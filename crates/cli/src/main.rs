@@ -2915,9 +2915,13 @@ fn cli_command(binary_name: &'static str) -> clap::Command {
     ))
 }
 
+fn completion_command(binary_name: &'static str) -> clap::Command {
+    scope_globals(Cli::command().name(binary_name).bin_name(binary_name), true)
+}
+
 /// Global flags that only some command paths accept. `Only` paths are exact;
 /// an `Except` path also covers its descendants. `run` still validates the
-/// flag combination; this table only decides where help shows the flag.
+/// flag combination; this table controls help and completion visibility.
 const SCOPED_GLOBALS: &[(&str, ScopedGlobal)] = &[
     ("json_lines", ScopedGlobal::Only(PAGED_RIB_PATHS)),
     ("pager", ScopedGlobal::Only(PAGED_RIB_PATHS)),
@@ -2961,13 +2965,22 @@ impl ScopedGlobal {
     }
 }
 
-/// Display only: subcommand help lists the global flags under their own
+/// Subcommand help lists the global flags under their own
 /// heading, after the command's own options, and hides the scoped ones on
-/// paths that reject them. Each subcommand gets a copy of every still-global
-/// root argument (what Clap's propagation would add), so parsing, value
-/// propagation, and flag positions are unchanged.
+/// paths that reject them. Parser/help mode copies every global root argument
+/// to each subcommand so parsing and flag positions are unchanged. Completion
+/// mode copies only those accepted on the path, without global propagation.
 fn scope_global_help(command: clap::Command) -> clap::Command {
-    fn visit(mut command: clap::Command, path: &str, globals: &[clap::Arg]) -> clap::Command {
+    scope_globals(command, false)
+}
+
+fn scope_globals(mut command: clap::Command, completions: bool) -> clap::Command {
+    fn visit(
+        mut command: clap::Command,
+        path: &str,
+        globals: &[clap::Arg],
+        completions: bool,
+    ) -> clap::Command {
         let names: Vec<String> = command
             .get_subcommands()
             .map(|sub| sub.get_name().to_owned())
@@ -2984,13 +2997,26 @@ fn scope_global_help(command: clap::Command) -> clap::Command {
                         .iter()
                         .find(|(id, _)| arg.get_id() == id)
                         .is_none_or(|(_, scope)| scope.shown_on(&sub_path));
-                    sub = sub.arg(
-                        arg.clone()
-                            .help_heading("Global options")
-                            .hide(arg.is_hide_set() || !shown),
-                    );
+                    if completions && !shown {
+                        continue;
+                    }
+                    let mut arg = arg
+                        .clone()
+                        .help_heading("Global options")
+                        .hide(arg.is_hide_set() || !shown);
+                    if completions {
+                        // Every path has its own copied globals, so Clap must
+                        // not propagate the root's wider set back into it.
+                        arg = arg.global(false);
+                        if arg.get_id() == "json"
+                            && !ScopedGlobal::Only(PAGED_RIB_PATHS).shown_on(&sub_path)
+                        {
+                            arg = arg.conflicts_with(clap::builder::Resettable::Reset);
+                        }
+                    }
+                    sub = sub.arg(arg);
                 }
-                visit(sub, &sub_path, globals)
+                visit(sub, &sub_path, globals, completions)
             });
         }
         command
@@ -3009,7 +3035,10 @@ fn scope_global_help(command: clap::Command) -> clap::Command {
         .filter(|arg| arg.is_global_set())
         .cloned()
         .collect();
-    visit(command, "", &globals)
+    if completions {
+        command = command.mut_args(|arg| arg.global(false));
+    }
+    visit(command, "", &globals, completions)
 }
 
 // Presentation only: command paths, aliases, and parser order stay in Clap.
@@ -3213,7 +3242,7 @@ fn generate_completions(
     binary_name: &'static str,
     output: &mut dyn std::io::Write,
 ) -> std::io::Result<()> {
-    let mut command = cli_command(binary_name);
+    let mut command = completion_command(binary_name);
     command.build();
     if shell == Shell::Bash {
         let mut raw = Vec::new();
@@ -6119,9 +6148,16 @@ printf '%s\n' "${COMPREPLY[@]}"
         let mut generated = Vec::new();
         generate_completions(Shell::Zsh, BINARY_NAME, &mut generated).unwrap();
         let generated = String::from_utf8(generated).unwrap();
+        let rib_options = generated
+            .split_once("(rib)\n_arguments ")
+            .unwrap()
+            .1
+            .split_once("&& ret=0")
+            .unwrap()
+            .0;
         for flag in ["-j", "--json"] {
-            assert!(generated.contains(&format!("'(--json-lines){flag}[")));
-            assert!(!generated.contains(&format!("'{flag}[")));
+            assert!(rib_options.contains(&format!("'(--json-lines){flag}[")));
+            assert!(!rib_options.contains(&format!("'{flag}[")));
         }
     }
 
@@ -6141,6 +6177,107 @@ printf '%s\n' "${COMPREPLY[@]}"
                 generated == checked_in,
                 "{relative_path} is stale; regenerate it with `rbgp completions {shell}`"
             );
+        }
+    }
+
+    #[test]
+    fn generated_completions_scope_global_flags() {
+        fn assert_scopes(command: &clap::Command, path: &str) {
+            for (id, scope) in SCOPED_GLOBALS {
+                assert_eq!(
+                    command.get_arguments().any(|arg| arg.get_id() == id),
+                    scope.shown_on(path),
+                    "rbgp {path} {id}"
+                );
+            }
+            for sub in command.get_subcommands() {
+                assert_scopes(sub, &format!("{path} {}", sub.get_name()));
+            }
+        }
+        let command = completion_command(BINARY_NAME);
+        for sub in command.get_subcommands() {
+            assert_scopes(sub, sub.get_name());
+        }
+
+        let mut scripts = Vec::new();
+        for shell in [Shell::Bash, Shell::Zsh, Shell::Fish] {
+            let mut output = Vec::new();
+            generate_completions(shell, BINARY_NAME, &mut output).unwrap();
+            scripts.push(String::from_utf8(output).unwrap());
+        }
+
+        // Each row names the Bash selector, Zsh case, Fish condition, and
+        // whether json-lines, pager, and json-version belong to that path.
+        for (bash, zsh, fish, expected) in [
+            ("doctor", "doctor", "doctor", [false, false, false]),
+            ("rib", "rib", "rib; and not", [true, true, true]),
+            (
+                "rib__subcmd__received",
+                "received",
+                "rib; and __fish_seen_subcommand_from received",
+                [true, true, true],
+            ),
+            (
+                "rib__subcmd__blackholes",
+                "blackholes",
+                "rib; and __fish_seen_subcommand_from blackholes",
+                [false, false, true],
+            ),
+            (
+                "config__subcmd__diff",
+                "diff",
+                "config; and __fish_seen_subcommand_from diff",
+                [false, false, false],
+            ),
+        ] {
+            let bash_marker = format!("\n        rbgp__subcmd__{bash})\n");
+            let bash_options = scripts[0]
+                .split_once(&bash_marker)
+                .unwrap_or_else(|| panic!("missing Bash branch {bash}"))
+                .1
+                .split_once("opts=\"")
+                .unwrap()
+                .1
+                .split_once('"')
+                .unwrap()
+                .0;
+            let zsh_marker = format!("({zsh})\n_arguments ");
+            let zsh_options = scripts[1]
+                .split_once(&zsh_marker)
+                .unwrap_or_else(|| panic!("missing Zsh branch {zsh}"))
+                .1
+                .split_once("&& ret=0")
+                .unwrap()
+                .0;
+            let fish_marker = format!("complete -c rbgp -n \"__fish_rbgp_using_subcommand {fish}");
+            let fish_options: Vec<_> = scripts[2]
+                .lines()
+                .filter(|line| line.starts_with(&fish_marker))
+                .collect();
+            assert!(!fish_options.is_empty(), "missing Fish branch {fish}");
+            for ((flag, zsh_flag), allowed) in [
+                ("--json-lines", "--json-lines["),
+                ("--pager", "--pager=["),
+                ("--json-version", "--json-version=["),
+            ]
+            .into_iter()
+            .zip(expected)
+            {
+                assert_eq!(
+                    bash_options.split_whitespace().any(|option| option == flag),
+                    allowed,
+                    "Bash {bash} {flag}"
+                );
+                assert_eq!(zsh_options.contains(zsh_flag), allowed, "Zsh {zsh} {flag}");
+                assert_eq!(
+                    fish_options
+                        .iter()
+                        .any(|line| line
+                            .contains(&format!(" -l {} ", flag.trim_start_matches("--")))),
+                    allowed,
+                    "Fish {fish} {flag}"
+                );
+            }
         }
     }
 

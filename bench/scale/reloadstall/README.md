@@ -121,7 +121,18 @@ reloadstall <n_peers> <total_prefixes> <daemon_port> <daemon_pid> \
   `K` stubs (never the churners) are closed simultaneously; every survivor
   timestamps receipt of all `K` slices' withdrawals, the `K` reconnect after
   10 s and re-announce, and survivors timestamp re-announce completion.
-  3 rounds, per-round percentiles plus `flapstorm_csv` records.
+  Each flapped peer also prints `rejoin_complete_s` from its successful OPEN
+  write to the first instant it has both received its first IPv4 End-of-RIB
+  and currently holds every expected base prefix (the full table minus its
+  own slice and any overlap extras); withdrawals clear coverage until a fresh
+  announcement. `eor_before_full_table=true` identifies an EoR that preceded
+  the last required route. Missing EoR or incomplete coverage fails the run;
+  neither is reported as zero. Each round prints
+  rejoin p50/max alongside the existing survivor percentiles and unchanged
+  `flapstorm_csv` records. The three rounds still reconnect and re-announce
+  without GR retention, so rejoin time can include other flapped peers'
+  return and re-announcement. It cannot alone attribute delay to serialized
+  initial-table joins.
 - `RELOADSTALL_SESSION_NOTIFICATION_METRICS_ADDR` — optional B2 receipt seam,
   valid only with `--flapstorm`. It must be a loopback socket address with a
   nonzero port. The exact 700-peer/400400-prefix/50-flap shape polls the

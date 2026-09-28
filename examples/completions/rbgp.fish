@@ -75,11 +75,7 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand global" -l tls-cert -d 'PEM cl
 complete -c rbgp -n "__fish_rbgp_using_subcommand global" -l tls-key -d 'PEM client private key for mTLS (requires --tls-cert)' -r -F
 complete -c rbgp -n "__fish_rbgp_using_subcommand global" -l tls-server-name -d 'Server certificate name to verify instead of the HTTPS address host' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand global" -l json-version -d 'Wrap supported JSON documents in a versioned envelope (requires --json)' -r -f -a "1\t''"
-complete -c rbgp -n "__fish_rbgp_using_subcommand global" -l pager -d 'Page complete human unicast RIB listings' -r -f -a "auto\t''
-always\t''
-never\t''"
 complete -c rbgp -n "__fish_rbgp_using_subcommand global" -s j -l json -d 'Output in JSON format'
-complete -c rbgp -n "__fish_rbgp_using_subcommand global" -l json-lines -d 'Stream accepted unicast RIB routes as versioned JSON lines'
 complete -c rbgp -n "__fish_rbgp_using_subcommand global" -l no-color -d 'Disable colored output'
 complete -c rbgp -n "__fish_rbgp_using_subcommand global" -s h -l help -d 'Print help (see more with \'--help\')'
 complete -c rbgp -n "__fish_rbgp_using_subcommand config; and not __fish_seen_subcommand_from diff plan apply confirm abort status history rollback effective import help" -s s -l addr -d 'gRPC server address or unix:///path/to/socket' -r
@@ -89,11 +85,7 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand config; and not __fish_seen_su
 complete -c rbgp -n "__fish_rbgp_using_subcommand config; and not __fish_seen_subcommand_from diff plan apply confirm abort status history rollback effective import help" -l tls-key -d 'PEM client private key for mTLS (requires --tls-cert)' -r -F
 complete -c rbgp -n "__fish_rbgp_using_subcommand config; and not __fish_seen_subcommand_from diff plan apply confirm abort status history rollback effective import help" -l tls-server-name -d 'Server certificate name to verify instead of the HTTPS address host' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand config; and not __fish_seen_subcommand_from diff plan apply confirm abort status history rollback effective import help" -l json-version -d 'Wrap supported JSON documents in a versioned envelope (requires --json)' -r -f -a "1\t''"
-complete -c rbgp -n "__fish_rbgp_using_subcommand config; and not __fish_seen_subcommand_from diff plan apply confirm abort status history rollback effective import help" -l pager -d 'Page complete human unicast RIB listings' -r -f -a "auto\t''
-always\t''
-never\t''"
 complete -c rbgp -n "__fish_rbgp_using_subcommand config; and not __fish_seen_subcommand_from diff plan apply confirm abort status history rollback effective import help" -s j -l json -d 'Output in JSON format'
-complete -c rbgp -n "__fish_rbgp_using_subcommand config; and not __fish_seen_subcommand_from diff plan apply confirm abort status history rollback effective import help" -l json-lines -d 'Stream accepted unicast RIB routes as versioned JSON lines'
 complete -c rbgp -n "__fish_rbgp_using_subcommand config; and not __fish_seen_subcommand_from diff plan apply confirm abort status history rollback effective import help" -l no-color -d 'Disable colored output'
 complete -c rbgp -n "__fish_rbgp_using_subcommand config; and not __fish_seen_subcommand_from diff plan apply confirm abort status history rollback effective import help" -s h -l help -d 'Print help (see more with \'--help\')'
 complete -c rbgp -n "__fish_rbgp_using_subcommand config; and not __fish_seen_subcommand_from diff plan apply confirm abort status history rollback effective import help" -f -a "diff" -d 'Diff a candidate TOML file against the daemon\'s live runtime snapshot'
@@ -113,12 +105,7 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand config; and __fish_seen_subcom
 complete -c rbgp -n "__fish_rbgp_using_subcommand config; and __fish_seen_subcommand_from diff" -l tls-cert -d 'PEM client certificate chain for mTLS (requires --tls-key)' -r -F
 complete -c rbgp -n "__fish_rbgp_using_subcommand config; and __fish_seen_subcommand_from diff" -l tls-key -d 'PEM client private key for mTLS (requires --tls-cert)' -r -F
 complete -c rbgp -n "__fish_rbgp_using_subcommand config; and __fish_seen_subcommand_from diff" -l tls-server-name -d 'Server certificate name to verify instead of the HTTPS address host' -r
-complete -c rbgp -n "__fish_rbgp_using_subcommand config; and __fish_seen_subcommand_from diff" -l json-version -d 'Wrap supported JSON documents in a versioned envelope (requires --json)' -r -f -a "1\t''"
-complete -c rbgp -n "__fish_rbgp_using_subcommand config; and __fish_seen_subcommand_from diff" -l pager -d 'Page complete human unicast RIB listings' -r -f -a "auto\t''
-always\t''
-never\t''"
 complete -c rbgp -n "__fish_rbgp_using_subcommand config; and __fish_seen_subcommand_from diff" -s j -l json -d 'Output in JSON format'
-complete -c rbgp -n "__fish_rbgp_using_subcommand config; and __fish_seen_subcommand_from diff" -l json-lines -d 'Stream accepted unicast RIB routes as versioned JSON lines'
 complete -c rbgp -n "__fish_rbgp_using_subcommand config; and __fish_seen_subcommand_from diff" -l no-color -d 'Disable colored output'
 complete -c rbgp -n "__fish_rbgp_using_subcommand config; and __fish_seen_subcommand_from diff" -s h -l help -d 'Print help (see more with \'--help\')'
 complete -c rbgp -n "__fish_rbgp_using_subcommand config; and __fish_seen_subcommand_from plan" -l expected-runtime-snapshot-token -d 'Optional runtime snapshot token to check while planning' -r
@@ -129,11 +116,7 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand config; and __fish_seen_subcom
 complete -c rbgp -n "__fish_rbgp_using_subcommand config; and __fish_seen_subcommand_from plan" -l tls-key -d 'PEM client private key for mTLS (requires --tls-cert)' -r -F
 complete -c rbgp -n "__fish_rbgp_using_subcommand config; and __fish_seen_subcommand_from plan" -l tls-server-name -d 'Server certificate name to verify instead of the HTTPS address host' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand config; and __fish_seen_subcommand_from plan" -l json-version -d 'Wrap supported JSON documents in a versioned envelope (requires --json)' -r -f -a "1\t''"
-complete -c rbgp -n "__fish_rbgp_using_subcommand config; and __fish_seen_subcommand_from plan" -l pager -d 'Page complete human unicast RIB listings' -r -f -a "auto\t''
-always\t''
-never\t''"
 complete -c rbgp -n "__fish_rbgp_using_subcommand config; and __fish_seen_subcommand_from plan" -s j -l json -d 'Output in JSON format'
-complete -c rbgp -n "__fish_rbgp_using_subcommand config; and __fish_seen_subcommand_from plan" -l json-lines -d 'Stream accepted unicast RIB routes as versioned JSON lines'
 complete -c rbgp -n "__fish_rbgp_using_subcommand config; and __fish_seen_subcommand_from plan" -l no-color -d 'Disable colored output'
 complete -c rbgp -n "__fish_rbgp_using_subcommand config; and __fish_seen_subcommand_from plan" -s h -l help -d 'Print help (see more with \'--help\')'
 complete -c rbgp -n "__fish_rbgp_using_subcommand config; and __fish_seen_subcommand_from apply" -l expected-runtime-snapshot-token -d 'Runtime snapshot token returned by config plan' -r
@@ -149,11 +132,7 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand config; and __fish_seen_subcom
 complete -c rbgp -n "__fish_rbgp_using_subcommand config; and __fish_seen_subcommand_from apply" -l tls-key -d 'PEM client private key for mTLS (requires --tls-cert)' -r -F
 complete -c rbgp -n "__fish_rbgp_using_subcommand config; and __fish_seen_subcommand_from apply" -l tls-server-name -d 'Server certificate name to verify instead of the HTTPS address host' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand config; and __fish_seen_subcommand_from apply" -l json-version -d 'Wrap supported JSON documents in a versioned envelope (requires --json)' -r -f -a "1\t''"
-complete -c rbgp -n "__fish_rbgp_using_subcommand config; and __fish_seen_subcommand_from apply" -l pager -d 'Page complete human unicast RIB listings' -r -f -a "auto\t''
-always\t''
-never\t''"
 complete -c rbgp -n "__fish_rbgp_using_subcommand config; and __fish_seen_subcommand_from apply" -s j -l json -d 'Output in JSON format'
-complete -c rbgp -n "__fish_rbgp_using_subcommand config; and __fish_seen_subcommand_from apply" -l json-lines -d 'Stream accepted unicast RIB routes as versioned JSON lines'
 complete -c rbgp -n "__fish_rbgp_using_subcommand config; and __fish_seen_subcommand_from apply" -l no-color -d 'Disable colored output'
 complete -c rbgp -n "__fish_rbgp_using_subcommand config; and __fish_seen_subcommand_from apply" -s h -l help -d 'Print help (see more with \'--help\')'
 complete -c rbgp -n "__fish_rbgp_using_subcommand config; and __fish_seen_subcommand_from confirm" -s s -l addr -d 'gRPC server address or unix:///path/to/socket' -r
@@ -163,11 +142,7 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand config; and __fish_seen_subcom
 complete -c rbgp -n "__fish_rbgp_using_subcommand config; and __fish_seen_subcommand_from confirm" -l tls-key -d 'PEM client private key for mTLS (requires --tls-cert)' -r -F
 complete -c rbgp -n "__fish_rbgp_using_subcommand config; and __fish_seen_subcommand_from confirm" -l tls-server-name -d 'Server certificate name to verify instead of the HTTPS address host' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand config; and __fish_seen_subcommand_from confirm" -l json-version -d 'Wrap supported JSON documents in a versioned envelope (requires --json)' -r -f -a "1\t''"
-complete -c rbgp -n "__fish_rbgp_using_subcommand config; and __fish_seen_subcommand_from confirm" -l pager -d 'Page complete human unicast RIB listings' -r -f -a "auto\t''
-always\t''
-never\t''"
 complete -c rbgp -n "__fish_rbgp_using_subcommand config; and __fish_seen_subcommand_from confirm" -s j -l json -d 'Output in JSON format'
-complete -c rbgp -n "__fish_rbgp_using_subcommand config; and __fish_seen_subcommand_from confirm" -l json-lines -d 'Stream accepted unicast RIB routes as versioned JSON lines'
 complete -c rbgp -n "__fish_rbgp_using_subcommand config; and __fish_seen_subcommand_from confirm" -l no-color -d 'Disable colored output'
 complete -c rbgp -n "__fish_rbgp_using_subcommand config; and __fish_seen_subcommand_from confirm" -s h -l help -d 'Print help (see more with \'--help\')'
 complete -c rbgp -n "__fish_rbgp_using_subcommand config; and __fish_seen_subcommand_from abort" -s s -l addr -d 'gRPC server address or unix:///path/to/socket' -r
@@ -177,11 +152,7 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand config; and __fish_seen_subcom
 complete -c rbgp -n "__fish_rbgp_using_subcommand config; and __fish_seen_subcommand_from abort" -l tls-key -d 'PEM client private key for mTLS (requires --tls-cert)' -r -F
 complete -c rbgp -n "__fish_rbgp_using_subcommand config; and __fish_seen_subcommand_from abort" -l tls-server-name -d 'Server certificate name to verify instead of the HTTPS address host' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand config; and __fish_seen_subcommand_from abort" -l json-version -d 'Wrap supported JSON documents in a versioned envelope (requires --json)' -r -f -a "1\t''"
-complete -c rbgp -n "__fish_rbgp_using_subcommand config; and __fish_seen_subcommand_from abort" -l pager -d 'Page complete human unicast RIB listings' -r -f -a "auto\t''
-always\t''
-never\t''"
 complete -c rbgp -n "__fish_rbgp_using_subcommand config; and __fish_seen_subcommand_from abort" -s j -l json -d 'Output in JSON format'
-complete -c rbgp -n "__fish_rbgp_using_subcommand config; and __fish_seen_subcommand_from abort" -l json-lines -d 'Stream accepted unicast RIB routes as versioned JSON lines'
 complete -c rbgp -n "__fish_rbgp_using_subcommand config; and __fish_seen_subcommand_from abort" -l no-color -d 'Disable colored output'
 complete -c rbgp -n "__fish_rbgp_using_subcommand config; and __fish_seen_subcommand_from abort" -s h -l help -d 'Print help (see more with \'--help\')'
 complete -c rbgp -n "__fish_rbgp_using_subcommand config; and __fish_seen_subcommand_from status" -s s -l addr -d 'gRPC server address or unix:///path/to/socket' -r
@@ -191,11 +162,7 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand config; and __fish_seen_subcom
 complete -c rbgp -n "__fish_rbgp_using_subcommand config; and __fish_seen_subcommand_from status" -l tls-key -d 'PEM client private key for mTLS (requires --tls-cert)' -r -F
 complete -c rbgp -n "__fish_rbgp_using_subcommand config; and __fish_seen_subcommand_from status" -l tls-server-name -d 'Server certificate name to verify instead of the HTTPS address host' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand config; and __fish_seen_subcommand_from status" -l json-version -d 'Wrap supported JSON documents in a versioned envelope (requires --json)' -r -f -a "1\t''"
-complete -c rbgp -n "__fish_rbgp_using_subcommand config; and __fish_seen_subcommand_from status" -l pager -d 'Page complete human unicast RIB listings' -r -f -a "auto\t''
-always\t''
-never\t''"
 complete -c rbgp -n "__fish_rbgp_using_subcommand config; and __fish_seen_subcommand_from status" -s j -l json -d 'Output in JSON format'
-complete -c rbgp -n "__fish_rbgp_using_subcommand config; and __fish_seen_subcommand_from status" -l json-lines -d 'Stream accepted unicast RIB routes as versioned JSON lines'
 complete -c rbgp -n "__fish_rbgp_using_subcommand config; and __fish_seen_subcommand_from status" -l no-color -d 'Disable colored output'
 complete -c rbgp -n "__fish_rbgp_using_subcommand config; and __fish_seen_subcommand_from status" -s h -l help -d 'Print help (see more with \'--help\')'
 complete -c rbgp -n "__fish_rbgp_using_subcommand config; and __fish_seen_subcommand_from history" -s s -l addr -d 'gRPC server address or unix:///path/to/socket' -r
@@ -205,11 +172,7 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand config; and __fish_seen_subcom
 complete -c rbgp -n "__fish_rbgp_using_subcommand config; and __fish_seen_subcommand_from history" -l tls-key -d 'PEM client private key for mTLS (requires --tls-cert)' -r -F
 complete -c rbgp -n "__fish_rbgp_using_subcommand config; and __fish_seen_subcommand_from history" -l tls-server-name -d 'Server certificate name to verify instead of the HTTPS address host' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand config; and __fish_seen_subcommand_from history" -l json-version -d 'Wrap supported JSON documents in a versioned envelope (requires --json)' -r -f -a "1\t''"
-complete -c rbgp -n "__fish_rbgp_using_subcommand config; and __fish_seen_subcommand_from history" -l pager -d 'Page complete human unicast RIB listings' -r -f -a "auto\t''
-always\t''
-never\t''"
 complete -c rbgp -n "__fish_rbgp_using_subcommand config; and __fish_seen_subcommand_from history" -s j -l json -d 'Output in JSON format'
-complete -c rbgp -n "__fish_rbgp_using_subcommand config; and __fish_seen_subcommand_from history" -l json-lines -d 'Stream accepted unicast RIB routes as versioned JSON lines'
 complete -c rbgp -n "__fish_rbgp_using_subcommand config; and __fish_seen_subcommand_from history" -l no-color -d 'Disable colored output'
 complete -c rbgp -n "__fish_rbgp_using_subcommand config; and __fish_seen_subcommand_from history" -s h -l help -d 'Print help (see more with \'--help\')'
 complete -c rbgp -n "__fish_rbgp_using_subcommand config; and __fish_seen_subcommand_from rollback" -l expected-runtime-snapshot-token -d 'Optional runtime snapshot token to guard against concurrent changes' -r
@@ -224,11 +187,7 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand config; and __fish_seen_subcom
 complete -c rbgp -n "__fish_rbgp_using_subcommand config; and __fish_seen_subcommand_from rollback" -l tls-key -d 'PEM client private key for mTLS (requires --tls-cert)' -r -F
 complete -c rbgp -n "__fish_rbgp_using_subcommand config; and __fish_seen_subcommand_from rollback" -l tls-server-name -d 'Server certificate name to verify instead of the HTTPS address host' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand config; and __fish_seen_subcommand_from rollback" -l json-version -d 'Wrap supported JSON documents in a versioned envelope (requires --json)' -r -f -a "1\t''"
-complete -c rbgp -n "__fish_rbgp_using_subcommand config; and __fish_seen_subcommand_from rollback" -l pager -d 'Page complete human unicast RIB listings' -r -f -a "auto\t''
-always\t''
-never\t''"
 complete -c rbgp -n "__fish_rbgp_using_subcommand config; and __fish_seen_subcommand_from rollback" -s j -l json -d 'Output in JSON format'
-complete -c rbgp -n "__fish_rbgp_using_subcommand config; and __fish_seen_subcommand_from rollback" -l json-lines -d 'Stream accepted unicast RIB routes as versioned JSON lines'
 complete -c rbgp -n "__fish_rbgp_using_subcommand config; and __fish_seen_subcommand_from rollback" -l no-color -d 'Disable colored output'
 complete -c rbgp -n "__fish_rbgp_using_subcommand config; and __fish_seen_subcommand_from rollback" -s h -l help -d 'Print help (see more with \'--help\')'
 complete -c rbgp -n "__fish_rbgp_using_subcommand config; and __fish_seen_subcommand_from effective" -s s -l addr -d 'gRPC server address or unix:///path/to/socket' -r
@@ -238,11 +197,7 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand config; and __fish_seen_subcom
 complete -c rbgp -n "__fish_rbgp_using_subcommand config; and __fish_seen_subcommand_from effective" -l tls-key -d 'PEM client private key for mTLS (requires --tls-cert)' -r -F
 complete -c rbgp -n "__fish_rbgp_using_subcommand config; and __fish_seen_subcommand_from effective" -l tls-server-name -d 'Server certificate name to verify instead of the HTTPS address host' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand config; and __fish_seen_subcommand_from effective" -l json-version -d 'Wrap supported JSON documents in a versioned envelope (requires --json)' -r -f -a "1\t''"
-complete -c rbgp -n "__fish_rbgp_using_subcommand config; and __fish_seen_subcommand_from effective" -l pager -d 'Page complete human unicast RIB listings' -r -f -a "auto\t''
-always\t''
-never\t''"
 complete -c rbgp -n "__fish_rbgp_using_subcommand config; and __fish_seen_subcommand_from effective" -s j -l json -d 'Output in JSON format'
-complete -c rbgp -n "__fish_rbgp_using_subcommand config; and __fish_seen_subcommand_from effective" -l json-lines -d 'Stream accepted unicast RIB routes as versioned JSON lines'
 complete -c rbgp -n "__fish_rbgp_using_subcommand config; and __fish_seen_subcommand_from effective" -l no-color -d 'Disable colored output'
 complete -c rbgp -n "__fish_rbgp_using_subcommand config; and __fish_seen_subcommand_from effective" -s h -l help -d 'Print help (see more with \'--help\')'
 complete -c rbgp -n "__fish_rbgp_using_subcommand config; and __fish_seen_subcommand_from import" -l format -d 'Source format (default: auto-detect from content)' -r -f -a "bird\t''
@@ -255,12 +210,7 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand config; and __fish_seen_subcom
 complete -c rbgp -n "__fish_rbgp_using_subcommand config; and __fish_seen_subcommand_from import" -l tls-cert -d 'PEM client certificate chain for mTLS (requires --tls-key)' -r -F
 complete -c rbgp -n "__fish_rbgp_using_subcommand config; and __fish_seen_subcommand_from import" -l tls-key -d 'PEM client private key for mTLS (requires --tls-cert)' -r -F
 complete -c rbgp -n "__fish_rbgp_using_subcommand config; and __fish_seen_subcommand_from import" -l tls-server-name -d 'Server certificate name to verify instead of the HTTPS address host' -r
-complete -c rbgp -n "__fish_rbgp_using_subcommand config; and __fish_seen_subcommand_from import" -l json-version -d 'Wrap supported JSON documents in a versioned envelope (requires --json)' -r -f -a "1\t''"
-complete -c rbgp -n "__fish_rbgp_using_subcommand config; and __fish_seen_subcommand_from import" -l pager -d 'Page complete human unicast RIB listings' -r -f -a "auto\t''
-always\t''
-never\t''"
 complete -c rbgp -n "__fish_rbgp_using_subcommand config; and __fish_seen_subcommand_from import" -s j -l json -d 'Output in JSON format'
-complete -c rbgp -n "__fish_rbgp_using_subcommand config; and __fish_seen_subcommand_from import" -l json-lines -d 'Stream accepted unicast RIB routes as versioned JSON lines'
 complete -c rbgp -n "__fish_rbgp_using_subcommand config; and __fish_seen_subcommand_from import" -l no-color -d 'Disable colored output'
 complete -c rbgp -n "__fish_rbgp_using_subcommand config; and __fish_seen_subcommand_from import" -s h -l help -d 'Print help (see more with \'--help\')'
 complete -c rbgp -n "__fish_rbgp_using_subcommand config; and __fish_seen_subcommand_from help" -f -a "diff" -d 'Diff a candidate TOML file against the daemon\'s live runtime snapshot'
@@ -282,12 +232,8 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor; and not __fish_seen_
 complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor; and not __fish_seen_subcommand_from add delete enable disable reset softreset refresh-out replay-out help" -l tls-key -d 'PEM client private key for mTLS (requires --tls-cert)' -r -F
 complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor; and not __fish_seen_subcommand_from add delete enable disable reset softreset refresh-out replay-out help" -l tls-server-name -d 'Server certificate name to verify instead of the HTTPS address host' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor; and not __fish_seen_subcommand_from add delete enable disable reset softreset refresh-out replay-out help" -l json-version -d 'Wrap supported JSON documents in a versioned envelope (requires --json)' -r -f -a "1\t''"
-complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor; and not __fish_seen_subcommand_from add delete enable disable reset softreset refresh-out replay-out help" -l pager -d 'Page complete human unicast RIB listings' -r -f -a "auto\t''
-always\t''
-never\t''"
 complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor; and not __fish_seen_subcommand_from add delete enable disable reset softreset refresh-out replay-out help" -l wide -d 'Append summary columns to the list: Source (static or dynamic), MsgRcvd, MsgSent, Flaps, RRC (route-reflector client), Slow (`!` marks a slow peer), and State/PfxRcd (prefix count when Established). Display-only; JSON is unaffected by --wide and may omit optional false healthy-state fields'
 complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor; and not __fish_seen_subcommand_from add delete enable disable reset softreset refresh-out replay-out help" -s j -l json -d 'Output in JSON format'
-complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor; and not __fish_seen_subcommand_from add delete enable disable reset softreset refresh-out replay-out help" -l json-lines -d 'Stream accepted unicast RIB routes as versioned JSON lines'
 complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor; and not __fish_seen_subcommand_from add delete enable disable reset softreset refresh-out replay-out help" -l no-color -d 'Disable colored output'
 complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor; and not __fish_seen_subcommand_from add delete enable disable reset softreset refresh-out replay-out help" -s h -l help -d 'Print help (see more with \'--help\')'
 complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor; and not __fish_seen_subcommand_from add delete enable disable reset softreset refresh-out replay-out help" -a "add" -d 'Add a new neighbor'
@@ -319,9 +265,6 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor; and __fish_seen_subc
 complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor; and __fish_seen_subcommand_from add" -l tls-key -d 'PEM client private key for mTLS (requires --tls-cert)' -r -F
 complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor; and __fish_seen_subcommand_from add" -l tls-server-name -d 'Server certificate name to verify instead of the HTTPS address host' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor; and __fish_seen_subcommand_from add" -l json-version -d 'Wrap supported JSON documents in a versioned envelope (requires --json)' -r -f -a "1\t''"
-complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor; and __fish_seen_subcommand_from add" -l pager -d 'Page complete human unicast RIB listings' -r -f -a "auto\t''
-always\t''
-never\t''"
 complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor; and __fish_seen_subcommand_from add" -l route-server-client -d 'Enable transparent route-server client mode (eBGP only)'
 complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor; and __fish_seen_subcommand_from add" -l no-route-server-client -d 'Explicitly disable inherited transparent route-server client mode'
 complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor; and __fish_seen_subcommand_from add" -l per-client-best -d 'RFC 7947 per-client best-path (path-hiding mitigation); effective route-server-client mode is validated by the daemon'
@@ -332,7 +275,6 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor; and __fish_seen_subc
 complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor; and __fish_seen_subcommand_from add" -l add-path-send -d 'Enable Add-Path send'
 complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor; and __fish_seen_subcommand_from add" -l no-add-path -d 'Explicitly disable the complete inherited Add-Path block'
 complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor; and __fish_seen_subcommand_from add" -s j -l json -d 'Output in JSON format'
-complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor; and __fish_seen_subcommand_from add" -l json-lines -d 'Stream accepted unicast RIB routes as versioned JSON lines'
 complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor; and __fish_seen_subcommand_from add" -l no-color -d 'Disable colored output'
 complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor; and __fish_seen_subcommand_from add" -s h -l help -d 'Print help (see more with \'--help\')'
 complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor; and __fish_seen_subcommand_from delete" -s s -l addr -d 'gRPC server address or unix:///path/to/socket' -r
@@ -342,11 +284,7 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor; and __fish_seen_subc
 complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor; and __fish_seen_subcommand_from delete" -l tls-key -d 'PEM client private key for mTLS (requires --tls-cert)' -r -F
 complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor; and __fish_seen_subcommand_from delete" -l tls-server-name -d 'Server certificate name to verify instead of the HTTPS address host' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor; and __fish_seen_subcommand_from delete" -l json-version -d 'Wrap supported JSON documents in a versioned envelope (requires --json)' -r -f -a "1\t''"
-complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor; and __fish_seen_subcommand_from delete" -l pager -d 'Page complete human unicast RIB listings' -r -f -a "auto\t''
-always\t''
-never\t''"
 complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor; and __fish_seen_subcommand_from delete" -s j -l json -d 'Output in JSON format'
-complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor; and __fish_seen_subcommand_from delete" -l json-lines -d 'Stream accepted unicast RIB routes as versioned JSON lines'
 complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor; and __fish_seen_subcommand_from delete" -l no-color -d 'Disable colored output'
 complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor; and __fish_seen_subcommand_from delete" -s h -l help -d 'Print help (see more with \'--help\')'
 complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor; and __fish_seen_subcommand_from enable" -s s -l addr -d 'gRPC server address or unix:///path/to/socket' -r
@@ -356,11 +294,7 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor; and __fish_seen_subc
 complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor; and __fish_seen_subcommand_from enable" -l tls-key -d 'PEM client private key for mTLS (requires --tls-cert)' -r -F
 complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor; and __fish_seen_subcommand_from enable" -l tls-server-name -d 'Server certificate name to verify instead of the HTTPS address host' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor; and __fish_seen_subcommand_from enable" -l json-version -d 'Wrap supported JSON documents in a versioned envelope (requires --json)' -r -f -a "1\t''"
-complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor; and __fish_seen_subcommand_from enable" -l pager -d 'Page complete human unicast RIB listings' -r -f -a "auto\t''
-always\t''
-never\t''"
 complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor; and __fish_seen_subcommand_from enable" -s j -l json -d 'Output in JSON format'
-complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor; and __fish_seen_subcommand_from enable" -l json-lines -d 'Stream accepted unicast RIB routes as versioned JSON lines'
 complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor; and __fish_seen_subcommand_from enable" -l no-color -d 'Disable colored output'
 complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor; and __fish_seen_subcommand_from enable" -s h -l help -d 'Print help (see more with \'--help\')'
 complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor; and __fish_seen_subcommand_from disable" -l reason -d 'Disable reason' -r
@@ -371,11 +305,7 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor; and __fish_seen_subc
 complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor; and __fish_seen_subcommand_from disable" -l tls-key -d 'PEM client private key for mTLS (requires --tls-cert)' -r -F
 complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor; and __fish_seen_subcommand_from disable" -l tls-server-name -d 'Server certificate name to verify instead of the HTTPS address host' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor; and __fish_seen_subcommand_from disable" -l json-version -d 'Wrap supported JSON documents in a versioned envelope (requires --json)' -r -f -a "1\t''"
-complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor; and __fish_seen_subcommand_from disable" -l pager -d 'Page complete human unicast RIB listings' -r -f -a "auto\t''
-always\t''
-never\t''"
 complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor; and __fish_seen_subcommand_from disable" -s j -l json -d 'Output in JSON format'
-complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor; and __fish_seen_subcommand_from disable" -l json-lines -d 'Stream accepted unicast RIB routes as versioned JSON lines'
 complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor; and __fish_seen_subcommand_from disable" -l no-color -d 'Disable colored output'
 complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor; and __fish_seen_subcommand_from disable" -s h -l help -d 'Print help (see more with \'--help\')'
 complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor; and __fish_seen_subcommand_from reset" -l reason -d 'Shutdown communication sent with the reset (RFC 9003)' -r
@@ -386,11 +316,7 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor; and __fish_seen_subc
 complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor; and __fish_seen_subcommand_from reset" -l tls-key -d 'PEM client private key for mTLS (requires --tls-cert)' -r -F
 complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor; and __fish_seen_subcommand_from reset" -l tls-server-name -d 'Server certificate name to verify instead of the HTTPS address host' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor; and __fish_seen_subcommand_from reset" -l json-version -d 'Wrap supported JSON documents in a versioned envelope (requires --json)' -r -f -a "1\t''"
-complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor; and __fish_seen_subcommand_from reset" -l pager -d 'Page complete human unicast RIB listings' -r -f -a "auto\t''
-always\t''
-never\t''"
 complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor; and __fish_seen_subcommand_from reset" -s j -l json -d 'Output in JSON format'
-complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor; and __fish_seen_subcommand_from reset" -l json-lines -d 'Stream accepted unicast RIB routes as versioned JSON lines'
 complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor; and __fish_seen_subcommand_from reset" -l no-color -d 'Disable colored output'
 complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor; and __fish_seen_subcommand_from reset" -s h -l help -d 'Print help (see more with \'--help\')'
 complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor; and __fish_seen_subcommand_from softreset" -s a -l family -d 'Address family to refresh' -r
@@ -401,11 +327,7 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor; and __fish_seen_subc
 complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor; and __fish_seen_subcommand_from softreset" -l tls-key -d 'PEM client private key for mTLS (requires --tls-cert)' -r -F
 complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor; and __fish_seen_subcommand_from softreset" -l tls-server-name -d 'Server certificate name to verify instead of the HTTPS address host' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor; and __fish_seen_subcommand_from softreset" -l json-version -d 'Wrap supported JSON documents in a versioned envelope (requires --json)' -r -f -a "1\t''"
-complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor; and __fish_seen_subcommand_from softreset" -l pager -d 'Page complete human unicast RIB listings' -r -f -a "auto\t''
-always\t''
-never\t''"
 complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor; and __fish_seen_subcommand_from softreset" -s j -l json -d 'Output in JSON format'
-complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor; and __fish_seen_subcommand_from softreset" -l json-lines -d 'Stream accepted unicast RIB routes as versioned JSON lines'
 complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor; and __fish_seen_subcommand_from softreset" -l no-color -d 'Disable colored output'
 complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor; and __fish_seen_subcommand_from softreset" -s h -l help -d 'Print help (see more with \'--help\')'
 complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor; and __fish_seen_subcommand_from refresh-out" -s s -l addr -d 'gRPC server address or unix:///path/to/socket' -r
@@ -415,11 +337,7 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor; and __fish_seen_subc
 complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor; and __fish_seen_subcommand_from refresh-out" -l tls-key -d 'PEM client private key for mTLS (requires --tls-cert)' -r -F
 complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor; and __fish_seen_subcommand_from refresh-out" -l tls-server-name -d 'Server certificate name to verify instead of the HTTPS address host' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor; and __fish_seen_subcommand_from refresh-out" -l json-version -d 'Wrap supported JSON documents in a versioned envelope (requires --json)' -r -f -a "1\t''"
-complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor; and __fish_seen_subcommand_from refresh-out" -l pager -d 'Page complete human unicast RIB listings' -r -f -a "auto\t''
-always\t''
-never\t''"
 complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor; and __fish_seen_subcommand_from refresh-out" -s j -l json -d 'Output in JSON format'
-complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor; and __fish_seen_subcommand_from refresh-out" -l json-lines -d 'Stream accepted unicast RIB routes as versioned JSON lines'
 complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor; and __fish_seen_subcommand_from refresh-out" -l no-color -d 'Disable colored output'
 complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor; and __fish_seen_subcommand_from refresh-out" -s h -l help -d 'Print help (see more with \'--help\')'
 complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor; and __fish_seen_subcommand_from replay-out" -s s -l addr -d 'gRPC server address or unix:///path/to/socket' -r
@@ -429,11 +347,7 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor; and __fish_seen_subc
 complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor; and __fish_seen_subcommand_from replay-out" -l tls-key -d 'PEM client private key for mTLS (requires --tls-cert)' -r -F
 complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor; and __fish_seen_subcommand_from replay-out" -l tls-server-name -d 'Server certificate name to verify instead of the HTTPS address host' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor; and __fish_seen_subcommand_from replay-out" -l json-version -d 'Wrap supported JSON documents in a versioned envelope (requires --json)' -r -f -a "1\t''"
-complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor; and __fish_seen_subcommand_from replay-out" -l pager -d 'Page complete human unicast RIB listings' -r -f -a "auto\t''
-always\t''
-never\t''"
 complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor; and __fish_seen_subcommand_from replay-out" -s j -l json -d 'Output in JSON format'
-complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor; and __fish_seen_subcommand_from replay-out" -l json-lines -d 'Stream accepted unicast RIB routes as versioned JSON lines'
 complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor; and __fish_seen_subcommand_from replay-out" -l no-color -d 'Disable colored output'
 complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor; and __fish_seen_subcommand_from replay-out" -s h -l help -d 'Print help (see more with \'--help\')'
 complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor; and __fish_seen_subcommand_from help" -f -a "add" -d 'Add a new neighbor'
@@ -453,12 +367,8 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand summary; and not __fish_seen_s
 complete -c rbgp -n "__fish_rbgp_using_subcommand summary; and not __fish_seen_subcommand_from add delete enable disable reset softreset refresh-out replay-out help" -l tls-key -d 'PEM client private key for mTLS (requires --tls-cert)' -r -F
 complete -c rbgp -n "__fish_rbgp_using_subcommand summary; and not __fish_seen_subcommand_from add delete enable disable reset softreset refresh-out replay-out help" -l tls-server-name -d 'Server certificate name to verify instead of the HTTPS address host' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand summary; and not __fish_seen_subcommand_from add delete enable disable reset softreset refresh-out replay-out help" -l json-version -d 'Wrap supported JSON documents in a versioned envelope (requires --json)' -r -f -a "1\t''"
-complete -c rbgp -n "__fish_rbgp_using_subcommand summary; and not __fish_seen_subcommand_from add delete enable disable reset softreset refresh-out replay-out help" -l pager -d 'Page complete human unicast RIB listings' -r -f -a "auto\t''
-always\t''
-never\t''"
 complete -c rbgp -n "__fish_rbgp_using_subcommand summary; and not __fish_seen_subcommand_from add delete enable disable reset softreset refresh-out replay-out help" -l wide -d 'Append summary columns to the list: Source (static or dynamic), MsgRcvd, MsgSent, Flaps, RRC (route-reflector client), Slow (`!` marks a slow peer), and State/PfxRcd (prefix count when Established). Display-only; JSON is unaffected by --wide and may omit optional false healthy-state fields'
 complete -c rbgp -n "__fish_rbgp_using_subcommand summary; and not __fish_seen_subcommand_from add delete enable disable reset softreset refresh-out replay-out help" -s j -l json -d 'Output in JSON format'
-complete -c rbgp -n "__fish_rbgp_using_subcommand summary; and not __fish_seen_subcommand_from add delete enable disable reset softreset refresh-out replay-out help" -l json-lines -d 'Stream accepted unicast RIB routes as versioned JSON lines'
 complete -c rbgp -n "__fish_rbgp_using_subcommand summary; and not __fish_seen_subcommand_from add delete enable disable reset softreset refresh-out replay-out help" -l no-color -d 'Disable colored output'
 complete -c rbgp -n "__fish_rbgp_using_subcommand summary; and not __fish_seen_subcommand_from add delete enable disable reset softreset refresh-out replay-out help" -s h -l help -d 'Print help (see more with \'--help\')'
 complete -c rbgp -n "__fish_rbgp_using_subcommand summary; and not __fish_seen_subcommand_from add delete enable disable reset softreset refresh-out replay-out help" -a "add" -d 'Add a new neighbor'
@@ -490,9 +400,6 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand summary; and __fish_seen_subco
 complete -c rbgp -n "__fish_rbgp_using_subcommand summary; and __fish_seen_subcommand_from add" -l tls-key -d 'PEM client private key for mTLS (requires --tls-cert)' -r -F
 complete -c rbgp -n "__fish_rbgp_using_subcommand summary; and __fish_seen_subcommand_from add" -l tls-server-name -d 'Server certificate name to verify instead of the HTTPS address host' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand summary; and __fish_seen_subcommand_from add" -l json-version -d 'Wrap supported JSON documents in a versioned envelope (requires --json)' -r -f -a "1\t''"
-complete -c rbgp -n "__fish_rbgp_using_subcommand summary; and __fish_seen_subcommand_from add" -l pager -d 'Page complete human unicast RIB listings' -r -f -a "auto\t''
-always\t''
-never\t''"
 complete -c rbgp -n "__fish_rbgp_using_subcommand summary; and __fish_seen_subcommand_from add" -l route-server-client -d 'Enable transparent route-server client mode (eBGP only)'
 complete -c rbgp -n "__fish_rbgp_using_subcommand summary; and __fish_seen_subcommand_from add" -l no-route-server-client -d 'Explicitly disable inherited transparent route-server client mode'
 complete -c rbgp -n "__fish_rbgp_using_subcommand summary; and __fish_seen_subcommand_from add" -l per-client-best -d 'RFC 7947 per-client best-path (path-hiding mitigation); effective route-server-client mode is validated by the daemon'
@@ -503,7 +410,6 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand summary; and __fish_seen_subco
 complete -c rbgp -n "__fish_rbgp_using_subcommand summary; and __fish_seen_subcommand_from add" -l add-path-send -d 'Enable Add-Path send'
 complete -c rbgp -n "__fish_rbgp_using_subcommand summary; and __fish_seen_subcommand_from add" -l no-add-path -d 'Explicitly disable the complete inherited Add-Path block'
 complete -c rbgp -n "__fish_rbgp_using_subcommand summary; and __fish_seen_subcommand_from add" -s j -l json -d 'Output in JSON format'
-complete -c rbgp -n "__fish_rbgp_using_subcommand summary; and __fish_seen_subcommand_from add" -l json-lines -d 'Stream accepted unicast RIB routes as versioned JSON lines'
 complete -c rbgp -n "__fish_rbgp_using_subcommand summary; and __fish_seen_subcommand_from add" -l no-color -d 'Disable colored output'
 complete -c rbgp -n "__fish_rbgp_using_subcommand summary; and __fish_seen_subcommand_from add" -s h -l help -d 'Print help (see more with \'--help\')'
 complete -c rbgp -n "__fish_rbgp_using_subcommand summary; and __fish_seen_subcommand_from delete" -s s -l addr -d 'gRPC server address or unix:///path/to/socket' -r
@@ -513,11 +419,7 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand summary; and __fish_seen_subco
 complete -c rbgp -n "__fish_rbgp_using_subcommand summary; and __fish_seen_subcommand_from delete" -l tls-key -d 'PEM client private key for mTLS (requires --tls-cert)' -r -F
 complete -c rbgp -n "__fish_rbgp_using_subcommand summary; and __fish_seen_subcommand_from delete" -l tls-server-name -d 'Server certificate name to verify instead of the HTTPS address host' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand summary; and __fish_seen_subcommand_from delete" -l json-version -d 'Wrap supported JSON documents in a versioned envelope (requires --json)' -r -f -a "1\t''"
-complete -c rbgp -n "__fish_rbgp_using_subcommand summary; and __fish_seen_subcommand_from delete" -l pager -d 'Page complete human unicast RIB listings' -r -f -a "auto\t''
-always\t''
-never\t''"
 complete -c rbgp -n "__fish_rbgp_using_subcommand summary; and __fish_seen_subcommand_from delete" -s j -l json -d 'Output in JSON format'
-complete -c rbgp -n "__fish_rbgp_using_subcommand summary; and __fish_seen_subcommand_from delete" -l json-lines -d 'Stream accepted unicast RIB routes as versioned JSON lines'
 complete -c rbgp -n "__fish_rbgp_using_subcommand summary; and __fish_seen_subcommand_from delete" -l no-color -d 'Disable colored output'
 complete -c rbgp -n "__fish_rbgp_using_subcommand summary; and __fish_seen_subcommand_from delete" -s h -l help -d 'Print help (see more with \'--help\')'
 complete -c rbgp -n "__fish_rbgp_using_subcommand summary; and __fish_seen_subcommand_from enable" -s s -l addr -d 'gRPC server address or unix:///path/to/socket' -r
@@ -527,11 +429,7 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand summary; and __fish_seen_subco
 complete -c rbgp -n "__fish_rbgp_using_subcommand summary; and __fish_seen_subcommand_from enable" -l tls-key -d 'PEM client private key for mTLS (requires --tls-cert)' -r -F
 complete -c rbgp -n "__fish_rbgp_using_subcommand summary; and __fish_seen_subcommand_from enable" -l tls-server-name -d 'Server certificate name to verify instead of the HTTPS address host' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand summary; and __fish_seen_subcommand_from enable" -l json-version -d 'Wrap supported JSON documents in a versioned envelope (requires --json)' -r -f -a "1\t''"
-complete -c rbgp -n "__fish_rbgp_using_subcommand summary; and __fish_seen_subcommand_from enable" -l pager -d 'Page complete human unicast RIB listings' -r -f -a "auto\t''
-always\t''
-never\t''"
 complete -c rbgp -n "__fish_rbgp_using_subcommand summary; and __fish_seen_subcommand_from enable" -s j -l json -d 'Output in JSON format'
-complete -c rbgp -n "__fish_rbgp_using_subcommand summary; and __fish_seen_subcommand_from enable" -l json-lines -d 'Stream accepted unicast RIB routes as versioned JSON lines'
 complete -c rbgp -n "__fish_rbgp_using_subcommand summary; and __fish_seen_subcommand_from enable" -l no-color -d 'Disable colored output'
 complete -c rbgp -n "__fish_rbgp_using_subcommand summary; and __fish_seen_subcommand_from enable" -s h -l help -d 'Print help (see more with \'--help\')'
 complete -c rbgp -n "__fish_rbgp_using_subcommand summary; and __fish_seen_subcommand_from disable" -l reason -d 'Disable reason' -r
@@ -542,11 +440,7 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand summary; and __fish_seen_subco
 complete -c rbgp -n "__fish_rbgp_using_subcommand summary; and __fish_seen_subcommand_from disable" -l tls-key -d 'PEM client private key for mTLS (requires --tls-cert)' -r -F
 complete -c rbgp -n "__fish_rbgp_using_subcommand summary; and __fish_seen_subcommand_from disable" -l tls-server-name -d 'Server certificate name to verify instead of the HTTPS address host' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand summary; and __fish_seen_subcommand_from disable" -l json-version -d 'Wrap supported JSON documents in a versioned envelope (requires --json)' -r -f -a "1\t''"
-complete -c rbgp -n "__fish_rbgp_using_subcommand summary; and __fish_seen_subcommand_from disable" -l pager -d 'Page complete human unicast RIB listings' -r -f -a "auto\t''
-always\t''
-never\t''"
 complete -c rbgp -n "__fish_rbgp_using_subcommand summary; and __fish_seen_subcommand_from disable" -s j -l json -d 'Output in JSON format'
-complete -c rbgp -n "__fish_rbgp_using_subcommand summary; and __fish_seen_subcommand_from disable" -l json-lines -d 'Stream accepted unicast RIB routes as versioned JSON lines'
 complete -c rbgp -n "__fish_rbgp_using_subcommand summary; and __fish_seen_subcommand_from disable" -l no-color -d 'Disable colored output'
 complete -c rbgp -n "__fish_rbgp_using_subcommand summary; and __fish_seen_subcommand_from disable" -s h -l help -d 'Print help (see more with \'--help\')'
 complete -c rbgp -n "__fish_rbgp_using_subcommand summary; and __fish_seen_subcommand_from reset" -l reason -d 'Shutdown communication sent with the reset (RFC 9003)' -r
@@ -557,11 +451,7 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand summary; and __fish_seen_subco
 complete -c rbgp -n "__fish_rbgp_using_subcommand summary; and __fish_seen_subcommand_from reset" -l tls-key -d 'PEM client private key for mTLS (requires --tls-cert)' -r -F
 complete -c rbgp -n "__fish_rbgp_using_subcommand summary; and __fish_seen_subcommand_from reset" -l tls-server-name -d 'Server certificate name to verify instead of the HTTPS address host' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand summary; and __fish_seen_subcommand_from reset" -l json-version -d 'Wrap supported JSON documents in a versioned envelope (requires --json)' -r -f -a "1\t''"
-complete -c rbgp -n "__fish_rbgp_using_subcommand summary; and __fish_seen_subcommand_from reset" -l pager -d 'Page complete human unicast RIB listings' -r -f -a "auto\t''
-always\t''
-never\t''"
 complete -c rbgp -n "__fish_rbgp_using_subcommand summary; and __fish_seen_subcommand_from reset" -s j -l json -d 'Output in JSON format'
-complete -c rbgp -n "__fish_rbgp_using_subcommand summary; and __fish_seen_subcommand_from reset" -l json-lines -d 'Stream accepted unicast RIB routes as versioned JSON lines'
 complete -c rbgp -n "__fish_rbgp_using_subcommand summary; and __fish_seen_subcommand_from reset" -l no-color -d 'Disable colored output'
 complete -c rbgp -n "__fish_rbgp_using_subcommand summary; and __fish_seen_subcommand_from reset" -s h -l help -d 'Print help (see more with \'--help\')'
 complete -c rbgp -n "__fish_rbgp_using_subcommand summary; and __fish_seen_subcommand_from softreset" -s a -l family -d 'Address family to refresh' -r
@@ -572,11 +462,7 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand summary; and __fish_seen_subco
 complete -c rbgp -n "__fish_rbgp_using_subcommand summary; and __fish_seen_subcommand_from softreset" -l tls-key -d 'PEM client private key for mTLS (requires --tls-cert)' -r -F
 complete -c rbgp -n "__fish_rbgp_using_subcommand summary; and __fish_seen_subcommand_from softreset" -l tls-server-name -d 'Server certificate name to verify instead of the HTTPS address host' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand summary; and __fish_seen_subcommand_from softreset" -l json-version -d 'Wrap supported JSON documents in a versioned envelope (requires --json)' -r -f -a "1\t''"
-complete -c rbgp -n "__fish_rbgp_using_subcommand summary; and __fish_seen_subcommand_from softreset" -l pager -d 'Page complete human unicast RIB listings' -r -f -a "auto\t''
-always\t''
-never\t''"
 complete -c rbgp -n "__fish_rbgp_using_subcommand summary; and __fish_seen_subcommand_from softreset" -s j -l json -d 'Output in JSON format'
-complete -c rbgp -n "__fish_rbgp_using_subcommand summary; and __fish_seen_subcommand_from softreset" -l json-lines -d 'Stream accepted unicast RIB routes as versioned JSON lines'
 complete -c rbgp -n "__fish_rbgp_using_subcommand summary; and __fish_seen_subcommand_from softreset" -l no-color -d 'Disable colored output'
 complete -c rbgp -n "__fish_rbgp_using_subcommand summary; and __fish_seen_subcommand_from softreset" -s h -l help -d 'Print help (see more with \'--help\')'
 complete -c rbgp -n "__fish_rbgp_using_subcommand summary; and __fish_seen_subcommand_from refresh-out" -s s -l addr -d 'gRPC server address or unix:///path/to/socket' -r
@@ -586,11 +472,7 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand summary; and __fish_seen_subco
 complete -c rbgp -n "__fish_rbgp_using_subcommand summary; and __fish_seen_subcommand_from refresh-out" -l tls-key -d 'PEM client private key for mTLS (requires --tls-cert)' -r -F
 complete -c rbgp -n "__fish_rbgp_using_subcommand summary; and __fish_seen_subcommand_from refresh-out" -l tls-server-name -d 'Server certificate name to verify instead of the HTTPS address host' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand summary; and __fish_seen_subcommand_from refresh-out" -l json-version -d 'Wrap supported JSON documents in a versioned envelope (requires --json)' -r -f -a "1\t''"
-complete -c rbgp -n "__fish_rbgp_using_subcommand summary; and __fish_seen_subcommand_from refresh-out" -l pager -d 'Page complete human unicast RIB listings' -r -f -a "auto\t''
-always\t''
-never\t''"
 complete -c rbgp -n "__fish_rbgp_using_subcommand summary; and __fish_seen_subcommand_from refresh-out" -s j -l json -d 'Output in JSON format'
-complete -c rbgp -n "__fish_rbgp_using_subcommand summary; and __fish_seen_subcommand_from refresh-out" -l json-lines -d 'Stream accepted unicast RIB routes as versioned JSON lines'
 complete -c rbgp -n "__fish_rbgp_using_subcommand summary; and __fish_seen_subcommand_from refresh-out" -l no-color -d 'Disable colored output'
 complete -c rbgp -n "__fish_rbgp_using_subcommand summary; and __fish_seen_subcommand_from refresh-out" -s h -l help -d 'Print help (see more with \'--help\')'
 complete -c rbgp -n "__fish_rbgp_using_subcommand summary; and __fish_seen_subcommand_from replay-out" -s s -l addr -d 'gRPC server address or unix:///path/to/socket' -r
@@ -600,11 +482,7 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand summary; and __fish_seen_subco
 complete -c rbgp -n "__fish_rbgp_using_subcommand summary; and __fish_seen_subcommand_from replay-out" -l tls-key -d 'PEM client private key for mTLS (requires --tls-cert)' -r -F
 complete -c rbgp -n "__fish_rbgp_using_subcommand summary; and __fish_seen_subcommand_from replay-out" -l tls-server-name -d 'Server certificate name to verify instead of the HTTPS address host' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand summary; and __fish_seen_subcommand_from replay-out" -l json-version -d 'Wrap supported JSON documents in a versioned envelope (requires --json)' -r -f -a "1\t''"
-complete -c rbgp -n "__fish_rbgp_using_subcommand summary; and __fish_seen_subcommand_from replay-out" -l pager -d 'Page complete human unicast RIB listings' -r -f -a "auto\t''
-always\t''
-never\t''"
 complete -c rbgp -n "__fish_rbgp_using_subcommand summary; and __fish_seen_subcommand_from replay-out" -s j -l json -d 'Output in JSON format'
-complete -c rbgp -n "__fish_rbgp_using_subcommand summary; and __fish_seen_subcommand_from replay-out" -l json-lines -d 'Stream accepted unicast RIB routes as versioned JSON lines'
 complete -c rbgp -n "__fish_rbgp_using_subcommand summary; and __fish_seen_subcommand_from replay-out" -l no-color -d 'Disable colored output'
 complete -c rbgp -n "__fish_rbgp_using_subcommand summary; and __fish_seen_subcommand_from replay-out" -s h -l help -d 'Print help (see more with \'--help\')'
 complete -c rbgp -n "__fish_rbgp_using_subcommand summary; and __fish_seen_subcommand_from help" -f -a "add" -d 'Add a new neighbor'
@@ -623,11 +501,7 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand bfd; and not __fish_seen_subco
 complete -c rbgp -n "__fish_rbgp_using_subcommand bfd; and not __fish_seen_subcommand_from show help" -l tls-key -d 'PEM client private key for mTLS (requires --tls-cert)' -r -F
 complete -c rbgp -n "__fish_rbgp_using_subcommand bfd; and not __fish_seen_subcommand_from show help" -l tls-server-name -d 'Server certificate name to verify instead of the HTTPS address host' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand bfd; and not __fish_seen_subcommand_from show help" -l json-version -d 'Wrap supported JSON documents in a versioned envelope (requires --json)' -r -f -a "1\t''"
-complete -c rbgp -n "__fish_rbgp_using_subcommand bfd; and not __fish_seen_subcommand_from show help" -l pager -d 'Page complete human unicast RIB listings' -r -f -a "auto\t''
-always\t''
-never\t''"
 complete -c rbgp -n "__fish_rbgp_using_subcommand bfd; and not __fish_seen_subcommand_from show help" -s j -l json -d 'Output in JSON format'
-complete -c rbgp -n "__fish_rbgp_using_subcommand bfd; and not __fish_seen_subcommand_from show help" -l json-lines -d 'Stream accepted unicast RIB routes as versioned JSON lines'
 complete -c rbgp -n "__fish_rbgp_using_subcommand bfd; and not __fish_seen_subcommand_from show help" -l no-color -d 'Disable colored output'
 complete -c rbgp -n "__fish_rbgp_using_subcommand bfd; and not __fish_seen_subcommand_from show help" -s h -l help -d 'Print help (see more with \'--help\')'
 complete -c rbgp -n "__fish_rbgp_using_subcommand bfd; and not __fish_seen_subcommand_from show help" -f -a "show" -d 'Show a single BFD session by peer address'
@@ -639,11 +513,7 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand bfd; and __fish_seen_subcomman
 complete -c rbgp -n "__fish_rbgp_using_subcommand bfd; and __fish_seen_subcommand_from show" -l tls-key -d 'PEM client private key for mTLS (requires --tls-cert)' -r -F
 complete -c rbgp -n "__fish_rbgp_using_subcommand bfd; and __fish_seen_subcommand_from show" -l tls-server-name -d 'Server certificate name to verify instead of the HTTPS address host' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand bfd; and __fish_seen_subcommand_from show" -l json-version -d 'Wrap supported JSON documents in a versioned envelope (requires --json)' -r -f -a "1\t''"
-complete -c rbgp -n "__fish_rbgp_using_subcommand bfd; and __fish_seen_subcommand_from show" -l pager -d 'Page complete human unicast RIB listings' -r -f -a "auto\t''
-always\t''
-never\t''"
 complete -c rbgp -n "__fish_rbgp_using_subcommand bfd; and __fish_seen_subcommand_from show" -s j -l json -d 'Output in JSON format'
-complete -c rbgp -n "__fish_rbgp_using_subcommand bfd; and __fish_seen_subcommand_from show" -l json-lines -d 'Stream accepted unicast RIB routes as versioned JSON lines'
 complete -c rbgp -n "__fish_rbgp_using_subcommand bfd; and __fish_seen_subcommand_from show" -l no-color -d 'Disable colored output'
 complete -c rbgp -n "__fish_rbgp_using_subcommand bfd; and __fish_seen_subcommand_from show" -s h -l help -d 'Print help (see more with \'--help\')'
 complete -c rbgp -n "__fish_rbgp_using_subcommand bfd; and __fish_seen_subcommand_from help" -f -a "show" -d 'Show a single BFD session by peer address'
@@ -655,11 +525,7 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand rpki; and not __fish_seen_subc
 complete -c rbgp -n "__fish_rbgp_using_subcommand rpki; and not __fish_seen_subcommand_from aspa verify-path caches validate help" -l tls-key -d 'PEM client private key for mTLS (requires --tls-cert)' -r -F
 complete -c rbgp -n "__fish_rbgp_using_subcommand rpki; and not __fish_seen_subcommand_from aspa verify-path caches validate help" -l tls-server-name -d 'Server certificate name to verify instead of the HTTPS address host' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand rpki; and not __fish_seen_subcommand_from aspa verify-path caches validate help" -l json-version -d 'Wrap supported JSON documents in a versioned envelope (requires --json)' -r -f -a "1\t''"
-complete -c rbgp -n "__fish_rbgp_using_subcommand rpki; and not __fish_seen_subcommand_from aspa verify-path caches validate help" -l pager -d 'Page complete human unicast RIB listings' -r -f -a "auto\t''
-always\t''
-never\t''"
 complete -c rbgp -n "__fish_rbgp_using_subcommand rpki; and not __fish_seen_subcommand_from aspa verify-path caches validate help" -s j -l json -d 'Output in JSON format'
-complete -c rbgp -n "__fish_rbgp_using_subcommand rpki; and not __fish_seen_subcommand_from aspa verify-path caches validate help" -l json-lines -d 'Stream accepted unicast RIB routes as versioned JSON lines'
 complete -c rbgp -n "__fish_rbgp_using_subcommand rpki; and not __fish_seen_subcommand_from aspa verify-path caches validate help" -l no-color -d 'Disable colored output'
 complete -c rbgp -n "__fish_rbgp_using_subcommand rpki; and not __fish_seen_subcommand_from aspa verify-path caches validate help" -s h -l help -d 'Print help (see more with \'--help\')'
 complete -c rbgp -n "__fish_rbgp_using_subcommand rpki; and not __fish_seen_subcommand_from aspa verify-path caches validate help" -f -a "aspa" -d 'Look up one customer\'s merged ASPA provider set'
@@ -674,11 +540,7 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand rpki; and __fish_seen_subcomma
 complete -c rbgp -n "__fish_rbgp_using_subcommand rpki; and __fish_seen_subcommand_from aspa" -l tls-key -d 'PEM client private key for mTLS (requires --tls-cert)' -r -F
 complete -c rbgp -n "__fish_rbgp_using_subcommand rpki; and __fish_seen_subcommand_from aspa" -l tls-server-name -d 'Server certificate name to verify instead of the HTTPS address host' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand rpki; and __fish_seen_subcommand_from aspa" -l json-version -d 'Wrap supported JSON documents in a versioned envelope (requires --json)' -r -f -a "1\t''"
-complete -c rbgp -n "__fish_rbgp_using_subcommand rpki; and __fish_seen_subcommand_from aspa" -l pager -d 'Page complete human unicast RIB listings' -r -f -a "auto\t''
-always\t''
-never\t''"
 complete -c rbgp -n "__fish_rbgp_using_subcommand rpki; and __fish_seen_subcommand_from aspa" -s j -l json -d 'Output in JSON format'
-complete -c rbgp -n "__fish_rbgp_using_subcommand rpki; and __fish_seen_subcommand_from aspa" -l json-lines -d 'Stream accepted unicast RIB routes as versioned JSON lines'
 complete -c rbgp -n "__fish_rbgp_using_subcommand rpki; and __fish_seen_subcommand_from aspa" -l no-color -d 'Disable colored output'
 complete -c rbgp -n "__fish_rbgp_using_subcommand rpki; and __fish_seen_subcommand_from aspa" -s h -l help -d 'Print help (see more with \'--help\')'
 complete -c rbgp -n "__fish_rbgp_using_subcommand rpki; and __fish_seen_subcommand_from verify-path" -l neighbor-asn -d 'Effective neighbor ASN (never inferred from the path)' -r
@@ -695,11 +557,7 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand rpki; and __fish_seen_subcomma
 complete -c rbgp -n "__fish_rbgp_using_subcommand rpki; and __fish_seen_subcommand_from verify-path" -l tls-key -d 'PEM client private key for mTLS (requires --tls-cert)' -r -F
 complete -c rbgp -n "__fish_rbgp_using_subcommand rpki; and __fish_seen_subcommand_from verify-path" -l tls-server-name -d 'Server certificate name to verify instead of the HTTPS address host' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand rpki; and __fish_seen_subcommand_from verify-path" -l json-version -d 'Wrap supported JSON documents in a versioned envelope (requires --json)' -r -f -a "1\t''"
-complete -c rbgp -n "__fish_rbgp_using_subcommand rpki; and __fish_seen_subcommand_from verify-path" -l pager -d 'Page complete human unicast RIB listings' -r -f -a "auto\t''
-always\t''
-never\t''"
 complete -c rbgp -n "__fish_rbgp_using_subcommand rpki; and __fish_seen_subcommand_from verify-path" -s j -l json -d 'Output in JSON format'
-complete -c rbgp -n "__fish_rbgp_using_subcommand rpki; and __fish_seen_subcommand_from verify-path" -l json-lines -d 'Stream accepted unicast RIB routes as versioned JSON lines'
 complete -c rbgp -n "__fish_rbgp_using_subcommand rpki; and __fish_seen_subcommand_from verify-path" -l no-color -d 'Disable colored output'
 complete -c rbgp -n "__fish_rbgp_using_subcommand rpki; and __fish_seen_subcommand_from verify-path" -s h -l help -d 'Print help (see more with \'--help\')'
 complete -c rbgp -n "__fish_rbgp_using_subcommand rpki; and __fish_seen_subcommand_from caches" -s s -l addr -d 'gRPC server address or unix:///path/to/socket' -r
@@ -709,11 +567,7 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand rpki; and __fish_seen_subcomma
 complete -c rbgp -n "__fish_rbgp_using_subcommand rpki; and __fish_seen_subcommand_from caches" -l tls-key -d 'PEM client private key for mTLS (requires --tls-cert)' -r -F
 complete -c rbgp -n "__fish_rbgp_using_subcommand rpki; and __fish_seen_subcommand_from caches" -l tls-server-name -d 'Server certificate name to verify instead of the HTTPS address host' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand rpki; and __fish_seen_subcommand_from caches" -l json-version -d 'Wrap supported JSON documents in a versioned envelope (requires --json)' -r -f -a "1\t''"
-complete -c rbgp -n "__fish_rbgp_using_subcommand rpki; and __fish_seen_subcommand_from caches" -l pager -d 'Page complete human unicast RIB listings' -r -f -a "auto\t''
-always\t''
-never\t''"
 complete -c rbgp -n "__fish_rbgp_using_subcommand rpki; and __fish_seen_subcommand_from caches" -s j -l json -d 'Output in JSON format'
-complete -c rbgp -n "__fish_rbgp_using_subcommand rpki; and __fish_seen_subcommand_from caches" -l json-lines -d 'Stream accepted unicast RIB routes as versioned JSON lines'
 complete -c rbgp -n "__fish_rbgp_using_subcommand rpki; and __fish_seen_subcommand_from caches" -l no-color -d 'Disable colored output'
 complete -c rbgp -n "__fish_rbgp_using_subcommand rpki; and __fish_seen_subcommand_from caches" -s h -l help -d 'Print help (see more with \'--help\')'
 complete -c rbgp -n "__fish_rbgp_using_subcommand rpki; and __fish_seen_subcommand_from validate" -s s -l addr -d 'gRPC server address or unix:///path/to/socket' -r
@@ -723,11 +577,7 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand rpki; and __fish_seen_subcomma
 complete -c rbgp -n "__fish_rbgp_using_subcommand rpki; and __fish_seen_subcommand_from validate" -l tls-key -d 'PEM client private key for mTLS (requires --tls-cert)' -r -F
 complete -c rbgp -n "__fish_rbgp_using_subcommand rpki; and __fish_seen_subcommand_from validate" -l tls-server-name -d 'Server certificate name to verify instead of the HTTPS address host' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand rpki; and __fish_seen_subcommand_from validate" -l json-version -d 'Wrap supported JSON documents in a versioned envelope (requires --json)' -r -f -a "1\t''"
-complete -c rbgp -n "__fish_rbgp_using_subcommand rpki; and __fish_seen_subcommand_from validate" -l pager -d 'Page complete human unicast RIB listings' -r -f -a "auto\t''
-always\t''
-never\t''"
 complete -c rbgp -n "__fish_rbgp_using_subcommand rpki; and __fish_seen_subcommand_from validate" -s j -l json -d 'Output in JSON format'
-complete -c rbgp -n "__fish_rbgp_using_subcommand rpki; and __fish_seen_subcommand_from validate" -l json-lines -d 'Stream accepted unicast RIB routes as versioned JSON lines'
 complete -c rbgp -n "__fish_rbgp_using_subcommand rpki; and __fish_seen_subcommand_from validate" -l no-color -d 'Disable colored output'
 complete -c rbgp -n "__fish_rbgp_using_subcommand rpki; and __fish_seen_subcommand_from validate" -s h -l help -d 'Print help (see more with \'--help\')'
 complete -c rbgp -n "__fish_rbgp_using_subcommand rpki; and __fish_seen_subcommand_from help" -f -a "aspa" -d 'Look up one customer\'s merged ASPA provider set'
@@ -790,11 +640,7 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcomman
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from lookup" -l tls-key -d 'PEM client private key for mTLS (requires --tls-cert)' -r -F
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from lookup" -l tls-server-name -d 'Server certificate name to verify instead of the HTTPS address host' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from lookup" -l json-version -d 'Wrap supported JSON documents in a versioned envelope (requires --json)' -r -f -a "1\t''"
-complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from lookup" -l pager -d 'Page complete human unicast RIB listings' -r -f -a "auto\t''
-always\t''
-never\t''"
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from lookup" -s j -l json -d 'Output in JSON format'
-complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from lookup" -l json-lines -d 'Stream accepted unicast RIB routes as versioned JSON lines'
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from lookup" -l no-color -d 'Disable colored output'
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from lookup" -s h -l help -d 'Print help (see more with \'--help\')'
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from received" -s a -l family -d 'Address family filter' -r
@@ -940,11 +786,7 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcomman
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from blackholes" -l tls-key -d 'PEM client private key for mTLS (requires --tls-cert)' -r -F
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from blackholes" -l tls-server-name -d 'Server certificate name to verify instead of the HTTPS address host' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from blackholes" -l json-version -d 'Wrap supported JSON documents in a versioned envelope (requires --json)' -r -f -a "1\t''"
-complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from blackholes" -l pager -d 'Page complete human unicast RIB listings' -r -f -a "auto\t''
-always\t''
-never\t''"
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from blackholes" -s j -l json -d 'Output in JSON format'
-complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from blackholes" -l json-lines -d 'Stream accepted unicast RIB routes as versioned JSON lines'
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from blackholes" -l no-color -d 'Disable colored output'
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from blackholes" -s h -l help -d 'Print help (see more with \'--help\')'
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from fib" -l table -d 'FIB table-name filter' -r
@@ -961,11 +803,7 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcomman
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from fib" -l tls-key -d 'PEM client private key for mTLS (requires --tls-cert)' -r -F
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from fib" -l tls-server-name -d 'Server certificate name to verify instead of the HTTPS address host' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from fib" -l json-version -d 'Wrap supported JSON documents in a versioned envelope (requires --json)' -r -f -a "1\t''"
-complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from fib" -l pager -d 'Page complete human unicast RIB listings' -r -f -a "auto\t''
-always\t''
-never\t''"
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from fib" -s j -l json -d 'Output in JSON format'
-complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from fib" -l json-lines -d 'Stream accepted unicast RIB routes as versioned JSON lines'
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from fib" -l no-color -d 'Disable colored output'
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from fib" -s h -l help -d 'Print help (see more with \'--help\')'
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from bgpls" -s a -l family -d 'BGP-LS family filter: linkstate (aliases bgpls, bgp-ls) or linkstate_vpn (aliases bgpls-vpn, bgp-ls-vpn)' -r
@@ -978,11 +816,7 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcomman
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from bgpls" -l tls-key -d 'PEM client private key for mTLS (requires --tls-cert)' -r -F
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from bgpls" -l tls-server-name -d 'Server certificate name to verify instead of the HTTPS address host' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from bgpls" -l json-version -d 'Wrap supported JSON documents in a versioned envelope (requires --json)' -r -f -a "1\t''"
-complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from bgpls" -l pager -d 'Page complete human unicast RIB listings' -r -f -a "auto\t''
-always\t''
-never\t''"
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from bgpls" -s j -l json -d 'Output in JSON format'
-complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from bgpls" -l json-lines -d 'Stream accepted unicast RIB routes as versioned JSON lines'
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from bgpls" -l no-color -d 'Disable colored output'
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from bgpls" -s h -l help -d 'Print help (see more with \'--help\')'
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from bgp-ls" -s a -l family -d 'BGP-LS family filter: linkstate (aliases bgpls, bgp-ls) or linkstate_vpn (aliases bgpls-vpn, bgp-ls-vpn)' -r
@@ -995,11 +829,7 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcomman
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from bgp-ls" -l tls-key -d 'PEM client private key for mTLS (requires --tls-cert)' -r -F
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from bgp-ls" -l tls-server-name -d 'Server certificate name to verify instead of the HTTPS address host' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from bgp-ls" -l json-version -d 'Wrap supported JSON documents in a versioned envelope (requires --json)' -r -f -a "1\t''"
-complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from bgp-ls" -l pager -d 'Page complete human unicast RIB listings' -r -f -a "auto\t''
-always\t''
-never\t''"
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from bgp-ls" -s j -l json -d 'Output in JSON format'
-complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from bgp-ls" -l json-lines -d 'Stream accepted unicast RIB routes as versioned JSON lines'
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from bgp-ls" -l no-color -d 'Disable colored output'
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from bgp-ls" -s h -l help -d 'Print help (see more with \'--help\')'
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from vpn" -s a -l family -d 'VPN family filter: l3vpn_ipv4_unicast (alias vpnv4) or l3vpn_ipv6_unicast (alias vpnv6)' -r
@@ -1011,11 +841,7 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcomman
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from vpn" -l tls-key -d 'PEM client private key for mTLS (requires --tls-cert)' -r -F
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from vpn" -l tls-server-name -d 'Server certificate name to verify instead of the HTTPS address host' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from vpn" -l json-version -d 'Wrap supported JSON documents in a versioned envelope (requires --json)' -r -f -a "1\t''"
-complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from vpn" -l pager -d 'Page complete human unicast RIB listings' -r -f -a "auto\t''
-always\t''
-never\t''"
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from vpn" -s j -l json -d 'Output in JSON format'
-complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from vpn" -l json-lines -d 'Stream accepted unicast RIB routes as versioned JSON lines'
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from vpn" -l no-color -d 'Disable colored output'
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from vpn" -s h -l help -d 'Print help (see more with \'--help\')'
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from labeled" -s a -l family -d 'Labeled family filter: ipv4_labeled_unicast (alias labeled-v4) or ipv6_labeled_unicast (alias labeled-v6)' -r
@@ -1027,11 +853,7 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcomman
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from labeled" -l tls-key -d 'PEM client private key for mTLS (requires --tls-cert)' -r -F
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from labeled" -l tls-server-name -d 'Server certificate name to verify instead of the HTTPS address host' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from labeled" -l json-version -d 'Wrap supported JSON documents in a versioned envelope (requires --json)' -r -f -a "1\t''"
-complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from labeled" -l pager -d 'Page complete human unicast RIB listings' -r -f -a "auto\t''
-always\t''
-never\t''"
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from labeled" -s j -l json -d 'Output in JSON format'
-complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from labeled" -l json-lines -d 'Stream accepted unicast RIB routes as versioned JSON lines'
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from labeled" -l no-color -d 'Disable colored output'
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from labeled" -s h -l help -d 'Print help (see more with \'--help\')'
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from rtc" -l neighbor -l peer -d 'Neighbor IP address filter' -r
@@ -1042,11 +864,7 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcomman
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from rtc" -l tls-key -d 'PEM client private key for mTLS (requires --tls-cert)' -r -F
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from rtc" -l tls-server-name -d 'Server certificate name to verify instead of the HTTPS address host' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from rtc" -l json-version -d 'Wrap supported JSON documents in a versioned envelope (requires --json)' -r -f -a "1\t''"
-complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from rtc" -l pager -d 'Page complete human unicast RIB listings' -r -f -a "auto\t''
-always\t''
-never\t''"
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from rtc" -s j -l json -d 'Output in JSON format'
-complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from rtc" -l json-lines -d 'Stream accepted unicast RIB routes as versioned JSON lines'
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from rtc" -l no-color -d 'Disable colored output'
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from rtc" -s h -l help -d 'Print help (see more with \'--help\')'
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from add" -l next-hop -l nexthop -d 'Next hop address' -r
@@ -1064,11 +882,7 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcomman
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from add" -l tls-key -d 'PEM client private key for mTLS (requires --tls-cert)' -r -F
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from add" -l tls-server-name -d 'Server certificate name to verify instead of the HTTPS address host' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from add" -l json-version -d 'Wrap supported JSON documents in a versioned envelope (requires --json)' -r -f -a "1\t''"
-complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from add" -l pager -d 'Page complete human unicast RIB listings' -r -f -a "auto\t''
-always\t''
-never\t''"
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from add" -s j -l json -d 'Output in JSON format'
-complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from add" -l json-lines -d 'Stream accepted unicast RIB routes as versioned JSON lines'
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from add" -l no-color -d 'Disable colored output'
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from add" -s h -l help -d 'Print help (see more with \'--help\')'
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from delete" -l path-id -d 'Path ID for Add-Path' -r
@@ -1079,11 +893,7 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcomman
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from delete" -l tls-key -d 'PEM client private key for mTLS (requires --tls-cert)' -r -F
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from delete" -l tls-server-name -d 'Server certificate name to verify instead of the HTTPS address host' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from delete" -l json-version -d 'Wrap supported JSON documents in a versioned envelope (requires --json)' -r -f -a "1\t''"
-complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from delete" -l pager -d 'Page complete human unicast RIB listings' -r -f -a "auto\t''
-always\t''
-never\t''"
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from delete" -s j -l json -d 'Output in JSON format'
-complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from delete" -l json-lines -d 'Stream accepted unicast RIB routes as versioned JSON lines'
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from delete" -l no-color -d 'Disable colored output'
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from delete" -s h -l help -d 'Print help (see more with \'--help\')'
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from help" -f -a "lookup" -d 'Find the longest-prefix match in the global best-route table'
@@ -1105,11 +915,7 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand topology; and not __fish_seen_
 complete -c rbgp -n "__fish_rbgp_using_subcommand topology; and not __fish_seen_subcommand_from nodes links help" -l tls-key -d 'PEM client private key for mTLS (requires --tls-cert)' -r -F
 complete -c rbgp -n "__fish_rbgp_using_subcommand topology; and not __fish_seen_subcommand_from nodes links help" -l tls-server-name -d 'Server certificate name to verify instead of the HTTPS address host' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand topology; and not __fish_seen_subcommand_from nodes links help" -l json-version -d 'Wrap supported JSON documents in a versioned envelope (requires --json)' -r -f -a "1\t''"
-complete -c rbgp -n "__fish_rbgp_using_subcommand topology; and not __fish_seen_subcommand_from nodes links help" -l pager -d 'Page complete human unicast RIB listings' -r -f -a "auto\t''
-always\t''
-never\t''"
 complete -c rbgp -n "__fish_rbgp_using_subcommand topology; and not __fish_seen_subcommand_from nodes links help" -s j -l json -d 'Output in JSON format'
-complete -c rbgp -n "__fish_rbgp_using_subcommand topology; and not __fish_seen_subcommand_from nodes links help" -l json-lines -d 'Stream accepted unicast RIB routes as versioned JSON lines'
 complete -c rbgp -n "__fish_rbgp_using_subcommand topology; and not __fish_seen_subcommand_from nodes links help" -l no-color -d 'Disable colored output'
 complete -c rbgp -n "__fish_rbgp_using_subcommand topology; and not __fish_seen_subcommand_from nodes links help" -s h -l help -d 'Print help (see more with \'--help\')'
 complete -c rbgp -n "__fish_rbgp_using_subcommand topology; and not __fish_seen_subcommand_from nodes links help" -f -a "nodes" -d 'List topology nodes (BGP-LS node identities across all peers)'
@@ -1122,11 +928,7 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand topology; and __fish_seen_subc
 complete -c rbgp -n "__fish_rbgp_using_subcommand topology; and __fish_seen_subcommand_from nodes" -l tls-key -d 'PEM client private key for mTLS (requires --tls-cert)' -r -F
 complete -c rbgp -n "__fish_rbgp_using_subcommand topology; and __fish_seen_subcommand_from nodes" -l tls-server-name -d 'Server certificate name to verify instead of the HTTPS address host' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand topology; and __fish_seen_subcommand_from nodes" -l json-version -d 'Wrap supported JSON documents in a versioned envelope (requires --json)' -r -f -a "1\t''"
-complete -c rbgp -n "__fish_rbgp_using_subcommand topology; and __fish_seen_subcommand_from nodes" -l pager -d 'Page complete human unicast RIB listings' -r -f -a "auto\t''
-always\t''
-never\t''"
 complete -c rbgp -n "__fish_rbgp_using_subcommand topology; and __fish_seen_subcommand_from nodes" -s j -l json -d 'Output in JSON format'
-complete -c rbgp -n "__fish_rbgp_using_subcommand topology; and __fish_seen_subcommand_from nodes" -l json-lines -d 'Stream accepted unicast RIB routes as versioned JSON lines'
 complete -c rbgp -n "__fish_rbgp_using_subcommand topology; and __fish_seen_subcommand_from nodes" -l no-color -d 'Disable colored output'
 complete -c rbgp -n "__fish_rbgp_using_subcommand topology; and __fish_seen_subcommand_from nodes" -s h -l help -d 'Print help (see more with \'--help\')'
 complete -c rbgp -n "__fish_rbgp_using_subcommand topology; and __fish_seen_subcommand_from links" -s s -l addr -d 'gRPC server address or unix:///path/to/socket' -r
@@ -1136,11 +938,7 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand topology; and __fish_seen_subc
 complete -c rbgp -n "__fish_rbgp_using_subcommand topology; and __fish_seen_subcommand_from links" -l tls-key -d 'PEM client private key for mTLS (requires --tls-cert)' -r -F
 complete -c rbgp -n "__fish_rbgp_using_subcommand topology; and __fish_seen_subcommand_from links" -l tls-server-name -d 'Server certificate name to verify instead of the HTTPS address host' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand topology; and __fish_seen_subcommand_from links" -l json-version -d 'Wrap supported JSON documents in a versioned envelope (requires --json)' -r -f -a "1\t''"
-complete -c rbgp -n "__fish_rbgp_using_subcommand topology; and __fish_seen_subcommand_from links" -l pager -d 'Page complete human unicast RIB listings' -r -f -a "auto\t''
-always\t''
-never\t''"
 complete -c rbgp -n "__fish_rbgp_using_subcommand topology; and __fish_seen_subcommand_from links" -s j -l json -d 'Output in JSON format'
-complete -c rbgp -n "__fish_rbgp_using_subcommand topology; and __fish_seen_subcommand_from links" -l json-lines -d 'Stream accepted unicast RIB routes as versioned JSON lines'
 complete -c rbgp -n "__fish_rbgp_using_subcommand topology; and __fish_seen_subcommand_from links" -l no-color -d 'Disable colored output'
 complete -c rbgp -n "__fish_rbgp_using_subcommand topology; and __fish_seen_subcommand_from links" -s h -l help -d 'Print help (see more with \'--help\')'
 complete -c rbgp -n "__fish_rbgp_using_subcommand topology; and __fish_seen_subcommand_from help" -f -a "nodes" -d 'List topology nodes (BGP-LS node identities across all peers)'
@@ -1153,11 +951,7 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand orr" -l tls-cert -d 'PEM clien
 complete -c rbgp -n "__fish_rbgp_using_subcommand orr" -l tls-key -d 'PEM client private key for mTLS (requires --tls-cert)' -r -F
 complete -c rbgp -n "__fish_rbgp_using_subcommand orr" -l tls-server-name -d 'Server certificate name to verify instead of the HTTPS address host' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand orr" -l json-version -d 'Wrap supported JSON documents in a versioned envelope (requires --json)' -r -f -a "1\t''"
-complete -c rbgp -n "__fish_rbgp_using_subcommand orr" -l pager -d 'Page complete human unicast RIB listings' -r -f -a "auto\t''
-always\t''
-never\t''"
 complete -c rbgp -n "__fish_rbgp_using_subcommand orr" -s j -l json -d 'Output in JSON format'
-complete -c rbgp -n "__fish_rbgp_using_subcommand orr" -l json-lines -d 'Stream accepted unicast RIB routes as versioned JSON lines'
 complete -c rbgp -n "__fish_rbgp_using_subcommand orr" -l no-color -d 'Disable colored output'
 complete -c rbgp -n "__fish_rbgp_using_subcommand orr" -s h -l help -d 'Print help (see more with \'--help\')'
 complete -c rbgp -n "__fish_rbgp_using_subcommand diff; and not __fish_seen_subcommand_from advertised snapshot help" -s s -l addr -d 'gRPC server address or unix:///path/to/socket' -r
@@ -1166,12 +960,7 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand diff; and not __fish_seen_subc
 complete -c rbgp -n "__fish_rbgp_using_subcommand diff; and not __fish_seen_subcommand_from advertised snapshot help" -l tls-cert -d 'PEM client certificate chain for mTLS (requires --tls-key)' -r -F
 complete -c rbgp -n "__fish_rbgp_using_subcommand diff; and not __fish_seen_subcommand_from advertised snapshot help" -l tls-key -d 'PEM client private key for mTLS (requires --tls-cert)' -r -F
 complete -c rbgp -n "__fish_rbgp_using_subcommand diff; and not __fish_seen_subcommand_from advertised snapshot help" -l tls-server-name -d 'Server certificate name to verify instead of the HTTPS address host' -r
-complete -c rbgp -n "__fish_rbgp_using_subcommand diff; and not __fish_seen_subcommand_from advertised snapshot help" -l json-version -d 'Wrap supported JSON documents in a versioned envelope (requires --json)' -r -f -a "1\t''"
-complete -c rbgp -n "__fish_rbgp_using_subcommand diff; and not __fish_seen_subcommand_from advertised snapshot help" -l pager -d 'Page complete human unicast RIB listings' -r -f -a "auto\t''
-always\t''
-never\t''"
 complete -c rbgp -n "__fish_rbgp_using_subcommand diff; and not __fish_seen_subcommand_from advertised snapshot help" -s j -l json -d 'Output in JSON format'
-complete -c rbgp -n "__fish_rbgp_using_subcommand diff; and not __fish_seen_subcommand_from advertised snapshot help" -l json-lines -d 'Stream accepted unicast RIB routes as versioned JSON lines'
 complete -c rbgp -n "__fish_rbgp_using_subcommand diff; and not __fish_seen_subcommand_from advertised snapshot help" -l no-color -d 'Disable colored output'
 complete -c rbgp -n "__fish_rbgp_using_subcommand diff; and not __fish_seen_subcommand_from advertised snapshot help" -s h -l help -d 'Print help (see more with \'--help\')'
 complete -c rbgp -n "__fish_rbgp_using_subcommand diff; and not __fish_seen_subcommand_from advertised snapshot help" -f -a "advertised" -d 'Compare the live Adj-RIB-Out against an incumbent NDJSON snapshot'
@@ -1191,12 +980,7 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand diff; and __fish_seen_subcomma
 complete -c rbgp -n "__fish_rbgp_using_subcommand diff; and __fish_seen_subcommand_from advertised" -l tls-cert -d 'PEM client certificate chain for mTLS (requires --tls-key)' -r -F
 complete -c rbgp -n "__fish_rbgp_using_subcommand diff; and __fish_seen_subcommand_from advertised" -l tls-key -d 'PEM client private key for mTLS (requires --tls-cert)' -r -F
 complete -c rbgp -n "__fish_rbgp_using_subcommand diff; and __fish_seen_subcommand_from advertised" -l tls-server-name -d 'Server certificate name to verify instead of the HTTPS address host' -r
-complete -c rbgp -n "__fish_rbgp_using_subcommand diff; and __fish_seen_subcommand_from advertised" -l json-version -d 'Wrap supported JSON documents in a versioned envelope (requires --json)' -r -f -a "1\t''"
-complete -c rbgp -n "__fish_rbgp_using_subcommand diff; and __fish_seen_subcommand_from advertised" -l pager -d 'Page complete human unicast RIB listings' -r -f -a "auto\t''
-always\t''
-never\t''"
 complete -c rbgp -n "__fish_rbgp_using_subcommand diff; and __fish_seen_subcommand_from advertised" -s j -l json -d 'Output in JSON format'
-complete -c rbgp -n "__fish_rbgp_using_subcommand diff; and __fish_seen_subcommand_from advertised" -l json-lines -d 'Stream accepted unicast RIB routes as versioned JSON lines'
 complete -c rbgp -n "__fish_rbgp_using_subcommand diff; and __fish_seen_subcommand_from advertised" -l no-color -d 'Disable colored output'
 complete -c rbgp -n "__fish_rbgp_using_subcommand diff; and __fish_seen_subcommand_from advertised" -s h -l help -d 'Print help (see more with \'--help\')'
 complete -c rbgp -n "__fish_rbgp_using_subcommand diff; and __fish_seen_subcommand_from snapshot" -s s -l addr -d 'gRPC server address or unix:///path/to/socket' -r
@@ -1205,12 +989,7 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand diff; and __fish_seen_subcomma
 complete -c rbgp -n "__fish_rbgp_using_subcommand diff; and __fish_seen_subcommand_from snapshot" -l tls-cert -d 'PEM client certificate chain for mTLS (requires --tls-key)' -r -F
 complete -c rbgp -n "__fish_rbgp_using_subcommand diff; and __fish_seen_subcommand_from snapshot" -l tls-key -d 'PEM client private key for mTLS (requires --tls-cert)' -r -F
 complete -c rbgp -n "__fish_rbgp_using_subcommand diff; and __fish_seen_subcommand_from snapshot" -l tls-server-name -d 'Server certificate name to verify instead of the HTTPS address host' -r
-complete -c rbgp -n "__fish_rbgp_using_subcommand diff; and __fish_seen_subcommand_from snapshot" -l json-version -d 'Wrap supported JSON documents in a versioned envelope (requires --json)' -r -f -a "1\t''"
-complete -c rbgp -n "__fish_rbgp_using_subcommand diff; and __fish_seen_subcommand_from snapshot" -l pager -d 'Page complete human unicast RIB listings' -r -f -a "auto\t''
-always\t''
-never\t''"
 complete -c rbgp -n "__fish_rbgp_using_subcommand diff; and __fish_seen_subcommand_from snapshot" -s j -l json -d 'Output in JSON format'
-complete -c rbgp -n "__fish_rbgp_using_subcommand diff; and __fish_seen_subcommand_from snapshot" -l json-lines -d 'Stream accepted unicast RIB routes as versioned JSON lines'
 complete -c rbgp -n "__fish_rbgp_using_subcommand diff; and __fish_seen_subcommand_from snapshot" -l no-color -d 'Disable colored output'
 complete -c rbgp -n "__fish_rbgp_using_subcommand diff; and __fish_seen_subcommand_from snapshot" -s h -l help -d 'Print help (see more with \'--help\')'
 complete -c rbgp -n "__fish_rbgp_using_subcommand diff; and __fish_seen_subcommand_from snapshot" -f -a "from-mrt" -d 'Convert an RFC 6396 TABLE_DUMP_V2 MRT dump into a snapshot'
@@ -1227,11 +1006,7 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand flowspec; and not __fish_seen_
 complete -c rbgp -n "__fish_rbgp_using_subcommand flowspec; and not __fish_seen_subcommand_from received add delete help" -l tls-key -d 'PEM client private key for mTLS (requires --tls-cert)' -r -F
 complete -c rbgp -n "__fish_rbgp_using_subcommand flowspec; and not __fish_seen_subcommand_from received add delete help" -l tls-server-name -d 'Server certificate name to verify instead of the HTTPS address host' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand flowspec; and not __fish_seen_subcommand_from received add delete help" -l json-version -d 'Wrap supported JSON documents in a versioned envelope (requires --json)' -r -f -a "1\t''"
-complete -c rbgp -n "__fish_rbgp_using_subcommand flowspec; and not __fish_seen_subcommand_from received add delete help" -l pager -d 'Page complete human unicast RIB listings' -r -f -a "auto\t''
-always\t''
-never\t''"
 complete -c rbgp -n "__fish_rbgp_using_subcommand flowspec; and not __fish_seen_subcommand_from received add delete help" -s j -l json -d 'Output in JSON format'
-complete -c rbgp -n "__fish_rbgp_using_subcommand flowspec; and not __fish_seen_subcommand_from received add delete help" -l json-lines -d 'Stream accepted unicast RIB routes as versioned JSON lines'
 complete -c rbgp -n "__fish_rbgp_using_subcommand flowspec; and not __fish_seen_subcommand_from received add delete help" -l no-color -d 'Disable colored output'
 complete -c rbgp -n "__fish_rbgp_using_subcommand flowspec; and not __fish_seen_subcommand_from received add delete help" -s h -l help -d 'Print help (see more with \'--help\')'
 complete -c rbgp -n "__fish_rbgp_using_subcommand flowspec; and not __fish_seen_subcommand_from received add delete help" -f -a "received" -d 'Show retained received candidates, including infeasible and nonselected rules'
@@ -1246,11 +1021,7 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand flowspec; and __fish_seen_subc
 complete -c rbgp -n "__fish_rbgp_using_subcommand flowspec; and __fish_seen_subcommand_from received" -l tls-key -d 'PEM client private key for mTLS (requires --tls-cert)' -r -F
 complete -c rbgp -n "__fish_rbgp_using_subcommand flowspec; and __fish_seen_subcommand_from received" -l tls-server-name -d 'Server certificate name to verify instead of the HTTPS address host' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand flowspec; and __fish_seen_subcommand_from received" -l json-version -d 'Wrap supported JSON documents in a versioned envelope (requires --json)' -r -f -a "1\t''"
-complete -c rbgp -n "__fish_rbgp_using_subcommand flowspec; and __fish_seen_subcommand_from received" -l pager -d 'Page complete human unicast RIB listings' -r -f -a "auto\t''
-always\t''
-never\t''"
 complete -c rbgp -n "__fish_rbgp_using_subcommand flowspec; and __fish_seen_subcommand_from received" -s j -l json -d 'Output in JSON format'
-complete -c rbgp -n "__fish_rbgp_using_subcommand flowspec; and __fish_seen_subcommand_from received" -l json-lines -d 'Stream accepted unicast RIB routes as versioned JSON lines'
 complete -c rbgp -n "__fish_rbgp_using_subcommand flowspec; and __fish_seen_subcommand_from received" -l no-color -d 'Disable colored output'
 complete -c rbgp -n "__fish_rbgp_using_subcommand flowspec; and __fish_seen_subcommand_from received" -s h -l help -d 'Print help (see more with \'--help\')'
 complete -c rbgp -n "__fish_rbgp_using_subcommand flowspec; and __fish_seen_subcommand_from add" -s a -l family -d 'Address family (required: ipv4_flowspec or ipv6_flowspec)' -r
@@ -1263,11 +1034,7 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand flowspec; and __fish_seen_subc
 complete -c rbgp -n "__fish_rbgp_using_subcommand flowspec; and __fish_seen_subcommand_from add" -l tls-key -d 'PEM client private key for mTLS (requires --tls-cert)' -r -F
 complete -c rbgp -n "__fish_rbgp_using_subcommand flowspec; and __fish_seen_subcommand_from add" -l tls-server-name -d 'Server certificate name to verify instead of the HTTPS address host' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand flowspec; and __fish_seen_subcommand_from add" -l json-version -d 'Wrap supported JSON documents in a versioned envelope (requires --json)' -r -f -a "1\t''"
-complete -c rbgp -n "__fish_rbgp_using_subcommand flowspec; and __fish_seen_subcommand_from add" -l pager -d 'Page complete human unicast RIB listings' -r -f -a "auto\t''
-always\t''
-never\t''"
 complete -c rbgp -n "__fish_rbgp_using_subcommand flowspec; and __fish_seen_subcommand_from add" -s j -l json -d 'Output in JSON format'
-complete -c rbgp -n "__fish_rbgp_using_subcommand flowspec; and __fish_seen_subcommand_from add" -l json-lines -d 'Stream accepted unicast RIB routes as versioned JSON lines'
 complete -c rbgp -n "__fish_rbgp_using_subcommand flowspec; and __fish_seen_subcommand_from add" -l no-color -d 'Disable colored output'
 complete -c rbgp -n "__fish_rbgp_using_subcommand flowspec; and __fish_seen_subcommand_from add" -s h -l help -d 'Print help (see more with \'--help\')'
 complete -c rbgp -n "__fish_rbgp_using_subcommand flowspec; and __fish_seen_subcommand_from delete" -s a -l family -d 'Address family (required: ipv4_flowspec or ipv6_flowspec)' -r
@@ -1279,12 +1046,8 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand flowspec; and __fish_seen_subc
 complete -c rbgp -n "__fish_rbgp_using_subcommand flowspec; and __fish_seen_subcommand_from delete" -l tls-key -d 'PEM client private key for mTLS (requires --tls-cert)' -r -F
 complete -c rbgp -n "__fish_rbgp_using_subcommand flowspec; and __fish_seen_subcommand_from delete" -l tls-server-name -d 'Server certificate name to verify instead of the HTTPS address host' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand flowspec; and __fish_seen_subcommand_from delete" -l json-version -d 'Wrap supported JSON documents in a versioned envelope (requires --json)' -r -f -a "1\t''"
-complete -c rbgp -n "__fish_rbgp_using_subcommand flowspec; and __fish_seen_subcommand_from delete" -l pager -d 'Page complete human unicast RIB listings' -r -f -a "auto\t''
-always\t''
-never\t''"
 complete -c rbgp -n "__fish_rbgp_using_subcommand flowspec; and __fish_seen_subcommand_from delete" -l allow-missing -d 'Succeed and report "not present" when no injected rule matches'
 complete -c rbgp -n "__fish_rbgp_using_subcommand flowspec; and __fish_seen_subcommand_from delete" -s j -l json -d 'Output in JSON format'
-complete -c rbgp -n "__fish_rbgp_using_subcommand flowspec; and __fish_seen_subcommand_from delete" -l json-lines -d 'Stream accepted unicast RIB routes as versioned JSON lines'
 complete -c rbgp -n "__fish_rbgp_using_subcommand flowspec; and __fish_seen_subcommand_from delete" -l no-color -d 'Disable colored output'
 complete -c rbgp -n "__fish_rbgp_using_subcommand flowspec; and __fish_seen_subcommand_from delete" -s h -l help -d 'Print help (see more with \'--help\')'
 complete -c rbgp -n "__fish_rbgp_using_subcommand flowspec; and __fish_seen_subcommand_from help" -f -a "received" -d 'Show retained received candidates, including infeasible and nonselected rules'
@@ -1301,11 +1064,7 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and not __fish_seen_subc
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and not __fish_seen_subcommand_from received advertised explain add-mac-ip add-imet add-ip-prefix delete-mac-ip delete-imet delete-ip-prefix clear-duplicate-mac duplicate-mac-quarantines es runtime instances nexthops managed-netdevs vrfs diagnose help" -l tls-key -d 'PEM client private key for mTLS (requires --tls-cert)' -r -F
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and not __fish_seen_subcommand_from received advertised explain add-mac-ip add-imet add-ip-prefix delete-mac-ip delete-imet delete-ip-prefix clear-duplicate-mac duplicate-mac-quarantines es runtime instances nexthops managed-netdevs vrfs diagnose help" -l tls-server-name -d 'Server certificate name to verify instead of the HTTPS address host' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and not __fish_seen_subcommand_from received advertised explain add-mac-ip add-imet add-ip-prefix delete-mac-ip delete-imet delete-ip-prefix clear-duplicate-mac duplicate-mac-quarantines es runtime instances nexthops managed-netdevs vrfs diagnose help" -l json-version -d 'Wrap supported JSON documents in a versioned envelope (requires --json)' -r -f -a "1\t''"
-complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and not __fish_seen_subcommand_from received advertised explain add-mac-ip add-imet add-ip-prefix delete-mac-ip delete-imet delete-ip-prefix clear-duplicate-mac duplicate-mac-quarantines es runtime instances nexthops managed-netdevs vrfs diagnose help" -l pager -d 'Page complete human unicast RIB listings' -r -f -a "auto\t''
-always\t''
-never\t''"
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and not __fish_seen_subcommand_from received advertised explain add-mac-ip add-imet add-ip-prefix delete-mac-ip delete-imet delete-ip-prefix clear-duplicate-mac duplicate-mac-quarantines es runtime instances nexthops managed-netdevs vrfs diagnose help" -s j -l json -d 'Output in JSON format'
-complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and not __fish_seen_subcommand_from received advertised explain add-mac-ip add-imet add-ip-prefix delete-mac-ip delete-imet delete-ip-prefix clear-duplicate-mac duplicate-mac-quarantines es runtime instances nexthops managed-netdevs vrfs diagnose help" -l json-lines -d 'Stream accepted unicast RIB routes as versioned JSON lines'
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and not __fish_seen_subcommand_from received advertised explain add-mac-ip add-imet add-ip-prefix delete-mac-ip delete-imet delete-ip-prefix clear-duplicate-mac duplicate-mac-quarantines es runtime instances nexthops managed-netdevs vrfs diagnose help" -l no-color -d 'Disable colored output'
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and not __fish_seen_subcommand_from received advertised explain add-mac-ip add-imet add-ip-prefix delete-mac-ip delete-imet delete-ip-prefix clear-duplicate-mac duplicate-mac-quarantines es runtime instances nexthops managed-netdevs vrfs diagnose help" -s h -l help -d 'Print help (see more with \'--help\')'
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and not __fish_seen_subcommand_from received advertised explain add-mac-ip add-imet add-ip-prefix delete-mac-ip delete-imet delete-ip-prefix clear-duplicate-mac duplicate-mac-quarantines es runtime instances nexthops managed-netdevs vrfs diagnose help" -f -a "received" -d 'Accepted post-policy EVPN routes from a peer; absence does not prove it sent none'
@@ -1338,11 +1097,7 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcomma
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from received" -l tls-key -d 'PEM client private key for mTLS (requires --tls-cert)' -r -F
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from received" -l tls-server-name -d 'Server certificate name to verify instead of the HTTPS address host' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from received" -l json-version -d 'Wrap supported JSON documents in a versioned envelope (requires --json)' -r -f -a "1\t''"
-complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from received" -l pager -d 'Page complete human unicast RIB listings' -r -f -a "auto\t''
-always\t''
-never\t''"
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from received" -s j -l json -d 'Output in JSON format'
-complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from received" -l json-lines -d 'Stream accepted unicast RIB routes as versioned JSON lines'
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from received" -l no-color -d 'Disable colored output'
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from received" -s h -l help -d 'Print help (see more with \'--help\')'
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from advertised" -l route-type -d 'Only this route type (1..=5)' -r
@@ -1356,11 +1111,7 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcomma
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from advertised" -l tls-key -d 'PEM client private key for mTLS (requires --tls-cert)' -r -F
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from advertised" -l tls-server-name -d 'Server certificate name to verify instead of the HTTPS address host' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from advertised" -l json-version -d 'Wrap supported JSON documents in a versioned envelope (requires --json)' -r -f -a "1\t''"
-complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from advertised" -l pager -d 'Page complete human unicast RIB listings' -r -f -a "auto\t''
-always\t''
-never\t''"
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from advertised" -s j -l json -d 'Output in JSON format'
-complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from advertised" -l json-lines -d 'Stream accepted unicast RIB routes as versioned JSON lines'
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from advertised" -l no-color -d 'Disable colored output'
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from advertised" -s h -l help -d 'Print help (see more with \'--help\')'
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from explain" -s s -l addr -d 'gRPC server address or unix:///path/to/socket' -r
@@ -1370,11 +1121,7 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcomma
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from explain" -l tls-key -d 'PEM client private key for mTLS (requires --tls-cert)' -r -F
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from explain" -l tls-server-name -d 'Server certificate name to verify instead of the HTTPS address host' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from explain" -l json-version -d 'Wrap supported JSON documents in a versioned envelope (requires --json)' -r -f -a "1\t''"
-complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from explain" -l pager -d 'Page complete human unicast RIB listings' -r -f -a "auto\t''
-always\t''
-never\t''"
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from explain" -s j -l json -d 'Output in JSON format'
-complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from explain" -l json-lines -d 'Stream accepted unicast RIB routes as versioned JSON lines'
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from explain" -l no-color -d 'Disable colored output'
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from explain" -s h -l help -d 'Print help (see more with \'--help\')'
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from explain" -f -a "mac-ip" -d 'Type 2: omitted IP selects the MAC-only key, not all host IPs'
@@ -1399,12 +1146,8 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcomma
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from add-mac-ip" -l tls-key -d 'PEM client private key for mTLS (requires --tls-cert)' -r -F
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from add-mac-ip" -l tls-server-name -d 'Server certificate name to verify instead of the HTTPS address host' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from add-mac-ip" -l json-version -d 'Wrap supported JSON documents in a versioned envelope (requires --json)' -r -f -a "1\t''"
-complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from add-mac-ip" -l pager -d 'Page complete human unicast RIB listings' -r -f -a "auto\t''
-always\t''
-never\t''"
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from add-mac-ip" -l no-vxlan-encap -d 'Disable the RFC 8365 VXLAN encapsulation ext community'
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from add-mac-ip" -s j -l json -d 'Output in JSON format'
-complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from add-mac-ip" -l json-lines -d 'Stream accepted unicast RIB routes as versioned JSON lines'
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from add-mac-ip" -l no-color -d 'Disable colored output'
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from add-mac-ip" -s h -l help -d 'Print help (see more with \'--help\')'
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from add-imet" -l rd -d 'Route Distinguisher, "asn:value" / "ip:value"' -r
@@ -1419,12 +1162,8 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcomma
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from add-imet" -l tls-key -d 'PEM client private key for mTLS (requires --tls-cert)' -r -F
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from add-imet" -l tls-server-name -d 'Server certificate name to verify instead of the HTTPS address host' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from add-imet" -l json-version -d 'Wrap supported JSON documents in a versioned envelope (requires --json)' -r -f -a "1\t''"
-complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from add-imet" -l pager -d 'Page complete human unicast RIB listings' -r -f -a "auto\t''
-always\t''
-never\t''"
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from add-imet" -l no-vxlan-encap -d 'Disable the RFC 8365 VXLAN encapsulation ext community'
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from add-imet" -s j -l json -d 'Output in JSON format'
-complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from add-imet" -l json-lines -d 'Stream accepted unicast RIB routes as versioned JSON lines'
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from add-imet" -l no-color -d 'Disable colored output'
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from add-imet" -s h -l help -d 'Print help (see more with \'--help\')'
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from add-ip-prefix" -l rd -d 'Route Distinguisher, "asn:value" / "ip:value"' -r
@@ -1442,12 +1181,8 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcomma
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from add-ip-prefix" -l tls-key -d 'PEM client private key for mTLS (requires --tls-cert)' -r -F
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from add-ip-prefix" -l tls-server-name -d 'Server certificate name to verify instead of the HTTPS address host' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from add-ip-prefix" -l json-version -d 'Wrap supported JSON documents in a versioned envelope (requires --json)' -r -f -a "1\t''"
-complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from add-ip-prefix" -l pager -d 'Page complete human unicast RIB listings' -r -f -a "auto\t''
-always\t''
-never\t''"
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from add-ip-prefix" -l no-vxlan-encap -d 'Disable the RFC 8365 VXLAN encapsulation ext community'
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from add-ip-prefix" -s j -l json -d 'Output in JSON format'
-complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from add-ip-prefix" -l json-lines -d 'Stream accepted unicast RIB routes as versioned JSON lines'
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from add-ip-prefix" -l no-color -d 'Disable colored output'
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from add-ip-prefix" -s h -l help -d 'Print help (see more with \'--help\')'
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from delete-mac-ip" -l rd -d 'Route Distinguisher, "asn:value" / "ip:value"' -r
@@ -1461,11 +1196,7 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcomma
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from delete-mac-ip" -l tls-key -d 'PEM client private key for mTLS (requires --tls-cert)' -r -F
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from delete-mac-ip" -l tls-server-name -d 'Server certificate name to verify instead of the HTTPS address host' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from delete-mac-ip" -l json-version -d 'Wrap supported JSON documents in a versioned envelope (requires --json)' -r -f -a "1\t''"
-complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from delete-mac-ip" -l pager -d 'Page complete human unicast RIB listings' -r -f -a "auto\t''
-always\t''
-never\t''"
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from delete-mac-ip" -s j -l json -d 'Output in JSON format'
-complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from delete-mac-ip" -l json-lines -d 'Stream accepted unicast RIB routes as versioned JSON lines'
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from delete-mac-ip" -l no-color -d 'Disable colored output'
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from delete-mac-ip" -s h -l help -d 'Print help (see more with \'--help\')'
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from delete-imet" -l rd -d 'Route Distinguisher, "asn:value" / "ip:value"' -r
@@ -1478,11 +1209,7 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcomma
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from delete-imet" -l tls-key -d 'PEM client private key for mTLS (requires --tls-cert)' -r -F
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from delete-imet" -l tls-server-name -d 'Server certificate name to verify instead of the HTTPS address host' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from delete-imet" -l json-version -d 'Wrap supported JSON documents in a versioned envelope (requires --json)' -r -f -a "1\t''"
-complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from delete-imet" -l pager -d 'Page complete human unicast RIB listings' -r -f -a "auto\t''
-always\t''
-never\t''"
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from delete-imet" -s j -l json -d 'Output in JSON format'
-complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from delete-imet" -l json-lines -d 'Stream accepted unicast RIB routes as versioned JSON lines'
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from delete-imet" -l no-color -d 'Disable colored output'
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from delete-imet" -s h -l help -d 'Print help (see more with \'--help\')'
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from delete-ip-prefix" -l rd -d 'Route Distinguisher, "asn:value" / "ip:value"' -r
@@ -1495,11 +1222,7 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcomma
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from delete-ip-prefix" -l tls-key -d 'PEM client private key for mTLS (requires --tls-cert)' -r -F
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from delete-ip-prefix" -l tls-server-name -d 'Server certificate name to verify instead of the HTTPS address host' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from delete-ip-prefix" -l json-version -d 'Wrap supported JSON documents in a versioned envelope (requires --json)' -r -f -a "1\t''"
-complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from delete-ip-prefix" -l pager -d 'Page complete human unicast RIB listings' -r -f -a "auto\t''
-always\t''
-never\t''"
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from delete-ip-prefix" -s j -l json -d 'Output in JSON format'
-complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from delete-ip-prefix" -l json-lines -d 'Stream accepted unicast RIB routes as versioned JSON lines'
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from delete-ip-prefix" -l no-color -d 'Disable colored output'
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from delete-ip-prefix" -s h -l help -d 'Print help (see more with \'--help\')'
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from clear-duplicate-mac" -l vni -d 'L2VNI containing the quarantined MAC' -r
@@ -1511,11 +1234,7 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcomma
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from clear-duplicate-mac" -l tls-key -d 'PEM client private key for mTLS (requires --tls-cert)' -r -F
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from clear-duplicate-mac" -l tls-server-name -d 'Server certificate name to verify instead of the HTTPS address host' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from clear-duplicate-mac" -l json-version -d 'Wrap supported JSON documents in a versioned envelope (requires --json)' -r -f -a "1\t''"
-complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from clear-duplicate-mac" -l pager -d 'Page complete human unicast RIB listings' -r -f -a "auto\t''
-always\t''
-never\t''"
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from clear-duplicate-mac" -s j -l json -d 'Output in JSON format'
-complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from clear-duplicate-mac" -l json-lines -d 'Stream accepted unicast RIB routes as versioned JSON lines'
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from clear-duplicate-mac" -l no-color -d 'Disable colored output'
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from clear-duplicate-mac" -s h -l help -d 'Print help (see more with \'--help\')'
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from duplicate-mac-quarantines" -s s -l addr -d 'gRPC server address or unix:///path/to/socket' -r
@@ -1525,11 +1244,7 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcomma
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from duplicate-mac-quarantines" -l tls-key -d 'PEM client private key for mTLS (requires --tls-cert)' -r -F
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from duplicate-mac-quarantines" -l tls-server-name -d 'Server certificate name to verify instead of the HTTPS address host' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from duplicate-mac-quarantines" -l json-version -d 'Wrap supported JSON documents in a versioned envelope (requires --json)' -r -f -a "1\t''"
-complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from duplicate-mac-quarantines" -l pager -d 'Page complete human unicast RIB listings' -r -f -a "auto\t''
-always\t''
-never\t''"
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from duplicate-mac-quarantines" -s j -l json -d 'Output in JSON format'
-complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from duplicate-mac-quarantines" -l json-lines -d 'Stream accepted unicast RIB routes as versioned JSON lines'
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from duplicate-mac-quarantines" -l no-color -d 'Disable colored output'
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from duplicate-mac-quarantines" -s h -l help -d 'Print help (see more with \'--help\')'
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from es" -s s -l addr -d 'gRPC server address or unix:///path/to/socket' -r
@@ -1539,11 +1254,7 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcomma
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from es" -l tls-key -d 'PEM client private key for mTLS (requires --tls-cert)' -r -F
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from es" -l tls-server-name -d 'Server certificate name to verify instead of the HTTPS address host' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from es" -l json-version -d 'Wrap supported JSON documents in a versioned envelope (requires --json)' -r -f -a "1\t''"
-complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from es" -l pager -d 'Page complete human unicast RIB listings' -r -f -a "auto\t''
-always\t''
-never\t''"
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from es" -s j -l json -d 'Output in JSON format'
-complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from es" -l json-lines -d 'Stream accepted unicast RIB routes as versioned JSON lines'
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from es" -l no-color -d 'Disable colored output'
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from es" -s h -l help -d 'Print help (see more with \'--help\')'
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from es" -f -a "list" -d 'List configured Ethernet Segments'
@@ -1557,11 +1268,7 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcomma
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from runtime" -l tls-key -d 'PEM client private key for mTLS (requires --tls-cert)' -r -F
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from runtime" -l tls-server-name -d 'Server certificate name to verify instead of the HTTPS address host' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from runtime" -l json-version -d 'Wrap supported JSON documents in a versioned envelope (requires --json)' -r -f -a "1\t''"
-complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from runtime" -l pager -d 'Page complete human unicast RIB listings' -r -f -a "auto\t''
-always\t''
-never\t''"
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from runtime" -s j -l json -d 'Output in JSON format'
-complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from runtime" -l json-lines -d 'Stream accepted unicast RIB routes as versioned JSON lines'
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from runtime" -l no-color -d 'Disable colored output'
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from runtime" -s h -l help -d 'Print help (see more with \'--help\')'
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from instances" -s s -l addr -d 'gRPC server address or unix:///path/to/socket' -r
@@ -1571,11 +1278,7 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcomma
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from instances" -l tls-key -d 'PEM client private key for mTLS (requires --tls-cert)' -r -F
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from instances" -l tls-server-name -d 'Server certificate name to verify instead of the HTTPS address host' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from instances" -l json-version -d 'Wrap supported JSON documents in a versioned envelope (requires --json)' -r -f -a "1\t''"
-complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from instances" -l pager -d 'Page complete human unicast RIB listings' -r -f -a "auto\t''
-always\t''
-never\t''"
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from instances" -s j -l json -d 'Output in JSON format'
-complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from instances" -l json-lines -d 'Stream accepted unicast RIB routes as versioned JSON lines'
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from instances" -l no-color -d 'Disable colored output'
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from instances" -s h -l help -d 'Print help (see more with \'--help\')'
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from nexthops" -s s -l addr -d 'gRPC server address or unix:///path/to/socket' -r
@@ -1585,11 +1288,7 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcomma
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from nexthops" -l tls-key -d 'PEM client private key for mTLS (requires --tls-cert)' -r -F
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from nexthops" -l tls-server-name -d 'Server certificate name to verify instead of the HTTPS address host' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from nexthops" -l json-version -d 'Wrap supported JSON documents in a versioned envelope (requires --json)' -r -f -a "1\t''"
-complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from nexthops" -l pager -d 'Page complete human unicast RIB listings' -r -f -a "auto\t''
-always\t''
-never\t''"
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from nexthops" -s j -l json -d 'Output in JSON format'
-complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from nexthops" -l json-lines -d 'Stream accepted unicast RIB routes as versioned JSON lines'
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from nexthops" -l no-color -d 'Disable colored output'
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from nexthops" -s h -l help -d 'Print help (see more with \'--help\')'
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from managed-netdevs" -s s -l addr -d 'gRPC server address or unix:///path/to/socket' -r
@@ -1599,11 +1298,7 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcomma
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from managed-netdevs" -l tls-key -d 'PEM client private key for mTLS (requires --tls-cert)' -r -F
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from managed-netdevs" -l tls-server-name -d 'Server certificate name to verify instead of the HTTPS address host' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from managed-netdevs" -l json-version -d 'Wrap supported JSON documents in a versioned envelope (requires --json)' -r -f -a "1\t''"
-complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from managed-netdevs" -l pager -d 'Page complete human unicast RIB listings' -r -f -a "auto\t''
-always\t''
-never\t''"
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from managed-netdevs" -s j -l json -d 'Output in JSON format'
-complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from managed-netdevs" -l json-lines -d 'Stream accepted unicast RIB routes as versioned JSON lines'
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from managed-netdevs" -l no-color -d 'Disable colored output'
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from managed-netdevs" -s h -l help -d 'Print help (see more with \'--help\')'
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from vrfs" -s s -l addr -d 'gRPC server address or unix:///path/to/socket' -r
@@ -1613,11 +1308,7 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcomma
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from vrfs" -l tls-key -d 'PEM client private key for mTLS (requires --tls-cert)' -r -F
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from vrfs" -l tls-server-name -d 'Server certificate name to verify instead of the HTTPS address host' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from vrfs" -l json-version -d 'Wrap supported JSON documents in a versioned envelope (requires --json)' -r -f -a "1\t''"
-complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from vrfs" -l pager -d 'Page complete human unicast RIB listings' -r -f -a "auto\t''
-always\t''
-never\t''"
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from vrfs" -s j -l json -d 'Output in JSON format'
-complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from vrfs" -l json-lines -d 'Stream accepted unicast RIB routes as versioned JSON lines'
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from vrfs" -l no-color -d 'Disable colored output'
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from vrfs" -s h -l help -d 'Print help (see more with \'--help\')'
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from diagnose" -s s -l addr -d 'gRPC server address or unix:///path/to/socket' -r
@@ -1627,11 +1318,7 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcomma
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from diagnose" -l tls-key -d 'PEM client private key for mTLS (requires --tls-cert)' -r -F
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from diagnose" -l tls-server-name -d 'Server certificate name to verify instead of the HTTPS address host' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from diagnose" -l json-version -d 'Wrap supported JSON documents in a versioned envelope (requires --json)' -r -f -a "1\t''"
-complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from diagnose" -l pager -d 'Page complete human unicast RIB listings' -r -f -a "auto\t''
-always\t''
-never\t''"
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from diagnose" -s j -l json -d 'Output in JSON format'
-complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from diagnose" -l json-lines -d 'Stream accepted unicast RIB routes as versioned JSON lines'
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from diagnose" -l no-color -d 'Disable colored output'
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from diagnose" -s h -l help -d 'Print help (see more with \'--help\')'
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from help" -f -a "received" -d 'Accepted post-policy EVPN routes from a peer; absence does not prove it sent none'
@@ -1660,12 +1347,7 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand watch" -l tls-ca -d 'PEM CA bu
 complete -c rbgp -n "__fish_rbgp_using_subcommand watch" -l tls-cert -d 'PEM client certificate chain for mTLS (requires --tls-key)' -r -F
 complete -c rbgp -n "__fish_rbgp_using_subcommand watch" -l tls-key -d 'PEM client private key for mTLS (requires --tls-cert)' -r -F
 complete -c rbgp -n "__fish_rbgp_using_subcommand watch" -l tls-server-name -d 'Server certificate name to verify instead of the HTTPS address host' -r
-complete -c rbgp -n "__fish_rbgp_using_subcommand watch" -l json-version -d 'Wrap supported JSON documents in a versioned envelope (requires --json)' -r -f -a "1\t''"
-complete -c rbgp -n "__fish_rbgp_using_subcommand watch" -l pager -d 'Page complete human unicast RIB listings' -r -f -a "auto\t''
-always\t''
-never\t''"
 complete -c rbgp -n "__fish_rbgp_using_subcommand watch" -s j -l json -d 'Output in JSON format'
-complete -c rbgp -n "__fish_rbgp_using_subcommand watch" -l json-lines -d 'Stream accepted unicast RIB routes as versioned JSON lines'
 complete -c rbgp -n "__fish_rbgp_using_subcommand watch" -l no-color -d 'Disable colored output'
 complete -c rbgp -n "__fish_rbgp_using_subcommand watch" -s h -l help -d 'Print help (see more with \'--help\')'
 complete -c rbgp -n "__fish_rbgp_using_subcommand events; and not __fish_seen_subcommand_from watch sessions policy evpn help" -l neighbor -l peer -d 'Neighbor address filter' -r
@@ -1678,13 +1360,8 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand events; and not __fish_seen_su
 complete -c rbgp -n "__fish_rbgp_using_subcommand events; and not __fish_seen_subcommand_from watch sessions policy evpn help" -l tls-cert -d 'PEM client certificate chain for mTLS (requires --tls-key)' -r -F
 complete -c rbgp -n "__fish_rbgp_using_subcommand events; and not __fish_seen_subcommand_from watch sessions policy evpn help" -l tls-key -d 'PEM client private key for mTLS (requires --tls-cert)' -r -F
 complete -c rbgp -n "__fish_rbgp_using_subcommand events; and not __fish_seen_subcommand_from watch sessions policy evpn help" -l tls-server-name -d 'Server certificate name to verify instead of the HTTPS address host' -r
-complete -c rbgp -n "__fish_rbgp_using_subcommand events; and not __fish_seen_subcommand_from watch sessions policy evpn help" -l json-version -d 'Wrap supported JSON documents in a versioned envelope (requires --json)' -r -f -a "1\t''"
-complete -c rbgp -n "__fish_rbgp_using_subcommand events; and not __fish_seen_subcommand_from watch sessions policy evpn help" -l pager -d 'Page complete human unicast RIB listings' -r -f -a "auto\t''
-always\t''
-never\t''"
 complete -c rbgp -n "__fish_rbgp_using_subcommand events; and not __fish_seen_subcommand_from watch sessions policy evpn help" -l all -d 'Return the daemon\'s full retained route-event window (route history only)'
 complete -c rbgp -n "__fish_rbgp_using_subcommand events; and not __fish_seen_subcommand_from watch sessions policy evpn help" -s j -l json -d 'Output in JSON format'
-complete -c rbgp -n "__fish_rbgp_using_subcommand events; and not __fish_seen_subcommand_from watch sessions policy evpn help" -l json-lines -d 'Stream accepted unicast RIB routes as versioned JSON lines'
 complete -c rbgp -n "__fish_rbgp_using_subcommand events; and not __fish_seen_subcommand_from watch sessions policy evpn help" -l no-color -d 'Disable colored output'
 complete -c rbgp -n "__fish_rbgp_using_subcommand events; and not __fish_seen_subcommand_from watch sessions policy evpn help" -s h -l help -d 'Print help (see more with \'--help\')'
 complete -c rbgp -n "__fish_rbgp_using_subcommand events; and not __fish_seen_subcommand_from watch sessions policy evpn help" -f -a "watch" -d 'Watch the unified live event stream'
@@ -1731,12 +1408,7 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand events; and __fish_seen_subcom
 complete -c rbgp -n "__fish_rbgp_using_subcommand events; and __fish_seen_subcommand_from watch" -l tls-cert -d 'PEM client certificate chain for mTLS (requires --tls-key)' -r -F
 complete -c rbgp -n "__fish_rbgp_using_subcommand events; and __fish_seen_subcommand_from watch" -l tls-key -d 'PEM client private key for mTLS (requires --tls-cert)' -r -F
 complete -c rbgp -n "__fish_rbgp_using_subcommand events; and __fish_seen_subcommand_from watch" -l tls-server-name -d 'Server certificate name to verify instead of the HTTPS address host' -r
-complete -c rbgp -n "__fish_rbgp_using_subcommand events; and __fish_seen_subcommand_from watch" -l json-version -d 'Wrap supported JSON documents in a versioned envelope (requires --json)' -r -f -a "1\t''"
-complete -c rbgp -n "__fish_rbgp_using_subcommand events; and __fish_seen_subcommand_from watch" -l pager -d 'Page complete human unicast RIB listings' -r -f -a "auto\t''
-always\t''
-never\t''"
 complete -c rbgp -n "__fish_rbgp_using_subcommand events; and __fish_seen_subcommand_from watch" -s j -l json -d 'Output in JSON format'
-complete -c rbgp -n "__fish_rbgp_using_subcommand events; and __fish_seen_subcommand_from watch" -l json-lines -d 'Stream accepted unicast RIB routes as versioned JSON lines'
 complete -c rbgp -n "__fish_rbgp_using_subcommand events; and __fish_seen_subcommand_from watch" -l no-color -d 'Disable colored output'
 complete -c rbgp -n "__fish_rbgp_using_subcommand events; and __fish_seen_subcommand_from watch" -s h -l help -d 'Print help (see more with \'--help\')'
 complete -c rbgp -n "__fish_rbgp_using_subcommand events; and __fish_seen_subcommand_from sessions" -l neighbor -l peer -d 'Neighbor address filter' -r
@@ -1755,13 +1427,8 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand events; and __fish_seen_subcom
 complete -c rbgp -n "__fish_rbgp_using_subcommand events; and __fish_seen_subcommand_from sessions" -l tls-cert -d 'PEM client certificate chain for mTLS (requires --tls-key)' -r -F
 complete -c rbgp -n "__fish_rbgp_using_subcommand events; and __fish_seen_subcommand_from sessions" -l tls-key -d 'PEM client private key for mTLS (requires --tls-cert)' -r -F
 complete -c rbgp -n "__fish_rbgp_using_subcommand events; and __fish_seen_subcommand_from sessions" -l tls-server-name -d 'Server certificate name to verify instead of the HTTPS address host' -r
-complete -c rbgp -n "__fish_rbgp_using_subcommand events; and __fish_seen_subcommand_from sessions" -l json-version -d 'Wrap supported JSON documents in a versioned envelope (requires --json)' -r -f -a "1\t''"
-complete -c rbgp -n "__fish_rbgp_using_subcommand events; and __fish_seen_subcommand_from sessions" -l pager -d 'Page complete human unicast RIB listings' -r -f -a "auto\t''
-always\t''
-never\t''"
 complete -c rbgp -n "__fish_rbgp_using_subcommand events; and __fish_seen_subcommand_from sessions" -l all -d 'Return the daemon\'s full retained session event window'
 complete -c rbgp -n "__fish_rbgp_using_subcommand events; and __fish_seen_subcommand_from sessions" -s j -l json -d 'Output in JSON format'
-complete -c rbgp -n "__fish_rbgp_using_subcommand events; and __fish_seen_subcommand_from sessions" -l json-lines -d 'Stream accepted unicast RIB routes as versioned JSON lines'
 complete -c rbgp -n "__fish_rbgp_using_subcommand events; and __fish_seen_subcommand_from sessions" -l no-color -d 'Disable colored output'
 complete -c rbgp -n "__fish_rbgp_using_subcommand events; and __fish_seen_subcommand_from sessions" -s h -l help -d 'Print help (see more with \'--help\')'
 complete -c rbgp -n "__fish_rbgp_using_subcommand events; and __fish_seen_subcommand_from policy" -l neighbor -l peer -d 'Neighbor address filter. Only peer-scoped policy events match' -r
@@ -1773,13 +1440,8 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand events; and __fish_seen_subcom
 complete -c rbgp -n "__fish_rbgp_using_subcommand events; and __fish_seen_subcommand_from policy" -l tls-cert -d 'PEM client certificate chain for mTLS (requires --tls-key)' -r -F
 complete -c rbgp -n "__fish_rbgp_using_subcommand events; and __fish_seen_subcommand_from policy" -l tls-key -d 'PEM client private key for mTLS (requires --tls-cert)' -r -F
 complete -c rbgp -n "__fish_rbgp_using_subcommand events; and __fish_seen_subcommand_from policy" -l tls-server-name -d 'Server certificate name to verify instead of the HTTPS address host' -r
-complete -c rbgp -n "__fish_rbgp_using_subcommand events; and __fish_seen_subcommand_from policy" -l json-version -d 'Wrap supported JSON documents in a versioned envelope (requires --json)' -r -f -a "1\t''"
-complete -c rbgp -n "__fish_rbgp_using_subcommand events; and __fish_seen_subcommand_from policy" -l pager -d 'Page complete human unicast RIB listings' -r -f -a "auto\t''
-always\t''
-never\t''"
 complete -c rbgp -n "__fish_rbgp_using_subcommand events; and __fish_seen_subcommand_from policy" -l all -d 'Return the daemon\'s full retained policy event window'
 complete -c rbgp -n "__fish_rbgp_using_subcommand events; and __fish_seen_subcommand_from policy" -s j -l json -d 'Output in JSON format'
-complete -c rbgp -n "__fish_rbgp_using_subcommand events; and __fish_seen_subcommand_from policy" -l json-lines -d 'Stream accepted unicast RIB routes as versioned JSON lines'
 complete -c rbgp -n "__fish_rbgp_using_subcommand events; and __fish_seen_subcommand_from policy" -l no-color -d 'Disable colored output'
 complete -c rbgp -n "__fish_rbgp_using_subcommand events; and __fish_seen_subcommand_from policy" -s h -l help -d 'Print help (see more with \'--help\')'
 complete -c rbgp -n "__fish_rbgp_using_subcommand events; and __fish_seen_subcommand_from evpn" -l neighbor -l peer -d 'Neighbor address filter. Matches current and previous best-path peer' -r
@@ -1795,13 +1457,8 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand events; and __fish_seen_subcom
 complete -c rbgp -n "__fish_rbgp_using_subcommand events; and __fish_seen_subcommand_from evpn" -l tls-cert -d 'PEM client certificate chain for mTLS (requires --tls-key)' -r -F
 complete -c rbgp -n "__fish_rbgp_using_subcommand events; and __fish_seen_subcommand_from evpn" -l tls-key -d 'PEM client private key for mTLS (requires --tls-cert)' -r -F
 complete -c rbgp -n "__fish_rbgp_using_subcommand events; and __fish_seen_subcommand_from evpn" -l tls-server-name -d 'Server certificate name to verify instead of the HTTPS address host' -r
-complete -c rbgp -n "__fish_rbgp_using_subcommand events; and __fish_seen_subcommand_from evpn" -l json-version -d 'Wrap supported JSON documents in a versioned envelope (requires --json)' -r -f -a "1\t''"
-complete -c rbgp -n "__fish_rbgp_using_subcommand events; and __fish_seen_subcommand_from evpn" -l pager -d 'Page complete human unicast RIB listings' -r -f -a "auto\t''
-always\t''
-never\t''"
 complete -c rbgp -n "__fish_rbgp_using_subcommand events; and __fish_seen_subcommand_from evpn" -l all -d 'Return the daemon\'s full retained EVPN event window'
 complete -c rbgp -n "__fish_rbgp_using_subcommand events; and __fish_seen_subcommand_from evpn" -s j -l json -d 'Output in JSON format'
-complete -c rbgp -n "__fish_rbgp_using_subcommand events; and __fish_seen_subcommand_from evpn" -l json-lines -d 'Stream accepted unicast RIB routes as versioned JSON lines'
 complete -c rbgp -n "__fish_rbgp_using_subcommand events; and __fish_seen_subcommand_from evpn" -l no-color -d 'Disable colored output'
 complete -c rbgp -n "__fish_rbgp_using_subcommand events; and __fish_seen_subcommand_from evpn" -s h -l help -d 'Print help (see more with \'--help\')'
 complete -c rbgp -n "__fish_rbgp_using_subcommand events; and __fish_seen_subcommand_from help" -f -a "watch" -d 'Watch the unified live event stream'
@@ -1816,12 +1473,8 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand health" -l tls-cert -d 'PEM cl
 complete -c rbgp -n "__fish_rbgp_using_subcommand health" -l tls-key -d 'PEM client private key for mTLS (requires --tls-cert)' -r -F
 complete -c rbgp -n "__fish_rbgp_using_subcommand health" -l tls-server-name -d 'Server certificate name to verify instead of the HTTPS address host' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand health" -l json-version -d 'Wrap supported JSON documents in a versioned envelope (requires --json)' -r -f -a "1\t''"
-complete -c rbgp -n "__fish_rbgp_using_subcommand health" -l pager -d 'Page complete human unicast RIB listings' -r -f -a "auto\t''
-always\t''
-never\t''"
 complete -c rbgp -n "__fish_rbgp_using_subcommand health" -l liveness -d 'Check only authenticated gRPC responsiveness, without actor readiness or topology'
 complete -c rbgp -n "__fish_rbgp_using_subcommand health" -s j -l json -d 'Output in JSON format'
-complete -c rbgp -n "__fish_rbgp_using_subcommand health" -l json-lines -d 'Stream accepted unicast RIB routes as versioned JSON lines'
 complete -c rbgp -n "__fish_rbgp_using_subcommand health" -l no-color -d 'Disable colored output'
 complete -c rbgp -n "__fish_rbgp_using_subcommand health" -s h -l help -d 'Print help (see more with \'--help\')'
 complete -c rbgp -n "__fish_rbgp_using_subcommand doctor" -l output -d 'Output tarball path. Defaults to `rustbgpd-doctor-<unix-seconds>.tar.gz` in the first writable of: the working directory, the daemon\'s runtime state dir, the temp dir' -r -F
@@ -1833,12 +1486,7 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand doctor" -l tls-ca -d 'PEM CA b
 complete -c rbgp -n "__fish_rbgp_using_subcommand doctor" -l tls-cert -d 'PEM client certificate chain for mTLS (requires --tls-key)' -r -F
 complete -c rbgp -n "__fish_rbgp_using_subcommand doctor" -l tls-key -d 'PEM client private key for mTLS (requires --tls-cert)' -r -F
 complete -c rbgp -n "__fish_rbgp_using_subcommand doctor" -l tls-server-name -d 'Server certificate name to verify instead of the HTTPS address host' -r
-complete -c rbgp -n "__fish_rbgp_using_subcommand doctor" -l json-version -d 'Wrap supported JSON documents in a versioned envelope (requires --json)' -r -f -a "1\t''"
-complete -c rbgp -n "__fish_rbgp_using_subcommand doctor" -l pager -d 'Page complete human unicast RIB listings' -r -f -a "auto\t''
-always\t''
-never\t''"
 complete -c rbgp -n "__fish_rbgp_using_subcommand doctor" -s j -l json -d 'Output in JSON format'
-complete -c rbgp -n "__fish_rbgp_using_subcommand doctor" -l json-lines -d 'Stream accepted unicast RIB routes as versioned JSON lines'
 complete -c rbgp -n "__fish_rbgp_using_subcommand doctor" -l no-color -d 'Disable colored output'
 complete -c rbgp -n "__fish_rbgp_using_subcommand doctor" -s h -l help -d 'Print help (see more with \'--help\')'
 complete -c rbgp -n "__fish_rbgp_using_subcommand metrics" -s s -l addr -d 'gRPC server address or unix:///path/to/socket' -r
@@ -1847,12 +1495,7 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand metrics" -l tls-ca -d 'PEM CA 
 complete -c rbgp -n "__fish_rbgp_using_subcommand metrics" -l tls-cert -d 'PEM client certificate chain for mTLS (requires --tls-key)' -r -F
 complete -c rbgp -n "__fish_rbgp_using_subcommand metrics" -l tls-key -d 'PEM client private key for mTLS (requires --tls-cert)' -r -F
 complete -c rbgp -n "__fish_rbgp_using_subcommand metrics" -l tls-server-name -d 'Server certificate name to verify instead of the HTTPS address host' -r
-complete -c rbgp -n "__fish_rbgp_using_subcommand metrics" -l json-version -d 'Wrap supported JSON documents in a versioned envelope (requires --json)' -r -f -a "1\t''"
-complete -c rbgp -n "__fish_rbgp_using_subcommand metrics" -l pager -d 'Page complete human unicast RIB listings' -r -f -a "auto\t''
-always\t''
-never\t''"
 complete -c rbgp -n "__fish_rbgp_using_subcommand metrics" -s j -l json -d 'Output in JSON format'
-complete -c rbgp -n "__fish_rbgp_using_subcommand metrics" -l json-lines -d 'Stream accepted unicast RIB routes as versioned JSON lines'
 complete -c rbgp -n "__fish_rbgp_using_subcommand metrics" -l no-color -d 'Disable colored output'
 complete -c rbgp -n "__fish_rbgp_using_subcommand metrics" -s h -l help -d 'Print help (see more with \'--help\')'
 complete -c rbgp -n "__fish_rbgp_using_subcommand shutdown" -l reason -d 'Shutdown reason' -r
@@ -1863,12 +1506,8 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand shutdown" -l tls-cert -d 'PEM 
 complete -c rbgp -n "__fish_rbgp_using_subcommand shutdown" -l tls-key -d 'PEM client private key for mTLS (requires --tls-cert)' -r -F
 complete -c rbgp -n "__fish_rbgp_using_subcommand shutdown" -l tls-server-name -d 'Server certificate name to verify instead of the HTTPS address host' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand shutdown" -l json-version -d 'Wrap supported JSON documents in a versioned envelope (requires --json)' -r -f -a "1\t''"
-complete -c rbgp -n "__fish_rbgp_using_subcommand shutdown" -l pager -d 'Page complete human unicast RIB listings' -r -f -a "auto\t''
-always\t''
-never\t''"
 complete -c rbgp -n "__fish_rbgp_using_subcommand shutdown" -s y -l yes -d 'Skip the confirmation prompt (asked only on a terminal)'
 complete -c rbgp -n "__fish_rbgp_using_subcommand shutdown" -s j -l json -d 'Output in JSON format'
-complete -c rbgp -n "__fish_rbgp_using_subcommand shutdown" -l json-lines -d 'Stream accepted unicast RIB routes as versioned JSON lines'
 complete -c rbgp -n "__fish_rbgp_using_subcommand shutdown" -l no-color -d 'Disable colored output'
 complete -c rbgp -n "__fish_rbgp_using_subcommand shutdown" -s h -l help -d 'Print help (see more with \'--help\')'
 complete -c rbgp -n "__fish_rbgp_using_subcommand mrt-dump" -s s -l addr -d 'gRPC server address or unix:///path/to/socket' -r
@@ -1877,12 +1516,7 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand mrt-dump" -l tls-ca -d 'PEM CA
 complete -c rbgp -n "__fish_rbgp_using_subcommand mrt-dump" -l tls-cert -d 'PEM client certificate chain for mTLS (requires --tls-key)' -r -F
 complete -c rbgp -n "__fish_rbgp_using_subcommand mrt-dump" -l tls-key -d 'PEM client private key for mTLS (requires --tls-cert)' -r -F
 complete -c rbgp -n "__fish_rbgp_using_subcommand mrt-dump" -l tls-server-name -d 'Server certificate name to verify instead of the HTTPS address host' -r
-complete -c rbgp -n "__fish_rbgp_using_subcommand mrt-dump" -l json-version -d 'Wrap supported JSON documents in a versioned envelope (requires --json)' -r -f -a "1\t''"
-complete -c rbgp -n "__fish_rbgp_using_subcommand mrt-dump" -l pager -d 'Page complete human unicast RIB listings' -r -f -a "auto\t''
-always\t''
-never\t''"
 complete -c rbgp -n "__fish_rbgp_using_subcommand mrt-dump" -s j -l json -d 'Output in JSON format'
-complete -c rbgp -n "__fish_rbgp_using_subcommand mrt-dump" -l json-lines -d 'Stream accepted unicast RIB routes as versioned JSON lines'
 complete -c rbgp -n "__fish_rbgp_using_subcommand mrt-dump" -l no-color -d 'Disable colored output'
 complete -c rbgp -n "__fish_rbgp_using_subcommand mrt-dump" -s h -l help -d 'Print help (see more with \'--help\')'
 complete -c rbgp -n "__fish_rbgp_using_subcommand gshut" -l neighbor -l peer -d 'Neighbor address; this or --all is required' -r
@@ -1893,14 +1527,10 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand gshut" -l tls-cert -d 'PEM cli
 complete -c rbgp -n "__fish_rbgp_using_subcommand gshut" -l tls-key -d 'PEM client private key for mTLS (requires --tls-cert)' -r -F
 complete -c rbgp -n "__fish_rbgp_using_subcommand gshut" -l tls-server-name -d 'Server certificate name to verify instead of the HTTPS address host' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand gshut" -l json-version -d 'Wrap supported JSON documents in a versioned envelope (requires --json)' -r -f -a "1\t''"
-complete -c rbgp -n "__fish_rbgp_using_subcommand gshut" -l pager -d 'Page complete human unicast RIB listings' -r -f -a "auto\t''
-always\t''
-never\t''"
 complete -c rbgp -n "__fish_rbgp_using_subcommand gshut" -l all -d 'Toggle every currently-managed peer'
 complete -c rbgp -n "__fish_rbgp_using_subcommand gshut" -l clear -d 'Clear instead of enabling'
 complete -c rbgp -n "__fish_rbgp_using_subcommand gshut" -s y -l yes -d 'Skip the confirmation prompt for an all-peers change (asked only on a terminal)'
 complete -c rbgp -n "__fish_rbgp_using_subcommand gshut" -s j -l json -d 'Output in JSON format'
-complete -c rbgp -n "__fish_rbgp_using_subcommand gshut" -l json-lines -d 'Stream accepted unicast RIB routes as versioned JSON lines'
 complete -c rbgp -n "__fish_rbgp_using_subcommand gshut" -l no-color -d 'Disable colored output'
 complete -c rbgp -n "__fish_rbgp_using_subcommand gshut" -s h -l help -d 'Print help (see more with \'--help\')'
 complete -c rbgp -n "__fish_rbgp_using_subcommand top" -s i -l interval -d 'Poll interval in seconds (1-60)' -r
@@ -1910,12 +1540,7 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand top" -l tls-ca -d 'PEM CA bund
 complete -c rbgp -n "__fish_rbgp_using_subcommand top" -l tls-cert -d 'PEM client certificate chain for mTLS (requires --tls-key)' -r -F
 complete -c rbgp -n "__fish_rbgp_using_subcommand top" -l tls-key -d 'PEM client private key for mTLS (requires --tls-cert)' -r -F
 complete -c rbgp -n "__fish_rbgp_using_subcommand top" -l tls-server-name -d 'Server certificate name to verify instead of the HTTPS address host' -r
-complete -c rbgp -n "__fish_rbgp_using_subcommand top" -l json-version -d 'Wrap supported JSON documents in a versioned envelope (requires --json)' -r -f -a "1\t''"
-complete -c rbgp -n "__fish_rbgp_using_subcommand top" -l pager -d 'Page complete human unicast RIB listings' -r -f -a "auto\t''
-always\t''
-never\t''"
 complete -c rbgp -n "__fish_rbgp_using_subcommand top" -s j -l json -d 'Output in JSON format'
-complete -c rbgp -n "__fish_rbgp_using_subcommand top" -l json-lines -d 'Stream accepted unicast RIB routes as versioned JSON lines'
 complete -c rbgp -n "__fish_rbgp_using_subcommand top" -l no-color -d 'Disable colored output'
 complete -c rbgp -n "__fish_rbgp_using_subcommand top" -s h -l help -d 'Print help (see more with \'--help\')'
 complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and not __fish_seen_subcommand_from list check fmt test get set delete chain stats counters explain help" -s s -l addr -d 'gRPC server address or unix:///path/to/socket' -r
@@ -1925,11 +1550,7 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and not __fish_seen_su
 complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and not __fish_seen_subcommand_from list check fmt test get set delete chain stats counters explain help" -l tls-key -d 'PEM client private key for mTLS (requires --tls-cert)' -r -F
 complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and not __fish_seen_subcommand_from list check fmt test get set delete chain stats counters explain help" -l tls-server-name -d 'Server certificate name to verify instead of the HTTPS address host' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and not __fish_seen_subcommand_from list check fmt test get set delete chain stats counters explain help" -l json-version -d 'Wrap supported JSON documents in a versioned envelope (requires --json)' -r -f -a "1\t''"
-complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and not __fish_seen_subcommand_from list check fmt test get set delete chain stats counters explain help" -l pager -d 'Page complete human unicast RIB listings' -r -f -a "auto\t''
-always\t''
-never\t''"
 complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and not __fish_seen_subcommand_from list check fmt test get set delete chain stats counters explain help" -s j -l json -d 'Output in JSON format'
-complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and not __fish_seen_subcommand_from list check fmt test get set delete chain stats counters explain help" -l json-lines -d 'Stream accepted unicast RIB routes as versioned JSON lines'
 complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and not __fish_seen_subcommand_from list check fmt test get set delete chain stats counters explain help" -l no-color -d 'Disable colored output'
 complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and not __fish_seen_subcommand_from list check fmt test get set delete chain stats counters explain help" -s h -l help -d 'Print help (see more with \'--help\')'
 complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and not __fish_seen_subcommand_from list check fmt test get set delete chain stats counters explain help" -f -a "list" -d 'List configured policies (names + statement counts)'
@@ -1951,11 +1572,7 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcom
 complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcommand_from list" -l tls-key -d 'PEM client private key for mTLS (requires --tls-cert)' -r -F
 complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcommand_from list" -l tls-server-name -d 'Server certificate name to verify instead of the HTTPS address host' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcommand_from list" -l json-version -d 'Wrap supported JSON documents in a versioned envelope (requires --json)' -r -f -a "1\t''"
-complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcommand_from list" -l pager -d 'Page complete human unicast RIB listings' -r -f -a "auto\t''
-always\t''
-never\t''"
 complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcommand_from list" -s j -l json -d 'Output in JSON format'
-complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcommand_from list" -l json-lines -d 'Stream accepted unicast RIB routes as versioned JSON lines'
 complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcommand_from list" -l no-color -d 'Disable colored output'
 complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcommand_from list" -s h -l help -d 'Print help (see more with \'--help\')'
 complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcommand_from check" -l root -d 'Additional policy root for `import` resolution (repeatable; the main file\'s directory is always a root) — mirror of the daemon\'s `[policy] rpol_roots`' -r
@@ -1968,14 +1585,9 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcom
 complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcommand_from check" -l tls-cert -d 'PEM client certificate chain for mTLS (requires --tls-key)' -r -F
 complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcommand_from check" -l tls-key -d 'PEM client private key for mTLS (requires --tls-cert)' -r -F
 complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcommand_from check" -l tls-server-name -d 'Server certificate name to verify instead of the HTTPS address host' -r
-complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcommand_from check" -l json-version -d 'Wrap supported JSON documents in a versioned envelope (requires --json)' -r -f -a "1\t''"
-complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcommand_from check" -l pager -d 'Page complete human unicast RIB listings' -r -f -a "auto\t''
-always\t''
-never\t''"
 complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcommand_from check" -l list-deps -d 'Print the resolved import graph — each module\'s path, SHA-256 content hash, and imports — instead of running tests (audit/packaging aid)'
 complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcommand_from check" -l coverage -d 'Report which policy terms the in-language tests exercised (evaluated vs. matched, per term) plus static lints (unused sets/datasets/fns, unreachable terms, unreferenced policies). A report only — it never changes the exit code by itself'
 complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcommand_from check" -s j -l json -d 'Output in JSON format'
-complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcommand_from check" -l json-lines -d 'Stream accepted unicast RIB routes as versioned JSON lines'
 complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcommand_from check" -l no-color -d 'Disable colored output'
 complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcommand_from check" -s h -l help -d 'Print help (see more with \'--help\')'
 complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcommand_from fmt" -s s -l addr -d 'gRPC server address or unix:///path/to/socket' -r
@@ -1984,13 +1596,8 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcom
 complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcommand_from fmt" -l tls-cert -d 'PEM client certificate chain for mTLS (requires --tls-key)' -r -F
 complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcommand_from fmt" -l tls-key -d 'PEM client private key for mTLS (requires --tls-cert)' -r -F
 complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcommand_from fmt" -l tls-server-name -d 'Server certificate name to verify instead of the HTTPS address host' -r
-complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcommand_from fmt" -l json-version -d 'Wrap supported JSON documents in a versioned envelope (requires --json)' -r -f -a "1\t''"
-complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcommand_from fmt" -l pager -d 'Page complete human unicast RIB listings' -r -f -a "auto\t''
-always\t''
-never\t''"
 complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcommand_from fmt" -l check -d 'Rewrite nothing; print a diff and exit 1 when any file is not canonically formatted (CI mode)'
 complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcommand_from fmt" -s j -l json -d 'Output in JSON format'
-complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcommand_from fmt" -l json-lines -d 'Stream accepted unicast RIB routes as versioned JSON lines'
 complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcommand_from fmt" -l no-color -d 'Disable colored output'
 complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcommand_from fmt" -s h -l help -d 'Print help (see more with \'--help\')'
 complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcommand_from test" -l policy -d 'Policy to evaluate: a name, or a call-form with u32 arguments for parameterized policies, e.g. "customer-in(200)"' -r
@@ -2006,12 +1613,8 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcom
 complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcommand_from test" -l tls-key -d 'PEM client private key for mTLS (requires --tls-cert)' -r -F
 complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcommand_from test" -l tls-server-name -d 'Server certificate name to verify instead of the HTTPS address host' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcommand_from test" -l json-version -d 'Wrap supported JSON documents in a versioned envelope (requires --json)' -r -f -a "1\t''"
-complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcommand_from test" -l pager -d 'Page complete human unicast RIB listings' -r -f -a "auto\t''
-always\t''
-never\t''"
 complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcommand_from test" -l all -d 'Evaluate every route in the snapshot (the default)'
 complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcommand_from test" -s j -l json -d 'Output in JSON format'
-complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcommand_from test" -l json-lines -d 'Stream accepted unicast RIB routes as versioned JSON lines'
 complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcommand_from test" -l no-color -d 'Disable colored output'
 complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcommand_from test" -s h -l help -d 'Print help (see more with \'--help\')'
 complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcommand_from get" -s s -l addr -d 'gRPC server address or unix:///path/to/socket' -r
@@ -2021,11 +1624,7 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcom
 complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcommand_from get" -l tls-key -d 'PEM client private key for mTLS (requires --tls-cert)' -r -F
 complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcommand_from get" -l tls-server-name -d 'Server certificate name to verify instead of the HTTPS address host' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcommand_from get" -l json-version -d 'Wrap supported JSON documents in a versioned envelope (requires --json)' -r -f -a "1\t''"
-complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcommand_from get" -l pager -d 'Page complete human unicast RIB listings' -r -f -a "auto\t''
-always\t''
-never\t''"
 complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcommand_from get" -s j -l json -d 'Output in JSON format'
-complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcommand_from get" -l json-lines -d 'Stream accepted unicast RIB routes as versioned JSON lines'
 complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcommand_from get" -l no-color -d 'Disable colored output'
 complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcommand_from get" -s h -l help -d 'Print help (see more with \'--help\')'
 complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcommand_from set" -l from-file -d 'JSON file containing the policy definition' -r
@@ -2036,11 +1635,7 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcom
 complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcommand_from set" -l tls-key -d 'PEM client private key for mTLS (requires --tls-cert)' -r -F
 complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcommand_from set" -l tls-server-name -d 'Server certificate name to verify instead of the HTTPS address host' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcommand_from set" -l json-version -d 'Wrap supported JSON documents in a versioned envelope (requires --json)' -r -f -a "1\t''"
-complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcommand_from set" -l pager -d 'Page complete human unicast RIB listings' -r -f -a "auto\t''
-always\t''
-never\t''"
 complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcommand_from set" -s j -l json -d 'Output in JSON format'
-complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcommand_from set" -l json-lines -d 'Stream accepted unicast RIB routes as versioned JSON lines'
 complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcommand_from set" -l no-color -d 'Disable colored output'
 complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcommand_from set" -s h -l help -d 'Print help (see more with \'--help\')'
 complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcommand_from delete" -s s -l addr -d 'gRPC server address or unix:///path/to/socket' -r
@@ -2050,11 +1645,7 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcom
 complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcommand_from delete" -l tls-key -d 'PEM client private key for mTLS (requires --tls-cert)' -r -F
 complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcommand_from delete" -l tls-server-name -d 'Server certificate name to verify instead of the HTTPS address host' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcommand_from delete" -l json-version -d 'Wrap supported JSON documents in a versioned envelope (requires --json)' -r -f -a "1\t''"
-complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcommand_from delete" -l pager -d 'Page complete human unicast RIB listings' -r -f -a "auto\t''
-always\t''
-never\t''"
 complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcommand_from delete" -s j -l json -d 'Output in JSON format'
-complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcommand_from delete" -l json-lines -d 'Stream accepted unicast RIB routes as versioned JSON lines'
 complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcommand_from delete" -l no-color -d 'Disable colored output'
 complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcommand_from delete" -s h -l help -d 'Print help (see more with \'--help\')'
 complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcommand_from chain" -s s -l addr -d 'gRPC server address or unix:///path/to/socket' -r
@@ -2064,11 +1655,7 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcom
 complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcommand_from chain" -l tls-key -d 'PEM client private key for mTLS (requires --tls-cert)' -r -F
 complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcommand_from chain" -l tls-server-name -d 'Server certificate name to verify instead of the HTTPS address host' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcommand_from chain" -l json-version -d 'Wrap supported JSON documents in a versioned envelope (requires --json)' -r -f -a "1\t''"
-complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcommand_from chain" -l pager -d 'Page complete human unicast RIB listings' -r -f -a "auto\t''
-always\t''
-never\t''"
 complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcommand_from chain" -s j -l json -d 'Output in JSON format'
-complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcommand_from chain" -l json-lines -d 'Stream accepted unicast RIB routes as versioned JSON lines'
 complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcommand_from chain" -l no-color -d 'Disable colored output'
 complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcommand_from chain" -s h -l help -d 'Print help (see more with \'--help\')'
 complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcommand_from chain" -f -a "show" -d 'Show the global or per-neighbor chains'
@@ -2088,11 +1675,7 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcom
 complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcommand_from stats" -l tls-key -d 'PEM client private key for mTLS (requires --tls-cert)' -r -F
 complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcommand_from stats" -l tls-server-name -d 'Server certificate name to verify instead of the HTTPS address host' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcommand_from stats" -l json-version -d 'Wrap supported JSON documents in a versioned envelope (requires --json)' -r -f -a "1\t''"
-complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcommand_from stats" -l pager -d 'Page complete human unicast RIB listings' -r -f -a "auto\t''
-always\t''
-never\t''"
 complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcommand_from stats" -s j -l json -d 'Output in JSON format'
-complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcommand_from stats" -l json-lines -d 'Stream accepted unicast RIB routes as versioned JSON lines'
 complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcommand_from stats" -l no-color -d 'Disable colored output'
 complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcommand_from stats" -s h -l help -d 'Print help (see more with \'--help\')'
 complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcommand_from counters" -l neighbor -l peer -d 'Restrict to one neighbor\'s installed chain' -r
@@ -2106,11 +1689,7 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcom
 complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcommand_from counters" -l tls-key -d 'PEM client private key for mTLS (requires --tls-cert)' -r -F
 complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcommand_from counters" -l tls-server-name -d 'Server certificate name to verify instead of the HTTPS address host' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcommand_from counters" -l json-version -d 'Wrap supported JSON documents in a versioned envelope (requires --json)' -r -f -a "1\t''"
-complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcommand_from counters" -l pager -d 'Page complete human unicast RIB listings' -r -f -a "auto\t''
-always\t''
-never\t''"
 complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcommand_from counters" -s j -l json -d 'Output in JSON format'
-complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcommand_from counters" -l json-lines -d 'Stream accepted unicast RIB routes as versioned JSON lines'
 complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcommand_from counters" -l no-color -d 'Disable colored output'
 complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcommand_from counters" -s h -l help -d 'Print help (see more with \'--help\')'
 complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcommand_from explain" -l neighbor -l peer -d 'Neighbor (peer) address whose decision to explain' -r
@@ -2125,11 +1704,7 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcom
 complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcommand_from explain" -l tls-key -d 'PEM client private key for mTLS (requires --tls-cert)' -r -F
 complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcommand_from explain" -l tls-server-name -d 'Server certificate name to verify instead of the HTTPS address host' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcommand_from explain" -l json-version -d 'Wrap supported JSON documents in a versioned envelope (requires --json)' -r -f -a "1\t''"
-complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcommand_from explain" -l pager -d 'Page complete human unicast RIB listings' -r -f -a "auto\t''
-always\t''
-never\t''"
 complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcommand_from explain" -s j -l json -d 'Output in JSON format'
-complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcommand_from explain" -l json-lines -d 'Stream accepted unicast RIB routes as versioned JSON lines'
 complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcommand_from explain" -l no-color -d 'Disable colored output'
 complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcommand_from explain" -s h -l help -d 'Print help (see more with \'--help\')'
 complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcommand_from help" -f -a "list" -d 'List configured policies (names + statement counts)'
@@ -2150,11 +1725,7 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor-set; and not __fish_s
 complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor-set; and not __fish_seen_subcommand_from list get set delete help" -l tls-key -d 'PEM client private key for mTLS (requires --tls-cert)' -r -F
 complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor-set; and not __fish_seen_subcommand_from list get set delete help" -l tls-server-name -d 'Server certificate name to verify instead of the HTTPS address host' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor-set; and not __fish_seen_subcommand_from list get set delete help" -l json-version -d 'Wrap supported JSON documents in a versioned envelope (requires --json)' -r -f -a "1\t''"
-complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor-set; and not __fish_seen_subcommand_from list get set delete help" -l pager -d 'Page complete human unicast RIB listings' -r -f -a "auto\t''
-always\t''
-never\t''"
 complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor-set; and not __fish_seen_subcommand_from list get set delete help" -s j -l json -d 'Output in JSON format'
-complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor-set; and not __fish_seen_subcommand_from list get set delete help" -l json-lines -d 'Stream accepted unicast RIB routes as versioned JSON lines'
 complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor-set; and not __fish_seen_subcommand_from list get set delete help" -l no-color -d 'Disable colored output'
 complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor-set; and not __fish_seen_subcommand_from list get set delete help" -s h -l help -d 'Print help (see more with \'--help\')'
 complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor-set; and not __fish_seen_subcommand_from list get set delete help" -f -a "list" -d 'List configured neighbor sets'
@@ -2169,11 +1740,7 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor-set; and __fish_seen_
 complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor-set; and __fish_seen_subcommand_from list" -l tls-key -d 'PEM client private key for mTLS (requires --tls-cert)' -r -F
 complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor-set; and __fish_seen_subcommand_from list" -l tls-server-name -d 'Server certificate name to verify instead of the HTTPS address host' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor-set; and __fish_seen_subcommand_from list" -l json-version -d 'Wrap supported JSON documents in a versioned envelope (requires --json)' -r -f -a "1\t''"
-complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor-set; and __fish_seen_subcommand_from list" -l pager -d 'Page complete human unicast RIB listings' -r -f -a "auto\t''
-always\t''
-never\t''"
 complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor-set; and __fish_seen_subcommand_from list" -s j -l json -d 'Output in JSON format'
-complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor-set; and __fish_seen_subcommand_from list" -l json-lines -d 'Stream accepted unicast RIB routes as versioned JSON lines'
 complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor-set; and __fish_seen_subcommand_from list" -l no-color -d 'Disable colored output'
 complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor-set; and __fish_seen_subcommand_from list" -s h -l help -d 'Print help (see more with \'--help\')'
 complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor-set; and __fish_seen_subcommand_from get" -s s -l addr -d 'gRPC server address or unix:///path/to/socket' -r
@@ -2183,11 +1750,7 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor-set; and __fish_seen_
 complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor-set; and __fish_seen_subcommand_from get" -l tls-key -d 'PEM client private key for mTLS (requires --tls-cert)' -r -F
 complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor-set; and __fish_seen_subcommand_from get" -l tls-server-name -d 'Server certificate name to verify instead of the HTTPS address host' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor-set; and __fish_seen_subcommand_from get" -l json-version -d 'Wrap supported JSON documents in a versioned envelope (requires --json)' -r -f -a "1\t''"
-complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor-set; and __fish_seen_subcommand_from get" -l pager -d 'Page complete human unicast RIB listings' -r -f -a "auto\t''
-always\t''
-never\t''"
 complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor-set; and __fish_seen_subcommand_from get" -s j -l json -d 'Output in JSON format'
-complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor-set; and __fish_seen_subcommand_from get" -l json-lines -d 'Stream accepted unicast RIB routes as versioned JSON lines'
 complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor-set; and __fish_seen_subcommand_from get" -l no-color -d 'Disable colored output'
 complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor-set; and __fish_seen_subcommand_from get" -s h -l help -d 'Print help (see more with \'--help\')'
 complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor-set; and __fish_seen_subcommand_from set" -l from-file -d 'JSON file containing the neighbor-set definition' -r
@@ -2198,11 +1761,7 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor-set; and __fish_seen_
 complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor-set; and __fish_seen_subcommand_from set" -l tls-key -d 'PEM client private key for mTLS (requires --tls-cert)' -r -F
 complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor-set; and __fish_seen_subcommand_from set" -l tls-server-name -d 'Server certificate name to verify instead of the HTTPS address host' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor-set; and __fish_seen_subcommand_from set" -l json-version -d 'Wrap supported JSON documents in a versioned envelope (requires --json)' -r -f -a "1\t''"
-complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor-set; and __fish_seen_subcommand_from set" -l pager -d 'Page complete human unicast RIB listings' -r -f -a "auto\t''
-always\t''
-never\t''"
 complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor-set; and __fish_seen_subcommand_from set" -s j -l json -d 'Output in JSON format'
-complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor-set; and __fish_seen_subcommand_from set" -l json-lines -d 'Stream accepted unicast RIB routes as versioned JSON lines'
 complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor-set; and __fish_seen_subcommand_from set" -l no-color -d 'Disable colored output'
 complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor-set; and __fish_seen_subcommand_from set" -s h -l help -d 'Print help (see more with \'--help\')'
 complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor-set; and __fish_seen_subcommand_from delete" -s s -l addr -d 'gRPC server address or unix:///path/to/socket' -r
@@ -2212,11 +1771,7 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor-set; and __fish_seen_
 complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor-set; and __fish_seen_subcommand_from delete" -l tls-key -d 'PEM client private key for mTLS (requires --tls-cert)' -r -F
 complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor-set; and __fish_seen_subcommand_from delete" -l tls-server-name -d 'Server certificate name to verify instead of the HTTPS address host' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor-set; and __fish_seen_subcommand_from delete" -l json-version -d 'Wrap supported JSON documents in a versioned envelope (requires --json)' -r -f -a "1\t''"
-complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor-set; and __fish_seen_subcommand_from delete" -l pager -d 'Page complete human unicast RIB listings' -r -f -a "auto\t''
-always\t''
-never\t''"
 complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor-set; and __fish_seen_subcommand_from delete" -s j -l json -d 'Output in JSON format'
-complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor-set; and __fish_seen_subcommand_from delete" -l json-lines -d 'Stream accepted unicast RIB routes as versioned JSON lines'
 complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor-set; and __fish_seen_subcommand_from delete" -l no-color -d 'Disable colored output'
 complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor-set; and __fish_seen_subcommand_from delete" -s h -l help -d 'Print help (see more with \'--help\')'
 complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor-set; and __fish_seen_subcommand_from help" -f -a "list" -d 'List configured neighbor sets'
@@ -2231,11 +1786,7 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand peer-group; and not __fish_see
 complete -c rbgp -n "__fish_rbgp_using_subcommand peer-group; and not __fish_seen_subcommand_from list get set delete attach detach help" -l tls-key -d 'PEM client private key for mTLS (requires --tls-cert)' -r -F
 complete -c rbgp -n "__fish_rbgp_using_subcommand peer-group; and not __fish_seen_subcommand_from list get set delete attach detach help" -l tls-server-name -d 'Server certificate name to verify instead of the HTTPS address host' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand peer-group; and not __fish_seen_subcommand_from list get set delete attach detach help" -l json-version -d 'Wrap supported JSON documents in a versioned envelope (requires --json)' -r -f -a "1\t''"
-complete -c rbgp -n "__fish_rbgp_using_subcommand peer-group; and not __fish_seen_subcommand_from list get set delete attach detach help" -l pager -d 'Page complete human unicast RIB listings' -r -f -a "auto\t''
-always\t''
-never\t''"
 complete -c rbgp -n "__fish_rbgp_using_subcommand peer-group; and not __fish_seen_subcommand_from list get set delete attach detach help" -s j -l json -d 'Output in JSON format'
-complete -c rbgp -n "__fish_rbgp_using_subcommand peer-group; and not __fish_seen_subcommand_from list get set delete attach detach help" -l json-lines -d 'Stream accepted unicast RIB routes as versioned JSON lines'
 complete -c rbgp -n "__fish_rbgp_using_subcommand peer-group; and not __fish_seen_subcommand_from list get set delete attach detach help" -l no-color -d 'Disable colored output'
 complete -c rbgp -n "__fish_rbgp_using_subcommand peer-group; and not __fish_seen_subcommand_from list get set delete attach detach help" -s h -l help -d 'Print help (see more with \'--help\')'
 complete -c rbgp -n "__fish_rbgp_using_subcommand peer-group; and not __fish_seen_subcommand_from list get set delete attach detach help" -f -a "list" -d 'List configured peer groups'
@@ -2252,11 +1803,7 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand peer-group; and __fish_seen_su
 complete -c rbgp -n "__fish_rbgp_using_subcommand peer-group; and __fish_seen_subcommand_from list" -l tls-key -d 'PEM client private key for mTLS (requires --tls-cert)' -r -F
 complete -c rbgp -n "__fish_rbgp_using_subcommand peer-group; and __fish_seen_subcommand_from list" -l tls-server-name -d 'Server certificate name to verify instead of the HTTPS address host' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand peer-group; and __fish_seen_subcommand_from list" -l json-version -d 'Wrap supported JSON documents in a versioned envelope (requires --json)' -r -f -a "1\t''"
-complete -c rbgp -n "__fish_rbgp_using_subcommand peer-group; and __fish_seen_subcommand_from list" -l pager -d 'Page complete human unicast RIB listings' -r -f -a "auto\t''
-always\t''
-never\t''"
 complete -c rbgp -n "__fish_rbgp_using_subcommand peer-group; and __fish_seen_subcommand_from list" -s j -l json -d 'Output in JSON format'
-complete -c rbgp -n "__fish_rbgp_using_subcommand peer-group; and __fish_seen_subcommand_from list" -l json-lines -d 'Stream accepted unicast RIB routes as versioned JSON lines'
 complete -c rbgp -n "__fish_rbgp_using_subcommand peer-group; and __fish_seen_subcommand_from list" -l no-color -d 'Disable colored output'
 complete -c rbgp -n "__fish_rbgp_using_subcommand peer-group; and __fish_seen_subcommand_from list" -s h -l help -d 'Print help (see more with \'--help\')'
 complete -c rbgp -n "__fish_rbgp_using_subcommand peer-group; and __fish_seen_subcommand_from get" -s s -l addr -d 'gRPC server address or unix:///path/to/socket' -r
@@ -2266,11 +1813,7 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand peer-group; and __fish_seen_su
 complete -c rbgp -n "__fish_rbgp_using_subcommand peer-group; and __fish_seen_subcommand_from get" -l tls-key -d 'PEM client private key for mTLS (requires --tls-cert)' -r -F
 complete -c rbgp -n "__fish_rbgp_using_subcommand peer-group; and __fish_seen_subcommand_from get" -l tls-server-name -d 'Server certificate name to verify instead of the HTTPS address host' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand peer-group; and __fish_seen_subcommand_from get" -l json-version -d 'Wrap supported JSON documents in a versioned envelope (requires --json)' -r -f -a "1\t''"
-complete -c rbgp -n "__fish_rbgp_using_subcommand peer-group; and __fish_seen_subcommand_from get" -l pager -d 'Page complete human unicast RIB listings' -r -f -a "auto\t''
-always\t''
-never\t''"
 complete -c rbgp -n "__fish_rbgp_using_subcommand peer-group; and __fish_seen_subcommand_from get" -s j -l json -d 'Output in JSON format'
-complete -c rbgp -n "__fish_rbgp_using_subcommand peer-group; and __fish_seen_subcommand_from get" -l json-lines -d 'Stream accepted unicast RIB routes as versioned JSON lines'
 complete -c rbgp -n "__fish_rbgp_using_subcommand peer-group; and __fish_seen_subcommand_from get" -l no-color -d 'Disable colored output'
 complete -c rbgp -n "__fish_rbgp_using_subcommand peer-group; and __fish_seen_subcommand_from get" -s h -l help -d 'Print help (see more with \'--help\')'
 complete -c rbgp -n "__fish_rbgp_using_subcommand peer-group; and __fish_seen_subcommand_from set" -l from-file -d 'JSON file containing the peer-group definition' -r
@@ -2281,11 +1824,7 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand peer-group; and __fish_seen_su
 complete -c rbgp -n "__fish_rbgp_using_subcommand peer-group; and __fish_seen_subcommand_from set" -l tls-key -d 'PEM client private key for mTLS (requires --tls-cert)' -r -F
 complete -c rbgp -n "__fish_rbgp_using_subcommand peer-group; and __fish_seen_subcommand_from set" -l tls-server-name -d 'Server certificate name to verify instead of the HTTPS address host' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand peer-group; and __fish_seen_subcommand_from set" -l json-version -d 'Wrap supported JSON documents in a versioned envelope (requires --json)' -r -f -a "1\t''"
-complete -c rbgp -n "__fish_rbgp_using_subcommand peer-group; and __fish_seen_subcommand_from set" -l pager -d 'Page complete human unicast RIB listings' -r -f -a "auto\t''
-always\t''
-never\t''"
 complete -c rbgp -n "__fish_rbgp_using_subcommand peer-group; and __fish_seen_subcommand_from set" -s j -l json -d 'Output in JSON format'
-complete -c rbgp -n "__fish_rbgp_using_subcommand peer-group; and __fish_seen_subcommand_from set" -l json-lines -d 'Stream accepted unicast RIB routes as versioned JSON lines'
 complete -c rbgp -n "__fish_rbgp_using_subcommand peer-group; and __fish_seen_subcommand_from set" -l no-color -d 'Disable colored output'
 complete -c rbgp -n "__fish_rbgp_using_subcommand peer-group; and __fish_seen_subcommand_from set" -s h -l help -d 'Print help (see more with \'--help\')'
 complete -c rbgp -n "__fish_rbgp_using_subcommand peer-group; and __fish_seen_subcommand_from delete" -s s -l addr -d 'gRPC server address or unix:///path/to/socket' -r
@@ -2295,11 +1834,7 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand peer-group; and __fish_seen_su
 complete -c rbgp -n "__fish_rbgp_using_subcommand peer-group; and __fish_seen_subcommand_from delete" -l tls-key -d 'PEM client private key for mTLS (requires --tls-cert)' -r -F
 complete -c rbgp -n "__fish_rbgp_using_subcommand peer-group; and __fish_seen_subcommand_from delete" -l tls-server-name -d 'Server certificate name to verify instead of the HTTPS address host' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand peer-group; and __fish_seen_subcommand_from delete" -l json-version -d 'Wrap supported JSON documents in a versioned envelope (requires --json)' -r -f -a "1\t''"
-complete -c rbgp -n "__fish_rbgp_using_subcommand peer-group; and __fish_seen_subcommand_from delete" -l pager -d 'Page complete human unicast RIB listings' -r -f -a "auto\t''
-always\t''
-never\t''"
 complete -c rbgp -n "__fish_rbgp_using_subcommand peer-group; and __fish_seen_subcommand_from delete" -s j -l json -d 'Output in JSON format'
-complete -c rbgp -n "__fish_rbgp_using_subcommand peer-group; and __fish_seen_subcommand_from delete" -l json-lines -d 'Stream accepted unicast RIB routes as versioned JSON lines'
 complete -c rbgp -n "__fish_rbgp_using_subcommand peer-group; and __fish_seen_subcommand_from delete" -l no-color -d 'Disable colored output'
 complete -c rbgp -n "__fish_rbgp_using_subcommand peer-group; and __fish_seen_subcommand_from delete" -s h -l help -d 'Print help (see more with \'--help\')'
 complete -c rbgp -n "__fish_rbgp_using_subcommand peer-group; and __fish_seen_subcommand_from attach" -l group -d 'Peer-group name' -r
@@ -2310,11 +1845,7 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand peer-group; and __fish_seen_su
 complete -c rbgp -n "__fish_rbgp_using_subcommand peer-group; and __fish_seen_subcommand_from attach" -l tls-key -d 'PEM client private key for mTLS (requires --tls-cert)' -r -F
 complete -c rbgp -n "__fish_rbgp_using_subcommand peer-group; and __fish_seen_subcommand_from attach" -l tls-server-name -d 'Server certificate name to verify instead of the HTTPS address host' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand peer-group; and __fish_seen_subcommand_from attach" -l json-version -d 'Wrap supported JSON documents in a versioned envelope (requires --json)' -r -f -a "1\t''"
-complete -c rbgp -n "__fish_rbgp_using_subcommand peer-group; and __fish_seen_subcommand_from attach" -l pager -d 'Page complete human unicast RIB listings' -r -f -a "auto\t''
-always\t''
-never\t''"
 complete -c rbgp -n "__fish_rbgp_using_subcommand peer-group; and __fish_seen_subcommand_from attach" -s j -l json -d 'Output in JSON format'
-complete -c rbgp -n "__fish_rbgp_using_subcommand peer-group; and __fish_seen_subcommand_from attach" -l json-lines -d 'Stream accepted unicast RIB routes as versioned JSON lines'
 complete -c rbgp -n "__fish_rbgp_using_subcommand peer-group; and __fish_seen_subcommand_from attach" -l no-color -d 'Disable colored output'
 complete -c rbgp -n "__fish_rbgp_using_subcommand peer-group; and __fish_seen_subcommand_from attach" -s h -l help -d 'Print help (see more with \'--help\')'
 complete -c rbgp -n "__fish_rbgp_using_subcommand peer-group; and __fish_seen_subcommand_from detach" -s s -l addr -d 'gRPC server address or unix:///path/to/socket' -r
@@ -2324,11 +1855,7 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand peer-group; and __fish_seen_su
 complete -c rbgp -n "__fish_rbgp_using_subcommand peer-group; and __fish_seen_subcommand_from detach" -l tls-key -d 'PEM client private key for mTLS (requires --tls-cert)' -r -F
 complete -c rbgp -n "__fish_rbgp_using_subcommand peer-group; and __fish_seen_subcommand_from detach" -l tls-server-name -d 'Server certificate name to verify instead of the HTTPS address host' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand peer-group; and __fish_seen_subcommand_from detach" -l json-version -d 'Wrap supported JSON documents in a versioned envelope (requires --json)' -r -f -a "1\t''"
-complete -c rbgp -n "__fish_rbgp_using_subcommand peer-group; and __fish_seen_subcommand_from detach" -l pager -d 'Page complete human unicast RIB listings' -r -f -a "auto\t''
-always\t''
-never\t''"
 complete -c rbgp -n "__fish_rbgp_using_subcommand peer-group; and __fish_seen_subcommand_from detach" -s j -l json -d 'Output in JSON format'
-complete -c rbgp -n "__fish_rbgp_using_subcommand peer-group; and __fish_seen_subcommand_from detach" -l json-lines -d 'Stream accepted unicast RIB routes as versioned JSON lines'
 complete -c rbgp -n "__fish_rbgp_using_subcommand peer-group; and __fish_seen_subcommand_from detach" -l no-color -d 'Disable colored output'
 complete -c rbgp -n "__fish_rbgp_using_subcommand peer-group; and __fish_seen_subcommand_from detach" -s h -l help -d 'Print help (see more with \'--help\')'
 complete -c rbgp -n "__fish_rbgp_using_subcommand peer-group; and __fish_seen_subcommand_from help" -f -a "list" -d 'List configured peer groups'
@@ -2345,11 +1872,7 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand dynamic-neighbor; and not __fi
 complete -c rbgp -n "__fish_rbgp_using_subcommand dynamic-neighbor; and not __fish_seen_subcommand_from list add delete help" -l tls-key -d 'PEM client private key for mTLS (requires --tls-cert)' -r -F
 complete -c rbgp -n "__fish_rbgp_using_subcommand dynamic-neighbor; and not __fish_seen_subcommand_from list add delete help" -l tls-server-name -d 'Server certificate name to verify instead of the HTTPS address host' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand dynamic-neighbor; and not __fish_seen_subcommand_from list add delete help" -l json-version -d 'Wrap supported JSON documents in a versioned envelope (requires --json)' -r -f -a "1\t''"
-complete -c rbgp -n "__fish_rbgp_using_subcommand dynamic-neighbor; and not __fish_seen_subcommand_from list add delete help" -l pager -d 'Page complete human unicast RIB listings' -r -f -a "auto\t''
-always\t''
-never\t''"
 complete -c rbgp -n "__fish_rbgp_using_subcommand dynamic-neighbor; and not __fish_seen_subcommand_from list add delete help" -s j -l json -d 'Output in JSON format'
-complete -c rbgp -n "__fish_rbgp_using_subcommand dynamic-neighbor; and not __fish_seen_subcommand_from list add delete help" -l json-lines -d 'Stream accepted unicast RIB routes as versioned JSON lines'
 complete -c rbgp -n "__fish_rbgp_using_subcommand dynamic-neighbor; and not __fish_seen_subcommand_from list add delete help" -l no-color -d 'Disable colored output'
 complete -c rbgp -n "__fish_rbgp_using_subcommand dynamic-neighbor; and not __fish_seen_subcommand_from list add delete help" -s h -l help -d 'Print help (see more with \'--help\')'
 complete -c rbgp -n "__fish_rbgp_using_subcommand dynamic-neighbor; and not __fish_seen_subcommand_from list add delete help" -f -a "list" -d 'List configured dynamic neighbor ranges'
@@ -2363,11 +1886,7 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand dynamic-neighbor; and __fish_s
 complete -c rbgp -n "__fish_rbgp_using_subcommand dynamic-neighbor; and __fish_seen_subcommand_from list" -l tls-key -d 'PEM client private key for mTLS (requires --tls-cert)' -r -F
 complete -c rbgp -n "__fish_rbgp_using_subcommand dynamic-neighbor; and __fish_seen_subcommand_from list" -l tls-server-name -d 'Server certificate name to verify instead of the HTTPS address host' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand dynamic-neighbor; and __fish_seen_subcommand_from list" -l json-version -d 'Wrap supported JSON documents in a versioned envelope (requires --json)' -r -f -a "1\t''"
-complete -c rbgp -n "__fish_rbgp_using_subcommand dynamic-neighbor; and __fish_seen_subcommand_from list" -l pager -d 'Page complete human unicast RIB listings' -r -f -a "auto\t''
-always\t''
-never\t''"
 complete -c rbgp -n "__fish_rbgp_using_subcommand dynamic-neighbor; and __fish_seen_subcommand_from list" -s j -l json -d 'Output in JSON format'
-complete -c rbgp -n "__fish_rbgp_using_subcommand dynamic-neighbor; and __fish_seen_subcommand_from list" -l json-lines -d 'Stream accepted unicast RIB routes as versioned JSON lines'
 complete -c rbgp -n "__fish_rbgp_using_subcommand dynamic-neighbor; and __fish_seen_subcommand_from list" -l no-color -d 'Disable colored output'
 complete -c rbgp -n "__fish_rbgp_using_subcommand dynamic-neighbor; and __fish_seen_subcommand_from list" -s h -l help -d 'Print help (see more with \'--help\')'
 complete -c rbgp -n "__fish_rbgp_using_subcommand dynamic-neighbor; and __fish_seen_subcommand_from add" -l peer-group -d 'Peer group the dynamic peers inherit' -r
@@ -2380,11 +1899,7 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand dynamic-neighbor; and __fish_s
 complete -c rbgp -n "__fish_rbgp_using_subcommand dynamic-neighbor; and __fish_seen_subcommand_from add" -l tls-key -d 'PEM client private key for mTLS (requires --tls-cert)' -r -F
 complete -c rbgp -n "__fish_rbgp_using_subcommand dynamic-neighbor; and __fish_seen_subcommand_from add" -l tls-server-name -d 'Server certificate name to verify instead of the HTTPS address host' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand dynamic-neighbor; and __fish_seen_subcommand_from add" -l json-version -d 'Wrap supported JSON documents in a versioned envelope (requires --json)' -r -f -a "1\t''"
-complete -c rbgp -n "__fish_rbgp_using_subcommand dynamic-neighbor; and __fish_seen_subcommand_from add" -l pager -d 'Page complete human unicast RIB listings' -r -f -a "auto\t''
-always\t''
-never\t''"
 complete -c rbgp -n "__fish_rbgp_using_subcommand dynamic-neighbor; and __fish_seen_subcommand_from add" -s j -l json -d 'Output in JSON format'
-complete -c rbgp -n "__fish_rbgp_using_subcommand dynamic-neighbor; and __fish_seen_subcommand_from add" -l json-lines -d 'Stream accepted unicast RIB routes as versioned JSON lines'
 complete -c rbgp -n "__fish_rbgp_using_subcommand dynamic-neighbor; and __fish_seen_subcommand_from add" -l no-color -d 'Disable colored output'
 complete -c rbgp -n "__fish_rbgp_using_subcommand dynamic-neighbor; and __fish_seen_subcommand_from add" -s h -l help -d 'Print help (see more with \'--help\')'
 complete -c rbgp -n "__fish_rbgp_using_subcommand dynamic-neighbor; and __fish_seen_subcommand_from delete" -s s -l addr -d 'gRPC server address or unix:///path/to/socket' -r
@@ -2394,11 +1909,7 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand dynamic-neighbor; and __fish_s
 complete -c rbgp -n "__fish_rbgp_using_subcommand dynamic-neighbor; and __fish_seen_subcommand_from delete" -l tls-key -d 'PEM client private key for mTLS (requires --tls-cert)' -r -F
 complete -c rbgp -n "__fish_rbgp_using_subcommand dynamic-neighbor; and __fish_seen_subcommand_from delete" -l tls-server-name -d 'Server certificate name to verify instead of the HTTPS address host' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand dynamic-neighbor; and __fish_seen_subcommand_from delete" -l json-version -d 'Wrap supported JSON documents in a versioned envelope (requires --json)' -r -f -a "1\t''"
-complete -c rbgp -n "__fish_rbgp_using_subcommand dynamic-neighbor; and __fish_seen_subcommand_from delete" -l pager -d 'Page complete human unicast RIB listings' -r -f -a "auto\t''
-always\t''
-never\t''"
 complete -c rbgp -n "__fish_rbgp_using_subcommand dynamic-neighbor; and __fish_seen_subcommand_from delete" -s j -l json -d 'Output in JSON format'
-complete -c rbgp -n "__fish_rbgp_using_subcommand dynamic-neighbor; and __fish_seen_subcommand_from delete" -l json-lines -d 'Stream accepted unicast RIB routes as versioned JSON lines'
 complete -c rbgp -n "__fish_rbgp_using_subcommand dynamic-neighbor; and __fish_seen_subcommand_from delete" -l no-color -d 'Disable colored output'
 complete -c rbgp -n "__fish_rbgp_using_subcommand dynamic-neighbor; and __fish_seen_subcommand_from delete" -s h -l help -d 'Print help (see more with \'--help\')'
 complete -c rbgp -n "__fish_rbgp_using_subcommand dynamic-neighbor; and __fish_seen_subcommand_from help" -f -a "list" -d 'List configured dynamic neighbor ranges'
@@ -2412,11 +1923,7 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand fib-table; and not __fish_seen
 complete -c rbgp -n "__fish_rbgp_using_subcommand fib-table; and not __fish_seen_subcommand_from list set delete help" -l tls-key -d 'PEM client private key for mTLS (requires --tls-cert)' -r -F
 complete -c rbgp -n "__fish_rbgp_using_subcommand fib-table; and not __fish_seen_subcommand_from list set delete help" -l tls-server-name -d 'Server certificate name to verify instead of the HTTPS address host' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand fib-table; and not __fish_seen_subcommand_from list set delete help" -l json-version -d 'Wrap supported JSON documents in a versioned envelope (requires --json)' -r -f -a "1\t''"
-complete -c rbgp -n "__fish_rbgp_using_subcommand fib-table; and not __fish_seen_subcommand_from list set delete help" -l pager -d 'Page complete human unicast RIB listings' -r -f -a "auto\t''
-always\t''
-never\t''"
 complete -c rbgp -n "__fish_rbgp_using_subcommand fib-table; and not __fish_seen_subcommand_from list set delete help" -s j -l json -d 'Output in JSON format'
-complete -c rbgp -n "__fish_rbgp_using_subcommand fib-table; and not __fish_seen_subcommand_from list set delete help" -l json-lines -d 'Stream accepted unicast RIB routes as versioned JSON lines'
 complete -c rbgp -n "__fish_rbgp_using_subcommand fib-table; and not __fish_seen_subcommand_from list set delete help" -l no-color -d 'Disable colored output'
 complete -c rbgp -n "__fish_rbgp_using_subcommand fib-table; and not __fish_seen_subcommand_from list set delete help" -s h -l help -d 'Print help (see more with \'--help\')'
 complete -c rbgp -n "__fish_rbgp_using_subcommand fib-table; and not __fish_seen_subcommand_from list set delete help" -f -a "list" -d 'List the configured FIB tables and runtime availability'
@@ -2430,11 +1937,7 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand fib-table; and __fish_seen_sub
 complete -c rbgp -n "__fish_rbgp_using_subcommand fib-table; and __fish_seen_subcommand_from list" -l tls-key -d 'PEM client private key for mTLS (requires --tls-cert)' -r -F
 complete -c rbgp -n "__fish_rbgp_using_subcommand fib-table; and __fish_seen_subcommand_from list" -l tls-server-name -d 'Server certificate name to verify instead of the HTTPS address host' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand fib-table; and __fish_seen_subcommand_from list" -l json-version -d 'Wrap supported JSON documents in a versioned envelope (requires --json)' -r -f -a "1\t''"
-complete -c rbgp -n "__fish_rbgp_using_subcommand fib-table; and __fish_seen_subcommand_from list" -l pager -d 'Page complete human unicast RIB listings' -r -f -a "auto\t''
-always\t''
-never\t''"
 complete -c rbgp -n "__fish_rbgp_using_subcommand fib-table; and __fish_seen_subcommand_from list" -s j -l json -d 'Output in JSON format'
-complete -c rbgp -n "__fish_rbgp_using_subcommand fib-table; and __fish_seen_subcommand_from list" -l json-lines -d 'Stream accepted unicast RIB routes as versioned JSON lines'
 complete -c rbgp -n "__fish_rbgp_using_subcommand fib-table; and __fish_seen_subcommand_from list" -l no-color -d 'Disable colored output'
 complete -c rbgp -n "__fish_rbgp_using_subcommand fib-table; and __fish_seen_subcommand_from list" -s h -l help -d 'Print help (see more with \'--help\')'
 complete -c rbgp -n "__fish_rbgp_using_subcommand fib-table; and __fish_seen_subcommand_from set" -l table-id -d 'Linux route table id' -r
@@ -2453,11 +1956,7 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand fib-table; and __fish_seen_sub
 complete -c rbgp -n "__fish_rbgp_using_subcommand fib-table; and __fish_seen_subcommand_from set" -l tls-key -d 'PEM client private key for mTLS (requires --tls-cert)' -r -F
 complete -c rbgp -n "__fish_rbgp_using_subcommand fib-table; and __fish_seen_subcommand_from set" -l tls-server-name -d 'Server certificate name to verify instead of the HTTPS address host' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand fib-table; and __fish_seen_subcommand_from set" -l json-version -d 'Wrap supported JSON documents in a versioned envelope (requires --json)' -r -f -a "1\t''"
-complete -c rbgp -n "__fish_rbgp_using_subcommand fib-table; and __fish_seen_subcommand_from set" -l pager -d 'Page complete human unicast RIB listings' -r -f -a "auto\t''
-always\t''
-never\t''"
 complete -c rbgp -n "__fish_rbgp_using_subcommand fib-table; and __fish_seen_subcommand_from set" -s j -l json -d 'Output in JSON format'
-complete -c rbgp -n "__fish_rbgp_using_subcommand fib-table; and __fish_seen_subcommand_from set" -l json-lines -d 'Stream accepted unicast RIB routes as versioned JSON lines'
 complete -c rbgp -n "__fish_rbgp_using_subcommand fib-table; and __fish_seen_subcommand_from set" -l no-color -d 'Disable colored output'
 complete -c rbgp -n "__fish_rbgp_using_subcommand fib-table; and __fish_seen_subcommand_from set" -s h -l help -d 'Print help (see more with \'--help\')'
 complete -c rbgp -n "__fish_rbgp_using_subcommand fib-table; and __fish_seen_subcommand_from delete" -s s -l addr -d 'gRPC server address or unix:///path/to/socket' -r
@@ -2467,11 +1966,7 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand fib-table; and __fish_seen_sub
 complete -c rbgp -n "__fish_rbgp_using_subcommand fib-table; and __fish_seen_subcommand_from delete" -l tls-key -d 'PEM client private key for mTLS (requires --tls-cert)' -r -F
 complete -c rbgp -n "__fish_rbgp_using_subcommand fib-table; and __fish_seen_subcommand_from delete" -l tls-server-name -d 'Server certificate name to verify instead of the HTTPS address host' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand fib-table; and __fish_seen_subcommand_from delete" -l json-version -d 'Wrap supported JSON documents in a versioned envelope (requires --json)' -r -f -a "1\t''"
-complete -c rbgp -n "__fish_rbgp_using_subcommand fib-table; and __fish_seen_subcommand_from delete" -l pager -d 'Page complete human unicast RIB listings' -r -f -a "auto\t''
-always\t''
-never\t''"
 complete -c rbgp -n "__fish_rbgp_using_subcommand fib-table; and __fish_seen_subcommand_from delete" -s j -l json -d 'Output in JSON format'
-complete -c rbgp -n "__fish_rbgp_using_subcommand fib-table; and __fish_seen_subcommand_from delete" -l json-lines -d 'Stream accepted unicast RIB routes as versioned JSON lines'
 complete -c rbgp -n "__fish_rbgp_using_subcommand fib-table; and __fish_seen_subcommand_from delete" -l no-color -d 'Disable colored output'
 complete -c rbgp -n "__fish_rbgp_using_subcommand fib-table; and __fish_seen_subcommand_from delete" -s h -l help -d 'Print help (see more with \'--help\')'
 complete -c rbgp -n "__fish_rbgp_using_subcommand fib-table; and __fish_seen_subcommand_from help" -f -a "list" -d 'List the configured FIB tables and runtime availability'
@@ -2484,12 +1979,7 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand completions" -l tls-ca -d 'PEM
 complete -c rbgp -n "__fish_rbgp_using_subcommand completions" -l tls-cert -d 'PEM client certificate chain for mTLS (requires --tls-key)' -r -F
 complete -c rbgp -n "__fish_rbgp_using_subcommand completions" -l tls-key -d 'PEM client private key for mTLS (requires --tls-cert)' -r -F
 complete -c rbgp -n "__fish_rbgp_using_subcommand completions" -l tls-server-name -d 'Server certificate name to verify instead of the HTTPS address host' -r
-complete -c rbgp -n "__fish_rbgp_using_subcommand completions" -l json-version -d 'Wrap supported JSON documents in a versioned envelope (requires --json)' -r -f -a "1\t''"
-complete -c rbgp -n "__fish_rbgp_using_subcommand completions" -l pager -d 'Page complete human unicast RIB listings' -r -f -a "auto\t''
-always\t''
-never\t''"
 complete -c rbgp -n "__fish_rbgp_using_subcommand completions" -s j -l json -d 'Output in JSON format'
-complete -c rbgp -n "__fish_rbgp_using_subcommand completions" -l json-lines -d 'Stream accepted unicast RIB routes as versioned JSON lines'
 complete -c rbgp -n "__fish_rbgp_using_subcommand completions" -l no-color -d 'Disable colored output'
 complete -c rbgp -n "__fish_rbgp_using_subcommand completions" -s h -l help -d 'Print help (see more with \'--help\')'
 complete -c rbgp -n "__fish_rbgp_using_subcommand man" -s s -l addr -d 'gRPC server address or unix:///path/to/socket' -r
@@ -2498,12 +1988,7 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand man" -l tls-ca -d 'PEM CA bund
 complete -c rbgp -n "__fish_rbgp_using_subcommand man" -l tls-cert -d 'PEM client certificate chain for mTLS (requires --tls-key)' -r -F
 complete -c rbgp -n "__fish_rbgp_using_subcommand man" -l tls-key -d 'PEM client private key for mTLS (requires --tls-cert)' -r -F
 complete -c rbgp -n "__fish_rbgp_using_subcommand man" -l tls-server-name -d 'Server certificate name to verify instead of the HTTPS address host' -r
-complete -c rbgp -n "__fish_rbgp_using_subcommand man" -l json-version -d 'Wrap supported JSON documents in a versioned envelope (requires --json)' -r -f -a "1\t''"
-complete -c rbgp -n "__fish_rbgp_using_subcommand man" -l pager -d 'Page complete human unicast RIB listings' -r -f -a "auto\t''
-always\t''
-never\t''"
 complete -c rbgp -n "__fish_rbgp_using_subcommand man" -s j -l json -d 'Output in JSON format'
-complete -c rbgp -n "__fish_rbgp_using_subcommand man" -l json-lines -d 'Stream accepted unicast RIB routes as versioned JSON lines'
 complete -c rbgp -n "__fish_rbgp_using_subcommand man" -l no-color -d 'Disable colored output'
 complete -c rbgp -n "__fish_rbgp_using_subcommand man" -s h -l help -d 'Print help (see more with \'--help\')'
 complete -c rbgp -n "__fish_rbgp_using_subcommand help; and not __fish_seen_subcommand_from global config neighbor bfd rpki rib topology orr diff flowspec evpn watch events health doctor metrics shutdown mrt-dump gshut top policy neighbor-set peer-group dynamic-neighbor fib-table completions man help" -f -a "global" -d 'Show daemon global configuration'
