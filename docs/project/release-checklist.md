@@ -993,12 +993,12 @@ wire before dependent crates. If a publish or registry check fails, retain the
 existing record and retry after resolving the failure.
 
 `--refresh` does not reword prose. A crate README is packaged with the crate
-and becomes its crates.io landing page, so turn "prepared in the source
-checkout" or "source checkout prepares" wording for a version about to publish
-into released wording in `crates/wire/README.md`, `crates/fsm/README.md`, and
-`crates/rpki/README.md` before the release commit;
-`just gate-release --mode release` rejects either wording in a crate whose
-manifest is ahead of the published record. Reword
+and becomes its crates.io landing page, so turn staging wording for a version
+about to publish ("prepared in this checkout", "the source checkout prepares",
+"the prepared 0.x release") into released wording in `crates/wire/README.md`,
+`crates/fsm/README.md`, and `crates/rpki/README.md` before the release commit;
+`just gate-release --mode release` rejects any form of "prepare" in the README
+of a crate whose manifest is ahead of the published record. Reword
 `docs/reference/embedding.md` §4 in the same change as `--refresh`. Past
 `CHANGELOG.md` sections keep their wording.
 
