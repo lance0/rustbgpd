@@ -64,7 +64,8 @@
 //!   reload loop. After convergence + the control window, close the first
 //!   K stub sockets simultaneously, timestamp every survivor's receipt of
 //!   all K slices' withdrawals, reconnect the K after 10 s, re-announce
-//!   their slices, and timestamp survivors' re-announce completion.
+//!   their slices, and timestamp survivors' re-announce completion plus each
+//!   rejoiner's first EoR and exact table coverage.
 //!   3 rounds, per-round percentiles + `flapstorm_csv` lines.
 //!
 //! Soak extensions (route-server flagship soak) — all additive env vars;
@@ -541,6 +542,8 @@ struct Obs {
     /// advertises to it: set on announcement, cleared on withdrawal.
     /// Recorded whenever the session is up, independent of any armed bitmap.
     extras_seen: Mutex<Vec<u64>>,
+    /// Armed only on a flap reconnect; completion requires EoR and exact coverage.
+    rejoin: Mutex<Option<RejoinProgress>>,
 }
 
 impl Obs {
@@ -561,6 +564,67 @@ impl Obs {
             base_withdrawn: AtomicU64::new(0),
             base_withdrawn6: AtomicU64::new(0),
             extras_seen: Mutex::new(Vec::new()),
+            rejoin: Mutex::new(None),
+        }
+    }
+}
+
+struct RejoinProgress {
+    open_sent_us: u64,
+    table: GenerationProgress,
+    eor_us: Option<u64>,
+    complete_us: Option<u64>,
+}
+
+impl RejoinProgress {
+    fn new(ctx: &Ctx, i: u32, open_sent_us: u64) -> Self {
+        let total = ctx.totals[0];
+        let (own_start, own_len) = member_slice(total, ctx.n_peers, i);
+        let mut table = GenerationProgress::default();
+        table.reset(total, u64::from(total - own_len), own_start, own_len);
+        table.exclude_extra(&ctx.extras[i as usize]);
+        Self {
+            open_sent_us,
+            table,
+            eor_us: None,
+            complete_us: None,
+        }
+    }
+
+    fn observe(
+        &mut self,
+        announced: &[Ipv4Prefix],
+        withdrawn: &[Ipv4Prefix],
+        eor: bool,
+        total: u32,
+        at_us: u64,
+    ) {
+        for prefix in withdrawn {
+            if let Some(index) = base_prefix_index(*prefix, total) {
+                if self.table.is_excluded(index) {
+                    continue;
+                }
+                let bit = 1u64 << (index % 64);
+                let slot = &mut self.table.seen[index / 64];
+                if *slot & bit != 0 {
+                    *slot &= !bit;
+                    self.table.unique -= 1;
+                    self.table.completed_at_us = None;
+                }
+            }
+        }
+        for prefix in announced {
+            if let Some(index) = base_prefix_index(*prefix, total) {
+                self.table.observe(index, at_us);
+            }
+        }
+        if eor && self.eor_us.is_none() {
+            self.eor_us = Some(at_us);
+        }
+        if self.complete_us.is_none() {
+            if let (Some(eor), Some(table)) = (self.eor_us, self.table.completed_at_us) {
+                self.complete_us = Some(eor.max(table));
+            }
         }
     }
 }
@@ -1484,7 +1548,7 @@ async fn open_stub_stream(
     open: &[u8],
     keepalive: &[u8],
     required: &[(Afi, Safi)],
-) -> Result<TcpStream, StubOpenError> {
+) -> Result<(TcpStream, Instant), StubOpenError> {
     let sock = TcpSocket::new_v4().map_err(|e| StubOpenError::Fatal(format!("socket: {e}")))?;
     if std::env::var("RELOADSTALL_GTSM").as_deref() == Ok("1") {
         socket2::SockRef::from(&sock)
@@ -1502,6 +1566,7 @@ async fn open_stub_stream(
         .write_all(open)
         .await
         .map_err(|e| StubOpenError::Retryable(format!("open write: {e}")))?;
+    let open_sent = Instant::now();
 
     // Read the daemon's OPEN. A transport close before OPEN is retryable:
     // peers may accept a socket while an IdleHold timer still owns their FSM.
@@ -1556,7 +1621,7 @@ async fn open_stub_stream(
         .write_all(keepalive)
         .await
         .map_err(|e| StubOpenError::Retryable(format!("ka write: {e}")))?;
-    Ok(stream)
+    Ok((stream, open_sent))
 }
 
 async fn establish_stream_with_retry(
@@ -1566,7 +1631,7 @@ async fn establish_stream_with_retry(
     keepalive: &[u8],
     window: Duration,
     required: &[(Afi, Safi)],
-) -> Result<(TcpStream, u32), String> {
+) -> Result<(TcpStream, Instant, u32), String> {
     let deadline = Instant::now() + window;
     let mut retries = 0;
     loop {
@@ -1583,7 +1648,7 @@ async fn establish_stream_with_retry(
         )
         .await
         {
-            Ok(Ok(stream)) => return Ok((stream, retries)),
+            Ok(Ok((stream, open_sent))) => return Ok((stream, open_sent, retries)),
             Ok(Err(StubOpenError::Fatal(error))) => return Err(error),
             Ok(Err(StubOpenError::Retryable(error))) => {
                 retries += 1;
@@ -1634,7 +1699,7 @@ fn stub_open(i: u32, open_asn: u32, dualstack: bool) -> OpenMessage {
     }
 }
 
-async fn establish_stub(ctx: Arc<Ctx>, i: u32) -> Result<(Stub, u32), String> {
+async fn establish_stub(ctx: Arc<Ctx>, i: u32, rejoin: bool) -> Result<(Stub, u32), String> {
     let local = stub_addr(i);
 
     // iBGP-RR mode: every stub OPENs with the shared local AS (the
@@ -1646,7 +1711,7 @@ async fn establish_stub(ctx: Arc<Ctx>, i: u32) -> Result<(Stub, u32), String> {
     let open = stub_open(i, open_asn, dualstack());
     let bytes = encode_message(&Message::Open(open)).map_err(|e| format!("open encode: {e}"))?;
     let ka = encode_message(&Message::Keepalive).unwrap();
-    let (stream, retries) = establish_stream_with_retry(
+    let (stream, open_sent, retries) = establish_stream_with_retry(
         ctx.daemon,
         local,
         &bytes,
@@ -1655,14 +1720,18 @@ async fn establish_stub(ctx: Arc<Ctx>, i: u32) -> Result<(Stub, u32), String> {
         required_families(dualstack()),
     )
     .await?;
+    if rejoin {
+        let sent_us = u64::try_from(open_sent.duration_since(ctx.t0).as_micros()).unwrap();
+        *ctx.obs[i as usize].rejoin.lock().unwrap() = Some(RejoinProgress::new(&ctx, i, sent_us));
+    }
     ctx.obs[i as usize]
         .established
         .store(true, Ordering::Relaxed);
 
-    Ok((start_stub(ctx, i, stream), retries))
+    Ok((start_stub(ctx, i, stream, rejoin), retries))
 }
 
-fn start_stub(ctx: Arc<Ctx>, i: u32, stream: TcpStream) -> Stub {
+fn start_stub(ctx: Arc<Ctx>, i: u32, stream: TcpStream, track_rejoin: bool) -> Stub {
     let (tx, mut tx_rx) = mpsc::channel::<Message>(256);
     let (mut reader, mut writer) = stream.into_split();
     let refreshes = Arc::new(Mutex::new(tokio::task::JoinSet::new()));
@@ -1770,6 +1839,9 @@ fn start_stub(ctx: Arc<Ctx>, i: u32, stream: TcpStream) -> Stub {
                 };
                 match msg {
                     Message::Update(u) => {
+                        let ipv4_eor = u.withdrawn_routes.is_empty()
+                            && u.path_attributes.is_empty()
+                            && u.nlri.is_empty();
                         // Parse the wire UPDATE once: NLRI, withdrawals, and
                         // attributes all come from the same decode (the earlier
                         // code decoded the NLRI twice, then re-parsed the whole
@@ -1809,6 +1881,17 @@ fn start_stub(ctx: Arc<Ctx>, i: u32, stream: TcpStream) -> Stub {
                         }
                         let ob = &rctx.obs[i as usize];
                         let t_us = now_us(&rctx);
+                        if track_rejoin {
+                            if let Some(rejoin) = ob.rejoin.lock().unwrap().as_mut() {
+                                rejoin.observe(
+                                    &nlri.v4_ann,
+                                    &nlri.v4_wd,
+                                    ipv4_eor,
+                                    total_prefixes,
+                                    t_us,
+                                );
+                            }
+                        }
                         if !nlri.v4_ann.is_empty() || !nlri.v6_ann.is_empty() {
                             // Borrow the communities out of the single parse;
                             // clone once only to store the last-seen sample.
@@ -2230,6 +2313,43 @@ async fn wait_flap_completion(ctx: &Ctx, first: usize, round: u32, phase: &str) 
     }
 }
 
+async fn wait_rejoin_completion(ctx: &Ctx, k: u32, round: u32) -> Vec<f64> {
+    let mut last_unique = 0;
+    let mut last_progress = Instant::now();
+    loop {
+        let mut values = Vec::with_capacity(k as usize);
+        let mut unique = 0;
+        for i in 0..k as usize {
+            let guard = ctx.obs[i].rejoin.lock().unwrap();
+            let rejoin = guard.as_ref().expect("rejoin armed before reader");
+            unique += rejoin.table.unique;
+            if let Some(complete) = rejoin.complete_us {
+                let seconds = complete.saturating_sub(rejoin.open_sent_us) as f64 / 1e6;
+                if seconds <= 0.0 {
+                    eprintln!("FAIL: flap {round} peer {i} rejoin_complete_s is zero");
+                    std::process::exit(1);
+                }
+                values.push(seconds);
+            }
+        }
+        if values.len() == k as usize {
+            return values;
+        }
+        if unique > last_unique {
+            last_unique = unique;
+            last_progress = Instant::now();
+        } else if last_progress.elapsed() > STALL_WINDOW {
+            eprintln!(
+                "FAIL: flap {round} rejoin stalled: {}/{} complete",
+                values.len(),
+                k
+            );
+            std::process::exit(1);
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
 /// Arm every survivor's shared bitmap to track `mode` over the flapped
 /// window (base indices `[0, flap_prefixes)`; everything else excluded).
 fn arm_survivors(ctx: &Ctx, k: u32, flap_prefixes: u32, total: u32, mode: u32) {
@@ -2571,7 +2691,7 @@ async fn run_flapstorm(
         let mut reconnect_retries = 0u32;
         let mut recovered_peers = 0u32;
         for i in 0..k {
-            match establish_stub(Arc::clone(ctx), i).await {
+            match establish_stub(Arc::clone(ctx), i, true).await {
                 Ok((stub, retries)) => {
                     reconnect_retries += retries;
                     recovered_peers += u32::from(retries > 0);
@@ -2597,6 +2717,14 @@ async fn run_flapstorm(
             }
         }
         wait_flap_completion(ctx, k as usize, round, "reannounce").await;
+        let rejoin_values = wait_rejoin_completion(ctx, k, round).await;
+        for (i, seconds) in rejoin_values.iter().enumerate() {
+            let rejoin = ctx.obs[i].rejoin.lock().unwrap();
+            let progress = rejoin.as_ref().unwrap();
+            let eor_before_full_table = progress.eor_us.unwrap() < progress.complete_us.unwrap();
+            println!("flap {round} peer {i} rejoin_complete_s={seconds:.6} eor_before_full_table={eor_before_full_table}");
+        }
+        stats_line(&format!("flap {round} rejoin_complete_s"), rejoin_values);
         let reann_s: Vec<f64> = survivors
             .clone()
             .filter_map(|i| completion_us(ctx, i))
@@ -2780,7 +2908,7 @@ async fn run_trip_cycle(
     let (stub, retries) = loop {
         match tokio::time::timeout(
             TRIP_ATTEMPT_WINDOW,
-            establish_stub(Arc::clone(ctx), TRIP_MEMBER),
+            establish_stub(Arc::clone(ctx), TRIP_MEMBER, false),
         )
         .await
         {
@@ -3405,7 +3533,7 @@ fn main() {
             let mut handles = Vec::new();
             for &i in wave {
                 let c = Arc::clone(&ctx);
-                handles.push((i, tokio::spawn(establish_stub(c, i))));
+                handles.push((i, tokio::spawn(establish_stub(c, i, false))));
             }
             for (i, h) in handles {
                 match h.await.unwrap() {
@@ -4376,7 +4504,7 @@ mod tests {
     #[tokio::test]
     async fn fleet_finish_writes_queued_updates_and_cease_then_drains_to_eof() {
         let (client, mut server) = finish_test_connection().await;
-        let stub = start_stub(finish_test_ctx(), 0, client);
+        let stub = start_stub(finish_test_ctx(), 0, client, false);
         let update = announce_msgs(0, &[base_prefix(0)]).pop().unwrap();
         stub.tx.send(update.clone()).await.unwrap();
         stub.tx.send(update).await.unwrap();
@@ -4418,7 +4546,7 @@ mod tests {
     #[tokio::test]
     async fn fleet_finish_rejects_truncated_daemon_eof() {
         let (client, mut server) = finish_test_connection().await;
-        let stub = start_stub(finish_test_ctx(), 0, client);
+        let stub = start_stub(finish_test_ctx(), 0, client, false);
         let peer = tokio::spawn(async move {
             let mut sent = Vec::new();
             server.read_to_end(&mut sent).await.unwrap();
@@ -4437,7 +4565,7 @@ mod tests {
         let (client, mut server) = finish_test_connection().await;
         let ctx = finish_test_ctx();
         ctx.obs[0].established.store(true, Ordering::Relaxed);
-        let stub = start_stub(Arc::clone(&ctx), 0, client);
+        let stub = start_stub(Arc::clone(&ctx), 0, client, false);
         let failed = stub.refreshes.lock().unwrap().spawn(async {
             panic!("fixture refresh failure");
         });
@@ -4620,7 +4748,7 @@ mod tests {
 
         let client_open = test_open(64_512);
         let keepalive = encode_message(&Message::Keepalive).unwrap();
-        let (stream, retries) = establish_stream_with_retry(
+        let (stream, _, retries) = establish_stream_with_retry(
             daemon,
             Ipv4Addr::new(127, 0, 0, 2),
             &client_open,
@@ -5741,6 +5869,68 @@ mod tests {
         assert!(required_families(false).is_empty());
     }
 
+    #[test]
+    fn rejoin_requires_exact_table_and_first_eor() {
+        let mut table = GenerationProgress::default();
+        table.reset(4, 3, 0, 1);
+        let mut rejoin = RejoinProgress {
+            open_sent_us: 10,
+            table,
+            eor_us: None,
+            complete_us: None,
+        };
+        rejoin.observe(
+            &[base_prefix(1), base_prefix(1), base_prefix(2)],
+            &[],
+            false,
+            4,
+            20,
+        );
+        assert_eq!(rejoin.complete_us, None, "missing EoR cannot complete");
+        rejoin.observe(&[], &[base_prefix(2)], true, 4, 30);
+        assert_eq!(rejoin.table.unique, 1, "withdrawal clears current coverage");
+        rejoin.observe(&[base_prefix(2)], &[], false, 4, 35);
+        assert_eq!(rejoin.table.unique, 2);
+        assert_eq!(rejoin.complete_us, None, "incomplete EoR is not completion");
+        rejoin.observe(&[base_prefix(3)], &[], false, 4, 40);
+        assert_eq!(
+            rejoin.complete_us,
+            Some(40),
+            "last required route completes the rejoin"
+        );
+        rejoin.observe(&[], &[], true, 4, 50);
+        assert_eq!(
+            rejoin.complete_us,
+            Some(40),
+            "later EoR does not move first completion"
+        );
+        rejoin.observe(&[], &[base_prefix(3)], false, 4, 55);
+        rejoin.observe(&[base_prefix(3)], &[], false, 4, 58);
+        assert_eq!(
+            rejoin.complete_us,
+            Some(40),
+            "later churn does not move first completion"
+        );
+
+        let mut table_first = RejoinProgress {
+            open_sent_us: 10,
+            table: rejoin.table,
+            eor_us: None,
+            complete_us: None,
+        };
+        table_first.observe(&[], &[], false, 4, 50);
+        assert_eq!(
+            table_first.complete_us, None,
+            "full table without EoR cannot complete"
+        );
+        table_first.observe(&[], &[], true, 4, 60);
+        assert_eq!(
+            table_first.complete_us,
+            Some(60),
+            "EoR after the table completes rejoin"
+        );
+    }
+
     #[tokio::test]
     async fn dualstack_establishment_fails_closed_on_an_unnegotiated_family() {
         // Empty-family negative: a peer whose OPEN carries only IPv4 unicast
@@ -5778,7 +5968,7 @@ mod tests {
             )
             .await;
             match result {
-                Ok((stream, retries)) => {
+                Ok((stream, _, retries)) => {
                     assert!(expect_ok, "IPv4-only OPEN must not establish");
                     assert_eq!(retries, 0);
                     drop(stream);
