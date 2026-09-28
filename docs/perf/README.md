@@ -110,6 +110,17 @@ cross-daemon ranking. Every receipt is indexed in
 [the receipts index](../receipts.md); GoBGP-specific parity is in
 [the GoBGP parity reference](../explanation/gobgp-parity.md).
 
+## Running a measurement
+
+Every benchmark driver behind these receipts has a `just bench-*` recipe;
+`just bench-list` prints them with the script each one runs. A new receipt
+cites the recipe invocation, for example
+`just bench-compare rustbgpd-rib rib_ops <base> <head>` or
+`N_PEERS=700 just bench-ixp-matrix rustbgpd`, instead of reconstructing the
+driver's flags. The recipes keep each driver's host lock, quiet gate, and
+thresholds. Receipts written before the recipes existed keep their original
+commands as history.
+
 ## Reading the archive
 
 This directory is a historical evidence archive. Each row reports only the

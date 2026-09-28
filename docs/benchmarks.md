@@ -229,6 +229,15 @@ runs every criterion target once through `cargo test --bench`, exercises
 fixtures, and runs the `gr_end_of_rib` self-test. The four other custom
 harnesses retain dedicated CI smoke invocations.
 
+`just bench <package> <target> [args]` runs one target with the measurement
+discipline built in: it reads the target's required features from its
+manifest, takes the shared host lock, builds, and then pins the run to the
+core named by `RUSTBGPD_BENCH_CORE`. It refuses to start without that
+variable, because no core number suits every host. Extra arguments reach the
+harness. `just bench-list` prints every target with its features, plus every
+benchmark driver and the `bench-*` recipe that runs it. The raw commands below
+remain the reference for what a recipe runs.
+
 ```bash
 # Wire codec only
 cargo bench -p rustbgpd-wire --bench codec
@@ -371,6 +380,10 @@ and writes a Markdown summary plus raw Criterion artifacts under
 
 It requires `bash`, `git`, `cargo`, `python3`, `flock` (the host mutex is
 taken unconditionally), and `taskset` from util-linux.
+`just bench-compare <package> <target> <base> <head> [flags]` runs it with the
+documented discipline as defaults: four alternating attempts, `--core` from
+`RUSTBGPD_BENCH_CORE`, `--require-performance`, and the target's required
+features. Flags after the refs override those defaults.
 Fixed-harness mode also requires GNU `sha256sum` from coreutils and is supported
 on Linux only; it does not promise macOS portability.
 

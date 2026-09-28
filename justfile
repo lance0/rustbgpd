@@ -271,3 +271,250 @@ fuzz crate target *args:
     export RUSTUP_TOOLCHAIN
     cd "${crate}"
     exec cargo fuzz run "${target}" "$@"
+
+# Every `bench-*` recipe measures, or smokes, a benchmark on this host. None is
+# reachable from `gate`, `gate-ci`, or another check recipe, so nothing
+# measures by accident. They are thin wrappers: each driver keeps its own host
+# lock, quiet gate, provenance, clean-tree refusal, and thresholds, and its
+# exit status passes through unchanged (75 when the host lock or a quiet gate
+# says the host is busy). A recipe that runs a bare harness takes the shared
+# host lock itself, through tests/soak/host-lock.sh, at
+# ${RUSTBGPD_HOST_LOCK:-$HOME/.local/state/rustbgpd-host.lock}.
+#
+# Single timing runs pin to RUSTBGPD_BENCH_CORE and refuse to start without
+# it: receipts have used cores 2, 5, 8, 15, and 63, so there is no portable
+# default. The A/B drivers receive it as `--core` when it is set and keep
+# their own default otherwise. bench/scale is a separate workspace with its
+# own lockfile, so its harnesses build with `--manifest-path`, outside any
+# CARGO_TARGET_DIR override, where the scale drivers look for them.
+
+# Print '<package> <target> [features]' for every Cargo bench target, read from cargo metadata.
+_bench-targets:
+    @cargo metadata --locked --no-deps --format-version 1 | python3 -c 'import json, sys; [print(p["name"], t["name"], ",".join(t.get("required-features") or [])) for p in json.load(sys.stdin)["packages"] for t in p["targets"] if "bench" in t["kind"]]' | LC_ALL=C sort
+
+# List every Cargo bench target with its required features, then each benchmark driver and the recipe that runs it (measures nothing).
+bench-list:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    echo "Cargo bench targets ('just bench <package> <target>'; required features in brackets):"
+    just _bench-targets | awk '{ if ($3 == "") printf "  %-18s %s\n", $1, $2; else printf "  %-18s %-28s [%s]\n", $1, $2, $3 }'
+    cat <<'EOF'
+
+    Benchmark drivers:
+      bench-compare                 bench/compare-criterion.sh (Criterion A/B)
+      bench-rib-memory              RIB structural memory profile, one tree
+      bench-compare-rib-memory      bench/compare-rib-memory.sh
+      bench-compare-route-paging    bench/compare-route-paging.sh
+      bench-rrharness               bench/scale/rrharness (flood, churn, late-join)
+      bench-compare-rrharness       bench/scale/compare-rrharness.sh
+      bench-rrtransport-smoke       rrtransport smoke (correctness only)
+      bench-rrtransport             bench/scale/rrtransport/run-receipt.sh
+      bench-ixp-matrix              bench/scale/matrix/run-matrix.sh
+      bench-policy-stats            bench/scale/reloadstall/policy_stats_cell.sh
+      bench-route-server-1000       bench/scale/route-server-1000/run-receipt.sh
+      bench-enhanced-route-refresh  bench/scale/enhanced-route-refresh/run-receipt.sh
+      bench-irr-reload              bench/scale/irrreload/run-irr-reload.sh
+      bench-vpn-query               bench/run-vpn-query-campaign.sh
+      gate-contract                 bench/smoke-benches.sh (smoke only, no measurement)
+
+    Drivers without a recipe (run directly; see their headers):
+      bench/scale/irrreload/run-bmp-buffer-receipt.sh
+      bench/scale/irrreload/run-memory-attribution.sh
+      bench/netns-calibration/run-vm.sh
+      bench/evpn-load/fanout.py
+      bench/run-fib-kernel-dump.py
+      bench/run-mrt-attribute-scratch-campaign.py
+      docs/perf/run-lean-daemon-build-flavors.sh
+      docs/perf/run-explain-cache-variant.sh
+    EOF
+
+# Measure one Cargo bench target pinned to RUSTBGPD_BENCH_CORE under the host lock; required features come from its manifest and extra arguments reach the harness.
+[positional-arguments]
+bench package target *args:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    core="${RUSTBGPD_BENCH_CORE:-}"
+    if [[ ! $core =~ ^[0-9]+$ ]]; then
+        echo "set RUSTBGPD_BENCH_CORE to the CPU core this timing run is pinned to" >&2
+        exit 2
+    fi
+    read -r package target features < <(just _bench-targets \
+        | awk -v p="$1" -v t="$2" '($1 == p || $1 == "rustbgpd-" p) && $2 == t') || true
+    if [[ -z ${package:-} ]]; then
+        echo "unknown bench target: $1 $2" >&2
+        echo "run 'just bench-list' for the inventory" >&2
+        exit 2
+    fi
+    shift 2
+    feature_args=()
+    [[ -z ${features:-} ]] || feature_args=(--features "$features")
+    source tests/soak/host-lock.sh
+    acquire_rustbgpd_host_lock || exit $?
+    # Build unpinned first so only the measurement runs on the pinned core.
+    cargo bench --locked -p "$package" "${feature_args[@]}" --bench "$target" --no-run
+    exec taskset -c "$core" \
+        cargo bench --locked -p "$package" "${feature_args[@]}" --bench "$target" -- "$@"
+
+# A/B one Criterion target between two refs with compare-criterion.sh: four alternating attempts, pinned to RUSTBGPD_BENCH_CORE on the performance governor; later flags override these defaults.
+[positional-arguments]
+bench-compare package target base head *args:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    read -r package target features < <(just _bench-targets \
+        | awk -v p="$1" -v t="$2" '($1 == p || $1 == "rustbgpd-" p) && $2 == t') || true
+    if [[ -z ${package:-} ]]; then
+        echo "unknown bench target: $1 $2" >&2
+        echo "run 'just bench-list' for the inventory" >&2
+        exit 2
+    fi
+    base="$3"
+    head="$4"
+    shift 4
+    no_taskset=0
+    has_core=0
+    for arg in "$@"; do
+        case "$arg" in
+            --no-taskset) no_taskset=1 ;;
+            --core) has_core=1 ;;
+        esac
+    done
+    defaults=(--attempts 4)
+    if [[ ${no_taskset} -eq 1 ]]; then
+        : # mechanics only: no pin, so no governor requirement either
+    elif [[ -n ${RUSTBGPD_BENCH_CORE:-} ]]; then
+        defaults+=(--core "${RUSTBGPD_BENCH_CORE}" --require-performance)
+    elif [[ ${has_core} -eq 1 ]]; then
+        defaults+=(--require-performance)
+    else
+        echo "set RUSTBGPD_BENCH_CORE (or pass --core N) to pin both refs; --no-taskset is mechanics only" >&2
+        exit 2
+    fi
+    feature_args=()
+    [[ -z ${features:-} ]] || feature_args=(--features "$features")
+    exec bash bench/compare-criterion.sh --base "$base" --head "$head" \
+        --package "$package" --bench "$target" "${feature_args[@]}" "${defaults[@]}" "$@"
+
+# Measure the high-N RIB structural memory profile of this tree (quick: 10k and 100k prefixes; full: 100k to 900k) under the host lock.
+[positional-arguments]
+bench-rib-memory profile='quick':
+    #!/usr/bin/env bash
+    set -euo pipefail
+    case "$1" in
+        quick|full) ;;
+        *) echo "unknown profile: $1 (available: quick, full)" >&2; exit 2 ;;
+    esac
+    source tests/soak/host-lock.sh
+    acquire_rustbgpd_host_lock || exit $?
+    RUSTBGPD_RIB_MEMORY_PROFILE="$1" exec cargo test --locked -p rustbgpd-rib \
+        --features bench-internals --test memory_profile memory_profile_high_n \
+        -- --ignored --exact --nocapture
+
+# A/B the RIB structural memory profile between two refs with compare-rib-memory.sh (its default profile is quick).
+[positional-arguments]
+bench-compare-rib-memory base head *args:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    exec bash bench/compare-rib-memory.sh --base "$1" --head "$2" "${@:3}"
+
+# A/B route paging between the driver's two pinned commits with compare-route-paging.sh, pinned to RUSTBGPD_BENCH_CORE when set.
+[positional-arguments]
+bench-compare-route-paging base head *args:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    core_args=()
+    [[ -z ${RUSTBGPD_BENCH_CORE:-} ]] || core_args=(--core "${RUSTBGPD_BENCH_CORE}")
+    exec bash bench/compare-route-paging.sh --base "$1" --head "$2" "${core_args[@]}" "${@:3}"
+
+# Measure one rrharness flood, churn, or late-join run pinned to RUSTBGPD_BENCH_CORE under the host lock; arguments are in bench/scale/rrharness/README.md.
+[positional-arguments]
+bench-rrharness mode *args:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    core="${RUSTBGPD_BENCH_CORE:-}"
+    if [[ ! $core =~ ^[0-9]+$ ]]; then
+        echo "set RUSTBGPD_BENCH_CORE to the CPU core this timing run is pinned to" >&2
+        exit 2
+    fi
+    source tests/soak/host-lock.sh
+    acquire_rustbgpd_host_lock || exit $?
+    env -u CARGO_TARGET_DIR cargo build --release --locked \
+        --manifest-path bench/scale/rrharness/Cargo.toml
+    exec taskset -c "$core" bench/scale/target/release/rrharness "$@"
+
+# A/B the fixed rrharness flood/churn matrix between two refs with compare-rrharness.sh, pinned to RUSTBGPD_BENCH_CORE when set.
+[positional-arguments]
+bench-compare-rrharness base head *args:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    core_args=()
+    [[ -z ${RUSTBGPD_BENCH_CORE:-} ]] || core_args=(--core "${RUSTBGPD_BENCH_CORE}")
+    exec bash bench/scale/compare-rrharness.sh --base "$1" --head "$2" "${core_args[@]}" "${@:3}"
+
+# Run the fixed four-source rrtransport correctness smoke (checks exact routes; measures nothing).
+bench-rrtransport-smoke:
+    cargo run --manifest-path bench/scale/rrtransport/Cargo.toml --locked -- smoke
+
+# Measure the three-attempt rrtransport rr1000 campaign into OUTPUT, a new absolute path outside the repository (`--real-smoke DIR` runs the tiny fixture instead).
+[positional-arguments]
+bench-rrtransport *args:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    exec bash bench/scale/rrtransport/run-receipt.sh "$@"
+
+# The daemon is built with the IRR runner's three-package command, so one
+# source gives the same daemon hash under either driver.
+
+# Measure IXP reload-stall matrix cells with run-matrix.sh (default: rustbgpd bird openbgpd) after building the daemon and reloadstall; N_PEERS, FLAPSTORM, ARTIFACTS_DIR and the other knobs in its header pass through.
+[positional-arguments]
+bench-ixp-matrix *cells:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    env -u CARGO_TARGET_DIR -u RUSTFLAGS cargo build --release --locked \
+        -p rustbgpd -p rustbgpctl -p rs-config-render
+    env -u CARGO_TARGET_DIR -u RUSTFLAGS cargo build --release --locked \
+        --manifest-path bench/scale/reloadstall/Cargo.toml
+    # The membership cell needs more descriptors (bench/scale/reloadstall/README.md).
+    [[ ${RELOADSTALL_MEMBERSHIP_CHURN:-0} != 1 ]] || ulimit -n 65536
+    exec bash bench/scale/matrix/run-matrix.sh "$@"
+
+# Measure the GetPolicyStats reload cell into RUN_DIR, a new directory, under the host lock; PEERS, PREFIXES, RELOADS and the CPU sets in its header pass through.
+[positional-arguments]
+bench-policy-stats run_dir:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    env -u CARGO_TARGET_DIR -u RUSTFLAGS cargo build --release --locked \
+        -p rustbgpd -p rustbgpctl -p rs-config-render
+    env -u CARGO_TARGET_DIR -u RUSTFLAGS cargo build --release --locked \
+        --manifest-path bench/scale/reloadstall/Cargo.toml
+    source tests/soak/host-lock.sh
+    acquire_rustbgpd_host_lock || exit $?
+    exec bash bench/scale/reloadstall/policy_stats_cell.sh \
+        target/release bench/scale/target/release/reloadstall "$1"
+
+# Measure the fixed 1,000-client route-server retained receipt (no smoke mode; needs a clean tree).
+bench-route-server-1000:
+    bash bench/scale/route-server-1000/run-receipt.sh
+
+# Measure the fixed one-peer x 100,000-prefix enhanced route refresh receipt (no smoke mode; needs a clean tree).
+bench-enhanced-route-refresh:
+    bash bench/scale/enhanced-route-refresh/run-receipt.sh
+
+# Measure IRR-scale reload cells with run-irr-reload.sh; SMOKE=1 is its tiny pipeline check, and N_MEMBERS, OVERLAP_FRACTION, ARTIFACTS_DIR and the other knobs in its header pass through.
+[positional-arguments]
+bench-irr-reload *cells:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    exec bash bench/scale/irrreload/run-irr-reload.sh "$@"
+
+# Measure the VPN query campaign into OUTPUT, a new directory, pinned to RUSTBGPD_BENCH_CORE unless --cpu is given; `--smoke` and `--retry` come first.
+[positional-arguments]
+bench-vpn-query output *args:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    output="$1"
+    shift
+    cpu_args=()
+    if [[ " $* " != *" --cpu "* && -n ${RUSTBGPD_BENCH_CORE:-} ]]; then
+        cpu_args=(--cpu "${RUSTBGPD_BENCH_CORE}")
+    fi
+    exec bash bench/run-vpn-query-campaign.sh "$@" "${cpu_args[@]}" "$output"

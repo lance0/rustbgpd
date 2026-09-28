@@ -150,6 +150,14 @@ The recipes intentionally expose their direct commands:
   `just fuzz <crate> <target> [args]` runs one listed target from its owning
   crate on the pinned nightly toolchain and passes any extra arguments to
   libFuzzer.
+- `just bench-list` prints every Cargo bench target with its required
+  features and every benchmark driver with the `bench-*` recipe that runs it.
+  `just bench <package> <target> [args]` measures one target pinned to the
+  core in `RUSTBGPD_BENCH_CORE` under the shared host lock, and
+  `just bench-compare <package> <target> <base> <head>` runs the Criterion
+  A/B with four alternating attempts. The scale and receipt drivers have their
+  own recipes; `bench/README.md` lists them. No `gate` recipe runs a
+  benchmark.
 
 Hosted checks remain authoritative. `just gate-ci` covers the `ci.yml`
 checks that need no privileges or pull-request context; these stay CI-only:
