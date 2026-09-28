@@ -100,10 +100,16 @@ Other mutations wait at most just past the daemon's own bound. Neighbor
 session controls, `gshut`, route injection, EVPN runtime controls and
 `shutdown` wait up to 11 minutes. Changes the daemon persists to its
 configuration wait up to 31 minutes: neighbors, dynamic-neighbor ranges,
-policies, neighbor sets, chains, peer groups and FIB tables. `mrt-dump`
-also waits up to 31 minutes. On expiry the command exits 1 with an
-outcome-unknown error that names a command to verify with. The daemon may
-still apply the change, so the CLI never retries it.
+policies, neighbor sets, chains, peer groups and FIB tables. On expiry the
+command exits 1 with an outcome-unknown error that names a command to verify
+with. The daemon may still apply the change, so the CLI never retries it.
+
+`mrt-dump` waits up to 31 minutes and also exits 1 on expiry, but its
+outcome differs. The daemon treats the dropped request as a cancellation
+until the dump's RIB snapshot arrives. A dump still queued or waiting for
+that snapshot is abandoned, and no file is written. A dump already encoding
+or writing runs to completion. Check the `[mrt] output_dir` directory for a
+new file before triggering another.
 
 Each config-transaction RPC waits up to 31 minutes, just past the daemon's
 30-minute operation bound: `config diff`, `plan`, `apply`, `confirm`, `abort`

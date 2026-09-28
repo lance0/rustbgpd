@@ -23,37 +23,38 @@ fn mutations_against_a_silent_daemon_report_an_unknown_outcome() {
     });
     let address = format!("unix://{}", socket.display());
 
-    let apply = "the daemon may still apply this change";
-    for (args, rpc, outcome, verify) in [
+    let apply = "outcome unknown: the daemon may still apply this change; verify with";
+    for (args, expected) in [
         (
             &["neighbor", "192.0.2.1", "reset"][..],
-            "ResetNeighbor",
-            apply,
-            "`rbgp neighbor 192.0.2.1`",
+            &["ResetNeighbor", apply, "`rbgp neighbor 192.0.2.1`"][..],
         ),
         (
             &["neighbor", "192.0.2.1", "delete"][..],
-            "DeleteNeighbor",
-            apply,
-            "`rbgp neighbor 192.0.2.1`",
+            &["DeleteNeighbor", apply, "`rbgp neighbor 192.0.2.1`"][..],
         ),
         (
             &["gshut", "--all", "--yes"][..],
-            "SetGracefulShutdown",
-            apply,
-            "`rbgp neighbor`",
-        ),
-        (
-            &["mrt-dump"][..],
-            "TriggerMrtDump",
-            apply,
-            "MRT output directory",
+            &["SetGracefulShutdown", apply, "`rbgp neighbor`"][..],
         ),
         (
             &["config", "confirm", "maint-1"][..],
-            "ConfirmConfigTransaction",
-            "the transaction may still commit or roll back",
-            "`rbgp config status`",
+            &[
+                "ConfirmConfigTransaction",
+                "outcome unknown: the transaction may still commit or roll back; verify with",
+                "`rbgp config status`",
+            ][..],
+        ),
+        // The daemon cancels a dump whose caller disconnects before the RIB
+        // snapshot arrives, so mrt-dump must not claim the change may apply.
+        (
+            &["mrt-dump"][..],
+            &[
+                "TriggerMrtDump",
+                "a dump still queued or waiting for its RIB snapshot is cancelled when rbgp \
+                 disconnects, but one already encoding or writing still completes",
+                "`[mrt] output_dir`",
+            ][..],
         ),
     ] {
         let mut child = Command::new(env!("CARGO_BIN_EXE_rbgp"))
@@ -79,14 +80,10 @@ fn mutations_against_a_silent_daemon_report_an_unknown_outcome() {
         let error = String::from_utf8_lossy(&output.stderr);
         assert_eq!(output.status.code(), Some(1), "{args:?}: {error}");
         assert!(output.stdout.is_empty(), "{args:?}: {output:?}");
-        for expected in [
-            "deadline exceeded",
-            rpc,
-            "outcome unknown: ",
-            outcome,
-            "; verify with ",
-            verify,
-        ] {
+        if args == ["mrt-dump"] {
+            assert!(!error.contains("outcome unknown"), "{error}");
+        }
+        for expected in ["deadline exceeded"].iter().chain(expected) {
             assert!(
                 error.contains(expected),
                 "{args:?}: missing {expected:?} in {error}"

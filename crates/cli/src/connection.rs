@@ -50,9 +50,13 @@ pub(crate) const MUTATION_RPC_TIMEOUT: Duration = Duration::from_secs(11 * 60);
 /// FIB tables). The settlement watchdog stops the daemon when such a change
 /// has not settled within 30 minutes (`OWNED_SETTLEMENT_BUDGET`), so no reply
 /// can arrive later; the extra minute covers the fence grace and transfer.
-/// `mrt-dump` also uses it: the daemon does not bound a dump, which writes
-/// the whole RIB.
 pub(crate) const SETTLED_MUTATION_RPC_TIMEOUT: Duration = Duration::from_secs(31 * 60);
+/// Client wait for `mrt-dump`. The daemon does not bound a dump, and a
+/// disconnect cancels one only before its RIB snapshot arrives; encoding and
+/// writing then finish regardless. Expiry therefore cannot cut short a dump
+/// that is writing, only one still queued or waiting on the RIB, and 31
+/// minutes is far beyond a healthy snapshot wait.
+pub(crate) const MRT_DUMP_RPC_TIMEOUT: Duration = Duration::from_secs(31 * 60);
 /// Client wait for each config-transaction RPC: diff, plan, apply, confirm,
 /// abort and rollback, unary or streamed. The daemon bounds each operation at
 /// 30 minutes (`CONFIG_OPERATION_TIMEOUT`); the extra minute covers the

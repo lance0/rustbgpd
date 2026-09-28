@@ -1,5 +1,6 @@
 use crate::connection::{
-    Connection, MUTATION_RPC_TIMEOUT, SETTLED_MUTATION_RPC_TIMEOUT, mutation_rpc, read_rpc,
+    Connection, MRT_DUMP_RPC_TIMEOUT, MUTATION_RPC_TIMEOUT, mutation_budget, mutation_rpc,
+    read_rpc, rpc_with_timeout,
 };
 use crate::error::CliError;
 use crate::output::{self, JsonHealth, outln};
@@ -171,16 +172,32 @@ pub async fn shutdown(
     output::print_result(json, "shutdown", "", "Shutdown requested")
 }
 
+/// The daemon treats a disconnected caller as a cancellation until the RIB
+/// snapshot arrives: a queued dump is skipped and a snapshot wait is
+/// abandoned. Once encoding starts the dump runs to completion. Say so
+/// instead of the generic "may still apply" notice.
+fn mrt_dump_deadline(status: tonic::Status) -> tonic::Status {
+    if status.code() != tonic::Code::DeadlineExceeded {
+        return status;
+    }
+    tonic::Status::deadline_exceeded(format!(
+        "{}; a dump still queued or waiting for its RIB snapshot is cancelled when \
+         rbgp disconnects, but one already encoding or writing still completes; check \
+         for a new file in the `[mrt] output_dir` directory",
+        status.message()
+    ))
+}
+
 pub async fn mrt_dump(connection: Connection, json: bool) -> Result<(), CliError> {
     let mut client =
         ControlServiceClient::with_interceptor(connection.channel(), connection.interceptor());
-    let resp = mutation_rpc(
+    let resp = rpc_with_timeout(
         "TriggerMrtDump",
-        SETTLED_MUTATION_RPC_TIMEOUT,
-        "the newest file in the configured MRT output directory",
+        mutation_budget(MRT_DUMP_RPC_TIMEOUT),
         client.trigger_mrt_dump(TriggerMrtDumpRequest {}),
     )
-    .await?
+    .await
+    .map_err(mrt_dump_deadline)?
     .into_inner();
 
     if json {
