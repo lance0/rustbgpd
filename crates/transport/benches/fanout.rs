@@ -2780,6 +2780,15 @@ fn bench_route_refresh_group_member(c: &mut Criterion) {
                                 (index, receiver)
                             })
                             .collect();
+                        // Every refreshed member must take the grouped refresh
+                        // arm; an ungrouped member would time the full walk.
+                        let receipt = manager.bench_adj_rib_out_fanout_receipt();
+                        assert_eq!(receipt.update_groups, 1, "one converged group");
+                        assert_eq!(receipt.grouped_peers, 1 + GROUP_JOINERS);
+                        assert_eq!(
+                            receipt.ungrouped_peers, 0,
+                            "no refreshed member is ungrouped"
+                        );
                         for (index, _) in &receivers {
                             let started = Instant::now();
                             manager.bench_route_refresh_joined_peer(*index);
