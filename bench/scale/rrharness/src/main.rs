@@ -76,10 +76,10 @@ fn flood_prefix(offset: u64) -> Ipv4Prefix {
 
 /// Distinct /24 for a churn prefix index. Indexes below 61,440 keep their
 /// original `172.16.0.0/12`-rooted prefixes; larger ones continue into the
-/// following first octets (room for about 5.1M prefixes).
+/// following first octets, up to `255.255.255.0/24` (5,160,960 prefixes).
 fn churn_prefix(i: u64) -> Ipv4Prefix {
     let block = i >> 8;
-    let a = 172 + u8::try_from(block / 240).expect("churn prefix space exhausted");
+    let a = u8::try_from(172 + block / 240).expect("churn prefix space exhausted");
     let b = 16 + u8::try_from(block % 240).unwrap();
     let c = u8::try_from(i & 0xff).unwrap();
     Ipv4Prefix::new(Ipv4Addr::new(a, b, c, 0), 24)
@@ -808,6 +808,21 @@ mod tests {
         assert_eq!(churn_prefix(61_440), v4(173, 16, 0));
         let prefixes: std::collections::HashSet<_> = (0..1_000_000).map(churn_prefix).collect();
         assert_eq!(prefixes.len(), 1_000_000);
+    }
+
+    #[test]
+    fn churn_prefix_space_ends_at_255() {
+        let last = 84 * 240 * 256 - 1;
+        assert_eq!(
+            churn_prefix(last),
+            Ipv4Prefix::new(Ipv4Addr::new(255, 255, 255, 0), 24)
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "churn prefix space exhausted")]
+    fn churn_prefix_past_the_space_panics() {
+        let _ = churn_prefix(84 * 240 * 256);
     }
 
     fn stat(comm: &str, utime: &str, stime: &str) -> String {
