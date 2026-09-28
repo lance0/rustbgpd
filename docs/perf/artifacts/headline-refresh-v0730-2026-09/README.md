@@ -16,6 +16,7 @@ v0.72.0 and v0.68.0 controls.
 | `daemon-reload.csv` | Per-reload daemon-log intervals: SIGHUP received to config source loaded and to config reload complete, with the logged `validate_ms` and RIB transition time |
 | `bgperf2-spot-check.csv` | The three single-run bgperf2 rows for the v0.73.0 spot-check |
 | `driver/` | The campaign driver as run (see below) |
+| `build/` | `build.out` (per-arm build exit codes and binary hashes) and `tagcheck.txt` (same-directory tag-commit rebuild check), with paths replaced by placeholders |
 
 ## Arms and identities
 
@@ -58,6 +59,45 @@ Absolute scratch, checkout, repository and home paths are replaced with
 | `bgperf2-spot.sh` | The bgperf2 single-run spot-check |
 | `summary.py`, `report.py`, `daemon_reload.py` | Extraction into `summary.csv`, `establishment-span.csv` and `daemon-reload.csv`, and the per-arm range report |
 | `bundle.py` | Sanitized copy of the evidence into this directory |
+
+### Known defects in this driver as run
+
+The scripts are published unchanged, so these defects remain in them. None of
+them affected the evidence, for the reasons given after the list.
+
+1. **`build.sh` depends on checkouts that `setup.sh` does not create.** Its
+   second loop builds in `headline-v0730-tag-v0730` and
+   `headline-v0730-tag-v0680`, but `setup.sh` never creates them. The script
+   has no `set -e`, so a failed `cd` would not stop it: it would build in the
+   wrong directory and still print `BUILD_DONE`.
+2. **`run-window.sh` exits with the status of its final `echo`,** not the
+   campaign's exit status.
+3. **`run-window2.sh` has the same defect.**
+4. **`run-window3.sh` has the same defect.**
+5. **`tagcheck.sh` does not fail when a build fails.** It prints each rebuild's
+   exit code into its output line, and the trailing `tee` masks the loop's
+   status.
+
+**Why the evidence is unaffected:**
+
+- **The tag checkouts existed during the run.** Before `build.sh` ran, they
+  were created inline with `git worktree add --detach
+  <worktrees>/headline-v0730-tag-v0730 v0.73.0`, and likewise for `v0.68.0`.
+  `build/build.out` records `tag-v0730 product=0` and `tag-v0680 product=0`
+  and hashes daemons at both tag paths.
+  - Those tag-path hashes are not used as an identity anywhere. A daemon
+    built in a different directory hashes differently.
+- **Every recorded leg exited 0.** `progress.txt` holds 52 per-leg exit codes:
+  - 30 matrix cells, each also recording `status=pass`;
+  - 13 IRR roots, each recording `"status":"pass"`;
+  - 9 RR1000 campaigns, each recording `completed=pass`.
+- **The phase exit codes were recorded despite defects 2–4.** Each wrapper
+  wrote its phase's exit code before exiting: `campaign all rc=0`,
+  `campaign xh rc=0` and `campaign irrx rc=0`. The chain scripts start a phase
+  by reading that line, not the wrapper's exit status.
+- **Every tag rebuild passed.** `build/tagcheck.txt` shows `rc=0`,
+  `compiled=0` and `same=yes` for all three arms, and the three hashes match
+  the daemon hashes above and in the matrix and IRR provenance files.
 
 Local paths in the evidence files are replaced with `<run-root>`, `<scratch>`
 and `<v0.73.0-tree>`-style placeholders. Full daemon logs, scenario
