@@ -7,7 +7,7 @@
 use serde::Serialize;
 
 use crate::commands::policy_input::{JsonNeighborSetDefinition, load_json};
-use crate::connection::{Connection, read_rpc};
+use crate::connection::{Connection, SETTLED_MUTATION_RPC_TIMEOUT, mutation_rpc, read_rpc};
 use crate::error::CliError;
 use crate::output::{self, outln};
 use crate::proto::policy_service_client::PolicyServiceClient;
@@ -152,12 +152,16 @@ pub async fn set(
     let definition: JsonNeighborSetDefinition = load_json(from_file)?;
     let mut client =
         PolicyServiceClient::with_interceptor(connection.channel(), connection.interceptor());
-    client
-        .set_neighbor_set(SetNeighborSetRequest {
+    mutation_rpc(
+        "SetNeighborSet",
+        SETTLED_MUTATION_RPC_TIMEOUT,
+        &format!("`rbgp neighbor-set get {name}`"),
+        client.set_neighbor_set(SetNeighborSetRequest {
             name: name.to_string(),
             definition: Some(definition.into()),
-        })
-        .await?;
+        }),
+    )
+    .await?;
     output::print_result(
         json,
         "set_neighbor_set",
@@ -169,11 +173,15 @@ pub async fn set(
 pub async fn delete(connection: Connection, name: &str, json: bool) -> Result<(), CliError> {
     let mut client =
         PolicyServiceClient::with_interceptor(connection.channel(), connection.interceptor());
-    client
-        .delete_neighbor_set(DeleteNeighborSetRequest {
+    mutation_rpc(
+        "DeleteNeighborSet",
+        SETTLED_MUTATION_RPC_TIMEOUT,
+        &format!("`rbgp neighbor-set get {name}`"),
+        client.delete_neighbor_set(DeleteNeighborSetRequest {
             name: name.to_string(),
-        })
-        .await?;
+        }),
+    )
+    .await?;
     output::print_result(
         json,
         "delete_neighbor_set",

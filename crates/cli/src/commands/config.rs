@@ -1,4 +1,7 @@
-use crate::connection::{Connection, EFFECTIVE_CONFIG_RPC_TIMEOUT, read_rpc, rpc_with_timeout};
+use crate::connection::{
+    CONFIG_TRANSACTION_RPC_TIMEOUT, Connection, EFFECTIVE_CONFIG_RPC_TIMEOUT,
+    config_transaction_rpc, mutation_budget, read_rpc, rpc_with_timeout,
+};
 use crate::error::CliError;
 use crate::output::{self, outln};
 use crate::proto::config_service_client::ConfigServiceClient;
@@ -89,7 +92,13 @@ pub async fn diff(connection: Connection, from_file: &str, json: bool) -> Result
     preflight_config_request(&request, from_file)?;
     let mut client =
         ConfigServiceClient::with_interceptor(connection.channel(), connection.interceptor());
-    let resp = client.diff_runtime_config(request).await?.into_inner();
+    let resp = rpc_with_timeout(
+        "DiffRuntimeConfig",
+        mutation_budget(CONFIG_TRANSACTION_RPC_TIMEOUT),
+        client.diff_runtime_config(request),
+    )
+    .await?
+    .into_inner();
 
     if json {
         output::print_serialized_json_line(&resp.diff_json)?;
@@ -109,12 +118,15 @@ pub async fn plan(
     let candidate_toml = Arc::new(read_candidate_toml(from_file)?);
     let mut client =
         ConfigServiceClient::with_interceptor(connection.channel(), connection.interceptor());
-    let streamed = client
-        .stream_plan_config_transaction(PlanFrameStream::new(
+    let streamed = rpc_with_timeout(
+        "StreamPlanConfigTransaction",
+        mutation_budget(CONFIG_TRANSACTION_RPC_TIMEOUT),
+        client.stream_plan_config_transaction(PlanFrameStream::new(
             Arc::clone(&candidate_toml),
             expected_runtime_snapshot_token,
-        ))
-        .await;
+        )),
+    )
+    .await;
     let (resp, plan_token) = match streamed {
         Ok(response) => {
             let response = response.into_inner();
@@ -132,7 +144,13 @@ pub async fn plan(
             };
             preflight_config_request(&request, from_file)?;
             (
-                client.plan_config_transaction(request).await?.into_inner(),
+                rpc_with_timeout(
+                    "PlanConfigTransaction",
+                    mutation_budget(CONFIG_TRANSACTION_RPC_TIMEOUT),
+                    client.plan_config_transaction(request),
+                )
+                .await?
+                .into_inner(),
                 None,
             )
         }
@@ -199,12 +217,15 @@ async fn apply_response(
     let plan_token = match options.plan_token {
         Some(token) => token.to_string(),
         None => {
-            let plan = client
-                .stream_plan_config_transaction(PlanFrameStream::new(
+            let plan = rpc_with_timeout(
+                "StreamPlanConfigTransaction",
+                mutation_budget(CONFIG_TRANSACTION_RPC_TIMEOUT),
+                client.stream_plan_config_transaction(PlanFrameStream::new(
                     Arc::clone(&candidate_toml),
                     Some(options.expected_runtime_snapshot_token),
-                ))
-                .await;
+                )),
+            )
+            .await;
             match plan {
                 Ok(response) => {
                     let response = response.into_inner();
@@ -255,12 +276,15 @@ async fn apply_response(
         confirm_id: options.confirm_id.unwrap_or_default().to_string(),
         confirm_timeout_seconds: options.confirm_timeout_seconds.unwrap_or_default(),
     };
-    let resp = match client
-        .stream_apply_config_transaction(ApplyFrameStream::new(
+    let resp = match config_transaction_rpc(
+        "StreamApplyConfigTransaction",
+        "`rbgp config history`",
+        client.stream_apply_config_transaction(ApplyFrameStream::new(
             Arc::clone(&candidate_toml),
             metadata,
-        ))
-        .await
+        )),
+    )
+    .await
     {
         Ok(response) => response.into_inner(),
         Err(status) if options.plan_token.is_none() && exact_missing_method(&status) => {
@@ -314,7 +338,13 @@ where
     <T::ResponseBody as tonic::codegen::Body>::Error: Into<tonic::codegen::StdError> + Send,
 {
     preflight_config_request(&request, from_file)?;
-    Ok(client.apply_config_transaction(request).await?.into_inner())
+    Ok(config_transaction_rpc(
+        "ApplyConfigTransaction",
+        "`rbgp config history`",
+        client.apply_config_transaction(request),
+    )
+    .await?
+    .into_inner())
 }
 
 fn print_apply_response(resp: &ConfigTransactionApplyResponse, json: bool) -> Result<(), CliError> {
@@ -535,12 +565,15 @@ pub async fn confirm(connection: Connection, confirm_id: &str, json: bool) -> Re
     validate_confirm_id(confirm_id)?;
     let mut client =
         ConfigServiceClient::with_interceptor(connection.channel(), connection.interceptor());
-    let resp = client
-        .confirm_config_transaction(ConfirmConfigTransactionRequest {
+    let resp = config_transaction_rpc(
+        "ConfirmConfigTransaction",
+        "`rbgp config status`",
+        client.confirm_config_transaction(ConfirmConfigTransactionRequest {
             confirm_id: confirm_id.to_string(),
-        })
-        .await?
-        .into_inner();
+        }),
+    )
+    .await?
+    .into_inner();
 
     if json {
         print_json(confirm_to_json(&resp))?;
@@ -559,12 +592,15 @@ pub async fn abort(connection: Connection, confirm_id: &str, json: bool) -> Resu
     validate_confirm_id(confirm_id)?;
     let mut client =
         ConfigServiceClient::with_interceptor(connection.channel(), connection.interceptor());
-    let resp = client
-        .abort_config_transaction(AbortConfigTransactionRequest {
+    let resp = config_transaction_rpc(
+        "AbortConfigTransaction",
+        "`rbgp config status`",
+        client.abort_config_transaction(AbortConfigTransactionRequest {
             confirm_id: confirm_id.to_string(),
-        })
-        .await?
-        .into_inner();
+        }),
+    )
+    .await?
+    .into_inner();
 
     if json {
         print_json(abort_to_json(&resp))?;
@@ -653,8 +689,10 @@ pub async fn rollback(
     }
     let mut client =
         ConfigServiceClient::with_interceptor(connection.channel(), connection.interceptor());
-    let resp = client
-        .rollback_config_transaction(RollbackConfigTransactionRequest {
+    let resp = config_transaction_rpc(
+        "RollbackConfigTransaction",
+        "`rbgp config history`",
+        client.rollback_config_transaction(RollbackConfigTransactionRequest {
             index: options.index,
             expected_runtime_snapshot_token: options
                 .expected_runtime_snapshot_token
@@ -664,9 +702,10 @@ pub async fn rollback(
             comment: options.comment.unwrap_or_default().to_string(),
             confirm_id: options.confirm_id.unwrap_or_default().to_string(),
             confirm_timeout_seconds: options.confirm_timeout_seconds.unwrap_or_default(),
-        })
-        .await?
-        .into_inner();
+        }),
+    )
+    .await?
+    .into_inner();
 
     // A rollback receipt is an apply receipt — same shape, same printers.
     if json {

@@ -1,4 +1,7 @@
-use crate::connection::{Connection, read_rpc};
+use crate::connection::{
+    Connection, MRT_DUMP_RPC_TIMEOUT, MUTATION_RPC_TIMEOUT, mutation_budget, mutation_rpc,
+    read_rpc, rpc_with_timeout,
+};
 use crate::error::CliError;
 use crate::output::{self, JsonHealth, outln};
 use crate::proto::control_service_client::ControlServiceClient;
@@ -157,21 +160,45 @@ pub async fn shutdown(
 ) -> Result<(), CliError> {
     let mut client =
         ControlServiceClient::with_interceptor(connection.channel(), connection.interceptor());
-    client
-        .shutdown(ShutdownRequest {
+    mutation_rpc(
+        "Shutdown",
+        MUTATION_RPC_TIMEOUT,
+        "`rbgp health`",
+        client.shutdown(ShutdownRequest {
             reason: reason.unwrap_or_default(),
-        })
-        .await?;
+        }),
+    )
+    .await?;
     output::print_result(json, "shutdown", "", "Shutdown requested")
+}
+
+/// The daemon treats a disconnected caller as a cancellation until the RIB
+/// snapshot arrives: a queued dump is skipped and a snapshot wait is
+/// abandoned. Once encoding starts the dump runs to completion. Say so
+/// instead of the generic "may still apply" notice.
+fn mrt_dump_deadline(status: tonic::Status) -> tonic::Status {
+    if status.code() != tonic::Code::DeadlineExceeded {
+        return status;
+    }
+    tonic::Status::deadline_exceeded(format!(
+        "{}; a dump still queued or waiting for its RIB snapshot is cancelled when \
+         rbgp disconnects, but one already encoding or writing still completes; check \
+         for a new file in the `[mrt] output_dir` directory",
+        status.message()
+    ))
 }
 
 pub async fn mrt_dump(connection: Connection, json: bool) -> Result<(), CliError> {
     let mut client =
         ControlServiceClient::with_interceptor(connection.channel(), connection.interceptor());
-    let resp = client
-        .trigger_mrt_dump(TriggerMrtDumpRequest {})
-        .await?
-        .into_inner();
+    let resp = rpc_with_timeout(
+        "TriggerMrtDump",
+        mutation_budget(MRT_DUMP_RPC_TIMEOUT),
+        client.trigger_mrt_dump(TriggerMrtDumpRequest {}),
+    )
+    .await
+    .map_err(mrt_dump_deadline)?
+    .into_inner();
 
     if json {
         output::print_json_line(&serde_json::json!({ "file_path": resp.file_path }))?;
