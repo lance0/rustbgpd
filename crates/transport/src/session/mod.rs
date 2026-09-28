@@ -308,6 +308,13 @@ pub(crate) struct PeerSession {
     link_local_next_hop_scope: Option<NextHopScope>,
     /// Negotiated session parameters (set when `SessionEstablished`).
     negotiated: Option<Arc<NegotiatedSession>>,
+    /// The last ASPA validation context this session interned, and its id.
+    /// Inbound UPDATEs reuse the id while the context is unchanged, so the
+    /// process-wide context table is not locked per UPDATE.
+    aspa_context_id: (
+        rustbgpd_wire::AspaValidationContext,
+        rustbgpd_rib::route::AspaContextId,
+    ),
     /// Families for which Add-Path receive was negotiated. Built once at
     /// `SessionEstablished` and reused by inbound UPDATE decode instead of
     /// rebuilding from `NegotiatedSession::add_path_families` per UPDATE.
@@ -2061,6 +2068,7 @@ impl PeerSession {
             peer_ip,
             link_local_next_hop_scope,
             negotiated: None,
+            aspa_context_id: Default::default(),
             add_path_receive_families: Vec::new(),
             received_eor_families: HashSet::new(),
             route_refresh_queued: HashMap::new(),

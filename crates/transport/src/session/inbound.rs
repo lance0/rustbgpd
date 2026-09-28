@@ -1070,6 +1070,16 @@ impl PeerSession {
             self.config.peer.local_role,
         )
     }
+    /// The interned id of [`Self::aspa_validation_context`]. Its inputs are
+    /// fixed for an established session but change across reconnects, so the
+    /// id is re-interned only when the context differs from the cached one.
+    pub(super) fn aspa_context_id(&mut self) -> rustbgpd_rib::route::AspaContextId {
+        let context = self.aspa_validation_context();
+        if self.aspa_context_id.0 != context {
+            self.aspa_context_id = (context, rustbgpd_rib::route::AspaContextId::intern(context));
+        }
+        self.aspa_context_id.1
+    }
     /// Return the received and negotiated ASNs when an IPv4/IPv6-unicast
     /// UPDATE from an eBGP peer fails the ASPA first-AS precondition. A
     /// session on which this speaker is the RS client remains exempt.
@@ -2131,7 +2141,7 @@ impl PeerSession {
         // ASN; a configured role selects verification direction, not whether
         // the first-AS precondition applies.
         let aspa_context = self.aspa_validation_context();
-        let aspa_context_id = rustbgpd_rib::route::AspaContextId::intern(aspa_context);
+        let aspa_context_id = self.aspa_context_id();
         let route_received_at = rustbgpd_rib::route::ReceivedAt::from_instant(now);
         // ASPA is an edge-ingress signal. Draft -27 §6.2 says applying it to
         // iBGP is NOT RECOMMENDED, so rustbgpd deliberately presents Unknown

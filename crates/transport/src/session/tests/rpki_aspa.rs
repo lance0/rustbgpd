@@ -1,4 +1,5 @@
 use super::*;
+use rustbgpd_rib::route::AspaContextId;
 
 #[test]
 fn aspa_validation_context_exempts_only_local_route_server_client_role() {
@@ -87,6 +88,46 @@ async fn aspa_first_as_mismatch_exempts_local_route_server_client_role() {
     assert!(withdrawn.is_empty());
     assert_eq!(session.known_prefix_count(), 1);
     assert_eq!(session.fsm.state(), SessionState::Established);
+}
+
+/// Routes carry the interned id of their session's ASPA context. The id is
+/// cached per session and re-interned only when the context changes, as it
+/// does when a reconnect negotiates a different peer ASN; a cache that never
+/// re-interns would stamp the new session's routes with the old context.
+#[tokio::test]
+async fn inbound_routes_carry_the_current_session_aspa_context_id() {
+    let (mut session, mut rib_rx) = make_test_session_with_rib(65001, 65002);
+    session.config.peer.local_role = Some(BgpRole::Customer);
+    let (client, _server) = connected_stream_pair().await;
+    session.test_install_stream(client);
+    establish_test_session(&mut session, 65002).await;
+    let mut announced_context = async |session: &mut PeerSession, octet: u8, asn: u32| {
+        while rib_rx.try_recv().is_ok() {}
+        let prefix = Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, octet), 32);
+        session
+            .process_update(aspa_first_as_update(prefix, asn, true))
+            .await;
+        let Ok(RibUpdate::RoutesReceived { announced, .. }) = rib_rx.try_recv() else {
+            panic!("expected RoutesReceived");
+        };
+        assert_eq!(announced.len(), 1);
+        announced[0].aspa_context
+    };
+
+    install_test_negotiated_session(&mut session, negotiated_session(65002, false));
+    let first = announced_context(&mut session, 1, 65002).await;
+    let expected = AspaContextId::intern(session.aspa_validation_context());
+    assert_eq!(first, expected);
+    assert_ne!(first, AspaContextId::DEFAULT);
+    assert_eq!(announced_context(&mut session, 2, 65002).await, first);
+
+    // Reconnect to a different negotiated ASN: the id must follow.
+    install_test_negotiated_session(&mut session, negotiated_session(65077, false));
+    let second = announced_context(&mut session, 3, 65077).await;
+    let context = session.aspa_validation_context();
+    assert_eq!(context.neighbor_asn, Some(65077));
+    assert_eq!(second, AspaContextId::intern(context));
+    assert_ne!(second, first);
 }
 
 /// Load-bearing scope controls: removing either the eBGP or unicast-family
