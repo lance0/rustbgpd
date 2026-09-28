@@ -184,6 +184,15 @@ established shapes.
     - S2 peak process-tree RSS: the range narrows from 488–567 MiB to
       488–497 MiB.
     - No main-against-v0.72.0 reading in the results changes.
+
+  **Correction (2026-09-28):** The campaign driver set no CPU affinity for the
+  benchmark runners, daemon, or harness. They were unpinned; the 16–23 and
+  24–39 core placement stated above is incorrect. The concurrent builds ran
+  on cores 40–63, but separate-core isolation of the benchmark cannot be
+  claimed. The overlap caveat and measurements above are retained as recorded.
+  The [v0.73.0 follow-up receipt](headline-refresh-v0730-2026-09.md#host-and-order)
+  records the same placement and identifies the driver discrepancy.
+
 - Order: strictly sequential, alternating the two builds within every cell type,
   with the runners' 300-second cool-downs. The sequence was matrix S2 then S3
   for each run, then IRR at 0%, then RR1000.
