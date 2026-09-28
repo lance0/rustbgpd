@@ -5,9 +5,6 @@ Hosted CI is where a release commit usually meets these for the first time,
 some of them only after the tag is pushed:
 
   - the metric release-note contract (`public-docs-contract.yml`);
-  - the published-crate README freshness gate (`ci.yml`), which hosted CI
-    diffs against the pull request base or the pushed range. Here the base is
-    `git merge-base origin/main HEAD`, or `--base`;
   - each independently versioned crate whose manifest is ahead of
     `docs/reference/published-crate-versions.json`: its `CHANGELOG.md` must
     open with that version, and on a release commit the heading must be dated
@@ -134,39 +131,6 @@ def metric_release_note_errors(root: Path) -> list[str]:
     ) + command_errors(root, [sys.executable, "scripts/check_metric_release_notes.py"])
 
 
-def git(root: Path, *args: str) -> str:
-    result = subprocess.run(
-        ["git", *args], cwd=root, capture_output=True, text=True, check=False
-    )
-    if result.returncode != 0:
-        raise PreflightError(f"git {' '.join(args)}: {result.stderr.strip()}")
-    return result.stdout
-
-
-def diff_base(root: Path, base: str | None) -> str:
-    if base is not None:
-        return git(root, "rev-parse", "--verify", f"{base}^{{commit}}").strip()
-    try:
-        return git(root, "merge-base", "origin/main", "HEAD").strip()
-    except PreflightError as error:
-        raise PreflightError(f"{error}; pass --base <commit>") from error
-
-
-def readme_freshness_errors(root: Path, base: str) -> list[str]:
-    """Mirror ci.yml's "Published crate README freshness gate" for `base...HEAD`."""
-    errors = []
-    for crate in publishable_crates(root):
-        manifest = git(root, "diff", f"{base}...HEAD", "--", f"crates/{crate}/Cargo.toml")
-        if re.search(r"(?m)^\+version\s*=", manifest) and not git(
-            root, "diff", f"{base}...HEAD", "--", f"crates/{crate}/README.md"
-        ):
-            errors.append(
-                f"crates/{crate}/Cargo.toml bumps the version since {base[:12]} but "
-                f"crates/{crate}/README.md is untouched; hosted CI rejects that diff"
-            )
-    return errors
-
-
 def crate_heading_errors(root: Path, pending: dict[str, tuple[str, str]]) -> list[str]:
     errors = []
     for crate, (_, version) in pending.items():
@@ -245,7 +209,7 @@ def heavy_commands(pending: dict[str, tuple[str, str]]) -> list[list[str]]:
 
 
 def preflight(
-    root: Path, mode: str, base: str | None, heavy: bool
+    root: Path, mode: str, heavy: bool
 ) -> tuple[str, list[tuple[str, str, list[str]]]]:
     """Return the resolved mode and one (status, check, errors) row per check."""
     if mode == "auto":
@@ -253,20 +217,12 @@ def preflight(
     release = mode == "release"
     pending = pending_crates(root)
     named = ", ".join(f"{crate} {meta[1]}" for crate, meta in pending.items()) or "none"
-    base = diff_base(root, base)
-    head = git(root, "rev-parse", "HEAD").strip()
-    span = "no commits to compare" if base == head else f"{base[:12]}...HEAD"
     checks = [
         ("metric release notes", True, lambda: metric_release_note_errors(root)),
         (
             f"changelog fragments ({len(pending_fragments(root))} pending)",
             True,
             lambda: fragment_errors(root, release),
-        ),
-        (
-            f"published-crate README freshness ({span})",
-            True,
-            lambda: readme_freshness_errors(root, base),
         ),
         (
             f"pending crate changelog headings ({named})",
@@ -299,12 +255,11 @@ def preflight(
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--mode", choices=("auto", "staging", "release"), default="auto")
-    parser.add_argument("--base", help="diff base for the README freshness check")
     parser.add_argument("--heavy", action="store_true", help="also audit, build, and dry-run")
     parser.add_argument("--root", type=Path, default=ROOT, help=argparse.SUPPRESS)
     args = parser.parse_args()
     try:
-        mode, rows = preflight(args.root, args.mode, args.base, args.heavy)
+        mode, rows = preflight(args.root, args.mode, args.heavy)
     except PreflightError as error:
         print(f"release preflight: {error}", file=sys.stderr)
         return 1

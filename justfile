@@ -211,11 +211,10 @@ gate-msrv:
 # The release-only checks are skipped, and listed, while the root CHANGELOG
 # `[Unreleased]` section still has entries or a changelog.d/ fragment is
 # pending; `--mode release` forces them, and then refuses a leftover fragment.
-# `--base <commit>` replaces the origin/main merge base of the README check,
-# and `--heavy` adds `cargo audit`, the release build, and the multi-package
+# `--heavy` adds `cargo audit`, the release build, and the multi-package
 # publish dry-run.
 
-# Run the checks that otherwise first fail on a release commit: metric release notes, changelog fragments, published-crate README freshness, crate changelogs, and the root changelog section.
+# Run the checks that otherwise first fail on a release commit: metric release notes, changelog fragments, crate changelogs, and the root changelog section.
 gate-release *args:
     python3 -m unittest -v scripts/test_check_release_preflight.py
     python3 scripts/check_release_preflight.py {{args}}

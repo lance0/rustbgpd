@@ -823,13 +823,10 @@ Before rolling any versions:
    then push it to `main`: `git push origin main`. The recipe runs the checks
    that otherwise first fail in hosted CI on the release commit, or only after
    the tag: the metric release-note contract, the `changelog.d/` fragment
-   assembly (no fragment may remain), the published-crate README
-   freshness gate, a dated `CHANGELOG.md` heading and released README wording
-   for every crate whose manifest is ahead of
+   assembly (no fragment may remain), a dated `CHANGELOG.md` heading and
+   released README wording for every crate whose manifest is ahead of
    `docs/reference/published-crate-versions.json`, and the root `## [X.Y.Z]`
-   section that `release.yml` extracts. Run it before the push: the README
-   comparison covers the commits `origin/main` does not have yet, and needs
-   `--base <previous main SHA>` afterwards. Without `--mode release` the
+   section that `release.yml` extracts. Without `--mode release` the
    recipe detects a release commit by its empty `[Unreleased]` section with no
    `changelog.d/` fragment pending, and otherwise lists the release-only
    checks it skipped. `--heavy` adds
