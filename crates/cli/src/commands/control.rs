@@ -1,4 +1,6 @@
-use crate::connection::{Connection, read_rpc};
+use crate::connection::{
+    Connection, MUTATION_RPC_TIMEOUT, SETTLED_MUTATION_RPC_TIMEOUT, mutation_rpc, read_rpc,
+};
 use crate::error::CliError;
 use crate::output::{self, JsonHealth, outln};
 use crate::proto::control_service_client::ControlServiceClient;
@@ -157,21 +159,29 @@ pub async fn shutdown(
 ) -> Result<(), CliError> {
     let mut client =
         ControlServiceClient::with_interceptor(connection.channel(), connection.interceptor());
-    client
-        .shutdown(ShutdownRequest {
+    mutation_rpc(
+        "Shutdown",
+        MUTATION_RPC_TIMEOUT,
+        "`rbgp health`",
+        client.shutdown(ShutdownRequest {
             reason: reason.unwrap_or_default(),
-        })
-        .await?;
+        }),
+    )
+    .await?;
     output::print_result(json, "shutdown", "", "Shutdown requested")
 }
 
 pub async fn mrt_dump(connection: Connection, json: bool) -> Result<(), CliError> {
     let mut client =
         ControlServiceClient::with_interceptor(connection.channel(), connection.interceptor());
-    let resp = client
-        .trigger_mrt_dump(TriggerMrtDumpRequest {})
-        .await?
-        .into_inner();
+    let resp = mutation_rpc(
+        "TriggerMrtDump",
+        SETTLED_MUTATION_RPC_TIMEOUT,
+        "the newest file in the configured MRT output directory",
+        client.trigger_mrt_dump(TriggerMrtDumpRequest {}),
+    )
+    .await?
+    .into_inner();
 
     if json {
         output::print_json_line(&serde_json::json!({ "file_path": resp.file_path }))?;

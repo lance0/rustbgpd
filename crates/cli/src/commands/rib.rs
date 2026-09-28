@@ -1,5 +1,5 @@
 use crate::commands::neighbor::{bare_ip_rpc_address, restore_matching_scoped_address};
-use crate::connection::{Connection, read_rpc};
+use crate::connection::{Connection, MUTATION_RPC_TIMEOUT, mutation_rpc, read_rpc};
 use crate::error::CliError;
 use crate::output::{
     self, JsonExplainAdvertisedRoute, JsonExplainModifications, JsonExplainReason,
@@ -2520,8 +2520,11 @@ pub async fn add_route(
     let (addr, len) = output::parse_prefix(prefix).map_err(CliError::Argument)?;
     let mut client =
         InjectionServiceClient::with_interceptor(connection.channel(), connection.interceptor());
-    client
-        .add_path(AddPathRequest {
+    mutation_rpc(
+        "AddPath",
+        MUTATION_RPC_TIMEOUT,
+        &format!("`rbgp rib --prefix {prefix}`"),
+        client.add_path(AddPathRequest {
             prefix: addr,
             prefix_length: len,
             next_hop: opts.next_hop,
@@ -2533,8 +2536,9 @@ pub async fn add_route(
             extended_communities: vec![],
             large_communities: opts.large_communities,
             path_id: opts.path_id.unwrap_or(0),
-        })
-        .await?;
+        }),
+    )
+    .await?;
     output::print_result(json, "add_route", prefix, &format!("Route {prefix} added"))
 }
 
@@ -2547,13 +2551,17 @@ pub async fn delete_route(
     let (addr, len) = output::parse_prefix(prefix).map_err(CliError::Argument)?;
     let mut client =
         InjectionServiceClient::with_interceptor(connection.channel(), connection.interceptor());
-    client
-        .delete_path(DeletePathRequest {
+    mutation_rpc(
+        "DeletePath",
+        MUTATION_RPC_TIMEOUT,
+        &format!("`rbgp rib --prefix {prefix}`"),
+        client.delete_path(DeletePathRequest {
             prefix: addr,
             prefix_length: len,
             path_id: path_id.unwrap_or(0),
-        })
-        .await?;
+        }),
+    )
+    .await?;
     output::print_result(
         json,
         "delete_route",

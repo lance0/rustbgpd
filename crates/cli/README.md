@@ -94,10 +94,20 @@ the affected bundle section incomplete. Its effective-config export has a
 separate 30-minute-and-30-second allowance for the server's supported large
 configuration operation and response transfer. This is a per-call limit, not
 a 30-second limit on the whole doctor command. `rbgp config effective` uses
-the same allowance. Long-running config diff and plan, config mutations and
-streams, advertised diff's aggregate deadline, TUI refresh limits, live
-watches, MRT dump completion, and other mutations retain their existing
-behavior.
+the same allowance.
+
+Other mutations wait at most just past the daemon's own bound. Neighbor
+session controls, `gshut`, route injection, EVPN runtime controls and
+`shutdown` wait up to 11 minutes. Changes the daemon persists to its
+configuration wait up to 31 minutes: neighbors, dynamic-neighbor ranges,
+policies, neighbor sets, chains, peer groups and FIB tables. `mrt-dump`
+also waits up to 31 minutes. On expiry the command exits 1 with an
+outcome-unknown error that names a command to verify with. The daemon may
+still apply the change, so the CLI never retries it.
+
+Long-running config diff and plan, config transactions (apply, confirm,
+abort and rollback) and their streams, advertised diff's aggregate deadline,
+TUI refresh limits and live watches retain their existing behavior.
 
 In `rbgp top`, select a peer and open its detail, then press `r` to open the
 on-demand route explorer. `v` cycles the global unicast Best table and the

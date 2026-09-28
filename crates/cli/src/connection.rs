@@ -40,7 +40,55 @@ pub(crate) async fn read_rpc<T>(
     rpc_with_timeout(name, READ_RPC_TIMEOUT, future).await
 }
 
-/// Method-specific budget for reads with a separate supported allowance.
+/// Client wait for a runtime-only mutation: session control, graceful
+/// shutdown, route injection, EVPN runtime controls and daemon shutdown.
+/// The daemon bounds its own peer-manager mutation wait at 10 minutes
+/// (`PEER_MANAGER_MUTATION_TIMEOUT`); the extra minute covers transfer.
+pub(crate) const MUTATION_RPC_TIMEOUT: Duration = Duration::from_secs(11 * 60);
+/// Client wait for a mutation the daemon persists to its configuration
+/// (neighbors, dynamic ranges, policies, neighbor sets, chains, peer groups,
+/// FIB tables). The settlement watchdog stops the daemon when such a change
+/// has not settled within 30 minutes (`OWNED_SETTLEMENT_BUDGET`), so no reply
+/// can arrive later; the extra minute covers the fence grace and transfer.
+/// `mrt-dump` also uses it: the daemon does not bound a dump, which writes
+/// the whole RIB.
+pub(crate) const SETTLED_MUTATION_RPC_TIMEOUT: Duration = Duration::from_secs(31 * 60);
+/// Debug builds only: shortens every mutation budget so process tests can
+/// observe expiry without waiting minutes.
+#[cfg(debug_assertions)]
+const TEST_MUTATION_RPC_TIMEOUT_MS_ENV: &str = "RBGP_TEST_MUTATION_RPC_TIMEOUT_MS";
+
+/// Bound a mutation RPC. On expiry the change may still be applied, because
+/// the daemon shields an accepted mutation from client cancellation: report
+/// the outcome as unknown, point at `verify` (a command or place to check),
+/// and never retry.
+pub(crate) async fn mutation_rpc<T>(
+    name: &str,
+    budget: Duration,
+    verify: &str,
+    future: impl Future<Output = Result<T, Status>>,
+) -> Result<T, Status> {
+    #[cfg(debug_assertions)]
+    let budget = std::env::var(TEST_MUTATION_RPC_TIMEOUT_MS_ENV)
+        .ok()
+        .and_then(|ms| ms.parse().ok())
+        .map_or(budget, Duration::from_millis);
+    rpc_with_timeout(name, budget, future)
+        .await
+        .map_err(|status| {
+            if status.code() == tonic::Code::DeadlineExceeded {
+                Status::deadline_exceeded(format!(
+                    "{}; outcome unknown: the daemon may still apply this change; \
+                     verify with {verify}",
+                    status.message()
+                ))
+            } else {
+                status
+            }
+        })
+}
+
+/// Bound a unary RPC by a method-specific budget.
 pub(crate) async fn rpc_with_timeout<T>(
     name: &str,
     budget: Duration,

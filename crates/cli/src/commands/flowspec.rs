@@ -1,4 +1,4 @@
-use crate::connection::{Connection, read_rpc};
+use crate::connection::{Connection, MUTATION_RPC_TIMEOUT, mutation_rpc, read_rpc};
 use crate::error::CliError;
 use crate::output::{self, outln};
 use crate::proto::injection_service_client::InjectionServiceClient;
@@ -290,15 +290,19 @@ pub async fn add(
 
     let mut client =
         InjectionServiceClient::with_interceptor(connection.channel(), connection.interceptor());
-    client
-        .add_flow_spec(AddFlowSpecRequest {
+    mutation_rpc(
+        "AddFlowSpec",
+        MUTATION_RPC_TIMEOUT,
+        "`rbgp flowspec`",
+        client.add_flow_spec(AddFlowSpecRequest {
             afi_safi: family,
             components: parsed_components,
             actions: parsed_actions,
             communities: vec![],
             extended_communities: vec![],
-        })
-        .await?;
+        }),
+    )
+    .await?;
     output::print_result(json, "add_flowspec", "", "FlowSpec rule added")
 }
 
@@ -316,12 +320,16 @@ pub async fn delete(
 
     let mut client =
         InjectionServiceClient::with_interceptor(connection.channel(), connection.interceptor());
-    client
-        .delete_flow_spec(DeleteFlowSpecRequest {
+    mutation_rpc(
+        "DeleteFlowSpec",
+        MUTATION_RPC_TIMEOUT,
+        "`rbgp flowspec`",
+        client.delete_flow_spec(DeleteFlowSpecRequest {
             afi_safi: family,
             components: parsed_components,
-        })
-        .await?;
+        }),
+    )
+    .await?;
     output::print_result(json, "delete_flowspec", "", "FlowSpec rule deleted")
 }
 

@@ -1,6 +1,8 @@
 use std::io::Write;
 
-use crate::connection::{Connection, read_rpc};
+use crate::connection::{
+    Connection, MUTATION_RPC_TIMEOUT, SETTLED_MUTATION_RPC_TIMEOUT, mutation_rpc, read_rpc,
+};
 use crate::error::CliError;
 use crate::output::{
     self, JsonEffectiveNeighborPosture, JsonInboundPrefixLimit, JsonNegotiatedGracefulRestart,
@@ -1295,9 +1297,13 @@ pub async fn add(
 ) -> Result<(), CliError> {
     let mut client =
         NeighborServiceClient::with_interceptor(connection.channel(), connection.interceptor());
-    client
-        .add_neighbor(add_neighbor_request(address, opts))
-        .await?;
+    mutation_rpc(
+        "AddNeighbor",
+        SETTLED_MUTATION_RPC_TIMEOUT,
+        &format!("`rbgp neighbor {address}`"),
+        client.add_neighbor(add_neighbor_request(address, opts)),
+    )
+    .await?;
     output::print_result(
         json,
         "add_neighbor",
@@ -1317,12 +1323,16 @@ pub async fn delete(connection: Connection, address: &str, json: bool) -> Result
     let mut client =
         NeighborServiceClient::with_interceptor(connection.channel(), connection.interceptor());
     let (address_only, interface) = split_scoped_address(address);
-    client
-        .delete_neighbor(DeleteNeighborRequest {
+    mutation_rpc(
+        "DeleteNeighbor",
+        SETTLED_MUTATION_RPC_TIMEOUT,
+        &format!("`rbgp neighbor {address}`"),
+        client.delete_neighbor(DeleteNeighborRequest {
             address: address_only,
             interface,
-        })
-        .await?;
+        }),
+    )
+    .await?;
     output::print_result(
         json,
         "delete_neighbor",
@@ -1335,12 +1345,16 @@ pub async fn enable(connection: Connection, address: &str, json: bool) -> Result
     let mut client =
         NeighborServiceClient::with_interceptor(connection.channel(), connection.interceptor());
     let (address_only, interface) = split_scoped_address(address);
-    client
-        .enable_neighbor(EnableNeighborRequest {
+    mutation_rpc(
+        "EnableNeighbor",
+        MUTATION_RPC_TIMEOUT,
+        &format!("`rbgp neighbor {address}`"),
+        client.enable_neighbor(EnableNeighborRequest {
             address: address_only,
             interface,
-        })
-        .await?;
+        }),
+    )
+    .await?;
     output::print_result(
         json,
         "enable_neighbor",
@@ -1358,13 +1372,17 @@ pub async fn disable(
     let mut client =
         NeighborServiceClient::with_interceptor(connection.channel(), connection.interceptor());
     let (address_only, interface) = split_scoped_address(address);
-    client
-        .disable_neighbor(DisableNeighborRequest {
+    mutation_rpc(
+        "DisableNeighbor",
+        MUTATION_RPC_TIMEOUT,
+        &format!("`rbgp neighbor {address}`"),
+        client.disable_neighbor(DisableNeighborRequest {
             address: address_only,
             reason: reason.unwrap_or_default(),
             interface,
-        })
-        .await?;
+        }),
+    )
+    .await?;
     output::print_result(
         json,
         "disable_neighbor",
@@ -1387,13 +1405,17 @@ pub async fn reset(
     let mut client =
         NeighborServiceClient::with_interceptor(connection.channel(), connection.interceptor());
     let (address_only, interface) = split_scoped_address(address);
-    client
-        .reset_neighbor(ResetNeighborRequest {
+    mutation_rpc(
+        "ResetNeighbor",
+        MUTATION_RPC_TIMEOUT,
+        &format!("`rbgp neighbor {address}`"),
+        client.reset_neighbor(ResetNeighborRequest {
             address: address_only,
             reason: reason.unwrap_or_default(),
             interface,
-        })
-        .await?;
+        }),
+    )
+    .await?;
     output::print_result(
         json,
         "reset_neighbor",
@@ -1411,13 +1433,17 @@ pub async fn softreset(
     let mut client =
         NeighborServiceClient::with_interceptor(connection.channel(), connection.interceptor());
     let (address_only, interface) = split_scoped_address(address);
-    client
-        .soft_reset_in(SoftResetInRequest {
+    mutation_rpc(
+        "SoftResetIn",
+        MUTATION_RPC_TIMEOUT,
+        &format!("`rbgp neighbor {address}`"),
+        client.soft_reset_in(SoftResetInRequest {
             address: address_only,
             families: family.into_iter().collect(),
             interface,
-        })
-        .await?;
+        }),
+    )
+    .await?;
     output::print_result(
         json,
         "softreset",
@@ -1447,13 +1473,17 @@ pub async fn refresh_outbound(
     let mut client =
         NeighborServiceClient::with_interceptor(connection.channel(), connection.interceptor());
     let (address_only, interface) = split_scoped_address(address);
-    let response = client
-        .refresh_outbound(RefreshOutboundRequest {
+    let response = mutation_rpc(
+        "RefreshOutbound",
+        MUTATION_RPC_TIMEOUT,
+        &format!("`rbgp neighbor {address}`"),
+        client.refresh_outbound(RefreshOutboundRequest {
             address: address_only,
             interface,
-        })
-        .await?
-        .into_inner();
+        }),
+    )
+    .await?
+    .into_inner();
     if !response.scheduled {
         return Err(CliError::Rpc(
             "daemon did not schedule the outbound refresh".into(),
@@ -1488,13 +1518,17 @@ pub async fn replay_outbound(
     let mut client =
         NeighborServiceClient::with_interceptor(connection.channel(), connection.interceptor());
     let (address_only, interface) = split_scoped_address(address);
-    let response = client
-        .replay_outbound(ReplayOutboundRequest {
+    let response = mutation_rpc(
+        "ReplayOutbound",
+        MUTATION_RPC_TIMEOUT,
+        &format!("`rbgp neighbor {address}`"),
+        client.replay_outbound(ReplayOutboundRequest {
             address: address_only,
             interface,
-        })
-        .await?
-        .into_inner();
+        }),
+    )
+    .await?
+    .into_inner();
     if !response.scheduled {
         return Err(CliError::Rpc(
             "daemon did not schedule the outbound replay".into(),
@@ -1521,13 +1555,20 @@ pub async fn set_graceful_shutdown(
         NeighborServiceClient::with_interceptor(connection.channel(), connection.interceptor());
     let address = peer.clone().unwrap_or_default();
     let (address_only, interface) = split_scoped_address(&address);
-    client
-        .set_graceful_shutdown(SetGracefulShutdownRequest {
+    mutation_rpc(
+        "SetGracefulShutdown",
+        MUTATION_RPC_TIMEOUT,
+        &peer.as_deref().map_or_else(
+            || "`rbgp neighbor`".to_string(),
+            |peer| format!("`rbgp neighbor {peer}`"),
+        ),
+        client.set_graceful_shutdown(SetGracefulShutdownRequest {
             address: address_only,
             enabled,
             interface,
-        })
-        .await?;
+        }),
+    )
+    .await?;
     let scope = peer.as_deref().unwrap_or("all peers");
     let verb = if enabled { "enabled" } else { "cleared" };
     output::print_result(

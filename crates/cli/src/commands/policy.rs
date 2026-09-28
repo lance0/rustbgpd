@@ -14,7 +14,7 @@ use serde::Serialize;
 
 use crate::commands::neighbor::bare_ip_rpc_address;
 use crate::commands::policy_input::{JsonPolicyDefinition, load_json};
-use crate::connection::{Connection, read_rpc};
+use crate::connection::{Connection, SETTLED_MUTATION_RPC_TIMEOUT, mutation_rpc, read_rpc};
 use crate::error::CliError;
 use crate::output::{self, outln};
 use crate::proto::policy_service_client::PolicyServiceClient;
@@ -1208,23 +1208,31 @@ pub async fn set(
     let definition: JsonPolicyDefinition = load_json(from_file)?;
     let mut client =
         PolicyServiceClient::with_interceptor(connection.channel(), connection.interceptor());
-    client
-        .set_policy(SetPolicyRequest {
+    mutation_rpc(
+        "SetPolicy",
+        SETTLED_MUTATION_RPC_TIMEOUT,
+        &format!("`rbgp policy get {name}`"),
+        client.set_policy(SetPolicyRequest {
             name: name.to_string(),
             definition: Some(definition.into()),
-        })
-        .await?;
+        }),
+    )
+    .await?;
     output::print_result(json, "set_policy", name, &format!("Policy {name} set"))
 }
 
 pub async fn delete(connection: Connection, name: &str, json: bool) -> Result<(), CliError> {
     let mut client =
         PolicyServiceClient::with_interceptor(connection.channel(), connection.interceptor());
-    client
-        .delete_policy(DeletePolicyRequest {
+    mutation_rpc(
+        "DeletePolicy",
+        SETTLED_MUTATION_RPC_TIMEOUT,
+        &format!("`rbgp policy get {name}`"),
+        client.delete_policy(DeletePolicyRequest {
             name: name.to_string(),
-        })
-        .await?;
+        }),
+    )
+    .await?;
     output::print_result(
         json,
         "delete_policy",
@@ -1778,46 +1786,62 @@ pub async fn chain_set(
 
     let (target, message) = match (direction, neighbor) {
         (ChainDirection::Import, None) => {
-            client
-                .set_global_import_chain(SetGlobalImportChainRequest {
+            mutation_rpc(
+                "SetGlobalImportChain",
+                SETTLED_MUTATION_RPC_TIMEOUT,
+                "`rbgp policy chain show`",
+                client.set_global_import_chain(SetGlobalImportChainRequest {
                     policy_names: policy_names.clone(),
-                })
-                .await?;
+                }),
+            )
+            .await?;
             (
                 "global".to_string(),
                 "Global import chain updated".to_string(),
             )
         }
         (ChainDirection::Export, None) => {
-            client
-                .set_global_export_chain(SetGlobalExportChainRequest {
+            mutation_rpc(
+                "SetGlobalExportChain",
+                SETTLED_MUTATION_RPC_TIMEOUT,
+                "`rbgp policy chain show`",
+                client.set_global_export_chain(SetGlobalExportChainRequest {
                     policy_names: policy_names.clone(),
-                })
-                .await?;
+                }),
+            )
+            .await?;
             (
                 "global".to_string(),
                 "Global export chain updated".to_string(),
             )
         }
         (ChainDirection::Import, Some(addr)) => {
-            client
-                .set_neighbor_import_chain(SetNeighborImportChainRequest {
+            mutation_rpc(
+                "SetNeighborImportChain",
+                SETTLED_MUTATION_RPC_TIMEOUT,
+                &format!("`rbgp policy chain show --neighbor {addr}`"),
+                client.set_neighbor_import_chain(SetNeighborImportChainRequest {
                     address: bare_ip_rpc_address(addr).to_string(),
                     policy_names: policy_names.clone(),
-                })
-                .await?;
+                }),
+            )
+            .await?;
             (
                 addr.to_string(),
                 format!("Neighbor {addr} import chain updated"),
             )
         }
         (ChainDirection::Export, Some(addr)) => {
-            client
-                .set_neighbor_export_chain(SetNeighborExportChainRequest {
+            mutation_rpc(
+                "SetNeighborExportChain",
+                SETTLED_MUTATION_RPC_TIMEOUT,
+                &format!("`rbgp policy chain show --neighbor {addr}`"),
+                client.set_neighbor_export_chain(SetNeighborExportChainRequest {
                     address: bare_ip_rpc_address(addr).to_string(),
                     policy_names: policy_names.clone(),
-                })
-                .await?;
+                }),
+            )
+            .await?;
             (
                 addr.to_string(),
                 format!("Neighbor {addr} export chain updated"),
@@ -1846,40 +1870,56 @@ pub async fn chain_clear(
 
     let (target, message) = match (direction, neighbor) {
         (ChainDirection::Import, None) => {
-            client
-                .clear_global_import_chain(ClearGlobalImportChainRequest {})
-                .await?;
+            mutation_rpc(
+                "ClearGlobalImportChain",
+                SETTLED_MUTATION_RPC_TIMEOUT,
+                "`rbgp policy chain show`",
+                client.clear_global_import_chain(ClearGlobalImportChainRequest {}),
+            )
+            .await?;
             (
                 "global".to_string(),
                 "Global import chain cleared".to_string(),
             )
         }
         (ChainDirection::Export, None) => {
-            client
-                .clear_global_export_chain(ClearGlobalExportChainRequest {})
-                .await?;
+            mutation_rpc(
+                "ClearGlobalExportChain",
+                SETTLED_MUTATION_RPC_TIMEOUT,
+                "`rbgp policy chain show`",
+                client.clear_global_export_chain(ClearGlobalExportChainRequest {}),
+            )
+            .await?;
             (
                 "global".to_string(),
                 "Global export chain cleared".to_string(),
             )
         }
         (ChainDirection::Import, Some(addr)) => {
-            client
-                .clear_neighbor_import_chain(ClearNeighborImportChainRequest {
+            mutation_rpc(
+                "ClearNeighborImportChain",
+                SETTLED_MUTATION_RPC_TIMEOUT,
+                &format!("`rbgp policy chain show --neighbor {addr}`"),
+                client.clear_neighbor_import_chain(ClearNeighborImportChainRequest {
                     address: bare_ip_rpc_address(addr).to_string(),
-                })
-                .await?;
+                }),
+            )
+            .await?;
             (
                 addr.to_string(),
                 format!("Neighbor {addr} import chain cleared"),
             )
         }
         (ChainDirection::Export, Some(addr)) => {
-            client
-                .clear_neighbor_export_chain(ClearNeighborExportChainRequest {
+            mutation_rpc(
+                "ClearNeighborExportChain",
+                SETTLED_MUTATION_RPC_TIMEOUT,
+                &format!("`rbgp policy chain show --neighbor {addr}`"),
+                client.clear_neighbor_export_chain(ClearNeighborExportChainRequest {
                     address: bare_ip_rpc_address(addr).to_string(),
-                })
-                .await?;
+                }),
+            )
+            .await?;
             (
                 addr.to_string(),
                 format!("Neighbor {addr} export chain cleared"),
