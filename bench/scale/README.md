@@ -24,6 +24,7 @@ cargo update --workspace --manifest-path bench/scale/Cargo.toml
 | [`matrix/`](matrix/) | Sequential same-host rustbgpd, BIRD, and OpenBGPD reload-stall comparison driver | `docs/perf/ixp-matrix-2026-07.md` |
 | [`enhanced-route-refresh/`](enhanced-route-refresh/) | Real-session one-peer × 100,000-prefix RFC 7313 inventory and memory receipt | `docs/perf/enhanced-route-refresh-2026-07.md` |
 | [`irrreload/`](irrreload/) | Full IRR-policy reload matrix plus a two-run, one-collector RFC 9069 dump/live-buffer boundary receipt | IRR reload evidence and BMP Loc-RIB buffer measurement; no general capacity claim |
+| [`headline/`](headline/run-campaign.sh) | Multi-arm driver for the headline matrix, IRR reload, and RR1000 cells, plus the extractor for its summary and receipt table | `docs/perf/headline-refresh-*` receipts from 2026-09 onward |
 | [`route-server-1000/`](route-server-1000/) | Fixed-shape 1,000-peer rustbgpd route-server retained receipt driver | LAN-508 ([retained receipt](../../docs/perf/route-server-1000-2026-07.md)) |
 
 Build (from repo root; binaries land in `bench/scale/target/release/`):

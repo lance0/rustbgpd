@@ -37,6 +37,8 @@ lock, quiet gates, provenance, and thresholds, and a lock or quiet-gate exit
 | `just bench-enhanced-route-refresh` | `scale/enhanced-route-refresh/run-receipt.sh` |
 | `just bench-irr-reload [cells]` | `scale/irrreload/run-irr-reload.sh` (`SMOKE=1` for its pipeline check) |
 | `just bench-vpn-query <output> [--smoke] [--retry]` | `run-vpn-query-campaign.sh`, with `--cpu $RUSTBGPD_BENCH_CORE` unless `--cpu` is given |
+| `just bench-headline <out-dir> <label>=<ref>...` | `scale/headline/run-campaign.sh`: the headline matrix, IRR, and RR1000 cells across several arms, in rotated order |
+| `just bench-headline-summary <dir> [--out DIR]` | `scale/headline/summarize.py`: re-extraction of a campaign or receipt bundle, no measurement |
 
 `RUSTBGPD_BENCH_CORE` has no default: receipts have pinned cores 2, 5, 8, 15,
 and 63, and the right core depends on the host. `bench` and `bench-rrharness`
