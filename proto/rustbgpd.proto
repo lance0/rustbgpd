@@ -3289,17 +3289,21 @@ service InjectionService {
   // upsert keyed on (afi_safi, components): repeating an identical request
   // is idempotent, and a request with the same key but different actions or
   // communities replaces the local rule. The response reports which of
-  // these happened. OK means the rule is in the local Adj-RIB-In (peer
-  // 0.0.0.0) and selection and distribution ran for that rule before the
-  // reply. It does not mean any peer received or installed it, a received
-  // rule with the same key can still out-select it, and Graceful Restart
-  // selection deferral can postpone its Loc-RIB effect. Injected rules are
-  // process-local: a controller must re-inject them after a daemon restart.
+  // these happened. OK confirms that the rule was accepted into the local
+  // Adj-RIB-In (peer 0.0.0.0). Selection and outbound distribution normally
+  // run in the same RIB turn, before the reply, but are deferred while
+  // Graceful Restart selection deferral is active for the family. OK does
+  // not mean any peer received or installed the rule, and a received rule
+  // with the same key can out-select it. Injected rules are process-local:
+  // a controller must re-inject them after a daemon restart.
   rpc AddFlowSpec(AddFlowSpecRequest) returns (AddFlowSpecResponse);
   // Withdraw a locally injected FlowSpec rule by its (afi_safi, components)
   // key. Only rules added through AddFlowSpec are affected; rules received
   // from peers are never removed. A key with no local rule returns
-  // NOT_FOUND unless allow_missing is set.
+  // NOT_FOUND unless allow_missing is set. As for AddFlowSpec, OK confirms
+  // the change to the local Adj-RIB-In; selection and distribution follow
+  // in the same RIB turn unless Graceful Restart selection deferral is
+  // active.
   rpc DeleteFlowSpec(DeleteFlowSpecRequest) returns (DeleteFlowSpecResponse);
   // Inject a locally-originated EVPN route (RFC 7432). SDN controllers
   // push Type 2 / Type 5 / etc. routes to the RR's Loc-RIB, and the RR
@@ -3435,18 +3439,26 @@ message DeleteFlowSpecRequest {
   AddressFamily afi_safi = 1;
   // Same identity and ordering rules as AddFlowSpecRequest.components.
   repeated FlowSpecComponent components = 2;
-  // When true, a key with no local rule returns OK with deleted = false
+  // When true, a key with no local rule returns OK with outcome NOT_PRESENT
   // instead of NOT_FOUND, so a reconciling controller can treat "already
-  // gone" as drift. A daemon that predates this field ignores it and
-  // returns NOT_FOUND.
+  // gone" as drift. A daemon that predates this field ignores it: a missing
+  // rule returns NOT_FOUND and a present rule is deleted with outcome
+  // UNSPECIFIED.
   bool allow_missing = 3;
 }
 
 message DeleteFlowSpecResponse {
-  // True when a local rule was removed and distribution ran for it. False
-  // only when allow_missing was set and no local rule matched; a daemon that
-  // predates this field always leaves it false.
-  bool deleted = 1;
+  FlowSpecDeleteOutcome outcome = 1;
+}
+
+enum FlowSpecDeleteOutcome {
+  // Not reported. Only a daemon that predates this field leaves it unset,
+  // and such a daemon returns OK only after removing a local rule.
+  FLOW_SPEC_DELETE_OUTCOME_UNSPECIFIED = 0;
+  // A local rule with this key was removed from the local Adj-RIB-In.
+  FLOW_SPEC_DELETE_OUTCOME_DELETED = 1;
+  // No local rule had this key; returned only when allow_missing is set.
+  FLOW_SPEC_DELETE_OUTCOME_NOT_PRESENT = 2;
 }
 
 message ListFlowSpecRequest {

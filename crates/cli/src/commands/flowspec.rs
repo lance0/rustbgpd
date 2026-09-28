@@ -357,20 +357,31 @@ pub async fn delete(
     )
     .await?
     .into_inner();
-    // Without `allow_missing`, success always means a rule was removed, even
-    // from a daemon that predates the `deleted` field.
-    let deleted = !allow_missing || response.deleted;
+    let outcome = delete_outcome_name(response.outcome);
     if json {
         output::print_json_pretty(&serde_json::json!({
             "ok": true,
             "action": "delete_flowspec",
             "target": "",
-            "deleted": deleted,
+            "outcome": outcome,
         }))
-    } else if deleted {
-        output::print_line("FlowSpec rule deleted")
     } else {
-        output::print_line("FlowSpec rule not present")
+        output::print_line(match outcome {
+            "deleted" => "FlowSpec rule deleted",
+            "not_present" => "FlowSpec rule not present",
+            // An older daemon returns OK only after removing a local rule.
+            _ => "FlowSpec rule deleted (the daemon did not report an outcome)",
+        })
+    }
+}
+
+/// Name the delete outcome; `unknown` for a daemon that predates it.
+fn delete_outcome_name(outcome: i32) -> &'static str {
+    use crate::proto::FlowSpecDeleteOutcome;
+    match FlowSpecDeleteOutcome::try_from(outcome) {
+        Ok(FlowSpecDeleteOutcome::Deleted) => "deleted",
+        Ok(FlowSpecDeleteOutcome::NotPresent) => "not_present",
+        Ok(FlowSpecDeleteOutcome::Unspecified) | Err(_) => "unknown",
     }
 }
 

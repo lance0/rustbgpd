@@ -465,7 +465,15 @@ impl proto::injection_service_server::InjectionService for InjectionService {
             .map_err(|_| Status::internal("RIB manager dropped reply"))?
             .map_err(|error| map_rib_command_error("FlowSpec withdraw failed", error))?;
 
-        Ok(Response::new(proto::DeleteFlowSpecResponse { deleted }))
+        let outcome = if deleted {
+            proto::FlowSpecDeleteOutcome::Deleted
+        } else {
+            proto::FlowSpecDeleteOutcome::NotPresent
+        };
+
+        Ok(Response::new(proto::DeleteFlowSpecResponse {
+            outcome: outcome as i32,
+        }))
     }
 
     async fn add_evpn_route(
@@ -2593,6 +2601,31 @@ mod tests {
         .into_inner()
     }
 
+    /// Delete present, missing by default, missing with `allow_missing`, and
+    /// present with `allow_missing`; leaves no local rule behind.
+    async fn assert_delete_outcomes(svc: &InjectionService) {
+        assert_eq!(
+            delete_rule(svc, false).await.unwrap().outcome(),
+            proto::FlowSpecDeleteOutcome::Deleted
+        );
+        assert_eq!(
+            delete_rule(svc, false).await.unwrap_err().code(),
+            tonic::Code::NotFound
+        );
+        assert_eq!(
+            delete_rule(svc, true).await.unwrap().outcome(),
+            proto::FlowSpecDeleteOutcome::NotPresent
+        );
+        assert_eq!(
+            add_rate(svc, 0.0).await,
+            proto::FlowSpecInjectOutcome::Created
+        );
+        assert_eq!(
+            delete_rule(svc, true).await.unwrap().outcome(),
+            proto::FlowSpecDeleteOutcome::Deleted
+        );
+    }
+
     /// The controller contract against a real RIB: add reports created /
     /// replaced / unchanged from the local Adj-RIB-In, a received rule that
     /// out-selects the local one does not mask a real replacement, the
@@ -2692,12 +2725,7 @@ mod tests {
             proto::FlowSpecValidationStatus::Disabled as i32
         );
 
-        assert!(delete_rule(&svc, false).await.unwrap().deleted);
-        assert_eq!(
-            delete_rule(&svc, false).await.unwrap_err().code(),
-            tonic::Code::NotFound
-        );
-        assert!(!delete_rule(&svc, true).await.unwrap().deleted);
+        assert_delete_outcomes(&svc).await;
         let local = list_local_flowspec(&rib).await;
         assert!(local.received_view);
         assert!(local.received_routes.is_empty());

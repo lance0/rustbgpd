@@ -2674,20 +2674,32 @@ received rule with the same key does not affect it, even when that received
 rule is the selected one: replacing an out-selected local rule still reports
 `REPLACED`, although nothing changes on the wire.
 
-`OK` means the rule is in the local Adj-RIB-In (peer `0.0.0.0`) and selection
-and distribution ran for it before the reply. It does not mean that a peer
-received or installed the rule. A received rule can out-select it, and
-Graceful Restart selection deferral can postpone its Loc-RIB effect. Injected
-rules are process-local: after a daemon restart, the controller must inject
-them again.
+`OK` confirms that the rule was accepted into the local Adj-RIB-In (peer
+`0.0.0.0`). Selection and outbound distribution normally run in the same RIB
+turn, before the reply, but are deferred while Graceful Restart selection
+deferral is active for the family. `OK` does not mean that a peer received or
+installed the rule, and a received rule with the same key can out-select it.
+Injected rules are process-local: after a daemon restart, the controller must
+inject them again.
 
 `DeleteFlowSpec` removes only a rule added through `AddFlowSpec`; it never
 removes a received rule. A key with no local rule returns `NOT_FOUND` by
-default. Set `allow_missing: true` to get `OK` with `deleted: false` instead,
-so a reconciling controller can treat "already gone" as drift rather than a
-failure. `deleted: true` means a local rule was removed and distribution ran.
-A daemon that predates these fields ignores `allow_missing`, returns
-`NOT_FOUND` for a missing rule, and leaves `deleted` false.
+default. Set `allow_missing: true` to get `OK` with outcome `NOT_PRESENT`
+instead, so a reconciling controller can treat "already gone" as drift rather
+than a failure. The same selection and distribution timing as `AddFlowSpec`
+applies to a successful delete.
+
+| `DeleteFlowSpecResponse.outcome` | Meaning |
+|---|---|
+| `FLOW_SPEC_DELETE_OUTCOME_DELETED` | A local rule with this key was removed from the local Adj-RIB-In. |
+| `FLOW_SPEC_DELETE_OUTCOME_NOT_PRESENT` | No local rule had this key; returned only with `allow_missing`. |
+| `FLOW_SPEC_DELETE_OUTCOME_UNSPECIFIED` | The daemon predates the field. |
+
+A daemon that predates these fields ignores `allow_missing`: a missing rule
+returns `NOT_FOUND`, and a present rule is deleted with outcome
+`UNSPECIFIED`. Because such a daemon returns `OK` only after removing a rule,
+`UNSPECIFIED` on success means the rule was deleted; it never means the rule
+was absent.
 
 To list exactly the injected rules, call `RibService.ListFlowSpecRoutes`
 with `received_peer_address: "0.0.0.0"`. The received view returns every
@@ -2705,10 +2717,12 @@ grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
 `rbgp flowspec add` prints the outcome, for example `FlowSpec rule added
 (unchanged)`, and its `--json` result carries `outcome` (`created`,
 `replaced`, `unchanged`, or `unknown` for an older daemon).
-`rbgp flowspec delete --allow-missing` sets `allow_missing`: when no local
-rule matches it prints `FlowSpec rule not present` and exits 0, and its
-`--json` result carries `deleted: false`. Without the flag a missing rule is
-still an error, and a successful delete reports `deleted: true`.
+`rbgp flowspec delete` reports the delete outcome the same way: its `--json`
+result carries `outcome` (`deleted`, `not_present`, or `unknown` for an older
+daemon). With `--allow-missing`, a missing rule prints `FlowSpec rule not
+present` and exits 0; without the flag a missing rule is still an error. An
+older daemon's success prints `FlowSpec rule deleted (the daemon did not
+report an outcome)`.
 `rbgp flowspec received 0.0.0.0` shows the injected rules.
 
 These RPCs remain outside the v1 inventory

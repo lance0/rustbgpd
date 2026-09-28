@@ -439,36 +439,53 @@ async fn flowspec_delete_allow_missing_reports_not_present() {
         }
         command.env("NO_COLOR", "1").output().expect("run rbgp")
     };
-    let json_result = |output: &std::process::Output| {
-        serde_json::from_slice::<serde_json::Value>(&output.stdout).unwrap()
+    let expect = |output: std::process::Output, outcome: &str, text: Option<&str>| {
+        assert!(output.status.success(), "{output:?}");
+        match text {
+            Some(text) => assert_eq!(String::from_utf8(output.stdout).unwrap(), text),
+            None => assert_eq!(
+                serde_json::from_slice::<serde_json::Value>(&output.stdout).unwrap(),
+                serde_json::json!({"ok": true, "action": "delete_flowspec", "target": "",
+                    "outcome": outcome})
+            ),
+        }
     };
 
     *server.state.delete_flowspec_matches.lock().await = true;
     for allow_missing in [false, true] {
-        let output = delete(true, allow_missing);
-        assert!(output.status.success(), "{output:?}");
-        assert_eq!(
-            json_result(&output),
-            serde_json::json!({"ok": true, "action": "delete_flowspec", "target": "", "deleted": true})
+        expect(delete(true, allow_missing), "deleted", None);
+        expect(
+            delete(false, allow_missing),
+            "deleted",
+            Some("FlowSpec rule deleted\n"),
         );
-        let output = delete(false, allow_missing);
-        assert!(output.status.success(), "{output:?}");
-        assert_eq!(output.stdout, b"FlowSpec rule deleted\n");
     }
 
     *server.state.delete_flowspec_matches.lock().await = false;
-    let output = delete(true, true);
-    assert!(output.status.success(), "{output:?}");
-    assert_eq!(
-        json_result(&output),
-        serde_json::json!({"ok": true, "action": "delete_flowspec", "target": "", "deleted": false})
+    expect(delete(true, true), "not_present", None);
+    expect(
+        delete(false, true),
+        "not_present",
+        Some("FlowSpec rule not present\n"),
     );
-    let output = delete(false, true);
-    assert!(output.status.success(), "{output:?}");
-    assert_eq!(output.stdout, b"FlowSpec rule not present\n");
-
     // Without the flag, a missing rule stays an error.
     let output = delete(false, false);
     assert!(!output.status.success(), "{output:?}");
     assert!(output.stdout.is_empty(), "{output:?}");
+
+    // An older daemon ignores the flag and reports no outcome. It returns OK
+    // only after removing a rule, so that is never reported as not present.
+    *server.state.delete_flowspec_legacy.lock().await = true;
+    *server.state.delete_flowspec_matches.lock().await = true;
+    for allow_missing in [false, true] {
+        expect(delete(true, allow_missing), "unknown", None);
+        expect(
+            delete(false, allow_missing),
+            "unknown",
+            Some("FlowSpec rule deleted (the daemon did not report an outcome)\n"),
+        );
+    }
+    *server.state.delete_flowspec_matches.lock().await = false;
+    let output = delete(false, true);
+    assert!(!output.status.success(), "{output:?}");
 }
