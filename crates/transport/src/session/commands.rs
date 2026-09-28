@@ -1744,6 +1744,10 @@ impl PeerSession {
                 let _ = reply.send(());
                 ControlFlow::Continue(())
             }
+            PeerCommand::ClaimCollisionPromotion { reply } => {
+                let _ = reply.send(self.claim_collision_promotion());
+                ControlFlow::Continue(())
+            }
             PeerCommand::CollisionDump => {
                 self.stop_requested = true;
                 self.reconnect_timer = None;

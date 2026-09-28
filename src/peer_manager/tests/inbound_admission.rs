@@ -1045,6 +1045,9 @@ fn backoff_session_handle(
                         ..policy_test_peer_state(peer_addr, state)
                     });
                 }
+                PeerCommand::ClaimCollisionPromotion { reply } => {
+                    let _ = reply.send(true);
+                }
                 PeerCommand::ActivateMaxPrefixMetrics {
                     notification_idle_failures,
                     reply,

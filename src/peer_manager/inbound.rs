@@ -851,8 +851,7 @@ impl PeerManager {
                     rule = "identifier_comparison",
                     "collision: remote wins, replacing with inbound"
                 );
-                self.drain_before_candidate_promotion(&peer_key).await;
-                if let Some(promoted) = self.promote_pending_inbound_handle(&peer_key) {
+                if let Some(promoted) = self.claim_pending_inbound(&peer_key).await {
                     self.finish_inbound_promotion(
                         &peer_key,
                         promoted,
@@ -1069,13 +1068,58 @@ impl PeerManager {
         Box::pin(self.drain_ready_session_notifications(Some(peer_key))).await;
     }
 
+    /// Reserve the pending candidate before any ownership changes, then
+    /// install it as primary. The drain is not an ownership fence: the
+    /// candidate can still fall to Idle after it (its verdict timer, a peer
+    /// NOTIFICATION, TCP loss). The candidate's own reply settles that, so a
+    /// candidate that is Idle, exited, or unconfirmed is dropped and the
+    /// primary is never retired for it. Returns what
+    /// [`Self::finish_inbound_promotion`] takes.
+    async fn claim_pending_inbound(
+        &mut self,
+        peer_key: &PeerKey,
+    ) -> Option<(PeerHandle, u64, u64)> {
+        self.drain_before_candidate_promotion(peer_key).await;
+        let claim = self
+            .peers
+            .get(peer_key)?
+            .pending_inbound
+            .as_ref()?
+            .handle
+            .claim_collision_promotion_timeout(PEER_LIFECYCLE_COMMAND_TIMEOUT)
+            .await;
+        let collision_dump = match claim {
+            Ok(true) => return self.promote_pending_inbound_handle(peer_key),
+            Ok(false) => {
+                info!(peer = %peer_key.address, "collision candidate fell to Idle before promotion; keeping the primary");
+                false
+            }
+            // A timed-out command may still be handled later, so a live
+            // candidate is closed as a collision loser.
+            Err(error) => {
+                warn!(peer = %peer_key.address, %error, "collision candidate did not confirm promotion; keeping the primary");
+                true
+            }
+        };
+        let pending = self.peers.get_mut(peer_key)?.pending_inbound.take()?;
+        let _ = self
+            .quiesce_retiring_session(
+                peer_key,
+                pending.session_id,
+                pending.handle,
+                "unclaimed collision candidate",
+                collision_dump,
+            )
+            .await;
+        None
+    }
+
     pub(super) async fn promote_pending_inbound(
         &mut self,
         peer_key: &PeerKey,
         primary_notification_failures: u32,
     ) -> bool {
-        self.drain_before_candidate_promotion(peer_key).await;
-        let Some(promoted) = self.promote_pending_inbound_handle(peer_key) else {
+        let Some(promoted) = self.claim_pending_inbound(peer_key).await else {
             return false;
         };
         self.finish_inbound_promotion(

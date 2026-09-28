@@ -75,14 +75,54 @@ pub(super) enum CollisionHold {
     Released,
     /// An unpromoted candidate that has not yet received the peer's OPEN.
     Armed,
+    /// Claimed for promotion before the peer's OPEN. The OPEN still holds the
+    /// KEEPALIVE until activation, entering [`Self::Claimed`].
+    Reserved,
     /// An unpromoted candidate in `OpenConfirm` waiting for the verdict. Holds
     /// the deferred KEEPALIVE and keepalive-timer actions.
     Waiting(Vec<Action>),
+    /// `PeerManager` reserved this candidate for promotion and is retiring
+    /// the primary. Still holds the KEEPALIVE until activation, but the
+    /// verdict timer now releases the hold instead of closing the session.
+    Claimed(Vec<Action>),
 }
 
 impl PeerSession {
     pub(super) fn collision_verdict_pending(&self) -> bool {
-        matches!(self.collision_hold, CollisionHold::Waiting(_))
+        matches!(
+            self.collision_hold,
+            CollisionHold::Waiting(_) | CollisionHold::Claimed(_)
+        )
+    }
+
+    /// Reserve this candidate for promotion. The reply is what `PeerManager`
+    /// commits on: `false` means the candidate has fallen to Idle since it
+    /// was accepted (for example its verdict timer fired after the manager's
+    /// last notification drain), even if its reconnect timer has since dialed
+    /// a new connection, so the manager keeps the primary instead of retiring
+    /// it for that session. A candidate still on its accepted connection,
+    /// before or after the peer's OPEN, is claimed.
+    pub(super) fn claim_collision_promotion(&mut self) -> bool {
+        if self.collision_candidate_lost {
+            return false;
+        }
+        match std::mem::replace(&mut self.collision_hold, CollisionHold::Released) {
+            CollisionHold::Waiting(deferred) => {
+                self.collision_hold = CollisionHold::Claimed(deferred);
+                self.collision_verdict_timer =
+                    Some(Box::pin(tokio::time::sleep(COLLISION_VERDICT_TIMEOUT)));
+                true
+            }
+            CollisionHold::Armed | CollisionHold::Reserved => {
+                self.collision_hold = CollisionHold::Reserved;
+                true
+            }
+            other => {
+                let claimed = matches!(other, CollisionHold::Claimed(_));
+                self.collision_hold = other;
+                claimed
+            }
+        }
     }
 
     /// Withhold the KEEPALIVE from an unpromoted candidate's transition to
@@ -98,7 +138,12 @@ impl PeerSession {
                 }
             )
         });
-        if !matches!(self.collision_hold, CollisionHold::Armed) || !enters_open_confirm {
+        let reserved = match self.collision_hold {
+            CollisionHold::Armed => false,
+            CollisionHold::Reserved => true,
+            _ => return actions,
+        };
+        if !enters_open_confirm {
             return actions;
         }
         let (deferred, now) = actions.into_iter().partition(|action| {
@@ -108,7 +153,11 @@ impl PeerSession {
             )
         });
         debug!(peer = %self.peer_label, "inbound collision candidate holding KEEPALIVE for verdict");
-        self.collision_hold = CollisionHold::Waiting(deferred);
+        self.collision_hold = if reserved {
+            CollisionHold::Claimed(deferred)
+        } else {
+            CollisionHold::Waiting(deferred)
+        };
         self.collision_verdict_timer =
             Some(Box::pin(tokio::time::sleep(COLLISION_VERDICT_TIMEOUT)));
         now
@@ -118,7 +167,7 @@ impl PeerSession {
     /// may already hold the KEEPALIVE that completes the handshake.
     pub(super) async fn release_collision_hold(&mut self) {
         let held = std::mem::replace(&mut self.collision_hold, CollisionHold::Released);
-        let CollisionHold::Waiting(deferred) = held else {
+        let (CollisionHold::Waiting(deferred) | CollisionHold::Claimed(deferred)) = held else {
             return;
         };
         self.collision_verdict_timer = None;
@@ -132,8 +181,19 @@ impl PeerSession {
 
     /// No verdict arrived: end the `OpenConfirm` wait as its hold timer would.
     /// The candidate falls to Idle and `PeerManager` drops it on `BackToIdle`.
+    /// A claimed candidate already owns the peer, so a lost activation
+    /// releases it rather than closing the winner.
     pub(super) async fn expire_collision_verdict_wait(&mut self) {
         self.collision_verdict_timer = None;
+        if matches!(self.collision_hold, CollisionHold::Claimed(_)) {
+            warn!(
+                peer = %self.peer_label,
+                timeout_secs = COLLISION_VERDICT_TIMEOUT.as_secs(),
+                "promoted collision candidate received no activation; releasing it"
+            );
+            self.release_collision_hold().await;
+            return;
+        }
         warn!(
             peer = %self.peer_label,
             timeout_secs = COLLISION_VERDICT_TIMEOUT.as_secs(),
@@ -600,6 +660,13 @@ impl PeerSession {
                     if new != SessionState::OpenConfirm && self.collision_verdict_pending() {
                         self.collision_hold = CollisionHold::Armed;
                         self.collision_verdict_timer = None;
+                    }
+                    // An unpromoted candidate's accepted connection is gone for
+                    // good; a reconnect would be a different connection.
+                    if new == SessionState::Idle
+                        && !matches!(self.collision_hold, CollisionHold::Released)
+                    {
+                        self.collision_candidate_lost = true;
                     }
                     info!(
                         peer = %self.peer_label,
