@@ -1890,7 +1890,7 @@ process.
 
 `WatchEvents` does not backfill recent events for new subscribers. Clients
 that need both context and a live tail should call `ListRouteEvents` first,
-then open a live stream for subsequent deltas (`rbgp events watch --backfill`
+then open a live stream for subsequent deltas (`rbgp events watch --backfill 50`
 does exactly this), or use `SubscribeFromEvent` when event history is enabled.
 `WatchEvents` emits `BGP_EVENT_TYPE_STREAM_LAGGED` with a `StreamLagEvent`
 payload when a subscriber falls behind the bounded route broadcast.

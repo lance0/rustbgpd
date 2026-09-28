@@ -263,16 +263,17 @@ What you still provide:
 ## Verifying
 
 ```bash
-rbgp evpn instances        # L2VNI view (Ready / NotReady / Unbound / Unknown)
-rbgp evpn vrfs <name>      # IP-VRF readiness_state + not_ready_reasons
-rbgp evpn vrfs <name>      #   also: remote_prefix_drop_counts
+rbgp evpn instances        # readiness=ready|not-ready|unbound|unknown, reason=[...]
+rbgp evpn vrfs <name>      # readiness=ready|not-ready|unknown, reasons=[...]
+rbgp evpn vrfs <name> --json # includes not_ready_reasons and remote_prefix_drop_counts
 ```
 
-`NotReady` L2VNI rows include the single failing probe reason on
-`rbgp evpn instances`; `Unknown` means a bound instance has no dataplane
-verdict yet; `NotReady` IP-VRF rows enumerate predicate failures on
-`rbgp evpn vrfs`. The reconcile actor logs the `Ready` ↔ `NotReady`
-transition once per state change (not every pass).
+L2VNI rows with `readiness=not-ready` include the single failing probe reason
+in `reason=[...]`;
+`readiness=unknown` means a bound instance has no dataplane verdict yet.
+IP-VRF rows enumerate predicate failures in `reasons=[...]`. The reconcile
+actor logs the `Ready` ↔ `NotReady` transition once per state change (not every
+pass).
 
 ## Common pitfalls
 
@@ -281,7 +282,7 @@ transition once per state change (not every pass).
 | L2VNI `NotReady` "VLAN-aware" | bridge created with `vlan_filtering=1` but instance has no `bridge_vlan` | set `bridge_vlan` and add the VLAN membership, or recreate with `vlan_filtering 0` |
 | L2VNI `NotReady` "learning enabled" | VXLAN missing `nolearning` | recreate the VXLAN with `nolearning` |
 | L2VNI `NotReady` "local IP …" | `local` ≠ `local_vtep_ip` | match the config |
-| L2VNI `NotReady` ">1 VXLAN port" | legacy instance has multiple VXLANs on one bridge, or `bridge_vlan` instance has multiple VXLANs for the same VNI | legacy: one VXLAN per bridge; VLAN-aware: one VXLAN member per VNI |
+| L2VNI `NotReady` "VXLAN ports" | legacy bridge has zero or multiple VXLAN ports, or a `bridge_vlan` instance has a count other than one for its VLAN/VNI | legacy: attach exactly one VXLAN to the bridge; VLAN-aware: attach exactly one VXLAN member for the VLAN/VNI |
 | L2VNI `Unbound` unexpectedly | `bridge` omitted from config | set `bridge` if you want dataplane binding |
 | IP-VRF predicate 6/7 fails | L3VXLAN not enslaved to VRF, or wrong MAC | `set master ${VRF}` / `set address ${RMAC}` |
 | IP-VRF predicate 2 fails | VRF table id ≠ `table_id` | `type vrf table ${TABLE}` |
