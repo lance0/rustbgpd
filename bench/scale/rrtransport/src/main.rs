@@ -384,6 +384,7 @@ async fn smoke() -> Result<()> {
                 flowspec_withdrawn: Vec::new(),
                 evpn_announced: Vec::new(),
                 evpn_withdrawn: Vec::new(),
+                validated_with: None,
             })
             .await?;
     }

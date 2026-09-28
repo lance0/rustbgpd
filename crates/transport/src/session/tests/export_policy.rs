@@ -82,6 +82,7 @@ async fn accepted_export_policy_survives_rib_collision_promotion() {
             flowspec_withdrawn: vec![],
             evpn_announced: vec![],
             evpn_withdrawn: vec![],
+            validated_with: None,
         })
         .await
         .unwrap();

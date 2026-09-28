@@ -2532,6 +2532,7 @@ fn queue_messages(tx: &mpsc::Sender<RibUpdate>, messages: Vec<QueuedMessage>) {
             flowspec_withdrawn: Vec::new(),
             evpn_announced: Vec::new(),
             evpn_withdrawn: Vec::new(),
+            validated_with: None,
         })
         .expect("queued-announcement input fits the primary channel");
     }

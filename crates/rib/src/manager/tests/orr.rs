@@ -433,6 +433,7 @@ async fn unicast_stream_with_vantage(vantage: Option<IpAddr>) -> Vec<(Vec<String
         flowspec_withdrawn: vec![],
         evpn_announced: vec![],
         evpn_withdrawn: vec![],
+        validated_with: None,
     })
     .await
     .unwrap();
@@ -450,6 +451,7 @@ async fn unicast_stream_with_vantage(vantage: Option<IpAddr>) -> Vec<(Vec<String
         flowspec_withdrawn: vec![],
         evpn_announced: vec![],
         evpn_withdrawn: vec![],
+        validated_with: None,
     })
     .await
     .unwrap();
@@ -592,6 +594,7 @@ async fn announce_unicast(tx: &mpsc::Sender<RibUpdate>, peer: Ipv4Addr, announce
         flowspec_withdrawn: vec![],
         evpn_announced: vec![],
         evpn_withdrawn: vec![],
+        validated_with: None,
     })
     .await
     .unwrap();

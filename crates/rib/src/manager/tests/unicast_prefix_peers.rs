@@ -88,6 +88,7 @@ fn routes_received(
         flowspec_withdrawn: vec![],
         evpn_announced: vec![],
         evpn_withdrawn: vec![],
+        validated_with: None,
     });
     drain_route_chunks(manager);
 }

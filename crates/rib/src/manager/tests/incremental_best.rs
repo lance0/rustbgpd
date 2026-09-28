@@ -99,6 +99,7 @@ fn srv6_unicast_eligibility_covers_incremental_export_multipath_and_recovery() {
             vec![],
             vec![],
             vec![],
+            None,
         );
         drain_route_chunks(manager);
     };
@@ -162,6 +163,7 @@ fn srv6_unicast_eligibility_covers_incremental_export_multipath_and_recovery() {
         vec![],
         vec![],
         vec![],
+        None,
     );
     drain_route_chunks(&mut manager);
     assert!(manager.loc_rib.get(&fallback.prefix).is_none());
@@ -404,6 +406,7 @@ fn apply(manager: &mut RibManager, op: &Op, received_at: Instant) {
                 vec![],
                 vec![],
                 vec![],
+                None,
             );
             drain_route_chunks(manager);
         }
@@ -420,6 +423,7 @@ fn apply(manager: &mut RibManager, op: &Op, received_at: Instant) {
                 vec![],
                 vec![],
                 vec![],
+                None,
             );
             drain_route_chunks(manager);
         }

@@ -1492,6 +1492,7 @@ impl PeerSession {
                     flowspec_withdrawn: loop_fs_withdrawn,
                     evpn_announced: vec![],
                     evpn_withdrawn: loop_evpn_withdrawn,
+                    validated_with: None,
                 })
                 .await
                 .is_err()
@@ -3406,6 +3407,7 @@ impl PeerSession {
                     flowspec_withdrawn,
                     evpn_announced,
                     evpn_withdrawn,
+                    validated_with: validation,
                 })
                 .await
                 .is_err()

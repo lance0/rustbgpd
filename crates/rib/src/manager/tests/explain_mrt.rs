@@ -105,6 +105,7 @@ async fn warm_mrt_snapshot_excludes_routes_for_family_outside_exact_view() {
         flowspec_withdrawn: vec![],
         evpn_announced: vec![],
         evpn_withdrawn: vec![],
+        validated_with: None,
     })
     .await
     .unwrap();
@@ -199,6 +200,7 @@ async fn warm_mrt_snapshot_rejects_materialization_before_route_clone() {
         flowspec_withdrawn: vec![],
         evpn_announced: vec![],
         evpn_withdrawn: vec![],
+        validated_with: None,
     })
     .await
     .unwrap();
@@ -247,6 +249,7 @@ async fn mrt_snapshot_uses_adj_rib_in_routes_without_loc_rib_duplication() {
         flowspec_withdrawn: vec![],
         evpn_announced: vec![],
         evpn_withdrawn: vec![],
+        validated_with: None,
     })
     .await
     .unwrap();
@@ -303,6 +306,7 @@ async fn mrt_peer_metadata_retained_during_gr() {
         flowspec_withdrawn: vec![],
         evpn_announced: vec![],
         evpn_withdrawn: vec![],
+        validated_with: None,
     })
     .await
     .unwrap();
@@ -356,6 +360,7 @@ async fn explain_best_path_returns_candidates_without_winner() {
         flowspec_withdrawn: vec![],
         evpn_announced: vec![],
         evpn_withdrawn: vec![],
+        validated_with: None,
     })
     .await
     .unwrap();
@@ -369,6 +374,7 @@ async fn explain_best_path_returns_candidates_without_winner() {
         flowspec_withdrawn: vec![],
         evpn_announced: vec![],
         evpn_withdrawn: vec![],
+        validated_with: None,
     })
     .await
     .unwrap();
@@ -412,6 +418,10 @@ async fn explain_best_path_returns_candidates_without_winner() {
 }
 
 #[tokio::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "the route batch literal carries every supported family as one transaction"
+)]
 async fn lookup_best_path_is_atomic_and_falls_back_after_withdrawal() {
     let (tx, rx) = mpsc::channel(64);
     let handle =
@@ -441,6 +451,7 @@ async fn lookup_best_path_is_atomic_and_falls_back_after_withdrawal() {
             flowspec_withdrawn: vec![],
             evpn_announced: vec![],
             evpn_withdrawn: vec![],
+            validated_with: None,
         })
         .await
         .unwrap();
@@ -468,6 +479,7 @@ async fn lookup_best_path_is_atomic_and_falls_back_after_withdrawal() {
         flowspec_withdrawn: vec![],
         evpn_announced: vec![],
         evpn_withdrawn: vec![],
+        validated_with: None,
     })
     .await
     .unwrap();
@@ -495,6 +507,7 @@ async fn lookup_best_path_is_atomic_and_falls_back_after_withdrawal() {
             flowspec_withdrawn: vec![],
             evpn_announced: vec![],
             evpn_withdrawn: vec![],
+            validated_with: None,
         })
         .await
         .unwrap();
@@ -512,6 +525,7 @@ async fn lookup_best_path_is_atomic_and_falls_back_after_withdrawal() {
         flowspec_withdrawn: vec![],
         evpn_announced: vec![],
         evpn_withdrawn: vec![],
+        validated_with: None,
     })
     .await
     .unwrap();
@@ -561,6 +575,7 @@ async fn explain_best_path_single_path_has_no_best_reason() {
         flowspec_withdrawn: vec![],
         evpn_announced: vec![],
         evpn_withdrawn: vec![],
+        validated_with: None,
     })
     .await
     .unwrap();
@@ -629,6 +644,7 @@ async fn explain_best_path_attributes_each_loss_and_the_winning_step() {
             flowspec_withdrawn: vec![],
             evpn_announced: vec![],
             evpn_withdrawn: vec![],
+            validated_with: None,
         })
         .await
         .unwrap();
@@ -713,6 +729,7 @@ async fn explain_best_path_lower_bgp_identifier_beats_peer_address() {
             flowspec_withdrawn: vec![],
             evpn_announced: vec![],
             evpn_withdrawn: vec![],
+            validated_with: None,
         })
         .await
         .unwrap();
@@ -772,6 +789,7 @@ async fn explain_best_path_for_addpath_peer_marks_top_n_with_path_id() {
             flowspec_withdrawn: vec![],
             evpn_announced: vec![],
             evpn_withdrawn: vec![],
+            validated_with: None,
         })
         .await
         .unwrap();
@@ -869,6 +887,7 @@ async fn explain_best_path_single_best_does_not_fall_back_when_winner_is_target(
             flowspec_withdrawn: vec![],
             evpn_announced: vec![],
             evpn_withdrawn: vec![],
+            validated_with: None,
         })
         .await
         .unwrap();
@@ -942,6 +961,7 @@ async fn explain_best_path_for_single_best_peer_marks_only_winner_path_id_zero()
             flowspec_withdrawn: vec![],
             evpn_announced: vec![],
             evpn_withdrawn: vec![],
+            validated_with: None,
         })
         .await
         .unwrap();
@@ -1016,6 +1036,7 @@ async fn explain_best_path_effective_send_max_zero_on_family_mismatch() {
             flowspec_withdrawn: vec![],
             evpn_announced: vec![],
             evpn_withdrawn: vec![],
+            validated_with: None,
         })
         .await
         .unwrap();
@@ -1103,6 +1124,7 @@ async fn explain_best_path_global_view_unchanged() {
         flowspec_withdrawn: vec![],
         evpn_announced: vec![],
         evpn_withdrawn: vec![],
+        validated_with: None,
     })
     .await
     .unwrap();
@@ -1115,6 +1137,7 @@ async fn explain_best_path_global_view_unchanged() {
         flowspec_withdrawn: vec![],
         evpn_announced: vec![],
         evpn_withdrawn: vec![],
+        validated_with: None,
     })
     .await
     .unwrap();

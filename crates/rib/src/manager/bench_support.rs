@@ -957,6 +957,7 @@ impl RibManager {
             flowspec_withdrawn: Vec::new(),
             evpn_announced: Vec::new(),
             evpn_withdrawn: Vec::new(),
+            validated_with: None,
         });
         while self.process_next_route_chunk() {}
     }

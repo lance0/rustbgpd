@@ -1029,6 +1029,7 @@ mod tests {
                 flowspec_withdrawn: vec![],
                 evpn_announced: vec![],
                 evpn_withdrawn: vec![],
+                validated_with: None,
             });
             while manager.process_next_route_chunk() {}
         }
@@ -1059,6 +1060,7 @@ mod tests {
             flowspec_withdrawn: vec![],
             evpn_announced: vec![],
             evpn_withdrawn: vec![],
+            validated_with: None,
         });
         while manager.process_next_route_chunk() {}
         drain(&mut manager);
@@ -1182,6 +1184,7 @@ mod tests {
             flowspec_withdrawn: vec![],
             evpn_announced: vec![],
             evpn_withdrawn: vec![],
+            validated_with: None,
         });
         while manager.process_next_route_chunk() {}
         let rows = manager

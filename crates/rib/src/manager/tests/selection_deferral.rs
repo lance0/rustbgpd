@@ -297,6 +297,7 @@ async fn frozen_roster_rearms_satisfied_peer_on_session_replacement() {
         flowspec_withdrawn: vec![],
         evpn_announced: vec![],
         evpn_withdrawn: vec![],
+        validated_with: None,
     })
     .await
     .unwrap();
@@ -851,6 +852,7 @@ fn dirty_resync_sends_ready_eor_and_retains_held_family() {
         Vec::new(),
         Vec::new(),
         Vec::new(),
+        None,
     );
     while manager.process_next_route_chunk() {}
     assert!(!outbound_rx.try_recv().unwrap().announce.is_empty());
@@ -941,6 +943,7 @@ fn dirty_observer_emits_convergence_eor_before_deferred_refresh() {
         Vec::new(),
         Vec::new(),
         Vec::new(),
+        None,
     );
     while manager.process_next_route_chunk() {}
     assert!(
@@ -1081,6 +1084,7 @@ fn no_diff_dirty_resync_keeps_refresh_behind_failed_convergence_eor() {
         Vec::new(),
         Vec::new(),
         Vec::new(),
+        None,
     );
     while manager.process_next_route_chunk() {}
     assert!(
@@ -1246,6 +1250,7 @@ async fn collision_failback_withholds_eor_until_survivor_refresh_converges() {
         flowspec_withdrawn: Vec::new(),
         evpn_announced: Vec::new(),
         evpn_withdrawn: Vec::new(),
+        validated_with: None,
     })
     .await
     .unwrap();
@@ -1288,6 +1293,7 @@ async fn collision_failback_withholds_eor_until_survivor_refresh_converges() {
         flowspec_withdrawn: Vec::new(),
         evpn_announced: Vec::new(),
         evpn_withdrawn: Vec::new(),
+        validated_with: None,
     })
     .await
     .unwrap();
@@ -1455,6 +1461,7 @@ async fn collision_failback_withholds_eor_until_survivor_refresh_converges() {
         flowspec_withdrawn: Vec::new(),
         evpn_announced: Vec::new(),
         evpn_withdrawn: Vec::new(),
+        validated_with: None,
     })
     .await
     .unwrap();
@@ -1744,6 +1751,7 @@ fn collision_failback_overflow_receipt(
         Vec::new(),
         Vec::new(),
         Vec::new(),
+        None,
     );
     while manager.process_next_route_chunk() {}
     assert!(manager.loc_rib.get(&prefix_a).is_some());
@@ -1777,6 +1785,7 @@ fn collision_failback_overflow_receipt(
         Vec::new(),
         Vec::new(),
         Vec::new(),
+        None,
     );
     while manager.process_next_route_chunk() {}
     assert!(manager.loc_rib.get(&prefix_a).is_some());
@@ -2312,6 +2321,7 @@ async fn queued_route_is_applied_before_simultaneous_eor_and_timer_release() {
         flowspec_withdrawn: Vec::new(),
         evpn_announced: Vec::new(),
         evpn_withdrawn: Vec::new(),
+        validated_with: None,
     })
     .unwrap();
     tx.try_send(RibUpdate::EndOfRib {
@@ -2378,6 +2388,7 @@ async fn full_outbound_channel_keeps_eor_pending_until_dirty_resync() {
         flowspec_withdrawn: Vec::new(),
         evpn_announced: Vec::new(),
         evpn_withdrawn: Vec::new(),
+        validated_with: None,
     })
     .await
     .unwrap();

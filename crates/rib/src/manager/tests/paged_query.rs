@@ -249,6 +249,7 @@ fn receive_direct(
         flowspec_withdrawn: vec![],
         evpn_announced: vec![],
         evpn_withdrawn: vec![],
+        validated_with: None,
     });
     while manager.process_next_route_chunk() {}
 }
@@ -308,6 +309,7 @@ async fn seeded_manager() -> (
             flowspec_withdrawn: vec![],
             evpn_announced: vec![],
             evpn_withdrawn: vec![],
+            validated_with: None,
         })
         .await
         .unwrap();
@@ -917,6 +919,7 @@ async fn custom_predicate_continuation_preserves_filter_semantics() {
         flowspec_withdrawn: vec![],
         evpn_announced: vec![],
         evpn_withdrawn: vec![],
+        validated_with: None,
     })
     .await
     .unwrap();

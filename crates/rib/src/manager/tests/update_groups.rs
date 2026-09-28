@@ -363,6 +363,7 @@ async fn assert_mixed_fanout_readiness(selection_release: bool) {
         flowspec_withdrawn: vec![],
         evpn_announced: vec![],
         evpn_withdrawn: vec![],
+        validated_with: None,
     });
     while manager.process_next_route_chunk() {}
     if selection_release {
@@ -716,6 +717,7 @@ fn distribute_direct_routes(
         flowspec_withdrawn: vec![],
         evpn_announced: vec![],
         evpn_withdrawn: vec![],
+        validated_with: None,
     });
     while manager.process_next_route_chunk() {}
 }
@@ -1279,6 +1281,7 @@ fn drive_exact_precommit_step(
         flowspec_withdrawn: vec![],
         evpn_announced: vec![],
         evpn_withdrawn: vec![],
+        validated_with: None,
     });
     while manager.process_next_route_chunk() {}
     let updates = receivers
@@ -1539,6 +1542,7 @@ async fn run_clean_transition_equivalence(force_ungrouped: bool) -> Vec<Vec<Stri
         flowspec_withdrawn: vec![],
         evpn_announced: vec![],
         evpn_withdrawn: vec![],
+        validated_with: None,
     })
     .await
     .unwrap();
@@ -1994,6 +1998,7 @@ async fn rs_transparent_peers_group_per_client_best_groups_on_own_key() {
         flowspec_withdrawn: vec![],
         evpn_announced: vec![],
         evpn_withdrawn: vec![],
+        validated_with: None,
     })
     .await
     .unwrap();
@@ -2241,6 +2246,7 @@ async fn clean_policy_transition_builds_and_probes_once_per_wire_cohort() {
         flowspec_withdrawn: vec![],
         evpn_announced: vec![],
         evpn_withdrawn: vec![],
+        validated_with: None,
     })
     .await
     .unwrap();
@@ -2356,6 +2362,7 @@ async fn clean_policy_transition_builds_and_probes_once_per_wire_cohort() {
         flowspec_withdrawn: vec![],
         evpn_announced: vec![],
         evpn_withdrawn: vec![],
+        validated_with: None,
     })
     .await
     .unwrap();
@@ -2520,6 +2527,7 @@ async fn clean_policy_transition_drains_unrelated_dirty_residue_before_reply() {
             flowspec_withdrawn: vec![],
             evpn_announced: vec![],
             evpn_withdrawn: vec![],
+            validated_with: None,
         })
         .await
         .unwrap();
@@ -2668,6 +2676,7 @@ async fn clean_policy_transition_existing_destination_shares_every_members_count
         flowspec_withdrawn: vec![],
         evpn_announced: vec![],
         evpn_withdrawn: vec![],
+        validated_with: None,
     })
     .await
     .unwrap();
@@ -2717,6 +2726,7 @@ async fn clean_policy_transition_existing_destination_shares_every_members_count
         flowspec_withdrawn: vec![],
         evpn_announced: vec![],
         evpn_withdrawn: vec![],
+        validated_with: None,
     })
     .await
     .unwrap();
@@ -2802,6 +2812,7 @@ async fn clean_policy_transition_isolates_readiness_from_general_query_flood() {
         flowspec_withdrawn: vec![],
         evpn_announced: vec![],
         evpn_withdrawn: vec![],
+        validated_with: None,
     })
     .await
     .unwrap();
@@ -3350,6 +3361,7 @@ async fn clean_policy_transition_finishes_after_reply_and_channels_close() {
         flowspec_withdrawn: vec![],
         evpn_announced: vec![],
         evpn_withdrawn: vec![],
+        validated_with: None,
     })
     .await
     .unwrap();
@@ -3453,6 +3465,7 @@ async fn clean_policy_transition_falls_back_wholesale_on_member_ceiling_rejectio
         flowspec_withdrawn: vec![],
         evpn_announced: vec![],
         evpn_withdrawn: vec![],
+        validated_with: None,
     })
     .await
     .unwrap();
@@ -3551,6 +3564,7 @@ async fn clean_policy_transition_falls_back_wholesale_on_member_ceiling_rejectio
         flowspec_withdrawn: vec![],
         evpn_announced: vec![],
         evpn_withdrawn: vec![],
+        validated_with: None,
     })
     .await
     .unwrap();
@@ -3617,6 +3631,7 @@ async fn clean_policy_transition_falls_back_wholesale_on_member_ceiling_rejectio
         flowspec_withdrawn: vec![],
         evpn_announced: vec![],
         evpn_withdrawn: vec![],
+        validated_with: None,
     })
     .await
     .unwrap();
@@ -3683,6 +3698,7 @@ async fn clean_policy_transition_falls_back_wholesale_for_add_path_member() {
         flowspec_withdrawn: vec![],
         evpn_announced: vec![],
         evpn_withdrawn: vec![],
+        validated_with: None,
     })
     .await
     .unwrap();
@@ -3829,6 +3845,7 @@ async fn clean_policy_transition_admits_rs_control_members_on_untagged_inventory
         flowspec_withdrawn: vec![],
         evpn_announced: vec![],
         evpn_withdrawn: vec![],
+        validated_with: None,
     })
     .await
     .unwrap();
@@ -3961,6 +3978,7 @@ async fn clean_policy_transition_tagged_source_keeps_rs_members_on_authoritative
         flowspec_withdrawn: vec![],
         evpn_announced: vec![],
         evpn_withdrawn: vec![],
+        validated_with: None,
     })
     .await
     .unwrap();
@@ -4077,6 +4095,7 @@ async fn clean_policy_transition_saturation_falls_back_and_heals_without_duplica
         flowspec_withdrawn: vec![],
         evpn_announced: vec![],
         evpn_withdrawn: vec![],
+        validated_with: None,
     })
     .await
     .unwrap();
@@ -4196,6 +4215,7 @@ async fn clean_policy_transition_generation_change_rejects_stale_plan() {
         flowspec_withdrawn: vec![],
         evpn_announced: vec![],
         evpn_withdrawn: vec![],
+        validated_with: None,
     })
     .await
     .unwrap();
@@ -4262,6 +4282,7 @@ async fn residue_gauge_tracks_tombstones_and_clears_on_resync() {
             flowspec_withdrawn: vec![],
             evpn_announced: vec![],
             evpn_withdrawn: vec![],
+            validated_with: None,
         })
         .await
         .unwrap();
@@ -4362,6 +4383,7 @@ async fn residue_gauge_clears_after_dirty_leaver_moves_to_per_peer_path() {
             flowspec_withdrawn: vec![],
             evpn_announced: vec![],
             evpn_withdrawn: vec![],
+            validated_with: None,
         })
         .await
         .unwrap();
@@ -4487,6 +4509,7 @@ async fn content_identical_replace_keeps_export_term_hit_counters() {
             flowspec_withdrawn: vec![],
             evpn_announced: vec![],
             evpn_withdrawn: vec![],
+            validated_with: None,
         })
         .await
         .unwrap();
@@ -4859,6 +4882,7 @@ async fn grouped_and_ungrouped_export_counters_match_after_dirty_resync() {
             flowspec_withdrawn: vec![],
             evpn_announced: vec![],
             evpn_withdrawn: vec![],
+            validated_with: None,
         })
         .await
         .unwrap();
@@ -4987,6 +5011,7 @@ fn direct_clean_transition_manager(
         flowspec_withdrawn: vec![],
         evpn_announced: vec![],
         evpn_withdrawn: vec![],
+        validated_with: None,
     });
     while manager.process_next_route_chunk() {}
     for receiver in &mut receivers {
@@ -5325,6 +5350,7 @@ async fn post_commit_query_trace_accounts_work_until_first_general_query() {
             flowspec_withdrawn: vec![],
             evpn_announced: vec![],
             evpn_withdrawn: vec![],
+            validated_with: None,
         });
     });
     while manager.traced_route_chunk() {}
@@ -5506,6 +5532,7 @@ async fn post_commit_query_trace_is_consumed_by_idle_select_arm_query() {
         flowspec_withdrawn: vec![],
         evpn_announced: vec![],
         evpn_withdrawn: vec![],
+        validated_with: None,
     };
     tx.send(routes_received(Ipv4Prefix::new(
         Ipv4Addr::new(203, 0, 118, 0),
@@ -5961,6 +5988,7 @@ async fn fence_holds_queued_work_until_commit_flush_terminal() {
         flowspec_withdrawn: vec![],
         evpn_announced: vec![],
         evpn_withdrawn: vec![],
+        validated_with: None,
     })
     .await
     .unwrap();
@@ -5993,6 +6021,7 @@ async fn fence_holds_queued_work_until_commit_flush_terminal() {
         flowspec_withdrawn: vec![],
         evpn_announced: vec![],
         evpn_withdrawn: vec![],
+        validated_with: None,
     })
     .await
     .unwrap();
@@ -6233,6 +6262,7 @@ fn announce_family_route(manager: &mut RibManager, source: Ipv4Addr, safi: Safi,
                     vec![]
                 },
                 evpn_withdrawn: vec![],
+                validated_with: None,
             }
         }
         _ => panic!("unsupported family fixture: {safi:?}"),
@@ -6720,6 +6750,7 @@ async fn prepared_destination_commits_with_interleaved_churn() {
         flowspec_withdrawn: vec![],
         evpn_announced: vec![],
         evpn_withdrawn: vec![],
+        validated_with: None,
     })
     .await
     .unwrap();
@@ -6754,6 +6785,7 @@ async fn prepared_destination_commits_with_interleaved_churn() {
         flowspec_withdrawn: vec![],
         evpn_announced: vec![],
         evpn_withdrawn: vec![],
+        validated_with: None,
     })
     .await
     .unwrap();
@@ -6835,6 +6867,7 @@ async fn discarded_prepared_destination_is_removed() {
         flowspec_withdrawn: vec![],
         evpn_announced: vec![],
         evpn_withdrawn: vec![],
+        validated_with: None,
     })
     .await
     .unwrap();
@@ -6919,6 +6952,7 @@ async fn transition_immediately_after_prepare_commits_without_leaks() {
         flowspec_withdrawn: vec![],
         evpn_announced: vec![],
         evpn_withdrawn: vec![],
+        validated_with: None,
     })
     .await
     .unwrap();
@@ -7014,6 +7048,7 @@ async fn prestage_mid_walk_join_of_prestaged_destination() {
         flowspec_withdrawn: vec![],
         evpn_announced: vec![],
         evpn_withdrawn: vec![],
+        validated_with: None,
     })
     .await
     .unwrap();
@@ -7078,6 +7113,7 @@ async fn prestage_mid_walk_join_of_prestaged_destination() {
         flowspec_withdrawn: vec![],
         evpn_announced: vec![],
         evpn_withdrawn: vec![],
+        validated_with: None,
     })
     .await
     .unwrap();
@@ -7150,6 +7186,7 @@ async fn prestage_control_join_without_prestage() {
         flowspec_withdrawn: vec![],
         evpn_announced: vec![],
         evpn_withdrawn: vec![],
+        validated_with: None,
     })
     .await
     .unwrap();
@@ -7200,6 +7237,7 @@ async fn prestage_control_join_without_prestage() {
         flowspec_withdrawn: vec![],
         evpn_announced: vec![],
         evpn_withdrawn: vec![],
+        validated_with: None,
     })
     .await
     .unwrap();
@@ -7269,6 +7307,7 @@ async fn prestage_discarded_when_cohort_resolves_different_destination() {
         flowspec_withdrawn: vec![],
         evpn_announced: vec![],
         evpn_withdrawn: vec![],
+        validated_with: None,
     })
     .await
     .unwrap();
@@ -7503,6 +7542,7 @@ async fn converged_per_client_best_fleet_regroups_byte_empty() {
             flowspec_withdrawn: vec![],
             evpn_announced: vec![],
             evpn_withdrawn: vec![],
+            validated_with: None,
         })
         .await
         .unwrap();
@@ -7858,6 +7898,7 @@ fn replacement_readiness_fleet(export_policy: &PolicyChain) -> BatchedPcbFleet {
         flowspec_withdrawn: vec![],
         evpn_announced: vec![],
         evpn_withdrawn: vec![],
+        validated_with: None,
     });
     while manager.process_next_route_chunk() {}
     manager
@@ -8305,6 +8346,7 @@ fn replacement_readiness_services_production_interiors_before_ack_and_queued_mut
                 flowspec_withdrawn: vec![],
                 evpn_announced: vec![],
                 evpn_withdrawn: vec![],
+                validated_with: None,
             })
             .unwrap();
         let (reply, response) = oneshot::channel();
@@ -10008,6 +10050,7 @@ fn batched_authoritative_occupied_destination_preserves_incumbent_retry() {
             flowspec_withdrawn: vec![],
             evpn_announced: vec![],
             evpn_withdrawn: vec![],
+            validated_with: None,
         });
         while fleet.manager.process_next_route_chunk() {}
         assert!(fleet.manager.dirty_peers.contains(&incumbent));
@@ -10213,6 +10256,7 @@ fn batched_authoritative_occupied_destination_resyncs_a_lagging_mover() {
         flowspec_withdrawn: vec![],
         evpn_announced: vec![],
         evpn_withdrawn: vec![],
+        validated_with: None,
     });
     while fleet.manager.process_next_route_chunk() {}
     assert!(fleet.manager.dirty_peers.contains(&lagging));
@@ -10958,6 +11002,7 @@ fn refresh_residue_during_churn(force_ungrouped: bool) -> Vec<RefreshObservation
         flowspec_withdrawn: vec![],
         evpn_announced: vec![],
         evpn_withdrawn: vec![],
+        validated_with: None,
     });
     let mut observations = Vec::new();
     for (peer, receiver) in [(grouped, &mut grouped_rx), (distinct, &mut distinct_rx)] {

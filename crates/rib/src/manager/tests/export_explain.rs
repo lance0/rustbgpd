@@ -162,6 +162,7 @@ async fn feed_routes(tx: &mpsc::Sender<RibUpdate>, peer: IpAddr, announced: Vec<
         flowspec_withdrawn: vec![],
         evpn_announced: vec![],
         evpn_withdrawn: vec![],
+        validated_with: None,
     })
     .await
     .unwrap();

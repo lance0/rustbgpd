@@ -20,6 +20,7 @@ async fn export_policy_counter_records_single_best_permit() {
         flowspec_withdrawn: vec![],
         evpn_announced: vec![],
         evpn_withdrawn: vec![],
+        validated_with: None,
     })
     .await
     .unwrap();
@@ -106,6 +107,7 @@ async fn graceful_restart_clears_export_policy_stats() {
         flowspec_withdrawn: vec![],
         evpn_announced: vec![],
         evpn_withdrawn: vec![],
+        validated_with: None,
     })
     .await
     .unwrap();
@@ -180,6 +182,7 @@ async fn explain_advertised_route_does_not_increment_export_policy_counter() {
         flowspec_withdrawn: vec![],
         evpn_announced: vec![],
         evpn_withdrawn: vec![],
+        validated_with: None,
     })
     .await
     .unwrap();
@@ -293,6 +296,7 @@ async fn export_policy_blocks_denied() {
         flowspec_withdrawn: vec![],
         evpn_announced: vec![],
         evpn_withdrawn: vec![],
+        validated_with: None,
     })
     .await
     .unwrap();
@@ -361,6 +365,7 @@ async fn query_advertised_routes() {
         flowspec_withdrawn: vec![],
         evpn_announced: vec![],
         evpn_withdrawn: vec![],
+        validated_with: None,
     })
     .await
     .unwrap();
@@ -474,6 +479,7 @@ async fn per_peer_export_policy() {
         flowspec_withdrawn: vec![],
         evpn_announced: vec![],
         evpn_withdrawn: vec![],
+        validated_with: None,
     })
     .await
     .unwrap();
@@ -563,6 +569,7 @@ async fn replace_peer_export_policy_resyncs_outbound_state_and_emits_policy_filt
         flowspec_withdrawn: vec![],
         evpn_announced: vec![],
         evpn_withdrawn: vec![],
+        validated_with: None,
     })
     .await
     .unwrap();
@@ -700,6 +707,7 @@ async fn export_policy_match_next_hop_filters_route() {
         flowspec_withdrawn: vec![],
         evpn_announced: vec![],
         evpn_withdrawn: vec![],
+        validated_with: None,
     })
     .await
     .unwrap();
@@ -803,6 +811,7 @@ async fn explain_advertised_route_reports_policy_deny_without_mutation() {
         flowspec_withdrawn: vec![],
         evpn_announced: vec![],
         evpn_withdrawn: vec![],
+        validated_with: None,
     })
     .await
     .unwrap();
@@ -906,6 +915,7 @@ async fn export_as_path_regex_still_filters_through_distribution() {
         flowspec_withdrawn: vec![],
         evpn_announced: vec![],
         evpn_withdrawn: vec![],
+        validated_with: None,
     })
     .await
     .unwrap();
@@ -1004,6 +1014,7 @@ async fn explain_advertised_route_reports_modifications() {
         flowspec_withdrawn: vec![],
         evpn_announced: vec![],
         evpn_withdrawn: vec![],
+        validated_with: None,
     })
     .await
     .unwrap();
@@ -1116,6 +1127,7 @@ async fn explain_advertised_route_reports_ipv6_next_hop_override() {
         flowspec_withdrawn: vec![],
         evpn_announced: vec![],
         evpn_withdrawn: vec![],
+        validated_with: None,
     })
     .await
     .unwrap();
@@ -1290,6 +1302,7 @@ policy chain_default_permit {
         flowspec_withdrawn: vec![],
         evpn_announced: vec![],
         evpn_withdrawn: vec![],
+        validated_with: None,
     })
     .await
     .unwrap();
@@ -1512,6 +1525,7 @@ async fn export_memo_shares_identical_modified_attrs_and_keys_peer_varying_chain
         flowspec_withdrawn: vec![],
         evpn_announced: vec![],
         evpn_withdrawn: vec![],
+        validated_with: None,
     })
     .await
     .unwrap();
@@ -1628,6 +1642,7 @@ async fn single_best_policy_added_no_advertise_emits_policy_filtered_event() {
         flowspec_withdrawn: vec![],
         evpn_announced: vec![],
         evpn_withdrawn: vec![],
+        validated_with: None,
     })
     .await
     .unwrap();
@@ -1668,6 +1683,10 @@ async fn single_best_policy_added_no_advertise_emits_policy_filtered_event() {
 /// them: the joiner's policy-filtered state and `PolicyFiltered` event come
 /// from the group residue, which the join's prefix scope must cover.
 #[tokio::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "the route batch literal carries every supported family as one transaction"
+)]
 async fn grouped_join_inherits_group_export_policy_denials() {
     use rustbgpd_policy::{Policy, PolicyAction, PolicyChain, PolicyStatement, RouteModifications};
 
@@ -1738,6 +1757,7 @@ async fn grouped_join_inherits_group_export_policy_denials() {
         flowspec_withdrawn: vec![],
         evpn_announced: vec![],
         evpn_withdrawn: vec![],
+        validated_with: None,
     })
     .await
     .unwrap();
