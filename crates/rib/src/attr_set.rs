@@ -1,7 +1,7 @@
 //! Path-attribute sets with a cached best-path selection summary.
 //!
 //! Unicast best-path comparison reads seven attribute-derived values per route. As
-//! `find_map` scans over 208-byte `PathAttribute` values, an equal compare
+//! `find_map` scans over the `PathAttribute` values, an equal compare
 //! walked the attribute list about a dozen times. [`AttrSet`] computes those
 //! values once, when the set is built, and interning shares one set (and so
 //! one summary) across every route that carries the same attributes.
