@@ -518,9 +518,11 @@ fn runtime_config_coordinator_inventory_is_complete_and_closed() {
         (main, ".with_runtime_config_settlement(", 1),
         (main, "move || settlement_wait.wait_until_idle()", 0),
         (main, "move || settlement_wait.wait_until_idle_or_fail_stop()", 1),
-        (transaction, "self.deps.lock.acquire()", 2),
+        // Two owned mutation acquisitions plus the bounded, request-scoped
+        // preview history capture; the preview is never a watchdog owner.
+        (transaction, "self.deps.lock.acquire()", 3),
         (transaction, ".acquire().await", 0),
-        (transaction, "CONFIG_TRANSACTION_COORDINATOR_ACQUIRE_TIMEOUT,", 2),
+        (transaction, "CONFIG_TRANSACTION_COORDINATOR_ACQUIRE_TIMEOUT,", 3),
         (transaction, "acquire.await?", 0),
         (transaction, "self.acquire_for_auto_revert(acquire, auto_revert).await?", 1),
         (transaction, "return acquire.await;", 1),
@@ -542,6 +544,24 @@ fn runtime_config_coordinator_inventory_is_complete_and_closed() {
     for (source, shape, count) in inventory {
         assert_eq!(source.matches(shape).count(), count, "{shape}");
     }
+    let preview = fn_body(transaction, "async fn preview_rollback");
+    assert_eq!(preview.matches("self.deps.lock.acquire()").count(), 1);
+    assert_eq!(
+        preview
+            .matches("CONFIG_TRANSACTION_COORDINATOR_ACQUIRE_TIMEOUT,")
+            .count(),
+        1
+    );
+    assert!(preview.contains("Some(self.deps.lock.clone())"));
+    assert!(!preview.contains("execute_owned_operation"));
+    assert!(!preview.contains("RuntimeConfigOperationKind"));
+    assert!(!preview.contains("register_owned"));
+    assert_eq!(
+        server.matches(".try_acquire_owned()").count(),
+        1,
+        "only the explicit nonblocking coordinator API may probe ownership"
+    );
+
     // AutoRevert appears twice: its registration, and the one deliberate
     // exemption from the bounded coordinator acquire.
     for (kind, count) in [
@@ -741,6 +761,11 @@ fn runtime_config_coordinator_inventory_is_complete_and_closed() {
         assert!(!neighbor.contains(legacy), "Neighbor4 bypass: {legacy}");
     }
     let peer_manager = production(include_str!("../peer_manager/mod.rs"));
+    assert_eq!(
+        peer_manager.matches("coordinator.try_acquire()").count(),
+        1,
+        "rollback preview has one nonblocking planner-entry baseline check"
+    );
     assert_eq!(
         peer_manager
             .matches("PeerManagerCommand::OwnedNeighborMutation")

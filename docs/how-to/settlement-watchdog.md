@@ -61,9 +61,14 @@ watchdog:
 | Peer groups | Group Set/Delete and neighbor membership Set/Clear |
 | Policy | Policy and neighbor-set Set/Delete, global import/export chain Set/Clear, per-neighbor import/export chain Set/Clear |
 
-Read-only operations — Plan, Status, History, Get, List — never take
-ownership and are outside the watchdog. The shutdown/warm-checkpoint
-coordinator acquisition is a fence, not a mutation owner.
+Read-only operations — Plan, Status, History, Get, List, and rollback preview —
+never register mutation ownership and are outside the watchdog. Rollback preview
+briefly takes the coordinator to capture a bounded retained history payload,
+then releases it before source loading or planning. Its actor-entry check also
+acquires nonblockingly and releases immediately; a busy or closed coordinator
+returns retryable `UNAVAILABLE`. Neither read acquisition spans an actor wait.
+The shutdown/warm-checkpoint coordinator acquisition is a fence, not a mutation
+owner.
 
 ## Two clocks: acquisition and settlement
 
@@ -109,10 +114,10 @@ A clean settlement instead disarms the fatal boundary and lets coordinated
 teardown continue.
 
 Only an owner gets that wait. If the coordinator permit is still held once no
-owner is registered, the holder is outside the watchdog (defense-in-depth:
-in normal operation every coordinator acquirer is an owned mutation, as
-`ListFibTables` no longer holds the permit), and shutdown gives it five seconds
-before logging an error, skipping the warm checkpoint, and continuing. No
+owner is registered, the holder is outside the watchdog. This includes the
+brief rollback-preview read acquisitions; `ListFibTables` does not hold the
+permit. Shutdown gives such a holder five seconds before logging an error,
+skipping the warm checkpoint, and continuing. No
 mutation can start behind that abandoned wait: an operation that obtains the
 permit only after shutdown has begun is refused as `UNAVAILABLE` (`runtime
 config coordinator is closed`; a SIGHUP reload is rejected with no effect)
