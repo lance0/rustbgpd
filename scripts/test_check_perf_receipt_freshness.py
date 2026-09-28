@@ -576,12 +576,17 @@ class PerfReceiptFreshnessTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             (root / "docs" / "perf").mkdir(parents=True)
-            for name in ("inline", "reference", "footnote", "orphan"):
+            names = ("inline", "full", "collapsed", "shortcut", "footnote", "unused", "orphan")
+            for name in names:
                 (root / "docs" / "perf" / f"{name}.md").write_text(f"# {name}\n", encoding="utf-8")
             (root / "docs" / "index.md").write_text(
-                "[inline](perf/inline.md) and [reference][ref] and a note[^perf/footnote.md].\n"
+                "[inline](perf/inline.md), [full][Full\n  Label], [Collapsed][],\n"
+                "[shortcut], and a note[^perf/footnote.md].\n"
                 "\n"
-                "[ref]: <perf/reference.md> \"Reference title\"\n"
+                "[full label]: <perf/full.md> \"Reference title\"\n"
+                "[collapsed]: perf/collapsed.md\n"
+                "   [SHORTCUT]: perf/shortcut.md\n"
+                "[unused]: perf/unused.md\n"
                 "[^perf/footnote.md]: perf/footnote.md\n",
                 encoding="utf-8",
             )
@@ -589,7 +594,7 @@ class PerfReceiptFreshnessTests(unittest.TestCase):
                 subprocess.run(("git", *arguments), cwd=root, check=True)
             self.assertEqual(
                 checker.unlinked_receipts(root),
-                ["docs/perf/footnote.md", "docs/perf/orphan.md"],
+                ["docs/perf/footnote.md", "docs/perf/orphan.md", "docs/perf/unused.md"],
             )
 
     def test_supersession_links_are_direct_and_non_destructive(self) -> None:
