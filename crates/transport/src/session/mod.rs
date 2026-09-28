@@ -343,6 +343,9 @@ pub(crate) struct PeerSession {
     collision_hold: fsm::CollisionHold,
     /// Bounds the `OpenConfirm` wait for a collision verdict that never comes.
     collision_verdict_timer: Option<Pin<Box<Sleep>>>,
+    /// An unpromoted inbound candidate fell to Idle, so its accepted
+    /// connection is gone and it can no longer be claimed for promotion.
+    collision_candidate_lost: bool,
     /// In-flight outbound TCP connect attempt. Polled by the main event loop
     /// so control commands remain responsive during connection establishment.
     connect_task: Option<ConnectTask>,
@@ -2074,6 +2077,7 @@ impl PeerSession {
                 fsm::CollisionHold::Released
             },
             collision_verdict_timer: None,
+            collision_candidate_lost: false,
             connect_task: None,
             connect_failure_episode: ConnectFailureEpisode::default(),
             outbound_rx,

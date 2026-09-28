@@ -2115,7 +2115,14 @@ async fn stale_open_received_after_verdict_timeout_does_not_promote_candidate() 
 /// back its `BackToIdle` until after the manager has handled the OPEN, which is
 /// what the drain sees when the timer fires just after it. The candidate's
 /// claim reply must keep the primary in place.
-async fn candidate_idle_after_drain_keeps_primary(local_id: Ipv4Addr, primary_state: SessionState) {
+/// With `redial`, the candidate's reconnect timer also dials the peer again
+/// and receives a fresh OPEN before the claim, so it is back in `OpenConfirm`
+/// on a connection that is not the one the manager resolved.
+async fn candidate_idle_after_drain_keeps_primary(
+    local_id: Ipv4Addr,
+    primary_state: SessionState,
+    redial: bool,
+) {
     let (_cmd_tx, cmd_rx) = mpsc::channel(16);
     let (rib_tx, _rib_rx) = mpsc::channel(64);
     let mut mgr = PeerManager::new(
@@ -2138,6 +2145,12 @@ async fn candidate_idle_after_drain_keeps_primary(local_id: Ipv4Addr, primary_st
         fake_peer_handle(peer_addr, primary_state, None, primary.clone()),
         false,
     );
+    let redial_listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+    mgr.peers
+        .get_mut(&key(peer_addr))
+        .unwrap()
+        .transport_config
+        .remote_addr = redial_listener.local_addr().unwrap();
     let mut client = accept_real_candidate(&mut mgr, peer_addr).await;
     let mut buf = BytesMut::with_capacity(4096);
     let open_received = candidate_open_exchange(&mut mgr, &mut client, &mut buf).await;
@@ -2163,6 +2176,12 @@ async fn candidate_idle_after_drain_keeps_primary(local_id: Ipv4Addr, primary_st
             .any(|n| matches!(n, SessionNotification::BackToIdle { session_id: 2, .. })),
         "the candidate fell to Idle before promotion: {late:?}"
     );
+    if redial {
+        tokio::time::advance(Duration::from_secs(6)).await;
+        let (mut redialed, _) = redial_listener.accept().await.unwrap();
+        let mut redial_buf = BytesMut::with_capacity(4096);
+        late.push(candidate_open_exchange(&mut mgr, &mut redialed, &mut redial_buf).await);
+    }
 
     mgr.handle_session_notification(open_received).await;
     for notification in late {
@@ -2186,15 +2205,35 @@ async fn candidate_idle_after_drain_keeps_primary(local_id: Ipv4Addr, primary_st
 /// Remote wins against a primary in `OpenConfirm`.
 #[tokio::test]
 async fn candidate_idle_after_drain_does_not_replace_open_confirm_primary() {
-    candidate_idle_after_drain_keeps_primary(Ipv4Addr::new(10, 0, 0, 1), SessionState::OpenConfirm)
-        .await;
+    candidate_idle_after_drain_keeps_primary(
+        Ipv4Addr::new(10, 0, 0, 1),
+        SessionState::OpenConfirm,
+        false,
+    )
+    .await;
+}
+
+/// The candidate falls to Idle after the drain and its reconnect timer redials
+/// the peer before the claim: the redialed session must not be promoted.
+#[tokio::test]
+async fn redialed_candidate_does_not_replace_open_confirm_primary() {
+    candidate_idle_after_drain_keeps_primary(
+        Ipv4Addr::new(10, 0, 0, 1),
+        SessionState::OpenConfirm,
+        true,
+    )
+    .await;
 }
 
 /// The no-primary-connection rule against a primary in `Active`.
 #[tokio::test]
 async fn candidate_idle_after_drain_does_not_replace_active_primary() {
-    candidate_idle_after_drain_keeps_primary(Ipv4Addr::new(10, 255, 0, 1), SessionState::Active)
-        .await;
+    candidate_idle_after_drain_keeps_primary(
+        Ipv4Addr::new(10, 255, 0, 1),
+        SessionState::Active,
+        false,
+    )
+    .await;
 }
 
 /// A candidate whose task exits before answering the claim (its reply is

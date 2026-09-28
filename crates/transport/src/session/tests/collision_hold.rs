@@ -241,3 +241,91 @@ async fn idle_candidate_refuses_promotion_claim() {
     assert!(!claim(&mut candidate).await);
     assert!(rib_rx.try_recv().is_err());
 }
+
+/// A candidate that lost its accepted connection keeps its reconnect timer and
+/// dials the peer again. On the new connection it reaches the same FSM and
+/// hold states as a candidate still on its accepted socket, so the claim must
+/// remember the fall to Idle rather than read the current state.
+#[tokio::test(start_paused = true)]
+async fn candidate_redialed_after_idle_refuses_promotion_claim() {
+    let (local, mut remote) = connected_stream_pair().await;
+    let redial = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let mut peer_config = PeerConfig::new(65001, 65002, Ipv4Addr::new(10, 0, 0, 1));
+    peer_config.families = vec![(Afi::Ipv4, Safi::Unicast)];
+    peer_config.connect_retry_secs = 5;
+    let config = TransportConfig::new(peer_config, redial.local_addr().unwrap());
+    let metrics = BgpMetrics::new();
+    let (notify_tx, mut notify_rx) = crate::handle::session_notification_channel(metrics.clone());
+    let (cmd_tx, cmd_rx) = mpsc::channel(8);
+    let (rib_tx, _rib_rx) = mpsc::channel(64);
+    let mut candidate = PeerSession::new_inbound_with_identity_and_lifecycle(
+        config,
+        metrics,
+        cmd_rx,
+        rib_tx,
+        None,
+        None,
+        local,
+        Some(notify_tx),
+        None,
+        None,
+        None,
+        None,
+        false,
+        SessionIdentity::inbound_candidate(7),
+        None,
+        None,
+        crate::TcpAoRotationGeneration::STARTUP,
+    );
+    let session = tokio::spawn(async move { candidate.run().await });
+    cmd_tx.send(PeerCommand::Start).await.unwrap();
+    assert!(matches!(
+        read_single_bgp_message(&mut remote).await,
+        Message::Open(_)
+    ));
+    remote
+        .write_all(&encoded_peer_open_and_keepalive())
+        .await
+        .unwrap();
+    assert!(matches!(
+        notify_rx.recv().await.unwrap(),
+        SessionNotification::OpenReceived { session_id: 7, .. }
+    ));
+
+    // The verdict timer closes the accepted connection...
+    tokio::time::advance(fsm::COLLISION_VERDICT_TIMEOUT).await;
+    assert!(matches!(
+        notify_rx.recv().await.unwrap(),
+        SessionNotification::BackToIdle { session_id: 7, .. }
+    ));
+    // ...and the reconnect timer dials a new one, which sends our OPEN. The
+    // peer answers, so the redialed session is held for a verdict exactly as
+    // the accepted one was.
+    tokio::time::advance(Duration::from_secs(6)).await;
+    let (mut redialed, _) = redial.accept().await.unwrap();
+    assert!(matches!(
+        read_single_bgp_message(&mut redialed).await,
+        Message::Open(_)
+    ));
+    redialed
+        .write_all(&encoded_peer_open_and_keepalive())
+        .await
+        .unwrap();
+    assert!(matches!(
+        notify_rx.recv().await.unwrap(),
+        SessionNotification::OpenReceived { session_id: 7, .. }
+    ));
+
+    let (reply, claimed) = oneshot::channel();
+    cmd_tx
+        .send(PeerCommand::ClaimCollisionPromotion { reply })
+        .await
+        .unwrap();
+    assert!(
+        !claimed.await.unwrap(),
+        "a redialed session no longer represents the OPEN that was resolved"
+    );
+
+    cmd_tx.send(PeerCommand::Shutdown).await.unwrap();
+    session.await.unwrap().unwrap();
+}

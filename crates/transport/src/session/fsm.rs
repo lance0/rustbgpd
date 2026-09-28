@@ -93,11 +93,16 @@ impl PeerSession {
     }
 
     /// Reserve this candidate for promotion. The reply is what `PeerManager`
-    /// commits on: `false` means the candidate already fell to Idle (for
-    /// example its verdict timer fired after the manager's last notification
-    /// drain), so the manager keeps the primary instead of retiring it for a
-    /// dead session.
+    /// commits on: `false` means the candidate has fallen to Idle since it
+    /// was accepted (for example its verdict timer fired after the manager's
+    /// last notification drain), even if its reconnect timer has since dialed
+    /// a new connection, so the manager keeps the primary instead of retiring
+    /// it for that session. A candidate still on its accepted connection,
+    /// before or after the peer's OPEN, is claimed.
     pub(super) fn claim_collision_promotion(&mut self) -> bool {
+        if self.collision_candidate_lost {
+            return false;
+        }
         match std::mem::replace(&mut self.collision_hold, CollisionHold::Released) {
             CollisionHold::Waiting(deferred) => {
                 self.collision_hold = CollisionHold::Claimed(deferred);
@@ -106,8 +111,9 @@ impl PeerSession {
                 true
             }
             other => {
+                let claimed = matches!(other, CollisionHold::Armed | CollisionHold::Claimed(_));
                 self.collision_hold = other;
-                self.fsm.state() != SessionState::Idle
+                claimed
             }
         }
     }
@@ -638,6 +644,13 @@ impl PeerSession {
                     if new != SessionState::OpenConfirm && self.collision_verdict_pending() {
                         self.collision_hold = CollisionHold::Armed;
                         self.collision_verdict_timer = None;
+                    }
+                    // An unpromoted candidate's accepted connection is gone for
+                    // good; a reconnect would be a different connection.
+                    if new == SessionState::Idle
+                        && !matches!(self.collision_hold, CollisionHold::Released)
+                    {
+                        self.collision_candidate_lost = true;
                     }
                     info!(
                         peer = %self.peer_label,
