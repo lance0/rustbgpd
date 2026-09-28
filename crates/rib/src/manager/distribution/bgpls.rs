@@ -113,7 +113,7 @@ impl RibManager {
                 next_hop_scope: None,
                 peer: best.peer,
                 attributes: AttrSet::new(vec![]),
-                received_at: best.received_at,
+                received_at: crate::route::ReceivedAt::from_instant(best.received_at),
                 origin_type: best.origin_type,
                 peer_router_id: best.peer_router_id,
                 is_stale: false,
@@ -122,7 +122,7 @@ impl RibManager {
                 validation_state: rustbgpd_wire::RpkiValidation::NotFound,
                 aspa_state: rustbgpd_wire::AspaValidation::Unknown,
                 received_as_path: None,
-                aspa_context: rustbgpd_wire::AspaValidationContext::default(),
+                aspa_context: crate::route::AspaContextId::DEFAULT,
             };
             if should_suppress_ibgp_inner(
                 &probe,

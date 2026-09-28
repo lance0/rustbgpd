@@ -551,7 +551,7 @@ fn ibgp_route(prefix: Ipv4Prefix, peer: Ipv4Addr, next_hop: IpAddr) -> Route {
             PathAttribute::Origin(Origin::Igp),
             PathAttribute::LocalPref(100),
         ]),
-        received_at: Instant::now(),
+        received_at: crate::route::ReceivedAt::now(),
         origin_type: crate::route::RouteOrigin::Ibgp,
         peer_router_id: peer,
         is_stale: false,
@@ -560,7 +560,7 @@ fn ibgp_route(prefix: Ipv4Prefix, peer: Ipv4Addr, next_hop: IpAddr) -> Route {
         validation_state: RpkiValidation::NotFound,
         aspa_state: rustbgpd_wire::AspaValidation::Unknown,
         received_as_path: None,
-        aspa_context: rustbgpd_wire::AspaValidationContext::default(),
+        aspa_context: crate::route::AspaContextId::DEFAULT,
     }
 }
 

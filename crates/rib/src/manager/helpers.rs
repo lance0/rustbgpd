@@ -307,16 +307,21 @@ pub(super) fn validate_route_rpki(route: &crate::route::Route, table: &VrpTable)
 /// non-unicast routes are ever routed through this helper, callers must
 /// gate via [`rustbgpd_rpki::ValidationSnapshot::validate_aspa`], which carries the
 /// explicit family check.
+///
+/// `contexts` resolves the route's interned session context. A route whose
+/// context did not fit the table keeps its stored verdict.
 pub(super) fn validate_route_aspa(
     route: &crate::route::Route,
     table: &AspaTable,
+    contexts: &crate::route::AspaContexts,
 ) -> AspaValidation {
-    validate_route_aspa_detailed(route, table).state
+    validate_route_aspa_detailed(route, table, contexts).state
 }
 
 pub(super) fn validate_route_aspa_detailed(
     route: &crate::route::Route,
     table: &AspaTable,
+    contexts: &crate::route::AspaContexts,
 ) -> AspaVerificationResult {
     if !route.is_ebgp() {
         return AspaVerificationResult {
@@ -324,8 +329,14 @@ pub(super) fn validate_route_aspa_detailed(
             invalid_hop: None,
         };
     }
+    let Some(context) = contexts.get(route.aspa_context) else {
+        return AspaVerificationResult {
+            state: route.aspa_state,
+            invalid_hop: None,
+        };
+    };
     match route.validation_as_path() {
-        Some(path) => rustbgpd_rpki::aspa_verify::verify_detailed(path, table, route.aspa_context),
+        Some(path) => rustbgpd_rpki::aspa_verify::verify_detailed(path, table, context),
         None => AspaVerificationResult {
             state: AspaValidation::Unknown,
             invalid_hop: None,

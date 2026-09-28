@@ -786,7 +786,6 @@ fn same_multipath_class(a: &Route, b: &Route) -> bool {
 #[cfg(test)]
 mod tests {
     use std::net::{IpAddr, Ipv4Addr};
-    use std::time::Instant;
 
     use rustbgpd_wire::{AsPath, AsPathSegment, Ipv4Prefix, Origin, PathAttribute, Prefix};
 
@@ -808,7 +807,7 @@ mod tests {
                 }),
                 PathAttribute::LocalPref(100),
             ]),
-            received_at: Instant::now(),
+            received_at: crate::route::ReceivedAt::now(),
             origin_type: RouteOrigin::Ebgp,
             peer_router_id: crate::test_support::session_router_id(IpAddr::V4(peer)),
             is_stale: false,
@@ -817,7 +816,7 @@ mod tests {
             validation_state: rustbgpd_wire::RpkiValidation::NotFound,
             aspa_state: rustbgpd_wire::AspaValidation::Unknown,
             received_as_path: None,
-            aspa_context: rustbgpd_wire::AspaValidationContext::default(),
+            aspa_context: crate::route::AspaContextId::DEFAULT,
         }
     }
 
@@ -2166,7 +2165,6 @@ mod tests {
 #[cfg(test)]
 mod proptests {
     use std::net::{IpAddr, Ipv4Addr};
-    use std::time::Instant;
 
     use proptest::prelude::*;
     use rustbgpd_wire::{AsPath, AsPathSegment, Ipv4Prefix, Origin, PathAttribute, Prefix};
@@ -2278,7 +2276,7 @@ mod proptests {
                         next_hop_scope: None,
                         peer: IpAddr::V4(peer),
                         attributes: AttrSet::new(attributes),
-                        received_at: Instant::now(),
+                        received_at: crate::route::ReceivedAt::now(),
                         origin_type,
                         peer_router_id: peer_router_id_for(origin_type, rid_oct),
                         is_stale,
@@ -2287,7 +2285,7 @@ mod proptests {
                         validation_state,
                         aspa_state,
                         received_as_path: None,
-                        aspa_context: rustbgpd_wire::AspaValidationContext::default(),
+                        aspa_context: crate::route::AspaContextId::DEFAULT,
                     }
                 },
             )

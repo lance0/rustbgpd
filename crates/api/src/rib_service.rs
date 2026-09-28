@@ -1791,15 +1791,15 @@ fn route_to_proto(route: &Route, best: bool) -> proto::Route {
         // stored path attributes; an absent attribute stays None / false.
         aggregator,
         atomic_aggregate,
-        // Receive wall time recovered from the monotonic receive
-        // instant, the same recovery the BMP Loc-RIB dump uses for its
-        // RFC 9069 per-peer header timestamp. Approximation: `now()` and
-        // `received_at.elapsed()` are two independent clock reads, so a
-        // wall-clock step between them skews the recovered epoch by that
-        // step. Acceptable for a display timestamp; not re-architected
-        // into a single stored wall time.
-        received_at_epoch_seconds: std::time::SystemTime::now()
-            .checked_sub(route.received_at.elapsed())
+        // Receive wall time recovered from the whole-second monotonic
+        // receive stamp. Approximation: `now()` and the stamp's age are two
+        // independent clock reads, so a wall-clock step between them skews
+        // the recovered epoch by that step, and the stamp's whole-second
+        // floor can place it up to one second early. Acceptable for a
+        // display timestamp; not re-architected into a stored wall time.
+        received_at_epoch_seconds: route
+            .received_at
+            .approx_wall_time(std::time::SystemTime::now())
             .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
             .map_or(0, |d| d.as_secs()),
     }
@@ -5418,7 +5418,7 @@ mod tests {
             next_hop_scope: None,
             peer: "192.0.2.2".parse().unwrap(),
             attributes: AttrSet::new(vec![]),
-            received_at: Instant::now(),
+            received_at: rustbgpd_rib::route::ReceivedAt::now(),
             origin_type: rustbgpd_rib::RouteOrigin::Ebgp,
             peer_router_id: Ipv4Addr::UNSPECIFIED,
             is_stale: true,
@@ -5427,7 +5427,7 @@ mod tests {
             validation_state: rustbgpd_wire::RpkiValidation::NotFound,
             aspa_state: rustbgpd_wire::AspaValidation::Unknown,
             received_as_path: None,
-            aspa_context: rustbgpd_wire::AspaValidationContext::default(),
+            aspa_context: rustbgpd_rib::route::AspaContextId::DEFAULT,
         };
 
         let entry = route_to_proto(&route, true);
@@ -6063,7 +6063,7 @@ mod tests {
             next_hop_scope: None,
             peer: "10.0.0.1".parse().unwrap(),
             attributes: AttrSet::new(vec![]),
-            received_at: std::time::Instant::now(),
+            received_at: rustbgpd_rib::route::ReceivedAt::now(),
             origin_type: rustbgpd_rib::RouteOrigin::Ebgp,
             peer_router_id: Ipv4Addr::UNSPECIFIED,
             is_stale: false,
@@ -6072,7 +6072,7 @@ mod tests {
             validation_state: rustbgpd_wire::RpkiValidation::NotFound,
             aspa_state: rustbgpd_wire::AspaValidation::Unknown,
             received_as_path: None,
-            aspa_context: rustbgpd_wire::AspaValidationContext::default(),
+            aspa_context: rustbgpd_rib::route::AspaContextId::DEFAULT,
         };
         let v6 = Route {
             prefix: Prefix::V6(Ipv6Prefix::new("2001:db8::".parse().unwrap(), 32)),
@@ -6081,7 +6081,7 @@ mod tests {
             next_hop_scope: None,
             peer: "2001:db8::1".parse().unwrap(),
             attributes: AttrSet::new(vec![]),
-            received_at: std::time::Instant::now(),
+            received_at: rustbgpd_rib::route::ReceivedAt::now(),
             origin_type: rustbgpd_rib::RouteOrigin::Ebgp,
             peer_router_id: Ipv4Addr::UNSPECIFIED,
             is_stale: false,
@@ -6090,7 +6090,7 @@ mod tests {
             validation_state: rustbgpd_wire::RpkiValidation::NotFound,
             aspa_state: rustbgpd_wire::AspaValidation::Unknown,
             received_as_path: None,
-            aspa_context: rustbgpd_wire::AspaValidationContext::default(),
+            aspa_context: rustbgpd_rib::route::AspaContextId::DEFAULT,
         };
 
         // Unspecified matches all.
@@ -7005,7 +7005,7 @@ mod tests {
             next_hop_scope: None,
             peer: "10.0.0.1".parse().unwrap(),
             attributes: AttrSet::new(attributes),
-            received_at: std::time::Instant::now(),
+            received_at: rustbgpd_rib::route::ReceivedAt::now(),
             origin_type: rustbgpd_rib::RouteOrigin::Ebgp,
             peer_router_id: Ipv4Addr::UNSPECIFIED,
             is_stale: false,
@@ -7014,7 +7014,7 @@ mod tests {
             validation_state: rustbgpd_wire::RpkiValidation::NotFound,
             aspa_state: rustbgpd_wire::AspaValidation::Unknown,
             received_as_path: None,
-            aspa_context: rustbgpd_wire::AspaValidationContext::default(),
+            aspa_context: rustbgpd_rib::route::AspaContextId::DEFAULT,
         }
     }
 
@@ -7125,7 +7125,7 @@ mod tests {
             next_hop_scope: None,
             peer: "10.0.0.1".parse().unwrap(),
             attributes: AttrSet::new(vec![]),
-            received_at: std::time::Instant::now(),
+            received_at: rustbgpd_rib::route::ReceivedAt::now(),
             origin_type: rustbgpd_rib::RouteOrigin::Ebgp,
             peer_router_id: Ipv4Addr::UNSPECIFIED,
             is_stale: false,
@@ -7134,7 +7134,7 @@ mod tests {
             validation_state: rustbgpd_wire::RpkiValidation::NotFound,
             aspa_state: rustbgpd_wire::AspaValidation::Unknown,
             received_as_path: None,
-            aspa_context: rustbgpd_wire::AspaValidationContext::default(),
+            aspa_context: rustbgpd_rib::route::AspaContextId::DEFAULT,
         };
 
         let filters = RouteFilters {
@@ -7174,7 +7174,7 @@ mod tests {
             next_hop_scope: None,
             peer: "10.0.0.1".parse().unwrap(),
             attributes: AttrSet::new(vec![PathAttribute::Communities(vec![community_val])]),
-            received_at: std::time::Instant::now(),
+            received_at: rustbgpd_rib::route::ReceivedAt::now(),
             origin_type: rustbgpd_rib::RouteOrigin::Ebgp,
             peer_router_id: Ipv4Addr::UNSPECIFIED,
             is_stale: false,
@@ -7183,7 +7183,7 @@ mod tests {
             validation_state: rustbgpd_wire::RpkiValidation::NotFound,
             aspa_state: rustbgpd_wire::AspaValidation::Unknown,
             received_as_path: None,
-            aspa_context: rustbgpd_wire::AspaValidationContext::default(),
+            aspa_context: rustbgpd_rib::route::AspaContextId::DEFAULT,
         };
 
         let filters = RouteFilters {
@@ -7224,7 +7224,7 @@ mod tests {
             attributes: AttrSet::new(vec![PathAttribute::AsPath(AsPath {
                 segments: vec![AsPathSegment::AsSequence(vec![65001, 65002, 65003])],
             })]),
-            received_at: std::time::Instant::now(),
+            received_at: rustbgpd_rib::route::ReceivedAt::now(),
             origin_type: rustbgpd_rib::RouteOrigin::Ebgp,
             peer_router_id: Ipv4Addr::UNSPECIFIED,
             is_stale: false,
@@ -7233,7 +7233,7 @@ mod tests {
             validation_state: rustbgpd_wire::RpkiValidation::NotFound,
             aspa_state: rustbgpd_wire::AspaValidation::Unknown,
             received_as_path: None,
-            aspa_context: rustbgpd_wire::AspaValidationContext::default(),
+            aspa_context: rustbgpd_rib::route::AspaContextId::DEFAULT,
         };
 
         let filters = RouteFilters {

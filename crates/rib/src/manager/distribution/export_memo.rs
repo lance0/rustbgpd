@@ -142,7 +142,6 @@ impl ExportMemo {
 #[cfg(test)]
 mod tests {
     use std::net::{IpAddr, Ipv4Addr};
-    use std::time::Instant;
 
     use rustbgpd_wire::{
         AsPath, AsPathSegment, ExtendedCommunity, Ipv4Prefix, LargeCommunity, Origin,
@@ -173,7 +172,7 @@ mod tests {
             next_hop_scope: None,
             peer: IpAddr::V4(Ipv4Addr::new(192, 0, 2, 10)),
             attributes,
-            received_at: Instant::now(),
+            received_at: crate::route::ReceivedAt::now(),
             origin_type: RouteOrigin::Ebgp,
             peer_router_id: Ipv4Addr::new(192, 0, 2, 10),
             is_stale: false,
@@ -182,7 +181,7 @@ mod tests {
             validation_state: rustbgpd_wire::RpkiValidation::NotFound,
             aspa_state: rustbgpd_wire::AspaValidation::Unknown,
             received_as_path: None,
-            aspa_context: rustbgpd_wire::AspaValidationContext::default(),
+            aspa_context: crate::route::AspaContextId::DEFAULT,
         }
     }
 

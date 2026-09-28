@@ -333,7 +333,7 @@ fn build_route(peer: u8, prefix: u8, path_id: u8, variant: u8, received_at: Inst
             PathAttribute::LocalPref(100 + u32::from(variant % 2) * 10),
             PathAttribute::Med(u32::from(variant)),
         ]),
-        received_at,
+        received_at: crate::route::ReceivedAt::from_instant(received_at),
         origin_type: if peer < 2 {
             RouteOrigin::Ebgp
         } else {
@@ -346,7 +346,7 @@ fn build_route(peer: u8, prefix: u8, path_id: u8, variant: u8, received_at: Inst
         validation_state: RpkiValidation::NotFound,
         aspa_state: rustbgpd_wire::AspaValidation::Unknown,
         received_as_path: None,
-        aspa_context: rustbgpd_wire::AspaValidationContext::default(),
+        aspa_context: crate::route::AspaContextId::DEFAULT,
     }
 }
 

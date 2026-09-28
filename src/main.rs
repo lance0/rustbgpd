@@ -2858,6 +2858,9 @@ fn main() -> ExitCode {
     #[cfg(not(feature = "dhat-heap"))]
     let profiler: Option<()> = None;
 
+    // Pin the route receive-stamp epoch before any session can capture an
+    // instant, so no stamp saturates to the epoch.
+    rustbgpd_rib::route::ReceivedAt::init_epoch();
     let worker_threads = resolve_worker_threads(config.global.worker_threads);
     info!(worker_threads, "initializing tokio runtime");
     let rt = tokio::runtime::Builder::new_multi_thread()

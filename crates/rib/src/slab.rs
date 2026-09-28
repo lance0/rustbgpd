@@ -333,5 +333,6 @@ mod tests {
         use crate::route::Route;
         use std::mem::size_of;
         assert_eq!(size_of::<Option<Route>>(), size_of::<Route>());
+        assert_eq!(size_of::<Route>(), 112);
     }
 }

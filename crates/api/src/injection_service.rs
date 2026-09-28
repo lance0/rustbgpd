@@ -277,7 +277,7 @@ impl proto::injection_service_server::InjectionService for InjectionService {
             next_hop_scope: None,
             peer: LOCAL_PEER,
             attributes: AttrSet::new(attributes),
-            received_at: std::time::Instant::now(),
+            received_at: rustbgpd_rib::route::ReceivedAt::now(),
             origin_type: RouteOrigin::Local,
             peer_router_id: std::net::Ipv4Addr::UNSPECIFIED,
             is_stale: false,
@@ -286,7 +286,7 @@ impl proto::injection_service_server::InjectionService for InjectionService {
             validation_state: rustbgpd_wire::RpkiValidation::NotFound,
             aspa_state: rustbgpd_wire::AspaValidation::Unknown,
             received_as_path: None,
-            aspa_context: rustbgpd_wire::AspaValidationContext::default(),
+            aspa_context: rustbgpd_rib::route::AspaContextId::DEFAULT,
         };
 
         let (reply_tx, reply_rx) = oneshot::channel();

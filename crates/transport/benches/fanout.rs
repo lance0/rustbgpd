@@ -167,7 +167,7 @@ fn make_route_with_med(prefix: Prefix, med: u32) -> Route {
         next_hop_scope: None,
         peer: IpAddr::V4(Ipv4Addr::new(198, 51, 100, 1)),
         attributes: AttrSet::new(attributes),
-        received_at: Instant::now(),
+        received_at: rustbgpd_rib::route::ReceivedAt::now(),
         // eBGP-learned so it reflects freely to the iBGP / RR clients (no
         // iBGP-to-iBGP split-horizon suppression in the way).
         origin_type: RouteOrigin::Ebgp,
@@ -178,7 +178,7 @@ fn make_route_with_med(prefix: Prefix, med: u32) -> Route {
         validation_state: RpkiValidation::NotFound,
         aspa_state: rustbgpd_wire::AspaValidation::Unknown,
         received_as_path: None,
-        aspa_context: rustbgpd_wire::AspaValidationContext::default(),
+        aspa_context: rustbgpd_rib::route::AspaContextId::DEFAULT,
     }
 }
 

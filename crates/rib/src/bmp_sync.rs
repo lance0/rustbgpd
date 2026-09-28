@@ -437,7 +437,7 @@ mod tests {
             next_hop_scope: None,
             peer: next_hop,
             attributes: AttrSet::new(base_attrs()),
-            received_at: Instant::now(),
+            received_at: crate::route::ReceivedAt::now(),
             origin_type: RouteOrigin::Ebgp,
             peer_router_id: crate::test_support::session_router_id(next_hop),
             is_stale: false,
@@ -446,7 +446,7 @@ mod tests {
             validation_state: rustbgpd_wire::RpkiValidation::NotFound,
             aspa_state: rustbgpd_wire::AspaValidation::Unknown,
             received_as_path: None,
-            aspa_context: rustbgpd_wire::AspaValidationContext::default(),
+            aspa_context: crate::route::AspaContextId::DEFAULT,
         }
     }
 

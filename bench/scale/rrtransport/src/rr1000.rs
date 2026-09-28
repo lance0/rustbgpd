@@ -14,8 +14,8 @@ use rustbgpd_rib::RibManager;
 use rustbgpd_telemetry::BgpMetrics;
 use rustbgpd_transport::PeerHandle;
 use rustbgpd_wire::{
-    Afi, AsPath, AspaValidation, AspaValidationContext, Ipv4Prefix, Message, Origin, PathAttribute,
-    Prefix, RpkiValidation, Safi,
+    Afi, AsPath, AspaValidation, Ipv4Prefix, Message, Origin, PathAttribute, Prefix,
+    RpkiValidation, Safi,
 };
 use std::collections::{HashMap, HashSet};
 use std::fs::{self, File};
@@ -149,7 +149,7 @@ fn route(prefix: Ipv4Prefix, peer: Ipv4Addr) -> Route {
             PathAttribute::NextHop(peer),
             PathAttribute::LocalPref(100),
         ]),
-        received_at: Instant::now(),
+        received_at: rustbgpd_rib::route::ReceivedAt::now(),
         origin_type: RouteOrigin::Ibgp,
         peer_router_id: peer,
         is_stale: false,
@@ -158,7 +158,7 @@ fn route(prefix: Ipv4Prefix, peer: Ipv4Addr) -> Route {
         validation_state: RpkiValidation::NotFound,
         aspa_state: AspaValidation::Unknown,
         received_as_path: None,
-        aspa_context: AspaValidationContext::default(),
+        aspa_context: rustbgpd_rib::route::AspaContextId::DEFAULT,
     }
 }
 

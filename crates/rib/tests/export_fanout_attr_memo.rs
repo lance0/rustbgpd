@@ -18,7 +18,6 @@ use std::alloc::{GlobalAlloc, Layout, System};
 use std::net::{IpAddr, Ipv4Addr};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::time::Instant;
 
 use rustbgpd_policy::{
     AsPathRegex, Policy, PolicyAction, PolicyChain, PolicyStatement, RouteModifications,
@@ -150,7 +149,7 @@ fn route(prefix: Prefix, peer: IpAddr, attributes: Arc<AttrSet>) -> Route {
         next_hop_scope: None,
         peer,
         attributes,
-        received_at: Instant::now(),
+        received_at: rustbgpd_rib::route::ReceivedAt::now(),
         origin_type: RouteOrigin::Ebgp,
         peer_router_id: Ipv4Addr::new(192, 0, 2, 99),
         is_stale: false,
@@ -159,7 +158,7 @@ fn route(prefix: Prefix, peer: IpAddr, attributes: Arc<AttrSet>) -> Route {
         validation_state: rustbgpd_wire::RpkiValidation::NotFound,
         aspa_state: rustbgpd_wire::AspaValidation::Unknown,
         received_as_path: None,
-        aspa_context: rustbgpd_wire::AspaValidationContext::default(),
+        aspa_context: rustbgpd_rib::route::AspaContextId::DEFAULT,
     }
 }
 

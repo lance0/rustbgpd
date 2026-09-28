@@ -30,8 +30,7 @@ use rustbgpd_rib::RibManager;
 use rustbgpd_telemetry::BgpMetrics;
 use rustbgpd_transport::fanout_bench_export_encoder;
 use rustbgpd_wire::{
-    Afi, AsPath, AspaValidation, AspaValidationContext, Ipv4Prefix, Origin, PathAttribute, Prefix,
-    RpkiValidation, Safi,
+    Afi, AsPath, AspaValidation, Ipv4Prefix, Origin, PathAttribute, Prefix, RpkiValidation, Safi,
 };
 use tokio::sync::{mpsc, oneshot};
 
@@ -54,7 +53,7 @@ fn route(prefix: Ipv4Prefix, src: Ipv4Addr, local_pref: u32) -> Route {
         next_hop_scope: None,
         peer: IpAddr::V4(src),
         attributes: AttrSet::new(attributes),
-        received_at: Instant::now(),
+        received_at: rustbgpd_rib::route::ReceivedAt::now(),
         origin_type: RouteOrigin::Ibgp,
         peer_router_id: src,
         is_stale: false,
@@ -63,7 +62,7 @@ fn route(prefix: Ipv4Prefix, src: Ipv4Addr, local_pref: u32) -> Route {
         validation_state: RpkiValidation::NotFound,
         aspa_state: AspaValidation::Unknown,
         received_as_path: None,
-        aspa_context: AspaValidationContext::default(),
+        aspa_context: rustbgpd_rib::route::AspaContextId::DEFAULT,
     }
 }
 
@@ -75,10 +74,15 @@ fn flood_prefix(offset: u64) -> Ipv4Prefix {
     Ipv4Prefix::new(Ipv4Addr::new(a, b, c, 0), 24)
 }
 
+/// Distinct /24 for a churn prefix index. Indexes below 61,440 keep their
+/// original `172.16.0.0/12`-rooted prefixes; larger ones continue into the
+/// following first octets, up to `255.255.255.0/24` (5,160,960 prefixes).
 fn churn_prefix(i: u64) -> Ipv4Prefix {
-    let b = 16 + u8::try_from(i >> 8).expect("churn prefix space exhausted");
+    let block = i >> 8;
+    let a = u8::try_from(172 + block / 240).expect("churn prefix space exhausted");
+    let b = 16 + u8::try_from(block % 240).unwrap();
     let c = u8::try_from(i & 0xff).unwrap();
-    Ipv4Prefix::new(Ipv4Addr::new(172, b, c, 0), 24)
+    Ipv4Prefix::new(Ipv4Addr::new(a, b, c, 0), 24)
 }
 
 fn client_addr(i: u32) -> IpAddr {
@@ -795,6 +799,31 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn churn_prefixes_stay_distinct_past_the_old_ceiling() {
+        let v4 = |a, b, c| Ipv4Prefix::new(Ipv4Addr::new(a, b, c, 0), 24);
+        assert_eq!(churn_prefix(0), v4(172, 16, 0));
+        assert_eq!(churn_prefix(61_439), v4(172, 255, 255));
+        assert_eq!(churn_prefix(61_440), v4(173, 16, 0));
+        let prefixes: std::collections::HashSet<_> = (0..1_000_000).map(churn_prefix).collect();
+        assert_eq!(prefixes.len(), 1_000_000);
+    }
+
+    #[test]
+    fn churn_prefix_space_ends_at_255() {
+        let last = 84 * 240 * 256 - 1;
+        assert_eq!(
+            churn_prefix(last),
+            Ipv4Prefix::new(Ipv4Addr::new(255, 255, 255, 0), 24)
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "churn prefix space exhausted")]
+    fn churn_prefix_past_the_space_panics() {
+        let _ = churn_prefix(84 * 240 * 256);
+    }
 
     fn stat(comm: &str, utime: &str, stime: &str) -> String {
         format!("42 ({comm}) S 1 2 3 4 5 6 7 8 9 10 {utime} {stime} 16 17 18 19 20 21")

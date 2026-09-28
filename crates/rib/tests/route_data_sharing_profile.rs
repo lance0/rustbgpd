@@ -14,7 +14,7 @@
 //! normal `cargo test` run**, so it cannot silently bit-rot against the `Route`
 //! / RIB APIs.
 //!
-//! ## Results (50k prefixes per RIB; `size_of::<Route>()` = 120 B)
+//! ## Results (50k prefixes per RIB; measured when `size_of::<Route>()` was 120 B)
 //!
 //! | shape | P=2 | P=8 |
 //! |---|---|---|
@@ -60,7 +60,6 @@ use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::time::Instant;
 
 use rustbgpd_rib::AttrSet;
 use rustbgpd_rib::adj_rib_in::AdjRibIn;
@@ -110,7 +109,7 @@ static ALLOC: TrackingAllocator = TrackingAllocator::new();
 struct RouteData {
     prefix: Prefix,
     peer: IpAddr,
-    received_at: Instant,
+    received_at: rustbgpd_rib::route::ReceivedAt,
     origin_type: RouteOrigin,
     peer_router_id: Ipv4Addr,
     path_id: u32,
@@ -176,7 +175,7 @@ fn make_route(prefix: Prefix, i: u32, a: &Arc<AttrSet>) -> Route {
         next_hop_scope: None,
         peer: IpAddr::V4(Ipv4Addr::new(10, 0, i as u8, 1)),
         attributes: a.clone(),
-        received_at: Instant::now(),
+        received_at: rustbgpd_rib::route::ReceivedAt::now(),
         origin_type: RouteOrigin::Ebgp,
         peer_router_id: Ipv4Addr::new(10, 0, i as u8, 1),
         is_stale: false,
@@ -185,7 +184,7 @@ fn make_route(prefix: Prefix, i: u32, a: &Arc<AttrSet>) -> Route {
         validation_state: RpkiValidation::NotFound,
         aspa_state: AspaValidation::Unknown,
         received_as_path: None,
-        aspa_context: rustbgpd_wire::AspaValidationContext::default(),
+        aspa_context: rustbgpd_rib::route::AspaContextId::DEFAULT,
     }
 }
 
@@ -200,7 +199,7 @@ fn make_client_route(prefix: Prefix, client: u32, idx: u32) -> Route {
         next_hop_scope: None,
         peer: IpAddr::V4(Ipv4Addr::new(10, 0, 1, 1)),
         attributes: a,
-        received_at: Instant::now(),
+        received_at: rustbgpd_rib::route::ReceivedAt::now(),
         origin_type: RouteOrigin::Ebgp,
         peer_router_id: Ipv4Addr::new(10, 0, 1, 1),
         is_stale: false,
@@ -209,7 +208,7 @@ fn make_client_route(prefix: Prefix, client: u32, idx: u32) -> Route {
         validation_state: RpkiValidation::NotFound,
         aspa_state: AspaValidation::Unknown,
         received_as_path: None,
-        aspa_context: rustbgpd_wire::AspaValidationContext::default(),
+        aspa_context: rustbgpd_rib::route::AspaContextId::DEFAULT,
     }
 }
 

@@ -607,6 +607,7 @@ impl RibManager {
         let mut routes_revalidated = 0_u64;
         let mut changed_routes = 0_u64;
         let mut invalid_hops = AspaInvalidHopSummary::default();
+        let contexts = crate::route::AspaContextId::snapshot();
         for rib in self.ribs.values_mut() {
             rib.for_each_route_mut_accounting_rpki(|route| {
                 routes_scanned += 1;
@@ -621,7 +622,7 @@ impl RibManager {
                     return;
                 }
                 routes_revalidated += 1;
-                let result = validate_route_aspa_detailed(route, table);
+                let result = validate_route_aspa_detailed(route, table, &contexts);
                 if let Some(hop) = result.invalid_hop {
                     invalid_hops.observe(hop);
                 }

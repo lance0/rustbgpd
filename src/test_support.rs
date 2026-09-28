@@ -7,7 +7,6 @@
 
 use std::net::{IpAddr, Ipv4Addr};
 use std::sync::Arc;
-use std::time::Instant;
 
 use prometheus::Encoder;
 use rustbgpd_evpn::{EvpnInstance, EvpnInstanceId, RouteTarget};
@@ -214,7 +213,7 @@ pub(crate) fn route_from_peer(
             PathAttribute::Origin(Origin::Igp),
             PathAttribute::AsPath(AsPath { segments: vec![] }),
         ]),
-        received_at: Instant::now(),
+        received_at: rustbgpd_rib::route::ReceivedAt::now(),
         origin_type,
         peer_router_id: Ipv4Addr::new(192, 0, 2, 1),
         is_stale: false,
@@ -223,7 +222,7 @@ pub(crate) fn route_from_peer(
         validation_state: RpkiValidation::NotFound,
         aspa_state: rustbgpd_wire::AspaValidation::Unknown,
         received_as_path: None,
-        aspa_context: rustbgpd_wire::AspaValidationContext::default(),
+        aspa_context: rustbgpd_rib::route::AspaContextId::DEFAULT,
     }
 }
 

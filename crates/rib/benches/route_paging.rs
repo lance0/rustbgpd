@@ -204,7 +204,7 @@ fn make_routes(count: usize) -> Vec<Route> {
                 next_hop_scope: None,
                 peer,
                 attributes: Arc::clone(&attributes),
-                received_at: Instant::now(),
+                received_at: rustbgpd_rib::route::ReceivedAt::now(),
                 origin_type: if own_grouped_route {
                     RouteOrigin::Ibgp
                 } else {
@@ -217,7 +217,7 @@ fn make_routes(count: usize) -> Vec<Route> {
                 validation_state: RpkiValidation::NotFound,
                 aspa_state: rustbgpd_wire::AspaValidation::Unknown,
                 received_as_path: None,
-                aspa_context: rustbgpd_wire::AspaValidationContext::default(),
+                aspa_context: rustbgpd_rib::route::AspaContextId::DEFAULT,
             }
         })
         .collect()

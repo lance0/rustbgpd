@@ -2,7 +2,6 @@ use std::collections::HashSet;
 use std::hash::{Hash, Hasher};
 use std::net::{IpAddr, Ipv4Addr};
 use std::sync::Arc;
-use std::time::Instant;
 
 use criterion::{BatchSize, BenchmarkId, Criterion, criterion_group, criterion_main};
 
@@ -398,7 +397,7 @@ fn make_route_with_attributes(prefix: Prefix, peer_idx: u32, attributes: Arc<Att
         next_hop_scope: None,
         peer: IpAddr::V4(Ipv4Addr::new(10, 0, peer_idx as u8, 1)),
         attributes,
-        received_at: Instant::now(),
+        received_at: rustbgpd_rib::route::ReceivedAt::now(),
         origin_type: RouteOrigin::Ebgp,
         peer_router_id: Ipv4Addr::new(10, 0, peer_idx as u8, 1),
         is_stale: false,
@@ -407,7 +406,7 @@ fn make_route_with_attributes(prefix: Prefix, peer_idx: u32, attributes: Arc<Att
         validation_state: RpkiValidation::NotFound,
         aspa_state: rustbgpd_wire::AspaValidation::Unknown,
         received_as_path: None,
-        aspa_context: rustbgpd_wire::AspaValidationContext::default(),
+        aspa_context: rustbgpd_rib::route::AspaContextId::DEFAULT,
     }
 }
 
@@ -723,7 +722,7 @@ fn bench_attr_intern_manager_churn(c: &mut Criterion) {
                             for _ in 0..iterations {
                                 if withdraw {
                                     let withdrawn = vec![(prefixes[count], 0)];
-                                    let start = Instant::now();
+                                    let start = std::time::Instant::now();
                                     manager.bench_withdraw_loc_rib(peer, withdrawn);
                                     elapsed += start.elapsed();
                                     assert_eq!(
@@ -734,7 +733,7 @@ fn bench_attr_intern_manager_churn(c: &mut Criterion) {
                                 } else {
                                     variant ^= 1;
                                     let announced = vec![make_target(variant)];
-                                    let start = Instant::now();
+                                    let start = std::time::Instant::now();
                                     manager.bench_seed_loc_rib(announced);
                                     elapsed += start.elapsed();
                                 }
