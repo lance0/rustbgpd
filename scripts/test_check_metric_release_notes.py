@@ -2,10 +2,11 @@
 """Regression tests for the emitted-metric release-note contract."""
 
 import importlib.util
+import subprocess
 import tempfile
+import textwrap
 import unittest
 from pathlib import Path
-from unittest import mock
 
 
 PATH = Path(__file__).with_name("check_metric_release_notes.py")
@@ -15,19 +16,6 @@ SPEC.loader.exec_module(check)
 
 
 class MetricReleaseNoteContractTests(unittest.TestCase):
-    def test_live_release_delta_is_exact_and_documented(self):
-        baseline = check.parse_baseline(check.BASELINE.read_text(encoding="utf-8"))
-        current = set(check.METRIC_CHECK.workspace_metric_inventory())
-        version = check.workspace_version(check.CARGO_MANIFEST.read_bytes())
-        check.validate_workspace_release(version)
-        section = check.target_notes(check.CHANGELOG.read_text(encoding="utf-8"), check.ROOT)
-
-        added, removed = check.validate_release_notes(baseline, current, section)
-
-        self.assertEqual(len(baseline), 222)
-        self.assertEqual(added, set())
-        self.assertEqual(removed, set())
-
     def test_consumed_new_family_without_release_note_fails(self):
         baseline = {"bgp_existing_total"}
         current = {
@@ -98,10 +86,10 @@ class MetricReleaseNoteContractTests(unittest.TestCase):
         self.assertEqual(added, {"bgp_new_name"})
         self.assertEqual(removed, {"bgp_old_name", "bgp_removed"})
 
-    def test_previous_release_cannot_satisfy_target_metric_changes(self):
-        changelog = f"""# Changelog
+    def test_released_sections_cannot_document_a_later_change(self):
+        changelog = """# Changelog
 
-## [{check.TARGET_CHANGELOG_SECTION}]
+## [Unreleased]
 
 - Other change.
 
@@ -109,7 +97,7 @@ class MetricReleaseNoteContractTests(unittest.TestCase):
 
 - Rename `bgp_old_name` to `bgp_new_name`; remove `bgp_removed`.
 """
-        section = check.release_section(changelog, check.TARGET_CHANGELOG_SECTION)
+        notes = check.notes_since(changelog, "v0.70.0")
         with self.assertRaisesRegex(
             ValueError,
             "added=bgp_new_name; removed=bgp_old_name, bgp_removed",
@@ -117,7 +105,38 @@ class MetricReleaseNoteContractTests(unittest.TestCase):
             check.validate_release_notes(
                 {"bgp_stable", "bgp_old_name", "bgp_removed"},
                 {"bgp_stable", "bgp_new_name"},
-                section,
+                notes,
+                {},
+            )
+
+    def test_untagged_release_section_documents_changes_since_the_tag(self):
+        # A release commit: the new section exists, its tag does not yet.
+        changelog = """# Changelog
+
+## [Unreleased]
+
+## [0.71.0] - 2026-09-20
+
+- Export `bgp_new_total`.
+
+## [0.70.2] - 2026-09-18
+
+- Export `bgp_older_total`.
+"""
+        added, _ = check.validate_release_notes(
+            {"bgp_stable"},
+            {"bgp_stable", "bgp_new_total"},
+            check.notes_since(changelog, "v0.70.2"),
+            {},
+        )
+        self.assertEqual(added, {"bgp_new_total"})
+        # Once v0.71.0 is tagged, its section is history and the same change
+        # would need a new note.
+        with self.assertRaisesRegex(ValueError, "added=bgp_new_total"):
+            check.validate_release_notes(
+                {"bgp_stable"},
+                {"bgp_stable", "bgp_new_total"},
+                check.notes_since(changelog, "v0.71.0"),
                 {},
             )
 
@@ -133,53 +152,39 @@ class MetricReleaseNoteContractTests(unittest.TestCase):
                 {},
             )
 
-    def test_empty_unreleased_target_without_family_changes_passes(self):
-        changelog = f"""# Changelog
+    def test_empty_unreleased_with_a_family_change_names_the_family(self):
+        changelog = """# Changelog
 
-## [{check.UNRELEASED_SECTION}]
-
-## [0.71.0] - 2026-09-20
-
-- Export `bgp_carried_total`.
-"""
-        section = check.release_section(changelog, check.UNRELEASED_SECTION)
-        self.assertEqual(section.strip(), "")
-
-        added, removed = check.validate_release_notes(
-            {"bgp_stable"}, {"bgp_stable"}, section, {}
-        )
-
-        self.assertEqual(added, set())
-        self.assertEqual(removed, set())
-
-    def test_empty_unreleased_target_with_a_family_change_names_the_family(self):
-        changelog = f"""# Changelog
-
-## [{check.UNRELEASED_SECTION}]
+## [Unreleased]
 
 ## [0.71.0] - 2026-09-20
 
 - Export `bgp_new_total`.
 """
-        section = check.release_section(changelog, check.UNRELEASED_SECTION)
-        self.assertEqual(section.strip(), "")
-
+        notes = check.notes_since(changelog, "v0.71.0")
+        added, removed = check.validate_release_notes(
+            {"bgp_stable"}, {"bgp_stable"}, notes, {}
+        )
+        self.assertEqual((added, removed), (set(), set()))
         with self.assertRaisesRegex(ValueError, "added=bgp_new_total"):
             check.validate_release_notes(
-                {"bgp_stable"}, {"bgp_stable", "bgp_new_total"}, section, {}
+                {"bgp_stable"}, {"bgp_stable", "bgp_new_total"}, notes, {}
             )
 
-    def test_fragment_notes_count_and_are_required_alongside_unreleased(self):
-        # Fragments are pending only while the target is [Unreleased]; a
-        # release commit moves the target, so pin it for this fixture.
-        target = mock.patch.object(
-            check, "TARGET_CHANGELOG_SECTION", check.UNRELEASED_SECTION
-        )
-        target.start()
-        self.addCleanup(target.stop)
-        changelog = f"""# Changelog
+    def test_missing_or_duplicate_release_heading_fails_closed(self):
+        for changelog in (
+            "# Changelog\n\n## [Unreleased]\n",
+            "## [0.71.0]\n\n## [0.71.0]\n",
+        ):
+            with self.subTest(changelog=changelog), self.assertRaisesRegex(
+                ValueError, "CHANGELOG section for 0.71.0"
+            ):
+                check.notes_since(changelog, "v0.71.0")
 
-## [{check.UNRELEASED_SECTION}]
+    def test_fragment_notes_count_and_are_required_alongside_unreleased(self):
+        changelog = """# Changelog
+
+## [Unreleased]
 
 - Export `bgp_in_section_total`.
 
@@ -196,7 +201,7 @@ class MetricReleaseNoteContractTests(unittest.TestCase):
 
         with self.assertRaisesRegex(ValueError, "added=bgp_in_fragment_total$"):
             check.validate_release_notes(
-                baseline, current, check.target_notes(changelog, root), {}
+                baseline, current, check.target_notes(changelog, root, "v0.71.0"), {}
             )
 
         (root / "changelog.d/added-fragment.md").write_text(
@@ -204,34 +209,14 @@ class MetricReleaseNoteContractTests(unittest.TestCase):
             encoding="utf-8",
         )
         added, removed = check.validate_release_notes(
-            baseline, current, check.target_notes(changelog, root), {}
+            baseline, current, check.target_notes(changelog, root, "v0.71.0"), {}
         )
         self.assertEqual(added, {"bgp_in_section_total", "bgp_in_fragment_total"})
         self.assertEqual(removed, set())
 
         (root / "changelog.d/broken.md").write_text("- no category\n", encoding="utf-8")
         with self.assertRaisesRegex(ValueError, "changelog.d/broken.md: first line"):
-            check.target_notes(changelog, root)
-
-    def test_empty_versioned_target_section_still_fails_closed(self):
-        changelog = """# Changelog
-
-## [0.71.0] - 2026-09-20
-
-## [0.70.2] - 2026-09-18
-
-- Export `bgp_carried_total`.
-"""
-        with self.assertRaisesRegex(ValueError, r"section for 0\.71\.0 is empty"):
-            check.release_section(changelog, "0.71.0")
-
-    def test_workspace_release_change_requires_explicit_target_review(self):
-        check.validate_workspace_release("0.73.0")
-        with self.assertRaisesRegex(
-            ValueError,
-            "roll the baseline to that release in the post-release commit",
-        ):
-            check.validate_workspace_release("0.73.1")
+            check.target_notes(changelog, root, "v0.71.0")
 
     def test_exceptions_are_reasoned_narrow_and_nonredundant(self):
         with self.assertRaisesRegex(ValueError, "specific reasons"):
@@ -253,34 +238,48 @@ class MetricReleaseNoteContractTests(unittest.TestCase):
                 {"bgp_new": "A specific public-contract exception reason."},
             )
 
-    def test_baseline_metadata_ordering_and_names_fail_closed(self):
-        cases = (
-            (
-                '{"release":"v0.72.0","source_commit":"x","families":["bgp_a"]}',
-                "release must be",
-            ),
-            (
-                '{"release":"v0.73.0","source_commit":"x","families":["bgp_a"]}',
-                "commit must be",
-            ),
-            (
-                '{"release":"v0.73.0","source_commit":"'
-                + check.BASELINE_COMMIT
-                + '","families":["bgp_b","bgp_a"]}',
-                "sorted and unique",
-            ),
-            (
-                '{"release":"v0.73.0","source_commit":"'
-                + check.BASELINE_COMMIT
-                + '","families":["not a metric"]}',
-                "invalid family name",
-            ),
+    def test_baseline_is_the_previous_release_read_by_its_own_parser(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        root = Path(temporary.name)
+
+        def run(*args: str) -> str:
+            return subprocess.run(
+                ["git", "-c", "user.name=t", "-c", "user.email=t@example.invalid", *args],
+                cwd=root, check=True, capture_output=True, text=True,
+            ).stdout
+
+        def commit(families: list[str], message: str) -> None:
+            (root / "scripts").mkdir(exist_ok=True)
+            (root / "scripts/check-metric-consumers.py").write_text(
+                textwrap.dedent(f"""\
+                    def workspace_metric_inventory():
+                        return {{name: "ordinary" for name in {families!r}}}
+                    """),
+                encoding="utf-8",
+            )
+            run("add", "-A")
+            run("commit", "-qm", message)
+
+        run("init", "-q")
+        commit(["bgp_shipped"], "first release")
+        run("tag", "-a", "v0.1.0", "-m", "v0.1.0")
+        commit(["bgp_shipped", "bgp_next"], "second release")
+        run("tag", "-a", "v0.2.0", "-m", "v0.2.0")
+        commit(["bgp_shipped", "bgp_next", "bgp_later"], "after the release")
+        run("tag", "soak-marker")
+
+        self.assertEqual(check.previous_release(root), "v0.2.0")
+        # The tag's tree and parser, not HEAD's.
+        self.assertEqual(check.release_inventory("v0.1.0", root), {"bgp_shipped"})
+        self.assertEqual(
+            check.release_inventory("v0.2.0", root), {"bgp_shipped", "bgp_next"}
         )
-        for document, message in cases:
-            with self.subTest(message=message), self.assertRaisesRegex(
-                ValueError, message
-            ):
-                check.parse_baseline(document)
+        self.assertEqual(len(run("worktree", "list").splitlines()), 1)
+
+        run("tag", "-d", "v0.1.0", "v0.2.0")
+        with self.assertRaisesRegex(ValueError, "needs history and release tags"):
+            check.previous_release(root)
 
 
 if __name__ == "__main__":

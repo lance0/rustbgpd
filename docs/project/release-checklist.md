@@ -835,10 +835,6 @@ Before rolling any versions:
      root key the previous schema rejects. Semantic round-trip tests cover the
      rendered values; this is not full previous-release schema validation or a
      downgrade guarantee.
-   - Update the workspace release and target changelog section in
-     `scripts/check_metric_release_notes.py` and its companion test. The
-     baseline stays on the previous release here; it rolls to this tag in
-     step 14, once the tag is published.
    - [ ] Confirm each published library crate archive contains regular-file
          `LICENSE-MIT` and `LICENSE-APACHE` entries whose contents match the
          canonical repository-root license texts; the SPDX `MIT OR Apache-2.0`
@@ -959,23 +955,6 @@ After the tag publishes:
     copies match the tag byte for byte and every role the tag carries is
     present. The next release's consecutive upgrade exercise consumes the
     `route-server` fixture.
-14. **Roll the metric release-note baseline** in the same post-release commit
-    as step 13, immediately after the tag. Every release rolls it, patch
-    releases included: the checker requires every metric family added or
-    removed since the baseline release to be named in the target changelog
-    section, which only means "documented by the release that shipped it"
-    while the baseline is the previous release. A baseline left further back
-    accumulates the delta and makes each release section re-document families
-    an earlier section already covered. In
-    `scripts/check_metric_release_notes.py` and its companion test, point the
-    baseline release and source commit at the new tag, add the released family
-    inventory as a JSON file named for the tag in
-    `scripts/fixtures/metric-release-notes/`, set the target section to
-    `Unreleased`, and remove the orphaned older fixture. Generate that
-    inventory from a checkout of the tag, using that tree's own
-    `scripts/check-metric-consumers.py`. The roll does not wait for a
-    `CHANGELOG.md` `[Unreleased]` entry: an empty `Unreleased` target is
-    accepted, while an empty versioned target section still fails closed.
 
 ### Published-crate documentation refresh
 

@@ -1,27 +1,27 @@
 #!/usr/bin/env python3
-"""Require release notes for emitted Prometheus family additions and removals."""
+"""Require release notes for emitted Prometheus family additions and removals.
+
+The baseline is the newest release tag reachable from HEAD, and its family
+inventory comes from that tag's tree, read with that tag's own
+`check-metric-consumers.py`. The notes are every `CHANGELOG.md` entry above
+that release's heading, plus every pending `changelog.d/` fragment. Nothing
+here names a release, so cutting a tag needs no edit to this checker.
+"""
 
 from __future__ import annotations
 
 import importlib.util
-import json
 import re
+import subprocess
 import sys
-import tomllib
+import tempfile
 from pathlib import Path
 from types import ModuleType
 
 
 ROOT = Path(__file__).resolve().parents[1]
-UNRELEASED_SECTION = "Unreleased"
-BASELINE_RELEASE = "v0.73.0"
-BASELINE_COMMIT = "335676078965ae5a7d24273821dab12da79222d2"
-WORKSPACE_RELEASE = "0.73.0"
-TARGET_CHANGELOG_SECTION = UNRELEASED_SECTION
-BASELINE = ROOT / "scripts/fixtures/metric-release-notes/v0.73.0.json"
 CHANGELOG = ROOT / "CHANGELOG.md"
-CARGO_MANIFEST = ROOT / "Cargo.toml"
-METRIC_NAME = re.compile(r"[A-Za-z_:][A-Za-z0-9_:]*")
+RELEASE_TAG_GLOB = "v[0-9]*.[0-9]*.[0-9]*"
 
 # Exceptions are deliberately source-controlled and empty by default. A metric
 # may be added here only with a specific public-contract reason; stale, unknown,
@@ -29,109 +29,79 @@ METRIC_NAME = re.compile(r"[A-Za-z_:][A-Za-z0-9_:]*")
 RELEASE_NOTE_EXCEPTIONS: dict[str, str] = {}
 
 
-def load_script(relative: str, name: str) -> ModuleType:
-    path = ROOT / relative
+def load_script(path: Path, name: str) -> ModuleType:
     spec = importlib.util.spec_from_file_location(name, path)
     if spec is None or spec.loader is None:
-        raise ValueError(f"cannot load {relative}")
+        raise ValueError(f"cannot load {path}")
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
 
 
-METRIC_CHECK = load_script("scripts/check-metric-consumers.py", "metric_consumer_contract")
-ASSEMBLER = load_script("scripts/assemble-changelog.py", "assemble_changelog")
+METRIC_CHECK = load_script(ROOT / "scripts/check-metric-consumers.py", "metric_consumer_contract")
+ASSEMBLER = load_script(ROOT / "scripts/assemble-changelog.py", "assemble_changelog")
 
 
-def parse_baseline(text: str) -> set[str]:
-    """Parse the pinned released-family manifest without consulting git history."""
+def git(root: Path, *args: str) -> str:
+    result = subprocess.run(
+        ["git", *args], cwd=root, capture_output=True, text=True, check=False
+    )
+    if result.returncode != 0:
+        raise ValueError(f"git {' '.join(args)}: {result.stderr.strip()}")
+    return result.stdout
+
+
+def previous_release(root: Path = ROOT) -> str:
+    """Return the newest release tag reachable from HEAD."""
     try:
-        document = json.loads(text)
-    except json.JSONDecodeError as error:
-        raise ValueError(f"invalid metric baseline JSON: {error.msg}") from error
-    if not isinstance(document, dict) or set(document) != {
-        "release",
-        "source_commit",
-        "families",
-    }:
+        return git(
+            root, "describe", "--tags", "--abbrev=0", "--match", RELEASE_TAG_GLOB, "HEAD"
+        ).strip()
+    except ValueError as error:
+        raise ValueError(f"{error}; the check needs history and release tags") from error
+
+
+def release_inventory(tag: str, root: Path = ROOT) -> set[str]:
+    """Return the families `tag` shipped, as that release's own parser saw them."""
+    with tempfile.TemporaryDirectory() as scratch:
+        tree = Path(scratch) / "tree"
+        git(root, "worktree", "add", "--quiet", "--detach", str(tree), f"{tag}^{{commit}}")
+        try:
+            module = load_script(
+                tree / "scripts/check-metric-consumers.py", f"metric_consumer_contract_{tag}"
+            )
+            return set(module.workspace_metric_inventory())
+        finally:
+            git(root, "worktree", "remove", "--force", str(tree))
+
+
+def notes_since(changelog: str, release: str) -> str:
+    """Return every CHANGELOG entry written after `release`: the text above its heading.
+
+    On a release commit that includes the new, not yet tagged version section;
+    afterwards it is `[Unreleased]` alone. The release's own section and every
+    older one are excluded, so they cannot document a later change.
+    """
+    version = release.removeprefix("v")
+    headings = list(
+        re.finditer(rf"^## \[{re.escape(version)}\][^\n]*$", changelog, re.MULTILINE)
+    )
+    if len(headings) != 1:
         raise ValueError(
-            "metric baseline must contain only release, source_commit, and families"
+            f"expected one CHANGELOG section for {version}, found {len(headings)}"
         )
-    if document["release"] != BASELINE_RELEASE:
-        raise ValueError(
-            f"metric baseline release must be {BASELINE_RELEASE}, "
-            f"got {document['release']!r}"
-        )
-    if document["source_commit"] != BASELINE_COMMIT:
-        raise ValueError(
-            f"metric baseline commit must be {BASELINE_COMMIT}, "
-            f"got {document['source_commit']!r}"
-        )
-    families = document["families"]
-    if not isinstance(families, list) or not families:
-        raise ValueError("metric baseline families must be a nonempty list")
-    if any(
-        not isinstance(name, str) or METRIC_NAME.fullmatch(name) is None
-        for name in families
-    ):
-        raise ValueError("metric baseline contains an invalid family name")
-    if families != sorted(set(families)):
-        raise ValueError("metric baseline families must be sorted and unique")
-    return set(families)
+    return changelog[: headings[0].start()]
 
 
-def workspace_version(manifest: bytes) -> str:
-    try:
-        version = tomllib.loads(manifest.decode("utf-8"))["workspace"]["package"][
-            "version"
-        ]
-    except (KeyError, TypeError, UnicodeDecodeError, tomllib.TOMLDecodeError) as error:
-        raise ValueError("cannot read workspace package version") from error
-    if not isinstance(version, str) or re.fullmatch(r"\d+\.\d+\.\d+", version) is None:
-        raise ValueError(f"workspace package version is not a release version: {version!r}")
-    return version
-
-
-def validate_workspace_release(version: str) -> None:
-    if version != WORKSPACE_RELEASE:
-        raise ValueError(
-            f"workspace release changed from {WORKSPACE_RELEASE} to {version}; point the "
-            "target section at the new release now, then roll the baseline to that release "
-            "in the post-release commit, because the baseline must always be the previous "
-            "release for this check to mean 'documented by the release that shipped it'"
-        )
-
-
-def release_section(changelog: str, version: str) -> str:
-    """Return exactly one changelog section, excluding adjacent releases."""
-    header = re.compile(rf"^## \[{re.escape(version)}\](?:[^\n]*)$", re.MULTILINE)
-    matches = list(header.finditer(changelog))
-    if len(matches) != 1:
-        raise ValueError(
-            f"expected one CHANGELOG section for {version}, found {len(matches)}"
-        )
-    start = matches[0].end()
-    following = re.search(r"^## \[[^\]\n]+\](?:[^\n]*)$", changelog[start:], re.MULTILINE)
-    end = len(changelog) if following is None else start + following.start()
-    section = changelog[start:end]
-    # An empty Unreleased section is a normal state right after a release, and it
-    # stays safe: with no family changes nothing needs documenting, and with family
-    # changes every one of them lands in `missing` and is named. A versioned section
-    # that is empty is a real error, because release.yml publishes it as the body.
-    if not section.strip() and version != UNRELEASED_SECTION:
-        raise ValueError(f"CHANGELOG section for {version} is empty")
-    return section
-
-
-def target_notes(changelog: str, root: Path) -> str:
-    """The notes under review: the target section plus every pending fragment.
+def target_notes(changelog: str, root: Path, release: str) -> str:
+    """The notes under review: entries since `release` plus every pending fragment.
 
     A fragment under `changelog.d/` becomes an `[Unreleased]` entry at release
     preparation, so a note there documents the family as well as one already in
     the section. A malformed fragment fails here, before release preparation.
     """
-    section = release_section(changelog, TARGET_CHANGELOG_SECTION)
-    return section + "".join(fragment.body for fragment in ASSEMBLER.load_fragments(root))
+    notes = notes_since(changelog, release)
+    return notes + "".join(fragment.body for fragment in ASSEMBLER.load_fragments(root))
 
 
 def metric_delta(
@@ -185,7 +155,7 @@ def validate_release_notes(
         if missing_removed:
             details.append("removed=" + ", ".join(missing_removed))
         raise ValueError(
-            "target CHANGELOG section omits changed metric families: "
+            "release notes since the previous release omit changed metric families: "
             + "; ".join(details)
         )
     return added, removed
@@ -193,19 +163,16 @@ def validate_release_notes(
 
 def main() -> int:
     try:
-        baseline = parse_baseline(BASELINE.read_text(encoding="utf-8"))
+        release = previous_release()
+        baseline = release_inventory(release)
         current = set(METRIC_CHECK.workspace_metric_inventory())
-        version = workspace_version(CARGO_MANIFEST.read_bytes())
-        validate_workspace_release(version)
-        section = target_notes(CHANGELOG.read_text(encoding="utf-8"), ROOT)
-        added, removed = validate_release_notes(baseline, current, section)
+        notes = target_notes(CHANGELOG.read_text(encoding="utf-8"), ROOT, release)
+        added, removed = validate_release_notes(baseline, current, notes)
     except (OSError, ValueError) as error:
         print(f"metric release-note check: {error}", file=sys.stderr)
         return 1
     print(
-        "metric release-note check: "
-        f"{BASELINE_RELEASE} -> {TARGET_CHANGELOG_SECTION} at v{version}: "
-        f"{len(added)} added, "
+        f"metric release-note check: {release} -> HEAD: {len(added)} added, "
         f"{len(removed)} removed; all changed families documented"
     )
     return 0
