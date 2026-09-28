@@ -223,7 +223,7 @@ gRPC request
 | Wire codec (message parse/encode) | `crates/wire/src/` — `message.rs`, `attribute.rs`, `nlri.rs` |
 | Path attribute decode/encode | `crates/wire/src/attribute.rs` |
 | FlowSpec NLRI | `crates/wire/src/flowspec.rs` |
-| FSM state transitions | `crates/fsm/src/lib.rs` |
+| FSM state transitions | `crates/fsm/src/session.rs` — `Session::handle_event()` |
 | Capability negotiation | `crates/fsm/src/negotiation.rs` |
 | Peer session runtime | `crates/transport/src/session/` (split into `mod.rs`, `fsm.rs`, `inbound.rs`, `outbound.rs`, `io.rs`, `commands.rs`, `writer.rs`, `import_decision_cache.rs`, `rejected_routes.rs`, `export.rs`, `refresh_accounting.rs`, `shared_group.rs`, `replay.rs`, `tests/`) |
 | Outbound UPDATE construction | `crates/transport/src/session/outbound.rs` — `prepare_outbound_attributes()` |
