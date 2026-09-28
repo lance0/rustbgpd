@@ -152,11 +152,8 @@ The recipes intentionally expose their direct commands:
   libFuzzer.
 
 Hosted checks remain authoritative. `just gate-ci` covers the `ci.yml`
-checks that need no privileges or pull-request context; these stay CI-only:
+checks that need no privileges; these stay CI-only:
 
-- the published-crate README freshness check, which diffs against the pull
-  request base (`just gate-release` runs the same comparison against the
-  merge base with `origin/main`);
 - the exact v0.64 migration test, which runs only when
   `RUSTBGPD_V064_VALIDATOR` points to the verified v0.64 binary that CI
   prepares;

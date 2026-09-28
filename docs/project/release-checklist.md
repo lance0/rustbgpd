@@ -33,12 +33,6 @@ applicable to the release diff actually ran before tagging.
 - [ ] **MSRV gate** — `cargo check --workspace --all-targets` at the
       declared `rust-version` (kept in lockstep with the Dockerfile
       builder version)
-- [ ] **Published-crate README freshness gate** — if the independently
-      versioned manifest for `wire`, `fsm`, or `rpki` changed in the diff, the
-      matching crate README must also be touched. Hosted CI diffs the pull
-      request or the pushed range and skips on a manual dispatch;
-      `just gate-release` runs the same comparison locally against the merge
-      base with `origin/main`
 - [ ] **Gate 8b BUM-filter kernel primitive**
       (`evpn_bum_filter_kernel` job) — runs the netns harness under
       `--cap-add=NET_ADMIN --cap-add=SYS_ADMIN
