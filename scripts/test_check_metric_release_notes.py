@@ -277,7 +277,17 @@ class MetricReleaseNoteContractTests(unittest.TestCase):
         )
         self.assertEqual(len(run("worktree", "list").splitlines()), 1)
 
+        # No reachable release tag fails closed, as in a shallow or tagless
+        # checkout: a non-release tag, or a release tag HEAD does not
+        # contain, is never taken as the baseline.
         run("tag", "-d", "v0.1.0", "v0.2.0")
+        with self.assertRaisesRegex(ValueError, "needs history and release tags"):
+            check.previous_release(root)
+        branch = run("symbolic-ref", "--short", "HEAD").strip()
+        run("switch", "-q", "--orphan", "unrelated")
+        commit(["bgp_elsewhere"], "unrelated history")
+        run("tag", "-a", "v9.9.9", "-m", "v9.9.9")
+        run("switch", "-q", branch)
         with self.assertRaisesRegex(ValueError, "needs history and release tags"):
             check.previous_release(root)
 
