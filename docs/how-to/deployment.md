@@ -156,7 +156,10 @@ sudo install -m 0644 share/systemd/rustbgpd-dataplane.conf \
 The man pages and completions are also generated on demand by the
 binaries themselves (`rbgp man`, `rustbgpd --man`,
 `rbgp completions bash|zsh|fish`), so an installed binary can always
-regenerate them.
+regenerate them. Bash and Zsh complete flags at every command level. Fish
+completes flags only for top-level commands and their direct subcommands;
+for deeper commands such as `rbgp policy chain set-import`, it completes the
+subcommand name but not its flags.
 
 To pin to a specific tag for reproducibility, swap `latest` for the
 version, e.g. `releases/download/v0.45.0/${TARBALL}`. SHA-256
