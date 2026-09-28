@@ -53,10 +53,26 @@ pub(crate) const MUTATION_RPC_TIMEOUT: Duration = Duration::from_secs(11 * 60);
 /// `mrt-dump` also uses it: the daemon does not bound a dump, which writes
 /// the whole RIB.
 pub(crate) const SETTLED_MUTATION_RPC_TIMEOUT: Duration = Duration::from_secs(31 * 60);
-/// Debug builds only: shortens every mutation budget so process tests can
-/// observe expiry without waiting minutes.
+/// Client wait for each config-transaction RPC: diff, plan, apply, confirm,
+/// abort and rollback, unary or streamed. The daemon bounds each operation at
+/// 30 minutes (`CONFIG_OPERATION_TIMEOUT`); the extra minute covers the
+/// candidate upload and response transfer. The commit-confirm window is a
+/// daemon-side auto-revert timer, so the CLI has no other wait to stack on.
+pub(crate) const CONFIG_TRANSACTION_RPC_TIMEOUT: Duration = Duration::from_secs(31 * 60);
+/// Debug builds only: shortens every mutation and config-transaction budget
+/// so process tests can observe expiry without waiting minutes.
 #[cfg(debug_assertions)]
 const TEST_MUTATION_RPC_TIMEOUT_MS_ENV: &str = "RBGP_TEST_MUTATION_RPC_TIMEOUT_MS";
+
+/// `budget`, or the debug-build test override.
+pub(crate) fn mutation_budget(budget: Duration) -> Duration {
+    #[cfg(debug_assertions)]
+    let budget = std::env::var(TEST_MUTATION_RPC_TIMEOUT_MS_ENV)
+        .ok()
+        .and_then(|ms| ms.parse().ok())
+        .map_or(budget, Duration::from_millis);
+    budget
+}
 
 /// Bound a mutation RPC. On expiry the change may still be applied, because
 /// the daemon shields an accepted mutation from client cancellation: report
@@ -68,18 +84,47 @@ pub(crate) async fn mutation_rpc<T>(
     verify: &str,
     future: impl Future<Output = Result<T, Status>>,
 ) -> Result<T, Status> {
-    #[cfg(debug_assertions)]
-    let budget = std::env::var(TEST_MUTATION_RPC_TIMEOUT_MS_ENV)
-        .ok()
-        .and_then(|ms| ms.parse().ok())
-        .map_or(budget, Duration::from_millis);
-    rpc_with_timeout(name, budget, future)
+    unknown_outcome_rpc(
+        name,
+        budget,
+        "the daemon may still apply this change",
+        verify,
+        future,
+    )
+    .await
+}
+
+/// Bound a config-transaction RPC that can change the runtime (apply,
+/// confirm, abort, rollback), with the same unknown-outcome contract as
+/// [`mutation_rpc`].
+pub(crate) async fn config_transaction_rpc<T>(
+    name: &str,
+    verify: &str,
+    future: impl Future<Output = Result<T, Status>>,
+) -> Result<T, Status> {
+    unknown_outcome_rpc(
+        name,
+        CONFIG_TRANSACTION_RPC_TIMEOUT,
+        "the transaction may still commit or roll back",
+        verify,
+        future,
+    )
+    .await
+}
+
+async fn unknown_outcome_rpc<T>(
+    name: &str,
+    budget: Duration,
+    outcome: &str,
+    verify: &str,
+    future: impl Future<Output = Result<T, Status>>,
+) -> Result<T, Status> {
+    rpc_with_timeout(name, mutation_budget(budget), future)
         .await
         .map_err(|status| {
             if status.code() == tonic::Code::DeadlineExceeded {
                 Status::deadline_exceeded(format!(
-                    "{}; outcome unknown: the daemon may still apply this change; \
-                     verify with {verify}",
+                    "{}; outcome unknown: {outcome}; verify with {verify}",
                     status.message()
                 ))
             } else {

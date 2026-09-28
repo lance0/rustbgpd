@@ -105,9 +105,17 @@ also waits up to 31 minutes. On expiry the command exits 1 with an
 outcome-unknown error that names a command to verify with. The daemon may
 still apply the change, so the CLI never retries it.
 
-Long-running config diff and plan, config transactions (apply, confirm,
-abort and rollback) and their streams, advertised diff's aggregate deadline,
-TUI refresh limits and live watches retain their existing behavior.
+Each config-transaction RPC waits up to 31 minutes, just past the daemon's
+30-minute operation bound: `config diff`, `plan`, `apply`, `confirm`, `abort`
+and `rollback`, streamed or unary. `apply` without `--plan-token` makes two
+such calls, a plan and then the apply. An expired `apply`, `confirm`, `abort`
+or `rollback` exits 1 with an outcome-unknown error: the transaction may still
+commit or roll back, so check `rbgp config history` or `rbgp config status`
+before acting again. The commit-confirm window is a daemon-side auto-revert
+timer, not a client wait.
+
+Advertised diff's aggregate deadline, TUI refresh limits and live watches
+retain their existing behavior.
 
 In `rbgp top`, select a peer and open its detail, then press `r` to open the
 on-demand route explorer. `v` cycles the global unicast Best table and the

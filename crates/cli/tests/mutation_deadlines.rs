@@ -21,23 +21,38 @@ fn mutations_against_a_silent_daemon_report_an_unknown_outcome() {
     });
     let address = format!("unix://{}", socket.display());
 
-    for (args, rpc, verify) in [
+    let apply = "the daemon may still apply this change";
+    for (args, rpc, outcome, verify) in [
         (
             &["neighbor", "192.0.2.1", "reset"][..],
             "ResetNeighbor",
+            apply,
             "`rbgp neighbor 192.0.2.1`",
         ),
         (
             &["neighbor", "192.0.2.1", "delete"][..],
             "DeleteNeighbor",
+            apply,
             "`rbgp neighbor 192.0.2.1`",
         ),
         (
             &["gshut", "--all", "--yes"][..],
             "SetGracefulShutdown",
+            apply,
             "`rbgp neighbor`",
         ),
-        (&["mrt-dump"][..], "TriggerMrtDump", "MRT output directory"),
+        (
+            &["mrt-dump"][..],
+            "TriggerMrtDump",
+            apply,
+            "MRT output directory",
+        ),
+        (
+            &["config", "confirm", "maint-1"][..],
+            "ConfirmConfigTransaction",
+            "the transaction may still commit or roll back",
+            "`rbgp config status`",
+        ),
     ] {
         let mut child = Command::new(env!("CARGO_BIN_EXE_rbgp"))
             .args(["--addr", &address, "--no-color"])
@@ -65,7 +80,9 @@ fn mutations_against_a_silent_daemon_report_an_unknown_outcome() {
         for expected in [
             "deadline exceeded",
             rpc,
-            "outcome unknown: the daemon may still apply this change; verify with",
+            "outcome unknown: ",
+            outcome,
+            "; verify with ",
             verify,
         ] {
             assert!(
