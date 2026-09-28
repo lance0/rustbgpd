@@ -140,32 +140,47 @@ fn grpc_error_span_and_label(source: &str, reason: &str) -> Option<(Range<usize>
 /// one of `a`, `b`, ..."), rewrite the label as a did-you-mean suggestion.
 /// The candidate set is parsed out of serde's own expected-field list, which
 /// is generated from the schema structs — so it can never drift from the
-/// actual fields. Returns `None` for other messages, or when no candidate is
-/// within the edit-distance budget (garbage keys keep serde's full list).
+/// actual fields. Policy statement errors also point at the richer `.rpol`
+/// frontend, retaining serde's full list when no suggestion is close enough.
+/// Other errors with no suggestion return `None` to keep the original message.
 fn unknown_field_label(source: &str, offset: usize, message: &str) -> Option<String> {
     let rest = message.strip_prefix("unknown field `")?;
     let (name, rest) = rest.split_once('`')?;
     // Every backtick-quoted token after the field name is a valid key.
     // "there are no fields" carries none and falls through to None.
     let candidates = rest.split('`').skip(1).step_by(2).filter(|c| !c.is_empty());
+    // This field belongs to PolicyStatementConfig. Use serde's vocabulary
+    // rather than a table-name heuristic: statements also occur in inline
+    // arrays and quoted or dotted TOML tables.
+    let policy_statement = candidates.clone().any(|key| key == "match_as_path");
     let suggestions = rustbgpd_policy::rpol::closest_matches(name, candidates, 3);
-    let (last, head) = suggestions.split_last()?;
-    let alternatives = if head.is_empty() {
-        format!("`{last}`")
+    let mut label = if let Some((last, head)) = suggestions.split_last() {
+        let alternatives = if head.is_empty() {
+            format!("`{last}`")
+        } else {
+            let head = head
+                .iter()
+                .map(|s| format!("`{s}`"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("{head} or `{last}`")
+        };
+        let table = enclosing_table(source, offset)
+            .map(|t| format!(" in {t}"))
+            .unwrap_or_default();
+        format!("unknown field `{name}`{table}; did you mean {alternatives}?")
+    } else if policy_statement {
+        message.to_string()
     } else {
-        let head = head
-            .iter()
-            .map(|s| format!("`{s}`"))
-            .collect::<Vec<_>>()
-            .join(", ");
-        format!("{head} or `{last}`")
+        return None;
     };
-    let table = enclosing_table(source, offset)
-        .map(|t| format!(" in {t}"))
-        .unwrap_or_default();
-    Some(format!(
-        "unknown field `{name}`{table}; did you mean {alternatives}?"
-    ))
+    if policy_statement {
+        label.push_str(
+            "\nhelp: TOML policy statements support literal matches and actions; \
+             for richer expressions use .rpol; see docs/reference/rpol-language.md",
+        );
+    }
+    Some(label)
 }
 
 /// The nearest TOML table header (`[global]`, `[[neighbors]]`, ...) above
@@ -819,6 +834,52 @@ zzzqqqxxw = 1
         assert!(!rendered.contains("did you mean"), "got: {rendered}");
         // Serde's own expected-field list is preserved as the fallback.
         assert!(rendered.contains("expected"), "got: {rendered}");
+    }
+
+    #[test]
+    fn unknown_policy_statement_fields_name_the_rpol_tier() {
+        for statement in [
+            "[[policy.definitions.\"with.dot\".statements]]\naction = \"permit\"\nmatch_family = \"ipv6.unicast\"",
+            "[[neighbors]]\naddress = \"192.0.2.1\"\nremote_asn = 65001\nimport_policy = [{ action = \"permit\", or = [] }]",
+            "[peer_groups.customer]\nexport_policy = [{ action = \"permit\", set_local_prefx = 200 }]",
+        ] {
+            let base = super::super::profiles::profile_toml("lab").unwrap();
+            let source = format!("{base}\n{statement}\n");
+            let error: ConfigError = toml::from_str::<super::super::Config>(&source)
+                .unwrap_err()
+                .into();
+            let rendered = render_diagnostic(&source, "config.toml", &error).unwrap();
+            assert!(rendered.contains("unknown field"), "{rendered}");
+            assert!(rendered.contains("TOML policy"), "{rendered}");
+            assert!(rendered.contains("use .rpol"), "{rendered}");
+            assert!(
+                rendered.contains("docs/reference/rpol-language.md"),
+                "{rendered}"
+            );
+            if statement.contains("set_local_prefx") {
+                assert!(
+                    rendered.contains("did you mean `set_local_pref`?"),
+                    "{rendered}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn rpol_tier_hint_is_scoped_to_unknown_policy_statement_fields() {
+        for statement in [
+            "[[neighbors]]\naddress = \"192.0.2.1\"\nremote_asn = 65001\nmatch_family = \"ipv6.unicast\"",
+            "[policy.definitions.customer]\ndefault_acton = \"deny\"",
+            "[[policy.definitions.customer.statements]]\naction = \"permit\"\nprefix = 42",
+        ] {
+            let base = super::super::profiles::profile_toml("lab").unwrap();
+            let source = format!("{base}\n{statement}\n");
+            let error: ConfigError = toml::from_str::<super::super::Config>(&source)
+                .unwrap_err()
+                .into();
+            let rendered = render_diagnostic(&source, "config.toml", &error).unwrap();
+            assert!(!rendered.contains("use .rpol"), "{rendered}");
+        }
     }
 
     #[test]

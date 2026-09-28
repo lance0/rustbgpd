@@ -68,6 +68,8 @@ check-fast:
     rustfmt --check --edition 2024 crates/*/fuzz/fuzz_targets/*.rs
     python3 -m unittest -v scripts/test_build_lock.py
     python3 -m unittest -v scripts/test_run_ci_steps.py
+    python3 -m unittest -v scripts/test_check_ci_scale_split_contract.py
+    python3 scripts/check_ci_scale_split_contract.py
     python3 -m unittest -v scripts/test_check_clippy_reasons.py
     python3 scripts/check-clippy-reasons.py
     python3 scripts/check-v1-stable-surface.py
@@ -199,7 +201,12 @@ gate-msrv:
         exit 1
     fi
     toolchains="$(rustup toolchain list 2>/dev/null || true)"
-    if ! grep -qE "^${msrv//./[.]}-" <<<"${toolchains}"; then
+    version_pattern="${msrv//./[.]}"
+    if [[ "${msrv}" =~ ^[0-9]+\.[0-9]+$ ]]; then
+        version_pattern+='([.][0-9]+)?'
+    fi
+    toolchain="$(awk -v pattern="^${version_pattern}-" '$1 ~ pattern {print $1; exit}' <<<"${toolchains}")"
+    if [[ -z "${toolchain}" ]]; then
         echo "Rust ${msrv} (the workspace rust-version) is required; install it with:" >&2
         echo "  rustup toolchain install ${msrv} --profile minimal" >&2
         exit 127
@@ -208,7 +215,7 @@ gate-msrv:
     # as CI's separate MSRV cache does.
     exec bash scripts/build-lock.sh \
         env CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-target}/msrv-${msrv}" \
-        cargo "+${msrv}" check --locked --workspace --all-targets
+        cargo "+${toolchain}" check --locked --workspace --all-targets
 
 # The release-only checks are skipped, and listed, while the root CHANGELOG
 # `[Unreleased]` section still has entries or a changelog.d/ fragment is

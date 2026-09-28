@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import re
 import sys
+import tomllib
 from collections import Counter
 from pathlib import Path
 
@@ -50,6 +51,42 @@ CARGO_COMMAND = re.compile(r"(?<![\w-])cargo(?:\s+\+\S+)?\s+(build|check|test|cl
 LOCKED_TOKEN = re.compile(r"(?<!\S)--locked(?=\s|$)")
 ARG_SEPARATOR = re.compile(r"(?<!\S)--(?=\s|$)")
 MANIFEST_PATH = re.compile(r"(?<!\S)--manifest-path(?:=|\s+)([^\s;|&)]+)")
+MSRV_PINS = (
+    ("Dockerfile", None, None, r"(?m)^FROM rust:([^\s-]+)-\S+ AS chef$"),
+    ("crates/evpn-linux/tests/docker/Dockerfile", None, None, r"(?m)^FROM rust:([^\s-]+)-\S+$"),
+    (".github/workflows/release.yml", "build", None, r"(?m)^ {4}container: rust:([^\s-]+)-"),
+    (".github/workflows/kernel-dataplane.yml", "m43", "dtolnay/rust-toolchain", r'(?m)^ {10}toolchain: "([0-9.]+)"[ \t]*$'),
+    (".github/workflows/ci.yml", "msrv", "dtolnay/rust-toolchain", r'(?m)^ {10}toolchain: "([0-9.]+)"[ \t]*$'),
+    (".github/workflows/ci.yml", "msrv", "Swatinem/rust-cache", r"(?m)^ {10}key: msrv-([^\s]+)[ \t]*$"),
+)
+
+
+def _action_inputs(job: str, action: str) -> str:
+    # Like _jobs, intentionally accept the repository's workflow layout.
+    # A nearby env key or a different action's input is not the active pin.
+    steps = [" " * 8 + step for step in re.split(r"(?m)^ {6}- ", job)[1:]]
+    matches = [step for step in steps if re.search(rf"(?m)^ {{8}}uses: {re.escape(action)}@\S+", step)]
+    if len(matches) != 1:
+        return ""
+    inputs = re.search(r"(?ms)^ {8}with:[ \t]*\n(.*?)(?=^ {0,8}\S|\Z)", matches[0])
+    return inputs.group(1) if inputs else ""
+
+
+def _check_msrv_pins(root: Path, errors: list[str]) -> None:
+    manifest = tomllib.loads((root / "Cargo.toml").read_text())
+    msrv = manifest.get("workspace", {}).get("package", {}).get("rust-version")
+    if not isinstance(msrv, str) or not re.fullmatch(r"[0-9]+\.[0-9]+(?:\.[0-9]+)?", msrv):
+        errors.append("Cargo.toml: expected one numeric workspace.package.rust-version")
+        return
+    for filename, job, action, pattern in MSRV_PINS:
+        text = (root / filename).read_text()
+        if job:
+            text = _jobs(text).get(job, "")
+        if action:
+            text = _action_inputs(text, action)
+        pins = re.findall(pattern, text)
+        if pins != [msrv]:
+            errors.append(f"{filename}: MSRV pin {pins!r} must match Cargo.toml rust-version {msrv!r}")
 
 
 def _jobs(text: str) -> dict[str, str]:
@@ -145,6 +182,7 @@ def check(root: Path) -> list[str]:
             f"retired workflow must stay absent: {RETIRED_PRIVILEGED_WORKFLOW}"
         )
     _check_dependency_commands(root, errors)
+    _check_msrv_pins(root, errors)
     if set(jobs) != ROSTER:
         errors.append("exact CI job roster drifted")
 
