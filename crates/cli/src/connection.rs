@@ -40,7 +40,104 @@ pub(crate) async fn read_rpc<T>(
     rpc_with_timeout(name, READ_RPC_TIMEOUT, future).await
 }
 
-/// Method-specific budget for reads with a separate supported allowance.
+/// Client wait for a runtime-only mutation: session control, graceful
+/// shutdown, route injection, EVPN runtime controls and daemon shutdown.
+/// The daemon bounds its own peer-manager mutation wait at 10 minutes
+/// (`PEER_MANAGER_MUTATION_TIMEOUT`); the extra minute covers transfer.
+pub(crate) const MUTATION_RPC_TIMEOUT: Duration = Duration::from_secs(11 * 60);
+/// Client wait for a mutation the daemon persists to its configuration
+/// (neighbors, dynamic ranges, policies, neighbor sets, chains, peer groups,
+/// FIB tables). The settlement watchdog stops the daemon when such a change
+/// has not settled within 30 minutes (`OWNED_SETTLEMENT_BUDGET`), so no reply
+/// can arrive later; the extra minute covers the fence grace and transfer.
+pub(crate) const SETTLED_MUTATION_RPC_TIMEOUT: Duration = Duration::from_secs(31 * 60);
+/// Client wait for `mrt-dump`. The daemon does not bound a dump, and a
+/// disconnect cancels one only before its RIB snapshot arrives; encoding and
+/// writing then finish regardless. Expiry therefore cannot cut short a dump
+/// that is writing, only one still queued or waiting on the RIB, and 31
+/// minutes is far beyond a healthy snapshot wait.
+pub(crate) const MRT_DUMP_RPC_TIMEOUT: Duration = Duration::from_secs(31 * 60);
+/// Client wait for each config-transaction RPC: diff, plan, apply, confirm,
+/// abort and rollback, unary or streamed. The daemon bounds each operation at
+/// 30 minutes (`CONFIG_OPERATION_TIMEOUT`); the extra minute covers the
+/// candidate upload and response transfer. The commit-confirm window is a
+/// daemon-side auto-revert timer, so the CLI has no other wait to stack on.
+pub(crate) const CONFIG_TRANSACTION_RPC_TIMEOUT: Duration = Duration::from_secs(31 * 60);
+/// Debug builds only: shortens every mutation and config-transaction budget
+/// so process tests can observe expiry without waiting minutes.
+#[cfg(debug_assertions)]
+const TEST_MUTATION_RPC_TIMEOUT_MS_ENV: &str = "RBGP_TEST_MUTATION_RPC_TIMEOUT_MS";
+
+/// `budget`, or the debug-build test override.
+pub(crate) fn mutation_budget(budget: Duration) -> Duration {
+    #[cfg(debug_assertions)]
+    let budget = std::env::var(TEST_MUTATION_RPC_TIMEOUT_MS_ENV)
+        .ok()
+        .and_then(|ms| ms.parse().ok())
+        .map_or(budget, Duration::from_millis);
+    budget
+}
+
+/// Bound a mutation RPC. On expiry the change may still be applied, because
+/// the daemon shields an accepted mutation from client cancellation: report
+/// the outcome as unknown, point at `verify` (a command or place to check),
+/// and never retry.
+pub(crate) async fn mutation_rpc<T>(
+    name: &str,
+    budget: Duration,
+    verify: &str,
+    future: impl Future<Output = Result<T, Status>>,
+) -> Result<T, Status> {
+    unknown_outcome_rpc(
+        name,
+        budget,
+        "the daemon may still apply this change",
+        verify,
+        future,
+    )
+    .await
+}
+
+/// Bound a config-transaction RPC that can change the runtime (apply,
+/// confirm, abort, rollback), with the same unknown-outcome contract as
+/// [`mutation_rpc`].
+pub(crate) async fn config_transaction_rpc<T>(
+    name: &str,
+    verify: &str,
+    future: impl Future<Output = Result<T, Status>>,
+) -> Result<T, Status> {
+    unknown_outcome_rpc(
+        name,
+        CONFIG_TRANSACTION_RPC_TIMEOUT,
+        "the transaction may still commit or roll back",
+        verify,
+        future,
+    )
+    .await
+}
+
+async fn unknown_outcome_rpc<T>(
+    name: &str,
+    budget: Duration,
+    outcome: &str,
+    verify: &str,
+    future: impl Future<Output = Result<T, Status>>,
+) -> Result<T, Status> {
+    rpc_with_timeout(name, mutation_budget(budget), future)
+        .await
+        .map_err(|status| {
+            if status.code() == tonic::Code::DeadlineExceeded {
+                Status::deadline_exceeded(format!(
+                    "{}; outcome unknown: {outcome}; verify with {verify}",
+                    status.message()
+                ))
+            } else {
+                status
+            }
+        })
+}
+
+/// Bound a unary RPC by a method-specific budget.
 pub(crate) async fn rpc_with_timeout<T>(
     name: &str,
     budget: Duration,
@@ -1347,5 +1444,52 @@ mod tests {
             )),
             "{rendered}"
         );
+    }
+
+    // A deadline the daemon reports (for example `peer manager mutation timed
+    // out`) leaves the outcome as unknown as the CLI's own timer does; other
+    // statuses pass through untouched.
+    #[tokio::test]
+    async fn daemon_reported_deadline_is_an_unknown_outcome() {
+        let daemon =
+            || async { Err::<(), _>(Status::deadline_exceeded("peer manager mutation timed out")) };
+        let status = mutation_rpc(
+            "ResetNeighbor",
+            MUTATION_RPC_TIMEOUT,
+            "`rbgp neighbor`",
+            daemon(),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(status.code(), tonic::Code::DeadlineExceeded);
+        assert_eq!(
+            status.message(),
+            "peer manager mutation timed out; outcome unknown: the daemon may still apply \
+             this change; verify with `rbgp neighbor`"
+        );
+        let status =
+            config_transaction_rpc("ConfirmConfigTransaction", "`rbgp config status`", async {
+                Err::<(), _>(Status::deadline_exceeded(
+                    "config operation exceeded deadline",
+                ))
+            })
+            .await
+            .unwrap_err();
+        assert_eq!(
+            status.message(),
+            "config operation exceeded deadline; outcome unknown: the transaction may still \
+             commit or roll back; verify with `rbgp config status`"
+        );
+
+        let status = mutation_rpc(
+            "ResetNeighbor",
+            MUTATION_RPC_TIMEOUT,
+            "`rbgp neighbor`",
+            async { Err::<(), _>(Status::not_found("peer 192.0.2.1 not found")) },
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(status.code(), tonic::Code::NotFound);
+        assert_eq!(status.message(), "peer 192.0.2.1 not found");
     }
 }

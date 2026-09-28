@@ -7,7 +7,7 @@
 
 use serde::Serialize;
 
-use crate::connection::{Connection, read_rpc};
+use crate::connection::{Connection, SETTLED_MUTATION_RPC_TIMEOUT, mutation_rpc, read_rpc};
 use crate::error::CliError;
 use crate::output::{self, outln};
 use crate::proto::neighbor_service_client::NeighborServiceClient;
@@ -83,16 +83,20 @@ pub async fn add(
 ) -> Result<(), CliError> {
     let mut client =
         NeighborServiceClient::with_interceptor(connection.channel(), connection.interceptor());
-    client
-        .add_dynamic_neighbor(AddDynamicNeighborRequest {
+    mutation_rpc(
+        "AddDynamicNeighbor",
+        SETTLED_MUTATION_RPC_TIMEOUT,
+        "`rbgp dynamic-neighbor list`",
+        client.add_dynamic_neighbor(AddDynamicNeighborRequest {
             range: Some(DynamicNeighborRange {
                 prefix: prefix.to_string(),
                 peer_group: peer_group.to_string(),
                 remote_asn,
                 description: description.unwrap_or_default(),
             }),
-        })
-        .await?;
+        }),
+    )
+    .await?;
     output::print_result(
         json,
         "add_dynamic_neighbor",
@@ -104,11 +108,15 @@ pub async fn add(
 pub async fn delete(connection: Connection, prefix: &str, json: bool) -> Result<(), CliError> {
     let mut client =
         NeighborServiceClient::with_interceptor(connection.channel(), connection.interceptor());
-    client
-        .delete_dynamic_neighbor(DeleteDynamicNeighborRequest {
+    mutation_rpc(
+        "DeleteDynamicNeighbor",
+        SETTLED_MUTATION_RPC_TIMEOUT,
+        "`rbgp dynamic-neighbor list`",
+        client.delete_dynamic_neighbor(DeleteDynamicNeighborRequest {
             prefix: prefix.to_string(),
-        })
-        .await?;
+        }),
+    )
+    .await?;
     output::print_result(
         json,
         "delete_dynamic_neighbor",
