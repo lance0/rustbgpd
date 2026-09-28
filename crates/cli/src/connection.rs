@@ -1441,4 +1441,51 @@ mod tests {
             "{rendered}"
         );
     }
+
+    // A deadline the daemon reports (for example `peer manager mutation timed
+    // out`) leaves the outcome as unknown as the CLI's own timer does; other
+    // statuses pass through untouched.
+    #[tokio::test]
+    async fn daemon_reported_deadline_is_an_unknown_outcome() {
+        let daemon =
+            || async { Err::<(), _>(Status::deadline_exceeded("peer manager mutation timed out")) };
+        let status = mutation_rpc(
+            "ResetNeighbor",
+            MUTATION_RPC_TIMEOUT,
+            "`rbgp neighbor`",
+            daemon(),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(status.code(), tonic::Code::DeadlineExceeded);
+        assert_eq!(
+            status.message(),
+            "peer manager mutation timed out; outcome unknown: the daemon may still apply \
+             this change; verify with `rbgp neighbor`"
+        );
+        let status =
+            config_transaction_rpc("ConfirmConfigTransaction", "`rbgp config status`", async {
+                Err::<(), _>(Status::deadline_exceeded(
+                    "config operation exceeded deadline",
+                ))
+            })
+            .await
+            .unwrap_err();
+        assert_eq!(
+            status.message(),
+            "config operation exceeded deadline; outcome unknown: the transaction may still \
+             commit or roll back; verify with `rbgp config status`"
+        );
+
+        let status = mutation_rpc(
+            "ResetNeighbor",
+            MUTATION_RPC_TIMEOUT,
+            "`rbgp neighbor`",
+            async { Err::<(), _>(Status::not_found("peer 192.0.2.1 not found")) },
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(status.code(), tonic::Code::NotFound);
+        assert_eq!(status.message(), "peer 192.0.2.1 not found");
+    }
 }

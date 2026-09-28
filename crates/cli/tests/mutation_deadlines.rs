@@ -1,7 +1,9 @@
 //! Mutation RPCs stop at a deadline with an outcome-unknown error instead of
 //! waiting forever on a daemon that accepts the connection but never answers.
 
-#![cfg(unix)]
+// The shortened test budget is a debug-build hook; a release-profile test
+// run would otherwise wait the real 11-31 minute budgets.
+#![cfg(all(unix, debug_assertions))]
 
 use std::os::unix::net::UnixListener;
 use std::process::{Command, Stdio};
