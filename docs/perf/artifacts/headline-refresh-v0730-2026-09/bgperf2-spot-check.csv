@@ -1,0 +1,4 @@
+name,target,version,peers,prefixes per peer,required,received,monitor (s),elapsed (s),prefix received (s),testers (s),total time,max cpu %,max mem (GB),min idle%,min free mem (GB),flags,date,cores,Mem (GB),tester errors,tester timeouts,failed,MSG,filters,max foreign cpu %,target image,tester version,monitor version
+rustbgpd,rustbgpd,rustbgpd 0.73.0,10,1000,9900,10000,0,2,1,1,8.31,9,0.045,98,105.907,,2026-09-28,64,125.29GB,0,0,,,,109,bgperf/rustbgpd:v0.73.0-spot,2.19.2,4.8.0
+rustbgpd,rustbgpd,rustbgpd 0.73.0,2,10000,19800,20000,0,2,1,1,8.31,7,0.047,97,105.934,,2026-09-28,64,125.29GB,0,0,,,,108,bgperf/rustbgpd:v0.73.0-spot,2.19.2,4.8.0
+rustbgpd,rustbgpd,rustbgpd 0.73.0,2,100000,198000,200000,0,3,1,2,12.62,50,0.2,93,105.439,,2026-09-28,64,125.29GB,0,0,,,,108,bgperf/rustbgpd:v0.73.0-spot,2.19.2,4.8.0

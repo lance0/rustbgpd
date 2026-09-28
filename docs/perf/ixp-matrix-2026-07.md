@@ -782,3 +782,13 @@ and current main, alternating on the same host. Results, method, and the
 cross-date gap to the 2026-08-30 rows above are in the
 [v0.72.0 headline refresh receipt](headline-refresh-v0720-2026-09.md). The
 sections above are unchanged as history.
+
+## v0.73.0 headline refresh — 2026-09-28
+
+The rustbgpd rows were re-measured overnight 2026-09-27 to 2026-09-28 for the
+v0.73.0, v0.72.0 and v0.68.0 release trees, alternating on the same host.
+v0.68.0 reproduced the 2026-08-30 rows above, so the slower 2026-09-26
+v0.72.0 rows reflect a change between the releases, not the host. Results and
+method are in the
+[v0.73.0 headline refresh receipt](headline-refresh-v0730-2026-09.md). The
+sections above are unchanged as history.

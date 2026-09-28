@@ -1,0 +1,37 @@
+# reloadstall peers=700 changed_peers=700 stable_peers=0 prefixes=400400 per_peer=572 pid=337039
+established 700 at 0.8s
+establishment transport_retries=0 recovered_peers=0
+first_exact_bitmap,mode=flapstorm,peers=700,total=400400,per_peer=572,expected=399828,completed=700,min_unique=399828,max_unique=399828
+converged (>= 399828/observer) at 3.1s rss_mib=427
+control_maxgap_ms: p50=77.09 p95=77.49 max=77.72 (n=700)
+control_rss_mib 379
+flapstorm_failover_csv_header,round,peers_total,peers_flapped,flap_prefixes,alternate_prefixes,alternate_sources,daemon_cpu_s,scrape_bracketed_flush_sum_s,scrape_bracketed_flush_count,withdraw_p50_s,withdraw_max_s,window_s,background_cpu_s_per_s
+flapstorm_csv_header,round,peers_total,peers_flapped,prefixes,flap_prefixes,withdraw_p50_s,withdraw_p95_s,withdraw_max_s,reannounce_p50_s,reannounce_p95_s,reannounce_max_s,rss_mib,sessions_up,parse_errors
+flap 1 close wall_us=1790563238653631
+flap 1 withdraw_s: p50=0.24 p95=0.25 max=0.27 (n=650)
+flapstorm_failover_csv,1,700,50,28600,0,0,1.090,NaN,0,0.243367,0.271602,0.302671,0.300
+flap 1 reconnect transport_retries=0 recovered_peers=0
+flap 1 reannounce wall_us=1790563248680542
+flap 1 reannounce_s: p50=0.37 p95=0.37 max=0.39 (n=650)
+flap 1 first_reann_s: p50=0.25 p95=0.25 max=0.25 (n=650)
+flap 1 sessions_up 700/700 rss_mib=426
+flapstorm_csv,1,700,50,400400,28600,0.243367,0.249494,0.271602,0.370748,0.372509,0.387663,426,700,0
+flap 2 close wall_us=1790563261091648
+flap 2 withdraw_s: p50=0.25 p95=0.29 max=0.30 (n=650)
+flapstorm_failover_csv,2,700,50,28600,0,0,1.190,NaN,0,0.254540,0.295281,0.303448,1.139
+flap 2 reconnect transport_retries=0 recovered_peers=0
+flap 2 reannounce wall_us=1790563271116085
+flap 2 reannounce_s: p50=0.38 p95=0.40 max=0.41 (n=650)
+flap 2 first_reann_s: p50=0.26 p95=0.26 max=0.26 (n=650)
+flap 2 sessions_up 700/700 rss_mib=488
+flapstorm_csv,2,700,50,400400,28600,0.254540,0.288337,0.295281,0.377848,0.403085,0.412969,488,700,0
+flap 3 close wall_us=1790563283628595
+flap 3 withdraw_s: p50=0.28 p95=0.29 max=0.31 (n=650)
+flapstorm_failover_csv,3,700,50,28600,0,0,1.280,NaN,0,0.283699,0.307404,0.404600,1.129
+flap 3 reconnect transport_retries=0 recovered_peers=0
+flap 3 reannounce wall_us=1790563293651824
+flap 3 reannounce_s: p50=0.39 p95=0.39 max=0.41 (n=650)
+flap 3 first_reann_s: p50=0.25 p95=0.25 max=0.25 (n=650)
+flap 3 sessions_up 700/700 rss_mib=471
+flapstorm_csv,3,700,50,400400,28600,0.283699,0.285374,0.307404,0.387611,0.389190,0.411378,471,700,0
+done rss_mib=504
