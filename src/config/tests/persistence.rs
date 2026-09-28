@@ -150,55 +150,100 @@ fn canonical_persistence_retains_each_configured_optional_section() {
 }
 
 #[test]
-fn v071_archived_configs_emit_only_released_root_schema_keys() {
+fn archived_configs_emit_only_released_root_schema_keys() {
     let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
-    let tag_root = repository.join("tests/fixtures/v1-stable/v0.71.0");
-    let manifest: serde_json::Value = serde_json::from_str(
-        &std::fs::read_to_string(
-            repository.join("tests/fixtures/v1-stable-schema-root-keys/v0.71.0.json"),
-        )
-        .unwrap(),
-    )
-    .unwrap();
-    assert_eq!(manifest["source_tag"], "v0.71.0");
-    assert_eq!(
-        manifest["schema_sha256"],
-        "480e1d69aaa6ab10397e389eb240e124d1f9c35dcdbb9b2dc0bc9d1c1f191a64"
-    );
-    assert_eq!(manifest["additional_properties"], false);
-    let allowed: std::collections::BTreeSet<&str> = manifest["properties"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|value| value.as_str().unwrap())
-        .collect();
-    assert!(
-        !allowed.contains("flowspec"),
-        "the v0.71.0 red proof requires FlowSpec to be a newer root key"
-    );
-
-    let mut exercised = 0;
-    for entry in std::fs::read_dir(&tag_root).unwrap() {
-        let directory = entry.unwrap().path();
-        if !directory.is_dir() {
-            continue;
-        }
-        let source = std::fs::read_to_string(directory.join("config.toml")).unwrap();
-        let mut config: Config = toml::from_str(&source).unwrap();
-        config.load_rpol_files(Some(&directory)).unwrap();
-        config.validate().unwrap();
-        let persisted = persisted_config_document_bounded(&mut config).unwrap();
-        let value: toml::Value = toml::from_str(&persisted).unwrap();
-        for key in value.as_table().unwrap().keys() {
+    let mut manifests: Vec<_> =
+        std::fs::read_dir(repository.join("tests/fixtures/v1-stable-schema-root-keys"))
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .collect();
+    manifests.sort();
+    let mut tags = Vec::new();
+    for manifest_path in manifests {
+        let tag = manifest_path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .and_then(|name| name.strip_suffix(".json"))
+            .unwrap_or_else(|| panic!("{} is not a JSON fixture", manifest_path.display()));
+        let manifest: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&manifest_path).unwrap()).unwrap();
+        assert_eq!(manifest["source_tag"], tag, "{}", manifest_path.display());
+        assert_eq!(
+            manifest["schema_path"],
+            "docs/reference/rustbgpd.schema.json",
+            "{}",
+            manifest_path.display()
+        );
+        assert_eq!(manifest["additional_properties"], false, "{tag}");
+        let allowed: std::collections::BTreeSet<&str> = manifest["properties"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|value| value.as_str().unwrap())
+            .collect();
+        if tag == "v0.71.0" {
+            assert_eq!(
+                manifest["schema_sha256"],
+                "480e1d69aaa6ab10397e389eb240e124d1f9c35dcdbb9b2dc0bc9d1c1f191a64"
+            );
             assert!(
-                allowed.contains(key.as_str()),
-                "{} canonical persistence emitted root key {key:?} outside the released v0.71.0 schema:\n{persisted}",
-                directory.display()
+                !allowed.contains("flowspec"),
+                "the v0.71.0 red proof requires FlowSpec to be a newer root key"
             );
         }
-        exercised += 1;
+
+        let mut exercised = 0;
+        for entry in std::fs::read_dir(repository.join("tests/fixtures/v1-stable").join(tag))
+            .unwrap_or_else(|error| panic!("{tag} has no archived v1-stable configs: {error}"))
+        {
+            let directory = entry.unwrap().path();
+            if !directory.is_dir() {
+                continue;
+            }
+            let source = std::fs::read_to_string(directory.join("config.toml")).unwrap();
+            let mut config: Config = toml::from_str(&source).unwrap();
+            config.load_rpol_files(Some(&directory)).unwrap();
+            config.validate().unwrap();
+            let persisted = persisted_config_document_bounded(&mut config).unwrap();
+            let value: toml::Value = toml::from_str(&persisted).unwrap();
+            for key in value.as_table().unwrap().keys() {
+                assert!(
+                    allowed.contains(key.as_str()),
+                    "{} canonical persistence emitted root key {key:?} outside the released {tag} schema:\n{persisted}",
+                    directory.display()
+                );
+            }
+            exercised += 1;
+        }
+        assert!(exercised > 0, "no supported {tag} configs were exercised");
+        tags.push(tag.to_owned());
     }
-    assert!(exercised > 0, "no supported v0.71.0 configs were exercised");
+    // Every archived release from v0.71.0 onward needs its manifest, so a
+    // missed checklist step or a deleted manifest cannot drop coverage.
+    let release = |tag: &str| -> (u64, u64, u64) {
+        let mut parts = tag
+            .strip_prefix('v')
+            .unwrap_or_else(|| panic!("{tag} is not a vX.Y.Z tag"))
+            .split('.')
+            .map(|part| part.parse::<u64>().unwrap());
+        let version = (
+            parts.next().unwrap(),
+            parts.next().unwrap(),
+            parts.next().unwrap(),
+        );
+        assert!(parts.next().is_none(), "{tag} is not a vX.Y.Z tag");
+        version
+    };
+    let mut archived: Vec<String> = std::fs::read_dir(repository.join("tests/fixtures/v1-stable"))
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+        .filter(|tag| release(tag) >= (0, 71, 0))
+        .collect();
+    archived.sort();
+    assert_eq!(
+        tags, archived,
+        "each archived v1-stable release from v0.71.0 needs a schema root-keys manifest"
+    );
 }
 
 fn raw_bounded_fixture(

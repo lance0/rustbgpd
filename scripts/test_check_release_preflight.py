@@ -127,6 +127,8 @@ class ReleasePreflightTests(unittest.TestCase):
             ("crates/wire/CHANGELOG.md", "## 0.2.0\n", "release date"),
             ("crates/wire/README.md", STAGING["crates/wire/README.md"], "still says"),
             ("crates/wire/README.md", "The source checkout prepares 0.2.0.\n", "still says"),
+            ("crates/wire/README.md", "Version 0.2.0 is prepared in this\ncheckout.\n", "still says"),
+            ("crates/wire/README.md", "The Prepared 0.2.0 release pairs with fsm.\n", "still says"),
         ):
             with self.subTest(text=text):
                 root = self.tree(**{relative: text})

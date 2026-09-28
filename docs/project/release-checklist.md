@@ -813,28 +813,6 @@ Before rolling any versions:
      the workspace version. For a new release line, append the consecutive
      upgrade exercise using the previous release's immutable fixture and
      the shared `v1_stable_archived_fixtures_parse` test. Keep the README baseline aligned; preserve older exercises.
-   - Freeze the previous tag's root config-schema manifest beside its archived
-     fixture. Derive it from the immutable tag rather than the working tree:
-
-     ```sh
-     prev_tag=vX.Y.Z
-     schema_path=docs/reference/rustbgpd.schema.json
-     git show "${prev_tag}:${schema_path}" > /tmp/rustbgpd-prev-schema.json
-     schema_sha256=$(sha256sum /tmp/rustbgpd-prev-schema.json | cut -d' ' -f1)
-     mkdir -p tests/fixtures/v1-stable-schema-root-keys
-     jq --arg source_tag "$prev_tag" --arg schema_path "$schema_path" \
-       --arg schema_sha256 "$schema_sha256" \
-       '{source_tag:$source_tag,schema_path:$schema_path,
-         schema_sha256:$schema_sha256,
-         additional_properties:.additionalProperties,
-         properties:(.properties|keys)}' /tmp/rustbgpd-prev-schema.json \
-       > "tests/fixtures/v1-stable-schema-root-keys/${prev_tag}.json"
-     ```
-
-     This compact fixture proves only that canonical persistence introduces no
-     root key the previous schema rejects. Semantic round-trip tests cover the
-     rendered values; this is not full previous-release schema validation or a
-     downgrade guarantee.
    - Update the workspace release and target changelog section in
      `scripts/check_metric_release_notes.py` and its companion test. The
      baseline stays on the previous release here; it rolls to this tag in
@@ -959,6 +937,32 @@ After the tag publishes:
     copies match the tag byte for byte and every role the tag carries is
     present. The next release's consecutive upgrade exercise consumes the
     `route-server` fixture.
+
+    In the same commit, freeze the tag's root config-schema manifest beside
+    the archived fixture. Derive it from the immutable tag rather than the
+    working tree:
+
+    ```sh
+    tag=vX.Y.Z
+    schema_path=docs/reference/rustbgpd.schema.json
+    git show "${tag}:${schema_path}" > /tmp/rustbgpd-tag-schema.json
+    schema_sha256=$(sha256sum /tmp/rustbgpd-tag-schema.json | cut -d' ' -f1)
+    mkdir -p tests/fixtures/v1-stable-schema-root-keys
+    jq --arg source_tag "$tag" --arg schema_path "$schema_path" \
+      --arg schema_sha256 "$schema_sha256" \
+      '{source_tag:$source_tag,schema_path:$schema_path,
+        schema_sha256:$schema_sha256,
+        additional_properties:.additionalProperties,
+        properties:(.properties|keys)}' /tmp/rustbgpd-tag-schema.json \
+      > "tests/fixtures/v1-stable-schema-root-keys/${tag}.json"
+    ```
+
+    The `archived_configs_emit_only_released_root_schema_keys` test fails
+    until every archived tag from v0.71.0 onward has its manifest. For each
+    manifest, it persists that tag's configs from `tests/fixtures/v1-stable/`
+    and checks that canonical persistence introduces no root key the tag's
+    schema rejects. Semantic round-trip tests cover the rendered values; this
+    is not full previous-release schema validation or a downgrade guarantee.
 14. **Roll the metric release-note baseline** in the same post-release commit
     as step 13, immediately after the tag. Every release rolls it, patch
     releases included: the checker requires every metric family added or
@@ -993,12 +997,12 @@ wire before dependent crates. If a publish or registry check fails, retain the
 existing record and retry after resolving the failure.
 
 `--refresh` does not reword prose. A crate README is packaged with the crate
-and becomes its crates.io landing page, so turn "prepared in the source
-checkout" or "source checkout prepares" wording for a version about to publish
-into released wording in `crates/wire/README.md`, `crates/fsm/README.md`, and
-`crates/rpki/README.md` before the release commit;
-`just gate-release --mode release` rejects either wording in a crate whose
-manifest is ahead of the published record. Reword
+and becomes its crates.io landing page, so turn staging wording for a version
+about to publish ("prepared in this checkout", "the source checkout prepares",
+"the prepared 0.x release") into released wording in `crates/wire/README.md`,
+`crates/fsm/README.md`, and `crates/rpki/README.md` before the release commit;
+`just gate-release --mode release` rejects any form of "prepare" in the README
+of a crate whose manifest is ahead of the published record. Reword
 `docs/reference/embedding.md` §4 in the same change as `--refresh`. Past
 `CHANGELOG.md` sections keep their wording.
 

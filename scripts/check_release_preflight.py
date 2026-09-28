@@ -43,8 +43,11 @@ ASSEMBLER_SPEC = importlib.util.spec_from_file_location(
 ASSEMBLER = importlib.util.module_from_spec(ASSEMBLER_SPEC)
 ASSEMBLER_SPEC.loader.exec_module(ASSEMBLER)
 RECORD = "docs/reference/published-crate-versions.json"
-# The two wordings the release checklist names for a not-yet-published version.
-PREPARED_PHRASES = ("prepared in the source checkout", "source checkout prepares")
+# Staging prose for a not-yet-published version has used many phrasings
+# ("prepared in this checkout", "the source tree prepares", "the prepared
+# 0.22.0 release"); every one carries a form of "prepare", and released crate
+# READMEs use none.
+PREPARED_WORDING = re.compile(r"\bprepar\w*", re.IGNORECASE)
 SECTION = re.compile(r"(?m)^## \[[^\]\n]+\][^\n]*$")
 DATE = re.compile(r"\b\d{4}-\d{2}-\d{2}\b")
 
@@ -190,13 +193,13 @@ def crate_release_errors(root: Path, pending: dict[str, tuple[str, str]]) -> lis
                 f"crates/{crate}/CHANGELOG.md heading {heading!r} needs the release "
                 "date in place of `Unreleased`"
             )
-        readme = " ".join(read(root, f"crates/{crate}/README.md").split()).casefold()
-        for phrase in PREPARED_PHRASES:
-            if phrase in readme:
-                errors.append(
-                    f"crates/{crate}/README.md still says {phrase!r}; it is the "
-                    "crates.io landing page for the version about to publish"
-                )
+        readme = " ".join(read(root, f"crates/{crate}/README.md").split())
+        for match in PREPARED_WORDING.finditer(readme):
+            context = readme[max(0, match.start() - 40) : match.end() + 40]
+            errors.append(
+                f"crates/{crate}/README.md still says {context!r}; it is the "
+                "crates.io landing page for the version about to publish"
+            )
     return errors
 
 
