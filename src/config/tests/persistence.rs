@@ -218,9 +218,31 @@ fn archived_configs_emit_only_released_root_schema_keys() {
         assert!(exercised > 0, "no supported {tag} configs were exercised");
         tags.push(tag.to_owned());
     }
-    assert!(
-        tags.iter().any(|tag| tag == "v0.71.0"),
-        "the v0.71.0 schema fixture is missing: {tags:?}"
+    // Every archived release from v0.71.0 onward needs its manifest, so a
+    // missed checklist step or a deleted manifest cannot drop coverage.
+    let release = |tag: &str| -> (u64, u64, u64) {
+        let mut parts = tag
+            .strip_prefix('v')
+            .unwrap_or_else(|| panic!("{tag} is not a vX.Y.Z tag"))
+            .split('.')
+            .map(|part| part.parse::<u64>().unwrap());
+        let version = (
+            parts.next().unwrap(),
+            parts.next().unwrap(),
+            parts.next().unwrap(),
+        );
+        assert!(parts.next().is_none(), "{tag} is not a vX.Y.Z tag");
+        version
+    };
+    let mut archived: Vec<String> = std::fs::read_dir(repository.join("tests/fixtures/v1-stable"))
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+        .filter(|tag| release(tag) >= (0, 71, 0))
+        .collect();
+    archived.sort();
+    assert_eq!(
+        tags, archived,
+        "each archived v1-stable release from v0.71.0 needs a schema root-keys manifest"
     );
 }
 
