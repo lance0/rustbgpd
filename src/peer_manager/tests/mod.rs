@@ -1097,6 +1097,9 @@ fn fake_peer_handle_with_route_refresh_reply(
                         pending_route_refresh_replies.push(reply);
                     }
                 }
+                PeerCommand::ClaimCollisionPromotion { reply } => {
+                    let _ = reply.send(true);
+                }
                 PeerCommand::ActivateMaxPrefixMetrics { reply, .. } => {
                     counters
                         .activate_max_prefix_metrics

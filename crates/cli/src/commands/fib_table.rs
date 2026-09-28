@@ -8,7 +8,7 @@
 
 use serde::Serialize;
 
-use crate::connection::{Connection, read_rpc};
+use crate::connection::{Connection, SETTLED_MUTATION_RPC_TIMEOUT, mutation_rpc, read_rpc};
 use crate::error::CliError;
 use crate::output::{self, outln};
 use crate::proto::rib_service_client::RibServiceClient;
@@ -137,8 +137,11 @@ pub async fn set(
 ) -> Result<(), CliError> {
     let mut client =
         RibServiceClient::with_interceptor(connection.channel(), connection.interceptor());
-    let resp = client
-        .set_fib_table(SetFibTableRequest {
+    let resp = mutation_rpc(
+        "SetFibTable",
+        SETTLED_MUTATION_RPC_TIMEOUT,
+        "`rbgp fib-table list`",
+        client.set_fib_table(SetFibTableRequest {
             table: Some(FibTableConfig {
                 name: name.to_string(),
                 table_id,
@@ -151,9 +154,10 @@ pub async fn set(
                 maximum_paths_ebgp,
                 maximum_paths_ibgp,
             }),
-        })
-        .await?
-        .into_inner();
+        }),
+    )
+    .await?
+    .into_inner();
     if json {
         render(&resp, true)?;
     } else {
@@ -168,12 +172,16 @@ pub async fn set(
 pub async fn delete(connection: Connection, name: &str, json: bool) -> Result<(), CliError> {
     let mut client =
         RibServiceClient::with_interceptor(connection.channel(), connection.interceptor());
-    let resp = client
-        .delete_fib_table(DeleteFibTableRequest {
+    let resp = mutation_rpc(
+        "DeleteFibTable",
+        SETTLED_MUTATION_RPC_TIMEOUT,
+        "`rbgp fib-table list`",
+        client.delete_fib_table(DeleteFibTableRequest {
             name: name.to_string(),
-        })
-        .await?
-        .into_inner();
+        }),
+    )
+    .await?
+    .into_inner();
     if json {
         render(&resp, true)?;
     } else {

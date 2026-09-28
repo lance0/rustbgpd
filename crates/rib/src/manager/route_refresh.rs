@@ -833,32 +833,56 @@ impl RibManager {
         // Resolved before the `policy_stats` borrow below (whole-`self`
         // method call).
         let vpn_member_of = self.vpn_grouped_member_of(peer);
-        let policy_stats = self.export_policy_stats.entry(peer).or_default();
-
-        let mut all_prefixes: HashSet<Prefix> = self
-            .loc_rib
-            .iter()
-            .inspect(|_| {
+        // The unicast prefix inventory the replay reconciles against. Any
+        // other family's set is empty, so it is not walked. A grouped member
+        // replays the group table, so its scope is the group and peer residue
+        // (as for a grouped join) rather than the Loc-RIB plus every
+        // Adj-RIB-In. Either way the peer's own OTC-blocked keys are added
+        // afterwards without an inventory check, so a stale block at a prefix
+        // no RIB holds is still cleared.
+        let unicast_family = matches!(family, (Afi::Ipv4 | Afi::Ipv6, Safi::Unicast));
+        let mut all_prefixes: HashSet<Prefix> = if !unicast_family {
+            HashSet::new()
+        } else if let Some(group) = member_of.and_then(|gid| self.group_ribs.get(&gid)) {
+            let mut scope = self.grouped_join_prefix_scope(peer, group, &mut || {
                 super::replacement_readiness_checkpoint_at(
                     &self.replacement_readiness,
                     "refresh",
                     false,
                 );
-            })
-            .map(|r| r.prefix)
-            .filter(|p| prefix_family(p) == family)
-            .collect();
-        for rib in self.ribs.values() {
-            super::replacement_readiness_checkpoint(&self.replacement_readiness, false);
-            all_prefixes.extend(
-                rib.iter()
-                    .inspect(|_| {
-                        super::replacement_readiness_checkpoint(&self.replacement_readiness, false);
-                    })
-                    .map(|r| r.prefix)
-                    .filter(|p| prefix_family(p) == family),
-            );
-        }
+            });
+            scope.retain(|p| prefix_family(p) == family);
+            scope
+        } else {
+            let mut all_prefixes: HashSet<Prefix> = self
+                .loc_rib
+                .iter()
+                .inspect(|_| {
+                    super::replacement_readiness_checkpoint_at(
+                        &self.replacement_readiness,
+                        "refresh",
+                        false,
+                    );
+                })
+                .map(|r| r.prefix)
+                .filter(|p| prefix_family(p) == family)
+                .collect();
+            for rib in self.ribs.values() {
+                super::replacement_readiness_checkpoint(&self.replacement_readiness, false);
+                all_prefixes.extend(
+                    rib.iter()
+                        .inspect(|_| {
+                            super::replacement_readiness_checkpoint(
+                                &self.replacement_readiness,
+                                false,
+                            );
+                        })
+                        .map(|r| r.prefix)
+                        .filter(|p| prefix_family(p) == family),
+                );
+            }
+            all_prefixes
+        };
         if let Some(blocked) = self.peer_otc_blocked.get(&peer) {
             all_prefixes.extend(
                 blocked
@@ -870,6 +894,7 @@ impl RibManager {
                     .copied(),
             );
         }
+        let policy_stats = self.export_policy_stats.entry(peer).or_default();
 
         // Stage against an empty outbound view so ROUTE-REFRESH
         // re-advertises the current export set for this family rather than
@@ -1252,7 +1277,11 @@ impl RibManager {
                 // captured source, scrub post-policy).
                 let rs_control = rs_control_asn.zip(target_peer_asn);
                 for staged in group.table.iter().inspect(|_| {
-                    super::replacement_readiness_checkpoint(&self.replacement_readiness, false);
+                    super::replacement_readiness_checkpoint_at(
+                        &self.replacement_readiness,
+                        "refresh",
+                        false,
+                    );
                 }) {
                     if prefix_family(&staged.prefix) != family {
                         continue;

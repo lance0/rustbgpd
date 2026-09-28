@@ -10880,3 +10880,224 @@ async fn export_roster_switches_a_grouped_cohort_once_at_the_terminal_commit() {
     let new = designated(&after);
     assert!(new[0].is_some() && new[0] != old[0] && new.iter().all(|id| *id == new[0]));
 }
+
+fn register_direct_peer_with_policy(
+    manager: &mut RibManager,
+    peer: IpAddr,
+    export_policy: Option<PolicyChain>,
+) -> mpsc::Receiver<OutboundRouteUpdate> {
+    let (outbound_tx, outbound_rx) = mpsc::channel(8);
+    manager.handle_update(RibUpdate::PeerUp {
+        peer,
+        session_id: 0,
+        peer_asn: 65_000,
+        peer_router_id: Ipv4Addr::UNSPECIFIED,
+        outbound_tx,
+        export_policy,
+        sendable_families: ipv4_sendable(),
+        is_ebgp: false,
+        route_reflector_client: false,
+        orr_vantage: None,
+        per_client_best: false,
+        interpret_rfc1997: true,
+        add_path_send_families: vec![],
+        add_path_send_max: 0,
+        negotiated_orf_recv: vec![],
+        negotiated_llgr_families: vec![],
+    });
+    outbound_rx
+}
+
+/// Everything one peer's ROUTE-REFRESH response and the churn behind it leave
+/// observable: the refresh envelopes in order, the peer's derived residue
+/// right after the response, and the stream once the churn has drained.
+#[derive(Debug, PartialEq, Eq)]
+struct RefreshObservation {
+    refresh: Vec<String>,
+    policy_filtered: BTreeSet<String>,
+    otc_blocked: BTreeSet<String>,
+    after_churn: Vec<String>,
+}
+
+fn envelope_summary(update: &OutboundRouteUpdate) -> String {
+    let mut announce: Vec<String> = update
+        .announce
+        .iter()
+        .map(|route| format!("{}#{}", route.prefix, route.path_id))
+        .collect();
+    announce.sort();
+    let mut withdraw: Vec<String> = update
+        .withdraw
+        .iter()
+        .map(|(prefix, path_id)| format!("{prefix}#{path_id}"))
+        .collect();
+    withdraw.sort();
+    format!(
+        "announce={announce:?} withdraw={withdraw:?} eor={:?} markers={:?}",
+        update.end_of_rib, update.refresh_markers
+    )
+}
+
+/// Refresh two peers — `grouped` shares a deny-`denied` policy with another
+/// member, `distinct` has no export policy — while a churn batch is queued
+/// behind the refresh. `grouped`'s residue is corrupted first: its group
+/// denial dropped, a stale denial at a permitted prefix, one at a prefix no
+/// RIB holds, and an OTC block at another prefix no RIB holds. The refresh
+/// re-derives the residue its inventory covers; the forced-ungrouped run
+/// walks the full inventory per prefix and is the oracle.
+fn refresh_residue_during_churn(force_ungrouped: bool) -> Vec<RefreshObservation> {
+    let (_tx, rx) = mpsc::channel(1);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    manager.test_force_ungrouped = force_ungrouped;
+    let denied = Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 8);
+    let permitted = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24);
+    let absent = Ipv4Prefix::new(Ipv4Addr::new(198, 18, 0, 0), 15);
+    let absent_otc = Ipv4Prefix::new(Ipv4Addr::new(100, 64, 0, 0), 10);
+    let churned = Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 0), 24);
+    let grouped = IpAddr::V4(Ipv4Addr::new(10, 26, 0, 1));
+    let sibling = IpAddr::V4(Ipv4Addr::new(10, 26, 0, 2));
+    let distinct = IpAddr::V4(Ipv4Addr::new(10, 26, 0, 3));
+    let mut grouped_rx =
+        register_direct_peer_with_policy(&mut manager, grouped, Some(deny_chain(denied)));
+    let mut sibling_rx =
+        register_direct_peer_with_policy(&mut manager, sibling, Some(deny_chain(denied)));
+    let mut distinct_rx = register_direct_peer_with_policy(&mut manager, distinct, None);
+    let source = Ipv4Addr::new(192, 0, 2, 26);
+    distribute_direct_routes(&mut manager, source, [denied, permitted]);
+    for receiver in [&mut grouped_rx, &mut sibling_rx, &mut distinct_rx] {
+        while receiver.try_recv().is_ok() {}
+    }
+    if force_ungrouped {
+        assert_eq!(manager.grouped_member_of(grouped), None);
+    } else {
+        let group = manager.grouped_member_of(grouped).expect("grouped member");
+        assert_eq!(manager.grouped_member_of(sibling), Some(group));
+        assert_ne!(manager.grouped_member_of(distinct), Some(group));
+    }
+
+    let key = |prefix: Ipv4Prefix| PolicyFilteredRouteKey {
+        target_peer: grouped,
+        source_peer: IpAddr::V4(source),
+        prefix: Prefix::V4(prefix),
+        path_id: 0,
+    };
+    let residue = manager.policy_filtered_routes.entry(grouped).or_default();
+    assert!(residue.remove(&key(denied)), "the join recorded the denial");
+    residue.insert(key(permitted));
+    residue.insert(key(absent));
+    manager
+        .peer_otc_blocked
+        .entry(grouped)
+        .or_default()
+        .insert(Prefix::V4(absent_otc), HashSet::from([0]));
+
+    // Churn queued, not yet drained: a new route and a withdrawal the
+    // refresh must not overtake or duplicate.
+    manager.handle_update(RibUpdate::RoutesReceived {
+        peer: IpAddr::V4(source),
+        session_id: 0,
+        announced: vec![crate::test_support::make_route(churned, source)],
+        withdrawn: vec![(Prefix::V4(permitted), 0)],
+        flowspec_announced: vec![],
+        flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
+        validated_with: None,
+    });
+    let mut observations = Vec::new();
+    for (peer, receiver) in [(grouped, &mut grouped_rx), (distinct, &mut distinct_rx)] {
+        manager.send_route_refresh_response(peer, Afi::Ipv4, Safi::Unicast);
+        let mut refresh = Vec::new();
+        while let Ok(update) = receiver.try_recv() {
+            refresh.push(envelope_summary(&update));
+        }
+        let policy_filtered = manager
+            .policy_filtered_routes
+            .get(&peer)
+            .into_iter()
+            .flatten()
+            .map(|key| format!("{key:?}"))
+            .collect();
+        let otc_blocked = manager
+            .peer_otc_blocked
+            .get(&peer)
+            .into_iter()
+            .flatten()
+            .map(|(prefix, paths)| format!("{prefix}:{paths:?}"))
+            .collect();
+        observations.push(RefreshObservation {
+            refresh,
+            policy_filtered,
+            otc_blocked,
+            after_churn: Vec::new(),
+        });
+    }
+    while manager.process_next_route_chunk() {}
+    for (observation, receiver) in observations
+        .iter_mut()
+        .zip([&mut grouped_rx, &mut distinct_rx])
+    {
+        while let Ok(update) = receiver.try_recv() {
+            observation.after_churn.push(envelope_summary(&update));
+        }
+    }
+    observations
+}
+
+#[test]
+fn grouped_refresh_repairs_residue_like_ungrouped_oracle_during_churn() {
+    let grouped = refresh_residue_during_churn(false);
+    assert_eq!(grouped, refresh_residue_during_churn(true));
+
+    let [member, distinct] = grouped.as_slice() else {
+        panic!("two refreshed peers");
+    };
+    // RFC 7313 §4 bracketing and the RFC 2918 End-of-RIB stay per peer, in
+    // one envelope after the replayed table; the queued churn follows it.
+    let bracket = "eor=[(Ipv4, Unicast)] markers=[(Ipv4, Unicast, BoRR), (Ipv4, Unicast, EoRR)]";
+    assert_eq!(
+        member.refresh,
+        vec![format!(
+            r#"announce=["203.0.113.0/24#0"] withdraw=[] {bracket}"#
+        )]
+    );
+    assert_eq!(
+        distinct.refresh,
+        vec![format!(
+            r#"announce=["10.0.0.0/8#0", "203.0.113.0/24#0"] withdraw=[] {bracket}"#
+        )]
+    );
+    // The group denial is restored and the stale denial at a held prefix
+    // is gone. A denial at a prefix no RIB holds is outside every refresh
+    // inventory, so both paths leave it; the peer's OTC keys are always in
+    // the inventory, so the stale block is cleared.
+    let key = |addr: Ipv4Addr, len| {
+        format!(
+            "{:?}",
+            PolicyFilteredRouteKey {
+                target_peer: IpAddr::V4(Ipv4Addr::new(10, 26, 0, 1)),
+                source_peer: IpAddr::V4(Ipv4Addr::new(192, 0, 2, 26)),
+                prefix: Prefix::V4(Ipv4Prefix::new(addr, len)),
+                path_id: 0,
+            }
+        )
+    };
+    assert_eq!(
+        member.policy_filtered,
+        BTreeSet::from([
+            key(Ipv4Addr::new(10, 0, 0, 0), 8),
+            key(Ipv4Addr::new(198, 18, 0, 0), 15),
+        ])
+    );
+    assert!(member.otc_blocked.is_empty(), "{:?}", member.otc_blocked);
+    assert!(distinct.policy_filtered.is_empty());
+    for observation in [member, distinct] {
+        assert_eq!(
+            observation.after_churn,
+            vec![
+                r#"announce=["198.51.100.0/24#0"] withdraw=["203.0.113.0/24#0"] eor=[] markers=[]"#
+                    .to_owned()
+            ]
+        );
+    }
+}

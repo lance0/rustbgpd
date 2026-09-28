@@ -9,7 +9,7 @@ use serde::Serialize;
 
 use crate::commands::neighbor::bare_ip_rpc_address;
 use crate::commands::policy_input::{JsonPeerGroupDefinition, load_json};
-use crate::connection::{Connection, read_rpc};
+use crate::connection::{Connection, SETTLED_MUTATION_RPC_TIMEOUT, mutation_rpc, read_rpc};
 use crate::error::CliError;
 use crate::output::{self, outln};
 use crate::proto::peer_group_service_client::PeerGroupServiceClient;
@@ -309,12 +309,16 @@ pub async fn set(
     let definition: JsonPeerGroupDefinition = load_json(from_file)?;
     let mut client =
         PeerGroupServiceClient::with_interceptor(connection.channel(), connection.interceptor());
-    client
-        .set_peer_group(SetPeerGroupRequest {
+    mutation_rpc(
+        "SetPeerGroup",
+        SETTLED_MUTATION_RPC_TIMEOUT,
+        &format!("`rbgp peer-group get {name}`"),
+        client.set_peer_group(SetPeerGroupRequest {
             name: name.to_string(),
             definition: Some(definition.into()),
-        })
-        .await?;
+        }),
+    )
+    .await?;
     output::print_result(
         json,
         "set_peer_group",
@@ -326,11 +330,15 @@ pub async fn set(
 pub async fn delete(connection: Connection, name: &str, json: bool) -> Result<(), CliError> {
     let mut client =
         PeerGroupServiceClient::with_interceptor(connection.channel(), connection.interceptor());
-    client
-        .delete_peer_group(DeletePeerGroupRequest {
+    mutation_rpc(
+        "DeletePeerGroup",
+        SETTLED_MUTATION_RPC_TIMEOUT,
+        &format!("`rbgp peer-group get {name}`"),
+        client.delete_peer_group(DeletePeerGroupRequest {
             name: name.to_string(),
-        })
-        .await?;
+        }),
+    )
+    .await?;
     output::print_result(
         json,
         "delete_peer_group",
@@ -347,12 +355,16 @@ pub async fn attach(
 ) -> Result<(), CliError> {
     let mut client =
         PeerGroupServiceClient::with_interceptor(connection.channel(), connection.interceptor());
-    client
-        .set_neighbor_peer_group(SetNeighborPeerGroupRequest {
+    mutation_rpc(
+        "SetNeighborPeerGroup",
+        SETTLED_MUTATION_RPC_TIMEOUT,
+        &format!("`rbgp neighbor {address}`"),
+        client.set_neighbor_peer_group(SetNeighborPeerGroupRequest {
             address: bare_ip_rpc_address(address).to_string(),
             peer_group: group.to_string(),
-        })
-        .await?;
+        }),
+    )
+    .await?;
     output::print_result(
         json,
         "attach_peer_group",
@@ -364,11 +376,15 @@ pub async fn attach(
 pub async fn detach(connection: Connection, address: &str, json: bool) -> Result<(), CliError> {
     let mut client =
         PeerGroupServiceClient::with_interceptor(connection.channel(), connection.interceptor());
-    client
-        .clear_neighbor_peer_group(ClearNeighborPeerGroupRequest {
+    mutation_rpc(
+        "ClearNeighborPeerGroup",
+        SETTLED_MUTATION_RPC_TIMEOUT,
+        &format!("`rbgp neighbor {address}`"),
+        client.clear_neighbor_peer_group(ClearNeighborPeerGroupRequest {
             address: bare_ip_rpc_address(address).to_string(),
-        })
-        .await?;
+        }),
+    )
+    .await?;
     output::print_result(
         json,
         "detach_peer_group",

@@ -1,5 +1,5 @@
 use crate::commands::neighbor::{bare_ip_rpc_address, restore_matching_scoped_address};
-use crate::connection::{Connection, read_rpc};
+use crate::connection::{Connection, MUTATION_RPC_TIMEOUT, mutation_rpc, read_rpc};
 use crate::error::CliError;
 use crate::output::{self, outln};
 use crate::proto::control_service_client::ControlServiceClient;
@@ -503,8 +503,11 @@ pub async fn add_mac_ip(
 ) -> Result<(), CliError> {
     let mut client =
         InjectionServiceClient::with_interceptor(connection.channel(), connection.interceptor());
-    client
-        .add_evpn_route(AddEvpnRouteRequest {
+    mutation_rpc(
+        "AddEvpnRoute",
+        MUTATION_RPC_TIMEOUT,
+        "`rbgp evpn`",
+        client.add_evpn_route(AddEvpnRouteRequest {
             route_type: 2,
             rd,
             ethernet_tag,
@@ -519,8 +522,9 @@ pub async fn add_mac_ip(
             prefix_length: 0,
             router_mac: String::new(),
             gateway: String::new(),
-        })
-        .await?;
+        }),
+    )
+    .await?;
     output::print_result(json, "add_evpn", "", "EVPN Type 2 route added")
 }
 
@@ -540,8 +544,11 @@ pub async fn add_imet(
 ) -> Result<(), CliError> {
     let mut client =
         InjectionServiceClient::with_interceptor(connection.channel(), connection.interceptor());
-    client
-        .add_evpn_route(AddEvpnRouteRequest {
+    mutation_rpc(
+        "AddEvpnRoute",
+        MUTATION_RPC_TIMEOUT,
+        "`rbgp evpn`",
+        client.add_evpn_route(AddEvpnRouteRequest {
             route_type: 3,
             rd,
             ethernet_tag,
@@ -556,8 +563,9 @@ pub async fn add_imet(
             prefix_length: 0,
             router_mac: String::new(),
             gateway: String::new(),
-        })
-        .await?;
+        }),
+    )
+    .await?;
     output::print_result(json, "add_evpn", "", "EVPN Type 3 route added")
 }
 
@@ -593,8 +601,11 @@ pub async fn add_ip_prefix(
     let (prefix, prefix_length) = output::parse_prefix(&prefix).map_err(CliError::Argument)?;
     let mut client =
         InjectionServiceClient::with_interceptor(connection.channel(), connection.interceptor());
-    client
-        .add_evpn_route(AddEvpnRouteRequest {
+    mutation_rpc(
+        "AddEvpnRoute",
+        MUTATION_RPC_TIMEOUT,
+        "`rbgp evpn`",
+        client.add_evpn_route(AddEvpnRouteRequest {
             route_type: 5,
             rd,
             ethernet_tag,
@@ -609,8 +620,9 @@ pub async fn add_ip_prefix(
             prefix_length,
             router_mac: router_mac.unwrap_or_default(),
             gateway: gateway.unwrap_or_default(),
-        })
-        .await?;
+        }),
+    )
+    .await?;
     output::print_result(json, "add_evpn", "", "EVPN Type 5 route added")
 }
 
@@ -655,8 +667,11 @@ pub async fn delete_mac_ip(
 ) -> Result<(), CliError> {
     let mut client =
         InjectionServiceClient::with_interceptor(connection.channel(), connection.interceptor());
-    client
-        .delete_evpn_route(DeleteEvpnRouteRequest {
+    mutation_rpc(
+        "DeleteEvpnRoute",
+        MUTATION_RPC_TIMEOUT,
+        "`rbgp evpn`",
+        client.delete_evpn_route(DeleteEvpnRouteRequest {
             route_type: 2,
             rd,
             ethernet_tag,
@@ -664,8 +679,9 @@ pub async fn delete_mac_ip(
             ip,
             prefix: String::new(),
             prefix_length: 0,
-        })
-        .await?;
+        }),
+    )
+    .await?;
     output::print_result(json, "delete_evpn", "", "EVPN Type 2 route deleted")
 }
 
@@ -678,8 +694,11 @@ pub async fn delete_imet(
 ) -> Result<(), CliError> {
     let mut client =
         InjectionServiceClient::with_interceptor(connection.channel(), connection.interceptor());
-    client
-        .delete_evpn_route(DeleteEvpnRouteRequest {
+    mutation_rpc(
+        "DeleteEvpnRoute",
+        MUTATION_RPC_TIMEOUT,
+        "`rbgp evpn`",
+        client.delete_evpn_route(DeleteEvpnRouteRequest {
             route_type: 3,
             rd,
             ethernet_tag,
@@ -687,8 +706,9 @@ pub async fn delete_imet(
             ip,
             prefix: String::new(),
             prefix_length: 0,
-        })
-        .await?;
+        }),
+    )
+    .await?;
     output::print_result(json, "delete_evpn", "", "EVPN Type 3 route deleted")
 }
 
@@ -703,8 +723,11 @@ pub async fn delete_ip_prefix(
     let (prefix, prefix_length) = output::parse_prefix(&prefix).map_err(CliError::Argument)?;
     let mut client =
         InjectionServiceClient::with_interceptor(connection.channel(), connection.interceptor());
-    client
-        .delete_evpn_route(DeleteEvpnRouteRequest {
+    mutation_rpc(
+        "DeleteEvpnRoute",
+        MUTATION_RPC_TIMEOUT,
+        "`rbgp evpn`",
+        client.delete_evpn_route(DeleteEvpnRouteRequest {
             route_type: 5,
             rd,
             ethernet_tag,
@@ -712,8 +735,9 @@ pub async fn delete_ip_prefix(
             ip: String::new(),
             prefix,
             prefix_length,
-        })
-        .await?;
+        }),
+    )
+    .await?;
     output::print_result(json, "delete_evpn", "", "EVPN Type 5 route deleted")
 }
 
@@ -739,13 +763,17 @@ pub async fn clear_duplicate_mac(
 ) -> Result<(), CliError> {
     let mut client =
         EvpnServiceClient::with_interceptor(connection.channel(), connection.interceptor());
-    let resp = client
-        .clear_duplicate_mac_quarantine(ClearDuplicateMacQuarantineRequest {
+    let resp = mutation_rpc(
+        "ClearDuplicateMacQuarantine",
+        MUTATION_RPC_TIMEOUT,
+        "`rbgp evpn duplicate-mac-quarantines`",
+        client.clear_duplicate_mac_quarantine(ClearDuplicateMacQuarantineRequest {
             vni,
             mac: mac.clone(),
-        })
-        .await?
-        .into_inner();
+        }),
+    )
+    .await?
+    .into_inner();
     if json {
         output::print_json_pretty(&clear_duplicate_mac_json(vni, &mac, &resp))?;
     } else if resp.cleared {
@@ -831,13 +859,17 @@ pub async fn set_es_drain(
 ) -> Result<(), CliError> {
     let mut client =
         EvpnServiceClient::with_interceptor(connection.channel(), connection.interceptor());
-    let resp = client
-        .set_ethernet_segment_drain(SetEthernetSegmentDrainRequest {
+    let resp = mutation_rpc(
+        "SetEthernetSegmentDrain",
+        MUTATION_RPC_TIMEOUT,
+        "`rbgp evpn es list`",
+        client.set_ethernet_segment_drain(SetEthernetSegmentDrainRequest {
             esi: esi.clone(),
             drained,
-        })
-        .await?
-        .into_inner();
+        }),
+    )
+    .await?
+    .into_inner();
     if json {
         output::print_json_pretty(&es_drain_json(&esi, &resp))?;
     } else {

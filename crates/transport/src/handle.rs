@@ -624,6 +624,16 @@ pub enum PeerCommand {
         /// snapshot has been published.
         reply: oneshot::Sender<()>,
     },
+    /// Reserve an inbound collision candidate for promotion before the
+    /// manager retires the primary. Replies `true` when the candidate still
+    /// has its connection; a candidate waiting for its verdict stops the
+    /// verdict close and keeps holding its KEEPALIVE until
+    /// [`Self::ActivateMaxPrefixMetrics`]. `false` means it already fell to
+    /// Idle, so the manager keeps the primary.
+    ClaimCollisionPromotion {
+        /// Whether the candidate was reserved.
+        reply: oneshot::Sender<bool>,
+    },
     /// Collision resolution: send Cease/7 NOTIFICATION and tear down.
     CollisionDump,
     /// ADR-0073: query this session's import-decision cache. Read-only
@@ -1931,6 +1941,39 @@ impl PeerHandle {
     pub async fn collision_dump_timeout(&self, deadline: Duration) -> Result<(), PeerCommandError> {
         self.send_simple_command_timeout(PeerCommand::CollisionDump, "collision_dump", deadline)
             .await
+    }
+
+    /// Reserve an inbound collision candidate for promotion.
+    ///
+    /// `Ok(false)` means the candidate has already fallen to Idle. Any error
+    /// means the reservation is unknown and the candidate must not be
+    /// promoted; after a timeout the command may still be handled later.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the session is unreachable, drops the reply, or
+    /// does not answer within `deadline`.
+    pub async fn claim_collision_promotion_timeout(
+        &self,
+        deadline: Duration,
+    ) -> Result<bool, PeerCommandError> {
+        let commands = self.commands.clone();
+        match tokio::time::timeout(deadline, async move {
+            let (reply, claimed) = oneshot::channel();
+            commands
+                .send(PeerCommand::ClaimCollisionPromotion { reply })
+                .await
+                .map_err(|_| PeerCommandError::SessionExited)?;
+            claimed.await.map_err(|_| PeerCommandError::ReplyDropped)
+        })
+        .await
+        {
+            Ok(result) => result,
+            Err(_elapsed) => Err(PeerCommandError::TimedOut {
+                operation: "claim_collision_promotion",
+                deadline,
+            }),
+        }
     }
 
     /// Activate shared max-prefix capacity metrics after collision promotion.
