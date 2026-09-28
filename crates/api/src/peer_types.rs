@@ -536,6 +536,8 @@ pub enum RuntimeConfigTransactionPlanError {
     StaleSnapshot { expected: String, current: String },
     /// Candidate TOML/config failed validation.
     InvalidCandidate(String),
+    /// A concurrent config owner prevents observing a committed baseline.
+    Unavailable(String),
     /// Internal serialization / diff rendering failed.
     Internal(String),
 }
@@ -547,7 +549,9 @@ impl RuntimeConfigTransactionPlanError {
             Self::StaleSnapshot { expected, current } => {
                 format!("runtime config snapshot changed: expected {expected}, current {current}")
             }
-            Self::InvalidCandidate(message) | Self::Internal(message) => message.clone(),
+            Self::InvalidCandidate(message)
+            | Self::Unavailable(message)
+            | Self::Internal(message) => message.clone(),
         }
     }
 }
@@ -561,7 +565,9 @@ impl std::fmt::Display for RuntimeConfigTransactionPlanError {
                     "runtime config snapshot changed: expected {expected}, current {current}"
                 )
             }
-            Self::InvalidCandidate(message) | Self::Internal(message) => f.write_str(message),
+            Self::InvalidCandidate(message)
+            | Self::Unavailable(message)
+            | Self::Internal(message) => f.write_str(message),
         }
     }
 }

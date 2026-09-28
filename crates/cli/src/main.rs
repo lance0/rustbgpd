@@ -680,21 +680,29 @@ enum Command {
 
 #[derive(Subcommand)]
 enum ConfigAction {
-    /// Diff a candidate TOML file against the daemon's live runtime snapshot
+    /// Diff a candidate TOML file or preview a retained rollback against the daemon's live runtime snapshot
     ///
     /// Changed neighbor / peer-group fields are annotated with their
     /// live-impact class ([hot-applied], [session reset: ...], [restart
     /// required]) and the diff ends with a plan summary line. Exit codes
     /// are terraform-style detailed codes (`rbgp diff`, the route diff,
-    /// has its own separate 0/1/2 contract).
+    /// has its own separate 0/1/2 contract). With --history, prints the
+    /// same redacted plan text or JSON as `config plan`, including plan
+    /// status and rejection reasons. The preview does not reserve the row
+    /// index for a later rollback.
     #[command(after_help = "Exit codes:\n  \
         0  candidate matches the runtime config (no changes)\n  \
         1  error (unreadable candidate, invalid config, connection or daemon failure)\n  \
-        2  changes present")]
+        2  changes present\n  \
+        3  history rollback plan rejected (receipt printed)")]
     Diff {
         /// Candidate TOML file to validate and compare
-        #[arg(value_name = "CANDIDATE", value_hint = clap::ValueHint::FilePath)]
-        candidate: String,
+        #[arg(value_name = "CANDIDATE", value_hint = clap::ValueHint::FilePath,
+            required_unless_present = "history", conflicts_with = "history")]
+        candidate: Option<String>,
+        /// Preview rollback to retained history row N (>= 1), without applying
+        #[arg(long, value_name = "N", value_parser = clap::value_parser!(u32).range(1..))]
+        history: Option<u32>,
     },
 
     /// Validate and classify a candidate transaction without mutation
@@ -3981,9 +3989,16 @@ async fn run(cli: Cli, binary_name: &'static str) -> Result<(), CliError> {
         },
 
         Command::Config { action } => match action {
-            ConfigAction::Diff { candidate } => {
-                let has_changes = commands::config::diff(connection, &candidate, json).await?;
-                let code = commands::config::change_status_exit_code(has_changes);
+            ConfigAction::Diff { candidate, history } => {
+                let code = if let Some(index) = history {
+                    commands::config::preview_rollback(connection, index, json).await?
+                } else {
+                    let candidate = candidate.ok_or_else(|| {
+                        CliError::Argument("config diff requires a candidate or --history".into())
+                    })?;
+                    let has_changes = commands::config::diff(connection, &candidate, json).await?;
+                    commands::config::change_status_exit_code(has_changes)
+                };
                 std::process::exit(flush_stdout_result(&mut std::io::stdout(), Ok(code))?);
             }
             ConfigAction::Plan {
@@ -10192,6 +10207,33 @@ printf '%s\n' "${COMPREPLY[@]}"
         }
 
         assert!(Cli::try_parse_from(["rbgp", "config", "diff"]).is_err());
+    }
+
+    #[test]
+    fn config_diff_history_requires_one_positive_index_or_candidate() {
+        for index in [1, u32::MAX] {
+            let cli =
+                Cli::try_parse_from(["rbgp", "config", "diff", "--history", &index.to_string()])
+                    .unwrap();
+            assert!(matches!(
+                cli.command,
+                Command::Config {
+                    action: ConfigAction::Diff { candidate: None, history: Some(parsed) }
+                } if parsed == index
+            ));
+        }
+        for args in [
+            vec!["rbgp", "config", "diff"],
+            vec!["rbgp", "config", "diff", "--history"],
+            vec!["rbgp", "config", "diff", "--history", "0"],
+            vec!["rbgp", "config", "diff", "--history", "-1"],
+            vec!["rbgp", "config", "diff", "--history", "4294967296"],
+            vec!["rbgp", "config", "diff", "--history", "not-an-index"],
+            vec!["rbgp", "config", "diff", "candidate.toml", "--history", "1"],
+            vec!["rbgp", "config", "diff", "--history", "1", "candidate.toml"],
+        ] {
+            assert!(Cli::try_parse_from(&args).is_err(), "{args:?}");
+        }
     }
 
     #[test]

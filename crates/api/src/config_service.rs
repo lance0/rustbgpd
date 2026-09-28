@@ -11,7 +11,7 @@ use crate::audit::{
     abort_config_transaction_summary, apply_config_transaction_summary,
     confirm_config_transaction_summary, diff_runtime_config_summary,
     get_config_transaction_status_summary, get_effective_config_summary,
-    list_config_history_summary, plan_config_transaction_summary,
+    list_config_history_summary, plan_config_transaction_summary, preview_config_rollback_summary,
     rollback_config_transaction_summary, set_request_summary,
 };
 use crate::peer_types::{
@@ -21,9 +21,10 @@ use crate::peer_types::{
 use crate::proto;
 use crate::runtime_config_settlement::OwnedRuntimeConfigRequestContext;
 use crate::server::{
-    AccessMode, ConfigHistoryListFn, ConfigRollbackFn, ConfigTransactionAbortFn,
-    ConfigTransactionApplyContext, ConfigTransactionApplyError, ConfigTransactionApplyFn,
-    ConfigTransactionConfirmFn, ConfigTransactionStatusFn, read_only_rejection,
+    AccessMode, ConfigHistoryListFn, ConfigRollbackFn, ConfigRollbackPreviewFn,
+    ConfigTransactionAbortFn, ConfigTransactionApplyContext, ConfigTransactionApplyError,
+    ConfigTransactionApplyFn, ConfigTransactionConfirmFn, ConfigTransactionStatusFn,
+    read_only_rejection,
 };
 
 pub(super) const CONFIG_OPERATION_TIMEOUT: Duration = Duration::from_mins(30);
@@ -63,6 +64,7 @@ pub struct ConfigService {
     transaction_status: Option<ConfigTransactionStatusFn>,
     history_list: Option<ConfigHistoryListFn>,
     rollback: Option<ConfigRollbackFn>,
+    rollback_preview: Option<ConfigRollbackPreviewFn>,
     stream_plan: Option<std::sync::Arc<stream::StreamPlanState>>,
     stream_plan_authenticated_transport: bool,
 }
@@ -79,6 +81,7 @@ impl ConfigService {
             transaction_status: None,
             history_list: None,
             rollback: None,
+            rollback_preview: None,
             stream_plan: None,
             stream_plan_authenticated_transport: false,
         }
@@ -99,6 +102,14 @@ impl ConfigService {
         self.transaction_status = transaction_status;
         self.history_list = history_list;
         self.rollback = rollback;
+        self
+    }
+
+    pub(crate) fn with_rollback_preview(
+        mut self,
+        preview: Option<ConfigRollbackPreviewFn>,
+    ) -> Self {
+        self.rollback_preview = preview;
         self
     }
 
@@ -206,6 +217,7 @@ fn plan_error_to_status(error: RuntimeConfigTransactionPlanError) -> Status {
         RuntimeConfigTransactionPlanError::InvalidCandidate(message) => {
             Status::invalid_argument(message)
         }
+        RuntimeConfigTransactionPlanError::Unavailable(message) => Status::unavailable(message),
         RuntimeConfigTransactionPlanError::Internal(message) => Status::internal(message),
     }
 }
@@ -412,6 +424,35 @@ impl proto::config_service_server::ConfigService for ConfigService {
         };
         history_list(request)
             .await
+            .map(Response::new)
+            .map_err(ConfigTransactionApplyError::into_status)
+    }
+
+    async fn preview_config_rollback(
+        &self,
+        request: Request<proto::PreviewConfigRollbackRequest>,
+    ) -> Result<Response<proto::ConfigTransactionPlanResponse>, Status> {
+        set_request_summary(
+            &request,
+            preview_config_rollback_summary(request.get_ref().index),
+        );
+        let request = request.into_inner();
+        if request.index == 0 {
+            return Err(Status::invalid_argument(
+                "rollback preview index must be >= 1",
+            ));
+        }
+        let preview = self.rollback_preview.as_ref().ok_or_else(|| {
+            Status::failed_precondition(
+                "ConfigService.PreviewConfigRollback executor is unavailable",
+            )
+        })?;
+        // Request-scoped read: timeout/cancellation abandons only diagnostic
+        // work. It never enters the owned mutation or confirmation executor.
+        tokio::time::timeout(CONFIG_OPERATION_TIMEOUT, preview(request))
+            .await
+            .map_err(|_| Status::deadline_exceeded("config rollback preview exceeded deadline"))?
+            .map(transaction_plan_to_proto)
             .map(Response::new)
             .map_err(ConfigTransactionApplyError::into_status)
     }
@@ -1243,6 +1284,133 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(err.code(), tonic::Code::FailedPrecondition);
+    }
+
+    #[tokio::test]
+    async fn rollback_preview_is_read_only_and_uses_redacted_plan_response() {
+        let (tx, mut rx) = mpsc::channel(1);
+        let svc = ConfigService::new(AccessMode::ReadOnly, tx).with_rollback_preview(Some(
+            Arc::new(|request| {
+                Box::pin(async move {
+                    assert_eq!(request.index, 2);
+                    Ok(RuntimeConfigTransactionPlan {
+                        status: RuntimeConfigTransactionStatus::Committable,
+                        runtime_snapshot_token: "as-of-token".into(),
+                        post_commit_runtime_snapshot_token: "future-token".into(),
+                        committed_candidate: Some(
+                            crate::peer_types::RuntimeConfigTransactionCandidate::new(
+                                "tcp_ao_key = \"retained-secret\"".into(),
+                            ),
+                        ),
+                        diff: sample_runtime_diff(),
+                        supported_sections: vec!["[policy]".into()],
+                        unsupported_sections: Vec::new(),
+                        restart_required_sections: Vec::new(),
+                        human_text: "Config transaction is committable.".into(),
+                        update_group_impact: rustbgpd_rib::UpdateGroupImpactPlan::default(),
+                    })
+                })
+            }),
+        ));
+        let response = svc
+            .preview_config_rollback(Request::new(proto::PreviewConfigRollbackRequest {
+                index: 2,
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(
+            response.status,
+            proto::ConfigTransactionPlanStatus::Committable as i32
+        );
+        assert_eq!(response.runtime_snapshot_token, "as-of-token");
+        assert_eq!(response.supported_sections, vec!["[policy]"]);
+        assert!(!format!("{response:?}").contains("retained-secret"));
+        assert!(matches!(
+            rx.try_recv(),
+            Err(mpsc::error::TryRecvError::Empty)
+        ));
+        assert_eq!(
+            svc.preview_config_rollback(Request::new(proto::PreviewConfigRollbackRequest {
+                index: 0
+            }))
+            .await
+            .unwrap_err()
+            .code(),
+            tonic::Code::InvalidArgument
+        );
+    }
+
+    #[tokio::test]
+    async fn rollback_preview_fails_closed_without_hook_or_on_unavailable_history() {
+        let (tx, _rx) = mpsc::channel(1);
+        let svc = ConfigService::new(AccessMode::ReadWrite, tx);
+        assert_eq!(
+            svc.preview_config_rollback(Request::new(proto::PreviewConfigRollbackRequest {
+                index: 1
+            }))
+            .await
+            .unwrap_err()
+            .code(),
+            tonic::Code::FailedPrecondition
+        );
+        let svc = svc.with_rollback_preview(Some(Arc::new(|_| {
+            Box::pin(async {
+                Err(ConfigTransactionApplyError::FailedPrecondition(
+                    "metadata-only history row".into(),
+                ))
+            })
+        })));
+        let error = svc
+            .preview_config_rollback(Request::new(proto::PreviewConfigRollbackRequest {
+                index: 1,
+            }))
+            .await
+            .unwrap_err();
+        assert_eq!(error.code(), tonic::Code::FailedPrecondition);
+        assert_eq!(error.message(), "metadata-only history row");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn rollback_preview_timeout_and_cancellation_drop_read_future() {
+        for cancel in [false, true] {
+            let (tx, _rx) = mpsc::channel(1);
+            let (started_tx, mut started_rx) = mpsc::channel(1);
+            let svc = ConfigService::new(AccessMode::ReadWrite, tx).with_rollback_preview(Some(
+                Arc::new(move |_| {
+                    let started = started_tx.clone();
+                    Box::pin(async move {
+                        let (reply, receiver) = tokio::sync::oneshot::channel::<()>();
+                        started.send(reply).await.unwrap();
+                        receiver.await.unwrap();
+                        unreachable!("stalled read must be dropped")
+                    })
+                }),
+            ));
+            let task = tokio::spawn(async move {
+                svc.preview_config_rollback(Request::new(proto::PreviewConfigRollbackRequest {
+                    index: 1,
+                }))
+                .await
+            });
+            let mut reply = started_rx.recv().await.unwrap();
+            if cancel {
+                task.abort();
+                assert!(task.await.unwrap_err().is_cancelled());
+            } else {
+                tokio::time::advance(
+                    CONFIG_OPERATION_TIMEOUT
+                        .checked_sub(Duration::from_secs(1))
+                        .unwrap(),
+                )
+                .await;
+                assert!(!task.is_finished());
+                tokio::time::advance(Duration::from_secs(1)).await;
+                let error = task.await.unwrap().unwrap_err();
+                assert_eq!(error.code(), tonic::Code::DeadlineExceeded);
+            }
+            reply.closed().await;
+        }
     }
 
     #[tokio::test]

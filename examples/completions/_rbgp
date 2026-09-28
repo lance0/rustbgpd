@@ -85,6 +85,7 @@ _arguments "${_arguments_options[@]}" : \
         case $line[1] in
             (diff)
 _arguments "${_arguments_options[@]}" : \
+'--history=[Preview rollback to retained history row N (>= 1), without applying]:N:_default' \
 '-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
@@ -97,7 +98,7 @@ _arguments "${_arguments_options[@]}" : \
 '--no-color[Disable colored output]' \
 '-h[Print help (see more with '\''--help'\'')]' \
 '--help[Print help (see more with '\''--help'\'')]' \
-':candidate -- Candidate TOML file to validate and compare:_files' \
+'::candidate -- Candidate TOML file to validate and compare:_files' \
 && ret=0
 ;;
 (plan)
@@ -5074,7 +5075,7 @@ _rbgp__subcmd__completions_commands() {
 (( $+functions[_rbgp__subcmd__config_commands] )) ||
 _rbgp__subcmd__config_commands() {
     local commands; commands=(
-'diff:Diff a candidate TOML file against the daemon'\''s live runtime snapshot' \
+'diff:Diff a candidate TOML file or preview a retained rollback against the daemon'\''s live runtime snapshot' \
 'plan:Validate and classify a candidate transaction without mutation' \
 'apply:Commit a previously planned candidate transaction' \
 'confirm:Confirm a pending confirmed config transaction' \
@@ -5116,7 +5117,7 @@ _rbgp__subcmd__config__subcmd__effective_commands() {
 (( $+functions[_rbgp__subcmd__config__subcmd__help_commands] )) ||
 _rbgp__subcmd__config__subcmd__help_commands() {
     local commands; commands=(
-'diff:Diff a candidate TOML file against the daemon'\''s live runtime snapshot' \
+'diff:Diff a candidate TOML file or preview a retained rollback against the daemon'\''s live runtime snapshot' \
 'plan:Validate and classify a candidate transaction without mutation' \
 'apply:Commit a previously planned candidate transaction' \
 'confirm:Confirm a pending confirmed config transaction' \
@@ -6049,7 +6050,7 @@ _rbgp__subcmd__help__subcmd__completions_commands() {
 (( $+functions[_rbgp__subcmd__help__subcmd__config_commands] )) ||
 _rbgp__subcmd__help__subcmd__config_commands() {
     local commands; commands=(
-'diff:Diff a candidate TOML file against the daemon'\''s live runtime snapshot' \
+'diff:Diff a candidate TOML file or preview a retained rollback against the daemon'\''s live runtime snapshot' \
 'plan:Validate and classify a candidate transaction without mutation' \
 'apply:Commit a previously planned candidate transaction' \
 'confirm:Confirm a pending confirmed config transaction' \

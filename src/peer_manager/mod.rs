@@ -267,6 +267,9 @@ pub(crate) enum InternalCommand {
     PlanAcceptedTransactionConfig {
         snapshot: std::sync::Arc<crate::config::AcceptedConfigSnapshot>,
         expected_runtime_snapshot_token: Option<String>,
+        /// Preview reads must reject an unsettled baseline at actor entry.
+        /// Owned mutation callers already retain this coordinator themselves.
+        read_coordinator: Option<rustbgpd_api::server::RuntimeConfigCoordinator>,
         reply: oneshot::Sender<Result<PlannedTransactionConfig, RuntimeConfigTransactionPlanError>>,
     },
     /// Plan an already loaded candidate and return that exact typed object.
@@ -2430,8 +2433,20 @@ impl PeerManager {
                         Some(InternalCommand::PlanAcceptedTransactionConfig {
                             snapshot,
                             expected_runtime_snapshot_token,
-                            reply,
+                            read_coordinator,
+                            mut reply,
                         }) => {
+                            if let Some(coordinator) = read_coordinator {
+                                let Some(permit) = coordinator.try_acquire() else {
+                                    let _ = reply.send(Err(RuntimeConfigTransactionPlanError::Unavailable(
+                                        "runtime config is changing or unavailable; retry the rollback preview".into(),
+                                    )));
+                                    continue;
+                                };
+                                // This actor owns current_config until planning returns.
+                                // Do not hold mutation admission through RIB waits.
+                                drop(permit);
+                            }
                             let mut candidate = snapshot.config();
                             // A retained/prior snapshot carries its own
                             // captured external-source manifest; seed the
@@ -2442,12 +2457,18 @@ impl PeerManager {
                                 crate::config::ExternalSourcesDigest(Some(
                                     snapshot.source_manifest().external_sources_sha256(),
                                 ));
-                            let result = self
-                                .plan_preloaded_config_transaction(
+                            let result = {
+                                let planning = self.plan_preloaded_config_transaction(
                                     &mut candidate,
                                     expected_runtime_snapshot_token.as_deref(),
-                                )
-                                .await
+                                );
+                                tokio::pin!(planning);
+                                tokio::select! {
+                                    biased;
+                                    () = reply.closed() => continue,
+                                    result = &mut planning => result,
+                                }
+                            }
                                 .map(|plan| PlannedTransactionConfig {
                                     plan,
                                     candidate: Box::new(candidate),
@@ -2457,14 +2478,20 @@ impl PeerManager {
                         Some(InternalCommand::PlanTransactionConfig {
                             mut candidate,
                             expected_runtime_snapshot_token,
-                            reply,
+                            mut reply,
                         }) => {
-                            let result = self
-                                .plan_preloaded_config_transaction(
+                            let result = {
+                                let planning = self.plan_preloaded_config_transaction(
                                     &mut candidate,
                                     expected_runtime_snapshot_token.as_deref(),
-                                )
-                                .await
+                                );
+                                tokio::pin!(planning);
+                                tokio::select! {
+                                    biased;
+                                    () = reply.closed() => continue,
+                                    result = &mut planning => result,
+                                }
+                            }
                                 .map(|plan| PlannedTransactionConfig { plan, candidate });
                             let _ = reply.send(result);
                         }

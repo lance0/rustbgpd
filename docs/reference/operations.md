@@ -462,14 +462,33 @@ survives restarts:
 rbgp config history
 rbgp -j config history
 
-# Restore an eligible row selected from the listing
+# Preview an eligible row selected from the listing, then restore it
 HISTORY_INDEX=3
+rbgp config diff --history "$HISTORY_INDEX"
+rbgp --json config diff --history "$HISTORY_INDEX"
 rbgp config rollback "$HISTORY_INDEX"
 
 # A cautious rollback: auto-reverts the rollback itself unless confirmed
 rbgp config rollback "$HISTORY_INDEX" --confirm-id undo-1 --confirm-timeout 120
 rbgp config confirm undo-1
 ```
+
+`config diff --history N` previews a retained rollback without changing runtime,
+persisted config, history, or confirmed-commit state. Choose either a candidate
+file or `--history`, with an index of 1 or higher. The preview uses the rollback
+source-provenance checks and prints the same redacted plan, section support,
+reload impact, and update-group projection as `config plan`; retained secrets
+are never exported. Missing, unreadable, metadata-only, or source-mismatched
+rows fail with a nonzero exit status.
+
+The preview describes the state observed while planning. It does not reserve
+the numeric history index or authorize a later rollback; new history rows can
+shift indexes, and rollback checks the selected row again. If a config mutation
+is in progress when the planner receives the preview, it returns `UNAVAILABLE`;
+retry after the mutation settles. The dedicated
+`PreviewConfigRollback` RPC is outside the v1 contract and available at
+`sensitive_read` tier. Older daemons return `UNIMPLEMENTED`; the CLI reports an
+error without calling a mutation RPC.
 
 `config history` lists index, timestamp, normalized-TOML content hash,
 provenance status, and—when recorded—a config-source hash over that TOML digest
@@ -597,8 +616,9 @@ effective-impact view:
 
 Exit codes: `rustbgpd --diff` returns 0 = no actionable changes,
 1 = actionable changes found, 2 = error (bad config, missing file).
-`rbgp config diff` uses 0 = no changes, 2 = changes present, 1 = error.
-`rbgp config plan` uses 0 = noop, 2 = committable, 3 = rejected, 1 = error.
+`rbgp config diff <candidate>` uses 0 = no changes, 2 = changes present, 1 = error.
+`rbgp config plan` and `rbgp config diff --history N` use 0 = noop,
+2 = committable, 3 = rejected, 1 = error.
 `rbgp config apply` and `rbgp config rollback` use 0 = committed or noop,
 3 = rejected, 1 = error. A rejected transaction still prints its full receipt,
 including `--json` output, and changes nothing; the `status` field tells a

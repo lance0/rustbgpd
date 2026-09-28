@@ -108,6 +108,30 @@ pub async fn diff(connection: Connection, from_file: &str, json: bool) -> Result
     Ok(resp.has_any_changes)
 }
 
+/// Preview retained rollback intent through a read-only method. No fallback to
+/// RollbackConfigTransaction: older daemons must fail safely as UNIMPLEMENTED.
+pub async fn preview_rollback(
+    connection: Connection,
+    index: u32,
+    json: bool,
+) -> Result<i32, CliError> {
+    let mut client =
+        ConfigServiceClient::with_interceptor(connection.channel(), connection.interceptor());
+    let response = rpc_with_timeout(
+        "PreviewConfigRollback",
+        mutation_budget(CONFIG_TRANSACTION_RPC_TIMEOUT),
+        client.preview_config_rollback(crate::proto::PreviewConfigRollbackRequest { index }),
+    )
+    .await?
+    .into_inner();
+    if json {
+        print_json(plan_to_json(&response, None))?;
+    } else {
+        print_plan_human(&response)?;
+    }
+    transaction_exit_code(response.status, 2)
+}
+
 /// Returns the plan's exit code: 0 noop, 2 committable, 3 rejected.
 pub async fn plan(
     connection: Connection,

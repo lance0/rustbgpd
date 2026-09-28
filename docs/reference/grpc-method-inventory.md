@@ -91,7 +91,7 @@ shape itself does not raise the tier.
 |-----|------|-------|
 | `GetGlobal` | `sensitive_read` | Returns `GlobalState`: `asn`, `router_id`, `listen_port`, TCP-AO kernel-support probe, and the Unix timestamp of the last successfully accepted full policy generation (zero until first acceptance). Topology and change-cadence disclosure. |
 
-### ConfigService (11 RPCs)
+### ConfigService (12 RPCs)
 
 | RPC | Tier | Notes |
 |-----|------|-------|
@@ -104,6 +104,7 @@ shape itself does not raise the tier.
 | `AbortConfigTransaction` | `operator_only` | Abort a pending confirmed config transaction and roll back immediately through the transaction executor. |
 | `GetConfigTransactionStatus` | `sensitive_read` | Returns redacted confirmed-transaction lifecycle status: pending/last state, confirm id, deadline, committed sections, and snapshot token, but never candidate TOML. |
 | `GetEffectiveConfig` | `sensitive_read` | Returns the full effective running config as normalized TOML with defaults resolved and selected default-empty policy lists omitted (`rbgp config effective`). Whole-config disclosure: peer lists, policy structure, topology. Secret material (`md5_password`, `tcp_ao.key`) is replaced with `<redacted>` before the document leaves the daemon. |
+| `PreviewConfigRollback` | `sensitive_read` | Outside-v1 read-only plan for a retained v2 row at index 1 or higher. Returns the existing redacted transaction plan, including reload and update-group impact, after the same source-provenance checks as rollback. Missing, metadata-only, unreadable, or mismatched rows fail closed. Never exports retained TOML or changes runtime, persistence, history, or confirmed-commit state. Audit output contains only the index. |
 | `ListConfigHistory` | `sensitive_read` | Lists bounded mixed v2/v3 config history, newest row first: per-entry index, timestamp, normalized-TOML SHA-256, config-source SHA-256 over that TOML digest plus the canonical accepted rpol/dataset source roster, explicit provenance status, and a one-line identity/count summary. Retired TOML files are ignored and retained; unreadable rows withhold both digests and use a constant summary. Metadata-only v3 rows expose accepted byte count and reason, omit payloads/source rosters, and are permanently rollback-ineligible. Index 0 is not a claim about running or persisted state. Never returns config documents, but discloses change cadence and identity facts — full-config-adjacent read. |
 | `RollbackConfigTransaction` | `operator_only` | Junos-style `rollback N`: a provenance-verified v2 row routes through the same transaction executor as `ApplyConfigTransaction` (same plan/impact classification and receipts). Metadata-only rows refuse before payload/source access, planning, confirm authority, or mutation. Unreadable rows and provenance mismatches fail closed before planning or mutation. Same tier as apply because it is an apply. Comment is audit-redacted (presence only). |
 
@@ -270,10 +271,10 @@ shape itself does not raise the tier.
 | Tier | Count | % |
 |------|------:|--:|
 | `read` | 1 | 0.9% |
-| `sensitive_read` | 68 | 59.1% |
-| `mutating` | 22 | 19.1% |
-| `operator_only` | 24 | 20.9% |
-| **Total** | **115** | **100%** |
+| `sensitive_read` | 69 | 59.5% |
+| `mutating` | 22 | 19.0% |
+| `operator_only` | 24 | 20.7% |
+| **Total** | **116** | **100%** |
 
 (Counts include `SetGracefulShutdown` as one `NeighborService` RPC. The total
 includes the four `gnmi.gNMI` RPCs; the remainder are native `rustbgpd.v1`
