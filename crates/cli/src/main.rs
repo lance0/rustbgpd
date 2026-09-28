@@ -263,8 +263,8 @@ struct Cli {
 
     /// Disable colored output
     ///
-    /// The `NO_COLOR` environment variable is handled at runtime so its
-    /// presence disables color without requiring a boolean value.
+    /// Setting the `NO_COLOR` environment variable to any value also
+    /// disables color.
     #[arg(long, global = true)]
     no_color: bool,
 
@@ -2818,7 +2818,106 @@ fn invoked_binary_name() -> &'static str {
 }
 
 fn cli_command(binary_name: &'static str) -> clap::Command {
-    group_root_help(Cli::command().name(binary_name).bin_name(binary_name))
+    group_root_help(scope_global_help(
+        Cli::command().name(binary_name).bin_name(binary_name),
+    ))
+}
+
+/// Global flags that only some command paths accept, with the paths that
+/// accept them. A listed path covers its descendants. `run` still validates
+/// the flag combination; this table only decides where help shows the flag.
+const SCOPED_GLOBALS: &[(&str, ScopedGlobal)] = &[
+    ("json_lines", ScopedGlobal::Only(PAGED_RIB_PATHS)),
+    ("pager", ScopedGlobal::Only(PAGED_RIB_PATHS)),
+    (
+        "json_version",
+        ScopedGlobal::Except(&[
+            "completions",
+            "config diff",
+            "config import",
+            "diff",
+            "doctor",
+            "events",
+            "man",
+            "metrics",
+            "mrt-dump",
+            "policy check",
+            "policy fmt",
+            "top",
+            "watch",
+        ]),
+    ),
+];
+
+const PAGED_RIB_PATHS: &[&str] = &["rib", "rib received", "rib advertised"];
+
+enum ScopedGlobal {
+    Only(&'static [&'static str]),
+    Except(&'static [&'static str]),
+}
+
+impl ScopedGlobal {
+    fn shown_on(&self, path: &str) -> bool {
+        match self {
+            // Exact: `rib` accepts the flag, `rib blackholes` does not.
+            Self::Only(paths) => paths.contains(&path),
+            Self::Except(paths) => !paths.iter().any(|excluded| {
+                path.strip_prefix(excluded)
+                    .is_some_and(|rest| rest.is_empty() || rest.starts_with(' '))
+            }),
+        }
+    }
+}
+
+/// Display only: subcommand help lists the global flags under their own
+/// heading, after the command's own options, and hides the scoped ones on
+/// paths that reject them. Each subcommand gets a copy of every still-global
+/// root argument (what Clap's propagation would add), so parsing, value
+/// propagation, and flag positions are unchanged.
+fn scope_global_help(command: clap::Command) -> clap::Command {
+    fn visit(mut command: clap::Command, path: &str, globals: &[clap::Arg]) -> clap::Command {
+        let names: Vec<String> = command
+            .get_subcommands()
+            .map(|sub| sub.get_name().to_owned())
+            .collect();
+        for name in names {
+            let sub_path = if path.is_empty() {
+                name.clone()
+            } else {
+                format!("{path} {name}")
+            };
+            command = command.mut_subcommand(&name, |mut sub| {
+                for arg in globals {
+                    let shown = SCOPED_GLOBALS
+                        .iter()
+                        .find(|(id, _)| arg.get_id() == id)
+                        .is_none_or(|(_, scope)| scope.shown_on(&sub_path));
+                    sub = sub.arg(
+                        arg.clone()
+                            .help_heading("Global options")
+                            .hide(arg.is_hide_set() || !shown),
+                    );
+                }
+                visit(sub, &sub_path, globals)
+            });
+        }
+        command
+    }
+
+    for (id, _) in SCOPED_GLOBALS {
+        assert!(
+            command
+                .get_arguments()
+                .any(|arg| arg.get_id() == id && arg.is_global_set()),
+            "scoped global {id} is a global root argument"
+        );
+    }
+    let globals: Vec<_> = command
+        .get_arguments()
+        .filter(|arg| arg.is_global_set())
+        .cloned()
+        .collect();
+    visit(command, "", &globals)
 }
 
 // Presentation only: command paths, aliases, and parser order stay in Clap.
@@ -5213,6 +5312,146 @@ mod tests {
         }
     }
 
+    /// Visits every command in the built tree except Clap's generated
+    /// `help` subcommands, with its space-separated path.
+    fn for_each_command(f: &mut dyn FnMut(&str, &clap::Command)) {
+        fn visit(command: &clap::Command, path: &str, f: &mut dyn FnMut(&str, &clap::Command)) {
+            f(path, command);
+            for sub in command
+                .get_subcommands()
+                .filter(|sub| sub.get_name() != "help")
+            {
+                let sub_path = format!("{path} {}", sub.get_name());
+                visit(sub, sub_path.trim_start(), f);
+            }
+        }
+        let mut command = cli_command(BINARY_NAME);
+        command.build();
+        visit(&command, "", f);
+    }
+
+    #[test]
+    fn subcommand_help_lists_global_options_last() {
+        let globals: Vec<String> = Cli::command()
+            .get_arguments()
+            .filter(|arg| arg.is_global_set())
+            .filter_map(|arg| arg.get_long().map(|long| format!("--{long}")))
+            .collect();
+        let mut checked = 0;
+        for_each_command(&mut |path, command| {
+            if path.is_empty() {
+                return;
+            }
+            let help = command.clone().render_long_help().to_string();
+            let (own, global) = help
+                .split_once("\nGlobal options:\n")
+                .unwrap_or_else(|| panic!("rbgp {path} --help has no Global options block"));
+            assert!(!global.contains("\nGlobal options:\n"), "rbgp {path}");
+            let option_lines = |text: &str| -> Vec<String> {
+                text.lines()
+                    .filter_map(|line| line.trim_start().strip_prefix('-'))
+                    .filter_map(|line| {
+                        line.split([',', ' ', '='])
+                            .map(|part| part.trim_start_matches('-'))
+                            .find(|part| part.len() > 1)
+                            .map(|long| format!("--{long}"))
+                    })
+                    .collect()
+            };
+            for flag in option_lines(own) {
+                assert!(
+                    !globals.contains(&flag),
+                    "rbgp {path}: {flag} before Global options"
+                );
+            }
+            for flag in option_lines(global.split("\n\nExamples:").next().unwrap()) {
+                assert!(
+                    globals.contains(&flag),
+                    "rbgp {path}: {flag} under Global options"
+                );
+            }
+            checked += 1;
+        });
+        assert!(checked > 100, "only {checked} subcommands checked");
+    }
+
+    #[test]
+    fn scoped_globals_are_shown_where_run_accepts_them() {
+        // Every path that parses without arguments, plus the ones below
+        // that need an argument to reach their command.
+        let mut invocations = Vec::new();
+        for_each_command(&mut |path, _| {
+            if !path.is_empty() {
+                invocations.push(path.to_owned());
+            }
+        });
+        invocations.extend(
+            [
+                "config diff c.toml",
+                "config import c.conf",
+                "config plan c.toml",
+                "diff advertised --against s.ndjson",
+                "policy check p.rpol",
+                "policy fmt p.rpol",
+                "policy get p",
+                "rib received 192.0.2.1",
+                "rib advertised 192.0.2.1",
+                "completions bash",
+            ]
+            .map(str::to_owned),
+        );
+        let command = cli_command(BINARY_NAME);
+        let mut built = command.clone();
+        built.build();
+        let shown = |path: &str, id: &str| {
+            path.split(' ')
+                .fold(&built, |command, name| {
+                    command.find_subcommand(name).unwrap()
+                })
+                .get_arguments()
+                .any(|arg| arg.get_id() == id && !arg.is_hide_set())
+        };
+        let mut checked = 0;
+        for invocation in &invocations {
+            let parse = |globals: &[&str]| {
+                let args = ["rbgp"]
+                    .into_iter()
+                    .chain(globals.iter().copied())
+                    .chain(invocation.split(' '));
+                let matches = command.clone().try_get_matches_from(args).ok()?;
+                let mut path = Vec::new();
+                let mut current = &matches;
+                while let Some((name, sub)) = current.subcommand() {
+                    path.push(name.to_owned());
+                    current = sub;
+                }
+                Some((Cli::from_arg_matches(&matches).ok()?, path.join(" ")))
+            };
+            let Some((cli, path)) = parse(&["--json", "--json-version", "1"]) else {
+                continue;
+            };
+            checked += 1;
+            assert_eq!(
+                validate_json_version(&cli).is_ok(),
+                shown(&path, "json_version"),
+                "--json-version on rbgp {invocation}"
+            );
+            let (cli, _) = parse(&[]).unwrap();
+            assert_eq!(
+                pager_supported(&cli.command),
+                shown(&path, "pager"),
+                "--pager on rbgp {invocation}"
+            );
+            let (cli, _) = parse(&["--json-lines"]).unwrap();
+            assert_eq!(
+                validate_json_lines(&cli).is_ok(),
+                shown(&path, "json_lines"),
+                "--json-lines on rbgp {invocation}"
+            );
+        }
+        assert!(checked >= 60, "only {checked} invocations parsed");
+    }
+
     #[test]
     fn test_rbgp_command_renders_rbgp_usage() {
         let mut command = cli_command(BINARY_NAME);
@@ -5293,7 +5532,7 @@ mod tests {
 
     #[test]
     fn root_help_groups_preserve_subcommands_and_completions() {
-        let mut native = Cli::command();
+        let mut native = scope_global_help(Cli::command());
         native.build();
         let mut grouped = cli_command(BINARY_NAME);
         grouped.build();
