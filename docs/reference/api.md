@@ -2705,6 +2705,10 @@ grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
 `rbgp flowspec add` prints the outcome, for example `FlowSpec rule added
 (unchanged)`, and its `--json` result carries `outcome` (`created`,
 `replaced`, `unchanged`, or `unknown` for an older daemon).
+`rbgp flowspec delete --allow-missing` sets `allow_missing`: when no local
+rule matches it prints `FlowSpec rule not present` and exits 0, and its
+`--json` result carries `deleted: false`. Without the flag a missing rule is
+still an error, and a successful delete reports `deleted: true`.
 `rbgp flowspec received 0.0.0.0` shows the injected rules.
 
 These RPCs remain outside the v1 inventory

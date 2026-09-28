@@ -416,3 +416,59 @@ async fn flowspec_add_reports_injection_outcome() {
         assert_eq!(String::from_utf8(output.stdout).unwrap(), expected);
     }
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn flowspec_delete_allow_missing_reports_not_present() {
+    let server = test_support::spawn_mock_server(None).await;
+    let delete = |json: bool, allow_missing: bool| {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_rbgp"));
+        command.args(["--addr", &server.addr]);
+        if json {
+            command.arg("--json");
+        }
+        command.args([
+            "flowspec",
+            "delete",
+            "-a",
+            "ipv4_flowspec",
+            "--match",
+            "dest=192.0.2.0/24",
+        ]);
+        if allow_missing {
+            command.arg("--allow-missing");
+        }
+        command.env("NO_COLOR", "1").output().expect("run rbgp")
+    };
+    let json_result = |output: &std::process::Output| {
+        serde_json::from_slice::<serde_json::Value>(&output.stdout).unwrap()
+    };
+
+    *server.state.delete_flowspec_matches.lock().await = true;
+    for allow_missing in [false, true] {
+        let output = delete(true, allow_missing);
+        assert!(output.status.success(), "{output:?}");
+        assert_eq!(
+            json_result(&output),
+            serde_json::json!({"ok": true, "action": "delete_flowspec", "target": "", "deleted": true})
+        );
+        let output = delete(false, allow_missing);
+        assert!(output.status.success(), "{output:?}");
+        assert_eq!(output.stdout, b"FlowSpec rule deleted\n");
+    }
+
+    *server.state.delete_flowspec_matches.lock().await = false;
+    let output = delete(true, true);
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(
+        json_result(&output),
+        serde_json::json!({"ok": true, "action": "delete_flowspec", "target": "", "deleted": false})
+    );
+    let output = delete(false, true);
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(output.stdout, b"FlowSpec rule not present\n");
+
+    // Without the flag, a missing rule stays an error.
+    let output = delete(false, false);
+    assert!(!output.status.success(), "{output:?}");
+    assert!(output.stdout.is_empty(), "{output:?}");
+}

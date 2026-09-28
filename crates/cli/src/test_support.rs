@@ -193,6 +193,9 @@ pub(crate) struct MockState {
     pub(crate) last_list_rtc: Mutex<Option<server_proto::ListRtcRoutesRequest>>,
     pub(crate) list_flowspec_response: Mutex<server_proto::ListFlowSpecResponse>,
     pub(crate) add_flowspec_response: Mutex<server_proto::AddFlowSpecResponse>,
+    // Whether a local rule matches the next DeleteFlowSpec; a miss follows
+    // the daemon: NOT_FOUND unless the request sets `allow_missing`.
+    pub(crate) delete_flowspec_matches: Mutex<bool>,
     pub(crate) last_list_flowspec: Mutex<Option<server_proto::ListFlowSpecRequest>>,
     pub(crate) last_list_evpn: Mutex<Option<server_proto::ListEvpnRequest>>,
     pub(crate) last_list_received_evpn: Mutex<Option<server_proto::ListPeerEvpnRoutesRequest>>,
@@ -1406,11 +1409,15 @@ impl rustbgpd_api::proto::injection_service_server::InjectionService for MockInj
 
     async fn delete_flow_spec(
         &self,
-        _request: Request<server_proto::DeleteFlowSpecRequest>,
+        request: Request<server_proto::DeleteFlowSpecRequest>,
     ) -> Result<Response<server_proto::DeleteFlowSpecResponse>, Status> {
-        Ok(Response::new(
-            server_proto::DeleteFlowSpecResponse::default(),
-        ))
+        let deleted = *self.state.delete_flowspec_matches.lock().await;
+        if !deleted && !request.get_ref().allow_missing {
+            return Err(Status::not_found("FlowSpec rule not found"));
+        }
+        Ok(Response::new(server_proto::DeleteFlowSpecResponse {
+            deleted,
+        }))
     }
 
     async fn add_evpn_route(

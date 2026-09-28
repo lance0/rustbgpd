@@ -300,7 +300,7 @@ rbgp policy counters --direction both                     # alias
 rbgp flowspec
 rbgp flowspec received 192.0.2.1 -a ipv4_flowspec
 rbgp flowspec add -a ipv4_flowspec --match "dest=192.0.2.0/24 port==80" --action drop
-rbgp flowspec delete -a ipv4_flowspec --match "dest=192.0.2.0/24 port==80"
+rbgp flowspec delete -a ipv4_flowspec --match "dest=192.0.2.0/24 port==80" [--allow-missing]
 rbgp fib-table list
 rbgp fib-table set edge --table-id 1000 --metric 200 --families ipv4_unicast,ipv6_unicast
 ```

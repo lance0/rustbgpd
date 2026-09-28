@@ -10,5 +10,7 @@
   document the upsert and delete semantics, the `0.0.0.0` local-injection
   sentinel, and reconciliation through `ListFlowSpecRoutes` with
   `received_peer_address: "0.0.0.0"`. `rbgp flowspec add` prints the outcome
-  and adds an `outcome` key to its `--json` result. The fields are additive;
-  these RPCs remain outside the v1 inventory.
+  and adds an `outcome` key to its `--json` result. `rbgp flowspec delete`
+  gains `--allow-missing`, which reports a missing rule as not present with
+  exit status 0, and its `--json` result gains a `deleted` key. The fields are
+  additive; these RPCs remain outside the v1 inventory.

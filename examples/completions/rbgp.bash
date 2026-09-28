@@ -6375,7 +6375,7 @@ _rbgp() {
             return 0
             ;;
         rbgp__subcmd__flowspec__subcmd__delete)
-            opts="-a -s -j -h --family --match --addr --token-file --tls-ca --tls-cert --tls-key --tls-server-name --json --json-version --json-lines --no-color --pager --help"
+            opts="-a -s -j -h --family --match --allow-missing --addr --token-file --tls-ca --tls-cert --tls-key --tls-server-name --json --json-version --json-lines --no-color --pager --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0

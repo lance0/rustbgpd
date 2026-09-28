@@ -334,6 +334,7 @@ pub async fn delete(
     connection: Connection,
     family: i32,
     components: &[String],
+    allow_missing: bool,
     json: bool,
 ) -> Result<(), CliError> {
     let parsed_components: Vec<FlowSpecComponent> = components
@@ -344,18 +345,33 @@ pub async fn delete(
 
     let mut client =
         InjectionServiceClient::with_interceptor(connection.channel(), connection.interceptor());
-    mutation_rpc(
+    let response = mutation_rpc(
         "DeleteFlowSpec",
         MUTATION_RPC_TIMEOUT,
         "`rbgp flowspec`",
         client.delete_flow_spec(DeleteFlowSpecRequest {
             afi_safi: family,
             components: parsed_components,
-            allow_missing: false,
+            allow_missing,
         }),
     )
-    .await?;
-    output::print_result(json, "delete_flowspec", "", "FlowSpec rule deleted")
+    .await?
+    .into_inner();
+    // Without `allow_missing`, success always means a rule was removed, even
+    // from a daemon that predates the `deleted` field.
+    let deleted = !allow_missing || response.deleted;
+    if json {
+        output::print_json_pretty(&serde_json::json!({
+            "ok": true,
+            "action": "delete_flowspec",
+            "target": "",
+            "deleted": deleted,
+        }))
+    } else if deleted {
+        output::print_line("FlowSpec rule deleted")
+    } else {
+        output::print_line("FlowSpec rule not present")
+    }
 }
 
 #[cfg(test)]
