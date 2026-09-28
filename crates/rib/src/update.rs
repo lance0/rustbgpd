@@ -1908,6 +1908,11 @@ pub enum RibUpdate {
         evpn_announced: Vec<EvpnRibRoute>,
         /// EVPN route keys withdrawn.
         evpn_withdrawn: Vec<EvpnRouteKey>,
+        /// The RPKI/ASPA tables the session validated `announced` against,
+        /// or `None` if it did not validate them. The RIB keeps a stored
+        /// verdict only for a table it still holds by pointer identity and
+        /// re-validates against its own table otherwise.
+        validated_with: Option<rustbgpd_rpki::ValidationSnapshot>,
     },
     /// Peer session sent us BGP-LS routes (RFC 9552).
     BgpLsRoutesReceived {

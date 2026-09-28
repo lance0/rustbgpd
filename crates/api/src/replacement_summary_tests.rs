@@ -256,6 +256,7 @@ async fn replacement_summaries_complete_api_reads_inside_actual_rib_restore() {
             flowspec_withdrawn: vec![],
             evpn_announced: vec![],
             evpn_withdrawn: vec![],
+            validated_with: None,
         })
         .await
         .unwrap();
@@ -459,6 +460,7 @@ async fn health_completes_inside_actual_rib_export(selection_release: bool) {
             flowspec_withdrawn: vec![],
             evpn_announced: vec![],
             evpn_withdrawn: vec![],
+            validated_with: None,
         })
         .await
         .unwrap();

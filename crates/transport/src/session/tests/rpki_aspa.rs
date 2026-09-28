@@ -868,3 +868,203 @@ async fn received_empty_path_keeps_rpki_not_found_after_import_and_cache_updates
     drop(tx);
     actor.await.unwrap();
 }
+
+/// Ingest `update` into a fresh RIB actor holding `vrps` and `aspa`, and
+/// return the stored verdicts in prefix order.
+async fn rib_stored_verdicts(
+    update: RibUpdate,
+    peer: IpAddr,
+    vrps: &Arc<rustbgpd_rpki::VrpTable>,
+    aspa: &Arc<rustbgpd_rpki::AspaTable>,
+) -> Vec<(
+    Prefix,
+    rustbgpd_wire::RpkiValidation,
+    rustbgpd_wire::AspaValidation,
+)> {
+    let (tx, rx) = mpsc::channel(16);
+    let (_, query_rx) = mpsc::channel(1);
+    let manager = rustbgpd_rib::RibManager::new(rx, query_rx, None, None, BgpMetrics::new());
+    let actor = tokio::spawn(manager.run());
+    tx.send(RibUpdate::RpkiCacheUpdate {
+        table: Arc::clone(vrps),
+        delta: None,
+    })
+    .await
+    .unwrap();
+    tx.send(RibUpdate::AspaTableUpdate {
+        table: Arc::clone(aspa),
+        changed_customer_asns: None,
+    })
+    .await
+    .unwrap();
+    tx.send(update).await.unwrap();
+    let mut verdicts: Vec<_> = received_validation_routes(&tx, peer)
+        .await
+        .iter()
+        .map(|route| (route.prefix, route.validation_state, route.aspa_state))
+        .collect();
+    verdicts.sort_unstable_by_key(|&(prefix, _, _)| prefix);
+    drop(tx);
+    actor.await.unwrap();
+    verdicts
+}
+
+/// The RIB keeps the session's verdicts when both used the same tables, so
+/// the two must agree. Run one UPDATE through a real session (eBGP with an
+/// import self-prepend, and iBGP), then ingest the batch as sent and with its
+/// validation provenance removed; both RIBs must store the same verdicts.
+/// Red proof: a session verdict that differs from RIB validation (for
+/// example, dropping the per-prefix origin lookup) makes the kept verdicts
+/// differ from the re-validated ones; sending no provenance fails the
+/// pointer-identity check.
+#[tokio::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one end-to-end parity case per session type shares the fixture"
+)]
+async fn session_verdicts_equal_rib_validation_for_the_same_tables() {
+    use rustbgpd_rpki::{AspaRecord, AspaTable, ValidationSnapshot, VrpEntry, VrpTable};
+    use rustbgpd_wire::{AspaValidation, RpkiValidation};
+
+    let valid = Ipv4Prefix::new(Ipv4Addr::new(192, 0, 2, 0), 24);
+    let invalid = Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 0), 24);
+    let not_found = Ipv6Prefix::new("2001:db8::".parse().unwrap(), 32);
+    let vrps = Arc::new(VrpTable::new(vec![
+        VrpEntry {
+            prefix: "192.0.2.0".parse().unwrap(),
+            prefix_len: 24,
+            max_len: 24,
+            origin_asn: 65003,
+        },
+        VrpEntry {
+            prefix: "198.51.100.0".parse().unwrap(),
+            prefix_len: 24,
+            max_len: 24,
+            origin_asn: 65999,
+        },
+    ]));
+    let aspa = Arc::new(AspaTable::new(vec![AspaRecord {
+        customer_asn: 65003,
+        provider_asns: vec![65002],
+    }]));
+    let attrs = vec![
+        PathAttribute::Origin(Origin::Igp),
+        PathAttribute::AsPath(AsPath {
+            segments: vec![AsPathSegment::AsSequence(vec![65002, 65003])],
+        }),
+        PathAttribute::NextHop(Ipv4Addr::new(10, 0, 0, 2)),
+        PathAttribute::MpReachNlri(Box::new(rustbgpd_wire::MpReachNlri {
+            afi: Afi::Ipv6,
+            safi: Safi::Unicast,
+            next_hop: "2001:db8::1".parse().unwrap(),
+            link_local_next_hop: None,
+            announced: vec![rustbgpd_wire::NlriEntry {
+                path_id: 0,
+                prefix: Prefix::V6(not_found),
+            }],
+            flowspec_announced: vec![],
+            evpn_announced: vec![],
+            bgpls_announced: vec![],
+            labeled_announced: vec![],
+            vpn_announced: vec![],
+            rtc_announced: vec![],
+        })),
+    ];
+
+    for (remote_asn, expected_aspa) in [
+        (65002, AspaValidation::Valid),
+        (65001, AspaValidation::Unknown),
+    ] {
+        let (mut session, mut rib_rx) = make_test_session_with_rib(65001, remote_asn);
+        let mut negotiated = negotiated_session(remote_asn, false);
+        negotiated
+            .negotiated_families
+            .push((Afi::Ipv6, Safi::Unicast));
+        install_test_negotiated_session(&mut session, negotiated);
+        let (_snapshot_tx, snapshot_rx) = tokio::sync::watch::channel(ValidationSnapshot {
+            vrp_table: Some(Arc::clone(&vrps)),
+            aspa_table: Some(Arc::clone(&aspa)),
+        });
+        session.validation_rx = Some(snapshot_rx);
+        if remote_asn != 65001 {
+            let mut statement = retention_statement(None, PolicyAction::Permit);
+            statement.modifications.as_path_prepend = Some((65001, 1));
+            session.import_policy = Some(PolicyChain::new(vec![Policy {
+                entries: vec![statement],
+                default_action: PolicyAction::Deny,
+            }]));
+        }
+        session
+            .process_update(UpdateMessage::build(
+                &[
+                    Ipv4NlriEntry {
+                        path_id: 0,
+                        prefix: valid,
+                    },
+                    Ipv4NlriEntry {
+                        path_id: 0,
+                        prefix: invalid,
+                    },
+                ],
+                &[],
+                &attrs,
+                true,
+                false,
+                Ipv4UnicastMode::Body,
+            ))
+            .await;
+        let RibUpdate::RoutesReceived {
+            peer,
+            session_id,
+            announced,
+            withdrawn,
+            flowspec_announced,
+            flowspec_withdrawn,
+            evpn_announced,
+            evpn_withdrawn,
+            validated_with,
+        } = rib_rx.try_recv().expect("routes reach the RIB")
+        else {
+            panic!("expected RoutesReceived");
+        };
+        if remote_asn != 65001 {
+            assert!(
+                announced
+                    .iter()
+                    .all(|route| route.received_as_path.is_some()),
+                "the import prepend changed the stored AS_PATH"
+            );
+        }
+        let provenance = validated_with.expect("session sends its validation tables");
+        assert!(Arc::ptr_eq(provenance.vrp_table.as_ref().unwrap(), &vrps));
+        assert!(Arc::ptr_eq(provenance.aspa_table.as_ref().unwrap(), &aspa));
+        let batch = |validated_with| RibUpdate::RoutesReceived {
+            peer,
+            session_id,
+            announced: announced.clone(),
+            withdrawn: withdrawn.clone(),
+            flowspec_announced: flowspec_announced.clone(),
+            flowspec_withdrawn: flowspec_withdrawn.clone(),
+            evpn_announced: evpn_announced.clone(),
+            evpn_withdrawn: evpn_withdrawn.clone(),
+            validated_with,
+        };
+
+        let kept = rib_stored_verdicts(batch(Some(provenance.clone())), peer, &vrps, &aspa).await;
+        let revalidated = rib_stored_verdicts(batch(None), peer, &vrps, &aspa).await;
+        assert_eq!(kept, revalidated, "remote AS {remote_asn}");
+        assert_eq!(
+            kept,
+            vec![
+                (Prefix::V4(valid), RpkiValidation::Valid, expected_aspa),
+                (Prefix::V4(invalid), RpkiValidation::Invalid, expected_aspa),
+                (
+                    Prefix::V6(not_found),
+                    RpkiValidation::NotFound,
+                    expected_aspa
+                ),
+            ],
+            "remote AS {remote_asn}"
+        );
+    }
+}

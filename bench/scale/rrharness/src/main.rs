@@ -228,6 +228,7 @@ fn empty_routes_received(peer: IpAddr, announced: Vec<Route>) -> RibUpdate {
         flowspec_withdrawn: Vec::new(),
         evpn_announced: Vec::new(),
         evpn_withdrawn: Vec::new(),
+        validated_with: None,
     }
 }
 

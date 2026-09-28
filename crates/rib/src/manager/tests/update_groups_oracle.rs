@@ -761,6 +761,7 @@ impl Oracle {
                 flowspec_withdrawn: vec![],
                 evpn_announced: vec![],
                 evpn_withdrawn: vec![],
+                validated_with: None,
             })
             .await
             .unwrap();

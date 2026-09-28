@@ -218,6 +218,7 @@ async fn enhanced_route_refresh_replacement_preserves_refreshed_route() {
         flowspec_withdrawn: vec![],
         evpn_announced: vec![],
         evpn_withdrawn: vec![],
+        validated_with: None,
     })
     .await
     .unwrap();
@@ -246,6 +247,7 @@ async fn enhanced_route_refresh_replacement_preserves_refreshed_route() {
         flowspec_withdrawn: vec![],
         evpn_announced: vec![],
         evpn_withdrawn: vec![],
+        validated_with: None,
     })
     .await
     .unwrap();
@@ -293,6 +295,7 @@ async fn enhanced_route_refresh_eorr_sweeps_unreplaced_route() {
         flowspec_withdrawn: vec![],
         evpn_announced: vec![],
         evpn_withdrawn: vec![],
+        validated_with: None,
     })
     .await
     .unwrap();
@@ -321,6 +324,7 @@ async fn enhanced_route_refresh_eorr_sweeps_unreplaced_route() {
         flowspec_withdrawn: vec![],
         evpn_announced: vec![],
         evpn_withdrawn: vec![],
+        validated_with: None,
     })
     .await
     .unwrap();
@@ -372,6 +376,7 @@ async fn enhanced_route_refresh_duplicate_borr_rebuilds_snapshot_safely() {
         flowspec_withdrawn: vec![],
         evpn_announced: vec![],
         evpn_withdrawn: vec![],
+        validated_with: None,
     })
     .await
     .unwrap();
@@ -396,6 +401,7 @@ async fn enhanced_route_refresh_duplicate_borr_rebuilds_snapshot_safely() {
         flowspec_withdrawn: vec![],
         evpn_announced: vec![],
         evpn_withdrawn: vec![],
+        validated_with: None,
     })
     .await
     .unwrap();
@@ -436,6 +442,7 @@ async fn enhanced_route_refresh_eorr_without_active_state_is_ignored() {
         flowspec_withdrawn: vec![],
         evpn_announced: vec![],
         evpn_withdrawn: vec![],
+        validated_with: None,
     })
     .await
     .unwrap();
@@ -480,6 +487,7 @@ async fn enhanced_route_refresh_timeout_sweeps_unreplaced_routes() {
         flowspec_withdrawn: vec![],
         evpn_announced: vec![],
         evpn_withdrawn: vec![],
+        validated_with: None,
     })
     .await
     .unwrap();
@@ -507,6 +515,7 @@ async fn enhanced_route_refresh_timeout_sweeps_unreplaced_routes() {
         flowspec_withdrawn: vec![],
         evpn_announced: vec![],
         evpn_withdrawn: vec![],
+        validated_with: None,
     })
     .await
     .unwrap();
@@ -551,6 +560,7 @@ async fn enhanced_route_refresh_timeout_is_family_isolated() {
         flowspec_withdrawn: vec![],
         evpn_announced: vec![],
         evpn_withdrawn: vec![],
+        validated_with: None,
     })
     .await
     .unwrap();
@@ -952,6 +962,7 @@ async fn eorr_preserves_gr_stale_routes_awaiting_eor() {
         flowspec_withdrawn: vec![],
         evpn_announced: vec![],
         evpn_withdrawn: vec![],
+        validated_with: None,
     })
     .await
     .unwrap();
@@ -1020,6 +1031,7 @@ async fn eorr_preserves_gr_stale_routes_awaiting_eor() {
         flowspec_withdrawn: vec![],
         evpn_announced: vec![],
         evpn_withdrawn: vec![],
+        validated_with: None,
     })
     .await
     .unwrap();
@@ -1097,6 +1109,7 @@ async fn eorr_preserves_llgr_stale_routes_awaiting_eor() {
         flowspec_withdrawn: vec![],
         evpn_announced: vec![],
         evpn_withdrawn: vec![],
+        validated_with: None,
     })
     .await
     .unwrap();
@@ -1169,6 +1182,7 @@ async fn eorr_preserves_llgr_stale_routes_awaiting_eor() {
         flowspec_withdrawn: vec![],
         evpn_announced: vec![],
         evpn_withdrawn: vec![],
+        validated_with: None,
     })
     .await
     .unwrap();
@@ -1260,6 +1274,7 @@ fn peer_down_mid_refresh_zeroes_refresh_gauges() {
         flowspec_withdrawn: vec![],
         evpn_announced: vec![],
         evpn_withdrawn: vec![],
+        validated_with: None,
     });
     drain_route_chunks(&mut manager);
 

@@ -122,6 +122,7 @@ async fn announce_from(tx: &mpsc::Sender<RibUpdate>, source: Ipv4Addr, routes: V
         flowspec_withdrawn: vec![],
         evpn_announced: vec![],
         evpn_withdrawn: vec![],
+        validated_with: None,
     })
     .await
     .unwrap();
@@ -469,6 +470,7 @@ async fn candidate_churn_produces_minimal_deltas() {
         flowspec_withdrawn: vec![],
         evpn_announced: vec![],
         evpn_withdrawn: vec![],
+        validated_with: None,
     })
     .await
     .unwrap();

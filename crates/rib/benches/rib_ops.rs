@@ -1072,6 +1072,140 @@ fn bench_bulk_initial_load(c: &mut Criterion) {
     group.finish();
 }
 
+/// One 100k-route `RoutesReceived` batch through the production dispatcher
+/// and chunk path, with and without a 500k-VRP table and an ASPA table.
+/// `revalidate` is a batch the session did not validate against the RIB's
+/// tables; `session_validated` carries the RIB's own tables as provenance.
+fn bench_announce_validation(c: &mut Criterion) {
+    #[cfg(not(feature = "bench-internals"))]
+    let _ = c;
+    #[cfg(feature = "bench-internals")]
+    {
+        use std::time::Duration;
+
+        use rustbgpd_rib::RibManager;
+        use rustbgpd_rib::update::RibUpdate;
+        use rustbgpd_rpki::{AspaRecord, AspaTable, ValidationSnapshot, VrpEntry, VrpTable};
+        use rustbgpd_telemetry::BgpMetrics;
+        use tokio::sync::mpsc;
+
+        let count = 100_000;
+        let context = rustbgpd_rpki::aspa_verify::validation_context(65_001, None);
+        let aspa_context = rustbgpd_rib::route::AspaContextId::intern(context);
+        let routes: Vec<Route> = generate_prefixes(count)
+            .into_iter()
+            .map(|prefix| {
+                let mut route = make_route(prefix, 1);
+                route.aspa_context = aspa_context;
+                route
+            })
+            .collect();
+        // 500k /24 VRPs laid out like `generate_prefixes`: every route is an
+        // exact Valid match for its origin, 65200.
+        let vrps = Arc::new(VrpTable::new(
+            generate_prefixes(500_000)
+                .into_iter()
+                .map(|prefix| {
+                    let Prefix::V4(prefix) = prefix else {
+                        unreachable!("IPv4 fixture")
+                    };
+                    VrpEntry {
+                        prefix: IpAddr::V4(prefix.addr),
+                        prefix_len: 24,
+                        max_len: 24,
+                        origin_asn: 65_200,
+                    }
+                })
+                .collect(),
+        ));
+        // A few thousand attestations plus the chain the bench path walks.
+        let mut records: Vec<_> = (0..4_000)
+            .map(|i| AspaRecord {
+                customer_asn: 4_200_000_000 + i,
+                provider_asns: vec![174, 3356],
+            })
+            .collect();
+        records.push(AspaRecord {
+            customer_asn: 65_200,
+            provider_asns: vec![65_100],
+        });
+        records.push(AspaRecord {
+            customer_asn: 65_100,
+            provider_asns: vec![65_001],
+        });
+        let aspa = Arc::new(AspaTable::new(records));
+        // Outside the timed loop: the fixture must reach the table walks,
+        // not a cheap NotFound/Unknown shortcut.
+        let sample = &routes[count - 1];
+        assert_eq!(vrps.validate(&sample.prefix, 65_200), RpkiValidation::Valid);
+        assert_eq!(
+            rustbgpd_rpki::aspa_verify::verify_detailed(
+                sample.validation_as_path().expect("fixture AS_PATH"),
+                &aspa,
+                context,
+            )
+            .state,
+            rustbgpd_wire::AspaValidation::Valid
+        );
+        let peer = sample.peer;
+
+        let mut group = c.benchmark_group("announce_validation");
+        group.sample_size(10);
+        group.warm_up_time(Duration::from_secs(2));
+        group.measurement_time(Duration::from_secs(8));
+        for arm in ["table_off", "revalidate", "session_validated"] {
+            group.bench_function(BenchmarkId::new(arm, count), |b| {
+                b.iter_custom(|iterations| {
+                    let mut elapsed = Duration::ZERO;
+                    for _ in 0..iterations {
+                        let (tx, rx) = mpsc::channel(4);
+                        let (_query_tx, query_rx) = mpsc::channel(1);
+                        let mut manager =
+                            RibManager::new(rx, query_rx, None, None, BgpMetrics::new());
+                        if arm != "table_off" {
+                            tx.try_send(RibUpdate::RpkiCacheUpdate {
+                                table: Arc::clone(&vrps),
+                                delta: None,
+                            })
+                            .unwrap();
+                            tx.try_send(RibUpdate::AspaTableUpdate {
+                                table: Arc::clone(&aspa),
+                                changed_customer_asns: None,
+                            })
+                            .unwrap();
+                            manager.bench_drain_primary_updates();
+                        }
+                        let validated_with =
+                            (arm == "session_validated").then(|| ValidationSnapshot {
+                                vrp_table: Some(Arc::clone(&vrps)),
+                                aspa_table: Some(Arc::clone(&aspa)),
+                            });
+                        tx.try_send(RibUpdate::RoutesReceived {
+                            peer,
+                            session_id: 0,
+                            announced: routes.clone(),
+                            withdrawn: Vec::new(),
+                            flowspec_announced: Vec::new(),
+                            flowspec_withdrawn: Vec::new(),
+                            evpn_announced: Vec::new(),
+                            evpn_withdrawn: Vec::new(),
+                            validated_with,
+                        })
+                        .unwrap();
+                        let start = std::time::Instant::now();
+                        manager.bench_drain_primary_updates();
+                        elapsed += start.elapsed();
+                        assert_eq!(manager.bench_attr_intern_inventory()[0], count);
+                        drop(manager);
+                    }
+                    elapsed
+                });
+            });
+        }
+        group.finish();
+    }
+}
+
 fn bench_route_churn(c: &mut Criterion) {
     let mut group = c.benchmark_group("route_churn");
     group.sample_size(10);
@@ -1192,6 +1326,7 @@ criterion_group!(
     bench_loc_rib_steady,
     bench_rib_pipeline,
     bench_bulk_initial_load,
+    bench_announce_validation,
     bench_route_churn,
     bench_export_policy_eval,
 );

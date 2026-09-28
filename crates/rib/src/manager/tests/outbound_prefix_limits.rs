@@ -216,6 +216,7 @@ fn announce(manager: &mut RibManager, source: IpAddr, announced: Vec<Route>) {
         flowspec_withdrawn: vec![],
         evpn_announced: vec![],
         evpn_withdrawn: vec![],
+        validated_with: None,
     });
     while manager.process_next_route_chunk() {}
 }
@@ -230,6 +231,7 @@ fn withdraw(manager: &mut RibManager, source: IpAddr, withdrawn: Vec<(Prefix, u3
         flowspec_withdrawn: vec![],
         evpn_announced: vec![],
         evpn_withdrawn: vec![],
+        validated_with: None,
     });
     while manager.process_next_route_chunk() {}
 }
@@ -1924,6 +1926,7 @@ async fn a_raise_delivers_the_withheld_prefixes_on_a_quiescent_daemon() {
         flowspec_withdrawn: vec![],
         evpn_announced: vec![],
         evpn_withdrawn: vec![],
+        validated_with: None,
     })
     .await
     .expect("the manager is running");

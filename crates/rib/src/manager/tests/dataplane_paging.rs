@@ -79,6 +79,7 @@ fn apply_routes(manager: &mut RibManager, peer: Ipv4Addr, announced: Vec<Route>)
         flowspec_withdrawn: Vec::new(),
         evpn_announced: Vec::new(),
         evpn_withdrawn: Vec::new(),
+        validated_with: None,
     });
     while manager.process_next_route_chunk() {}
 }
@@ -93,6 +94,7 @@ fn withdraw(manager: &mut RibManager, peer: Ipv4Addr, prefixes: &[Prefix]) {
         flowspec_withdrawn: Vec::new(),
         evpn_announced: Vec::new(),
         evpn_withdrawn: Vec::new(),
+        validated_with: None,
     });
     while manager.process_next_route_chunk() {}
 }

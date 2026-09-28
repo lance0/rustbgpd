@@ -5,7 +5,7 @@ use super::{
     AdjRibIn, AdjRibOut, Afi, Arc, BgpMetrics, ExplainAdvertisedRoute, ExplainDecision,
     ExplainReason, HashMap, HashSet, IpAddr, Ipv4Addr, LOCAL_PEER, LocRib, NeighborPolicyStats,
     PolicyAction, PolicyChain, PolicyFilteredRouteKey, Prefix, RibCommandError, RibManager,
-    RouteContext, Safi, UnicastDistributionResult, UnicastPrefixPeers, VrpTable, debug,
+    RouteContext, Safi, UnicastDistributionResult, UnicastPrefixPeers, debug,
     evaluate_chain_with_attribution, family_label, gauge_val, policy_label_with_term,
     prefix_family, record_export_policy_eval, route_type, route_type_label, route_type_message,
     routes_equal, rr_suppression_reason, should_suppress_ibgp_inner, unicast_route_family,
@@ -129,6 +129,25 @@ impl RibManager {
             force,
             &mut || {},
         );
+    }
+}
+
+/// What the RIB does with a batch's stored verdicts for one table kind.
+enum Revalidation<T> {
+    /// The session used the RIB's own table, or neither side has one.
+    Keep,
+    /// Recompute with the RIB's table; `None` stores the no-table verdict.
+    With(Option<Arc<T>>),
+}
+
+/// Keep a batch's verdicts only when the session validated against the very
+/// table the RIB holds (or neither has one). Any other combination, including
+/// a session table the RIB has not installed yet, yields the RIB's verdict.
+fn revalidation<T>(ours: Option<&Arc<T>>, sessions: Option<&Arc<T>>) -> Revalidation<T> {
+    match (ours, sessions) {
+        (None, None) => Revalidation::Keep,
+        (Some(ours), Some(sessions)) if Arc::ptr_eq(ours, sessions) => Revalidation::Keep,
+        (ours, _) => Revalidation::With(ours.map(Arc::clone)),
     }
 }
 
@@ -1497,17 +1516,27 @@ impl RibManager {
         &mut self,
         peer: IpAddr,
         announced: Vec<crate::route::Route>,
+        validated_with: Option<&rustbgpd_rpki::ValidationSnapshot>,
     ) {
         let active_refresh = self
             .refresh_in_progress
             .get(&peer)
             .cloned()
             .unwrap_or_default();
-        let vrp_table: Option<Arc<VrpTable>> = self.vrp_table.as_ref().map(Arc::clone);
-        let aspa_contexts = self
-            .aspa_table
-            .is_some()
-            .then(crate::route::AspaContextId::snapshot);
+        // The session computed each verdict from the same received path,
+        // session context and eBGP/iBGP rule, so re-validate only when it
+        // did not use the RIB's own table. The message holds the session's
+        // tables, so a pointer match cannot be a reused allocation.
+        let vrp = revalidation(
+            self.vrp_table.as_ref(),
+            validated_with.and_then(|v| v.vrp_table.as_ref()),
+        );
+        let aspa = revalidation(
+            self.aspa_table.as_ref(),
+            validated_with.and_then(|v| v.aspa_table.as_ref()),
+        );
+        let aspa_contexts =
+            matches!(aspa, Revalidation::With(Some(_))).then(crate::route::AspaContextId::snapshot);
         let mut affected = HashSet::new();
         let mut removed_stale_counts: HashMap<(Afi, Safi), usize> = HashMap::new();
         let mut replaced = 0;
@@ -1519,11 +1548,23 @@ impl RibManager {
                 .expect("peer rib must exist before chunk processing");
 
             for mut route in announced {
-                if let Some(ref table) = vrp_table {
-                    route.validation_state = validate_route_rpki(&route, table);
+                match &vrp {
+                    Revalidation::Keep => {}
+                    Revalidation::With(Some(table)) => {
+                        route.validation_state = validate_route_rpki(&route, table);
+                    }
+                    Revalidation::With(None) => {
+                        route.validation_state = rustbgpd_wire::RpkiValidation::NotFound;
+                    }
                 }
-                if let (Some(table), Some(contexts)) = (&self.aspa_table, &aspa_contexts) {
-                    route.aspa_state = validate_route_aspa(&route, table, contexts);
+                match (&aspa, &aspa_contexts) {
+                    (Revalidation::With(Some(table)), Some(contexts)) => {
+                        route.aspa_state = validate_route_aspa(&route, table, contexts);
+                    }
+                    (Revalidation::With(None), _) => {
+                        route.aspa_state = rustbgpd_wire::AspaValidation::Unknown;
+                    }
+                    _ => {}
                 }
                 debug!(%peer, prefix = %route.prefix, "announced");
                 affected.insert(route.prefix);

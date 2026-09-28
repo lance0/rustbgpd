@@ -420,6 +420,7 @@ pub async fn run(output: &str, tiny: bool) -> Result<()> {
                 flowspec_withdrawn: vec![],
                 evpn_announced: vec![],
                 evpn_withdrawn: vec![],
+                validated_with: None,
             },
             run_deadline,
         )

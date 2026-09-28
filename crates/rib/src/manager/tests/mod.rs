@@ -1057,6 +1057,7 @@ fn route_chunk_and_its_coalesced_flush_are_observed_as_separate_work_units() {
         flowspec_withdrawn: vec![],
         evpn_announced: vec![],
         evpn_withdrawn: vec![],
+        validated_with: None,
     });
     drain_route_chunks(&mut manager);
 

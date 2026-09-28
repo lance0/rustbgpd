@@ -133,6 +133,7 @@ async fn recompute_best_changes_emit_loc_rib_route_monitoring() {
         flowspec_withdrawn: vec![],
         evpn_announced: vec![],
         evpn_withdrawn: vec![],
+        validated_with: None,
     })
     .await
     .unwrap();
@@ -157,6 +158,7 @@ async fn recompute_best_changes_emit_loc_rib_route_monitoring() {
         flowspec_withdrawn: vec![],
         evpn_announced: vec![],
         evpn_withdrawn: vec![],
+        validated_with: None,
     })
     .await
     .unwrap();
@@ -187,6 +189,7 @@ async fn recompute_best_changes_emit_loc_rib_route_monitoring() {
         flowspec_withdrawn: vec![],
         evpn_announced: vec![],
         evpn_withdrawn: vec![],
+        validated_with: None,
     })
     .await
     .unwrap();
@@ -204,6 +207,7 @@ async fn recompute_best_changes_emit_loc_rib_route_monitoring() {
         flowspec_withdrawn: vec![],
         evpn_announced: vec![],
         evpn_withdrawn: vec![],
+        validated_with: None,
     })
     .await
     .unwrap();
@@ -241,6 +245,7 @@ async fn stale_best_route_sets_stale_path_status_bit() {
         flowspec_withdrawn: vec![],
         evpn_announced: vec![],
         evpn_withdrawn: vec![],
+        validated_with: None,
     })
     .await
     .unwrap();
@@ -287,6 +292,7 @@ async fn received_llgr_stale_best_has_consistent_loc_rib_status() {
         flowspec_withdrawn: vec![],
         evpn_announced: vec![],
         evpn_withdrawn: vec![],
+        validated_with: None,
     })
     .await
     .unwrap();
@@ -442,6 +448,7 @@ async fn query_bmp_loc_rib_dump_streams_routes_then_eor_per_family() {
         flowspec_withdrawn: vec![],
         evpn_announced: vec![],
         evpn_withdrawn: vec![],
+        validated_with: None,
     })
     .await
     .unwrap();
@@ -553,6 +560,7 @@ async fn dump_timestamps_equal_stored_install_time() {
         flowspec_withdrawn: vec![],
         evpn_announced: vec![],
         evpn_withdrawn: vec![],
+        validated_with: None,
     })
     .await
     .unwrap();
@@ -629,6 +637,7 @@ async fn loc_rib_dump_chunks_stream_complete_table() {
         flowspec_withdrawn: vec![],
         evpn_announced: vec![],
         evpn_withdrawn: vec![],
+        validated_with: None,
     })
     .await
     .unwrap();
@@ -712,6 +721,7 @@ async fn loc_rib_dump_interleaves_live_commands_between_chunks() {
         flowspec_withdrawn: vec![],
         evpn_announced: vec![],
         evpn_withdrawn: vec![],
+        validated_with: None,
     })
     .await
     .unwrap();
@@ -764,6 +774,7 @@ async fn loc_rib_dump_interleaves_live_commands_between_chunks() {
         flowspec_withdrawn: vec![],
         evpn_announced: vec![],
         evpn_withdrawn: vec![],
+        validated_with: None,
     })
     .await
     .unwrap();
@@ -863,6 +874,7 @@ async fn loc_rib_dump_excludes_routes_admitted_after_dump_start() {
         flowspec_withdrawn: vec![],
         evpn_announced: vec![],
         evpn_withdrawn: vec![],
+        validated_with: None,
     })
     .await
     .unwrap();
@@ -913,6 +925,7 @@ async fn loc_rib_dump_excludes_routes_admitted_after_dump_start() {
         flowspec_withdrawn: vec![],
         evpn_announced: vec![],
         evpn_withdrawn: vec![],
+        validated_with: None,
     })
     .await
     .unwrap();
@@ -980,6 +993,7 @@ async fn query_bmp_loc_rib_stats_counts_per_family() {
         flowspec_withdrawn: vec![],
         evpn_announced: vec![],
         evpn_withdrawn: vec![],
+        validated_with: None,
     })
     .await
     .unwrap();
@@ -1035,6 +1049,7 @@ async fn no_bmp_tx_means_no_synthesis() {
         flowspec_withdrawn: vec![],
         evpn_announced: vec![],
         evpn_withdrawn: vec![],
+        validated_with: None,
     })
     .await
     .unwrap();

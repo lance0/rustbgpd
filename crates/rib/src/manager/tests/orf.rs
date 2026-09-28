@@ -110,6 +110,7 @@ async fn orf_setup() -> (
         flowspec_withdrawn: vec![],
         evpn_announced: vec![],
         evpn_withdrawn: vec![],
+        validated_with: None,
     })
     .await
     .unwrap();
@@ -680,6 +681,7 @@ async fn graceful_restart_clears_orf_filter() {
         flowspec_withdrawn: vec![],
         evpn_announced: vec![],
         evpn_withdrawn: vec![],
+        validated_with: None,
     })
     .await
     .unwrap();
@@ -926,6 +928,7 @@ async fn dirty_initial_dump_refresh_waits_for_pending_eor() {
         vec![],
         vec![],
         vec![],
+        None,
     );
     while manager.process_next_route_chunk() {}
     // Capacity one admits the initial routes but forces the separate EoR
@@ -1001,6 +1004,7 @@ async fn gr_restarter_deferred_eor_lifts_per_family() {
         flowspec_withdrawn: vec![],
         evpn_announced: vec![],
         evpn_withdrawn: vec![],
+        validated_with: None,
     })
     .await
     .unwrap();

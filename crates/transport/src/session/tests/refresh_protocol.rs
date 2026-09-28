@@ -262,6 +262,7 @@ async fn gr_orf_first_refresh_sends_initial_eor_before_any_borr_on_tcp() {
         flowspec_withdrawn: vec![],
         evpn_announced: vec![],
         evpn_withdrawn: vec![],
+        validated_with: None,
     })
     .await
     .unwrap();

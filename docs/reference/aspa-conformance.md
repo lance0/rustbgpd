@@ -67,8 +67,10 @@ ASPA verification judges the effective path received from the neighbor, after
 AS4 reconstruction and before import policy. Import prepends do not change that
 validation input or exempt the route from the neighbor-AS prerequisite. Initial
 RIB insertion and full or incremental cache revalidation use the same received
-path and session relationship context. The RIB still validates against its own
-current table; it does not assume the session used the same cache snapshot.
+path and session relationship context. The session reports the cache snapshots
+it validated each batch against. The RIB keeps the session's verdict only for a
+snapshot it currently holds, and it re-validates the batch against its own
+table when a cache update has changed the snapshot since.
 
 Only accepted unicast routes whose import policy changes AS_PATH retain a shared
 copy of the original path. Selection and export use the modified attributes;

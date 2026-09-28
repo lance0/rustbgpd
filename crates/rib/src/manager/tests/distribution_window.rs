@@ -60,6 +60,7 @@ fn routes(from: Ipv4Addr, announced: Vec<Route>, withdrawn: Vec<Ipv4Prefix>) -> 
         flowspec_withdrawn: vec![],
         evpn_announced: vec![],
         evpn_withdrawn: vec![],
+        validated_with: None,
     }
 }
 
@@ -348,6 +349,7 @@ fn unregistered_routes(announced: Vec<Route>, withdrawn: Vec<Ipv4Prefix>) -> Rib
         flowspec_withdrawn,
         evpn_announced,
         evpn_withdrawn,
+        validated_with: None,
     }
 }
 
@@ -813,6 +815,7 @@ async fn window_dequeues_at_most_one_message_per_turn_including_stale() {
             flowspec_withdrawn,
             evpn_announced,
             evpn_withdrawn,
+            validated_with: None,
         }
     };
     let (query_reply, mut query_response) = oneshot::channel();
