@@ -831,10 +831,12 @@ Before rolling any versions:
        > "tests/fixtures/v1-stable-schema-root-keys/${prev_tag}.json"
      ```
 
-     This compact fixture proves only that canonical persistence introduces no
-     root key the previous schema rejects. Semantic round-trip tests cover the
-     rendered values; this is not full previous-release schema validation or a
-     downgrade guarantee.
+     The `archived_configs_emit_only_released_root_schema_keys` test reads
+     every manifest in that directory and persists the same tag's configs
+     under `tests/fixtures/v1-stable/`. This compact fixture proves only that
+     canonical persistence introduces no root key the previous schema rejects.
+     Semantic round-trip tests cover the rendered values; this is not full
+     previous-release schema validation or a downgrade guarantee.
    - Update the workspace release and target changelog section in
      `scripts/check_metric_release_notes.py` and its companion test. The
      baseline stays on the previous release here; it rolls to this tag in
