@@ -3285,7 +3285,21 @@ message BgpEvent {
 service InjectionService {
   rpc AddPath(AddPathRequest) returns (AddPathResponse);
   rpc DeletePath(DeletePathRequest) returns (DeletePathResponse);
+  // Inject or replace a locally originated FlowSpec rule. The rule is an
+  // upsert keyed on (afi_safi, components): repeating an identical request
+  // is idempotent, and a request with the same key but different actions or
+  // communities replaces the local rule. The response reports which of
+  // these happened. OK means the rule is in the local Adj-RIB-In (peer
+  // 0.0.0.0) and selection and distribution ran for that rule before the
+  // reply. It does not mean any peer received or installed it, a received
+  // rule with the same key can still out-select it, and Graceful Restart
+  // selection deferral can postpone its Loc-RIB effect. Injected rules are
+  // process-local: a controller must re-inject them after a daemon restart.
   rpc AddFlowSpec(AddFlowSpecRequest) returns (AddFlowSpecResponse);
+  // Withdraw a locally injected FlowSpec rule by its (afi_safi, components)
+  // key. Only rules added through AddFlowSpec are affected; rules received
+  // from peers are never removed. A key with no local rule returns
+  // NOT_FOUND unless allow_missing is set.
   rpc DeleteFlowSpec(DeleteFlowSpecRequest) returns (DeleteFlowSpecResponse);
   // Inject a locally-originated EVPN route (RFC 7432). SDN controllers
   // push Type 2 / Type 5 / etc. routes to the RR's Loc-RIB, and the RR
@@ -3376,6 +3390,8 @@ message FlowSpecRedirect {
 message FlowSpecRouteEntry {
   repeated FlowSpecComponent components = 1;
   repeated FlowSpecAction actions = 2;
+  // Source peer. "0.0.0.0" marks a rule injected locally through
+  // InjectionService.AddFlowSpec, for both address families.
   string peer_address = 3;
   AddressFamily afi_safi = 4;
   repeated uint32 as_path = 5;
@@ -3386,25 +3402,62 @@ message FlowSpecRouteEntry {
 message AddFlowSpecRequest {
   // Address family: IPV4_FLOWSPEC or IPV6_FLOWSPEC.
   AddressFamily afi_safi = 1;
+  // Match components, the rule's identity together with afi_safi. They must
+  // be non-empty and in strictly ascending RFC 8955 type order, with no type
+  // repeated; the daemon does not reorder them. Out-of-order or duplicate
+  // types, and a rule encoding to more than 4095 NLRI bytes, return
+  // INVALID_ARGUMENT.
   repeated FlowSpecComponent components = 2;
   repeated FlowSpecAction actions = 3;
   repeated uint32 communities = 4;
   repeated uint64 extended_communities = 5;
 }
 
-message AddFlowSpecResponse {}
+message AddFlowSpecResponse {
+  // Compared with the local rule previously held for this key. A received
+  // rule with the same key does not affect it.
+  FlowSpecInjectOutcome outcome = 1;
+}
+
+enum FlowSpecInjectOutcome {
+  // Not reported; a daemon that predates this field leaves it unset.
+  FLOW_SPEC_INJECT_OUTCOME_UNSPECIFIED = 0;
+  // No local rule had this (afi_safi, components) key.
+  FLOW_SPEC_INJECT_OUTCOME_CREATED = 1;
+  // A local rule had this key with different actions or communities; the
+  // new payload replaced it.
+  FLOW_SPEC_INJECT_OUTCOME_REPLACED = 2;
+  // An identical local rule already existed. Nothing was redistributed.
+  FLOW_SPEC_INJECT_OUTCOME_UNCHANGED = 3;
+}
 
 message DeleteFlowSpecRequest {
   AddressFamily afi_safi = 1;
+  // Same identity and ordering rules as AddFlowSpecRequest.components.
   repeated FlowSpecComponent components = 2;
+  // When true, a key with no local rule returns OK with deleted = false
+  // instead of NOT_FOUND, so a reconciling controller can treat "already
+  // gone" as drift. A daemon that predates this field ignores it and
+  // returns NOT_FOUND.
+  bool allow_missing = 3;
 }
 
-message DeleteFlowSpecResponse {}
+message DeleteFlowSpecResponse {
+  // True when a local rule was removed and distribution ran for it. False
+  // only when allow_missing was set and no local rule matched; a daemon that
+  // predates this field always leaves it false.
+  bool deleted = 1;
+}
 
 message ListFlowSpecRequest {
   AddressFamily afi_safi = 1;
   // Empty selects the existing Loc-RIB view. An IP address selects retained
   // received candidates from that peer, including infeasible/nonselected rules.
+  // "0.0.0.0" selects the locally injected rules: exactly what AddFlowSpec
+  // holds, including rules a received candidate currently out-selects
+  // (selected = false). Their validation is DISABLED by default and LOCAL
+  // when receive-side validation is enabled; it is never FEASIBLE or
+  // INFEASIBLE. Controllers reconcile against this view.
   string received_peer_address = 2;
 }
 

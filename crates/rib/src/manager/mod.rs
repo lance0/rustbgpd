@@ -3529,9 +3529,13 @@ impl RibManager {
                 self.handle_aspa_cache_update(table, changed_customer_asns);
             }
             RibUpdate::InjectFlowSpec { route, reply } => self.handle_inject_flowspec(route, reply),
-            RibUpdate::WithdrawFlowSpec { key, reply } => {
+            RibUpdate::WithdrawFlowSpec {
+                key,
+                allow_missing,
+                reply,
+            } => {
                 let retired = ExactExportKey::FlowSpec(key.clone());
-                self.handle_withdraw_flowspec(key, reply);
+                self.handle_withdraw_flowspec(key, allow_missing, reply);
                 self.retire_exact_export_rejections([retired]);
             }
             RibUpdate::InjectEvpn { route, reply } => self.handle_inject_evpn(route, reply),

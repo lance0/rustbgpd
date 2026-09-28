@@ -365,3 +365,54 @@ async fn received_flowspec_rejects_unacknowledged_old_server_view_without_output
         }
     }
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn flowspec_add_reports_injection_outcome() {
+    let server = test_support::spawn_mock_server(None).await;
+    let add = |json: bool| {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_rbgp"));
+        command.args(["--addr", &server.addr]);
+        if json {
+            command.arg("--json");
+        }
+        command
+            .args([
+                "flowspec",
+                "add",
+                "-a",
+                "ipv4_flowspec",
+                "--match",
+                "dest=192.0.2.0/24",
+                "--action",
+                "drop",
+            ])
+            .env("NO_COLOR", "1")
+            .output()
+            .expect("run rbgp")
+    };
+    for (outcome, name) in [
+        (proto::FlowSpecInjectOutcome::Created, "created"),
+        (proto::FlowSpecInjectOutcome::Replaced, "replaced"),
+        (proto::FlowSpecInjectOutcome::Unchanged, "unchanged"),
+        (proto::FlowSpecInjectOutcome::Unspecified, "unknown"),
+    ] {
+        *server.state.add_flowspec_response.lock().await = proto::AddFlowSpecResponse {
+            outcome: outcome as i32,
+        };
+        let output = add(true);
+        assert!(output.status.success(), "{output:?}");
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&output.stdout).unwrap(),
+            serde_json::json!({"ok": true, "action": "add_flowspec", "target": "", "outcome": name})
+        );
+        let output = add(false);
+        assert!(output.status.success(), "{output:?}");
+        // An older daemon reports no outcome; keep the original line for it.
+        let expected = if name == "unknown" {
+            "FlowSpec rule added\n".to_string()
+        } else {
+            format!("FlowSpec rule added ({name})\n")
+        };
+        assert_eq!(String::from_utf8(output.stdout).unwrap(), expected);
+    }
+}

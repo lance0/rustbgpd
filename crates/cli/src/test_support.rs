@@ -192,6 +192,7 @@ pub(crate) struct MockState {
     pub(crate) last_list_labeled: Mutex<Option<server_proto::ListLabeledRoutesRequest>>,
     pub(crate) last_list_rtc: Mutex<Option<server_proto::ListRtcRoutesRequest>>,
     pub(crate) list_flowspec_response: Mutex<server_proto::ListFlowSpecResponse>,
+    pub(crate) add_flowspec_response: Mutex<server_proto::AddFlowSpecResponse>,
     pub(crate) last_list_flowspec: Mutex<Option<server_proto::ListFlowSpecRequest>>,
     pub(crate) last_list_evpn: Mutex<Option<server_proto::ListEvpnRequest>>,
     pub(crate) last_list_received_evpn: Mutex<Option<server_proto::ListPeerEvpnRoutesRequest>>,
@@ -1398,7 +1399,9 @@ impl rustbgpd_api::proto::injection_service_server::InjectionService for MockInj
         &self,
         _request: Request<server_proto::AddFlowSpecRequest>,
     ) -> Result<Response<server_proto::AddFlowSpecResponse>, Status> {
-        Ok(Response::new(server_proto::AddFlowSpecResponse::default()))
+        Ok(Response::new(
+            *self.state.add_flowspec_response.lock().await,
+        ))
     }
 
     async fn delete_flow_spec(

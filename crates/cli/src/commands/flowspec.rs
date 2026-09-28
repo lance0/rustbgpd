@@ -290,7 +290,7 @@ pub async fn add(
 
     let mut client =
         InjectionServiceClient::with_interceptor(connection.channel(), connection.interceptor());
-    client
+    let response = client
         .add_flow_spec(AddFlowSpecRequest {
             afi_safi: family,
             components: parsed_components,
@@ -298,8 +298,32 @@ pub async fn add(
             communities: vec![],
             extended_communities: vec![],
         })
-        .await?;
-    output::print_result(json, "add_flowspec", "", "FlowSpec rule added")
+        .await?
+        .into_inner();
+    let outcome = inject_outcome_name(response.outcome);
+    if json {
+        output::print_json_pretty(&serde_json::json!({
+            "ok": true,
+            "action": "add_flowspec",
+            "target": "",
+            "outcome": outcome,
+        }))
+    } else if outcome == "unknown" {
+        output::print_line("FlowSpec rule added")
+    } else {
+        output::print_line(&format!("FlowSpec rule added ({outcome})"))
+    }
+}
+
+/// Name the local Adj-RIB-In outcome; `unknown` for a daemon that predates it.
+fn inject_outcome_name(outcome: i32) -> &'static str {
+    use crate::proto::FlowSpecInjectOutcome;
+    match FlowSpecInjectOutcome::try_from(outcome) {
+        Ok(FlowSpecInjectOutcome::Created) => "created",
+        Ok(FlowSpecInjectOutcome::Replaced) => "replaced",
+        Ok(FlowSpecInjectOutcome::Unchanged) => "unchanged",
+        Ok(FlowSpecInjectOutcome::Unspecified) | Err(_) => "unknown",
+    }
 }
 
 pub async fn delete(
@@ -320,6 +344,7 @@ pub async fn delete(
         .delete_flow_spec(DeleteFlowSpecRequest {
             afi_safi: family,
             components: parsed_components,
+            allow_missing: false,
         })
         .await?;
     output::print_result(json, "delete_flowspec", "", "FlowSpec rule deleted")
