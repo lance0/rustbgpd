@@ -1313,16 +1313,16 @@ impl RibManager {
         });
     }
 
-    /// The prefix inventory of a grouped join. A grouped member replays the
-    /// group table instead of staging per prefix, so the inventory only
-    /// scopes the group residue queries and this peer's own OTC and
-    /// policy-filtered reconciliation. Every prefix those can touch is a
-    /// group residue prefix or a key of the peer's own residue maps, so the
-    /// scope is that set restricted to prefixes the full inventory holds:
-    /// present in the Loc-RIB or in some Adj-RIB-In (via the announcer
-    /// index, which never under-counts). This avoids walking the Loc-RIB
-    /// and every Adj-RIB-In on each join.
-    fn grouped_join_prefix_scope(
+    /// The prefix inventory of a grouped join or unicast route-refresh
+    /// response. A grouped member replays the group table instead of
+    /// staging per prefix, so the inventory only scopes the group residue
+    /// queries and this peer's own OTC and policy-filtered reconciliation.
+    /// Every prefix those can touch is a group residue prefix or a key of
+    /// the peer's own residue maps, so the scope is that set restricted to
+    /// prefixes the full inventory holds: present in the Loc-RIB or in some
+    /// Adj-RIB-In (via the announcer index, which never under-counts). This
+    /// avoids walking the Loc-RIB and every Adj-RIB-In on each replay.
+    pub(super) fn grouped_join_prefix_scope(
         &self,
         peer: IpAddr,
         group: &super::update_groups::GroupRibOut,

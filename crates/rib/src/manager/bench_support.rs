@@ -1062,6 +1062,24 @@ impl RibManager {
             .collect()
     }
 
+    /// Deliver one IPv4 unicast ROUTE-REFRESH from the peer that
+    /// [`Self::bench_join_route_reflector_peer`] registered at `index`,
+    /// through the production `RouteRefreshRequest` dispatch.
+    ///
+    /// # Panics
+    ///
+    /// Panics when `index` exceeds `u32::MAX`, far beyond a useful benchmark.
+    pub fn bench_route_refresh_joined_peer(&mut self, index: usize) {
+        let idx = u32::try_from(index).expect("bench peer index fits u32");
+        self.handle_update(RibUpdate::RouteRefreshRequest {
+            peer: Self::bench_peer_address(index),
+            session_id: u64::from(idx) + 1,
+            afi: Afi::Ipv4,
+            safi: Safi::Unicast,
+            queued: Arc::new(AtomicBool::new(true)),
+        });
+    }
+
     /// Enter Graceful Restart for an unregistered synthetic source through the
     /// production `PeerGracefulRestart` path: its routes in `families` are
     /// retained and marked stale.
