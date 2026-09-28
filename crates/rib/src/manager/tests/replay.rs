@@ -46,6 +46,7 @@ fn receive_routes(manager: &mut RibManager, routes: Vec<Route>) {
         flowspec_withdrawn: vec![],
         evpn_announced: vec![],
         evpn_withdrawn: vec![],
+        validated_with: None,
     });
     drain_route_chunks(manager);
 }

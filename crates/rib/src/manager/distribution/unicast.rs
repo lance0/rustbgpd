@@ -5,7 +5,7 @@ use super::{
     AdjRibIn, AdjRibOut, Afi, Arc, BgpMetrics, ExplainAdvertisedRoute, ExplainDecision,
     ExplainReason, HashMap, HashSet, IpAddr, Ipv4Addr, LOCAL_PEER, LocRib, NeighborPolicyStats,
     PolicyAction, PolicyChain, PolicyFilteredRouteKey, Prefix, RibCommandError, RibManager,
-    RouteContext, Safi, UnicastDistributionResult, UnicastPrefixPeers, VrpTable, debug,
+    RouteContext, Safi, UnicastDistributionResult, UnicastPrefixPeers, debug,
     evaluate_chain_with_attribution, family_label, gauge_val, policy_label_with_term,
     prefix_family, record_export_policy_eval, route_type, route_type_label, route_type_message,
     routes_equal, rr_suppression_reason, should_suppress_ibgp_inner, unicast_route_family,
@@ -129,6 +129,15 @@ impl RibManager {
             force,
             &mut || {},
         );
+    }
+}
+
+/// The RIB's table when a batch still needs validating against it, or `None`
+/// when the session already validated the batch against this same table.
+fn table_to_revalidate<T>(ours: Option<&Arc<T>>, sessions: Option<&Arc<T>>) -> Option<Arc<T>> {
+    match (ours, sessions) {
+        (Some(ours), Some(sessions)) if Arc::ptr_eq(ours, sessions) => None,
+        (ours, _) => ours.map(Arc::clone),
     }
 }
 
@@ -1497,15 +1506,26 @@ impl RibManager {
         &mut self,
         peer: IpAddr,
         announced: Vec<crate::route::Route>,
+        validated_with: Option<&rustbgpd_rpki::ValidationSnapshot>,
     ) {
         let active_refresh = self
             .refresh_in_progress
             .get(&peer)
             .cloned()
             .unwrap_or_default();
-        let vrp_table: Option<Arc<VrpTable>> = self.vrp_table.as_ref().map(Arc::clone);
-        let aspa_contexts = self
-            .aspa_table
+        // The session computed each verdict from the same received path,
+        // session context and eBGP/iBGP rule, so re-validate only against a
+        // table it did not use. The message holds the session's tables, so a
+        // pointer match cannot be a reused allocation.
+        let vrp_table = table_to_revalidate(
+            self.vrp_table.as_ref(),
+            validated_with.and_then(|v| v.vrp_table.as_ref()),
+        );
+        let aspa_table = table_to_revalidate(
+            self.aspa_table.as_ref(),
+            validated_with.and_then(|v| v.aspa_table.as_ref()),
+        );
+        let aspa_contexts = aspa_table
             .is_some()
             .then(crate::route::AspaContextId::snapshot);
         let mut affected = HashSet::new();
@@ -1522,7 +1542,7 @@ impl RibManager {
                 if let Some(ref table) = vrp_table {
                     route.validation_state = validate_route_rpki(&route, table);
                 }
-                if let (Some(table), Some(contexts)) = (&self.aspa_table, &aspa_contexts) {
+                if let (Some(table), Some(contexts)) = (&aspa_table, &aspa_contexts) {
                     route.aspa_state = validate_route_aspa(&route, table, contexts);
                 }
                 debug!(%peer, prefix = %route.prefix, "announced");

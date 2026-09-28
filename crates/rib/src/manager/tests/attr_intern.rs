@@ -122,7 +122,7 @@ fn unicast_withdraw_reclaims_selected_attr_intern_after_loc_rib_recompute() {
     let prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 0, 2, 0), 24);
     let mut route = make_route(prefix, Ipv4Addr::new(10, 0, 0, 1));
     route.attributes = AttrSet::new(vec![PathAttribute::Med(100)]);
-    manager.process_announce_chunk(peer, vec![route]);
+    manager.process_announce_chunk(peer, vec![route], None);
     assert_eq!(
         manager.loc_rib.get(&Prefix::V4(prefix)).map(|r| r.peer),
         Some(peer)
@@ -138,6 +138,7 @@ fn unicast_withdraw_reclaims_selected_attr_intern_after_loc_rib_recompute() {
         flowspec_withdrawn: vec![],
         evpn_announced: vec![],
         evpn_withdrawn: vec![],
+        validated_with: None,
     });
     drain_route_chunks(&mut manager);
 
@@ -230,7 +231,7 @@ fn llgr_eor_reclaims_stale_clear_attr_intern_after_loc_rib_recompute() {
     let prefix = Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 0), 24);
     let mut route = make_route(prefix, Ipv4Addr::new(10, 0, 0, 1));
     route.attributes = AttrSet::new(vec![PathAttribute::Med(100)]);
-    manager.process_announce_chunk(peer, vec![route]);
+    manager.process_announce_chunk(peer, vec![route], None);
     assert_eq!(
         manager.loc_rib.get(&Prefix::V4(prefix)).map(|r| r.peer),
         Some(peer)
@@ -273,7 +274,7 @@ fn llgr_eor_reclaims_stale_clear_attr_intern_after_loc_rib_recompute() {
     // path this test pins.
     let mut readvertised = make_route(prefix, Ipv4Addr::new(10, 0, 0, 1));
     readvertised.attributes = AttrSet::new(vec![PathAttribute::Med(100)]);
-    manager.process_announce_chunk(peer, vec![readvertised]);
+    manager.process_announce_chunk(peer, vec![readvertised], None);
 
     manager.handle_update(RibUpdate::EndOfRib {
         session_id: 0,
@@ -317,7 +318,7 @@ fn llgr_promotion_preserves_global_attribute_sharing() {
             route
         })
         .collect();
-    manager.process_announce_chunk(peer, routes);
+    manager.process_announce_chunk(peer, routes, None);
 
     manager.handle_update(RibUpdate::PeerGracefulRestart {
         session_id: 0,
@@ -366,7 +367,7 @@ fn gr_expiry_reclaims_stale_attr_intern_after_loc_rib_recompute() {
     let prefix = Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 0), 24);
     let mut route = make_route(prefix, Ipv4Addr::new(10, 0, 0, 1));
     route.attributes = AttrSet::new(vec![PathAttribute::Med(100)]);
-    manager.process_announce_chunk(peer, vec![route]);
+    manager.process_announce_chunk(peer, vec![route], None);
     assert_eq!(
         manager.loc_rib.get(&Prefix::V4(prefix)).map(|r| r.peer),
         Some(peer)
@@ -417,7 +418,7 @@ fn unicast_announce_replace_reclaims_attr_intern() {
     for seq in 0..moves {
         let mut route = make_route(prefix, Ipv4Addr::new(10, 0, 0, 1));
         route.attributes = AttrSet::new(vec![PathAttribute::Med(seq)]);
-        manager.process_announce_chunk(peer, vec![route]);
+        manager.process_announce_chunk(peer, vec![route], None);
     }
 
     let intern = manager.attr_intern.len();
@@ -721,8 +722,8 @@ fn cross_peer_identical_attrs_share_one_global_intern_entry() {
     r2.attributes = AttrSet::new(attrs);
     assert!(!Arc::ptr_eq(&r1.attributes, &r2.attributes));
 
-    manager.process_announce_chunk(peer1, vec![r1]);
-    manager.process_announce_chunk(peer2, vec![r2]);
+    manager.process_announce_chunk(peer1, vec![r1], None);
+    manager.process_announce_chunk(peer2, vec![r2], None);
 
     assert_eq!(
         manager.attr_intern.len(),
@@ -781,7 +782,7 @@ fn cross_peer_churn_keeps_global_intern_table_flat_and_teardown_reclaims() {
                     route
                 })
                 .collect();
-            manager.process_announce_chunk(peer, routes);
+            manager.process_announce_chunk(peer, routes, None);
         }
         assert_eq!(
             manager.attr_intern.len(),
@@ -814,7 +815,7 @@ fn diverse_unicast_fixture(metrics: BgpMetrics) -> (RibManager, mpsc::Sender<Rib
         .map(|index| diverse_unicast_route(index, u32::try_from(index).unwrap()))
         .collect::<Vec<_>>();
     for chunk in routes.chunks(ROUTES_RECEIVED_CHUNK_SIZE) {
-        manager.process_announce_chunk(peer, chunk.to_vec());
+        manager.process_announce_chunk(peer, chunk.to_vec(), None);
     }
     (manager, tx, peer)
 }
@@ -985,7 +986,7 @@ async fn unicast_attr_gc_bounds_displaced_sets_and_preserves_current_routes() {
         let route = diverse_unicast_route(0, 100_000 + u32::try_from(index).unwrap());
         let expected = Arc::clone(&route.attributes);
         let prefix = route.prefix;
-        manager.process_announce_chunk(peer, vec![route]);
+        manager.process_announce_chunk(peer, vec![route], None);
         assert_eq!(
             manager.ribs[&peer].get(&prefix, 0).unwrap().attributes,
             expected
@@ -1006,7 +1007,7 @@ async fn unicast_attr_gc_reclaims_when_actor_is_idle() {
     let metrics = BgpMetrics::new();
     let (mut manager, tx, peer) = diverse_unicast_fixture(metrics.clone());
     let live_sets = ATTR_INTERN_GC_DISPLACED_LIMIT + 1;
-    manager.process_announce_chunk(peer, vec![diverse_unicast_route(0, 100_000)]);
+    manager.process_announce_chunk(peer, vec![diverse_unicast_route(0, 100_000)], None);
     assert_eq!(manager.attr_intern.len(), live_sets + 1);
     let actor = tokio::spawn(manager.run());
     tokio::task::yield_now().await;
@@ -1042,6 +1043,7 @@ async fn unicast_attr_gc_withdraw_all_reaches_floor_without_waiting() {
         flowspec_withdrawn: vec![],
         evpn_announced: vec![],
         evpn_withdrawn: vec![],
+        validated_with: None,
     });
     while manager.process_next_route_chunk() {}
     assert!(manager.ribs[&peer].is_empty());
@@ -1060,10 +1062,10 @@ async fn unicast_attr_gc_keeps_held_attributes_canonical() {
             .unwrap()
             .attributes,
     );
-    manager.process_announce_chunk(peer, vec![diverse_unicast_route(0, 100_000)]);
+    manager.process_announce_chunk(peer, vec![diverse_unicast_route(0, 100_000)], None);
     tokio::time::advance(ATTR_INTERN_GC_INTERVAL).await;
     // Expiry on an active UPDATE takes the same full sweep as the idle timer.
-    manager.process_announce_chunk(peer, vec![diverse_unicast_route(0, 100_001)]);
+    manager.process_announce_chunk(peer, vec![diverse_unicast_route(0, 100_001)], None);
     let mut equal = Arc::new(held.as_ref().clone());
     manager.attr_intern.intern(&mut equal);
     assert!(
@@ -1086,6 +1088,7 @@ async fn unicast_attr_gc_amortizes_sparse_large_capacity_tables() {
         manager.process_announce_chunk(
             peer,
             vec![diverse_unicast_route(index, u32::try_from(index).unwrap())],
+            None,
         );
     }
     manager.handle_update(RibUpdate::RoutesReceived {
@@ -1099,11 +1102,12 @@ async fn unicast_attr_gc_amortizes_sparse_large_capacity_tables() {
         flowspec_withdrawn: vec![],
         evpn_announced: vec![],
         evpn_withdrawn: vec![],
+        validated_with: None,
     });
     while manager.process_next_route_chunk() {}
     assert_eq!(manager.attr_intern.len(), 1);
     assert!(manager.attr_intern.capacity() > ATTR_INTERN_GC_DISPLACED_LIMIT);
-    manager.process_announce_chunk(peer, vec![diverse_unicast_route(0, 100_000)]);
+    manager.process_announce_chunk(peer, vec![diverse_unicast_route(0, 100_000)], None);
     assert_eq!(
         manager.attr_intern.len(),
         2,
@@ -1112,6 +1116,6 @@ async fn unicast_attr_gc_amortizes_sparse_large_capacity_tables() {
     assert_eq!(manager.attr_intern_gc_displaced, 1);
     assert!(manager.attr_intern_gc_deadline.is_some());
     tokio::time::advance(ATTR_INTERN_GC_INTERVAL).await;
-    manager.process_announce_chunk(peer, vec![diverse_unicast_route(0, 100_001)]);
+    manager.process_announce_chunk(peer, vec![diverse_unicast_route(0, 100_001)], None);
     assert_eq!(manager.attr_intern.len(), 1);
 }

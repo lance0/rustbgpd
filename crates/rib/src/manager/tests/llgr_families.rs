@@ -1273,6 +1273,7 @@ async fn unicast_announce_and_promote_to_llgr(
         flowspec_withdrawn: vec![],
         evpn_announced: vec![],
         evpn_withdrawn: vec![],
+        validated_with: None,
     })
     .await
     .unwrap();
@@ -1460,6 +1461,7 @@ async fn fresh_routes_unaffected_by_peer_llgr_capability() {
         flowspec_withdrawn: vec![],
         evpn_announced: vec![],
         evpn_withdrawn: vec![],
+        validated_with: None,
     })
     .await
     .unwrap();
@@ -1715,6 +1717,7 @@ async fn evpn_llgr_stale_suppressed_toward_ebgp_peer_without_llgr() {
         flowspec_withdrawn: vec![],
         evpn_announced: vec![imet],
         evpn_withdrawn: vec![],
+        validated_with: None,
     })
     .await
     .unwrap();
@@ -1819,6 +1822,7 @@ async fn unicast_llgr_no_llgr_community_drops_route_on_promotion() {
         flowspec_withdrawn: vec![],
         evpn_announced: vec![],
         evpn_withdrawn: vec![],
+        validated_with: None,
     })
     .await
     .unwrap();
@@ -1905,6 +1909,7 @@ async fn reflector_does_not_propagate_received_llgr_stale_over_fresh_path() {
                 flowspec_withdrawn: vec![],
                 evpn_announced: vec![],
                 evpn_withdrawn: vec![],
+                validated_with: None,
             })
             .await
             .unwrap();

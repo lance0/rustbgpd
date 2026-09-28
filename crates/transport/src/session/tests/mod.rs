@@ -1035,6 +1035,7 @@ async fn initial_dump_announcements(peer_group: Option<&str>) -> Vec<Prefix> {
             flowspec_withdrawn: vec![],
             evpn_announced: vec![],
             evpn_withdrawn: vec![],
+            validated_with: None,
         })
         .await
         .unwrap();
@@ -1735,6 +1736,7 @@ fn placeholder_routes_received() -> RibUpdate {
         flowspec_withdrawn: vec![],
         evpn_announced: vec![],
         evpn_withdrawn: vec![],
+        validated_with: None,
     }
 }
 

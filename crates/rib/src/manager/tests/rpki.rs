@@ -379,6 +379,7 @@ fn aspa_delta_matches_full_rescan_on_deterministic_sequences() {
                 flowspec_withdrawn: vec![],
                 evpn_announced: vec![],
                 evpn_withdrawn: vec![],
+                validated_with: None,
             });
         }
         manager
@@ -629,6 +630,7 @@ async fn routes_validated_on_insert_with_vrp_table() {
         flowspec_withdrawn: vec![],
         evpn_announced: vec![],
         evpn_withdrawn: vec![],
+        validated_with: None,
     })
     .await
     .unwrap();
@@ -666,6 +668,7 @@ async fn rpki_cache_update_revalidates_existing_routes() {
         flowspec_withdrawn: vec![],
         evpn_announced: vec![],
         evpn_withdrawn: vec![],
+        validated_with: None,
     })
     .await
     .unwrap();
@@ -718,6 +721,7 @@ async fn rpki_cache_update_changes_best_path() {
         flowspec_withdrawn: vec![],
         evpn_announced: vec![],
         evpn_withdrawn: vec![],
+        validated_with: None,
     })
     .await
     .unwrap();
@@ -730,6 +734,7 @@ async fn rpki_cache_update_changes_best_path() {
         flowspec_withdrawn: vec![],
         evpn_announced: vec![],
         evpn_withdrawn: vec![],
+        validated_with: None,
     })
     .await
     .unwrap();
@@ -801,6 +806,7 @@ async fn rpki_cache_update_invalid_demotes_best_path() {
         flowspec_withdrawn: vec![],
         evpn_announced: vec![],
         evpn_withdrawn: vec![],
+        validated_with: None,
     })
     .await
     .unwrap();
@@ -813,6 +819,7 @@ async fn rpki_cache_update_invalid_demotes_best_path() {
         flowspec_withdrawn: vec![],
         evpn_announced: vec![],
         evpn_withdrawn: vec![],
+        validated_with: None,
     })
     .await
     .unwrap();
@@ -865,6 +872,7 @@ async fn rpki_no_table_all_not_found() {
         flowspec_withdrawn: vec![],
         evpn_announced: vec![],
         evpn_withdrawn: vec![],
+        validated_with: None,
     })
     .await
     .unwrap();
@@ -919,6 +927,7 @@ async fn ibgp_aspa_stays_unknown_on_insert_and_cache_revalidation() {
         flowspec_withdrawn: vec![],
         evpn_announced: vec![],
         evpn_withdrawn: vec![],
+        validated_with: None,
     })
     .await
     .unwrap();
@@ -980,6 +989,7 @@ async fn aspa_cache_update_revalidates_with_stored_downstream_context() {
         flowspec_withdrawn: vec![],
         evpn_announced: vec![],
         evpn_withdrawn: vec![],
+        validated_with: None,
     })
     .await
     .unwrap();
@@ -1059,6 +1069,7 @@ async fn rpki_cache_update_no_change_no_redistribution() {
         flowspec_withdrawn: vec![],
         evpn_announced: vec![],
         evpn_withdrawn: vec![],
+        validated_with: None,
     })
     .await
     .unwrap();
@@ -1708,6 +1719,7 @@ async fn aspa_revalidation_keeps_each_route_session_context_across_gr_reconnect(
         flowspec_withdrawn: vec![],
         evpn_announced: vec![],
         evpn_withdrawn: vec![],
+        validated_with: None,
     };
     let old_prefix = Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 24);
     let new_prefix = Ipv4Prefix::new(Ipv4Addr::new(10, 0, 1, 0), 24);
@@ -1779,4 +1791,251 @@ fn aspa_revalidation_keeps_the_verdict_of_an_unresolved_context() {
     route.aspa_context = crate::route::AspaContextId::DEFAULT;
     let result = crate::manager::helpers::validate_route_aspa_detailed(&route, &table, &contexts);
     assert_ne!(result.state, rustbgpd_wire::AspaValidation::Invalid);
+}
+
+// Batch validation provenance: the session sends the tables it validated a
+// batch against, and the RIB re-validates only against a table it did not use.
+
+fn session_snapshot(
+    vrp: &Arc<rustbgpd_rpki::VrpTable>,
+    aspa: &Arc<rustbgpd_rpki::AspaTable>,
+) -> rustbgpd_rpki::ValidationSnapshot {
+    rustbgpd_rpki::ValidationSnapshot {
+        vrp_table: Some(Arc::clone(vrp)),
+        aspa_table: Some(Arc::clone(aspa)),
+    }
+}
+
+fn receive_batch(
+    manager: &mut RibManager,
+    peer: IpAddr,
+    announced: Vec<Route>,
+    validated_with: Option<rustbgpd_rpki::ValidationSnapshot>,
+) {
+    manager.handle_update(RibUpdate::RoutesReceived {
+        peer,
+        session_id: 0,
+        announced,
+        withdrawn: vec![],
+        flowspec_announced: vec![],
+        flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
+        validated_with,
+    });
+}
+
+fn stored_verdicts(
+    manager: &RibManager,
+    peer: IpAddr,
+) -> Vec<(Prefix, RpkiValidation, rustbgpd_wire::AspaValidation)> {
+    let mut out: Vec<_> = manager
+        .ribs
+        .get(&peer)
+        .unwrap()
+        .iter()
+        .map(|r| (r.prefix, r.validation_state, r.aspa_state))
+        .collect();
+    out.sort_unstable_by_key(|&(prefix, _, _)| prefix);
+    out
+}
+
+/// A route from neighbor 65002 whose origin 65003 attests 65002 as provider.
+fn provenance_route(third_octet: u8, neighbor_asn: u32) -> Route {
+    let mut route = make_route_with_as_path(
+        Ipv4Prefix::new(Ipv4Addr::new(10, 0, third_octet, 0), 24),
+        Ipv4Addr::new(1, 0, 0, 9),
+        vec![65002, 65003],
+    );
+    route.aspa_context =
+        crate::route::AspaContextId::intern(rustbgpd_wire::AspaValidationContext {
+            neighbor_asn: Some(neighbor_asn),
+            local_role: None,
+            first_as_check_exempt: false,
+        });
+    route
+}
+
+fn provenance_vrps(asn: u32) -> Arc<rustbgpd_rpki::VrpTable> {
+    delta_table(&[delta_vrp(Ipv4Addr::new(10, 0, 0, 0), 16, 24, asn)])
+}
+
+fn provenance_aspa(provider: u32) -> Arc<rustbgpd_rpki::AspaTable> {
+    Arc::new(rustbgpd_rpki::AspaTable::new(vec![
+        rustbgpd_rpki::AspaRecord {
+            customer_asn: 65003,
+            provider_asns: vec![provider],
+        },
+    ]))
+}
+
+/// Red proof: re-validating a batch the session validated against the RIB's
+/// own tables overwrites the stand-in verdicts with (Valid, Valid).
+#[test]
+fn batch_validated_against_the_rib_tables_keeps_session_verdicts() {
+    let mut manager = delta_manager();
+    let peer = IpAddr::V4(Ipv4Addr::new(1, 0, 0, 9));
+    let vrps = provenance_vrps(65003);
+    let aspa = provenance_aspa(65002);
+    manager.handle_rpki_cache_update(Arc::clone(&vrps), None);
+    manager.handle_aspa_cache_update(Arc::clone(&aspa), None);
+
+    // Stand-in session verdicts that the tables would not produce, so the
+    // assertion observes whether the RIB re-ran validation.
+    let mut route = provenance_route(0, 65002);
+    route.validation_state = RpkiValidation::Invalid;
+    route.aspa_state = rustbgpd_wire::AspaValidation::Invalid;
+    receive_batch(
+        &mut manager,
+        peer,
+        vec![route],
+        Some(session_snapshot(&vrps, &aspa)),
+    );
+    while manager.process_next_route_chunk() {}
+
+    assert_eq!(
+        stored_verdicts(&manager, peer),
+        vec![(
+            Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 24)),
+            RpkiValidation::Invalid,
+            rustbgpd_wire::AspaValidation::Invalid,
+        )]
+    );
+}
+
+/// A cache update that lands after the batch was queued but before its chunk
+/// is ingested leaves the session's tables stale; the RIB must re-validate
+/// against the tables it holds at insert. Red proof: trusting any
+/// session-validated batch stores the stale (`NotFound`, Unknown).
+#[test]
+fn cache_update_between_receive_and_insert_revalidates_the_batch() {
+    let mut manager = delta_manager();
+    let peer = IpAddr::V4(Ipv4Addr::new(1, 0, 0, 9));
+    let old_vrps = delta_table(&[]);
+    let old_aspa = Arc::new(rustbgpd_rpki::AspaTable::new(vec![]));
+    manager.handle_rpki_cache_update(Arc::clone(&old_vrps), None);
+    manager.handle_aspa_cache_update(Arc::clone(&old_aspa), None);
+
+    // Correct verdicts under the old tables.
+    let route = provenance_route(0, 65002);
+    receive_batch(
+        &mut manager,
+        peer,
+        vec![route],
+        Some(session_snapshot(&old_vrps, &old_aspa)),
+    );
+    manager.handle_rpki_cache_update(provenance_vrps(65003), None);
+    manager.handle_aspa_cache_update(provenance_aspa(65002), None);
+    while manager.process_next_route_chunk() {}
+
+    assert_eq!(
+        stored_verdicts(&manager, peer),
+        vec![(
+            Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 24)),
+            RpkiValidation::Valid,
+            rustbgpd_wire::AspaValidation::Valid,
+        )]
+    );
+}
+
+/// A batch validated against a table the RIB has not installed yet is
+/// re-validated against the RIB's current table, and routes whose verdict
+/// was kept are still revalidated by later incremental cache updates.
+#[test]
+fn skipped_and_ahead_of_rib_batches_follow_later_vrp_updates() {
+    let mut manager = delta_manager();
+    let peer = IpAddr::V4(Ipv4Addr::new(1, 0, 0, 9));
+    let covered = Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 24));
+    let ahead = Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(10, 0, 1, 0), 24));
+    let aspa = Arc::new(rustbgpd_rpki::AspaTable::new(vec![]));
+    let valid_vrp = delta_vrp(Ipv4Addr::new(10, 0, 0, 0), 16, 24, 65003);
+    let current = delta_table(std::slice::from_ref(&valid_vrp));
+    manager.handle_rpki_cache_update(Arc::clone(&current), None);
+    manager.handle_aspa_cache_update(Arc::clone(&aspa), None);
+
+    // Validated by the session against the RIB's table: verdict kept.
+    let mut kept = provenance_route(0, 65002);
+    kept.validation_state = RpkiValidation::Valid;
+    receive_batch(
+        &mut manager,
+        peer,
+        vec![kept],
+        Some(session_snapshot(&current, &aspa)),
+    );
+    // Validated against a newer table the RIB has not installed yet (it
+    // withdraws the VRP): the RIB judges with its own table, as before.
+    let newer = delta_table(&[]);
+    let mut early = provenance_route(1, 65002);
+    early.validation_state = RpkiValidation::NotFound;
+    receive_batch(
+        &mut manager,
+        peer,
+        vec![early],
+        Some(session_snapshot(&newer, &aspa)),
+    );
+    while manager.process_next_route_chunk() {}
+    assert_eq!(state_of(&manager, peer, covered), RpkiValidation::Valid);
+    assert_eq!(state_of(&manager, peer, ahead), RpkiValidation::Valid);
+
+    // The newer table arrives as a withdrawal delta; both routes follow it.
+    manager.handle_rpki_cache_update(newer, Some(vec![valid_vrp]));
+    assert_eq!(state_of(&manager, peer, covered), RpkiValidation::NotFound);
+    assert_eq!(state_of(&manager, peer, ahead), RpkiValidation::NotFound);
+}
+
+/// Each table is matched on its own: a matching VRP table keeps the session's
+/// origin verdict while a different ASPA table is re-verified per route, with
+/// the route's own session context and the iBGP rule. Red proof: one combined
+/// identity check either keeps the stand-in ASPA verdicts or overwrites the
+/// stand-in origin verdicts.
+#[test]
+fn aspa_mismatch_revalidates_with_each_route_context_and_ibgp_rule() {
+    let mut manager = delta_manager();
+    let peer = IpAddr::V4(Ipv4Addr::new(1, 0, 0, 9));
+    let vrps = provenance_vrps(65003);
+    let session_aspa = Arc::new(rustbgpd_rpki::AspaTable::new(vec![]));
+    manager.handle_rpki_cache_update(Arc::clone(&vrps), None);
+    manager.handle_aspa_cache_update(provenance_aspa(65002), None);
+
+    let neighbor = provenance_route(0, 65002);
+    let first_as_mismatch = provenance_route(1, 65009);
+    let mut ibgp = provenance_route(2, 65002);
+    ibgp.origin_type = crate::route::RouteOrigin::Ibgp;
+    let routes: Vec<Route> = [neighbor, first_as_mismatch, ibgp]
+        .into_iter()
+        .map(|mut route| {
+            route.validation_state = RpkiValidation::Invalid;
+            route.aspa_state = rustbgpd_wire::AspaValidation::Valid;
+            route
+        })
+        .collect();
+    receive_batch(
+        &mut manager,
+        peer,
+        routes,
+        Some(session_snapshot(&vrps, &session_aspa)),
+    );
+    while manager.process_next_route_chunk() {}
+
+    let prefix = |octet| Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(10, 0, octet, 0), 24));
+    assert_eq!(
+        stored_verdicts(&manager, peer),
+        vec![
+            (
+                prefix(0),
+                RpkiValidation::Invalid,
+                rustbgpd_wire::AspaValidation::Valid
+            ),
+            (
+                prefix(1),
+                RpkiValidation::Invalid,
+                rustbgpd_wire::AspaValidation::Invalid
+            ),
+            (
+                prefix(2),
+                RpkiValidation::Invalid,
+                rustbgpd_wire::AspaValidation::Unknown
+            ),
+        ]
+    );
 }

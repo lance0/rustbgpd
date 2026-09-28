@@ -1487,10 +1487,15 @@ struct PendingRoutesReceived {
     flowspec_announced: std::vec::IntoIter<crate::route::FlowSpecRoute>,
     evpn_withdrawn: std::vec::IntoIter<rustbgpd_wire::EvpnRouteKey>,
     evpn_announced: std::vec::IntoIter<crate::route::EvpnRibRoute>,
+    validated_with: Option<rustbgpd_rpki::ValidationSnapshot>,
     phase: PendingRoutePhase,
 }
 
 impl PendingRoutesReceived {
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "RIB update messages carry every supported family as one transaction"
+    )]
     fn new(
         peer: IpAddr,
         announced: Vec<crate::route::Route>,
@@ -1499,6 +1504,7 @@ impl PendingRoutesReceived {
         flowspec_withdrawn: Vec<crate::route::FlowSpecKey>,
         evpn_announced: Vec<crate::route::EvpnRibRoute>,
         evpn_withdrawn: Vec<rustbgpd_wire::EvpnRouteKey>,
+        validated_with: Option<rustbgpd_rpki::ValidationSnapshot>,
     ) -> Self {
         let route_capacity_hint = (announced.len() + withdrawn.len()).max(16);
         let flowspec_capacity_hint = (flowspec_announced.len() + flowspec_withdrawn.len()).max(4);
@@ -1512,6 +1518,7 @@ impl PendingRoutesReceived {
             flowspec_announced: flowspec_announced.into_iter(),
             evpn_withdrawn: evpn_withdrawn.into_iter(),
             evpn_announced: evpn_announced.into_iter(),
+            validated_with,
             phase: PendingRoutePhase::Withdrawn,
         }
     }
@@ -2831,6 +2838,7 @@ impl RibManager {
                 flowspec_withdrawn,
                 evpn_announced,
                 evpn_withdrawn,
+                validated_with,
             } => {
                 if !self.stale_session_message(peer, session_id, "RoutesReceived", Routes) {
                     #[cfg(any(test, feature = "bench-internals"))]
@@ -2852,6 +2860,7 @@ impl RibManager {
                         flowspec_withdrawn,
                         evpn_announced,
                         evpn_withdrawn,
+                        validated_with,
                     );
                 }
             }

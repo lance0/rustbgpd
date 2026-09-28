@@ -1288,6 +1288,7 @@ async fn grouped_shared_unicast_probes_once_per_compatible_wire_profile() {
         flowspec_withdrawn: Vec::new(),
         evpn_announced: Vec::new(),
         evpn_withdrawn: Vec::new(),
+        validated_with: None,
     })
     .await
     .unwrap();
@@ -1334,6 +1335,7 @@ async fn grouped_shared_unicast_does_not_reuse_when_snapshot_refuses() {
         flowspec_withdrawn: Vec::new(),
         evpn_announced: Vec::new(),
         evpn_withdrawn: Vec::new(),
+        validated_with: None,
     })
     .await
     .unwrap();
@@ -1376,6 +1378,7 @@ async fn grouped_shared_unicast_falls_back_on_wrong_reuse_cardinality() {
         flowspec_withdrawn: Vec::new(),
         evpn_announced: Vec::new(),
         evpn_withdrawn: Vec::new(),
+        validated_with: None,
     })
     .await
     .unwrap();
@@ -1427,6 +1430,7 @@ async fn grouped_classic_rejection_is_a_member_local_overlay_across_source_flip_
         flowspec_withdrawn: Vec::new(),
         evpn_announced: Vec::new(),
         evpn_withdrawn: Vec::new(),
+        validated_with: None,
     })
     .await
     .unwrap();
@@ -1464,6 +1468,7 @@ async fn grouped_classic_rejection_is_a_member_local_overlay_across_source_flip_
         flowspec_withdrawn: Vec::new(),
         evpn_announced: Vec::new(),
         evpn_withdrawn: Vec::new(),
+        validated_with: None,
     })
     .await
     .unwrap();
@@ -1522,6 +1527,7 @@ async fn grouped_classic_rejection_is_a_member_local_overlay_across_source_flip_
             flowspec_withdrawn: Vec::new(),
             evpn_announced: Vec::new(),
             evpn_withdrawn: Vec::new(),
+            validated_with: None,
         })
         .await
         .unwrap();
@@ -1739,6 +1745,7 @@ async fn add_path_explain_does_not_mark_exact_rejected_rank_as_advertised() {
             flowspec_withdrawn: Vec::new(),
             evpn_announced: Vec::new(),
             evpn_withdrawn: Vec::new(),
+            validated_with: None,
         })
         .await
         .unwrap();

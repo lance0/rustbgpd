@@ -1860,6 +1860,7 @@ async fn evpn_rtc_membership_filters_tenants_and_route_types() {
         flowspec_withdrawn: vec![],
         evpn_announced: vec![tenant_a, tenant_b, es, no_rt],
         evpn_withdrawn: vec![],
+        validated_with: None,
     })
     .await
     .unwrap();
@@ -2013,6 +2014,7 @@ async fn evpn_routes_received_from(
         flowspec_withdrawn: vec![],
         evpn_announced: vec![route],
         evpn_withdrawn: vec![],
+        validated_with: None,
     })
     .await
     .unwrap();

@@ -4691,6 +4691,7 @@ fn receive_routes(m: &mut RibManager, source: IpAddr, announced: Vec<Route>) {
         flowspec_withdrawn: vec![],
         evpn_announced: vec![],
         evpn_withdrawn: vec![],
+        validated_with: None,
     });
     while m.process_next_route_chunk() {}
 }

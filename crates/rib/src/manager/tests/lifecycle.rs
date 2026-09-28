@@ -56,6 +56,7 @@ async fn channel_full_marks_dirty_and_resyncs() {
         flowspec_withdrawn: vec![],
         evpn_announced: vec![],
         evpn_withdrawn: vec![],
+        validated_with: None,
     })
     .await
     .unwrap();
@@ -78,6 +79,7 @@ async fn channel_full_marks_dirty_and_resyncs() {
         flowspec_withdrawn: vec![],
         evpn_announced: vec![],
         evpn_withdrawn: vec![],
+        validated_with: None,
     })
     .await
     .unwrap();
@@ -96,6 +98,7 @@ async fn channel_full_marks_dirty_and_resyncs() {
         flowspec_withdrawn: vec![],
         evpn_announced: vec![],
         evpn_withdrawn: vec![],
+        validated_with: None,
     })
     .await
     .unwrap();
@@ -202,6 +205,7 @@ async fn dirty_resync_not_starved_by_query_traffic() {
         flowspec_withdrawn: vec![],
         evpn_announced: vec![],
         evpn_withdrawn: vec![],
+        validated_with: None,
     })
     .await
     .unwrap();
@@ -217,6 +221,7 @@ async fn dirty_resync_not_starved_by_query_traffic() {
         flowspec_withdrawn: vec![],
         evpn_announced: vec![],
         evpn_withdrawn: vec![],
+        validated_with: None,
     })
     .await
     .unwrap();
@@ -235,6 +240,7 @@ async fn dirty_resync_not_starved_by_query_traffic() {
         flowspec_withdrawn: vec![],
         evpn_announced: vec![],
         evpn_withdrawn: vec![],
+        validated_with: None,
     })
     .await
     .unwrap();
@@ -254,6 +260,7 @@ async fn dirty_resync_not_starved_by_query_traffic() {
         flowspec_withdrawn: vec![],
         evpn_announced: vec![],
         evpn_withdrawn: vec![],
+        validated_with: None,
     })
     .await
     .unwrap();
@@ -328,6 +335,7 @@ async fn initial_dump_failure_leaves_adjribout_empty() {
         flowspec_withdrawn: vec![],
         evpn_announced: vec![],
         evpn_withdrawn: vec![],
+        validated_with: None,
     })
     .await
     .unwrap();
@@ -395,6 +403,7 @@ async fn initial_dump_failure_resyncs_via_timer() {
         flowspec_withdrawn: vec![],
         evpn_announced: vec![],
         evpn_withdrawn: vec![],
+        validated_with: None,
     })
     .await
     .unwrap();
@@ -540,6 +549,7 @@ async fn stale_peer_down_after_replacement_peer_up_is_discarded() {
         flowspec_withdrawn: vec![],
         evpn_announced: vec![imet_winner],
         evpn_withdrawn: vec![],
+        validated_with: None,
     })
     .await
     .unwrap();
@@ -602,6 +612,7 @@ async fn stale_peer_down_after_replacement_peer_up_is_discarded() {
         flowspec_withdrawn: vec![],
         evpn_announced: vec![imet],
         evpn_withdrawn: vec![],
+        validated_with: None,
     })
     .await
     .unwrap();
@@ -723,6 +734,7 @@ async fn stale_graceful_restart_from_superseded_session_is_discarded() {
         flowspec_withdrawn: vec![],
         evpn_announced: vec![imet],
         evpn_withdrawn: vec![],
+        validated_with: None,
     })
     .await
     .unwrap();
@@ -812,6 +824,7 @@ async fn peer_down_of_replacement_session_fails_over_to_surviving_session() {
         flowspec_withdrawn: vec![],
         evpn_announced: vec![imet_winner],
         evpn_withdrawn: vec![],
+        validated_with: None,
     })
     .await
     .unwrap();
@@ -892,6 +905,7 @@ async fn peer_down_of_replacement_session_fails_over_to_surviving_session() {
         flowspec_withdrawn: vec![],
         evpn_announced: vec![imet_again],
         evpn_withdrawn: vec![],
+        validated_with: None,
     })
     .await
     .unwrap();
@@ -936,6 +950,7 @@ async fn peer_down_of_replacement_session_fails_over_to_surviving_session() {
         flowspec_withdrawn: vec![],
         evpn_announced: vec![imet],
         evpn_withdrawn: vec![],
+        validated_with: None,
     })
     .await
     .unwrap();
@@ -1383,6 +1398,7 @@ async fn stale_routes_received_from_superseded_session_is_discarded() {
         flowspec_withdrawn: vec![],
         evpn_announced: vec![imet_stale],
         evpn_withdrawn: vec![],
+        validated_with: None,
     })
     .await
     .unwrap();
@@ -1406,6 +1422,7 @@ async fn stale_routes_received_from_superseded_session_is_discarded() {
         flowspec_withdrawn: vec![],
         evpn_announced: vec![imet_active],
         evpn_withdrawn: vec![],
+        validated_with: None,
     })
     .await
     .unwrap();
@@ -1450,6 +1467,7 @@ async fn stale_end_of_rib_from_superseded_session_is_discarded() {
         flowspec_withdrawn: vec![],
         evpn_announced: vec![],
         evpn_withdrawn: vec![],
+        validated_with: None,
     })
     .await
     .unwrap();
@@ -1548,6 +1566,7 @@ async fn stale_enhanced_refresh_markers_from_superseded_session_are_discarded() 
         flowspec_withdrawn: vec![],
         evpn_announced: vec![],
         evpn_withdrawn: vec![],
+        validated_with: None,
     })
     .await
     .unwrap();
@@ -1796,6 +1815,7 @@ async fn active_session_messages_flow_after_replacement() {
         flowspec_withdrawn: vec![],
         evpn_announced: vec![],
         evpn_withdrawn: vec![],
+        validated_with: None,
     })
     .await
     .unwrap();
@@ -1846,6 +1866,7 @@ async fn unregistered_session_message_keeps_legacy_accept_behavior() {
         flowspec_withdrawn: vec![],
         evpn_announced: vec![],
         evpn_withdrawn: vec![],
+        validated_with: None,
     })
     .await
     .unwrap();
@@ -1910,6 +1931,7 @@ fn test_routes_received(peer: IpAddr, announced: Vec<Route>) -> RibUpdate {
         flowspec_withdrawn: vec![],
         evpn_announced: vec![],
         evpn_withdrawn: vec![],
+        validated_with: None,
     }
 }
 

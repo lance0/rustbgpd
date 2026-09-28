@@ -39,6 +39,7 @@ fn routes(peer: Ipv4Addr, first: usize, count: usize) -> RibUpdate {
         flowspec_withdrawn: Vec::new(),
         evpn_announced: Vec::new(),
         evpn_withdrawn: Vec::new(),
+        validated_with: None,
     }
 }
 

@@ -144,6 +144,7 @@ async fn partial_communities_enforce_no_export_and_no_advertise() {
             flowspec_withdrawn: vec![],
             evpn_announced: vec![],
             evpn_withdrawn: vec![],
+            validated_with: None,
         })
         .await
         .unwrap();
@@ -160,6 +161,7 @@ async fn partial_communities_enforce_no_export_and_no_advertise() {
             flowspec_withdrawn: vec![],
             evpn_announced: vec![],
             evpn_withdrawn: vec![],
+            validated_with: None,
         })
         .await
         .unwrap();
@@ -334,6 +336,7 @@ async fn partial_community_attributes_survive_policy_update_group_and_wire_encod
         flowspec_withdrawn: vec![],
         evpn_announced: vec![],
         evpn_withdrawn: vec![],
+        validated_with: None,
     })
     .await
     .unwrap();
@@ -364,6 +367,7 @@ async fn seed_three_dual_stack_candidates(
             flowspec_withdrawn: vec![],
             evpn_announced: vec![],
             evpn_withdrawn: vec![],
+            validated_with: None,
         }
     }
 
@@ -606,6 +610,7 @@ async fn refresh_peer_outbound_replays_only_the_target_exportable_inventory() {
         flowspec_withdrawn: vec![],
         evpn_announced: vec![],
         evpn_withdrawn: vec![],
+        validated_with: None,
     })
     .await
     .unwrap();
@@ -620,6 +625,7 @@ async fn refresh_peer_outbound_replays_only_the_target_exportable_inventory() {
         flowspec_withdrawn: vec![],
         evpn_announced: vec![],
         evpn_withdrawn: vec![],
+        validated_with: None,
     })
     .await
     .unwrap();
@@ -643,6 +649,7 @@ async fn refresh_peer_outbound_replays_only_the_target_exportable_inventory() {
         flowspec_withdrawn: vec![],
         evpn_announced: vec![],
         evpn_withdrawn: vec![],
+        validated_with: None,
     })
     .await
     .unwrap();
@@ -659,6 +666,7 @@ async fn refresh_peer_outbound_replays_only_the_target_exportable_inventory() {
         flowspec_withdrawn: vec![],
         evpn_announced: vec![],
         evpn_withdrawn: vec![],
+        validated_with: None,
     })
     .await
     .unwrap();
@@ -673,6 +681,7 @@ async fn refresh_peer_outbound_replays_only_the_target_exportable_inventory() {
         flowspec_withdrawn: vec![],
         evpn_announced: vec![],
         evpn_withdrawn: vec![],
+        validated_with: None,
     })
     .await
     .unwrap();
@@ -814,6 +823,7 @@ async fn no_advertise_precedes_policy_for_grouped_and_private_single_best() {
         flowspec_withdrawn: vec![],
         evpn_announced: vec![],
         evpn_withdrawn: vec![],
+        validated_with: None,
     })
     .await
     .unwrap();
@@ -833,6 +843,7 @@ async fn no_advertise_precedes_policy_for_grouped_and_private_single_best() {
         flowspec_withdrawn: vec![],
         evpn_announced: vec![],
         evpn_withdrawn: vec![],
+        validated_with: None,
     })
     .await
     .unwrap();
@@ -884,6 +895,7 @@ async fn no_advertise_precedes_policy_for_grouped_and_private_single_best() {
         flowspec_withdrawn: vec![],
         evpn_announced: vec![],
         evpn_withdrawn: vec![],
+        validated_with: None,
     })
     .await
     .unwrap();
@@ -1012,6 +1024,7 @@ async fn otc_is_rejected_before_grouped_and_private_adj_rib_out_commit() {
         flowspec_withdrawn: vec![],
         evpn_announced: vec![],
         evpn_withdrawn: vec![],
+        validated_with: None,
     })
     .await
     .unwrap();
@@ -1032,6 +1045,7 @@ async fn otc_is_rejected_before_grouped_and_private_adj_rib_out_commit() {
         flowspec_withdrawn: vec![],
         evpn_announced: vec![],
         evpn_withdrawn: vec![],
+        validated_with: None,
     })
     .await
     .unwrap();
@@ -1063,6 +1077,7 @@ async fn otc_is_rejected_before_grouped_and_private_adj_rib_out_commit() {
         flowspec_withdrawn: vec![],
         evpn_announced: vec![],
         evpn_withdrawn: vec![],
+        validated_with: None,
     })
     .await
     .unwrap();
@@ -1141,6 +1156,7 @@ async fn otc_is_rejected_before_grouped_and_private_adj_rib_out_commit() {
         flowspec_withdrawn: vec![],
         evpn_announced: vec![],
         evpn_withdrawn: vec![],
+        validated_with: None,
     })
     .await
     .unwrap();
@@ -1167,6 +1183,7 @@ async fn otc_is_rejected_before_grouped_and_private_adj_rib_out_commit() {
         flowspec_withdrawn: vec![],
         evpn_announced: vec![],
         evpn_withdrawn: vec![],
+        validated_with: None,
     })
     .await
     .unwrap();
@@ -1273,6 +1290,7 @@ async fn assert_otc_backpressure_dedup(per_client_best: bool) {
         flowspec_withdrawn: vec![],
         evpn_announced: vec![],
         evpn_withdrawn: vec![],
+        validated_with: None,
     })
     .await
     .unwrap();
@@ -1318,6 +1336,10 @@ async fn private_otc_backpressure_emits_one_deduplicated_diagnostic_on_recovery(
 }
 
 #[tokio::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "the route batch literal carries every supported family as one transaction"
+)]
 async fn grouped_otc_source_withdraw_clears_pending_diagnostic_before_recovery() {
     tokio::time::pause();
     let (tx, rx) = mpsc::channel(64);
@@ -1370,6 +1392,7 @@ async fn grouped_otc_source_withdraw_clears_pending_diagnostic_before_recovery()
         flowspec_withdrawn: vec![],
         evpn_announced: vec![],
         evpn_withdrawn: vec![],
+        validated_with: None,
     })
     .await
     .unwrap();
@@ -1382,6 +1405,7 @@ async fn grouped_otc_source_withdraw_clears_pending_diagnostic_before_recovery()
         flowspec_withdrawn: vec![],
         evpn_announced: vec![],
         evpn_withdrawn: vec![],
+        validated_with: None,
     })
     .await
     .unwrap();
@@ -1407,6 +1431,7 @@ async fn grouped_otc_source_withdraw_clears_pending_diagnostic_before_recovery()
         flowspec_withdrawn: vec![],
         evpn_announced: vec![],
         evpn_withdrawn: vec![],
+        validated_with: None,
     })
     .await
     .unwrap();
@@ -1722,6 +1747,7 @@ async fn paths_limit_drives_dual_stack_initial_churn_withdraw_and_refresh() {
             flowspec_withdrawn: vec![],
             evpn_announced: vec![],
             evpn_withdrawn: vec![],
+            validated_with: None,
         })
         .await
         .unwrap();
@@ -1737,6 +1763,7 @@ async fn paths_limit_drives_dual_stack_initial_churn_withdraw_and_refresh() {
             flowspec_withdrawn: vec![],
             evpn_announced: vec![],
             evpn_withdrawn: vec![],
+            validated_with: None,
         })
         .await
         .unwrap();
@@ -1805,6 +1832,7 @@ async fn paths_limit_drives_dual_stack_initial_churn_withdraw_and_refresh() {
             flowspec_withdrawn: vec![],
             evpn_announced: vec![],
             evpn_withdrawn: vec![],
+            validated_with: None,
         })
         .await
         .unwrap();
@@ -1885,6 +1913,7 @@ async fn routes_received_and_queried() {
         flowspec_withdrawn: vec![],
         evpn_announced: vec![],
         evpn_withdrawn: vec![],
+        validated_with: None,
     })
     .await
     .unwrap();
@@ -1938,6 +1967,7 @@ async fn large_routes_received_batch_preserves_final_state() {
         flowspec_withdrawn: vec![],
         evpn_announced: vec![],
         evpn_withdrawn: vec![],
+        validated_with: None,
     })
     .await
     .unwrap();
@@ -2011,6 +2041,7 @@ async fn multi_chunk_flood_coalesces_into_one_outbound_batch() {
         flowspec_withdrawn: vec![],
         evpn_announced: vec![],
         evpn_withdrawn: vec![],
+        validated_with: None,
     })
     .await
     .unwrap();
@@ -2063,6 +2094,7 @@ async fn query_channel_observes_partial_progress_during_large_batch() {
         flowspec_withdrawn: vec![],
         evpn_announced: vec![],
         evpn_withdrawn: vec![],
+        validated_with: None,
     })
     .await
     .unwrap();
@@ -2109,6 +2141,7 @@ async fn peer_down_clears_routes() {
         flowspec_withdrawn: vec![],
         evpn_announced: vec![],
         evpn_withdrawn: vec![],
+        validated_with: None,
     })
     .await
     .unwrap();
@@ -2149,6 +2182,7 @@ async fn withdrawal_removes_route() {
         flowspec_withdrawn: vec![],
         evpn_announced: vec![],
         evpn_withdrawn: vec![],
+        validated_with: None,
     })
     .await
     .unwrap();
@@ -2162,6 +2196,7 @@ async fn withdrawal_removes_route() {
         flowspec_withdrawn: vec![],
         evpn_announced: vec![],
         evpn_withdrawn: vec![],
+        validated_with: None,
     })
     .await
     .unwrap();
@@ -2195,6 +2230,7 @@ async fn query_all_peers() {
         flowspec_withdrawn: vec![],
         evpn_announced: vec![],
         evpn_withdrawn: vec![],
+        validated_with: None,
     })
     .await
     .unwrap();
@@ -2211,6 +2247,7 @@ async fn query_all_peers() {
         flowspec_withdrawn: vec![],
         evpn_announced: vec![],
         evpn_withdrawn: vec![],
+        validated_with: None,
     })
     .await
     .unwrap();
@@ -2244,6 +2281,7 @@ async fn best_routes_returns_winner() {
         flowspec_withdrawn: vec![],
         evpn_announced: vec![],
         evpn_withdrawn: vec![],
+        validated_with: None,
     })
     .await
     .unwrap();
@@ -2258,6 +2296,7 @@ async fn best_routes_returns_winner() {
         flowspec_withdrawn: vec![],
         evpn_announced: vec![],
         evpn_withdrawn: vec![],
+        validated_with: None,
     })
     .await
     .unwrap();
@@ -2297,6 +2336,7 @@ async fn peer_down_promotes_second_best() {
         flowspec_withdrawn: vec![],
         evpn_announced: vec![],
         evpn_withdrawn: vec![],
+        validated_with: None,
     })
     .await
     .unwrap();
@@ -2310,6 +2350,7 @@ async fn peer_down_promotes_second_best() {
         flowspec_withdrawn: vec![],
         evpn_announced: vec![],
         evpn_withdrawn: vec![],
+        validated_with: None,
     })
     .await
     .unwrap();
@@ -2357,6 +2398,7 @@ async fn withdrawal_updates_best() {
         flowspec_withdrawn: vec![],
         evpn_announced: vec![],
         evpn_withdrawn: vec![],
+        validated_with: None,
     })
     .await
     .unwrap();
@@ -2370,6 +2412,7 @@ async fn withdrawal_updates_best() {
         flowspec_withdrawn: vec![],
         evpn_announced: vec![],
         evpn_withdrawn: vec![],
+        validated_with: None,
     })
     .await
     .unwrap();
@@ -2384,6 +2427,7 @@ async fn withdrawal_updates_best() {
         flowspec_withdrawn: vec![],
         evpn_announced: vec![],
         evpn_withdrawn: vec![],
+        validated_with: None,
     })
     .await
     .unwrap();
@@ -2428,6 +2472,7 @@ async fn different_best_per_prefix() {
         flowspec_withdrawn: vec![],
         evpn_announced: vec![],
         evpn_withdrawn: vec![],
+        validated_with: None,
     })
     .await
     .unwrap();
@@ -2444,6 +2489,7 @@ async fn different_best_per_prefix() {
         flowspec_withdrawn: vec![],
         evpn_announced: vec![],
         evpn_withdrawn: vec![],
+        validated_with: None,
     })
     .await
     .unwrap();
@@ -2496,6 +2542,7 @@ async fn peer_up_triggers_initial_table_dump() {
         flowspec_withdrawn: vec![],
         evpn_announced: vec![],
         evpn_withdrawn: vec![],
+        validated_with: None,
     })
     .await
     .unwrap();
@@ -2574,6 +2621,7 @@ async fn route_change_distributes_to_peer() {
         flowspec_withdrawn: vec![],
         evpn_announced: vec![],
         evpn_withdrawn: vec![],
+        validated_with: None,
     })
     .await
     .unwrap();
@@ -2629,6 +2677,7 @@ async fn single_best_send_normalizes_path_id_to_zero() {
         flowspec_withdrawn: vec![],
         evpn_announced: vec![],
         evpn_withdrawn: vec![],
+        validated_with: None,
     })
     .await
     .unwrap();
@@ -2683,6 +2732,7 @@ async fn split_horizon_prevents_echo() {
         flowspec_withdrawn: vec![],
         evpn_announced: vec![],
         evpn_withdrawn: vec![],
+        validated_with: None,
     })
     .await
     .unwrap();
@@ -2770,6 +2820,7 @@ async fn ibgp_route_not_sent_to_ibgp_peer() {
         flowspec_withdrawn: vec![],
         evpn_announced: vec![],
         evpn_withdrawn: vec![],
+        validated_with: None,
     })
     .await
     .unwrap();
@@ -2824,6 +2875,7 @@ async fn ibgp_route_sent_to_ebgp_peer() {
         flowspec_withdrawn: vec![],
         evpn_announced: vec![],
         evpn_withdrawn: vec![],
+        validated_with: None,
     })
     .await
     .unwrap();
@@ -2882,6 +2934,7 @@ async fn ebgp_route_sent_to_ibgp_peer() {
         flowspec_withdrawn: vec![],
         evpn_announced: vec![],
         evpn_withdrawn: vec![],
+        validated_with: None,
     })
     .await
     .unwrap();
@@ -2967,6 +3020,7 @@ async fn ibgp_split_horizon_withdraw_on_best_change() {
         flowspec_withdrawn: vec![],
         evpn_announced: vec![],
         evpn_withdrawn: vec![],
+        validated_with: None,
     })
     .await
     .unwrap();
@@ -2996,6 +3050,7 @@ async fn ibgp_split_horizon_withdraw_on_best_change() {
         flowspec_withdrawn: vec![],
         evpn_announced: vec![],
         evpn_withdrawn: vec![],
+        validated_with: None,
     })
     .await
     .unwrap();
@@ -3433,6 +3488,7 @@ async fn distribute_changes_filters_unsendable_families() {
         flowspec_withdrawn: vec![],
         evpn_announced: vec![],
         evpn_withdrawn: vec![],
+        validated_with: None,
     })
     .await
     .unwrap();
@@ -3494,6 +3550,7 @@ async fn send_initial_table_filters_unsendable_families() {
         flowspec_withdrawn: vec![],
         evpn_announced: vec![],
         evpn_withdrawn: vec![],
+        validated_with: None,
     })
     .await
     .unwrap();
@@ -3580,6 +3637,7 @@ async fn dual_stack_peer_receives_both_families() {
         flowspec_withdrawn: vec![],
         evpn_announced: vec![],
         evpn_withdrawn: vec![],
+        validated_with: None,
     })
     .await
     .unwrap();
@@ -3711,6 +3769,7 @@ async fn rr_client_route_reflected_to_all_ibgp() {
         flowspec_withdrawn: vec![],
         evpn_announced: vec![],
         evpn_withdrawn: vec![],
+        validated_with: None,
     })
     .await
     .unwrap();
@@ -3826,6 +3885,7 @@ async fn rr_nonclient_route_reflected_to_clients_only() {
         flowspec_withdrawn: vec![],
         evpn_announced: vec![],
         evpn_withdrawn: vec![],
+        validated_with: None,
     })
     .await
     .unwrap();
@@ -3893,6 +3953,7 @@ async fn non_rr_ibgp_split_horizon_unchanged() {
         flowspec_withdrawn: vec![],
         evpn_announced: vec![],
         evpn_withdrawn: vec![],
+        validated_with: None,
     })
     .await
     .unwrap();
@@ -3955,6 +4016,7 @@ async fn rr_ebgp_route_to_all_ibgp() {
         flowspec_withdrawn: vec![],
         evpn_announced: vec![],
         evpn_withdrawn: vec![],
+        validated_with: None,
     })
     .await
     .unwrap();
@@ -4088,6 +4150,7 @@ async fn link_local_only_next_hop_change_is_re_advertised() {
         flowspec_withdrawn: vec![],
         evpn_announced: vec![],
         evpn_withdrawn: vec![],
+        validated_with: None,
     })
     .await
     .unwrap();
@@ -4109,6 +4172,7 @@ async fn link_local_only_next_hop_change_is_re_advertised() {
         flowspec_withdrawn: vec![],
         evpn_announced: vec![],
         evpn_withdrawn: vec![],
+        validated_with: None,
     })
     .await
     .unwrap();
@@ -4182,6 +4246,7 @@ async fn otc_tagged_unicast_is_advertised_toward_customer_and_route_server_clien
             flowspec_withdrawn: vec![],
             evpn_announced: vec![],
             evpn_withdrawn: vec![],
+            validated_with: None,
         })
         .await
         .unwrap();

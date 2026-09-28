@@ -12,7 +12,6 @@ use rustbgpd_policy::{
     PolicyAction, PolicyChain, PolicyEvaluation, RouteContext, RouteFamily, RouteType,
     evaluate_chain_with_attribution,
 };
-use rustbgpd_rpki::VrpTable;
 use rustbgpd_telemetry::BgpMetrics;
 use rustbgpd_wire::{
     AddressPrefixOrf, Afi, BgpRole, OrfAction, OrfMatch, Prefix, RouteRefreshSubtype, Safi,
@@ -5125,6 +5124,7 @@ impl RibManager {
         flowspec_withdrawn: Vec<crate::route::FlowSpecKey>,
         evpn_announced: Vec<crate::route::EvpnRibRoute>,
         evpn_withdrawn: Vec<rustbgpd_wire::EvpnRouteKey>,
+        validated_with: Option<rustbgpd_rpki::ValidationSnapshot>,
     ) {
         if let std::collections::hash_map::Entry::Vacant(entry) = self.ribs.entry(peer) {
             let pending = PendingRoutesReceived::new(
@@ -5135,6 +5135,7 @@ impl RibManager {
                 flowspec_withdrawn,
                 evpn_announced,
                 evpn_withdrawn,
+                validated_with,
             );
             entry.insert(AdjRibIn::with_capacity(
                 peer,
@@ -5154,6 +5155,7 @@ impl RibManager {
                 flowspec_withdrawn,
                 evpn_announced,
                 evpn_withdrawn,
+                validated_with,
             ));
     }
 
@@ -5196,7 +5198,7 @@ impl RibManager {
                 self.process_withdraw_chunk(peer, withdrawn);
             }
             PendingRouteChunk::Announced(announced) => {
-                self.process_announce_chunk(peer, announced);
+                self.process_announce_chunk(peer, announced, pending.validated_with.as_ref());
             }
             PendingRouteChunk::FlowSpecWithdrawn(flowspec_withdrawn) => {
                 self.pending_exact_export_withdrawals.extend(
