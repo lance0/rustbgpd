@@ -2039,3 +2039,59 @@ fn aspa_mismatch_revalidates_with_each_route_context_and_ibgp_rule() {
         ]
     );
 }
+
+/// At startup the session watch receives a table before the RIB does. A
+/// batch validated against that table while the RIB holds none must get the
+/// RIB's no-table verdict (`NotFound`), not the session's; the RIB's first
+/// table then revalidates it. Red proof: treating "RIB has no table" like a
+/// matching table keeps the session's Valid.
+#[test]
+fn batch_validated_against_a_vrp_table_the_rib_lacks_stores_not_found() {
+    let mut manager = delta_manager();
+    let peer = IpAddr::V4(Ipv4Addr::new(1, 0, 0, 9));
+    let prefix = Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 24));
+    let vrps = provenance_vrps(65003);
+    let mut route = provenance_route(0, 65002);
+    route.validation_state = RpkiValidation::Valid;
+    receive_batch(
+        &mut manager,
+        peer,
+        vec![route],
+        Some(rustbgpd_rpki::ValidationSnapshot {
+            vrp_table: Some(Arc::clone(&vrps)),
+            aspa_table: None,
+        }),
+    );
+    while manager.process_next_route_chunk() {}
+    assert_eq!(state_of(&manager, peer, prefix), RpkiValidation::NotFound);
+
+    manager.handle_rpki_cache_update(vrps, None);
+    assert_eq!(state_of(&manager, peer, prefix), RpkiValidation::Valid);
+}
+
+/// The ASPA counterpart: a batch verified against an ASPA table the RIB has
+/// not installed yet is stored Unknown, then verified by the RIB's first
+/// table. Red proof: keeping the session's verdict stores Valid first.
+#[test]
+fn batch_validated_against_an_aspa_table_the_rib_lacks_stores_unknown() {
+    let mut manager = delta_manager();
+    let peer = IpAddr::V4(Ipv4Addr::new(1, 0, 0, 9));
+    let aspa = provenance_aspa(65002);
+    let mut route = provenance_route(0, 65002);
+    route.aspa_state = rustbgpd_wire::AspaValidation::Valid;
+    receive_batch(
+        &mut manager,
+        peer,
+        vec![route],
+        Some(rustbgpd_rpki::ValidationSnapshot {
+            vrp_table: None,
+            aspa_table: Some(Arc::clone(&aspa)),
+        }),
+    );
+    while manager.process_next_route_chunk() {}
+    let aspa_state = |manager: &RibManager| stored_verdicts(manager, peer)[0].2;
+    assert_eq!(aspa_state(&manager), rustbgpd_wire::AspaValidation::Unknown);
+
+    manager.handle_aspa_cache_update(aspa, None);
+    assert_eq!(aspa_state(&manager), rustbgpd_wire::AspaValidation::Valid);
+}
