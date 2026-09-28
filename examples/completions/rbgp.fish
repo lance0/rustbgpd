@@ -40,17 +40,17 @@ complete -c rbgp -n "__fish_rbgp_needs_command" -l no-color -d 'Disable colored 
 complete -c rbgp -n "__fish_rbgp_needs_command" -s h -l help -d 'Print help (see more with \'--help\')'
 complete -c rbgp -n "__fish_rbgp_needs_command" -s V -l version -d 'Print version'
 complete -c rbgp -n "__fish_rbgp_needs_command" -f -a "global" -d 'Show daemon global configuration'
-complete -c rbgp -n "__fish_rbgp_needs_command" -f -a "config" -d 'Runtime config diagnostics'
+complete -c rbgp -n "__fish_rbgp_needs_command" -f -a "config" -d 'Plan, apply, confirm, roll back, and inspect runtime configuration'
 complete -c rbgp -n "__fish_rbgp_needs_command" -f -a "neighbor" -d 'Manage BGP neighbors'
 complete -c rbgp -n "__fish_rbgp_needs_command" -f -a "summary" -d 'Manage BGP neighbors'
-complete -c rbgp -n "__fish_rbgp_needs_command" -f -a "bfd" -d 'Inspect single-hop and multihop BFD sessions (ADR-0067)'
+complete -c rbgp -n "__fish_rbgp_needs_command" -f -a "bfd" -d 'Inspect single-hop and multihop BFD sessions'
 complete -c rbgp -n "__fish_rbgp_needs_command" -f -a "rpki" -d 'Inspect RPKI caches and validate origins or AS paths'
 complete -c rbgp -n "__fish_rbgp_needs_command" -f -a "rib" -d 'Query and manage the RIB'
 complete -c rbgp -n "__fish_rbgp_needs_command" -f -a "topology" -d 'Show the RFC 9107 ORR topology graph derived from BGP-LS'
 complete -c rbgp -n "__fish_rbgp_needs_command" -f -a "orr" -d 'Show RFC 9107 ORR per-vantage status (resolution, SPF reach, peers)'
 complete -c rbgp -n "__fish_rbgp_needs_command" -f -a "diff" -d 'Compare live RIB views against an external snapshot (read-only)'
 complete -c rbgp -n "__fish_rbgp_needs_command" -f -a "flowspec" -d 'Manage FlowSpec routes'
-complete -c rbgp -n "__fish_rbgp_needs_command" -f -a "evpn" -d 'Manage EVPN routes (list, add, delete — RFC 7432)'
+complete -c rbgp -n "__fish_rbgp_needs_command" -f -a "evpn" -d 'List, explain, inject, and withdraw EVPN routes; inspect VTEP state'
 complete -c rbgp -n "__fish_rbgp_needs_command" -f -a "watch" -d 'Watch route updates (streaming)'
 complete -c rbgp -n "__fish_rbgp_needs_command" -f -a "events" -d 'Show recent route update events'
 complete -c rbgp -n "__fish_rbgp_needs_command" -f -a "health" -d 'Check daemon health'
@@ -737,7 +737,7 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand rpki; and __fish_seen_subcomma
 complete -c rbgp -n "__fish_rbgp_using_subcommand rpki; and __fish_seen_subcommand_from help" -f -a "help" -d 'Print this message or the help of the given subcommand(s)'
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and not __fish_seen_subcommand_from lookup received recv advertised sent blackholes fib bgpls bgp-ls vpn labeled rtc add delete help" -s a -l family -d 'Address family filter (ipv4_unicast, ipv6_unicast)' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and not __fish_seen_subcommand_from lookup received recv advertised sent blackholes fib bgpls bgp-ls vpn labeled rtc add delete help" -s p -l prefix -d 'Prefix filter (e.g., 10.0.0.0/24)' -r
-complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and not __fish_seen_subcommand_from lookup received recv advertised sent blackholes fib bgpls bgp-ls vpn labeled rtc add delete help" -l explain-peer -d 'Scope --explain to a specific peer\'s Add-Path send view. When set, candidates are filtered by the peer\'s export policy + sendable families and the top `add_path_send_max` are tagged with their advertised rank. Omit for the global Loc-RIB view' -r
+complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and not __fish_seen_subcommand_from lookup received recv advertised sent blackholes fib bgpls bgp-ls vpn labeled rtc add delete help" -l explain-peer -d 'Scope --explain to a specific peer\'s Add-Path send view. When set, candidates are filtered by the peer\'s export policy + sendable families, and the paths within the peer\'s Add-Path send limit are tagged with their advertised rank. Omit for the global Loc-RIB view' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and not __fish_seen_subcommand_from lookup received recv advertised sent blackholes fib bgpls bgp-ls vpn labeled rtc add delete help" -l origin-asn -d 'Filter by origin ASN (last ASN in AS_PATH)' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and not __fish_seen_subcommand_from lookup received recv advertised sent blackholes fib bgpls bgp-ls vpn labeled rtc add delete help" -s c -l community -d 'Filter by community (e.g., 65001:100 or BLACKHOLE); may be repeated' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and not __fish_seen_subcommand_from lookup received recv advertised sent blackholes fib bgpls bgp-ls vpn labeled rtc add delete help" -l large-community -d 'Filter by large community (e.g., 65001:100:200); may be repeated' -r
@@ -774,7 +774,7 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and not __fish_seen_subco
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and not __fish_seen_subcommand_from lookup received recv advertised sent blackholes fib bgpls bgp-ls vpn labeled rtc add delete help" -f -a "advertised" -d 'Show advertised routes to a neighbor'
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and not __fish_seen_subcommand_from lookup received recv advertised sent blackholes fib bgpls bgp-ls vpn labeled rtc add delete help" -f -a "sent" -d 'Show advertised routes to a neighbor'
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and not __fish_seen_subcommand_from lookup received recv advertised sent blackholes fib bgpls bgp-ls vpn labeled rtc add delete help" -f -a "blackholes" -d 'Show RFC 7999 BLACKHOLE discard install status'
-complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and not __fish_seen_subcommand_from lookup received recv advertised sent blackholes fib bgpls bgp-ls vpn labeled rtc add delete help" -f -a "fib" -d 'Show ADR-0061 general FIB route install status'
+complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and not __fish_seen_subcommand_from lookup received recv advertised sent blackholes fib bgpls bgp-ls vpn labeled rtc add delete help" -f -a "fib" -d 'Show general unicast FIB route install status'
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and not __fish_seen_subcommand_from lookup received recv advertised sent blackholes fib bgpls bgp-ls vpn labeled rtc add delete help" -f -a "bgpls" -d 'Show BGP-LS routes learned from peers (RFC 9552)'
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and not __fish_seen_subcommand_from lookup received recv advertised sent blackholes fib bgpls bgp-ls vpn labeled rtc add delete help" -f -a "bgp-ls" -d 'Show BGP-LS routes learned from peers (RFC 9552)'
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and not __fish_seen_subcommand_from lookup received recv advertised sent blackholes fib bgpls bgp-ls vpn labeled rtc add delete help" -f -a "vpn" -d 'Show VPNv4/VPNv6 routes learned from peers (RFC 4364/4659)'
@@ -1090,7 +1090,7 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcomman
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from help" -f -a "received" -d 'Show received routes from a neighbor'
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from help" -f -a "advertised" -d 'Show advertised routes to a neighbor'
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from help" -f -a "blackholes" -d 'Show RFC 7999 BLACKHOLE discard install status'
-complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from help" -f -a "fib" -d 'Show ADR-0061 general FIB route install status'
+complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from help" -f -a "fib" -d 'Show general unicast FIB route install status'
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from help" -f -a "bgpls" -d 'Show BGP-LS routes learned from peers (RFC 9552)'
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from help" -f -a "vpn" -d 'Show VPNv4/VPNv6 routes learned from peers (RFC 4364/4659)'
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from help" -f -a "labeled" -d 'Show IPv4/IPv6 labeled-unicast routes learned from peers (RFC 8277)'
@@ -1319,10 +1319,10 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and not __fish_seen_subc
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and not __fish_seen_subcommand_from received advertised explain add-mac-ip add-imet add-ip-prefix delete-mac-ip delete-imet delete-ip-prefix clear-duplicate-mac duplicate-mac-quarantines es runtime instances nexthops managed-netdevs vrfs diagnose help" -f -a "clear-duplicate-mac" -d 'Clear one duplicate-MAC local-origin quarantine'
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and not __fish_seen_subcommand_from received advertised explain add-mac-ip add-imet add-ip-prefix delete-mac-ip delete-imet delete-ip-prefix clear-duplicate-mac duplicate-mac-quarantines es runtime instances nexthops managed-netdevs vrfs diagnose help" -f -a "duplicate-mac-quarantines" -d 'List active duplicate-MAC local-origin quarantines'
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and not __fish_seen_subcommand_from received advertised explain add-mac-ip add-imet add-ip-prefix delete-mac-ip delete-imet delete-ip-prefix clear-duplicate-mac duplicate-mac-quarantines es runtime instances nexthops managed-netdevs vrfs diagnose help" -f -a "es" -d 'Ethernet Segment runtime controls and diagnose state'
-complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and not __fish_seen_subcommand_from received advertised explain add-mac-ip add-imet add-ip-prefix delete-mac-ip delete-imet delete-ip-prefix clear-duplicate-mac duplicate-mac-quarantines es runtime instances nexthops managed-netdevs vrfs diagnose help" -f -a "runtime" -d 'Show the committed ADR-0063 EVPN runtime generation'
+complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and not __fish_seen_subcommand_from received advertised explain add-mac-ip add-imet add-ip-prefix delete-mac-ip delete-imet delete-ip-prefix clear-duplicate-mac duplicate-mac-quarantines es runtime instances nexthops managed-netdevs vrfs diagnose help" -f -a "runtime" -d 'Show the committed EVPN runtime generation'
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and not __fish_seen_subcommand_from received advertised explain add-mac-ip add-imet add-ip-prefix delete-mac-ip delete-imet delete-ip-prefix clear-duplicate-mac duplicate-mac-quarantines es runtime instances nexthops managed-netdevs vrfs diagnose help" -f -a "instances" -d 'List local EVPN instances configured on this VTEP'
-complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and not __fish_seen_subcommand_from received advertised explain add-mac-ip add-imet add-ip-prefix delete-mac-ip delete-imet delete-ip-prefix clear-duplicate-mac duplicate-mac-quarantines es runtime instances nexthops managed-netdevs vrfs diagnose help" -f -a "nexthops" -d 'List rustbgpd-owned FDB nexthop groups (ADR-0059 aliasing ECMP)'
-complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and not __fish_seen_subcommand_from received advertised explain add-mac-ip add-imet add-ip-prefix delete-mac-ip delete-imet delete-ip-prefix clear-duplicate-mac duplicate-mac-quarantines es runtime instances nexthops managed-netdevs vrfs diagnose help" -f -a "managed-netdevs" -d 'List managed EVPN netdev ownership/status rows (ADR-0091)'
+complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and not __fish_seen_subcommand_from received advertised explain add-mac-ip add-imet add-ip-prefix delete-mac-ip delete-imet delete-ip-prefix clear-duplicate-mac duplicate-mac-quarantines es runtime instances nexthops managed-netdevs vrfs diagnose help" -f -a "nexthops" -d 'List rustbgpd-owned FDB nexthop groups (aliasing ECMP)'
+complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and not __fish_seen_subcommand_from received advertised explain add-mac-ip add-imet add-ip-prefix delete-mac-ip delete-imet delete-ip-prefix clear-duplicate-mac duplicate-mac-quarantines es runtime instances nexthops managed-netdevs vrfs diagnose help" -f -a "managed-netdevs" -d 'List managed EVPN netdev ownership/status rows'
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and not __fish_seen_subcommand_from received advertised explain add-mac-ip add-imet add-ip-prefix delete-mac-ip delete-imet delete-ip-prefix clear-duplicate-mac duplicate-mac-quarantines es runtime instances nexthops managed-netdevs vrfs diagnose help" -f -a "vrfs" -d 'List configured IP-VRFs and their readiness verdict'
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and not __fish_seen_subcommand_from received advertised explain add-mac-ip add-imet add-ip-prefix delete-mac-ip delete-imet delete-ip-prefix clear-duplicate-mac duplicate-mac-quarantines es runtime instances nexthops managed-netdevs vrfs diagnose help" -f -a "diagnose" -d 'Summarize EVPN VTEP alpha state and key metrics'
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and not __fish_seen_subcommand_from received advertised explain add-mac-ip add-imet add-ip-prefix delete-mac-ip delete-imet delete-ip-prefix clear-duplicate-mac duplicate-mac-quarantines es runtime instances nexthops managed-netdevs vrfs diagnose help" -f -a "help" -d 'Print this message or the help of the given subcommand(s)'
@@ -1406,11 +1406,11 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcomma
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from add-mac-ip" -l json-lines -d 'Stream accepted unicast RIB routes as versioned JSON lines'
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from add-mac-ip" -l no-color -d 'Disable colored output'
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from add-mac-ip" -s h -l help -d 'Print help (see more with \'--help\')'
-complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from add-imet" -l rd -r
-complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from add-imet" -l ethernet-tag -r
+complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from add-imet" -l rd -d 'Route Distinguisher, "asn:value" / "ip:value"' -r
+complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from add-imet" -l ethernet-tag -d 'Ethernet-tag identifying the EVI (default 0)' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from add-imet" -l ip -l originator-ip -d 'Originator IP (required for Type 3)' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from add-imet" -l next-hop -d 'VTEP loopback IP (next-hop)' -r
-complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from add-imet" -l rt -r
+complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from add-imet" -l rt -d 'Optional route targets, each "asn:value"' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from add-imet" -s s -l addr -d 'gRPC server address or unix:///path/to/socket' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from add-imet" -l token-file -d 'Bearer token file for authenticated gRPC endpoints' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from add-imet" -l tls-ca -d 'PEM CA bundle used to verify an HTTPS server (required for HTTPS)' -r -F
@@ -1421,19 +1421,19 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcomma
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from add-imet" -l pager -d 'Page complete human unicast RIB listings' -r -f -a "auto\t''
 always\t''
 never\t''"
-complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from add-imet" -l no-vxlan-encap
+complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from add-imet" -l no-vxlan-encap -d 'Disable the RFC 8365 VXLAN encapsulation ext community'
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from add-imet" -s j -l json -d 'Output in JSON format'
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from add-imet" -l json-lines -d 'Stream accepted unicast RIB routes as versioned JSON lines'
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from add-imet" -l no-color -d 'Disable colored output'
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from add-imet" -s h -l help -d 'Print help (see more with \'--help\')'
-complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from add-ip-prefix" -l rd -r
+complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from add-ip-prefix" -l rd -d 'Route Distinguisher, "asn:value" / "ip:value"' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from add-ip-prefix" -l ethernet-tag -d 'Ethernet Tag ID. Must be 0 for supported Type 5 injection' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from add-ip-prefix" -l prefix -d 'IP prefix, e.g. "10.0.0.0/24" or "2001:db8::/48"' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from add-ip-prefix" -l label -d 'L3VNI for this IP-VRF' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from add-ip-prefix" -l next-hop -d 'VTEP loopback IP (next-hop)' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from add-ip-prefix" -l gateway -d 'Optional Type 5 Gateway IP for overlay-index injection. Omit for interface-less Type 5' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from add-ip-prefix" -l router-mac -d 'Router MAC extended community value. Required unless --no-vxlan-encap is set' -r
-complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from add-ip-prefix" -l rt -r
+complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from add-ip-prefix" -l rt -d 'Optional route targets, each "asn:value"' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from add-ip-prefix" -s s -l addr -d 'gRPC server address or unix:///path/to/socket' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from add-ip-prefix" -l token-file -d 'Bearer token file for authenticated gRPC endpoints' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from add-ip-prefix" -l tls-ca -d 'PEM CA bundle used to verify an HTTPS server (required for HTTPS)' -r -F
@@ -1444,15 +1444,15 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcomma
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from add-ip-prefix" -l pager -d 'Page complete human unicast RIB listings' -r -f -a "auto\t''
 always\t''
 never\t''"
-complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from add-ip-prefix" -l no-vxlan-encap
+complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from add-ip-prefix" -l no-vxlan-encap -d 'Disable the RFC 8365 VXLAN encapsulation ext community'
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from add-ip-prefix" -s j -l json -d 'Output in JSON format'
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from add-ip-prefix" -l json-lines -d 'Stream accepted unicast RIB routes as versioned JSON lines'
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from add-ip-prefix" -l no-color -d 'Disable colored output'
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from add-ip-prefix" -s h -l help -d 'Print help (see more with \'--help\')'
-complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from delete-mac-ip" -l rd -r
-complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from delete-mac-ip" -l ethernet-tag -r
-complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from delete-mac-ip" -l mac -r
-complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from delete-mac-ip" -l ip -r
+complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from delete-mac-ip" -l rd -d 'Route Distinguisher, "asn:value" / "ip:value"' -r
+complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from delete-mac-ip" -l ethernet-tag -d 'Ethernet-tag identifying the EVI (default 0)' -r
+complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from delete-mac-ip" -l mac -d 'MAC address "aa:bb:cc:dd:ee:ff"' -r
+complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from delete-mac-ip" -l ip -d 'Host IP (omit for the MAC-only route)' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from delete-mac-ip" -s s -l addr -d 'gRPC server address or unix:///path/to/socket' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from delete-mac-ip" -l token-file -d 'Bearer token file for authenticated gRPC endpoints' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from delete-mac-ip" -l tls-ca -d 'PEM CA bundle used to verify an HTTPS server (required for HTTPS)' -r -F
@@ -1467,8 +1467,8 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcomma
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from delete-mac-ip" -l json-lines -d 'Stream accepted unicast RIB routes as versioned JSON lines'
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from delete-mac-ip" -l no-color -d 'Disable colored output'
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from delete-mac-ip" -s h -l help -d 'Print help (see more with \'--help\')'
-complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from delete-imet" -l rd -r
-complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from delete-imet" -l ethernet-tag -r
+complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from delete-imet" -l rd -d 'Route Distinguisher, "asn:value" / "ip:value"' -r
+complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from delete-imet" -l ethernet-tag -d 'Ethernet-tag identifying the EVI (default 0)' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from delete-imet" -l ip -l originator-ip -d 'Originator IP' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from delete-imet" -s s -l addr -d 'gRPC server address or unix:///path/to/socket' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from delete-imet" -l token-file -d 'Bearer token file for authenticated gRPC endpoints' -r
@@ -1484,7 +1484,7 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcomma
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from delete-imet" -l json-lines -d 'Stream accepted unicast RIB routes as versioned JSON lines'
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from delete-imet" -l no-color -d 'Disable colored output'
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from delete-imet" -s h -l help -d 'Print help (see more with \'--help\')'
-complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from delete-ip-prefix" -l rd -r
+complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from delete-ip-prefix" -l rd -d 'Route Distinguisher, "asn:value" / "ip:value"' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from delete-ip-prefix" -l ethernet-tag -d 'Ethernet Tag ID. Must be 0 for Type 5 withdrawal' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from delete-ip-prefix" -l prefix -d 'IP prefix, e.g. "10.0.0.0/24" or "2001:db8::/48"' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from delete-ip-prefix" -s s -l addr -d 'gRPC server address or unix:///path/to/socket' -r
@@ -1645,10 +1645,10 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcomma
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from help" -f -a "clear-duplicate-mac" -d 'Clear one duplicate-MAC local-origin quarantine'
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from help" -f -a "duplicate-mac-quarantines" -d 'List active duplicate-MAC local-origin quarantines'
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from help" -f -a "es" -d 'Ethernet Segment runtime controls and diagnose state'
-complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from help" -f -a "runtime" -d 'Show the committed ADR-0063 EVPN runtime generation'
+complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from help" -f -a "runtime" -d 'Show the committed EVPN runtime generation'
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from help" -f -a "instances" -d 'List local EVPN instances configured on this VTEP'
-complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from help" -f -a "nexthops" -d 'List rustbgpd-owned FDB nexthop groups (ADR-0059 aliasing ECMP)'
-complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from help" -f -a "managed-netdevs" -d 'List managed EVPN netdev ownership/status rows (ADR-0091)'
+complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from help" -f -a "nexthops" -d 'List rustbgpd-owned FDB nexthop groups (aliasing ECMP)'
+complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from help" -f -a "managed-netdevs" -d 'List managed EVPN netdev ownership/status rows'
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from help" -f -a "vrfs" -d 'List configured IP-VRFs and their readiness verdict'
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from help" -f -a "diagnose" -d 'Summarize EVPN VTEP alpha state and key metrics'
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from help" -f -a "help" -d 'Print this message or the help of the given subcommand(s)'
@@ -1697,7 +1697,7 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand events; and __fish_seen_subcom
 complete -c rbgp -n "__fish_rbgp_using_subcommand events; and __fish_seen_subcommand_from watch" -l prefix -d 'Exact prefix filter, e.g. 203.0.113.0/24' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand events; and __fish_seen_subcommand_from watch" -l type -d 'Event type filter: added, withdrawn, best_changed, state_changed, established, lost, peer_enabled, peer_disabled, notification_sent, notification_received, policy_changed, dataplane_status_changed, dataplane_route_installed, dataplane_route_withdrawn, dataplane_route_failed, evpn_added, evpn_withdrawn, evpn_best_changed, bfd_up, bfd_down, bfd_state_changed' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand events; and __fish_seen_subcommand_from watch" -l backfill -d 'Print recent route history before tailing the live stream. Applies only to route-capable event streams. Mutually exclusive with `--from-event-id`; `--backfill` replays the daemon\'s process-local route ring (resets on restart), while `--from-event-id` replays the durable event outbox (survives restart)' -r
-complete -c rbgp -n "__fish_rbgp_using_subcommand events; and __fish_seen_subcommand_from watch" -l from-event-id -d 'ADR-0072 durable cursor: replay committed events with `event_id > N` from the daemon\'s local event outbox, then tail the live stream. `0` replays everything retained. Survives daemon restart. Returns `FAILED_PRECONDITION` when the daemon was started with `[event_history].enabled = false` or EHM is unavailable' -r
+complete -c rbgp -n "__fish_rbgp_using_subcommand events; and __fish_seen_subcommand_from watch" -l from-event-id -d 'Durable cursor: replay committed events with `event_id > N` from the daemon\'s local event outbox, then tail the live stream. `0` replays everything retained. Survives daemon restart. Fails when the daemon was started with `[event_history].enabled = false` or its event history is unavailable' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand events; and __fish_seen_subcommand_from watch" -s s -l addr -d 'gRPC server address or unix:///path/to/socket' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand events; and __fish_seen_subcommand_from watch" -l token-file -d 'Bearer token file for authenticated gRPC endpoints' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand events; and __fish_seen_subcommand_from watch" -l tls-ca -d 'PEM CA bundle used to verify an HTTPS server (required for HTTPS)' -r -F
@@ -1992,7 +1992,7 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcom
 complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcommand_from get" -l json-lines -d 'Stream accepted unicast RIB routes as versioned JSON lines'
 complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcommand_from get" -l no-color -d 'Disable colored output'
 complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcommand_from get" -s h -l help -d 'Print help (see more with \'--help\')'
-complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcommand_from set" -l from-file -d 'JSON file containing the PolicyDefinition shape' -r
+complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcommand_from set" -l from-file -d 'JSON file containing the policy definition' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcommand_from set" -s s -l addr -d 'gRPC server address or unix:///path/to/socket' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcommand_from set" -l token-file -d 'Bearer token file for authenticated gRPC endpoints' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcommand_from set" -l tls-ca -d 'PEM CA bundle used to verify an HTTPS server (required for HTTPS)' -r -F
@@ -2154,7 +2154,7 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor-set; and __fish_seen_
 complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor-set; and __fish_seen_subcommand_from get" -l json-lines -d 'Stream accepted unicast RIB routes as versioned JSON lines'
 complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor-set; and __fish_seen_subcommand_from get" -l no-color -d 'Disable colored output'
 complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor-set; and __fish_seen_subcommand_from get" -s h -l help -d 'Print help (see more with \'--help\')'
-complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor-set; and __fish_seen_subcommand_from set" -l from-file -r
+complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor-set; and __fish_seen_subcommand_from set" -l from-file -d 'JSON file containing the neighbor-set definition' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor-set; and __fish_seen_subcommand_from set" -s s -l addr -d 'gRPC server address or unix:///path/to/socket' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor-set; and __fish_seen_subcommand_from set" -l token-file -d 'Bearer token file for authenticated gRPC endpoints' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor-set; and __fish_seen_subcommand_from set" -l tls-ca -d 'PEM CA bundle used to verify an HTTPS server (required for HTTPS)' -r -F
@@ -2237,7 +2237,7 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand peer-group; and __fish_seen_su
 complete -c rbgp -n "__fish_rbgp_using_subcommand peer-group; and __fish_seen_subcommand_from get" -l json-lines -d 'Stream accepted unicast RIB routes as versioned JSON lines'
 complete -c rbgp -n "__fish_rbgp_using_subcommand peer-group; and __fish_seen_subcommand_from get" -l no-color -d 'Disable colored output'
 complete -c rbgp -n "__fish_rbgp_using_subcommand peer-group; and __fish_seen_subcommand_from get" -s h -l help -d 'Print help (see more with \'--help\')'
-complete -c rbgp -n "__fish_rbgp_using_subcommand peer-group; and __fish_seen_subcommand_from set" -l from-file -r
+complete -c rbgp -n "__fish_rbgp_using_subcommand peer-group; and __fish_seen_subcommand_from set" -l from-file -d 'JSON file containing the peer-group definition' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand peer-group; and __fish_seen_subcommand_from set" -s s -l addr -d 'gRPC server address or unix:///path/to/socket' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand peer-group; and __fish_seen_subcommand_from set" -l token-file -d 'Bearer token file for authenticated gRPC endpoints' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand peer-group; and __fish_seen_subcommand_from set" -l tls-ca -d 'PEM CA bundle used to verify an HTTPS server (required for HTTPS)' -r -F
@@ -2471,16 +2471,16 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand man" -l json-lines -d 'Stream 
 complete -c rbgp -n "__fish_rbgp_using_subcommand man" -l no-color -d 'Disable colored output'
 complete -c rbgp -n "__fish_rbgp_using_subcommand man" -s h -l help -d 'Print help (see more with \'--help\')'
 complete -c rbgp -n "__fish_rbgp_using_subcommand help; and not __fish_seen_subcommand_from global config neighbor bfd rpki rib topology orr diff flowspec evpn watch events health doctor metrics shutdown mrt-dump gshut top policy neighbor-set peer-group dynamic-neighbor fib-table completions man help" -f -a "global" -d 'Show daemon global configuration'
-complete -c rbgp -n "__fish_rbgp_using_subcommand help; and not __fish_seen_subcommand_from global config neighbor bfd rpki rib topology orr diff flowspec evpn watch events health doctor metrics shutdown mrt-dump gshut top policy neighbor-set peer-group dynamic-neighbor fib-table completions man help" -f -a "config" -d 'Runtime config diagnostics'
+complete -c rbgp -n "__fish_rbgp_using_subcommand help; and not __fish_seen_subcommand_from global config neighbor bfd rpki rib topology orr diff flowspec evpn watch events health doctor metrics shutdown mrt-dump gshut top policy neighbor-set peer-group dynamic-neighbor fib-table completions man help" -f -a "config" -d 'Plan, apply, confirm, roll back, and inspect runtime configuration'
 complete -c rbgp -n "__fish_rbgp_using_subcommand help; and not __fish_seen_subcommand_from global config neighbor bfd rpki rib topology orr diff flowspec evpn watch events health doctor metrics shutdown mrt-dump gshut top policy neighbor-set peer-group dynamic-neighbor fib-table completions man help" -f -a "neighbor" -d 'Manage BGP neighbors'
-complete -c rbgp -n "__fish_rbgp_using_subcommand help; and not __fish_seen_subcommand_from global config neighbor bfd rpki rib topology orr diff flowspec evpn watch events health doctor metrics shutdown mrt-dump gshut top policy neighbor-set peer-group dynamic-neighbor fib-table completions man help" -f -a "bfd" -d 'Inspect single-hop and multihop BFD sessions (ADR-0067)'
+complete -c rbgp -n "__fish_rbgp_using_subcommand help; and not __fish_seen_subcommand_from global config neighbor bfd rpki rib topology orr diff flowspec evpn watch events health doctor metrics shutdown mrt-dump gshut top policy neighbor-set peer-group dynamic-neighbor fib-table completions man help" -f -a "bfd" -d 'Inspect single-hop and multihop BFD sessions'
 complete -c rbgp -n "__fish_rbgp_using_subcommand help; and not __fish_seen_subcommand_from global config neighbor bfd rpki rib topology orr diff flowspec evpn watch events health doctor metrics shutdown mrt-dump gshut top policy neighbor-set peer-group dynamic-neighbor fib-table completions man help" -f -a "rpki" -d 'Inspect RPKI caches and validate origins or AS paths'
 complete -c rbgp -n "__fish_rbgp_using_subcommand help; and not __fish_seen_subcommand_from global config neighbor bfd rpki rib topology orr diff flowspec evpn watch events health doctor metrics shutdown mrt-dump gshut top policy neighbor-set peer-group dynamic-neighbor fib-table completions man help" -f -a "rib" -d 'Query and manage the RIB'
 complete -c rbgp -n "__fish_rbgp_using_subcommand help; and not __fish_seen_subcommand_from global config neighbor bfd rpki rib topology orr diff flowspec evpn watch events health doctor metrics shutdown mrt-dump gshut top policy neighbor-set peer-group dynamic-neighbor fib-table completions man help" -f -a "topology" -d 'Show the RFC 9107 ORR topology graph derived from BGP-LS'
 complete -c rbgp -n "__fish_rbgp_using_subcommand help; and not __fish_seen_subcommand_from global config neighbor bfd rpki rib topology orr diff flowspec evpn watch events health doctor metrics shutdown mrt-dump gshut top policy neighbor-set peer-group dynamic-neighbor fib-table completions man help" -f -a "orr" -d 'Show RFC 9107 ORR per-vantage status (resolution, SPF reach, peers)'
 complete -c rbgp -n "__fish_rbgp_using_subcommand help; and not __fish_seen_subcommand_from global config neighbor bfd rpki rib topology orr diff flowspec evpn watch events health doctor metrics shutdown mrt-dump gshut top policy neighbor-set peer-group dynamic-neighbor fib-table completions man help" -f -a "diff" -d 'Compare live RIB views against an external snapshot (read-only)'
 complete -c rbgp -n "__fish_rbgp_using_subcommand help; and not __fish_seen_subcommand_from global config neighbor bfd rpki rib topology orr diff flowspec evpn watch events health doctor metrics shutdown mrt-dump gshut top policy neighbor-set peer-group dynamic-neighbor fib-table completions man help" -f -a "flowspec" -d 'Manage FlowSpec routes'
-complete -c rbgp -n "__fish_rbgp_using_subcommand help; and not __fish_seen_subcommand_from global config neighbor bfd rpki rib topology orr diff flowspec evpn watch events health doctor metrics shutdown mrt-dump gshut top policy neighbor-set peer-group dynamic-neighbor fib-table completions man help" -f -a "evpn" -d 'Manage EVPN routes (list, add, delete — RFC 7432)'
+complete -c rbgp -n "__fish_rbgp_using_subcommand help; and not __fish_seen_subcommand_from global config neighbor bfd rpki rib topology orr diff flowspec evpn watch events health doctor metrics shutdown mrt-dump gshut top policy neighbor-set peer-group dynamic-neighbor fib-table completions man help" -f -a "evpn" -d 'List, explain, inject, and withdraw EVPN routes; inspect VTEP state'
 complete -c rbgp -n "__fish_rbgp_using_subcommand help; and not __fish_seen_subcommand_from global config neighbor bfd rpki rib topology orr diff flowspec evpn watch events health doctor metrics shutdown mrt-dump gshut top policy neighbor-set peer-group dynamic-neighbor fib-table completions man help" -f -a "watch" -d 'Watch route updates (streaming)'
 complete -c rbgp -n "__fish_rbgp_using_subcommand help; and not __fish_seen_subcommand_from global config neighbor bfd rpki rib topology orr diff flowspec evpn watch events health doctor metrics shutdown mrt-dump gshut top policy neighbor-set peer-group dynamic-neighbor fib-table completions man help" -f -a "events" -d 'Show recent route update events'
 complete -c rbgp -n "__fish_rbgp_using_subcommand help; and not __fish_seen_subcommand_from global config neighbor bfd rpki rib topology orr diff flowspec evpn watch events health doctor metrics shutdown mrt-dump gshut top policy neighbor-set peer-group dynamic-neighbor fib-table completions man help" -f -a "health" -d 'Check daemon health'
@@ -2525,7 +2525,7 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand help; and __fish_seen_subcomma
 complete -c rbgp -n "__fish_rbgp_using_subcommand help; and __fish_seen_subcommand_from rib" -f -a "received" -d 'Show received routes from a neighbor'
 complete -c rbgp -n "__fish_rbgp_using_subcommand help; and __fish_seen_subcommand_from rib" -f -a "advertised" -d 'Show advertised routes to a neighbor'
 complete -c rbgp -n "__fish_rbgp_using_subcommand help; and __fish_seen_subcommand_from rib" -f -a "blackholes" -d 'Show RFC 7999 BLACKHOLE discard install status'
-complete -c rbgp -n "__fish_rbgp_using_subcommand help; and __fish_seen_subcommand_from rib" -f -a "fib" -d 'Show ADR-0061 general FIB route install status'
+complete -c rbgp -n "__fish_rbgp_using_subcommand help; and __fish_seen_subcommand_from rib" -f -a "fib" -d 'Show general unicast FIB route install status'
 complete -c rbgp -n "__fish_rbgp_using_subcommand help; and __fish_seen_subcommand_from rib" -f -a "bgpls" -d 'Show BGP-LS routes learned from peers (RFC 9552)'
 complete -c rbgp -n "__fish_rbgp_using_subcommand help; and __fish_seen_subcommand_from rib" -f -a "vpn" -d 'Show VPNv4/VPNv6 routes learned from peers (RFC 4364/4659)'
 complete -c rbgp -n "__fish_rbgp_using_subcommand help; and __fish_seen_subcommand_from rib" -f -a "labeled" -d 'Show IPv4/IPv6 labeled-unicast routes learned from peers (RFC 8277)'
@@ -2551,10 +2551,10 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand help; and __fish_seen_subcomma
 complete -c rbgp -n "__fish_rbgp_using_subcommand help; and __fish_seen_subcommand_from evpn" -f -a "clear-duplicate-mac" -d 'Clear one duplicate-MAC local-origin quarantine'
 complete -c rbgp -n "__fish_rbgp_using_subcommand help; and __fish_seen_subcommand_from evpn" -f -a "duplicate-mac-quarantines" -d 'List active duplicate-MAC local-origin quarantines'
 complete -c rbgp -n "__fish_rbgp_using_subcommand help; and __fish_seen_subcommand_from evpn" -f -a "es" -d 'Ethernet Segment runtime controls and diagnose state'
-complete -c rbgp -n "__fish_rbgp_using_subcommand help; and __fish_seen_subcommand_from evpn" -f -a "runtime" -d 'Show the committed ADR-0063 EVPN runtime generation'
+complete -c rbgp -n "__fish_rbgp_using_subcommand help; and __fish_seen_subcommand_from evpn" -f -a "runtime" -d 'Show the committed EVPN runtime generation'
 complete -c rbgp -n "__fish_rbgp_using_subcommand help; and __fish_seen_subcommand_from evpn" -f -a "instances" -d 'List local EVPN instances configured on this VTEP'
-complete -c rbgp -n "__fish_rbgp_using_subcommand help; and __fish_seen_subcommand_from evpn" -f -a "nexthops" -d 'List rustbgpd-owned FDB nexthop groups (ADR-0059 aliasing ECMP)'
-complete -c rbgp -n "__fish_rbgp_using_subcommand help; and __fish_seen_subcommand_from evpn" -f -a "managed-netdevs" -d 'List managed EVPN netdev ownership/status rows (ADR-0091)'
+complete -c rbgp -n "__fish_rbgp_using_subcommand help; and __fish_seen_subcommand_from evpn" -f -a "nexthops" -d 'List rustbgpd-owned FDB nexthop groups (aliasing ECMP)'
+complete -c rbgp -n "__fish_rbgp_using_subcommand help; and __fish_seen_subcommand_from evpn" -f -a "managed-netdevs" -d 'List managed EVPN netdev ownership/status rows'
 complete -c rbgp -n "__fish_rbgp_using_subcommand help; and __fish_seen_subcommand_from evpn" -f -a "vrfs" -d 'List configured IP-VRFs and their readiness verdict'
 complete -c rbgp -n "__fish_rbgp_using_subcommand help; and __fish_seen_subcommand_from evpn" -f -a "diagnose" -d 'Summarize EVPN VTEP alpha state and key metrics'
 complete -c rbgp -n "__fish_rbgp_using_subcommand help; and __fish_seen_subcommand_from events" -f -a "watch" -d 'Watch the unified live event stream'
