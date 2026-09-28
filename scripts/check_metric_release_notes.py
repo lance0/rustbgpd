@@ -21,7 +21,7 @@ from types import ModuleType
 
 ROOT = Path(__file__).resolve().parents[1]
 CHANGELOG = ROOT / "CHANGELOG.md"
-RELEASE_TAG_GLOB = "v[0-9]*.[0-9]*.[0-9]*"
+RELEASE_TAG = re.compile(r"v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)")
 
 # Exceptions are deliberately source-controlled and empty by default. A metric
 # may be added here only with a specific public-contract reason; stale, unknown,
@@ -52,13 +52,23 @@ def git(root: Path, *args: str) -> str:
 
 
 def previous_release(root: Path = ROOT) -> str:
-    """Return the newest release tag reachable from HEAD."""
-    try:
-        return git(
-            root, "describe", "--tags", "--abbrev=0", "--match", RELEASE_TAG_GLOB, "HEAD"
-        ).strip()
-    except ValueError as error:
-        raise ValueError(f"{error}; the check needs history and release tags") from error
+    """Return the highest strict `vMAJOR.MINOR.PATCH` tag reachable from HEAD.
+
+    Pre-release and other tags are ignored, and so is any release tag HEAD does
+    not contain. With none left (a shallow or tagless checkout) the check fails
+    closed rather than guessing a baseline.
+    """
+    versions = [
+        (tuple(map(int, match.groups())), tag)
+        for tag in git(root, "tag", "--merged", "HEAD", "--list", "v*").split()
+        if (match := RELEASE_TAG.fullmatch(tag))
+    ]
+    if not versions:
+        raise ValueError(
+            "no vMAJOR.MINOR.PATCH release tag is reachable from HEAD; "
+            "the check needs history and release tags"
+        )
+    return max(versions)[1]
 
 
 def release_inventory(tag: str, root: Path = ROOT) -> set[str]:

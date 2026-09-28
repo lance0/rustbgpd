@@ -268,6 +268,9 @@ class MetricReleaseNoteContractTests(unittest.TestCase):
         run("tag", "-a", "v0.2.0", "-m", "v0.2.0")
         commit(["bgp_shipped", "bgp_next", "bgp_later"], "after the release")
         run("tag", "soak-marker")
+        # A newer pre-release or malformed version tag is never the baseline.
+        run("tag", "-a", "v0.3.0-rc.1", "-m", "v0.3.0-rc.1")
+        run("tag", "v0.3")
 
         self.assertEqual(check.previous_release(root), "v0.2.0")
         # The tag's tree and parser, not HEAD's.
