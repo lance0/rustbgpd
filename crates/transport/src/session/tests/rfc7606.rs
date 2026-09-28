@@ -1536,6 +1536,32 @@ fn treat_as_withdraw_summary_bounds_the_ipv4_body_sample() {
     );
 }
 
+/// Non-unicast families use the canonical configuration labels, alongside
+/// the IPv4 body.
+#[test]
+fn treat_as_withdraw_summary_uses_canonical_family_labels() {
+    let mut vpn_reach = vec![0x80, 14, 0]; // optional flags, type, len (patched)
+    vpn_reach.extend([0, 1, 128, 12]); // AFI=IPv4, SAFI=MPLS-VPN, NH-Len=12
+    vpn_reach.extend([0, 0, 0, 0, 0, 0, 0, 0, 10, 0, 0, 2]); // RD 0, next hop 10.0.0.2
+    vpn_reach.push(0); // reserved
+    vpn_reach.push(112); // label (24) + RD (64) + /24
+    vpn_reach.extend([0x00, 0x06, 0x41]); // label 100, bottom of stack
+    vpn_reach.extend([0, 0, 0xFD, 0xE8, 0, 0, 0, 1]); // RD 0:65000:1
+    vpn_reach.extend([10, 1, 0]); // 10.1.0.0/24
+    vpn_reach[2] = u8::try_from(vpn_reach.len() - 3).unwrap();
+    let update = rfc7606_update(rfc7606_attr_bytes(&vpn_reach), &[v4_prefix(1)]);
+    let revised = update.parse_revised(true, false, false, &[]).unwrap();
+    let summary = super::inbound::treat_as_withdraw_summary(&revised.update);
+    assert_eq!(summary.announced, 2);
+    assert_eq!(summary.families, "ipv4_unicast=1, l3vpn_ipv4_unicast=1");
+    assert_eq!(summary.next_hop, "10.0.0.2");
+    assert_eq!(summary.prefixes.len(), 2, "{:?}", summary.prefixes);
+    assert!(
+        super::inbound::involved_nlri(&revised.update).contains("l3vpn_ipv4_unicast_announced"),
+        "the debug dump shares the canonical label"
+    );
+}
+
 /// An UPDATE whose only attributes were discarded as malformed must not be
 /// mistaken for an End-of-RIB marker.
 #[tokio::test]

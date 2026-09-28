@@ -293,6 +293,12 @@ pub(crate) fn full_update_hex(update: &rustbgpd_wire::UpdateMessage) -> String {
     }
     out
 }
+/// Canonical family label for log fields, from the shared configuration
+/// vocabulary; an AFI/SAFI pair outside it falls back to its Debug form.
+fn log_family_label(afi: Afi, safi: Safi) -> String {
+    rustbgpd_wire::family_label(afi, safi)
+        .map_or_else(|| format!("{afi:?}_{safi:?}").to_lowercase(), str::to_owned)
+}
 fn with_path_id(path_id: u32, rendered: String) -> String {
     if path_id == 0 {
         rendered
@@ -352,7 +358,10 @@ pub(crate) fn treat_as_withdraw_summary(parsed: &ParsedUpdate) -> TreatAsWithdra
         .collect();
     let mut announced = parsed.announced.len();
     if announced > 0 {
-        families.push(format!("ipv4_unicast={announced}"));
+        families.push(format!(
+            "{}={announced}",
+            log_family_label(Afi::Ipv4, Safi::Unicast)
+        ));
         if let Some(next_hop) = parsed.attributes.iter().find_map(|a| match a {
             PathAttribute::NextHop(next_hop) => Some(next_hop.to_string()),
             _ => None,
@@ -369,8 +378,7 @@ pub(crate) fn treat_as_withdraw_summary(parsed: &ParsedUpdate) -> TreatAsWithdra
             continue;
         }
         announced += count;
-        let family = format!("{:?}_{:?}", mp.afi, mp.safi).to_lowercase();
-        families.push(format!("{family}={count}"));
+        families.push(format!("{}={count}", log_family_label(mp.afi, mp.safi)));
         // FlowSpec carries no next hop (NH-Len 0).
         if mp.safi != Safi::FlowSpec {
             next_hops.push(mp.next_hop.to_string());
@@ -463,7 +471,7 @@ pub(crate) fn involved_nlri(parsed: &ParsedUpdate) -> String {
             ),
             _ => continue,
         };
-        let family = format!("{afi:?}_{safi:?}").to_lowercase();
+        let family = log_family_label(afi, safi);
         section(&mut out, &format!("{family}_{direction}"), &items);
     }
     if out.is_empty() {
