@@ -3152,33 +3152,46 @@ struct BashFilePositional {
     index: usize,
     repeatable: bool,
     value_options: Vec<String>,
+    conflicting_options: Vec<String>,
 }
 
 fn bash_file_positionals(command: &clap::Command) -> Vec<BashFilePositional> {
+    fn option_names(option: &clap::Arg) -> Vec<String> {
+        let mut names = Vec::new();
+        if let Some(longs) = option.get_long_and_visible_aliases() {
+            names.extend(longs.into_iter().map(|name| format!("--{name}")));
+        }
+        if let Some(shorts) = option.get_short_and_visible_aliases() {
+            names.extend(shorts.into_iter().map(|name| format!("-{name}")));
+        }
+        names
+    }
+
     fn visit(command: &clap::Command, path: &mut Vec<String>, found: &mut Vec<BashFilePositional>) {
         for positional in command
             .get_positionals()
             .filter(|arg| arg.get_value_hint() == clap::ValueHint::FilePath)
         {
-            let mut value_options = Vec::new();
-            for option in command
+            let mut value_options: Vec<_> = command
                 .get_opts()
                 .filter(|arg| arg.get_action().takes_values())
-            {
-                if let Some(longs) = option.get_long_and_visible_aliases() {
-                    value_options.extend(longs.into_iter().map(|name| format!("--{name}")));
-                }
-                if let Some(shorts) = option.get_short_and_visible_aliases() {
-                    value_options.extend(shorts.into_iter().map(|name| format!("-{name}")));
-                }
+                .flat_map(option_names)
+                .collect();
+            let mut conflicting_options: Vec<_> = command
+                .get_arg_conflicts_with(positional)
+                .into_iter()
+                .flat_map(option_names)
+                .collect();
+            for options in [&mut value_options, &mut conflicting_options] {
+                options.sort();
+                options.dedup();
             }
-            value_options.sort();
-            value_options.dedup();
             found.push(BashFilePositional {
                 path: path.clone(),
                 index: positional.get_index().unwrap_or(0),
                 repeatable: matches!(positional.get_action(), &clap::ArgAction::Append),
                 value_options,
+                conflicting_options,
             });
         }
         for subcommand in command.get_subcommands() {
@@ -3265,14 +3278,30 @@ fn patch_bash_file_positionals(
             .map(|short| format!(r#""{short}""#))
             .collect::<Vec<_>>()
             .join("|");
+        let conflicts = positional
+            .conflicting_options
+            .iter()
+            .map(|option| format!(r#""{option}""#))
+            .collect::<Vec<_>>()
+            .join("|");
+        let conflict_guard = if conflicts.is_empty() {
+            String::new()
+        } else {
+            format!(
+                r#"                    case "${{rbgp_word%%=*}}" in
+                        {conflicts}) rbgp_file_allowed=0 ;;
+                    esac
+"#
+            )
+        };
         // Count command and positional words, excluding options and their
         // values, so options anywhere in argv cannot shift a file's index.
         let patched_fast_path = format!(
-            r#"            local rbgp_positional=1 rbgp_value=0 rbgp_options=1 rbgp_word rbgp_short
+            r#"            local rbgp_positional=1 rbgp_value=0 rbgp_options=1 rbgp_file_allowed=1 rbgp_word rbgp_short
             for rbgp_word in "${{COMP_WORDS[@]:1:COMP_CWORD-1}}"; do
                 if [[ ${{rbgp_value}} == 1 ]]; then rbgp_value=0; continue; fi
                 if [[ ${{rbgp_options}} == 1 ]]; then
-                    case "${{rbgp_word}}" in
+{conflict_guard}                    case "${{rbgp_word}}" in
                         --) rbgp_options=0; continue ;;
                         --*=*) continue ;;
                         {value_options}) rbgp_value=1; continue ;;
@@ -3295,7 +3324,7 @@ fn patch_bash_file_positionals(
             if [[ ${{cur}} == -* && ${{rbgp_options}} == 1 && ${{rbgp_value}} == 0 ]] ; then
                 COMPREPLY=( $(compgen -W "${{opts}}" -- "${{cur}}") )
                 return 0
-            elif [[ ${{rbgp_value}} == 0 && ( {positions} ) ]] ; then
+            elif [[ ${{rbgp_value}} == 0 && ${{rbgp_file_allowed}} == 1 && ( {positions} ) ]] ; then
                 local rbgp_old_ifs rbgp_ifs_was_set
                 [ -n "${{IFS+x}}" ] && {{ rbgp_old_ifs="$IFS"; rbgp_ifs_was_set=1; }}
                 IFS=$'\n'
@@ -6150,6 +6179,23 @@ printf '%s\n' "${COMPREPLY[@]}"
                     || (item.path == ["diff", "snapshots"] && item.index == 2))
         );
         assert_eq!(found.iter().filter(|item| item.repeatable).count(), 1);
+        // The only current positional conflict is a single-file command with
+        // a long option. Revisit the guard if another conflict shape is added.
+        let conflicts: Vec<_> = found
+            .iter()
+            .filter(|item| !item.conflicting_options.is_empty())
+            .map(|item| {
+                (
+                    item.path.join(" "),
+                    item.index,
+                    item.conflicting_options.clone(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            conflicts,
+            [("config diff".into(), 1, vec!["--history".into()])]
+        );
     }
 
     #[test]
@@ -6368,6 +6414,46 @@ printf '%s\n' "${COMPREPLY[@]}"
             let (filenames, _) = bash_replies(&script, files.path(), words, false);
             assert!(!filenames, "positional completion claimed {words:?}");
         }
+    }
+
+    #[test]
+    fn bash_file_positionals_respect_clap_conflicts() {
+        let scripts = tempfile::tempdir().unwrap();
+        let files = tempfile::tempdir().unwrap();
+        std::fs::write(files.path().join("target plain.toml"), []).unwrap();
+        let mut generated = Vec::new();
+        generate_completions(Shell::Bash, BINARY_NAME, &mut generated).unwrap();
+        let script = scripts.path().join("generated.bash");
+        std::fs::write(&script, generated).unwrap();
+        for words in [
+            &["rbgp", "config", "diff", "--history", "1", "target"][..],
+            &["rbgp", "config", "diff", "--history=1", "target"],
+            &[
+                "rbgp",
+                "config",
+                "diff",
+                "--history",
+                "1",
+                "--json",
+                "target",
+            ],
+        ] {
+            let error = cli_command(BINARY_NAME)
+                .try_get_matches_from(words)
+                .unwrap_err();
+            assert_eq!(error.kind(), clap::error::ErrorKind::ArgumentConflict);
+            let (filenames, replies) = bash_replies(&script, files.path(), words, false);
+            assert!(
+                !filenames && replies.is_empty(),
+                "conflicting positional offered for {words:?}: {replies:?}"
+            );
+        }
+        let words = ["rbgp", "config", "diff", "--addr=--history", "target"];
+        cli_command(BINARY_NAME)
+            .try_get_matches_from(words)
+            .unwrap();
+        let (filenames, replies) = bash_replies(&script, files.path(), &words, false);
+        assert!(filenames && replies.iter().any(|reply| reply == "target plain.toml"));
     }
 
     #[test]

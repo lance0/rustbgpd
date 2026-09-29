@@ -1650,7 +1650,7 @@ _rbgp() {
             ;;
         rbgp__subcmd__config__subcmd__apply)
             opts="-s -j -h --expected-runtime-snapshot-token --plan-token --client-request-id --comment --confirm-id --confirm-timeout --addr --token-file --tls-ca --tls-cert --tls-key --tls-server-name --json --json-version --no-color --help"
-            local rbgp_positional=1 rbgp_value=0 rbgp_options=1 rbgp_word rbgp_short
+            local rbgp_positional=1 rbgp_value=0 rbgp_options=1 rbgp_file_allowed=1 rbgp_word rbgp_short
             for rbgp_word in "${COMP_WORDS[@]:1:COMP_CWORD-1}"; do
                 if [[ ${rbgp_value} == 1 ]]; then rbgp_value=0; continue; fi
                 if [[ ${rbgp_options} == 1 ]]; then
@@ -1677,7 +1677,7 @@ _rbgp() {
             if [[ ${cur} == -* && ${rbgp_options} == 1 && ${rbgp_value} == 0 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
-            elif [[ ${rbgp_value} == 0 && ( ${rbgp_positional} -eq 3 ) ]] ; then
+            elif [[ ${rbgp_value} == 0 && ${rbgp_file_allowed} == 1 && ( ${rbgp_positional} -eq 3 ) ]] ; then
                 local rbgp_old_ifs rbgp_ifs_was_set
                 [ -n "${IFS+x}" ] && { rbgp_old_ifs="$IFS"; rbgp_ifs_was_set=1; }
                 IFS=$'\n'
@@ -1798,10 +1798,13 @@ _rbgp() {
             ;;
         rbgp__subcmd__config__subcmd__diff)
             opts="-s -j -h --history --addr --token-file --tls-ca --tls-cert --tls-key --tls-server-name --json --no-color --help"
-            local rbgp_positional=1 rbgp_value=0 rbgp_options=1 rbgp_word rbgp_short
+            local rbgp_positional=1 rbgp_value=0 rbgp_options=1 rbgp_file_allowed=1 rbgp_word rbgp_short
             for rbgp_word in "${COMP_WORDS[@]:1:COMP_CWORD-1}"; do
                 if [[ ${rbgp_value} == 1 ]]; then rbgp_value=0; continue; fi
                 if [[ ${rbgp_options} == 1 ]]; then
+                    case "${rbgp_word%%=*}" in
+                        "--history") rbgp_file_allowed=0 ;;
+                    esac
                     case "${rbgp_word}" in
                         --) rbgp_options=0; continue ;;
                         --*=*) continue ;;
@@ -1825,7 +1828,7 @@ _rbgp() {
             if [[ ${cur} == -* && ${rbgp_options} == 1 && ${rbgp_value} == 0 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
-            elif [[ ${rbgp_value} == 0 && ( ${rbgp_positional} -eq 3 ) ]] ; then
+            elif [[ ${rbgp_value} == 0 && ${rbgp_file_allowed} == 1 && ( ${rbgp_positional} -eq 3 ) ]] ; then
                 local rbgp_old_ifs rbgp_ifs_was_set
                 [ -n "${IFS+x}" ] && { rbgp_old_ifs="$IFS"; rbgp_ifs_was_set=1; }
                 IFS=$'\n'
@@ -2136,7 +2139,7 @@ _rbgp() {
             ;;
         rbgp__subcmd__config__subcmd__import)
             opts="-s -j -h --format --out --addr --token-file --tls-ca --tls-cert --tls-key --tls-server-name --json --no-color --help"
-            local rbgp_positional=1 rbgp_value=0 rbgp_options=1 rbgp_word rbgp_short
+            local rbgp_positional=1 rbgp_value=0 rbgp_options=1 rbgp_file_allowed=1 rbgp_word rbgp_short
             for rbgp_word in "${COMP_WORDS[@]:1:COMP_CWORD-1}"; do
                 if [[ ${rbgp_value} == 1 ]]; then rbgp_value=0; continue; fi
                 if [[ ${rbgp_options} == 1 ]]; then
@@ -2163,7 +2166,7 @@ _rbgp() {
             if [[ ${cur} == -* && ${rbgp_options} == 1 && ${rbgp_value} == 0 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
-            elif [[ ${rbgp_value} == 0 && ( ${rbgp_positional} -eq 3 ) ]] ; then
+            elif [[ ${rbgp_value} == 0 && ${rbgp_file_allowed} == 1 && ( ${rbgp_positional} -eq 3 ) ]] ; then
                 local rbgp_old_ifs rbgp_ifs_was_set
                 [ -n "${IFS+x}" ] && { rbgp_old_ifs="$IFS"; rbgp_ifs_was_set=1; }
                 IFS=$'\n'
@@ -2218,7 +2221,7 @@ _rbgp() {
             ;;
         rbgp__subcmd__config__subcmd__plan)
             opts="-s -j -h --expected-runtime-snapshot-token --addr --token-file --tls-ca --tls-cert --tls-key --tls-server-name --json --json-version --no-color --help"
-            local rbgp_positional=1 rbgp_value=0 rbgp_options=1 rbgp_word rbgp_short
+            local rbgp_positional=1 rbgp_value=0 rbgp_options=1 rbgp_file_allowed=1 rbgp_word rbgp_short
             for rbgp_word in "${COMP_WORDS[@]:1:COMP_CWORD-1}"; do
                 if [[ ${rbgp_value} == 1 ]]; then rbgp_value=0; continue; fi
                 if [[ ${rbgp_options} == 1 ]]; then
@@ -2245,7 +2248,7 @@ _rbgp() {
             if [[ ${cur} == -* && ${rbgp_options} == 1 && ${rbgp_value} == 0 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
-            elif [[ ${rbgp_value} == 0 && ( ${rbgp_positional} -eq 3 ) ]] ; then
+            elif [[ ${rbgp_value} == 0 && ${rbgp_file_allowed} == 1 && ( ${rbgp_positional} -eq 3 ) ]] ; then
                 local rbgp_old_ifs rbgp_ifs_was_set
                 [ -n "${IFS+x}" ] && { rbgp_old_ifs="$IFS"; rbgp_ifs_was_set=1; }
                 IFS=$'\n'
@@ -2676,7 +2679,7 @@ _rbgp() {
             ;;
         rbgp__subcmd__diff__subcmd__snapshot__subcmd__from__subcmd__bmp)
             opts="-s -j -h --peer --neighbor --source --generation --addr --token-file --tls-ca --tls-cert --tls-key --tls-server-name --json --no-color --help"
-            local rbgp_positional=1 rbgp_value=0 rbgp_options=1 rbgp_word rbgp_short
+            local rbgp_positional=1 rbgp_value=0 rbgp_options=1 rbgp_file_allowed=1 rbgp_word rbgp_short
             for rbgp_word in "${COMP_WORDS[@]:1:COMP_CWORD-1}"; do
                 if [[ ${rbgp_value} == 1 ]]; then rbgp_value=0; continue; fi
                 if [[ ${rbgp_options} == 1 ]]; then
@@ -2703,7 +2706,7 @@ _rbgp() {
             if [[ ${cur} == -* && ${rbgp_options} == 1 && ${rbgp_value} == 0 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
-            elif [[ ${rbgp_value} == 0 && ( ${rbgp_positional} -eq 4 ) ]] ; then
+            elif [[ ${rbgp_value} == 0 && ${rbgp_file_allowed} == 1 && ( ${rbgp_positional} -eq 4 ) ]] ; then
                 local rbgp_old_ifs rbgp_ifs_was_set
                 [ -n "${IFS+x}" ] && { rbgp_old_ifs="$IFS"; rbgp_ifs_was_set=1; }
                 IFS=$'\n'
@@ -2766,7 +2769,7 @@ _rbgp() {
             ;;
         rbgp__subcmd__diff__subcmd__snapshot__subcmd__from__subcmd__mrt)
             opts="-s -j -h --view --peer --neighbor --peer-asn --neighbor-asn --source --generation --addr --token-file --tls-ca --tls-cert --tls-key --tls-server-name --json --no-color --help"
-            local rbgp_positional=1 rbgp_value=0 rbgp_options=1 rbgp_word rbgp_short
+            local rbgp_positional=1 rbgp_value=0 rbgp_options=1 rbgp_file_allowed=1 rbgp_word rbgp_short
             for rbgp_word in "${COMP_WORDS[@]:1:COMP_CWORD-1}"; do
                 if [[ ${rbgp_value} == 1 ]]; then rbgp_value=0; continue; fi
                 if [[ ${rbgp_options} == 1 ]]; then
@@ -2793,7 +2796,7 @@ _rbgp() {
             if [[ ${cur} == -* && ${rbgp_options} == 1 && ${rbgp_value} == 0 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
-            elif [[ ${rbgp_value} == 0 && ( ${rbgp_positional} -eq 4 ) ]] ; then
+            elif [[ ${rbgp_value} == 0 && ${rbgp_file_allowed} == 1 && ( ${rbgp_positional} -eq 4 ) ]] ; then
                 local rbgp_old_ifs rbgp_ifs_was_set
                 [ -n "${IFS+x}" ] && { rbgp_old_ifs="$IFS"; rbgp_ifs_was_set=1; }
                 IFS=$'\n'
@@ -2924,7 +2927,7 @@ _rbgp() {
             ;;
         rbgp__subcmd__diff__subcmd__snapshots)
             opts="-s -j -h --max-routes --max-input-bytes --detail --addr --token-file --tls-ca --tls-cert --tls-key --tls-server-name --json --no-color --help"
-            local rbgp_positional=1 rbgp_value=0 rbgp_options=1 rbgp_word rbgp_short
+            local rbgp_positional=1 rbgp_value=0 rbgp_options=1 rbgp_file_allowed=1 rbgp_word rbgp_short
             for rbgp_word in "${COMP_WORDS[@]:1:COMP_CWORD-1}"; do
                 if [[ ${rbgp_value} == 1 ]]; then rbgp_value=0; continue; fi
                 if [[ ${rbgp_options} == 1 ]]; then
@@ -2951,7 +2954,7 @@ _rbgp() {
             if [[ ${cur} == -* && ${rbgp_options} == 1 && ${rbgp_value} == 0 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
-            elif [[ ${rbgp_value} == 0 && ( ${rbgp_positional} -eq 3 || ${rbgp_positional} -eq 4 ) ]] ; then
+            elif [[ ${rbgp_value} == 0 && ${rbgp_file_allowed} == 1 && ( ${rbgp_positional} -eq 3 || ${rbgp_positional} -eq 4 ) ]] ; then
                 local rbgp_old_ifs rbgp_ifs_was_set
                 [ -n "${IFS+x}" ] && { rbgp_old_ifs="$IFS"; rbgp_ifs_was_set=1; }
                 IFS=$'\n'
@@ -10656,7 +10659,7 @@ _rbgp() {
             ;;
         rbgp__subcmd__policy__subcmd__check)
             opts="-s -j -h --root --max-graph-bytes --list-deps --coverage --coverage-min --coverage-matched-min --addr --token-file --tls-ca --tls-cert --tls-key --tls-server-name --json --no-color --help"
-            local rbgp_positional=1 rbgp_value=0 rbgp_options=1 rbgp_word rbgp_short
+            local rbgp_positional=1 rbgp_value=0 rbgp_options=1 rbgp_file_allowed=1 rbgp_word rbgp_short
             for rbgp_word in "${COMP_WORDS[@]:1:COMP_CWORD-1}"; do
                 if [[ ${rbgp_value} == 1 ]]; then rbgp_value=0; continue; fi
                 if [[ ${rbgp_options} == 1 ]]; then
@@ -10683,7 +10686,7 @@ _rbgp() {
             if [[ ${cur} == -* && ${rbgp_options} == 1 && ${rbgp_value} == 0 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
-            elif [[ ${rbgp_value} == 0 && ( ${rbgp_positional} -eq 3 ) ]] ; then
+            elif [[ ${rbgp_value} == 0 && ${rbgp_file_allowed} == 1 && ( ${rbgp_positional} -eq 3 ) ]] ; then
                 local rbgp_old_ifs rbgp_ifs_was_set
                 [ -n "${IFS+x}" ] && { rbgp_old_ifs="$IFS"; rbgp_ifs_was_set=1; }
                 IFS=$'\n'
@@ -10858,7 +10861,7 @@ _rbgp() {
             ;;
         rbgp__subcmd__policy__subcmd__fmt)
             opts="-s -j -h --check --addr --token-file --tls-ca --tls-cert --tls-key --tls-server-name --json --no-color --help"
-            local rbgp_positional=1 rbgp_value=0 rbgp_options=1 rbgp_word rbgp_short
+            local rbgp_positional=1 rbgp_value=0 rbgp_options=1 rbgp_file_allowed=1 rbgp_word rbgp_short
             for rbgp_word in "${COMP_WORDS[@]:1:COMP_CWORD-1}"; do
                 if [[ ${rbgp_value} == 1 ]]; then rbgp_value=0; continue; fi
                 if [[ ${rbgp_options} == 1 ]]; then
@@ -10885,7 +10888,7 @@ _rbgp() {
             if [[ ${cur} == -* && ${rbgp_options} == 1 && ${rbgp_value} == 0 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
-            elif [[ ${rbgp_value} == 0 && ( ${rbgp_positional} -ge 3 ) ]] ; then
+            elif [[ ${rbgp_value} == 0 && ${rbgp_file_allowed} == 1 && ( ${rbgp_positional} -ge 3 ) ]] ; then
                 local rbgp_old_ifs rbgp_ifs_was_set
                 [ -n "${IFS+x}" ] && { rbgp_old_ifs="$IFS"; rbgp_ifs_was_set=1; }
                 IFS=$'\n'
@@ -11370,7 +11373,7 @@ _rbgp() {
             ;;
         rbgp__subcmd__policy__subcmd__test)
             opts="-a -s -j -h --policy --direction --peer --neighbor --family --limit --all --show-changes --dataset --show-rejected --addr --token-file --tls-ca --tls-cert --tls-key --tls-server-name --json --json-version --no-color --help"
-            local rbgp_positional=1 rbgp_value=0 rbgp_options=1 rbgp_word rbgp_short
+            local rbgp_positional=1 rbgp_value=0 rbgp_options=1 rbgp_file_allowed=1 rbgp_word rbgp_short
             for rbgp_word in "${COMP_WORDS[@]:1:COMP_CWORD-1}"; do
                 if [[ ${rbgp_value} == 1 ]]; then rbgp_value=0; continue; fi
                 if [[ ${rbgp_options} == 1 ]]; then
@@ -11397,7 +11400,7 @@ _rbgp() {
             if [[ ${cur} == -* && ${rbgp_options} == 1 && ${rbgp_value} == 0 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
-            elif [[ ${rbgp_value} == 0 && ( ${rbgp_positional} -eq 3 ) ]] ; then
+            elif [[ ${rbgp_value} == 0 && ${rbgp_file_allowed} == 1 && ( ${rbgp_positional} -eq 3 ) ]] ; then
                 local rbgp_old_ifs rbgp_ifs_was_set
                 [ -n "${IFS+x}" ] && { rbgp_old_ifs="$IFS"; rbgp_ifs_was_set=1; }
                 IFS=$'\n'
