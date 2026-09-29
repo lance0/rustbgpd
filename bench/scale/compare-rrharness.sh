@@ -274,6 +274,7 @@ governor_path="/sys/devices/system/cpu/cpu${core}/cpufreq/scaling_governor"
 # runs, loudly, with blank cgroup columns and memory_scope=none in the manifest.
 memory_scope=(systemd-run --user --scope --quiet -p MemorySwapMax=0 --)
 memory_scope_mode=systemd-user-scope-swap-max-0
+launch_mode=systemd-user-scope-watcher-then-prebuilt-binary-with-taskset
 # shellcheck disable=SC2016 # Expanded by the scoped shell, not here.
 if ! "${memory_scope[@]}" sh -c 'cg=/sys/fs/cgroup$(sed -n "s/^0:://p" /proc/self/cgroup)
   test -r "$cg/memory.peak" && test "$(cat "$cg/memory.swap.max")" = 0' >/dev/null 2>&1; then
@@ -281,6 +282,7 @@ if ! "${memory_scope[@]}" sh -c 'cg=/sys/fs/cgroup$(sed -n "s/^0:://p" /proc/sel
   printf 'WARNING: cg_peak_mib and cg_settled_current_mib will be blank in this receipt\n' >&2
   memory_scope=()
   memory_scope_mode=none
+  launch_mode=direct-prebuilt-binary-with-taskset
 fi
 # Runs inside the leg's scope: start the leg, read memory.current once the
 # harness logs its settled RSS line (rss_converged_mib / rss_primed_mib), then
@@ -692,7 +694,7 @@ manifest = {
     "repetitions": 2,
     "counterbalance": ["repetition-1-base-first", "repetition-2-head-first"],
     "build": "cargo build --release --locked --jobs 1 --manifest-path bench/scale/rrharness/Cargo.toml",
-    "launch": "direct-prebuilt-binary-with-taskset",
+    "launch": "$launch_mode",
     "memory_scope": "$memory_scope_mode",
     "rustc": "$(rustc --version)",
     "cargo": "$(cargo --version)",

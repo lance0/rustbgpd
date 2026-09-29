@@ -97,6 +97,14 @@ parser_header=$(cd "$repo/bench/scale/rebaseline" &&
   exit 1
 }
 
+# The manifest's launch description follows the leg launch actually used.
+rg -F '"launch": "$launch_mode"' "$driver" >/dev/null &&
+  rg -F 'launch_mode=direct-prebuilt-binary-with-taskset' "$driver" >/dev/null &&
+  rg -F 'launch_mode=systemd-user-scope-' "$driver" >/dev/null || {
+  printf 'rrharness manifest launch is not derived from the memory scope mode\n' >&2
+  exit 1
+}
+
 cp "$driver" "$external_driver"
 chmod +x "$external_driver"
 expect_rc 2 'external driver' "$external_driver" --validate-only --base "$base" --head "$head"
