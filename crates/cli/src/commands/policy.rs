@@ -1304,6 +1304,10 @@ struct JsonImportExplain {
     prefix: String,
     afi_safi: String,
     current_policy_generation: u64,
+    // Null when the daemon did not report them (older daemon, or no
+    // enabled cache answered).
+    cache_size: Option<u32>,
+    evictions_since_reset: Option<u64>,
     matches: Vec<JsonImportExplainMatch>,
 }
 
@@ -1528,6 +1532,9 @@ pub async fn explain_import(
             }
         }
     }
+    if let Some(notice) = import_explain_cache_notice(&resp) {
+        outln!("{notice}")?;
+    }
     Ok(())
 }
 
@@ -1540,7 +1547,32 @@ fn import_explain_to_json(
         prefix: format!("{}/{}", resp.prefix, resp.prefix_length),
         afi_safi: address_family_label(resp.afi_safi).to_string(),
         current_policy_generation: resp.current_policy_generation,
+        cache_size: resp.cache_size,
+        evictions_since_reset: resp.evictions_since_reset,
         matches: resp.matches.iter().map(match_to_json).collect(),
+    }
+}
+
+/// The explain cache's eviction state, printed under a text answer. A
+/// daemon that does not report it may be one whose `not_seen` covers
+/// evicted prefixes, so say so when that is the answer.
+fn import_explain_cache_notice(resp: &proto::ExplainImportPolicyResponse) -> Option<String> {
+    match (resp.cache_size, resp.evictions_since_reset) {
+        (Some(size), Some(evictions)) => Some(format!(
+            "  cache:   {evictions} decision(s) evicted since session reset (cache_size {size})"
+        )),
+        _ if resp
+            .matches
+            .iter()
+            .any(|m| m.outcome == proto::ImportExplainOutcome::NotSeen as i32) =>
+        {
+            Some(
+                "WARNING: this daemon does not report explain-cache evictions; \
+                 not_seen may mean the decision was evicted"
+                    .to_string(),
+            )
+        }
+        _ => None,
     }
 }
 
@@ -2222,6 +2254,8 @@ mod tests {
             prefix_length: 48,
             afi_safi: proto::AddressFamily::Ipv6Unicast as i32,
             current_policy_generation: u64::MAX,
+            cache_size: Some(u32::MAX),
+            evictions_since_reset: Some(u64::MAX),
             matches: vec![proto::ImportExplainMatch {
                 outcome: proto::ImportExplainOutcome::Permit as i32,
                 // Per-match identity repeats the response envelope in normal RPC
@@ -2283,6 +2317,7 @@ mod tests {
             serde_json::to_value(import_explain_to_json(&response, "fe80::9%eth0")).unwrap(),
             serde_json::json!({"peer_address": "fe80::9%eth0", "prefix": "2001:db8::/48",
                 "afi_safi": "ipv6-unicast", "current_policy_generation": u64::MAX,
+                "cache_size": u32::MAX, "evictions_since_reset": u64::MAX,
                 "matches": [expected_match.clone()]})
         );
         for (outcome, label) in [
@@ -2340,10 +2375,13 @@ mod tests {
         );
         response.matches.clear();
         response.afi_safi = 999;
+        response.cache_size = None;
+        response.evictions_since_reset = None;
         assert_eq!(
             serde_json::to_value(import_explain_to_json(&response, "fe80::10%eth1")).unwrap(),
             serde_json::json!({"peer_address": "fe80::9", "prefix": "2001:db8::/48",
-                "afi_safi": "unspecified", "current_policy_generation": u64::MAX, "matches": []})
+                "afi_safi": "unspecified", "current_policy_generation": u64::MAX,
+                "cache_size": null, "evictions_since_reset": null, "matches": []})
         );
 
         let fallthrough = proto::ImportExplainStatementStep {
@@ -3152,6 +3190,34 @@ mod tests {
         explain_import(json_conn, "10.0.0.2", "10.0.0.0/24", None, true)
             .await
             .unwrap();
+    }
+
+    #[test]
+    fn import_explain_cache_notice_reports_evictions() {
+        let mut resp = proto::ExplainImportPolicyResponse {
+            cache_size: Some(4096),
+            evictions_since_reset: Some(995_000),
+            matches: vec![proto::ImportExplainMatch {
+                outcome: proto::ImportExplainOutcome::Evicted as i32,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        assert_eq!(
+            import_explain_cache_notice(&resp).as_deref(),
+            Some("  cache:   995000 decision(s) evicted since session reset (cache_size 4096)")
+        );
+        resp.cache_size = None;
+        resp.evictions_since_reset = None;
+        assert_eq!(import_explain_cache_notice(&resp), None);
+        resp.matches[0].outcome = proto::ImportExplainOutcome::NotSeen as i32;
+        assert_eq!(
+            import_explain_cache_notice(&resp).as_deref(),
+            Some(
+                "WARNING: this daemon does not report explain-cache evictions; \
+                 not_seen may mean the decision was evicted"
+            )
+        );
     }
 
     /// LAN-320: the JSON outcome strings for the tri-state are stable.

@@ -1539,6 +1539,8 @@ impl PeerSession {
                 let _ = reply.send(super::import_decision_cache::ImportExplainReply {
                     current_generation: generation,
                     cache_enabled: self.import_explain_enabled,
+                    cache_size: self.import_decision_cache.capacity(),
+                    evictions_since_reset: self.import_decision_cache.evictions_since_reset(),
                     matches,
                 });
                 ControlFlow::Continue(())

@@ -2770,6 +2770,8 @@ impl rustbgpd_api::proto::policy_service_server::PolicyService for MockPolicySer
                 prefix_length: req.prefix_length,
                 afi_safi: req.afi_safi,
                 current_policy_generation: 0,
+                cache_size: None,
+                evictions_since_reset: None,
                 matches: vec![server_proto::ImportExplainMatch {
                     outcome: outcome as i32,
                     peer_address: req.peer_address,
@@ -2861,6 +2863,8 @@ impl rustbgpd_api::proto::policy_service_server::PolicyService for MockPolicySer
             afi_safi: req.afi_safi,
             current_policy_generation: 3,
             matches,
+            cache_size: Some(4096),
+            evictions_since_reset: Some(0),
         }))
     }
 

@@ -2982,6 +2982,14 @@ daemon, or nothing.
 peers × (154 KiB + min(cache_size, distinct prefixes per peer) × 587 B)
 ```
 
+Each session also remembers every key the cap evicts, so an evicted prefix
+answers `evicted` rather than `not_seen`. That memory grows only after
+eviction starts: allocator-counted requested bytes are about 19 B per evicted
+key (18.9 MB at 1M evicted keys), capped at 2,097,152 keys (about 38 MB) per
+session. Past the cap the session stops recording and answers `evicted` for
+any prefix it has no record of. An Add-Path key with a nonzero path
+identifier costs about 85 B.
+
 The fixed and per-entry terms are a **computed model** solved from two
 same-binary fleet shapes in the
 [`explain-cache opt-in receipt`](../perf/explain-cache-opt-in-2026-07.md).

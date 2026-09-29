@@ -3094,7 +3094,7 @@ Each result reports an outcome:
 |---|---|
 | `permit` / `deny` | The chain admitted / rejected the prefix; a `deny` is explainable even though it never reached the RIB. |
 | `withdrawn` | Was permitted, then withdrawn by the peer (tombstone; policy context dropped). |
-| `evicted` | Was cached but pushed out by the per-peer cap — raise `cache_size`. |
+| `evicted` | Was cached but pushed out by the per-peer cap — raise `cache_size`. Every evicted key is remembered until session reset, so an evicted prefix never answers `not_seen`. |
 | `stale` | A decision exists but the peer's import policy has changed since; the historical decision is shown with its original generation. |
 | `not_seen` | The peer hasn't advertised this prefix on the current session (cache resets on flap / restart). This is an evaluated answer: the session is live and the cache is enabled. |
 | `cache_disabled` | The session records no decisions (`[policy.explain] enabled = false`). The CLI renders this as an error with a config hint and exits nonzero — it is never folded into `not_seen`. |
@@ -3130,6 +3130,13 @@ This is a side-effect-free read: it does not touch the RIB or move any
 policy counter. The cache is **diagnostic session state**, not durable
 history — it resets on peer flap and daemon restart.
 
+Text output ends with the session's eviction count and `cache_size`
+(`cache: N decision(s) evicted since session reset (cache_size C)`); JSON and
+gRPC carry `cache_size` and `evictions_since_reset`, absent when the daemon
+predates them. `bgp_import_explain_cache_evictions_total{peer}` counts the same
+evictions: a steadily rising value means that peer announces more distinct
+prefixes than `cache_size` holds, so most of its prefixes answer `evicted`.
+
 Tuning (`[policy.explain]` in the config, diagnostic retention only —
 never affects which routes are accepted). Both settings are **global**:
 there is no per-peer or per-group override.
@@ -3142,7 +3149,8 @@ there is no per-peer or per-group override.
   partial-table size. For reliable full-table explain, raise it toward
   the peer's expected retained-prefix count and budget the memory: the
   number applies to every session, so the bill is
-  `peers × (154 KiB + min(cache_size, prefixes per peer) × 587 B)`. See
+  `peers × (154 KiB + min(cache_size, prefixes per peer) × 587 B)`, plus
+  about 19 B per evicted key for the eviction memory. See
   [`CONFIGURATION.md`](configuration.md#import-decision-explain-policyexplain).
 
 ### Answer a member's "why is my route filtered?"

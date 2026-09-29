@@ -136,7 +136,8 @@ flag on this one.
   secondary structure — a recent-eviction key set, lossy with
   false-positive-only semantics, capped at `EVICTION_TRACKER_CAPACITY = 512`
   entries per peer and allocated once at that capacity — lets a subsequent
-  lookup return `EVICTED` rather than `NOT_SEEN`.
+  lookup return `EVICTED` rather than `NOT_SEEN`. (Superseded: see
+  [Amendment (2026-09-29)](#amendment-2026-09-29-evicted-keys-are-remembered-exactly).)
 
   **What 4096 is and isn't.** 4096 targets **fabric / partial-table
   debugging** — a leaf-spine or route-reflector peer carrying
@@ -347,6 +348,40 @@ session count without bound. Any of:
   of how many sessions are established.
 
 Absent one of those, the default stays off.
+
+## Amendment (2026-09-29): evicted keys are remembered exactly
+
+The Bound section and Decisions 1 and 3 describe a saturated cache as a
+"coin-flip between a real answer and `EVICTED`". That was wrong. The
+512-entry recent-eviction ring remembered only the latest 512 evicted
+keys, so once a session had pushed more than `cache_size + 512` distinct
+keys, every older evicted prefix answered `NOT_SEEN` — "the peer has not
+advertised this prefix on this session". At the default 4096 and a
+full-table peer of about 1M prefixes, roughly 995k announced prefixes
+read as never advertised, and nothing on the reply, in metrics or in logs
+showed that eviction had happened.
+
+The ring is replaced by exact per-session evicted-key memory:
+
+- Each evicted key is stored as a 64-bit fingerprint of `(AFI, SAFI,
+  prefix)` under per-cache random keys; nonzero Add-Path identifiers are
+  listed per prefix so an all-paths query names each evicted path. A
+  write for the key removes it, and it resets with the session.
+- Errors need a 64-bit fingerprint collision (about `n² / 2^65` across
+  `n` evicted keys).
+- The memory grows only once eviction starts: about 19 B per evicted key
+  (18.9 MB of allocator-counted requested bytes at 1M keys, about 85 B
+  for a nonzero Add-Path identifier). It is capped at 2,097,152 keys per
+  session (about 38 MB). Past the cap the session stops recording and
+  answers `EVICTED` for any key it has no record of, so `NOT_SEEN` is
+  never a guess.
+- Eviction is observable: `ExplainImportPolicyResponse` carries
+  `cache_size` and `evictions_since_reset`, `rbgp policy explain` prints
+  them, and `bgp_import_explain_cache_evictions_total{peer}` counts them.
+
+The corrected reading of the original wording: a query against a
+saturated cache is a coin-flip between a real answer and `EVICTED`, and
+that is now what the implementation delivers.
 
 ## Decisions baked in
 

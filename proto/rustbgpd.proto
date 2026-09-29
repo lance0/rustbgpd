@@ -1714,6 +1714,18 @@ message ExplainImportPolicyResponse {
   // when it does not, every matching path_id appears (Add-Path
   // disambiguation).
   repeated ImportExplainMatch matches = 6;
+
+  // The session's per-peer decision-cache cap
+  // ([policy.explain] cache_size). Present only when a live session
+  // with an enabled cache answered; absent for CACHE_DISABLED,
+  // NO_SESSION, or a daemon that predates the field.
+  optional uint32 cache_size = 7;
+
+  // Decisions pushed out by that cap since the session's last reset.
+  // Present under the same conditions as cache_size; present zero means
+  // every decision recorded on this session is still cached. An evicted
+  // prefix answers EVICTED, not NOT_SEEN, however large this count is.
+  optional uint64 evictions_since_reset = 8;
 }
 
 message ListRejectedRoutesRequest {
