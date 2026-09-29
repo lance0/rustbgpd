@@ -263,6 +263,7 @@ rss_end_mib 210
         head_multiplier: float = 1.16,
         fields: tuple[str, ...] = RESULT_FIELDS,
         cg_peak: object = 512,
+        cg_settled: object = 256,
     ) -> None:
         raw_dir.mkdir()
         rows: list[dict[str, object]] = []
@@ -313,7 +314,7 @@ rss_end_mib 210
                             ).hexdigest(),
                             "total_samples": 100,
                             "cg_peak_mib": cg_peak,
-                            "cg_settled_current_mib": 256,
+                            "cg_settled_current_mib": cg_settled,
                         }
                     )
         with path.open("w", newline="", encoding="utf-8") as handle:
@@ -345,7 +346,9 @@ rss_end_mib 210
             directory = Path(directory_text)
             for name, kwargs, success in (
                 ("legacy", {"fields": LEGACY_RESULT_FIELDS}, True),
-                ("blank", {"cg_peak": ""}, True),
+                ("blank", {"cg_peak": "", "cg_settled": ""}, True),
+                ("half-peak", {"cg_peak": ""}, False),
+                ("half-settled", {"cg_settled": ""}, False),
                 ("text", {"cg_peak": "lots"}, False),
                 ("negative", {"cg_peak": -1}, False),
             ):

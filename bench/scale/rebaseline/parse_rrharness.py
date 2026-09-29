@@ -347,9 +347,12 @@ def read_results(path: Path) -> list[dict[str, str]]:
     for row in rows:
         if None in row:
             raise ValueError(f"{path}: row has more fields than the header names")
-        for field in RESULT_FIELDS[len(LEGACY_RESULT_FIELDS):]:
-            if row.get(field):
-                finite_number(row[field], field)
+        cgroup = [row.get(field, "") for field in RESULT_FIELDS[len(LEGACY_RESULT_FIELDS):]]
+        if all(cgroup):
+            for field, value in zip(RESULT_FIELDS[len(LEGACY_RESULT_FIELDS):], cgroup):
+                finite_number(value, field)
+        elif any(cgroup):
+            raise ValueError(f"{path}: cgroup columns must be both populated or both blank")
     if len(rows) != 16:
         raise ValueError(f"{path}: expected 16 result rows, got {len(rows)}")
     return rows
