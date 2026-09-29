@@ -427,6 +427,7 @@ prom_value() {
 }
 
 # evpn_df_role{esi=...,vni=...,role=$2} value on $1 (empty if absent).
+# Drain the scrape after the first match to avoid SIGPIPE under pipefail.
 prom_df_role() {
     local container=${1:?}
     local role=${2:?}
@@ -440,12 +441,12 @@ prom_df_role() {
                 }
                 return ""
             }
-            $0 ~ /^evpn_df_role\{/ &&
+            !found && $0 ~ /^evpn_df_role\{/ &&
                 label_value($0, "role") == role &&
                 label_value($0, "vni") == vni &&
                 label_value($0, "esi") == esi {
                     print $2
-                    exit
+                    found = 1
                 }
         '
 }

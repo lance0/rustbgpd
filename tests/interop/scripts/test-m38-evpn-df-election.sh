@@ -18,17 +18,17 @@
 #   bash tests/interop/scripts/test-m38-evpn-df-election.sh
 #   sudo containerlab destroy -t tests/interop/m38-evpn-df-election.clab.yml
 
-set -eu
-
 TOPO="m38-evpn-df-election"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PE1="clab-${TOPO}-pe1"
 PE2="clab-${TOPO}-pe2"
 ESI="00:00:00:00:00:00:00:00:00:01"
 VNI="100"
-PROTO="proto/rustbgpd.proto"
-TEST_OPERATOR_TOKEN_FILE="tests/fixtures/grpc-test-only-operator.token"
-IFS= read -r TEST_OPERATOR_TOKEN < "$TEST_OPERATOR_TOKEN_FILE"
-GRPC_AUTH=(-H "authorization: Bearer $TEST_OPERATOR_TOKEN")
+RUSTBGPD="$PE1"
+INTEROP_TEST_OPERATOR_AUTH=1
+export RUSTBGPD INTEROP_TEST_OPERATOR_AUTH
+# shellcheck source=tests/interop/scripts/test-lib.sh
+source "$SCRIPT_DIR/test-lib.sh"
 
 # Type 0x06 / Subtype 0x02 = ES-Import RT (RFC 7432 §7.6).
 # Type 0x06 / Subtype 0x01 = ESI Label (RFC 7432 §7.5).
@@ -40,40 +40,6 @@ ESI_LABEL_TYPESUB="0x0601"
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
-
-# Scrape Prometheus via the container's management IP. The
-# `rustbgpd:dev` runtime image intentionally stays small and does not
-# carry curl/wget, so do the HTTP request from the host like the soak
-# harnesses do.
-prom_scrape() {
-    local container=${1:?}
-    local ip
-    ip=$(resolve_ip "$container")
-    if [ -z "$ip" ]; then
-        echo "ERROR: could not resolve management IP for $container" >&2
-        return 1
-    fi
-    curl -sfm 5 "http://${ip}:9179/metrics" 2>/dev/null \
-        || wget -qO- -T 5 "http://${ip}:9179/metrics" 2>/dev/null \
-        || true
-}
-
-# Read the current value of evpn_df_role for the given role label.
-# Returns "0", "1", or "" if the metric line isn't yet emitted.
-prom_df_role() {
-    local container=${1:?}
-    local role=${2:?}
-    prom_scrape "$container" \
-        | awk -v esi="$ESI" -v vni="$VNI" -v role="$role" '
-            $0 ~ /^evpn_df_role\{/ \
-                && index($0, "esi=\"" esi "\"") \
-                && index($0, "vni=\"" vni "\"") \
-                && index($0, "role=\"" role "\"") {
-                print $NF
-                exit
-            }
-        '
-}
 
 stop_rustbgpd_daemon() {
     local container=${1:?}
@@ -90,10 +56,6 @@ stop_rustbgpd_daemon() {
     return 1
 }
 
-resolve_ip() {
-    docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "$1" 2>/dev/null
-}
-
 # List the EVPN routes a PE currently has best-pathed for the given
 # route_type (4 = ES, 1 = EAD-per-ES / EAD-per-EVI). Returns raw JSON.
 grpc_list_evpn() {
@@ -102,8 +64,7 @@ grpc_list_evpn() {
     local ip
     ip=$(resolve_ip "$container")
     [ -z "$ip" ] && return 1
-    grpcurl -plaintext -import-path . -proto "$PROTO" \
-        "${GRPC_AUTH[@]}" \
+    grpcurl_call \
         -d "{\"route_type_filter\": $route_type}" \
         "${ip}:50051" rustbgpd.v1.RibService/ListEvpnRoutes 2>/dev/null
 }
@@ -121,20 +82,10 @@ print(len(data.get("routes", [])))
 '
 }
 
-wait_for_route_count() {
-    local container=${1:?}
-    local route_type=${2:?}
-    local want=${3:?}
-    local timeout=${4:-60}
-    for _ in $(seq 1 "$timeout"); do
-        local got
-        got=$(evpn_route_count "$container" "$route_type" 2>/dev/null || echo 0)
-        if [ "$got" -ge "$want" ]; then
-            return 0
-        fi
-        sleep 1
-    done
-    return 1
+route_count_at_least() {
+    local got
+    got=$(evpn_route_count "${1:?}" "${2:?}") || return 1
+    [ "$got" -ge "${3:?}" ]
 }
 
 # True iff at least one EVPN route in the PE's RIB at the given
@@ -159,65 +110,34 @@ sys.exit(1)
 ' "$type_sub"
 }
 
-wait_for_extcomm() {
-    local container=${1:?}
-    local route_type=${2:?}
-    local type_sub=${3:?}
-    local timeout=${4:-30}
-    for _ in $(seq 1 "$timeout"); do
-        if has_extcomm_typesub "$container" "$route_type" "$type_sub"; then
-            return 0
-        fi
-        sleep 1
-    done
-    return 1
-}
-
 prom_df_role_changes() {
     local container=${1:?}
     prom_scrape "$container" \
         | awk -v esi="$ESI" -v vni="$VNI" '
-            $0 ~ /^evpn_df_role_changes_total\{/ \
+            !found && $0 ~ /^evpn_df_role_changes_total\{/ \
                 && index($0, "esi=\"" esi "\"") \
                 && index($0, "vni=\"" vni "\"") {
                 print $NF
-                exit
+                found = 1
             }
         '
 }
 
-wait_for_role() {
-    local container=${1:?}
-    local role=${2:?}
-    local want=${3:?}
-    local timeout=${4:-30}
-    for _ in $(seq 1 "$timeout"); do
-        local got
-        got=$(prom_df_role "$container" "$role")
-        if [ "$got" = "$want" ]; then return 0; fi
-        sleep 1
-    done
-    return 1
+role_is() {
+    [ "$(prom_df_role "${1:?}" "${2:?}")" = "${3:?}" ]
 }
 
 # ---------------------------------------------------------------------------
 # Tests
 # ---------------------------------------------------------------------------
 
-PASS=0
-FAIL=0
-TOTAL=0
-
 assert() {
     local desc=${1:?}
-    local cmd=${2:?}
-    TOTAL=$((TOTAL + 1))
-    if eval "$cmd"; then
-        echo "PASS — $desc"
-        PASS=$((PASS + 1))
+    shift
+    if "$@"; then
+        ok "$desc"
     else
-        echo "FAIL — $desc"
-        FAIL=$((FAIL + 1))
+        fail "$desc"
     fi
 }
 
@@ -226,24 +146,24 @@ assert() {
 # and remote Type 4 ES candidates in LocRib, then poll Prometheus.
 echo "Waiting up to 60s for Type 4 ES candidate exchange..."
 assert "PE1 LocRib has both Type 4 ES candidates" \
-    'wait_for_route_count "$PE1" 4 2 60'
+    wait_until 60 1 route_count_at_least "$PE1" 4 2
 
 assert "PE2 LocRib has both Type 4 ES candidates" \
-    'wait_for_route_count "$PE2" 4 2 60'
+    wait_until 60 1 route_count_at_least "$PE2" 4 2
 
 echo "Waiting up to 60s for initial DF election to land..."
 
 assert "PE1 reports DF=1 for (esi=$ESI, vni=$VNI)" \
-    'wait_for_role "$PE1" df 1 60'
+    wait_for_role "$PE1" df 1 60
 
 assert "PE1 reports NonDF=0 for the same key" \
-    '[ "$(prom_df_role "$PE1" nondf)" = "0" ]'
+    role_is "$PE1" nondf 0
 
 assert "PE2 reports DF=0 for (esi=$ESI, vni=$VNI)" \
-    'wait_for_role "$PE2" df 0 60'
+    wait_for_role "$PE2" df 0 60
 
 assert "PE2 reports NonDF=1 for the same key" \
-    '[ "$(prom_df_role "$PE2" nondf)" = "1" ]'
+    role_is "$PE2" nondf 1
 
 # Gate 8b prep: ES-Import RT extcomm (RFC 7432 §7.6) on Type 4 routes
 # and ESI Label extcomm (RFC 7432 §7.5) on Type 1 EAD-per-ES routes.
@@ -251,19 +171,19 @@ assert "PE2 reports NonDF=1 for the same key" \
 # and in routes received from the other PE (reflected via iBGP).
 echo "Waiting up to 30s for ES-Import RT (Type 4) on PE1..."
 assert "PE1 LocRib has Type 4 ES with ES-Import RT extcomm" \
-    'wait_for_extcomm "$PE1" 4 "$ES_IMPORT_RT_TYPESUB" 30'
+    wait_until 30 1 has_extcomm_typesub "$PE1" 4 "$ES_IMPORT_RT_TYPESUB"
 
 echo "Waiting up to 30s for ES-Import RT (Type 4) on PE2..."
 assert "PE2 LocRib has Type 4 ES with ES-Import RT extcomm" \
-    'wait_for_extcomm "$PE2" 4 "$ES_IMPORT_RT_TYPESUB" 30'
+    wait_until 30 1 has_extcomm_typesub "$PE2" 4 "$ES_IMPORT_RT_TYPESUB"
 
 echo "Waiting up to 30s for ESI Label (Type 1) on PE1..."
 assert "PE1 LocRib has Type 1 EAD-per-ES with ESI Label extcomm" \
-    'wait_for_extcomm "$PE1" 1 "$ESI_LABEL_TYPESUB" 30'
+    wait_until 30 1 has_extcomm_typesub "$PE1" 1 "$ESI_LABEL_TYPESUB"
 
 echo "Waiting up to 30s for ESI Label (Type 1) on PE2..."
 assert "PE2 LocRib has Type 1 EAD-per-ES with ESI Label extcomm" \
-    'wait_for_extcomm "$PE2" 1 "$ESI_LABEL_TYPESUB" 30'
+    wait_until 30 1 has_extcomm_typesub "$PE2" 1 "$ESI_LABEL_TYPESUB"
 
 # Capture PE2's transition counter before forcing the flip.
 PE2_BEFORE=$(prom_df_role_changes "$PE2")
@@ -285,19 +205,17 @@ echo "Waiting up to 120s for PE2 to promote to DF..."
 # Widening to 120s costs nothing in the success case and absorbs the
 # observed jitter without masking real regressions.
 assert "PE2 promotes to DF after PE1 shutdown" \
-    'wait_for_role "$PE2" df 1 120'
+    wait_for_role "$PE2" df 1 120
 
 # The transition counter should have advanced by at least 1.
 PE2_AFTER=$(prom_df_role_changes "$PE2")
 PE2_AFTER=${PE2_AFTER:-0}
 echo "PE2 evpn_df_role_changes_total after promotion: $PE2_AFTER"
 assert "PE2 evpn_df_role_changes_total advanced after promotion" \
-    'awk -v b="$PE2_BEFORE" -v a="$PE2_AFTER" "BEGIN { exit !(a > b) }"'
+    awk -v b="$PE2_BEFORE" -v a="$PE2_AFTER" 'BEGIN { exit !(a > b) }'
 
 # ---------------------------------------------------------------------------
 # Summary
 # ---------------------------------------------------------------------------
 
-echo ""
-echo "M38 smoke: $PASS/$TOTAL passed, $FAIL failed."
-[[ $FAIL -eq 0 ]]
+print_summary
