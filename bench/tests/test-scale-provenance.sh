@@ -55,6 +55,8 @@ v=value(); v["workload"]["inputs"]={}; accepted("missing-input-fields",v,False)
 v=value(); v["workload"]["inputs"]={**inputs,"GEN_DUALSTACK":"1","RELOADSTALL_IPV4_PREFIXES":"360360"}; accepted("asymmetric-inputs",v,True)
 v=value(); v["workload"]["inputs"]={**inputs,"RELOADSTALL_IPV4_PREFIXES":360360}; accepted("malformed-input-value",v,False)
 v=value(); v["workload"]["inputs"]={**inputs,"UNTRACKED":"value"}; accepted("unknown-input-key",v,False)
+v=value(); v["workload"]["inputs"]={**inputs,"FLAP_ROUNDS":"12"}; accepted("optional-flap-rounds",v,True)
+v=value(); v["workload"]["inputs"]={**inputs,"FLAP_ROUNDS":12}; accepted("malformed-flap-rounds",v,False)
 v=value(); v["workload"]["inputs"]={**inputs,"RELOADSTALL_MEMBERSHIP_CHURN":"1"}
 accepted("membership-missing-helper-hash",v,False)
 v["sources"]["common"]={**common,"bench/scale/reloadstall/membership_churn.py":h}

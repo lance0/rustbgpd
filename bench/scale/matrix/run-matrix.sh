@@ -19,6 +19,9 @@
 # Usage: run-matrix.sh [cell ...]         (default: rustbgpd bird openbgpd)
 # Knobs (env): N_PEERS=700 TOTAL_PREFIXES=400400 PORT=1790 RELOADS=4
 #              CONTROL_SECS=30 BIRD_THREADS=8 FLAPSTORM= (K, optional)
+#              FLAP_ROUNDS= (with FLAPSTORM: the harness's --flap-rounds;
+#                empty keeps its default of 3). rustbgpd flapstorm cells
+#                also log jemalloc gauges per round (`flap N heap ...`).
 #              COMPETITOR_GENERATION=historical|current
 #              ARTIFACTS_DIR=bench/scale/matrix/artifacts
 #              CHANGED_PEERS= (rustbgpd cell only: the mixed export-only
@@ -58,6 +61,7 @@ RELOADS="${RELOADS:-4}"
 CONTROL_SECS="${CONTROL_SECS:-30}"
 BIRD_THREADS="${BIRD_THREADS:-8}"
 FLAPSTORM="${FLAPSTORM:-}"
+FLAP_ROUNDS="${FLAP_ROUNDS:-}"
 CHANGED_PEERS="${CHANGED_PEERS:-}"
 PROBE_PREFIXES="${PROBE_PREFIXES:-}"
 ART="${ARTIFACTS_DIR:-$REPO/bench/scale/matrix/artifacts}"
@@ -118,9 +122,11 @@ matrix_workload_inputs() {
         --arg reloads "$RELOADS" --arg control "$CONTROL_SECS" \
         --arg changed "$CHANGED_PEERS" --arg flapstorm "$FLAPSTORM" \
         --arg threads "$BIRD_THREADS" --arg probes "$PROBE_PREFIXES" \
+        --arg flaprounds "$FLAP_ROUNDS" \
         '{N_PEERS:$peers,TOTAL_PREFIXES:$total,PORT:$port,RELOADS:$reloads,
           CONTROL_SECS:$control,CHANGED_PEERS:$changed,FLAPSTORM:$flapstorm,
           BIRD_THREADS:$threads,PROBE_PREFIXES:$probes}
+         + (if $flaprounds == "" then {} else {FLAP_ROUNDS:$flaprounds} end)
          + (env | with_entries(select(.key | test("^(GEN_|RELOADSTALL_)"))))'
 }
 
@@ -469,6 +475,7 @@ run_cell() {
     [ -n "$reload_cmd" ] && hargs+=("$N_PEERS" "$reload_cmd")
     [ -z "$reload_cmd" ] && [ -n "$CHANGED_PEERS" ] && hargs+=("$CHANGED_PEERS")
     [ -n "$FLAPSTORM" ] && hargs+=(--flapstorm "$FLAPSTORM")
+    [ -n "$FLAPSTORM" ] && [ -n "$FLAP_ROUNDS" ] && hargs+=(--flap-rounds "$FLAP_ROUNDS")
 
     # Harness in the background so the RSS guard can abort the cell.
     local settlement_env=()
@@ -481,6 +488,9 @@ run_cell() {
     fi
     if [ "$cell" = rustbgpd ] && [ -z "$FLAPSTORM" ] && [ "$RELOADS" -gt 0 ]; then
         settlement_env+=(RELOADSTALL_RELOAD_METRICS_ADDR=127.0.0.1:9179)
+    fi
+    if [ "$cell" = rustbgpd ] && [ -n "$FLAPSTORM" ]; then
+        settlement_env+=(RELOADSTALL_HEAP_METRICS_ADDR=127.0.0.1:9179)
     fi
     env "${settlement_env[@]}" "$HARNESS" "${hargs[@]}" >"$cdir/reloadstall.log" 2>&1 &
     local hpid=$!
