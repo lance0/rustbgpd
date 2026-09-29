@@ -12,9 +12,9 @@ use super::parse::{
     resolve_chain,
 };
 use super::schema::{
-    ManagedBridgeNetdevConfig, ManagedL3VxlanNetdevConfig, ManagedNetdevsConfig,
-    ManagedSvdVxlanNetdevConfig, ManagedVlanUpperNetdevConfig, ManagedVrfNetdevConfig,
-    ManagedVxlanNetdevConfig, Rfc8212PolicySource,
+    MAX_POLICY_CACHE_ENTRIES, ManagedBridgeNetdevConfig, ManagedL3VxlanNetdevConfig,
+    ManagedNetdevsConfig, ManagedSvdVxlanNetdevConfig, ManagedVlanUpperNetdevConfig,
+    ManagedVrfNetdevConfig, ManagedVxlanNetdevConfig, Rfc8212PolicySource,
 };
 use super::schema::{OrrVantage, parse_orr_vantage, validate_orr_vantage_address};
 use super::{
@@ -468,6 +468,22 @@ impl Config {
         }
 
         validate_reserved_policy_names(self)?;
+        for (field, value) in [
+            (
+                "[policy.explain] cache_size",
+                self.policy.explain.cache_size,
+            ),
+            (
+                "[policy.reject_retention] capacity",
+                self.policy.reject_retention.capacity,
+            ),
+        ] {
+            if value > MAX_POLICY_CACHE_ENTRIES {
+                return Err(ConfigError::InvalidPolicyEntry {
+                    reason: format!("{field} = {value} exceeds maximum {MAX_POLICY_CACHE_ENTRIES}"),
+                });
+            }
+        }
         validate_event_history(&self.event_history)?;
         validate_inbound_admission(&self.inbound_admission)?;
         validate_grpc_security(&self.security)?;

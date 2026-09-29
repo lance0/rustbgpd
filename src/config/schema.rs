@@ -2550,10 +2550,14 @@ pub struct PolicyExplainConfig {
     /// this toward their expected retained-prefix count for the peer
     /// and own the memory cost.
     ///
-    /// Budget roughly `peers × min(cache_size, prefixes per peer) ×
-    /// ~600 B`, plus a ~155 KiB fixed floor per session once explain is
-    /// enabled (the LRU index is allocated at capacity).
+    /// Budget roughly `sum over nonempty peer caches (~1 KiB +
+    /// min(max(1, cache_size), recorded decisions) × ~600 B)`, plus evicted-key
+    /// memory after eviction. The minimal first-insert probe requested 1,428
+    /// heap bytes; actual memory depends on attributes and allocator. The
+    /// index grows with retained entries. Values above 2,097,152 are rejected;
+    /// zero is clamped to one by the session cache.
     #[serde(default = "default_explain_cache_size")]
+    #[schemars(range(min = 0, max = 2_097_152))]
     pub cache_size: usize,
 }
 
@@ -2600,8 +2604,10 @@ pub struct PolicyRejectRetentionConfig {
     /// storm; the store is LRU on rejection recency, so a storm
     /// converges on the most recent rejections. Raise it toward the
     /// expected member announcement count for reliable full coverage on
-    /// route-server fleets and own the memory.
+    /// route-server fleets and own the memory. Values above 2,097,152
+    /// are rejected; zero is clamped to one by the session store.
     #[serde(default = "default_reject_retention_capacity")]
+    #[schemars(range(min = 0, max = 2_097_152))]
     pub capacity: usize,
 }
 
@@ -2621,6 +2627,8 @@ impl Default for PolicyRejectRetentionConfig {
         }
     }
 }
+
+pub(crate) const MAX_POLICY_CACHE_ENTRIES: usize = 1 << 21;
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]

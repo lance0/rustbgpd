@@ -75,7 +75,7 @@
       {"definition": "PolicyConfig", "fields": ["datasets", "definitions", "explain", "export_chain", "import_chain", "neighbor_sets", "rpol_files", "rpol_roots"], "schema_sha256": "43697fb72539c84f903e8fda63a2b8cb71142bb6e896a3553cb2677f8906afe6"},
       {"definition": "DatasetFileConfig", "fields": ["path"], "schema_sha256": "9549ad636e3932f31fee4f3dbfe55d49e54b99c1e3cfacae8d62bc55ede9ca16"},
       {"definition": "NeighborSetConfig", "fields": ["addresses", "peer_groups", "remote_asns"], "schema_sha256": "2443c25417b6b731071c7f26dfcf698a34d83b92d195d6bed76739e5aa471952"},
-      {"definition": "PolicyExplainConfig", "fields": ["cache_size", "enabled"], "schema_sha256": "ceef93e1bd774fcb3216832aed9f3e021fb73adbc834494de0ec419974c863b2"},
+      {"definition": "PolicyExplainConfig", "fields": ["cache_size", "enabled"], "schema_sha256": "792eb690c4e63ea8a482eb094c2cdb175381907764dbde9a4282ef260d1026f5"},
       {"definition": "NamedPolicyConfig", "fields": ["default_action", "statements"], "schema_sha256": "f24a8eef30aaa84a2ab5ed652f411064677ba3ebd701943a150bb2db61aa7e0d"},
       {"definition": "PolicyStatementConfig", "fields": ["action", "ge", "le", "match_as_path", "match_as_path_length_ge", "match_as_path_length_le", "match_aspa_validation", "match_community", "match_local_pref_ge", "match_local_pref_le", "match_med_ge", "match_med_le", "match_neighbor_set", "match_next_hop", "match_route_type", "match_rpki_validation", "prefix", "set_as_path_prepend", "set_community_add", "set_community_remove", "set_local_pref", "set_med", "set_next_hop"], "schema_sha256": "16f5776b52aca20eb6090855b62dfe8e470dc0d06ed7bc4441c0c6215e5b85fb"},
       {"definition": "AsPathPrependConfig", "fields": ["asn", "count"], "schema_sha256": "9b0ae8118a5c2b68c741aac36402faa68ede17c9c746f2e60feaac0dfd4eb06c"},
@@ -323,7 +323,7 @@
     "metrics": "Stable metric names, types, and existing label meanings do not change. New metrics and bounded labels are additive; label removal or reinterpretation is breaking.",
     "events": "Stable event kinds and existing JSON/protobuf fields retain meaning. New optional fields and event kinds are additive; field removal, rename, or semantic reuse is breaking.",
     "deprecation_window": {"minimum_minor_releases": 2, "minimum_days": 90},
-    "migration_support": "A breaking stable-surface change requires a new contract major, CHANGELOG entry, migration guide, and a consecutive-release fixture accepted by the new release. Current and immediately previous minor release migrations are supported."
+    "migration_support": "During 0.x, the inventory defines the existing narrow compatibility promise for route servers and route reflectors. Under the alpha correctness-over-compatibility posture, reviewed correctness changes may require breaking upgrades before the v1.0 tag. A change that rejects previously accepted config is a breaking upgrade requiring a CHANGELOG entry, migration guidance, and a check with the new binary. The inventory freezes at the v1.0 tag. After the tag, a breaking frozen-surface change requires a new contract major, CHANGELOG entry, migration guide, and a consecutive-release fixture accepted by the new release. The fixture chain advances during release preparation. Current and immediately previous minor release migrations are supported."
   },
   "mutation": {
     "canonical": "ConfigService PlanConfigTransaction/ApplyConfigTransaction with snapshot token and commit-confirmed confirm/abort lifecycle",

@@ -2967,7 +2967,7 @@ cache_size = 4096
 | Field        | Type    | Required | Default | Description |
 |--------------|---------|----------|---------|-------------|
 | `enabled`    | bool    | no       | `false` | Gates the cache write-path. When `false` (the default), the inbound UPDATE path skips the compact decision/context snapshot entirely (one boolean check, nothing stored), the session allocates no cache, and explain queries answer `cache_disabled` (distinct from `not_seen`; the CLI renders it as an error naming the config lines to add). |
-| `cache_size` | integer | no       | `4096`  | LRU capacity **per session**, one entry per `(AFI, SAFI, prefix, path_id)`. The 4096 default suits fabric / partial-table peers; a full-table peer keeps it saturated, so raise it toward that peer's retained-prefix count if you need reliable full-table explain. |
+| `cache_size` | integer | no       | `4096`  | LRU capacity **per session**, one entry per `(AFI, SAFI, prefix, path_id)`; maximum 2,097,152. Zero is treated as one. The 4096 default suits fabric / partial-table peers; raise it toward the expected decision count for more coverage. The index grows as entries arrive. |
 
 **Both settings are global.** There is no per-peer or per-group
 override: `enabled` is on or off for the whole daemon, and `cache_size`
@@ -2979,7 +2979,9 @@ daemon, or nothing.
 **partial-table**, not complete. Budget roughly:
 
 ```
-peers × (154 KiB + min(cache_size, distinct prefixes per peer) × 587 B)
+sum over nonempty peer caches (
+  ~1 KiB + min(max(1, cache_size), recorded decisions for that peer) × ~600 B
+)
 ```
 
 Each session also remembers every key the cap evicts, so an evicted prefix
@@ -2991,14 +2993,17 @@ about 72 MB if every evicted key carries a nonzero Add-Path identifier. Past
 the cap the session stops recording and answers `evicted` for any prefix it
 has no record of.
 
-The fixed and per-entry terms are a **computed model** solved from two
-same-binary fleet shapes in the
-[`explain-cache opt-in receipt`](../perf/explain-cache-opt-in-2026-07.md).
-Worked examples: 10 saturated peers ≈ 24.4 MiB; 1000 peers × 400
-retained prefixes ≈ 374 MiB; 1000 peers each announcing at least 4096
-distinct routes ≈ 2.4 GiB, the extrapolated saturation ceiling for that
-fleet shape. The receipt computes the 1000 × 400 steady-RSS difference
-from four measured runs and discloses the fleet, allocator, and host limits.
+The one-time term covers the LRU's list sentinels and first hash-table
+allocation. The first insertion in the minimal allocation probe requested
+1,428 heap bytes; the estimate above budgets about 1.6 KiB for one entry.
+The ~600 B term includes the growing index and entry payload at larger
+occupancy. Actual memory depends on attributes, occupancy, and allocator.
+There is no fixed 154 KiB reservation per session. The allocation discussion
+in [ADR-0073](../adr/0073-import-policy-explain.md) and the historical
+[`explain-cache opt-in receipt`](../perf/explain-cache-opt-in-2026-07.md)
+describe the previous eager index and should not be used to predict the
+memory saved by this change. The configured ceiling bounds retained
+decisions per session, not total daemon memory.
 
 This is **diagnostic state only** — it never affects which routes are
 accepted. Scope is IPv4 / IPv6 unicast. The cache resets on peer session
@@ -3031,7 +3036,7 @@ capacity = 1024
 | Field      | Type    | Required | Default | Description |
 |------------|---------|----------|---------|-------------|
 | `enabled`  | bool    | no       | `true`  | Gates retention entirely. When `false`, the reject paths skip entry construction (one boolean check per gate) and the query surface reports the disabled state as a configuration fact rather than an empty answer. |
-| `capacity` | integer | no       | `1024`  | Per-peer retention cap, LRU on rejection recency — a reject storm converges on the most recent `capacity` rejections. Each entry is one rejected `(AFI, SAFI, prefix, path_id)` with its reason and a compact attribute summary, ≤ ~512 bytes realistic worst case ⇒ ~0.5 MiB bound per peer at the default. Raise it toward the expected member announcement count for full coverage on route-server fleets. |
+| `capacity` | integer | no       | `1024`  | Per-peer retention cap, LRU on rejection recency; maximum 2,097,152. Zero is treated as one. A reject storm converges on the most recent `capacity` rejections. Each entry is one rejected `(AFI, SAFI, prefix, path_id)` with its reason and a compact attribute summary, ≤ ~512 bytes realistic worst case ⇒ ~0.5 MiB bound per peer at the default. Raise it toward the expected member announcement count for full coverage on route-server fleets. |
 
 With retention enabled, a clean permitted UPDATE does not construct a
 rejection summary. The first policy, OTC, or next-hop-ownership rejection in
