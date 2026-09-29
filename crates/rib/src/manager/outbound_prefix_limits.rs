@@ -1032,6 +1032,11 @@ impl RibManager {
         let Some((peer, afi)) = self.take_next_outbound_limit_recovery() else {
             return false;
         };
+        // Advance the rotating cursor even when this peer cannot accept a
+        // replay, but retain its family intent for the ordinary retry timer.
+        if self.outbound_channel_full(peer) {
+            return false;
+        }
         let started = std::time::Instant::now();
         let outcome = self.send_route_refresh_response_inner(
             peer,

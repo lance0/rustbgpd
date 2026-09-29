@@ -1315,13 +1315,13 @@ fn selection_held_recovery_parks_without_protocol_state_or_timer_spin() {
     assert_eq!(outbound_limit_actor_samples(&metrics)["recovery"], 1);
 }
 
-/// A full outbound channel is an internal recovery failure, not a generic
-/// refresh/dirty-resync handoff. The queue entry and blocking/gauge truth
+/// A full outbound channel defers internal recovery without rebuilding the
+/// replay or handing off to dirty resync. The queue and blocking/gauge truth
 /// survive, and the ordinary retry can commit once capacity returns.
 ///
-/// Load-bearing breaks: removing the replay outcome consumes the queue on
-/// failure; reusing peer-refresh failure handling populates `pending_refresh`
-/// and widens the retry into broad dirty-peer resync.
+/// Load-bearing breaks: removing the capacity guard rebuilds export and drops
+/// each tick; consuming queued intent before capacity returns loses recovery;
+/// using a peer refresh emits protocol markers instead of an internal replay.
 #[test]
 fn backpressured_recovery_stays_internal_and_retries_transactionally() {
     let metrics = BgpMetrics::new();
@@ -1334,33 +1334,80 @@ fn backpressured_recovery_stays_internal_and_retries_transactionally() {
         .clone();
     while outbound_tx.try_send(OutboundRouteUpdate::default()).is_ok() {}
 
-    assert!(!manager.drain_outbound_limit_recovery());
-    assert_eq!(manager.outbound_limit_recovery_for(peer), vec![Afi::Ipv4]);
-    assert!(manager.outbound_limit_recovery_runnable());
-    assert!(ipv4_row(&manager, peer).blocking);
-    assert_eq!(ipv4_row(&manager, peer).usage, 1);
-    assert_eq!(
-        capacity_gauge(
-            &metrics,
-            "bgp_outbound_prefix_blocking",
-            peer,
-            "ipv4_unicast"
-        ),
-        Some(1.0)
-    );
-    assert_eq!(
-        capacity_gauge(&metrics, "bgp_outbound_prefix_usage", peer, "ipv4_unicast"),
-        Some(1.0)
-    );
-    assert!(!manager.pending_refresh.contains_key(&peer));
-    assert!(!manager.dirty_peers.contains(&peer));
-    assert_eq!(outbound_limit_actor_samples(&metrics)["recovery"], 0);
+    let exported = manager.export_policy_stats[&peer].export_policy_routes_permitted;
+    let drops = counter_metric_value(&metrics, "bgp_outbound_route_drops_total", &[]);
+    for _ in 0..3 {
+        assert!(manager.outbound_channel_full(peer));
+        assert!(!manager.resync_dirty_peers_bounded());
+        assert_eq!(
+            manager.export_policy_stats[&peer].export_policy_routes_permitted, exported,
+            "a full channel must not rebuild the family export replay"
+        );
+        assert!(
+            (counter_metric_value(&metrics, "bgp_outbound_route_drops_total", &[]) - drops).abs()
+                < f64::EPSILON,
+            "a full channel must not attempt another send"
+        );
+        assert_eq!(manager.outbound_limit_recovery_for(peer), vec![Afi::Ipv4]);
+        assert!(
+            manager.resync_tick_pending(),
+            "recovery must re-arm the timer"
+        );
+        assert!(ipv4_row(&manager, peer).blocking);
+        assert_eq!(ipv4_row(&manager, peer).usage, 1);
+        assert_eq!(
+            capacity_gauge(
+                &metrics,
+                "bgp_outbound_prefix_blocking",
+                peer,
+                "ipv4_unicast"
+            ),
+            Some(1.0)
+        );
+        assert_eq!(
+            capacity_gauge(&metrics, "bgp_outbound_prefix_usage", peer, "ipv4_unicast"),
+            Some(1.0)
+        );
+        assert!(!manager.pending_refresh.contains_key(&peer));
+        assert!(!manager.dirty_peers.contains(&peer));
+        assert_eq!(outbound_limit_actor_samples(&metrics)["recovery"], 0);
+    }
 
     drop(wire_prefixes(&mut outbound_rx));
-    assert!(manager.drain_outbound_limit_recovery());
+    assert!(manager.resync_dirty_peers_bounded());
     assert_eq!(manager.outbound_limit_recovery_for(peer), vec![]);
-    assert_eq!(wire_prefixes(&mut outbound_rx).len(), 2);
+    let replay = outbound_rx
+        .try_recv()
+        .expect("capacity permits the family replay");
+    assert_eq!(replay.announce.len(), 2);
+    assert_eq!(
+        replay
+            .announce
+            .iter()
+            .map(|route| route.prefix)
+            .collect::<HashSet<_>>(),
+        HashSet::from([v4(41), v4(42)])
+    );
+    assert!(replay.end_of_rib.is_empty());
+    assert!(replay.refresh_markers.is_empty());
+    assert!(
+        outbound_rx.try_recv().is_err(),
+        "only one replay is enqueued"
+    );
+    assert_eq!(ipv4_row(&manager, peer).usage, 2);
+    assert!(!ipv4_row(&manager, peer).blocking);
+    assert_eq!(
+        manager.export_policy_stats[&peer].export_policy_routes_permitted,
+        exported + 2
+    );
     assert_eq!(outbound_limit_actor_samples(&metrics)["recovery"], 1);
+    assert!(!manager.resync_tick_pending());
+    assert!(!manager.resync_dirty_peers_bounded());
+    assert!(outbound_rx.try_recv().is_err());
+    assert_eq!(
+        manager.export_policy_stats[&peer].export_policy_routes_permitted,
+        exported + 2
+    );
 }
 
 /// An RFC 5291 initial-advertisement gate parks recovery without lifting the
@@ -1796,11 +1843,30 @@ fn a_limited_grouped_member_reports_only_what_it_advertised() {
         .iter()
         .find(|prefix| !advertised.contains(prefix))
         .expect("one prefix is over the cap");
+    let member_tx = manager.outbound_peers[&member].clone();
+    while member_tx.try_send(OutboundRouteUpdate::default()).is_ok() {}
     install(
         &mut manager,
         2,
         limit_config(&[(member, Some(3), None)], &[]),
     );
+    let exported = manager.export_policy_stats[&member].export_policy_routes_permitted;
+    let drops = counter_metric_value(&metrics, "bgp_outbound_route_drops_total", &[]);
+    for _ in 0..3 {
+        assert!(!manager.resync_dirty_peers_bounded());
+        assert_eq!(
+            manager.export_policy_stats[&member].export_policy_routes_permitted,
+            exported
+        );
+        assert!(
+            (counter_metric_value(&metrics, "bgp_outbound_route_drops_total", &[]) - drops).abs()
+                < f64::EPSILON
+        );
+        assert_eq!(manager.outbound_limit_recovery_for(member), vec![Afi::Ipv4]);
+        assert!(manager.resync_tick_pending());
+        assert_eq!(manager.grouped_advertised_count(member), Some(2));
+    }
+    drop(wire_prefixes(&mut member_rx));
     while manager.resync_dirty_peers_bounded() {}
     let recovered = wire_prefixes(&mut member_rx);
     assert!(
