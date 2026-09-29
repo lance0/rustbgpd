@@ -23,7 +23,7 @@ that does not happen within TIMEOUT_SECS or the daemon exits first.
 
 `summarize` reads every OUT_DIR/cells/ARM-rN cell, writes OUT_DIR/cells.csv
 and OUT_DIR/summary.txt, and exits 1 if any cell is incomplete, lost its VRP
-table, failed its harness, or the arms ran unequal run counts.
+table, failed its harness, or the arms have unpaired or duplicate run IDs.
 """
 
 from __future__ import annotations
@@ -38,6 +38,7 @@ from pathlib import Path
 
 BASE_ASN = 64512
 MIN_PEERS = 8  # reloadstall CHURNERS: the harness refuses fewer stubs
+MAX_PEERS = 51200  # reloadstall stub i uses 127.1.(i // 200).(i % 200 + 1)
 PAD_ASN = 65000
 CHUNK_SUM = 'bgp_rib_actor_work_duration_seconds_sum{work_unit="route_chunk"}'
 CHUNK_COUNT = 'bgp_rib_actor_work_duration_seconds_count{work_unit="route_chunk"}'
@@ -69,6 +70,8 @@ def check_shape(n_peers: int, total: int, vrps: int) -> None:
     see family_totals in reloadstall). Raises ValueError."""
     if n_peers < MIN_PEERS:
         raise ValueError(f"N_PEERS={n_peers} is below the reloadstall minimum of {MIN_PEERS}")
+    if n_peers > MAX_PEERS:
+        raise ValueError(f"N_PEERS={n_peers} exceeds the reloadstall address limit of {MAX_PEERS}")
     if total % n_peers:
         raise ValueError(f"TOTAL_PREFIXES={total} is not a multiple of N_PEERS={n_peers}; reloadstall refuses it")
     check_fixture(n_peers, total, vrps)
@@ -154,9 +157,12 @@ def cell_row(cell: Path) -> dict:
     env = read_env(cell / "cell.env")
     before = (cell / "metrics-before.prom").read_text()
     after = (cell / "metrics-after.prom").read_text()
-    chunk_after, count = series(after, CHUNK_SUM), series(after, CHUNK_COUNT)
-    if chunk_after is None or count is None or count == 0:
-        raise ValueError(f"{cell.name}: no route_chunk work in metrics-after.prom")
+    chunk_before, count_before = series(before, CHUNK_SUM), series(before, CHUNK_COUNT)
+    chunk_after, count_after = series(after, CHUNK_SUM), series(after, CHUNK_COUNT)
+    if chunk_before is None or count_before is None or chunk_after is None or count_after is None:
+        raise ValueError(f"{cell.name}: missing route_chunk series in metrics snapshot")
+    if count_after <= count_before:
+        raise ValueError(f"{cell.name}: no route_chunk work between metrics snapshots")
     expected, loaded = int(env["vrps_expected"]), vrp_total(after)
     if loaded is None or loaded < expected:
         raise ValueError(f"{cell.name}: {loaded} of {expected} VRPs loaded at the convergence scrape")
@@ -166,8 +172,8 @@ def cell_row(cell: Path) -> dict:
     return {
         "arm": env["arm"], "run": int(env["run"]), "position": int(env["position"]),
         "vrps_expected": expected, "vrps_loaded": loaded,
-        "route_chunk_sum_s": round(chunk_after - (series(before, CHUNK_SUM) or 0.0), 4),
-        "route_chunk_count": int(count - (series(before, CHUNK_COUNT) or 0.0)),
+        "route_chunk_sum_s": round(chunk_after - chunk_before, 4),
+        "route_chunk_count": int(count_after - count_before),
         "daemon_cpu_s": round((int(env["cpu_ticks_end"]) - int(env["cpu_ticks_start"])) / hz, 2),
         "convergence_wall_s": round(float(env["t_ready"]) - float(env["t_start"]), 2),
         "harness_rc": 0,
@@ -183,9 +189,11 @@ def summarize(out: Path) -> int:
             rows.append(cell_row(cell))
         except (OSError, KeyError, ValueError) as err:
             problems.append(str(err) if isinstance(err, ValueError) else f"{cell.name}: {err!r}")
-    runs = {arm: sum(1 for r in rows if r["arm"] == arm) for arm in arms}
-    if not rows or len(set(runs.values())) != 1 or set(r["arm"] for r in rows) - set(arms):
-        problems.append(f"unequal or empty complete runs per arm: {runs}")
+    runs = {arm: [r["run"] for r in rows if r["arm"] == arm] for arm in arms}
+    if (not rows or set(runs[arms[0]]) != set(runs[arms[1]])
+            or any(len(ids) != len(set(ids)) for ids in runs.values())
+            or set(r["arm"] for r in rows) - set(arms)):
+        problems.append(f"unequal, duplicate, or empty complete runs per arm: {runs}")
     rows.sort(key=lambda r: (r["run"], r["position"]))
     with open(out / "cells.csv", "w", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=COLUMNS)
