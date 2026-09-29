@@ -375,7 +375,7 @@ record_scope_memory() {
 scope_stat_rows() {
     local cgroup=$1 phase=$2
     awk -v phase="$phase" '$1 == "anon" || $1 == "file" || $1 == "file_mapped" {
-        if ($2 !~ /^[0-9]+$/ || seen[$1]++) exit 1
+        if (NF != 2 || $2 !~ /^[0-9]+$/ || seen[$1]++) exit 1
         value[$1] = $2
         count++
     } END {

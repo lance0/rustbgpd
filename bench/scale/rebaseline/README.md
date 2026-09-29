@@ -240,7 +240,8 @@ The scoped rrharness comparison writes `cg_peak_mib` and
 file_mapped values at the settled log marker and at teardown. These are
 point-in-time cgroup charges, not peak values; file_mapped is a subset of
 file. A leg without a swap-fenced user scope leaves all cgroup columns blank.
-Older receipts with just the peak/current pair remain readable.
+Older CSV receipts with just the peak/current pair remain readable. The raw
+`--cgroup` readout for a new leg requires all six stat fields.
 
 Use a dedicated directory and stable names:
 

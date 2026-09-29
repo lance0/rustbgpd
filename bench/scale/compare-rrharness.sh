@@ -295,7 +295,7 @@ out=$1 log=$2
 shift 2
 stat_rows() {
   awk -v phase="$1" '\''$1 == "anon" || $1 == "file" || $1 == "file_mapped" {
-    if ($2 !~ /^[0-9]+$/ || seen[$1]++) exit 1
+    if (NF != 2 || $2 !~ /^[0-9]+$/ || seen[$1]++) exit 1
     value[$1] = $2
     count++
   } END {
@@ -309,16 +309,18 @@ stat_rows() {
 leg=$!
 settled=
 settled_stat=
+stat_error=0
 while kill -0 "$leg" 2>/dev/null; do
   if [ -z "$settled" ] && grep -Eq "^rss_(converged|primed)_mib " "$log"; then
     settled=$(cat "$cg/memory.current")
-    settled_stat=$(stat_rows settled) || exit 1
+    settled_stat=$(stat_rows settled) || stat_error=1
   fi
   sleep 0.1
 done
 rc=0
 wait "$leg" || rc=$?
-teardown_stat=$(stat_rows teardown) || exit 1
+teardown_stat=$(stat_rows teardown) || stat_error=1
+if [ "$stat_error" -ne 0 ]; then exit 1; fi
 printf "cg_peak_bytes %s\ncg_settled_current_bytes %s\ncg_swap_max %s\n" \
   "$(cat "$cg/memory.peak")" "$settled" "$(cat "$cg/memory.swap.max")" >"$out"
 printf "%s\n%s\n" "$settled_stat" "$teardown_stat" >>"$out"
