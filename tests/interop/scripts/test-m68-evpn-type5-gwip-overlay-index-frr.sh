@@ -39,19 +39,6 @@ frr_vtysh() {
     docker exec "$PE2" vtysh -c "$1" 2>/dev/null || true
 }
 
-wait_until() {
-    local timeout=$1
-    shift
-    local attempts=$((timeout / 2))
-    for _ in $(seq 1 "$attempts"); do
-        if "$@"; then
-            return 0
-        fi
-        sleep 2
-    done
-    return 1
-}
-
 not() { ! "$@"; }
 
 frr_has_type5() {
@@ -135,14 +122,14 @@ wait_frr_established "$PE2" "$PE1_IP" "PE1↔PE2 L2VPN/EVPN" || print_summary
 
 log "[test 1] add the static VRF route before the companion Type 2 exists"
 pe1_add_target_route
-if wait_until 90 frr_has_type5; then
+if wait_until 45 2 frr_has_type5; then
     ok "FRR received rustbgpd's GW-IP Type 5 for $TARGET_PREFIX"
 else
     fail "FRR never received the GW-IP Type 5 for $TARGET_PREFIX"
     frr_vtysh "show bgp l2vpn evpn route type prefix" >&2 || true
 fi
 
-if wait_until 30 frr_type5_detail_has_gateway; then
+if wait_until 15 2 frr_type5_detail_has_gateway; then
     ok "FRR detail shows Gateway Address $GATEWAY_IP on the Type 5"
 else
     fail "FRR detail never showed Gateway Address $GATEWAY_IP"
@@ -161,7 +148,7 @@ fi
 
 log "[test 3] originate the companion MAC+IP Type 2 for $GATEWAY_IP"
 pe1_add_gateway_type2
-if wait_until 60 frr_has_gateway_type2; then
+if wait_until 30 2 frr_has_gateway_type2; then
     ok "FRR received the Gateway Address Type 2 MAC/IP route"
 else
     fail "FRR never received MAC+IP Type 2 for $GATEWAY_IP"
@@ -169,14 +156,14 @@ else
 fi
 
 log "[test 4] FRR resolves the Type 5 through the Type 2 and imports it into vrf1"
-if wait_until 90 frr_vrf_route_installed; then
+if wait_until 45 2 frr_vrf_route_installed; then
     ok "FRR's vrf1 RIB installed $TARGET_PREFIX via $GATEWAY_IP"
 else
     fail "FRR did not import $TARGET_PREFIX into vrf1 via $GATEWAY_IP"
     frr_vtysh "show ip route vrf $TENANT_VRF" >&2 || true
 fi
 
-if wait_until 30 frr_kernel_route_installed; then
+if wait_until 15 2 frr_kernel_route_installed; then
     ok "FRR kernel vrf1 route uses gateway $GATEWAY_IP"
 else
     fail "FRR kernel did not install $TARGET_PREFIX via $GATEWAY_IP"
@@ -185,14 +172,14 @@ fi
 
 log "[test 5] withdrawing the static route withdraws the Type 5 and removes the VRF route"
 pe1_delete_target_route
-if wait_until 30 not frr_has_type5; then
+if wait_until 15 2 not frr_has_type5; then
     ok "FRR dropped rustbgpd's GW-IP Type 5 after withdraw"
 else
     fail "FRR still shows the GW-IP Type 5 after withdraw"
     frr_vtysh "show bgp l2vpn evpn route type prefix" >&2 || true
 fi
 
-if wait_until 30 not frr_vrf_route_installed; then
+if wait_until 15 2 not frr_vrf_route_installed; then
     ok "FRR removed the imported vrf1 route after withdraw"
 else
     fail "FRR still has the imported vrf1 route after withdraw"

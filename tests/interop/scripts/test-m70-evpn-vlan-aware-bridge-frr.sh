@@ -27,20 +27,6 @@ frr_vtysh() {
     docker exec "$FRR" vtysh -c "$1" 2>/dev/null || true
 }
 
-wait_until() {
-    local timeout=${1:?}
-    shift
-    local attempts=$((timeout / 2))
-    [ "$attempts" -lt 1 ] && attempts=1
-    for _ in $(seq 1 "$attempts"); do
-        if "$@"; then
-            return 0
-        fi
-        sleep 2
-    done
-    return 1
-}
-
 rb_fdb() {
     local vxlan=${1:?}
     docker exec "$RUSTBGPD" bridge fdb show dev "$vxlan" 2>/dev/null || true
@@ -172,13 +158,13 @@ wait_frr_established "$FRR" "$RUSTBGPD_IP" "M70 FRR↔rustbgpd L2VPN/EVPN" \
 
 log "[baseline] FRR discovered and originated both traditional VNIs"
 for vni in 100 200; do
-    if wait_until 30 frr_has_vni "$vni"; then
+    if wait_until 15 2 frr_has_vni "$vni"; then
         ok "FRR discovered VNI $vni"
     else
         fail "FRR did not discover VNI $vni"
         dump_debug
     fi
-    if wait_until 60 frr_has_type3_vni "$vni"; then
+    if wait_until 30 2 frr_has_type3_vni "$vni"; then
         ok "FRR originated Type 3 IMET for VNI $vni"
     else
         fail "FRR did not originate Type 3 IMET for VNI $vni"
@@ -190,28 +176,28 @@ log "[test] FRR originates the same MAC in VNI100 and VNI200"
 frr_inject_mac 100 "$SHARED_MAC"
 frr_inject_mac 200 "$SHARED_MAC"
 
-if wait_until 60 frr_has_local_mac_vni 100 "$SHARED_MAC"; then
+if wait_until 30 2 frr_has_local_mac_vni 100 "$SHARED_MAC"; then
     ok "FRR local VNI100 MAC table contains $SHARED_MAC"
 else
     fail "FRR did not learn $SHARED_MAC in VNI100"
     dump_debug
 fi
 
-if wait_until 60 frr_has_local_mac_vni 200 "$SHARED_MAC"; then
+if wait_until 30 2 frr_has_local_mac_vni 200 "$SHARED_MAC"; then
     ok "FRR local VNI200 MAC table contains $SHARED_MAC"
 else
     fail "FRR did not learn $SHARED_MAC in VNI200"
     dump_debug
 fi
 
-if wait_until 60 frr_type2_has_mac_rt "$SHARED_MAC" 100; then
+if wait_until 30 2 frr_type2_has_mac_rt "$SHARED_MAC" 100; then
     ok "FRR advertised $SHARED_MAC with RT 65000:100"
 else
     fail "FRR Type 2 for $SHARED_MAC missing RT 65000:100"
     dump_debug
 fi
 
-if wait_until 60 frr_type2_has_mac_rt "$SHARED_MAC" 200; then
+if wait_until 30 2 frr_type2_has_mac_rt "$SHARED_MAC" 200; then
     ok "FRR advertised $SHARED_MAC with RT 65000:200"
 else
     fail "FRR Type 2 for $SHARED_MAC missing RT 65000:200"
@@ -219,14 +205,14 @@ else
 fi
 
 log "[test] rustbgpd programs VLAN-scoped remote FDB rows"
-if wait_until 90 rb_has_vlan_remote_fdb vxlan100 "$SHARED_MAC" 10 "$FRR_IP"; then
+if wait_until 45 2 rb_has_vlan_remote_fdb vxlan100 "$SHARED_MAC" 10 "$FRR_IP"; then
     ok "rustbgpd programmed $SHARED_MAC on vxlan100 vlan 10 dst $FRR_IP"
 else
     fail "rustbgpd did not program $SHARED_MAC on vxlan100 vlan 10"
     dump_debug
 fi
 
-if wait_until 90 rb_has_vlan_remote_fdb vxlan200 "$SHARED_MAC" 20 "$FRR_IP"; then
+if wait_until 45 2 rb_has_vlan_remote_fdb vxlan200 "$SHARED_MAC" 20 "$FRR_IP"; then
     ok "rustbgpd programmed $SHARED_MAC on vxlan200 vlan 20 dst $FRR_IP"
 else
     fail "rustbgpd did not program $SHARED_MAC on vxlan200 vlan 20"
@@ -236,7 +222,7 @@ fi
 log "[test] withdrawing VNI100 removes only VLAN10/VNI100 state"
 frr_withdraw_mac 100 "$SHARED_MAC"
 
-if wait_until 60 sh -c "! docker exec '$RUSTBGPD' bridge fdb show dev vxlan100 2>/dev/null | grep -qiF '$SHARED_MAC'"; then
+if wait_until 30 2 sh -c "! docker exec '$RUSTBGPD' bridge fdb show dev vxlan100 2>/dev/null | grep -qiF '$SHARED_MAC'"; then
     ok "rustbgpd removed $SHARED_MAC from vxlan100 after VNI100 withdraw"
 else
     fail "rustbgpd kept $SHARED_MAC on vxlan100 after VNI100 withdraw"
@@ -252,7 +238,7 @@ fi
 
 log "[cleanup assertion] withdrawing VNI200 removes the remaining row"
 frr_withdraw_mac 200 "$SHARED_MAC"
-if wait_until 60 sh -c "! docker exec '$RUSTBGPD' bridge fdb show dev vxlan200 2>/dev/null | grep -qiF '$SHARED_MAC'"; then
+if wait_until 30 2 sh -c "! docker exec '$RUSTBGPD' bridge fdb show dev vxlan200 2>/dev/null | grep -qiF '$SHARED_MAC'"; then
     ok "rustbgpd removed $SHARED_MAC from vxlan200 after VNI200 withdraw"
 else
     fail "rustbgpd kept $SHARED_MAC on vxlan200 after VNI200 withdraw"

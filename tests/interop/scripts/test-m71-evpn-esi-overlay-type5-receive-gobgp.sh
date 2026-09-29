@@ -169,20 +169,6 @@ vrf_installed_count_is() {
     [ "$(vrf_installed_count)" = "$want" ]
 }
 
-wait_until() {
-    local timeout=$1
-    shift
-    local attempts=$((timeout / 2))
-    [ "$attempts" -lt 1 ] && attempts=1
-    for _ in $(seq 1 "$attempts"); do
-        if "$@"; then
-            return 0
-        fi
-        sleep 2
-    done
-    return 1
-}
-
 not() { ! "$@"; }
 
 # Inject / withdraw the ESI overlay-index Type 5 from the PE. Non-zero
@@ -268,7 +254,7 @@ else
 fi
 
 log "[phase 1] rustbgpd must hold it unresolved (no EAD-per-ES/EVI)"
-if wait_until 40 drop_gauge_at_least_1 "unresolved_esi_overlay_index"; then
+if wait_until 20 2 drop_gauge_at_least_1 "unresolved_esi_overlay_index"; then
     ok "drop gauge unresolved_esi_overlay_index >= 1 (= $(drop_gauge unresolved_esi_overlay_index))"
 else
     fail "drop gauge unresolved_esi_overlay_index never reached >= 1"
@@ -301,7 +287,7 @@ else
 fi
 
 log "[phase 2] rustbgpd resolves the ESI overlay and imports $TARGET_PREFIX into vrf1"
-if wait_until 90 vrf_route_installed_via_pe; then
+if wait_until 45 2 vrf_route_installed_via_pe; then
     ok "vrf1 kernel route installed: $(vrf_route_line)"
 else
     fail "rustbgpd did not install the expected vrf1 kernel route for $TARGET_PREFIX"
@@ -311,14 +297,14 @@ else
 fi
 
 log "[phase 2] gRPC installed_routes_count must report exactly one imported route"
-if wait_until 30 vrf_installed_count_is 1; then
+if wait_until 15 2 vrf_installed_count_is 1; then
     ok "rustbgpd reports installed_routes_count=1 for vrf1"
 else
     fail "rustbgpd kernel route exists but installed_routes_count != 1"
 fi
 
 log "[phase 2] the unresolved-overlay drop gauge must fall back to 0"
-if wait_until 30 drop_gauge_is_zero "unresolved_esi_overlay_index"; then
+if wait_until 15 2 drop_gauge_is_zero "unresolved_esi_overlay_index"; then
     ok "drop gauge unresolved_esi_overlay_index back to 0 after resolution"
 else
     fail "drop gauge unresolved_esi_overlay_index still nonzero after import (= $(drop_gauge unresolved_esi_overlay_index))"
@@ -340,7 +326,7 @@ else
 fi
 
 log "[phase 3] rustbgpd must withdraw the import and fail closed"
-if wait_until 60 drop_gauge_at_least_1 "unsupported_all_active_target_set"; then
+if wait_until 30 2 drop_gauge_at_least_1 "unsupported_all_active_target_set"; then
     ok "drop gauge unsupported_all_active_target_set >= 1 (= $(drop_gauge unsupported_all_active_target_set))"
 else
     fail "drop gauge unsupported_all_active_target_set never reached >= 1"
@@ -348,7 +334,7 @@ else
 fi
 
 log "[phase 3] the vrf1 kernel route must be withdrawn"
-if wait_until 60 vrf_route_absent && wait_until 30 vrf_installed_count_is 0; then
+if wait_until 30 2 vrf_route_absent && wait_until 15 2 vrf_installed_count_is 0; then
     ok "vrf1 kernel route withdrawn / installed_routes_count=0 under all-active"
 else
     fail "vrf1 route survived the all-active downgrade"
@@ -367,7 +353,7 @@ else
 fi
 
 log "[phase 4] vrf1 must be clean (no route, no residual import)"
-if wait_until 30 vrf_route_absent && wait_until 30 vrf_installed_count_is 0; then
+if wait_until 15 2 vrf_route_absent && wait_until 15 2 vrf_installed_count_is 0; then
     ok "vrf1 clean after the Type 5 withdraw"
 else
     fail "vrf1 not clean after the Type 5 withdraw"

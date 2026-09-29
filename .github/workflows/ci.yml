@@ -152,13 +152,16 @@ jobs:
           bash -n tests/interop/scripts/test-lib.sh \
             tests/interop/scripts/test-test-operator-auth-helper.sh \
             tests/interop/scripts/test-test-vtep-route-oracles.sh \
+            tests/interop/scripts/test-test-wait-helper.sh \
             tests/interop/scripts/test-m1-frr.sh
           shellcheck -x tests/interop/scripts/test-lib.sh \
             tests/interop/scripts/test-test-operator-auth-helper.sh \
             tests/interop/scripts/test-test-vtep-route-oracles.sh \
+            tests/interop/scripts/test-test-wait-helper.sh \
             tests/interop/scripts/test-m1-frr.sh
           bash tests/interop/scripts/test-test-operator-auth-helper.sh
           bash tests/interop/scripts/test-test-vtep-route-oracles.sh
+          bash tests/interop/scripts/test-test-wait-helper.sh
           python3 tests/interop/scripts/test_evpn_peer_sync_oracle.py
           python3 tests/interop/scripts/test_interop_signal_cleanup.py
           python3 tests/interop/scripts/test_m66_failure_diagnostics.py
