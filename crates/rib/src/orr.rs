@@ -19,6 +19,8 @@
 //! - Link cost is the IGP Metric (TLV 1095). A link without it is
 //!   unusable and contributes no edge; its endpoints and addresses are
 //!   still interned so the nodes stay observable.
+//! - An SRv6 Locator advertisement (TLV 1162) contributes prefix
+//!   reachability only with a valid Prefix Metric (TLV 1155).
 //! - Unknown cost to a next-hop is `None` — the caller must treat it as
 //!   least preferred (RFC 9107 §3.1).
 
@@ -53,6 +55,8 @@ const BGP_LS_TLV_FLEX_ALGO_DEFINITION: u16 = 1039;
 const BGP_LS_TLV_FLEX_ALGO_PREFIX_METRIC: u16 = 1044;
 /// RFC 9085 Prefix-SID Attribute TLV.
 const BGP_LS_TLV_PREFIX_SID: u16 = 1158;
+/// RFC 9514 `SRv6` Locator Prefix Attribute TLV.
+const BGP_LS_TLV_SRV6_LOCATOR: u16 = 1162;
 
 const PROTOCOL_ISIS_LEVEL_1: u8 = 1;
 const PROTOCOL_ISIS_LEVEL_2: u8 = 2;
@@ -541,8 +545,18 @@ impl OrrTopology {
                     metric: igp_metric(&attributes),
                 },
                 BgpLsNlriType::Ipv4TopologyPrefix | BgpLsNlriType::Ipv6TopologyPrefix => {
+                    let metric = prefix_metric(&attributes);
+                    // RFC 9514 §5.1, corrected by erratum 7737: a locator
+                    // without a valid Prefix Metric is not reachability.
+                    if metric.is_none()
+                        && attributes
+                            .iter()
+                            .any(|tlv| tlv.type_code == BGP_LS_TLV_SRV6_LOCATOR)
+                    {
+                        continue;
+                    }
                     Element::IpPrefix {
-                        metric: prefix_metric(&attributes).unwrap_or(0),
+                        metric: metric.unwrap_or(0),
                     }
                 }
                 // Unknown and future NLRI types are not topology elements.
@@ -1427,6 +1441,29 @@ mod tests {
         BgpLsTlv::new(type_code, Bytes::copy_from_slice(value))
     }
 
+    fn ipv6_prefix_route(peer: Ipv4Addr, attributes: &[BgpLsTlv]) -> BgpLsRibRoute {
+        rib_route(
+            peer,
+            build_nlri_protocol(
+                BgpLsNlriType::Ipv6TopologyPrefix,
+                PROTOCOL_ISIS_LEVEL_2,
+                &[
+                    BgpLsTlv::new(BGP_LS_TLV_LOCAL_NODE_DESCRIPTORS, node_container(X)),
+                    raw_tlv(
+                        BGP_LS_TLV_IP_REACHABILITY,
+                        &[48, 0x20, 1, 0x0d, 0xb8, 0xca, 0xfe],
+                    ),
+                ],
+            ),
+            vec![bgp_ls_attribute(attributes)],
+        )
+    }
+
+    fn srv6_locator_tlv() -> BgpLsTlv {
+        // RFC 9514 §5.1: flags, algorithm, reserved, locator metric.
+        raw_tlv(BGP_LS_TLV_SRV6_LOCATOR, &[0, 0, 0, 0, 0, 0, 0, 7])
+    }
+
     #[test]
     fn unknown_nlri_is_ignored_and_uncounted() {
         let nlri = BgpLsNlri::try_new(
@@ -2144,6 +2181,96 @@ mod tests {
             spf.cost_to(&topo, IpAddr::V4(Ipv4Addr::new(198, 19, 1, 1))),
             Some(10)
         );
+    }
+
+    #[test]
+    fn srv6_locator_without_prefix_metric_is_not_reachability() {
+        let mut routes = square_topology(PEER1);
+        routes.push(ipv6_prefix_route(PEER1, &[srv6_locator_tlv()]));
+        let topo = OrrTopology::build(routes.iter());
+        let spf = topo.spf(ix(&topo, A));
+        let next_hop = "2001:db8:cafe:1::1".parse().unwrap();
+        assert_eq!(spf.dist_to(ix(&topo, X)), Some(1));
+        assert_eq!(
+            spf.cost_to(&topo, next_hop),
+            None,
+            "a locator-only advertisement is not prefix reachability (erratum 7737)"
+        );
+        assert_eq!(topo.resolve_node(next_hop), None);
+        assert!(topo.snapshot().prefixes.is_empty());
+    }
+
+    #[test]
+    fn srv6_locator_requires_valid_prefix_metric_but_ordinary_prefix_keeps_zero_default() {
+        for locator in [false, true] {
+            for (metric, parsed) in [
+                (Some(&[0, 0, 1][..]), None),
+                (None, None),
+                (Some(&[][..]), None),
+                (Some(&[1][..]), None),
+                (Some(&[0, 0, 0, 1, 0][..]), None),
+                (Some(&[0, 0, 0, 0][..]), Some(0)),
+                (Some(&[0, 0, 0, 5][..]), Some(5)),
+            ] {
+                let mut attributes = Vec::new();
+                if let Some(metric) = metric {
+                    attributes.push(raw_tlv(BGP_LS_TLV_PREFIX_METRIC, metric));
+                }
+                if locator {
+                    attributes.push(srv6_locator_tlv());
+                }
+                let mut routes = square_topology(PEER1);
+                routes.push(ipv6_prefix_route(PEER1, &attributes));
+                let topo = OrrTopology::build(routes.iter());
+                let expected = if locator && parsed.is_none() {
+                    None
+                } else {
+                    Some(1 + parsed.unwrap_or(0))
+                };
+                assert_eq!(
+                    topo.spf(ix(&topo, A))
+                        .cost_to(&topo, "2001:db8:cafe:1::1".parse().unwrap()),
+                    expected,
+                    "locator={locator}, metric={metric:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn locator_only_duplicate_does_not_override_reachable_prefix() {
+        for malformed_metric in [false, true] {
+            for locator_first in [false, true] {
+                let mut attributes = vec![srv6_locator_tlv()];
+                if malformed_metric {
+                    attributes.push(raw_tlv(BGP_LS_TLV_PREFIX_METRIC, &[0, 0, 1]));
+                }
+                let locator = ipv6_prefix_route(PEER1, &attributes);
+                let reachable = ipv6_prefix_route(
+                    PEER2,
+                    &[
+                        srv6_locator_tlv(),
+                        raw_tlv(BGP_LS_TLV_PREFIX_METRIC, &[0, 0, 0, 20]),
+                    ],
+                );
+                let mut routes = square_topology(PEER1);
+                routes.extend(if locator_first {
+                    [locator, reachable]
+                } else {
+                    [reachable, locator]
+                });
+                let topo = OrrTopology::build(routes.iter());
+                assert_eq!(
+                    topo.spf(ix(&topo, A))
+                        .cost_to(&topo, "2001:db8:cafe:1::1".parse().unwrap()),
+                    Some(21),
+                    "the locator-only duplicate cannot lower the valid reachability metric"
+                );
+                let snapshot = topo.snapshot();
+                assert_eq!(snapshot.prefixes.len(), 1);
+                assert_eq!(snapshot.prefixes[0].metric, 20);
+            }
+        }
     }
 
     #[test]

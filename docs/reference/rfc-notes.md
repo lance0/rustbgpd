@@ -199,6 +199,12 @@ deviations; [docs/interop.md](../interop.md) has the interop matrix,
   values do not select another SPF. They are reported as ignored aggregate
   input while the valid base default object and classic IGP/Prefix Metric stay
   active.
+- A prefix carrying an SRv6 Locator TLV (1162) contributes reachability only
+  with a valid Prefix Metric TLV (1155), as required by
+  [RFC 9514 §5.1](https://www.rfc-editor.org/rfc/rfc9514.html#section-5.1) and
+  [verified erratum 7737](https://www.rfc-editor.org/errata/eid7737). Locator-only
+  advertisements remain available for raw BGP-LS reflection. Ordinary prefixes
+  retain metric zero when the Prefix Metric is absent or unreadable.
 
 ---
 
