@@ -125,19 +125,20 @@ the source of the supported-RFC table.
 
 ### 2.3 Semver policy
 
-The wire crate follows the Cargo/semver convention with a documented wire-specific
-policy (`docs/project/release-checklist.md` §"Wire crate semver"):
+The wire crate is still `0.x` and follows the Cargo/semver convention documented
+in `docs/project/release-checklist.md` §"Wire crate semver":
 
-- **Patch**: bug fixes, stricter validation, docs/test improvements.
-- **Minor**: new message types, attributes, helper methods, additive API changes.
-- **Major**: breaking API changes, changed method signatures, enum shape changes.
+- **Patch (`0.x.Y`)**: backward-compatible fixes and additions, including new
+  message types, attributes, and helpers protected by the public API boundary.
+- **Minor (`0.X.0`)**: breaking API or decode-behavior changes, such as changed
+  method signatures or incompatible enum and struct shapes.
 
 **Registry growth is no longer breaking.** As of the published `0.15.0`, every
 enum that tracks an IANA/RFC registry — `Capability`, `PathAttribute`,
 `Afi`/`Safi`, `Message`/`MessageType`, `NotificationCode`, and the EVPN,
 FlowSpec, ORF, PMSI, and error enums — is `#[non_exhaustive]`. Match them with
-a wildcard arm and a new capability code, path attribute, or AFI/SAFI arrives
-in a minor release without a semver-major break. Closed-by-construction sets
+a wildcard arm so a new capability code, path attribute, or AFI/SAFI can arrive
+in a compatible `0.x` patch release. Closed-by-construction sets
 (`Origin`, `AsPathSegment`, `Prefix`, `AddPathMode`, `ErrorDisposition`,
 `RpkiValidation`) stay exhaustively matchable on purpose. `crates/wire/README.md`
 carries the full split under "Enum exhaustiveness".
@@ -623,7 +624,8 @@ To be the de facto Rust BGP codec, the concrete gaps:
 3. **Run `cargo-semver-checks` in CI** against the published crates so
    accidental breaking changes are caught before publish. Done: the
    `semver-checks` workflow checks every publishable workspace crate against
-   its latest crates.io release on pull requests that touch it.
+   its latest crates.io release on qualifying pull requests, every `v*` tag
+   push, and manual dispatch.
 4. **docs.rs is the storefront.** Ensure `cargo doc` is warning-clean (already
    a release gate) and that the README's supported-RFC table stays the landing
    page. Add per-type examples in doc-comments for `decode_message`,

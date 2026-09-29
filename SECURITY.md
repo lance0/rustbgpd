@@ -86,7 +86,8 @@ input from the network. It runs under continuous fuzzing in CI.
   - `crates/api`'s `runtime_config_settlement` module: the
     ambiguous-configuration watchdog's terminal boundary is
     `#[cfg(not(test))] fn terminate_process()`, whose entire body is
-    `unsafe { libc::_exit(70) }`. It is exit-only by construction, and that is
+    `unsafe { libc::_exit(AMBIGUOUS_CONFIG_EXIT_STATUS) }`, where the constant is
+    `70`. It is exit-only by construction, and that is
     enforced rather than asserted — a unit test parses the production source and
     requires the body to be exactly that call and to contain no allocation,
     lock, drop, panic, logging, or metric term, so nothing runs between the
