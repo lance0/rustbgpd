@@ -892,9 +892,12 @@ Before rolling any versions:
     (covering the tarball and packages).
     Each tarball contains `rustbgpd`, `rbgp`, `rs-config-render`,
     `birdwatcher-adapter`, `LICENSE-MIT`, `LICENSE-APACHE`, `LICENSES.md`,
-    and `rustbgpd.schema.json` plus the systemd unit under `share/systemd/`
-    (the workflow asserts the presence of each except the schema; the runtime
-    image likewise ships both licenses at `/`).
+    and `rustbgpd.schema.json`. The archive's shared assets contain the CLI and
+    daemon man pages, shell completions, `rustbgpd.service`, `rustbgpd@.service`,
+    the opt-in dataplane drop-in, Grafana dashboards, and Prometheus alert rules
+    with their tests. The workflow asserts these files and the root
+    payload except the schema; the runtime image likewise ships both licenses
+    at `/`.
     The version-less filenames are what powers the static
     `releases/latest/download/` URLs in `docs/how-to/deployment.md`; if the
     filenames drift, deployment.md silently breaks for new operators.
@@ -1027,9 +1030,11 @@ changed.
    [published-crate documentation refresh](#published-crate-documentation-refresh).
 
 **Wire crate semver:**
-- **Patch**: bug fixes, stricter validation, docs/test improvements
-- **Minor**: new message types, attributes, helper methods, additive API changes
-- **Major**: breaking API changes, changed method signatures, enum shape changes
+- **Patch (`0.x.Y`)**: backward-compatible fixes and additions, including new
+  message types, attributes, and helper methods protected by the public API
+  boundary; docs/test improvements
+- **Minor (`0.X.0`)**: breaking API or decode-behavior changes, including
+  changed method signatures and incompatible enum or struct shapes
 
 ### rustbgpd-fsm crate release
 
@@ -1042,15 +1047,14 @@ do not force an FSM release for every daemon tag.
    - If no: skip. Do not publish a no-op release.
    - If yes: continue.
 2. Decide semver bump:
-   - **Patch**: bug fixes, docs/test improvements, or backward-compatible
-     fields on an existing `#[non_exhaustive]` config struct when its
-     constructor preserves the prior defaults.
-   - **Minor**: additive events/actions/helpers, new public types, or other
-     non-breaking negotiation surfaces. An incompatible `rustbgpd-wire`
-     dependency move also requires an FSM minor bump because wire types appear
-     in the public FSM API.
-   - **Major**: changed method signatures, removed variants, or enum/struct
-     shape changes not protected by `#[non_exhaustive]`.
+   - **Patch (`0.x.Y`)**: backward-compatible fixes and additions, including
+     events, actions, helpers, new public types, and fields on an existing
+     `#[non_exhaustive]` config struct when its constructor preserves the prior
+     defaults; docs/test improvements.
+   - **Minor (`0.X.0`)**: breaking changes such as changed method signatures,
+     removed variants, or enum/struct shape changes not protected by
+     `#[non_exhaustive]`. An incompatible `rustbgpd-wire` dependency move also
+     requires an FSM minor bump because wire types appear in the public FSM API.
    The `semver-checks` workflow applies the same crates.io comparison to this
    crate on the PR.
 3. Update `version` in `crates/fsm/Cargo.toml`, its matching root workspace
