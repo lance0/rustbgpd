@@ -20,14 +20,16 @@
 //! transitions, but the function tolerates it deterministically:
 //!
 //! 1. Higher [`ProjectedEvpnRoute::mobility_sequence`] wins. RFC 7432
-//!    §15 puts the higher seq in the more recent advertisement.
-//! 2. On equal sequence (or both `None`), the route whose `next_hop`
-//!    sorts lower wins. RFC 7432 §15.1 resolves an equal-sequence
+//!    §15 puts the higher seq in the more recent advertisement and
+//!    treats an absent sequence as zero.
+//! 2. On equal effective sequence, the route whose `next_hop`
+//!    sorts lower wins. RFC 7432 §15 resolves an equal-sequence
 //!    contest between PEs by the lowest PE IP address.
 //! 3. The RFC leaves a tie between two routes from the same VTEP at the
 //!    same sequence open (for example the same MAC under two RDs, or
 //!    with different ESIs). The lower RD, then ESI, Ethernet Tag, host
-//!    IP, label and MAC wins, so the winner never depends on input order.
+//!    IP, label and MAC wins, then an explicit zero beats an absent
+//!    sequence, so the winner never depends on input order.
 //!
 //! [`ProjectedEvpnRoute::preference_cmp`] is the single definition of
 //! this order.
@@ -430,17 +432,19 @@ impl ProjectedEvpnRoute {
     /// Total preference order between two Type 2 candidates for the same
     /// `(VNI, MAC)`; `Ordering::Greater` means `self` is preferred.
     ///
-    /// Higher mobility sequence wins (RFC 7432 §15, `None` below any
-    /// `Some`), then the lower `next_hop` (RFC 7432 §15.1: lowest PE IP on
+    /// Higher mobility sequence wins (RFC 7432 §15, `None` means zero),
+    /// then the lower `next_hop` (RFC 7432 §15: lowest PE IP on
     /// equal sequence). The RFC leaves ties between routes from the same
     /// VTEP open; those fall to the lower `rd`, `esi`, `ethernet_tag`,
-    /// `host_ip`, `label1` and `mac`, in that order. Every field takes
+    /// `host_ip`, `label1` and `mac`, in that order. Finally, an explicit
+    /// zero wins over an absent sequence. Every field takes
     /// part, so only identical routes compare `Equal` and the winner is
     /// independent of the order candidates are seen in.
     #[must_use]
     pub fn preference_cmp(&self, other: &Self) -> std::cmp::Ordering {
         self.mobility_sequence
-            .cmp(&other.mobility_sequence)
+            .unwrap_or(0)
+            .cmp(&other.mobility_sequence.unwrap_or(0))
             .then_with(|| other.next_hop.cmp(&self.next_hop))
             .then_with(|| other.rd.cmp(&self.rd))
             .then_with(|| other.esi.cmp(&self.esi))
@@ -448,6 +452,7 @@ impl ProjectedEvpnRoute {
             .then_with(|| other.host_ip.cmp(&self.host_ip))
             .then_with(|| other.label1.cmp(&self.label1))
             .then_with(|| other.mac.cmp(&self.mac))
+            .then_with(|| self.mobility_sequence.cmp(&other.mobility_sequence))
     }
 }
 
@@ -611,6 +616,33 @@ mod tests {
             table.get(vni(100), mac(1)).unwrap().remote_vtep_ip,
             ipa("10.0.0.2")
         );
+    }
+
+    #[test]
+    fn absent_sequence_ties_with_zero_in_either_order() {
+        let absent = route(100, 1, "10.0.0.2", None);
+        let mut zero = route(100, 1, "10.0.0.3", Some(0));
+        zero.rd = rd(65003, 100);
+        let winners: Vec<_> = [[absent.clone(), zero.clone()], [zero, absent]]
+            .into_iter()
+            .map(|routes| {
+                let table = project_evpn_routes(&one_local(100), routes);
+                let winner = table.get(vni(100), mac(1)).unwrap();
+                (winner.remote_vtep_ip, winner.mobility_sequence)
+            })
+            .collect();
+        assert_eq!(winners, vec![(ipa("10.0.0.2"), None); 2]);
+    }
+
+    #[test]
+    fn sequence_presence_only_breaks_otherwise_identical_ties() {
+        let absent = route(100, 1, "10.0.0.2", None);
+        let mut present = route(100, 1, "10.0.0.2", Some(0));
+        assert!(present.preference_cmp(&absent).is_gt());
+        assert!(absent.preference_cmp(&present).is_lt());
+        present.mac = mac(2);
+        assert!(absent.preference_cmp(&present).is_gt());
+        assert!(present.preference_cmp(&absent).is_lt());
     }
 
     #[test]
