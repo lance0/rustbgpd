@@ -1488,7 +1488,10 @@ tag (peak 759.8 MB, 5th–95th percentile 505.7–566.1 MB) and the
 tag (peak 735.2 MB, 5th–95th percentile 499.8–560.5 MB; that run failed its
 management-correctness gate) and the
 [2026-09-26 run](soaks/soak-rs-flagship-24h-2026-09-26.md) on untagged main
-`292c32b39` (peak 756.4 MB, 5th–95th percentile 504.9–561.8 MB). Different hosts
+`292c32b39` (peak 756.4 MB, 5th–95th percentile 504.9–561.8 MB). The
+[2026-09-28 route-reflector run](soaks/soak-rr-flagship-24h-2026-09-28.md) on
+the v0.73.0 tag, on the same virtualized host shape, passed its RSS gates
+(hold band 237.7–254.6 MB, peak 427.6 MB in the terminal refresh). Different hosts
 and revisions make these observations, not a comparison with the band above.
 
 Receipts, gates, and artifacts:

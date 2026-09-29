@@ -26,6 +26,7 @@ the run they describe.
 | [M37 local-origination MAC-churn 24-hour soak](soak-m37-local-origination-churn-24h.md) | Local MAC origination under bounded bridge-FDB churn |
 | [M67 link-drain churn 24-hour soak](soak-m67-link-drain-24h-evpn-leak.md) | Attribute-intern behavior under link drain and MAC mobility |
 | [Route-reflector flagship 24-hour soak](soak-rr-flagship-24h.md) | Route reflection under churn |
+| [Route-reflector flagship 24-hour soak, 2026-09-28 (PASS)](soak-rr-flagship-24h-2026-09-28.md) | Run on the v0.73.0 tag; every gate passes on the on-host verdict; terminal reflected delivery exact at 99,900 non-self prefixes per observer after 5,493,035 churn cycles; zero flaps |
 | [Route-server flagship 24-hour soak](soak-rs-flagship-24h.md) | Reload and maximum-prefix behavior under sustained load |
 | [Route-server flagship 24-hour soak, 2026-09-11 (FAIL)](soak-rs-flagship-24h-2026-09-11.md) | Reload, maximum-prefix, and management-plane load; management read timeouts and missed metrics slots |
 | [Route-server flagship 24-hour soak, 2026-09-12 (FAIL)](soak-rs-flagship-24h-2026-09-12.md) | Reload, maximum-prefix, and management-plane load; missed metrics slots only |
