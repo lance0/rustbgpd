@@ -181,7 +181,74 @@ class ExtractorFailsClosed(unittest.TestCase):
         log = cell / "reloadstall.log"
         lines = [line for line in log.read_text().splitlines() if not line.startswith("flap 3 first_reann_s:")]
         log.write_text("\n".join(lines) + "\n")
-        with self.assertRaisesRegex(summarize.ExtractionError, "flap metric line counts"):
+        with self.assertRaisesRegex(summarize.ExtractionError, "flap metric rounds differ"):
+            summarize.extract(self.tmp)
+
+    def heap_leg(self, rounds, fields=None):
+        """Insert heap lines numbered ROUNDS, one after each round's RSS line in order.
+
+        FIELDS, when given, replaces every line's key=value text."""
+        cell = matrix_leg(self.tmp, "matrix-a-r1-s3", "s3")
+        log = cell / "reloadstall.log"
+        lines, pending = [], list(rounds)
+        for line in log.read_text().splitlines():
+            lines.append(line)
+            if line.startswith("flap ") and " sessions_up " in line and pending:
+                round_ = pending.pop(0)
+                lines.append(f"flap {round_} heap " + (fields or f"allocated_mib={300 + round_} active_mib=320 "
+                                                                f"resident_mib={350 + round_} mapped_mib=400"))
+        assert not pending
+        log.write_text("\n".join(lines) + "\n")
+
+    def test_heap_lines_extract_per_round(self):
+        self.heap_leg([1, 2, 3])
+        rows, _, _ = summarize.extract(self.tmp)
+        heap = sorted((r[3], r[4], r[5]) for r in rows if r[3].startswith("flap_heap_"))
+        self.assertEqual(heap, [("flap_heap_allocated", i, str(300 + i)) for i in (1, 2, 3)]
+                         + [("flap_heap_resident", i, str(350 + i)) for i in (1, 2, 3)])
+
+    def test_heap_line_missing_a_round_fails(self):
+        self.heap_leg([1, 3])
+        with self.assertRaisesRegex(summarize.ExtractionError, "flap metric rounds differ"):
+            summarize.extract(self.tmp)
+
+    def test_heap_line_duplicate_round_fails(self):
+        # As many heap lines as rounds, but round 1 twice and round 2 never.
+        self.heap_leg([1, 1, 3])
+        with self.assertRaisesRegex(summarize.ExtractionError, "duplicate flap round in 'heap'"):
+            summarize.extract(self.tmp)
+
+    def heap_rows(self):
+        rows, _, _ = summarize.extract(self.tmp)
+        return sorted((r[3], r[4], r[5]) for r in rows if r[3].startswith("flap_heap_"))
+
+    def test_absent_heap_lines_still_count_rounds(self):
+        absent = "allocated_mib=absent active_mib=absent resident_mib=absent mapped_mib=absent"
+        self.heap_leg([1, 2, 3], absent)
+        self.assertEqual(self.heap_rows(), [])
+
+    def test_absent_heap_line_missing_a_round_fails(self):
+        absent = "allocated_mib=absent active_mib=absent resident_mib=absent mapped_mib=absent"
+        self.heap_leg([1, 3], absent)
+        with self.assertRaisesRegex(summarize.ExtractionError, "flap metric rounds differ"):
+            summarize.extract(self.tmp)
+
+    def test_mixed_heap_line_emits_only_numeric_rows(self):
+        self.heap_leg([1, 2, 3], "allocated_mib=300 active_mib=absent resident_mib=absent mapped_mib=absent")
+        self.assertEqual(self.heap_rows(), [("flap_heap_allocated", i, "300") for i in (1, 2, 3)])
+
+    def test_malformed_heap_value_fails(self):
+        for fields in ("allocated_mib=3x0 resident_mib=350", "allocated_mib=300", "allocated_mib= resident_mib=350"):
+            with self.subTest(fields=fields):
+                shutil.rmtree(self.tmp)
+                self.tmp.mkdir()
+                self.heap_leg([1, 2, 3], fields)
+                with self.assertRaisesRegex(summarize.ExtractionError, "neither an integer nor 'absent'"):
+                    summarize.extract(self.tmp)
+
+    def test_heap_line_for_an_unknown_round_fails(self):
+        self.heap_leg([1, 2, 4])
+        with self.assertRaisesRegex(summarize.ExtractionError, "flap metric rounds differ"):
             summarize.extract(self.tmp)
 
     def test_unfinished_legs_are_not_counted(self):
