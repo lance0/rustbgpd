@@ -42,8 +42,10 @@ pub(crate) async fn read_rpc<T>(
 
 /// Client wait for a runtime-only mutation: session control, graceful
 /// shutdown, route injection, EVPN runtime controls and daemon shutdown.
-/// The daemon bounds its own peer-manager mutation wait at 10 minutes
+/// Peer-manager mutation waits have a 10-minute daemon-side bound
 /// (`PEER_MANAGER_MUTATION_TIMEOUT`); the extra minute covers transfer.
+/// Route injection waits directly on the RIB without a daemon-side bound;
+/// this budget bounds only the client's wait, not the accepted mutation.
 pub(crate) const MUTATION_RPC_TIMEOUT: Duration = Duration::from_secs(11 * 60);
 /// Client wait for a mutation the daemon persists to its configuration
 /// (neighbors, dynamic ranges, policies, neighbor sets, chains, peer groups,

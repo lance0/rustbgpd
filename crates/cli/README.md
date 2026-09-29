@@ -96,10 +96,12 @@ configuration operation and response transfer. This is a per-call limit, not
 a 30-second limit on the whole doctor command. `rbgp config effective` uses
 the same allowance.
 
-Other mutations wait at most just past the daemon's own bound. Neighbor
-session controls, `gshut`, route injection, EVPN runtime controls and
-`shutdown` wait up to 11 minutes. Changes the daemon persists to its
-configuration wait up to 31 minutes: neighbors, dynamic-neighbor ranges,
+Runtime-only mutations wait up to 11 minutes: neighbor session controls,
+`gshut`, route injection, EVPN runtime controls and `shutdown`. Peer-manager
+mutation waits have a 10-minute daemon-side bound. Route injection
+(unicast, EVPN and FlowSpec) waits directly on the RIB without a daemon-side
+bound, so its 11-minute limit bounds only the client's wait. Changes the
+daemon persists to its configuration wait up to 31 minutes: neighbors, dynamic-neighbor ranges,
 policies, neighbor sets, chains, peer groups and FIB tables. On expiry the
 command exits 1 with an outcome-unknown error that names a command to verify
 with. The daemon may still apply the change, so the CLI never retries it.
