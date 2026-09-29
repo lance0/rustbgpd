@@ -297,9 +297,16 @@ class ExtractorFailsClosed(unittest.TestCase):
         self.assertEqual(cg, {"daemon_cg_peak": "812345", "settled_cg_current_last_sample": 1000 + len(lines) - 2})
         (cell / "cgroup-memory").write_text("cg_scope: unavailable\n")
         self.assertNotIn("daemon_cg_peak", {r[3] for r in summarize.extract(self.tmp)[0]})
-        (cell / "cgroup-memory").write_text("cg_peak_kib: 812345\n")
-        with self.assertRaisesRegex(summarize.ExtractionError, "cg_peak"):
-            summarize.extract(self.tmp)
+        # No cg_peak may publish without the full readout and its swap-fence evidence.
+        for bad in ("cg_peak_kib: 812345\n",
+                    "cg_peak: 812345 kB\ncg_current: 700000 kB\ncg_swap_max: max\n",
+                    "cg_peak: 812345 kB\ncg_swap_max: 0\n",
+                    "cg_peak: 812345 kB\ncg_current: 700000 kB\n",
+                    "cg_scope: unavailable\ncg_peak: 812345 kB\n"):
+            with self.subTest(bad=bad):
+                (cell / "cgroup-memory").write_text(bad)
+                with self.assertRaisesRegex(summarize.ExtractionError, "cgroup-memory"):
+                    summarize.extract(self.tmp)
 
     def test_daemon_reload_intervals(self):
         cell = matrix_leg(self.tmp, "matrix-a-r1-s2")

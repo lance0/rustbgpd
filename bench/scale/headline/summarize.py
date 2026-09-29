@@ -102,6 +102,10 @@ def read_text(path):
     return path.read_text(errors="replace")
 
 
+# run-matrix.sh's record_scope_memory output, byte for byte.
+CGROUP_MEMORY = re.compile(r"cg_peak: (\d+) kB\ncg_current: \d+ kB\ncg_swap_max: 0\n")
+
+
 def rss_column(path, column="total_rss_kib"):
     return [int(row[column]) for row in csv.DictReader(path.read_text().splitlines()) if row.get(column)]
 
@@ -235,14 +239,17 @@ def matrix_rows(source, exclusions, campaign):
             if hwm:
                 rows.append([phase, arm, run, "daemon_vmhwm", "", hwm.group(1), "KiB"])
         # Legs recorded before the daemon ran in a swap-fenced scope have no cg_peak.
-        # A leg run without a usable scope says so; any other readout must parse.
+        # A leg run without a usable scope says so exactly; any other readout
+        # must be the complete producer format, including the swap fence.
         if (cell / "cgroup-memory").exists():
             text = read_text(cell / "cgroup-memory")
-            cg_peak = re.search(r"^cg_peak:\s+(\d+) kB$", text, re.M)
-            if cg_peak:
-                rows.append([phase, arm, run, "daemon_cg_peak", "", cg_peak.group(1), "KiB"])
-            elif text.strip() != "cg_scope: unavailable":
-                raise ExtractionError(f"{leg.name}: cgroup-memory has no 'cg_peak: N kB' line")
+            readout = CGROUP_MEMORY.fullmatch(text)
+            if readout:
+                rows.append([phase, arm, run, "daemon_cg_peak", "", readout.group(1), "KiB"])
+            elif text != "cg_scope: unavailable\n":
+                raise ExtractionError(
+                    f"{leg.name}: cgroup-memory is neither 'cg_peak/cg_current/cg_swap_max: 0' nor 'cg_scope: unavailable'"
+                )
         cg_current = rss_column(cell / "rss.csv", "cg_current_kib")
         if cg_current:
             rows.append([phase, arm, run, "settled_cg_current_last_sample", "", cg_current[-1], "KiB"])
