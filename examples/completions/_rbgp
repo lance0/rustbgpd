@@ -3215,6 +3215,8 @@ _arguments "${_arguments_options[@]}" : \
 '--family=[Address family filter (ipv4_unicast, ipv6_unicast)]:FAMILY:_default' \
 '--limit=[Maximum routes to evaluate (default\: every route in the snapshot)]:LIMIT:_default' \
 '--show-changes=[Maximum before/after attribute diffs to show]:SHOW_CHANGES:_default' \
+'*--dataset=[Candidate dataset binding NAME=PATH (repeat for each declared dataset)]:DATASETS:_default' \
+'--show-rejected=[Maximum currently carried routes rejected by the candidate to show]:SHOW_REJECTED:_default' \
 '-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \

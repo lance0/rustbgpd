@@ -1839,6 +1839,18 @@ message TestPolicyRequest {
   // Maximum before/after attribute diffs to return (routes the policy
   // accepted with modifications). 0 = none.
   uint32 show_changes = 7;
+  // Candidate dataset file contents supplied by the client, matched to
+  // declarations in rpol_source. At most 16 bindings; missing, duplicate,
+  // undeclared, or malformed bindings are invalid. The encoded request is
+  // limited to 4 MiB. No daemon-side file reads or mutation.
+  repeated TestPolicyDataset datasets = 8;
+  // Maximum rejected-route samples (up to 1,000). 0 = none.
+  uint32 show_rejected = 9;
+}
+
+message TestPolicyDataset {
+  string name = 1;
+  string entries = 2;
 }
 
 // Per-term guard-hit counter (the IOS-XR "show pcl" idea): how many
@@ -1859,6 +1871,12 @@ message TestPolicyDiff {
   // Human-readable attribute changes, e.g. "local_pref 100 - 200" or
   // "communities + 65001:999".
   repeated string changes = 4;
+}
+
+message TestPolicyRejectedRoute {
+  string prefix = 1;
+  uint32 prefix_length = 2;
+  string peer = 3;
 }
 
 message GetPolicyStatsRequest {
@@ -1969,6 +1987,9 @@ message TestPolicyResponse {
   // Up to request.show_changes samples, in canonical
   // (prefix, peer, path_id) order across the whole walk.
   repeated TestPolicyDiff diffs = 8;
+  // Up to request.show_rejected samples from currently retained,
+  // post-policy routes, in the same canonical order as diffs.
+  repeated TestPolicyRejectedRoute rejected_routes = 9;
 }
 
 // ---------------------------------------------------------------------------

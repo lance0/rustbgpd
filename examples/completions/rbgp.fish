@@ -1620,6 +1620,8 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcom
 complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcommand_from test" -s a -l family -d 'Address family filter (ipv4_unicast, ipv6_unicast)' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcommand_from test" -l limit -d 'Maximum routes to evaluate (default: every route in the snapshot)' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcommand_from test" -l show-changes -d 'Maximum before/after attribute diffs to show' -r
+complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcommand_from test" -l dataset -d 'Candidate dataset binding NAME=PATH (repeat for each declared dataset)' -r
+complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcommand_from test" -l show-rejected -d 'Maximum currently carried routes rejected by the candidate to show' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcommand_from test" -s s -l addr -d 'gRPC server address or unix:///path/to/socket' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcommand_from test" -l token-file -d 'Bearer token file for authenticated gRPC endpoints' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcommand_from test" -l tls-ca -d 'PEM CA bundle used to verify an HTTPS server (required for HTTPS)' -r -F

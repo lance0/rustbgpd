@@ -2965,6 +2965,7 @@ impl rustbgpd_api::proto::policy_service_server::PolicyService for MockPolicySer
                 peer: "10.0.0.9".to_string(),
                 changes: vec!["local_pref unset -> 200".to_string()],
             }],
+            ..Default::default()
         }))
     }
 }
