@@ -435,15 +435,21 @@ Decode UPDATEs. Support IPv4 unicast NLRI. Support attributes: ORIGIN, AS_PATH (
 Loc-RIB best-path selection — minimal but deterministic. The comparison function is a **total ordering**: it must never return equality for distinct paths (from distinct peers).
 
 Best-path rules (implemented), applied in order:
+0. Fresh over GR-stale over LLGR-stale; a received `LLGR_STALE` community also puts a route in the least-preferred tier
+0.5. RPKI validation: Valid > NotFound > Invalid
+0.7. ASPA path verification: Valid > Unknown > Invalid
 1. Highest LOCAL_PREF (default 100 if absent)
 2. Shortest AS_PATH (AS_SET counts as 1, per RFC 4271 §9.1.2.2)
 3. Lowest ORIGIN (IGP < EGP < INCOMPLETE)
 4. Lowest MED (deterministic — always-compare across all peers, not just same-AS)
 5. eBGP over iBGP (only `RouteOrigin::Ebgp`; Local uses LOCAL_PREF/AS_PATH)
+5.3. ORR interior cost to NEXT_HOP: known over unknown, then lower cost; used only for an iBGP route-reflector client's best paths when its configured `orr_vantage` resolves in the BGP-LS topology
 5.5. Lowest effective BGP Identifier (RFC 4271 §9.1.2.2 step (f)): ORIGINATOR_ID substitutes for the advertising peer's BGP Identifier when present (RFC 4456 §9); a locally originated route has no BGP Identifier and ranks ahead of every session-learned route at this step. Explain reports `lower_originator_id` when both routes carried ORIGINATOR_ID and `lower_bgp_identifier` otherwise
 5.6. Shortest CLUSTER_LIST length (RFC 4456 §9)
 6. Lowest peer address (tiebreaker)
 7. Lowest inbound Add-Path path identifier (same-peer route identity only; reported as `lower_path_id` in explain)
+
+Without RPKI/ASPA cache data, routes have the neutral NotFound and Unknown states. Local LLGR retention requires negotiated LLGR and a nonzero `llgr_stale_time`; a received `LLGR_STALE` community still demotes a route without local LLGR retention. Step 5.3 is absent from global Loc-RIB selection. A client without a resolved ORR vantage uses the standard best path.
 
 **Implementation choices (ADR-0014):**
 - `best_path_cmp()` is a standalone function, not `Ord` on `Route`. Domain-specific ordering doesn't belong as a trait impl — multiple orderings may be needed.
