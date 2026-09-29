@@ -137,8 +137,8 @@ in `docs/project/release-checklist.md` §"Wire crate semver":
 enum that tracks an IANA/RFC registry — `Capability`, `PathAttribute`,
 `Afi`/`Safi`, `Message`/`MessageType`, `NotificationCode`, and the EVPN,
 FlowSpec, ORF, PMSI, and error enums — is `#[non_exhaustive]`. Match them with
-a wildcard arm and a new capability code, path attribute, or AFI/SAFI arrives
-in a minor release without a semver-major break. Closed-by-construction sets
+a wildcard arm so a new capability code, path attribute, or AFI/SAFI can arrive
+in a compatible `0.x` patch release. Closed-by-construction sets
 (`Origin`, `AsPathSegment`, `Prefix`, `AddPathMode`, `ErrorDisposition`,
 `RpkiValidation`) stay exhaustively matchable on purpose. `crates/wire/README.md`
 carries the full split under "Enum exhaustiveness".

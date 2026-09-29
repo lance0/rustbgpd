@@ -580,8 +580,8 @@ use rustbgpd_wire::Capability;
 fn negotiate(capability: &Capability) {
     match capability {
         Capability::RouteRefresh => { /* ... */ }
-        // New registry variants arrive in minor releases without a
-        // semver-major break; ignore what you do not support.
+        // New registry variants can arrive in compatible 0.x patch
+        // releases; ignore what you do not support.
         _ => {}
     }
 }
