@@ -2982,10 +2982,11 @@
       "type": "object",
       "properties": {
         "cache_size": {
-          "description": "Cache capacity **per session** (entries). Each entry is one\n`(AFI, SAFI, prefix, path_id)` import decision. Default 4096 —\na fabric / partial-table starter size (hundreds–low-thousands\nof prefixes fully observable). It is **not** sized for internet\nfull-table retention: a 100k-prefix peer keeps the cache\nsaturated, so explain becomes a coin-flip versus an evicted\nanswer. Operators who want reliable full-table explain raise\nthis toward their expected retained-prefix count for the peer\nand own the memory cost.\n\nBudget roughly `peers × min(cache_size, prefixes per peer) ×\n~600 B`, plus a ~155 KiB fixed floor per session once explain is\nenabled (the LRU index is allocated at capacity).",
+          "description": "Cache capacity **per session** (entries). Each entry is one\n`(AFI, SAFI, prefix, path_id)` import decision. Default 4096 —\na fabric / partial-table starter size (hundreds–low-thousands\nof prefixes fully observable). It is **not** sized for internet\nfull-table retention: a 100k-prefix peer keeps the cache\nsaturated, so explain becomes a coin-flip versus an evicted\nanswer. Operators who want reliable full-table explain raise\nthis toward their expected retained-prefix count for the peer\nand own the memory cost.\n\nBudget roughly `peers × min(max(1, cache_size), recorded decisions per\npeer) × ~600 B`, plus evicted-key memory after eviction. The index grows\nwith retained entries. Values above 2,097,152 are rejected;\nzero is clamped to one by the session cache.",
           "type": "integer",
           "format": "uint",
           "default": 4096,
+          "maximum": 2097152,
           "minimum": 0
         },
         "enabled": {
@@ -3001,10 +3002,11 @@
       "type": "object",
       "properties": {
         "capacity": {
-          "description": "Per-peer retention capacity (entries). Each entry is one\nrejected `(AFI, SAFI, prefix, path_id)` identity with its reason\nand a compact attribute summary (≤ ~512 bytes realistic worst\ncase, dominated by the AS-path string and community sets).\nDefault 1024 ⇒ ~0.5 MiB bound per peer under a full reject\nstorm; the store is LRU on rejection recency, so a storm\nconverges on the most recent rejections. Raise it toward the\nexpected member announcement count for reliable full coverage on\nroute-server fleets and own the memory.",
+          "description": "Per-peer retention capacity (entries). Each entry is one\nrejected `(AFI, SAFI, prefix, path_id)` identity with its reason\nand a compact attribute summary (≤ ~512 bytes realistic worst\ncase, dominated by the AS-path string and community sets).\nDefault 1024 ⇒ ~0.5 MiB bound per peer under a full reject\nstorm; the store is LRU on rejection recency, so a storm\nconverges on the most recent rejections. Raise it toward the\nexpected member announcement count for reliable full coverage on\nroute-server fleets and own the memory. Values above 2,097,152\nare rejected; zero is clamped to one by the session store.",
           "type": "integer",
           "format": "uint",
           "default": 1024,
+          "maximum": 2097152,
           "minimum": 0
         },
         "enabled": {

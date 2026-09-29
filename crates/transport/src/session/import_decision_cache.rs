@@ -241,13 +241,8 @@ pub struct ImportExplainReply {
 pub struct ImportDecisionCache {
     /// Per-peer LRU cap, retained so `entries` can be built on demand.
     cap: NonZeroUsize,
-    /// `None` until the first `insert`. `LruCache::new` eagerly
-    /// allocates its index (`HashMap::with_capacity(cap)`) plus the two
-    /// sigil nodes of its intrusive list, so building it at session
-    /// construction charges every peer for the cache whether or not
-    /// `[policy.explain] enabled` is set — and a disabled session never
-    /// inserts. Deferring the build keeps a disabled session (and an
-    /// enabled one that has not yet seen an UPDATE) allocation-free.
+    /// `None` until the first `insert`. The LRU index grows with entries,
+    /// up to `cap`, rather than reserving the configured ceiling.
     entries: Option<LruCache<ImportDecisionKey, CachedDecision>>,
     /// Every key evicted from `entries` since the last reset and not
     /// written again. Grows on demand; empty until the first eviction.
@@ -429,8 +424,7 @@ impl ImportDecisionCache {
     ///
     /// Drops the backing allocations too, returning the cache to the
     /// state `with_capacity` left it in — a session that is down holds
-    /// no cache memory, and the next `insert` rebuilds the LRU at its
-    /// full configured size.
+    /// no cache memory, and the next `insert` grows it on demand.
     pub fn clear(&mut self) {
         self.entries = None;
         self.evicted = EvictedKeys::default();
@@ -445,7 +439,11 @@ impl ImportDecisionCache {
     pub fn insert(&mut self, key: ImportDecisionKey, decision: CachedDecision) -> bool {
         self.evicted.remove(&key);
         let cap = self.cap;
-        let entries = self.entries.get_or_insert_with(|| LruCache::new(cap));
+        let entries = self.entries.get_or_insert_with(|| {
+            let mut entries = LruCache::unbounded();
+            entries.resize(cap);
+            entries
+        });
         // `push` also returns the old pair when it replaces `key` in place.
         let replaced = key.clone();
         match entries.push(key, decision) {

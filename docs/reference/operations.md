@@ -3148,11 +3148,12 @@ there is no per-peer or per-group override.
 - `cache_size` (default `4096`) — capacity **per session**, a fabric /
   partial-table size. For reliable full-table explain, raise it toward
   the peer's expected retained-prefix count and budget the memory: the
-  number applies to every session, so the bill is
-  `peers × (154 KiB + min(cache_size, prefixes per peer) × 587 B)`, plus
+  number applies to every session, so budget roughly
+  `sum over peers (min(max(1, cache_size), recorded decisions) × 600 B)`, plus
   eviction memory of about 19 B per evicted key (27–34 B with a nonzero
   Add-Path identifier), capped at 2,097,152 keys per session (about 38 MB,
-  or up to about 72 MB for nonzero Add-Path identifiers). See
+  or up to about 72 MB for nonzero Add-Path identifiers). The index grows
+  with entries; `cache_size` is capped at 2,097,152 and zero acts as one. See
   [`CONFIGURATION.md`](configuration.md#import-decision-explain-policyexplain).
 
 ### Answer a member's "why is my route filtered?"

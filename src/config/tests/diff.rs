@@ -339,6 +339,39 @@ fn resolve_neighbor_threads_reject_retention_settings() {
 }
 
 #[test]
+fn policy_cache_caps_are_validated_even_when_disabled() {
+    let mut config = parse(valid_toml()).unwrap();
+    config.policy.explain.enabled = false;
+    config.policy.reject_retention.enabled = false;
+    for field in [
+        "[policy.explain] cache_size",
+        "[policy.reject_retention] capacity",
+    ] {
+        for value in [0, 2_097_152] {
+            if field.contains("explain") {
+                config.policy.explain.cache_size = value;
+            } else {
+                config.policy.reject_retention.capacity = value;
+            }
+            config.validate().unwrap();
+        }
+        if field.contains("explain") {
+            config.policy.explain.cache_size = 2_097_153;
+        } else {
+            config.policy.reject_retention.capacity = 2_097_153;
+        }
+        let error = config.validate().unwrap_err().to_string();
+        assert!(error.contains(field), "{error}");
+        assert!(error.contains("maximum 2097152"), "{error}");
+        if field.contains("explain") {
+            config.policy.explain.cache_size = 4096;
+        } else {
+            config.policy.reject_retention.capacity = 1024;
+        }
+    }
+}
+
+#[test]
 fn diff_config_flags_reject_retention_as_restart_required() {
     // LAN-472: a [policy.reject_retention] edit is restart-required-per-
     // peer and must be visible in `--diff` (JSON + text), matching the

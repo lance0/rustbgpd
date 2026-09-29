@@ -16,7 +16,10 @@ pub mod import_decision_cache;
 #[path = "../src/session/rejected_routes.rs"]
 pub mod rejected_routes;
 
-use import_decision_cache::ImportDecisionKey;
+use import_decision_cache::{
+    CachedDecision, CachedOutcome, CachedPolicyContext, ImportDecisionCache, ImportDecisionKey,
+    LookupResult,
+};
 use rejected_routes::{DEFAULT_REJECT_RETENTION_CAPACITY, RejectedRouteEntry, RejectedRouteStore};
 
 struct RequestedAllocator;
@@ -238,6 +241,51 @@ fn requested_live<T>(build: impl FnOnce() -> T) -> (T, usize) {
     (value, after.checked_sub(before).unwrap())
 }
 
+fn decision() -> CachedDecision {
+    CachedDecision {
+        outcome: CachedOutcome::Permit,
+        matched_policy: None,
+        rpki: RpkiValidation::NotFound,
+        aspa: AspaValidation::Unknown,
+        policy_context: CachedPolicyContext::default(),
+        next_hop: None,
+        modifications: Default::default(),
+        evaluated_at: SystemTime::UNIX_EPOCH,
+        policy_generation: 0,
+    }
+}
+
+fn explain_first_insert_grows_index_lazily() {
+    for capacity in [65_536, 1_048_576] {
+        let (lazy, lazy_bytes) = requested_live(|| {
+            let mut cache = ImportDecisionCache::with_capacity(capacity);
+            cache.insert(key(0), decision());
+            cache
+        });
+        assert!(matches!(lazy.lookup(&key(0), 0), LookupResult::Hit(_)));
+        black_box(&lazy);
+        drop(lazy);
+
+        let (eager, eager_bytes) = requested_live(|| {
+            let mut cache = LruCache::new(NonZeroUsize::new(capacity).unwrap());
+            cache.push(key(0), decision());
+            cache
+        });
+        assert_eq!(eager.len(), 1);
+        black_box(&eager);
+        drop(eager);
+
+        println!(
+            "explain first insert cap={capacity}: lazy={lazy_bytes} eager={eager_bytes} requested bytes"
+        );
+        assert!(
+            lazy_bytes < 4096,
+            "first insert reserved too much: {lazy_bytes}"
+        );
+        assert!(eager_bytes > lazy_bytes + capacity * 16);
+    }
+}
+
 fn saturated_candidate(capacity: usize) -> RejectedRouteStore {
     let mut store = RejectedRouteStore::with_capacity(capacity);
     for path_id in 0..capacity as u32 {
@@ -329,4 +377,5 @@ fn lazy_store_releases_default_reservation_without_saturated_allocations() {
 fn main() {
     lazy_store_matches_bounded_lru_semantics();
     lazy_store_releases_default_reservation_without_saturated_allocations();
+    explain_first_insert_grows_index_lazily();
 }
