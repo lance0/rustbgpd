@@ -14,7 +14,7 @@ import unittest
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 
-from parse_rrharness import EXPECTED_SHAPES, RESULT_FIELDS  # noqa: E402
+from parse_rrharness import EXPECTED_SHAPES, LEGACY_RESULT_FIELDS, RESULT_FIELDS  # noqa: E402
 
 
 SCRIPT = HERE / "parse_rrharness.py"
@@ -35,7 +35,20 @@ class RrHarnessParserTests(unittest.TestCase):
             self.fail("parser unexpectedly accepted invalid input")
         return result
 
-    def parse_cell(self, directory: Path, log_text: str, *, mode: str = "flood") -> Path:
+    def parse_cell(
+        self,
+        directory: Path,
+        log_text: str,
+        *,
+        mode: str = "flood",
+        cgroup_text: str | None = None,
+        success: bool = True,
+    ) -> Path:
+        extra: list[str] = []
+        if cgroup_text is not None:
+            cgroup = directory / "cell.cgroup"
+            cgroup.write_text(cgroup_text, encoding="utf-8")
+            extra = ["--cgroup", str(cgroup)]
         log = directory / "cell.log"
         folded = directory / "cell.folded"
         classified = directory / "cell.cpu.tsv"
@@ -65,6 +78,8 @@ class RrHarnessParserTests(unittest.TestCase):
             str(classified),
             "--output",
             str(output),
+            *extra,
+            success=success,
         )
         return output
 
@@ -90,6 +105,43 @@ rss_end_mib 210
             self.assertEqual(rows[0]["rate_name"], "blocks_per_s")
             self.assertEqual(rows[0]["rate"], "2.100000000")
             self.assertEqual(rows[0]["total_samples"], "105")
+
+    FLOOD_LOG = """# flood clients=256 prefixes=100000 secs=20
+rss_established_mib 100
+cold_staged_s 1.250
+cold_drained_s 0.750
+rss_converged_mib 200
+sustained_blocks 42
+sustained_window_s 20.000
+mgr_cpu_s 10.000
+mgr_busy_frac 0.500
+rss_end_mib 210
+"""
+
+    def test_cgroup_readout_fills_trailing_columns_and_requires_swap_fence(self) -> None:
+        valid = "cg_peak_bytes 314572800\ncg_settled_current_bytes 209715200\ncg_swap_max 0\n"
+        with tempfile.TemporaryDirectory() as directory_text:
+            directory = Path(directory_text)
+            output = self.parse_cell(directory, self.FLOOD_LOG, cgroup_text=valid)
+            with output.open(newline="", encoding="utf-8") as handle:
+                reader = csv.DictReader(handle)
+                self.assertEqual(tuple(reader.fieldnames or ())[-2:], ("cg_peak_mib", "cg_settled_current_mib"))
+                row = next(reader)
+            self.assertEqual(row["cg_peak_mib"], "300.000")
+            self.assertEqual(row["cg_settled_current_mib"], "200.000")
+            # Without a scope the columns exist but are blank.
+            row = next(csv.DictReader(self.parse_cell(directory, self.FLOOD_LOG).open(encoding="utf-8")))
+            self.assertEqual((row["cg_peak_mib"], row["cg_settled_current_mib"]), ("", ""))
+            for bad in (
+                valid.replace("cg_swap_max 0", "cg_swap_max max"),
+                valid.replace("cg_settled_current_bytes 209715200", "cg_settled_current_bytes "),
+                valid.replace("cg_peak_bytes 314572800\n", ""),
+                valid + "cg_peak_bytes 1\n",
+            ):
+                with self.subTest(bad=bad):
+                    (directory / "cell.csv").unlink(missing_ok=True)
+                    output = self.parse_cell(directory, self.FLOOD_LOG, cgroup_text=bad, success=False)
+                    self.assertFalse(output.exists())
 
     def test_parses_strict_churn_cell_and_checks_printed_rate(self) -> None:
         with tempfile.TemporaryDirectory() as directory_text:
@@ -199,7 +251,13 @@ rss_end_mib 210
                     self.assertFalse(output.exists())
 
     def write_matrix(
-        self, path: Path, raw_dir: Path, *, head_multiplier: float = 1.16
+        self,
+        path: Path,
+        raw_dir: Path,
+        *,
+        head_multiplier: float = 1.16,
+        fields: tuple[str, ...] = RESULT_FIELDS,
+        cg_peak: object = 512,
     ) -> None:
         raw_dir.mkdir()
         rows: list[dict[str, object]] = []
@@ -249,12 +307,40 @@ rss_end_mib 210
                                 classified.read_bytes()
                             ).hexdigest(),
                             "total_samples": 100,
+                            "cg_peak_mib": cg_peak,
+                            "cg_settled_current_mib": 256,
                         }
                     )
         with path.open("w", newline="", encoding="utf-8") as handle:
-            writer = csv.DictWriter(handle, fieldnames=RESULT_FIELDS, lineterminator="\n")
+            writer = csv.DictWriter(
+                handle, fieldnames=fields, lineterminator="\n", extrasaction="ignore"
+            )
             writer.writeheader()
             writer.writerows(rows)
+
+    def test_matrix_accepts_legacy_header_and_rejects_bad_cgroup_column(self) -> None:
+        with tempfile.TemporaryDirectory() as directory_text:
+            directory = Path(directory_text)
+            for name, kwargs, success in (
+                ("legacy", {"fields": LEGACY_RESULT_FIELDS}, True),
+                ("blank", {"cg_peak": ""}, True),
+                ("text", {"cg_peak": "lots"}, False),
+                ("negative", {"cg_peak": -1}, False),
+            ):
+                with self.subTest(name=name):
+                    matrix = directory / f"{name}.csv"
+                    raw_dir = directory / f"{name}-raw"
+                    self.write_matrix(matrix, raw_dir, **kwargs)
+                    self.run_parser(
+                        "compare",
+                        "--input",
+                        str(matrix),
+                        "--raw-dir",
+                        str(raw_dir),
+                        "--output",
+                        str(directory / f"{name}-comparison.csv"),
+                        success=success,
+                    )
 
     def test_complete_counterbalanced_matrix_passes_literal_gates(self) -> None:
         with tempfile.TemporaryDirectory() as directory_text:

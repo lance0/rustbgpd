@@ -96,8 +96,8 @@ def read_text(path):
     return path.read_text(errors="replace")
 
 
-def rss_column(path):
-    return [int(row["total_rss_kib"]) for row in csv.DictReader(path.read_text().splitlines())]
+def rss_column(path, column="total_rss_kib"):
+    return [int(row[column]) for row in csv.DictReader(path.read_text().splitlines()) if row.get(column)]
 
 
 def log_time(record):
@@ -205,6 +205,18 @@ def matrix_rows(source, exclusions, campaign):
             hwm = re.search(r"VmHWM:\s+(\d+)", read_text(cell / "vmhwm"))
             if hwm:
                 rows.append([phase, arm, run, "daemon_vmhwm", "", hwm.group(1), "KiB"])
+        # Legs recorded before the daemon ran in a swap-fenced scope have no cg_peak.
+        # A leg run without a usable scope says so; any other readout must parse.
+        if (cell / "cgroup-memory").exists():
+            text = read_text(cell / "cgroup-memory")
+            cg_peak = re.search(r"^cg_peak:\s+(\d+) kB$", text, re.M)
+            if cg_peak:
+                rows.append([phase, arm, run, "daemon_cg_peak", "", cg_peak.group(1), "KiB"])
+            elif text.strip() != "cg_scope: unavailable":
+                raise ExtractionError(f"{leg.name}: cgroup-memory has no 'cg_peak: N kB' line")
+        cg_current = rss_column(cell / "rss.csv", "cg_current_kib")
+        if cg_current:
+            rows.append([phase, arm, run, "settled_cg_current_last_sample", "", cg_current[-1], "KiB"])
         daemon_log = cell / "daemon.log"
         if daemon_log.exists():
             established = re.search(r"^established (\d+) at", log, re.M)

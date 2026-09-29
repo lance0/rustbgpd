@@ -218,6 +218,22 @@ class ExtractorFailsClosed(unittest.TestCase):
         with self.assertRaisesRegex(summarize.ExtractionError, "matches no leg"):
             summarize.extract(self.tmp)
 
+    def test_cgroup_memory_rows(self):
+        cell = matrix_leg(self.tmp, "matrix-a-r1-s2")
+        self.assertFalse({"daemon_cg_peak", "settled_cg_current_last_sample"} & {r[3] for r in summarize.extract(self.tmp)[0]})
+        rss = cell / "rss.csv"
+        lines = rss.read_text().splitlines()
+        rss.write_text("\n".join([lines[0] + ",cg_current_kib"] + [f"{line},{i + 1000}" for i, line in enumerate(lines[1:])] + [lines[-1] + ","]) + "\n")
+        (cell / "cgroup-memory").write_text("cg_peak: 812345 kB\ncg_current: 700000 kB\ncg_swap_max: 0\n")
+        cg = {r[3]: r[5] for r in summarize.extract(self.tmp)[0] if r[3].startswith(("daemon_cg", "settled_cg"))}
+        # The trailing sample lost its cgroup read at teardown; the last real one counts.
+        self.assertEqual(cg, {"daemon_cg_peak": "812345", "settled_cg_current_last_sample": 1000 + len(lines) - 2})
+        (cell / "cgroup-memory").write_text("cg_scope: unavailable\n")
+        self.assertNotIn("daemon_cg_peak", {r[3] for r in summarize.extract(self.tmp)[0]})
+        (cell / "cgroup-memory").write_text("cg_peak_kib: 812345\n")
+        with self.assertRaisesRegex(summarize.ExtractionError, "cg_peak"):
+            summarize.extract(self.tmp)
+
     def test_daemon_reload_intervals(self):
         cell = matrix_leg(self.tmp, "matrix-a-r1-s2")
         (cell / "daemon.log").write_text(daemon_log(4))
@@ -225,7 +241,7 @@ class ExtractorFailsClosed(unittest.TestCase):
         shutil.copytree(V0720 / "irr" / "irr-ov0-ctrl-r1", root)
         (root / "rustbgpd-sighup" / "daemon.log").write_text(daemon_log(4))
         rows, _, _ = summarize.extract(self.tmp)
-        daemon = sorted({(r[0], r[3], r[5]) for r in rows if r[3].startswith("daemon_") and r[3] != "daemon_vmhwm"})
+        daemon = sorted({(r[0], r[3], r[5]) for r in rows if r[3].startswith("daemon_") and r[3] not in ("daemon_vmhwm", "daemon_cg_peak")})
         expected = [(phase, metric, value) for phase in ("irr-ov0", "matrix-s2") for metric, value in (
             ("daemon_rib_transition", 581.0), ("daemon_sighup_to_complete", 1199.0),
             ("daemon_sighup_to_loaded", 100.0), ("daemon_validate", 84))]

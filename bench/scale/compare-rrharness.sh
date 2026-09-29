@@ -34,7 +34,11 @@ a clean invoking checkout, an identical bench/scale/rrharness tree at both
 refs, the shared host lock, a performance-governor pinned CPU, load below
 2.0, and no competing build/performance process before every fresh-process
 cell. Both sides are built with `cargo build --release --locked` into
-separate target directories and launched as prebuilt binaries.
+separate target directories and launched as prebuilt binaries. Each leg runs
+in its own transient systemd user scope with MemorySwapMax=0; results.csv
+carries the scope's memory.peak (cg_peak_mib) and its memory.current when the
+harness logs settled RSS (cg_settled_current_mib) as trailing columns. Without
+a usable user scope the driver warns and leaves those columns blank.
 
 Without --pin or --max-regression the receipt is advisory: comparison.csv
 (per cell) and summary.csv (per rung) report head-vs-base throughput with no
@@ -263,6 +267,43 @@ governor_path="/sys/devices/system/cpu/cpu${core}/cpufreq/scaling_governor"
   printf 'cpu%s must use the %s governor\n' "$core" "$required_governor" >&2
   exit 75
 }
+
+# Each leg runs in its own transient systemd user scope with swap fenced, so
+# the scope's memory.peak is the leg's whole high-water mark; swapped pages
+# would otherwise hide from it. Without a usable user manager the matrix still
+# runs, loudly, with blank cgroup columns and memory_scope=none in the manifest.
+memory_scope=(systemd-run --user --scope --quiet -p MemorySwapMax=0 --)
+memory_scope_mode=systemd-user-scope-swap-max-0
+# shellcheck disable=SC2016 # Expanded by the scoped shell, not here.
+if ! "${memory_scope[@]}" sh -c 'cg=/sys/fs/cgroup$(sed -n "s/^0:://p" /proc/self/cgroup)
+  test -r "$cg/memory.peak" && test "$(cat "$cg/memory.swap.max")" = 0' >/dev/null 2>&1; then
+  printf 'WARNING: no systemd user scope with a readable memory.peak and memory.swap.max=0;\n' >&2
+  printf 'WARNING: cg_peak_mib and cg_settled_current_mib will be blank in this receipt\n' >&2
+  memory_scope=()
+  memory_scope_mode=none
+fi
+# Runs inside the leg's scope: start the leg, read memory.current once the
+# harness logs its settled RSS line (rss_converged_mib / rss_primed_mib), then
+# record memory.peak before the scope goes away. The watcher shell's few MiB
+# are charged to the scope identically on both sides.
+# shellcheck disable=SC2016 # Expanded by the scoped shell, not here.
+scoped_leg='cg=/sys/fs/cgroup$(sed -n "s/^0:://p" /proc/self/cgroup)
+out=$1 log=$2
+shift 2
+"$@" >"$log" &
+leg=$!
+settled=
+while kill -0 "$leg" 2>/dev/null; do
+  if [ -z "$settled" ] && grep -Eq "^rss_(converged|primed)_mib " "$log"; then
+    settled=$(cat "$cg/memory.current")
+  fi
+  sleep 0.1
+done
+rc=0
+wait "$leg" || rc=$?
+printf "cg_peak_bytes %s\ncg_settled_current_bytes %s\ncg_swap_max %s\n" \
+  "$(cat "$cg/memory.peak")" "$settled" "$(cat "$cg/memory.swap.max")" >"$out"
+exit "$rc"'
 
 if [[ -n ${RUSTBGPD_HOST_LOCK+x} ]]; then
   host_lock=$RUSTBGPD_HOST_LOCK
@@ -496,8 +537,17 @@ run_cell() {
     "$cell" "$variant" "$commit" "$repetition" "$pair_order" "$run_position" \
     "$logical_argv" >>"$execution"
   preflight_cell "$cell"
-  timeout --signal=TERM --kill-after=30s "${cell_timeout_seconds}s" \
-    taskset -c "$core" "$binary" "${rr_args[@]}" >"$log" 2>"$stderr"
+  local -a leg=(timeout --signal=TERM --kill-after=30s "${cell_timeout_seconds}s"
+    taskset -c "$core" "$binary" "${rr_args[@]}")
+  local -a cgroup_args=()
+  if ((${#memory_scope[@]})); then
+    local cgroup_file="$scratch/$cell.cgroup"
+    "${memory_scope[@]}" bash -c "$scoped_leg" scoped-leg "$cgroup_file" "$log" \
+      "${leg[@]}" 2>"$stderr"
+    cgroup_args=(--cgroup "$cgroup_file")
+  else
+    "${leg[@]}" >"$log" 2>"$stderr"
+  fi
   [[ ! -s $stderr ]] || {
     printf 'rrharness emitted stderr for %s\n' "$cell" >&2
     exit 1
@@ -509,7 +559,7 @@ run_cell() {
     --mode "$mode" --variant "$variant" --commit "$commit" \
     --repetition "$repetition" --pair-order "$pair_order" \
     --run-position "$run_position" --log "$log" --folded "$folded" \
-    --classified "$classified" --output "$row"
+    --classified "$classified" --output "$row" "${cgroup_args[@]}"
   [[ $(wc -l <"$row") -eq 2 ]] || {
     printf 'cell parser did not emit exactly one row: %s\n' "$cell" >&2
     exit 1
@@ -643,6 +693,7 @@ manifest = {
     "counterbalance": ["repetition-1-base-first", "repetition-2-head-first"],
     "build": "cargo build --release --locked --jobs 1 --manifest-path bench/scale/rrharness/Cargo.toml",
     "launch": "direct-prebuilt-binary-with-taskset",
+    "memory_scope": "$memory_scope_mode",
     "rustc": "$(rustc --version)",
     "cargo": "$(cargo --version)",
     "kernel": "$(uname -sr)",
