@@ -1,6 +1,68 @@
 use super::*;
 use rustbgpd_rib::AttrSet;
 
+/// RIB staging normally removes OTC-blocked routes. The shared encoder must
+/// still defer a blocked payload to the per-session path for diagnostics.
+#[test]
+fn shared_unicast_otc_gate_falls_back_only_for_blocked_roles() {
+    let prefix = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24);
+    for (role, blocks_tagged) in [
+        (Some(BgpRole::Customer), true),
+        (Some(BgpRole::Peer), true),
+        (Some(BgpRole::RouteServerClient), true),
+        (Some(BgpRole::Provider), false),
+        (Some(BgpRole::RouteServer), false),
+        (None, false),
+    ] {
+        let mut session = make_test_session(65001, 65002);
+        session.config.peer.local_role = role;
+        session.negotiated = Some(Arc::new(negotiated_session(65002, false)));
+        let profile = session.publish_export_profile();
+        for otc in [
+            None,
+            Some(PathAttribute::OnlyToCustomer(65003)),
+            Some(PathAttribute::OnlyToCustomerPartial(65003)),
+        ] {
+            let tagged = otc.is_some();
+            let mut route = make_sourced_route(Ipv4Addr::new(10, 45, 0, 3), prefix, 65003);
+            if let Some(otc) = otc {
+                AttrSet::edit(&mut route.attributes, |attrs| attrs.push(otc));
+            }
+            let chunks = super::shared_group::encode_shared_unicast_slice(
+                &profile,
+                &mut super::export::PreparedAttrCache::default(),
+                std::slice::from_ref(&route),
+                &[None],
+                &[0],
+            );
+            if tagged && blocks_tagged {
+                assert!(
+                    chunks.is_none(),
+                    "role {role:?} must defer a tagged payload to per-session handling"
+                );
+            } else {
+                let chunks = chunks.unwrap_or_else(|| {
+                    panic!("role {role:?}, tagged={tagged}: permitted payload must encode")
+                });
+                assert_eq!(chunks.len(), 1);
+                assert_eq!(chunks[0].afi, Afi::Ipv4);
+                let parsed = parse_frame(&chunks[0].bytes, false);
+                assert_eq!(parsed.announced, vec![Ipv4NlriEntry { path_id: 0, prefix }]);
+                if tagged {
+                    assert_eq!(
+                        parsed
+                            .attributes
+                            .iter()
+                            .filter_map(PathAttribute::only_to_customer)
+                            .collect::<Vec<_>>(),
+                        vec![65003]
+                    );
+                }
+            }
+        }
+    }
+}
+
 impl PeerSession {
     /// Direct encoder fixtures explicitly drive the same bounded cursor used
     /// by `run()`; control responsiveness is tested through the real actor.

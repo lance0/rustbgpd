@@ -12,29 +12,9 @@ async fn send_route_update_emits_bgpls_reach_and_unreach() {
     let route = make_bgpls_route(0xcc);
     let key = route.key();
     session.send_route_update(OutboundRouteUpdate {
-        replay: None,
         exact_export_snapshot: Some(session.publish_export_profile()),
-        announce_source_exclusion: None,
-        otc_blocked: vec![],
-        announce: vec![].into(),
-        withdraw: vec![],
-        end_of_rib: vec![],
-        refresh_markers: vec![],
-        next_hop_override: vec![].into(),
-        flowspec_announce: vec![],
-        flowspec_withdraw: vec![],
-        evpn_announce: vec![],
-        evpn_withdraw: vec![],
         bgpls_announce: vec![route.clone()],
-        bgpls_withdraw: vec![],
-        vpn_announce: vec![],
-        labeled_announce: vec![],
-        rtc_announce: vec![],
-        vpn_withdraw: vec![],
-        labeled_withdraw: vec![],
-        rtc_withdraw: vec![],
-        request_refresh_all_negotiated: false,
-        shared_group_encode: None,
+        ..empty_outbound_update()
     });
     let Message::Update(msg) = read_single_bgp_message(&mut server).await else {
         panic!("expected BGP-LS MP_REACH UPDATE");
@@ -52,30 +32,23 @@ async fn send_route_update_emits_bgpls_reach_and_unreach() {
     assert_eq!(mp.safi, Safi::BgpLs);
     assert_eq!(mp.next_hop, route.next_hop);
     assert_eq!(mp.bgpls_announced, vec![route.nlri.clone()]);
+    let mut attributes = parsed.attributes.clone();
+    attributes.retain(|attr| !matches!(attr, PathAttribute::MpReachNlri(_)));
+    attributes.sort_by_key(PathAttribute::type_code);
+    assert_eq!(
+        attributes,
+        vec![
+            PathAttribute::Origin(Origin::Igp),
+            PathAttribute::AsPath(AsPath {
+                segments: vec![AsPathSegment::AsSequence(vec![65001, 65002])],
+            }),
+        ],
+        "BGP-LS eBGP announcement must retain ORIGIN and one prepended AS_PATH"
+    );
     session.send_route_update(OutboundRouteUpdate {
-        replay: None,
         exact_export_snapshot: Some(session.publish_export_profile()),
-        announce_source_exclusion: None,
-        otc_blocked: vec![],
-        announce: vec![].into(),
-        withdraw: vec![],
-        end_of_rib: vec![],
-        refresh_markers: vec![],
-        next_hop_override: vec![].into(),
-        flowspec_announce: vec![],
-        flowspec_withdraw: vec![],
-        evpn_announce: vec![],
-        evpn_withdraw: vec![],
-        bgpls_announce: vec![],
         bgpls_withdraw: vec![key],
-        vpn_announce: vec![],
-        labeled_announce: vec![],
-        rtc_announce: vec![],
-        vpn_withdraw: vec![],
-        labeled_withdraw: vec![],
-        rtc_withdraw: vec![],
-        request_refresh_all_negotiated: false,
-        shared_group_encode: None,
+        ..empty_outbound_update()
     });
     let Message::Update(msg) = read_single_bgp_message(&mut server).await else {
         panic!("expected BGP-LS MP_UNREACH UPDATE");
