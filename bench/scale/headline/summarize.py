@@ -65,11 +65,12 @@ MATRIX_LINES = [
     ("flap_reannounce_p50", r"^flap (\d+) reannounce_s: p50=([\d.]+)", "s", {"s3"}),
     ("flap_first_reannounce_p50", r"^flap (\d+) first_reann_s: p50=([\d.]+)", "s", {"s3"}),
     ("flap_post_round_rss", r"^flap (\d+) sessions_up \d+/\d+ rss_mib=(\d+)", "MiB", {"s3"}),
-    # Optional: older harnesses print no heap line, and a daemon without the
-    # gauge prints `absent`. When present, one per round like the rest.
-    ("flap_heap_allocated", r"^flap (\d+) heap allocated_mib=(\d+)", "MiB", set()),
-    ("flap_heap_resident", r"^flap (\d+) heap .*\bresident_mib=(\d+)", "MiB", set()),
 ]
+# Optional `flap N heap key=value ...` lines: older harnesses print none. When
+# present there is one per round like the flap metrics above, whatever their
+# values; a gauge the daemon does not export reads `absent` and emits no row.
+HEAP_LINE = re.compile(r"^flap (\d+) heap\b(.*)$", re.M)
+HEAP_FIELDS = [("flap_heap_allocated", "allocated_mib"), ("flap_heap_resident", "resident_mib")]
 
 
 class ExtractionError(Exception):
@@ -207,6 +208,21 @@ def matrix_rows(source, exclusions, campaign):
             raise ExtractionError(f"{leg.name}: reload completion and maxgap line counts differ")
         if scenario == "s2":
             rows += reload_rows(leg, phase, arm, run, cell / "daemon.log", counts["reload_completion_p50"], campaign)
+        heap = [(int(round_), rest) for round_, rest in HEAP_LINE.findall(log)]
+        if heap:
+            rounds = [round_ for round_, _ in heap]
+            if len(set(rounds)) != len(rounds):
+                raise ExtractionError(f"{leg.name}: duplicate flap round in 'heap' lines")
+            flap_rounds["heap"] = frozenset(rounds)
+        for round_, rest in heap:
+            fields = dict(token.partition("=")[::2] for token in rest.split())
+            for metric, key in HEAP_FIELDS:
+                value = fields.get(key)
+                if value == "absent":
+                    continue
+                if value is None or not re.fullmatch(r"[0-9]+", value):
+                    raise ExtractionError(f"{leg.name}: flap {round_} heap {key}={value!r} is neither an integer nor 'absent'")
+                rows.append([phase, arm, run, metric, round_, value, "MiB"])
         if scenario == "s3" and len(set(flap_rounds.values())) != 1:
             raise ExtractionError(f"{leg.name}: flap metric rounds differ")
         rss = rss_column(cell / "rss.csv")
