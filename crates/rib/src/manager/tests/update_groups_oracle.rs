@@ -1565,13 +1565,14 @@ async fn oracle_dirty_resync_converges_to_identical_state() {
     );
 }
 
-/// A failed forced refresh is retained for retry and marks the peer dirty.
+/// A forced refresh deferred by a full channel is retained for retry and
+/// marks the peer dirty.
 /// Genuine churn can arrive before that retry, so this deliberately exercises
 /// the allowed `force && dirty && !best_changed.is_empty()` state: dirty group
 /// assembly must include the pass tombstones while force still replays the
 /// current table.
 #[tokio::test]
-async fn oracle_failed_force_then_churn_converges_to_identical_state() {
+async fn oracle_deferred_force_then_churn_converges_to_identical_state() {
     tokio::time::pause();
     let cluster = Some(Ipv4Addr::new(192, 0, 2, 1));
     let scenario = async |o: &mut Oracle| {
@@ -1584,7 +1585,7 @@ async fn oracle_failed_force_then_churn_converges_to_identical_state() {
         // The standing p1 announce fills C's only queue slot.
         o.routes(A, vec![ibgp_route(pfx(1, 0), A, 100, vec![])], vec![])
             .await;
-        // Forced replay fails against the full channel, retaining force and
+        // Forced replay waits for channel capacity, retaining force and
         // marking C dirty for the timer retry.
         o.refresh_outbound(C).await;
         // Before retry, p1 is withdrawn and p2 becomes best. This is the

@@ -5843,15 +5843,14 @@ impl RibManager {
                     || (best_changed.is_empty() && all_affected.is_empty()),
                 "a grouped force-only resync cannot share a nonempty distribution pass"
             );
-            // A dirty resync builds the peer's whole table, then the send
-            // needs one free slot. With none free the send is certain to
-            // fail, so skip the build and keep only the missed-pass
-            // bookkeeping; no drop is counted because nothing was built.
-            // The resync timer retries while the peer stays dirty. Only this
-            // actor sends on the channel, so a free slot seen here is still
-            // free at the send. Force resyncs keep their one-shot attempt.
-            if is_dirty && !is_force && self.outbound_channel_full(peer) {
-                debug!(%peer, "outbound channel still full — deferring dirty resync");
+            // Dirty and forced resyncs build the peer's whole table, then
+            // need one free slot. A full channel makes that send certain to
+            // fail, even on the first forced pass. Keep missed-pass residue
+            // and the force flag for the retry; no drop is counted because
+            // nothing was built. Only this actor sends on the channel, so a
+            // free slot seen here is still free at the send.
+            if (is_dirty || is_force) && self.outbound_channel_full(peer) {
+                debug!(%peer, "outbound channel still full — deferring resync");
                 self.defer_unsent_outbound_pass(peer, member_of, &group_stage, &checkpoint);
                 continue;
             }

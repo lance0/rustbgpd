@@ -6358,20 +6358,189 @@ fn ungrouped_dirty_peer_with_full_channel_defers_resync_until_drained() {
     dirty_member_with_full_channel_defers_resync(true);
 }
 
-/// A force resync (ROUTE_REFRESH-style outbound refresh) is not gated: it
-/// still attempts the build against a full channel, and keeps retrying as
-/// a dirty force peer.
+/// A forced peer that is already dirty still records later missed passes,
+/// but does not rebuild its whole table while the receiver is full. Once
+/// the receiver drains, force re-announces an unchanged advertised prefix.
+fn force_resync_with_full_channel_defers_until_drained(ungrouped: bool) {
+    let (mut manager, stuck, _live, mut stuck_rx, mut live_rx) = full_channel_manager(ungrouped);
+    manager.adj_rib_out_commit_stats = AdjRibOutCommitStats::default();
+    let drops = counter_metric_value(&manager.metrics, "bgp_outbound_route_drops_total", &[]);
+    let (ack_tx, _response) = oneshot::channel();
+    manager.handle_refresh_peer_outbound(stuck, ack_tx);
+    assert_eq!(manager.adj_rib_out_commit_stats.resync_builds, 0);
+    assert!(manager.force_outbound_peers.contains(&stuck));
+    assert!(manager.dirty_peers.contains(&stuck));
+    for third in [20, 21, 22] {
+        full_channel_pass(&mut manager, &[third], &[]);
+        while live_rx.try_recv().is_ok() {}
+        manager.resync_dirty_peers_bounded();
+        assert_eq!(
+            manager.adj_rib_out_commit_stats.resync_builds, 0,
+            "ingest and timer passes must not rebuild while full"
+        );
+        assert!(manager.force_outbound_peers.contains(&stuck));
+        assert!(manager.dirty_peers.contains(&stuck));
+        assert!(manager.resync_tick_pending());
+    }
+    assert_metric(
+        counter_metric_value(&manager.metrics, "bgp_outbound_route_drops_total", &[]),
+        drops,
+        "deferred forced passes do not count failed sends",
+    );
+
+    for _ in 0..FULL_CHANNEL_CAPACITY {
+        stuck_rx.try_recv().expect("queued envelope before the jam");
+    }
+    assert!(stuck_rx.try_recv().is_err());
+    manager.resync_dirty_peers_bounded();
+    assert_eq!(manager.adj_rib_out_commit_stats.resync_builds, 1);
+    let replay = stuck_rx.try_recv().expect("one forced replay after drain");
+    assert!(stuck_rx.try_recv().is_err(), "exactly one replay envelope");
+    assert!(
+        replay.withdraw.contains(&(full_channel_prefix(0), 0)),
+        "missed withdrawal is retained"
+    );
+    assert!(
+        replay
+            .announce
+            .iter()
+            .any(|route| route.prefix == full_channel_prefix(2)),
+        "force bypasses AdjRibOut equality for an unchanged route"
+    );
+    assert!(
+        replay
+            .announce
+            .iter()
+            .any(|route| route.prefix == full_channel_prefix(22)),
+        "churn while full is included"
+    );
+    assert!(!manager.dirty_peers.contains(&stuck));
+    assert!(!manager.force_outbound_peers.contains(&stuck));
+    assert!(!manager.resync_tick_pending());
+    manager.resync_dirty_peers_bounded();
+    assert_eq!(manager.adj_rib_out_commit_stats.resync_builds, 1);
+    assert!(stuck_rx.try_recv().is_err(), "settled force stays quiet");
+}
+
 #[test]
-fn force_resync_with_full_channel_still_attempts() {
-    let (mut manager, stuck, _live, _stuck_rx, _live_rx) = full_channel_manager(false);
+fn grouped_force_resync_with_full_channel_defers_until_drained() {
+    force_resync_with_full_channel_defers_until_drained(false);
+}
+
+#[test]
+fn ungrouped_force_resync_with_full_channel_defers_until_drained() {
+    force_resync_with_full_channel_defers_until_drained(true);
+}
+
+#[test]
+fn clean_force_resync_waits_for_capacity_before_first_build() {
+    let (mut manager, peers, mut receivers) = direct_clean_transition_manager(1, 1, None);
+    let peer = peers[0];
+    let mut receiver = receivers.pop().unwrap();
+    let permits: Vec<_> = (0..8)
+        .map(|_| {
+            manager.outbound_peers[&peer]
+                .clone()
+                .try_reserve_owned()
+                .unwrap()
+        })
+        .collect();
+    assert!(!manager.dirty_peers.contains(&peer));
+    assert!(manager.outbound_channel_full(peer));
+    manager.adj_rib_out_commit_stats = AdjRibOutCommitStats::default();
+    let (ack_tx, _response) = oneshot::channel();
+    manager.handle_refresh_peer_outbound(peer, ack_tx);
+    assert_eq!(manager.adj_rib_out_commit_stats.resync_builds, 0);
+    assert!(manager.force_outbound_peers.contains(&peer));
+    assert!(manager.dirty_peers.contains(&peer));
+    drop(permits);
+    manager.resync_dirty_peers_bounded();
+    assert_eq!(manager.adj_rib_out_commit_stats.resync_builds, 1);
+    let replay = receiver
+        .try_recv()
+        .expect("force replays after capacity returns");
+    assert_eq!(replay.announce.len(), 1);
+    assert!(receiver.try_recv().is_err());
+    assert!(!manager.force_outbound_peers.contains(&peer));
+    assert!(!manager.dirty_peers.contains(&peer));
+}
+
+#[test]
+fn empty_forced_view_clears_after_capacity_returns() {
+    let (mut manager, peers, mut receivers) = direct_clean_transition_manager(1, 0, None);
+    let peer = peers[0];
+    let mut receiver = receivers.pop().unwrap();
+    let permits: Vec<_> = (0..8)
+        .map(|_| {
+            manager.outbound_peers[&peer]
+                .clone()
+                .try_reserve_owned()
+                .unwrap()
+        })
+        .collect();
     manager.adj_rib_out_commit_stats = AdjRibOutCommitStats::default();
     let (reply, _response) = oneshot::channel();
-    manager.handle_refresh_peer_outbound(stuck, reply);
-    assert_eq!(manager.adj_rib_out_commit_stats.resync_builds, 1);
-    assert!(manager.force_outbound_peers.contains(&stuck));
+    manager.handle_refresh_peer_outbound(peer, reply);
+    assert_eq!(manager.adj_rib_out_commit_stats.resync_builds, 0);
+    assert!(manager.force_outbound_peers.contains(&peer));
+    assert!(manager.dirty_peers.contains(&peer));
+    drop(permits);
+
     manager.resync_dirty_peers_bounded();
-    assert_eq!(manager.adj_rib_out_commit_stats.resync_builds, 2);
-    assert!(manager.dirty_peers.contains(&stuck));
+    assert_eq!(manager.adj_rib_out_commit_stats.resync_builds, 1);
+    assert!(receiver.try_recv().is_err(), "no empty envelope is emitted");
+    assert!(!manager.force_outbound_peers.contains(&peer));
+    assert!(!manager.dirty_peers.contains(&peer));
+    manager.resync_dirty_peers_bounded();
+    assert_eq!(manager.adj_rib_out_commit_stats.resync_builds, 1);
+}
+
+#[test]
+fn forced_peer_outside_dirty_tick_slice_waits_for_capacity() {
+    let peer_count = super::super::RESYNC_PEERS_PER_TICK + 1;
+    let (mut manager, peers, mut receivers) = direct_clean_transition_manager(peer_count, 1, None);
+    let withheld = peers[peer_count - 1];
+    let permits: Vec<_> = (0..8)
+        .map(|_| {
+            manager.outbound_peers[&withheld]
+                .clone()
+                .try_reserve_owned()
+                .unwrap()
+        })
+        .collect();
+    assert!(manager.outbound_channel_full(withheld));
+    for &peer in &peers {
+        manager.force_outbound_peers.insert(peer);
+        manager.mark_outbound_dirty(peer);
+    }
+    manager.adj_rib_out_commit_stats = AdjRibOutCommitStats::default();
+
+    manager.resync_dirty_peers_bounded();
+    assert_eq!(
+        manager.adj_rib_out_commit_stats.resync_builds,
+        super::super::RESYNC_PEERS_PER_TICK,
+        "the withheld forced peer must not rebuild against its full channel"
+    );
+    assert!(manager.force_outbound_peers.contains(&withheld));
+    assert!(manager.dirty_peers.contains(&withheld));
+    assert!(receivers[peer_count - 1].try_recv().is_err());
+    for receiver in &mut receivers[..peer_count - 1] {
+        assert_eq!(receiver.try_recv().unwrap().announce.len(), 1);
+        assert!(receiver.try_recv().is_err());
+    }
+
+    drop(permits);
+    manager.resync_dirty_peers_bounded();
+    assert_eq!(manager.adj_rib_out_commit_stats.resync_builds, peer_count);
+    assert_eq!(
+        receivers[peer_count - 1].try_recv().unwrap().announce.len(),
+        1
+    );
+    assert!(receivers[peer_count - 1].try_recv().is_err());
+    assert!(!manager.force_outbound_peers.contains(&withheld));
+    assert!(!manager.dirty_peers.contains(&withheld));
+    manager.resync_dirty_peers_bounded();
+    assert_eq!(manager.adj_rib_out_commit_stats.resync_builds, peer_count);
 }
 
 fn family_distribution_cases() -> [(Afi, Safi, bool); 7] {
