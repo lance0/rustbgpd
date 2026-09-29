@@ -307,6 +307,19 @@ import sys
 
 root, tmp = map(Path, sys.argv[1:])
 source = (root / "bench/scale/matrix/run-matrix.sh").read_text()
+# Execute the actual argument assembly: only OpenBGPD flapstorm cells may
+# waive EoR, and ordinary reload invocations must not acquire the flag.
+args = source.split('    local hargs=(', 1)[1].split('    # Harness in the background', 1)[0]
+for cell in ("rustbgpd", "bird", "openbgpd"):
+    for flap in ("", "1"):
+        script = 'assemble() {\nlocal hargs=(' + args + '\nprintf "%s\\n" "${hargs[@]}"\n}\nassemble'
+        result = subprocess.run(
+            ["bash", "-c", script], capture_output=True, text=True, check=True,
+            env={**os.environ, "cell": cell, "FLAPSTORM": flap, "FLAP_ROUNDS": ""},
+        )
+        assert ("--rejoin-coverage-only" in result.stdout.splitlines()) == (
+            cell == "openbgpd" and flap == "1"
+        ), (cell, flap, result.stdout)
 setup = source.split('    rm -rf "$run"\n', 1)[1].split('\n    local daemon_pid', 1)[0]
 for cell, mode in (("rustbgpd", 0o700), ("bird", 0o775)):
     run, artifacts = tmp / (cell + "-run"), tmp / (cell + "-artifacts")

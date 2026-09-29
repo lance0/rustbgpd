@@ -127,13 +127,19 @@ reloadstall <n_peers> <total_prefixes> <daemon_port> <daemon_pid> \
   and currently holds every expected base prefix (the full table minus its
   own slice and any overlap extras); withdrawals clear coverage until a fresh
   announcement. `eor_before_full_table=true` identifies an EoR that preceded
-  the last required route. Missing EoR or incomplete coverage fails the run;
-  neither is reported as zero. Each round prints
+  the last required route. Missing EoR or incomplete coverage fails the run
+  by default. The matrix's OpenBGPD cells use `--rejoin-coverage-only` because
+  OpenBGPD sends no EoR to these non-GR stubs: their rejoin time ends at exact
+  coverage, and absent EoR prints `eor_before_full_table=absent eor=absent`. An observed EoR prints `eor=present`; no EoR time
+  is fabricated. rustbgpd and BIRD cells retain the EoR requirement. Each round prints
   rejoin p50/max alongside the existing survivor percentiles and unchanged
   `flapstorm_csv` records. The rounds still reconnect and re-announce
   without GR retention, so rejoin time can include other flapped peers'
   return and re-announcement. It cannot alone attribute delay to serialized
   initial-table joins.
+- `--rejoin-coverage-only` — complete rejoin on exact current table coverage
+  without requiring EoR. Valid only with `--flapstorm`; incomplete coverage
+  still fails the run.
 - `--flap-rounds N` — flapstorm round count, `1..=100` (default 3, the
   historical receipt shape). Valid only with `--flapstorm`.
 - `RELOADSTALL_HEAP_METRICS_ADDR` — optional, valid only with `--flapstorm`;
