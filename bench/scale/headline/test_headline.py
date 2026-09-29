@@ -297,13 +297,13 @@ class ExtractorFailsClosed(unittest.TestCase):
         self.assertEqual(cg, {"daemon_cg_peak": "812345", "settled_cg_current_last_sample": 1000 + len(lines) - 2})
         (cell / "cgroup-memory").write_text(
             "cg_peak: 812345 kB\ncg_current: 700000 kB\ncg_swap_max: 0\n"
-            "cg_settled_anon: 400000 kB\ncg_settled_file: 200000 kB\n"
-            "cg_settled_file_mapped: 100000 kB\ncg_teardown_anon: 390000 kB\n"
+            "cg_last_sample_anon: 400000 kB\ncg_last_sample_file: 200000 kB\n"
+            "cg_last_sample_file_mapped: 100000 kB\ncg_teardown_anon: 390000 kB\n"
             "cg_teardown_file: 190000 kB\ncg_teardown_file_mapped: 90000 kB\n"
         )
         self.assertIn("daemon_cg_peak", {r[3] for r in summarize.extract(self.tmp)[0]})
         (cell / "cgroup-memory").write_text((cell / "cgroup-memory").read_text().replace("cg_teardown_file: 190000 kB\n", ""))
-        with self.assertRaisesRegex(summarize.ExtractionError, "cgroup-memory"):
+        with self.assertRaisesRegex(summarize.ExtractionError, r"all cg_last_sample_\* and cg_teardown_\* fields"):
             summarize.extract(self.tmp)
         (cell / "cgroup-memory").write_text("cg_scope: unavailable\n")
         self.assertNotIn("daemon_cg_peak", {r[3] for r in summarize.extract(self.tmp)[0]})

@@ -243,6 +243,11 @@ file. A leg without a swap-fenced user scope leaves all cgroup columns blank.
 Older CSV receipts with just the peak/current pair remain readable. The raw
 `--cgroup` readout for a new leg requires all six stat fields.
 
+The native matrix uses its last complete RSS sample for the stat split in
+`cgroup-memory` (`cg_last_sample_*`), then reads `cg_teardown_*` before stopping
+the daemon. The rrharness comparison instead samples `cg_settled_*` when its
+settled RSS marker appears.
+
 Use a dedicated directory and stable names:
 
 - eight `*.folded` CPU profiles and eight `*.cpu.tsv` classified tables. The

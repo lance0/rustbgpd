@@ -105,8 +105,8 @@ def read_text(path):
 # run-matrix.sh's record_scope_memory output, byte for byte.
 CGROUP_MEMORY = re.compile(
     r"cg_peak: (\d+) kB\ncg_current: \d+ kB\ncg_swap_max: 0\n"
-    r"(?:cg_settled_anon: \d+ kB\ncg_settled_file: \d+ kB\n"
-    r"cg_settled_file_mapped: \d+ kB\ncg_teardown_anon: \d+ kB\n"
+    r"(?:cg_last_sample_anon: \d+ kB\ncg_last_sample_file: \d+ kB\n"
+    r"cg_last_sample_file_mapped: \d+ kB\ncg_teardown_anon: \d+ kB\n"
     r"cg_teardown_file: \d+ kB\ncg_teardown_file_mapped: \d+ kB\n)?"
 )
 
@@ -259,7 +259,7 @@ def matrix_rows(source, exclusions, campaign):
                 rows.append([phase, arm, run, "daemon_cg_peak", "", readout.group(1), "KiB"])
             elif text != "cg_scope: unavailable\n":
                 raise ExtractionError(
-                    f"{leg.name}: cgroup-memory is neither 'cg_peak/cg_current/cg_swap_max: 0' nor 'cg_scope: unavailable'"
+                    f"{leg.name}: cgroup-memory must be 'cg_scope: unavailable', the legacy peak/current/swap-fence readout, or the extended readout with all cg_last_sample_* and cg_teardown_* fields"
                 )
         cg_current = cg_current_column(cell / "rss.csv")
         if cg_current:

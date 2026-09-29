@@ -5,8 +5,8 @@
 #
 # Usage: rss-sampler.sh <root_pid> <out_csv> [interval_s=5] [cgroup_dir]
 #
-# With a cgroup_dir, each row also carries that cgroup's memory.current in a
-# trailing cg_current_kib column (blank when the read fails at teardown).
+# With a cgroup_dir, each row also carries memory.current and memory.stat
+# anon/file/file_mapped charges (blank when a read races teardown).
 #
 # Prefers /proc/<pid>/smaps_rollup (precise Rss). That file is 0400, so for
 # processes owned by another user (daemons inside containers run as root in
@@ -24,16 +24,27 @@ cgroup=${4:-}
 tree() {
     echo "$1"
     local k
+    # shellcheck disable=SC2013 # /proc children is a whitespace-delimited PID list.
     for k in $(cat /proc/"$1"/task/*/children 2>/dev/null); do
         tree "$k"
     done
 }
 
 if [ -n "$cgroup" ]; then
-    echo "epoch_s,total_rss_kib,pids,cg_current_kib" >"$out"
+    echo "epoch_s,total_rss_kib,pids,cg_current_kib,cg_anon_kib,cg_file_kib,cg_file_mapped_kib" >"$out"
 else
     echo "epoch_s,total_rss_kib,pids" >"$out"
 fi
+stat_sample() {
+    awk '$1 == "anon" || $1 == "file" || $1 == "file_mapped" {
+        if (NF != 2 || $2 !~ /^[0-9]+$/ || seen[$1]++) exit 1
+        value[$1] = $2
+        count++
+    } END {
+        if (count != 3) exit 1
+        printf "%d,%d,%d", value["anon"] / 1024, value["file"] / 1024, value["file_mapped"] / 1024
+    }' "$cgroup/memory.stat"
+}
 # ponytail: liveness via /proc existence, not `kill -0` — kill -0 reports
 # EPERM (failure) for other users' live processes, e.g. container daemons.
 while [ -d "/proc/$root" ]; do
@@ -58,7 +69,11 @@ while [ -d "/proc/$root" ]; do
     fi
     if [ -n "$cgroup" ]; then
         cg_bytes=$(cat "$cgroup/memory.current" 2>/dev/null) || cg_bytes=
-        echo "$(date +%s),$total,$n,${cg_bytes:+$((cg_bytes / 1024))}" >>"$out"
+        cg_stat=
+        if [ -n "$cg_bytes" ]; then
+            cg_stat=$(stat_sample) || exit 1
+        fi
+        echo "$(date +%s),$total,$n,${cg_bytes:+$((cg_bytes / 1024))},${cg_stat:-,,}" >>"$out"
     else
         echo "$(date +%s),$total,$n" >>"$out"
     fi
