@@ -424,6 +424,24 @@ candidate directory, and another `activate`: the daemon hot-reloads
 members keep their sessions), `current` moves to
 the new generation, and the previous generation stays on disk. Re-rendering
 the same upstream state produces byte-identical files and a no-op.
+Before activating a candidate, an operator can inspect one member's IRR
+filter impact with `rbgp policy test`. Use that member's rendered policy,
+dataset names, and peer address; for the `client-1` candidate shown above:
+
+```bash
+CANDIDATE=/var/lib/rustbgpd/ixp-manager/candidate
+rbgp -s unix:///var/lib/rustbgpd/b2-rs1-lan1-ipv4/grpc.sock \
+    policy test "$CANDIDATE/policy/client-1.rpol" \
+    --policy client-1 --direction import --neighbor 10.1.0.10 \
+    --dataset client-1-origins="$CANDIDATE/datasets/client-1-origins.list" \
+    --dataset client-1-prefixes="$CANDIDATE/datasets/client-1-prefixes.list" \
+    --show-rejected 20
+```
+
+The rejected count and bounded samples cover candidate rejections among
+retained post-policy routes for that member. This read-only check does not
+activate the candidate. See the [dry-run scope](../reference/rpol-language.md#live-rib-policy-dry-runs)
+for what retained routes and attributes represent.
 
 Exit codes, and exactly what each one guarantees:
 
