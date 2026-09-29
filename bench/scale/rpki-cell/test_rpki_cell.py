@@ -67,16 +67,20 @@ class VrpFixture(unittest.TestCase):
         self.assert_owned(10, 2000, 2500)
 
     def test_non_divisible_shape_follows_reloadstall_slices(self):
-        roas = self.assert_owned(7, 50, 80)
-        # 50 = 7 x 7 + 1: member 0 owns indexes 0..=7, member 1 starts at 8.
-        self.assertEqual(roas[7]["asn"], "AS64512")
-        self.assertEqual(roas[8]["asn"], "AS64513")
-        self.assertEqual(roas[49]["asn"], "AS64518")
+        roas = self.assert_owned(9, 50, 80)
+        # 50 = 9 x 5 + 5: members 0-4 own six indexes, members 5-8 own five.
+        self.assertEqual(roas[5]["asn"], "AS64512")
+        self.assertEqual(roas[6]["asn"], "AS64513")
+        self.assertEqual(roas[29]["asn"], "AS64516")
+        self.assertEqual(roas[30]["asn"], "AS64517")
+        self.assertEqual(roas[49]["asn"], "AS64520")
 
     def test_check_is_arithmetic_only(self):
         rpki_cell.check_shape(700, 400400, 500000)
         with self.assertRaises(ValueError):
-            rpki_cell.check_shape(7, 50, 49)
+            rpki_cell.check_shape(9, 50, 49)
+        with self.assertRaises(ValueError):
+            rpki_cell.check_shape(7, 50, 80)
 
     def test_default_shape_crosses_the_second_octet_boundary(self):
         roas = rpki_cell.roas(700, 400400, 500000)
@@ -85,7 +89,7 @@ class VrpFixture(unittest.TestCase):
 
     def test_too_few_vrps_is_refused(self):
         with self.assertRaises(ValueError):
-            rpki_cell.roas(7, 50, 49)
+            rpki_cell.roas(9, 50, 49)
 
     def test_output_is_deterministic(self):
         with tempfile.TemporaryDirectory() as tmp:

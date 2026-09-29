@@ -37,6 +37,7 @@ import urllib.request
 from pathlib import Path
 
 BASE_ASN = 64512
+MIN_PEERS = 8  # reloadstall CHURNERS: the harness refuses fewer stubs
 PAD_ASN = 65000
 CHUNK_SUM = 'bgp_rib_actor_work_duration_seconds_sum{work_unit="route_chunk"}'
 CHUNK_COUNT = 'bgp_rib_actor_work_duration_seconds_count{work_unit="route_chunk"}'
@@ -55,7 +56,9 @@ def member_slice(total: int, peers: int, member: int) -> tuple[int, int]:
 
 def check_shape(n_peers: int, total: int, vrps: int) -> None:
     """Arithmetic-only shape check; raises ValueError."""
-    if n_peers < 1 or total < n_peers:
+    if n_peers < MIN_PEERS:
+        raise ValueError(f"N_PEERS={n_peers} is below the reloadstall minimum of {MIN_PEERS}")
+    if total < n_peers:
         raise ValueError("need at least one prefix per peer")
     if vrps < total:
         raise ValueError(f"VRPS={vrps} is below the {total} announced prefixes; every route must validate")
