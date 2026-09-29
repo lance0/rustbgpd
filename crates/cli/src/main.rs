@@ -3248,26 +3248,54 @@ fn patch_bash_file_positionals(
             .map(|positional| {
                 let file_cword = positional.path.len() + positional.index;
                 let comparison = if positional.repeatable { "-ge" } else { "-eq" };
-                format!("${{COMP_CWORD}} {comparison} {file_cword}")
+                format!("${{rbgp_positional}} {comparison} {file_cword}")
             })
             .collect::<Vec<_>>()
             .join(" || ");
-        let guards = positional
+        let value_options = positional
             .value_options
             .iter()
-            .map(|option| format!(r#""${{prev}}" != "{option}""#))
+            .map(|option| format!(r#""{option}""#))
             .collect::<Vec<_>>()
-            .join(" && ");
-        let positional_condition = if guards.is_empty() {
-            positions
-        } else {
-            format!("( {positions} ) && {guards}")
-        };
+            .join("|");
+        let short_value_options = positional
+            .value_options
+            .iter()
+            .filter_map(|option| option.strip_prefix('-').filter(|short| short.len() == 1))
+            .map(|short| format!(r#""{short}""#))
+            .collect::<Vec<_>>()
+            .join("|");
+        // Count command and positional words, excluding options and their
+        // values, so options anywhere in argv cannot shift a file's index.
         let patched_fast_path = format!(
-            r#"            if [[ ${{cur}} == -* ]] ; then
+            r#"            local rbgp_positional=1 rbgp_value=0 rbgp_options=1 rbgp_word rbgp_short
+            for rbgp_word in "${{COMP_WORDS[@]:1:COMP_CWORD-1}}"; do
+                if [[ ${{rbgp_value}} == 1 ]]; then rbgp_value=0; continue; fi
+                if [[ ${{rbgp_options}} == 1 ]]; then
+                    case "${{rbgp_word}}" in
+                        --) rbgp_options=0; continue ;;
+                        --*=*) continue ;;
+                        {value_options}) rbgp_value=1; continue ;;
+                        --*) continue ;;
+                        -?*)
+                            rbgp_short="${{rbgp_word:1}}"
+                            while [[ -n ${{rbgp_short}} ]]; do
+                                case "${{rbgp_short:0:1}}" in
+                                    {short_value_options})
+                                        [[ ${{#rbgp_short}} -eq 1 ]] && rbgp_value=1
+                                        break ;;
+                                esac
+                                rbgp_short="${{rbgp_short:1}}"
+                            done
+                            continue ;;
+                    esac
+                fi
+                rbgp_positional=$((rbgp_positional + 1))
+            done
+            if [[ ${{cur}} == -* && ${{rbgp_options}} == 1 && ${{rbgp_value}} == 0 ]] ; then
                 COMPREPLY=( $(compgen -W "${{opts}}" -- "${{cur}}") )
                 return 0
-            elif [[ {positional_condition} ]] ; then
+            elif [[ ${{rbgp_value}} == 0 && ( {positions} ) ]] ; then
                 local rbgp_old_ifs rbgp_ifs_was_set
                 [ -n "${{IFS+x}}" ] && {{ rbgp_old_ifs="$IFS"; rbgp_ifs_was_set=1; }}
                 IFS=$'\n'
@@ -6194,6 +6222,152 @@ printf '%s\n' "${COMPREPLY[@]}"
         let (filenames, replies) = bash_replies(&generated_path, files.path(), &words, false);
         assert!(!filenames);
         assert!(replies.iter().any(|reply| reply == "lan938-prefix"));
+    }
+
+    #[test]
+    fn bash_snapshot_positionals_ignore_options_and_their_values() {
+        let scripts = tempfile::tempdir().unwrap();
+        let files = tempfile::tempdir().unwrap();
+        for name in [
+            "target plain.ndjson",
+            "target-prefix.ndjson",
+            "-target plain.ndjson",
+        ] {
+            std::fs::write(files.path().join(name), []).unwrap();
+        }
+        let mut generated = Vec::new();
+        generate_completions(Shell::Bash, BINARY_NAME, &mut generated).unwrap();
+        let script = scripts.path().join("generated.bash");
+        std::fs::write(&script, generated).unwrap();
+        let cases: &[&[&str]] = &[
+            &[
+                "rbgp",
+                "diff",
+                "snapshots",
+                "--json",
+                "incumbent.ndjson",
+                "target",
+            ],
+            &[
+                "rbgp",
+                "diff",
+                "snapshots",
+                "incumbent path.ndjson",
+                "--json",
+                "target",
+            ],
+            &[
+                "rbgp",
+                "diff",
+                "snapshots",
+                "--detail",
+                "2",
+                "incumbent.ndjson",
+                "target",
+            ],
+            &[
+                "rbgp",
+                "diff",
+                "snapshots",
+                "incumbent.ndjson",
+                "--detail",
+                "2",
+                "target",
+            ],
+            &[
+                "rbgp",
+                "diff",
+                "snapshots",
+                "--detail=2",
+                "incumbent.ndjson",
+                "target",
+            ],
+            &[
+                "rbgp",
+                "--addr",
+                "unix:///unused.sock",
+                "diff",
+                "snapshots",
+                "incumbent.ndjson",
+                "target",
+            ],
+            &[
+                "rbgp",
+                "diff",
+                "snapshots",
+                "-js",
+                "unix:///unused.sock",
+                "incumbent.ndjson",
+                "target",
+            ],
+            &[
+                "rbgp",
+                "diff",
+                "snapshots",
+                "-sunix:///unused.sock",
+                "incumbent.ndjson",
+                "target",
+            ],
+            &[
+                "rbgp",
+                "diff",
+                "snapshots",
+                "--",
+                "-incumbent.ndjson",
+                "target",
+            ],
+            &["rbgp", "diff", "snapshots", "--json", "target"],
+        ];
+        for words in cases {
+            let (filenames, replies) = bash_replies(&script, files.path(), words, false);
+            assert!(
+                filenames && replies.iter().any(|reply| reply == "target plain.ndjson"),
+                "{words:?}: filenames={filenames}, replies={replies:?}"
+            );
+        }
+        let (filenames, replies) = bash_replies(
+            &script,
+            files.path(),
+            &[
+                "rbgp",
+                "diff",
+                "snapshots",
+                "--",
+                "incumbent.ndjson",
+                "-target",
+            ],
+            true,
+        );
+        assert!(filenames && replies.iter().any(|reply| reply == "-target plain.ndjson"));
+        for words in [
+            &[
+                "rbgp",
+                "diff",
+                "snapshots",
+                "incumbent.ndjson",
+                "--detail",
+                "target",
+            ][..],
+            &[
+                "rbgp",
+                "diff",
+                "snapshots",
+                "--json",
+                "--token-file",
+                "target",
+            ],
+            &[
+                "rbgp",
+                "diff",
+                "snapshots",
+                "incumbent.ndjson",
+                "rustbgpd.ndjson",
+                "target",
+            ],
+        ] {
+            let (filenames, _) = bash_replies(&script, files.path(), words, false);
+            assert!(!filenames, "positional completion claimed {words:?}");
+        }
     }
 
     #[test]

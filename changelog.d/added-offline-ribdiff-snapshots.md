@@ -6,3 +6,5 @@
   refuses mismatched generations or peer ASNs, and bounds both inputs.
   The [RR comparison prerequisites](../docs/cookbook/route-server-migration.md#route-reflector-snapshot-comparison)
   document capture requirements; incumbent RR qualification remains pending.
+- Bash file-path completion accounts for flags and option values before or
+  between positional paths, preserving filenames that contain spaces.
