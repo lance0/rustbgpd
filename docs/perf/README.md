@@ -140,7 +140,7 @@ bundle, pass an output directory too, as in
 `just bench-headline-summary docs/perf/artifacts/<bundle> --out <dir>`. The
 receipts before 2026-09-28 ran from hand-built drivers.
 
-RPKI and ASPA performance changes have a daemon-level A/B cell:
+RPKI origin-validation (VRP) performance changes have a daemon-level A/B cell:
 `DAEMON_CPUS=<list> RTR_CPUS=<list> just bench-rpki-cell <out-dir> <base> <head>`
 runs the reloadstall 700-member initial convergence with a static
 500,000-entry VRP table served by a digest-pinned StayRTR container, three
