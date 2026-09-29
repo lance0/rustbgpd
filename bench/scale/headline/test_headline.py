@@ -181,31 +181,44 @@ class ExtractorFailsClosed(unittest.TestCase):
         log = cell / "reloadstall.log"
         lines = [line for line in log.read_text().splitlines() if not line.startswith("flap 3 first_reann_s:")]
         log.write_text("\n".join(lines) + "\n")
-        with self.assertRaisesRegex(summarize.ExtractionError, "flap metric line counts"):
+        with self.assertRaisesRegex(summarize.ExtractionError, "flap metric rounds differ"):
             summarize.extract(self.tmp)
 
     def heap_leg(self, rounds):
+        """Insert heap lines numbered ROUNDS, one after each round's RSS line in order."""
         cell = matrix_leg(self.tmp, "matrix-a-r1-s3", "s3")
         log = cell / "reloadstall.log"
-        lines = []
+        lines, pending = [], list(rounds)
         for line in log.read_text().splitlines():
             lines.append(line)
-            round_ = line.split()[1] if line.startswith("flap ") and " sessions_up " in line else None
-            if round_ in rounds:
-                lines.append(f"flap {round_} heap allocated_mib={300 + int(round_)} active_mib=320 "
-                             f"resident_mib={350 + int(round_)} mapped_mib=400")
+            if line.startswith("flap ") and " sessions_up " in line and pending:
+                round_ = pending.pop(0)
+                lines.append(f"flap {round_} heap allocated_mib={300 + round_} active_mib=320 "
+                             f"resident_mib={350 + round_} mapped_mib=400")
+        assert not pending
         log.write_text("\n".join(lines) + "\n")
 
     def test_heap_lines_extract_per_round(self):
-        self.heap_leg({"1", "2", "3"})
+        self.heap_leg([1, 2, 3])
         rows, _, _ = summarize.extract(self.tmp)
         heap = sorted((r[3], r[4], r[5]) for r in rows if r[3].startswith("flap_heap_"))
         self.assertEqual(heap, [("flap_heap_allocated", i, str(300 + i)) for i in (1, 2, 3)]
                          + [("flap_heap_resident", i, str(350 + i)) for i in (1, 2, 3)])
 
     def test_heap_line_missing_a_round_fails(self):
-        self.heap_leg({"1", "3"})
-        with self.assertRaisesRegex(summarize.ExtractionError, "flap metric line counts"):
+        self.heap_leg([1, 3])
+        with self.assertRaisesRegex(summarize.ExtractionError, "flap metric rounds differ"):
+            summarize.extract(self.tmp)
+
+    def test_heap_line_duplicate_round_fails(self):
+        # As many heap lines as rounds, but round 1 twice and round 2 never.
+        self.heap_leg([1, 1, 3])
+        with self.assertRaisesRegex(summarize.ExtractionError, "duplicate flap round in 'flap_heap_allocated'"):
+            summarize.extract(self.tmp)
+
+    def test_heap_line_for_an_unknown_round_fails(self):
+        self.heap_leg([1, 2, 4])
+        with self.assertRaisesRegex(summarize.ExtractionError, "flap metric rounds differ"):
             summarize.extract(self.tmp)
 
     def test_unfinished_legs_are_not_counted(self):

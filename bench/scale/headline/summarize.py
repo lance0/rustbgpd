@@ -54,20 +54,21 @@ MATRIX = re.compile(r"^matrix-(.+)-r(\d+)-(s\d)$")
 IRR = re.compile(r"^irr-ov([\d.]+)-(.+)-r(\d+)$")
 RR = re.compile(r"^rr1000-(.+)-c(\d+)$")
 
-# (metric, labelled-line pattern, unit, scenarios where a pass must carry it)
+# (metric, labelled-line pattern, unit, scenarios where a pass must carry it).
+# flap_* patterns capture the round number first; their rows are keyed by it.
 MATRIX_LINES = [
     ("established", r"^established \d+ at ([\d.]+)s", "s", {"s2", "s3"}),
     ("cold_convergence", r"^converged \(>= \d+/observer\) at ([\d.]+)s", "s", {"s2", "s3"}),
     ("reload_completion_p50", r"^reload \d+ completion_s: p50=([\d.]+)", "s", {"s2"}),
     ("reload_changed_maxgap_p50", r"^reload \d+ maxgap_ms: p50=([\d.]+)", "ms", {"s2"}),
-    ("flap_withdraw_p50", r"^flap \d+ withdraw_s: p50=([\d.]+)", "s", {"s3"}),
-    ("flap_reannounce_p50", r"^flap \d+ reannounce_s: p50=([\d.]+)", "s", {"s3"}),
-    ("flap_first_reannounce_p50", r"^flap \d+ first_reann_s: p50=([\d.]+)", "s", {"s3"}),
-    ("flap_post_round_rss", r"^flap \d+ sessions_up \d+/\d+ rss_mib=(\d+)", "MiB", {"s3"}),
+    ("flap_withdraw_p50", r"^flap (\d+) withdraw_s: p50=([\d.]+)", "s", {"s3"}),
+    ("flap_reannounce_p50", r"^flap (\d+) reannounce_s: p50=([\d.]+)", "s", {"s3"}),
+    ("flap_first_reannounce_p50", r"^flap (\d+) first_reann_s: p50=([\d.]+)", "s", {"s3"}),
+    ("flap_post_round_rss", r"^flap (\d+) sessions_up \d+/\d+ rss_mib=(\d+)", "MiB", {"s3"}),
     # Optional: older harnesses print no heap line, and a daemon without the
     # gauge prints `absent`. When present, one per round like the rest.
-    ("flap_heap_allocated", r"^flap \d+ heap allocated_mib=(\d+)", "MiB", set()),
-    ("flap_heap_resident", r"^flap \d+ heap .*\bresident_mib=(\d+)", "MiB", set()),
+    ("flap_heap_allocated", r"^flap (\d+) heap allocated_mib=(\d+)", "MiB", set()),
+    ("flap_heap_resident", r"^flap (\d+) heap .*\bresident_mib=(\d+)", "MiB", set()),
 ]
 
 
@@ -185,22 +186,29 @@ def matrix_rows(source, exclusions, campaign):
             continue
         log = read_text(cell / "reloadstall.log")
         phase = f"matrix-{scenario}"
-        counts = {}
+        counts, flap_rounds = {}, {}
         for metric, pattern, unit, required in MATRIX_LINES:
             values = re.findall(pattern, log, re.M)
             if scenario in required and not values:
                 raise ExtractionError(f"{leg.name}: passing {scenario} leg has no '{metric}' line")
             counts[metric] = len(values)
-            for index, value in enumerate(values, 1):
+            if metric.startswith("flap_"):
+                values = [(int(round_), value) for round_, value in values]
+                rounds = [round_ for round_, _ in values]
+                if len(set(rounds)) != len(rounds):
+                    raise ExtractionError(f"{leg.name}: duplicate flap round in '{metric}' lines")
+                if scenario in required or values:
+                    flap_rounds[metric] = frozenset(rounds)
+            else:
+                values = list(enumerate(values, 1))
+            for index, value in values:
                 rows.append([phase, arm, run, metric, index, value, unit])
         if scenario == "s2" and counts["reload_completion_p50"] != counts["reload_changed_maxgap_p50"]:
             raise ExtractionError(f"{leg.name}: reload completion and maxgap line counts differ")
         if scenario == "s2":
             rows += reload_rows(leg, phase, arm, run, cell / "daemon.log", counts["reload_completion_p50"], campaign)
-        flap_counts = {counts[m] for m, _, _, required in MATRIX_LINES
-                       if m.startswith("flap_") and (scenario in required or counts[m])}
-        if scenario == "s3" and len(flap_counts) != 1:
-            raise ExtractionError(f"{leg.name}: flap metric line counts differ")
+        if scenario == "s3" and len(set(flap_rounds.values())) != 1:
+            raise ExtractionError(f"{leg.name}: flap metric rounds differ")
         rss = rss_column(cell / "rss.csv")
         if not rss:
             raise ExtractionError(f"{leg.name}: rss.csv has no samples")
