@@ -232,6 +232,9 @@ struct AdjRibOutCommitStats {
     metrics_handle_clones: usize,
     #[cfg(test)]
     otc_reconcile_prefix_visits: usize,
+    /// Per-peer passes that built a full resync (dirty or force).
+    #[cfg(test)]
+    resync_builds: usize,
 }
 
 #[cfg(test)]

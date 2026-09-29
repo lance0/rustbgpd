@@ -1611,6 +1611,50 @@ impl RibManager {
             .is_none_or(tokio::sync::mpsc::Sender::is_closed)
     }
 
+    /// Whether `peer`'s open outbound channel has no free slot, so a send
+    /// attempted now is certain to fail.
+    pub(in crate::manager) fn outbound_channel_full(&self, peer: IpAddr) -> bool {
+        self.outbound_peers
+            .get(&peer)
+            .is_some_and(|sender| sender.capacity() == 0)
+    }
+
+    /// Record that `peer` missed this distribution pass because its
+    /// outbound update was not sent: keep the peer dirty. A grouped member
+    /// also records the pass's withdrawals as tombstones, and its
+    /// member-scoped withdraws as extra-withdraw residue, so its resync
+    /// can (over-)withdraw them.
+    pub(in crate::manager) fn defer_unsent_outbound_pass(
+        &mut self,
+        peer: IpAddr,
+        member_of: Option<usize>,
+        group_stage: &HashMap<usize, GroupStageOutput>,
+        checkpoint: &impl Fn(),
+    ) {
+        self.mark_outbound_dirty(peer);
+        let Some(gid) = member_of else {
+            return;
+        };
+        let Some(stage) = group_stage.get(&gid) else {
+            return;
+        };
+        if let Some(group) = self.group_ribs.get_mut(&gid) {
+            let withdrawn: Vec<(Prefix, u32)> = stage.withdrawn_keys(checkpoint).collect();
+            group.tombstones.extend(withdrawn);
+        }
+        // A source-flip member-scoped withdraw (this member is the delta's
+        // new source) keeps the key IN the table, invisible to tombstones.
+        let lost: Vec<(Prefix, u32)> = stage.member_scoped_withdraws(peer, checkpoint).collect();
+        if !lost.is_empty() {
+            self.pending_extra_withdraws
+                .entry(peer)
+                .or_default()
+                .unicast
+                .extend(lost);
+        }
+        self.refresh_group_residue_gauge();
+    }
+
     /// Drop a peer's dirty-resync state because its outbound channel is
     /// gone: the resync timer must not re-arm against a channel that can
     /// never accept — a backlog of dead sessions (e.g. after shutdown tore

@@ -5843,7 +5843,26 @@ impl RibManager {
                     || (best_changed.is_empty() && all_affected.is_empty()),
                 "a grouped force-only resync cannot share a nonempty distribution pass"
             );
+            // A dirty resync builds the peer's whole table, then the send
+            // needs one free slot. With none free the send is certain to
+            // fail, so skip the build and keep only the missed-pass
+            // bookkeeping; no drop is counted because nothing was built.
+            // The resync timer retries while the peer stays dirty. Only this
+            // actor sends on the channel, so a free slot seen here is still
+            // free at the send. Force resyncs keep their one-shot attempt.
+            if is_dirty && !is_force && self.outbound_channel_full(peer) {
+                debug!(%peer, "outbound channel still full — deferring dirty resync");
+                self.defer_unsent_outbound_pass(peer, member_of, &group_stage, &checkpoint);
+                continue;
+            }
             let resync = is_dirty || is_force;
+            #[cfg(test)]
+            if resync {
+                self.adj_rib_out_commit_stats.resync_builds = self
+                    .adj_rib_out_commit_stats
+                    .resync_builds
+                    .saturating_add(1);
+            }
             #[cfg(feature = "bench-internals")]
             let bench_per_client_best_resync = resync && self.peer_per_client_best.contains(&peer);
             #[cfg(feature = "bench-internals")]
@@ -7349,33 +7368,7 @@ impl RibManager {
                 } else {
                     warn!(%peer, "outbound channel full or closed — marking dirty for resync");
                     self.metrics.record_outbound_route_drop(&peer.to_string());
-                    self.mark_outbound_dirty(peer);
-                    // A grouped member that just went dirty missed this
-                    // pass's withdrawals: record them as tombstones so
-                    // its resync can (over-)withdraw them.
-                    if let Some(gid) = member_of
-                        && let Some(stage) = group_stage.get(&gid)
-                    {
-                        if let Some(group) = self.group_ribs.get_mut(&gid) {
-                            let withdrawn: Vec<(Prefix, u32)> =
-                                stage.withdrawn_keys(&checkpoint).collect();
-                            group.tombstones.extend(withdrawn);
-                        }
-                        // A source-flip member-scoped withdraw (this
-                        // member is the delta's new source) keeps the
-                        // key IN the table — invisible to tombstones.
-                        // Ride the member's extra-withdraw residue.
-                        let lost: Vec<(Prefix, u32)> =
-                            stage.member_scoped_withdraws(peer, &checkpoint).collect();
-                        if !lost.is_empty() {
-                            self.pending_extra_withdraws
-                                .entry(peer)
-                                .or_default()
-                                .unicast
-                                .extend(lost);
-                        }
-                        self.refresh_group_residue_gauge();
-                    }
+                    self.defer_unsent_outbound_pass(peer, member_of, &group_stage, &checkpoint);
                 }
             } else {
                 super::retire_vec(&mut unicast.withdraw, &mut || checkpoint());

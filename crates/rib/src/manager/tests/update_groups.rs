@@ -6182,6 +6182,198 @@ async fn dirty_resync_tick_attempts_each_peer_at_most_once() {
     );
 }
 
+const FULL_CHANNEL_SOURCE: Ipv4Addr = Ipv4Addr::new(192, 0, 2, 42);
+const FULL_CHANNEL_CAPACITY: usize = 4;
+
+fn full_channel_prefix(third: u8) -> Prefix {
+    Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(198, 51, third, 0), 24))
+}
+
+/// One synchronous distribution pass for a source announce/withdraw.
+fn full_channel_pass(manager: &mut RibManager, announce: &[u8], withdraw: &[u8]) {
+    let announced = announce
+        .iter()
+        .map(|&third| {
+            crate::test_support::make_route(
+                Ipv4Prefix::new(Ipv4Addr::new(198, 51, third, 0), 24),
+                FULL_CHANNEL_SOURCE,
+            )
+        })
+        .collect();
+    let withdrawn = withdraw
+        .iter()
+        .map(|&third| (full_channel_prefix(third), 0))
+        .collect();
+    manager.handle_update(RibUpdate::RoutesReceived {
+        session_id: 0,
+        peer: IpAddr::V4(FULL_CHANNEL_SOURCE),
+        announced,
+        withdrawn,
+        flowspec_announced: vec![],
+        flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
+        validated_with: None,
+    });
+    while manager.process_next_route_chunk() {}
+}
+
+/// Two members (`stuck`, `live`) holding prefixes 0-2. Four further
+/// announces fill `stuck`'s outbound channel while `live` drains, then a
+/// withdraw of prefix 0 fails to send to `stuck` and marks it dirty.
+fn full_channel_manager(
+    ungrouped: bool,
+) -> (
+    RibManager,
+    IpAddr,
+    IpAddr,
+    mpsc::Receiver<OutboundRouteUpdate>,
+    mpsc::Receiver<OutboundRouteUpdate>,
+) {
+    let (_tx, rx) = mpsc::channel(1);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    manager.test_force_ungrouped = ungrouped;
+    let stuck = IpAddr::V4(Ipv4Addr::new(10, 43, 0, 1));
+    let live = IpAddr::V4(Ipv4Addr::new(10, 43, 0, 2));
+    let mut receivers = Vec::new();
+    for peer in [stuck, live] {
+        let (outbound_tx, mut outbound_rx) = mpsc::channel(FULL_CHANNEL_CAPACITY);
+        manager.handle_update(RibUpdate::PeerUp {
+            peer,
+            session_id: 0,
+            peer_asn: 65_000,
+            peer_router_id: Ipv4Addr::UNSPECIFIED,
+            outbound_tx,
+            export_policy: None,
+            sendable_families: ipv4_sendable(),
+            is_ebgp: false,
+            route_reflector_client: true,
+            orr_vantage: None,
+            per_client_best: false,
+            interpret_rfc1997: true,
+            add_path_send_families: vec![],
+            add_path_send_max: 0,
+            negotiated_orf_recv: vec![],
+            negotiated_llgr_families: vec![],
+        });
+        while outbound_rx.try_recv().is_ok() {}
+        receivers.push(outbound_rx);
+    }
+    let mut live_rx = receivers.pop().unwrap();
+    let mut stuck_rx = receivers.pop().unwrap();
+    assert_eq!(manager.grouped_member_of(stuck).is_none(), ungrouped);
+    full_channel_pass(&mut manager, &[0, 1, 2], &[]);
+    while stuck_rx.try_recv().is_ok() {}
+    while live_rx.try_recv().is_ok() {}
+    for third in 10..10 + u8::try_from(FULL_CHANNEL_CAPACITY).unwrap() {
+        full_channel_pass(&mut manager, &[third], &[]);
+        while live_rx.try_recv().is_ok() {}
+    }
+    assert!(manager.outbound_channel_full(stuck));
+    assert!(!manager.dirty_peers.contains(&stuck));
+    full_channel_pass(&mut manager, &[], &[0]);
+    assert!(
+        manager.dirty_peers.contains(&stuck),
+        "failed send marks dirty"
+    );
+    assert!(!manager.dirty_peers.contains(&live));
+    let live_withdraw = live_rx.try_recv().unwrap();
+    assert!(
+        live_withdraw
+            .withdraw
+            .contains(&(full_channel_prefix(0), 0))
+    );
+    (manager, stuck, live, stuck_rx, live_rx)
+}
+
+/// While a dirty member's outbound channel stays full, neither the ingest
+/// pass nor the resync tick builds its resync; once the channel drains,
+/// the next tick resyncs it exactly once with the withdrawal and the
+/// announce it missed.
+fn dirty_member_with_full_channel_defers_resync(ungrouped: bool) {
+    let (mut manager, stuck, live, mut stuck_rx, mut live_rx) = full_channel_manager(ungrouped);
+    manager.adj_rib_out_commit_stats = AdjRibOutCommitStats::default();
+
+    full_channel_pass(&mut manager, &[20], &[]);
+    let live_update = live_rx.try_recv().expect("the live member keeps receiving");
+    assert!(
+        live_update
+            .announce
+            .iter()
+            .any(|route| route.prefix == full_channel_prefix(20))
+    );
+    assert!(manager.resync_tick_pending());
+    manager.resync_dirty_peers_bounded();
+    assert_eq!(
+        manager.adj_rib_out_commit_stats.resync_builds, 0,
+        "a dirty member with a full channel builds no resync"
+    );
+    assert!(manager.dirty_peers.contains(&stuck));
+    assert!(manager.outbound_channel_full(stuck));
+    assert!(manager.resync_tick_pending(), "the retry stays armed");
+
+    // The session drains what was queued before the member went dirty.
+    for _ in 0..FULL_CHANNEL_CAPACITY {
+        stuck_rx.try_recv().unwrap();
+    }
+    assert!(stuck_rx.try_recv().is_err());
+
+    manager.resync_dirty_peers_bounded();
+    assert_eq!(manager.adj_rib_out_commit_stats.resync_builds, 1);
+    assert!(!manager.dirty_peers.contains(&stuck));
+    let resync = stuck_rx.try_recv().expect("one resync envelope");
+    assert!(stuck_rx.try_recv().is_err(), "exactly one resync envelope");
+    assert!(
+        resync.withdraw.contains(&(full_channel_prefix(0), 0)),
+        "the resync withdraws the prefix withdrawn while the channel was full"
+    );
+    assert!(
+        resync
+            .announce
+            .iter()
+            .any(|route| route.prefix == full_channel_prefix(20)),
+        "the resync announces the prefix added while the channel was full"
+    );
+    assert!(
+        resync
+            .announce
+            .iter()
+            .all(|route| route.prefix != full_channel_prefix(0))
+    );
+
+    assert!(!manager.resync_tick_pending());
+    manager.resync_dirty_peers_bounded();
+    assert_eq!(manager.adj_rib_out_commit_stats.resync_builds, 1);
+    assert!(stuck_rx.try_recv().is_err());
+    assert!(!manager.dirty_peers.contains(&live));
+}
+
+#[test]
+fn grouped_dirty_member_with_full_channel_defers_resync_until_drained() {
+    dirty_member_with_full_channel_defers_resync(false);
+}
+
+#[test]
+fn ungrouped_dirty_peer_with_full_channel_defers_resync_until_drained() {
+    dirty_member_with_full_channel_defers_resync(true);
+}
+
+/// A force resync (ROUTE_REFRESH-style outbound refresh) is not gated: it
+/// still attempts the build against a full channel, and keeps retrying as
+/// a dirty force peer.
+#[test]
+fn force_resync_with_full_channel_still_attempts() {
+    let (mut manager, stuck, _live, _stuck_rx, _live_rx) = full_channel_manager(false);
+    manager.adj_rib_out_commit_stats = AdjRibOutCommitStats::default();
+    let (reply, _response) = oneshot::channel();
+    manager.handle_refresh_peer_outbound(stuck, reply);
+    assert_eq!(manager.adj_rib_out_commit_stats.resync_builds, 1);
+    assert!(manager.force_outbound_peers.contains(&stuck));
+    manager.resync_dirty_peers_bounded();
+    assert_eq!(manager.adj_rib_out_commit_stats.resync_builds, 2);
+    assert!(manager.dirty_peers.contains(&stuck));
+}
+
 fn family_distribution_cases() -> [(Afi, Safi, bool); 7] {
     [
         (Afi::Ipv4, Safi::MplsVpn, false),
