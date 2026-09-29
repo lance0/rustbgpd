@@ -34,6 +34,8 @@ INPUT_KEYS = {
     "N_PEERS", "TOTAL_PREFIXES", "PORT", "RELOADS", "CONTROL_SECS",
     "CHANGED_PEERS", "FLAPSTORM", "BIRD_THREADS", "PROBE_PREFIXES",
 }
+# Recorded only when set, so earlier receipts keep their exact inputs.
+OPTIONAL_INPUT_KEYS = {"FLAP_ROUNDS"}
 
 def fail(message):
     raise ValueError(message)
@@ -86,7 +88,7 @@ def verify(path, expected_cell, competitor_generation="historical"):
         inputs = workload.pop("inputs")
         if not isinstance(inputs, dict) or not INPUT_KEYS <= inputs.keys():
             fail("missing workload input fields")
-        if any(not isinstance(v, str) or (k not in INPUT_KEYS and not k.startswith(("GEN_", "RELOADSTALL_"))) for k, v in inputs.items()):
+        if any(not isinstance(v, str) or (k not in INPUT_KEYS | OPTIONAL_INPUT_KEYS and not k.startswith(("GEN_", "RELOADSTALL_"))) for k, v in inputs.items()):
             fail("malformed workload inputs")
     if cell == "rustbgpd":
         if set(workload) != {"binary", "sha256"} or workload["binary"] != "target/release/rustbgpd" or not HASH.fullmatch(workload["sha256"]):

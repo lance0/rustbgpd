@@ -20,7 +20,8 @@
 # existing cell's logs (exit 0 = a complete, well-formed cell).
 set -u
 
-# The harness's fixed flap round count (FLAP_ROUNDS in src/main.rs).
+# The harness default flap round count (DEFAULT_FLAP_ROUNDS in src/main.rs;
+# this cell does not pass --flap-rounds).
 ROUNDS=3
 
 # Fail closed unless reloadstall.log carries the harness's CSV header and

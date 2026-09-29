@@ -8,7 +8,8 @@
 //! Usage:
 //!   reloadstall <n_peers> <total_prefixes> <daemon_port> <daemon_pid> \
 //!       <policy_live> <policy_a> <policy_b> <reloads> <control_secs> \
-//!       [changed_peers] [reload_cmd] [--flapstorm K] [--convergence-only]
+//!       [changed_peers] [reload_cmd] [--flapstorm K [--flap-rounds N]]
+//!       [--convergence-only]
 //!
 //! Stubs bind distinct 127.1.x.y source addresses (matching the
 //! generated [[neighbors]] blocks) and connect to 127.0.0.1:<port>.
@@ -66,7 +67,13 @@
 //!   all K slices' withdrawals, reconnect the K after 10 s, re-announce
 //!   their slices, and timestamp survivors' re-announce completion plus each
 //!   rejoiner's first EoR and exact table coverage.
-//!   3 rounds, per-round percentiles + `flapstorm_csv` lines.
+//!   `--flap-rounds N` rounds (default 3, at most 100), per-round
+//!   percentiles + `flapstorm_csv` lines.
+//! - `RELOADSTALL_HEAP_METRICS_ADDR` (env, flapstorm mode): loopback
+//!   `SocketAddr` of the daemon's metrics endpoint. After each round's RSS
+//!   sample, print `flap N heap allocated_mib=.. active_mib=.. resident_mib=..
+//!   mapped_mib=..` from the jemalloc gauges; a gauge the daemon does not
+//!   export prints `absent`. A failed scrape fails the run.
 //!
 //! Soak extensions (route-server flagship soak) — all additive env vars;
 //! their defaults retain the one-shot shape; native reloads also require
@@ -222,7 +229,20 @@ const FIRST_OUTPUT_WINDOW: Duration = Duration::from_secs(600);
 /// failures are never retried. A harness parameter, not a measurement
 /// (establishment and flap re-announcement are timed outside it).
 const CONNECT_WINDOW: Duration = Duration::from_secs(120);
-const FLAP_ROUNDS: u32 = 3;
+/// `--flap-rounds N` default; the historical fixed count, so receipts that
+/// omit the flag keep their shape.
+const DEFAULT_FLAP_ROUNDS: u32 = 3;
+/// Upper bound on `--flap-rounds`: each round holds at least 20 s (reconnect
+/// hold plus quiesce), so 100 rounds is already a long plateau run.
+const MAX_FLAP_ROUNDS: u32 = 100;
+/// jemalloc gauges sampled after each flap round when
+/// `RELOADSTALL_HEAP_METRICS_ADDR` is set, as (log key, metric name).
+const HEAP_GAUGES: [(&str, &str); 4] = [
+    ("allocated_mib", "jemalloc_allocated_bytes"),
+    ("active_mib", "jemalloc_active_bytes"),
+    ("resident_mib", "jemalloc_resident_bytes"),
+    ("mapped_mib", "jemalloc_mapped_bytes"),
+];
 const FLAP_RECONNECT_SECS: u64 = 10;
 /// Pre-close churn-only CPU sample per flap round (see `run_flapstorm`).
 const BACKGROUND_CPU_WINDOW: Duration = Duration::from_secs(2);
@@ -285,6 +305,41 @@ fn metric_value(body: &str, name: &str) -> Result<u64, String> {
         }
     }
     found.ok_or_else(|| format!("missing {name}"))
+}
+
+/// `flap N heap ...` line from one metrics body: each jemalloc gauge in
+/// whole MiB, or `absent` when the daemon does not export it (a build
+/// without the `jemalloc` feature, or a release that predates the gauge).
+/// A present but malformed gauge is an error, never a silent zero.
+fn heap_line(round: u32, body: &str) -> Result<String, String> {
+    let mut line = format!("flap {round} heap");
+    for (key, name) in HEAP_GAUGES {
+        let value = match metric_value(body, name) {
+            Ok(bytes) => (bytes >> 20).to_string(),
+            Err(error) if error == format!("missing {name}") => "absent".to_owned(),
+            Err(error) => return Err(error),
+        };
+        line.push_str(&format!(" {key}={value}"));
+    }
+    Ok(line)
+}
+
+/// Strip `--flap-rounds N` (anywhere in argv). Absent is `None`; the
+/// value must be an integer in `1..=MAX_FLAP_ROUNDS`.
+fn take_flap_rounds(args: &mut Vec<String>) -> Result<Option<u32>, String> {
+    let Some(pos) = args.iter().position(|arg| arg == "--flap-rounds") else {
+        return Ok(None);
+    };
+    let rounds = args
+        .get(pos + 1)
+        .and_then(|value| value.parse::<u32>().ok())
+        .filter(|rounds| (1..=MAX_FLAP_ROUNDS).contains(rounds))
+        .ok_or_else(|| format!("--flap-rounds requires an integer in 1..={MAX_FLAP_ROUNDS}"))?;
+    args.drain(pos..=pos + 1);
+    if args.iter().any(|arg| arg == "--flap-rounds") {
+        return Err("--flap-rounds may be specified only once".into());
+    }
+    Ok(Some(rounds))
 }
 
 async fn fetch_metrics(addr: SocketAddr, deadline: Instant) -> Result<String, String> {
@@ -2516,12 +2571,18 @@ fn disarm_survivors(ctx: &Ctx, first: usize) {
 /// `--flapstorm K` mode: the alternative to the reload loop (see the crate
 /// doc). The flapped cohort is the first K stubs — never the churners,
 /// which are the last CHURNERS.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the flapstorm knobs are parsed and validated in main, then passed through"
+)]
 async fn run_flapstorm(
     ctx: &Arc<Ctx>,
     stubs: &mut [Stub],
     k: u32,
+    rounds: u32,
     pid: i32,
     metrics_addr: Option<SocketAddr>,
+    heap_metrics_addr: Option<SocketAddr>,
     prior_high: &mut u64,
 ) {
     let n_peers = ctx.n_peers;
@@ -2564,7 +2625,7 @@ async fn run_flapstorm(
          reannounce_p50_s,reannounce_p95_s,reannounce_max_s,\
          rss_mib,sessions_up,parse_errors"
     );
-    for round in 1..=FLAP_ROUNDS {
+    for round in 1..=rounds {
         if let Some(addr) = metrics_addr {
             let up = ctx
                 .obs
@@ -2754,6 +2815,16 @@ async fn run_flapstorm(
             .count();
         let parse_errors = ctx.parse_errors.load(Ordering::Relaxed);
         println!("flap {round} sessions_up {up}/{n_peers} rss_mib={rss}");
+        if let Some(addr) = heap_metrics_addr {
+            let heap = fetch_metrics(addr, Instant::now() + METRICS_DEADLINE)
+                .await
+                .and_then(|body| heap_line(round, &body))
+                .unwrap_or_else(|error| {
+                    eprintln!("FAIL: flap {round} heap metrics scrape: {error}");
+                    std::process::exit(1);
+                });
+            println!("{heap}");
+        }
         if up != n_peers as usize || parse_errors != 0 {
             eprintln!(
                 "FAIL: flap {round} integrity check failed: \
@@ -3225,16 +3296,26 @@ fn main() {
         );
         a.drain(pos..=pos + 1);
     }
+    let flap_rounds = take_flap_rounds(&mut a).unwrap_or_else(|error| {
+        eprintln!("{error}");
+        std::process::exit(2);
+    });
+    if flap_rounds.is_some() && flapstorm.is_none() {
+        eprintln!("--flap-rounds requires --flapstorm");
+        std::process::exit(2);
+    }
+    let flap_rounds = flap_rounds.unwrap_or(DEFAULT_FLAP_ROUNDS);
     if a.len() < 10 {
         eprintln!(
             "usage: reloadstall <n_peers> <total_prefixes> <daemon_port> <daemon_pid> \
              <policy_live> <policy_a> <policy_b> <reloads> <control_secs> \
-             [changed_peers] [reload_cmd] [--flapstorm K]\n\
+             [changed_peers] [reload_cmd] [--flapstorm K [--flap-rounds N]]\n\
              [--convergence-only]\n\
              reload_cmd: run `sh -c <reload_cmd>` per reload instead of SIGHUP-ing <daemon_pid>\n\
              daemon_pid 0: skip in-harness RSS sampling (outer sampler owns it); \
              requires reload_cmd, --flapstorm, or --convergence-only\n\
-             --flapstorm K: flap the first K stubs for {FLAP_ROUNDS} rounds instead of reloading"
+             --flapstorm K: flap the first K stubs instead of reloading\n\
+             --flap-rounds N: flapstorm rounds, 1..={MAX_FLAP_ROUNDS} (default {DEFAULT_FLAP_ROUNDS})"
         );
         std::process::exit(2);
     }
@@ -3288,6 +3369,19 @@ fn main() {
         eprintln!("RELOADSTALL_SESSION_NOTIFICATION_METRICS_ADDR requires --flapstorm and a loopback SocketAddr with nonzero port");
         std::process::exit(2);
     }
+    let heap_metrics_addr = std::env::var("RELOADSTALL_HEAP_METRICS_ADDR")
+        .ok()
+        .map(|value| value.parse::<SocketAddr>());
+    let heap_metrics_addr = match heap_metrics_addr {
+        None => None,
+        Some(Ok(addr)) if addr.ip().is_loopback() && addr.port() != 0 && flapstorm.is_some() => {
+            Some(addr)
+        }
+        Some(_) => {
+            eprintln!("RELOADSTALL_HEAP_METRICS_ADDR requires --flapstorm and a loopback SocketAddr with nonzero port");
+            std::process::exit(2);
+        }
+    };
     // Soak-mode knobs; every default reproduces the frozen one-shot contract.
     let cycle_quiesce_secs = env_u64("RELOADSTALL_CYCLE_QUIESCE_SECS", 20);
     let trip_every = u32::try_from(env_u64("RELOADSTALL_TRIP_EVERY", 0)).unwrap();
@@ -3883,7 +3977,17 @@ fn main() {
                 if up != 700 || completed != 700 || errors != 0 { eprintln!("FAIL: initial receipt integrity: sessions={up}, completions={completed}, parse_errors={errors}"); std::process::exit(1); }
                 notification_checkpoint(addr, ("initial_drained", 0, up, completed, expected as u32, errors), &mut prior_high).await;
             }
-            run_flapstorm(&ctx, &mut stubs, k, pid, notification_metrics_addr, &mut prior_high).await;
+            run_flapstorm(
+                &ctx,
+                &mut stubs,
+                k,
+                flap_rounds,
+                pid,
+                notification_metrics_addr,
+                heap_metrics_addr,
+                &mut prior_high,
+            )
+            .await;
             println!("done rss_mib={}", rss_mib(pid));
             let parse_errors = ctx.parse_errors.load(Ordering::Relaxed);
             if parse_errors > 0 {
@@ -4793,6 +4897,51 @@ mod tests {
 
         assert!(error.contains("invalid frame during open"), "{error}");
         server.await.unwrap();
+    }
+
+    #[test]
+    fn flap_rounds_flag_parses_and_validates() {
+        let argv = |s: &str| s.split_whitespace().map(String::from).collect::<Vec<_>>();
+        let mut a = argv("rs 20 --flap-rounds 12 x");
+        assert_eq!(take_flap_rounds(&mut a), Ok(Some(12)));
+        assert_eq!(a, argv("rs 20 x"));
+        let mut a = argv("rs 20 x");
+        assert_eq!(take_flap_rounds(&mut a), Ok(None));
+        assert_eq!(a, argv("rs 20 x"));
+        let mut a = argv("rs --flap-rounds 1");
+        assert_eq!(take_flap_rounds(&mut a), Ok(Some(1)));
+        let mut a = argv(&format!("rs --flap-rounds {MAX_FLAP_ROUNDS}"));
+        assert_eq!(take_flap_rounds(&mut a), Ok(Some(MAX_FLAP_ROUNDS)));
+        for bad in [
+            "rs --flap-rounds 0",
+            "rs --flap-rounds 101",
+            "rs --flap-rounds -1",
+            "rs --flap-rounds x",
+            "rs --flap-rounds",
+            "rs --flap-rounds 3 --flap-rounds 4",
+        ] {
+            assert!(take_flap_rounds(&mut argv(bad)).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn heap_line_reports_mib_and_absent_gauges() {
+        let body = "# HELP jemalloc_allocated_bytes x\n\
+                    jemalloc_allocated_bytes 314572800\n\
+                    jemalloc_active_bytes 335544320\n\
+                    jemalloc_resident_bytes 367001600\n\
+                    jemalloc_mapped_bytes 419430400\n";
+        assert_eq!(
+            heap_line(4, body).unwrap(),
+            "flap 4 heap allocated_mib=300 active_mib=320 resident_mib=350 mapped_mib=400"
+        );
+        assert_eq!(
+            heap_line(1, "jemalloc_allocated_bytes 1048576\n").unwrap(),
+            "flap 1 heap allocated_mib=1 active_mib=absent resident_mib=absent mapped_mib=absent"
+        );
+        // Malformed or duplicated gauges fail instead of reading as absent.
+        assert!(heap_line(1, "jemalloc_resident_bytes 1.5e8\n").is_err());
+        assert!(heap_line(1, "jemalloc_active_bytes 1\njemalloc_active_bytes 2\n").is_err());
     }
 
     #[test]

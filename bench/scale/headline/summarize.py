@@ -64,6 +64,10 @@ MATRIX_LINES = [
     ("flap_reannounce_p50", r"^flap \d+ reannounce_s: p50=([\d.]+)", "s", {"s3"}),
     ("flap_first_reannounce_p50", r"^flap \d+ first_reann_s: p50=([\d.]+)", "s", {"s3"}),
     ("flap_post_round_rss", r"^flap \d+ sessions_up \d+/\d+ rss_mib=(\d+)", "MiB", {"s3"}),
+    # Optional: older harnesses print no heap line, and a daemon without the
+    # gauge prints `absent`. When present, one per round like the rest.
+    ("flap_heap_allocated", r"^flap \d+ heap allocated_mib=(\d+)", "MiB", set()),
+    ("flap_heap_resident", r"^flap \d+ heap .*\bresident_mib=(\d+)", "MiB", set()),
 ]
 
 
@@ -193,7 +197,8 @@ def matrix_rows(source, exclusions, campaign):
             raise ExtractionError(f"{leg.name}: reload completion and maxgap line counts differ")
         if scenario == "s2":
             rows += reload_rows(leg, phase, arm, run, cell / "daemon.log", counts["reload_completion_p50"], campaign)
-        flap_counts = {counts[m] for m, *_ in MATRIX_LINES if m.startswith("flap_")}
+        flap_counts = {counts[m] for m, _, _, required in MATRIX_LINES
+                       if m.startswith("flap_") and (scenario in required or counts[m])}
         if scenario == "s3" and len(flap_counts) != 1:
             raise ExtractionError(f"{leg.name}: flap metric line counts differ")
         rss = rss_column(cell / "rss.csv")

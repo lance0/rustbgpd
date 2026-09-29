@@ -96,7 +96,8 @@ exits 2):
 ```text
 reloadstall <n_peers> <total_prefixes> <daemon_port> <daemon_pid> \
     <policy_live> <policy_a> <policy_b> <reloads> <control_secs> \
-    [changed_peers] [reload_cmd] [--flapstorm K] [--convergence-only]
+    [changed_peers] [reload_cmd] [--flapstorm K [--flap-rounds N]]
+    [--convergence-only]
 ```
 
 - `n_peers` — stub sessions to establish (`total_prefixes` must divide evenly).
@@ -129,14 +130,26 @@ reloadstall <n_peers> <total_prefixes> <daemon_port> <daemon_pid> \
   the last required route. Missing EoR or incomplete coverage fails the run;
   neither is reported as zero. Each round prints
   rejoin p50/max alongside the existing survivor percentiles and unchanged
-  `flapstorm_csv` records. The three rounds still reconnect and re-announce
+  `flapstorm_csv` records. The rounds still reconnect and re-announce
   without GR retention, so rejoin time can include other flapped peers'
   return and re-announcement. It cannot alone attribute delay to serialized
   initial-table joins.
+- `--flap-rounds N` — flapstorm round count, `1..=100` (default 3, the
+  historical receipt shape). Valid only with `--flapstorm`.
+- `RELOADSTALL_HEAP_METRICS_ADDR` — optional, valid only with `--flapstorm`;
+  a loopback socket address with a nonzero port for the daemon's Prometheus
+  endpoint. After each round's `rss_mib` sample the harness scrapes it and
+  prints `flap N heap allocated_mib=A active_mib=B resident_mib=C
+  mapped_mib=D` from the `jemalloc_*_bytes` gauges (whole MiB), so a post-round
+  RSS change can be split between live heap (`allocated`) and allocator
+  retention (`resident` minus `allocated`). A gauge the daemon does not export
+  prints `absent`, never 0; a failed scrape fails the run. The IXP matrix sets
+  it for rustbgpd flapstorm cells.
 - `RELOADSTALL_SESSION_NOTIFICATION_METRICS_ADDR` — optional B2 receipt seam,
   valid only with `--flapstorm`. It must be a loopback socket address with a
   nonzero port. The exact 700-peer/400400-prefix/50-flap shape polls the
-  daemon's Prometheus endpoint at ten phase boundaries and emits
+  daemon's Prometheus endpoint at 1 + 3 × rounds phase boundaries (ten at
+  the default three rounds) and emits
   `session_notification_receipt` rows after the notification population has
   reached zero. This proves dequeue accounting only: the monotonic lifetime
   high-water value is not a per-round peak, capacity, latency, or bound.

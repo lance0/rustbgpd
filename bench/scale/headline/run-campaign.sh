@@ -50,6 +50,8 @@
 #   IRR_CELLS=rustbgpd-sighup
 #   MATRIX_PEERS=700 MATRIX_PREFIXES=400400 MATRIX_RELOADS=4
 #   MATRIX_CONTROL_SECS=30 MATRIX_FLAPSTORM=50 (S3 only)
+#   MATRIX_FLAP_ROUNDS=    S3 flap rounds; empty keeps the harness default (3).
+#                          Every arm's HARNESS_REF must support --flap-rounds
 #   MATRIX_SCENARIOS=s2,s3 matrix legs per run and arm
 #   SMOKE=1                pipeline check, not a measurement: the matrix runs
 #                          at 20 peers x 11,440 prefixes, one reload and five
@@ -97,11 +99,12 @@ else
     MATRIX_RELOADS=${MATRIX_RELOADS:-4} MATRIX_CONTROL_SECS=${MATRIX_CONTROL_SECS:-30}
     MATRIX_FLAPSTORM=${MATRIX_FLAPSTORM:-50}
 fi
+MATRIX_FLAP_ROUNDS=${MATRIX_FLAP_ROUNDS:-}
 export RUSTBGPD_HOST_QUIET_TIMEOUT_SECS=${RUSTBGPD_HOST_QUIET_TIMEOUT_SECS:-1800}
 # The runners read these generic names; each leg sets the ones it needs, so an
 # operator's matrix shape never leaks into an IRR root. One build environment
 # serves the prebuilds and the IRR runner's own build.
-unset N_PEERS TOTAL_PREFIXES RELOADS CONTROL_SECS FLAPSTORM ARTIFACTS_DIR
+unset N_PEERS TOTAL_PREFIXES RELOADS CONTROL_SECS FLAPSTORM FLAP_ROUNDS ARTIFACTS_DIR
 unset CARGO_TARGET_DIR RUSTFLAGS
 
 IFS=', ' read -r -a PHASES <<<"$CELLS"
@@ -187,6 +190,7 @@ manifest() {
     echo "matrix_scenarios=${SCENARIOS[*]}"
     echo "matrix_peers=$MATRIX_PEERS matrix_prefixes=$MATRIX_PREFIXES matrix_reloads=$MATRIX_RELOADS"
     echo "matrix_control_secs=$MATRIX_CONTROL_SECS matrix_flapstorm=$MATRIX_FLAPSTORM"
+    [[ -z $MATRIX_FLAP_ROUNDS ]] || echo "matrix_flap_rounds=$MATRIX_FLAP_ROUNDS"
     echo "smoke=${SMOKE:+1}"
 }
 fresh=1
@@ -297,7 +301,7 @@ leg_matrix() {
     if [[ $(cat "$art/rustbgpd/status" 2>/dev/null) == pass ]]; then log "$name already pass, skip"; return; fi
     [[ $s == s2 ]] || flap=$MATRIX_FLAPSTORM
     log "$name start $(state)"
-    (cd "$OUT/trees/$arm" && env FLAPSTORM="$flap" N_PEERS="$MATRIX_PEERS" \
+    (cd "$OUT/trees/$arm" && env FLAPSTORM="$flap" FLAP_ROUNDS="$MATRIX_FLAP_ROUNDS" N_PEERS="$MATRIX_PEERS" \
         TOTAL_PREFIXES="$MATRIX_PREFIXES" RELOADS="$MATRIX_RELOADS" \
         CONTROL_SECS="$MATRIX_CONTROL_SECS" ARTIFACTS_DIR="$art" \
         bash bench/scale/matrix/run-matrix.sh rustbgpd) >>"$art.log" 2>&1 || rc=$?

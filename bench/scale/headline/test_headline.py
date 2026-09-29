@@ -184,6 +184,30 @@ class ExtractorFailsClosed(unittest.TestCase):
         with self.assertRaisesRegex(summarize.ExtractionError, "flap metric line counts"):
             summarize.extract(self.tmp)
 
+    def heap_leg(self, rounds):
+        cell = matrix_leg(self.tmp, "matrix-a-r1-s3", "s3")
+        log = cell / "reloadstall.log"
+        lines = []
+        for line in log.read_text().splitlines():
+            lines.append(line)
+            round_ = line.split()[1] if line.startswith("flap ") and " sessions_up " in line else None
+            if round_ in rounds:
+                lines.append(f"flap {round_} heap allocated_mib={300 + int(round_)} active_mib=320 "
+                             f"resident_mib={350 + int(round_)} mapped_mib=400")
+        log.write_text("\n".join(lines) + "\n")
+
+    def test_heap_lines_extract_per_round(self):
+        self.heap_leg({"1", "2", "3"})
+        rows, _, _ = summarize.extract(self.tmp)
+        heap = sorted((r[3], r[4], r[5]) for r in rows if r[3].startswith("flap_heap_"))
+        self.assertEqual(heap, [("flap_heap_allocated", i, str(300 + i)) for i in (1, 2, 3)]
+                         + [("flap_heap_resident", i, str(350 + i)) for i in (1, 2, 3)])
+
+    def test_heap_line_missing_a_round_fails(self):
+        self.heap_leg({"1", "3"})
+        with self.assertRaisesRegex(summarize.ExtractionError, "flap metric line counts"):
+            summarize.extract(self.tmp)
+
     def test_unfinished_legs_are_not_counted(self):
         matrix_leg(self.tmp, "matrix-a-r1-s2")
         (matrix_leg(self.tmp, "matrix-a-r2-s2") / "status").write_text("fail rc=1\n")
