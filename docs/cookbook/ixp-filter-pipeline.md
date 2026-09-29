@@ -236,6 +236,21 @@ run; read the `Neighbors:` section and the route line.
 Previews compare configuration and bindings; they do not evaluate dataset
 file contents. When the candidate declares datasets, `rbgp config diff` and
 `rustbgpd --diff` report `datasets: contents not compared (N declared); a reload re-reads them`.
+For one member, preview whether the candidate IRR lists would reject routes
+that member currently has admitted before the reload:
+
+```bash
+rbgp policy test "$STATE/candidate/policy/client-as4242-1.rpol" \
+    --policy client-as4242-1 --direction import --neighbor 192.0.2.11 \
+    --dataset client-as4242-1-origins="$STATE/candidate/datasets/client-as4242-1-origins.list" \
+    --dataset client-as4242-1-prefixes="$STATE/candidate/datasets/client-as4242-1-prefixes.list" \
+    --show-rejected 20
+```
+
+The `rejected` total counts candidate rejections among retained post-policy
+routes; the list is capped at 20 samples. This is a read-only, single-policy
+view for one member. See the [dry-run scope](../reference/rpol-language.md#live-rib-policy-dry-runs)
+before using it to judge a refresh.
 For an IRR-only refresh where member prefix or origin lists change while the
 member roster and config text remain identical, the diff flags the uncompared
 datasets and omits `No changes.`; SIGHUP re-reads the updated dataset files

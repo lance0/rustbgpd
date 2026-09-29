@@ -1566,8 +1566,10 @@ Changes (up to 2):
   re-evaluates them (a reload requests one for affected peers;
   `rbgp neighbor <addr> softreset` requests one on demand), and under an
   active GR/LLGR window until re-sync/EOR. Rejected routes are not
-  stored there, so the dry run shows which retained routes a candidate
-  would reject or modify, but not which routes it would newly admit.
+  stored there, so the dry run shows candidate rejections or modifications
+  among retained post-policy routes, but not which routes it would newly
+  admit. If an earlier policy rewrote a prefix or origin attribute, the
+  candidate sees that stored value rather than the original received value.
   Inspect currently rejected routes with
   `rbgp rib received PEER --rejected`, which keeps only the most recent
   rejections per peer (`[policy.reject_retention]`).
@@ -1579,9 +1581,23 @@ Changes (up to 2):
 - `--limit N` caps how many routes are evaluated (`N` ≥ 1; `--limit 0` is
   a usage error); `--all`, the default, evaluates every route.
   `--show-changes N` caps the before/after attribute diff samples.
+- `--dataset NAME=PATH` supplies the contents of a candidate `.list` file
+  for a dataset declared in the submitted source. Repeat it for each dataset
+  the selected policy probes; a missing, duplicate, undeclared, or malformed
+  binding fails the dry run. The CLI reads the files and sends their contents;
+  the daemon does not read candidate paths. The source and all candidate
+  contents together must fit below the 4 MiB RPC receive limit (up to 16
+  datasets). Larger candidates need a smaller policy-specific input.
+- `--show-rejected N` shows up to `N` candidate rejections among retained
+  post-policy routes (`N` ≤ 1000), alongside the total `rejected` count.
+  Samples follow the snapshot's canonical order. This previews the rejection
+  of routes retained by the live daemon; it does not show routes a candidate
+  would newly admit, replay the full import chain, or predict export impact.
+  Without the flag, the output is unchanged.
 - Compile diagnostics come back rendered exactly as `policy check`
   prints them (exit code 1); a clean run exits 0.
-- `--json` emits the counts, per-term hits, and diffs structurally.
+- `--json` emits the counts, per-term hits, and diffs structurally, plus
+  `rejected_routes` when rejection sampling is requested.
 
 Per-term hit counters answer "which term is doing the work" (the
 IOS-XR `show pcl` idea); a term lowered to several IR steps reports as

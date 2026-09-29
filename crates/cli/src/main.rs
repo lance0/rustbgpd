@@ -980,6 +980,12 @@ enum PolicyAction {
         /// Maximum before/after attribute diffs to show
         #[arg(long, default_value_t = 10)]
         show_changes: u32,
+        /// Candidate dataset binding NAME=PATH (repeat for each declared dataset)
+        #[arg(long = "dataset")]
+        datasets: Vec<String>,
+        /// Maximum currently carried routes rejected by the candidate to show
+        #[arg(long, default_value_t = 0)]
+        show_rejected: u32,
     },
     /// Show one policy by name
     Get {
@@ -5054,6 +5060,8 @@ async fn run(cli: Cli, binary_name: &'static str) -> Result<(), CliError> {
                 limit,
                 all: _,
                 show_changes,
+                datasets,
+                show_rejected,
             } => {
                 commands::policy::test(
                     connection,
@@ -5066,6 +5074,8 @@ async fn run(cli: Cli, binary_name: &'static str) -> Result<(), CliError> {
                         // Omitted and `--all` both evaluate the whole snapshot (RPC limit 0).
                         limit: limit.unwrap_or(0),
                         show_changes,
+                        datasets: &datasets,
+                        show_rejected,
                     },
                     json,
                 )

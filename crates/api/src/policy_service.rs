@@ -49,6 +49,9 @@ const OWNED_POLICY_ACTOR_TIMEOUT: Duration = Duration::from_mins(10);
 /// swap, so a sub-second bound turns normal bounded reload work into a hard
 /// `DEADLINE_EXCEEDED` for an operator polling live counters.
 const POLICY_STATS_AGGREGATE_TIMEOUT: Duration = Duration::from_secs(2);
+// Match tonic's default decoded-message limit without narrowing valid requests.
+const TEST_POLICY_MAX_REQUEST_BYTES: usize = 4 * 1024 * 1024;
+const TEST_POLICY_MAX_REJECTED_SAMPLES: u32 = 1000;
 
 /// Run one policy-stats backend send and reply within the RPC's shared
 /// absolute deadline. A saturated bounded channel is part of the same budget
@@ -1315,11 +1318,25 @@ impl proto::policy_service_server::PolicyService for PolicyService {
         &self,
         request: Request<proto::TestPolicyRequest>,
     ) -> Result<Response<proto::TestPolicyResponse>, Status> {
+        use prost::Message;
         use rustbgpd_policy::rpol::{RpolFile, parse_call_form};
         use rustbgpd_policy::sets::SetStore;
         use rustbgpd_rib::{RouteQueryScope, route_query_key};
 
         let req = request.into_inner();
+        if req.encoded_len() > TEST_POLICY_MAX_REQUEST_BYTES {
+            return Err(Status::invalid_argument(
+                "TestPolicy candidate input exceeds the request size limit",
+            ));
+        }
+        if req.show_rejected > TEST_POLICY_MAX_REJECTED_SAMPLES {
+            return Err(Status::invalid_argument(format!(
+                "show_rejected exceeds {TEST_POLICY_MAX_REJECTED_SAMPLES}"
+            )));
+        }
+        if req.datasets.len() > rustbgpd_policy::datasets::MAX_UNIT_DATASETS {
+            return Err(Status::invalid_argument("too many candidate datasets"));
+        }
         let import = match req.direction.as_str() {
             "import" => true,
             "export" => false,
@@ -1374,20 +1391,40 @@ impl proto::policy_service_server::PolicyService for PolicyService {
                 args.len()
             )));
         }
+        let declared: std::collections::HashMap<_, _> = file.dataset_decls().collect();
+        let mut bindings = rustbgpd_policy::datasets::DatasetBindings::new();
+        for dataset in &req.datasets {
+            let Some(&kind) = declared.get(dataset.name.as_str()) else {
+                return Err(Status::invalid_argument(format!(
+                    "candidate dataset {:?} is not declared in the submitted source",
+                    dataset.name
+                )));
+            };
+            if bindings.get(&dataset.name).is_some() {
+                return Err(Status::invalid_argument(format!(
+                    "duplicate candidate dataset {:?}",
+                    dataset.name
+                )));
+            }
+            let data = rustbgpd_policy::rpol::parse_dataset_text(&dataset.entries, kind).map_err(
+                |error| {
+                    Status::invalid_argument(format!(
+                        "candidate dataset {:?}: {error}",
+                        dataset.name
+                    ))
+                },
+            )?;
+            bindings.insert(std::sync::Arc::new(
+                rustbgpd_policy::datasets::DatasetHandle::new(&dataset.name, kind, data),
+            ));
+        }
         let mut store = SetStore::new();
-        // Dry runs have no dataset file bindings — a candidate source
-        // referencing one is rejected, not panicked on (LAN-305).
         let chain = file
-            .compile_policy_bound(
-                base,
-                &args,
-                &mut store,
-                &rustbgpd_policy::datasets::DatasetBindings::new(),
-            )
+            .compile_policy_bound(base, &args, &mut store, &bindings)
             .expect("existence checked above")
             .map_err(|missing| {
                 Status::invalid_argument(format!(
-                    "policy {base:?} probes datasets, which TestPolicy cannot bind: {missing}"
+                    "policy {base:?} probes an unbound candidate dataset: {missing}"
                 ))
             })?;
 
@@ -1422,6 +1459,7 @@ impl proto::policy_service_server::PolicyService for PolicyService {
             family_filter,
             limit: req.limit as usize,
             show_changes: req.show_changes as usize,
+            show_rejected: req.show_rejected as usize,
         };
         let mut hits = chain.zero_term_hits();
         let mut response = proto::TestPolicyResponse {
@@ -1711,6 +1749,8 @@ struct TestPolicyScope {
     limit: usize,
     /// Max before/after diff samples returned.
     show_changes: usize,
+    /// Max rejected route samples returned.
+    show_rejected: usize,
 }
 
 /// Evaluate the compiled candidate policy read-only over the route
@@ -1807,6 +1847,15 @@ fn run_test_policy_page(
             }
         } else {
             response.rejected += 1;
+            if response.rejected_routes.len() < scope.show_rejected {
+                response
+                    .rejected_routes
+                    .push(proto::TestPolicyRejectedRoute {
+                        prefix: route.prefix.addr_string(),
+                        prefix_length: u32::from(route.prefix.prefix_len()),
+                        peer: route.peer.to_string(),
+                    });
+            }
         }
     }
 }
@@ -1967,6 +2016,7 @@ mod tests {
             afi_safi: proto::AddressFamily::Unspecified as i32,
             limit: 0,
             show_changes: 0,
+            ..Default::default()
         }
     }
 
@@ -3484,6 +3534,7 @@ policy customer-in(peer_lp: u32) {
                 afi_safi: proto::AddressFamily::Unspecified as i32,
                 limit: 0,
                 show_changes: 1,
+                ..Default::default()
             }),
         )
         .await
@@ -3522,6 +3573,7 @@ policy customer-in(peer_lp: u32) {
                 afi_safi: 0,
                 limit: 0,
                 show_changes: 0,
+                ..Default::default()
             }),
         )
         .await
@@ -3557,6 +3609,7 @@ policy customer-in(peer_lp: u32) {
                 afi_safi: 0,
                 limit: 0,
                 show_changes: 0,
+                ..Default::default()
             }),
         )
         .await
@@ -3566,6 +3619,180 @@ policy customer-in(peer_lp: u32) {
             status.message().contains("customers"),
             "{}",
             status.message()
+        );
+    }
+
+    fn golden_candidate_dataset(name: &str, entries: &str) -> proto::TestPolicyDataset {
+        proto::TestPolicyDataset {
+            name: format!("client-as4242-1-{name}"),
+            entries: entries.to_string(),
+        }
+    }
+
+    fn golden_candidate_request(prefixes: &str) -> proto::TestPolicyRequest {
+        proto::TestPolicyRequest {
+            rpol_source: include_str!(
+                "../../../tools/rs-config-render/tests/golden/client-as4242-1.rpol"
+            )
+            .to_string(),
+            policy: "client-as4242-1".to_string(),
+            peer: "10.0.0.9".to_string(),
+            datasets: vec![
+                golden_candidate_dataset("origins", "64496\n"),
+                golden_candidate_dataset("prefixes", prefixes),
+            ],
+            show_rejected: 1,
+            ..test_policy_request()
+        }
+    }
+
+    #[tokio::test]
+    async fn test_policy_golden_candidate_prefix_drop_names_exact_route() {
+        let mut carried = vec![test_route("192.0.2.0", 24), test_route("192.0.2.128", 25)];
+        for route in &mut carried {
+            route.attributes = AttrSet::new(vec![rustbgpd_wire::PathAttribute::AsPath(
+                rustbgpd_wire::AsPath {
+                    segments: vec![rustbgpd_wire::AsPathSegment::AsSequence(vec![64496])],
+                },
+            )]);
+        }
+        let svc = test_policy_service(carried.clone());
+        let full = PolicyServiceRpc::test_policy(
+            &svc,
+            Request::new(golden_candidate_request("192.0.2.0/24\n192.0.2.128/25\n")),
+        )
+        .await
+        .unwrap()
+        .into_inner();
+        assert_eq!(
+            (full.routes_evaluated, full.accepted, full.rejected),
+            (2, 2, 0)
+        );
+        assert!(full.rejected_routes.is_empty());
+
+        let svc = test_policy_service(carried);
+        let removed = PolicyServiceRpc::test_policy(
+            &svc,
+            Request::new(golden_candidate_request("192.0.2.0/24\n")),
+        )
+        .await
+        .unwrap()
+        .into_inner();
+        assert_eq!(
+            (removed.routes_evaluated, removed.accepted, removed.rejected),
+            (2, 1, 1)
+        );
+        assert_eq!(removed.rejected_routes.len(), 1);
+        assert_eq!(removed.rejected_routes[0].prefix, "192.0.2.128");
+        assert_eq!(removed.rejected_routes[0].prefix_length, 25);
+        assert_eq!(removed.rejected_routes[0].peer, "10.0.0.9");
+    }
+
+    #[tokio::test]
+    async fn test_policy_rejects_invalid_candidate_bindings() {
+        let svc = test_policy_service(Vec::new());
+        for (datasets, expected) in [
+            (
+                vec![golden_candidate_dataset("prefixes", "192.0.2.0/24\n")],
+                "client-as4242-1-origins",
+            ),
+            (
+                vec![
+                    golden_candidate_dataset("origins", "64496\n"),
+                    golden_candidate_dataset("origins", "64496\n"),
+                ],
+                "duplicate candidate dataset",
+            ),
+            (
+                vec![golden_candidate_dataset("prefixes", "bogus\n")],
+                "line 1",
+            ),
+            (
+                vec![golden_candidate_dataset("unknown", "64496\n")],
+                "not declared",
+            ),
+        ] {
+            let status = PolicyServiceRpc::test_policy(
+                &svc,
+                Request::new(proto::TestPolicyRequest {
+                    datasets,
+                    ..golden_candidate_request("192.0.2.0/24\n")
+                }),
+            )
+            .await
+            .unwrap_err();
+            assert_eq!(status.code(), tonic::Code::InvalidArgument);
+            assert!(status.message().contains(expected), "{status}");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_policy_candidate_size_and_sample_bounds() {
+        use prost::Message;
+
+        let svc = test_policy_service(Vec::new());
+        let mut admitted = test_policy_request();
+        admitted.rpol_source.push_str("\n#");
+        admitted.rpol_source.push_str(
+            &"x".repeat(TEST_POLICY_MAX_REQUEST_BYTES - 256 - admitted.rpol_source.len()),
+        );
+        assert!(admitted.encoded_len() > TEST_POLICY_MAX_REQUEST_BYTES - 4096);
+        assert!(admitted.encoded_len() < TEST_POLICY_MAX_REQUEST_BYTES);
+        assert!(
+            PolicyServiceRpc::test_policy(&svc, Request::new(admitted))
+                .await
+                .unwrap()
+                .into_inner()
+                .compiled
+        );
+        for (request, expected) in [
+            (
+                proto::TestPolicyRequest {
+                    rpol_source: "x".repeat(TEST_POLICY_MAX_REQUEST_BYTES + 1),
+                    ..test_policy_request()
+                },
+                "size limit",
+            ),
+            (
+                proto::TestPolicyRequest {
+                    show_rejected: TEST_POLICY_MAX_REJECTED_SAMPLES + 1,
+                    ..test_policy_request()
+                },
+                "show_rejected",
+            ),
+        ] {
+            let status = PolicyServiceRpc::test_policy(&svc, Request::new(request))
+                .await
+                .unwrap_err();
+            assert_eq!(status.code(), tonic::Code::InvalidArgument);
+            assert!(status.message().contains(expected), "{status}");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_policy_rejected_samples_are_capped_across_pages() {
+        let svc = test_policy_service((0..1001).map(customer_route).collect());
+        let response = PolicyServiceRpc::test_policy(
+            &svc,
+            Request::new(proto::TestPolicyRequest {
+                rpol_source: "policy p { term t { reject } }".to_string(),
+                policy: "p".to_string(),
+                show_rejected: 2,
+                ..test_policy_request()
+            }),
+        )
+        .await
+        .unwrap()
+        .into_inner();
+        assert_eq!(response.rejected, 1001);
+        assert_eq!(response.rejected_routes.len(), 2);
+        assert_eq!(
+            response.rejected_routes[0].prefix,
+            customer_route(0).prefix.addr_string()
+        );
+        assert_eq!(
+            response.rejected_routes[1].prefix,
+            customer_route(1).prefix.addr_string()
         );
     }
 
@@ -3580,6 +3807,7 @@ policy customer-in(peer_lp: u32) {
             afi_safi: 0,
             limit: 0,
             show_changes: 0,
+            ..Default::default()
         };
         for (policy, direction) in [
             ("customer-in", "import"),  // arity
@@ -3613,6 +3841,7 @@ policy customer-in(peer_lp: u32) {
                 afi_safi: proto::AddressFamily::Ipv4Unicast as i32,
                 limit: 2,
                 show_changes: 0,
+                ..Default::default()
             }),
         )
         .await

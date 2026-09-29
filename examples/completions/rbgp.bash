@@ -11153,7 +11153,7 @@ _rbgp() {
             return 0
             ;;
         rbgp__subcmd__policy__subcmd__test)
-            opts="-a -s -j -h --policy --direction --peer --neighbor --family --limit --all --show-changes --addr --token-file --tls-ca --tls-cert --tls-key --tls-server-name --json --json-version --no-color --help"
+            opts="-a -s -j -h --policy --direction --peer --neighbor --family --limit --all --show-changes --dataset --show-rejected --addr --token-file --tls-ca --tls-cert --tls-key --tls-server-name --json --json-version --no-color --help"
             if [[ ${cur} == -* ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -11196,6 +11196,14 @@ _rbgp() {
                     return 0
                     ;;
                 --show-changes)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --dataset)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --show-rejected)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;

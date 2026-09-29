@@ -10,6 +10,8 @@
 //!   `chain clear-export (--global | --neighbor ADDR)` to drop the
 //!   resolved chain entirely.
 
+use std::io::Read;
+
 use serde::Serialize;
 
 use crate::commands::neighbor::bare_ip_rpc_address;
@@ -776,6 +778,29 @@ pub struct TestOptions<'a> {
     pub limit: u32,
     /// Max before/after diff samples.
     pub show_changes: u32,
+    /// Candidate dataset NAME=PATH bindings.
+    pub datasets: &'a [String],
+    /// Max rejected route samples.
+    pub show_rejected: u32,
+}
+
+// Bound file reads before allocation, then check the exact encoded request size.
+const TEST_POLICY_MAX_REQUEST_BYTES: usize = 4 * 1024 * 1024;
+const TEST_POLICY_MAX_REJECTED_SAMPLES: u32 = 1000;
+
+fn read_test_policy_file(path: &str, limit: usize) -> Result<String, CliError> {
+    let file = std::fs::File::open(path)
+        .map_err(|error| CliError::Argument(format!("cannot read {path}: {error}")))?;
+    let mut text = String::new();
+    file.take((limit + 1) as u64)
+        .read_to_string(&mut text)
+        .map_err(|error| CliError::Argument(format!("cannot read {path}: {error}")))?;
+    if text.len() > limit {
+        return Err(CliError::Argument(format!(
+            "{path} exceeds the TestPolicy request size limit"
+        )));
+    }
+    Ok(text)
 }
 
 #[derive(Serialize)]
@@ -788,6 +813,12 @@ struct JsonDiff<'a> {
     prefix: String,
     peer: &'a str,
     changes: &'a [String],
+}
+
+#[derive(Serialize)]
+struct JsonRejectedRoute<'a> {
+    prefix: String,
+    peer: &'a str,
 }
 #[derive(Serialize)]
 struct JsonTest<'a> {
@@ -803,6 +834,8 @@ struct JsonTest<'a> {
     modified: u64,
     term_hits: Vec<JsonTermHits<'a>>,
     diffs: Vec<JsonDiff<'a>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    rejected_routes: Option<Vec<JsonRejectedRoute<'a>>>,
 }
 
 fn test_to_json<'a>(resp: &'a proto::TestPolicyResponse, opts: &TestOptions<'a>) -> JsonTest<'a> {
@@ -833,6 +866,15 @@ fn test_to_json<'a>(resp: &'a proto::TestPolicyResponse, opts: &TestOptions<'a>)
                 changes: &d.changes,
             })
             .collect(),
+        rejected_routes: (opts.show_rejected > 0).then(|| {
+            resp.rejected_routes
+                .iter()
+                .map(|route| JsonRejectedRoute {
+                    prefix: format!("{}/{}", route.prefix, route.prefix_length),
+                    peer: &route.peer,
+                })
+                .collect()
+        }),
     }
 }
 
@@ -843,8 +885,39 @@ pub async fn test(
     opts: TestOptions<'_>,
     json: bool,
 ) -> Result<(), CliError> {
-    let rpol_source = std::fs::read_to_string(opts.file)
-        .map_err(|error| CliError::Argument(format!("cannot read {}: {error}", opts.file)))?;
+    use prost::Message;
+
+    if opts.show_rejected > TEST_POLICY_MAX_REJECTED_SAMPLES {
+        return Err(CliError::Argument(format!(
+            "--show-rejected exceeds {TEST_POLICY_MAX_REJECTED_SAMPLES}"
+        )));
+    }
+    if opts.datasets.len() > rustbgpd_policy::datasets::MAX_UNIT_DATASETS {
+        return Err(CliError::Argument("too many --dataset bindings".into()));
+    }
+    let rpol_source = read_test_policy_file(opts.file, TEST_POLICY_MAX_REQUEST_BYTES)?;
+    let mut remaining = TEST_POLICY_MAX_REQUEST_BYTES - rpol_source.len();
+    let mut names = std::collections::HashSet::new();
+    let mut datasets = Vec::with_capacity(opts.datasets.len());
+    for binding in opts.datasets {
+        let (name, path) = binding.split_once('=').ok_or_else(|| {
+            CliError::Argument(format!("invalid --dataset {binding:?}; expected NAME=PATH"))
+        })?;
+        if name.is_empty() || path.is_empty() || !names.insert(name) {
+            return Err(CliError::Argument(format!(
+                "invalid or duplicate --dataset {binding:?}; expected unique NAME=PATH"
+            )));
+        }
+        remaining = remaining.checked_sub(name.len()).ok_or_else(|| {
+            CliError::Argument("candidate datasets exceed the TestPolicy request size limit".into())
+        })?;
+        let entries = read_test_policy_file(path, remaining)?;
+        remaining -= entries.len();
+        datasets.push(proto::TestPolicyDataset {
+            name: name.into(),
+            entries,
+        });
+    }
     let afi_safi = match opts.family {
         None => proto::AddressFamily::Unspecified,
         Some("ipv4_unicast" | "ipv4") => proto::AddressFamily::Ipv4Unicast,
@@ -855,26 +928,31 @@ pub async fn test(
             )));
         }
     };
+    let request = proto::TestPolicyRequest {
+        rpol_source,
+        policy: opts.policy.to_string(),
+        direction: opts.direction.to_string(),
+        peer: opts
+            .peer
+            .map(bare_ip_rpc_address)
+            .unwrap_or_default()
+            .to_string(),
+        afi_safi: afi_safi as i32,
+        limit: opts.limit,
+        show_changes: opts.show_changes,
+        datasets,
+        show_rejected: opts.show_rejected,
+    };
+    if request.encoded_len() > TEST_POLICY_MAX_REQUEST_BYTES {
+        return Err(CliError::Argument(
+            "TestPolicy request exceeds the size limit".into(),
+        ));
+    }
     let mut client =
         PolicyServiceClient::with_interceptor(connection.channel(), connection.interceptor());
-    let resp = read_rpc(
-        "TestPolicy",
-        client.test_policy(proto::TestPolicyRequest {
-            rpol_source,
-            policy: opts.policy.to_string(),
-            direction: opts.direction.to_string(),
-            peer: opts
-                .peer
-                .map(bare_ip_rpc_address)
-                .unwrap_or_default()
-                .to_string(),
-            afi_safi: afi_safi as i32,
-            limit: opts.limit,
-            show_changes: opts.show_changes,
-        }),
-    )
-    .await?
-    .into_inner();
+    let resp = read_rpc("TestPolicy", client.test_policy(request))
+        .await?
+        .into_inner();
 
     if json {
         output::print_json_pretty(&test_to_json(&resp, &opts))?;
@@ -915,6 +993,21 @@ pub async fn test(
             for change in &d.changes {
                 outln!("    {change}")?;
             }
+        }
+    }
+    if opts.show_rejected > 0 {
+        outln!(
+            "Rejected routes (showing {} of {}):",
+            resp.rejected_routes.len(),
+            resp.rejected
+        )?;
+        for route in &resp.rejected_routes {
+            outln!(
+                "  {}/{} (from {})",
+                route.prefix,
+                route.prefix_length,
+                route.peer
+            )?;
         }
     }
     Ok(())
@@ -2179,7 +2272,7 @@ mod tests {
 
     #[test]
     fn policy_test_json_covers_proto_fields() {
-        let opts = TestOptions {
+        let mut opts = TestOptions {
             file: "edge.rpol",
             policy: "edge-in(200)",
             direction: "import",
@@ -2187,6 +2280,8 @@ mod tests {
             family: Some("ipv6_unicast"),
             limit: 17,
             show_changes: 2,
+            datasets: &[],
+            show_rejected: 0,
         };
         let mut response = proto::TestPolicyResponse {
             compiled: true,
@@ -2214,6 +2309,7 @@ mod tests {
                     "communities + 65001:7".into(),
                 ],
             }],
+            ..Default::default()
         };
         // Request filters/bounds are not response fields; only file/policy/direction
         // annotate the RPC's counters and diffs in this curated document.
@@ -2228,6 +2324,21 @@ mod tests {
                     "changes": ["local_pref 100 -> 200", "communities + 65001:7"]}]
             })
         );
+        opts.show_rejected = 2;
+        response.rejected_routes = vec![proto::TestPolicyRejectedRoute {
+            prefix: "192.0.2.0".into(),
+            prefix_length: 24,
+            peer: "192.0.2.9".into(),
+        }];
+        let json = serde_json::to_value(test_to_json(&response, &opts)).unwrap();
+        assert_eq!(
+            json["rejected_routes"],
+            serde_json::json!([
+                {"prefix": "192.0.2.0/24", "peer": "192.0.2.9"}
+            ])
+        );
+        opts.show_rejected = 0;
+        response.rejected_routes.clear();
         response.compiled = false;
         response.diagnostics.clear();
         response.routes_evaluated = 0;
@@ -2516,6 +2627,8 @@ mod tests {
                 family: Some("ipv4_unicast"),
                 limit: 100,
                 show_changes: 5,
+                datasets: &[],
+                show_rejected: 0,
             },
             true,
         )
@@ -2535,6 +2648,77 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_candidate_datasets_are_read_locally_and_sent_as_text() {
+        let server = spawn_mock_server(None).await;
+        let connection = connect(&server.addr, None).await.unwrap();
+        let source = write_rpol("dataset prefix-set prefixes\npolicy p { term t { reject } }");
+        let candidate = write_rpol("192.0.2.0/24\n");
+        let binding = format!("prefixes={}", candidate.path().display());
+        test(
+            connection,
+            TestOptions {
+                file: source.path().to_str().unwrap(),
+                policy: "p",
+                direction: "import",
+                peer: None,
+                family: None,
+                limit: 0,
+                show_changes: 0,
+                datasets: &[binding],
+                show_rejected: 3,
+            },
+            true,
+        )
+        .await
+        .unwrap();
+        let captured = server.state.last_test_policy.lock().await.clone().unwrap();
+        assert_eq!(captured.datasets.len(), 1);
+        assert_eq!(captured.datasets[0].name, "prefixes");
+        assert_eq!(captured.datasets[0].entries, "192.0.2.0/24\n");
+        assert_eq!(captured.show_rejected, 3);
+    }
+
+    #[test]
+    fn test_candidate_file_read_is_bounded() {
+        let file = write_rpol("123456");
+        let error = read_test_policy_file(file.path().to_str().unwrap(), 5).unwrap_err();
+        assert!(matches!(error, CliError::Argument(_)));
+    }
+
+    #[tokio::test]
+    async fn test_candidate_binding_requires_unique_name_and_path() {
+        let server = spawn_mock_server(None).await;
+        let connection = connect(&server.addr, None).await.unwrap();
+        let source = write_rpol("policy p { term t { reject } }");
+        let candidate = write_rpol("192.0.2.0/24\n");
+        let valid = format!("prefixes={}", candidate.path().display());
+        for datasets in [
+            vec!["prefixes".to_string()],
+            vec![valid.clone(), valid.clone()],
+        ] {
+            let error = test(
+                connection.clone(),
+                TestOptions {
+                    file: source.path().to_str().unwrap(),
+                    policy: "p",
+                    direction: "import",
+                    peer: None,
+                    family: None,
+                    limit: 0,
+                    show_changes: 0,
+                    datasets: &datasets,
+                    show_rejected: 0,
+                },
+                true,
+            )
+            .await
+            .unwrap_err();
+            assert!(matches!(error, CliError::Argument(_)));
+        }
+        assert!(server.state.last_test_policy.lock().await.is_none());
+    }
+
+    #[tokio::test]
     async fn test_rejects_unknown_family_and_missing_file() {
         let server = spawn_mock_server(None).await;
         let connection = connect(&server.addr, None).await.unwrap();
@@ -2547,6 +2731,8 @@ mod tests {
             family,
             limit: 0,
             show_changes: 0,
+            datasets: &[],
+            show_rejected: 0,
         };
         let path = file.path().to_str().unwrap();
         let err = test(connection.clone(), opts(path, Some("l2vpn_evpn")), false)
