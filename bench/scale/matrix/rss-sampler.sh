@@ -3,7 +3,10 @@
 # memory across the process TREE rooted at <root_pid> into a CSV. OpenBGPD is
 # three processes (parent + RDE + SE), so a single-pid readout undercounts.
 #
-# Usage: rss-sampler.sh <root_pid> <out_csv> [interval_s=5]
+# Usage: rss-sampler.sh <root_pid> <out_csv> [interval_s=5] [cgroup_dir]
+#
+# With a cgroup_dir, each row also carries that cgroup's memory.current in a
+# trailing cg_current_kib column (blank when the read fails at teardown).
 #
 # Prefers /proc/<pid>/smaps_rollup (precise Rss). That file is 0400, so for
 # processes owned by another user (daemons inside containers run as root in
@@ -14,6 +17,7 @@ set -u
 root=${1:?usage: rss-sampler.sh <root_pid> <out_csv> [interval_s]}
 out=${2:?usage: rss-sampler.sh <root_pid> <out_csv> [interval_s]}
 interval=${3:-5}
+cgroup=${4:-}
 
 # Walk the tree via /proc/<pid>/task/*/children (works without ps/pgrep and
 # without permission on the target processes).
@@ -25,7 +29,11 @@ tree() {
     done
 }
 
-echo "epoch_s,total_rss_kib,pids" >"$out"
+if [ -n "$cgroup" ]; then
+    echo "epoch_s,total_rss_kib,pids,cg_current_kib" >"$out"
+else
+    echo "epoch_s,total_rss_kib,pids" >"$out"
+fi
 # ponytail: liveness via /proc existence, not `kill -0` — kill -0 reports
 # EPERM (failure) for other users' live processes, e.g. container daemons.
 while [ -d "/proc/$root" ]; do
@@ -48,6 +56,11 @@ while [ -d "/proc/$root" ]; do
         sleep "$interval"
         continue
     fi
-    echo "$(date +%s),$total,$n" >>"$out"
+    if [ -n "$cgroup" ]; then
+        cg_bytes=$(cat "$cgroup/memory.current" 2>/dev/null) || cg_bytes=
+        echo "$(date +%s),$total,$n,${cg_bytes:+$((cg_bytes / 1024))}" >>"$out"
+    else
+        echo "$(date +%s),$total,$n" >>"$out"
+    fi
     sleep "$interval"
 done

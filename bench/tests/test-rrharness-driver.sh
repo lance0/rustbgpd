@@ -87,6 +87,26 @@ rg -F 'receipt_status=regression-gate-passed' "$driver" >/dev/null || {
   exit 1
 }
 
+# The driver writes results.csv's header itself; it must name every parser
+# column (including the trailing cgroup ones) or the extra fields go unnamed.
+driver_header=$(sed -n "s/^  '\(variant,commit,mode,[^']*\)' \\\\$/\1/p" "$driver")
+parser_header=$(cd "$repo/bench/scale/rebaseline" &&
+  python3 -c 'from parse_rrharness import RESULT_FIELDS; print(",".join(RESULT_FIELDS))')
+[[ -n $driver_header && $driver_header == "$parser_header" ]] || {
+  printf 'driver results.csv header differs from the parser RESULT_FIELDS\n' >&2
+  exit 1
+}
+
+# The manifest's launch description follows the leg launch actually used.
+# shellcheck disable=SC2016 # Literal driver source text, not an expansion.
+for launch_pattern in '"launch": "$launch_mode"' \
+  'launch_mode=direct-prebuilt-binary-with-taskset' 'launch_mode=systemd-user-scope-'; do
+  rg -F -- "$launch_pattern" "$driver" >/dev/null || {
+    printf 'rrharness manifest launch is not derived from the memory scope mode\n' >&2
+    exit 1
+  }
+done
+
 cp "$driver" "$external_driver"
 chmod +x "$external_driver"
 expect_rc 2 'external driver' "$external_driver" --validate-only --base "$base" --head "$head"

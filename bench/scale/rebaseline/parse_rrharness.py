@@ -43,7 +43,12 @@ RESULT_FIELDS = (
     "folded_sha256",
     "classified_sha256",
     "total_samples",
+    "cg_peak_mib",
+    "cg_settled_current_mib",
 )
+# Receipts written before the cgroup memory columns existed stay readable.
+LEGACY_RESULT_FIELDS = RESULT_FIELDS[:-2]
+CGROUP_KEYS = ("cg_peak_bytes", "cg_settled_current_bytes", "cg_swap_max")
 
 COMPARISON_FIELDS = (
     "mode",
@@ -213,8 +218,30 @@ def validate_classified(path: Path) -> int:
     return total
 
 
+def parse_cgroup(path: Path | None) -> dict[str, str]:
+    """Read the leg's cgroup memory readout; no file means no scope (blank columns)."""
+    if path is None:
+        return {"cg_peak_mib": "", "cg_settled_current_mib": ""}
+    values: dict[str, str] = {}
+    for line in path.read_text(encoding="utf-8").splitlines():
+        key, _, value = line.partition(" ")
+        if key not in CGROUP_KEYS or key in values:
+            raise ValueError(f"{path}: unknown or duplicate cgroup key {key!r}")
+        values[key] = value
+    if set(values) != set(CGROUP_KEYS):
+        raise ValueError(f"{path}: expected keys {', '.join(CGROUP_KEYS)}")
+    if values["cg_swap_max"] != "0":
+        raise ValueError(f"{path}: swap was not fenced (memory.swap.max={values['cg_swap_max']!r})")
+    mib = 1024 * 1024
+    return {
+        "cg_peak_mib": f"{positive_integer(values['cg_peak_bytes'], 'cg_peak_bytes') / mib:.3f}",
+        "cg_settled_current_mib": f"{positive_integer(values['cg_settled_current_bytes'], 'cg_settled_current_bytes') / mib:.3f}",
+    }
+
+
 def parse_command(args: argparse.Namespace) -> None:
     header, values = parse_log(args.log, args.mode)
+    cgroup = parse_cgroup(args.cgroup)
     if args.mode == "flood":
         clients, prefixes, seconds = header
         candidates = 0
@@ -302,6 +329,7 @@ def parse_command(args: argparse.Namespace) -> None:
         "folded_sha256": sha256(args.folded),
         "classified_sha256": sha256(args.classified),
         "total_samples": total_samples,
+        **cgroup,
     }
     args.output.parent.mkdir(parents=True, exist_ok=True)
     with args.output.open("w", newline="", encoding="utf-8") as handle:
@@ -313,9 +341,18 @@ def parse_command(args: argparse.Namespace) -> None:
 def read_results(path: Path) -> list[dict[str, str]]:
     with path.open(newline="", encoding="utf-8") as handle:
         reader = csv.DictReader(handle)
-        if tuple(reader.fieldnames or ()) != RESULT_FIELDS:
+        if tuple(reader.fieldnames or ()) not in (RESULT_FIELDS, LEGACY_RESULT_FIELDS):
             raise ValueError(f"{path}: unexpected results header")
         rows = list(reader)
+    for row in rows:
+        if None in row:
+            raise ValueError(f"{path}: row has more fields than the header names")
+        cgroup = [row.get(field, "") for field in RESULT_FIELDS[len(LEGACY_RESULT_FIELDS):]]
+        if all(cgroup):
+            for field, value in zip(RESULT_FIELDS[len(LEGACY_RESULT_FIELDS):], cgroup):
+                finite_number(value, field)
+        elif any(cgroup):
+            raise ValueError(f"{path}: cgroup columns must be both populated or both blank")
     if len(rows) != 16:
         raise ValueError(f"{path}: expected 16 result rows, got {len(rows)}")
     return rows
@@ -544,6 +581,11 @@ def build_parser() -> argparse.ArgumentParser:
     parse.add_argument("--folded", type=Path, required=True)
     parse.add_argument("--classified", type=Path, required=True)
     parse.add_argument("--output", type=Path, required=True)
+    parse.add_argument(
+        "--cgroup",
+        type=Path,
+        help="cgroup memory readout (cg_peak_bytes, cg_settled_current_bytes, cg_swap_max)",
+    )
     parse.set_defaults(run=parse_command)
     compare = commands.add_parser("compare", help="validate and gate the complete matrix")
     compare.add_argument("--input", type=Path, required=True)

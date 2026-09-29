@@ -10,6 +10,11 @@
 #   historical (default): BIRD 3.3.1 / OpenBGPD 9.1, the frozen receipt recipe
 #   current: BIRD 3.3.2 / OpenBGPD 9.2, the explicit refresh generation
 #
+# The native rustbgpd daemon runs in its own systemd user scope with
+# MemorySwapMax=0: cgroup-memory records the scope's memory.peak (cg_peak) and
+# rss.csv gains its memory.current per sample (cg_current_kib). Competitor
+# cells and hosts without a user scope keep the RSS/VmHWM-only receipt.
+#
 # One cell at a time: 1-min loadavg gate (< 2.0) before each cell, 5-minute
 # cool-down after. Per-cell status files under the artifacts dir make the
 # campaign resumable — a rerun skips cells whose status is `pass` (delete the
@@ -332,6 +337,40 @@ probe_query_loop() {
     return 0
 }
 
+# Native daemon memory scope: a transient systemd user scope with swap fenced,
+# so the scope's memory.peak (cg_peak) covers every page the daemon charged;
+# RSS and VmHWM miss swapped pages and kernel-side charges. Without a usable
+# user manager the cell still runs, warns, and records why cg_peak is absent.
+MEMORY_SCOPE=()
+memory_scope_launcher() {
+    local out=$1
+    rm -f "$out"
+    MEMORY_SCOPE=(systemd-run --user --scope --quiet -p MemorySwapMax=0 --)
+    # shellcheck disable=SC2016 # Expanded by the scoped shell, not here.
+    if "${MEMORY_SCOPE[@]}" sh -c 'cg=/sys/fs/cgroup$(sed -n "s/^0:://p" /proc/self/cgroup)
+        test -r "$cg/memory.peak" && test "$(cat "$cg/memory.swap.max")" = 0' >/dev/null 2>&1; then
+        return 0
+    fi
+    MEMORY_SCOPE=()
+    echo "WARNING: no systemd user scope with a readable memory.peak and memory.swap.max=0; cg_peak will be absent" >&2
+    echo "cg_scope: unavailable" >"$out"
+}
+# Print the daemon's scope cgroup directory once its fence is confirmed.
+daemon_scope_cgroup() {
+    local cgroup
+    cgroup=/sys/fs/cgroup$(sed -n 's/^0:://p' "/proc/$1/cgroup") || return 1
+    case $cgroup in *.scope) ;; *) return 1 ;; esac
+    [ -r "$cgroup/memory.peak" ] && [ "$(cat "$cgroup/memory.swap.max")" = 0 ] &&
+        printf '%s\n' "$cgroup"
+}
+record_scope_memory() {
+    local cgroup=$1 out=$2 peak current swap_max
+    peak=$(cat "$cgroup/memory.peak") && current=$(cat "$cgroup/memory.current") &&
+        swap_max=$(cat "$cgroup/memory.swap.max") || return 1
+    printf 'cg_peak: %s kB\ncg_current: %s kB\ncg_swap_max: %s\n' \
+        $((peak / 1024)) $((current / 1024)) "$swap_max" >"$out"
+}
+
 # Bound native process teardown independently of the daemon's actor deadlines.
 # The optional duration is for short companion fixtures; cells always use 60s.
 stop_native_daemon() {
@@ -399,7 +438,8 @@ run_cell() {
             python3 "$RSTALL/membership_churn.py" prepare "$run" "$N_PEERS" "$TOTAL" "$RELOADS" || return 1
         fi
         recheck_cell_provenance "$cell" || return 1
-        "$REPO/target/release/rustbgpd" "$run/config.toml" \
+        memory_scope_launcher "$cdir/cgroup-memory" || return 1
+        "${MEMORY_SCOPE[@]}" "$REPO/target/release/rustbgpd" "$run/config.toml" \
             >"$cdir/daemon.log" 2>&1 &
         daemon_pid=$!
         live="$run/member.rpol" a="$run/gen-a.rpol" b="$run/gen-b.rpol"
@@ -459,7 +499,15 @@ run_cell() {
         return 1
     fi
 
-    "$SAMPLER" "$daemon_pid" "$cdir/rss.csv" 5 &
+    local cgroup=""
+    if [ "$cell" = rustbgpd ] && [ ${#MEMORY_SCOPE[@]} -gt 0 ]; then
+        cgroup=$(daemon_scope_cgroup "$daemon_pid") || {
+            echo "cell $cell: daemon is not in a swap-fenced scope; stopping" >&2
+            stop_native_daemon "$daemon_pid" "$cdir/daemon.exit"
+            return 1
+        }
+    fi
+    "$SAMPLER" "$daemon_pid" "$cdir/rss.csv" 5 "$cgroup" &
     local sampler_pid=$!
     local probe_pids=()
     if [ "$cell" = rustbgpd ] && [ -n "$PROBE_PREFIXES" ]; then
@@ -551,6 +599,10 @@ run_cell() {
         # Peak resident set over the whole cell, from the kernel's own
         # high-water mark, before the daemon goes away.
         grep -E '^(VmHWM|VmRSS):' "/proc/$daemon_pid/status" >"$cdir/vmhwm" 2>/dev/null || cleanup_rc=1
+        # The scope's own high-water mark (cg_peak), read while it still exists.
+        if [ -n "${cgroup:-}" ]; then
+            record_scope_memory "$cgroup" "$cdir/cgroup-memory" || cleanup_rc=1
+        fi
         stop_native_daemon "$daemon_pid" "$cdir/daemon.exit" || cleanup_rc=1
     fi
     cp -r "$run" "$cdir/scenario" || cleanup_rc=1
