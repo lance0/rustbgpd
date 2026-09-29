@@ -281,8 +281,9 @@ class Summary(unittest.TestCase):
 
     def test_duplicate_run_ids_are_invalid(self):
         campaign(self.out)
-        env = self.out / "cells" / "head-r3" / "cell.env"
-        env.write_text(env.read_text().replace("run=3", "run=2"))
+        for arm in ("base", "head"):
+            env = self.out / "cells" / f"{arm}-r3" / "cell.env"
+            env.write_text(env.read_text().replace("run=3", "run=2"))
         self.assertEqual(self.summarize(), 1)
         self.assertIn("'head': [1, 2, 2]", (self.out / "summary.txt").read_text())
 
