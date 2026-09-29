@@ -140,6 +140,17 @@ bundle, pass an output directory too, as in
 `just bench-headline-summary docs/perf/artifacts/<bundle> --out <dir>`. The
 receipts before 2026-09-28 ran from hand-built drivers.
 
+RPKI and ASPA performance changes have a daemon-level A/B cell:
+`DAEMON_CPUS=<list> RTR_CPUS=<list> just bench-rpki-cell <out-dir> <base> <head>`
+runs the reloadstall 700-member initial convergence with a static
+500,000-entry VRP table served by a digest-pinned StayRTR container, three
+alternating runs per arm. Every announced prefix validates against the table,
+and a cell fails unless the daemon reports the full table before the first
+route arrives. It writes `cells.csv` and `summary.txt` with the RIB actor's
+`route_chunk` work, daemon CPU time and convergence wall time; `SMOKE=1` runs
+a tiny shape as a pipeline check. The table is VRP only: StayRTR speaks RTR
+version 1 and serves no ASPA records.
+
 ## Reading the archive
 
 This directory is a historical evidence archive. Each row reports only the

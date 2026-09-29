@@ -323,6 +323,7 @@ bench-list:
       bench-vpn-query               bench/run-vpn-query-campaign.sh
       bench-headline                bench/scale/headline/run-campaign.sh (multi-arm headline campaign)
       bench-headline-summary        bench/scale/headline/summarize.py (extraction only)
+      bench-rpki-cell               bench/scale/rpki-cell/run-rpki-cell.sh (A/B with a VRP table loaded)
       gate-contract                 bench/smoke-benches.sh (smoke only, no measurement)
 
     Drivers without a recipe (run directly; see their headers):
@@ -543,6 +544,13 @@ bench-headline out_dir +arms:
     #!/usr/bin/env bash
     set -euo pipefail
     exec bash bench/scale/headline/run-campaign.sh "$@"
+
+# Measure the reloadstall route-server convergence cell with a static VRP table served by StayRTR, BASE against HEAD, alternating arms, into OUT_DIR (a new directory); DAEMON_CPUS and RTR_CPUS are required, and SMOKE=1, RUNS, VRPS and the other knobs are in bench/scale/rpki-cell/run-rpki-cell.sh.
+[positional-arguments]
+bench-rpki-cell out_dir base head:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    exec bash bench/scale/rpki-cell/run-rpki-cell.sh "$@"
 
 # Re-extract summary.csv, establishment-span.csv and report.md from a headline campaign or receipt bundle without running anything (`--out DIR` for a bundle, `--exclude GLOB` to drop legs).
 [positional-arguments]
