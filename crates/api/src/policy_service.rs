@@ -1162,7 +1162,7 @@ impl proto::policy_service_server::PolicyService for PolicyService {
         let cache_enabled = reply.as_ref().is_some_and(|r| r.cache_enabled);
         let (cache_size, evictions_since_reset) = match &reply {
             Some(r) if r.cache_enabled => (
-                Some(u32::try_from(r.cache_size).unwrap_or(u32::MAX)),
+                Some(u64::try_from(r.cache_size).unwrap_or(u64::MAX)),
                 Some(r.evictions_since_reset),
             ),
             _ => (None, None),

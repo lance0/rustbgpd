@@ -1719,7 +1719,7 @@ message ExplainImportPolicyResponse {
   // ([policy.explain] cache_size). Present only when a live session
   // with an enabled cache answered; absent for CACHE_DISABLED,
   // NO_SESSION, or a daemon that predates the field.
-  optional uint32 cache_size = 7;
+  optional uint64 cache_size = 7;
 
   // Decisions pushed out by that cap since the session's last reset.
   // Present under the same conditions as cache_size; present zero means

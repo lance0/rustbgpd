@@ -1306,7 +1306,7 @@ struct JsonImportExplain {
     current_policy_generation: u64,
     // Null when the daemon did not report them (older daemon, or no
     // enabled cache answered).
-    cache_size: Option<u32>,
+    cache_size: Option<u64>,
     evictions_since_reset: Option<u64>,
     matches: Vec<JsonImportExplainMatch>,
 }
@@ -2254,7 +2254,7 @@ mod tests {
             prefix_length: 48,
             afi_safi: proto::AddressFamily::Ipv6Unicast as i32,
             current_policy_generation: u64::MAX,
-            cache_size: Some(u32::MAX),
+            cache_size: Some(u64::MAX),
             evictions_since_reset: Some(u64::MAX),
             matches: vec![proto::ImportExplainMatch {
                 outcome: proto::ImportExplainOutcome::Permit as i32,
@@ -2317,7 +2317,7 @@ mod tests {
             serde_json::to_value(import_explain_to_json(&response, "fe80::9%eth0")).unwrap(),
             serde_json::json!({"peer_address": "fe80::9%eth0", "prefix": "2001:db8::/48",
                 "afi_safi": "ipv6-unicast", "current_policy_generation": u64::MAX,
-                "cache_size": u32::MAX, "evictions_since_reset": u64::MAX,
+                "cache_size": u64::MAX, "evictions_since_reset": u64::MAX,
                 "matches": [expected_match.clone()]})
         );
         for (outcome, label) in [
