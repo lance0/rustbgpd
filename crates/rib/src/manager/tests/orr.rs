@@ -794,6 +794,272 @@ async fn topology_metric_flip_marks_only_affected_vantage_peers_dirty_and_flips_
     );
 }
 
+/// A Prefix Metric replacement can change next-hop costs without moving
+/// any node distance. Existing clients must receive the freshly selected best.
+#[tokio::test]
+async fn prefix_metric_flip_reexports_orr_best_with_unchanged_node_distances() {
+    use crate::orr::{
+        OrrTopology,
+        fixtures::{X, Y, prefix_route, square_topology},
+    };
+
+    // These next-hops are covered by Prefix NLRIs, not exact link addresses.
+    let nh_x = Ipv4Addr::new(203, 0, 113, 1);
+    let nh_y = Ipv4Addr::new(203, 0, 113, 2);
+    let prefix_x = prefix_route(ORR_FEED, X, nh_x, 32, Some(0));
+    let prefix_y = prefix_route(ORR_FEED, Y, nh_y, 32, Some(0));
+    let changed_x = prefix_route(ORR_FEED, X, nh_x, 32, Some(100));
+    let mut before_routes = square_topology(ORR_FEED);
+    before_routes.extend([prefix_x.clone(), prefix_y.clone()]);
+    let mut after_routes = square_topology(ORR_FEED);
+    after_routes.extend([changed_x.clone(), prefix_y.clone()]);
+    let before = OrrTopology::build(before_routes.iter());
+    let after = OrrTopology::build(after_routes.iter());
+    let before_spf = before.spf(before.resolve_node(vantage_at_node_a()).unwrap());
+    let after_spf = after.spf(after.resolve_node(vantage_at_node_a()).unwrap());
+    assert_eq!(
+        before.spf_signature(&before_spf),
+        after.spf_signature(&after_spf)
+    );
+    assert_eq!(before_spf.cost_to(&before, IpAddr::V4(nh_x)), Some(1));
+    assert_eq!(after_spf.cost_to(&after, IpAddr::V4(nh_x)), Some(101));
+    assert_eq!(after_spf.cost_to(&after, IpAddr::V4(nh_y)), Some(10));
+
+    let (tx, handle) = orr_rr_manager().await;
+    let client = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let mut out = orr_client_peer_up(&tx, client, Some(vantage_at_node_a())).await;
+    tx.send(RibUpdate::BgpLsRoutesReceived {
+        session_id: 0,
+        peer: IpAddr::V4(ORR_FEED),
+        announced: vec![prefix_x, prefix_y],
+        withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+    announce_unicast(
+        &tx,
+        ORR_SRC_X,
+        vec![ibgp_route(orr_prefix(), ORR_SRC_X, IpAddr::V4(nh_x))],
+    )
+    .await;
+    announce_unicast(
+        &tx,
+        ORR_SRC_Y,
+        vec![ibgp_route(orr_prefix(), ORR_SRC_Y, IpAddr::V4(nh_y))],
+    )
+    .await;
+    // The actor's query reply orders both receive batches and distribution.
+    let initial = query_explain_best_path_for_peer(&tx, Prefix::V4(orr_prefix()), client)
+        .await
+        .unwrap();
+    assert_eq!(initial.best_reason_detail, "orr_cost 1 < 10");
+    assert_eq!(
+        drain_final_unicast(&mut out)
+            .get(&orr_prefix_key())
+            .map(|route| route.next_hop),
+        Some(IpAddr::V4(nh_x))
+    );
+
+    tx.send(RibUpdate::BgpLsRoutesReceived {
+        session_id: 0,
+        peer: IpAddr::V4(ORR_FEED),
+        announced: vec![changed_x],
+        withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+    let changed = query_explain_best_path_for_peer(&tx, Prefix::V4(orr_prefix()), client)
+        .await
+        .unwrap();
+    assert_eq!(
+        changed.best.as_ref().map(|route| route.next_hop),
+        Some(IpAddr::V4(nh_y))
+    );
+    assert_eq!(changed.best_reason_detail, "orr_cost 10 < 101");
+    drop(tx);
+    handle.await.unwrap();
+    assert_eq!(
+        drain_final_unicast(&mut out)
+            .get(&orr_prefix_key())
+            .map(|route| route.next_hop),
+        Some(IpAddr::V4(nh_y)),
+        "the existing client must receive the new winner after a Prefix Metric-only change"
+    );
+}
+
+/// Removing/restoring a covering prefix changes only next-hop lookup, and
+/// export equality suppresses updates for unaffected ORR and plain clients.
+#[tokio::test]
+async fn prefix_withdrawal_and_restoration_reexport_only_changed_orr_bests() {
+    use crate::orr::fixtures::{X, Y, prefix_route};
+
+    let nh_x = Ipv4Addr::new(203, 0, 113, 1);
+    let nh_y = Ipv4Addr::new(203, 0, 113, 2);
+    let prefix_x = prefix_route(ORR_FEED, X, nh_x, 32, Some(0));
+    let prefix_y = prefix_route(ORR_FEED, Y, nh_y, 32, Some(0));
+    let (tx, handle) = orr_rr_manager().await;
+    let client_a = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let client_b = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 3));
+    let client_plain = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 4));
+    let mut out_a = orr_client_peer_up(&tx, client_a, Some(vantage_at_node_a())).await;
+    let mut out_b = orr_client_peer_up(&tx, client_b, Some(vantage_at_node_b())).await;
+    let mut out_plain = orr_client_peer_up(&tx, client_plain, None).await;
+    tx.send(RibUpdate::BgpLsRoutesReceived {
+        session_id: 0,
+        peer: IpAddr::V4(ORR_FEED),
+        announced: vec![prefix_x.clone(), prefix_y],
+        withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+    announce_unicast(
+        &tx,
+        ORR_SRC_X,
+        vec![ibgp_route(orr_prefix(), ORR_SRC_X, IpAddr::V4(nh_x))],
+    )
+    .await;
+    announce_unicast(
+        &tx,
+        ORR_SRC_Y,
+        vec![ibgp_route(orr_prefix(), ORR_SRC_Y, IpAddr::V4(nh_y))],
+    )
+    .await;
+    let _ = query_best_routes(&tx).await;
+    for (out, expected) in [
+        (&mut out_a, nh_x),
+        (&mut out_b, nh_y),
+        (&mut out_plain, nh_x),
+    ] {
+        assert_eq!(
+            drain_final_unicast(out)
+                .get(&orr_prefix_key())
+                .map(|route| route.next_hop),
+            Some(IpAddr::V4(expected))
+        );
+    }
+
+    for (announced, withdrawn, expected) in [
+        (vec![], vec![prefix_x.key()], nh_y),
+        (vec![prefix_x], vec![], nh_x),
+    ] {
+        tx.send(RibUpdate::BgpLsRoutesReceived {
+            session_id: 0,
+            peer: IpAddr::V4(ORR_FEED),
+            announced,
+            withdrawn,
+        })
+        .await
+        .unwrap();
+        let explain = query_explain_best_path_for_peer(&tx, Prefix::V4(orr_prefix()), client_a)
+            .await
+            .unwrap();
+        assert_eq!(
+            explain.best.map(|route| route.next_hop),
+            Some(IpAddr::V4(expected))
+        );
+        assert_eq!(
+            drain_final_unicast(&mut out_a)
+                .get(&orr_prefix_key())
+                .map(|route| route.next_hop),
+            Some(IpAddr::V4(expected)),
+            "the affected ORR client follows prefix withdrawal and restoration"
+        );
+        assert!(
+            out_b.try_recv().is_err(),
+            "unchanged ORR best must not be advertised again"
+        );
+        assert!(
+            out_plain.try_recv().is_err(),
+            "plain client must not be advertised again"
+        );
+    }
+    drop(tx);
+    handle.await.unwrap();
+}
+
+/// Even unmetered links contribute exact address ownership. Replacing that
+/// mapping must update exports while the usable graph and SPF stay unchanged.
+#[tokio::test]
+async fn exact_address_owner_change_reexports_orr_best() {
+    use crate::orr::{
+        OrrTopology,
+        fixtures::{A, X, Y, link_route, square_topology, v4_interface},
+    };
+
+    let next_hop = IpAddr::V4(Ipv4Addr::new(203, 0, 113, 1));
+    let address = v4_interface(Ipv4Addr::new(203, 0, 113, 1));
+    let at_x = link_route(ORR_FEED, X, A, None, std::slice::from_ref(&address));
+    let at_y = link_route(ORR_FEED, Y, A, None, &[address]);
+    let mut before_routes = square_topology(ORR_FEED);
+    before_routes.push(at_x.clone());
+    let mut after_routes = square_topology(ORR_FEED);
+    after_routes.push(at_y.clone());
+    let before = OrrTopology::build(before_routes.iter());
+    let after = OrrTopology::build(after_routes.iter());
+    let before_spf = before.spf(before.resolve_node(vantage_at_node_a()).unwrap());
+    let after_spf = after.spf(after.resolve_node(vantage_at_node_a()).unwrap());
+    assert_eq!(
+        before.spf_signature(&before_spf),
+        after.spf_signature(&after_spf)
+    );
+    assert_eq!(before_spf.cost_to(&before, next_hop), Some(1));
+    assert_eq!(after_spf.cost_to(&after, next_hop), Some(10));
+
+    let (tx, handle) = orr_rr_manager().await;
+    let client = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let mut out = orr_client_peer_up(&tx, client, Some(vantage_at_node_a())).await;
+    tx.send(RibUpdate::BgpLsRoutesReceived {
+        session_id: 0,
+        peer: IpAddr::V4(ORR_FEED),
+        announced: vec![at_x.clone()],
+        withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+    announce_unicast(
+        &tx,
+        ORR_SRC_X,
+        vec![ibgp_route(orr_prefix(), ORR_SRC_X, next_hop)],
+    )
+    .await;
+    announce_unicast(
+        &tx,
+        ORR_SRC_Y,
+        vec![ibgp_route(orr_prefix(), ORR_SRC_Y, orr_nh_x())],
+    )
+    .await;
+    let _ = query_best_routes(&tx).await;
+    assert_eq!(
+        drain_final_unicast(&mut out)
+            .get(&orr_prefix_key())
+            .map(|route| route.next_hop),
+        Some(next_hop)
+    );
+
+    tx.send(RibUpdate::BgpLsRoutesReceived {
+        session_id: 0,
+        peer: IpAddr::V4(ORR_FEED),
+        announced: vec![at_y],
+        withdrawn: vec![at_x.key()],
+    })
+    .await
+    .unwrap();
+    let explain = query_explain_best_path_for_peer(&tx, Prefix::V4(orr_prefix()), client)
+        .await
+        .unwrap();
+    assert_eq!(explain.best_reason_detail, "orr_cost 1 < 10");
+    assert_eq!(explain.best.map(|route| route.next_hop), Some(orr_nh_x()));
+    drop(tx);
+    handle.await.unwrap();
+    assert_eq!(
+        drain_final_unicast(&mut out)
+            .get(&orr_prefix_key())
+            .map(|route| route.next_hop),
+        Some(orr_nh_x()),
+        "the existing client must receive the best using the new exact address ownership"
+    );
+}
+
 /// A non-default topology object is observable but cannot perturb the
 /// cached default graph, SPF signatures, or any client's advertised state.
 #[tokio::test]

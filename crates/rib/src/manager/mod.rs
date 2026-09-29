@@ -4371,7 +4371,8 @@ impl RibManager {
     }
 
     /// Resync every established peer bound to a changed ORR vantage: a
-    /// changed SPF surface (metric shift, vantage resolution flip) can
+    /// changed next-hop cost surface (metric shift, lookup change, or
+    /// vantage resolution flip) can
     /// move those peers' per-vantage bests without any unicast RIB
     /// change, so nothing else would re-stage them. Dirty + empty-set
     /// `distribute_changes` is the `ReplacePeerExportPolicy` precedent —
@@ -4404,7 +4405,7 @@ impl RibManager {
 
     /// Rebuild the cached RFC 9107 ORR state: one topology from the
     /// BGP-LS Adj-RIB-In union, one SPF per DISTINCT configured vantage
-    /// IP. Returns the vantages whose SPF distance surface changed
+    /// IP. Returns the vantages whose next-hop cost surface changed
     /// (consumed by [`Self::resync_orr_bound_peers`] to dirty their
     /// bound peers). Early-outs with no
     /// topology build and no SPF while `peer_orr_vantage` is empty, so
@@ -4434,6 +4435,9 @@ impl RibManager {
         );
         let input_diagnostics = topology.input_diagnostics();
         log_orr_input_transition(self.orr.topology.input_diagnostics(), input_diagnostics);
+        // Next-hop costs also depend on exact address ownership and covering
+        // prefix advertisers/metrics, which can move without any node distance.
+        let lookup_changed = !topology.same_next_hop_lookup(&self.orr.topology);
         let vantages: HashSet<IpAddr> = self.peer_orr_vantage.values().copied().collect();
         let mut changed = HashSet::new();
         let mut spf = HashMap::new();
@@ -4459,7 +4463,7 @@ impl RibManager {
                 let result = topology.spf(node);
                 self.metrics.record_orr_spf_run();
                 let signature = topology.spf_signature(&result);
-                if self.orr.signatures.get(&vantage) != Some(&signature) {
+                if lookup_changed || self.orr.signatures.get(&vantage) != Some(&signature) {
                     changed.insert(vantage);
                 }
                 spf.insert(vantage, result);
