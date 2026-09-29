@@ -462,7 +462,7 @@ export-policy evaluation per overlapped changed prefix.
   `sorted` table; `sorted` incompatible with `deterministic med`) —
   <https://bird.nic.cz/doc/bird-3.1.2.html>
 - OpenBGPD `rde evaluate all` bug family (fixed in 7.0) —
-  <https://github.com/openbgpd-portable/openbgpd-portable/issues/21>
+  <https://github.com/openbgpd/openbgpd-portable/issues/21>
 - arouteserver path-hiding defaults and per-daemon implementation —
   <https://arouteserver.readthedocs.io/en/latest/GENERAL.html>
 - CZ.NIC, "BIRD Journey to Threads. Chapter 3½: Route server performance" —

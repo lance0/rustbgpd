@@ -113,4 +113,4 @@ mutation receipts, and checksums are in the linked receipt.
 
 [cargo-resolver]: https://doc.rust-lang.org/cargo/reference/resolver.html#features
 [cargo-features]: https://doc.rust-lang.org/cargo/reference/features.html#inspecting-resolved-features
-[rusqlite-build]: https://docs.rs/rusqlite/0.40.1/rusqlite/index.html#notes-on-building-rusqlite-and-libsqlite3-sys
+[rusqlite-build]: https://github.com/rusqlite/rusqlite/blob/v0.40.1/README.md#notes-on-building-rusqlite-and-libsqlite3-sys
