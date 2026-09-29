@@ -34,8 +34,9 @@ use lru::LruCache;
 use prefix_trie::PrefixMap;
 use rustbgpd_wire::{
     BGP_LS_TLV_AUTONOMOUS_SYSTEM, BGP_LS_TLV_BGP_LS_IDENTIFIER, BGP_LS_TLV_IGP_ROUTER_ID,
-    BGP_LS_TLV_MULTI_TOPOLOGY_ID, BgpLsNlri, BgpLsNlriType, BgpLsNodeKey, BgpLsTlv, PathAttribute,
-    Prefix, bgp_ls_attribute_tlvs, decode_bgpls_tlvs, igp_metric, prefix_metric,
+    BGP_LS_TLV_MULTI_TOPOLOGY_ID, BgpLsNlri, BgpLsNlriType, BgpLsNodeKey, BgpLsTlv, Ipv4Prefix,
+    Ipv6Prefix, PathAttribute, Prefix, bgp_ls_attribute_tlvs, decode_bgpls_tlvs, igp_metric,
+    prefix_metric,
 };
 
 use crate::route::BgpLsRibRoute;
@@ -785,6 +786,38 @@ impl OrrTopology {
             .collect();
         signature.sort();
         signature
+    }
+
+    /// Compare next-hop lookup inputs independently of node interning order.
+    /// Node distances alone miss address ownership and prefix reachability
+    /// changes, including Prefix Metric replacements.
+    pub(crate) fn same_next_hop_lookup(&self, other: &Self) -> bool {
+        self.addr_index.len() == other.addr_index.len()
+            && self.addr_index.iter().all(|(address, node)| {
+                other.addr_index.get(address).is_some_and(|other_node| {
+                    self.node_keys[node.index()] == other.node_keys[other_node.index()]
+                })
+            })
+            && self.prefix_signature() == other.prefix_signature()
+    }
+
+    fn prefix_signature(&self) -> Vec<(Prefix, &[u8], u32)> {
+        let mut prefixes = Vec::new();
+        for (net, advertisers) in &self.prefix_v4 {
+            let prefix = Prefix::V4(Ipv4Prefix::new(net.addr(), net.prefix_len()));
+            for &(node, metric) in advertisers {
+                prefixes.push((prefix, self.node_keys[node.index()].as_bytes(), metric));
+            }
+        }
+        for (net, advertisers) in &self.prefix_v6 {
+            let prefix = Prefix::V6(Ipv6Prefix::new(net.addr(), net.prefix_len()));
+            for &(node, metric) in advertisers {
+                prefixes.push((prefix, self.node_keys[node.index()].as_bytes(), metric));
+            }
+        }
+        prefixes.sort_unstable();
+        prefixes.dedup();
+        prefixes
     }
 
     /// Serializable snapshot for the read-only topology API.
@@ -2020,6 +2053,75 @@ mod tests {
         assert_eq!(from_b.dist_to(x), Some(10));
         assert_eq!(from_b.dist_to(y), Some(1));
         assert_eq!(from_b.dist_to(a), None);
+    }
+
+    #[test]
+    fn next_hop_lookup_comparison_ignores_interning_order_and_excluded_inputs() {
+        let mut routes = square_topology(PEER1);
+        routes.extend([
+            prefix_route(PEER1, X, Ipv4Addr::new(203, 0, 113, 0), 24, Some(5)),
+            prefix_route(PEER1, Y, Ipv4Addr::new(203, 0, 113, 0), 24, Some(10)),
+        ]);
+        let before = OrrTopology::build(routes.iter());
+        routes.reverse();
+        let reversed = OrrTopology::build(routes.iter());
+        assert!(before.same_next_hop_lookup(&reversed));
+        assert_ne!(before.node_ix(&node_key(A)), reversed.node_ix(&node_key(A)));
+
+        routes.push(link_route(PEER1, A, X, Some(0), &[mt_id_tlv(&[2])]));
+        let excluded = OrrTopology::build(routes.iter());
+        assert!(before.same_next_hop_lookup(&excluded));
+        assert_eq!(excluded.input_diagnostics().excluded_nondefault, 1);
+    }
+
+    #[test]
+    fn next_hop_lookup_comparison_includes_ipv6_prefix_metric_advertiser_and_coverage() {
+        let address = "2001:db8:1::".parse::<Ipv6Addr>().unwrap();
+        let next_hop = "2001:db8:1::99".parse::<IpAddr>().unwrap();
+        let prefix = |node, metric, len: u8| {
+            let mut reach = vec![len];
+            reach.extend_from_slice(&address.octets()[..usize::from(len.div_ceil(8))]);
+            let nlri = build_nlri_protocol(
+                BgpLsNlriType::Ipv6TopologyPrefix,
+                PROTOCOL_ISIS_LEVEL_2,
+                &[
+                    BgpLsTlv::new(BGP_LS_TLV_LOCAL_NODE_DESCRIPTORS, node_container(node)),
+                    BgpLsTlv::new(BGP_LS_TLV_IP_REACHABILITY, Bytes::from(reach)),
+                ],
+            );
+            rib_route(
+                PEER1,
+                nlri,
+                vec![bgp_ls_attribute(&[BgpLsTlv::new(
+                    BGP_LS_TLV_PREFIX_METRIC,
+                    Bytes::from(u32::to_be_bytes(metric).to_vec()),
+                )])],
+            )
+        };
+        let mut routes = square_topology(PEER1);
+        routes.push(prefix(X, 5, 64));
+        let before = OrrTopology::build(routes.iter());
+        let before_spf = before.spf(ix(&before, A));
+        assert_eq!(before_spf.cost_to(&before, next_hop), Some(6));
+        for (changed_prefix, expected_cost) in [
+            (Some(prefix(X, 6, 64)), Some(7)),
+            (Some(prefix(Y, 5, 64)), Some(15)),
+            (Some(prefix(X, 5, 128)), None),
+            (None, None),
+        ] {
+            let mut changed = square_topology(PEER1);
+            changed.extend(changed_prefix);
+            let after = OrrTopology::build(changed.iter());
+            let after_spf = after.spf(ix(&after, A));
+            assert_eq!(
+                before.spf_signature(&before_spf),
+                after.spf_signature(&after_spf)
+            );
+            assert!(!before.same_next_hop_lookup(&after));
+            assert_eq!(after_spf.cost_to(&after, next_hop), expected_cost);
+        }
+        routes.reverse();
+        assert!(before.same_next_hop_lookup(&OrrTopology::build(routes.iter())));
     }
 
     #[test]
