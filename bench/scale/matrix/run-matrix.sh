@@ -554,6 +554,8 @@ run_cell() {
     [ -n "$reload_cmd" ] && hargs+=("$N_PEERS" "$reload_cmd")
     [ -z "$reload_cmd" ] && [ -n "$CHANGED_PEERS" ] && hargs+=("$CHANGED_PEERS")
     [ -n "$FLAPSTORM" ] && hargs+=(--flapstorm "$FLAPSTORM")
+    # OpenBGPD sends no EoR to the non-GR stubs; exact coverage still gates completion.
+    [ -n "$FLAPSTORM" ] && [ "$cell" = openbgpd ] && hargs+=(--rejoin-coverage-only)
     [ -n "$FLAPSTORM" ] && [ -n "$FLAP_ROUNDS" ] && hargs+=(--flap-rounds "$FLAP_ROUNDS")
 
     # Harness in the background so the RSS guard can abort the cell.

@@ -8,7 +8,7 @@
 //! Usage:
 //!   reloadstall <n_peers> <total_prefixes> <daemon_port> <daemon_pid> \
 //!       <policy_live> <policy_a> <policy_b> <reloads> <control_secs> \
-//!       [changed_peers] [reload_cmd] [--flapstorm K [--flap-rounds N]]
+//!       [changed_peers] [reload_cmd] [--flapstorm K [--flap-rounds N] [--rejoin-coverage-only]]
 //!       [--convergence-only]
 //!
 //! Stubs bind distinct 127.1.x.y source addresses (matching the
@@ -67,6 +67,8 @@
 //!   all K slices' withdrawals, reconnect the K after 10 s, re-announce
 //!   their slices, and timestamp survivors' re-announce completion plus each
 //!   rejoiner's first EoR and exact table coverage.
+//!   `--rejoin-coverage-only` allows targets without EoR to complete on
+//!   exact coverage; the default requires both EoR and coverage.
 //!   `--flap-rounds N` rounds (default 3, at most 100), per-round
 //!   percentiles + `flapstorm_csv` lines.
 //! - `RELOADSTALL_HEAP_METRICS_ADDR` (env, flapstorm mode): loopback
@@ -600,7 +602,7 @@ struct Obs {
     /// advertises to it: set on announcement, cleared on withdrawal.
     /// Recorded whenever the session is up, independent of any armed bitmap.
     extras_seen: Mutex<Vec<u64>>,
-    /// Armed only on a flap reconnect; completion requires EoR and exact coverage.
+    /// Armed only on a flap reconnect; completion always requires exact coverage.
     rejoin: Mutex<Option<RejoinProgress>>,
 }
 
@@ -629,6 +631,7 @@ impl Obs {
 
 struct RejoinProgress {
     open_sent_us: u64,
+    require_eor: bool,
     table: GenerationProgress,
     eor_us: Option<u64>,
     complete_us: Option<u64>,
@@ -643,6 +646,7 @@ impl RejoinProgress {
         table.exclude_extra(&ctx.extras[i as usize]);
         Self {
             open_sent_us,
+            require_eor: ctx.rejoin_require_eor,
             table,
             eor_us: None,
             complete_us: None,
@@ -680,8 +684,12 @@ impl RejoinProgress {
             self.eor_us = Some(at_us);
         }
         if self.complete_us.is_none() {
-            if let (Some(eor), Some(table)) = (self.eor_us, self.table.completed_at_us) {
-                self.complete_us = Some(eor.max(table));
+            if let Some(table) = self.table.completed_at_us {
+                self.complete_us = if self.require_eor {
+                    self.eor_us.map(|eor| eor.max(table))
+                } else {
+                    Some(table)
+                };
             }
         }
     }
@@ -957,6 +965,7 @@ impl GenerationProgress {
 
 struct Ctx {
     t0: Instant,
+    rejoin_require_eor: bool,
     n_peers: u32,
     // Uniform IPv4-only modes retain their historical per-member size.
     per_peer: u32,
@@ -2785,8 +2794,11 @@ async fn run_flapstorm(
         for (i, seconds) in rejoin_values.iter().enumerate() {
             let rejoin = ctx.obs[i].rejoin.lock().unwrap();
             let progress = rejoin.as_ref().unwrap();
-            let eor_before_full_table = progress.eor_us.unwrap() < progress.complete_us.unwrap();
-            println!("flap {round} peer {i} rejoin_complete_s={seconds:.6} eor_before_full_table={eor_before_full_table}");
+            let (eor, eor_before_full_table) = progress.eor_us.map_or_else(
+                || ("absent", "absent".to_owned()),
+                |eor| ("present", (eor < progress.complete_us.unwrap()).to_string()),
+            );
+            println!("flap {round} peer {i} rejoin_complete_s={seconds:.6} eor_before_full_table={eor_before_full_table} eor={eor}");
         }
         stats_line(&format!("flap {round} rejoin_complete_s"), rejoin_values);
         let reann_s: Vec<f64> = survivors
@@ -3286,6 +3298,7 @@ fn convergence_integrity_valid(
 fn main() {
     let mut a: Vec<String> = std::env::args().collect();
     let convergence_only = take_single_flag(&mut a, "--convergence-only");
+    let rejoin_coverage_only = take_single_flag(&mut a, "--rejoin-coverage-only");
     // --flapstorm K may appear anywhere; strip it before positional parsing.
     let mut flapstorm: Option<u32> = None;
     if let Some(pos) = a.iter().position(|s| s == "--flapstorm") {
@@ -3307,12 +3320,16 @@ fn main() {
         eprintln!("--flap-rounds requires --flapstorm");
         std::process::exit(2);
     }
+    if rejoin_coverage_only && flapstorm.is_none() {
+        eprintln!("--rejoin-coverage-only requires --flapstorm");
+        std::process::exit(2);
+    }
     let flap_rounds = flap_rounds.unwrap_or(DEFAULT_FLAP_ROUNDS);
     if a.len() < 10 {
         eprintln!(
             "usage: reloadstall <n_peers> <total_prefixes> <daemon_port> <daemon_pid> \
              <policy_live> <policy_a> <policy_b> <reloads> <control_secs> \
-             [changed_peers] [reload_cmd] [--flapstorm K [--flap-rounds N]]\n\
+             [changed_peers] [reload_cmd] [--flapstorm K [--flap-rounds N] [--rejoin-coverage-only]]\n\
              [--convergence-only]\n\
              reload_cmd: run `sh -c <reload_cmd>` per reload instead of SIGHUP-ing <daemon_pid>\n\
              daemon_pid 0: skip in-harness RSS sampling (outer sampler owns it); \
@@ -3599,6 +3616,7 @@ fn main() {
     rt.block_on(async move {
         let ctx = Arc::new(Ctx {
             t0: Instant::now(),
+            rejoin_require_eor: !rejoin_coverage_only,
             n_peers,
             per_peer,
             totals,
@@ -4584,6 +4602,7 @@ mod tests {
     fn finish_test_ctx() -> Arc<Ctx> {
         Arc::new(Ctx {
             t0: Instant::now(),
+            rejoin_require_eor: true,
             n_peers: CHURNERS,
             per_peer: 1,
             totals: [CHURNERS, CHURNERS],
@@ -5415,6 +5434,7 @@ mod tests {
         // 12 peers x 2 prefixes, 2 flapped (window [0, 4)); peers 4..12 churn.
         let ctx_with = |extras: Vec<Vec<u32>>| Ctx {
             t0: Instant::now(),
+            rejoin_require_eor: true,
             n_peers: 12,
             per_peer: 2,
             totals: [24, 0],
@@ -6031,6 +6051,7 @@ mod tests {
         table.reset(4, 3, 0, 1);
         let mut rejoin = RejoinProgress {
             open_sent_us: 10,
+            require_eor: true,
             table,
             eor_us: None,
             complete_us: None,
@@ -6070,6 +6091,7 @@ mod tests {
 
         let mut table_first = RejoinProgress {
             open_sent_us: 10,
+            require_eor: true,
             table: rejoin.table,
             eor_us: None,
             complete_us: None,
@@ -6084,6 +6106,49 @@ mod tests {
             table_first.complete_us,
             Some(60),
             "EoR after the table completes rejoin"
+        );
+    }
+
+    #[test]
+    fn rejoin_without_eor_requires_exact_current_coverage() {
+        let mut ctx = finish_test_ctx();
+        let ctx = Arc::get_mut(&mut ctx).unwrap();
+        ctx.rejoin_require_eor = false;
+        ctx.n_peers = 4;
+        ctx.totals = [4, 0];
+        let mut rejoin = RejoinProgress::new(ctx, 0, 10);
+        rejoin.observe(
+            &[
+                base_prefix(0),
+                base_prefix(1),
+                base_prefix(1),
+                base_prefix(2),
+            ],
+            &[],
+            false,
+            4,
+            20,
+        );
+        assert_eq!(
+            rejoin.table.unique, 2,
+            "own routes and duplicates do not count"
+        );
+        assert_eq!(rejoin.complete_us, None, "missing coverage cannot complete");
+        rejoin.observe(&[], &[base_prefix(2)], false, 4, 25);
+        rejoin.observe(&[base_prefix(3)], &[], false, 4, 30);
+        assert_eq!(
+            rejoin.complete_us, None,
+            "withdrawn coverage must be restored"
+        );
+        rejoin.observe(&[base_prefix(2)], &[], false, 4, 40);
+        assert_eq!(rejoin.complete_us, Some(40));
+        assert_eq!(rejoin.eor_us, None, "coverage must not fabricate an EoR");
+        rejoin.observe(&[], &[], true, 4, 50);
+        assert_eq!(rejoin.eor_us, Some(50));
+        assert_eq!(
+            rejoin.complete_us,
+            Some(40),
+            "late EoR does not move coverage completion"
         );
     }
 
@@ -6142,6 +6207,7 @@ mod tests {
     fn family_gap_only_counts_that_family() {
         let ctx = Ctx {
             t0: Instant::now(),
+            rejoin_require_eor: true,
             n_peers: 1,
             per_peer: 1,
             totals: [1, 1],
