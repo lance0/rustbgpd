@@ -465,6 +465,56 @@ differences (1 total, showing 1):
 here.) Divergences you cannot explain from a deliberate policy delta are
 cutover blockers.
 
+## Route-reflector snapshot comparison
+
+`rbgp diff snapshots` compares two post-policy BMP-derived snapshots,
+including ORIGINATOR_ID, CLUSTER_LIST, and NEXT_HOP. The live advertised
+query runs before the transport adds the reflection attributes. The offline
+command uses the existing RPC-independent comparison engine and snapshot
+schema.
+
+**Incumbent RR qualification remains outstanding.** The pinned FRR 10.7.1
+and GoBGP 4.8.0 BMP exporters provide received-route pre/post-policy views
+and a local-RIB view, without the required RFC 8671 Adj-RIB-Out flag. Their
+post-policy feeds therefore cannot supply this comparison. The synthetic
+BMP fixtures prove conversion and comparison mechanics only; there is no
+end-to-end FRR/GoBGP or vendor-RR shadow-trial receipt for this command.
+
+A future qualified capture must meet these conditions:
+
+- Both daemons export BMP version 3 **post-policy Adj-RIB-Out** (O=1, L=1)
+  toward the same observer address and ASN, with the same families and
+  negotiated Add-Path mode.
+- Both see the same settled iBGP routes and policies. The observer does not
+  use the shadow's routes for forwarding.
+- rustbgpd's `[global].cluster_id` matches the incumbent's cluster ID for
+  the comparison, so a deliberate cluster-ID difference does not produce
+  a CLUSTER_LIST difference. Keep router IDs distinct. This does not cover
+  ORR-specific selection or normalize cluster IDs.
+- Each selected family has Peer Up and End-of-RIB in the capture. A late
+  rustbgpd collector has no automatic outbound reconnect dump; the
+  [complete capture/replay procedure](paired-route-servers.md#inter-rs-consistency-rbgp-diff-advertised)
+  explains its boundary. `refresh-out` scheduling alone is insufficient.
+
+Given captures that meet those conditions, compare the files offline:
+
+```bash
+if rbgp diff snapshot from-bmp incumbent.bmp --neighbor 192.0.2.30 \
+       --generation 7 > incumbent.ndjson &&
+   rbgp diff snapshot from-bmp rustbgpd.bmp --neighbor 192.0.2.30 \
+       --generation 7 > rustbgpd.ndjson; then
+    rbgp diff snapshots incumbent.ndjson rustbgpd.ndjson --json > rr-diff.json
+    echo $?  # 0 in sync, 1 divergent, 2 refused
+fi
+```
+
+All attributes remain included. In `attribute_deltas`, `unknown` entries
+with `type_code: 9` carry ORIGINATOR_ID and type 10 carries CLUSTER_LIST,
+including every value byte. A next-hop change has its own `next_hop` delta.
+A generation label is self-attested; it names a capture round without
+proving the routers were synchronized. Preserve both BMP files, converted
+snapshots, daemon versions/configurations, and report for qualification.
+
 ## Cutover checklist
 
 1. Build the candidate config and run `rustbgpd --check --strict`.

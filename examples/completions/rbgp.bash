@@ -190,6 +190,9 @@ _rbgp() {
             rbgp__subcmd__diff,snapshot)
                 cmd="rbgp__subcmd__diff__subcmd__snapshot"
                 ;;
+            rbgp__subcmd__diff,snapshots)
+                cmd="rbgp__subcmd__diff__subcmd__snapshots"
+                ;;
             rbgp__subcmd__diff__subcmd__help,advertised)
                 cmd="rbgp__subcmd__diff__subcmd__help__subcmd__advertised"
                 ;;
@@ -198,6 +201,9 @@ _rbgp() {
                 ;;
             rbgp__subcmd__diff__subcmd__help,snapshot)
                 cmd="rbgp__subcmd__diff__subcmd__help__subcmd__snapshot"
+                ;;
+            rbgp__subcmd__diff__subcmd__help,snapshots)
+                cmd="rbgp__subcmd__diff__subcmd__help__subcmd__snapshots"
                 ;;
             rbgp__subcmd__diff__subcmd__help__subcmd__snapshot,from-bmp)
                 cmd="rbgp__subcmd__diff__subcmd__help__subcmd__snapshot__subcmd__from__subcmd__bmp"
@@ -660,6 +666,9 @@ _rbgp() {
                 ;;
             rbgp__subcmd__help__subcmd__diff,snapshot)
                 cmd="rbgp__subcmd__help__subcmd__diff__subcmd__snapshot"
+                ;;
+            rbgp__subcmd__help__subcmd__diff,snapshots)
+                cmd="rbgp__subcmd__help__subcmd__diff__subcmd__snapshots"
                 ;;
             rbgp__subcmd__help__subcmd__diff__subcmd__snapshot,from-bmp)
                 cmd="rbgp__subcmd__help__subcmd__diff__subcmd__snapshot__subcmd__from__subcmd__bmp"
@@ -1644,7 +1653,7 @@ _rbgp() {
             if [[ ${cur} == -* ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
-            elif [[ ${COMP_CWORD} -eq 3 ]] ; then
+            elif [[ ( ${COMP_CWORD} -eq 3 ) && "${prev}" != "--addr" && "${prev}" != "--client-request-id" && "${prev}" != "--comment" && "${prev}" != "--confirm-id" && "${prev}" != "--confirm-timeout" && "${prev}" != "--expected-runtime-snapshot-token" && "${prev}" != "--json-version" && "${prev}" != "--plan-token" && "${prev}" != "--tls-ca" && "${prev}" != "--tls-cert" && "${prev}" != "--tls-key" && "${prev}" != "--tls-server-name" && "${prev}" != "--token-file" && "${prev}" != "-s" ]] ; then
                 local rbgp_old_ifs rbgp_ifs_was_set
                 [ -n "${IFS+x}" ] && { rbgp_old_ifs="$IFS"; rbgp_ifs_was_set=1; }
                 IFS=$'\n'
@@ -1768,7 +1777,7 @@ _rbgp() {
             if [[ ${cur} == -* ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
-            elif [[ ${COMP_CWORD} -eq 3 ]] ; then
+            elif [[ ( ${COMP_CWORD} -eq 3 ) && "${prev}" != "--addr" && "${prev}" != "--history" && "${prev}" != "--tls-ca" && "${prev}" != "--tls-cert" && "${prev}" != "--tls-key" && "${prev}" != "--tls-server-name" && "${prev}" != "--token-file" && "${prev}" != "-s" ]] ; then
                 local rbgp_old_ifs rbgp_ifs_was_set
                 [ -n "${IFS+x}" ] && { rbgp_old_ifs="$IFS"; rbgp_ifs_was_set=1; }
                 IFS=$'\n'
@@ -2082,7 +2091,7 @@ _rbgp() {
             if [[ ${cur} == -* ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
-            elif [[ ${COMP_CWORD} -eq 3 ]] ; then
+            elif [[ ( ${COMP_CWORD} -eq 3 ) && "${prev}" != "--addr" && "${prev}" != "--format" && "${prev}" != "--out" && "${prev}" != "--tls-ca" && "${prev}" != "--tls-cert" && "${prev}" != "--tls-key" && "${prev}" != "--tls-server-name" && "${prev}" != "--token-file" && "${prev}" != "-s" ]] ; then
                 local rbgp_old_ifs rbgp_ifs_was_set
                 [ -n "${IFS+x}" ] && { rbgp_old_ifs="$IFS"; rbgp_ifs_was_set=1; }
                 IFS=$'\n'
@@ -2140,7 +2149,7 @@ _rbgp() {
             if [[ ${cur} == -* ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
-            elif [[ ${COMP_CWORD} -eq 3 ]] ; then
+            elif [[ ( ${COMP_CWORD} -eq 3 ) && "${prev}" != "--addr" && "${prev}" != "--expected-runtime-snapshot-token" && "${prev}" != "--json-version" && "${prev}" != "--tls-ca" && "${prev}" != "--tls-cert" && "${prev}" != "--tls-key" && "${prev}" != "--tls-server-name" && "${prev}" != "--token-file" && "${prev}" != "-s" ]] ; then
                 local rbgp_old_ifs rbgp_ifs_was_set
                 [ -n "${IFS+x}" ] && { rbgp_old_ifs="$IFS"; rbgp_ifs_was_set=1; }
                 IFS=$'\n'
@@ -2306,7 +2315,7 @@ _rbgp() {
             return 0
             ;;
         rbgp__subcmd__diff)
-            opts="-s -j -h --addr --token-file --tls-ca --tls-cert --tls-key --tls-server-name --json --no-color --help advertised snapshot help"
+            opts="-s -j -h --addr --token-file --tls-ca --tls-cert --tls-key --tls-server-name --json --no-color --help advertised snapshots snapshot help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -2430,7 +2439,7 @@ _rbgp() {
             return 0
             ;;
         rbgp__subcmd__diff__subcmd__help)
-            opts="advertised snapshot help"
+            opts="advertised snapshots snapshot help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -2513,6 +2522,20 @@ _rbgp() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
+        rbgp__subcmd__diff__subcmd__help__subcmd__snapshots)
+            opts=""
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
         rbgp__subcmd__diff__subcmd__snapshot)
             opts="-s -j -h --addr --token-file --tls-ca --tls-cert --tls-key --tls-server-name --json --no-color --help from-mrt from-bmp help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
@@ -2560,7 +2583,7 @@ _rbgp() {
             if [[ ${cur} == -* ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
-            elif [[ ${COMP_CWORD} -eq 4 ]] ; then
+            elif [[ ( ${COMP_CWORD} -eq 4 ) && "${prev}" != "--addr" && "${prev}" != "--generation" && "${prev}" != "--neighbor" && "${prev}" != "--peer" && "${prev}" != "--source" && "${prev}" != "--tls-ca" && "${prev}" != "--tls-cert" && "${prev}" != "--tls-key" && "${prev}" != "--tls-server-name" && "${prev}" != "--token-file" && "${prev}" != "-s" ]] ; then
                 local rbgp_old_ifs rbgp_ifs_was_set
                 [ -n "${IFS+x}" ] && { rbgp_old_ifs="$IFS"; rbgp_ifs_was_set=1; }
                 IFS=$'\n'
@@ -2626,7 +2649,7 @@ _rbgp() {
             if [[ ${cur} == -* ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
-            elif [[ ${COMP_CWORD} -eq 4 ]] ; then
+            elif [[ ( ${COMP_CWORD} -eq 4 ) && "${prev}" != "--addr" && "${prev}" != "--generation" && "${prev}" != "--neighbor" && "${prev}" != "--neighbor-asn" && "${prev}" != "--peer" && "${prev}" != "--peer-asn" && "${prev}" != "--source" && "${prev}" != "--tls-ca" && "${prev}" != "--tls-cert" && "${prev}" != "--tls-key" && "${prev}" != "--tls-server-name" && "${prev}" != "--token-file" && "${prev}" != "--view" && "${prev}" != "-s" ]] ; then
                 local rbgp_old_ifs rbgp_ifs_was_set
                 [ -n "${IFS+x}" ] && { rbgp_old_ifs="$IFS"; rbgp_ifs_was_set=1; }
                 IFS=$'\n'
@@ -2748,6 +2771,68 @@ _rbgp() {
                 return 0
             fi
             case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        rbgp__subcmd__diff__subcmd__snapshots)
+            opts="-s -j -h --max-routes --max-input-bytes --detail --addr --token-file --tls-ca --tls-cert --tls-key --tls-server-name --json --no-color --help"
+            if [[ ${cur} == -* ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            elif [[ ( ${COMP_CWORD} -eq 3 || ${COMP_CWORD} -eq 4 ) && "${prev}" != "--addr" && "${prev}" != "--detail" && "${prev}" != "--max-input-bytes" && "${prev}" != "--max-routes" && "${prev}" != "--tls-ca" && "${prev}" != "--tls-cert" && "${prev}" != "--tls-key" && "${prev}" != "--tls-server-name" && "${prev}" != "--token-file" && "${prev}" != "-s" ]] ; then
+                local rbgp_old_ifs rbgp_ifs_was_set
+                [ -n "${IFS+x}" ] && { rbgp_old_ifs="$IFS"; rbgp_ifs_was_set=1; }
+                IFS=$'\n'
+                COMPREPLY=($(compgen -f -- "${cur}"))
+                [ -n "${rbgp_ifs_was_set+x}" ] && IFS="$rbgp_old_ifs" || unset IFS
+                if [[ "${BASH_VERSINFO[0]}" -ge 4 ]]; then compopt -o filenames; fi
+                return 0
+            fi
+            case "${prev}" in
+                --max-routes)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --max-input-bytes)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --detail)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --addr)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                -s)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --token-file)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --tls-ca)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --tls-cert)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --tls-key)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --tls-server-name)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
                 *)
                     COMPREPLY=()
                     ;;
@@ -6686,7 +6771,7 @@ _rbgp() {
             return 0
             ;;
         rbgp__subcmd__help__subcmd__diff)
-            opts="advertised snapshot"
+            opts="advertised snapshots snapshot"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -6744,6 +6829,20 @@ _rbgp() {
         rbgp__subcmd__help__subcmd__diff__subcmd__snapshot__subcmd__from__subcmd__mrt)
             opts=""
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 5 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        rbgp__subcmd__help__subcmd__diff__subcmd__snapshots)
+            opts=""
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
             fi
@@ -10392,7 +10491,7 @@ _rbgp() {
             if [[ ${cur} == -* ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
-            elif [[ ${COMP_CWORD} -eq 3 ]] ; then
+            elif [[ ( ${COMP_CWORD} -eq 3 ) && "${prev}" != "--addr" && "${prev}" != "--coverage-matched-min" && "${prev}" != "--coverage-min" && "${prev}" != "--max-graph-bytes" && "${prev}" != "--root" && "${prev}" != "--tls-ca" && "${prev}" != "--tls-cert" && "${prev}" != "--tls-key" && "${prev}" != "--tls-server-name" && "${prev}" != "--token-file" && "${prev}" != "-s" ]] ; then
                 local rbgp_old_ifs rbgp_ifs_was_set
                 [ -n "${IFS+x}" ] && { rbgp_old_ifs="$IFS"; rbgp_ifs_was_set=1; }
                 IFS=$'\n'
@@ -10570,7 +10669,7 @@ _rbgp() {
             if [[ ${cur} == -* ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
-            elif [[ ${COMP_CWORD} -eq 3 || ( ${COMP_CWORD} -gt 3 && "${prev}" != "--addr" && "${prev}" != "--tls-ca" && "${prev}" != "--tls-cert" && "${prev}" != "--tls-key" && "${prev}" != "--tls-server-name" && "${prev}" != "--token-file" && "${prev}" != "-s" ) ]] ; then
+            elif [[ ( ${COMP_CWORD} -ge 3 ) && "${prev}" != "--addr" && "${prev}" != "--tls-ca" && "${prev}" != "--tls-cert" && "${prev}" != "--tls-key" && "${prev}" != "--tls-server-name" && "${prev}" != "--token-file" && "${prev}" != "-s" ]] ; then
                 local rbgp_old_ifs rbgp_ifs_was_set
                 [ -n "${IFS+x}" ] && { rbgp_old_ifs="$IFS"; rbgp_ifs_was_set=1; }
                 IFS=$'\n'
@@ -11058,7 +11157,7 @@ _rbgp() {
             if [[ ${cur} == -* ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
-            elif [[ ${COMP_CWORD} -eq 3 ]] ; then
+            elif [[ ( ${COMP_CWORD} -eq 3 ) && "${prev}" != "--addr" && "${prev}" != "--direction" && "${prev}" != "--family" && "${prev}" != "--json-version" && "${prev}" != "--limit" && "${prev}" != "--neighbor" && "${prev}" != "--peer" && "${prev}" != "--policy" && "${prev}" != "--show-changes" && "${prev}" != "--tls-ca" && "${prev}" != "--tls-cert" && "${prev}" != "--tls-key" && "${prev}" != "--tls-server-name" && "${prev}" != "--token-file" && "${prev}" != "-a" && "${prev}" != "-s" ]] ; then
                 local rbgp_old_ifs rbgp_ifs_was_set
                 [ -n "${IFS+x}" ] && { rbgp_old_ifs="$IFS"; rbgp_ifs_was_set=1; }
                 IFS=$'\n'

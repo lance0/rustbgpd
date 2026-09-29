@@ -1420,6 +1420,33 @@ enum DiffAction {
         deadline: u64,
     },
 
+    /// Compare two complete `rbgp-ribsnap/1` snapshots without a daemon
+    ///
+    /// Use from-bmp post-policy Adj-RIB-Out captures toward the same observer.
+    /// Both snapshots must have the same capture-round generation. All peers
+    /// and attributes are compared, including ORIGINATOR_ID and CLUSTER_LIST
+    /// as byte-exact unknown attributes (type codes 9 and 10).
+    #[command(
+        after_help = "Exit codes:\n  0  complete inputs, no semantic differences\n  1  complete inputs, differences found\n  2  incomplete, malformed, mixed-generation, over-limit, or unreadable input"
+    )]
+    Snapshots {
+        /// Incumbent post-policy Adj-RIB-Out snapshot
+        #[arg(value_hint = clap::ValueHint::FilePath)]
+        incumbent: PathBuf,
+        /// Rustbgpd post-policy Adj-RIB-Out snapshot
+        #[arg(value_hint = clap::ValueHint::FilePath)]
+        rustbgpd: PathBuf,
+        /// Maximum retained routes per input; exceeding it exits 2
+        #[arg(long, default_value_t = 4_000_000)]
+        max_routes: usize,
+        /// Maximum bytes per input; exceeding it exits 2
+        #[arg(long, default_value_t = 1 << 30)]
+        max_input_bytes: u64,
+        /// Maximum detailed difference rows in human output (--json is complete)
+        #[arg(long, default_value_t = 20)]
+        detail: usize,
+    },
+
     /// Produce an `rbgp-ribsnap/1` snapshot from an incumbent's own output
     /// (offline; no daemon connection)
     Snapshot {
@@ -3181,7 +3208,9 @@ fn patch_bash_file_positionals(
 
     let mut completion = String::from_utf8(raw)
         .map_err(|error| invalid(format!("Bash completion was not UTF-8: {error}")))?;
-    for positional in bash_file_positionals(command) {
+    let positionals = bash_file_positionals(command);
+    for group in positionals.chunk_by(|left, right| left.path == right.path) {
+        let positional = &group[0];
         let selector = positional
             .path
             .iter()
@@ -3208,22 +3237,25 @@ fn patch_bash_file_positionals(
             &raw_fast_path,
             &format!("{context} positional fast path"),
         )?;
-        let positional_condition = if positional.repeatable {
-            let guards = positional
-                .value_options
-                .iter()
-                .map(|option| format!(r#""${{prev}}" != "{option}""#))
-                .collect::<Vec<_>>()
-                .join(" && ");
-            if guards.is_empty() {
-                format!("${{COMP_CWORD}} -ge {file_cword}")
-            } else {
-                format!(
-                    "${{COMP_CWORD}} -eq {file_cword} || ( ${{COMP_CWORD}} -gt {file_cword} && {guards} )"
-                )
-            }
+        let positions = group
+            .iter()
+            .map(|positional| {
+                let file_cword = positional.path.len() + positional.index;
+                let comparison = if positional.repeatable { "-ge" } else { "-eq" };
+                format!("${{COMP_CWORD}} {comparison} {file_cword}")
+            })
+            .collect::<Vec<_>>()
+            .join(" || ");
+        let guards = positional
+            .value_options
+            .iter()
+            .map(|option| format!(r#""${{prev}}" != "{option}""#))
+            .collect::<Vec<_>>()
+            .join(" && ");
+        let positional_condition = if guards.is_empty() {
+            positions
         } else {
-            format!("${{COMP_CWORD}} -eq {file_cword}")
+            format!("( {positions} ) && {guards}")
         };
         let patched_fast_path = format!(
             r#"            if [[ ${{cur}} == -* ]] ; then
@@ -3838,6 +3870,29 @@ async fn run(cli: Cli, binary_name: &'static str) -> Result<(), CliError> {
             }
         };
         std::process::exit(code);
+    }
+
+    if let Command::Diff {
+        action:
+            DiffAction::Snapshots {
+                incumbent,
+                rustbgpd,
+                max_routes,
+                max_input_bytes,
+                detail,
+            },
+    } = &cli.command
+    {
+        std::process::exit(commands::diff::snapshots(
+            &commands::diff::SnapshotDiffOpts {
+                incumbent,
+                rustbgpd,
+                max_routes: *max_routes,
+                max_input_bytes: *max_input_bytes,
+                detail: *detail,
+                json: cli.json,
+            },
+        ));
     }
 
     // `diff snapshot from-mrt` is a pure offline adapter (no daemon
@@ -6048,9 +6103,14 @@ printf '%s\n' "${COMPREPLY[@]}"
         paths.sort();
         assert_eq!(
             paths.join("|"),
-            "config apply|config diff|config import|config plan|diff snapshot from-bmp|diff snapshot from-mrt|policy check|policy fmt|policy test"
+            "config apply|config diff|config import|config plan|diff snapshot from-bmp|diff snapshot from-mrt|diff snapshots|diff snapshots|policy check|policy fmt|policy test"
         );
-        assert!(found.iter().all(|item| item.index == 1));
+        assert!(
+            found
+                .iter()
+                .all(|item| item.index == 1
+                    || (item.path == ["diff", "snapshots"] && item.index == 2))
+        );
         assert_eq!(found.iter().filter(|item| item.repeatable).count(), 1);
     }
 
@@ -6083,6 +6143,7 @@ printf '%s\n' "${COMPREPLY[@]}"
             for prefix in ["", "lan938"] {
                 let mut words = vec![BINARY_NAME];
                 words.extend(positional.path.iter().map(String::as_str));
+                words.extend(std::iter::repeat_n("prior-file", positional.index - 1));
                 words.push(prefix);
                 let (filenames, replies) =
                     bash_replies(&generated_path, files.path(), &words, false);
@@ -6102,6 +6163,16 @@ printf '%s\n' "${COMPREPLY[@]}"
             true,
         );
         assert!(filenames && replies.iter().any(|reply| reply == "lan938 plain"));
+        // A value option at the first file offset must not turn its value
+        // into the second file positional.
+        let (filenames, replies) = bash_replies(
+            &generated_path,
+            files.path(),
+            &["rbgp", "diff", "snapshots", "--detail", "lan938"],
+            false,
+        );
+        assert!(!filenames);
+        assert!(!replies.iter().any(|reply| reply == "lan938 plain"));
         let words = [
             "rbgp",
             "policy",
