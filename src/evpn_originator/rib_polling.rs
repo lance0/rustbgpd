@@ -745,4 +745,57 @@ mod partial_extended_community_tests {
             assert_eq!(mac_ip_view.esi, EthernetSegmentIdentifier::new([7; 10]));
         }
     }
+
+    #[test]
+    fn absent_sequence_ties_with_zero_in_both_remote_views() {
+        let rt = rustbgpd_evpn::RouteTarget::TwoOctetAs {
+            asn: 65000,
+            value: 100,
+        }
+        .to_extended_community();
+        let mut absent = contender(PathAttribute::ExtendedCommunities(vec![rt]));
+        let EvpnRoute::MacIp(mac_ip) = &mut absent.route else {
+            unreachable!("contender builds a MAC/IP route");
+        };
+        mac_ip.rd = rd(65000, 1);
+        mac_ip.esi = EthernetSegmentIdentifier::new([7; 10]);
+        let mut zero = contender(PathAttribute::ExtendedCommunities(vec![
+            rt,
+            ExtendedCommunity::mac_mobility(false, 0),
+        ]));
+        zero.next_hop = ipa("10.0.0.3");
+        let mut instances = EvpnInstanceTable::new();
+        instances
+            .insert(evpn_instance(65_000, 100, 100, None, false))
+            .unwrap();
+        let no_segments = BTreeMap::new();
+
+        let views: Vec<_> = [[absent.clone(), zero.clone()], [zero, absent]]
+            .into_iter()
+            .map(|routes| build_remote_views(&instances, &routes, &no_segments))
+            .collect();
+        for (mac_views, mac_ip_views) in views {
+            let mac_view = &mac_views[&(vni(100), mac(0xaa))];
+            let mac_ip_view = &mac_ip_views[&(vni(100), mac(0xaa), ipa("192.0.2.10"))];
+            for (next_hop, sequence, sticky, esi) in [
+                (
+                    mac_view.next_hop,
+                    mac_view.mobility_sequence,
+                    mac_view.sticky,
+                    mac_view.esi,
+                ),
+                (
+                    mac_ip_view.next_hop,
+                    mac_ip_view.mobility_sequence,
+                    mac_ip_view.sticky,
+                    mac_ip_view.esi,
+                ),
+            ] {
+                assert_eq!(next_hop, ipa("10.0.0.2"));
+                assert_eq!(sequence, None);
+                assert!(!sticky);
+                assert_eq!(esi, EthernetSegmentIdentifier::new([7; 10]));
+            }
+        }
+    }
 }
