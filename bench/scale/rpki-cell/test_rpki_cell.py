@@ -78,9 +78,11 @@ class VrpFixture(unittest.TestCase):
     def test_check_is_arithmetic_only(self):
         rpki_cell.check_shape(700, 400400, 500000)
         with self.assertRaises(ValueError):
-            rpki_cell.check_shape(9, 50, 49)
+            rpki_cell.check_shape(10, 50, 49)
         with self.assertRaises(ValueError):
-            rpki_cell.check_shape(7, 50, 80)
+            rpki_cell.check_shape(7, 49, 80)
+        with self.assertRaises(ValueError):
+            rpki_cell.check_shape(9, 50, 80)
 
     def test_default_shape_crosses_the_second_octet_boundary(self):
         roas = rpki_cell.roas(700, 400400, 500000)

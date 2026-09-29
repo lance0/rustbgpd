@@ -54,11 +54,8 @@ def member_slice(total: int, peers: int, member: int) -> tuple[int, int]:
     return member * q + min(member, r), q + (member < r)
 
 
-def check_shape(n_peers: int, total: int, vrps: int) -> None:
-    """Arithmetic-only shape check; raises ValueError."""
-    if n_peers < MIN_PEERS:
-        raise ValueError(f"N_PEERS={n_peers} is below the reloadstall minimum of {MIN_PEERS}")
-    if total < n_peers:
+def check_fixture(n_peers: int, total: int, vrps: int) -> None:
+    if n_peers < 1 or total < n_peers:
         raise ValueError("need at least one prefix per peer")
     if vrps < total:
         raise ValueError(f"VRPS={vrps} is below the {total} announced prefixes; every route must validate")
@@ -66,8 +63,19 @@ def check_shape(n_peers: int, total: int, vrps: int) -> None:
         raise ValueError("prefix space exhausted")
 
 
+def check_shape(n_peers: int, total: int, vrps: int) -> None:
+    """Arithmetic-only check of a cell shape, including the harness's own
+    IPv4-only rules (at least CHURNERS stubs, TOTAL a multiple of N_PEERS;
+    see family_totals in reloadstall). Raises ValueError."""
+    if n_peers < MIN_PEERS:
+        raise ValueError(f"N_PEERS={n_peers} is below the reloadstall minimum of {MIN_PEERS}")
+    if total % n_peers:
+        raise ValueError(f"TOTAL_PREFIXES={total} is not a multiple of N_PEERS={n_peers}; reloadstall refuses it")
+    check_fixture(n_peers, total, vrps)
+
+
 def roas(n_peers: int, total: int, vrps: int) -> list[dict]:
-    check_shape(n_peers, total, vrps)
+    check_fixture(n_peers, total, vrps)
     out = []
     for member in range(n_peers):
         start, length = member_slice(total, n_peers, member)
