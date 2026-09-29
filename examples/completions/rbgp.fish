@@ -955,18 +955,19 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand orr" -l json-version -d 'Wrap 
 complete -c rbgp -n "__fish_rbgp_using_subcommand orr" -s j -l json -d 'Output in JSON format'
 complete -c rbgp -n "__fish_rbgp_using_subcommand orr" -l no-color -d 'Disable colored output'
 complete -c rbgp -n "__fish_rbgp_using_subcommand orr" -s h -l help -d 'Print help (see more with \'--help\')'
-complete -c rbgp -n "__fish_rbgp_using_subcommand diff; and not __fish_seen_subcommand_from advertised snapshot help" -s s -l addr -d 'gRPC server address or unix:///path/to/socket' -r
-complete -c rbgp -n "__fish_rbgp_using_subcommand diff; and not __fish_seen_subcommand_from advertised snapshot help" -l token-file -d 'Bearer token file for authenticated gRPC endpoints' -r
-complete -c rbgp -n "__fish_rbgp_using_subcommand diff; and not __fish_seen_subcommand_from advertised snapshot help" -l tls-ca -d 'PEM CA bundle used to verify an HTTPS server (required for HTTPS)' -r -F
-complete -c rbgp -n "__fish_rbgp_using_subcommand diff; and not __fish_seen_subcommand_from advertised snapshot help" -l tls-cert -d 'PEM client certificate chain for mTLS (requires --tls-key)' -r -F
-complete -c rbgp -n "__fish_rbgp_using_subcommand diff; and not __fish_seen_subcommand_from advertised snapshot help" -l tls-key -d 'PEM client private key for mTLS (requires --tls-cert)' -r -F
-complete -c rbgp -n "__fish_rbgp_using_subcommand diff; and not __fish_seen_subcommand_from advertised snapshot help" -l tls-server-name -d 'Server certificate name to verify instead of the HTTPS address host' -r
-complete -c rbgp -n "__fish_rbgp_using_subcommand diff; and not __fish_seen_subcommand_from advertised snapshot help" -s j -l json -d 'Output in JSON format'
-complete -c rbgp -n "__fish_rbgp_using_subcommand diff; and not __fish_seen_subcommand_from advertised snapshot help" -l no-color -d 'Disable colored output'
-complete -c rbgp -n "__fish_rbgp_using_subcommand diff; and not __fish_seen_subcommand_from advertised snapshot help" -s h -l help -d 'Print help (see more with \'--help\')'
-complete -c rbgp -n "__fish_rbgp_using_subcommand diff; and not __fish_seen_subcommand_from advertised snapshot help" -f -a "advertised" -d 'Compare the live Adj-RIB-Out against an incumbent NDJSON snapshot'
-complete -c rbgp -n "__fish_rbgp_using_subcommand diff; and not __fish_seen_subcommand_from advertised snapshot help" -f -a "snapshot" -d 'Produce an `rbgp-ribsnap/1` snapshot from an incumbent\'s own output (offline; no daemon connection)'
-complete -c rbgp -n "__fish_rbgp_using_subcommand diff; and not __fish_seen_subcommand_from advertised snapshot help" -f -a "help" -d 'Print this message or the help of the given subcommand(s)'
+complete -c rbgp -n "__fish_rbgp_using_subcommand diff; and not __fish_seen_subcommand_from advertised snapshots snapshot help" -s s -l addr -d 'gRPC server address or unix:///path/to/socket' -r
+complete -c rbgp -n "__fish_rbgp_using_subcommand diff; and not __fish_seen_subcommand_from advertised snapshots snapshot help" -l token-file -d 'Bearer token file for authenticated gRPC endpoints' -r
+complete -c rbgp -n "__fish_rbgp_using_subcommand diff; and not __fish_seen_subcommand_from advertised snapshots snapshot help" -l tls-ca -d 'PEM CA bundle used to verify an HTTPS server (required for HTTPS)' -r -F
+complete -c rbgp -n "__fish_rbgp_using_subcommand diff; and not __fish_seen_subcommand_from advertised snapshots snapshot help" -l tls-cert -d 'PEM client certificate chain for mTLS (requires --tls-key)' -r -F
+complete -c rbgp -n "__fish_rbgp_using_subcommand diff; and not __fish_seen_subcommand_from advertised snapshots snapshot help" -l tls-key -d 'PEM client private key for mTLS (requires --tls-cert)' -r -F
+complete -c rbgp -n "__fish_rbgp_using_subcommand diff; and not __fish_seen_subcommand_from advertised snapshots snapshot help" -l tls-server-name -d 'Server certificate name to verify instead of the HTTPS address host' -r
+complete -c rbgp -n "__fish_rbgp_using_subcommand diff; and not __fish_seen_subcommand_from advertised snapshots snapshot help" -s j -l json -d 'Output in JSON format'
+complete -c rbgp -n "__fish_rbgp_using_subcommand diff; and not __fish_seen_subcommand_from advertised snapshots snapshot help" -l no-color -d 'Disable colored output'
+complete -c rbgp -n "__fish_rbgp_using_subcommand diff; and not __fish_seen_subcommand_from advertised snapshots snapshot help" -s h -l help -d 'Print help (see more with \'--help\')'
+complete -c rbgp -n "__fish_rbgp_using_subcommand diff; and not __fish_seen_subcommand_from advertised snapshots snapshot help" -f -a "advertised" -d 'Compare the live Adj-RIB-Out against an incumbent NDJSON snapshot'
+complete -c rbgp -n "__fish_rbgp_using_subcommand diff; and not __fish_seen_subcommand_from advertised snapshots snapshot help" -f -a "snapshots" -d 'Compare two complete `rbgp-ribsnap/1` snapshots without a daemon'
+complete -c rbgp -n "__fish_rbgp_using_subcommand diff; and not __fish_seen_subcommand_from advertised snapshots snapshot help" -f -a "snapshot" -d 'Produce an `rbgp-ribsnap/1` snapshot from an incumbent\'s own output (offline; no daemon connection)'
+complete -c rbgp -n "__fish_rbgp_using_subcommand diff; and not __fish_seen_subcommand_from advertised snapshots snapshot help" -f -a "help" -d 'Print this message or the help of the given subcommand(s)'
 complete -c rbgp -n "__fish_rbgp_using_subcommand diff; and __fish_seen_subcommand_from advertised" -l neighbor -l peer -d 'Neighbor address to compare; may be repeated. Omit to compare every peer present in the snapshot' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand diff; and __fish_seen_subcommand_from advertised" -l against -d 'Path to the incumbent `rbgp-ribsnap/1` NDJSON snapshot' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand diff; and __fish_seen_subcommand_from advertised" -s a -l family -d 'Address family filter (ipv4_unicast, ipv6_unicast); may be repeated' -r
@@ -984,6 +985,18 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand diff; and __fish_seen_subcomma
 complete -c rbgp -n "__fish_rbgp_using_subcommand diff; and __fish_seen_subcommand_from advertised" -s j -l json -d 'Output in JSON format'
 complete -c rbgp -n "__fish_rbgp_using_subcommand diff; and __fish_seen_subcommand_from advertised" -l no-color -d 'Disable colored output'
 complete -c rbgp -n "__fish_rbgp_using_subcommand diff; and __fish_seen_subcommand_from advertised" -s h -l help -d 'Print help (see more with \'--help\')'
+complete -c rbgp -n "__fish_rbgp_using_subcommand diff; and __fish_seen_subcommand_from snapshots" -l max-routes -d 'Maximum retained routes per input; exceeding it exits 2' -r
+complete -c rbgp -n "__fish_rbgp_using_subcommand diff; and __fish_seen_subcommand_from snapshots" -l max-input-bytes -d 'Maximum bytes per input; exceeding it exits 2' -r
+complete -c rbgp -n "__fish_rbgp_using_subcommand diff; and __fish_seen_subcommand_from snapshots" -l detail -d 'Maximum detailed difference rows in human output (--json is complete)' -r
+complete -c rbgp -n "__fish_rbgp_using_subcommand diff; and __fish_seen_subcommand_from snapshots" -s s -l addr -d 'gRPC server address or unix:///path/to/socket' -r
+complete -c rbgp -n "__fish_rbgp_using_subcommand diff; and __fish_seen_subcommand_from snapshots" -l token-file -d 'Bearer token file for authenticated gRPC endpoints' -r
+complete -c rbgp -n "__fish_rbgp_using_subcommand diff; and __fish_seen_subcommand_from snapshots" -l tls-ca -d 'PEM CA bundle used to verify an HTTPS server (required for HTTPS)' -r -F
+complete -c rbgp -n "__fish_rbgp_using_subcommand diff; and __fish_seen_subcommand_from snapshots" -l tls-cert -d 'PEM client certificate chain for mTLS (requires --tls-key)' -r -F
+complete -c rbgp -n "__fish_rbgp_using_subcommand diff; and __fish_seen_subcommand_from snapshots" -l tls-key -d 'PEM client private key for mTLS (requires --tls-cert)' -r -F
+complete -c rbgp -n "__fish_rbgp_using_subcommand diff; and __fish_seen_subcommand_from snapshots" -l tls-server-name -d 'Server certificate name to verify instead of the HTTPS address host' -r
+complete -c rbgp -n "__fish_rbgp_using_subcommand diff; and __fish_seen_subcommand_from snapshots" -s j -l json -d 'Output in JSON format'
+complete -c rbgp -n "__fish_rbgp_using_subcommand diff; and __fish_seen_subcommand_from snapshots" -l no-color -d 'Disable colored output'
+complete -c rbgp -n "__fish_rbgp_using_subcommand diff; and __fish_seen_subcommand_from snapshots" -s h -l help -d 'Print help (see more with \'--help\')'
 complete -c rbgp -n "__fish_rbgp_using_subcommand diff; and __fish_seen_subcommand_from snapshot" -s s -l addr -d 'gRPC server address or unix:///path/to/socket' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand diff; and __fish_seen_subcommand_from snapshot" -l token-file -d 'Bearer token file for authenticated gRPC endpoints' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand diff; and __fish_seen_subcommand_from snapshot" -l tls-ca -d 'PEM CA bundle used to verify an HTTPS server (required for HTTPS)' -r -F
@@ -997,6 +1010,7 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand diff; and __fish_seen_subcomma
 complete -c rbgp -n "__fish_rbgp_using_subcommand diff; and __fish_seen_subcommand_from snapshot" -f -a "from-bmp" -d 'Convert a captured RFC 7854/8671 BMP byte stream into a snapshot'
 complete -c rbgp -n "__fish_rbgp_using_subcommand diff; and __fish_seen_subcommand_from snapshot" -f -a "help" -d 'Print this message or the help of the given subcommand(s)'
 complete -c rbgp -n "__fish_rbgp_using_subcommand diff; and __fish_seen_subcommand_from help" -f -a "advertised" -d 'Compare the live Adj-RIB-Out against an incumbent NDJSON snapshot'
+complete -c rbgp -n "__fish_rbgp_using_subcommand diff; and __fish_seen_subcommand_from help" -f -a "snapshots" -d 'Compare two complete `rbgp-ribsnap/1` snapshots without a daemon'
 complete -c rbgp -n "__fish_rbgp_using_subcommand diff; and __fish_seen_subcommand_from help" -f -a "snapshot" -d 'Produce an `rbgp-ribsnap/1` snapshot from an incumbent\'s own output (offline; no daemon connection)'
 complete -c rbgp -n "__fish_rbgp_using_subcommand diff; and __fish_seen_subcommand_from help" -f -a "help" -d 'Print this message or the help of the given subcommand(s)'
 complete -c rbgp -n "__fish_rbgp_using_subcommand flowspec; and not __fish_seen_subcommand_from advertised received add delete help" -s a -l family -d 'Address family (ipv4_flowspec, ipv6_flowspec)' -r
@@ -2072,6 +2086,7 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand help; and __fish_seen_subcomma
 complete -c rbgp -n "__fish_rbgp_using_subcommand help; and __fish_seen_subcommand_from topology" -f -a "nodes" -d 'List topology nodes (BGP-LS node identities across all peers)'
 complete -c rbgp -n "__fish_rbgp_using_subcommand help; and __fish_seen_subcommand_from topology" -f -a "links" -d 'List usable directed topology links (with IGP metrics)'
 complete -c rbgp -n "__fish_rbgp_using_subcommand help; and __fish_seen_subcommand_from diff" -f -a "advertised" -d 'Compare the live Adj-RIB-Out against an incumbent NDJSON snapshot'
+complete -c rbgp -n "__fish_rbgp_using_subcommand help; and __fish_seen_subcommand_from diff" -f -a "snapshots" -d 'Compare two complete `rbgp-ribsnap/1` snapshots without a daemon'
 complete -c rbgp -n "__fish_rbgp_using_subcommand help; and __fish_seen_subcommand_from diff" -f -a "snapshot" -d 'Produce an `rbgp-ribsnap/1` snapshot from an incumbent\'s own output (offline; no daemon connection)'
 complete -c rbgp -n "__fish_rbgp_using_subcommand help; and __fish_seen_subcommand_from flowspec" -f -a "advertised" -d 'Show committed post-export-policy rules toward a destination peer'
 complete -c rbgp -n "__fish_rbgp_using_subcommand help; and __fish_seen_subcommand_from flowspec" -f -a "received" -d 'Show retained received candidates, including infeasible and nonselected rules'

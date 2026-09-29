@@ -1,22 +1,22 @@
-//! `rbgp diff advertised` — compare the daemon's live Adj-RIB-Out against a
-//! canonical NDJSON snapshot of an incumbent route server's advertised view.
+//! `rbgp diff` — compare complete advertised views from live gRPC or
+//! two offline canonical NDJSON snapshots.
 //!
 //! The semantic comparison itself lives in `rustbgpctl::ribdiff`; this module
 //! is the operator workflow around it: fail-closed NDJSON ingestion (versioned
 //! header + counted completion trailer required — EOF alone is never
 //! completeness), fail-closed gRPC pagination (repeated/cyclic page tokens,
 //! mid-walk listing drift, and count mismatches all refuse the comparison),
-//! per-peer processing that never holds both full sides at once, and the
+//! per-peer live processing, bounded offline route sets, and the
 //! 0/1/2 exit-code contract.
 //!
-//! Strictly read-only: the only RPCs issued are `ListNeighbors` and
+//! Strictly read-only: the live command only issues `ListNeighbors` and
 //! `ListAdvertisedRoutes`.
 
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::future::Future;
 use std::io::{BufRead, BufReader, Read};
 use std::net::IpAddr;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use crate::commands::neighbor::bare_ip_rpc_address;
@@ -114,14 +114,102 @@ pub struct AdvertisedDiffOpts {
     pub json: bool,
 }
 
+/// Options for comparing two complete offline snapshots.
+pub struct SnapshotDiffOpts<'a> {
+    pub incumbent: &'a Path,
+    pub rustbgpd: &'a Path,
+    pub max_routes: usize,
+    pub max_input_bytes: u64,
+    pub detail: usize,
+    pub json: bool,
+}
+
+/// Compare two snapshots without opening a daemon connection.
+pub fn snapshots(opts: &SnapshotDiffOpts<'_>) -> i32 {
+    let stdout = std::io::stdout();
+    emit_diff_result(run_snapshots(opts), &mut stdout.lock())
+}
+
+fn run_snapshots(opts: &SnapshotDiffOpts<'_>) -> Result<(String, i32), CliError> {
+    let limits = DiffLimits {
+        max_routes: opts.max_routes,
+        max_input_bytes: usize::try_from(opts.max_input_bytes).unwrap_or(usize::MAX),
+        ..DiffLimits::default()
+    };
+    let mut peer_asns = BTreeMap::new();
+    let mut load = |path: &Path| -> Result<RouteSet, CliError> {
+        let file = std::fs::File::open(path)
+            .map_err(|error| op(format!("cannot open snapshot {}: {error}", path.display())))?;
+        let snapshot = parse_snapshot(
+            file,
+            path,
+            opts.max_routes,
+            opts.max_input_bytes,
+            &[],
+            &BTreeSet::new(),
+            &[],
+        )?;
+        let mut routes = RouteSet::with_limits(
+            SnapshotMeta {
+                source: snapshot.source,
+                generation: snapshot.generation,
+                complete: true,
+            },
+            limits,
+        );
+        for (address, bucket) in snapshot.peers {
+            if let Some(previous) = peer_asns.insert(address, bucket.asn)
+                && previous != bucket.asn
+            {
+                return Err(op(format!(
+                    "peer {address}: ASN mismatch between snapshots ({previous} vs {}); equality refused",
+                    bucket.asn
+                )));
+            }
+            let peer = PeerId {
+                address,
+                asn: bucket.asn,
+                distinguisher: None,
+            };
+            for (family, nlri, route) in bucket.records {
+                routes
+                    .insert(peer.clone(), family, nlri, route)
+                    .map_err(|error| op(format!("snapshot {}: {error}", path.display())))?;
+            }
+        }
+        Ok(routes)
+    };
+    let incumbent = load(opts.incumbent)?;
+    let rustbgpd = load(opts.rustbgpd)?;
+    let report = ribdiff::diff(&incumbent, &rustbgpd);
+    let code = match report.verdict {
+        Verdict::InSync => EXIT_IN_SYNC,
+        Verdict::Divergent => EXIT_DIVERGENT,
+        Verdict::Incomparable => EXIT_INCOMPARABLE,
+    };
+    let rendered = if opts.json {
+        render_json(&report, &[], &[], &BTreeMap::new())?
+    } else {
+        render_human(
+            &report,
+            &[],
+            &[],
+            opts.detail,
+            &BTreeMap::new(),
+            "snapshots",
+        )
+    };
+    Ok((rendered, code))
+}
+
 /// Run the diff, print its report, and return the process exit code.
 pub async fn advertised(connection: Connection, opts: &AdvertisedDiffOpts) -> i32 {
     let result = run(connection, opts).await;
     let stdout = std::io::stdout();
-    emit_advertised_result(result, &mut stdout.lock())
+    emit_diff_result(result, &mut stdout.lock())
 }
 
-fn emit_advertised_result(
+fn emit_diff_result(
     result: Result<(String, i32), CliError>,
     writer: &mut dyn std::io::Write,
 ) -> i32 {
@@ -129,7 +217,7 @@ fn emit_advertised_result(
         Ok((rendered, code)) => match output::write_bytes(writer, rendered.as_bytes()) {
             Ok(()) => code,
             Err(error) => {
-                output::report_write_error("advertised diff output", &error);
+                output::report_write_error("diff output", &error);
                 EXIT_INCOMPARABLE
             }
         },
@@ -201,8 +289,15 @@ async fn run(connection: Connection, opts: &AdvertisedDiffOpts) -> Result<(Strin
             opts.against.display()
         ))
     })?;
-    let mut snapshot =
-        parse_snapshot(file, opts, &family_filter, &peer_filter.addresses, &ignored)?;
+    let mut snapshot = parse_snapshot(
+        file,
+        &opts.against,
+        opts.max_routes,
+        opts.max_input_bytes,
+        &family_filter,
+        &peer_filter.addresses,
+        &ignored,
+    )?;
 
     let requested: BTreeSet<IpAddr> = if peer_filter.addresses.is_empty() {
         snapshot.peers.keys().copied().collect()
@@ -379,6 +474,7 @@ async fn run(connection: Connection, opts: &AdvertisedDiffOpts) -> Result<(Strin
             notes,
             opts.detail,
             &peer_filter.scoped_labels,
+            "advertised",
         )
     };
     Ok((rendered, code))
@@ -633,15 +729,17 @@ struct SnapshotData {
 ///   before any allocation) and `--max-routes` bounds retained records.
 fn parse_snapshot(
     reader: impl Read,
-    opts: &AdvertisedDiffOpts,
+    path: &Path,
+    max_routes: usize,
+    max_input_bytes: u64,
     family_filter: &[FamilyId],
     peer_filter: &BTreeSet<IpAddr>,
     ignored: &[String],
 ) -> Result<SnapshotData, CliError> {
-    let path = opts.against.display();
+    let path = path.display();
     // The +1 lets us distinguish "exactly at the limit" from over it while
     // still bounding every allocation below the limit check.
-    let mut reader = BufReader::new(reader.take(opts.max_input_bytes.saturating_add(1)));
+    let mut reader = BufReader::new(reader.take(max_input_bytes.saturating_add(1)));
     let mut line = String::new();
     let mut bytes_read: u64 = 0;
     let mut line_no: u64 = 0;
@@ -651,11 +749,11 @@ fn parse_snapshot(
             .read_line(line)
             .map_err(|e| op(format!("{path}: read failed: {e}")))?;
         *bytes_read += n as u64;
-        if *bytes_read > opts.max_input_bytes {
+        if *bytes_read > max_input_bytes {
             return Err(op(format!(
                 "{path}: max_input_bytes limit exceeded ({} > {}); refusing to compare \
                  truncated input",
-                bytes_read, opts.max_input_bytes
+                bytes_read, max_input_bytes
             )));
         }
         if n > 0 {
@@ -733,11 +831,11 @@ fn parse_snapshot(
         if !family_retained(family, family_filter) {
             continue;
         }
-        if retained >= opts.max_routes {
+        if retained >= max_routes {
             return Err(op(format!(
                 "{path}: max_routes limit exceeded (more than {} retained snapshot routes); \
                  refusing to compare truncated input",
-                opts.max_routes
+                max_routes
             )));
         }
         retained += 1;
@@ -1102,7 +1200,9 @@ fn render_json(
         .as_object_mut()
         .expect("DiffReport serializes to an object");
     object.insert("ignored_attributes".to_string(), serde_json::json!(ignored));
-    object.insert("live_source_notes".to_string(), serde_json::json!(notes));
+    if !notes.is_empty() {
+        object.insert("live_source_notes".to_string(), serde_json::json!(notes));
+    }
     Ok(format!("{}\n", serde_json::to_string_pretty(&value)?))
 }
 
@@ -1112,14 +1212,17 @@ fn render_human(
     notes: &[&str],
     detail: usize,
     scoped_peer_labels: &BTreeMap<IpAddr, String>,
+    command: &str,
 ) -> String {
     use std::fmt::Write;
 
     let mut out = String::new();
     let _ = writeln!(
         out,
-        "diff advertised: incumbent {:?} (generation {}) vs {}",
-        report.incumbent.source, report.incumbent.generation, report.rustbgpd.source
+        "diff {command}: incumbent {:?} (generation {}) vs {}",
+        report.incumbent.source,
+        report.incumbent.generation,
+        report.rustbgpd.source.escape_debug()
     );
     let _ = writeln!(
         out,
@@ -1128,9 +1231,11 @@ fn render_human(
         report.normalization.version,
         ignored_display(ignored)
     );
-    out.push_str("live-source notes:\n");
-    for note in notes {
-        let _ = writeln!(out, "  - {note}");
+    if !notes.is_empty() {
+        out.push_str("live-source notes:\n");
+        for note in notes {
+            let _ = writeln!(out, "  - {note}");
+        }
     }
     let verdict = match report.verdict {
         Verdict::InSync => "in_sync",
@@ -1234,7 +1339,7 @@ mod tests {
     fn advertised_json_emitter_preserves_rendered_bytes_and_exit_code() {
         let rendered = "{\n  \"verdict\": \"in_sync\"\n}\n".to_string();
         let mut bytes = Vec::new();
-        let code = emit_advertised_result(Ok((rendered.clone(), EXIT_IN_SYNC)), &mut bytes);
+        let code = emit_diff_result(Ok((rendered.clone(), EXIT_IN_SYNC)), &mut bytes);
         assert_eq!(code, EXIT_IN_SYNC);
         assert_eq!(bytes, rendered.as_bytes());
     }
@@ -1254,7 +1359,7 @@ mod tests {
     #[test]
     fn advertised_json_write_failure_exits_two() {
         assert_eq!(
-            emit_advertised_result(Ok(("{}\n".to_string(), EXIT_IN_SYNC)), &mut BrokenWriter,),
+            emit_diff_result(Ok(("{}\n".to_string(), EXIT_IN_SYNC)), &mut BrokenWriter,),
             EXIT_INCOMPARABLE
         );
     }
@@ -1389,7 +1494,16 @@ mod tests {
             }
 
             let opts = opts(&golden_path);
-            parse_snapshot(&bytes[..], &opts, &[], &BTreeSet::new(), &[]).unwrap_or_else(|error| {
+            parse_snapshot(
+                &bytes[..],
+                &opts.against,
+                opts.max_routes,
+                opts.max_input_bytes,
+                &[],
+                &BTreeSet::new(),
+                &[],
+            )
+            .unwrap_or_else(|error| {
                 panic!(
                     "pinned producer golden {} failed the rbgp-ribsnap/1 parser: {error}",
                     golden_path.display()
@@ -1436,7 +1550,16 @@ mod tests {
             bytes.push(b'\n');
             let opts = opts(&golden_path);
             assert!(
-                parse_snapshot(&bytes[..], &opts, &[], &BTreeSet::new(), &[]).is_err(),
+                parse_snapshot(
+                    &bytes[..],
+                    &opts.against,
+                    opts.max_routes,
+                    opts.max_input_bytes,
+                    &[],
+                    &BTreeSet::new(),
+                    &[]
+                )
+                .is_err(),
                 "{} parsed after a required producer field was deleted",
                 golden_path.display()
             );
@@ -2572,8 +2695,16 @@ mod tests {
                 converter.golden
             );
             let opts = opts(&golden_path);
-            parse_snapshot(&golden[..], &opts, &[], &BTreeSet::new(), &[])
-                .expect("golden snapshot must parse as rbgp-ribsnap/1")
+            parse_snapshot(
+                &golden[..],
+                &opts.against,
+                opts.max_routes,
+                opts.max_input_bytes,
+                &[],
+                &BTreeSet::new(),
+                &[],
+            )
+            .expect("golden snapshot must parse as rbgp-ribsnap/1")
         }
 
         /// Mock daemon advertising the wire-truth routes captured from

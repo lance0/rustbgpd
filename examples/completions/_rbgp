@@ -1684,6 +1684,27 @@ _arguments "${_arguments_options[@]}" : \
 '--help[Print help (see more with '\''--help'\'')]' \
 && ret=0
 ;;
+(snapshots)
+_arguments "${_arguments_options[@]}" : \
+'--max-routes=[Maximum retained routes per input; exceeding it exits 2]:MAX_ROUTES:_default' \
+'--max-input-bytes=[Maximum bytes per input; exceeding it exits 2]:MAX_INPUT_BYTES:_default' \
+'--detail=[Maximum detailed difference rows in human output (--json is complete)]:DETAIL:_default' \
+'-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
+'--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
+'--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
+'--tls-ca=[PEM CA bundle used to verify an HTTPS server (required for HTTPS)]:FILE:_files' \
+'--tls-cert=[PEM client certificate chain for mTLS (requires --tls-key)]:FILE:_files' \
+'--tls-key=[PEM client private key for mTLS (requires --tls-cert)]:FILE:_files' \
+'--tls-server-name=[Server certificate name to verify instead of the HTTPS address host]:NAME:_default' \
+'-j[Output in JSON format]' \
+'--json[Output in JSON format]' \
+'--no-color[Disable colored output]' \
+'-h[Print help (see more with '\''--help'\'')]' \
+'--help[Print help (see more with '\''--help'\'')]' \
+':incumbent -- Incumbent post-policy Adj-RIB-Out snapshot:_files' \
+':rustbgpd -- Rustbgpd post-policy Adj-RIB-Out snapshot:_files' \
+&& ret=0
+;;
 (snapshot)
 _arguments "${_arguments_options[@]}" : \
 '-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
@@ -1798,6 +1819,10 @@ _arguments "${_arguments_options[@]}" : \
         curcontext="${curcontext%:*:*}:rbgp-diff-help-command-$line[1]:"
         case $line[1] in
             (advertised)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(snapshots)
 _arguments "${_arguments_options[@]}" : \
 && ret=0
 ;;
@@ -4494,6 +4519,10 @@ _arguments "${_arguments_options[@]}" : \
 _arguments "${_arguments_options[@]}" : \
 && ret=0
 ;;
+(snapshots)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
 (snapshot)
 _arguments "${_arguments_options[@]}" : \
 ":: :_rbgp__subcmd__help__subcmd__diff__subcmd__snapshot_commands" \
@@ -5217,6 +5246,7 @@ _rbgp__subcmd__config__subcmd__status_commands() {
 _rbgp__subcmd__diff_commands() {
     local commands; commands=(
 'advertised:Compare the live Adj-RIB-Out against an incumbent NDJSON snapshot' \
+'snapshots:Compare two complete \`rbgp-ribsnap/1\` snapshots without a daemon' \
 'snapshot:Produce an \`rbgp-ribsnap/1\` snapshot from an incumbent'\''s own output (offline; no daemon connection)' \
 'help:Print this message or the help of the given subcommand(s)' \
     )
@@ -5231,6 +5261,7 @@ _rbgp__subcmd__diff__subcmd__advertised_commands() {
 _rbgp__subcmd__diff__subcmd__help_commands() {
     local commands; commands=(
 'advertised:Compare the live Adj-RIB-Out against an incumbent NDJSON snapshot' \
+'snapshots:Compare two complete \`rbgp-ribsnap/1\` snapshots without a daemon' \
 'snapshot:Produce an \`rbgp-ribsnap/1\` snapshot from an incumbent'\''s own output (offline; no daemon connection)' \
 'help:Print this message or the help of the given subcommand(s)' \
     )
@@ -5263,6 +5294,11 @@ _rbgp__subcmd__diff__subcmd__help__subcmd__snapshot__subcmd__from-bmp_commands()
 _rbgp__subcmd__diff__subcmd__help__subcmd__snapshot__subcmd__from-mrt_commands() {
     local commands; commands=()
     _describe -t commands 'rbgp diff help snapshot from-mrt commands' commands "$@"
+}
+(( $+functions[_rbgp__subcmd__diff__subcmd__help__subcmd__snapshots_commands] )) ||
+_rbgp__subcmd__diff__subcmd__help__subcmd__snapshots_commands() {
+    local commands; commands=()
+    _describe -t commands 'rbgp diff help snapshots commands' commands "$@"
 }
 (( $+functions[_rbgp__subcmd__diff__subcmd__snapshot_commands] )) ||
 _rbgp__subcmd__diff__subcmd__snapshot_commands() {
@@ -5306,6 +5342,11 @@ _rbgp__subcmd__diff__subcmd__snapshot__subcmd__help__subcmd__from-mrt_commands()
 _rbgp__subcmd__diff__subcmd__snapshot__subcmd__help__subcmd__help_commands() {
     local commands; commands=()
     _describe -t commands 'rbgp diff snapshot help help commands' commands "$@"
+}
+(( $+functions[_rbgp__subcmd__diff__subcmd__snapshots_commands] )) ||
+_rbgp__subcmd__diff__subcmd__snapshots_commands() {
+    local commands; commands=()
+    _describe -t commands 'rbgp diff snapshots commands' commands "$@"
 }
 (( $+functions[_rbgp__subcmd__doctor_commands] )) ||
 _rbgp__subcmd__doctor_commands() {
@@ -6119,6 +6160,7 @@ _rbgp__subcmd__help__subcmd__config__subcmd__status_commands() {
 _rbgp__subcmd__help__subcmd__diff_commands() {
     local commands; commands=(
 'advertised:Compare the live Adj-RIB-Out against an incumbent NDJSON snapshot' \
+'snapshots:Compare two complete \`rbgp-ribsnap/1\` snapshots without a daemon' \
 'snapshot:Produce an \`rbgp-ribsnap/1\` snapshot from an incumbent'\''s own output (offline; no daemon connection)' \
     )
     _describe -t commands 'rbgp help diff commands' commands "$@"
@@ -6145,6 +6187,11 @@ _rbgp__subcmd__help__subcmd__diff__subcmd__snapshot__subcmd__from-bmp_commands()
 _rbgp__subcmd__help__subcmd__diff__subcmd__snapshot__subcmd__from-mrt_commands() {
     local commands; commands=()
     _describe -t commands 'rbgp help diff snapshot from-mrt commands' commands "$@"
+}
+(( $+functions[_rbgp__subcmd__help__subcmd__diff__subcmd__snapshots_commands] )) ||
+_rbgp__subcmd__help__subcmd__diff__subcmd__snapshots_commands() {
+    local commands; commands=()
+    _describe -t commands 'rbgp help diff snapshots commands' commands "$@"
 }
 (( $+functions[_rbgp__subcmd__help__subcmd__doctor_commands] )) ||
 _rbgp__subcmd__help__subcmd__doctor_commands() {

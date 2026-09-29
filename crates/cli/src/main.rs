@@ -1426,6 +1426,33 @@ enum DiffAction {
         deadline: u64,
     },
 
+    /// Compare two complete `rbgp-ribsnap/1` snapshots without a daemon
+    ///
+    /// Use from-bmp post-policy Adj-RIB-Out captures toward the same observer.
+    /// Both snapshots must have the same capture-round generation. All peers
+    /// and attributes are compared, including ORIGINATOR_ID and CLUSTER_LIST
+    /// as byte-exact unknown attributes (type codes 9 and 10).
+    #[command(
+        after_help = "Exit codes:\n  0  complete inputs, no semantic differences\n  1  complete inputs, differences found\n  2  incomplete, malformed, mixed-generation, over-limit, or unreadable input"
+    )]
+    Snapshots {
+        /// Incumbent post-policy Adj-RIB-Out snapshot
+        #[arg(value_hint = clap::ValueHint::FilePath)]
+        incumbent: PathBuf,
+        /// Rustbgpd post-policy Adj-RIB-Out snapshot
+        #[arg(value_hint = clap::ValueHint::FilePath)]
+        rustbgpd: PathBuf,
+        /// Maximum retained routes per input; exceeding it exits 2
+        #[arg(long, default_value_t = 4_000_000)]
+        max_routes: usize,
+        /// Maximum bytes per input; exceeding it exits 2
+        #[arg(long, default_value_t = 1 << 30)]
+        max_input_bytes: u64,
+        /// Maximum detailed difference rows in human output (--json is complete)
+        #[arg(long, default_value_t = 20)]
+        detail: usize,
+    },
+
     /// Produce an `rbgp-ribsnap/1` snapshot from an incumbent's own output
     /// (offline; no daemon connection)
     Snapshot {
@@ -3125,33 +3152,46 @@ struct BashFilePositional {
     index: usize,
     repeatable: bool,
     value_options: Vec<String>,
+    conflicting_options: Vec<String>,
 }
 
 fn bash_file_positionals(command: &clap::Command) -> Vec<BashFilePositional> {
+    fn option_names(option: &clap::Arg) -> Vec<String> {
+        let mut names = Vec::new();
+        if let Some(longs) = option.get_long_and_visible_aliases() {
+            names.extend(longs.into_iter().map(|name| format!("--{name}")));
+        }
+        if let Some(shorts) = option.get_short_and_visible_aliases() {
+            names.extend(shorts.into_iter().map(|name| format!("-{name}")));
+        }
+        names
+    }
+
     fn visit(command: &clap::Command, path: &mut Vec<String>, found: &mut Vec<BashFilePositional>) {
         for positional in command
             .get_positionals()
             .filter(|arg| arg.get_value_hint() == clap::ValueHint::FilePath)
         {
-            let mut value_options = Vec::new();
-            for option in command
+            let mut value_options: Vec<_> = command
                 .get_opts()
                 .filter(|arg| arg.get_action().takes_values())
-            {
-                if let Some(longs) = option.get_long_and_visible_aliases() {
-                    value_options.extend(longs.into_iter().map(|name| format!("--{name}")));
-                }
-                if let Some(shorts) = option.get_short_and_visible_aliases() {
-                    value_options.extend(shorts.into_iter().map(|name| format!("-{name}")));
-                }
+                .flat_map(option_names)
+                .collect();
+            let mut conflicting_options: Vec<_> = command
+                .get_arg_conflicts_with(positional)
+                .into_iter()
+                .flat_map(option_names)
+                .collect();
+            for options in [&mut value_options, &mut conflicting_options] {
+                options.sort();
+                options.dedup();
             }
-            value_options.sort();
-            value_options.dedup();
             found.push(BashFilePositional {
                 path: path.clone(),
                 index: positional.get_index().unwrap_or(0),
                 repeatable: matches!(positional.get_action(), &clap::ArgAction::Append),
                 value_options,
+                conflicting_options,
             });
         }
         for subcommand in command.get_subcommands() {
@@ -3187,7 +3227,9 @@ fn patch_bash_file_positionals(
 
     let mut completion = String::from_utf8(raw)
         .map_err(|error| invalid(format!("Bash completion was not UTF-8: {error}")))?;
-    for positional in bash_file_positionals(command) {
+    let positionals = bash_file_positionals(command);
+    for group in positionals.chunk_by(|left, right| left.path == right.path) {
+        let positional = &group[0];
         let selector = positional
             .path
             .iter()
@@ -3214,28 +3256,75 @@ fn patch_bash_file_positionals(
             &raw_fast_path,
             &format!("{context} positional fast path"),
         )?;
-        let positional_condition = if positional.repeatable {
-            let guards = positional
-                .value_options
-                .iter()
-                .map(|option| format!(r#""${{prev}}" != "{option}""#))
-                .collect::<Vec<_>>()
-                .join(" && ");
-            if guards.is_empty() {
-                format!("${{COMP_CWORD}} -ge {file_cword}")
-            } else {
-                format!(
-                    "${{COMP_CWORD}} -eq {file_cword} || ( ${{COMP_CWORD}} -gt {file_cword} && {guards} )"
-                )
-            }
+        let positions = group
+            .iter()
+            .map(|positional| {
+                let file_cword = positional.path.len() + positional.index;
+                let comparison = if positional.repeatable { "-ge" } else { "-eq" };
+                format!("${{rbgp_positional}} {comparison} {file_cword}")
+            })
+            .collect::<Vec<_>>()
+            .join(" || ");
+        let value_options = positional
+            .value_options
+            .iter()
+            .map(|option| format!(r#""{option}""#))
+            .collect::<Vec<_>>()
+            .join("|");
+        let short_value_options = positional
+            .value_options
+            .iter()
+            .filter_map(|option| option.strip_prefix('-').filter(|short| short.len() == 1))
+            .map(|short| format!(r#""{short}""#))
+            .collect::<Vec<_>>()
+            .join("|");
+        let conflicts = positional
+            .conflicting_options
+            .iter()
+            .map(|option| format!(r#""{option}""#))
+            .collect::<Vec<_>>()
+            .join("|");
+        let conflict_guard = if conflicts.is_empty() {
+            String::new()
         } else {
-            format!("${{COMP_CWORD}} -eq {file_cword}")
+            format!(
+                r#"                    case "${{rbgp_word%%=*}}" in
+                        {conflicts}) rbgp_file_allowed=0 ;;
+                    esac
+"#
+            )
         };
+        // Count command and positional words, excluding options and their
+        // values, so options anywhere in argv cannot shift a file's index.
         let patched_fast_path = format!(
-            r#"            if [[ ${{cur}} == -* ]] ; then
+            r#"            local rbgp_positional=1 rbgp_value=0 rbgp_options=1 rbgp_file_allowed=1 rbgp_word rbgp_short
+            for rbgp_word in "${{COMP_WORDS[@]:1:COMP_CWORD-1}}"; do
+                if [[ ${{rbgp_value}} == 1 ]]; then rbgp_value=0; continue; fi
+                if [[ ${{rbgp_options}} == 1 ]]; then
+{conflict_guard}                    case "${{rbgp_word}}" in
+                        --) rbgp_options=0; continue ;;
+                        --*=*) continue ;;
+                        {value_options}) rbgp_value=1; continue ;;
+                        --*) continue ;;
+                        -?*)
+                            rbgp_short="${{rbgp_word:1}}"
+                            while [[ -n ${{rbgp_short}} ]]; do
+                                case "${{rbgp_short:0:1}}" in
+                                    {short_value_options})
+                                        [[ ${{#rbgp_short}} -eq 1 ]] && rbgp_value=1
+                                        break ;;
+                                esac
+                                rbgp_short="${{rbgp_short:1}}"
+                            done
+                            continue ;;
+                    esac
+                fi
+                rbgp_positional=$((rbgp_positional + 1))
+            done
+            if [[ ${{cur}} == -* && ${{rbgp_options}} == 1 && ${{rbgp_value}} == 0 ]] ; then
                 COMPREPLY=( $(compgen -W "${{opts}}" -- "${{cur}}") )
                 return 0
-            elif [[ {positional_condition} ]] ; then
+            elif [[ ${{rbgp_value}} == 0 && ${{rbgp_file_allowed}} == 1 && ( {positions} ) ]] ; then
                 local rbgp_old_ifs rbgp_ifs_was_set
                 [ -n "${{IFS+x}}" ] && {{ rbgp_old_ifs="$IFS"; rbgp_ifs_was_set=1; }}
                 IFS=$'\n'
@@ -3844,6 +3933,29 @@ async fn run(cli: Cli, binary_name: &'static str) -> Result<(), CliError> {
             }
         };
         std::process::exit(code);
+    }
+
+    if let Command::Diff {
+        action:
+            DiffAction::Snapshots {
+                incumbent,
+                rustbgpd,
+                max_routes,
+                max_input_bytes,
+                detail,
+            },
+    } = &cli.command
+    {
+        std::process::exit(commands::diff::snapshots(
+            &commands::diff::SnapshotDiffOpts {
+                incumbent,
+                rustbgpd,
+                max_routes: *max_routes,
+                max_input_bytes: *max_input_bytes,
+                detail: *detail,
+                json: cli.json,
+            },
+        ));
     }
 
     // `diff snapshot from-mrt` is a pure offline adapter (no daemon
@@ -6058,10 +6170,32 @@ printf '%s\n' "${COMPREPLY[@]}"
         paths.sort();
         assert_eq!(
             paths.join("|"),
-            "config apply|config diff|config import|config plan|diff snapshot from-bmp|diff snapshot from-mrt|policy check|policy fmt|policy test"
+            "config apply|config diff|config import|config plan|diff snapshot from-bmp|diff snapshot from-mrt|diff snapshots|diff snapshots|policy check|policy fmt|policy test"
         );
-        assert!(found.iter().all(|item| item.index == 1));
+        assert!(
+            found
+                .iter()
+                .all(|item| item.index == 1
+                    || (item.path == ["diff", "snapshots"] && item.index == 2))
+        );
         assert_eq!(found.iter().filter(|item| item.repeatable).count(), 1);
+        // The only current positional conflict is a single-file command with
+        // a long option. Revisit the guard if another conflict shape is added.
+        let conflicts: Vec<_> = found
+            .iter()
+            .filter(|item| !item.conflicting_options.is_empty())
+            .map(|item| {
+                (
+                    item.path.join(" "),
+                    item.index,
+                    item.conflicting_options.clone(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            conflicts,
+            [("config diff".into(), 1, vec!["--history".into()])]
+        );
     }
 
     #[test]
@@ -6093,6 +6227,7 @@ printf '%s\n' "${COMPREPLY[@]}"
             for prefix in ["", "lan938"] {
                 let mut words = vec![BINARY_NAME];
                 words.extend(positional.path.iter().map(String::as_str));
+                words.extend(std::iter::repeat_n("prior-file", positional.index - 1));
                 words.push(prefix);
                 let (filenames, replies) =
                     bash_replies(&generated_path, files.path(), &words, false);
@@ -6112,6 +6247,16 @@ printf '%s\n' "${COMPREPLY[@]}"
             true,
         );
         assert!(filenames && replies.iter().any(|reply| reply == "lan938 plain"));
+        // A value option at the first file offset must not turn its value
+        // into the second file positional.
+        let (filenames, replies) = bash_replies(
+            &generated_path,
+            files.path(),
+            &["rbgp", "diff", "snapshots", "--detail", "lan938"],
+            false,
+        );
+        assert!(!filenames);
+        assert!(!replies.iter().any(|reply| reply == "lan938 plain"));
         let words = [
             "rbgp",
             "policy",
@@ -6123,6 +6268,192 @@ printf '%s\n' "${COMPREPLY[@]}"
         let (filenames, replies) = bash_replies(&generated_path, files.path(), &words, false);
         assert!(!filenames);
         assert!(replies.iter().any(|reply| reply == "lan938-prefix"));
+    }
+
+    #[test]
+    fn bash_snapshot_positionals_ignore_options_and_their_values() {
+        let scripts = tempfile::tempdir().unwrap();
+        let files = tempfile::tempdir().unwrap();
+        for name in [
+            "target plain.ndjson",
+            "target-prefix.ndjson",
+            "-target plain.ndjson",
+        ] {
+            std::fs::write(files.path().join(name), []).unwrap();
+        }
+        let mut generated = Vec::new();
+        generate_completions(Shell::Bash, BINARY_NAME, &mut generated).unwrap();
+        let script = scripts.path().join("generated.bash");
+        std::fs::write(&script, generated).unwrap();
+        let cases: &[&[&str]] = &[
+            &[
+                "rbgp",
+                "diff",
+                "snapshots",
+                "--json",
+                "incumbent.ndjson",
+                "target",
+            ],
+            &[
+                "rbgp",
+                "diff",
+                "snapshots",
+                "incumbent path.ndjson",
+                "--json",
+                "target",
+            ],
+            &[
+                "rbgp",
+                "diff",
+                "snapshots",
+                "--detail",
+                "2",
+                "incumbent.ndjson",
+                "target",
+            ],
+            &[
+                "rbgp",
+                "diff",
+                "snapshots",
+                "incumbent.ndjson",
+                "--detail",
+                "2",
+                "target",
+            ],
+            &[
+                "rbgp",
+                "diff",
+                "snapshots",
+                "--detail=2",
+                "incumbent.ndjson",
+                "target",
+            ],
+            &[
+                "rbgp",
+                "--addr",
+                "unix:///unused.sock",
+                "diff",
+                "snapshots",
+                "incumbent.ndjson",
+                "target",
+            ],
+            &[
+                "rbgp",
+                "diff",
+                "snapshots",
+                "-js",
+                "unix:///unused.sock",
+                "incumbent.ndjson",
+                "target",
+            ],
+            &[
+                "rbgp",
+                "diff",
+                "snapshots",
+                "-sunix:///unused.sock",
+                "incumbent.ndjson",
+                "target",
+            ],
+            &[
+                "rbgp",
+                "diff",
+                "snapshots",
+                "--",
+                "-incumbent.ndjson",
+                "target",
+            ],
+            &["rbgp", "diff", "snapshots", "--json", "target"],
+        ];
+        for words in cases {
+            let (filenames, replies) = bash_replies(&script, files.path(), words, false);
+            assert!(
+                filenames && replies.iter().any(|reply| reply == "target plain.ndjson"),
+                "{words:?}: filenames={filenames}, replies={replies:?}"
+            );
+        }
+        let (filenames, replies) = bash_replies(
+            &script,
+            files.path(),
+            &[
+                "rbgp",
+                "diff",
+                "snapshots",
+                "--",
+                "incumbent.ndjson",
+                "-target",
+            ],
+            true,
+        );
+        assert!(filenames && replies.iter().any(|reply| reply == "-target plain.ndjson"));
+        for words in [
+            &[
+                "rbgp",
+                "diff",
+                "snapshots",
+                "incumbent.ndjson",
+                "--detail",
+                "target",
+            ][..],
+            &[
+                "rbgp",
+                "diff",
+                "snapshots",
+                "--json",
+                "--token-file",
+                "target",
+            ],
+            &[
+                "rbgp",
+                "diff",
+                "snapshots",
+                "incumbent.ndjson",
+                "rustbgpd.ndjson",
+                "target",
+            ],
+        ] {
+            let (filenames, _) = bash_replies(&script, files.path(), words, false);
+            assert!(!filenames, "positional completion claimed {words:?}");
+        }
+    }
+
+    #[test]
+    fn bash_file_positionals_respect_clap_conflicts() {
+        let scripts = tempfile::tempdir().unwrap();
+        let files = tempfile::tempdir().unwrap();
+        std::fs::write(files.path().join("target plain.toml"), []).unwrap();
+        let mut generated = Vec::new();
+        generate_completions(Shell::Bash, BINARY_NAME, &mut generated).unwrap();
+        let script = scripts.path().join("generated.bash");
+        std::fs::write(&script, generated).unwrap();
+        for words in [
+            &["rbgp", "config", "diff", "--history", "1", "target"][..],
+            &["rbgp", "config", "diff", "--history=1", "target"],
+            &[
+                "rbgp",
+                "config",
+                "diff",
+                "--history",
+                "1",
+                "--json",
+                "target",
+            ],
+        ] {
+            let error = cli_command(BINARY_NAME)
+                .try_get_matches_from(words)
+                .unwrap_err();
+            assert_eq!(error.kind(), clap::error::ErrorKind::ArgumentConflict);
+            let (filenames, replies) = bash_replies(&script, files.path(), words, false);
+            assert!(
+                !filenames && replies.is_empty(),
+                "conflicting positional offered for {words:?}: {replies:?}"
+            );
+        }
+        let words = ["rbgp", "config", "diff", "--addr=--history", "target"];
+        cli_command(BINARY_NAME)
+            .try_get_matches_from(words)
+            .unwrap();
+        let (filenames, replies) = bash_replies(&script, files.path(), &words, false);
+        assert!(filenames && replies.iter().any(|reply| reply == "target plain.toml"));
     }
 
     #[test]

@@ -2,7 +2,7 @@
 
 > **Document class: CURRENT.**
 
-Compare rustbgpd's advertised routes with an incumbent route server.
+Compare advertised routes from route servers or route reflectors.
 
 Compares what rustbgpd is advertising to each peer (the live Adj-RIB-Out,
 read over gRPC) against a snapshot of what an incumbent route server
@@ -11,15 +11,60 @@ the route-server shadow trial: run both stacks against the same members,
 export the incumbent's advertised view, and prove the views match before
 cutover ([cookbook/route-server-migration.md](../cookbook/route-server-migration.md)).
 
-The command is strictly read-only (`ListNeighbors` + `ListAdvertisedRoutes`
-are the only RPCs issued) and fail-closed: **equality is never asserted
-from incomplete, truncated, over-limit, stale, or malformed input.**
+`diff advertised` is strictly read-only (`ListNeighbors` +
+`ListAdvertisedRoutes` are its only RPCs). `diff snapshots` compares two
+offline captures without connecting to a daemon. Both are fail-closed: **equality is never asserted
+from incomplete, truncated, over-limit, or malformed input.**
 
 ```console
 $ rbgp diff advertised --neighbor 192.0.2.1 --against incumbent.ndjson
 $ echo $?
 0
 ```
+
+## Compare two wire captures
+
+Use `rbgp diff snapshots INCUMBENT RUSTBGPD` when both sides must include
+encode-time attributes, especially reflection's ORIGINATOR_ID, CLUSTER_LIST,
+and unchanged NEXT_HOP. The supported producer for both inputs is
+`diff snapshot from-bmp` with **post-policy Adj-RIB-Out** captures toward the
+same observer address and ASN. Capture the same settled routing scenario on
+both daemons and stamp the same capture-round generation:
+
+```bash
+rbgp diff snapshot from-bmp incumbent.bmp --neighbor 192.0.2.30 \
+    --generation 7 > incumbent.ndjson
+rbgp diff snapshot from-bmp rustbgpd.bmp --neighbor 192.0.2.30 \
+    --generation 7 > rustbgpd.ndjson
+rbgp diff snapshots incumbent.ndjson rustbgpd.ndjson --json
+```
+
+Only compare after **both conversions exit 0**. Missing End-of-RIB refuses
+conversion; a missing or mismatched counted trailer refuses comparison.
+The union of peers in the two files is compared, so a peer present on only
+one side reports one-sided routes. Conflicting ASNs for the same address,
+including conflicts across files, refuse comparison. Different header
+generations yield `incomparable` (exit 2). Generation and source labels are
+producer attestations; equal labels do not establish synchronized capture,
+provenance, or freshness. A valid empty snapshot contains no peer inventory;
+use the producer's `--neighbor` to require the intended observer's presence.
+
+All attributes are compared using the existing `rbgp-ribdiff/1` rules.
+Reflection attributes appear as `unknown` deltas: type code **9** is
+ORIGINATOR_ID, **10** is CLUSTER_LIST. Reports show their flags and complete
+value bytes; order within CLUSTER_LIST is significant. NEXT_HOP is compared
+as its IP address. No attribute-ignore option is offered for this command.
+The report omits the live gRPC source notes because neither input uses gRPC.
+The snapshot schema's flat AS_PATH representation remains a limitation;
+this command does not recover AS_SET structure lost by a producer.
+
+Options are `--max-routes` (4,000,000 per input), `--max-input-bytes`
+(1 GiB per input), `--detail` (20 human difference rows), and `--json`.
+Both route sets are held in memory within those bounds; lower the limits for
+smaller capture hosts. The [RR comparison prerequisites](../cookbook/route-server-migration.md#route-reflector-snapshot-comparison)
+explain cluster-ID alignment and complete capture boundaries. End-to-end
+incumbent RR qualification remains outstanding: the pinned FRR 10.7.1 and
+GoBGP 4.8.0 exporters lack the required Adj-RIB-Out BMP view.
 
 ## Exit codes
 
@@ -29,7 +74,7 @@ $ echo $?
 | 1 | Both inputs complete, differences found (listed in the report) |
 | 2 | Incomplete / malformed / stale / mixed-generation / unsupported / over-limit input, or an operational error — equality refused |
 
-## Flags
+## Live comparison flags
 
 | Flag | Default | Meaning |
 |------|---------|---------|
@@ -63,7 +108,7 @@ difference, not equality. Divergence classes: `incumbent_only`,
 MED uses the presence-aware `med_attr` field: absent and explicit zero are
 distinct; the deprecated bare integer is never a presence fallback.
 
-Live-source limitations (also printed in every report):
+Live-source limitations (also printed in every `diff advertised` report):
 
 - **AS_PATH**: compared as a single flattened `AS_SEQUENCE` on both sides
   (the proto exposes a flat ASN list); `AS_SET` structure is not compared.
@@ -153,7 +198,7 @@ duplicates; multiplicity is compared):
 ```
 
 - `peer` / `peer_asn`: the member the route is advertised **to** (must
-  match the daemon's configured neighbor and ASN).
+  match the daemon's configured neighbor and ASN for a live comparison).
 - `prefix`: `addr/len`; the family is inferred from the address.
 - `origin`: 0 = IGP, 1 = EGP, 2 = INCOMPLETE. Omit when absent.
 - `as_path`: flat ASN list (compared as one `AS_SEQUENCE`). Omit or `[]`
@@ -395,8 +440,9 @@ eight-byte type 7 record in `unknown_attrs`; compatibility types 17/18 are
 not re-emitted. ORIGINATOR_ID, CLUSTER_LIST, OTC, and other attributes the
 decoder leaves untyped retain their value bytes and semantic flags in
 `unknown_attrs`; the Extended Length bit is cleared because it is an encoding
-artifact. Compare with
-`--ignore-attribute unknown` if accepting that gRPC cannot verify them.
+artifact. Use `diff snapshots` to compare these values on both sides. A live
+comparison requires `--ignore-attribute unknown` if accepting that gRPC
+cannot verify them.
 Hard limits (not flags) bound input bytes (1 GiB), per-message length
 (1 MiB), peers (4096), routes (4M), and paths per NLRI (64); exceeding
 any refuses the conversion.
@@ -428,7 +474,8 @@ incomplete verdicts.
 
 `--json` emits the versioned `rbgp-ribdiff/1` report: verdict,
 per-(peer, family) summaries, every diverging NLRI with both sides'
-paths and field-level deltas, the normalization profile, plus two
-command-level extensions: `ignored_attributes` (the `--ignore-attribute`
-choices) and `live_source_notes` (the limitations listed above). Output
-is deterministic — byte-identical across runs over identical inputs.
+paths and field-level deltas, and the normalization profile. The
+`ignored_attributes` command-level extension records `--ignore-attribute`
+choices for `diff advertised` and is empty for `diff snapshots`. Only
+`diff advertised` includes `live_source_notes` (the limitations listed above).
+Output is deterministic — byte-identical across runs over identical inputs.

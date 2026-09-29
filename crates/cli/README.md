@@ -277,6 +277,7 @@ rbgp rib labeled  # labeled-unicast routes (RFC 8277, SAFI 4)
 rbgp rib rtc      # RT-Constrain membership NLRI (RFC 4684, SAFI 132)
 rbgp rib add <prefix> --next-hop <ip> [--origin <igp|egp|incomplete>] [--local-pref <n>] [--med <n>] [--as-path "<asn> <asn>..."] [--communities <c1,c2,...>] [--large-communities <c1,c2,...>] [--path-id <n>]   # --origin also accepts 0/1/2
 rbgp rib delete <prefix> [--path-id <n>]
+rbgp diff snapshots <incumbent.ndjson> <rustbgpd.ndjson>   # offline BMP-to-BMP comparison, including RR attributes; exit 0/1/2
 rbgp diff advertised --against <snapshot.ndjson>   # compare live Adj-RIB-Out against an incumbent NDJSON snapshot (read-only; own 0/1/2 exit contract)
 rbgp diff snapshot from-mrt <file> --view adj-rib-out-capture --neighbor <addr> --neighbor-asn <asn>   # offline: produce an rbgp-ribsnap/1 snapshot from an incumbent MRT dump (see docs/how-to/ribdiff.md; from-bmp for BMP captures)
 

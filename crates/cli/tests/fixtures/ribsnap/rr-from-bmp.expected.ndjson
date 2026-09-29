@@ -1,0 +1,3 @@
+{"generation":7,"record":"header","schema":"rbgp-ribsnap/1","source":"from-bmp/1 view=adj-rib-out-post-policy"}
+{"local_pref":100,"next_hop":"192.0.2.20","origin":0,"peer":"192.0.2.30","peer_asn":65001,"prefix":"198.51.100.0/24","record":"route","unknown_attrs":[{"flags":128,"type_code":9,"value":"c0000214"},{"flags":128,"type_code":10,"value":"c0000201"}]}
+{"record":"trailer","routes":1}
