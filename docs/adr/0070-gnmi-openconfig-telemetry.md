@@ -322,7 +322,7 @@ Grounded against the current checkout:
 ## References
 
 - gNMI specification (v0.10.0), OpenConfig:
-  <https://openconfig.net/docs/gnmi/gnmi-specification/>
+  <https://github.com/openconfig/reference/blob/master/rpc/gnmi/gnmi-specification.md>
 - gNMI authentication and encryption guidance:
   <https://github.com/openconfig/reference/blob/master/rpc/gnmi/gnmi-authentication.md>
 - OpenConfig BGP model (`openconfig-bgp`):
