@@ -65,13 +65,10 @@ check() {
     fi
 }
 
-wait_until() {
+wait_for() {
     local label=${1:?}
     shift
-    for _ in $(seq 1 120); do
-        "$@" >/dev/null 2>&1 && return 0
-        sleep 1
-    done
+    wait_until 120 1 "$@" >/dev/null 2>&1 && return 0
     echo "timeout waiting for $label" >&2
     return 1
 }
@@ -367,16 +364,16 @@ check "release-image network namespace configured" configure_rust_network
 preflight_receivers
 
 docker exec -d "$RAW" sh -c 'python3 /m100_partial_raw_peer.py >/tmp/m100-raw.log 2>&1'
-wait_until "raw listener" docker exec "$RAW" test -s /tmp/m100-events.jsonl
+wait_for "raw listener" docker exec "$RAW" test -s /tmp/m100-events.jsonl
 start_daemons
-wait_until "all raw sessions" docker exec "$RAW" test -s /tmp/m100-ready
+wait_for "all raw sessions" docker exec "$RAW" test -s /tmp/m100-ready
 check "all receiver sessions established" all_established
 
 for case_name in "${CASES[@]}"; do
     docker exec "$RAW" touch "/tmp/m100-${case_name}-prepare"
-    wait_until "$case_name baseline send" docker exec "$RAW" test -s "/tmp/m100-${case_name}-prepare.sent"
-    wait_until "$case_name candidate at all receivers" all_have "$CANDIDATE"
-    wait_until "$case_name survivor at all receivers" all_have "$SURVIVOR"
+    wait_for "$case_name baseline send" docker exec "$RAW" test -s "/tmp/m100-${case_name}-prepare.sent"
+    wait_for "$case_name candidate at all receivers" all_have "$CANDIDATE"
+    wait_for "$case_name survivor at all receivers" all_have "$SURVIVOR"
     for receiver in "${RECEIVERS[@]}" "${CURRENT_RECEIVERS[@]}"; do
         snapshot_receiver "$receiver" "$case_name" baseline true
     done
@@ -392,7 +389,7 @@ for case_name in "${CASES[@]}"; do
     fi
 
     docker exec "$RAW" touch "/tmp/m100-${case_name}-malformed"
-    wait_until "$case_name malformed send" docker exec "$RAW" test -s "/tmp/m100-${case_name}-malformed.sent"
+    wait_for "$case_name malformed send" docker exec "$RAW" test -s "/tmp/m100-${case_name}-malformed.sent"
     sleep 4
     for receiver in "${RECEIVERS[@]}" "${CURRENT_RECEIVERS[@]}"; do
         before_epoch=$(last_event_epoch "$receiver" send "$case_name")
@@ -419,7 +416,7 @@ for case_name in "${CASES[@]}"; do
     done
     check "$case_name leaves all receiver daemons live" all_processes_running
     check "$case_name resets OpenBGPD case isolation" restart_openbgpd_case
-    wait_until "$case_name case-isolated sessions" all_established
+    wait_for "$case_name case-isolated sessions" all_established
 done
 
 check "M100 produced exactly 20 unique cells" jq -se \

@@ -137,20 +137,6 @@ vrf_installed_count_is() {
     [ "$(vrf_installed_count)" = "$want" ]
 }
 
-wait_until() {
-    local timeout=$1
-    shift
-    local attempts=$((timeout / 2))
-    [ "$attempts" -lt 1 ] && attempts=1
-    for _ in $(seq 1 "$attempts"); do
-        if "$@"; then
-            return 0
-        fi
-        sleep 2
-    done
-    return 1
-}
-
 l3_neigh_dump() {
     docker exec "$VTEP" ip neigh show dev "$L3VXLAN" 2>/dev/null || true
 }
@@ -352,7 +338,7 @@ else
 fi
 
 log "[phase 1] rustbgpd must hold it unresolved (no EAD-per-ES/EVI)"
-if wait_until 40 drop_gauge_at_least_1 "unresolved_esi_overlay_index"; then
+if wait_until 20 2 drop_gauge_at_least_1 "unresolved_esi_overlay_index"; then
     ok "drop gauge unresolved_esi_overlay_index >= 1 (= $(drop_gauge unresolved_esi_overlay_index))"
 else
     fail "drop gauge unresolved_esi_overlay_index never reached >= 1"
@@ -384,7 +370,7 @@ else
 fi
 
 log "[phase 2] rustbgpd resolves all-active target set and installs ECMP route + FDB-NHG"
-if wait_until 90 assert_l3_resolution_state; then
+if wait_until 45 2 assert_l3_resolution_state; then
     ok "all-active L3 resolution installed"
     printf "%s\n" "$(route_dump)"
     ok "Router-MAC FDB row: $(router_mac_fdb_row)"
@@ -399,13 +385,13 @@ else
     docker exec "$VTEP" tail -100 /var/log/rustbgpd.log >&2 2>/dev/null || true
 fi
 
-if wait_until 30 vrf_installed_count_is 1; then
+if wait_until 15 2 vrf_installed_count_is 1; then
     ok "rustbgpd reports installed_routes_count=1 for vrf1"
 else
     fail "rustbgpd kernel route exists but installed_routes_count != 1"
 fi
 
-if wait_until 30 drop_gauge_is_zero "unresolved_esi_overlay_index"; then
+if wait_until 15 2 drop_gauge_is_zero "unresolved_esi_overlay_index"; then
     ok "drop gauge unresolved_esi_overlay_index back to 0 after resolution"
 else
     fail "drop gauge unresolved_esi_overlay_index still nonzero after import (= $(drop_gauge unresolved_esi_overlay_index))"
@@ -431,7 +417,7 @@ log "[phase 3] PE2 withdraws its all-active EAD state (target set collapses belo
 pe2_del_all_active_eads
 ok "PE2 all-active EAD state withdrawn"
 
-if wait_until 60 vrf_route_absent && wait_until 30 router_mac_fdb_absent && wait_until 30 vrf_installed_count_is 0; then
+if wait_until 30 2 vrf_route_absent && wait_until 15 2 router_mac_fdb_absent && wait_until 15 2 vrf_installed_count_is 0; then
     ok "all-active route and Router-MAC FDB row withdrawn after one-member collapse"
 else
     fail "all-active route/FDB state survived a one-member collapse"
@@ -447,7 +433,7 @@ else
     fail "PE2 all-active EAD reinjection failed"
 fi
 
-if wait_until 90 assert_l3_resolution_state && wait_until 30 vrf_installed_count_is 1; then
+if wait_until 45 2 assert_l3_resolution_state && wait_until 15 2 vrf_installed_count_is 1; then
     ok "two-way all-active ECMP route returned after PE2 re-add"
 else
     fail "all-active ECMP route did not return after PE2 re-add"
@@ -466,28 +452,28 @@ log "[phase 4] PE1 withdraws the ESI overlay-index Type 5"
 pe1_del_type5
 ok "PE1 withdrew the Type 5 for $TARGET_PREFIX"
 
-if wait_until 60 vrf_route_absent && wait_until 30 vrf_installed_count_is 0; then
+if wait_until 30 2 vrf_route_absent && wait_until 15 2 vrf_installed_count_is 0; then
     ok "vrf1 route withdrawn / installed_routes_count=0 after Type 5 withdraw"
 else
     fail "vrf1 route survived Type 5 withdraw"
     docker exec "$VTEP" ip route show table "$TABLE_ID" >&2 || true
 fi
 
-if wait_until 60 router_mac_fdb_absent; then
+if wait_until 30 2 router_mac_fdb_absent; then
     ok "Router-MAC FDB nhid row removed after Type 5 withdraw"
 else
     fail "Router-MAC FDB row survived Type 5 withdraw"
     fdb_dump >&2
 fi
 
-if wait_until 60 l3_nhg_absent "$CAPTURED_GROUP_ID" "$CAPTURED_MEMBER1_ID" "$CAPTURED_MEMBER2_ID"; then
+if wait_until 30 2 l3_nhg_absent "$CAPTURED_GROUP_ID" "$CAPTURED_MEMBER1_ID" "$CAPTURED_MEMBER2_ID"; then
     ok "captured L3 NHG/member nexthops removed after Type 5 withdraw"
 else
     fail "captured L3 NHG/member nexthops survived Type 5 withdraw"
     nh_dump >&2
 fi
 
-if wait_until 60 l3_neighbors_absent; then
+if wait_until 30 2 l3_neighbors_absent; then
     ok "per-VTEP L3 neighbors removed after Type 5 withdraw"
 else
     fail "per-VTEP L3 neighbors survived Type 5 withdraw"

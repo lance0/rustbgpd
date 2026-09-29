@@ -41,13 +41,10 @@ check() {
     fi
 }
 
-wait_until() {
+wait_for() {
     local label=${1:?}
     shift
-    for _ in $(seq 1 45); do
-        "$@" >/dev/null 2>&1 && return 0
-        sleep 1
-    done
+    wait_until 45 1 "$@" >/dev/null 2>&1 && return 0
     echo "timeout waiting for $label" >&2
     return 1
 }
@@ -399,14 +396,14 @@ preflight_receivers
 write_identities
 
 docker exec -d "$RAW" sh -c 'python3 /m105_raw_peer.py >/tmp/m105-raw.log 2>&1'
-wait_until "raw listener" raw_listener_ready
+wait_for "raw listener" raw_listener_ready
 check "capture sidecar is ready before receiver startup" start_capture
 start_daemons
-wait_until "all five raw sessions" docker exec "$RAW" test -s /tmp/m105-ready
+wait_for "all five raw sessions" docker exec "$RAW" test -s /tmp/m105-ready
 check "all five receiver sessions established" all_established
 
 docker exec "$RAW" touch /tmp/m105-send-baseline
-if ! wait_until "baseline route at all five receivers" all_have "$BASELINE"; then
+if ! wait_for "baseline route at all five receivers" all_have "$BASELINE"; then
     report_presence "$BASELINE"
     die "ordinary AS_SEQUENCE control did not reach every receiver"
 fi
@@ -421,8 +418,8 @@ check "all receiver daemons remain live" all_processes_running
 check "raw peer saw no notification, closure, error, or reverse route" raw_events_clean
 
 docker exec "$RAW" touch /tmp/m105-send-withdraw
-wait_until "baseline withdrawal at all receivers" all_absent "$BASELINE"
-wait_until "AS_SET withdrawal at all receivers" all_absent "$PROBE"
+wait_for "baseline withdrawal at all receivers" all_absent "$BASELINE"
+wait_for "AS_SET withdrawal at all receivers" all_absent "$PROBE"
 check "both routes are absent after withdrawal" both_routes_absent
 check "all receiver sessions survive withdrawal" all_established
 check "raw peer remains clean through withdrawal" raw_events_clean

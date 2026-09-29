@@ -191,14 +191,7 @@ fdb_has_mac() {
     rb_fdb | grep -qiF "${1:?}"
 }
 
-wait_until() {
-    local cmd=${1:?} attempts=${2:-40}
-    for _ in $(seq 1 "$attempts"); do
-        if eval "$cmd"; then return 0; fi
-        sleep 1
-    done
-    return 1
-}
+fdb_mac_absent() { ! fdb_has_mac "$@"; }
 
 # ---------------------------------------------------------------------------
 # Injection helpers
@@ -306,7 +299,7 @@ assert_rb_next_hop \
     "$FRR_VTEP" "rustbgpd received FRR's MAC-only Type 2"
 
 log "[5b] rustbgpd programs the bridge-master FDB row"
-if wait_until "fdb_has_master_row \"$FRR_MAC\""; then
+if wait_until 40 1 fdb_has_master_row "$FRR_MAC"; then
     ok "bridge-master row present for $FRR_MAC with extern_learn"
 else
     fail "bridge-master row missing for $FRR_MAC — the bridge would flood instead of tunnelling"
@@ -314,7 +307,7 @@ else
 fi
 
 log "[5c] rustbgpd programs the VXLAN self row with dst $FRR_VTEP"
-if wait_until "fdb_has_self_dst_row \"$FRR_MAC\" \"$FRR_VTEP\""; then
+if wait_until 40 1 fdb_has_self_dst_row "$FRR_MAC" "$FRR_VTEP"; then
     ok "self row present: $(rb_fdb | grep -iF "$FRR_MAC" | grep -F "dst $FRR_VTEP" | head -1 | tr -s ' ')"
 else
     fail "no FDB row for $FRR_MAC with dst $FRR_VTEP — kernel FDB programming toward an IPv6 remote VTEP failed"
@@ -364,7 +357,7 @@ log "[7] FRR withdraws $FRR_MAC; rustbgpd must drop both kernel rows"
 frr_del_neigh "$FRR_HOST_IP"
 frr_del_mac "$FRR_MAC"
 
-if wait_until "! fdb_has_mac \"$FRR_MAC\""; then
+if wait_until 40 1 fdb_mac_absent "$FRR_MAC"; then
     ok "FDB rows for $FRR_MAC withdrawn"
 else
     fail "FDB rows for $FRR_MAC still present 40s after withdraw"

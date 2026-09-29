@@ -126,14 +126,10 @@ rb_neigh_del() {
     docker exec "$RUSTBGPD" ip neigh del "$ip" dev "$BRIDGE" 2>/dev/null || true
 }
 
-wait_until() {
-    local desc=${1:?}
-    local cmd=${2:?}
-    local timeout=${3:-15}
-    for _ in $(seq 1 "$timeout"); do
-        if eval "$cmd"; then return 0; fi
-        sleep 1
-    done
+wait_for() {
+    local desc=${1:?} attempts=${2:?}
+    shift 2
+    wait_until "$attempts" 1 "$@" && return 0
     echo "TIMEOUT — $desc"
     return 1
 }
@@ -154,24 +150,21 @@ assert() {
 
 echo "Waiting for L2VPN/EVPN session to establish..."
 wait_frr_established "$CONSUMER" "$RUSTBGPD_IP" "L2VPN/EVPN" || true
-wait_until "Type 3 IMET surfaces on FRR" \
-    "frr_has_type3" 30 || true
+wait_for "Type 3 IMET surfaces on FRR" 30 frr_has_type3 || true
 assert "Type 3 IMET originated before MAC injection" \
     "frr_has_type3"
 
 # 1. Add static FDB entry → MAC-only Type 2 surfaces.
 echo "Adding static FDB entry $TEST_MAC..."
 rb_fdb_add "$TEST_MAC"
-wait_until "MAC-only Type 2 surfaces on FRR" \
-    "frr_has_mac_only \"$TEST_MAC\"" 30 || true
+wait_for "MAC-only Type 2 surfaces on FRR" 30 frr_has_mac_only "$TEST_MAC" || true
 assert "MAC-only Type 2 originated" \
     "frr_has_mac_only \"$TEST_MAC\""
 
 # 2. Add ARP entry on bridge → MAC-only withdrawn, MAC+IP emitted.
 echo "Adding bridge neighbour $TEST_IP → $TEST_MAC..."
 rb_neigh_add "$TEST_IP" "$TEST_MAC"
-wait_until "MAC+IP Type 2 surfaces on FRR" \
-    "frr_has_mac_ip \"$TEST_MAC\" \"$TEST_IP\"" 30 || true
+wait_for "MAC+IP Type 2 surfaces on FRR" 30 frr_has_mac_ip "$TEST_MAC" "$TEST_IP" || true
 assert "MAC+IP Type 2 originated after IpAdded" \
     "frr_has_mac_ip \"$TEST_MAC\" \"$TEST_IP\""
 assert "MAC-only Type 2 withdrawn under replace model" \
@@ -180,20 +173,17 @@ assert "MAC-only Type 2 withdrawn under replace model" \
 # 3. Delete bridge neighbour → MAC+IP withdrawn, MAC-only re-emitted.
 echo "Removing bridge neighbour $TEST_IP..."
 rb_neigh_del "$TEST_IP"
-wait_until "MAC+IP withdrawn after IpRemoved" \
-    "frr_mac_ip_absent \"$TEST_MAC\" \"$TEST_IP\"" 15 || true
+wait_for "MAC+IP withdrawn after IpRemoved" 15 frr_mac_ip_absent "$TEST_MAC" "$TEST_IP" || true
 assert "MAC+IP Type 2 withdrawn on IpRemoved" \
     "frr_mac_ip_absent \"$TEST_MAC\" \"$TEST_IP\""
-wait_until "MAC-only re-emitted on downgrade" \
-    "frr_has_mac_only \"$TEST_MAC\"" 30 || true
+wait_for "MAC-only re-emitted on downgrade" 30 frr_has_mac_only "$TEST_MAC" || true
 assert "MAC-only Type 2 re-emitted after last IP removed" \
     "frr_has_mac_only \"$TEST_MAC\""
 
 # 4. Delete the FDB entry → MAC-only withdrawn.
 echo "Removing static FDB entry $TEST_MAC..."
 rb_fdb_del "$TEST_MAC"
-wait_until "MAC-only Type 2 withdrawn on Aged" \
-    "frr_mac_only_absent \"$TEST_MAC\"" 15 || true
+wait_for "MAC-only Type 2 withdrawn on Aged" 15 frr_mac_only_absent "$TEST_MAC" || true
 assert "MAC-only Type 2 withdrawn on FDB del" \
     "frr_mac_only_absent \"$TEST_MAC\""
 

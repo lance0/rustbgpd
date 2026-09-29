@@ -89,15 +89,6 @@ pe1_route_present() {
         | grep -qE "^${1//./\\.}\b"
 }
 
-wait_until() { # <timeout> <cmd...>
-    local timeout=$1; shift
-    local attempts=$((timeout / 2))
-    for _ in $(seq 1 "$attempts"); do
-        if "$@"; then return 0; fi
-        sleep 2
-    done
-    return 1
-}
 not() { ! "$@"; }
 
 # ---------------------------------------------------------------------------
@@ -118,7 +109,7 @@ start_rustbgpd
 wait_frr_established "$PE2" "$PE1_IP" "PE1↔PE2 L2VPN/EVPN" || print_summary
 
 log "[test] FRR sees PE1's Type 5 (192.0.2.0/24)"
-if wait_until 90 frr_type5_has "$PE1_ORIGINATED_PLEN" "$PE1_ORIGINATED_HOST"; then
+if wait_until 45 2 frr_type5_has "$PE1_ORIGINATED_PLEN" "$PE1_ORIGINATED_HOST"; then
     ok "FRR EVPN RIB contains PE1's Type 5"
 else
     fail "FRR never received PE1's Type 5 within 90s"
@@ -126,7 +117,7 @@ else
 fi
 
 log "[test] FRR sees PE1's Type 3 IMET (L2VNI RD ${L2VNI_RD})"
-if wait_until 60 frr_imet_has_rd "$L2VNI_RD"; then
+if wait_until 30 2 frr_imet_has_rd "$L2VNI_RD"; then
     ok "FRR EVPN RIB contains PE1's IMET under ${L2VNI_RD}"
 else
     fail "FRR never received PE1's IMET within 60s"
@@ -134,7 +125,7 @@ else
 fi
 
 log "[test] PE1 imports FRR's Type 5 (${PE2_ORIGINATED_PREFIX}) into vrf1 kernel table"
-if wait_until 90 pe1_route_present "$PE2_ORIGINATED_PREFIX"; then
+if wait_until 45 2 pe1_route_present "$PE2_ORIGINATED_PREFIX"; then
     ok "PE1 kernel route for ${PE2_ORIGINATED_PREFIX} present in table ${PE1_TABLE_ID}"
 else
     fail "PE1 never installed FRR's Type 5 within 90s"
@@ -169,7 +160,7 @@ else
 fi
 
 log "[test] FRR withdraws PE1's Type 5 after teardown"
-if wait_until 30 not frr_type5_has "$PE1_ORIGINATED_PLEN" "$PE1_ORIGINATED_HOST"; then
+if wait_until 15 2 not frr_type5_has "$PE1_ORIGINATED_PLEN" "$PE1_ORIGINATED_HOST"; then
     ok "FRR dropped PE1's Type 5 (192.0.2.0/24) after teardown"
 else
     fail "FRR still shows PE1's Type 5 30s after teardown"
@@ -177,7 +168,7 @@ else
 fi
 
 log "[test] FRR withdraws PE1's Type 3 IMET after teardown"
-if wait_until 30 not frr_imet_has_rd "$L2VNI_RD"; then
+if wait_until 15 2 not frr_imet_has_rd "$L2VNI_RD"; then
     ok "FRR dropped PE1's IMET (${L2VNI_RD}) after teardown"
 else
     fail "FRR still shows PE1's IMET 30s after teardown"
@@ -185,7 +176,7 @@ else
 fi
 
 log "[test] PE1 drains the imported kernel L3 route after teardown"
-if wait_until 60 not pe1_route_present "$PE2_ORIGINATED_PREFIX"; then
+if wait_until 30 2 not pe1_route_present "$PE2_ORIGINATED_PREFIX"; then
     ok "PE1 kernel route for ${PE2_ORIGINATED_PREFIX} drained from table ${PE1_TABLE_ID}"
 else
     fail "PE1 kernel still has ${PE2_ORIGINATED_PREFIX} 60s after teardown"

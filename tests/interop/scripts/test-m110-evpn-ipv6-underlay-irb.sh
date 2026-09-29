@@ -176,15 +176,6 @@ frr_type5_dump_strict() {
     docker exec "$PE2" vtysh -c "show bgp l2vpn evpn route type prefix json" 2>/dev/null
 }
 
-wait_until() {
-    local cmd=${1:?} attempts=${2:-60}
-    for _ in $(seq 1 "$attempts"); do
-        if eval "$cmd"; then return 0; fi
-        sleep 1
-    done
-    return 1
-}
-
 pe1_route_installed() {
     # Field-exact match on the destination, then every operational flag
     # the install path is documented to set on the same line:
@@ -198,6 +189,10 @@ pe1_route_installed() {
 pe1_installed_count() {
     grpcurl_call -d '{"name":"vrf1"}' "$GRPC_ADDR" rustbgpd.v1.EvpnService/GetIpVrf 2>/dev/null \
         | jq -r '.installedRoutesCount // 0' 2>/dev/null || true
+}
+
+pe1_installed_count_is() {
+    [ "$(pe1_installed_count)" = "${1:?}" ]
 }
 
 # ---------------------------------------------------------------------------
@@ -271,7 +266,7 @@ assert_rb_type5_next_hop "$PE2_PREFIX" "$PE2_VTEP" \
 # ---------------------------------------------------------------------------
 
 log "[4] PE1 kernel installs $PE2_PREFIX in table $PE1_TABLE_ID"
-if wait_until "pe1_route_installed"; then
+if wait_until 60 1 pe1_route_installed; then
     ok "kernel route: $(pe1_routes | awk -v p="$PE2_PREFIX" '$1 == p { print; exit }')"
 else
     fail "PE2's prefix never installed with via $PE2_VTEP dev $PE1_L3VXLAN proto bgp onlink"
@@ -301,7 +296,7 @@ else
 fi
 
 log "[7] gRPC IpVrfState.installed_routes_count == 1 for vrf1"
-if wait_until '[ "$(pe1_installed_count)" = "1" ]' 30; then
+if wait_until 30 1 pe1_installed_count_is 1; then
     ok "installed_routes_count=1 on vrf1"
 else
     fail "installed_routes_count is '$(pe1_installed_count)', want 1"
@@ -354,7 +349,7 @@ frr_lost_pe1_type5() {
     ! grep -qF "$PE1_PREFIX_KEY" <<<"$dump"
 }
 
-if wait_until "frr_lost_pe1_type5" 30; then
+if wait_until 30 1 frr_lost_pe1_type5; then
     ok "FRR dropped PE1's Type 5 for $PE1_PREFIX (and still holds its own)"
 else
     fail "FRR still shows PE1's Type 5 30s after withdraw, or the guard route vanished too"
@@ -379,7 +374,7 @@ pe1_route_gone() {
 }
 
 log "[11] PE1 kernel removes $PE2_PREFIX from vrf1's table"
-if wait_until "pe1_route_gone"; then
+if wait_until 60 1 pe1_route_gone; then
     ok "kernel route absent from table $PE1_TABLE_ID (table still readable)"
 else
     fail "PE1 still holds $PE2_PREFIX, or table $PE1_TABLE_ID could not be read"
@@ -407,7 +402,7 @@ else
 fi
 
 log "[13] gRPC IpVrfState.installed_routes_count drops back to 0 for vrf1"
-if wait_until '[ "$(pe1_installed_count)" = "0" ]' 30; then
+if wait_until 30 1 pe1_installed_count_is 0; then
     ok "installed_routes_count converged to 0 on vrf1"
 else
     fail "installed_routes_count is '$(pe1_installed_count)', want 0"

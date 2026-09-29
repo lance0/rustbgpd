@@ -11,7 +11,7 @@
 #   - Timestamped log/ok/fail helpers
 #   - resolve_grpc_addr, resolve_ip, grpcurl_call
 #   - start_rustbgpd with gRPC health wait
-#   - wait_frr_established (FRR vtysh polling)
+#   - wait_until (command polling), wait_frr_established (FRR vtysh polling)
 #   - wait_capture_ready / capture_summary (packet capture arming + diagnosis)
 #   - Trap-based cleanup: auto-destroy containerlab on EXIT if CLEANUP=1
 
@@ -196,6 +196,19 @@ start_rustbgpd() {
         sleep 2
     done
     fail "gRPC endpoint not reachable within 30s"
+    return 1
+}
+
+# Poll a command, keeping its arguments and output intact. Callers own diagnostics.
+# Usage: wait_until <attempts> <interval-seconds> <command> [args...]
+# The interval is slept after each failed attempt; command runtime is additional.
+wait_until() {
+    local attempts=${1:?} interval=${2:?} attempt
+    shift 2
+    for ((attempt = 0; attempt < attempts; attempt++)); do
+        if "$@"; then return 0; fi
+        sleep "$interval"
+    done
     return 1
 }
 
