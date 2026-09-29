@@ -98,6 +98,7 @@ parser_header=$(cd "$repo/bench/scale/rebaseline" &&
 }
 
 # The manifest's launch description follows the leg launch actually used.
+# shellcheck disable=SC2016 # Literal driver source text, not an expansion.
 for launch_pattern in '"launch": "$launch_mode"' \
   'launch_mode=direct-prebuilt-binary-with-taskset' 'launch_mode=systemd-user-scope-'; do
   rg -F -- "$launch_pattern" "$driver" >/dev/null || {
