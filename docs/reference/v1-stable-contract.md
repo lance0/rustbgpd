@@ -14,8 +14,13 @@ signatures against the protobuf, its RPC membership against the authorization
 inventory, its CLI paths against the Clap tree, and its consecutive-release
 upgrade receipt. A surface absent from that file is outside the v1 promise.
 [ADR-0125](../adr/0125-v1-stability-contract.md) defines the accepted evidence bar
-for turning this narrow promise into a v1.0 tag; acceptance schedules no tag
-and freezes nothing beyond the inventory until that evidence is complete.
+for promoting this narrow 0.x promise to a v1.0 tag. During 0.x, the inventory
+defines the existing narrow compatibility promise for route servers and route
+reflectors. Under the alpha correctness-over-compatibility posture, reviewed
+correctness changes may still require breaking upgrades before the v1.0 tag.
+The inventory freezes at that tag, after the evidence bar is complete. A 0.x
+change that rejects previously accepted configuration is a breaking upgrade
+for affected operators and needs migration guidance.
 
 ## Role matrix
 
@@ -143,9 +148,13 @@ and series.
   optional fields and event kinds are additive. Consumers must ignore unknown
   fields.
 
-Breaking changes to the inventoried surface require a new contract major, a
-CHANGELOG entry, a migration guide, and a consecutive-release fixture accepted
-by the new release.
+After the v1.0 tag freezes the inventory, breaking changes to that surface
+require a new contract major, a CHANGELOG entry, a migration guide, and a
+consecutive-release fixture accepted by the new release. Before the tag, a
+reviewed 0.x correctness change that narrows accepted configuration is
+classified as breaking for the upgrade, with a CHANGELOG entry, migration
+guidance, and a check against the new binary. The consecutive-release fixture
+chain advances during release preparation.
 Migration compatibility covers the current and immediately previous minor
 release. Security fixes support the latest 1.x release; that is a separate
 promise and does not extend migration compatibility into security support.

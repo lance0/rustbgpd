@@ -2550,9 +2550,11 @@ pub struct PolicyExplainConfig {
     /// this toward their expected retained-prefix count for the peer
     /// and own the memory cost.
     ///
-    /// Budget roughly `peers × min(max(1, cache_size), recorded decisions per
-    /// peer) × ~600 B`, plus evicted-key memory after eviction. The index grows
-    /// with retained entries. Values above 2,097,152 are rejected;
+    /// Budget roughly `sum over nonempty peer caches (~1 KiB +
+    /// min(max(1, cache_size), recorded decisions) × ~600 B)`, plus evicted-key
+    /// memory after eviction. The minimal first-insert probe requested 1,428
+    /// heap bytes; actual memory depends on attributes and allocator. The
+    /// index grows with retained entries. Values above 2,097,152 are rejected;
     /// zero is clamped to one by the session cache.
     #[serde(default = "default_explain_cache_size")]
     #[schemars(range(min = 0, max = 2_097_152))]

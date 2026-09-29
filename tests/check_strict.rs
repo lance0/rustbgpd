@@ -293,6 +293,25 @@ fn check_strict_exits_zero_on_a_clean_config() {
 }
 
 #[test]
+fn check_strict_rejects_oversized_policy_caches_and_accepts_edited_config() {
+    for (section, field) in [
+        ("policy.explain", "cache_size"),
+        ("policy.reject_retention", "capacity"),
+    ] {
+        let oversized = format!("{CLEAN}\n[{section}]\nenabled = false\n{field} = 2097153\n");
+        let (code, stdout, stderr) = run(&oversized, &["--check", "--strict"]);
+        assert_eq!(code, Some(1), "stdout:\n{stdout}\nstderr:\n{stderr}");
+        assert!(stderr.contains(&format!("[{section}] {field}")), "{stderr}");
+        assert!(stderr.contains("maximum 2097152"), "{stderr}");
+
+        let edited = oversized.replace("2097153", "2097152");
+        let (code, stdout, stderr) = run(&edited, &["--check", "--strict"]);
+        assert_eq!(code, Some(0), "stdout:\n{stdout}\nstderr:\n{stderr}");
+        assert!(stdout.contains("config OK"), "{stdout}");
+    }
+}
+
+#[test]
 fn check_unknown_policy_field_points_to_rpol_and_still_rejects_config() {
     let config = format!(
         "{CLEAN}\n[[policy.definitions.from-peer.statements]]\n\

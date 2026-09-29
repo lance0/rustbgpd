@@ -2979,7 +2979,9 @@ daemon, or nothing.
 **partial-table**, not complete. Budget roughly:
 
 ```
-sum over peers (min(max(1, cache_size), recorded decisions for that peer) × ~600 B)
+sum over nonempty peer caches (
+  ~1 KiB + min(max(1, cache_size), recorded decisions for that peer) × ~600 B
+)
 ```
 
 Each session also remembers every key the cap evicts, so an evicted prefix
@@ -2991,8 +2993,11 @@ about 72 MB if every evicted key carries a nonzero Add-Path identifier. Past
 the cap the session stops recording and answers `evicted` for any prefix it
 has no record of.
 
-The ~600 B term includes the growing LRU index and entry payload in an
-allocator-counted example; actual memory depends on attributes and allocator.
+The one-time term covers the LRU's list sentinels and first hash-table
+allocation. The first insertion in the minimal allocation probe requested
+1,428 heap bytes; the estimate above budgets about 1.6 KiB for one entry.
+The ~600 B term includes the growing index and entry payload at larger
+occupancy. Actual memory depends on attributes, occupancy, and allocator.
 There is no fixed 154 KiB reservation per session. The historical
 [`explain-cache opt-in receipt`](../perf/explain-cache-opt-in-2026-07.md)
 measured the previous eager index and should not be used to predict the

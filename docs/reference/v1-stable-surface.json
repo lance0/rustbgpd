@@ -323,7 +323,7 @@
     "metrics": "Stable metric names, types, and existing label meanings do not change. New metrics and bounded labels are additive; label removal or reinterpretation is breaking.",
     "events": "Stable event kinds and existing JSON/protobuf fields retain meaning. New optional fields and event kinds are additive; field removal, rename, or semantic reuse is breaking.",
     "deprecation_window": {"minimum_minor_releases": 2, "minimum_days": 90},
-    "migration_support": "A breaking stable-surface change requires a new contract major, CHANGELOG entry, migration guide, and a consecutive-release fixture accepted by the new release. Current and immediately previous minor release migrations are supported."
+    "migration_support": "During 0.x, the inventory defines the existing narrow compatibility promise for route servers and route reflectors. Under the alpha correctness-over-compatibility posture, reviewed correctness changes may require breaking upgrades before the v1.0 tag. A change that rejects previously accepted config is a breaking upgrade requiring a CHANGELOG entry, migration guidance, and a check with the new binary. The inventory freezes at the v1.0 tag. After the tag, a breaking frozen-surface change requires a new contract major, CHANGELOG entry, migration guide, and a consecutive-release fixture accepted by the new release. The fixture chain advances during release preparation. Current and immediately previous minor release migrations are supported."
   },
   "mutation": {
     "canonical": "ConfigService PlanConfigTransaction/ApplyConfigTransaction with snapshot token and commit-confirmed confirm/abort lifecycle",

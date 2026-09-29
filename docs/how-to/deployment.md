@@ -1324,6 +1324,14 @@ therefore own the graceful stop and the verification that follows it.
    This check validates candidate config bytes only: it does **not** inspect
    `runtime_state_dir` or config-adjacent commit-confirm authority.
 
+   For the import explain and rejected-route retention capacity limit, older
+   configs with `[policy.explain] cache_size` or
+   `[policy.reject_retention] capacity` above 2,097,152 now fail startup and
+   reload validation, even if that section has `enabled = false`. Reduce each
+   named value to at most 2,097,152, then run the **new** binary's
+   `--check --strict` against the edited file before stopping or restarting
+   the daemon. The defaults remain 4096 and 1024; zero still acts as one.
+
    Before any upgrade, use the still-running daemon to run the pre-upgrade
    diagnostic against the file the new binary will boot:
 

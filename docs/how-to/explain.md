@@ -243,8 +243,10 @@ arbitrary prefix of theirs answers `evicted` rather than a decision
 (never `not_seen`: every evicted key is remembered until session reset). The
 answer ends with the session's eviction count and `cache_size`.
 Budget roughly
-`sum over peers (min(max(1, cache_size), recorded decisions) × 600 B)`;
-the index grows with entries. Add about 19 B per evicted key (27–34 B
+`sum over nonempty peer caches (~1 KiB + min(max(1, cache_size), recorded decisions) × ~600 B)`;
+the index grows with entries. The minimal first-insert probe requested
+1,428 heap bytes; actual memory depends on attributes and allocator.
+Add about 19 B per evicted key (27–34 B
 with a nonzero Add-Path identifier), capped at 2,097,152 keys per session
 (about 38 MB, or up to about 72 MB for nonzero Add-Path identifiers).
 The `cache_size` ceiling is 2,097,152, and zero acts as one. Raise it
