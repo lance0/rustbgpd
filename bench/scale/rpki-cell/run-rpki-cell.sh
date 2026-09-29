@@ -130,6 +130,9 @@ acquire_rustbgpd_host_lock || exit $?
 source "$REPO/tests/soak/fd-headroom.sh"
 require_fd_headroom
 
+# Sample the invoking checkout before OUT_DIR exists, so an OUT_DIR inside
+# the repository cannot make a clean checkout look dirty.
+DRIVER_STATE="$(git -C "$REPO" rev-parse HEAD) dirty=$(git -C "$REPO" status --porcelain | wc -l)"
 mkdir -p "$(dirname "$OUT")"
 mkdir "$OUT"
 mkdir "$OUT/cells" "$OUT/bin" "$OUT/trees"
@@ -194,7 +197,7 @@ python3 "$HERE/rpki_cell.py" vrps "$N_PEERS" "$TOTAL_PREFIXES" "$VRPS" "$OUT/vrp
 {
     echo "base=$BASE_REF $BASE_SHA daemon_sha256=$(sha "${BIN[base]}")"
     echo "head=$HEAD_REF $HEAD_SHA daemon_sha256=$(sha "${BIN[head]}")"
-    echo "driver=$(git -C "$REPO" rev-parse HEAD) dirty=$(git -C "$REPO" status --porcelain | wc -l)"
+    echo "driver=$DRIVER_STATE"
     echo "reloadstall_sha256=$(sha "$HARNESS")"
     echo "vrps_sha256=$(sha "$OUT/vrps.json")"
     echo "stayrtr=$STAYRTR_IMAGE"
