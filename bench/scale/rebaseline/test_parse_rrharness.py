@@ -14,7 +14,12 @@ import unittest
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 
-from parse_rrharness import EXPECTED_SHAPES, LEGACY_RESULT_FIELDS, RESULT_FIELDS  # noqa: E402
+from parse_rrharness import (  # noqa: E402
+    EXPECTED_SHAPES,
+    LEGACY_RESULT_FIELDS,
+    RESULT_FIELDS,
+    read_results,
+)
 
 
 SCRIPT = HERE / "parse_rrharness.py"
@@ -317,6 +322,23 @@ rss_end_mib 210
             )
             writer.writeheader()
             writer.writerows(rows)
+
+    def test_results_round_trip_cgroup_columns_by_name(self) -> None:
+        with tempfile.TemporaryDirectory() as directory_text:
+            directory = Path(directory_text)
+            current = directory / "current.csv"
+            self.write_matrix(current, directory / "current-raw")
+            rows = read_results(current)
+            self.assertEqual({(row["cg_peak_mib"], row["cg_settled_current_mib"]) for row in rows}, {("512", "256")})
+            self.assertTrue(all(None not in row for row in rows), "unnamed extra fields")
+            legacy = directory / "legacy.csv"
+            self.write_matrix(legacy, directory / "legacy-raw", fields=LEGACY_RESULT_FIELDS)
+            self.assertTrue(all("cg_peak_mib" not in row for row in read_results(legacy)))
+            # A pre-change header with post-change rows leaves the cgroup values unnamed.
+            text = current.read_text(encoding="utf-8").split("\n", 1)[1]
+            (directory / "mixed.csv").write_text(",".join(LEGACY_RESULT_FIELDS) + "\n" + text, encoding="utf-8")
+            with self.assertRaises(ValueError):
+                read_results(directory / "mixed.csv")
 
     def test_matrix_accepts_legacy_header_and_rejects_bad_cgroup_column(self) -> None:
         with tempfile.TemporaryDirectory() as directory_text:

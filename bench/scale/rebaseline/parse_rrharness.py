@@ -345,6 +345,8 @@ def read_results(path: Path) -> list[dict[str, str]]:
             raise ValueError(f"{path}: unexpected results header")
         rows = list(reader)
     for row in rows:
+        if None in row:
+            raise ValueError(f"{path}: row has more fields than the header names")
         for field in RESULT_FIELDS[len(LEGACY_RESULT_FIELDS):]:
             if row.get(field):
                 finite_number(row[field], field)

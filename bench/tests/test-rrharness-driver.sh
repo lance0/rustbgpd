@@ -87,6 +87,16 @@ rg -F 'receipt_status=regression-gate-passed' "$driver" >/dev/null || {
   exit 1
 }
 
+# The driver writes results.csv's header itself; it must name every parser
+# column (including the trailing cgroup ones) or the extra fields go unnamed.
+driver_header=$(sed -n "s/^  '\(variant,commit,mode,[^']*\)' \\\\$/\1/p" "$driver")
+parser_header=$(cd "$repo/bench/scale/rebaseline" &&
+  python3 -c 'from parse_rrharness import RESULT_FIELDS; print(",".join(RESULT_FIELDS))')
+[[ -n $driver_header && $driver_header == "$parser_header" ]] || {
+  printf 'driver results.csv header differs from the parser RESULT_FIELDS\n' >&2
+  exit 1
+}
+
 cp "$driver" "$external_driver"
 chmod +x "$external_driver"
 expect_rc 2 'external driver' "$external_driver" --validate-only --base "$base" --head "$head"

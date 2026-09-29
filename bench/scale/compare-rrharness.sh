@@ -454,7 +454,7 @@ summary="$output_dir/summary.csv"
 preflight="$output_dir/preflight.tsv"
 execution="$output_dir/execution.tsv"
 printf '%s\n' \
-  'variant,commit,mode,clients,candidates,prefixes,seconds,repetition,pair_order,run_position,rate_name,rate,rss_established_mib,rss_converged_mib,rss_end_mib,setup_s,window_s,work_units,mgr_cpu_s,mgr_busy_frac,folded_sha256,classified_sha256,total_samples' \
+  'variant,commit,mode,clients,candidates,prefixes,seconds,repetition,pair_order,run_position,rate_name,rate,rss_established_mib,rss_converged_mib,rss_end_mib,setup_s,window_s,work_units,mgr_cpu_s,mgr_busy_frac,folded_sha256,classified_sha256,total_samples,cg_peak_mib,cg_settled_current_mib' \
   >"$results"
 printf 'cell\tattempt\tutc\tload_1m\tload_max\tgovernor\tcompeting_count\tcompeting_names\tstatus\n' \
   >"$preflight"
