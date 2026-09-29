@@ -297,6 +297,12 @@ class ExtractorFailsClosed(unittest.TestCase):
         self.assertEqual(cg, {"daemon_cg_peak": "812345", "settled_cg_current_last_sample": 1000 + len(lines) - 2})
         (cell / "cgroup-memory").write_text("cg_scope: unavailable\n")
         self.assertNotIn("daemon_cg_peak", {r[3] for r in summarize.extract(self.tmp)[0]})
+        # Only the optional cgroup column may be blank; a blank primary RSS sample fails.
+        good = rss.read_text()
+        rss.write_text(good + "1790000000,,1,1\n")
+        with self.assertRaises(ValueError):
+            summarize.extract(self.tmp)
+        rss.write_text(good)
         # No cg_peak may publish without the full readout and its swap-fence evidence.
         for bad in ("cg_peak_kib: 812345\n",
                     "cg_peak: 812345 kB\ncg_current: 700000 kB\ncg_swap_max: max\n",

@@ -106,8 +106,14 @@ def read_text(path):
 CGROUP_MEMORY = re.compile(r"cg_peak: (\d+) kB\ncg_current: \d+ kB\ncg_swap_max: 0\n")
 
 
-def rss_column(path, column="total_rss_kib"):
-    return [int(row[column]) for row in csv.DictReader(path.read_text().splitlines()) if row.get(column)]
+def rss_column(path):
+    return [int(row["total_rss_kib"]) for row in csv.DictReader(path.read_text().splitlines())]
+
+
+def cg_current_column(path):
+    """The optional cgroup column; a sample whose read raced scope teardown is blank."""
+    return [int(row["cg_current_kib"]) for row in csv.DictReader(path.read_text().splitlines())
+            if row.get("cg_current_kib")]
 
 
 def log_time(record):
@@ -250,7 +256,7 @@ def matrix_rows(source, exclusions, campaign):
                 raise ExtractionError(
                     f"{leg.name}: cgroup-memory is neither 'cg_peak/cg_current/cg_swap_max: 0' nor 'cg_scope: unavailable'"
                 )
-        cg_current = rss_column(cell / "rss.csv", "cg_current_kib")
+        cg_current = cg_current_column(cell / "rss.csv")
         if cg_current:
             rows.append([phase, arm, run, "settled_cg_current_last_sample", "", cg_current[-1], "KiB"])
         daemon_log = cell / "daemon.log"
