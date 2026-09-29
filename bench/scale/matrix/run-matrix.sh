@@ -364,11 +364,26 @@ daemon_scope_cgroup() {
         printf '%s\n' "$cgroup"
 }
 record_scope_memory() {
-    local cgroup=$1 out=$2 peak current swap_max
+    local cgroup=$1 out=$2 settled_stat=$3 peak current swap_max teardown_stat
     peak=$(cat "$cgroup/memory.peak") && current=$(cat "$cgroup/memory.current") &&
         swap_max=$(cat "$cgroup/memory.swap.max") || return 1
+    teardown_stat=$(scope_stat_rows "$cgroup" teardown) || return 1
     printf 'cg_peak: %s kB\ncg_current: %s kB\ncg_swap_max: %s\n' \
         $((peak / 1024)) $((current / 1024)) "$swap_max" >"$out"
+    printf '%s\n%s\n' "$settled_stat" "$teardown_stat" >>"$out"
+}
+scope_stat_rows() {
+    local cgroup=$1 phase=$2
+    awk -v phase="$phase" '$1 == "anon" || $1 == "file" || $1 == "file_mapped" {
+        if ($2 !~ /^[0-9]+$/ || seen[$1]++) exit 1
+        value[$1] = $2
+        count++
+    } END {
+        if (count != 3) exit 1
+        print "cg_" phase "_anon: " int(value["anon"] / 1024) " kB"
+        print "cg_" phase "_file: " int(value["file"] / 1024) " kB"
+        print "cg_" phase "_file_mapped: " int(value["file_mapped"] / 1024) " kB"
+    }' "$cgroup/memory.stat"
 }
 
 # Bound native process teardown independently of the daemon's actor deadlines.
@@ -564,7 +579,10 @@ run_cell() {
     [ -z "$rc" ] && rc=$hrc
 
     # Collect artifacts, then teardown.
-    local cleanup_rc=0 child_rc p
+    local cleanup_rc=0 child_rc p settled_stat=""
+    if [ -n "${cgroup:-}" ]; then
+        settled_stat=$(scope_stat_rows "$cgroup" settled) || cleanup_rc=1
+    fi
     if [ -n "$membership_pid" ]; then
         touch "$run/membership-stop"
         if [ "$hrc" -ne 0 ]; then
@@ -601,7 +619,7 @@ run_cell() {
         grep -E '^(VmHWM|VmRSS):' "/proc/$daemon_pid/status" >"$cdir/vmhwm" 2>/dev/null || cleanup_rc=1
         # The scope's own high-water mark (cg_peak), read while it still exists.
         if [ -n "${cgroup:-}" ]; then
-            record_scope_memory "$cgroup" "$cdir/cgroup-memory" || cleanup_rc=1
+            record_scope_memory "$cgroup" "$cdir/cgroup-memory" "$settled_stat" || cleanup_rc=1
         fi
         stop_native_daemon "$daemon_pid" "$cdir/daemon.exit" || cleanup_rc=1
     fi

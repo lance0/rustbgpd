@@ -103,7 +103,12 @@ def read_text(path):
 
 
 # run-matrix.sh's record_scope_memory output, byte for byte.
-CGROUP_MEMORY = re.compile(r"cg_peak: (\d+) kB\ncg_current: \d+ kB\ncg_swap_max: 0\n")
+CGROUP_MEMORY = re.compile(
+    r"cg_peak: (\d+) kB\ncg_current: \d+ kB\ncg_swap_max: 0\n"
+    r"(?:cg_settled_anon: \d+ kB\ncg_settled_file: \d+ kB\n"
+    r"cg_settled_file_mapped: \d+ kB\ncg_teardown_anon: \d+ kB\n"
+    r"cg_teardown_file: \d+ kB\ncg_teardown_file_mapped: \d+ kB\n)?"
+)
 
 
 def rss_column(path):

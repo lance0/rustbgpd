@@ -45,10 +45,22 @@ RESULT_FIELDS = (
     "total_samples",
     "cg_peak_mib",
     "cg_settled_current_mib",
+    "cg_settled_anon_mib",
+    "cg_settled_file_mib",
+    "cg_settled_file_mapped_mib",
+    "cg_teardown_anon_mib",
+    "cg_teardown_file_mib",
+    "cg_teardown_file_mapped_mib",
 )
-# Receipts written before the cgroup memory columns existed stay readable.
-LEGACY_RESULT_FIELDS = RESULT_FIELDS[:-2]
-CGROUP_KEYS = ("cg_peak_bytes", "cg_settled_current_bytes", "cg_swap_max")
+# Receipts written before either cgroup schema extension stay readable.
+LEGACY_RESULT_FIELDS = RESULT_FIELDS[:-8]
+PEAK_RESULT_FIELDS = RESULT_FIELDS[:-6]
+STAT_KEYS = tuple(
+    f"cg_{phase}_{kind}_bytes"
+    for phase in ("settled", "teardown")
+    for kind in ("anon", "file", "file_mapped")
+)
+CGROUP_KEYS = ("cg_peak_bytes", "cg_settled_current_bytes", "cg_swap_max", *STAT_KEYS)
 
 COMPARISON_FIELDS = (
     "mode",
@@ -221,7 +233,7 @@ def validate_classified(path: Path) -> int:
 def parse_cgroup(path: Path | None) -> dict[str, str]:
     """Read the leg's cgroup memory readout; no file means no scope (blank columns)."""
     if path is None:
-        return {"cg_peak_mib": "", "cg_settled_current_mib": ""}
+        return {field: "" for field in RESULT_FIELDS[len(LEGACY_RESULT_FIELDS):]}
     values: dict[str, str] = {}
     for line in path.read_text(encoding="utf-8").splitlines():
         key, _, value = line.partition(" ")
@@ -236,6 +248,10 @@ def parse_cgroup(path: Path | None) -> dict[str, str]:
     return {
         "cg_peak_mib": f"{positive_integer(values['cg_peak_bytes'], 'cg_peak_bytes') / mib:.3f}",
         "cg_settled_current_mib": f"{positive_integer(values['cg_settled_current_bytes'], 'cg_settled_current_bytes') / mib:.3f}",
+        **{
+            key.removesuffix("_bytes") + "_mib": f"{nonnegative_integer(values[key], key) / mib:.3f}"
+            for key in STAT_KEYS
+        },
     }
 
 
@@ -341,18 +357,23 @@ def parse_command(args: argparse.Namespace) -> None:
 def read_results(path: Path) -> list[dict[str, str]]:
     with path.open(newline="", encoding="utf-8") as handle:
         reader = csv.DictReader(handle)
-        if tuple(reader.fieldnames or ()) not in (RESULT_FIELDS, LEGACY_RESULT_FIELDS):
+        if tuple(reader.fieldnames or ()) not in (
+            RESULT_FIELDS,
+            PEAK_RESULT_FIELDS,
+            LEGACY_RESULT_FIELDS,
+        ):
             raise ValueError(f"{path}: unexpected results header")
+        cgroup_fields = tuple(reader.fieldnames or ())[len(LEGACY_RESULT_FIELDS):]
         rows = list(reader)
     for row in rows:
         if None in row:
             raise ValueError(f"{path}: row has more fields than the header names")
-        cgroup = [row.get(field, "") for field in RESULT_FIELDS[len(LEGACY_RESULT_FIELDS):]]
+        cgroup = [row.get(field, "") for field in cgroup_fields]
         if all(cgroup):
-            for field, value in zip(RESULT_FIELDS[len(LEGACY_RESULT_FIELDS):], cgroup):
+            for field, value in zip(cgroup_fields, cgroup):
                 finite_number(value, field)
         elif any(cgroup):
-            raise ValueError(f"{path}: cgroup columns must be both populated or both blank")
+            raise ValueError(f"{path}: cgroup columns must be all populated or all blank")
     if len(rows) != 16:
         raise ValueError(f"{path}: expected 16 result rows, got {len(rows)}")
     return rows
@@ -584,7 +605,7 @@ def build_parser() -> argparse.ArgumentParser:
     parse.add_argument(
         "--cgroup",
         type=Path,
-        help="cgroup memory readout (cg_peak_bytes, cg_settled_current_bytes, cg_swap_max)",
+        help="cgroup memory readout (peak, settled current, swap fence, and settled/teardown memory.stat)",
     )
     parse.set_defaults(run=parse_command)
     compare = commands.add_parser("compare", help="validate and gate the complete matrix")
