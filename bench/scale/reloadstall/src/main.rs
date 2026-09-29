@@ -272,6 +272,12 @@ struct NotificationDepth {
 }
 
 fn metric_value(body: &str, name: &str) -> Result<u64, String> {
+    optional_metric_value(body, name)?.ok_or_else(|| format!("missing {name}"))
+}
+
+/// `metric_value` that reports an absent sample as `Ok(None)`; malformed,
+/// labeled or duplicated samples are still errors.
+fn optional_metric_value(body: &str, name: &str) -> Result<Option<u64>, String> {
     let mut found = None;
     for line in body.lines() {
         let line = line.trim();
@@ -304,7 +310,7 @@ fn metric_value(body: &str, name: &str) -> Result<u64, String> {
             return Err(format!("duplicate {name}"));
         }
     }
-    found.ok_or_else(|| format!("missing {name}"))
+    Ok(found)
 }
 
 /// `flap N heap ...` line from one metrics body: each jemalloc gauge in
@@ -314,11 +320,8 @@ fn metric_value(body: &str, name: &str) -> Result<u64, String> {
 fn heap_line(round: u32, body: &str) -> Result<String, String> {
     let mut line = format!("flap {round} heap");
     for (key, name) in HEAP_GAUGES {
-        let value = match metric_value(body, name) {
-            Ok(bytes) => (bytes >> 20).to_string(),
-            Err(error) if error == format!("missing {name}") => "absent".to_owned(),
-            Err(error) => return Err(error),
-        };
+        let value = optional_metric_value(body, name)?
+            .map_or_else(|| "absent".to_owned(), |bytes| (bytes >> 20).to_string());
         line.push_str(&format!(" {key}={value}"));
     }
     Ok(line)
@@ -4950,6 +4953,10 @@ mod tests {
         assert_eq!(metric_value(&format!("{n} 1\n"), n), Ok(1));
         assert!(metric_value(&format!("{n}{{x=\"y\"}} 1\n{n} 1\n"), n).is_err());
         assert!(metric_value(&format!("{n} 1\n{n} 2\n"), n).is_err());
+        assert_eq!(metric_value("", n), Err(format!("missing {n}")));
+        assert_eq!(optional_metric_value("", n), Ok(None));
+        assert_eq!(optional_metric_value(&format!("{n} 7\n"), n), Ok(Some(7)));
+        assert!(optional_metric_value(&format!("{n}{{x=\"y\"}} 1\n"), n).is_err());
         for value in ["-1", "1.0", "1e2", "NaN", "1 2"] {
             assert!(metric_value(&format!("{n} {value}\n"), n).is_err());
         }
