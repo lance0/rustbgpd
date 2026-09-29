@@ -32,11 +32,12 @@ sampling began 02:00:20Z; hold 2026-09-28T02:00:53Z → 2026-09-29T02:00:53Z
 
 ## Verdict
 
-**PASS on all 13 analyzer gates.** After 5,493,035 churn cycles across the
-24 h hold, the terminal reflected-delivery verification was exact: all 1000
-clients sent a Normal ROUTE_REFRESH and each received exactly 99,900
-non-self prefixes (`min_unique == max_unique == expected`), with 0 parse
-errors and 1000 sessions up. Flap delta was 0 against a budget of 0, and
+**PASS on all 13 analyzer gates.** Churn reached 5,483,438 cycles at the end
+of the 24 h hold and 5,493,035 at the terminal receipt, having continued
+through the refresh. The terminal reflected-delivery verification was
+exact: all 1000 clients sent a Normal ROUTE_REFRESH and each received
+exactly 99,900 non-self prefixes (`min_unique == max_unique == expected`),
+with 0 parse errors and 1000 sessions up. Flap delta was 0 against a budget of 0, and
 the session floor held on all 2886 samples. Peak RSS was 427.6 MB against a
 1024 MB ceiling, and the late-window RSS slope was +0.7116 MB/h against
 10 MB/h. `/readyz` answered HTTP 200 on every hold sample and recovered to
@@ -87,7 +88,7 @@ host differs; see [Claim ceiling](#claim-ceiling).
 
 | Injection | Planned | Executed | Notes |
 |-----------|---------|----------|-------|
-| Churn flap cycles (8 churners × 125 ms cadence) | ≥ 2,764,800 (precommitted floor: 0.5 × 64/s × 86,400 s) | 5,493,035 | Counter nondecreasing across all 1441 per-minute `rr_hold` status lines; zero monotone breaks |
+| Churn flap cycles (8 churners × 125 ms cadence) | ≥ 2,764,800 (precommitted floor: 0.5 × 64/s × 86,400 s) | 5,483,438 at hold end (`rr_hold elapsed_s=86400`); 5,493,035 at the terminal receipt | Churn continued through the terminal refresh; counter nondecreasing across all 1441 per-minute `rr_hold` status lines; zero monotone breaks |
 | Terminal reflected-delivery verification (1000-way Normal ROUTE_REFRESH) | 1 | 1 | `rr_terminal_receipt`: `expected=99900 min_unique=99900 max_unique=99900 sessions_up=1000 parse_errors=0` |
 
 ## Gates — measured vs precommitted
@@ -102,8 +103,8 @@ through `msgs_sent_monotone` and `terminal_delivery_exact`.
 | Minimum sample count (`min_samples`) | ≥ 2592 (0.9 × 86,400 ÷ 30) | 2886 | **PASS** |
 | Session floor (`session_floor`) | `established == 1000` on every post-warmup sample, no exceptions | 0 violations | **PASS** |
 | Session-flap budget exact (`flap_budget`) | flap delta over the run == 0 | 0 | **PASS** |
-| Terminal reflected-delivery exact (`terminal_delivery_exact`) | `min_unique == max_unique == expected == 99,900`; `sessions_up == 1000`; `parse_errors == 0` | exactly that, after 5,493,035 churn cycles; 0 receipt defects | **PASS** |
-| Churn-cycle floor (`churn_cycle_floor`) | final `churn_cycles` ≥ 2,764,800, nondecreasing across hold lines | 5,493,035; 0 monotone breaks | **PASS** |
+| Terminal reflected-delivery exact (`terminal_delivery_exact`) | `min_unique == max_unique == expected == 99,900`; `sessions_up == 1000`; `parse_errors == 0` | exactly that; receipt `churn_cycles=5,493,035` (terminal count); 0 receipt defects | **PASS** |
+| Churn-cycle floor (`churn_cycle_floor`) | final `churn_cycles` ≥ 2,764,800, nondecreasing across hold lines | final (terminal-receipt) count 5,493,035; 0 monotone breaks | **PASS** |
 | Max-prefix flat (`max_prefix_flat`) | `bgp_max_prefix_exceeded_total` == 0 on every sample | 0 on all 2886 samples | **PASS** |
 | Counter advancement (`msgs_sent_monotone`) | `bgp_messages_sent_total` strictly increases across every adjacent sample | 0 breaks, 0 equal intervals; final 4,797,400,577 | **PASS** |
 | readyz availability (`readyz`) | (a) hold: HTTP 200 within 250 ms on every sample; (b) terminal-refresh window: every sample records an HTTP response, any code; (c) recovery: 200 within 250 ms no later than 60 s after `rr_terminal_receipt` | (a) 0 bad hold samples, max 8.2 ms; (b) 5 window samples, 0 without a response (all HTTP 503, 201.5–202.3 ms); (c) `recovered_ms=136` | **PASS** |
