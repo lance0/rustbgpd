@@ -23,6 +23,14 @@ resolved.
 
 ## Resolved
 
+- **MRT snapshot per-entry attribute clones (resolved).** Ordinary IPv4/IPv6
+  `TABLE_DUMP_V2` and EVPN `RIB_GENERIC` encoding borrow route attributes and
+  reuse one attribute-encoding scratch buffer across entries. The separate
+  output-buffer growth fix is recorded in the
+  [July 2026 allocation receipt](../perf/mrt-snapshot-allocation-2026-07.md).
+  EVPN encoding still builds a temporary NLRI buffer per record; this does not
+  synthesize or clone its path attributes.
+
 - **Fleet policy stats can time out during reload (resolved).** The
   route-server flagship soak, which runs `rbgp policy stats --direction both`
   every 5 s through 48 serialized SIGHUP reloads, passed `management_failures`
@@ -404,16 +412,6 @@ resolved.
   mixed with `[[dynamic_neighbors]]`, EVPN runtime tables, `[[fib_tables]]`,
   or `honor_graceful_shutdown` / `honor_blackhole` are rejected before any
   effect. See [SIGHUP reload routes](reload-matrix.md#sighup-reload-routes).
-- **MRT snapshot attribute synthesis still allocates per entry.** The
-  dominant allocation cost — millions of exact-capacity output-buffer
-  reallocations on full-table dumps — was removed by bounded geometric
-  output growth (growth misses fell from millions to ~40 on both
-  measured fleet shapes; see
-  [docs/perf/mrt-snapshot-allocation-2026-07.md](../perf/mrt-snapshot-allocation-2026-07.md)).
-  The `TABLE_DUMP_V2` encoder still groups routes by prefix and
-  synthesizes per-entry attributes, which remains a residual allocation
-  cost for very large snapshots. Track as a performance optimization,
-  not a correctness issue.
 - **Injected routes support multiple paths via path_id.** `InjectionService`
   supports multiple injected routes per prefix using explicit `path_id`.
   Path ID 0 is the default path.

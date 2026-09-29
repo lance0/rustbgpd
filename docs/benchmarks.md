@@ -1182,9 +1182,10 @@ allocation instead of one copy per route or per peer.
 | Typical (6 attrs, 3-ASN path, 2 communities) | 764 B | 128 B | 892 B |
 | Rich (8 attrs, 5-ASN+SET path, 5 communities, ORIGINATOR_ID, CLUSTER_LIST) | 1056 B | 128 B | 1184 B |
 
-These are per-unique-attribute-set costs. With interning, routes sharing the
-same attributes pay only the 128-byte `Route` stack cost plus an 8-byte `Arc`
-pointer.
+The stale heap figures above are per unique attribute set. In the current
+layout, each stored route has a 112-byte `Route` body, including its
+`Arc<AttrSet>` pointer; routes with identical attributes share the separate
+attribute-set allocation.
 
 The `memory_profile` harness emits **seven** shape rows per size —
 `adj_rib_in`, `loc_rib_only`, `full_rib`, `full_rib_diverse`,
