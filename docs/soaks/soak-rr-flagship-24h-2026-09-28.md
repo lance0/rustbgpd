@@ -40,8 +40,9 @@ exactly 99,900 non-self prefixes (`min_unique == max_unique == expected`),
 with 0 parse errors and 1000 sessions up. Flap delta was 0 against a budget of 0, and
 the session floor held on all 2886 samples. Peak RSS was 427.6 MB against a
 1024 MB ceiling, and the late-window RSS slope was +0.7116 MB/h against
-10 MB/h. `/readyz` answered HTTP 200 on every hold sample and recovered to
-HTTP 200 136 ms after the terminal receipt, against a 60 s bound. The
+10 MB/h. `/readyz` answered HTTP 200 on every hold sample. After the
+terminal receipt, the runner's post-receipt probe loop got HTTP 200 within
+250 ms after 136 ms of probing, inside the 60 s recovery bound. The
 daemon log holds 22,169 records with zero `ERROR`; `cycles.log` holds zero
 abort records.
 
@@ -107,7 +108,7 @@ through `msgs_sent_monotone` and `terminal_delivery_exact`.
 | Churn-cycle floor (`churn_cycle_floor`) | final `churn_cycles` ≥ 2,764,800, nondecreasing across hold lines | final (terminal-receipt) count 5,493,035; 0 monotone breaks | **PASS** |
 | Max-prefix flat (`max_prefix_flat`) | `bgp_max_prefix_exceeded_total` == 0 on every sample | 0 on all 2886 samples | **PASS** |
 | Counter advancement (`msgs_sent_monotone`) | `bgp_messages_sent_total` strictly increases across every adjacent sample | 0 breaks, 0 equal intervals; final 4,797,400,577 | **PASS** |
-| readyz availability (`readyz`) | (a) hold: HTTP 200 within 250 ms on every sample; (b) terminal-refresh window: every sample records an HTTP response, any code; (c) recovery: 200 within 250 ms no later than 60 s after `rr_terminal_receipt` | (a) 0 bad hold samples, max 8.2 ms; (b) 5 window samples, 0 without a response (all HTTP 503, 201.5–202.3 ms); (c) `recovered_ms=136` | **PASS** |
+| readyz availability (`readyz`) | (a) hold: HTTP 200 within 250 ms on every sample; (b) terminal-refresh window: every sample records an HTTP response, any code; (c) recovery: 200 within 250 ms no later than 60 s after `rr_terminal_receipt` | (a) 0 bad hold samples, max 8.2 ms; (b) 5 window samples, 0 without a response (all HTTP 503, 201.5–202.3 ms); (c) `recovered_ms=136` (duration of the post-receipt probe loop); the receipt and the recovery line share the 02:03:24Z timestamp in `cycles.log` and `soak.log` | **PASS** |
 | Peak RSS (`rss_peak_mb`) | < 1024 MB | 427.6 MB | **PASS** |
 | RSS late-window slope (`rss_late_slope_per_hour`) | < 10 MB/h over the final 25 % (window ≥ 1 h, evaluated) | +0.7116 MB/h | **PASS** |
 | Intern-table late-window slope (`intern_late_slope_per_hour`) | < 100 entries/h over the same window | 0.0 entries/h | **PASS** |
@@ -122,8 +123,9 @@ below).
 Observed:
 
 - Sample accounting: 2886 CSV rows from elapsed 0 to 86,574 s at a 30 s
-  cadence (adjacent gaps 30–31 s), one row per interval, no scrape-failure
-  gaps.
+  cadence (the elapsed counter advances by 30 s, 31 s on 24 intervals;
+  wall-clock timestamps 29–31 s apart), one row per interval, no
+  scrape-failure gaps.
 - RSS trajectory (daemon process-tree RSS, CSV `rss_mb`): 259.4 MB at the
   first sample, then a 237.7–254.6 MB band for the whole post-warmup hold
   (5th–95th percentile 239.0–249.9 MB; median 247.4 MB in the first hold
@@ -139,8 +141,13 @@ Observed:
 - `/readyz` during the hold: HTTP 200 on every sample, max 8.2 ms. The five
   samples inside the terminal-refresh window (from the engine's
   `rr_terminal refresh` marker at 02:00:53Z) each returned HTTP 503 in
-  about 202 ms. The post-receipt probe loop recorded recovery to 200 within
-  the 250 ms bound after 136 ms.
+  about 202 ms. The runner starts its post-receipt probe loop once the
+  engine has exited and the receipt is checked, so `recovered_ms=136` is
+  that loop's duration, not the time elapsed since the receipt. The 60 s
+  bound is evidenced by the timestamps: the `rr_terminal_receipt` and
+  `terminal_readyz recovered_ms=136` lines in `cycles.log`, and the
+  runner's completion and recovery lines in `soak.log`, are all stamped
+  02:03:24Z.
 - Daemon log census (`verdict.json` `daemon_log.value.warnings_by_message`):
   22,169 records, 0 `ERROR`, 5 `WARN`, all `readiness probe failed` with
   `RIB manager probe timed out (200ms deadline)`, at 02:01:14Z, 02:01:45Z,
