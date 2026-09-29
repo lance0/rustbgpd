@@ -12,7 +12,7 @@
 #
 # The native rustbgpd daemon runs in its own systemd user scope with
 # MemorySwapMax=0: cgroup-memory records the scope's memory.peak (cg_peak) and
-# rss.csv gains its memory.current per sample (cg_current_kib). Competitor
+# rss.csv gains its memory.current and memory.stat per sample. Competitor
 # cells and hosts without a user scope keep the RSS/VmHWM-only receipt.
 #
 # One cell at a time: 1-min loadavg gate (< 2.0) before each cell, 5-minute
@@ -364,11 +364,42 @@ daemon_scope_cgroup() {
         printf '%s\n' "$cgroup"
 }
 record_scope_memory() {
-    local cgroup=$1 out=$2 peak current swap_max
+    local cgroup=$1 out=$2 last_sample_stat=$3 peak current swap_max teardown_stat
     peak=$(cat "$cgroup/memory.peak") && current=$(cat "$cgroup/memory.current") &&
         swap_max=$(cat "$cgroup/memory.swap.max") || return 1
+    teardown_stat=$(scope_stat_rows "$cgroup" teardown) || return 1
     printf 'cg_peak: %s kB\ncg_current: %s kB\ncg_swap_max: %s\n' \
         $((peak / 1024)) $((current / 1024)) "$swap_max" >"$out"
+    printf '%s\n%s\n' "$last_sample_stat" "$teardown_stat" >>"$out"
+}
+scope_stat_rows() {
+    local cgroup=$1 phase=$2
+    awk -v phase="$phase" '$1 == "anon" || $1 == "file" || $1 == "file_mapped" {
+        if (NF != 2 || $2 !~ /^[0-9]+$/ || seen[$1]++) exit 1
+        value[$1] = $2
+        count++
+    } END {
+        if (count != 3) exit 1
+        print "cg_" phase "_anon: " int(value["anon"] / 1024) " kB"
+        print "cg_" phase "_file: " int(value["file"] / 1024) " kB"
+        print "cg_" phase "_file_mapped: " int(value["file_mapped"] / 1024) " kB"
+    }' "$cgroup/memory.stat"
+}
+last_sample_stat_rows() {
+    awk -F, 'NR == 1 {
+        if ($0 != "epoch_s,total_rss_kib,pids,cg_current_kib,cg_anon_kib,cg_file_kib,cg_file_mapped_kib") bad=1
+        next
+    } {
+        if (NF != 7 || $1 !~ /^[0-9]+$/ || $2 !~ /^[1-9][0-9]*$/ || $3 !~ /^[1-9][0-9]*$/) bad=1
+        if ($4 == "" && $5 == "" && $6 == "" && $7 == "") next
+        if ($4 !~ /^[0-9]+$/ || $5 !~ /^[0-9]+$/ || $6 !~ /^[0-9]+$/ || $7 !~ /^[0-9]+$/) bad=1
+        anon=$5; file=$6; mapped=$7; found=1
+    } END {
+        if (bad || !found) exit 1
+        print "cg_last_sample_anon: " anon " kB"
+        print "cg_last_sample_file: " file " kB"
+        print "cg_last_sample_file_mapped: " mapped " kB"
+    }' "$1"
 }
 
 # Bound native process teardown independently of the daemon's actor deadlines.
@@ -564,7 +595,7 @@ run_cell() {
     [ -z "$rc" ] && rc=$hrc
 
     # Collect artifacts, then teardown.
-    local cleanup_rc=0 child_rc p
+    local cleanup_rc=0 child_rc p last_sample_stat=""
     if [ -n "$membership_pid" ]; then
         touch "$run/membership-stop"
         if [ "$hrc" -ne 0 ]; then
@@ -592,6 +623,9 @@ run_cell() {
         echo "cell $cell: RSS sampler exited $child_rc during cleanup" >&2
         cleanup_rc=1
     fi
+    if [ -n "${cgroup:-}" ]; then
+        last_sample_stat=$(last_sample_stat_rows "$cdir/rss.csv") || cleanup_rc=1
+    fi
     if [ -n "$container" ]; then
         docker logs "$container" >"$cdir/daemon.log" 2>&1 || cleanup_rc=1
         docker rm -f "$container" >/dev/null 2>&1 || cleanup_rc=1
@@ -601,7 +635,7 @@ run_cell() {
         grep -E '^(VmHWM|VmRSS):' "/proc/$daemon_pid/status" >"$cdir/vmhwm" 2>/dev/null || cleanup_rc=1
         # The scope's own high-water mark (cg_peak), read while it still exists.
         if [ -n "${cgroup:-}" ]; then
-            record_scope_memory "$cgroup" "$cdir/cgroup-memory" || cleanup_rc=1
+            record_scope_memory "$cgroup" "$cdir/cgroup-memory" "$last_sample_stat" || cleanup_rc=1
         fi
         stop_native_daemon "$daemon_pid" "$cdir/daemon.exit" || cleanup_rc=1
     fi

@@ -447,6 +447,7 @@ jobs:
           bash -n bench/tests/test-scale-provenance.sh
           bash -n bench/tests/test-route-server-1000-receipt.sh
           bash -n bench/tests/test-scale-host-quiet.sh
+          bash -n bench/tests/test-cgroup-memory-stat.sh
           bash -n bench/tests/test-vpn-query-receipt.sh
           bash -n bench/tests/test-vpn-query-campaign.sh
           bash -n bench/run-vpn-query-campaign.sh
@@ -464,6 +465,8 @@ jobs:
             bench/tests/test-scale-provenance.sh \
             bench/tests/test-route-server-1000-receipt.sh \
             bench/tests/test-scale-host-quiet.sh \
+            bench/tests/test-cgroup-memory-stat.sh \
+            bench/scale/matrix/rss-sampler.sh \
             bench/scale/compare-rrharness.sh
           shellcheck bench/tests/test-vpn-query-receipt.sh
           shellcheck bench/tests/test-vpn-query-campaign.sh \
@@ -473,6 +476,7 @@ jobs:
             bench/tests/test-netns-calibration-vm.sh
           bash bench/tests/test-route-server-1000-receipt.sh
           bash bench/tests/test-scale-host-quiet.sh
+          bash bench/tests/test-cgroup-memory-stat.sh
           bash bench/tests/test-vpn-query-receipt.sh
           bash bench/tests/test-vpn-query-campaign.sh
           bash bench/tests/test-compare-criterion-harness.sh

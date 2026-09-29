@@ -17,6 +17,7 @@ sys.path.insert(0, str(HERE))
 from parse_rrharness import (  # noqa: E402
     EXPECTED_SHAPES,
     LEGACY_RESULT_FIELDS,
+    PEAK_RESULT_FIELDS,
     RESULT_FIELDS,
     read_results,
 )
@@ -124,24 +125,33 @@ rss_end_mib 210
 """
 
     def test_cgroup_readout_fills_trailing_columns_and_requires_swap_fence(self) -> None:
-        valid = "cg_peak_bytes 314572800\ncg_settled_current_bytes 209715200\ncg_swap_max 0\n"
+        valid = ("cg_peak_bytes 314572800\ncg_settled_current_bytes 209715200\ncg_swap_max 0\n"
+                 "cg_settled_anon_bytes 104857600\ncg_settled_file_bytes 52428800\n"
+                 "cg_settled_file_mapped_bytes 10485760\ncg_teardown_anon_bytes 94371840\n"
+                 "cg_teardown_file_bytes 41943040\ncg_teardown_file_mapped_bytes 0\n")
         with tempfile.TemporaryDirectory() as directory_text:
             directory = Path(directory_text)
             output = self.parse_cell(directory, self.FLOOD_LOG, cgroup_text=valid)
             with output.open(newline="", encoding="utf-8") as handle:
                 reader = csv.DictReader(handle)
-                self.assertEqual(tuple(reader.fieldnames or ())[-2:], ("cg_peak_mib", "cg_settled_current_mib"))
+                self.assertEqual(tuple(reader.fieldnames or ())[-8:], RESULT_FIELDS[-8:])
                 row = next(reader)
             self.assertEqual(row["cg_peak_mib"], "300.000")
             self.assertEqual(row["cg_settled_current_mib"], "200.000")
+            self.assertEqual(row["cg_settled_anon_mib"], "100.000")
+            self.assertEqual(row["cg_teardown_file_mapped_mib"], "0.000")
             # Without a scope the columns exist but are blank.
-            row = next(csv.DictReader(self.parse_cell(directory, self.FLOOD_LOG).open(encoding="utf-8")))
+            with self.parse_cell(directory, self.FLOOD_LOG).open(encoding="utf-8") as handle:
+                row = next(csv.DictReader(handle))
             self.assertEqual((row["cg_peak_mib"], row["cg_settled_current_mib"]), ("", ""))
+            self.assertTrue(all(row[field] == "" for field in RESULT_FIELDS[-8:]))
             for bad in (
                 valid.replace("cg_swap_max 0", "cg_swap_max max"),
                 valid.replace("cg_settled_current_bytes 209715200", "cg_settled_current_bytes "),
                 valid.replace("cg_peak_bytes 314572800\n", ""),
                 valid + "cg_peak_bytes 1\n",
+                valid.replace("cg_settled_file_bytes 52428800\n", ""),
+                valid.replace("cg_teardown_anon_bytes 94371840", "cg_teardown_anon_bytes -1"),
             ):
                 with self.subTest(bad=bad):
                     (directory / "cell.csv").unlink(missing_ok=True)
@@ -315,6 +325,7 @@ rss_end_mib 210
                             "total_samples": 100,
                             "cg_peak_mib": cg_peak,
                             "cg_settled_current_mib": cg_settled,
+                            **{field: ("" if cg_peak == cg_settled == "" else 1) for field in RESULT_FIELDS[-6:]},
                         }
                     )
         with path.open("w", newline="", encoding="utf-8") as handle:
@@ -332,9 +343,20 @@ rss_end_mib 210
             rows = read_results(current)
             self.assertEqual({(row["cg_peak_mib"], row["cg_settled_current_mib"]) for row in rows}, {("512", "256")})
             self.assertTrue(all(None not in row for row in rows), "unnamed extra fields")
+            partial = directory / "partial.csv"
+            rows[0]["cg_settled_anon_mib"] = ""
+            with partial.open("w", newline="", encoding="utf-8") as handle:
+                writer = csv.DictWriter(handle, fieldnames=RESULT_FIELDS)
+                writer.writeheader()
+                writer.writerows(rows)
+            with self.assertRaisesRegex(ValueError, "cgroup columns"):
+                read_results(partial)
             legacy = directory / "legacy.csv"
             self.write_matrix(legacy, directory / "legacy-raw", fields=LEGACY_RESULT_FIELDS)
             self.assertTrue(all("cg_peak_mib" not in row for row in read_results(legacy)))
+            peak = directory / "peak.csv"
+            self.write_matrix(peak, directory / "peak-raw", fields=PEAK_RESULT_FIELDS)
+            self.assertTrue(all("cg_settled_anon_mib" not in row for row in read_results(peak)))
             # A pre-change header with post-change rows leaves the cgroup values unnamed.
             text = current.read_text(encoding="utf-8").split("\n", 1)[1]
             (directory / "mixed.csv").write_text(",".join(LEGACY_RESULT_FIELDS) + "\n" + text, encoding="utf-8")

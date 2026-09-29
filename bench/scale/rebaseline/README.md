@@ -235,6 +235,19 @@ only; without the raw capture the numeric values themselves are unanchored.
 
 ## Receipt artifact contract
 
+The scoped rrharness comparison writes `cg_peak_mib` and
+`cg_settled_current_mib` followed by `memory.stat` anon, file, and
+file_mapped values at the settled log marker and at teardown. These are
+point-in-time cgroup charges, not peak values; file_mapped is a subset of
+file. A leg without a swap-fenced user scope leaves all cgroup columns blank.
+Older CSV receipts with just the peak/current pair remain readable. The raw
+`--cgroup` readout for a new leg requires all six stat fields.
+
+The native matrix uses its last complete RSS sample for the stat split in
+`cgroup-memory` (`cg_last_sample_*`), then reads `cg_teardown_*` before stopping
+the daemon. The rrharness comparison instead samples `cg_settled_*` when its
+settled RSS marker appears.
+
 Use a dedicated directory and stable names:
 
 - eight `*.folded` CPU profiles and eight `*.cpu.tsv` classified tables. The

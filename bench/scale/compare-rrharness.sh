@@ -36,8 +36,9 @@ refs, the shared host lock, a performance-governor pinned CPU, load below
 cell. Both sides are built with `cargo build --release --locked` into
 separate target directories and launched as prebuilt binaries. Each leg runs
 in its own transient systemd user scope with MemorySwapMax=0; results.csv
-carries the scope's memory.peak (cg_peak_mib) and its memory.current when the
-harness logs settled RSS (cg_settled_current_mib) as trailing columns. Without
+carries the scope's memory.peak (cg_peak_mib), its memory.current when the
+harness logs settled RSS, and memory.stat anon/file/file_mapped at that point
+and teardown as trailing columns. Without
 a usable user scope the driver warns and leaves those columns blank.
 
 Without --pin or --max-regression the receipt is advisory: comparison.csv
@@ -279,7 +280,7 @@ launch_mode=systemd-user-scope-watcher-then-prebuilt-binary-with-taskset
 if ! "${memory_scope[@]}" sh -c 'cg=/sys/fs/cgroup$(sed -n "s/^0:://p" /proc/self/cgroup)
   test -r "$cg/memory.peak" && test "$(cat "$cg/memory.swap.max")" = 0' >/dev/null 2>&1; then
   printf 'WARNING: no systemd user scope with a readable memory.peak and memory.swap.max=0;\n' >&2
-  printf 'WARNING: cg_peak_mib and cg_settled_current_mib will be blank in this receipt\n' >&2
+  printf 'WARNING: cgroup memory columns will be blank in this receipt\n' >&2
   memory_scope=()
   memory_scope_mode=none
   launch_mode=direct-prebuilt-binary-with-taskset
@@ -292,19 +293,37 @@ fi
 scoped_leg='cg=/sys/fs/cgroup$(sed -n "s/^0:://p" /proc/self/cgroup)
 out=$1 log=$2
 shift 2
+stat_rows() {
+  awk -v phase="$1" '\''$1 == "anon" || $1 == "file" || $1 == "file_mapped" {
+    if (NF != 2 || $2 !~ /^[0-9]+$/ || seen[$1]++) exit 1
+    value[$1] = $2
+    count++
+  } END {
+    if (count != 3) exit 1
+    print "cg_" phase "_anon_bytes " value["anon"]
+    print "cg_" phase "_file_bytes " value["file"]
+    print "cg_" phase "_file_mapped_bytes " value["file_mapped"]
+  }'\'' "$cg/memory.stat"
+}
 "$@" >"$log" &
 leg=$!
 settled=
+settled_stat=
+stat_error=0
 while kill -0 "$leg" 2>/dev/null; do
   if [ -z "$settled" ] && grep -Eq "^rss_(converged|primed)_mib " "$log"; then
     settled=$(cat "$cg/memory.current")
+    settled_stat=$(stat_rows settled) || stat_error=1
   fi
   sleep 0.1
 done
 rc=0
 wait "$leg" || rc=$?
+teardown_stat=$(stat_rows teardown) || stat_error=1
+if [ "$stat_error" -ne 0 ]; then exit 1; fi
 printf "cg_peak_bytes %s\ncg_settled_current_bytes %s\ncg_swap_max %s\n" \
   "$(cat "$cg/memory.peak")" "$settled" "$(cat "$cg/memory.swap.max")" >"$out"
+printf "%s\n%s\n" "$settled_stat" "$teardown_stat" >>"$out"
 exit "$rc"'
 
 if [[ -n ${RUSTBGPD_HOST_LOCK+x} ]]; then
@@ -456,7 +475,7 @@ summary="$output_dir/summary.csv"
 preflight="$output_dir/preflight.tsv"
 execution="$output_dir/execution.tsv"
 printf '%s\n' \
-  'variant,commit,mode,clients,candidates,prefixes,seconds,repetition,pair_order,run_position,rate_name,rate,rss_established_mib,rss_converged_mib,rss_end_mib,setup_s,window_s,work_units,mgr_cpu_s,mgr_busy_frac,folded_sha256,classified_sha256,total_samples,cg_peak_mib,cg_settled_current_mib' \
+  'variant,commit,mode,clients,candidates,prefixes,seconds,repetition,pair_order,run_position,rate_name,rate,rss_established_mib,rss_converged_mib,rss_end_mib,setup_s,window_s,work_units,mgr_cpu_s,mgr_busy_frac,folded_sha256,classified_sha256,total_samples,cg_peak_mib,cg_settled_current_mib,cg_settled_anon_mib,cg_settled_file_mib,cg_settled_file_mapped_mib,cg_teardown_anon_mib,cg_teardown_file_mib,cg_teardown_file_mapped_mib' \
   >"$results"
 printf 'cell\tattempt\tutc\tload_1m\tload_max\tgovernor\tcompeting_count\tcompeting_names\tstatus\n' \
   >"$preflight"
