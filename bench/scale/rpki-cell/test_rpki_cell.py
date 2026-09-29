@@ -85,6 +85,11 @@ class VrpFixture(unittest.TestCase):
         with self.assertRaises(ValueError):
             rpki_cell.check_shape(9, 50, 80)
 
+    def test_peer_address_limit(self):
+        rpki_cell.check_shape(51200, 51200, 51200)
+        with self.assertRaisesRegex(ValueError, "N_PEERS=51201"):
+            rpki_cell.check_shape(51201, 51201, 51201)
+
     def test_default_shape_crosses_the_second_octet_boundary(self):
         roas = rpki_cell.roas(700, 400400, 500000)
         self.assertEqual(roas[400399], {"asn": "AS65211", "prefix": "26.28.15.0/24",
@@ -242,11 +247,44 @@ class Summary(unittest.TestCase):
             "\n".join(line for line in text.splitlines() if "route_chunk" not in line))
         self.assertEqual(self.summarize(), 1)
 
+    def test_missing_before_route_chunk_series_is_invalid(self):
+        campaign(self.out)
+        before = self.out / "cells" / "base-r1" / "metrics-before.prom"
+        original = before.read_text()
+        for metric, value in (("sum", 0.01), ("count", 1)):
+            with self.subTest(metric=metric):
+                before.write_text(original.replace(CHUNK.format(metric, value) + "\n", ""))
+                self.assertEqual(self.summarize(), 1)
+                self.assertIn("base-r1: missing route_chunk series", (self.out / "summary.txt").read_text())
+
+    def test_unchanged_route_chunk_count_is_invalid(self):
+        campaign(self.out)
+        after = self.out / "cells" / "base-r1" / "metrics-after.prom"
+        for count in (1, 0):
+            with self.subTest(count=count):
+                after.write_text(metrics(0.4, count, 100))
+                self.assertEqual(self.summarize(), 1)
+                self.assertIn("base-r1: no route_chunk work", (self.out / "summary.txt").read_text())
+
     def test_unequal_runs_are_invalid(self):
         campaign(self.out)
         (self.out / "cells" / "head-r3" / "cell.env").unlink()
         self.assertEqual(self.summarize(), 1)
         self.assertIn("unequal", (self.out / "summary.txt").read_text())
+
+    def test_mismatched_run_ids_are_invalid(self):
+        campaign(self.out)
+        env = self.out / "cells" / "head-r3" / "cell.env"
+        env.write_text(env.read_text().replace("run=3", "run=4"))
+        self.assertEqual(self.summarize(), 1)
+        self.assertIn("'head': [1, 2, 4]", (self.out / "summary.txt").read_text())
+
+    def test_duplicate_run_ids_are_invalid(self):
+        campaign(self.out)
+        env = self.out / "cells" / "head-r3" / "cell.env"
+        env.write_text(env.read_text().replace("run=3", "run=2"))
+        self.assertEqual(self.summarize(), 1)
+        self.assertIn("'head': [1, 2, 2]", (self.out / "summary.txt").read_text())
 
 
 if __name__ == "__main__":
