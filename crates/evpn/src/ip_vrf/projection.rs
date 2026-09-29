@@ -1114,19 +1114,19 @@ fn resolve_overlay_index_gateway(
     }
     // Mobility tie-break, mirroring the Type 2 projection: the highest
     // MAC mobility sequence reflects the most recent host location, so
-    // it wins (a route with no sequence loses to one that carries one).
+    // it wins (an absent sequence is zero per RFC 7432 section 15).
     // Among the top-sequence contenders, a single MAC — possibly
     // multi-homed across several VTEPs — is unambiguous; resolve it to
     // the lowest next_hop for determinism. Distinct MACs tied at the
     // top sequence are a genuine conflict and stay fail-closed.
     let top_seq = matches
         .iter()
-        .map(|t| t.mobility_sequence)
+        .map(|t| t.mobility_sequence.unwrap_or(0))
         .max()
         .expect("matches is non-empty");
     let winners: Vec<OverlayIndexTarget> = matches
         .into_iter()
-        .filter(|t| t.mobility_sequence == top_seq)
+        .filter(|t| t.mobility_sequence.unwrap_or(0) == top_seq)
         .collect();
     let mut distinct_macs: Vec<MacAddress> = Vec::new();
     for w in &winners {
@@ -1993,20 +1993,25 @@ mod tests {
         let mut r = route(v4([10, 1, 0, 0], 24), "10.0.0.9", &["65000:5000"]);
         r.gateway = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 10));
 
-        let table = project_ip_prefix_routes_with_overlay_index(
-            &vrfs,
-            vec![r],
-            vec![
-                overlay(100, "192.0.2.10", 0xaa, "10.0.0.2"),
-                overlay(101, "192.0.2.10", 0xbb, "10.0.0.3"),
-            ],
+        let absent = overlay(100, "192.0.2.10", 0xaa, "10.0.0.2");
+        let zero = overlay_seq(101, "192.0.2.10", 0xbb, "10.0.0.3", Some(0));
+        let tables: Vec<_> = [[absent.clone(), zero.clone()], [zero, absent]]
+            .into_iter()
+            .map(|routes| project_ip_prefix_routes_with_overlay_index(&vrfs, [r.clone()], routes))
+            .collect();
+        assert_eq!(
+            tables
+                .iter()
+                .map(RemoteIpPrefixTable::is_empty)
+                .collect::<Vec<_>>(),
+            vec![true; 2]
         );
-
-        assert!(table.is_empty());
-        assert!(matches!(
-            table.drops()[0],
-            DropReason::AmbiguousOverlayIndexGateway { candidates: 2, .. }
-        ));
+        for table in tables {
+            assert!(matches!(
+                table.drops()[0],
+                DropReason::AmbiguousOverlayIndexGateway { candidates: 2, .. }
+            ));
+        }
     }
 
     #[test]
@@ -2020,21 +2025,23 @@ mod tests {
         r.gateway = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 10));
         r.router_mac = None;
 
-        let table = project_ip_prefix_routes_with_overlay_index(
-            &vrfs,
-            vec![r],
-            vec![
-                overlay(100, "192.0.2.10", 0xaa, "10.0.0.3"),
-                overlay(100, "192.0.2.10", 0xaa, "10.0.0.2"),
-            ],
-        );
-
-        assert!(table.drops().is_empty());
         let blue = IpVrfId::new(5000).unwrap();
-        let entries: Vec<_> = table.for_vrf(blue).collect();
-        assert_eq!(entries.len(), 1);
-        assert_eq!(entries[0].1.next_hop, "10.0.0.2".parse::<IpAddr>().unwrap());
-        assert_eq!(entries[0].1.router_mac, mac_with_tail(0xaa));
+        let absent = overlay(100, "192.0.2.10", 0xaa, "10.0.0.2");
+        let zero = overlay_seq(100, "192.0.2.10", 0xaa, "10.0.0.3", Some(0));
+        let winners: Vec<_> = [[absent.clone(), zero.clone()], [zero, absent]]
+            .into_iter()
+            .map(|routes| {
+                let table = project_ip_prefix_routes_with_overlay_index(&vrfs, [r.clone()], routes);
+                assert!(table.drops().is_empty());
+                let entries: Vec<_> = table.for_vrf(blue).collect();
+                assert_eq!(entries.len(), 1);
+                (entries[0].1.next_hop, entries[0].1.router_mac)
+            })
+            .collect();
+        assert_eq!(
+            winners,
+            vec![("10.0.0.2".parse::<IpAddr>().unwrap(), mac_with_tail(0xaa)); 2]
+        );
     }
 
     #[test]
