@@ -117,7 +117,7 @@ BASE_SHA=$(resolve "$BASE_REF")
 HEAD_SHA=$(resolve "$HEAD_REF")
 [[ $BASE_SHA != "$HEAD_SHA" ]] || { echo "BASE and HEAD are the same commit" >&2; exit 2; }
 [[ ! -e $OUT ]] || { echo "OUT_DIR exists; use a new directory: $OUT" >&2; exit 2; }
-python3 "$HERE/rpki_cell.py" vrps "$N_PEERS" "$TOTAL_PREFIXES" "$VRPS" /dev/null || exit 2
+python3 "$HERE/rpki_cell.py" check "$N_PEERS" "$TOTAL_PREFIXES" "$VRPS" || exit 2
 
 for lock in ${RPKI_CELL_LOCKS:-}; do
     exec {fd}>>"$lock"

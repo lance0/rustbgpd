@@ -2,16 +2,20 @@
 """Helpers for run-rpki-cell.sh: the VRP fixture, the VRP-loaded gate, and
 the per-cell extraction.
 
+    rpki_cell.py check N_PEERS TOTAL_PREFIXES VRPS
     rpki_cell.py vrps N_PEERS TOTAL_PREFIXES VRPS OUT_JSON
     rpki_cell.py wait-vrps METRICS_URL WANT TIMEOUT_SECS DAEMON_PID
     rpki_cell.py summarize OUT_DIR
 
 `vrps` writes a StayRTR JSON cache of exactly VRPS entries. Every reloadstall
-base-table /24 is Valid for the stub that announces it (stub i owns global
-indexes [i*per, (i+1)*per) with origin AS 64512+i, per = TOTAL // N_PEERS;
-see base_prefix and stub_asn in bench/scale/reloadstall/src/main.rs). The rest
+base-table /24 is Valid for the stub that announces it: stub i announces the
+contiguous slice member_slice(TOTAL, N_PEERS, i) with origin AS 64512+i, the
+first TOTAL % N_PEERS stubs one prefix more than the rest (see member_slice,
+base_prefix and stub_asn in bench/scale/reloadstall/src/main.rs). The rest
 are /24s in 100.0.0.0/8 and up that cover no announced route. The output is
 byte-identical for the same arguments.
+
+`check` validates the same shape arithmetically without building the table.
 
 `wait-vrps` polls the daemon's /metrics until the bgp_rpki_vrp_count series
 sum to at least WANT, and exits 1 with a message naming the loaded count if
@@ -42,21 +46,33 @@ ARMS = ("base", "head")
 METRICS = ("route_chunk_sum_s", "daemon_cpu_s", "convergence_wall_s")
 
 
-def roas(n_peers: int, total: int, vrps: int) -> list[dict]:
+def member_slice(total: int, peers: int, member: int) -> tuple[int, int]:
+    """(start, len) of a member's base-table slice, as reloadstall's member_slice:
+    contiguous disjoint slices, the first TOTAL % N_PEERS members one longer."""
+    q, r = divmod(total, peers)
+    return member * q + min(member, r), q + (member < r)
+
+
+def check_shape(n_peers: int, total: int, vrps: int) -> None:
+    """Arithmetic-only shape check; raises ValueError."""
     if n_peers < 1 or total < n_peers:
         raise ValueError("need at least one prefix per peer")
-    per = total // n_peers
-    base = n_peers * per
-    if vrps < base:
-        raise ValueError(f"VRPS={vrps} is below the {base} announced prefixes; every route must validate")
-    if 20 + ((base - 1) >> 16) >= 100 or 100 + ((vrps - base - 1) >> 16) > 223:
+    if vrps < total:
+        raise ValueError(f"VRPS={vrps} is below the {total} announced prefixes; every route must validate")
+    if 20 + ((total - 1) >> 16) >= 100 or 100 + ((vrps - total - 1) >> 16) > 223:
         raise ValueError("prefix space exhausted")
+
+
+def roas(n_peers: int, total: int, vrps: int) -> list[dict]:
+    check_shape(n_peers, total, vrps)
     out = []
-    for idx in range(base):
-        out.append({"asn": f"AS{BASE_ASN + idx // per}",
-                    "prefix": f"{20 + (idx >> 16)}.{(idx >> 8) & 0xFF}.{idx & 0xFF}.0/24",
-                    "maxLength": 24, "ta": "bench"})
-    for j in range(vrps - base):
+    for member in range(n_peers):
+        start, length = member_slice(total, n_peers, member)
+        for idx in range(start, start + length):
+            out.append({"asn": f"AS{BASE_ASN + member}",
+                        "prefix": f"{20 + (idx >> 16)}.{(idx >> 8) & 0xFF}.{idx & 0xFF}.0/24",
+                        "maxLength": 24, "ta": "bench"})
+    for j in range(vrps - total):
         out.append({"asn": f"AS{PAD_ASN + j % 500}",
                     "prefix": f"{100 + (j >> 16)}.{(j >> 8) & 0xFF}.{j & 0xFF}.0/24",
                     "maxLength": 24, "ta": "bench"})
@@ -176,11 +192,14 @@ def summarize(out: Path) -> int:
 
 def main(argv: list[str]) -> int:
     cmd, args = (argv[1], argv[2:]) if len(argv) > 1 else ("", [])
-    if cmd == "vrps" and len(args) == 4:
+    if cmd in ("check", "vrps") and len(args) == (3 if cmd == "check" else 4):
         try:
-            write_vrps(int(args[0]), int(args[1]), int(args[2]), args[3])
+            if cmd == "check":
+                check_shape(int(args[0]), int(args[1]), int(args[2]))
+            else:
+                write_vrps(int(args[0]), int(args[1]), int(args[2]), args[3])
         except ValueError as err:
-            print(f"vrps: {err}", file=sys.stderr)
+            print(f"{cmd}: {err}", file=sys.stderr)
             return 2
         return 0
     if cmd == "wait-vrps" and len(args) == 4:

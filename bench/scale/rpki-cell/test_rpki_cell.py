@@ -49,16 +49,34 @@ def campaign(out: Path) -> None:
 
 
 class VrpFixture(unittest.TestCase):
-    def test_every_announced_prefix_is_valid_for_its_owner(self):
-        roas = rpki_cell.roas(7, 1000, 1500)
-        self.assertEqual(len(roas), 1500)
-        per = 1000 // 7
-        by_prefix = {r["prefix"]: r["asn"] for r in roas}
-        for idx in range(7 * per):
+    def assert_owned(self, n_peers: int, total: int, vrps: int) -> list[dict]:
+        roas = rpki_cell.roas(n_peers, total, vrps)
+        self.assertEqual(len(roas), vrps)
+        # reloadstall member_slice: the first total % n_peers members own q + 1.
+        q, r = divmod(total, n_peers)
+        by_prefix = {row["prefix"]: row["asn"] for row in roas}
+        for idx in range(total):
+            owner = idx // (q + 1) if idx < r * (q + 1) else r + (idx - r * (q + 1)) // q
             prefix = f"{20 + (idx >> 16)}.{(idx >> 8) & 0xFF}.{idx & 0xFF}.0/24"
-            self.assertEqual(by_prefix[prefix], f"AS{64512 + idx // per}")
-        self.assertEqual(len(by_prefix), 1500, "padding must not duplicate or cover announced prefixes")
-        self.assertTrue(all(r["prefix"].startswith(("100.", "101.")) for r in roas[7 * per:]))
+            self.assertEqual(by_prefix.get(prefix), f"AS{64512 + owner}", prefix)
+        self.assertEqual(len(by_prefix), vrps, "padding must not duplicate or cover announced prefixes")
+        self.assertTrue(all(row["prefix"].startswith(("100.", "101.")) for row in roas[total:]))
+        return roas
+
+    def test_every_announced_prefix_is_valid_for_its_owner(self):
+        self.assert_owned(10, 2000, 2500)
+
+    def test_non_divisible_shape_follows_reloadstall_slices(self):
+        roas = self.assert_owned(7, 50, 80)
+        # 50 = 7 x 7 + 1: member 0 owns indexes 0..=7, member 1 starts at 8.
+        self.assertEqual(roas[7]["asn"], "AS64512")
+        self.assertEqual(roas[8]["asn"], "AS64513")
+        self.assertEqual(roas[49]["asn"], "AS64518")
+
+    def test_check_is_arithmetic_only(self):
+        rpki_cell.check_shape(700, 400400, 500000)
+        with self.assertRaises(ValueError):
+            rpki_cell.check_shape(7, 50, 49)
 
     def test_default_shape_crosses_the_second_octet_boundary(self):
         roas = rpki_cell.roas(700, 400400, 500000)
@@ -67,7 +85,7 @@ class VrpFixture(unittest.TestCase):
 
     def test_too_few_vrps_is_refused(self):
         with self.assertRaises(ValueError):
-            rpki_cell.roas(10, 2000, 1999)
+            rpki_cell.roas(7, 50, 49)
 
     def test_output_is_deterministic(self):
         with tempfile.TemporaryDirectory() as tmp:
