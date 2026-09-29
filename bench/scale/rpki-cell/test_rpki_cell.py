@@ -12,6 +12,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 import unittest
 from pathlib import Path
 
@@ -124,9 +125,40 @@ class VrpGate(unittest.TestCase):
         self.addCleanup(server.shutdown)
         return f"http://127.0.0.1:{server.server_port}/metrics"
 
-    def gate(self, url: str, want: int, pid: int = 0) -> subprocess.CompletedProcess:
+    def serve_slow(self, first: str, later: str, first_delay: float, drip: float) -> str:
+        """First request: `first` after `first_delay`; later ones: `later`, its
+        headers at once and its body in four chunks `drip` seconds apart."""
+        seen = []
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):  # noqa: N802
+                seen.append(1)
+                body = (first if len(seen) == 1 else later).encode()
+                time.sleep(first_delay if len(seen) == 1 else 0)
+                self.send_response(200)
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.flush()
+                step = len(body) // 4 + 1
+                for i in range(0, len(body), step):
+                    if len(seen) > 1:
+                        time.sleep(drip)
+                    self.wfile.write(body[i:i + step])
+                    self.wfile.flush()
+
+            def log_message(self, *args):
+                pass
+
+        server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        server.daemon_threads = True
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        return f"http://127.0.0.1:{server.server_port}/metrics"
+
+    def gate(self, url: str, want: int, pid: int = 0, timeout: str = "1.2") -> subprocess.CompletedProcess:
         script = Path(rpki_cell.__file__)
-        return subprocess.run([sys.executable, str(script), "wait-vrps", url, str(want), "1.2",
+        return subprocess.run([sys.executable, str(script), "wait-vrps", url, str(want), timeout,
                                str(pid or os.getpid())],
                               capture_output=True, text=True, timeout=30)
 
@@ -155,6 +187,22 @@ class VrpGate(unittest.TestCase):
         result = self.gate(self.serve(metrics(0, 0, 500)), 500, pid=child.pid)
         self.assertEqual(result.returncode, 1)
         self.assertIn("exited", result.stderr)
+
+
+    def test_table_completed_after_the_deadline_fails(self):
+        # The second scrape starts inside the budget but its body finishes
+        # after it; each chunk arrives within the per-request socket timeout.
+        url = self.serve_slow(metrics(0, 0, 499), metrics(0, 0, 500), first_delay=0, drip=0.3)
+        result = self.gate(url, 500, timeout="1.0")
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertIn("499 of 500", result.stderr)
+
+    def test_slow_scrape_is_bounded_by_the_remaining_budget(self):
+        url = self.serve_slow(metrics(0, 0, 500), metrics(0, 0, 500), first_delay=4, drip=0)
+        started = time.monotonic()
+        result = self.gate(url, 500, timeout="1.0")
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertLess(time.monotonic() - started, 3.0)
 
 
 class Summary(unittest.TestCase):

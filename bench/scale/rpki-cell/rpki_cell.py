@@ -119,25 +119,30 @@ def alive(pid: int) -> bool:
 
 
 def wait_vrps(url: str, want: int, timeout: float, pid: int) -> int:
+    """Only a scrape that completes by the deadline counts, and no request may
+    wait longer than the budget that remains."""
     deadline = time.monotonic() + timeout
     loaded = None
     while True:
         if not alive(pid):
             print(f"VRP gate failed: daemon {pid} exited with {loaded} of {want} VRPs loaded", file=sys.stderr)
             return 1
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            print(f"VRP gate failed: {loaded} of {want} VRPs loaded after {timeout:g}s; "
+                  "no route was sent", file=sys.stderr)
+            return 1
         try:
-            with urllib.request.urlopen(url, timeout=5) as resp:
-                loaded = vrp_total(resp.read().decode())
+            with urllib.request.urlopen(url, timeout=min(5.0, remaining)) as resp:
+                text = resp.read().decode()
+            if time.monotonic() <= deadline:
+                loaded = vrp_total(text)
         except OSError:
             pass
         if loaded is not None and loaded >= want:
             print(f"vrps_loaded={loaded}")
             return 0
-        if time.monotonic() >= deadline:
-            print(f"VRP gate failed: {loaded} of {want} VRPs loaded after {timeout:g}s; "
-                  "no route was sent", file=sys.stderr)
-            return 1
-        time.sleep(0.5)
+        time.sleep(max(0.0, min(0.5, deadline - time.monotonic())))
 
 
 def read_env(path: Path) -> dict[str, str]:
