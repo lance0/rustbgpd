@@ -1,4 +1,4 @@
-//! Sequential manual proof for rejected-route store allocation behavior.
+//! Sequential allocation regression for rejected-route and explain caches.
 
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::hint::black_box;
@@ -11,8 +11,22 @@ use lru::LruCache;
 use rustbgpd_telemetry::reason_labels::ImportRejectReason;
 use rustbgpd_wire::{Afi, AspaValidation, Ipv4Prefix, Prefix, RpkiValidation, Safi};
 
+#[cfg_attr(
+    test,
+    allow(
+        dead_code,
+        reason = "custom harness runs main, not included unit tests"
+    )
+)]
 #[path = "../src/session/import_decision_cache.rs"]
 pub mod import_decision_cache;
+#[cfg_attr(
+    test,
+    allow(
+        dead_code,
+        reason = "custom harness runs main, not included unit tests"
+    )
+)]
 #[path = "../src/session/rejected_routes.rs"]
 pub mod rejected_routes;
 

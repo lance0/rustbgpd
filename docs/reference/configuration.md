@@ -2998,9 +2998,10 @@ allocation. The first insertion in the minimal allocation probe requested
 1,428 heap bytes; the estimate above budgets about 1.6 KiB for one entry.
 The ~600 B term includes the growing index and entry payload at larger
 occupancy. Actual memory depends on attributes, occupancy, and allocator.
-There is no fixed 154 KiB reservation per session. The historical
+There is no fixed 154 KiB reservation per session. The allocation discussion
+in [ADR-0073](../adr/0073-import-policy-explain.md) and the historical
 [`explain-cache opt-in receipt`](../perf/explain-cache-opt-in-2026-07.md)
-measured the previous eager index and should not be used to predict the
+describe the previous eager index and should not be used to predict the
 memory saved by this change. The configured ceiling bounds retained
 decisions per session, not total daemon memory.
 

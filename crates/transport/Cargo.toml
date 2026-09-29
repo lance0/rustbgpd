@@ -44,7 +44,8 @@ criterion.workspace = true
 [[bin]]
 name = "rejected-route-store-allocation"
 path = "tools/rejected_route_store_allocation.rs"
-test = false
+test = true
+harness = false
 bench = false
 doc = false
 
