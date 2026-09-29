@@ -3150,7 +3150,9 @@ there is no per-peer or per-group override.
   the peer's expected retained-prefix count and budget the memory: the
   number applies to every session, so the bill is
   `peers × (154 KiB + min(cache_size, prefixes per peer) × 587 B)`, plus
-  about 19 B per evicted key for the eviction memory. See
+  eviction memory of about 19 B per evicted key (27–34 B with a nonzero
+  Add-Path identifier), capped at 2,097,152 keys per session (about 38 MB,
+  or up to about 72 MB for nonzero Add-Path identifiers). See
   [`CONFIGURATION.md`](configuration.md#import-decision-explain-policyexplain).
 
 ### Answer a member's "why is my route filtered?"

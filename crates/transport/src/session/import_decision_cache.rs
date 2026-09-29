@@ -39,6 +39,8 @@
 //! stored and every unknown key answers `Evicted`: the cache can no longer
 //! prove a key was never seen, so it never claims so.
 
+use std::cmp::Ordering;
+use std::collections::BTreeSet;
 use std::collections::hash_map::RandomState;
 use std::hash::BuildHasher;
 use std::net::IpAddr;
@@ -51,7 +53,7 @@ use rustbgpd_policy::{PolicyAction, RouteModifications, StatementAttribution};
 use rustbgpd_wire::{
     Afi, AspaValidation, ExtendedCommunity, LargeCommunity, Prefix, RpkiValidation, Safi,
 };
-use rustc_hash::{FxHashMap, FxHashSet};
+use rustc_hash::FxHashSet;
 
 /// Default per-peer cap. Per ADR-0073 this is a deliberate fabric /
 /// partial-table starter size (hundreds–low-thousands of prefixes fully
@@ -64,9 +66,9 @@ pub const DEFAULT_EXPLAIN_CACHE_SIZE: usize = 4096;
 /// Cap on remembered evicted keys per session. It covers a full
 /// dual-stack table plus churn; a peer cycling through distinct prefixes
 /// cannot grow the memory past it. Allocator-counted requested bytes:
-/// 18.9 MB for 1M evicted `path_id` 0 keys and 37.8 MB at the cap. A
-/// nonzero Add-Path identifier costs about 85 B, because it needs a
-/// per-prefix list to be named by an all-paths lookup.
+/// 18.9 MB for 1M evicted `path_id` 0 keys and 37.8 MB at the cap; 27–34 B
+/// per nonzero Add-Path key (ordered so an all-paths lookup can enumerate
+/// them), up to 72 MB at the cap.
 pub const EVICTED_KEY_LIMIT: usize = 1 << 21;
 
 /// Identity of a cached import decision.
@@ -264,13 +266,43 @@ struct EvictedKeys {
     state: RandomState,
     /// `(afi, safi, prefix)` fingerprints whose `path_id` 0 entry was evicted.
     default_path: FxHashSet<u64>,
-    /// Evicted nonzero Add-Path identifiers, by `(afi, safi, prefix)`
-    /// fingerprint, so an all-paths lookup can name each one.
-    add_path: FxHashMap<u64, Vec<u32>>,
+    /// Evicted nonzero Add-Path keys, ordered so each prefix's paths are
+    /// one range an all-paths lookup can enumerate. Every operation is
+    /// logarithmic, however many path identifiers one prefix cycles through.
+    add_path: BTreeSet<AddPathKey>,
     len: usize,
     /// Set once `len` reached [`EVICTED_KEY_LIMIT`]; every unknown key
     /// then answers `Evicted`.
     overflowed: bool,
+}
+
+/// An evicted nonzero Add-Path key: `(afi, safi, prefix)` fingerprint, then
+/// path identifier.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct AddPathKey {
+    prefix: u64,
+    path_id: u32,
+}
+
+impl Ord for AddPathKey {
+    fn cmp(&self, other: &Self) -> Ordering {
+        #[cfg(test)]
+        ADD_PATH_COMPARISONS.with(|count| count.set(count.get() + 1));
+        (self.prefix, self.path_id).cmp(&(other.prefix, other.path_id))
+    }
+}
+
+impl PartialOrd for AddPathKey {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    /// `AddPathKey` comparisons on this thread, so a test can bound the
+    /// work without timing it.
+    static ADD_PATH_COMPARISONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 impl EvictedKeys {
@@ -287,12 +319,10 @@ impl EvictedKeys {
         let added = if key.path_id == 0 {
             self.default_path.insert(fp)
         } else {
-            let paths = self.add_path.entry(fp).or_default();
-            let added = !paths.contains(&key.path_id);
-            if added {
-                paths.push(key.path_id);
-            }
-            added
+            self.add_path.insert(AddPathKey {
+                prefix: fp,
+                path_id: key.path_id,
+            })
         };
         self.len += usize::from(added);
     }
@@ -304,16 +334,11 @@ impl EvictedKeys {
         let fp = self.fingerprint(key.afi, key.safi, &key.prefix);
         let removed = if key.path_id == 0 {
             self.default_path.remove(&fp)
-        } else if let Some(paths) = self.add_path.get_mut(&fp) {
-            let before = paths.len();
-            paths.retain(|&id| id != key.path_id);
-            let removed = paths.len() != before;
-            if paths.is_empty() {
-                self.add_path.remove(&fp);
-            }
-            removed
         } else {
-            false
+            self.add_path.remove(&AddPathKey {
+                prefix: fp,
+                path_id: key.path_id,
+            })
         };
         self.len -= usize::from(removed);
     }
@@ -329,9 +354,10 @@ impl EvictedKeys {
         if key.path_id == 0 {
             self.default_path.contains(&fp)
         } else {
-            self.add_path
-                .get(&fp)
-                .is_some_and(|paths| paths.contains(&key.path_id))
+            self.add_path.contains(&AddPathKey {
+                prefix: fp,
+                path_id: key.path_id,
+            })
         }
     }
 
@@ -343,16 +369,22 @@ impl EvictedKeys {
             if self.default_path.contains(&fp) {
                 ids.push(0);
             }
-            if let Some(paths) = self.add_path.get(&fp) {
-                ids.extend_from_slice(paths);
-            }
+            let first = AddPathKey {
+                prefix: fp,
+                path_id: 1,
+            };
+            let last = AddPathKey {
+                prefix: fp,
+                path_id: u32::MAX,
+            };
+            ids.extend(self.add_path.range(first..=last).map(|k| k.path_id));
         }
         ids
     }
 
     #[cfg(test)]
     fn is_unallocated(&self) -> bool {
-        self.default_path.capacity() == 0 && self.add_path.capacity() == 0
+        self.default_path.capacity() == 0 && self.add_path.is_empty()
     }
 }
 
@@ -959,6 +991,43 @@ mod tests {
         assert!(matches!(mixed[0].result, LookupResult::Evicted));
         assert!(matches!(mixed[1].result, LookupResult::Hit(_)));
         assert!(matches!(mixed[2].result, LookupResult::Evicted));
+    }
+
+    #[test]
+    fn cycling_add_path_ids_on_one_prefix_stays_logarithmic() {
+        // Add-Path receive is unlimited by default and decisions are
+        // recorded before admission, so one prefix can cycle through any
+        // number of path identifiers. Each evict, re-announce and lookup
+        // must stay logarithmic in that number, not linear.
+        const PATHS: u32 = 20_000;
+        let mut cache = ImportDecisionCache::with_capacity(1);
+        ADD_PATH_COMPARISONS.with(|count| count.set(0));
+        for path_id in 1..=PATHS {
+            cache.insert(nth_key(0, path_id), permit_at(0)); // evicts path_id - 1
+        }
+        for path_id in 1..PATHS {
+            assert!(matches!(
+                cache.lookup(&nth_key(0, path_id), 0),
+                LookupResult::Evicted
+            ));
+        }
+        for path_id in 1..PATHS {
+            cache.insert(nth_key(0, path_id), permit_at(0)); // clears its record
+        }
+        let comparisons = ADD_PATH_COMPARISONS.with(std::cell::Cell::get);
+        let operations = 4 * PATHS as usize;
+        // Measured at about 32 comparisons per operation; a per-prefix list would
+        // need about PATHS² / 2 comparisons in total.
+        assert!(
+            comparisons < operations * 64,
+            "{comparisons} comparisons for {operations} operations",
+        );
+        // Re-announcing in order evicts each predecessor again.
+        assert_eq!(cache.evicted.add_path.len(), PATHS as usize - 1);
+        assert!(matches!(
+            cache.lookup(&nth_key(0, PATHS - 1), 0),
+            LookupResult::Hit(_)
+        ));
     }
 
     #[test]

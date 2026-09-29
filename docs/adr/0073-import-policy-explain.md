@@ -364,15 +364,18 @@ showed that eviction had happened.
 The ring is replaced by exact per-session evicted-key memory:
 
 - Each evicted key is stored as a 64-bit fingerprint of `(AFI, SAFI,
-  prefix)` under per-cache random keys; nonzero Add-Path identifiers are
-  listed per prefix so an all-paths query names each evicted path. A
-  write for the key removes it, and it resets with the session.
+  prefix)` under per-cache random keys; nonzero Add-Path identifiers sit
+  in an ordered set beside that fingerprint, so an all-paths query names
+  each evicted path and every operation stays logarithmic however many
+  identifiers one prefix cycles through. A write for the key removes it,
+  and it resets with the session.
 - Errors need a 64-bit fingerprint collision (about `n² / 2^65` across
   `n` evicted keys).
-- The memory grows only once eviction starts: about 19 B per evicted key
-  (18.9 MB of allocator-counted requested bytes at 1M keys, about 85 B
-  for a nonzero Add-Path identifier). It is capped at 2,097,152 keys per
-  session (about 38 MB). Past the cap the session stops recording and
+- The memory grows only once eviction starts. Allocator-counted
+  requested bytes are about 19 B per evicted key (18.9 MB at 1M keys)
+  and 27–34 B per key with a nonzero Add-Path identifier. It is capped at
+  2,097,152 keys per session: about 38 MB, or up to about 72 MB if every
+  key carries a nonzero Add-Path identifier. Past the cap the session stops recording and
   answers `EVICTED` for any key it has no record of, so `NOT_SEEN` is
   never a guess.
 - Eviction is observable: `ExplainImportPolicyResponse` carries

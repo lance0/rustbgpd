@@ -244,7 +244,9 @@ arbitrary prefix of theirs answers `evicted` rather than a decision
 answer ends with the session's eviction count and `cache_size`.
 Budget roughly
 `peers × (154 KiB + min(cache_size, prefixes per peer) × 587 B)`,
-and raise `cache_size` toward a peer's retained-prefix count when you
+plus about 19 B per evicted key (27–34 B with a nonzero Add-Path
+identifier), capped at 2,097,152 keys per session (about 38 MB, or up to
+about 72 MB for nonzero Add-Path identifiers), and raise `cache_size` toward a peer's retained-prefix count when you
 need full-table answers.
 Details:
 [CONFIGURATION.md](../reference/configuration.md#import-decision-explain-policyexplain)

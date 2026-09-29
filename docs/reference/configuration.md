@@ -2985,10 +2985,11 @@ peers × (154 KiB + min(cache_size, distinct prefixes per peer) × 587 B)
 Each session also remembers every key the cap evicts, so an evicted prefix
 answers `evicted` rather than `not_seen`. That memory grows only after
 eviction starts: allocator-counted requested bytes are about 19 B per evicted
-key (18.9 MB at 1M evicted keys), capped at 2,097,152 keys (about 38 MB) per
-session. Past the cap the session stops recording and answers `evicted` for
-any prefix it has no record of. An Add-Path key with a nonzero path
-identifier costs about 85 B.
+key (18.9 MB at 1M evicted keys) and 27–34 B per key with a nonzero Add-Path
+identifier. It is capped at 2,097,152 keys per session: about 38 MB, or up to
+about 72 MB if every evicted key carries a nonzero Add-Path identifier. Past
+the cap the session stops recording and answers `evicted` for any prefix it
+has no record of.
 
 The fixed and per-entry terms are a **computed model** solved from two
 same-binary fleet shapes in the
