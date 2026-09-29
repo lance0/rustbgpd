@@ -1307,6 +1307,79 @@ async fn explain_reply_carries_cache_enabled_flag() {
     }
 }
 
+/// The explain reply and metrics report explain-cache evictions, and an
+/// evicted prefix answers EVICTED through the session command path.
+#[tokio::test]
+async fn explain_cache_evictions_reach_reply_and_metric() {
+    use super::import_decision_cache::LookupResult;
+    let mut peer_config = PeerConfig::new(65001, 65002, Ipv4Addr::new(10, 0, 0, 1));
+    peer_config.connect_retry_secs = 30;
+    peer_config.families = vec![(Afi::Ipv4, Safi::Unicast)];
+    peer_config.gr_restart_time = 120;
+    let mut config = TransportConfig::new(peer_config, "10.0.0.2:179".parse().unwrap());
+    config.explain_enabled = true;
+    config.explain_cache_size = 2;
+    let metrics = BgpMetrics::new();
+    let metric_view = metrics.clone();
+    let (_cmd_tx, cmd_rx) = mpsc::channel(8);
+    let (rib_tx, _rib_rx) = mpsc::channel(64);
+    let chain = PolicyChain::new(vec![Policy {
+        entries: vec![],
+        default_action: PolicyAction::Permit,
+    }]);
+    let mut session = PeerSession::new(
+        config,
+        metrics,
+        cmd_rx,
+        rib_tx,
+        Some(chain),
+        None,
+        None,
+        None,
+        None,
+        false,
+    );
+    session.negotiated = Some(Arc::new(negotiated_session(65002, false)));
+    let attrs = vec![
+        PathAttribute::Origin(Origin::Igp),
+        PathAttribute::AsPath(AsPath {
+            segments: vec![AsPathSegment::AsSequence(vec![65002])],
+        }),
+        PathAttribute::NextHop(Ipv4Addr::new(10, 0, 0, 2)),
+    ];
+    let prefix = |octet: u8| Ipv4Prefix::new(Ipv4Addr::new(198, 51, octet, 0), 24);
+    let update = |octets: std::ops::Range<u8>| {
+        let nlri: Vec<Ipv4NlriEntry> = octets
+            .map(|octet| Ipv4NlriEntry {
+                path_id: 0,
+                prefix: prefix(octet),
+            })
+            .collect();
+        UpdateMessage::build(&nlri, &[], &attrs, true, false, Ipv4UnicastMode::Body)
+    };
+    session.process_update(update(0..5)).await;
+    assert_eq!(metric_view.import_explain_cache_evictions("10.0.0.2"), 3);
+
+    let (reply_tx, reply_rx) = oneshot::channel();
+    let _ = session
+        .handle_command(PeerCommand::ExplainImportPolicy {
+            afi: Afi::Ipv4,
+            safi: Safi::Unicast,
+            prefix: Prefix::V4(prefix(0)),
+            path_id: None,
+            reply: reply_tx,
+        })
+        .await;
+    let reply = reply_rx.await.expect("session replied");
+    assert_eq!(reply.cache_size, 2);
+    assert_eq!(reply.evictions_since_reset, 3);
+    assert_eq!(reply.matches.len(), 1);
+    assert!(matches!(reply.matches[0].result, LookupResult::Evicted));
+
+    session.process_update(update(5..6)).await;
+    assert_eq!(metric_view.import_explain_cache_evictions("10.0.0.2"), 4);
+}
+
 /// Import policy chains accumulate modifications across matching permit
 /// policies before the route reaches the RIB.
 #[expect(

@@ -1160,6 +1160,13 @@ impl proto::policy_service_server::PolicyService for PolicyService {
         // enabled cache with no record is a genuine NOT_SEEN.
         let no_session = reply.is_none();
         let cache_enabled = reply.as_ref().is_some_and(|r| r.cache_enabled);
+        let (cache_size, evictions_since_reset) = match &reply {
+            Some(r) if r.cache_enabled => (
+                Some(u64::try_from(r.cache_size).unwrap_or(u64::MAX)),
+                Some(r.evictions_since_reset),
+            ),
+            _ => (None, None),
+        };
         let (current_generation, mut matches) = match reply {
             Some(r) => {
                 let proto_matches: Vec<proto::ImportExplainMatch> = r
@@ -1211,6 +1218,8 @@ impl proto::policy_service_server::PolicyService for PolicyService {
             afi_safi: req.afi_safi,
             current_policy_generation: current_generation,
             matches,
+            cache_size,
+            evictions_since_reset,
         }))
     }
 
@@ -2392,6 +2401,14 @@ mod tests {
     /// answers with `reply`, returning the single synthetic match's
     /// outcome (LAN-320 tri-state pins).
     async fn explain_outcome_for(reply: Option<ImportExplainReply>) -> i32 {
+        let resp = explain_response_for(reply).await;
+        assert_eq!(resp.matches.len(), 1, "one synthetic match expected");
+        resp.matches[0].outcome
+    }
+
+    async fn explain_response_for(
+        reply: Option<ImportExplainReply>,
+    ) -> proto::ExplainImportPolicyResponse {
         let (peer_tx, mut peer_rx) = mpsc::channel(8);
         let svc = PolicyService::new(AccessMode::ReadOnly, peer_tx, None, None);
         tokio::spawn(async move {
@@ -2407,12 +2424,10 @@ mod tests {
                 }
             }
         });
-        let resp = PolicyServiceRpc::explain_import_policy(&svc, Request::new(explain_request()))
+        PolicyServiceRpc::explain_import_policy(&svc, Request::new(explain_request()))
             .await
             .expect("explain succeeds")
-            .into_inner();
-        assert_eq!(resp.matches.len(), 1, "one synthetic match expected");
-        resp.matches[0].outcome
+            .into_inner()
     }
 
     /// Drive `ListRejectedRoutes` against a fake peer manager that
@@ -2585,6 +2600,8 @@ mod tests {
             explain_outcome_for(Some(ImportExplainReply {
                 current_generation: 0,
                 cache_enabled: false,
+                cache_size: 4096,
+                evictions_since_reset: 0,
                 matches: Vec::new(),
             }))
             .await,
@@ -2600,11 +2617,46 @@ mod tests {
             explain_outcome_for(Some(ImportExplainReply {
                 current_generation: 0,
                 cache_enabled: true,
+                cache_size: 4096,
+                evictions_since_reset: 0,
                 matches: Vec::new(),
             }))
             .await,
             proto::ImportExplainOutcome::NotSeen as i32
         );
+    }
+
+    /// The reply carries the cache cap and eviction count only when an
+    /// enabled cache answered; otherwise they are absent, not zero.
+    #[tokio::test]
+    async fn explain_reports_cache_size_and_evictions() {
+        let reply = |cache_enabled| {
+            Some(ImportExplainReply {
+                current_generation: 0,
+                cache_enabled,
+                cache_size: 4096,
+                evictions_since_reset: 995_000,
+                matches: vec![ResolvedMatch {
+                    path_id: 0,
+                    result: LookupResult::Evicted,
+                    statements: Vec::new(),
+                }],
+            })
+        };
+        let resp = explain_response_for(reply(true)).await;
+        assert_eq!(resp.cache_size, Some(4096));
+        assert_eq!(resp.evictions_since_reset, Some(995_000));
+        assert_eq!(
+            resp.matches[0].outcome,
+            proto::ImportExplainOutcome::Evicted as i32
+        );
+
+        let disabled = explain_response_for(reply(false)).await;
+        assert_eq!(disabled.cache_size, None);
+        assert_eq!(disabled.evictions_since_reset, None);
+        let gone = explain_response_for(None).await;
+        assert_eq!(gone.cache_size, None);
+        assert_eq!(gone.evictions_since_reset, None);
     }
 
     #[tokio::test]

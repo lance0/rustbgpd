@@ -1367,7 +1367,10 @@ modifications applied. A Deny names its configured denying member; a Permit
 after a nonempty chain uses `chain_default_permit`, while an absent or empty
 chain stays inline. Compare a match's
 `policy_generation` to the response's `current_policy_generation` to spot a
-`STALE` decision recorded before a policy reload.
+`STALE` decision recorded before a policy reload. When an enabled cache
+answered, the response also carries `cache_size` and `evictions_since_reset`
+(absent from older daemons). An evicted prefix answers `EVICTED`, not
+`NOT_SEEN`, however many decisions have been evicted.
 
 ### List a peer's rejected routes
 

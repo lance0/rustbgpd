@@ -2210,6 +2210,7 @@ impl PeerSession {
         // / `origin_asn` feed ASPA (per-family) and RPKI (per-prefix)
         // validation below.
         let explain_enabled = self.import_explain_enabled;
+        let explain_evictions_before = self.import_decision_cache.evictions_since_reset();
         let policy_summary =
             PolicyAttrSummary::from_route_attrs(&route_attrs, self.import_needs_as_path_string);
         let cached_policy_context = explain_enabled.then(|| policy_summary.to_cached_context());
@@ -3117,6 +3118,15 @@ impl PeerSession {
         // mixes families); SAFI is unicast on this path. No-op for keys
         // the cache never held; skipped entirely when explain is off.
         if explain_enabled {
+            // Nothing between the snapshot above and here resets the cache.
+            let evictions = self
+                .import_decision_cache
+                .evictions_since_reset()
+                .saturating_sub(explain_evictions_before);
+            if evictions > 0 {
+                self.metrics
+                    .record_import_explain_cache_evictions(&self.peer_label, evictions);
+            }
             for (prefix, path_id) in &withdrawn {
                 let afi = match prefix {
                     Prefix::V4(_) => Afi::Ipv4,

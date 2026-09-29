@@ -239,10 +239,14 @@ above and exits nonzero. `--path-id` narrows to one Add-Path identity.
 global — there is no per-peer or per-group override. At the default
 size retention is **partial-table**: a peer announcing more than 4096
 distinct prefixes keeps the cache saturated, so a query for an
-arbitrary prefix of theirs answers `evicted` rather than a decision.
+arbitrary prefix of theirs answers `evicted` rather than a decision
+(never `not_seen`: every evicted key is remembered until session reset). The
+answer ends with the session's eviction count and `cache_size`.
 Budget roughly
 `peers × (154 KiB + min(cache_size, prefixes per peer) × 587 B)`,
-and raise `cache_size` toward a peer's retained-prefix count when you
+plus about 19 B per evicted key (27–34 B with a nonzero Add-Path
+identifier), capped at 2,097,152 keys per session (about 38 MB, or up to
+about 72 MB for nonzero Add-Path identifiers), and raise `cache_size` toward a peer's retained-prefix count when you
 need full-table answers.
 Details:
 [CONFIGURATION.md](../reference/configuration.md#import-decision-explain-policyexplain)

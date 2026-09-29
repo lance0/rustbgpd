@@ -24,14 +24,25 @@
 //!
 //! Bound: per-peer LRU cap configured via `[policy.explain] cache_size`
 //! ([`DEFAULT_EXPLAIN_CACHE_SIZE`] = 4096). When the cap
-//! is reached, the least-recently-touched entry is pushed out; its key
-//! is recorded in a small lossy recent-eviction ring so a subsequent
-//! lookup returns `Evicted` rather than misleading `NotSeen`. The ring
-//! is false-positive-only — a stale eviction record cannot mask a
-//! genuine entry because every write refreshes the LRU position and
-//! takes precedence over the ring.
+//! is reached, the least-recently-touched entry is pushed out and its key
+//! is remembered as a 64-bit fingerprint, so a later lookup returns
+//! `Evicted` rather than a misleading `NotSeen` however many keys have
+//! been evicted since the session came up. A write for the key removes
+//! its fingerprint, and a live entry always takes precedence. The only
+//! error is a 64-bit fingerprint collision between two keys, which can
+//! answer `Evicted` for an unseen key or, once the colliding key is
+//! re-announced, `NotSeen` for an evicted one; across `n` evicted keys a
+//! collision has probability about `n² / 2^65`.
+//!
+//! The fingerprint memory is capped at [`EVICTED_KEY_LIMIT`] keys (see
+//! that constant for its measured cost). Past the cap no new fingerprint is
+//! stored and every unknown key answers `Evicted`: the cache can no longer
+//! prove a key was never seen, so it never claims so.
 
-use std::collections::VecDeque;
+use std::cmp::Ordering;
+use std::collections::BTreeSet;
+use std::collections::hash_map::RandomState;
+use std::hash::BuildHasher;
 use std::net::IpAddr;
 use std::num::NonZeroUsize;
 use std::sync::Arc;
@@ -42,6 +53,7 @@ use rustbgpd_policy::{PolicyAction, RouteModifications, StatementAttribution};
 use rustbgpd_wire::{
     Afi, AspaValidation, ExtendedCommunity, LargeCommunity, Prefix, RpkiValidation, Safi,
 };
+use rustc_hash::FxHashSet;
 
 /// Default per-peer cap. Per ADR-0073 this is a deliberate fabric /
 /// partial-table starter size (hundreds–low-thousands of prefixes fully
@@ -51,10 +63,13 @@ use rustbgpd_wire::{
 /// toward their expected retained-prefix count and own the memory.
 pub const DEFAULT_EXPLAIN_CACHE_SIZE: usize = 4096;
 
-/// Bound for the recent-eviction tracker. Small fixed cap — its job is
-/// to distinguish "evicted" from "never seen" for entries that just
-/// fell out of LRU, not to be an exhaustive eviction log.
-const EVICTION_TRACKER_CAPACITY: usize = 512;
+/// Cap on remembered evicted keys per session. It covers a full
+/// dual-stack table plus churn; a peer cycling through distinct prefixes
+/// cannot grow the memory past it. Allocator-counted requested bytes:
+/// 18.9 MB for 1M evicted `path_id` 0 keys and 37.8 MB at the cap; 27–34 B
+/// per nonzero Add-Path key (ordered so an all-paths lookup can enumerate
+/// them), up to 72 MB at the cap.
+pub const EVICTED_KEY_LIMIT: usize = 1 << 21;
 
 /// Identity of a cached import decision.
 ///
@@ -198,7 +213,7 @@ pub struct ResolvedMatch {
 /// staleness is internally consistent with it.
 ///
 /// `matches` is empty only when the prefix was never seen on this
-/// session and no eviction record survives — the caller renders that
+/// session (or its only record is a fingerprint collision) — the caller renders that
 /// as a single synthetic `NOT_SEEN` when `cache_enabled` is set, or
 /// as `CACHE_DISABLED` when it is not (a disabled cache records
 /// nothing, so an empty match set says nothing about the prefix).
@@ -210,6 +225,11 @@ pub struct ImportExplainReply {
     /// `false` means the empty cache is a configuration fact, not an
     /// evaluated "never seen" answer (LAN-320).
     pub cache_enabled: bool,
+    /// The session's configured entry cap (`[policy.explain] cache_size`).
+    pub cache_size: usize,
+    /// Decisions evicted by that cap since the last session reset. Zero
+    /// means every decision recorded on this session is still cached.
+    pub evictions_since_reset: u64,
     pub matches: Vec<ResolvedMatch>,
 }
 
@@ -229,16 +249,143 @@ pub struct ImportDecisionCache {
     /// inserts. Deferring the build keeps a disabled session (and an
     /// enabled one that has not yet seen an UPDATE) allocation-free.
     entries: Option<LruCache<ImportDecisionKey, CachedDecision>>,
-    /// FIFO of recently-evicted keys. False-positive-only by
-    /// construction: every `insert` for a key clears it from this ring
-    /// before recording the new entry, so the ring can never mask a
-    /// genuine live entry.
-    ///
-    /// Allocated in lockstep with `entries` — see [`Self::storage`] —
-    /// at its full [`EVICTION_TRACKER_CAPACITY`], never grown
-    /// incrementally. An enabled cache therefore has exactly the ring
-    /// it always had by the time any eviction can occur.
-    recently_evicted: VecDeque<ImportDecisionKey>,
+    /// Every key evicted from `entries` since the last reset and not
+    /// written again. Grows on demand; empty until the first eviction.
+    evicted: EvictedKeys,
+    /// LRU evictions since the last reset, reported on the explain reply.
+    evictions_since_reset: u64,
+}
+
+/// Fingerprints of evicted keys, split so the common case stays one
+/// `u64` per key: a session without Add-Path receive only ever uses
+/// `path_id` 0.
+#[derive(Debug, Default)]
+struct EvictedKeys {
+    /// Per-cache random keys, so a peer cannot choose prefixes whose
+    /// fingerprints collide.
+    state: RandomState,
+    /// `(afi, safi, prefix)` fingerprints whose `path_id` 0 entry was evicted.
+    default_path: FxHashSet<u64>,
+    /// Evicted nonzero Add-Path keys, ordered so each prefix's paths are
+    /// one range an all-paths lookup can enumerate. Every operation is
+    /// logarithmic, however many path identifiers one prefix cycles through.
+    add_path: BTreeSet<AddPathKey>,
+    len: usize,
+    /// Set once `len` reached [`EVICTED_KEY_LIMIT`]; every unknown key
+    /// then answers `Evicted`.
+    overflowed: bool,
+}
+
+/// An evicted nonzero Add-Path key: `(afi, safi, prefix)` fingerprint, then
+/// path identifier.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct AddPathKey {
+    prefix: u64,
+    path_id: u32,
+}
+
+impl Ord for AddPathKey {
+    fn cmp(&self, other: &Self) -> Ordering {
+        #[cfg(test)]
+        ADD_PATH_COMPARISONS.with(|count| count.set(count.get() + 1));
+        (self.prefix, self.path_id).cmp(&(other.prefix, other.path_id))
+    }
+}
+
+impl PartialOrd for AddPathKey {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    /// `AddPathKey` comparisons on this thread, so a test can bound the
+    /// work without timing it.
+    static ADD_PATH_COMPARISONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+impl EvictedKeys {
+    fn fingerprint(&self, afi: Afi, safi: Safi, prefix: &Prefix) -> u64 {
+        self.state.hash_one((afi, safi, prefix))
+    }
+
+    fn insert(&mut self, key: &ImportDecisionKey) {
+        if self.len >= EVICTED_KEY_LIMIT {
+            self.overflowed = true;
+            return;
+        }
+        let fp = self.fingerprint(key.afi, key.safi, &key.prefix);
+        let added = if key.path_id == 0 {
+            self.default_path.insert(fp)
+        } else {
+            self.add_path.insert(AddPathKey {
+                prefix: fp,
+                path_id: key.path_id,
+            })
+        };
+        self.len += usize::from(added);
+    }
+
+    fn remove(&mut self, key: &ImportDecisionKey) {
+        if self.len == 0 {
+            return;
+        }
+        let fp = self.fingerprint(key.afi, key.safi, &key.prefix);
+        let removed = if key.path_id == 0 {
+            self.default_path.remove(&fp)
+        } else {
+            self.add_path.remove(&AddPathKey {
+                prefix: fp,
+                path_id: key.path_id,
+            })
+        };
+        self.len -= usize::from(removed);
+    }
+
+    fn contains(&self, key: &ImportDecisionKey) -> bool {
+        if self.overflowed {
+            return true;
+        }
+        if self.len == 0 {
+            return false;
+        }
+        let fp = self.fingerprint(key.afi, key.safi, &key.prefix);
+        if key.path_id == 0 {
+            self.default_path.contains(&fp)
+        } else {
+            self.add_path.contains(&AddPathKey {
+                prefix: fp,
+                path_id: key.path_id,
+            })
+        }
+    }
+
+    /// Recorded evicted path identifiers for a prefix.
+    fn path_ids(&self, afi: Afi, safi: Safi, prefix: &Prefix) -> Vec<u32> {
+        let mut ids = Vec::new();
+        if self.len > 0 {
+            let fp = self.fingerprint(afi, safi, prefix);
+            if self.default_path.contains(&fp) {
+                ids.push(0);
+            }
+            let first = AddPathKey {
+                prefix: fp,
+                path_id: 1,
+            };
+            let last = AddPathKey {
+                prefix: fp,
+                path_id: u32::MAX,
+            };
+            ids.extend(self.add_path.range(first..=last).map(|k| k.path_id));
+        }
+        ids
+    }
+
+    #[cfg(test)]
+    fn is_unallocated(&self) -> bool {
+        self.default_path.capacity() == 0 && self.add_path.is_empty()
+    }
 }
 
 impl ImportDecisionCache {
@@ -246,18 +393,31 @@ impl ImportDecisionCache {
     /// otherwise nonsensical input is clamped to `1` — the cache is
     /// always at least nominally usable.
     ///
-    /// Allocates nothing: both the LRU and the eviction ring are built
-    /// on first use.
+    /// Allocates nothing: the LRU is built on first use and the evicted-key
+    /// memory on first eviction.
     #[must_use]
     pub fn with_capacity(cap: usize) -> Self {
         Self {
             cap: NonZeroUsize::new(cap.max(1)).expect("clamped to at least 1"),
             entries: None,
-            recently_evicted: VecDeque::new(),
+            evicted: EvictedKeys::default(),
+            evictions_since_reset: 0,
         }
     }
 
-    /// Drop every cached decision and the recent-eviction ring.
+    /// The configured per-session entry cap.
+    #[must_use]
+    pub fn capacity(&self) -> usize {
+        self.cap.get()
+    }
+
+    /// LRU evictions since the session's last reset.
+    #[must_use]
+    pub fn evictions_since_reset(&self) -> u64 {
+        self.evictions_since_reset
+    }
+
+    /// Drop every cached decision and the evicted-key memory.
     ///
     /// Called on session reset (peer flap / `Action::SessionDown`): the
     /// cache is **per-session** diagnostic state, so decisions recorded
@@ -269,44 +429,33 @@ impl ImportDecisionCache {
     ///
     /// Drops the backing allocations too, returning the cache to the
     /// state `with_capacity` left it in — a session that is down holds
-    /// no cache memory, and the next `insert` rebuilds both at their
-    /// full configured sizes.
+    /// no cache memory, and the next `insert` rebuilds the LRU at its
+    /// full configured size.
     pub fn clear(&mut self) {
         self.entries = None;
-        self.recently_evicted = VecDeque::new();
+        self.evicted = EvictedKeys::default();
+        self.evictions_since_reset = 0;
     }
 
-    /// Insert or replace an entry. On capacity overflow the LRU victim
-    /// is recorded in the recent-eviction ring so a subsequent
-    /// `lookup` for it returns `Evicted` rather than `NotSeen`.
-    ///
-    /// If the key was previously in the recent-eviction ring, that
-    /// stale record is dropped so future lookups see the fresh
-    /// decision rather than spuriously reporting `Evicted`.
-    pub fn insert(&mut self, key: ImportDecisionKey, decision: CachedDecision) {
-        self.drop_eviction_record(&key);
-        let evicted = self.storage().push(key, decision);
-        if let Some((victim_key, _)) = evicted {
-            self.record_eviction(victim_key);
-        }
-    }
-
-    /// The backing LRU, built on first write.
-    ///
-    /// Both allocations happen here, together and at their full
-    /// configured sizes, so an enabled cache reaches exactly the shape
-    /// eager construction gave it — only the *moment* moves, from
-    /// session build to the first recorded decision. In particular the
-    /// eviction ring is at `EVICTION_TRACKER_CAPACITY` before the LRU
-    /// can possibly evict anything (that needs `cap` inserts first), so
-    /// eviction behaviour is unchanged.
-    fn storage(&mut self) -> &mut LruCache<ImportDecisionKey, CachedDecision> {
-        if self.entries.is_none() {
-            self.recently_evicted
-                .reserve_exact(EVICTION_TRACKER_CAPACITY);
-        }
+    /// Insert or replace an entry and return whether it evicted another
+    /// key. The LRU victim's key is remembered so a subsequent `lookup`
+    /// for it returns `Evicted` rather than `NotSeen`; a write for a
+    /// previously evicted key forgets that record, so lookups see the
+    /// fresh decision.
+    pub fn insert(&mut self, key: ImportDecisionKey, decision: CachedDecision) -> bool {
+        self.evicted.remove(&key);
         let cap = self.cap;
-        self.entries.get_or_insert_with(|| LruCache::new(cap))
+        let entries = self.entries.get_or_insert_with(|| LruCache::new(cap));
+        // `push` also returns the old pair when it replaces `key` in place.
+        let replaced = key.clone();
+        match entries.push(key, decision) {
+            Some((victim, _)) if victim != replaced => {
+                self.evicted.insert(&victim);
+                self.evictions_since_reset = self.evictions_since_reset.saturating_add(1);
+                true
+            }
+            _ => false,
+        }
     }
 
     /// Tombstone the entry under `key` as `Withdrawn`. No-op when the
@@ -341,7 +490,7 @@ impl ImportDecisionCache {
     pub fn lookup(&self, key: &ImportDecisionKey, current_generation: u64) -> LookupResult {
         if let Some(decision) = self.entries.as_ref().and_then(|e| e.peek(key)) {
             Self::classify(decision.clone(), current_generation)
-        } else if self.recently_evicted.iter().any(|k| k == key) {
+        } else if self.evicted.contains(key) {
             LookupResult::Evicted
         } else {
             LookupResult::NotSeen
@@ -351,8 +500,7 @@ impl ImportDecisionCache {
     /// Resolve every cached path for `(afi, safi, prefix)` — the
     /// Add-Path / "operator omitted `--path-id`" case. Returns one
     /// [`ResolvedMatch`] per live entry, ordered by `path_id` for a
-    /// stable response. When no live entry exists but one or more
-    /// matching keys are in the recent-eviction ring, returns those as
+    /// stable response. Evicted paths for the prefix are returned as
     /// `Evicted` so the operator isn't told `NotSeen` for something
     /// that was real. Empty only when genuinely never-seen.
     #[must_use]
@@ -374,18 +522,18 @@ impl ImportDecisionCache {
                 statements: Vec::new(),
             })
             .collect();
-        if matches.is_empty() {
-            matches.extend(
-                self.recently_evicted
-                    .iter()
-                    .filter(|k| k.afi == afi && k.safi == safi && &k.prefix == prefix)
-                    .map(|k| ResolvedMatch {
-                        path_id: k.path_id,
-                        result: LookupResult::Evicted,
-                        statements: Vec::new(),
-                    }),
-            );
+        // A key is never both live and evicted, so these cannot duplicate
+        // a live path.
+        let mut evicted = self.evicted.path_ids(afi, safi, prefix);
+        if matches.is_empty() && evicted.is_empty() && self.evicted.overflowed {
+            // Past the memory cap the evicted path identifier is unknown.
+            evicted.push(0);
         }
+        matches.extend(evicted.into_iter().map(|path_id| ResolvedMatch {
+            path_id,
+            result: LookupResult::Evicted,
+            statements: Vec::new(),
+        }));
         matches.sort_by_key(|m| m.path_id);
         matches
     }
@@ -413,24 +561,13 @@ impl ImportDecisionCache {
     }
 
     /// Whether the cache is holding zero heap allocation — no LRU index
-    /// and no eviction ring. The structural fact a disabled session
+    /// and no evicted-key memory. The structural fact a disabled session
     /// must satisfy: an occupancy assertion (`lookup` returns
     /// `NotSeen`) is satisfied by an eagerly-allocated empty cache too,
     /// so it cannot pin this.
     #[cfg(test)]
     pub(super) fn is_unallocated(&self) -> bool {
-        self.entries.is_none() && self.recently_evicted.capacity() == 0
-    }
-
-    fn record_eviction(&mut self, key: ImportDecisionKey) {
-        if self.recently_evicted.len() == EVICTION_TRACKER_CAPACITY {
-            self.recently_evicted.pop_front();
-        }
-        self.recently_evicted.push_back(key);
-    }
-
-    fn drop_eviction_record(&mut self, key: &ImportDecisionKey) {
-        self.recently_evicted.retain(|k| k != key);
+        self.entries.is_none() && self.evicted.is_unallocated()
     }
 }
 
@@ -627,7 +764,7 @@ mod tests {
 
     #[test]
     fn reinserting_an_evicted_key_clears_the_eviction_record() {
-        // The eviction ring must be false-positive-only — once the
+        // The evicted-key memory must be cleared on a write — once the
         // operator's peer re-sends the prefix, the cache must report
         // the fresh decision and never spuriously surface Evicted.
         let mut cache = ImportDecisionCache::with_capacity(2);
@@ -728,7 +865,7 @@ mod tests {
         let mut cache = ImportDecisionCache::with_capacity(DEFAULT_EXPLAIN_CACHE_SIZE);
         assert!(
             cache.is_unallocated(),
-            "a cache with no entries must hold no LRU index and no eviction ring",
+            "a cache with no entries must hold no LRU index and no evicted-key memory",
         );
         // Reads must not allocate either.
         let _ = cache.lookup(&key(1, 0), 0);
@@ -752,34 +889,195 @@ mod tests {
         assert!(matches!(cache.lookup(&key(1, 0), 0), LookupResult::NotSeen));
     }
 
+    /// A distinct /32 per index, for pushing a cache far past its cap.
+    fn nth_key(i: u32, path_id: u32) -> ImportDecisionKey {
+        ImportDecisionKey {
+            afi: Afi::Ipv4,
+            safi: Safi::Unicast,
+            prefix: Prefix::V4(Ipv4Prefix::new(Ipv4Addr::from(0x0a00_0000 | i), 32)),
+            path_id,
+        }
+    }
+
+    /// More evictions than the 512-key ring that used to back `Evicted`.
+    const MANY: u32 = 4 + 512 + 64;
+
     #[test]
-    fn enabled_cache_ring_is_full_size_before_any_eviction() {
-        // Deferring construction must not defer the eviction ring into
-        // incremental growth: by the time the LRU can evict anything,
-        // the ring must already be the size eager construction gave it.
+    fn evicted_key_stays_evicted_after_many_evictions() {
         let mut cache = ImportDecisionCache::with_capacity(4);
-        cache.insert(key(1, 0), permit_at(0));
+        for i in 0..MANY {
+            cache.insert(nth_key(i, 0), permit_at(0));
+        }
         assert!(
-            cache.recently_evicted.is_empty(),
-            "no eviction has happened yet",
+            matches!(cache.lookup(&nth_key(0, 0), 0), LookupResult::Evicted),
+            "the first key was announced, then evicted: it must not read as never seen",
         );
-        assert_eq!(
-            cache.recently_evicted.capacity(),
-            EVICTION_TRACKER_CAPACITY,
-            "the ring is allocated in full on the first insert, not grown",
+        assert!(matches!(
+            cache.lookup(&nth_key(MANY, 0), 0),
+            LookupResult::NotSeen
+        ));
+        let evicted = cache.lookup_all_paths(Afi::Ipv4, Safi::Unicast, &nth_key(0, 0).prefix, 0);
+        assert_eq!(evicted.len(), 1);
+        assert_eq!(evicted[0].path_id, 0);
+        assert!(matches!(evicted[0].result, LookupResult::Evicted));
+        assert!(
+            cache
+                .lookup_all_paths(Afi::Ipv4, Safi::Unicast, &nth_key(MANY, 0).prefix, 0)
+                .is_empty()
         );
+        assert_eq!(cache.evictions_since_reset(), u64::from(MANY - 4));
+        assert_eq!(cache.capacity(), 4);
+
+        // Re-announcing clears the evicted record.
+        cache.insert(nth_key(0, 0), deny_at(0));
+        assert!(matches!(
+            cache.lookup(&nth_key(0, 0), 0),
+            LookupResult::Hit(_)
+        ));
+        let live = cache.lookup_all_paths(Afi::Ipv4, Safi::Unicast, &nth_key(0, 0).prefix, 0);
+        assert_eq!(live.len(), 1);
+        assert!(matches!(live[0].result, LookupResult::Hit(_)));
+        // Evicted again, it reads as evicted again.
+        for i in MANY..MANY + 4 {
+            cache.insert(nth_key(i, 0), permit_at(0));
+        }
+        assert!(matches!(
+            cache.lookup(&nth_key(0, 0), 0),
+            LookupResult::Evicted
+        ));
     }
 
     #[test]
-    fn eviction_ring_stays_bounded_at_its_cap() {
-        let mut cache = ImportDecisionCache::with_capacity(1);
-        for i in 0..(EVICTION_TRACKER_CAPACITY + 50) {
-            cache.insert(
-                key(1, u32::try_from(i).expect("loop bound fits u32")),
-                permit_at(0),
-            );
+    fn add_path_evictions_are_exact_per_path_id() {
+        let mut cache = ImportDecisionCache::with_capacity(4);
+        for path_id in 1..=3 {
+            cache.insert(nth_key(0, path_id), permit_at(0));
         }
-        assert_eq!(cache.recently_evicted.len(), EVICTION_TRACKER_CAPACITY);
-        assert_eq!(cache.recently_evicted.capacity(), EVICTION_TRACKER_CAPACITY);
+        for i in 1..MANY {
+            cache.insert(nth_key(i, 1), permit_at(0));
+        }
+        let prefix = nth_key(0, 0).prefix;
+        assert!(matches!(
+            cache.lookup(&nth_key(0, 2), 0),
+            LookupResult::Evicted
+        ));
+        assert!(matches!(
+            cache.lookup(&nth_key(0, 9), 0),
+            LookupResult::NotSeen
+        ));
+        assert!(matches!(
+            cache.lookup(&nth_key(0, 0), 0),
+            LookupResult::NotSeen
+        ));
+        let evicted = cache.lookup_all_paths(Afi::Ipv4, Safi::Unicast, &prefix, 0);
+        assert_eq!(
+            evicted.iter().map(|m| m.path_id).collect::<Vec<_>>(),
+            vec![1, 2, 3]
+        );
+        assert!(
+            evicted
+                .iter()
+                .all(|m| matches!(m.result, LookupResult::Evicted))
+        );
+
+        // Re-announcing one path clears only that path; the all-paths
+        // answer lists it live beside its still-evicted siblings.
+        cache.insert(nth_key(0, 2), permit_at(0));
+        let mixed = cache.lookup_all_paths(Afi::Ipv4, Safi::Unicast, &prefix, 0);
+        assert_eq!(
+            mixed.iter().map(|m| m.path_id).collect::<Vec<_>>(),
+            vec![1, 2, 3]
+        );
+        assert!(matches!(mixed[0].result, LookupResult::Evicted));
+        assert!(matches!(mixed[1].result, LookupResult::Hit(_)));
+        assert!(matches!(mixed[2].result, LookupResult::Evicted));
+    }
+
+    #[test]
+    fn cycling_add_path_ids_on_one_prefix_stays_logarithmic() {
+        // Add-Path receive is unlimited by default and decisions are
+        // recorded before admission, so one prefix can cycle through any
+        // number of path identifiers. Each evict, re-announce and lookup
+        // must stay logarithmic in that number, not linear.
+        const PATHS: u32 = 20_000;
+        let mut cache = ImportDecisionCache::with_capacity(1);
+        ADD_PATH_COMPARISONS.with(|count| count.set(0));
+        for path_id in 1..=PATHS {
+            cache.insert(nth_key(0, path_id), permit_at(0)); // evicts path_id - 1
+        }
+        for path_id in 1..PATHS {
+            assert!(matches!(
+                cache.lookup(&nth_key(0, path_id), 0),
+                LookupResult::Evicted
+            ));
+        }
+        for path_id in 1..PATHS {
+            cache.insert(nth_key(0, path_id), permit_at(0)); // clears its record
+        }
+        let comparisons = ADD_PATH_COMPARISONS.with(std::cell::Cell::get);
+        let operations = 4 * PATHS as usize;
+        // Measured at about 32 comparisons per operation; a per-prefix list would
+        // need about PATHS² / 2 comparisons in total.
+        assert!(
+            comparisons < operations * 64,
+            "{comparisons} comparisons for {operations} operations",
+        );
+        // Re-announcing in order evicts each predecessor again.
+        assert_eq!(cache.evicted.add_path.len(), PATHS as usize - 1);
+        assert!(matches!(
+            cache.lookup(&nth_key(0, PATHS - 1), 0),
+            LookupResult::Hit(_)
+        ));
+    }
+
+    #[test]
+    fn replacing_a_live_entry_is_not_an_eviction() {
+        let mut cache = ImportDecisionCache::with_capacity(1);
+        assert!(!cache.insert(key(1, 0), permit_at(0)));
+        assert!(!cache.insert(key(1, 0), deny_at(0)));
+        assert_eq!(cache.evictions_since_reset(), 0);
+        assert!(matches!(cache.lookup(&key(1, 0), 0), LookupResult::Hit(_)));
+        assert!(cache.insert(key(2, 0), permit_at(0)));
+        assert_eq!(cache.evictions_since_reset(), 1);
+    }
+
+    #[test]
+    fn clear_forgets_evictions() {
+        let mut cache = ImportDecisionCache::with_capacity(1);
+        cache.insert(key(1, 0), permit_at(0));
+        cache.insert(key(2, 0), permit_at(0));
+        assert!(matches!(cache.lookup(&key(1, 0), 0), LookupResult::Evicted));
+        cache.clear();
+        assert!(cache.is_unallocated());
+        assert_eq!(cache.evictions_since_reset(), 0);
+        assert!(matches!(cache.lookup(&key(1, 0), 0), LookupResult::NotSeen));
+    }
+
+    #[test]
+    fn evicted_memory_past_its_limit_never_claims_not_seen() {
+        let mut cache = ImportDecisionCache::with_capacity(1);
+        cache.insert(key(1, 0), permit_at(0));
+        cache.insert(key(2, 0), permit_at(0)); // evicts key(1)
+        // Stand in for EVICTED_KEY_LIMIT real evictions.
+        cache.evicted.len = EVICTED_KEY_LIMIT;
+        cache.insert(key(3, 0), permit_at(0)); // evicts key(2), unrecorded
+        assert!(cache.evicted.overflowed);
+        assert!(matches!(cache.lookup(&key(2, 0), 0), LookupResult::Evicted));
+        assert!(
+            matches!(cache.lookup(&key(99, 0), 0), LookupResult::Evicted),
+            "past the limit an unknown key may have been evicted",
+        );
+        let unknown = cache.lookup_all_paths(Afi::Ipv4, Safi::Unicast, &key(99, 0).prefix, 0);
+        assert_eq!(unknown.len(), 1);
+        assert!(matches!(unknown[0].result, LookupResult::Evicted));
+        assert!(matches!(cache.lookup(&key(3, 0), 0), LookupResult::Hit(_)));
+        let live = cache.lookup_all_paths(Afi::Ipv4, Safi::Unicast, &key(3, 0).prefix, 0);
+        assert_eq!(live.len(), 1, "a live path is not also reported evicted");
+        assert!(matches!(live[0].result, LookupResult::Hit(_)));
+        cache.clear();
+        assert!(matches!(
+            cache.lookup(&key(99, 0), 0),
+            LookupResult::NotSeen
+        ));
     }
 }

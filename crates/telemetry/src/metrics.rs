@@ -509,6 +509,7 @@ struct BgpMetricsInner {
     bmp_stream_diverged: IntGaugeVec,
     rejected_routes_retained: IntGaugeVec,
     rejected_route_retention_evictions: IntCounterVec,
+    import_explain_cache_evictions: IntCounterVec,
     rfc8212_missing_import_policy: IntGaugeVec,
     rfc8212_missing_export_policy: IntGaugeVec,
 
@@ -1092,6 +1093,15 @@ impl BgpMetrics {
             Opts::new(
                 "bgp_rejected_route_retention_evictions_total",
                 "Rejected inbound routes displaced from the bounded retention store, per peer.",
+            ),
+            &["peer"],
+        )
+        .expect("valid metric definition");
+
+        let import_explain_cache_evictions = IntCounterVec::new(
+            Opts::new(
+                "bgp_import_explain_cache_evictions_total",
+                "Import-policy decisions evicted from the bounded explain cache, per peer.",
             ),
             &["peer"],
         )
@@ -2768,6 +2778,9 @@ impl BgpMetrics {
             .register(Box::new(rejected_route_retention_evictions.clone()))
             .expect("metric not already registered");
         registry
+            .register(Box::new(import_explain_cache_evictions.clone()))
+            .expect("metric not already registered");
+        registry
             .register(Box::new(rfc8212_missing_import_policy.clone()))
             .expect("metric not already registered");
         registry
@@ -3332,6 +3345,7 @@ impl BgpMetrics {
             bmp_stream_diverged,
             rejected_routes_retained,
             rejected_route_retention_evictions,
+            import_explain_cache_evictions,
             rfc8212_missing_import_policy,
             rfc8212_missing_export_policy,
             rib_prefixes,
@@ -3631,6 +3645,7 @@ impl BgpMetrics {
         Self::reap_peer_series_from_vec(&self.0.bmp_stream_diverged, peer);
         Self::reap_peer_series_from_vec(&self.0.rejected_routes_retained, peer);
         Self::reap_peer_series_from_vec(&self.0.rejected_route_retention_evictions, peer);
+        Self::reap_peer_series_from_vec(&self.0.import_explain_cache_evictions, peer);
         Self::reap_peer_series_from_vec(&self.0.rfc8212_missing_import_policy, peer);
         Self::reap_peer_series_from_vec(&self.0.rfc8212_missing_export_policy, peer);
         Self::reap_peer_series_from_vec(&self.0.peer_update_group, peer);
@@ -4269,6 +4284,23 @@ impl BgpMetrics {
     pub fn rejected_route_retention_evictions(&self, peer: &str) -> u64 {
         self.0
             .rejected_route_retention_evictions
+            .with_label_values(&[peer])
+            .get()
+    }
+
+    /// Record `count` decisions evicted from a peer's import explain cache.
+    pub fn record_import_explain_cache_evictions(&self, peer: &str, count: u64) {
+        self.0
+            .import_explain_cache_evictions
+            .with_label_values(&[peer])
+            .inc_by(count);
+    }
+
+    /// Read a peer's cumulative import explain cache eviction counter.
+    #[must_use]
+    pub fn import_explain_cache_evictions(&self, peer: &str) -> u64 {
+        self.0
+            .import_explain_cache_evictions
             .with_label_values(&[peer])
             .get()
     }
@@ -9093,6 +9125,7 @@ mod tests {
         m.set_bmp_stream_diverged(peer, true);
         m.set_rejected_routes_retained(peer, 4);
         m.record_rejected_route_eviction(peer);
+        m.record_import_explain_cache_evictions(peer, 1);
         m.set_rfc8212_missing_policy(peer, true, true);
         m.set_peer_update_group(peer, 1);
         m.set_max_prefix_capacity(peer, "aggregate", 80, Some(100));
@@ -9172,10 +9205,10 @@ mod tests {
         let m = BgpMetrics::new();
         populate_all_peer_families(&m, "10.0.0.1");
         populate_all_peer_families(&m, "10.0.0.2");
-        // 73 peer-labeled series; state transitions and EVPN discard types
+        // 74 peer-labeled series; state transitions and EVPN discard types
         // hold two each, while exact
         // state and down-reason vocabularies materialize six rows each.
-        assert_eq!(series_for_peer(&m, "10.0.0.1").len(), 73);
+        assert_eq!(series_for_peer(&m, "10.0.0.1").len(), 74);
 
         m.reap_peer_series("10.0.0.1");
 
@@ -9185,7 +9218,7 @@ mod tests {
             "peer-labeled families not reaped: {leftovers:?}"
         );
         // The other peer's series are untouched.
-        assert_eq!(series_for_peer(&m, "10.0.0.2").len(), 73);
+        assert_eq!(series_for_peer(&m, "10.0.0.2").len(), 74);
     }
 
     /// Load-bearing finite/unlimited proof: removing either finite gauge
@@ -9454,7 +9487,7 @@ mod tests {
     // `gather()`, so no runtime check can catch one that is added and
     // left unpopulated; this list plus the struct doc comment is the
     // practical ceiling.
-    const PEER_LABELED_FAMILIES: [&str; 61] = [
+    const PEER_LABELED_FAMILIES: [&str; 62] = [
         "bfd_session_flaps_total",
         "bfd_session_up",
         "bgp_as_path_loop_detected_total",
@@ -9467,6 +9500,7 @@ mod tests {
         "bgp_gr_stale_routes",
         "bgp_gr_timer_expired_total",
         "bgp_hold_timer_rearmed_pending_input_total",
+        "bgp_import_explain_cache_evictions_total",
         "bgp_inbound_rib_backpressure_total",
         "bgp_max_prefix_exceeded_total",
         "bgp_max_prefix_headroom",
