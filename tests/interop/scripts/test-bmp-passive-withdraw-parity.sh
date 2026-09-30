@@ -25,7 +25,26 @@ cleanup_capture() {
         docker rm -f "$CAP" >/dev/null 2>&1 || true
     fi
 }
-trap cleanup_capture EXIT
+on_exit() {
+    local status=$?
+    cleanup_capture
+    set +e  # Feed the original status to test-lib's cleanup handler.
+    (exit "$status")
+    _cleanup_on_exit
+    exit "$status"
+}
+trap on_exit EXIT
+
+if [ "${1:-}" = --self-test-cleanup ]; then
+    CAP_CREATED=1
+    case ${2:-} in
+        success) exit 0 ;;
+        failure) exit 7 ;;
+        signal) kill -TERM "$$" ;;
+        *) exit 2 ;;
+    esac
+fi
+command -v tshark >/dev/null || { echo 'ERROR: host tshark is required' >&2; exit 1; }
 
 peer_established() {
     docker exec "$1" gobgp neighbor "$2" 2>/dev/null | grep -qi 'establ'
