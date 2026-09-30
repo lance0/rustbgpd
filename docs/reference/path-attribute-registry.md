@@ -13,7 +13,7 @@ codec claim.
 - CSV: `https://www.iana.org/assignments/bgp-parameters/bgp-parameters-2.csv`
 - Registry snapshot: 2026-09-22 (live-verified 2026-09-22)
 - SHA-256: `b04771e1948af2e2682bae76ecff9b957c7c4ccc93e32b31efcec086281005a0`
-- Normative anchors: [RFC 4271 §§4.3, 5](https://www.rfc-editor.org/rfc/rfc4271), [RFC 7606 §§2, 3, 5.2, 7.1-7.10, 7.16](https://www.rfc-editor.org/rfc/rfc7606), [RFC 9012 §§2, 13](https://www.rfc-editor.org/rfc/rfc9012), [RFC 6368 §5](https://www.rfc-editor.org/rfc/rfc6368), [RFC 9234 §5](https://www.rfc-editor.org/rfc/rfc9234), [RFC 7311](https://www.rfc-editor.org/rfc/rfc7311), [RFC 9552](https://www.rfc-editor.org/rfc/rfc9552), and [RFC 8669 §3](https://www.rfc-editor.org/rfc/rfc8669).
+- Normative anchors: [RFC 4271 §§4.3, 5](https://www.rfc-editor.org/rfc/rfc4271), [RFC 7606 §§2, 3, 5.2, 7.1-7.10, 7.16](https://www.rfc-editor.org/rfc/rfc7606), [RFC 9012 §§2, 11, 13](https://www.rfc-editor.org/rfc/rfc9012), [RFC 6368 §5](https://www.rfc-editor.org/rfc/rfc6368), [RFC 9234 §5](https://www.rfc-editor.org/rfc/rfc9234), [RFC 7311](https://www.rfc-editor.org/rfc/rfc7311), [RFC 9552](https://www.rfc-editor.org/rfc/rfc9552), and [RFC 8669 §3](https://www.rfc-editor.org/rfc/rfc8669).
 
 Manual live comparison (never run by normal CI): download the CSV with
 `curl -fsSL https://www.iana.org/assignments/bgp-parameters/bgp-parameters-2.csv -o /tmp/bgp-parameters-2.csv`, run
@@ -53,7 +53,7 @@ octet from 0 through 255 to appear exactly once with no blank cell.
 | 20 | Connector Attribute (deprecated) | pending follow-up audit | pending follow-up audit | IANA CSV digest above |
 | 21 | AS_PATHLIMIT (deprecated) | pending follow-up audit | pending follow-up audit | IANA CSV digest above |
 | 22 | PMSI_TUNNEL | optional transitive; flags `0xc0`; RFC 6514 §5 / RFC 7385 | typed canonical + Partial round-trip; Extended Length and reserved low bits canonicalize; malformed tunnel type or identifier is treat-as-withdraw | typed-Partial and PMSI tunnel-type matrices |
-| 23 | Tunnel Encapsulation | optional transitive; flags `0xc0`; RFC 9012 | opaque retention with exact Tunnel TLV and variable-width sub-TLV framing; malformed framing or class is treat-as-withdraw | assigned class and framing matrices below |
+| 23 | Tunnel Encapsulation | optional transitive; flags `0xc0`; RFC 9012 §§2, 11, 13 | framing-only opaque transit with exact Tunnel TLV and variable-width sub-TLV framing; malformed framing or class is treat-as-withdraw; no tunnel endpoint or selection semantics | assigned class and framing matrices; encapsulation boundary below |
 | 24 | Traffic Engineering | optional non-transitive; flags `0x80`; RFC 5543 §3 / RFC 7606 §7.13 | payload semantics unsupported; correct class ignored and never emitted; class or Partial conflict is treat-as-withdraw | assigned-class matrix below |
 | 25 | IPv6 Address Specific Extended Community | optional transitive; flags `0xc0`; values are non-empty multiples of 20 octets; RFC 5701 §2 / RFC 7606 §7.15 | opaque retention with Partial on egress; zero or non-multiple-of-20 length and class conflicts are treat-as-withdraw | assigned-class and IPv6-community length matrices below |
 | 26 | AIGP | optional non-transitive; flags `0x80`; RFC 7311 §3 | payload semantics unsupported; correct class ignored; Transitive-set conflicts are attribute-discard, other class conflicts are treat-as-withdraw | assigned-class matrix below |
@@ -69,7 +69,7 @@ octet from 0 through 255 to appear exactly once with no blank cell.
 | 36 | BGP Domain Path (D-PATH) | optional transitive; flags `0xc0`; RFC 10039 §§4, 11 restrict supporting speakers to IPVPN (SAFI 128) and EVPN (SAFI 70) | framing-only opaque transit on all families; malformed framing is treat-as-withdraw; no interworking semantics | assigned framing matrix and D-PATH boundary below |
 | 37 | SFP attribute | optional transitive; flags `0xc0`; RFC 9015 §3.2.1 | opaque retention with TLV, Hop, and Hop sub-TLV framing; malformed is treat-as-withdraw | assigned framing matrix below |
 | 38 | BFD Discriminator | optional transitive; flags `0xc0`; RFC 9026 §3.1.6 | opaque retention with base and Source-IP TLV framing; malformed is attribute-discard | assigned framing matrix below |
-| 39 | Next Hop Dependent Characteristic (NHC) | optional transitive; flags `0xc0`; draft-ietf-idr-nhc-07 | opaque retention with next-hop and characteristic-TLV framing; malformed or empty characteristics is attribute-discard | assigned framing matrix below |
+| 39 | Next Hop Dependent Characteristic (NHC) | optional transitive; flags `0xc0`; draft-ietf-idr-nhc-07 §§1.2, 2.2 (work in progress) | framing-only opaque transit, including across next-hop rewrites; malformed or empty characteristics is attribute-discard; no NHC semantics | assigned framing matrix; NHC boundary below |
 | 40 | BGP Prefix-SID | optional transitive; flags `0xc0`; RFC 8669 §§3, 6 | opaque retention with complete TLV framing and known-length checks; generic malformed is attribute-discard, recognized SRv6 Service malformation is treat-as-withdraw | assigned framing matrix below |
 | 41 | BIER | optional transitive; flags `0xc0`; RFC 9793 §§3-4 | opaque retention with exact TLV/sub-TLV length-boundary framing; boundary failure is attribute-discard | assigned framing matrix below |
 | 42 | Edge Metadata Path Attribute (TEMPORARY - registered 2025-04-23, extension registered 2026-04-03, expires 2027-04-23) | optional non-transitive; flags `0x80`; draft-ietf-idr-5g-edge-service-metadata-27 | payload unsupported; correct class ignored and never emitted; every class or Partial conflict is treat-as-withdraw | assigned framing matrix below |
@@ -101,6 +101,49 @@ boundary rather than claiming D-PATH semantic support from framing checks alone.
 `domain_path_remains_opaque_on_vpn_and_evpn_routes` checks transport retention.
 The existing `assigned_opaque_attributes_reach_rib_while_edge_metadata_is_absent`
 test also verifies unicast re-advertisement bytes and Partial.
+
+### NHC boundary
+
+NHC (39) has unsupported payload semantics. rustbgpd validates its next-hop
+and characteristic-TLV framing, retains a valid payload, and re-advertises it
+with Partial set. Import and export next-hop rewrites leave that opaque payload
+unchanged; rustbgpd does not construct characteristics, compare the encoded
+next hop with the route's next hop, or rebuild the NHC header.
+
+[draft-ietf-idr-nhc-07 §1.2](https://datatracker.ietf.org/doc/html/draft-ietf-idr-nhc-07#section-1.2)
+limits requirements for supporting speakers to implementations that support and
+enable the specification.
+[§2.2](https://datatracker.ietf.org/doc/html/draft-ietf-idr-nhc-07#section-2.2)
+explicitly describes unsupported speakers propagating opaque NHC without
+updating it. A supporting receiver applies the encoded-next-hop comparison in
+[§2.3](https://datatracker.ietf.org/doc/html/draft-ietf-idr-nhc-07#section-2.3)
+before using it. Framing validation is not NHC semantic support. This is an
+Internet-Draft, not a published RFC. The existing
+`assigned_opaque_attributes_reach_rib_while_edge_metadata_is_absent` test checks
+NHC payload retention and Partial on unicast re-advertisement.
+
+### Encapsulation boundary
+
+Tunnel Encapsulation (23) remains framing-validated opaque transit. rustbgpd
+does not interpret its tunnel endpoints or select tunnels from its TLVs.
+[RFC 9012 §11](https://www.rfc-editor.org/rfc/rfc9012.html#section-11) describes
+transit through speakers that do not recognize it and requires default eBGP
+ingress and egress filtering by speakers that understand it.
+
+The Encapsulation Extended Community (type `0x03`, subtype `0x0c`, carried in
+attribute 16) is different: rustbgpd originates VXLAN values and interprets
+received tunnel types for local EVPN eligibility. It retains this transitive
+community across eBGP without default ingress or egress filtering. That is an
+explicit compatibility exception for the current [alpha EVPN profile](stability.md),
+whose deployment boundary is an operator-controlled administrative domain.
+rustbgpd does not enforce that boundary with a default filter or provide a
+dedicated same-domain permission control, and does not claim RFC 9012 §11
+conformance for the community.
+[RFC 8365 §5.1.3](https://www.rfc-editor.org/rfc/rfc8365.html#section-5.1.3)
+requires encapsulation signaling for EVPN overlays; it does not exempt the
+community from RFC 9012's filtering obligation. See the
+[RFC notes](rfc-notes.md#rfc-9012--rfc-8365--bgp-encapsulation-ext-community--vxlan-evpn)
+for the compatibility implications.
 
 ## Executable RFC 7606 core matrix
 
