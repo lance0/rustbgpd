@@ -642,11 +642,17 @@ class ClassifierFixtures(unittest.TestCase):
                     env={**os.environ, "GEN_DUALSTACK": "0", "RELOADSTALL_DUALSTACK": "0"},
                 )
                 self.assertEqual(result.returncode, expected_rc, result.stderr)
-        result = subprocess.run(
-            [sys.executable, "-c", python, *valid], capture_output=True, text=True,
-            env={**os.environ, "GEN_DUALSTACK": "1"},
-        )
-        self.assertNotEqual(result.returncode, 0)
+        for mode, args in (("held", valid),
+                           ("reload", ["8", "400000", "true", "4096", "4", "30"])):
+            for generator, harness in (("1", "0"), ("0", "1"), ("1", "1")):
+                with self.subTest(mode=mode, generator=generator, harness=harness):
+                    result = subprocess.run(
+                        [sys.executable, "-c", python, *args], capture_output=True, text=True,
+                        env={**os.environ, "GEN_DUALSTACK": generator,
+                             "RELOADSTALL_DUALSTACK": harness},
+                    )
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn("unsupported by the IPv4 explain qualification", result.stderr)
 
     def test_explain_variant_matches_the_emitted_convergence_marker(self) -> None:
         _, script = runner_script()

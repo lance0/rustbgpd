@@ -66,10 +66,9 @@ if reloads > 0xFFFFFFFF:
     raise SystemExit("RELOADS must fit u32")
 if not 0 <= control <= 0xFFFFFFFF or (reloads == 0 and control == 0):
     raise SystemExit("CONTROL_SECS must fit u32 and be positive with RELOADS=0")
-if reloads == 0:
-    for name in ("GEN_DUALSTACK", "RELOADSTALL_DUALSTACK"):
-        if os.environ.get(name, "0") != "0":
-            raise SystemExit(f"{name} is unsupported by the IPv4 explain qualification")
+for name in ("GEN_DUALSTACK", "RELOADSTALL_DUALSTACK"):
+    if os.environ.get(name, "0") != "0":
+        raise SystemExit(f"{name} is unsupported by the IPv4 explain qualification")
 PY
 }
 validate_variant_inputs
