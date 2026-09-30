@@ -2915,12 +2915,12 @@ Daemon lifecycle, health checks, and metrics.
 obtained. It does not assert that every BGP session or the dataplane is healthy.
 Failure to obtain the snapshot returns an RPC error, rather than a successful
 `healthy=false` response. When the peer manager or the RIB misses the 200 ms
-core-probe deadline, the error is `UNAVAILABLE`: both actors are alive but
-busy, for example in the short tail of a configuration reload, and a later
-retry may succeed. A closed actor channel, a dropped reply, a stalled
-export-policy transition or selection release, or a daemon-wide fault
-(listener bind failure, shutdown in progress) returns `INTERNAL`. `active_peers` counts only non-stale peers observed
-`Established`; unavailable observations are excluded even if their last known
+core-probe deadline, the error is `UNAVAILABLE`. The miss may be transient, an
+actor busy for example in the short tail of a configuration reload, or
+persistent, a wedged actor; a caller may retry once and should treat a
+repeated miss as a failure. A closed actor channel, a dropped reply, or a
+stalled export-policy transition or selection release returns `INTERNAL`.
+`active_peers` counts only non-stale peers observed `Established`; unavailable observations are excluded even if their last known
 state was `Established`. The count can therefore omit live sessions. Use
 `ListNeighbors` and its `stale` flag to distinguish unavailable state from an
 observed session state.

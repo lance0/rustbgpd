@@ -2675,9 +2675,10 @@ allowance. Long-running config diff and plan, config mutations and streams,
 and live watches keep their existing budgets and lifetimes.
 
 `daemon.healthy` reads `GetHealth`. When the daemon answers `UNAVAILABLE`
-(a core actor missed the 200 ms probe deadline, as happens briefly while a
-reload settles), doctor waits one second and asks once more. A healthy second
-answer is yellow and names the first miss; a second miss is red. Any other
+(a core actor missed the 200 ms probe deadline), doctor waits one second and
+asks once more. The miss may be transient, as briefly while a reload settles,
+or persistent, from a wedged actor. A healthy second answer is yellow and
+names the first miss; a second miss is red. Any other
 error, including doctor's own 30-second response deadline, is red at once
 without a retry, as is a snapshot reporting `healthy=false`.
 

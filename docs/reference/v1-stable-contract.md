@@ -229,8 +229,10 @@ These meanings are part of the inventoried RPC contract:
   every session or the dataplane is healthy. `active_peers` counts only
   non-stale `Established` observations, so an unavailable peer is excluded
   without asserting it is down. Core snapshot failure returns an RPC error:
-  `UNAVAILABLE` when a core actor misses the probe deadline, `INTERNAL` for
-  every other cause.
+  `UNAVAILABLE` when a core actor misses the probe deadline, which may be
+  transient (busy) or persistent (wedged), so a caller may retry once and
+  should treat a repeated miss as a failure; `INTERNAL` for every other
+  cause.
 - `GetPolicyStats`: success means the installed counters were available,
   not that the session command loop is responsive. Peer validation, import
   counters and dataset status are read from the roster the peer manager

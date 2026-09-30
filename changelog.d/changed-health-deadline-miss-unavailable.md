@@ -1,9 +1,11 @@
 ### Changed
 
 - `GetHealth` now fails with `UNAVAILABLE` instead of `INTERNAL` when the
-  peer manager or the RIB misses the 200 ms core-probe deadline. A closed
-  actor channel, a dropped reply, a stalled transition and daemon-wide faults
-  still return `INTERNAL`. `rbgp doctor` retries `GetHealth` once, after one
+  peer manager or the RIB misses the 200 ms core-probe deadline. The miss
+  may be transient (a busy actor, as while a reload settles) or persistent
+  (a wedged actor), so a caller may retry once and should treat a repeated
+  miss as a failure. A closed actor channel, a dropped reply, and a stalled
+  readiness transition or release still return `INTERNAL`. `rbgp doctor` retries `GetHealth` once, after one
   second, on `UNAVAILABLE`: a healthy retry reports `daemon.healthy` as a
   warning that names the first miss, and a second miss is still a failure.
   A single probe miss while a reload settles therefore no longer fails

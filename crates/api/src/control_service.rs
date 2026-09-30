@@ -80,9 +80,11 @@ impl ControlService {
 }
 
 /// `GetHealth` status for a failed core snapshot. A missed probe deadline is
-/// `UNAVAILABLE`: both actors are alive but busy (for example while a reload
-/// settles), so a caller may retry. A closed channel, dropped reply, stalled
-/// transition, or daemon-gate fault stays `INTERNAL`.
+/// `UNAVAILABLE`. The miss may be transient (an actor busy, for example while
+/// a reload settles) or persistent (a wedged actor), so a caller may retry
+/// once and should treat a repeated miss as a failure. A closed actor
+/// channel, a dropped reply, or a stalled export-policy transition or
+/// selection release stays `INTERNAL`.
 fn health_probe_status(error: CoreReadinessError) -> Status {
     match error {
         CoreReadinessError::PeerManagerTimedOut | CoreReadinessError::RibTimedOut => {
