@@ -23,7 +23,8 @@ precommitted gates in docs/soaks/soak-acceptance-gates.md (scenario 10):
   - management-plane load brackets the measured window, retains every
     operation, completes >= 90% of scheduled probes, and records zero
     non-ok results or invalid ok results; a non-ok CLI record's bounded
-    stderr excerpt, when present, is carried into the reported failures
+    stderr excerpt, when present, is carried into the reported failures,
+    as are a nonzero doctor exit's saved report file and red check names
   - management cadence: every missed probe slot falls inside a reload
     window [issued - 2 s, complete + 2 s] from cycles.log and no window
     holds more than 2 missed slots per operation; a miss outside every
@@ -80,6 +81,11 @@ MANAGEMENT_RECORD_LIMIT = 4096
 # Optional on non-ok CLI records only; older evidence without it stays valid.
 # Each retained stderr byte decodes to at most one character.
 MANAGEMENT_STDERR_EXCERPT_LIMIT = 512
+# Optional on nonzero-exit doctor records only: the saved stdout report's file
+# name and the bounded red configuration check names the driver parsed from it.
+DOCTOR_OUTPUT_RE = re.compile(r"^doctor-report-[0-9]{4,}\.json$")
+DOCTOR_FAILED_CHECKS_MAX = 4
+DOCTOR_CHECK_NAME_CHARS = 64
 # A missed management probe slot is tolerated only inside a reload window
 # (cycles.log issued - grace .. complete + grace) and at most this many per
 # window per operation; operator reads get deadlines, not priority over the
@@ -205,6 +211,22 @@ def analyze_management_load(
                          or not isinstance(record["stderr_excerpt"], str)
                          or len(record["stderr_excerpt"])
                          > MANAGEMENT_STDERR_EXCERPT_LIMIT))
+                or ("doctor_output" in record
+                    and (operation != "doctor" or record.get("exit") in (0, None)
+                         or not isinstance(record["doctor_output"], str)
+                         or DOCTOR_OUTPUT_RE.fullmatch(record["doctor_output"])
+                         is None))
+                or ("failed_checks" in record
+                    and (record["result"] != "doctor_check_failed"
+                         or "doctor_output" not in record
+                         or not isinstance(record["failed_checks"], list)
+                         or not 0 < len(record["failed_checks"])
+                         <= DOCTOR_FAILED_CHECKS_MAX
+                         or not all(
+                             isinstance(name, str)
+                             and 0 < len(name) <= DOCTOR_CHECK_NAME_CHARS
+                             for name in record["failed_checks"]
+                         )))
             ):
                 schema_errors.append(
                     f"line {line_number}: invalid bounded operation record"
@@ -217,8 +239,9 @@ def analyze_management_load(
                     "result": record["result"],
                     "exit": record.get("exit"),
                 }
-                if "stderr_excerpt" in record:
-                    failure["stderr_excerpt"] = record["stderr_excerpt"]
+                for field in ("stderr_excerpt", "doctor_output", "failed_checks"):
+                    if field in record:
+                        failure[field] = record[field]
                 failures.append(failure)
             elif operation == "metrics" and record.get("exit") != 200:
                 failures.append({
@@ -522,8 +545,9 @@ def analyze_management_load(
         # here as the driver's `doctor_check_failed` result: the driver runs
         # `rbgp --json doctor`, accepts its documented exit 2 ("bundle
         # written, at least one check red") as a report rather than a CLI
-        # failure, and classifies the parsed report before discarding it, so
-        # nothing but the verdict is retained. Per-peer session checks are
+        # failure, and classifies the parsed report. A nonzero exit also saves
+        # that report beside the evidence, and the failure names the file and
+        # the red configuration checks. Per-peer session checks are
         # excluded there — the scenario trips the designated member on
         # purpose, and the session/flap/trip gates above measure peer health
         # exactly. This gate is the configuration verdict.

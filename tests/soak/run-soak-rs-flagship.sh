@@ -33,6 +33,7 @@
 #   - management-plane-load.jsonl  bounded HTTP/CLI load evidence
 #   - management-plane-load.log    load-driver stdout/stderr
 #   - doctor-bundle.tar.gz         latest `rbgp doctor` support bundle
+#   - doctor-report-NNNN.json      `rbgp --json doctor` report of each nonzero exit
 #   - metrics-snapshots.txt.gz     full /metrics body every METRICS_SNAPSHOT_EVERY samples
 #   - run.json         run metadata (analyzer input)
 #   - verdict.json     analyzer verdict

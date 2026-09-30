@@ -268,6 +268,13 @@ class ManagementPlaneLoadContracts(unittest.TestCase):
                         engine.request_stop()
                 if operation == "metrics":
                     return load.ProbeResult(200, "ok", 2, "a" * 64)
+                if operation == "doctor":
+                    # Sanitized check names never need JSON escaping.
+                    return load.ProbeResult(
+                        -2**31, "doctor_check_failed", 2**53, "a" * 64, excerpt,
+                        b"{}", ("x" * load.DOCTOR_CHECK_NAME_CHARS,)
+                        * load.DOCTOR_FAILED_CHECKS_MAX,
+                    )
                 return load.ProbeResult(
                     -2**31, "payload_too_large", 2**53, "a" * 64, excerpt
                 )
@@ -355,6 +362,102 @@ class ManagementPlaneLoadContracts(unittest.TestCase):
         )
         self.assertEqual(result.exit_code, 2)
         self.assertEqual(result.result, "doctor_check_failed")
+
+    def test_doctor_nonzero_exit_keeps_capped_report_and_red_names(self):
+        report = json.dumps({
+            "bundle": "/run/bundle.tar.gz", "ok": False,
+            "checks": [
+                {"name": "daemon.healthy", "status": "fail",
+                 "detail": "health RPC failed: status: Internal"},
+                {"name": "peer.127.1.0.1.session", "status": "fail", "detail": "d"},
+                {"name": "state_dir.disk", "status": "ok", "detail": "d"},
+                {"name": "bad\x01\u00e9\"\\name", "status": "fail", "detail": "d"},
+            ],
+        })
+        argv = [sys.executable, "-c",
+                f"import sys; sys.stdout.write({report!r}); raise SystemExit(2)"]
+        result = load.run_cli_command(argv, "doctor", 5, 1, "20.0.0.0/24")
+        self.assertEqual(result.result, "doctor_check_failed")
+        self.assertEqual(result.doctor_output, report.encode())
+        # Peer reds do not decide the verdict, so they are not named.
+        self.assertEqual(result.failed_checks, ("daemon.healthy", "bad????name"))
+        with mock.patch.object(load, "DOCTOR_OUTPUT_BYTES", 10):
+            capped = load.run_cli_command(argv, "doctor", 5, 1, "20.0.0.0/24")
+        self.assertEqual(capped.doctor_output, report.encode()[:10])
+        self.assertEqual(capped.failed_checks, result.failed_checks)
+
+    def test_doctor_zero_exit_and_other_operations_keep_no_report(self):
+        green = json.dumps({
+            "bundle": "/b", "ok": True,
+            "checks": [{"name": "daemon.healthy", "status": "ok", "detail": "d"}],
+        })
+        for operation, code in (("doctor", 0), ("neighbor", 2)):
+            with self.subTest(operation=operation):
+                result = load.run_cli_command(
+                    [sys.executable, "-c",
+                     f"import sys; sys.stdout.write({green!r}); raise SystemExit({code})"],
+                    operation, 5, 1, "20.0.0.0/24",
+                )
+                self.assertIsNone(result.doctor_output)
+                self.assertEqual(result.failed_checks, ())
+
+    def test_failing_doctor_report_is_saved_beside_the_evidence(self):
+        # End to end through a fake `rbgp`: removing the retention leaves no
+        # report file and no record fields, and this fails.
+        report = json.dumps({
+            "bundle": "/run/bundle.tar.gz", "ok": False,
+            "checks": [{"name": "daemon.healthy", "status": "fail",
+                        "detail": "health RPC failed: status: Internal"}],
+        })
+        with tempfile.TemporaryDirectory() as tmp:
+            rbgp = Path(tmp) / "rbgp"
+            rbgp.write_text(
+                f"#!{sys.executable}\nimport sys\n"
+                f"sys.stdout.write({report!r})\nraise SystemExit(2)\n"
+            )
+            rbgp.chmod(0o755)
+            path = str(Path(tmp) / "load.jsonl")
+            engine = load.ManagementPlaneLoad(
+                output=path,
+                metrics_url="http://127.0.0.1:1/metrics",
+                rbgp=str(rbgp),
+                uds="unix:///tmp/grpc.sock",
+                peer_count=1,
+                route_prefix="20.0.0.0/24",
+                doctor_bundle=str(Path(tmp) / "doctor-bundle.tar.gz"),
+                metrics_interval_seconds=60,
+                cli_interval_seconds=60,
+                doctor_interval_seconds=60,
+                timeout_seconds=5,
+            )
+            real_probe = engine._probe
+            probed = set()
+            probed_lock = threading.Lock()
+
+            def probe(operation):
+                result = (
+                    real_probe(operation) if operation == "doctor"
+                    else load.ProbeResult(0, "ok", 2, "a" * 64)
+                )
+                with probed_lock:
+                    probed.add(operation)
+                    if probed == set(load.OPERATIONS):
+                        engine.request_stop()
+                return result
+
+            engine._probe = probe
+            self.assertEqual(engine.run(), 0)
+            records = [
+                json.loads(line) for line in Path(path).read_bytes().splitlines()
+            ]
+            doctor = [r for r in records if r.get("operation") == "doctor"]
+            self.assertEqual(len(doctor), 1)
+            self.assertEqual(doctor[0]["result"], "doctor_check_failed")
+            self.assertEqual(doctor[0]["doctor_output"], "doctor-report-0001.json")
+            self.assertEqual(doctor[0]["failed_checks"], ["daemon.healthy"])
+            saved = Path(tmp) / doctor[0]["doctor_output"]
+            self.assertEqual(saved.read_text(), report)
+            self.assertEqual(doctor[0]["sha256"], hashlib.sha256(report.encode()).hexdigest())
 
     def test_doctor_hard_error_exit_stays_a_cli_failure(self):
         # Exit 1 means doctor could not produce a bundle at all.
