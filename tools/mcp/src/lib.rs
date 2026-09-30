@@ -905,9 +905,9 @@ pub struct RouteEventsParams {
     /// Exact prefix address to filter; omit for all prefixes.
     #[serde(default)]
     pub prefix: String,
-    /// Required when prefix is supplied.
+    /// Required when prefix is supplied; an explicit zero selects /0.
     #[serde(default)]
-    pub prefix_length: u32,
+    pub prefix_length: Option<u32>,
     /// Maximum matching events, from 1 to 100.
     pub limit: u32,
 }
@@ -1052,6 +1052,16 @@ fn bounded_event_limit(limit: u32) -> Result<u32, ErrorData> {
         ));
     }
     Ok(limit)
+}
+
+fn route_event_prefix_length(params: &RouteEventsParams) -> Result<u32, ErrorData> {
+    if !params.prefix.is_empty() && params.prefix_length.is_none() {
+        return Err(ErrorData::invalid_params(
+            "prefix_length is required when prefix is supplied",
+            None,
+        ));
+    }
+    Ok(params.prefix_length.unwrap_or(0))
 }
 
 fn dry_run_limit(limit: u32) -> Result<u32, ErrorData> {
@@ -1414,6 +1424,7 @@ impl RustbgpdMcp {
         Parameters(params): Parameters<RouteEventsParams>,
     ) -> Result<Json<RouteEventsResult>, ErrorData> {
         let limit = bounded_event_limit(params.limit)?;
+        let prefix_length = route_event_prefix_length(&params)?;
         let mut client = proto::rib_service_client::RibServiceClient::new(self.upstream.clone());
         let response = self
             .read(client.list_route_events(proto::ListRouteEventsRequest {
@@ -1421,7 +1432,7 @@ impl RustbgpdMcp {
                 afi_safi: params.family.as_proto(),
                 limit,
                 prefix: params.prefix,
-                prefix_length: params.prefix_length,
+                prefix_length,
             }))
             .await?;
         Ok(Json(RouteEventsResult {
@@ -2119,6 +2130,24 @@ mod tests {
         assert!(dry_run_limit(0).is_err());
         assert_eq!(dry_run_limit(1).unwrap(), 1);
         assert_eq!(dry_run_limit(u32::MAX).unwrap(), 1_000);
+    }
+
+    #[test]
+    fn route_event_prefix_length_requires_presence_without_losing_zero() {
+        let parse = |value| serde_json::from_value::<RouteEventsParams>(value).unwrap();
+        let missing = parse(serde_json::json!({"prefix":"0.0.0.0", "limit":1}));
+        let error = route_event_prefix_length(&missing).unwrap_err();
+        assert_eq!(error.code, rmcp::model::ErrorCode::INVALID_PARAMS);
+        assert!(error.message.contains("prefix_length is required"));
+
+        let default_route =
+            parse(serde_json::json!({"prefix":"0.0.0.0", "prefix_length":0, "limit":1}));
+        assert_eq!(route_event_prefix_length(&default_route).unwrap(), 0);
+        let ordinary =
+            parse(serde_json::json!({"prefix":"203.0.113.0", "prefix_length":24, "limit":1}));
+        assert_eq!(route_event_prefix_length(&ordinary).unwrap(), 24);
+        let unfiltered = parse(serde_json::json!({"limit":1}));
+        assert_eq!(route_event_prefix_length(&unfiltered).unwrap(), 0);
     }
 
     #[test]

@@ -119,7 +119,7 @@ fn initialize_then_list_tools_over_stdio() {
     expected.sort();
     assert_eq!(
         names, expected,
-        "the stdio tool surface must be exactly the seven read-only tools"
+        "the stdio tool surface must match EXPECTED_TOOLS exactly"
     );
 
     // Every tool must declare an input schema; a host cannot call one without.
