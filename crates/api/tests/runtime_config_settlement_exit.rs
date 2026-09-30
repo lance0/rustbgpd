@@ -5,7 +5,8 @@ use std::time::{Duration, Instant};
 
 use rustbgpd_api::health_probe::DaemonGate;
 use rustbgpd_api::runtime_config_settlement::{
-    AMBIGUOUS_CONFIG_EXIT_STATUS, RuntimeConfigOperationKind, RuntimeConfigSettlementWatchdog,
+    AMBIGUITY_FENCE_GRACE, AMBIGUOUS_CONFIG_EXIT_STATUS, RuntimeConfigOperationKind,
+    RuntimeConfigSettlementWatchdog,
 };
 use rustbgpd_api::server::RuntimeConfigCoordinator;
 use tokio::sync::Semaphore;
@@ -50,5 +51,10 @@ fn executor_loss_uses_production_exit_status() {
         .status()
         .unwrap();
     assert_eq!(status.code(), Some(AMBIGUOUS_CONFIG_EXIT_STATUS));
-    assert!(started.elapsed() <= Duration::from_secs(15));
+    let elapsed = started.elapsed();
+    assert!(
+        elapsed >= AMBIGUITY_FENCE_GRACE,
+        "exited before grace: {elapsed:?}"
+    );
+    assert!(elapsed <= Duration::from_secs(15));
 }

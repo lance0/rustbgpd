@@ -2049,6 +2049,75 @@ impl Drop for TestWatchdog {
 mod tests {
     use super::*;
     use prometheus::Encoder as _;
+    use tracing::{Event, Level, Metadata, Subscriber, field::Visit, span};
+
+    struct WarningFields {
+        message: Option<String>,
+        remaining: Option<String>,
+    }
+
+    impl Visit for WarningFields {
+        fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+            let rendered = format!("{value:?}");
+            self.record_str(field, rendered.trim_matches('"'));
+        }
+
+        fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+            match field.name() {
+                "message" => self.message = Some(value.to_owned()),
+                "remaining" => self.remaining = Some(value.to_owned()),
+                _ => {}
+            }
+        }
+    }
+
+    struct WarningEvents {
+        events: Arc<Mutex<Vec<String>>>,
+        notify: Option<std::sync::mpsc::Sender<String>>,
+    }
+
+    impl Subscriber for WarningEvents {
+        fn register_callsite(
+            &self,
+            _: &'static Metadata<'static>,
+        ) -> tracing::subscriber::Interest {
+            tracing::subscriber::Interest::sometimes()
+        }
+
+        fn enabled(&self, _: &Metadata<'_>) -> bool {
+            true
+        }
+
+        fn new_span(&self, _: &span::Attributes<'_>) -> span::Id {
+            span::Id::from_u64(1)
+        }
+
+        fn record(&self, _: &span::Id, _: &span::Record<'_>) {}
+        fn record_follows_from(&self, _: &span::Id, _: &span::Id) {}
+
+        fn event(&self, event: &Event<'_>) {
+            if event.metadata().level() != &Level::WARN {
+                return;
+            }
+            let mut fields = WarningFields {
+                message: None,
+                remaining: None,
+            };
+            event.record(&mut fields);
+            if fields.message.as_deref() == Some("runtime config settlement budget warning") {
+                let remaining = fields
+                    .remaining
+                    .expect("warning must include remaining budget");
+                self.events.lock().unwrap().push(remaining.clone());
+                if let Some(notify) = &self.notify {
+                    let _ = notify.send(remaining);
+                }
+            }
+        }
+
+        fn enter(&self, _: &span::Id) {}
+        fn exit(&self, _: &span::Id) {}
+    }
 
     #[test]
     fn policy_failure_codes_are_closed_and_secret_free() {
@@ -2565,27 +2634,116 @@ mod tests {
         let (operation, guard, _, _) = operation(&watchdog, false).await;
         let deadline = operation.deadline();
         let start = operation.inner.registered_at;
-        emit_due_warnings(
-            &operation.inner,
-            (start + WARNING_HALF_BUDGET)
-                .checked_sub(Duration::from_nanos(1))
-                .unwrap(),
-        );
-        assert_eq!(operation.inner.warning_bits.load(Ordering::Acquire), 0);
-        emit_due_warnings(&operation.inner, start + WARNING_HALF_BUDGET);
-        emit_due_warnings(
-            &operation.inner,
-            start + WARNING_HALF_BUDGET + Duration::from_nanos(1),
+        let events = Arc::new(Mutex::new(Vec::new()));
+        tracing::subscriber::with_default(
+            WarningEvents {
+                events: Arc::clone(&events),
+                notify: None,
+            },
+            || {
+                // Warm and re-register the callsite before checking output: sibling
+                // tests may have first registered it without a subscriber.
+                emit_due_warnings(&operation.inner, start + WARNING_ONE_MINUTE_REMAINING);
+                tracing::callsite::rebuild_interest_cache();
+                operation.inner.warning_bits.store(0, Ordering::Release);
+                events.lock().unwrap().clear();
+
+                emit_due_warnings(
+                    &operation.inner,
+                    (start + WARNING_HALF_BUDGET)
+                        .checked_sub(Duration::from_nanos(1))
+                        .unwrap(),
+                );
+                assert_eq!(operation.inner.warning_bits.load(Ordering::Acquire), 0);
+                emit_due_warnings(&operation.inner, start + WARNING_HALF_BUDGET);
+                emit_due_warnings(
+                    &operation.inner,
+                    start + WARNING_HALF_BUDGET + Duration::from_nanos(1),
+                );
+                assert_eq!(
+                    operation.inner.warning_bits.load(Ordering::Acquire),
+                    WARNING_HALF_BIT
+                );
+                emit_due_warnings(&operation.inner, start + WARNING_FIVE_MINUTES_REMAINING);
+                emit_due_warnings(&operation.inner, start + WARNING_ONE_MINUTE_REMAINING);
+                emit_due_warnings(&operation.inner, start + WARNING_ONE_MINUTE_REMAINING);
+                assert_eq!(operation.inner.warning_bits.load(Ordering::Acquire), 0b111);
+            },
         );
         assert_eq!(
-            operation.inner.warning_bits.load(Ordering::Acquire),
-            WARNING_HALF_BIT
+            *events.lock().unwrap(),
+            ["15_minutes", "5_minutes", "1_minute"]
         );
-        emit_due_warnings(&operation.inner, start + WARNING_FIVE_MINUTES_REMAINING);
-        emit_due_warnings(&operation.inner, start + WARNING_ONE_MINUTE_REMAINING);
-        emit_due_warnings(&operation.inner, start + WARNING_ONE_MINUTE_REMAINING);
-        assert_eq!(operation.inner.warning_bits.load(Ordering::Acquire), 0b111);
         assert_eq!(operation.deadline(), deadline);
+        assert!(operation.try_settle());
+        drop(guard);
+    }
+
+    #[tokio::test]
+    async fn observer_emits_warning_for_owned_operation() {
+        let (watchdog, _receiver) =
+            isolated_test_watchdog(Duration::from_mins(30), Duration::from_secs(5));
+        let (mut operation, mut guard, _, _) = operation(&watchdog, false).await;
+
+        // Prepare an aged owned operation before starting any observer thread.
+        watchdog.registry.current.store(None);
+        drop(guard.inner.take());
+        let inner = Arc::get_mut(&mut operation.inner).unwrap();
+        inner.registered_at = Instant::now()
+            .checked_sub(WARNING_HALF_BUDGET + Duration::from_secs(1))
+            .unwrap();
+        inner.deadline = inner.registered_at + OWNED_SETTLEMENT_BUDGET;
+        inner.fatal_at_nanos.store(
+            watchdog
+                .registry
+                .instant_nanos(inner.deadline + watchdog.registry.grace),
+            Ordering::Release,
+        );
+        guard.inner = Some(Arc::clone(&operation.inner));
+        watchdog
+            .registry
+            .current
+            .store(Some(Arc::clone(&operation.inner)));
+
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let observer = {
+            let registry = Arc::clone(&watchdog.registry);
+            let inner = Arc::clone(&operation.inner);
+            let events = Arc::clone(&events);
+            thread::spawn(move || {
+                tracing::subscriber::with_default(
+                    WarningEvents {
+                        events: Arc::clone(&events),
+                        notify: None,
+                    },
+                    || {
+                        // Ensure this callsite is enabled even if another test first
+                        // registered it with no subscriber.
+                        emit_due_warnings(&inner, Instant::now());
+                        tracing::callsite::rebuild_interest_cache();
+                    },
+                );
+                inner.warning_bits.store(0, Ordering::Release);
+                events.lock().unwrap().clear();
+                tracing::subscriber::with_default(
+                    WarningEvents {
+                        events,
+                        notify: Some(sender),
+                    },
+                    || {
+                        tracing::callsite::rebuild_interest_cache();
+                        observer_loop(&registry);
+                    },
+                );
+            })
+        };
+        let warning = receiver.recv_timeout(Duration::from_secs(1));
+        watchdog.registry.stopping.store(true, Ordering::Release);
+        observer.thread().unpark();
+        observer.join().unwrap();
+        assert_eq!(warning.unwrap(), "15_minutes");
+        assert_eq!(*events.lock().unwrap(), ["15_minutes"]);
         assert!(operation.try_settle());
         drop(guard);
     }
@@ -2987,11 +3145,18 @@ mod tests {
         };
         assert!(operation.fence_recovery(RuntimeConfigFenceReason::KnownDivergence));
         assert_eq!(receiver.recv_timeout(Duration::from_secs(1)).unwrap(), 70);
+        let terminal_observed_at = Instant::now();
         assert_eq!(
             operation.fence_reason(),
             Some(RuntimeConfigFenceReason::KnownDivergence)
         );
         release_terminal_waiter(&watchdog, waiter);
+        assert!(
+            terminal_observed_at
+                >= watchdog
+                    .registry
+                    .nanos_instant(operation.inner.fatal_at_nanos.load(Ordering::Acquire))
+        );
         drop(guard);
     }
 
@@ -3045,6 +3210,7 @@ mod tests {
             }
         });
         let operation = operation_rx.await.unwrap();
+        assert!(operation.response_attached());
         executor.abort();
         let _ = executor.await;
         drop(attachment);
@@ -3377,12 +3543,21 @@ mod tests {
         let (watchdog, receiver) = test_watchdog(old_deadline, grace);
         let (operation, guard, _, _) = operation(&watchdog, false).await;
         let prearmed = operation.inner.fatal_at_nanos.load(Ordering::Acquire);
+        assert_eq!(
+            watchdog.registry.nanos_instant(prearmed),
+            operation.deadline() + grace
+        );
         let started = Instant::now();
         drop(guard);
         let shortened = operation.inner.fatal_at_nanos.load(Ordering::Acquire);
         assert!(shortened < prearmed);
         assert_eq!(receiver.recv_timeout(Duration::from_secs(1)).unwrap(), 70);
-        assert!(started.elapsed() < old_deadline);
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed >= grace,
+            "executor loss fired before grace: {elapsed:?}"
+        );
+        assert!(elapsed < old_deadline);
         assert_eq!(
             operation.fence_reason(),
             Some(RuntimeConfigFenceReason::ExecutorLost)
