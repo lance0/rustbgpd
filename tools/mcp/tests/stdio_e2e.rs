@@ -17,8 +17,12 @@ const EXPECTED_TOOLS: &[&str] = &[
     "rbgp_explain_export",
     "rbgp_explain_import",
     "rbgp_get_health",
+    "rbgp_get_policy_stats",
     "rbgp_list_peers",
     "rbgp_list_rejected",
+    "rbgp_list_route_events",
+    "rbgp_list_session_events",
+    "rbgp_test_policy",
 ];
 
 struct Server(Child);

@@ -14,7 +14,8 @@ use std::time::Duration;
 use nix::sys::signal::{Signal, kill};
 use nix::unistd::Pid;
 use rustbgpd_api::proto;
-use rustbgpd_wire::{Capability, Message, OpenMessage};
+use rustbgpd_wire::notification::cease_subcode;
+use rustbgpd_wire::{Capability, Message, NotificationCode, NotificationMessage, OpenMessage};
 use serde_json::{Value, json};
 use tokio::io::AsyncWriteExt;
 use tokio::sync::mpsc;
@@ -427,6 +428,45 @@ async fn run_fixture(path: &Path) {
         let result = explain(&mut mcp, 5, PREFIX).await;
         if result["decision"] == "deny" {
             assert_ladder(&result, true);
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    // A peer-initiated administrative reset must be visible through the MCP
+    // history RPC as a recorded lifecycle transition, not inferred from the
+    // current neighbor table. The RPC does not retain notification payloads.
+    peer.write_all(
+        &rustbgpd_wire::encode_message(&Message::Notification(NotificationMessage::new(
+            NotificationCode::Cease,
+            cease_subcode::ADMINISTRATIVE_RESET,
+            Default::default(),
+        )))
+        .unwrap(),
+    )
+    .await
+    .unwrap();
+    drop(peer);
+    loop {
+        let history = mcp
+            .tool(
+                6,
+                "rbgp_list_session_events",
+                json!({"neighbor_address":"127.0.0.1", "limit":100}),
+            )
+            .await;
+        if let Some(lost) = history["events"].as_array().unwrap().iter().find(|event| {
+            event["event_type"] == "BGP_EVENT_TYPE_SESSION_LOST"
+                && event["payload"]["old_state"] == "established"
+        }) {
+            assert_eq!(lost["peer"], "127.0.0.1");
+            assert!(
+                lost["payload"]["reason"]
+                    .as_str()
+                    .unwrap()
+                    .contains("session lost for peer 127.0.0.1"),
+                "{lost}"
+            );
+            assert!(!lost["timestamp"].as_str().unwrap().is_empty());
             break;
         }
         tokio::time::sleep(Duration::from_millis(50)).await;

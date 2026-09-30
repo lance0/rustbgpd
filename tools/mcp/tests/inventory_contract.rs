@@ -52,18 +52,27 @@ fn every_tool_calls_a_method_the_daemon_publishes() {
 fn no_tool_reaches_a_mutating_or_operator_only_method() {
     let inventory = inventory_tiers();
     for (tool, path) in TOOL_METHOD_PATHS {
-        let tier = inventory
-            .iter()
-            .find(|(known, _)| known == path)
-            .map(|(_, tier)| tier.as_str())
-            .unwrap_or_else(|| panic!("tool `{tool}` declares unknown method `{path}`"));
         assert!(
-            matches!(tier, "read" | "sensitive_read"),
-            "tool `{tool}` calls `{path}`, which the daemon classifies as `{tier}`. \
-             This server is read-only: a `mutating` or `operator_only` method must not be \
-             reachable from any tool."
+            read_tier(&inventory, path),
+            "tool `{tool}` calls `{path}`, which is not a read-tier method"
         );
     }
+}
+
+fn read_tier(inventory: &[(String, String)], path: &str) -> bool {
+    inventory
+        .iter()
+        .find(|(known, _)| known == path)
+        .is_some_and(|(_, tier)| matches!(tier.as_str(), "read" | "sensitive_read"))
+}
+
+#[test]
+fn mutating_rpc_negative_control_fails_the_read_tier_check() {
+    let inventory = inventory_tiers();
+    assert!(!read_tier(
+        &inventory,
+        "/rustbgpd.v1.InjectionService/AddPath"
+    ));
 }
 
 #[test]
