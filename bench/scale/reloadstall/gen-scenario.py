@@ -249,14 +249,15 @@ config = [
     "# Stock daemon config: worker_threads unset => min(CPU, 8), matching the",
     "# receipt. Start load-gated (1-min loadavg < 2.0), --release.",
     "",
-    # Leave the historical RS output alone. The opt-in RPKI scenario has
-    # explicit import/export chains, so declare its RFC 8212 posture too.
-    *([] if ibgp_rr_asn is None and rpki_cache is None else ["config_epoch = 2", ""]),
+    # Declare the existing posture explicitly so strict checks are clean.
+    "config_epoch = 1" if ibgp_rr_asn is None and rpki_cache is None else "config_epoch = 2",
+    "",
     "[global]",
     f"asn = {GLOBAL_ASN if ibgp_rr_asn is None else ibgp_rr_asn}",
     'router_id = "10.0.0.1"',  # < 240.1.x.y so the stubs win collision resolution
     *([] if ibgp_rr_asn is None else ['cluster_id = "10.0.0.1"']),
-    *([] if ibgp_rr_asn is None and rpki_cache is None else ["ebgp_requires_policy = true"]),
+    "ebgp_requires_policy = false"
+    if ibgp_rr_asn is None and rpki_cache is None else "ebgp_requires_policy = true",
     f"listen_port = {port}",
     f'runtime_state_dir = "{rundir}"',
     "",

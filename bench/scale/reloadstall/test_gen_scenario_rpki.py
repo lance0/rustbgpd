@@ -34,6 +34,8 @@ class RpkiScenarioTests(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stderr)
             config = tomllib.loads((out / "config.toml").read_text())
             self.assertNotIn("rpki", config)
+            self.assertEqual(config["config_epoch"], 1)
+            self.assertFalse(config["global"]["ebgp_requires_policy"])
             self.assertEqual(config["policy"]["import_chain"], ["member-in"])
             self.assertEqual(len(config["neighbors"]), 8)
             for name in ("gen-a.rpol", "gen-b.rpol"):
