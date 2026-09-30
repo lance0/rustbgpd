@@ -136,6 +136,10 @@ path returns an error; the MCP server does not retry the call automatically.
 | `rbgp_list_rejected` | What did this peer send that was thrown away? |
 | `rbgp_list_peers` | What sessions exist and what state are they in? |
 | `rbgp_get_health` | Is the daemon up, and how much is in the RIB? |
+| `rbgp_list_session_events` | Which retained lifecycle transitions and reasons affected this peer? |
+| `rbgp_list_route_events` | Which retained route changes affected this peer or prefix? |
+| `rbgp_get_policy_stats` | Which installed policy terms matched, and did evaluations error? |
+| `rbgp_test_policy` | What does a candidate rpol do to a bounded current route snapshot? |
 
 `rbgp_explain_export` returns the full export-gate ladder in live evaluation
 order. Against a daemon whose export policy blocks the prefix:
@@ -193,6 +197,23 @@ model inferring it:
   there were no earlier rejections. `evictions_since_reset` reports known
   displacement; occupancy alone cannot establish whether eviction occurred.
   `truncated_by_limit` reports entries omitted from this response by `limit`.
+- `rbgp_list_session_events` and `rbgp_list_route_events` require `limit` from
+  1 to 100. They return recent matching events from bounded, process-local
+  histories. An empty result may mean the event fell outside retained history
+  after eviction or restart; it does not prove nothing happened. Session
+  history includes lifecycle transitions and their recorded reasons, not
+  retained NOTIFICATION payloads. Route history is ordered oldest to newest
+  within the selected recent window. Neither tool is a durable event archive.
+- `rbgp_get_policy_stats` reports counters since each chain install;
+  `policy_generation` identifies the installation. Import term hits and
+  `routes_evaluated` are sampled during collection, not atomically.
+- `rbgp_test_policy` requires a nonzero route `limit` and clamps requests above
+  1,000 to 1,000. The response reports `evaluated_limit`. Import evaluation
+  uses retained post-policy Adj-RIB-In: routes previously rejected are absent,
+  so the dry run cannot discover routes a candidate would newly admit. Export
+  evaluates Loc-RIB best routes. Candidate datasets are supplied as inline
+  contents; no daemon-side candidate file is read. Changed and rejected route
+  samples are each capped at 100; compile diagnostics are returned as a result.
 - `rbgp_explain_import` outcomes `cache_disabled`, `no_session`, and `evicted`
   mean the question could not be answered. They are not rejections.
 - `rbgp_explain_evpn_route` returns a `received_note`. EVPN import rejection
@@ -252,9 +273,10 @@ tools. Capping a UDS listener at `sensitive_read` and giving it an explicit
 
 The workspace test suite runs the actual MCP binary against a disposable daemon
 with an Established IPv4 peer. It checks the export-explain allow/deny ladder
-across a policy reload, JSON-RPC stdout, and mutation refusal on the same
-observer listener used by the adapter. Fixture setup uses a separate operator
-connection. This does not establish live coverage of every tool or EVPN case;
+across a policy reload, a recorded peer-reset lifecycle event, JSON-RPC stdout,
+and mutation refusal on the same observer listener used by the adapter.
+Fixture setup uses a separate operator connection. This does not establish live
+coverage of every tool or EVPN case;
 the mock transport tests separately cover mutual TLS and stalled responses.
 
 To run this check alone, build the source-only adapter first:

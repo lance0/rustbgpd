@@ -314,3 +314,15 @@ in the lab — `examples/peer-loop` negotiates IPv4 unicast only — so `receive
 was null in every capture and the populated-source branch is untested against
 live data. The absent-source branch, which is the one that misleads, was
 exercised live.
+
+### Amendment, 2026-09-30: bounded diagnostics
+
+The next adapter slice adds session and route event history, policy stats, and
+a capped policy dry run through the existing read-only stdio server. This
+answers the earlier tool-list question for these RPCs. Session history is
+lifecycle history with recorded reasons; the existing RPC does not retain
+NOTIFICATION payloads. Both event histories are bounded and process-local, so
+empty results cannot prove no earlier event occurred. The dry run evaluates at
+most 1,000 routes and, for import, only retained post-policy Adj-RIB-In.
+Config planning, mutation, remote MCP transport, and release packaging remain
+outside this decision.

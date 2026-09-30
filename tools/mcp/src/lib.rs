@@ -79,6 +79,19 @@ pub const TOOL_METHOD_PATHS: &[(&str, &str)] = &[
         "rbgp_explain_evpn_route",
         "/rustbgpd.v1.RibService/ExplainEvpnRoute",
     ),
+    (
+        "rbgp_list_session_events",
+        "/rustbgpd.v1.EventService/ListSessionEvents",
+    ),
+    (
+        "rbgp_list_route_events",
+        "/rustbgpd.v1.RibService/ListRouteEvents",
+    ),
+    (
+        "rbgp_get_policy_stats",
+        "/rustbgpd.v1.PolicyService/GetPolicyStats",
+    ),
+    ("rbgp_test_policy", "/rustbgpd.v1.PolicyService/TestPolicy"),
 ];
 
 // ---------------------------------------------------------------------------
@@ -859,11 +872,227 @@ pub struct HealthResult {
     pub daemon_version: String,
 }
 
+const EVENT_LIMIT_MAX: u32 = 100;
+const TEST_POLICY_LIMIT_MAX: u32 = 1_000;
+const HISTORY_NOTE: &str = "History is bounded and process-local. An empty result does not prove no event occurred: matching events may be outside retained history, including after eviction or daemon restart.";
+
+/// Query the most recent matching session events.
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
+pub struct SessionEventsParams {
+    /// Peer address to filter; omit for all peers.
+    #[serde(default)]
+    pub neighbor_address: String,
+    /// Maximum matching events, from 1 to 100.
+    pub limit: u32,
+}
+
+/// A bounded session lifecycle history. Notification payloads are not retained by this RPC.
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct SessionEventsResult {
+    pub events: Vec<serde_json::Value>,
+    pub retention_note: String,
+}
+
+/// Query the most recent matching route events.
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
+pub struct RouteEventsParams {
+    /// Peer address to filter; omit for all peers.
+    #[serde(default)]
+    pub neighbor_address: String,
+    /// IPv4 or IPv6 unicast scope; unspecified includes both.
+    #[serde(default)]
+    pub family: Family,
+    /// Exact prefix address to filter; omit for all prefixes.
+    #[serde(default)]
+    pub prefix: String,
+    /// Required when prefix is supplied; an explicit zero selects /0.
+    #[serde(default)]
+    pub prefix_length: Option<u32>,
+    /// Maximum matching events, from 1 to 100.
+    pub limit: u32,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct RouteEventLine {
+    pub event_type: String,
+    pub event_id: u64,
+    pub timestamp: String,
+    pub prefix: String,
+    pub peer_address: String,
+    pub previous_peer_address: String,
+    pub target_peer_address: String,
+    pub family: String,
+    pub path_id: u32,
+    pub reason: String,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct RouteEventsResult {
+    pub events: Vec<RouteEventLine>,
+    pub retention_note: String,
+}
+
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
+pub struct PolicyStatsParams {
+    /// Peer address to filter; omit for all installed chains.
+    #[serde(default)]
+    pub peer_address: String,
+    /// `export` (default), `import`, or `both`.
+    #[serde(default)]
+    pub direction: String,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct PolicyStatsResult {
+    pub chains: Vec<PolicyChainLine>,
+    pub datasets: Vec<PolicyDatasetLine>,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct PolicyChainLine {
+    pub peer_address: String,
+    pub direction: String,
+    pub routes_evaluated: u64,
+    pub policy_generation: u64,
+    pub eval_errors: u64,
+    pub last_error: String,
+    pub terms: Vec<PolicyTermLine>,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct PolicyTermLine {
+    pub policy_index: u32,
+    pub policy: String,
+    pub term_index: u32,
+    pub term: String,
+    pub hits: u64,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct PolicyDatasetLine {
+    pub name: String,
+    pub kind: String,
+    pub generation: u64,
+    pub records: u64,
+    pub path: String,
+    pub last_error: String,
+}
+
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
+pub struct TestPolicyParams {
+    /// Complete candidate rpol source text.
+    pub rpol_source: String,
+    /// Policy name or call-form selection.
+    pub policy: String,
+    /// `import` or `export`.
+    pub direction: String,
+    /// Optional peer context/filter.
+    #[serde(default)]
+    pub peer: String,
+    #[serde(default)]
+    pub family: Family,
+    /// Route evaluation ceiling; 0 is rejected and values above 1000 are clamped.
+    pub limit: u32,
+    /// Maximum changed-route samples, clamped to 100.
+    #[serde(default)]
+    pub show_changes: u32,
+    /// Maximum rejected-route samples, clamped to 100.
+    #[serde(default)]
+    pub show_rejected: u32,
+    /// Inline candidate dataset contents for declarations in `rpol_source`.
+    #[serde(default)]
+    pub datasets: Vec<PolicyDatasetInput>,
+}
+
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
+pub struct PolicyDatasetInput {
+    pub name: String,
+    pub entries: String,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct TestPolicyResult {
+    pub compiled: bool,
+    pub diagnostics: String,
+    pub routes_evaluated: u64,
+    pub accepted: u64,
+    pub rejected: u64,
+    pub modified: u64,
+    pub term_hits: Vec<PolicyHitLine>,
+    pub diffs: Vec<PolicyDiffLine>,
+    pub rejected_routes: Vec<PolicyRejectedLine>,
+    pub evaluated_limit: u32,
+    pub scope_note: String,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct PolicyDiffLine {
+    pub prefix: String,
+    pub peer: String,
+    pub changes: Vec<String>,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct PolicyRejectedLine {
+    pub prefix: String,
+    pub peer: String,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct PolicyHitLine {
+    pub term: String,
+    pub hits: u64,
+}
+
+fn bounded_event_limit(limit: u32) -> Result<u32, ErrorData> {
+    if limit == 0 || limit > EVENT_LIMIT_MAX {
+        return Err(ErrorData::invalid_params(
+            "limit must be between 1 and 100",
+            None,
+        ));
+    }
+    Ok(limit)
+}
+
+fn route_event_prefix_length(params: &RouteEventsParams) -> Result<u32, ErrorData> {
+    if !params.prefix.is_empty() && params.prefix_length.is_none() {
+        return Err(ErrorData::invalid_params(
+            "prefix_length is required when prefix is supplied",
+            None,
+        ));
+    }
+    Ok(params.prefix_length.unwrap_or(0))
+}
+
+fn dry_run_limit(limit: u32) -> Result<u32, ErrorData> {
+    if limit == 0 {
+        return Err(ErrorData::invalid_params("limit must be nonzero", None));
+    }
+    Ok(limit.min(TEST_POLICY_LIMIT_MAX))
+}
+
+fn session_events_result(response: &proto::ListSessionEventsResponse) -> SessionEventsResult {
+    let events = response
+        .events
+        .iter()
+        .map(|event| {
+            serde_json::from_str(&rustbgpd_api::json_format::bgp_event_to_json_line(event))
+                .expect("shared event formatter emits JSON")
+        })
+        .collect();
+    SessionEventsResult {
+        events,
+        retention_note: format!(
+            "{HISTORY_NOTE} Session history records lifecycle events and reasons, not NOTIFICATION payloads."
+        ),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Server
 // ---------------------------------------------------------------------------
 
-/// The MCP server: a gRPC client of one daemon, exposing seven read-only tools.
+/// The MCP server: a gRPC client of one daemon, exposing read-only tools.
 #[derive(Clone)]
 pub struct RustbgpdMcp {
     upstream: Upstream,
@@ -1160,6 +1389,188 @@ impl RustbgpdMcp {
             active_peers: response.active_peers,
             total_routes: response.total_routes,
             daemon_version: response.daemon_version,
+        }))
+    }
+
+    /// Read a bounded recent window of session lifecycle events.
+    #[tool(
+        name = "rbgp_list_session_events",
+        description = "List recent retained session lifecycle events and recorded reasons for a peer. The bounded process-local history can evict older events; an empty result is not proof nothing happened. This RPC does not retain NOTIFICATION payloads."
+    )]
+    pub async fn list_session_events(
+        &self,
+        Parameters(params): Parameters<SessionEventsParams>,
+    ) -> Result<Json<SessionEventsResult>, ErrorData> {
+        let limit = bounded_event_limit(params.limit)?;
+        let mut client =
+            proto::event_service_client::EventServiceClient::new(self.upstream.clone());
+        let response = self
+            .read(client.list_session_events(proto::ListSessionEventsRequest {
+                neighbor_address: params.neighbor_address,
+                event_types: Vec::new(),
+                limit,
+            }))
+            .await?;
+        Ok(Json(session_events_result(&response)))
+    }
+
+    /// Read a bounded recent window of route events.
+    #[tool(
+        name = "rbgp_list_route_events",
+        description = "List recent retained route events by peer, family or exact prefix. History is bounded and process-local; an empty result does not prove no route event happened."
+    )]
+    pub async fn list_route_events(
+        &self,
+        Parameters(params): Parameters<RouteEventsParams>,
+    ) -> Result<Json<RouteEventsResult>, ErrorData> {
+        let limit = bounded_event_limit(params.limit)?;
+        let prefix_length = route_event_prefix_length(&params)?;
+        let mut client = proto::rib_service_client::RibServiceClient::new(self.upstream.clone());
+        let response = self
+            .read(client.list_route_events(proto::ListRouteEventsRequest {
+                neighbor_address: params.neighbor_address,
+                afi_safi: params.family.as_proto(),
+                limit,
+                prefix: params.prefix,
+                prefix_length,
+            }))
+            .await?;
+        Ok(Json(RouteEventsResult {
+            events: response
+                .events
+                .into_iter()
+                .map(|event| RouteEventLine {
+                    event_type: proto::RouteEventType::try_from(event.event_type).map_or_else(
+                        |_| format!("unknown({})", event.event_type),
+                        |kind| strip_enum_prefix(kind.as_str_name(), "ROUTE_EVENT_TYPE_"),
+                    ),
+                    event_id: event.event_id,
+                    timestamp: event.timestamp,
+                    prefix: format!("{}/{}", event.prefix, event.prefix_length),
+                    peer_address: event.peer_address,
+                    previous_peer_address: event.previous_peer_address,
+                    target_peer_address: event.target_peer_address,
+                    family: family_label(event.afi_safi),
+                    path_id: event.path_id,
+                    reason: event.reason,
+                })
+                .collect(),
+            retention_note: HISTORY_NOTE.into(),
+        }))
+    }
+
+    /// Read installed policy chain counters.
+    #[tool(
+        name = "rbgp_get_policy_stats",
+        description = "Read live policy term hits, evaluation errors, chain generation and dataset status. Import counters and denominator are sampled during collection, not atomically."
+    )]
+    pub async fn get_policy_stats(
+        &self,
+        Parameters(params): Parameters<PolicyStatsParams>,
+    ) -> Result<Json<PolicyStatsResult>, ErrorData> {
+        let mut client =
+            proto::policy_service_client::PolicyServiceClient::new(self.upstream.clone());
+        let response = self
+            .read(client.get_policy_stats(proto::GetPolicyStatsRequest {
+                peer_address: params.peer_address,
+                direction: params.direction,
+            }))
+            .await?;
+        Ok(Json(PolicyStatsResult {
+            chains: response
+                .chains
+                .into_iter()
+                .map(|chain| PolicyChainLine {
+                    peer_address: chain.peer_address,
+                    direction: chain.direction,
+                    routes_evaluated: chain.routes_evaluated,
+                    policy_generation: chain.policy_generation,
+                    eval_errors: chain.eval_errors,
+                    last_error: chain.last_error,
+                    terms: chain
+                        .terms
+                        .into_iter()
+                        .map(|term| PolicyTermLine {
+                            policy_index: term.policy_index,
+                            policy: term.policy,
+                            term_index: term.term_index,
+                            term: term.term,
+                            hits: term.hits,
+                        })
+                        .collect(),
+                })
+                .collect(),
+            datasets: response
+                .datasets
+                .into_iter()
+                .map(|dataset| PolicyDatasetLine {
+                    name: dataset.name,
+                    kind: dataset.kind,
+                    generation: dataset.generation,
+                    records: dataset.records,
+                    path: dataset.path,
+                    last_error: dataset.last_error,
+                })
+                .collect(),
+        }))
+    }
+
+    /// Dry-run a candidate policy over a bounded route snapshot.
+    #[tool(
+        name = "rbgp_test_policy",
+        description = "Dry-run candidate rpol against at most 1000 retained routes. Import evaluates post-policy Adj-RIB-In, so routes previously rejected are absent and newly admissible routes cannot be discovered. No configuration is changed."
+    )]
+    pub async fn test_policy(
+        &self,
+        Parameters(params): Parameters<TestPolicyParams>,
+    ) -> Result<Json<TestPolicyResult>, ErrorData> {
+        let limit = dry_run_limit(params.limit)?;
+        let mut client =
+            proto::policy_service_client::PolicyServiceClient::new(self.upstream.clone());
+        let response = self
+            .read(
+                client.test_policy(proto::TestPolicyRequest {
+                    rpol_source: params.rpol_source,
+                    policy: params.policy,
+                    direction: params.direction,
+                    peer: params.peer,
+                    afi_safi: params.family.as_proto(),
+                    limit,
+                    show_changes: params.show_changes.min(100),
+                    datasets: params
+                        .datasets
+                        .into_iter()
+                        .map(|dataset| proto::TestPolicyDataset {
+                            name: dataset.name,
+                            entries: dataset.entries,
+                        })
+                        .collect(),
+                    show_rejected: params.show_rejected.min(100),
+                }),
+            )
+            .await?;
+        Ok(Json(TestPolicyResult {
+            compiled: response.compiled,
+            diagnostics: response.diagnostics,
+            routes_evaluated: response.routes_evaluated,
+            accepted: response.accepted,
+            rejected: response.rejected,
+            modified: response.modified,
+            term_hits: response.term_hits.into_iter().map(|term| PolicyHitLine {
+                term: term.term,
+                hits: term.hits,
+            }).collect(),
+            diffs: response.diffs.into_iter().map(|diff| PolicyDiffLine {
+                prefix: format!("{}/{}", diff.prefix, diff.prefix_length),
+                peer: diff.peer,
+                changes: diff.changes,
+            }).collect(),
+            rejected_routes: response.rejected_routes.into_iter().map(|route| PolicyRejectedLine {
+                prefix: format!("{}/{}", route.prefix, route.prefix_length),
+                peer: route.peer,
+            }).collect(),
+            evaluated_limit: limit,
+            scope_note: "Import evaluates only retained post-policy Adj-RIB-In; routes previously rejected are absent, so a candidate that would newly admit them cannot be measured here. Export evaluates Loc-RIB best routes. Counts cover at most evaluated_limit routes.".into(),
         }))
     }
 
@@ -1692,6 +2103,51 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn empty_event_history_cannot_claim_no_matching_event() {
+        // The RPC has no eviction counter: an evicted matching event and a
+        // never-recorded one both return this same empty shape.
+        let session =
+            session_events_result(&proto::ListSessionEventsResponse { events: Vec::new() });
+        let route = RouteEventsResult {
+            events: Vec::new(),
+            retention_note: HISTORY_NOTE.into(),
+        };
+        for note in [&session.retention_note, &route.retention_note] {
+            assert!(note.contains("outside retained history"), "{note}");
+            assert!(note.contains("eviction"), "{note}");
+            assert!(!note.contains("no events"), "{note}");
+        }
+    }
+
+    #[test]
+    fn limits_are_bounded_before_rpc() {
+        assert!(bounded_event_limit(0).is_err());
+        assert_eq!(bounded_event_limit(100).unwrap(), 100);
+        assert!(bounded_event_limit(101).is_err());
+        assert!(dry_run_limit(0).is_err());
+        assert_eq!(dry_run_limit(1).unwrap(), 1);
+        assert_eq!(dry_run_limit(u32::MAX).unwrap(), 1_000);
+    }
+
+    #[test]
+    fn route_event_prefix_length_requires_presence_without_losing_zero() {
+        let parse = |value| serde_json::from_value::<RouteEventsParams>(value).unwrap();
+        let missing = parse(serde_json::json!({"prefix":"0.0.0.0", "limit":1}));
+        let error = route_event_prefix_length(&missing).unwrap_err();
+        assert_eq!(error.code, rmcp::model::ErrorCode::INVALID_PARAMS);
+        assert!(error.message.contains("prefix_length is required"));
+
+        let default_route =
+            parse(serde_json::json!({"prefix":"0.0.0.0", "prefix_length":0, "limit":1}));
+        assert_eq!(route_event_prefix_length(&default_route).unwrap(), 0);
+        let ordinary =
+            parse(serde_json::json!({"prefix":"203.0.113.0", "prefix_length":24, "limit":1}));
+        assert_eq!(route_event_prefix_length(&ordinary).unwrap(), 24);
+        let unfiltered = parse(serde_json::json!({"limit":1}));
+        assert_eq!(route_event_prefix_length(&unfiltered).unwrap(), 0);
     }
 
     #[test]

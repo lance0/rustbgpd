@@ -17,8 +17,12 @@ const EXPECTED_TOOLS: &[&str] = &[
     "rbgp_explain_export",
     "rbgp_explain_import",
     "rbgp_get_health",
+    "rbgp_get_policy_stats",
     "rbgp_list_peers",
     "rbgp_list_rejected",
+    "rbgp_list_route_events",
+    "rbgp_list_session_events",
+    "rbgp_test_policy",
 ];
 
 struct Server(Child);
@@ -115,7 +119,7 @@ fn initialize_then_list_tools_over_stdio() {
     expected.sort();
     assert_eq!(
         names, expected,
-        "the stdio tool surface must be exactly the seven read-only tools"
+        "the stdio tool surface must match EXPECTED_TOOLS exactly"
     );
 
     // Every tool must declare an input schema; a host cannot call one without.
