@@ -484,6 +484,7 @@ test_widen_without_reset() {
     gobgp "$GOBGP_SINK" global rib add -a rtc asn 65001 rt "$RED_RT"
     wait_vpnv4_key "$GOBGP_SINK" "${RED_RD}:${RED_PREFIX}" "sink"
     wait_evpn_key_state "$GOBGP_SINK" "$RED_EVPN_KEY" true "sink red after widen" || return 1
+    wait_evpn_key_state "$GOBGP_SINK" "$BLUE_EVPN_KEY" true "sink blue after widen" || return 1
     assert_no_flap "$flap_before" "widen"
 }
 
@@ -595,7 +596,7 @@ main() {
     wait_default_rtc_accepted "$GOBGP_SRC" "10.0.0.1" "source"
     wait_default_rtc_accepted "$GOBGP_SINK" "10.0.1.1" "sink"
 
-    test_setup_vrfs || exit 1
+    test_setup_vrfs
     test_rr_receives_both
     test_rr_rtc_table
     test_rtc_reflection
