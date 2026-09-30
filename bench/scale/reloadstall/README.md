@@ -114,7 +114,7 @@ exits 2):
 reloadstall <n_peers> <total_prefixes> <daemon_port> <daemon_pid> \
     <policy_live> <policy_a> <policy_b> <reloads> <control_secs> \
     [changed_peers] [reload_cmd] [--flapstorm K [--flap-rounds N]]
-    [--convergence-only]
+    [--convergence-only] [--no-churn]
 ```
 
 - `n_peers` — stub sessions to establish (`total_prefixes` must divide evenly).
@@ -124,7 +124,13 @@ reloadstall <n_peers> <total_prefixes> <daemon_port> <daemon_pid> \
 - `policy_live` — the daemon's live `.rpol` file (copied over each reload).
 - `policy_a` / `policy_b` — the two policy generations (alternated per reload).
 - `reloads` — number of SIGHUP reload cycles.
-- `control_secs` — quiet control-window length (baseline inter-UPDATE gap).
+- `control_secs` — quiet control-window length (baseline inter-UPDATE gap). With
+  `--no-churn`, hold the established sessions for this finite window without
+  starting churn tasks or their warmup. This requires `reloads=0`, a positive
+  `control_secs` and daemon PID, and no flapstorm, reload command,
+  `--convergence-only`, or iBGP-RR mode. The final session/decode checks, optional
+  evidence acknowledgment, bounded cleanup, and refresh accounting still run.
+  Empty inter-UPDATE gap samples in this mode are not performance evidence.
 - `changed_peers` — optional number of leading observers whose effective export
   chain changes. Completion waits only for these observers; all-observer gap and
   session checks still include every peer. Omit it for the historical all-peer
