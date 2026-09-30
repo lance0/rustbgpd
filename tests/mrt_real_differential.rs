@@ -19,12 +19,14 @@ use bgpkit_parser::parser::mrt::chunk_mrt_record;
 use bytes::{Bytes, BytesMut};
 use rustbgpd_wire::constants::HEADER_LEN;
 use rustbgpd_wire::{
-    Afi, AsPathSegment, ErrorDisposition, Ipv4UnicastMode, PathAttribute, RawAttribute,
+    Afi, AsPathSegment, DecodeError, ErrorDisposition, Ipv4UnicastMode, Ipv6Prefix,
+    MalformedAttribute, MpReachNlri, NlriEntry, PathAttribute, Prefix, RawAttribute,
     RevisedParsedUpdate, Safi, UpdateMessage,
 };
 use std::collections::BTreeSet;
 use std::fs::File;
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, Cursor, Write};
+use std::net::{IpAddr, Ipv6Addr};
 
 #[derive(Debug, PartialEq, Eq)]
 struct Shape {
@@ -148,6 +150,70 @@ fn add_path_identity_negative_control() {
 }
 
 #[test]
+fn mp_add_path_unicast_control() {
+    let clean = std::fs::read("tests/fixtures/bgpkit/clean_ipv4_update.bin").unwrap();
+    let mut body = Bytes::copy_from_slice(&clean[HEADER_LEN..]);
+    let clean = UpdateMessage::decode(&mut body, clean.len() - HEADER_LEN)
+        .unwrap()
+        .parse_revised(true, false, false, &[])
+        .unwrap()
+        .update;
+    let mut attributes = clean.attributes;
+    attributes.push(PathAttribute::MpReachNlri(Box::new(MpReachNlri {
+        afi: Afi::Ipv6,
+        safi: Safi::Unicast,
+        next_hop: IpAddr::V6(Ipv6Addr::LOCALHOST),
+        link_local_next_hop: None,
+        announced: vec![NlriEntry {
+            path_id: 7,
+            prefix: Prefix::V6(Ipv6Prefix::new(
+                Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 0),
+                32,
+            )),
+        }],
+        flowspec_announced: Vec::new(),
+        evpn_announced: Vec::new(),
+        bgpls_announced: Vec::new(),
+        vpn_announced: Vec::new(),
+        labeled_announced: Vec::new(),
+        rtc_announced: Vec::new(),
+    })));
+    let update = UpdateMessage::build(&[], &[], &attributes, true, true, Ipv4UnicastMode::Body);
+    let mut bytes = BytesMut::new();
+    update.encode(&mut bytes).unwrap();
+    let mut kit_bytes = bytes.clone().freeze();
+    let BgpMessage::Update(kit) =
+        parse_bgp_message(&mut kit_bytes, true, &AsnLength::Bits32).unwrap()
+    else {
+        panic!("expected UPDATE")
+    };
+    let kit_id = kit.attributes.iter().find_map(|a| match a {
+        AttributeValue::MpReachNlri(n) => n.prefixes.first().and_then(|p| p.path_id),
+        _ => None,
+    });
+    assert_eq!(kit_id, Some(7));
+
+    let mut rust_bytes = bytes.freeze().slice(HEADER_LEN..);
+    let body_len = rust_bytes.len();
+    let raw = UpdateMessage::decode(&mut rust_bytes, body_len).unwrap();
+    let rust = raw
+        .parse_revised(true, false, true, mp_add_path_families(true))
+        .unwrap();
+    assert!(
+        verdict(&kit, &rust).is_none(),
+        "MP Add-Path UPDATE must match"
+    );
+    let without_mp_add_path = raw.parse_revised(true, false, true, &[]);
+    assert!(
+        match without_mp_add_path {
+            Ok(ref rust) => verdict(&kit, rust).is_some(),
+            Err(_) => true,
+        },
+        "omitting MP Add-Path negotiation must not appear to agree"
+    );
+}
+
+#[test]
 fn typed_mp_scope_negative_control() {
     let clean = std::fs::read("tests/fixtures/bgpkit/clean_ipv4_update.bin").unwrap();
     let mut kit_bytes = Bytes::copy_from_slice(&clean);
@@ -177,6 +243,44 @@ fn typed_mp_scope_negative_control() {
     let (category, reason) = verdict(&kit, &rust).expect("typed MP must not be ignored");
     assert_eq!(category, "other");
     assert_eq!(reason, "unsupported MP NLRI family in unicast differential");
+}
+
+#[test]
+fn as_set_exemption_requires_exclusive_cause() {
+    let mut bytes = std::fs::read("tests/fixtures/bgpkit/clean_ipv4_update.bin").unwrap();
+    // The fixture's AS_PATH starts with a two-ASN AS_SEQUENCE. Change only
+    // its segment type byte on the wire; the encoder rejects AS_SET by design.
+    let path_header = bytes
+        .windows(4)
+        .position(|w| w == [0x40, 2, 10, 2])
+        .unwrap();
+    bytes[path_header + 3] = 1;
+    let mut kit_bytes = Bytes::copy_from_slice(&bytes);
+    let BgpMessage::Update(kit) =
+        parse_bgp_message(&mut kit_bytes, false, &AsnLength::Bits32).unwrap()
+    else {
+        panic!("expected UPDATE")
+    };
+    let mut rust_bytes = Bytes::copy_from_slice(&bytes[HEADER_LEN..]);
+    let body_len = rust_bytes.len();
+    let mut rust = UpdateMessage::decode(&mut rust_bytes, body_len)
+        .unwrap()
+        .parse_revised(true, false, false, &[])
+        .unwrap();
+    assert!(matches!(verdict(&kit, &rust), Some(("expected-as-set", _))));
+
+    // Isolate the classifier condition: another type-2 cause must override the
+    // AS_SET exemption even if both parsers retained identical attributes.
+    rust.malformed.push(MalformedAttribute {
+        type_code: 2,
+        disposition: ErrorDisposition::AttributeDiscard,
+        error: DecodeError::UpdateAttributeError {
+            subcode: 1,
+            data: Vec::new(),
+            detail: "duplicate AS_PATH".into(),
+        },
+    });
+    assert!(matches!(verdict(&kit, &rust), Some(("other", _))));
 }
 
 fn kit_shape(u: &bgpkit_parser::models::BgpUpdateMessage) -> Shape {
@@ -381,7 +485,10 @@ fn verdict(kit: &BgpUpdateMessage, rust: &RevisedParsedUpdate) -> Option<(&'stat
     let as_set = rust.update.attributes.iter().any(|a| matches!(a, PathAttribute::AsPath(p) if p.segments.iter().any(|s| matches!(s, AsPathSegment::AsSet(_)))));
     if disposition == Some(ErrorDisposition::TreatAsWithdraw)
         && as_set
-        && rust.malformed.iter().all(|m| m.type_code == 2)
+        && rust
+            .malformed
+            .iter()
+            .all(|m| m.type_code == 2 && matches!(m.error, DecodeError::ProhibitedAsSet { .. }))
         && kit.attributes.validation_warnings().is_empty()
         && ours == theirs
         && missing.is_empty()
@@ -419,6 +526,46 @@ fn bgp_bytes(body: &[u8], subtype: u16) -> Option<(&[u8], bool, bool, bool)> {
     let offset = if four_as { 12 } else { 8 } + if ipv6 { 32 } else { 8 };
     let bytes = body.get(offset..)?;
     (bytes.get(18) == Some(&2)).then_some((bytes, four_as, add_path, is_ibgp))
+}
+
+#[test]
+fn et_header_is_already_split_from_message_bytes() {
+    let bgp = std::fs::read("tests/fixtures/bgpkit/clean_ipv4_update.bin").unwrap();
+    let mut message = Vec::new();
+    message.extend_from_slice(&64512u32.to_be_bytes());
+    message.extend_from_slice(&64513u32.to_be_bytes());
+    message.extend_from_slice(&0u16.to_be_bytes());
+    message.extend_from_slice(&1u16.to_be_bytes());
+    message.extend_from_slice(&[192, 0, 2, 1, 192, 0, 2, 2]);
+    message.extend_from_slice(&bgp);
+    let mut wire = Vec::new();
+    wire.extend_from_slice(&1_700_000_000u32.to_be_bytes());
+    wire.extend_from_slice(&17u16.to_be_bytes());
+    wire.extend_from_slice(&4u16.to_be_bytes());
+    wire.extend_from_slice(&((message.len() + 4) as u32).to_be_bytes());
+    wire.extend_from_slice(&123_456u32.to_be_bytes());
+    wire.extend_from_slice(&message);
+
+    let raw = chunk_mrt_record(&mut Cursor::new(&wire)).unwrap();
+    assert_eq!(raw.header_bytes.len(), 16);
+    assert_eq!(raw.message_bytes.as_ref(), message.as_slice());
+    assert_eq!(raw.raw_bytes().as_ref(), wire.as_slice());
+    let (extracted, four_as, add_path, is_ibgp) = bgp_bytes(&raw.message_bytes, 4).unwrap();
+    assert_eq!(extracted, bgp.as_slice());
+    assert!(four_as);
+    assert!(!add_path);
+    assert!(!is_ibgp);
+    let record = raw.parse().unwrap();
+    assert!(matches!(
+        record.message,
+        MrtMessage::Bgp4Mp(Bgp4MpEnum::Message(ref m))
+            if matches!(&m.bgp_message, BgpMessage::Update(_))
+    ));
+}
+
+fn mp_add_path_families(add_path: bool) -> &'static [(Afi, Safi)] {
+    const UNICAST: [(Afi, Safi); 2] = [(Afi::Ipv4, Safi::Unicast), (Afi::Ipv6, Safi::Unicast)];
+    if add_path { &UNICAST } else { &[] }
 }
 
 #[test]
@@ -469,8 +616,9 @@ fn real_updates() {
         updates += 1;
         let rust = if bgp.len() >= HEADER_LEN {
             let mut body = Bytes::copy_from_slice(&bgp[HEADER_LEN..]);
-            UpdateMessage::decode(&mut body, bgp.len() - HEADER_LEN)
-                .and_then(|u| u.parse_revised(four_as, is_ibgp, add_path, &[]))
+            UpdateMessage::decode(&mut body, bgp.len() - HEADER_LEN).and_then(|u| {
+                u.parse_revised(four_as, is_ibgp, add_path, mp_add_path_families(add_path))
+            })
         } else {
             panic!("record {records}: short UPDATE");
         };
