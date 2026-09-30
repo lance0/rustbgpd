@@ -5,7 +5,10 @@ Five independent workers exercise the shipped HTTP and ``rbgp`` surfaces.
 Only timing, disposition, byte count, and a payload digest are retained; the
 potentially large response bodies never enter the JSONL evidence. A non-ok
 ``rbgp`` result also keeps a bounded excerpt of the CLI's stderr, so a
-client-side failure stays attributable without daemon-side evidence.
+client-side failure stays attributable without daemon-side evidence. A
+``doctor`` run that exits nonzero is the one exception to discarding bodies:
+its stdout report is saved, size-capped, next to the JSONL evidence, and the
+record names that file plus the red checks that decided the verdict.
 """
 
 from __future__ import annotations
@@ -45,6 +48,13 @@ EMPTY_SHA256 = hashlib.sha256(b"").hexdigest()
 # Raw stderr bytes kept on a non-ok CLI record. JSON escaping can grow each
 # byte to six, so 512 bytes still fits MAX_RECORD_BYTES with every other field.
 STDERR_EXCERPT_BYTES = 512
+# A nonzero doctor exit keeps at most this much of its stdout report (about
+# 270 KB at 1000 peers), in a per-attempt file beside the JSONL evidence.
+DOCTOR_OUTPUT_BYTES = 4 * 1024 * 1024
+# Failing check names carried in the bounded JSONL record; the saved report
+# holds the full list and every check's detail.
+DOCTOR_FAILED_CHECKS_MAX = 4
+DOCTOR_CHECK_NAME_CHARS = 64
 
 
 @dataclass(frozen=True)
@@ -54,6 +64,10 @@ class ProbeResult:
     byte_count: int
     sha256: str
     stderr_excerpt: Optional[str] = None
+    # Doctor only, on a nonzero exit: the capped stdout report and the names
+    # of the configuration checks that were red in it.
+    doctor_output: Optional[bytes] = None
+    failed_checks: tuple[str, ...] = ()
 
 
 def _stderr_excerpt(stream: BinaryIO) -> str:
@@ -120,27 +134,58 @@ def validate_cli_json(
     raise ValueError(f"unsupported CLI operation: {operation}")
 
 
-def validate_doctor(value: object) -> str:
-    """Configuration verdict from one `rbgp doctor --json` report."""
+def doctor_failed_checks(value: object) -> Optional[list[str]]:
+    """Red configuration check names, or None when the report is malformed."""
     if not isinstance(value, dict) or not isinstance(value.get("bundle"), str):
-        return "schema"
+        return None
     checks = value.get("checks")
     if not isinstance(checks, list) or not checks:
-        return "schema"
+        return None
     for check in checks:
         if not isinstance(check, dict) or not isinstance(check.get("name"), str):
-            return "schema"
+            return None
         if check.get("status") not in ("ok", "warn", "fail"):
-            return "schema"
+            return None
     if not isinstance(value.get("ok"), bool):
-        return "schema"
-    failed = [
+        return None
+    return [
         check["name"]
         for check in checks
         if check["status"] == "fail"
         and not check["name"].startswith(DOCTOR_PEER_CHECK_PREFIX)
     ]
+
+
+def validate_doctor(value: object) -> str:
+    """Configuration verdict from one `rbgp doctor --json` report."""
+    failed = doctor_failed_checks(value)
+    if failed is None:
+        return "schema"
     return "doctor_check_failed" if failed else "ok"
+
+
+def _doctor_evidence(
+    stream: BinaryIO, payload: Optional[bytes]
+) -> tuple[bytes, tuple[str, ...]]:
+    """Capped report bytes plus bounded red check names.
+
+    Names keep only printable ASCII that JSON does not escape, so the record
+    stays within MAX_RECORD_BYTES next to a worst-case stderr excerpt.
+    """
+    stream.seek(0)
+    retained = stream.read(DOCTOR_OUTPUT_BYTES)
+    try:
+        failed = doctor_failed_checks(json.loads(payload)) if payload else None
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        failed = None
+    names = tuple(
+        "".join(
+            c if " " <= c <= "~" and c not in '"\\' else "?"
+            for c in name[:DOCTOR_CHECK_NAME_CHARS]
+        )
+        for name in (failed or [])[:DOCTOR_FAILED_CHECKS_MAX]
+    )
+    return retained, names
 
 
 def probe_metrics(
@@ -199,7 +244,17 @@ def run_cli_command(
         else:
             result = validate_cli_json(operation, payload, peer_count, route_prefix)
         excerpt = None if result == "ok" else _stderr_excerpt(stderr)
-    return ProbeResult(completed.returncode, result, byte_count, digest, excerpt)
+        doctor_output, failed_checks = None, ()
+        if operation == "doctor" and completed.returncode != 0:
+            doctor_output, failed_checks = _doctor_evidence(stdout, payload)
+            # A hard error can still print red JSON; only a validated report
+            # names checks, or the analyzer rejects the record.
+            if result != "doctor_check_failed":
+                failed_checks = ()
+    return ProbeResult(
+        completed.returncode, result, byte_count, digest, excerpt,
+        doctor_output, failed_checks,
+    )
 
 
 def cli_commands(
@@ -265,6 +320,7 @@ class ManagementPlaneLoad:
         timeout_seconds: float,
     ) -> None:
         self.sink = JsonlSink(output)
+        self.evidence_dir = os.path.dirname(os.path.abspath(output))
         self.metrics_url = metrics_url
         self.peer_count = peer_count
         self.route_prefix = route_prefix
@@ -299,6 +355,17 @@ class ManagementPlaneLoad:
     def _worker_error(self) -> Optional[str]:
         with self.counter_lock:
             return self.worker_error
+
+    def _save_doctor_output(self, attempt: int, report: bytes) -> str:
+        """Write one nonzero-exit doctor report; return its file name."""
+        name = f"doctor-report-{attempt:04d}.json"
+        fd = os.open(
+            os.path.join(self.evidence_dir, name),
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644,
+        )
+        with os.fdopen(fd, "wb") as f:
+            f.write(report)
+        return name
 
     def _probe(self, operation: str) -> ProbeResult:
         if operation == "metrics":
@@ -346,6 +413,14 @@ class ManagementPlaneLoad:
                 }
                 if result.stderr_excerpt is not None:
                     record["stderr_excerpt"] = result.stderr_excerpt
+                if result.doctor_output is not None:
+                    with self.counter_lock:
+                        attempt = self.counts[operation]["completed"]
+                    record["doctor_output"] = self._save_doctor_output(
+                        attempt, result.doctor_output
+                    )
+                if result.failed_checks:
+                    record["failed_checks"] = list(result.failed_checks)
                 self.sink.write(record)
                 due += interval
                 if self.stop.is_set():
