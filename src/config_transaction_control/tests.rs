@@ -10,6 +10,7 @@ use rustbgpd_api::peer_types::{
 use rustbgpd_api::rib_service::FibTableControlError;
 use rustbgpd_policy::PolicyAction;
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
+use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicUsize;
 use tokio::sync::Mutex;
 
@@ -1615,13 +1616,107 @@ fn spawn_typed_transaction_manager(
 struct TypedTransactionFakeControl {
     plans: Arc<Mutex<VecDeque<RuntimeConfigTransactionPlan>>>,
     stage_results: Arc<Mutex<VecDeque<Result<(), String>>>>,
-    drop_stage_ack: Arc<AtomicBool>,
-    drop_restore_ack: Arc<AtomicBool>,
     /// `StageTransactionConfig` commands received, answered or not.
     stage_calls: Arc<AtomicUsize>,
-    /// Drop the reply of every `PlanTransactionConfig` after the first plan
-    /// of either kind: the post-commit re-plan of a live policy-impact apply.
-    drop_replan_reply: Arc<AtomicBool>,
+    faults: Arc<TransactionFaultSchedule>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+enum TransactionTestActor {
+    Peer,
+    Typed,
+    Persist,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+enum TransactionTestFault {
+    NotAccepted,
+    DropReply,
+    NoReply,
+}
+
+#[derive(Default)]
+struct TransactionFaultSchedule {
+    fault: Option<(usize, TransactionTestFault)>,
+    baseline: Vec<TransactionTestActor>,
+    interactions: std::sync::Mutex<Vec<(TransactionTestActor, &'static str)>>,
+    injected: AtomicBool,
+    // An applied effect stays outstanding until its restoration is acknowledged.
+    // Observing a restored fake alone is not proof that the controller knows it.
+    outstanding: std::sync::atomic::AtomicU8,
+}
+
+impl TransactionFaultSchedule {
+    fn drop_reply_at(index: usize) -> Arc<Self> {
+        Arc::new(Self {
+            fault: Some((index, TransactionTestFault::DropReply)),
+            ..Self::default()
+        })
+    }
+
+    fn accepted(
+        &self,
+        actor: TransactionTestActor,
+        name: &'static str,
+    ) -> Option<TransactionTestFault> {
+        let mut interactions = self.interactions.lock().unwrap();
+        let index = interactions.len();
+        interactions.push((actor, name));
+        self.fault.and_then(|(target, fault)| {
+            if index != target || self.injected.swap(true, Ordering::SeqCst) {
+                return None;
+            }
+            assert_ne!(fault, TransactionTestFault::NotAccepted);
+            Some(fault)
+        })
+    }
+
+    /// Close a receiver before the target send. Closing it after its previous
+    /// accepted command but before replying orders the controller's next send.
+    fn reject_next(&self, actor: TransactionTestActor, local_index: usize) -> bool {
+        let Some((index, TransactionTestFault::NotAccepted)) = self.fault else {
+            return false;
+        };
+        if self.baseline[index] != actor
+            || self.baseline[..index]
+                .iter()
+                .filter(|&&a| a == actor)
+                .count()
+                != local_index
+        {
+            return false;
+        }
+        self.injected.store(true, Ordering::SeqCst);
+        true
+    }
+
+    fn effect(&self, actor: TransactionTestActor) {
+        self.outstanding
+            .fetch_or(1 << actor as u8, Ordering::SeqCst);
+    }
+
+    fn restored(&self, actor: TransactionTestActor) {
+        self.outstanding
+            .fetch_and(!(1 << actor as u8), Ordering::SeqCst);
+    }
+}
+
+async fn transaction_test_reply<T>(
+    reply: oneshot::Sender<T>,
+    value: T,
+    fault: Option<TransactionTestFault>,
+) -> bool {
+    match fault {
+        Some(TransactionTestFault::DropReply) => false,
+        Some(TransactionTestFault::NoReply) => {
+            let _held_reply = reply;
+            std::future::pending().await
+        }
+        None => reply.send(value).is_ok(),
+        Some(TransactionTestFault::NotAccepted) => {
+            unreachable!("rejected sends are never received")
+        }
+    }
 }
 
 fn spawn_typed_transaction_manager_controlled(
@@ -1638,7 +1733,10 @@ fn spawn_typed_transaction_manager_controlled(
     )
     .expect("typed transaction fake initial config must load");
     let current = Arc::new(Mutex::new(initial));
-    let (tx, rx) = mpsc::channel(1);
+    let (tx, mut rx) = mpsc::channel(1);
+    if control.faults.reject_next(TransactionTestActor::Typed, 0) {
+        rx.close();
+    }
     tokio::spawn(fake_typed_transaction_manager_actor(
         rx,
         current,
@@ -1672,6 +1770,10 @@ fn spawn_typed_transaction_manager_with_current(
     tx
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "the typed fake keeps plan, stage, and acknowledged restoration under one fault schedule"
+)]
 async fn fake_typed_transaction_manager_actor(
     mut rx: mpsc::Receiver<InternalCommand>,
     current: Arc<Mutex<Config>>,
@@ -1680,7 +1782,23 @@ async fn fake_typed_transaction_manager_actor(
     control: TypedTransactionFakeControl,
 ) {
     let mut plan_calls = 0usize;
+    let mut calls = 0usize;
     while let Some(command) = rx.recv().await {
+        let name = match &command {
+            InternalCommand::PlanTransactionConfig { .. } => "plan",
+            InternalCommand::PlanAcceptedTransactionConfig { .. } => "accepted plan",
+            InternalCommand::StageTransactionConfig { .. } => "stage snapshot",
+            InternalCommand::RestoreTransactionConfig { .. } => "restore snapshot",
+            _ => panic!("unexpected command in typed transaction fake"),
+        };
+        let fault = control.faults.accepted(TransactionTestActor::Typed, name);
+        calls += 1;
+        if control
+            .faults
+            .reject_next(TransactionTestActor::Typed, calls)
+        {
+            rx.close();
+        }
         match command {
             InternalCommand::PlanTransactionConfig {
                 candidate, reply, ..
@@ -1695,15 +1813,16 @@ async fn fake_typed_transaction_manager_actor(
                     .unwrap_or_else(|| response.clone());
                 let mut plan = attach_committed_candidate(response.clone(), &candidate_toml);
                 if plan_calls > 0 {
-                    if control.drop_replan_reply.load(Ordering::Relaxed) {
-                        drop(reply);
-                        continue;
-                    }
                     plan.runtime_snapshot_token =
                         response.post_commit_runtime_snapshot_token.clone();
                 }
                 plan_calls += 1;
-                let _ = reply.send(Ok(PlannedTransactionConfig { plan, candidate }));
+                transaction_test_reply(
+                    reply,
+                    Ok(PlannedTransactionConfig { plan, candidate }),
+                    fault,
+                )
+                .await;
             }
             InternalCommand::PlanAcceptedTransactionConfig {
                 snapshot, reply, ..
@@ -1723,7 +1842,12 @@ async fn fake_typed_transaction_manager_actor(
                         response.post_commit_runtime_snapshot_token.clone();
                 }
                 plan_calls += 1;
-                let _ = reply.send(Ok(PlannedTransactionConfig { plan, candidate }));
+                transaction_test_reply(
+                    reply,
+                    Ok(PlannedTransactionConfig { plan, candidate }),
+                    fault,
+                )
+                .await;
             }
             InternalCommand::StageTransactionConfig {
                 candidate,
@@ -1750,21 +1874,16 @@ async fn fake_typed_transaction_manager_actor(
                 *snapshot_toml.lock().await = crate::config::persisted_config_document(&current)
                     .expect("typed fake staged config must serialize");
                 let rollback = TransactionConfigRollbackToken::capture(Box::new(previous), scope);
-                if control.drop_stage_ack.load(Ordering::Relaxed) {
-                    drop(reply);
-                } else {
-                    let _ = reply.send(Ok(rollback));
-                }
+                control.faults.effect(TransactionTestActor::Typed);
+                transaction_test_reply(reply, Ok(rollback), fault).await;
             }
             InternalCommand::RestoreTransactionConfig { rollback, reply } => {
                 *current.lock().await = rollback.previous().clone();
                 *snapshot_toml.lock().await =
                     crate::config::persisted_config_document(rollback.previous())
                         .expect("typed fake restored config must serialize");
-                if control.drop_restore_ack.load(Ordering::Relaxed) {
-                    drop(reply);
-                } else {
-                    let _ = reply.send(());
+                if transaction_test_reply(reply, (), fault).await {
+                    control.faults.restored(TransactionTestActor::Typed);
                 }
             }
             InternalCommand::ReplaceConfigSnapshot { .. }
@@ -4902,7 +5021,7 @@ async fn confirmed_apply_compound_rollback_failure_retains_journal_and_fences_mu
     let snapshot_toml = Arc::new(Mutex::new(previous_toml.clone()));
     let peers = Arc::new(Mutex::new(Vec::new()));
     let control = TypedTransactionFakeControl {
-        drop_restore_ack: Arc::new(AtomicBool::new(true)),
+        faults: TransactionFaultSchedule::drop_reply_at(2),
         ..TypedTransactionFakeControl::default()
     };
     let (peer_tx, peer_rx) = mpsc::channel(8);
@@ -6294,7 +6413,7 @@ fn replan_dropped_live_policy_fakes(
         snapshot_toml.clone(),
         live_impact_plan(),
         TypedTransactionFakeControl {
-            drop_replan_reply: Arc::new(AtomicBool::new(true)),
+            faults: TransactionFaultSchedule::drop_reply_at(2),
             ..TypedTransactionFakeControl::default()
         },
     );
@@ -7982,7 +8101,7 @@ async fn dropped_typed_stage_reply_fences_without_persisting() {
     let candidate_toml = dynamic_candidate_toml();
     let snapshot_toml = Arc::new(Mutex::new(previous_toml));
     let control = TypedTransactionFakeControl {
-        drop_stage_ack: Arc::new(AtomicBool::new(true)),
+        faults: TransactionFaultSchedule::drop_reply_at(1),
         ..TypedTransactionFakeControl::default()
     };
     let transaction_plan = plan(
@@ -8055,8 +8174,10 @@ peer_group = "ix-members"
     );
     let snapshot_toml = Arc::new(Mutex::new(previous_toml));
     let peers = Arc::new(Mutex::new(Vec::new()));
-    let control = TypedTransactionFakeControl::default();
-    control.drop_restore_ack.store(true, Ordering::Relaxed);
+    let control = TypedTransactionFakeControl {
+        faults: TransactionFaultSchedule::drop_reply_at(2),
+        ..TypedTransactionFakeControl::default()
+    };
     let internal_tx = spawn_typed_transaction_manager_controlled(
         snapshot_toml.clone(),
         plan(
@@ -11489,4 +11610,367 @@ async fn full_persistence_queue_ends_clean_at_the_pre_effect_deadline() {
     assert!(internal_rx.try_recv().is_err(), "no snapshot was staged");
     assert!(operation.try_settle());
     drop(executor_guard);
+}
+
+async fn enumerated_live_policy_peer(
+    mut rx: mpsc::Receiver<PeerManagerCommand>,
+    snapshot: Arc<Mutex<String>>,
+    live: Arc<Mutex<Vec<ResolvedPeerPolicy>>>,
+    schedule: Arc<TransactionFaultSchedule>,
+) {
+    let mut calls = 0;
+    while let Some(command) = rx.recv().await {
+        let name = match &command {
+            PeerManagerCommand::RuntimeConfigSnapshot { .. } => "snapshot",
+            PeerManagerCommand::PlanConfigTransaction { .. } => "plan",
+            PeerManagerCommand::ApplyPolicyImpactSnapshot { .. } => "apply policies",
+            PeerManagerCommand::ApplyResolvedPolicySnapshot { .. } => "restore policies",
+            PeerManagerCommand::CommitConfigSnapshotStage { .. } => "finalize snapshot",
+            _ => panic!("unexpected live-policy peer command"),
+        };
+        let fault = schedule.accepted(TransactionTestActor::Peer, name);
+        calls += 1;
+        if schedule.reject_next(TransactionTestActor::Peer, calls) {
+            rx.close();
+        }
+        match command {
+            PeerManagerCommand::RuntimeConfigSnapshot { reply } => {
+                let value = rustbgpd_api::peer_types::RuntimeConfigSnapshotReply {
+                    toml: snapshot.lock().await.clone(),
+                    rpol_files: Vec::new(),
+                    rpol: rustbgpd_policy::rpol::RpolPolicySet::default(),
+                };
+                transaction_test_reply(reply, Ok(value), fault).await;
+            }
+            PeerManagerCommand::PlanConfigTransaction {
+                candidate_toml,
+                reply,
+                ..
+            } => {
+                transaction_test_reply(
+                    reply,
+                    Ok(attach_committed_candidate(
+                        live_impact_plan(),
+                        &candidate_toml,
+                    )),
+                    fault,
+                )
+                .await;
+            }
+            PeerManagerCommand::ApplyPolicyImpactSnapshot {
+                static_targets,
+                dynamic_ranges,
+                reply,
+            } => {
+                assert!(dynamic_ranges.is_empty());
+                let priors = std::mem::replace(&mut *live.lock().await, static_targets);
+                schedule.effect(TransactionTestActor::Peer);
+                transaction_test_reply(reply, Ok(priors), fault).await;
+            }
+            PeerManagerCommand::ApplyResolvedPolicySnapshot { targets, reply } => {
+                let priors = std::mem::replace(&mut *live.lock().await, targets);
+                if transaction_test_reply(reply, Ok(priors), fault).await {
+                    schedule.restored(TransactionTestActor::Peer);
+                }
+            }
+            PeerManagerCommand::CommitConfigSnapshotStage { reply } => {
+                transaction_test_reply(reply, (), fault).await;
+            }
+            _ => unreachable!(),
+        }
+    }
+}
+
+async fn enumerated_transaction_persister(
+    mut rx: mpsc::Receiver<ConfigEvent>,
+    config_path: PathBuf,
+    schedule: Arc<TransactionFaultSchedule>,
+) {
+    let Some(ConfigEvent::ConfigTransactionCommitted {
+        candidate_toml,
+        ack: Some(ConfigPersistAck::Staged { staged, commit }),
+    }) = rx.recv().await
+    else {
+        return;
+    };
+    let fault = schedule.accepted(TransactionTestActor::Persist, "stage file");
+    // The second interaction uses a oneshot, so reject its receiver before
+    // acknowledging the stage, exactly as an unavailable bridge would.
+    if schedule.reject_next(TransactionTestActor::Persist, 1) {
+        drop(commit);
+        transaction_test_reply(staged, Ok(()), fault).await;
+        return;
+    }
+    transaction_test_reply(staged, Ok(()), fault).await;
+    if let Ok(reply) = commit.await {
+        let fault = schedule.accepted(TransactionTestActor::Persist, "publish file");
+        std::fs::write(config_path, candidate_toml).unwrap();
+        schedule.effect(TransactionTestActor::Persist);
+        transaction_test_reply(reply, ConfigPersistCommitOutcome::PublishedDurable, fault).await;
+    }
+}
+
+const TRANSACTION_FAULT_CHILD: &str = "RUSTBGPD_TEST_TRANSACTION_FAULT_CHILD";
+
+#[expect(
+    clippy::too_many_lines,
+    reason = "one confirmed apply fixture checks the same terminal oracle for every scheduled interaction"
+)]
+async fn run_confirmed_live_policy_fault_child(root: &Path) {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let (baseline, fault): (
+        Vec<TransactionTestActor>,
+        Option<(usize, TransactionTestFault)>,
+    ) = serde_json::from_slice(&std::fs::read(root.join("schedule.json")).unwrap()).unwrap();
+    let schedule = Arc::new(TransactionFaultSchedule {
+        fault,
+        baseline,
+        ..TransactionFaultSchedule::default()
+    });
+    let config_dir = root.join("config");
+    let state_dir = root.join("state");
+    for dir in [&config_dir, &state_dir] {
+        std::fs::create_dir(dir).unwrap();
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    let previous = live_policy_toml("permit");
+    let candidate = live_policy_toml("deny");
+    let config_path = config_dir.join("rustbgpd.toml");
+    std::fs::write(&config_path, &previous).unwrap();
+    let accepted = Arc::new(AcceptedConfigSnapshot::load(&config_path, None).unwrap());
+    let (_accepted_tx, accepted_rx) = watch::channel(accepted);
+    let snapshot = Arc::new(Mutex::new(previous.clone()));
+    let live = Arc::new(Mutex::new(resolved_policy_targets(&candidate, &previous)));
+    let internal_tx = spawn_typed_transaction_manager_controlled(
+        snapshot.clone(),
+        live_impact_plan(),
+        TypedTransactionFakeControl {
+            faults: schedule.clone(),
+            ..Default::default()
+        },
+    );
+    let (peer_tx, mut peer_rx) = mpsc::channel(1);
+    if schedule.reject_next(TransactionTestActor::Peer, 0) {
+        peer_rx.close();
+    }
+    tokio::spawn(enumerated_live_policy_peer(
+        peer_rx,
+        snapshot.clone(),
+        live.clone(),
+        schedule.clone(),
+    ));
+    let (config_tx, mut config_rx) = mpsc::channel(1);
+    if schedule.reject_next(TransactionTestActor::Persist, 0) {
+        config_rx.close();
+    }
+    tokio::spawn(enumerated_transaction_persister(
+        config_rx,
+        config_path.clone(),
+        schedule.clone(),
+    ));
+    let launch = crate::confirm_journal::v3::LaunchIdentity::resolve(&config_path).unwrap();
+    let locator = launch.locator_path();
+    let watchdog = RuntimeConfigSettlementWatchdog::new();
+    let gate = DaemonGate::new();
+    let controller = ConfigTransactionController::new_accepted(
+        FibTableControlDeps {
+            confirm_journal_path: Some(state_dir.join(crate::confirm_journal::JOURNAL_FILE_NAME)),
+            ..deps_value(None, peer_tx, Some(config_tx), Vec::new())
+        },
+        BgpMetrics::new(),
+        accepted_rx,
+    )
+    .with_preloaded_planner(internal_tx)
+    .with_confirm_v3_launch(launch)
+    .with_runtime_config_settlement(watchdog.clone(), gate.clone());
+    let applying = controller.clone().apply(confirmed_dynamic_request(
+        candidate.clone(),
+        "enumerated",
+        60,
+    ));
+    tokio::pin!(applying);
+    let result = tokio::time::timeout(Duration::from_secs(10), async {
+        tokio::select! {
+            result = &mut applying => Some(result),
+            () = async {
+                while watchdog.owner_fence_reason().is_none() {
+                    tokio::time::sleep(Duration::from_millis(1)).await;
+                }
+            } => None,
+        }
+    })
+    .await
+    .expect("owned apply must settle or actually fence within its test budget");
+    let outstanding = schedule.outstanding.load(Ordering::SeqCst);
+    let fence = watchdog.owner_fence_reason();
+    assert_eq!(
+        live.lock().await.len(),
+        1,
+        "the fixture has one active policy target"
+    );
+    if fault.is_none() {
+        let response = result.unwrap().expect("baseline apply succeeds");
+        assert!(response.confirmation.is_some());
+        assert!(controller.state.lock().await.pending.is_some());
+        assert!(locator.exists());
+        assert_snapshot_matches_config(&snapshot.lock().await, &candidate);
+        assert_snapshot_matches_config(&std::fs::read_to_string(&config_path).unwrap(), &candidate);
+        assert!(
+            live.lock()
+                .await
+                .iter()
+                .all(|target| import_default_action(target) == PolicyAction::Deny)
+        );
+    } else if outstanding == 0 {
+        let error = result
+            .expect("proved no effect or acknowledged restoration must settle cleanly")
+            .expect_err("a fault cannot report successful apply");
+        assert!(
+            !matches!(error, ConfigTransactionApplyError::RecoveryRequired { .. }),
+            "{error:?}"
+        );
+        assert!(fence.is_none() && gate.not_ready_reason().is_none());
+        assert!(!watchdog.has_owner());
+        assert!(!locator.exists());
+        let state = controller.state.lock().await;
+        assert!(
+            state.applying_confirm_id.is_none()
+                && state.pending.is_none()
+                && state.ambiguous_failure_confirm_id.is_none()
+        );
+        drop(state);
+        controller.reject_if_pending("oracle").await.unwrap();
+        drop(controller.deps.lock.acquire().await.unwrap());
+        assert_snapshot_matches_config(&snapshot.lock().await, &previous);
+        assert_eq!(std::fs::read_to_string(&config_path).unwrap(), previous);
+        assert!(
+            live.lock()
+                .await
+                .iter()
+                .all(|target| import_default_action(target) == PolicyAction::Permit)
+        );
+    } else {
+        assert!(
+            result.is_none(),
+            "unrestored or unknown effects cannot return a clean result: {result:?}"
+        );
+        assert!(fence.is_some() && watchdog.has_owner());
+        assert!(
+            locator.exists(),
+            "unconfirmed effects require retained revert authority"
+        );
+        // Readiness propagation is asynchronous after the atomic fence.
+        while gate.not_ready_reason().is_none() {
+            tokio::task::yield_now().await;
+        }
+        assert!(controller.deps.lock.acquire().await.is_err());
+    }
+    assert!(fault.is_none() || schedule.injected.load(Ordering::SeqCst));
+    let receipt = serde_json::json!({
+        "interactions": *schedule.interactions.lock().unwrap(),
+        "outstanding": outstanding,
+        "fence": fence,
+        "locator": locator.exists(),
+    });
+    std::fs::write(
+        root.join("receipt.json"),
+        serde_json::to_vec(&receipt).unwrap(),
+    )
+    .unwrap();
+    if fence.is_some() {
+        // Exercise the real independent fail-stop action; the parent checks
+        // exit 70 plus this already-validated receipt and then boot-reverts.
+        std::future::pending::<()>().await;
+    }
+}
+
+#[tokio::test]
+async fn confirmed_live_policy_faults_are_enumerated() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    if let Some(root) = std::env::var_os(TRANSACTION_FAULT_CHILD) {
+        run_confirmed_live_policy_fault_child(Path::new(&root)).await;
+        return;
+    }
+    let run = |baseline: &[TransactionTestActor], fault: Option<(usize, TransactionTestFault)>| {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let settings = root.path().join("settings.v1");
+        std::fs::write(
+            &settings,
+            "version=settlement-control-v1\nbudget_ms=2000\ngrace_ms=100\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(settings, std::fs::Permissions::from_mode(0o600)).unwrap();
+        std::fs::write(
+            root.path().join("schedule.json"),
+            serde_json::to_vec(&(baseline, fault)).unwrap(),
+        )
+        .unwrap();
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "config_transaction_control::tests::confirmed_live_policy_faults_are_enumerated",
+                "--nocapture",
+            ])
+            .env(TRANSACTION_FAULT_CHILD, root.path())
+            .env("RUSTBGPD_TEST_SETTLEMENT_CONTROL_DIR", root.path())
+            .output()
+            .unwrap();
+        let bytes = std::fs::read(root.path().join("receipt.json")).unwrap_or_else(|error| {
+            panic!("fault {fault:?} has no validated receipt: {error}; {output:?}")
+        });
+        let receipt: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        let fenced = !receipt["fence"].is_null();
+        assert_eq!(
+            output.status.code(),
+            Some(if fenced { 70 } else { 0 }),
+            "fault {fault:?}: {output:?}"
+        );
+        if fenced {
+            let config_path = root.path().join("config/rustbgpd.toml");
+            let launch = crate::confirm_journal::v3::LaunchIdentity::resolve(&config_path).unwrap();
+            assert_eq!(
+                launch
+                    .boot_revert_check()
+                    .unwrap()
+                    .unwrap()
+                    .notice
+                    .confirm_id,
+                "enumerated"
+            );
+            assert_snapshot_matches_config(
+                &std::fs::read_to_string(config_path).unwrap(),
+                &live_policy_toml("permit"),
+            );
+            assert!(!launch.locator_path().exists());
+        }
+        eprintln!(
+            "fault={fault:?} exit={} receipt={receipt}",
+            output.status.code().unwrap()
+        );
+        receipt
+    };
+    let baseline = run(&[], None);
+    let interactions: Vec<(TransactionTestActor, String)> =
+        serde_json::from_value(baseline["interactions"].clone()).unwrap();
+    assert!(!interactions.is_empty());
+    let actors: Vec<_> = interactions.iter().map(|(actor, _)| *actor).collect();
+    for index in 0..actors.len() {
+        for fault in [
+            TransactionTestFault::NotAccepted,
+            TransactionTestFault::DropReply,
+            TransactionTestFault::NoReply,
+        ] {
+            let receipt = run(&actors, Some((index, fault)));
+            let observed: Vec<(TransactionTestActor, String)> =
+                serde_json::from_value(receipt["interactions"].clone()).unwrap();
+            let accepted_prefix = index + usize::from(fault != TransactionTestFault::NotAccepted);
+            assert_eq!(observed[..accepted_prefix], interactions[..accepted_prefix]);
+            if fault == TransactionTestFault::NotAccepted {
+                assert_ne!(observed.get(index), interactions.get(index));
+            }
+        }
+    }
 }
