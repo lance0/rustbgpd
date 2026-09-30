@@ -705,6 +705,38 @@ class RsFlagshipAnalyzerContracts(unittest.TestCase):
             "failed_checks": ["daemon.healthy"],
         })
 
+    def test_doctor_hard_error_keeps_report_without_naming_checks(self):
+        # Exit 1 with red JSON is a cli_exit: the report is kept, but naming
+        # its checks would make the driver's record schema-invalid here.
+        report = json.dumps({
+            "bundle": "/run/doctor.tar.gz", "ok": False,
+            "checks": [{"name": "daemon.healthy", "status": "fail", "detail": "d"}],
+        })
+        probe = load.run_cli_command(
+            [sys.executable, "-c", f"print({report!r}); raise SystemExit(1)"],
+            "doctor", 5, 1, "20.0.0.0/24",
+        )
+        self.assertEqual(probe.result, "cli_exit")
+        self.assertEqual(probe.doctor_output, (report + "\n").encode())
+        self.assertEqual(probe.failed_checks, ())
+        # Mirror the driver: failed_checks is written only when non-empty.
+        fields = {"failed_checks": list(probe.failed_checks)} if probe.failed_checks else {}
+        meta = smoke_meta()
+        evidence = self.with_operation_fields(
+            meta, "doctor", exit=probe.exit_code, result=probe.result,
+            bytes=probe.byte_count, sha256=probe.sha256,
+            doctor_output="doctor-report-0001.json", **fields,
+        )
+        result, payload = run_analyzer(
+            smoke_rows(), smoke_cycles(), meta, management=evidence
+        )
+        self.assertEqual(result.returncode, 1)
+        self.assertTrue(payload["gates"]["management_evidence"]["pass"])
+        self.assertEqual(payload["gates"]["management_doctor"]["value"]["failures"][0], {
+            "operation": "doctor", "result": "cli_exit", "exit": 1,
+            "doctor_output": "doctor-report-0001.json",
+        })
+
     def test_doctor_report_fields_are_bounded_and_only_on_nonzero_doctor(self):
         self.assertEqual(analyzer.DOCTOR_FAILED_CHECKS_MAX, load.DOCTOR_FAILED_CHECKS_MAX)
         self.assertEqual(analyzer.DOCTOR_CHECK_NAME_CHARS, load.DOCTOR_CHECK_NAME_CHARS)

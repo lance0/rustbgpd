@@ -247,6 +247,10 @@ def run_cli_command(
         doctor_output, failed_checks = None, ()
         if operation == "doctor" and completed.returncode != 0:
             doctor_output, failed_checks = _doctor_evidence(stdout, payload)
+            # A hard error can still print red JSON; only a validated report
+            # names checks, or the analyzer rejects the record.
+            if result != "doctor_check_failed":
+                failed_checks = ()
     return ProbeResult(
         completed.returncode, result, byte_count, digest, excerpt,
         doctor_output, failed_checks,
