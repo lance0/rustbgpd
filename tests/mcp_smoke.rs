@@ -25,6 +25,7 @@ use tonic::{Code, Request};
 pub mod support;
 
 const PREFIX: &str = "203.0.113.0";
+const SECOND_PREFIX: &str = "198.51.100.0";
 const TOKEN: &str = "mcp-smoke-observer";
 const LADDER: &[&str] = &[
     "best_route",
@@ -78,7 +79,7 @@ impl Process {
         stdin.flush().expect("flush MCP request");
     }
 
-    async fn request(&mut self, request: Value) -> Value {
+    async fn exchange(&mut self, request: Value) -> Value {
         self.send(&request);
         let response = tokio::time::timeout(
             Duration::from_secs(35),
@@ -93,6 +94,11 @@ impl Process {
             response["id"], request["id"],
             "unexpected MCP message: {response}"
         );
+        response
+    }
+
+    async fn request(&mut self, request: Value) -> Value {
+        let response = self.exchange(request).await;
         assert!(
             response.get("error").is_none(),
             "MCP protocol error: {response}"
@@ -344,6 +350,7 @@ async fn run_fixture(path: &Path) {
     };
     let mut injection = proto::injection_service_client::InjectionServiceClient::new(operator);
     injection.add_path(route(PREFIX)).await.unwrap();
+    injection.add_path(route(SECOND_PREFIX)).await.unwrap();
 
     let mut peer = tokio::net::TcpStream::connect(("127.0.0.1", bgp_port))
         .await
@@ -395,13 +402,89 @@ async fn run_fixture(path: &Path) {
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
+    let history = mcp
+        .tool(
+            7,
+            "rbgp_list_route_events",
+            json!({"family":"ipv4_unicast", "prefix":PREFIX, "prefix_length":24, "limit":10}),
+        )
+        .await;
+    let events = history["events"].as_array().unwrap();
+    assert!(
+        events.iter().any(|event| event["event_type"] == "added"),
+        "{history}"
+    );
+    for event in events {
+        assert_eq!(event["prefix"], "203.0.113.0/24");
+        assert_eq!(event["family"], "ipv4_unicast");
+        assert!(event["event_id"].as_u64().unwrap() > 0);
+        assert!(!event["timestamp"].as_str().unwrap().is_empty());
+    }
+    let other_family = mcp
+        .tool(
+            8,
+            "rbgp_list_route_events",
+            json!({"family":"ipv6_unicast", "limit":10}),
+        )
+        .await;
+    assert_eq!(other_family["events"], json!([]));
+
+    let stats = mcp
+        .tool(
+            9,
+            "rbgp_get_policy_stats",
+            json!({"peer_address":"127.0.0.1", "direction":"both"}),
+        )
+        .await;
+    let chains = stats["chains"].as_array().unwrap();
+    assert_eq!(chains.len(), 2, "{stats}");
+    assert_eq!(chains[0]["direction"], "export");
+    assert_eq!(chains[1]["direction"], "import");
+    for chain in chains {
+        assert_eq!(chain["peer_address"], "127.0.0.1");
+        assert!(chain["routes_evaluated"].is_u64());
+        assert!(chain["policy_generation"].is_u64());
+        assert!(chain["terms"].is_array());
+    }
+    let unknown_peer_stats = mcp
+        .exchange(json!({"jsonrpc":"2.0", "id":10, "method":"tools/call", "params":{"name":"rbgp_get_policy_stats", "arguments":{"peer_address":"192.0.2.1", "direction":"both"}}}))
+        .await;
+    assert_eq!(unknown_peer_stats["error"]["code"], -32602);
+    assert!(
+        unknown_peer_stats["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("neighbor 192.0.2.1 not found"),
+        "{unknown_peer_stats}"
+    );
+
+    let dry_run = mcp
+        .tool(
+            11,
+            "rbgp_test_policy",
+            json!({
+                "rpol_source":"policy candidate { term selected { if peer.asn == 65002 { reject } } term fallback { accept } }",
+                "policy":"candidate", "direction":"export", "peer":"127.0.0.1",
+                "family":"ipv4_unicast", "limit":1, "show_rejected":1
+            }),
+        )
+        .await;
+    assert_eq!(dry_run["compiled"], true, "{dry_run}");
+    assert_eq!(dry_run["routes_evaluated"], 1);
+    assert_eq!(dry_run["accepted"], 0);
+    assert_eq!(dry_run["rejected"], 1);
+    assert_eq!(dry_run["evaluated_limit"], 1);
+    assert_eq!(dry_run["rejected_routes"][0]["prefix"], "198.51.100.0/24");
+    assert_eq!(dry_run["term_hits"][0]["term"], "selected");
+    assert_eq!(dry_run["term_hits"][0]["hits"], 1);
+
     let observer = Endpoint::from_shared(endpoint)
         .unwrap()
         .connect()
         .await
         .unwrap();
     let mut observer = proto::injection_service_client::InjectionServiceClient::new(observer);
-    let mut attempt = Request::new(route("198.51.100.0"));
+    let mut attempt = Request::new(route("192.0.2.0"));
     attempt
         .metadata_mut()
         .insert("authorization", format!("Bearer {TOKEN}").parse().unwrap());
@@ -412,7 +495,7 @@ async fn run_fixture(path: &Path) {
         "{error}"
     );
     assert_eq!(
-        explain(&mut mcp, 4, "198.51.100.0").await["decision"],
+        explain(&mut mcp, 4, "192.0.2.0").await["decision"],
         "no_best_route"
     );
 
@@ -432,6 +515,23 @@ async fn run_fixture(path: &Path) {
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
+    let stats_after_reload = mcp
+        .tool(
+            12,
+            "rbgp_get_policy_stats",
+            json!({"peer_address":"127.0.0.1", "direction":"export"}),
+        )
+        .await;
+    let export = &stats_after_reload["chains"][0];
+    assert_eq!(stats_after_reload["chains"].as_array().unwrap().len(), 1);
+    assert_eq!(export["peer_address"], "127.0.0.1");
+    assert_eq!(export["direction"], "export");
+    assert!(export["policy_generation"].as_u64().unwrap() > 0);
+    assert!(export["routes_evaluated"].as_u64().unwrap() > 0);
+    assert_eq!(export["terms"][0]["policy"], "block-doc-prefix");
+    assert_eq!(export["terms"][0]["term_index"], 0);
+    assert!(export["terms"][0]["hits"].as_u64().unwrap() > 0);
+
     // A peer-initiated administrative reset must be visible through the MCP
     // history RPC as a recorded lifecycle transition, not inferred from the
     // current neighbor table. The RPC does not retain notification payloads.
