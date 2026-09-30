@@ -1,4 +1,5 @@
 //! One-off, opt-in differential for uncompressed BGP4MP UPDATE dumps.
+//! Compares IPv4/IPv6 unicast NLRI, including Add-Path IDs; other MP families fail closed.
 //! Pinned 2026-09-30 00:00 UTC files (download outside Git, verify with sha256sum, decompress):
 //! RIS rrc03: https://data.ris.ripe.net/rrc03/2026.09/updates.20260930.0000.gz
 //!   50a97ec55a6f6cbe8eb46cf9555a10c39d5729b0af87f7569136167fecce3ca4
@@ -10,16 +11,16 @@
 //!   cargo test --test mrt_real_differential real_updates -- --ignored --nocapture
 //! RFC 7606 differences require an individual verdict; only RFC 9774 AS_SET is pre-exempted.
 use bgpkit_parser::models::{
-    AsPathSegment as KitSegment, AsnLength, AttributeValue, Bgp4MpEnum, BgpMessage,
-    BgpUpdateMessage, Community, MetaCommunity, MrtMessage,
+    Afi as KitAfi, AsPathSegment as KitSegment, AsnLength, AttributeValue, Bgp4MpEnum, BgpMessage,
+    BgpUpdateMessage, Community, MetaCommunity, MrtMessage, NetworkPrefix, Nlri, Safi as KitSafi,
 };
 use bgpkit_parser::parser::bgp::parse_bgp_message;
 use bgpkit_parser::parser::mrt::chunk_mrt_record;
 use bytes::{Bytes, BytesMut};
 use rustbgpd_wire::constants::HEADER_LEN;
 use rustbgpd_wire::{
-    AsPathSegment, ErrorDisposition, Ipv4UnicastMode, PathAttribute, RawAttribute,
-    RevisedParsedUpdate, UpdateMessage,
+    Afi, AsPathSegment, ErrorDisposition, Ipv4UnicastMode, PathAttribute, RawAttribute,
+    RevisedParsedUpdate, Safi, UpdateMessage,
 };
 use std::collections::BTreeSet;
 use std::fs::File;
@@ -27,11 +28,15 @@ use std::io::{BufRead, BufReader, Write};
 
 #[derive(Debug, PartialEq, Eq)]
 struct Shape {
-    announced: Vec<String>,
-    withdrawn: Vec<String>,
+    announced: Vec<(String, u32)>,
+    withdrawn: Vec<(String, u32)>,
     path: Vec<String>,
     communities: Vec<String>,
     known: BTreeSet<u8>,
+}
+
+fn kit_prefix(n: &NetworkPrefix) -> (String, u32) {
+    (n.prefix.to_string(), n.path_id.unwrap_or(0))
 }
 
 fn known_identity(kit: &BTreeSet<u8>, typed: &BTreeSet<u8>) -> BTreeSet<u8> {
@@ -95,17 +100,88 @@ fn known_attribute_negative_control() {
     );
 }
 
+#[test]
+fn add_path_identity_negative_control() {
+    let clean = std::fs::read("tests/fixtures/bgpkit/clean_ipv4_update.bin").unwrap();
+    let mut body = Bytes::copy_from_slice(&clean[HEADER_LEN..]);
+    let clean = UpdateMessage::decode(&mut body, clean.len() - HEADER_LEN)
+        .unwrap()
+        .parse_revised(true, false, false, &[])
+        .unwrap()
+        .update;
+    let mut announced = clean.announced;
+    assert!(!announced.is_empty());
+    announced[0].path_id = 7;
+    let update = UpdateMessage::build(
+        &announced,
+        &clean.withdrawn,
+        &clean.attributes,
+        true,
+        true,
+        Ipv4UnicastMode::Body,
+    );
+    let mut bytes = BytesMut::new();
+    update.encode(&mut bytes).unwrap();
+    let mut kit_bytes = bytes.clone().freeze();
+    let BgpMessage::Update(kit) =
+        parse_bgp_message(&mut kit_bytes, true, &AsnLength::Bits32).unwrap()
+    else {
+        panic!("expected UPDATE")
+    };
+    assert_eq!(kit.announced_prefixes[0].path_id, Some(7));
+    let mut rust_bytes = bytes.freeze().slice(HEADER_LEN..);
+    let body_len = rust_bytes.len();
+    let mut rust = UpdateMessage::decode(&mut rust_bytes, body_len)
+        .unwrap()
+        .parse_revised(true, false, true, &[])
+        .unwrap();
+    assert_eq!(rust.update.announced[0].path_id, 7);
+    assert!(
+        verdict(&kit, &rust).is_none(),
+        "valid Add-Path UPDATE must match"
+    );
+    rust.update.announced[0].path_id = 8;
+    let (category, reason) = verdict(&kit, &rust).expect("changed path ID must differ");
+    assert_eq!(category, "other");
+    assert!(reason.contains("(\"203.0.113.0/24\", 7)"));
+    assert!(reason.contains("(\"203.0.113.0/24\", 8)"));
+}
+
+#[test]
+fn typed_mp_scope_negative_control() {
+    let clean = std::fs::read("tests/fixtures/bgpkit/clean_ipv4_update.bin").unwrap();
+    let mut kit_bytes = Bytes::copy_from_slice(&clean);
+    let BgpMessage::Update(mut kit) =
+        parse_bgp_message(&mut kit_bytes, false, &AsnLength::Bits32).unwrap()
+    else {
+        panic!("expected UPDATE")
+    };
+    let mut rust_bytes = Bytes::copy_from_slice(&clean[HEADER_LEN..]);
+    let body_len = rust_bytes.len();
+    let rust = UpdateMessage::decode(&mut rust_bytes, body_len)
+        .unwrap()
+        .parse_revised(true, false, false, &[])
+        .unwrap();
+    assert!(
+        verdict(&kit, &rust).is_none(),
+        "valid unicast UPDATE must match"
+    );
+
+    kit.attributes.add_attr(
+        AttributeValue::MpUnreachNlri(Nlri::new_link_state_unreachable(
+            KitSafi::LinkState,
+            Vec::new(),
+        ))
+        .into(),
+    );
+    let (category, reason) = verdict(&kit, &rust).expect("typed MP must not be ignored");
+    assert_eq!(category, "other");
+    assert_eq!(reason, "unsupported MP NLRI family in unicast differential");
+}
+
 fn kit_shape(u: &bgpkit_parser::models::BgpUpdateMessage) -> Shape {
-    let mut announced: Vec<_> = u
-        .announced_prefixes
-        .iter()
-        .map(ToString::to_string)
-        .collect();
-    let mut withdrawn: Vec<_> = u
-        .withdrawn_prefixes
-        .iter()
-        .map(ToString::to_string)
-        .collect();
+    let mut announced: Vec<_> = u.announced_prefixes.iter().map(kit_prefix).collect();
+    let mut withdrawn: Vec<_> = u.withdrawn_prefixes.iter().map(kit_prefix).collect();
     let mut path = Vec::new();
     let mut communities = Vec::new();
     let mut known = BTreeSet::new();
@@ -137,12 +213,8 @@ fn kit_shape(u: &bgpkit_parser::models::BgpUpdateMessage) -> Shape {
                     ));
                 }
             }
-            AttributeValue::MpReachNlri(n) => {
-                announced.extend(n.prefixes.iter().map(ToString::to_string))
-            }
-            AttributeValue::MpUnreachNlri(n) => {
-                withdrawn.extend(n.prefixes.iter().map(ToString::to_string))
-            }
+            AttributeValue::MpReachNlri(n) => announced.extend(n.prefixes.iter().map(kit_prefix)),
+            AttributeValue::MpUnreachNlri(n) => withdrawn.extend(n.prefixes.iter().map(kit_prefix)),
             _ => {}
         }
     }
@@ -187,8 +259,16 @@ fn kit_shape(u: &bgpkit_parser::models::BgpUpdateMessage) -> Shape {
 }
 
 fn rust_shape(u: &rustbgpd_wire::ParsedUpdate) -> (Shape, BTreeSet<u8>) {
-    let mut announced: Vec<_> = u.announced.iter().map(|n| n.prefix.to_string()).collect();
-    let mut withdrawn: Vec<_> = u.withdrawn.iter().map(|n| n.prefix.to_string()).collect();
+    let mut announced: Vec<_> = u
+        .announced
+        .iter()
+        .map(|n| (n.prefix.to_string(), n.path_id))
+        .collect();
+    let mut withdrawn: Vec<_> = u
+        .withdrawn
+        .iter()
+        .map(|n| (n.prefix.to_string(), n.path_id))
+        .collect();
     let mut path = Vec::new();
     let mut communities = Vec::new();
     let mut known = BTreeSet::new();
@@ -208,12 +288,16 @@ fn rust_shape(u: &rustbgpd_wire::ParsedUpdate) -> (Shape, BTreeSet<u8>) {
                     path.push(format!("{kind}:{asns:?}"));
                 }
             }
-            PathAttribute::MpReachNlri(n) => {
-                announced.extend(n.announced.iter().map(|n| n.prefix.to_string()))
-            }
-            PathAttribute::MpUnreachNlri(n) => {
-                withdrawn.extend(n.withdrawn.iter().map(|n| n.prefix.to_string()))
-            }
+            PathAttribute::MpReachNlri(n) => announced.extend(
+                n.announced
+                    .iter()
+                    .map(|n| (n.prefix.to_string(), n.path_id)),
+            ),
+            PathAttribute::MpUnreachNlri(n) => withdrawn.extend(
+                n.withdrawn
+                    .iter()
+                    .map(|n| (n.prefix.to_string(), n.path_id)),
+            ),
             _ => {}
         }
         if let Some(v) = a.communities() {
@@ -244,7 +328,52 @@ fn rust_shape(u: &rustbgpd_wire::ParsedUpdate) -> (Shape, BTreeSet<u8>) {
     )
 }
 
+fn unsupported_kit_mp(kit: &BgpUpdateMessage) -> bool {
+    kit.attributes.iter().any(|a| {
+        let n = match a {
+            AttributeValue::MpReachNlri(n) | AttributeValue::MpUnreachNlri(n) => n,
+            _ => return false,
+        };
+        !matches!(
+            (n.afi, n.safi),
+            (KitAfi::Ipv4 | KitAfi::Ipv6, KitSafi::Unicast)
+        ) || n.labeled_prefixes.is_some()
+            || n.link_state_nlris.is_some()
+            || n.flowspec_nlris.is_some()
+    })
+}
+
+fn unsupported_rust_mp(rust: &RevisedParsedUpdate) -> bool {
+    rust.update.attributes.iter().any(|a| match a {
+        PathAttribute::MpReachNlri(n) => {
+            !matches!((n.afi, n.safi), (Afi::Ipv4 | Afi::Ipv6, Safi::Unicast))
+                || !n.flowspec_announced.is_empty()
+                || !n.evpn_announced.is_empty()
+                || !n.bgpls_announced.is_empty()
+                || !n.vpn_announced.is_empty()
+                || !n.labeled_announced.is_empty()
+                || !n.rtc_announced.is_empty()
+        }
+        PathAttribute::MpUnreachNlri(n) => {
+            !matches!((n.afi, n.safi), (Afi::Ipv4 | Afi::Ipv6, Safi::Unicast))
+                || !n.flowspec_withdrawn.is_empty()
+                || !n.evpn_withdrawn.is_empty()
+                || !n.bgpls_withdrawn.is_empty()
+                || !n.vpn_withdrawn.is_empty()
+                || !n.labeled_withdrawn.is_empty()
+                || !n.rtc_withdrawn.is_empty()
+        }
+        _ => false,
+    })
+}
+
 fn verdict(kit: &BgpUpdateMessage, rust: &RevisedParsedUpdate) -> Option<(&'static str, String)> {
+    if unsupported_kit_mp(kit) || unsupported_rust_mp(rust) {
+        return Some((
+            "other",
+            "unsupported MP NLRI family in unicast differential".into(),
+        ));
+    }
     let (ours, typed) = rust_shape(&rust.update);
     let theirs = kit_shape(kit);
     let missing = known_identity(&theirs.known, &typed);
