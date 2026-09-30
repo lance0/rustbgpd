@@ -32,6 +32,15 @@ reload is rejected before its CSV row if any session is down, post-completion
 stable-marker evidence is missing, or a daemon UPDATE fails to decode. Each
 valid reload emits a `reloadstall_csv` record for durable raw receipts.
 
+At successful exit, peers that received a ROUTE-REFRESH also emit one
+`route_refresh_accounting` line per family. `received` counts wire requests;
+`suppressed` counts requests ignored while that peer/family's replay latch was
+pending; `completed` counts replays whose final UPDATE was written (or empty
+replays); `sent_nlri` counts announced NLRI in replay UPDATEs after successful
+socket writes. Counts are cumulative for the whole run, including reconnects;
+they are not reset at reload boundaries. The pending latch retains its existing
+behavior across reconnects. Existing CSV headers and rows are unchanged.
+
 Native SIGHUP reloads also require a terminal daemon success from
 `bgp_sighup_reload_outcomes_total`. Receiver delivery alone can precede a
 failed apply acknowledgement and rollback. The driver snapshots the counters
