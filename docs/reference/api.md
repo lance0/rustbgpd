@@ -282,7 +282,7 @@ Read budgets depend on the operation; there is no server-wide read timeout.
 | Peer-manager operator reads | 2 s per request to the peer manager, including channel admission and reply |
 | `ListNeighbors` / `GetNeighborState` RIB summaries | A separate 2 s for the RIB summary admission and reply, after the peer-manager read; this is not one 2 s end-to-end RPC budget |
 | `GetPolicyStats` | One absolute 2 s deadline shared by peer validation, export, import and dataset waits; no stage resets it. Every stage reads a published roster (peer manager or RIB manager) and waits only for a Pending session publication or a busy counter or dataset error lock |
-| `GetHealth` | One 200 ms internal core-probe budget shared by peer-manager and RIB snapshot queries; failures return `INTERNAL` |
+| `GetHealth` | One 200 ms internal core-probe budget shared by peer-manager and RIB snapshot queries; a missed deadline returns `UNAVAILABLE` and other snapshot failures return `INTERNAL` |
 | General RIB listing and RIB explain reads | No fixed server-side timeout in the shared RIB read helper; callers set their own deadlines and cancel abandoned reads |
 
 General RIB reads can wait behind policy-transition consistency fences. A raw
@@ -2914,7 +2914,12 @@ Daemon lifecycle, health checks, and metrics.
 `GetHealth.healthy=true` means the core peer-manager and RIB snapshot was
 obtained. It does not assert that every BGP session or the dataplane is healthy.
 Failure to obtain the snapshot returns an RPC error, rather than a successful
-`healthy=false` response. `active_peers` counts only non-stale peers observed
+`healthy=false` response. When the peer manager or the RIB misses the 200 ms
+core-probe deadline, the error is `UNAVAILABLE`: both actors are alive but
+busy, for example in the short tail of a configuration reload, and a later
+retry may succeed. A closed actor channel, a dropped reply, a stalled
+export-policy transition or selection release, or a daemon-wide fault
+(listener bind failure, shutdown in progress) returns `INTERNAL`. `active_peers` counts only non-stale peers observed
 `Established`; unavailable observations are excluded even if their last known
 state was `Established`. The count can therefore omit live sessions. Use
 `ListNeighbors` and its `stale` flag to distinguish unavailable state from an

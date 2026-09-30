@@ -4091,6 +4091,8 @@ service ControlService {
   rpc Shutdown(ShutdownRequest) returns (ShutdownResponse);
   // Answers only that the authenticated gRPC handler is serving; no actor readiness or topology.
   rpc CheckLiveness(CheckLivenessRequest) returns (CheckLivenessResponse);
+  // Fails UNAVAILABLE when a core actor misses the 200 ms probe deadline
+  // (busy, retryable) and INTERNAL for any other core snapshot failure.
   rpc GetHealth(HealthRequest) returns (HealthResponse);
   rpc GetMetrics(MetricsRequest) returns (MetricsResponse);
   rpc TriggerMrtDump(TriggerMrtDumpRequest) returns (TriggerMrtDumpResponse);
