@@ -60,6 +60,8 @@ if peers < (2 if reloads == 0 else 8):
     raise SystemExit("PEERS must be at least 2 without churn, otherwise at least 8")
 if not peers <= total <= (256 - 20) * 65536:
     raise SystemExit("TOTAL must supply every peer and fit the generator's IPv4 space")
+if total % peers:
+    raise SystemExit("TOTAL must divide evenly across peers in the IPv4 harness")
 if reloads > 0xFFFFFFFF:
     raise SystemExit("RELOADS must fit u32")
 if not 0 <= control <= 0xFFFFFFFF or (reloads == 0 and control == 0):
@@ -71,7 +73,8 @@ if reloads == 0:
 PY
 }
 validate_variant_inputs
-EXPECTED_PER_OBSERVER=$((TOTAL - (TOTAL + PEERS - 1) / PEERS))
+# Match the harness's emitted marker; probe slices are derived separately.
+EXPECTED_PER_OBSERVER=$((TOTAL - TOTAL / PEERS))
 
 prepare_explain_config() {
     python3 - "$RUN/config.toml" "$EXPLAIN" "$CACHE_SIZE" "$TOTAL" "$PEERS" \

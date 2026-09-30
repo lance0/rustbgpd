@@ -633,6 +633,8 @@ class ClassifierFixtures(unittest.TestCase):
             changed[index] = value
             cases.append((f"invalid {index}={value}", changed, 1))
         cases.append(("omit override", ["8", "400000", "omit", "262144", "0", "10"], 1))
+        cases.append(("uneven held slice", ["3", "8", "true", "4", "0", "10"], 1))
+        cases.append(("uneven reload slice", ["8", "1001", "true", "4", "4", "30"], 1))
         for label, args, expected_rc in cases:
             with self.subTest(label=label):
                 result = subprocess.run(
@@ -645,6 +647,25 @@ class ClassifierFixtures(unittest.TestCase):
             env={**os.environ, "GEN_DUALSTACK": "1"},
         )
         self.assertNotEqual(result.returncode, 0)
+
+    def test_explain_variant_matches_the_emitted_convergence_marker(self) -> None:
+        _, script = runner_script()
+        assignment = next(line for line in script.splitlines()
+                          if line.startswith("EXPECTED_PER_OBSERVER="))
+        match = next(line for line in script.splitlines() if line.startswith("until grep -q "))
+        match = match.removeprefix("until ").removesuffix("; do")
+        # The harness emits total - floor(total/peers), even though its actual
+        # member_slice completion targets use quotient/remainder allocation.
+        for marker, expected_rc in ((6, 0), (5, 1)):
+            with self.subTest(marker=marker), tempfile.TemporaryDirectory() as directory:
+                (Path(directory) / "reloadstall.log").write_text(
+                    f"converged (>= {marker}/observer) at 0.2s rss_mib=12\n", encoding="utf-8")
+                result = subprocess.run(
+                    ["bash", "-c", "set -euo pipefail\n" + assignment + "\n" + match],
+                    env={**os.environ, "PEERS": "3", "TOTAL": "8", "OUT": directory},
+                    capture_output=True, text=True,
+                )
+                self.assertEqual(result.returncode, expected_rc, result.stderr)
 
     def test_explain_variant_no_churn_is_only_used_with_zero_reloads(self) -> None:
         _, script = runner_script()
