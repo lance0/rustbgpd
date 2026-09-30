@@ -1,0 +1,49 @@
+{
+  "started_at_utc": "2026-09-30T23:21:48Z",
+  "ended_at_utc": "2026-09-30T23:22:49Z",
+  "runtime_source": "ee99c9321ed969a835e8476898ff95871389fa2f",
+  "harness_base": "ee99c9321ed969a835e8476898ff95871389fa2f",
+  "harness_patch": "harness.diff",
+  "profile": "ci",
+  "builder_image": "sha256:55da1e5e108a47e1815daf75dd866106410ed321bd0f4c3644daeb1371d7e3a9",
+  "runtime_image": "sha256:8c25b4fafc8728c52c7a2725e2def57d448c51cbca2af5a1038903e1b8dfbaf1",
+  "gobgp_image": "sha256:4575cbd773da6e98512cb82d369a7e7a1677883c80058a4b66caf21fcad12b62",
+  "bmpsink_image": "sha256:e1ddd645d4d9df8bca800f320f3bad752078c29644f98827bafb77242e255caf",
+  "daemon_sha256": "f9bf7230060f6fd38078f29e8e55cf0980b4ebf29fb80ec91fa3297791104d6f",
+  "cli_sha256": "d52c1826a6590cdf3004059ad397d68ac6bf9b297bc752809388869f33feb23a",
+  "dockerfile_sha256": "5e2ba504f5e0755efb65ec4e3b5ff74e2e9ff76bc6abc60accfe4b46f2d9b4c2",
+  "dockerfile_jobs4_sha256": "2dab2b009c2a1203d358f854b3676afc91d55c9586f24cd123db14369e72e253",
+  "dockerfile_overlay": "ENV CARGO_BUILD_JOBS=4 immediately after FROM chef AS builder",
+  "gobgp_version": "3.37.0",
+  "host_tshark_version": "4.2.2",
+  "harness_files_sha256": {
+    "tests/interop/bmp-passive-withdraw-parity.clab.yml": "2fc25b9578f0e78ebbd905810823a1a63ab625c666c8357dca39acbcdf7d6b74",
+    "tests/interop/configs/rustbgpd-bmp-passive-withdraw-parity.toml": "5dfeb374a9f7638ac8ad3ebf581d9597a1f203f9b7ec993bb20354b87b7f6a9c",
+    "tests/interop/scripts/test-bmp-passive-withdraw-parity.sh": "e9bfa751cdec898e4d26fb8881bf96e47eb8e5a1fa020fc79eb498552ed803f1",
+    "tests/interop/scripts/check-bmp-passive-withdraw-parity.py": "d5125c63894804ee0b2bdf7d96fd111adf61c4af826b113c5dc70b8dea7d6468",
+    "tests/interop/scripts/test-lib.sh": "262003d74e3e8c3a6ff2db247b39bc0bf25b7127ae4ccb4fa63fe4445e727570",
+    "tests/interop/scripts/bmp-raw-sink.py": "d25030520c93a447af4a24304ff53edadeb1f3fb3c00a918e75ef686425a6d77"
+  },
+  "runner_exit": 0,
+  "test_exit": 0,
+  "cleanup_exit": 0,
+  "remaining_owned_containers": 0,
+  "remaining_owned_networks": 0,
+  "remaining_capture_sidecars": 0,
+  "empty_export_announcements": 0,
+  "peers": {
+    "10.0.0.2": {
+      "bgp_sent_withdrawals": 24,
+      "bmp_received_withdrawals": 24,
+      "bmp_peerdowns": 2,
+      "bmp_peerups": 3
+    },
+    "10.0.1.2": {
+      "bgp_sent_withdrawals": 24,
+      "bmp_received_withdrawals": 24,
+      "bmp_peerdowns": 2,
+      "bmp_peerups": 3
+    }
+  },
+  "negative_control": "one actual BMP RouteMonitoring withdrawal removed; checker rejects missing 10.0.0.2/198.18.164.1/32"
+}

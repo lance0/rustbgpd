@@ -1,0 +1,51 @@
+[global]
+asn = 65001
+router_id = "10.255.0.1"
+listen_port = 179
+
+[global.telemetry]
+prometheus_addr = "0.0.0.0:9179"
+log_format = "json"
+
+[global.telemetry.grpc_tcp]
+address = "0.0.0.0:50051"
+token_file = "/run/rustbgpd/grpc-test-only-operator.token"
+principal = "rustbgpd://operator/test-only"
+
+[bmp]
+sys_name = "rustbgpd-passive-withdraw-parity"
+
+[[bmp.collectors]]
+address = "SINK_ADDR:11019"
+reconnect_interval = 5
+monitor = ["rib_in_pre"]
+
+# Keep the collector passive even though both inputs are iBGP.
+[policy]
+export_chain = ["export-nothing"]
+
+[policy.definitions.export-nothing]
+[[policy.definitions.export-nothing.statements]]
+prefix = "0.0.0.0/0"
+le = 32
+action = "deny"
+
+[[neighbors]]
+address = "10.0.0.2"
+remote_asn = 65001
+description = "gobgp-pe1"
+hold_time = 90
+families = ["ipv4_unicast"]
+
+[[neighbors]]
+address = "10.0.1.2"
+remote_asn = 65001
+description = "gobgp-pe2"
+hold_time = 90
+families = ["ipv4_unicast"]
+
+[security.grpc]
+enforcement = "tier"
+
+[security.grpc.roles]
+"rustbgpd://operator/test-only" = "operator"

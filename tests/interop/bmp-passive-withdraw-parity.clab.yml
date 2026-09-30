@@ -1,0 +1,50 @@
+# Passive two-peer Adj-RIB-In BMP withdrawal parity proof.
+name: bmp-passive-withdraw-parity
+
+topology:
+  nodes:
+    rustbgpd:
+      kind: linux
+      image: rustbgpd:dev
+      cmd: sleep infinity
+      binds:
+        - ./configs/rustbgpd-bmp-passive-withdraw-parity.toml:/etc/rustbgpd/config.toml:ro
+        - ../fixtures/grpc-test-only-operator.token:/run/rustbgpd/grpc-test-only-operator.token:ro
+      exec:
+        - ip addr add 10.0.0.1/24 dev eth1
+        - ip link set eth1 up
+        - ip addr add 10.0.1.1/24 dev eth2
+        - ip link set eth2 up
+      env:
+        RUST_LOG: info
+
+    gobgp-pe1:
+      kind: linux
+      image: gobgp:interop
+      cmd: sleep infinity
+      binds:
+        - ./configs/gobgp-m81-pe1.toml:/config/gobgp.toml:ro
+      exec:
+        - ip addr add 10.0.0.2/24 dev eth1
+        - ip link set eth1 up
+
+    gobgp-pe2:
+      kind: linux
+      image: gobgp:interop
+      cmd: sleep infinity
+      binds:
+        - ./configs/gobgp-m81-pe2.toml:/config/gobgp.toml:ro
+      exec:
+        - ip addr add 10.0.1.2/24 dev eth1
+        - ip link set eth1 up
+
+    bmpsink:
+      kind: linux
+      image: bmpsink:m81
+      cmd: sleep infinity
+      binds:
+        - ./scripts/bmp-raw-sink.py:/usr/local/bin/bmp-raw-sink.py:ro
+
+  links:
+    - endpoints: ["rustbgpd:eth1", "gobgp-pe1:eth1"]
+    - endpoints: ["rustbgpd:eth2", "gobgp-pe2:eth1"]
