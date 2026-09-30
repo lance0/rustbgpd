@@ -3369,6 +3369,78 @@ async fn await_pre_churn_evidence_capture(
     }
 }
 
+fn start_churn(no_churn: bool, stubs: &[Stub], ctx: &Arc<Ctx>) -> Vec<tokio::task::JoinHandle<()>> {
+    if no_churn {
+        return Vec::new();
+    }
+    let mut churn_tasks = Vec::new();
+    // The last CHURNERS stubs flap a dedicated block.
+    for c in 0..CHURNERS {
+        let i = ctx.n_peers - CHURNERS + c;
+        let tx = stubs[i as usize].tx.clone();
+        let block: Vec<Ipv4Prefix> = (0..CHURN_BLOCK).map(|j| churn_prefix(c, j)).collect();
+        let block6: Vec<Ipv6Prefix> = (0..CHURN_BLOCK).map(|j| churn_prefix6(c, j)).collect();
+        let cctx = Arc::clone(ctx);
+        churn_tasks.push(tokio::spawn(async move {
+            // Stagger churners across the interval.
+            tokio::time::sleep(Duration::from_millis(
+                u64::from(c) * CHURN_MS / u64::from(CHURNERS),
+            ))
+            .await;
+            let mut announced = false;
+            loop {
+                let msg = if announced {
+                    withdraw_msg(&block)
+                } else {
+                    // Always one UPDATE per flap, whatever the base packing.
+                    announce_msgs_packed(&base_attrs(i), &block, NLRI_PER_MSG, false)
+                        .pop()
+                        .unwrap()
+                };
+                // Dual-stack: flap the IPv6 block in lockstep so both
+                // families carry steady churn (and stable-marker proof).
+                let msg6 = dualstack().then(|| {
+                    if announced {
+                        withdraw6_msg(&block6)
+                    } else {
+                        announce6_msgs(i, &block6).pop().unwrap()
+                    }
+                });
+                announced = !announced;
+                if tx.send(msg.into()).await.is_err() {
+                    return;
+                }
+                if let Some(msg6) = msg6 {
+                    if tx.send(msg6.into()).await.is_err() {
+                        return;
+                    }
+                }
+                cctx.churn_cycles.fetch_add(1, Ordering::Relaxed);
+                tokio::time::sleep(Duration::from_millis(CHURN_MS)).await;
+            }
+        }));
+    }
+    churn_tasks
+}
+
+fn no_churn_allowed(
+    reloads: u32,
+    control_secs: u64,
+    pid: i32,
+    flapstorm: Option<u32>,
+    reload_cmd: Option<&str>,
+    convergence_only: bool,
+    ibgp_rr: Option<u16>,
+) -> bool {
+    reloads == 0
+        && control_secs > 0
+        && pid > 0
+        && flapstorm.is_none()
+        && reload_cmd.is_none()
+        && !convergence_only
+        && ibgp_rr.is_none()
+}
+
 fn final_evidence_allowed(_reloads: u32, flapstorm: Option<u32>) -> bool {
     flapstorm.is_none()
 }
@@ -3434,6 +3506,7 @@ fn convergence_integrity_valid(
 fn main() {
     let mut a: Vec<String> = std::env::args().collect();
     let convergence_only = take_single_flag(&mut a, "--convergence-only");
+    let no_churn = take_single_flag(&mut a, "--no-churn");
     let rejoin_coverage_only = take_single_flag(&mut a, "--rejoin-coverage-only");
     // --flapstorm K may appear anywhere; strip it before positional parsing.
     let mut flapstorm: Option<u32> = None;
@@ -3466,10 +3539,11 @@ fn main() {
             "usage: reloadstall <n_peers> <total_prefixes> <daemon_port> <daemon_pid> \
              <policy_live> <policy_a> <policy_b> <reloads> <control_secs> \
              [changed_peers] [reload_cmd] [--flapstorm K [--flap-rounds N] [--rejoin-coverage-only]]\n\
-             [--convergence-only]\n\
+             [--convergence-only] [--no-churn]\n\
              reload_cmd: run `sh -c <reload_cmd>` per reload instead of SIGHUP-ing <daemon_pid>\n\
              daemon_pid 0: skip in-harness RSS sampling (outer sampler owns it); \
              requires reload_cmd, --flapstorm, or --convergence-only\n\
+             --no-churn: hold sessions for control_secs with reloads=0 and no churn\n\
              --flapstorm K: flap the first K stubs instead of reloading\n\
              --flap-rounds N: flapstorm rounds, 1..={MAX_FLAP_ROUNDS} (default {DEFAULT_FLAP_ROUNDS})"
         );
@@ -3571,6 +3645,19 @@ fn main() {
     if dualstack_enabled {
         DUALSTACK.store(true, Ordering::Relaxed);
     }
+    assert!(
+        !no_churn
+            || no_churn_allowed(
+                reloads,
+                control_secs,
+                pid,
+                flapstorm,
+                reload_cmd.as_deref(),
+                convergence_only,
+                ibgp_rr,
+            ),
+        "--no-churn requires reloads=0, control_secs>0, daemon_pid>0, and no flapstorm, reload command, --convergence-only, or iBGP-RR mode"
+    );
     assert!(n_peers >= CHURNERS, "n_peers must be at least {CHURNERS}");
     assert!(
         (1..=n_peers).contains(&changed_peers),
@@ -4053,55 +4140,12 @@ fn main() {
             }
         }
 
-        let mut churn_tasks = Vec::new();
         // --- Start churn: last CHURNERS stubs flap a dedicated block. ---
-        for c in 0..CHURNERS {
-            let i = n_peers - CHURNERS + c;
-            let tx = stubs[i as usize].tx.clone();
-            let block: Vec<Ipv4Prefix> = (0..CHURN_BLOCK).map(|j| churn_prefix(c, j)).collect();
-            let block6: Vec<Ipv6Prefix> = (0..CHURN_BLOCK).map(|j| churn_prefix6(c, j)).collect();
-            let cctx = Arc::clone(&ctx);
-            churn_tasks.push(tokio::spawn(async move {
-                // Stagger churners across the interval.
-                tokio::time::sleep(Duration::from_millis(
-                    u64::from(c) * CHURN_MS / u64::from(CHURNERS),
-                ))
-                .await;
-                let mut announced = false;
-                loop {
-                    let msg = if announced {
-                        withdraw_msg(&block)
-                    } else {
-                        // Always one UPDATE per flap, whatever the base packing.
-                        announce_msgs_packed(&base_attrs(i), &block, NLRI_PER_MSG, false)
-                            .pop()
-                            .unwrap()
-                    };
-                    // Dual-stack: flap the IPv6 block in lockstep so both
-                    // families carry steady churn (and stable-marker proof).
-                    let msg6 = dualstack().then(|| {
-                        if announced {
-                            withdraw6_msg(&block6)
-                        } else {
-                            announce6_msgs(i, &block6).pop().unwrap()
-                        }
-                    });
-                    announced = !announced;
-                    if tx.send(msg.into()).await.is_err() {
-                        return;
-                    }
-                    if let Some(msg6) = msg6 {
-                        if tx.send(msg6.into()).await.is_err() {
-                            return;
-                        }
-                    }
-                    cctx.churn_cycles.fetch_add(1, Ordering::Relaxed);
-                    tokio::time::sleep(Duration::from_millis(CHURN_MS)).await;
-                }
-            }));
+        let churn_tasks = start_churn(no_churn, &stubs, &ctx);
+        if !no_churn {
+            // Let churn reach steady state.
+            tokio::time::sleep(Duration::from_secs(3)).await;
         }
-        // Let churn reach steady state.
-        tokio::time::sleep(Duration::from_secs(3)).await;
 
         // --- Control window. ---
         let cs = now_us(&ctx);
@@ -4695,6 +4739,20 @@ fn main() {
         }
 
         let parse_errors = ctx.parse_errors.load(Ordering::Relaxed);
+        let up = ctx
+            .obs
+            .iter()
+            .filter(|observer| observer.established.load(Ordering::Relaxed))
+            .count();
+        if (no_churn || evidence_dir.is_some()) && (up != n_peers as usize || parse_errors != 0) {
+            eprintln!(
+                "FAIL: final integrity check failed: sessions_up={up}/{n_peers}, parse_errors={parse_errors}"
+            );
+            std::process::exit(1);
+        }
+        if no_churn || evidence_dir.is_some() {
+            println!("final sessions_up {up}/{n_peers} parse_errors={parse_errors}");
+        }
         let Some(evidence_dir) = evidence_dir.as_deref() else {
             println!("done rss_mib={}", rss_mib(pid));
             if parse_errors > 0 {
@@ -4707,18 +4765,6 @@ fn main() {
             print_refresh_accounting(&ctx);
             std::process::exit(0);
         };
-        let up = ctx
-            .obs
-            .iter()
-            .filter(|observer| observer.established.load(Ordering::Relaxed))
-            .count();
-        if up != n_peers as usize || parse_errors != 0 {
-            eprintln!(
-                "FAIL: final integrity check failed: sessions_up={up}/{n_peers}, parse_errors={parse_errors}"
-            );
-            std::process::exit(1);
-        }
-        println!("final sessions_up {up}/{n_peers} parse_errors={parse_errors}");
         if let Some(path) = received_view_file.as_deref() {
             if let Err(error) = write_received_view(&ctx, path) {
                 eprintln!("FAIL: received-view dump failed: {error}");
@@ -5374,7 +5420,9 @@ mod tests {
         let barrier = source
             .find("await_pre_churn_evidence_capture(evidence_dir, PRE_CHURN_EVIDENCE_TIMEOUT)")
             .unwrap();
-        let churn = source.find("// --- Start churn:").unwrap();
+        let churn = source
+            .find("let churn_tasks = start_churn(no_churn, &stubs, &ctx);")
+            .unwrap();
         let disarm_source = ["flap_mode.store(", "FLAP_OFF"].concat();
         let cutoff = marker("_g = observer.generation.lock().unwrap();");
         let disarm = source.match_indices(&disarm_source).nth(2).unwrap().0;
@@ -5394,6 +5442,65 @@ mod tests {
             1,
             "removing opt-in or making the barrier unconditional changes behavior"
         );
+    }
+
+    #[test]
+    fn no_churn_requires_a_finite_plain_zero_reload_window() {
+        assert!(no_churn_allowed(0, 1, 1, None, None, false, None));
+        for rejected in [
+            no_churn_allowed(1, 1, 1, None, None, false, None),
+            no_churn_allowed(0, 0, 1, None, None, false, None),
+            no_churn_allowed(0, 1, 0, None, None, false, None),
+            no_churn_allowed(0, 1, -1, None, None, false, None),
+            no_churn_allowed(0, 1, 1, Some(1), None, false, None),
+            no_churn_allowed(0, 1, 1, None, Some("reload"), false, None),
+            no_churn_allowed(0, 1, 1, None, None, true, None),
+            no_churn_allowed(0, 1, 1, None, None, false, Some(64512)),
+        ] {
+            assert!(!rejected);
+        }
+    }
+
+    #[tokio::test]
+    async fn no_churn_skips_tasks_and_updates_but_default_starts_them() {
+        for no_churn in [true, false] {
+            let ctx = finish_test_ctx();
+            let mut stubs = Vec::new();
+            let mut receivers = Vec::new();
+            for _ in 0..CHURNERS {
+                let (tx, rx) = mpsc::channel(32);
+                receivers.push(rx);
+                stubs.push(Stub {
+                    tx,
+                    reader: tokio::spawn(async { Ok(()) }),
+                    writer: tokio::spawn(async { Ok(()) }),
+                    refreshes: Arc::new(Mutex::new(tokio::task::JoinSet::new())),
+                });
+            }
+            let tasks = start_churn(no_churn, &stubs, &ctx);
+            if no_churn {
+                assert!(tasks.is_empty());
+                tokio::task::yield_now().await;
+                for receiver in &mut receivers {
+                    assert!(matches!(
+                        receiver.try_recv(),
+                        Err(mpsc::error::TryRecvError::Empty)
+                    ));
+                }
+                assert_eq!(ctx.churn_cycles.load(Ordering::Relaxed), 0);
+            } else {
+                assert_eq!(tasks.len(), CHURNERS as usize);
+                let outbound = tokio::time::timeout(Duration::from_secs(1), receivers[0].recv())
+                    .await
+                    .unwrap()
+                    .unwrap();
+                assert!(matches!(outbound.message, Message::Update(_)));
+                assert!(ctx.churn_cycles.load(Ordering::Relaxed) > 0);
+            }
+            finish_fleet(stubs, tasks, Duration::from_secs(1))
+                .await
+                .unwrap();
+        }
     }
 
     #[test]
@@ -5489,7 +5596,9 @@ mod tests {
         let pre_churn = source
             .find("if let Some(evidence_dir) = pre_churn_evidence_dir")
             .unwrap();
-        let churn = source.find("// --- Start churn:").unwrap();
+        let churn = source
+            .find("let churn_tasks = start_churn(no_churn, &stubs, &ctx);")
+            .unwrap();
         assert!(first_check < ack && ack < second_check && second_check < disarm);
         assert!(disarm < receipt);
         assert!(receipt < exit && exit < pre_churn && pre_churn < churn);
