@@ -10978,6 +10978,391 @@ async fn stalled_transaction_stage_acknowledgement_ends_clean_at_the_pre_effect_
     drop(executor_guard);
 }
 
+#[derive(Clone, Copy)]
+enum PreEffectRead {
+    Snapshot,
+    PublicPlan,
+    TypedPlan,
+}
+
+#[expect(
+    clippy::too_many_lines,
+    reason = "the controlled fixture keeps actor admission, authority cleanup, and owner reuse in one proof"
+)]
+async fn assert_confirmed_pre_effect_read_deadline(site: PreEffectRead, block_send: bool) {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let root = tempfile::tempdir().unwrap();
+    std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    let state_dir = root.path().join("state");
+    std::fs::create_dir(&state_dir).unwrap();
+    std::fs::set_permissions(&state_dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let previous = live_policy_toml("permit");
+    let config_path = root.path().join("rustbgpd.toml");
+    std::fs::write(&config_path, &previous).unwrap();
+    let accepted = Arc::new(AcceptedConfigSnapshot::load(&config_path, None).unwrap());
+    let (_accepted_tx, accepted_rx) = watch::channel(accepted);
+    let (peer_tx, mut peer_rx) = mpsc::channel(1);
+    let (internal_tx, mut internal_rx) = mpsc::channel(1);
+    let (config_tx, mut config_rx) = mpsc::channel(1);
+    let launch = crate::confirm_journal::v3::LaunchIdentity::resolve(&config_path).unwrap();
+    let locator = launch.locator_path();
+    let controller = ConfigTransactionController::new_accepted(
+        FibTableControlDeps {
+            confirm_journal_path: Some(state_dir.join(crate::confirm_journal::JOURNAL_FILE_NAME)),
+            ..deps_value(None, peer_tx.clone(), Some(config_tx), Vec::new())
+        },
+        BgpMetrics::new(),
+        accepted_rx,
+    )
+    .with_preloaded_planner(internal_tx.clone())
+    .with_confirm_v3_launch(launch);
+    let coordinator = controller.deps.lock.clone();
+    let gate = DaemonGate::new();
+    let (operation, executor_guard) = RuntimeConfigSettlementWatchdog::new().register_owned(
+        RuntimeConfigOperationKind::Apply,
+        coordinator.clone(),
+        coordinator.acquire().await.unwrap(),
+        gate.clone(),
+        None,
+        None,
+        Arc::new(AtomicBool::new(true)),
+    );
+    let progress = RuntimeConfigMutationProgress::owned(&operation);
+    let mut peer_slot = None;
+    let mut internal_slot = None;
+    if block_send && matches!(site, PreEffectRead::Snapshot) {
+        peer_slot = Some(peer_tx.clone().reserve_owned().await.unwrap());
+    }
+    let runner = controller.clone();
+    let request = confirmed_dynamic_request(live_policy_toml("deny"), "stalled-read", 60);
+    let confirmed = parse_confirmed_apply_mode(&request).unwrap();
+    let (started_tx, started_rx) = oneshot::channel();
+    let mut apply = tokio::spawn(async move {
+        let _ = started_tx.send(());
+        runner
+            .apply_locked(request, confirmed, &progress, true)
+            .await
+    });
+    started_rx.await.unwrap();
+
+    if !matches!(site, PreEffectRead::Snapshot) {
+        let Some(PeerManagerCommand::RuntimeConfigSnapshot { reply }) = peer_rx.recv().await else {
+            panic!("expected the confirmed prior snapshot read");
+        };
+        if block_send && matches!(site, PreEffectRead::PublicPlan) {
+            peer_slot = Some(peer_tx.clone().reserve_owned().await.unwrap());
+        }
+        reply
+            .send(Ok(rustbgpd_api::peer_types::RuntimeConfigSnapshotReply {
+                toml: previous.clone(),
+                rpol_files: Vec::new(),
+                rpol: rustbgpd_policy::rpol::RpolPolicySet::default(),
+            }))
+            .unwrap();
+    }
+    if matches!(site, PreEffectRead::TypedPlan) {
+        let Some(PeerManagerCommand::PlanConfigTransaction {
+            candidate_toml,
+            reply,
+            ..
+        }) = peer_rx.recv().await
+        else {
+            panic!("expected the initial public plan");
+        };
+        if block_send {
+            internal_slot = Some(internal_tx.reserve_owned().await.unwrap());
+        }
+        reply
+            .send(Ok(attach_committed_candidate(
+                live_impact_plan(),
+                &candidate_toml,
+            )))
+            .unwrap();
+    }
+    // Dequeue the pure read but retain its reply, or keep its admission slot
+    // occupied. Neither fault cancels actor work or fabricates an actor error.
+    let held_peer = if !block_send && !matches!(site, PreEffectRead::TypedPlan) {
+        Some(tokio::select! {
+            command = peer_rx.recv() => command.unwrap(),
+            result = &mut apply => {
+                assert!(operation.try_settle());
+                panic!("apply ended before the expected public read: {result:?}");
+            }
+        })
+    } else {
+        None
+    };
+    let held_internal = if !block_send && matches!(site, PreEffectRead::TypedPlan) {
+        Some(internal_rx.recv().await.unwrap())
+    } else {
+        None
+    };
+    tokio::time::sleep_until(operation.pre_effect_deadline() - Duration::from_millis(1)).await;
+    let finished_early = apply.is_finished();
+    let authority_while_waiting = locator.exists();
+    tokio::time::sleep_until(operation.pre_effect_deadline()).await;
+    let at_deadline = tokio::time::Instant::now();
+    let outcome = tokio::time::timeout(Duration::from_secs(1), &mut apply).await;
+    // Disarm even on the destructive red proof; no test may leave a fatal
+    // production watchdog armed after its assertion fails.
+    if !apply.is_finished() {
+        apply.abort();
+        let _ = apply.await;
+    }
+    assert!(operation.try_settle());
+    drop(executor_guard);
+    assert!(!finished_early, "the read ended before its deadline");
+    assert_eq!(
+        authority_while_waiting,
+        !matches!(site, PreEffectRead::Snapshot)
+    );
+    let error = outcome
+        .expect("a pure pre-effect wait must end at its deadline")
+        .unwrap()
+        .expect_err("the missing reply cannot report success");
+    assert!(
+        matches!(error, ConfigTransactionApplyError::Unavailable(_)),
+        "{error:?}"
+    );
+    assert_eq!(tokio::time::Instant::now(), at_deadline);
+    assert!(peer_rx.try_recv().is_err(), "no late public command");
+    assert!(internal_rx.try_recv().is_err(), "no typed runtime effect");
+    assert!(config_rx.try_recv().is_err(), "no persistence stage");
+    match held_peer {
+        Some(PeerManagerCommand::RuntimeConfigSnapshot { reply }) => assert!(reply.is_closed()),
+        Some(PeerManagerCommand::PlanConfigTransaction { reply, .. }) => assert!(reply.is_closed()),
+        None => {}
+        _ => panic!("unexpected public command"),
+    }
+    match held_internal {
+        Some(InternalCommand::PlanTransactionConfig { reply, .. }) => assert!(reply.is_closed()),
+        None => {}
+        _ => panic!("unexpected internal command"),
+    }
+    drop((peer_slot, internal_slot));
+    assert!(!locator.exists(), "no uncommitted revert authority remains");
+    assert_eq!(std::fs::read_to_string(config_path).unwrap(), previous);
+    let state = controller.state.lock().await;
+    assert!(state.applying_confirm_id.is_none());
+    assert!(state.pending.is_none());
+    assert!(state.ambiguous_failure_confirm_id.is_none());
+    drop(state);
+    assert!(operation.fence_reason().is_none());
+    assert!(gate.not_ready_reason().is_none());
+    controller.reject_if_pending("next mutation").await.unwrap();
+    drop(
+        tokio::time::timeout(Duration::from_secs(1), coordinator.acquire())
+            .await
+            .unwrap()
+            .unwrap(),
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn confirmed_snapshot_reply_ends_at_pre_effect_deadline() {
+    assert_confirmed_pre_effect_read_deadline(PreEffectRead::Snapshot, false).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn confirmed_snapshot_send_ends_at_pre_effect_deadline() {
+    assert_confirmed_pre_effect_read_deadline(PreEffectRead::Snapshot, true).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn initial_public_plan_reply_ends_at_pre_effect_deadline() {
+    assert_confirmed_pre_effect_read_deadline(PreEffectRead::PublicPlan, false).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn initial_public_plan_send_ends_at_pre_effect_deadline() {
+    assert_confirmed_pre_effect_read_deadline(PreEffectRead::PublicPlan, true).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn initial_typed_plan_reply_ends_at_pre_effect_deadline() {
+    assert_confirmed_pre_effect_read_deadline(PreEffectRead::TypedPlan, false).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn initial_typed_plan_send_ends_at_pre_effect_deadline() {
+    assert_confirmed_pre_effect_read_deadline(PreEffectRead::TypedPlan, true).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn gnmi_snapshot_reply_ends_at_pre_effect_deadline() {
+    let root = tempfile::tempdir().unwrap();
+    let previous = live_policy_toml("permit");
+    let config_path = root.path().join("rustbgpd.toml");
+    std::fs::write(&config_path, &previous).unwrap();
+    let accepted = Arc::new(AcceptedConfigSnapshot::load(&config_path, None).unwrap());
+    let (_accepted_tx, accepted_rx) = watch::channel(accepted);
+    let (peer_tx, mut peer_rx) = mpsc::channel(1);
+    let (internal_tx, mut internal_rx) = mpsc::channel(1);
+    let (config_tx, mut config_rx) = mpsc::channel(1);
+    let watchdog = RuntimeConfigSettlementWatchdog::new();
+    let gate = DaemonGate::new();
+    let controller = ConfigTransactionController::new_accepted(
+        deps_value(None, peer_tx, Some(config_tx), Vec::new()),
+        BgpMetrics::new(),
+        accepted_rx,
+    )
+    .with_preloaded_planner(internal_tx)
+    .with_runtime_config_settlement(watchdog.clone(), gate.clone());
+    let mut apply = tokio::spawn(
+        controller
+            .clone()
+            .apply_gnmi_set(gnmi_set_add_neighbor("10.0.0.3", 65003)),
+    );
+    let Some(PeerManagerCommand::RuntimeConfigSnapshot { reply }) = peer_rx.recv().await else {
+        panic!("expected the gNMI construction snapshot");
+    };
+    assert!(watchdog.has_owner());
+    // The owner registered before this handshake. Its production pre-effect
+    // deadline is therefore no later than now + 30 minutes - 30 seconds.
+    let latest_deadline =
+        tokio::time::Instant::from_std(std::time::Instant::now()) + Duration::from_secs(1770);
+    tokio::time::sleep_until(latest_deadline).await;
+    let outcome = tokio::time::timeout(Duration::from_secs(1), &mut apply).await;
+    drop(reply);
+    // On the destructive red proof, closing the read reply lets the real
+    // owned executor settle before the assertion reports its missed deadline.
+    if outcome.is_err() {
+        tokio::time::timeout(Duration::from_secs(1), &mut apply)
+            .await
+            .expect("closing the pure-read reply must release the owner")
+            .unwrap()
+            .map(|_| ())
+            .expect_err("the closed snapshot reply cannot succeed");
+    }
+    assert!(!watchdog.has_owner());
+    assert!(gate.not_ready_reason().is_none());
+    let error = outcome
+        .expect("gNMI snapshot must end by the pre-effect deadline")
+        .unwrap()
+        .map(|_| ())
+        .expect_err("the missing snapshot reply cannot succeed");
+    assert!(matches!(error, GnmiSetError::Unavailable(_)), "{error:?}");
+    assert!(peer_rx.try_recv().is_err());
+    assert!(internal_rx.try_recv().is_err());
+    assert!(config_rx.try_recv().is_err());
+    assert_eq!(std::fs::read_to_string(config_path).unwrap(), previous);
+    controller.reject_if_pending("next mutation").await.unwrap();
+    drop(
+        tokio::time::timeout(Duration::from_secs(1), controller.deps.lock.acquire())
+            .await
+            .unwrap()
+            .unwrap(),
+    );
+}
+
+async fn assert_history_rollback_pre_effect_reply_deadline(hold_plan: bool) {
+    let dir = tempfile::tempdir().unwrap();
+    record_v2_history(dir.path(), &live_policy_toml("permit"));
+    let current = live_policy_toml("deny");
+    record_v2_history(dir.path(), &current);
+    let config_path = dir.path().join("runtime.toml");
+    std::fs::write(&config_path, &current).unwrap();
+    let accepted = Arc::new(AcceptedConfigSnapshot::load(&config_path, None).unwrap());
+    let (_accepted_tx, accepted_rx) = watch::channel(accepted);
+    let (peer_tx, mut peer_rx) = mpsc::channel(1);
+    let (internal_tx, mut internal_rx) = mpsc::channel(1);
+    let (config_tx, mut config_rx) = mpsc::channel(1);
+    let watchdog = RuntimeConfigSettlementWatchdog::new();
+    let gate = DaemonGate::new();
+    let launch = crate::confirm_journal::v3::LaunchIdentity::resolve(&config_path).unwrap();
+    let locator = launch.locator_path();
+    let controller = ConfigTransactionController::new_accepted(
+        FibTableControlDeps {
+            config_history_dir: Some(dir.path().to_path_buf()),
+            confirm_journal_path: Some(dir.path().join(crate::confirm_journal::JOURNAL_FILE_NAME)),
+            ..deps_value(None, peer_tx, Some(config_tx), Vec::new())
+        },
+        BgpMetrics::new(),
+        accepted_rx,
+    )
+    .with_preloaded_planner(internal_tx)
+    .with_confirm_v3_launch(launch)
+    .with_runtime_config_settlement(watchdog.clone(), gate.clone());
+    let history = controller.history().unwrap();
+    let mut apply = tokio::spawn(controller.clone().rollback(
+        proto::RollbackConfigTransactionRequest {
+            index: 1,
+            confirm_id: "stalled-history".to_string(),
+            confirm_timeout_seconds: 60,
+            ..Default::default()
+        },
+    ));
+    let Some(PeerManagerCommand::RuntimeConfigSnapshot { reply }) = peer_rx.recv().await else {
+        panic!("expected the initial history rollback barrier");
+    };
+    let mut barrier_reply = Some(reply);
+    let mut plan_reply = None;
+    if hold_plan {
+        barrier_reply
+            .take()
+            .unwrap()
+            .send(Ok(rustbgpd_api::peer_types::RuntimeConfigSnapshotReply {
+                toml: current.clone(),
+                rpol_files: Vec::new(),
+                rpol: rustbgpd_policy::rpol::RpolPolicySet::default(),
+            }))
+            .unwrap();
+        let Some(InternalCommand::PlanAcceptedTransactionConfig { reply, .. }) =
+            internal_rx.recv().await
+        else {
+            panic!("expected the initial retained-snapshot plan");
+        };
+        plan_reply = Some(reply);
+    }
+    assert!(watchdog.has_owner());
+    let latest_deadline =
+        tokio::time::Instant::from_std(std::time::Instant::now()) + Duration::from_secs(1770);
+    tokio::time::sleep_until(latest_deadline).await;
+    let outcome = tokio::time::timeout(Duration::from_secs(1), &mut apply).await;
+    drop((barrier_reply, plan_reply));
+    if outcome.is_err() {
+        tokio::time::timeout(Duration::from_secs(1), &mut apply)
+            .await
+            .expect("closing the pure read must release the rollback owner")
+            .unwrap()
+            .expect_err("the closed initial read cannot succeed");
+    }
+    assert!(!watchdog.has_owner());
+    assert!(gate.not_ready_reason().is_none());
+    let error = outcome
+        .expect("history rollback preparation must end by the pre-effect deadline")
+        .unwrap()
+        .expect_err("the missing initial reply cannot succeed");
+    assert!(
+        matches!(error, ConfigTransactionApplyError::Unavailable(_)),
+        "{error:?}"
+    );
+    assert!(peer_rx.try_recv().is_err());
+    assert!(internal_rx.try_recv().is_err());
+    assert!(config_rx.try_recv().is_err());
+    assert_eq!(std::fs::read_to_string(config_path).unwrap(), current);
+    assert_eq!(controller.history().unwrap(), history);
+    assert!(!locator.exists());
+    controller.reject_if_pending("next mutation").await.unwrap();
+    drop(
+        tokio::time::timeout(Duration::from_secs(1), controller.deps.lock.acquire())
+            .await
+            .unwrap()
+            .unwrap(),
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn history_rollback_pre_effect_barrier_reply_is_bounded() {
+    assert_history_rollback_pre_effect_reply_deadline(false).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn history_rollback_pre_effect_plan_reply_is_bounded() {
+    assert_history_rollback_pre_effect_reply_deadline(true).await;
+}
+
 #[tokio::test(start_paused = true)]
 async fn stalled_transaction_fib_read_ends_clean_at_the_pre_effect_deadline() {
     let (operation, executor_guard) = register_test_owner().await;
