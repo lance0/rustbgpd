@@ -11897,9 +11897,11 @@ async fn confirmed_live_policy_faults_are_enumerated() {
         let root = tempfile::tempdir().unwrap();
         std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
         let settings = root.path().join("settings.v1");
+        // Use the control schema's maximum grace for the child to validate and
+        // persist its receipt after fencing; fault ordering never uses this clock.
         std::fs::write(
             &settings,
-            "version=settlement-control-v1\nbudget_ms=2000\ngrace_ms=100\n",
+            "version=settlement-control-v1\nbudget_ms=2000\ngrace_ms=5000\n",
         )
         .unwrap();
         std::fs::set_permissions(settings, std::fs::Permissions::from_mode(0o600)).unwrap();
