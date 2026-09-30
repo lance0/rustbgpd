@@ -1036,12 +1036,17 @@ reports, authorization posture — and a soak that measures a misconfigured host
 should say so at minute one rather than publish a degraded receipt as green.
 It runs with an explicit `--output` so the support bundle is rewritten in place
 (`doctor-bundle.tar.gz`) instead of leaving one timestamped tarball per
-attempt, and the run keeps the last one. The driver validates the report and
-discards it like every other response; only the verdict is retained. A red
-check outside the `peer.` namespace fails the run. Per-peer session and flap
-checks are deliberately excluded: the scenario tears the designated member down
-on purpose, and the session-floor, flap-budget, and trip-evidence gates measure
-peer health far more exactly than `doctor`'s fleet-wide heuristics can.
+attempt, and the run keeps the last one. The driver validates each report. A
+passing report is discarded like every other response; an attempt that exits
+nonzero keeps its `--json` report, capped at 4 MiB, as `doctor-report-NNNN.json`
+beside the JSONL. When that report is a red verdict (`doctor_check_failed`),
+the record also names up to four red checks outside the `peer.` namespace.
+Preserve these reports with the run artifacts; the bundle keeps only the last
+attempt. A red check outside the `peer.` namespace fails the run. Per-peer
+session and flap checks are deliberately excluded: the scenario tears the
+designated member down on purpose, and the session-floor, flap-budget, and
+trip-evidence gates measure peer health far more exactly than `doctor`'s
+fleet-wide heuristics can.
 
 `doctor`'s rlimit check reports every `rustbgpd` process on the host, not only
 the one under measurement. A second daemon with a low descriptor limit turns
@@ -1088,7 +1093,8 @@ file-descriptor headroom (see below). Output
 lands in `tests/soak/runs/soak-rs-flagship-<UTC>/` (`samples.csv`,
 `cycles.log`, `reloadstall.log`, `rustbgpd.log`,
 `management-plane-load.jsonl`, `management-plane-load.log`,
-`doctor-bundle.tar.gz`, `metrics-snapshots.txt.gz`, `run.json`,
+`doctor-bundle.tar.gz`, `doctor-report-NNNN.json` for each failing `doctor`
+attempt, `metrics-snapshots.txt.gz`, `run.json`,
 `verdict.json`, `runner.identity`, `cleanup.complete`); the analyzer is `analyze-soak-rs-flagship.py` and the
 precommitted gates are scenario 10 in
 `docs/soaks/soak-acceptance-gates.md`. Note the short scenario
