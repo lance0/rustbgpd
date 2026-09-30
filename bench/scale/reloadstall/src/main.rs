@@ -578,8 +578,7 @@ struct Obs {
     expected_community: AtomicU32,
     /// Unique base prefixes observed with `expected_community`.
     generation: Mutex<GenerationProgress>,
-    /// One outstanding ROUTE-REFRESH reply at a time (see the reader).
-    refresh_pending: AtomicBool,
+    refresh4: RefreshAccounting,
     /// Flapstorm arming: FLAP_OFF, or feed withdrawn/announced base
     /// prefixes into `generation` (which the reload path leaves idle in
     /// flapstorm mode — `expected_community` stays 0).
@@ -590,8 +589,7 @@ struct Obs {
     generation6: Mutex<GenerationProgress>,
     /// IPv6 counterpart of `stable_marker_seen_at_us`.
     stable_marker6_seen_at_us: AtomicU64,
-    /// One outstanding IPv6 ROUTE-REFRESH reply at a time.
-    refresh6_pending: AtomicBool,
+    refresh6: RefreshAccounting,
     /// Cumulative base-space withdrawals received, per family: the
     /// bystander accounting for observers without an armed generation
     /// (stable observers) is a before/after delta of these.
@@ -616,17 +614,28 @@ impl Obs {
             stable_marker_seen_at_us: AtomicU64::new(0),
             expected_community: AtomicU32::new(0),
             generation: Mutex::new(GenerationProgress::default()),
-            refresh_pending: AtomicBool::new(false),
+            refresh4: RefreshAccounting::default(),
             flap_mode: AtomicU32::new(FLAP_OFF),
             generation6: Mutex::new(GenerationProgress::default()),
             stable_marker6_seen_at_us: AtomicU64::new(0),
-            refresh6_pending: AtomicBool::new(false),
+            refresh6: RefreshAccounting::default(),
             base_withdrawn: AtomicU64::new(0),
             base_withdrawn6: AtomicU64::new(0),
             extras_seen: Mutex::new(Vec::new()),
             rejoin: Mutex::new(None),
         }
     }
+}
+
+/// Counts are cumulative for one observer and family across reconnects. The
+/// pending latch also stays in the observer; completion follows the final write.
+#[derive(Default)]
+struct RefreshAccounting {
+    pending: AtomicBool,
+    received: AtomicU64,
+    suppressed: AtomicU64,
+    completed: AtomicU64,
+    sent_nlri: AtomicU64,
 }
 
 struct RejoinProgress {
@@ -699,10 +708,30 @@ impl RejoinProgress {
 /// handles, so flapstorm can hard-close the socket by aborting both tasks
 /// (dropping both split halves closes the fd).
 struct Stub {
-    tx: mpsc::Sender<Message>,
+    tx: mpsc::Sender<Outbound>,
     reader: tokio::task::JoinHandle<Result<(), String>>,
     writer: tokio::task::JoinHandle<Result<(), String>>,
     refreshes: Arc<Mutex<tokio::task::JoinSet<()>>>,
+}
+
+struct Outbound {
+    message: Message,
+    replay: Option<ReplayWrite>,
+}
+
+struct ReplayWrite {
+    ipv6: bool,
+    nlri: u32,
+    last: bool,
+}
+
+impl From<Message> for Outbound {
+    fn from(message: Message) -> Self {
+        Self {
+            message,
+            replay: None,
+        }
+    }
 }
 
 /// Finish only after measurement/evidence has completed. Every peer receives
@@ -731,7 +760,7 @@ async fn finish_fleet(
             cease_subcode::ADMINISTRATIVE_SHUTDOWN,
             bytes::Bytes::new(),
         ));
-        match tokio::time::timeout_at(deadline, stub.tx.send(cease)).await {
+        match tokio::time::timeout_at(deadline, stub.tx.send(cease.into())).await {
             Ok(Ok(())) => {}
             Ok(Err(_)) => errors.push(format!("stub {i} writer channel closed")),
             Err(_) => {
@@ -1335,12 +1364,73 @@ fn split_unicast_families(parsed: &ParsedUpdate) -> UnicastNlri {
 }
 
 /// The per-family "one outstanding ROUTE-REFRESH reply" latch.
-fn refresh_pending(observer: &Obs, ipv6: bool) -> &AtomicBool {
+fn refresh_accounting(observer: &Obs, ipv6: bool) -> &RefreshAccounting {
     if ipv6 {
-        &observer.refresh6_pending
+        &observer.refresh6
     } else {
-        &observer.refresh_pending
+        &observer.refresh4
     }
+}
+
+fn admit_refresh(observer: &Obs, ipv6: bool) -> bool {
+    let accounting = refresh_accounting(observer, ipv6);
+    accounting.received.fetch_add(1, Ordering::Relaxed);
+    if accounting.pending.swap(true, Ordering::AcqRel) {
+        accounting.suppressed.fetch_add(1, Ordering::Relaxed);
+        false
+    } else {
+        true
+    }
+}
+
+fn print_refresh_accounting(ctx: &Ctx) {
+    for (peer, observer) in ctx.obs.iter().enumerate() {
+        for (family, counts) in [("ipv4", &observer.refresh4), ("ipv6", &observer.refresh6)] {
+            let received = counts.received.load(Ordering::Relaxed);
+            if received == 0 {
+                continue;
+            }
+            println!(
+                "route_refresh_accounting,peer={peer},family={family},received={received},suppressed={},completed={},sent_nlri={}",
+                counts.suppressed.load(Ordering::Relaxed),
+                counts.completed.load(Ordering::Relaxed),
+                counts.sent_nlri.load(Ordering::Relaxed),
+            );
+        }
+    }
+}
+
+async fn enqueue_replay(
+    tx: &mpsc::Sender<Outbound>,
+    observer: &Obs,
+    ipv6: bool,
+    messages: Vec<(Message, u32)>,
+) {
+    if messages.is_empty() {
+        refresh_accounting(observer, ipv6)
+            .completed
+            .fetch_add(1, Ordering::Relaxed);
+    }
+    let last = messages.len().saturating_sub(1);
+    for (index, (message, nlri)) in messages.into_iter().enumerate() {
+        if tx
+            .send(Outbound {
+                message,
+                replay: Some(ReplayWrite {
+                    ipv6,
+                    nlri,
+                    last: index == last,
+                }),
+            })
+            .await
+            .is_err()
+        {
+            break;
+        }
+    }
+    refresh_accounting(observer, ipv6)
+        .pending
+        .store(false, Ordering::Release);
 }
 
 fn observe_generation6(
@@ -1431,6 +1521,45 @@ fn announced_msgs(ctx: &Ctx, i: u32) -> Vec<Message> {
         .collect();
     messages.extend(announce_msgs_with(i, &attrs, &extras));
     messages
+}
+
+/// Attach the generator's chunk sizes so the writer can count successful
+/// replay writes without decoding the UPDATE it just encoded.
+fn replay_messages(ctx: &Ctx, i: u32, ipv6: bool) -> Vec<(Message, u32)> {
+    let (messages, sizes): (Vec<_>, Vec<_>) = if ipv6 {
+        let prefixes = own_slice6(ctx, i);
+        (
+            announce6_msgs(i, &prefixes),
+            prefixes
+                .chunks(NLRI6_PER_MSG)
+                .map(|chunk| chunk.len())
+                .collect(),
+        )
+    } else {
+        let mut sizes = Vec::new();
+        let per_msg = nlri_packing(i).0;
+        if ALTERNATE_PREPEND.load(Ordering::Relaxed) {
+            sizes.extend(own_slice(ctx, i).chunks(per_msg).map(|chunk| chunk.len()));
+            sizes.extend(
+                ctx.extras[i as usize]
+                    .chunks(per_msg)
+                    .map(|chunk| chunk.len()),
+            );
+        } else {
+            sizes.extend(
+                announced_prefixes(ctx, i)
+                    .chunks(per_msg)
+                    .map(|chunk| chunk.len()),
+            );
+        }
+        (announced_msgs(ctx, i), sizes)
+    };
+    assert_eq!(messages.len(), sizes.len(), "replay packing changed");
+    messages
+        .into_iter()
+        .zip(sizes)
+        .map(|(message, count)| (message, count as u32))
+        .collect()
 }
 
 /// Stub `i`'s announce UPDATEs carrying `attrs`, packed per [`nlri_packing`].
@@ -1799,7 +1928,7 @@ async fn establish_stub(ctx: Arc<Ctx>, i: u32, rejoin: bool) -> Result<(Stub, u3
 }
 
 fn start_stub(ctx: Arc<Ctx>, i: u32, stream: TcpStream, track_rejoin: bool) -> Stub {
-    let (tx, mut tx_rx) = mpsc::channel::<Message>(256);
+    let (tx, mut tx_rx) = mpsc::channel::<Outbound>(256);
     let (mut reader, mut writer) = stream.into_split();
     let refreshes = Arc::new(Mutex::new(tokio::task::JoinSet::new()));
 
@@ -1814,9 +1943,17 @@ fn start_stub(ctx: Arc<Ctx>, i: u32, stream: TcpStream, track_rejoin: bool) -> S
             ka_tick.tick().await;
             loop {
                 tokio::select! {
-                    Some(msg) = tx_rx.recv() => {
+                    Some(outbound) = tx_rx.recv() => {
+                        let msg = outbound.message;
                         let bytes = encode_message(&msg).map_err(|e| format!("encode: {e}"))?;
                         writer.write_all(&bytes).await.map_err(|e| format!("write: {e}"))?;
+                        if let Some(replay) = outbound.replay {
+                            let counts = refresh_accounting(&writer_ctx.obs[i as usize], replay.ipv6);
+                            counts.sent_nlri.fetch_add(u64::from(replay.nlri), Ordering::Relaxed);
+                            if replay.last {
+                                counts.completed.fetch_add(1, Ordering::Relaxed);
+                            }
+                        }
                         if matches!(msg, Message::Notification(_)) {
                             writer.shutdown().await.map_err(|e| format!("shutdown: {e}"))?;
                             return Ok(());
@@ -2125,8 +2262,7 @@ fn start_stub(ctx: Arc<Ctx>, i: u32, stream: TcpStream, track_rejoin: bool) -> S
                         // storm must not spawn overlapping full-slice floods that
                         // duplicate announcements and skew the measurement.
                         let ipv6 = dualstack() && refresh.afi_raw == Afi::Ipv6 as u16;
-                        if refresh_pending(&rctx.obs[i as usize], ipv6).swap(true, Ordering::AcqRel)
-                        {
+                        if !admit_refresh(&rctx.obs[i as usize], ipv6) {
                             continue;
                         }
                         let tx = tx_for_reader.clone();
@@ -2141,18 +2277,8 @@ fn start_stub(ctx: Arc<Ctx>, i: u32, stream: TcpStream, track_rejoin: bool) -> S
                             }
                         }
                         refresh_tasks.spawn(async move {
-                            let messages = if ipv6 {
-                                announce6_msgs(i, &own_slice6(&rc, i))
-                            } else {
-                                announced_msgs(&rc, i)
-                            };
-                            for m in messages {
-                                if tx.send(m).await.is_err() {
-                                    break;
-                                }
-                            }
-                            refresh_pending(&rc.obs[i as usize], ipv6)
-                                .store(false, Ordering::Release);
+                            let messages = replay_messages(&rc, i, ipv6);
+                            enqueue_replay(&tx, &rc.obs[i as usize], ipv6, messages).await;
                         });
                     }
                     _ => {}
@@ -2783,7 +2909,7 @@ async fn run_flapstorm(
         println!("flap {round} reannounce wall_us={}", wall_us());
         for i in 0..k {
             for m in announced_msgs(ctx, i) {
-                if stubs[i as usize].tx.send(m).await.is_err() {
+                if stubs[i as usize].tx.send(m.into()).await.is_err() {
                     eprintln!("flap {round} re-announce send failed for stub {i}");
                     std::process::exit(1);
                 }
@@ -2952,7 +3078,12 @@ async fn run_trip_cycle(
     );
     let t_over = now_us(ctx);
     for msg in announce_msgs(TRIP_MEMBER, &trip_block(total, trip_prefix_count)) {
-        if stubs[TRIP_MEMBER as usize].tx.send(msg).await.is_err() {
+        if stubs[TRIP_MEMBER as usize]
+            .tx
+            .send(msg.into())
+            .await
+            .is_err()
+        {
             eprintln!("FAIL: trip {trip} over-limit announce send failed");
             std::process::exit(1);
         }
@@ -3033,7 +3164,12 @@ async fn run_trip_cycle(
     );
     // Compliant base slice only — the over-limit block stays withdrawn.
     for msg in announce_msgs(TRIP_MEMBER, &own_slice(ctx, TRIP_MEMBER)) {
-        if stubs[TRIP_MEMBER as usize].tx.send(msg).await.is_err() {
+        if stubs[TRIP_MEMBER as usize]
+            .tx
+            .send(msg.into())
+            .await
+            .is_err()
+        {
             eprintln!("FAIL: trip {trip} compliant re-announce send failed");
             std::process::exit(1);
         }
@@ -3128,7 +3264,7 @@ async fn run_ibgp_rr_soak(ctx: &Arc<Ctx>, stubs: &[Stub], hold_secs: u64, pid: i
     println!("rr_terminal refresh wall_us={}", wall_us());
     for (i, stub) in stubs.iter().enumerate() {
         let msg = Message::RouteRefresh(RouteRefreshMessage::new(Afi::Ipv4, Safi::Unicast));
-        if stub.tx.send(msg).await.is_err() {
+        if stub.tx.send(msg.into()).await.is_err() {
             eprintln!("FAIL: rr terminal refresh send failed for stub {i}");
             std::process::exit(1);
         }
@@ -3713,11 +3849,11 @@ fn main() {
         // --- Announce base table (FIRST_EXACT_SEND). ---
         for i in 0..n_peers {
             for m in announced_msgs(&ctx, i) {
-                stubs[i as usize].tx.send(m).await.unwrap();
+                stubs[i as usize].tx.send(m.into()).await.unwrap();
             }
             if dualstack() {
                 for m in announce6_msgs(i, &own_slice6(&ctx, i)) {
-                    stubs[i as usize].tx.send(m).await.unwrap();
+                    stubs[i as usize].tx.send(m.into()).await.unwrap();
                 }
             }
         }
@@ -3904,6 +4040,7 @@ fn main() {
                 "convergence_only_receipt,peers={n_peers},prefixes={total},per_peer={per_peer},expected={expected},min_unique={min_unique},max_unique={max_unique},sessions_up={up},parse_errors={parse_errors}"
             );
             finish_or_exit(stubs, Vec::new()).await;
+            print_refresh_accounting(&ctx);
             std::process::exit(0);
         }
 
@@ -3950,11 +4087,11 @@ fn main() {
                         }
                     });
                     announced = !announced;
-                    if tx.send(msg).await.is_err() {
+                    if tx.send(msg.into()).await.is_err() {
                         return;
                     }
                     if let Some(msg6) = msg6 {
-                        if tx.send(msg6).await.is_err() {
+                        if tx.send(msg6.into()).await.is_err() {
                             return;
                         }
                     }
@@ -4018,6 +4155,7 @@ fn main() {
                 std::process::exit(1);
             }
             finish_or_exit(stubs, churn_tasks).await;
+            print_refresh_accounting(&ctx);
             std::process::exit(0);
         }
 
@@ -4033,6 +4171,7 @@ fn main() {
                 std::process::exit(1);
             }
             finish_or_exit(stubs, churn_tasks).await;
+            print_refresh_accounting(&ctx);
             std::process::exit(0);
         }
 
@@ -4565,6 +4704,7 @@ fn main() {
                 std::process::exit(1);
             }
             finish_or_exit(stubs, churn_tasks).await;
+            print_refresh_accounting(&ctx);
             std::process::exit(0);
         };
         let up = ctx
@@ -4591,6 +4731,7 @@ fn main() {
         }
         println!("done rss_mib={}", rss_mib(pid));
         finish_or_exit(stubs, churn_tasks).await;
+        print_refresh_accounting(&ctx);
         std::process::exit(0);
     });
 }
@@ -4627,13 +4768,144 @@ mod tests {
         (client.unwrap(), server.unwrap().0)
     }
 
+    #[test]
+    fn refresh_admission_is_per_observer_and_family() {
+        let observers = [Obs::new(), Obs::new()];
+        assert!(admit_refresh(&observers[0], false));
+        assert!(!admit_refresh(&observers[0], false));
+        assert!(admit_refresh(&observers[0], true));
+        assert!(admit_refresh(&observers[1], false));
+        assert_eq!(observers[0].refresh4.received.load(Ordering::Relaxed), 2);
+        assert_eq!(observers[0].refresh4.suppressed.load(Ordering::Relaxed), 1);
+        assert_eq!(observers[0].refresh6.suppressed.load(Ordering::Relaxed), 0);
+        assert_eq!(observers[1].refresh4.received.load(Ordering::Relaxed), 1);
+    }
+
+    #[tokio::test]
+    async fn closed_writer_does_not_complete_partially_queued_replay() {
+        let observer = Obs::new();
+        assert!(admit_refresh(&observer, false));
+        let (tx, mut rx) = mpsc::channel(1);
+        let messages = [base_prefix(0), base_prefix(1)]
+            .map(|prefix| (announce_msgs(0, &[prefix]).pop().unwrap(), 1))
+            .into_iter()
+            .collect();
+        let send = enqueue_replay(&tx, &observer, false, messages);
+        let close = async {
+            let first = rx.recv().await.unwrap();
+            assert_eq!(first.replay.as_ref().unwrap().nlri, 1);
+            drop(rx);
+        };
+        tokio::join!(send, close);
+        assert_eq!(observer.refresh4.received.load(Ordering::Relaxed), 1);
+        assert_eq!(observer.refresh4.completed.load(Ordering::Relaxed), 0);
+        assert_eq!(observer.refresh4.sent_nlri.load(Ordering::Relaxed), 0);
+        assert!(!observer.refresh4.pending.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn refresh_metadata_matches_multichunk_overlap_wire() {
+        let mut ctx = finish_test_ctx();
+        let inner = Arc::get_mut(&mut ctx).unwrap();
+        inner.totals[0] = 901 * CHURNERS;
+        inner.extras[0] = vec![901, 902];
+        let mut wire_counts = Vec::new();
+        for (message, count) in replay_messages(&ctx, 0, false) {
+            let Message::Update(update) = message else {
+                panic!("expected replay UPDATE")
+            };
+            let decoded = update.parse(true, false, &[]).unwrap().announced.len();
+            assert_eq!(count as usize, decoded);
+            wire_counts.push(decoded);
+        }
+        assert_eq!(wire_counts, [900, 3]);
+    }
+
+    #[tokio::test]
+    async fn refresh_replay_counts_completed_and_written_nlri() {
+        let (client, mut server) = finish_test_connection().await;
+        let mut ctx = finish_test_ctx();
+        let inner = Arc::get_mut(&mut ctx).unwrap();
+        inner.per_peer = 2;
+        inner.totals[0] = 2 * CHURNERS;
+        inner.totals[1] = 2 * CHURNERS;
+        for (message, count) in replay_messages(&ctx, 0, true) {
+            let Message::Update(update) = message else {
+                panic!("expected IPv6 UPDATE")
+            };
+            assert_eq!(
+                split_unicast_families(&update.parse(true, false, &[]).unwrap())
+                    .v6_ann
+                    .len(),
+                count as usize
+            );
+        }
+        let stub = start_stub(Arc::clone(&ctx), 0, client, false);
+        let request = encode_message(&Message::RouteRefresh(RouteRefreshMessage::new(
+            Afi::Ipv4,
+            Safi::Unicast,
+        )))
+        .unwrap();
+
+        // Hold the real reader's latch so the first wire request takes the
+        // duplicate path; no replay can be counted for that request.
+        ctx.obs[0].refresh4.pending.store(true, Ordering::Release);
+        server.write_all(&request).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while ctx.obs[0].refresh4.suppressed.load(Ordering::Relaxed) != 1 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(ctx.obs[0].refresh4.completed.load(Ordering::Relaxed), 0);
+        assert_eq!(ctx.obs[0].refresh4.sent_nlri.load(Ordering::Relaxed), 0);
+
+        ctx.obs[0].refresh4.pending.store(false, Ordering::Release);
+        server.write_all(&request).await.unwrap();
+        let mut header = [0u8; HEADER_LEN];
+        tokio::time::timeout(Duration::from_secs(2), server.read_exact(&mut header))
+            .await
+            .unwrap()
+            .unwrap();
+        let length = peek_message_length(&header, MAX_MESSAGE_LEN)
+            .unwrap()
+            .unwrap() as usize;
+        let mut wire = BytesMut::from(&header[..]);
+        wire.resize(length, 0);
+        server.read_exact(&mut wire[HEADER_LEN..]).await.unwrap();
+        let Message::Update(update) = decode_message(&mut wire.freeze(), MAX_MESSAGE_LEN).unwrap()
+        else {
+            panic!("expected replay UPDATE");
+        };
+        assert_eq!(update.parse(true, false, &[]).unwrap().announced.len(), 2);
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while ctx.obs[0].refresh4.completed.load(Ordering::Relaxed) != 1 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(ctx.obs[0].refresh4.received.load(Ordering::Relaxed), 2);
+        assert_eq!(ctx.obs[0].refresh4.completed.load(Ordering::Relaxed), 1);
+        assert_eq!(ctx.obs[0].refresh4.sent_nlri.load(Ordering::Relaxed), 2);
+        assert_eq!(ctx.obs[0].refresh6.received.load(Ordering::Relaxed), 0);
+        stub.reader.abort();
+        stub.writer.abort();
+        let _ = stub.reader.await;
+        let _ = stub.writer.await;
+        let mut refreshes = std::mem::take(&mut *stub.refreshes.lock().unwrap());
+        refreshes.abort_all();
+        while refreshes.join_next().await.is_some() {}
+    }
+
     #[tokio::test]
     async fn fleet_finish_writes_queued_updates_and_cease_then_drains_to_eof() {
         let (client, mut server) = finish_test_connection().await;
         let stub = start_stub(finish_test_ctx(), 0, client, false);
         let update = announce_msgs(0, &[base_prefix(0)]).pop().unwrap();
-        stub.tx.send(update.clone()).await.unwrap();
-        stub.tx.send(update).await.unwrap();
+        stub.tx.send(update.clone().into()).await.unwrap();
+        stub.tx.send(update.into()).await.unwrap();
         let peer = tokio::spawn(async move {
             let mut sent = Vec::new();
             server.read_to_end(&mut sent).await.unwrap();
