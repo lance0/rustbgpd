@@ -76,6 +76,7 @@ sink_ip=$(resolve_ip "$SINK")
 test -n "$sink_ip"
 docker exec "$RUSTBGPD" sh -c \
     "sed 's/SINK_ADDR/$sink_ip/' /etc/rustbgpd/config.toml > /tmp/config.toml"
+resolve_grpc_addr
 start_rustbgpd 'exec /usr/local/bin/rustbgpd /tmp/config.toml >/tmp/rustbgpd-bmp-passive.log 2>&1'
 for peer in "$PE1" "$PE2"; do
     docker exec -d "$peer" sh -c \
