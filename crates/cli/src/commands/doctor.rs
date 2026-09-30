@@ -95,6 +95,13 @@ const PROBE_TIMEOUT_SECS: u64 = 2;
 /// Free-space thresholds for `runtime_state_dir`: below WARN the check is
 /// yellow, below FAIL it is red (journal/MRT/crash/event-history writes
 /// are about to start failing).
+/// Pause before the single `GetHealth` retry after an `UNAVAILABLE` reply.
+/// The daemon returns `UNAVAILABLE` when a core actor misses the 200 ms
+/// readiness deadline, which happens in the short tail of a reload while the
+/// actors drain post-commit work; a second attempt a second later separates
+/// that transient from an actor that stays unresponsive.
+const HEALTH_RETRY_DELAY: Duration = Duration::from_secs(1);
+
 const STATE_DIR_DISK_WARN_BYTES: u64 = 1024 * 1024 * 1024;
 const STATE_DIR_DISK_FAIL_BYTES: u64 = 100 * 1024 * 1024;
 
@@ -2063,6 +2070,78 @@ fn config_freshness_check(
     }
 }
 
+/// Issue `GetHealth`, retrying once after `retry_delay` when the first reply is
+/// `UNAVAILABLE` (a core-probe deadline miss or a transient transport error).
+/// Returns the final outcome plus the first miss when a retry happened. Every
+/// other error, including the client-side read deadline, is returned at once.
+async fn get_health_with_retry<T, F, Fut>(
+    retry_delay: Duration,
+    mut call: F,
+) -> (Result<T, tonic::Status>, Option<tonic::Status>)
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Result<T, tonic::Status>>,
+{
+    match call().await {
+        Err(miss) if miss.code() == tonic::Code::Unavailable => {
+            tokio::time::sleep(retry_delay).await;
+            (call().await, Some(miss))
+        }
+        first => (first, None),
+    }
+}
+
+/// `daemon.healthy` from the final `GetHealth` outcome. A single
+/// `UNAVAILABLE` miss followed by a healthy snapshot is yellow and names the
+/// miss; a failed retry, any other RPC error, or `healthy=false` is red.
+fn daemon_healthy_check(
+    outcome: Result<&crate::proto::HealthResponse, &tonic::Status>,
+    first_miss: Option<&tonic::Status>,
+) -> Check {
+    let (status, detail) = match outcome {
+        Ok(health) => {
+            let summary = format!(
+                "(uptime {}, {} active peers, {} routes)",
+                output::format_duration(health.uptime_seconds),
+                health.active_peers,
+                health.total_routes
+            );
+            match (health.healthy, first_miss) {
+                (false, _) => (
+                    CheckStatus::Fail,
+                    format!("daemon reports UNHEALTHY {summary}"),
+                ),
+                (true, Some(miss)) => (
+                    CheckStatus::Warn,
+                    format!(
+                        "daemon healthy on retry {summary}; the first GetHealth attempt was \
+                         unavailable: {}. A single miss is expected while a reload settles; \
+                         repeated misses point at a busy or wedged core actor",
+                        miss.message()
+                    ),
+                ),
+                (true, None) => (CheckStatus::Ok, format!("daemon healthy {summary}")),
+            }
+        }
+        Err(error) => (
+            CheckStatus::Fail,
+            match first_miss {
+                Some(miss) => format!(
+                    "health RPC failed: {error} (retried once after the first attempt was \
+                     unavailable: {})",
+                    miss.message()
+                ),
+                None => format!("health RPC failed: {error}"),
+            },
+        ),
+    };
+    Check {
+        name: "daemon.healthy".to_string(),
+        status,
+        detail,
+    }
+}
+
 /// `daemon.authz.reachable`: the `GetHealth` probe outcome viewed through
 /// an authorization lens. `GetHealth` is the least-privileged RPC doctor
 /// issues (`sensitive_read`, within every role's ceiling), so a
@@ -2584,6 +2663,7 @@ pub(crate) async fn run(
         opts,
         READ_RPC_TIMEOUT,
         EFFECTIVE_CONFIG_RPC_TIMEOUT,
+        HEALTH_RETRY_DELAY,
     )
     .await
 }
@@ -2593,6 +2673,7 @@ async fn run_with_deadlines(
     opts: &DoctorOptions<'_>,
     read_budget: Duration,
     effective_config_budget: Duration,
+    health_retry_delay: Duration,
 ) -> Result<i32, CliError> {
     let now = now_unix_seconds();
     let mut reporter = Reporter {
@@ -2659,12 +2740,19 @@ async fn run_with_deadlines(
             // system/health.json + the healthy check. The same probe outcome
             // feeds the daemon.authz.* triage: a PERMISSION_DENIED here is an
             // authorization finding, not a health one.
-            let health_result = rpc_with_timeout(
-                "GetHealth",
-                read_budget,
-                control.get_health(HealthRequest {}),
-            )
-            .await;
+            let (health_result, health_first_miss) =
+                get_health_with_retry(health_retry_delay, || {
+                    let mut control = control.clone();
+                    async move {
+                        rpc_with_timeout(
+                            "GetHealth",
+                            read_budget,
+                            control.get_health(HealthRequest {}),
+                        )
+                        .await
+                    }
+                })
+                .await;
             if let Some(check) = authz_reachable_check(health_result.as_ref().err()) {
                 reporter.record(check.name, check.status, check.detail)?;
             }
@@ -2680,25 +2768,8 @@ async fn run_with_deadlines(
                     if !health.daemon_version.is_empty() {
                         daemon_version = Some(health.daemon_version.clone());
                     }
-                    reporter.record(
-                        "daemon.healthy",
-                        if health.healthy {
-                            CheckStatus::Ok
-                        } else {
-                            CheckStatus::Fail
-                        },
-                        format!(
-                            "daemon {} (uptime {}, {} active peers, {} routes)",
-                            if health.healthy {
-                                "healthy"
-                            } else {
-                                "reports UNHEALTHY"
-                            },
-                            output::format_duration(health.uptime_seconds),
-                            health.active_peers,
-                            health.total_routes
-                        ),
-                    )?;
+                    let check = daemon_healthy_check(Ok(&health), health_first_miss.as_ref());
+                    reporter.record(check.name, check.status, check.detail)?;
                     bundle.add_json(
                         "system/health.json",
                         &HealthSnapshot {
@@ -2711,11 +2782,8 @@ async fn run_with_deadlines(
                     )?;
                 }
                 Err(e) => {
-                    reporter.record(
-                        "daemon.healthy",
-                        CheckStatus::Fail,
-                        format!("health RPC failed: {e}"),
-                    )?;
+                    let check = daemon_healthy_check(Err(&e), health_first_miss.as_ref());
+                    reporter.record(check.name, check.status, check.detail)?;
                     sections.insert("system", format!("partial: health RPC failed: {e}"));
                 }
             }
@@ -5842,10 +5910,13 @@ paths = ["x"]
             },
             Duration::from_millis(250),
             Duration::from_secs(2),
+            HEALTH_RETRY_DELAY,
         )
         .await
         .unwrap();
         assert_eq!(code, 2);
+        // A client-side read deadline is not a daemon deadline miss: no retry.
+        assert_eq!(server.state.health_calls.load(Ordering::SeqCst), 1);
         let files = extract_bundle(&bundle_path);
         assert!(!files.iter().any(|(name, _)| name == "system/health.json"));
         for retained in [
@@ -5898,6 +5969,168 @@ paths = ["x"]
         );
     }
 
+    /// Runs doctor against the mock after `misses` UNAVAILABLE GetHealth
+    /// replies, with no retry pause so the retry needs no wall-clock wait.
+    async fn doctor_after_health_misses(misses: usize) -> (serde_json::Value, usize) {
+        let server = spawn_mock_server(None).await;
+        server
+            .state
+            .health_failures_remaining
+            .store(misses, Ordering::SeqCst);
+        let dir = tempfile::tempdir().unwrap();
+        let bundle_path = dir.path().join("bundle.tar.gz");
+        run_with_deadlines(
+            connect(&server.addr, None).await,
+            &DoctorOptions {
+                output: Some(&bundle_path),
+                log_file: None,
+                daemon_address: &server.addr,
+                token_file_configured: false,
+                json: true,
+                pre_upgrade: None,
+            },
+            Duration::from_secs(5),
+            Duration::from_secs(5),
+            Duration::ZERO,
+        )
+        .await
+        .unwrap();
+        let files = extract_bundle(&bundle_path);
+        let manifest: serde_json::Value =
+            serde_json::from_str(find(&files, "manifest.json")).unwrap();
+        (
+            manifest_check(&manifest, "daemon.healthy").clone(),
+            server.state.health_calls.load(Ordering::SeqCst),
+        )
+    }
+
+    #[tokio::test]
+    async fn one_unavailable_health_reply_then_success_is_yellow() {
+        let (check, calls) = doctor_after_health_misses(1).await;
+        assert_eq!(calls, 2);
+        assert_eq!(check["status"], "warn", "{check}");
+        let detail = check["detail"].as_str().unwrap();
+        assert!(
+            detail.starts_with("daemon healthy on retry (uptime"),
+            "{detail}"
+        );
+        assert!(
+            detail.contains("unavailable: transient health failure"),
+            "{detail}"
+        );
+    }
+
+    #[tokio::test]
+    async fn two_unavailable_health_replies_are_red() {
+        let (check, calls) = doctor_after_health_misses(2).await;
+        assert_eq!(calls, 2);
+        assert_eq!(check["status"], "fail", "{check}");
+        assert!(
+            check["detail"]
+                .as_str()
+                .unwrap()
+                .contains("(retried once after the first attempt was unavailable"),
+            "{check}"
+        );
+    }
+
+    /// Paused clock: the retry pause is observed exactly, with no real sleep.
+    #[tokio::test(start_paused = true)]
+    async fn health_retry_is_one_paused_retry_for_unavailable_only() {
+        async fn drive(
+            replies: Vec<Result<u8, tonic::Status>>,
+        ) -> (
+            Result<u8, tonic::Status>,
+            Option<tonic::Status>,
+            usize,
+            Duration,
+        ) {
+            let replies = std::sync::Mutex::new(std::collections::VecDeque::from(replies));
+            let calls = std::sync::atomic::AtomicUsize::new(0);
+            let started = tokio::time::Instant::now();
+            let (result, miss) = get_health_with_retry(HEALTH_RETRY_DELAY, || {
+                calls.fetch_add(1, Ordering::SeqCst);
+                let reply = replies.lock().unwrap().pop_front().unwrap();
+                async move { reply }
+            })
+            .await;
+            (
+                result,
+                miss,
+                calls.load(Ordering::SeqCst),
+                started.elapsed(),
+            )
+        }
+        let unavailable =
+            || tonic::Status::unavailable("peer manager probe timed out (200ms deadline)");
+
+        let (result, miss, calls, elapsed) = drive(vec![Err(unavailable()), Ok(7)]).await;
+        assert_eq!(result.unwrap(), 7);
+        assert_eq!(miss.unwrap().code(), tonic::Code::Unavailable);
+        assert_eq!((calls, elapsed), (2, HEALTH_RETRY_DELAY));
+
+        let (result, miss, calls, _) = drive(vec![Err(unavailable()), Err(unavailable())]).await;
+        assert_eq!(result.unwrap_err().code(), tonic::Code::Unavailable);
+        assert!(miss.is_some());
+        assert_eq!(calls, 2);
+
+        for code in [
+            tonic::Code::Internal,
+            tonic::Code::DeadlineExceeded,
+            tonic::Code::PermissionDenied,
+        ] {
+            let (result, miss, calls, elapsed) =
+                drive(vec![Err(tonic::Status::new(code, "no retry"))]).await;
+            assert_eq!(result.unwrap_err().code(), code);
+            assert!(miss.is_none());
+            assert_eq!((calls, elapsed), (1, Duration::ZERO), "{code:?}");
+        }
+    }
+
+    #[test]
+    fn daemon_healthy_grading() {
+        let healthy = crate::proto::HealthResponse {
+            healthy: true,
+            uptime_seconds: 60,
+            active_peers: 3,
+            total_routes: 9,
+            daemon_version: String::new(),
+        };
+        let miss = tonic::Status::unavailable("RIB manager probe timed out (200ms deadline)");
+        let internal = tonic::Status::internal("peer manager unavailable");
+
+        let green = daemon_healthy_check(Ok(&healthy), None);
+        assert_eq!(green.status, CheckStatus::Ok);
+        assert_eq!(
+            green.detail,
+            "daemon healthy (uptime 00:01:00, 3 active peers, 9 routes)"
+        );
+
+        let yellow = daemon_healthy_check(Ok(&healthy), Some(&miss));
+        assert_eq!(yellow.status, CheckStatus::Warn);
+        assert!(
+            yellow
+                .detail
+                .contains("RIB manager probe timed out (200ms deadline)")
+        );
+
+        let unhealthy = crate::proto::HealthResponse {
+            healthy: false,
+            ..healthy.clone()
+        };
+        assert_eq!(
+            daemon_healthy_check(Ok(&unhealthy), Some(&miss)).status,
+            CheckStatus::Fail
+        );
+        assert_eq!(
+            daemon_healthy_check(Err(&miss), Some(&miss)).status,
+            CheckStatus::Fail
+        );
+        let immediate = daemon_healthy_check(Err(&internal), None);
+        assert_eq!(immediate.status, CheckStatus::Fail);
+        assert!(!immediate.detail.contains("retried"));
+    }
+
     #[tokio::test]
     async fn effective_config_deadline_keeps_successful_lightweight_evidence() {
         let server = spawn_mock_server(None).await;
@@ -5919,6 +6152,7 @@ paths = ["x"]
             },
             Duration::from_secs(1),
             Duration::from_millis(20),
+            HEALTH_RETRY_DELAY,
         )
         .await
         .unwrap();

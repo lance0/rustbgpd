@@ -5,7 +5,7 @@ use tokio::sync::{mpsc, oneshot, watch};
 use tonic::{Request, Response, Status};
 use tracing::info;
 
-use crate::health_probe::CoreReadinessProbe;
+use crate::health_probe::{CoreReadinessError, CoreReadinessProbe};
 use crate::peer_types::{PeerManagerCommand, PeerManagerReadinessQuery};
 use crate::proto;
 use crate::server::{AccessMode, read_only_rejection};
@@ -79,6 +79,21 @@ impl ControlService {
     }
 }
 
+/// `GetHealth` status for a failed core snapshot. A missed probe deadline is
+/// `UNAVAILABLE`. The miss may be transient (an actor busy, for example while
+/// a reload settles) or persistent (a wedged actor), so a caller may retry
+/// once and should treat a repeated miss as a failure. A closed actor
+/// channel, a dropped reply, or a stalled export-policy transition or
+/// selection release stays `INTERNAL`.
+fn health_probe_status(error: CoreReadinessError) -> Status {
+    match error {
+        CoreReadinessError::PeerManagerTimedOut | CoreReadinessError::RibTimedOut => {
+            Status::unavailable(error.to_string())
+        }
+        _ => Status::internal(error.to_string()),
+    }
+}
+
 #[tonic::async_trait]
 impl proto::control_service_server::ControlService for ControlService {
     async fn check_liveness(
@@ -102,10 +117,7 @@ impl proto::control_service_server::ControlService for ControlService {
         if let Some(readiness_tx) = &self.rib_readiness_tx {
             probe = probe.with_rib_readiness(readiness_tx.clone());
         }
-        let snapshot = probe
-            .snapshot()
-            .await
-            .map_err(|error| Status::internal(error.to_string()))?;
+        let snapshot = probe.snapshot().await.map_err(health_probe_status)?;
 
         // Only count peers we successfully queried as Established. A
         // `stale` PeerInfo means the per-peer `query_state` deadline fired
@@ -460,10 +472,96 @@ mod tests {
         .expect("GetHealth should return after the readiness deadline")
         .unwrap_err();
 
-        assert_eq!(err.code(), tonic::Code::Internal);
+        assert_eq!(err.code(), tonic::Code::Unavailable);
         assert_eq!(
             err.message(),
             "peer manager probe timed out (200ms deadline)"
         );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn get_health_rib_deadline_miss_is_unavailable() {
+        let (peer_tx, mut peer_rx) = mpsc::channel(16);
+        let (rib_tx, _rib_rx) = mpsc::channel(16);
+        let (shutdown_tx, _shutdown_rx) = watch::channel(false);
+        let svc = ControlService::new(
+            AccessMode::ReadWrite,
+            tokio::time::Instant::now(),
+            BgpMetrics::new(),
+            peer_tx,
+            rib_tx,
+            shutdown_tx,
+            None,
+        );
+        tokio::spawn(async move {
+            if let Some(PeerManagerCommand::ListPeers { reply }) = peer_rx.recv().await {
+                let _ = reply.send(Vec::new());
+            }
+        });
+
+        let err = svc
+            .get_health(Request::new(proto::HealthRequest {}))
+            .await
+            .unwrap_err();
+
+        assert_eq!(err.code(), tonic::Code::Unavailable);
+        assert_eq!(
+            err.message(),
+            "RIB manager probe timed out (200ms deadline)"
+        );
+    }
+
+    #[tokio::test]
+    async fn get_health_dead_or_dropping_actor_stays_internal() {
+        // Closed peer-manager channel: the actor is gone, not busy.
+        let (peer_tx, peer_rx) = mpsc::channel(16);
+        drop(peer_rx);
+        let (rib_tx, _rib_rx) = mpsc::channel(16);
+        let (shutdown_tx, _shutdown_rx) = watch::channel(false);
+        let svc = ControlService::new(
+            AccessMode::ReadWrite,
+            tokio::time::Instant::now(),
+            BgpMetrics::new(),
+            peer_tx,
+            rib_tx,
+            shutdown_tx,
+            None,
+        );
+        let err = svc
+            .get_health(Request::new(proto::HealthRequest {}))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), tonic::Code::Internal);
+        assert_eq!(err.message(), "peer manager unavailable");
+
+        // Dropped RIB reply after a successful peer snapshot.
+        let (peer_tx, mut peer_rx) = mpsc::channel(16);
+        let (rib_tx, mut rib_rx) = mpsc::channel(16);
+        let (shutdown_tx, _shutdown_rx) = watch::channel(false);
+        let svc = ControlService::new(
+            AccessMode::ReadWrite,
+            tokio::time::Instant::now(),
+            BgpMetrics::new(),
+            peer_tx,
+            rib_tx,
+            shutdown_tx,
+            None,
+        );
+        tokio::spawn(async move {
+            if let Some(PeerManagerCommand::ListPeers { reply }) = peer_rx.recv().await {
+                let _ = reply.send(Vec::new());
+            }
+        });
+        tokio::spawn(async move {
+            if let Some(RibUpdate::QueryLocRibCount { reply }) = rib_rx.recv().await {
+                drop(reply);
+            }
+        });
+        let err = svc
+            .get_health(Request::new(proto::HealthRequest {}))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), tonic::Code::Internal);
+        assert_eq!(err.message(), "RIB manager dropped reply");
     }
 }

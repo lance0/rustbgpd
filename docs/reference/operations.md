@@ -2667,11 +2667,20 @@ including response-body transfer, for both TCP and Unix sockets. A timeout
 names the RPC and budget, preserves successful evidence, and marks the
 affected section incomplete. The effective-config collection has a separate
 30-minute-and-30-second allowance; doctor can therefore take longer than
-30 seconds overall. No timeout triggers an automatic retry. Native one-shot
+30 seconds overall. No timeout triggers an automatic retry; the one retry
+doctor makes is described under `daemon.healthy` below. Native one-shot
 CLI reads, including config status and history, use the same 30-second limit
 per call or RIB page. `rbgp config effective` uses the effective-config
 allowance. Long-running config diff and plan, config mutations and streams,
 and live watches keep their existing budgets and lifetimes.
+
+`daemon.healthy` reads `GetHealth`. When the daemon answers `UNAVAILABLE`
+(a core actor missed the 200 ms probe deadline), doctor waits one second and
+asks once more. The miss may be transient, as briefly while a reload settles,
+or persistent, from a wedged actor. A healthy second answer is yellow and
+names the first miss; a second miss is red. Any other
+error, including doctor's own 30-second response deadline, is red at once
+without a retry, as is a snapshot reporting `healthy=false`.
 
 `peer.<addr>.rfc8212_policy` is the ADR-0112 check. It is green for
 `not_required` — the compatibility default, so it never turns an existing
