@@ -149,8 +149,10 @@ class VrpFixture(unittest.TestCase):
             self.assertEqual(len(before_rows), len(after_rows))
             selected = rpki_cell.replacement_indices(v4, total - v4, changed)
             self.assertEqual(len(selected), len(set(selected)))
-            self.assertEqual({index for index, (old, new) in enumerate(zip(before_rows, after_rows))
-                              if old != new}, set(selected))
+            actual = {index for index, (old, new) in enumerate(zip(before_rows, after_rows))
+                      if old != new}
+            self.assertEqual(actual, {0, 10, 20, 30, 40, 51, 61, 71, 81, 91})
+            self.assertEqual(actual, set(selected))
             for index in selected:
                 old, new = before_rows[index], after_rows[index]
                 self.assertEqual({key: value for key, value in old.items() if key != "maxLength"},
@@ -162,6 +164,20 @@ class VrpFixture(unittest.TestCase):
             added = Counter(map(identity, after_rows)) - Counter(map(identity, before_rows))
             self.assertEqual(sum(removed.values()), changed)
             self.assertEqual(sum(added.values()), changed)
+
+    def test_maxlen_delta_can_replace_every_announced_entry_with_uneven_families(self):
+        peers, total, v4, vrps = 9, 101, 92, 115
+        with tempfile.TemporaryDirectory() as tmp:
+            base, after = Path(tmp, "base.json"), Path(tmp, "after.json")
+            rpki_cell.write_vrps(peers, total, vrps, str(base), v4)
+            self.assertEqual(rpki_cell.write_maxlen_delta(
+                peers, total, vrps, v4, total, str(base), str(after)), (v4, total - v4))
+            before_rows = json.loads(base.read_text())["roas"]
+            after_rows = json.loads(after.read_text())["roas"]
+            changed = {index for index, (old, new) in enumerate(zip(before_rows, after_rows))
+                       if old != new}
+            self.assertEqual(changed, set(range(total)))
+            self.assertEqual(before_rows[total:], after_rows[total:])
 
     def test_maxlen_delta_rejects_tampered_base_and_invalid_counts(self):
         peers, total, v4, vrps = 9, 101, 51, 115
