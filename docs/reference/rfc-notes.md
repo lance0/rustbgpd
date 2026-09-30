@@ -586,6 +586,23 @@ matches FRR, BIRD, and most production implementations. Setting it on a value
 rustbgpd did parse and validate would be a false claim, which is why the
 recognized types carry the received bit through rather than OR one in.
 
+### NHC opaque transit
+
+NHC (39) is framing-validated opaque data, with unsupported payload semantics.
+Import and export next-hop rewrites preserve its payload; rustbgpd neither
+constructs NHC characteristics nor rebuilds the next-hop header.
+[draft-ietf-idr-nhc-07 §1.2](https://datatracker.ietf.org/doc/html/draft-ietf-idr-nhc-07#section-1.2)
+limits supporting-speaker requirements to implementations supporting and
+enabling the specification, and
+[§2.2](https://datatracker.ietf.org/doc/html/draft-ietf-idr-nhc-07#section-2.2)
+explicitly permits opaque propagation through unsupported speakers without
+updating NHC. A supporting receiver must compare the encoded next hop before
+using the characteristics ([§2.3](https://datatracker.ietf.org/doc/html/draft-ietf-idr-nhc-07#section-2.3)).
+The rewrite requirement therefore does not require NHC removal under rustbgpd's
+current support boundary. This remains an Internet-Draft, not a
+published RFC. The [registry boundary](path-attribute-registry.md#nhc-boundary)
+records framing/error handling and the existing transport retention evidence.
+
 ### Cease Subcode 8 (Out of Resources)
 
 rustbgpd sends NOTIFICATION Cease with subcode 8 (Out of Resources, RFC 4486
@@ -2083,6 +2100,28 @@ carries inactive (absent), unlimited (zero), or finite.
   `as_bgp_encapsulation()` returns the u16 tunnel type.
 - rustbgpd does not yet **negotiate** a preferred encap. VXLAN is
   assumed; non-VXLAN values are passed through untouched.
+- **Tunnel Encapsulation (23):** exact Tunnel TLV and sub-TLV framing is
+  validated before opaque transit. rustbgpd does not interpret tunnel endpoints
+  or select tunnels from that attribute; carriage is not RFC 9012 semantic
+  support. The [registry boundary](path-attribute-registry.md#encapsulation-boundary)
+  distinguishes it from the Encapsulation Extended Community.
+- **Administrative-domain boundary:** rustbgpd originates VXLAN Encapsulation
+  ECs and interprets received tunnel types for local EVPN eligibility, while
+  retaining the community across eBGP. [RFC 9012 §11](https://www.rfc-editor.org/rfc/rfc9012.html#section-11)
+  requires default ingress and egress filtering by speakers that understand
+  it. Current behavior is an explicit compatibility exception for the
+  [alpha EVPN profile](stability.md) in operator-controlled administrative
+  domains: default eBGP filtering and a dedicated same-domain permission
+  control are absent. This is a conformance limitation, not an implementation
+  of that RFC requirement.
+- **Compatibility:** [RFC 8365 §5.1.3](https://www.rfc-editor.org/rfc/rfc8365.html#section-5.1.3)
+  requires encapsulation signaling for EVPN overlays but provides no exemption
+  from RFC 9012 §11. Removing received communities would also change local
+  eligibility: advertising only non-VXLAN types excludes a route from the local
+  VXLAN profile, whereas absence uses the statically configured VXLAN fallback.
+  A future default-filter change needs explicit same-domain authorization and
+  migration guidance; this documented decision preserves current wire behavior
+  and route-server transparency.
 - **Automatic RT derivation:** L2VNI auto-RT follows RFC 8365 §5.1.2.1;
   L3VNI auto-RT uses AS:VNI. Both reject ASNs above 65535 with a typed
   error. A four-octet-AS RT has only a two-octet local administrator and
