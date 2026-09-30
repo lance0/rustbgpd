@@ -6,20 +6,18 @@ fn ebgp_prepends_asn() {
     let session = make_test_session(65001, 65002);
     let route = make_route(100);
     let attrs = session.prepare_outbound_attributes(&route, true, Ipv4Addr::new(10, 0, 0, 1), None);
-    let as_path = attrs
+    let as_paths = attrs
         .iter()
-        .find_map(|a| match a {
+        .filter_map(|a| match a {
             PathAttribute::AsPath(p) => Some(p),
             _ => None,
         })
-        .unwrap();
-    // Should have our ASN prepended
-    if let AsPathSegment::AsSequence(asns) = &as_path.segments[0] {
-        assert_eq!(asns[0], 65001);
-        assert_eq!(asns[1], 65002);
-    } else {
-        panic!("expected AS_SEQUENCE");
-    }
+        .collect::<Vec<_>>();
+    assert_eq!(as_paths.len(), 1);
+    assert_eq!(
+        as_paths[0].segments,
+        vec![AsPathSegment::AsSequence(vec![65001, 65002])]
+    );
 }
 
 #[test]
@@ -84,6 +82,45 @@ fn ebgp_strips_local_pref() {
             .iter()
             .any(|a| matches!(a, PathAttribute::LocalPref(_)))
     );
+}
+
+#[test]
+fn classic_export_strips_rr_attrs_only_for_ebgp() {
+    let originator = Ipv4Addr::new(10, 0, 0, 42);
+    let clusters = vec![Ipv4Addr::new(10, 0, 0, 7), Ipv4Addr::new(10, 0, 0, 8)];
+    let rr_attrs = vec![
+        PathAttribute::OriginatorId(originator),
+        PathAttribute::ClusterList(clusters),
+    ];
+    for (remote_asn, route_server_client) in [(65002, false), (65002, true), (65001, false)] {
+        let mut session = make_test_session(65001, remote_asn);
+        session.config.route_server_client = route_server_client;
+        let mut route = make_route(100);
+        route.origin_type = rustbgpd_rib::RouteOrigin::Ibgp;
+        route.peer_router_id = originator;
+        AttrSet::edit(&mut route.attributes, |attrs| {
+            attrs.extend(rr_attrs.clone());
+        });
+        let is_ebgp = remote_asn != 65001;
+        let attrs =
+            session.prepare_outbound_attributes(&route, is_ebgp, Ipv4Addr::new(10, 0, 0, 1), None);
+        let mut actual = attrs
+            .into_iter()
+            .filter(|attr| {
+                matches!(
+                    attr,
+                    PathAttribute::OriginatorId(_) | PathAttribute::ClusterList(_)
+                )
+            })
+            .collect::<Vec<_>>();
+        let mut expected = if is_ebgp { vec![] } else { rr_attrs.clone() };
+        actual.sort_by_key(PathAttribute::type_code);
+        expected.sort_by_key(PathAttribute::type_code);
+        assert_eq!(
+            actual, expected,
+            "remote_asn={remote_asn}, route_server_client={route_server_client}"
+        );
+    }
 }
 
 #[test]
@@ -195,11 +232,16 @@ fn llgr_stale_to_non_llgr_ibgp_peer_carries_no_export_and_lpref_zero() {
         comms.contains(&rustbgpd_wire::COMMUNITY_NO_EXPORT),
         "§4.6 requires NO_EXPORT toward a non-LLGR iBGP peer"
     );
-    assert!(
+    assert_eq!(
         attrs
             .iter()
-            .any(|a| matches!(a, PathAttribute::LocalPref(0))),
-        "§4.6 requires LOCAL_PREF zero toward a non-LLGR iBGP peer"
+            .filter_map(|attr| match attr {
+                PathAttribute::LocalPref(value) => Some(*value),
+                _ => None,
+            })
+            .collect::<Vec<_>>(),
+        vec![0],
+        "§4.6 requires exactly one LOCAL_PREF zero toward a non-LLGR iBGP peer"
     );
     // Everything else rides through untouched.
     assert!(
@@ -236,10 +278,15 @@ fn llgr_rewrite_preserves_partial_communities() {
         .expect("LLGR rewrite retains Partial");
     assert!(communities.contains(&rustbgpd_wire::COMMUNITY_LLGR_STALE));
     assert!(communities.contains(&rustbgpd_wire::COMMUNITY_NO_EXPORT));
-    assert!(
+    assert_eq!(
         attrs
             .iter()
-            .any(|attr| matches!(attr, PathAttribute::LocalPref(0)))
+            .filter_map(|attr| match attr {
+                PathAttribute::LocalPref(value) => Some(*value),
+                _ => None,
+            })
+            .collect::<Vec<_>>(),
+        vec![0]
     );
 }
 
@@ -444,35 +491,109 @@ fn fresh_route_to_non_llgr_ibgp_peer_unmodified() {
 
 #[test]
 fn llgr_peer_keeps_llgr_stale_community() {
-    let mut session = make_test_session(65001, 65002);
-    let mut negotiated = negotiated_session(65002, false);
-    negotiated.peer_llgr_capable = true;
-    negotiated.peer_llgr_families = vec![LlgrFamily {
-        afi: Afi::Ipv4,
-        safi: Safi::Unicast,
-        stale_time: 3600,
-        forwarding_preserved: false,
-    }];
-    session.negotiated = Some(Arc::new(negotiated));
-    let route = Route {
-        attributes: AttrSet::new(vec![
-            PathAttribute::Origin(Origin::Igp),
-            PathAttribute::AsPath(AsPath {
-                segments: vec![AsPathSegment::AsSequence(vec![65002])],
-            }),
-            PathAttribute::NextHop(Ipv4Addr::new(10, 0, 0, 2)),
-            PathAttribute::Communities(vec![rustbgpd_wire::COMMUNITY_LLGR_STALE]),
-        ]),
-        ..make_route(100)
-    };
-    let attrs = session.prepare_outbound_attributes(&route, true, Ipv4Addr::new(10, 0, 0, 1), None);
-    assert!(attrs.iter().any(|a| {
-        matches!(
-            a,
-            PathAttribute::Communities(comms)
-                if comms.contains(&rustbgpd_wire::COMMUNITY_LLGR_STALE)
-        )
-    }));
+    for (remote_asn, capable, afi, local_prefs, no_export) in [
+        (65001, true, Afi::Ipv4, vec![100], false),
+        (65001, true, Afi::Ipv6, vec![0], true),
+        (65001, false, Afi::Ipv4, vec![0], true),
+        (65002, true, Afi::Ipv4, vec![], false),
+    ] {
+        let mut session = make_test_session(65001, remote_asn);
+        let mut negotiated = negotiated_session(remote_asn, false);
+        negotiated.peer_llgr_capable = capable;
+        negotiated.peer_llgr_families = vec![LlgrFamily {
+            afi,
+            safi: Safi::Unicast,
+            stale_time: 3600,
+            forwarding_preserved: false,
+        }];
+        session.negotiated = Some(Arc::new(negotiated));
+        let mut route = make_route(100);
+        AttrSet::edit(&mut route.attributes, |attrs| {
+            attrs.push(PathAttribute::Communities(vec![
+                rustbgpd_wire::COMMUNITY_LLGR_STALE,
+            ]));
+        });
+        let attrs = session.prepare_outbound_attributes(
+            &route,
+            remote_asn != 65001,
+            Ipv4Addr::new(10, 0, 0, 1),
+            None,
+        );
+        let communities = attrs
+            .iter()
+            .find_map(PathAttribute::communities)
+            .expect("LLGR_STALE community is preserved");
+        assert!(communities.contains(&rustbgpd_wire::COMMUNITY_LLGR_STALE));
+        assert_eq!(
+            communities.contains(&rustbgpd_wire::COMMUNITY_NO_EXPORT),
+            no_export,
+            "remote_asn={remote_asn}, capable={capable}, afi={afi:?}"
+        );
+        assert_eq!(
+            attrs
+                .iter()
+                .filter_map(|attr| match attr {
+                    PathAttribute::LocalPref(value) => Some(*value),
+                    _ => None,
+                })
+                .collect::<Vec<_>>(),
+            local_prefs,
+            "remote_asn={remote_asn}, capable={capable}, afi={afi:?}"
+        );
+    }
+}
+
+#[test]
+fn graceful_shutdown_preserves_communities_and_adds_marker_once() {
+    let community = 0x0001_0001;
+    let marker = rustbgpd_wire::COMMUNITY_GRACEFUL_SHUTDOWN;
+    for enabled in [false, true] {
+        for already_present in [false, true] {
+            for partial in [false, true] {
+                let mut session = make_test_session(65001, 65002);
+                session.advertise_graceful_shutdown = enabled;
+                let mut route = make_route(100);
+                let mut communities = vec![community];
+                if already_present {
+                    communities.push(marker);
+                }
+                AttrSet::edit(&mut route.attributes, |attrs| {
+                    attrs.push(if partial {
+                        PathAttribute::CommunitiesPartial(communities)
+                    } else {
+                        PathAttribute::Communities(communities)
+                    });
+                });
+                let attrs = session.prepare_outbound_attributes(
+                    &route,
+                    true,
+                    Ipv4Addr::new(10, 0, 0, 1),
+                    None,
+                );
+                let community_attrs = attrs
+                    .iter()
+                    .filter(|attr| attr.communities().is_some())
+                    .collect::<Vec<_>>();
+                assert_eq!(community_attrs.len(), 1);
+                assert_eq!(
+                    matches!(community_attrs[0], PathAttribute::CommunitiesPartial(_)),
+                    partial
+                );
+                let mut actual = community_attrs[0].communities().unwrap().to_vec();
+                let mut expected = if enabled || already_present {
+                    vec![community, marker]
+                } else {
+                    vec![community]
+                };
+                actual.sort_unstable();
+                expected.sort_unstable();
+                assert_eq!(
+                    actual, expected,
+                    "enabled={enabled}, already_present={already_present}, partial={partial}"
+                );
+            }
+        }
+    }
 }
 
 #[test]

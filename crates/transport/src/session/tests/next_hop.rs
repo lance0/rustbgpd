@@ -1281,6 +1281,75 @@ async fn send_unicast_update(
     msg
 }
 
+#[tokio::test]
+async fn scoped_extended_nexthop_global_self_hop_has_no_link_local_companion() {
+    let msg =
+        send_unicast_update(true, false, true, vec![make_route(100)], vec![None], vec![]).await;
+    let parsed = msg.parse(true, false, &[]).unwrap();
+    let mp = parsed
+        .attributes
+        .iter()
+        .find_map(|attr| match attr {
+            PathAttribute::MpReachNlri(mp) => Some(mp),
+            _ => None,
+        })
+        .expect("scoped IPv4 uses MP_REACH");
+    assert_eq!((mp.afi, mp.safi), (Afi::Ipv4, Safi::Unicast));
+    assert_eq!(mp.next_hop, "2001:db8::1".parse::<IpAddr>().unwrap());
+    assert_eq!(mp.link_local_next_hop, None);
+}
+
+#[tokio::test]
+async fn route_server_reflection_preserves_received_link_local_companion() {
+    let primary: IpAddr = "2001:db8::2".parse().unwrap();
+    let companion: Ipv6Addr = "fe80::2".parse().unwrap();
+    let v4_prefix = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24);
+    for (afi, prefix) in [
+        (Afi::Ipv4, Prefix::V4(v4_prefix)),
+        (
+            Afi::Ipv6,
+            Prefix::V6(Ipv6Prefix::new("2001:db8:5::".parse().unwrap(), 48)),
+        ),
+    ] {
+        let (mut session, _rib_rx) = make_test_session_with_rib(65001, 65002);
+        session.config.route_server_client = true;
+        let (client, mut server) = connected_stream_pair().await;
+        session.test_install_stream(client);
+        let mut negotiated = negotiated_session(65002, true);
+        negotiated.negotiated_families =
+            vec![(Afi::Ipv4, Safi::Unicast), (Afi::Ipv6, Safi::Unicast)];
+        session.negotiated = Some(Arc::new(negotiated));
+        let mut route = make_sourced_route(Ipv4Addr::new(10, 0, 0, 3), v4_prefix, 65003);
+        route.prefix = prefix;
+        route.next_hop = primary;
+        route.link_local_next_hop = Some(companion);
+        AttrSet::edit(&mut route.attributes, |attrs| {
+            attrs.retain(|attr| !matches!(attr, PathAttribute::NextHop(_)));
+        });
+        let mut update = empty_outbound_update();
+        update.exact_export_snapshot = Some(session.publish_export_profile());
+        update.announce = vec![route].into();
+        update.next_hop_override = vec![None].into();
+        session.send_route_update(update);
+        let Message::Update(msg) = read_single_bgp_message(&mut server).await else {
+            panic!("expected UPDATE");
+        };
+        let parsed = msg.parse(true, false, &[]).unwrap();
+        let mp = parsed
+            .attributes
+            .iter()
+            .find_map(|attr| match attr {
+                PathAttribute::MpReachNlri(mp) => Some(mp),
+                _ => None,
+            })
+            .expect("IPv6 primary uses MP_REACH");
+        assert_eq!((mp.afi, mp.safi), (afi, Safi::Unicast));
+        assert_eq!(mp.next_hop, primary);
+        assert_eq!(mp.link_local_next_hop, Some(companion), "{afi:?}");
+        assert_eq!(mp.announced, vec![NlriEntry { path_id: 0, prefix }]);
+    }
+}
+
 /// `(type code, value)` for each attribute in an encoded path-attribute block.
 fn attribute_values(mut attrs: &[u8]) -> Vec<(u8, &[u8])> {
     let mut out = Vec::new();
@@ -1342,7 +1411,18 @@ async fn extended_nexthop_ipv6_next_hop_still_uses_mp_reach() {
     });
     let msg = send_extended_nexthop_update(true, false, vec![route], vec![]).await;
     assert!(msg.nlri.is_empty(), "IPv4 NLRI must stay in MP_REACH_NLRI");
+    let mut codes = attribute_type_codes(&msg.path_attributes);
+    codes.sort_unstable();
+    assert_eq!(codes, vec![1, 2, 14]);
     let parsed = msg.parse(true, false, &[]).unwrap();
+    assert!(
+        parsed
+            .attributes
+            .contains(&PathAttribute::Origin(Origin::Igp))
+    );
+    assert!(parsed.attributes.contains(&PathAttribute::AsPath(AsPath {
+        segments: vec![AsPathSegment::AsSequence(vec![65002])],
+    })));
     let mp = parsed
         .attributes
         .iter()

@@ -329,6 +329,75 @@ async fn exact_export_probe_matches_real_writer_for_every_family_and_limit() {
     }
 }
 
+/// Every modeled EVPN key must prepare and retain its identifying fields in
+/// decoded withdrawal NLRI, including both Type 1 variants.
+#[test]
+fn exact_export_withdrawal_preserves_every_modeled_evpn_key() {
+    use rustbgpd_wire::{EthernetSegmentIdentifier, EthernetTagId, EvpnIpPrefixValue, MacAddress};
+
+    let session = make_test_session(65001, 65002);
+    let profile = session.publish_export_profile();
+    let rd = RouteDistinguisher([0, 0, 0xfd, 0xe8, 0, 0, 0, 100]);
+    let esi = EthernetSegmentIdentifier([0, 1, 2, 3, 4, 5, 6, 7, 8, 9]);
+    let ethernet_tag = EthernetTagId(100);
+    let keys = [
+        EvpnRouteKey::EadPerEs {
+            rd,
+            esi,
+            ethernet_tag: EthernetTagId::MAX_ET,
+        },
+        EvpnRouteKey::EadPerEvi {
+            rd,
+            esi,
+            ethernet_tag,
+        },
+        EvpnRouteKey::MacIp {
+            rd,
+            ethernet_tag,
+            mac: MacAddress([0x02, 0, 0, 0xaa, 0xbb, 0xcc]),
+            ip: Some(IpAddr::V6("2001:db8::10".parse().unwrap())),
+        },
+        EvpnRouteKey::Imet {
+            rd,
+            ethernet_tag,
+            originator_ip: IpAddr::V4(Ipv4Addr::new(192, 0, 2, 7)),
+        },
+        EvpnRouteKey::Es {
+            rd,
+            esi,
+            originator_ip: IpAddr::V6("2001:db8::7".parse().unwrap()),
+        },
+        EvpnRouteKey::IpPrefix {
+            rd,
+            ethernet_tag,
+            prefix: EvpnIpPrefixValue::V4(Ipv4Prefix::new(Ipv4Addr::new(192, 0, 2, 0), 24)),
+        },
+        EvpnRouteKey::IpPrefix {
+            rd,
+            ethernet_tag,
+            prefix: EvpnIpPrefixValue::V6(Ipv6Prefix::new("2001:db8:100::".parse().unwrap(), 64)),
+        },
+    ];
+    for key in keys {
+        let probe = profile
+            .probe_withdrawal(ExportWithdrawal::Evpn(&key))
+            .expect("every modeled EVPN key must prepare a withdrawal");
+        let parsed = probe.message.parse(true, false, &[]).unwrap();
+        let [PathAttribute::MpUnreachNlri(mp)] = parsed.attributes.as_slice() else {
+            panic!("EVPN withdrawal must carry exactly one MP_UNREACH: {key:?}");
+        };
+        assert_eq!((mp.afi, mp.safi), (Afi::L2Vpn, Safi::Evpn));
+        assert_eq!(
+            mp.evpn_withdrawn
+                .iter()
+                .map(EvpnRoute::key)
+                .collect::<Vec<_>>(),
+            vec![key],
+            "EVPN withdrawal must preserve its complete key"
+        );
+    }
+}
+
 #[tokio::test]
 #[allow(
     clippy::items_after_statements,

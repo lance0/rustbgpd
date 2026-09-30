@@ -568,84 +568,81 @@ async fn denied_vpn_add_path_replacements_withdraw_exact_known_identity() {
     exercise(Afi::Ipv6).await;
 }
 
-/// iBGP reflection of a VPN route on an RR adds `ORIGINATOR_ID` and
-/// `CLUSTER_LIST`, keeps `LOCAL_PREF`, and never emits inline `NextHop`/MP attrs.
+/// VPN export preserves or supplies attributes exactly once, strips inline
+/// next-hop attributes, and retains the complete inherited reflector chain.
 #[test]
-fn prepare_outbound_attributes_vpn_adds_rr_attrs_for_ibgp_reflection() {
-    let mut session = make_test_session(65001, 65001);
+fn prepare_outbound_attributes_vpn_has_exact_attribute_inventory() {
     let cluster_id = Ipv4Addr::new(10, 0, 0, 9);
     let source_id = Ipv4Addr::new(10, 0, 0, 42);
-    session.config.cluster_id = Some(cluster_id);
-    let mut route = make_vpn_rib_route(100);
-    route.origin_type = rustbgpd_rib::RouteOrigin::Ibgp;
-    route.peer_router_id = source_id;
-    route.attributes = AttrSet::new(vec![
-        PathAttribute::Origin(Origin::Igp),
-        PathAttribute::AsPath(AsPath { segments: vec![] }),
-        PathAttribute::LocalPref(200),
-        PathAttribute::NextHop(Ipv4Addr::new(192, 0, 2, 99)),
-        PathAttribute::MpReachNlri(Box::new(empty_nonunicast_reach(
-            Afi::Ipv4,
-            Safi::MplsVpn,
-            route.next_hop,
-        ))),
-        PathAttribute::MpUnreachNlri(Box::new(empty_nonunicast_unreach(Afi::Ipv4, Safi::MplsVpn))),
-    ]);
-    let attrs = session.prepare_outbound_attributes_vpn(&route, false);
-    assert!(
-        attrs
-            .iter()
-            .any(|a| matches!(a, PathAttribute::OriginatorId(id) if *id == source_id))
-    );
-    assert!(
-        attrs.iter().any(
-            |a| matches!(a, PathAttribute::ClusterList(ids) if ids.as_slice() == [cluster_id])
-        )
-    );
-    assert!(
-        attrs
-            .iter()
-            .any(|a| matches!(a, PathAttribute::LocalPref(200)))
-    );
-    assert!(!attrs.iter().any(|a| matches!(
-        a,
-        PathAttribute::NextHop(_) | PathAttribute::MpReachNlri(_) | PathAttribute::MpUnreachNlri(_)
-    )));
-}
-
-/// eBGP export of a VPN route strips `ORIGINATOR_ID`/`CLUSTER_LIST`/`LOCAL_PREF`
-/// and prepends the local ASN to `AS_PATH`.
-#[test]
-fn prepare_outbound_attributes_vpn_strips_rr_attrs_for_ebgp() {
-    let session = make_test_session(65001, 65002);
-    let mut route = make_vpn_rib_route(100);
-    route.attributes = AttrSet::new(vec![
-        PathAttribute::Origin(Origin::Igp),
-        PathAttribute::AsPath(AsPath {
-            segments: vec![AsPathSegment::AsSequence(vec![65002])],
-        }),
-        PathAttribute::LocalPref(200),
-        PathAttribute::OriginatorId(Ipv4Addr::new(10, 0, 0, 42)),
-        PathAttribute::ClusterList(vec![Ipv4Addr::new(10, 0, 0, 9)]),
-    ]);
-    let attrs = session.prepare_outbound_attributes_vpn(&route, true);
-    assert!(!attrs.iter().any(|a| matches!(
-        a,
-        PathAttribute::OriginatorId(_)
-            | PathAttribute::ClusterList(_)
-            | PathAttribute::LocalPref(_)
-    )));
-    let as_path = attrs
-        .iter()
-        .find_map(|a| match a {
-            PathAttribute::AsPath(p) => Some(p),
-            _ => None,
-        })
-        .expect("eBGP VPN export must carry AS_PATH");
-    assert_eq!(
-        as_path.segments,
-        vec![AsPathSegment::AsSequence(vec![65001, 65002])]
-    );
+    let originator_id = Ipv4Addr::new(10, 0, 0, 7);
+    let previous_clusters = [Ipv4Addr::new(10, 0, 0, 17), Ipv4Addr::new(10, 0, 0, 18)];
+    for remote_asn in [65001, 65002] {
+        let is_ebgp = remote_asn != 65001;
+        let mut session = make_test_session(65001, remote_asn);
+        session.config.cluster_id = Some(cluster_id);
+        for has_attributes in [true, false] {
+            let mut route = make_vpn_rib_route(100);
+            route.origin_type = rustbgpd_rib::RouteOrigin::Ibgp;
+            route.peer_router_id = source_id;
+            let mut input = vec![
+                PathAttribute::Origin(Origin::Igp),
+                PathAttribute::NextHop(Ipv4Addr::new(192, 0, 2, 99)),
+                PathAttribute::MpReachNlri(Box::new(empty_nonunicast_reach(
+                    Afi::Ipv4,
+                    Safi::MplsVpn,
+                    route.next_hop,
+                ))),
+                PathAttribute::MpUnreachNlri(Box::new(empty_nonunicast_unreach(
+                    Afi::Ipv4,
+                    Safi::MplsVpn,
+                ))),
+            ];
+            if has_attributes {
+                input.extend([
+                    PathAttribute::AsPath(AsPath {
+                        segments: vec![AsPathSegment::AsSequence(vec![65002])],
+                    }),
+                    PathAttribute::LocalPref(200),
+                    PathAttribute::OriginatorId(originator_id),
+                    PathAttribute::ClusterList(previous_clusters.to_vec()),
+                ]);
+            }
+            route.attributes = AttrSet::new(input);
+            let mut attrs = session.prepare_outbound_attributes_vpn(&route, is_ebgp);
+            let mut expected = vec![PathAttribute::Origin(Origin::Igp)];
+            if is_ebgp || has_attributes {
+                let asns = match (is_ebgp, has_attributes) {
+                    (true, true) => vec![65001, 65002],
+                    (true, false) => vec![65001],
+                    (false, _) => vec![65002],
+                };
+                expected.push(PathAttribute::AsPath(AsPath {
+                    segments: vec![AsPathSegment::AsSequence(asns)],
+                }));
+            }
+            if !is_ebgp {
+                expected.extend([
+                    PathAttribute::LocalPref(if has_attributes { 200 } else { 100 }),
+                    PathAttribute::OriginatorId(if has_attributes {
+                        originator_id
+                    } else {
+                        source_id
+                    }),
+                    PathAttribute::ClusterList(if has_attributes {
+                        vec![cluster_id, previous_clusters[0], previous_clusters[1]]
+                    } else {
+                        vec![cluster_id]
+                    }),
+                ]);
+            }
+            attrs.sort_by_key(PathAttribute::type_code);
+            expected.sort_by_key(PathAttribute::type_code);
+            assert_eq!(
+                attrs, expected,
+                "is_ebgp={is_ebgp}, has_attributes={has_attributes}"
+            );
+        }
+    }
 }
 
 /// RFC 8950 §5 preserves the original `VPNv4` next-hop encoding on reflection.

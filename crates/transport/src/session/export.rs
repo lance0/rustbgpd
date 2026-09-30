@@ -2538,10 +2538,11 @@ mod tests {
     #[test]
     fn object_safe_exact_export_bridge_preserves_identity_and_generation() {
         let config = config_with_auth_secret("not-retained");
-        let encoder: Arc<dyn ExactExportEncoder> = Arc::new(SessionExportEncoder::new(
-            SessionExportProfile::initial(&config, None, false),
-        ));
-        let snapshot = encoder.snapshot();
+        let concrete_encoder = Arc::new(SessionExportEncoder::new(SessionExportProfile::initial(
+            &config, None, false,
+        )));
+        let encoder: Arc<dyn ExactExportEncoder> = concrete_encoder.clone();
+        let old = concrete_encoder.snapshot();
         let route = Route {
             prefix: Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24)),
             next_hop: IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1)),
@@ -2569,10 +2570,23 @@ mod tests {
             candidate.key(),
             rustbgpd_rib::ExactExportKey::Unicast(route.prefix, route.path_id)
         );
-        let result = snapshot.probe_announcement(candidate).unwrap();
-        assert_eq!(result.generation, snapshot.generation());
-        assert!(result.encoded_len <= result.max_len);
-        assert!(snapshot.as_any().is::<SessionExportProfile>());
+        let mut replacement = (*old).clone();
+        replacement.advertise_graceful_shutdown = true;
+        let first = concrete_encoder.publish(replacement);
+        let mut replacement = (*first).clone();
+        replacement.advertise_graceful_shutdown = false;
+        let second = concrete_encoder.publish(replacement);
+        assert_eq!(encoder.snapshot().generation(), 2);
+        for (concrete, expected) in [(&old, 0), (&first, 1), (&second, 2)] {
+            let snapshot: Arc<dyn ExactExportSnapshot> = concrete.clone();
+            assert_eq!(concrete.generation(), expected);
+            assert_eq!(snapshot.generation(), expected);
+            assert_eq!(snapshot.owner_id(), old.owner_id);
+            let result = snapshot.probe_announcement(candidate).unwrap();
+            assert_eq!(result.generation, expected);
+            assert!(result.encoded_len <= result.max_len);
+            assert!(snapshot.as_any().is::<SessionExportProfile>());
+        }
     }
 
     #[test]
@@ -3065,6 +3079,163 @@ mod tests {
             aspa_state: rustbgpd_wire::AspaValidation::Unknown,
             received_as_path: None,
             aspa_context: rustbgpd_rib::route::AspaContextId::DEFAULT,
+        }
+    }
+
+    #[test]
+    fn ipv4_extended_next_hop_uses_socket_ipv6_without_configured_override() {
+        let peer = PeerConfig::new(65_001, 65_002, Ipv4Addr::new(10, 0, 0, 1));
+        let config = TransportConfig::new(peer, "[2001:db8::2]:179".parse().unwrap());
+        let socket_local: IpAddr = "2001:db8::10".parse().unwrap();
+        let mut profile = SessionExportProfile::initial(&config, Some(socket_local), false);
+        profile.four_octet_as = true;
+        profile.extended_nexthop_ipv4 = true;
+        let prefix = Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24));
+        let route = as4_projection_route(prefix, "192.0.2.1".parse().unwrap());
+        let probe = profile
+            .probe_announcement(ExportCandidate::Unicast {
+                route: &route,
+                next_hop_override: None,
+            })
+            .expect("socket-local IPv6 supplies the eBGP next hop");
+        let mut bytes = bytes::Bytes::from(encoded(probe.message));
+        let super::super::Message::Update(message) =
+            rustbgpd_wire::decode_message(&mut bytes, rustbgpd_wire::MAX_MESSAGE_LEN).unwrap()
+        else {
+            panic!("expected UPDATE");
+        };
+        let parsed = message.parse(true, false, &[]).unwrap();
+        let mp = parsed
+            .attributes
+            .iter()
+            .find_map(|attr| match attr {
+                PathAttribute::MpReachNlri(mp) => Some(mp),
+                _ => None,
+            })
+            .expect("IPv4 ENH uses MP_REACH");
+        assert_eq!((mp.afi, mp.safi), (Afi::Ipv4, Safi::Unicast));
+        assert_eq!(mp.next_hop, socket_local);
+        assert_eq!(mp.link_local_next_hop, None);
+        assert_eq!(mp.announced, vec![NlriEntry { path_id: 0, prefix }]);
+    }
+
+    #[test]
+    fn ipv4_extended_next_hop_self_uses_socket_ipv4_on_route_server_target() {
+        let peer = PeerConfig::new(65_001, 65_002, Ipv4Addr::new(10, 0, 0, 1));
+        let mut config = TransportConfig::new(peer, "10.0.0.2:179".parse().unwrap());
+        config.route_server_client = true;
+        let local: IpAddr = "10.0.0.10".parse().unwrap();
+        let received: IpAddr = "2001:db8::2".parse().unwrap();
+        let mut profile = SessionExportProfile::initial(&config, Some(local), false);
+        profile.four_octet_as = true;
+        profile.extended_nexthop_ipv4 = true;
+        let v4_prefix = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24);
+        let route = as4_projection_route(Prefix::V4(v4_prefix), received);
+        for (next_hop_override, expected_types) in [
+            (None, vec![1, 2, 14]),
+            (Some(rustbgpd_policy::NextHopAction::Self_), vec![1, 2, 3]),
+        ] {
+            let probe = profile
+                .probe_announcement(ExportCandidate::Unicast {
+                    route: &route,
+                    next_hop_override: next_hop_override.as_ref(),
+                })
+                .expect("route-server next-hop override encodes");
+            let mut types = raw_attribute_types(&probe.message);
+            types.sort_unstable();
+            assert_eq!(types, expected_types);
+            let parsed = probe.message.parse(true, false, &[]).unwrap();
+            if next_hop_override.is_some() {
+                assert_eq!(
+                    parsed.announced,
+                    vec![Ipv4NlriEntry {
+                        path_id: 0,
+                        prefix: v4_prefix
+                    }]
+                );
+                assert!(
+                    parsed
+                        .attributes
+                        .contains(&PathAttribute::NextHop("10.0.0.10".parse().unwrap()))
+                );
+            } else {
+                assert!(parsed.announced.is_empty());
+                let mp = parsed
+                    .attributes
+                    .iter()
+                    .find_map(|attr| match attr {
+                        PathAttribute::MpReachNlri(mp) => Some(mp),
+                        _ => None,
+                    })
+                    .expect("received IPv6 next hop stays in MP_REACH");
+                assert_eq!(mp.next_hop, received);
+                assert_eq!(
+                    mp.announced,
+                    vec![NlriEntry {
+                        path_id: 0,
+                        prefix: route.prefix
+                    }]
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn route_server_ipv6_policy_next_hop_requires_extended_next_hop() {
+        let peer = PeerConfig::new(65_001, 65_002, Ipv4Addr::new(10, 0, 0, 1));
+        let mut config = TransportConfig::new(peer, "10.0.0.2:179".parse().unwrap());
+        config.route_server_client = true;
+        let mut profile =
+            SessionExportProfile::initial(&config, Some("10.0.0.10".parse().unwrap()), false);
+        profile.four_octet_as = true;
+        let prefix = Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24));
+        let next_hop: IpAddr = "2001:db8::2".parse().unwrap();
+        let route = as4_projection_route(prefix, next_hop);
+        assert!(matches!(
+            profile.probe_announcement(ExportCandidate::Unicast {
+                route: &route,
+                next_hop_override: Some(&rustbgpd_policy::NextHopAction::Specific(next_hop)),
+            }),
+            Err(ExportProbeError::Ipv4RequiresExtendedNextHop)
+        ));
+    }
+
+    #[test]
+    fn ibgp_ipv6_next_hop_self_uses_configured_address_only_when_requested() {
+        let peer = PeerConfig::new(65_001, 65_001, Ipv4Addr::new(10, 0, 0, 1));
+        let mut config = TransportConfig::new(peer, "[2001:db8::2]:179".parse().unwrap());
+        let local: Ipv6Addr = "2001:db8::1".parse().unwrap();
+        let received: IpAddr = "2001:db8::2".parse().unwrap();
+        config.local_ipv6_nexthop = Some(local);
+        let mut profile = SessionExportProfile::initial(&config, None, false);
+        profile.four_octet_as = true;
+        let prefix = Prefix::V6(Ipv6Prefix::new("2001:db8:5::".parse().unwrap(), 48));
+        let route = as4_projection_route(prefix, received);
+        for (next_hop_override, expected) in [
+            (None, received),
+            (
+                Some(rustbgpd_policy::NextHopAction::Self_),
+                IpAddr::V6(local),
+            ),
+        ] {
+            let probe = profile
+                .probe_announcement(ExportCandidate::Unicast {
+                    route: &route,
+                    next_hop_override: next_hop_override.as_ref(),
+                })
+                .expect("iBGP IPv6 next hop encodes");
+            let parsed = probe.message.parse(true, false, &[]).unwrap();
+            let mp = parsed
+                .attributes
+                .iter()
+                .find_map(|attr| match attr {
+                    PathAttribute::MpReachNlri(mp) => Some(mp),
+                    _ => None,
+                })
+                .expect("IPv6 unicast uses MP_REACH");
+            assert_eq!((mp.afi, mp.safi), (Afi::Ipv6, Safi::Unicast));
+            assert_eq!(mp.next_hop, expected);
+            assert_eq!(mp.announced, vec![NlriEntry { path_id: 0, prefix }]);
         }
     }
 
