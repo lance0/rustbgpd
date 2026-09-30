@@ -5,6 +5,7 @@ summary's refusal of incomplete cells."""
 from __future__ import annotations
 
 import http.server
+from collections import Counter
 import json
 import os
 import shutil
@@ -106,6 +107,118 @@ class VrpFixture(unittest.TestCase):
             rpki_cell.write_vrps(10, 2000, 5000, str(b))
             self.assertEqual(a.read_bytes(), b.read_bytes())
             self.assertEqual(len(json.loads(a.read_text())["roas"]), 5000)
+
+    def test_dual_stack_owners_follow_each_family_slice(self):
+        peers, total, v4, vrps = 9, 101, 51, 115
+        rows = rpki_cell.roas(peers, total, vrps, v4)
+        self.assertEqual(len(rows), vrps)
+        for family, offset, count, prefix, max_length in (
+            ("ipv4", 0, v4, lambda i: f"20.{(i >> 8) & 255}.{i & 255}.0/24", 24),
+            ("ipv6", v4, total - v4, lambda i: f"3001:{i >> 16:x}:{i & 0xffff:x}::/48", 48),
+        ):
+            for member in range(peers):
+                start, length = rpki_cell.member_slice(count, peers, member)
+                for index in range(start, start + length):
+                    with self.subTest(family=family, member=member, index=index):
+                        self.assertEqual(rows[offset + index], {
+                            "asn": f"AS{64512 + member}", "prefix": prefix(index),
+                            "maxLength": max_length, "ta": "bench",
+                        })
+        self.assertEqual(len({row["prefix"] for row in rows}), vrps)
+        self.assertTrue(all(row["prefix"].startswith("100.") for row in rows[total:]))
+
+    def test_dual_stack_shape_and_budget_rejections(self):
+        rpki_cell.check_shape(700, 400400, 500000, 200200)
+        rpki_cell.check_shape(700, 400400, 500000, 360360)
+        for peers, total, vrps, v4 in ((9, 101, 100, 51), (9, 101, 115, 8),
+                                       (9, 101, 115, 93), (9, 101, 115, 102),
+                                       (9, 101, 115, -1)):
+            with self.subTest(peers=peers, total=total, vrps=vrps, v4=v4):
+                with self.assertRaises(ValueError):
+                    rpki_cell.check_shape(peers, total, vrps, v4)
+
+    def test_maxlen_delta_changes_exact_distributed_announced_records(self):
+        peers, total, v4, vrps, changed = 9, 101, 51, 115, 10
+        with tempfile.TemporaryDirectory() as tmp:
+            base, after = Path(tmp, "base.json"), Path(tmp, "after.json")
+            rpki_cell.write_vrps(peers, total, vrps, str(base), v4)
+            self.assertEqual(rpki_cell.write_maxlen_delta(
+                peers, total, vrps, v4, changed, str(base), str(after)), (5, 5))
+            before_rows = json.loads(base.read_text())["roas"]
+            after_rows = json.loads(after.read_text())["roas"]
+            self.assertEqual(len(before_rows), len(after_rows))
+            selected = rpki_cell.replacement_indices(v4, total - v4, changed)
+            self.assertEqual(len(selected), len(set(selected)))
+            actual = {index for index, (old, new) in enumerate(zip(before_rows, after_rows))
+                      if old != new}
+            self.assertEqual(actual, {0, 10, 20, 30, 40, 51, 61, 71, 81, 91})
+            self.assertEqual(actual, set(selected))
+            for index in selected:
+                old, new = before_rows[index], after_rows[index]
+                self.assertEqual({key: value for key, value in old.items() if key != "maxLength"},
+                                 {key: value for key, value in new.items() if key != "maxLength"})
+                self.assertEqual((old["maxLength"], new["maxLength"]),
+                                 (24, 25) if index < v4 else (48, 49))
+            identity = lambda row: (row["asn"], row["prefix"], row["maxLength"])
+            removed = Counter(map(identity, before_rows)) - Counter(map(identity, after_rows))
+            added = Counter(map(identity, after_rows)) - Counter(map(identity, before_rows))
+            self.assertEqual(sum(removed.values()), changed)
+            self.assertEqual(sum(added.values()), changed)
+
+    def test_maxlen_delta_can_replace_every_announced_entry_with_uneven_families(self):
+        peers, total, v4, vrps = 9, 101, 92, 115
+        with tempfile.TemporaryDirectory() as tmp:
+            base, after = Path(tmp, "base.json"), Path(tmp, "after.json")
+            rpki_cell.write_vrps(peers, total, vrps, str(base), v4)
+            self.assertEqual(rpki_cell.write_maxlen_delta(
+                peers, total, vrps, v4, total, str(base), str(after)), (v4, total - v4))
+            before_rows = json.loads(base.read_text())["roas"]
+            after_rows = json.loads(after.read_text())["roas"]
+            changed = {index for index, (old, new) in enumerate(zip(before_rows, after_rows))
+                       if old != new}
+            self.assertEqual(changed, set(range(total)))
+            self.assertEqual(before_rows[total:], after_rows[total:])
+
+    def test_maxlen_delta_rejects_tampered_base_and_invalid_counts(self):
+        peers, total, v4, vrps = 9, 101, 51, 115
+        with tempfile.TemporaryDirectory() as tmp:
+            base, after = Path(tmp, "base.json"), Path(tmp, "after.json")
+            rpki_cell.write_vrps(peers, total, vrps, str(base), v4)
+            clean = json.loads(base.read_text())
+            for count in (0, total + 1):
+                with self.subTest(count=count), self.assertRaises(ValueError):
+                    rpki_cell.write_maxlen_delta(peers, total, vrps, v4, count,
+                                                 str(base), str(after))
+                self.assertFalse(after.exists())
+            for label, change in (
+                ("missing-v6", lambda doc: doc["roas"].pop(v4)),
+                ("wrong-family", lambda doc: doc["roas"][v4].update(prefix="20.0.0.0/24")),
+                ("wrong-owner", lambda doc: doc["roas"][v4].update(asn="AS64513")),
+                ("already-changed", lambda doc: doc["roas"][v4].update(maxLength=49)),
+                ("metadata-only", lambda doc: doc["metadata"].update(generated=1710000001)),
+            ):
+                with self.subTest(label=label):
+                    doc = json.loads(json.dumps(clean))
+                    change(doc)
+                    base.write_text(json.dumps(doc))
+                    with self.assertRaisesRegex(ValueError, "not the canonical"):
+                        rpki_cell.write_maxlen_delta(peers, total, vrps, v4, 10,
+                                                     str(base), str(after))
+                    self.assertFalse(after.exists())
+
+    def test_dual_stack_cli_writes_equal_cardinality_delta(self):
+        script = Path(rpki_cell.__file__)
+        with tempfile.TemporaryDirectory() as tmp:
+            base, after = Path(tmp, "base.json"), Path(tmp, "after.json")
+            make = subprocess.run([sys.executable, str(script), "vrps", "9", "101", "115",
+                                   str(base), "51"], capture_output=True, text=True)
+            self.assertEqual(make.returncode, 0, make.stderr)
+            delta = subprocess.run([sys.executable, str(script), "maxlen-delta", "9", "101",
+                                    "115", "51", "10", str(base), str(after)],
+                                   capture_output=True, text=True)
+            self.assertEqual(delta.returncode, 0, delta.stderr)
+            self.assertIn("withdrawals=10 announcements=10 ipv4=5 ipv6=5", delta.stdout)
+            self.assertEqual(len(json.loads(after.read_text())["roas"]), 115)
 
 
 class VrpGate(unittest.TestCase):
