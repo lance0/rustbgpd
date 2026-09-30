@@ -9,8 +9,8 @@ use bytes::Bytes;
 use rustbgpd_fsm::SessionState;
 use rustbgpd_policy::PolicyChain;
 use rustbgpd_transport::{
-    ImportExplainReply, NegotiatedSessionState, RejectedRoutesReply, RemovePrivateAs,
-    SessionQueryOutcome, TcpAoInfoSnapshot, TcpAoKeyring, TransportAuthSecret,
+    AllPathMatchLimitExceeded, ImportExplainReply, NegotiatedSessionState, RejectedRoutesReply,
+    RemovePrivateAs, SessionQueryOutcome, TcpAoInfoSnapshot, TcpAoKeyring, TransportAuthSecret,
 };
 use rustbgpd_wire::{Afi, BgpRole, Prefix, Safi};
 use tokio::net::TcpStream;
@@ -1218,7 +1218,9 @@ pub enum PeerManagerCommand {
         /// Optional Add-Path identifier; `None` = all paths.
         path_id: Option<u32>,
         /// Reply channel carrying the bounded session-query outcome.
-        reply: oneshot::Sender<SessionQueryOutcome<ImportExplainReply>>,
+        reply: oneshot::Sender<
+            SessionQueryOutcome<Result<ImportExplainReply, AllPathMatchLimitExceeded>>,
+        >,
     },
     /// LAN-472: list a peer's retained rejected routes with their
     /// reject reasons (the looking-glass filtered-route surface).

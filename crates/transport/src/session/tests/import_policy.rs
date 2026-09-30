@@ -1,5 +1,85 @@
 use super::*;
 
+#[tokio::test]
+async fn explain_command_rejects_oversized_all_path_answer() {
+    use super::import_decision_cache::{
+        AllPathMatchLimitExceeded, CachedDecision, CachedOutcome, CachedPolicyContext,
+        ImportDecisionKey, LookupResult,
+    };
+
+    let peer_config = PeerConfig::new(65001, 65002, Ipv4Addr::new(10, 0, 0, 1));
+    let config = TransportConfig::new(peer_config, "10.0.0.2:179".parse().unwrap());
+    let (_cmd_tx, cmd_rx) = mpsc::channel(8);
+    let (rib_tx, _rib_rx) = mpsc::channel(64);
+    let mut session = PeerSession::new(
+        config,
+        BgpMetrics::new(),
+        cmd_rx,
+        rib_tx,
+        None,
+        None,
+        None,
+        None,
+        None,
+        false,
+    );
+    session.import_decision_cache =
+        super::import_decision_cache::ImportDecisionCache::with_capacity(1);
+    let prefix = Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(192, 0, 2, 0), 24));
+    let decision = CachedDecision {
+        outcome: CachedOutcome::Permit,
+        matched_policy: None,
+        rpki: rustbgpd_wire::RpkiValidation::NotFound,
+        aspa: rustbgpd_wire::AspaValidation::Unknown,
+        policy_context: CachedPolicyContext::default(),
+        next_hop: None,
+        modifications: RouteModifications::default(),
+        evaluated_at: std::time::SystemTime::UNIX_EPOCH,
+        policy_generation: 0,
+    };
+    for path_id in 1..=4097 {
+        session.import_decision_cache.insert(
+            ImportDecisionKey {
+                afi: Afi::Ipv4,
+                safi: Safi::Unicast,
+                prefix,
+                path_id,
+            },
+            decision.clone(),
+        );
+    }
+    let (reply, response) = oneshot::channel();
+    let flow = session
+        .handle_command(PeerCommand::ExplainImportPolicy {
+            afi: Afi::Ipv4,
+            safi: Safi::Unicast,
+            prefix,
+            path_id: None,
+            reply,
+        })
+        .await;
+    assert_eq!(flow, ControlFlow::Continue(()));
+    assert!(matches!(
+        response.await.unwrap(),
+        Err(AllPathMatchLimitExceeded)
+    ));
+
+    let (reply, response) = oneshot::channel();
+    let flow = session
+        .handle_command(PeerCommand::ExplainImportPolicy {
+            afi: Afi::Ipv4,
+            safi: Safi::Unicast,
+            prefix,
+            path_id: Some(1),
+            reply,
+        })
+        .await;
+    assert_eq!(flow, ControlFlow::Continue(()));
+    let answer = response.await.unwrap().expect("point lookup succeeds");
+    assert_eq!(answer.matches.len(), 1);
+    assert!(matches!(answer.matches[0].result, LookupResult::Evicted));
+}
+
 /// Import policy is applied before `RoutesReceived` reaches the RIB. A
 /// first-seen denial has no prior accepted identity, so it must produce
 /// neither an announcement nor a synthetic withdrawal.
@@ -603,7 +683,10 @@ async fn explain_import_policy_command_does_not_touch_counters() {
         })
         .await;
     assert_eq!(flow, ControlFlow::Continue(()));
-    let reply = reply_rx.await.expect("session replied");
+    let reply = reply_rx
+        .await
+        .expect("session replied")
+        .expect("all paths fit");
     assert!(
         matches!(
             reply.matches.as_slice(),
@@ -753,7 +836,10 @@ async fn query_import_policy_term_hits_snapshots_without_counting() {
             reply: reply_tx,
         })
         .await;
-    reply_rx.await.expect("session replied");
+    reply_rx
+        .await
+        .expect("session replied")
+        .expect("all paths fit");
     let second = snapshot(&mut session).await.expect("chain installed");
     assert_eq!(second.evals, first.evals, "explain must not bump evals");
     assert_eq!(
@@ -848,7 +934,10 @@ async fn explain_statement_trace_attributes_hit_and_skips_stale() {
                 reply: reply_tx,
             })
             .await;
-        reply_rx.await.expect("session replied")
+        reply_rx
+            .await
+            .expect("session replied")
+            .expect("all paths fit")
     }
     let mut peer_config = PeerConfig::new(65001, 65002, Ipv4Addr::new(10, 0, 0, 1));
     peer_config.connect_retry_secs = 30;
@@ -1253,7 +1342,10 @@ async fn explain_trace_renders_as_path_from_the_cached_typed_value() {
             reply: reply_tx,
         })
         .await;
-    let reply = reply_rx.await.expect("session replied");
+    let reply = reply_rx
+        .await
+        .expect("session replied")
+        .expect("all paths fit");
     assert_eq!(reply.matches.len(), 1);
     let steps = &reply.matches[0].statements;
     assert_eq!(steps.len(), 1, "the hit re-derives a statement trace");
@@ -1298,7 +1390,10 @@ async fn explain_reply_carries_cache_enabled_flag() {
                 reply: reply_tx,
             })
             .await;
-        let reply = reply_rx.await.expect("session replied");
+        let reply = reply_rx
+            .await
+            .expect("session replied")
+            .expect("all paths fit");
         assert_eq!(
             reply.cache_enabled, enabled,
             "reply must snapshot the session's own explain flag"
@@ -1370,7 +1465,10 @@ async fn explain_cache_evictions_reach_reply_and_metric() {
             reply: reply_tx,
         })
         .await;
-    let reply = reply_rx.await.expect("session replied");
+    let reply = reply_rx
+        .await
+        .expect("session replied")
+        .expect("all paths fit");
     assert_eq!(reply.cache_size, 2);
     assert_eq!(reply.evictions_since_reset, 3);
     assert_eq!(reply.matches.len(), 1);

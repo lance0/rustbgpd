@@ -1521,9 +1521,16 @@ impl PeerSession {
                             statements: Vec::new(),
                         }]
                     }
-                    None => self
+                    None => match self
                         .import_decision_cache
-                        .lookup_all_paths(afi, safi, &prefix, generation),
+                        .lookup_all_paths(afi, safi, &prefix, generation)
+                    {
+                        Ok(matches) => matches,
+                        Err(error) => {
+                            let _ = reply.send(Err(error));
+                            return ControlFlow::Continue(());
+                        }
+                    },
                 };
                 // Statement-level attribution, re-derived on demand from the
                 // cached pre-policy context against the session's import
@@ -1536,13 +1543,13 @@ impl PeerSession {
                 for m in &mut matches {
                     m.statements = self.statement_trace_for(prefix, family, &m.result);
                 }
-                let _ = reply.send(super::import_decision_cache::ImportExplainReply {
+                let _ = reply.send(Ok(super::import_decision_cache::ImportExplainReply {
                     current_generation: generation,
                     cache_enabled: self.import_explain_enabled,
                     cache_size: self.import_decision_cache.capacity(),
                     evictions_since_reset: self.import_decision_cache.evictions_since_reset(),
                     matches,
-                });
+                }));
                 ControlFlow::Continue(())
             }
             PeerCommand::ListRejectedRoutes { reply } => {

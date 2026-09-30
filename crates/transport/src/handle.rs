@@ -23,7 +23,7 @@ use crate::config::TransportConfig;
 use crate::error::TransportError;
 use crate::event_sink::TransportEventSink;
 use crate::session::PeerSession;
-use crate::session::import_decision_cache::ImportExplainReply;
+use crate::session::import_decision_cache::{AllPathMatchLimitExceeded, ImportExplainReply};
 use crate::session::rejected_routes::RejectedRoutesReply;
 
 /// Error returned by a peer-session command round-trip.
@@ -646,7 +646,8 @@ pub enum PeerCommand {
     /// ADR-0073: query this session's import-decision cache. Read-only
     /// — must not mutate session state or counters. `path_id = None`
     /// returns every cached path for the prefix (Add-Path
-    /// disambiguation); `Some(id)` resolves the single key.
+    /// disambiguation), or an error above 4096 matches; `Some(id)`
+    /// resolves the single key.
     ExplainImportPolicy {
         /// Address family of the queried NLRI.
         afi: Afi,
@@ -658,7 +659,7 @@ pub enum PeerCommand {
         path_id: Option<u32>,
         /// Reply channel carrying the resolved matches plus this
         /// session's current import-policy generation.
-        reply: oneshot::Sender<ImportExplainReply>,
+        reply: oneshot::Sender<Result<ImportExplainReply, AllPathMatchLimitExceeded>>,
     },
     /// LAN-472: list this session's retained rejected routes with their
     /// reject reasons — the looking-glass filtered-route surface.
@@ -2355,7 +2356,7 @@ impl PeerHandle {
         prefix: Prefix,
         path_id: Option<u32>,
         deadline: Duration,
-    ) -> SessionQueryOutcome<ImportExplainReply> {
+    ) -> SessionQueryOutcome<Result<ImportExplainReply, AllPathMatchLimitExceeded>> {
         Self::query_outcome(self.commands.clone(), deadline, |reply| {
             PeerCommand::ExplainImportPolicy {
                 afi,
