@@ -97,6 +97,14 @@ The daemon must already be running (load-gated `--release` start) with
 `<policy_live>`; `<policy_a>` / `<policy_b>` are the two generations copied over
 it on alternating reloads.
 
+Set `GEN_RPKI_CACHE=127.0.0.1:3323` when generating a route-server scenario
+to add an RTR cache and a reject-invalid term to every member's shared import
+chain in both policy generations. A bracketed numeric IPv6 cache address such
+as `[::1]:3323` also works. The cache must be started separately; this knob
+does not produce VRPs, inject deltas, or hold sessions for measurement.
+It is unavailable in the policy-free `GEN_IBGP_RR_ASN` scenario. With the
+knob absent, the historical generated files are unchanged.
+
 ## Arg contract
 
 From `src/main.rs` (fewer than 9 positional args prints the usage string and
