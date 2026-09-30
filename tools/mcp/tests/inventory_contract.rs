@@ -69,10 +69,16 @@ fn read_tier(inventory: &[(String, String)], path: &str) -> bool {
 #[test]
 fn mutating_rpc_negative_control_fails_the_read_tier_check() {
     let inventory = inventory_tiers();
-    assert!(!read_tier(
-        &inventory,
-        "/rustbgpd.v1.InjectionService/AddPath"
-    ));
+    let path = "/rustbgpd.v1.InjectionService/AddPath";
+    assert_eq!(
+        inventory
+            .iter()
+            .find(|(known, _)| known == path)
+            .map(|(_, tier)| tier.as_str()),
+        Some("operator_only"),
+        "the negative-control RPC must exist at its non-read tier"
+    );
+    assert!(!read_tier(&inventory, path));
 }
 
 #[test]
