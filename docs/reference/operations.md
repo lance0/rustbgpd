@@ -3091,6 +3091,11 @@ rbgp policy explain --neighbor 10.0.0.2 --prefix 2001:db8::/32 --direction impor
 rbgp policy explain --neighbor 10.0.0.2 --prefix 192.0.2.0/24 --direction import --path-id 3
 ```
 
+An import explain request without `--path-id` returns every matching path
+while there are at most 4096. Above that, the RPC fails with
+`RESOURCE_EXHAUSTED` and the CLI suggests `--path-id`; it does not return
+an incomplete list. A query with `--path-id` still resolves that one path.
+
 `--direction export` runs the
 [export dry run](#explain-an-export-decision-why-diddidnt-route-x-go-to-peer-y)
 under the same verb (identical to `rbgp rib --prefix <cidr> advertised <peer>

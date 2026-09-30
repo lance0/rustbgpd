@@ -71,6 +71,13 @@ pub const DEFAULT_EXPLAIN_CACHE_SIZE: usize = 4096;
 /// them), up to 72 MB at the cap.
 pub const EVICTED_KEY_LIMIT: usize = 1 << 21;
 
+/// Maximum number of matches in one all-path import explain reply.
+pub const ALL_PATH_MATCH_LIMIT: usize = 4096;
+
+/// The complete all-path answer would exceed 4096 matches.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AllPathMatchLimitExceeded;
+
 /// Identity of a cached import decision.
 ///
 /// Per ADR-0073 the key is `(AFI, SAFI, prefix, path_id)`. `path_id` is
@@ -357,11 +364,18 @@ impl EvictedKeys {
     }
 
     /// Recorded evicted path identifiers for a prefix.
-    fn path_ids(&self, afi: Afi, safi: Safi, prefix: &Prefix) -> Vec<u32> {
+    fn path_ids(
+        &self,
+        afi: Afi,
+        safi: Safi,
+        prefix: &Prefix,
+        live_ids: &FxHashSet<u32>,
+        remaining: usize,
+    ) -> Result<Vec<u32>, AllPathMatchLimitExceeded> {
         let mut ids = Vec::new();
         if self.len > 0 {
             let fp = self.fingerprint(afi, safi, prefix);
-            if self.default_path.contains(&fp) {
+            if self.default_path.contains(&fp) && !live_ids.contains(&0) {
                 ids.push(0);
             }
             let first = AddPathKey {
@@ -372,9 +386,19 @@ impl EvictedKeys {
                 prefix: fp,
                 path_id: u32::MAX,
             };
-            ids.extend(self.add_path.range(first..=last).map(|k| k.path_id));
+            ids.extend(
+                self.add_path
+                    .range(first..=last)
+                    .map(|k| k.path_id)
+                    .filter(|id| !live_ids.contains(id))
+                    .take(remaining + 1),
+            );
         }
-        ids
+        if ids.len() > remaining {
+            Err(AllPathMatchLimitExceeded)
+        } else {
+            Ok(ids)
+        }
     }
 
     #[cfg(test)]
@@ -500,29 +524,42 @@ impl ImportDecisionCache {
     /// [`ResolvedMatch`] per live entry, ordered by `path_id` for a
     /// stable response. Evicted paths for the prefix are returned as
     /// `Evicted` so the operator isn't told `NotSeen` for something
-    /// that was real. Empty only when genuinely never-seen.
-    #[must_use]
+    /// that was real. Empty only when genuinely never-seen. Returns an
+    /// error before collecting more than [`ALL_PATH_MATCH_LIMIT`] matches.
     pub fn lookup_all_paths(
         &self,
         afi: Afi,
         safi: Safi,
         prefix: &Prefix,
         current_generation: u64,
-    ) -> Vec<ResolvedMatch> {
-        let mut matches: Vec<ResolvedMatch> = self
-            .entries
-            .iter()
-            .flat_map(|entries| entries.iter())
-            .filter(|(k, _)| k.afi == afi && k.safi == safi && &k.prefix == prefix)
-            .map(|(k, decision)| ResolvedMatch {
-                path_id: k.path_id,
-                result: Self::classify(decision.clone(), current_generation),
-                statements: Vec::new(),
-            })
-            .collect();
-        // A key is never both live and evicted, so these cannot duplicate
-        // a live path.
-        let mut evicted = self.evicted.path_ids(afi, safi, prefix);
+    ) -> Result<Vec<ResolvedMatch>, AllPathMatchLimitExceeded> {
+        let mut matches = Vec::new();
+        let mut live_ids = FxHashSet::default();
+        if let Some(entries) = &self.entries {
+            for (key, decision) in entries {
+                if key.afi != afi || key.safi != safi || &key.prefix != prefix {
+                    continue;
+                }
+                if matches.len() == ALL_PATH_MATCH_LIMIT {
+                    return Err(AllPathMatchLimitExceeded);
+                }
+                live_ids.insert(key.path_id);
+                matches.push(ResolvedMatch {
+                    path_id: key.path_id,
+                    result: Self::classify(decision.clone(), current_generation),
+                    statements: Vec::new(),
+                });
+            }
+        }
+        // Fingerprints can collide. A live key wins over an evicted
+        // fingerprint with the same path identifier.
+        let mut evicted = self.evicted.path_ids(
+            afi,
+            safi,
+            prefix,
+            &live_ids,
+            ALL_PATH_MATCH_LIMIT - matches.len(),
+        )?;
         if matches.is_empty() && evicted.is_empty() && self.evicted.overflowed {
             // Past the memory cap the evicted path identifier is unknown.
             evicted.push(0);
@@ -533,7 +570,7 @@ impl ImportDecisionCache {
             statements: Vec::new(),
         }));
         matches.sort_by_key(|m| m.path_id);
-        matches
+        Ok(matches)
     }
 
     fn classify(decision: CachedDecision, current_generation: u64) -> LookupResult {
@@ -801,7 +838,9 @@ mod tests {
         // A different prefix that must not leak into the result.
         cache.insert(key(2, 1), permit_at(0));
         let prefix = key(1, 0).prefix;
-        let matches = cache.lookup_all_paths(Afi::Ipv4, Safi::Unicast, &prefix, 0);
+        let matches = cache
+            .lookup_all_paths(Afi::Ipv4, Safi::Unicast, &prefix, 0)
+            .expect("all paths fit");
         let path_ids: Vec<u32> = matches.iter().map(|m| m.path_id).collect();
         assert_eq!(path_ids, vec![1, 2, 3], "sorted, prefix-scoped");
     }
@@ -813,7 +852,9 @@ mod tests {
         cache.insert(key(2, 0), permit_at(0));
         cache.insert(key(3, 0), permit_at(0)); // evicts key(1, 7)
         let prefix = key(1, 0).prefix;
-        let matches = cache.lookup_all_paths(Afi::Ipv4, Safi::Unicast, &prefix, 0);
+        let matches = cache
+            .lookup_all_paths(Afi::Ipv4, Safi::Unicast, &prefix, 0)
+            .expect("all paths fit");
         assert_eq!(matches.len(), 1);
         assert_eq!(matches[0].path_id, 7);
         assert!(matches!(matches[0].result, LookupResult::Evicted));
@@ -826,6 +867,7 @@ mod tests {
         assert!(
             cache
                 .lookup_all_paths(Afi::Ipv4, Safi::Unicast, &prefix, 0)
+                .expect("all paths fit")
                 .is_empty()
         );
     }
@@ -867,7 +909,9 @@ mod tests {
         );
         // Reads must not allocate either.
         let _ = cache.lookup(&key(1, 0), 0);
-        let _ = cache.lookup_all_paths(Afi::Ipv4, Safi::Unicast, &key(1, 0).prefix, 0);
+        let _ = cache
+            .lookup_all_paths(Afi::Ipv4, Safi::Unicast, &key(1, 0).prefix, 0)
+            .expect("all paths fit");
         cache.mark_withdrawn(&key(1, 0));
         assert!(
             cache.is_unallocated(),
@@ -914,13 +958,16 @@ mod tests {
             cache.lookup(&nth_key(MANY, 0), 0),
             LookupResult::NotSeen
         ));
-        let evicted = cache.lookup_all_paths(Afi::Ipv4, Safi::Unicast, &nth_key(0, 0).prefix, 0);
+        let evicted = cache
+            .lookup_all_paths(Afi::Ipv4, Safi::Unicast, &nth_key(0, 0).prefix, 0)
+            .expect("all paths fit");
         assert_eq!(evicted.len(), 1);
         assert_eq!(evicted[0].path_id, 0);
         assert!(matches!(evicted[0].result, LookupResult::Evicted));
         assert!(
             cache
                 .lookup_all_paths(Afi::Ipv4, Safi::Unicast, &nth_key(MANY, 0).prefix, 0)
+                .expect("all paths fit")
                 .is_empty()
         );
         assert_eq!(cache.evictions_since_reset(), u64::from(MANY - 4));
@@ -932,7 +979,9 @@ mod tests {
             cache.lookup(&nth_key(0, 0), 0),
             LookupResult::Hit(_)
         ));
-        let live = cache.lookup_all_paths(Afi::Ipv4, Safi::Unicast, &nth_key(0, 0).prefix, 0);
+        let live = cache
+            .lookup_all_paths(Afi::Ipv4, Safi::Unicast, &nth_key(0, 0).prefix, 0)
+            .expect("all paths fit");
         assert_eq!(live.len(), 1);
         assert!(matches!(live[0].result, LookupResult::Hit(_)));
         // Evicted again, it reads as evicted again.
@@ -967,7 +1016,9 @@ mod tests {
             cache.lookup(&nth_key(0, 0), 0),
             LookupResult::NotSeen
         ));
-        let evicted = cache.lookup_all_paths(Afi::Ipv4, Safi::Unicast, &prefix, 0);
+        let evicted = cache
+            .lookup_all_paths(Afi::Ipv4, Safi::Unicast, &prefix, 0)
+            .expect("all paths fit");
         assert_eq!(
             evicted.iter().map(|m| m.path_id).collect::<Vec<_>>(),
             vec![1, 2, 3]
@@ -981,7 +1032,9 @@ mod tests {
         // Re-announcing one path clears only that path; the all-paths
         // answer lists it live beside its still-evicted siblings.
         cache.insert(nth_key(0, 2), permit_at(0));
-        let mixed = cache.lookup_all_paths(Afi::Ipv4, Safi::Unicast, &prefix, 0);
+        let mixed = cache
+            .lookup_all_paths(Afi::Ipv4, Safi::Unicast, &prefix, 0)
+            .expect("all paths fit");
         assert_eq!(
             mixed.iter().map(|m| m.path_id).collect::<Vec<_>>(),
             vec![1, 2, 3]
@@ -1029,6 +1082,81 @@ mod tests {
     }
 
     #[test]
+    fn all_path_limit_rejects_incomplete_answers_but_preserves_point_lookups() {
+        let mut cache = ImportDecisionCache::with_capacity(1);
+        let prefix = nth_key(0, 1).prefix;
+        let limit = u32::try_from(ALL_PATH_MATCH_LIMIT).expect("path limit fits u32");
+        for path_id in 1..limit {
+            cache.insert(nth_key(0, path_id), permit_at(0));
+        }
+        assert_eq!(
+            cache
+                .lookup_all_paths(Afi::Ipv4, Safi::Unicast, &prefix, 0)
+                .expect("below limit")
+                .len(),
+            ALL_PATH_MATCH_LIMIT - 1
+        );
+        cache.insert(nth_key(0, limit), deny_at(0));
+        let exact = cache
+            .lookup_all_paths(Afi::Ipv4, Safi::Unicast, &prefix, 0)
+            .expect("at limit");
+        assert_eq!(exact.len(), ALL_PATH_MATCH_LIMIT);
+        assert!(matches!(exact.last().unwrap().result, LookupResult::Hit(_)));
+        cache.mark_withdrawn(&nth_key(0, limit));
+        cache.insert(nth_key(0, limit + 1), permit_at(0));
+        assert!(matches!(
+            cache.lookup_all_paths(Afi::Ipv4, Safi::Unicast, &prefix, 0),
+            Err(AllPathMatchLimitExceeded)
+        ));
+        assert!(matches!(
+            cache.lookup(&nth_key(0, 1), 0),
+            LookupResult::Evicted
+        ));
+        assert!(matches!(
+            cache.lookup(&nth_key(0, limit + 1), 0),
+            LookupResult::Hit(_)
+        ));
+    }
+
+    #[test]
+    fn live_path_wins_over_matching_evicted_fingerprint() {
+        let mut cache = ImportDecisionCache::with_capacity(1);
+        let key = nth_key(0, 7);
+        cache.insert(key.clone(), permit_at(0));
+        // Simulate a collision: the fingerprint index cannot tell this
+        // entry from an evicted key with the same path ID.
+        cache.evicted.insert(&key);
+        let matches = cache
+            .lookup_all_paths(Afi::Ipv4, Safi::Unicast, &key.prefix, 0)
+            .expect("one live path");
+        assert_eq!(matches.len(), 1);
+        assert!(matches!(matches[0].result, LookupResult::Hit(_)));
+    }
+
+    #[test]
+    fn all_path_limit_counts_live_entries_too() {
+        let mut cache = ImportDecisionCache::with_capacity(ALL_PATH_MATCH_LIMIT + 1);
+        let prefix = nth_key(0, 1).prefix;
+        let limit = u32::try_from(ALL_PATH_MATCH_LIMIT).expect("path limit fits u32");
+        for path_id in 1..=limit {
+            cache.insert(nth_key(0, path_id), permit_at(0));
+        }
+        assert_eq!(
+            cache
+                .lookup_all_paths(Afi::Ipv4, Safi::Unicast, &prefix, 0)
+                .expect("at limit")
+                .len(),
+            ALL_PATH_MATCH_LIMIT
+        );
+        cache.insert(nth_key(0, limit + 1), deny_at(0));
+        assert!(matches!(
+            cache.lookup_all_paths(Afi::Ipv4, Safi::Unicast, &prefix, 0),
+            Err(AllPathMatchLimitExceeded)
+        ));
+        assert_eq!(cache.evictions_since_reset(), 0);
+    }
+
+    #[test]
     fn replacing_a_live_entry_is_not_an_eviction() {
         let mut cache = ImportDecisionCache::with_capacity(1);
         assert!(!cache.insert(key(1, 0), permit_at(0)));
@@ -1065,11 +1193,15 @@ mod tests {
             matches!(cache.lookup(&key(99, 0), 0), LookupResult::Evicted),
             "past the limit an unknown key may have been evicted",
         );
-        let unknown = cache.lookup_all_paths(Afi::Ipv4, Safi::Unicast, &key(99, 0).prefix, 0);
+        let unknown = cache
+            .lookup_all_paths(Afi::Ipv4, Safi::Unicast, &key(99, 0).prefix, 0)
+            .expect("all paths fit");
         assert_eq!(unknown.len(), 1);
         assert!(matches!(unknown[0].result, LookupResult::Evicted));
         assert!(matches!(cache.lookup(&key(3, 0), 0), LookupResult::Hit(_)));
-        let live = cache.lookup_all_paths(Afi::Ipv4, Safi::Unicast, &key(3, 0).prefix, 0);
+        let live = cache
+            .lookup_all_paths(Afi::Ipv4, Safi::Unicast, &key(3, 0).prefix, 0)
+            .expect("all paths fit");
         assert_eq!(live.len(), 1, "a live path is not also reported evicted");
         assert!(matches!(live[0].result, LookupResult::Hit(_)));
         cache.clear();

@@ -1575,9 +1575,9 @@ message ExplainImportPolicyRequest {
   string prefix = 3;
   uint32 prefix_length = 4;
   // Add-Path path identifier (RFC 7911). When absent, the response
-  // returns every matching path_id for the prefix — useful when the
-  // caller doesn't know which path they're asking about, or when
-  // Add-Path is not negotiated and the implicit path_id is 0.
+  // returns every matching path_id for the prefix, up to 4096 matches.
+  // A larger answer fails with RESOURCE_EXHAUSTED; specify path_id
+  // to inspect one path. Without Add-Path the implicit path_id is 0.
   optional uint32 path_id = 5;
 }
 
@@ -1712,7 +1712,8 @@ message ExplainImportPolicyResponse {
   // empty fields beyond the echoed request. When the request
   // specifies `path_id` the response has exactly one element;
   // when it does not, every matching path_id appears (Add-Path
-  // disambiguation).
+  // disambiguation), or the RPC fails with RESOURCE_EXHAUSTED if
+  // more than 4096 matches exist.
   repeated ImportExplainMatch matches = 6;
 
   // The session's per-peer decision-cache cap

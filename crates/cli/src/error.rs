@@ -212,6 +212,17 @@ mod tests {
     }
 
     #[test]
+    fn resource_exhausted_preserves_path_id_hint() {
+        let err = CliError::from(Status::resource_exhausted(
+            "import-policy explain has more than 4096 paths; specify --path-id",
+        ));
+        assert_eq!(
+            err.to_string(),
+            "resource exhausted: import-policy explain has more than 4096 paths; specify --path-id"
+        );
+    }
+
+    #[test]
     fn internal_falls_back_to_daemon_error_prefix() {
         let err = CliError::from(Status::internal("route processor panicked"));
         assert_eq!(err.to_string(), "daemon error: route processor panicked");

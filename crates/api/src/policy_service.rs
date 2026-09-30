@@ -1147,7 +1147,12 @@ impl proto::policy_service_server::PolicyService for PolicyService {
         })
         .await?;
         let reply: Option<ImportExplainReply> = match reply {
-            SessionQueryOutcome::Reply(reply) => Some(reply),
+            SessionQueryOutcome::Reply(Ok(reply)) => Some(reply),
+            SessionQueryOutcome::Reply(Err(_)) => {
+                return Err(Status::resource_exhausted(
+                    "import-policy explain has more than 4096 paths; specify --path-id",
+                ));
+            }
             SessionQueryOutcome::SessionGone => None,
             SessionQueryOutcome::TimedOut => {
                 return Err(Status::deadline_exceeded(format!(
@@ -2467,7 +2472,9 @@ mod tests {
                     PeerManagerCommand::ExplainImportPolicy { reply: tx, .. } => {
                         let outcome = reply
                             .clone()
-                            .map_or(SessionQueryOutcome::SessionGone, SessionQueryOutcome::Reply);
+                            .map_or(SessionQueryOutcome::SessionGone, |reply| {
+                                SessionQueryOutcome::Reply(Ok(reply))
+                            });
                         let _ = tx.send(outcome);
                     }
                     _ => panic!("unexpected peer-manager command"),
@@ -2478,6 +2485,26 @@ mod tests {
             .await
             .expect("explain succeeds")
             .into_inner()
+    }
+
+    #[tokio::test]
+    async fn explain_all_path_limit_is_resource_exhausted() {
+        let (peer_tx, mut peer_rx) = mpsc::channel(8);
+        let svc = PolicyService::new(AccessMode::ReadOnly, peer_tx, None, None);
+        tokio::spawn(async move {
+            if let Some(PeerManagerCommand::ExplainImportPolicy { reply, .. }) =
+                peer_rx.recv().await
+            {
+                let _ = reply.send(SessionQueryOutcome::Reply(Err(
+                    rustbgpd_transport::AllPathMatchLimitExceeded,
+                )));
+            }
+        });
+        let error = PolicyServiceRpc::explain_import_policy(&svc, Request::new(explain_request()))
+            .await
+            .expect_err("oversized all-path answer must fail");
+        assert_eq!(error.code(), tonic::Code::ResourceExhausted);
+        assert!(error.message().contains("--path-id"));
     }
 
     /// Drive `ListRejectedRoutes` against a fake peer manager that
