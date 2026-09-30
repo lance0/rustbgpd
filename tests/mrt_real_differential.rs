@@ -8,14 +8,19 @@
 //! Run once per decompressed file:
 //! MRT_DIFFERENTIAL_PATH=/path/to/updates.mrt MRT_DIFFERENTIAL_OUT=/path/to/output \
 //!   cargo test --test mrt_real_differential real_updates -- --ignored --nocapture
+//! RFC 7606 differences require an individual verdict; only RFC 9774 AS_SET is pre-exempted.
 use bgpkit_parser::models::{
-    AsPathSegment as KitSegment, AsnLength, AttributeValue, Bgp4MpEnum, BgpMessage, Community,
-    MetaCommunity, MrtMessage,
+    AsPathSegment as KitSegment, AsnLength, AttributeValue, Bgp4MpEnum, BgpMessage,
+    BgpUpdateMessage, Community, MetaCommunity, MrtMessage,
 };
+use bgpkit_parser::parser::bgp::parse_bgp_message;
 use bgpkit_parser::parser::mrt::chunk_mrt_record;
-use bytes::Bytes;
+use bytes::{Bytes, BytesMut};
 use rustbgpd_wire::constants::HEADER_LEN;
-use rustbgpd_wire::{AsPathSegment, ErrorDisposition, PathAttribute, UpdateMessage};
+use rustbgpd_wire::{
+    AsPathSegment, ErrorDisposition, Ipv4UnicastMode, PathAttribute, RawAttribute,
+    RevisedParsedUpdate, UpdateMessage,
+};
 use std::collections::BTreeSet;
 use std::fs::File;
 use std::io::{BufRead, BufReader, Write};
@@ -36,10 +41,56 @@ fn known_identity(kit: &BTreeSet<u8>, typed: &BTreeSet<u8>) -> BTreeSet<u8> {
 #[test]
 #[should_panic(expected = "known attribute decoded as Unknown")]
 fn known_attribute_negative_control() {
-    let kit = BTreeSet::from([1, 2, 3, 6]);
-    let altered = BTreeSet::from([1, 2, 3]); // plausible ATOMIC_AGGREGATE -> Unknown regression
+    let clean = std::fs::read("tests/fixtures/bgpkit/clean_ipv4_update.bin").unwrap();
+    let mut body = Bytes::copy_from_slice(&clean[HEADER_LEN..]);
+    let clean = UpdateMessage::decode(&mut body, clean.len() - HEADER_LEN)
+        .unwrap()
+        .parse_revised(true, false, false, &[])
+        .unwrap()
+        .update;
+    let mut attributes = clean.attributes;
+    attributes.push(PathAttribute::AtomicAggregate);
+    let update = UpdateMessage::build(
+        &clean.announced,
+        &clean.withdrawn,
+        &attributes,
+        true,
+        false,
+        Ipv4UnicastMode::Body,
+    );
+    let mut bytes = BytesMut::new();
+    update.encode(&mut bytes).unwrap();
+    let mut kit_bytes = bytes.clone().freeze();
+    let BgpMessage::Update(kit) =
+        parse_bgp_message(&mut kit_bytes, false, &AsnLength::Bits32).unwrap()
+    else {
+        panic!("expected UPDATE")
+    };
+    let mut rust_bytes = bytes.freeze().slice(HEADER_LEN..);
+    let body_len = rust_bytes.len();
+    let mut rust = UpdateMessage::decode(&mut rust_bytes, body_len)
+        .unwrap()
+        .parse_revised(true, false, false, &[])
+        .unwrap();
     assert!(
-        known_identity(&kit, &altered).is_empty(),
+        verdict(&kit, &rust).is_none(),
+        "valid ATOMIC_AGGREGATE must match"
+    );
+    *rust
+        .update
+        .attributes
+        .iter_mut()
+        .find(|a| matches!(a, PathAttribute::AtomicAggregate))
+        .unwrap() = PathAttribute::Unknown(RawAttribute {
+        flags: 0x40,
+        type_code: 6,
+        data: Bytes::new(),
+    });
+    let (category, reason) = verdict(&kit, &rust).expect("altered known attribute must differ");
+    assert_eq!(category, "other");
+    assert!(reason.contains("known_to_kit_but_unknown_to_rust={6}"));
+    assert!(
+        verdict(&kit, &rust).is_none(),
         "known attribute decoded as Unknown"
     );
 }
@@ -193,6 +244,41 @@ fn rust_shape(u: &rustbgpd_wire::ParsedUpdate) -> (Shape, BTreeSet<u8>) {
     )
 }
 
+fn verdict(kit: &BgpUpdateMessage, rust: &RevisedParsedUpdate) -> Option<(&'static str, String)> {
+    let (ours, typed) = rust_shape(&rust.update);
+    let theirs = kit_shape(kit);
+    let missing = known_identity(&theirs.known, &typed);
+    let disposition = rust.malformed.iter().map(|m| m.disposition).max();
+    let as_set = rust.update.attributes.iter().any(|a| matches!(a, PathAttribute::AsPath(p) if p.segments.iter().any(|s| matches!(s, AsPathSegment::AsSet(_)))));
+    if disposition == Some(ErrorDisposition::TreatAsWithdraw)
+        && as_set
+        && rust.malformed.iter().all(|m| m.type_code == 2)
+        && kit.attributes.validation_warnings().is_empty()
+        && ours == theirs
+        && missing.is_empty()
+    {
+        return Some((
+            "expected-as-set",
+            "RFC 9774 AS_SET treat-as-withdraw vs bgpkit accept".into(),
+        ));
+    }
+    if disposition.is_some()
+        || !kit.attributes.validation_warnings().is_empty()
+        || ours != theirs
+        || !missing.is_empty()
+    {
+        return Some((
+            "other",
+            format!(
+                "rust_disposition={disposition:?} rust_malformed={:?} kit_warnings={:?} rust={ours:?} kit={theirs:?} known_to_kit_but_unknown_to_rust={missing:?}",
+                rust.malformed,
+                kit.attributes.validation_warnings()
+            ),
+        ));
+    }
+    None
+}
+
 fn bgp_bytes(body: &[u8], subtype: u16) -> Option<(&[u8], bool, bool, bool)> {
     let four_as = matches!(subtype, 4 | 7 | 9 | 11);
     let add_path = matches!(subtype, 8..=11);
@@ -219,7 +305,6 @@ fn real_updates() {
     let mut updates = 0u64;
     let mut accepted = 0u64;
     let mut expected_as_set = 0u64;
-    let mut expected_7606 = 0u64;
     let mut other = 0u64;
     let mut log = File::create(format!("{out}/discrepancies.txt")).unwrap();
     while !reader.fill_buf().unwrap().is_empty() {
@@ -260,56 +345,25 @@ fn real_updates() {
         } else {
             panic!("record {records}: short UPDATE");
         };
-        let mut reason = String::new();
-        let mut category = "other";
-        match (&kit_update, &rust) {
-            (Some(k), Ok(r)) => {
-                let disposition = r.malformed.iter().map(|m| m.disposition).max();
-                let (ours, typed) = rust_shape(&r.update);
-                let theirs = kit_shape(k);
-                let missing = known_identity(&theirs.known, &typed);
-                let as_set = r.update.attributes.iter().any(|a| matches!(a, PathAttribute::AsPath(p) if p.segments.iter().any(|s| matches!(s, AsPathSegment::AsSet(_)))));
-                if disposition == Some(ErrorDisposition::TreatAsWithdraw)
-                    && as_set
-                    && r.malformed.iter().all(|m| m.type_code == 2)
-                    && k.attributes.validation_warnings().is_empty()
-                    && ours == theirs
-                    && missing.is_empty()
-                {
-                    expected_as_set += 1;
-                    category = "expected-as-set";
-                    reason = "RFC 9774 AS_SET treat-as-withdraw vs bgpkit accept".into();
-                } else if (disposition.is_some() || !k.attributes.validation_warnings().is_empty())
-                    && ours == theirs
-                    && missing.is_empty()
-                {
-                    expected_7606 += 1;
-                    category = "expected-rfc7606";
-                    reason = format!(
-                        "rfc7606 rust={disposition:?} malformed={:?} kit_warnings={:?}",
-                        r.malformed,
-                        k.attributes.validation_warnings()
-                    );
-                } else if ours != theirs || !missing.is_empty() {
-                    reason = format!(
-                        "shape rust={ours:?} kit={theirs:?} known_to_kit_but_unknown_to_rust={missing:?}"
-                    );
-                } else {
-                    accepted += 1;
-                }
+        let result = match (&kit_update, &rust) {
+            (Some(k), Ok(r)) => verdict(k, r),
+            _ => Some(("other", format!("parse rust={rust:?} kit={kit:?}"))),
+        };
+        if let Some((category, reason)) = result {
+            if category == "expected-as-set" {
+                expected_as_set += 1;
             }
-            _ => reason = format!("parse rust={rust:?} kit={kit:?}"),
-        }
-        if !reason.is_empty() {
             if category == "other" {
                 other += 1;
             }
             writeln!(log, "record={records} update={updates} subtype={subtype} category={category} reason={reason}").unwrap();
             std::fs::write(format!("{out}/record-{records}.mrt"), raw.raw_bytes()).unwrap();
+        } else {
+            accepted += 1;
         }
     }
     println!(
-        "records={records} updates={updates} accepted={accepted} expected_as_set={expected_as_set} expected_7606={expected_7606} other={other}"
+        "records={records} updates={updates} accepted={accepted} expected_as_set={expected_as_set} other={other}"
     );
     assert!(updates > 0);
     assert_eq!(
