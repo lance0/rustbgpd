@@ -932,7 +932,18 @@ impl ConfigTransactionController {
                                 .map_err(apply_error_to_owned_gnmi_set_error)?;
                         }
                     }
-                    let current = self_.accepted_runtime_snapshot().await.map_err(|error| {
+                    let current = before_pre_effect_deadline(
+                        progress.pre_effect_deadline(),
+                        self_.accepted_runtime_snapshot(),
+                    )
+                    .await
+                    .ok_or_else(|| {
+                        OwnedGnmiSetError::Clean(GnmiSetError::Unavailable(
+                            "peer manager did not answer gNMI config snapshot in time; nothing was applied"
+                                .to_string(),
+                        ))
+                    })?
+                    .map_err(|error| {
                         OwnedGnmiSetError::Clean(GnmiSetError::Unavailable(error))
                     })?;
                     let mut candidate =
@@ -1071,9 +1082,17 @@ impl ConfigTransactionController {
         progress: &RuntimeConfigMutationProgress,
         verify_external_inputs: bool,
     ) -> Result<proto::ConfigTransactionApplyResponse, ConfigTransactionApplyError> {
-        let prior_snapshot = self
-            .accepted_prior_snapshot()
+        let prior_snapshot = before_pre_effect_deadline(
+            progress.pre_effect_deadline(),
+            self.accepted_prior_snapshot(),
+        )
             .await
+            .ok_or_else(|| {
+                ConfigTransactionApplyError::Unavailable(
+                    "peer manager did not answer confirmed config snapshot in time; nothing was applied"
+                        .to_string(),
+                )
+            })?
             .map_err(ConfigTransactionApplyError::Unavailable)?;
         if let Some(launch) = &self.confirm_v3_launch {
             let prior_bytes = prior_snapshot.normalized_toml().len();
@@ -1655,14 +1674,22 @@ impl ConfigTransactionController {
                     }
                 }
                 let config_path = self_.rollback_config_path()?;
-                let (candidate_toml, preloaded) = self_
-                    .prepare_rollback_payload(
+                let (candidate_toml, preloaded) = before_pre_effect_deadline(
+                    progress.pre_effect_deadline(),
+                    self_.prepare_rollback_payload(
                         payload,
                         &config_path,
                         request.expected_runtime_snapshot_token.clone(),
                         None,
+                    ),
+                )
+                .await
+                .ok_or_else(|| {
+                    ConfigTransactionApplyError::Unavailable(
+                        "peer manager did not prepare config history rollback in time; nothing was applied"
+                            .to_string(),
                     )
-                    .await?;
+                })??;
                 let client_request_id = if request.client_request_id.is_empty() {
                     format!("config-rollback:{index}")
                 } else {
@@ -2552,13 +2579,22 @@ async fn apply_config_transaction_locked_with_preloaded(
             )
         }
         .map_err(ConfigTransactionApplyError::InvalidArgument)?;
-        let plan = plan_candidate(
-            &deps.peer_mgr_tx,
-            request.candidate_toml.clone(),
-            request.expected_runtime_snapshot_token.clone(),
-            verify_external_inputs,
+        let plan = before_pre_effect_deadline(
+            progress.pre_effect_deadline(),
+            plan_candidate(
+                &deps.peer_mgr_tx,
+                request.candidate_toml.clone(),
+                request.expected_runtime_snapshot_token.clone(),
+                verify_external_inputs,
+            ),
         )
-        .await?;
+        .await
+        .ok_or_else(|| {
+            ConfigTransactionApplyError::Unavailable(
+                "peer manager did not answer initial config transaction plan in time; nothing was applied"
+                    .to_string(),
+            )
+        })??;
         (plan, Box::new(candidate), false)
     };
 
@@ -2603,12 +2639,21 @@ async fn apply_config_transaction_locked_with_preloaded(
     let candidate = if typed_plan {
         *candidate
     } else {
-        let typed = plan_loaded_candidate(
-            peer_mgr_internal_tx,
-            candidate,
-            request.expected_runtime_snapshot_token.clone(),
+        let typed = before_pre_effect_deadline(
+            progress.pre_effect_deadline(),
+            plan_loaded_candidate(
+                peer_mgr_internal_tx,
+                candidate,
+                request.expected_runtime_snapshot_token.clone(),
+            ),
         )
-        .await?;
+        .await
+        .ok_or_else(|| {
+            ConfigTransactionApplyError::Unavailable(
+                "peer manager did not answer initial typed config transaction plan in time; nothing was applied"
+                    .to_string(),
+            )
+        })??;
         let typed_candidate = typed
             .plan
             .committed_candidate
