@@ -14,4 +14,8 @@ afi-safi-name = "l3vpn-ipv4-unicast"
 
 [[neighbors.afi-safis]]
 [neighbors.afi-safis.config]
+afi-safi-name = "l2vpn-evpn"
+
+[[neighbors.afi-safis]]
+[neighbors.afi-safis.config]
 afi-safi-name = "rtc"

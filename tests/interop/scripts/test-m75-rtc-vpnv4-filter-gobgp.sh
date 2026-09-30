@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# M75 interop test — RT-Constrain (RFC 4684) VPNv4 reflection filtering
+# M75 interop test — RT-Constrain (RFC 4684) VPNv4 and EVPN reflection filtering
 # against GoBGP v3.
 #
 # Validates:
@@ -27,6 +27,9 @@
 #  10. Nothing is installed into any dataplane on the RR.
 #  11. No RTC reflection UPDATE storm (GoBGP issue #1630 signature): the
 #      RR's UPDATE counters are quiet after convergence.
+# The same membership transitions also pin EVPN Type 2 RT filtering: sink
+# initially receives only blue, sink2 receives both tenants, and the sink's
+# red route appears/disappears with red RTC membership.
 #
 # iBGP-only on purpose: GoBGP's eBGP RTC handling is broken upstream
 # (gobgp #2427).
@@ -62,6 +65,12 @@ RED_RT="65001:200"
 # rustbgpd's best-path-only RTC view (src and sink both originate the blue
 # /96, and only the tiebreak winner shows).
 SINK_EXTRA_RT="65001:111"
+BLUE_MAC="aa:bb:cc:00:75:01"
+RED_MAC="aa:bb:cc:00:75:02"
+BLUE_IP="10.75.100.1"
+RED_IP="10.75.200.1"
+BLUE_EVPN_KEY="[type:macadv][rd:${BLUE_RD}][etag:0][mac:${BLUE_MAC}][ip:${BLUE_IP}]"
+RED_EVPN_KEY="[type:macadv][rd:${RED_RD}][etag:0][mac:${RED_MAC}][ip:${RED_IP}]"
 
 start_gobgpd() {
     local container=${1:?}
@@ -84,6 +93,34 @@ gobgp_neighbor() {
 gobgp_vpnv4_json() {
     local container=${1:?}
     gobgp "$container" global rib -a vpnv4 -j
+}
+
+gobgp_evpn_json() {
+    local container=${1:?}
+    gobgp "$container" global rib -a evpn -j
+}
+
+# Check an exact decoded NLRI key, not just a route count. Require a valid
+# GoBGP JSON object so a failed CLI query cannot masquerade as an absence.
+evpn_key_state() {
+    local container=${1:?} key=${2:?} want=${3:?}
+    gobgp_evpn_json "$container" | jq -e --arg key "$key" --argjson want "$want" \
+        'type == "object" and (has($key) == $want)' >/dev/null
+}
+
+wait_evpn_key_state() {
+    local container=${1:?} key=${2:?} want=${3:?} label=${4:?}
+    log "Waiting for $label EVPN key present=$want..."
+    for i in $(seq 1 30); do
+        if evpn_key_state "$container" "$key" "$want"; then
+            ok "$label EVPN key present=$want (attempt $i)"
+            return 0
+        fi
+        sleep 2
+    done
+    fail "$label EVPN key did not reach present=$want: $key"
+    gobgp_evpn_json "$container" | jq -r 'keys[]' || true
+    return 1
 }
 
 rustbgpd_vpn_json() {
@@ -312,6 +349,14 @@ test_setup_vrfs() {
     gobgp "$GOBGP_SRC" vrf red rib add "$RED_PREFIX" nexthop "$SRC_ADDR"
     gobgp "$GOBGP_SINK" vrf add blue rd "$BLUE_RD" rt both "$BLUE_RT" "$SINK_EXTRA_RT"
     ok "VRFs configured and one VPN route injected per src VRF"
+
+    gobgp "$GOBGP_SRC" global rib add -a evpn macadv "$BLUE_MAC" "$BLUE_IP" \
+        etag 0 label 10100 rd "$BLUE_RD" rt "$BLUE_RT" encap vxlan nexthop "$SRC_ADDR" \
+        || { fail "blue EVPN route injection failed"; return 1; }
+    gobgp "$GOBGP_SRC" global rib add -a evpn macadv "$RED_MAC" "$RED_IP" \
+        etag 0 label 10200 rd "$RED_RD" rt "$RED_RT" encap vxlan nexthop "$SRC_ADDR" \
+        || { fail "red EVPN route injection failed"; return 1; }
+    ok "one EVPN Type 2 route injected per tenant"
 }
 
 test_rr_receives_both() {
@@ -399,6 +444,33 @@ test_sink2_unfiltered() {
     wait_vpnv4_key "$GOBGP_SINK2" "${RED_RD}:${RED_PREFIX}" "sink2"
 }
 
+test_evpn_filtering() {
+    log "EVPN extension: sink gets blue only; non-RTC sink2 gets both exact tenant NLRIs"
+    wait_evpn_key_state "$GOBGP_SINK2" "$BLUE_EVPN_KEY" true "sink2 blue" || return 1
+    wait_evpn_key_state "$GOBGP_SINK2" "$RED_EVPN_KEY" true "sink2 red" || return 1
+    wait_evpn_key_state "$GOBGP_SINK" "$BLUE_EVPN_KEY" true "sink blue" || return 1
+    # Both routes reached sink2; let the RR's sink-bound queue settle before
+    # checking that the unmatched red tenant was filtered.
+    sleep 3
+    if gobgp_evpn_json "$GOBGP_SINK" | jq -e --arg blue "$BLUE_EVPN_KEY" \
+        'type == "object" and (keys == [$blue])' >/dev/null; then
+        ok "sink holds exactly the blue EVPN NLRI"
+    else
+        fail "sink EVPN table is not exactly the blue tenant"
+        gobgp_evpn_json "$GOBGP_SINK" | jq -r 'keys[]' || true
+        return 1
+    fi
+    if gobgp_evpn_json "$GOBGP_SINK2" | jq -e \
+        --arg blue "$BLUE_EVPN_KEY" --arg red "$RED_EVPN_KEY" \
+        'type == "object" and (keys == ([$blue, $red] | sort))' >/dev/null; then
+        ok "non-RTC sink2 holds exactly both EVPN tenants"
+    else
+        fail "non-RTC sink2 EVPN table is not exactly both tenants"
+        gobgp_evpn_json "$GOBGP_SINK2" | jq -r 'keys[]' || true
+        return 1
+    fi
+}
+
 # Widen/narrow drive the sink's red membership via `global rib add/del -a
 # rtc` rather than `vrf add/del red`: GoBGP 3.37.0 SEGFAULTs in
 # table.(*Table).deleteRTCPathsByVrf on `vrf del` while the RR's default
@@ -411,6 +483,7 @@ test_widen_without_reset() {
     flap_before=$(sink_flap_count)
     gobgp "$GOBGP_SINK" global rib add -a rtc asn 65001 rt "$RED_RT"
     wait_vpnv4_key "$GOBGP_SINK" "${RED_RD}:${RED_PREFIX}" "sink"
+    wait_evpn_key_state "$GOBGP_SINK" "$RED_EVPN_KEY" true "sink red after widen" || return 1
     assert_no_flap "$flap_before" "widen"
 }
 
@@ -420,6 +493,8 @@ test_narrow_withdraws() {
     flap_before=$(sink_flap_count)
     gobgp "$GOBGP_SINK" global rib del -a rtc asn 65001 rt "$RED_RT"
     wait_vpnv4_key_gone "$GOBGP_SINK" "${RED_RD}:${RED_PREFIX}" "sink"
+    wait_evpn_key_state "$GOBGP_SINK" "$RED_EVPN_KEY" false "sink red after narrow" || return 1
+    wait_evpn_key_state "$GOBGP_SINK" "$BLUE_EVPN_KEY" true "sink blue after narrow" || return 1
     if vpnv4_key_present "$GOBGP_SINK" "${BLUE_RD}:${BLUE_PREFIX}"; then
         ok "sink still holds the blue route after the red withdraw"
     else
@@ -510,6 +585,9 @@ main() {
     assert_family_negotiated "$GOBGP_SRC" "10.0.0.1" "l3vpn-ipv4-unicast" "source"
     assert_family_negotiated "$GOBGP_SINK" "10.0.1.1" "l3vpn-ipv4-unicast" "sink"
     assert_family_negotiated "$GOBGP_SINK2" "10.0.2.1" "l3vpn-ipv4-unicast" "sink2"
+    assert_family_negotiated "$GOBGP_SRC" "10.0.0.1" "l2vpn-evpn" "source"
+    assert_family_negotiated "$GOBGP_SINK" "10.0.1.1" "l2vpn-evpn" "sink"
+    assert_family_negotiated "$GOBGP_SINK2" "10.0.2.1" "l2vpn-evpn" "sink2"
     assert_family_negotiated "$GOBGP_SRC" "10.0.0.1" "rtc" "source"
     assert_family_negotiated "$GOBGP_SINK" "10.0.1.1" "rtc" "sink"
     assert_family_absent "$GOBGP_SINK2" "10.0.2.1" "rtc" "sink2"
@@ -517,12 +595,13 @@ main() {
     wait_default_rtc_accepted "$GOBGP_SRC" "10.0.0.1" "source"
     wait_default_rtc_accepted "$GOBGP_SINK" "10.0.1.1" "sink"
 
-    test_setup_vrfs
+    test_setup_vrfs || exit 1
     test_rr_receives_both
     test_rr_rtc_table
     test_rtc_reflection
     test_sink_filtered
     test_sink2_unfiltered
+    test_evpn_filtering
     test_widen_without_reset
     test_narrow_withdraws
     test_default_rtc_injection
