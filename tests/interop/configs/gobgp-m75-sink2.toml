@@ -1,6 +1,6 @@
-# sink2 deliberately negotiates ONLY l3vpn-ipv4-unicast (no rtc family):
+# sink2 deliberately omits the rtc family while negotiating VPNv4 and EVPN:
 # it pins rustbgpd's SAFI-132-not-negotiated rule — no RTC session means
-# no filtering, the peer receives the full VPN table.
+# no filtering, the peer receives both VPNv4 and EVPN tenants.
 [global.config]
 as = 65001
 router-id = "10.0.2.2"
@@ -14,3 +14,7 @@ description = "rustbgpd-rtc-rr"
 [[neighbors.afi-safis]]
 [neighbors.afi-safis.config]
 afi-safi-name = "l3vpn-ipv4-unicast"
+
+[[neighbors.afi-safis]]
+[neighbors.afi-safis.config]
+afi-safi-name = "l2vpn-evpn"

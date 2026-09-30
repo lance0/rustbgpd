@@ -19,7 +19,7 @@ remote_asn = 65001
 description = "vpnv4-source"
 hold_time = 90
 route_reflector_client = true
-families = ["l3vpn_ipv4_unicast", "rtc"]
+families = ["l3vpn_ipv4_unicast", "l2vpn_evpn", "rtc"]
 
 [[neighbors]]
 address = "10.0.1.2"
@@ -27,7 +27,7 @@ remote_asn = 65001
 description = "vpnv4-sink-rtc"
 hold_time = 90
 route_reflector_client = true
-families = ["l3vpn_ipv4_unicast", "rtc"]
+families = ["l3vpn_ipv4_unicast", "l2vpn_evpn", "rtc"]
 
 # No "rtc" here on purpose: sink2 pins the SAFI-132-not-negotiated rule —
 # a peer without RTC must receive the full unfiltered VPN table.
@@ -37,7 +37,7 @@ remote_asn = 65001
 description = "vpnv4-sink-no-rtc"
 hold_time = 90
 route_reflector_client = true
-families = ["l3vpn_ipv4_unicast"]
+families = ["l3vpn_ipv4_unicast", "l2vpn_evpn"]
 
 [security.grpc]
 enforcement = "tier"
