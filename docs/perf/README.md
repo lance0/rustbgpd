@@ -151,6 +151,17 @@ route arrives. It writes `cells.csv` and `summary.txt` with the RIB actor's
 a tiny shape as a pipeline check. The table is VRP only: StayRTR speaks RTR
 version 1 and serves no ASPA records.
 
+The fixture helper can also prepare a dual-stack VRP table without running a
+cell. `python3 bench/scale/rpki-cell/rpki_cell.py vrps 700 400400 500000
+base.json 200200` assigns 200,200 IPv4 /24s and 200,200 IPv6 /48s to the
+same 700 origin ASNs, with the remaining VRPs as unannounced padding. Then
+`python3 bench/scale/rpki-cell/rpki_cell.py maxlen-delta 700 400400 500000
+200200 1000 base.json changed.json` changes the maxLength of 1,000 spread
+announced VRPs while retaining the table size and route validity. The helper
+checks that its input is the canonical baseline and reports the expected
+withdrawal and announcement counts. Serving and measuring the RTR delta
+requires a separate driver; the existing A/B cell remains IPv4-only.
+
 ## Reading the archive
 
 This directory is a historical evidence archive. Each row reports only the

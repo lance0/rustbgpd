@@ -2,18 +2,23 @@
 """Helpers for run-rpki-cell.sh: the VRP fixture, the VRP-loaded gate, and
 the per-cell extraction.
 
-    rpki_cell.py check N_PEERS TOTAL_PREFIXES VRPS
-    rpki_cell.py vrps N_PEERS TOTAL_PREFIXES VRPS OUT_JSON
+    rpki_cell.py check N_PEERS TOTAL_PREFIXES VRPS [IPV4_PREFIXES]
+    rpki_cell.py vrps N_PEERS TOTAL_PREFIXES VRPS OUT_JSON [IPV4_PREFIXES]
+    rpki_cell.py maxlen-delta N_PEERS TOTAL_PREFIXES VRPS IPV4_PREFIXES N BASE_JSON OUT_JSON
     rpki_cell.py wait-vrps METRICS_URL WANT TIMEOUT_SECS DAEMON_PID
     rpki_cell.py summarize OUT_DIR
 
-`vrps` writes a StayRTR JSON cache of exactly VRPS entries. Every reloadstall
-base-table /24 is Valid for the stub that announces it: stub i announces the
-contiguous slice member_slice(TOTAL, N_PEERS, i) with origin AS 64512+i, the
-first TOTAL % N_PEERS stubs one prefix more than the rest (see member_slice,
-base_prefix and stub_asn in bench/scale/reloadstall/src/main.rs). The rest
-are /24s in 100.0.0.0/8 and up that cover no announced route. The output is
-byte-identical for the same arguments.
+`vrps` writes a StayRTR JSON cache of exactly VRPS entries. Without the
+optional split, every reloadstall IPv4 base-table /24 is Valid for its owning
+stub, preserving the historical output. IPV4_PREFIXES selects the dual-stack
+shape: TOTAL_PREFIXES is the total across families, the remainder is IPv6,
+and each family uses member_slice(FAMILY_TOTAL, N_PEERS, i) with origin
+AS 64512+i. IPv6 base routes are 3001:HHHH:LLLL::/48. Padding /24s cover no
+announced route. `maxlen-delta` takes only a canonical dual-stack `vrps`
+output and changes N distributed announced entries' maxLength, from 24 to 25
+or 48 to 49. The ROA still validates its /24 or /48 route; exactly N old
+entries are withdrawn and N replacement entries announced if served as an
+incremental RTR update. This helper does not serve RTR or prove that update.
 
 `check` validates the same shape arithmetically without building the table.
 
@@ -55,37 +60,58 @@ def member_slice(total: int, peers: int, member: int) -> tuple[int, int]:
     return member * q + min(member, r), q + (member < r)
 
 
-def check_fixture(n_peers: int, total: int, vrps: int) -> None:
+def family_totals(n_peers: int, total: int, ipv4_prefixes: int | None) -> tuple[int, int]:
+    if ipv4_prefixes is None:
+        return total, 0
+    ipv6_prefixes = total - ipv4_prefixes
+    if ipv4_prefixes < n_peers or ipv6_prefixes < n_peers:
+        raise ValueError("both families need at least one prefix per peer")
+    return ipv4_prefixes, ipv6_prefixes
+
+
+def check_fixture(n_peers: int, total: int, vrps: int,
+                  ipv4_prefixes: int | None = None) -> None:
     if n_peers < 1 or total < n_peers:
         raise ValueError("need at least one prefix per peer")
+    v4, v6 = family_totals(n_peers, total, ipv4_prefixes)
     if vrps < total:
         raise ValueError(f"VRPS={vrps} is below the {total} announced prefixes; every route must validate")
-    if 20 + ((total - 1) >> 16) >= 100 or 100 + ((vrps - total - 1) >> 16) > 223:
+    if (20 + ((v4 - 1) >> 16) >= 100 or v6 > 1 << 32
+            or 100 + ((vrps - total - 1) >> 16) > 223):
         raise ValueError("prefix space exhausted")
 
 
-def check_shape(n_peers: int, total: int, vrps: int) -> None:
+def check_shape(n_peers: int, total: int, vrps: int,
+                ipv4_prefixes: int | None = None) -> None:
     """Arithmetic-only check of a cell shape, including the harness's own
-    IPv4-only rules (at least CHURNERS stubs, TOTAL a multiple of N_PEERS;
-    see family_totals in reloadstall). Raises ValueError."""
+    rules (at least CHURNERS stubs, IPv4-only TOTAL a multiple of N_PEERS;
+    dual-stack families can have remainder slices). Raises ValueError."""
     if n_peers < MIN_PEERS:
         raise ValueError(f"N_PEERS={n_peers} is below the reloadstall minimum of {MIN_PEERS}")
     if n_peers > MAX_PEERS:
         raise ValueError(f"N_PEERS={n_peers} exceeds the reloadstall address limit of {MAX_PEERS}")
-    if total % n_peers:
+    if ipv4_prefixes is None and total % n_peers:
         raise ValueError(f"TOTAL_PREFIXES={total} is not a multiple of N_PEERS={n_peers}; reloadstall refuses it")
-    check_fixture(n_peers, total, vrps)
+    check_fixture(n_peers, total, vrps, ipv4_prefixes)
 
 
-def roas(n_peers: int, total: int, vrps: int) -> list[dict]:
-    check_fixture(n_peers, total, vrps)
+def roas(n_peers: int, total: int, vrps: int,
+         ipv4_prefixes: int | None = None) -> list[dict]:
+    check_fixture(n_peers, total, vrps, ipv4_prefixes)
+    v4, v6 = family_totals(n_peers, total, ipv4_prefixes)
     out = []
     for member in range(n_peers):
-        start, length = member_slice(total, n_peers, member)
+        start, length = member_slice(v4, n_peers, member)
         for idx in range(start, start + length):
             out.append({"asn": f"AS{BASE_ASN + member}",
                         "prefix": f"{20 + (idx >> 16)}.{(idx >> 8) & 0xFF}.{idx & 0xFF}.0/24",
                         "maxLength": 24, "ta": "bench"})
+    for member in range(n_peers):
+        start, length = member_slice(v6, n_peers, member)
+        for idx in range(start, start + length):
+            out.append({"asn": f"AS{BASE_ASN + member}",
+                        "prefix": f"3001:{idx >> 16:x}:{idx & 0xffff:x}::/48",
+                        "maxLength": 48, "ta": "bench"})
     for j in range(vrps - total):
         out.append({"asn": f"AS{PAD_ASN + j % 500}",
                     "prefix": f"{100 + (j >> 16)}.{(j >> 8) & 0xFF}.{j & 0xFF}.0/24",
@@ -93,9 +119,45 @@ def roas(n_peers: int, total: int, vrps: int) -> list[dict]:
     return out
 
 
-def write_vrps(n_peers: int, total: int, vrps: int, path: str) -> None:
-    doc = {"metadata": {"generated": 1710000000, "valid": 4102444800}, "roas": roas(n_peers, total, vrps)}
+def fixture_doc(n_peers: int, total: int, vrps: int,
+                ipv4_prefixes: int | None = None) -> dict:
+    return {"metadata": {"generated": 1710000000, "valid": 4102444800},
+            "roas": roas(n_peers, total, vrps, ipv4_prefixes)}
+
+
+def write_vrps(n_peers: int, total: int, vrps: int, path: str,
+               ipv4_prefixes: int | None = None) -> None:
+    doc = fixture_doc(n_peers, total, vrps, ipv4_prefixes)
     Path(path).write_text(json.dumps(doc, separators=(",", ":")))
+
+
+def replacement_indices(v4: int, v6: int, count: int) -> list[int]:
+    """Spread changed announced records across both family inventories."""
+    if not 1 <= count <= v4 + v6:
+        raise ValueError(f"replacement count must be in 1..={v4 + v6}")
+    v4_count = min(v4, (count + 1) // 2)
+    v6_count = min(v6, count - v4_count)
+    v4_count = count - v6_count
+    return ([i * v4 // v4_count for i in range(v4_count)]
+            + [v4 + i * v6 // v6_count for i in range(v6_count)])
+
+
+def write_maxlen_delta(n_peers: int, total: int, vrps: int, ipv4_prefixes: int,
+                       count: int, base_path: str, out_path: str) -> tuple[int, int]:
+    """Accept only our baseline; change N announced VRPs without changing validity."""
+    check_shape(n_peers, total, vrps, ipv4_prefixes)
+    if Path(base_path).resolve() == Path(out_path).resolve():
+        raise ValueError("BASE_JSON and OUT_JSON must be different paths")
+    baseline = json.loads(Path(base_path).read_text())
+    if baseline != fixture_doc(n_peers, total, vrps, ipv4_prefixes):
+        raise ValueError("BASE_JSON is not the canonical VRP fixture for this shape")
+    v4, v6 = family_totals(n_peers, total, ipv4_prefixes)
+    selected = replacement_indices(v4, v6, count)
+    for index in selected:
+        baseline["roas"][index]["maxLength"] += 1
+    Path(out_path).write_text(json.dumps(baseline, separators=(",", ":")))
+    v4_changed = sum(index < v4 for index in selected)
+    return v4_changed, count - v4_changed
 
 
 def series(text: str, name: str) -> float | None:
@@ -216,15 +278,29 @@ def summarize(out: Path) -> int:
 
 def main(argv: list[str]) -> int:
     cmd, args = (argv[1], argv[2:]) if len(argv) > 1 else ("", [])
-    if cmd in ("check", "vrps") and len(args) == (3 if cmd == "check" else 4):
+    if cmd in ("check", "vrps") and len(args) in ((3, 4) if cmd == "check" else (4, 5)):
         try:
             if cmd == "check":
-                check_shape(int(args[0]), int(args[1]), int(args[2]))
+                check_shape(int(args[0]), int(args[1]), int(args[2]),
+                            int(args[3]) if len(args) == 4 else None)
             else:
-                write_vrps(int(args[0]), int(args[1]), int(args[2]), args[3])
+                write_vrps(int(args[0]), int(args[1]), int(args[2]), args[3],
+                           int(args[4]) if len(args) == 5 else None)
         except ValueError as err:
             print(f"{cmd}: {err}", file=sys.stderr)
             return 2
+        return 0
+    if cmd == "maxlen-delta" and len(args) == 7:
+        try:
+            v4_changed, v6_changed = write_maxlen_delta(
+                int(args[0]), int(args[1]), int(args[2]), int(args[3]),
+                int(args[4]), args[5], args[6])
+        except (OSError, ValueError, TypeError) as err:
+            print(f"{cmd}: {err}", file=sys.stderr)
+            return 2
+        print(f"maxlen-delta: withdrawals={v4_changed + v6_changed} "
+              f"announcements={v4_changed + v6_changed} "
+              f"ipv4={v4_changed} ipv6={v6_changed}")
         return 0
     if cmd == "wait-vrps" and len(args) == 4:
         return wait_vrps(args[0], int(args[1]), float(args[2]), int(args[3]))
