@@ -1267,6 +1267,34 @@ pub struct ExplainAdvertisedRoute {
     pub source: Option<RouteSourceIdentity>,
 }
 
+/// Outcome of explicit RFC 9819 cross-route Argument inspection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Srv6ArgumentStatus {
+    /// The caller-selected companion supplies the Argument.
+    Composed,
+    /// RFC 9819 section 3.3 prescribes only the IMET Locator and Function.
+    LocFuncOnly,
+    /// Both routes advertise nonzero, unequal Argument lengths.
+    Conflict,
+    /// Required route or valid SID information is unavailable.
+    Unavailable,
+    /// More than one interpretation remains; no SID was chosen.
+    Ambiguous,
+}
+
+/// One explicit companion read atomically with the primary EVPN explain.
+#[derive(Debug, Clone)]
+pub struct ExplainSrv6Argument {
+    /// Exact caller-selected Ethernet A-D per ES identity, even when absent.
+    pub companion_key: EvpnRouteKey,
+    pub companion: Option<EvpnRibRoute>,
+    pub scope: RouteQueryScope,
+    pub status: Srv6ArgumentStatus,
+    pub detail: String,
+    pub sid: Option<std::net::Ipv6Addr>,
+    pub association: &'static str,
+}
+
 /// Bounded exact-key EVPN selection and optional export snapshot.
 #[derive(Debug, Clone)]
 pub struct ExplainEvpnRoute {
@@ -1286,6 +1314,8 @@ pub struct ExplainEvpnRoute {
     pub reason_detail: String,
     pub selection_deferred: bool,
     pub export: Option<ExplainEvpnExport>,
+    /// Explicit RFC 9819 pair inspection; ordinary route views stay unchanged.
+    pub srv6_argument: Option<ExplainSrv6Argument>,
 }
 
 /// Current installed-best export eligibility alongside committed send-side state.
@@ -2859,6 +2889,7 @@ pub enum RibUpdate {
         key: EvpnRouteKey,
         received_from: Option<IpAddr>,
         advertised_to: Option<IpAddr>,
+        srv6_argument_companion: Option<EvpnRouteKey>,
         reply: oneshot::Sender<ExplainEvpnRoute>,
     },
     /// Query EVPN routes from the Loc-RIB (RFC 7432).

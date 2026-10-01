@@ -47,6 +47,7 @@ fn query(
         key,
         received_from,
         advertised_to,
+        srv6_argument_companion: None,
         reply,
     });
     rx.try_recv().expect("exact actor query replied")
@@ -343,4 +344,238 @@ fn exact_evpn_explain_source_scope_deferral_dirty_and_encoder_overlay_are_distin
             .reason_detail
             .contains("import rejection history is not retained")
     );
+}
+
+fn argument_routes(argument: u16) -> (EvpnRibRoute, EvpnRibRoute) {
+    use rustbgpd_wire::{EthernetSegmentIdentifier, EvpnEadPerEs};
+    let mut imet = make_evpn_imet(SOURCE, 100);
+    imet.attributes = AttrSet::new(vec![crate::srv6::tests::service_attribute(
+        6,
+        "2001:db8:1:fbd1:fbd1::".parse().unwrap(),
+        124,
+        Some([32, 16, 32, 16, 0, 0]),
+    )]);
+    let mut ead = imet.clone();
+    ead.route = EvpnRoute::EadPerEs(EvpnEadPerEs {
+        rd: "65000:200".parse().unwrap(),
+        esi: EthernetSegmentIdentifier::new([1; 10]),
+        ethernet_tag: EthernetTagId::MAX_ET,
+        // Deliberately different from the Argument: this is never its source.
+        label: rustbgpd_wire::MplsLabel::new(0x0012_3456),
+    });
+    ead.next_hop = "2001:db8::99".parse().unwrap();
+    ead.attributes = AttrSet::new(vec![crate::srv6::tests::service_attribute(
+        6,
+        std::net::Ipv6Addr::from(u128::from(argument) << 48),
+        68,
+        Some([32, 16, 16, 16, 0, 0]),
+    )]);
+    (imet, ead)
+}
+
+fn argument_query(
+    manager: &mut RibManager,
+    imet: &EvpnRibRoute,
+    ead: &EvpnRibRoute,
+    received_from: Option<IpAddr>,
+    advertised_to: Option<IpAddr>,
+) -> crate::update::ExplainSrv6Argument {
+    let (reply, mut rx) = oneshot::channel();
+    manager.handle_update(RibUpdate::ExplainEvpnRoute {
+        key: imet.key(),
+        received_from,
+        advertised_to,
+        srv6_argument_companion: Some(ead.key()),
+        reply,
+    });
+    rx.try_recv().unwrap().srv6_argument.unwrap()
+}
+
+#[test]
+fn srv6_argument_snapshots_keep_best_received_and_committed_advertised_separate() {
+    use crate::update::{RouteQueryScope, Srv6ArgumentStatus as Status};
+    let (mut manager, mut out, _) = fixture();
+    let (imet, installed) = argument_routes(0xaaaa);
+    install(&mut manager, &imet);
+    install(&mut manager, &installed);
+    let (_, mut received) = argument_routes(0xbbbb);
+    AttrSet::edit(&mut received.attributes, |attrs| {
+        attrs.push(PathAttribute::LocalPref(200));
+    });
+    manager
+        .ribs
+        .get_mut(&received.peer)
+        .unwrap()
+        .insert_evpn(received.clone());
+    // The installed pair is intentionally older than fresh candidate selection.
+    let (_, committed) = argument_routes(0xcccc);
+    let mut rib_out = AdjRibOut::new(TARGET);
+    rib_out.insert_evpn(imet.clone());
+    rib_out.insert_evpn(committed.clone());
+    manager.adj_ribs_out.insert(TARGET, rib_out);
+    let before_stats = manager.export_policy_stats.clone();
+    let mut events = manager.evpn_events_tx.subscribe();
+    for (received_from, advertised_to, scope, expected, attributes) in [
+        (
+            None,
+            None,
+            RouteQueryScope::Best,
+            "2001:db8:1:fbd1:fbd1:aaaa::",
+            &installed.attributes,
+        ),
+        (
+            Some(imet.peer),
+            None,
+            RouteQueryScope::Received {
+                peer: Some(imet.peer),
+            },
+            "2001:db8:1:fbd1:fbd1:bbbb::",
+            &received.attributes,
+        ),
+        (
+            None,
+            Some(TARGET),
+            RouteQueryScope::Advertised { peer: TARGET },
+            "2001:db8:1:fbd1:fbd1:cccc::",
+            &committed.attributes,
+        ),
+    ] {
+        let result = argument_query(
+            &mut manager,
+            &imet,
+            &installed,
+            received_from,
+            advertised_to,
+        );
+        assert_eq!(result.status, Status::Composed);
+        assert_eq!(result.sid, Some(expected.parse().unwrap()));
+        assert_eq!(result.scope, scope);
+        assert_eq!(result.companion_key, installed.key());
+        assert_eq!(&result.companion.unwrap().attributes, attributes);
+        assert_eq!(result.association, "caller_selected");
+    }
+    assert_eq!(manager.export_policy_stats, before_stats);
+    assert!(events.try_recv().is_err());
+    assert!(out.try_recv().is_err());
+    // A staged export remains available but cannot fill a missing committed pair.
+    manager
+        .adj_ribs_out
+        .get_mut(&TARGET)
+        .unwrap()
+        .remove_evpn(&installed.key());
+    let absent = argument_query(&mut manager, &imet, &installed, None, Some(TARGET));
+    assert_eq!(absent.status, Status::LocFuncOnly);
+    assert!(absent.companion.is_none());
+    assert_eq!(absent.sid, Some("2001:db8:1:fbd1:fbd1::".parse().unwrap()));
+    manager
+        .adj_ribs_out
+        .get_mut(&TARGET)
+        .unwrap()
+        .remove_evpn(&imet.key());
+    assert_eq!(
+        argument_query(&mut manager, &imet, &installed, None, Some(TARGET)).status,
+        Status::Unavailable
+    );
+}
+
+#[test]
+fn srv6_argument_exact_pair_tracks_replacement_withdrawal_and_reannouncement() {
+    use crate::update::Srv6ArgumentStatus as Status;
+    let (_tx, rx) = mpsc::channel(8);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let (imet, ead) = argument_routes(0xaaaa);
+    let receive = |manager: &mut RibManager, announced, withdrawn| {
+        manager.handle_update(RibUpdate::RoutesReceived {
+            session_id: 0,
+            peer: imet.peer,
+            announced: vec![],
+            withdrawn: vec![],
+            flowspec_announced: vec![],
+            flowspec_withdrawn: vec![],
+            evpn_announced: announced,
+            evpn_withdrawn: withdrawn,
+            validated_with: None,
+        });
+        while manager.process_next_route_chunk() {}
+    };
+    receive(&mut manager, vec![imet.clone(), ead.clone()], vec![]);
+    assert_eq!(
+        argument_query(&mut manager, &imet, &ead, None, None).sid,
+        Some("2001:db8:1:fbd1:fbd1:aaaa::".parse().unwrap())
+    );
+    let (_, replacement) = argument_routes(0xbbbb);
+    receive(&mut manager, vec![replacement], vec![]);
+    assert_eq!(
+        argument_query(&mut manager, &imet, &ead, None, None).sid,
+        Some("2001:db8:1:fbd1:fbd1:bbbb::".parse().unwrap())
+    );
+    receive(&mut manager, vec![], vec![ead.key()]);
+    for scope in [None, Some(imet.peer)] {
+        let absent = argument_query(&mut manager, &imet, &ead, scope, None);
+        assert_eq!(absent.status, Status::LocFuncOnly);
+        assert!(absent.companion.is_none());
+    }
+    receive(&mut manager, vec![ead.clone()], vec![]);
+    assert_eq!(
+        argument_query(&mut manager, &imet, &ead, None, None).status,
+        Status::Composed
+    );
+    receive(&mut manager, vec![], vec![imet.key()]);
+    assert_eq!(
+        argument_query(&mut manager, &imet, &ead, None, None).status,
+        Status::Unavailable
+    );
+}
+
+#[test]
+fn srv6_argument_route_wrapper_uses_esi_community_and_ignores_malformed_companion_for_zero_al() {
+    use crate::update::Srv6ArgumentStatus as Status;
+    use rustbgpd_wire::{ExtendedCommunity, RawAttribute};
+    let (mut imet, mut ead) = argument_routes(0);
+    ead.attributes = AttrSet::new(vec![
+        crate::srv6::tests::service_attribute(
+            6,
+            "::".parse().unwrap(),
+            24,
+            Some([32, 16, 16, 16, 16, 64]),
+        ),
+        PathAttribute::ExtendedCommunities(vec![ExtendedCommunity::esi_label(false, 0x00aa_aa00)]),
+    ]);
+    let result = crate::srv6::inspect_argument_pair(Some(&imet), Some(&ead));
+    assert_eq!(result.status, Status::Composed);
+    assert_eq!(
+        result.sid,
+        Some("2001:db8:1:fbd1:fbd1:aaaa::".parse().unwrap())
+    );
+    AttrSet::edit(&mut ead.attributes, |attrs| {
+        attrs.retain(|attr| !matches!(attr, PathAttribute::ExtendedCommunities(_)));
+    });
+    assert_eq!(
+        crate::srv6::inspect_argument_pair(Some(&imet), Some(&ead)).status,
+        Status::Unavailable
+    );
+    AttrSet::edit(&mut ead.attributes, |attrs| {
+        attrs.push(PathAttribute::ExtendedCommunities(vec![
+            ExtendedCommunity::esi_label(false, 0x00aa_aa00),
+            ExtendedCommunity::esi_label(false, 0x00bb_bb00),
+        ]));
+    });
+    assert_eq!(
+        crate::srv6::inspect_argument_pair(Some(&imet), Some(&ead)).status,
+        Status::Ambiguous
+    );
+    imet.attributes = AttrSet::new(vec![crate::srv6::tests::service_attribute(
+        6,
+        "2001:db8:1:fbd1:fbd1::".parse().unwrap(),
+        124,
+        Some([32, 16, 32, 0, 0, 0]),
+    )]);
+    ead.attributes = AttrSet::new(vec![PathAttribute::Unknown(RawAttribute {
+        flags: 0xe0,
+        type_code: 40,
+        data: vec![6, 0, 255].into(),
+    })]);
+    let result = crate::srv6::inspect_argument_pair(Some(&imet), Some(&ead));
+    assert_eq!(result.status, Status::LocFuncOnly);
+    assert_eq!(result.sid, Some("2001:db8:1:fbd1:fbd1::".parse().unwrap()));
 }

@@ -3774,6 +3774,12 @@ message ExplainEvpnRouteRequest {
   string received_from = 2;
   // Optional destination for current export eligibility and committed state.
   string advertised_to = 3;
+  // Optional RFC 9819 inspection, only for an IMET key. Select one exact
+  // Ethernet A-D per ES key (MAX_ET, nonzero ESI); its RD may differ from IMET.
+  // Both routes use the same scope: received_from, committed advertised_to,
+  // or installed best when neither is set. The two peer filters cannot both
+  // be set for this inspection. No selection or forwarding state is changed.
+  EvpnRouteSelector srv6_argument_companion = 4;
 }
 
 message ExplainEvpnRouteResponse {
@@ -3790,6 +3796,36 @@ message ExplainEvpnRouteResponse {
   ExplainReason selection_reason = 8;
   bool selection_deferred = 9;
   ExplainEvpnExport export = 10;
+  // Present only when an explicit companion was requested. Primary provenance
+  // is in received, best, or export.advertised according to this view's scope.
+  ExplainSrv6Argument srv6_argument = 11;
+}
+
+enum Srv6ArgumentStatus {
+  SRV6_ARGUMENT_STATUS_UNSPECIFIED = 0;
+  SRV6_ARGUMENT_STATUS_COMPOSED = 1;
+  SRV6_ARGUMENT_STATUS_LOC_FUNC_ONLY = 2;
+  SRV6_ARGUMENT_STATUS_CONFLICT = 3;
+  SRV6_ARGUMENT_STATUS_UNAVAILABLE = 4;
+  SRV6_ARGUMENT_STATUS_AMBIGUOUS = 5;
+}
+
+// Alpha, read-only RFC 9819 section 3.3 inspection of one selected pair.
+// This does not assert forwarding, installation, or remote receipt.
+message ExplainSrv6Argument {
+  EvpnRouteSelector companion_key = 1;
+  EvpnRouteEntry companion = 2;
+  // "best", "received", or "advertised". Both routes were read in one actor turn.
+  string scope = 3;
+  string scope_peer = 4;
+  Srv6ArgumentStatus status = 5;
+  string detail = 6;
+  // Present only for COMPOSED or LOC_FUNC_ONLY; raw SID fields are unchanged.
+  optional string sid = 7;
+  // "caller_selected": computed for the explicitly requested pair. Original
+  // egress identity is not established by retained peer/RD/next-hop metadata.
+  // The caller must select the applicable same-egress Ethernet Segment route.
+  string association = 8;
 }
 
 message ExplainEvpnExport {

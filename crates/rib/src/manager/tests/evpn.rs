@@ -277,7 +277,7 @@ fn srv6_evpn_eligibility_filters_selection_exports_and_consumer_queries() {
             .attributes,
         invalid.attributes
     );
-    let explain = manager.explain_evpn_route(invalid.key(), Some(invalid.peer), Some(target));
+    let explain = manager.explain_evpn_route(invalid.key(), Some(invalid.peer), Some(target), None);
     assert_eq!(explain.reason, Some(crate::BestPathReason::Srv6SidInvalid));
     assert_eq!(explain.received.unwrap().attributes, invalid.attributes);
     assert_eq!(explain.selection_best.unwrap().peer, fallback.peer);
@@ -303,7 +303,7 @@ fn srv6_evpn_eligibility_filters_selection_exports_and_consumer_queries() {
         withdrawn.extend(update.evpn_withdraw);
     }
     assert_eq!(withdrawn, vec![fallback.key()]);
-    let explain = manager.explain_evpn_route(invalid.key(), None, Some(target));
+    let explain = manager.explain_evpn_route(invalid.key(), None, Some(target), None);
     assert!(explain.best.is_none());
     assert_eq!(explain.candidate_count, 1);
     assert_eq!(explain.reason, Some(crate::BestPathReason::Srv6SidInvalid));

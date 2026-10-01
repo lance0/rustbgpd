@@ -1600,6 +1600,7 @@ impl RustbgpdMcp {
                 key: Some(params.key.into_selector(params.rd)),
                 received_from: received_from.clone(),
                 advertised_to: params.advertised_to.unwrap_or_default(),
+                srv6_argument_companion: None,
             }))
             .await?;
 

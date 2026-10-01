@@ -5056,7 +5056,7 @@ _rbgp() {
             return 0
             ;;
         rbgp__subcmd__evpn__subcmd__explain__subcmd__imet)
-            opts="-s -j -h --rd --received-from --advertised-to --ethernet-tag --originator-ip --addr --token-file --tls-ca --tls-cert --tls-key --tls-server-name --json --json-version --no-color --help"
+            opts="-s -j -h --rd --received-from --advertised-to --ethernet-tag --originator-ip --argument-rd --argument-esi --addr --token-file --tls-ca --tls-cert --tls-key --tls-server-name --json --json-version --no-color --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -5079,6 +5079,14 @@ _rbgp() {
                     return 0
                     ;;
                 --originator-ip)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --argument-rd)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --argument-esi)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;

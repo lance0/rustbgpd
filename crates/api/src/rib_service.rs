@@ -1491,6 +1491,7 @@ fn smet_address_to_proto(address: Option<IpAddr>) -> proto::EvpnSmetAddress {
 fn explain_evpn_to_proto(
     explain: rustbgpd_rib::update::ExplainEvpnRoute,
     key: proto::EvpnRouteSelector,
+    companion_key: Option<proto::EvpnRouteSelector>,
 ) -> proto::ExplainEvpnRouteResponse {
     proto::ExplainEvpnRouteResponse {
         key: Some(key),
@@ -1521,6 +1522,31 @@ fn explain_evpn_to_proto(
             advertised: export.advertised.as_ref().map(evpn_route_to_proto),
             already_advertised: export.already_advertised,
             outbound_dirty: export.outbound_dirty,
+        }),
+        srv6_argument: explain.srv6_argument.map(|argument| {
+            use rustbgpd_rib::update::{RouteQueryScope, Srv6ArgumentStatus};
+            let (scope, peer) = match argument.scope {
+                RouteQueryScope::Best => ("best", None),
+                RouteQueryScope::Received { peer } => ("received", peer),
+                RouteQueryScope::Advertised { peer } => ("advertised", Some(peer)),
+            };
+            let status = match argument.status {
+                Srv6ArgumentStatus::Composed => proto::Srv6ArgumentStatus::Composed,
+                Srv6ArgumentStatus::LocFuncOnly => proto::Srv6ArgumentStatus::LocFuncOnly,
+                Srv6ArgumentStatus::Conflict => proto::Srv6ArgumentStatus::Conflict,
+                Srv6ArgumentStatus::Unavailable => proto::Srv6ArgumentStatus::Unavailable,
+                Srv6ArgumentStatus::Ambiguous => proto::Srv6ArgumentStatus::Ambiguous,
+            };
+            proto::ExplainSrv6Argument {
+                companion_key,
+                companion: argument.companion.as_ref().map(evpn_route_to_proto),
+                scope: scope.to_string(),
+                scope_peer: peer.map_or_else(String::new, |peer| peer.to_string()),
+                status: status.into(),
+                detail: argument.detail,
+                sid: argument.sid.map(|sid| sid.to_string()),
+                association: argument.association.to_string(),
+            }
         }),
     }
 }
@@ -2344,10 +2370,30 @@ impl proto::rib_service_server::RibService for RibService {
         let key = parse_evpn_selector(&selector)?;
         let received_from = parse_optional_peer_filter(&request.received_from)?;
         let advertised_to = parse_optional_peer_filter(&request.advertised_to)?;
+        let companion_selector = request.srv6_argument_companion;
+        let srv6_argument_companion = companion_selector
+            .as_ref()
+            .map(parse_evpn_selector)
+            .transpose()?;
+        if let Some(companion) = srv6_argument_companion {
+            if !matches!(key, rustbgpd_wire::EvpnRouteKey::Imet { .. })
+                || !matches!(companion, rustbgpd_wire::EvpnRouteKey::EadPerEs { esi, .. } if esi != rustbgpd_wire::EthernetSegmentIdentifier::ZERO)
+            {
+                return Err(Status::invalid_argument(
+                    "SRv6 Argument inspection requires an IMET key and one Ethernet A-D per ES companion with nonzero ESI",
+                ));
+            }
+            if received_from.is_some() && advertised_to.is_some() {
+                return Err(Status::invalid_argument(
+                    "SRv6 Argument inspection requires one table scope; received_from and advertised_to cannot both be set",
+                ));
+            }
+        }
         let explanation = rib_manager_read(&self.rib_tx, |reply| RibUpdate::ExplainEvpnRoute {
             key,
             received_from,
             advertised_to,
+            srv6_argument_companion,
             reply,
         })
         .await?;
@@ -2362,7 +2408,11 @@ impl proto::rib_service_server::RibService for RibService {
                 .is_some_and(|export| export.advertised.is_some());
             self.require_known_peer_if_empty(peer, !advertised).await?;
         }
-        Ok(Response::new(explain_evpn_to_proto(explanation, selector)))
+        Ok(Response::new(explain_evpn_to_proto(
+            explanation,
+            selector,
+            companion_selector,
+        )))
     }
 
     async fn list_bgp_ls_routes(
@@ -3758,6 +3808,7 @@ mod tests {
                             reason_detail: String::new(),
                             selection_deferred: false,
                             export: None,
+                            srv6_argument: None,
                         });
                     }
                     _ => panic!("unexpected RIB read"),
@@ -4894,6 +4945,278 @@ mod tests {
         }
     }
 
+    fn srv6_argument_companion_selector() -> proto::EvpnRouteSelector {
+        proto::EvpnRouteSelector {
+            // Explicit companions may have a different RD from the primary.
+            rd: "65000:200".into(),
+            route: Some(proto::evpn_route_selector::Route::EadPerEs(
+                proto::EvpnEadSelector {
+                    esi: "00:11:22:33:44:55:66:77:88:99".into(),
+                    ethernet_tag: u32::MAX,
+                },
+            )),
+        }
+    }
+
+    fn empty_evpn_explanation(
+        key: rustbgpd_wire::EvpnRouteKey,
+    ) -> rustbgpd_rib::update::ExplainEvpnRoute {
+        rustbgpd_rib::update::ExplainEvpnRoute {
+            key,
+            received_from: None,
+            received: None,
+            best: None,
+            selection_best: None,
+            compared: None,
+            candidate_count: 0,
+            reason: None,
+            reason_detail: String::new(),
+            selection_deferred: false,
+            export: None,
+            srv6_argument: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn srv6_argument_invalid_companions_and_scopes_never_query_actor() {
+        use proto::evpn_route_selector::Route;
+        let mut requests = Vec::new();
+        for (selector, _) in evpn_selector_cases() {
+            if !matches!(&selector.route, Some(Route::Imet(_))) {
+                requests.push(proto::ExplainEvpnRouteRequest {
+                    key: Some(selector.clone()),
+                    srv6_argument_companion: Some(srv6_argument_companion_selector()),
+                    ..Default::default()
+                });
+            }
+            if !matches!(&selector.route, Some(Route::EadPerEs(_))) {
+                requests.push(proto::ExplainEvpnRouteRequest {
+                    srv6_argument_companion: Some(selector),
+                    ..evpn_explain_request()
+                });
+            }
+        }
+        for companion in [
+            proto::EvpnRouteSelector::default(),
+            proto::EvpnRouteSelector {
+                rd: "invalid".into(),
+                ..srv6_argument_companion_selector()
+            },
+            evpn_explain_selector(Route::EadPerEs(proto::EvpnEadSelector {
+                esi: "00:00:00:00:00:00:00:00:00:00".into(),
+                ethernet_tag: u32::MAX,
+            })),
+            evpn_explain_selector(Route::EadPerEs(proto::EvpnEadSelector {
+                esi: "00:11".into(),
+                ethernet_tag: u32::MAX,
+            })),
+            evpn_explain_selector(Route::EadPerEs(proto::EvpnEadSelector {
+                esi: "00:11:22:33:44:55:66:77:88:99".into(),
+                ethernet_tag: 100,
+            })),
+        ] {
+            requests.push(proto::ExplainEvpnRouteRequest {
+                srv6_argument_companion: Some(companion),
+                ..evpn_explain_request()
+            });
+        }
+        requests.push(proto::ExplainEvpnRouteRequest {
+            received_from: "192.0.2.1".into(),
+            advertised_to: "192.0.2.2".into(),
+            srv6_argument_companion: Some(srv6_argument_companion_selector()),
+            ..evpn_explain_request()
+        });
+        let (tx, mut rx) = mpsc::channel(1);
+        let service = RibService::new(tx);
+        for request in requests {
+            let error = tokio::time::timeout(
+                std::time::Duration::from_secs(1),
+                service.explain_evpn_route(Request::new(request.clone())),
+            )
+            .await
+            .expect("invalid inspection must fail before actor admission")
+            .unwrap_err();
+            assert_eq!(
+                error.code(),
+                tonic::Code::InvalidArgument,
+                "{request:?}: {error}"
+            );
+            assert!(matches!(
+                rx.try_recv(),
+                Err(mpsc::error::TryRecvError::Empty)
+            ));
+        }
+    }
+
+    #[tokio::test]
+    async fn srv6_argument_forwards_explicit_companion_and_one_scope() {
+        use rustbgpd_rib::update::{ExplainSrv6Argument, Srv6ArgumentStatus};
+        let peer: IpAddr = "192.0.2.9".parse().unwrap();
+        for (scope, received_from, advertised_to, scope_name) in [
+            (RouteQueryScope::Best, None, None, "best"),
+            (
+                RouteQueryScope::Received { peer: Some(peer) },
+                Some(peer),
+                None,
+                "received",
+            ),
+            (
+                RouteQueryScope::Advertised { peer },
+                None,
+                Some(peer),
+                "advertised",
+            ),
+        ] {
+            let companion = srv6_argument_companion_selector();
+            let companion_key = parse_evpn_selector(&companion).unwrap();
+            let request = proto::ExplainEvpnRouteRequest {
+                received_from: received_from.map_or_else(String::new, |p| p.to_string()),
+                advertised_to: advertised_to.map_or_else(String::new, |p| p.to_string()),
+                srv6_argument_companion: Some(companion.clone()),
+                ..evpn_explain_request()
+            };
+            let expected_key = parse_evpn_selector(request.key.as_ref().unwrap()).unwrap();
+            let (tx, mut rx) = mpsc::channel(1);
+            let actor = tokio::spawn(async move {
+                let RibUpdate::ExplainEvpnRoute {
+                    key,
+                    received_from: received,
+                    advertised_to: advertised,
+                    srv6_argument_companion,
+                    reply,
+                } = rx.recv().await.unwrap()
+                else {
+                    panic!("expected exact EVPN explain query")
+                };
+                assert_eq!(key, expected_key);
+                assert_eq!(srv6_argument_companion, Some(companion_key));
+                assert_eq!(received, received_from);
+                assert_eq!(advertised, advertised_to);
+                let mut explanation = empty_evpn_explanation(key);
+                explanation.received_from = received;
+                explanation.srv6_argument = Some(ExplainSrv6Argument {
+                    companion_key,
+                    companion: None,
+                    scope,
+                    status: Srv6ArgumentStatus::Unavailable,
+                    detail: "companion is absent in the selected scope".into(),
+                    sid: None,
+                    association: "caller_selected",
+                });
+                reply.send(explanation).unwrap();
+            });
+            let response = RibService::new(tx)
+                .explain_evpn_route(Request::new(request))
+                .await
+                .unwrap()
+                .into_inner();
+            actor.await.unwrap();
+            let argument = response.srv6_argument.unwrap();
+            assert_eq!(argument.companion_key, Some(companion));
+            assert!(argument.companion.is_none());
+            assert_eq!(argument.scope, scope_name);
+            assert_eq!(
+                argument.scope_peer,
+                if scope_name == "best" {
+                    String::new()
+                } else {
+                    peer.to_string()
+                }
+            );
+            assert_eq!(
+                argument.status,
+                proto::Srv6ArgumentStatus::Unavailable as i32
+            );
+            assert!(argument.sid.is_none());
+            assert_eq!(argument.association, "caller_selected");
+        }
+    }
+
+    #[test]
+    fn srv6_argument_projection_preserves_status_scope_and_unverified_provenance() {
+        use rustbgpd_rib::update::{ExplainSrv6Argument, Srv6ArgumentStatus as Status};
+        let primary = evpn_explain_request().key.unwrap();
+        let companion_selector = srv6_argument_companion_selector();
+        let companion_key = parse_evpn_selector(&companion_selector).unwrap();
+        let peer: IpAddr = "192.0.2.9".parse().unwrap();
+        let mut companion = non_unicast_routes("192.0.2.7".parse().unwrap()).0;
+        companion.route = EvpnRoute::EadPerEs(rustbgpd_wire::EvpnEadPerEs {
+            rd: "65000:200".parse().unwrap(),
+            esi: rustbgpd_evpn::parse_esi("00:11:22:33:44:55:66:77:88:99").unwrap(),
+            ethernet_tag: rustbgpd_wire::EthernetTagId::MAX_ET,
+            label: rustbgpd_wire::MplsLabel::new(0),
+        });
+        for (status, expected_status, sid) in [
+            (
+                Status::Composed,
+                proto::Srv6ArgumentStatus::Composed,
+                Some("2001:db8::1234"),
+            ),
+            (
+                Status::LocFuncOnly,
+                proto::Srv6ArgumentStatus::LocFuncOnly,
+                Some("2001:db8::"),
+            ),
+            (Status::Conflict, proto::Srv6ArgumentStatus::Conflict, None),
+            (
+                Status::Unavailable,
+                proto::Srv6ArgumentStatus::Unavailable,
+                None,
+            ),
+            (
+                Status::Ambiguous,
+                proto::Srv6ArgumentStatus::Ambiguous,
+                None,
+            ),
+        ] {
+            for (scope, scope_name, scope_peer) in [
+                (RouteQueryScope::Best, "best", String::new()),
+                (
+                    RouteQueryScope::Received { peer: Some(peer) },
+                    "received",
+                    peer.to_string(),
+                ),
+                (
+                    RouteQueryScope::Advertised { peer },
+                    "advertised",
+                    peer.to_string(),
+                ),
+            ] {
+                let mut explanation =
+                    empty_evpn_explanation(parse_evpn_selector(&primary).unwrap());
+                let retained = (status != Status::Unavailable).then(|| companion.clone());
+                let expected_companion = retained.as_ref().map(evpn_route_to_proto);
+                explanation.srv6_argument = Some(ExplainSrv6Argument {
+                    companion_key,
+                    companion: retained,
+                    scope,
+                    status,
+                    detail: "explicit pair; same egress association is not verified".into(),
+                    sid: sid.map(|value| value.parse().unwrap()),
+                    association: "caller_selected",
+                });
+                let response = explain_evpn_to_proto(
+                    explanation,
+                    primary.clone(),
+                    Some(companion_selector.clone()),
+                );
+                assert_eq!(response.key, Some(primary.clone()));
+                let argument = response.srv6_argument.unwrap();
+                assert_eq!(argument.companion_key, Some(companion_selector.clone()));
+                assert_eq!(argument.companion, expected_companion);
+                assert_eq!(argument.scope, scope_name);
+                assert_eq!(argument.scope_peer, scope_peer);
+                assert_eq!(argument.status, expected_status as i32);
+                assert_eq!(argument.sid.as_deref(), sid);
+                assert_eq!(argument.association, "caller_selected");
+                assert_eq!(
+                    argument.detail,
+                    "explicit pair; same egress association is not verified"
+                );
+            }
+        }
+    }
+
     #[tokio::test]
     async fn evpn_explain_forwards_every_typed_key_and_optional_peers() {
         for (selector, expected_key) in evpn_selector_cases() {
@@ -4906,6 +5229,7 @@ mod tests {
                         key,
                         received_from: received,
                         advertised_to: advertised,
+                        srv6_argument_companion,
                         reply,
                     } = rx.recv().await.unwrap()
                     else {
@@ -4914,6 +5238,7 @@ mod tests {
                     assert_eq!(key, expected_key);
                     assert_eq!(received, received_from);
                     assert_eq!(advertised, advertised_to);
+                    assert!(srv6_argument_companion.is_none());
                     reply
                         .send(rustbgpd_rib::update::ExplainEvpnRoute {
                             key,
@@ -4927,6 +5252,7 @@ mod tests {
                             reason_detail: String::new(),
                             selection_deferred: false,
                             export: None,
+                            srv6_argument: None,
                         })
                         .unwrap();
                 });
@@ -4935,6 +5261,7 @@ mod tests {
                         key: Some(selector.clone()),
                         received_from: received_from.map_or_else(String::new, |p| p.to_string()),
                         advertised_to: advertised_to.map_or_else(String::new, |p| p.to_string()),
+                        srv6_argument_companion: None,
                     }))
                     .await
                     .unwrap()
@@ -4952,6 +5279,7 @@ mod tests {
                         && response.received.is_none()
                         && response.selection_reason.is_none()
                         && response.export.is_none()
+                        && response.srv6_argument.is_none()
                 );
             }
         }
@@ -5023,6 +5351,7 @@ mod tests {
                 already_advertised: false,
                 outbound_dirty: true,
             }),
+            srv6_argument: None,
         };
         let (tx, mut rx) = mpsc::channel(1);
         let actor = tokio::spawn(async move {

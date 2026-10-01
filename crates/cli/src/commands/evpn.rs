@@ -322,6 +322,14 @@ pub(crate) fn parse_esi(value: &str) -> Result<String, String> {
     parse_hex_octets(value, 10)
 }
 
+pub(crate) fn parse_argument_esi(value: &str) -> Result<String, String> {
+    let esi = parse_esi(value)?;
+    if esi == "00:00:00:00:00:00:00:00:00:00" {
+        return Err("SRv6 Argument companion ESI must be nonzero".into());
+    }
+    Ok(esi)
+}
+
 pub(crate) fn parse_exact_prefix(value: &str) -> Result<String, String> {
     if !value.contains('/') {
         return Err("exact EVPN prefix must include a CIDR length".into());
@@ -404,8 +412,36 @@ fn reason_to_json(reason: &crate::proto::ExplainReason) -> serde_json::Value {
     serde_json::json!({"code": reason.code, "message": reason.message})
 }
 
+fn srv6_argument_status(status: i32) -> &'static str {
+    use crate::proto::Srv6ArgumentStatus;
+    match Srv6ArgumentStatus::try_from(status) {
+        Ok(Srv6ArgumentStatus::Composed) => "composed",
+        Ok(Srv6ArgumentStatus::LocFuncOnly) => "loc_func_only",
+        Ok(Srv6ArgumentStatus::Conflict) => "conflict",
+        Ok(Srv6ArgumentStatus::Unavailable) => "unavailable",
+        Ok(Srv6ArgumentStatus::Ambiguous) => "ambiguous",
+        _ => "unspecified",
+    }
+}
+
+fn srv6_argument_to_json(argument: &crate::proto::ExplainSrv6Argument) -> serde_json::Value {
+    let mut value = serde_json::json!({
+        "companion_key": argument.companion_key.as_ref().map(selector_to_json),
+        "companion": argument.companion.as_ref().map(explain_route_to_json),
+        "scope": argument.scope,
+        "scope_peer": argument.scope_peer,
+        "status": srv6_argument_status(argument.status),
+        "detail": argument.detail,
+        "association": argument.association,
+    });
+    if let Some(sid) = &argument.sid {
+        value["sid"] = serde_json::json!(sid);
+    }
+    value
+}
+
 fn explain_to_json(response: &crate::proto::ExplainEvpnRouteResponse) -> serde_json::Value {
-    serde_json::json!({
+    let mut value = serde_json::json!({
         "key": response.key.as_ref().map(selector_to_json),
         "received_from": response.received_from,
         "received": response.received.as_ref().map(explain_route_to_json),
@@ -428,7 +464,11 @@ fn explain_to_json(response: &crate::proto::ExplainEvpnRouteResponse) -> serde_j
             "already_advertised": export.already_advertised,
             "outbound_dirty": export.outbound_dirty,
         })),
-    })
+    });
+    if let Some(argument) = &response.srv6_argument {
+        value["srv6_argument"] = srv6_argument_to_json(argument);
+    }
+    value
 }
 
 fn print_explain_route(
@@ -444,6 +484,30 @@ fn print_explain_route(
     }
 }
 
+fn print_srv6_argument(argument: &crate::proto::ExplainSrv6Argument) -> Result<(), CliError> {
+    outln!("SRv6 Argument inspection for requested pair:")?;
+    outln!(
+        "  scope={} peer={} association={}",
+        argument.scope,
+        argument.scope_peer,
+        argument.association
+    )?;
+    outln!("  Computed for requested pair; original egress identity not established.")?;
+    if let Some(key) = &argument.companion_key {
+        outln!("  Exact companion key: {}", selector_to_json(key))?;
+    }
+    print_explain_route("Companion snapshot", argument.companion.as_ref())?;
+    outln!(
+        "  Requested-pair status: {} ({})",
+        srv6_argument_status(argument.status),
+        argument.detail
+    )?;
+    if let Some(sid) = &argument.sid {
+        outln!("  Candidate SID for requested pair: {sid}")?;
+    }
+    Ok(())
+}
+
 pub async fn explain(
     connection: Connection,
     mut request: crate::proto::ExplainEvpnRouteRequest,
@@ -451,6 +515,7 @@ pub async fn explain(
 ) -> Result<(), CliError> {
     let received_from = request.received_from.clone();
     let advertised_to = request.advertised_to.clone();
+    let argument_requested = request.srv6_argument_companion.is_some();
     request.received_from = bare_ip_rpc_address(&received_from).to_string();
     request.advertised_to = bare_ip_rpc_address(&advertised_to).to_string();
     let mut response = read_rpc(
@@ -459,6 +524,12 @@ pub async fn explain(
     )
     .await?
     .into_inner();
+    if argument_requested && response.srv6_argument.is_none() {
+        return Err(tonic::Status::unimplemented(
+            "SRv6 Argument pair inspection requires a newer daemon",
+        )
+        .into());
+    }
     restore_matching_scoped_address(Some(&received_from), &mut response.received_from);
     for route in [
         &mut response.received,
@@ -478,6 +549,17 @@ pub async fn explain(
             .flatten()
         {
             restore_matching_scoped_address(Some(&received_from), &mut route.peer_address);
+        }
+    }
+    if let Some(argument) = &mut response.srv6_argument {
+        let scope_peer = match argument.scope.as_str() {
+            "received" => &received_from,
+            "advertised" => &advertised_to,
+            _ => "",
+        };
+        restore_matching_scoped_address(Some(scope_peer), &mut argument.scope_peer);
+        if let Some(companion) = &mut argument.companion {
+            restore_matching_scoped_address(Some(&received_from), &mut companion.peer_address);
         }
     }
     if json {
@@ -539,6 +621,9 @@ pub async fn explain(
             export.outbound_dirty
         )?;
         outln!("Committed state does not prove remote receipt or installation.")?;
+    }
+    if let Some(argument) = &response.srv6_argument {
+        print_srv6_argument(argument)?;
     }
     Ok(())
 }
@@ -2060,6 +2145,7 @@ mod tests {
                 already_advertised: true,
                 outbound_dirty: false,
             }),
+            srv6_argument: None,
         };
         assert_eq!(
             super::explain_to_json(&response),

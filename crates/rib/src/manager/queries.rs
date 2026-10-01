@@ -1458,6 +1458,7 @@ impl RibManager {
         key: rustbgpd_wire::EvpnRouteKey,
         received_from: Option<IpAddr>,
         advertised_to: Option<IpAddr>,
+        srv6_argument_companion: Option<rustbgpd_wire::EvpnRouteKey>,
     ) -> crate::update::ExplainEvpnRoute {
         use crate::loc_rib::{evpn_cmp_with_reason, evpn_reason_detail};
         let candidates = || self.ribs.values().filter_map(|rib| rib.get_evpn(&key));
@@ -1504,6 +1505,45 @@ impl RibManager {
             reason_detail,
             selection_deferred: self.selection_deferred((Afi::L2Vpn, Safi::Evpn)),
             export: advertised_to.map(|peer| self.explain_evpn_export(key, peer)),
+            srv6_argument: srv6_argument_companion.map(|companion| {
+                self.explain_srv6_argument(key, companion, received_from, advertised_to)
+            }),
+        }
+    }
+
+    /// Both exact keys are read in this actor turn, from the same committed
+    /// table. Fresh selection and export dry-runs are not composition inputs.
+    fn explain_srv6_argument(
+        &self,
+        key: rustbgpd_wire::EvpnRouteKey,
+        companion_key: rustbgpd_wire::EvpnRouteKey,
+        received_from: Option<IpAddr>,
+        advertised_to: Option<IpAddr>,
+    ) -> crate::update::ExplainSrv6Argument {
+        use crate::update::RouteQueryScope;
+        let scope = if let Some(peer) = received_from {
+            RouteQueryScope::Received { peer: Some(peer) }
+        } else if let Some(peer) = advertised_to {
+            RouteQueryScope::Advertised { peer }
+        } else {
+            RouteQueryScope::Best
+        };
+        let lookup = |key: &rustbgpd_wire::EvpnRouteKey| match scope {
+            RouteQueryScope::Received { peer: Some(peer) } => self.ribs.get(&peer)?.get_evpn(key),
+            RouteQueryScope::Advertised { peer } => self.adj_ribs_out.get(&peer)?.get_evpn(key),
+            RouteQueryScope::Best => self.loc_rib.get_evpn(key),
+            RouteQueryScope::Received { peer: None } => None,
+        };
+        let companion = lookup(&companion_key);
+        let result = crate::srv6::inspect_argument_pair(lookup(&key), companion);
+        crate::update::ExplainSrv6Argument {
+            companion_key,
+            companion: companion.cloned(),
+            scope,
+            status: result.status,
+            detail: result.detail.to_string(),
+            sid: result.sid,
+            association: "caller_selected",
         }
     }
 

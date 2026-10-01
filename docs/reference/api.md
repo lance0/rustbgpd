@@ -1528,7 +1528,7 @@ route changes through `EventService.WatchEvents` or `EventService.SubscribeFromE
 | `ListEvpnRoutes` | EVPN routes (RFC 7432 / RFC 9136 / RFC 9251 Type 6) in Loc-RIB view, filterable by route type / source peer / RD |
 | `ListReceivedEvpnRoutes` | Bounded accepted post-policy EVPN Adj-RIB-In for one source neighbor, filterable by type / RD |
 | `ListAdvertisedEvpnRoutes` | Bounded committed EVPN Adj-RIB-Out for one destination neighbor, filterable by type / RD |
-| `ExplainEvpnRoute` | Exact typed EVPN candidate selection and optional destination export trace, with installed and committed state kept distinct |
+| `ExplainEvpnRoute` | Exact typed EVPN candidate selection, optional destination export trace and caller-selected SRv6 Argument pair inspection, with installed and committed state kept distinct |
 | `ListBgpLsRoutes` | BGP-LS / BGP-LS VPN routes (RFC 9552) in Loc-RIB view, exposed as opaque NLRI/TLV bytes and filterable by family, peer, and NLRI type |
 | `ListVpnRoutes` | RFC 4364/4659 VPNv4/VPNv6 routes — RD-scoped customer prefixes, Route Targets, and MPLS labels |
 | `ListLabeledRoutes` | RFC 8277 labeled-unicast (SAFI 4) routes in Loc-RIB view — MPLS label stack plus prefix reachability |
@@ -1627,7 +1627,8 @@ Reconstruction requires exactly one SID Structure, a nonzero transposition
 wholly inside its Function, valid bounds, and zero advertised bits in the
 vacated slice. Missing or ambiguous labels/structures, no transposition, and
 nonzero Argument lengths leave it absent. Argument composition involving
-another route (such as Ethernet A-D per ES plus IMET) is outside this view.
+another route (such as Ethernet A-D per ES plus IMET) is outside this per-route
+view; use the explicit [EVPN Argument pair inspection](#inspect-an-explicit-srv6-argument-pair).
 
 This is attribute inspection. It does not validate endpoint behavior against
 the route family, select a service, originate SRv6 routes, or program forwarding.
@@ -2206,6 +2207,53 @@ resynchronization flag, not proof that this particular route is pending.
 A retained exact-encoder rejection can stop an otherwise eligible candidate.
 The query neither sends nor freshly encodes an UPDATE, and committed state
 is not proof of remote receipt, acceptance, or installation.
+
+#### Inspect an explicit SRv6 Argument pair
+
+For an IMET `key`, optional `srv6_argument_companion` (request field 4)
+selects one exact EAD-per-ES key with MAX_ET and a nonzero ESI. Its RD is
+independent of the IMET RD. The CLI exposes this only on `evpn explain imet`
+as paired `--argument-rd` and `--argument-esi` options:
+
+```bash
+rbgp --json evpn explain imet --rd 65000:100 --originator-ip 192.0.2.3 \
+  --argument-rd 65000:200 --argument-esi 00:11:22:33:44:55:66:77:88:99 \
+  --advertised-to 192.0.2.9
+```
+
+Both routes are read in one RIB actor turn. `received_from` selects the same
+accepted-source Adj-RIB-In for both; `advertised_to` selects the same committed
+local Adj-RIB-Out for both; neither selects installed Loc-RIB. Both peer
+filters together return `INVALID_ARGUMENT` when a companion is requested.
+The primary snapshot remains in `received`, `export.advertised`, or `best`,
+respectively. Fresh selection and staged export are never composition inputs.
+
+The optional `srv6_argument` response (field 11) records `companion_key`,
+the retained `companion` snapshot if present, `scope` (`received`, `advertised`
+or `best`), `scope_peer`, `status`, `detail`, optional `sid`, and `association`.
+The companion route's `peer_address` remains its source; `scope_peer` identifies
+the requested source or destination. CLI JSON adds `srv6_argument` only for a
+pair request and omits its `sid` when no candidate can be computed.
+
+| Status | Meaning |
+|---|---|
+| `COMPOSED` / `composed` | A candidate SID combines the IMET LOC:FUNC with the selected companion's Argument. |
+| `LOC_FUNC_ONLY` / `loc_func_only` | A candidate LOC:FUNC SID with zero Argument bits, including when no usable companion Argument is present or the IMET Argument length is zero. |
+| `CONFLICT` / `conflict` | Both relevant Argument lengths are nonzero and differ; no candidate SID. This concerns the requested pair, not route selection. |
+| `UNAVAILABLE` / `unavailable` | Required SID, structure, label or transposition input cannot be used; no candidate SID. |
+| `AMBIGUOUS` / `ambiguous` | Multiple SID entries, structures or label sources prevent a unique result; no candidate SID. |
+
+This is alpha, read-only RFC 9819 section 3.3 inspection. The association is
+always `caller_selected`: computation is conditional on the caller choosing
+the applicable same-egress Ethernet Segment route. Retained peer, RD and
+next-hop metadata do not establish original egress identity. The result does
+not assert forwarding, remote receipt or installation, and no pairing search
+or service origination is performed. Advertised SID values, raw Prefix-SID
+bytes and per-route Function reconstruction are unchanged.
+
+Omitting the companion preserves the existing request meaning and CLI text
+and JSON shape. An older server can ignore the additive request field; the CLI
+then fails explicitly if the requested `srv6_argument` response is absent.
 
 ### List BGP-LS routes
 

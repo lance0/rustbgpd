@@ -92,6 +92,7 @@ async fn exact_selectors_forward_typed_keys_without_fallback() {
         let result = run(&server.addr, &args);
         assert!(result.status.success(), "{args:?}: {result:?}");
         let value: serde_json::Value = serde_json::from_slice(&result.stdout).unwrap();
+        assert!(value.get("srv6_argument").is_none());
         let mut expected = expected;
         expected["rd"] = serde_json::json!("65000:100");
         assert_eq!(value["key"], expected);
@@ -99,6 +100,7 @@ async fn exact_selectors_forward_typed_keys_without_fallback() {
         let request = server.state.last_explain_evpn.lock().await.clone().unwrap();
         assert_eq!(request.received_from, "fe80::2");
         assert_eq!(request.advertised_to, "fe80::3");
+        assert!(request.srv6_argument_companion.is_none());
         assert_eq!(request.key.unwrap().rd, "65000:100");
     }
     *server.state.explain_evpn_error.lock().await =
@@ -190,6 +192,7 @@ async fn explain_distinguishes_fresh_selection_retained_source_and_committed_exp
     let result = run(&server.addr, &args);
     assert!(result.status.success(), "{result:?}");
     let text = String::from_utf8(result.stdout).unwrap();
+    assert!(!text.contains("SRv6 Argument inspection"));
     for expected in [
         "sid-value=fc00:0:1:: behavior=65535",
         "structure=40/24/16/0/16/64",
@@ -258,6 +261,196 @@ async fn explain_distinguishes_fresh_selection_retained_source_and_committed_exp
     assert!(!text.contains("Import rejection history is not retained"));
     assert!(text.contains("Current staged export:\n"));
     assert!(text.contains("Already advertised: true; outbound dirty: false"));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn argument_pair_preserves_candidate_status_and_snapshot_provenance() {
+    let server = test_support::spawn_mock_server(None).await;
+    let esi = "00:11:22:33:44:55:66:77:88:99";
+    let args = [
+        "evpn",
+        "explain",
+        "imet",
+        "--rd",
+        "65000:100",
+        "--originator-ip",
+        "192.0.2.3",
+        "--argument-rd",
+        "65000:200",
+        "--argument-esi",
+        esi,
+    ];
+    for (status, label, scope, peer_flag, peer, source, sid) in [
+        (
+            proto::Srv6ArgumentStatus::Composed,
+            "composed",
+            "best",
+            None,
+            "",
+            "192.0.2.7",
+            Some("fc00:1:2:3::"),
+        ),
+        (
+            proto::Srv6ArgumentStatus::LocFuncOnly,
+            "loc_func_only",
+            "received",
+            Some("--received-from"),
+            "fe80::2%eth0",
+            "fe80::2",
+            Some("fc00:1:2::"),
+        ),
+        (
+            proto::Srv6ArgumentStatus::Conflict,
+            "conflict",
+            "advertised",
+            Some("--advertised-to"),
+            "fe80::3%eth1",
+            "fe80::9",
+            None,
+        ),
+        (
+            proto::Srv6ArgumentStatus::Unavailable,
+            "unavailable",
+            "best",
+            None,
+            "",
+            "192.0.2.7",
+            None,
+        ),
+        (
+            proto::Srv6ArgumentStatus::Ambiguous,
+            "ambiguous",
+            "received",
+            Some("--received-from"),
+            "fe80::2%eth0",
+            "fe80::2",
+            None,
+        ),
+    ] {
+        *server.state.explain_evpn_response.lock().await = proto::ExplainEvpnRouteResponse {
+            srv6_argument: Some(proto::ExplainSrv6Argument {
+                companion_key: Some(proto::EvpnRouteSelector {
+                    rd: "65000:200".into(),
+                    route: Some(proto::evpn_route_selector::Route::EadPerEs(
+                        proto::EvpnEadSelector {
+                            esi: esi.into(),
+                            ethernet_tag: u32::MAX,
+                        },
+                    )),
+                }),
+                companion: Some(proto::EvpnRouteEntry {
+                    route_type: 1,
+                    rd: "65000:200".into(),
+                    esi: esi.into(),
+                    ethernet_tag: u32::MAX.to_string(),
+                    peer_address: source.into(),
+                    prefix_sid: Some(Box::new(test_support::mock_prefix_sid())),
+                    ..Default::default()
+                }),
+                scope: scope.into(),
+                scope_peer: peer.split('%').next().unwrap().into(),
+                status: status as i32,
+                detail: format!("fixture {label}"),
+                sid: sid.map(str::to_string),
+                association: "caller_selected".into(),
+            }),
+            ..Default::default()
+        };
+        let mut request_args = args.to_vec();
+        if let Some(flag) = peer_flag {
+            request_args.extend([flag, peer]);
+        }
+        let result = run(
+            &server.addr,
+            &[vec!["--json"], request_args.clone()].concat(),
+        );
+        assert!(result.status.success(), "{label}: {result:?}");
+        let value: serde_json::Value = serde_json::from_slice(&result.stdout).unwrap();
+        let argument = &value["srv6_argument"];
+        assert_eq!(argument["status"], label);
+        assert_eq!(argument["detail"], format!("fixture {label}"));
+        assert_eq!(argument["association"], "caller_selected");
+        assert_eq!(argument["scope"], scope);
+        assert_eq!(argument["scope_peer"], peer);
+        assert_eq!(argument["companion_key"]["rd"], "65000:200");
+        assert_eq!(
+            argument["companion_key"]["ead_per_es"]["ethernet_tag"],
+            u32::MAX
+        );
+        assert_eq!(
+            argument["companion"]["peer"],
+            if scope == "received" { peer } else { source }
+        );
+        assert_eq!(argument["companion"]["prefix_sid"]["raw_value"], "deadbeef");
+        if let Some(sid) = sid {
+            assert_eq!(argument["sid"], sid);
+        } else {
+            assert!(argument.get("sid").is_none(), "{label}: {argument}");
+        }
+        let request = server.state.last_explain_evpn.lock().await.clone().unwrap();
+        let companion = request.srv6_argument_companion.unwrap();
+        assert_eq!(companion.rd, "65000:200");
+        assert_eq!(
+            companion.route,
+            Some(proto::evpn_route_selector::Route::EadPerEs(
+                proto::EvpnEadSelector {
+                    esi: esi.into(),
+                    ethernet_tag: u32::MAX,
+                }
+            ))
+        );
+        let result = run(&server.addr, &request_args);
+        assert!(result.status.success(), "{result:?}");
+        let text = String::from_utf8(result.stdout).unwrap();
+        assert!(text.contains("original egress identity not established"));
+        assert!(text.contains("association=caller_selected"));
+        assert!(text.contains(&format!("Requested-pair status: {label}")));
+        assert_eq!(
+            text.contains("Candidate SID for requested pair:"),
+            sid.is_some()
+        );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn argument_pair_fails_when_older_daemon_ignores_request_field() {
+    let server = test_support::spawn_mock_server(None).await;
+    let result = run(
+        &server.addr,
+        &[
+            "--json",
+            "evpn",
+            "explain",
+            "imet",
+            "--rd",
+            "65000:100",
+            "--originator-ip",
+            "192.0.2.3",
+            "--argument-rd",
+            "65000:200",
+            "--argument-esi",
+            "00:11:22:33:44:55:66:77:88:99",
+        ],
+    );
+    assert_eq!(result.status.code(), Some(1), "{result:?}");
+    assert!(result.stdout.is_empty());
+    assert!(
+        String::from_utf8(result.stderr)
+            .unwrap()
+            .contains("requires a newer daemon")
+    );
+    assert!(
+        server
+            .state
+            .last_explain_evpn
+            .lock()
+            .await
+            .as_ref()
+            .unwrap()
+            .srv6_argument_companion
+            .is_some()
+    );
+    assert!(server.state.last_list_evpn.lock().await.is_none());
 }
 
 #[test]
@@ -330,6 +523,80 @@ fn malformed_keys_fail_before_connecting() {
             "--originator-ip",
             "192.0.2.3",
         ],
+    );
+    assert_eq!(result.status.code(), Some(1), "{result:?}");
+    assert!(
+        !String::from_utf8(result.stderr)
+            .unwrap()
+            .contains("cannot reach rustbgpd")
+    );
+}
+
+#[test]
+fn invalid_argument_pairs_fail_before_connecting() {
+    let base = [
+        "evpn",
+        "explain",
+        "imet",
+        "--rd",
+        "65000:100",
+        "--originator-ip",
+        "192.0.2.3",
+    ];
+    let esi = "00:11:22:33:44:55:66:77:88:99";
+    for fields in [
+        vec!["--argument-rd", "65000:200"],
+        vec!["--argument-esi", esi],
+        vec!["--argument-rd", "invalid", "--argument-esi", esi],
+        vec!["--argument-rd", "65000:200", "--argument-esi", "00:11"],
+        vec![
+            "--argument-rd",
+            "65000:200",
+            "--argument-esi",
+            "00:00:00:00:00:00:00:00:00:00",
+        ],
+    ] {
+        let result = run("http://127.0.0.1:1", &[base.to_vec(), fields].concat());
+        assert_eq!(result.status.code(), Some(2), "{result:?}");
+        assert!(
+            !String::from_utf8(result.stderr)
+                .unwrap()
+                .contains("cannot reach rustbgpd")
+        );
+    }
+    let result = run(
+        "http://127.0.0.1:1",
+        &[
+            "evpn",
+            "explain",
+            "ead-per-es",
+            "--rd",
+            "65000:100",
+            "--esi",
+            esi,
+            "--argument-rd",
+            "65000:200",
+            "--argument-esi",
+            esi,
+        ],
+    );
+    assert_eq!(result.status.code(), Some(2), "{result:?}");
+    let result = run(
+        "http://127.0.0.1:1",
+        &[
+            base.to_vec(),
+            vec![
+                "--argument-rd",
+                "65000:200",
+                "--argument-esi",
+                esi,
+                "--received-from",
+                "192.0.2.1",
+                "--advertised-to",
+                "192.0.2.2",
+            ],
+        ]
+        .concat(),
     );
     assert_eq!(result.status.code(), Some(1), "{result:?}");
     assert!(
