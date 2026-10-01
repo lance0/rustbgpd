@@ -801,8 +801,8 @@ Before rolling any versions:
      selected by their own crate manifests and release steps; never align them
      to the daemon workspace bump. Retain both `path` and `version` so
      downstream publish dry-runs resolve from crates.io.
-   - Refresh root `Cargo.lock` and `bench/scale/Cargo.lock` for the new
-     workspace package versions without updating unrelated dependencies.
+   - Refresh root `Cargo.lock` for the new workspace package versions
+     without updating unrelated dependencies, including scale harnesses.
    - Move `docs/reference/v1-stable-surface.json` `baseline_release` with
      the workspace version. For a new release line, append the consecutive
      upgrade exercise using the previous release's immutable fixture and
@@ -1013,7 +1013,7 @@ changed.
    compared the crate against its latest crates.io release on the PR, so a
    bump it reported as required is not optional.
 3. Update `version` in `crates/wire/Cargo.toml`, its matching root workspace
-   dependency pin, root `Cargo.lock`, and `bench/scale/Cargo.lock`. Keep the
+   dependency pin and root `Cargo.lock`. Keep the
    wire publish ahead of dependent FSM or RPKI releases when moving to a new
    wire line.
 4. Roll `crates/wire/CHANGELOG.md`, review and update the crate README, and
@@ -1058,7 +1058,7 @@ do not force an FSM release for every daemon tag.
    The `semver-checks` workflow applies the same crates.io comparison to this
    crate on the PR.
 3. Update `version` in `crates/fsm/Cargo.toml`, its matching root workspace
-   dependency pin, root `Cargo.lock`, and `bench/scale/Cargo.lock`. When the
+   dependency pin and root `Cargo.lock`. When the
    wire line also moves, publish wire first so the FSM package can resolve it.
 4. Roll `crates/fsm/CHANGELOG.md`, review and update the crate README, and
    add a `rustbgpd-fsm` entry in the repository-level `CHANGELOG.md`. The
@@ -1095,7 +1095,7 @@ client share one public compatibility boundary.
    The `semver-checks` workflow compares every registry-visible release with
    its latest normal crates.io baseline.
 3. Update `version` in `crates/rpki/Cargo.toml`, its matching root workspace
-   dependency pin, root `Cargo.lock`, and `bench/scale/Cargo.lock`.
+   dependency pin and root `Cargo.lock`.
 4. Roll `crates/rpki/CHANGELOG.md`, review and update the crate README, and
    add a `rustbgpd-rpki` entry in the repository-level `CHANGELOG.md`.
    `python3 scripts/check_embedding_versions.py` fails while the README path

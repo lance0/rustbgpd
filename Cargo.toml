@@ -16,6 +16,34 @@ members = [
     "crates/evpn-linux",
     "crates/event-history",
     "bench/evpn-load",
+    "bench/scale/enhanced-route-refresh",
+    "bench/scale/reloadstall",
+    "bench/scale/rrharness",
+    "bench/scale/rrtransport",
+    "examples/event-bridge",
+    "examples/birdwatcher-adapter",
+    "examples/peer-loop",
+    "tools/rs-config-render",
+    "tools/mcp",
+]
+default-members = [
+    ".",
+    "crates/wire",
+    "crates/bfd",
+    "crates/fsm",
+    "crates/transport",
+    "crates/rib",
+    "crates/policy",
+    "crates/api",
+    "crates/telemetry",
+    "crates/rpki",
+    "crates/cli",
+    "crates/bmp",
+    "crates/mrt",
+    "crates/evpn",
+    "crates/evpn-linux",
+    "crates/event-history",
+    "bench/evpn-load",
     "examples/event-bridge",
     "examples/birdwatcher-adapter",
     "examples/peer-loop",
@@ -241,6 +269,14 @@ strip = "symbols"
 
 [profile.release-prof]
 inherits = "release"
+strip = false
+debug = 1
+
+# Match the former bench/scale release profile for comparable measurements.
+[profile.scale]
+inherits = "release"
+lto = false
+codegen-units = 16
 strip = false
 debug = 1
 

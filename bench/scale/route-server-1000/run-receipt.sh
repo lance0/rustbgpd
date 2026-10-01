@@ -96,7 +96,7 @@ printf 'commit=%s\ntree=%s\npeers=%s\nroutes_per_peer=400\ntotal=%s\n' \
 printf 'working_directory=%q\n' "$REPO" >"$OUT/commands.txt"
 cat >>"$OUT/commands.txt" <<'EOF'
 env -u CARGO_TARGET_DIR -u RUSTFLAGS cargo build --release --locked -p rustbgpd -p rustbgpctl
-env -u CARGO_TARGET_DIR -u RUSTFLAGS cargo build --release --locked --manifest-path bench/scale/reloadstall/Cargo.toml
+env -u CARGO_TARGET_DIR -u RUSTFLAGS cargo build --profile scale --locked -p reloadstall
 EOF
 record_command() { printf '%q ' "$@" >>"$OUT/commands.txt"; printf '\n' >>"$OUT/commands.txt"; }
 printf 'status=running\nexit_status=unset\n' >"$OUT/exit-status.env"
@@ -161,10 +161,9 @@ wait_for_idle() {
 wait_for_idle prebuild
 (cd "$REPO" && env -u CARGO_TARGET_DIR -u RUSTFLAGS \
     cargo build --release --locked -p rustbgpd -p rustbgpctl) >"$OUT/build/root.log" 2>&1
-(cd "$REPO" && env -u CARGO_TARGET_DIR -u RUSTFLAGS cargo build --release --locked \
-    --manifest-path bench/scale/reloadstall/Cargo.toml) >"$OUT/build/reloadstall.log" 2>&1
+(cd "$REPO" && env -u CARGO_TARGET_DIR -u RUSTFLAGS cargo build --profile scale --locked -p reloadstall) >"$OUT/build/reloadstall.log" 2>&1
 readonly DAEMON="$REPO/target/release/rustbgpd" RBGP="$REPO/target/release/rbgp"
-readonly HARNESS="$REPO/bench/scale/target/release/reloadstall"
+readonly HARNESS="$REPO/target/scale/reloadstall"
 sha256sum "$DAEMON" "$RBGP" "$HARNESS" >"$OUT/build/binaries.sha256"
 wait_for_idle postbuild
 

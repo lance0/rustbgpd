@@ -2,19 +2,17 @@
 
 Scale/perf harnesses that back the published perf receipts in `docs/perf/`.
 
-The harness crates are members of a dedicated workspace rooted at
-[`Cargo.toml`](Cargo.toml) with one shared [`Cargo.lock`](Cargo.lock),
-deliberately kept **out of** the root workspace so normal
-`cargo build --workspace` does not build them. CI compiles and tests each
-crate explicitly so API drift cannot leave a receipt harness broken on
-`main`. Binaries land in `bench/scale/target/`.
+The four harness crates are root-workspace members excluded from
+`default-members`. Plain `cargo build` does not build them; `--workspace`
+and explicit `-p` commands do. They share the root [`Cargo.lock`](../../Cargo.lock),
+so a workspace version bump needs only one lockfile update. CI compiles and
+tests each crate explicitly so API drift cannot leave a receipt harness
+broken on `main`.
 
-Release-time lockfile refresh (syncs the path-dep versions after a
-workspace version bump) is one command:
-
-```text
-cargo update --workspace --manifest-path bench/scale/Cargo.toml
-```
+Measured scale binaries use the root `scale` profile, which matches the
+standalone workspace's release code generation and debug line tables. They
+land in `target/scale/`; debug smoke binaries land in
+`target/debug/`.
 
 | Harness | Measures | Backs |
 |---|---|---|
@@ -27,11 +25,11 @@ cargo update --workspace --manifest-path bench/scale/Cargo.toml
 | [`headline/`](headline/run-campaign.sh) | Multi-arm driver for the headline matrix, IRR reload, and RR1000 cells, plus the extractor for its summary and receipt table | `docs/perf/headline-refresh-*` receipts from 2026-09 onward |
 | [`route-server-1000/`](route-server-1000/) | Fixed-shape 1,000-peer rustbgpd route-server retained receipt driver | LAN-508 ([retained receipt](../../docs/perf/route-server-1000-2026-07.md)) |
 
-Build (from repo root; binaries land in `bench/scale/target/release/`):
+Build (from repo root):
 
 ```text
-cargo build --release --manifest-path bench/scale/rrharness/Cargo.toml
-cargo build --release --manifest-path bench/scale/reloadstall/Cargo.toml
+cargo build --profile scale --locked -p rrharness
+cargo build --profile scale --locked -p reloadstall
 ```
 
 See each harness's `README.md` for its arg contract and run shapes.

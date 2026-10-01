@@ -673,6 +673,68 @@ class ClassifierFixtures(unittest.TestCase):
                 )
                 self.assertEqual(result.returncode, expected_rc, result.stderr)
 
+    def test_explain_variant_build_uses_actual_scale_workspace(self) -> None:
+        _, script = runner_script()
+        start = script.index("BUILD_FEATURES=()")
+        block = script[start:script.index("\nsha256sum", start)]
+        for layout in ("root", "standalone", "metadata-failure", "unexpected"):
+            with self.subTest(layout=layout), tempfile.TemporaryDirectory() as directory:
+                base = Path(directory)
+                repo = base / "source tree"
+                repo.mkdir()
+                out = base / "receipt"
+                (out / "build").mkdir(parents=True)
+                target = base / "actual target"
+                workspace = (repo if layout == "root" else
+                             repo / "bench" / "scale" if layout == "standalone" else
+                             base / "unexpected workspace")
+                metadata = base / "metadata.json"
+                metadata.write_text(json.dumps(dict(workspace_root=str(workspace),
+                                                   target_directory=str(target))), encoding="utf-8")
+                tools = base / "tools"
+                tools.mkdir()
+                cargo = tools / "cargo"
+                cargo.write_text(f"#!{sys.executable}\n" + r'''import json, os, pathlib, sys
+with pathlib.Path(os.environ["CARGO_LOG"]).open("a") as log:
+    log.write(json.dumps(dict(args=sys.argv[1:], target=os.environ.get("CARGO_TARGET_DIR"),
+                             rustflags=os.environ.get("RUSTFLAGS"))) + "\n")
+if sys.argv[1] == "metadata":
+    if os.environ["LAYOUT"] == "metadata-failure":
+        sys.exit(42)
+    print(pathlib.Path(os.environ["METADATA"]).read_text())
+''', encoding="utf-8")
+                cargo.chmod(0o755)
+                result = subprocess.run(
+                    ["bash", "-c", "set -euo pipefail\n" + block +
+                     '\nprintf "%s\\n" "$HARNESS" "$DAEMON" "$RBGP"'],
+                    env={**os.environ, "REPO": str(repo), "OUT": str(out), "DHAT": "0",
+                         "PROFILE": "ci", "PATH": str(tools) + os.pathsep + os.environ["PATH"],
+                         "CARGO_TARGET_DIR": "must-be-unset", "RUSTFLAGS": "must-be-unset",
+                         "CARGO_LOG": str(base / "cargo.jsonl"), "METADATA": str(metadata),
+                         "LAYOUT": layout}, capture_output=True, text=True,
+                )
+                calls = [json.loads(line) for line in (base / "cargo.jsonl").read_text().splitlines()]
+                self.assertTrue(all(call["target"] is None and call["rustflags"] is None
+                                    for call in calls))
+                if layout in ("metadata-failure", "unexpected"):
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertFalse(any("--manifest-path" in call["args"] and
+                                         call["args"][0] == "build" for call in calls))
+                    continue
+                self.assertEqual(result.returncode, 0, result.stderr)
+                profile = "scale" if layout == "root" else "release"
+                root_target = target if layout == "root" else repo / "target"
+                self.assertEqual(result.stdout.splitlines(), [str(target / profile / "reloadstall"),
+                                                             str(root_target / "ci" / "rustbgpd"),
+                                                             str(root_target / "ci" / "rbgp")])
+                self.assertEqual(calls[-1]["args"], ["build", "--profile", profile, "--locked",
+                                                     "--manifest-path", "bench/scale/reloadstall/Cargo.toml"])
+                fields = dict(line.split("=", 1) for line in
+                              (out / "provenance.env").read_text().splitlines())
+                self.assertEqual(fields["harness_profile"], profile)
+                self.assertEqual(fields["harness_target_dir"], str(target))
+                self.assertEqual(fields["harness_workspace_root"], str(workspace))
+
     def test_explain_variant_no_churn_is_only_used_with_zero_reloads(self) -> None:
         _, script = runner_script()
         start = script.index("HARNESS_ENV=()")

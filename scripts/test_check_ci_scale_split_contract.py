@@ -54,6 +54,26 @@ class ScaleSplitContractTests(unittest.TestCase):
     def test_live_contract(self) -> None:
         self.assertEqual([], check(ROOT))
 
+    def test_scale_profile_and_membership_are_required(self) -> None:
+        for old, new in (
+            ("lto = false\ncodegen-units = 16\nstrip = false\ndebug = 1", "lto = true\ncodegen-units = 1\nstrip = false\ndebug = 1"),
+            ('    "bench/scale/reloadstall",\n', ""),
+        ):
+            with self.subTest(old=old):
+                self.mutate(old, new, workflow="Cargo.toml")
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            self.copy_workflows(root)
+            manifest = root / "Cargo.toml"
+            manifest.write_text(manifest.read_text().replace(
+                'default-members = [\n    ".",',
+                'default-members = [\n    "bench/scale/reloadstall",\n    ".",', 1,
+            ))
+            self.assertIn(
+                "Cargo.toml: scale harnesses must stay outside default-members",
+                check(root),
+            )
+
     def test_msrv_bump_names_every_stale_pin(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -216,13 +236,13 @@ class ScaleSplitContractTests(unittest.TestCase):
             ),
             (
                 WORKFLOW,
-                "bench/scale/Cargo.toml --workspace --locked",
-                "bench/scale/Cargo.toml --workspace",
+                "cargo test --locked -p enhanced-route-refresh-receipt -p reloadstall -p rrharness -p rrtransport",
+                "cargo test --locked -p reloadstall -p rrharness -p rrtransport",
             ),
             (
                 WORKFLOW,
-                "bench/scale/rrtransport/Cargo.toml --locked -- smoke",
-                "bench/scale/renamed/Cargo.toml --locked -- smoke",
+                "cargo run --locked -p rrtransport -- smoke",
+                "cargo run --locked -p rrtransport -- other",
             ),
             (
                 WORKFLOW,
@@ -236,7 +256,7 @@ class ScaleSplitContractTests(unittest.TestCase):
             ),
             (
                 WORKFLOW,
-                "cargo build --manifest-path bench/scale/Cargo.toml --locked -p reloadstall",
+                "cargo build --locked -p reloadstall",
                 "true",
             ),
         )
@@ -262,7 +282,7 @@ class ScaleSplitContractTests(unittest.TestCase):
         with mock.patch.object(contract, "CARGO_COMMAND", re.compile(r"(?!)")):
             failures = "\n".join(check(ROOT))
         self.assertIn("root Cargo commands removed", failures)
-        self.assertIn("standalone Cargo command inventory", failures)
+        self.assertIn("scale receipt Cargo command missing", failures)
 
     def test_semantic_mutations_fail_closed(self) -> None:
         cases = (

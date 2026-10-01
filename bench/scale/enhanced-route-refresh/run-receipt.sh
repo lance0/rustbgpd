@@ -100,7 +100,7 @@ trap 'exit 143' TERM
 } >"$OUT/host.txt"
 cat >"$OUT/commands.txt" <<'EOF'
 env -u CARGO_TARGET_DIR -u RUSTFLAGS cargo build --release --locked -p rustbgpd -p rustbgpctl
-env -u CARGO_TARGET_DIR -u RUSTFLAGS cargo build --release --locked --manifest-path bench/scale/enhanced-route-refresh/Cargo.toml
+env -u CARGO_TARGET_DIR -u RUSTFLAGS cargo build --profile scale --locked -p enhanced-route-refresh-receipt
 python3 bench/scale/enhanced-route-refresh/gen-scenario.py <runtime> 1793 9183
 rustbgpd <runtime>/config.toml
 enhanced-route-refresh-receipt 1793 <runtime>/evidence 100000
@@ -118,17 +118,16 @@ fi
 (cd "$REPO" && env -u CARGO_TARGET_DIR -u RUSTFLAGS \
     cargo build --release --locked -p rustbgpd -p rustbgpctl) >"$OUT/build/workspace.log" 2>&1
 (cd "$REPO" && env -u CARGO_TARGET_DIR -u RUSTFLAGS \
-    cargo build --release --locked --manifest-path \
-    bench/scale/enhanced-route-refresh/Cargo.toml) >"$OUT/build/harness.log" 2>&1
+    cargo build --profile scale --locked -p enhanced-route-refresh-receipt) >"$OUT/build/harness.log" 2>&1
 readonly DAEMON="$REPO/target/release/rustbgpd"
 readonly RBGP="$REPO/target/release/rbgp"
-readonly HARNESS="$REPO/bench/scale/target/release/enhanced-route-refresh-receipt"
+readonly HARNESS="$REPO/target/scale/enhanced-route-refresh-receipt"
 (
     cd "$REPO"
     sha256sum \
         target/release/rustbgpd \
         target/release/rbgp \
-        bench/scale/target/release/enhanced-route-refresh-receipt
+        target/scale/enhanced-route-refresh-receipt
 ) >"$OUT/build/binaries.sha256"
 
 python3 "$RECEIPT_DIR/gen-scenario.py" "$RUN" "$PORT" "$METRICS_PORT" \

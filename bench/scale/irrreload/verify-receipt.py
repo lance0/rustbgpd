@@ -1812,12 +1812,15 @@ def validate_root(root: Path, kind: str):
     if not isinstance(inputs, dict) or not isinstance(git, dict):
         fail(f"{root}: receipt context is incomplete")
     binaries = provenance.get("binaries")
-    expected_binaries = {
-        "bench/scale/target/release/reloadstall",
+    fixed_binaries = {
         "target/release/rbgp",
         "target/release/rs-config-render",
         "target/release/rustbgpd",
     }
+    expected_binaries = (
+        fixed_binaries | {"bench/scale/target/release/reloadstall"},
+        fixed_binaries | {"target/scale/reloadstall"},
+    )
     expected_cells = {
         "comparison": COMPARISON_CELLS,
         "grouped": (GROUPED_CELL,),
@@ -1853,7 +1856,7 @@ def validate_root(root: Path, kind: str):
         != {"rustc", "cargo", "python", "jq", "docker", "kernel", "cpu_model"}
         or not all(isinstance(value, str) and value for value in environment.values())
         or not isinstance(binaries, dict)
-        or set(binaries) != expected_binaries
+        or set(binaries) not in expected_binaries
         or not all(isinstance(value, str) and re.fullmatch(r"[0-9a-f]{64}", value) for value in binaries.values())
     ):
         fail(f"{root}: receipt context is incomplete")
@@ -2278,6 +2281,7 @@ def make_fixture(
     started: int,
     identity_seed: int,
     generation: str = "historical",
+    scale_binary: str = "bench/scale/target/release/reloadstall",
 ) -> None:
     cells = {
         "comparison": COMPARISON_CELLS,
@@ -2294,7 +2298,7 @@ def make_fixture(
         "started_at_epoch_ns": started,
         "git": {"commit": "c" * 40, "tree": "b" * 40, "dirty": False},
         "environment": {key: "fixture" for key in ("rustc", "cargo", "python", "jq", "docker", "kernel", "cpu_model")},
-        "binaries": {key: "d" * 64 for key in ("bench/scale/target/release/reloadstall", "target/release/rbgp", "target/release/rs-config-render", "target/release/rustbgpd")},
+        "binaries": {key: "d" * 64 for key in (scale_binary, "target/release/rbgp", "target/release/rs-config-render", "target/release/rustbgpd")},
         "inputs": {
             **CANONICAL_FULL_INPUTS,
             **COMPETITOR_GENERATIONS[generation],
@@ -3117,6 +3121,7 @@ def self_test() -> None:
                 1000 + index * 10,
                 5000 + index * 10,
                 generation="current",
+                scale_binary="target/scale/reloadstall",
             )
         current_output = base / "current-output"
         validate_campaigns(current_roots, current_output)

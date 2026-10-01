@@ -82,12 +82,12 @@ Depends only on `crates/wire` (wire encode/decode for the stub sessions).
 
 ## Build and run
 
-Member of the `bench/scale` workspace (not the root workspace — build it
-explicitly):
+Root-workspace member excluded from `default-members`; build it explicitly
+with the profiling profile:
 
 ```text
-cargo build --release --manifest-path bench/scale/reloadstall/Cargo.toml
-./bench/scale/target/release/reloadstall <n_peers> <total_prefixes> <daemon_port> \
+cargo build --profile scale --locked -p reloadstall
+./target/scale/reloadstall <n_peers> <total_prefixes> <daemon_port> \
     <daemon_pid> <policy_live> <policy_a> <policy_b> <reloads> <control_secs> \
     [changed_peers]
 ```
@@ -497,14 +497,14 @@ quiescent `policy stats --direction both` probe follows 20 s after the reload
 completes, inside the 40 s inter-reload quiesce. Nothing is retried.
 
 Build release `rustbgpd` and `rbgp` from the source under test, and
-`reloadstall` from `bench/scale`. On an otherwise quiet host, from the repo
+`reloadstall` from the root workspace. On an otherwise quiet host, from the repo
 root:
 
 ```bash
 cargo build --locked --release -p rustbgpd -p rustbgpctl --bin rustbgpd --bin rbgp
-(cd bench/scale && cargo build --locked --release -p reloadstall)
+cargo build --locked --profile scale -p reloadstall
 bash bench/scale/reloadstall/policy_stats_cell.sh target/release \
-    bench/scale/target/release/reloadstall "$(mktemp -d)/run"
+    target/scale/reloadstall "$(mktemp -d)/run"
 ```
 
 The run directory keeps the daemon log, every probe row and reply body, the

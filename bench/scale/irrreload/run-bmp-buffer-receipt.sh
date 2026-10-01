@@ -6,7 +6,7 @@ set -euo pipefail
 
 REPO="$(cd "$(dirname "$0")/../../.." && pwd)"
 GEN="$REPO/bench/scale/reloadstall/gen-irr-scenario.py"
-HARNESS="$REPO/bench/scale/target/release/reloadstall"
+HARNESS="$REPO/target/scale/reloadstall"
 SINK="$REPO/bench/scale/irrreload/bmp-loc-rib-sink.py"
 VERIFY="$REPO/bench/scale/irrreload/verify-bmp-buffer-receipt.py"
 DAEMON="$REPO/target/release/rustbgpd"
@@ -56,8 +56,8 @@ mkdir -p "$(dirname "$HOST_LOCK")" "$ART"
 exec 9>"$HOST_LOCK"
 flock -n 9 || { echo "bench/soak host lock is held" >&2; exit 2; }
 
-cargo build --release -p rustbgpd --bin rustbgpd -p rs-config-render --bin rs-config-render
-cargo build --release --manifest-path bench/scale/reloadstall/Cargo.toml --locked
+cargo build --release --locked -p rustbgpd --bin rustbgpd -p rs-config-render --bin rs-config-render
+cargo build --profile scale --locked -p reloadstall
 
 ACTIVE_DAEMON="" ACTIVE_HARNESS="" ACTIVE_SINK="" ACTIVE_TMP=""
 COMPLETED_RUNS=()

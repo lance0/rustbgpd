@@ -231,7 +231,7 @@ build_product() { # TREE LOG
 }
 
 setup_arm() {
-    local arm=$1 tree=$OUT/trees/$1 log=$OUT/build-$1.log harness daemon ctl dtree before after
+    local arm=$1 tree=$OUT/trees/$1 log=$OUT/build-$1.log harness daemon ctl dtree before after scale_profile scale_binary
     harness=${HARNESS_SHA[$arm]}
     daemon=${DAEMON_SHA[$arm]}
     if [[ ! -d $tree ]]; then
@@ -241,9 +241,16 @@ setup_arm() {
     fi
     log "build $arm start"
     build_product "$tree" "$log"
-    (cd "$tree" && cargo build --release --locked --manifest-path bench/scale/reloadstall/Cargo.toml) >>"$log" 2>&1
+    if [[ -f $tree/bench/scale/Cargo.toml ]]; then
+        scale_profile=release
+        scale_binary=$tree/bench/scale/target/release/reloadstall
+    else
+        scale_profile=scale
+        scale_binary=$tree/target/scale/reloadstall
+    fi
+    (cd "$tree" && cargo build --profile "$scale_profile" --locked --manifest-path bench/scale/reloadstall/Cargo.toml) >>"$log" 2>&1
     if wants rr && ! is_cross "$arm" && [[ -z $SMOKE ]]; then
-        (cd "$tree" && cargo build --release --locked --manifest-path bench/scale/rrtransport/Cargo.toml) >>"$log" 2>&1
+        (cd "$tree" && cargo build --profile "$scale_profile" --locked --manifest-path bench/scale/rrtransport/Cargo.toml) >>"$log" 2>&1
     fi
     if is_cross "$arm"; then
         dtree=$OUT/trees/$arm.daemon
@@ -266,7 +273,7 @@ setup_arm() {
     [[ -z $(git -C "$tree" status --porcelain) ]] || die "$arm: tree dirty after build"
     printf '%s\ttree=%s\tdaemon=%s\tdaemon_sha256=%s\treloadstall_sha256=%s\n' "$arm" \
         "$(git -C "$tree" rev-parse 'HEAD^{tree}')" "$daemon" "$(sha "$tree/target/release/rustbgpd")" \
-        "$(sha "$tree/bench/scale/target/release/reloadstall")" >>"$OUT/identity.tsv"
+        "$(sha "$scale_binary")" >>"$OUT/identity.tsv"
     log "build $arm done daemon_sha256=$(sha "$tree/target/release/rustbgpd")"
 }
 

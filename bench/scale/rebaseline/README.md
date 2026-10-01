@@ -12,10 +12,8 @@ the SHA recorded in its manifest.
 From the repository root:
 
 ```text
-cargo fmt --manifest-path bench/scale/rrharness/Cargo.toml -- --check
-cargo fmt --manifest-path bench/scale/reloadstall/Cargo.toml -- --check
-cargo test --manifest-path bench/scale/rrharness/Cargo.toml --locked
-cargo test --manifest-path bench/scale/reloadstall/Cargo.toml --locked
+cargo fmt --all -- --check
+cargo test --locked -p rrharness -p reloadstall
 python3 bench/scale/rebaseline/test_classifiers.py
 ```
 
@@ -125,10 +123,10 @@ immediately before launch. Do not publish a partial replacement table when the
 host lacks the memory, kernel/tooling, or quiet-load window needed for all
 shapes.
 
-Build rrharness from the measured checkout with the committed standalone lock:
+Build rrharness from the measured checkout with the committed root lockfile:
 
 ```text
-cargo build --release --locked --manifest-path bench/scale/rrharness/Cargo.toml
+cargo build --profile scale --locked -p rrharness
 ```
 
 The bgperf2 DHAT image builder must consume the same clean root checkout and
@@ -267,9 +265,9 @@ The manifest records at least:
   "commands": ["exact argv for every build and run"],
   "host": {"cpu": "model", "memory_bytes": 0},
   "kernel": "uname -srvm",
-  "build": {"rustc": "rustc -Vv", "profile": "release / release-prof+dhat-heap"},
+  "build": {"rustc": "rustc -Vv", "profile": "scale / release-prof+dhat-heap"},
   "executables": {
-    "rrharness_sha256": "hash of target/release/rrharness",
+    "rrharness_sha256": "hash of target/scale/rrharness",
     "daemon_sha256_or_image_digest": "sha256:..."
   },
   "bgperf2": {"revision_or_version": "40 lowercase hex digits: the pinned fork commit, or an exact version"},
