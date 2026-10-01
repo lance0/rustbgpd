@@ -44,12 +44,12 @@ compiling against `crates/rib`, `crates/wire`, and `crates/telemetry` on `main`.
 
 ## Build and run
 
-Member of the `bench/scale` workspace (not the root workspace — build it
-explicitly):
+Root-workspace member excluded from `default-members`; build it explicitly
+with the profiling profile to retain folded-stack line tables:
 
 ```text
-cargo build --release --manifest-path bench/scale/rrharness/Cargo.toml
-./bench/scale/target/release/rrharness <mode> <args...>
+cargo build --profile scale --locked -p rrharness
+./target/scale/rrharness <mode> <args...>
 ```
 
 ## Arg contract
@@ -98,7 +98,8 @@ rrharness churn 1000 1000 3000 20 churn-1000-{a,b}
 
 To A/B that matrix between two refs, use
 [`../compare-rrharness.sh`](../compare-rrharness.sh). It builds base and
-candidate in detached worktrees with `cargo build --release --locked` into
+candidate in detached worktrees with the commit's release profiling profile
+and `--locked` into
 separate target directories, launches the prebuilt binaries directly on a
 `taskset`-pinned performance-governor CPU behind the shared host lock, waits
 for an idle host before every cell, and runs two counterbalanced repetitions

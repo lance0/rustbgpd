@@ -176,10 +176,9 @@ cargo_build() { # cargo_build DIR ARGS...: release build into the shared target
 sha() { sha256sum "$1" | cut -c1-64; }
 
 echo "build reloadstall from this checkout"
-(cd "$REPO" && "${PIN_BUILD[@]}" cargo build --release --locked \
-    --manifest-path bench/scale/reloadstall/Cargo.toml) >>"$OUT/build.log" 2>&1 \
+(cd "$REPO" && "${PIN_BUILD[@]}" cargo build --profile scale --locked -p reloadstall) >>"$OUT/build.log" 2>&1 \
     || die "reloadstall build failed (see $OUT/build.log)"
-cp "$REPO/bench/scale/target/release/reloadstall" "$OUT/bin/reloadstall"
+cp "$REPO/target/scale/reloadstall" "$OUT/bin/reloadstall"
 HARNESS=$OUT/bin/reloadstall
 declare -A BIN=()
 for arm in base head; do

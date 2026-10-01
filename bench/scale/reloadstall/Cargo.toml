@@ -6,8 +6,8 @@ license = "MIT OR Apache-2.0"
 publish = false
 
 [dependencies]
-rustbgpd-wire = { path = "../../../crates/wire" }
-tokio = { version = "1", features = ["full"] }
-bytes = "1"
-libc = "0.2"
+rustbgpd-wire.workspace = true
+tokio.workspace = true
+bytes.workspace = true
+libc.workspace = true
 socket2.workspace = true

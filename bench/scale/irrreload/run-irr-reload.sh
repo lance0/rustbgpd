@@ -48,7 +48,7 @@ source "$REPO/bench/scale/host-quiet.sh"
 # shellcheck disable=SC1091 # REPO is resolved dynamically above
 source "$REPO/bench/scale/provenance.sh"
 RSTALL="$REPO/bench/scale/reloadstall"
-HARNESS="$REPO/bench/scale/target/release/reloadstall"
+HARNESS="$REPO/target/scale/reloadstall"
 GEN="$RSTALL/gen-irr-scenario.py"
 SAMPLER="$REPO/bench/scale/matrix/rss-sampler.sh"
 TXN_APPLY="$REPO/bench/scale/irrreload/txn-apply.sh"
@@ -410,8 +410,8 @@ fi
 acquire_rustbgpd_host_lock || exit $?
 
 echo "=== builds ==="
-(cd "$REPO" && cargo build --release -q -p rustbgpd -p rustbgpctl -p rs-config-render) || exit 1
-(cd "$RSTALL" && cargo build --release -q) || exit 1
+(cd "$REPO" && cargo build --release --locked -q -p rustbgpd -p rustbgpctl -p rs-config-render) || exit 1
+(cd "$REPO" && cargo build --profile scale --locked -q -p reloadstall) || exit 1
 for bin in "$HARNESS" "$RBGP" "$RENDER" "$DAEMON"; do
     [ -x "$bin" ] || {
         echo "missing binary after build: $bin" >&2
@@ -419,7 +419,7 @@ for bin in "$HARNESS" "$RBGP" "$RENDER" "$DAEMON"; do
     }
 done
 declare -A CAMPAIGN_BINARY_HASHES
-for relative in bench/scale/target/release/reloadstall target/release/rbgp \
+for relative in target/scale/reloadstall target/release/rbgp \
     target/release/rs-config-render target/release/rustbgpd; do
     CAMPAIGN_BINARY_HASHES[$relative]=$(provenance_sha256_file "$REPO/$relative") || exit 1
 done
@@ -476,11 +476,11 @@ CAMPAIGN_PROVENANCE=$(jq -cn \
     --arg cpu_model "$(awk -F: '/^model name/ { sub(/^[[:space:]]+/, "", $2); print $2; exit }' /proc/cpuinfo)" \
     --arg bird_image "$BIRD_IMAGE" --arg bird_image_id "$BIRD_IMAGE_ID" \
     --arg openbgpd_image "$OPENBGPD_IMAGE" --arg openbgpd_image_id "$OPENBGPD_IMAGE_ID" \
-    --arg reloadstall_sha "${CAMPAIGN_BINARY_HASHES[bench/scale/target/release/reloadstall]}" \
+    --arg reloadstall_sha "${CAMPAIGN_BINARY_HASHES[target/scale/reloadstall]}" \
     --arg rbgp_sha "${CAMPAIGN_BINARY_HASHES[target/release/rbgp]}" \
     --arg render_sha "${CAMPAIGN_BINARY_HASHES[target/release/rs-config-render]}" \
     --arg rustbgpd_sha "${CAMPAIGN_BINARY_HASHES[target/release/rustbgpd]}" \
-    '{schema:2,started_at_epoch_ns:$started_at_epoch_ns,git:{commit:$commit,tree:$tree,dirty:$dirty},environment:{rustc:$rustc,cargo:$cargo,python:$python,jq:$jq,docker:$docker,kernel:$kernel,cpu_model:$cpu_model},binaries:{"bench/scale/target/release/reloadstall":$reloadstall_sha,"target/release/rbgp":$rbgp_sha,"target/release/rs-config-render":$render_sha,"target/release/rustbgpd":$rustbgpd_sha},inputs:{campaign_kind:$campaign_kind,cells:$cells,smoke:$smoke,n_members:$n_members,total_prefixes:$total_prefixes,min_list:$min_list,max_list:$max_list,seed:$seed,changed_fraction:$changed_fraction,overlap_fraction:$overlap_fraction,port:$port,reloads:$reloads,control_secs:$control_secs,txn_max_candidate_bytes:$txn_max_candidate_bytes,cell_timeout:$cell_timeout,start_timeout:$start_timeout,bird_threads:$bird_threads,skip_preflight:$skip_preflight,bird_image:$bird_image,bird_image_id:$bird_image_id,openbgpd_image:$openbgpd_image,openbgpd_image_id:$openbgpd_image_id}}') || exit 1
+    '{schema:2,started_at_epoch_ns:$started_at_epoch_ns,git:{commit:$commit,tree:$tree,dirty:$dirty},environment:{rustc:$rustc,cargo:$cargo,python:$python,jq:$jq,docker:$docker,kernel:$kernel,cpu_model:$cpu_model},binaries:{"target/scale/reloadstall":$reloadstall_sha,"target/release/rbgp":$rbgp_sha,"target/release/rs-config-render":$render_sha,"target/release/rustbgpd":$rustbgpd_sha},inputs:{campaign_kind:$campaign_kind,cells:$cells,smoke:$smoke,n_members:$n_members,total_prefixes:$total_prefixes,min_list:$min_list,max_list:$max_list,seed:$seed,changed_fraction:$changed_fraction,overlap_fraction:$overlap_fraction,port:$port,reloads:$reloads,control_secs:$control_secs,txn_max_candidate_bytes:$txn_max_candidate_bytes,cell_timeout:$cell_timeout,start_timeout:$start_timeout,bird_threads:$bird_threads,skip_preflight:$skip_preflight,bird_image:$bird_image,bird_image_id:$bird_image_id,openbgpd_image:$openbgpd_image,openbgpd_image_id:$openbgpd_image_id}}') || exit 1
 printf '%s\n' "$CAMPAIGN_PROVENANCE" | jq -cS . >"$ART/provenance.json" || exit 1
 if [ -n "$PREFLIGHT_LOG" ]; then
     mv "$PREFLIGHT_LOG" "$ART/preflight.log" || exit 1

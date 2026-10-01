@@ -398,9 +398,14 @@ FAKE_CARGO = """#!/usr/bin/env bash
 # Stand-in for cargo: a product build writes a daemon whose bytes are the
 # tree hash (FAKE_CARGO=tree) or the commit (FAKE_CARGO=commit), or fails.
 set -euo pipefail
+echo "$*"
 [[ ${FAKE_CARGO} != fail ]] || { echo "fake build failure" >&2; exit 101; }
 if [[ " $* " == *" --manifest-path "* ]]; then
-    mkdir -p bench/scale/target/release && echo harness >bench/scale/target/release/reloadstall
+    profile=release
+    [[ " $* " != *" --profile scale "* ]] || profile=scale
+    target=target/$profile
+    [[ ! -f bench/scale/Cargo.toml ]] || target=bench/scale/target/$profile
+    mkdir -p "$target" && echo harness >"$target/reloadstall"
 else
     what=tree; [[ ${FAKE_CARGO} != commit ]] || what=commit
     mkdir -p target/release
@@ -504,6 +509,7 @@ class CampaignFailsClosed(unittest.TestCase):
     def test_two_arms_pass_and_summarize(self):
         result = self.campaign("a=HEAD", "b=HEAD", FAKE_CARGO="tree")
         self.assertEqual(result.returncode, 0, self.progress())
+        self.assertIn("--profile scale", (self.out / "build-a.log").read_text())
         self.assertIn("campaign done rc=0 failed=none", self.progress())
         self.assertIn("| matrix-s2 | reload_completion_p50 | ", (self.out / "report.md").read_text())
         self.assertIn("cpus_allowed=", (self.out / "placement.txt").read_text())
@@ -529,6 +535,15 @@ class CampaignFailsClosed(unittest.TestCase):
         self.assertEqual(moved.returncode, 2)
         self.assertIn(f"< arm a={head}:{head}", moved.stderr)
         self.assertEqual(self.progress().count("campaign start"), 3)
+
+    def test_legacy_scale_workspace_uses_its_release_profile(self):
+        manifest = self.repo / "bench/scale/Cargo.toml"
+        manifest.write_text('[workspace]\nmembers = ["reloadstall"]\n')
+        subprocess.run(["git", "add", str(manifest)], cwd=self.repo, check=True)
+        subprocess.run(["git", "commit", "-qm", "legacy scale workspace"], cwd=self.repo, check=True)
+        result = self.campaign("a=HEAD", "b=HEAD", FAKE_CARGO="tree")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("--profile release ", (self.out / "build-a.log").read_text())
 
     def test_dry_run_rotates_arm_order(self):
         result = self.campaign("a=HEAD", "b=HEAD", "c=HEAD", DRY_RUN="1", CELLS="rr", RUNS="3")

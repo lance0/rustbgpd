@@ -578,7 +578,10 @@ fn write_folded(report: &pprof::Report, path: &str) -> io::Result<()> {
     fs::write(path, render_folded(samples)?)
 }
 
-#[allow(clippy::too_many_lines)]
+#[allow(
+    clippy::too_many_lines,
+    reason = "benchmark mode dispatch keeps each scenario and its measurements together"
+)]
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let mode = args.get(1).expect("mode").clone();

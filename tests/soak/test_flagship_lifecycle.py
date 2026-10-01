@@ -69,7 +69,7 @@ class FlagshipLifecycleContracts(unittest.TestCase):
             script, run_dir, _port, environment = self.write_actual_main_stub(
                 directory, "run-soak-rs-flagship.sh",
             )
-            engine = directory / "repo/bench/scale/target/release/reloadstall"
+            engine = directory / "repo/target/scale/reloadstall"
             engine.write_text(
                 '#!/usr/bin/env bash\n'
                 'printf "%s\\n" "$$" >>"$STUB_RUN_DIR/children"\n'
@@ -100,7 +100,7 @@ class FlagshipLifecycleContracts(unittest.TestCase):
             script, run_dir, _port, environment = self.write_actual_main_stub(
                 directory, "run-soak-rs-flagship.sh",
             )
-            engine = directory / "repo/bench/scale/target/release/reloadstall"
+            engine = directory / "repo/target/scale/reloadstall"
             engine.write_text(textwrap.dedent("""\
                 #!/usr/bin/env python3
                 import os
@@ -219,7 +219,7 @@ class FlagshipLifecycleContracts(unittest.TestCase):
                     time.sleep(1)
                 """),
             root / "target/release/rbgp": "#!/usr/bin/env bash\nexit 0\n",
-            root / "bench/scale/target/release/reloadstall": (
+            root / "target/scale/reloadstall": (
                 "#!/usr/bin/env bash\nprintf '%s\\n' \"$$\" >>\"$STUB_RUN_DIR/children\"\nprintf 'converged (stub)\\n'\nexec sleep 300\n"
             ),
             root / "bench/scale/reloadstall/gen-scenario.py": textwrap.dedent("""\

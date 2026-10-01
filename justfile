@@ -160,10 +160,6 @@ gate-rib:
     cargo check --locked -p rustbgpd-api --features bench-internals --benches
     cargo check --locked -p rustbgpd-api --features bench-internals,vpn-query-allocation --bench vpn_query_allocation
 
-# Test the standalone scale-harness workspace used by CI.
-gate-deps:
-    cargo test --manifest-path bench/scale/Cargo.toml --workspace --locked
-
 # Execute every Criterion benchmark body once without collecting timings.
 gate-contract:
     bash bench/smoke-benches.sh --locked --fail-fast
@@ -290,9 +286,8 @@ fuzz crate target *args:
 # Single timing runs pin to RUSTBGPD_BENCH_CORE and refuse to start without
 # it: receipts have used cores 2, 5, 8, 15, and 63, so there is no portable
 # default. The A/B drivers receive it as `--core` when it is set and keep
-# their own default otherwise. bench/scale is a separate workspace with its
-# own lockfile, so its harnesses build with `--manifest-path`, outside any
-# CARGO_TARGET_DIR override, where the scale drivers look for them.
+# their own default otherwise. Scale harnesses are root-workspace members
+# excluded from default-members; build them explicitly with -p.
 
 # Print '<package> <target> [features]' for every Cargo bench target, read from cargo metadata.
 _bench-targets:
@@ -447,9 +442,8 @@ bench-rrharness mode *args:
     fi
     source tests/soak/host-lock.sh
     acquire_rustbgpd_host_lock || exit $?
-    env -u CARGO_TARGET_DIR cargo build --release --locked \
-        --manifest-path bench/scale/rrharness/Cargo.toml
-    exec taskset -c "$core" bench/scale/target/release/rrharness "$@"
+    env -u CARGO_TARGET_DIR cargo build --profile scale --locked -p rrharness
+    exec taskset -c "$core" target/scale/rrharness "$@"
 
 # A/B the fixed rrharness flood/churn matrix between two refs with compare-rrharness.sh, pinned to RUSTBGPD_BENCH_CORE when set.
 [positional-arguments]
@@ -462,7 +456,7 @@ bench-compare-rrharness base head *args:
 
 # Run the fixed four-source rrtransport correctness smoke (checks exact routes; measures nothing).
 bench-rrtransport-smoke:
-    cargo run --manifest-path bench/scale/rrtransport/Cargo.toml --locked -- smoke
+    cargo run --locked -p rrtransport -- smoke
 
 # Measure the three-attempt rrtransport rr1000 campaign into OUTPUT, a new absolute path outside the repository (`--real-smoke DIR` runs the tiny fixture instead).
 [positional-arguments]
@@ -488,8 +482,7 @@ bench-ixp-matrix *cells:
     acquire_rustbgpd_host_lock || exit $?
     env -u CARGO_TARGET_DIR -u RUSTFLAGS cargo build --release --locked \
         -p rustbgpd -p rustbgpctl -p rs-config-render
-    env -u CARGO_TARGET_DIR -u RUSTFLAGS cargo build --release --locked \
-        --manifest-path bench/scale/reloadstall/Cargo.toml
+    env -u CARGO_TARGET_DIR -u RUSTFLAGS cargo build --profile scale --locked -p reloadstall
     # The membership cell needs more descriptors (bench/scale/reloadstall/README.md).
     [[ ${RELOADSTALL_MEMBERSHIP_CHURN:-0} != 1 ]] || ulimit -n 65536
     flock -u "$RUSTBGPD_HOST_LOCK_FD"
@@ -505,10 +498,9 @@ bench-policy-stats run_dir:
     acquire_rustbgpd_host_lock || exit $?
     env -u CARGO_TARGET_DIR -u RUSTFLAGS cargo build --release --locked \
         -p rustbgpd -p rustbgpctl -p rs-config-render
-    env -u CARGO_TARGET_DIR -u RUSTFLAGS cargo build --release --locked \
-        --manifest-path bench/scale/reloadstall/Cargo.toml
+    env -u CARGO_TARGET_DIR -u RUSTFLAGS cargo build --profile scale --locked -p reloadstall
     exec bash bench/scale/reloadstall/policy_stats_cell.sh \
-        target/release bench/scale/target/release/reloadstall "$1"
+        target/release target/scale/reloadstall "$1"
 
 # Measure the fixed 1,000-client route-server retained receipt (no smoke mode; needs a clean tree).
 bench-route-server-1000:
