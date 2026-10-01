@@ -7,6 +7,10 @@ Part of [rustbgpd](https://github.com/lance0/rustbgpd). Requires Rust 1.95 or
 newer. Release-by-release crate changes are recorded in the
 [changelog](CHANGELOG.md).
 
+The working tree prepares `rustbgpd-rpki` 0.5.0 with wire `0.23.0` for the
+Type 6 SMET decoder change. Verifier and RTR signatures remain unchanged.
+The published dependency examples below retain the last published versions.
+
 `rustbgpd-rpki` 0.4.0 moves to the wire `0.22.0` dependency; verifier and RTR
 method signatures are unchanged from the `0.3` line.
 Upgrade dependencies that exchange public wire types together. The `0.3` line
@@ -86,8 +90,8 @@ from one rustbgpd checkout:
 
 ```toml
 [dependencies]
-rustbgpd-rpki = { version = "0.4.0", path = "../rustbgpd/crates/rpki" }
-rustbgpd-wire = { version = "0.22.0", path = "../rustbgpd/crates/wire" }
+rustbgpd-rpki = { version = "0.5.0", path = "../rustbgpd/crates/rpki" }
+rustbgpd-wire = { version = "0.23.0", path = "../rustbgpd/crates/wire" }
 ```
 
 ```rust

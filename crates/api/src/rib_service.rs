@@ -1065,9 +1065,9 @@ fn peer_evpn_filter(
     route_type: u32,
     rd: &str,
 ) -> Result<(Option<RibRowFilter<EvpnRibRoute>>, String), Status> {
-    if route_type > 5 {
+    if route_type > 6 {
         return Err(Status::invalid_argument(
-            "route_type_filter must be 0 or 1..=5",
+            "route_type_filter must be 0 or 1..=6",
         ));
     }
     let rd = if rd.is_empty() {
@@ -1096,6 +1096,7 @@ fn peer_evpn_filter(
                     EvpnRoute::Imet(route) => route.rd == rd,
                     EvpnRoute::Es(route) => route.rd == rd,
                     EvpnRoute::IpPrefix(route) => route.rd == rd,
+                    EvpnRoute::Smet(route) => route.rd == rd,
                     _ => false,
                 })
             },
@@ -1353,6 +1354,10 @@ fn route_page_to_response(
     }
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "keep exact-key validation for all supported EVPN selector variants together"
+)]
 fn parse_evpn_selector(
     selector: &proto::EvpnRouteSelector,
 ) -> Result<rustbgpd_wire::EvpnRouteKey, Status> {
@@ -1440,6 +1445,46 @@ fn parse_evpn_selector(
                 },
             })
         }
+        Selector::Smet(route) => {
+            let source_ip = parse_smet_address(route.source.as_ref())?;
+            let group_ip = parse_smet_address(route.group.as_ref())?;
+            if source_ip.is_some_and(|source| {
+                group_ip.is_none_or(|group| source.is_ipv4() != group.is_ipv4())
+            }) {
+                return Err(Status::invalid_argument(
+                    "SMET source/group families or wildcard shape disagree",
+                ));
+            }
+            Ok(EvpnRouteKey::Smet {
+                rd,
+                ethernet_tag: EthernetTagId(route.ethernet_tag),
+                source_ip,
+                group_ip,
+                originator_ip: ip(&route.originator_ip)?,
+            })
+        }
+    }
+}
+
+fn parse_smet_address(address: Option<&proto::EvpnSmetAddress>) -> Result<Option<IpAddr>, Status> {
+    match address.and_then(|address| address.address.as_ref()) {
+        Some(proto::evpn_smet_address::Address::Wildcard(true)) => Ok(None),
+        Some(proto::evpn_smet_address::Address::Ip(ip)) => ip
+            .parse()
+            .map(Some)
+            .map_err(|error| Status::invalid_argument(format!("invalid SMET IP: {error}"))),
+        _ => Err(Status::invalid_argument(
+            "SMET address requires wildcard=true or an IP address",
+        )),
+    }
+}
+
+fn smet_address_to_proto(address: Option<IpAddr>) -> proto::EvpnSmetAddress {
+    proto::EvpnSmetAddress {
+        address: Some(match address {
+            None => proto::evpn_smet_address::Address::Wildcard(true),
+            Some(ip) => proto::evpn_smet_address::Address::Ip(ip.to_string()),
+        }),
     }
 }
 
@@ -2210,9 +2255,9 @@ impl proto::rib_service_server::RibService for RibService {
         request: Request<proto::ListEvpnRequest>,
     ) -> Result<Response<proto::ListEvpnResponse>, Status> {
         let req = request.into_inner();
-        if req.route_type_filter > 5 {
+        if req.route_type_filter > 6 {
             return Err(Status::invalid_argument(format!(
-                "invalid route_type_filter {}: expected 0 or 1..=5",
+                "invalid route_type_filter {}: expected 0 or 1..=6",
                 req.route_type_filter
             )));
         }
@@ -2250,6 +2295,7 @@ impl proto::rib_service_server::RibService for RibService {
                         EvpnRoute::Imet(e) => e.rd,
                         EvpnRoute::Es(e) => e.rd,
                         EvpnRoute::IpPrefix(e) => e.rd,
+                        EvpnRoute::Smet(e) => e.rd,
                         // Unmodeled route types never match an RD filter.
                         _ => return false,
                     };
@@ -3270,6 +3316,17 @@ pub(crate) fn evpn_route_to_proto(route: &EvpnRibRoute) -> proto::EvpnRouteEntry
             e.label.value(),
             0,
         ),
+        EvpnRoute::Smet(e) => (
+            e.rd.to_string(),
+            String::new(),
+            e.ethernet_tag.to_string(),
+            String::new(),
+            String::new(),
+            String::new(),
+            String::new(),
+            0,
+            0,
+        ),
         // Non-exhaustive: route types this build does not model render with
         // empty fields; the numeric route type is still reported alongside.
         _ => (
@@ -3302,6 +3359,15 @@ pub(crate) fn evpn_route_to_proto(route: &EvpnRibRoute) -> proto::EvpnRouteEntry
         communities,
         extended_communities,
         tunnel_type,
+        smet: match &route.route {
+            EvpnRoute::Smet(smet) => Some(Box::new(proto::EvpnSmetView {
+                source: Some(smet_address_to_proto(smet.source_ip)),
+                group: Some(smet_address_to_proto(smet.group_ip)),
+                originator_ip: smet.originator_ip.to_string(),
+                flags: u32::from(smet.flags),
+            })),
+            _ => None,
+        },
         prefix_sid: prefix_sid_to_proto(
             &route.attributes,
             match &route.route {
@@ -4360,6 +4426,186 @@ mod tests {
         }
     }
 
+    #[test]
+    fn smet_view_selector_filters_and_cursor_preserve_independent_fields() {
+        let peer: IpAddr = "192.0.2.1".parse().unwrap();
+        let (mut route, ..) = non_unicast_routes(peer);
+        let smet = rustbgpd_wire::EvpnSmet {
+            rd: "65000:100".parse().unwrap(),
+            ethernet_tag: rustbgpd_wire::EthernetTagId(100),
+            source_ip: None,
+            group_ip: Some("239.1.2.3".parse().unwrap()),
+            originator_ip: "2001:db8::10".parse().unwrap(),
+            flags: 0xf2,
+        };
+        route.route = EvpnRoute::Smet(smet);
+        let view = evpn_route_to_proto(&route);
+        assert_eq!(view.route_type, 6);
+        assert_eq!(view.rd, "65000:100");
+        assert_eq!(view.ethernet_tag, "100");
+        assert_eq!(view.ip, "");
+        let typed = view.smet.unwrap();
+        assert_eq!(typed.source, Some(smet_address_to_proto(None)));
+        assert_eq!(typed.group, Some(smet_address_to_proto(smet.group_ip)));
+        assert_eq!(typed.originator_ip, "2001:db8::10");
+        assert_eq!(typed.flags, 0xf2);
+        let selector = evpn_explain_selector(proto::evpn_route_selector::Route::Smet(
+            proto::EvpnSmetSelector {
+                ethernet_tag: 100,
+                source: typed.source,
+                group: typed.group,
+                originator_ip: typed.originator_ip,
+            },
+        ));
+        assert_eq!(parse_evpn_selector(&selector).unwrap(), route.key());
+        let (filter, _) = peer_evpn_filter(6, "65000:100").unwrap();
+        assert!(filter.unwrap()(&route));
+        let (filter, _) = peer_evpn_filter(6, "65000:101").unwrap();
+        assert!(!filter.unwrap()(&route));
+        let scope = RouteQueryScope::Received { peer: Some(peer) };
+        let version = RoutePageVersion {
+            epoch: 5,
+            generation: 17,
+        };
+        let token = encode_evpn_page_token(scope, "6:65000:100", &route, version).unwrap();
+        assert!(token.starts_with("ep1|"));
+        let before = decode_evpn_page_token(&token).unwrap();
+        route.route = EvpnRoute::Smet(rustbgpd_wire::EvpnSmet {
+            flags: 0xfa,
+            ..smet
+        });
+        let token = encode_evpn_page_token(scope, "6:65000:100", &route, version).unwrap();
+        assert_eq!(decode_evpn_page_token(&token).unwrap().after, before.after);
+        assert_eq!(before.after, (route.key(), peer));
+        assert!(token.len() <= 1024);
+    }
+
+    #[tokio::test]
+    async fn smet_list_received_and_advertised_keep_typed_payload_and_filters() {
+        let peer: IpAddr = "192.0.2.1".parse().unwrap();
+        let (mut route, ..) = non_unicast_routes(peer);
+        route.route = EvpnRoute::Smet(rustbgpd_wire::EvpnSmet {
+            rd: "65000:100".parse().unwrap(),
+            ethernet_tag: rustbgpd_wire::EthernetTagId(100),
+            source_ip: None,
+            group_ip: None,
+            originator_ip: "2001:db8::10".parse().unwrap(),
+            flags: 0xf1,
+        });
+        let expected = evpn_route_to_proto(&route);
+        let expected_key = route.key();
+        let (tx, mut rx) = mpsc::channel(1);
+        let actor = tokio::spawn(async move {
+            for index in 0..3 {
+                match rx.recv().await.unwrap() {
+                    RibUpdate::QueryEvpnRoutes { filter, reply } => {
+                        assert_eq!(index, 0);
+                        assert!(filter.as_ref().unwrap()(&route));
+                        reply.send(vec![route.clone()]).unwrap();
+                    }
+                    RibUpdate::QueryEvpnRoutesPage {
+                        scope,
+                        filter,
+                        after,
+                        reply,
+                        ..
+                    } => {
+                        assert_eq!(
+                            scope,
+                            if index == 1 {
+                                RouteQueryScope::Received { peer: Some(peer) }
+                            } else {
+                                RouteQueryScope::Advertised { peer }
+                            }
+                        );
+                        assert!(filter.as_ref().unwrap()(&route));
+                        assert!(after.is_none());
+                        reply
+                            .send(Ok(rustbgpd_rib::EvpnRoutePage {
+                                routes: vec![route.clone()],
+                                total: 2,
+                                has_more: true,
+                                version: RoutePageVersion {
+                                    epoch: 1,
+                                    generation: 2,
+                                },
+                            }))
+                            .unwrap();
+                    }
+                    _ => panic!("EVPN query"),
+                }
+            }
+        });
+        let service = RibService::new(tx);
+        let listed = service
+            .list_evpn_routes(Request::new(proto::ListEvpnRequest {
+                route_type_filter: 6,
+                peer_filter: peer.to_string(),
+                rd_filter: "65000:100".into(),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(listed.routes, vec![expected.clone()]);
+        for advertised in [false, true] {
+            let request = Request::new(proto::ListPeerEvpnRoutesRequest {
+                neighbor_address: peer.to_string(),
+                route_type_filter: 6,
+                rd_filter: "65000:100".into(),
+                page_size: 1,
+                page_token: String::new(),
+            });
+            let response = if advertised {
+                service.list_advertised_evpn_routes(request).await
+            } else {
+                service.list_received_evpn_routes(request).await
+            }
+            .unwrap()
+            .into_inner();
+            assert_eq!(response.routes, vec![expected.clone()]);
+            assert_eq!(response.total_count, 2);
+            assert_eq!(
+                decode_evpn_page_token(&response.next_page_token)
+                    .unwrap()
+                    .after,
+                (expected_key, peer)
+            );
+        }
+        actor.await.unwrap();
+    }
+
+    #[test]
+    fn smet_selector_rejects_absence_false_wildcard_and_family_mismatch() {
+        assert!(parse_smet_address(None).is_err());
+        assert!(parse_smet_address(Some(&proto::EvpnSmetAddress::default())).is_err());
+        assert!(
+            parse_smet_address(Some(&proto::EvpnSmetAddress {
+                address: Some(proto::evpn_smet_address::Address::Wildcard(false)),
+            }))
+            .is_err()
+        );
+        assert!(
+            parse_smet_address(Some(&proto::EvpnSmetAddress {
+                address: Some(proto::evpn_smet_address::Address::Ip("*".into())),
+            }))
+            .is_err()
+        );
+        for group in [None, Some("ff3e::1".parse().unwrap())] {
+            let selector = evpn_explain_selector(proto::evpn_route_selector::Route::Smet(
+                proto::EvpnSmetSelector {
+                    ethernet_tag: 100,
+                    source: Some(smet_address_to_proto(Some("192.0.2.1".parse().unwrap()))),
+                    group: Some(smet_address_to_proto(group)),
+                    originator_ip: "192.0.2.10".into(),
+                },
+            ));
+            assert_eq!(
+                parse_evpn_selector(&selector).unwrap_err().code(),
+                tonic::Code::InvalidArgument
+            );
+        }
+    }
+
     fn evpn_explain_request() -> proto::ExplainEvpnRouteRequest {
         proto::ExplainEvpnRouteRequest {
             key: Some(evpn_explain_selector(
@@ -4374,7 +4620,7 @@ mod tests {
 
     #[expect(
         clippy::too_many_lines,
-        reason = "keeps all six exact selector fixtures and their typed expectations together"
+        reason = "keeps exact selector fixtures and their typed expectations together"
     )]
     fn evpn_selector_cases() -> Vec<(proto::EvpnRouteSelector, rustbgpd_wire::EvpnRouteKey)> {
         use proto::evpn_route_selector::Route as S;
@@ -4383,6 +4629,21 @@ mod tests {
         let esi = rustbgpd_evpn::parse_esi("00:11:22:33:44:55:66:77:88:99").unwrap();
         let mac = rustbgpd_wire::MacAddress::new([0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff]);
         let mut cases = vec![
+            (
+                S::Smet(proto::EvpnSmetSelector {
+                    ethernet_tag: 100,
+                    source: Some(smet_address_to_proto(None)),
+                    group: Some(smet_address_to_proto(None)),
+                    originator_ip: "2001:db8::10".into(),
+                }),
+                K::Smet {
+                    rd,
+                    ethernet_tag: EthernetTagId(100),
+                    source_ip: None,
+                    group_ip: None,
+                    originator_ip: "2001:db8::10".parse().unwrap(),
+                },
+            ),
             (
                 S::EadPerEs(proto::EvpnEadSelector {
                     esi: esi.to_string(),
@@ -4983,7 +5244,7 @@ mod tests {
                 ..request.clone()
             },
             proto::ListPeerEvpnRoutesRequest {
-                route_type_filter: 6,
+                route_type_filter: 7,
                 ..request.clone()
             },
             proto::ListPeerEvpnRoutesRequest {
@@ -5305,7 +5566,7 @@ mod tests {
             ),
             (
                 svc.list_evpn_routes(Request::new(proto::ListEvpnRequest {
-                    route_type_filter: 6,
+                    route_type_filter: 7,
                     ..Default::default()
                 }))
                 .await

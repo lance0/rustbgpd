@@ -44,7 +44,7 @@ those.
 | BGP Roles + Only-to-Customer (9234) | Shipped | Static eBGP, IPv4/IPv6 unicast (ADR-0071, M55) |
 | BGP unnumbered / IPv6 link-local peering | Shipped | Static interface-bound link-local (ADR-0069, M53) |
 | Confederation (5065) | Rejected | See "Researched and rejected" under Next — no demand signal; revival requires a new recorded decision |
-| EVPN-VXLAN: Route Reflector (7432, types 1–5) | Shipped | |
+| EVPN-VXLAN: Route Reflector (types 1–6) | Shipped, alpha | Type 6 SMET is relay-only; [M113 raw-peer/TShark proof](../artifacts/interop/m113-smet-20261001T180815Z/README.md), vendor interoperability unproven |
 | EVPN-VXLAN: single-homed VTEP (Type-2 / Type-3 IMET origination, FDB program) | Partial (alpha) | Linux/VXLAN only |
 | EVPN-VXLAN: multi-homing (ESI, Type-1/4, DF election, BUM suppression, aliasing ECMP) | Partial (alpha) | Production-default enforcement with opt-out |
 | EVPN-VXLAN: symmetric IRB (Type-5 / L3VNI, 9136 §4.4.2) | Partial (alpha) | Receive-side GW-IP overlay-index recursion shipped; native GW-IP + ESI overlay-index origination shipped; single-active ESI overlay-index receive v1 shipped; all-active ESI overlay-index Type 5 writer shipped with same-host netns proof and M72 real-peer proof (ADR-0087/0090, FRR consume-side M68 for GW-IP, GoBGP receive-side M71 for single-active ESI recursion, GoBGP ×2 receive-side M72 for all-active ESI recursion) |
@@ -588,7 +588,7 @@ gobmp/pmacct already terminate it into Kafka), and BGPsec.
   covers Ready + add + same-MAC two-VNI isolation + scoped delete on a real
   kernel; sparse `NDA_VLAN` / `NDA_DST` echoes are handled by configured-VLAN
   inference plus owned-state convergence. Service-provider EVPN breadth
-  (route types 6-11, PBB-EVPN,
+  (route types 7–11, SMET service procedures, PBB-EVPN,
   multicast EVPN/MVPN, VPWS/E-Tree, MPLS/SRv6 service encapsulation) stays out
   of the current lane until operator demand justifies a new ADR. **Native
   GW-IP overlay-index origination landed
@@ -1331,7 +1331,8 @@ gobmp/pmacct already terminate it into Kafka), and BGPsec.
   if subscriber count / event rate makes post-broadcast filtering expensive;
   additional TUI event categories beyond the shipped lag-aware route view.
 - **EVPN adjacent standards.** PBB-EVPN (RFC 7623), RFC 9251 IGMP/MLD proxy
-  multicast EVPN routes (types 6/7/8), RFC 9572 BUM segmentation
+  service procedures and routes 7/8 (Type 6 relay is implemented),
+  RFC 9572 BUM segmentation
   (types 9/10/11), EVPN optimized ingress replication (RFC 9574),
   tunnel aggregation / common labels
   (RFC 9573), multihoming split-horizon for non-VXLAN tunnel families (RFC 9746),

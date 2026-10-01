@@ -9,7 +9,7 @@ VTEPs (FRR, SR Linux, GoBGP, or rustbgpd leaves) do the dataplane, and
 you want a lean, API-first reflector distributing the RFC 7432 routes
 between them. Scope, stated up front: **this recipe is the RR role.** The
 RR holds no EVI state, learns no MACs, and forwards no packets — it
-reflects all five EVPN route types verbatim between clients. rustbgpd
+reflects EVPN Types 1–6 between clients, including Type 6 SMET relay. rustbgpd
 also has a bidirectional VTEP mode (alpha, Linux/VXLAN-only, with IRB
 and multi-homing — see
 [`evpn-enablement.md`](../project/evpn-enablement.md)); that is a different
@@ -26,6 +26,13 @@ Tags — including rustbgpd's first vendor-NOS leg, Nokia SR Linux
 [`examples/rr-evpn-fabric/config.toml`](../../examples/rr-evpn-fabric/config.toml),
 which also disables `[policy.explain]` explicitly and uses the implicit gRPC
 socket path.
+
+Type 6 SMET relay remains alpha. Its [M113 raw-peer proof](../artifacts/interop/m113-smet-20261001T180815Z/README.md)
+checks reflected wire bytes with an independent TShark decoder, including
+withdrawal and error recovery. The earlier receipts above cover other route
+types. M113 does not establish vendor interoperability; no SMET origination,
+IGMP/MLD proxy, or multicast forwarding is implemented. See the
+[SMET boundary](../reference/rfc-notes.md#type-6-smet-reflection).
 
 ## Config
 
@@ -146,6 +153,17 @@ current export gates, and committed output. A missing accepted source does not
 prove the leaf never sent the route, and committed output does not prove the
 other leaf received it. Check `selection_deferred` and `outbound_dirty` before
 expecting installed or committed state to match a current comparison.
+
+To inspect SMET relay, filter on Type 6 and explain its exact key:
+
+```bash
+rbgp evpn received 10.0.0.1 --route-type 6
+rbgp evpn explain smet --rd 65000:100 --source '*' --group 239.1.2.3 \
+  --originator-ip 2001:db8::1 --advertised-to 10.0.0.2
+```
+
+`'*'` is the route's literal wildcard source, not a query pattern. Source/group
+families must agree when both are concrete; the originator family is independent.
 
 Two common reflection stops are *family* — the destination did not negotiate
 `l2vpn_evpn` — and *RR rules* — the source and destination's

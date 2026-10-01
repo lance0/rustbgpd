@@ -40,8 +40,8 @@ are covered by the narrow v1 contract.
 ### Route reflector
 
 IPv4/IPv6 unicast under the narrow v1 contract. VPN, labeled-unicast,
-RT-Constrain, and BGP-LS reflection have separate, scoped support; EVPN
-remains alpha.
+RT-Constrain, and BGP-LS reflection have separate, scoped support. EVPN
+Types 1–6 remain alpha; Type 6 SMET supports relay only.
 
 [Deploy](docs/cookbook/route-reflector.md) ·
 [Family boundaries](docs/explanation/feature-tour.md#route-reflector-families-beyond-unicast)

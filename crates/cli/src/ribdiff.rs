@@ -170,7 +170,7 @@ pub enum Nlri {
     },
     /// RFC 7432 EVPN route.
     Evpn {
-        /// EVPN route type (1–5).
+        /// EVPN route type (1–6).
         route_type: u8,
         /// Route distinguisher.
         rd: Rd,

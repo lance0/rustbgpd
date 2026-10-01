@@ -784,6 +784,54 @@ fn configure_scoped_link_local_peer(session: &mut PeerSession) {
     session.link_local_next_hop_scope =
         PeerSession::link_local_next_hop_scope_from_config(&session.config);
 }
+fn make_smet_route(flags: u8) -> rustbgpd_rib::EvpnRibRoute {
+    rustbgpd_rib::EvpnRibRoute {
+        route: EvpnRoute::Smet(rustbgpd_wire::EvpnSmet {
+            rd: "65000:100".parse().unwrap(),
+            ethernet_tag: rustbgpd_wire::EthernetTagId(100),
+            source_ip: Some("2001:db8::10".parse().unwrap()),
+            group_ip: Some("ff3e::1234".parse().unwrap()),
+            originator_ip: "192.0.2.10".parse().unwrap(),
+            flags,
+        }),
+        next_hop: "192.0.2.7".parse().unwrap(),
+        link_local_next_hop: None,
+        peer: "10.0.0.2".parse().unwrap(),
+        attributes: AttrSet::new(vec![
+            PathAttribute::Origin(Origin::Igp),
+            PathAttribute::AsPath(AsPath {
+                segments: vec![AsPathSegment::AsSequence(vec![65002])],
+            }),
+        ]),
+        received_at: Instant::now(),
+        origin_type: rustbgpd_rib::RouteOrigin::Ebgp,
+        peer_router_id: "10.0.0.2".parse().unwrap(),
+        is_stale: false,
+        is_llgr_stale: false,
+    }
+}
+
+fn smet_update(routes: Vec<EvpnRoute>) -> UpdateMessage {
+    let sample = make_smet_route(2);
+    let mut attrs = sample.attributes.to_vec();
+    attrs.push(PathAttribute::MpReachNlri(Box::new(
+        rustbgpd_wire::MpReachNlri {
+            afi: Afi::L2Vpn,
+            safi: Safi::Evpn,
+            next_hop: sample.next_hop,
+            link_local_next_hop: None,
+            announced: vec![],
+            flowspec_announced: vec![],
+            evpn_announced: routes,
+            bgpls_announced: vec![],
+            labeled_announced: vec![],
+            vpn_announced: vec![],
+            rtc_announced: vec![],
+        },
+    )));
+    UpdateMessage::build(&[], &[], &attrs, true, false, Ipv4UnicastMode::Body)
+}
+
 fn make_route(local_pref: u32) -> Route {
     Route {
         prefix: Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 24)),

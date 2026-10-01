@@ -385,6 +385,9 @@ _rbgp() {
             rbgp__subcmd__evpn__subcmd__explain,mac-ip)
                 cmd="rbgp__subcmd__evpn__subcmd__explain__subcmd__mac__subcmd__ip"
                 ;;
+            rbgp__subcmd__evpn__subcmd__explain,smet)
+                cmd="rbgp__subcmd__evpn__subcmd__explain__subcmd__smet"
+                ;;
             rbgp__subcmd__evpn__subcmd__explain__subcmd__help,ead-per-es)
                 cmd="rbgp__subcmd__evpn__subcmd__explain__subcmd__help__subcmd__ead__subcmd__per__subcmd__es"
                 ;;
@@ -405,6 +408,9 @@ _rbgp() {
                 ;;
             rbgp__subcmd__evpn__subcmd__explain__subcmd__help,mac-ip)
                 cmd="rbgp__subcmd__evpn__subcmd__explain__subcmd__help__subcmd__mac__subcmd__ip"
+                ;;
+            rbgp__subcmd__evpn__subcmd__explain__subcmd__help,smet)
+                cmd="rbgp__subcmd__evpn__subcmd__explain__subcmd__help__subcmd__smet"
                 ;;
             rbgp__subcmd__evpn__subcmd__help,add-imet)
                 cmd="rbgp__subcmd__evpn__subcmd__help__subcmd__add__subcmd__imet"
@@ -489,6 +495,9 @@ _rbgp() {
                 ;;
             rbgp__subcmd__evpn__subcmd__help__subcmd__explain,mac-ip)
                 cmd="rbgp__subcmd__evpn__subcmd__help__subcmd__explain__subcmd__mac__subcmd__ip"
+                ;;
+            rbgp__subcmd__evpn__subcmd__help__subcmd__explain,smet)
+                cmd="rbgp__subcmd__evpn__subcmd__help__subcmd__explain__subcmd__smet"
                 ;;
             rbgp__subcmd__fib__subcmd__table,delete)
                 cmd="rbgp__subcmd__fib__subcmd__table__subcmd__delete"
@@ -777,6 +786,9 @@ _rbgp() {
                 ;;
             rbgp__subcmd__help__subcmd__evpn__subcmd__explain,mac-ip)
                 cmd="rbgp__subcmd__help__subcmd__evpn__subcmd__explain__subcmd__mac__subcmd__ip"
+                ;;
+            rbgp__subcmd__help__subcmd__evpn__subcmd__explain,smet)
+                cmd="rbgp__subcmd__help__subcmd__evpn__subcmd__explain__subcmd__smet"
                 ;;
             rbgp__subcmd__help__subcmd__fib__subcmd__table,delete)
                 cmd="rbgp__subcmd__help__subcmd__fib__subcmd__table__subcmd__delete"
@@ -4678,7 +4690,7 @@ _rbgp() {
             return 0
             ;;
         rbgp__subcmd__evpn__subcmd__explain)
-            opts="-s -j -h --addr --token-file --tls-ca --tls-cert --tls-key --tls-server-name --json --json-version --no-color --help mac-ip imet es ip-prefix ead-per-es ead-per-evi help"
+            opts="-s -j -h --addr --token-file --tls-ca --tls-cert --tls-key --tls-server-name --json --json-version --no-color --help smet mac-ip imet es ip-prefix ead-per-es ead-per-evi help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -4918,7 +4930,7 @@ _rbgp() {
             return 0
             ;;
         rbgp__subcmd__evpn__subcmd__explain__subcmd__help)
-            opts="mac-ip imet es ip-prefix ead-per-es ead-per-evi help"
+            opts="smet mac-ip imet es ip-prefix ead-per-es ead-per-evi help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -5016,6 +5028,20 @@ _rbgp() {
             return 0
             ;;
         rbgp__subcmd__evpn__subcmd__explain__subcmd__help__subcmd__mac__subcmd__ip)
+            opts=""
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 5 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        rbgp__subcmd__evpn__subcmd__explain__subcmd__help__subcmd__smet)
             opts=""
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 5 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
@@ -5189,6 +5215,80 @@ _rbgp() {
                     return 0
                     ;;
                 --ip)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --addr)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                -s)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --token-file)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --tls-ca)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --tls-cert)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --tls-key)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --tls-server-name)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --json-version)
+                    COMPREPLY=($(compgen -W "1" -- "${cur}"))
+                    return 0
+                    ;;
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        rbgp__subcmd__evpn__subcmd__explain__subcmd__smet)
+            opts="-s -j -h --rd --received-from --advertised-to --ethernet-tag --source --group --originator-ip --addr --token-file --tls-ca --tls-cert --tls-key --tls-server-name --json --json-version --no-color --help"
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                --rd)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --received-from)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --advertised-to)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --ethernet-tag)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --source)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --group)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --originator-ip)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
@@ -5442,7 +5542,7 @@ _rbgp() {
             return 0
             ;;
         rbgp__subcmd__evpn__subcmd__help__subcmd__explain)
-            opts="mac-ip imet es ip-prefix ead-per-es ead-per-evi"
+            opts="smet mac-ip imet es ip-prefix ead-per-es ead-per-evi"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -5526,6 +5626,20 @@ _rbgp() {
             return 0
             ;;
         rbgp__subcmd__evpn__subcmd__help__subcmd__explain__subcmd__mac__subcmd__ip)
+            opts=""
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 5 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        rbgp__subcmd__evpn__subcmd__help__subcmd__explain__subcmd__smet)
             opts=""
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 5 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
@@ -7376,7 +7490,7 @@ _rbgp() {
             return 0
             ;;
         rbgp__subcmd__help__subcmd__evpn__subcmd__explain)
-            opts="mac-ip imet es ip-prefix ead-per-es ead-per-evi"
+            opts="smet mac-ip imet es ip-prefix ead-per-es ead-per-evi"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -7460,6 +7574,20 @@ _rbgp() {
             return 0
             ;;
         rbgp__subcmd__help__subcmd__evpn__subcmd__explain__subcmd__mac__subcmd__ip)
+            opts=""
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 5 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        rbgp__subcmd__help__subcmd__evpn__subcmd__explain__subcmd__smet)
             opts=""
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 5 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )

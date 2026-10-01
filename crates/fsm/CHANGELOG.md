@@ -3,6 +3,12 @@
 This changelog covers the independently published `rustbgpd-fsm` crate. Daemon
 and workspace changes remain in the repository-level `CHANGELOG.md`.
 
+## 0.10.0 - Unreleased
+
+- Move the public wire dependency to 0.23 for typed Type 6 SMET support.
+  Upgrade crates exchanging public wire types together. No additional
+  session-state-machine behavior changes.
+
 ## 0.9.0 - 2026-09-27
 
 - Move the public wire dependency to 0.22. Public wire types must be

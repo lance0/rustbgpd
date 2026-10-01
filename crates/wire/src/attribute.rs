@@ -1280,7 +1280,22 @@ pub(crate) fn decode_path_attributes_revised_observed(
             &mut bgpls_discarded,
             &mut evpn_discarded,
         ) {
-            Ok(attr) => attrs.push(attr),
+            Ok(attr) => {
+                if let PathAttribute::MpReachNlri(mp) = &attr
+                    && let Err(error) = crate::evpn::validate_evpn_announcements(&mp.evpn_announced)
+                {
+                    // RFC 9251 §9.7: canonical SMET keys remain extractable
+                    // when announcement flags are invalid. Retain all NLRI
+                    // for RFC 7606 UPDATE-wide treat-as-withdraw, including
+                    // valid siblings. MP_UNREACH deliberately bypasses this.
+                    malformed.push(MalformedAttribute {
+                        type_code,
+                        disposition: ErrorDisposition::TreatAsWithdraw,
+                        error,
+                    });
+                }
+                attrs.push(attr);
+            }
             Err(error) => {
                 // The raw occurrence was already classified above. Preserve
                 // independent framing/AS-zero errors, but not a second report
@@ -3597,6 +3612,105 @@ mod tests {
             components: vec![FlowSpecComponent::Port(ops)],
         }
     }
+    #[test]
+    fn smet_announcement_recovery_retains_keys_and_withdrawals_ignore_flags() {
+        let smet = [
+            6, 24, 0, 0, 253, 232, 0, 0, 0, 100, 0, 0, 0, 100, 0, 32, 239, 1, 2, 3, 32, 192, 0, 2,
+            1, 1,
+        ];
+        let imet = [
+            3, 17, 0, 0, 253, 232, 0, 0, 0, 100, 0, 0, 0, 100, 32, 192, 0, 2, 1,
+        ];
+        for withdrawal in [false, true] {
+            let mut value = if withdrawal {
+                vec![0, 25, 70]
+            } else {
+                vec![0, 25, 70, 4, 192, 0, 2, 254, 0]
+            };
+            value.extend_from_slice(&imet);
+            value.extend_from_slice(&smet);
+            let code = if withdrawal {
+                attr_type::MP_UNREACH_NLRI
+            } else {
+                attr_type::MP_REACH_NLRI
+            };
+            let mut bytes = vec![0x80, code, u8::try_from(value.len()).unwrap()];
+            bytes.extend_from_slice(&value);
+            let decoded = decode_path_attributes_revised(&bytes, true, true, &[]).unwrap();
+            assert_eq!(decoded.attributes.len(), 1);
+            if withdrawal {
+                assert_eq!(decoded.malformed.len(), 0);
+                let PathAttribute::MpUnreachNlri(mp) = &decoded.attributes[0] else {
+                    panic!("MP_UNREACH")
+                };
+                assert_eq!(
+                    mp.evpn_withdrawn,
+                    crate::decode_evpn_nlri(&[imet.as_slice(), smet.as_slice()].concat()).unwrap()
+                );
+            } else {
+                assert_eq!(decoded.malformed.len(), 1);
+                assert_eq!(decoded.malformed[0].type_code, attr_type::MP_REACH_NLRI);
+                assert_eq!(
+                    decoded.malformed[0].disposition,
+                    ErrorDisposition::TreatAsWithdraw
+                );
+                let PathAttribute::MpReachNlri(mp) = &decoded.attributes[0] else {
+                    panic!("MP_REACH")
+                };
+                assert_eq!(
+                    mp.evpn_announced,
+                    crate::decode_evpn_nlri(&[imet.as_slice(), smet.as_slice()].concat()).unwrap()
+                );
+            }
+            // A valid canonical announcement is admitted after the error.
+            *bytes.last_mut().unwrap() = 2;
+            assert_eq!(
+                decode_path_attributes_revised(&bytes, true, true, &[])
+                    .unwrap()
+                    .malformed
+                    .len(),
+                0
+            );
+        }
+    }
+
+    #[test]
+    fn smet_noncanonical_payload_resets_both_mp_directions() {
+        let canonical = vec![
+            6, 24, 0, 0, 253, 232, 0, 0, 0, 100, 0, 0, 0, 100, 0, 32, 239, 1, 2, 3, 32, 192, 0, 2,
+            1, 2,
+        ];
+        let mut missing_flags = canonical.clone();
+        missing_flags.pop();
+        missing_flags[1] -= 1;
+        let mut extra_flags = canonical.clone();
+        extra_flags.push(0);
+        extra_flags[1] += 1;
+        let mut missing_key = canonical;
+        missing_key.truncate(17);
+        missing_key[1] = 15;
+        for nlri in [missing_flags, extra_flags, missing_key] {
+            for code in [attr_type::MP_REACH_NLRI, attr_type::MP_UNREACH_NLRI] {
+                let mut value = if code == attr_type::MP_REACH_NLRI {
+                    vec![0, 25, 70, 4, 192, 0, 2, 254, 0]
+                } else {
+                    vec![0, 25, 70]
+                };
+                value.extend_from_slice(&nlri);
+                let mut bytes = vec![0x80, code, u8::try_from(value.len()).unwrap()];
+                bytes.extend_from_slice(&value);
+                let error = decode_path_attributes_revised(&bytes, true, true, &[]).unwrap_err();
+                assert!(matches!(
+                    error,
+                    DecodeError::UpdateAttributeError {
+                        subcode: update_subcode::OPTIONAL_ATTRIBUTE_ERROR,
+                        ..
+                    }
+                ));
+            }
+        }
+    }
+
     #[test]
     fn mp_reach_evpn_attribute_roundtrip() {
         use crate::evpn::{EthernetTagId, EvpnImet, EvpnRoute, RouteDistinguisher};

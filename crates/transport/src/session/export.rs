@@ -1805,6 +1805,20 @@ pub(super) fn evpn_route_from_key(key: EvpnRouteKey) -> Option<EvpnRoute> {
                 label: zero_label,
             })
         }
+        EvpnRouteKey::Smet {
+            rd,
+            ethernet_tag,
+            source_ip,
+            group_ip,
+            originator_ip,
+        } => EvpnRoute::Smet(rustbgpd_wire::EvpnSmet {
+            rd,
+            ethernet_tag,
+            source_ip,
+            group_ip,
+            originator_ip,
+            flags: 0,
+        }),
         // Non-exhaustive: no wire NLRI form for unmodeled route types.
         _ => return None,
     };

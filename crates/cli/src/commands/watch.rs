@@ -414,6 +414,7 @@ fn evpn_route_type_label(t: u32) -> &'static str {
         3 => "imet",
         4 => "es",
         5 => "ip-prefix",
+        6 => "smet",
         _ => "unknown",
     }
 }
@@ -471,8 +472,9 @@ impl Serialize for JsonEvpnRouteEntry<'_> {
         // Keys are emitted in flattened alphabetical order to match the
         // pre-#515 serde_json::Value (BTreeMap) byte output. Locked by
         // `direct_bgp_event_json_matches_legacy_value` — keep sorted.
-        let mut map =
-            serializer.serialize_map(Some(17 + usize::from(route.prefix_sid.is_some())))?;
+        let mut map = serializer.serialize_map(Some(
+            17 + usize::from(route.prefix_sid.is_some()) + usize::from(route.smet.is_some()),
+        ))?;
         map.serialize_entry("as_path", &route.as_path)?;
         map.serialize_entry("communities", &route.communities)?;
         map.serialize_entry("esi", &route.esi)?;
@@ -492,6 +494,9 @@ impl Serialize for JsonEvpnRouteEntry<'_> {
         map.serialize_entry("rd", &route.rd)?;
         map.serialize_entry("route_type", &route.route_type)?;
         map.serialize_entry("route_type_name", evpn_route_type_label(route.route_type))?;
+        if let Some(view) = &route.smet {
+            map.serialize_entry("smet", &super::evpn::smet_json(view))?;
+        }
         map.serialize_entry("tunnel_type", &route.tunnel_type)?;
         map.end()
     }
@@ -730,6 +735,9 @@ fn format_bgp_event_line(event: &BgpEvent) -> String {
         for (label, route) in [("current", &evpn.route), ("previous", &evpn.previous_route)] {
             if let Some(view) = route.as_ref().and_then(|route| route.prefix_sid.as_ref()) {
                 line.push_str(&format!(" {label}: {}", output::prefix_sid_summary(view)));
+            }
+            if let Some(view) = route.as_ref().and_then(|route| route.smet.as_ref()) {
+                line.push_str(&format!(" {label}: {}", super::evpn::smet_summary(view)));
             }
         }
     }
@@ -2437,6 +2445,58 @@ mod tests {
             );
         }
         value
+    }
+
+    #[test]
+    fn smet_event_preserves_current_and_previous_identity_and_raw_flags() {
+        for (source, group, originator) in [
+            ("*", "*", "192.0.2.9"),
+            ("192.0.2.1", "239.1.1.1", "2001:db8::9"),
+            ("2001:db8::1", "ff3e::1", "192.0.2.9"),
+        ] {
+            let route = |flags| EvpnRouteEntry {
+                route_type: 6,
+                rd: "65000:100".into(),
+                ethernet_tag: "7".into(),
+                smet: Some(Box::new(crate::proto::EvpnSmetView {
+                    source: Some(crate::commands::evpn::parse_smet_address(source).unwrap()),
+                    group: Some(crate::commands::evpn::parse_smet_address(group).unwrap()),
+                    originator_ip: originator.into(),
+                    flags,
+                })),
+                ..Default::default()
+            };
+            let event = BgpEvent {
+                payload: Some(crate::proto::bgp_event::Payload::Evpn(
+                    crate::proto::EvpnRouteEvent {
+                        route_type: 6,
+                        route: Some(route(0xe5)),
+                        previous_route: Some(route(0x80)),
+                        ..Default::default()
+                    },
+                )),
+                ..Default::default()
+            };
+            let value = bgp_event_json_value(&event).unwrap();
+            assert_eq!(value["route_type_name"], "smet");
+            for (key, flags) in [("route", 229), ("previous_route", 128)] {
+                assert_eq!(value[key]["route_type_name"], "smet");
+                assert_eq!(value[key]["rd"], "65000:100");
+                assert_eq!(value[key]["ethernet_tag"], "7");
+                assert_eq!(
+                    value[key]["smet"],
+                    serde_json::json!({
+                        "source": source, "group": group, "originator_ip": originator, "flags": flags
+                    })
+                );
+            }
+            let text = format_bgp_event_line(&event);
+            for (label, flags) in [("current", "e5"), ("previous", "80")] {
+                assert!(text.contains(&format!(
+                    "{label}: source={source} group={group} originator_ip={originator} flags=0x{flags}"
+                )), "{text}");
+            }
+        }
     }
 
     #[test]

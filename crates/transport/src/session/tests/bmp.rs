@@ -567,6 +567,77 @@ async fn outbound_evpn_update_emits_rib_out_bmp_byte_exact() {
     assert_eq!(pdu.as_ref(), &wire[..]);
 }
 
+#[tokio::test]
+async fn smet_bmp_preserves_inbound_and_post_policy_outbound_bytes() {
+    let (mut session, _rib_rx, mut bmp_rx) = make_test_session_with_rib_and_bmp(65001, 65002);
+    session.config.bmp_rib_out = true;
+    let (client, mut server) = connected_stream_pair().await;
+    session.test_install_stream(client);
+    let mut negotiated = negotiated_session(65002, false);
+    negotiated.negotiated_families = vec![(Afi::L2Vpn, Safi::Evpn)];
+    session.negotiated = Some(Arc::new(negotiated));
+    let key = make_smet_route(0xf2).key();
+    for flags in [Some(0xf2), Some(0xfa), None] {
+        let inbound = match flags {
+            Some(flags) => smet_update(vec![make_smet_route(flags).route]),
+            None => {
+                session
+                    .publish_export_profile()
+                    .probe_withdrawal(ExportWithdrawal::Evpn(&key))
+                    .unwrap()
+                    .message
+            }
+        };
+        let encoded = rustbgpd_wire::encode_message(&Message::Update(inbound)).unwrap();
+        session.read_buf.buf.extend_from_slice(&encoded);
+        session.process_read_buffer().await;
+        let BmpEvent::RouteMonitoring {
+            peer_info,
+            update_pdu,
+        } = bmp_rx.try_recv().unwrap()
+        else {
+            panic!("inbound BMP")
+        };
+        assert!(!peer_info.is_post_policy);
+        assert_eq!(update_pdu.as_ref(), encoded.as_ref());
+
+        let mut outbound = empty_outbound_update();
+        outbound.exact_export_snapshot = Some(session.publish_export_profile());
+        if let Some(flags) = flags {
+            outbound.evpn_announce = vec![make_smet_route(flags)];
+        } else {
+            outbound.evpn_withdraw = vec![key];
+        }
+        session.send_route_update(outbound);
+        let wire = read_single_raw_bgp_message(&mut server).await;
+        let pdu = expect_rib_out_rm(bmp_rx.try_recv().unwrap());
+        assert_eq!(pdu.as_ref(), &wire[..]);
+        let message =
+            rustbgpd_wire::decode_message(&mut Bytes::from(wire), rustbgpd_wire::MAX_MESSAGE_LEN)
+                .unwrap();
+        let Message::Update(update) = message else {
+            panic!("outbound UPDATE")
+        };
+        let decoded = update.parse_revised(true, false, false, &[]).unwrap();
+        assert_eq!(decoded.malformed.len(), 0);
+        let route = decoded
+            .update
+            .attributes
+            .iter()
+            .find_map(|attribute| match attribute {
+                PathAttribute::MpReachNlri(mp) => mp.evpn_announced.first(),
+                PathAttribute::MpUnreachNlri(mp) => mp.evpn_withdrawn.first(),
+                _ => None,
+            })
+            .unwrap();
+        let EvpnRoute::Smet(smet) = route else {
+            panic!("SMET")
+        };
+        assert_eq!(smet.flags, flags.unwrap_or(0));
+        assert_eq!(route.key(), key);
+    }
+}
+
 /// The rib-out tap keeps the non-blocking posture: a full BMP event
 /// channel drops the event and bumps `bmp_source_drops_total` — it
 /// never blocks or tears down the session. But the drop is no longer

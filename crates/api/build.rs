@@ -13,11 +13,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // had the includes — passed. Putting the bundled include dir on the protoc
     // search path fixes codegen identically in every environment.
     let well_known_include = protoc_bin_vendored::include_path()?;
-    // Keep absent Prefix-SID views pointer-sized, including both EVPN
+    // Keep absent optional views pointer-sized, including both EVPN
     // snapshots in every BgpEvent's largest oneof variant.
     tonic_prost_build::configure()
         .boxed(".rustbgpd.v1.VpnRouteEntry.prefix_sid")
         .boxed(".rustbgpd.v1.EvpnRouteEntry.prefix_sid")
+        .boxed(".rustbgpd.v1.EvpnRouteEntry.smet")
         .compile_protos(
             &[
                 "../../proto/rustbgpd.proto",
