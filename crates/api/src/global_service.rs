@@ -103,7 +103,7 @@ mod tests {
             initial.tcp_ao_support,
             proto::TcpAoSupport::Supported as i32
         );
-        assert!(initial.tcp_ao_detail.is_empty());
+        assert_eq!(initial.tcp_ao_detail.len(), 0);
         assert_eq!(initial.policy_generation_loaded_timestamp_seconds, 0);
 
         metrics.record_policy_generation_loaded();

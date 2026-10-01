@@ -12,7 +12,7 @@ fn dataset_binds_at_load_and_chains_probe_it() {
         .get("customers")
         .expect("bound");
     assert_eq!(handle.pin().generation, 1);
-    assert!(config.policy.dataset_events.swapped.is_empty());
+    assert_eq!(config.policy.dataset_events.swapped.len(), 0);
 
     let (import, _) = config
         .effective_policy_chains_for_neighbor(&config.neighbors[0])
@@ -104,7 +104,7 @@ fn dataset_reload_reuses_handles_swaps_scoped_and_keeps_prior_on_failure() {
     ));
     assert_eq!(handle.pin().generation, 2);
     assert_eq!(reloaded.policy.dataset_events.swapped, vec!["customers"]);
-    assert!(reloaded.policy.dataset_events.failed.is_empty());
+    assert_eq!(reloaded.policy.dataset_events.failed.len(), 0);
     // The chain installed from the OLD config now permits the new
     // member — the swap reached it without any reinstall — and the
     // re-resolved chain is content-equal (no Route Refresh storm).
@@ -128,7 +128,7 @@ fn dataset_reload_reuses_handles_swaps_scoped_and_keeps_prior_on_failure() {
         Config::load_with_diagnostics_and_datasets(path, Some(&reloaded.policy.dataset_bindings))
             .expect("content-equal reload");
     assert_eq!(handle.pin().generation, 2);
-    assert!(unchanged.policy.dataset_events.swapped.is_empty());
+    assert_eq!(unchanged.policy.dataset_events.swapped.len(), 0);
 
     // Bad file: reload still succeeds, prior snapshot retained, error
     // surfaced on the handle and in the events.
@@ -261,7 +261,7 @@ fn dataset_generation_equal_content_restores_error_without_advancing() {
             .unwrap();
     let staged = candidate.prepare_staged_datasets(&initial.policy.dataset_bindings);
     let prepared = staged.prepare_generation(&initial, &candidate).unwrap();
-    assert!(prepared.changed_names().is_empty());
+    assert_eq!(prepared.changed_names().len(), 0);
     let rollback = prepared.publish();
     assert!(live.status().last_error.is_none());
     assert!(Arc::ptr_eq(&prior, &live.pin()));
@@ -321,7 +321,7 @@ fn dataset_generation_accepts_changed_mapping_and_added_or_removed_bindings() {
     }
     .prepare_generation(&initial, &candidate)
     .expect("a file mapping change stages through the stable handle");
-    assert!(prepared.changed_names().is_empty());
+    assert_eq!(prepared.changed_names().len(), 0);
 
     let mut added = initial.clone();
     added

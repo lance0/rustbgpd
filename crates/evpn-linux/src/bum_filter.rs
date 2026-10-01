@@ -229,7 +229,7 @@ mod tests {
                 reason: "missing VXLAN".into(),
             },
         )];
-        assert!(compute_flag_plan(&rows).is_empty());
+        assert_eq!(compute_flag_plan(&rows).len(), 0);
     }
 
     #[test]
@@ -280,7 +280,7 @@ mod tests {
             ifindex: 10,
             flags: BumPortFlags::suppress_all(),
         }];
-        assert!(diff_flag_plans(&plan, &plan).is_empty());
+        assert_eq!(diff_flag_plans(&plan, &plan).len(), 0);
     }
 
     #[test]
@@ -337,6 +337,6 @@ mod tests {
             flags: BumPortFlags::allow_all(),
         }];
         let new: Vec<BumPortFlagPlan> = vec![];
-        assert!(diff_flag_plans(&prior, &new).is_empty());
+        assert_eq!(diff_flag_plans(&prior, &new).len(), 0);
     }
 }

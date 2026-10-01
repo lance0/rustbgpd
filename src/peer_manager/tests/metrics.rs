@@ -830,7 +830,7 @@ async fn peer_info_follows_install_hot_update_and_delete() {
     );
 
     mgr.delete_peer(key(peer_addr), false).await.unwrap();
-    assert!(peer_info_series(&metrics_view, "10.0.0.2").is_empty());
+    assert_eq!(peer_info_series(&metrics_view, "10.0.0.2").len(), 0);
     assert_eq!(peer_metric_series_count(&metrics_view, "10.0.0.2"), 0);
 }
 

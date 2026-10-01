@@ -518,15 +518,13 @@ fn forwarding_state_role_changes_do_not_reconfigure_neighbors() {
     let prior = rs(RS_TOML);
     let mut candidate = prior.clone();
     candidate.fib_tables = vec![crate::test_support::basic_fib_table("dual", 1001)];
-    assert!(
-        plan_reload_peer_actions(&prior, &candidate)
-            .unwrap()
-            .is_empty()
+    assert_eq!(
+        plan_reload_peer_actions(&prior, &candidate).unwrap().len(),
+        0
     );
-    assert!(
-        plan_reload_peer_actions(&candidate, &prior)
-            .unwrap()
-            .is_empty()
+    assert_eq!(
+        plan_reload_peer_actions(&candidate, &prior).unwrap().len(),
+        0
     );
     let old = prior.resolve_neighbor(&prior.neighbors[0]).unwrap();
     let new = candidate.resolve_neighbor(&candidate.neighbors[0]).unwrap();
@@ -564,9 +562,8 @@ fn forwarding_state_does_not_turn_policy_impact_into_session_reshape() {
             .iter()
             .any(|impact| impact.is_dynamic_range)
     );
-    assert!(
-        plan_reload_peer_actions(&prior, &candidate)
-            .unwrap()
-            .is_empty()
+    assert_eq!(
+        plan_reload_peer_actions(&prior, &candidate).unwrap().len(),
+        0
     );
 }

@@ -701,7 +701,7 @@ mod tests {
         let mut out = IpVrfRouteDump::default();
         ingest_route_message(&msg, &res, &mut out);
         let vrf_id = IpVrfId::new(100).unwrap();
-        assert!(out.observations.get(&vrf_id).unwrap().is_empty());
+        assert_eq!(out.observations.get(&vrf_id).unwrap().len(), 0);
         assert_eq!(
             out.filter_counts
                 .get(&(vrf_id, RouteFilterReason::OutputDeviceIsL3Vxlan))

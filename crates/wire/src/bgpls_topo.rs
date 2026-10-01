@@ -615,10 +615,11 @@ mod tests {
         // Truncated TLV value: claims 4 bytes, has 1.
         assert!(bgp_ls_attribute_tlvs(&[0x04, 0x47, 0x00, 0x04, 0xaa]).is_err());
         // Empty attribute is valid and yields no TLVs.
-        assert!(
+        assert_eq!(
             bgp_ls_attribute_tlvs(&[])
                 .expect("empty attribute decodes")
-                .is_empty()
+                .len(),
+            0
         );
     }
 }

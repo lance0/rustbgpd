@@ -483,7 +483,7 @@ async fn transaction_plan_supports_full_snapshot_family_with_unchanged_external_
         plan.unsupported_sections
     );
     assert_eq!(plan.supported_sections, vec!["[[neighbors]] modify"]);
-    assert!(plan.unsupported_sections.is_empty());
+    assert_eq!(plan.unsupported_sections.len(), 0);
     responder.await.unwrap();
 }
 
@@ -896,8 +896,8 @@ export_policy_chain = ["dataset-export"]
         noop.status,
         rustbgpd_api::peer_types::RuntimeConfigTransactionStatus::Noop
     );
-    assert!(noop.supported_sections.is_empty());
-    assert!(noop.unsupported_sections.is_empty());
+    assert_eq!(noop.supported_sections.len(), 0);
+    assert_eq!(noop.unsupported_sections.len(), 0);
     assert_eq!(noop.update_group_impact.entries.len(), 1);
     assert_eq!(noop.update_group_impact.entries[0].transition, "no_op");
     assert!(!noop.update_group_impact.entries[0].local_resync);
@@ -911,7 +911,7 @@ export_policy_chain = ["dataset-export"]
         rustbgpd_api::peer_types::RuntimeConfigTransactionStatus::Committable
     );
     assert_eq!(fib.supported_sections, vec!["[[fib_tables]]"]);
-    assert!(fib.unsupported_sections.is_empty());
+    assert_eq!(fib.unsupported_sections.len(), 0);
     assert_eq!(fib.update_group_impact.entries.len(), 1);
     assert_eq!(fib.update_group_impact.entries[0].transition, "no_op");
     assert!(!fib.update_group_impact.entries[0].local_resync);

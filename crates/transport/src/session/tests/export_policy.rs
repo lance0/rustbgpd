@@ -67,7 +67,7 @@ async fn accepted_export_policy_survives_rib_collision_promotion() {
     let manager = rustbgpd_rib::RibManager::new(rib_rx, query_rx, None, None, BgpMetrics::new());
     let manager_task = tokio::spawn(manager.run());
     let mut survivor = register_export_session(&session, 7, Some(old)).await;
-    assert!(!next_export(&mut survivor).await.end_of_rib.is_empty());
+    assert_ne!(next_export(&mut survivor).await.end_of_rib.len(), 0);
 
     let prefix = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24);
     let source = Ipv4Addr::new(10, 0, 0, 9);

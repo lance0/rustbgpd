@@ -278,7 +278,7 @@ async fn rtc_no_advertise_withdraws_exact_prior_and_recovers() {
     let _ = query_rtc_routes(&tx).await;
     let source_recovered = out_rx.try_recv().expect("plain RTC route must recover");
     assert_eq!(source_recovered.rtc_announce.len(), 1);
-    assert!(source_recovered.rtc_withdraw.is_empty());
+    assert_eq!(source_recovered.rtc_withdraw.len(), 0);
 
     let (reply, response) = oneshot::channel();
     tx.send(RibUpdate::ReplacePeerExportPolicy {
@@ -310,7 +310,7 @@ async fn rtc_no_advertise_withdraws_exact_prior_and_recovers() {
         .try_recv()
         .expect("removing policy-added NO_ADVERTISE must re-announce RTC");
     assert_eq!(policy_recovered.rtc_announce.len(), 1);
-    assert!(policy_recovered.rtc_withdraw.is_empty());
+    assert_eq!(policy_recovered.rtc_withdraw.len(), 0);
     assert!(out_rx.try_recv().is_err(), "default RTC must not churn");
 
     drop(tx);
@@ -420,7 +420,7 @@ async fn send_initial_table_includes_rtc_routes() {
         update.rtc_announce.iter().any(|r| r.nlri.is_default()),
         "initial dump must carry the locally-originated default"
     );
-    assert!(update.rtc_withdraw.is_empty());
+    assert_eq!(update.rtc_withdraw.len(), 0);
 
     // EoR pin: emitted for (IPv4, RtConstrain) with no GR state at all.
     let eor = out_rx.recv().await.unwrap();
@@ -1116,7 +1116,7 @@ async fn vpn_advertised_after_matching_rtc_nlri_arrives_without_reset() {
     let first = out_rx.recv().await.unwrap();
     assert_eq!(first.vpn_announce.len(), 1);
     assert_eq!(first.vpn_announce[0].key(), key_a);
-    assert!(first.vpn_withdraw.is_empty());
+    assert_eq!(first.vpn_withdraw.len(), 0);
 
     // Widening the membership announces ONLY the newly-covered route — the
     // already-advertised one is suppressed by the Adj-RIB-Out equality check.
@@ -1124,7 +1124,7 @@ async fn vpn_advertised_after_matching_rtc_nlri_arrives_without_reset() {
     let second = out_rx.recv().await.unwrap();
     assert_eq!(second.vpn_announce.len(), 1);
     assert_eq!(second.vpn_announce[0].key(), key_b);
-    assert!(second.vpn_withdraw.is_empty());
+    assert_eq!(second.vpn_withdraw.len(), 0);
 
     drop(tx);
     handle.await.unwrap();
@@ -1896,12 +1896,12 @@ async fn evpn_rtc_membership_filters_tenants_and_route_types() {
     send_rtc_interest(&tx, target, &[100]).await;
     let update = next_update(&mut out_rx).await;
     assert_eq!(sorted_evpn_keys(&update.evpn_announce), vec![key_a]);
-    assert!(update.evpn_withdraw.is_empty());
+    assert_eq!(update.evpn_withdraw.len(), 0);
 
     send_rtc_interest(&tx, target, &[200]).await;
     let update = next_update(&mut out_rx).await;
     assert_eq!(sorted_evpn_keys(&update.evpn_announce), vec![key_b]);
-    assert!(update.evpn_withdraw.is_empty());
+    assert_eq!(update.evpn_withdraw.len(), 0);
 
     tx.send(RibUpdate::RtcRoutesReceived {
         session_id: 0,

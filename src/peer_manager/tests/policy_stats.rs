@@ -143,7 +143,7 @@ async fn import_policy_stats_rpc_reads_live_counters_while_real_session_is_held(
     assert_eq!(result.chains[0].terms.len(), 1);
     assert_eq!(result.chains[0].terms[0].policy, "held-import");
     assert_eq!(result.chains[0].terms[0].hits, 7);
-    assert!(result.chains[0].last_error.is_empty());
+    assert_eq!(result.chains[0].last_error.len(), 0);
     assert!(matches!(
         export_ack.try_recv(),
         Err(oneshot::error::TryRecvError::Empty)

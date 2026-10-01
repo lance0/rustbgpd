@@ -335,7 +335,7 @@ async fn denied_flowspec_replacements_retire_exact_afi_rule_identity() {
             panic!("expected RoutesReceived");
         };
         assert_eq!(flowspec_announced.len(), expected);
-        assert!(flowspec_withdrawn.is_empty());
+        assert_eq!(flowspec_withdrawn.len(), 0);
     }
     assert_eq!(session.known_prefix_count(), 5);
     session.install_import_policy(Some(PolicyChain::new(vec![Policy {
@@ -472,7 +472,7 @@ async fn denied_evpn_replacements_retire_exact_known_type2_key() {
         panic!("expected RoutesReceived");
     };
     assert_eq!(evpn_announced.len(), 4);
-    assert!(evpn_withdrawn.is_empty());
+    assert_eq!(evpn_withdrawn.len(), 0);
     assert_eq!(session.known_prefix_count(), 4);
     session.install_import_policy(Some(PolicyChain::new(vec![Policy {
         entries: vec![],

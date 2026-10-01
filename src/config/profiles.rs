@@ -377,8 +377,8 @@ mod tests {
         );
 
         assert!(config.rpki.is_none());
-        assert!(config.policy.rpol_files.is_empty());
-        assert!(config.policy.rpol_roots.is_empty());
+        assert_eq!(config.policy.rpol_files.len(), 0);
+        assert_eq!(config.policy.rpol_roots.len(), 0);
         assert!(config.policy.datasets.is_empty());
 
         assert_eq!(config.neighbors.len(), 2);

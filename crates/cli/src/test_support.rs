@@ -264,7 +264,7 @@ pub(crate) struct MockState {
 
 fn consume_failure(counter: &AtomicUsize) -> bool {
     counter
-        .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {
+        .try_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {
             remaining.checked_sub(1)
         })
         .is_ok()
@@ -947,7 +947,7 @@ impl rustbgpd_api::proto::global_service_server::GlobalService for MockGlobalSer
         if self
             .state
             .global_failures_remaining
-            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {
+            .try_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {
                 remaining.checked_sub(1)
             })
             .is_ok()
@@ -1039,7 +1039,7 @@ impl rustbgpd_api::proto::control_service_server::ControlService for MockControl
         if self
             .state
             .metrics_failures_remaining
-            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {
+            .try_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {
                 remaining.checked_sub(1)
             })
             .is_ok()

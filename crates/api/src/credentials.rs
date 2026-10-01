@@ -544,7 +544,7 @@ mod tests {
         let store = CredentialStore::stage(vec![CredentialSource::default()]).unwrap();
         let registry = Registry::new();
         store.register_tls_expiry_metrics(&registry, 0).unwrap();
-        assert!(registry.gather().is_empty());
+        assert_eq!(registry.gather().len(), 0);
         assert_eq!(store.load().tls_expiry(0), None);
     }
 

@@ -493,7 +493,7 @@ mod tests {
     #[test]
     fn es_origin_shutdown_without_startup_is_no_op() {
         let mut o = LocalEsOriginator::new(rd(65000, 100), esi(1), ipa("10.0.0.1"));
-        assert!(o.on_shutdown().is_empty());
+        assert_eq!(o.on_shutdown().len(), 0);
     }
 
     #[test]
@@ -532,7 +532,7 @@ mod tests {
     fn ead_per_es_idempotent_repeat() {
         let mut o = LocalEadPerEsOriginator::new(rd(65000, 100), esi(1), MplsLabel::new(8000));
         let _ = o.on_startup();
-        assert!(o.on_startup().is_empty());
+        assert_eq!(o.on_startup().len(), 0);
     }
 
     #[test]
@@ -623,7 +623,7 @@ mod tests {
     #[test]
     fn ead_per_evi_vni_removed_unknown_no_op() {
         let mut o = LocalEadPerEviOriginator::new(rd(65000, 100), esi(1));
-        assert!(o.on_vni_removed(vni(100)).is_empty());
+        assert_eq!(o.on_vni_removed(vni(100)).len(), 0);
     }
 
     #[test]

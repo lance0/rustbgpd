@@ -126,7 +126,7 @@ fn srv6_unicast_eligibility_covers_incremental_export_multipath_and_recovery() {
     for (_, out) in &mut receivers {
         while let Ok(update) = out.try_recv() {
             assert!(update.announce.is_empty());
-            assert!(update.withdraw.is_empty());
+            assert_eq!(update.withdraw.len(), 0);
         }
     }
     for peer in std::iter::once(None).chain(receivers.iter().map(|(peer, _)| Some(*peer))) {

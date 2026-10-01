@@ -3252,7 +3252,7 @@ peer_group = "ix-members"
         response.status,
         proto::ConfigTransactionPlanStatus::Rejected as i32
     );
-    assert!(response.committed_sections.is_empty());
+    assert_eq!(response.committed_sections.len(), 0);
     assert!(staged.lock().await.is_empty());
     assert!(matches!(
         config_rx.try_recv(),
@@ -5996,7 +5996,7 @@ async fn real_token_confirm_window_after_session_drop(
         .await
         .expect("real plan must succeed");
     assert_eq!(planned.status, RuntimeConfigTransactionStatus::Committable);
-    assert!(!planned.runtime_snapshot_token.is_empty());
+    assert_ne!(planned.runtime_snapshot_token.len(), 0);
 
     let (config_tx, config_rx) = mpsc::channel(8);
     tokio::spawn(ack_config_transaction_commits(config_rx));
@@ -6017,7 +6017,7 @@ async fn real_token_confirm_window_after_session_drop(
         applied.status,
         proto::ConfigTransactionPlanStatus::Committable as i32
     );
-    assert!(!applied.runtime_snapshot_token.is_empty());
+    assert_ne!(applied.runtime_snapshot_token.len(), 0);
     assert_ne!(
         applied.runtime_snapshot_token,
         planned.runtime_snapshot_token
@@ -6030,11 +6030,9 @@ async fn real_token_confirm_window_after_session_drop(
         })
         .await
         .expect("real RIB must accept PeerDown");
-    assert!(
-        query_real_update_group_snapshot(&rib_tx)
-            .await
-            .peers
-            .is_empty()
+    assert_eq!(
+        query_real_update_group_snapshot(&rib_tx).await.peers.len(),
+        0
     );
 
     // The caller-facing optimistic check is unchanged: the post-commit token
@@ -6073,7 +6071,7 @@ async fn confirmed_abort_survives_session_drop_inside_confirm_window() {
         })
         .await
         .expect("a session drop must not make abort fail");
-    assert!(!response.runtime_snapshot_token.is_empty());
+    assert_ne!(response.runtime_snapshot_token.len(), 0);
     window
         .assert_restored_and_unfenced(proto::ConfigTransactionConfirmationStatus::Aborted)
         .await;
@@ -9596,7 +9594,7 @@ async fn config_transaction_plan_matches_real_post_apply_update_groups() {
             .await
             .expect("real RIB must emit initial EoR");
         assert!(initial.announce.is_empty());
-        assert!(initial.withdraw.is_empty());
+        assert_eq!(initial.withdraw.len(), 0);
         assert_eq!(
             initial
                 .end_of_rib
@@ -10733,8 +10731,8 @@ async fn history_redacts_unreadable_entry_metadata() {
         .expect("listing must degrade per entry");
     assert_eq!(response.entries.len(), 2);
     let row = &response.entries[1];
-    assert!(row.sha256.is_empty());
-    assert!(row.source_sha256.is_empty());
+    assert_eq!(row.sha256.len(), 0);
+    assert_eq!(row.source_sha256.len(), 0);
     assert_eq!(
         row.provenance_status,
         proto::ConfigHistoryProvenanceStatus::Unreadable as i32
@@ -11664,7 +11662,7 @@ async fn enumerated_live_policy_peer(
                 dynamic_ranges,
                 reply,
             } => {
-                assert!(dynamic_ranges.is_empty());
+                assert_eq!(dynamic_ranges.len(), 0);
                 let priors = std::mem::replace(&mut *live.lock().await, static_targets);
                 schedule.effect(TransactionTestActor::Peer);
                 transaction_test_reply(reply, Ok(priors), fault).await;
@@ -11963,7 +11961,7 @@ async fn confirmed_live_policy_faults_are_enumerated() {
     let baseline = run(&[], None);
     let interactions: Vec<(TransactionTestActor, String)> =
         serde_json::from_value(baseline["interactions"].clone()).unwrap();
-    assert!(!interactions.is_empty());
+    assert_ne!(interactions.len(), 0);
     let actors: Vec<_> = interactions.iter().map(|(actor, _)| *actor).collect();
     for index in 0..actors.len() {
         for fault in [

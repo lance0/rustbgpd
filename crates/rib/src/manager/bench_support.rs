@@ -211,7 +211,7 @@ fn bench_duration_nanos(duration: std::time::Duration) -> u64 {
 
 fn bench_add_duration(total: &AtomicU64, elapsed: std::time::Duration) {
     let nanos = bench_duration_nanos(elapsed);
-    let _ = total.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+    let _ = total.try_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
         Some(current.saturating_add(nanos))
     });
 }

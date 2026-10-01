@@ -34,7 +34,7 @@ fn policy(entries: Vec<PolicyStatement>, default_action: PolicyAction) -> Policy
 fn no_chain_is_permit_with_no_steps() {
     let trace = explain_chain_statements(None, &plain_ctx(v4_prefix([10, 0, 0, 0], 24)));
     assert_eq!(trace.action, PolicyAction::Permit);
-    assert!(trace.steps.is_empty());
+    assert_eq!(trace.steps.len(), 0);
 }
 
 #[test]
@@ -42,7 +42,7 @@ fn empty_chain_is_permit_with_no_steps() {
     let chain = PolicyChain::default();
     let trace = explain_chain_statements(Some(&chain), &plain_ctx(v4_prefix([10, 0, 0, 0], 24)));
     assert_eq!(trace.action, PolicyAction::Permit);
-    assert!(trace.steps.is_empty());
+    assert_eq!(trace.steps.len(), 0);
 }
 
 fn plain_ctx(prefix: Prefix) -> RouteContext<'static> {
@@ -100,7 +100,7 @@ fn prefix_match_attributes_statement_and_renders_bounds() {
         step.matched_conditions,
         vec!["prefix 10.0.0.0/8 ge 16 le 24".to_string()]
     );
-    assert!(step.modifications.is_empty());
+    assert_eq!(step.modifications.len(), 0);
 }
 
 #[test]
@@ -240,8 +240,8 @@ fn default_action_fallthrough_names_the_policy_with_no_statement() {
     assert_eq!(step.policy_name.as_deref(), Some("guard"));
     assert_eq!(step.statement_index, None, "fallthrough has no statement");
     assert_eq!(step.action, PolicyAction::Deny);
-    assert!(step.matched_conditions.is_empty());
-    assert!(step.modifications.is_empty());
+    assert_eq!(step.matched_conditions.len(), 0);
+    assert_eq!(step.modifications.len(), 0);
 }
 
 #[test]
@@ -622,7 +622,7 @@ fn rpol_fallthrough_keeps_continue_mods_under_the_permit_default() {
     assert_eq!(step.statement_index, None, "fallthrough has no term");
     assert_eq!(step.term_name, None);
     assert_eq!(step.action, PolicyAction::Permit);
-    assert!(step.matched_conditions.is_empty());
+    assert_eq!(step.matched_conditions.len(), 0);
     assert_eq!(step.modifications, vec!["med 0 -> 5".to_string()]);
     assert_eq!(step.term_traces.len(), 3, "every term was evaluated");
     assert!(step.term_traces[2].ends_with("[not matched]"));

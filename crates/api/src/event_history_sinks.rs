@@ -665,7 +665,7 @@ mod tests {
             assert_eq!(view.raw_value, [6, 0, 1, 0xff, 254, 0, 1, 0xab]);
             assert_eq!(view.flags, 0xe0);
             assert_eq!(view.services[0].tlv_type, 6);
-            assert!(view.services[0].sids.is_empty());
+            assert_eq!(view.services[0].sids.len(), 0);
         }
         assert_eq!(decoded.encode_to_vec(), envelope.payload);
     }

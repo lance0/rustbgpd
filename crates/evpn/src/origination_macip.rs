@@ -588,7 +588,7 @@ mod tests {
             ("255.255.255.255", "ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff"),
         ] {
             let mut o = fresh();
-            assert!(o.adopt_peer_sequence(mac(0xAA), 3).is_empty());
+            assert_eq!(o.adopt_peer_sequence(mac(0xAA), 3).len(), 0);
             assert_eq!(o.sequence_for_mac(mac(0xAA)), None);
             let (v4, v6) = (ipa(v4), ipa(v6));
             o.on_local_ip_learned(mac(0xAA), v4, false, None);
@@ -601,8 +601,8 @@ mod tests {
             assert_eq!(actions.len(), 2);
             assert_inject(&actions[0], Some(3), false);
             assert_inject(&actions[1], Some(3), true);
-            assert!(o.adopt_peer_sequence(mac(0xAA), 3).is_empty());
-            assert!(o.adopt_peer_sequence(mac(0xAA), 2).is_empty());
+            assert_eq!(o.adopt_peer_sequence(mac(0xAA), 3).len(), 0);
+            assert_eq!(o.adopt_peer_sequence(mac(0xAA), 2).len(), 0);
             o.on_local_ip_aged(mac(0xAA), v4);
             let actions = o.adopt_peer_sequence(mac(0xAA), u32::MAX);
             assert_eq!(actions.len(), 1);
@@ -773,7 +773,7 @@ mod tests {
     fn ip_aged_unknown_entry_is_no_op() {
         let mut o = fresh();
         let actions = o.on_local_ip_aged(mac(0xAA), ipa("192.0.2.10"));
-        assert!(actions.is_empty());
+        assert_eq!(actions.len(), 0);
     }
 
     #[test]
@@ -833,7 +833,7 @@ mod tests {
     #[test]
     fn mac_aged_with_no_entries_is_no_op() {
         let mut o = fresh();
-        assert!(o.on_local_mac_aged(mac(0xAA)).is_empty());
+        assert_eq!(o.on_local_mac_aged(mac(0xAA)).len(), 0);
     }
 
     // --- on_local_mac_moved (RFC 9721 §5.1 / §6.2 cascade) ---
@@ -867,21 +867,22 @@ mod tests {
         assert_eq!(relearn.len(), 1);
         assert_inject(&relearn[0], None, false);
         // (BB, 192.0.2.20) is still at seq=0: idempotent re-Learn.
-        assert!(
+        assert_eq!(
             o.on_local_ip_learned(mac(0xBB), ipa("192.0.2.20"), false, None)
-                .is_empty()
+                .len(),
+            0
         );
     }
 
     #[test]
     fn mac_moved_with_nothing_advertising_is_no_op() {
         let mut o = fresh();
-        assert!(o.on_local_mac_moved(mac(0xAA)).is_empty());
+        assert_eq!(o.on_local_mac_moved(mac(0xAA)).len(), 0);
 
         // Tracked but withdrawn: still a no-op, ratchet untouched.
         let _ = o.on_local_ip_learned(mac(0xAA), ipa("192.0.2.10"), false, None);
         let _ = o.on_local_mac_aged(mac(0xAA));
-        assert!(o.on_local_mac_moved(mac(0xAA)).is_empty());
+        assert_eq!(o.on_local_mac_moved(mac(0xAA)).len(), 0);
         let relearn = o.on_local_ip_learned(mac(0xAA), ipa("192.0.2.10"), false, None);
         assert_eq!(relearn.len(), 1);
         assert_inject(&relearn[0], None, false);
@@ -983,7 +984,7 @@ mod tests {
     fn remote_changed_for_untracked_macip_is_no_op() {
         let mut o = fresh();
         let actions = o.on_remote_ip_changed(mac(0xCC), ipa("192.0.2.99"), Some(&remote(Some(5))));
-        assert!(actions.is_empty());
+        assert_eq!(actions.len(), 0);
     }
 
     // --- drain_to_withdraws + outstanding_keys ---

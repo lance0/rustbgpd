@@ -939,7 +939,7 @@ mod tests {
         err.clear();
         let broken = stdout_exit_with(Err(StdoutWriteError::BrokenPipe), &mut err);
         assert_eq!(broken, ExitCode::from(Exit::InvalidInput));
-        assert!(err.is_empty());
+        assert_eq!(err, [] as [u8; 0]);
     }
 
     #[test]

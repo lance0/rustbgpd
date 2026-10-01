@@ -856,8 +856,8 @@ import_policy_chain = ["inbound"]
         let candidate_handle = dataset(&candidate);
         assert!(!Arc::ptr_eq(&prior_handle, &candidate_handle));
         assert!(Arc::ptr_eq(&prior_snapshot, &candidate_handle.pin()));
-        assert!(candidate.policy.dataset_events.swapped.is_empty());
-        assert!(candidate.policy.dataset_events.failed.is_empty());
+        assert_eq!(candidate.policy.dataset_events.swapped.len(), 0);
+        assert_eq!(candidate.policy.dataset_events.failed.len(), 0);
         assert_eq!(
             candidate.manifest.datasets[0].path,
             second.path().join("customers.txt").canonicalize().unwrap()
@@ -1170,7 +1170,7 @@ log_format = "json"
             )
             .expect("runtime A must reconstruct independently of desired roster B");
 
-        assert!(runtime.policy.rpol_files.is_empty());
+        assert_eq!(runtime.policy.rpol_files.len(), 0);
         assert!(runtime.policy.datasets.is_empty());
         assert_eq!(desired.policy.rpol_files.len(), 2);
         assert_eq!(desired.policy.datasets.len(), 1);

@@ -108,7 +108,7 @@ fn srv6_evpn_eligibility_filters_selection_exports_and_consumer_queries() {
     assert_eq!(explain.selection_best.unwrap().peer, fallback.peer);
     while let Ok(update) = out.try_recv() {
         assert!(update.evpn_announce.is_empty());
-        assert!(update.evpn_withdraw.is_empty());
+        assert_eq!(update.evpn_withdraw.len(), 0);
     }
     manager.enqueue_routes_received(
         fallback.peer,
@@ -1740,7 +1740,7 @@ async fn evpn_no_export_honors_neighbor_mode_and_source_precedence() {
     for out_rx in [&mut honor_rx, &mut transparent_rx, &mut internal_rx] {
         let update = out_rx.try_recv().expect("plain EVPN routes advertise");
         assert_eq!(update.evpn_announce.len(), 3);
-        assert!(update.evpn_withdraw.is_empty());
+        assert_eq!(update.evpn_withdraw.len(), 0);
     }
     let added_update = adder_rx
         .try_recv()
@@ -1786,7 +1786,7 @@ async fn evpn_no_export_honors_neighbor_mode_and_source_precedence() {
             .expect("transparent and iBGP peers retain the tagged route");
         assert_eq!(update.evpn_announce.len(), 1);
         assert_eq!(update.evpn_announce[0].key(), primary_key);
-        assert!(update.evpn_withdraw.is_empty());
+        assert_eq!(update.evpn_withdraw.len(), 0);
     }
     assert!(honor_rx.try_recv().is_err(), "sibling must not churn");
     assert_ne!(primary_key, sibling_key, "fixture keys must be distinct");
@@ -1949,7 +1949,7 @@ async fn evpn_source_no_advertise_cannot_be_removed_by_export_policy() {
         .expect("removing source NO_ADVERTISE must re-announce EVPN");
     assert_eq!(recovered.evpn_announce.len(), 1);
     assert_eq!(recovered.evpn_announce[0].key(), primary_key);
-    assert!(recovered.evpn_withdraw.is_empty());
+    assert_eq!(recovered.evpn_withdraw.len(), 0);
     assert!(
         out_rx.try_recv().is_err(),
         "sibling EVPN route must not churn"
@@ -2025,7 +2025,7 @@ async fn evpn_policy_added_no_advertise_withdraws_exact_prior() {
         .expect("unscoped EVPN sibling must advertise");
     assert_eq!(first_seen.evpn_announce.len(), 1);
     assert_eq!(first_seen.evpn_announce[0].key(), sibling_key);
-    assert!(first_seen.evpn_withdraw.is_empty());
+    assert_eq!(first_seen.evpn_withdraw.len(), 0);
 
     let mut repeated = primary.clone();
     AttrSet::edit(&mut repeated.attributes, |attrs| {
@@ -2065,7 +2065,7 @@ async fn evpn_policy_added_no_advertise_withdraws_exact_prior() {
         .expect("removing policy-added NO_ADVERTISE must announce EVPN");
     assert_eq!(recovered.evpn_announce.len(), 1);
     assert_eq!(recovered.evpn_announce[0].key(), primary_key);
-    assert!(recovered.evpn_withdraw.is_empty());
+    assert_eq!(recovered.evpn_withdraw.len(), 0);
 
     let (reply, response) = oneshot::channel();
     tx.send(RibUpdate::ReplacePeerExportPolicy {
@@ -2098,7 +2098,7 @@ async fn evpn_policy_added_no_advertise_withdraws_exact_prior() {
         .expect("EVPN must recover after repeated policy scope");
     assert_eq!(recovered_again.evpn_announce.len(), 1);
     assert_eq!(recovered_again.evpn_announce[0].key(), primary_key);
-    assert!(recovered_again.evpn_withdraw.is_empty());
+    assert_eq!(recovered_again.evpn_withdraw.len(), 0);
     assert!(
         out_rx.try_recv().is_err(),
         "sibling EVPN route must not churn"
