@@ -2201,7 +2201,11 @@ Flags are mutable payload outside that identity. The structural codec retains
 the full flags byte, including reserved high bits. Source and group can be
 wildcards; a wildcard group requires a wildcard source. Concrete source/group
 addresses share a family, while the originator address family is independent.
-See [RFC 9251 §9.1](https://www.rfc-editor.org/rfc/rfc9251.html#section-9.1).
+See [RFC 9251 §9.1](https://www.rfc-editor.org/rfc/rfc9251.html#section-9.1)
+and its [default wildcard route](https://www.rfc-editor.org/rfc/rfc9251.html#section-9.1.3).
+[RFC 9625 §3.3](https://www.rfc-editor.org/rfc/rfc9625.html#section-3.3)
+also permits zero flags for SBD-SMET wildcard state when IGMP/MLD reports are
+not required.
 
 The announcement validator implements the following low-nibble acceptance
 matrix. High flag bits do not affect acceptance and remain preserved. A
