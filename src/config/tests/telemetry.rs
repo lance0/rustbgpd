@@ -154,7 +154,7 @@ log_format = "json"
 "#;
     let config = parse(toml).unwrap();
     let bmp = config.bmp.as_ref().unwrap();
-    assert!(bmp.collectors.is_empty());
+    assert_eq!(bmp.collectors.len(), 0);
 }
 
 #[test]
@@ -335,7 +335,7 @@ fn gnmi_dialout_absent_section_yields_no_targets() {
     let stripped = toml.split("[gnmi_dialout]").next().unwrap();
     let config = parse(stripped).unwrap();
     assert!(config.gnmi_dialout.is_none());
-    assert!(super::gnmi_dialout_targets(&config).unwrap().is_empty());
+    assert_eq!(super::gnmi_dialout_targets(&config).unwrap().len(), 0);
 }
 
 #[test]

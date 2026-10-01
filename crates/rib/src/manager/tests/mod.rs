@@ -358,8 +358,8 @@ fn ipv4_flowspec_sendable() -> Vec<(Afi, Safi)> {
 async fn drain_eor(out_rx: &mut mpsc::Receiver<OutboundRouteUpdate>) {
     let eor = out_rx.recv().await.unwrap();
     assert!(eor.announce.is_empty());
-    assert!(eor.withdraw.is_empty());
-    assert!(!eor.end_of_rib.is_empty());
+    assert_eq!(eor.withdraw.len(), 0);
+    assert_ne!(eor.end_of_rib.len(), 0);
 }
 
 async fn query_best_routes(tx: &mpsc::Sender<RibUpdate>) -> Vec<Route> {
@@ -1105,7 +1105,7 @@ async fn drain_strict_vpn_rtc_initial_dump(out_rx: &mut mpsc::Receiver<OutboundR
         dump.vpn_announce.is_empty(),
         "empty RTC membership must withhold every VPN route from the initial dump"
     );
-    assert!(dump.vpn_withdraw.is_empty());
+    assert_eq!(dump.vpn_withdraw.len(), 0);
     let eor = out_rx.recv().await.unwrap();
     assert_eq!(eor.end_of_rib, vpn_rtc_sendable());
 }

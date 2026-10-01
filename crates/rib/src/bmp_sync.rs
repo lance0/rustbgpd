@@ -499,7 +499,7 @@ mod tests {
         let parsed = decode_pdu(&pdu);
         assert_eq!(parsed.announced.len(), 1);
         assert_eq!(Prefix::V4(parsed.announced[0].prefix), prefix);
-        assert!(parsed.withdrawn.is_empty());
+        assert_eq!(parsed.withdrawn.len(), 0);
         assert!(parsed.attributes.iter().any(
             |a| matches!(a, PathAttribute::NextHop(nh) if *nh == Ipv4Addr::new(192, 0, 2, 1))
         ));

@@ -746,8 +746,8 @@ mod tests {
     fn idle_ignores_other_events() {
         let mut s = Session::new(test_config());
         // Non-timer events are silently dropped — no Action emitted.
-        assert!(s.handle_event(Event::KeepaliveReceived).is_empty());
-        assert!(s.handle_event(Event::TcpConnectionFails).is_empty());
+        assert_eq!(s.handle_event(Event::KeepaliveReceived).len(), 0);
+        assert_eq!(s.handle_event(Event::TcpConnectionFails).len(), 0);
         assert_eq!(s.state(), SessionState::Idle);
         // Timer events emit StaleTimerIgnored; covered by
         // `idle_stale_*` tests below.
@@ -1581,7 +1581,7 @@ mod tests {
         assert_eq!(open.my_as, 65001);
         assert_eq!(open.hold_time, 90);
         assert_eq!(open.bgp_identifier, Ipv4Addr::new(10, 0, 0, 1));
-        assert!(!open.capabilities.is_empty());
+        assert_ne!(open.capabilities.len(), 0);
     }
 
     // ── Stale timer events ─────────────────────────────────────────

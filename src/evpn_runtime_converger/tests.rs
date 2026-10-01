@@ -429,7 +429,7 @@ async fn forwarding_state_evpn_unsupported_candidate_has_no_effect() {
             .await
             .is_err()
     );
-    assert!(state.kernel_families().is_empty());
+    assert_eq!(state.kernel_families().len(), 0);
 }
 
 impl DaemonEvpnRuntimeConverger for GatedRuntimeConverger {
@@ -5387,13 +5387,13 @@ fn validate_l2vni_mixed_accepts_batch_redefine_only() {
     let plan = current.plan_candidate(&candidate);
 
     assert_eq!(plan.evpn_instances.redefined, vec![100, 200]);
-    assert!(plan.evpn_instances.added.is_empty());
-    assert!(plan.evpn_instances.deleted.is_empty());
+    assert_eq!(plan.evpn_instances.added.len(), 0);
+    assert_eq!(plan.evpn_instances.deleted.len(), 0);
     assert!(is_l2vni_mixed_plan(&plan));
 
     let changes = validate_l2vni_mixed(&current, &candidate, &plan).unwrap();
-    assert!(changes.added.is_empty());
-    assert!(changes.deleted.is_empty());
+    assert_eq!(changes.added.len(), 0);
+    assert_eq!(changes.deleted.len(), 0);
     assert_eq!(
         changes
             .redefined
@@ -5527,7 +5527,7 @@ fn validate_tenant_teardown_accepts_full_tenant() {
     assert_eq!(plan.evpn_instances.deleted, vec![100]);
     assert_eq!(plan.ip_vrfs.deleted, vec!["tenant-blue".to_string()]);
     assert_eq!(plan.ethernet_segments.deleted.len(), 1);
-    assert!(plan.evpn_instances.added.is_empty());
+    assert_eq!(plan.evpn_instances.added.len(), 0);
     assert!(is_tenant_teardown_plan(&plan, &current));
 
     let deleted = validate_tenant_teardown(&current, &candidate, &plan).unwrap();
@@ -5549,7 +5549,7 @@ fn validate_tenant_teardown_accepts_es_member_shrink() {
 
     assert_eq!(plan.evpn_instances.deleted, vec![200]);
     assert_eq!(plan.ethernet_segments.redefined.len(), 1);
-    assert!(plan.ethernet_segments.deleted.is_empty());
+    assert_eq!(plan.ethernet_segments.deleted.len(), 0);
     assert!(is_tenant_teardown_plan(&plan, &current));
 
     let deleted = validate_tenant_teardown(&current, &candidate, &plan).unwrap();
@@ -5730,8 +5730,8 @@ fn validate_additive_build_up_rejects_add_with_redefine() {
         runtime_candidate_from_toml(two_l2vni_one_redefined_plus_ip_vrf_runtime_candidate_toml());
     let plan = current.plan_candidate(&candidate);
 
-    assert!(!plan.ip_vrfs.added.is_empty());
-    assert!(!plan.evpn_instances.redefined.is_empty());
+    assert_ne!(plan.ip_vrfs.added.len(), 0);
+    assert_ne!(plan.evpn_instances.redefined.len(), 0);
     assert!(!is_additive_build_up_plan(&plan));
     let error = validate_additive_build_up(&current, &candidate, &plan).unwrap_err();
     let message = error.message();
@@ -5817,7 +5817,7 @@ async fn apply_evpn_runtime_tenant_teardown_commits() {
     assert_eq!(guard.model().generation().as_u64(), 2);
     assert!(guard.model().instances().is_empty());
     assert!(guard.model().ip_vrfs().get("tenant-blue").is_none());
-    assert!(guard.model().ethernet_segments().is_empty());
+    assert_eq!(guard.model().ethernet_segments().len(), 0);
 }
 
 #[tokio::test]
@@ -5907,8 +5907,8 @@ async fn apply_evpn_runtime_ip_vrf_relink_commits() {
         plan.ip_vrf_references_changed,
         "the plan summary must surface the relink so it doesn't read as empty/COMMITTED"
     );
-    assert!(plan.evpn_instances.unwrap().redefined.is_empty());
-    assert!(plan.evpn_ip_vrfs.unwrap().redefined.is_empty());
+    assert_eq!(plan.evpn_instances.unwrap().redefined.len(), 0);
+    assert_eq!(plan.evpn_ip_vrfs.unwrap().redefined.len(), 0);
     let guard = coordinator.lock().unwrap();
     assert_eq!(guard.model().generation().as_u64(), 2);
     let vni100 = rustbgpd_evpn::EvpnInstanceId::new(100).unwrap();
@@ -8175,9 +8175,9 @@ async fn apply_evpn_runtime_mixed_candidate_decomposes_across_generations() {
     assert_eq!(accepted[0].ethernet_segments.deleted.len(), 1);
     assert!(!accepted[0].evpn_instances.has_changes());
     assert_eq!(accepted[1].evpn_instances.redefined, vec![100]);
-    assert!(accepted[1].evpn_instances.added.is_empty());
+    assert_eq!(accepted[1].evpn_instances.added.len(), 0);
     assert_eq!(accepted[2].evpn_instances.added, vec![200]);
-    assert!(accepted[2].evpn_instances.redefined.is_empty());
+    assert_eq!(accepted[2].evpn_instances.redefined.len(), 0);
 
     let guard = coordinator.lock().unwrap();
     assert_eq!(guard.model().generation().as_u64(), 4);
@@ -8185,7 +8185,7 @@ async fn apply_evpn_runtime_mixed_candidate_decomposes_across_generations() {
         guard.model().mutation_state(),
         rustbgpd_evpn::EvpnRuntimeMutationState::Idle
     );
-    assert!(guard.model().ethernet_segments().is_empty());
+    assert_eq!(guard.model().ethernet_segments().len(), 0);
     assert_eq!(
         guard
             .model()
@@ -8249,7 +8249,7 @@ async fn apply_evpn_runtime_decomposed_mid_sequence_failure_is_fail_stop_and_rec
         // Step 1 (the ES delete) committed generation 2 and stays
         // committed; the failed step pins the model.
         assert_eq!(guard.model().generation().as_u64(), 2);
-        assert!(guard.model().ethernet_segments().is_empty());
+        assert_eq!(guard.model().ethernet_segments().len(), 0);
         assert_eq!(
             guard.model().mutation_state(),
             rustbgpd_evpn::EvpnRuntimeMutationState::Failed

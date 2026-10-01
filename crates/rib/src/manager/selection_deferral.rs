@@ -1833,7 +1833,7 @@ mod ledger_tests {
             retained_key_bytes: 1,
         };
 
-        assert!(
+        assert_eq!(
             DeferredSelectionKeys::extend_bounded(
                 &mut identities,
                 &mut overflowed,
@@ -1843,7 +1843,8 @@ mod ledger_tests {
                 0,
                 limits,
             )
-            .is_empty()
+            .len(),
+            0
         );
         assert_eq!(ACCEPTED_KEY_CLONES.load(Ordering::SeqCst), 1);
 
@@ -1915,7 +1916,7 @@ mod ledger_tests {
             current_len,
             limits,
         );
-        assert!(overflowed.is_empty());
+        assert_eq!(overflowed.len(), 0);
         assert_eq!(ledger.retained_key_bytes, charge * 2);
         assert_eq!(
             ledger.retained_key_bytes_by_family.get(&family_a),
@@ -1964,7 +1965,7 @@ mod ledger_tests {
             current_len,
             limits,
         );
-        assert!(overflowed.is_empty());
+        assert_eq!(overflowed.len(), 0);
         assert!(
             !ledger.unicast.contains(&keys[2]),
             "overflow remains sticky even after another family releases budget"

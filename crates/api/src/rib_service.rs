@@ -3985,7 +3985,7 @@ mod tests {
                 view.services[0].sids[0].reconstructed_sid.as_deref(),
                 Some(expected)
             );
-            assert!(view.decode_error.is_empty());
+            assert_eq!(view.decode_error.len(), 0);
             assert_eq!(view.raw_value, value);
             assert_eq!(view.flags, 0xc0);
             let sid = &view.services[0].sids[0];
@@ -4315,10 +4315,10 @@ mod tests {
             assert_eq!(view.raw_value, raw);
             assert_eq!(view.flags, 0xe0);
             if raw.last() == Some(&1) {
-                assert!(!view.decode_error.is_empty());
-                assert!(view.services.is_empty());
+                assert_ne!(view.decode_error.len(), 0);
+                assert_eq!(view.services.len(), 0);
             } else {
-                assert!(view.decode_error.is_empty());
+                assert_eq!(view.decode_error.len(), 0);
                 assert_eq!(view.services[0].tlv_type, 5);
                 let sid = &view.services[0].sids[0];
                 assert_eq!(sid.sid_value, "fc00:0:1::");
@@ -4349,8 +4349,8 @@ mod tests {
         let view = prefix_sid_to_proto(&[first, second], None, None).unwrap();
         assert_eq!(view.raw_value, [254, 0, 0]);
         assert_eq!(view.flags, 0xc0);
-        assert!(view.services.is_empty());
-        assert!(view.decode_error.is_empty());
+        assert_eq!(view.services.len(), 0);
+        assert_eq!(view.decode_error.len(), 0);
     }
 
     fn evpn_explain_selector(route: proto::evpn_route_selector::Route) -> proto::EvpnRouteSelector {
@@ -5903,8 +5903,8 @@ mod tests {
             .into_inner();
 
         assert_eq!(resp.best_reason, "only_path");
-        assert!(resp.best_reason_detail.is_empty());
-        assert!(resp.candidates.is_empty());
+        assert_eq!(resp.best_reason_detail.len(), 0);
+        assert_eq!(resp.candidates.len(), 0);
     }
 
     #[tokio::test]
@@ -5933,7 +5933,7 @@ mod tests {
             .unwrap()
             .into_inner();
         assert!(response.best_route.is_none());
-        assert!(response.best_reason.is_empty());
+        assert_eq!(response.best_reason.len(), 0);
         assert_eq!(response.candidates.len(), 1);
         assert_eq!(response.candidates[0].vs_best_reason, "srv6_sid_invalid");
         assert_eq!(response.candidates[0].advertised_path_id, 0);
@@ -6355,9 +6355,9 @@ mod tests {
                 assert_eq!(response.routes[0].peer_address, "0.0.0.0");
                 assert_eq!(response.routes[0].communities, vec![(65000 << 16) | 0x002a]);
             } else {
-                assert!(response.routes.is_empty());
+                assert_eq!(response.routes.len(), 0);
             }
-            assert!(response.received_routes.is_empty());
+            assert_eq!(response.received_routes.len(), 0);
         }
         actor.await.unwrap();
     }
@@ -6468,7 +6468,7 @@ mod tests {
             .unwrap()
             .into_inner();
         actor.await.unwrap();
-        assert!(response.routes.is_empty());
+        assert_eq!(response.routes.len(), 0);
         assert!(response.received_view);
         assert_eq!(
             response.received_routes,
@@ -6780,7 +6780,7 @@ mod tests {
             .into_inner();
 
         assert_eq!(second.total_count, 2);
-        assert!(second.next_page_token.is_empty());
+        assert_eq!(second.next_page_token.len(), 0);
         assert_eq!(second.routes.len(), 1);
         assert_eq!(second.routes[0].peer_address, "198.51.100.3");
     }
@@ -6820,7 +6820,7 @@ mod tests {
             .into_inner();
 
         assert_eq!(resp.total_count, 2);
-        assert!(resp.next_page_token.is_empty());
+        assert_eq!(resp.next_page_token.len(), 0);
         assert_eq!(resp.routes[0].peer_address, "198.51.100.3");
         assert_eq!(resp.routes[1].peer_address, "198.51.100.1");
     }
@@ -7713,8 +7713,8 @@ mod tests {
             true,
         );
 
-        assert!(response.routes.is_empty());
-        assert!(response.next_page_token.is_empty());
+        assert_eq!(response.routes.len(), 0);
+        assert_eq!(response.next_page_token.len(), 0);
         assert_eq!(response.total_count, 0);
         assert_eq!(
             response.page_version,
@@ -8145,7 +8145,7 @@ mod tests {
             .unwrap()
             .into_inner();
         assert_eq!(response.total_count, 1);
-        assert!(response.next_page_token.is_empty());
+        assert_eq!(response.next_page_token.len(), 0);
     }
 
     #[tokio::test]

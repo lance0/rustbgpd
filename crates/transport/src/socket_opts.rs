@@ -4696,7 +4696,7 @@ mod tests {
     fn tcp_ao_probe_classifies_kernel_response() {
         let support = probe_tcp_ao_support();
         if let TcpAoSupport::ProbeFailed(err) = support {
-            assert!(!err.is_empty());
+            assert_ne!(err.len(), 0);
         }
     }
 }

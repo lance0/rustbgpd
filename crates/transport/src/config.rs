@@ -720,7 +720,7 @@ mod tests {
         assert_eq!(format!("{secret:?}"), "<redacted>");
         assert!(!format!("{secret:?}").contains("transport-secret-sentinel"));
         secret.zeroize();
-        assert!(secret.as_ref().is_empty());
+        assert_eq!(secret.as_ref().len(), 0);
         assert_eq!(retained_clone.as_ref(), "transport-secret-sentinel");
     }
 

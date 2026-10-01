@@ -617,16 +617,17 @@ mod tests {
             kind: TimerKind::Detect
         }));
         // A shut-down session ignores further packets.
-        assert!(
+        assert_eq!(
             s.handle(Event::PacketReceived(peer(SessionState::Up, 0x0000_00AA)))
-                .is_empty()
+                .len(),
+            0
         );
     }
 
     #[test]
     fn down_session_ignores_spurious_detect_timer() {
         let (mut s, _) = Session::new(cfg()).expect("non-zero discriminator");
-        assert!(s.handle(Event::DetectTimerExpires).is_empty());
+        assert_eq!(s.handle(Event::DetectTimerExpires).len(), 0);
         assert_eq!(s.state(), SessionState::Down);
     }
 
@@ -637,7 +638,7 @@ mod tests {
         // not for us: no actions, no state change, remote discr unchanged.
         let mut stray = peer(SessionState::Down, 0x0000_0099);
         stray.my_discriminator = 0x0000_0CCC;
-        assert!(s.handle(Event::PacketReceived(stray)).is_empty());
+        assert_eq!(s.handle(Event::PacketReceived(stray)).len(), 0);
         assert_eq!(s.state(), SessionState::Up);
         assert_eq!(s.remote_discriminator(), 0x0000_00BB);
     }
@@ -675,15 +676,16 @@ mod tests {
         let (mut s, _) = Session::new(cfg()).expect("non-zero discriminator");
         // Your Discriminator 0 is only valid while the sender is Down/AdminDown;
         // an Up/Init packet with Your Discr 0 must be ignored.
-        assert!(
+        assert_eq!(
             s.handle(Event::PacketReceived(peer(SessionState::Up, 0)))
-                .is_empty()
+                .len(),
+            0
         );
         assert_eq!(s.state(), SessionState::Down);
         // The legitimate bootstrap (Down, Your Discr 0) is accepted.
         let actions = s.handle(Event::PacketReceived(peer(SessionState::Down, 0)));
         assert_eq!(s.state(), SessionState::Init);
-        assert!(!actions.is_empty());
+        assert_ne!(actions.len(), 0);
     }
 
     /// Bring a fresh session to Up (Down→Init→Up) and return it.
@@ -765,7 +767,7 @@ mod tests {
             SessionState::AdminDown,
             0x0000_00AA,
         )));
-        assert!(state_changes(&a).is_empty());
+        assert_eq!(state_changes(&a).len(), 0);
 
         // Flipping back out of AdminDown without a local transition (remote
         // claims Up while we are Down — ignored by the FSM) is published too:

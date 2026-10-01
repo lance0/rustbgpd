@@ -454,7 +454,7 @@ async fn owned_rfc8212_preflight_rejection_is_failed_precondition_without_mutati
             if message == RuntimeConfigPolicyFailureCode::PreflightRejected.as_str()
                 && !message.contains(&addr.to_string())
     ));
-    assert!(mgr.current_config.policy.import_chain.is_empty());
+    assert_eq!(mgr.current_config.policy.import_chain.len(), 0);
     assert_eq!(
         mgr.peers[&key(addr)].import_policy,
         Some(rfc8212_missing_import())

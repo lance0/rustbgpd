@@ -642,7 +642,7 @@ mod tests {
         assert_eq!(decoded.timestamp_unix_seconds, 1_787_000_000);
         assert_eq!(decoded.sha256, "ab".repeat(32));
         assert_eq!(decoded.summary, "asn 65001");
-        assert!(decoded.source_sha256.is_empty());
+        assert_eq!(decoded.source_sha256.len(), 0);
         assert_eq!(
             decoded.provenance_status,
             proto::ConfigHistoryProvenanceStatus::Unspecified as i32
@@ -1056,7 +1056,7 @@ mod tests {
                     assert_eq!(request.expected_runtime_snapshot_token, "kv1:abc:9");
                     assert_eq!(request.client_request_id, "deploy-42");
                     assert_eq!(request.comment, "change note");
-                    assert!(request.confirm_id.is_empty());
+                    assert_eq!(request.confirm_id.len(), 0);
                     assert_eq!(request.confirm_timeout_seconds, 0);
                     Ok(proto::ConfigTransactionApplyResponse {
                         status: proto::ConfigTransactionPlanStatus::Committable.into(),

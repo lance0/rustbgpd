@@ -5238,7 +5238,7 @@ mod tests {
         let plan = compute_fib_diff(&intent, &owned, &kernel);
 
         assert_eq!(plan.ops, vec![FibOp::Replace { previous, desired }]);
-        assert!(plan.drops.is_empty());
+        assert_eq!(plan.drops.len(), 0);
     }
 
     #[test]
@@ -5298,7 +5298,7 @@ mod tests {
 
         let statuses = reconcile_config_for_test(config, rib_tx, &mut fib, &mut owned).await;
 
-        assert!(statuses.is_empty());
+        assert_eq!(statuses.len(), 0);
         assert!(!path.exists());
     }
 
@@ -6757,7 +6757,7 @@ mod tests {
                 .await
             );
             assert_eq!(fib.dump_calls, 0);
-            assert!(fib.applied.is_empty());
+            assert_eq!(fib.applied.len(), 0);
             assert_eq!(owned, owned_before);
             assert_eq!(unresolved, unresolved_before);
             assert_eq!(*status_rx.borrow(), sentinel);
@@ -6859,7 +6859,7 @@ mod tests {
                 .await
             );
             assert_eq!(fib.dump_calls, 0);
-            assert!(fib.applied.is_empty());
+            assert_eq!(fib.applied.len(), 0);
             assert_eq!(owned, owned_before);
             assert_eq!(unresolved, unresolved_before);
             assert_eq!(*status_rx.borrow(), sentinel);
@@ -6929,7 +6929,7 @@ mod tests {
             .await
         );
         assert_eq!(fib.dump_calls, 0);
-        assert!(fib.applied.is_empty());
+        assert_eq!(fib.applied.len(), 0);
         assert!(owned.routes.is_empty() && unresolved.routes.is_empty());
         assert_eq!(*status_rx.borrow(), sentinel);
         assert!(event_rx.try_recv().is_err());
@@ -7406,7 +7406,7 @@ mod tests {
         let statuses =
             reconcile_for_test(vec![route(v4(24), ip("192.0.2.1"))], &mut fib, &mut owned).await;
 
-        assert!(fib.applied.is_empty());
+        assert_eq!(fib.applied.len(), 0);
         assert!(owned.routes.is_empty());
         assert_eq!(statuses.len(), 1);
         assert_eq!(statuses[0].state, FibRuntimeState::Rejected);
@@ -7428,7 +7428,7 @@ mod tests {
         let statuses =
             reconcile_for_test(vec![route(v4(24), ip("192.0.2.1"))], &mut fib, &mut owned).await;
 
-        assert!(fib.applied.is_empty());
+        assert_eq!(fib.applied.len(), 0);
         assert!(owned.routes.is_empty());
         assert_eq!(statuses.len(), 1);
         assert_eq!(statuses[0].state, FibRuntimeState::Rejected);
@@ -7480,7 +7480,7 @@ mod tests {
         assert_eq!(statuses.len(), 1);
         assert_eq!(statuses[0].state, FibRuntimeState::Unresolved);
         assert_eq!(statuses[0].reason, "next_hop_unresolved");
-        assert!(events.is_empty());
+        assert_eq!(events.len(), 0);
         assert_eq!(
             metric_value_bits(&registry, "bgp_fib_routes_unresolved"),
             1.0_f64.to_bits()
@@ -7505,7 +7505,7 @@ mod tests {
         assert_eq!(fib.applied.len(), 1, "ordinary RIB pass must skip hold");
         assert_eq!(statuses[0].state, FibRuntimeState::Unresolved);
         assert_eq!(statuses[0].peer, Some(ip("198.51.100.9")));
-        assert!(events.is_empty());
+        assert_eq!(events.len(), 0);
 
         fib.fail_apply.push(FibApplyError::Unresolved);
         let (statuses, events) = reconcile_for_test_with_holds(
@@ -7659,7 +7659,7 @@ mod tests {
         )
         .await;
         assert!(unresolved.routes.is_empty());
-        assert!(statuses.is_empty());
+        assert_eq!(statuses.len(), 0);
         assert_eq!(fib.applied.len(), 1, "withdrawal needs no kernel delete");
     }
 
@@ -7700,7 +7700,7 @@ mod tests {
         assert_eq!(statuses.len(), 1);
         assert_eq!(statuses[0].state, FibRuntimeState::Unresolved);
         assert_eq!(statuses[0].next_hop, Some(ip("192.0.2.2")));
-        assert!(events.is_empty());
+        assert_eq!(events.len(), 0);
 
         let (statuses, events) = reconcile_for_test_with_holds(
             vec![desired],
@@ -7875,7 +7875,7 @@ mod tests {
         assert!(reached_apply);
         assert!(unresolved.routes.is_empty());
         assert!(status_rx.borrow().is_empty());
-        assert!(fib.applied.is_empty());
+        assert_eq!(fib.applied.len(), 0);
     }
 
     #[tokio::test]
@@ -7987,7 +7987,7 @@ mod tests {
         .await;
 
         let statuses = status_rx.borrow().clone();
-        assert!(statuses.is_empty());
+        assert_eq!(statuses.len(), 0);
         assert!(fib.applied.is_empty(), "failed query must not reach apply");
         assert!(owned.routes.contains_key(&existing_key));
     }
@@ -8088,7 +8088,7 @@ mod tests {
 
         assert!(matches!(fib.applied.as_slice(), [FibOp::Remove(_)]));
         assert!(owned.routes.is_empty());
-        assert!(statuses.is_empty());
+        assert_eq!(statuses.len(), 0);
     }
 
     #[tokio::test]
@@ -8150,7 +8150,7 @@ mod tests {
 
         let statuses = reconcile_for_test(Vec::new(), &mut fib, &mut owned).await;
 
-        assert!(fib.applied.is_empty());
+        assert_eq!(fib.applied.len(), 0);
         assert!(owned.routes.is_empty());
         assert_eq!(statuses.len(), 1);
         assert_eq!(statuses[0].state, FibRuntimeState::Rejected);
@@ -8178,7 +8178,7 @@ mod tests {
 
         assert!(matches!(fib.applied.as_slice(), [FibOp::Remove(_)]));
         assert!(owned.routes.is_empty());
-        assert!(statuses.is_empty());
+        assert_eq!(statuses.len(), 0);
     }
 
     #[tokio::test]
@@ -8294,7 +8294,7 @@ mod tests {
 
         drain_owned(&config(), &mut fib, &metrics(), &status_tx, &mut owned).await;
 
-        assert!(fib.applied.is_empty());
+        assert_eq!(fib.applied.len(), 0);
         assert!(owned.routes.is_empty());
         assert!(status_rx.borrow().is_empty());
         assert_eq!(
@@ -8313,7 +8313,7 @@ mod tests {
         let statuses =
             reconcile_for_test(vec![route(v4(24), ip("2001:db8::1"))], &mut fib, &mut owned).await;
 
-        assert!(fib.applied.is_empty());
+        assert_eq!(fib.applied.len(), 0);
         assert!(owned.routes.is_empty());
         assert_eq!(statuses.len(), 1);
         assert_eq!(statuses[0].state, FibRuntimeState::Rejected);
@@ -8339,7 +8339,7 @@ mod tests {
 
         let statuses = reconcile_config_for_test(config, rib_tx, &mut fib, &mut owned).await;
 
-        assert!(fib.applied.is_empty());
+        assert_eq!(fib.applied.len(), 0);
         assert!(owned.routes.is_empty());
         assert_eq!(statuses.len(), 1);
         assert_eq!(statuses[0].state, FibRuntimeState::Rejected);
@@ -8368,7 +8368,7 @@ mod tests {
 
         let statuses = reconcile_config_for_test(config, rib_tx, &mut fib, &mut owned).await;
 
-        assert!(fib.applied.is_empty());
+        assert_eq!(fib.applied.len(), 0);
         assert!(owned.routes.is_empty());
         assert_eq!(statuses.len(), 2);
         assert!(statuses.iter().all(|status| {
@@ -8424,7 +8424,7 @@ mod tests {
 
         let statuses = reconcile_config_for_test(config, rib_tx, &mut fib, &mut owned).await;
 
-        assert!(fib.applied.is_empty());
+        assert_eq!(fib.applied.len(), 0);
         assert_eq!(owned.routes.len(), 1);
         assert_eq!(statuses.len(), 2);
         assert!(statuses.iter().any(|status| {
@@ -9057,7 +9057,7 @@ mod tests {
             &CancellationToken::new(),
         )
         .await;
-        assert!(route_show(1000, prefix_text).trim().is_empty());
+        assert_eq!(route_show(1000, prefix_text).trim().len(), 0);
         assert!(owned.routes.is_empty());
         assert_eq!(unresolved.routes.len(), 1);
         assert_eq!(status_rx.borrow()[0].state, FibRuntimeState::Unresolved);
@@ -9167,7 +9167,7 @@ mod tests {
             &CancellationToken::new(),
         )
         .await;
-        assert!(route_show_v6(1000, prefix_text).trim().is_empty());
+        assert_eq!(route_show_v6(1000, prefix_text).trim().len(), 0);
         assert!(owned.routes.is_empty());
         assert_eq!(unresolved.routes.len(), 1);
         assert_eq!(status_rx.borrow()[0].state, FibRuntimeState::Unresolved);

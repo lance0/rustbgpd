@@ -1278,7 +1278,7 @@ mod tests {
             .await
             .unwrap()
             .into_inner();
-        assert!(resp.instances.is_empty());
+        assert_eq!(resp.instances.len(), 0);
     }
 
     #[tokio::test]
@@ -1291,7 +1291,7 @@ mod tests {
             .await
             .unwrap()
             .into_inner();
-        assert!(resp.quarantines.is_empty());
+        assert_eq!(resp.quarantines.len(), 0);
         assert_eq!(resp.omitted, 0);
         assert!(resp.complete);
     }
@@ -1348,7 +1348,7 @@ mod tests {
         assert_eq!(resp.instances[0].rd, "65000:100");
         assert_eq!(resp.instances[0].local_vtep_ip, "10.0.0.1");
         assert_eq!(resp.instances[0].route_targets, vec!["65000:100"]);
-        assert!(resp.instances[0].bridge.is_empty());
+        assert_eq!(resp.instances[0].bridge.len(), 0);
         assert_eq!(resp.instances[0].bridge_vlan, None);
         assert!(!resp.instances[0].advertise_svi_mac);
         assert_eq!(resp.instances[0].originated_local_macs_count, 0);
@@ -1356,7 +1356,7 @@ mod tests {
             resp.instances[0].readiness_state,
             proto::EvpnInstanceReadinessState::EvpnInstanceReadinessUnbound as i32
         );
-        assert!(resp.instances[0].not_ready_reason.is_empty());
+        assert_eq!(resp.instances[0].not_ready_reason.len(), 0);
     }
 
     #[tokio::test]
@@ -1494,17 +1494,17 @@ mod tests {
             resp.instances[0].readiness_state,
             proto::EvpnInstanceReadinessState::EvpnInstanceReadinessUnbound as i32
         );
-        assert!(resp.instances[0].not_ready_reason.is_empty());
+        assert_eq!(resp.instances[0].not_ready_reason.len(), 0);
         assert_eq!(
             resp.instances[1].readiness_state,
             proto::EvpnInstanceReadinessState::EvpnInstanceReadinessUnknown as i32
         );
-        assert!(resp.instances[1].not_ready_reason.is_empty());
+        assert_eq!(resp.instances[1].not_ready_reason.len(), 0);
         assert_eq!(
             resp.instances[2].readiness_state,
             proto::EvpnInstanceReadinessState::EvpnInstanceReadinessReady as i32
         );
-        assert!(resp.instances[2].not_ready_reason.is_empty());
+        assert_eq!(resp.instances[2].not_ready_reason.len(), 0);
         assert_eq!(
             resp.instances[3].readiness_state,
             proto::EvpnInstanceReadinessState::EvpnInstanceReadinessNotReady as i32
@@ -2538,7 +2538,7 @@ mod tests {
             .await
             .unwrap()
             .into_inner();
-        assert!(resp.ip_vrfs.is_empty());
+        assert_eq!(resp.ip_vrfs.len(), 0);
     }
 
     #[tokio::test]
@@ -2589,7 +2589,7 @@ mod tests {
         );
         assert_eq!(row.vrf_ifindex, 11);
         assert_eq!(row.l3vxlan_ifindex, 12);
-        assert!(row.not_ready_reasons.is_empty());
+        assert_eq!(row.not_ready_reasons.len(), 0);
     }
 
     #[tokio::test]
@@ -2764,7 +2764,7 @@ mod tests {
         );
         assert_eq!(row.vrf_ifindex, 0);
         assert_eq!(row.l3vxlan_ifindex, 0);
-        assert!(row.not_ready_reasons.is_empty());
+        assert_eq!(row.not_ready_reasons.len(), 0);
     }
 
     #[tokio::test]

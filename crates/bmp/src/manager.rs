@@ -3630,7 +3630,7 @@ mod tests {
         let handle = tokio::spawn(mgr.run());
 
         let (bootstrap, mut c_rx) = connect_collector(&control_tx, 0, collector_addr(0), 16).await;
-        assert!(bootstrap.messages.is_empty());
+        assert_eq!(bootstrap.messages, [] as [bytes::Bytes; 0]);
         complete_bootstrap(&control_tx, 0, bootstrap.generation).await;
 
         assert!(

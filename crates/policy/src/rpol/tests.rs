@@ -398,7 +398,7 @@ test unmatched { route { prefix 198.51.100.0/24 } expect p == reject }
     assert_eq!(step.policy_name.as_deref(), Some("p"));
     assert_eq!(step.statement_index, None);
     assert_eq!(step.term_name, None);
-    assert!(step.modifications.is_empty());
+    assert_eq!(step.modifications.len(), 0);
 }
 
 #[test]
@@ -572,7 +572,7 @@ fn term_fallthrough_encoding() {
     let ctx = route_ctx(v4(10, 0, 0, 0, 24), &[], RpkiValidation::NotFound);
     let result = chain.evaluate(&ctx);
     assert_eq!(result.modifications.set_med, Some(10));
-    assert!(result.modifications.communities_add.is_empty());
+    assert_eq!(result.modifications.communities_add.len(), 0);
 }
 
 #[test]
@@ -3286,7 +3286,7 @@ fn eval_error_explain_renders_and_agrees() {
         "error renders in place of a verdict: {:?}",
         step.term_traces
     );
-    assert!(step.modifications.is_empty());
+    assert_eq!(step.modifications.len(), 0);
 
     // Computed set values render in source form in the action lines.
     let compiled = compile_ok("policy p { term t { set med route.med + 50; accept } }");
@@ -3686,7 +3686,7 @@ fn use_before_definition_is_a_compile_error() {
         rendered.contains("unknown parameter or binding `y`"),
         "{rendered}"
     );
-    assert!(!diags.0.is_empty());
+    assert_ne!(diags.0.len(), 0);
 }
 
 /// The `MAX_LOCALS` boundary: 64 bindings in one scope compile; the
@@ -4233,12 +4233,9 @@ fn as_path_iteration_wire_order_with_duplicates_and_sets() {
     );
     // An absent typed path iterates zero times.
     let no_path = route_ctx(v4(10, 0, 0, 0, 24), &[], RpkiValidation::NotFound);
-    assert!(
-        chain
-            .evaluate(&no_path)
-            .modifications
-            .communities_add
-            .is_empty()
+    assert_eq!(
+        chain.evaluate(&no_path).modifications.communities_add.len(),
+        0
     );
 }
 

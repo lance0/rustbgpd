@@ -1388,8 +1388,8 @@ fn backpressured_recovery_stays_internal_and_retries_transactionally() {
             .collect::<HashSet<_>>(),
         HashSet::from([v4(41), v4(42)])
     );
-    assert!(replay.end_of_rib.is_empty());
-    assert!(replay.refresh_markers.is_empty());
+    assert_eq!(replay.end_of_rib.len(), 0);
+    assert_eq!(replay.refresh_markers.len(), 0);
     assert!(
         outbound_rx.try_recv().is_err(),
         "only one replay is enqueued"
@@ -1475,8 +1475,8 @@ fn orf_pending_recovery_waits_for_a_normal_peer_refresh() {
     let recovery = outbound_rx
         .try_recv()
         .expect("internal recovery is enqueued");
-    assert!(recovery.end_of_rib.is_empty());
-    assert!(recovery.refresh_markers.is_empty());
+    assert_eq!(recovery.end_of_rib.len(), 0);
+    assert_eq!(recovery.refresh_markers.len(), 0);
     assert_eq!(manager.outbound_limit_recovery_for(peer), vec![]);
     assert_eq!(outbound_limit_actor_samples(&metrics)["recovery"], 1);
 }
@@ -1503,8 +1503,8 @@ fn recovery_does_not_consume_or_flush_a_gr_deferred_eor() {
     let recovery = outbound_rx
         .try_recv()
         .expect("internal recovery is enqueued");
-    assert!(recovery.end_of_rib.is_empty());
-    assert!(recovery.refresh_markers.is_empty());
+    assert_eq!(recovery.end_of_rib.len(), 0);
+    assert_eq!(recovery.refresh_markers.len(), 0);
     assert!(
         manager
             .gr_deferred_eor

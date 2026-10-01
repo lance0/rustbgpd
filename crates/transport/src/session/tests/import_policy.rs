@@ -1072,7 +1072,7 @@ async fn explain_statement_trace_attributes_hit_and_skips_stale() {
     assert_eq!(steps.len(), 1);
     assert_eq!(steps[0].statement_index, Some(0));
     assert_eq!(steps[0].action, PolicyAction::Deny);
-    assert!(steps[0].modifications.is_empty());
+    assert_eq!(steps[0].modifications.len(), 0);
     // Hot-apply the (same) chain: the generation bump makes the cached
     // entries Stale, and a stale match must carry no statement trace.
     let (reply_tx, reply_rx) = oneshot::channel();

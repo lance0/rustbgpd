@@ -5495,7 +5495,7 @@ local_vtep_ip = "10.0.0.1"
             2,
             "the committed delete remains authoritative after the later step fails"
         );
-        assert!(guard.model().ethernet_segments().is_empty());
+        assert_eq!(guard.model().ethernet_segments().len(), 0);
         assert_eq!(
             guard
                 .model()
@@ -5974,7 +5974,7 @@ local_vtep_ip = "10.0.0.1"
         let initial = load_tier_test_config(&path);
         let live_grpc_tcp = initial.global.telemetry.grpc_tcp.clone();
         let live_grpc_uds = initial.global.telemetry.grpc_uds.clone();
-        assert!(initial.ethernet_segments.is_empty());
+        assert_eq!(initial.ethernet_segments.len(), 0);
         assert!(
             !initial.apply_bum_enforcement,
             "explicit `apply_bum_enforcement = false` must override the v0.23.0 default"
@@ -6429,7 +6429,7 @@ log_format = "json"
         let initial = load_tier_test_config(&path);
         let tcp = initial.global.telemetry.grpc_tcp.clone();
         let uds = initial.global.telemetry.grpc_uds.clone();
-        assert!(initial.fib_tables.is_empty());
+        assert_eq!(initial.fib_tables.len(), 0);
 
         std::fs::write(&path, FIB_ONE_TABLE_TOML).unwrap();
 
@@ -7479,7 +7479,7 @@ hold_time = 90
                 let (outcome, tags, calls) =
                     drive_scoped_reload(&initial, &desired, with_listener).await;
                 assert!(matches!(outcome, SighupReloadOutcome::CleanNoEffect(_)));
-                assert!(tags.is_empty());
+                assert_eq!(tags.len(), 0);
                 assert!(calls.is_empty());
             }
         }
@@ -7609,7 +7609,7 @@ metric = 200
             "{}",
             failure.error
         );
-        assert!(peer_mgr.await.unwrap().is_empty());
+        assert_eq!(peer_mgr.await.unwrap().len(), 0);
         assert!(generation.await.unwrap().is_empty());
         assert!(
             fib_rx.recv().await.is_none(),
@@ -7711,7 +7711,7 @@ import_policy_chain = ["origin-guard"]
             .await;
             drop(peer_mgr_tx);
             drop(internal_tx);
-            assert!(mock.await.unwrap().is_empty());
+            assert_eq!(mock.await.unwrap().len(), 0);
             let calls = generation.await.unwrap();
             if variant == "malformed" {
                 let SighupReloadOutcome::CleanNoEffect(SighupReloadError::Failed(failure)) =
@@ -7997,17 +7997,17 @@ import_policy_chain = ["origin-guard"]
         std::fs::write(dir.path().join("datasets/customers.list"), "64500\n64999\n").unwrap();
         let (outcome, tags, calls) = run(&adopted.runtime).await;
         let compound = outcome.expect("rpol and dataset contents settle together");
-        assert!(tags.is_empty());
+        assert_eq!(tags.len(), 0);
         assert_eq!(calls.len(), 1);
-        assert!(calls[0].actions.is_empty());
+        assert_eq!(calls[0].actions.len(), 0);
 
         // Dataset-only changes keep the same owned publication route.
         std::fs::write(dir.path().join("datasets/customers.list"), "64500\n65000\n").unwrap();
         let (outcome, tags, calls) = run(&compound.runtime).await;
         let dataset = outcome.expect("dataset-only refresh uses the generation route");
-        assert!(tags.is_empty());
+        assert_eq!(tags.len(), 0);
         assert_eq!(calls.len(), 1);
-        assert!(calls[0].actions.is_empty());
+        assert_eq!(calls[0].actions.len(), 0);
         assert_eq!(
             dataset
                 .policy
@@ -8108,7 +8108,7 @@ import_policy_chain = ["origin-guard"]
         assert!(matches!(adopted.completion, SighupCompletion::Complete));
         drop(peer_mgr_tx);
         drop(internal_tx);
-        assert!(mock.await.unwrap().is_empty());
+        assert_eq!(mock.await.unwrap().len(), 0);
         let calls = generation.await.unwrap();
         assert_eq!(calls.len(), 2);
         assert_eq!(
@@ -8578,7 +8578,7 @@ import_policy_chain = ["origin-guard"]
         drop(internal_tx);
         let calls = generation.await.unwrap();
         assert_eq!(calls.len(), 1, "an rpol-only edit is one generation");
-        assert!(calls[0].actions.is_empty());
+        assert_eq!(calls[0].actions.len(), 0);
 
         // The returned snapshot resolves chains against the NEW
         // compiled registry: the edited local-pref value evaluates.
@@ -10216,14 +10216,14 @@ tcp_ao = { key = "static-next-start", send_id = 3, recv_id = 4, algorithm = "hma
         let (returned, tags) = drive_reload(initial, desired).await;
         let returned = returned.expect("valid startup-only AO edits are pinned");
         assert!(tags.is_empty(), "pinned AO addition must not mutate peers");
-        assert!(returned.neighbors.is_empty());
+        assert_eq!(returned.neighbors.len(), 0);
         assert_eq!(returned.dynamic_neighbors.len(), 1);
         assert_eq!(
             returned.dynamic_neighbors[0].tcp_ao.as_ref().unwrap().0[0].key,
             "dynamic-startup"
         );
         assert_eq!(returned.desired.neighbors.len(), 1);
-        assert!(returned.desired.dynamic_neighbors.is_empty());
+        assert_eq!(returned.desired.dynamic_neighbors.len(), 0);
     }
 
     #[tokio::test]
@@ -10333,7 +10333,7 @@ import_policy_chain = ["origin-guard"]
         drop(internal_tx);
         let calls = generation.await.unwrap();
         assert_eq!(calls.len(), 1);
-        assert!(calls[0].actions.is_empty());
+        assert_eq!(calls[0].actions.len(), 0);
 
         assert_eq!(live.pin().generation, 2);
         assert_eq!(live.pin().data.records(), 2);
@@ -11790,7 +11790,7 @@ remote_asn = 65002
         );
         let (runtime, disk) = reload_then_persist_policy_after_desired_refresh(&new_toml).await;
 
-        assert!(runtime.evpn_instances.is_empty());
+        assert_eq!(runtime.evpn_instances.len(), 0);
         assert_eq!(disk.evpn_instances.len(), 1);
     }
 

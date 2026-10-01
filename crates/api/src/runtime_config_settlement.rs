@@ -2476,7 +2476,7 @@ mod tests {
         let (watchdog, receiver) = test_watchdog(Duration::from_secs(5), Duration::from_millis(20));
         let registry = prometheus::Registry::new();
         watchdog.register_metrics(&registry);
-        assert!(encode_metric_families(&registry.gather()).is_empty());
+        assert_eq!(encode_metric_families(&registry.gather()).len(), 0);
         let (first_operation, guard, _, _) = operation(&watchdog, false).await;
         let attached = encode_metric_families(&registry.gather());
         assert!(attached.contains("kind=\"apply\""));
@@ -2494,7 +2494,7 @@ mod tests {
         assert!(!detached.contains("phase=\"owned_preflight\""));
         assert!(!detached.contains("response_attached=\"attached\""));
         assert!(first_operation.try_settle());
-        assert!(encode_metric_families(&registry.gather()).is_empty());
+        assert_eq!(encode_metric_families(&registry.gather()).len(), 0);
         drop(guard);
 
         let (operation, guard, _, _) = operation(&watchdog, false).await;

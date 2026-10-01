@@ -100,12 +100,13 @@ async fn assert_timer_drain_yields_before_backlog_is_empty(pending_chunk: bool) 
         "general read waited for the whole ingest backlog: {observed}/{total}"
     );
     assert!(readiness_response.try_recv().unwrap().unwrap() < total);
-    assert!(
+    assert_eq!(
         summary_response
             .try_recv()
             .expect("typed summary must be served at the first drain seam")
             .snapshots
-            .is_empty()
+            .len(),
+        0
     );
     assert!(
         matches!(
@@ -261,7 +262,7 @@ async fn timer_drain_preserves_newly_accepted_policy_transition_fence() {
     ));
     let handle = tokio::spawn(actor);
     assert_eq!(query.await.unwrap(), 0);
-    assert!(summary.await.unwrap().snapshots.is_empty());
+    assert_eq!(summary.await.unwrap().snapshots.len(), 0);
     let _outcome = transition.await.unwrap();
     assert_eq!(primary.await.unwrap(), 0);
     drop(tx);

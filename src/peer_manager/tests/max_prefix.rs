@@ -722,7 +722,7 @@ async fn peer_presence_retained_max_prefix_emits_no_removed() {
         0,
     )
     .await;
-    assert!(removed.is_empty());
+    assert_eq!(removed.len(), 0);
 }
 
 /// A candidate-owned breach is fail-closed for the whole peer. Removing the

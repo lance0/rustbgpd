@@ -172,7 +172,7 @@ prometheus_addr = "0.0.0.0:9179"
 log_format = "json"
 "#;
     let config = parse(toml_str).unwrap();
-    assert!(config.neighbors.is_empty());
+    assert_eq!(config.neighbors.len(), 0);
 }
 
 #[test]
@@ -1399,5 +1399,5 @@ fn per_neighbor_inline_policy_still_loads() {
         "test.toml",
     )
     .unwrap();
-    assert!(!config.neighbors[0].import_policy.is_empty());
+    assert_ne!(config.neighbors[0].import_policy.len(), 0);
 }

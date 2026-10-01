@@ -1198,7 +1198,7 @@ mod tests {
         let intent = project_fib_intent(&[], &candidates(routes));
 
         assert!(intent.routes.is_empty());
-        assert!(intent.drops.is_empty());
+        assert_eq!(intent.drops.len(), 0);
     }
 
     #[test]
@@ -1217,7 +1217,7 @@ mod tests {
         let intent = project_fib_intent(&tables, &candidates(routes));
 
         assert_eq!(intent.routes.len(), 2);
-        assert!(intent.drops.is_empty());
+        assert_eq!(intent.drops.len(), 0);
         assert!(
             intent
                 .routes
@@ -1246,7 +1246,7 @@ mod tests {
             intent.routes.keys().next().unwrap().prefix,
             Prefix::V4(_)
         ));
-        assert!(intent.drops.is_empty());
+        assert_eq!(intent.drops.len(), 0);
     }
 
     #[test]
@@ -1317,7 +1317,7 @@ mod tests {
             addr_scopes(&projected.target),
             vec![(ip("fe80::1"), Some(7))]
         );
-        assert!(intent.drops.is_empty());
+        assert_eq!(intent.drops.len(), 0);
     }
 
     #[test]
@@ -1333,7 +1333,7 @@ mod tests {
             addr_scopes(&projected.target),
             vec![(ip("192.0.2.1"), None)]
         );
-        assert!(intent.drops.is_empty());
+        assert_eq!(intent.drops.len(), 0);
     }
 
     #[test]
@@ -1542,7 +1542,7 @@ mod tests {
 
         let plan = compute_fib_diff(&intent, &owned, &kernel);
 
-        assert!(plan.ops.is_empty());
+        assert_eq!(plan.ops.len(), 0);
         assert_eq!(plan.drops.len(), 1);
         assert!(matches!(
             plan.drops.as_slice(),
@@ -1652,7 +1652,7 @@ mod tests {
         let intent = project_fib_intent(&[table], &candidates(routes));
 
         assert_eq!(intent.routes.len(), 2);
-        assert!(intent.drops.is_empty());
+        assert_eq!(intent.drops.len(), 0);
     }
 
     #[test]
@@ -1671,7 +1671,7 @@ mod tests {
         );
 
         assert_eq!(plan.ops, vec![FibOp::Add(route)]);
-        assert!(plan.drops.is_empty());
+        assert_eq!(plan.drops.len(), 0);
     }
 
     #[test]
@@ -1692,8 +1692,8 @@ mod tests {
 
         let plan = compute_fib_diff(&intent, &owned, &kernel);
 
-        assert!(plan.ops.is_empty());
-        assert!(plan.drops.is_empty());
+        assert_eq!(plan.ops.len(), 0);
+        assert_eq!(plan.drops.len(), 0);
     }
 
     #[test]
@@ -1720,7 +1720,7 @@ mod tests {
         let plan = compute_fib_diff(&intent, &owned, &kernel);
 
         assert_eq!(plan.ops, vec![FibOp::Adopt(desired)]);
-        assert!(plan.drops.is_empty());
+        assert_eq!(plan.drops.len(), 0);
     }
 
     #[test]
@@ -1743,7 +1743,7 @@ mod tests {
         let plan = compute_fib_diff(&intent, &owned, &kernel);
 
         assert_eq!(plan.ops, vec![FibOp::Replace { previous, desired }]);
-        assert!(plan.drops.is_empty());
+        assert_eq!(plan.drops.len(), 0);
     }
 
     #[test]
@@ -1822,7 +1822,7 @@ mod tests {
         let plan = compute_fib_diff(&FibIntent::default(), &owned, &kernel);
 
         assert_eq!(plan.ops, vec![FibOp::Remove(route)]);
-        assert!(plan.drops.is_empty());
+        assert_eq!(plan.drops.len(), 0);
     }
 
     #[test]
@@ -1878,7 +1878,7 @@ mod tests {
 
         let plan = compute_fib_diff(&intent, &FibOwnedState::default(), &kernel);
 
-        assert!(plan.ops.is_empty());
+        assert_eq!(plan.ops.len(), 0);
         assert_eq!(
             plan.drops,
             vec![FibDrop::ForeignRouteExists { key: route.key }]
@@ -1899,7 +1899,7 @@ mod tests {
 
         let plan = compute_fib_diff(&intent, &FibOwnedState::default(), &kernel);
 
-        assert!(plan.ops.is_empty());
+        assert_eq!(plan.ops.len(), 0);
         assert_eq!(
             plan.drops,
             vec![FibDrop::ForeignRouteExists { key: route.key }]
@@ -1920,7 +1920,7 @@ mod tests {
 
         let plan = compute_fib_diff(&intent, &FibOwnedState::default(), &kernel);
 
-        assert!(plan.ops.is_empty());
+        assert_eq!(plan.ops.len(), 0);
         assert_eq!(
             plan.drops,
             vec![FibDrop::ForeignRouteExists { key: desired.key }]
@@ -1938,8 +1938,8 @@ mod tests {
 
         let plan = compute_fib_diff(&FibIntent::default(), &FibOwnedState::default(), &kernel);
 
-        assert!(plan.ops.is_empty());
-        assert!(plan.drops.is_empty());
+        assert_eq!(plan.ops.len(), 0);
+        assert_eq!(plan.drops.len(), 0);
     }
 
     #[test]
@@ -1958,7 +1958,7 @@ mod tests {
         let plan = compute_fib_diff(&intent, &owned, &FibKernelSnapshot::default());
 
         assert_eq!(plan.ops, vec![FibOp::Add(route)]);
-        assert!(plan.drops.is_empty());
+        assert_eq!(plan.drops.len(), 0);
     }
 
     #[test]
@@ -2361,7 +2361,7 @@ mod tests {
         assert_eq!(intent.routes.len(), 1);
         let projected = intent.routes.values().next().unwrap();
         assert_eq!(addrs(&projected.target), vec![ip("203.0.113.1")]);
-        assert!(intent.drops.is_empty());
+        assert_eq!(intent.drops.len(), 0);
     }
 
     #[test]
@@ -2400,7 +2400,7 @@ mod tests {
         assert_eq!(intent.routes.len(), 1);
         let projected = intent.routes.values().next().unwrap();
         assert_eq!(addrs(&projected.target), vec![ip("203.0.113.1")]);
-        assert!(intent.drops.is_empty());
+        assert_eq!(intent.drops.len(), 0);
     }
 
     #[test]
@@ -2468,7 +2468,7 @@ mod tests {
             "reordered-but-equal set should be a no-op: {:?}",
             plan.ops
         );
-        assert!(plan.drops.is_empty());
+        assert_eq!(plan.drops.len(), 0);
     }
 
     #[test]
@@ -2493,6 +2493,6 @@ mod tests {
         let plan = compute_fib_diff(&intent, &owned, &kernel);
 
         assert_eq!(plan.ops, vec![FibOp::Replace { previous, desired }]);
-        assert!(plan.drops.is_empty());
+        assert_eq!(plan.drops.len(), 0);
     }
 }

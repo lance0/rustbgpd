@@ -485,7 +485,7 @@ fn comparison_verdicts_use_runtime_identity_and_preserve_sides() {
     let separate = compare(&mut manager, MEMBER, OTHER1);
     assert_eq!(separate.verdict, UpdateGroupComparisonVerdict::Separate);
     assert_eq!(separate.primary_update_group, "group:0");
-    assert!(separate.differences.is_empty());
+    assert_eq!(separate.differences.len(), 0);
     assert_eq!(
         compare(&mut manager, MEMBER, OTHER2).verdict,
         UpdateGroupComparisonVerdict::Unknown
@@ -1434,7 +1434,7 @@ fn pcb_lane_counts_insert_replace_remove() {
     let out = stage_pcb(&mut m, &[p]);
     assert_eq!(out.lane_deltas.len(), 1);
     assert!(out.lane_deltas[0].new.is_none());
-    assert!(lane_count_rows(&m).is_empty());
+    assert_eq!(lane_count_rows(&m).len(), 0);
 }
 
 /// Winner source-flip under an unchanged runner-up: the lane route
@@ -2356,7 +2356,7 @@ fn pcb_lane_only_transition_targets_winner_source_only() {
     let (announce, withdraw) = member_emission(&out, OTHER1);
     assert_eq!(announce.len(), 1);
     assert_eq!((announce[0].peer, announce[0].path_id), (OTHER2, 0));
-    assert!(withdraw.is_empty());
+    assert_eq!(withdraw.len(), 0);
     for member in [OTHER2, MEMBER, FOURTH] {
         let (announce, withdraw) = member_emission(&out, member);
         assert!(
@@ -3185,7 +3185,7 @@ fn pcb_resync_substitution_applies_rs_control() {
         Some(lane_entry(substituted, MEMBER, "lane", Some(scrub_comm))),
     );
     let (announce, withdraw, _) = resync(&group, MEMBER, rs, true, false, None);
-    assert!(withdraw.is_empty());
+    assert_eq!(withdraw.len(), 0);
     assert_eq!(announce.len(), 1);
     assert!(
         announce[0].communities().is_empty(),
@@ -3501,7 +3501,7 @@ fn pcb_route_refresh_replays_lane_substitution() {
         (OTHER2, Some(NextHopAction::Self_)),
         "the substituted slot carries the LANE's route and nh residue"
     );
-    assert!(withdrawn.is_empty());
+    assert_eq!(withdrawn.len(), 0);
 }
 
 /// rs-control at the refresh replay decides the substituted slot
@@ -3520,7 +3520,7 @@ fn pcb_route_refresh_rs_member_suppresses_tagged_lane() {
         vec![prefix(1)],
         "the suppressed lane source removes the substituted slot"
     );
-    assert!(withdrawn.is_empty());
+    assert_eq!(withdrawn.len(), 0);
 }
 
 /// Join / initial-dump replay substitution matrix, plus the
@@ -3543,7 +3543,7 @@ fn pcb_initial_dump_replays_substitution_and_join_counters_agree() {
     );
     assert_eq!(announced[&prefix(1)], (OTHER1, None));
     assert_eq!(announced[&prefix(2)], (OTHER2, Some(NextHopAction::Self_)));
-    assert!(withdrawn.is_empty());
+    assert_eq!(withdrawn.len(), 0);
     let permitted = m
         .export_policy_stats
         .get(&MEMBER)
@@ -3751,7 +3751,7 @@ fn pcb_member_view_snapshot_records_substitution_for_regroup_diff() {
         !routes_equal(&announce[0], &baseline[&(k2, 0)]),
         "the announce is the CHANGED lane content"
     );
-    assert!(withdraw.is_empty());
+    assert_eq!(withdraw.len(), 0);
 
     // Retired substitution: the baseline key is no longer
     // retained — withdrawn.
@@ -4198,7 +4198,7 @@ fn vpn_matrix_rt_filter_dimension() {
         &mut withdraw,
     );
     assert_eq!(announce.len(), 1);
-    assert!(withdraw.is_empty());
+    assert_eq!(withdraw.len(), 0);
     assert_eq!(d, [1, 0]);
 
     // Strict-empty membership: silent for both directions.
@@ -4489,7 +4489,7 @@ fn pcb_group_restages_from_all_affected_without_best_change() {
         Some(OTHER3),
         "the member receives the new winner"
     );
-    assert!(withdrawn.is_empty());
+    assert_eq!(withdrawn.len(), 0);
 }
 
 /// The staging-trigger control: a plain group with the same
@@ -5115,7 +5115,7 @@ fn pcb_otc_blocked_lane_substitution_matches_ungrouped_toward_winner_source() {
         vec![(p, 0)],
         "fresh blocked edge: the pinned defensive withdraw"
     );
-    assert!(ungrouped_pass.withdrawn.is_empty());
+    assert_eq!(ungrouped_pass.withdrawn.len(), 0);
     assert_eq!(grouped_refresh, DrainedWire::default());
     assert_eq!(ungrouped_refresh, DrainedWire::default());
 }

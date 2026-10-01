@@ -2443,7 +2443,7 @@ fn assert_reserved_deny(chain: Option<&PolicyChain>, expected_name: &str) {
         vec![Some(expected_name)],
         "the reserved deny replaces the direction outright"
     );
-    assert!(chain.policies[0].entries.is_empty());
+    assert_eq!(chain.policies[0].entries.len(), 0);
     assert_eq!(chain.policies[0].default_action, PolicyAction::Deny);
 }
 

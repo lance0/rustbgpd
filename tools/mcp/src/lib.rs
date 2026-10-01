@@ -2152,7 +2152,7 @@ mod tests {
 
     #[test]
     fn modifications_render_only_the_fields_policy_set() {
-        assert!(render_modifications(None).is_empty());
+        assert_eq!(render_modifications(None), [] as [std::string::String; 0]);
         assert!(
             render_modifications(Some(&proto::ExplainModifications::default())).is_empty(),
             "an all-default modifications message means policy changed nothing"
@@ -2289,7 +2289,7 @@ mod tests {
         .into_selector("65001:100".into());
         assert_eq!(mac_only.rd, "65001:100");
         match mac_only.route {
-            Some(Route::MacIp(selector)) => assert!(selector.ip.is_empty()),
+            Some(Route::MacIp(selector)) => assert_eq!(selector.ip, ""),
             other => panic!("expected a MAC/IP selector, got {other:?}"),
         }
 

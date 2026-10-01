@@ -227,10 +227,10 @@ async fn bgpls_routes_received_reflects_and_withdraws_to_eligible_peer() {
 
     let update = out_rx.recv().await.unwrap();
     assert!(update.announce.is_empty());
-    assert!(update.withdraw.is_empty());
+    assert_eq!(update.withdraw.len(), 0);
     assert_eq!(update.bgpls_announce.len(), 1);
     assert_eq!(update.bgpls_announce[0].key(), key);
-    assert!(update.bgpls_withdraw.is_empty());
+    assert_eq!(update.bgpls_withdraw.len(), 0);
 
     tx.send(RibUpdate::BgpLsRoutesReceived {
         session_id: 0,
@@ -341,7 +341,7 @@ async fn bgpls_no_advertise_withdraws_exact_prior_and_recovers_for_both_safis() 
         let _ = query_bgpls_routes(&tx).await;
         let source_recovered = out_rx.try_recv().expect("plain BGP-LS route must recover");
         assert_eq!(source_recovered.bgpls_announce.len(), 1);
-        assert!(source_recovered.bgpls_withdraw.is_empty());
+        assert_eq!(source_recovered.bgpls_withdraw.len(), 0);
 
         let (reply, response) = oneshot::channel();
         tx.send(RibUpdate::ReplacePeerExportPolicy {
@@ -373,7 +373,7 @@ async fn bgpls_no_advertise_withdraws_exact_prior_and_recovers_for_both_safis() 
             .try_recv()
             .expect("removing policy-added NO_ADVERTISE must re-announce BGP-LS");
         assert_eq!(policy_recovered.bgpls_announce.len(), 1);
-        assert!(policy_recovered.bgpls_withdraw.is_empty());
+        assert_eq!(policy_recovered.bgpls_withdraw.len(), 0);
         assert!(out_rx.try_recv().is_err());
 
         drop(tx);
@@ -706,7 +706,7 @@ async fn send_initial_table_includes_bgpls_routes() {
     assert!(update.announce.is_empty());
     assert_eq!(update.bgpls_announce.len(), 1);
     assert_eq!(update.bgpls_announce[0].key(), key);
-    assert!(update.bgpls_withdraw.is_empty());
+    assert_eq!(update.bgpls_withdraw.len(), 0);
 
     let eor = out_rx.recv().await.unwrap();
     assert_eq!(eor.end_of_rib, bgpls_sendable());

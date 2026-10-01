@@ -688,16 +688,17 @@ fn unpoliced_ebgp_neighbors_names_the_missing_directions() {
     assert_eq!(import_only[0].missing_phrase(), "no export policy");
 
     // Fully policed eBGP, and iBGP at any policy state, are silent.
-    assert!(
+    assert_eq!(
         unpoliced(&rfc8212_toml(
             "",
             permit_all,
             65002,
             "import_policy_chain = [\"permit-all\"]\nexport_policy_chain = [\"permit-all\"]",
         ))
-        .is_empty()
+        .len(),
+        0
     );
-    assert!(unpoliced(&rfc8212_toml("", "", 65001, "")).is_empty());
+    assert_eq!(unpoliced(&rfc8212_toml("", "", 65001, "")).len(), 0);
 }
 
 #[test]
@@ -718,7 +719,7 @@ fn unpoliced_ebgp_boundaries_include_dynamic_ranges() {
     );
     let fixed = unpoliced(&dynamic("", 65001, 65002, ""));
     assert!(fixed[0].identity_phrase().ends_with("(AS 65002)"));
-    assert!(unpoliced(&dynamic("", 65001, 65001, "")).is_empty());
+    assert_eq!(unpoliced(&dynamic("", 65001, 65001, "")).len(), 0);
     let import = "import_policy = [{ action = \"permit\", prefix = \"0.0.0.0/0\", le = 32 }]";
     assert_eq!(
         unpoliced(&dynamic("", 65001, 0, import))[0].missing_phrase(),
@@ -726,7 +727,7 @@ fn unpoliced_ebgp_boundaries_include_dynamic_ranges() {
     );
     let export = "export_policy = [{ action = \"permit\", prefix = \"0.0.0.0/0\" }]";
     let complete = format!("{import}\n{export}");
-    assert!(unpoliced(&dynamic("", 65001, 0, &complete)).is_empty());
+    assert_eq!(unpoliced(&dynamic("", 65001, 0, &complete)).len(), 0);
     let mixed = unpoliced(&dynamic("", 65002, 0, ""));
     assert!(mixed[0].identity_phrase().starts_with("10.0.0.2"));
     assert!(mixed[1].identity_phrase().starts_with("dynamic range"));

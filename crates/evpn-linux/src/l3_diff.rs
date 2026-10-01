@@ -1562,7 +1562,7 @@ mod tests {
             &ip_vrfs,
         );
 
-        assert!(plan.drops.is_empty());
+        assert_eq!(plan.drops.len(), 0);
         assert_eq!(plan.ops.len(), 4, "{:?}", plan.ops);
         assert!(matches!(
             &plan.ops[0],
@@ -1627,7 +1627,7 @@ mod tests {
             &ip_vrfs,
         );
 
-        assert!(plan.ops.is_empty());
+        assert_eq!(plan.ops.len(), 0);
         assert!(matches!(
             plan.drops.as_slice(),
             [L3Drop::UnsupportedAllActiveTargetSet { candidates: 1, .. }]
@@ -1741,7 +1741,7 @@ mod tests {
                 .count(),
             2
         );
-        assert!(plan.ops.is_empty());
+        assert_eq!(plan.ops.len(), 0);
     }
 
     /// Regression for review finding #4 (FDB dst drift): the owned

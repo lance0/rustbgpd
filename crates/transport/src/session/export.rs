@@ -3159,7 +3159,7 @@ mod tests {
                         .contains(&PathAttribute::NextHop("10.0.0.10".parse().unwrap()))
                 );
             } else {
-                assert!(parsed.announced.is_empty());
+                assert_eq!(parsed.announced.len(), 0);
                 let mp = parsed
                     .attributes
                     .iter()

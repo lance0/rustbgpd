@@ -134,7 +134,7 @@ fn vpn_srv6_invalid_sid_structure_uses_fallback_withdraws_and_recovers() {
         let (announced, withdrawn) = drain_vpn_delta(&mut out_rx);
         assert_eq!(announced.len(), 1);
         assert_eq!(announced[0].peer, fallback.peer);
-        assert!(withdrawn.is_empty());
+        assert_eq!(withdrawn.len(), 0);
 
         manager.handle_vpn_routes_received(invalid.peer, vec![invalid.clone()], vec![]);
         assert_eq!(
@@ -156,7 +156,7 @@ fn vpn_srv6_invalid_sid_structure_uses_fallback_withdraws_and_recovers() {
             announced.is_empty(),
             "the valid fallback remains advertised"
         );
-        assert!(withdrawn.is_empty());
+        assert_eq!(withdrawn.len(), 0);
 
         manager.handle_vpn_routes_received(fallback.peer, vec![], vec![fallback.key()]);
         assert!(manager.loc_rib.get_vpn(&key).is_none());
@@ -179,7 +179,7 @@ fn vpn_srv6_invalid_sid_structure_uses_fallback_withdraws_and_recovers() {
         let (announced, withdrawn) = drain_vpn_delta(&mut out_rx);
         assert_eq!(announced.len(), 1);
         assert_eq!(announced[0].attributes, recovered.attributes);
-        assert!(withdrawn.is_empty());
+        assert_eq!(withdrawn.len(), 0);
 
         manager.handle_vpn_routes_received(invalid.peer, vec![invalid.clone()], vec![]);
         assert!(manager.loc_rib.get_vpn(&key).is_none());
@@ -643,7 +643,7 @@ async fn vpn_no_advertise_withdraws_grouped_and_private_single_best() {
     for (_, out_rx) in &mut receivers {
         let (announced, withdrawn) = drain_vpn_delta(out_rx);
         assert_eq!(announced.len(), 2);
-        assert!(withdrawn.is_empty());
+        assert_eq!(withdrawn.len(), 0);
     }
 
     tx.send(RibUpdate::VpnRoutesReceived {
@@ -663,7 +663,7 @@ async fn vpn_no_advertise_withdraws_grouped_and_private_single_best() {
         assert!(announced.is_empty());
         assert_eq!(withdrawn.len(), 2, "each VPN identity withdraws once");
         assert_eq!(withdrawn.into_iter().collect::<HashSet<_>>(), expected_keys);
-        assert!(query_vpn_advertised(&tx, *peer).await.is_empty());
+        assert_eq!(query_vpn_advertised(&tx, *peer).await.len(), 0);
     }
     for route in [&v4, &v6] {
         let grouped_explain = query_explain_advertised_vpn_route(
@@ -704,7 +704,7 @@ async fn vpn_no_advertise_withdraws_grouped_and_private_single_best() {
                 .last()
                 .map(|gate| (gate.gate, gate.code))
         );
-        assert!(grouped_explain.modifications.communities_remove.is_empty());
+        assert_eq!(grouped_explain.modifications.communities_remove.len(), 0);
     }
 
     tx.send(RibUpdate::VpnRoutesReceived {
@@ -719,7 +719,7 @@ async fn vpn_no_advertise_withdraws_grouped_and_private_single_best() {
     for (_, out_rx) in &mut receivers {
         let (announced, withdrawn) = drain_vpn_delta(out_rx);
         assert_eq!(announced.len(), 2);
-        assert!(withdrawn.is_empty());
+        assert_eq!(withdrawn.len(), 0);
     }
 
     for (peer, _) in &receivers {
@@ -741,7 +741,7 @@ async fn vpn_no_advertise_withdraws_grouped_and_private_single_best() {
         assert!(announced.is_empty());
         assert_eq!(withdrawn.len(), 2, "each VPN identity withdraws once");
         assert_eq!(withdrawn.into_iter().collect::<HashSet<_>>(), expected_keys);
-        assert!(query_vpn_advertised(&tx, *peer).await.is_empty());
+        assert_eq!(query_vpn_advertised(&tx, *peer).await.len(), 0);
     }
     for route in [&v4, &v6] {
         let grouped_explain = query_explain_advertised_vpn_route(
@@ -805,7 +805,7 @@ async fn vpn_no_advertise_withdraws_grouped_and_private_single_best() {
     for (_, out_rx) in &mut receivers {
         let (announced, withdrawn) = drain_vpn_delta(out_rx);
         assert_eq!(announced.len(), 2);
-        assert!(withdrawn.is_empty());
+        assert_eq!(withdrawn.len(), 0);
     }
 
     drop(tx);
@@ -924,7 +924,7 @@ async fn vpn_add_path_no_advertise_compacts_and_withdraws_ranks() {
             path_id: 1
         }]
     );
-    assert!(query_vpn_advertised(&tx, target).await.is_empty());
+    assert_eq!(query_vpn_advertised(&tx, target).await.len(), 0);
 
     let (reply, response) = oneshot::channel();
     tx.send(RibUpdate::ReplacePeerExportPolicy {
@@ -1026,7 +1026,7 @@ async fn vpn_routes_received_reflects_and_withdraws_to_eligible_peer() {
 
     let update = out_rx.recv().await.unwrap();
     assert!(update.announce.is_empty());
-    assert!(update.withdraw.is_empty());
+    assert_eq!(update.withdraw.len(), 0);
     assert_eq!(update.vpn_announce.len(), 1);
     assert_eq!(update.vpn_announce[0].key(), key);
     assert_eq!(
@@ -1034,7 +1034,7 @@ async fn vpn_routes_received_reflects_and_withdraws_to_eligible_peer() {
         "RD + label stack must pass through reflection verbatim"
     );
     assert_eq!(update.vpn_announce[0].next_hop, route.next_hop);
-    assert!(update.vpn_withdraw.is_empty());
+    assert_eq!(update.vpn_withdraw.len(), 0);
 
     tx.send(RibUpdate::VpnRoutesReceived {
         session_id: 0,
@@ -1614,7 +1614,7 @@ async fn send_initial_table_includes_vpn_routes() {
     assert!(update.announce.is_empty());
     assert_eq!(update.vpn_announce.len(), 1);
     assert_eq!(update.vpn_announce[0].key(), key);
-    assert!(update.vpn_withdraw.is_empty());
+    assert_eq!(update.vpn_withdraw.len(), 0);
 
     let eor = out_rx.recv().await.unwrap();
     assert_eq!(eor.end_of_rib, vpn_sendable());
@@ -1682,10 +1682,10 @@ async fn route_refresh_vpn_re_advertises_routes() {
 
     let update = out_rx.recv().await.unwrap();
     assert!(update.announce.is_empty());
-    assert!(update.withdraw.is_empty());
+    assert_eq!(update.withdraw.len(), 0);
     assert_eq!(update.vpn_announce.len(), 1);
     assert_eq!(update.vpn_announce[0].key(), key);
-    assert!(update.vpn_withdraw.is_empty());
+    assert_eq!(update.vpn_withdraw.len(), 0);
     assert_eq!(update.end_of_rib, vec![(Afi::Ipv4, Safi::MplsVpn)]);
     assert_eq!(
         update.refresh_markers,

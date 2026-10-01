@@ -3543,7 +3543,7 @@ impl BgpMetrics {
 
     /// Release one reservation after dequeue or a failed channel send.
     pub fn release_session_notification(&self) {
-        let released = self.0.session_notification_outstanding_value.fetch_update(
+        let released = self.0.session_notification_outstanding_value.try_update(
             Ordering::AcqRel,
             Ordering::Acquire,
             |current| current.checked_sub(1).filter(|next| *next >= 0),
@@ -6668,7 +6668,10 @@ mod tests {
     #[test]
     fn event_outbox_queue_depth_collector_tracks_only_the_bound_generation() {
         let metrics = BgpMetrics::new();
-        assert!(event_outbox_queue_depths(&metrics).is_empty());
+        assert_eq!(
+            event_outbox_queue_depths(&metrics),
+            [] as [(std::string::String, f64); 0]
+        );
 
         let first = Arc::new(TestQueueDepthSource::new([0; 6]));
         metrics.bind_event_outbox_queue_depth_source(first.clone());
@@ -8786,7 +8789,7 @@ mod tests {
         m.record_state_transition("10.0.0.1", "idle", "connect");
 
         let families = m.registry().gather();
-        assert!(!families.is_empty());
+        assert_ne!(families, [] as [prometheus::proto::MetricFamily; 0]);
     }
 
     #[test]

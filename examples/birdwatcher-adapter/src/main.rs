@@ -3182,8 +3182,8 @@ mod tests {
             format_optional_epoch_secs(1_700_000_000),
             "2023-11-14 22:13:20"
         );
-        assert!(format_optional_epoch_secs(0).is_empty());
-        assert!(format_optional_epoch_secs(-1).is_empty());
+        assert_eq!(format_optional_epoch_secs(0), "");
+        assert_eq!(format_optional_epoch_secs(-1), "");
     }
 
     #[test]
@@ -3960,10 +3960,9 @@ mod tests {
                 .len(),
             1
         );
-        assert!(
-            table_reject_inventory(&before, &identities, "master6")
-                .unwrap()
-                .is_empty()
+        assert_eq!(
+            table_reject_inventory(&before, &identities, "master6").unwrap(),
+            [] as [(std::net::IpAddr, i32, bool, std::option::Option<u64>); 0]
         );
         for changed in [
             vec![neighbor("192.0.2.1", 6, false, Some(2))],
@@ -4925,7 +4924,7 @@ mod tests {
             format_optional_rfc3339_epoch_secs(1_700_000_000),
             "2023-11-14T22:13:20+00:00"
         );
-        assert!(format_optional_rfc3339_epoch_secs(0).is_empty());
+        assert_eq!(format_optional_rfc3339_epoch_secs(0), "");
         assert!(format_rfc3339_secs_ago(0).ends_with("+00:00"));
     }
 }

@@ -5772,7 +5772,7 @@ async fn ip_owner_sequence_failed_snapshot_withdraws_and_cancels_superseded_acti
             if relearn {
                 assert_ip_owner_sequence(&h, 0xAA, 20).await;
             }
-            assert!(batch.is_empty());
+            assert_eq!(batch.len(), 0);
         }
     }
 }
@@ -5948,7 +5948,7 @@ async fn ip_owner_sequence_full_deferred_batch_backpressures_until_snapshot_reco
     );
     h.repoll().await;
     observation::process_observation_batch(&mut batch, &mut h.state, &runtime).await;
-    assert!(batch.is_empty());
+    assert_eq!(batch.len(), 0);
     assert_ip_owner_sequence(&h, 0xAA, 10).await;
     collect_ready_observations(&mut rx, &mut batch);
     observation::process_observation_batch(&mut batch, &mut h.state, &runtime).await;
@@ -6078,10 +6078,10 @@ async fn ip_owner_sequence_survives_first_learning_under_drain_or_quarantine() {
             )
             .await;
         }
-        assert!(h.take_log().await.is_empty());
+        assert_eq!(h.take_log().await.len(), 0);
         h.routes_tx.send_replace(vec![remote(19)]);
         h.repoll().await;
-        assert!(h.take_log().await.is_empty());
+        assert_eq!(h.take_log().await.len(), 0);
         if quarantined {
             // Clearing remains responsive when a snapshot has failed. Only
             // re-origination is queued until a current snapshot is available.
@@ -6100,7 +6100,7 @@ async fn ip_owner_sequence_survives_first_learning_under_drain_or_quarantine() {
                 .await,
                 ClearDuplicateMacQuarantineResult::Cleared
             );
-            assert!(h.take_log().await.is_empty());
+            assert_eq!(h.take_log().await.len(), 0);
             assert!(!h.state.active_duplicate_mac_quarantines.contains(&key));
             h.repoll().await;
             let runtime = originator_runtime_for_test(
@@ -6380,7 +6380,7 @@ async fn ip_owner_sequence_missing_mobility_and_saturation() {
         h.repoll().await;
         h.observe(ip_added_aa()).await;
         h.replay(mac(0xAA)).await;
-        assert!(h.take_log().await.is_empty());
+        assert_eq!(h.take_log().await.len(), 0);
     }
 }
 
@@ -6542,7 +6542,7 @@ async fn peer_sync_adopts_exact_sequence_in_both_arrival_orders() {
             }
             h.routes_tx.send_replace(Vec::new());
             h.repoll().await;
-            assert!(h.take_log().await.is_empty());
+            assert_eq!(h.take_log().await.len(), 0);
             assert_eq!(
                 h.state.mac_originators[&vni(100)].sequence_for_mac(mac(0xAA)),
                 Some(9)
@@ -6608,7 +6608,7 @@ async fn peer_sync_synchronizes_local_ip_children_without_duplicate_accounting()
                 ]
             );
             h.repoll().await;
-            assert!(h.take_log().await.is_empty());
+            assert_eq!(h.take_log().await.len(), 0);
             assert_no_duplicate_mac_moves(&h.metrics, 100, 0xAA);
             assert_duplicate_ip_metrics(&h.metrics, 0, 0);
             assert_eq!(
@@ -6637,7 +6637,7 @@ async fn peer_sync_withdrawal_preserves_sequence_for_new_ip_children() {
     );
     h.routes_tx.send_replace(Vec::new());
     h.repoll().await;
-    assert!(h.take_log().await.is_empty());
+    assert_eq!(h.take_log().await.len(), 0);
     h.observe(ip_added_aa()).await;
     h.observe(ip_observation(0xAA, "2001:db8::10", true)).await;
     assert_eq!(
@@ -6674,7 +6674,7 @@ async fn peer_sync_withdrawal_preserves_sequence_on_pending_ip_downgrade() {
         );
         h.routes_tx.send_replace(Vec::new());
         h.repoll().await;
-        assert!(h.take_log().await.is_empty());
+        assert_eq!(h.take_log().await.len(), 0);
         h.observe(ip_observation(0xAA, ip, false)).await;
         assert_eq!(
             h.take_log().await,
@@ -6751,7 +6751,7 @@ async fn peer_sync_keeps_higher_local_sequence_across_new_children_and_downgrade
     h.routes_tx
         .send_replace(vec![eligible_peer_sync_route(2, None)]);
     h.repoll().await;
-    assert!(h.take_log().await.is_empty());
+    assert_eq!(h.take_log().await.len(), 0);
     h.observe(ip_observation(0xAA, "2001:db8::10", true)).await;
     assert_eq!(
         h.take_log().await,
@@ -6956,7 +6956,7 @@ async fn peer_sync_preserves_duplicate_mac_quarantine() {
         .send_replace(vec![eligible_peer_sync_route(9, None)]);
     h.repoll().await;
     h.observe(learned_aa()).await;
-    assert!(h.take_log().await.is_empty());
+    assert_eq!(h.take_log().await.len(), 0);
     assert_eq!(h.counts.count(vni(100)), 0);
     assert_duplicate_mac_moves(&h.metrics, 100, 0xAA, 1);
     assert_quarantine_metric(&h.metrics, 100, 0xAA, 1);

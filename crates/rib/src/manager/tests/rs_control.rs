@@ -287,7 +287,7 @@ async fn untagged_routes_share_the_group_path_while_tagged_diverge() {
             .collect::<Vec<_>>(),
         vec![Prefix::V4(plain_prefix)]
     );
-    assert!(update.withdraw.is_empty());
+    assert_eq!(update.withdraw.len(), 0);
 
     // B: both routes, the tagged one scrubbed (unrelated kept).
     let update = b_rx.try_recv().expect("other enabled client gets both");
@@ -298,7 +298,7 @@ async fn untagged_routes_share_the_group_path_while_tagged_diverge() {
         .find(|route| route.prefix == Prefix::V4(tagged_prefix))
         .expect("tagged route announced to B");
     assert_eq!(advertised.communities(), [unrelated]);
-    assert!(advertised.large_communities().is_empty());
+    assert_eq!(advertised.large_communities().len(), 0);
 
     // Transparent session: both routes, control community verbatim.
     let update = t_rx.try_recv().expect("transparent session gets both");
@@ -444,7 +444,7 @@ async fn prepend_toward_target_asn_only() {
         vec![65010, 65010, 65010, 64510],
         "announcing client's ASN prepended twice toward the steered target"
     );
-    assert!(advertised.large_communities().is_empty());
+    assert_eq!(advertised.large_communities().len(), 0);
 
     let update = b_rx.try_recv().expect("other client still receives");
     assert_eq!(update.announce.len(), 1);
@@ -454,7 +454,7 @@ async fn prepend_toward_target_asn_only() {
         vec![65010, 64510],
         "no prepend toward a non-matching target"
     );
-    assert!(advertised.large_communities().is_empty());
+    assert_eq!(advertised.large_communities().len(), 0);
 
     drop(tx);
     handle.await.unwrap();
@@ -537,7 +537,7 @@ async fn policy_stripped_suppression_community_still_suppresses_toward_target() 
     );
     let update = b_rx.try_recv().expect("other client still receives");
     assert_eq!(update.announce.len(), 1);
-    assert!(update.announce[0].large_communities().is_empty());
+    assert_eq!(update.announce[0].large_communities().len(), 0);
 
     drop(tx);
     handle.await.unwrap();
@@ -583,7 +583,7 @@ async fn policy_added_control_communities_scrub_but_do_not_steer() {
 
     let update = b_rx.try_recv().expect("other client receives");
     assert_eq!(update.announce.len(), 1);
-    assert!(update.announce[0].large_communities().is_empty());
+    assert_eq!(update.announce[0].large_communities().len(), 0);
     assert_eq!(
         sequence_asns(&update.announce[0]),
         vec![65010],

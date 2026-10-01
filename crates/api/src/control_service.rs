@@ -235,7 +235,7 @@ mod tests {
             .await
             .unwrap()
             .into_inner();
-        assert!(response.encode_to_vec().is_empty());
+        assert_eq!(response.encode_to_vec().len(), 0);
         assert!(
             svc.get_health(Request::new(proto::HealthRequest {}))
                 .await

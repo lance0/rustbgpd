@@ -543,7 +543,7 @@ async fn presence_create_preserves_raw_inheritance_over_disk_actor_and_reload() 
             .iter()
             .find(|neighbor| neighbor.address == INHERITED)
             .unwrap();
-        assert!(raw.families.is_empty());
+        assert_eq!(raw.families.len(), 0);
         assert_eq!(raw.route_server_client, None);
         assert_eq!(raw.per_client_best, None);
         // `ttl_security` (and `md5_password`) are deliberately absent from
@@ -579,7 +579,7 @@ async fn presence_create_preserves_raw_inheritance_over_disk_actor_and_reload() 
             .iter()
             .find(|neighbor| neighbor.address == RR_CLIENT)
             .unwrap();
-        assert!(raw.families.is_empty());
+        assert_eq!(raw.families.len(), 0);
         assert_eq!(raw.route_reflector_client, None);
         assert_eq!(raw.graceful_restart, None);
         let effective = snapshot.resolve_neighbor(raw).unwrap();

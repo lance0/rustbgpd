@@ -3798,9 +3798,9 @@ mod tests {
             panic!("not MP_REACH after decode");
         };
         assert_eq!(decoded_mp.bgpls_announced, vec![route]);
-        assert!(decoded_mp.announced.is_empty());
-        assert!(decoded_mp.flowspec_announced.is_empty());
-        assert!(decoded_mp.evpn_announced.is_empty());
+        assert_eq!(decoded_mp.announced.len(), 0);
+        assert_eq!(decoded_mp.flowspec_announced.len(), 0);
+        assert_eq!(decoded_mp.evpn_announced.len(), 0);
     }
     #[test]
     fn mp_unreach_bgpls_vpn_attribute_roundtrip() {
@@ -3827,9 +3827,9 @@ mod tests {
             panic!("not MP_UNREACH after decode");
         };
         assert_eq!(decoded_mp.bgpls_withdrawn, vec![route]);
-        assert!(decoded_mp.withdrawn.is_empty());
-        assert!(decoded_mp.flowspec_withdrawn.is_empty());
-        assert!(decoded_mp.evpn_withdrawn.is_empty());
+        assert_eq!(decoded_mp.withdrawn.len(), 0);
+        assert_eq!(decoded_mp.flowspec_withdrawn.len(), 0);
+        assert_eq!(decoded_mp.evpn_withdrawn.len(), 0);
     }
     #[test]
     fn mp_reach_bgpls_addpath_rejected() {
@@ -3966,7 +3966,7 @@ mod tests {
             decoded_mp.vpn_announced[0].nlri.route_distinguisher,
             vpn_rd()
         );
-        assert!(decoded_mp.announced.is_empty());
+        assert_eq!(decoded_mp.announced.len(), 0);
     }
     /// LAN-217: a `VPNv6` `MP_REACH` carrying an RFC 4659 §3.2.1.1 48-byte
     /// two-address next-hop (RD + global, RD + link-local) must emit the
@@ -4039,7 +4039,7 @@ mod tests {
             panic!("not MP_UNREACH after decode");
         };
         assert_eq!(decoded_mp.vpn_withdrawn, vec![vpn_entry(0, route)]);
-        assert!(decoded_mp.vpn_withdrawn[0].nlri.labels.is_empty());
+        assert_eq!(decoded_mp.vpn_withdrawn[0].nlri.labels.len(), 0);
     }
     #[test]
     fn mp_unreach_vpn_withdraw_ignores_label_position_value() {
@@ -4066,7 +4066,7 @@ mod tests {
         assert_eq!(mp.vpn_withdrawn.len(), 1);
         assert_eq!(mp.vpn_withdrawn[0].nlri.route_distinguisher, vpn_rd());
         assert_eq!(mp.vpn_withdrawn[0].nlri.prefix.to_string(), "10.1.0.0/24");
-        assert!(mp.vpn_withdrawn[0].nlri.labels.is_empty());
+        assert_eq!(mp.vpn_withdrawn[0].nlri.labels.len(), 0);
     }
     #[test]
     fn mp_reach_vpn_addpath_roundtrip() {
@@ -4216,7 +4216,7 @@ mod tests {
         };
         assert!(decoded_mp.rtc_announced[0].is_default());
         assert_eq!(decoded_mp.rtc_announced[1], rtc_nlri_96());
-        assert!(decoded_mp.announced.is_empty());
+        assert_eq!(decoded_mp.announced.len(), 0);
     }
     #[test]
     fn mp_unreach_rtc_attribute_roundtrip() {
@@ -4743,7 +4743,7 @@ mod tests {
     #[test]
     fn decode_unknown_optional_non_transitive_attribute_is_ignored() {
         let attrs = decode_path_attributes(&[0x80, 99, 2, 1, 2], true, &[]).unwrap();
-        assert!(attrs.is_empty());
+        assert_eq!(attrs.len(), 0);
     }
     #[test]
     fn decode_atomic_aggregate_typed_and_roundtrips() {
@@ -5245,7 +5245,7 @@ mod tests {
         });
         let mut buf = Vec::new();
         encode_path_attributes(&[attr], &mut buf, true, false).unwrap();
-        assert!(buf.is_empty());
+        assert_eq!(buf.len(), 0);
     }
     // --- MP_REACH_NLRI / MP_UNREACH_NLRI tests ---
     /// Helper to create a `NlriEntry` with `path_id=0`.
@@ -5882,7 +5882,7 @@ mod tests {
             (true, ErrorDisposition::TreatAsWithdraw),
         ] {
             let decoded = decode_path_attributes_revised(&empty, true, is_ibgp, &[]).unwrap();
-            assert!(decoded.attributes.is_empty());
+            assert_eq!(decoded.attributes.len(), 0);
             assert_eq!(decoded.malformed.len(), 1);
             assert_eq!(decoded.malformed[0].disposition, disposition);
             assert_eq!(decoded.malformed[0].type_code, attr_type::CLUSTER_LIST);
@@ -5893,7 +5893,7 @@ mod tests {
         ] {
             let decoded = decode_path_attributes_revised(wire, true, true, &[]).unwrap();
             assert_eq!(decoded.attributes.len(), 1);
-            assert!(decoded.malformed.is_empty());
+            assert_eq!(decoded.malformed.len(), 0);
         }
     }
     #[test]
@@ -6173,7 +6173,7 @@ mod tests {
         assert_eq!(decoded_mp.next_hop, IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1)));
         assert_eq!(decoded_mp.labeled_announced, vec![labeled_entry(0, nlri)]);
         assert_eq!(decoded_mp.labeled_announced[0].nlri.labels[0].label, 100);
-        assert!(decoded_mp.announced.is_empty());
+        assert_eq!(decoded_mp.announced.len(), 0);
     }
 
     /// LAN-190: an IPv6 labeled-unicast `MP_REACH` carrying an RFC 8950 §4 /
@@ -6247,7 +6247,7 @@ mod tests {
             panic!("not MP_UNREACH after decode");
         };
         assert_eq!(decoded_mp.labeled_withdrawn, vec![labeled_entry(0, nlri)]);
-        assert!(decoded_mp.labeled_withdrawn[0].nlri.labels.is_empty());
+        assert_eq!(decoded_mp.labeled_withdrawn[0].nlri.labels.len(), 0);
     }
 
     #[test]
@@ -6595,7 +6595,7 @@ mod tests {
                     ));
                 }
                 let decoded = decode_path_attributes_revised(&wire, true, false, &[]).unwrap();
-                assert!(decoded.attributes.is_empty());
+                assert_eq!(decoded.attributes.len(), 0);
                 let [malformed] = decoded.malformed.as_slice() else {
                     panic!("type {type_code}, flags {flags:#04x}: expected one malformation");
                 };
@@ -6637,7 +6637,7 @@ mod tests {
                 ));
 
                 let revised = decode_path_attributes_revised(&wire, true, false, &[]).unwrap();
-                assert!(revised.attributes.is_empty());
+                assert_eq!(revised.attributes.len(), 0);
                 let [malformed] = revised.malformed.as_slice() else {
                     panic!(
                         "flags {flags:#04x}, identifier len {identifier_len}: expected one malformation"
@@ -6929,7 +6929,7 @@ mod tests {
             for value in [&[][..], &[0, 0, 1][..], &[0, 0, 0, 1, 2][..]] {
                 let wire = attr_bytes(canonical, attr_type::ONLY_TO_CUSTOMER, value);
                 let decoded = decode_path_attributes_revised(&wire, true, is_ibgp, &[]).unwrap();
-                assert!(decoded.attributes.is_empty());
+                assert_eq!(decoded.attributes.len(), 0);
                 let [malformed] = decoded.malformed.as_slice() else {
                     panic!("expected exactly one malformed OTC record");
                 };
@@ -6953,7 +6953,7 @@ mod tests {
             ] {
                 let wire = attr_bytes(flags, attr_type::ONLY_TO_CUSTOMER, value);
                 let decoded = decode_path_attributes_revised(&wire, true, is_ibgp, &[]).unwrap();
-                assert!(decoded.attributes.is_empty());
+                assert_eq!(decoded.attributes.len(), 0);
                 let [malformed] = decoded.malformed.as_slice() else {
                     panic!("expected exactly one malformed OTC record");
                 };
@@ -7042,7 +7042,7 @@ mod tests {
                 &[],
             )
             .unwrap();
-            assert!(decoded.attributes.is_empty());
+            assert_eq!(decoded.attributes.len(), 0);
             assert_eq!(decoded.malformed.len(), 1);
             assert_eq!(decoded.malformed[0].type_code, attr_type::BGP_LS);
             assert_eq!(
@@ -7073,7 +7073,7 @@ mod tests {
             &[],
         )
         .unwrap();
-        assert!(decoded.attributes.is_empty());
+        assert_eq!(decoded.attributes.len(), 0);
         assert_eq!(decoded.malformed.len(), 1);
         assert_eq!(decoded.malformed[0].type_code, attr_type::BGP_LS);
         assert_eq!(
@@ -7121,7 +7121,7 @@ mod tests {
         let mut bad_flags = encoded;
         bad_flags[0] |= attr_flags::TRANSITIVE;
         let rejected = decode_path_attributes_revised(&bad_flags, true, false, &[]).unwrap();
-        assert!(rejected.attributes.is_empty());
+        assert_eq!(rejected.attributes.len(), 0);
         assert_eq!(rejected.malformed.len(), 1);
         assert_eq!(
             rejected.malformed[0].disposition,
@@ -7445,7 +7445,7 @@ mod tests {
         ));
         let decoded = decode_path_attributes_revised(&good, true, false, &[]).unwrap();
         assert_eq!(decoded.attributes.len(), 4);
-        assert!(decoded.malformed.is_empty());
+        assert_eq!(decoded.malformed.len(), 0);
     }
     #[test]
     fn revised_malformed_atomic_aggregate_is_attribute_discard() {
@@ -7850,15 +7850,15 @@ mod tests {
             &[],
         )
         .unwrap();
-        assert!(decoded.attributes.is_empty());
-        assert!(decoded.malformed.is_empty());
+        assert_eq!(decoded.attributes.len(), 0);
+        assert_eq!(decoded.malformed.len(), 0);
     }
     #[test]
     fn revised_duplicate_unknown_optional_non_transitive_stores_neither() {
         let mut buf = attr_bytes(attr_flags::OPTIONAL, 99, &[1]);
         buf.extend(attr_bytes(attr_flags::OPTIONAL, 99, &[2]));
         let decoded = decode_path_attributes_revised(&buf, true, false, &[]).unwrap();
-        assert!(decoded.attributes.is_empty());
+        assert_eq!(decoded.attributes.len(), 0);
         assert_eq!(decoded.malformed.len(), 1);
         assert_eq!(decoded.malformed[0].type_code, 99);
         assert_eq!(
@@ -7878,7 +7878,7 @@ mod tests {
             panic!("expected Malformed Attribute List");
         };
         assert_eq!(subcode, update_subcode::MALFORMED_ATTRIBUTE_LIST);
-        assert!(data.is_empty());
+        assert_eq!(data.len(), 0);
     }
     #[test]
     fn revised_attribute_overrun_is_treat_as_withdraw_and_stops() {
@@ -7918,7 +7918,7 @@ mod tests {
         let buf = valid_attrs_plus(&[]);
         let decoded = decode_path_attributes_revised(&buf, true, false, &[]).unwrap();
         assert_eq!(decoded.attributes.len(), 3);
-        assert!(decoded.malformed.is_empty());
+        assert_eq!(decoded.malformed.len(), 0);
         // Matches the legacy decoder on clean input.
         assert_eq!(
             decoded.attributes,
@@ -7964,7 +7964,7 @@ mod tests {
         );
         let revised = decode_path_attributes_revised(&bytes, false, false, &[]).unwrap();
         assert_eq!(revised.attributes, expected);
-        assert!(revised.malformed.is_empty());
+        assert_eq!(revised.malformed.len(), 0);
         assert!(
             revised
                 .attributes
@@ -8172,7 +8172,7 @@ mod tests {
                 &[],
             )
             .unwrap();
-            assert!(decoded.attributes.is_empty());
+            assert_eq!(decoded.attributes.len(), 0);
             assert_eq!(decoded.malformed.len(), 1);
             assert_eq!(decoded.malformed[0].type_code, type_code);
             assert_eq!(
@@ -8546,7 +8546,7 @@ mod tests {
             let wire = attr_bytes(attr_flags::TRANSITIVE, attr_type::AS_PATH, &value);
             assert!(decode_path_attributes(&wire, four_octet_as, &[]).is_err());
             let revised = rfc7607_revised(&wire, four_octet_as);
-            assert!(revised.attributes.is_empty());
+            assert_eq!(revised.attributes.len(), 0);
             assert!(revised.malformed.iter().any(|malformed| {
                 malformed.type_code == attr_type::AS_PATH
                     && malformed.disposition == ErrorDisposition::TreatAsWithdraw
@@ -8563,7 +8563,7 @@ mod tests {
         );
         assert!(decode_path_attributes(&set_zero, false, &[]).is_err());
         let revised = rfc7607_revised(&set_zero, false);
-        assert!(revised.attributes.is_empty());
+        assert_eq!(revised.attributes.len(), 0);
         assert!(revised.malformed.iter().any(|malformed| {
             malformed.type_code == attr_type::AS_PATH
                 && malformed.disposition == ErrorDisposition::TreatAsWithdraw
@@ -8647,7 +8647,7 @@ mod tests {
             );
             assert!(decode_path_attributes(&wire, four_octet_as, &[]).is_err());
             let revised = rfc7607_revised(&wire, four_octet_as);
-            assert!(revised.attributes.is_empty());
+            assert_eq!(revised.attributes.len(), 0);
             let [malformed] = revised.malformed.as_slice() else {
                 panic!("expected exact AGGREGATOR discard");
             };
@@ -8666,7 +8666,7 @@ mod tests {
         for four_octet_as in [false, true] {
             assert!(decode_path_attributes(&wire, four_octet_as, &[]).is_err());
             let revised = rfc7607_revised(&wire, four_octet_as);
-            assert!(revised.attributes.is_empty());
+            assert_eq!(revised.attributes.len(), 0);
             let [malformed] = revised.malformed.as_slice() else {
                 panic!("expected exact AS4_AGGREGATOR discard");
             };
@@ -8684,7 +8684,7 @@ mod tests {
                 decode_path_attributes(&wire, four_octet_as, &[]).unwrap(),
                 vec![as_path(&[1])]
             );
-            assert!(rfc7607_revised(&wire, four_octet_as).malformed.is_empty());
+            assert_eq!(rfc7607_revised(&wire, four_octet_as).malformed.len(), 0);
         }
     }
 
@@ -8711,7 +8711,7 @@ mod tests {
                 )
                 .unwrap_err();
                 assert!(matches!(error, EncodeError::ValueOutOfRange { .. }));
-                assert!(encoded.is_empty());
+                assert_eq!(encoded.len(), 0);
             }
         }
     }
@@ -8830,7 +8830,7 @@ mod tests {
         ];
         let mut encoded = Vec::new();
         encode_path_attributes(&attributes, &mut encoded, false, false).unwrap();
-        assert!(encoded.is_empty());
+        assert_eq!(encoded.len(), 0);
     }
 
     fn srv6_test_tlv(kind: u8, value: &[u8]) -> Vec<u8> {
@@ -8868,7 +8868,7 @@ mod tests {
                     let wire = attr_bytes(flags, attr_type::PREFIX_SID, &value);
                     let strict = decode_path_attributes(&wire, true, &[]).unwrap();
                     let revised = decode_path_attributes_revised(&wire, true, true, &[]).unwrap();
-                    assert!(revised.malformed.is_empty());
+                    assert_eq!(revised.malformed.len(), 0);
                     assert_eq!(strict, revised.attributes);
                     let [PathAttribute::Unknown(raw)] = strict.as_slice() else {
                         panic!("Prefix-SID must remain raw");
@@ -8922,7 +8922,7 @@ mod tests {
                     for is_ibgp in [false, true] {
                         let revised =
                             decode_path_attributes_revised(&wire, true, is_ibgp, &[]).unwrap();
-                        assert!(revised.attributes.is_empty());
+                        assert_eq!(revised.attributes.len(), 0);
                         assert_eq!(revised.malformed.len(), 1);
                         assert_eq!(revised.malformed[0].error, error);
                         assert_eq!(
@@ -8986,7 +8986,7 @@ mod tests {
             let value = [first.clone(), ignored].concat();
             let wire = attr_bytes(0xe0, attr_type::PREFIX_SID, &value);
             let revised = decode_path_attributes_revised(&wire, true, true, &[]).unwrap();
-            assert!(revised.malformed.is_empty());
+            assert_eq!(revised.malformed.len(), 0);
             let mut encoded = Vec::new();
             encode_path_attributes(&revised.attributes, &mut encoded, true, false).unwrap();
             assert_eq!(encoded, wire);
@@ -9062,10 +9062,11 @@ mod tests {
             [40, 24, 16, 0, 16, 64]
         );
         assert_eq!(sid.structures[1].transposition_length, 0);
-        assert!(
+        assert_eq!(
             crate::decode_prefix_sid_services(&srv6_test_tlv(254, &[1]))
                 .unwrap()
-                .is_empty()
+                .len(),
+            0
         );
         assert!(crate::decode_prefix_sid_services(&[]).is_err());
         // A malformed suffix invalidates the whole view, including earlier valid services.
@@ -9094,7 +9095,7 @@ mod tests {
         );
         let revised =
             decode_path_attributes_revised(&[malformed, valid].concat(), true, true, &[]).unwrap();
-        assert!(revised.attributes.is_empty());
+        assert_eq!(revised.attributes.len(), 0);
         assert_eq!(revised.malformed.len(), 2);
         assert_eq!(
             revised.malformed[0].disposition,

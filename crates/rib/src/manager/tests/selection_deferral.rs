@@ -490,10 +490,11 @@ fn collision_failback_stages_then_waits_for_refresh_completion() {
     let gr_families = HashSet::from([FAMILY]);
     let selection = manager.selection_deferral.as_mut().unwrap();
 
-    assert!(
+    assert_eq!(
         selection
             .classify_session(survivor, 11, false, &gr_families, &metrics)
-            .is_empty()
+            .len(),
+        0
     );
     assert!(
         selection
@@ -526,10 +527,11 @@ fn collision_failback_stages_then_waits_for_refresh_completion() {
         "an unrelated session must not satisfy the refresh waiter"
     );
 
-    assert!(
+    assert_eq!(
         selection
             .classify_session(remaining, 21, false, &gr_families, &metrics)
-            .is_empty()
+            .len(),
+        0
     );
     assert_eq!(
         selection.end_of_rib(remaining, 21, FAMILY, &metrics),
@@ -582,10 +584,11 @@ fn multiple_failback_survivors_release_only_after_every_waiter_converges() {
     let selection = manager.selection_deferral.as_mut().unwrap();
 
     for (peer, session_id) in [(first_survivor, 11), (second_survivor, 21)] {
-        assert!(
+        assert_eq!(
             selection
                 .classify_session(peer, session_id, false, &gr_families, &metrics)
-                .is_empty()
+                .len(),
+            0
         );
         assert!(
             selection
@@ -608,10 +611,11 @@ fn multiple_failback_survivors_release_only_after_every_waiter_converges() {
         assert!(waiting.active);
         assert_eq!(waiting.waiter_state, "awaiting_refresh");
     }
-    assert!(
+    assert_eq!(
         selection
             .classify_session(ordinary, 31, false, &gr_families, &metrics)
-            .is_empty()
+            .len(),
+        0
     );
 
     assert!(
@@ -679,10 +683,11 @@ fn staged_selection_rejects_eor_and_refresh_marker_commits() {
     let gr_families = HashSet::from([FAMILY]);
     let transitions = {
         let selection = manager.selection_deferral.as_mut().unwrap();
-        assert!(
+        assert_eq!(
             selection
                 .classify_session(source, 11, false, &gr_families, &metrics)
-                .is_empty()
+                .len(),
+            0
         );
         selection.session_down(source, 11, &metrics);
         selection
@@ -776,10 +781,11 @@ fn staged_selection_classifies_refresh_response_as_convergence_deferred() {
     let gr_families = HashSet::from([FAMILY]);
     let transitions = {
         let selection = manager.selection_deferral.as_mut().unwrap();
-        assert!(
+        assert_eq!(
             selection
                 .classify_session(source, 11, false, &gr_families, &metrics)
-                .is_empty()
+                .len(),
+            0
         );
         selection.session_down(source, 11, &metrics);
         selection
@@ -817,10 +823,11 @@ fn dirty_resync_sends_ready_eor_and_retains_held_family() {
     let gr_families = HashSet::from([FAMILY]);
     let transitions = {
         let selection = manager.selection_deferral.as_mut().unwrap();
-        assert!(
+        assert_eq!(
             selection
                 .classify_session(source, 11, false, &gr_families, &metrics)
-                .is_empty()
+                .len(),
+            0
         );
         selection.session_down(source, 11, &metrics);
         selection
@@ -1015,7 +1022,7 @@ fn dirty_observer_emits_convergence_eor_before_deferred_refresh() {
 
     let convergence = observer_rx.try_recv().unwrap();
     assert_eq!(convergence.end_of_rib, vec![FAMILY]);
-    assert!(convergence.refresh_markers.is_empty());
+    assert_eq!(convergence.refresh_markers.len(), 0);
     assert!(
         convergence
             .announce
@@ -1060,10 +1067,11 @@ fn no_diff_dirty_resync_keeps_refresh_behind_failed_convergence_eor() {
     let gr_families = HashSet::from([FAMILY]);
     let transitions = {
         let selection = manager.selection_deferral.as_mut().unwrap();
-        assert!(
+        assert_eq!(
             selection
                 .classify_session(survivor, 11, false, &gr_families, &metrics)
-                .is_empty()
+                .len(),
+            0
         );
         selection.session_down(survivor, 11, &metrics);
         selection
@@ -1157,7 +1165,7 @@ fn no_diff_dirty_resync_keeps_refresh_behind_failed_convergence_eor() {
 
     let convergence = observer_rx.try_recv().unwrap();
     assert_eq!(convergence.end_of_rib, vec![FAMILY]);
-    assert!(convergence.refresh_markers.is_empty());
+    assert_eq!(convergence.refresh_markers.len(), 0);
     let refresh = observer_rx.try_recv().unwrap();
     assert_eq!(
         refresh.refresh_markers,
@@ -1324,7 +1332,7 @@ async fn collision_failback_withholds_eor_until_survivor_refresh_converges() {
     );
     assert_eq!(state.selection_deferral[0].waiter_state, "awaiting_refresh");
     assert_eq!(state.selection_deferral[0].waiter_session_id, Some(11));
-    assert!(state.selection_deferral[0].release_reason.is_empty());
+    assert_eq!(state.selection_deferral[0].release_reason.len(), 0);
     assert_eq!(query_best_routes(&tx).await.len(), 1);
 
     let mut survivor_saw_remaining = false;
@@ -1472,7 +1480,7 @@ async fn collision_failback_withholds_eor_until_survivor_refresh_converges() {
     let mut observer_saw_survivor = false;
     while let Ok(update) = observer_rx.try_recv() {
         assert!(!update.end_of_rib.contains(&FAMILY));
-        assert!(update.refresh_markers.is_empty());
+        assert_eq!(update.refresh_markers.len(), 0);
         observer_saw_survivor |= update
             .announce
             .iter()
@@ -1697,7 +1705,7 @@ fn unavailable_survivor_channel_keeps_convergence_timer_bound() {
             .remove(0);
         assert!(row.active);
         assert_eq!(row.waiter_state, "awaiting_refresh");
-        assert!(row.release_reason.is_empty());
+        assert_eq!(row.release_reason.len(), 0);
         if !channel_closed {
             let queued = survivor_rx.try_recv().unwrap();
             assert!(!queued.request_refresh_all_negotiated);
@@ -1797,7 +1805,7 @@ fn collision_failback_overflow_receipt(
         .as_mut()
         .unwrap()
         .classify_session(source, 8, false, &peer_gr_families, &metrics);
-    assert!(released.is_empty());
+    assert_eq!(released.len(), 0);
     manager
         .selection_deferral
         .as_mut()
@@ -2403,7 +2411,7 @@ async fn full_outbound_channel_keeps_eor_pending_until_dirty_resync() {
 
     let table = observer_rx.recv().await.unwrap();
     assert_eq!(table.announce.len(), 1);
-    assert!(table.end_of_rib.is_empty());
+    assert_eq!(table.end_of_rib.len(), 0);
     assert_eq!(source_rx.recv().await.unwrap().end_of_rib, vec![FAMILY]);
 
     // The one-slot observer channel rejected the first EoR attempt. Once
@@ -2562,10 +2570,11 @@ fn release_sends_single_eor_to_refresh_deferred_peer() {
     let gr_families = HashSet::from([FAMILY]);
     let transitions = {
         let selection = manager.selection_deferral.as_mut().unwrap();
-        assert!(
+        assert_eq!(
             selection
                 .classify_session(source, 11, false, &gr_families, &metrics)
-                .is_empty()
+                .len(),
+            0
         );
         selection.session_down(source, 11, &metrics);
         selection

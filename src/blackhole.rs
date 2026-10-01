@@ -1885,7 +1885,7 @@ pub(super) mod tests {
         assert!(!state.ownership.prefixes.contains(&withdrawn));
         assert!(state.ownership.prefixes.contains(&adopted));
         assert!(state.adoption.pending.is_empty());
-        assert!(fib.install_calls.is_empty());
+        assert_eq!(fib.install_calls.len(), 0);
         assert_eq!(fib.remove_calls, vec![withdrawn]);
         let statuses = status_rx.borrow();
         assert_eq!(
@@ -3247,7 +3247,7 @@ pub(super) mod tests {
         assert!(adoption.pending.contains(&over_cap));
         assert!(fib.installed.contains(&pending));
         assert!(fib.installed.contains(&over_cap));
-        assert!(fib.install_calls.is_empty());
+        assert_eq!(fib.install_calls.len(), 0);
         assert!(
             statuses
                 .iter()
@@ -3458,7 +3458,7 @@ pub(super) mod tests {
         )
         .await;
 
-        assert!(fib.install_calls.is_empty());
+        assert_eq!(fib.install_calls.len(), 0);
         assert!(owned.is_empty());
         assert_eq!(statuses[0].state, BlackholeState::Failed);
         assert_eq!(statuses[0].reason, "foreign_route_exists");
@@ -3492,7 +3492,7 @@ pub(super) mod tests {
         .await;
 
         assert!(owned.is_empty());
-        assert!(fib.install_calls.is_empty());
+        assert_eq!(fib.install_calls.len(), 0);
         assert_eq!(statuses[0].state, BlackholeState::Failed);
         assert_eq!(statuses[0].reason, "foreign_route_exists");
     }
@@ -3627,7 +3627,7 @@ pub(super) mod tests {
         assert_eq!(fib.remove_calls, vec![prefix]);
         assert!(owned.is_empty());
         assert!(!fib.installed.contains(&prefix));
-        assert!(statuses.is_empty());
+        assert_eq!(statuses.len(), 0);
     }
 
     /// ADR-0079 rule 3: an adopted-but-unclaimed row keeps discarding
@@ -3687,7 +3687,7 @@ pub(super) mod tests {
         assert_eq!(fib.remove_calls, vec![prefix]);
         assert!(!fib.installed.contains(&prefix));
         assert!(adoption.pending.is_empty());
-        assert!(statuses.is_empty());
+        assert_eq!(statuses.len(), 0);
         let reaped = plain_counter_value(&metrics, "bgp_blackhole_discard_reaped_total");
         assert!((reaped - 1.0).abs() < f64::EPSILON, "got {reaped}");
     }
@@ -3808,9 +3808,9 @@ pub(super) mod tests {
         )
         .await;
 
-        assert!(fib.remove_calls.is_empty());
+        assert_eq!(fib.remove_calls.len(), 0);
         assert!(adoption.pending.is_empty());
-        assert!(statuses.is_empty());
+        assert_eq!(statuses.len(), 0);
         let reaped = plain_counter_value(&metrics, "bgp_blackhole_discard_reaped_total");
         assert!(reaped.abs() < f64::EPSILON, "got {reaped}");
     }
@@ -3853,9 +3853,9 @@ pub(super) mod tests {
         )
         .await;
 
-        assert!(fib.remove_calls.is_empty());
+        assert_eq!(fib.remove_calls.len(), 0);
         assert!(adoption.pending.is_empty());
-        assert!(statuses.is_empty());
+        assert_eq!(statuses.len(), 0);
         let reaped = plain_counter_value(&metrics, "bgp_blackhole_discard_reaped_total");
         assert!(reaped.abs() < f64::EPSILON, "got {reaped}");
     }
@@ -3882,7 +3882,7 @@ pub(super) mod tests {
         )
         .await;
 
-        assert!(fib.remove_calls.is_empty());
+        assert_eq!(fib.remove_calls.len(), 0);
         assert!(adoption.pending.is_empty());
         let adopted = plain_counter_value(&metrics, "bgp_blackhole_discard_adopted_total");
         assert!(adopted.abs() < f64::EPSILON, "got {adopted}");
@@ -3913,7 +3913,7 @@ pub(super) mod tests {
         .await;
 
         assert!(owned.is_empty());
-        assert!(fib.install_calls.is_empty());
+        assert_eq!(fib.install_calls.len(), 0);
         assert_eq!(statuses[0].state, BlackholeState::Failed);
         assert_eq!(statuses[0].reason, "foreign_route_exists");
         assert!(fib.installed.contains(&prefix));
@@ -4058,7 +4058,7 @@ pub(super) mod tests {
 
         assert_eq!(fib.remove_calls, vec![stale], "stale removal still runs");
         assert!(owned.contains_key(&desired), "owned state must not churn");
-        assert!(fib.install_calls.is_empty());
+        assert_eq!(fib.install_calls.len(), 0);
         assert!(!adoption.swept, "sweep must wait for a successful dump");
         assert_eq!(statuses.len(), 1);
         assert_eq!(statuses[0].state, BlackholeState::Failed);
@@ -4124,6 +4124,6 @@ pub(super) mod tests {
             assert!(fib.installed.contains(&prefix));
             assert_eq!(statuses[0].reason, "adopted_pending_reap");
         }
-        assert!(fib.remove_calls.is_empty());
+        assert_eq!(fib.remove_calls.len(), 0);
     }
 }

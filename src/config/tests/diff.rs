@@ -8,8 +8,8 @@ fn diff_neighbors_detects_added() {
         test_neighbor("10.0.0.2", 65002),
     ];
     let diff = super::diff_neighbors(&old, &new);
-    assert!(diff.removed.is_empty());
-    assert!(diff.changed.is_empty());
+    assert_eq!(diff.removed.len(), 0);
+    assert_eq!(diff.changed.len(), 0);
     assert_eq!(diff.added.len(), 1);
     assert_eq!(diff.added[0].address, "10.0.0.2");
 }
@@ -22,8 +22,8 @@ fn diff_neighbors_detects_removed() {
     ];
     let new = vec![test_neighbor("10.0.0.1", 65001)];
     let diff = super::diff_neighbors(&old, &new);
-    assert!(diff.added.is_empty());
-    assert!(diff.changed.is_empty());
+    assert_eq!(diff.added.len(), 0);
+    assert_eq!(diff.changed.len(), 0);
     assert_eq!(diff.removed.len(), 1);
     assert_eq!(
         diff.removed[0],
@@ -36,8 +36,8 @@ fn diff_neighbors_detects_changed() {
     let old = vec![test_neighbor("10.0.0.1", 65001)];
     let new = vec![test_neighbor("10.0.0.1", 65099)];
     let diff = super::diff_neighbors(&old, &new);
-    assert!(diff.added.is_empty());
-    assert!(diff.removed.is_empty());
+    assert_eq!(diff.added.len(), 0);
+    assert_eq!(diff.removed.len(), 0);
     assert_eq!(diff.changed.len(), 1);
     assert_eq!(diff.changed[0].remote_asn, 65099);
 }
@@ -49,9 +49,9 @@ fn diff_neighbors_no_changes() {
         test_neighbor("10.0.0.2", 65002),
     ];
     let diff = super::diff_neighbors(&peers, &peers);
-    assert!(diff.added.is_empty());
-    assert!(diff.removed.is_empty());
-    assert!(diff.changed.is_empty());
+    assert_eq!(diff.added.len(), 0);
+    assert_eq!(diff.removed.len(), 0);
+    assert_eq!(diff.changed.len(), 0);
 }
 
 #[test]
@@ -116,7 +116,7 @@ fn genuine_ipv6_address_change_still_diffs_removed_and_added() {
     );
     assert_eq!(diff.added.len(), 1);
     assert_eq!(diff.added[0].address, "2001:db8::2");
-    assert!(diff.changed.is_empty());
+    assert_eq!(diff.changed.len(), 0);
 }
 
 #[test]
@@ -143,9 +143,9 @@ fn diff_neighbors_ignores_tcp_ao_only_changes_because_reload_pins_them() {
     );
 
     let diff = super::diff_neighbors(&old, &[new_neighbor]);
-    assert!(diff.added.is_empty());
-    assert!(diff.removed.is_empty());
-    assert!(diff.changed.is_empty());
+    assert_eq!(diff.added.len(), 0);
+    assert_eq!(diff.removed.len(), 0);
+    assert_eq!(diff.changed.len(), 0);
 }
 
 #[test]
@@ -160,8 +160,8 @@ fn diff_neighbors_detects_prefix_orf_receive_only_change() {
     new_neighbor.prefix_orf_receive = Some(true);
 
     let diff = super::diff_neighbors(&old, &[new_neighbor]);
-    assert!(diff.added.is_empty());
-    assert!(diff.removed.is_empty());
+    assert_eq!(diff.added.len(), 0);
+    assert_eq!(diff.removed.len(), 0);
     assert_eq!(diff.changed.len(), 1);
 
     let changes = super::describe_neighbor_changes(&old[0], &diff.changed[0]);
@@ -205,8 +205,8 @@ fn diff_neighbors_detects_disable_ipv4_unicast_only_change() {
     new_neighbor.disable_ipv4_unicast = Some(true);
 
     let diff = super::diff_neighbors(&old, &[new_neighbor]);
-    assert!(diff.added.is_empty());
-    assert!(diff.removed.is_empty());
+    assert_eq!(diff.added.len(), 0);
+    assert_eq!(diff.removed.len(), 0);
     assert_eq!(diff.changed.len(), 1);
 
     let changes = super::describe_neighbor_changes(&old[0], &diff.changed[0]);
@@ -746,8 +746,8 @@ peer_group = "secure"
     let diff = super::diff_config(&old, &new);
 
     assert!(diff.neighbor_tcp_ao_changed);
-    assert!(diff.peer_groups.changed.is_empty());
-    assert!(diff.policy.definitions_changed.is_empty());
+    assert_eq!(diff.peer_groups.changed.len(), 0);
+    assert_eq!(diff.policy.definitions_changed.len(), 0);
     assert!(!diff.has_reload_applied_changes());
     assert!(diff.has_restart_required_changes());
 }
@@ -813,10 +813,10 @@ log_format = "json"
     assert!(runtime.policy.neighbor_sets.contains_key("ixp"));
 
     let diff = super::diff_config(&old, &runtime);
-    assert!(diff.neighbors.removed.is_empty());
-    assert!(diff.peer_groups.removed.is_empty());
-    assert!(diff.policy.definitions_removed.is_empty());
-    assert!(diff.policy.neighbor_sets_removed.is_empty());
+    assert_eq!(diff.neighbors.removed.len(), 0);
+    assert_eq!(diff.peer_groups.removed.len(), 0);
+    assert_eq!(diff.policy.definitions_removed.len(), 0);
+    assert_eq!(diff.policy.neighbor_sets_removed.len(), 0);
 }
 
 #[test]
@@ -869,7 +869,7 @@ log_format = "json"
     let diff = super::diff_config(&old, &runtime);
     assert!(!diff.policy.import_chain_changed);
     assert!(!diff.policy.export_chain_changed);
-    assert!(diff.policy.definitions_removed.is_empty());
+    assert_eq!(diff.policy.definitions_removed.len(), 0);
 }
 
 #[test]
@@ -1701,7 +1701,7 @@ remote_asn = 65003
     assert_eq!(diff.neighbors.added.len(), 1);
     assert_eq!(diff.neighbors.added[0].address, "10.0.0.3");
     assert_eq!(diff.neighbors.added[0].remote_asn, 65003);
-    assert!(diff.neighbors.removed.is_empty());
+    assert_eq!(diff.neighbors.removed.len(), 0);
     assert!(diff.neighbors.changed.is_empty());
 }
 
@@ -2245,7 +2245,7 @@ fn diff_config_flags_flowspec_validation_as_restart_required() {
         assert!(text.contains("[flowspec]"), "{text}");
         let class = classify_config_transaction_v1(&diff);
         assert!(!class.is_committable());
-        assert!(class.supported_sections.is_empty());
+        assert_eq!(class.supported_sections.len(), 0);
         assert_eq!(class.restart_required_sections, ["[flowspec]"]);
     }
 }

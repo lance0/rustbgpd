@@ -526,7 +526,7 @@ mod tests {
         ];
         let err = validate_update_attributes(&attrs, true, true, true).unwrap_err();
         assert_eq!(err.subcode, update_subcode::MALFORMED_ATTRIBUTE_LIST);
-        assert!(err.data.is_empty());
+        assert_eq!(err.data.len(), 0);
         assert_eq!(err.disposition, ErrorDisposition::SessionReset);
     }
     #[test]

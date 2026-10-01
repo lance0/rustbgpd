@@ -538,7 +538,7 @@ impl QueueDepths {
 
     fn decrement(&self, category: Category) -> u64 {
         self.counter(category)
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |value| {
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |value| {
                 let depth = value & QUEUE_DEPTH_MASK;
                 Some((value & QUEUE_CLOSED) | depth.saturating_sub(1))
             })
@@ -1562,7 +1562,7 @@ async fn run_actor(
 
 #[cfg(test)]
 mod tests {
-    #![expect(
+    #![allow(
         clippy::float_cmp,
         reason = "the metric samples asserted here are integer-valued counters and gauges; exact equality is the assertion"
     )]

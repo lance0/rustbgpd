@@ -324,7 +324,7 @@ mod tests {
         assert_eq!(trace.primary_updates, 1, "completed owner work is counted");
         let mut response = enqueue();
         manager.drain_summary_queries();
-        assert!(response.try_recv().unwrap().snapshots.is_empty());
+        assert_eq!(response.try_recv().unwrap().snapshots.len(), 0);
         assert!(manager.post_commit_query_trace.is_none());
 
         // Exercise the first checkpoint after capture and an interior one.
@@ -337,11 +337,11 @@ mod tests {
                     assert_eq!(pending_in_scope(manager), !queued_before_capture);
                     let mut response = queued.unwrap_or_else(enqueue);
                     manager.replacement_checkpoint(true);
-                    assert!(response.try_recv().unwrap().snapshots.is_empty());
+                    assert_eq!(response.try_recv().unwrap().snapshots.len(), 0);
                     assert!(!pending_in_scope(manager));
                     let mut second = enqueue();
                     manager.replacement_checkpoint(true);
-                    assert!(second.try_recv().unwrap().snapshots.is_empty());
+                    assert_eq!(second.try_recv().unwrap().snapshots.len(), 0);
                     assert!(!pending_in_scope(manager), "the trace stays consumed");
                 });
             });
@@ -436,21 +436,22 @@ mod tests {
             }
             manager.replacement_checkpoint(true);
             for response in replies.iter_mut().take(QUERY_BUDGET_PER_CHUNK) {
-                assert!(response.try_recv().unwrap().snapshots.is_empty());
+                assert_eq!(response.try_recv().unwrap().snapshots.len(), 0);
             }
             assert!(matches!(
                 replies.last_mut().unwrap().try_recv(),
                 Err(oneshot::error::TryRecvError::Empty)
             ));
             manager.replacement_checkpoint(true);
-            assert!(
+            assert_eq!(
                 replies
                     .last_mut()
                     .unwrap()
                     .try_recv()
                     .unwrap()
                     .snapshots
-                    .is_empty()
+                    .len(),
+                0
             );
         });
     }

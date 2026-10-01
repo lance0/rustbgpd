@@ -2427,7 +2427,7 @@ mod tests {
         // (operators read "inline").
         let fallthrough = &m.statements[1];
         assert_eq!(fallthrough.policy_index, 1);
-        assert!(fallthrough.policy_name.is_empty());
+        assert_eq!(fallthrough.policy_name.len(), 0);
         assert!(fallthrough.default_action);
         assert_eq!(fallthrough.statement_index, 0);
         assert_eq!(fallthrough.action, "permit");
@@ -3695,7 +3695,7 @@ policy customer-in(peer_lp: u32) {
             (full.routes_evaluated, full.accepted, full.rejected),
             (2, 2, 0)
         );
-        assert!(full.rejected_routes.is_empty());
+        assert_eq!(full.rejected_routes.len(), 0);
 
         let svc = test_policy_service(carried);
         let removed = PolicyServiceRpc::test_policy(
@@ -3876,7 +3876,7 @@ policy customer-in(peer_lp: u32) {
         .into_inner();
         assert_eq!(resp.routes_evaluated, 2);
         assert_eq!(resp.accepted, 2);
-        assert!(resp.diffs.is_empty());
+        assert_eq!(resp.diffs.len(), 0);
     }
 
     async fn assert_test_policy_page_count(route_count: u32) {
