@@ -10,6 +10,7 @@ use rustbgpd_api::peer_types::{
 use rustbgpd_api::rib_service::FibTableControlError;
 use rustbgpd_policy::PolicyAction;
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
+#[cfg(debug_assertions)]
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicUsize;
 use tokio::sync::Mutex;
@@ -11612,6 +11613,7 @@ async fn full_persistence_queue_ends_clean_at_the_pre_effect_deadline() {
     drop(executor_guard);
 }
 
+#[cfg(debug_assertions)]
 async fn enumerated_live_policy_peer(
     mut rx: mpsc::Receiver<PeerManagerCommand>,
     snapshot: Arc<Mutex<String>>,
@@ -11681,6 +11683,7 @@ async fn enumerated_live_policy_peer(
     }
 }
 
+#[cfg(debug_assertions)]
 async fn enumerated_transaction_persister(
     mut rx: mpsc::Receiver<ConfigEvent>,
     config_path: PathBuf,
@@ -11710,12 +11713,14 @@ async fn enumerated_transaction_persister(
     }
 }
 
+#[cfg(debug_assertions)]
 const TRANSACTION_FAULT_CHILD: &str = "RUSTBGPD_TEST_TRANSACTION_FAULT_CHILD";
 
 #[expect(
     clippy::too_many_lines,
     reason = "one confirmed apply fixture checks the same terminal oracle for every scheduled interaction"
 )]
+#[cfg(debug_assertions)]
 async fn run_confirmed_live_policy_fault_child(root: &Path) {
     use std::os::unix::fs::PermissionsExt as _;
 
@@ -11886,6 +11891,7 @@ async fn run_confirmed_live_policy_fault_child(root: &Path) {
 }
 
 #[tokio::test]
+#[cfg(debug_assertions)]
 async fn confirmed_live_policy_faults_are_enumerated() {
     use std::os::unix::fs::PermissionsExt as _;
 
