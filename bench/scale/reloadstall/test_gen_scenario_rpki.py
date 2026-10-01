@@ -98,6 +98,43 @@ class RpkiScenarioTests(unittest.TestCase):
             self.assertIn("incompatible", result.stderr)
             self.assertFalse(out.exists())
 
+    def test_converged_rejoin_adds_only_explicit_helper_settings(self):
+        with tempfile.TemporaryDirectory(prefix="gr-gen-", dir="/tmp") as tmp:
+            out = Path(tmp) / "scenario"
+            baseline = self.generate(out, cache=None)
+            self.assertEqual(baseline.returncode, 0, baseline.stderr)
+            original = (out / "config.toml").read_text()
+            policies = [(out / name).read_bytes() for name in ("gen-a.rpol", "gen-b.rpol")]
+            enabled = self.generate(out, cache=None, extra_env={"GEN_CONVERGED_REJOIN": "1"})
+            self.assertEqual(enabled.returncode, 0, enabled.stderr)
+            generated = (out / "config.toml").read_text()
+            for neighbor in tomllib.loads(generated)["neighbors"]:
+                self.assertTrue(neighbor["graceful_restart"])
+                self.assertEqual(neighbor["gr_peer_restart_time_max"], 180)
+                self.assertEqual(neighbor["gr_stale_routes_time"], 360)
+            settings = "graceful_restart = true\ngr_peer_restart_time_max = 180\ngr_stale_routes_time = 360\n"
+            self.assertEqual(generated.replace(settings, ""), original)
+            self.assertEqual([(out / name).read_bytes() for name in ("gen-a.rpol", "gen-b.rpol")], policies)
+
+    def test_converged_rejoin_rejects_invalid_and_incompatible_shapes(self):
+        cases = [({"GEN_CONVERGED_REJOIN": value}, None) for value in ("", "true", "2", "-1")]
+        cases += [({"GEN_CONVERGED_REJOIN": "1", **extra}, changed)
+                  for extra, changed in (({"GEN_DUALSTACK": "1"}, None),
+                                         ({"GEN_RPKI_CACHE": "127.0.0.1:3323"}, None),
+                                         ({"GEN_RPKI_CACHE": "[::1]:3323"}, None),
+                                         ({"GEN_FILTER_COUNT": "1"}, None),
+                                         ({"GEN_IBGP_RR_ASN": "64512"}, None),
+                                         ({"GEN_TRIP_MAX_PREFIXES": "1", "GEN_TRIP_RESTART_SECONDS": "1"}, None),
+                                         ({}, 6))]
+        with tempfile.TemporaryDirectory(prefix="gr-gen-", dir="/tmp") as tmp:
+            for index, (env, changed) in enumerate(cases):
+                with self.subTest(env=env, changed=changed):
+                    out = Path(tmp) / str(index)
+                    result = self.generate(out, cache=None, changed_peers=changed, extra_env=env)
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn("GEN_CONVERGED_REJOIN", result.stderr)
+                    self.assertFalse(out.exists())
+
 
 if __name__ == "__main__":
     unittest.main()

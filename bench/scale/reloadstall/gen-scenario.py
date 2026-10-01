@@ -78,6 +78,11 @@ bracketed IPv6 `[address]:port` adds that RTR cache and rejects RPKI-invalid
 routes in the shared import policy for every route-server member. It does not
 start a cache or inject VRP updates. It is incompatible with iBGP-RR mode,
 which has no import policy.
+
+Converged-rejoin extension: `GEN_CONVERGED_REJOIN=1` explicitly enables IPv4
+GR helper retention with a 180-second disconnected window and 360-second
+post-reconnect EoR window, matching `--converged-rejoin`. This is a harness
+control-plane fixture, not evidence of forwarding survival.
 """
 import ipaddress
 import os
@@ -114,7 +119,15 @@ if ibgp_rr_asn is not None:
         sys.exit("GEN_IBGP_RR_ASN must be in 1..=65535 (stub OPENs carry it as u16)")
     if trip_max_prefixes is not None:
         sys.exit("GEN_IBGP_RR_ASN is mutually exclusive with the GEN_TRIP_* knobs")
+converged_rejoin = os.environ.get("GEN_CONVERGED_REJOIN", "0")
+if converged_rejoin not in ("0", "1"):
+    sys.exit("GEN_CONVERGED_REJOIN must be 0 or 1")
+converged_rejoin = converged_rejoin == "1"
 rpki_cache = os.environ.get("GEN_RPKI_CACHE")
+if converged_rejoin and (dualstack or filter_count or ibgp_rr_asn is not None
+                         or trip_max_prefixes is not None or mixed_export_only
+                         or rpki_cache is not None):
+    sys.exit("GEN_CONVERGED_REJOIN requires the disjoint all-peer IPv4 route-server shape")
 if rpki_cache is not None:
     if ibgp_rr_asn is not None:
         sys.exit("GEN_RPKI_CACHE is incompatible with GEN_IBGP_RR_ASN")
@@ -304,6 +317,9 @@ for i in range(n_peers):
         'families = ["ipv4_unicast", "ipv6_unicast"]' if dualstack else 'families = ["ipv4_unicast"]',
         "hold_time = 180",
     ]
+    if converged_rejoin:
+        neighbor += ["graceful_restart = true", "gr_peer_restart_time_max = 180",
+                     "gr_stale_routes_time = 360"]
     if i == 0 and trip_max_prefixes is not None:
         # The soak's designated trip member: the harness announces over
         # this bound and rides the Cease teardown + timed restart.
