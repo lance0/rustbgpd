@@ -3435,11 +3435,12 @@ pub(crate) fn evpn_route_to_proto(route: &EvpnRibRoute) -> proto::EvpnRouteEntry
                         .filter_map(PathAttribute::pmsi_tunnel);
                     tunnels
                         .next()
-                        .filter(|pmsi| {
-                            pmsi.tunnel_type == rustbgpd_wire::PmsiTunnelType::IngressReplication
-                                && tunnels.next().is_none()
+                        .filter(|_| tunnels.next().is_none())
+                        .and_then(|pmsi| {
+                            let width = pmsi.tunnel_type.evpn_srv6_function_bits()?;
+                            // PMSI stores 24 bits; P2MP uses only the high 20.
+                            Some((pmsi.mpls_label >> (24 - width), width))
                         })
-                        .map(|pmsi| (pmsi.mpls_label, 24))
                 }
                 _ => None,
             },
@@ -4305,6 +4306,74 @@ mod tests {
             view.services[1].sids[0].reconstructed_sid.as_deref(),
             Some("2001:db8:111:1:1234::")
         );
+    }
+
+    #[test]
+    fn prefix_sid_imet_p2mp_reconstruction_preserves_raw_bits_and_width_limits() {
+        use rustbgpd_wire::{PmsiTunnel, PmsiTunnelIdentifier, PmsiTunnelType};
+        let (mut evpn, _, _, _, _) = non_unicast_routes("192.0.2.1".parse().unwrap());
+        for (tunnel_type, count, length, label, expected) in [
+            (0x0d, 1, 16, 0x00fb_d100, Some("2001:db8:1:fbd1::")),
+            (0x0d, 1, 16, 0x00fb_d10f, Some("2001:db8:1:fbd1::")),
+            (0x0d, 1, 20, 0x00ab_cdef, Some("2001:db8:1:abcd:e000::")),
+            (0x0d, 1, 21, 0x00ab_cdef, None),
+            (0x06, 1, 24, 0x00ab_cdef, Some("2001:db8:1:abcd:ef00::")),
+            (0x0d, 0, 16, 0x00fb_d100, None),
+            (0x00, 1, 16, 0x00fb_d100, None),
+            (0x01, 1, 16, 0x00fb_d100, None),
+            (0x0c, 1, 16, 0x00fb_d100, None),
+            (0x8d, 1, 16, 0x00fb_d100, None),
+            (0x0d, 2, 16, 0x00fb_d100, None),
+        ] {
+            let PathAttribute::Unknown(mut raw) = transposed_service(6, false) else {
+                unreachable!()
+            };
+            let mut value = raw.data.to_vec();
+            value[8..24].copy_from_slice(&"2001:db8:1::".parse::<Ipv6Addr>().unwrap().octets());
+            value[26] = 24; // End.DT2M
+            // Keep Function Length >= 21 to isolate the P2MP label width limit.
+            value[31..].copy_from_slice(&[
+                32,
+                16,
+                if length == 16 { 16 } else { 24 },
+                0,
+                length,
+                48,
+            ]);
+            raw.data = value.into();
+            let pmsi = PathAttribute::PmsiTunnel(PmsiTunnel {
+                flags: 0,
+                tunnel_type: match tunnel_type {
+                    0 => PmsiTunnelType::NoTunnelInfo,
+                    1 => PmsiTunnelType::RsvpTeP2mp,
+                    6 => PmsiTunnelType::IngressReplication,
+                    value => PmsiTunnelType::Other(value),
+                },
+                mpls_label: label,
+                tunnel_identifier: match tunnel_type {
+                    0 => PmsiTunnelIdentifier::Empty,
+                    6 => PmsiTunnelIdentifier::Ipv4("192.0.2.1".parse().unwrap()),
+                    _ => PmsiTunnelIdentifier::Raw(vec![0, 0, 0, 1, 192, 0, 2, 1]),
+                },
+            });
+            let mut attributes = vec![PathAttribute::Unknown(raw.clone())];
+            attributes.extend(std::iter::repeat_n(pmsi, count));
+            evpn.attributes = AttrSet::new(attributes);
+            let original = evpn.attributes.clone();
+            let view = evpn_route_to_proto(&evpn).prefix_sid.unwrap();
+            assert_eq!(view.raw_value, raw.data);
+            assert_eq!(view.flags, u32::from(raw.flags));
+            assert_eq!(view.decode_error, "");
+            let sid = &view.services[0].sids[0];
+            assert_eq!(sid.sid_value, "2001:db8:1::");
+            assert_eq!(sid.endpoint_behavior, 24);
+            assert_eq!(
+                sid.reconstructed_sid.as_deref(),
+                expected,
+                "type={tunnel_type:#x}, count={count}, length={length}, label={label:#x}"
+            );
+            assert_eq!(evpn.attributes, original);
+        }
     }
 
     #[test]

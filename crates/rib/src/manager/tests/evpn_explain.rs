@@ -579,3 +579,106 @@ fn srv6_argument_route_wrapper_uses_esi_community_and_ignores_malformed_companio
     assert_eq!(result.status, Status::LocFuncOnly);
     assert_eq!(result.sid, Some("2001:db8:1:fbd1:fbd1::".parse().unwrap()));
 }
+
+#[test]
+fn srv6_p2mp_imet_replacement_withdrawal_and_recovery_reach_export_and_inspection() {
+    use crate::srv6::tests::{p2mp_imet, service_attribute};
+    use crate::update::Srv6ArgumentStatus as Status;
+    let (_tx, rx) = mpsc::channel(8);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let (outbound_tx, mut out) = mpsc::channel(16);
+    manager.handle_update(RibUpdate::PeerUp {
+        per_client_best: false,
+        interpret_rfc1997: true,
+        session_id: 0,
+        peer: TARGET,
+        peer_asn: 65100,
+        peer_router_id: Ipv4Addr::UNSPECIFIED,
+        outbound_tx,
+        export_policy: None,
+        sendable_families: evpn_sendable(),
+        is_ebgp: true,
+        route_reflector_client: false,
+        orr_vantage: None,
+        add_path_send_families: vec![],
+        add_path_send_max: 0,
+        negotiated_orf_recv: vec![],
+        negotiated_llgr_families: vec![],
+    });
+    while out.try_recv().is_ok() {}
+    let mut imet = p2mp_imet();
+    let (_, ead) = argument_routes(0xaaaa);
+    let receive = |manager: &mut RibManager, route: &EvpnRibRoute, withdraw| {
+        manager.handle_update(RibUpdate::RoutesReceived {
+            session_id: 0,
+            peer: route.peer,
+            announced: vec![],
+            withdrawn: vec![],
+            flowspec_announced: vec![],
+            flowspec_withdrawn: vec![],
+            evpn_announced: if withdraw {
+                vec![]
+            } else {
+                vec![route.clone()]
+            },
+            evpn_withdrawn: if withdraw { vec![route.key()] } else { vec![] },
+            validated_with: None,
+        });
+        drain_route_chunks(manager);
+    };
+    receive(&mut manager, &ead, false);
+    while out.try_recv().is_ok() {}
+    // Ordered actor updates exercise replacement by an invalid sole candidate,
+    // recovery, explicit withdrawal, and reannouncement without timing sleeps.
+    for (label, length, withdraw, expected) in [
+        (0x00fb_d100, 16, false, Some("2001:db8:1:fbd1:aaaa::")),
+        (0x00ab_cd0f, 16, false, Some("2001:db8:1:abcd:aaaa::")),
+        (0x00ab_cd0f, 21, false, None),
+        (0x00fb_d100, 16, false, Some("2001:db8:1:fbd1:aaaa::")),
+        (0x00fb_d100, 16, true, None),
+        (0x00fb_d100, 16, false, Some("2001:db8:1:fbd1:aaaa::")),
+    ] {
+        AttrSet::edit(&mut imet.attributes, |attrs| {
+            attrs[0] = service_attribute(
+                6,
+                "2001:db8:1::".parse().unwrap(),
+                24,
+                Some([32, 16, if length == 21 { 24 } else { 16 }, 16, length, 48]),
+            );
+            let PathAttribute::PmsiTunnel(tunnel) = &mut attrs[1] else {
+                panic!("PMSI fixture")
+            };
+            tunnel.mpls_label = label;
+        });
+        receive(&mut manager, &imet, withdraw);
+        let result = argument_query(&mut manager, &imet, &ead, None, None);
+        assert_eq!(result.sid, expected.map(|sid| sid.parse().unwrap()));
+        assert_eq!(
+            result.status,
+            expected.map_or(Status::Unavailable, |_| Status::Composed)
+        );
+        assert_eq!(result.association, "caller_selected");
+        let explain = query(&mut manager, imet.key(), Some(imet.peer), Some(TARGET));
+        assert_eq!(explain.best.is_some(), expected.is_some());
+        if withdraw {
+            assert!(explain.received.is_none());
+        } else {
+            assert_eq!(explain.received.unwrap().attributes, imet.attributes);
+        }
+        let mut announced = Vec::new();
+        let mut withdrawn = Vec::new();
+        while let Ok(update) = out.try_recv() {
+            announced.extend(update.evpn_announce);
+            withdrawn.extend(update.evpn_withdraw);
+        }
+        if expected.is_some() {
+            assert_eq!(withdrawn.len(), 0);
+            assert_eq!(announced.len(), 1);
+            assert_eq!(announced[0].key(), imet.key());
+            assert_eq!(announced[0].attributes, imet.attributes);
+        } else {
+            assert!(announced.is_empty());
+            assert_eq!(withdrawn, vec![imet.key()]);
+        }
+    }
+}

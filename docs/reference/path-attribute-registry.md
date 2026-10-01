@@ -320,12 +320,16 @@ label field, require the transposed SID bits to be zero, and require zero
 offset when transposition length is zero. The sum may equal offset plus length
 ([verified erratum 7817](https://www.rfc-editor.org/errata/eid7817)). Global
 IPv4/IPv6 unicast uses L3 service without transposition; VPNv4/VPNv6 allows up
-to 20 Function bits. EVPN uses the applicable 24-bit label field: EAD-per-ES
-uses the ESI Label extended community and Argument bits; EAD-per-EVI and
-MAC-only use L2 Function bits; MAC+IP can use L2 or L3 service, with L3
-transposition requiring its second label; IMET uses the ingress-replication
-PMSI label; IP Prefix routes use L3 Function bits. EVPN Type 4 and families
-outside these encodings keep their existing selection behavior.
+to 20 Function bits. Most EVPN encodings use an applicable 24-bit label field:
+EAD-per-ES uses the ESI Label extended community and Argument bits; EAD-per-EVI
+and MAC-only use L2 Function bits; MAC+IP can use L2 or L3 service, with L3
+transposition requiring its second label; IP Prefix routes use L3 Function bits.
+IMET uses 24 Function bits from an ingress-replication (`0x06`) PMSI label or
+the high-order 20 Function bits from an SRv6 P2MP (`0x0d`) PMSI label, as
+specified by [RFC 10018 §4.1.1.1.2](https://www.rfc-editor.org/rfc/rfc10018.html#section-4.1.1.1.2).
+Missing or other PMSI tunnel types cannot supply a transposed IMET Function.
+EVPN Type 4 and families outside these encodings keep their existing selection
+behavior.
 
 An unknown endpoint behavior with no arguments remains eligible. Nonzero
 Argument Length requires an understood argument-capable behavior: End.DT2M

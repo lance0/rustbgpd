@@ -579,10 +579,12 @@ a route-selection verdict.
 `association=caller_selected` means the caller chose the pair. Retained
 metadata does not establish the original egress identity; choose the
 applicable same-egress Ethernet Segment route yourself. The result does not
-assert forwarding, remote receipt or installation. Existing raw SID and
-per-route Function views are unchanged. Without the two argument options,
-text and JSON keep their existing shape. An older daemon that ignores the
-pair request fails explicitly instead of returning a partial explanation.
+assert forwarding, remote receipt or installation. The pair request leaves
+raw SID and per-route Function views unchanged. For IMET transposition, those
+views support 24 Function bits with ingress replication (`0x06`) and 20
+high-order Function bits with SRv6 P2MP (`0x0d`). Without the two argument
+options, text and JSON keep their existing shape. An older daemon that ignores
+the pair request fails explicitly instead of returning a partial explanation.
 
 
 ### Events and Control
