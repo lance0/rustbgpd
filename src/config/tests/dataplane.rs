@@ -7,7 +7,7 @@ use super::*;
 #[test]
 fn fib_tables_default_empty() {
     let config = parse(valid_toml()).unwrap();
-    assert!(config.fib_tables.is_empty());
+    assert_eq!(config.fib_tables.len(), 0);
 }
 
 #[test]
@@ -31,8 +31,8 @@ metric = 200
     assert_eq!(table.table_id, 1000);
     assert_eq!(table.metric, 200);
     assert_eq!(table.families, ["ipv4_unicast", "ipv6_unicast"]);
-    assert!(table.allowed_peer_groups.is_empty());
-    assert!(table.allowed_neighbors.is_empty());
+    assert_eq!(table.allowed_peer_groups.len(), 0);
+    assert_eq!(table.allowed_neighbors.len(), 0);
     assert_eq!(table.max_routes, None);
 }
 
@@ -705,7 +705,7 @@ fn bfd_member_edits_are_reload_applied_and_transaction_unsupported() {
             assert!(!diff.has_restart_required_changes());
             let class = classify_config_transaction_v1(&diff);
             assert!(!class.is_committable());
-            assert!(class.restart_required_sections.is_empty());
+            assert_eq!(class.restart_required_sections.len(), 0);
             assert!(
                 class
                     .unsupported_sections

@@ -308,7 +308,7 @@ async fn configured_discard_is_the_import_policy_and_explain_view() {
         panic!("expected configured discard to remove the deny match before policy")
     };
     assert_eq!(announced.len(), 1);
-    assert!(announced[0].communities().is_empty());
+    assert_eq!(announced[0].communities().len(), 0);
     let key = ImportDecisionKey {
         afi: Afi::Ipv4,
         safi: Safi::Unicast,
@@ -319,7 +319,7 @@ async fn configured_discard_is_the_import_policy_and_explain_view() {
         .import_decision_cache
         .lookup(&key, session.import_policy_generation)
     {
-        LookupResult::Hit(decision) => assert!(decision.policy_context.communities.is_empty()),
+        LookupResult::Hit(decision) => assert_eq!(decision.policy_context.communities.len(), 0),
         other => panic!("expected cached permit decision, got {other:?}"),
     }
 }
@@ -737,7 +737,7 @@ async fn external_neighbor_rr_attributes_are_discarded_and_counted() {
         "ORIGINATOR_ID / CLUSTER_LIST from an external neighbor reached the RIB"
     );
     assert_eq!(route.originator_id(), None);
-    assert!(route.cluster_list().is_empty());
+    assert_eq!(route.cluster_list().len(), 0);
     assert_eq!(
         discarded_type_code_counts(&session),
         vec![("10".to_string(), 1.0), ("9".to_string(), 1.0)]
@@ -763,7 +763,7 @@ async fn internal_neighbor_rr_attributes_are_kept() {
     .await;
     assert_eq!(route.originator_id(), Some(FORGED_ORIGINATOR));
     assert_eq!(route.cluster_list(), forged_cluster_list().as_slice());
-    assert!(discarded_type_code_counts(&session).is_empty());
+    assert_eq!(discarded_type_code_counts(&session).len(), 0);
 }
 
 /// An external neighbor's attributes are discarded, so they cannot trip the

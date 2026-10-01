@@ -1622,7 +1622,7 @@ mod tests {
         let vrfs = one_vrf("blue", 5000, "10.0.0.1", &["65000:5000"]);
         let table = project_ip_prefix_routes(&vrfs, std::iter::empty());
         assert!(table.is_empty());
-        assert!(table.drops().is_empty());
+        assert_eq!(table.drops().len(), 0);
     }
 
     #[test]
@@ -1731,7 +1731,7 @@ mod tests {
             vec![esi_ead(100, esi, 42, "10.0.0.2", true)],
         );
 
-        assert!(table.drops().is_empty());
+        assert_eq!(table.drops().len(), 0);
         let entries: Vec<_> = table.for_vrf(IpVrfId::new(5000).unwrap()).collect();
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].1.next_hop, "10.0.0.2".parse::<IpAddr>().unwrap());
@@ -1779,7 +1779,7 @@ mod tests {
             vec![esi_ead(100, esi, 0, "10.0.0.2", false)],
         );
 
-        assert!(table.drops().is_empty());
+        assert_eq!(table.drops().len(), 0);
         let ((_id, prefix), entry) = table.iter().next().expect("route imported");
         assert_eq!(*prefix, v4([10, 3, 0, 0], 24));
         let expected = ["10.0.0.2".parse::<IpAddr>().unwrap()];
@@ -1957,7 +1957,7 @@ mod tests {
             vec![overlay(100, "192.0.2.10", 0xaa, "10.0.0.2")],
         );
 
-        assert!(table.drops().is_empty());
+        assert_eq!(table.drops().len(), 0);
         let blue = IpVrfId::new(5000).unwrap();
         let entries: Vec<_> = table.for_vrf(blue).collect();
         assert_eq!(entries.len(), 1);
@@ -2032,7 +2032,7 @@ mod tests {
             .into_iter()
             .map(|routes| {
                 let table = project_ip_prefix_routes_with_overlay_index(&vrfs, [r.clone()], routes);
-                assert!(table.drops().is_empty());
+                assert_eq!(table.drops().len(), 0);
                 let entries: Vec<_> = table.for_vrf(blue).collect();
                 assert_eq!(entries.len(), 1);
                 (entries[0].1.next_hop, entries[0].1.router_mac)
@@ -2064,7 +2064,7 @@ mod tests {
             ],
         );
 
-        assert!(table.drops().is_empty());
+        assert_eq!(table.drops().len(), 0);
         let blue = IpVrfId::new(5000).unwrap();
         let entries: Vec<_> = table.for_vrf(blue).collect();
         assert_eq!(entries.len(), 1);

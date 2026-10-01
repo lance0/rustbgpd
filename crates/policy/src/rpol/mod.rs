@@ -501,7 +501,7 @@ impl Eq for RpolPolicySet {}
 /// exceeding [`crate::compile::MAX_CHAIN_NODES`].
 pub fn compile_rpol(source: &str, store: &mut SetStore) -> Result<CompiledChain, Diagnostics> {
     let (file, diags) = front(source)?;
-    debug_assert!(diags.is_empty());
+    debug_assert_eq!(diags, []);
     let mut lowerer = lower::Lowerer::new(&file, store);
     let chain = lowerer
         .zero_param_chain(store, &DatasetBindings::new())

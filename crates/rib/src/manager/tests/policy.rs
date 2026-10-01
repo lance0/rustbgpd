@@ -576,7 +576,7 @@ async fn replace_peer_export_policy_resyncs_outbound_state_and_emits_policy_filt
 
     let initial = out_rx.recv().await.unwrap();
     assert_eq!(initial.announce.len(), 1);
-    assert!(initial.withdraw.is_empty());
+    assert_eq!(initial.withdraw.len(), 0);
 
     let (reply_tx, reply_rx) = oneshot::channel();
     tx.send(RibUpdate::ReplacePeerExportPolicy {

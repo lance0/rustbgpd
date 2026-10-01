@@ -174,10 +174,10 @@ async fn route_refresh_bgpls_re_advertises_routes() {
 
     let update = out_rx.recv().await.unwrap();
     assert!(update.announce.is_empty());
-    assert!(update.withdraw.is_empty());
+    assert_eq!(update.withdraw.len(), 0);
     assert_eq!(update.bgpls_announce.len(), 1);
     assert_eq!(update.bgpls_announce[0].key(), key);
-    assert!(update.bgpls_withdraw.is_empty());
+    assert_eq!(update.bgpls_withdraw.len(), 0);
     assert_eq!(update.end_of_rib, vec![(Afi::BgpLs, Safi::BgpLs)]);
     assert_eq!(
         update.refresh_markers,

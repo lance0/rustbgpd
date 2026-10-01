@@ -573,10 +573,9 @@ mod tests {
         );
 
         // Not due yet → nothing fires.
-        assert!(
-            planner
-                .fire_due(armed_at + Duration::from_secs(29))
-                .is_empty()
+        assert_eq!(
+            planner.fire_due(armed_at + Duration::from_secs(29)).len(),
+            0
         );
         // Due → the Link reason releases.
         assert_eq!(
@@ -619,10 +618,9 @@ mod tests {
             Some(second_up + Duration::from_secs(30))
         );
         // The original deadline must not fire.
-        assert!(
-            planner
-                .fire_due(first_up + Duration::from_secs(30))
-                .is_empty()
+        assert_eq!(
+            planner.fire_due(first_up + Duration::from_secs(30)).len(),
+            0
         );
         assert_eq!(
             planner.fire_due(second_up + Duration::from_secs(30)),
@@ -687,7 +685,7 @@ mod tests {
         // The projection does not carry the bound name yet (monitor
         // replace in flight) — no action on a stale map.
         let actions = planner.replace_bindings(bindings(&[(1, "es0", 30)]), &carrier(&[]), now);
-        assert!(actions.is_empty());
+        assert_eq!(actions.len(), 0);
 
         // The feed's next projection carries it as down (fail-closed
         // for a name the kernel does not have) → direct drain.

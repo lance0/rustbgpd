@@ -859,8 +859,8 @@ async fn send_route_update_skips_route_refresh_request_without_capability() {
         panic!("expected the EoR UPDATE, not a ROUTE-REFRESH");
     };
     let parsed = msg.parse(true, false, &[]).unwrap();
-    assert!(parsed.announced.is_empty());
-    assert!(parsed.withdrawn.is_empty());
+    assert_eq!(parsed.announced.len(), 0);
+    assert_eq!(parsed.withdrawn.len(), 0);
 }
 
 /// Plain ROUTE-REFRESH requests dequeued from the session's RIB channel,

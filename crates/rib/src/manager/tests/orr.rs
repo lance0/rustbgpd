@@ -218,7 +218,7 @@ async fn orr_status_reports_resolved_and_unresolved_vantages() {
     let resolved = &status.vantages[0];
     assert_eq!(resolved.vantage, vantage_at_node_a());
     assert!(resolved.resolved);
-    assert!(!resolved.node_key_hex.is_empty());
+    assert_ne!(resolved.node_key_hex.len(), 0);
     assert_eq!(resolved.asn, Some(64512));
     assert_eq!(resolved.router_id_hex, format!("00000000000{A:x}"));
     // From A the square reaches A, X, and Y — never B.
@@ -228,7 +228,7 @@ async fn orr_status_reports_resolved_and_unresolved_vantages() {
     let unresolved = &status.vantages[1];
     assert_eq!(unresolved.vantage, outside);
     assert!(!unresolved.resolved);
-    assert!(unresolved.node_key_hex.is_empty());
+    assert_eq!(unresolved.node_key_hex.len(), 0);
     assert_eq!(unresolved.reachable_nodes, 0);
     assert_eq!(unresolved.peers, vec![client2]);
 
@@ -2049,7 +2049,7 @@ async fn non_orr_vpn_peer_unchanged() {
             announces += 1;
             last = Some(route.clone());
         }
-        assert!(update.vpn_withdraw.is_empty());
+        assert_eq!(update.vpn_withdraw.len(), 0);
     }
     assert_eq!(
         announces, 1,

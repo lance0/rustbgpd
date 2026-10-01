@@ -550,17 +550,17 @@ mod tests {
     #[test]
     fn peer_sequence_adoption_preserves_ownership_sticky_and_history() {
         let mut o = fresh();
-        assert!(o.adopt_peer_sequence(mac(0xAA), 3).is_empty());
+        assert_eq!(o.adopt_peer_sequence(mac(0xAA), 3).len(), 0);
         assert_eq!(o.sequence_for_mac(mac(0xAA)), None);
         o.on_local_learned(mac(0xAA), 7, true, None);
         let actions = o.adopt_peer_sequence(mac(0xAA), 3);
         assert_eq!(actions.len(), 1);
         assert_inject(&actions[0], Some(3), true);
-        assert!(o.adopt_peer_sequence(mac(0xAA), 3).is_empty());
-        assert!(o.adopt_peer_sequence(mac(0xAA), 2).is_empty());
+        assert_eq!(o.adopt_peer_sequence(mac(0xAA), 3).len(), 0);
+        assert_eq!(o.adopt_peer_sequence(mac(0xAA), 2).len(), 0);
         assert_eq!(o.by_mac[&mac(0xAA)].last_seen_remote_seq, None);
         o.on_local_aged(mac(0xAA));
-        assert!(o.adopt_peer_sequence(mac(0xAA), u32::MAX).is_empty());
+        assert_eq!(o.adopt_peer_sequence(mac(0xAA), u32::MAX).len(), 0);
         assert_eq!(o.sequence_for_mac(mac(0xAA)), Some(u32::MAX));
         assert_eq!(o.advertised_count(), 0);
         let actions = o.on_local_learned(mac(0xAA), 7, true, None);
@@ -660,7 +660,7 @@ mod tests {
     fn aged_for_unknown_mac_returns_no_actions_no_panic() {
         let mut o = fresh();
         let actions = o.on_local_aged(mac(0xBB));
-        assert!(actions.is_empty());
+        assert_eq!(actions.len(), 0);
     }
 
     #[test]
@@ -812,7 +812,7 @@ mod tests {
         let mut o = fresh();
         let v = remote(Some(7));
         let actions = o.on_remote_changed(mac(0xCC), Some(&v));
-        assert!(actions.is_empty());
+        assert_eq!(actions.len(), 0);
     }
 
     #[test]
@@ -825,7 +825,7 @@ mod tests {
         // Remote drops to 5 — we already win, no bump.
         let v5 = remote(Some(5));
         let actions = o.on_remote_changed(mac(0xAA), Some(&v5));
-        assert!(actions.is_empty());
+        assert_eq!(actions.len(), 0);
     }
 
     #[test]

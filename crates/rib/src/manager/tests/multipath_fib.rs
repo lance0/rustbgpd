@@ -233,7 +233,7 @@ async fn same_peer_add_path_rank_is_stable_across_order_and_replacement() {
     assert_eq!(replacement.announce.len(), 1);
     assert_eq!(replacement.announce[0].path_id, 1);
     assert_eq!(replacement.announce[0].next_hop, path_7.next_hop);
-    assert!(replacement.withdraw.is_empty());
+    assert_eq!(replacement.withdraw.len(), 0);
     assert!(
         matches!(out_rx.try_recv(), Err(mpsc::error::TryRecvError::Empty)),
         "replacement must produce one exact outbound update"

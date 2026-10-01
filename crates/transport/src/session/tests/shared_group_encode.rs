@@ -1470,7 +1470,7 @@ async fn shared_group_mixed_failover_pass_stays_on_encode_once() {
         );
         let first = parse_frame(&frames[0], false);
         assert_eq!(first.withdrawn.len(), 2);
-        assert!(first.announced.is_empty());
+        assert_eq!(first.announced.len(), 0);
         assert_eq!(
             frames[1..],
             published[..],
@@ -1691,7 +1691,7 @@ async fn shared_group_mixed_pass_rib_out_bmp_mirrors_emitted_frames() {
             withdraw,
             "exactly the member's withdrawals go first"
         );
-        assert!(first.announced.is_empty());
+        assert_eq!(first.announced.len(), 0);
         let mut announced: Vec<_> = frames[1..]
             .iter()
             .flat_map(|frame| parse_frame(frame, false).announced)

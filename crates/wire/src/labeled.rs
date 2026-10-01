@@ -715,7 +715,7 @@ mod tests {
 
         let decoded = decode_labeled_withdraw_nlri(&buf, LabeledAddressFamily::V4).unwrap();
         assert_eq!(decoded.len(), 1);
-        assert!(decoded[0].labels.is_empty());
+        assert_eq!(decoded[0].labels.len(), 0);
         assert_eq!(decoded[0].prefix, entry.prefix);
     }
 
@@ -727,7 +727,7 @@ mod tests {
         let buf = vec![24 + 24, 0x00, 0x00, 0x00, 10, 0, 1];
         let decoded = decode_labeled_withdraw_nlri(&buf, LabeledAddressFamily::V4).unwrap();
         assert_eq!(decoded.len(), 1);
-        assert!(decoded[0].labels.is_empty());
+        assert_eq!(decoded[0].labels.len(), 0);
         assert_eq!(decoded[0].prefix, v4([10, 0, 1, 0], 24));
     }
 
@@ -745,7 +745,7 @@ mod tests {
         ];
         let decoded = decode_labeled_withdraw_nlri(&buf, LabeledAddressFamily::V4).unwrap();
         assert_eq!(decoded.len(), 1);
-        assert!(decoded[0].labels.is_empty());
+        assert_eq!(decoded[0].labels.len(), 0);
         assert_eq!(decoded[0].prefix.to_string(), "198.51.101.0/24");
     }
 
@@ -767,7 +767,7 @@ mod tests {
 
         let decoded = decode_labeled_withdraw_nlri(&buf, LabeledAddressFamily::V6).unwrap();
         assert_eq!(decoded.len(), 1);
-        assert!(decoded[0].labels.is_empty());
+        assert_eq!(decoded[0].labels.len(), 0);
         assert_eq!(decoded[0].prefix, entry.prefix);
     }
 
@@ -783,7 +783,7 @@ mod tests {
         let decoded = decode_labeled_withdraw_nlri_addpath(&buf, LabeledAddressFamily::V4).unwrap();
         assert_eq!(decoded.len(), 1);
         assert_eq!(decoded[0].path_id, 9);
-        assert!(decoded[0].nlri.labels.is_empty());
+        assert_eq!(decoded[0].nlri.labels.len(), 0);
         assert_eq!(decoded[0].nlri.prefix.to_string(), "198.51.101.0/24");
     }
 
@@ -852,7 +852,7 @@ mod tests {
             let withdrawn = decode_labeled_withdraw_nlri(&announce, family).unwrap();
             assert_eq!(withdrawn.len(), entries.len());
             for (got, want) in withdrawn.iter().zip(&entries) {
-                assert!(got.labels.is_empty());
+                assert_eq!(got.labels.len(), 0);
                 assert_eq!(got.key(), want.key(), "{family}");
             }
 

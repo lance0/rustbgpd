@@ -485,7 +485,7 @@ mod tests {
     fn is_ready_and_reasons_accessor_shapes() {
         let ready = probe(&vrf(), &happy_snapshot());
         assert!(ready.is_ready());
-        assert!(ready.reasons().is_empty());
+        assert_eq!(ready.reasons().len(), 0);
 
         let nr = probe(
             &vrf(),
@@ -495,6 +495,6 @@ mod tests {
             },
         );
         assert!(!nr.is_ready());
-        assert!(!nr.reasons().is_empty());
+        assert_ne!(nr.reasons().len(), 0);
     }
 }

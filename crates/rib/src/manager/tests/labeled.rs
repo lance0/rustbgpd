@@ -189,7 +189,7 @@ async fn labeled_no_advertise_suppresses_resolved_orr_winner_without_plain_churn
     for (peer, out_rx, state) in &mut receivers {
         let (announced, withdrawn) = drain_labeled_delta(out_rx, state);
         assert!(!announced.is_empty(), "baseline must stage real output");
-        assert!(withdrawn.is_empty());
+        assert_eq!(withdrawn.len(), 0);
         assert_eq!(state.keys().copied().collect::<HashSet<_>>(), expected_keys);
         let expected_source = if *peer == plain { source_x } else { source_y };
         assert!(
@@ -237,7 +237,7 @@ async fn labeled_no_advertise_suppresses_resolved_orr_winner_without_plain_churn
     let _ = query_labeled_routes(&tx).await;
     let (announced, withdrawn) = drain_labeled_delta(orr_rx, orr_state);
     assert_eq!(announced.len(), 2);
-    assert!(withdrawn.is_empty());
+    assert_eq!(withdrawn.len(), 0);
     assert!(
         orr_state
             .values()
@@ -292,7 +292,7 @@ async fn labeled_no_advertise_suppresses_resolved_orr_winner_without_plain_churn
     let (_, orr_rx, orr_state) = &mut receivers[1];
     let (announced, withdrawn) = drain_labeled_delta(orr_rx, orr_state);
     assert_eq!(announced.len(), 2);
-    assert!(withdrawn.is_empty());
+    assert_eq!(withdrawn.len(), 0);
     assert_eq!(
         orr_state.keys().copied().collect::<HashSet<_>>(),
         expected_keys
@@ -358,7 +358,7 @@ async fn labeled_add_path_no_advertise_compacts_and_withdraws_ranks() {
     let mut state = HashMap::new();
     let (announced, withdrawn) = drain_labeled_delta(&mut out_rx, &mut state);
     assert!(!announced.is_empty(), "baseline must begin non-empty");
-    assert!(withdrawn.is_empty());
+    assert_eq!(withdrawn.len(), 0);
     assert_eq!(state.len(), 2);
     assert_eq!(
         state[&crate::route::LabeledRibRouteKey { prefix, path_id: 1 }].peer,
@@ -418,7 +418,7 @@ async fn labeled_add_path_no_advertise_compacts_and_withdraws_ranks() {
     let (announced, withdrawn) = drain_labeled_delta(&mut out_rx, &mut state);
     assert_eq!(announced.len(), 1);
     assert_eq!((announced[0].path_id, announced[0].peer), (1, second.peer));
-    assert!(withdrawn.is_empty());
+    assert_eq!(withdrawn.len(), 0);
 
     tx.send(RibUpdate::LabeledRoutesReceived {
         session_id: 0,
@@ -431,7 +431,7 @@ async fn labeled_add_path_no_advertise_compacts_and_withdraws_ranks() {
     let _ = query_labeled_routes(&tx).await;
     let (announced, withdrawn) = drain_labeled_delta(&mut out_rx, &mut state);
     assert_eq!(announced.len(), 2);
-    assert!(withdrawn.is_empty());
+    assert_eq!(withdrawn.len(), 0);
     assert_eq!(state.len(), 2);
     assert_eq!(
         state[&crate::route::LabeledRibRouteKey { prefix, path_id: 1 }].peer,
@@ -493,7 +493,7 @@ async fn labeled_routes_received_reflects_and_withdraws_to_eligible_peer() {
 
     let update = out_rx.recv().await.unwrap();
     assert!(update.announce.is_empty());
-    assert!(update.withdraw.is_empty());
+    assert_eq!(update.withdraw.len(), 0);
     assert_eq!(update.labeled_announce.len(), 1);
     assert_eq!(update.labeled_announce[0].key(), key);
     assert_eq!(
@@ -501,7 +501,7 @@ async fn labeled_routes_received_reflects_and_withdraws_to_eligible_peer() {
         "label stack must pass through reflection verbatim"
     );
     assert_eq!(update.labeled_announce[0].next_hop, route.next_hop);
-    assert!(update.labeled_withdraw.is_empty());
+    assert_eq!(update.labeled_withdraw.len(), 0);
 
     tx.send(RibUpdate::LabeledRoutesReceived {
         session_id: 0,
@@ -999,7 +999,7 @@ async fn send_initial_table_includes_labeled_routes() {
     assert!(update.announce.is_empty());
     assert_eq!(update.labeled_announce.len(), 1);
     assert_eq!(update.labeled_announce[0].key(), key);
-    assert!(update.labeled_withdraw.is_empty());
+    assert_eq!(update.labeled_withdraw.len(), 0);
 
     let eor = out_rx.recv().await.unwrap();
     assert_eq!(eor.end_of_rib, labeled_sendable());
@@ -1067,10 +1067,10 @@ async fn route_refresh_labeled_re_advertises_routes() {
 
     let update = out_rx.recv().await.unwrap();
     assert!(update.announce.is_empty());
-    assert!(update.withdraw.is_empty());
+    assert_eq!(update.withdraw.len(), 0);
     assert_eq!(update.labeled_announce.len(), 1);
     assert_eq!(update.labeled_announce[0].key(), key);
-    assert!(update.labeled_withdraw.is_empty());
+    assert_eq!(update.labeled_withdraw.len(), 0);
     assert_eq!(update.end_of_rib, vec![(Afi::Ipv4, Safi::LabeledUnicast)]);
     assert_eq!(
         update.refresh_markers,

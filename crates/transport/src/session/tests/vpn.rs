@@ -504,7 +504,7 @@ async fn denied_vpn_add_path_replacements_withdraw_exact_known_identity() {
             panic!("expected VpnRoutesReceived");
         };
         assert_eq!(announced.len(), 3);
-        assert!(withdrawn.is_empty());
+        assert_eq!(withdrawn.len(), 0);
         assert_eq!(session.known_prefix_count(), 3);
         for path_id in [11, 22, 33] {
             assert!(session.known_vpn.contains(&key(path_id)));

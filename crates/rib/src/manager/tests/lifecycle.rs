@@ -456,7 +456,7 @@ async fn initial_dump_failure_resyncs_via_timer() {
         "resync should announce the route from Loc-RIB"
     );
     assert_eq!(resync.announce[0].prefix, Prefix::V4(prefix));
-    assert!(resync.withdraw.is_empty());
+    assert_eq!(resync.withdraw.len(), 0);
     assert_eq!(resync.end_of_rib, ipv4_sendable());
 
     // AdjRibOut should now reflect Loc-RIB
@@ -1016,7 +1016,7 @@ async fn failover_inbound_refresh_retries_once_after_channel_drains() {
 
     let failover_dump = winner_rx.recv().await.expect("winner channel stays open");
     assert!(!failover_dump.request_refresh_all_negotiated);
-    assert!(!failover_dump.end_of_rib.is_empty());
+    assert_ne!(failover_dump.end_of_rib.len(), 0);
     assert!(
         counter_metric_value(
             &metrics,
@@ -1963,7 +1963,7 @@ async fn deferred_registration_lets_queued_imports_distribute_first() {
     let eor = survivor_rx
         .try_recv()
         .expect("quiet-actor PeerUp dumps synchronously");
-    assert!(!eor.end_of_rib.is_empty());
+    assert_ne!(eor.end_of_rib.len(), 0);
 
     // A third peer's route lands in the table (feeds the eventual dump).
     manager.handle_update(test_routes_received(
@@ -1986,12 +1986,7 @@ async fn deferred_registration_lets_queued_imports_distribute_first() {
         "busy-actor PeerUp must not dump inline"
     );
     assert_eq!(manager.pending_initial_registrations.len(), 1);
-    assert!(
-        manager
-            .peer_outbound_state(restarter)
-            .update_group
-            .is_empty()
-    );
+    assert_eq!(manager.peer_outbound_state(restarter).update_group.len(), 0);
 
     // The restarter's re-announcements import and distribute to the
     // survivor while the restarter's own dump is still pending.
@@ -2022,19 +2017,9 @@ async fn deferred_registration_lets_queued_imports_distribute_first() {
     // ready updates never advances the idle-only registration.
     assert_eq!(manager.primary_backlog(), 0);
     assert!(!manager.drain_ready_updates().await);
-    assert!(
-        manager
-            .peer_outbound_state(restarter)
-            .update_group
-            .is_empty()
-    );
+    assert_eq!(manager.peer_outbound_state(restarter).update_group.len(), 0);
     manager.advance_pending_initial_registration();
-    assert!(
-        !manager
-            .peer_outbound_state(restarter)
-            .update_group
-            .is_empty()
-    );
+    assert_ne!(manager.peer_outbound_state(restarter).update_group.len(), 0);
     assert!(manager.pending_initial_registrations.is_empty());
     let dump = restarter_rx.try_recv().expect("deferred dump delivered");
     assert!(

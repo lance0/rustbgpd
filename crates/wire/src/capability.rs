@@ -1168,7 +1168,7 @@ mod tests {
     fn decode_empty_optional_params() {
         let mut buf = Bytes::new();
         let caps = decode_optional_parameters(&mut buf, 0).unwrap();
-        assert!(caps.is_empty());
+        assert_eq!(caps.len(), 0);
     }
 
     #[test]

@@ -151,7 +151,7 @@ fn singleton_is_inline_and_duplicate_neutral() {
         index.prefixes[&prefix(1)],
         PrefixAnnouncers::Inline(_)
     ));
-    assert!(index.spills.is_empty());
+    assert_eq!(index.spills.len(), 0);
     assert_eq!(index.peers(&prefix(1)).collect::<Vec<_>>(), [peer(1)]);
 }
 
@@ -182,7 +182,7 @@ fn spill_collapse_sheds_heap_and_reuses_slot() {
     index.register(peer(1), prefix(2));
     index.register(peer(2), prefix(2));
     assert_eq!(index.spills.len(), 1);
-    assert!(index.free_spills.is_empty());
+    assert_eq!(index.free_spills.len(), 0);
     for n in 3..=20 {
         index.prune_to_live(&prefix(2), |candidate| candidate == peer(1));
         index.register(peer(n), prefix(2));

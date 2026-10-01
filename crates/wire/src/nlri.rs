@@ -518,7 +518,7 @@ mod tests {
     #[test]
     fn empty_buffer_yields_empty_vec() {
         let decoded = decode_nlri(&[]).unwrap();
-        assert!(decoded.is_empty());
+        assert_eq!(decoded.len(), 0);
     }
 
     #[test]
@@ -626,7 +626,7 @@ mod tests {
     #[test]
     fn ipv6_nlri_empty_buffer() {
         let decoded = decode_ipv6_nlri(&[]).unwrap();
-        assert!(decoded.is_empty());
+        assert_eq!(decoded.len(), 0);
     }
 
     // --- Prefix enum tests ---
@@ -698,7 +698,7 @@ mod tests {
     #[test]
     fn addpath_ipv4_empty() {
         let decoded = decode_nlri_addpath(&[]).unwrap();
-        assert!(decoded.is_empty());
+        assert_eq!(decoded.len(), 0);
     }
 
     #[test]
@@ -769,7 +769,7 @@ mod tests {
     #[test]
     fn addpath_ipv6_empty() {
         let decoded = decode_ipv6_nlri_addpath(&[]).unwrap();
-        assert!(decoded.is_empty());
+        assert_eq!(decoded.len(), 0);
     }
 
     #[test]

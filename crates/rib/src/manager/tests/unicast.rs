@@ -724,7 +724,7 @@ async fn refresh_peer_outbound_replays_only_the_target_exportable_inventory() {
         HashSet::from([Prefix::V4(kept_prefix), Prefix::V6(v6)])
     );
     assert!(refreshed.vpn_announce.is_empty());
-    assert!(refreshed.withdraw.is_empty());
+    assert_eq!(refreshed.withdraw.len(), 0);
 
     let (_, sibling_rx) = receivers
         .iter_mut()
@@ -831,7 +831,7 @@ async fn no_advertise_precedes_policy_for_grouped_and_private_single_best() {
     for (_, out_rx) in &mut receivers {
         let update = out_rx.try_recv().expect("plain route announced after sync");
         assert_eq!(update.announce.len(), 1);
-        assert!(update.withdraw.is_empty());
+        assert_eq!(update.withdraw.len(), 0);
     }
 
     tx.send(RibUpdate::RoutesReceived {
@@ -1031,7 +1031,7 @@ async fn otc_is_rejected_before_grouped_and_private_adj_rib_out_commit() {
     for (_, out_rx) in &mut receivers {
         let update = out_rx.recv().await.unwrap();
         assert_eq!(update.announce.len(), 1);
-        assert!(update.withdraw.is_empty());
+        assert_eq!(update.withdraw.len(), 0);
         assert!(update.otc_blocked.is_empty());
     }
 
@@ -1084,7 +1084,7 @@ async fn otc_is_rejected_before_grouped_and_private_adj_rib_out_commit() {
     for (peer, out_rx) in &mut receivers {
         let update = out_rx.recv().await.unwrap();
         assert!(update.announce.is_empty());
-        assert!(update.withdraw.is_empty());
+        assert_eq!(update.withdraw.len(), 0);
         assert_eq!(update.otc_blocked.len(), 1);
         assert!(
             update.otc_blocked[0]
@@ -1163,7 +1163,7 @@ async fn otc_is_rejected_before_grouped_and_private_adj_rib_out_commit() {
     for (_, out_rx) in &mut receivers {
         let update = out_rx.recv().await.unwrap();
         assert_eq!(update.announce.len(), 1);
-        assert!(update.withdraw.is_empty());
+        assert_eq!(update.withdraw.len(), 0);
         assert!(
             update.otc_blocked.is_empty(),
             "a permitted replacement must clear the prior OTC denial residue"
@@ -1452,7 +1452,7 @@ fn assert_one_dual_stack_eor(out_rx: &mut mpsc::Receiver<OutboundRouteUpdate>) {
         .try_recv()
         .expect("effective limit change triggers one resync");
     assert!(update.announce.is_empty());
-    assert!(update.withdraw.is_empty());
+    assert_eq!(update.withdraw.len(), 0);
     assert_eq!(
         update.end_of_rib,
         vec![(Afi::Ipv4, Safi::Unicast), (Afi::Ipv6, Safi::Unicast)]
@@ -2574,7 +2574,7 @@ async fn peer_up_triggers_initial_table_dump() {
     let update = out_rx.recv().await.unwrap();
     assert_eq!(update.announce.len(), 1);
     assert_eq!(update.announce[0].prefix, Prefix::V4(prefix));
-    assert!(update.withdraw.is_empty());
+    assert_eq!(update.withdraw.len(), 0);
 
     drop(tx);
     handle.await.unwrap();
@@ -3497,7 +3497,7 @@ async fn distribute_changes_filters_unsendable_families() {
     let update = out_rx.recv().await.unwrap();
     assert_eq!(update.announce.len(), 1);
     assert_eq!(update.announce[0].prefix, Prefix::V4(v4_prefix));
-    assert!(update.withdraw.is_empty());
+    assert_eq!(update.withdraw.len(), 0);
 
     // Adj-RIB-Out should only contain IPv4
     let advertised = collect_advertised_routes(&tx, target).await;
@@ -3584,7 +3584,7 @@ async fn send_initial_table_filters_unsendable_families() {
     let update = out_rx.recv().await.unwrap();
     assert_eq!(update.announce.len(), 1);
     assert_eq!(update.announce[0].prefix, Prefix::V4(v4_prefix));
-    assert!(update.withdraw.is_empty());
+    assert_eq!(update.withdraw.len(), 0);
 
     // Adj-RIB-Out should only contain IPv4
     let advertised = collect_advertised_routes(&tx, target).await;

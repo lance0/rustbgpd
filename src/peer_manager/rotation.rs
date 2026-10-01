@@ -1734,7 +1734,7 @@ mod tests {
         assert!(failure.mutation_may_have_started);
         let resets =
             reset_sessions_after_failed_mutation(&[primary_tx, pending_tx], generation).await;
-        assert!(resets.is_empty());
+        assert_eq!(resets.len(), 0);
         primary_reset_rx.await.unwrap();
         pending_reset_rx.await.unwrap();
     }

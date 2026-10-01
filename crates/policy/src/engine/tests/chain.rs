@@ -48,7 +48,7 @@ fn merge_from_later_remove_cancels_earlier_add() {
         ..Default::default()
     };
     base.merge_from(other);
-    assert!(base.communities_add.is_empty());
+    assert_eq!(base.communities_add.len(), 0);
     assert_eq!(base.communities_remove, vec![100]);
 }
 
@@ -64,7 +64,7 @@ fn merge_from_later_add_cancels_earlier_remove() {
     };
     base.merge_from(other);
     assert_eq!(base.communities_add, vec![100]);
-    assert!(base.communities_remove.is_empty());
+    assert_eq!(base.communities_remove.len(), 0);
 }
 
 #[test]
@@ -126,7 +126,7 @@ fn chain_later_remove_overrides_earlier_add() {
     let chain = PolicyChain::new(vec![p1, p2]);
     let r = eval_chain(&chain);
     assert_eq!(r.action, PolicyAction::Permit);
-    assert!(r.modifications.communities_add.is_empty());
+    assert_eq!(r.modifications.communities_add.len(), 0);
     assert_eq!(r.modifications.communities_remove, vec![100]);
 }
 

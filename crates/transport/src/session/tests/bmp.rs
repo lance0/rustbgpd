@@ -187,7 +187,7 @@ async fn legacy_as4_suffix_reaches_loop_detection_after_raw_bmp_tap() {
         panic!("expected seed RoutesReceived");
     };
     assert_eq!(announced.len(), 1);
-    assert!(withdrawn.is_empty());
+    assert_eq!(withdrawn.len(), 0);
     assert!(matches!(
         bmp_rx.try_recv(),
         Ok(BmpEvent::RouteMonitoring { .. })

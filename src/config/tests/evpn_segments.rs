@@ -90,8 +90,8 @@ recovery_delay_seconds = 7
 #[test]
 fn ethernet_segments_default_empty() {
     let config = parse(valid_toml()).unwrap();
-    assert!(config.ethernet_segments.is_empty());
-    assert!(config.resolve_ethernet_segments().unwrap().is_empty());
+    assert_eq!(config.ethernet_segments.len(), 0);
+    assert_eq!(config.resolve_ethernet_segments().unwrap().len(), 0);
 }
 
 #[test]

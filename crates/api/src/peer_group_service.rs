@@ -910,7 +910,7 @@ mod tests {
         // defaulting helper turns an empty list into IPv4 and fails the first
         // assertion; dropping either conversion loses the non-empty value.
         let empty = proto_definition_to_input(proto::PeerGroupDefinition::default()).unwrap();
-        assert!(empty.required_families.is_empty());
+        assert_eq!(empty.required_families.len(), 0);
 
         let input = proto_definition_to_input(sample_definition()).unwrap();
         assert_eq!(input.required_families, vec!["ipv4_unicast"]);
@@ -956,11 +956,12 @@ mod tests {
         );
 
         let cleared = proto_definition_to_input(proto::PeerGroupDefinition::default()).unwrap();
-        assert!(cleared.discard_path_attributes.is_empty());
-        assert!(
+        assert_eq!(cleared.discard_path_attributes.len(), 0);
+        assert_eq!(
             input_definition_to_proto(&cleared)
                 .discard_path_attributes
-                .is_empty()
+                .len(),
+            0
         );
 
         let error = proto_definition_to_input(proto::PeerGroupDefinition {

@@ -1768,7 +1768,7 @@ async fn publish_warm_checkpoint_bounded(
     let mrt_timestamp = u32::try_from(now_seconds)
         .map_err(|_| "warm checkpoint timestamp exceeds MRT u32".to_string())?;
     let snapshot_revision = WARM_CHECKPOINT_REVISION
-        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |revision| {
+        .try_update(Ordering::Relaxed, Ordering::Relaxed, |revision| {
             revision.checked_add(1)
         })
         .map(|prior| prior + 1)

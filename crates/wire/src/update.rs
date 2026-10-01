@@ -574,7 +574,7 @@ mod tests {
         let msg = UpdateMessage::build(&announced, &[], &attrs, true, false, Ipv4UnicastMode::Body);
         let parsed = msg.parse(true, false, &[]).unwrap();
         assert_eq!(parsed.announced, announced);
-        assert!(parsed.withdrawn.is_empty());
+        assert_eq!(parsed.withdrawn.len(), 0);
         assert_eq!(parsed.attributes, attrs);
     }
     #[test]
@@ -618,7 +618,7 @@ mod tests {
         assert!(msg.withdrawn_routes.is_empty());
         assert!(msg.nlri.is_empty());
         let parsed = msg.parse(true, false, &[]).unwrap();
-        assert!(parsed.announced.is_empty());
+        assert_eq!(parsed.announced.len(), 0);
         let mp = parsed
             .attributes
             .iter()
@@ -641,9 +641,9 @@ mod tests {
         ))];
         let msg = UpdateMessage::build(&[], &withdrawn, &[], true, false, Ipv4UnicastMode::Body);
         let parsed = msg.parse(true, false, &[]).unwrap();
-        assert!(parsed.announced.is_empty());
+        assert_eq!(parsed.announced.len(), 0);
         assert_eq!(parsed.withdrawn, withdrawn);
-        assert!(parsed.attributes.is_empty());
+        assert_eq!(parsed.attributes.len(), 0);
     }
     #[test]
     fn build_announce_only() {

@@ -564,7 +564,7 @@ async fn private_route_rejection_withdraws_once_then_recovers() {
     assert_eq!(recovered.announce.len(), 1);
     assert_eq!(recovered.announce[0].prefix, route.prefix);
     assert_eq!(recovered.announce[0].peer, route.peer);
-    assert!(recovered.withdraw.is_empty());
+    assert_eq!(recovered.withdraw.len(), 0);
     assert_eq!(recovered.exact_export_snapshot.unwrap().generation(), 13);
     assert!(!manager.peer_unexportable.contains_key(&peer));
     assert!(manager.adj_ribs_out[&peer].get(&route.prefix, 0).is_some());
@@ -801,7 +801,7 @@ fn mismatched_unicast_payload_is_unrepresentable_and_nonretryable() {
         )
     }));
     assert!(overrides_longer.is_err());
-    assert!(encoder.probed().is_empty());
+    assert_eq!(encoder.probed().len(), 0);
     assert!(!manager.adj_ribs_out.contains_key(&peer));
     assert!(!manager.dirty_peers.contains(&peer));
     assert!(rx.try_recv().is_err());
@@ -1083,7 +1083,7 @@ fn cached_success_rechecks_target_ceiling_and_emits_owed_withdrawal() {
     ));
     let source_update = source_rx.try_recv().unwrap();
     assert_eq!(source_update.announce.len(), 1);
-    assert!(source_update.withdraw.is_empty());
+    assert_eq!(source_update.withdraw.len(), 0);
     assert_eq!(source_encoder.probe_count(), 1);
 
     assert!(commit_shared_unicast_with_cache(
@@ -1475,7 +1475,7 @@ async fn grouped_classic_rejection_is_a_member_local_overlay_across_source_flip_
     let classic_flip = classic_rx.recv().await.unwrap();
     let extended_flip = extended_rx.recv().await.unwrap();
     assert!(classic_flip.announce.is_empty());
-    assert!(classic_flip.withdraw.is_empty());
+    assert_eq!(classic_flip.withdraw.len(), 0);
     assert_eq!(extended_flip.announce.len(), 1);
     assert_eq!(extended_flip.announce[0].peer, IpAddr::V4(source_b));
     assert_eq!(advertised_count(&tx, classic).await, 0);
@@ -1510,7 +1510,7 @@ async fn grouped_classic_rejection_is_a_member_local_overlay_across_source_flip_
         .await
         .unwrap();
     let counts = result.await.unwrap().adj_rib_out_post;
-    assert!(counts[&classic].is_empty());
+    assert_eq!(counts[&classic].len(), 0);
     assert_eq!(counts[&extended], vec![((Afi::Ipv4, Safi::Unicast), 1)]);
 
     // Remove the non-best source, then the remaining best. The grouped table
@@ -1616,7 +1616,7 @@ async fn grouped_vpn_force_rejection_withdraws_stale_route_once() {
     })
     .await
     .unwrap();
-    assert!(result.await.unwrap().is_empty());
+    assert_eq!(result.await.unwrap().len(), 0);
 
     if let Ok(Some(update)) =
         tokio::time::timeout(Duration::from_millis(25), target_rx.recv()).await
@@ -1681,7 +1681,7 @@ async fn grouped_vpn_ineligible_replacement_withdraws_previous_advertisement() {
     let accepted = sibling_rx.recv().await.unwrap();
     assert_eq!(accepted.vpn_announce.len(), 1);
     assert!(accepted.vpn_announce[0].next_hop.is_ipv6());
-    assert!(accepted.vpn_withdraw.is_empty());
+    assert_eq!(accepted.vpn_withdraw.len(), 0);
     let prefix = Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(10, 0, 30, 0), 24));
     let rd = key.nlri_key.route_distinguisher;
     let denied = query_explain_advertised_vpn_route(&tx, target, prefix, rd).await;
@@ -1696,7 +1696,7 @@ async fn grouped_vpn_ineligible_replacement_withdraws_previous_advertisement() {
         .await
         .unwrap();
     let counts = result.await.unwrap().adj_rib_out_post;
-    assert!(counts[&target].is_empty());
+    assert_eq!(counts[&target].len(), 0);
     assert_eq!(counts[&sibling], vec![((Afi::Ipv4, Safi::MplsVpn), 1)]);
 
     tx.send(RibUpdate::VpnRoutesReceived {

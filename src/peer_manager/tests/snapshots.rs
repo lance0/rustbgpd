@@ -225,12 +225,13 @@ async fn warm_checkpoint_session_query_skips_unusable_gr_sessions() {
         false,
     );
 
-    assert!(
+    assert_eq!(
         mgr.query_warm_checkpoint_capture()
             .await
             .unwrap()
             .sessions
-            .is_empty()
+            .len(),
+        0
     );
 }
 

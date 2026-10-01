@@ -1476,7 +1476,7 @@ async fn fresh_routes_unaffected_by_peer_llgr_capability() {
                 .communities()
                 .contains(&rustbgpd_wire::COMMUNITY_LLGR_STALE)
         );
-        assert!(update.withdraw.is_empty());
+        assert_eq!(update.withdraw.len(), 0);
     }
 
     drop(tx);

@@ -500,7 +500,7 @@ local_vtep_ip = "10.0.0.1"
 
         // Step 1: ES delete only; VNI 100 keeps its committed definition.
         assert!(steps[0].description.starts_with("deletes"));
-        assert!(steps[0].candidate.ethernet_segments().is_empty());
+        assert_eq!(steps[0].candidate.ethernet_segments().len(), 0);
         assert_eq!(
             steps[0]
                 .candidate

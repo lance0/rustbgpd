@@ -85,7 +85,7 @@ table_id = 5001
 fn evpn_ip_vrfs_default_empty() {
     // No `[[evpn_ip_vrfs]]` block ⇒ L2-only VTEP / RR shape stays valid.
     let config = parse(valid_toml()).unwrap();
-    assert!(config.evpn_ip_vrfs.is_empty());
+    assert_eq!(config.evpn_ip_vrfs.len(), 0);
     assert!(config.resolve_evpn_ip_vrfs().unwrap().is_empty());
 }
 

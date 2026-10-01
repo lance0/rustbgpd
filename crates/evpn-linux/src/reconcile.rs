@@ -7971,7 +7971,7 @@ mod managed_netdev_tests {
         );
 
         let unmanaged = build_managed_netdev_status(&ManagedNetdevTable::new(), Some(&snapshot));
-        assert!(unmanaged.is_empty());
+        assert_eq!(unmanaged.len(), 0);
     }
 
     // ADR-0091 Decision 6: a rustbgpd-stamped link whose stamp class does not
@@ -8235,7 +8235,7 @@ mod managed_netdev_tests {
         assert_eq!(rows[2].state, ManagedNetdevState::OwnedUnsafe);
 
         let unmanaged = build_managed_netdev_status(&ManagedNetdevTable::new(), Some(&snapshot));
-        assert!(unmanaged.is_empty());
+        assert_eq!(unmanaged.len(), 0);
     }
 
     #[test]
@@ -8740,12 +8740,12 @@ mod managed_netdev_tests {
             vec!["rustbgpd:vxlan:leaf-1:vxlan100"],
             100,
         ));
-        assert!(compute_managed_netdev_ops(&table, &snapshot).is_empty());
+        assert_eq!(compute_managed_netdev_ops(&table, &snapshot).len(), 0);
 
         let mut occupied = KernelSnapshot::new();
         occupied.insert_link_name("br100");
         occupied.insert_link_name("vxlan100");
-        assert!(compute_managed_netdev_ops(&table, &occupied).is_empty());
+        assert_eq!(compute_managed_netdev_ops(&table, &occupied).len(), 0);
     }
 
     #[test]
@@ -8791,12 +8791,12 @@ mod managed_netdev_tests {
         l3vxlan.master = Some("vrf100".to_string());
         l3vxlan.mac = Some(MacAddress::new([0x02, 0, 0, 0, 0, 1]));
         snapshot.insert_vxlan(l3vxlan);
-        assert!(compute_managed_netdev_ops(&table, &snapshot).is_empty());
+        assert_eq!(compute_managed_netdev_ops(&table, &snapshot).len(), 0);
 
         let mut occupied = KernelSnapshot::new();
         occupied.insert_link_name("vrf100");
         occupied.insert_link_name("l3vxlan100");
-        assert!(compute_managed_netdev_ops(&table, &occupied).is_empty());
+        assert_eq!(compute_managed_netdev_ops(&table, &occupied).len(), 0);
     }
 
     #[test]
@@ -8854,7 +8854,7 @@ mod managed_netdev_tests {
             Some(10),
             true,
         ));
-        assert!(compute_managed_netdev_ops(&table, &snapshot).is_empty());
+        assert_eq!(compute_managed_netdev_ops(&table, &snapshot).len(), 0);
 
         let mut occupied = KernelSnapshot::new();
         occupied.insert_link(link(
@@ -8864,7 +8864,7 @@ mod managed_netdev_tests {
             vec!["rustbgpd:bridge:leaf-1:br100"],
         ));
         occupied.insert_link_name("br100.10");
-        assert!(compute_managed_netdev_ops(&table, &occupied).is_empty());
+        assert_eq!(compute_managed_netdev_ops(&table, &occupied).len(), 0);
     }
 
     // LAN-290: a desired SVD VXLAN that exists with exactly our stamp
@@ -8941,14 +8941,17 @@ mod managed_netdev_tests {
         let mut complete = KernelSnapshot::new();
         complete.insert_link(bridge);
         complete.insert_vxlan(svd.clone());
-        assert!(compute_managed_netdev_ops(&table, &complete).is_empty());
+        assert_eq!(compute_managed_netdev_ops(&table, &complete).len(), 0);
 
         // A foreign (unstamped) incomplete link must NOT be touched.
         let mut foreign_snapshot = KernelSnapshot::new();
         foreign_snapshot.insert_link(link("br100", 10, true, Vec::new()));
         svd.altnames.clear();
         foreign_snapshot.insert_vxlan(svd);
-        assert!(compute_managed_netdev_ops(&table, &foreign_snapshot).is_empty());
+        assert_eq!(
+            compute_managed_netdev_ops(&table, &foreign_snapshot).len(),
+            0
+        );
     }
 
     // LAN-290: a desired VLAN upper with exactly our stamp and matching
@@ -9005,7 +9008,10 @@ mod managed_netdev_tests {
             Some(10),
             false,
         ));
-        assert!(compute_managed_netdev_ops(&table, &foreign_snapshot).is_empty());
+        assert_eq!(
+            compute_managed_netdev_ops(&table, &foreign_snapshot).len(),
+            0
+        );
     }
 
     #[test]
@@ -9027,7 +9033,7 @@ mod managed_netdev_tests {
         let mut snapshot = KernelSnapshot::new();
         snapshot.insert_link(link("br100", 10, true, vec![]));
         snapshot.insert_vxlan(vxlan_link("vxlan100", 20, vec![], 100));
-        assert!(compute_managed_netdev_ops(&table, &snapshot).is_empty());
+        assert_eq!(compute_managed_netdev_ops(&table, &snapshot).len(), 0);
 
         snapshot.set_links(BTreeMap::from([(
             "br100".to_string(),
@@ -9037,7 +9043,7 @@ mod managed_netdev_tests {
             "vxlan100".to_string(),
             vxlan_link("vxlan100", 20, vec!["rustbgpd:vxlan:leaf-1:vxlan100"], 101),
         )]));
-        assert!(compute_managed_netdev_ops(&table, &snapshot).is_empty());
+        assert_eq!(compute_managed_netdev_ops(&table, &snapshot).len(), 0);
 
         snapshot.set_links(BTreeMap::from([(
             "br100".to_string(),
@@ -9063,7 +9069,7 @@ mod managed_netdev_tests {
                 100,
             ),
         )]));
-        assert!(compute_managed_netdev_ops(&table, &snapshot).is_empty());
+        assert_eq!(compute_managed_netdev_ops(&table, &snapshot).len(), 0);
     }
 
     #[test]

@@ -273,7 +273,7 @@ async fn replacement_summaries_complete_api_reads_inside_actual_rib_restore() {
     .unwrap();
     let baseline_stats = stats(&policy, peer).await;
     assert!(baseline_stats.chains[0].routes_evaluated >= 4);
-    assert!(!baseline_stats.chains[0].terms.is_empty());
+    assert_ne!(baseline_stats.chains[0].terms.len(), 0);
     hold.armed.store(true, Ordering::SeqCst);
     let (restore_reply, mut restore_response) = oneshot::channel();
     rib_tx

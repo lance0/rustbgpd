@@ -549,7 +549,7 @@ async fn explain_best_path_no_candidates() {
     assert!(explain.peer.is_none());
     assert_eq!(explain.add_path_send_max, 0);
     assert!(explain.best_reason.is_none());
-    assert!(explain.best_reason_detail.is_empty());
+    assert_eq!(explain.best_reason_detail.len(), 0);
 
     drop(tx);
     handle.await.unwrap();
@@ -588,7 +588,7 @@ async fn explain_best_path_single_path_has_no_best_reason() {
     );
     assert!(explain.candidates.is_empty());
     assert!(explain.best_reason.is_none());
-    assert!(explain.best_reason_detail.is_empty());
+    assert_eq!(explain.best_reason_detail.len(), 0);
 
     drop(tx);
     handle.await.unwrap();

@@ -4,7 +4,7 @@ use super::*;
 fn evpn_instances_default_empty() {
     // No `[[evpn_instances]]` block ⇒ empty list, valid config (RR mode).
     let config = parse(valid_toml()).unwrap();
-    assert!(config.evpn_instances.is_empty());
+    assert_eq!(config.evpn_instances.len(), 0);
     assert_eq!(config.resolve_evpn_instances().unwrap().len(), 0);
 }
 

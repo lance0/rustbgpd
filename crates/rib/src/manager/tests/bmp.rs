@@ -213,7 +213,7 @@ async fn recompute_best_changes_emit_loc_rib_route_monitoring() {
     .unwrap();
     let (pdu, _, status) = recv_loc_rib_rm(&mut bmp_rx).await;
     let parsed = decode_pdu(&pdu);
-    assert!(parsed.announced.is_empty());
+    assert_eq!(parsed.announced.len(), 0);
     assert_eq!(parsed.withdrawn.len(), 1);
     assert_eq!(parsed.withdrawn[0].prefix, prefix);
     assert_eq!(status, None, "withdrawals carry no path status");

@@ -2730,7 +2730,7 @@ mod tests {
         assert_delete_outcomes(&svc).await;
         let local = list_local_flowspec(&rib).await;
         assert!(local.received_view);
-        assert!(local.received_routes.is_empty());
+        assert_eq!(local.received_routes.len(), 0);
 
         drop((svc, rib, rib_tx));
         manager_task.await.unwrap();

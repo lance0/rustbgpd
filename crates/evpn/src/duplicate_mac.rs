@@ -406,7 +406,7 @@ mod tests {
             DuplicateMacDecision::Recorded { window_count: 1 }
         );
         assert!(detector.has_state(key()));
-        assert!(detector.expire(now + Duration::from_secs(11)).is_empty());
+        assert_eq!(detector.expire(now + Duration::from_secs(11)).len(), 0);
         assert!(!detector.has_state(key()));
     }
 

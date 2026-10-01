@@ -1283,7 +1283,7 @@ description = "old"
         )
         .unwrap();
 
-        assert!(candidate.neighbors.is_empty());
+        assert_eq!(candidate.neighbors.len(), 0);
     }
 
     #[test]
@@ -1559,7 +1559,7 @@ description = "old"
         )
         .unwrap();
 
-        assert!(candidate.dynamic_neighbors.is_empty());
+        assert_eq!(candidate.dynamic_neighbors.len(), 0);
     }
 
     #[test]
@@ -1573,7 +1573,7 @@ description = "old"
         )
         .unwrap();
 
-        assert!(candidate.dynamic_neighbors.is_empty());
+        assert_eq!(candidate.dynamic_neighbors.len(), 0);
     }
 
     #[test]
@@ -1628,7 +1628,7 @@ description = "old"
         )
         .unwrap();
 
-        assert!(candidate.dynamic_neighbors.is_empty());
+        assert_eq!(candidate.dynamic_neighbors.len(), 0);
     }
 
     #[test]

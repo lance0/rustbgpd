@@ -2005,7 +2005,7 @@ mod linux {
                 })
                 .await
                 .unwrap();
-            assert!(applied.await.unwrap().is_empty());
+            assert_eq!(applied.await.unwrap().len(), 0);
             assert!(status_rx.borrow().is_empty());
             handle.shutdown().await;
         }
@@ -2815,7 +2815,7 @@ bfd = { profile = "p", enabled = false }
 "#,
         );
         let rc = BfdRuntimeConfig::from_config(&config).expect("disabled BFD needs no scope");
-        assert!(rc.sessions.is_empty());
+        assert_eq!(rc.sessions.len(), 0);
     }
 
     #[test]
@@ -3016,7 +3016,7 @@ remote_asn = 65002
 "#,
         );
         let rc = BfdRuntimeConfig::from_config(&config).expect("derive BFD runtime");
-        assert!(rc.sessions.is_empty());
+        assert_eq!(rc.sessions.len(), 0);
         assert!(!rc.enabled());
     }
 

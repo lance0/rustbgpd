@@ -134,8 +134,8 @@ address = "10.0.0.2"
 remote_asn = 65002
 "#;
     let config = parse(toml_str).unwrap();
-    assert!(config.neighbors[0].import_policy.is_empty());
-    assert!(config.neighbors[0].export_policy.is_empty());
+    assert_eq!(config.neighbors[0].import_policy.len(), 0);
+    assert_eq!(config.neighbors[0].export_policy.len(), 0);
 
     let peers = config.to_peer_configs().unwrap();
     // Should inherit global export policy

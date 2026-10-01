@@ -552,7 +552,7 @@ mod tests {
                 len: usize::from(u16::MAX) + 1
             }
         );
-        assert!(out.is_empty());
+        assert_eq!(out.len(), 0);
     }
 
     #[cfg(target_pointer_width = "64")]

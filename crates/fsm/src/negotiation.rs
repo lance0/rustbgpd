@@ -1552,7 +1552,7 @@ mod tests {
         assert!(!neg.peer_gr_capable);
         assert!(!neg.peer_restart_state);
         assert_eq!(neg.peer_restart_time, 0);
-        assert!(neg.peer_gr_families.is_empty());
+        assert_eq!(neg.peer_gr_families.len(), 0);
     }
 
     fn llgr_v4(stale_time: u32) -> Capability {
@@ -1679,7 +1679,7 @@ mod tests {
         let neg = validate_open(&open, &cfg).unwrap();
         assert!(!neg.peer_gr_capable);
         assert!(!neg.peer_llgr_capable);
-        assert!(neg.peer_llgr_families.is_empty());
+        assert_eq!(neg.peer_llgr_families.len(), 0);
         assert!(!neg.peer_notification_gr);
     }
 
@@ -1967,7 +1967,7 @@ mod tests {
         open.capabilities
             .push(orf_cap(OrfSendReceive::Receive, OrfType::AddressPrefix));
         let neg = validate_open(&open, &cfg).unwrap();
-        assert!(neg.negotiated_orf_recv.is_empty());
+        assert_eq!(neg.negotiated_orf_recv.len(), 0);
     }
 
     #[test]
@@ -1977,7 +1977,7 @@ mod tests {
         open.capabilities
             .push(orf_cap(OrfSendReceive::Both, OrfType::AddressPrefix));
         let neg = validate_open(&open, &cfg).unwrap();
-        assert!(neg.negotiated_orf_recv.is_empty());
+        assert_eq!(neg.negotiated_orf_recv.len(), 0);
     }
 
     #[test]
@@ -1990,7 +1990,7 @@ mod tests {
         open.capabilities
             .push(orf_cap(OrfSendReceive::Send, OrfType::AddressPrefixLegacy));
         let neg = validate_open(&open, &cfg).unwrap();
-        assert!(neg.negotiated_orf_recv.is_empty());
+        assert_eq!(neg.negotiated_orf_recv.len(), 0);
     }
 
     #[test]

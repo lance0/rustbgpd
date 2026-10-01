@@ -2865,7 +2865,7 @@ mod tests {
             gnmi::update_result::Operation::Update as i32
         );
         assert!(response.prefix.is_none());
-        assert!(response.extension.is_empty());
+        assert_eq!(response.extension.len(), 0);
 
         let captured = captured.lock().unwrap();
         assert_eq!(captured.len(), 1);
@@ -3054,7 +3054,7 @@ mod tests {
             .unwrap()
             .into_inner();
 
-        assert!(response.response.is_empty());
+        assert_eq!(response.response.len(), 0);
         let captured = captured.lock().unwrap();
         assert_eq!(captured.len(), 1);
         assert!(captured[0].operations.is_empty());
@@ -5260,7 +5260,7 @@ mod tests {
         else {
             panic!("expected sampled neighbor Update, got {sampled:?}");
         };
-        assert!(!notification.update.is_empty());
+        assert_ne!(notification.update.len(), 0);
         assert_eq!(calls.load(Ordering::SeqCst), 2);
         let error = next_bounded(&mut stream).await.unwrap_err();
         assert_eq!(error.code(), tonic::Code::Unavailable);

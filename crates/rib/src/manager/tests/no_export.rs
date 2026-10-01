@@ -412,7 +412,7 @@ async fn vpn_no_export_source_route_suppressed_to_honor_ebgp_only() {
         .try_recv()
         .expect("tagged VPN route re-announced to the transparent peer");
     assert_eq!(update.vpn_announce.len(), 1);
-    assert!(update.vpn_withdraw.is_empty());
+    assert_eq!(update.vpn_withdraw.len(), 0);
 
     drop(tx);
     handle.await.unwrap();
@@ -498,7 +498,7 @@ async fn labeled_no_export_source_route_suppressed_to_honor_ebgp_only() {
         .try_recv()
         .expect("tagged labeled route re-announced to the transparent peer");
     assert_eq!(update.labeled_announce.len(), 1);
-    assert!(update.labeled_withdraw.is_empty());
+    assert_eq!(update.labeled_withdraw.len(), 0);
 
     drop(tx);
     handle.await.unwrap();

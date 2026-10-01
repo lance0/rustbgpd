@@ -1100,12 +1100,13 @@ async fn required_family_group_reconcile_waits_for_dynamic_reconnect() {
         false,
     );
     mgr.peers.get_mut(&key(addr)).unwrap().is_dynamic = true;
-    assert!(
+    assert_eq!(
         mgr.peers[&key(addr)]
             .transport_config
             .peer
             .required_families
-            .is_empty()
+            .len(),
+        0
     );
 
     let mut definition =

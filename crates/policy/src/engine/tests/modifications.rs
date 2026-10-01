@@ -397,7 +397,7 @@ fn removing_all_community_values_removes_partial_attributes() {
         },
     );
 
-    assert!(attrs.is_empty());
+    assert_eq!(attrs.len(), 0);
 }
 
 #[test]

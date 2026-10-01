@@ -354,7 +354,7 @@ mod tests {
                 .unwrap()
                 .into_inner();
             assert_eq!(response.found, found);
-            assert!(response.provider_asns.is_empty());
+            assert_eq!(response.provider_asns.len(), 0);
             assert!(response.complete);
             assert_eq!(response.omitted, 0);
         }
@@ -701,7 +701,7 @@ mod tests {
             .into_inner();
         assert_eq!(response.prefix, "192.0.2.0/24");
         assert_eq!(response.validation, RouteOriginValidation::NotFound as i32);
-        assert!(response.covering_vrps.is_empty());
+        assert_eq!(response.covering_vrps.len(), 0);
         assert!(response.complete);
         assert_eq!(response.omitted, 0);
     }
@@ -714,7 +714,7 @@ mod tests {
             .await
             .unwrap()
             .into_inner();
-        assert!(response.caches.is_empty());
+        assert_eq!(response.caches.len(), 0);
         assert!(response.complete);
         assert_eq!(response.omitted, 0);
     }

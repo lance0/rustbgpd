@@ -1657,7 +1657,7 @@ fn received_validation_path_preserves_absent_and_empty_origins() {
         RpkiValidation::NotFound
     );
     route.received_as_path = Some(Arc::new(Some(AsPath { segments: vec![] })));
-    assert!(route.validation_as_path().unwrap().segments.is_empty());
+    assert_eq!(route.validation_as_path().unwrap().segments.len(), 0);
     assert_eq!(
         super::validate_route_rpki(&route, &table),
         RpkiValidation::NotFound
