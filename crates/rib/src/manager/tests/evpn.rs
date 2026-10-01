@@ -2,6 +2,181 @@ use super::*;
 use crate::attr_set::AttrSet;
 
 #[test]
+fn smet_obeys_family_export_policy_and_rr_client_gates() {
+    for (family, deny, client, exported) in [
+        (true, false, true, true),
+        (false, false, true, false),
+        (true, true, true, false),
+        (true, false, false, false),
+    ] {
+        let (_tx, rx) = mpsc::channel(4);
+        let mut manager = RibManager::new(
+            rx,
+            dummy_query_rx(),
+            None,
+            Some("192.0.2.254".parse().unwrap()),
+            BgpMetrics::new(),
+        );
+        let (outbound_tx, mut out) = mpsc::channel(4);
+        manager.handle_update(RibUpdate::PeerUp {
+            per_client_best: false,
+            interpret_rfc1997: true,
+            session_id: 0,
+            peer: "192.0.2.30".parse().unwrap(),
+            peer_asn: 65000,
+            peer_router_id: "192.0.2.30".parse().unwrap(),
+            outbound_tx,
+            export_policy: deny.then(|| {
+                rustbgpd_policy::PolicyChain::new(vec![rustbgpd_policy::Policy {
+                    entries: vec![],
+                    default_action: rustbgpd_policy::PolicyAction::Deny,
+                }])
+            }),
+            sendable_families: if family { evpn_sendable() } else { vec![] },
+            is_ebgp: false,
+            route_reflector_client: client,
+            orr_vantage: None,
+            add_path_send_families: vec![],
+            add_path_send_max: 0,
+            negotiated_orf_recv: vec![],
+            negotiated_llgr_families: vec![],
+        });
+        while out.try_recv().is_ok() {}
+        let mut route = make_evpn_smet("192.0.2.10".parse().unwrap(), 0xf2);
+        route.origin_type = crate::route::RouteOrigin::Ibgp;
+        manager.ribs.insert(route.peer, AdjRibIn::new(route.peer));
+        manager.process_evpn_announce_chunk(route.peer, vec![route.clone()]);
+        assert!(manager.loc_rib.get_evpn(&route.key()).is_some());
+        let announcements: Vec<_> = std::iter::from_fn(|| out.try_recv().ok())
+            .flat_map(|update| update.evpn_announce)
+            .collect();
+        assert_eq!(
+            announcements.len(),
+            usize::from(exported),
+            "family={family} deny={deny} client={client}"
+        );
+        if exported {
+            assert_eq!(announcements[0].route, route.route);
+        }
+    }
+}
+
+#[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one lifecycle pins flags-only replacement, fallback, distinct originators, events, and dataplane exclusion"
+)]
+fn smet_flags_replace_selected_payload_fallback_and_originators_stay_distinct() {
+    let (_tx, rx) = mpsc::channel(16);
+    let mut manager = RibManager::new(
+        rx,
+        dummy_query_rx(),
+        None,
+        Some("192.0.2.254".parse().unwrap()),
+        BgpMetrics::new(),
+    );
+    let mut live = manager.evpn_events_tx.subscribe();
+    let target: IpAddr = "192.0.2.30".parse().unwrap();
+    let (outbound_tx, mut out) = mpsc::channel(16);
+    manager.handle_update(RibUpdate::PeerUp {
+        per_client_best: false,
+        interpret_rfc1997: true,
+        session_id: 0,
+        peer: target,
+        peer_asn: 65000,
+        peer_router_id: "192.0.2.30".parse().unwrap(),
+        outbound_tx,
+        export_policy: None,
+        sendable_families: evpn_sendable(),
+        is_ebgp: false,
+        route_reflector_client: true,
+        orr_vantage: None,
+        add_path_send_families: vec![],
+        add_path_send_max: 0,
+        negotiated_orf_recv: vec![],
+        negotiated_llgr_families: vec![],
+    });
+    while out.try_recv().is_ok() {}
+    let mut winner = make_evpn_smet("192.0.2.10".parse().unwrap(), 0xf2);
+    AttrSet::edit(&mut winner.attributes, |attrs| {
+        attrs.push(PathAttribute::LocalPref(200));
+    });
+    let fallback = make_evpn_smet("192.0.2.11".parse().unwrap(), 0x02);
+    for route in [&winner, &fallback] {
+        manager.ribs.insert(route.peer, AdjRibIn::new(route.peer));
+        manager.process_evpn_announce_chunk(route.peer, vec![route.clone()]);
+    }
+    let key = winner.key();
+    assert_eq!(manager.loc_rib.get_evpn(&key).unwrap().peer, winner.peer);
+    let initial = out.try_recv().unwrap();
+    assert_eq!(initial.evpn_announce[0].route, winner.route);
+    assert!(out.try_recv().is_err());
+    assert_eq!(live.try_recv().unwrap().event_type, RouteEventType::Added);
+    assert!(live.try_recv().is_err());
+    let original = winner.clone();
+    let EvpnRoute::Smet(smet) = &mut winner.route else {
+        unreachable!()
+    };
+    smet.flags = 0xfa;
+    manager.process_evpn_announce_chunk(winner.peer, vec![winner.clone()]);
+    assert_eq!(winner.key(), key);
+    assert_eq!(manager.ribs[&winner.peer].evpn_len(), 1);
+    assert_eq!(manager.loc_rib.get_evpn(&key).unwrap().route, winner.route);
+    let changed = out.try_recv().unwrap();
+    assert_eq!(changed.evpn_announce.len(), 1);
+    assert_eq!(changed.evpn_announce[0].route, winner.route);
+    assert_eq!(changed.evpn_withdraw.len(), 0);
+    let event = live.try_recv().unwrap();
+    assert_eq!(event.event_type, RouteEventType::BestChanged);
+    assert_eq!(event.key, key);
+    assert_eq!(event.best.as_ref().unwrap().route, winner.route);
+    assert_eq!(event.previous_best.as_ref().unwrap().route, original.route);
+    assert_eq!(
+        manager
+            .evpn_route_event_history
+            .back()
+            .unwrap()
+            .best
+            .as_ref()
+            .unwrap()
+            .route,
+        winner.route
+    );
+
+    let mut other_originator = winner.clone();
+    let EvpnRoute::Smet(smet) = &mut other_originator.route else {
+        unreachable!()
+    };
+    smet.originator_ip = "2001:db8::99".parse().unwrap();
+    manager.process_evpn_announce_chunk(winner.peer, vec![other_originator.clone()]);
+    assert_eq!(manager.loc_rib.iter_evpn().count(), 2);
+    assert_eq!(
+        out.try_recv().unwrap().evpn_announce[0].key(),
+        other_originator.key()
+    );
+
+    manager.process_evpn_withdraw_chunk(winner.peer, vec![key]);
+    assert_eq!(
+        manager.loc_rib.get_evpn(&key).unwrap().route,
+        fallback.route
+    );
+    let changed = out.try_recv().unwrap();
+    assert_eq!(changed.evpn_announce[0].peer, fallback.peer);
+    assert_eq!(changed.evpn_announce[0].route, fallback.route);
+    manager.process_evpn_withdraw_chunk(fallback.peer, vec![key]);
+    assert!(manager.loc_rib.get_evpn(&key).is_none());
+    assert_eq!(out.try_recv().unwrap().evpn_withdraw, vec![key]);
+    assert!(manager.loc_rib.get_evpn(&other_originator.key()).is_some());
+    let (reply, mut received) = oneshot::channel();
+    manager.handle_update(RibUpdate::QueryEvpnDataplaneRoutes {
+        known_generation: None,
+        reply,
+    });
+    assert_eq!(received.try_recv().unwrap().routes.unwrap().len(), 0);
+    assert_eq!(manager.evpn_dataplane_generation, 0);
+}
+
+#[test]
 #[expect(
     clippy::too_many_lines,
     reason = "one lifecycle compares retained, selected, advertised, and dataplane consumer views"

@@ -1525,7 +1525,7 @@ route changes through `EventService.WatchEvents` or `EventService.SubscribeFromE
 | `ExplainBestPath` | Show all candidates for a prefix with decisive comparison reasons; optional `peer_address` field scopes to that peer's Add-Path send view |
 | `LookupBestPath` | Outside-v1 global-only LPM: bounded ancestor probes return the closest installed Loc-RIB winner plus every alternative for that one matched prefix from one actor turn; old daemons fail with `UNIMPLEMENTED` |
 | `ListFlowSpecRoutes` | FlowSpec selected Loc-RIB, received Adj-RIB-In, or per-peer committed advertised Adj-RIB-Out view (alpha) |
-| `ListEvpnRoutes` | EVPN routes (RFC 7432 / RFC 9136) in Loc-RIB view, filterable by route type / source peer / RD |
+| `ListEvpnRoutes` | EVPN routes (RFC 7432 / RFC 9136 / RFC 9251 Type 6) in Loc-RIB view, filterable by route type / source peer / RD |
 | `ListReceivedEvpnRoutes` | Bounded accepted post-policy EVPN Adj-RIB-In for one source neighbor, filterable by type / RD |
 | `ListAdvertisedEvpnRoutes` | Bounded committed EVPN Adj-RIB-Out for one destination neighbor, filterable by type / RD |
 | `ExplainEvpnRoute` | Exact typed EVPN candidate selection and optional destination export trace, with installed and committed state kept distinct |
@@ -2032,7 +2032,7 @@ for opt-in validation and convergence semantics.
 
 `ListEvpnRoutes` retains its existing unpaginated best-route view. The additive
 `ListReceivedEvpnRoutes` and `ListAdvertisedEvpnRoutes` methods require
-`neighbor_address` and accept `route_type_filter` (0 or 1–5), `rd_filter`,
+`neighbor_address` and accept `route_type_filter` (0 or 1–6), `rd_filter`,
 `page_size`, and `page_token`. They are outside the narrow v1 contract; older
 servers return `UNIMPLEMENTED` without falling back to a unicast table.
 
@@ -2091,14 +2091,24 @@ grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
   localhost:50051 rustbgpd.v1.RibService/ListEvpnRoutes
 ```
 
-`route_type_filter` accepts 0 (no filter) or `1..=5` matching the RFC 7432
-route type numbers. `peer_filter` is an optional typed IP-address match (for
-example, expanded and compressed IPv6 spellings are equivalent); `rd_filter`
+`route_type_filter` accepts 0 (no filter) or `1..=6` matching the EVPN
+route type numbers (RFC 7432, RFC 9136, and RFC 9251 Type 6). `peer_filter`
+is an optional typed IP-address match (for example, expanded and compressed IPv6 spellings are equivalent); `rd_filter`
 is an optional typed route-distinguisher match (for example, `"65000:100"`,
 `"10.0.0.1:100"`, or `"4200000000:100"` per RFC 4364 RD types 0/1/2, plus
 the displayed `0x`/16-hex-digit fallback for unknown types). Empty strings
 disable each filter. Invalid filters fail with `INVALID_ARGUMENT` before the
 RIB actor is queried.
+
+Type 6 rows carry the optional `EvpnRouteEntry.smet` message (`EvpnSmetView`):
+`source`, `group`, `originator_ip`, and the raw `flags` byte (0–255).
+Each source/group is an `EvpnSmetAddress` with an explicit oneof value:
+`{"wildcard":true}` or `{"ip":"239.1.2.3"}`. A wildcard group requires a
+wildcard source; concrete source and group addresses must share a family.
+The originator address may use either family independently. CLI JSON renders
+source and group as `"*"` or IP strings. Flags remain payload and do not form
+part of the key. Type 6 is alpha relay support; see the
+[SMET boundary](rfc-notes.md#type-6-smet-reflection).
 
 ### Explain an exact EVPN route
 
@@ -2111,7 +2121,8 @@ evaluates one destination. Both are neighbor IP addresses. This additive,
 
 The CLI uses `rbgp evpn explain <selector> --rd <RD>` with optional
 `--received-from <PEER>` and `--advertised-to <PEER>`. Put these options after
-the selector. Each selector is exact, with no wildcard or longest-prefix match:
+the selector. Each selector is an exact key lookup, with no pattern or
+longest-prefix matching:
 
 | CLI selector | Proto selector | Required key fields beyond RD | Ethernet Tag |
 |---|---|---|---|
@@ -2121,12 +2132,20 @@ the selector. Each selector is exact, with no wildcard or longest-prefix match:
 | `imet` | `imet` | `--originator-ip` | `--ethernet-tag` defaults to 0 |
 | `es` | `es` | `--esi`, `--originator-ip` | Not part of the Type 4 key |
 | `ip-prefix` | `ip_prefix` | `--prefix` in canonical CIDR form | `--ethernet-tag` defaults to 0; nonzero tags are supported |
+| `smet` | `smet` | `--source`, `--group`, `--originator-ip` | `--ethernet-tag` defaults to 0 |
 
 For Type 2, omitting `--ip` (an empty RPC `ip`) selects the MAC-only key;
 it does not match every host IP attached to that MAC. Type 5 prefixes must
 have zero host bits. ESI uses ten colon-separated hex octets; MAC uses six.
 Labels, next hop, and gateway are route payload, not selector fields. Invalid
 selectors return `INVALID_ARGUMENT` before querying the RIB.
+
+For Type 6, source and group must be explicit. The CLI accepts an IP or the
+quoted literal `'*'`; RPC selectors use the same `EvpnSmetAddress` oneof as
+route views, and `wildcard` must be `true`. This selects the route's literal
+wildcard field, not every source or group. A wildcard group requires a wildcard
+source, concrete source/group families must agree, and the originator family is
+independent. Flags are not selector fields.
 
 ```bash
 # Exact MAC-only route, with source and destination diagnostics
@@ -2136,6 +2155,10 @@ rbgp evpn explain mac-ip --rd 65000:100 --mac 02:00:00:00:00:11 \
 # The same MAC with a host IP is a distinct key
 rbgp evpn explain mac-ip --rd 65000:100 --mac 02:00:00:00:00:11 \
   --ip 192.0.2.11 --advertised-to 10.0.0.2
+
+# Type 6: exact wildcard-source route with an independent IPv6 originator
+rbgp evpn explain smet --rd 65000:100 --source '*' --group 239.1.2.3 \
+  --originator-ip 2001:db8::1 --advertised-to 10.0.0.2
 
 # Type 5 supports an exact IPv6 prefix and a nonzero Ethernet Tag
 rbgp evpn explain ip-prefix --rd 65000:100 --ethernet-tag 100 \
@@ -2532,8 +2555,8 @@ restart.
 `BGP_EVENT_TYPE_EVPN_ROUTE_BEST_CHANGED`; empty `event_types` means all three.
 The peer filter matches both the current and previous best-path peer so
 withdrawals and best-path moves away from a peer remain visible to
-peer-scoped dashboards. `route_type_filter` accepts RFC 7432 / RFC 9136 route
-types 1 through 5, and `rd_filter` uses the same display format as
+peer-scoped dashboards. `route_type_filter` accepts EVPN route types 1 through 6
+(RFC 7432 / RFC 9136 / RFC 9251), and `rd_filter` uses the same display format as
 `ListEvpnRoutes`. The history ring holds at most 4096 events, is process-local,
 and resets on daemon restart.
 

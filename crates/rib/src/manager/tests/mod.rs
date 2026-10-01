@@ -171,6 +171,19 @@ fn make_evpn_imet(peer: Ipv4Addr, ethernet_tag: u32) -> EvpnRibRoute {
     }
 }
 
+fn make_evpn_smet(peer: Ipv4Addr, flags: u8) -> EvpnRibRoute {
+    let mut route = make_evpn_imet(peer, 100);
+    route.route = EvpnRoute::Smet(rustbgpd_wire::EvpnSmet {
+        rd: "65000:100".parse().unwrap(),
+        ethernet_tag: EthernetTagId(100),
+        source_ip: Some("2001:db8::10".parse().unwrap()),
+        group_ip: Some("ff3e::1234".parse().unwrap()),
+        originator_ip: "192.0.2.10".parse().unwrap(),
+        flags,
+    });
+    route
+}
+
 fn make_bgpls_route(peer: Ipv4Addr, payload_suffix: u8, local_pref: u32) -> BgpLsRibRoute {
     let nlri = decode_bgpls_nlri(&[0xfd, 0xe8, 0, 4, 0xde, 0xad, 0xbe, payload_suffix])
         .expect("fixture BGP-LS NLRI decodes")

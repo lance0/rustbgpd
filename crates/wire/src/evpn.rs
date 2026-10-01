@@ -2,13 +2,14 @@
 //!
 //! EVPN NLRI is a typed TLV format carried under AFI=25 / SAFI=70. Each NLRI
 //! entry has a 1-byte route type, 1-byte length, and a type-specific payload.
-//! Five route types are defined:
+//! Six route types are supported:
 //!
 //! - Type 1: Ethernet Auto-Discovery (EAD) — per-ES (ethernet_tag=MAX_ET) or per-EVI
 //! - Type 2: MAC/IP Advertisement
 //! - Type 3: Inclusive Multicast Ethernet Tag (IMET)
 //! - Type 4: Ethernet Segment (ES)
 //! - Type 5: IP Prefix Route (RFC 9136)
+//! - Type 6: Selective Multicast Ethernet Tag (SMET, RFC 9251)
 //!
 //! This module is the structural codec — no semantic interpretation of RDs,
 //! ESIs, MACs, or labels. Upstream layers (RIB, best-path) apply meaning.
@@ -491,11 +492,90 @@ pub struct EvpnIpPrefixRoute {
     pub label: MplsLabel,
 }
 
+/// Type 6: Selective Multicast Ethernet Tag route (RFC 9251 §9.1).
+///
+/// `None` represents a source or group wildcard. Source and group addresses
+/// share a family; the originator family is independent. Flags are mutable
+/// payload, not part of the route key. Reserved flag bits are preserved.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct EvpnSmet {
+    /// Route Distinguisher.
+    pub rd: RouteDistinguisher,
+    /// Ethernet Tag identifying the EVI / bridge domain.
+    pub ethernet_tag: EthernetTagId,
+    /// Source address, or wildcard.
+    pub source_ip: Option<IpAddr>,
+    /// Group address, or wildcard (only with a wildcard source).
+    pub group_ip: Option<IpAddr>,
+    /// Originator Router IP, independent of the source/group family.
+    pub originator_ip: IpAddr,
+    /// Complete flags byte, including uninterpreted reserved high bits.
+    pub flags: u8,
+}
+
+impl EvpnSmet {
+    fn valid_shape(&self) -> bool {
+        match (self.source_ip, self.group_ip) {
+            (None, _) => true,
+            (Some(source), Some(group)) => source.is_ipv4() == group.is_ipv4(),
+            (Some(_), None) => false,
+        }
+    }
+
+    /// Validate announcement flags for context-free route reflection.
+    ///
+    /// RFC 9251 §§9.1/10 and RFC 9625 §3.3 permit the wildcard zero-flag
+    /// profile. A familyless (*,*) accepts either family's wildcard profile;
+    /// the originator address does not determine that family. Withdrawals
+    /// bypass this check and use the flags-free key.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for an invalid source/group shape or flag profile.
+    pub fn validate_announcement(&self) -> Result<(), DecodeError> {
+        let flags = self.flags & 0x0f;
+        let valid = self.valid_shape()
+            && match (self.source_ip, self.group_ip) {
+                (None, None) => matches!(flags, 0..=3 | 8..=15),
+                (None, Some(IpAddr::V4(_))) => matches!(flags, 0 | 2 | 3 | 8 | 10..=15),
+                (Some(_), Some(IpAddr::V4(_))) => matches!(flags, 4 | 5 | 12 | 13),
+                (None, Some(IpAddr::V6(_))) => matches!(flags, 0 | 1 | 8..=11),
+                (Some(_), Some(IpAddr::V6(_))) => matches!(flags, 2 | 10),
+                (Some(_), None) => false,
+            };
+        if valid {
+            Ok(())
+        } else {
+            Err(DecodeError::MalformedField {
+                message_type: "UPDATE",
+                detail: format!("EVPN Type 6 invalid announcement profile: {self:?}"),
+            })
+        }
+    }
+}
+
+/// Validate announcement-only semantics after structural EVPN decoding.
+///
+/// Keep the decoded routes on failure: RFC 7606 recovery needs every
+/// announcement key, including valid siblings. Do not apply to withdrawals.
+///
+/// # Errors
+///
+/// Returns the first invalid Type 6 announcement profile.
+pub fn validate_evpn_announcements(routes: &[EvpnRoute]) -> Result<(), DecodeError> {
+    for route in routes {
+        if let EvpnRoute::Smet(smet) = route {
+            smet.validate_announcement()?;
+        }
+    }
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // EvpnRoute + EvpnRouteKey top-level enums
 // ---------------------------------------------------------------------------
 
-/// A single EVPN NLRI entry (RFC 7432 §7), one of five route types.
+/// A single EVPN NLRI entry, one of six supported route types.
 ///
 /// This carries the full wire payload — needed for round-trip encoding and
 /// for reflection through a route reflector. For a minimal hashable
@@ -515,10 +595,12 @@ pub enum EvpnRoute {
     Es(EvpnEs),
     /// Type 5 — IP Prefix (RFC 9136).
     IpPrefix(EvpnIpPrefixRoute),
+    /// Type 6 — Selective Multicast Ethernet Tag (RFC 9251).
+    Smet(EvpnSmet),
 }
 
 impl EvpnRoute {
-    /// Wire route-type byte (1..=5).
+    /// Wire route-type byte (1..=6).
     #[must_use]
     pub const fn route_type(&self) -> u8 {
         match self {
@@ -527,6 +609,7 @@ impl EvpnRoute {
             Self::Imet(_) => 3,
             Self::Es(_) => 4,
             Self::IpPrefix(_) => 5,
+            Self::Smet(_) => 6,
         }
     }
 
@@ -564,6 +647,13 @@ impl EvpnRoute {
                 rd: r.rd,
                 ethernet_tag: r.ethernet_tag,
                 prefix: r.prefix,
+            },
+            Self::Smet(r) => EvpnRouteKey::Smet {
+                rd: r.rd,
+                ethernet_tag: r.ethernet_tag,
+                source_ip: r.source_ip,
+                group_ip: r.group_ip,
+                originator_ip: r.originator_ip,
             },
         }
     }
@@ -633,10 +723,23 @@ pub enum EvpnRouteKey {
         /// IP prefix.
         prefix: EvpnIpPrefixValue,
     },
+    /// Type 6 key — flags are deliberately excluded (RFC 9251 §9.1).
+    Smet {
+        /// Route Distinguisher.
+        rd: RouteDistinguisher,
+        /// Ethernet Tag.
+        ethernet_tag: EthernetTagId,
+        /// Source address, or wildcard.
+        source_ip: Option<IpAddr>,
+        /// Group address, or wildcard.
+        group_ip: Option<IpAddr>,
+        /// Originator Router IP, with its own address-family identity.
+        originator_ip: IpAddr,
+    },
 }
 
 impl EvpnRouteKey {
-    /// Wire route-type byte (1..=5).
+    /// Wire route-type byte (1..=6).
     #[must_use]
     pub const fn route_type(&self) -> u8 {
         match self {
@@ -645,6 +748,7 @@ impl EvpnRouteKey {
             Self::Imet { .. } => 3,
             Self::Es { .. } => 4,
             Self::IpPrefix { .. } => 5,
+            Self::Smet { .. } => 6,
         }
     }
 }
@@ -1043,13 +1147,77 @@ fn decode_type5(payload: &[u8]) -> Result<EvpnRoute, DecodeError> {
 // Public NLRI encode / decode
 // ---------------------------------------------------------------------------
 
+fn decode_smet_address(buf: &mut &[u8], wildcard: bool) -> Result<Option<IpAddr>, DecodeError> {
+    let Some((&bits, rest)) = buf.split_first() else {
+        return Err(DecodeError::MalformedField {
+            message_type: "UPDATE",
+            detail: "EVPN Type 6 truncated before address length".into(),
+        });
+    };
+    let bytes = match bits {
+        0 if wildcard => {
+            *buf = rest;
+            return Ok(None);
+        }
+        32 => 4,
+        128 => 16,
+        _ => {
+            return Err(DecodeError::MalformedField {
+                message_type: "UPDATE",
+                detail: format!("EVPN Type 6 invalid address length {bits}"),
+            });
+        }
+    };
+    let address = decode_ip_addr(rest, bytes, "Type 6 address")?;
+    *buf = &rest[bytes..];
+    Ok(Some(address))
+}
+
+fn decode_type6(payload: &[u8]) -> Result<EvpnRoute, DecodeError> {
+    let rd = decode_rd(payload)?;
+    let ethernet_tag = decode_ethernet_tag(&payload[8..])?;
+    let mut remaining = &payload[12..];
+    let source_ip = decode_smet_address(&mut remaining, true)?;
+    let group_ip = decode_smet_address(&mut remaining, true)?;
+    let originator_ip = decode_smet_address(&mut remaining, false)?
+        .expect("non-wildcard address decoder returns an address");
+    let [flags] = remaining else {
+        return Err(DecodeError::MalformedField {
+            message_type: "UPDATE",
+            detail: "EVPN Type 6 requires exactly one Flags octet after its key".into(),
+        });
+    };
+    let route = EvpnSmet {
+        rd,
+        ethernet_tag,
+        source_ip,
+        group_ip,
+        originator_ip,
+        flags: *flags,
+    };
+    if !route.valid_shape() {
+        return Err(DecodeError::MalformedField {
+            message_type: "UPDATE",
+            detail: "EVPN Type 6 source/group families or wildcard shape disagree".into(),
+        });
+    }
+    // This decoder also handles withdrawals. Announcement flags are checked
+    // separately, retaining the key for UPDATE-wide treat-as-withdraw.
+    Ok(EvpnRoute::Smet(route))
+}
+
 /// Decode one or more EVPN NLRI entries from a contiguous buffer.
 ///
 /// Each entry is framed as `route_type (1) | length (1) | payload`.
 ///
-/// Unrecognized or unsupported route types (anything outside 1..=5) are
+/// Unrecognized or unsupported route types (anything outside 1..=6) are
 /// discarded per RFC 7606 §5.4. RFC 9136 §3 confirms that rule for EVPN.
 /// Truncation and per-type malformed payloads still error.
+///
+/// This is structural decoding, shared by announcements and withdrawals.
+/// Canonical Type 6 flags are retained even when invalid for announcement.
+/// Announcement callers must also use [`validate_evpn_announcements`] (or
+/// the revised UPDATE parser) and retain decoded keys for error recovery.
 ///
 /// # Errors
 ///
@@ -1115,6 +1283,7 @@ pub(crate) fn decode_evpn_nlri_observed(
             3 => routes.push(decode_type3(payload)?),
             4 => routes.push(decode_type4(payload)?),
             5 => routes.push(decode_type5(payload)?),
+            6 => routes.push(decode_type6(payload)?),
             // RFC 7606 §5.4: discard an unrecognized typed NLRI unless the
             // address-family specification says otherwise. RFC 9136 §3
             // explicitly applies that rule to EVPN. Keep a sparse, bounded
@@ -1242,7 +1411,33 @@ fn encode_type5_body(r: &EvpnIpPrefixRoute, out: &mut Vec<u8>) -> Result<(), Enc
     Ok(())
 }
 
+fn encode_type6_body(r: &EvpnSmet, out: &mut Vec<u8>) -> Result<(), EncodeError> {
+    if !r.valid_shape() {
+        return Err(EncodeError::ValueOutOfRange {
+            field: "EVPN Type 6 source/group",
+            value: "address families or wildcard shape disagree".into(),
+        });
+    }
+    out.extend_from_slice(&r.rd.0);
+    out.extend_from_slice(&r.ethernet_tag.0.to_be_bytes());
+    for ip in [r.source_ip, r.group_ip, Some(r.originator_ip)] {
+        match ip {
+            None => out.push(0),
+            Some(ip) => {
+                out.push(if ip.is_ipv4() { 32 } else { 128 });
+                encode_ip_addr(ip, out);
+            }
+        }
+    }
+    // Zero flags are required for reconstructed withdrawals, including (S,G).
+    out.push(r.flags);
+    Ok(())
+}
+
 /// Encode a list of EVPN NLRI entries to wire bytes.
+///
+/// Type 6 flags are encoded verbatim for both announcements and withdrawals;
+/// announcement callers must separately validate their flag profiles.
 ///
 /// # Errors
 ///
@@ -1250,8 +1445,8 @@ fn encode_type5_body(r: &EvpnIpPrefixRoute, out: &mut Vec<u8>) -> Result<(), Enc
 /// invariant the decoder discriminates on: a Type 5 gateway whose
 /// address family differs from its prefix, an EAD-per-ES route whose
 /// ethernet tag is not `MAX_ET`, or an EAD-per-EVI route whose ethernet
-/// tag is `MAX_ET`. `buf` may hold a partial encoding after an error
-/// and must be discarded.
+/// tag is `MAX_ET`, or a Type 6 source/group family or wildcard mismatch.
+/// `buf` may hold a partial encoding after an error and must be discarded.
 pub fn encode_evpn_nlri(routes: &[EvpnRoute], buf: &mut Vec<u8>) -> Result<(), EncodeError> {
     for route in routes {
         let route_type = route.route_type();
@@ -1287,6 +1482,7 @@ pub fn encode_evpn_nlri(routes: &[EvpnRoute], buf: &mut Vec<u8>) -> Result<(), E
             EvpnRoute::Imet(r) => encode_type3_body(r, buf),
             EvpnRoute::Es(r) => encode_type4_body(r, buf),
             EvpnRoute::IpPrefix(r) => encode_type5_body(r, buf)?,
+            EvpnRoute::Smet(r) => encode_type6_body(r, buf)?,
         }
         let body_len = buf.len() - body_start;
         debug_assert!(
@@ -1329,6 +1525,175 @@ mod tests {
 
     fn sample_esi() -> EthernetSegmentIdentifier {
         EthernetSegmentIdentifier([0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A])
+    }
+
+    fn smet(source_ip: Option<IpAddr>, group_ip: Option<IpAddr>, flags: u8) -> EvpnSmet {
+        EvpnSmet {
+            rd: sample_rd(),
+            ethernet_tag: EthernetTagId(100),
+            source_ip,
+            group_ip,
+            originator_ip: "192.0.2.1".parse().unwrap(),
+            flags,
+        }
+    }
+
+    #[test]
+    fn smet_independent_exact_bytes() {
+        // Independently written RFC 9251 field order, lengths and addresses.
+        let vectors: &[(&[u8], EvpnSmet)] = &[
+            (
+                &[
+                    6, 24, 0, 0, 253, 232, 0, 0, 0, 100, 0, 0, 0, 100, 0, 32, 239, 1, 2, 3, 32,
+                    192, 0, 2, 1, 242,
+                ],
+                smet(None, Some("239.1.2.3".parse().unwrap()), 0xf2),
+            ),
+            (
+                &[
+                    6, 20, 0, 0, 253, 232, 0, 0, 0, 100, 0, 0, 0, 100, 0, 0, 32, 192, 0, 2, 1, 0,
+                ],
+                smet(None, None, 0),
+            ),
+            (
+                &[
+                    6, 52, 0, 0, 253, 232, 0, 0, 0, 100, 0, 0, 0, 100, 128, 32, 1, 13, 184, 0, 0,
+                    0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 128, 255, 62, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                    0, 2, 32, 192, 0, 2, 1, 2,
+                ],
+                smet(
+                    Some("2001:db8::1".parse().unwrap()),
+                    Some("ff3e::2".parse().unwrap()),
+                    2,
+                ),
+            ),
+            (
+                &[
+                    6, 32, 0, 0, 253, 232, 0, 0, 0, 100, 0, 0, 0, 100, 0, 0, 128, 32, 1, 13, 184,
+                    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1,
+                ],
+                EvpnSmet {
+                    originator_ip: "2001:db8::1".parse().unwrap(),
+                    ..smet(None, None, 1)
+                },
+            ),
+        ];
+        for (bytes, route) in vectors {
+            let routes = vec![EvpnRoute::Smet(*route)];
+            assert_eq!(decode_evpn_nlri(bytes).unwrap(), routes);
+            validate_evpn_announcements(&routes).unwrap();
+            let mut encoded = Vec::new();
+            encode_evpn_nlri(&routes, &mut encoded).unwrap();
+            assert_eq!(&encoded, bytes);
+            assert_eq!(routes[0].route_type(), 6);
+            assert_eq!(routes[0].key().route_type(), 6);
+        }
+    }
+
+    #[test]
+    fn smet_literal_flag_matrix_and_reserved_bits() {
+        let v4_source = Some("192.0.2.2".parse().unwrap());
+        let v4_group = Some("239.1.2.3".parse().unwrap());
+        let v6_source = Some("2001:db8::2".parse().unwrap());
+        let v6_group = Some("ff3e::2".parse().unwrap());
+        // Literal accepted profiles, independent of the implementation's
+        // ranges. Every high-bit combination must preserve this answer.
+        for (source, group, accepted) in [
+            (None, v4_group, &[0, 2, 3, 8, 10, 11, 12, 13, 14, 15][..]),
+            (v4_source, v4_group, &[4, 5, 12, 13][..]),
+            (None, v6_group, &[0, 1, 8, 9, 10, 11][..]),
+            (v6_source, v6_group, &[2, 10][..]),
+            (None, None, &[0, 1, 2, 3, 8, 9, 10, 11, 12, 13, 14, 15][..]),
+        ] {
+            for originator_ip in ["192.0.2.1", "2001:db8::1"] {
+                for flags in 0..=u8::MAX {
+                    let route = EvpnSmet {
+                        originator_ip: originator_ip.parse().unwrap(),
+                        ..smet(source, group, flags)
+                    };
+                    assert_eq!(
+                        route.validate_announcement().is_ok(),
+                        accepted.contains(&(flags & 15)),
+                        "{route:?}"
+                    );
+                    // Structural codec accepts every canonical flag octet,
+                    // even invalid announcement flags and zero (S,G) flags.
+                    roundtrip(&[EvpnRoute::Smet(route)]);
+                    assert_eq!(
+                        EvpnRoute::Smet(route).key(),
+                        EvpnRoute::Smet(EvpnSmet { flags: 0, ..route }).key()
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn smet_structure_rejects_truncation_lengths_and_invalid_shapes() {
+        let route = EvpnRoute::Smet(smet(None, Some("239.1.2.3".parse().unwrap()), 2));
+        let mut encoded = Vec::new();
+        encode_evpn_nlri(&[route], &mut encoded).unwrap();
+        for end in 1..encoded.len() {
+            let mut truncated = encoded[..end].to_vec();
+            if end >= 2 {
+                truncated[1] = u8::try_from(end - 2).unwrap();
+            }
+            assert!(
+                decode_evpn_nlri(&truncated).is_err(),
+                "accepted {end} bytes"
+            );
+        }
+        let mut extra = encoded.clone();
+        extra.push(0);
+        extra[1] += 1;
+        assert!(decode_evpn_nlri(&extra).is_err());
+        for offset in [14, 15, 20] {
+            for bits in [1, 8, 31, 33, 127, 129, 255] {
+                let mut malformed = encoded.clone();
+                malformed[offset] = bits;
+                assert!(decode_evpn_nlri(&malformed).is_err());
+            }
+        }
+        let mut wildcard_originator = encoded.clone();
+        wildcard_originator[20] = 0;
+        wildcard_originator.drain(21..25);
+        wildcard_originator[1] -= 4;
+        assert!(decode_evpn_nlri(&wildcard_originator).is_err());
+        for route in [
+            smet(Some("192.0.2.2".parse().unwrap()), None, 4),
+            smet(
+                Some("192.0.2.2".parse().unwrap()),
+                Some("ff3e::2".parse().unwrap()),
+                4,
+            ),
+        ] {
+            assert!(route.validate_announcement().is_err());
+            assert!(encode_evpn_nlri(&[EvpnRoute::Smet(route)], &mut Vec::new()).is_err());
+        }
+        // Canonical source length/address followed by wildcard group.
+        let invalid_wildcard = [
+            6, 24, 0, 0, 253, 232, 0, 0, 0, 100, 0, 0, 0, 100, 32, 192, 0, 2, 2, 0, 32, 192, 0, 2,
+            1, 4,
+        ];
+        assert!(decode_evpn_nlri(&invalid_wildcard).is_err());
+    }
+
+    #[test]
+    fn smet_originators_are_distinct_and_unsupported_types_still_counted() {
+        let a = smet(None, None, 0);
+        let b = EvpnSmet {
+            originator_ip: "2001:db8::1".parse().unwrap(),
+            ..a
+        };
+        assert_ne!(EvpnRoute::Smet(a).key(), EvpnRoute::Smet(b).key());
+        let mut bytes = Vec::new();
+        encode_evpn_nlri(&[EvpnRoute::Smet(a), EvpnRoute::Smet(b)], &mut bytes).unwrap();
+        for route_type in 7..=11 {
+            bytes.extend_from_slice(&[route_type, 0]);
+        }
+        let (routes, discarded) = decode_evpn_nlri_counted(&bytes).unwrap();
+        assert_eq!(routes, vec![EvpnRoute::Smet(a), EvpnRoute::Smet(b)]);
+        assert_eq!(discarded, vec![(7, 1), (8, 1), (9, 1), (10, 1), (11, 1)]);
     }
 
     fn roundtrip(routes: &[EvpnRoute]) {

@@ -52,7 +52,7 @@ pub struct RouteEvent {
 /// daemon's local-MAC originator — need the full new best to build a
 /// `RemoteMacView` without a follow-up RIB query. Carrying the full
 /// [`EvpnRibRoute`] on the event side keeps the consumer's hot path
-/// allocation-free: the 400 B event is allocated once, then the
+/// allocation-free: the 432 B event is allocated once, then the
 /// history and live broadcast share that allocation through `Arc`.
 /// Each subscriber clone copies one `Arc`; nested path attributes
 /// remain shared, and the hot path still avoids a follow-up query.
@@ -103,7 +103,8 @@ pub const fn evpn_key_rd(key: &EvpnRouteKey) -> Option<rustbgpd_wire::RouteDisti
         | EvpnRouteKey::MacIp { rd, .. }
         | EvpnRouteKey::Imet { rd, .. }
         | EvpnRouteKey::Es { rd, .. }
-        | EvpnRouteKey::IpPrefix { rd, .. } => Some(*rd),
+        | EvpnRouteKey::IpPrefix { rd, .. }
+        | EvpnRouteKey::Smet { rd, .. } => Some(*rd),
         _ => None,
     }
 }

@@ -173,9 +173,10 @@ jobs:
           shellcheck tests/interop/scripts/test-m111-srv6-l3vpn-reflection.sh
           python3 tests/interop/scripts/test_m111_capture_oracle.py
           python3 tests/interop/scripts/test_m99_open_oracle.py
-      - name: Check SRv6 reflection proof helpers
+      - name: Check SRv6 and SMET reflection proof helpers
         run: |
           python3 tests/interop/scripts/test_m112_capture_oracle.py
+          python3 tests/interop/scripts/test_m113_smet_oracle.py
           python3 tests/interop/scripts/test_m111_typed_visibility.py
           bash -n tests/interop/scripts/test-m112-srv6-l2-reflection.sh
           shellcheck -x tests/interop/scripts/test-m112-srv6-l2-reflection.sh
@@ -193,6 +194,8 @@ jobs:
             python3 tests/interop/scripts/m112_capture_oracle.py observer "$m112/$phase-observer.json" \
               --phase "$phase" | cmp - "$m112/$phase-observer-check.json"
           done
+      - name: Replay committed SMET reflection receipt
+        run: python3 tests/interop/scripts/m113_smet_oracle.py --replay docs/artifacts/interop/m113-smet-20261001T180815Z
       - name: Replay SRv6 semantic eligibility receipts
         run: |
           set -euo pipefail

@@ -14,7 +14,7 @@
 use libfuzzer_sys::fuzz_target;
 use rustbgpd_wire::evpn::{
     EthernetSegmentIdentifier, EthernetTagId, EvpnEadPerEs, EvpnEadPerEvi, EvpnEs, EvpnImet,
-    EvpnIpPrefixRoute, EvpnIpPrefixValue, EvpnMacIp, EvpnRoute, MacAddress, MplsLabel,
+    EvpnIpPrefixRoute, EvpnIpPrefixValue, EvpnMacIp, EvpnRoute, EvpnSmet, MacAddress, MplsLabel,
     RouteDistinguisher, decode_evpn_nlri, encode_evpn_nlri,
 };
 use rustbgpd_wire::nlri::{Ipv4Prefix, Ipv6Prefix};
@@ -46,13 +46,25 @@ impl<'a> ByteCursor<'a> {
         self.take(4)
             .map(|s| u32::from_be_bytes([s[0], s[1], s[2], s[3]]))
     }
+
+    fn take_ip(&mut self, v6: bool) -> Option<IpAddr> {
+        if v6 {
+            Some(IpAddr::V6(Ipv6Addr::from(
+                <[u8; 16]>::try_from(self.take(16)?).ok()?,
+            )))
+        } else {
+            Some(IpAddr::V4(Ipv4Addr::from(
+                <[u8; 4]>::try_from(self.take(4)?).ok()?,
+            )))
+        }
+    }
 }
 
 fn build_route(c: &mut ByteCursor<'_>) -> Option<EvpnRoute> {
     let kind = c.take_byte()?;
     let rd_bytes: [u8; 8] = c.take(8)?.try_into().ok()?;
     let rd = RouteDistinguisher::new(rd_bytes);
-    match kind % 6 {
+    match kind % 7 {
         0 => {
             // Type 1 EAD per-ES — non-zero ESI, MAX_ET tag forced on encode
             let mut esi: [u8; 10] = c.take(10)?.try_into().ok()?;
@@ -153,7 +165,7 @@ fn build_route(c: &mut ByteCursor<'_>) -> Option<EvpnRoute> {
                 originator_ip: ip,
             }))
         }
-        _ => {
+        5 => {
             // Type 5 IP Prefix — gateway family must match prefix family
             let esi: [u8; 10] = c.take(10)?.try_into().ok()?;
             let tag = c.take_u32()?;
@@ -185,6 +197,30 @@ fn build_route(c: &mut ByteCursor<'_>) -> Option<EvpnRoute> {
                     label,
                 }))
             }
+        }
+        _ => {
+            let ethernet_tag = EthernetTagId(c.take_u32()?);
+            let shape = c.take_byte()?;
+            let v6 = shape & 4 != 0;
+            let source_ip = if shape & 3 >= 2 {
+                Some(c.take_ip(v6)?)
+            } else {
+                None
+            };
+            let group_ip = if shape & 3 != 0 {
+                Some(c.take_ip(v6)?)
+            } else {
+                None
+            };
+            let originator_ip = c.take_ip(shape & 8 != 0)?;
+            Some(EvpnRoute::Smet(EvpnSmet {
+                rd,
+                ethernet_tag,
+                source_ip,
+                group_ip,
+                originator_ip,
+                flags: c.take_byte()?,
+            }))
         }
     }
 }

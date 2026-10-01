@@ -2536,6 +2536,7 @@ fn mock_evpn_route(route_type: u32) -> server_proto::EvpnRouteEntry {
         extended_communities: vec![],
         tunnel_type: 8,
         prefix_sid: None,
+        smet: None,
     }
 }
 

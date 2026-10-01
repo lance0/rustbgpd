@@ -1454,10 +1454,12 @@ the peer via MP-BGP capabilities. Supported values:
   the same controller-feed / reflection scope as `linkstate`.
 - `"l2vpn_evpn"` — L2VPN EVPN (AFI 25, SAFI 70, RFC 7432). Two
   deployment modes share the family:
-  - **RR mode (Phase 1):** the daemon reflects all five RFC 7432
-    route types between iBGP-speaking VTEPs configured as
+  - **RR mode (Phase 1):** the daemon reflects EVPN Types 1–6, including
+    alpha Type 6 SMET relay, between iBGP-speaking VTEPs configured as
     `route_reflector_client = true`, with no local EVI state. Empty
-    `[[evpn_instances]]` selects this mode.
+    `[[evpn_instances]]` selects this mode. Type 6 does not add SMET origination,
+    IGMP/MLD proxy, or multicast forwarding; see the
+    [SMET boundary](rfc-notes.md#type-6-smet-reflection).
   - **Bidirectional VTEP mode (Phase 2 — Gates 7a / 7b / 7b+1 / 7b+2 / 7c / 8 / 8b):**
     populating `[[evpn_instances]]` (see § *EVPN VTEP instances*
     below) makes the daemon program remote-MAC FDB entries from
@@ -3081,7 +3083,7 @@ same entry are ANDed.
 | `match_as_path`          | string   | no*      | AS_PATH regex (Cisco/Quagga style, `_` = boundary)    |
 | `match_neighbor_set`     | string   | no*      | Named neighbor set matched against the evaluation peer |
 | `match_route_type`       | string   | no*      | Route source type: `"local"`, `"internal"`, `"external"` |
-| `match_evpn_route_type`  | u8       | no*      | EVPN route type (RFC 7432 §7 / RFC 9136): 1 EAD, 2 MAC/IP, 3 IMET, 4 Ethernet Segment, 5 IP Prefix. Non-EVPN routes never match a set value |
+| `match_evpn_route_type`  | u8       | no*      | EVPN route type (RFC 7432 §7 / RFC 9136 / RFC 9251): 1 EAD, 2 MAC/IP, 3 IMET, 4 Ethernet Segment, 5 IP Prefix, 6 SMET. Non-EVPN routes never match a set value |
 | `match_as_path_length_ge`| u32      | no*      | Minimum AS_PATH length to match (inclusive)           |
 | `match_as_path_length_le`| u32      | no*      | Maximum AS_PATH length to match (inclusive)           |
 | `match_local_pref_ge`    | u32      | no*      | Minimum `LOCAL_PREF` to match (inclusive)             |

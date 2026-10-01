@@ -16,6 +16,25 @@ Requires Rust 1.95 or newer.
 
 Release-by-release crate changes are recorded in the [changelog](CHANGELOG.md).
 
+### 0.23.0 compatibility note (prepared)
+
+The working tree prepares `rustbgpd-wire` 0.23.0 with FSM 0.10 and RPKI 0.5.
+The published dependency examples below retain the last published versions.
+Upgrade crates exchanging public wire types together when adopting this line.
+
+- **Breaking decoder behavior:** EVPN Type 6 is now decoded as `EvpnRoute::Smet`
+  instead of being counted and discarded as an unknown route type. The typed
+  `EvpnSmet` preserves source/group wildcards, the independent originator
+  address family, and the full flags byte. `EvpnRouteKey::Smet` excludes flags.
+- Structural EVPN decoding and encoding preserve announcement-invalid flag
+  profiles. Call `validate_evpn_announcements` or
+  `EvpnSmet::validate_announcement` before admitting announcements. Revised
+  UPDATE decoding applies this validation to MP_REACH, retaining all extracted
+  keys for treat-as-withdraw; withdrawals use structural decoding only.
+- This is the codec and route-reflector subset of RFC 9251. It does not add
+  SMET origination, IGMP/MLD proxy procedures, multicast forwarding, or Types
+  7–11. See the [Type 6 boundary](../../docs/reference/rfc-notes.md#type-6-smet-reflection).
+
 ### 0.22.0 compatibility note
 
 `rustbgpd-wire` 0.22.0 is a breaking minor release and pairs with FSM 0.9 and
@@ -314,7 +333,7 @@ later registry additions land without a breaking release.
 | 7313 | Enhanced Route Refresh (BoRR / EoRR markers) and the ROUTE-REFRESH Message Error NOTIFICATION code 7 (`NotificationCode::RouteRefreshMessage`) with the Invalid Message Length subcode (`notification::route_refresh_subcode::INVALID_MESSAGE_LENGTH`, §5) |
 | 7385 | PMSI Tunnel Type IANA registry — assigned unsupported and experimental values round-trip opaquely through `PmsiTunnelType::Other`; unassigned values and invalid composite encodings are rejected |
 | 7432 | EVPN: Types 1–4 (EAD, MAC/IP, IMET, Ethernet Segment) including the MAC Mobility extended community (§7.7) and the flag-only Default Gateway extended community (§7.8, type 0x03 / subtype 0x0D, decode + construct) |
-| 7606 | Revised UPDATE error handling: `UpdateMessage::parse_revised` recovers malformed path attributes without aborting the parse, each carrying its §7 per-attribute disposition (treat-as-withdraw / attribute-discard / session-reset) from `malformed_attr_disposition`; `parse_revised_observed` additionally returns sparse per-type EVPN NLRI discard observations from §5.4 without changing the established result structs; an attribute that decodes but fails validation may be retained in `update.attributes` for observation alongside its disposition; malformed or duplicated `MP_REACH_NLRI` / `MP_UNREACH_NLRI` and unparseable NLRI stay session-reset (§5.3, §7.11) |
+| 7606 | Revised UPDATE error handling: `UpdateMessage::parse_revised` recovers malformed path attributes without aborting the parse, each carrying its §7 per-attribute disposition (treat-as-withdraw / attribute-discard / session-reset) from `malformed_attr_disposition`; `parse_revised_observed` additionally returns sparse per-type EVPN NLRI discard observations from §5.4 without changing the established result structs; an attribute that decodes but fails validation may be retained in `update.attributes` for observation alongside its disposition; malformed framing or duplication of `MP_REACH_NLRI` / `MP_UNREACH_NLRI` and unparseable NLRI stay session-reset (§5.3, §7.11); canonical Type 6 announcement flag errors retain decoded keys for treat-as-withdraw |
 | 7607 | AS 0 rejection in `AS_PATH`, `AS4_PATH`, `AGGREGATOR`, and `AS4_AGGREGATOR`, including revised-error dispositions and canonical encoder rejection |
 | 7674 | FlowSpec Redirect Extended Community formatting (obsoleted by RFC 8955, whose §7.4 carries the same encodings): redirect-to-IPv4 type 0x8108 and redirect-to-4-octet-AS type 0x8208 in `FlowSpecAction` |
 | 7911 | Add-Path: path ID in NLRI encode/decode |
@@ -337,6 +356,7 @@ later registry additions land without a breaking release.
 | 9135 | EVPN integrated routing for IRB |
 | 9136 | EVPN Type 5: IP Prefix advertisement |
 | 9234 | BGP Roles (OPEN capability code 9, `BgpRole`) + Only-to-Customer path attribute (type 35, `PathAttribute::OnlyToCustomer(u32)` and `PathAttribute::OnlyToCustomerPartial(u32)`). Valid OTC stays typed and preserves Partial; Extended Length input canonicalizes on emission. The legacy decoder reports malformed flags/length with the RFC 4271 subcode and offending attribute data, while revised decoding omits the attribute and records RFC 7606 treat-as-withdraw. Negotiation + ingress/egress rules live in the daemon (ADR-0071) |
+| 9251 §9.1 | EVPN Type 6 SMET structural codec and announcement validation for route reflection; no IGMP/MLD proxy or multicast forwarding |
 | 9252 §7 | SRv6 L3/L2 Service TLV framing inside Prefix-SID, with treat-as-withdraw for recognized service malformation; `decode_prefix_sid_services` returns the first L3/L2 services, advertised SIDs, behavior codes, flags, and SID Structure fields. No SID reconstruction, eligibility decision, origination, or forwarding |
 | 9384 | Cease subcode 10, BFD Down (`cease_subcode::BFD_DOWN`) |
 | 9494 | Long-lived graceful restart capability |
@@ -362,7 +382,7 @@ path:
 
 ```toml
 [dependencies]
-rustbgpd-wire = { version = "0.22.0", path = "../rustbgpd/crates/wire" }
+rustbgpd-wire = { version = "0.23.0", path = "../rustbgpd/crates/wire" }
 bytes = "1"
 ```
 
@@ -483,8 +503,8 @@ cargo run -p rustbgpd-wire --features tokio-codec --example tokio_codec
   code 76), graceful restart, Outbound Route Filtering, etc.
 - **ORF types** (`orf` module, RFC 5291/5292) — `OrfCapEntry` (capability blocks), `OrfPayload` / `OrfEntryGroup` / `OrfEntries` (the Route Refresh ORF section), and `AddressPrefixOrf` (one Address-Prefix entry: action, match, sequence, min/max length, prefix). `RouteRefreshMessage::orf` carries the decoded section; a malformed IPv4/IPv6 unicast Address-Prefix group decodes to `OrfEntries::Malformed` (RFC 5291 §6 reset) rather than failing the message, while non-unicast / future-family Address-Prefix groups are preserved as raw bytes until those family encodings are implemented. Adding `orf` to `RouteRefreshMessage` made that struct `Clone` rather than `Copy` (0.11.0)
 - **`FlowSpecRule`** / **`FlowSpecComponent`** — FlowSpec NLRI with all 13 match types
-- **`EvpnRoute`** / **`EvpnRouteKey`** — typed EVPN routes (Types 1–5) with
-  full payloads (RFC 7432, RFC 9136); `EvpnRouteKey` implements `Ord` for
+- **`EvpnRoute`** / **`EvpnRouteKey`** — typed EVPN routes (Types 1–6) with
+  full payloads (RFC 7432, RFC 9136, RFC 9251); `EvpnRouteKey` implements `Ord` for
   deterministic keyed collections
 - **`vpn` module** — VPNv4/VPNv6 labeled NLRI substrate, including label-stack
   validation, Route Distinguisher, and IPv4/IPv6 prefix payloads
@@ -603,7 +623,7 @@ Fuzz targets exercise the codec in the nightly CI fuzz campaign:
 - `decode_open` — OPEN + capability decode
 - `decode_route_refresh` — ROUTE-REFRESH / ORF decode
 - `decode_flowspec` — FlowSpec NLRI component decoding
-- `decode_evpn` — EVPN NLRI (Types 1–5) decoding
+- `decode_evpn` — EVPN NLRI (Types 1–6) decoding
 - `encode_evpn` — EVPN NLRI encode round-trip
 - `decode_vpn` — VPNv4/VPNv6 labeled NLRI decode + successful decode round-trip
 - `decode_labeled` — labeled-unicast NLRI decode (SAFI 4)

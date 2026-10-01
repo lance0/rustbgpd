@@ -1626,7 +1626,7 @@ impl Parser<'_> {
                 self.expect_ident("`local`, `internal`, or `external`")?,
             )),
             "evpn-route-type" => {
-                let (value, span) = self.expect_u32("an EVPN route type (1-5)")?;
+                let (value, span) = self.expect_u32("an EVPN route type (0-255)")?;
                 Ok(RouteField::EvpnRouteType(value, field.span.to(span)))
             }
             "family" => Ok(RouteField::Family(

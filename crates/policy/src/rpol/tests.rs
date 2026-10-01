@@ -1755,17 +1755,16 @@ fn strict_next_hop_rejects_other_field_comparisons() {
 }
 
 #[test]
-fn evpn_route_type_enforces_rfc7432_range() {
-    // LAN-192: rustbgpd only emits EVPN route types 1-5 (RFC 7432 §7),
-    // so those compile…
-    for t in 1..=5 {
+fn evpn_route_type_enforces_supported_range() {
+    // Supported types compile; fixture inputs still retain their u8 range.
+    for t in 1..=6 {
         compile_ok(&format!(
             "policy p {{ term t {{ if route.evpn-route-type == {t} {{ accept }} }} }}"
         ));
     }
-    // …while 0 and 6-255 can never match a real route and are rejected
+    // 0 and 7-255 can never match a real route and are rejected
     // as dead policies rather than silently never firing.
-    for t in [0u32, 6, 255, 256] {
+    for t in [0u32, 7, 255, 256] {
         let (_, rendered) = diagnostics_of(&format!(
             "policy p {{ term t {{ if route.evpn-route-type == {t} {{ accept }} }} }}"
         ));

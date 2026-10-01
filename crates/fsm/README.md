@@ -10,6 +10,10 @@ Requires Rust 1.95 or newer.
 
 Release-by-release crate changes are recorded in the [changelog](CHANGELOG.md).
 
+The working tree prepares `rustbgpd-fsm` 0.10.0 with wire `0.23.0` for the
+Type 6 SMET decoder change. There is no direct FSM API or state-machine change;
+upgrade crates exchanging public wire types together when adopting this line.
+
 `rustbgpd-fsm` 0.9.0 moves to wire `0.22.0`. Upgrade dependencies exchanging
 public wire types together. Version 0.9.0 also removes internal modules and
 helpers from the public API; [Compatibility](#compatibility) lists them and

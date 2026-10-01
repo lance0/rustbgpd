@@ -639,8 +639,8 @@ capacity for thousands of VTEPs. See the
 **EVPN route-reflector behavior** (see the
 [EVPN enablement plan](../project/evpn-enablement.md) and ADR-0050):
 
-- **EVPN Type 1–5 route reflection (RFC 7432 and RFC 9136)** — EAD per-ES,
-  EAD per-EVI, MAC/IP, IMET, Ethernet Segment, IP Prefix (RFC 9136) —
+- **EVPN Type 1–6 route reflection (RFC 7432, RFC 9136, and RFC 9251)** — EAD per-ES,
+  EAD per-EVI, MAC/IP, IMET, Ethernet Segment, IP Prefix, and SMET —
   reflected between VTEPs per RFC 4456 with the
   [EVPN best-path ordering](../reference/rfc-notes.md)
   and source-peer split horizon.
@@ -687,7 +687,11 @@ The reflector retains eligible routes even when their RTs match no local
 VNI or VRF, and preserves the VTEP next hop on iBGP and eBGP export unless
 export policy names a replacement address. These defaults need no retention
 or next-hop-unchanged knobs. Policy and normal route selection still apply.
-Unsupported typed NLRIs, including RFC 9251 Types 6–8, are discarded rather
+Type 6 SMET is alpha relay-only support, with a
+[controlled raw-peer proof](../artifacts/interop/m113-smet-20261001T180815Z/README.md) checked by an independent
+TShark decoder. Vendor interoperability is unproven; SMET origination,
+IGMP/MLD proxy, and multicast forwarding are not implemented.
+Unsupported typed NLRIs, including RFC 9251 Types 7–8, are discarded rather
 than reflected; see the
 [adjacent standards matrix](../reference/rfc-notes.md#later-evpn-standards-against-the-vxlanlinux-lane).
 
@@ -937,7 +941,8 @@ Be honest about where rustbgpd isn't the right tool:
 	  have also shipped. **Still missing for full VTEP parity:**
 	  Linux softswitch local-bias split-horizon,
 	  optional import-side ES-Import RT filtering, EVPN over MPLS/PBB,
-	  and EVPN route types 6-11. For a single-homed L2VNI fabric without
+	  SMET service procedures, and EVPN route types 7–11. For a single-homed
+	  L2VNI fabric without
 	  MPLS/PBB or service-provider EVPN requirements, rustbgpd is a fit today.
 - **VPLS fabrics** — No RFC 4761 VPLS address family support.
 - **Service provider core** — No Confederation (RFC 5065). VPNv4/VPNv6 and

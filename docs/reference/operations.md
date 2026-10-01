@@ -1760,7 +1760,7 @@ without a `reason` label encode the mechanism in the metric name.
 | `bgp_rr_loop_detected_total{peer}` | UPDATEs rejected by route-reflection loop detection (RFC 4456 §8). No `reason` label; the debug log line emitted with each increment carries `reason=originator_id` (received `ORIGINATOR_ID` equals our router-id) or `reason=cluster_list` (our cluster-id already in `CLUSTER_LIST`) |
 | `bgp_bgpls_nlri_discarded_total{peer}` | Known BGP-LS NLRIs dropped for out-of-order descriptor TLVs (RFC 9552 fault management). The affected NLRI is isolated and the session is preserved; each increment carries a `family=bgp_ls` debug log line. Fatal BGP-LS framing/length errors are not counted here — they still reset the session |
 | `bgp_evpn_nlri_discarded_total{peer}` | Unrecognized or unsupported EVPN typed NLRIs discarded under RFC 7606 §5.4 while supported routes in the same MP attribute and the session are preserved. This existing counter remains the peer aggregate across announcements and withdrawals. Malformed EVPN framing and malformed payloads for supported types are not counted here and retain their existing decode-error handling. |
-| `bgp_evpn_nlri_discarded_by_type_total{peer,route_type}` | The same discards separated by decimal wire route type (bounded to one octet). One WARN per type per TCP connection identifies the peer, `family=evpn`, `route_type`, and initial `discarded` count; DEBUG records retain every per-type count per UPDATE. Repeated discards continue incrementing both counters. Ordinary reconnects preserve counters and re-arm warnings; configured-peer deletion reaps all type series. Use this counter to identify unsupported routes sent by a peer, such as multicast types 6–8; these routes do not enter the RIB or get reflected. |
+| `bgp_evpn_nlri_discarded_by_type_total{peer,route_type}` | The same discards separated by decimal wire route type (bounded to one octet). One WARN per type per TCP connection identifies the peer, `family=evpn`, `route_type`, and initial `discarded` count; DEBUG records retain every per-type count per UPDATE. Repeated discards continue incrementing both counters. Ordinary reconnects preserve counters and re-arm warnings; configured-peer deletion reaps all type series. Use this counter to identify unsupported routes sent by a peer, such as multicast types 7–8; these routes do not enter the RIB or get reflected. |
 | `bgp_path_attribute_discarded_total{peer,type_code}` | Surviving decoded attributes removed by effective `discard_path_attributes`, plus well-formed ORIGINATOR_ID (`9`) and CLUSTER_LIST (`10`) received from an external neighbor, which RFC 7606 §7.9/§7.10 discard without any configuration (an attribute matching both counts once); `type_code` is the decimal wire type. Increments once per removed attribute occurrence in an UPDATE, not once per NLRI, and each peer/type/update produces one bounded DEBUG record. RFC 7606-removed malformed attributes do not increment it; their reported causes appear in `bgp_update_malformed_causes_total`. Ordinary session resets preserve the counter; configured-peer deletion reaps all of its type-code series. |
 | `bgp_update_malformed_total{peer,disposition}` | Malformed UPDATE messages by the RFC 7606 disposition applied: `attribute_discard` (offending attribute dropped, UPDATE proceeds), `treat_as_withdraw` (every route in the UPDATE handled as withdrawn, session stays Established), or `session_reset` (NOTIFICATION + teardown, retained where the NLRI cannot be trusted — including the §5.2 escalation when a treat-as-withdraw-class error arrives with no reachable NLRI). One increment per malformed UPDATE, labeled with the strongest-action disposition that governed it (§3 (h)). Each increment is accompanied by a warn log line per malformed attribute and, at DEBUG, the §6 full-message hex capture |
 | `bgp_update_malformed_causes_total{peer,type_code,reason,disposition}` | Causes reported while processing malformed UPDATEs, with the final applied disposition on every cause. `type_code` is decimal 0–255 or `none` when no attribute type is attributable. Multiple independent causes can occur in one UPDATE or attribute; this is neither an UPDATE nor an NLRI count. Each prohibited AS-set attribute occurrence contributes one `as_set_prohibited` cause. A missing mandatory attribute caused by the decoder removing that same malformed attribute adds no second cause. Counters survive session resets; configured-peer deletion reaps them. |
@@ -3479,7 +3479,7 @@ the full bounded in-memory window.
 For recent EVPN route history, use `rbgp events evpn`; it reads the RIB's
 bounded 4096-event process-local EVPN route-event history. `--neighbor` matches
 both the current and previous best-path peer, `--route-type` accepts route types
-1 through 5, and `--rd` uses the same Route Distinguisher display format as
+1 through 6, and `--rd` uses the same Route Distinguisher display format as
 `rbgp evpn`.
 
 ### Pick the right observability surface
@@ -4020,8 +4020,8 @@ rustbgpd has two operational EVPN modes that share the same `l2vpn_evpn`
 session machinery:
 
 - **RR mode (Phase 1):** empty `[[evpn_instances]]`. The daemon
-  reflects RFC 7432 routes between iBGP-speaking VTEPs, owns no
-  kernel state, and runs no DF election. External VTEPs (FRR on
+  reflects EVPN Types 1–6 between iBGP-speaking VTEPs, including RFC 9251
+  Type 6 SMET relay. It owns no kernel state and runs no DF election. External VTEPs (FRR on
   SONiC, commercial NOS) handle local origination + forwarding.
 - **Bidirectional VTEP mode (Phase 2 — Gates 7a / 7b / 7b+1):**
   populated `[[evpn_instances]]`. The daemon **programs the kernel
@@ -4087,6 +4087,7 @@ own `cluster_id` (under `[global]`) drives the RFC 4456 ORIGINATOR_ID
 ```bash
 rbgp evpn                             # all EVPN routes
 rbgp evpn --route-type 2              # MAC/IP only
+rbgp evpn --route-type 6              # SMET relay routes
 rbgp evpn --rd 65000:100              # filter by RD
 rbgp evpn --neighbor 10.0.1.1         # filter by source peer
 rbgp evpn diagnose                    # alpha VTEP summary
@@ -4096,6 +4097,21 @@ rbgp evpn clear-duplicate-mac --vni 100 --mac aa:bb:cc:dd:ee:ff
 
 `tunnel_type=8` in the output indicates the RFC 8365 VXLAN
 encapsulation extended community is present.
+
+For an exact Type 6 route, use its literal source/group wildcard or IP and
+originator address. Quote the wildcard for the shell:
+
+```bash
+rbgp evpn explain smet --rd 65000:100 --source '*' --group 239.1.2.3 \
+  --originator-ip 2001:db8::1 --advertised-to 10.0.1.2
+```
+
+Type 6 supports relay and inspection only. It does not originate SMET routes,
+run an IGMP/MLD proxy, or program multicast forwarding. The
+[M113 controlled raw-peer proof](../artifacts/interop/m113-smet-20261001T180815Z/README.md) checks reflection,
+withdrawal, and error recovery with an independent TShark decoder. Vendor
+interoperability remains unproven; see the
+[SMET boundary](rfc-notes.md#type-6-smet-reflection).
 
 #### Inspect the dataplane (ADR-0059 FDB nexthop groups)
 

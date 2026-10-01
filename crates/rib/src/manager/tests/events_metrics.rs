@@ -19,7 +19,10 @@ fn event_storage_layout_and_lazy_history_capacity_are_pinned() {
     use std::mem::size_of;
 
     assert_eq!(size_of::<crate::event::RouteEvent>(), 136);
-    assert_eq!(size_of::<crate::event::EvpnRouteEvent>(), 400);
+    // SMET widens the Copy key from 36 to 64 B while the full route stays
+    // 68 B. Including alignment, the shared event grows by 32 B; neither
+    // Arc slots nor the lazy history's initial capacity grow.
+    assert_eq!(size_of::<crate::event::EvpnRouteEvent>(), 432);
     assert_eq!(size_of::<Arc<crate::event::RouteEvent>>(), 8);
     assert_eq!(size_of::<Arc<crate::event::EvpnRouteEvent>>(), 8);
 

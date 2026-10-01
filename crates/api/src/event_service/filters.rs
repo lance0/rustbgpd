@@ -645,12 +645,12 @@ fn parse_evpn_route_type_filter(route_type: u32) -> Result<Option<u8>, Status> {
         return Ok(None);
     }
     let route_type = u8::try_from(route_type)
-        .map_err(|_| Status::invalid_argument("EVPN route_type_filter must be 1..=5"))?;
-    if (1..=5).contains(&route_type) {
+        .map_err(|_| Status::invalid_argument("EVPN route_type_filter must be 1..=6"))?;
+    if (1..=6).contains(&route_type) {
         Ok(Some(route_type))
     } else {
         Err(Status::invalid_argument(
-            "EVPN route_type_filter must be 1..=5",
+            "EVPN route_type_filter must be 1..=6",
         ))
     }
 }
@@ -849,6 +849,27 @@ pub(super) fn parse_list_evpn_events_filter(
 #[cfg(test)]
 mod compatibility_tests {
     use super::*;
+
+    #[test]
+    fn smet_event_filter_accepts_type_six_and_rejects_unmodeled_types() {
+        let filter = parse_list_evpn_events_filter(&proto::ListEvpnEventsRequest {
+            route_type_filter: 6,
+            rd_filter: "65000:100".into(),
+            ..Default::default()
+        })
+        .unwrap();
+        assert_eq!(filter.route_type, Some(6));
+        assert_eq!(filter.rd, Some("65000:100".parse().unwrap()));
+        for route_type_filter in 7..=11 {
+            assert!(
+                parse_list_evpn_events_filter(&proto::ListEvpnEventsRequest {
+                    route_type_filter,
+                    ..Default::default()
+                })
+                .is_err()
+            );
+        }
+    }
 
     #[test]
     fn live_event_type_matrix_is_exhaustive() {

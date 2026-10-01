@@ -166,6 +166,17 @@ fn format_evpn_route_key(key: &rustbgpd_wire::EvpnRouteKey) -> String {
             ethernet_tag,
             prefix,
         } => format!("ip-prefix rd={rd} ethernet_tag={ethernet_tag} prefix={prefix}"),
+        rustbgpd_wire::EvpnRouteKey::Smet {
+            rd,
+            ethernet_tag,
+            source_ip,
+            group_ip,
+            originator_ip,
+        } => format!(
+            "smet rd={rd} ethernet_tag={ethernet_tag} source={} group={} originator_ip={originator_ip}",
+            source_ip.map_or_else(|| "*".to_string(), |ip| ip.to_string()),
+            group_ip.map_or_else(|| "*".to_string(), |ip| ip.to_string())
+        ),
         // Non-exhaustive: name the gap honestly instead of guessing fields.
         _ => "unmodeled-route-type".to_string(),
     }

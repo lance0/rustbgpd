@@ -883,6 +883,43 @@ mod tests {
         })
     }
 
+    #[test]
+    fn smet_snapshot_roundtrip_preserves_payload_and_attributes() {
+        let peer: IpAddr = "192.0.2.10".parse().unwrap();
+        let mut route = make_evpn_macip(peer, peer);
+        route.route = rustbgpd_wire::EvpnRoute::Smet(rustbgpd_wire::EvpnSmet {
+            rd: "65000:100".parse().unwrap(),
+            ethernet_tag: rustbgpd_wire::EthernetTagId(100),
+            source_ip: Some("2001:db8::10".parse().unwrap()),
+            group_ip: Some("ff3e::1234".parse().unwrap()),
+            originator_ip: peer,
+            flags: 0xfa,
+        });
+        let bytes = encode_snapshot(
+            COLLECTOR,
+            &[make_peer(peer, 65001)],
+            &[],
+            std::slice::from_ref(&route),
+            TS,
+        )
+        .unwrap();
+        let mut reader = SnapshotReader::new(&bytes).unwrap();
+        let entry = reader.next().unwrap().unwrap();
+        assert!(reader.next().is_none());
+        assert_eq!(entry.peer.peer_addr, peer);
+        assert_eq!(entry.next_hop, Some(peer));
+        assert_eq!(entry.attributes.as_slice(), route.attributes.as_slice());
+        let SnapshotNlri::Generic {
+            afi: 25,
+            safi: 70,
+            nlri,
+        } = entry.nlri
+        else {
+            panic!("EVPN RIB_GENERIC")
+        };
+        assert_eq!(decode_evpn_nlri(&nlri).unwrap(), vec![route.route]);
+    }
+
     fn drain(reader: &mut SnapshotReader<'_>) -> (Vec<SnapshotEntry>, Option<ReadError>) {
         let mut entries = Vec::new();
         for item in reader.by_ref() {

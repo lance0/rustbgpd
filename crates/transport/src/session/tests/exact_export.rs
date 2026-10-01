@@ -377,6 +377,7 @@ fn exact_export_withdrawal_preserves_every_modeled_evpn_key() {
             ethernet_tag,
             prefix: EvpnIpPrefixValue::V6(Ipv6Prefix::new("2001:db8:100::".parse().unwrap(), 64)),
         },
+        make_smet_route(0xf2).key(),
     ];
     for key in keys {
         let probe = profile

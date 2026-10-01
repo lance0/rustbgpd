@@ -1237,11 +1237,10 @@ impl FlowSpecRoute {
 /// full wire payload so the RR can round-trip it to other peers.
 #[derive(Debug, Clone)]
 pub struct EvpnRibRoute {
-    /// The EVPN route (Type 1-5 with full payload). The single source of
+    /// The EVPN route (Types 1-6 with full payload). The single source of
     /// truth for route identity — call [`Self::key`] to derive the
     /// `EvpnRouteKey`. There is no cached key field: a stored copy
-    /// would create a sync surface that future Route Types (e.g.,
-    /// RFC 9251 §6/7/8) would have to keep aligned for no benefit
+    /// would create a sync surface that future route types would have to keep aligned for no benefit
     /// since `EvpnRoute::key()` is O(1) and allocation-free.
     pub route: EvpnRoute,
     /// The VTEP loopback IP (next-hop), carried separately for policy / display.
@@ -1394,7 +1393,7 @@ impl EvpnRibRoute {
         self.origin_type == RouteOrigin::Ebgp
     }
 
-    /// EVPN wire route type (1..=5).
+    /// EVPN wire route type (1..=6).
     #[must_use]
     pub fn route_type(&self) -> u8 {
         self.route.route_type()

@@ -1763,7 +1763,7 @@ pub struct PolicyStatementDefinition {
     pub match_neighbor_set: Option<String>,
     /// Optional route-source type match (`"local"`, `"internal"`, `"external"`).
     pub match_route_type: Option<String>,
-    /// Optional EVPN route-type match (1-5 per RFC 7432 / RFC 9136).
+    /// Optional EVPN route-type match (supported Types 1-6).
     /// `None` means no constraint; non-EVPN routes never match a set value.
     pub match_evpn_route_type: Option<u8>,
     /// Optional minimum `AS_PATH` length.

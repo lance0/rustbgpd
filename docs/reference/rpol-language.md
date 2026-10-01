@@ -457,7 +457,7 @@ group. Comparisons: `==`, `!=`, `>=`, `<=`.
 | `route.rpki == invalid` | RPKI origin validation state |
 | `route.aspa == unknown` | ASPA verification state |
 | `route.route-type == external` | route source class |
-| `route.evpn-route-type == 2` | EVPN route type (integer literal 1–5, RFC 7432 §7; `==`/`!=` only) |
+| `route.evpn-route-type == 2` | EVPN route type (integer literal 1–6, RFC 7432 §7 / RFC 9136 / RFC 9251; `==`/`!=` only) |
 | `route.family == ipv4-unicast` | typed AFI/SAFI route family (`==`/`!=` only); route-context-only, so it never disqualifies update-group sharing |
 | `peer.address == 192.0.2.1` | evaluation-peer address |
 | `peer.asn == 65010` | evaluation-peer ASN (`==`/`!=` only) |
