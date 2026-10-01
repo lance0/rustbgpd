@@ -294,11 +294,12 @@ remains valid.
 
 RSS bounds rationale: the ceiling is calibrated from the
 `bench/scale/route-server-1000` retained receipt, whose one-shot
-4-reload run at this exact shape enforces a 2 GiB process-tree ceiling;
-repeated reload cycles add glibc allocator retention (a known-benign
-pattern: jemalloc erases it, it is not an
-intern/RIB leak), so the soak ceiling adds 1 GiB of reload-cycle
-headroom (3 GiB). Because that retention front-loads, the slope gate
+4-reload run at this exact shape enforces a 2 GiB process-tree ceiling.
+The soak retains 1 GiB of conservative reload-cycle headroom (3 GiB).
+The [historical allocator comparison](../benchmarks.md) observed reload
+retention on stock-glibc builds and background decay under jemalloc.
+The flagship runners build with default jemalloc; RSS growth in a current
+soak requires attribution from that run's evidence. The slope gate
 bounds only the LATE window (final 25 % of the run), not the early
 settle; 10 MB/h is well above the ±30–50 MiB anonymous-residency variance
 band averaged over ≥ 6 h of 30 s samples, while still catching a
@@ -407,7 +408,7 @@ as a refreshed number; refreshing it is a separate decision). The
 dated transport figure: wide enough that anonymous-residency variance
 (±30–50 MiB at 100p×1k) and measurement drift cannot trip it, tight
 enough to catch a leak of a few hundred MB. There are no reload cycles
-here, so no glibc reload-retention headroom is added (contrast
+here, so no additional reload-cycle headroom is added (contrast
 scenario 10's 3 GiB). The late-window slope bounds match scenario 10:
 10 MB/h is above the anonymous-residency variance band averaged over a ≥ 6 h late
 window while catching a ~240 MB/day leak; slope gates are evaluated
