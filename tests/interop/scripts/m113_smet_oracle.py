@@ -36,9 +36,12 @@ RT = bytes.fromhex("0002fde900000071")
 RR = "127.0.0.1"
 RR_ID = "10.113.0.1"
 SOURCE, ALTERNATE, SINK = "127.0.0.2", "127.0.0.3", "127.0.0.4"
+RESET_SOURCES = [f"127.0.0.{index}" for index in range(5, 11)]
 # Transport addresses stay loopback; BGP payloads use valid unicast identities.
-NEXT_HOPS = {SOURCE: "192.0.2.2", ALTERNATE: "192.0.2.3"}
-ROUTER_IDS = {SOURCE: "10.113.0.2", ALTERNATE: "10.113.0.3", SINK: "10.113.0.4"}
+NEXT_HOPS = {peer: f"192.0.2.{peer.rsplit('.', 1)[1]}"
+             for peer in [SOURCE, ALTERNATE, *RESET_SOURCES]}
+ROUTER_IDS = {peer: f"10.113.0.{peer.rsplit('.', 1)[1]}"
+              for peer in [SOURCE, ALTERNATE, SINK, *RESET_SOURCES]}
 TSHARK_SHA256 = "1be3296c467ba299c4e89b4d6a2dfb8d0985a8bba2a8af3fa2ac3f10c3062668"
 # Independent literal RFC 9251 layouts; do not derive expected bytes from smet().
 VECTORS = [
@@ -266,16 +269,16 @@ class Proof:
                 print(f"PASS {name}", flush=True)
                 return
 
-    def expect_reset(self, name: str, body: bytes):
+    def expect_reset(self, name: str, body: bytes, peer: str = SOURCE):
         start = len(self.events)
-        self.peers[SOURCE].send(2, body)
+        self.peers[peer].send(2, body)
         deadline = time.monotonic() + self.timeout
         while True:
-            notified = self.pump(deadline, resetting=SOURCE)
+            notified = self.pump(deadline, resetting=peer)
             phase_complete(self.state, self.events[start:], [], {})
             if notified:
                 break
-        self.peers.pop(SOURCE).close()
+        self.peers.pop(peer).close()
         self.receipt["phases"].append({"name": name, "notification": "0309", "events": []})
         print(f"PASS {name}", flush=True)
 
@@ -336,11 +339,16 @@ class Proof:
             "extra-byte": target[:1] + bytes([target[1] + 1]) + target[2:] + b"\0",
             "mixed-source-group-family": smet("192.0.2.1", "ff3e::1", "192.0.2.1", 2),
         }
+        reset_sources = iter(RESET_SOURCES)
         for name, raw in malformed.items():
             for withdraw in [False, True]:
+                # Each case proves same-peer reconnect once without accumulating
+                # the daemon's intentional repeated-NOTIFICATION backoff.
+                peer = next(reset_sources)
+                self.connect(peer)
                 phase = f"reset-{name}-{'withdraw' if withdraw else 'announce'}"
                 self.expect_reset(phase, update_body(
-                    withdrawn=[raw]) if withdraw else update_body([raw]))
+                    withdrawn=[raw], peer=peer) if withdraw else update_body([raw], peer=peer), peer)
                 # The source NOTIFICATION is on another TCP connection. A fresh
                 # alternate-source marker acknowledges progress on the receiver
                 # stream and rejects any earlier malformed-route leak/churn.
@@ -351,11 +359,11 @@ class Proof:
                 self.phase(f"{phase}-barrier-cleanup", ALTERNATE,
                            update_body(withdrawn=[marker[:-1] + b"\0"], peer=ALTERNATE), {},
                            [("withdraw", key(marker))])
-                self.connect(SOURCE)
-                self.phase(f"{phase}-recovery", SOURCE, update_body([target]),
-                           {key(target): expected_route(target)}, [("announce", key(target))])
-                self.phase(f"{phase}-cleanup", SOURCE,
-                           update_body(withdrawn=[target[:-1] + b"\0"]), {},
+                self.connect(peer)
+                self.phase(f"{phase}-recovery", peer, update_body([target], peer=peer),
+                           {key(target): expected_route(target, peer)}, [("announce", key(target))])
+                self.phase(f"{phase}-cleanup", peer,
+                           update_body(withdrawn=[target[:-1] + b"\0"], peer=peer), {},
                            [("withdraw", key(target))])
 
     def close(self):
@@ -486,13 +494,14 @@ router_id = "{RR_ID}"
 cluster_id = "{RR_ID}"
 listen_port = {port}
 listen_addresses = ["{RR}"]
+runtime_state_dir = {json.dumps(str(output / "state"))}
 [global.telemetry]
 log_format = "json"
 [global.telemetry.grpc_uds]
 path = {json.dumps(str(output / "api.sock"))}
 access_mode = "read_only"
 '''
-    for peer in [SOURCE, ALTERNATE, SINK]:
+    for peer in [SOURCE, ALTERNATE, SINK, *RESET_SOURCES]:
         text += f'''\n[[neighbors]]
 address = "{peer}"
 remote_asn = 65001
@@ -502,6 +511,12 @@ route_reflector_client = true
 families = ["l2vpn_evpn"]
 '''
     return text
+
+
+def prepare_output(output: Path, port: int):
+    # The UDS server refuses a group/world-writable socket parent.
+    output.mkdir(mode=0o700, parents=True, exist_ok=False)
+    (output / "rr.toml").write_text(config(output, port))
 
 
 def stop(process, sig=signal.SIGTERM):
@@ -562,12 +577,11 @@ def main():
     need(len(os.fsencode(output / "api.sock")) < 108, "output path is too long for the owned Unix socket")
     with socket.socket() as probe:
         probe.bind((RR, args.port))  # Refuse to attach this proof to an existing listener.
-    output.mkdir(parents=True, exist_ok=False)
+    prepare_output(output, args.port)
     receipt = {"passed": False, "port": args.port, "connections": [], "phases": [],
                "capture_image": args.capture_image,
                "daemon_sha256": hashlib.sha256(daemon.read_bytes()).hexdigest(),
                "tshark_sha256": TSHARK_SHA256, "tshark_version": version.splitlines()[0]}
-    (output / "rr.toml").write_text(config(output, args.port))
     capture = process = proof = None
     capture_name = f"m113-capture-{os.getpid()}-{time.time_ns()}" if args.capture_image else None
 
@@ -581,14 +595,14 @@ def main():
 
     try:
         with (output / "capture.log").open("w+") as capture_log, (output / "daemon.log").open("w") as daemon_log:
-            tcpdump = ["tcpdump", "-i", "lo", "-U", "-n", "-Z", getpass.getuser(),
+            tcpdump = ["tcpdump", "--immediate-mode", "-i", "lo", "-U", "-n", "-Z", getpass.getuser(),
                        "-w", str(output / "m113.pcap"), "tcp", "port", str(args.port)]
             command = (["sudo", "-n"] if args.capture_sudo else []) + tcpdump
             if capture_name:
                 command = ["docker", "run", "--rm", "--name", capture_name, "--network", "host",
                            "--cap-add", "NET_RAW", "--cap-add", "NET_ADMIN", "--mount",
                            f"type=bind,src={output},dst=/capture", args.capture_image,
-                           "tcpdump", "-i", "lo", "-U", "-n", "-Z", "root",
+                           "tcpdump", "--immediate-mode", "-i", "lo", "-U", "-n", "-Z", "root",
                            "-w", "/capture/m113.pcap", "tcp", "port", str(args.port)]
             capture = subprocess.Popen(command, stdout=capture_log, stderr=capture_log)
             deadline = time.monotonic() + 10

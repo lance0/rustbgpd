@@ -2184,7 +2184,7 @@ implemented service procedures.
 |-----|--------|-----------|
 | [RFC 9014](https://www.rfc-editor.org/rfc/rfc9014.html) | Not implemented | EVPN overlay interconnect gateway procedures, including overlay-to-MPLS interworking and Interconnect Ethernet Segments, are not implemented. Reflecting supported EVPN routes does not provide a DCI gateway. |
 | [RFC 9252](https://www.rfc-editor.org/rfc/rfc9252.html) | Partial: service-aware reflection | Recognized malformed L3/L2 Service framing follows §7 treat-as-withdraw; see the [framing contract](path-attribute-registry.md#srv6-service-framing-within-prefix-sid). Structurally valid routes with no semantically valid applicable SID remain retained but are excluded from selection, Add-Path, ORR, and ECMP; see the [service eligibility contract](path-attribute-registry.md#srv6-service-eligibility). Unchanged-next-hop reflection preserves eligible raw attributes; [transport regressions](../../crates/transport/src/session/tests/outbound_attrs.rs) cover raw receive/export. PE import, service origination, next-hop rewriting, and SRv6 forwarding are not implemented; VPN and EVPN views may show an optional display-only [`reconstructed_sid`](api.md#prefix-sid-inspection-on-vpn-and-evpn-routes) from a single route's transposition, unused by selection. This is not full RFC 9252 service support. |
-| [RFC 9251](https://www.rfc-editor.org/rfc/rfc9251.html#section-9) | Partial: Type 6 SMET relay, alpha | Typed Type 6 receive/reflect/withdraw and inspection are implemented; external Type 6 peer proof is pending. Types 7/8 remain unsupported typed NLRIs, counted and discarded under RFC 7606 §5.4. No SMET origination, IGMP/MLD proxy, or multicast forwarding; see the [SMET boundary](#type-6-smet-reflection). |
+| [RFC 9251](https://www.rfc-editor.org/rfc/rfc9251.html#section-9) | Partial: Type 6 SMET relay, alpha | Typed Type 6 receive/reflect/withdraw and inspection are implemented. The [M113 controlled raw-peer proof](../artifacts/interop/m113-smet-20261001T180815Z/README.md) checks reflected bytes and recovery with an independent TShark decoder; vendor interoperability is unproven. Types 7/8 remain unsupported typed NLRIs, counted and discarded under RFC 7606 §5.4. No SMET origination, IGMP/MLD proxy, or multicast forwarding; see the [SMET boundary](#type-6-smet-reflection). |
 | RFC 9746 (Mar 2025; updates RFC 7432, RFC 8365) | Not implemented | Split Horizon Type (SHT) bits in the ESI Label extended community. §2.2: an egress NVE MUST NOT use an SHT other than 00 with VXLAN (tunnel type 8), so local bias is the only multi-homing split-horizon mechanism for VXLAN. This is the normative backing for the Linux softswitch local-bias limitation in [docs/reference/limitations.md](limitations.md); the ESI Label decoder reads only the single-active flag. |
 | RFC 9785 (Jun 2025; updates RFC 8584) | Partial | Highest-/Lowest-Preference DF election is implemented (`df_algorithm`), under the same unanimous-or-default negotiation restated in §4.1. The Don't-Preempt (DP) bit is originated (`df_dont_preempt`) and parsed but is not an election input, so stateful non-revertive election is not implemented. |
 | RFC 9722 (May 2025; updates RFC 8584) | Not implemented | Fast DF recovery: a Service Carving Time extended community on the Type 4 route synchronizes the DF election timer across the segment's PEs so they carve at the same instant. rustbgpd runs each election on its own timer. |
@@ -2231,8 +2231,14 @@ records, warm state, and BMP output. Filters accept route type 6; see the
 [operator examples](operations.md#inspect-the-evpn-rib). No multicast service
 is implied: SMET origination, IGMP/MLD proxy behavior, and multicast forwarding
 are not implemented. Types 7–11 remain unsupported, counted, and discarded.
-External Type 6 peer interoperability proof is pending; historical Types 1–5
-receipts establish no Type 6 peer or scale claim.
+The [M113 controlled raw-peer receipt](../artifacts/interop/m113-smet-20261001T180815Z/README.md) records
+41 protocol phases, 15 TCP connections, and 46 reflected SMET NLRIs, checked
+against an independent TShark decoder. It covers IPv4 wildcard-source, IPv6
+source-specific, and familyless wildcard routes; flags-only replacement,
+withdrawal fallback, UPDATE-wide treat-as-withdraw and same-session recovery;
+and six structural-error resets with same-peer reconnect recovery. This is
+neither vendor interoperability nor scale evidence. Historical Types 1–5
+receipts remain scoped to their original route types.
 
 ---
 

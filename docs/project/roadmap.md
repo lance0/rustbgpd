@@ -44,7 +44,7 @@ those.
 | BGP Roles + Only-to-Customer (9234) | Shipped | Static eBGP, IPv4/IPv6 unicast (ADR-0071, M55) |
 | BGP unnumbered / IPv6 link-local peering | Shipped | Static interface-bound link-local (ADR-0069, M53) |
 | Confederation (5065) | Rejected | See "Researched and rejected" under Next — no demand signal; revival requires a new recorded decision |
-| EVPN-VXLAN: Route Reflector (types 1–6) | Shipped, alpha | Type 6 SMET is relay-only; external Type 6 peer proof pending |
+| EVPN-VXLAN: Route Reflector (types 1–6) | Shipped, alpha | Type 6 SMET is relay-only; [M113 raw-peer/TShark proof](../artifacts/interop/m113-smet-20261001T180815Z/README.md), vendor interoperability unproven |
 | EVPN-VXLAN: single-homed VTEP (Type-2 / Type-3 IMET origination, FDB program) | Partial (alpha) | Linux/VXLAN only |
 | EVPN-VXLAN: multi-homing (ESI, Type-1/4, DF election, BUM suppression, aliasing ECMP) | Partial (alpha) | Production-default enforcement with opt-out |
 | EVPN-VXLAN: symmetric IRB (Type-5 / L3VNI, 9136 §4.4.2) | Partial (alpha) | Receive-side GW-IP overlay-index recursion shipped; native GW-IP + ESI overlay-index origination shipped; single-active ESI overlay-index receive v1 shipped; all-active ESI overlay-index Type 5 writer shipped with same-host netns proof and M72 real-peer proof (ADR-0087/0090, FRR consume-side M68 for GW-IP, GoBGP receive-side M71 for single-active ESI recursion, GoBGP ×2 receive-side M72 for all-active ESI recursion) |

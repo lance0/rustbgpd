@@ -3,6 +3,7 @@
 import copy
 import ipaddress
 import hashlib
+import os
 from pathlib import Path
 import shutil
 import signal
@@ -10,6 +11,7 @@ import socket
 import subprocess
 import struct
 import tempfile
+import tomllib
 import unittest
 from unittest import mock
 from types import SimpleNamespace
@@ -42,6 +44,43 @@ PDML_SG = '''<pdml><packet><field name="bgp.evpn.nlri">
           </field></packet></pdml>'''
 
 class SmetOracleTests(unittest.TestCase):
+    def test_each_reset_case_uses_its_own_peer_and_reconnects_that_peer(self):
+        proof = oracle.Proof(21179, 45, {"connections": [], "phases": []})
+        with mock.patch.object(proof, "connect") as connect, \
+             mock.patch.object(proof, "phase") as phase, \
+             mock.patch.object(proof, "expect_reset") as reset:
+            proof.run()
+        peers = [call.args[2] for call in reset.call_args_list]
+        self.assertEqual(len(peers), 6)
+        self.assertEqual(set(peers), set(oracle.RESET_SOURCES))
+        config = tomllib.loads(oracle.config(Path("/tmp/m113-fixture"), 21179))
+        configured = {neighbor["address"] for neighbor in config["neighbors"]}
+        for peer in peers:
+            self.assertIn(peer, configured)
+            self.assertEqual(sum(call.args == (peer,) for call in connect.call_args_list), 2)
+            recovery = [call for call in phase.call_args_list
+                        if call.args[0].endswith("-recovery") and call.args[1] == peer]
+            self.assertEqual(len(recovery), 1)
+            self.assertEqual(next(iter(recovery[0].args[3].values()))["originator_id"],
+                             oracle.ROUTER_IDS[peer])
+
+    def test_output_is_private_under_permissive_umask_and_state_is_owned(self):
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "proof"
+            previous_umask = os.umask(0)
+            try:
+                oracle.prepare_output(output, 21179)
+            finally:
+                os.umask(previous_umask)
+            self.assertEqual(output.stat().st_mode & 0o777, 0o700)
+            original = (output / "rr.toml").read_text()
+            config = tomllib.loads(original)["global"]
+            self.assertEqual(config["runtime_state_dir"], str(output / "state"))
+            self.assertEqual(config["telemetry"]["grpc_uds"]["path"], str(output / "api.sock"))
+            with self.assertRaises(FileExistsError):
+                oracle.prepare_output(output, 21180)
+            self.assertEqual((output / "rr.toml").read_text(), original)
+
     def test_literal_vectors_and_flags_free_keys(self):
         shapes = [("*", "239.1.1.1", "192.0.2.1", 0xf2),
                   ("2001:db8::1", "ff3e::1", "192.0.2.1", 0xf2),

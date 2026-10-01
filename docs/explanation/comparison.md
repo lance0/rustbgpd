@@ -114,8 +114,10 @@ IPv4/IPv6 `Prefix` routes.
     Supported decomposable runtime edits commit live; L3VNI/device/table IP-VRF identity
     changes remain restart-required, dependency cycles fail closed, and
     residual mid-sequence failures fail-stop at the last committed generation.
-    Type 6 SMET typed relay is implemented in the alpha RR lane, with external
-    peer proof pending and no SMET origination or multicast forwarding.
+    Type 6 SMET typed relay is implemented in the alpha RR lane, with a
+    [controlled raw-peer/TShark proof](../artifacts/interop/m113-smet-20261001T180815Z/README.md). Vendor
+    interoperability is unproven; SMET origination and multicast forwarding
+    are not implemented.
     Route types 7–11 are not reflected: unsupported typed NLRIs are
     discarded before the RIB under RFC 7606 §5.4. The
     [per-type discard counter and warnings](../reference/operations.md)

@@ -5,16 +5,21 @@ through one rustbgpd route reflector using controlled raw BGP peers on loopback.
 A separate TShark decoder checks the complete reflected route identity and flags
 against the captured TCP streams.
 
-**Status:** the runner and offline negative controls are available; the live
-proof has not yet been recorded here. This procedure makes no passed-run claim.
+**Recorded result:** the [2026-10-01 receipt](../../../docs/artifacts/interop/m113-smet-20261001T180815Z/README.md)
+passed 41 protocol phases across 15 TCP connections, with 46 reflected SMET
+NLRIs checked by the independent TShark decoder. This is the bounded controlled
+raw-peer proof described below; it does not establish vendor interoperability.
 
 ## Scope
 
-The runner starts one explicitly supplied daemon and three raw peers: a source,
-a lower-preference alternate, and a receiver. TCP uses `127.0.0.1` through
-`127.0.0.4`; BGP router IDs, next hops, and SMET originator fields have separate
-identities. No interfaces, routes, namespaces, or host network settings are
-created. The Docker capture option uses host networking to observe the owned
+The runner starts one explicitly supplied daemon and three normal raw peers:
+a source, a lower-preference alternate, and a receiver, using `127.0.0.1`
+through `127.0.0.4`. Six additional malformed-test source identities use
+`127.0.0.5` through `127.0.0.10`. Each structural-error case resets and reconnects
+its own peer once, preserving the 45-second acknowledgement deadline without
+accumulating repeated-NOTIFICATION backoff on one peer. BGP router IDs, next
+hops, and SMET originator fields have separate identities. No interfaces,
+routes, namespaces, or host network settings are created. The Docker capture option uses host networking to observe the owned
 loopback TCP port.
 
 This is a bounded raw-peer wire proof. It does not establish vendor
@@ -25,9 +30,10 @@ or multicast forwarding. EVPN remains alpha; see the
 ## Requirements and live invocation
 
 Run this separately from CLI doctor tests, which discover local daemon processes.
-Use a Linux host with Python 3, a freshly built rustbgpd binary for the revision
-under test, an unused TCP port, and a new
-output directory. Keep the output path short enough for the Unix API socket
+Use a Linux host with Python 3.11 or newer (the offline tests use `tomllib`),
+a freshly built rustbgpd binary for the revision under test, an unused TCP port,
+and a new output directory. The runner creates it with mode `0700` and places runtime
+state beneath it. Keep the output path short enough for the Unix API socket
 (the runner checks the platform's 108-byte pathname limit).
 
 The live decoder is pinned to **TShark 4.2.2** and this binary SHA-256:
@@ -41,8 +47,10 @@ binary. Its Type 6 field layout was checked against upstream `packet-bgp.c` at
 commit `40459284278611128aac5cef35a563218933f8da`.
 
 For Docker capture, set `M113_CAPTURE_IMAGE` to an existing image containing
-`tcpdump`. An image ID or digest identifies it without relying on a mutable
-tag. Docker must be available to the invoking user. The image supplies capture
+`tcpdump` with `--immediate-mode` support. The runner enables immediate
+capture and packet-buffered PCAP writes (`-U`) so final packets are retained
+before capture shutdown. An image ID or digest identifies the image without
+relying on a mutable tag. Docker must be available to the invoking user. The image supplies capture
 only; the pinned TShark binary runs on the host.
 
 Run from the repository root, with `/tmp/m113-smet` absent:
@@ -86,7 +94,9 @@ resources.
 5. Test missing flags, an extra byte, and mixed source/group families in both
    MP_REACH and MP_UNREACH. Require UPDATE error `3/9`, no receiver route
    transition during the reset wait, an alternate-source marker/withdrawal
-   barrier, reconnection, and successful announce/withdraw recovery.
+   barrier, same-peer reconnection, and successful announce/withdraw recovery.
+   The six cases use separate source identities to isolate protocol handling
+   from repeated-NOTIFICATION backoff.
 
 A phase completes only after the exact expected multiset of receiver event
 kinds and keys arrives and the receiver state matches. Wrong payloads,

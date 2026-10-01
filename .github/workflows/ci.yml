@@ -194,6 +194,8 @@ jobs:
             python3 tests/interop/scripts/m112_capture_oracle.py observer "$m112/$phase-observer.json" \
               --phase "$phase" | cmp - "$m112/$phase-observer-check.json"
           done
+      - name: Replay committed SMET reflection receipt
+        run: python3 tests/interop/scripts/m113_smet_oracle.py --replay docs/artifacts/interop/m113-smet-20261001T180815Z
       - name: Replay SRv6 semantic eligibility receipts
         run: |
           set -euo pipefail

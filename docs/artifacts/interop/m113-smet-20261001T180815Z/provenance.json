@@ -1,0 +1,38 @@
+{
+  "build_command": "cargo build --locked --bin rustbgpd",
+  "built_at_utc": "2026-10-01T17:57:08.555337+00:00",
+  "capture": {
+    "payloads_sha256": "2ad01374a72e44abd0d3638edb70b0938e55e053885be488f1c6bb4048bac3f0",
+    "pdml_sha256": "61617ae5e64d4f0436765f5c6ee14ba65c667578fb4b53964d0fcf5d3f004790",
+    "reflected_nlri_count": 46,
+    "sha256": "8dc1ff5c0e491525ae3f31d2f2cac4c1585684a0281426c1f51fc9d219bccfda",
+    "tshark_full_key_and_flags_match": true
+  },
+  "capture_image": "sha256:fb751bc12ef48310204ea67b42377a3c19e39feb45970250802ab7a8dcf3597c",
+  "capture_statistics": {
+    "packets_captured": 443,
+    "packets_dropped_by_kernel": 0,
+    "packets_received_by_filter": 886
+  },
+  "cargo_lock_sha256": "caf5b271e721980dbec514dfeab547ac621e8594e940f2f1133e35ee050579df",
+  "compiler": "rustc 1.99.0 (b940084d7 2026-09-28)",
+  "daemon_sha256": "ed65a53dc4bbe00c98dadbf22b25494b8e383d1e147cc5fc2471c482d52de10d",
+  "original_pdml_sha256": "93d0f788dde6b14005bc50c9198eb7eda5b3a021e584fda3cf63912756a17fb7",
+  "public_pdml_normalization": "Only the capture_file root attribute was reduced to the basename and a generated stylesheet-location comment was removed; every packet element and decoded field is unchanged.",
+  "reset_sources": [
+    "127.0.0.5",
+    "127.0.0.6",
+    "127.0.0.7",
+    "127.0.0.8",
+    "127.0.0.9",
+    "127.0.0.10"
+  ],
+  "runner_git_blob": "e6c49b083f602eeeafd6622b9b1ae127538a2820",
+  "runner_sha256": "4e2e4412477e7ed6e73a6ebb31169bb95e0b1d5cea5a82cc5ecd9dcdcc8cd9df",
+  "runner_state": "follow-up harness repairs; runtime source unchanged",
+  "source_commit": "ff234d1c987a207cfb595db96ad4210989bdb875",
+  "source_tree_clean": true,
+  "tshark_sha256": "1be3296c467ba299c4e89b4d6a2dfb8d0985a8bba2a8af3fa2ac3f10c3062668",
+  "tshark_version": "TShark (Wireshark) 4.2.2 (Git v4.2.2 packaged as 4.2.2-1.1build3).",
+  "verified_at_utc": "2026-10-01T18:08:54.733134+00:00"
+}

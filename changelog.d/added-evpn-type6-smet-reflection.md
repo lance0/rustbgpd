@@ -6,7 +6,9 @@
   preservation. Source/group wildcards are explicit; flags remain payload
   outside the key. Invalid announcement flag profiles use treat-as-withdraw
   with all decoded keys retained; withdrawals ignore announcement flags.
-  This remains alpha RR support, with external Type 6 peer proof pending.
+  This remains alpha RR support. The [M113 controlled raw-peer proof](../docs/artifacts/interop/m113-smet-20261001T180815Z/README.md)
+  checks reflected bytes and error recovery with an independent TShark decoder;
+  vendor interoperability remains unproven.
   SMET origination, IGMP/MLD proxy, multicast forwarding, and Types 7–11
   remain outside scope. See the
   [Type 6 boundary](../docs/reference/rfc-notes.md#type-6-smet-reflection).

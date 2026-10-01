@@ -601,7 +601,9 @@ controller-driven injection for Type 2 / Type 3. What remains:
   Types 9-11** (BUM segmentation) are not decoded or reflected: unknown
   typed NLRIs are discarded per RFC 7606 §5.4. Type 6 SMET relay is implemented
   in the alpha RR lane; SMET origination, IGMP/MLD proxy, and multicast forwarding
-  remain unimplemented, and external Type 6 peer proof is pending. **RFC 7623 PBB-EVPN**,
+  remain unimplemented. The [M113 controlled raw-peer/TShark proof](../artifacts/interop/m113-smet-20261001T180815Z/README.md)
+  covers reflection, withdrawal, and recovery; vendor interoperability remains
+  unproven. **RFC 7623 PBB-EVPN**,
   **MPLS encap**, and **BGP Add-Path (RFC 7911) for L2VPN EVPN** remain
   outside the implemented service boundary. See the
   [adjacent standards matrix](../reference/rfc-notes.md#later-evpn-standards-against-the-vxlanlinux-lane)

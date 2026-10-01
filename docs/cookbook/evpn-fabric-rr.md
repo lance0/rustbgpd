@@ -27,10 +27,11 @@ Tags — including rustbgpd's first vendor-NOS leg, Nokia SR Linux
 which also disables `[policy.explain]` explicitly and uses the implicit gRPC
 socket path.
 
-Type 6 SMET relay remains alpha, with external peer interoperability proof
-pending. The receipts above cover earlier route types; they do not establish
-Type 6 interoperability. No SMET origination, IGMP/MLD proxy, or multicast
-forwarding is implemented. See the
+Type 6 SMET relay remains alpha. Its [M113 raw-peer proof](../artifacts/interop/m113-smet-20261001T180815Z/README.md)
+checks reflected wire bytes with an independent TShark decoder, including
+withdrawal and error recovery. The earlier receipts above cover other route
+types. M113 does not establish vendor interoperability; no SMET origination,
+IGMP/MLD proxy, or multicast forwarding is implemented. See the
 [SMET boundary](../reference/rfc-notes.md#type-6-smet-reflection).
 
 ## Config

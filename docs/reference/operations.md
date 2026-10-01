@@ -4107,8 +4107,10 @@ rbgp evpn explain smet --rd 65000:100 --source '*' --group 239.1.2.3 \
 ```
 
 Type 6 supports relay and inspection only. It does not originate SMET routes,
-run an IGMP/MLD proxy, or program multicast forwarding. External Type 6 peer
-interoperability proof remains pending; see the
+run an IGMP/MLD proxy, or program multicast forwarding. The
+[M113 controlled raw-peer proof](../artifacts/interop/m113-smet-20261001T180815Z/README.md) checks reflection,
+withdrawal, and error recovery with an independent TShark decoder. Vendor
+interoperability remains unproven; see the
 [SMET boundary](rfc-notes.md#type-6-smet-reflection).
 
 #### Inspect the dataplane (ADR-0059 FDB nexthop groups)

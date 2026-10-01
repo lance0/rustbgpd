@@ -102,8 +102,10 @@ Shipped and interop-tested:
 - Non-zero Ethernet Tag VLAN-aware-bundle receive/reflect in RR mode.
 
 Type 6 SMET typed receive, reflection, withdrawal, and inspection are also
-implemented in the alpha RR lane. External Type 6 peer interoperability proof
-remains pending; the receipts above do not establish it. See the
+implemented in the alpha RR lane. The [M113 controlled raw-peer proof](../artifacts/interop/m113-smet-20261001T180815Z/README.md)
+checks reflection, withdrawal, and error recovery with an independent TShark
+decoder. This does not establish vendor interoperability or scale; the earlier
+receipts above cover other route types. See the
 [SMET boundary](rfc-notes.md#type-6-smet-reflection).
 
 Known EVPN gaps:

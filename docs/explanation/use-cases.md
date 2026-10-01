@@ -687,8 +687,10 @@ The reflector retains eligible routes even when their RTs match no local
 VNI or VRF, and preserves the VTEP next hop on iBGP and eBGP export unless
 export policy names a replacement address. These defaults need no retention
 or next-hop-unchanged knobs. Policy and normal route selection still apply.
-Type 6 SMET is alpha relay-only support, with external peer proof pending;
-SMET origination, IGMP/MLD proxy, and multicast forwarding are not implemented.
+Type 6 SMET is alpha relay-only support, with a
+[controlled raw-peer proof](../artifacts/interop/m113-smet-20261001T180815Z/README.md) checked by an independent
+TShark decoder. Vendor interoperability is unproven; SMET origination,
+IGMP/MLD proxy, and multicast forwarding are not implemented.
 Unsupported typed NLRIs, including RFC 9251 Types 7–8, are discarded rather
 than reflected; see the
 [adjacent standards matrix](../reference/rfc-notes.md#later-evpn-standards-against-the-vxlanlinux-lane).
