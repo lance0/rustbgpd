@@ -10,6 +10,160 @@ const RELEASED_PARTIAL_MP_REACH: [u8; 16] = [
 const RELEASED_PARTIAL_MP_UNREACH: [u8; 10] =
     [0xa0, 0x0f, 0x07, 0x00, 0x01, 0x01, 0x18, 0xc6, 0x33, 0x64];
 
+#[tokio::test]
+async fn smet_invalid_flags_withdraw_all_update_siblings_and_recover() {
+    let (mut session, mut rib_rx) = make_test_session_with_rib(65001, 65002);
+    let (client, _server) = connected_stream_pair().await;
+    session.test_install_stream(client);
+    establish_test_session(&mut session, 65002).await;
+    let mut negotiated = session.negotiated.as_deref().unwrap().clone();
+    negotiated
+        .negotiated_families
+        .push((Afi::L2Vpn, Safi::Evpn));
+    session.negotiated = Some(Arc::new(negotiated));
+    rfc7606_drain(&mut rib_rx);
+    let good = make_smet_route(0xf2).route;
+    let sibling = EvpnRoute::Imet(rustbgpd_wire::EvpnImet {
+        rd: "65000:100".parse().unwrap(),
+        ethernet_tag: rustbgpd_wire::EthernetTagId(100),
+        originator_ip: "192.0.2.10".parse().unwrap(),
+    });
+    let mut unrelated = good.clone();
+    let EvpnRoute::Smet(route) = &mut unrelated else {
+        unreachable!()
+    };
+    route.originator_ip = "192.0.2.11".parse().unwrap();
+    session
+        .process_update(smet_update(vec![
+            good.clone(),
+            sibling.clone(),
+            unrelated.clone(),
+        ]))
+        .await;
+    let RibUpdate::RoutesReceived { evpn_announced, .. } = rib_rx.try_recv().unwrap() else {
+        panic!("initial announcements")
+    };
+    assert_eq!(evpn_announced.len(), 3);
+    let mut accepted: HashMap<_, _> = evpn_announced
+        .into_iter()
+        .map(|route| (route.key(), route))
+        .collect();
+
+    // IPv6 (S,G) accepts only low-nibble 2/A. The valid IMET sibling
+    // shares the UPDATE and must also withdraw its previously accepted key.
+    session
+        .process_update(smet_update(vec![
+            make_smet_route(0xf1).route,
+            sibling.clone(),
+        ]))
+        .await;
+    let RibUpdate::RoutesReceived {
+        evpn_announced,
+        evpn_withdrawn,
+        ..
+    } = rib_rx.try_recv().unwrap()
+    else {
+        panic!("UPDATE-wide withdrawal")
+    };
+    assert_eq!(evpn_announced.len(), 0);
+    assert_eq!(evpn_withdrawn.len(), 2);
+    assert!(evpn_withdrawn.contains(&good.key()));
+    assert!(evpn_withdrawn.contains(&sibling.key()));
+    for key in evpn_withdrawn {
+        accepted.remove(&key);
+    }
+    assert_eq!(accepted.len(), 1);
+    assert!(accepted.contains_key(&unrelated.key()));
+    assert_eq!(session.known_evpn.len(), 1);
+    assert!(session.known_evpn.contains(&unrelated.key()));
+    assert_eq!(session.fsm.state(), SessionState::Established);
+    assert_single_malformed_disposition(&session, "treat_as_withdraw");
+
+    session
+        .process_update(smet_update(vec![good.clone(), sibling]))
+        .await;
+    let RibUpdate::RoutesReceived { evpn_announced, .. } = rib_rx.try_recv().unwrap() else {
+        panic!("later valid update")
+    };
+    assert_eq!(evpn_announced.len(), 2);
+    assert_eq!(session.known_evpn.len(), 3);
+    assert_eq!(session.fsm.state(), SessionState::Established);
+
+    let withdrawal = session
+        .publish_export_profile()
+        .probe_withdrawal(ExportWithdrawal::Evpn(&good.key()))
+        .unwrap()
+        .message;
+    let parsed = withdrawal.parse_revised(true, false, false, &[]).unwrap();
+    assert_eq!(parsed.malformed.len(), 0);
+    session.process_update(withdrawal).await;
+    let RibUpdate::RoutesReceived {
+        evpn_announced,
+        evpn_withdrawn,
+        ..
+    } = rib_rx.try_recv().unwrap()
+    else {
+        panic!("canonical zero-flag withdrawal")
+    };
+    assert_eq!(evpn_announced.len(), 0);
+    assert_eq!(evpn_withdrawn, vec![good.key()]);
+    assert!(!session.known_evpn.contains(&good.key()));
+    assert_eq!(session.fsm.state(), SessionState::Established);
+}
+
+#[tokio::test]
+async fn smet_noncanonical_payload_resets_session_in_both_directions() {
+    for withdrawn in [false, true] {
+        for change in [-1_i8, 1, 0] {
+            let (mut session, mut rib_rx) = make_test_session_with_rib(65001, 65002);
+            let (client, _server) = connected_stream_pair().await;
+            session.test_install_stream(client);
+            establish_test_session(&mut session, 65002).await;
+            let mut negotiated = session.negotiated.as_deref().unwrap().clone();
+            negotiated
+                .negotiated_families
+                .push((Afi::L2Vpn, Safi::Evpn));
+            session.negotiated = Some(Arc::new(negotiated));
+            rfc7606_drain(&mut rib_rx);
+            let mut nlri = Vec::new();
+            rustbgpd_wire::encode_evpn_nlri(&[make_smet_route(2).route], &mut nlri).unwrap();
+            match change {
+                -1 => {
+                    nlri.pop();
+                    nlri[1] -= 1;
+                }
+                1 => {
+                    nlri.push(0);
+                    nlri[1] += 1;
+                }
+                _ => {
+                    // A complete but mixed-family S,G key is not extractable.
+                    // Replace the 128-bit source with a canonical 32-bit source.
+                    nlri[14] = 32;
+                    nlri.drain(19..31);
+                    nlri[1] -= 12;
+                }
+            }
+            let mut value = if withdrawn {
+                vec![0, 25, 70]
+            } else {
+                vec![0, 25, 70, 4, 192, 0, 2, 7, 0]
+            };
+            value.extend(nlri);
+            let mut attrs = rfc7606_attr_bytes(&[]);
+            attrs.extend([
+                0x80,
+                if withdrawn { 15 } else { 14 },
+                u8::try_from(value.len()).unwrap(),
+            ]);
+            attrs.extend(value);
+            session.process_update(rfc7606_update(attrs, &[])).await;
+            assert_ne!(session.fsm.state(), SessionState::Established);
+            assert_single_malformed_disposition(&session, "session_reset");
+        }
+    }
+}
+
 /// RFC 7606 §7.10: an empty `CLUSTER_LIST` on iBGP withdraws the previously
 /// accepted route while leaving the session Established.
 #[tokio::test]

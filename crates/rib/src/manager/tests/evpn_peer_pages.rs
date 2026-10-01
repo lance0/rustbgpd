@@ -36,6 +36,40 @@ fn fixture() -> (RibManager, IpAddr) {
 }
 
 #[test]
+fn smet_pages_continue_by_key_and_peer_and_invalidate_on_flags_change() {
+    let (mut manager, peer) = fixture();
+    let mut route = make_evpn_smet("10.0.0.1".parse().unwrap(), 0xf2);
+    let mut other = route.clone();
+    let EvpnRoute::Smet(smet) = &mut other.route else {
+        unreachable!()
+    };
+    smet.originator_ip = "2001:db8::1".parse().unwrap();
+    manager.process_evpn_announce_chunk(peer, vec![other.clone(), route.clone()]);
+    let scope = RouteQueryScope::Received { peer: Some(peer) };
+    let first = page(&mut manager, scope, None, None, 1).unwrap();
+    assert_eq!(first.total, 2);
+    assert!(first.has_more);
+    let after = (first.routes[0].key(), peer);
+    let second = page(&mut manager, scope, Some(after), Some(first.version), 1).unwrap();
+    assert_eq!(second.routes.len(), 1);
+    assert!(!second.has_more);
+    assert_ne!(second.routes[0].key(), after.0);
+    let original_key = route.key();
+    let EvpnRoute::Smet(smet) = &mut route.route else {
+        unreachable!()
+    };
+    smet.flags = 0xfa;
+    assert_eq!(route.key(), original_key);
+    manager.process_evpn_announce_chunk(peer, vec![route]);
+    assert_eq!(
+        page(&mut manager, scope, Some(after), Some(first.version), 1).unwrap_err(),
+        RoutePageError::Invalidated
+    );
+    assert_eq!(page(&mut manager, scope, None, None, 10).unwrap().total, 2);
+    assert_eq!(manager.evpn_dataplane_generation, 0);
+}
+
+#[test]
 fn evpn_pages_bound_copy_and_order_without_losing_non_best_rows() {
     let (mut manager, peer) = fixture();
     for tag in (0..1005).rev() {

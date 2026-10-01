@@ -9431,6 +9431,127 @@ tcp_ao = {{ key = "secret", send_id = 1, recv_id = 1, algorithm = "hmac(sha256)"
         marker_store.remove().unwrap();
     }
 
+    #[tokio::test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "exercise the real warm coordinator through snapshot query, durable publication, and typed load"
+    )]
+    async fn smet_warm_checkpoint_publication_preserves_typed_payload() {
+        use rustbgpd_mrt::{
+            SnapshotNlri, SnapshotReader, WarmBundleExpectedV1, WarmBundleFreshnessV1,
+        };
+        use rustbgpd_wire::{EthernetTagId, EvpnRoute, EvpnSmet, Origin, PathAttribute};
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(temp.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let pinned = PinnedRuntimeStateDirectory::prepare(temp.path()).unwrap();
+        let directory = Arc::new(pinned.prepare_warm_bundle().unwrap());
+        let mut session = checkpoint_plan_session();
+        session.negotiated_families = vec![(Afi::L2Vpn, Safi::Evpn)];
+        session.peer_gr_families = session.negotiated_families.clone();
+        session.add_path_receive_families.clear();
+        let capture = WarmCheckpointCapture {
+            local_asn: 65001,
+            local_router_id: Ipv4Addr::new(192, 0, 2, 1),
+            effective_config_toml: "[global]\nasn = 65001\n".into(),
+            restart_time_secs: Some(120),
+            sessions: vec![session.clone()],
+        };
+        let plan = build_warm_checkpoint_plan(&capture.sessions).unwrap();
+        let mut expected = WarmBundleExpectedV1 {
+            checkpoint_generation: String::new(),
+            local_asn: capture.local_asn,
+            local_router_id: capture.local_router_id,
+            config_sha256: effective_config_sha256(&capture.effective_config_toml),
+            resolved_import_policy: resolved_import_policy_digest_v1(&plan.policy_inputs).unwrap(),
+            views: plan.views,
+        };
+        let route = EvpnRoute::Smet(EvpnSmet {
+            rd: "65000:100".parse().unwrap(),
+            ethernet_tag: EthernetTagId(100),
+            source_ip: Some("2001:db8::1".parse().unwrap()),
+            group_ip: Some("ff3e::2".parse().unwrap()),
+            originator_ip: "192.0.2.9".parse().unwrap(),
+            flags: 0xfa,
+        });
+        let expected_route = route.clone();
+        let (rib_tx, mut rib_rx) = mpsc::channel(1);
+        let responder = tokio::spawn(async move {
+            let RibUpdate::QueryWarmMrtSnapshot { views, reply, .. } = rib_rx.recv().await.unwrap()
+            else {
+                panic!("warm snapshot query")
+            };
+            assert_eq!(views.len(), 1);
+            reply
+                .send(Ok(rustbgpd_rib::MrtSnapshotData {
+                    peers: vec![rustbgpd_rib::MrtPeerEntry {
+                        peer_addr: session.peer.address,
+                        peer_bgp_id: session.peer_router_id,
+                        peer_asn: session.peer_asn,
+                    }],
+                    routes: vec![],
+                    evpn_routes: vec![rustbgpd_rib::EvpnRibRoute {
+                        route,
+                        next_hop: "192.0.2.9".parse().unwrap(),
+                        link_local_next_hop: None,
+                        peer: session.peer.address,
+                        attributes: rustbgpd_rib::AttrSet::new(vec![PathAttribute::Origin(
+                            Origin::Igp,
+                        )]),
+                        received_at: StdInstant::now(),
+                        origin_type: rustbgpd_rib::RouteOrigin::Ibgp,
+                        peer_router_id: session.peer_router_id,
+                        is_stale: false,
+                        is_llgr_stale: false,
+                    }],
+                }))
+                .unwrap();
+        });
+        expected.checkpoint_generation = publish_warm_checkpoint_bounded(
+            capture,
+            &rib_tx,
+            Arc::clone(&directory),
+            StdInstant::now() + Duration::from_mins(1),
+            usize::try_from(MAX_WARM_BUNDLE_SNAPSHOT_BYTES).unwrap(),
+        )
+        .await
+        .unwrap();
+        responder.await.unwrap();
+        let loaded = rustbgpd_mrt::load_warm_bundle(
+            &directory,
+            &expected,
+            WarmBundleFreshnessV1 {
+                now_utc_seconds: i64::try_from(
+                    SystemTime::now()
+                        .duration_since(UNIX_EPOCH)
+                        .unwrap()
+                        .as_secs(),
+                )
+                .unwrap(),
+                max_age_seconds: 120,
+                max_future_skew_seconds: 1,
+            },
+        )
+        .unwrap();
+        assert_eq!(loaded.manifest.view_route_counts, vec![1]);
+        let mut reader = SnapshotReader::new(&loaded.snapshot).unwrap();
+        let entry = reader.next().unwrap().unwrap();
+        let SnapshotNlri::Generic {
+            afi: 25,
+            safi: 70,
+            nlri,
+        } = entry.nlri
+        else {
+            panic!("EVPN RIB_GENERIC")
+        };
+        assert_eq!(
+            rustbgpd_wire::decode_evpn_nlri(&nlri).unwrap(),
+            vec![expected_route]
+        );
+        assert!(reader.next().is_none());
+    }
+
     fn checkpoint_plan_session() -> WarmCheckpointSession {
         WarmCheckpointSession {
             peer: rustbgpd_api::peer_types::PeerKey::new("10.0.0.2".parse().unwrap(), None),

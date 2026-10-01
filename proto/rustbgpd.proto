@@ -1312,7 +1312,7 @@ message PolicyStatement {
   optional uint32 match_med_le = 21;
   optional string match_next_hop = 22;
   optional string match_aspa_validation = 23;
-  // RFC 7432 / RFC 9136 EVPN route type match (1-5). u32 wire-shape because
+  // Supported EVPN route type match (1-6). u32 wire-shape because
   // proto3 lacks u8; only the low byte is consumed. 0 / unset = no match.
   optional uint32 match_evpn_route_type = 24;
 }
@@ -3041,7 +3041,7 @@ message ListEvpnEventsRequest {
   // are clamped to the same 4096-event ceiling. Responses contain the most
   // recent matching events, ordered oldest-to-newest within that window.
   uint32 limit = 3;
-  // RFC 7432/9136 EVPN route type filter (1..=5). 0 = no filter.
+  // Supported EVPN route type filter (1..=6). 0 = no filter.
   uint32 route_type_filter = 4;
   // Route Distinguisher filter in display format. Empty = no filter.
   string rd_filter = 5;
@@ -3196,7 +3196,7 @@ message EvpnRouteEvent {
   string previous_peer_address = 3;
   // Unix epoch seconds, matching existing RouteEvent timestamp shape.
   string timestamp = 4;
-  // RFC 7432 route type (1..=5).
+  // Supported EVPN route type (1..=6).
   uint32 route_type = 5;
   // Route Distinguisher in display format.
   string rd = 6;
@@ -3618,9 +3618,9 @@ message Srv6SidStructure {
   uint32 transposition_offset = 6;
 }
 
-// EVPN route entry in the RIB (any of 5 RFC 7432 route types).
+// EVPN route entry in the RIB (Types 1–5 and reflector-only Type 6 SMET).
 message EvpnRouteEntry {
-  // RFC 7432 route type (1..=5).
+  // EVPN route type (1..=6).
   uint32 route_type = 1;
   // Route Distinguisher (RFC 4364) in "asn:value" / "ip:value" display format.
   string rd = 2;
@@ -3656,11 +3656,30 @@ message EvpnRouteEntry {
   uint32 tunnel_type = 16;
   // Present only when the retained route has a Prefix-SID path attribute.
   PrefixSidView prefix_sid = 17;
+  // Present for Type 6 only. RD/tag remain in their existing fields above.
+  EvpnSmetView smet = 18;
+}
+
+// Explicit wildcard or exact host address; never inferred from originator AF.
+message EvpnSmetAddress {
+  oneof address {
+    // Must be true when selected.
+    bool wildcard = 1;
+    string ip = 2;
+  }
+}
+
+message EvpnSmetView {
+  EvpnSmetAddress source = 1;
+  EvpnSmetAddress group = 2;
+  string originator_ip = 3;
+  // Complete octet (0..255), including reserved bits.
+  uint32 flags = 4;
 }
 
 // Filter EVPN route listings. All filters are optional.
 message ListEvpnRequest {
-  // Only routes matching this route type (1..=5). 0 = no filter.
+  // Only routes matching this route type (1..=6). 0 = no filter.
   uint32 route_type_filter = 1;
   // Only routes from this peer, empty = any.
   string peer_filter = 2;
@@ -3677,7 +3696,7 @@ message ListEvpnResponse {
 message ListPeerEvpnRoutesRequest {
   // Required source (received) or destination (advertised) neighbor IP.
   string neighbor_address = 1;
-  // 0 = all supported types; otherwise 1..=5.
+  // 0 = all supported types; otherwise 1..=6.
   uint32 route_type_filter = 2;
   // Route Distinguisher display format. Empty = any.
   string rd_filter = 3;
@@ -3707,6 +3726,7 @@ message EvpnRouteSelector {
     EvpnImetSelector imet = 5;
     EvpnEsSelector es = 6;
     EvpnIpPrefixSelector ip_prefix = 7;
+    EvpnSmetSelector smet = 8;
   }
 }
 
@@ -3737,6 +3757,14 @@ message EvpnIpPrefixSelector {
   uint32 ethernet_tag = 1;
   // CIDR prefix. Host bits must be zero; nonzero Ethernet Tags are supported.
   string prefix = 2;
+}
+
+// Flags are mutable payload and cannot be selected as part of the key.
+message EvpnSmetSelector {
+  uint32 ethernet_tag = 1;
+  EvpnSmetAddress source = 2;
+  EvpnSmetAddress group = 3;
+  string originator_ip = 4;
 }
 
 message ExplainEvpnRouteRequest {

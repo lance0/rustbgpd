@@ -5,6 +5,9 @@ use rustbgpd_wire::evpn::{decode_evpn_nlri, decode_evpn_nlri_counted, encode_evp
 fuzz_target!(|data: &[u8]| {
     // Never panic on arbitrary input.
     if let Ok(routes) = decode_evpn_nlri(data) {
+        // Structural success includes canonical withdrawals whose flags are
+        // invalid for announcements; exercise validation without rejecting them.
+        let _ = rustbgpd_wire::validate_evpn_announcements(&routes);
         let (observed_routes, observations) =
             decode_evpn_nlri_counted(data).expect("legacy-success input must decode counted");
         assert_eq!(routes, observed_routes, "counted decode changed routes");

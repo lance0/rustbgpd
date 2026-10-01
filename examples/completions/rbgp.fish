@@ -1082,7 +1082,7 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand flowspec; and __fish_seen_subc
 complete -c rbgp -n "__fish_rbgp_using_subcommand flowspec; and __fish_seen_subcommand_from help" -f -a "add" -d 'Add a FlowSpec rule'
 complete -c rbgp -n "__fish_rbgp_using_subcommand flowspec; and __fish_seen_subcommand_from help" -f -a "delete" -d 'Delete a FlowSpec rule'
 complete -c rbgp -n "__fish_rbgp_using_subcommand flowspec; and __fish_seen_subcommand_from help" -f -a "help" -d 'Print this message or the help of the given subcommand(s)'
-complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and not __fish_seen_subcommand_from received advertised explain add-mac-ip add-imet add-ip-prefix delete-mac-ip delete-imet delete-ip-prefix clear-duplicate-mac duplicate-mac-quarantines es runtime instances nexthops managed-netdevs vrfs diagnose help" -l route-type -d 'Route type filter (1..=5) — applies when no subcommand is given' -r
+complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and not __fish_seen_subcommand_from received advertised explain add-mac-ip add-imet add-ip-prefix delete-mac-ip delete-imet delete-ip-prefix clear-duplicate-mac duplicate-mac-quarantines es runtime instances nexthops managed-netdevs vrfs diagnose help" -l route-type -d 'Route type filter (1..=6) — applies when no subcommand is given' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and not __fish_seen_subcommand_from received advertised explain add-mac-ip add-imet add-ip-prefix delete-mac-ip delete-imet delete-ip-prefix clear-duplicate-mac duplicate-mac-quarantines es runtime instances nexthops managed-netdevs vrfs diagnose help" -l neighbor -l peer -d 'Neighbor IP address filter (list mode only)' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and not __fish_seen_subcommand_from received advertised explain add-mac-ip add-imet add-ip-prefix delete-mac-ip delete-imet delete-ip-prefix clear-duplicate-mac duplicate-mac-quarantines es runtime instances nexthops managed-netdevs vrfs diagnose help" -l rd -d 'Route Distinguisher filter (list mode only), e.g. "65000:100"' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and not __fish_seen_subcommand_from received advertised explain add-mac-ip add-imet add-ip-prefix delete-mac-ip delete-imet delete-ip-prefix clear-duplicate-mac duplicate-mac-quarantines es runtime instances nexthops managed-netdevs vrfs diagnose help" -s s -l addr -d 'gRPC server address or unix:///path/to/socket' -r
@@ -1114,7 +1114,7 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and not __fish_seen_subc
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and not __fish_seen_subcommand_from received advertised explain add-mac-ip add-imet add-ip-prefix delete-mac-ip delete-imet delete-ip-prefix clear-duplicate-mac duplicate-mac-quarantines es runtime instances nexthops managed-netdevs vrfs diagnose help" -f -a "vrfs" -d 'List configured IP-VRFs and their readiness verdict'
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and not __fish_seen_subcommand_from received advertised explain add-mac-ip add-imet add-ip-prefix delete-mac-ip delete-imet delete-ip-prefix clear-duplicate-mac duplicate-mac-quarantines es runtime instances nexthops managed-netdevs vrfs diagnose help" -f -a "diagnose" -d 'Summarize EVPN VTEP alpha state and key metrics'
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and not __fish_seen_subcommand_from received advertised explain add-mac-ip add-imet add-ip-prefix delete-mac-ip delete-imet delete-ip-prefix clear-duplicate-mac duplicate-mac-quarantines es runtime instances nexthops managed-netdevs vrfs diagnose help" -f -a "help" -d 'Print this message or the help of the given subcommand(s)'
-complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from received" -l route-type -d 'Only this route type (1..=5)' -r
+complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from received" -l route-type -d 'Only this route type (1..=6)' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from received" -l rd -d 'Route Distinguisher, e.g. "65000:100"' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from received" -l limit -d 'Maximum rows in this page (1..=1000)' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from received" -l page-token -d 'Opaque continuation token from the preceding page; restart after a table change' -r
@@ -1128,7 +1128,7 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcomma
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from received" -s j -l json -d 'Output in JSON format'
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from received" -l no-color -d 'Disable colored output'
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from received" -s h -l help -d 'Print help (see more with \'--help\')'
-complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from advertised" -l route-type -d 'Only this route type (1..=5)' -r
+complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from advertised" -l route-type -d 'Only this route type (1..=6)' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from advertised" -l rd -d 'Route Distinguisher, e.g. "65000:100"' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from advertised" -l limit -d 'Maximum rows in this page (1..=1000)' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from advertised" -l page-token -d 'Opaque continuation token from the preceding page; restart after a table change' -r
@@ -1152,6 +1152,7 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcomma
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from explain" -s j -l json -d 'Output in JSON format'
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from explain" -l no-color -d 'Disable colored output'
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from explain" -s h -l help -d 'Print help (see more with \'--help\')'
+complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from explain" -f -a "smet" -d 'Type 6: exact selective multicast key (flags are not identity)'
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from explain" -f -a "mac-ip" -d 'Type 2: omitted IP selects the MAC-only key, not all host IPs'
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from explain" -f -a "imet" -d 'Type 3: exact inclusive multicast originator'
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from explain" -f -a "es" -d 'Type 4: exact Ethernet Segment and originator'
@@ -1473,7 +1474,7 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand events; and __fish_seen_subcom
 complete -c rbgp -n "__fish_rbgp_using_subcommand events; and __fish_seen_subcommand_from policy" -l no-color -d 'Disable colored output'
 complete -c rbgp -n "__fish_rbgp_using_subcommand events; and __fish_seen_subcommand_from policy" -s h -l help -d 'Print help (see more with \'--help\')'
 complete -c rbgp -n "__fish_rbgp_using_subcommand events; and __fish_seen_subcommand_from evpn" -l neighbor -l peer -d 'Neighbor address filter. Matches current and previous best-path peer' -r
-complete -c rbgp -n "__fish_rbgp_using_subcommand events; and __fish_seen_subcommand_from evpn" -l route-type -d 'EVPN route type filter (1..=5)' -r
+complete -c rbgp -n "__fish_rbgp_using_subcommand events; and __fish_seen_subcommand_from evpn" -l route-type -d 'EVPN route type filter (1..=6)' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand events; and __fish_seen_subcommand_from evpn" -l rd -d 'Route Distinguisher filter, e.g. "65000:100"' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand events; and __fish_seen_subcommand_from evpn" -l type -d 'EVPN event type filter (comma-separated)' -r -f -a "evpn_added\t''
 evpn_withdrawn\t''

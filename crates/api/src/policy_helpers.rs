@@ -43,8 +43,8 @@ pub(crate) fn proto_statement_to_input(
         })
         .transpose()?;
 
-    // EVPN route types are 1..=5 today (RFC 7432 + RFC 9136); reserve
-    // headroom for RFC 9251 6/7/8 by accepting up to 0xFF without an
+    // Supported EVPN route types are 1..=6; reserve headroom for
+    // future route types by accepting up to 0xFF without an
     // upper-bound check. Reject only outright type-mismatch (>u8).
     let match_evpn_route_type = statement
         .match_evpn_route_type

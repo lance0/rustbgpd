@@ -1846,7 +1846,7 @@ async fn evpn_rtc_membership_filters_tenants_and_route_types() {
     let handle = tokio::spawn(manager.run());
 
     let src = Ipv4Addr::new(10, 0, 0, 1);
-    let tenant_a = with_ext_communities(make_evpn_imet(src, 100), vec![rt(100)]);
+    let tenant_a = with_ext_communities(make_evpn_smet(src, 0xf2), vec![rt(100)]);
     let tenant_b = with_ext_communities(make_evpn_imet(src, 200), vec![rt(200)]);
     let es = make_evpn_es_route(src);
     let no_rt = make_evpn_imet(src, 300);

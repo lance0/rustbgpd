@@ -1679,3 +1679,60 @@ async fn import_policy_match_next_hop_filters_route() {
         "route should be filtered by next-hop"
     );
 }
+
+#[tokio::test]
+async fn smet_import_policy_family_and_rr_loop_gates() {
+    for gate in ["import", "originator", "cluster", "family"] {
+        let (mut session, mut rib_rx) = make_test_session_with_rib(65001, 65001);
+        let mut negotiated = negotiated_session(65001, false);
+        negotiated.negotiated_families = vec![(Afi::L2Vpn, Safi::Evpn)];
+        install_test_negotiated_session(&mut session, negotiated);
+        let route = make_smet_route(0xf2).route;
+        session
+            .process_update(smet_update(vec![route.clone()]))
+            .await;
+        let RibUpdate::RoutesReceived { evpn_announced, .. } = rib_rx.try_recv().unwrap() else {
+            panic!("initial SMET")
+        };
+        assert_eq!(evpn_announced.len(), 1);
+        let mut attrs = smet_update(vec![route.clone()])
+            .parse_revised(true, false, false, &[])
+            .unwrap()
+            .update
+            .attributes;
+        match gate {
+            "import" => session.install_import_policy(Some(PolicyChain::new(vec![Policy {
+                entries: vec![],
+                default_action: PolicyAction::Deny,
+            }]))),
+            "originator" => attrs.push(PathAttribute::OriginatorId(
+                session.config.peer.local_router_id,
+            )),
+            "cluster" => {
+                let cluster = "192.0.2.254".parse().unwrap();
+                session.config.cluster_id = Some(cluster);
+                attrs.push(PathAttribute::ClusterList(vec![cluster]));
+            }
+            "family" => Arc::make_mut(session.negotiated.as_mut().unwrap())
+                .negotiated_families
+                .clear(),
+            _ => unreachable!(),
+        }
+        let update = UpdateMessage::build(&[], &[], &attrs, true, false, Ipv4UnicastMode::MpReach);
+        session.process_update(update).await;
+        if gate == "family" {
+            assert!(rib_rx.try_recv().is_err());
+        } else {
+            let RibUpdate::RoutesReceived {
+                evpn_announced,
+                evpn_withdrawn,
+                ..
+            } = rib_rx.try_recv().unwrap()
+            else {
+                panic!("denied replacement")
+            };
+            assert!(evpn_announced.is_empty(), "{gate}");
+            assert_eq!(evpn_withdrawn, vec![route.key()], "{gate}");
+        }
+    }
+}

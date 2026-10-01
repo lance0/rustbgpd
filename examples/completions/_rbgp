@@ -2013,7 +2013,7 @@ esac
 ;;
 (evpn)
 _arguments "${_arguments_options[@]}" : \
-'--route-type=[Route type filter (1..=5) — applies when no subcommand is given]:ROUTE_TYPE:_default' \
+'--route-type=[Route type filter (1..=6) — applies when no subcommand is given]:ROUTE_TYPE:_default' \
 '--neighbor=[Neighbor IP address filter (list mode only)]:NEIGHBOR:_default' \
 '--peer=[Neighbor IP address filter (list mode only)]:NEIGHBOR:_default' \
 '--rd=[Route Distinguisher filter (list mode only), e.g. "65000\:100"]:RD:_default' \
@@ -2042,7 +2042,7 @@ _arguments "${_arguments_options[@]}" : \
         case $line[1] in
             (received)
 _arguments "${_arguments_options[@]}" : \
-'--route-type=[Only this route type (1..=5)]:ROUTE_TYPE:_default' \
+'--route-type=[Only this route type (1..=6)]:ROUTE_TYPE:_default' \
 '--rd=[Route Distinguisher, e.g. "65000\:100"]:RD:_default' \
 '--limit=[Maximum rows in this page (1..=1000)]:PAGE_SIZE:_default' \
 '--page-token=[Opaque continuation token from the preceding page; restart after a table change]:PAGE_TOKEN:_default' \
@@ -2064,7 +2064,7 @@ _arguments "${_arguments_options[@]}" : \
 ;;
 (advertised)
 _arguments "${_arguments_options[@]}" : \
-'--route-type=[Only this route type (1..=5)]:ROUTE_TYPE:_default' \
+'--route-type=[Only this route type (1..=6)]:ROUTE_TYPE:_default' \
 '--rd=[Route Distinguisher, e.g. "65000\:100"]:RD:_default' \
 '--limit=[Maximum rows in this page (1..=1000)]:PAGE_SIZE:_default' \
 '--page-token=[Opaque continuation token from the preceding page; restart after a table change]:PAGE_TOKEN:_default' \
@@ -2109,7 +2109,31 @@ _arguments "${_arguments_options[@]}" : \
         (( CURRENT += 1 ))
         curcontext="${curcontext%:*:*}:rbgp-evpn-explain-command-$line[1]:"
         case $line[1] in
-            (mac-ip)
+            (smet)
+_arguments "${_arguments_options[@]}" : \
+'--rd=[Exact Route Distinguisher, "asn\:value" or "ip\:value"]:RD:_default' \
+'--received-from=[Look up this accepted source; absence does not explain import rejection]:RECEIVED_FROM:_default' \
+'--advertised-to=[Evaluate current export gates and committed local state for this peer]:ADVERTISED_TO:_default' \
+'--ethernet-tag=[Ethernet Tag ID (default 0)]:ETHERNET_TAG:_default' \
+'--source=[Exact source IP or '\''*'\'' for wildcard]:SOURCE:_default' \
+'--group=[Exact group IP or '\''*'\'' for wildcard (requires wildcard source)]:GROUP:_default' \
+'--originator-ip=[Originating router IP (its address family is independent)]:ORIGINATOR_IP:_default' \
+'-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
+'--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
+'--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
+'--tls-ca=[PEM CA bundle used to verify an HTTPS server (required for HTTPS)]:FILE:_files' \
+'--tls-cert=[PEM client certificate chain for mTLS (requires --tls-key)]:FILE:_files' \
+'--tls-key=[PEM client private key for mTLS (requires --tls-cert)]:FILE:_files' \
+'--tls-server-name=[Server certificate name to verify instead of the HTTPS address host]:NAME:_default' \
+'--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
+'-j[Output in JSON format]' \
+'--json[Output in JSON format]' \
+'--no-color[Disable colored output]' \
+'-h[Print help (see more with '\''--help'\'')]' \
+'--help[Print help (see more with '\''--help'\'')]' \
+&& ret=0
+;;
+(mac-ip)
 _arguments "${_arguments_options[@]}" : \
 '--rd=[Exact Route Distinguisher, "asn\:value" or "ip\:value"]:RD:_default' \
 '--received-from=[Look up this accepted source; absence does not explain import rejection]:RECEIVED_FROM:_default' \
@@ -2253,7 +2277,11 @@ _arguments "${_arguments_options[@]}" : \
         (( CURRENT += 1 ))
         curcontext="${curcontext%:*:*}:rbgp-evpn-explain-help-command-$line[1]:"
         case $line[1] in
-            (mac-ip)
+            (smet)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(mac-ip)
 _arguments "${_arguments_options[@]}" : \
 && ret=0
 ;;
@@ -2713,7 +2741,11 @@ _arguments "${_arguments_options[@]}" : \
         (( CURRENT += 1 ))
         curcontext="${curcontext%:*:*}:rbgp-evpn-help-explain-command-$line[1]:"
         case $line[1] in
-            (mac-ip)
+            (smet)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(mac-ip)
 _arguments "${_arguments_options[@]}" : \
 && ret=0
 ;;
@@ -2958,7 +2990,7 @@ _arguments "${_arguments_options[@]}" : \
 _arguments "${_arguments_options[@]}" : \
 '--neighbor=[Neighbor address filter. Matches current and previous best-path peer]:NEIGHBOR:_default' \
 '--peer=[Neighbor address filter. Matches current and previous best-path peer]:NEIGHBOR:_default' \
-'--route-type=[EVPN route type filter (1..=5)]:ROUTE_TYPE:_default' \
+'--route-type=[EVPN route type filter (1..=6)]:ROUTE_TYPE:_default' \
 '--rd=[Route Distinguisher filter, e.g. "65000\:100"]:RD:_default' \
 '*--type=[EVPN event type filter (comma-separated)]:EVENT_TYPES:(evpn_added evpn_withdrawn evpn_best_changed)' \
 '--limit=[Maximum recent EVPN events to return (default 100)]:LIMIT:_default' \
@@ -4615,7 +4647,11 @@ _arguments "${_arguments_options[@]}" : \
         (( CURRENT += 1 ))
         curcontext="${curcontext%:*:*}:rbgp-help-evpn-explain-command-$line[1]:"
         case $line[1] in
-            (mac-ip)
+            (smet)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(mac-ip)
 _arguments "${_arguments_options[@]}" : \
 && ret=0
 ;;
@@ -5608,6 +5644,7 @@ _rbgp__subcmd__evpn__subcmd__es__subcmd__undrain_commands() {
 (( $+functions[_rbgp__subcmd__evpn__subcmd__explain_commands] )) ||
 _rbgp__subcmd__evpn__subcmd__explain_commands() {
     local commands; commands=(
+'smet:Type 6\: exact selective multicast key (flags are not identity)' \
 'mac-ip:Type 2\: omitted IP selects the MAC-only key, not all host IPs' \
 'imet:Type 3\: exact inclusive multicast originator' \
 'es:Type 4\: exact Ethernet Segment and originator' \
@@ -5636,6 +5673,7 @@ _rbgp__subcmd__evpn__subcmd__explain__subcmd__es_commands() {
 (( $+functions[_rbgp__subcmd__evpn__subcmd__explain__subcmd__help_commands] )) ||
 _rbgp__subcmd__evpn__subcmd__explain__subcmd__help_commands() {
     local commands; commands=(
+'smet:Type 6\: exact selective multicast key (flags are not identity)' \
 'mac-ip:Type 2\: omitted IP selects the MAC-only key, not all host IPs' \
 'imet:Type 3\: exact inclusive multicast originator' \
 'es:Type 4\: exact Ethernet Segment and originator' \
@@ -5681,6 +5719,11 @@ _rbgp__subcmd__evpn__subcmd__explain__subcmd__help__subcmd__mac-ip_commands() {
     local commands; commands=()
     _describe -t commands 'rbgp evpn explain help mac-ip commands' commands "$@"
 }
+(( $+functions[_rbgp__subcmd__evpn__subcmd__explain__subcmd__help__subcmd__smet_commands] )) ||
+_rbgp__subcmd__evpn__subcmd__explain__subcmd__help__subcmd__smet_commands() {
+    local commands; commands=()
+    _describe -t commands 'rbgp evpn explain help smet commands' commands "$@"
+}
 (( $+functions[_rbgp__subcmd__evpn__subcmd__explain__subcmd__imet_commands] )) ||
 _rbgp__subcmd__evpn__subcmd__explain__subcmd__imet_commands() {
     local commands; commands=()
@@ -5695,6 +5738,11 @@ _rbgp__subcmd__evpn__subcmd__explain__subcmd__ip-prefix_commands() {
 _rbgp__subcmd__evpn__subcmd__explain__subcmd__mac-ip_commands() {
     local commands; commands=()
     _describe -t commands 'rbgp evpn explain mac-ip commands' commands "$@"
+}
+(( $+functions[_rbgp__subcmd__evpn__subcmd__explain__subcmd__smet_commands] )) ||
+_rbgp__subcmd__evpn__subcmd__explain__subcmd__smet_commands() {
+    local commands; commands=()
+    _describe -t commands 'rbgp evpn explain smet commands' commands "$@"
 }
 (( $+functions[_rbgp__subcmd__evpn__subcmd__help_commands] )) ||
 _rbgp__subcmd__evpn__subcmd__help_commands() {
@@ -5798,6 +5846,7 @@ _rbgp__subcmd__evpn__subcmd__help__subcmd__es__subcmd__undrain_commands() {
 (( $+functions[_rbgp__subcmd__evpn__subcmd__help__subcmd__explain_commands] )) ||
 _rbgp__subcmd__evpn__subcmd__help__subcmd__explain_commands() {
     local commands; commands=(
+'smet:Type 6\: exact selective multicast key (flags are not identity)' \
 'mac-ip:Type 2\: omitted IP selects the MAC-only key, not all host IPs' \
 'imet:Type 3\: exact inclusive multicast originator' \
 'es:Type 4\: exact Ethernet Segment and originator' \
@@ -5836,6 +5885,11 @@ _rbgp__subcmd__evpn__subcmd__help__subcmd__explain__subcmd__ip-prefix_commands()
 _rbgp__subcmd__evpn__subcmd__help__subcmd__explain__subcmd__mac-ip_commands() {
     local commands; commands=()
     _describe -t commands 'rbgp evpn help explain mac-ip commands' commands "$@"
+}
+(( $+functions[_rbgp__subcmd__evpn__subcmd__help__subcmd__explain__subcmd__smet_commands] )) ||
+_rbgp__subcmd__evpn__subcmd__help__subcmd__explain__subcmd__smet_commands() {
+    local commands; commands=()
+    _describe -t commands 'rbgp evpn help explain smet commands' commands "$@"
 }
 (( $+functions[_rbgp__subcmd__evpn__subcmd__help__subcmd__help_commands] )) ||
 _rbgp__subcmd__evpn__subcmd__help__subcmd__help_commands() {
@@ -6353,6 +6407,7 @@ _rbgp__subcmd__help__subcmd__evpn__subcmd__es__subcmd__undrain_commands() {
 (( $+functions[_rbgp__subcmd__help__subcmd__evpn__subcmd__explain_commands] )) ||
 _rbgp__subcmd__help__subcmd__evpn__subcmd__explain_commands() {
     local commands; commands=(
+'smet:Type 6\: exact selective multicast key (flags are not identity)' \
 'mac-ip:Type 2\: omitted IP selects the MAC-only key, not all host IPs' \
 'imet:Type 3\: exact inclusive multicast originator' \
 'es:Type 4\: exact Ethernet Segment and originator' \
@@ -6391,6 +6446,11 @@ _rbgp__subcmd__help__subcmd__evpn__subcmd__explain__subcmd__ip-prefix_commands()
 _rbgp__subcmd__help__subcmd__evpn__subcmd__explain__subcmd__mac-ip_commands() {
     local commands; commands=()
     _describe -t commands 'rbgp help evpn explain mac-ip commands' commands "$@"
+}
+(( $+functions[_rbgp__subcmd__help__subcmd__evpn__subcmd__explain__subcmd__smet_commands] )) ||
+_rbgp__subcmd__help__subcmd__evpn__subcmd__explain__subcmd__smet_commands() {
+    local commands; commands=()
+    _describe -t commands 'rbgp help evpn explain smet commands' commands "$@"
 }
 (( $+functions[_rbgp__subcmd__help__subcmd__evpn__subcmd__instances_commands] )) ||
 _rbgp__subcmd__help__subcmd__evpn__subcmd__instances_commands() {

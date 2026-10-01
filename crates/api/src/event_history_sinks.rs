@@ -670,6 +670,124 @@ mod tests {
         assert_eq!(decoded.encode_to_vec(), envelope.payload);
     }
 
+    #[tokio::test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one scenario pins identical current and previous SMET payloads through live delivery, storage, and reopened replay"
+    )]
+    async fn smet_current_previous_payloads_survive_live_storage_and_replay() {
+        let mut event = sample_evpn_event();
+        let smet = rustbgpd_wire::EvpnSmet {
+            rd: "65000:100".parse().unwrap(),
+            ethernet_tag: EthernetTagId(100),
+            source_ip: None,
+            group_ip: None,
+            originator_ip: "2001:db8::10".parse().unwrap(),
+            flags: 0xf1,
+        };
+        event.best.as_mut().unwrap().route = EvpnRoute::Smet(smet);
+        event.previous_best = event.best.clone();
+        event.previous_best.as_mut().unwrap().route = EvpnRoute::Smet(rustbgpd_wire::EvpnSmet {
+            flags: 0x08,
+            ..smet
+        });
+        event.event_type = RouteEventType::BestChanged;
+        event.key = event.best.as_ref().unwrap().key();
+        event.previous_peer = event.peer;
+        let expected = convert::evpn_event_to_bgp_event(event.clone());
+        let Some(proto::bgp_event::Payload::Evpn(view)) = &expected.payload else {
+            panic!("EVPN event")
+        };
+        assert_eq!(view.route_type, 6);
+        assert_eq!(view.rd, "65000:100");
+        assert!(
+            view.route_key
+                .contains("source=* group=* originator_ip=2001:db8::10")
+        );
+        assert!(!view.route_key.contains("flags"));
+        assert_eq!(
+            view.route.as_ref().unwrap().smet.as_ref().unwrap().flags,
+            0xf1
+        );
+        assert_eq!(
+            view.previous_route
+                .as_ref()
+                .unwrap()
+                .smet
+                .as_ref()
+                .unwrap()
+                .flags,
+            0x08
+        );
+        let expected_bytes = expected.encode_to_vec();
+        let dir = tempfile::tempdir().unwrap();
+        let metrics = BgpMetrics::new();
+        let manager = EventHistoryManager::start(small_ehm_config(&dir, &metrics))
+            .await
+            .unwrap();
+        let handle = manager.handle();
+        let mut live = handle.subscribe_live();
+        let (sink, stage) = make_rib_event_sink(handle, metrics.clone());
+        sink.publish_evpn_event(&Arc::new(event));
+        let committed = tokio::time::timeout(TEST_BACKSTOP, live.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(committed.envelope.payload, expected_bytes);
+        assert_eq!(committed.envelope.evpn_route_type, Some(6));
+        assert_eq!(committed.envelope.rd.as_deref(), Some("65000:100"));
+        stage.shutdown().await;
+        drop(sink);
+        manager.shutdown().await;
+        // Reopen the database: replay cannot be satisfied from the live ring.
+        let manager = EventHistoryManager::start(small_ehm_config(&dir, &metrics))
+            .await
+            .unwrap();
+        let persisted = manager
+            .query_persisted(
+                0,
+                committed.event_id,
+                10,
+                rustbgpd_event_history::QueryFilter {
+                    category: Some(Category::Evpn),
+                    rd: Some("65000:100".into()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(persisted.len(), 1);
+        assert_eq!(persisted[0].payload, expected_bytes);
+        assert_eq!(persisted[0].evpn_route_type, Some(6));
+        let mut replay = manager
+            .subscribe_from_event(rustbgpd_event_history::SubscribeRequest {
+                from_event_id: Some(0),
+                filter: rustbgpd_event_history::SubscribeFilter {
+                    category: Some(Category::Evpn),
+                    rd: Some("65000:100".into()),
+                    ..Default::default()
+                },
+                ..Default::default()
+            })
+            .await
+            .unwrap()
+            .into_receiver();
+        let item = tokio::time::timeout(TEST_BACKSTOP, replay.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        let rustbgpd_event_history::EventSubscriptionItem::Event(replayed) = item else {
+            panic!("replayed event")
+        };
+        assert_eq!(replayed.envelope.payload, expected_bytes);
+        assert_eq!(
+            proto::BgpEvent::decode(replayed.envelope.payload.as_slice()).unwrap(),
+            expected
+        );
+        drop(replay);
+        manager.shutdown().await;
+    }
+
     /// Order + cursor-contiguity pin: events published through the
     /// offloaded sink commit in publish order (route and EVPN
     /// interleaved on the one snapshot channel) with contiguous

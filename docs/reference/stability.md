@@ -24,7 +24,7 @@ member.
 
 In particular:
 
-- EVPN, including EVPN route-reflector use, remains alpha.
+- EVPN, including route-reflector use and Type 6 SMET relay, remains alpha.
 - Linux dataplane work, including FIB and managed-netdev behavior, remains
   outside the control-plane contract.
 - Experimental features remain outside the contract.

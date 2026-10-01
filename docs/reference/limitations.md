@@ -101,6 +101,11 @@ Shipped and interop-tested:
   upper, VRF, and fixed-VNI L3VXLAN lifecycle under `[managed_netdevs]`.
 - Non-zero Ethernet Tag VLAN-aware-bundle receive/reflect in RR mode.
 
+Type 6 SMET typed receive, reflection, withdrawal, and inspection are also
+implemented in the alpha RR lane. External Type 6 peer interoperability proof
+remains pending; the receipts above do not establish it. See the
+[SMET boundary](rfc-notes.md#type-6-smet-reflection).
+
 Known EVPN gaps:
 
 - L3VNI/device/table IP-VRF identity changes remain restart-required by design.
@@ -123,12 +128,13 @@ Known EVPN gaps:
   and for same-family symmetric IRB. The receipts covering it are
   single-homed, so a multi-homed IPv6 underlay is untested rather than
   known unsupported.
-- EVPN route types 6–11 are not decoded or reflected. Unsupported typed
+- EVPN route types 7–11 are not decoded or reflected. Unsupported typed
   NLRIs are discarded on receive under RFC 7606 §5.4, including on a
   reflector; they never enter the RIB. The
   [per-type discard counter and connection-scoped warnings](operations.md)
   identify the affected peer and type.
-- PBB-EVPN, multicast EVPN, MPLS/SRv6 encapsulation,
+- SMET origination, IGMP/MLD proxy procedures, and multicast forwarding are
+  not implemented. PBB-EVPN, multicast EVPN service, MPLS/SRv6 encapsulation,
   VPWS, and E-Tree are demand-shaped rather than part of the current
   VXLAN/Linux lane.
 

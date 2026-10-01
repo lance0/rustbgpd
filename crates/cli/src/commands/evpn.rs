@@ -31,6 +31,7 @@ fn route_type_label(t: u32) -> &'static str {
         3 => "imet",
         4 => "es",
         5 => "ip-prefix",
+        6 => "smet",
         _ => "unknown",
     }
 }
@@ -94,6 +95,9 @@ fn routes_to_json(routes: &[crate::proto::EvpnRouteEntry]) -> Vec<serde_json::Va
             if let Some(view) = &r.prefix_sid {
                 row["prefix_sid"] = output::prefix_sid_json(view);
             }
+            if let Some(view) = &r.smet {
+                row["smet"] = smet_json(view);
+            }
             row
         })
         .collect()
@@ -134,6 +138,9 @@ fn print_routes(routes: &[crate::proto::EvpnRouteEntry], json: bool) -> Result<(
             }
             if !r.gateway.is_empty() {
                 detail.push(format!("gw={}", r.gateway));
+            }
+            if let Some(view) = &r.smet {
+                detail.push(smet_summary(view));
             }
             if r.label != 0 {
                 detail.push(format!("label={}", r.label));
@@ -249,6 +256,50 @@ pub(crate) fn parse_rd(value: &str) -> Result<String, String> {
         .map_err(|err| format!("invalid EVPN RD: {err}"))
 }
 
+pub(crate) fn parse_smet_address(value: &str) -> Result<crate::proto::EvpnSmetAddress, String> {
+    use crate::proto::evpn_smet_address::Address;
+    let address = if value == "*" {
+        Address::Wildcard(true)
+    } else {
+        Address::Ip(
+            value
+                .parse::<std::net::IpAddr>()
+                .map_err(|error| format!("invalid SMET address: {error}"))?
+                .to_string(),
+        )
+    };
+    Ok(crate::proto::EvpnSmetAddress {
+        address: Some(address),
+    })
+}
+
+fn smet_address_text(address: Option<&crate::proto::EvpnSmetAddress>) -> &str {
+    match address.and_then(|address| address.address.as_ref()) {
+        Some(crate::proto::evpn_smet_address::Address::Wildcard(true)) => "*",
+        Some(crate::proto::evpn_smet_address::Address::Ip(ip)) => ip,
+        _ => "unknown",
+    }
+}
+
+pub(crate) fn smet_json(view: &crate::proto::EvpnSmetView) -> serde_json::Value {
+    serde_json::json!({
+        "source": smet_address_text(view.source.as_ref()),
+        "group": smet_address_text(view.group.as_ref()),
+        "originator_ip": view.originator_ip,
+        "flags": view.flags,
+    })
+}
+
+pub(crate) fn smet_summary(view: &crate::proto::EvpnSmetView) -> String {
+    format!(
+        "source={} group={} originator_ip={} flags=0x{:02x}",
+        smet_address_text(view.source.as_ref()),
+        smet_address_text(view.group.as_ref()),
+        view.originator_ip,
+        view.flags
+    )
+}
+
 fn parse_hex_octets(value: &str, length: usize) -> Result<String, String> {
     let octets: Vec<_> = value.split(':').collect();
     if octets.len() != length
@@ -303,6 +354,14 @@ fn selector_to_json(key: &crate::proto::EvpnRouteSelector) -> serde_json::Value 
         Some(Route::IpPrefix(r)) => {
             value["ip_prefix"] =
                 serde_json::json!({"ethernet_tag": r.ethernet_tag, "prefix": r.prefix})
+        }
+        Some(Route::Smet(r)) => {
+            value["smet"] = serde_json::json!({
+                "ethernet_tag": r.ethernet_tag,
+                "source": smet_address_text(r.source.as_ref()),
+                "group": smet_address_text(r.group.as_ref()),
+                "originator_ip": r.originator_ip,
+            });
         }
         Some(Route::EadPerEs(r)) => {
             value["ead_per_es"] = serde_json::json!({"esi": r.esi, "ethernet_tag": r.ethernet_tag})
@@ -1714,6 +1773,156 @@ mod tests {
     }
 
     #[test]
+    fn smet_addresses_and_views_preserve_identity_and_raw_flags() {
+        use crate::proto::evpn_smet_address::Address;
+        for (input, expected) in [
+            ("*", Address::Wildcard(true)),
+            ("0.0.0.0", Address::Ip("0.0.0.0".into())),
+            ("192.0.2.1", Address::Ip("192.0.2.1".into())),
+            ("2001:0DB8::1", Address::Ip("2001:db8::1".into())),
+        ] {
+            assert_eq!(
+                super::parse_smet_address(input).unwrap().address,
+                Some(expected)
+            );
+        }
+        for invalid in [
+            "",
+            "any",
+            "*.*",
+            "192.0.2.256",
+            "192.0.2.1/32",
+            "ff3e::/64",
+            "fe80::1%eth0",
+        ] {
+            assert!(super::parse_smet_address(invalid).is_err(), "{invalid}");
+        }
+        for (source, group, originator) in [
+            ("*", "*", "192.0.2.9"),
+            ("*", "239.1.1.1", "2001:db8::9"),
+            ("192.0.2.1", "239.1.1.1", "2001:db8::9"),
+            ("2001:db8::1", "ff3e::1", "192.0.2.9"),
+        ] {
+            let view = crate::proto::EvpnSmetView {
+                source: Some(super::parse_smet_address(source).unwrap()),
+                group: Some(super::parse_smet_address(group).unwrap()),
+                originator_ip: originator.into(),
+                flags: 0xe5,
+            };
+            let route = crate::proto::EvpnRouteEntry {
+                route_type: 6,
+                rd: "65000:100".into(),
+                ethernet_tag: "7".into(),
+                smet: Some(Box::new(view.clone())),
+                ..Default::default()
+            };
+            let expected = serde_json::json!({
+                "source": source, "group": group, "originator_ip": originator, "flags": 229
+            });
+            let row = super::explain_route_to_json(&route);
+            assert_eq!(row["route_type_name"], "smet");
+            assert_eq!(row["smet"], expected);
+            for received in [true, false] {
+                let page = crate::proto::ListPeerEvpnRoutesResponse {
+                    routes: vec![route.clone()],
+                    ..Default::default()
+                };
+                assert_eq!(
+                    super::peer_page_to_json(&page, "192.0.2.2", received)["routes"][0]["smet"],
+                    expected
+                );
+            }
+            assert_eq!(
+                super::smet_summary(&view),
+                format!("source={source} group={group} originator_ip={originator} flags=0xe5")
+            );
+            super::print_routes(&[route], false).unwrap();
+            let key = crate::proto::EvpnRouteSelector {
+                rd: "65000:100".into(),
+                route: Some(crate::proto::evpn_route_selector::Route::Smet(
+                    crate::proto::EvpnSmetSelector {
+                        ethernet_tag: 7,
+                        source: view.source,
+                        group: view.group,
+                        originator_ip: view.originator_ip,
+                    },
+                )),
+            };
+            assert_eq!(
+                super::selector_to_json(&key),
+                serde_json::json!({
+                    "rd": "65000:100", "smet": {
+                        "ethernet_tag": 7, "source": source, "group": group, "originator_ip": originator
+                    }
+                })
+            );
+        }
+        assert!(
+            super::explain_route_to_json(&crate::proto::EvpnRouteEntry::default())
+                .get("smet")
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn smet_listing_requests_forward_type_six_for_all_views() {
+        let server = spawn_mock_server(None).await;
+        super::list(
+            crate::connection::connect(&server.addr, None)
+                .await
+                .unwrap(),
+            Some(6),
+            None,
+            Some("65000:100".into()),
+            true,
+        )
+        .await
+        .unwrap();
+        let request = server.state.last_list_evpn.lock().await.clone().unwrap();
+        assert_eq!(request.route_type_filter, 6);
+        assert_eq!(request.rd_filter, "65000:100");
+        for received in [true, false] {
+            super::list_peer(
+                crate::connection::connect(&server.addr, None)
+                    .await
+                    .unwrap(),
+                received,
+                crate::proto::ListPeerEvpnRoutesRequest {
+                    neighbor_address: "192.0.2.2".into(),
+                    route_type_filter: 6,
+                    rd_filter: "65000:100".into(),
+                    page_size: 25,
+                    page_token: "opaque".into(),
+                },
+                true,
+            )
+            .await
+            .unwrap();
+            let request = if received {
+                server
+                    .state
+                    .last_list_received_evpn
+                    .lock()
+                    .await
+                    .clone()
+                    .unwrap()
+            } else {
+                server
+                    .state
+                    .last_list_advertised_evpn
+                    .lock()
+                    .await
+                    .clone()
+                    .unwrap()
+            };
+            assert_eq!(request.route_type_filter, 6);
+            assert_eq!(request.rd_filter, "65000:100");
+            assert_eq!(request.page_size, 25);
+            assert_eq!(request.page_token, "opaque");
+        }
+    }
+
+    #[test]
     fn evpn_selector_json_projection_covers_variants() {
         use crate::proto::evpn_route_selector::Route;
         use crate::proto::{
@@ -2225,6 +2434,7 @@ mod tests {
                 extended_communities: vec![0x0002_fde8_0000_0064, u64::MAX],
                 tunnel_type: 8,
                 prefix_sid: Some(Box::new(prefix_sid.clone())),
+                smet: None,
             },
             crate::proto::EvpnRouteEntry::default(),
         ];

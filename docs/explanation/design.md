@@ -28,7 +28,7 @@ This is not a full routing suite replacement. rustbgpd will not implement OSPF, 
 
 **Programmable edge speaker.** Inject and withdraw prefixes programmatically. Minimal, reliable session handling.
 
-**EVPN Route Reflector (VXLAN-EVPN DC fabric).** iBGP route reflector for Type 1-5 RFC 7432 routes between VTEPs; control plane only, VTEPs handle their own DF election and data-plane encapsulation. See ADR-0050.
+**EVPN Route Reflector (VXLAN-EVPN DC fabric).** iBGP route reflector for EVPN Types 1–6 between VTEPs, including alpha Type 6 SMET relay; control plane only, VTEPs handle their own DF election and data-plane encapsulation. See ADR-0050.
 
 **EVPN VTEP — bidirectional (Phase 2: declarative instance schema, FDB reconciler, local MAC + MAC+IP origination, VTEP convergence).** Local EVI/VNI domain types (`crates/evpn`) and an `[[evpn_instances]]` TOML schema with a read-only `EvpnService.ListEvpnInstances` gRPC surface (declarative EVPN instance schema, ADR-0052). The EVPN VXLAN VTEP dataplane (Linux FDB reconciler) programs remote-MAC FDB entries from received Type 2 routes (ADR-0054). EVPN local MAC origination subscribes to `RTNLGRP_NEIGH` and emits Type 2 routes per RFC 7432 §15.1 mobility sequencing, plus one Type 3 IMET per L2VNI carrying the PMSI Tunnel attribute (Type-2 + Type-3 IMET, ADR-0055). `advertise_svi_mac` originates a Type 2 for the bridge's own MAC (RFC 9135 §6.1) on instance-Ready by surfacing the bridge link-layer address through `InstanceDataplaneStatus.bridge_mac`; `sticky_macs` (ADR-0056) marks origination with the RFC 7432 §15.4 sticky bit. MAC-with-IP origination closes the MAC+IP path: with `bridge link set ... neigh_suppress on`, ARP/ND-snooped `(IP, MAC)` bindings on the bridge's neighbour table drive MAC+IP Type 2 origination under the FRR-style replace model — one Type 2 per MAC at any time, `IpAdded` upgrades from MAC-only to MAC+IP, last `IpRemoved` downgrades back. Mobility events propagate sub-second via the EVPN-keyed `EvpnRouteEvent` broadcast in `crates/rib`; the 5 s `QueryEvpnRoutes` poll stays as a `Lagged` / cold-start backstop (EVPN VTEP convergence). RR-only deployments (empty `[[evpn_instances]]`) spawn no kernel-facing tasks for either direction.
 
@@ -597,9 +597,11 @@ controller-driven injection for Type 2 / Type 3. What remains:
   overlay-index testing, is exposed in the injection RPCs. Type 1 / Type 4
   multi-homing route injection is not exposed; native daemon Type 1/4
   origination exists via `[[ethernet_segments]]`.
-- **RFC 9251 Route Types 6-8** (IGMP/MLD proxy) and **RFC 9572 Route
+- **RFC 9251 Route Types 7–8** (IGMP/MLD synchronization) and **RFC 9572 Route
   Types 9-11** (BUM segmentation) are not decoded or reflected: unknown
-  typed NLRIs are discarded per RFC 7606 §5.4. **RFC 7623 PBB-EVPN**,
+  typed NLRIs are discarded per RFC 7606 §5.4. Type 6 SMET relay is implemented
+  in the alpha RR lane; SMET origination, IGMP/MLD proxy, and multicast forwarding
+  remain unimplemented, and external Type 6 peer proof is pending. **RFC 7623 PBB-EVPN**,
   **MPLS encap**, and **BGP Add-Path (RFC 7911) for L2VPN EVPN** remain
   outside the implemented service boundary. See the
   [adjacent standards matrix](../reference/rfc-notes.md#later-evpn-standards-against-the-vxlanlinux-lane)

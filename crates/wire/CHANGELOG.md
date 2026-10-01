@@ -3,6 +3,21 @@
 This changelog covers the independently published `rustbgpd-wire` crate. Daemon
 and workspace changes remain in the repository-level `CHANGELOG.md`.
 
+## 0.23.0 - Unreleased
+
+- Add typed RFC 9251 Type 6 SMET NLRI and flags-free route keys for
+  reflector use. Source/group wildcards and independent originator families
+  round-trip with every reserved flag bit preserved. Types 7–11 remain
+  unsupported and counted-discarded.
+- Structural decoding accepts canonical withdrawal flags. Revised UPDATE
+  parsing reports invalid SMET announcement profiles as UPDATE-wide
+  treat-as-withdraw while retaining all keys; noncanonical payload lengths
+  and unextractable keys remain session-reset errors. Embedders using plain
+  structural decoding must call `validate_evpn_announcements` before admitting
+  announcements. No multicast proxy, local origination or forwarding is added.
+- Pair this wire compatibility line with FSM 0.10 and RPKI 0.5 when sharing
+  public wire types. Crate publication is a separate release step.
+
 ## 0.22.0 - 2026-09-27
 
 - **Breaking:** `PathAttribute::MpReachNlri` and `PathAttribute::MpUnreachNlri`

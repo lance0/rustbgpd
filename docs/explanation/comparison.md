@@ -106,7 +106,7 @@ IPv4/IPv6 `Prefix` routes.
     a multi-homed IPv6 underlay is untested here. Still ahead: Linux
     softswitch local-bias split-horizon, true shared-VNI / non-zero Ethernet
     Tag service,
-    managed netdev ergonomics, and demand-shaped route types 6-11, PBB-EVPN,
+    managed netdev ergonomics, SMET service procedures, route types 7–11, PBB-EVPN,
     multicast EVPN, MPLS/SRv6 service
     encapsulation, and VPWS/E-Tree remain demand-shaped service-provider
     breadth, not part of the current VXLAN/Linux alpha lane. See
@@ -114,7 +114,9 @@ IPv4/IPv6 `Prefix` routes.
     Supported decomposable runtime edits commit live; L3VNI/device/table IP-VRF identity
     changes remain restart-required, dependency cycles fail closed, and
     residual mid-sequence failures fail-stop at the last committed generation.
-    Route types 6–11 are not reflected: unsupported typed NLRIs are
+    Type 6 SMET typed relay is implemented in the alpha RR lane, with external
+    peer proof pending and no SMET origination or multicast forwarding.
+    Route types 7–11 are not reflected: unsupported typed NLRIs are
     discarded before the RIB under RFC 7606 §5.4. The
     [per-type discard counter and warnings](../reference/operations.md)
     expose which peer and route type are affected.

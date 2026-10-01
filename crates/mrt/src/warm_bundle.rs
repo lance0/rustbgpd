@@ -1347,6 +1347,8 @@ fn validate_snapshot_semantics(
             } => {
                 let routes = rustbgpd_wire::decode_evpn_nlri(nlri)
                     .map_err(WarmBundleError::InvalidEvpnNlri)?;
+                rustbgpd_wire::validate_evpn_announcements(&routes)
+                    .map_err(WarmBundleError::InvalidEvpnNlri)?;
                 if routes.len() != 1 {
                     return Err(WarmBundleError::MrtIdentityMismatch {
                         field: "supported EVPN NLRI",
@@ -2811,6 +2813,71 @@ mod tests {
             Err(WarmBundleError::MrtIdentityMismatch {
                 field: "per-view route counts"
             })
+        ));
+    }
+
+    #[test]
+    fn smet_warm_admission_preserves_valid_bundle_after_invalid_flags() {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = opened(&temp);
+        let identity = identity_with(vec![WarmBundleViewV1 {
+            family: WarmBundleFamilyV1::L2vpnEvpn,
+            ..v4_view(1, false)
+        }]);
+        let mut snapshot = valid_snapshot(&identity);
+        let record_offset = last_record_offset(&snapshot);
+        let nlri_offset = record_offset + 12 + 7;
+        let route = rustbgpd_wire::EvpnRoute::Smet(rustbgpd_wire::EvpnSmet {
+            rd: "65000:100".parse().unwrap(),
+            ethernet_tag: rustbgpd_wire::EthernetTagId(100),
+            source_ip: Some("2001:db8::1".parse().unwrap()),
+            group_ip: Some("ff3e::2".parse().unwrap()),
+            originator_ip: "192.0.2.1".parse().unwrap(),
+            flags: 0xf2,
+        });
+        let mut nlri = Vec::new();
+        rustbgpd_wire::encode_evpn_nlri(std::slice::from_ref(&route), &mut nlri).unwrap();
+        snapshot.splice(nlri_offset..nlri_offset + 19, nlri.clone());
+        let record_len = u32::try_from(snapshot.len() - record_offset - 12).unwrap();
+        snapshot[record_offset + 8..record_offset + 12].copy_from_slice(&record_len.to_be_bytes());
+        let manifest = write_warm_bundle(&dir, identity.clone(), &snapshot).unwrap();
+        assert_eq!(manifest.view_route_counts, vec![1]);
+        let loaded = load_warm_bundle(&dir, &expected(&identity), freshness()).unwrap();
+        assert_eq!(loaded.snapshot, snapshot);
+        let entry = SnapshotReader::new(&loaded.snapshot)
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap();
+        let SnapshotNlri::Generic {
+            afi: 25,
+            safi: 70,
+            nlri: decoded,
+        } = entry.nlri
+        else {
+            panic!("EVPN RIB_GENERIC")
+        };
+        assert_eq!(decoded, nlri);
+        assert_eq!(
+            rustbgpd_wire::decode_evpn_nlri(&decoded).unwrap(),
+            vec![route]
+        );
+
+        snapshot[nlri_offset + nlri.len() - 1] = 0xf1;
+        assert!(matches!(
+            write_warm_bundle(&dir, identity.clone(), &snapshot),
+            Err(WarmBundleError::InvalidEvpnNlri(_))
+        ));
+        let still_valid = load_warm_bundle(&dir, &expected(&identity), freshness()).unwrap();
+        assert_eq!(still_valid.manifest, manifest);
+        assert_eq!(still_valid.snapshot, loaded.snapshot);
+
+        // A matching digest is insufficient at boot: snapshot semantics are
+        // validated again independently of the writer's admission check.
+        install_raw_bundle(&temp, identity.clone(), &snapshot, vec![1]);
+        assert!(matches!(
+            load_warm_bundle(&dir, &expected(&identity), freshness()),
+            Err(WarmBundleError::InvalidEvpnNlri(_))
         ));
     }
 

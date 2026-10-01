@@ -462,7 +462,7 @@ enum Command {
         #[command(subcommand)]
         action: Option<EvpnAction>,
 
-        /// Route type filter (1..=5) — applies when no subcommand is given.
+        /// Route type filter (1..=6) — applies when no subcommand is given.
         #[arg(long)]
         route_type: Option<u32>,
 
@@ -1998,7 +1998,7 @@ enum EventsAction {
         )]
         address: Option<String>,
 
-        /// EVPN route type filter (1..=5)
+        /// EVPN route type filter (1..=6)
         #[arg(long)]
         route_type: Option<u32>,
 
@@ -2028,8 +2028,8 @@ enum EventsAction {
 struct EvpnPeerViewArgs {
     /// Source neighbor (received) or destination neighbor (advertised).
     peer: String,
-    /// Only this route type (1..=5).
-    #[arg(long, value_parser = clap::value_parser!(u32).range(1..=5))]
+    /// Only this route type (1..=6).
+    #[arg(long, value_parser = clap::value_parser!(u32).range(1..=6))]
     route_type: Option<u32>,
     /// Route Distinguisher, e.g. "65000:100".
     #[arg(long)]
@@ -2246,6 +2246,23 @@ struct EvpnExplainArgs {
 
 #[derive(Subcommand)]
 enum EvpnExplainSelector {
+    /// Type 6: exact selective multicast key (flags are not identity).
+    Smet {
+        #[command(flatten)]
+        common: EvpnExplainArgs,
+        /// Ethernet Tag ID (default 0)
+        #[arg(long, default_value_t = 0)]
+        ethernet_tag: u32,
+        /// Exact source IP or '*' for wildcard
+        #[arg(long, value_parser = commands::evpn::parse_smet_address)]
+        source: proto::EvpnSmetAddress,
+        /// Exact group IP or '*' for wildcard (requires wildcard source)
+        #[arg(long, value_parser = commands::evpn::parse_smet_address)]
+        group: proto::EvpnSmetAddress,
+        /// Originating router IP (its address family is independent)
+        #[arg(long)]
+        originator_ip: std::net::IpAddr,
+    },
     /// Type 2: omitted IP selects the MAC-only key, not all host IPs.
     MacIp {
         #[command(flatten)]
@@ -2318,6 +2335,21 @@ impl EvpnExplainSelector {
     fn into_request(self) -> proto::ExplainEvpnRouteRequest {
         use proto::evpn_route_selector::Route;
         let (common, route) = match self {
+            Self::Smet {
+                common,
+                ethernet_tag,
+                source,
+                group,
+                originator_ip,
+            } => (
+                common,
+                Route::Smet(proto::EvpnSmetSelector {
+                    ethernet_tag,
+                    source: Some(source),
+                    group: Some(group),
+                    originator_ip: originator_ip.to_string(),
+                }),
+            ),
             Self::MacIp {
                 common,
                 ethernet_tag,
@@ -8606,6 +8638,76 @@ printf '%s\n' "${COMPREPLY[@]}"
         ));
     }
 
+    #[tokio::test]
+    async fn smet_explain_sends_exact_selector_with_independent_originator() {
+        use prost::Message;
+        let server = spawn_mock_server(None).await;
+        for (source, group, originator, tag) in [
+            ("*", "*", "192.0.2.9", 0),
+            ("*", "239.1.1.1", "2001:db8::9", 7),
+            ("192.0.2.1", "239.1.1.1", "2001:db8::9", 7),
+            ("2001:db8::1", "ff3e::1", "192.0.2.9", 7),
+        ] {
+            let mut args = format!(
+                "rbgp --addr {} --json evpn explain smet --rd 65000:100 --source {source} --group {group} --originator-ip {originator}",
+                server.addr
+            );
+            if tag != 0 {
+                args.push_str(&format!(" --ethernet-tag {tag}"));
+            }
+            let cli = Cli::try_parse_from(args.split_whitespace()).unwrap();
+            run(cli, BINARY_NAME).await.unwrap();
+            let request = server.state.last_explain_evpn.lock().await.clone().unwrap();
+            let request =
+                proto::ExplainEvpnRouteRequest::decode(request.encode_to_vec().as_slice()).unwrap();
+            assert_eq!(
+                request,
+                proto::ExplainEvpnRouteRequest {
+                    key: Some(proto::EvpnRouteSelector {
+                        rd: "65000:100".into(),
+                        route: Some(proto::evpn_route_selector::Route::Smet(
+                            proto::EvpnSmetSelector {
+                                ethernet_tag: tag,
+                                source: Some(commands::evpn::parse_smet_address(source).unwrap()),
+                                group: Some(commands::evpn::parse_smet_address(group).unwrap()),
+                                originator_ip: originator.into(),
+                            }
+                        )),
+                    }),
+                    ..Default::default()
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn smet_cli_requires_identity_and_rejects_flags_and_malformed_addresses() {
+        let base = "rbgp evpn explain smet --rd 65000:100 --source * --group 239.1.1.1 --originator-ip 192.0.2.9";
+        for (flag, value) in [
+            ("--source", "*"),
+            ("--group", "239.1.1.1"),
+            ("--originator-ip", "192.0.2.9"),
+        ] {
+            let missing = base.replace(&format!(" {flag} {value}"), "");
+            assert!(
+                Cli::try_parse_from(missing.split_whitespace()).is_err(),
+                "{flag}"
+            );
+            let malformed = base.replace(&format!("{flag} {value}"), &format!("{flag} invalid"));
+            assert!(
+                Cli::try_parse_from(malformed.split_whitespace()).is_err(),
+                "{flag}"
+            );
+        }
+        let flags = format!("{base} --flags 1");
+        assert!(Cli::try_parse_from(flags.split_whitespace()).is_err());
+        for view in ["", "received 192.0.2.2", "advertised 192.0.2.2"] {
+            let args = format!("rbgp evpn {view} --route-type 6");
+            let cli = Cli::try_parse_from(args.split_whitespace()).unwrap();
+            validate_local_command(&cli.command).unwrap();
+        }
+    }
+
     #[test]
     fn test_parse_evpn_peer_views_and_legacy_best() {
         for action in ["received", "advertised"] {
@@ -8681,7 +8783,7 @@ printf '%s\n' "${COMPREPLY[@]}"
         }
         for (flag, value) in [
             ("--route-type", "0"),
-            ("--route-type", "6"),
+            ("--route-type", "7"),
             ("--limit", "0"),
             ("--limit", "1001"),
         ] {
