@@ -2287,6 +2287,12 @@ enum EvpnExplainSelector {
         /// Originating router IP
         #[arg(long)]
         originator_ip: std::net::IpAddr,
+        /// Exact EAD-per-ES companion RD for caller-selected SRv6 Argument inspection
+        #[arg(long, requires = "argument_esi", value_parser = commands::evpn::parse_rd)]
+        argument_rd: Option<String>,
+        /// Nonzero ESI of the EAD-per-ES companion (Ethernet Tag is MAX_ET)
+        #[arg(long, requires = "argument_rd", value_parser = commands::evpn::parse_argument_esi)]
+        argument_esi: Option<String>,
     },
     /// Type 4: exact Ethernet Segment and originator.
     Es {
@@ -2334,6 +2340,20 @@ enum EvpnExplainSelector {
 impl EvpnExplainSelector {
     fn into_request(self) -> proto::ExplainEvpnRouteRequest {
         use proto::evpn_route_selector::Route;
+        let srv6_argument_companion = match &self {
+            Self::Imet {
+                argument_rd: Some(rd),
+                argument_esi: Some(esi),
+                ..
+            } => Some(proto::EvpnRouteSelector {
+                rd: rd.clone(),
+                route: Some(Route::EadPerEs(proto::EvpnEadSelector {
+                    esi: esi.clone(),
+                    ethernet_tag: u32::MAX,
+                })),
+            }),
+            _ => None,
+        };
         let (common, route) = match self {
             Self::Smet {
                 common,
@@ -2367,6 +2387,7 @@ impl EvpnExplainSelector {
                 common,
                 ethernet_tag,
                 originator_ip,
+                ..
             } => (
                 common,
                 Route::Imet(proto::EvpnImetSelector {
@@ -2419,6 +2440,7 @@ impl EvpnExplainSelector {
             }),
             received_from: common.received_from.unwrap_or_default(),
             advertised_to: common.advertised_to.unwrap_or_default(),
+            srv6_argument_companion,
         }
     }
 }
@@ -4093,6 +4115,26 @@ async fn run(cli: Cli, binary_name: &'static str) -> Result<(), CliError> {
     {
         return Err(CliError::Argument(
             "EVPN list filters do not apply to explain; put exact key fields after the selector"
+                .into(),
+        ));
+    }
+    if let Command::Evpn {
+        action:
+            Some(EvpnAction::Explain {
+                route:
+                    EvpnExplainSelector::Imet {
+                        common,
+                        argument_rd: Some(_),
+                        ..
+                    },
+            }),
+        ..
+    } = &cli.command
+        && common.received_from.is_some()
+        && common.advertised_to.is_some()
+    {
+        return Err(CliError::Argument(
+            "SRv6 Argument inspection accepts only one of --received-from or --advertised-to"
                 .into(),
         ));
     }

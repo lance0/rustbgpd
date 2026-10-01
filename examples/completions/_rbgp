@@ -2163,6 +2163,8 @@ _arguments "${_arguments_options[@]}" : \
 '--advertised-to=[Evaluate current export gates and committed local state for this peer]:ADVERTISED_TO:_default' \
 '--ethernet-tag=[Ethernet Tag ID (default 0)]:ETHERNET_TAG:_default' \
 '--originator-ip=[Originating router IP]:ORIGINATOR_IP:_default' \
+'--argument-rd=[Exact EAD-per-ES companion RD for caller-selected SRv6 Argument inspection]:ARGUMENT_RD:_default' \
+'--argument-esi=[Nonzero ESI of the EAD-per-ES companion (Ethernet Tag is MAX_ET)]:ARGUMENT_ESI:_default' \
 '-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \

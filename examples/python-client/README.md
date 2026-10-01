@@ -44,6 +44,16 @@ inputs, and Argument-dependent composition. See the
 [Prefix-SID API reference](../../docs/reference/api.md#prefix-sid-inspection-on-vpn-and-evpn-routes)
 for the inspection boundary.
 
+For explicit alpha IMET/EAD-per-ES Argument inspection, set
+`ExplainEvpnRouteRequest.srv6_argument_companion` to one exact EAD-per-ES
+selector (MAX_ET, nonzero ESI; the companion RD may differ). Check
+`response.HasField("srv6_argument")` before using the result, and
+`response.srv6_argument.HasField("sid")` before reading a candidate SID.
+Both routes use the same requested received, committed advertised, or installed
+best scope. `association="caller_selected"` does not establish original egress
+identity or forwarding; see the
+[pair inspection reference](../../docs/reference/api.md#inspect-an-explicit-srv6-argument-pair).
+
 ```bash
 python -m pip install -r requirements.txt
 ```

@@ -199,6 +199,292 @@ fn structure_eligible(
     u128::from(sid.sid_value) & transposed_bits == 0
 }
 
+/// Pure RFC 9819 section 3.3 result. Route lookup and egress association are
+/// established by the caller; no route selection or forwarding state changes.
+pub(crate) struct ArgumentComposition {
+    pub status: crate::update::Srv6ArgumentStatus,
+    pub sid: Option<std::net::Ipv6Addr>,
+    pub detail: &'static str,
+}
+
+impl ArgumentComposition {
+    pub(crate) const fn absent(
+        status: crate::update::Srv6ArgumentStatus,
+        detail: &'static str,
+    ) -> Self {
+        Self {
+            status,
+            sid: None,
+            detail,
+        }
+    }
+}
+
+/// Inspect the caller-selected pair. The caller, not equal RD, received peer,
+/// next-hop or `ORIGINATOR_ID`, establishes applicability to the egress PE/ES.
+/// This result is arithmetic over retained signaling, not forwarding eligibility.
+pub(crate) fn inspect_argument_pair(
+    imet: Option<&EvpnRibRoute>,
+    ead: Option<&EvpnRibRoute>,
+) -> ArgumentComposition {
+    use crate::update::Srv6ArgumentStatus as Status;
+    let absent = ArgumentComposition::absent;
+    let Some(imet) = imet else {
+        return absent(
+            Status::Unavailable,
+            "IMET route is absent from the requested table snapshot",
+        );
+    };
+    if !matches!(imet.route, EvpnRoute::Imet(_)) {
+        return absent(Status::Unavailable, "primary route is not IMET");
+    }
+    let imet_sid = match inspection_l2_sid(&imet.attributes) {
+        Ok(Some(sid)) => sid,
+        Ok(None) => return absent(Status::Unavailable, "IMET has no End.DT2M service SID"),
+        Err(error) => return error,
+    };
+    let pmsi_label = match inspection_label(&imet.attributes, &imet_sid, false) {
+        Ok(label) => label,
+        Err(error) => return error,
+    };
+    let without_argument = compose_argument(&imet_sid, pmsi_label, None);
+    // Validate the destination first. AL=0 MUST ignore even malformed or
+    // ambiguous companion attributes (RFC 9819 section 3.3 step 1).
+    if without_argument.status != Status::LocFuncOnly || imet_sid.structures[0].argument_length == 0
+    {
+        return without_argument;
+    }
+    let Some(ead) = ead else {
+        return without_argument;
+    };
+    if !matches!(ead.route, EvpnRoute::EadPerEs(route) if route.ethernet_tag == rustbgpd_wire::EthernetTagId::MAX_ET)
+    {
+        return absent(
+            Status::Unavailable,
+            "companion route is not Ethernet A-D per ES",
+        );
+    }
+    let ead_sid = match inspection_l2_sid(&ead.attributes) {
+        Ok(Some(sid)) => sid,
+        Ok(None) => return without_argument,
+        Err(error) => return error,
+    };
+    // Resolve zero/unequal AL and nontransposed cases before reading an
+    // irrelevant ESI label. An AL conflict must not become "missing label".
+    let without_label = compose_argument(&imet_sid, pmsi_label, Some((&ead_sid, None)));
+    if without_label.status != Status::Unavailable {
+        return without_label;
+    }
+    let esi_label = match inspection_label(&ead.attributes, &ead_sid, true) {
+        Ok(label) => label,
+        Err(error) => return error,
+    };
+    compose_argument(&imet_sid, pmsi_label, Some((&ead_sid, esi_label)))
+}
+
+fn inspection_l2_sid(
+    attributes: &[PathAttribute],
+) -> Result<Option<Srv6SidInformation>, ArgumentComposition> {
+    use crate::update::Srv6ArgumentStatus as Status;
+    let Some(value) = attributes.iter().find_map(|attribute| match attribute {
+        PathAttribute::Unknown(raw) if raw.type_code == 40 => Some(raw.data.as_ref()),
+        _ => None,
+    }) else {
+        return Ok(None);
+    };
+    let services = decode_prefix_sid_services(value).map_err(|_| {
+        ArgumentComposition::absent(
+            Status::Unavailable,
+            "Prefix-SID attribute cannot be decoded",
+        )
+    })?;
+    let Some(service) = services.into_iter().find(|service| service.tlv_type == 6) else {
+        return Ok(None);
+    };
+    if !service
+        .sids
+        .iter()
+        .any(|sid| argument_capable(sid.endpoint_behavior))
+    {
+        return Ok(None);
+    }
+    if service.sids.len() != 1 {
+        return Err(ArgumentComposition::absent(
+            Status::Ambiguous,
+            "L2 service has multiple SID Information entries",
+        ));
+    }
+    Ok(service.sids.into_iter().next())
+}
+
+fn inspection_label(
+    attributes: &[PathAttribute],
+    sid: &Srv6SidInformation,
+    argument: bool,
+) -> Result<Option<u32>, ArgumentComposition> {
+    use crate::update::Srv6ArgumentStatus as Status;
+    if !sid
+        .structures
+        .iter()
+        .any(|structure| structure.transposition_length != 0)
+    {
+        return Ok(None);
+    }
+    if argument {
+        let mut labels = attributes
+            .iter()
+            .filter_map(PathAttribute::extended_communities)
+            .flatten()
+            .filter_map(|community| community.as_esi_label().map(|(_, label)| label));
+        let label = labels.next();
+        if labels.next().is_some() {
+            return Err(ArgumentComposition::absent(
+                Status::Ambiguous,
+                "multiple ESI Label extended communities",
+            ));
+        }
+        Ok(label)
+    } else {
+        let mut tunnels = attributes.iter().filter_map(PathAttribute::pmsi_tunnel);
+        let tunnel = tunnels.next();
+        if tunnels.next().is_some() {
+            return Err(ArgumentComposition::absent(
+                Status::Ambiguous,
+                "multiple PMSI Tunnel attributes",
+            ));
+        }
+        Ok(tunnel
+            .filter(|tunnel| tunnel.tunnel_type == PmsiTunnelType::IngressReplication)
+            .map(|tunnel| tunnel.mpls_label))
+    }
+}
+
+/// Compose one caller-selected pair. Labels are the raw 24-bit PMSI
+/// Function and ESI Label extended-community Argument fields, respectively;
+/// the Ethernet A-D NLRI label is never an Argument input.
+pub(crate) fn compose_argument(
+    imet: &Srv6SidInformation,
+    pmsi_label: Option<u32>,
+    ead: Option<(&Srv6SidInformation, Option<u32>)>,
+) -> ArgumentComposition {
+    use crate::update::Srv6ArgumentStatus as Status;
+    let absent = ArgumentComposition::absent;
+    if !argument_capable(imet.endpoint_behavior) {
+        return absent(
+            Status::Unavailable,
+            "IMET SID is not a supported End.DT2M behavior",
+        );
+    }
+    let imet_structure = match imet.structures.as_slice() {
+        [structure] => *structure,
+        [] => return absent(Status::Unavailable, "IMET SID Structure is missing"),
+        _ => return absent(Status::Ambiguous, "IMET has multiple SID Structures"),
+    };
+    let Some(imet_sid) = restore_component(imet, imet_structure, pmsi_label, false) else {
+        return absent(
+            Status::Unavailable,
+            "IMET SID Structure or Function transposition is invalid or unavailable",
+        );
+    };
+    let destination_offset = argument_offset(imet_structure);
+    let loc_func = imet_sid & prefix_mask(destination_offset);
+    let loc_func_only = |detail| ArgumentComposition {
+        status: Status::LocFuncOnly,
+        sid: Some(loc_func.into()),
+        detail,
+    };
+    if imet_structure.argument_length == 0 {
+        // The companion SID and Structure MUST be ignored in this case.
+        return loc_func_only("IMET advertises zero Argument length; companion SID is ignored");
+    }
+    let Some((ead, esi_label)) = ead else {
+        return loc_func_only(
+            "selected companion has no usable End.DT2M Argument in the requested snapshot",
+        );
+    };
+    if !argument_capable(ead.endpoint_behavior) {
+        return loc_func_only("Ethernet A-D per ES has no supported End.DT2M SID");
+    }
+    let ead_structure = match ead.structures.as_slice() {
+        [structure] => *structure,
+        [] => {
+            return absent(
+                Status::Unavailable,
+                "Ethernet A-D per ES SID Structure is missing",
+            );
+        }
+        _ => {
+            return absent(
+                Status::Ambiguous,
+                "Ethernet A-D per ES has multiple SID Structures",
+            );
+        }
+    };
+    if argument_offset(ead_structure) + u16::from(ead_structure.argument_length) > 128 {
+        return absent(
+            Status::Unavailable,
+            "Ethernet A-D per ES SID Structure exceeds 128 bits",
+        );
+    }
+    if ead_structure.argument_length == 0 {
+        return loc_func_only("Ethernet A-D per ES advertises zero Argument length");
+    }
+    if imet_structure.argument_length != ead_structure.argument_length {
+        return absent(
+            Status::Conflict,
+            "nonzero IMET and Ethernet A-D per ES Argument lengths differ",
+        );
+    }
+    let Some(ead_sid) = restore_component(ead, ead_structure, esi_label, true) else {
+        return absent(
+            Status::Unavailable,
+            "Ethernet A-D per ES SID Structure or Argument transposition is invalid or unavailable",
+        );
+    };
+    let length = u16::from(imet_structure.argument_length);
+    let source_offset = argument_offset(ead_structure);
+    let argument = (ead_sid >> (128 - source_offset - length)) & !prefix_mask(128 - length);
+    ArgumentComposition {
+        status: Status::Composed,
+        sid: Some((loc_func | (argument << (128 - destination_offset - length))).into()),
+        detail: "Argument extracted at the companion offset and inserted at the IMET offset",
+    }
+}
+
+fn argument_offset(structure: Srv6SidStructure) -> u16 {
+    u16::from(structure.locator_block_length)
+        + u16::from(structure.locator_node_length)
+        + u16::from(structure.function_length)
+}
+
+fn prefix_mask(length: u16) -> u128 {
+    u128::MAX.checked_shl(u32::from(128 - length)).unwrap_or(0)
+}
+
+fn restore_component(
+    sid: &Srv6SidInformation,
+    structure: Srv6SidStructure,
+    label: Option<u32>,
+    argument: bool,
+) -> Option<u128> {
+    let transposition = if argument {
+        Transposition::Argument(24)
+    } else {
+        Transposition::Function(24)
+    };
+    if !structure_eligible(sid, structure, transposition) {
+        return None;
+    }
+    let length = u16::from(structure.transposition_length);
+    let mut value = u128::from(sid.sid_value);
+    if length != 0 {
+        let label = label.filter(|label| *label < (1 << 24))?;
+        value |= u128::from(label >> (24 - length))
+            << (128 - u16::from(structure.transposition_offset) - length);
+    }
+    Some(value)
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
     use std::net::Ipv6Addr;
@@ -250,6 +536,176 @@ pub(crate) mod tests {
         let mut value = attribute.data.to_vec();
         value.extend(extra.data);
         attribute.data = value.into();
+    }
+
+    fn inspection_sid(value: &str, behavior: u16, structure: [u8; 6]) -> Srv6SidInformation {
+        let PathAttribute::Unknown(raw) =
+            service_attribute(6, value.parse().unwrap(), behavior, Some(structure))
+        else {
+            unreachable!()
+        };
+        decode_prefix_sid_services(&raw.data)
+            .unwrap()
+            .remove(0)
+            .sids
+            .remove(0)
+    }
+
+    #[test]
+    fn argument_composition_rfc9819_outcomes_and_distinct_offsets() {
+        use crate::update::Srv6ArgumentStatus as Status;
+        // RFC 9819 Figures 1–6, including the four section 3.3 outcomes.
+        for behavior in [24, 68, 124] {
+            let mut imet = inspection_sid("2001:db8:1:fbd1::", behavior, [32, 16, 16, 16, 0, 0]);
+            let mut ead = inspection_sid("::aaaa:0:0:0", 24, [32, 16, 16, 16, 0, 0]);
+            let result = compose_argument(&imet, None, Some((&ead, None)));
+            assert_eq!(result.status, Status::Composed);
+            assert_eq!(
+                result.sid.unwrap(),
+                "2001:db8:1:fbd1:aaaa::".parse::<Ipv6Addr>().unwrap()
+            );
+
+            let absent = compose_argument(&imet, None, None);
+            assert_eq!(absent.status, Status::LocFuncOnly);
+            assert_eq!(absent.sid, Some(imet.sid_value));
+            ead.structures[0].argument_length = 0;
+            assert_eq!(
+                compose_argument(&imet, None, Some((&ead, None))).status,
+                Status::LocFuncOnly
+            );
+            ead.structures[0].argument_length = 8;
+            let conflict = compose_argument(&imet, None, Some((&ead, None)));
+            assert_eq!(conflict.status, Status::Conflict);
+            assert!(conflict.sid.is_none());
+
+            // AL=0 ignores even an ambiguous or invalid companion Structure.
+            imet.structures[0].argument_length = 0;
+            ead.structures.push(ead.structures[0]);
+            let ignored = compose_argument(&imet, None, Some((&ead, None)));
+            assert_eq!(ignored.status, Status::LocFuncOnly);
+            assert_eq!(ignored.sid, Some(imet.sid_value));
+        }
+        // Figure 7: copying/OR-ing the source SID at its original offset is wrong.
+        let imet = inspection_sid("2001:db8:1:fbd1:fbd1::", 124, [32, 16, 32, 16, 0, 0]);
+        let ead = inspection_sid("::aaaa:0:0:0", 68, [32, 16, 16, 16, 0, 0]);
+        assert_eq!(
+            compose_argument(&imet, None, Some((&ead, None)))
+                .sid
+                .unwrap(),
+            "2001:db8:1:fbd1:fbd1:aaaa::".parse::<Ipv6Addr>().unwrap()
+        );
+    }
+
+    #[test]
+    fn argument_composition_restores_each_24_bit_component_and_clears_tail() {
+        use crate::update::Srv6ArgumentStatus as Status;
+        let imet = inspection_sid("2001:db8:1::ffff", 24, [32, 16, 16, 16, 16, 48]);
+        let ead = inspection_sid("::ffff", 124, [32, 16, 32, 16, 16, 80]);
+        let result = compose_argument(&imet, Some(0x00fb_d100), Some((&ead, Some(0x00aa_aa00))));
+        assert_eq!(result.status, Status::Composed);
+        assert_eq!(
+            result.sid.unwrap(),
+            "2001:db8:1:fbd1:aaaa::".parse::<Ipv6Addr>().unwrap()
+        );
+        assert_eq!(
+            compose_argument(&imet, None, Some((&ead, Some(0x00aa_aa00)))).status,
+            Status::Unavailable
+        );
+        assert_eq!(
+            compose_argument(&imet, Some(0x00fb_d100), Some((&ead, None))).status,
+            Status::Unavailable
+        );
+        assert_eq!(
+            compose_argument(&imet, Some(1 << 24), Some((&ead, Some(0x00aa_aa00)))).status,
+            Status::Unavailable
+        );
+        let mut invalid = ead.clone();
+        invalid.sid_value = "::1:0:0".parse().unwrap(); // nonzero vacated Argument bit.
+        assert_eq!(
+            compose_argument(
+                &imet,
+                Some(0x00fb_d100),
+                Some((&invalid, Some(0x00aa_aa00)))
+            )
+            .status,
+            Status::Unavailable
+        );
+    }
+
+    #[test]
+    fn argument_composition_resolves_lengths_before_requiring_argument_label() {
+        use crate::update::Srv6ArgumentStatus as Status;
+        let imet = inspection_sid("2001:db8:1:fbd1::", 24, [32, 16, 16, 16, 0, 0]);
+        let mut ead = inspection_sid("::", 24, [32, 16, 16, 8, 8, 64]);
+        // A missing ESI Label cannot conceal the explicit unequal-AL conflict.
+        assert_eq!(
+            compose_argument(&imet, None, Some((&ead, None))).status,
+            Status::Conflict
+        );
+        ead.structures[0].argument_length = 0;
+        // No Argument is used, so its transposition fields are irrelevant.
+        assert_eq!(
+            compose_argument(&imet, None, Some((&ead, None))).status,
+            Status::LocFuncOnly
+        );
+        ead.structures[0].argument_length = 16;
+        assert_eq!(
+            compose_argument(&imet, None, Some((&ead, None))).status,
+            Status::Unavailable
+        );
+    }
+
+    #[test]
+    fn argument_composition_rejects_ambiguous_missing_and_invalid_structures() {
+        use crate::update::Srv6ArgumentStatus as Status;
+        let imet = inspection_sid("2001:db8:1:fbd1::", 24, [32, 16, 16, 16, 0, 0]);
+        let ead = inspection_sid("::aaaa:0:0:0", 24, [32, 16, 16, 16, 0, 0]);
+        for structure in [
+            [255; 6],
+            [32, 16, 16, 65, 0, 0],
+            [32, 16, 16, 16, 17, 48],
+            [32, 16, 16, 16, 0, 1],
+        ] {
+            let invalid = inspection_sid("::", 24, structure);
+            assert_eq!(
+                compose_argument(&invalid, Some(0), Some((&ead, None))).status,
+                Status::Unavailable
+            );
+        }
+        let mut missing = imet.clone();
+        missing.structures.clear();
+        assert_eq!(
+            compose_argument(&missing, None, Some((&ead, None))).status,
+            Status::Unavailable
+        );
+        let mut multiple = imet.clone();
+        multiple.structures.push(multiple.structures[0]);
+        assert_eq!(
+            compose_argument(&multiple, None, Some((&ead, None))).status,
+            Status::Ambiguous
+        );
+        let mut unknown = imet.clone();
+        unknown.endpoint_behavior = 0xffff;
+        assert_eq!(
+            compose_argument(&unknown, None, Some((&ead, None))).status,
+            Status::Unavailable
+        );
+        assert_eq!(
+            compose_argument(&imet, None, Some((&unknown, None))).status,
+            Status::LocFuncOnly
+        );
+        // Legal endpoints at bit 0 and bit 128 never shift by 128.
+        let imet = inspection_sid("ffff::", 24, [0, 0, 0, 128, 0, 0]);
+        let ead = inspection_sid("::aaaa", 24, [0, 0, 0, 128, 0, 0]);
+        assert_eq!(
+            compose_argument(&imet, None, Some((&ead, None))).sid,
+            Some(ead.sid_value)
+        );
+        let imet = inspection_sid("2001:db8::1", 24, [64, 48, 16, 0, 0, 0]);
+        assert_eq!(
+            compose_argument(&imet, None, None).sid,
+            Some(imet.sid_value)
+        );
     }
 
     #[test]

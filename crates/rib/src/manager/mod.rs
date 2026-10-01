@@ -3580,10 +3580,16 @@ impl RibManager {
                 key,
                 received_from,
                 advertised_to,
+                srv6_argument_companion,
                 reply,
             } => {
                 if !reply.is_closed() {
-                    let _ = reply.send(self.explain_evpn_route(key, received_from, advertised_to));
+                    let _ = reply.send(self.explain_evpn_route(
+                        key,
+                        received_from,
+                        advertised_to,
+                        srv6_argument_companion,
+                    ));
                 }
             }
             RibUpdate::QueryEvpnRoutes { filter, reply } => {

@@ -557,6 +557,33 @@ not explain an import rejection. Deferred selection and dirty outbound state
 remain visible; committed export is not proof of remote receipt or installation.
 Older daemons fail explicitly when the explain RPC is unavailable.
 
+For an IMET route, `--argument-rd` and `--argument-esi` together select one
+exact EAD-per-ES companion for alpha SRv6 Argument inspection. The companion
+uses MAX_ET and a nonzero ESI; its RD may differ from the IMET RD:
+
+```bash
+rbgp evpn explain imet --rd 65000:100 --originator-ip 192.0.2.3 \
+  --argument-rd 65000:200 --argument-esi 00:11:22:33:44:55:66:77:88:99 \
+  --received-from 192.0.2.1
+```
+
+Choose at most one peer option for this inspection. Both routes come from
+the same snapshot scope: accepted source with `--received-from`, committed
+local Adj-RIB-Out with `--advertised-to`, or installed Loc-RIB with neither.
+The result records the companion key and route, scope, status and detail.
+`composed` and `loc_func_only` include a candidate SID; `conflict`,
+`unavailable` and `ambiguous` do not. `loc_func_only` is the LOC:FUNC fallback
+with zero Argument bits. A requested-pair Argument-length conflict is not
+a route-selection verdict.
+
+`association=caller_selected` means the caller chose the pair. Retained
+metadata does not establish the original egress identity; choose the
+applicable same-egress Ethernet Segment route yourself. The result does not
+assert forwarding, remote receipt or installation. Existing raw SID and
+per-route Function views are unchanged. Without the two argument options,
+text and JSON keep their existing shape. An older daemon that ignores the
+pair request fails explicitly instead of returning a partial explanation.
+
 
 ### Events and Control
 
