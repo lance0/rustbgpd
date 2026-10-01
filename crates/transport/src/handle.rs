@@ -329,10 +329,21 @@ pub enum SessionNotification {
     },
 }
 
+/// Release accounting with the queued value, including when Tokio destroys it
+/// after receiver cleanup races with an already-admitted synchronous send.
+#[derive(Debug)]
+struct SessionNotificationReservation(BgpMetrics);
+
+impl Drop for SessionNotificationReservation {
+    fn drop(&mut self) {
+        self.0.release_session_notification();
+    }
+}
+
 /// Lossless, nonblocking sender for peer-session coordination notifications.
 #[derive(Debug, Clone)]
 pub struct SessionNotificationSender {
-    inner: mpsc::UnboundedSender<SessionNotification>,
+    inner: mpsc::UnboundedSender<(SessionNotification, SessionNotificationReservation)>,
     metrics: BgpMetrics,
 }
 
@@ -347,31 +358,28 @@ impl SessionNotificationSender {
         notification: SessionNotification,
     ) -> Result<(), mpsc::error::SendError<SessionNotification>> {
         self.metrics.reserve_session_notification();
-        match self.inner.send(notification) {
-            Ok(()) => Ok(()),
-            Err(error) => {
-                self.metrics.release_session_notification();
-                Err(error)
-            }
-        }
+        self.inner
+            .send((
+                notification,
+                SessionNotificationReservation(self.metrics.clone()),
+            ))
+            .map_err(|error| mpsc::error::SendError(error.0.0))
     }
 }
 
 /// Receiver half of the lossless session-notification channel.
 #[derive(Debug)]
 pub struct SessionNotificationReceiver {
-    inner: mpsc::UnboundedReceiver<SessionNotification>,
-    metrics: BgpMetrics,
+    inner: mpsc::UnboundedReceiver<(SessionNotification, SessionNotificationReservation)>,
 }
 
 impl SessionNotificationReceiver {
     /// Receive one notification, releasing its reservation only after dequeue.
     pub async fn recv(&mut self) -> Option<SessionNotification> {
-        let notification = self.inner.recv().await;
-        if notification.is_some() {
-            self.metrics.release_session_notification();
-        }
-        notification
+        self.inner
+            .recv()
+            .await
+            .map(|(notification, _reservation)| notification)
     }
 
     /// Try to receive one notification without waiting.
@@ -381,16 +389,9 @@ impl SessionNotificationReceiver {
     /// Returns `Empty` when no notification is queued and `Disconnected` when
     /// every sender has closed and the queue is drained.
     pub fn try_recv(&mut self) -> Result<SessionNotification, mpsc::error::TryRecvError> {
-        let notification = self.inner.try_recv()?;
-        self.metrics.release_session_notification();
-        Ok(notification)
-    }
-}
-
-impl Drop for SessionNotificationReceiver {
-    fn drop(&mut self) {
-        self.inner.close();
-        while self.try_recv().is_ok() {}
+        self.inner
+            .try_recv()
+            .map(|(notification, _reservation)| notification)
     }
 }
 
@@ -403,12 +404,9 @@ pub fn session_notification_channel(
     (
         SessionNotificationSender {
             inner: sender,
-            metrics: metrics.clone(),
-        },
-        SessionNotificationReceiver {
-            inner: receiver,
             metrics,
         },
+        SessionNotificationReceiver { inner: receiver },
     )
 }
 
@@ -3189,13 +3187,38 @@ mod tests {
     }
 
     #[test]
+    fn session_notification_channel_drop_releases_after_receiver_cleanup() {
+        let metrics = BgpMetrics::new();
+        let (sender, mut receiver) = session_notification_channel(metrics.clone());
+        sender.send(notification(1, 0)).unwrap();
+
+        // Keep Tokio's queued value past wrapper cleanup, as can happen when a
+        // send admitted before close finishes enqueueing after the drain loop.
+        // This isolates ownership without relying on the producer's scheduling.
+        let mut channel = mpsc::unbounded_channel().1;
+        std::mem::swap(&mut channel, &mut receiver.inner);
+        drop(receiver);
+        assert_gauge(&metrics, "bgp_session_notification_outstanding", 1.0);
+        drop(channel);
+        assert_gauge(&metrics, "bgp_session_notification_outstanding", 0.0);
+        assert_gauge(
+            &metrics,
+            "bgp_session_notification_outstanding_high_watermark",
+            1.0,
+        );
+    }
+
+    #[test]
     fn session_notification_receiver_drop_drains_and_closed_send_rolls_back() {
         let metrics = BgpMetrics::new();
         let (sender, receiver) = session_notification_channel(metrics.clone());
         sender.send(notification(1, 0)).unwrap();
         let remaining = sender.clone();
         drop(receiver);
-        assert!(remaining.send(notification(2, 0)).is_err());
+        assert_eq!(
+            identity(&remaining.send(notification(2, 0)).unwrap_err().0),
+            (2, 0)
+        );
         assert_gauge(&metrics, "bgp_session_notification_outstanding", 0.0);
         assert_gauge(
             &metrics,
