@@ -35,7 +35,8 @@ valid reload emits a `reloadstall_csv` record for durable raw receipts.
 At successful exit, peers that received a ROUTE-REFRESH also emit one
 `route_refresh_accounting` line per family. `received` counts wire requests;
 `suppressed` counts requests ignored while that peer/family's replay latch was
-pending; `completed` counts replays whose final UPDATE was written (or empty
+pending or its converged-rejoin source replay was blocked; `completed` counts
+replays whose final UPDATE was written (or empty
 replays); `sent_nlri` counts announced NLRI in replay UPDATEs after successful
 socket writes. Counts are cumulative for the whole run, including reconnects;
 they are not reset at reload boundaries. The pending latch retains its existing
@@ -189,7 +190,10 @@ reloadstall <n_peers> <total_prefixes> <daemon_port> <daemon_pid> \
   No reconnecting source reannounces until **every** joiner has completed
   its successful-OPEN → first-EoR-and-exact-table measurement. Only then
   is current coverage checked again before the first replay message, so
-  a latched completion cannot conceal a lost key. Source slices and their
+  a latched completion cannot conceal a lost key. Incoming ROUTE-REFRESH
+  requests for reconnecting sources are counted and suppressed until this
+  guarded boundary opens the whole cohort; initial and survivor refresh
+  responders remain active. Source slices and their
   EoRs are then sent to settle GR, followed by fresh
   survivor snapshots and current joiner-coverage checks. Survivor session
   loss, any new base-prefix withdrawal, decode errors, or incomplete GR

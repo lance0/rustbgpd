@@ -644,6 +644,9 @@ struct Obs {
     extras_seen: Mutex<Vec<u64>>,
     /// Armed only on a flap reconnect; completion always requires exact coverage.
     rejoin: Mutex<Option<RejoinProgress>>,
+    /// Closed for the GR rejoin cohort until every joiner's current table/EoR
+    /// passes the explicit replay boundary. Initial/default responders stay open.
+    source_replay_blocked: AtomicBool,
 }
 
 impl Obs {
@@ -665,6 +668,7 @@ impl Obs {
             base_withdrawn6: AtomicU64::new(0),
             extras_seen: Mutex::new(Vec::new()),
             rejoin: Mutex::new(None),
+            source_replay_blocked: AtomicBool::new(false),
         }
     }
 }
@@ -1418,6 +1422,10 @@ fn refresh_accounting(observer: &Obs, ipv6: bool) -> &RefreshAccounting {
 fn admit_refresh(observer: &Obs, ipv6: bool) -> bool {
     let accounting = refresh_accounting(observer, ipv6);
     accounting.received.fetch_add(1, Ordering::Relaxed);
+    if observer.source_replay_blocked.load(Ordering::Acquire) {
+        accounting.suppressed.fetch_add(1, Ordering::Relaxed);
+        return false;
+    }
     if accounting.pending.swap(true, Ordering::AcqRel) {
         accounting.suppressed.fetch_add(1, Ordering::Relaxed);
         false
@@ -2831,6 +2839,13 @@ async fn replay_rejoined_sources(ctx: &Ctx, stubs: &[Stub], k: u32) -> Result<()
     if !current_rejoin_tables_complete(ctx, 0, k) {
         return Err("joiner lacks exact current table/EoR before source replay".into());
     }
+    // Automatic refresh replies share this boundary with explicit replay:
+    // completing one peer alone must not replenish another joiner's input.
+    for observer in ctx.obs.iter().take(k as usize) {
+        observer
+            .source_replay_blocked
+            .store(false, Ordering::Release);
+    }
     for i in 0..k {
         for message in announced_msgs(ctx, i)
             .into_iter()
@@ -2905,6 +2920,9 @@ async fn run_converged_rejoin(
             let _ = (&mut stub.reader).await;
             let _ = (&mut stub.writer).await;
             ctx.obs[i].established.store(false, Ordering::Relaxed);
+            ctx.obs[i]
+                .source_replay_blocked
+                .store(true, Ordering::Release);
         }
         tokio::time::sleep(Duration::from_secs(FLAP_RECONNECT_SECS)).await;
         let retained = fetch_metrics(addr, Instant::now() + METRICS_DEADLINE).await?;
@@ -6988,6 +7006,137 @@ mod tests {
         let [stub] = stubs;
         stub.reader.await.unwrap().unwrap();
         stub.writer.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn converged_refresh_cannot_replay_before_all_joiners_cross_boundary() {
+        async fn next_frame(server: &mut TcpStream) -> Message {
+            tokio::time::timeout(Duration::from_secs(2), async {
+                let mut header = [0u8; HEADER_LEN];
+                server.read_exact(&mut header).await.unwrap();
+                let length = usize::from(
+                    peek_message_length(&header, MAX_MESSAGE_LEN)
+                        .unwrap()
+                        .unwrap(),
+                );
+                let mut wire = BytesMut::from(&header[..]);
+                wire.resize(length, 0);
+                server.read_exact(&mut wire[HEADER_LEN..]).await.unwrap();
+                decode_message(&mut wire.freeze(), MAX_MESSAGE_LEN).unwrap()
+            })
+            .await
+            .unwrap()
+        }
+
+        let mut ctx = finish_test_ctx();
+        Arc::get_mut(&mut ctx).unwrap().converged_rejoin = true;
+        for i in 0..2 {
+            let mut progress = RejoinProgress::new(&ctx, i, 10);
+            let prefixes: Vec<_> = (0..CHURNERS).filter(|&p| p != i).map(base_prefix).collect();
+            progress.observe(&prefixes, &[], true, CHURNERS, 20);
+            if i == 1 {
+                progress.observe(&[], &[base_prefix(0)], false, CHURNERS, 30);
+                assert!(
+                    progress.complete_us.is_some(),
+                    "first completion is latched"
+                );
+            }
+            *ctx.obs[i as usize].rejoin.lock().unwrap() = Some(progress);
+        }
+        let (client, mut server) = finish_test_connection().await;
+        let stub = start_stub(Arc::clone(&ctx), 0, client, true);
+        let request = encode_message(&Message::RouteRefresh(RouteRefreshMessage::new(
+            Afi::Ipv4,
+            Safi::Unicast,
+        )))
+        .unwrap();
+        let source = announced_msgs(&ctx, 0).remove(0);
+
+        // Initial GR responders are unchanged before the cohort is closed.
+        server.write_all(&request).await.unwrap();
+        assert_eq!(next_frame(&mut server).await, source);
+        for observer in ctx.obs.iter().take(2) {
+            observer
+                .source_replay_blocked
+                .store(true, Ordering::Release);
+        }
+        server.write_all(&request).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while ctx.obs[0].refresh4.received.load(Ordering::Relaxed) != 2 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        // Wait for every admitted response to queue its frames, then append a
+        // wire barrier. Any bypassed source UPDATE must precede this KEEPALIVE.
+        let mut refreshes = std::mem::take(&mut *stub.refreshes.lock().unwrap());
+        while let Some(result) = refreshes.join_next().await {
+            result.unwrap();
+        }
+        stub.tx.send(Message::Keepalive.into()).await.unwrap();
+        assert_eq!(
+            next_frame(&mut server).await,
+            Message::Keepalive,
+            "refresh must not replenish a source before the guarded boundary"
+        );
+        assert_eq!(ctx.obs[0].refresh4.suppressed.load(Ordering::Relaxed), 1);
+        assert_eq!(ctx.obs[0].refresh4.sent_nlri.load(Ordering::Relaxed), 1);
+
+        let (tx, mut rx) = mpsc::channel(4);
+        let stubs = [
+            stub,
+            Stub {
+                tx,
+                reader: tokio::spawn(async { Ok(()) }),
+                writer: tokio::spawn(async { Ok(()) }),
+                refreshes: Arc::new(Mutex::new(tokio::task::JoinSet::new())),
+            },
+        ];
+        assert!(replay_rejoined_sources(&ctx, &stubs, 2).await.is_err());
+        assert!(ctx.obs[0].source_replay_blocked.load(Ordering::Acquire));
+        assert!(ctx.obs[1].source_replay_blocked.load(Ordering::Acquire));
+        assert!(matches!(
+            rx.try_recv(),
+            Err(mpsc::error::TryRecvError::Empty)
+        ));
+        ctx.obs[1].rejoin.lock().unwrap().as_mut().unwrap().observe(
+            &[base_prefix(0)],
+            &[],
+            false,
+            CHURNERS,
+            40,
+        );
+        replay_rejoined_sources(&ctx, &stubs, 2).await.unwrap();
+        assert_eq!(next_frame(&mut server).await, source);
+        assert_eq!(next_frame(&mut server).await, withdraw_msg(&[]));
+        assert_eq!(
+            rx.try_recv().unwrap().message,
+            announced_msgs(&ctx, 1).remove(0)
+        );
+        assert_eq!(rx.try_recv().unwrap().message, withdraw_msg(&[]));
+
+        server.write_all(&request).await.unwrap();
+        assert_eq!(next_frame(&mut server).await, source);
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while ctx.obs[0].refresh4.completed.load(Ordering::Relaxed) != 2 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(ctx.obs[0].refresh4.received.load(Ordering::Relaxed), 3);
+        assert_eq!(ctx.obs[0].refresh4.suppressed.load(Ordering::Relaxed), 1);
+        assert_eq!(ctx.obs[0].refresh4.sent_nlri.load(Ordering::Relaxed), 2);
+        for stub in stubs {
+            stub.reader.abort();
+            stub.writer.abort();
+            let _ = stub.reader.await;
+            let _ = stub.writer.await;
+            let mut refreshes = std::mem::take(&mut *stub.refreshes.lock().unwrap());
+            refreshes.abort_all();
+            while refreshes.join_next().await.is_some() {}
+        }
     }
 
     #[tokio::test]
