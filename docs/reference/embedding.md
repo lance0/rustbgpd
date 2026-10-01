@@ -20,8 +20,12 @@ This document is the contract for embedders: which crate to depend on, what the
 | Package | Cargo publish | Internal normal/build path dependencies | Role |
 |---------|---------------|-----------------------------------------|------|
 | `birdwatcher-adapter` | Disabled | `rustbgpd-api` | Birdwatcher-compatible REST adapter backed by the daemon gRPC API. |
+| `enhanced-route-refresh-receipt` | Disabled | `rustbgpd-wire` | Enhanced Route Refresh protocol receipt harness. |
 | `event-bridge` | Disabled | `rustbgpd-api` | Reference durable-event collector bridge. |
 | `peer-loop` | Disabled | `rustbgpd-fsm`, `rustbgpd-wire` | Minimal BGP speaker embedding the published codec and FSM crates. |
+| `reloadstall` | Disabled | `rustbgpd-wire` | Route-server convergence, reload and failover harness. |
+| `rrharness` | Disabled | `rustbgpd-rib`, `rustbgpd-telemetry`, `rustbgpd-transport`, `rustbgpd-wire` | In-process route-reflector scale and profiling harness. |
+| `rrtransport` | Disabled | `rustbgpd-evpn-load`, `rustbgpd-fsm`, `rustbgpd-policy`, `rustbgpd-rib`, `rustbgpd-telemetry`, `rustbgpd-transport`, `rustbgpd-wire` | Route-reflector transport scale and receipt harness. |
 | `rs-config-render` | Disabled | `rustbgpd-policy` | Route-server configuration rendering tool. |
 | `rustbgpctl` | Disabled | `rustbgpd-policy`, `rustbgpd-wire` | Thin gRPC management CLI and support library. |
 | `rustbgpd` | Disabled | `rustbgpd-api`, `rustbgpd-bfd`, `rustbgpd-bmp`, `rustbgpd-event-history`, `rustbgpd-evpn`, `rustbgpd-evpn-linux`, `rustbgpd-fsm`, `rustbgpd-mrt`, `rustbgpd-policy`, `rustbgpd-rib`, `rustbgpd-rpki`, `rustbgpd-telemetry`, `rustbgpd-transport`, `rustbgpd-wire` | Daemon binary and internal assembly library. |

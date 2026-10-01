@@ -130,7 +130,7 @@ lock, the quiet gate (1-minute load < 2.0, every CPU governor
 
 ```text
 cargo build --release --locked -p rustbgpd -p rustbgpctl
-cargo build --release --locked --manifest-path bench/scale/reloadstall/Cargo.toml
+cargo build --profile scale --locked -p reloadstall
 for run in A B; do
   GEN_DUALSTACK=1 RELOADSTALL_DUALSTACK=1 N_PEERS=700 TOTAL_PREFIXES=400400 \
     CHANGED_PEERS=600 PROBE_PREFIXES="20.0.0.0/24 3001::/48" \
