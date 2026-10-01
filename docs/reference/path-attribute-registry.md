@@ -337,6 +337,23 @@ Reserved bits, unknown extensions, unused SID tail bits, and later duplicate
 Service TLVs remain preserved. These checks do not implement PE import,
 service origination, SID reconstruction, next-hop rewriting, or SRv6 forwarding.
 
+These eligibility checks are per-route.
+[RFC 9819 §3.2](https://www.rfc-editor.org/rfc/rfc9819.html#section-3.2)
+assigns consistent Argument Length (AL) signaling to the egress PE;
+[§3.3](https://www.rfc-editor.org/rfc/rfc9819.html#section-3.3) assigns
+cross-route processing to the ingress PE constructing the service SID.
+When both AL values are nonzero and differ, the ingress PE must suppress BUM
+forwarding for the affected routes from that Ethernet Segment. That forwarding
+rule does not prescribe reflector best-path exclusion or withdrawal of either
+route.
+
+rustbgpd retains the per-route eligibility checks above and does not
+automatically exclude IMET/EAD-per-ES pairs for an AL mismatch.
+[Caller-selected pair inspection](api.md#inspect-an-explicit-srv6-argument-pair)
+can report that conflict without changing eligibility. This read-only result
+is conditional on the caller selecting the applicable pair; it does not
+establish original egress identity or forwarding readiness.
+
 ## PMSI tunnel-type matrix
 
 PMSI Tunnel values use RFC 6514 base type and identifier semantics, the RFC
