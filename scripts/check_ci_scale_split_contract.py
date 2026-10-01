@@ -25,16 +25,18 @@ WORKFLOWS = tuple(
                  "release-install-contract", "release", "update-group-fault",
                  "public-docs-contract")
 )
-# Floors, not a census: a new root Cargo command needs only `--locked`, while a
-# removed one (or an extractor that stops seeing a workflow) still fails.
+# Floors, not a census: new root Cargo commands need `--locked`. CI floors
+# are job-scoped so scale commands cannot mask removed core checks.
 MIN_ROOT_COMMANDS = {
-    WORKFLOWS[0]: Counter(build=1, check=7, clippy=2, doc=2, test=7),
-    WORKFLOWS[1]: Counter(test=1),
-    WORKFLOWS[2]: Counter(test=6),
-    WORKFLOWS[3]: Counter(build=1, test=2),
-    WORKFLOWS[4]: Counter(build=2, test=1),
-    WORKFLOWS[5]: Counter(test=3),
-    WORKFLOWS[6]: Counter(test=1),
+    (WORKFLOWS[0], "core"): Counter(check=6, clippy=2, test=4),
+    (WORKFLOWS[0], "core_tests"): Counter(doc=2, test=2),
+    (WORKFLOWS[0], "msrv"): Counter(check=1),
+    (WORKFLOWS[1], None): Counter(test=1),
+    (WORKFLOWS[2], None): Counter(test=6),
+    (WORKFLOWS[3], None): Counter(build=1, test=2),
+    (WORKFLOWS[4], None): Counter(build=2, test=1),
+    (WORKFLOWS[5], None): Counter(test=3),
+    (WORKFLOWS[6], None): Counter(test=1),
 }
 SCALE_COMMANDS = (
     "cargo test --locked -p enhanced-route-refresh-receipt -p reloadstall -p rrharness -p rrtransport",
@@ -42,6 +44,7 @@ SCALE_COMMANDS = (
     "cargo run --locked -p rrtransport -- smoke",
     "cargo clippy --locked -p enhanced-route-refresh-receipt --all-targets -- -D warnings",
     "cargo build --locked -p rs-config-render",
+    "cargo test --locked --test reloadstall_scenario_emitted_check",
     "cargo build --locked -p reloadstall",
 )
 SCALE_PROFILE = {
@@ -54,6 +57,7 @@ SCALE_PROFILE = {
 CARGO_COMMAND = re.compile(r"(?<![\w-])cargo(?:\s+\+\S+)?\s+(build|check|test|clippy|doc|bench|run)\b")
 LOCKED_TOKEN = re.compile(r"(?<!\S)--locked(?=\s|$)")
 ARG_SEPARATOR = re.compile(r"(?<!\S)--(?=\s|$)")
+MANIFEST_PATH_TOKEN = re.compile(r"(?<!\S)--manifest-path(?=\s|=|$)")
 MSRV_PINS = (
     ("Dockerfile", None, None, r"(?m)^FROM rust:([^\s-]+)-\S+ AS chef$"),
     ("crates/evpn-linux/tests/docker/Dockerfile", None, None, r"(?m)^FROM rust:([^\s-]+)-\S+$"),
@@ -146,28 +150,34 @@ def _cargo_commands(text: str) -> list[tuple[str, str]]:
 
 
 def _check_dependency_commands(root: Path, errors: list[str]) -> None:
-    root_commands: dict[str, Counter[str]] = {}
+    workflow_text: dict[str, str] = {}
     directory = root / ".github/workflows"
     for path in sorted((*directory.glob("*.yml"), *directory.glob("*.yaml"))):
-        if not (commands := _cargo_commands(path.read_text())):
+        text = path.read_text()
+        if not (commands := _cargo_commands(text)):
             continue
         workflow = path.relative_to(root).as_posix()
-        counts: Counter[str] = Counter()
+        workflow_text[workflow] = text
         for subcommand, command in commands:
             locked = list(LOCKED_TOKEN.finditer(command))
             separator = ARG_SEPARATOR.search(command)
+            cargo_args = command[: separator.start()] if separator else command
+            if MANIFEST_PATH_TOKEN.search(cargo_args):
+                errors.append(f"{workflow}: {subcommand} command has --manifest-path; use the root workspace invocation: {command}")
             if not locked:
                 errors.append(f"{workflow}: {subcommand} command is missing --locked: {command}")
             elif len(locked) > 1:
                 errors.append(f"{workflow}: {subcommand} command has duplicate --locked: {command}")
             elif separator is not None and locked[0].start() > separator.start():
                 errors.append(f"{workflow}: {subcommand} command has --locked after Cargo's -- separator: {command}")
-            counts[subcommand] += 1
-        root_commands[workflow] = counts
-
-    for workflow, floor in MIN_ROOT_COMMANDS.items():
-        if missing := floor - root_commands.get(workflow, Counter()):
-            errors.append(f"{workflow}: root Cargo commands removed: {dict(missing)}")
+    for (workflow, job), floor in MIN_ROOT_COMMANDS.items():
+        text = workflow_text.get(workflow, "")
+        if job:
+            text = _jobs(text).get(job, "")
+        counts = Counter(subcommand for subcommand, _ in _cargo_commands(text))
+        if missing := floor - counts:
+            scope = f"{workflow}:{job}" if job else workflow
+            errors.append(f"{scope}: root Cargo commands removed: {dict(missing)}")
 
 
 def check(root: Path) -> list[str]:

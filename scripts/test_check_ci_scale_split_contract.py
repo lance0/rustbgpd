@@ -264,6 +264,47 @@ class ScaleSplitContractTests(unittest.TestCase):
             with self.subTest(workflow=workflow, seam=old):
                 self.mutate(old, new, workflow=workflow)
 
+    def test_scale_commands_cannot_mask_removed_core_commands(self) -> None:
+        for subcommand, command in (
+            ("clippy", "cargo clippy --locked --workspace --all-targets -- -D warnings"),
+            ("clippy", "cargo clippy --locked -p rustbgpd-wire --all-targets --features tokio-codec -- -D warnings"),
+            ("test", "cargo test --locked -p rustbgpd-mrt --bench snapshot_allocation -- timing --candidate --smoke"),
+        ):
+            with self.subTest(command=command):
+                with tempfile.TemporaryDirectory() as temporary:
+                    root = Path(temporary)
+                    self.copy_workflows(root)
+                    target = root / WORKFLOW
+                    text = target.read_text()
+                    self.assertEqual(1, text.count(command))
+                    target.write_text(text.replace(command, "true", 1))
+                    self.assertIn(
+                        f"{WORKFLOW}:core: root Cargo commands removed: {{{subcommand!r}: 1}}",
+                        check(root),
+                    )
+
+    def test_extra_manifest_commands_are_rejected(self) -> None:
+        for workflow in (WORKFLOW, ".github/workflows/release.yml", ".github/workflows/new.yml"):
+            for option in ("--manifest-path bench/scale/Cargo.toml", "--manifest-path=bench/scale/Cargo.toml"):
+                with self.subTest(workflow=workflow, option=option):
+                    with tempfile.TemporaryDirectory() as temporary:
+                        root = Path(temporary)
+                        self.copy_workflows(root)
+                        target = root / workflow
+                        text = target.read_text() if target.exists() else "name: extra\njobs:\n  extra:\n    steps:\n"
+                        target.write_text(text + f"\n      - run: cargo check --locked {option}\n")
+                        self.assertIn("command has --manifest-path", "\n".join(check(root)))
+
+    def test_binary_manifest_option_is_not_a_cargo_manifest(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            self.copy_workflows(root)
+            (root / ".github/workflows/new.yml").write_text(
+                "name: extra\njobs:\n  extra:\n    steps:\n"
+                "      - run: cargo run --locked -p rrtransport -- --manifest-path receipt.json\n"
+            )
+            self.assertEqual([], check(root))
+
     def test_added_locked_command_passes_and_blind_extractor_fails(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
