@@ -5942,6 +5942,41 @@ async fn run<T>(
     let metrics_listener = metrics_listener.filter(|_| !initial_peer_boot_failed);
     let metrics_clone = metrics.clone();
     let readiness_probe = core_probe.clone().with_gate(daemon_gate.clone());
+    let dataplane_probe = config.global.telemetry.dataplane_readiness.then(|| {
+        let mut workers = Vec::with_capacity(3);
+        if !config.fib_tables.is_empty() {
+            workers.push(metrics_server::DataplaneWorkerProbe {
+                name: "fib",
+                progress: fib_runtime_handle
+                    .as_ref()
+                    .map(|handle| handle.progress.clone()),
+                freshness: fib_runtime::READINESS_FRESHNESS,
+            });
+        }
+        if !evpn_instances.is_empty()
+            || !evpn_ip_vrfs.is_empty()
+            || !evpn_managed_netdevs.is_empty()
+        {
+            workers.push(metrics_server::DataplaneWorkerProbe {
+                name: "evpn intent",
+                progress: evpn_dataplane_handle
+                    .as_ref()
+                    .map(|handle| handle.supervisor_progress.clone()),
+                freshness: supervisor_config.poll_interval.saturating_mul(2),
+            });
+            workers.push(metrics_server::DataplaneWorkerProbe {
+                name: "evpn kernel",
+                progress: evpn_dataplane_handle
+                    .as_ref()
+                    .map(|handle| handle.reconciler_progress.clone()),
+                freshness: supervisor_config
+                    .actor_config
+                    .periodic_dump
+                    .saturating_mul(2),
+            });
+        }
+        workers
+    });
     let mut metrics_handle = tokio::spawn(async move {
         let Some(metrics_listener) = metrics_listener else {
             return std::future::pending().await;
@@ -5949,7 +5984,13 @@ async fn run<T>(
         if test_metrics_listener_unusable {
             metrics_listener.shut_down_for_test();
         }
-        metrics_server::serve_metrics(metrics_listener, metrics_clone, readiness_probe).await;
+        metrics_server::serve_metrics(
+            metrics_listener,
+            metrics_clone,
+            readiness_probe,
+            dataplane_probe,
+        )
+        .await;
     });
 
     // systemd `READY=1` shares the readiness boundary above: every configured
@@ -9647,6 +9688,7 @@ peer_group = "plain"
                 runtime_state_dir: "/tmp".to_string(),
                 telemetry: crate::config::TelemetryConfig {
                     prometheus_addr: Some("127.0.0.1:9179".to_string()),
+                    dataplane_readiness: false,
                     log_format: crate::config::LogFormatConfig::Json,
                     grpc_tcp: None,
                     grpc_uds: None,

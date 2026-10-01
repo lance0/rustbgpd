@@ -9,6 +9,7 @@ use rustbgpd_evpn::runtime_plan_shape::{
     validate_single_ip_vrf_delete, validate_single_ip_vrf_redefine, validate_single_l2vni_delete,
     validate_single_l2vni_redefine, validate_tenant_teardown,
 };
+use rustbgpd_evpn_linux::worker_progress::WorkerProgress;
 use rustbgpd_rib::RibCommandError;
 use tokio::sync::{broadcast, watch};
 
@@ -3376,6 +3377,8 @@ async fn runtime_actor_converger_l2vni_add_publishes_imet_and_actor_models() {
         watch::channel(Arc::new(evpn_dataplane::RemoteIpPrefixDropCounts::new()));
     let (report_tx, _) = broadcast::channel::<rustbgpd_evpn::DataplaneReport>(1);
     let dataplane_handle = evpn_dataplane::EvpnDataplaneHandle {
+        supervisor_progress: WorkerProgress::default().subscribe(),
+        reconciler_progress: WorkerProgress::default().subscribe(),
         shutdown: tokio_util::sync::CancellationToken::new(),
         supervisor_join: tokio::spawn(async {}),
         actor_join: tokio::spawn(async {}),
@@ -3437,6 +3440,10 @@ async fn runtime_actor_converger_l2vni_add_publishes_imet_and_actor_models() {
 }
 
 #[tokio::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "the additive L2VNI then Ethernet Segment scenario keeps its actor fixtures and ordering together"
+)]
 async fn runtime_actor_converger_l2vni_add_updates_segment_instance_view() {
     let current = runtime_model_from_candidate_toml(l2vni_one_es_runtime_candidate_toml());
     let l2_candidate = runtime_candidate_from_toml(two_l2vni_one_es_runtime_candidate_toml());
@@ -3462,6 +3469,8 @@ async fn runtime_actor_converger_l2vni_add_updates_segment_instance_view() {
         watch::channel(Arc::new(evpn_dataplane::RemoteIpPrefixDropCounts::new()));
     let (report_tx, _) = broadcast::channel::<rustbgpd_evpn::DataplaneReport>(1);
     let dataplane_handle = evpn_dataplane::EvpnDataplaneHandle {
+        supervisor_progress: WorkerProgress::default().subscribe(),
+        reconciler_progress: WorkerProgress::default().subscribe(),
         shutdown: tokio_util::sync::CancellationToken::new(),
         supervisor_join: tokio::spawn(async {}),
         actor_join: tokio::spawn(async {}),
@@ -3568,6 +3577,8 @@ async fn runtime_actor_converger_additive_build_up_rejects_missing_originator() 
         watch::channel(Arc::new(evpn_dataplane::RemoteIpPrefixDropCounts::new()));
     let (report_tx, _) = broadcast::channel::<rustbgpd_evpn::DataplaneReport>(1);
     let dataplane_handle = evpn_dataplane::EvpnDataplaneHandle {
+        supervisor_progress: WorkerProgress::default().subscribe(),
+        reconciler_progress: WorkerProgress::default().subscribe(),
         shutdown: tokio_util::sync::CancellationToken::new(),
         supervisor_join: tokio::spawn(async {}),
         actor_join: tokio::spawn(async {}),
@@ -3621,6 +3632,8 @@ async fn runtime_actor_converger_additive_build_up_rejects_missing_segment_actor
         watch::channel(Arc::new(evpn_dataplane::RemoteIpPrefixDropCounts::new()));
     let (report_tx, _) = broadcast::channel::<rustbgpd_evpn::DataplaneReport>(1);
     let dataplane_handle = evpn_dataplane::EvpnDataplaneHandle {
+        supervisor_progress: WorkerProgress::default().subscribe(),
+        reconciler_progress: WorkerProgress::default().subscribe(),
         shutdown: tokio_util::sync::CancellationToken::new(),
         supervisor_join: tokio::spawn(async {}),
         actor_join: tokio::spawn(async {}),
@@ -3722,6 +3735,8 @@ async fn runtime_actor_converger_additive_build_up_rollback_restores_imet_and_mo
         watch::channel(Arc::new(evpn_dataplane::RemoteIpPrefixDropCounts::new()));
     let (report_tx, _) = broadcast::channel::<rustbgpd_evpn::DataplaneReport>(8);
     let dataplane_handle = evpn_dataplane::EvpnDataplaneHandle {
+        supervisor_progress: WorkerProgress::default().subscribe(),
+        reconciler_progress: WorkerProgress::default().subscribe(),
         shutdown: tokio_util::sync::CancellationToken::new(),
         supervisor_join: tokio::spawn(async {}),
         actor_join: tokio::spawn(async {}),
@@ -3896,6 +3911,8 @@ async fn runtime_actor_converger_additive_build_up_publishes_all_actor_models() 
         watch::channel(Arc::new(evpn_dataplane::RemoteIpPrefixDropCounts::new()));
     let (report_tx, _) = broadcast::channel::<rustbgpd_evpn::DataplaneReport>(8);
     let dataplane_handle = evpn_dataplane::EvpnDataplaneHandle {
+        supervisor_progress: WorkerProgress::default().subscribe(),
+        reconciler_progress: WorkerProgress::default().subscribe(),
         shutdown: tokio_util::sync::CancellationToken::new(),
         supervisor_join: tokio::spawn(async {}),
         actor_join: tokio::spawn(async {}),
@@ -4123,6 +4140,8 @@ async fn runtime_actor_converger_additive_existing_es_member_expansion_publishes
         watch::channel(Arc::new(evpn_dataplane::RemoteIpPrefixDropCounts::new()));
     let (report_tx, _) = broadcast::channel::<rustbgpd_evpn::DataplaneReport>(1);
     let dataplane_handle = evpn_dataplane::EvpnDataplaneHandle {
+        supervisor_progress: WorkerProgress::default().subscribe(),
+        reconciler_progress: WorkerProgress::default().subscribe(),
         shutdown: tokio_util::sync::CancellationToken::new(),
         supervisor_join: tokio::spawn(async {}),
         actor_join: tokio::spawn(async {}),
@@ -4252,6 +4271,8 @@ async fn runtime_actor_converger_l2vni_delete_drains_imet_and_actor_models() {
         watch::channel(Arc::new(evpn_dataplane::RemoteIpPrefixDropCounts::new()));
     let (report_tx, _) = broadcast::channel::<rustbgpd_evpn::DataplaneReport>(1);
     let dataplane_handle = evpn_dataplane::EvpnDataplaneHandle {
+        supervisor_progress: WorkerProgress::default().subscribe(),
+        reconciler_progress: WorkerProgress::default().subscribe(),
         shutdown: tokio_util::sync::CancellationToken::new(),
         supervisor_join: tokio::spawn(async {}),
         actor_join: tokio::spawn(async {}),
@@ -4381,6 +4402,8 @@ async fn runtime_actor_converger_l2vni_swap_updates_models_and_imet() {
         watch::channel(Arc::new(evpn_dataplane::RemoteIpPrefixDropCounts::new()));
     let (report_tx, _) = broadcast::channel::<rustbgpd_evpn::DataplaneReport>(1);
     let dataplane_handle = evpn_dataplane::EvpnDataplaneHandle {
+        supervisor_progress: WorkerProgress::default().subscribe(),
+        reconciler_progress: WorkerProgress::default().subscribe(),
         shutdown: tokio_util::sync::CancellationToken::new(),
         supervisor_join: tokio::spawn(async {}),
         actor_join: tokio::spawn(async {}),
@@ -4478,6 +4501,8 @@ async fn runtime_actor_converger_l2vni_swap_publishes_ip_vrf_metadata() {
         watch::channel(Arc::new(evpn_dataplane::RemoteIpPrefixDropCounts::new()));
     let (report_tx, _) = broadcast::channel::<rustbgpd_evpn::DataplaneReport>(1);
     let dataplane_handle = evpn_dataplane::EvpnDataplaneHandle {
+        supervisor_progress: WorkerProgress::default().subscribe(),
+        reconciler_progress: WorkerProgress::default().subscribe(),
         shutdown: tokio_util::sync::CancellationToken::new(),
         supervisor_join: tokio::spawn(async {}),
         actor_join: tokio::spawn(async {}),
@@ -4595,6 +4620,8 @@ async fn runtime_actor_converger_l2vni_mixed_redefine_swap_updates_models_and_im
         watch::channel(Arc::new(evpn_dataplane::RemoteIpPrefixDropCounts::new()));
     let (report_tx, _) = broadcast::channel::<rustbgpd_evpn::DataplaneReport>(1);
     let dataplane_handle = evpn_dataplane::EvpnDataplaneHandle {
+        supervisor_progress: WorkerProgress::default().subscribe(),
+        reconciler_progress: WorkerProgress::default().subscribe(),
         shutdown: tokio_util::sync::CancellationToken::new(),
         supervisor_join: tokio::spawn(async {}),
         actor_join: tokio::spawn(async {}),
@@ -4723,6 +4750,8 @@ async fn runtime_actor_converger_l2vni_batch_redefine_updates_models_and_imet() 
         watch::channel(Arc::new(evpn_dataplane::RemoteIpPrefixDropCounts::new()));
     let (report_tx, _) = broadcast::channel::<rustbgpd_evpn::DataplaneReport>(1);
     let dataplane_handle = evpn_dataplane::EvpnDataplaneHandle {
+        supervisor_progress: WorkerProgress::default().subscribe(),
+        reconciler_progress: WorkerProgress::default().subscribe(),
         shutdown: tokio_util::sync::CancellationToken::new(),
         supervisor_join: tokio::spawn(async {}),
         actor_join: tokio::spawn(async {}),
@@ -4854,6 +4883,8 @@ async fn runtime_actor_converger_l2vni_mixed_redefine_withdraw_failure_rolls_bac
         watch::channel(Arc::new(evpn_dataplane::RemoteIpPrefixDropCounts::new()));
     let (report_tx, _) = broadcast::channel::<rustbgpd_evpn::DataplaneReport>(1);
     let dataplane_handle = evpn_dataplane::EvpnDataplaneHandle {
+        supervisor_progress: WorkerProgress::default().subscribe(),
+        reconciler_progress: WorkerProgress::default().subscribe(),
         shutdown: tokio_util::sync::CancellationToken::new(),
         supervisor_join: tokio::spawn(async {}),
         actor_join: tokio::spawn(async {}),
@@ -4954,6 +4985,8 @@ async fn runtime_actor_converger_l2vni_swap_rollback_restores_imet_and_models() 
         watch::channel(Arc::new(evpn_dataplane::RemoteIpPrefixDropCounts::new()));
     let (report_tx, _) = broadcast::channel::<rustbgpd_evpn::DataplaneReport>(1);
     let dataplane_handle = evpn_dataplane::EvpnDataplaneHandle {
+        supervisor_progress: WorkerProgress::default().subscribe(),
+        reconciler_progress: WorkerProgress::default().subscribe(),
         shutdown: tokio_util::sync::CancellationToken::new(),
         supervisor_join: tokio::spawn(async {}),
         actor_join: tokio::spawn(async {}),
@@ -5132,6 +5165,8 @@ async fn runtime_actor_converger_l2vni_delete_publishes_ip_vrf_metadata() {
         watch::channel(Arc::new(evpn_dataplane::RemoteIpPrefixDropCounts::new()));
     let (report_tx, _) = broadcast::channel::<rustbgpd_evpn::DataplaneReport>(1);
     let dataplane_handle = evpn_dataplane::EvpnDataplaneHandle {
+        supervisor_progress: WorkerProgress::default().subscribe(),
+        reconciler_progress: WorkerProgress::default().subscribe(),
         shutdown: tokio_util::sync::CancellationToken::new(),
         supervisor_join: tokio::spawn(async {}),
         actor_join: tokio::spawn(async {}),
@@ -5906,6 +5941,8 @@ async fn runtime_actor_converger_ip_vrf_add_publishes_dataplane_model() {
         watch::channel(Arc::new(evpn_dataplane::RemoteIpPrefixDropCounts::new()));
     let (report_tx, _) = broadcast::channel::<rustbgpd_evpn::DataplaneReport>(1);
     let dataplane_handle = evpn_dataplane::EvpnDataplaneHandle {
+        supervisor_progress: WorkerProgress::default().subscribe(),
+        reconciler_progress: WorkerProgress::default().subscribe(),
         shutdown: tokio_util::sync::CancellationToken::new(),
         supervisor_join: tokio::spawn(async {}),
         actor_join: tokio::spawn(async {}),
@@ -5982,6 +6019,8 @@ async fn runtime_actor_converger_ip_vrf_relink_republishes_ip_vrfs() {
         watch::channel(Arc::new(evpn_dataplane::RemoteIpPrefixDropCounts::new()));
     let (report_tx, _) = broadcast::channel::<rustbgpd_evpn::DataplaneReport>(1);
     let dataplane_handle = evpn_dataplane::EvpnDataplaneHandle {
+        supervisor_progress: WorkerProgress::default().subscribe(),
+        reconciler_progress: WorkerProgress::default().subscribe(),
         shutdown: tokio_util::sync::CancellationToken::new(),
         supervisor_join: tokio::spawn(async {}),
         actor_join: tokio::spawn(async {}),
@@ -6046,6 +6085,8 @@ async fn runtime_actor_converger_ip_vrf_delete_publishes_dataplane_and_l3_model(
         watch::channel(Arc::new(evpn_dataplane::RemoteIpPrefixDropCounts::new()));
     let (report_tx, _) = broadcast::channel::<rustbgpd_evpn::DataplaneReport>(1);
     let dataplane_handle = evpn_dataplane::EvpnDataplaneHandle {
+        supervisor_progress: WorkerProgress::default().subscribe(),
+        reconciler_progress: WorkerProgress::default().subscribe(),
         shutdown: tokio_util::sync::CancellationToken::new(),
         supervisor_join: tokio::spawn(async {}),
         actor_join: tokio::spawn(async {}),
@@ -6132,6 +6173,8 @@ async fn runtime_actor_converger_ip_vrf_redefine_reoriginates_type5() {
         watch::channel(Arc::new(evpn_dataplane::RemoteIpPrefixDropCounts::new()));
     let (report_tx, _) = broadcast::channel::<rustbgpd_evpn::DataplaneReport>(1);
     let dataplane_handle = evpn_dataplane::EvpnDataplaneHandle {
+        supervisor_progress: WorkerProgress::default().subscribe(),
+        reconciler_progress: WorkerProgress::default().subscribe(),
         shutdown: tokio_util::sync::CancellationToken::new(),
         supervisor_join: tokio::spawn(async {}),
         actor_join: tokio::spawn(async {}),
@@ -6639,6 +6682,8 @@ async fn runtime_actor_converger_l2vni_redefine_reoriginates_imet() {
         watch::channel(Arc::new(evpn_dataplane::RemoteIpPrefixDropCounts::new()));
     let (report_tx, _) = broadcast::channel::<rustbgpd_evpn::DataplaneReport>(1);
     let dataplane_handle = evpn_dataplane::EvpnDataplaneHandle {
+        supervisor_progress: WorkerProgress::default().subscribe(),
+        reconciler_progress: WorkerProgress::default().subscribe(),
         shutdown: tokio_util::sync::CancellationToken::new(),
         supervisor_join: tokio::spawn(async {}),
         actor_join: tokio::spawn(async {}),
@@ -6970,6 +7015,8 @@ async fn runtime_actor_converger_tenant_teardown_drains_imet_and_es_routes() {
         watch::channel(Arc::new(evpn_dataplane::RemoteIpPrefixDropCounts::new()));
     let (report_tx, _) = broadcast::channel::<rustbgpd_evpn::DataplaneReport>(1);
     let dataplane_handle = evpn_dataplane::EvpnDataplaneHandle {
+        supervisor_progress: WorkerProgress::default().subscribe(),
+        reconciler_progress: WorkerProgress::default().subscribe(),
         shutdown: tokio_util::sync::CancellationToken::new(),
         supervisor_join: tokio::spawn(async {}),
         actor_join: tokio::spawn(async {}),
@@ -7162,6 +7209,8 @@ async fn runtime_actor_converger_tenant_teardown_rollback_restores_imet_and_mode
         watch::channel(Arc::new(evpn_dataplane::RemoteIpPrefixDropCounts::new()));
     let (report_tx, _) = broadcast::channel::<rustbgpd_evpn::DataplaneReport>(1);
     let dataplane_handle = evpn_dataplane::EvpnDataplaneHandle {
+        supervisor_progress: WorkerProgress::default().subscribe(),
+        reconciler_progress: WorkerProgress::default().subscribe(),
         shutdown: tokio_util::sync::CancellationToken::new(),
         supervisor_join: tokio::spawn(async {}),
         actor_join: tokio::spawn(async {}),
@@ -7336,6 +7385,8 @@ async fn runtime_actor_converger_tenant_teardown_drains_svi_mac() {
         watch::channel(Arc::new(evpn_dataplane::RemoteIpPrefixDropCounts::new()));
     let (report_tx, _) = broadcast::channel::<rustbgpd_evpn::DataplaneReport>(1);
     let dataplane_handle = evpn_dataplane::EvpnDataplaneHandle {
+        supervisor_progress: WorkerProgress::default().subscribe(),
+        reconciler_progress: WorkerProgress::default().subscribe(),
         shutdown: tokio_util::sync::CancellationToken::new(),
         supervisor_join: tokio::spawn(async {}),
         actor_join: tokio::spawn(async {}),
@@ -7649,6 +7700,8 @@ async fn runtime_apply_preserves_operator_drain_across_unrelated_l2vni_add() {
         watch::channel(Arc::new(evpn_dataplane::RemoteIpPrefixDropCounts::new()));
     let (report_tx, _) = broadcast::channel::<rustbgpd_evpn::DataplaneReport>(1);
     let dataplane_handle = evpn_dataplane::EvpnDataplaneHandle {
+        supervisor_progress: WorkerProgress::default().subscribe(),
+        reconciler_progress: WorkerProgress::default().subscribe(),
         shutdown: tokio_util::sync::CancellationToken::new(),
         supervisor_join: tokio::spawn(async {}),
         actor_join: tokio::spawn(async {}),
@@ -7861,6 +7914,8 @@ async fn failed_tenant_teardown_keeps_coordinator_and_actor_drain_agreeing() {
         watch::channel(Arc::new(evpn_dataplane::RemoteIpPrefixDropCounts::new()));
     let (report_tx, _) = broadcast::channel::<rustbgpd_evpn::DataplaneReport>(1);
     let dataplane_handle = evpn_dataplane::EvpnDataplaneHandle {
+        supervisor_progress: WorkerProgress::default().subscribe(),
+        reconciler_progress: WorkerProgress::default().subscribe(),
         shutdown: tokio_util::sync::CancellationToken::new(),
         supervisor_join: tokio::spawn(async {}),
         actor_join: tokio::spawn(async {}),

@@ -5,10 +5,11 @@ use std::time::Duration;
 use prometheus::{Encoder, TextEncoder};
 use rustbgpd_api::accept_backoff::AcceptBackoff;
 use rustbgpd_api::health_probe::{CORE_READINESS_DEADLINE, CoreReadinessProbe};
+use rustbgpd_evpn_linux::worker_progress::WorkerProgressState;
 use rustbgpd_telemetry::BgpMetrics;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::Semaphore;
+use tokio::sync::{Semaphore, watch};
 use tokio_stream::wrappers::TcpListenerStream;
 use tokio_stream::{Stream, StreamExt};
 use tracing::{debug, info, warn};
@@ -17,6 +18,49 @@ const WRITE_TIMEOUT: Duration = Duration::from_secs(5);
 const READ_TIMEOUT: Duration = Duration::from_secs(5);
 const MAX_REQUEST_LINE: usize = 8192;
 const MAX_CONNECTIONS: usize = 64;
+
+/// Fixed startup worker inventory: at most FIB, EVPN intent and EVPN kernel.
+/// A missing receiver means a configured worker could not be constructed.
+#[derive(Clone)]
+pub(crate) struct DataplaneWorkerProbe {
+    pub name: &'static str,
+    pub progress: Option<watch::Receiver<WorkerProgressState>>,
+    pub freshness: Duration,
+}
+
+impl DataplaneWorkerProbe {
+    pub(crate) fn failure(&self) -> Option<&'static str> {
+        let Some(progress) = &self.progress else {
+            return Some("unavailable");
+        };
+        if progress.has_changed().is_err() {
+            return Some("closed");
+        }
+        let state = *progress.borrow();
+        if !state.initialized {
+            return Some("starting");
+        }
+        if state.observed_at.elapsed() > self.freshness {
+            return Some("stale progress");
+        }
+        None
+    }
+}
+
+fn dataplane_response(workers: &[DataplaneWorkerProbe]) -> String {
+    if workers.is_empty() {
+        return text_response("503 Service Unavailable", "dataplane not configured\n");
+    }
+    for worker in workers {
+        if let Some(reason) = worker.failure() {
+            return text_response(
+                "503 Service Unavailable",
+                &format!("dataplane not ready: {} {reason}\n", worker.name),
+            );
+        }
+    }
+    text_response("200 OK", "dataplane workers ready\n")
+}
 
 pub struct MetricsListener {
     addr: SocketAddr,
@@ -56,6 +100,7 @@ pub async fn serve_metrics(
     server: MetricsListener,
     metrics: BgpMetrics,
     readiness_probe: CoreReadinessProbe,
+    dataplane_probe: Option<Vec<DataplaneWorkerProbe>>,
 ) {
     let MetricsListener { addr, listener } = server;
     info!(%addr, "metrics server listening");
@@ -64,6 +109,7 @@ pub async fn serve_metrics(
         format!("metrics {addr}"),
         metrics,
         readiness_probe,
+        dataplane_probe,
     )
     .await;
 }
@@ -73,6 +119,7 @@ async fn serve_incoming<S>(
     name: String,
     metrics: BgpMetrics,
     readiness_probe: CoreReadinessProbe,
+    dataplane_probe: Option<Vec<DataplaneWorkerProbe>>,
 ) where
     S: Stream<Item = std::io::Result<TcpStream>> + Unpin,
 {
@@ -98,8 +145,16 @@ async fn serve_incoming<S>(
         let peer = stream.peer_addr().ok();
         let metrics = metrics.clone();
         let readiness_probe = readiness_probe.clone();
+        let dataplane_probe = dataplane_probe.clone();
         tokio::spawn(async move {
-            if let Err(e) = handle_connection(stream, &metrics, &readiness_probe).await {
+            if let Err(e) = handle_connection(
+                stream,
+                &metrics,
+                &readiness_probe,
+                dataplane_probe.as_deref(),
+            )
+            .await
+            {
                 debug!(client = ?peer, error = %e, "metrics connection error");
             }
             drop(permit);
@@ -111,6 +166,7 @@ async fn handle_connection(
     stream: TcpStream,
     metrics: &BgpMetrics,
     readiness_probe: &CoreReadinessProbe,
+    dataplane_probe: Option<&[DataplaneWorkerProbe]>,
 ) -> std::io::Result<()> {
     let (reader, mut writer) = stream.into_split();
     let mut buf_reader = BufReader::new(reader.take(MAX_REQUEST_LINE as u64));
@@ -162,6 +218,9 @@ async fn handle_connection(
             }
         },
         "/livez" => text_response("200 OK", "ok\n"),
+        "/dp-readyz" if dataplane_probe.is_some() => {
+            dataplane_response(dataplane_probe.unwrap_or_default())
+        }
         "/readyz" => {
             // Reject a successful probe observed after the shared deadline.
             // After a runtime stall, a queued reply can be polled before the
@@ -213,7 +272,7 @@ fn gather(metrics: &BgpMetrics) -> Result<String, std::io::Error> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use rustbgpd_api::peer_types::PeerManagerCommand;
     use rustbgpd_rib::RibUpdate;
@@ -229,6 +288,13 @@ mod tests {
     }
 
     async fn start_server(readiness_probe: CoreReadinessProbe) -> SocketAddr {
+        start_server_with_dataplane(readiness_probe, None).await
+    }
+
+    pub(crate) async fn start_server_with_dataplane(
+        readiness_probe: CoreReadinessProbe,
+        dataplane_probe: Option<Vec<DataplaneWorkerProbe>>,
+    ) -> SocketAddr {
         let metrics = BgpMetrics::new();
         let server = MetricsListener::bind("127.0.0.1:0".parse().unwrap())
             .await
@@ -236,13 +302,13 @@ mod tests {
         let addr = server.listener.local_addr().unwrap();
         assert_eq!(server.addr, addr);
         tokio::spawn(async move {
-            serve_metrics(server, metrics, readiness_probe).await;
+            serve_metrics(server, metrics, readiness_probe, dataplane_probe).await;
         });
 
         addr
     }
 
-    async fn request(addr: SocketAddr, path: &str) -> String {
+    pub(crate) async fn request(addr: SocketAddr, path: &str) -> String {
         let mut stream = TcpStream::connect(addr).await.unwrap();
         let request = format!("GET {path} HTTP/1.1\r\nHost: localhost\r\n\r\n");
         stream.write_all(request.as_bytes()).await.unwrap();
@@ -258,6 +324,87 @@ mod tests {
 
         let response = request(addr, "/metrics").await;
         assert!(response.starts_with("HTTP/1.1 200 OK"));
+    }
+
+    #[tokio::test]
+    async fn dataplane_probe_distinguishes_disabled_unconfigured_and_unavailable() {
+        let disabled = start_server(unused_probe()).await;
+        assert!(
+            request(disabled, "/dp-readyz")
+                .await
+                .starts_with("HTTP/1.1 404")
+        );
+        let unconfigured = start_server_with_dataplane(unused_probe(), Some(Vec::new())).await;
+        let response = request(unconfigured, "/dp-readyz").await;
+        assert!(response.starts_with("HTTP/1.1 503"));
+        assert!(response.ends_with("dataplane not configured\n"));
+        // A configured worker with no handle includes failed netlink setup;
+        // it must not disappear from the startup worker inventory.
+        let unavailable = start_server_with_dataplane(
+            unused_probe(),
+            Some(vec![DataplaneWorkerProbe {
+                name: "fib",
+                progress: None,
+                freshness: crate::fib_runtime::READINESS_FRESHNESS,
+            }]),
+        )
+        .await;
+        let response = request(unavailable, "/dp-readyz").await;
+        assert!(response.starts_with("HTTP/1.1 503"));
+        assert!(response.ends_with("fib unavailable\n"));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn dataplane_progress_uses_worker_cadence_and_original_observation() {
+        use rustbgpd_evpn_linux::worker_progress::WorkerProgress;
+        for (name, cadence, freshness) in [
+            (
+                "fib",
+                Duration::from_secs(30),
+                crate::fib_runtime::READINESS_FRESHNESS,
+            ),
+            (
+                "evpn intent",
+                Duration::from_secs(5),
+                Duration::from_secs(10),
+            ),
+            (
+                "evpn kernel",
+                Duration::from_secs(60),
+                Duration::from_secs(120),
+            ),
+        ] {
+            let worker = WorkerProgress::default();
+            let probe = DataplaneWorkerProbe {
+                name,
+                progress: Some(worker.subscribe()),
+                freshness,
+            };
+            assert_eq!(probe.failure(), Some("starting"));
+            worker.checkpoint();
+            assert_eq!(probe.failure(), Some("starting"));
+            worker.complete_pass();
+            for _ in 0..3 {
+                tokio::time::advance(cadence).await;
+                assert_eq!(probe.failure(), None, "healthy idle {name}");
+                worker.complete_pass();
+            }
+            // Copying an old observation is not new worker progress.
+            let cached = *probe.progress.as_ref().unwrap().borrow();
+            let (forward_tx, forward_rx) = watch::channel(cached);
+            let forwarded = DataplaneWorkerProbe {
+                progress: Some(forward_rx),
+                ..probe.clone()
+            };
+            tokio::time::advance(freshness + Duration::from_millis(1)).await;
+            forward_tx.send_replace(cached);
+            assert_eq!(forwarded.failure(), Some("stale progress"));
+            assert_eq!(probe.failure(), Some("stale progress"));
+            worker.checkpoint();
+            assert_eq!(probe.failure(), None);
+            drop(worker);
+            assert_eq!(probe.failure(), Some("closed"));
+        }
     }
 
     #[tokio::test]
@@ -414,7 +561,7 @@ mod tests {
                     }
                 });
                 let (stream, _) = listener.accept().await.unwrap();
-                let _ = handle_connection(stream, &metrics, &probe).await;
+                let _ = handle_connection(stream, &metrics, &probe, None).await;
             });
         });
 
@@ -518,7 +665,7 @@ mod tests {
                 let m = metrics.clone();
                 let probe = unused_probe();
                 tokio::spawn(async move {
-                    let _ = handle_connection(stream, &m, &probe).await;
+                    let _ = handle_connection(stream, &m, &probe, None).await;
                     drop(permit);
                 });
             }
@@ -558,6 +705,7 @@ mod tests {
                 "metrics test".into(),
                 BgpMetrics::new(),
                 unused_probe(),
+                None,
             ),
         )
         .await;
@@ -583,6 +731,7 @@ mod tests {
             "metrics test".into(),
             BgpMetrics::new(),
             unused_probe(),
+            None,
         )
         .await;
         assert_eq!(start.elapsed(), Duration::ZERO);

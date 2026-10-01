@@ -62,6 +62,7 @@ use rustbgpd_evpn::{
     FdbNhgDriftCounters, L3AdoptionCounters, LocalMacObservation, ManagedNetdevTable,
     ProjectedEvpnEadPerEvi, ProjectedEvpnRoute, RemoteMacTable, SameEsiBiasTable,
 };
+use rustbgpd_evpn_linux::worker_progress::{WorkerProgress, WorkerProgressState};
 use rustbgpd_evpn_linux::{Dataplane, ReconcileActor, ReconcileActorConfig};
 use rustbgpd_rib::{RibUpdate, route::EvpnRibRoute};
 use rustbgpd_telemetry::BgpMetrics;
@@ -197,6 +198,8 @@ pub struct EvpnDataplaneHandle {
     pub(crate) shutdown: CancellationToken,
     pub(crate) supervisor_join: tokio::task::JoinHandle<()>,
     pub(crate) actor_join: tokio::task::JoinHandle<()>,
+    pub(crate) supervisor_progress: watch::Receiver<WorkerProgressState>,
+    pub(crate) reconciler_progress: watch::Receiver<WorkerProgressState>,
     /// Upward `LocalMacObservation` receiver, taken once from the
     /// dataplane at construction time. Phase E moves this into the
     /// originator actor; if the daemon never spawns the originator
@@ -322,6 +325,8 @@ impl EvpnDataplaneHandle {
             shutdown,
             supervisor_join,
             actor_join,
+            supervisor_progress: _,
+            reconciler_progress: _,
             local_mac_rx: _,
             report_tx: _,
             bum_enforcement_tx: _,
@@ -525,6 +530,8 @@ where
     }
 
     let supervisor_shutdown = daemon_shutdown.clone();
+    let progress = WorkerProgress::default();
+    let supervisor_progress = progress.subscribe();
     let supervisor_join = tokio::spawn(supervisor_loop(
         config.poll_interval,
         evpn_instances_rx,
@@ -538,6 +545,7 @@ where
         remote_prefix_drop_counts_tx,
         metrics.clone(),
         supervisor_shutdown,
+        progress,
     ));
 
     let actor = ReconcileActor::new(
@@ -547,12 +555,15 @@ where
         report_mpsc_tx,
         daemon_shutdown.clone(),
     );
+    let reconciler_progress = actor.subscribe_progress();
     let actor_join = tokio::spawn(actor.run());
 
     EvpnDataplaneHandle {
         shutdown: daemon_shutdown,
         supervisor_join,
         actor_join,
+        supervisor_progress,
+        reconciler_progress,
         local_mac_rx: None,
         report_tx: report_broadcast_tx,
         bum_enforcement_tx,
@@ -670,6 +681,7 @@ fn publish_remote_prefix_drop_counts(
 
 #[derive(Debug)]
 struct SupervisorIntentState {
+    progress: WorkerProgress,
     generation: u64,
     /// Last Type 1/2/5 RIB equality token successfully materialized. `None`
     /// forces a full actor snapshot after startup or any local projection
@@ -687,6 +699,7 @@ struct SupervisorIntentState {
 impl Default for SupervisorIntentState {
     fn default() -> Self {
         Self {
+            progress: WorkerProgress::default(),
             generation: 0,
             evpn_dataplane_generation: None,
             last_instances: Arc::new(EvpnInstanceTable::new()),
@@ -733,14 +746,24 @@ async fn publish_dataplane_intent(
     state: &mut SupervisorIntentState,
     remote_prefix_drop_counts_tx: &watch::Sender<Arc<RemoteIpPrefixDropCounts>>,
 ) -> Result<bool, RibQueryError> {
+    state.progress.checkpoint();
     // The bias snapshot is a projection input: it shapes the remote-MAC
     // table itself, so the unchanged-intent early return below covers
     // bias changes through the projected-table comparison — no separate
     // last-bias field is needed.
-    let response = query_evpn_dataplane_routes(rib_tx, state.evpn_dataplane_generation).await?;
+    let response = query_evpn_dataplane_routes(rib_tx, state.evpn_dataplane_generation).await;
+    state.progress.checkpoint();
+    let response = match response {
+        Ok(response) => response,
+        Err(error) => {
+            state.progress.complete_pass();
+            return Err(error);
+        }
+    };
     let Some(routes) = response.routes else {
         // Equal actor-owned token: the RIB did not iterate or materialize its
         // EVPN table, and no local projection input was invalidated.
+        state.progress.complete_pass();
         return Ok(true);
     };
     let tables = project_intent_tables(
@@ -750,6 +773,7 @@ async fn publish_dataplane_intent(
         quarantined_macs,
         same_esi_bias,
     );
+    state.progress.checkpoint();
     // A successful full snapshot repairs startup/local invalidation. Set this
     // before semantic intent deduplication: an unchanged projection is still
     // a successfully materialized view of the new RIB generation.
@@ -772,6 +796,7 @@ async fn publish_dataplane_intent(
         // watch send keeps the reconcile actor's permanent-suppression
         // set alive across periodic polls, so an EPERM / EOPNOTSUPP
         // on op N doesn't get retried every 5 s tick.
+        state.progress.complete_pass();
         return Ok(true);
     }
 
@@ -812,6 +837,7 @@ async fn publish_dataplane_intent(
         debug!("intent receiver gone; supervisor exiting");
         return Ok(false);
     }
+    state.progress.complete_pass();
     Ok(true)
 }
 
@@ -820,6 +846,7 @@ fn publish_cached_dataplane_intent(
     bum_enforcement: BumEnforcementTable,
     state: &mut SupervisorIntentState,
 ) -> bool {
+    state.progress.checkpoint();
     if state.generation > 0 && bum_enforcement == state.last_bum_enforcement {
         return true;
     }
@@ -884,8 +911,10 @@ async fn supervisor_loop(
     remote_prefix_drop_counts_tx: watch::Sender<Arc<RemoteIpPrefixDropCounts>>,
     metrics: BgpMetrics,
     shutdown: CancellationToken,
+    progress: WorkerProgress,
 ) {
     let mut state = SupervisorIntentState {
+        progress,
         managed_netdevs,
         ..SupervisorIntentState::default()
     };
@@ -2335,6 +2364,10 @@ mod tests {
         let (report_tx, _) = broadcast::channel::<DataplaneReport>(1);
 
         let handle = EvpnDataplaneHandle {
+            supervisor_progress: rustbgpd_evpn_linux::worker_progress::WorkerProgress::default()
+                .subscribe(),
+            reconciler_progress: rustbgpd_evpn_linux::worker_progress::WorkerProgress::default()
+                .subscribe(),
             shutdown: CancellationToken::new(),
             supervisor_join: tokio::spawn(async {}),
             actor_join: tokio::spawn(async {}),
@@ -3957,6 +3990,153 @@ mod tests {
     }
 
     #[tokio::test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one ordered regression keeps worker startup, held query, forwarded report, recovery and closure visible"
+    )]
+    async fn wedged_intent_worker_fails_dataplane_probe_while_core_and_kernel_progress() {
+        use crate::metrics_server::{
+            DataplaneWorkerProbe,
+            tests::{request, start_server_with_dataplane},
+        };
+        use rustbgpd_api::{health_probe::CoreReadinessProbe, peer_types::PeerManagerCommand};
+
+        let instances = Arc::new(local_instance_table(100, Some("br100")));
+        let ip_vrfs = Arc::new(IpVrfTable::new());
+        let managed_netdevs = Arc::new(ManagedNetdevTable::new());
+        let (rib_tx, mut rib_rx) = mpsc::channel(8);
+        let (queries_tx, mut queries_rx) = mpsc::unbounded_channel();
+        let rib = tokio::spawn(async move {
+            while let Some(message) = rib_rx.recv().await {
+                match message {
+                    RibUpdate::QueryEvpnDataplaneRoutes {
+                        known_generation,
+                        reply,
+                    } => {
+                        queries_tx.send((known_generation, reply)).unwrap();
+                    }
+                    RibUpdate::QueryLocRibCount { reply } => {
+                        let _ = reply.send(0);
+                    }
+                    _ => {}
+                }
+            }
+        });
+        let (peer_tx, mut peer_rx) = mpsc::channel(1);
+        let peer = tokio::spawn(async move {
+            while let Some(PeerManagerCommand::Ping { reply }) = peer_rx.recv().await {
+                let _ = reply.send(());
+            }
+        });
+        let cfg = SupervisorConfig {
+            actor_config: ReconcileActorConfig {
+                coalesce_window: Duration::ZERO,
+                ..ReconcileActorConfig::production()
+            },
+            ..SupervisorConfig::default()
+        };
+        let handle = spawn_with_dataplane(
+            cfg,
+            EvpnDataplaneTables {
+                instances: &instances,
+                ip_vrfs: &ip_vrfs,
+                managed_netdevs: &managed_netdevs,
+            },
+            rib_tx.clone(),
+            &BgpMetrics::new(),
+            CancellationToken::new(),
+            InMemoryDataplane::new(),
+        );
+        let mut producer = handle.supervisor_progress.clone();
+        let mut kernel = handle.reconciler_progress.clone();
+        let mut reports = handle.report_tx.subscribe();
+        assert!(!producer.borrow().initialized);
+        let (known, first_reply) = queries_rx.recv().await.unwrap();
+        reply_dataplane_query(known, first_reply, 1, Vec::new());
+        producer.wait_for(|state| state.initialized).await.unwrap();
+        kernel.wait_for(|state| state.initialized).await.unwrap();
+        let initial_report = loop {
+            let report = reports.recv().await.unwrap();
+            if report.intent_generation == 1 {
+                break report;
+            }
+        };
+        let addr = start_server_with_dataplane(
+            CoreReadinessProbe::new(peer_tx, rib_tx),
+            Some(vec![
+                DataplaneWorkerProbe {
+                    name: "evpn intent",
+                    progress: Some(producer.clone()),
+                    freshness: cfg.poll_interval * 2,
+                },
+                DataplaneWorkerProbe {
+                    name: "evpn kernel",
+                    progress: Some(kernel.clone()),
+                    freshness: cfg.actor_config.periodic_dump * 2,
+                },
+            ]),
+        )
+        .await;
+        assert!(
+            request(addr, "/dp-readyz")
+                .await
+                .starts_with("HTTP/1.1 200")
+        );
+
+        // The next actual producer query is admitted but its reply is held.
+        // Core RIB queries continue to be answered by the same responder.
+        tokio::time::pause();
+        tokio::time::advance(cfg.poll_interval).await;
+        tokio::time::resume();
+        let (known, held_reply) = queries_rx.recv().await.unwrap();
+        let producer_checkpoint = producer.borrow().observed_at;
+        kernel.borrow_and_update();
+        tokio::time::pause();
+        tokio::time::advance(cfg.actor_config.periodic_dump + Duration::from_secs(1)).await;
+        tokio::time::resume();
+        kernel.changed().await.unwrap();
+        // The real forwarder publishes another report for the cached intent.
+        // Its fresh delivery must not stand in for producer progress.
+        let report = reports.recv().await.unwrap();
+        assert_eq!(report.intent_generation, initial_report.intent_generation);
+        assert!(report.reconcile_generation > initial_report.reconcile_generation);
+        assert!(kernel.borrow().observed_at > producer_checkpoint);
+        assert_eq!(producer.borrow().observed_at, producer_checkpoint);
+        let response = request(addr, "/dp-readyz").await;
+        assert!(response.starts_with("HTTP/1.1 503"), "{response}");
+        assert!(
+            response.ends_with("evpn intent stale progress\n"),
+            "{response}"
+        );
+        assert!(request(addr, "/readyz").await.starts_with("HTTP/1.1 200"));
+
+        reply_dataplane_query(known, held_reply, 1, Vec::new());
+        producer
+            .wait_for(|state| state.observed_at > producer_checkpoint)
+            .await
+            .unwrap();
+        assert!(
+            request(addr, "/dp-readyz")
+                .await
+                .starts_with("HTTP/1.1 200")
+        );
+        // A due poll may have started while the first reply was held.
+        while let Ok((known, reply)) = queries_rx.try_recv() {
+            reply_dataplane_query(known, reply, 1, Vec::new());
+        }
+        handle.supervisor_join.abort();
+        handle.actor_join.abort();
+        handle.shutdown().await;
+        assert!(producer.has_changed().is_err());
+        assert!(kernel.has_changed().is_err());
+        let response = request(addr, "/dp-readyz").await;
+        assert!(response.starts_with("HTTP/1.1 503"));
+        assert!(response.ends_with("evpn intent closed\n"));
+        rib.abort();
+        peer.abort();
+    }
+
+    #[tokio::test]
     async fn invalidated_generation_stays_none_across_send_and_reply_failure() {
         let mut state = SupervisorIntentState {
             evpn_dataplane_generation: Some(41),
@@ -4142,6 +4322,7 @@ mod tests {
             drop_counts_tx,
             BgpMetrics::new(),
             supervisor_shutdown,
+            WorkerProgress::default(),
         ));
 
         // Let the supervisor poll several times. Watch only fires
@@ -4220,6 +4401,7 @@ mod tests {
             drop_counts_tx,
             BgpMetrics::new(),
             shutdown.clone(),
+            WorkerProgress::default(),
         ));
 
         tokio::time::timeout(Duration::from_millis(300), intent_rx.changed())
@@ -4302,6 +4484,7 @@ mod tests {
             drop_counts_tx,
             BgpMetrics::new(),
             supervisor_shutdown,
+            WorkerProgress::default(),
         ));
 
         tokio::time::timeout(Duration::from_millis(200), intent_rx.changed())
@@ -4373,6 +4556,7 @@ mod tests {
             drop_counts_tx,
             BgpMetrics::new(),
             supervisor_shutdown,
+            WorkerProgress::default(),
         ));
 
         tokio::time::timeout(Duration::from_millis(200), intent_rx.changed())
@@ -4450,6 +4634,7 @@ mod tests {
             drop_counts_tx,
             BgpMetrics::new(),
             supervisor_shutdown,
+            WorkerProgress::default(),
         ));
 
         tokio::time::timeout(Duration::from_millis(200), intent_rx.changed())
@@ -4488,6 +4673,7 @@ mod tests {
         let cached_instances = Arc::new(local_instance_table(100, Some("br100")));
         let (intent_tx, mut intent_rx) = watch::channel(Arc::new(DataplaneIntent::empty()));
         let mut state = SupervisorIntentState {
+            progress: WorkerProgress::default(),
             generation: 1,
             evpn_dataplane_generation: Some(7),
             last_instances: cached_instances.clone(),
@@ -4563,6 +4749,7 @@ mod tests {
             drop_counts_tx,
             BgpMetrics::new(),
             supervisor_shutdown,
+            WorkerProgress::default(),
         ));
 
         tokio::time::timeout(Duration::from_millis(200), intent_rx.changed())
@@ -4643,6 +4830,7 @@ mod tests {
             drop_counts_tx,
             BgpMetrics::new(),
             supervisor_shutdown,
+            WorkerProgress::default(),
         ));
 
         tokio::time::timeout(Duration::from_millis(200), intent_rx.changed())
@@ -4798,6 +4986,7 @@ mod tests {
             drop_counts_tx,
             BgpMetrics::new(),
             supervisor_shutdown,
+            WorkerProgress::default(),
         ));
 
         tokio::time::timeout(Duration::from_millis(500), intent_rx.changed())
@@ -4857,6 +5046,7 @@ mod tests {
             drop_counts_tx,
             BgpMetrics::new(),
             supervisor_shutdown,
+            WorkerProgress::default(),
         ));
 
         // Startup: subscription established, exactly one initial query.

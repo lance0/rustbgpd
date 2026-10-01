@@ -88,6 +88,7 @@ pub mod l3_diff;
 pub mod nh_id_alloc;
 pub mod reconcile;
 pub mod snapshot;
+pub mod worker_progress;
 
 #[cfg(target_os = "linux")]
 pub mod linux;

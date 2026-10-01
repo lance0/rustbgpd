@@ -613,6 +613,7 @@ Required. Configures observability and management endpoints.
 | Field             | Type   | Required | Default | Description                        |
 |-------------------|--------|----------|---------|------------------------------------|
 | `prometheus_addr` | string | no       | --      | `host:port` for Prometheus metrics and HTTP `/livez` / `/readyz` probes (omit to disable) |
+| `dataplane_readiness` | bool | no | `false` | Enable alpha `/dp-readyz` on the metrics listener. Startup-only; observes configured FIB/EVPN worker progress, not forwarding or convergence. See [HTTP probes](operations.md#http-probes) |
 | `log_format`      | enum   | yes      | --      | `"json"` (one JSON object per line, for log pipelines) or `"text"` (human-readable lines, for a foreground run). Startup-only: a reload keeps the running format |
 
 `prometheus_addr`, when present, must be a valid `ip:port` socket address. The
@@ -4836,7 +4837,7 @@ after a chain swap.
 port, cluster-id, the RFC 8212 posture tuple, blackhole-discard admission
 limits and multipath knobs; `dynamic_neighbor_limit`, `honor_graceful_shutdown`
 and `honor_blackhole` are the reload-applied exceptions),
-`[global.telemetry]` `prometheus_addr` and `log_format`,
+`[global.telemetry]` `prometheus_addr`, `dataplane_readiness` and `log_format`,
 `[global.telemetry.grpc_*]` listener config, `[rpki]`, `[bmp]`,
 `[mrt]`, `[flowspec]`, `[event_history]`, `[inbound_admission]`,
 `[security.grpc]`, `[managed_netdevs]`, `[[bfd_profiles]]` definitions, and

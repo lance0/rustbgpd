@@ -215,6 +215,7 @@ fn make_dynamic_manager_config() -> Config {
             runtime_state_dir: "/tmp/rustbgpd-tests".to_string(),
             telemetry: crate::config::TelemetryConfig {
                 prometheus_addr: Some("127.0.0.1:9179".to_string()),
+                dataplane_readiness: false,
                 log_format: crate::config::LogFormatConfig::Json,
                 grpc_tcp: None,
                 grpc_uds: Some(crate::config::GrpcUdsListenerConfig {

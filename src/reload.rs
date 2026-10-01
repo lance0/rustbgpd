@@ -1866,6 +1866,7 @@ fn pin_unreconciled_daemon_runtime_fields(new_config: &mut Config, current: &Con
         .prometheus_addr
         .clone_from(&current.global.telemetry.prometheus_addr);
     new_config.global.telemetry.log_format = current.global.telemetry.log_format;
+    new_config.global.telemetry.dataplane_readiness = current.global.telemetry.dataplane_readiness;
     new_config.flowspec = current.flowspec;
     new_config.rpki.clone_from(&current.rpki);
     new_config.bmp.clone_from(&current.bmp);
@@ -4291,6 +4292,26 @@ mod tests {
         assert_tier_authorized_test_config, tier_authorized_uds_test_config,
     };
     use rustbgpd_telemetry::BgpMetrics;
+
+    #[test]
+    fn dataplane_readiness_remains_startup_only_on_reload() {
+        let current: Config = toml::from_str(
+            r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+[global.telemetry]
+log_format = "json"
+"#,
+        )
+        .unwrap();
+        let mut candidate = current.clone();
+        candidate.global.telemetry.dataplane_readiness = true;
+        assert!(config::diff_config(&current, &candidate).has_restart_required_changes());
+        pin_unreconciled_daemon_runtime_fields(&mut candidate, &current);
+        assert!(!candidate.global.telemetry.dataplane_readiness);
+    }
 
     fn unique_temp_path(name: &str) -> PathBuf {
         // A timestamp suffix is not unique under parallel test load (two
