@@ -71,6 +71,11 @@
 //!   exact coverage; the default requires both EoR and coverage.
 //!   `--flap-rounds N` rounds (default 3, at most 100), per-round
 //!   percentiles + `flapstorm_csv` lines.
+//! - `--converged-rejoin` with `--flapstorm K`: opt-in rustbgpd GR-helper
+//!   cell. Prove retained source routes and fresh survivor coverage while K
+//!   peers are down; finish each rejoin's table/EoR before source replay.
+//!   `RELOADSTALL_REJOIN_METRICS_ADDR` supplies metrics/readiness (default
+//!   `127.0.0.1:9179`). The historical flapstorm CSV is unchanged.
 //! - `RELOADSTALL_HEAP_METRICS_ADDR` (env, flapstorm mode): loopback
 //!   `SocketAddr` of the daemon's metrics endpoint. After each round's RSS
 //!   sample, print `flap N heap allocated_mib=.. active_mib=.. resident_mib=..
@@ -179,7 +184,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use bytes::BytesMut;
-use rustbgpd_wire::capability::{Afi, Capability, Safi};
+use rustbgpd_wire::capability::{Afi, Capability, GracefulRestartFamily, Safi};
 use rustbgpd_wire::constants::{AS_TRANS, HEADER_LEN, MAX_MESSAGE_LEN};
 use rustbgpd_wire::header::peek_message_length;
 use rustbgpd_wire::message::{decode_message, encode_message, Message};
@@ -246,6 +251,8 @@ const HEAP_GAUGES: [(&str, &str); 4] = [
     ("mapped_mib", "jemalloc_mapped_bytes"),
 ];
 const FLAP_RECONNECT_SECS: u64 = 10;
+const REJOIN_GR_SECS: u16 = HOLD_TIME;
+const READINESS_DEADLINE: Duration = Duration::from_millis(250);
 /// Pre-close churn-only CPU sample per flap round (see `run_flapstorm`).
 const BACKGROUND_CPU_WINDOW: Duration = Duration::from_secs(2);
 /// Designated max-prefix trip member (soak mode): always stub 0, which is
@@ -348,10 +355,17 @@ fn take_flap_rounds(args: &mut Vec<String>) -> Result<Option<u32>, String> {
 }
 
 async fn fetch_metrics(addr: SocketAddr, deadline: Instant) -> Result<String, String> {
+    fetch_http(addr, "/metrics", deadline).await
+}
+
+async fn fetch_http(addr: SocketAddr, path: &str, deadline: Instant) -> Result<String, String> {
     let work = async {
         let mut stream = TcpStream::connect(addr).await.map_err(|e| e.to_string())?;
         stream
-            .write_all(b"GET /metrics HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+            .write_all(
+                format!("GET {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+                    .as_bytes(),
+            )
             .await
             .map_err(|e| e.to_string())?;
         let mut response = Vec::new();
@@ -398,7 +412,35 @@ async fn fetch_metrics(addr: SocketAddr, deadline: Instant) -> Result<String, St
     };
     tokio::time::timeout_at(deadline.into(), work)
         .await
-        .map_err(|_| "metrics checkpoint exceeded 5 seconds".to_string())?
+        .map_err(|_| {
+            if path == "/metrics" {
+                "metrics checkpoint exceeded 5 seconds".to_owned()
+            } else {
+                format!("{path} checkpoint exceeded deadline")
+            }
+        })?
+}
+
+async fn watch_readiness(
+    addr: SocketAddr,
+    mut stop: tokio::sync::oneshot::Receiver<()>,
+) -> Result<u64, String> {
+    let mut tick = tokio::time::interval(Duration::from_secs(1));
+    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let mut samples = 0;
+    loop {
+        tokio::select! {
+            _ = &mut stop => return Ok(samples),
+            _ = tick.tick() => {
+                let started = Instant::now();
+                fetch_http(addr, "/readyz", started + READINESS_DEADLINE).await?;
+                if started.elapsed() > READINESS_DEADLINE {
+                    return Err("late readiness success".into());
+                }
+                samples += 1;
+            }
+        }
+    }
 }
 
 async fn fetch_notification_depth(
@@ -994,6 +1036,7 @@ impl GenerationProgress {
 
 struct Ctx {
     t0: Instant,
+    converged_rejoin: bool,
     rejoin_require_eor: bool,
     n_peers: u32,
     // Uniform IPv4-only modes retain their historical per-member size.
@@ -1904,7 +1947,10 @@ async fn establish_stub(ctx: Arc<Ctx>, i: u32, rejoin: bool) -> Result<(Stub, u3
         0 => stub_asn(i),
         shared => shared,
     };
-    let open = stub_open(i, open_asn, dualstack());
+    let mut open = stub_open(i, open_asn, dualstack());
+    if ctx.converged_rejoin {
+        open.capabilities.push(rejoin_gr_capability(rejoin));
+    }
     let bytes = encode_message(&Message::Open(open)).map_err(|e| format!("open encode: {e}"))?;
     let ka = encode_message(&Message::Keepalive).unwrap();
     let (stream, open_sent, retries) = establish_stream_with_retry(
@@ -1924,7 +1970,21 @@ async fn establish_stub(ctx: Arc<Ctx>, i: u32, rejoin: bool) -> Result<(Stub, u3
         .established
         .store(true, Ordering::Relaxed);
 
-    Ok((start_stub(ctx, i, stream, rejoin), retries))
+    let track_rejoin = rejoin || ctx.converged_rejoin;
+    Ok((start_stub(ctx, i, stream, track_rejoin), retries))
+}
+
+fn rejoin_gr_capability(restart_state: bool) -> Capability {
+    Capability::GracefulRestart {
+        restart_state,
+        notification: false,
+        restart_time: REJOIN_GR_SECS,
+        families: vec![GracefulRestartFamily {
+            afi: Afi::Ipv4,
+            safi: Safi::Unicast,
+            forwarding_preserved: true,
+        }],
+    }
 }
 
 fn start_stub(ctx: Arc<Ctx>, i: u32, stream: TcpStream, track_rejoin: bool) -> Stub {
@@ -2508,13 +2568,13 @@ async fn wait_flap_completion(ctx: &Ctx, first: usize, round: u32, phase: &str) 
     }
 }
 
-async fn wait_rejoin_completion(ctx: &Ctx, k: u32, round: u32) -> Vec<f64> {
+async fn wait_rejoin_completion(ctx: &Ctx, first: u32, end: u32, round: u32) -> Vec<f64> {
     let mut last_unique = 0;
     let mut last_progress = Instant::now();
     loop {
-        let mut values = Vec::with_capacity(k as usize);
+        let mut values = Vec::with_capacity((end - first) as usize);
         let mut unique = 0;
-        for i in 0..k as usize {
+        for i in first as usize..end as usize {
             let guard = ctx.obs[i].rejoin.lock().unwrap();
             let rejoin = guard.as_ref().expect("rejoin armed before reader");
             unique += rejoin.table.unique;
@@ -2527,7 +2587,7 @@ async fn wait_rejoin_completion(ctx: &Ctx, k: u32, round: u32) -> Vec<f64> {
                 values.push(seconds);
             }
         }
-        if values.len() == k as usize {
+        if values.len() == (end - first) as usize {
             return values;
         }
         if unique > last_unique {
@@ -2537,12 +2597,26 @@ async fn wait_rejoin_completion(ctx: &Ctx, k: u32, round: u32) -> Vec<f64> {
             eprintln!(
                 "FAIL: flap {round} rejoin stalled: {}/{} complete",
                 values.len(),
-                k
+                end - first
             );
             std::process::exit(1);
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
+}
+
+async fn report_rejoin_completion(ctx: &Ctx, k: u32, round: u32) -> Stats {
+    let values = wait_rejoin_completion(ctx, 0, k, round).await;
+    for (i, seconds) in values.iter().enumerate() {
+        let rejoin = ctx.obs[i].rejoin.lock().unwrap();
+        let progress = rejoin.as_ref().unwrap();
+        let (eor, eor_before_full_table) = progress.eor_us.map_or_else(
+            || ("absent", "absent".to_owned()),
+            |eor| ("present", (eor < progress.complete_us.unwrap()).to_string()),
+        );
+        println!("flap {round} peer {i} rejoin_complete_s={seconds:.6} eor_before_full_table={eor_before_full_table} eor={eor}");
+    }
+    stats_line(&format!("flap {round} rejoin_complete_s"), values)
 }
 
 /// Arm every survivor's shared bitmap to track `mode` over the flapped
@@ -2706,6 +2780,199 @@ fn disarm_survivors(ctx: &Ctx, first: usize) {
     for observer in ctx.obs.iter().skip(first) {
         observer.flap_mode.store(FLAP_OFF, Ordering::Release);
     }
+}
+
+fn gr_state_matches(body: &str, k: u32, per_peer: u32, retained: bool) -> Result<bool, String> {
+    let mut matches = true;
+    for i in 0..k {
+        let peer = stub_addr(i);
+        let active = metric_value(body, &format!("bgp_gr_active_peers{{peer=\"{peer}\"}}"))?;
+        let stale = metric_value(body, &format!("bgp_gr_stale_routes{{peer=\"{peer}\"}}"))?;
+        matches &= active == u64::from(retained)
+            && stale == if retained { u64::from(per_peer) } else { 0 };
+    }
+    Ok(matches)
+}
+
+fn converged_integrity(
+    ctx: &Ctx,
+    k: u32,
+    withdrawn: &[u64],
+    disconnected: bool,
+) -> Result<(), String> {
+    for (i, observer) in ctx.obs.iter().enumerate() {
+        if observer.established.load(Ordering::Relaxed) != (!disconnected || i >= k as usize) {
+            return Err(format!("unexpected session state for peer {i}"));
+        }
+        if i >= k as usize && observer.base_withdrawn.load(Ordering::Relaxed) != withdrawn[i] {
+            return Err(format!("survivor {i} lost base prefixes"));
+        }
+    }
+    if ctx.parse_errors.load(Ordering::Relaxed) != 0 {
+        return Err("daemon UPDATE decode error".into());
+    }
+    Ok(())
+}
+
+fn current_rejoin_tables_complete(ctx: &Ctx, first: u32, end: u32) -> bool {
+    (first..end).all(|i| {
+        ctx.obs[i as usize]
+            .rejoin
+            .lock()
+            .unwrap()
+            .as_ref()
+            .is_some_and(|p| {
+                p.eor_us.is_some() && p.table.unique == p.table.target && p.complete_us.is_some()
+            })
+    })
+}
+
+async fn replay_rejoined_sources(ctx: &Ctx, stubs: &[Stub], k: u32) -> Result<(), String> {
+    if !current_rejoin_tables_complete(ctx, 0, k) {
+        return Err("joiner lacks exact current table/EoR before source replay".into());
+    }
+    for i in 0..k {
+        for message in announced_msgs(ctx, i)
+            .into_iter()
+            .chain([withdraw_msg(&[])])
+        {
+            stubs[i as usize]
+                .tx
+                .send(message.into())
+                .await
+                .map_err(|_| format!("source {i} replay send failed"))?;
+        }
+    }
+    Ok(())
+}
+
+/// Two survivors have disjoint source exclusions, so their fresh snapshots
+/// jointly prove coverage of the whole current table, including retained keys.
+async fn verify_converged_table(
+    ctx: &Ctx,
+    stubs: &[Stub],
+    k: u32,
+    round: u32,
+    phase: &str,
+) -> Result<(), String> {
+    for i in k..k + 2 {
+        *ctx.obs[i as usize].rejoin.lock().unwrap() =
+            Some(RejoinProgress::new(ctx, i, now_us(ctx)));
+        stubs[i as usize]
+            .tx
+            .send(Message::RouteRefresh(RouteRefreshMessage::new(Afi::Ipv4, Safi::Unicast)).into())
+            .await
+            .map_err(|_| format!("survivor {i} refresh send failed"))?;
+    }
+    wait_rejoin_completion(ctx, k, k + 2, round).await;
+    if !current_rejoin_tables_complete(ctx, k, k + 2) {
+        return Err("fresh survivor table/EoR proof incomplete".into());
+    }
+    println!("converged_table_checkpoint,round={round},phase={phase},observers={k}:{},unique={},eor=present", k + 1, ctx.totals[0] - ctx.per_peer);
+    for i in k..k + 2 {
+        *ctx.obs[i as usize].rejoin.lock().unwrap() = None;
+    }
+    Ok(())
+}
+
+/// Harness-only GR helper cell: complete every initial snapshot before any
+/// source replay can contribute to the measured reconnect coverage.
+async fn run_converged_rejoin(
+    ctx: &Arc<Ctx>,
+    stubs: &mut [Stub],
+    k: u32,
+    rounds: u32,
+    pid: i32,
+    addr: SocketAddr,
+) -> Result<(), String> {
+    println!("converged_rejoin_csv_header,round,peers_total,peers_flapped,prefixes,rejoin_p50_s,rejoin_max_s,survivor_maxgap_ms,readiness_samples,rss_mib,sessions_up,parse_errors");
+    for round in 1..=rounds {
+        let withdrawn: Vec<u64> = ctx
+            .obs
+            .iter()
+            .map(|o| o.base_withdrawn.load(Ordering::Relaxed))
+            .collect();
+        converged_integrity(ctx, k, &withdrawn, false)?;
+        let (stop, stopped) = tokio::sync::oneshot::channel();
+        let readiness = tokio::spawn(watch_readiness(addr, stopped));
+        // Abort both halves together, then join the old tasks before a new
+        // session can publish established=true in their shared observer.
+        for stub in stubs.iter().take(k as usize) {
+            stub.reader.abort();
+            stub.writer.abort();
+        }
+        for (i, stub) in stubs.iter_mut().enumerate().take(k as usize) {
+            let _ = (&mut stub.reader).await;
+            let _ = (&mut stub.writer).await;
+            ctx.obs[i].established.store(false, Ordering::Relaxed);
+        }
+        tokio::time::sleep(Duration::from_secs(FLAP_RECONNECT_SECS)).await;
+        let retained = fetch_metrics(addr, Instant::now() + METRICS_DEADLINE).await?;
+        if !gr_state_matches(&retained, k, ctx.per_peer, true)? {
+            return Err("disconnected peers do not retain every source prefix in active GR".into());
+        }
+        verify_converged_table(ctx, stubs, k, round, "disconnected").await?;
+        converged_integrity(ctx, k, &withdrawn, true)?;
+        let retained = fetch_metrics(addr, Instant::now() + METRICS_DEADLINE).await?;
+        if !gr_state_matches(&retained, k, ctx.per_peer, true)? {
+            return Err("GR retention expired before reconnect".into());
+        }
+        let rejoin_started = now_us(ctx);
+        let mut retries = 0;
+        for i in 0..k {
+            let (stub, attempts) = establish_stub(Arc::clone(ctx), i, true).await?;
+            retries += attempts;
+            stubs[i as usize] = stub;
+        }
+        println!("converged_rejoin {round} reconnect transport_retries={retries}");
+        let rejoin = report_rejoin_completion(ctx, k, round).await;
+        let rejoin_finished = now_us(ctx);
+        converged_integrity(ctx, k, &withdrawn, false)?;
+        // Only now refresh retained input state and send its EoR. These writes
+        // are deliberately outside the OPEN-to-full-table measurement.
+        replay_rejoined_sources(ctx, stubs, k).await?;
+        let deadline = Instant::now() + STALL_WINDOW;
+        loop {
+            let body = fetch_metrics(addr, deadline.min(Instant::now() + METRICS_DEADLINE)).await?;
+            if gr_state_matches(&body, k, ctx.per_peer, false)? {
+                break;
+            }
+            if Instant::now() >= deadline {
+                return Err("source replay/EoR did not settle GR".into());
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        verify_converged_table(ctx, stubs, k, round, "settled").await?;
+        converged_integrity(ctx, k, &withdrawn, false)?;
+        if !current_rejoin_tables_complete(ctx, 0, k) {
+            return Err("joiner lost exact table coverage after GR settlement".into());
+        }
+        let _ = stop.send(());
+        let samples = readiness
+            .await
+            .map_err(|e| format!("readiness task: {e}"))??;
+        if samples == 0 {
+            return Err("no readiness samples".into());
+        }
+        let gap = stats_line(
+            &format!("converged_rejoin {round} survivor_maxgap_ms"),
+            (k as usize..ctx.obs.len())
+                .map(|i| max_gap_ms(ctx, i, rejoin_started, rejoin_finished, true))
+                .collect(),
+        );
+        println!(
+            "converged_rejoin_csv,{round},{},{k},{},{:.6},{:.6},{:.6},{samples},{},{},0",
+            ctx.n_peers,
+            ctx.totals[0],
+            rejoin.p50,
+            rejoin.max,
+            gap.max,
+            rss_mib(pid),
+            ctx.n_peers
+        );
+        tokio::time::sleep(Duration::from_secs(10)).await;
+    }
+    Ok(())
 }
 
 /// `--flapstorm K` mode: the alternative to the reload loop (see the crate
@@ -2918,17 +3185,7 @@ async fn run_flapstorm(
             }
         }
         wait_flap_completion(ctx, k as usize, round, "reannounce").await;
-        let rejoin_values = wait_rejoin_completion(ctx, k, round).await;
-        for (i, seconds) in rejoin_values.iter().enumerate() {
-            let rejoin = ctx.obs[i].rejoin.lock().unwrap();
-            let progress = rejoin.as_ref().unwrap();
-            let (eor, eor_before_full_table) = progress.eor_us.map_or_else(
-                || ("absent", "absent".to_owned()),
-                |eor| ("present", (eor < progress.complete_us.unwrap()).to_string()),
-            );
-            println!("flap {round} peer {i} rejoin_complete_s={seconds:.6} eor_before_full_table={eor_before_full_table} eor={eor}");
-        }
-        stats_line(&format!("flap {round} rejoin_complete_s"), rejoin_values);
+        report_rejoin_completion(ctx, k, round).await;
         let reann_s: Vec<f64> = survivors
             .clone()
             .filter_map(|i| completion_us(ctx, i))
@@ -3443,6 +3700,10 @@ fn no_churn_allowed(
         && ibgp_rr.is_none()
 }
 
+fn converged_rejoin_allowed(flapstorm: Option<u32>, reloads: u32, other_mode: bool) -> bool {
+    flapstorm.is_some() && reloads == 0 && !other_mode
+}
+
 fn no_churn_peer_count_allowed(n_peers: u32, no_churn: bool) -> bool {
     n_peers >= if no_churn { 2 } else { CHURNERS }
 }
@@ -3521,6 +3782,7 @@ fn main() {
     let mut a: Vec<String> = std::env::args().collect();
     let convergence_only = take_single_flag(&mut a, "--convergence-only");
     let no_churn = take_single_flag(&mut a, "--no-churn");
+    let converged_rejoin = take_single_flag(&mut a, "--converged-rejoin");
     let rejoin_coverage_only = take_single_flag(&mut a, "--rejoin-coverage-only");
     // --flapstorm K may appear anywhere; strip it before positional parsing.
     let mut flapstorm: Option<u32> = None;
@@ -3553,7 +3815,7 @@ fn main() {
             "usage: reloadstall <n_peers> <total_prefixes> <daemon_port> <daemon_pid> \
              <policy_live> <policy_a> <policy_b> <reloads> <control_secs> \
              [changed_peers] [reload_cmd] [--flapstorm K [--flap-rounds N] [--rejoin-coverage-only]]\n\
-             [--convergence-only] [--no-churn]\n\
+             [--convergence-only] [--no-churn] [--converged-rejoin]\n\
              reload_cmd: run `sh -c <reload_cmd>` per reload instead of SIGHUP-ing <daemon_pid>\n\
              daemon_pid 0: skip in-harness RSS sampling (outer sampler owns it); \
              requires reload_cmd, --flapstorm, or --convergence-only\n\
@@ -3847,6 +4109,29 @@ fn main() {
         }
         None => vec![Vec::new(); n_peers as usize],
     };
+    assert!(
+        !converged_rejoin || converged_rejoin_allowed(flapstorm, reloads,
+            rejoin_coverage_only || changed_peers != n_peers || reload_cmd.is_some()
+                || convergence_only || no_churn || dualstack_enabled || ibgp_rr.is_some()
+                || trip_every > 0 || overlap_file.is_some() || filter_count > 0
+                || notification_metrics_addr.is_some() || heap_metrics_addr.is_some()
+                || std::env::var_os("RELOADSTALL_FAILOVER_METRICS_ADDR").is_some()),
+        "--converged-rejoin requires zero-reload, disjoint all-peer IPv4 --flapstorm without other measurement modes"
+    );
+    let rejoin_metrics_addr = std::env::var("RELOADSTALL_REJOIN_METRICS_ADDR").ok();
+    assert!(
+        converged_rejoin || rejoin_metrics_addr.is_none(),
+        "RELOADSTALL_REJOIN_METRICS_ADDR requires --converged-rejoin"
+    );
+    let rejoin_metrics_addr: SocketAddr = rejoin_metrics_addr
+        .as_deref()
+        .unwrap_or("127.0.0.1:9179")
+        .parse()
+        .expect("RELOADSTALL_REJOIN_METRICS_ADDR must be a SocketAddr");
+    assert!(
+        rejoin_metrics_addr.ip().is_loopback() && rejoin_metrics_addr.port() > 0,
+        "RELOADSTALL_REJOIN_METRICS_ADDR must be loopback with nonzero port"
+    );
 
     let rt = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(24)
@@ -3856,6 +4141,7 @@ fn main() {
     rt.block_on(async move {
         let ctx = Arc::new(Ctx {
             t0: Instant::now(),
+            converged_rejoin,
             rejoin_require_eor: !rejoin_coverage_only,
             n_peers,
             per_peer,
@@ -3959,6 +4245,9 @@ fn main() {
                 for m in announce6_msgs(i, &own_slice6(&ctx, i)) {
                     stubs[i as usize].tx.send(m.into()).await.unwrap();
                 }
+            }
+            if converged_rejoin {
+                stubs[i as usize].tx.send(withdraw_msg(&[]).into()).await.unwrap();
             }
         }
         // Require every observer's table-minus-own-slice; abort stalls (LAN-449).
@@ -4196,17 +4485,26 @@ fn main() {
                 if up != 700 || completed != 700 || errors != 0 { eprintln!("FAIL: initial receipt integrity: sessions={up}, completions={completed}, parse_errors={errors}"); std::process::exit(1); }
                 notification_checkpoint(addr, ("initial_drained", 0, up, completed, expected as u32, errors), &mut prior_high).await;
             }
-            run_flapstorm(
-                &ctx,
-                &mut stubs,
-                k,
-                flap_rounds,
-                pid,
-                notification_metrics_addr,
-                heap_metrics_addr,
-                &mut prior_high,
-            )
-            .await;
+            if converged_rejoin {
+                if let Err(error) = run_converged_rejoin(
+                    &ctx, &mut stubs, k, flap_rounds, pid, rejoin_metrics_addr,
+                ).await {
+                    eprintln!("FAIL: converged rejoin: {error}");
+                    std::process::exit(1);
+                }
+            } else {
+                run_flapstorm(
+                    &ctx,
+                    &mut stubs,
+                    k,
+                    flap_rounds,
+                    pid,
+                    notification_metrics_addr,
+                    heap_metrics_addr,
+                    &mut prior_high,
+                )
+                .await;
+            }
             println!("done rss_mib={}", rss_mib(pid));
             let parse_errors = ctx.parse_errors.load(Ordering::Relaxed);
             if parse_errors > 0 {
@@ -4806,6 +5104,7 @@ mod tests {
     fn finish_test_ctx() -> Arc<Ctx> {
         Arc::new(Ctx {
             t0: Instant::now(),
+            converged_rejoin: false,
             rejoin_require_eor: true,
             n_peers: CHURNERS,
             per_peer: 1,
@@ -5852,6 +6151,7 @@ mod tests {
         // 12 peers x 2 prefixes, 2 flapped (window [0, 4)); peers 4..12 churn.
         let ctx_with = |extras: Vec<Vec<u32>>| Ctx {
             t0: Instant::now(),
+            converged_rejoin: false,
             rejoin_require_eor: true,
             n_peers: 12,
             per_peer: 2,
@@ -6528,6 +6828,199 @@ mod tests {
     }
 
     #[test]
+    fn converged_rejoin_requires_helper_state_for_each_peer() {
+        let sample = |i, active, stale| {
+            format!("bgp_gr_active_peers{{peer=\"{}\"}} {active}\nbgp_gr_stale_routes{{peer=\"{}\"}} {stale}\n", stub_addr(i), stub_addr(i))
+        };
+        let retained = sample(0, 1, 4) + &sample(1, 1, 4);
+        assert_eq!(gr_state_matches(&retained, 2, 4, true), Ok(true));
+        assert_eq!(
+            gr_state_matches(&(sample(0, 1, 4) + &sample(1, 0, 4)), 2, 4, true),
+            Ok(false),
+            "stale routes without active helper state are insufficient"
+        );
+        assert_eq!(
+            gr_state_matches(&(sample(0, 1, 4) + &sample(1, 1, 3)), 2, 4, true),
+            Ok(false),
+            "one missing source key must fail"
+        );
+        assert!(
+            gr_state_matches(&sample(0, 1, 4), 2, 4, true).is_err(),
+            "missing peer is not zero"
+        );
+        assert!(
+            gr_state_matches(&(retained.clone() + &sample(0, 1, 4)), 2, 4, true).is_err(),
+            "duplicate proof must fail"
+        );
+        assert!(gr_state_matches(&retained.replace(" 4\n", " NaN\n"), 2, 4, true).is_err());
+        assert_eq!(
+            gr_state_matches(&(sample(0, 0, 0) + &sample(1, 0, 0)), 2, 4, false),
+            Ok(true)
+        );
+        assert_eq!(
+            gr_state_matches(&retained, 2, 4, false),
+            Ok(false),
+            "source EoR must clear helper state"
+        );
+    }
+
+    #[test]
+    fn converged_rejoin_rejects_survivor_damage_and_latched_incomplete_coverage() {
+        let ctx = finish_test_ctx();
+        for (i, o) in ctx.obs.iter().enumerate() {
+            o.established.store(i >= 2, Ordering::Relaxed);
+        }
+        let withdrawn = vec![0; ctx.obs.len()];
+        assert!(converged_integrity(&ctx, 2, &withdrawn, true).is_ok());
+        ctx.obs[2].established.store(false, Ordering::Relaxed);
+        assert!(converged_integrity(&ctx, 2, &withdrawn, true).is_err());
+        ctx.obs[2].established.store(true, Ordering::Relaxed);
+        ctx.obs[2].base_withdrawn.store(1, Ordering::Relaxed);
+        assert!(converged_integrity(&ctx, 2, &withdrawn, true).is_err());
+        ctx.obs[2].base_withdrawn.store(0, Ordering::Relaxed);
+        ctx.parse_errors.store(1, Ordering::Relaxed);
+        assert!(converged_integrity(&ctx, 2, &withdrawn, true).is_err());
+
+        let mut proof = RejoinProgress::new(&ctx, 2, 10);
+        let prefixes: Vec<_> = (0..CHURNERS).filter(|&i| i != 2).map(base_prefix).collect();
+        proof.observe(&prefixes, &[], false, CHURNERS, 20);
+        *ctx.obs[2].rejoin.lock().unwrap() = Some(proof);
+        assert!(
+            !current_rejoin_tables_complete(&ctx, 2, 3),
+            "full bitmap without EoR must fail"
+        );
+        let mut proof = ctx.obs[2].rejoin.lock().unwrap();
+        proof
+            .as_mut()
+            .unwrap()
+            .observe(&[], &[], true, CHURNERS, 30);
+        drop(proof);
+        assert!(current_rejoin_tables_complete(&ctx, 2, 3));
+        let mut proof = ctx.obs[2].rejoin.lock().unwrap();
+        proof
+            .as_mut()
+            .unwrap()
+            .observe(&[], &[base_prefix(0)], false, CHURNERS, 40);
+        assert!(
+            proof.as_ref().unwrap().complete_us.is_some(),
+            "first completion remains latched"
+        );
+        drop(proof);
+        assert!(
+            !current_rejoin_tables_complete(&ctx, 2, 3),
+            "latched completion cannot conceal a lost key"
+        );
+    }
+
+    #[test]
+    fn converged_rejoin_capability_and_mode_contract() {
+        assert!(converged_rejoin_allowed(Some(1), 0, false));
+        assert!(!converged_rejoin_allowed(None, 0, false));
+        assert!(!converged_rejoin_allowed(Some(1), 1, false));
+        assert!(!converged_rejoin_allowed(Some(1), 0, true));
+        for restart_state in [false, true] {
+            let mut open = stub_open(1, stub_asn(1), false);
+            open.capabilities.push(rejoin_gr_capability(restart_state));
+            let bytes = encode_message(&Message::Open(open.clone()))
+                .unwrap()
+                .freeze();
+            assert_eq!(
+                decode_message(&mut bytes.clone(), MAX_MESSAGE_LEN).unwrap(),
+                Message::Open(open)
+            );
+            let Capability::GracefulRestart {
+                restart_state: actual,
+                families,
+                ..
+            } = rejoin_gr_capability(restart_state)
+            else {
+                panic!("GR capability required")
+            };
+            assert_eq!(actual, restart_state);
+            assert_eq!(
+                families,
+                vec![GracefulRestartFamily {
+                    afi: Afi::Ipv4,
+                    safi: Safi::Unicast,
+                    forwarding_preserved: true
+                }]
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn converged_replay_rejects_lost_coverage_before_any_source_write() {
+        let ctx = finish_test_ctx();
+        let mut progress = RejoinProgress::new(&ctx, 0, 10);
+        let prefixes: Vec<_> = (1..CHURNERS).map(base_prefix).collect();
+        progress.observe(&prefixes, &[], true, CHURNERS, 20);
+        progress.observe(&[], &[base_prefix(1)], false, CHURNERS, 30);
+        assert!(
+            progress.complete_us.is_some(),
+            "first completion is latched"
+        );
+        *ctx.obs[0].rejoin.lock().unwrap() = Some(progress);
+        let (tx, mut rx) = mpsc::channel(4);
+        let stubs = [Stub {
+            tx,
+            reader: tokio::spawn(async { Ok(()) }),
+            writer: tokio::spawn(async { Ok(()) }),
+            refreshes: Arc::new(Mutex::new(tokio::task::JoinSet::new())),
+        }];
+        assert!(replay_rejoined_sources(&ctx, &stubs, 1).await.is_err());
+        assert!(
+            matches!(rx.try_recv(), Err(mpsc::error::TryRecvError::Empty)),
+            "source replay must not repair missing measurement coverage"
+        );
+        ctx.obs[0].rejoin.lock().unwrap().as_mut().unwrap().observe(
+            &[base_prefix(1)],
+            &[],
+            false,
+            CHURNERS,
+            40,
+        );
+        replay_rejoined_sources(&ctx, &stubs, 1).await.unwrap();
+        assert_eq!(
+            rx.try_recv().unwrap().message,
+            announced_msgs(&ctx, 0).remove(0)
+        );
+        assert_eq!(rx.try_recv().unwrap().message, withdraw_msg(&[]));
+        let [stub] = stubs;
+        stub.reader.await.unwrap().unwrap();
+        stub.writer.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn converged_readiness_rejects_http_failure_and_timeout() {
+        for response in [
+            Some(b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\n\r\n".as_slice()),
+            None,
+        ] {
+            let listener = tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+                .await
+                .unwrap();
+            let addr = listener.local_addr().unwrap();
+            let server = tokio::spawn(async move {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut request = [0; 128];
+                assert!(socket.read(&mut request).await.unwrap() > 0);
+                if let Some(response) = response {
+                    socket.write_all(response).await.unwrap();
+                } else {
+                    std::future::pending::<()>().await;
+                }
+            });
+            assert!(
+                fetch_http(addr, "/readyz", Instant::now() + Duration::from_millis(20))
+                    .await
+                    .is_err()
+            );
+            server.abort();
+            let _ = server.await;
+        }
+    }
+
+    #[test]
     fn rejoin_without_eor_requires_exact_current_coverage() {
         let mut ctx = finish_test_ctx();
         let ctx = Arc::get_mut(&mut ctx).unwrap();
@@ -6625,6 +7118,7 @@ mod tests {
     fn family_gap_only_counts_that_family() {
         let ctx = Ctx {
             t0: Instant::now(),
+            converged_rejoin: false,
             rejoin_require_eor: true,
             n_peers: 1,
             per_peer: 1,

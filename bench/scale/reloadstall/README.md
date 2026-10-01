@@ -115,6 +115,7 @@ reloadstall <n_peers> <total_prefixes> <daemon_port> <daemon_pid> \
     <policy_live> <policy_a> <policy_b> <reloads> <control_secs> \
     [changed_peers] [reload_cmd] [--flapstorm K [--flap-rounds N]]
     [--convergence-only] [--no-churn]
+    [--converged-rejoin]
 ```
 
 - `n_peers` — stub sessions to establish (`total_prefixes` must divide evenly).
@@ -165,6 +166,54 @@ reloadstall <n_peers> <total_prefixes> <daemon_port> <daemon_pid> \
   still fails the run.
 - `--flap-rounds N` — flapstorm round count, `1..=100` (default 3, the
   historical receipt shape). Valid only with `--flapstorm`.
+- `--converged-rejoin` — opt-in rustbgpd GR-helper qualification with
+  `--flapstorm K`. Generate its matching scenario with
+  `GEN_CONVERGED_REJOIN=1`. It requires zero reloads, the disjoint all-peer
+  IPv4 route-server shape, and EoR completion. Other flapstorm instruments,
+  overlap, filtering, mixed export policies, iBGP-RR, and coverage-only
+  completion are rejected. The historical flapstorm mode and CSV stay intact.
+  `RELOADSTALL_REJOIN_METRICS_ADDR` selects the loopback metrics/readiness
+  endpoint, default `127.0.0.1:9179`.
+
+  Initial OPENs advertise IPv4 GR with R=0; reconnects set R=1 and F=1.
+  The fixture declares retained control-plane input, with a 180-second
+  disconnected retention cap and 360-second post-reconnect EoR window.
+  It makes no forwarding-survival claim. Every round closes K sockets,
+  holds them down for 10 seconds, and requires each disconnected peer's
+  helper-active flag and exact stale-source-prefix count. Two surviving
+  observers with disjoint own slices then request fresh snapshots; both
+  must receive EoR and exact table-minus-own coverage. Together these
+  snapshots cover the whole retained table. Retention is checked again
+  immediately before reconnect.
+
+  No reconnecting source reannounces until **every** joiner has completed
+  its successful-OPEN → first-EoR-and-exact-table measurement. Only then
+  is current coverage checked again before the first replay message, so
+  a latched completion cannot conceal a lost key. Source slices and their
+  EoRs are then sent to settle GR, followed by fresh
+  survivor snapshots and current joiner-coverage checks. Survivor session
+  loss, any new base-prefix withdrawal, decode errors, or incomplete GR
+  settlement fail the run. `/readyz` is sampled once per second throughout
+  each round; non-200 responses and responses beyond 250 ms fail before
+  the round's receipt. These probes and the snapshot proofs add load.
+
+  Per-peer `rejoin_complete_s` lines retain the existing EoR-order signal.
+  `converged_table_checkpoint` records disconnected and settled proofs;
+  `converged_rejoin_csv` records round, fleet size, K, prefixes, rejoin
+  p50/max, survivor maximum inter-UPDATE gap during reconnect, readiness
+  sample count, RSS, sessions, and decode errors. Survivor gap measures
+  continuing churn; unchanged retained routes need no reannouncement.
+  A small functional run qualifies the harness, not K=1/K=50 performance.
+  That comparison and its optimization decision require a quiet host.
+
+  Example, after separately starting the daemon from the generated config:
+
+  ```text
+  GEN_CONVERGED_REJOIN=1 python3 bench/scale/reloadstall/gen-scenario.py 12 /tmp/rejoin 1790
+  ./target/scale/reloadstall 12 240 1790 <daemon_pid> \
+      /tmp/rejoin/member.rpol /tmp/rejoin/gen-a.rpol /tmp/rejoin/gen-b.rpol \
+      0 1 --flapstorm 2 --flap-rounds 1 --converged-rejoin
+  ```
 - `RELOADSTALL_HEAP_METRICS_ADDR` — optional, valid only with `--flapstorm`;
   a loopback socket address with a nonzero port for the daemon's Prometheus
   endpoint. After each round's `rss_mib` sample the harness scrapes it and
