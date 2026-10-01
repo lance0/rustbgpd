@@ -1616,19 +1616,25 @@ available. Routes without Prefix-SID keep their existing JSON shape.
 
 Each SID can also carry optional `reconstructed_sid` (field 5), restoring a
 Function from the high-order bits of the route's label: a single 20-bit VPN
-label or the corresponding 24-bit EVPN service field. MAC/IP L2 and L3
+label or the applicable EVPN service field. MAC/IP L2 and L3
 services use label 1 and label 2 respectively; L3 requires an IP address.
-Ethernet A-D per EVI uses its L2 label, IP Prefix uses its L3 label, and IMET
-uses a single ingress-replication PMSI label. The raw `sid_value` stays unchanged.
+Ethernet A-D per EVI uses its L2 label and IP Prefix uses its L3 label; these
+EVPN labels supply up to 24 Function bits. IMET uses a single
+ingress-replication (`0x06`) PMSI label for up to 24 Function bits or an SRv6
+P2MP (`0x0d`) PMSI label for up to 20 high-order Function bits
+([RFC 10018 §4.1.1.1.2](https://www.rfc-editor.org/rfc/rfc10018.html#section-4.1.1.1.2)).
+The raw `sid_value` stays unchanged.
 Text labels the derived value `reconstructed-sid`; JSON omits the field when
 it is unavailable, including when reading an older daemon or event record.
 
 Reconstruction requires exactly one SID Structure, a nonzero transposition
 wholly inside its Function, valid bounds, and zero advertised bits in the
 vacated slice. Missing or ambiguous labels/structures, no transposition, and
-nonzero Argument lengths leave it absent. Argument composition involving
-another route (such as Ethernet A-D per ES plus IMET) is outside this per-route
-view; use the explicit [EVPN Argument pair inspection](#inspect-an-explicit-srv6-argument-pair).
+nonzero Argument lengths leave it absent. A missing or unsupported IMET PMSI
+tunnel type also leaves a transposed Function unavailable. Argument composition
+involving another route (such as Ethernet A-D per ES plus IMET) is outside this
+per-route view; use the explicit
+[EVPN Argument pair inspection](#inspect-an-explicit-srv6-argument-pair).
 
 This is attribute inspection. It does not validate endpoint behavior against
 the route family, select a service, originate SRv6 routes, or program forwarding.
@@ -2242,6 +2248,11 @@ pair request and omits its `sid` when no candidate can be computed.
 | `CONFLICT` / `conflict` | Both relevant Argument lengths are nonzero and differ; no candidate SID. This concerns the requested pair, not route selection. |
 | `UNAVAILABLE` / `unavailable` | Required SID, structure, label or transposition input cannot be used; no candidate SID. |
 | `AMBIGUOUS` / `ambiguous` | Multiple SID entries, structures or label sources prevent a unique result; no candidate SID. |
+
+For transposed IMET Function bits, inspection uses the same PMSI label limits
+as the per-route view: 24 bits for ingress replication (`0x06`) and 20 high-order
+bits for SRv6 P2MP (`0x0d`). A missing or unsupported PMSI tunnel type makes
+the Function unavailable; duplicate label sources remain ambiguous.
 
 This is alpha, read-only RFC 9819 section 3.3 inspection. The association is
 always `caller_selected`: computation is conditional on the caller choosing

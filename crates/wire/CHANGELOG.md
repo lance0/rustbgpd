@@ -5,6 +5,10 @@ and workspace changes remain in the repository-level `CHANGELOG.md`.
 
 ## 0.23.0 - Unreleased
 
+- Add `PmsiTunnelType::evpn_srv6_function_bits` for the EVPN IMET
+  Function transposition capacities: 24 bits for ingress replication and
+  the high-order 20 bits for SRv6 P2MP. Raw PMSI fields remain unchanged.
+
 - Add typed RFC 9251 Type 6 SMET NLRI and flags-free route keys for
   reflector use. Source/group wildcards and independent originator families
   round-trip with every reserved flag bit preserved. Types 7–11 remain

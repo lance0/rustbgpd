@@ -102,6 +102,20 @@ impl PmsiTunnelType {
         }
     }
 
+    /// Function transposition capacity for an EVPN IMET `SRv6` service SID.
+    ///
+    /// RFC 9252 section 6.3 uses all 24 label bits for ingress replication;
+    /// RFC 10018 section 4.1.1.1.2 uses the high-order 20 for `SRv6` P2MP.
+    /// The label is still stored as a raw 24-bit field in both cases.
+    #[must_use]
+    pub const fn evpn_srv6_function_bits(self) -> Option<u8> {
+        match self {
+            Self::IngressReplication => Some(24),
+            Self::Other(0x0d) => Some(20),
+            _ => None,
+        }
+    }
+
     /// Decode from a wire octet.
     #[must_use]
     pub fn from_u8(v: u8) -> Self {
@@ -319,6 +333,21 @@ impl PmsiTunnel {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn evpn_srv6_function_capacity_is_specific_to_tunnel_type() {
+        for value in 0..=u8::MAX {
+            let expected = match value {
+                6 => Some(24),
+                0x0d => Some(20),
+                _ => None,
+            };
+            assert_eq!(
+                PmsiTunnelType::from_u8(value).evpn_srv6_function_bits(),
+                expected
+            );
+        }
+    }
 
     fn roundtrip(t: &PmsiTunnel) {
         let mut buf = Vec::new();

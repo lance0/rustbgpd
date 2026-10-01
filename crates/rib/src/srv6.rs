@@ -1,7 +1,7 @@
-//! RFC 9252 service SID eligibility, separate from UPDATE framing/disposition.
+//! `SRv6` service SID eligibility, separate from UPDATE framing/disposition.
 
 use rustbgpd_wire::{
-    Afi, EvpnRoute, PathAttribute, PmsiTunnelType, Safi, Srv6SidInformation, Srv6SidStructure,
+    Afi, EvpnRoute, PathAttribute, Safi, Srv6SidInformation, Srv6SidStructure,
     decode_prefix_sid_services,
 };
 
@@ -37,7 +37,7 @@ enum Transposition {
     Argument(u8),
 }
 
-/// Interpret only the service encodings specified by RFC 9252 sections 5/6.
+/// Interpret the supported RFC 9252 and RFC 10018 service encodings.
 /// The inspection model preserves first-service and unknown-type behavior.
 /// Ordinary routes do not allocate; SRv6-bearing checks use its decoded vectors.
 fn service_eligible(
@@ -118,15 +118,12 @@ fn service_transposition(
                 }))
             }
             (EvpnRoute::Imet(_), 6) => {
-                let ingress_replication = attributes
+                let width = attributes
                     .iter()
                     .find_map(PathAttribute::pmsi_tunnel)
-                    .is_some_and(|pmsi| pmsi.tunnel_type == PmsiTunnelType::IngressReplication);
-                Some(Transposition::Function(if ingress_replication {
-                    24
-                } else {
-                    0
-                }))
+                    .and_then(|pmsi| pmsi.tunnel_type.evpn_srv6_function_bits())
+                    .unwrap_or(0);
+                Some(Transposition::Function(width))
             }
             _ => None,
         },
@@ -279,7 +276,11 @@ pub(crate) fn inspect_argument_pair(
         Ok(label) => label,
         Err(error) => return error,
     };
-    compose_argument(&imet_sid, pmsi_label, Some((&ead_sid, esi_label)))
+    compose_argument(
+        &imet_sid,
+        pmsi_label,
+        Some((&ead_sid, esi_label.map(|(label, _)| label))),
+    )
 }
 
 fn inspection_l2_sid(
@@ -321,7 +322,7 @@ fn inspection_label(
     attributes: &[PathAttribute],
     sid: &Srv6SidInformation,
     argument: bool,
-) -> Result<Option<u32>, ArgumentComposition> {
+) -> Result<Option<(u32, u8)>, ArgumentComposition> {
     use crate::update::Srv6ArgumentStatus as Status;
     if !sid
         .structures
@@ -343,7 +344,7 @@ fn inspection_label(
                 "multiple ESI Label extended communities",
             ));
         }
-        Ok(label)
+        Ok(label.map(|label| (label, 24)))
     } else {
         let mut tunnels = attributes.iter().filter_map(PathAttribute::pmsi_tunnel);
         let tunnel = tunnels.next();
@@ -353,18 +354,21 @@ fn inspection_label(
                 "multiple PMSI Tunnel attributes",
             ));
         }
-        Ok(tunnel
-            .filter(|tunnel| tunnel.tunnel_type == PmsiTunnelType::IngressReplication)
-            .map(|tunnel| tunnel.mpls_label))
+        Ok(tunnel.and_then(|tunnel| {
+            tunnel
+                .tunnel_type
+                .evpn_srv6_function_bits()
+                .map(|width| (tunnel.mpls_label, width))
+        }))
     }
 }
 
-/// Compose one caller-selected pair. Labels are the raw 24-bit PMSI
-/// Function and ESI Label extended-community Argument fields, respectively;
-/// the Ethernet A-D NLRI label is never an Argument input.
+/// Compose one caller-selected pair. PMSI carries its raw 24-bit field and
+/// EVPN Function capacity; the ESI Label Argument is a raw 24-bit field.
+/// The Ethernet A-D NLRI label is never an Argument input.
 pub(crate) fn compose_argument(
     imet: &Srv6SidInformation,
-    pmsi_label: Option<u32>,
+    pmsi_label: Option<(u32, u8)>,
     ead: Option<(&Srv6SidInformation, Option<u32>)>,
 ) -> ArgumentComposition {
     use crate::update::Srv6ArgumentStatus as Status;
@@ -380,7 +384,12 @@ pub(crate) fn compose_argument(
         [] => return absent(Status::Unavailable, "IMET SID Structure is missing"),
         _ => return absent(Status::Ambiguous, "IMET has multiple SID Structures"),
     };
-    let Some(imet_sid) = restore_component(imet, imet_structure, pmsi_label, false) else {
+    let Some(imet_sid) = restore_component(
+        imet,
+        imet_structure,
+        pmsi_label.map(|(label, _)| label),
+        Transposition::Function(pmsi_label.map_or(0, |(_, width)| width)),
+    ) else {
         return absent(
             Status::Unavailable,
             "IMET SID Structure or Function transposition is invalid or unavailable",
@@ -435,7 +444,9 @@ pub(crate) fn compose_argument(
             "nonzero IMET and Ethernet A-D per ES Argument lengths differ",
         );
     }
-    let Some(ead_sid) = restore_component(ead, ead_structure, esi_label, true) else {
+    let Some(ead_sid) =
+        restore_component(ead, ead_structure, esi_label, Transposition::Argument(24))
+    else {
         return absent(
             Status::Unavailable,
             "Ethernet A-D per ES SID Structure or Argument transposition is invalid or unavailable",
@@ -465,13 +476,8 @@ fn restore_component(
     sid: &Srv6SidInformation,
     structure: Srv6SidStructure,
     label: Option<u32>,
-    argument: bool,
+    transposition: Transposition,
 ) -> Option<u128> {
-    let transposition = if argument {
-        Transposition::Argument(24)
-    } else {
-        Transposition::Function(24)
-    };
     if !structure_eligible(sid, structure, transposition) {
         return None;
     }
@@ -492,7 +498,7 @@ pub(crate) mod tests {
     use rustbgpd_wire::{
         EthernetSegmentIdentifier, EthernetTagId, EvpnEadPerEs, EvpnEadPerEvi, EvpnEs, EvpnImet,
         EvpnIpPrefixRoute, EvpnIpPrefixValue, EvpnMacIp, ExtendedCommunity, MacAddress, MplsLabel,
-        PmsiTunnel, PmsiTunnelIdentifier, RawAttribute, RouteDistinguisher,
+        PmsiTunnel, PmsiTunnelIdentifier, PmsiTunnelType, RawAttribute, RouteDistinguisher,
     };
 
     use super::*;
@@ -601,7 +607,11 @@ pub(crate) mod tests {
         use crate::update::Srv6ArgumentStatus as Status;
         let imet = inspection_sid("2001:db8:1::ffff", 24, [32, 16, 16, 16, 16, 48]);
         let ead = inspection_sid("::ffff", 124, [32, 16, 32, 16, 16, 80]);
-        let result = compose_argument(&imet, Some(0x00fb_d100), Some((&ead, Some(0x00aa_aa00))));
+        let result = compose_argument(
+            &imet,
+            Some((0x00fb_d100, 24)),
+            Some((&ead, Some(0x00aa_aa00))),
+        );
         assert_eq!(result.status, Status::Composed);
         assert_eq!(
             result.sid.unwrap(),
@@ -612,11 +622,11 @@ pub(crate) mod tests {
             Status::Unavailable
         );
         assert_eq!(
-            compose_argument(&imet, Some(0x00fb_d100), Some((&ead, None))).status,
+            compose_argument(&imet, Some((0x00fb_d100, 24)), Some((&ead, None))).status,
             Status::Unavailable
         );
         assert_eq!(
-            compose_argument(&imet, Some(1 << 24), Some((&ead, Some(0x00aa_aa00)))).status,
+            compose_argument(&imet, Some((1 << 24, 24)), Some((&ead, Some(0x00aa_aa00)))).status,
             Status::Unavailable
         );
         let mut invalid = ead.clone();
@@ -624,7 +634,7 @@ pub(crate) mod tests {
         assert_eq!(
             compose_argument(
                 &imet,
-                Some(0x00fb_d100),
+                Some((0x00fb_d100, 24)),
                 Some((&invalid, Some(0x00aa_aa00)))
             )
             .status,
@@ -668,7 +678,7 @@ pub(crate) mod tests {
         ] {
             let invalid = inspection_sid("::", 24, structure);
             assert_eq!(
-                compose_argument(&invalid, Some(0), Some((&ead, None))).status,
+                compose_argument(&invalid, Some((0, 24)), Some((&ead, None))).status,
                 Status::Unavailable
             );
         }
@@ -973,6 +983,160 @@ pub(crate) mod tests {
             (Afi::L2Vpn, Safi::Evpn),
             Some(&imet)
         ));
+    }
+
+    pub(crate) fn p2mp_imet() -> EvpnRibRoute {
+        use std::{net::Ipv4Addr, time::Instant};
+
+        use crate::route::RouteOrigin;
+
+        let sid: Ipv6Addr = "2001:db8:1::".parse().unwrap();
+        let peer = Ipv4Addr::new(10, 0, 0, 1);
+        EvpnRibRoute {
+            route: EvpnRoute::Imet(EvpnImet {
+                rd: RouteDistinguisher([0; 8]),
+                ethernet_tag: EthernetTagId(0),
+                originator_ip: sid.into(),
+            }),
+            next_hop: sid.into(),
+            link_local_next_hop: None,
+            peer: peer.into(),
+            attributes: AttrSet::new(vec![
+                service_attribute(6, sid, 24, Some([32, 16, 16, 0, 16, 48])),
+                PathAttribute::PmsiTunnel(PmsiTunnel {
+                    flags: 0,
+                    tunnel_type: PmsiTunnelType::Other(0x0d),
+                    mpls_label: 0x00fb_d100,
+                    tunnel_identifier: PmsiTunnelIdentifier::Raw(vec![0, 0, 0, 1, 192, 0, 2, 1]),
+                }),
+            ]),
+            received_at: Instant::now(),
+            origin_type: RouteOrigin::Ibgp,
+            peer_router_id: peer,
+            is_stale: false,
+            is_llgr_stale: false,
+        }
+    }
+
+    #[test]
+    fn srv6_p2mp_transposed_imet_is_selected() {
+        use crate::loc_rib::LocRib;
+        let route = p2mp_imet();
+        let mut loc = LocRib::new();
+        assert!(loc.recompute_evpn(route.key(), std::iter::once(&route)));
+        assert!(
+            loc.get_evpn(&route.key()).is_some(),
+            "SRv6 P2MP IMET with a transposed Function must stay selected"
+        );
+    }
+
+    #[test]
+    fn p2mp_function_width_is_enforced_in_selection_and_argument_inspection() {
+        use crate::update::Srv6ArgumentStatus as Status;
+        let mut route = p2mp_imet();
+        let raw = route.attributes.clone();
+        assert_eq!(
+            inspect_argument_pair(Some(&route), None).sid,
+            Some("2001:db8:1:fbd1::".parse().unwrap())
+        );
+        assert_eq!(route.attributes, raw);
+        for (tunnel, length, sid, eligible) in [
+            (Some(PmsiTunnelType::Other(0x0d)), 20, "2001:db8:1::", true),
+            (Some(PmsiTunnelType::Other(0x0d)), 21, "2001:db8:1::", false),
+            (
+                Some(PmsiTunnelType::IngressReplication),
+                24,
+                "2001:db8:1::",
+                true,
+            ),
+            (Some(PmsiTunnelType::Other(0x0c)), 16, "2001:db8:1::", false),
+            (Some(PmsiTunnelType::Other(0x8d)), 16, "2001:db8:1::", false),
+            (None, 16, "2001:db8:1::", false),
+            (
+                Some(PmsiTunnelType::Other(0x0d)),
+                16,
+                "2001:db8:1:1::",
+                false,
+            ),
+        ] {
+            let mut attributes = vec![service_attribute(
+                6,
+                sid.parse().unwrap(),
+                24,
+                Some([32, 16, 24, 0, length, 48]),
+            )];
+            if let Some(tunnel_type) = tunnel {
+                let mut pmsi = raw
+                    .iter()
+                    .find_map(PathAttribute::pmsi_tunnel)
+                    .unwrap()
+                    .clone();
+                pmsi.tunnel_type = tunnel_type;
+                // Low bits remain opaque; only the high TL bits are restored.
+                pmsi.mpls_label |= 0xf;
+                attributes.push(PathAttribute::PmsiTunnel(pmsi));
+            }
+            route.attributes = AttrSet::new(attributes);
+            assert_eq!(
+                evpn_eligible(&route),
+                eligible,
+                "{tunnel:?}, TL={length}, {sid}"
+            );
+            let result = inspect_argument_pair(Some(&route), None);
+            assert_eq!(
+                result.status,
+                if eligible {
+                    Status::LocFuncOnly
+                } else {
+                    Status::Unavailable
+                }
+            );
+            if eligible {
+                let label = if length == 24 {
+                    0x00fb_d10f
+                } else {
+                    0x00fb_d100
+                };
+                assert_eq!(
+                    result.sid,
+                    Some(
+                        (u128::from("2001:db8:1::".parse::<Ipv6Addr>().unwrap()) | (label << 56))
+                            .into()
+                    )
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn p2mp_inspection_preserves_ambiguity_and_first_service_rules() {
+        use crate::update::Srv6ArgumentStatus as Status;
+        let mut route = p2mp_imet();
+        let raw = route.attributes.clone();
+        AttrSet::edit(&mut route.attributes, |attrs| attrs.push(attrs[1].clone()));
+        assert_eq!(
+            inspect_argument_pair(Some(&route), None).status,
+            Status::Ambiguous
+        );
+        route.attributes = raw;
+        AttrSet::edit(&mut route.attributes, |attrs| {
+            let mut first = service_attribute(
+                6,
+                "2001:db8:1::".parse().unwrap(),
+                24,
+                Some([32, 16, 24, 0, 21, 48]),
+            );
+            append_service(&mut first, attrs[0].clone());
+            attrs[0] = first;
+        });
+        assert!(
+            !evpn_eligible(&route),
+            "a later duplicate service cannot rescue the first"
+        );
+        assert_eq!(
+            inspect_argument_pair(Some(&route), None).status,
+            Status::Unavailable
+        );
     }
 
     #[test]
