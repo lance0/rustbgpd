@@ -19,7 +19,7 @@
 //! - Link cost is the IGP Metric (TLV 1095). A link without it is
 //!   unusable and contributes no edge; its endpoints and addresses are
 //!   still interned so the nodes stay observable.
-//! - An SRv6 Locator advertisement (TLV 1162) contributes prefix
+//! - An IPv6 SRv6 Locator advertisement (TLV 1162) contributes prefix
 //!   reachability only with a valid Prefix Metric (TLV 1155).
 //! - Unknown cost to a next-hop is `None` — the caller must treat it as
 //!   least preferred (RFC 9107 §3.1).
@@ -547,9 +547,10 @@ impl OrrTopology {
                 },
                 BgpLsNlriType::Ipv4TopologyPrefix | BgpLsNlriType::Ipv6TopologyPrefix => {
                     let metric = prefix_metric(&attributes);
-                    // RFC 9514 §5.1, corrected by erratum 7737: a locator
+                    // RFC 9514 §5.1, corrected by erratum 7737: an IPv6 locator
                     // without a valid Prefix Metric is not reachability.
-                    if metric.is_none()
+                    if route.nlri.nlri_type == BgpLsNlriType::Ipv6TopologyPrefix
+                        && metric.is_none()
                         && attributes
                             .iter()
                             .any(|tlv| tlv.type_code == BGP_LS_TLV_SRV6_LOCATOR)
@@ -2336,6 +2337,41 @@ mod tests {
                     "locator={locator}, metric={metric:?}"
                 );
             }
+        }
+    }
+
+    #[test]
+    fn ipv4_prefix_ignores_foreign_srv6_locator_tlv() {
+        for (metric, expected) in [
+            (None, 0),
+            (Some(&[][..]), 0),
+            (Some(&[1][..]), 0),
+            (Some(&[0, 0, 1][..]), 0),
+            (Some(&[0, 0, 0, 1, 0][..]), 0),
+            (Some(&[0, 0, 0, 0][..]), 0),
+            (Some(&[0, 0, 0, 5][..]), 5),
+        ] {
+            let mut attributes = vec![srv6_locator_tlv()];
+            if let Some(metric) = metric {
+                attributes.push(raw_tlv(BGP_LS_TLV_PREFIX_METRIC, metric));
+            }
+            let mut routes = square_topology(PEER1);
+            routes.push(rib_route(
+                PEER1,
+                prefix_nlri(PROTOCOL_ISIS_LEVEL_2, X, None),
+                vec![bgp_ls_attribute(&attributes)],
+            ));
+            let topo = OrrTopology::build(routes.iter());
+            let next_hop = IpAddr::V4(Ipv4Addr::new(203, 0, 113, 9));
+            assert_eq!(topo.resolve_node(next_hop), Some(ix(&topo, X)));
+            assert_eq!(
+                topo.spf(ix(&topo, A)).cost_to(&topo, next_hop),
+                Some(1 + expected),
+                "inapplicable locator TLV must not change IPv4 reachability, metric={metric:?}"
+            );
+            let snapshot = topo.snapshot();
+            assert_eq!(snapshot.prefixes.len(), 1);
+            assert_eq!(u64::from(snapshot.prefixes[0].metric), expected);
         }
     }
 
