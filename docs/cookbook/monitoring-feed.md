@@ -104,6 +104,75 @@ route_reflector_client = true
 families = ["ipv4_unicast", "ipv6_unicast", "l3vpn_ipv4_unicast"]
 ```
 
+## Passive iBGP relay
+
+Use a passive relay when two routers feed a collector through rustbgpd and
+the relay must advertise nothing. The
+[route-collector starter](../../examples/route-collector/config.toml) provides
+the same accept-all import and deny-all export posture for eBGP sources. This
+minimal IPv4 configuration uses two sources in the relay's own AS and sends
+only the pre-policy Adj-RIB-In BMP view:
+
+```toml
+[global]
+asn = 65001
+router_id = "10.255.0.1"
+listen_port = 179
+ebgp_requires_policy = true
+
+[global.telemetry]
+prometheus_addr = "127.0.0.1:9179"
+log_format = "json"
+
+[global.telemetry.grpc_uds]
+path = "/var/lib/rustbgpd/grpc.sock"
+
+[bmp]
+sys_name = "rustbgpd-passive-relay"
+
+[[bmp.collectors]]
+address = "10.20.0.10:1790"
+monitor = ["rib_in_pre"]
+
+[policy]
+import_chain = ["observe-all"]
+export_chain = ["deny-all"]
+
+[policy.definitions.observe-all]
+default_action = "permit"
+
+[policy.definitions.deny-all]
+default_action = "deny"
+
+[[neighbors]]
+address = "10.0.0.2"
+remote_asn = 65001
+families = ["ipv4_unicast"]
+
+[[neighbors]]
+address = "10.0.1.2"
+remote_asn = 65001
+families = ["ipv4_unicast"]
+```
+
+Keep the deny-all export chain attached: an empty iBGP export chain permits
+routes. This configuration enables no forwarding backend; received routes
+remain available to the daemon's RIB queries and BMP feed.
+
+At the collector, clear that peer's route state on PeerDown, as specified by
+[RFC 7854 §4.9](https://www.rfc-editor.org/rfc/rfc7854.html#section-4.9).
+Count that state teardown separately from explicit RouteMonitoring withdrawals.
+Connect the collector before feeding routes. After a BMP reconnect, cached
+PeerUp messages do not rebuild the received table: Adj-RIB-In has no automatic
+reconnect dump. See the [BMP reconnect caveat](#failure-modes).
+
+The dated [withdrawal parity receipt](../artifacts/interop/bmp-passive-withdraw-parity-20260930T232148Z/README.md)
+and its [runnable lab](../../tests/interop/bmp-passive-withdraw-parity.clab.yml)
+prove one bounded shape: eight IPv4 /32s per peer, three announce/withdraw
+rounds and two flaps per peer, with 24 matching wire/BMP withdrawals per peer
+and zero exported announcements. This is not full-table memory, sustained-load,
+backpressure or reconnect-completeness evidence.
+
 ## Verify
 
 ```console
