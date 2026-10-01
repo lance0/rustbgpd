@@ -3313,6 +3313,11 @@
     "TelemetryConfig": {
       "type": "object",
       "properties": {
+        "dataplane_readiness": {
+          "description": "Enable the alpha `/dp-readyz` worker-progress probe on the metrics listener.\nStartup-only; this does not change core readiness or prove forwarding.",
+          "type": "boolean",
+          "default": false
+        },
         "grpc_tcp": {
           "description": "gRPC TCP listener.",
           "anyOf": [

@@ -230,7 +230,7 @@ fn documented_startup_phases_match_unique_main_anchors_in_order() {
         "let mut grpc_handle = tokio::spawn(async move {",
         "for neighbor in peer_configs {",
         "let mut bgp_listener_handle = tokio::spawn(async move {",
-        "metrics_server::serve_metrics(metrics_listener, metrics_clone, readiness_probe).await;",
+        "metrics_server::serve_metrics(",
         "rustbgpd_api::gnmi_dialout::DialoutManager::new(",
         "Ok(targets) if !initial_peer_boot_failed => {",
         "gnmi_dialout_manager.lock().await.apply(&targets);",

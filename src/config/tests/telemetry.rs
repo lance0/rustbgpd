@@ -1,6 +1,24 @@
 use super::*;
 
 #[test]
+fn dataplane_readiness_is_explicitly_opt_in() {
+    let source = "log_format = \"json\"\n";
+    let default: TelemetryConfig = toml::from_str(source).unwrap();
+    assert!(!default.dataplane_readiness);
+    let enabled: TelemetryConfig =
+        toml::from_str(&format!("{source}dataplane_readiness = true\n")).unwrap();
+    assert!(enabled.dataplane_readiness);
+    assert_eq!(
+        toml::from_str::<TelemetryConfig>(&toml::to_string(&enabled).unwrap()).unwrap(),
+        enabled
+    );
+    assert!(
+        toml::from_str::<TelemetryConfig>(&format!("{source}dataplane_readiness = \"true\"\n"))
+            .is_err()
+    );
+}
+
+#[test]
 fn log_format_accepts_json_and_text_only() {
     let source = r#"
 [global]

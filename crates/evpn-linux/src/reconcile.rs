@@ -65,6 +65,7 @@ use crate::snapshot::{
     KernelVrfLinkInfo, KernelVxlanLinkInfo, OwnedEntry, OwnedEntryKind, OwnedSet,
     vlan_rows_contain,
 };
+use crate::worker_progress::{WorkerProgress, WorkerProgressState};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum L3OpKey {
@@ -222,6 +223,7 @@ pub struct ReconcileActor<D: Dataplane> {
 /// borrows it disjointly from `dataplane`.
 #[derive(Debug)]
 struct ActorState {
+    progress: WorkerProgress,
     owned: OwnedSet,
     /// Retry schedule for FDB ops, keyed by `(VNI, MAC)`.
     retry: RetrySchedule<(EvpnInstanceId, MacAddress)>,
@@ -522,6 +524,7 @@ struct ActorState {
 impl ActorState {
     fn new() -> Self {
         Self {
+            progress: WorkerProgress::default(),
             owned: OwnedSet::new(),
             retry: RetrySchedule::new(),
             permanent_failures: BTreeMap::new(),
@@ -727,6 +730,12 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
         }
     }
 
+    /// Observe actual reconciler progress without retaining its publisher.
+    #[must_use]
+    pub fn subscribe_progress(&self) -> watch::Receiver<WorkerProgressState> {
+        self.state.progress.subscribe()
+    }
+
     /// Wait the coalesce window, then reconcile. Drains any stacked
     /// intent updates inside the window so we apply just the latest.
     async fn coalesce_and_reconcile(&mut self) {
@@ -750,6 +759,7 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
         reason = "one reconciliation pass preserves the plan's ordered safety checks"
     )]
     async fn reconcile_once(&mut self) {
+        self.state.progress.checkpoint();
         self.state.reconcile_generation = self.state.reconcile_generation.saturating_add(1);
 
         // Snapshot the current intent (via `borrow_and_update` so the
@@ -763,6 +773,7 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
         self.state.last_intent_generation = intent.generation;
 
         let probes = self.dataplane.probe(&intent.instances).await;
+        self.state.progress.checkpoint();
 
         // Gate 9 IP-VRF readiness pass. `probe_ip_vrfs` short-circuits
         // when the intent's `IpVrfTable` is empty (Gate 9 opt-in via
@@ -770,6 +781,7 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
         // never pay the netlink dump cost. Transitions are logged at
         // info / warn; steady-state is silent.
         let ip_vrf_status_map = self.dataplane.probe_ip_vrfs(&intent.ip_vrfs).await;
+        self.state.progress.checkpoint();
         Self::log_ip_vrf_transitions(&mut self.state.last_ip_vrf_status, &ip_vrf_status_map);
         let ip_vrf_status = build_ip_vrf_status(&intent.ip_vrfs, &ip_vrf_status_map);
 
@@ -779,6 +791,7 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
         // `[[evpn_ip_vrfs]]`), so L2-only and RR-only deployments
         // never pay the netlink dump cost.
         let ip_vrf_routes = self.dataplane.dump_ip_vrf_routes(&intent.ip_vrfs).await;
+        self.state.progress.checkpoint();
 
         let snapshot = match self.dataplane.dump_snapshot().await {
             Ok(s) => s,
@@ -805,6 +818,7 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
                 return;
             }
         };
+        self.state.progress.checkpoint();
 
         // ADR-0079 slice 2: one-shot adoption sweep over the first
         // kernel FDB snapshot. `extern_learn` is OUR ownership marker
@@ -1582,6 +1596,7 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
                 &l3_plan.ops
             };
             for op in l3_ops_to_apply {
+                self.state.progress.checkpoint();
                 let l3_key = l3_op_key(op);
                 // LAN-283 foreign-state guard against the live
                 // ownership dump fetched above.
@@ -1986,6 +2001,7 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
             .retain(|key| planned_managed.contains(key));
 
         for op in &plan.ops {
+            self.state.progress.checkpoint();
             // Permanent-failure suppression — dispatched per op shape
             // across three key spaces: BUM (ifindex), FDB-NHG group
             // ops (`AliasGroupKey`), and per-MAC FDB ops (`(VNI, MAC)`).
@@ -2240,6 +2256,7 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
                     || crate::nh_id_alloc::NhIdAllocator::is_l3_nhg(*id)
             });
         for id in groups.into_iter().chain(members) {
+            self.state.progress.checkpoint();
             match self.dataplane.del_nexthop(id).await {
                 Ok(()) => {
                     forget_deleted_nhid(&mut self.state, id);
@@ -2383,6 +2400,7 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
 
         let mut all_ok = true;
         for id in stale_groups.into_iter().chain(stale_members) {
+            self.state.progress.checkpoint();
             // `del_nexthop` is idempotent on `ENOENT` (slice 2). Only
             // release + drop tracking on `Ok` — on `Err`, leave the
             // slot reserved + the entry in the map so the next
@@ -2580,6 +2598,7 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
 
         let mut all_ok = true;
         for id in stale_groups.into_iter().chain(stale_members) {
+            self.state.progress.checkpoint();
             match self.dataplane.del_nexthop(id).await {
                 Ok(()) => {
                     forget_deleted_nhid(&mut self.state, id);
@@ -2647,6 +2666,7 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
         self.dataplane.del_nexthop(tracked_id).await?;
         forget_deleted_nhid(&mut self.state, tracked_id);
         for ip in members {
+            self.state.progress.checkpoint();
             if self.state.l3_groups.vtep_nh_is_orphan(&ip)
                 && let Some(id) = self.state.l3_groups.drop_vtep_nh(&ip)
             {
@@ -2821,6 +2841,7 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
         //     gateway or a group object would otherwise look healthy
         //     to a `contains_key` check and never get repaired.
         for (ip, id) in &tracked_vteps {
+            self.state.progress.checkpoint();
             let needs_action = match actual_by_id.get(id) {
                 None => true,
                 Some(nh) => match &nh.kind {
@@ -2855,6 +2876,7 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
 
         // (2) Missing or member-set-drifted groups — re-add (REPLACE).
         for (key, g_id, members) in &tracked_groups {
+            self.state.progress.checkpoint();
             // Resolve expected kernel-side member IDs through the
             // current `groups` map (post step 1 re-adds, in case the
             // group depended on a member we just re-installed).
@@ -2933,6 +2955,7 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
             })
             .collect();
         for (vni, vlan, mac) in stale_rows {
+            self.state.progress.checkpoint();
             match self.dataplane.remove_fdb_nhg_row(vni, mac, vlan).await {
                 Ok(()) => tracing::info!(
                     ?vni,
@@ -3112,6 +3135,7 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
         use crate::dataplane::KernelNexthopKind;
 
         for (ip, id) in tracked_vteps {
+            self.state.progress.checkpoint();
             let needs_action = match actual_by_id.get(id) {
                 None => true,
                 Some(nh) => match &nh.kind {
@@ -3153,6 +3177,7 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
         use crate::dataplane::KernelNexthopKind;
 
         for (key, g_id, members) in tracked_groups {
+            self.state.progress.checkpoint();
             let expected_member_ids: Vec<u32> = members
                 .iter()
                 .filter_map(|ip| self.state.l3_groups.vtep_nh(ip).map(|nh| nh.id))
@@ -3359,6 +3384,7 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
         // `adopted_fdb`; cheaper than cloning the tree structure.
         let candidates: Vec<_> = self.state.adopted_fdb.iter().copied().collect();
         for (vni, vlan, mac) in candidates {
+            self.state.progress.checkpoint();
             if instances.get(vni).is_none() {
                 // The VNI dropped out of the intent's instance table
                 // since adoption — its rows are no longer ours to
@@ -3533,6 +3559,7 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
             .map(|(k, v)| (*k, v.clone()))
             .collect();
         for ((vrf_id, prefix), route) in route_candidates {
+            self.state.progress.checkpoint();
             if desired_route_keys.contains(&(vrf_id, prefix)) {
                 // Desired but not yet applied (VRF NotReady, or a
                 // retry pending). Never reap a desired prefix — the
@@ -3584,6 +3611,7 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
             .map(|(k, v)| (*k, *v))
             .collect();
         for ((ifindex, next_hop), vrf_id) in neighbor_candidates {
+            self.state.progress.checkpoint();
             // A VRF absent from the Ready map contributed no entries
             // to `desired_neighbor_keys` — its desired resolution
             // keys can't be derived until its L3VXLAN resolves — so
@@ -3630,6 +3658,7 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
             .map(|(k, v)| (*k, *v))
             .collect();
         for ((ifindex, router_mac), row) in fdb_candidates {
+            self.state.progress.checkpoint();
             // Same not-ready skip as the neighbor loop above.
             if !ready_l3vxlan_ifindex.contains_key(&row.vrf_id) {
                 continue;
@@ -4119,6 +4148,7 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
         if let Err(e) = self.report_tx.send(report).await {
             tracing::trace!(error = %e, "report receiver gone; report dropped");
         }
+        self.state.progress.complete_pass();
     }
 
     fn warn_managed_netdev_status_once(&mut self, rows: &[ManagedNetdevStatus]) {
@@ -6663,6 +6693,7 @@ where
 
     let mut new_members: Vec<(std::net::IpAddr, u32)> = Vec::new();
     for ip in members {
+        state.progress.checkpoint();
         if state.l3_groups.vtep_nh(ip).is_none() {
             let id = match state.nh_id_alloc.alloc_l3_vtep_nh() {
                 Ok(id) => id,
@@ -6709,6 +6740,7 @@ where
                 .l3_groups
                 .record_group_member_change(group_key, new_members_set);
             for ip in removed {
+                state.progress.checkpoint();
                 if state.l3_groups.vtep_nh_is_orphan(&ip)
                     && let Some(member_id) = state.l3_groups.drop_vtep_nh(&ip)
                 {
@@ -6807,6 +6839,7 @@ async fn cleanup_l3_ref_delta<D>(
         return;
     };
     for ip in members {
+        state.progress.checkpoint();
         if state.l3_groups.vtep_nh_is_orphan(&ip)
             && let Some(id) = state.l3_groups.drop_vtep_nh(&ip)
         {
@@ -6830,6 +6863,7 @@ async fn rollback_l3_partial_install<D>(
         try_del_and_release_alloc(dataplane, state, tracked_id, "l3_rollback_group").await;
     }
     for (ip, id) in new_members.iter().rev() {
+        state.progress.checkpoint();
         if state.l3_groups.vtep_nh_is_orphan(ip) {
             state.l3_groups.drop_vtep_nh(ip);
             try_del_and_release_alloc(dataplane, state, *id, "l3_rollback_member").await;
@@ -6875,6 +6909,7 @@ where
     // plain per-VTEP fdb nexthop — only the reference class differs),
     // so a future membership swap allocates nothing.
     for ip in members.iter().chain(standby.iter()) {
+        state.progress.checkpoint();
         if state.groups.vtep_nh(ip).is_none() {
             let id = match state.nh_id_alloc.alloc_vtep_nh() {
                 Ok(id) => id,
@@ -6975,6 +7010,7 @@ where
                 .groups
                 .record_group_member_change(group_key, new_members_set);
             for ip in removed {
+                state.progress.checkpoint();
                 if let Some(vtep_id) = state.groups.record_member_unref(ip, group_key) {
                     try_del_and_release_alloc(dataplane, state, vtep_id, "install_drift").await;
                 }
@@ -7072,6 +7108,7 @@ where
     // `new_group` slot.
     let mut new_members: Vec<(std::net::IpAddr, u32)> = Vec::new();
     for ip in members.iter().chain(standby.iter()) {
+        state.progress.checkpoint();
         if state.groups.vtep_nh(ip).is_none() {
             let id = match state.nh_id_alloc.alloc_vtep_nh() {
                 Ok(id) => id,
@@ -7151,6 +7188,7 @@ where
         .record_group_member_change(group_key, new_members_set);
     // GC per-VTEP members whose last group-ref dropped.
     for ip in removed {
+        state.progress.checkpoint();
         if let Some(vtep_id) = state.groups.record_member_unref(ip, group_key) {
             try_del_and_release_alloc(dataplane, state, vtep_id, "update_members").await;
         }
@@ -7227,6 +7265,7 @@ where
             }
             try_del_and_release_alloc(dataplane, state, id, "remove_group").await;
             for ip in members {
+                state.progress.checkpoint();
                 if let Some(vtep_id) = state.groups.record_member_unref(ip, group_key) {
                     try_del_and_release_alloc(dataplane, state, vtep_id, "remove_member").await;
                 }
@@ -7517,6 +7556,7 @@ async fn rollback_partial_install<D: crate::dataplane::NexthopOps>(
     // at gone kernel state. The next reconcile will re-emit Install
     // for the failed MAC and heal the missing FDB row.
     for (ip, id) in new_members.iter().rev() {
+        state.progress.checkpoint();
         if state.groups.vtep_nh_is_orphan(ip) {
             state.groups.drop_vtep_nh(ip);
             try_del_and_release_alloc(dataplane, state, *id, site).await;

@@ -1015,6 +1015,10 @@ pub struct TelemetryConfig {
     /// collected for gRPC health and internal counters.
     #[serde(default)]
     pub prometheus_addr: Option<String>,
+    /// Enable the alpha `/dp-readyz` worker-progress probe on the metrics listener.
+    /// Startup-only; this does not change core readiness or prove forwarding.
+    #[serde(default)]
+    pub dataplane_readiness: bool,
     /// Log output format: `"json"` (one JSON object per line) or `"text"`
     /// (human-readable lines for a foreground lab run).
     pub log_format: LogFormatConfig,

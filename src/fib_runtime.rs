@@ -15,6 +15,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 
+use rustbgpd_evpn_linux::worker_progress::{WorkerProgress, WorkerProgressState};
 #[cfg(test)]
 use rustbgpd_rib::FibInstallCandidate;
 use rustbgpd_rib::{RibUpdate, RouteOrigin};
@@ -41,6 +42,10 @@ use crate::kernel_route_notify::{
 };
 
 const RECONCILE_INTERVAL: Duration = Duration::from_secs(30);
+// One idle interval plus the bounded planning interval. Kernel waits are
+// observed, never canceled by readiness; each applied operation checkpoints.
+pub(crate) const READINESS_FRESHNESS: Duration =
+    RECONCILE_INTERVAL.saturating_add(PLANNING_TIMEOUT);
 const ROUTE_EVENT_DEBOUNCE: Duration = Duration::from_millis(200);
 const RIB_QUERY_TIMEOUT: Duration = Duration::from_secs(2);
 const PLANNING_TIMEOUT: Duration = Duration::from_secs(30);
@@ -176,6 +181,7 @@ pub struct FibRuntimeHandle {
     shutdown: CancellationToken,
     task: tokio::task::JoinHandle<()>,
     cmd_tx: mpsc::Sender<FibRuntimeCommand>,
+    pub(crate) progress: watch::Receiver<WorkerProgressState>,
 }
 
 impl FibRuntimeHandle {
@@ -269,6 +275,7 @@ where
 {
     let task_shutdown = shutdown.clone();
     let (cmd_tx, cmd_rx) = mpsc::channel(8);
+    let progress = fib.worker_progress().subscribe();
     let task = tokio::spawn(async move {
         run_loop(
             config,
@@ -288,6 +295,7 @@ where
         shutdown,
         task,
         cmd_tx,
+        progress,
     }
 }
 
@@ -337,6 +345,8 @@ async fn run_loop<F>(
         &shutdown,
     )
     .await;
+
+    fib.worker_progress().complete_pass();
 
     loop {
         tokio::select! {
@@ -393,6 +403,9 @@ async fn run_loop<F>(
                                 &shutdown,
                             )
                             .await;
+                        if signature_write.is_ok() {
+                            fib.worker_progress().complete_pass();
+                        }
                         // Orphan guard: if any owned route is now OUTSIDE the new
                         // table set, a withdraw for a removed table failed (its
                         // route stays owned + in the kernel). Keeping the new
@@ -477,6 +490,7 @@ async fn run_loop<F>(
                     HeldRetry::All,
                     &shutdown,
                 ).await;
+                fib.worker_progress().complete_pass();
             }
             () = &mut event_debounce, if route_event_dirty => {
                 route_event_dirty = false;
@@ -493,6 +507,7 @@ async fn run_loop<F>(
                     retry,
                     &shutdown,
                 ).await;
+                fib.worker_progress().complete_pass();
             }
             maybe_event = recv_route_event(&mut route_events) => {
                 match maybe_event {
@@ -983,6 +998,7 @@ async fn reconcile_once_with_events<F>(
 where
     F: UnicastFib,
 {
+    fib.worker_progress().checkpoint();
     // Nothing to reconcile: no configured tables and no owned routes — the
     // steady state after a N→0 delete. Skip the RIB query + kernel dump so a
     // deleted-to-empty FIB actor stays genuinely idle on timer ticks and
@@ -1145,6 +1161,7 @@ where
         return false;
     }
     let dump_tables = tables_to_dump(config, owned);
+    fib.worker_progress().checkpoint();
     let kernel = tokio::select! {
         biased;
         () = shutdown.cancelled() => return false,
@@ -1160,6 +1177,7 @@ where
     };
 
     let in_flight_resolved = resolve_in_flight(owned, &kernel);
+    fib.worker_progress().checkpoint();
     let mut plan = compute_fib_diff(&intent, owned, &kernel);
     let capped_tables: BTreeSet<FibTableKey> = config
         .tables
@@ -1364,6 +1382,7 @@ where
         result.err()
     });
     for op in &plan.ops {
+        fib.worker_progress().checkpoint();
         if shutdown.is_cancelled() {
             break;
         }
@@ -2676,6 +2695,8 @@ impl std::fmt::Display for FibApplyError {
 }
 
 trait UnicastFib {
+    fn worker_progress(&self) -> &WorkerProgress;
+
     fn dump<'a>(
         &'a mut self,
         tables: &'a [FibTableConfig],
@@ -2697,6 +2718,7 @@ trait UnicastFib {
 
 #[cfg(target_os = "linux")]
 struct LinuxUnicastFib {
+    progress: WorkerProgress,
     handle: rtnetlink::Handle,
     kernel_route_events: Option<mpsc::Receiver<KernelRouteEvent>>,
     route_dump_capability: RouteDumpCapability,
@@ -2711,6 +2733,7 @@ impl LinuxUnicastFib {
                 metrics,
             )?;
         Ok(Self {
+            progress: WorkerProgress::default(),
             handle,
             kernel_route_events: Some(events),
             route_dump_capability,
@@ -2720,6 +2743,10 @@ impl LinuxUnicastFib {
 
 #[cfg(target_os = "linux")]
 impl UnicastFib for LinuxUnicastFib {
+    fn worker_progress(&self) -> &WorkerProgress {
+        &self.progress
+    }
+
     fn dump<'a>(
         &'a mut self,
         tables: &'a [FibTableConfig],
@@ -3284,6 +3311,7 @@ mod tests {
 
     #[derive(Default)]
     struct FakeFib {
+        progress: WorkerProgress,
         kernel: FibKernelSnapshot,
         dump_calls: usize,
         fail_dump: Option<String>,
@@ -3293,11 +3321,17 @@ mod tests {
         kernel_events: Option<mpsc::Receiver<KernelRouteEvent>>,
         /// Runs as each op reaches the fake kernel, before it takes effect.
         on_apply: Option<ApplyHook>,
+        /// Per-operation handshake for progress tests; no wall-clock sleeps.
+        apply_step: Option<mpsc::UnboundedSender<oneshot::Sender<()>>>,
         /// The next Add takes effect in the kernel but never replies.
         hang_next_apply: bool,
     }
 
     impl UnicastFib for FakeFib {
+        fn worker_progress(&self) -> &WorkerProgress {
+            &self.progress
+        }
+
         fn dump<'a>(
             &'a mut self,
             tables: &'a [FibTableConfig],
@@ -3341,6 +3375,11 @@ mod tests {
                 return Box::pin(std::future::pending());
             }
             Box::pin(async move {
+                if let Some(steps) = &self.apply_step {
+                    let (ack, wait) = oneshot::channel();
+                    steps.send(ack).unwrap();
+                    wait.await.unwrap();
+                }
                 if self
                     .fail_apply_signal
                     .as_ref()
@@ -3394,6 +3433,108 @@ mod tests {
             owned_state_path: None,
             multipath_relax: false,
             link_bandwidth_weighted: false,
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn dataplane_readiness_stays_fresh_during_a_long_fib_apply_pass() {
+        use crate::metrics_server::DataplaneWorkerProbe;
+        let (steps_tx, mut steps_rx) = mpsc::unbounded_channel();
+        let mut fib = FakeFib {
+            apply_step: Some(steps_tx),
+            ..FakeFib::default()
+        };
+        // An earlier pass completed. This regression exercises the next pass's
+        // real apply loop for longer than the whole observation window.
+        fib.progress.complete_pass();
+        let probe = DataplaneWorkerProbe {
+            name: "fib",
+            progress: Some(fib.progress.subscribe()),
+            freshness: READINESS_FRESHNESS,
+        };
+        let routes = (1..=5)
+            .map(|n| {
+                route(
+                    Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, n), 32)),
+                    ip("192.0.2.1"),
+                )
+            })
+            .collect();
+        let rib_tx = rib_with_routes(routes);
+        let (status_tx, _) = watch::channel(Vec::new());
+        let pass = tokio::spawn(async move {
+            reconcile_once(
+                &config(),
+                &rib_tx,
+                &mut fib,
+                &metrics(),
+                &status_tx,
+                &mut FibOwnedState::default(),
+                &CancellationToken::new(),
+            )
+            .await;
+            fib.progress.complete_pass();
+            fib
+        });
+        for _ in 0..5 {
+            let ack = steps_rx.recv().await.expect("next kernel operation");
+            tokio::time::advance(Duration::from_secs(20)).await;
+            assert_eq!(
+                probe.failure(),
+                None,
+                "operations progress even without pass completion"
+            );
+            ack.send(()).unwrap();
+        }
+        let fib = pass.await.unwrap();
+        assert_eq!(fib.applied.len(), 5);
+        assert_eq!(probe.failure(), None);
+        drop(fib);
+        assert_eq!(probe.failure(), Some("closed"));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn dataplane_readiness_tracks_idle_and_retrying_fib_worker_lifetime() {
+        use crate::metrics_server::DataplaneWorkerProbe;
+        for routes in [Vec::new(), vec![route(v4(24), ip("192.0.2.1"))]] {
+            let fib = FakeFib {
+                fail_apply_signal: Some(Arc::new(std::sync::atomic::AtomicBool::new(true))),
+                ..FakeFib::default()
+            };
+            let mut progress = fib.progress.subscribe();
+            let probe = DataplaneWorkerProbe {
+                name: "fib",
+                progress: Some(progress.clone()),
+                freshness: READINESS_FRESHNESS,
+            };
+            assert_eq!(probe.failure(), Some("starting"));
+            let rib_tx = rib_with_routes(routes);
+            let (status_tx, _status_rx) = watch::channel(Vec::new());
+            let (events_tx, _) = broadcast::channel(1);
+            let handle = spawn_with_fib(
+                config(),
+                rib_tx.clone(),
+                rib_tx,
+                fib,
+                metrics(),
+                status_tx,
+                events_tx,
+                CancellationToken::new(),
+                None,
+            );
+            progress.wait_for(|state| state.initialized).await.unwrap();
+            for _ in 0..3 {
+                let previous = progress.borrow().observed_at;
+                tokio::time::advance(RECONCILE_INTERVAL).await;
+                assert_eq!(probe.failure(), None, "idle interval must not flap");
+                progress
+                    .wait_for(|state| state.observed_at > previous)
+                    .await
+                    .unwrap();
+                assert_eq!(probe.failure(), None, "a retry is real worker progress");
+            }
+            handle.shutdown().await;
+            assert_eq!(probe.failure(), Some("closed"));
         }
     }
 

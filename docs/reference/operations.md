@@ -1430,18 +1430,57 @@ at [`examples/prometheus/rustbgpd-alerts.yml`](../../examples/prometheus/rustbgp
 
 ### HTTP probes
 
-The telemetry HTTP listener exposes three read-only paths:
+The telemetry HTTP listener exposes these read-only paths:
 
 | Path | Success | Failure |
 |------|---------|---------|
 | `/metrics` | `200` Prometheus text exposition | `500` if metrics encoding fails |
 | `/livez` | `200 ok` once the listener accepts connections | No actor checks |
 | `/readyz` | `200 ready` when PeerManager and RIB respond within 200 ms total | `503 not ready: <reason>` |
+| `/dp-readyz` (opt-in alpha) | `200 dataplane workers ready` after each configured FIB/EVPN worker has completed an initial attempt and continues making progress | `404` when disabled; `503` when not configured, starting, unavailable, closed, or stale |
 
 Readiness is actor responsiveness, not routing policy. A daemon with zero
 configured peers, zero Established peers, or zero routes can still be ready.
 Event-history, EVPN, FIB, and peer-count health are surfaced through their own
 metrics and status commands rather than as v1 readiness gates.
+
+Enable the separate alpha dataplane probe with
+`dataplane_readiness = true` under `[global.telemetry]`, alongside
+`prometheus_addr`. Both the option and the monitored worker inventory are
+startup-only. With no FIB tables, EVPN instances, IP-VRFs or managed netdevs
+configured at startup, it returns `503 dataplane not configured`. A configured
+worker whose netlink setup failed remains in the inventory as `unavailable`.
+Removing all its tables at runtime still monitors that worker's empty passes;
+adding a previously absent worker requires a restart.
+
+The probe reads compact worker-owned observations: general FIB, EVPN intent
+producer, and EVPN kernel reconciler. Each records its own work checkpoints,
+including within multi-operation passes. Forwarding a cached route report
+cannot refresh any worker's observation. Startup fails until an initial attempt
+returns, and task exit closes its observation channel immediately. Individual
+install failures, unresolved next hops, filtered routes and normal retries do
+not themselves mean that a worker stopped progressing.
+
+The default observation windows follow the workers' existing cadences:
+
+| Worker | Idle cadence | Stale after no checkpoint for |
+|---|---|---|
+| General FIB | 30 seconds | 60 seconds (idle cadence plus the 30-second planning budget) |
+| EVPN intent producer | 5 seconds | 10 seconds (two poll intervals) |
+| EVPN kernel reconciler | 60 seconds | 120 seconds (two resync intervals) |
+
+Stale means **no observed worker progress**, not proof that a task is dead.
+A single unbounded dependency wait, kernel dump or monolithic computation
+longer than its observation window can produce this result. The probe does
+not cancel that work or change its recovery behavior. Empty idle tables remain
+healthy across their normal cadence, and successful checkpoints restore a
+stale worker's verdict. The HTTP request performs no route scan, metrics scrape
+or netlink operation.
+
+This is worker readiness only: it does not prove packet forwarding, route
+convergence, or successful installation of every route. It remains outside
+the v1 contract and does not change `/readyz`, GetHealth, the systemd watchdog,
+or the daemon's treatment of optional dataplane failure.
 
 Each `/readyz` response reports the current probe result; the endpoint has no
 internal failure-count hysteresis. The shared 200 ms core-actor deadline is

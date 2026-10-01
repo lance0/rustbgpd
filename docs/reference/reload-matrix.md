@@ -379,6 +379,7 @@ pinned per ADR-0057.
 | Field | Class | Notes |
 |---|---|---|
 | `prometheus_addr` | restart-required | The exporter listener binds at startup. |
+| `dataplane_readiness` | restart-required | The alpha `/dp-readyz` probe and its worker inventory are selected at startup. |
 | `log_format` | restart-required | The log subscriber is installed once at startup; a reload keeps the running `"json"` or `"text"` format. Other values fail config parsing before reload mutation. |
 
 ### `[global.telemetry.grpc_tcp]` and `[global.telemetry.grpc_uds]`

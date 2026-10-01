@@ -26,6 +26,7 @@ use rustbgpd_evpn::{
     RemoteMacEntry, RemoteMacSource, RemoteMacTable, RouteDistinguisher, RouteTarget,
 };
 use rustbgpd_evpn_linux::snapshot::{KernelVxlanInfo, KernelVxlanLinkInfo};
+use rustbgpd_evpn_linux::worker_progress::WorkerProgressState;
 use rustbgpd_evpn_linux::{
     DataplaneOp, InMemoryDataplane, InMemoryHandle, InstanceProbe, KernelEvent, KernelFdbEntry,
     KernelFdbFlags, KernelLinkInfo, ReconcileActor, ReconcileActorConfig,
@@ -105,6 +106,7 @@ struct Harness {
     report_rx: mpsc::Receiver<rustbgpd_evpn::DataplaneReport>,
     shutdown: CancellationToken,
     actor_join: tokio::task::JoinHandle<()>,
+    progress: watch::Receiver<WorkerProgressState>,
 }
 
 impl Harness {
@@ -115,6 +117,7 @@ impl Harness {
         let (report_tx, report_rx) = mpsc::channel(64);
         let shutdown = CancellationToken::new();
         let actor = ReconcileActor::new(config, dataplane, intent_rx, report_tx, shutdown.clone());
+        let progress = actor.subscribe_progress();
         let actor_join = tokio::spawn(actor.run());
         Self {
             intent_tx,
@@ -122,6 +125,7 @@ impl Harness {
             report_rx,
             shutdown,
             actor_join,
+            progress,
         }
     }
 
@@ -1091,6 +1095,11 @@ async fn failed_apply_retries_on_backoff_timer() {
     // First reconcile sees the failure.
     let _ = h.try_drain_reports().await;
     tokio::task::yield_now().await;
+    assert!(
+        h.progress.borrow().initialized,
+        "a failed install still completes a worker attempt"
+    );
+    let failed_at = h.progress.borrow().observed_at;
 
     // Advance past the maximum jittered first-failure backoff
     // (100ms ± 25% → ≤125ms; allow some slack).
@@ -1105,7 +1114,13 @@ async fn failed_apply_retries_on_backoff_timer() {
         h.handle.apply_count()
     );
     assert!(h.handle.apply_count() >= 2);
+    assert!(h.progress.borrow().observed_at > failed_at);
+    let progress = h.progress.clone();
     h.shutdown().await;
+    assert!(
+        progress.has_changed().is_err(),
+        "task exit closes its own observation channel"
+    );
 }
 
 // 4. Foreign-entry preservation through the actor — a foreign static
@@ -1180,6 +1195,8 @@ async fn periodic_dump_fires_on_cadence() {
     // Drain initial reports.
     tokio::task::yield_now().await;
     let _ = h.try_drain_reports().await;
+    assert!(h.progress.borrow().initialized);
+    let initial = h.progress.borrow().observed_at;
 
     let baseline_count = h.handle.apply_count();
     // Advance 60s + a little.
@@ -1194,6 +1211,7 @@ async fn periodic_dump_fires_on_cadence() {
     );
     // No new applies — periodic pass is a no-op.
     assert_eq!(h.handle.apply_count(), baseline_count);
+    assert!(h.progress.borrow().observed_at > initial);
     h.shutdown().await;
 }
 
