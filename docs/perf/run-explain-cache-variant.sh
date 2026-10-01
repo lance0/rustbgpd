@@ -9,6 +9,9 @@
 #   PEERS / TOTAL - fleet shape
 #   EXPLAIN - omit | true | false   ([policy.explain] enabled, injected
 #             into the generated config after the [policy] block)
+#   CACHE_SIZE - retained decisions per peer (1..2097152, default 4096)
+# Zero-reload cells hold the base inventory without churn and capture early
+# and late import-explain answers before releasing the final evidence barrier.
 #
 # The clean-tree refusal is preserved verbatim: a run still names the exact
 # tree it measured and aborts if that tree moves under it.
@@ -18,6 +21,7 @@ set -euo pipefail
 PEERS=${PEERS:-1000}
 TOTAL=${TOTAL:-400000}
 EXPLAIN=${EXPLAIN:-omit}
+CACHE_SIZE=${CACHE_SIZE-4096}
 DHAT=${DHAT:-0}
 PROFILE=${PROFILE:-release}
 RELOADS=${RELOADS:-4}
@@ -30,7 +34,73 @@ RSS_LIMIT_KIB=${RSS_LIMIT_KIB:-$((4 * 1024 * 1024))}
 PORT=${PORT:-1790}
 METRICS_PORT=${METRICS_PORT:-9179}
 CHANGED=$PEERS
+
+validate_variant_inputs() {
+    python3 - "$PEERS" "$TOTAL" "$EXPLAIN" "$CACHE_SIZE" "$RELOADS" "$CONTROL_SECS" <<'PY'
+import os
+import re
+import sys
+
+peers, total, explain, size, reloads, control = sys.argv[1:]
+for name, value in zip(
+    ("PEERS", "TOTAL", "CACHE_SIZE", "RELOADS", "CONTROL_SECS"),
+    (peers, total, size, reloads, control),
+):
+    if not re.fullmatch(r"0|[1-9][0-9]*", value):
+        raise SystemExit(f"{name} must be a decimal integer")
+peers, total, size, reloads, control = map(int, (peers, total, size, reloads, control))
+if explain not in ("omit", "true", "false"):
+    raise SystemExit("EXPLAIN must be omit, true, or false")
+# Matches the validated configuration ceiling; this receipt never uses 0->1.
+if not 1 <= size <= 2_097_152:
+    raise SystemExit("CACHE_SIZE must be in 1..2097152")
+if explain == "omit" and size != 4096:
+    raise SystemExit("a CACHE_SIZE override requires EXPLAIN=true or false")
+if peers < (2 if reloads == 0 else 8):
+    raise SystemExit("PEERS must be at least 2 without churn, otherwise at least 8")
+if not peers <= total <= (256 - 20) * 65536:
+    raise SystemExit("TOTAL must supply every peer and fit the generator's IPv4 space")
+if total % peers:
+    raise SystemExit("TOTAL must divide evenly across peers in the IPv4 harness")
+if reloads > 0xFFFFFFFF:
+    raise SystemExit("RELOADS must fit u32")
+if not 0 <= control <= 0xFFFFFFFF or (reloads == 0 and control == 0):
+    raise SystemExit("CONTROL_SECS must fit u32 and be positive with RELOADS=0")
+for name in ("GEN_DUALSTACK", "RELOADSTALL_DUALSTACK"):
+    if os.environ.get(name, "0") != "0":
+        raise SystemExit(f"{name} is unsupported by the IPv4 explain qualification")
+PY
+}
+validate_variant_inputs
+# Match the harness's emitted marker; probe slices are derived separately.
 EXPECTED_PER_OBSERVER=$((TOTAL - TOTAL / PEERS))
+
+prepare_explain_config() {
+    python3 - "$RUN/config.toml" "$EXPLAIN" "$CACHE_SIZE" "$TOTAL" "$PEERS" \
+        "$REPO/bench/scale/reloadstall/gen-scenario.py" <<'PY'
+import ast
+from pathlib import Path
+import sys
+
+path, enabled, size, total, peers, generator = sys.argv[1:]
+if enabled != "omit":
+    lines = Path(path).read_text(encoding="utf-8").split("\n")
+    anchor = lines.index('export_chain = ["member-out"]')
+    lines[anchor + 1:anchor + 1] = [
+        "", "[policy.explain]", f"enabled = {enabled}", f"cache_size = {size}"
+    ]
+    Path(path).write_text("\n".join(lines), encoding="utf-8")
+# Execute only the generator's prefix function, not its file-writing main.
+module = ast.parse(Path(generator).read_text(encoding="utf-8"))
+prefix = next(node for node in module.body if isinstance(node, ast.FunctionDef)
+              and node.name == "base_prefix")
+namespace = {}
+exec(compile(ast.Module(body=[prefix], type_ignores=[]), generator, "exec"), namespace)
+count = (int(total) + int(peers) - 1) // int(peers)  # member 0's actual slice
+for label, index in (("early", 0), ("late", count - 1)):
+    print(f"{label}\t{namespace['base_prefix'](index)}")
+PY
+}
 
 pid_running() {
     local state
@@ -80,9 +150,9 @@ trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
-printf 'label=%s\ncommit=%s\ntree=%s\npeers=%s\nroutes_per_peer=%s\ntotal=%s\nexplain=%s\ndhat=%s\nprofile=%s\nreloads=%s\ncontrol_secs=%s\nexpected_per_observer=%s\n' \
-    "$LABEL" "$COMMIT" "$TREE" "$PEERS" "$((TOTAL / PEERS))" "$TOTAL" "$EXPLAIN" "$DHAT" "$PROFILE" \
-    "$RELOADS" "$CONTROL_SECS" "$EXPECTED_PER_OBSERVER" >"$OUT/provenance.env"
+printf 'label=%s\ncommit=%s\ntree=%s\npeers=%s\nroutes_per_peer=%s\ntotal=%s\nexplain=%s\ncache_size=%s\ndhat=%s\nprofile=%s\nreloads=%s\ncontrol_secs=%s\nexpected_per_observer=%s\nno_churn=%s\n' \
+    "$LABEL" "$COMMIT" "$TREE" "$PEERS" "$((TOTAL / PEERS))" "$TOTAL" "$EXPLAIN" "$CACHE_SIZE" "$DHAT" "$PROFILE" \
+    "$RELOADS" "$CONTROL_SECS" "$EXPECTED_PER_OBSERVER" "$((RELOADS == 0))" >"$OUT/provenance.env"
 { rustc -vV; cargo -V; } >"$OUT/toolchain.txt"
 {
     printf 'kernel='; uname -srvmo
@@ -152,26 +222,18 @@ BUILD_FEATURES=()
 (cd "$REPO" && env -u CARGO_TARGET_DIR -u RUSTFLAGS cargo build --release --locked \
     --manifest-path bench/scale/reloadstall/Cargo.toml) >"$OUT/build/reloadstall.log" 2>&1
 DAEMON="$REPO/target/$PROFILE/rustbgpd"
-HARNESS="$REPO/bench/scale/reloadstall/target/release/reloadstall"
-sha256sum "$DAEMON" "$HARNESS" >"$OUT/build/binaries.sha256"
+HARNESS="$REPO/bench/scale/target/release/reloadstall"
+RBGP="$REPO/target/$PROFILE/rbgp"
+sha256sum "$DAEMON" "$HARNESS" "$RBGP" >"$OUT/build/binaries.sha256"
 wait_for_idle postbuild
 
 RUN="$(mktemp -d /tmp/rls-ex.XXXXXX)"
 python3 "$REPO/bench/scale/reloadstall/gen-scenario.py" \
     "$PEERS" "$RUN" "$PORT" "$CHANGED" >"$OUT/generator.log"
-if [[ $EXPLAIN != omit ]]; then
-    python3 - "$RUN/config.toml" "$EXPLAIN" <<'PY'
-import sys
-path, enabled = sys.argv[1], sys.argv[2]
-lines = open(path, encoding="utf-8").read().split("\n")
-anchor = lines.index('export_chain = ["member-out"]')
-lines[anchor + 1:anchor + 1] = ["", "[policy.explain]", f"enabled = {enabled}"]
-open(path, "w", encoding="utf-8").write("\n".join(lines))
-PY
-fi
+prepare_explain_config >"$OUT/explain-prefixes.tsv"
 cp "$RUN/config.toml" "$RUN"/*.rpol "$OUT/scenario/"
 grep -n -A7 '^\[policy\]' "$OUT/scenario/config.toml" >"$OUT/scenario/policy-section.txt"
-"$DAEMON" --check "$RUN/config.toml" >"$OUT/daemon-check.log" 2>&1
+"$DAEMON" --check --strict "$RUN/config.toml" >"$OUT/daemon-check.log" 2>&1
 
 (cd "$OUT" && "$DAEMON" "$RUN/config.toml") >"$OUT/daemon.log" 2>&1 & DAEMON_PID=$!
 for _ in {1..200}; do
@@ -304,6 +366,72 @@ for field in ("VmRSS", "VmHWM", "VmPeak", "VmSize"):
 PY
 }
 
+validate_explain_evidence() {
+    timeout --kill-after=1s 1s python3 - "$OUT" "$EXPLAIN" "$CACHE_SIZE" "$TOTAL" "$PEERS" <<'PY'
+import json
+from pathlib import Path
+import sys
+
+directory, enabled, size, total, peers = sys.argv[1:]
+out = Path(directory)
+size = int(size)
+count = (int(total) + int(peers) - 1) // int(peers)
+evictions = max(0, count - size)
+prefixes = dict(line.split("\t") for line in
+                (out / "explain-prefixes.tsv").read_text().splitlines())
+if set(prefixes) != {"early", "late"}:
+    raise SystemExit("missing early/late probe prefixes")
+generation = None
+for label in ("early", "late"):
+    answer = json.loads((out / f"explain-{label}.json").read_text())
+    status = int((out / f"explain-{label}.status").read_text())
+    expected = "cache_disabled" if enabled != "true" else (
+        "evicted" if label == "early" and evictions else "permit"
+    )
+    if status != (1 if enabled != "true" else 0):
+        raise SystemExit(f"{label}: unexpected CLI status {status}")
+    if (answer.get("peer_address") != "127.1.0.1"
+            or answer.get("prefix") != prefixes[label]
+            or answer.get("afi_safi") != "ipv4-unicast"):
+        raise SystemExit(f"{label}: wrong peer, prefix or family")
+    matches = answer.get("matches")
+    if (not isinstance(matches, list) or len(matches) != 1
+            or matches[0].get("outcome") != expected or matches[0].get("path_id") != 0):
+        raise SystemExit(f"{label}: expected one path-0 {expected} answer")
+    current = answer.get("current_policy_generation")
+    if type(current) is not int or current < 0 or (generation is not None and current != generation):
+        raise SystemExit(f"{label}: missing or inconsistent policy generation")
+    generation = current
+    if enabled == "true":
+        if (type(answer.get("cache_size")) is not int or answer["cache_size"] != size
+                or type(answer.get("evictions_since_reset")) is not int
+                or answer["evictions_since_reset"] != evictions):
+            raise SystemExit(f"{label}: wrong capacity or eviction completeness")
+    elif ("cache_size" not in answer or "evictions_since_reset" not in answer
+          or answer["cache_size"] is not None or answer["evictions_since_reset"] is not None):
+        raise SystemExit(f"{label}: disabled cache must report unknown completeness")
+    print(f"{label}_outcome={expected}")
+    print(f"{label}_cli_status={status}")
+    print(f"{label}_cache_size={answer['cache_size']}")
+    print(f"{label}_evictions_since_reset={answer['evictions_since_reset']}")
+PY
+}
+
+capture_explain_evidence() {
+    local label prefix rc
+    while IFS=$'\t' read -r label prefix; do
+        if timeout --kill-after=1s 2s "$RBGP" -s "unix://$RUN/grpc.sock" policy explain \
+            --neighbor 127.1.0.1 --prefix "$prefix" --direction import --json \
+            >"$OUT/explain-${label}.json" 2>"$OUT/explain-${label}.stderr"; then
+            rc=0
+        else
+            rc=$?
+        fi
+        printf '%s\n' "$rc" >"$OUT/explain-${label}.status"
+    done <"$OUT/explain-prefixes.tsv"
+    validate_explain_evidence >"$OUT/explain-evidence.env"
+}
+
 printf 'daemon_start_monotonic=%s\n' "$(monotonic_now)" >>"$OUT/provenance.env"
 cold_deadline=$((SECONDS + COLD_CAP))
 runtime_guard &
@@ -311,14 +439,16 @@ runtime_guard &
 # shellcheck disable=SC2034
 GUARD_PID=$!
 HARNESS_ENV=()
+HARNESS_FLAGS=()
 EVIDENCE_DIR=''
 if ((RELOADS == 0)); then
     EVIDENCE_DIR="$RUN/final-evidence"
     HARNESS_ENV=(env "RELOADSTALL_EVIDENCE_DIR=$EVIDENCE_DIR")
+    HARNESS_FLAGS=(--no-churn)
 fi
 timeout -k 10 "$OVERALL_CAP" "${HARNESS_ENV[@]}" "$HARNESS" "$PEERS" "$TOTAL" "$PORT" "$DAEMON_PID" \
     "$RUN/member.rpol" "$RUN/gen-a.rpol" "$RUN/gen-b.rpol" "$RELOADS" \
-    "$CONTROL_SECS" "$CHANGED" >"$OUT/reloadstall.log" 2>&1 & H_PID=$!
+    "$CONTROL_SECS" "$CHANGED" "${HARNESS_FLAGS[@]}" >"$OUT/reloadstall.log" 2>&1 & H_PID=$!
 rss_sampler & RSS_PID=$!
 
 until grep -q "^converged (>= ${EXPECTED_PER_OBSERVER}/observer)" "$OUT/reloadstall.log"; do
@@ -337,7 +467,9 @@ if ((RELOADS == 0)); then
         ((SECONDS < evidence_deadline)) || { echo "final evidence ready timeout" >&2; exit 1; }
         sleep 0.025
     done
-    evidence_deadline=$((SECONDS + 10))
+    evidence_capture_started=$SECONDS
+    # Leave time for two bounded CLI probes within the harness's 15s barrier.
+    evidence_deadline=$((SECONDS + 5))
     accepted=0
     while ((SECONDS < evidence_deadline)); do
         candidate="$RUN/metrics-candidate.prom"
@@ -358,6 +490,9 @@ if ((RELOADS == 0)); then
     fi
     grep -E '^(VmRSS|VmHWM|VmPeak|VmSize)' "/proc/$DAEMON_PID/status" >"$OUT/proc-status-after.txt"
     validate_settled_proc_status "$OUT/proc-status-after.txt" >"$OUT/settled-proc.env"
+    capture_explain_evidence
+    ((SECONDS - evidence_capture_started < 14)) || {
+        echo "final evidence capture exceeded the acknowledgement budget" >&2; exit 1; }
     touch "$EVIDENCE_DIR/ack"
 else
     while pid_running "$H_PID"; do

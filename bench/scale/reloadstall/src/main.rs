@@ -1958,12 +1958,14 @@ fn start_stub(ctx: Arc<Ctx>, i: u32, stream: TcpStream, track_rejoin: bool) -> S
                             writer.shutdown().await.map_err(|e| format!("shutdown: {e}"))?;
                             return Ok(());
                         }
-                        if dualstack() && i >= writer_ctx.n_peers - CHURNERS {
-                            let written_at = now_us(&writer_ctx);
-                            let family = churn_family(&msg, i - (writer_ctx.n_peers - CHURNERS));
-                            if family != 0 {
-                                if let Some(writes) = writer_ctx.churn_writes.lock().unwrap().as_mut() {
-                                    writes.push((written_at, family));
+                        if dualstack() {
+                            if let Some(churner) = churner_index(writer_ctx.n_peers, i) {
+                                let written_at = now_us(&writer_ctx);
+                                let family = churn_family(&msg, churner);
+                                if family != 0 {
+                                    if let Some(writes) = writer_ctx.churn_writes.lock().unwrap().as_mut() {
+                                        writes.push((written_at, family));
+                                    }
                                 }
                             }
                         }
@@ -3441,6 +3443,15 @@ fn no_churn_allowed(
         && ibgp_rr.is_none()
 }
 
+fn no_churn_peer_count_allowed(n_peers: u32, no_churn: bool) -> bool {
+    n_peers >= if no_churn { 2 } else { CHURNERS }
+}
+
+fn churner_index(n_peers: u32, member: u32) -> Option<u32> {
+    let first = n_peers.checked_sub(CHURNERS)?;
+    (first..n_peers).contains(&member).then(|| member - first)
+}
+
 fn final_evidence_allowed(_reloads: u32, flapstorm: Option<u32>) -> bool {
     flapstorm.is_none()
 }
@@ -3543,7 +3554,7 @@ fn main() {
              reload_cmd: run `sh -c <reload_cmd>` per reload instead of SIGHUP-ing <daemon_pid>\n\
              daemon_pid 0: skip in-harness RSS sampling (outer sampler owns it); \
              requires reload_cmd, --flapstorm, or --convergence-only\n\
-             --no-churn: hold sessions for control_secs with reloads=0 and no churn\n\
+             --no-churn: hold at least two sessions for control_secs with reloads=0 and no churn\n\
              --flapstorm K: flap the first K stubs instead of reloading\n\
              --flap-rounds N: flapstorm rounds, 1..={MAX_FLAP_ROUNDS} (default {DEFAULT_FLAP_ROUNDS})"
         );
@@ -3658,7 +3669,10 @@ fn main() {
             ),
         "--no-churn requires reloads=0, control_secs>0, daemon_pid>0, and no flapstorm, reload command, --convergence-only, or iBGP-RR mode"
     );
-    assert!(n_peers >= CHURNERS, "n_peers must be at least {CHURNERS}");
+    assert!(
+        no_churn_peer_count_allowed(n_peers, no_churn),
+        "n_peers must be at least 2 with --no-churn, otherwise at least {CHURNERS}"
+    );
     assert!(
         (1..=n_peers).contains(&changed_peers),
         "changed_peers must be in 1..={n_peers}"
@@ -5461,13 +5475,33 @@ mod tests {
         }
     }
 
+    #[test]
+    fn no_churn_allows_two_peers_without_churner_underflow() {
+        for peers in 0..=CHURNERS + 1 {
+            assert_eq!(no_churn_peer_count_allowed(peers, true), peers >= 2);
+            assert_eq!(no_churn_peer_count_allowed(peers, false), peers >= CHURNERS);
+        }
+        for member in 0..2 {
+            assert_eq!(churner_index(2, member), None);
+        }
+        assert_eq!(churner_index(CHURNERS, 0), Some(0));
+        assert_eq!(churner_index(CHURNERS, CHURNERS - 1), Some(CHURNERS - 1));
+        assert_eq!(churner_index(CHURNERS, CHURNERS), None);
+        assert_eq!(churner_index(CHURNERS + 1, 0), None);
+        assert_eq!(churner_index(CHURNERS + 1, 1), Some(0));
+    }
+
     #[tokio::test]
     async fn no_churn_skips_tasks_and_updates_but_default_starts_them() {
-        for no_churn in [true, false] {
-            let ctx = finish_test_ctx();
+        for (no_churn, peers) in [(true, 2), (true, CHURNERS), (false, CHURNERS)] {
+            let mut ctx = finish_test_ctx();
+            let inner = Arc::get_mut(&mut ctx).unwrap();
+            inner.n_peers = peers;
+            inner.obs.truncate(peers as usize);
+            inner.extras.truncate(peers as usize);
             let mut stubs = Vec::new();
             let mut receivers = Vec::new();
-            for _ in 0..CHURNERS {
+            for _ in 0..peers {
                 let (tx, rx) = mpsc::channel(32);
                 receivers.push(rx);
                 stubs.push(Stub {

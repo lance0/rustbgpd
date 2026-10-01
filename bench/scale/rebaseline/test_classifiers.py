@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -604,6 +605,7 @@ class ClassifierFixtures(unittest.TestCase):
             'until [[ -e "$EVIDENCE_DIR/ready" ]]',
             'mv "$candidate" "$OUT/metrics-after.prom"',
             'validate_settled_proc_status "$OUT/proc-status-after.txt"',
+            "    capture_explain_evidence\n",
             'touch "$EVIDENCE_DIR/ack"',
             'if wait "$H_PID"',
         ]
@@ -618,6 +620,168 @@ class ClassifierFixtures(unittest.TestCase):
         )
         done = harness.rindex('println!("done rss_mib={}", rss_mib(pid));')
         self.assertLess(handshake, done)
+
+    def test_explain_variant_input_boundaries(self) -> None:
+        python = self.runner_embedded_python("validate_variant_inputs() {")
+        valid = ["2", "2000000", "true", "4096", "0", "10"]
+        cases = [("valid", valid, 0), ("minimum", valid[:3] + ["1", "0", "10"], 0),
+                 ("maximum", valid[:3] + ["2097152", "0", "10"], 0),
+                 ("normal defaults", ["8", "400000", "omit", "4096", "4", "30"], 0)]
+        for index, value in ((0, "1"), (2, "yes"), (3, "0"), (3, "2097153"),
+                             (3, ""), (3, "-1"), (3, "01"), (4, "1"), (5, "0")):
+            changed = valid.copy()
+            changed[index] = value
+            cases.append((f"invalid {index}={value}", changed, 1))
+        cases.append(("omit override", ["8", "400000", "omit", "262144", "0", "10"], 1))
+        cases.append(("uneven held slice", ["3", "8", "true", "4", "0", "10"], 1))
+        cases.append(("uneven reload slice", ["8", "1001", "true", "4", "4", "30"], 1))
+        for label, args, expected_rc in cases:
+            with self.subTest(label=label):
+                result = subprocess.run(
+                    [sys.executable, "-c", python, *args], capture_output=True, text=True,
+                    env={**os.environ, "GEN_DUALSTACK": "0", "RELOADSTALL_DUALSTACK": "0"},
+                )
+                self.assertEqual(result.returncode, expected_rc, result.stderr)
+        for mode, args in (("held", valid),
+                           ("reload", ["8", "400000", "true", "4096", "4", "30"])):
+            for generator, harness in (("1", "0"), ("0", "1"), ("1", "1")):
+                with self.subTest(mode=mode, generator=generator, harness=harness):
+                    result = subprocess.run(
+                        [sys.executable, "-c", python, *args], capture_output=True, text=True,
+                        env={**os.environ, "GEN_DUALSTACK": generator,
+                             "RELOADSTALL_DUALSTACK": harness},
+                    )
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn("unsupported by the IPv4 explain qualification", result.stderr)
+
+    def test_explain_variant_matches_the_emitted_convergence_marker(self) -> None:
+        _, script = runner_script()
+        assignment = next(line for line in script.splitlines()
+                          if line.startswith("EXPECTED_PER_OBSERVER="))
+        match = next(line for line in script.splitlines() if line.startswith("until grep -q "))
+        match = match.removeprefix("until ").removesuffix("; do")
+        # The harness emits total - floor(total/peers), even though its actual
+        # member_slice completion targets use quotient/remainder allocation.
+        for marker, expected_rc in ((6, 0), (5, 1)):
+            with self.subTest(marker=marker), tempfile.TemporaryDirectory() as directory:
+                (Path(directory) / "reloadstall.log").write_text(
+                    f"converged (>= {marker}/observer) at 0.2s rss_mib=12\n", encoding="utf-8")
+                result = subprocess.run(
+                    ["bash", "-c", "set -euo pipefail\n" + assignment + "\n" + match],
+                    env={**os.environ, "PEERS": "3", "TOTAL": "8", "OUT": directory},
+                    capture_output=True, text=True,
+                )
+                self.assertEqual(result.returncode, expected_rc, result.stderr)
+
+    def test_explain_variant_no_churn_is_only_used_with_zero_reloads(self) -> None:
+        _, script = runner_script()
+        start = script.index("HARNESS_ENV=()")
+        block = script[start:script.index("\ntimeout -k 10", start)]
+        for reloads, expected in (("0", "--no-churn"), ("4", "")):
+            result = subprocess.run(
+                ["bash", "-c", "set -euo pipefail\n" + block + '\nprintf "%s\\n" "${HARNESS_FLAGS[@]}"'],
+                env={**os.environ, "RELOADS": reloads, "RUN": "/fixture"},
+                capture_output=True, text=True, check=True,
+            )
+            self.assertEqual(result.stdout.strip(), expected)
+
+    def test_explain_variant_config_and_source_derived_prefixes(self) -> None:
+        python = self.runner_embedded_python("prepare_explain_config() {")
+        generator = HERE.parent / "reloadstall" / "gen-scenario.py"
+        initial = '[policy]\nexport_chain = ["member-out"]\n'
+        for peers, total, last in ((2, 2000000, "35.66.63.0/24"),
+                                   (1000, 400000, "20.1.143.0/24"),
+                                   (3, 8, "20.0.2.0/24")):
+            for enabled in ("true", "false", "omit"):
+                with self.subTest(peers=peers, enabled=enabled), tempfile.TemporaryDirectory() as directory:
+                    config = Path(directory) / "config.toml"
+                    config.write_text(initial, encoding="utf-8")
+                    result = subprocess.run(
+                        [sys.executable, "-c", python, str(config), enabled, "262144",
+                         str(total), str(peers), str(generator)],
+                        capture_output=True, text=True, check=True,
+                    )
+                    self.assertEqual(result.stdout, f"early\t20.0.0.0/24\nlate\t{last}\n")
+                    if enabled == "omit":
+                        self.assertEqual(config.read_text(), initial)
+                    else:
+                        self.assertIn(f"enabled = {enabled}\ncache_size = 262144", config.read_text())
+
+    def test_explain_variant_capacity_provenance(self) -> None:
+        _, script = runner_script()
+        start = script.index("printf 'label=%s")
+        block = script[start:script.index("\n{ rustc", start)]
+        with tempfile.TemporaryDirectory() as directory:
+            variables = dict(OUT=directory, LABEL="fixture", COMMIT="abc", TREE="def",
+                             PEERS="2", TOTAL="2000000", EXPLAIN="true", CACHE_SIZE="262144",
+                             DHAT="0", PROFILE="release", RELOADS="0", CONTROL_SECS="10",
+                             EXPECTED_PER_OBSERVER="1000000")
+            subprocess.run(["bash", "-c", "set -euo pipefail\n" + block],
+                           env={**os.environ, **variables}, check=True)
+            fields = dict(line.split("=", 1) for line in
+                          (Path(directory) / "provenance.env").read_text().splitlines())
+            self.assertEqual(fields["cache_size"], "262144")
+            self.assertEqual(fields["explain"], "true")
+            self.assertEqual(fields["no_churn"], "1")
+
+    def test_explain_probe_failures_prevent_ack_and_success(self) -> None:
+        _, script = runner_script()
+        functions = []
+        for name in ("validate_explain_evidence", "capture_explain_evidence"):
+            start = script.index(f"{name}() {{")
+            functions.append(script[start:script.index("\n}\n", start) + 3])
+        command = "set -euo pipefail\n" + "\n".join(functions) + (
+            '\ncapture_explain_evidence\ntouch "$OUT/ack"\n'
+            'printf "status=success\\n" >"$OUT/result"\n'
+        )
+        cases = ("evicted", "full", "disabled", "failed", "missing", "not_seen",
+                 "capacity", "completeness", "family", "no_matches")
+        for case in cases:
+            with self.subTest(case=case), tempfile.TemporaryDirectory() as directory:
+                out = Path(directory)
+                enabled = "false" if case == "disabled" else "true"
+                size = 32 if case == "full" else 4
+                (out / "explain-prefixes.tsv").write_text(
+                    "early\t20.0.0.0/24\nlate\t20.0.7.0/24\n", encoding="utf-8")
+                for label in ("early", "late"):
+                    answer = dict(peer_address="127.1.0.1", prefix=f"20.0.{0 if label == 'early' else 7}.0/24",
+                                  afi_safi="ipv4-unicast", current_policy_generation=1,
+                                  cache_size=None if enabled == "false" else size,
+                                  evictions_since_reset=None if enabled == "false" else max(0, 8 - size),
+                                  matches=[dict(path_id=0, outcome="cache_disabled" if enabled == "false" else
+                                                ("evicted" if label == "early" and size < 8 else "permit"))])
+                    if label == "early":
+                        if case == "not_seen":
+                            answer["matches"][0]["outcome"] = "not_seen"
+                        elif case == "capacity":
+                            answer["cache_size"] = 4096
+                        elif case == "completeness":
+                            del answer["evictions_since_reset"]
+                        elif case == "family":
+                            answer["afi_safi"] = "ipv6-unicast"
+                        elif case == "no_matches":
+                            answer["matches"] = []
+                    (out / f"fixture-{label}.json").write_text(json.dumps(answer), encoding="utf-8")
+                cli = out / "fixture-cli"
+                cli.write_text(f"#!{sys.executable}\n" + '''import os, pathlib, sys
+label = "early" if sys.argv[sys.argv.index("--prefix") + 1] == "20.0.0.0/24" else "late"
+if not (os.environ["CASE"] == "missing" and label == "late"):
+    print((pathlib.Path(os.environ["OUT"]) / f"fixture-{label}.json").read_text())
+sys.exit(2 if os.environ["CASE"] == "failed" and label == "late" else
+         (1 if os.environ["EXPLAIN"] == "false" else 0))
+''', encoding="utf-8")
+                cli.chmod(0o755)
+                result = subprocess.run(
+                    ["bash", "-c", command], capture_output=True, text=True,
+                    env={**os.environ, "OUT": directory, "RUN": directory, "RBGP": str(cli),
+                         "EXPLAIN": enabled, "CACHE_SIZE": str(size), "TOTAL": "16", "PEERS": "2", "CASE": case},
+                )
+                positive = case in ("evicted", "full", "disabled")
+                self.assertEqual(result.returncode == 0, positive, result.stderr)
+                self.assertEqual((out / "ack").exists(), positive)
+                self.assertEqual((out / "result").exists(), positive)
+                if positive:
+                    self.assertIn("late_outcome=", (out / "explain-evidence.env").read_text())
 
     def test_dhat_receipt_requires_allocator_artifact_before_success(self) -> None:
         runner = HERE.parents[2] / "docs" / "perf" / "run-explain-cache-variant.sh"
