@@ -968,7 +968,7 @@ async fn dirty_initial_dump_refresh_waits_for_pending_eor() {
     );
     manager.distribute_changes(&HashSet::new(), &HashSet::new());
     let resync = out_rx.try_recv().unwrap();
-    assert!(resync.refresh_markers.is_empty());
+    assert_eq!(resync.refresh_markers.len(), 0);
     assert_eq!(resync.end_of_rib, vec![family]);
     assert!(!manager.pending_eor.contains_key(&peer));
     manager.send_route_refresh_response(peer, family.0, family.1);
@@ -1035,7 +1035,7 @@ async fn gr_restarter_deferred_eor_lifts_per_family() {
     // First (non-GR) session: both families gated, immediate honest-empty EoR.
     let initial = out_rx.recv().await.unwrap();
     assert!(initial.announce.is_empty());
-    assert!(!initial.end_of_rib.is_empty());
+    assert_ne!(initial.end_of_rib.len(), 0);
 
     let mut out_rx = gr_flap_and_reup(&tx, target, both.clone(), dual_stack_sendable(), both).await;
     assert!(

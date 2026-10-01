@@ -137,7 +137,7 @@ peer_group = "ix-members"
         class.unsupported_sections,
         vec!["mixed transaction families"]
     );
-    assert!(class.restart_required_sections.is_empty());
+    assert_eq!(class.restart_required_sections.len(), 0);
 }
 
 #[test]
@@ -198,8 +198,8 @@ remote_asn = 65100
         class.supported_sections,
         vec!["[[neighbors]] add", "[[neighbors]] delete"]
     );
-    assert!(class.unsupported_sections.is_empty());
-    assert!(class.restart_required_sections.is_empty());
+    assert_eq!(class.unsupported_sections.len(), 0);
+    assert_eq!(class.restart_required_sections.len(), 0);
 }
 
 #[test]
@@ -253,7 +253,7 @@ peer_group = "ix-members"
             .unsupported_sections
             .contains(&"mixed transaction families".to_string())
     );
-    assert!(class.restart_required_sections.is_empty());
+    assert_eq!(class.restart_required_sections.len(), 0);
 }
 
 #[test]
@@ -287,8 +287,8 @@ default_action = "permit"
             "[peer_groups] catalog",
         ]
     );
-    assert!(class.unsupported_sections.is_empty());
-    assert!(class.restart_required_sections.is_empty());
+    assert_eq!(class.unsupported_sections.len(), 0);
+    assert_eq!(class.restart_required_sections.len(), 0);
     assert!(
         diff.effective_neighbor_impact.is_empty(),
         "catalog-only changes must not affect existing neighbors"
@@ -329,8 +329,8 @@ default_action = "permit"
         class.supported_sections,
         vec!["[policy] definitions", "[policy] global chains"]
     );
-    assert!(class.unsupported_sections.is_empty());
-    assert!(class.restart_required_sections.is_empty());
+    assert_eq!(class.unsupported_sections.len(), 0);
+    assert_eq!(class.restart_required_sections.len(), 0);
 }
 
 #[test]
@@ -363,7 +363,7 @@ default_action = "{default_action}"
         vec!["[policy] definitions", "[policy] live impact"]
     );
     assert!(class.unsupported_sections.is_empty(), "{class:?}");
-    assert!(class.restart_required_sections.is_empty());
+    assert_eq!(class.restart_required_sections.len(), 0);
     assert!(
         diff.effective_neighbor_impact
             .iter()
@@ -655,7 +655,7 @@ remote_asn = 65030
         "{:?}",
         diff.effective_neighbor_impact
     );
-    assert!(class.restart_required_sections.is_empty());
+    assert_eq!(class.restart_required_sections.len(), 0);
 }
 
 #[test]
@@ -927,8 +927,8 @@ prefix_orf_receive = {orf}
     assert!(!class.is_noop(), "ORF toggle must not classify as a no-op");
     assert!(class.is_committable());
     assert_eq!(class.supported_sections, vec!["[[neighbors]] modify"]);
-    assert!(class.unsupported_sections.is_empty());
-    assert!(class.restart_required_sections.is_empty());
+    assert_eq!(class.unsupported_sections.len(), 0);
+    assert_eq!(class.restart_required_sections.len(), 0);
 }
 
 #[test]
@@ -950,7 +950,7 @@ metric = 200
     let class = classify_config_transaction_v1(&diff);
 
     assert!(!class.is_committable());
-    assert!(class.supported_sections.is_empty());
+    assert_eq!(class.supported_sections.len(), 0);
     assert!(
         class
             .restart_required_sections
@@ -1005,7 +1005,7 @@ fn transaction_v1_allows_disjoint_unprotected_dynamic_edit_beside_tcp_ao_range()
     assert!(diff.has_reload_applied_changes());
     assert!(class.is_committable(), "{class:?}");
     assert_eq!(class.supported_sections, vec!["[[dynamic_neighbors]]"]);
-    assert!(class.restart_required_sections.is_empty());
+    assert_eq!(class.restart_required_sections.len(), 0);
 }
 
 #[test]
@@ -1025,7 +1025,7 @@ fn protected_dynamic_range_reorder_is_not_a_tcp_ao_restart_change() {
     assert!(diff.dynamic_neighbors_reload_applied_changed);
     assert!(class.is_committable(), "{class:?}");
     assert_eq!(class.supported_sections, vec!["[[dynamic_neighbors]]"]);
-    assert!(class.restart_required_sections.is_empty());
+    assert_eq!(class.restart_required_sections.len(), 0);
 }
 
 #[test]

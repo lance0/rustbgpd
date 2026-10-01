@@ -3222,7 +3222,7 @@ mod tests {
             ipa("10.0.0.3"),
             "group member retargets to the lowest eligible survivor"
         );
-        assert!(entry.alias_vtep_ips.is_empty());
+        assert_eq!(entry.alias_vtep_ips.len(), 0);
         assert_eq!(entry.alias_group_key, Some((esi, EthernetTagId(0))));
         assert_eq!(
             entry.single_active_backup_vtep_ip,
@@ -3685,7 +3685,7 @@ mod tests {
             build_intent_tables(&rib_tx, &instances, &ip_vrfs, &BTreeSet::new(), &no_bias())
                 .await
                 .unwrap();
-        assert!(tables.remote_ip_prefixes.drops().is_empty());
+        assert_eq!(tables.remote_ip_prefixes.drops().len(), 0);
         let entries: Vec<_> = tables
             .remote_ip_prefixes
             .for_vrf(IpVrfId::new(5000).unwrap())
@@ -3725,7 +3725,7 @@ mod tests {
             build_intent_tables(&rib_tx, &instances, &ip_vrfs, &BTreeSet::new(), &no_bias())
                 .await
                 .unwrap();
-        assert!(tables.remote_ip_prefixes.drops().is_empty());
+        assert_eq!(tables.remote_ip_prefixes.drops().len(), 0);
         let entries: Vec<_> = tables
             .remote_ip_prefixes
             .for_vrf(IpVrfId::new(5000).unwrap())
@@ -3764,7 +3764,7 @@ mod tests {
             build_intent_tables(&rib_tx, &instances, &ip_vrfs, &BTreeSet::new(), &no_bias())
                 .await
                 .unwrap();
-        assert!(tables.remote_ip_prefixes.drops().is_empty());
+        assert_eq!(tables.remote_ip_prefixes.drops().len(), 0);
         let entries: Vec<_> = tables
             .remote_ip_prefixes
             .for_vrf(IpVrfId::new(5000).unwrap())

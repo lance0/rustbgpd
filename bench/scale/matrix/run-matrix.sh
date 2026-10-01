@@ -55,7 +55,7 @@ source "$REPO/bench/scale/host-quiet.sh"
 # shellcheck disable=SC1091 # REPO is resolved dynamically above
 source "$REPO/bench/scale/provenance.sh"
 RSTALL="$REPO/bench/scale/reloadstall"
-HARNESS="$REPO/bench/scale/target/release/reloadstall"
+HARNESS="$REPO/target/scale/reloadstall"
 SAMPLER="$REPO/bench/scale/matrix/rss-sampler.sh"
 RBGP="$REPO/target/release/rbgp"
 
@@ -223,7 +223,7 @@ done
 acquire_rustbgpd_host_lock || exit $?
 
 [ -x "$HARNESS" ] || {
-    echo "missing $HARNESS - build with: cd $RSTALL && cargo build --release" >&2
+    echo "missing $HARNESS - build with: cargo build --profile scale --locked -p reloadstall" >&2
     exit 1
 }
 CAPTURED_COMMIT=$(git -C "$REPO" rev-parse HEAD) || exit 1
@@ -243,7 +243,7 @@ snapshot_source() {
     local relative=$1
     SOURCE_HASHES[$relative]=$(provenance_sha256_file "$REPO/$relative") || return 1
 }
-for relative in "${COMMON_SOURCES[@]}" bench/scale/target/release/reloadstall; do
+for relative in "${COMMON_SOURCES[@]}" target/scale/reloadstall; do
     snapshot_source "$relative" || { echo "cannot hash $relative" >&2; exit 1; }
 done
 
@@ -266,9 +266,9 @@ write_cell_provenance() {
         --arg toolchain "$(rustc -Vv)" --arg host "$(uname -srvmo)" \
         --argjson common "$common" --arg generator_path "$generator" \
         --arg generator_hash "${SOURCE_HASHES[$generator]}" \
-        --arg reloadstall_hash "${SOURCE_HASHES[bench/scale/target/release/reloadstall]}" \
+        --arg reloadstall_hash "${SOURCE_HASHES[target/scale/reloadstall]}" \
         --argjson workload "$workload" --argjson inputs "$inputs" \
-        '{schema:1,cell:$cell,git:{commit:$commit,tree:$tree,dirty:$dirty},toolchain:$toolchain,host:$host,sources:{common:$common,generator:{($generator_path):$generator_hash},reloadstall:{path:"bench/scale/target/release/reloadstall",sha256:$reloadstall_hash}},workload:($workload + {inputs:$inputs})}' \
+        '{schema:1,cell:$cell,git:{commit:$commit,tree:$tree,dirty:$dirty},toolchain:$toolchain,host:$host,sources:{common:$common,generator:{($generator_path):$generator_hash},reloadstall:{path:"target/scale/reloadstall",sha256:$reloadstall_hash}},workload:($workload + {inputs:$inputs})}' \
         >"$ART/$cell/provenance.json" || return 1
     python3 "$REPO/bench/scale/matrix/verify-provenance.py" \
         "$ART/$cell/provenance.json" "$cell" "$COMPETITOR_GENERATION"

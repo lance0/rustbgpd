@@ -20,7 +20,7 @@ claim.
 Run from the repository root:
 
 ```text
-cargo run --manifest-path bench/scale/rrtransport/Cargo.toml --locked -- smoke
+cargo run --locked -p rrtransport -- smoke
 ```
 
 ## Fixed scale instrument

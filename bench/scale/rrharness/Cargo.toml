@@ -6,10 +6,10 @@ license = "MIT OR Apache-2.0"
 publish = false
 
 [dependencies]
-rustbgpd-rib = { path = "../../../crates/rib" }
-rustbgpd-transport = { path = "../../../crates/transport", features = ["bench-internals"] }
-rustbgpd-wire = { path = "../../../crates/wire" }
-rustbgpd-telemetry = { path = "../../../crates/telemetry" }
-tokio = { version = "1", features = ["full"] }
+rustbgpd-rib.workspace = true
+rustbgpd-transport = { workspace = true, features = ["bench-internals"] }
+rustbgpd-wire.workspace = true
+rustbgpd-telemetry.workspace = true
+tokio.workspace = true
 pprof = "0.15"
-libc = "0.2"
+libc.workspace = true

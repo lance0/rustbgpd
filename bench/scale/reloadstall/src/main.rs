@@ -3513,7 +3513,10 @@ fn convergence_integrity_valid(
     up == n_peers && parse_errors == 0 && min_unique == expected && max_unique == expected
 }
 
-#[allow(clippy::too_many_lines)]
+#[allow(
+    clippy::too_many_lines,
+    reason = "benchmark entrypoint keeps scenario execution and measurement phases together"
+)]
 fn main() {
     let mut a: Vec<String> = std::env::args().collect();
     let convergence_only = take_single_flag(&mut a, "--convergence-only");

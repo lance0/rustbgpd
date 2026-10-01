@@ -955,7 +955,7 @@ async fn route_event_has_timestamp() {
     .unwrap();
 
     let event = events_rx.recv().await.unwrap();
-    assert!(!event.timestamp.is_empty());
+    assert_ne!(event.timestamp.len(), 0);
     // Should be a valid integer (Unix seconds)
     let ts: u64 = event
         .timestamp

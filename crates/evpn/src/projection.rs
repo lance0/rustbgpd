@@ -737,7 +737,7 @@ mod tests {
         let eads = vec![ead(esi_seed(1), 0, "10.0.0.3")];
         let table = project_evpn_routes_with_aliases(&one_local(100), routes, eads);
         let entry = table.get(vni(100), mac(1)).unwrap();
-        assert!(entry.alias_vtep_ips.is_empty());
+        assert_eq!(entry.alias_vtep_ips.len(), 0);
     }
 
     #[test]
@@ -802,7 +802,7 @@ mod tests {
         let table = project_evpn_routes_with_aliases(&one_local(100), routes, eads);
         let entry = table.get(vni(100), mac(1)).unwrap();
         assert!(entry.alias_group_key.is_none());
-        assert!(entry.alias_vtep_ips.is_empty());
+        assert_eq!(entry.alias_vtep_ips.len(), 0);
     }
 
     #[test]
@@ -817,7 +817,7 @@ mod tests {
             entry.alias_group_key,
             Some((esi_seed(7), rustbgpd_wire::EthernetTagId(0))),
         );
-        assert!(!entry.alias_vtep_ips.is_empty());
+        assert_ne!(entry.alias_vtep_ips.len(), 0);
     }
 
     #[test]
@@ -829,7 +829,7 @@ mod tests {
         let table = project_evpn_routes_with_aliases(&one_local(100), routes, eads);
         let entry = table.get(vni(100), mac(1)).unwrap();
         assert!(entry.alias_group_key.is_none());
-        assert!(entry.alias_vtep_ips.is_empty());
+        assert_eq!(entry.alias_vtep_ips.len(), 0);
     }
 
     #[test]
@@ -858,7 +858,7 @@ mod tests {
         let routes = vec![route_with_esi(100, 1, "10.0.0.2", None, esi_seed(1))];
         let table = project_evpn_routes(&one_local(100), routes);
         let entry = table.get(vni(100), mac(1)).unwrap();
-        assert!(entry.alias_vtep_ips.is_empty());
+        assert_eq!(entry.alias_vtep_ips.len(), 0);
     }
 
     // ─── ADR-0083 slice 2: single-active backup-path projection ───
@@ -957,7 +957,7 @@ mod tests {
         );
         let entry = table.get(vni(100), mac(1)).unwrap();
         assert!(entry.alias_group_key.is_none());
-        assert!(entry.alias_vtep_ips.is_empty());
+        assert_eq!(entry.alias_vtep_ips.len(), 0);
         assert!(entry.single_active_backup_vtep_ip.is_none());
     }
 
@@ -977,7 +977,7 @@ mod tests {
         let eads = vec![ead(esi_seed(7), 0, "10.0.0.3")];
         let table = project_evpn_routes_with_backup_paths(&one_local(100), routes, eads, &index);
         let entry = table.get(vni(100), mac(1)).unwrap();
-        assert!(entry.alias_vtep_ips.is_empty());
+        assert_eq!(entry.alias_vtep_ips.len(), 0);
         assert!(entry.alias_group_key.is_none());
         assert!(entry.single_active_backup_vtep_ip.is_none());
     }
@@ -1052,7 +1052,7 @@ mod tests {
             ipa("10.0.0.3"),
             "membership retargets to the lowest eligible survivor"
         );
-        assert!(entry.alias_vtep_ips.is_empty());
+        assert_eq!(entry.alias_vtep_ips.len(), 0);
         assert_eq!(
             entry.alias_group_key,
             Some((esi_seed(7), rustbgpd_wire::EthernetTagId(0))),

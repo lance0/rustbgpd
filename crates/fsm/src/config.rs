@@ -537,7 +537,7 @@ mod tests {
         }
         let mut cfg = test_config();
         cfg.families = vec![(Afi::Ipv6, Safi::MplsVpn)];
-        assert!(cfg.extended_nexthop_capabilities().is_empty());
+        assert_eq!(cfg.extended_nexthop_capabilities().len(), 0);
     }
 
     #[test]
@@ -648,7 +648,7 @@ mod tests {
     fn paths_limit_requires_add_path_receive() {
         let mut cfg = test_config();
         cfg.paths_limit_receive_max = 4;
-        assert!(cfg.paths_limit_capabilities().is_empty());
+        assert_eq!(cfg.paths_limit_capabilities().len(), 0);
         cfg.add_path_receive = true;
         assert_eq!(cfg.paths_limit_capabilities().len(), 1);
         assert_eq!(cfg.paths_limit_capabilities()[0].receive_limit, 4);
@@ -657,7 +657,7 @@ mod tests {
     #[test]
     fn add_path_capabilities_empty_when_disabled() {
         let cfg = test_config(); // add_path_receive = false
-        assert!(cfg.add_path_capabilities().is_empty());
+        assert_eq!(cfg.add_path_capabilities().len(), 0);
     }
 
     #[test]

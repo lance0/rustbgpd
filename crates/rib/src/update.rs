@@ -1511,7 +1511,7 @@ fn route_query_filter_identity(filter: &RouteQueryFilter) -> usize {
 
 /// Build the trusted family-only closure used by the API's ordered continuations.
 #[doc(hidden)]
-#[must_use]
+#[must_use = "the filter must be passed to a paged route query"]
 pub fn ordered_route_query_filter(
     family: Option<Afi>,
     known_total: Option<u64>,

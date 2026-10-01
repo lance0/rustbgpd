@@ -2373,7 +2373,7 @@ fn empty_operation_replay_is_explicit_but_not_a_valid_minimizer_candidate() {
         Some(&[]),
     )
     .unwrap();
-    assert!(replay.retained_indices.is_empty());
+    assert_eq!(replay.retained_indices.len(), 0);
     assert!(replay.replay().ends_with("ops=[]"));
     assert!(
         replay

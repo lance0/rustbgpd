@@ -81,9 +81,9 @@ FLAPSTORM="${FLAPSTORM:-50}"
 CONTROL_SECS="${CONTROL_SECS:-30}"
 CORES="${CORES:-12-32,34-39}"
 HERE="$(cd "$(dirname "$0")" && pwd)"
-HARNESS="$HERE/../target/release/reloadstall"
+HARNESS="$HERE/../../../target/scale/reloadstall"
 [ -x "$DAEMON" ] || { echo "missing daemon binary $DAEMON" >&2; exit 2; }
-[ -x "$HARNESS" ] || { echo "missing $HARNESS (cargo build --release -p reloadstall)" >&2; exit 2; }
+[ -x "$HARNESS" ] || { echo "missing $HARNESS (cargo build --profile scale --locked -p reloadstall)" >&2; exit 2; }
 
 # Short run dir: the scenario's gRPC UDS path must fit SUN_LEN.
 RUN=/tmp/fo-cell

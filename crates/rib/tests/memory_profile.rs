@@ -1000,7 +1000,7 @@ fn adj_rib_out_release_unicast_reclaims_100k_structural_capacity() {
 fn adj_rib_out_first_adoption_tail_trim_reclaims_expected_slot_bytes() {
     const RESERVED: usize = 100_000;
     const STAGED: usize = 68_928;
-    const MIN_RECLAIMED_BYTES: usize = 7 * 1024 * 1024 / 2;
+    const MIN_RECLAIMED_BYTES: usize = (RESERVED - STAGED) * std::mem::size_of::<Option<Route>>();
 
     let prefixes = generate_prefixes(STAGED);
     let attrs = typical_attributes(1);

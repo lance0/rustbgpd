@@ -219,7 +219,7 @@ async fn denied_rtc_replacements_reconcile_exact_refresh_identity() {
         panic!("expected RtcRoutesReceived");
     };
     assert_eq!(announced.len(), 2);
-    assert!(withdrawn.is_empty());
+    assert_eq!(withdrawn.len(), 0);
     assert_eq!(session.known_prefix_count(), 2);
 
     buffer_route_refresh(
@@ -425,7 +425,7 @@ async fn denied_bgpls_replacements_reconcile_exact_refresh_identity_for_both_saf
             panic!("expected BgpLsRoutesReceived");
         };
         assert_eq!(announced.len(), 2);
-        assert!(withdrawn.is_empty());
+        assert_eq!(withdrawn.len(), 0);
         assert_eq!(session.known_prefix_count(), 2);
 
         buffer_route_refresh(&mut session, afi, safi, RouteRefreshSubtype::BoRR);

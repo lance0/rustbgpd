@@ -912,7 +912,7 @@ mod tests {
         let mut rib = AdjRibOut::new(IpAddr::V4(Ipv4Addr::LOCALHOST));
         let prefix = prefix_a();
 
-        assert!(rib.labeled_path_ids_for_key(&prefix).is_empty());
+        assert_eq!(rib.labeled_path_ids_for_key(&prefix).len(), 0);
         rib.insert_labeled(make_labeled_route([10, 0, 0, 0], 24, 1, 1));
         rib.insert_labeled(make_labeled_route([10, 0, 0, 0], 24, 2, 1));
         rib.insert_labeled(make_labeled_route([10, 0, 0, 0], 24, 3, 1));
@@ -928,7 +928,7 @@ mod tests {
 
         rib.remove_labeled(&LabeledRibRouteKey { prefix, path_id: 1 });
         rib.remove_labeled(&LabeledRibRouteKey { prefix, path_id: 3 });
-        assert!(rib.labeled_path_ids_for_key(&prefix).is_empty());
+        assert_eq!(rib.labeled_path_ids_for_key(&prefix).len(), 0);
     }
 
     fn make_rtc_route(local_admin: u32, peer_oct: u8) -> RtcRibRoute {
@@ -1176,9 +1176,10 @@ mod tests {
 
         assert!(checkpoints > 0);
         assert_eq!(rib.vpn_len(), 0);
-        assert!(
+        assert_eq!(
             rib.vpn_path_ids_for_key(&vpn_nlri([10, 0, 1, 0], 24, 100).key())
-                .is_empty()
+                .len(),
+            0
         );
         assert_eq!(rib.len(), 1);
         assert_eq!(rib.bgpls_len(), 1);
@@ -1289,7 +1290,7 @@ mod tests {
     #[test]
     fn family_counts_buckets_all_family_maps() {
         let mut rib = AdjRibOut::new(IpAddr::V4(Ipv4Addr::LOCALHOST));
-        assert!(rib.family_counts().is_empty());
+        assert_eq!(rib.family_counts().len(), 0);
 
         rib.insert(make_route(prefix_a(), 0));
         rib.insert(make_route(prefix_b(), 0));

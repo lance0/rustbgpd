@@ -8,7 +8,7 @@ source "$root/tests/soak/host-lock.sh"
 source "$root/bench/scale/provenance.sh"
 verifier="$root/bench/scale/rrtransport/verify_receipt.py"
 manifest="$root/bench/scale/rrtransport/Cargo.toml"
-binary="$root/bench/scale/target/release/rrtransport"
+binary="$root/target/scale/rrtransport"
 rss_limit_kib=$((2 * 1024 * 1024))
 classify_rss() {
   local rss=$1 output=$2
@@ -403,7 +403,7 @@ startup_gate_fixture() {
   receipt=$fixture_dir/receipt
   tiny_ready=$fixture_dir/gate/ready
   tiny_go=$fixture_dir/gate/go
-  tiny_expected="$root/bench/scale/target/debug/rrtransport"
+  tiny_expected="$root/target/debug/rrtransport"
   printf 'observer\trss_kib\n' >"$receipt/rss.tsv"
   max_rss=0
   case $mode in
@@ -778,7 +778,7 @@ case ${1:-} in
     receipt=$2
     rm -rf "$receipt"
     mkdir -p "$receipt"
-    tiny_binary="$root/bench/scale/target/debug/rrtransport"
+    tiny_binary="$root/target/debug/rrtransport"
     tiny_binary_sha256=$(provenance_sha256_file "$tiny_binary") || exit 1
     run_grouped_commit_fixture "$receipt" 4 100
     printf 'observer\trss_kib\n' >"$receipt/rss.tsv"
@@ -841,7 +841,7 @@ available=$(awk '/MemAvailable:/ {print $2}' /proc/meminfo)
 [[ -z $(git -C "$root" status --porcelain) ]] || { echo "tree must be clean" >&2; exit 1; }
 
 head_before=$(git -C "$root" rev-parse HEAD)
-timeout -k 10 300 cargo build --manifest-path "$manifest" --locked --release
+timeout -k 10 300 cargo build --locked --profile scale -p rrtransport
 binary_sha256=$(provenance_sha256_file "$binary") || exit 1
 mkdir -p "$output"; campaign_started=$SECONDS
 run_grouped_commit_fixture "$output" 1000 100000

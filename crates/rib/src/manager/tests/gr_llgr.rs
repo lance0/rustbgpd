@@ -1516,7 +1516,7 @@ async fn ungrouped_llgr_promotion_keeps_rr_client_route_advertised() {
             .iter()
             .any(|route| route.prefix == Prefix::V4(prefix))
     );
-    assert!(initial.withdraw.is_empty());
+    assert_eq!(initial.withdraw.len(), 0);
 
     manager.handle_update(RibUpdate::PeerGracefulRestart {
         session_id: 31,
@@ -2304,7 +2304,7 @@ async fn run_loop_retention_expiry_precedes_deferred_registration() {
         let dump = dump
             .expect("deferred registration must complete")
             .expect("the live session's sender must survive expiry");
-        assert!(!dump.end_of_rib.is_empty());
+        assert_ne!(dump.end_of_rib.len(), 0);
     }
 }
 

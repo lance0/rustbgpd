@@ -827,7 +827,7 @@ async fn bfd_reload_commit_preserves_nonstrict_and_releases_removed_hold() {
     mgr.commit_bfd_reload(None).await.unwrap();
     wait_counter(&counters.start, 1).await;
     assert!(!mgr.bfd_withholding(&peer));
-    assert!(desired.borrow().sessions.is_empty());
+    assert_eq!(desired.borrow().sessions.len(), 0);
     actor.abort();
 }
 

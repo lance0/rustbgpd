@@ -3519,9 +3519,9 @@ mod policy_attr_summary_tests {
     fn empty_attrs_use_defaults() {
         let attrs: Vec<PathAttribute> = Vec::new();
         let s = PolicyAttrSummary::from_route_attrs(&attrs, true);
-        assert!(s.extended_communities.is_empty());
-        assert!(s.communities.is_empty());
-        assert!(s.large_communities.is_empty());
+        assert_eq!(s.extended_communities.len(), 0);
+        assert_eq!(s.communities.len(), 0);
+        assert_eq!(s.large_communities.len(), 0);
         assert!(s.as_path.is_none());
         assert_eq!(s.as_path_str, "");
         assert_eq!(s.as_path_len, 0);

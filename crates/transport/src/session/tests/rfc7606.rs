@@ -856,7 +856,7 @@ async fn domain_path_remains_opaque_on_vpn_and_evpn_routes() {
             } => {
                 assert_eq!(safi, Safi::MplsVpn);
                 assert_eq!(announced.len(), 1);
-                assert!(withdrawn.is_empty());
+                assert_eq!(withdrawn.len(), 0);
                 Arc::clone(&announced[0].attributes)
             }
             RibUpdate::RoutesReceived {
@@ -866,13 +866,13 @@ async fn domain_path_remains_opaque_on_vpn_and_evpn_routes() {
             } => {
                 assert_eq!(safi, Safi::Evpn);
                 assert_eq!(evpn_announced.len(), 1);
-                assert!(evpn_withdrawn.is_empty());
+                assert_eq!(evpn_withdrawn.len(), 0);
                 Arc::clone(&evpn_announced[0].attributes)
             }
             _ => panic!("unexpected RIB update"),
         };
         assert!(retained.contains(&domain_path));
-        assert!(malformed_cause_rows(&session).is_empty());
+        assert_eq!(malformed_cause_rows(&session).len(), 0);
         assert_eq!(session.fsm.state(), SessionState::Established);
     }
 }
@@ -977,7 +977,7 @@ async fn malformed_as4_path_discards_only_sidecar_and_keeps_reachable_nlri() {
     else {
         panic!("expected RoutesReceived");
     };
-    assert!(withdrawn.is_empty());
+    assert_eq!(withdrawn.len(), 0);
     assert_eq!(announced.len(), 1);
     assert_eq!(announced[0].prefix, Prefix::V4(prefix));
     assert_eq!(
@@ -1072,7 +1072,7 @@ async fn bgpls_attribute_discard_keeps_nlri_and_session() {
     };
     assert_eq!(announced.len(), 1);
     assert_eq!(announced[0].nlri, nlri);
-    assert!(withdrawn.is_empty());
+    assert_eq!(withdrawn.len(), 0);
     assert!(
         !announced[0]
             .attributes
@@ -2210,7 +2210,7 @@ async fn srv6_service_generic_prefix_sid_failure_still_discards_only_attribute()
         panic!("expected accepted route without malformed generic Prefix-SID");
     };
     assert_eq!(announced.len(), 1);
-    assert!(withdrawn.is_empty());
+    assert_eq!(withdrawn.len(), 0);
     assert!(
         announced[0]
             .attributes
@@ -2346,7 +2346,7 @@ async fn malformed_causes_aggregator_and_first_as_use_one_final_disposition() {
     session
         .process_update(aspa_first_as_update(prefix, 65002, true))
         .await;
-    assert!(malformed_cause_rows(&session).is_empty());
+    assert_eq!(malformed_cause_rows(&session).len(), 0);
     rfc7606_drain(&mut rib_rx);
     let mut replacement = aspa_first_as_update(prefix, 65003, true);
     let mut attributes = replacement.path_attributes.to_vec();

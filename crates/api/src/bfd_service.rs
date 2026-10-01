@@ -152,21 +152,13 @@ mod tests {
                 peer_address: peer.to_string(),
             }))
         };
-        assert!(
-            view("10.0.0.1")
-                .await
-                .unwrap()
-                .into_inner()
-                .sessions
-                .is_empty()
+        assert_eq!(
+            view("10.0.0.1").await.unwrap().into_inner().sessions.len(),
+            0
         );
-        assert!(
-            view("10.0.0.2")
-                .await
-                .unwrap()
-                .into_inner()
-                .sessions
-                .is_empty()
+        assert_eq!(
+            view("10.0.0.2").await.unwrap().into_inner().sessions.len(),
+            0
         );
         assert_eq!(
             view("10.0.0.9").await.unwrap().into_inner().sessions.len(),
@@ -213,6 +205,6 @@ mod tests {
             .await
             .unwrap()
             .into_inner();
-        assert!(resp.sessions.is_empty());
+        assert_eq!(resp.sessions.len(), 0);
     }
 }

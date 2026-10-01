@@ -502,12 +502,12 @@ mod tests {
             let Some(proto::bgp_event::Payload::Session(session)) = event.payload else {
                 panic!("expected session payload");
             };
-            assert!(session.old_state.is_empty());
+            assert_eq!(session.old_state.len(), 0);
             assert_eq!(
                 session.new_state,
                 if new_state.is_some() { "idle" } else { "" }
             );
-            assert!(session.session_role.is_empty());
+            assert_eq!(session.session_role.len(), 0);
         }
     }
 

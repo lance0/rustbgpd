@@ -8,11 +8,11 @@ publish = false
 [dependencies]
 anyhow = "1"
 rustbgpd-evpn-load = { path = "../../evpn-load" }
-rustbgpd-fsm = { path = "../../../crates/fsm" }
-rustbgpd-policy = { path = "../../../crates/policy" }
-rustbgpd-rib = { path = "../../../crates/rib" }
-rustbgpd-telemetry = { path = "../../../crates/telemetry", features = ["jemalloc"] }
-rustbgpd-transport = { path = "../../../crates/transport", features = ["bench-internals"] }
-rustbgpd-wire = { path = "../../../crates/wire" }
-tikv-jemallocator = { version = "0.7", features = ["profiling", "stats"] }
-tokio = { version = "1", features = ["full"] }
+rustbgpd-fsm.workspace = true
+rustbgpd-policy.workspace = true
+rustbgpd-rib.workspace = true
+rustbgpd-telemetry = { workspace = true, features = ["jemalloc"] }
+rustbgpd-transport = { workspace = true, features = ["bench-internals"] }
+rustbgpd-wire.workspace = true
+tikv-jemallocator.workspace = true
+tokio.workspace = true

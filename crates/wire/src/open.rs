@@ -359,7 +359,7 @@ mod tests {
 
         // Mutation-red: treating an extended length of zero as truncated or
         // falling back to classic framing makes this fail.
-        assert!(decoded.capabilities.is_empty());
+        assert_eq!(decoded.capabilities.len(), 0);
     }
 
     #[test]

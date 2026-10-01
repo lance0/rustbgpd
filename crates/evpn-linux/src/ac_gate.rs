@@ -235,7 +235,7 @@ mod tests {
             }]
         );
         assert_eq!(res.managed.get(&10), Some(&true));
-        assert!(res.unresolved.is_empty());
+        assert_eq!(res.unresolved.len(), 0);
     }
 
     #[test]
@@ -260,7 +260,7 @@ mod tests {
         table.set_ac_gate(esi(1), "eth2".to_string(), AcGateState::Blocked);
 
         let snap_blocked = snapshot_with_port("eth2", 10, Some(BR_STATE_DISABLED));
-        assert!(resolve_ac_gate_plan(&table, &snap_blocked).ops.is_empty());
+        assert_eq!(resolve_ac_gate_plan(&table, &snap_blocked).ops.len(), 0);
 
         let snap_reset = snapshot_with_port("eth2", 10, Some(BR_STATE_FORWARDING));
         let res = resolve_ac_gate_plan(&table, &snap_reset);
@@ -302,7 +302,7 @@ mod tests {
         let snap = snapshot_with_port("eth2", 10, Some(BR_STATE_FORWARDING));
 
         let res = resolve_ac_gate_plan(&table, &snap);
-        assert!(res.ops.is_empty());
+        assert_eq!(res.ops.len(), 0);
         assert_eq!(res.managed.get(&10), Some(&false));
     }
 
@@ -344,7 +344,7 @@ mod tests {
         let snap = snapshot_with_port("eth2", 10, Some(BR_STATE_FORWARDING));
 
         let res = resolve_ac_gate_plan(&table, &snap);
-        assert!(res.ops.is_empty());
+        assert_eq!(res.ops.len(), 0);
         assert!(res.managed.is_empty());
         assert_eq!(res.unresolved, vec!["eth9".to_string()]);
     }
@@ -399,7 +399,7 @@ mod tests {
         // 10: already forwarding → skip. 11: still managed → skip.
         // 12: was managed-forwarding (never blocked) → nothing to
         // restore.
-        assert!(restore_ops(&last, &managed, &snap).is_empty());
+        assert_eq!(restore_ops(&last, &managed, &snap).len(), 0);
     }
 
     #[test]
@@ -418,6 +418,9 @@ mod tests {
         // Link deleted from the kernel — ENODEV would be the only
         // outcome; nothing to restore.
         let last: BTreeMap<u32, bool> = [(10, true)].into();
-        assert!(restore_ops(&last, &BTreeMap::new(), &KernelSnapshot::new()).is_empty());
+        assert_eq!(
+            restore_ops(&last, &BTreeMap::new(), &KernelSnapshot::new()).len(),
+            0
+        );
     }
 }

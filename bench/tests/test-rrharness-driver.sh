@@ -153,10 +153,71 @@ rg -F 'export PYTHONDONTWRITEBYTECODE=1' "$driver" >/dev/null || {
   printf 'rrharness driver does not disable retained Python bytecode writes\n' >&2
   exit 1
 }
-rg -F 'cargo build --release --locked' "$driver" >/dev/null || {
-  printf 'rrharness driver does not build both sides with --release --locked\n' >&2
-  exit 1
-}
+# Execute the real build/profile/path block with fake Cargo, for both source
+# layouts. A nearby command string alone does not prove binary alignment.
+python3 - "$driver" <<'PY'
+import json
+import os
+from pathlib import Path
+import subprocess
+import sys
+import tempfile
+
+source = Path(sys.argv[1]).read_text()
+assert source.count('build_variant() {') == source.count('# Cargo may print') == 1
+build = 'build_variant() {' + source.split('build_variant() {', 1)[1].split('# Cargo may print', 1)[0]
+
+def probe(program):
+    for profiles in [('release', 'scale'), ('scale', 'release'), ('scale', 'scale'), ('release', 'release')]:
+        with tempfile.TemporaryDirectory(prefix='rrharness build ') as temporary:
+            root = Path(temporary)
+            tools = root / 'tools'
+            tools.mkdir()
+            (tools / 'git').write_text("#!/bin/sh\nprintf 'fixture-commit\\n'\n")
+            (tools / 'cargo').write_text('''#!/usr/bin/env python3
+import json, os, sys
+from pathlib import Path
+target = Path(os.environ['CARGO_TARGET_DIR'])
+args = sys.argv[1:]
+binary = target / args[args.index('--profile') + 1] / 'rrharness'
+binary.parent.mkdir(parents=True)
+binary.write_text('#!/bin/sh\\n')
+binary.chmod(0o755)
+(target / 'argv.json').write_text(json.dumps(args))
+''')
+            for tool in tools.iterdir():
+                tool.chmod(0o755)
+            env = os.environ | {'PATH': f"{tools}:{os.environ['PATH']}"}
+            logs = root / 'logs'
+            logs.mkdir()
+            env['build_log_dir'] = str(logs)
+            expected_binaries = []
+            for side, profile in zip(('base', 'head'), profiles):
+                tree = root / f'{side} tree'
+                (tree / 'bench/scale').mkdir(parents=True)
+                if profile == 'release':
+                    (tree / 'bench/scale/Cargo.toml').touch()
+                env[f'{side}_tree'] = str(tree)
+                env[f'{side}_target'] = str(root / f'{side} target')
+                expected_binaries.append(f"{env[f'{side}_target']}/{profile}/rrharness")
+            result = subprocess.run(['bash', '-eu', '-c', program + '\nprintf "%s\\n" "$base_binary" "$head_binary"'], env=env, text=True, capture_output=True)
+            assert result.returncode == 0, result.stderr
+            assert result.stdout.splitlines() == expected_binaries
+            for side, profile in zip(('base', 'head'), profiles):
+                args = json.loads((Path(env[f'{side}_target']) / 'argv.json').read_text())
+                assert args == ['build', '--profile', profile, '--locked', '--jobs', '1', '--manifest-path', 'bench/scale/rrharness/Cargo.toml'], args
+                assert f'command=cargo build --profile {profile} --locked' in (logs / f'{side}.log').read_text()
+
+probe(build)
+for old, new in [('base_profile=scale', 'base_profile=release'), ('[[ ! -f $base_tree/bench/scale/Cargo.toml ]] || base_profile=release', 'true'), ('cargo build --profile "$profile" --locked', 'cargo build --profile "$profile"'), ('base_binary="$base_target/$base_profile/rrharness"', 'base_binary="$base_target/release/rrharness"')]:
+    assert old in build, old
+    try:
+        probe(build.replace(old, new, 1))
+    except AssertionError:
+        pass
+    else:
+        raise AssertionError(f'broken build stayed green: {old}')
+PY
 mkdir "$privacy_fixture/python-import"
 printf 'VALUE = 1\n' >"$privacy_fixture/python-import/probe.py"
 PYTHONPATH="$privacy_fixture/python-import" PYTHONDONTWRITEBYTECODE=1 \

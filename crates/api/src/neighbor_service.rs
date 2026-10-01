@@ -1758,13 +1758,14 @@ mod tests {
                 })
                 .unwrap();
         });
-        assert!(
+        assert_eq!(
             svc.list_neighbors(Request::new(proto::ListNeighborsRequest {}))
                 .await
                 .unwrap()
                 .into_inner()
                 .neighbors
-                .is_empty()
+                .len(),
+            0
         );
         let error = svc
             .get_neighbor_state(Request::new(proto::GetNeighborStateRequest {

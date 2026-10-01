@@ -49,10 +49,10 @@ async fn send_initial_table_includes_flowspec_routes() {
 
     let update = out_rx.recv().await.unwrap();
     assert!(update.announce.is_empty());
-    assert!(update.withdraw.is_empty());
+    assert_eq!(update.withdraw.len(), 0);
     assert_eq!(update.flowspec_announce.len(), 1);
     assert_eq!(update.flowspec_announce[0].rule, fs_rule);
-    assert!(update.flowspec_withdraw.is_empty());
+    assert_eq!(update.flowspec_withdraw.len(), 0);
 
     let eor = out_rx.recv().await.unwrap();
     assert_eq!(eor.end_of_rib, ipv4_flowspec_sendable());
@@ -124,10 +124,10 @@ async fn route_refresh_flowspec_re_advertises_routes() {
 
     let update = out_rx.recv().await.unwrap();
     assert!(update.announce.is_empty());
-    assert!(update.withdraw.is_empty());
+    assert_eq!(update.withdraw.len(), 0);
     assert_eq!(update.flowspec_announce.len(), 1);
     assert_eq!(update.flowspec_announce[0].rule, fs_rule);
-    assert!(update.flowspec_withdraw.is_empty());
+    assert_eq!(update.flowspec_withdraw.len(), 0);
     assert_eq!(update.end_of_rib, vec![(Afi::Ipv4, Safi::FlowSpec)]);
 
     drop(tx);
@@ -200,10 +200,10 @@ async fn dirty_resync_retries_flowspec_updates() {
 
     let resync = out_rx.recv().await.unwrap();
     assert!(resync.announce.is_empty());
-    assert!(resync.withdraw.is_empty());
+    assert_eq!(resync.withdraw.len(), 0);
     assert_eq!(resync.flowspec_announce.len(), 1);
     assert_eq!(resync.flowspec_announce[0].rule, fs_rule);
-    assert!(resync.flowspec_withdraw.is_empty());
+    assert_eq!(resync.flowspec_withdraw.len(), 0);
     let rows = super::flowspec_advertised::advertised(&tx, target).await;
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].rule, fs_rule);
@@ -215,7 +215,7 @@ async fn dirty_resync_retries_flowspec_updates() {
 
 // --- Graceful Restart tests ---
 
-#[expect(
+#[allow(
     clippy::float_cmp,
     reason = "the exported gauge contains exact integer route counts"
 )]
@@ -519,7 +519,7 @@ async fn flowspec_gr_omitted_families_withdraw_all_paths_and_redistribute() {
                             .peer,
                         best.peer
                     );
-                    assert!(withdrawn.is_empty());
+                    assert_eq!(withdrawn.len(), 0);
                     assert!(
                         announced
                             .iter()
@@ -844,7 +844,7 @@ async fn flowspec_export_prefix_term_does_not_match_destination_less_rules() {
         "destination-less FlowSpec rules are prefixless and must not match \
          default-prefix deny terms"
     );
-    assert!(update.flowspec_withdraw.is_empty());
+    assert_eq!(update.flowspec_withdraw.len(), 0);
 
     drop(tx);
     handle.await.unwrap();
@@ -913,7 +913,7 @@ async fn flowspec_export_prefix_term_still_matches_real_destination_prefix() {
          be suppressed"
     );
     assert_eq!(update.flowspec_announce[0].rule, permitted.rule);
-    assert!(update.flowspec_withdraw.is_empty());
+    assert_eq!(update.flowspec_withdraw.len(), 0);
 
     drop(tx);
     handle.await.unwrap();
@@ -1313,7 +1313,7 @@ async fn flowspec_source_no_advertise_precedes_removal_policy() {
     replace_flowspec_routes(&tx, source, vec![victim.clone(), sibling, other_afi]).await;
     let plain = out_rx.try_recv().expect("plain rules advertise");
     assert_eq!(plain.flowspec_announce.len(), 3);
-    assert!(plain.flowspec_withdraw.is_empty());
+    assert_eq!(plain.flowspec_withdraw.len(), 0);
     for key in [&victim_key, &sibling_key, &other_afi_key] {
         assert!(
             plain
@@ -1337,7 +1337,7 @@ async fn flowspec_source_no_advertise_precedes_removal_policy() {
     let recovery = out_rx.try_recv().expect("plain rule recovers");
     assert_eq!(recovery.flowspec_announce.len(), 1);
     assert_eq!(recovery.flowspec_announce[0].selection_key(), victim_key);
-    assert!(recovery.flowspec_withdraw.is_empty());
+    assert_eq!(recovery.flowspec_withdraw.len(), 0);
     assert!(
         out_rx.try_recv().is_err(),
         "sibling and IPv6 rule do not churn"
@@ -1413,7 +1413,7 @@ async fn flowspec_no_export_honors_neighbor_mode_and_source_precedence() {
     for out_rx in [&mut honor_rx, &mut transparent_rx, &mut internal_rx] {
         let update = out_rx.try_recv().expect("plain FlowSpec rules advertise");
         assert_eq!(update.flowspec_announce.len(), 3);
-        assert!(update.flowspec_withdraw.is_empty());
+        assert_eq!(update.flowspec_withdraw.len(), 0);
     }
     let added_update = adder_rx
         .try_recv()
@@ -1451,7 +1451,7 @@ async fn flowspec_no_export_honors_neighbor_mode_and_source_precedence() {
             .expect("transparent and iBGP peers retain the tagged rule");
         assert_eq!(update.flowspec_announce.len(), 1);
         assert_eq!(update.flowspec_announce[0].selection_key(), primary_key);
-        assert!(update.flowspec_withdraw.is_empty());
+        assert_eq!(update.flowspec_withdraw.len(), 0);
     }
     assert!(honor_rx.try_recv().is_err(), "sibling must not churn");
     assert_ne!(primary_key, sibling_key, "fixture keys must be distinct");
@@ -1542,7 +1542,7 @@ async fn flowspec_policy_modifications_suppress_and_recover_without_next_hop() {
     let first = out_rx.try_recv().expect("unscoped sibling advertises");
     assert_eq!(first.flowspec_announce.len(), 1);
     assert_eq!(first.flowspec_announce[0].selection_key(), sibling_key);
-    assert!(first.flowspec_withdraw.is_empty());
+    assert_eq!(first.flowspec_withdraw.len(), 0);
 
     let mut changed_scoped = scoped;
     changed_scoped
@@ -1604,7 +1604,7 @@ async fn flowspec_policy_modifications_suppress_and_recover_without_next_hop() {
         victim_key
     );
     assert_modified(&final_recovery.flowspec_announce[0]);
-    assert!(final_recovery.flowspec_withdraw.is_empty());
+    assert_eq!(final_recovery.flowspec_withdraw.len(), 0);
     assert!(out_rx.try_recv().is_err(), "sibling rule does not churn");
 
     drop(tx);

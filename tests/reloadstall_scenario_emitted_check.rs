@@ -1553,7 +1553,7 @@ fn irr_memory_protocol_self_test_exercises_semantic_rejections() {
 
     let script = std::fs::read_to_string(&runner).expect("runner source");
     let admission = script.find("source_admission \"$MODE\" || die").unwrap();
-    for later in r#"mkdir -p "$(dirname "$ARTIFACT_ROOT")"|mkdir "$ARTIFACT_ROOT"|tests/soak/preflight.sh|RUSTBGPD_HOST_LOCK|flock -n "$LOCK_FD"|cargo build --locked --profile|cargo build --locked --release --manifest-path"#.split('|') {
+    for later in r#"mkdir -p "$(dirname "$ARTIFACT_ROOT")"|mkdir "$ARTIFACT_ROOT"|tests/soak/preflight.sh|RUSTBGPD_HOST_LOCK|flock -n "$LOCK_FD"|cargo build --locked --profile|cargo build --locked --profile scale -p reloadstall"#.split('|') {
         assert!(
             admission < script.find(later).unwrap(),
             "admission must precede {later}"

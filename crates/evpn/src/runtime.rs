@@ -943,10 +943,10 @@ mod tests {
         let plan = current.plan_candidate(&candidate);
 
         assert_eq!(plan.ip_vrfs.added, vec!["green".to_string()]);
-        assert!(plan.ip_vrfs.deleted.is_empty());
+        assert_eq!(plan.ip_vrfs.deleted.len(), 0);
         assert_eq!(plan.ip_vrfs.redefined, vec!["blue".to_string()]);
         assert_eq!(plan.ethernet_segments.added, vec![esi_b]);
-        assert!(plan.ethernet_segments.deleted.is_empty());
+        assert_eq!(plan.ethernet_segments.deleted.len(), 0);
         assert_eq!(plan.ethernet_segments.redefined, vec![esi_a]);
     }
 

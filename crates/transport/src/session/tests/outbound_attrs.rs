@@ -759,7 +759,7 @@ fn all_private_path_mode_remove() {
         segments: vec![AsPathSegment::AsSequence(vec![64512, 65000])],
     };
     let result = remove_private_asns(&path, RemovePrivateAs::Remove, 100);
-    assert!(result.segments.is_empty());
+    assert_eq!(result.segments.len(), 0);
 }
 
 #[test]
@@ -805,7 +805,7 @@ fn four_byte_private_range() {
     };
     assert!(path.all_private());
     let result = remove_private_asns(&path, RemovePrivateAs::All, 100);
-    assert!(result.segments.is_empty());
+    assert_eq!(result.segments.len(), 0);
 }
 
 #[test]

@@ -1009,7 +1009,7 @@ async fn llgr_only_peer_session_down_enters_retention_when_llgr_configured() {
                     expect_retention,
                     "LLGR not configured locally: no retention"
                 );
-                assert!(gr_families.is_empty());
+                assert_eq!(gr_families.len(), 0);
                 assert_eq!(peer_llgr_families.len(), 1);
             }
             RibUpdate::PeerDown { .. } => {
@@ -1603,7 +1603,10 @@ fn evpn_discard_warnings_are_bounded_per_type_and_connection() {
         capture_session_logs(|| session.record_evpn_discard(6, 1)).len(),
         1
     );
-    assert!(capture_session_logs(|| session.record_evpn_discard(6, 1)).is_empty());
+    assert_eq!(
+        capture_session_logs(|| session.record_evpn_discard(6, 1)).len(),
+        0
+    );
     session.handle_tcp_disconnect();
     assert_eq!(
         capture_session_logs(|| session.record_evpn_discard(6, 1)).len(),

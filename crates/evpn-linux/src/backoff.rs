@@ -275,7 +275,7 @@ mod tests {
         s.record_failure(k(100, 1), 0); // due at 100
         s.record_failure(k(200, 2), 0); // due at 100
         // At now_ms=50, neither is due.
-        assert!(s.keys_due(50).is_empty());
+        assert_eq!(s.keys_due(50).len(), 0);
         // At now_ms=100, both are due.
         assert_eq!(s.keys_due(100).len(), 2);
     }

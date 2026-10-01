@@ -220,18 +220,17 @@ pub async fn establish_on(listener: TcpListener, cfg: PeerConfig) -> Result<Peer
                     }
                 }
             }
-        } else {
-            while let Some(msg) = tx_rx.recv().await {
-                let bytes = match encode_message(&msg) {
-                    Ok(bytes) => bytes,
-                    Err(e) => {
-                        tracing::error!(?e, "encode failed in writer task");
-                        return;
-                    }
-                };
-                if writer.write_all(&bytes).await.is_err() {
+        }
+        while let Some(msg) = tx_rx.recv().await {
+            let bytes = match encode_message(&msg) {
+                Ok(bytes) => bytes,
+                Err(e) => {
+                    tracing::error!(?e, "encode failed in writer task");
                     return;
                 }
+            };
+            if writer.write_all(&bytes).await.is_err() {
+                return;
             }
         }
     });

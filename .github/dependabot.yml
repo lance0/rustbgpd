@@ -3,8 +3,7 @@
 # covers the daemon and its workspace crates, including the
 # published ones, through the shared Cargo.lock. Member manifests
 # inherit workspace fields, so a per-crate directory entry cannot
-# replace the workspace entry. The independent scale workspace has
-# its own entry and lockfile; its path dependencies share root fields.
+# replace the workspace entry. The scale harnesses share this root lockfile.
 #
 # Cadence: weekly. The Cargo ecosystem tends to produce a steady
 # trickle of patch releases (tonic, prost, tokio); weekly avoids
@@ -85,15 +84,6 @@ updates:
       # a deliberate manual act: move the manifest pin, update the lock,
       # and run the differential tests.
       - dependency-name: "bgpkit-parser"
-
-  # Independent scale workspace, including profiling and load harnesses.
-  - package-ecosystem: "cargo"
-    directory: "/bench/scale"
-    schedule:
-      interval: "weekly"
-    open-pull-requests-limit: 5
-    ignore:
-      - dependency-name: "rustbgpd-*"
 
   # GitHub Actions versions in workflows/. Catches deprecation
   # warnings (e.g. Node 20 → Node 24 transition) before they bite.

@@ -404,28 +404,26 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y ripgrep
-      - name: Check standalone scale harnesses and receipt classifiers
+      - name: Check scale harnesses and receipt classifiers
         run: |
           set -euo pipefail
-          cargo fmt --manifest-path bench/scale/Cargo.toml --all -- --check
-          cargo test --manifest-path bench/scale/Cargo.toml --workspace --locked
-          cargo clippy --manifest-path bench/scale/rrtransport/Cargo.toml \
-            --locked --all-targets -- -D warnings
-          cargo run --manifest-path bench/scale/rrtransport/Cargo.toml --locked -- smoke
+          cargo fmt --all -- --check
+          cargo test --locked -p enhanced-route-refresh-receipt -p reloadstall -p rrharness -p rrtransport
+          cargo clippy --locked -p rrtransport --all-targets -- -D warnings
+          cargo run --locked -p rrtransport -- smoke
           rrtransport_receipt=$(mktemp -d)
           bench/scale/rrtransport/run-receipt.sh --real-smoke "$rrtransport_receipt"
           bash bench/tests/test-rrtransport-receipt.sh
           bash bench/tests/test-scale-provenance.sh
-          cargo clippy --manifest-path bench/scale/enhanced-route-refresh/Cargo.toml \
-            --locked --all-targets -- -D warnings
+          cargo clippy --locked -p enhanced-route-refresh-receipt --all-targets -- -D warnings
           # The IRR manifest contract exercises the production rustbgpd
           # renderer, so make that prerequisite explicit on a clean runner.
           cargo build --locked -p rs-config-render
           cargo test --locked --test reloadstall_scenario_emitted_check
-          cargo build --manifest-path bench/scale/Cargo.toml --locked -p reloadstall
+          cargo build --locked -p reloadstall
           python3 bench/tests/test-reloadstall-settlement.py \
             --daemon target/debug/rustbgpd \
-            --harness bench/scale/target/debug/reloadstall \
+            --harness target/debug/reloadstall \
             --artifact-dir "$RUNNER_TEMP/reloadstall-settlement"
           python3 bench/scale/irrreload/verify-receipt.py self-test
           python3 bench/scale/irrreload/verify-receipt.py authoritative-publication \

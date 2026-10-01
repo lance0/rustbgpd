@@ -1176,7 +1176,7 @@ async fn stale_max_prefix_warnings_are_not_published() {
     }
 
     assert!(live_events.try_recv().is_err());
-    assert!(
+    assert_eq!(
         query_session_event_history(
             &mgr,
             Some(peer_addr),
@@ -1186,7 +1186,8 @@ async fn stale_max_prefix_warnings_are_not_published() {
             0,
         )
         .await
-        .is_empty()
+        .len(),
+        0
     );
 }
 

@@ -505,7 +505,7 @@ async fn denied_labeled_add_path_replacements_reconcile_exact_refresh_identity()
             panic!("expected LabeledRoutesReceived");
         };
         assert_eq!(announced.len(), 3);
-        assert!(withdrawn.is_empty());
+        assert_eq!(withdrawn.len(), 0);
         assert_eq!(session.known_prefix_count(), 3);
         for path_id in [11, 22, 33] {
             assert!(session.known_labeled.contains(&key(path_id)));

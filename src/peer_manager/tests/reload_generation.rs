@@ -3292,7 +3292,7 @@ async fn generation_preserves_distinct_dataset_names_with_equal_contents() {
     .unwrap();
     let staged = candidate.prepare_staged_datasets(&prior.policy.dataset_bindings);
     let prepared = staged.prepare_generation(&prior, &candidate).unwrap();
-    assert!(prepared.changed_names().is_empty());
+    assert_eq!(prepared.changed_names().len(), 0);
     let old = prior
         .resolve_neighbor(&prior.neighbors[0])
         .unwrap()

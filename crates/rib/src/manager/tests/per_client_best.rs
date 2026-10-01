@@ -187,7 +187,7 @@ async fn best_denied_single_best_hides_per_client_best_sends_runner_up() {
     assert_eq!(dump.announce.len(), 1, "exactly the filtered best");
     assert_eq!(dump.announce[0].peer, IpAddr::V4(SOURCE_B));
     assert_eq!(dump.announce[0].path_id, 0, "single-best shape");
-    assert!(dump.withdraw.is_empty());
+    assert_eq!(dump.withdraw.len(), 0);
     drain_eor(&mut mitigated_rx).await;
 
     // Adj-RIB-Out / ListAdvertisedRoutes present the same shape.
@@ -331,7 +331,7 @@ async fn source_member_of_best_gets_runner_up() {
     assert_eq!(update.announce.len(), 1);
     assert_eq!(update.announce[0].peer, IpAddr::V4(SOURCE_B));
     assert_eq!(update.announce[0].path_id, 0);
-    assert!(update.withdraw.is_empty());
+    assert_eq!(update.withdraw.len(), 0);
 
     drop(tx);
     handle.await.unwrap();
@@ -516,7 +516,7 @@ async fn candidate_churn_produces_minimal_deltas() {
     assert_eq!(update.announce.len(), 1);
     assert_eq!(update.announce[0].peer, IpAddr::V4(SOURCE_E));
     assert_eq!(update.announce[0].path_id, 0);
-    assert!(update.withdraw.is_empty());
+    assert_eq!(update.withdraw.len(), 0);
 
     drop(tx);
     handle.await.unwrap();
@@ -556,7 +556,7 @@ async fn route_refresh_replays_filtered_best() {
     );
     assert_eq!(replay.announce[0].peer, IpAddr::V4(SOURCE_B));
     assert_eq!(replay.announce[0].path_id, 0);
-    assert!(replay.withdraw.is_empty());
+    assert_eq!(replay.withdraw.len(), 0);
 
     drop(tx);
     handle.await.unwrap();

@@ -2535,7 +2535,7 @@ mod tests {
             COMMUNITY_LLGR_STALE,
         ])];
         remove_llgr_stale_community_attrs(&mut only_stale);
-        assert!(only_stale.is_empty());
+        assert_eq!(only_stale.len(), 0);
     }
 
     fn bgpls_nlri(payload_suffix: u8) -> rustbgpd_wire::bgpls::BgpLsNlri {
@@ -2700,7 +2700,7 @@ mod tests {
         assert_eq!(rib.rpki_counts_v6.valid, 1);
 
         rib.clear();
-        assert!(rib.rpki_validation_counts().is_empty());
+        assert_eq!(rib.rpki_validation_counts().len(), 0);
     }
 
     #[test]
@@ -2728,7 +2728,7 @@ mod tests {
             )]
         );
         assert!(rib.withdraw(&Prefix::V4(prefix), 0));
-        assert!(rib.rpki_validation_counts().is_empty());
+        assert_eq!(rib.rpki_validation_counts().len(), 0);
     }
 
     #[test]
@@ -3176,7 +3176,7 @@ mod tests {
         // Reconnect re-advertises a second prefix (not the first); the
         // session drops again, marking the fresh route GR-stale.
         rib.insert(make_route(gr_prefix, Ipv4Addr::new(10, 0, 0, 1)));
-        assert!(rib.mark_stale((Afi::Ipv4, Safi::Unicast)).is_empty());
+        assert_eq!(rib.mark_stale((Afi::Ipv4, Safi::Unicast)).len(), 0);
 
         // Third drop before any refresh: the GR-stale route is deleted
         // (RFC 4724 §4.1: no retention across consecutive restarts) but the
@@ -3315,7 +3315,7 @@ mod tests {
             vec![Prefix::V4(llgr_stale)],
             "only the LLGR-stale route changes"
         );
-        assert!(rib.clear_llgr_stale(family).is_empty());
+        assert_eq!(rib.clear_llgr_stale(family).len(), 0);
 
         // A route still carrying the local community is changed by either
         // clear even without a stale flag.
@@ -3403,7 +3403,7 @@ mod tests {
 
         let removed =
             rib.withdraw_families_except(&[(Afi::Ipv4, Safi::Unicast), (Afi::Ipv6, Safi::Unicast)]);
-        assert!(removed.is_empty());
+        assert_eq!(removed.len(), 0);
         assert_eq!(rib.len(), 1);
     }
 
@@ -3560,9 +3560,9 @@ mod tests {
 
         // Reconnect advertises a second rule; two more drops follow.
         rib.insert_flowspec(gr_route);
-        assert!(
-            rib.mark_stale_flowspec((Afi::Ipv4, Safi::FlowSpec))
-                .is_empty()
+        assert_eq!(
+            rib.mark_stale_flowspec((Afi::Ipv4, Safi::FlowSpec)).len(),
+            0
         );
         let deleted = rib.mark_stale_flowspec((Afi::Ipv4, Safi::FlowSpec));
         assert_eq!(
@@ -3875,7 +3875,7 @@ mod tests {
         // GR-stale route is deleted (RFC 4724 §4.1), the LLGR-stale one is
         // retained unchanged (RFC 9494: original deadline governs).
         let gr_key = insert_evpn_imet(&mut rib, Ipv4Addr::new(10, 0, 0, 1), 100, vec![]);
-        assert!(rib.mark_stale_evpn((Afi::L2Vpn, Safi::Evpn)).is_empty());
+        assert_eq!(rib.mark_stale_evpn((Afi::L2Vpn, Safi::Evpn)).len(), 0);
         let deleted = rib.mark_stale_evpn((Afi::L2Vpn, Safi::Evpn));
         assert_eq!(deleted, vec![gr_key]);
         assert_eq!(rib.evpn_len(), 1);
@@ -4082,7 +4082,7 @@ mod tests {
 
         // Non-EVPN family: no-op
         let swept = rib.sweep_stale_family_evpn((Afi::Ipv4, Safi::Unicast));
-        assert!(swept.is_empty());
+        assert_eq!(swept.len(), 0);
         assert_eq!(rib.evpn_len(), 1);
 
         // EVPN family: sweeps the stale route
@@ -4158,11 +4158,11 @@ mod tests {
         let v6_key = insert_vpn_with(&mut rib, vpn_nlri_v6(1, 48, 200), vec![]);
 
         // Wrong SAFI: no-op
-        assert!(rib.mark_stale_vpn((Afi::Ipv4, Safi::Unicast)).is_empty());
+        assert_eq!(rib.mark_stale_vpn((Afi::Ipv4, Safi::Unicast)).len(), 0);
         assert!(!rib.vpn_routes[&v4_key].is_stale);
 
         // VPNv4: only the v4-tuple route becomes stale
-        assert!(rib.mark_stale_vpn(VPN_V4).is_empty());
+        assert_eq!(rib.mark_stale_vpn(VPN_V4).len(), 0);
         assert!(rib.vpn_routes[&v4_key].is_stale);
         assert!(
             !rib.vpn_routes[&v6_key].is_stale,
@@ -4184,7 +4184,7 @@ mod tests {
         // GR-stale route is deleted (RFC 4724 §4.1), the LLGR-stale one is
         // retained unchanged (RFC 9494: original deadline governs).
         let gr_key = insert_vpn_with(&mut rib, vpn_nlri([10, 0, 1, 0], 24, 100), vec![]);
-        assert!(rib.mark_stale_vpn(VPN_V4).is_empty());
+        assert_eq!(rib.mark_stale_vpn(VPN_V4).len(), 0);
         let deleted = rib.mark_stale_vpn(VPN_V4);
         assert_eq!(deleted, vec![gr_key]);
         assert_eq!(rib.vpn_len(), 1);
@@ -4553,14 +4553,11 @@ mod tests {
         let v6_key = insert_labeled_with(&mut rib, labeled_nlri_v6(1, 48, 200), vec![]);
 
         // Wrong SAFI: no-op
-        assert!(
-            rib.mark_stale_labeled((Afi::Ipv4, Safi::Unicast))
-                .is_empty()
-        );
+        assert_eq!(rib.mark_stale_labeled((Afi::Ipv4, Safi::Unicast)).len(), 0);
         assert!(!rib.labeled_routes[&v4_key].is_stale);
 
         // IPv4 labeled: only the v4-tuple route becomes stale
-        assert!(rib.mark_stale_labeled(LU_V4).is_empty());
+        assert_eq!(rib.mark_stale_labeled(LU_V4).len(), 0);
         assert!(rib.labeled_routes[&v4_key].is_stale);
         assert!(
             !rib.labeled_routes[&v6_key].is_stale,
@@ -4582,7 +4579,7 @@ mod tests {
         // GR-stale route is deleted (RFC 4724 §4.1), the LLGR-stale one is
         // retained unchanged (RFC 9494: original deadline governs).
         let gr_key = insert_labeled_with(&mut rib, labeled_nlri([10, 0, 1, 0], 24, 100), vec![]);
-        assert!(rib.mark_stale_labeled(LU_V4).is_empty());
+        assert_eq!(rib.mark_stale_labeled(LU_V4).len(), 0);
         let deleted = rib.mark_stale_labeled(LU_V4);
         assert_eq!(deleted, vec![gr_key]);
         assert_eq!(rib.labeled_len(), 1);
@@ -4774,11 +4771,11 @@ mod tests {
         );
 
         // Non-BGP-LS family: no-op
-        assert!(rib.mark_stale_bgpls((Afi::Ipv4, Safi::Unicast)).is_empty());
+        assert_eq!(rib.mark_stale_bgpls((Afi::Ipv4, Safi::Unicast)).len(), 0);
         assert!(!rib.bgpls_routes[&base_key].is_stale);
 
         // SAFI 71: only base link-state routes become stale
-        assert!(rib.mark_stale_bgpls(LS_BASE).is_empty());
+        assert_eq!(rib.mark_stale_bgpls(LS_BASE).len(), 0);
         assert!(rib.bgpls_routes[&base_key].is_stale);
         assert!(
             !rib.bgpls_routes[&vpn_key].is_stale,
@@ -4800,7 +4797,7 @@ mod tests {
         // GR-stale route is deleted (RFC 4724 §4.1), the LLGR-stale one is
         // retained unchanged (RFC 9494: original deadline governs).
         let gr_key = insert_bgpls_with(&mut rib, BgpLsFamily::LinkState, bgpls_nlri(1), vec![]);
-        assert!(rib.mark_stale_bgpls(LS_BASE).is_empty());
+        assert_eq!(rib.mark_stale_bgpls(LS_BASE).len(), 0);
         let deleted = rib.mark_stale_bgpls(LS_BASE);
         assert_eq!(deleted, vec![gr_key]);
         assert_eq!(rib.bgpls_len(), 1);
@@ -4971,10 +4968,10 @@ mod tests {
         let key = insert_rtc_with(&mut rib, rtc_nlri(100), vec![]);
 
         // Non-RTC family: no-op
-        assert!(rib.mark_stale_rtc((Afi::Ipv4, Safi::Unicast)).is_empty());
+        assert_eq!(rib.mark_stale_rtc((Afi::Ipv4, Safi::Unicast)).len(), 0);
         assert!(!rib.rtc_routes[&key].is_stale);
 
-        assert!(rib.mark_stale_rtc(RTC_FAM).is_empty());
+        assert_eq!(rib.mark_stale_rtc(RTC_FAM).len(), 0);
         assert!(rib.rtc_routes[&key].is_stale);
     }
 
@@ -4992,7 +4989,7 @@ mod tests {
         // GR-stale route is deleted (RFC 4724 §4.1), the LLGR-stale one is
         // retained unchanged (RFC 9494: original deadline governs).
         let gr_key = insert_rtc_with(&mut rib, rtc_nlri(100), vec![]);
-        assert!(rib.mark_stale_rtc(RTC_FAM).is_empty());
+        assert_eq!(rib.mark_stale_rtc(RTC_FAM).len(), 0);
         let deleted = rib.mark_stale_rtc(RTC_FAM);
         assert_eq!(deleted, vec![gr_key]);
         assert_eq!(rib.rtc_len(), 1);
@@ -5050,7 +5047,7 @@ mod tests {
         rib.mark_stale_rtc(RTC_FAM);
 
         let swept = rib.sweep_stale_family_rtc((Afi::Ipv4, Safi::Unicast));
-        assert!(swept.is_empty());
+        assert_eq!(swept.len(), 0);
         assert_eq!(rib.rtc_len(), 1);
 
         let swept = rib.sweep_stale_family_rtc(RTC_FAM);

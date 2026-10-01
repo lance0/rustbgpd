@@ -15,9 +15,8 @@ name: Security audit
 #     configs (so dependabot PRs and manual bumps get checked at PR
 #     time)
 #
-# Both gates scan the root and independent bench/scale workspaces,
-# sharing the repository's advisory and license policies. Each workspace
-# has its own lockfile; scanning the root alone does not cover the harnesses.
+# Both gates scan the root lockfile, including the scale harnesses and their
+# profiling dependencies.
 
 on:
   schedule:
@@ -50,11 +49,7 @@ permissions:
 
 jobs:
   audit:
-    name: cargo audit (${{ matrix.workspace }})
-    strategy:
-      fail-fast: false
-      matrix:
-        workspace: [".", "bench/scale"]
+    name: cargo audit
     runs-on: ubuntu-latest
     timeout-minutes: 10
     # rustsec/audit-check posts findings as a check-run via the
@@ -79,14 +74,10 @@ jobs:
         uses: rustsec/audit-check@v2.0.0
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
-          working-directory: ${{ matrix.workspace }}
+          working-directory: .
 
   deny:
-    name: cargo deny (${{ matrix.workspace }})
-    strategy:
-      fail-fast: false
-      matrix:
-        workspace: [".", "bench/scale"]
+    name: cargo deny
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
@@ -100,5 +91,6 @@ jobs:
       - name: Run cargo deny
         uses: EmbarkStudios/cargo-deny-action@v2
         with:
-          manifest-path: ${{ matrix.workspace }}/Cargo.toml
+          manifest-path: Cargo.toml
+          arguments: --workspace --all-features
           command: check advisories bans licenses sources

@@ -922,7 +922,7 @@ fn source_excluded_exact_failure_never_enters_the_peer_overlay() {
     assert_eq!(update.announce[0].peer, own_route.peer);
     assert_eq!(update.announce[1].prefix, other_route.prefix);
     assert_eq!(update.announce[1].peer, other_route.peer);
-    assert!(update.withdraw.is_empty());
+    assert_eq!(update.withdraw.len(), 0);
     assert!(
         update.shared_group_encode.is_none(),
         "a member-specific exact fallback cannot retain shared encoded bytes"
@@ -1591,7 +1591,7 @@ async fn run_clean_transition_equivalence(force_ungrouped: bool) -> Vec<Vec<Stri
     let mut shared_cells = Vec::new();
     for receiver in &mut receivers {
         let update = receiver.recv().await.unwrap();
-        assert!(update.withdraw.is_empty());
+        assert_eq!(update.withdraw.len(), 0);
         if let Some(cell) = &update.shared_group_encode {
             shared_cells.push(Arc::clone(cell));
         }
@@ -3528,7 +3528,7 @@ async fn clean_policy_transition_falls_back_wholesale_on_member_ceiling_rejectio
 
     let accepted = receivers[0].recv().await.unwrap();
     assert_eq!(accepted.announce.len(), 1);
-    assert!(accepted.withdraw.is_empty());
+    assert_eq!(accepted.withdraw.len(), 0);
     let rejected = receivers[1].recv().await.unwrap();
     assert!(rejected.announce.is_empty());
     assert_eq!(rejected.withdraw, vec![(Prefix::V4(prefix), 0)]);
@@ -7174,7 +7174,7 @@ async fn prepared_destination_commits_with_interleaved_churn() {
     let mut shared_cells = Vec::new();
     for receiver in &mut receivers {
         let update = receiver.recv().await.unwrap();
-        assert!(update.withdraw.is_empty());
+        assert_eq!(update.withdraw.len(), 0);
         assert_eq!(update.announce.len(), 3, "all three routes changed chains");
         assert!(
             update
@@ -8170,7 +8170,7 @@ fn replacement_cleanup_skips_scalar_walks_and_interleaves_owned_drops() {
         let mut values: Vec<usize> = (0..len).collect();
         let mut checkpoints = 0;
         super::super::retire_vec(&mut values, &mut || checkpoints += 1);
-        assert!(values.is_empty());
+        assert_eq!(values.len(), 0);
         assert_eq!(values.capacity(), 0);
         assert_eq!(checkpoints, 2, "scalar cleanup only needs allocation edges");
 
@@ -8192,7 +8192,7 @@ fn replacement_cleanup_skips_scalar_walks_and_interleaves_owned_drops() {
     let mut progress = Vec::new();
     let mut values = owners.clone();
     super::super::retire_vec(&mut values, &mut || progress.push(retired()));
-    assert!(values.is_empty());
+    assert_eq!(values.len(), 0);
     assert_eq!(retired(), owners.len());
     assert!((0..=owners.len()).all(|count| progress.contains(&count)));
 
@@ -10013,7 +10013,7 @@ fn batched_authoritative_pcb_cohort_commits_in_one_shared_transition() {
             5,
             "marker-style change re-announces every slot"
         );
-        assert!(shared.withdraw.is_empty());
+        assert_eq!(shared.withdraw.len(), 0);
         assert!(
             shared
                 .announce
@@ -10037,7 +10037,7 @@ fn batched_authoritative_pcb_cohort_commits_in_one_shared_transition() {
                 supplement.announce[0].peer, winner,
                 "the lane substitutes the runner-up"
             );
-            assert!(supplement.withdraw.is_empty());
+            assert_eq!(supplement.withdraw.len(), 0);
         }
         assert!(
             receiver.try_recv().is_err(),
@@ -10130,7 +10130,7 @@ fn batched_authoritative_apply_announces_only_changed_slots() {
         );
         assert_eq!(shared.announce[0].prefix, Prefix::V4(shared_prefix));
         assert_eq!(shared.announce_source_exclusion, Some(member));
-        assert!(shared.withdraw.is_empty());
+        assert_eq!(shared.withdraw.len(), 0);
         if member == winner {
             let supplement = receiver.try_recv().unwrap();
             assert_eq!(supplement.announce.len(), 1);

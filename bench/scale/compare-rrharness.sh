@@ -33,7 +33,8 @@ shape (repetition 1 base-first, repetition 2 head-first). The driver requires
 a clean invoking checkout, an identical bench/scale/rrharness tree at both
 refs, the shared host lock, a performance-governor pinned CPU, load below
 2.0, and no competing build/performance process before every fresh-process
-cell. Both sides are built with `cargo build --release --locked` into
+cell. Both sides are built with their source workspace's release profiling
+profile and `--locked` into
 separate target directories and launched as prebuilt binaries. Each leg runs
 in its own transient systemd user scope with MemorySwapMax=0; results.csv
 carries the scope's memory.peak (cg_peak_mib), its memory.current when the
@@ -430,26 +431,30 @@ done
 run_utc_start=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 
 build_variant() {
-  local variant=$1 tree=$2 target=$3
+  local variant=$1 tree=$2 target=$3 profile=$4
   local log="$build_log_dir/${variant}.log"
   {
     printf 'utc_start=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
     printf 'variant=%s\n' "$variant"
     printf 'commit=%s\n' "$(git -C "$tree" rev-parse HEAD)"
-    printf 'command=cargo build --release --locked --jobs 1 --manifest-path bench/scale/rrharness/Cargo.toml\n'
+    printf 'command=cargo build --profile %s --locked --jobs 1 --manifest-path bench/scale/rrharness/Cargo.toml\n' "$profile"
   } >"$log"
   (
     cd "$tree"
-    CARGO_TARGET_DIR="$target" cargo build --release --locked --jobs 1 \
+    CARGO_TARGET_DIR="$target" cargo build --profile "$profile" --locked --jobs 1 \
       --manifest-path bench/scale/rrharness/Cargo.toml
   ) >>"$log" 2>&1
   printf 'utc_finish=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >>"$log"
 }
 
-build_variant base "$base_tree" "$base_target"
-build_variant head "$head_tree" "$head_target"
-base_binary="$base_target/release/rrharness"
-head_binary="$head_target/release/rrharness"
+base_profile=scale
+head_profile=scale
+[[ ! -f $base_tree/bench/scale/Cargo.toml ]] || base_profile=release
+[[ ! -f $head_tree/bench/scale/Cargo.toml ]] || head_profile=release
+build_variant base "$base_tree" "$base_target" "$base_profile"
+build_variant head "$head_tree" "$head_target" "$head_profile"
+base_binary="$base_target/$base_profile/rrharness"
+head_binary="$head_target/$head_profile/rrharness"
 [[ -x $base_binary && -x $head_binary ]] || {
   printf 'expected one direct rrharness executable per target directory\n' >&2
   exit 1
@@ -712,7 +717,7 @@ manifest = {
     "cell_count": 16,
     "repetitions": 2,
     "counterbalance": ["repetition-1-base-first", "repetition-2-head-first"],
-    "build": "cargo build --release --locked --jobs 1 --manifest-path bench/scale/rrharness/Cargo.toml",
+    "build": "cargo build --profile <source-workspace-profile> --locked --jobs 1 --manifest-path bench/scale/rrharness/Cargo.toml",
     "launch": "$launch_mode",
     "memory_scope": "$memory_scope_mode",
     "rustc": "$(rustc --version)",

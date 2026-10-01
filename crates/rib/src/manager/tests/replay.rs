@@ -133,7 +133,7 @@ fn explicit_replay_preserves_private_grouped_and_add_path_inventory() {
             assert_eq!(ids.len(), 2);
         }
         for update in &updates[..updates.len() - 1] {
-            assert!(update.end_of_rib.is_empty());
+            assert_eq!(update.end_of_rib.len(), 0);
             assert!(update.replay.is_none());
         }
         assert!(
@@ -254,8 +254,8 @@ fn explicit_replay_terminal_admission_failure_invalidates_admitted_routes() {
         .expect("route replay consumed the sole slot");
     assert_eq!(admitted.announce.len(), 1);
     assert_eq!(admitted.announce[0].prefix, Prefix::V4(prefix));
-    assert!(admitted.end_of_rib.is_empty());
-    assert!(admitted.refresh_markers.is_empty());
+    assert_eq!(admitted.end_of_rib.len(), 0);
+    assert_eq!(admitted.refresh_markers.len(), 0);
     assert!(admitted.replay.is_none());
     assert!(
         outbound.try_recv().is_err(),

@@ -77,7 +77,7 @@ def verify(path, expected_cell, competitor_generation="historical"):
         common.add("bench/scale/reloadstall/membership_churn.py")
     hashed_map(sources["common"], common)
     hashed_map(sources["generator"], {GENERATORS[cell]})
-    if set(sources["reloadstall"]) != {"path", "sha256"} or sources["reloadstall"]["path"] != "bench/scale/target/release/reloadstall" or not HASH.fullmatch(sources["reloadstall"]["sha256"]):
+    if set(sources["reloadstall"]) != {"path", "sha256"} or sources["reloadstall"]["path"] not in {"bench/scale/target/release/reloadstall", "target/scale/reloadstall"} or not HASH.fullmatch(sources["reloadstall"]["sha256"]):
         fail("malformed reloadstall identity")
     if not isinstance(data["workload"], dict):
         fail("malformed workload identity")

@@ -628,15 +628,14 @@ main() {
     log "  trip member:      $DESIGNATED_ADDR max_prefixes=$MAX_PREFIXES restart=${TRIP_RESTART_SECONDS}s"
     log "  output:           $RUN_DIR"
 
-    log "building daemon + rbgp + reloadstall (--release --locked)"
+    log "building daemon + rbgp (--release) and reloadstall (--profile scale), locked"
     (cd "$REPO_ROOT" && cargo build --release --locked -p rustbgpd -p rustbgpctl) \
         >"$RUN_DIR/build-root.log" 2>&1
-    (cd "$REPO_ROOT" && cargo build --release --locked \
-        --manifest-path bench/scale/reloadstall/Cargo.toml) \
+    (cd "$REPO_ROOT" && cargo build --profile scale --locked -p reloadstall) \
         >"$RUN_DIR/build-reloadstall.log" 2>&1
     DAEMON="$REPO_ROOT/target/release/rustbgpd"
     RBGP="$REPO_ROOT/target/release/rbgp"
-    HARNESS="$REPO_ROOT/bench/scale/target/release/reloadstall"
+    HARNESS="$REPO_ROOT/target/scale/reloadstall"
     sha256sum "$DAEMON" "$RBGP" "$HARNESS" >"$RUN_DIR/binaries.sha256"
 
     # Fresh scenario per run, never reused; /tmp keeps the gRPC UDS under

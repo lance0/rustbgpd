@@ -85,7 +85,7 @@ async fn aspa_first_as_mismatch_exempts_local_route_server_client_role() {
         panic!("expected route-server-client RoutesReceived");
     };
     assert_eq!(announced.len(), 1);
-    assert!(withdrawn.is_empty());
+    assert_eq!(withdrawn.len(), 0);
     assert_eq!(session.known_prefix_count(), 1);
     assert_eq!(session.fsm.state(), SessionState::Established);
 }
@@ -831,13 +831,7 @@ async fn received_empty_path_keeps_rpki_not_found_after_import_and_cache_updates
     assert_eq!(announced.len(), 1);
     assert_eq!(announced[0].validation_state, RpkiValidation::NotFound);
     assert_eq!(announced[0].as_path().unwrap().origin_asn(), Some(65003));
-    assert!(
-        announced[0]
-            .validation_as_path()
-            .unwrap()
-            .segments
-            .is_empty()
-    );
+    assert_eq!(announced[0].validation_as_path().unwrap().segments.len(), 0);
     let (tx, rx) = mpsc::channel(16);
     let (_, query_rx) = mpsc::channel(1);
     let manager = rustbgpd_rib::RibManager::new(rx, query_rx, None, None, BgpMetrics::new());

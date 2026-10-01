@@ -1389,7 +1389,10 @@ mod tests {
         let (entries, err) = drain(&mut reader);
         assert!(err.is_none(), "unexpected error: {err:?}");
         assert_eq!(entries.len(), 1);
-        assert!(entries[0].attributes.is_empty());
+        assert_eq!(
+            entries[0].attributes,
+            [] as [rustbgpd_wire::PathAttribute; 0]
+        );
         assert_eq!(reader.discarded_path_attributes(), 1);
         assert_eq!(reader.discarded_bgpls_nlris(), 0);
     }
@@ -1462,7 +1465,10 @@ mod tests {
                     if raw.type_code == attr_type::PREFIX_SID && raw.data.as_ref() == value
                 )));
             } else {
-                assert!(entries[0].attributes.is_empty());
+                assert_eq!(
+                    entries[0].attributes,
+                    [] as [rustbgpd_wire::PathAttribute; 0]
+                );
             }
         }
     }
@@ -1535,7 +1541,10 @@ mod tests {
             Some(IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1)))
         );
         assert_eq!(entries[0].link_local_next_hop, None);
-        assert!(entries[0].attributes.is_empty());
+        assert_eq!(
+            entries[0].attributes,
+            [] as [rustbgpd_wire::PathAttribute; 0]
+        );
     }
 
     #[test]

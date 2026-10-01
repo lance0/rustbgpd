@@ -219,11 +219,34 @@ BUILD_FEATURES=()
 (cd "$REPO" && env -u CARGO_TARGET_DIR -u RUSTFLAGS \
     cargo build --profile "$PROFILE" --locked -p rustbgpd -p rustbgpctl "${BUILD_FEATURES[@]}") \
     >"$OUT/build/root.log" 2>&1
-(cd "$REPO" && env -u CARGO_TARGET_DIR -u RUSTFLAGS cargo build --release --locked \
+(cd "$REPO" && env -u CARGO_TARGET_DIR -u RUSTFLAGS cargo metadata --locked --no-deps \
+    --manifest-path bench/scale/reloadstall/Cargo.toml) >"$OUT/build/reloadstall-metadata.json"
+HARNESS_LAYOUT=$(python3 - "$REPO" "$OUT/build/reloadstall-metadata.json" <<'PY_LAYOUT'
+import json
+from pathlib import Path
+import sys
+
+repo = Path(sys.argv[1]).resolve()
+metadata = json.loads(Path(sys.argv[2]).read_text(encoding="utf-8"))
+workspace = Path(metadata["workspace_root"]).resolve()
+if workspace == repo:
+    profile = "scale"
+elif workspace == repo / "bench" / "scale":
+    profile = "release"
+else:
+    raise SystemExit(f"unexpected scale workspace: {workspace}")
+print(profile, metadata["target_directory"], workspace,
+      metadata["target_directory"] if workspace == repo else repo / "target", sep="\t")
+PY_LAYOUT
+)
+IFS=$'\t' read -r HARNESS_PROFILE HARNESS_TARGET HARNESS_WORKSPACE ROOT_TARGET <<<"$HARNESS_LAYOUT"
+printf 'harness_profile=%s\nharness_target_dir=%s\nharness_workspace_root=%s\n' \
+    "$HARNESS_PROFILE" "$HARNESS_TARGET" "$HARNESS_WORKSPACE" >>"$OUT/provenance.env"
+(cd "$REPO" && env -u CARGO_TARGET_DIR -u RUSTFLAGS cargo build --profile "$HARNESS_PROFILE" --locked \
     --manifest-path bench/scale/reloadstall/Cargo.toml) >"$OUT/build/reloadstall.log" 2>&1
-DAEMON="$REPO/target/$PROFILE/rustbgpd"
-HARNESS="$REPO/bench/scale/target/release/reloadstall"
-RBGP="$REPO/target/$PROFILE/rbgp"
+DAEMON="$ROOT_TARGET/$PROFILE/rustbgpd"
+HARNESS="$HARNESS_TARGET/$HARNESS_PROFILE/reloadstall"
+RBGP="$ROOT_TARGET/$PROFILE/rbgp"
 sha256sum "$DAEMON" "$HARNESS" "$RBGP" >"$OUT/build/binaries.sha256"
 wait_for_idle postbuild
 

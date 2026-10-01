@@ -148,7 +148,7 @@ mod tests {
             BumEnforcementReadiness::NotReady { .. }
         ));
         assert_eq!(rows[0].vxlan_ifindex, None);
-        assert!(rows[0].ce_port_ifindexes.is_empty());
+        assert_eq!(rows[0].ce_port_ifindexes.len(), 0);
     }
 
     #[test]
