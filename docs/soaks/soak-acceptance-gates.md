@@ -299,9 +299,13 @@ The soak retains 1 GiB of conservative reload-cycle headroom (3 GiB).
 The [historical allocator comparison](../benchmarks.md) observed reload
 retention on stock-glibc builds and background decay under jemalloc.
 The flagship runners build with default jemalloc; RSS growth in a current
-soak requires attribution from that run's evidence. The slope gate
-bounds only the LATE window (final 25 % of the run), not the early
-settle; 10 MB/h is well above the ±30–50 MiB anonymous-residency variance
+soak requires attribution from that run's evidence. The
+[flagship receipt's analysis notes](soak-rs-flagship-24h.md#analysis-notes)
+attribute growth to glibc, although that run used default jemalloc.
+That allocator attribution is incorrect; the measured RSS and gate verdict
+remain unchanged, and the receipt does not establish the cause of the growth.
+The slope gate bounds only the LATE window (final 25 % of the run), not the
+early settle; 10 MB/h is well above the ±30–50 MiB anonymous-residency variance
 band averaged over ≥ 6 h of 30 s samples, while still catching a
 ~240 MB/day leak. The late-window slope gates are evaluated only when
 the late window spans ≥ 1 h (`--min-slope-seconds`); on shorter smokes
