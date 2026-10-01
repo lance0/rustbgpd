@@ -171,8 +171,8 @@ reloadstall <n_peers> <total_prefixes> <daemon_port> <daemon_pid> \
   `--flapstorm K`. Generate its matching scenario with
   `GEN_CONVERGED_REJOIN=1`. It requires zero reloads, the disjoint all-peer
   IPv4 route-server shape, and EoR completion. Other flapstorm instruments,
-  overlap, filtering, mixed export policies, iBGP-RR, and coverage-only
-  completion are rejected. The historical flapstorm mode and CSV stay intact.
+  overlap, filtering (including `GEN_RPKI_CACHE`), mixed export policies,
+  iBGP-RR, and coverage-only completion are rejected. The historical flapstorm mode and CSV stay intact.
   `RELOADSTALL_REJOIN_METRICS_ADDR` selects the loopback metrics/readiness
   endpoint, default `127.0.0.1:9179`.
 

@@ -123,10 +123,11 @@ converged_rejoin = os.environ.get("GEN_CONVERGED_REJOIN", "0")
 if converged_rejoin not in ("0", "1"):
     sys.exit("GEN_CONVERGED_REJOIN must be 0 or 1")
 converged_rejoin = converged_rejoin == "1"
-if converged_rejoin and (dualstack or filter_count or ibgp_rr_asn is not None
-                         or trip_max_prefixes is not None or mixed_export_only):
-    sys.exit("GEN_CONVERGED_REJOIN requires the disjoint all-peer IPv4 route-server shape")
 rpki_cache = os.environ.get("GEN_RPKI_CACHE")
+if converged_rejoin and (dualstack or filter_count or ibgp_rr_asn is not None
+                         or trip_max_prefixes is not None or mixed_export_only
+                         or rpki_cache is not None):
+    sys.exit("GEN_CONVERGED_REJOIN requires the disjoint all-peer IPv4 route-server shape")
 if rpki_cache is not None:
     if ibgp_rr_asn is not None:
         sys.exit("GEN_RPKI_CACHE is incompatible with GEN_IBGP_RR_ASN")

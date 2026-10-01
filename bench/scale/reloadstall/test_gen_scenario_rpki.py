@@ -120,6 +120,8 @@ class RpkiScenarioTests(unittest.TestCase):
         cases = [({"GEN_CONVERGED_REJOIN": value}, None) for value in ("", "true", "2", "-1")]
         cases += [({"GEN_CONVERGED_REJOIN": "1", **extra}, changed)
                   for extra, changed in (({"GEN_DUALSTACK": "1"}, None),
+                                         ({"GEN_RPKI_CACHE": "127.0.0.1:3323"}, None),
+                                         ({"GEN_RPKI_CACHE": "[::1]:3323"}, None),
                                          ({"GEN_FILTER_COUNT": "1"}, None),
                                          ({"GEN_IBGP_RR_ASN": "64512"}, None),
                                          ({"GEN_TRIP_MAX_PREFIXES": "1", "GEN_TRIP_RESTART_SECONDS": "1"}, None),
