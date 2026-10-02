@@ -446,7 +446,7 @@ add/delete/redefine within the documented identity bounds, atomic tenant
 teardown, `ip_vrf` relink, additive build-up, and standalone L2VNI swaps that
 only combine L2VNI adds with standalone L2VNI deletes, plus L2VNI-only batch
 redefines that do not relink IP-VRF membership. Mixed edits beyond those
-shapes now hot-apply through the **#268 plan decomposer**: the candidate is
+shapes now hot-apply through the **[#268 plan decomposer](https://github.com/lance0/rustbgpd/issues/268)**: the candidate is
 split into an ordered sequence of already-supported primitive plans (deletes
 → redefines → `ip_vrf` relink → adds), each committing **its own runtime
 generation** — one SIGHUP produces N generations in `rbgp`/gRPC runtime
@@ -473,10 +473,10 @@ SIGHUP outcomes.
 
 | Section | Class | Notes |
 |---|---|---|
-| `[[evpn_instances]]` | coordinator-gated | Supported ADR-0063 L2VNI shapes hot-apply, including standalone L2VNI swaps and L2VNI-only batch redefines; mixed edits decompose into ordered primitive steps (#268), one committed generation per step; undecomposable shapes, missing actors, or convergence failure pin/log. |
+| `[[evpn_instances]]` | coordinator-gated | Supported ADR-0063 L2VNI shapes hot-apply, including standalone L2VNI swaps and L2VNI-only batch redefines; mixed edits decompose into ordered primitive steps ([#268](https://github.com/lance0/rustbgpd/issues/268)), one committed generation per step; undecomposable shapes, missing actors, or convergence failure pin/log. |
 | `[[evpn_instances]].duplicate_ip_detection` | coordinator-gated | Uses the full L2VNI redefine path even for a diagnostic-only edit: withdraws/replays local routes and clears duplicate-MAC quarantine. Clears IP move windows and removed-owner history while seeding preserved local/remote bindings without recounting them. Disabled by default. |
-| `[[evpn_ip_vrfs]]` | coordinator-gated | Supported IP-VRF add/delete/redefine and `ip_vrf` relink hot-apply, including decomposed mixed edits (#268); L3VNI/device/table identity changes stay restart-required by design — kernel VRF identity lifecycle (destroy + recreate); a runtime drain/recreate risks a dual-state window (see the ADR-0063 amendment). |
-| `[[ethernet_segments]]` | coordinator-gated | Supported ES add/delete/redefine and atomic tenant teardown hot-apply when the segment actor can converge; mixed edits decompose (#268) with ES redefines applied one segment per generation. |
+| `[[evpn_ip_vrfs]]` | coordinator-gated | Supported IP-VRF add/delete/redefine and `ip_vrf` relink hot-apply, including decomposed mixed edits ([#268](https://github.com/lance0/rustbgpd/issues/268)); L3VNI/device/table identity changes stay restart-required by design — kernel VRF identity lifecycle (destroy + recreate); a runtime drain/recreate risks a dual-state window (see the ADR-0063 amendment). |
+| `[[ethernet_segments]]` | coordinator-gated | Supported ES add/delete/redefine and atomic tenant teardown hot-apply when the segment actor can converge; mixed edits decompose ([#268](https://github.com/lance0/rustbgpd/issues/268)) with ES redefines applied one segment per generation. |
 | `[managed_netdevs]` | restart-required | ADR-0091 bridge, fixed-VNI VXLAN, SVD / collect-metadata VXLAN, VLAN upper, VRF, and L3VXLAN lifecycle is resolved at startup and reconciled by the dataplane actor (create, stamp, restart adoption, same-owner orphan reap). Managed netdevs are not live-mutable in this tranche. |
 
 ## `[[fib_tables]]` and FIB runtime

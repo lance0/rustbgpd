@@ -364,13 +364,14 @@ route-reflector fanout with degenerate (`rr_fanout`) and calibrated
 the preregistered approximation of the measured IPv4 full-table ratio; it is
 checked in the schema test rather than inferred from a run.
 
-Every row also carries an attribute-container structural model. It compares
-the wider per-Route `Arc<[PathAttribute]>` fat pointer with the one-Vec-header
-per-unique-set saving from replacing `Arc<Vec<PathAttribute>>`. The model keeps
-nested `AS_PATH` and community payloads unchanged and reports modeled bytes
-separately from allocator-tracked live bytes. A positive modeled delta is a
-warning that the slice representation is larger before allocator size classes
-or locality effects.
+Every row also carries an attribute-container structural model. It charges
+the wider per-Route `Arc<[PathAttribute]>` fat pointer relative to the current
+`Arc<AttrSet>` handle and credits removing one `Vec<PathAttribute>` header per
+unique set. This pointer/header model does not model how a replacement container
+would store `AttrSet`'s cached selection summary. It keeps nested `AS_PATH` and
+community payloads unchanged and reports modeled bytes separately from
+allocator-tracked live bytes. A positive modeled delta is a warning that the
+slice representation is larger before allocator size classes or locality effects.
 
 Requirements: `bash`, `git`, `cargo`, `flock`, and `python3`. The compared
 refs must already include the structured `memory_profile_high_n` harness. A
