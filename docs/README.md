@@ -60,6 +60,7 @@ Look up commands, configuration, and compatibility boundaries.
 
 | Page | Scope |
 |------|-------|
+| [rbgp commands](../crates/cli/README.md#commands) | CLI command groups, usage, and examples. |
 | [Configuration](reference/configuration.md) | TOML fields and examples. |
 | [Configuration schema](reference/rustbgpd.schema.json) | Machine-readable schema for editor integration. |
 | [Reload matrix](reference/reload-matrix.md) | When each configuration change takes effect. |
@@ -70,6 +71,7 @@ Look up commands, configuration, and compatibility boundaries.
 | [gNMI and OpenConfig](reference/gnmi.md) | Supported telemetry paths and operations. |
 | [Policy language](reference/rpol-language.md) | The typed routing-policy language and its tools. |
 | [Rust libraries](reference/embedding.md) | Workspace crates and their embedding boundaries. |
+| [Published crate versions](reference/published-crate-versions.json) | Machine-readable versions of published library crates. |
 | [Security posture](reference/security.md) | Management API protection and deployment tiers. |
 | [Limitations](reference/limitations.md) | Current product boundaries and unsupported behavior. |
 | [Known issues](reference/known-issues.md) | Known defects, workarounds, and operational caveats. |
