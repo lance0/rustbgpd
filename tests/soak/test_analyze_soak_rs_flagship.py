@@ -1049,8 +1049,8 @@ class RsFlagshipAnalyzerContracts(unittest.TestCase):
         )
         self.assertEqual(result.returncode, 1)
         defects = payload["gates"]["management_cadence"]["value"]["defects"]
-        self.assertIn("neighbor: first schedule does not start with load", defects)
-        self.assertNotIn("metrics: first schedule does not start with load", defects)
+        self.assertIn("neighbor: first schedule does not match its recorded phase offset", defects)
+        self.assertNotIn("metrics: first schedule does not match its recorded phase offset", defects)
 
     def test_management_load_phase_offset_must_fall_inside_its_interval(self):
         meta = smoke_meta()

@@ -437,7 +437,7 @@ def analyze_management_load(
             if schedules and schedules[0] is not None:
                 if abs(schedules[0] - started_at - phase_offsets[operation]) > 0.002:
                     cadence_defects.append(
-                        f"{operation}: first schedule does not start with load"
+                        f"{operation}: first schedule does not match its recorded phase offset"
                     )
                 # The driver advances `due` by exactly `interval`, so a gap of
                 # k intervals means k - 1 skipped slots; anything off that
