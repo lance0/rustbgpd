@@ -37,6 +37,11 @@ use tempfile::TempDir;
 use tokio::runtime::Runtime;
 use tokio::sync::{broadcast, mpsc};
 
+/// Benches link the allocator the daemon ships with, so allocation-heavy
+/// paths are timed under jemalloc rather than the system allocator.
+#[global_allocator]
+static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
+
 const EVENTS_PER_SAMPLE: usize = 256;
 const EHM_QUEUE_CAPACITY: usize = 4_096;
 const QUEUE_FENCE_TIMEOUT: Duration = Duration::from_secs(10);

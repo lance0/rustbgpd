@@ -30,6 +30,7 @@ tokio-util = { workspace = true, features = ["codec"], optional = true }
 [dev-dependencies]
 proptest.workspace = true
 criterion.workspace = true
+tikv-jemallocator.workspace = true
 syn = { version = "3", features = ["full"] }
 
 [[bench]]

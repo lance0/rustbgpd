@@ -652,6 +652,15 @@ unsafe impl GlobalAlloc for TrackingAllocator {
     }
 }
 
+/// The Criterion build links the allocator the daemon ships with, so
+/// allocation-heavy paths are timed under jemalloc rather than the system
+/// allocator.
+#[cfg(not(feature = "codec-allocation-diagnostics"))]
+#[global_allocator]
+static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
+
+/// The diagnostic build counts allocator calls and requested bytes, which do
+/// not depend on the backing allocator, so it keeps forwarding to `System`.
 #[cfg(feature = "codec-allocation-diagnostics")]
 #[global_allocator]
 static ALLOCATOR: TrackingAllocator = TrackingAllocator::new();

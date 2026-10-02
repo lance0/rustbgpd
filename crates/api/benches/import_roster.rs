@@ -27,6 +27,11 @@ use rustbgpd_transport::SessionIdentity;
 use rustbgpd_transport::handle::InstalledImportPolicy;
 use tokio::sync::watch;
 
+/// Benches link the allocator the daemon ships with, so allocation-heavy
+/// paths are timed under jemalloc rather than the system allocator.
+#[global_allocator]
+static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
+
 type Publication = watch::Sender<Option<Arc<InstalledImportPolicy>>>;
 type Receiver = watch::Receiver<Option<Arc<InstalledImportPolicy>>>;
 

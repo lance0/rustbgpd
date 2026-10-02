@@ -48,6 +48,11 @@ use rustbgpd_policy::{
 };
 use rustbgpd_wire::{AspaValidation, Ipv4Prefix, Prefix, RpkiValidation};
 
+/// Benches link the allocator the daemon ships with, so allocation-heavy
+/// paths are timed under jemalloc rather than the system allocator.
+#[global_allocator]
+static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
+
 /// A statement that matches any prefix but requires a standard community
 /// the benchmarked route does not carry — so evaluation checks prefix
 /// (match) then community (miss) and walks on to the next statement.
