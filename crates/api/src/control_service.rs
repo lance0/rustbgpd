@@ -1,6 +1,5 @@
 use std::path::PathBuf;
 
-use prometheus::{Encoder, TextEncoder};
 use tokio::sync::{mpsc, oneshot, watch};
 use tonic::{Request, Response, Status};
 use tracing::info;
@@ -144,14 +143,9 @@ impl proto::control_service_server::ControlService for ControlService {
         &self,
         _request: Request<proto::MetricsRequest>,
     ) -> Result<Response<proto::MetricsResponse>, Status> {
-        let encoder = TextEncoder::new();
-        let families = self.metrics.registry().gather();
-        let mut buf = Vec::new();
-        encoder
-            .encode(&families, &mut buf)
+        let text = crate::metrics_render::render_text(&self.metrics)
+            .await
             .map_err(|e| Status::internal(format!("metrics encoding error: {e}")))?;
-        let text =
-            String::from_utf8(buf).map_err(|e| Status::internal(format!("UTF-8 error: {e}")))?;
 
         Ok(Response::new(proto::MetricsResponse {
             prometheus_text: text,

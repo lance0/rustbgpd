@@ -141,6 +141,13 @@ mod tests {
 '''
         definitions = CHECK.static_metric_definitions(source)
         self.assertEqual(definitions, {"ready": ("bgp_ready", "ordinary")})
+        for visibility in ("pub ", "pub(crate) ", "pub(super) "):
+            visible = source.replace("mod tests {", f"{visibility}mod tests {{")
+            self.assertEqual(
+                CHECK.static_metric_definitions(visible),
+                {"ready": ("bgp_ready", "ordinary")},
+                visibility,
+            )
 
     def test_dynamic_metric_name_is_rejected(self):
         sources = dict(self.sources)

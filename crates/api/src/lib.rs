@@ -33,6 +33,7 @@ pub mod health_probe;
 pub mod import_roster;
 mod injection_service;
 pub mod json_format;
+pub mod metrics_render;
 mod neighbor_service;
 mod peer_group_service;
 pub mod peer_types;
