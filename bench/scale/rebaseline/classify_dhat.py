@@ -61,6 +61,12 @@ def classify_stack(stack: list[str]) -> str:
         stack,
         "Vec<rustbgpd_wire::attribute::PathAttribute",
         "Vec<rustbgpd_wire::PathAttribute",
+    ) or (
+        # Optimized slice cloning keeps generic Vec symbols. RouteAttrBundle's
+        # base.to_vec() allocates the outer vector before AttrSet takes it.
+        has(stack, "RouteAttrBundle::new", "RouteAttrBundle>::new")
+        and has(stack, "alloc::raw_vec::RawVec<T,A>::with_capacity_in")
+        and has(stack, "alloc::slice::<impl [T]>::to_vec")
     )
     is_nested_attribute_payload = has(
         stack,

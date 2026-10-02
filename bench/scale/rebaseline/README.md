@@ -86,6 +86,13 @@ it to the nearest-looking component.
 The two attribute rows are allocation ownership, not a claim that changing the
 outer container removes the nested bytes. Review them alongside the
 route-copy/unique-set structural model from `bench/compare-rib-memory.sh`.
+Optimized `RawVec<T,A>` / slice `to_vec` stacks under `RouteAttrBundle::new`
+also identify its outer vector, even when the element type is absent from the
+symbols. Element-clone frames take precedence as nested payloads; `AttrSet`
+Arc wrappers and temporary decoder vectors do not qualify. These allocation
+sites can include in-flight bundles at `t-gmax`, not only already-interned sets.
+Keep historical derivatives with their recorded classifier version; generate
+new outputs when applying a corrected classifier instead of rewriting a receipt.
 
 Raw DHAT JSON contains instruction addresses, command arguments, and source
 locations and must not be committed. `--derivative` aggregates every positive
