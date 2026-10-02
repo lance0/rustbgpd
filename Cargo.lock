@@ -3035,6 +3035,7 @@ dependencies = [
  "libc",
  "rustbgpd-wire",
  "socket2",
+ "tikv-jemallocator",
  "tokio",
 ]
 

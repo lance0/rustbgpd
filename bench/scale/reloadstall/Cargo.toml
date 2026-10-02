@@ -11,3 +11,4 @@ tokio.workspace = true
 bytes.workspace = true
 libc.workspace = true
 socket2.workspace = true
+tikv-jemallocator.workspace = true

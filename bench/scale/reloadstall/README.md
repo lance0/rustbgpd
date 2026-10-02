@@ -106,6 +106,17 @@ does not produce VRPs, inject deltas, or hold sessions for measurement.
 It is unavailable in the policy-free `GEN_IBGP_RR_ASN` scenario. With the
 knob absent, the historical generated files are unchanged.
 
+## Allocator
+
+The harness links jemalloc as its global allocator, the same allocator the
+daemon uses. Hundreds of stub readers on a 24-worker runtime grow their frame
+buffers and NLRI vectors at the same instant when the daemon delivers a
+coalesced post-reload burst; under glibc malloc those reallocations contended
+on the arena lock, and the resulting futex wait made the completion median
+bimodal from one process start to the next while the daemon sat idle on the
+receivers' TCP windows. Receiver-bound receipts taken before this change
+(glibc malloc) are not directly comparable on completion time.
+
 ## Arg contract
 
 From `src/main.rs` (fewer than 9 positional args prints the usage string and

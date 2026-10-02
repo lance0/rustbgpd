@@ -200,6 +200,14 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpSocket, TcpStream};
 use tokio::sync::mpsc;
 
+/// Receivers on every runtime worker reallocate their frame buffers and NLRI
+/// vectors in the same instant when the daemon delivers a coalesced
+/// post-reload burst. Under glibc malloc that contended on the arena lock, so
+/// completion timing depended on the per-process arena-to-thread assignment.
+/// jemalloc removes that contention and matches the daemon's allocator.
+#[global_allocator]
+static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
+
 const CHURNERS: u32 = 8;
 const CHURN_BLOCK: u32 = 16;
 const CHURN_MS: u64 = 125;
