@@ -24,26 +24,31 @@ UDP/3784 and UDP/4784 for BFD.
 > directly on the VM, and the netns harness adds caps to its *own* child
 > container via `docker run --cap-add=NET_ADMIN --cap-add=SYS_ADMIN`.
 
-## Per-job setup (no shared state)
+## Workflow preparation and per-job setup
 
-Each hosted job is an isolated VM, so it provisions itself rather than reusing a
-shared persistent Docker daemon. Two composite actions carry the repetition:
+Each hosted job has its own VM and Docker daemon. The workflow first classifies
+pull-request paths: documentation-only and other lab-independent changes skip
+the heavy suite; main pushes and manual dispatches run it. A primer job warms
+the shared `rustbgpd:dev` build cache from the checked-out source. Each
+topology job still builds and loads its own image through
+[`setup-dataplane-host`](../../.github/actions/setup-dataplane-host/action.yml),
+which calls the pinned
+[`install-containerlab`](../../.github/actions/install-containerlab/action.yml)
+and [`install-grpcurl-artifact`](../../.github/actions/install-grpcurl-artifact/action.yml)
+actions, ensures `jq` is present, and loads the kernel modules. The `vrf` load
+is best-effort and exposes a `vrf-available` output: if the matching
+`linux-modules-extra-$(uname -r)` is not yet in the apt mirror, VRF-dependent
+receipts **skip with a notice** (as do the netns job's L3 selectors).
 
-- **`.github/actions/install-containerlab`** — downloads the pinned containerlab
-  release with retry + `dpkg-deb --info` validation before `dpkg -i` (issue
-  #208), so a truncated/HTML download fails clearly instead of with
-  `dpkg-deb: … is not a Debian format archive`. Shared with `interop.yml`.
-- **`.github/actions/setup-dataplane-host`** — installs containerlab (via the
-  above), `grpcurl` + `jq`, loads kernel modules (`vrf` via
-  `linux-modules-extra` when absent, plus `vxlan` / `bridge` / `bonding`), and
-  builds `rustbgpd:dev` with a GitHub Actions layer cache (`type=gha`). The
-  `vrf` load is best-effort and exposes a `vrf-available` output: the hosted
-  kernel can roll ahead of the matching `linux-modules-extra-$(uname -r)` in the
-  apt mirror (`actions/runner-images` #7570 / #7587), and on that transient skew
-  the module cannot install. The vrf-dependent receipts are CI-gated on that
-  output — they run when the runner exposes or can install `vrf`, and otherwise
-  **skip with a notice** rather than fail (the netns job applies the same gate
-  to its L3 selectors).
+For M43, a separate preparation job verifies the manifest-pinned BIRD source
+archive. Only an upstream fetch outage skips M43; downloaded bytes that fail
+verification fail the workflow. M43 restores or fetches and verifies that same
+archive through
+[`stage-bird3-artifact`](../../.github/actions/stage-bird3-artifact/action.yml)
+before building its image. GoBGP labs likewise use the pinned
+[`stage-gobgp-artifact`](../../.github/actions/stage-gobgp-artifact/action.yml)
+action. Archive and image caches share inputs between isolated jobs; Docker
+daemon state stays local to each VM.
 
 Because every job rebuilds from a clean VM, stale `clab-*` topology
 accumulation cannot happen across jobs (this obsoletes issue #188 — there is no
