@@ -1009,6 +1009,10 @@ stub 1's first route, derived from `SOAK_ROUTES_PER_PEER` with the engine's
 base-prefix mapping (`20.1.144.0/24` at the 400-route flagship shape), so
 stub 0's deliberate max-prefix trip cannot create a false load failure. Each
 surface has its own monotonic schedule and a five-second timeout with no retry.
+The `rbgp` schedules are phase-offset between `/metrics` ticks and from each
+other, and a CLI record's duration is the child's spawn-to-exit time; see the
+[acceptance gates](../../docs/soaks/soak-acceptance-gates.md) for why CLI read
+times in earlier receipts read high.
 The retained JSONL contains only timing, disposition, byte count, and SHA-256
 fields—not the potentially large responses. A non-ok `rbgp` result also keeps
 a `stderr_excerpt` (first 512 bytes of the CLI's stderr), so a client-side

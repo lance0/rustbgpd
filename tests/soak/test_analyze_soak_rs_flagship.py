@@ -152,9 +152,11 @@ def long_rows(rss_of=None):
 def management_jsonl(meta, *, missing_operation=None, early=False,
                      missed=False, failure=None, terminal=True,
                      truncated=False, cadence_gap=False, skipped=(),
-                     unix_anchor=True):
+                     unix_anchor=True, phase_offsets=None, shift_schedules=True):
     """`skipped` lists metrics slot indices whose records are omitted and
-    counted as missed, the shape the driver leaves after a slow probe."""
+    counted as missed, the shape the driver leaves after a slow probe.
+    `phase_offsets` is recorded in the start record and, unless
+    `shift_schedules` is false, delays each operation's first schedule."""
     operations = ("metrics", "neighbor", "policy_stats", "rib_prefix", "doctor")
     start = meta["measured_start_monotonic"] - 0.1
     end = (meta["measured_end_monotonic"] - 1.0 if early
@@ -172,6 +174,7 @@ def management_jsonl(meta, *, missing_operation=None, early=False,
         "timeout_seconds": meta["management_timeout_sec"],
         "peer_count": meta["peers"],
         "route_prefix": meta["management_route_prefix"],
+        **({"phase_offset_seconds": phase_offsets} if phase_offsets else {}),
     }]
     completed = {}
     scheduled = {}
@@ -179,13 +182,14 @@ def management_jsonl(meta, *, missing_operation=None, early=False,
     digest = hashlib.sha256(b"{}").hexdigest()
     for operation in operations:
         interval = intervals[operation]
-        count = max(1, int(max(0.0, end - start - 0.1) // interval) + 1)
+        offset = (phase_offsets or {}).get(operation, 0.0) if shift_schedules else 0.0
+        count = max(1, int(max(0.0, end - start - offset - 0.1) // interval) + 1)
         if operation == missing_operation:
             count = 0
         completed[operation] = count
         scheduled[operation] = count
         for index in range(count):
-            due = start + index * interval
+            due = start + offset + index * interval
             if operation == "metrics" and index in skipped:
                 completed[operation] -= 1
                 missed_counts[operation] += 1
@@ -1015,6 +1019,57 @@ class RsFlagshipAnalyzerContracts(unittest.TestCase):
         gate = payload["gates"]["management_cadence"]
         self.assertFalse(gate["pass"])
         self.assertIn("metrics: scheduled interval drift", gate["value"]["defects"])
+
+    def driver_phase_offsets(self, meta):
+        return {
+            operation: fraction * meta["management_metrics_interval_sec"]
+            for operation, fraction in load.PHASE_FRACTIONS.items()
+        }
+
+    def test_management_load_phase_offsets_pass(self):
+        meta = smoke_meta()
+        result, payload = run_analyzer(
+            smoke_rows(), smoke_cycles(), meta,
+            management=management_jsonl(
+                meta, phase_offsets=self.driver_phase_offsets(meta)
+            ),
+        )
+        self.assertEqual(result.returncode, 0, payload)
+        self.assertTrue(payload["gates"]["management_cadence"]["pass"])
+        self.assertTrue(payload["gates"]["management_evidence"]["pass"])
+
+    def test_management_load_first_schedule_must_follow_recorded_phase(self):
+        meta = smoke_meta()
+        result, payload = run_analyzer(
+            smoke_rows(), smoke_cycles(), meta,
+            management=management_jsonl(
+                meta, phase_offsets=self.driver_phase_offsets(meta),
+                shift_schedules=False,
+            ),
+        )
+        self.assertEqual(result.returncode, 1)
+        defects = payload["gates"]["management_cadence"]["value"]["defects"]
+        self.assertIn("neighbor: first schedule does not start with load", defects)
+        self.assertNotIn("metrics: first schedule does not start with load", defects)
+
+    def test_management_load_phase_offset_must_fall_inside_its_interval(self):
+        meta = smoke_meta()
+        offsets = self.driver_phase_offsets(meta)
+        for bad in (meta["management_cli_interval_sec"], -0.1, "0.5", None):
+            with self.subTest(bad=bad):
+                result, payload = run_analyzer(
+                    smoke_rows(), smoke_cycles(), meta,
+                    management=management_jsonl(
+                        meta, phase_offsets={**offsets, "neighbor": bad},
+                        shift_schedules=False,
+                    ),
+                )
+                self.assertEqual(result.returncode, 1)
+                gate = payload["gates"]["management_evidence"]
+                self.assertIn(
+                    "start record has invalid neighbor phase offset",
+                    gate["value"]["errors"],
+                )
 
     def test_management_load_below_ninety_percent_completion_fails(self):
         meta = smoke_meta()
