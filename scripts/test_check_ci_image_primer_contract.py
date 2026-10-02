@@ -208,6 +208,10 @@ class PrimerContractTests(unittest.TestCase):
             self.assertNotEqual(lookup().returncode, 0)
             manifest.write_text(f"{'a' * 64}  {archive}\n{'b' * 64}  {archive}\n")
             self.assertNotEqual(lookup().returncode, 0)
+            manifest.write_text(f"{'a' * 64}  {archive} extra\n")
+            self.assertNotEqual(lookup().returncode, 0)
+            manifest.write_text(f"{'a' * 64}  {archive}\n{'b' * 64}  {archive} extra\n")
+            self.assertNotEqual(lookup().returncode, 0)
             manifest.write_text(f"bad  {archive}\n")
             self.assertNotEqual(lookup().returncode, 0)
 
