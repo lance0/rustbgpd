@@ -284,6 +284,19 @@ class ClassifierFixtures(unittest.TestCase):
                     with self.assertRaises(ValueError):
                         sanitize_bgperf_csv.load(path)
 
+    def test_sanitized_poll_mode_requires_the_fork_checkpoint(self) -> None:
+        sanitized = (FIXTURES / "bgperf.fork.expected.csv").read_text()
+        rows = list(csv.reader(io.StringIO(sanitized)))
+        rows[0].append("neighbor_poll_mode")
+        rows[1].append("poll1")
+        rows[1][rows[0].index("required")] = "200000"
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "wrong-checkpoint.csv"
+            with path.open("w", newline="") as output:
+                csv.writer(output, lineterminator="\n").writerows(rows)
+            with self.assertRaisesRegex(ValueError, "requires the 99% check-point"):
+                sanitize_bgperf_csv.load_sanitized(path)
+
     def test_dhat_fixture_and_sanitized_derivative(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             derivative = Path(directory) / "dhat.derivative.tsv"
