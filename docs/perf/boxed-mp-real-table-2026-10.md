@@ -44,7 +44,8 @@ Target and monitor each reached **1,078,977** IPv4 routes. The target retained
 unclassified by the retained counters. Those 32 are a limit of the correctness
 accounting, not an inferred parser or boxing effect. Both arms passed the same
 frozen route and inventory guards: **148,667 live interned sets**, **489,537**
-attribute-vector elements and capacity slots, and 229,376 intern-table slots.
+attribute-vector elements and capacity slots (**3.293 attributes and allocated
+slots per live set on average**), and 229,376 intern-table slots.
 
 Each release cell ran serially in a fresh, swap-disabled cgroup. The five
 orders were parent/boxed, boxed/parent, parent/boxed, boxed/parent,
