@@ -141,6 +141,34 @@ adopts it, and do not run from an unpinned fork `master`. Record the bgperf2
 checkout's `git rev-parse HEAD` as `bgperf2.revision_or_version` in the
 manifest; it must equal the pinned commit.
 
+### Neighbor polling control
+
+The fork's polling-control extension accepts `RUSTBGPD_NEIGHBOR_POLL_MODE`:
+`poll1` is the default, `poll5` waits five seconds between neighbor reads,
+and `off` issues no target neighbor CLI reads. Polling modes read immediately
+and wait their interval after each attempt. Monitor and resource sampling
+continue in all modes. With `off`, convergence uses the monitor checkpoint
+and the full 20-sample assurance window; `poll5` can delay the target
+confirmation that permits the shorter five-sample window.
+
+This extension is not in the campaign pin above. Adopt it only through an
+explicit fork repin after its separate alternating `poll1`/`off` 2x100k
+qualification under the benchmark lock. Do not overlap that comparison with
+another timed workload. The control alone is not evidence of neutral polling
+cost or convergence timing.
+
+For a polling-control build, record the effective mode from CSV
+`neighbor poll mode` and `target.neighbor_poll_mode` in `*.versions.json`,
+plus the environment assignment in the receipt manifest. Keep each mode and
+repetition in a separate results directory: mode is not an artifact-name or
+batch-resume axis. The sanitizer retains the mode as `neighbor_poll_mode`
+in the new receipt schema. Older receipts remain readable without that
+column; its absence does not assert `poll1`. Compare only receipts with
+matching, established mode identity except for an explicitly labeled polling
+A/B comparison.
+
+### Building the measured image
+
 Dated receipts keep the bgperf2 pins they name. Those pins reproduce only
 those receipts: they render the retired legacy gRPC enforcement mode,
 which rustbgpd v0.63 and later refuse at boot, so do not use them for a new
@@ -210,7 +238,7 @@ The sanitizer accepts exactly one header and one result row (16 KiB input,
 4 KiB output), the pinned rustbgpd 2x100k shape, convergence with zero tester
 errors/timeouts, and an allowlisted set of numeric metrics. It rejects schema
 drift, extra fields, paths, process/container-like IDs, filters, and failed
-runs. The sanitizer accepts three exact bgperf2 schemas. The historical shape
+runs. The sanitizer accepts four exact bgperf2 schemas. The historical shape
 from `jauderho/bgperf2` commit
 `17216483e779f1484ef38562fb8f6b5ea6ad4d8f` emits an unlabeled
 `tester_timeouts` data column, so its 24-label/25-value row remains pinned
@@ -219,8 +247,11 @@ bounded target-image, tester-version, and monitor-version fields; those fields
 are validated and omitted from the stable receipt. The maintained fork adds a
 `max foreign cpu %` count before the provenance fields, and its `required` is
 the monitor's 99% check-point (198000 for this shape), so that schema must also
-report the full 200000-route table as `received`. Any other schema still
-fails closed. Never commit the unsanitized temporary CSV.
+report the full 200000-route table as `received`. The polling-control schema
+adds `neighbor poll mode` before the last three provenance fields and
+requires exactly `poll1`, `poll5`, or `off`; the sanitized output retains
+that identity. Any other schema still fails closed. Never commit the
+unsanitized temporary CSV.
 Review the committed artifact without the raw capture using:
 
 ```text
