@@ -107,17 +107,20 @@ M1_CALL = (
 M83_BIRD_STAGE = (
     "      - name: Stage verified BIRD 2.19.2 archive\n"
     "        uses: ./.github/actions/stage-bird3-artifact\n"
+    "        id: bird_archive\n"
     "        with:\n"
-    '          version: "2.19.2"\n'
-    f"          sha256: {BIRD2192}\n\n"
+    '          version: "2.19.2"\n\n'
 )
 M74_STAGE = (
     "      - name: Stage verified GoBGP archive\n"
-    "        uses: ./.github/actions/stage-gobgp-artifact\n\n"
+    "        uses: ./.github/actions/stage-gobgp-artifact\n"
+    "        id: gobgp_archive\n\n"
 )
 M74_BUILD = (
     "      - name: Build gobgp:interop\n"
-    "        run: docker build -t gobgp:interop -f tests/interop/Dockerfile.gobgp tests/interop\n\n"
+    "        run: >-\n"
+    '          docker build --build-arg GOBGP_AMD64_SHA256="${{ steps.gobgp_archive.outputs.sha256 }}"\n'
+    "          -t gobgp:interop -f tests/interop/Dockerfile.gobgp tests/interop\n\n"
 )
 UNVERIFIED_STEP = (
     "      - name: Fetch a tool\n"
@@ -161,11 +164,6 @@ class PrimerContractTests(unittest.TestCase):
     # 1. Verified downloads.
 
     def test_archive_digest_copies_match_the_manifest(self):
-        with self.subTest("workflow copy drifts"):
-            self.assert_red(
-                f"{INTEROP}:1008: digest is not in {MANIFEST}",
-                (INTEROP, f"sha256: {BIRD2192}", f"sha256: {DRIFTED}"),
-            )
         with self.subTest("Dockerfile copy drifts"):
             self.assert_red(
                 f"tests/interop/Dockerfile.bird-v2192:4: digest is not in {MANIFEST}",
@@ -175,26 +173,121 @@ class PrimerContractTests(unittest.TestCase):
                     f"ARG BIRD_SHA256={DRIFTED}",
                 ),
             )
-        with self.subTest("manifest bumped: every stale copy is named"):
+        with self.subTest("manifest bumped: local Docker defaults still need a bump"):
             errors = self.mutated_errors((MANIFEST, BIRD332, DRIFTED))
-            self.assertIn(f"{MANIFEST}: bird-3.3.2.tar.gz has no copy in the CI surfaces", errors)
             stale = {error.split(":", 1)[0] for error in errors if "is not in" in error}
             self.assertEqual(
                 {
-                    INTEROP,
-                    KERNEL,
-                    ".github/actions/stage-bird3-artifact/action.yml",
-                    ".github/scripts/install-bird3.sh",
                     "tests/interop/Dockerfile.bird3",
                     "tests/interop/Dockerfile.bird-v332",
                 },
                 stale,
             )
-        with self.subTest("manifest entry with no copy"):
+        with self.subTest("duplicate archive entry"):
             self.assert_red(
-                f"{MANIFEST}: bird-9.9.9.tar.gz has no copy in the CI surfaces",
-                (MANIFEST, "\n", f"\n{DRIFTED}  bird-9.9.9.tar.gz\n"),
+                f"{MANIFEST}: malformed or duplicate entry",
+                (MANIFEST, "\n", f"\n{DRIFTED}  bird-3.3.2.tar.gz\n"),
             )
+
+    def test_archive_lookup_requires_one_valid_exact_match(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            scripts = Path(temporary) / ".github" / "scripts"
+            scripts.mkdir(parents=True)
+            helper = scripts / "archive-pin.sh"
+            shutil.copy2(ROOT / ".github/scripts/archive-pin.sh", helper)
+            manifest = scripts.parent / "pinned-archives.sha256"
+            archive = "bird-3.3.2.tar.gz"
+
+            def lookup():
+                return subprocess.run(
+                    ["bash", str(helper), archive], capture_output=True, text=True, check=False
+                )
+
+            manifest.write_text(f"{'a' * 64}  {archive}\n")
+            self.assertEqual(lookup().stdout.strip(), "a" * 64)
+            manifest.write_text(f"{'a' * 64}  other.tar.gz\n")
+            self.assertNotEqual(lookup().returncode, 0)
+            manifest.write_text(f"{'a' * 64}  {archive}\n{'b' * 64}  {archive}\n")
+            self.assertNotEqual(lookup().returncode, 0)
+            manifest.write_text(f"{'a' * 64}  {archive} extra\n")
+            self.assertNotEqual(lookup().returncode, 0)
+            manifest.write_text(f"{'a' * 64}  {archive}\n{'b' * 64}  {archive} extra\n")
+            self.assertNotEqual(lookup().returncode, 0)
+            manifest.write_text(f"bad  {archive}\n")
+            self.assertNotEqual(lookup().returncode, 0)
+
+    def test_explicit_empty_checksum_override_is_rejected(self):
+        for installer, variable in (
+            ("install-bird3.sh", "BIRD3_SHA256"),
+            ("install-gobgp.sh", "GOBGP_SHA256"),
+        ):
+            with self.subTest(installer=installer):
+                result = subprocess.run(
+                    [str(ROOT / ".github/scripts" / installer), "--sha256", "", "--self-test"],
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("invalid", result.stderr)
+                ambient = subprocess.run(
+                    [str(ROOT / ".github/scripts" / installer), "--self-test"],
+                    env={**os.environ, variable: "not-a-checksum"},
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+                self.assertEqual(ambient.returncode, 0, ambient.stderr)
+
+    def test_resolve_steps_fail_before_writing_an_empty_checksum(self):
+        cases = (
+            (".github/actions/install-containerlab/action.yml", "0.74.3", "containerlab_0.74.3_linux_amd64.deb"),
+            (".github/actions/install-gnmic-artifact/action.yml", None, "gnmic_0.46.0_Linux_x86_64.tar.gz"),
+            (".github/actions/install-grpcurl-artifact/action.yml", None, "grpcurl_1.9.1_linux_x86_64.tar.gz"),
+            (".github/actions/stage-bird3-artifact/action.yml", "3.3.2", "bird-3.3.2.tar.gz"),
+            (".github/actions/stage-gobgp-artifact/action.yml", "3.37.0", "gobgp_3.37.0_linux_amd64.tar.gz"),
+            (".github/workflows/ci.yml", None, "rustbgpd-v0.64.0-linux-amd64.tar.gz"),
+            (".github/workflows/kernel-dataplane.yml", None, "bird-3.3.2.tar.gz"),
+        )
+        pins = dict(line.split() for line in (ROOT / MANIFEST).read_text().splitlines() if line and not line.startswith("#"))
+        expected = {archive: digest for digest, archive in pins.items()}
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            scripts = root / ".github/scripts"
+            scripts.mkdir(parents=True)
+            shutil.copy2(ROOT / ".github/scripts/archive-pin.sh", scripts / "archive-pin.sh")
+            manifest = root / MANIFEST
+            output = root / "github-output"
+            for file, version, archive in cases:
+                with self.subTest(file=file):
+                    lines = (ROOT / file).read_text().splitlines()
+                    step = next(i for i, line in enumerate(lines) if "- name: Resolve pinned " in line)
+                    run = next(i for i in range(step + 1, len(lines)) if lines[i].lstrip() == "run: |")
+                    indent = len(lines[run]) - len(lines[run].lstrip()) + 2
+                    body = []
+                    for line in lines[run + 1 :]:
+                        if line.strip() and len(line) - len(line.lstrip()) < indent:
+                            break
+                        body.append(line[indent:])
+                    script = "\n".join(body).replace("${{ inputs.version }}", version or "")
+                    env = {**os.environ, "GITHUB_OUTPUT": str(output)}
+
+                    manifest.write_text("")
+                    output.write_text("")
+                    missing = subprocess.run(
+                        ["bash", "-eo", "pipefail", "-c", script], cwd=root, env=env,
+                        capture_output=True, text=True, check=False,
+                    )
+                    self.assertNotEqual(missing.returncode, 0)
+                    self.assertEqual(output.read_text(), "")
+
+                    manifest.write_text((ROOT / MANIFEST).read_text())
+                    valid = subprocess.run(
+                        ["bash", "-eo", "pipefail", "-c", script], cwd=root, env=env,
+                        capture_output=True, text=True, check=False,
+                    )
+                    self.assertEqual(valid.returncode, 0, valid.stderr)
+                    self.assertEqual(output.read_text(), f"sha256={expected[archive]}\n")
 
     def test_workflow_and_action_fetches_verify_their_archive(self):
         with self.subTest("workflow step fetches without a checksum"):
@@ -213,7 +306,7 @@ class PrimerContractTests(unittest.TestCase):
             )
         with self.subTest("containerlab action drops its checksum"):
             self.assert_red(
-                ".github/actions/install-containerlab/action.yml:34: fetches without verifying a SHA-256",
+                ".github/actions/install-containerlab/action.yml:38: fetches without verifying a SHA-256",
                 (
                     ".github/actions/install-containerlab/action.yml",
                     "sha256sum --check --status",

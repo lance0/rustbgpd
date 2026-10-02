@@ -2,6 +2,8 @@ FROM debian:bookworm-slim AS gobgp-release
 
 ARG TARGETARCH
 ENV GOBGP_VERSION=3.37.0
+ARG GOBGP_AMD64_SHA256=e20b2a155fe14450b9fe37e5c1a1d1bfe101eb479645f5bbea860a8fde30e522
+ARG GOBGP_ARM64_SHA256=0aaa2da6e4dcaaf57e3d0e64eae14946292b0a5894d80ef3b7ebde3bf52beb29
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
@@ -17,8 +19,8 @@ COPY gobgp-archive/ /tmp/gobgp-archive/
 
 RUN set -eux; \
     case "${TARGETARCH}" in \
-        amd64) checksum="e20b2a155fe14450b9fe37e5c1a1d1bfe101eb479645f5bbea860a8fde30e522" ;; \
-        arm64) checksum="0aaa2da6e4dcaaf57e3d0e64eae14946292b0a5894d80ef3b7ebde3bf52beb29" ;; \
+        amd64) checksum="${GOBGP_AMD64_SHA256}" ;; \
+        arm64) checksum="${GOBGP_ARM64_SHA256}" ;; \
         *) echo "unsupported TARGETARCH: ${TARGETARCH}" >&2; exit 1 ;; \
     esac; \
     archive="gobgp_${GOBGP_VERSION}_linux_${TARGETARCH}.tar.gz"; \

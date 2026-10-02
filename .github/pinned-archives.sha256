@@ -1,10 +1,9 @@
 # Canonical SHA-256 of every pinned archive that CI downloads.
 #
-# Workflows, composite actions, installer scripts and lab Dockerfiles each
-# carry their own copy of these digests, because they verify the bytes
-# themselves at run time. scripts/check_ci_image_primer_contract.py fails
-# when any copy is missing from this file or an entry here has no copy, so a
-# version bump starts here and the checker names every copy still to update.
+# Workflows, composite actions, and installers resolve archive digests from
+# this file. Lab Dockerfiles retain local-build defaults; hosted builds pass
+# the resolved digest as a build argument. The image-primer checker catches
+# stale defaults and malformed entries.
 21297d7a02edd700ae82de5a630055a9cb88a99e2e7e45551bc7d6c1e5b4de2c  bird-3.3.2.tar.gz
 aff89abba3b92b7637bd57e0168b8d7ae887747f160ada4973378ad72f5f3660  bird-2.19.2.tar.gz
 e20b2a155fe14450b9fe37e5c1a1d1bfe101eb479645f5bbea860a8fde30e522  gobgp_3.37.0_linux_amd64.tar.gz

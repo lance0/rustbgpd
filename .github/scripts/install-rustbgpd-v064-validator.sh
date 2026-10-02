@@ -3,7 +3,8 @@
 set -euo pipefail
 
 readonly VERSION=0.64.0
-readonly SHA256=bd4829de08d0c50074f9ecd5c351399fae42be06d456b3880a04aa4a7cda1137
+SHA256="$("$(dirname -- "${BASH_SOURCE[0]}")/archive-pin.sh" "rustbgpd-v${VERSION}-linux-amd64.tar.gz")"
+readonly SHA256
 readonly ARCHIVE=rustbgpd-linux-amd64.tar.gz
 readonly BINARY=rustbgpd-v0.64.0
 readonly URL="https://github.com/lance0/rustbgpd/releases/download/v${VERSION}/${ARCHIVE}"
@@ -117,8 +118,6 @@ self_test() (
     trap 'rm -rf -- "$fixture_dir"' EXIT
     [[ "$VERSION" == "0.64.0" ]] \
         || fail_self_test "version pin drifted"
-    [[ "$SHA256" == "bd4829de08d0c50074f9ecd5c351399fae42be06d456b3880a04aa4a7cda1137" ]] \
-        || fail_self_test "archive checksum pin drifted"
     [[ "$ARCHIVE" == "rustbgpd-linux-amd64.tar.gz" ]] \
         || fail_self_test "archive name drifted"
     [[ "$BINARY" == "rustbgpd-v0.64.0" ]] \

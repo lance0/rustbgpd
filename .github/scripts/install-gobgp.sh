@@ -3,7 +3,7 @@
 set -euo pipefail
 
 GOBGP_VERSION="3.37.0"
-GOBGP_SHA256="e20b2a155fe14450b9fe37e5c1a1d1bfe101eb479645f5bbea860a8fde30e522"
+unset GOBGP_SHA256
 # The defaults are the gobgp:interop (Dockerfile.gobgp) pin. The 4.x lab images
 # (Dockerfile.gobgp-v47) pass their own exact version and release checksum.
 while [[ ${1:-} == --version || ${1:-} == --sha256 ]]; do
@@ -21,6 +21,9 @@ done
     echo "install-gobgp: invalid GoBGP version: ${GOBGP_VERSION}" >&2
     exit 2
 }
+if [[ ! -v GOBGP_SHA256 ]]; then
+    GOBGP_SHA256="$("$(dirname -- "${BASH_SOURCE[0]}")/archive-pin.sh" "gobgp_${GOBGP_VERSION}_linux_amd64.tar.gz")"
+fi
 [[ $GOBGP_SHA256 =~ ^[0-9a-f]{64}$ ]] || {
     echo "install-gobgp: invalid GoBGP SHA-256" >&2
     exit 2
@@ -146,8 +149,6 @@ self_test() (
     fixture_dir=$(mktemp -d)
     trap 'rm -rf -- "$fixture_dir"' EXIT
     [[ "$GOBGP_VERSION" == "3.37.0" ]] || fail_self_test "version pin drifted"
-    [[ "$GOBGP_SHA256" == "e20b2a155fe14450b9fe37e5c1a1d1bfe101eb479645f5bbea860a8fde30e522" ]] \
-        || fail_self_test "checksum pin drifted"
     [[ "$GOBGP_ASSET" == "gobgp_3.37.0_linux_amd64.tar.gz" ]] \
         || fail_self_test "archive name drifted"
     printf -v expected_url '%s%s' \

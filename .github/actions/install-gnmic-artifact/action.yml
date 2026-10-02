@@ -8,12 +8,20 @@ description: >-
 runs:
   using: "composite"
   steps:
+    - name: Resolve pinned archive checksum
+      id: pin
+      shell: bash
+      run: |
+        set -euo pipefail
+        sha256=$(.github/scripts/archive-pin.sh gnmic_0.46.0_Linux_x86_64.tar.gz)
+        echo "sha256=${sha256}" >> "$GITHUB_OUTPUT"
+
     - name: Restore exact gnmic archive cache
       id: cache
       uses: actions/cache/restore@v6
       with:
         path: ${{ runner.temp }}/gnmic-cache/gnmic_0.46.0_Linux_x86_64.tar.gz
-        key: gnmic-v0.46.0-linux-x86_64-a3ded2f355a615df73900f31b9791f41e796e9c5c63b171e1ce041e8139ee00e
+        key: gnmic-v0.46.0-linux-x86_64-${{ steps.pin.outputs.sha256 }}
 
     - name: Verify cached gnmic archive or fetch it upstream
       shell: bash
@@ -28,7 +36,7 @@ runs:
       uses: actions/cache/save@v6
       with:
         path: ${{ runner.temp }}/gnmic-cache/gnmic_0.46.0_Linux_x86_64.tar.gz
-        key: gnmic-v0.46.0-linux-x86_64-a3ded2f355a615df73900f31b9791f41e796e9c5c63b171e1ce041e8139ee00e
+        key: gnmic-v0.46.0-linux-x86_64-${{ steps.pin.outputs.sha256 }}
 
     - name: Install exact gnmic offline
       shell: bash
