@@ -5,6 +5,13 @@
 Micro-benchmarks using [Criterion](https://github.com/bheisler/criterion.rs) 0.8,
 compiled with `--release` (LTO, codegen-units=1). Numbers below are meant
 for relative comparison and regression tracking, not absolute guarantees.
+The `rustbgpd-rib` and `rustbgpd-transport` bench targets link jemalloc as
+their global allocator, matching the shipped daemon. Through v0.73.0 they ran
+on the system allocator (glibc malloc on Linux), so their earlier baselines and
+recorded deltas are not comparable with current runs on allocation-heavy paths,
+and a `bench/compare-criterion.sh` A/B whose base is v0.73.0 or older compares
+allocators as well as code. Bench targets in other crates keep the allocator
+their source declares.
 For the consolidated operator-facing proof index that rolls benchmark, memory,
 interop, dataplane, and soak receipts together, see
 [`OPERATIONAL_PROOF.md`](operational-proof.md).
@@ -1981,6 +1988,34 @@ docker cp bgperf_rustbgpd_target:/root/config/dhat-heap.json ./dhat-heap.json
 ```
 
 View the profile at https://nnethercote.github.io/dh_view/dh_view.html
+
+### Heap profiling with jemalloc
+
+The default build links jemalloc with its symbols prefixed `_rjem_`, so the
+daemon reads jemalloc run-time options from `_RJEM_MALLOC_CONF` and ignores a
+plain `MALLOC_CONF`. Any jemalloc option goes in that variable, for example
+`background_thread:true` for a tuning experiment.
+
+jemalloc profiling is compiled in but inactive (`opt.prof` is false), so a
+heap profile needs no special build of the allocator. Release binaries are
+stripped, though; build with `--profile release-prof` (release settings,
+symbols kept) when the profile must name functions. Then run the daemon with
+profiling on and stop it normally:
+
+```bash
+cargo build --profile release-prof --locked -p rustbgpd --bin rustbgpd
+_RJEM_MALLOC_CONF=prof:true,prof_final:true,prof_prefix:/var/tmp/rustbgpd-heap \
+  target/release-prof/rustbgpd /etc/rustbgpd/config.toml
+# SIGTERM writes /var/tmp/rustbgpd-heap.<pid>.<seq>.f.heap at exit.
+jeprof --text target/release-prof/rustbgpd /var/tmp/rustbgpd-heap.*.f.heap
+```
+
+Add `lg_prof_interval:30` to also write an interval profile (`.i<seq>.heap`)
+about every 1 GiB of allocation activity while the daemon runs. Profiles
+sample allocations and report live bytes by allocation site, not RSS. `jeprof`
+comes with jemalloc itself (Ubuntu, for example, packages it in
+`libjemalloc-dev`); the Rust build does not produce it. DHAT remains the tool
+for exact per-call-site byte totals.
 
 ### Gotchas
 

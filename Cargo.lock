@@ -3104,6 +3104,7 @@ dependencies = [
  "rustbgpd-telemetry",
  "rustbgpd-transport",
  "rustbgpd-wire",
+ "tikv-jemallocator",
  "tokio",
 ]
 
@@ -3474,6 +3475,7 @@ dependencies = [
  "rustbgpd-wire",
  "rustc-hash 2.1.3",
  "smallvec",
+ "tikv-jemallocator",
  "tokio",
  "tracing",
 ]
@@ -3521,6 +3523,7 @@ dependencies = [
  "rustc-hash 2.1.3",
  "socket2",
  "thiserror 2.0.21",
+ "tikv-jemallocator",
  "tokio",
  "tracing",
  "zeroize",

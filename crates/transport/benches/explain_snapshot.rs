@@ -23,6 +23,11 @@ use rustbgpd_wire::{
     Prefix, RpkiValidation, Safi,
 };
 
+/// Benches link the allocator the daemon ships with, so allocation-heavy
+/// paths are timed under jemalloc rather than the system allocator.
+#[global_allocator]
+static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
+
 const CACHE_CAPACITY: usize = 4_096;
 
 fn policy_context(as_path_hops: u32, communities: usize) -> CachedPolicyContext {

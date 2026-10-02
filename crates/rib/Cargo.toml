@@ -37,6 +37,7 @@ bench-internals = []
 proptest.workspace = true
 tokio = { workspace = true, features = ["test-util"] }
 criterion.workspace = true
+tikv-jemallocator.workspace = true
 
 [[bench]]
 name = "rib_ops"

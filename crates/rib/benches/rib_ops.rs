@@ -19,6 +19,11 @@ use rustbgpd_wire::{
 };
 use rustc_hash::FxHasher;
 
+/// Benches link the allocator the daemon ships with, so allocation-heavy
+/// paths are timed under jemalloc rather than the system allocator.
+#[global_allocator]
+static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
+
 fn generate_prefixes(count: usize) -> Vec<Prefix> {
     const PREFIXES_PER_BLOCK: usize = 1 << 16;
     const BLOCKS: usize = 256 - 10;

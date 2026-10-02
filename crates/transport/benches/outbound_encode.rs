@@ -29,6 +29,11 @@ use rustbgpd_rib::{Route, RouteOrigin};
 use rustbgpd_transport::{OutboundEncodeBench, OutboundGroupBench};
 use rustbgpd_wire::{AsPath, AsPathSegment, Ipv4Prefix, Origin, PathAttribute, Prefix};
 
+/// Benches link the allocator the daemon ships with, so allocation-heavy
+/// paths are timed under jemalloc rather than the system allocator.
+#[global_allocator]
+static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
+
 fn attrs(med: Option<u32>) -> Vec<PathAttribute> {
     let mut attrs = vec![
         PathAttribute::Origin(Origin::Igp),

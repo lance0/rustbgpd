@@ -42,6 +42,15 @@ compiling against `crates/rib`, `crates/wire`, and `crates/telemetry` on `main`.
   transport-harness scale-receipt headline), recorded in
   [`docs/perf/ixp-matrix-2026-07.md`](../../../docs/perf/ixp-matrix-2026-07.md#1000-client-rr-cell--in-repo-manager-direct-harness).
 
+## Allocator
+
+The harness links jemalloc as its global allocator, the same allocator the
+daemon ships with, because the code it times and whose RSS it reports is the
+daemon's own `RibManager` running in this process. Through v0.73.0 the
+harness ran on glibc malloc, and so do the receipts listed under "Backs";
+compare them with current runs only as cross-allocator observations, not as
+same-build deltas.
+
 ## Build and run
 
 Root-workspace member excluded from `default-members`; build it explicitly
