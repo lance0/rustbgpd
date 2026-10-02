@@ -1,0 +1,79 @@
+{
+  "source_base": "326dc11218f70f75d1a9a103118682d3ab0b1a5a",
+  "rustc": "rustc 1.99.0 (b940084d7 2026-09-28)\nbinary: rustc\ncommit-hash: b940084d7eb6a299eb4bfeb8e34901bc051e7ac4\ncommit-date: 2026-09-28\nhost: x86_64-unknown-linux-gnu\nrelease: 1.99.0\nLLVM version: 23.1.1\n",
+  "compile": [
+    {
+      "arm": "baseline",
+      "command": [
+        "rustc",
+        "--edition=2024",
+        "-O",
+        "-A",
+        "dead_code",
+        "--crate-name",
+        "prefix_retirement_probe",
+        "-L",
+        "dependency=DEPENDENCY_DIR",
+        "--extern",
+        "ipnet=DEPENDENCY_DIR/libipnet-cca0c2fea9fa9f16.rlib",
+        "--extern",
+        "prefix_trie=DEPENDENCY_DIR/libprefix_trie-4c8477c6ac4f1222.rlib",
+        "--extern",
+        "rustbgpd_wire=DEPENDENCY_DIR/librustbgpd_wire-97397d78f85fc8f2.rlib",
+        "--extern",
+        "smallvec=DEPENDENCY_DIR/libsmallvec-4552bdb03b85f150.rlib",
+        "./baseline-main.rs",
+        "-o",
+        "./baseline"
+      ],
+      "sha256": {
+        "baseline.rs": "69e11c2e580dab1634a4a45897e5f16c9ff8b695124f38116eeba3cae967c160",
+        "baseline-main.rs": "f2ab9af29804e1a1d6a895f092b367f53618a94f360310f87500c79810edfc44",
+        "libipnet-cca0c2fea9fa9f16.rlib": "e866c7e60b61469be2dd57706c34f2d547dc298c3fb34b95efd35bb2cf13775f",
+        "libprefix_trie-4c8477c6ac4f1222.rlib": "b44b40e5a4ce783601620c75aad7ecb54e643bd3a36b89bd0697fd225f8b3ee1",
+        "librustbgpd_wire-97397d78f85fc8f2.rlib": "f9bc9d9b0a73b357ab738e6a69ad7cd8437a8d0ddf7037efe19cd34aa53ae3da",
+        "libsmallvec-4552bdb03b85f150.rlib": "42d0acb9c6f03815d47be07b0eab1ab31ee327a336f1e1c1336809380a9f68d1",
+        "baseline": "1843c3e5860fb7861095029843b82013139c3e616f6fddc3e0d3aa2f2b88bfaf"
+      }
+    },
+    {
+      "arm": "candidate",
+      "command": [
+        "rustc",
+        "--edition=2024",
+        "-O",
+        "-A",
+        "dead_code",
+        "--crate-name",
+        "prefix_retirement_probe",
+        "-L",
+        "dependency=DEPENDENCY_DIR",
+        "--extern",
+        "ipnet=DEPENDENCY_DIR/libipnet-cca0c2fea9fa9f16.rlib",
+        "--extern",
+        "prefix_trie=DEPENDENCY_DIR/libprefix_trie-4c8477c6ac4f1222.rlib",
+        "--extern",
+        "rustbgpd_wire=DEPENDENCY_DIR/librustbgpd_wire-97397d78f85fc8f2.rlib",
+        "--extern",
+        "smallvec=DEPENDENCY_DIR/libsmallvec-4552bdb03b85f150.rlib",
+        "./candidate-main.rs",
+        "-o",
+        "./candidate"
+      ],
+      "sha256": {
+        "candidate.rs": "a6d853606ccbbe738fe54e70ed62be327073fab5fb242db36b22e4aea7222362",
+        "candidate-main.rs": "f656e3a8bd613c42d889ba30ea6bd7e8d41c932bafbd2f2ae0a7463085c2d694",
+        "libipnet-cca0c2fea9fa9f16.rlib": "e866c7e60b61469be2dd57706c34f2d547dc298c3fb34b95efd35bb2cf13775f",
+        "libprefix_trie-4c8477c6ac4f1222.rlib": "b44b40e5a4ce783601620c75aad7ecb54e643bd3a36b89bd0697fd225f8b3ee1",
+        "librustbgpd_wire-97397d78f85fc8f2.rlib": "f9bc9d9b0a73b357ab738e6a69ad7cd8437a8d0ddf7037efe19cd34aa53ae3da",
+        "libsmallvec-4552bdb03b85f150.rlib": "42d0acb9c6f03815d47be07b0eab1ab31ee327a336f1e1c1336809380a9f68d1",
+        "candidate": "7d825bc11c1c03dfc43089ab4020ce3b6db83d2c4c81fb60e1f1387a61aa3ebe"
+      }
+    }
+  ],
+  "scope": "fixture only: 400400 dense IPv4 /24 index entries, SmallVec inline one path, mutex and monotonic elapsed checkpoint, no daemon or end-to-end S2/IRR claim",
+  "dependency_source": "370e211b95ec3e4a7b07556146e31dd02f391ea6",
+  "cpu": "AMD Ryzen Threadripper 7970X 32-Cores; 32 cores / 64 threads; affinity CPU 31",
+  "kernel": "7.0.0-30-generic",
+  "perf": "7.0.12"
+}

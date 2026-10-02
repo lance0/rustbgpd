@@ -321,6 +321,7 @@ from that file; a directory name does not fill a missing date.
 
 | Document | Date stated | Workload, shape, or role | Establishes | Does not establish |
 |---|---|---|---|---|
+| [Prefix-index retirement](prefix-retirement-2026-10.md) | 2026-10-02 | 400,400 IPv4 prefix index entries; three runs per arm | 62.4% fewer retirement instructions and 47.0% fewer cycles, retaining per-value checkpoints | End-to-end reload or IRR latency |
 | [`artifacts/adj-rib-out-family-gauge-2026-07/README.md`](artifacts/adj-rib-out-family-gauge-2026-07/README.md) | Unstated | Exact unrounded estimates and controls for the linked family-gauge receipt | Unstated | Unstated |
 | [`artifacts/adj-rib-out-family-gauge-2026-07/rejected-attempts.md`](artifacts/adj-rib-out-family-gauge-2026-07/rejected-attempts.md) | Unstated | Preflight-invalid and threshold-crossing attempts | Why those attempts were excluded | A retained result |
 | [`artifacts/attribute-layout-2026-08/README.md`](artifacts/attribute-layout-2026-08/README.md) | Unstated | 100k, 500k, and 900k structural rows plus a 200k-route bgperf2 result | The container-layout migration was rejected before a prototype | A live-byte A/B or throughput result |
