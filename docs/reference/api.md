@@ -2869,6 +2869,10 @@ after the window. It therefore establishes functional convergence, not a
 strict latency bound. The current driver also rejects success at or after
 the deadline, covered by an offline clock-controlled regression. These are
 acceptance deadlines; in-flight observation commands retain their own timeouts.
+The current FRR oracle also rejects additional match components in both table
+paths and detailed rows. An offline recheck of all 26 retained snapshots passed
+with those checks, covering 980 paths and their matching detailed rows without
+changing the original receipt or driver identity.
 
 ### Inject an EVPN Type 2 (MAC/IP) route
 

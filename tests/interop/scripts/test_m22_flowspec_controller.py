@@ -93,6 +93,32 @@ class ControllerOracleTests(unittest.TestCase):
         with self.assertRaises((AssertionError, json.JSONDecodeError)):
             controller.frr_details(json.dumps([fields, {"ecomlist": "x"}]) + "bad trailing data")
 
+    def test_frr_rejects_extra_match_components(self):
+        for family in controller.FAMILIES:
+            request = controller.rule(family, 1)
+            prefix = request["components"][0]["prefix"]
+            fields = {"to": prefix, "proto": "= 6 ", "dstp": "= 80 "}
+            detail = dict(fields, ecomlist="65001:100 FS:rate 1000.000000")
+            fixture = {"frr": {"totalRoutes": 1, "routes": {"nlri": [dict(fields, valid=True, bestpath=True)]}},
+                       "frr_details": {prefix: detail}}
+            controller.assert_frr(fixture, [request])
+            source = "192.0.2.0/24" if family == "IPV4" else "2001:db8:ffff::/64/off 0"
+            for extra in ({"from": source}, {"srcp": "= 1234 "}):
+                for representation in ("table", "detail", "both"):
+                    broken = copy.deepcopy(fixture)
+                    if representation in ("table", "both"):
+                        path = broken["frr"]["routes"].pop("nlri")[0]
+                        path.update(extra)
+                        broken["frr"]["routes"][f"nlri {extra}"] = [path]
+                    if representation in ("detail", "both"):
+                        broken["frr_details"][prefix].update(extra)
+                    with self.subTest(family=family, extra=extra, representation=representation), \
+                            self.assertRaises(AssertionError):
+                        controller.assert_frr(broken, [request])
+                with self.subTest(family=family, extra=extra, representation="detail parser"), \
+                        self.assertRaises(AssertionError):
+                    controller.frr_details(json.dumps([dict(fields, **extra), {"ecomlist": detail["ecomlist"]}]))
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -16,6 +16,7 @@ REWRITE = (65001 << 16) | 100
 REWRITE_RT = (2 << 48) | (65001 << 32) | 100
 TAG = (65001 << 16) | 10
 FAMILIES = ("IPV4", "IPV6")
+FRR_COMPONENTS = {"to", "proto", "dstp"}
 
 
 def rule(family, index, rate=1000):
@@ -65,6 +66,9 @@ def frr_routes(document):
     result = {}
     for nlri, paths in routes.items():
         assert len(paths) == 1 and paths[0].get("valid") and paths[0].get("bestpath"), (nlri, paths)
+        # Only path metadata present in the retained FRR 10.7.1 observations.
+        metadata = {"valid", "bestpath", "selectionReason", "pathFrom", "weight", "peerId", "path", "origin"}
+        assert set(paths[0]) - metadata == FRR_COMPONENTS, paths[0]
         result[nlri] = paths[0]
     return result
 
@@ -79,6 +83,7 @@ def frr_details(text):
         parts, end = decoder.raw_decode(text)
         text = text[end:]
         row = parts[0]
+        assert set(row) == FRR_COMPONENTS, row
         prefix = row["to"].removesuffix("/off 0")
         assert prefix not in routes, ("duplicate FRR rule", prefix)
         routes[prefix] = dict(row, ecomlist=parts[1]["ecomlist"])
@@ -92,6 +97,7 @@ def assert_frr(snapshot, expected):
     assert set(details) == {row["components"][0]["prefix"] for row in expected}, details
     for row in expected:
         prefix = row["components"][0]["prefix"]
+        assert set(details[prefix]) == FRR_COMPONENTS | {"ecomlist"}, details[prefix]
         matches = [path for path in routes.values() if path["to"].removesuffix("/off 0") == prefix]
         assert len(matches) == 1, (prefix, routes)
         for observed in (matches[0], details[prefix]):
