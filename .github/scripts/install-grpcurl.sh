@@ -3,7 +3,8 @@
 set -euo pipefail
 
 readonly GRPCURL_VERSION="1.9.1"
-readonly GRPCURL_SHA256="588c9c429476d9ed66cd3b2ae32283a6da36e0cfbb7e446f5d6a1b68dc770214"
+GRPCURL_SHA256="$("$(dirname -- "${BASH_SOURCE[0]}")/archive-pin.sh" "grpcurl_${GRPCURL_VERSION}_linux_x86_64.tar.gz")"
+readonly GRPCURL_SHA256
 readonly GRPCURL_ASSET="grpcurl_${GRPCURL_VERSION}_linux_x86_64.tar.gz"
 readonly GRPCURL_URL="https://github.com/fullstorydev/grpcurl/releases/download/v${GRPCURL_VERSION}/${GRPCURL_ASSET}"
 readonly GRPCURL_ATTEMPTS=3
@@ -133,8 +134,6 @@ self_test() (
     trap 'rm -rf -- "$fixture_dir"' EXIT
     [[ "$GRPCURL_VERSION" == "1.9.1" ]] \
         || fail_self_test "version pin drifted"
-    [[ "$GRPCURL_SHA256" == "588c9c429476d9ed66cd3b2ae32283a6da36e0cfbb7e446f5d6a1b68dc770214" ]] \
-        || fail_self_test "checksum pin drifted"
     [[ "$GRPCURL_ASSET" == "grpcurl_1.9.1_linux_x86_64.tar.gz" ]] \
         || fail_self_test "archive name drifted"
     [[ "$GRPCURL_URL" == "https://github.com/fullstorydev/grpcurl/releases/download/v1.9.1/grpcurl_1.9.1_linux_x86_64.tar.gz" ]] \

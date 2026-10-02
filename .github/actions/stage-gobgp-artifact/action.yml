@@ -11,19 +11,24 @@ inputs:
     description: "Exact GoBGP release version"
     required: false
     default: "3.37.0"
+outputs:
   sha256:
-    description: "Exact linux/amd64 release archive SHA-256"
-    required: false
-    default: "e20b2a155fe14450b9fe37e5c1a1d1bfe101eb479645f5bbea860a8fde30e522"
+    description: "Canonical archive SHA-256"
+    value: ${{ steps.pin.outputs.sha256 }}
 runs:
   using: "composite"
   steps:
+    - name: Resolve pinned archive checksum
+      id: pin
+      shell: bash
+      run: echo "sha256=$(.github/scripts/archive-pin.sh "gobgp_${{ inputs.version }}_linux_amd64.tar.gz")" >> "$GITHUB_OUTPUT"
+
     - name: Restore exact GoBGP archive cache
       id: cache
       uses: actions/cache/restore@v6
       with:
         path: ${{ runner.temp }}/gobgp-cache/gobgp_${{ inputs.version }}_linux_amd64.tar.gz
-        key: gobgp-v${{ inputs.version }}-linux-amd64-${{ inputs.sha256 }}
+        key: gobgp-v${{ inputs.version }}-linux-amd64-${{ steps.pin.outputs.sha256 }}
 
     - name: Verify cached GoBGP archive or fetch it upstream
       shell: bash
@@ -31,7 +36,7 @@ runs:
         set -euo pipefail
         .github/scripts/install-gobgp.sh \
           --version "${{ inputs.version }}" \
-          --sha256 "${{ inputs.sha256 }}" \
+          --sha256 "${{ steps.pin.outputs.sha256 }}" \
           --prepare-archive \
           "$RUNNER_TEMP/gobgp-cache/gobgp_${{ inputs.version }}_linux_amd64.tar.gz"
 
@@ -40,7 +45,7 @@ runs:
       uses: actions/cache/save@v6
       with:
         path: ${{ runner.temp }}/gobgp-cache/gobgp_${{ inputs.version }}_linux_amd64.tar.gz
-        key: gobgp-v${{ inputs.version }}-linux-amd64-${{ inputs.sha256 }}
+        key: gobgp-v${{ inputs.version }}-linux-amd64-${{ steps.pin.outputs.sha256 }}
 
     - name: Stage exact GoBGP archive offline
       shell: bash
@@ -48,7 +53,7 @@ runs:
         set -euo pipefail
         .github/scripts/install-gobgp.sh \
           --version "${{ inputs.version }}" \
-          --sha256 "${{ inputs.sha256 }}" \
+          --sha256 "${{ steps.pin.outputs.sha256 }}" \
           --stage-archive \
           "$RUNNER_TEMP/gobgp-cache/gobgp_${{ inputs.version }}_linux_amd64.tar.gz" \
           tests/interop/gobgp-archive

@@ -107,9 +107,9 @@ M1_CALL = (
 M83_BIRD_STAGE = (
     "      - name: Stage verified BIRD 2.19.2 archive\n"
     "        uses: ./.github/actions/stage-bird3-artifact\n"
+    "        id: bird_archive\n"
     "        with:\n"
-    '          version: "2.19.2"\n'
-    f"          sha256: {BIRD2192}\n\n"
+    '          version: "2.19.2"\n\n'
 )
 M74_STAGE = (
     "      - name: Stage verified GoBGP archive\n"
@@ -117,7 +117,9 @@ M74_STAGE = (
 )
 M74_BUILD = (
     "      - name: Build gobgp:interop\n"
-    "        run: docker build -t gobgp:interop -f tests/interop/Dockerfile.gobgp tests/interop\n\n"
+    "        run: >-\n"
+    '          docker build --build-arg GOBGP_AMD64_SHA256="$(.github/scripts/archive-pin.sh gobgp_3.37.0_linux_amd64.tar.gz)"\n'
+    "          -t gobgp:interop -f tests/interop/Dockerfile.gobgp tests/interop\n\n"
 )
 UNVERIFIED_STEP = (
     "      - name: Fetch a tool\n"
@@ -161,11 +163,6 @@ class PrimerContractTests(unittest.TestCase):
     # 1. Verified downloads.
 
     def test_archive_digest_copies_match_the_manifest(self):
-        with self.subTest("workflow copy drifts"):
-            self.assert_red(
-                f"{INTEROP}:1008: digest is not in {MANIFEST}",
-                (INTEROP, f"sha256: {BIRD2192}", f"sha256: {DRIFTED}"),
-            )
         with self.subTest("Dockerfile copy drifts"):
             self.assert_red(
                 f"tests/interop/Dockerfile.bird-v2192:4: digest is not in {MANIFEST}",
@@ -175,26 +172,56 @@ class PrimerContractTests(unittest.TestCase):
                     f"ARG BIRD_SHA256={DRIFTED}",
                 ),
             )
-        with self.subTest("manifest bumped: every stale copy is named"):
+        with self.subTest("manifest bumped: local Docker defaults still need a bump"):
             errors = self.mutated_errors((MANIFEST, BIRD332, DRIFTED))
-            self.assertIn(f"{MANIFEST}: bird-3.3.2.tar.gz has no copy in the CI surfaces", errors)
             stale = {error.split(":", 1)[0] for error in errors if "is not in" in error}
             self.assertEqual(
                 {
-                    INTEROP,
-                    KERNEL,
-                    ".github/actions/stage-bird3-artifact/action.yml",
-                    ".github/scripts/install-bird3.sh",
                     "tests/interop/Dockerfile.bird3",
                     "tests/interop/Dockerfile.bird-v332",
                 },
                 stale,
             )
-        with self.subTest("manifest entry with no copy"):
+        with self.subTest("duplicate archive entry"):
             self.assert_red(
-                f"{MANIFEST}: bird-9.9.9.tar.gz has no copy in the CI surfaces",
-                (MANIFEST, "\n", f"\n{DRIFTED}  bird-9.9.9.tar.gz\n"),
+                f"{MANIFEST}: malformed or duplicate entry",
+                (MANIFEST, "\n", f"\n{DRIFTED}  bird-3.3.2.tar.gz\n"),
             )
+
+    def test_archive_lookup_requires_one_valid_exact_match(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            scripts = Path(temporary) / ".github" / "scripts"
+            scripts.mkdir(parents=True)
+            helper = scripts / "archive-pin.sh"
+            shutil.copy2(ROOT / ".github/scripts/archive-pin.sh", helper)
+            manifest = scripts.parent / "pinned-archives.sha256"
+            archive = "bird-3.3.2.tar.gz"
+
+            def lookup():
+                return subprocess.run(
+                    ["bash", str(helper), archive], capture_output=True, text=True, check=False
+                )
+
+            manifest.write_text(f"{'a' * 64}  {archive}\n")
+            self.assertEqual(lookup().stdout.strip(), "a" * 64)
+            manifest.write_text(f"{'a' * 64}  other.tar.gz\n")
+            self.assertNotEqual(lookup().returncode, 0)
+            manifest.write_text(f"{'a' * 64}  {archive}\n{'b' * 64}  {archive}\n")
+            self.assertNotEqual(lookup().returncode, 0)
+            manifest.write_text(f"bad  {archive}\n")
+            self.assertNotEqual(lookup().returncode, 0)
+
+    def test_explicit_empty_checksum_override_is_rejected(self):
+        for installer in ("install-bird3.sh", "install-gobgp.sh"):
+            with self.subTest(installer=installer):
+                result = subprocess.run(
+                    [str(ROOT / ".github/scripts" / installer), "--sha256", "", "--self-test"],
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("invalid", result.stderr)
 
     def test_workflow_and_action_fetches_verify_their_archive(self):
         with self.subTest("workflow step fetches without a checksum"):
@@ -213,7 +240,7 @@ class PrimerContractTests(unittest.TestCase):
             )
         with self.subTest("containerlab action drops its checksum"):
             self.assert_red(
-                ".github/actions/install-containerlab/action.yml:34: fetches without verifying a SHA-256",
+                ".github/actions/install-containerlab/action.yml:35: fetches without verifying a SHA-256",
                 (
                     ".github/actions/install-containerlab/action.yml",
                     "sha256sum --check --status",

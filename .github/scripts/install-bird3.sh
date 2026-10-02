@@ -3,7 +3,6 @@
 set -euo pipefail
 
 BIRD3_VERSION="3.3.2"
-BIRD3_SHA256="21297d7a02edd700ae82de5a630055a9cb88a99e2e7e45551bc7d6c1e5b4de2c"
 BIRD3_COVERAGE_LABEL=""
 while [[ ${1:-} == --version || ${1:-} == --sha256 || ${1:-} == --coverage-label ]]; do
     option=$1
@@ -22,6 +21,9 @@ done
     echo "install-bird3: invalid BIRD version: ${BIRD3_VERSION}" >&2
     exit 2
 }
+if [[ ! -v BIRD3_SHA256 ]]; then
+    BIRD3_SHA256="$("$(dirname -- "${BASH_SOURCE[0]}")/archive-pin.sh" "bird-${BIRD3_VERSION}.tar.gz")"
+fi
 [[ $BIRD3_SHA256 =~ ^[0-9a-f]{64}$ ]] || {
     echo "install-bird3: invalid BIRD SHA-256" >&2
     exit 2
@@ -196,8 +198,6 @@ self_test() (
     fixture_dir=$(mktemp -d)
     trap 'rm -rf -- "$fixture_dir"' EXIT
     [[ "$BIRD3_VERSION" == "3.3.2" ]] || fail_self_test "version pin drifted"
-    [[ "$BIRD3_SHA256" == "21297d7a02edd700ae82de5a630055a9cb88a99e2e7e45551bc7d6c1e5b4de2c" ]] \
-        || fail_self_test "checksum pin drifted"
     [[ "$BIRD3_ASSET" == "bird-3.3.2.tar.gz" ]] \
         || fail_self_test "archive name drifted"
     printf -v expected_url '%s%s' \

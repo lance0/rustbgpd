@@ -4,9 +4,9 @@
 Each rule has a mutation test in test_check_ci_image_primer_contract.py that
 goes red when the rule is removed or weakened.
 
-1. Verified downloads. Every archive digest in the CI surfaces is declared in
-   the canonical .github/pinned-archives.sha256, and every entry there is in
-   use. A workflow or action step that fetches verifies a SHA-256 in the same
+1. Verified downloads. Every archive digest remaining in the CI surfaces is
+   declared in the canonical .github/pinned-archives.sha256. A workflow or
+   action step that fetches verifies a SHA-256 in the same
    step; an installer script verifies what it fetches; nothing pipes network
    bytes into tar or a shell. A lab Dockerfile fetches only when its staged
    archive is absent and verifies before it extracts, and a lab job stages the
@@ -287,20 +287,22 @@ def check(root: Path) -> list[str]:
 
     # 1. Verified downloads.
     manifest = {}
+    archives: set[str] = set()
     for line in (root / MANIFEST).read_text().splitlines():
-        if line.strip() and not line.startswith("#"):
-            digest, _, archive = line.partition("  ")
-            manifest[digest] = archive
-    used: set[str] = set()
+        if not line.strip() or line.startswith("#"):
+            continue
+        match = re.fullmatch(r"([0-9a-f]{64})  ([\w.-]+)", line)
+        if not match or match.group(1) in manifest or match.group(2) in archives:
+            errors.append(f"{MANIFEST}: malformed or duplicate entry: {line}")
+            continue
+        digest, archive = match.groups()
+        manifest[digest] = archive
+        archives.add(archive)
     for relative, text in {**texts, **scripts, **dockerfiles}.items():
         for match in DIGEST.finditer(text):
-            used.add(match.group(0))
             if match.group(0) not in manifest:
                 line = text.count("\n", 0, match.start()) + 1
                 errors.append(f"{relative}:{line}: digest is not in {MANIFEST}")
-    for digest, archive in manifest.items():
-        if digest not in used:
-            errors.append(f"{MANIFEST}: {archive} has no copy in the CI surfaces")
     for relative, text in texts.items():
         for line, body in _run_blocks(text):
             body = body.replace("\\\n", " ")

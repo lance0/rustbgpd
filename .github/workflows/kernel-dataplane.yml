@@ -75,12 +75,15 @@ jobs:
       - uses: actions/checkout@v7
         with:
           ref: ${{ github.sha }}
+      - name: Resolve pinned bird3 checksum
+        id: bird_pin
+        run: echo "sha256=$(.github/scripts/archive-pin.sh bird-3.3.2.tar.gz)" >> "$GITHUB_OUTPUT"
       - name: Restore exact bird3 archive cache
         id: cache
         uses: actions/cache/restore@v6
         with:
           path: ${{ runner.temp }}/bird-cache/bird-3.3.2.tar.gz
-          key: bird-v3.3.2-source-21297d7a02edd700ae82de5a630055a9cb88a99e2e7e45551bc7d6c1e5b4de2c
+          key: bird-v3.3.2-source-${{ steps.bird_pin.outputs.sha256 }}
       - name: Prepare exact bird3 archive
         id: prepare
         run: |
@@ -107,7 +110,7 @@ jobs:
         uses: actions/cache/save@v6
         with:
           path: ${{ runner.temp }}/bird-cache/bird-3.3.2.tar.gz
-          key: bird-v3.3.2-source-21297d7a02edd700ae82de5a630055a9cb88a99e2e7e45551bc7d6c1e5b4de2c
+          key: bird-v3.3.2-source-${{ steps.bird_pin.outputs.sha256 }}
 
   # Warm one fixed-scope cache per source SHA; jobs still build and load their
   # own image, falling back to an uncached build if the cache is unavailable.
@@ -573,6 +576,7 @@ jobs:
       - name: Stage verified BIRD 3 archive
         if: steps.tcp_ao.outputs.supported == 'true'
         uses: ./.github/actions/stage-bird3-artifact
+        id: bird_archive
 
       - name: Build BIRD 3.3.2 TCP-AO image
         if: steps.tcp_ao.outputs.supported == 'true'
@@ -580,6 +584,7 @@ jobs:
         with:
           context: tests/interop
           file: tests/interop/Dockerfile.bird3
+          build-args: BIRD_SHA256=${{ steps.bird_archive.outputs.sha256 }}
           load: true
           tags: bird:3.3.2-tcpao
           cache-from: type=gha,scope=bird3-tcpao
@@ -669,7 +674,9 @@ jobs:
       - name: Stage verified GoBGP archive
         uses: ./.github/actions/stage-gobgp-artifact
       - name: Build gobgp:interop image
-        run: docker build -t gobgp:interop -f tests/interop/Dockerfile.gobgp tests/interop
+        run: >-
+          docker build --build-arg GOBGP_AMD64_SHA256="$(.github/scripts/archive-pin.sh gobgp_3.37.0_linux_amd64.tar.gz)"
+          -t gobgp:interop -f tests/interop/Dockerfile.gobgp tests/interop
       - name: Run M65 (deploy + test + destroy with retry)
         uses: ./.github/actions/run-interop-test
         with:
@@ -694,7 +701,9 @@ jobs:
       - name: Stage verified GoBGP archive
         uses: ./.github/actions/stage-gobgp-artifact
       - name: Build gobgp:interop image
-        run: docker build -t gobgp:interop -f tests/interop/Dockerfile.gobgp tests/interop
+        run: >-
+          docker build --build-arg GOBGP_AMD64_SHA256="$(.github/scripts/archive-pin.sh gobgp_3.37.0_linux_amd64.tar.gz)"
+          -t gobgp:interop -f tests/interop/Dockerfile.gobgp tests/interop
       - name: Run M71 (deploy + test + destroy with retry)
         if: steps.dataplane.outputs.vrf-available == 'true'
         uses: ./.github/actions/run-interop-test
@@ -719,7 +728,9 @@ jobs:
       - name: Stage verified GoBGP archive
         uses: ./.github/actions/stage-gobgp-artifact
       - name: Build gobgp:interop image
-        run: docker build -t gobgp:interop -f tests/interop/Dockerfile.gobgp tests/interop
+        run: >-
+          docker build --build-arg GOBGP_AMD64_SHA256="$(.github/scripts/archive-pin.sh gobgp_3.37.0_linux_amd64.tar.gz)"
+          -t gobgp:interop -f tests/interop/Dockerfile.gobgp tests/interop
       - name: Run M72 (deploy + test + destroy with retry)
         if: steps.dataplane.outputs.vrf-available == 'true'
         uses: ./.github/actions/run-interop-test

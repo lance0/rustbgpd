@@ -1,6 +1,7 @@
 FROM debian:trixie-slim
 
 ARG BIRD_VERSION=3.3.2
+ARG BIRD_SHA256=21297d7a02edd700ae82de5a630055a9cb88a99e2e7e45551bc7d6c1e5b4de2c
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     bison \
@@ -27,7 +28,7 @@ COPY bird3-archive/ /tmp/bird3-archive/
 WORKDIR /tmp/bird
 
 RUN set -eux; \
-    checksum="21297d7a02edd700ae82de5a630055a9cb88a99e2e7e45551bc7d6c1e5b4de2c"; \
+    checksum="${BIRD_SHA256}"; \
     archive="bird-${BIRD_VERSION}.tar.gz"; \
     target="/tmp/bird3-archive/${archive}"; \
     if [ ! -f "${target}" ]; then \

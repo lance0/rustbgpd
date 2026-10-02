@@ -10,13 +10,14 @@ inputs:
     description: "containerlab release version (without leading v)."
     required: false
     default: "0.74.3"
-  sha256:
-    description: "SHA-256 of containerlab_<version>_linux_amd64.deb."
-    required: false
-    default: "e9f7fec82daae07b13dc61c25a877a2d81574809fefd6b11cd4ec0b0f4a36474"
 runs:
   using: "composite"
   steps:
+    - name: Resolve pinned containerlab checksum
+      id: pin
+      shell: bash
+      run: echo "sha256=$(.github/scripts/archive-pin.sh containerlab_${{ inputs.version }}_linux_amd64.deb)" >> "$GITHUB_OUTPUT"
+
     # The key includes the version and digest, so a bump of either input
     # misses the cache and re-downloads.
     - name: Restore exact containerlab .deb cache
@@ -24,13 +25,13 @@ runs:
       uses: actions/cache/restore@v6
       with:
         path: ${{ runner.temp }}/containerlab-cache/containerlab_${{ inputs.version }}_linux_amd64.deb
-        key: containerlab-deb-v${{ inputs.version }}-linux-amd64-${{ inputs.sha256 }}
+        key: containerlab-deb-v${{ inputs.version }}-linux-amd64-${{ steps.pin.outputs.sha256 }}
 
     - name: Verify cached containerlab .deb or fetch it upstream
       shell: bash
       env:
         CLAB_VERSION: ${{ inputs.version }}
-        CLAB_SHA256: ${{ inputs.sha256 }}
+        CLAB_SHA256: ${{ steps.pin.outputs.sha256 }}
       run: |
         set -euo pipefail
         url="https://github.com/srl-labs/containerlab/releases/download/v${CLAB_VERSION}/containerlab_${CLAB_VERSION}_linux_amd64.deb"
@@ -66,7 +67,7 @@ runs:
       uses: actions/cache/save@v6
       with:
         path: ${{ runner.temp }}/containerlab-cache/containerlab_${{ inputs.version }}_linux_amd64.deb
-        key: containerlab-deb-v${{ inputs.version }}-linux-amd64-${{ inputs.sha256 }}
+        key: containerlab-deb-v${{ inputs.version }}-linux-amd64-${{ steps.pin.outputs.sha256 }}
 
     - name: Install containerlab ${{ inputs.version }}
       shell: bash
