@@ -263,9 +263,23 @@ impl RibManager {
                 // flag/LLGR-community hygiene for the retained routes.
                 // Each helper is a family-scoped no-op for non-matching
                 // tuples.
+                #[cfg(feature = "bench-internals")]
+                let stale_sweep_started = Instant::now();
                 unicast_changed = rib.sweep_stale_family((afi, safi));
                 unicast_changed.extend(rib.sweep_llgr_stale_family((afi, safi)));
+                #[cfg(feature = "bench-internals")]
+                {
+                    self.adj_rib_out_commit_stats.eor_stale_sweep_ns =
+                        u64::try_from(stale_sweep_started.elapsed().as_nanos()).unwrap_or(u64::MAX);
+                }
+                #[cfg(feature = "bench-internals")]
+                let clear_stale_started = Instant::now();
                 unicast_changed.extend(rib.clear_stale((afi, safi)));
+                #[cfg(feature = "bench-internals")]
+                {
+                    self.adj_rib_out_commit_stats.eor_clear_stale_ns =
+                        u64::try_from(clear_stale_started.elapsed().as_nanos()).unwrap_or(u64::MAX);
+                }
                 rib.sweep_stale_flowspec_family((afi, safi));
                 rib.sweep_llgr_stale_flowspec_family((afi, safi));
                 rib.clear_stale_flowspec((afi, safi));

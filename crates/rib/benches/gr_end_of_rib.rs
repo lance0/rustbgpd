@@ -250,8 +250,8 @@ fn run(mode: Mode, ipv4: usize, ipv6_full: usize, attribute_sets: usize) {
         let receipt = manager.bench_end_of_rib(SOURCE, afi, safi);
         let envelopes = drain(&mut receivers);
         eors.push(format!(
-            "{{\"family\":\"{afi:?}/{safi:?}\",\"total_ns\":{},\"recompute_ns\":{},\"distribute_ns\":{},\"affected\":{},\"changed\":{},\"retained_stale\":{},\"gr_complete\":{},\"attr_gc_ns\":{},\"stale_count_ns\":{},\"envelopes\":{envelopes}}}",
-            receipt[0], receipt[1], receipt[2], receipt[3], receipt[4], receipt[5], receipt[6], receipt[7], receipt[8]
+            "{{\"family\":\"{afi:?}/{safi:?}\",\"total_ns\":{},\"recompute_ns\":{},\"distribute_ns\":{},\"affected\":{},\"changed\":{},\"retained_stale\":{},\"gr_complete\":{},\"attr_gc_ns\":{},\"stale_count_ns\":{},\"clear_stale_ns\":{},\"stale_sweep_ns\":{},\"envelopes\":{envelopes}}}",
+            receipt[0], receipt[1], receipt[2], receipt[3], receipt[4], receipt[5], receipt[6], receipt[7], receipt[8], receipt[9], receipt[10]
         ));
         assert_eq!(
             (receipt[3], receipt[4], receipt[5], envelopes),
