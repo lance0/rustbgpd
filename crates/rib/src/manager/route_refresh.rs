@@ -259,26 +259,18 @@ impl RibManager {
                 // DURING the LLGR phase moved back to `gr_peers`
                 // (`handle_peer_up`) while its unrefreshed routes kept
                 // their LLGR-stale flag — they were equally not
-                // re-advertised (RFC 9494 §4.2). The trailing clear is
-                // flag/LLGR-community hygiene for the retained routes.
+                // re-advertised (RFC 9494 §4.2). Unicast removal and
+                // retained local LLGR-community cleanup share one scan.
                 // Each helper is a family-scoped no-op for non-matching
                 // tuples.
                 #[cfg(feature = "bench-internals")]
-                let stale_sweep_started = Instant::now();
-                unicast_changed = rib.sweep_stale_family((afi, safi));
-                unicast_changed.extend(rib.sweep_llgr_stale_family((afi, safi)));
+                let stale_resolution_started = Instant::now();
+                unicast_changed = rib.finish_gr_family((afi, safi));
                 #[cfg(feature = "bench-internals")]
                 {
-                    self.adj_rib_out_commit_stats.eor_stale_sweep_ns =
-                        u64::try_from(stale_sweep_started.elapsed().as_nanos()).unwrap_or(u64::MAX);
-                }
-                #[cfg(feature = "bench-internals")]
-                let clear_stale_started = Instant::now();
-                unicast_changed.extend(rib.clear_stale((afi, safi)));
-                #[cfg(feature = "bench-internals")]
-                {
-                    self.adj_rib_out_commit_stats.eor_clear_stale_ns =
-                        u64::try_from(clear_stale_started.elapsed().as_nanos()).unwrap_or(u64::MAX);
+                    self.adj_rib_out_commit_stats.eor_stale_resolution_ns =
+                        u64::try_from(stale_resolution_started.elapsed().as_nanos())
+                            .unwrap_or(u64::MAX);
                 }
                 rib.sweep_stale_flowspec_family((afi, safi));
                 rib.sweep_llgr_stale_flowspec_family((afi, safi));

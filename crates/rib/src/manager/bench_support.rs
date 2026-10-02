@@ -1100,22 +1100,20 @@ impl RibManager {
     /// Deliver one End-of-RIB through the production `EndOfRib` dispatch and
     /// return `[total_ns, unicast_recompute_ns, unicast_distribute_ns,
     /// unicast_affected, unicast_changed, retained_stale_routes,
-    /// gr_complete, attr_gc_ns, stale_count_ns, clear_stale_ns,
-    /// stale_sweep_ns]`.
+    /// gr_complete, attr_gc_ns, stale_count_ns, stale_resolution_ns]`.
     ///
     /// # Panics
     ///
     /// Panics only if a duration or count exceeds `u64`.
     #[must_use]
-    pub fn bench_end_of_rib(&mut self, peer: IpAddr, afi: Afi, safi: Safi) -> [u64; 11] {
+    pub fn bench_end_of_rib(&mut self, peer: IpAddr, afi: Afi, safi: Safi) -> [u64; 10] {
         self.adj_rib_out_commit_stats.eor_unicast_affected = 0;
         self.adj_rib_out_commit_stats.eor_unicast_changed = 0;
         self.adj_rib_out_commit_stats.eor_unicast_recompute_ns = 0;
         self.adj_rib_out_commit_stats.eor_unicast_distribute_ns = 0;
         self.adj_rib_out_commit_stats.eor_attr_gc_ns = 0;
         self.adj_rib_out_commit_stats.eor_stale_count_ns = 0;
-        self.adj_rib_out_commit_stats.eor_clear_stale_ns = 0;
-        self.adj_rib_out_commit_stats.eor_stale_sweep_ns = 0;
+        self.adj_rib_out_commit_stats.eor_stale_resolution_ns = 0;
         let started = std::time::Instant::now();
         self.handle_update(RibUpdate::EndOfRib {
             peer,
@@ -1139,8 +1137,7 @@ impl RibManager {
             u64::from(!self.gr_peers.contains_key(&peer)),
             stats.eor_attr_gc_ns,
             stats.eor_stale_count_ns,
-            stats.eor_clear_stale_ns,
-            stats.eor_stale_sweep_ns,
+            stats.eor_stale_resolution_ns,
         ]
     }
 

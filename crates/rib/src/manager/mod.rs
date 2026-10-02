@@ -233,9 +233,7 @@ struct AdjRibOutCommitStats {
     #[cfg(feature = "bench-internals")]
     eor_stale_count_ns: u64,
     #[cfg(feature = "bench-internals")]
-    eor_clear_stale_ns: u64,
-    #[cfg(feature = "bench-internals")]
-    eor_stale_sweep_ns: u64,
+    eor_stale_resolution_ns: u64,
     #[cfg(test)]
     metrics_handle_clones: usize,
     #[cfg(test)]

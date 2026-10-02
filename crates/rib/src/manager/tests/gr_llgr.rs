@@ -2761,6 +2761,169 @@ async fn partial_gr_stale_gauge_counts_both_phases_through_reconnect() {
     }
 }
 
+/// A second restart can leave GR and LLGR paths under the same prefix.
+/// End-of-RIB must remove both kinds by path ID while retaining the refreshed
+/// path, resolving only its family, and distributing the lost prefixes.
+#[tokio::test(start_paused = true)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one lifecycle fixture pins mixed stale path identities and downstream cleanup"
+)]
+async fn gr_eor_after_llgr_reconnect_resolves_mixed_paths() {
+    let (_tx, mut manager) = direct_manager(None);
+    let source_addr = Ipv4Addr::new(10, 0, 0, 1);
+    let source = IpAddr::V4(source_addr);
+    let other_addr = Ipv4Addr::new(10, 0, 0, 2);
+    let other = IpAddr::V4(other_addr);
+    let receiver = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 3));
+    let dual = [V4_UNICAST, V6_UNICAST];
+    let mut out_rx = reconnect_with_capabilities(&mut manager, receiver, &dual, &dual);
+    let source_rx = establish_peer(&mut manager, source);
+    let shared = retention_v4_prefix();
+    let lost = Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 0), 24));
+    let fallback = Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24));
+    let announce = |manager: &mut RibManager, peer, announced| {
+        manager.handle_update(RibUpdate::RoutesReceived {
+            session_id: 0,
+            peer,
+            announced,
+            withdrawn: vec![],
+            flowspec_announced: vec![],
+            flowspec_withdrawn: vec![],
+            evpn_announced: vec![],
+            evpn_withdrawn: vec![],
+            validated_with: None,
+        });
+        drain_route_chunks(manager);
+    };
+    let route = |prefix, path_id| {
+        let mut route = eor_oracle_route(prefix, source_addr, vec![65_010], Some(path_id));
+        route.path_id = path_id;
+        // This community came from upstream and must survive EoR.
+        if path_id == 23 {
+            AttrSet::edit(&mut route.attributes, |attrs| {
+                attrs.push(PathAttribute::Communities(vec![
+                    rustbgpd_wire::COMMUNITY_LLGR_STALE,
+                ]));
+            });
+        }
+        route
+    };
+    announce(
+        &mut manager,
+        source,
+        vec![
+            route(shared, 0),
+            route(shared, 7),
+            route(shared, 23),
+            route(lost, 101),
+            route(fallback, 103),
+            route(retention_v6_prefix(), 107),
+        ],
+    );
+    announce(
+        &mut manager,
+        other,
+        vec![eor_oracle_route(
+            fallback,
+            other_addr,
+            vec![65_020, 65_021],
+            None,
+        )],
+    );
+    manager.handle_update(gr_with_llgr(source, 10, dual.to_vec(), dual.to_vec(), 60));
+    manager.sweep_gr_stale(source);
+    assert!(manager.llgr_peers.contains_key(&source));
+    let first_rx = reconnect_with_capabilities(&mut manager, source, &dual, &dual);
+    announce(
+        &mut manager,
+        source,
+        vec![route(shared, 0), route(shared, 23)],
+    );
+
+    // Restart again before EoR: path 0 becomes GR-stale, path 7 is still
+    // LLGR-stale. Only path 23 is refreshed on the next session.
+    manager.handle_update(gr_with_llgr(source, 10, dual.to_vec(), dual.to_vec(), 60));
+    let _second_rx = reconnect_with_capabilities(&mut manager, source, &dual, &dual);
+    announce(&mut manager, source, vec![route(shared, 23)]);
+    assert!(manager.ribs[&source].get(&shared, 0).unwrap().is_stale);
+    assert!(manager.ribs[&source].get(&shared, 7).unwrap().is_llgr_stale);
+    assert_eq!(
+        manager.ribs[&source]
+            .iter()
+            .filter(|route| route.is_stale || route.is_llgr_stale)
+            .count(),
+        5,
+    );
+    let old_lost_attrs = Arc::downgrade(&manager.ribs[&source].get(&lost, 101).unwrap().attributes);
+    while out_rx.try_recv().is_ok() {}
+    // Close inactive session receivers so their queued route clones do not
+    // artificially keep attributes alive after the EoR garbage collection.
+    drop((source_rx, first_rx));
+    manager.handle_update(RibUpdate::EndOfRib {
+        peer: source,
+        session_id: 0,
+        afi: Afi::Ipv4,
+        safi: Safi::Unicast,
+    });
+    assert!(manager.ribs[&source].get(&shared, 0).is_none());
+    assert!(manager.ribs[&source].get(&shared, 7).is_none());
+    let retained = manager.ribs[&source].get(&shared, 23).unwrap();
+    assert!(!retained.is_stale && !retained.is_llgr_stale);
+    assert!(
+        retained
+            .communities()
+            .contains(&rustbgpd_wire::COMMUNITY_LLGR_STALE)
+    );
+    assert_eq!(manager.loc_rib.get(&shared).unwrap().path_id, 23);
+    assert!(manager.loc_rib.get(&lost).is_none());
+    assert_eq!(manager.loc_rib.get(&fallback).unwrap().peer, other);
+    assert_llgr_stale(
+        adj_route(&manager, source, retention_v6_prefix()),
+        "other family",
+    );
+    assert_eq!(gr_gauges(&manager, source), (1.0, 1.0));
+    assert!(
+        !manager
+            .llgr_stale_deadlines
+            .contains_key(&(source, Afi::Ipv4, Safi::Unicast))
+    );
+    assert!(
+        manager
+            .llgr_stale_deadlines
+            .contains_key(&(source, Afi::Ipv6, Safi::Unicast))
+    );
+    let updates: Vec<_> = std::iter::from_fn(|| out_rx.try_recv().ok()).collect();
+    assert!(
+        updates
+            .iter()
+            .any(|update| update.withdraw.contains(&(lost, 0))),
+        "the downstream peer must withdraw the unrefreshed prefix"
+    );
+    drop(updates);
+    assert!(
+        old_lost_attrs.upgrade().is_none(),
+        "EoR GC must follow removal from Adj-RIB-In, Loc-RIB and Adj-RIB-Out"
+    );
+
+    manager.handle_update(RibUpdate::EndOfRib {
+        peer: source,
+        session_id: 0,
+        afi: Afi::Ipv6,
+        safi: Safi::Unicast,
+    });
+    assert_eq!(gr_gauges(&manager, source), (0.0, 0.0));
+    assert!(!manager.gr_peers.contains_key(&source));
+    assert!(!manager.llgr_peers.contains_key(&source));
+    assert!(
+        !manager
+            .llgr_stale_deadlines
+            .keys()
+            .any(|&(peer, _, _)| peer == source)
+    );
+    assert!(manager.loc_rib.get(&retention_v6_prefix()).is_none());
+}
+
 /// Partial GR: the LLGR-only family's Long-Lived Stale Time can expire while
 /// the GR family is still in its GR phase; the gauge keeps counting the
 /// GR-stale routes.
