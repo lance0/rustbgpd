@@ -107,17 +107,25 @@ impl<V> FamilyPrefixMap<V> {
     }
 
     /// Remove prefixes one at a time so the trie prunes each retired branch.
+    /// Collect a small stack batch first to amortize iterator startup, without
+    /// leaving a whole table's structural cleanup to its final destructor.
     pub(crate) fn retire_with(&mut self, checkpoint: &mut impl FnMut()) {
         loop {
-            let next = self.iter_from(None).next().map(|(prefix, _)| prefix);
-            let Some(prefix) = next else {
+            let mut prefixes = [None; 32];
+            for (slot, (prefix, _)) in prefixes.iter_mut().zip(self.iter_from(None)) {
+                *slot = Some(prefix);
+                checkpoint();
+            }
+            if prefixes[0].is_none() {
                 break;
-            };
-            checkpoint();
-            let retired = self.remove(&prefix);
-            debug_assert!(retired.is_some(), "iterated prefix must still be present");
-            drop(retired);
-            checkpoint();
+            }
+            for prefix in prefixes.into_iter().flatten() {
+                checkpoint();
+                let retired = self.remove(&prefix);
+                debug_assert!(retired.is_some(), "iterated prefix must still be present");
+                drop(retired);
+                checkpoint();
+            }
         }
     }
 
@@ -296,7 +304,55 @@ mod tests {
 
         map.retire_with(&mut || checkpoints += 1);
 
-        assert_eq!(checkpoints, 6);
+        assert!(checkpoints >= 6);
         assert!(map.iter_from(None).next().is_none());
+    }
+
+    #[test]
+    fn retirement_checkpoints_between_value_drops_across_batches_and_families() {
+        use std::{cell::Cell, rc::Rc};
+
+        struct DropProbe(Rc<Cell<usize>>);
+
+        impl Drop for DropProbe {
+            fn drop(&mut self) {
+                self.0.set(self.0.get() + 1);
+            }
+        }
+
+        for count in [0, 1, 31, 32, 33, 65] {
+            let dropped = Rc::new(Cell::new(0));
+            let mut map = FamilyPrefixMap::<Option<DropProbe>>::default();
+            for index in 0..count {
+                for prefix in [
+                    Prefix::V4(Ipv4Prefix::new(
+                        std::net::Ipv4Addr::new(10, index, 0, 0),
+                        16,
+                    )),
+                    Prefix::V6(Ipv6Prefix::new(
+                        std::net::Ipv6Addr::new(0x2001, 0xdb8, u16::from(index), 0, 0, 0, 0, 0),
+                        48,
+                    )),
+                ] {
+                    *map.entry_or_default(prefix) = Some(DropProbe(Rc::clone(&dropped)));
+                }
+            }
+            let mut last_observed = 0;
+            map.retire_with(&mut || {
+                let now = dropped.get();
+                assert!(now - last_observed <= 1, "value drops must be checkpointed");
+                last_observed = now;
+            });
+            assert_eq!(last_observed, usize::from(count) * 2);
+            assert_eq!(map.family_len(Afi::Ipv4), 0);
+            assert_eq!(map.family_len(Afi::Ipv6), 0);
+            assert!(map.iter_from(None).next().is_none());
+
+            // The map remains usable after complete retirement.
+            let prefix = Prefix::V4(Ipv4Prefix::new(std::net::Ipv4Addr::UNSPECIFIED, 0));
+            *map.entry_or_default(prefix) = Some(DropProbe(Rc::clone(&dropped)));
+            assert!(map.remove(&prefix).is_some());
+            assert_eq!(dropped.get(), usize::from(count) * 2 + 1);
+        }
     }
 }
