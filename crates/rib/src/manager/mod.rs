@@ -228,6 +228,10 @@ struct AdjRibOutCommitStats {
     eor_unicast_changed: usize,
     eor_unicast_recompute_ns: u64,
     eor_unicast_distribute_ns: u64,
+    #[cfg(feature = "bench-internals")]
+    eor_attr_gc_ns: u64,
+    #[cfg(feature = "bench-internals")]
+    eor_stale_count_ns: u64,
     #[cfg(test)]
     metrics_handle_clones: usize,
     #[cfg(test)]

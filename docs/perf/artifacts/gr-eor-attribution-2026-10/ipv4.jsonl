@@ -1,0 +1,1 @@
+{"mode":"ipv4","ipv4_routes":1000000,"ipv6_routes":0,"interned_sets":1,"intern_capacity":3,"end_of_rib":[{"family":"Ipv4/Unicast","total_ns":9856662,"recompute_ns":1012,"distribute_ns":1241,"affected":0,"changed":0,"retained_stale":0,"gr_complete":1,"attr_gc_ns":691,"stale_count_ns":2381889,"envelopes":0}]}
