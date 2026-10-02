@@ -251,7 +251,7 @@ class ManagementPlaneLoadContracts(unittest.TestCase):
                 peer_count=1,
                 route_prefix="20.0.0.0/24",
                 doctor_bundle=str(Path(tmp) / "doctor-bundle.tar.gz"),
-                metrics_interval_seconds=60,
+                metrics_interval_seconds=1,
                 cli_interval_seconds=60,
                 doctor_interval_seconds=60,
                 timeout_seconds=0.05,
@@ -305,6 +305,127 @@ class ManagementPlaneLoadContracts(unittest.TestCase):
         self.assertEqual(result.result, "timeout")
         self.assertIsNone(result.exit_code)
         self.assertLess(time.monotonic() - started, 1.0)
+
+    def test_cli_timeout_kills_the_child_and_keeps_stderr(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            marker = Path(tmp) / "survived"
+            result = load.run_cli_command(
+                [sys.executable, "-c",
+                 "import sys, time; sys.stderr.write('connecting'); sys.stderr.flush();"
+                 f" time.sleep(0.6); open({str(marker)!r}, 'w').close()"],
+                "neighbor", 0.2, 1, "20.0.0.0/24",
+            )
+            self.assertEqual(result.result, "timeout")
+            self.assertIsNone(result.exit_code)
+            self.assertEqual(result.stderr_excerpt, "connecting")
+            spawned, exited = result.child_monotonic
+            self.assertGreaterEqual(exited - spawned, 0.2)
+            self.assertLess(exited - spawned, 0.6)
+            time.sleep(0.8)
+            self.assertFalse(marker.exists(), "timed-out child kept running")
+
+    def _engine(self, tmp, rbgp, *, metrics_interval, cli_interval):
+        return load.ManagementPlaneLoad(
+            output=str(Path(tmp) / "load.jsonl"),
+            metrics_url="http://127.0.0.1:1/metrics",
+            rbgp=rbgp,
+            uds="unix:///tmp/grpc.sock",
+            peer_count=1,
+            route_prefix="20.0.0.0/24",
+            doctor_bundle=str(Path(tmp) / "doctor-bundle.tar.gz"),
+            metrics_interval_seconds=metrics_interval,
+            cli_interval_seconds=cli_interval,
+            doctor_interval_seconds=60,
+            timeout_seconds=5,
+        )
+
+    def test_cli_duration_is_the_child_wall_time_not_a_poll_point(self):
+        # A timed waitpid poll (subprocess.run(timeout=)) sleeps in steps
+        # doubling to 50 ms, so this ~20 ms child used to be recorded at the
+        # ~31 ms poll point. The recorded duration must be spawn to exit.
+        with tempfile.TemporaryDirectory() as tmp:
+            rbgp = Path(tmp) / "rbgp"
+            rbgp.write_text("#!/bin/sh\nsleep 0.02\nprintf '[{}]'\n")
+            rbgp.chmod(0o755)
+            engine = self._engine(tmp, str(rbgp), metrics_interval=0.2, cli_interval=0.1)
+            real_probe = engine._probe
+            reads = []
+
+            def probe(operation):
+                if operation != "neighbor":
+                    return load.ProbeResult(0, "ok", 2, "a" * 64)
+                result = real_probe(operation)
+                reads.append(result)
+                if len(reads) == 7:
+                    engine.request_stop()
+                return result
+
+            engine._probe = probe
+            self.assertEqual(engine.run(), 0)
+            records = [
+                json.loads(line)
+                for line in (Path(tmp) / "load.jsonl").read_bytes().splitlines()
+            ]
+        neighbor = [r for r in records if r.get("operation") == "neighbor"]
+        self.assertEqual(len(neighbor), 7)
+        self.assertTrue(all(r["result"] == "ok" for r in neighbor))
+        for record in neighbor:
+            self.assertAlmostEqual(
+                record["duration_ms"],
+                (record["completed_monotonic"] - record["started_monotonic"]) * 1000,
+                delta=0.01,
+            )
+        median = sorted(r["duration_ms"] for r in neighbor)[len(neighbor) // 2]
+        self.assertGreaterEqual(median, 19.0)
+        self.assertLess(median, 30.0)
+
+    def test_cli_schedules_are_offset_from_the_metrics_tick(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            engine = self._engine(tmp, "/missing/rbgp", metrics_interval=0.2, cli_interval=1)
+            seen = set()
+            seen_lock = threading.Lock()
+
+            def probe(operation):
+                with seen_lock:
+                    seen.add(operation)
+                    if seen == set(load.OPERATIONS):
+                        engine.request_stop()
+                return load.ProbeResult(0, "ok", 2, "a" * 64)
+
+            engine._probe = probe
+            self.assertEqual(engine.run(), 0)
+            records = [
+                json.loads(line)
+                for line in (Path(tmp) / "load.jsonl").read_bytes().splitlines()
+            ]
+        start = records[0]
+        self.assertEqual(start["phase_offset_seconds"], engine.phase_offsets)
+        first = {}
+        for record in records:
+            if record["record"] == "operation":
+                first.setdefault(record["operation"], record["scheduled_monotonic"])
+        self.assertEqual(set(first), set(load.OPERATIONS))
+        for operation, scheduled in first.items():
+            self.assertAlmostEqual(
+                scheduled - start["started_monotonic"],
+                engine.phase_offsets[operation],
+                delta=1e-5,
+            )
+        self.assertEqual(engine.phase_offsets["metrics"], 0)
+        cli = [engine.phase_offsets[op] for op in load.OPERATIONS if op != "metrics"]
+        self.assertEqual(len(set(cli)), len(cli), "CLI reads share a phase")
+        for offset in cli:
+            # Off the metrics grid by at least a quarter interval either side.
+            phase = (offset / 0.2) % 1.0
+            self.assertTrue(0.25 <= phase <= 0.8, offset)
+
+    def test_phase_offsets_stay_inside_short_intervals(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            engine = self._engine(tmp, "/missing/rbgp", metrics_interval=1, cli_interval=0.5)
+            for operation, offset in engine.phase_offsets.items():
+                self.assertGreaterEqual(offset, 0)
+                self.assertLess(offset, engine.intervals[operation], operation)
+            engine.sink.close()
 
     def test_doctor_green_report_is_ok(self):
         report = json.dumps({
@@ -425,7 +546,7 @@ class ManagementPlaneLoadContracts(unittest.TestCase):
                 peer_count=1,
                 route_prefix="20.0.0.0/24",
                 doctor_bundle=str(Path(tmp) / "doctor-bundle.tar.gz"),
-                metrics_interval_seconds=60,
+                metrics_interval_seconds=1,
                 cli_interval_seconds=60,
                 doctor_interval_seconds=60,
                 timeout_seconds=5,
@@ -535,7 +656,7 @@ class ManagementPlaneLoadContracts(unittest.TestCase):
                 peer_count=1,
                 route_prefix="20.0.0.0/24",
                 doctor_bundle=str(Path(tmp) / "doctor-bundle.tar.gz"),
-                metrics_interval_seconds=60,
+                metrics_interval_seconds=1,
                 cli_interval_seconds=60,
                 doctor_interval_seconds=60,
                 timeout_seconds=0.05,
@@ -650,7 +771,7 @@ class ManagementPlaneLoadContracts(unittest.TestCase):
                 peer_count=1,
                 route_prefix="20.0.0.0/24",
                 doctor_bundle=str(Path(tmp) / "doctor-bundle.tar.gz"),
-                metrics_interval_seconds=60,
+                metrics_interval_seconds=1,
                 cli_interval_seconds=60,
                 doctor_interval_seconds=60,
                 timeout_seconds=0.01,

@@ -292,6 +292,18 @@ excerpt and these fields are diagnostic only: every non-ok result already fails
 `management_failures`, and the analyzer reports them with it. Evidence recorded before the fields existed
 remains valid.
 
+The `/metrics` schedule starts with the load; the four `rbgp` schedules start
+0.35, 0.5, 0.65 and 0.8 metrics intervals later (wrapped into their own
+interval), recorded in the start record's `phase_offset_seconds`, so a CLI
+read does not systematically land on a `/metrics` render. A CLI record's start, completion and duration are the child
+process's spawn and exit, stamped by a blocking wait with a kill watchdog for
+the timeout. Evidence recorded before this change started every schedule at
+load start and timed CLI reads with a polled wait, so its CLI `duration_ms`
+values are rounded up to waitpid poll points (about 15, 31, 63, 113, 163 and
+213 ms) and most of its CLI reads overlapped a `/metrics` render. CLI read
+medians quoted in receipts from that evidence overstate the read itself and
+are not comparable with later evidence.
+
 RSS bounds rationale: the ceiling is calibrated from the
 `bench/scale/route-server-1000` retained receipt, whose one-shot
 4-reload run at this exact shape enforces a 2 GiB process-tree ceiling.

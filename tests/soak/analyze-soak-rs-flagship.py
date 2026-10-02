@@ -309,6 +309,8 @@ def analyze_management_load(
             "run metadata management route prefix mismatches stub 1 first route"
         )
     started_at = None
+    # Older drivers start every worker at load start and record no phases.
+    phase_offsets = {operation: 0.0 for operation in MANAGEMENT_OPERATIONS}
     summary_end = None
     summary_end_unix = None
     stop_requested = None
@@ -328,6 +330,23 @@ def analyze_management_load(
             or start.get("route_prefix") != expected_prefix
         ):
             schema_errors.append("start record does not match run metadata")
+        recorded_phases = start.get("phase_offset_seconds", phase_offsets)
+        if not isinstance(recorded_phases, dict) or set(recorded_phases) != set(
+            MANAGEMENT_OPERATIONS
+        ):
+            schema_errors.append("start record has invalid phase offsets")
+        else:
+            for operation in MANAGEMENT_OPERATIONS:
+                offset = finite_number(recorded_phases[operation])
+                interval = finite_number(expected_intervals[operation])
+                if offset is None or offset < 0 or (
+                    interval is not None and offset >= interval
+                ):
+                    schema_errors.append(
+                        f"start record has invalid {operation} phase offset"
+                    )
+                else:
+                    phase_offsets[operation] = offset
 
     if len(summaries) == 1:
         summary = summaries[0]
@@ -416,9 +435,9 @@ def analyze_management_load(
                 for record in operations[operation]
             ]
             if schedules and schedules[0] is not None:
-                if abs(schedules[0] - started_at) > 0.002:
+                if abs(schedules[0] - started_at - phase_offsets[operation]) > 0.002:
                     cadence_defects.append(
-                        f"{operation}: first schedule does not start with load"
+                        f"{operation}: first schedule does not match its recorded phase offset"
                     )
                 # The driver advances `due` by exactly `interval`, so a gap of
                 # k intervals means k - 1 skipped slots; anything off that
@@ -468,7 +487,7 @@ def analyze_management_load(
                     f"{operation}: more than {RELOAD_WINDOW_MISS_LIMIT} missed "
                     f"slots in reload window(s) {sorted(over)}"
                 )
-            active_lifetime = stop_requested - started_at
+            active_lifetime = stop_requested - started_at - phase_offsets[operation]
             expected_floor = max(
                 1,
                 math.floor(max(0.0, active_lifetime - 0.1) / interval) + 1,

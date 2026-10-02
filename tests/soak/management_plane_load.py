@@ -55,6 +55,16 @@ DOCTOR_OUTPUT_BYTES = 4 * 1024 * 1024
 # holds the full list and every check's detail.
 DOCTOR_FAILED_CHECKS_MAX = 4
 DOCTOR_CHECK_NAME_CHARS = 64
+# First schedule of each worker, as a fraction of the metrics interval after
+# load start. The CLI reads sit between `/metrics` ticks, apart from each
+# other, so they do not systematically land on a scrape's render.
+PHASE_FRACTIONS = {
+    "metrics": 0.0,
+    "neighbor": 0.35,
+    "policy_stats": 0.5,
+    "rib_prefix": 0.65,
+    "doctor": 0.8,
+}
 
 
 @dataclass(frozen=True)
@@ -68,6 +78,9 @@ class ProbeResult:
     # of the configuration checks that were red in it.
     doctor_output: Optional[bytes] = None
     failed_checks: tuple[str, ...] = ()
+    # CLI only: monotonic spawn and exit of the child, so the recorded
+    # duration excludes output validation.
+    child_monotonic: Optional[tuple[float, float]] = None
 
 
 def _stderr_excerpt(stream: BinaryIO) -> str:
@@ -221,39 +234,52 @@ def run_cli_command(
     route_prefix: str,
 ) -> ProbeResult:
     with tempfile.TemporaryFile() as stdout, tempfile.TemporaryFile() as stderr:
+        # A blocking wait() stamps the exit when waitpid returns. A timed
+        # wait (subprocess.run(timeout=)) polls with sleeps of up to 50 ms
+        # and rounds every duration up to its next poll point, so the
+        # deadline is a watchdog that kills the child instead.
+        expired = threading.Event()
+        started = time.monotonic()
+        child = subprocess.Popen(
+            argv, stdin=subprocess.DEVNULL, stdout=stdout, stderr=stderr
+        )
+
+        def expire() -> None:
+            expired.set()
+            child.kill()
+
+        watchdog = threading.Timer(timeout_seconds, expire)
+        watchdog.start()
         try:
-            completed = subprocess.run(
-                argv,
-                stdin=subprocess.DEVNULL,
-                stdout=stdout,
-                stderr=stderr,
-                timeout=timeout_seconds,
-                check=False,
-            )
-        except subprocess.TimeoutExpired:
+            returncode = child.wait()
+        finally:
+            watchdog.cancel()
+        child_monotonic = (started, time.monotonic())
+        if expired.is_set():
             stdout.seek(0)
             _, byte_count, digest = _payload_fingerprint(stdout)
             return ProbeResult(
-                None, "timeout", byte_count, digest, _stderr_excerpt(stderr)
+                None, "timeout", byte_count, digest, _stderr_excerpt(stderr),
+                child_monotonic=child_monotonic,
             )
         stdout.seek(0)
         payload, byte_count, digest = _payload_fingerprint(stdout)
-        reported = operation == "doctor" and completed.returncode == DOCTOR_REPORT_EXIT
-        if completed.returncode != 0 and not reported:
+        reported = operation == "doctor" and returncode == DOCTOR_REPORT_EXIT
+        if returncode != 0 and not reported:
             result = "cli_exit"
         else:
             result = validate_cli_json(operation, payload, peer_count, route_prefix)
         excerpt = None if result == "ok" else _stderr_excerpt(stderr)
         doctor_output, failed_checks = None, ()
-        if operation == "doctor" and completed.returncode != 0:
+        if operation == "doctor" and returncode != 0:
             doctor_output, failed_checks = _doctor_evidence(stdout, payload)
             # A hard error can still print red JSON; only a validated report
             # names checks, or the analyzer rejects the record.
             if result != "doctor_check_failed":
                 failed_checks = ()
     return ProbeResult(
-        completed.returncode, result, byte_count, digest, excerpt,
-        doctor_output, failed_checks,
+        returncode, result, byte_count, digest, excerpt,
+        doctor_output, failed_checks, child_monotonic,
     )
 
 
@@ -332,6 +358,14 @@ class ManagementPlaneLoad:
             "rib_prefix": cli_interval_seconds,
             "doctor": doctor_interval_seconds,
         }
+        # Wrapped into each operation's own interval: the knobs are independent.
+        self.phase_offsets = {
+            operation: round(
+                PHASE_FRACTIONS[operation] * metrics_interval_seconds
+                % self.intervals[operation], 6,
+            )
+            for operation in OPERATIONS
+        }
         self.commands = cli_commands(rbgp, uds, route_prefix, doctor_bundle)
         self.stop = threading.Event()
         self.counter_lock = threading.Lock()
@@ -386,7 +420,7 @@ class ManagementPlaneLoad:
 
     def _worker(self, operation: str) -> None:
         interval = self.intervals[operation]
-        due = self.started_monotonic
+        due = self.started_monotonic + self.phase_offsets[operation]
         try:
             while not self.stop.is_set():
                 delay = due - time.monotonic()
@@ -398,6 +432,8 @@ class ManagementPlaneLoad:
                 started = time.monotonic()
                 result = self._probe(operation)
                 completed = time.monotonic()
+                if result.child_monotonic is not None:
+                    started, completed = result.child_monotonic
                 self._mark(operation, "completed")
                 record = {
                     "record": "operation",
@@ -441,6 +477,7 @@ class ManagementPlaneLoad:
             "started_monotonic": round(self.started_monotonic, 6),
             "operations": list(OPERATIONS),
             "interval_seconds": self.intervals,
+            "phase_offset_seconds": self.phase_offsets,
             "timeout_seconds": self.timeout_seconds,
             "peer_count": self.peer_count,
             "route_prefix": self.route_prefix,
