@@ -323,7 +323,14 @@ impl RibManager {
             if !rtc_affected.is_empty() {
                 self.recompute_rtc_keys(&rtc_affected);
             }
+            #[cfg(feature = "bench-internals")]
+            let gc_started = Instant::now();
             self.gc_attr_intern();
+            #[cfg(feature = "bench-internals")]
+            {
+                self.adj_rib_out_commit_stats.eor_attr_gc_ns =
+                    u64::try_from(gc_started.elapsed().as_nanos()).unwrap_or(u64::MAX);
+            }
             if rtc_swept {
                 // The EoR sweep removed RT interest the peer did not
                 // re-advertise: shrink its membership so no-longer-covered
@@ -332,10 +339,17 @@ impl RibManager {
             }
 
             let peer_label = peer.to_string();
+            #[cfg(feature = "bench-internals")]
+            let stale_count_started = Instant::now();
             let stale_count = self
                 .ribs
                 .get(&peer)
                 .map_or(0, super::graceful_restart::retained_stale_count);
+            #[cfg(feature = "bench-internals")]
+            {
+                self.adj_rib_out_commit_stats.eor_stale_count_ns =
+                    u64::try_from(stale_count_started.elapsed().as_nanos()).unwrap_or(u64::MAX);
+            }
             self.metrics
                 .set_gr_stale_routes(&peer_label, gauge_val(stale_count));
 
@@ -488,7 +502,14 @@ impl RibManager {
             if !rtc_affected.is_empty() {
                 self.recompute_rtc_keys(&rtc_affected);
             }
+            #[cfg(feature = "bench-internals")]
+            let gc_started = Instant::now();
             self.gc_attr_intern();
+            #[cfg(feature = "bench-internals")]
+            {
+                self.adj_rib_out_commit_stats.eor_attr_gc_ns =
+                    u64::try_from(gc_started.elapsed().as_nanos()).unwrap_or(u64::MAX);
+            }
             if rtc_swept {
                 // The EoR sweep removed LLGR-stale RT interest the peer did
                 // not re-advertise: shrink its membership so no-longer-
@@ -497,10 +518,17 @@ impl RibManager {
             }
 
             let peer_label = peer.to_string();
+            #[cfg(feature = "bench-internals")]
+            let stale_count_started = Instant::now();
             let llgr_stale_count = self
                 .ribs
                 .get(&peer)
                 .map_or(0, super::graceful_restart::retained_stale_count);
+            #[cfg(feature = "bench-internals")]
+            {
+                self.adj_rib_out_commit_stats.eor_stale_count_ns =
+                    u64::try_from(stale_count_started.elapsed().as_nanos()).unwrap_or(u64::MAX);
+            }
             self.metrics
                 .set_gr_stale_routes(&peer_label, gauge_val(llgr_stale_count));
 

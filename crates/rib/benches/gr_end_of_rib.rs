@@ -22,6 +22,8 @@
 //!   (each peer scans the whole affected set).
 //! - `ipv4`: 1,000,000 IPv4 routes, IPv4 as the only GR family.
 //! - `--self-test`: every mode at 2,000 / 400 routes.
+//! - `--attribute-sets N`: deterministic synthetic MED values make N distinct
+//!   interned sets; omitted means the original one-set fixture.
 //!
 //! Each invocation prints one JSON line per mode.
 //!
@@ -152,13 +154,27 @@ fn route(prefix: Prefix, attributes: &Arc<AttrSet>) -> Route {
     }
 }
 
-fn table(ipv4: usize, ipv6: usize) -> Vec<Route> {
-    let attributes = AttrSet::new(vec![
+fn attribute_pool(count: usize) -> Vec<Arc<AttrSet>> {
+    let base = vec![
         PathAttribute::Origin(Origin::Igp),
         PathAttribute::AsPath(AsPath {
             segments: vec![AsPathSegment::AsSequence(vec![64_600, 64_601])],
         }),
-    ]);
+    ];
+    (0..count)
+        .map(|index| {
+            let mut attributes = base.clone();
+            if count > 1 {
+                attributes.push(PathAttribute::Med(
+                    u32::try_from(index).expect("MED fits u32"),
+                ));
+            }
+            AttrSet::new(attributes)
+        })
+        .collect()
+}
+
+fn table(ipv4: usize, ipv6: usize, attributes: &[Arc<AttrSet>]) -> Vec<Route> {
     let v4 = (0..ipv4).map(|index| {
         let index = u32::try_from(index).expect("IPv4 count fits u32");
         Prefix::V4(Ipv4Prefix::new(Ipv4Addr::from(0x1400_0000 + index), 32))
@@ -171,7 +187,8 @@ fn table(ipv4: usize, ipv6: usize) -> Vec<Route> {
         ))
     });
     v4.chain(v6)
-        .map(|prefix| route(prefix, &attributes))
+        .enumerate()
+        .map(|(index, prefix)| route(prefix, &attributes[index % attributes.len()]))
         .collect()
 }
 
@@ -188,8 +205,13 @@ fn drain(receivers: &mut [mpsc::Receiver<OutboundRouteUpdate>]) -> usize {
         .sum()
 }
 
-fn run(mode: Mode, ipv4: usize, ipv6_full: usize) {
+fn run(mode: Mode, ipv4: usize, ipv6_full: usize, attribute_sets: usize) {
     let ipv6 = mode.ipv6_routes(ipv6_full);
+    assert!(
+        (1..=ipv4 + ipv6).contains(&attribute_sets),
+        "attribute-set count must be between 1 and the route count"
+    );
+    let attributes = attribute_pool(attribute_sets);
     let (_tx, rx) = mpsc::channel::<RibUpdate>(16);
     let (_qtx, qrx) = mpsc::channel::<RibUpdate>(16);
     let mut manager = RibManager::new(rx, qrx, None, None, BgpMetrics::new());
@@ -200,7 +222,7 @@ fn run(mode: Mode, ipv4: usize, ipv6_full: usize) {
         1 << 20,
         |_| Arc::new(PermissiveExactExport),
     );
-    manager.bench_seed_loc_rib(table(ipv4, ipv6));
+    manager.bench_seed_loc_rib(table(ipv4, ipv6, &attributes));
     drain(&mut receivers);
     let receipt = manager.bench_adj_rib_out_fanout_receipt();
     let grouped = mode != Mode::PerClientBestFallback;
@@ -215,18 +237,27 @@ fn run(mode: Mode, ipv4: usize, ipv6_full: usize) {
         mode.name()
     );
     manager.bench_gr_restart(SOURCE, mode.gr_families());
-    manager.bench_seed_loc_rib(table(ipv4, ipv6));
+    manager.bench_seed_loc_rib(table(ipv4, ipv6, &attributes));
     drain(&mut receivers);
+    let intern = manager.bench_attr_intern_inventory();
+    assert_eq!(
+        intern[2], attribute_sets,
+        "intern cardinality matches fixture"
+    );
 
     let mut eors = Vec::new();
     for &(afi, safi) in mode.gr_families() {
         let receipt = manager.bench_end_of_rib(SOURCE, afi, safi);
         let envelopes = drain(&mut receivers);
         eors.push(format!(
-            "{{\"family\":\"{afi:?}/{safi:?}\",\"total_ns\":{},\"recompute_ns\":{},\"distribute_ns\":{},\"affected\":{},\"changed\":{},\"retained_stale\":{},\"gr_complete\":{},\"envelopes\":{envelopes}}}",
-            receipt[0], receipt[1], receipt[2], receipt[3], receipt[4], receipt[5], receipt[6]
+            "{{\"family\":\"{afi:?}/{safi:?}\",\"total_ns\":{},\"recompute_ns\":{},\"distribute_ns\":{},\"affected\":{},\"changed\":{},\"retained_stale\":{},\"gr_complete\":{},\"attr_gc_ns\":{},\"stale_count_ns\":{},\"envelopes\":{envelopes}}}",
+            receipt[0], receipt[1], receipt[2], receipt[3], receipt[4], receipt[5], receipt[6], receipt[7], receipt[8]
         ));
-        assert_eq!(receipt[5], 0, "re-advertised routes are no longer stale");
+        assert_eq!(
+            (receipt[3], receipt[4], receipt[5], envelopes),
+            (0, 0, 0, 0),
+            "identical re-advertisement leaves no EoR work or output"
+        );
     }
     let last = eors.last().expect("at least one GR family");
     assert!(
@@ -241,8 +272,15 @@ fn run(mode: Mode, ipv4: usize, ipv6_full: usize) {
         "every route survives End-of-RIB"
     );
     println!(
-        "{{\"mode\":\"{}\",\"ipv4_routes\":{ipv4},\"ipv6_routes\":{ipv6},\"end_of_rib\":[{}]}}",
+        "{{\"mode\":\"{}\",\"ipv4_routes\":{ipv4},\"ipv6_routes\":{ipv6},\"attribute_shape\":\"{}\",\"requested_attribute_sets\":{attribute_sets},\"interned_sets\":{},\"intern_capacity\":{},\"end_of_rib\":[{}]}}",
         mode.name(),
+        if attribute_sets == 1 {
+            "uniform"
+        } else {
+            "synthetic-distinct-med"
+        },
+        intern[2],
+        intern[3],
         eors.join(",")
     );
 }
@@ -250,11 +288,19 @@ fn run(mode: Mode, ipv4: usize, ipv6_full: usize) {
 fn main() {
     let mut modes = Vec::new();
     let mut self_test = false;
+    let mut attribute_sets = 1;
     let mut args = std::env::args().skip(1);
     while let Some(argument) = args.next() {
         match argument.as_str() {
             "--bench" => {}
             "--self-test" => self_test = true,
+            "--attribute-sets" => {
+                attribute_sets = args
+                    .next()
+                    .expect("--attribute-sets requires a value")
+                    .parse()
+                    .expect("--attribute-sets must be a positive integer");
+            }
             "--mode" => {
                 let value = args.next().expect("--mode requires a value");
                 modes.push(match value.as_str() {
@@ -282,6 +328,6 @@ fn main() {
         (1_000_000, 200_000)
     };
     for mode in modes {
-        run(mode, ipv4, ipv6);
+        run(mode, ipv4, ipv6, attribute_sets);
     }
 }
