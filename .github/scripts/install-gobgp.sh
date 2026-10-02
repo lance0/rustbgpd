@@ -3,6 +3,7 @@
 set -euo pipefail
 
 GOBGP_VERSION="3.37.0"
+unset GOBGP_SHA256
 # The defaults are the gobgp:interop (Dockerfile.gobgp) pin. The 4.x lab images
 # (Dockerfile.gobgp-v47) pass their own exact version and release checksum.
 while [[ ${1:-} == --version || ${1:-} == --sha256 ]]; do

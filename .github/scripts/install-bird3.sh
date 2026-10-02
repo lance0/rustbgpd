@@ -3,6 +3,7 @@
 set -euo pipefail
 
 BIRD3_VERSION="3.3.2"
+unset BIRD3_SHA256
 BIRD3_COVERAGE_LABEL=""
 while [[ ${1:-} == --version || ${1:-} == --sha256 || ${1:-} == --coverage-label ]]; do
     option=$1

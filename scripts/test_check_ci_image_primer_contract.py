@@ -217,7 +217,10 @@ class PrimerContractTests(unittest.TestCase):
             self.assertNotEqual(lookup().returncode, 0)
 
     def test_explicit_empty_checksum_override_is_rejected(self):
-        for installer in ("install-bird3.sh", "install-gobgp.sh"):
+        for installer, variable in (
+            ("install-bird3.sh", "BIRD3_SHA256"),
+            ("install-gobgp.sh", "GOBGP_SHA256"),
+        ):
             with self.subTest(installer=installer):
                 result = subprocess.run(
                     [str(ROOT / ".github/scripts" / installer), "--sha256", "", "--self-test"],
@@ -227,6 +230,14 @@ class PrimerContractTests(unittest.TestCase):
                 )
                 self.assertNotEqual(result.returncode, 0)
                 self.assertIn("invalid", result.stderr)
+                ambient = subprocess.run(
+                    [str(ROOT / ".github/scripts" / installer), "--self-test"],
+                    env={**os.environ, variable: "not-a-checksum"},
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+                self.assertEqual(ambient.returncode, 0, ambient.stderr)
 
     def test_resolve_steps_fail_before_writing_an_empty_checksum(self):
         cases = (
