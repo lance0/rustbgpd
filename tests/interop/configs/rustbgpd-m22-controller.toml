@@ -1,0 +1,50 @@
+# Bounded controller qualification, separate from M22 receive validation.
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+
+[global.telemetry]
+prometheus_addr = "0.0.0.0:9179"
+log_format = "json"
+
+[global.telemetry.grpc_tcp]
+address = "0.0.0.0:50051"
+token_file = "/run/rustbgpd/grpc-test-only-operator.token"
+principal = "rustbgpd://operator/test-only"
+
+[[neighbors]]
+address = "10.0.0.2"
+remote_asn = 65002
+hold_time = 90
+graceful_restart = false
+families = ["ipv4_unicast", "ipv4_flowspec", "ipv6_flowspec"]
+export_policy_chain = ["controller-export"]
+
+[[neighbors]]
+address = "10.0.1.2"
+remote_asn = 65003
+hold_time = 90
+graceful_restart = false
+families = ["ipv4_unicast", "ipv4_flowspec", "ipv6_flowspec"]
+import_policy_chain = ["prefer-source"]
+
+[policy.definitions.controller-export]
+default_action = "permit"
+[[policy.definitions.controller-export.statements]]
+match_community = ["65001:666"]
+action = "deny"
+[[policy.definitions.controller-export.statements]]
+match_community = ["65001:10"]
+action = "permit"
+set_community_add = ["65001:100", "RT:65001:100"]
+
+[policy.definitions.prefer-source]
+default_action = "permit"
+[[policy.definitions.prefer-source.statements]]
+match_community = ["65001:10"]
+action = "permit"
+set_local_pref = 200
+
+[security.grpc.roles]
+"rustbgpd://operator/test-only" = "operator"

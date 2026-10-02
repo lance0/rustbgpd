@@ -2856,6 +2856,11 @@ report an outcome)`.
 
 These RPCs remain outside the v1 inventory
 ([stability](stability.md)); the contract above describes current behavior.
+The [bounded dual-stack controller qualification](../artifacts/interop/m22-flowspec-controller-20261002/README.md)
+exercises 100 local rules against FRR 10.7.1, including retained intent,
+committed export policy, peer replay, and restart reconciliation. It does not
+qualify receive-side feasibility validation, GR/LLGR retention, or dataplane
+enforcement.
 
 ### Inject an EVPN Type 2 (MAC/IP) route
 

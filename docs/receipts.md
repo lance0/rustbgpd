@@ -63,7 +63,7 @@ M93 and M95; `m26_m27_m28_m59_m91` runs five). Full procedures:
 | M15 | Route Refresh (RFC 2918) via gRPC SoftResetIn | FRR 10.7.1 |
 | M16 | Dual-stack LLGR (RFC 9494): exact IPv4/IPv6 fresh → GR-stale → LLGR-stale → fresh lifecycle, both-family capability/timer/EoR proof, one restart and exact counters | FRR 10.7.1 |
 | M17 | Add-Path (RFC 7911) multi-path send with distinct path ids | FRR 10.7.1 |
-| M22 | FlowSpec inject + distribute + withdraw | FRR 10.7.1 |
+| M22 | FlowSpec inject + distribute + withdraw; separate [100-rule dual-stack controller lifecycle](artifacts/interop/m22-flowspec-controller-20261002/README.md) with retained intent, export policy, reconnect and restart reconciliation | FRR 10.7.1 |
 | M24 | BMP Initiation, PeerUp, RouteMonitoring ordering | FRR + BMP receiver |
 | M25 | TCP MD5 + GTSM/TTL security, including IPv6 dynamic accepted sockets | FRR 10.7.1 ×3 |
 | M26 | Max-prefix teardown latch + explicit recovery (Cease/1 without Notification GR); `block` recovery by one ROUTE-REFRESH replay with no session reset; `warning` accepts past the bound with one warning-counter increment and one session event | FRR 10.7.1 ×3 |

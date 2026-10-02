@@ -1,0 +1,31 @@
+{
+  "result": "pass",
+  "rules": 100,
+  "rules_per_afi": 50,
+  "families": [
+    "IPV4",
+    "IPV6"
+  ],
+  "checks": [
+    "initial sessions established",
+    "initial-empty",
+    "created",
+    "unchanged",
+    "replaced",
+    "masked-local-intent",
+    "masked-replaced",
+    "delete-keeps-received-winner",
+    "masked-recreated",
+    "local-selection-restored",
+    "peer deliberately disconnected",
+    "peer reconnected",
+    "reconnect-replay",
+    "daemon stopped",
+    "restarted daemon health",
+    "restart sessions restored",
+    "restart-empty",
+    "restart-reconciled",
+    "deleted"
+  ],
+  "scope": "bounded functional controller qualification; no performance or dataplane claim"
+}
