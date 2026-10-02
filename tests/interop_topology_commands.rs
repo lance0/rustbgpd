@@ -1151,6 +1151,76 @@ fn m105_capture_refuses_stale_resources_before_arming() {
 }
 
 #[test]
+fn m105_bird_identity_requires_local_image_and_manifest_version() {
+    let image = topology("m105-live-as-set.clab.yml")["topology"]["nodes"]["bird"]["image"]
+        .as_str()
+        .expect("M105 BIRD image tag")
+        .to_owned();
+    assert_eq!(image, "bird:m101");
+
+    let source = fs::read_to_string(interop_path("scripts/test-m105-live-as-set.sh"))
+        .expect("read M105 driver");
+    let version = source
+        .lines()
+        .find(|line| line.starts_with("BIRD_VERSION="))
+        .expect("M105 BIRD version assignment");
+    let helper = |name: &str| {
+        let start = source
+            .find(&format!("{name}() {{"))
+            .expect("M105 identity helper");
+        let end = start + source[start..].find("\n}\n").expect("bounded M105 helper") + 3;
+        &source[start..end]
+    };
+    let functions = format!(
+        "{version}\n{}\n{}",
+        helper("configured_image_is_local"),
+        helper("bird_identity")
+    );
+    let output = Command::new("bash")
+        .args(["-c", r#"
+set -euo pipefail
+SCRIPT_DIR=$DRIVER_DIR
+BIRD=clab-m105-live-as-set-bird
+eval "$FUNCTIONS"
+expected=$("$SCRIPT_DIR/../../../.github/scripts/archive-pin.sh" --bird3-version)
+[[ $BIRD_VERSION == "$expected" ]]
+docker() {
+    if [[ $# == 4 && $1 == inspect && $2 == -f && $4 == "$BIRD" ]]; then
+        case $3 in
+            '{{.Config.Image}}') printf '%s\n' "$container_tag" ;;
+            '{{.Image}}') printf '%s\n' "$container_id" ;;
+            *) return 2 ;;
+        esac
+    elif [[ $# == 5 && $1 == image && $2 == inspect && $3 == -f && $4 == '{{.Id}}' && $5 == bird:m101 ]]; then
+        printf '%s\n' "$local_id"
+    elif [[ $# == 4 && $1 == exec && $2 == "$BIRD" && $3 == bird && $4 == --version ]]; then
+        printf 'BIRD version %s\n' "$runtime_version"
+    else
+        return 2
+    fi
+}
+container_tag=$TOPOLOGY_IMAGE container_id=sha256:matching local_id=sha256:matching runtime_version=$expected
+bird_identity
+container_tag=bird:v3.3.2-m101
+if bird_identity; then echo 'wrong container tag accepted' >&2; exit 1; fi
+container_tag=$TOPOLOGY_IMAGE runtime_version=3.3.1
+if bird_identity; then echo 'wrong runtime version accepted' >&2; exit 1; fi
+runtime_version=$expected container_id=sha256:other
+if bird_identity; then echo 'nonlocal image accepted' >&2; exit 1; fi
+"#])
+        .env("FUNCTIONS", functions)
+        .env("DRIVER_DIR", interop_path("scripts"))
+        .env("TOPOLOGY_IMAGE", image)
+        .output()
+        .expect("run M105 identity fixture");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
 fn m102_pins_openbgpd92_route_server_member_contract() {
     const OPENBGPD_IMAGE: &str =
         "openbgpd/openbgpd@sha256:b2e94bd1538102a89cff96867993eabb6dbb27720de4ab7b588860880e3e3bf9";
