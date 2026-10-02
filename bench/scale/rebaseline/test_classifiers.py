@@ -407,6 +407,50 @@ class ClassifierFixtures(unittest.TestCase):
             "API / peer-manager",
         )
 
+    def test_dhat_generic_bundle_vector_and_other_allocations(self) -> None:
+        # Symbol-only prefix captured from the real-table DHAT profile. The
+        # raw source location identifies RouteAttrBundle::new's base.to_vec().
+        outer = [
+            "<alloc::alloc::Global as core::alloc::Allocator>::allocate",
+            "alloc::raw_vec::RawVecInner<A>::try_allocate_in",
+            "alloc::raw_vec::RawVecInner<A>::with_capacity_in",
+            "alloc::raw_vec::RawVec<T,A>::with_capacity_in",
+            "alloc::vec::Vec<T,A>::with_capacity_in",
+            "<T as alloc::slice::<impl [T]>::to_vec_in::ConvertVec>::to_vec",
+            "alloc::slice::<impl [T]>::to_vec_in",
+            "alloc::slice::<impl [T]>::to_vec",
+        ]
+        bundle = "rustbgpd_transport::session::inbound::RouteAttrBundle::new"
+        transport = [
+            "rustbgpd_transport::session::PeerSession::process_update",
+            "rustbgpd_transport::session::PeerSession::process_read_buffer",
+        ]
+        self.assertEqual(
+            classify_dhat.classify_stack(outer + [bundle] + transport),
+            "Interned attribute-set backing",
+        )
+        for payload in ("PathAttribute", "AsPath", "AsPathSegment"):
+            with self.subTest(payload=payload):
+                self.assertEqual(
+                    classify_dhat.classify_stack(outer + [
+                        f"<rustbgpd_wire::attribute::{payload} as core::clone::Clone>::clone",
+                        bundle,
+                    ] + transport),
+                    "Nested path-attribute payloads",
+                )
+        for temporary in (
+            ["alloc::sync::Arc<T>::new", "rustbgpd_rib::attr_set::AttrSet::new", bundle],
+            outer + ["rustbgpd_wire::attribute::decode_path_attributes_revised_observed"],
+            outer,
+            ["alloc::slice::<impl [T]>::to_vec", bundle],
+            ["alloc::raw_vec::RawVec<T,A>::with_capacity_in", bundle],
+        ):
+            with self.subTest(temporary=temporary):
+                self.assertEqual(
+                    classify_dhat.classify_stack(temporary + transport),
+                    "Transport session buffers/scratch",
+                )
+
     def test_dhat_current_demangled_loc_rib_owner(self) -> None:
         self.assertEqual(
             classify_dhat.classify_stack(

@@ -270,6 +270,10 @@ jobs:
       - name: Verify committed RIB rebaseline receipt
         run: |
           set -euo pipefail
+          # These dated derivatives retain their original generic-Vec labels.
+          # Verify them with the classifier before that attribution was corrected.
+          git show 202e0f1bf6f12631be7425e917988f80f3d2472c:bench/scale/rebaseline/classify_dhat.py \
+            > "$RUNNER_TEMP/frozen-dhat-classifier.py"
           receipt=docs/perf/artifacts/rib-rebaseline-2026-07-13
           cpu_dir="$RUNNER_TEMP/rib-rebaseline-cpu"
           (cd "$receipt" && sha256sum -c SHA256SUMS)
@@ -281,7 +285,7 @@ jobs:
             python3 bench/scale/rebaseline/classify_cpu.py "$profile" \
               --check "$receipt/$stem.cpu.tsv"
           done
-          python3 bench/scale/rebaseline/classify_dhat.py \
+          python3 "$RUNNER_TEMP/frozen-dhat-classifier.py" \
             --from-derivative "$receipt/2p-100k.dhat-derivative.tsv" \
             --check "$receipt/2p-100k.memory.tsv"
           # The raw bgperf capture is never committed, so the CSV numerics
@@ -296,7 +300,7 @@ jobs:
           receipt=docs/perf/artifacts/known-path-accounting-2026-07
           (cd "$receipt" && sha256sum -c SHA256SUMS)
           for variant in baseline candidate; do
-            python3 bench/scale/rebaseline/classify_dhat.py \
+            python3 "$RUNNER_TEMP/frozen-dhat-classifier.py" \
               --from-derivative "$receipt/$variant.dhat-derivative.tsv" \
               --check "$receipt/$variant.memory.tsv"
           done
