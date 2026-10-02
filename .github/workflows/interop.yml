@@ -2168,6 +2168,15 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
+      - name: Upload M100 failed-attempt evidence
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: m100-failed-attempt-${{ github.sha }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/m100
+          if-no-files-found: ignore
+          retention-days: 14
+
   m101:
     needs: [prime_dev_image]
     name: M101 — BIRD 3 real-wire attribute discard at a route server
