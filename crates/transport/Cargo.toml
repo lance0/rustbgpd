@@ -40,6 +40,7 @@ bench-internals = ["rustbgpd-rib/bench-internals"]
 rustbgpd-rib.workspace = true
 tokio = { workspace = true, features = ["test-util"] }
 criterion.workspace = true
+tikv-jemallocator.workspace = true
 
 [[bin]]
 name = "rejected-route-store-allocation"

@@ -1149,7 +1149,10 @@ serves `/livez` and `/readyz` for orchestrators. Key counters operators watch:
   release tarballs); refreshed at scrape time. `allocated` is live
   application bytes, `resident` is jemalloc's contribution to RSS —
   a widening gap between the two is retained-but-unused allocator
-  memory, the first thing to check before suspecting a leak.
+  memory, the first thing to check before suspecting a leak. This
+  jemalloc build takes run-time options from `_RJEM_MALLOC_CONF`, not
+  `MALLOC_CONF`; see
+  [heap profiling with jemalloc](../benchmarks.md#heap-profiling-with-jemalloc).
 - **Durable event outbox** (ADR-0072) —
   `bgp_event_outbox_committed_total{category}`,
   `bgp_event_outbox_dropped_total{category, reason}`,

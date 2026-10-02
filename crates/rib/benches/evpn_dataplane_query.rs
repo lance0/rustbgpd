@@ -15,6 +15,11 @@ use rustbgpd_wire::{
     EvpnIpPrefixValue, EvpnMacIp, EvpnRoute, Ipv4Prefix, MacAddress, MplsLabel, RouteDistinguisher,
 };
 
+/// Benches link the allocator the daemon ships with, so allocation-heavy
+/// paths are timed under jemalloc rather than the system allocator.
+#[global_allocator]
+static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
+
 const CURRENT_GENERATION: u64 = 73;
 
 fn rd(index: usize) -> RouteDistinguisher {

@@ -34,6 +34,11 @@ use rustbgpd_wire::{
 };
 use tokio::sync::{mpsc, oneshot};
 
+/// The harness runs the daemon's `RibManager` in-process, so its stage/drain
+/// timings and RSS must come from the allocator the daemon ships with.
+#[global_allocator]
+static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
+
 const BATCH: usize = 1000;
 const CHANNEL_CAP: usize = 8192;
 const INGRESS_FLOOD: u32 = 4;

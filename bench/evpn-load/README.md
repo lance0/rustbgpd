@@ -101,6 +101,10 @@ memory. Initial convergence is measured separately for each receiver from
 its own session establishment to its first full table. None of these values
 is a sustained throughput ceiling or evidence for thousands of VTEPs.
 
+The tester and monitor binaries keep the system allocator. They link only the
+wire crate and measure the separately launched release daemon, which uses
+jemalloc; no daemon code runs in their processes.
+
 The new output directory contains:
 
 - `summary.json`: shape, correctness, convergence range, withdrawal range,

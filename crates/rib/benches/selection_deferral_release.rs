@@ -20,6 +20,11 @@ use rustbgpd_telemetry::BgpMetrics;
 use rustbgpd_wire::{Afi, Ipv4Prefix, Ipv6Prefix, MAX_MESSAGE_LEN, Prefix, RpkiValidation, Safi};
 use tokio::sync::mpsc;
 
+/// Benches link the allocator the daemon ships with, so allocation-heavy
+/// paths are timed under jemalloc rather than the system allocator.
+#[global_allocator]
+static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
+
 const FLEET_PEERS: usize = 700;
 const FLEET_ROUTES: usize = 400_400;
 const SELF_TEST_PEERS: usize = 4;

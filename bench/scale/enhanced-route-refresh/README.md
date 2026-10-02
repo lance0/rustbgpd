@@ -72,6 +72,10 @@ The fleet shape is deliberately one ERR-capable peer × 100,000 unique IPv4
 /24s. It isolates per-peer inventory cost; it does not claim synchronized
 multi-peer wall time or extrapolate sampled resident bytes to a larger fleet.
 
+The receipt driver keeps the system allocator. It is a single-peer wire driver
+that links only the wire crate; every measured byte and duration comes from the
+separately launched release daemon, which uses jemalloc.
+
 ## Run
 
 The durable runner is host-locked and refuses a dirty worktree:

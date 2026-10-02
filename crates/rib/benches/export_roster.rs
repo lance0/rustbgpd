@@ -19,6 +19,11 @@ use rustbgpd_policy::sets::SetStore;
 use rustbgpd_policy::{NamedPolicy, PolicyChain};
 use rustbgpd_rib::export_roster::{ExportRosterPublisher, capture_export};
 
+/// Benches link the allocator the daemon ships with, so allocation-heavy
+/// paths are timed under jemalloc rather than the system allocator.
+#[global_allocator]
+static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
+
 /// One export policy with `terms` named terms whose labels are
 /// `label_bytes` long (0 keeps short native names).
 fn chain(terms: usize, label_bytes: usize) -> PolicyChain {

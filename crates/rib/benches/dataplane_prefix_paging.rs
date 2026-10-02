@@ -13,6 +13,11 @@ use rustbgpd_wire::{
 };
 use tokio::sync::mpsc;
 
+/// Benches link the allocator the daemon ships with, so allocation-heavy
+/// paths are timed under jemalloc rather than the system allocator.
+#[global_allocator]
+static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
+
 #[derive(Clone, Copy, Debug)]
 enum IndexMode {
     Eager,

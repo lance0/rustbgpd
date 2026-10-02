@@ -13,3 +13,4 @@ rustbgpd-telemetry.workspace = true
 tokio.workspace = true
 pprof = "0.15"
 libc.workspace = true
+tikv-jemallocator.workspace = true
