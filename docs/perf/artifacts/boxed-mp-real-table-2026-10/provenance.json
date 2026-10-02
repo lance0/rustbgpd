@@ -1,0 +1,71 @@
+{
+  "measured_utc_date": "2026-10-02",
+  "input": {
+    "url": "https://archive.routeviews.org/route-views2/bgpdata/2026.08/RIBS/rib.20260808.0000.bz2",
+    "compressed_sha256": "03bf1ea39809789576786c61c7ff77d8e1977d04706af1457aaafaf7cb0e95fb",
+    "raw_sha256": "f6c87b21e0c651d1ec66e8153018234d8981225c4450a8f97551a1cdcbab73d0",
+    "selected_peer_asn": 20130,
+    "selected_ipv4_prefixes": 1079184,
+    "selected_attribute_hashes_excluding_next_hop": 148789
+  },
+  "arms": {
+    "parent": {
+      "source_commit": "82700ff0dfe1b37d4e5a32ec1557e19a10abedab",
+      "release_image_id": "sha256:e19fae6dab00586d11ede1c98d0e37198334cf9c890a7b31c88286e9b62dc0da",
+      "dhat_image_id": "sha256:58f3a573c47f5eb6ed9a0f9f72f8a735843dbb55d46660bdf5d4f8a54bdaa9b2",
+      "dhat_builder_provenance_sha256": "0648c7661897c92ee1ce46a47379859ff5a60556b6d9282276c0c93120ac1041",
+      "dhat_runtime_provenance_sha256": "9ea948cee5b8fcac518d6d9faf54b03ecfbcd8ce51877be6fd190cf81ab64650"
+    },
+    "boxed": {
+      "source_commit": "aea6e2c77ee5581ff399fc27d6a8ebb816d2ea4d",
+      "release_image_id": "sha256:af8acae0a1a023ca8c6edf0e748b2cfd38e224e22f4dfb6c7ef40dffc016c5f0",
+      "dhat_image_id": "sha256:db9d2397a7eecd74d1f4001657eb339ec61076b116281f5edc6c334db2285a67",
+      "dhat_builder_provenance_sha256": "0648c7661897c92ee1ce46a47379859ff5a60556b6d9282276c0c93120ac1041",
+      "dhat_runtime_provenance_sha256": "9ea948cee5b8fcac518d6d9faf54b03ecfbcd8ce51877be6fd190cf81ab64650"
+    }
+  },
+  "diagnostic": {
+    "as_run_worktree_diff_sha256": "e364ff54d0738aafcd091acd265064f15655cc9b5d423c7a5bdba256e6fd0cef",
+    "as_run_runtime_patch_label_sha256": "3bc3f9aba836f9c2c529b964229271723d6ecdd06afbd793482b9cc1b5bc6752",
+    "scope": "Actor-owned one-time inventory on a sentinel-triggered readiness call; identical in both arms; campaign-only and not committed to production source."
+  },
+  "harness": {
+    "adapter_commit": "626dda815a4d72655b6e4e962dc5e9113dbff9a9",
+    "as_run_adapter_diff_sha256": "a63edb3905c4c2a340f00335adb72655ceef3b5dcddaa9187c187d5f762fcb51",
+    "runner_sha256": "5ea028c2620c7b9ffc866dec5441d3ba9bd8eaa574a09400acb9c6f0710e5248",
+    "scenario_sha256": "ebe0c17c1c72a1207711237345b9ede9db122f39f995503908c2fc5d487a86e3",
+    "gobgp_image_id": "sha256:3b6e240376cb1c6db7c4aae50173eec127ec4f4ac0bd7a0977872182aa3d7f78",
+    "selected_peer_filter_asn": 20130,
+    "route_checkpoint": 970000,
+    "no_record_count_limit": true
+  },
+  "build": {
+    "rustc": "1.95.0 (59807616e 2026-04-14)",
+    "cargo": "1.95.0 (f2d3ce0bd 2026-03-21)",
+    "llvm": "22.1.2",
+    "protoc": "3.21.12",
+    "release_profile": "cargo build --workspace --release --locked; jemalloc global allocator",
+    "dhat_profile": "CARGO_BUILD_JOBS=4 cargo build --workspace --profile release-prof --features dhat-heap --locked",
+    "dhat_allocator": "dhat::Alloc selected by dhat-heap cfg; release-prof inherits release LTO/codegen1 with debug=1 and strip=false"
+  },
+  "profile_sha256": {
+    "parent": "472e5ae29c45f326405cdbb61e6f2e9aeaa78502803b8657cf194302b26f2448",
+    "boxed": "3354769b95d1f7924dfedae2c61a2b495e9277d716ad608acb1ef619e7fb3388"
+  },
+  "dhat_t_gmax_seconds": {
+    "parent": 217.44,
+    "boxed": 208.60
+  },
+  "inventory": {
+    "target_and_monitor_routes": 1078977,
+    "live_interned_sets": 148667,
+    "attr_vector_length": 489537,
+    "attr_vector_capacity": 489537,
+    "intern_table_slots": 229376,
+    "retained_rejected_routes": 175
+  },
+  "limits": {
+    "unclassified_source_to_target_prefix_gap": 32,
+    "raw_dhat_profiles_and_full_logs": "retained outside the public repository; this bundle contains sanitized summaries and source-site excerpts"
+  }
+}

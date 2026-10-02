@@ -1,0 +1,19 @@
+component	parent_live_at_t_gmax_bytes	boxed_live_at_t_gmax_bytes	parent_minus_boxed_bytes
+Interned attribute-set backing	0	0	0
+Nested path-attribute payloads	8521952	8524188	-2236
+Group RIB-Out table	285212916	285212916	0
+Loc-RIB best-path map	371197200	371197200	0
+Adj-RIB-In route storage	285213720	285213720	0
+Transport known-path memory	39845904	39845904	0
+Announcing-peers index	232	232	0
+Transport session buffers/scratch	120203222	40242477	79960745
+Prefix-trie index - Adj-RIB-In	54528768	54528736	32
+Prefix-trie index - group table	54528768	54529664	-896
+Daemon core	304642	304642	0
+Transport import-decision cache	0	0	0
+RIB other	64117230	63959590	157640
+API / peer-manager	385643	384571	1072
+Per-peer Adj-RIB-Out	256	256	0
+Telemetry / tokio / rest	488218	488365	-147
+other	207	207	0
+TOTAL	1284548878	1204432668	80116210
