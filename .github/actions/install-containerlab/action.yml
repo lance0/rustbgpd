@@ -16,7 +16,10 @@ runs:
     - name: Resolve pinned containerlab checksum
       id: pin
       shell: bash
-      run: echo "sha256=$(.github/scripts/archive-pin.sh containerlab_${{ inputs.version }}_linux_amd64.deb)" >> "$GITHUB_OUTPUT"
+      run: |
+        set -euo pipefail
+        sha256=$(.github/scripts/archive-pin.sh containerlab_${{ inputs.version }}_linux_amd64.deb)
+        echo "sha256=${sha256}" >> "$GITHUB_OUTPUT"
 
     # The key includes the version and digest, so a bump of either input
     # misses the cache and re-downloads.

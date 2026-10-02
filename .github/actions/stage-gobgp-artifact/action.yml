@@ -21,7 +21,10 @@ runs:
     - name: Resolve pinned archive checksum
       id: pin
       shell: bash
-      run: echo "sha256=$(.github/scripts/archive-pin.sh "gobgp_${{ inputs.version }}_linux_amd64.tar.gz")" >> "$GITHUB_OUTPUT"
+      run: |
+        set -euo pipefail
+        sha256=$(.github/scripts/archive-pin.sh "gobgp_${{ inputs.version }}_linux_amd64.tar.gz")
+        echo "sha256=${sha256}" >> "$GITHUB_OUTPUT"
 
     - name: Restore exact GoBGP archive cache
       id: cache

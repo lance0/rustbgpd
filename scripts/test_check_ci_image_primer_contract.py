@@ -113,12 +113,13 @@ M83_BIRD_STAGE = (
 )
 M74_STAGE = (
     "      - name: Stage verified GoBGP archive\n"
-    "        uses: ./.github/actions/stage-gobgp-artifact\n\n"
+    "        uses: ./.github/actions/stage-gobgp-artifact\n"
+    "        id: gobgp_archive\n\n"
 )
 M74_BUILD = (
     "      - name: Build gobgp:interop\n"
     "        run: >-\n"
-    '          docker build --build-arg GOBGP_AMD64_SHA256="$(.github/scripts/archive-pin.sh gobgp_3.37.0_linux_amd64.tar.gz)"\n'
+    '          docker build --build-arg GOBGP_AMD64_SHA256="${{ steps.gobgp_archive.outputs.sha256 }}"\n'
     "          -t gobgp:interop -f tests/interop/Dockerfile.gobgp tests/interop\n\n"
 )
 UNVERIFIED_STEP = (
@@ -227,6 +228,56 @@ class PrimerContractTests(unittest.TestCase):
                 self.assertNotEqual(result.returncode, 0)
                 self.assertIn("invalid", result.stderr)
 
+    def test_resolve_steps_fail_before_writing_an_empty_checksum(self):
+        cases = (
+            (".github/actions/install-containerlab/action.yml", "0.74.3", "containerlab_0.74.3_linux_amd64.deb"),
+            (".github/actions/install-gnmic-artifact/action.yml", None, "gnmic_0.46.0_Linux_x86_64.tar.gz"),
+            (".github/actions/install-grpcurl-artifact/action.yml", None, "grpcurl_1.9.1_linux_x86_64.tar.gz"),
+            (".github/actions/stage-bird3-artifact/action.yml", "3.3.2", "bird-3.3.2.tar.gz"),
+            (".github/actions/stage-gobgp-artifact/action.yml", "3.37.0", "gobgp_3.37.0_linux_amd64.tar.gz"),
+            (".github/workflows/ci.yml", None, "rustbgpd-v0.64.0-linux-amd64.tar.gz"),
+            (".github/workflows/kernel-dataplane.yml", None, "bird-3.3.2.tar.gz"),
+        )
+        pins = dict(line.split() for line in (ROOT / MANIFEST).read_text().splitlines() if line and not line.startswith("#"))
+        expected = {archive: digest for digest, archive in pins.items()}
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            scripts = root / ".github/scripts"
+            scripts.mkdir(parents=True)
+            shutil.copy2(ROOT / ".github/scripts/archive-pin.sh", scripts / "archive-pin.sh")
+            manifest = root / MANIFEST
+            output = root / "github-output"
+            for file, version, archive in cases:
+                with self.subTest(file=file):
+                    lines = (ROOT / file).read_text().splitlines()
+                    step = next(i for i, line in enumerate(lines) if "- name: Resolve pinned " in line)
+                    run = next(i for i in range(step + 1, len(lines)) if lines[i].lstrip() == "run: |")
+                    indent = len(lines[run]) - len(lines[run].lstrip()) + 2
+                    body = []
+                    for line in lines[run + 1 :]:
+                        if line.strip() and len(line) - len(line.lstrip()) < indent:
+                            break
+                        body.append(line[indent:])
+                    script = "\n".join(body).replace("${{ inputs.version }}", version or "")
+                    env = {**os.environ, "GITHUB_OUTPUT": str(output)}
+
+                    manifest.write_text("")
+                    output.write_text("")
+                    missing = subprocess.run(
+                        ["bash", "-eo", "pipefail", "-c", script], cwd=root, env=env,
+                        capture_output=True, text=True, check=False,
+                    )
+                    self.assertNotEqual(missing.returncode, 0)
+                    self.assertEqual(output.read_text(), "")
+
+                    manifest.write_text((ROOT / MANIFEST).read_text())
+                    valid = subprocess.run(
+                        ["bash", "-eo", "pipefail", "-c", script], cwd=root, env=env,
+                        capture_output=True, text=True, check=False,
+                    )
+                    self.assertEqual(valid.returncode, 0, valid.stderr)
+                    self.assertEqual(output.read_text(), f"sha256={expected[archive]}\n")
+
     def test_workflow_and_action_fetches_verify_their_archive(self):
         with self.subTest("workflow step fetches without a checksum"):
             self.assert_red(
@@ -244,7 +295,7 @@ class PrimerContractTests(unittest.TestCase):
             )
         with self.subTest("containerlab action drops its checksum"):
             self.assert_red(
-                ".github/actions/install-containerlab/action.yml:35: fetches without verifying a SHA-256",
+                ".github/actions/install-containerlab/action.yml:38: fetches without verifying a SHA-256",
                 (
                     ".github/actions/install-containerlab/action.yml",
                     "sha256sum --check --status",

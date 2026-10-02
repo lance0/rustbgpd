@@ -77,7 +77,10 @@ jobs:
           ref: ${{ github.sha }}
       - name: Resolve pinned bird3 checksum
         id: bird_pin
-        run: echo "sha256=$(.github/scripts/archive-pin.sh bird-3.3.2.tar.gz)" >> "$GITHUB_OUTPUT"
+        run: |
+          set -euo pipefail
+          sha256=$(.github/scripts/archive-pin.sh bird-3.3.2.tar.gz)
+          echo "sha256=${sha256}" >> "$GITHUB_OUTPUT"
       - name: Restore exact bird3 archive cache
         id: cache
         uses: actions/cache/restore@v6
@@ -673,9 +676,10 @@ jobs:
       # the topology header).
       - name: Stage verified GoBGP archive
         uses: ./.github/actions/stage-gobgp-artifact
+        id: gobgp_archive
       - name: Build gobgp:interop image
         run: >-
-          docker build --build-arg GOBGP_AMD64_SHA256="$(.github/scripts/archive-pin.sh gobgp_3.37.0_linux_amd64.tar.gz)"
+          docker build --build-arg GOBGP_AMD64_SHA256="${{ steps.gobgp_archive.outputs.sha256 }}"
           -t gobgp:interop -f tests/interop/Dockerfile.gobgp tests/interop
       - name: Run M65 (deploy + test + destroy with retry)
         uses: ./.github/actions/run-interop-test
@@ -700,9 +704,10 @@ jobs:
       # all-active only and cannot originate a single-active EAD-per-ES.
       - name: Stage verified GoBGP archive
         uses: ./.github/actions/stage-gobgp-artifact
+        id: gobgp_archive
       - name: Build gobgp:interop image
         run: >-
-          docker build --build-arg GOBGP_AMD64_SHA256="$(.github/scripts/archive-pin.sh gobgp_3.37.0_linux_amd64.tar.gz)"
+          docker build --build-arg GOBGP_AMD64_SHA256="${{ steps.gobgp_archive.outputs.sha256 }}"
           -t gobgp:interop -f tests/interop/Dockerfile.gobgp tests/interop
       - name: Run M71 (deploy + test + destroy with retry)
         if: steps.dataplane.outputs.vrf-available == 'true'
@@ -727,9 +732,10 @@ jobs:
       # over l3vxlan100 plus a Router-MAC FDB-NHG row.
       - name: Stage verified GoBGP archive
         uses: ./.github/actions/stage-gobgp-artifact
+        id: gobgp_archive
       - name: Build gobgp:interop image
         run: >-
-          docker build --build-arg GOBGP_AMD64_SHA256="$(.github/scripts/archive-pin.sh gobgp_3.37.0_linux_amd64.tar.gz)"
+          docker build --build-arg GOBGP_AMD64_SHA256="${{ steps.gobgp_archive.outputs.sha256 }}"
           -t gobgp:interop -f tests/interop/Dockerfile.gobgp tests/interop
       - name: Run M72 (deploy + test + destroy with retry)
         if: steps.dataplane.outputs.vrf-available == 'true'

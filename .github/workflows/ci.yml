@@ -350,7 +350,10 @@ jobs:
       # fallback; a cache outage degrades to a miss, never to a failed job.
       - name: Resolve pinned v0.64 validator checksum
         id: v064-pin
-        run: echo "sha256=$(.github/scripts/archive-pin.sh rustbgpd-v0.64.0-linux-amd64.tar.gz)" >> "$GITHUB_OUTPUT"
+        run: |
+          set -euo pipefail
+          sha256=$(.github/scripts/archive-pin.sh rustbgpd-v0.64.0-linux-amd64.tar.gz)
+          echo "sha256=${sha256}" >> "$GITHUB_OUTPUT"
       - name: Restore exact v0.64 validator archive cache
         id: v064-cache
         uses: actions/cache/restore@v6

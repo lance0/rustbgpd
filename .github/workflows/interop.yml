@@ -485,6 +485,7 @@ jobs:
 
       - name: Stage verified GoBGP 4.6.0 archive
         uses: ./.github/actions/stage-gobgp-artifact
+        id: gobgp_archive
         with:
           version: "4.6.0"
 
@@ -492,7 +493,7 @@ jobs:
         run: >-
           docker build --build-arg TARGETARCH=amd64
           --build-arg GOBGP_VERSION=4.6.0
-          --build-arg GOBGP_SHA256="$(.github/scripts/archive-pin.sh gobgp_4.6.0_linux_amd64.tar.gz)"
+          --build-arg GOBGP_SHA256="${{ steps.gobgp_archive.outputs.sha256 }}"
           -t gobgp:bgpls -f tests/interop/Dockerfile.gobgp-v47 tests/interop
 
       - name: Build bird:2-bookworm
@@ -544,10 +545,11 @@ jobs:
 
       - name: Stage verified GoBGP archive
         uses: ./.github/actions/stage-gobgp-artifact
+        id: gobgp_archive
 
       - name: Build gobgp:interop
         run: >-
-          docker build --build-arg GOBGP_AMD64_SHA256="$(.github/scripts/archive-pin.sh gobgp_3.37.0_linux_amd64.tar.gz)"
+          docker build --build-arg GOBGP_AMD64_SHA256="${{ steps.gobgp_archive.outputs.sha256 }}"
           -t gobgp:interop -f tests/interop/Dockerfile.gobgp tests/interop
 
       - name: Run M74 dual-family reflection (deploy + test + destroy with retry)
@@ -589,10 +591,11 @@ jobs:
 
       - name: Stage verified GoBGP archive
         uses: ./.github/actions/stage-gobgp-artifact
+        id: gobgp_archive
 
       - name: Build gobgp:interop
         run: >-
-          docker build --build-arg GOBGP_AMD64_SHA256="$(.github/scripts/archive-pin.sh gobgp_3.37.0_linux_amd64.tar.gz)"
+          docker build --build-arg GOBGP_AMD64_SHA256="${{ steps.gobgp_archive.outputs.sha256 }}"
           -t gobgp:interop -f tests/interop/Dockerfile.gobgp tests/interop
 
       - name: Run M75 (deploy + test + destroy with retry)
@@ -634,6 +637,7 @@ jobs:
 
       - name: Stage verified GoBGP 4.8.0 archive
         uses: ./.github/actions/stage-gobgp-artifact
+        id: gobgp_archive
         with:
           version: "4.8.0"
 
@@ -641,7 +645,7 @@ jobs:
         run: |
           docker build --build-arg TARGETARCH=amd64 \
           --build-arg GOBGP_VERSION=4.8.0 \
-          --build-arg GOBGP_SHA256="$(.github/scripts/archive-pin.sh gobgp_4.8.0_linux_amd64.tar.gz)" \
+          --build-arg GOBGP_SHA256="${{ steps.gobgp_archive.outputs.sha256 }}" \
           -t gobgp:v4.8.0-m76 -f tests/interop/Dockerfile.gobgp-v47 tests/interop
 
       - name: Run M76 (deploy + test + destroy with retry)
@@ -683,6 +687,7 @@ jobs:
 
       - name: Stage verified GoBGP 4.8.0 archive
         uses: ./.github/actions/stage-gobgp-artifact
+        id: gobgp_archive
         with:
           version: "4.8.0"
 
@@ -690,7 +695,7 @@ jobs:
         run: |
           docker build --build-arg TARGETARCH=amd64 \
           --build-arg GOBGP_VERSION=4.8.0 \
-          --build-arg GOBGP_SHA256="$(.github/scripts/archive-pin.sh gobgp_4.8.0_linux_amd64.tar.gz)" \
+          --build-arg GOBGP_SHA256="${{ steps.gobgp_archive.outputs.sha256 }}" \
           -t gobgp:v4.8.0-m77 -f tests/interop/Dockerfile.gobgp-v47 tests/interop
 
       - name: Run M77 (deploy + test + destroy with retry)
@@ -732,6 +737,7 @@ jobs:
 
       - name: Stage verified GoBGP 4.6.0 archive
         uses: ./.github/actions/stage-gobgp-artifact
+        id: gobgp_archive
         with:
           version: "4.6.0"
 
@@ -739,7 +745,7 @@ jobs:
         run: >-
           docker build --build-arg TARGETARCH=amd64
           --build-arg GOBGP_VERSION=4.6.0
-          --build-arg GOBGP_SHA256="$(.github/scripts/archive-pin.sh gobgp_4.6.0_linux_amd64.tar.gz)"
+          --build-arg GOBGP_SHA256="${{ steps.gobgp_archive.outputs.sha256 }}"
           -t gobgp:bgpls -f tests/interop/Dockerfile.gobgp-v47 tests/interop
 
       - name: Run M78 (deploy + test + destroy with retry)
@@ -781,6 +787,7 @@ jobs:
 
       - name: Stage verified GoBGP 4.6.0 archive
         uses: ./.github/actions/stage-gobgp-artifact
+        id: gobgp_archive
         with:
           version: "4.6.0"
 
@@ -788,7 +795,7 @@ jobs:
         run: >-
           docker build --build-arg TARGETARCH=amd64
           --build-arg GOBGP_VERSION=4.6.0
-          --build-arg GOBGP_SHA256="$(.github/scripts/archive-pin.sh gobgp_4.6.0_linux_amd64.tar.gz)"
+          --build-arg GOBGP_SHA256="${{ steps.gobgp_archive.outputs.sha256 }}"
           -t gobgp:bgpls -f tests/interop/Dockerfile.gobgp-v47 tests/interop
 
       - name: Run M79 (deploy + test + destroy with retry)
@@ -904,10 +911,11 @@ jobs:
 
       - name: Stage verified GoBGP archive
         uses: ./.github/actions/stage-gobgp-artifact
+        id: gobgp_archive
 
       - name: Build gobgp:interop
         run: >-
-          docker build --build-arg GOBGP_AMD64_SHA256="$(.github/scripts/archive-pin.sh gobgp_3.37.0_linux_amd64.tar.gz)"
+          docker build --build-arg GOBGP_AMD64_SHA256="${{ steps.gobgp_archive.outputs.sha256 }}"
           -t gobgp:interop -f tests/interop/Dockerfile.gobgp tests/interop
 
       - name: Build bmpsink:m81
@@ -960,10 +968,11 @@ jobs:
 
       - name: Stage verified GoBGP archive
         uses: ./.github/actions/stage-gobgp-artifact
+        id: gobgp_archive
 
       - name: Build gobgp:interop
         run: >-
-          docker build --build-arg GOBGP_AMD64_SHA256="$(.github/scripts/archive-pin.sh gobgp_3.37.0_linux_amd64.tar.gz)"
+          docker build --build-arg GOBGP_AMD64_SHA256="${{ steps.gobgp_archive.outputs.sha256 }}"
           -t gobgp:interop -f tests/interop/Dockerfile.gobgp tests/interop
 
       - name: Run M82 (deploy + test + destroy with retry)
@@ -1025,6 +1034,7 @@ jobs:
 
       - name: Stage verified GoBGP 4.8.0 archive
         uses: ./.github/actions/stage-gobgp-artifact
+        id: gobgp_archive
         with:
           version: "4.8.0"
 
@@ -1032,7 +1042,7 @@ jobs:
         run: >-
           docker build --build-arg TARGETARCH=amd64
           --build-arg GOBGP_VERSION=4.8.0
-          --build-arg GOBGP_SHA256="$(.github/scripts/archive-pin.sh gobgp_4.8.0_linux_amd64.tar.gz)"
+          --build-arg GOBGP_SHA256="${{ steps.gobgp_archive.outputs.sha256 }}"
           -t gobgp:v4.8.0-m83 -f tests/interop/Dockerfile.gobgp-v47 tests/interop
 
       - name: Pull digest-pinned FRR 10.7.0 image
@@ -1967,12 +1977,13 @@ jobs:
 
       - name: Stage verified GoBGP 4.7.0 archive
         uses: ./.github/actions/stage-gobgp-artifact
+        id: gobgp_archive
         with:
           version: "4.7.0"
 
       - name: Build gobgp:v4.7.0-m92
         run: >-
-          docker build --build-arg GOBGP_SHA256="$(.github/scripts/archive-pin.sh gobgp_4.7.0_linux_amd64.tar.gz)"
+          docker build --build-arg GOBGP_SHA256="${{ steps.gobgp_archive.outputs.sha256 }}"
           -t gobgp:v4.7.0-m92 -f tests/interop/Dockerfile.gobgp-v47 tests/interop
 
       - name: Run M92
@@ -2302,6 +2313,7 @@ jobs:
 
       - name: Stage verified GoBGP 4.8.0 archive
         uses: ./.github/actions/stage-gobgp-artifact
+        id: gobgp_archive
         with:
           version: "4.8.0"
 
@@ -2309,7 +2321,7 @@ jobs:
         run: >-
           docker build --build-arg TARGETARCH=amd64
           --build-arg GOBGP_VERSION=4.8.0
-          --build-arg GOBGP_SHA256="$(.github/scripts/archive-pin.sh gobgp_4.8.0_linux_amd64.tar.gz)"
+          --build-arg GOBGP_SHA256="${{ steps.gobgp_archive.outputs.sha256 }}"
           -t gobgp:v4.8.0-m103 -f tests/interop/Dockerfile.gobgp-v47 tests/interop
 
       - name: Run M103 (single-attempt GoBGP 4.8 differential)
@@ -2424,6 +2436,7 @@ jobs:
 
       - name: Stage verified GoBGP 4.8.0 archive
         uses: ./.github/actions/stage-gobgp-artifact
+        id: gobgp_archive
         with:
           version: "4.8.0"
 
@@ -2431,7 +2444,7 @@ jobs:
         run: >-
           docker build --build-arg TARGETARCH=amd64
           --build-arg GOBGP_VERSION=4.8.0
-          --build-arg GOBGP_SHA256="$(.github/scripts/archive-pin.sh gobgp_4.8.0_linux_amd64.tar.gz)"
+          --build-arg GOBGP_SHA256="${{ steps.gobgp_archive.outputs.sha256 }}"
           -t gobgp:v4.8.0-m104 -f tests/interop/Dockerfile.gobgp-v47 tests/interop
 
       - name: Run immutable M90 context proof (exact 23/23)
@@ -2492,6 +2505,7 @@ jobs:
 
       - name: Stage verified GoBGP 4.8.0 archive
         uses: ./.github/actions/stage-gobgp-artifact
+        id: gobgp_archive
         with:
           version: "4.8.0"
 
@@ -2499,7 +2513,7 @@ jobs:
         run: >-
           docker build --build-arg TARGETARCH=amd64
           --build-arg GOBGP_VERSION=4.8.0
-          --build-arg GOBGP_SHA256="$(.github/scripts/archive-pin.sh gobgp_4.8.0_linux_amd64.tar.gz)"
+          --build-arg GOBGP_SHA256="${{ steps.gobgp_archive.outputs.sha256 }}"
           -t gobgp:v4.8.0-m107 -f tests/interop/Dockerfile.gobgp-v47 tests/interop
 
       - name: Run M107 (RFC 8950 uniform fleet, strict_peer, transparent export)

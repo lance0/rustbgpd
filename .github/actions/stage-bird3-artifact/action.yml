@@ -26,7 +26,10 @@ runs:
     - name: Resolve pinned archive checksum
       id: pin
       shell: bash
-      run: echo "sha256=$(.github/scripts/archive-pin.sh "bird-${{ inputs.version }}.tar.gz")" >> "$GITHUB_OUTPUT"
+      run: |
+        set -euo pipefail
+        sha256=$(.github/scripts/archive-pin.sh "bird-${{ inputs.version }}.tar.gz")
+        echo "sha256=${sha256}" >> "$GITHUB_OUTPUT"
 
     - name: Restore exact BIRD archive cache
       id: cache

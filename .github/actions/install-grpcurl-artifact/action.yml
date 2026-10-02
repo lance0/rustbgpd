@@ -11,7 +11,10 @@ runs:
     - name: Resolve pinned archive checksum
       id: pin
       shell: bash
-      run: echo "sha256=$(.github/scripts/archive-pin.sh grpcurl_1.9.1_linux_x86_64.tar.gz)" >> "$GITHUB_OUTPUT"
+      run: |
+        set -euo pipefail
+        sha256=$(.github/scripts/archive-pin.sh grpcurl_1.9.1_linux_x86_64.tar.gz)
+        echo "sha256=${sha256}" >> "$GITHUB_OUTPUT"
 
     - name: Restore exact grpcurl archive cache
       id: cache
