@@ -1,0 +1,32 @@
+[10:12:41 TEST] Controller observations: <artifact-directory>
+[10:12:41 TEST] gRPC endpoint: 172.20.20.3:50051
+% Can't open configuration file /etc/frr/vtysh.conf due to 'No such file or directory'.
+Configuration file[/etc/frr/frr.conf] processing failure: 11
+[10:12:41 TEST] Starting rustbgpd daemon...
+[10:12:41 TEST] rustbgpd is running (after 1s)
+[10:12:41 TEST] Waiting for gRPC to become available...
+  [10:12:41] PASS gRPC endpoint ready (attempt 1)
+[10:12:41 TEST] Starting rustbgpd daemon...
+[10:12:41 TEST] rustbgpd is running (after 1s)
+[10:12:41 TEST] Waiting for gRPC to become available...
+  [10:12:41] PASS gRPC endpoint ready (attempt 1)
+PASS initial sessions established
+PASS initial-empty
+PASS created
+PASS unchanged
+PASS replaced
+PASS masked-local-intent
+PASS masked-replaced
+PASS delete-keeps-received-winner
+PASS masked-recreated
+PASS local-selection-restored
+PASS peer deliberately disconnected
+PASS peer reconnected
+PASS reconnect-replay
+PASS daemon stopped
+PASS restarted daemon health
+PASS restart sessions restored
+PASS restart-empty
+PASS restart-reconciled
+PASS deleted
+[10:13:09 TEST] [cleanup] containerlab destroy -t ./tests/interop/scripts/../m22-flowspec-frr.clab.yml

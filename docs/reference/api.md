@@ -2856,6 +2856,23 @@ report an outcome)`.
 
 These RPCs remain outside the v1 inventory
 ([stability](stability.md)); the contract above describes current behavior.
+The [bounded dual-stack controller qualification](../artifacts/interop/m22-flowspec-controller-20261002/README.md)
+exercises 100 local rules against FRR 10.7.1, including retained intent,
+committed export policy, peer replay, and restart reconciliation. It does not
+qualify receive-side feasibility validation, GR/LLGR retention, or dataplane
+enforcement.
+
+The dated receipt preserves the as-run driver hash and observations. Its
+30-second convergence and 90-second session polling windows checked elapsed
+time only after failed observations; a successful observation could finish
+after the window. It therefore establishes functional convergence, not a
+strict latency bound. The current driver also rejects success at or after
+the deadline, covered by an offline clock-controlled regression. These are
+acceptance deadlines; in-flight observation commands retain their own timeouts.
+The current FRR oracle also rejects additional match components in both table
+paths and detailed rows. An offline recheck of all 26 retained snapshots passed
+with those checks, covering 980 paths and their matching detailed rows without
+changing the original receipt or driver identity.
 
 ### Inject an EVPN Type 2 (MAC/IP) route
 

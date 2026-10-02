@@ -1,0 +1,124 @@
+#!/usr/bin/env python3
+"""Negative controls for the controller lab's content comparisons."""
+
+import copy
+import json
+import struct
+import unittest
+from unittest.mock import Mock, patch
+
+import m22_flowspec_controller as controller
+
+
+def observed(request):
+    row = copy.deepcopy(request)
+    row["peerAddress"] = "0.0.0.0"
+    bits = struct.unpack("!I", struct.pack("!f", row["actions"][0]["trafficRate"]["rate"]))[0]
+    row["extendedCommunities"] = [str(0x8006000000000000 | bits)]
+    return row
+
+
+class ControllerOracleTests(unittest.TestCase):
+    def test_wait_rejects_success_at_or_after_deadline(self):
+        for completed in (29.999, 30, 31):
+            lab = object.__new__(controller.Lab)
+            lab.results = []
+            check = Mock(return_value="observed")
+            with self.subTest(completed=completed), \
+                    patch.object(controller.time, "monotonic", side_effect=[0, completed, completed]), \
+                    patch.object(controller.time, "sleep") as sleep, patch("builtins.print") as output:
+                if completed < 30:
+                    self.assertEqual(lab.wait("converged", check), "observed")
+                    self.assertEqual(lab.results, ["converged"])
+                    output.assert_called_once()
+                else:
+                    with self.assertRaisesRegex(AssertionError, "converged did not converge within 30s"):
+                        lab.wait("converged", check)
+                    self.assertEqual(lab.results, [])
+                    output.assert_not_called()
+                check.assert_called_once()
+                sleep.assert_not_called()
+
+    def test_exact_dual_afi_rows(self):
+        for family in controller.FAMILIES:
+            request = controller.rule(family, 1)
+            controller.assert_routes([observed(request)], [request], {})
+
+    def test_equal_count_is_insufficient(self):
+        request = controller.rule("IPV4", 1)
+        for mutation in (
+            lambda row: row["components"][0].update(prefix="198.18.2.0/24"),
+            lambda row: row["components"][2].update(value="=443"),
+            lambda row: row["actions"][0]["trafficRate"].update(rate=0),
+            lambda row: row.update(communities=[controller.REWRITE]),
+            lambda row: row.update(peerAddress="10.0.1.2"),
+            lambda row: row.update(extendedCommunities=["0"]),
+        ):
+            row = observed(request)
+            mutation(row)
+            with self.subTest(row=row), self.assertRaises(AssertionError):
+                controller.assert_routes([row], [request], {})
+
+    def test_duplicate_rows_do_not_hide_missing_rule(self):
+        requests = [controller.rule("IPV6", n) for n in (1, 2)]
+        with self.assertRaises(AssertionError):
+            controller.assert_routes([observed(requests[0])] * 2, requests, {})
+
+    def test_frr_rejects_count_only_and_invalid_paths(self):
+        for document in (
+            {"totalRoutes": 1},
+            {"totalRoutes": 1, "routes": {"rule": [{"valid": False}]}},
+            {"totalRoutes": 1, "routes": {"rule": [{"valid": True}, {"valid": True}]}},
+        ):
+            with self.subTest(document=document), self.assertRaises((AssertionError, KeyError)):
+                controller.frr_routes(document)
+
+    def test_frr_content_and_complete_detail_sequence(self):
+        request = controller.rule("IPV6", 1)
+        prefix = request["components"][0]["prefix"]
+        fields = {"to": prefix + "/off 0", "proto": "= 6 ", "dstp": "= 80 "}
+        details = controller.frr_details(json.dumps([
+            fields, {"ecomlist": "65001:100 FS:rate 1000.000000"}, {"time": "00:00:01"}
+        ]))
+        fixture = {"frr": {"totalRoutes": 1, "routes": {"nlri": [dict(fields, valid=True, bestpath=True)]}},
+                   "frr_details": details}
+        controller.assert_frr(fixture, [request])
+        for field, value in (("proto", "= 17 "), ("dstp", "= 443 "),
+                             ("ecomlist", "65001:100 FS:rate 2000.000000"),
+                             ("ecomlist", "FS:rate 1000.000000")):
+            broken = copy.deepcopy(fixture)
+            broken["frr_details"][prefix][field] = value
+            with self.subTest(field=field, value=value), self.assertRaises(AssertionError):
+                controller.assert_frr(broken, [request])
+        with self.assertRaises((AssertionError, json.JSONDecodeError)):
+            controller.frr_details(json.dumps([fields, {"ecomlist": "x"}]) + "bad trailing data")
+
+    def test_frr_rejects_extra_match_components(self):
+        for family in controller.FAMILIES:
+            request = controller.rule(family, 1)
+            prefix = request["components"][0]["prefix"]
+            fields = {"to": prefix, "proto": "= 6 ", "dstp": "= 80 "}
+            detail = dict(fields, ecomlist="65001:100 FS:rate 1000.000000")
+            fixture = {"frr": {"totalRoutes": 1, "routes": {"nlri": [dict(fields, valid=True, bestpath=True)]}},
+                       "frr_details": {prefix: detail}}
+            controller.assert_frr(fixture, [request])
+            source = "192.0.2.0/24" if family == "IPV4" else "2001:db8:ffff::/64/off 0"
+            for extra in ({"from": source}, {"srcp": "= 1234 "}):
+                for representation in ("table", "detail", "both"):
+                    broken = copy.deepcopy(fixture)
+                    if representation in ("table", "both"):
+                        path = broken["frr"]["routes"].pop("nlri")[0]
+                        path.update(extra)
+                        broken["frr"]["routes"][f"nlri {extra}"] = [path]
+                    if representation in ("detail", "both"):
+                        broken["frr_details"][prefix].update(extra)
+                    with self.subTest(family=family, extra=extra, representation=representation), \
+                            self.assertRaises(AssertionError):
+                        controller.assert_frr(broken, [request])
+                with self.subTest(family=family, extra=extra, representation="detail parser"), \
+                        self.assertRaises(AssertionError):
+                    controller.frr_details(json.dumps([dict(fields, **extra), {"ecomlist": detail["ecomlist"]}]))
+
+
+if __name__ == "__main__":
+    unittest.main()

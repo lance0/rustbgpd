@@ -845,6 +845,16 @@ jobs:
           topology: tests/interop/m22-flowspec-frr.clab.yml
           script: tests/interop/scripts/test-m22-flowspec-frr.sh
 
+      - name: Check M22 controller evidence comparisons
+        run: python3 tests/interop/scripts/test_m22_flowspec_controller.py
+
+      - name: Run M22 controller lifecycle on a fresh topology
+        uses: ./.github/actions/run-interop-test
+        with:
+          label: M22 controller
+          topology: tests/interop/m22-flowspec-frr.clab.yml
+          script: tests/interop/scripts/test-m22-flowspec-controller.sh
+
   m24:
     needs: [prime_dev_image]
     name: M24 — BMP (FRR 10.7.1, Python receiver)
