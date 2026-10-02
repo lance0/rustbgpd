@@ -111,11 +111,12 @@ jobs:
         # upstream release binary instead.
         run: |
           set -euo pipefail
+          sha256="$(.github/scripts/archive-pin.sh protoc-25.3-linux-x86_64.zip)"
           curl -sSfL -o /tmp/protoc.zip \
             --connect-timeout 10 --max-time 120 \
             --retry 5 --retry-all-errors --retry-delay 5 --retry-max-time 180 \
             https://github.com/protocolbuffers/protobuf/releases/download/v25.3/protoc-25.3-linux-x86_64.zip
-          echo "f853e691868d0557425ea290bf7ba6384eef2fa9b04c323afab49a770ba9da80  /tmp/protoc.zip" | sha256sum -c
+          echo "${sha256}  /tmp/protoc.zip" | sha256sum -c
           unzip -o /tmp/protoc.zip -d /usr/local bin/protoc 'include/*'
           protoc --version
 

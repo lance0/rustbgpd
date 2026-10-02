@@ -2,10 +2,10 @@
 set -euo pipefail
 
 ACTIONLINT_VERSION="1.7.12"
-ACTIONLINT_SHA256="8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8"
+ACTIONLINT_SHA256="$("$(dirname -- "${BASH_SOURCE[0]}")/archive-pin.sh" "actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz")"
 ACTIONLINT_URL="https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz"
 RUFF_VERSION="0.16.0"
-RUFF_SHA256="98001c995a134d95f9bc83106a7f94b552971b583f1c0ab75fb656a881e13865"
+RUFF_SHA256="$("$(dirname -- "${BASH_SOURCE[0]}")/archive-pin.sh" "ruff-${RUFF_VERSION}-x86_64-unknown-linux-gnu.tar.gz")"
 RUFF_URL="https://github.com/astral-sh/ruff/releases/download/${RUFF_VERSION}/ruff-x86_64-unknown-linux-gnu.tar.gz"
 
 usage() {

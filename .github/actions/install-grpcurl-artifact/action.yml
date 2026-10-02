@@ -8,12 +8,20 @@ description: >-
 runs:
   using: "composite"
   steps:
+    - name: Resolve pinned archive checksum
+      id: pin
+      shell: bash
+      run: |
+        set -euo pipefail
+        sha256=$(.github/scripts/archive-pin.sh grpcurl_1.9.1_linux_x86_64.tar.gz)
+        echo "sha256=${sha256}" >> "$GITHUB_OUTPUT"
+
     - name: Restore exact grpcurl archive cache
       id: cache
       uses: actions/cache/restore@v6
       with:
         path: ${{ runner.temp }}/grpcurl-cache/grpcurl_1.9.1_linux_x86_64.tar.gz
-        key: grpcurl-v1.9.1-linux-x86_64-588c9c429476d9ed66cd3b2ae32283a6da36e0cfbb7e446f5d6a1b68dc770214
+        key: grpcurl-v1.9.1-linux-x86_64-${{ steps.pin.outputs.sha256 }}
 
     - name: Verify cached grpcurl archive or fetch it upstream
       shell: bash
@@ -28,7 +36,7 @@ runs:
       uses: actions/cache/save@v6
       with:
         path: ${{ runner.temp }}/grpcurl-cache/grpcurl_1.9.1_linux_x86_64.tar.gz
-        key: grpcurl-v1.9.1-linux-x86_64-588c9c429476d9ed66cd3b2ae32283a6da36e0cfbb7e446f5d6a1b68dc770214
+        key: grpcurl-v1.9.1-linux-x86_64-${{ steps.pin.outputs.sha256 }}
 
     - name: Install exact grpcurl offline
       shell: bash

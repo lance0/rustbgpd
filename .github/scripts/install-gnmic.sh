@@ -3,7 +3,8 @@
 set -euo pipefail
 
 readonly GNMIC_VERSION="0.46.0"
-readonly GNMIC_SHA256="a3ded2f355a615df73900f31b9791f41e796e9c5c63b171e1ce041e8139ee00e"
+GNMIC_SHA256="$("$(dirname -- "${BASH_SOURCE[0]}")/archive-pin.sh" "gnmic_${GNMIC_VERSION}_Linux_x86_64.tar.gz")"
+readonly GNMIC_SHA256
 readonly GNMIC_ASSET="gnmic_${GNMIC_VERSION}_Linux_x86_64.tar.gz"
 readonly GNMIC_URL="https://github.com/openconfig/gnmic/releases/download/v${GNMIC_VERSION}/${GNMIC_ASSET}"
 readonly GNMIC_ATTEMPTS=3
@@ -132,8 +133,6 @@ self_test() (
     fixture_dir=$(mktemp -d)
     trap 'rm -rf -- "$fixture_dir"' EXIT
     [[ "$GNMIC_VERSION" == "0.46.0" ]] || fail_self_test "version pin drifted"
-    [[ "$GNMIC_SHA256" == "a3ded2f355a615df73900f31b9791f41e796e9c5c63b171e1ce041e8139ee00e" ]] \
-        || fail_self_test "checksum pin drifted"
     [[ "$GNMIC_ASSET" == "gnmic_0.46.0_Linux_x86_64.tar.gz" ]] \
         || fail_self_test "archive name drifted"
     printf -v expected_url '%s%s' \

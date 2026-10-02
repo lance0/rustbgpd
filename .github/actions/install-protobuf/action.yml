@@ -16,7 +16,7 @@ runs:
         fi
 
         version="25.3"
-        sha256="f853e691868d0557425ea290bf7ba6384eef2fa9b04c323afab49a770ba9da80"
+        sha256="$(.github/scripts/archive-pin.sh "protoc-${version}-linux-x86_64.zip")"
         install_root="$(mktemp -d "${RUNNER_TEMP}/protoc-${version}.XXXXXX")"
         archive="${install_root}/protoc.zip"
 
