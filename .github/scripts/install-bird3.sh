@@ -2,7 +2,7 @@
 
 set -euo pipefail
 
-BIRD3_VERSION="3.3.2"
+unset BIRD3_VERSION
 unset BIRD3_SHA256
 BIRD3_COVERAGE_LABEL=""
 while [[ ${1:-} == --version || ${1:-} == --sha256 || ${1:-} == --coverage-label ]]; do
@@ -18,6 +18,9 @@ while [[ ${1:-} == --version || ${1:-} == --sha256 || ${1:-} == --coverage-label
     esac
     shift 2
 done
+if [[ ! -v BIRD3_VERSION ]]; then
+    BIRD3_VERSION="$("$(dirname -- "${BASH_SOURCE[0]}")/archive-pin.sh" --bird3-version)"
+fi
 [[ $BIRD3_VERSION =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || {
     echo "install-bird3: invalid BIRD version: ${BIRD3_VERSION}" >&2
     exit 2
@@ -198,15 +201,14 @@ self_test() (
 
     fixture_dir=$(mktemp -d)
     trap 'rm -rf -- "$fixture_dir"' EXIT
-    [[ "$BIRD3_VERSION" == "3.3.2" ]] || fail_self_test "version pin drifted"
-    [[ "$BIRD3_ASSET" == "bird-3.3.2.tar.gz" ]] \
+    [[ "$BIRD3_ASSET" == "bird-${BIRD3_VERSION}.tar.gz" ]] \
         || fail_self_test "archive name drifted"
     printf -v expected_url '%s%s' \
         'https://bird.nic.cz' \
-        '/download/bird-3.3.2.tar.gz'
+        "/download/${BIRD3_ASSET}"
     [[ "$BIRD3_URL" == "$expected_url" ]] \
         || fail_self_test "release URL drifted"
-    [[ "$BIRD3_FALLBACK_URL" == "https://ftp.openbsd.org/pub/OpenBSD/distfiles/bird-3.3.2.tar.gz" ]] \
+    [[ "$BIRD3_FALLBACK_URL" == "https://ftp.openbsd.org/pub/OpenBSD/distfiles/${BIRD3_ASSET}" ]] \
         || fail_self_test "fallback URL drifted"
     [[ "$BIRD3_ATTEMPTS" -eq 3 ]] || fail_self_test "retry bound drifted"
     curl() { printf '%s\n' "$@" >"$fixture_dir/curl-args"; }
@@ -217,12 +219,12 @@ self_test() (
     [[ $((2 * (BIRD3_ATTEMPTS * BIRD3_MAX_TIME + 15))) -le 420 ]] \
         || fail_self_test "downloads leave less than three minutes of job headroom"
 
-    source_dir="$fixture_dir/source/bird-3.3.2"
+    source_dir="$fixture_dir/source/bird-${BIRD3_VERSION}"
     mkdir -p "$source_dir"
     printf '#!/bin/sh\n' >"$source_dir/configure"
-    printf '3.3.2\n' >"$source_dir/VERSION"
+    printf '%s\n' "$BIRD3_VERSION" >"$source_dir/VERSION"
     valid_archive="$fixture_dir/valid.tar.gz"
-    tar -czf "$valid_archive" -C "$fixture_dir/source" bird-3.3.2
+    tar -czf "$valid_archive" -C "$fixture_dir/source" "bird-${BIRD3_VERSION}"
     valid_checksum=$(sha256sum "$valid_archive" | awk '{print $1}')
 
     stage_archive "$valid_checksum" "$valid_archive" \
@@ -252,19 +254,19 @@ self_test() (
 
     partial_archive="$fixture_dir/no-configure.tar.gz"
     rm -f -- "$source_dir/configure"
-    tar -czf "$partial_archive" -C "$fixture_dir/source" bird-3.3.2
+    tar -czf "$partial_archive" -C "$fixture_dir/source" "bird-${BIRD3_VERSION}"
     printf '#!/bin/sh\n' >"$source_dir/configure"
     if stage_archive "$(sha256sum "$partial_archive" | awk '{print $1}')" \
         "$partial_archive" "$fixture_dir/partial" 2>/dev/null; then
         fail_self_test "archive without configure was accepted"
     fi
 
-    wrong_dir="$fixture_dir/wrong/bird-3.3.2"
+    wrong_dir="$fixture_dir/wrong/bird-${BIRD3_VERSION}"
     mkdir -p "$wrong_dir"
     printf '#!/bin/sh\n' >"$wrong_dir/configure"
     printf '3.3.0\n' >"$wrong_dir/VERSION"
     wrong_archive="$fixture_dir/wrong-version.tar.gz"
-    tar -czf "$wrong_archive" -C "$fixture_dir/wrong" bird-3.3.2
+    tar -czf "$wrong_archive" -C "$fixture_dir/wrong" "bird-${BIRD3_VERSION}"
     wrong_checksum=$(sha256sum "$wrong_archive" | awk '{print $1}')
     if stage_archive "$wrong_checksum" "$wrong_archive" \
         "$fixture_dir/stage" 2>/dev/null; then
@@ -326,7 +328,7 @@ self_test() (
     # from the primary: supply-chain exit code, no artifact, no skip excuse.
     printf 'extra\n' >"$source_dir/EXTRA"
     tampered_archive="$fixture_dir/tampered.tar.gz"
-    tar -czf "$tampered_archive" -C "$fixture_dir/source" bird-3.3.2
+    tar -czf "$tampered_archive" -C "$fixture_dir/source" "bird-${BIRD3_VERSION}"
     rm -f -- "$source_dir/EXTRA"
     attempts=0
     download_archive_once() {

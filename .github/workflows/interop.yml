@@ -2170,7 +2170,7 @@ jobs:
 
   m101:
     needs: [prime_dev_image]
-    name: M101 — BIRD 3.3.2 real-wire attribute discard at a route server
+    name: M101 — BIRD 3 real-wire attribute discard at a route server
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -2198,20 +2198,20 @@ jobs:
           target: dev
           cache-from: type=gha,scope=rustbgpd-dev
 
-      - name: Stage verified BIRD 3.3.2 archive
+      - name: Stage verified BIRD 3 archive
         uses: ./.github/actions/stage-bird3-artifact
         id: bird_archive
-        with:
-          version: "3.3.2"
 
-      - name: Build checksum-pinned BIRD 3.3.2 image
+      - name: Build checksum-pinned BIRD 3 image
         uses: docker/build-push-action@v7
         with:
           context: tests/interop
           file: tests/interop/Dockerfile.bird-v332
-          build-args: BIRD_SHA256=${{ steps.bird_archive.outputs.sha256 }}
+          build-args: |
+            BIRD_VERSION=${{ steps.bird_archive.outputs.version }}
+            BIRD_SHA256=${{ steps.bird_archive.outputs.sha256 }}
           load: true
-          tags: bird:v3.3.2-m101
+          tags: bird:m101
           cache-from: type=gha,scope=bird332-m101
           cache-to: type=gha,mode=max,scope=bird332-m101,ignore-error=true
 

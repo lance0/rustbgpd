@@ -40,7 +40,7 @@ topology:
 
     bird:
       kind: linux
-      image: bird:v3.3.2-m101
+      image: bird:m101
       cmd: sleep infinity
       binds:
         - ./configs/bird-m105-receiver.conf:/etc/bird/bird.conf:ro

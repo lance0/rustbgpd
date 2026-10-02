@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# M101 — BIRD 3.3.2 real-wire malformed type-40 route-server proof.
+# M101 — pinned BIRD 3 real-wire malformed type-40 route-server proof.
 #
 # Exact 27/0 contract:
 #   1 gRPC readiness; 2-3 both initial sessions; 4 raw e0 28 01 00;
@@ -25,9 +25,10 @@ source "$SCRIPT_DIR/test-lib.sh"
 
 BIRD="clab-${TOPO}-bird"
 FRR="clab-${TOPO}-frr"
-BIRD_IMAGE="bird:v3.3.2-m101"
+BIRD_IMAGE="bird:m101"
 FRR_IMAGE="quay.io/frrouting/frr@sha256:f90d26a9fd5c14fc5795a73b4254ac88bc3186c45bbeb220a225fb6182de812c"
-BIRD_VERSION="BIRD version 3.3.2"
+BIRD_SOURCE_VERSION=$("$SCRIPT_DIR/../../../.github/scripts/archive-pin.sh" --bird3-version)
+BIRD_VERSION="BIRD version ${BIRD_SOURCE_VERSION}"
 FRR_VERSION="bgpd version 10.3.1_git"
 BIRD_ADDR="10.101.1.2"
 FRR_ADDR="10.101.2.2"
@@ -136,7 +137,7 @@ preflight_identities_and_configs() {
     require_sleeping_identity "$BIRD" "$BIRD_IMAGE" bird "$BIRD_VERSION"
     require_sleeping_identity "$FRR" "$FRR_IMAGE" /usr/lib/frr/bgpd "$FRR_VERSION"
     docker exec "$BIRD" bird -p -c /etc/bird/bird.conf >/dev/null 2>&1 || {
-        echo "ERROR: BIRD 3.3.2 rejected the M101 configuration" >&2
+        echo "ERROR: BIRD ${BIRD_SOURCE_VERSION} rejected the M101 configuration" >&2
         return 1
     }
     docker exec "$FRR" /usr/lib/frr/bgpd -C -f /etc/frr/frr.conf >/dev/null 2>&1 || {
@@ -375,9 +376,9 @@ PY
 
 assert_initial_sessions() {
     if bird_established; then
-        ok "BIRD 3.3.2 member session is Established"
+        ok "BIRD ${BIRD_SOURCE_VERSION} member session is Established"
     else
-        fail "BIRD 3.3.2 member session is not Established"
+        fail "BIRD ${BIRD_SOURCE_VERSION} member session is not Established"
     fi
     if frr_established; then
         ok "FRR 10.3.1 control-member session is Established"
@@ -548,7 +549,7 @@ assert_final_session_stability() {
 }
 
 main() {
-    log "M101: BIRD 3.3.2 real-wire attribute-discard route-server proof"
+    log "M101: BIRD ${BIRD_SOURCE_VERSION} real-wire attribute-discard route-server proof"
     resolve_grpc_addr
     preflight_identities_and_configs
     start_capture

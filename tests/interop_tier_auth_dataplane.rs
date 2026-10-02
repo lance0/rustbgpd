@@ -323,15 +323,15 @@ fn m43_restart_signal_accepts_only_a_positive_decimal_pid() {
 }
 
 #[test]
-fn m43_bird_332_identity_and_config_preflight_precedes_both_modes() {
+fn m43_bird3_identity_and_config_preflight_precedes_both_modes() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let topology = fs::read_to_string(root.join("tests/interop/m43-tcp-ao-bird.clab.yml"))
         .expect("M43 topology must be readable");
     let source = fs::read_to_string(root.join("tests/interop/scripts/test-m43-tcp-ao-bird.sh"))
         .expect("M43 driver must be readable");
 
-    assert!(topology.contains("image: bird:3.3.2-tcpao"));
-    assert!(source.contains("BIRD_VERSION=\"3.3.2\""));
+    assert!(topology.contains("image: bird:m43-tcpao"));
+    assert!(source.contains("archive-pin.sh\" --bird3-version"));
     assert!(source.contains("BIRD_VERSION_OUTPUT=\"BIRD version ${BIRD_VERSION}\""));
     let preflight = source
         .split_once("preflight_bird_container() {")

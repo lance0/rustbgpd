@@ -1,7 +1,7 @@
 # M105 live AS_SET discovery
 
 M105 sends the same two IPv4 routes from one raw route-server client to five
-current route-server implementations: rustbgpd, BIRD 3.3.2, OpenBGPD 9.2,
+route-server implementations: rustbgpd, the pinned BIRD 3, OpenBGPD 9.2,
 GoBGP 4.8.0, and FRR 10.3.1. The first route has an ordinary AS_SEQUENCE; the
 second has a two-member AS_SET. No daemon's AS_SET policy default is changed.
 
@@ -11,6 +11,11 @@ observations beside packet-level evidence. It does not encode an expected
 per-daemon outcome.
 
 Run from the repository root:
+
+Build the current `bird:m101` image using the
+[pinned BIRD 3 recipe](../../../docs/interop.md#pinned-bird-3-images-m43-and-m101)
+before deploying. The observation below records the versions used on
+2026-08-29; later runs should record their actual image identities.
 
 ```console
 containerlab deploy -t tests/interop/m105-live-as-set.clab.yml

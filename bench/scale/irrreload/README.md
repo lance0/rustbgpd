@@ -34,7 +34,8 @@ The runner defaults to the frozen `historical` comparator generation: BIRD
 refresh pair:
 
 - BIRD 3.3.2 at `bird:v3.3.2-m101`, built from the checksum-pinned
-  `tests/interop/Dockerfile.bird-v332`;
+  `tests/interop/Dockerfile.bird-v332` with the
+  [frozen comparator build args](../../../docs/interop.md#pinned-bird-3-images-m43-and-m101);
 - OpenBGPD 9.2 at
   `openbgpd/openbgpd@sha256:b2e94bd1538102a89cff96867993eabb6dbb27720de4ab7b588860880e3e3bf9`.
 

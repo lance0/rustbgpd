@@ -933,13 +933,9 @@ fn m86_pins_openbgpd_identity_and_preflights_every_daemon_start() {
 #[test]
 fn m101_pins_peer_identity_and_real_wire_attribute_discard_contract() {
     const FRR_IMAGE: &str = "quay.io/frrouting/frr@sha256:f90d26a9fd5c14fc5795a73b4254ac88bc3186c45bbeb220a225fb6182de812c";
-    const BIRD_SHA256: &str = "21297d7a02edd700ae82de5a630055a9cb88a99e2e7e45551bc7d6c1e5b4de2c";
 
     let topology = topology("m101-routeserver-bird332.clab.yml");
-    assert_eq!(
-        topology["topology"]["nodes"]["bird"]["image"],
-        "bird:v3.3.2-m101"
-    );
+    assert_eq!(topology["topology"]["nodes"]["bird"]["image"], "bird:m101");
     assert_eq!(topology["topology"]["nodes"]["frr"]["image"], FRR_IMAGE);
     for node in ["bird", "frr"] {
         assert_eq!(
@@ -951,8 +947,10 @@ fn m101_pins_peer_identity_and_real_wire_attribute_discard_contract() {
     let dockerfile = fs::read_to_string(interop_path("Dockerfile.bird-v332"))
         .expect("read M101 BIRD Dockerfile");
     for required in [
-        "ARG BIRD_VERSION=3.3.2",
-        "ARG BIRD_SHA256=21297d7a02edd700ae82de5a630055a9cb88a99e2e7e45551bc7d6c1e5b4de2c",
+        "ARG BIRD_VERSION\n",
+        "ARG BIRD_SHA256\n",
+        "test -n \"${BIRD_VERSION}\"",
+        "test -n \"${BIRD_SHA256}\"",
         "COPY bird3-archive/ /tmp/bird-archive/",
         "if [ ! -f \"${target}\" ]; then",
         "if [ \"${attempt}\" -ge 3 ]; then",
@@ -964,7 +962,6 @@ fn m101_pins_peer_identity_and_real_wire_attribute_discard_contract() {
             "M101 BIRD build lost `{required}`"
         );
     }
-    assert!(dockerfile.contains(BIRD_SHA256));
     let copy = dockerfile
         .find("COPY bird3-archive/ /tmp/bird-archive/")
         .expect("M101 copies the staged archive directory");
@@ -996,7 +993,8 @@ fn m101_pins_peer_identity_and_real_wire_attribute_discard_contract() {
         .unwrap_or_else(|error| panic!("read {}: {error}", script_path.display()));
     for required in [
         format!("FRR_IMAGE=\"{FRR_IMAGE}\""),
-        "BIRD_VERSION=\"BIRD version 3.3.2\"".to_owned(),
+        "archive-pin.sh\" --bird3-version".to_owned(),
+        "BIRD_VERSION=\"BIRD version ${BIRD_SOURCE_VERSION}\"".to_owned(),
         "FRR_VERSION=\"bgpd version 10.3.1_git\"".to_owned(),
         "[ \"$command\" = '[\"sleep\",\"infinity\"]' ]".to_owned(),
         "type-40 tuple mismatch".to_owned(),
@@ -1149,6 +1147,76 @@ fn m105_capture_refuses_stale_resources_before_arming() {
             && refuse < create_volume
             && create_volume < ready,
         "M105 must refuse surviving capture resources before creating and arming the capture"
+    );
+}
+
+#[test]
+fn m105_bird_identity_requires_local_image_and_manifest_version() {
+    let image = topology("m105-live-as-set.clab.yml")["topology"]["nodes"]["bird"]["image"]
+        .as_str()
+        .expect("M105 BIRD image tag")
+        .to_owned();
+    assert_eq!(image, "bird:m101");
+
+    let source = fs::read_to_string(interop_path("scripts/test-m105-live-as-set.sh"))
+        .expect("read M105 driver");
+    let version = source
+        .lines()
+        .find(|line| line.starts_with("BIRD_VERSION="))
+        .expect("M105 BIRD version assignment");
+    let helper = |name: &str| {
+        let start = source
+            .find(&format!("{name}() {{"))
+            .expect("M105 identity helper");
+        let end = start + source[start..].find("\n}\n").expect("bounded M105 helper") + 3;
+        &source[start..end]
+    };
+    let functions = format!(
+        "{version}\n{}\n{}",
+        helper("configured_image_is_local"),
+        helper("bird_identity")
+    );
+    let output = Command::new("bash")
+        .args(["-c", r#"
+set -euo pipefail
+SCRIPT_DIR=$DRIVER_DIR
+BIRD=clab-m105-live-as-set-bird
+eval "$FUNCTIONS"
+expected=$("$SCRIPT_DIR/../../../.github/scripts/archive-pin.sh" --bird3-version)
+[[ $BIRD_VERSION == "$expected" ]]
+docker() {
+    if [[ $# == 4 && $1 == inspect && $2 == -f && $4 == "$BIRD" ]]; then
+        case $3 in
+            '{{.Config.Image}}') printf '%s\n' "$container_tag" ;;
+            '{{.Image}}') printf '%s\n' "$container_id" ;;
+            *) return 2 ;;
+        esac
+    elif [[ $# == 5 && $1 == image && $2 == inspect && $3 == -f && $4 == '{{.Id}}' && $5 == bird:m101 ]]; then
+        printf '%s\n' "$local_id"
+    elif [[ $# == 4 && $1 == exec && $2 == "$BIRD" && $3 == bird && $4 == --version ]]; then
+        printf 'BIRD version %s\n' "$runtime_version"
+    else
+        return 2
+    fi
+}
+container_tag=$TOPOLOGY_IMAGE container_id=sha256:matching local_id=sha256:matching runtime_version=$expected
+bird_identity
+container_tag=bird:v3.3.2-m101
+if bird_identity; then echo 'wrong container tag accepted' >&2; exit 1; fi
+container_tag=$TOPOLOGY_IMAGE runtime_version=3.3.1
+if bird_identity; then echo 'wrong runtime version accepted' >&2; exit 1; fi
+runtime_version=$expected container_id=sha256:other
+if bird_identity; then echo 'nonlocal image accepted' >&2; exit 1; fi
+"#])
+        .env("FUNCTIONS", functions)
+        .env("DRIVER_DIR", interop_path("scripts"))
+        .env("TOPOLOGY_IMAGE", image)
+        .output()
+        .expect("run M105 identity fixture");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
     );
 }
 
