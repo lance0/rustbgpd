@@ -75,19 +75,20 @@ spot-check (rustbgpd only, same host): 2026-09-28.
 | Kernel | Linux 6.17.0-20-generic |
 | rustc | 1.95.0 (2026-04-14) |
 | Criterion | 0.8 |
-| Measurement state | **RIB Operations** re-measured pinned (`performance` governor, `taskset -c 8`, 4 alternating A/B attempts) comparing the `v0.31.0` tag to current `main`; absolute numbers below are the `main` medians |
+| Measurement state | **RIB Operations** re-measured 2026-05-29, pinned (`performance` governor, `taskset -c 8`, 4 alternating A/B attempts), comparing the `v0.31.0` tag to then-current `main`; the RIB Operations numbers below are those `main` medians |
 
-The RIB Operations numbers below are the current-`main` medians from a pinned
+The RIB Operations numbers below are the 2026-05-29 `main` medians from a pinned
 `v0.31.0 → main` comparison run (the cumulative effect of the scale/memory
 sprint: the `SmallVec` prefix index, `FxHash` route maps, and multi-chunk
 distribution coalescing). Each row's per-benchmark delta versus `v0.31.0` is
 noted inline. The v0.32.0 inbound-UPDATE changes (single-pass attribute
 extraction + attribute-`Arc` sharing) are transport-crate only, so the RIB
-criterion and allocator-tracked `memory_profile` numbers are **unchanged**
-(re-confirmed on current `main`) and stand as-is. The **end-to-end bgperf2
-cross-stack comparison was fully re-run on current `main`** for v0.32.0 — all
-three daemons (rustbgpd, BIRD, GoBGP) on the same host — replacing the prior
-v0.4.2 snapshot. See *End-to-End System Benchmarks* below.
+criterion and allocator-tracked `memory_profile` numbers were **unchanged**
+(re-confirmed on then-current `main` on 2026-05-29) and stand as-is. The
+**end-to-end bgperf2 cross-stack comparison was fully re-run on then-current
+`main`** for v0.32.0 — all three daemons (rustbgpd, BIRD, GoBGP) on the same
+host — replacing the prior v0.4.2 snapshot. See *End-to-End System Benchmarks*
+below.
 
 ## Secondary measurement environment — self-hosted VPS bench runner
 
