@@ -42,9 +42,10 @@ is best-effort and exposes a `vrf-available` output: if the matching
 receipts **skip with a notice** (as do the netns job's L3 selectors).
 
 For M43, a separate preparation job verifies the manifest-pinned BIRD source
-archive. An upstream fetch outage at this stage skips M43; downloaded bytes
-that fail verification fail the workflow. M43 restores or fetches and verifies
-that same archive through
+archive. If all downloads are unavailable, this preparation stage skips M43;
+if downloads arrive but none passes verification after retries and fallback,
+the workflow fails. M43 restores or fetches and verifies that same archive
+through
 [`stage-bird3-artifact`](../../.github/actions/stage-bird3-artifact/action.yml)
 before building its image. GoBGP labs likewise use the pinned
 [`stage-gobgp-artifact`](../../.github/actions/stage-gobgp-artifact/action.yml)
