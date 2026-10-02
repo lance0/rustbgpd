@@ -436,6 +436,7 @@ impl PeerSession {
 // capped. A peer able to craft colliding attribute sets already has
 // strictly higher-impact vectors (churn flood, hijack).
 use crate::fast_hash::FastMap as HashMap;
+use std::collections::hash_map::Entry;
 
 fn has_route_payload(update: &OutboundRouteUpdate) -> bool {
     !update.announce.is_empty()
@@ -504,7 +505,10 @@ impl Eq for HashedAttrGroupValue {}
 /// otherwise emit one UPDATE per original pass and can overrun the bounded
 /// writer queue. Pointer lookups stay the fast path, and the value map is
 /// built only once a second distinct value appears, so the common
-/// one-allocation envelope never hashes an attribute vector. A pointer that
+/// one-allocation envelope never hashes an attribute vector. Once the value
+/// map exists, a pointer enters `by_ptr` only when it repeats or joins
+/// another group, so a distinct-valued route costs one map insert, not
+/// two; a repeated pointer pays one extra value hash. A pointer that
 /// opens a group is kept alive by that group; one that joins an existing
 /// group by value is pinned here, so a freed allocation cannot alias a
 /// later one.
@@ -553,11 +557,27 @@ impl AttrGroupIndex {
                     let key = HashedAttrGroupValue::new(first.clone(), self.by_value.hasher());
                     self.by_value.insert(key, *first_idx);
                 }
-                let key = HashedAttrGroupValue::new(
+                let value_key = HashedAttrGroupValue::new(
                     (Arc::clone(attrs), next_hop, link_local_next_hop),
                     self.by_value.hasher(),
                 );
-                *self.by_value.entry(key).or_insert(next)
+                match self.by_value.entry(value_key) {
+                    // A pointer that opens a group is found again through the
+                    // value map, so it skips `by_ptr` until it repeats: with
+                    // mostly distinct attributes that saves a second map
+                    // insert per route.
+                    Entry::Vacant(vacant) => {
+                        vacant.insert(next);
+                        return Err(next);
+                    }
+                    // Its own group again: remember the pointer, no pin needed.
+                    Entry::Occupied(own) if Arc::ptr_eq(&own.key().value.0, attrs) => {
+                        let idx = *own.get();
+                        self.by_ptr.insert(key, idx);
+                        return Ok(idx);
+                    }
+                    Entry::Occupied(other) => *other.get(),
+                }
             }
         };
         self.by_ptr.insert(key, idx);
@@ -2597,5 +2617,26 @@ mod attr_group_index_tests {
         let shared = attrs(3);
         assert_eq!(index.group(&shared, nh, None, 3), Err(3));
         assert_eq!(index.group(&shared, nh, None, 4), Ok(3));
+    }
+
+    /// Once the value map exists, a group-opening pointer is indexed by
+    /// value only; seeing it again rejoins its own group without a pin and
+    /// records it for the pointer fast path. A different allocation of the
+    /// same value still joins by value and is pinned.
+    #[test]
+    fn value_map_defers_pointer_entries_until_repeat() {
+        let mut index = AttrGroupIndex::default();
+        assert_eq!(index.group(&attrs(1), None, None, 0), Err(0));
+        let opener = attrs(2);
+        assert_eq!(index.group(&opener, None, None, 1), Err(1));
+        assert_eq!(index.by_ptr.len(), 1, "only the pre-map first pointer");
+        assert_eq!(index.group(&opener, None, None, 2), Ok(1));
+        assert_eq!(index.pinned.len(), 0);
+        assert_eq!(index.by_ptr.len(), 2);
+        assert_eq!(index.group(&opener, None, None, 2), Ok(1));
+        let twin = attrs(2);
+        assert_eq!(index.group(&twin, None, None, 2), Ok(1));
+        assert_eq!(index.pinned.len(), 1);
+        assert_eq!(index.by_ptr.len(), 3);
     }
 }
