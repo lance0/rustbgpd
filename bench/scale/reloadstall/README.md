@@ -456,7 +456,8 @@ to the frozen `historical` comparator generation (BIRD 3.3.1 / OpenBGPD 9.1).
 Set `COMPETITOR_GENERATION=current` to select the explicit current pair:
 
 - BIRD 3.3.2, built as `bird:v3.3.2-m101` from the checksum-pinned
-  `tests/interop/Dockerfile.bird-v332`;
+  `tests/interop/Dockerfile.bird-v332` with the
+  [frozen comparator build args](../../../docs/interop.md#pinned-bird-3-images-m43-and-m101);
 - OpenBGPD 9.2 at
   `openbgpd/openbgpd@sha256:b2e94bd1538102a89cff96867993eabb6dbb27720de4ab7b588860880e3e3bf9`.
 

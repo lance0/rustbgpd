@@ -933,13 +933,9 @@ fn m86_pins_openbgpd_identity_and_preflights_every_daemon_start() {
 #[test]
 fn m101_pins_peer_identity_and_real_wire_attribute_discard_contract() {
     const FRR_IMAGE: &str = "quay.io/frrouting/frr@sha256:f90d26a9fd5c14fc5795a73b4254ac88bc3186c45bbeb220a225fb6182de812c";
-    const BIRD_SHA256: &str = "21297d7a02edd700ae82de5a630055a9cb88a99e2e7e45551bc7d6c1e5b4de2c";
 
     let topology = topology("m101-routeserver-bird332.clab.yml");
-    assert_eq!(
-        topology["topology"]["nodes"]["bird"]["image"],
-        "bird:v3.3.2-m101"
-    );
+    assert_eq!(topology["topology"]["nodes"]["bird"]["image"], "bird:m101");
     assert_eq!(topology["topology"]["nodes"]["frr"]["image"], FRR_IMAGE);
     for node in ["bird", "frr"] {
         assert_eq!(
@@ -951,8 +947,10 @@ fn m101_pins_peer_identity_and_real_wire_attribute_discard_contract() {
     let dockerfile = fs::read_to_string(interop_path("Dockerfile.bird-v332"))
         .expect("read M101 BIRD Dockerfile");
     for required in [
-        "ARG BIRD_VERSION=3.3.2",
-        "ARG BIRD_SHA256=21297d7a02edd700ae82de5a630055a9cb88a99e2e7e45551bc7d6c1e5b4de2c",
+        "ARG BIRD_VERSION\n",
+        "ARG BIRD_SHA256\n",
+        "test -n \"${BIRD_VERSION}\"",
+        "test -n \"${BIRD_SHA256}\"",
         "COPY bird3-archive/ /tmp/bird-archive/",
         "if [ ! -f \"${target}\" ]; then",
         "if [ \"${attempt}\" -ge 3 ]; then",
@@ -964,7 +962,6 @@ fn m101_pins_peer_identity_and_real_wire_attribute_discard_contract() {
             "M101 BIRD build lost `{required}`"
         );
     }
-    assert!(dockerfile.contains(BIRD_SHA256));
     let copy = dockerfile
         .find("COPY bird3-archive/ /tmp/bird-archive/")
         .expect("M101 copies the staged archive directory");
@@ -996,7 +993,8 @@ fn m101_pins_peer_identity_and_real_wire_attribute_discard_contract() {
         .unwrap_or_else(|error| panic!("read {}: {error}", script_path.display()));
     for required in [
         format!("FRR_IMAGE=\"{FRR_IMAGE}\""),
-        "BIRD_VERSION=\"BIRD version 3.3.2\"".to_owned(),
+        "archive-pin.sh\" --bird3-version".to_owned(),
+        "BIRD_VERSION=\"BIRD version ${BIRD_SOURCE_VERSION}\"".to_owned(),
         "FRR_VERSION=\"bgpd version 10.3.1_git\"".to_owned(),
         "[ \"$command\" = '[\"sleep\",\"infinity\"]' ]".to_owned(),
         "type-40 tuple mismatch".to_owned(),

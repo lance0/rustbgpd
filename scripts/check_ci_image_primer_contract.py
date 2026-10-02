@@ -144,39 +144,63 @@ def _check_lab_calls(prefix: str, job_name: str, job: str, errors: list[str]) ->
             errors.append(f"{prefix}: no run-interop-test call labelled {token.upper()}")
 
 
-def _staged_version(step: str, action: str) -> str:
-    """Archive version a stage-*-artifact step stages: its input or the action default."""
+def _staged_version(step: str, action: str, fallback: str) -> str:
+    """Archive version a stage-*-artifact step stages: its input or default."""
     explicit = re.search(r'(?m)^          version: "?([\w.]+)"?$', step)
     if explicit:
         return explicit.group(1)
     default = re.search(r'(?m)^  version:\n(?:    .*\n)*?    default: "?([\w.]+)"?', action)
-    return default.group(1) if default else ""
+    return default.group(1) if default and default.group(1) else fallback
 
 
 def _check_staged_builds(
-    prefix: str, job: str, root: Path, dockerfiles: dict[str, str], errors: list[str]
+    prefix: str, job: str, root: Path, dockerfiles: dict[str, str], bird3_version: str,
+    errors: list[str]
 ) -> None:
     """A build of a staged-archive Dockerfile follows a stage of the same version."""
-    staged: list[tuple[str, str]] = []
+    staged: list[tuple[str, str, str]] = []
     for step in re.split(r"(?m)^      - ", job):
         stage = re.search(r"uses: \./\.github/actions/stage-([\w-]+)-artifact", step)
         if stage:
             action = root / f".github/actions/stage-{stage.group(1)}-artifact/action.yml"
             text = action.read_text() if action.is_file() else ""
-            staged.append((stage.group(1), _staged_version(step, text)))
+            stage_id = re.search(r"(?m)^        id: ([\w-]+)$", step)
+            fallback = bird3_version if stage.group(1) == "bird3" else ""
+            staged.append((stage.group(1), _staged_version(step, text, fallback),
+                           stage_id.group(1) if stage_id else ""))
         for path in DOCKERFILE.findall(step):
             source = dockerfiles.get(path, "")
             archive = re.search(r"(?m)^COPY ([\w-]+)-archive/", source)
             if not archive:
                 continue
             arg = re.search(r"--build-arg \w*_VERSION=([\w.]+)", step)
+            yaml_arg = re.search(r"(?m)^\s*BIRD_VERSION=([\d.]+)$", step)
             default = re.search(r"(?m)^(?:ARG|ENV) \w*_VERSION=([\w.]+)", source)
-            version = (arg or default).group(1) if (arg or default) else "?"
-            if (archive.group(1), version) not in staged:
+            selected = arg or yaml_arg or default
+            version = selected.group(1) if selected else "?"
+            output = re.search(
+                r"(?m)^\s*BIRD_VERSION=\$\{\{ steps\.([\w-]+)\.outputs\.version \}\}$",
+                step,
+            )
+            if output:
+                version = next((v for _, v, stage_id in staged if stage_id == output.group(1)), "?")
+            if not any(name == archive.group(1) and staged_version == version
+                       for name, staged_version, _ in staged):
                 errors.append(
                     f"{prefix}: builds {path} without first staging "
                     f"{archive.group(1)} {version}"
                 )
+            if Path(path).name in {"Dockerfile.bird3", "Dockerfile.bird-v332"}:
+                checksum = re.search(
+                    r"(?m)^\s*BIRD_SHA256=\$\{\{ steps\.([\w-]+)\.outputs\.sha256 \}\}$",
+                    step,
+                )
+                if not checksum or not any(
+                    name == "bird3" and staged_version == version
+                    and stage_id == checksum.group(1)
+                    for name, staged_version, stage_id in staged
+                ):
+                    errors.append(f"{prefix}: builds {path} without its staged BIRD checksum")
 
 
 def _check_dockerfile(path: str, text: str, errors: list[str]) -> None:
@@ -298,6 +322,21 @@ def check(root: Path) -> list[str]:
         digest, archive = match.groups()
         manifest[digest] = archive
         archives.add(archive)
+    bird3_archives = [name for name in archives if name.startswith("bird-3.")]
+    if len(bird3_archives) != 1 or not re.fullmatch(r"bird-3\.\d+\.\d+\.tar\.gz", bird3_archives[0]):
+        errors.append(f"{MANIFEST}: expected one valid BIRD 3 archive")
+        bird3_version = "?"
+    else:
+        bird3_version = bird3_archives[0].removeprefix("bird-").removesuffix(".tar.gz")
+    for relative, source in dockerfiles.items():
+        if Path(relative).name not in {"Dockerfile.bird3", "Dockerfile.bird-v332"}:
+            continue
+        version_default = re.search(r"(?m)^ARG BIRD_VERSION=([^\s]+)$", source)
+        if version_default and version_default.group(1) != bird3_version:
+            errors.append(f"{relative}: BIRD version default differs from {MANIFEST}")
+        digest_default = re.search(r"(?m)^ARG BIRD_SHA256=([^\s]+)$", source)
+        if digest_default and manifest.get(digest_default.group(1)) != f"bird-{bird3_version}.tar.gz":
+            errors.append(f"{relative}: BIRD checksum default differs from {MANIFEST}")
     for relative, text in {**texts, **scripts, **dockerfiles}.items():
         for match in DIGEST.finditer(text):
             if match.group(0) not in manifest:
@@ -345,7 +384,7 @@ def check(root: Path) -> list[str]:
             if "prime_dev_image" not in _list_needs(job):
                 errors.append(f"{prefix}: does not need prime_dev_image")
             _check_lab_calls(prefix, job_name, job, errors)
-            _check_staged_builds(prefix, job, root, dockerfiles, errors)
+            _check_staged_builds(prefix, job, root, dockerfiles, bird3_version, errors)
         # 5. Aggregate result.
         aggregate = jobs.get("check", "")
         others = set(jobs) - {"check"}

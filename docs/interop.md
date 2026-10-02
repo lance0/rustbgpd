@@ -242,16 +242,16 @@ set). Those jobs run on lab-relevant PRs, non-documentation pushes to `main`, an
 on GitHub-hosted `ubuntu-latest` runners; that workflow
 carries the same `classify_changes` gate as `interop.yml`.
 The current hosted runner advertises `CONFIG_TCP_AO=y`, so M43 runs the
-real BIRD 3.3.2 TCP-AO topology twice: the existing uninterrupted live-rotation
+current pinned BIRD 3 TCP-AO topology twice: the existing uninterrupted live-rotation
 receipt and a separate destructive crash-restart recovery receipt. The
 workflow still probes the selected runner kernel first; a future runner without
 TCP-AO support reports a warning and skips only that topology.
 
-M43 is fed by a third-party source archive (`bird-3.3.2.tar.gz`). The
+M43 is fed by the BIRD 3 source archive in `.github/pinned-archives.sha256`. The
 `bird3_archive` job verifies it into a content-addressed cache entry, and the
 M43 job restores that entry itself, falling back to the same checksum-verified
 fetch on a miss. It is not the only such scenario:
-`interop.yml` prepares the same pinned BIRD 3.3.2 archive for M101 and a pinned
+`interop.yml` prepares the same pinned BIRD 3 archive for M101 and a pinned
 `bird-2.19.2.tar.gz` for M83, M85/M93/M95, M100, and M104. M43 is the one whose
 archive outage is tolerated rather than hard-red. When
 the upstream host refuses to serve the pinned tarball, the `check` aggregate tolerates
@@ -316,7 +316,7 @@ broader platform-diversity validation beyond the protected hosted matrix.
 | FRR (bgpd) | 10.3.1 | `tests/interop/m99-rfc9072-extended-open-frr.clab.yml` | Tested (M99, hosted CI) | RFC 9072 extended Optional Parameters framing | Two links to one digest-pinned FRR process: forced-small extended versus classic control. Host tshark exports only raw TCP payload and sequence metadata; an independent reassembler proves four gap-free directions, exact 348-byte/313-capability-octet and 49-byte rustbgpd OPENs, exact type-2 parameter consumption, non-empty common capability inventories, one OPEN per stream, and no NOTIFICATION. | FRR is passive on both links so capture is armed before the only connection attempt; the proof runs exactly once. |
 | Released rustbgpd + BIRD + OpenBGPD + FRR | rustbgpd 0.67.0, BIRD 2.19.2, OpenBGPD 9.2, FRR 10.3.1 | `tests/interop/m100-partial-receiver.clab.yml` | M100 hosted gate | Exact Partial-flag receiver differential | A raw source sends MED, ORIGINATOR_ID, CLUSTER_LIST, MP_REACH, and MP_UNREACH with exact flags `0xa0` to all four receivers while a separate session observes resulting route state. The exact 20-cell matrix pins accepts, same-session candidate withdrawal, treat-as-withdraw, and reset; every reset requires exact UPDATE `3/4` bytes followed by close and next-epoch re-establishment. The rustbgpd 0.67.0 column is a frozen historical receipt: it stays digest-pinned and keeps the outcomes that release produced. The `rustbgpd_current` row below is the receiver that follows the tree. | Digest-pinned released receiver images, checksum-staged BIRD source, exact runtime/config preflight, single attempt, and successful-run artifact; proof-only with no production or configuration changes. |
 | Current rustbgpd beside the frozen M100 receivers | rustbgpd built from the tree under test (`rustbgpd:dev`) | `tests/interop/m100-partial-receiver.clab.yml` (`rustbgpd-current` node) | M100 hosted gate | Partial-flag handling of the current daemon for an external neighbor | The same raw source sends the same five `0xa0` attribute byte strings to a fifth receiver, judged by its own `rustbgpd_current` rows: MED is treat-as-withdraw with the session kept, ORIGINATOR_ID and CLUSTER_LIST are attribute-discard with the route kept, and MP_REACH / MP_UNREACH reset the session with exact UPDATE `3/4` bytes. Each row also requires exactly one matching increment of `bgp_update_malformed_total` and `bgp_update_malformed_causes_total` for the source peer, which is what separates attribute-discard from plain acceptance. Additionally, the well-formed baseline for ORIGINATOR_ID asserts `bgp_path_attribute_discarded_total{type_code="9"}` is exactly 1. The route projection carries no ORIGINATOR_ID field, so the attribute's absence from the installed route is not observed here; the discard counter is the whole claim. | Runs in the same deploy as the frozen matrix and is verified separately, so neither expectation set can satisfy the other. The raw peer is an eBGP route-server client; the iBGP branch of ORIGINATOR_ID / CLUSTER_LIST handling (treat-as-withdraw) cannot be driven with these byte strings and stays at unit coverage. |
-| BIRD + FRR | BIRD 3.3.2, FRR 10.3.1 | `tests/interop/m101-routeserver-bird332.clab.yml` | Tested (M101, hosted CI) | Real-speaker RFC 7606 attribute-discard at an IPv4-unicast route server | Both peer containers remain asleep until configured/local image identity, exact runtime versions, and both configs pass. Capture is armed before any BGP daemon starts. BIRD emits the exact optional-transitive-partial type-40 tuple `e0 28 01 00`; rustbgpd accepts the route after discarding only that attribute, preserves standard/Large Communities in post-policy Adj-RIB-In and on FRR, advances exactly `attribute_discard +1 / treat_as_withdraw +0 / session_reset +0`, and proves import plus member-scoped export denies with positive controls and explain/advertised surfaces. Deterministic withdrawal leaves both sessions Established with no flap delta. Exact 27/0; no Prefix-SID, labeled-unicast, SR, or AS_SET breadth is claimed. | BIRD source archive SHA-256 `21297d7a02edd700ae82de5a630055a9cb88a99e2e7e45551bc7d6c1e5b4de2c`; build with `docker build -t bird:v3.3.2-m101 -f tests/interop/Dockerfile.bird-v332 tests/interop`. Pull the current reviewed FRR identity exactly with `docker pull quay.io/frrouting/frr@sha256:f90d26a9fd5c14fc5795a73b4254ac88bc3186c45bbeb220a225fb6182de812c`. |
+| BIRD + FRR | BIRD 3.3.2, FRR 10.3.1 | `tests/interop/m101-routeserver-bird332.clab.yml` | Tested (M101, hosted CI) | Real-speaker RFC 7606 attribute-discard at an IPv4-unicast route server | Both peer containers remain asleep until configured/local image identity, exact runtime versions, and both configs pass. Capture is armed before any BGP daemon starts. BIRD emits the exact optional-transitive-partial type-40 tuple `e0 28 01 00`; rustbgpd accepts the route after discarding only that attribute, preserves standard/Large Communities in post-policy Adj-RIB-In and on FRR, advances exactly `attribute_discard +1 / treat_as_withdraw +0 / session_reset +0`, and proves import plus member-scoped export denies with positive controls and explain/advertised surfaces. Deterministic withdrawal leaves both sessions Established with no flap delta. Exact 27/0; no Prefix-SID, labeled-unicast, SR, or AS_SET breadth is claimed. | BIRD source archive SHA-256 `21297d7a02edd700ae82de5a630055a9cb88a99e2e7e45551bc7d6c1e5b4de2c`; for the current local image, use the [pinned BIRD 3 build recipe](#pinned-bird-3-images-m43-and-m101). Pull the current reviewed FRR identity exactly with `docker pull quay.io/frrouting/frr@sha256:f90d26a9fd5c14fc5795a73b4254ac88bc3186c45bbeb220a225fb6182de812c`. |
 | OpenBGPD + FRR | OpenBGPD 9.2, FRR 10.3.1 | `tests/interop/m102-routeserver-openbgpd92.clab.yml` | Tested (M102, hosted CI) | Dual-stack route-server member interoperability | Digest-pinned sleeping peers are identity-, runtime-, and config-preflighted before sidecar capture and daemon start. The exact 32/0 proof uses four-octet ASNs 4200000102/4200000201/4200000202 and enforced role, policy, AS4, RFC 8950 Extended Next Hop, and IPv4/IPv6 negotiation (OpenBGPD resets the session on an IPv4-unicast `MP_UNREACH_NLRI` or a 4-octet IPv4 `MP_REACH_NLRI` next hop, so the FRR IPv4 route and its withdrawal pin the classic-body encoding); proves bidirectional transparent AS_PATH plus standard/Large Communities; independently reassembles retransmitted TCP to decode AS_TRANS, capability 65, and exact IPv4 UPDATE fields (AS_PATH, NEXT_HOP, standard and Large Communities, and NLRI); covers explicit import/export policy; withdraws all four directional-family routes; and pins unchanged sessions/flap counters. Malformed Partial and AS_SET behavior are out of scope. | `docker pull openbgpd/openbgpd@sha256:b2e94bd1538102a89cff96867993eabb6dbb27720de4ab7b588860880e3e3bf9` |
 | FRR (bgpd) | 10.7.1 | `tests/interop/m18-extnexthop-frr.clab.yml` | Tested (M18) | Extended Next-Hop (RFC 8950) capability advertisement | IPv4-transport session: FRR receives rustbgpd's capability but advertises its own only over IPv6 transport, so it is not negotiated and IPv4 routes keep an IPv4 next hop. Negotiated ENHE is covered by M53 and M107 | — |
 | FRR (bgpd) | 10.7.1 | `tests/interop/m20-privateas-frr.clab.yml` | Tested (M20) | Private AS Removal | remove/all/replace modes | — |
@@ -424,8 +424,32 @@ IP-VRF state remain the primary operational view.
 - containerlab installed
 - `rustbgpd:dev` Docker image built: `docker build --target dev -t rustbgpd:dev .`
 - `bird:2-bookworm` Docker image built: `docker build -t bird:2-bookworm -f tests/interop/Dockerfile.bird tests/interop/`
-- `bird:3.3.2-tcpao` Docker image built for M43:
-  `docker build -t bird:3.3.2-tcpao -f tests/interop/Dockerfile.bird3 tests/interop/`
+- For M43 or M101, build the pinned BIRD 3 image below.
+
+### Pinned BIRD 3 images (M43 and M101)
+
+Run from the repository root. The M101 Dockerfile requires both build args;
+the M43 Dockerfile keeps defaults for a simple local build. CI passes both
+values to both builds.
+
+```sh
+bird_version=$(.github/scripts/archive-pin.sh --bird3-version)
+bird_sha256=$(.github/scripts/archive-pin.sh "bird-${bird_version}.tar.gz")
+docker build --build-arg BIRD_VERSION="$bird_version" --build-arg BIRD_SHA256="$bird_sha256" \
+  -t bird:m43-tcpao -f tests/interop/Dockerfile.bird3 tests/interop/
+docker build --build-arg BIRD_VERSION="$bird_version" --build-arg BIRD_SHA256="$bird_sha256" \
+  -t bird:m101 -f tests/interop/Dockerfile.bird-v332 tests/interop/
+```
+
+The `bird:v3.3.2-m101` tag is a frozen benchmark comparator, separate from
+the M101 image that follows the current manifest. Build that historical image
+with its recorded source version and checksum:
+
+```sh
+docker build --build-arg BIRD_VERSION=3.3.2 \
+  --build-arg BIRD_SHA256=21297d7a02edd700ae82de5a630055a9cb88a99e2e7e45551bc7d6c1e5b4de2c \
+  -t bird:v3.3.2-m101 -f tests/interop/Dockerfile.bird-v332 tests/interop/
+```
 
 ### FRR (M0)
 
@@ -478,10 +502,10 @@ containerlab destroy -t tests/interop/m0-bird.clab.yml
 ### BIRD TCP-AO (M43)
 
 M43 validates TCP-AO startup and the full live add/select/deprecate/delete
-lifecycle against BIRD 3.3.2 on a Linux kernel with `CONFIG_TCP_AO=y`:
+lifecycle against pinned BIRD 3 on a Linux kernel with `CONFIG_TCP_AO=y`:
 
 ```sh
-docker build -t bird:3.3.2-tcpao -f tests/interop/Dockerfile.bird3 tests/interop/
+docker build -t bird:m43-tcpao -f tests/interop/Dockerfile.bird3 tests/interop/
 docker build --target dev -t rustbgpd:dev .
 containerlab deploy -t tests/interop/m43-tcp-ao-bird.clab.yml
 bash tests/interop/scripts/test-m43-tcp-ao-bird.sh

@@ -94,7 +94,17 @@ PR_FILES = {
 INTEROP = ".github/workflows/interop.yml"
 KERNEL = ".github/workflows/kernel-dataplane.yml"
 MANIFEST = ".github/pinned-archives.sha256"
-BIRD332 = "21297d7a02edd700ae82de5a630055a9cb88a99e2e7e45551bc7d6c1e5b4de2c"
+ARCHIVE_PINS = dict(
+    (archive, digest)
+    for digest, archive in (
+        line.split() for line in (ROOT / MANIFEST).read_text().splitlines()
+        if line and not line.startswith("#")
+    )
+)
+BIRD3_ARCHIVE = next(archive for archive in ARCHIVE_PINS if archive.startswith("bird-3."))
+BIRD3_VERSION = BIRD3_ARCHIVE.removeprefix("bird-").removesuffix(".tar.gz")
+BIRD3_DIGEST = ARCHIVE_PINS[BIRD3_ARCHIVE]
+BIRD3_NEXT_VERSION = ".".join((*BIRD3_VERSION.split(".")[:2], str(int(BIRD3_VERSION.split(".")[2]) + 1)))
 BIRD2192 = "aff89abba3b92b7637bd57e0168b8d7ae887747f160ada4973378ad72f5f3660"
 DRIFTED = "f" * 64
 M1_CALL = (
@@ -173,21 +183,46 @@ class PrimerContractTests(unittest.TestCase):
                     f"ARG BIRD_SHA256={DRIFTED}",
                 ),
             )
-        with self.subTest("manifest bumped: local Docker defaults still need a bump"):
-            errors = self.mutated_errors((MANIFEST, BIRD332, DRIFTED))
+        with self.subTest("manifest bumped: one local Docker default still needs a bump"):
+            errors = self.mutated_errors((MANIFEST, BIRD3_DIGEST, DRIFTED))
             stale = {error.split(":", 1)[0] for error in errors if "is not in" in error}
             self.assertEqual(
-                {
-                    "tests/interop/Dockerfile.bird3",
-                    "tests/interop/Dockerfile.bird-v332",
-                },
+                {"tests/interop/Dockerfile.bird3"},
                 stale,
             )
         with self.subTest("duplicate archive entry"):
             self.assert_red(
                 f"{MANIFEST}: malformed or duplicate entry",
-                (MANIFEST, "\n", f"\n{DRIFTED}  bird-3.3.2.tar.gz\n"),
+                (MANIFEST, "\n", f"\n{DRIFTED}  {BIRD3_ARCHIVE}\n"),
             )
+
+    def test_next_bird3_pin_needs_only_manifest_and_one_dockerfile_default(self):
+        self.assertEqual([], self.mutated_errors(
+            (MANIFEST, f"{BIRD3_DIGEST}  {BIRD3_ARCHIVE}", f"{DRIFTED}  bird-{BIRD3_NEXT_VERSION}.tar.gz"),
+            ("tests/interop/Dockerfile.bird3", f"ARG BIRD_VERSION={BIRD3_VERSION}", f"ARG BIRD_VERSION={BIRD3_NEXT_VERSION}"),
+            ("tests/interop/Dockerfile.bird3", f"ARG BIRD_SHA256={BIRD3_DIGEST}", f"ARG BIRD_SHA256={DRIFTED}"),
+        ))
+        with tempfile.TemporaryDirectory() as temporary:
+            scripts = Path(temporary) / ".github" / "scripts"
+            scripts.mkdir(parents=True)
+            shutil.copy2(ROOT / ".github/scripts/archive-pin.sh", scripts / "archive-pin.sh")
+            (scripts.parent / "pinned-archives.sha256").write_text(
+                f"{DRIFTED}  bird-{BIRD3_NEXT_VERSION}.tar.gz\n"
+            )
+            version = subprocess.check_output([str(scripts / "archive-pin.sh"), "--bird3-version"], text=True)
+            digest = subprocess.check_output([str(scripts / "archive-pin.sh"), f"bird-{version.strip()}.tar.gz"], text=True)
+            self.assertEqual((version, digest), (f"{BIRD3_NEXT_VERSION}\n", f"{DRIFTED}\n"))
+            action = (ROOT / ".github/actions/stage-bird3-artifact/action.yml").read_text()
+            resolve = textwrap.dedent(action.split("      run: |\n", 1)[1].split("\n\n    - name:", 1)[0])
+            resolve = resolve.replace("${{ inputs.version }}", "")
+            output = Path(temporary) / "github-output"
+            result = subprocess.run(
+                ["bash", "-eo", "pipefail", "-c", resolve], cwd=temporary,
+                env={**os.environ, "GITHUB_OUTPUT": str(output)},
+                capture_output=True, text=True, check=False,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(output.read_text(), f"version={BIRD3_NEXT_VERSION}\nsha256={DRIFTED}\n")
 
     def test_archive_lookup_requires_one_valid_exact_match(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -215,6 +250,36 @@ class PrimerContractTests(unittest.TestCase):
             self.assertNotEqual(lookup().returncode, 0)
             manifest.write_text(f"bad  {archive}\n")
             self.assertNotEqual(lookup().returncode, 0)
+
+    def test_bird3_version_lookup_requires_one_valid_pin(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            scripts = Path(temporary) / ".github" / "scripts"
+            scripts.mkdir(parents=True)
+            helper = scripts / "archive-pin.sh"
+            shutil.copy2(ROOT / ".github/scripts/archive-pin.sh", helper)
+            manifest = scripts.parent / "pinned-archives.sha256"
+
+            def lookup():
+                return subprocess.run(
+                    ["bash", str(helper), "--bird3-version"],
+                    capture_output=True, text=True, check=False,
+                )
+
+            pin = f"{'a' * 64}  bird-3.3.3.tar.gz\n"
+            manifest.write_text(pin + f"{'b' * 64}  bird-2.19.2.tar.gz\n")
+            result = lookup()
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(result.stdout, "3.3.3\n")
+            for invalid in (
+                "",
+                pin + f"{'c' * 64}  bird-3.3.4.tar.gz\n",
+                pin + "bird-3.3.4.tar.gz  bad\n",
+                f"{'a' * 64}  bird-3.3.x.tar.gz\n",
+                f"{'a' * 64}  bird-3.3.3.tar.gz extra\n",
+                "bad  bird-3.3.3.tar.gz\n",
+            ):
+                manifest.write_text(invalid)
+                self.assertNotEqual(lookup().returncode, 0, invalid)
 
     def test_explicit_empty_checksum_override_is_rejected(self):
         for installer, variable in (
@@ -244,10 +309,12 @@ class PrimerContractTests(unittest.TestCase):
             (".github/actions/install-containerlab/action.yml", "0.74.3", "containerlab_0.74.3_linux_amd64.deb"),
             (".github/actions/install-gnmic-artifact/action.yml", None, "gnmic_0.46.0_Linux_x86_64.tar.gz"),
             (".github/actions/install-grpcurl-artifact/action.yml", None, "grpcurl_1.9.1_linux_x86_64.tar.gz"),
-            (".github/actions/stage-bird3-artifact/action.yml", "3.3.2", "bird-3.3.2.tar.gz"),
+            (".github/actions/stage-bird3-artifact/action.yml", BIRD3_VERSION, BIRD3_ARCHIVE),
+            (".github/actions/stage-bird3-artifact/action.yml", "", BIRD3_ARCHIVE),
+            (".github/actions/stage-bird3-artifact/action.yml", "2.19.2", "bird-2.19.2.tar.gz"),
             (".github/actions/stage-gobgp-artifact/action.yml", "3.37.0", "gobgp_3.37.0_linux_amd64.tar.gz"),
             (".github/workflows/ci.yml", None, "rustbgpd-v0.64.0-linux-amd64.tar.gz"),
-            (".github/workflows/kernel-dataplane.yml", None, "bird-3.3.2.tar.gz"),
+            (".github/workflows/kernel-dataplane.yml", None, BIRD3_ARCHIVE),
         )
         pins = dict(line.split() for line in (ROOT / MANIFEST).read_text().splitlines() if line and not line.startswith("#"))
         expected = {archive: digest for digest, archive in pins.items()}
@@ -287,7 +354,10 @@ class PrimerContractTests(unittest.TestCase):
                         capture_output=True, text=True, check=False,
                     )
                     self.assertEqual(valid.returncode, 0, valid.stderr)
-                    self.assertEqual(output.read_text(), f"sha256={expected[archive]}\n")
+                    version_output = f"version={version or BIRD3_VERSION}\n" if file.endswith("stage-bird3-artifact/action.yml") else ""
+                    if file == KERNEL:
+                        version_output = f"version={BIRD3_VERSION}\n"
+                    self.assertEqual(output.read_text(), f"{version_output}sha256={expected[archive]}\n")
 
     def test_workflow_and_action_fetches_verify_their_archive(self):
         with self.subTest("workflow step fetches without a checksum"):
@@ -442,10 +512,42 @@ class PrimerContractTests(unittest.TestCase):
                 "interop.yml:m74: builds tests/interop/Dockerfile.gobgp without first staging gobgp 3.37.0",
                 (INTEROP, M74_STAGE + M74_BUILD, M74_BUILD + M74_STAGE),
             )
-        with self.subTest("action default no longer matches the Dockerfile"):
+        with self.subTest("local Docker version default drifts from the manifest"):
             self.assert_red(
-                "kernel-dataplane.yml:m43: builds tests/interop/Dockerfile.bird3 without first staging bird3 3.3.2",
-                (".github/actions/stage-bird3-artifact/action.yml", 'default: "3.3.2"', 'default: "3.3.3"'),
+                "tests/interop/Dockerfile.bird3: BIRD version default differs",
+                ("tests/interop/Dockerfile.bird3", f"ARG BIRD_VERSION={BIRD3_VERSION}", f"ARG BIRD_VERSION={BIRD3_NEXT_VERSION}"),
+            )
+        with self.subTest("build arg drifts from the staged version"):
+            self.assert_red(
+                "kernel-dataplane.yml:m43: builds tests/interop/Dockerfile.bird3 without first staging bird3 2.19.2",
+                (KERNEL, "BIRD_VERSION=${{ steps.bird_archive.outputs.version }}", "BIRD_VERSION=2.19.2"),
+            )
+        with self.subTest("build drops its staged checksum"):
+            self.assert_red(
+                "kernel-dataplane.yml:m43: builds tests/interop/Dockerfile.bird3 without its staged BIRD checksum",
+                (KERNEL, "BIRD_SHA256=${{ steps.bird_archive.outputs.sha256 }}", "BIRD_SHA256=not-a-pin"),
+            )
+        with self.subTest("checksum comes from a different staged BIRD version"):
+            self.assert_red(
+                "interop.yml:m101: builds tests/interop/Dockerfile.bird-v332 without its staged BIRD checksum",
+                (
+                    INTEROP,
+                    "        id: bird_archive\n\n      - name: Build checksum-pinned BIRD 3 image",
+                    "        id: bird_archive\n\n"
+                    "      - name: Stage verified BIRD 2 archive\n"
+                    "        uses: ./.github/actions/stage-bird3-artifact\n"
+                    "        id: bird2_archive\n"
+                    "        with:\n"
+                    '          version: "2.19.2"\n\n'
+                    "      - name: Build checksum-pinned BIRD 3 image",
+                ),
+                (
+                    INTEROP,
+                    "BIRD_VERSION=${{ steps.bird_archive.outputs.version }}\n"
+                    "            BIRD_SHA256=${{ steps.bird_archive.outputs.sha256 }}",
+                    "BIRD_VERSION=${{ steps.bird_archive.outputs.version }}\n"
+                    "            BIRD_SHA256=${{ steps.bird2_archive.outputs.sha256 }}",
+                ),
             )
 
     def test_lab_workflows_do_not_use_the_artifact_service(self):

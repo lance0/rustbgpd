@@ -79,22 +79,25 @@ jobs:
         id: bird_pin
         run: |
           set -euo pipefail
-          sha256=$(.github/scripts/archive-pin.sh bird-3.3.2.tar.gz)
+          version=$(.github/scripts/archive-pin.sh --bird3-version)
+          sha256=$(.github/scripts/archive-pin.sh "bird-${version}.tar.gz")
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
           echo "sha256=${sha256}" >> "$GITHUB_OUTPUT"
       - name: Restore exact bird3 archive cache
         id: cache
         uses: actions/cache/restore@v6
         with:
-          path: ${{ runner.temp }}/bird-cache/bird-3.3.2.tar.gz
-          key: bird-v3.3.2-source-${{ steps.bird_pin.outputs.sha256 }}
+          path: ${{ runner.temp }}/bird-cache/bird-${{ steps.bird_pin.outputs.version }}.tar.gz
+          key: bird-v${{ steps.bird_pin.outputs.version }}-source-${{ steps.bird_pin.outputs.sha256 }}
       - name: Prepare exact bird3 archive
         id: prepare
         run: |
           set -uo pipefail
           rc=0
           .github/scripts/install-bird3.sh \
+            --version "${{ steps.bird_pin.outputs.version }}" \
             --prepare-archive \
-            "$RUNNER_TEMP/bird-cache/bird-3.3.2.tar.gz" || rc=$?
+            "$RUNNER_TEMP/bird-cache/bird-${{ steps.bird_pin.outputs.version }}.tar.gz" || rc=$?
           case "$rc" in
             0) status=ok ;;
             3) status=unavailable ;;
@@ -112,8 +115,8 @@ jobs:
         if: steps.prepare.outputs.bird3_status == 'ok' && steps.cache.outputs.cache-hit != 'true'
         uses: actions/cache/save@v6
         with:
-          path: ${{ runner.temp }}/bird-cache/bird-3.3.2.tar.gz
-          key: bird-v3.3.2-source-${{ steps.bird_pin.outputs.sha256 }}
+          path: ${{ runner.temp }}/bird-cache/bird-${{ steps.bird_pin.outputs.version }}.tar.gz
+          key: bird-v${{ steps.bird_pin.outputs.version }}-source-${{ steps.bird_pin.outputs.sha256 }}
 
   # Warm one fixed-scope cache per source SHA; jobs still build and load their
   # own image, falling back to an uncached build if the cache is unavailable.
@@ -461,12 +464,12 @@ jobs:
 
   m43:
     needs: [bird3_archive, prime_dev_image]
-    # No archive means no BIRD 3.3.2 image, so nothing here can run. Skipping
+    # No archive means no pinned BIRD 3 image, so nothing here can run. Skipping
     # the whole job rather than letting it report success with its lab steps
     # quietly disabled is what lets the check aggregate print the skip and name
     # its cause: a success with a hole in it is invisible coverage loss.
     if: needs.bird3_archive.outputs.bird3_status != 'unavailable'
-    name: M43 — TCP-AO live rotation and crash recovery (BIRD 3.3.2)
+    name: M43 — TCP-AO live rotation and crash recovery (BIRD 3)
     runs-on: ubuntu-latest
     timeout-minutes: 30
     # Every lab step below is gated on the TCP-AO probe, so a runner kernel
@@ -581,15 +584,17 @@ jobs:
         uses: ./.github/actions/stage-bird3-artifact
         id: bird_archive
 
-      - name: Build BIRD 3.3.2 TCP-AO image
+      - name: Build pinned BIRD 3 TCP-AO image
         if: steps.tcp_ao.outputs.supported == 'true'
         uses: docker/build-push-action@v7
         with:
           context: tests/interop
           file: tests/interop/Dockerfile.bird3
-          build-args: BIRD_SHA256=${{ steps.bird_archive.outputs.sha256 }}
+          build-args: |
+            BIRD_VERSION=${{ steps.bird_archive.outputs.version }}
+            BIRD_SHA256=${{ steps.bird_archive.outputs.sha256 }}
           load: true
-          tags: bird:3.3.2-tcpao
+          tags: bird:m43-tcpao
           cache-from: type=gha,scope=bird3-tcpao
           cache-to: type=gha,mode=max,scope=bird3-tcpao,ignore-error=true
 
@@ -1049,7 +1054,7 @@ jobs:
           if excused:
               print(
                   "::warning::m43=skipped (bird3 archive unavailable upstream): "
-                  "TCP-AO interop against BIRD 3.3.2 did not run in this Kernel "
+                  "TCP-AO interop against pinned BIRD 3 did not run in this Kernel "
                   "Dataplane run; this gate passed without that coverage"
               )
           if failed:

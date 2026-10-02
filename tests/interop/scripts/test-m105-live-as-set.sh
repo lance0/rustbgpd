@@ -11,6 +11,7 @@ export CLEANUP INTEROP_TEST_OPERATOR_AUTH
 source "$SCRIPT_DIR/test-lib.sh"
 
 BIRD="clab-${TOPO}-bird"
+BIRD_VERSION=$("$SCRIPT_DIR/../../../.github/scripts/archive-pin.sh" --bird3-version)
 OPENBGPD="clab-${TOPO}-openbgpd"
 GOBGP="clab-${TOPO}-gobgp"
 FRR="clab-${TOPO}-frr"
@@ -62,8 +63,8 @@ configured_image_is_local() {
 }
 
 bird_identity() {
-    configured_image_is_local "$BIRD" bird:v3.3.2-m101 \
-        && [ "$(docker exec "$BIRD" bird --version 2>&1)" = "BIRD version 3.3.2" ]
+    configured_image_is_local "$BIRD" bird:m101 \
+        && [ "$(docker exec "$BIRD" bird --version 2>&1)" = "BIRD version ${BIRD_VERSION}" ]
 }
 
 openbgpd_identity() {

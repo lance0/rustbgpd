@@ -1,7 +1,7 @@
 FROM debian:trixie-slim
 
-ARG BIRD_VERSION=3.3.2
-ARG BIRD_SHA256=21297d7a02edd700ae82de5a630055a9cb88a99e2e7e45551bc7d6c1e5b4de2c
+ARG BIRD_VERSION
+ARG BIRD_SHA256
 
 RUN apt-get update && DEBIAN_FRONTEND=noninteractive \
     apt-get install -y --no-install-recommends \
@@ -25,6 +25,8 @@ RUN apt-get update && DEBIAN_FRONTEND=noninteractive \
 COPY bird3-archive/ /tmp/bird-archive/
 
 RUN set -eux; \
+    test -n "${BIRD_VERSION}"; \
+    test -n "${BIRD_SHA256}"; \
     archive="bird-${BIRD_VERSION}.tar.gz"; \
     target="/tmp/bird-archive/${archive}"; \
     if [ ! -f "${target}" ]; then \

@@ -20,7 +20,7 @@
 #
 # Prerequisites:
 #   - BIRD image built:
-#       docker build -t bird:3.3.2-tcpao -f tests/interop/Dockerfile.bird3 tests/interop
+#       docker build -t bird:m43-tcpao -f tests/interop/Dockerfile.bird3 tests/interop
 #   - rustbgpd image built:
 #       docker build --target dev -t rustbgpd:dev .
 #   - containerlab deployed:
@@ -44,8 +44,8 @@ else
     source "$SCRIPT_DIR/test-lib.sh"
 fi
 BIRD="clab-${TOPO}-bird"
-BIRD_VERSION="3.3.2"
-BIRD_IMAGE="bird:${BIRD_VERSION}-tcpao"
+BIRD_VERSION=$("$SCRIPT_DIR/../../../.github/scripts/archive-pin.sh" --bird3-version)
+BIRD_IMAGE="bird:m43-tcpao"
 BIRD_VERSION_OUTPUT="BIRD version ${BIRD_VERSION}"
 GOOD_CONF="/etc/bird/bird.conf"
 BAD_CONF="/etc/bird/bird-bad.conf"
