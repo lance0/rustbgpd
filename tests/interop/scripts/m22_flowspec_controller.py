@@ -145,6 +145,7 @@ class Lab:
         while True:
             try:
                 value = check()
+                assert time.monotonic() < deadline, "check completed at or after convergence deadline"
                 self.results.append(label)
                 print(f"PASS {label}", flush=True)
                 return value

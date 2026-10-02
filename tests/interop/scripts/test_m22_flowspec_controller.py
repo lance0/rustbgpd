@@ -5,6 +5,7 @@ import copy
 import json
 import struct
 import unittest
+from unittest.mock import Mock, patch
 
 import m22_flowspec_controller as controller
 
@@ -18,6 +19,26 @@ def observed(request):
 
 
 class ControllerOracleTests(unittest.TestCase):
+    def test_wait_rejects_success_at_or_after_deadline(self):
+        for completed in (29.999, 30, 31):
+            lab = object.__new__(controller.Lab)
+            lab.results = []
+            check = Mock(return_value="observed")
+            with self.subTest(completed=completed), \
+                    patch.object(controller.time, "monotonic", side_effect=[0, completed, completed]), \
+                    patch.object(controller.time, "sleep") as sleep, patch("builtins.print") as output:
+                if completed < 30:
+                    self.assertEqual(lab.wait("converged", check), "observed")
+                    self.assertEqual(lab.results, ["converged"])
+                    output.assert_called_once()
+                else:
+                    with self.assertRaisesRegex(AssertionError, "converged did not converge within 30s"):
+                        lab.wait("converged", check)
+                    self.assertEqual(lab.results, [])
+                    output.assert_not_called()
+                check.assert_called_once()
+                sleep.assert_not_called()
+
     def test_exact_dual_afi_rows(self):
         for family in controller.FAMILIES:
             request = controller.rule(family, 1)
