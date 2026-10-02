@@ -1,0 +1,6 @@
+pair,order,parent_run,boxed_run,peak_delta_bytes,settled_anon_delta_bytes,settled_file_delta_bytes,settled_rss_delta_kib,sampled_max_rss_delta_kib
+1,parent-boxed,1,2,94838784,95342592,0,93204,109724
+2,boxed-parent,4,3,63549440,77217792,-4096,76308,46780
+3,parent-boxed,5,6,90427392,84897792,0,83444,79308
+4,boxed-parent,8,7,96169984,105709568,0,103112,104744
+5,parent-boxed,9,10,82849792,84316160,4096,82376,-14132

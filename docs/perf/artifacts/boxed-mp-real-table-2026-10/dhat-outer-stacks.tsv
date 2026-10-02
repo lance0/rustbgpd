@@ -1,0 +1,5 @@
+arm	live_at_t_gmax_bytes	allocation_spine	owner_site	frozen_classifier_category
+parent	65583856	RawVec -> slice::to_vec	crates/transport/src/session/inbound.rs:552 RouteAttrBundle::new	Transport session buffers/scratch
+parent	38402624	RawVec -> slice::to_vec	crates/transport/src/session/inbound.rs:552 RouteAttrBundle::new	Transport session buffers/scratch
+boxed	20694528	RawVec -> slice::to_vec	crates/transport/src/session/inbound.rs:552 RouteAttrBundle::new	Transport session buffers/scratch
+boxed	3309936	RawVec -> slice::to_vec	crates/transport/src/session/inbound.rs:552 RouteAttrBundle::new	Transport session buffers/scratch
