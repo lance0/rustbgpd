@@ -681,6 +681,33 @@ impl AdjRibIn {
         prefixes
     }
 
+    /// Resolve unicast GR End-of-RIB in one classification pass: remove
+    /// unrefreshed GR/LLGR paths and clear local LLGR tags on retained paths.
+    /// Returns every changed prefix, including duplicates for Add-Path.
+    pub(crate) fn finish_gr_family(&mut self, family: (Afi, Safi)) -> Vec<Prefix> {
+        let mut stale = Vec::new();
+        let mut clear_local_llgr = Vec::new();
+        for route in self.routes.iter() {
+            if route_matches_family(route, family) {
+                let key = (route.prefix, route.path_id);
+                if route.is_stale || route.is_llgr_stale {
+                    stale.push(key);
+                } else if self.llgr_stale_local_tags.contains(&key) {
+                    clear_local_llgr.push(key);
+                }
+            }
+        }
+        let mut changed = Vec::new();
+        for key in &stale {
+            changed.push(key.0);
+            self.llgr_stale_local_tags.remove(key);
+            self.remove_route_entry(&key.0, key.1);
+        }
+        self.clear_local_llgr_stale_community(&clear_local_llgr);
+        changed.extend(clear_local_llgr.iter().map(|key| key.0));
+        changed
+    }
+
     /// Promote GR-stale routes to LLGR-stale for the given family (RFC 9494).
     ///
     /// - Routes with `NO_LLGR` community are removed (must not enter LLGR).
@@ -3331,6 +3358,93 @@ mod tests {
                 rib.clear_stale(family)
             };
             assert_eq!(changed, vec![Prefix::V4(llgr_stale)]);
+        }
+    }
+
+    #[test]
+    fn finish_gr_family_matches_separate_sweeps_and_clear() {
+        let v4 = Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(192, 0, 2, 0), 24));
+        let v6 = Prefix::V6(Ipv6Prefix::new("2001:db8::".parse().unwrap(), 32));
+        let peer = Ipv4Addr::new(10, 0, 0, 1);
+        let paths = [0, 7, 11, 23, 31, 41];
+        let setup =
+            || {
+                let mut rib = AdjRibIn::new(IpAddr::V4(peer));
+                for prefix in [v4, v6] {
+                    for path_id in paths {
+                        let mut route = make_route(Ipv4Prefix::new(peer, 32), peer);
+                        route.prefix = prefix;
+                        route.path_id = path_id;
+                        route.is_stale = matches!(path_id, 0 | 11);
+                        route.is_llgr_stale = matches!(path_id, 7 | 11);
+                        route.validation_state = match path_id {
+                            0 | 23 => RpkiValidation::Valid,
+                            7 | 31 => RpkiValidation::Invalid,
+                            _ => RpkiValidation::NotFound,
+                        };
+                        if matches!(path_id, 7 | 11 | 31 | 41) {
+                            route.attributes = AttrSet::new(vec![
+                                PathAttribute::CommunitiesPartial(vec![123, COMMUNITY_LLGR_STALE]),
+                            ]);
+                        }
+                        rib.insert(route);
+                        // Path 31 exercises retained local-tag cleanup without a
+                        // stale flag; path 41 carries an upstream community.
+                        if matches!(path_id, 7 | 11 | 31) {
+                            rib.llgr_stale_local_tags.insert((prefix, path_id));
+                        }
+                    }
+                }
+                rib
+            };
+        for family in [
+            (Afi::Ipv4, Safi::Unicast),
+            (Afi::Ipv6, Safi::Unicast),
+            (Afi::Ipv4, Safi::MplsVpn),
+            (Afi::L2Vpn, Safi::Evpn),
+        ] {
+            let mut expected = setup();
+            let mut actual = setup();
+            let mut expected_changed = expected.sweep_stale_family(family);
+            expected_changed.extend(expected.sweep_llgr_stale_family(family));
+            expected_changed.extend(expected.clear_stale(family));
+            let mut actual_changed = actual.finish_gr_family(family);
+            expected_changed.sort_unstable();
+            actual_changed.sort_unstable();
+            assert_eq!(actual_changed, expected_changed, "{family:?}");
+            assert_eq!(actual.len(), expected.len());
+            assert_eq!(
+                actual.rpki_validation_counts(),
+                expected.rpki_validation_counts()
+            );
+            assert_eq!(actual.llgr_stale_local_tags, expected.llgr_stale_local_tags);
+            for prefix in [v4, v6] {
+                assert_eq!(
+                    actual.iter_prefix(&prefix).count(),
+                    expected.iter_prefix(&prefix).count()
+                );
+                for path_id in paths {
+                    let snapshot = |rib: &AdjRibIn| {
+                        rib.get(&prefix, path_id).map(|route| {
+                            (
+                                route.is_stale,
+                                route.is_llgr_stale,
+                                route.validation_state,
+                                route.attributes.iter().cloned().collect::<Vec<_>>(),
+                            )
+                        })
+                    };
+                    assert_eq!(
+                        snapshot(&actual),
+                        snapshot(&expected),
+                        "{family:?} {prefix:?}/{path_id}"
+                    );
+                }
+            }
+            assert!(
+                actual.finish_gr_family(family).is_empty(),
+                "second EoR is a no-op"
+            );
         }
     }
 

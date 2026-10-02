@@ -6,8 +6,10 @@
 //! stale), re-advertises the identical table (stale flags cleared on insert),
 //! and then sends one End-of-RIB per GR family. Each End-of-RIB is timed as one
 //! production `EndOfRib` dispatch, with the unicast recompute and distribution
-//! split reported separately. Fixture construction, the restart, and the
-//! re-advertisement stay outside the timed interval.
+//! split reported separately. `stale_resolution_ns` covers unicast stale
+//! removal and retained local LLGR-tag cleanup together; attribute GC and
+//! exact stale counting retain separate spans. Fixture construction, the
+//! restart, and the re-advertisement stay outside the timed interval.
 //!
 //! Modes:
 //! - `dual`: 1,000,000 IPv4 + 200,000 IPv6 routes; GR families IPv4, IPv6
@@ -250,8 +252,8 @@ fn run(mode: Mode, ipv4: usize, ipv6_full: usize, attribute_sets: usize) {
         let receipt = manager.bench_end_of_rib(SOURCE, afi, safi);
         let envelopes = drain(&mut receivers);
         eors.push(format!(
-            "{{\"family\":\"{afi:?}/{safi:?}\",\"total_ns\":{},\"recompute_ns\":{},\"distribute_ns\":{},\"affected\":{},\"changed\":{},\"retained_stale\":{},\"gr_complete\":{},\"attr_gc_ns\":{},\"stale_count_ns\":{},\"clear_stale_ns\":{},\"stale_sweep_ns\":{},\"envelopes\":{envelopes}}}",
-            receipt[0], receipt[1], receipt[2], receipt[3], receipt[4], receipt[5], receipt[6], receipt[7], receipt[8], receipt[9], receipt[10]
+            "{{\"family\":\"{afi:?}/{safi:?}\",\"total_ns\":{},\"recompute_ns\":{},\"distribute_ns\":{},\"affected\":{},\"changed\":{},\"retained_stale\":{},\"gr_complete\":{},\"attr_gc_ns\":{},\"stale_count_ns\":{},\"stale_resolution_ns\":{},\"envelopes\":{envelopes}}}",
+            receipt[0], receipt[1], receipt[2], receipt[3], receipt[4], receipt[5], receipt[6], receipt[7], receipt[8], receipt[9]
         ));
         assert_eq!(
             (receipt[3], receipt[4], receipt[5], envelopes),

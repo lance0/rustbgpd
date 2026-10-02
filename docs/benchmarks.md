@@ -231,6 +231,13 @@ runs every criterion target once through `cargo test --bench`, exercises
 fixtures, and runs the `gr_end_of_rib` self-test. The four other custom
 harnesses retain dedicated CI smoke invocations.
 
+The `gr_end_of_rib` JSON field `stale_resolution_ns` covers unicast GR/LLGR
+stale removal and retained local LLGR-community cleanup in one span.
+Attribute GC, exact stale counting, recomputation, and distribution keep
+separate fields. This contributor-only schema follows the source version;
+older receipts retain their separate `stale_sweep_ns` and `clear_stale_ns`
+fields and their original meaning.
+
 `just bench <package> <target> [args]` runs one target with the measurement
 discipline built in: it reads the target's required features from its
 manifest, takes the shared host lock, builds, and then pins the run to the
