@@ -92,9 +92,6 @@ const DEFAULT_CONFIG_PATH: &str = "/etc/rustbgpd/config.toml";
 /// this so a config full of dead endpoints cannot hang doctor.
 const PROBE_TIMEOUT_SECS: u64 = 2;
 
-/// Free-space thresholds for `runtime_state_dir`: below WARN the check is
-/// yellow, below FAIL it is red (journal/MRT/crash/event-history writes
-/// are about to start failing).
 /// Pause before the single `GetHealth` retry after an `UNAVAILABLE` reply.
 /// The daemon returns `UNAVAILABLE` when a core actor misses the 200 ms
 /// readiness deadline, which happens in the short tail of a reload while the
@@ -102,6 +99,9 @@ const PROBE_TIMEOUT_SECS: u64 = 2;
 /// that transient from an actor that stays unresponsive.
 const HEALTH_RETRY_DELAY: Duration = Duration::from_secs(1);
 
+/// Free-space thresholds for `runtime_state_dir`: below WARN the check is
+/// yellow, below FAIL it is red (journal/MRT/crash/event-history writes
+/// are about to start failing).
 const STATE_DIR_DISK_WARN_BYTES: u64 = 1024 * 1024 * 1024;
 const STATE_DIR_DISK_FAIL_BYTES: u64 = 100 * 1024 * 1024;
 
