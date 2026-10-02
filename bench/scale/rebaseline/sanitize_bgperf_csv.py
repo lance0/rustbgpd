@@ -60,6 +60,9 @@ PROVENANCE_RAW_HEADER = LEGACY_RAW_ROW_FIELDS + PROVENANCE_FIELDS
 FORK_RAW_HEADER = (
     LEGACY_RAW_ROW_FIELDS + ("max foreign cpu %",) + PROVENANCE_FIELDS
 )
+POLL_MODE_RAW_HEADER = (
+    FORK_RAW_HEADER[:-3] + ("neighbor poll mode",) + PROVENANCE_FIELDS
+)
 FORK_CHECKPOINT_PERCENT = 99
 DEFAULT_IMAGE_TAGS = ("bgperf/rustbgpd", "bgperf/rustbgpd:latest")
 OUTPUT_FIELDS = (
@@ -79,6 +82,7 @@ OUTPUT_FIELDS = (
     "tester_errors",
     "tester_timeouts",
 )
+POLL_MODE_OUTPUT_FIELDS = OUTPUT_FIELDS + ("neighbor_poll_mode",)
 LONG_HEX_ID = re.compile(r"\b[0-9a-fA-F]{16,}\b")
 SAFE_VERSION = re.compile(r"[A-Za-z0-9._+() -]{1,80}")
 SAFE_IMAGE = re.compile(r"bgperf/rustbgpd(?::[A-Za-z0-9._-]{1,80})?")
@@ -108,7 +112,8 @@ def decimal(value: str, field: str, maximum: Decimal) -> str:
 
 def render_output(output: dict[str, str]) -> str:
     rendered = io.StringIO(newline="")
-    writer = csv.DictWriter(rendered, fieldnames=OUTPUT_FIELDS, lineterminator="\n")
+    fields = POLL_MODE_OUTPUT_FIELDS if "neighbor_poll_mode" in output else OUTPUT_FIELDS
+    writer = csv.DictWriter(rendered, fieldnames=fields, lineterminator="\n")
     writer.writeheader()
     writer.writerow(output)
     result = rendered.getvalue()
@@ -123,6 +128,12 @@ def require_loaded_metrics(output: dict[str, str], source: Path) -> None:
             raise ValueError(f"{source}: loaded receipt metric {field} must be positive")
 
 
+def neighbor_poll_mode(value: str) -> str:
+    if value not in ("poll1", "poll5", "off"):
+        raise ValueError("neighbor poll mode must be poll1, poll5, or off")
+    return value
+
+
 def load(path: Path) -> str:
     raw = path.read_bytes()
     if len(raw) > MAX_INPUT_BYTES:
@@ -135,7 +146,7 @@ def load(path: Path) -> str:
     values = tuple(value.strip() for value in rows[1])
     if header == LEGACY_RAW_HEADER:
         row_fields = LEGACY_RAW_ROW_FIELDS
-    elif header in (PROVENANCE_RAW_HEADER, FORK_RAW_HEADER):
+    elif header in (PROVENANCE_RAW_HEADER, FORK_RAW_HEADER, POLL_MODE_RAW_HEADER):
         row_fields = header
     else:
         raise ValueError(f"{path}: unsupported bgperf2 header/schema")
@@ -150,7 +161,7 @@ def load(path: Path) -> str:
         if LONG_HEX_ID.search(value):
             raise ValueError(f"{path}: result contains a process/container-like identifier")
 
-    if header == FORK_RAW_HEADER:
+    if header in (FORK_RAW_HEADER, POLL_MODE_RAW_HEADER):
         integer(row["max foreign cpu %"], "max foreign cpu %")
     if header != LEGACY_RAW_HEADER:
         image = row["target image"]
@@ -161,7 +172,7 @@ def load(path: Path) -> str:
         # tag here means the row did not come from the DHAT image the
         # receipt's heap profile describes. The tag cannot prove the profile
         # either way -- the manifest's image digest and profile label do.
-        if header == FORK_RAW_HEADER and image in DEFAULT_IMAGE_TAGS:
+        if header in (FORK_RAW_HEADER, POLL_MODE_RAW_HEADER) and image in DEFAULT_IMAGE_TAGS:
             raise ValueError(
                 f"{path}: target image must be the receipt's explicit DHAT tag, "
                 f"not the default release tag {image!r}"
@@ -180,7 +191,7 @@ def load(path: Path) -> str:
     required = integer(row["required"], "required")
     received = integer(row["received"], "received")
     expected = int(peers) * int(prefixes)
-    if header == FORK_RAW_HEADER:
+    if header in (FORK_RAW_HEADER, POLL_MODE_RAW_HEADER):
         checkpoint = expected * FORK_CHECKPOINT_PERCENT // 100
         if int(required) != checkpoint or int(received) != expected:
             raise ValueError(
@@ -217,6 +228,12 @@ def load(path: Path) -> str:
         "tester_errors": errors,
         "tester_timeouts": timeouts,
     }
+    if header == POLL_MODE_RAW_HEADER:
+        # Preserve legacy whitespace handling above, but validate the exact
+        # control cell without normalizing whitespace into a valid mode.
+        output["neighbor_poll_mode"] = neighbor_poll_mode(
+            list(csv.reader(io.StringIO(text)))[1][header.index("neighbor poll mode")]
+        )
     require_loaded_metrics(output, path)
     return render_output(output)
 
@@ -227,9 +244,13 @@ def load_sanitized(path: Path) -> str:
         raise ValueError(f"{path}: sanitized CSV exceeds {MAX_OUTPUT_BYTES} bytes")
     text = raw.decode("utf-8")
     rows = list(csv.reader(io.StringIO(text)))
-    if len(rows) != 2 or tuple(rows[0]) != OUTPUT_FIELDS or len(rows[1]) != len(OUTPUT_FIELDS):
+    if (
+        len(rows) != 2
+        or tuple(rows[0]) not in (OUTPUT_FIELDS, POLL_MODE_OUTPUT_FIELDS)
+        or len(rows[1]) != len(rows[0])
+    ):
         raise ValueError(f"{path}: invalid sanitized CSV schema or row count")
-    row = dict(zip(OUTPUT_FIELDS, rows[1], strict=True))
+    row = dict(zip(rows[0], rows[1], strict=True))
     if row["target"] != "rustbgpd" or not SAFE_VERSION.fullmatch(row["version"]):
         raise ValueError(f"{path}: invalid sanitized target/version")
     peers = integer(row["peers"], "peers")
@@ -270,6 +291,10 @@ def load_sanitized(path: Path) -> str:
     }
     if validated["tester_errors"] != "0" or validated["tester_timeouts"] != "0":
         raise ValueError(f"{path}: sanitized CSV records tester failures")
+    if "neighbor_poll_mode" in row:
+        validated["neighbor_poll_mode"] = neighbor_poll_mode(row["neighbor_poll_mode"])
+        if int(required) != 198000:
+            raise ValueError(f"{path}: polling-mode receipt requires the 99% check-point")
     require_loaded_metrics(validated, path)
     canonical = render_output(validated)
     if canonical != text:

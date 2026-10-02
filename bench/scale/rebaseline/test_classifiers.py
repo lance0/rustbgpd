@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+import csv
+import io
 import json
 import os
 from pathlib import Path
@@ -17,6 +19,7 @@ FIXTURES = HERE / "fixtures"
 sys.path.insert(0, str(HERE))
 
 import classify_dhat  # noqa: E402
+import sanitize_bgperf_csv  # noqa: E402
 
 # The summary block is the one embedded Python the runner invokes outside any
 # shell function, so its own invocation line is the anchor.
@@ -217,6 +220,69 @@ class ClassifierFixtures(unittest.TestCase):
                 text=True,
             )
             self.assertNotEqual(result.returncode, 0)
+
+    def test_bgperf_poll_mode_survives_sanitization(self) -> None:
+        raw = (FIXTURES / "bgperf.fork.raw.csv").read_text(encoding="utf-8")
+        rows = list(csv.reader(io.StringIO(raw), skipinitialspace=True))
+        rows[0].insert(-3, "neighbor poll mode")
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "poll.csv"
+            sanitized = Path(directory) / "sanitized.csv"
+            outputs = []
+            for mode in ("poll1", "poll5", "off"):
+                with self.subTest(mode=mode):
+                    values = rows[1][:-3] + [mode] + rows[1][-3:]
+                    with path.open("w", newline="") as output:
+                        csv.writer(output).writerows([rows[0], values])
+                    reduced = sanitize_bgperf_csv.load(path)
+                    outputs.append(reduced)
+                    named = list(csv.DictReader(io.StringIO(reduced)))[0]
+                    self.assertEqual(named["neighbor_poll_mode"], mode)
+                    self.assertEqual(named["received"], "200000")
+                    sanitized.write_text(reduced, encoding="utf-8")
+                    self.assertEqual(sanitize_bgperf_csv.load_sanitized(sanitized), reduced)
+            self.assertEqual(len(set(outputs)), 3)
+            with self.assertRaisesRegex(ValueError, "differs"):
+                sanitize_bgperf_csv.check(sanitized, outputs[0])
+
+    def test_bgperf_poll_mode_rejects_invalid_modes_and_schema_drift(self) -> None:
+        raw = (FIXTURES / "bgperf.fork.raw.csv").read_text(encoding="utf-8")
+        rows = list(csv.reader(io.StringIO(raw), skipinitialspace=True))
+        rows[0].insert(-3, "neighbor poll mode")
+        rows[1].insert(-3, "off")
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "bad.csv"
+            for mode in ("", "poll2", "OFF", "off/unknown", "off\t", " off", "off "):
+                with self.subTest(mode=mode):
+                    rows[1][-4] = mode
+                    with path.open("w", newline="") as output:
+                        csv.writer(output).writerows(rows)
+                    with self.assertRaises(ValueError):
+                        sanitize_bgperf_csv.load(path)
+                    sanitized = (FIXTURES / "bgperf.fork.expected.csv").read_text()
+                    records = list(csv.reader(io.StringIO(sanitized)))
+                    records[0].append("neighbor_poll_mode")
+                    records[1].append(mode)
+                    with path.open("w", newline="") as output:
+                        csv.writer(output, lineterminator="\n").writerows(records)
+                    with self.assertRaises(ValueError):
+                        sanitize_bgperf_csv.load_sanitized(path)
+
+            rows[1][-4] = "poll1"
+            mutations = [
+                (rows[0][:-1], rows[1]),
+                (rows[0], rows[1][:-1]),
+                (rows[0] + ["extra"], rows[1] + ["extra"]),
+                (rows[0], rows[1][:5] + ["200000"] + rows[1][6:]),
+                (rows[0], rows[1][:6] + ["199999"] + rows[1][7:]),
+                (rows[0], rows[1][:-3] + ["bgperf/rustbgpd:latest"] + rows[1][-2:]),
+            ]
+            for header, values in mutations:
+                with self.subTest(header=header, values=values):
+                    with path.open("w", newline="") as output:
+                        csv.writer(output).writerows([header, values])
+                    with self.assertRaises(ValueError):
+                        sanitize_bgperf_csv.load(path)
 
     def test_dhat_fixture_and_sanitized_derivative(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
