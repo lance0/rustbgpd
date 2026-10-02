@@ -979,10 +979,10 @@ remote_asn = 65002
         let error = ConfigError::PolicyChainTooLarge {
             reason: "chain exceeds node budget".to_string(),
         };
-        let expected = error.to_string();
         assert!(matches!(
             catalog_config_error(error),
-            CatalogMutationError::Invalid(message) if message == expected
+            CatalogMutationError::Invalid(message)
+                if message == "policy chain too large: chain exceeds node budget"
         ));
     }
 
