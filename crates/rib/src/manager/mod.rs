@@ -1185,15 +1185,16 @@ fn replacement_readiness_checkpoint(
     let mut readiness = readiness
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    // The receipt keeps measuring opportunity gaps: the longest interval
-    // between checkpoints at which a queued query would have been served.
+    // The receipt measures opportunity gaps: the longest interval between
+    // checkpoints at which a queued query would have been served, using the
+    // same eligibility as the service pass below.
     #[cfg(any(test, feature = "bench-internals"))]
-    {
-        let gap = readiness.last_opportunity.elapsed();
-        if force || gap >= readiness.budget {
-            readiness.max_gap = readiness.max_gap.max(gap);
-            readiness.last_opportunity = std::time::Instant::now();
-        }
+    if force || readiness.last_service.elapsed() >= readiness.budget {
+        let now = std::time::Instant::now();
+        readiness.max_gap = readiness
+            .max_gap
+            .max(now.duration_since(readiness.last_opportunity));
+        readiness.last_opportunity = now;
     }
     // Staging calls this per element and both lanes are usually empty, so
     // skip the clock read. `last_service` then stays at the last real pass:
@@ -1212,6 +1213,10 @@ fn replacement_readiness_checkpoint(
         return;
     }
     readiness.last_service = std::time::Instant::now();
+    #[cfg(any(test, feature = "bench-internals"))]
+    {
+        readiness.last_opportunity = readiness.last_service;
+    }
     for _ in 0..QUERY_BUDGET_PER_CHUNK {
         let query = match readiness.rx.as_mut() {
             Some(rx) => match rx.try_recv() {

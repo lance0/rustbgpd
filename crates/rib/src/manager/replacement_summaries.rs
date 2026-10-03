@@ -494,7 +494,75 @@ mod tests {
         });
         let receipt = &manager.replacement_readiness_receipts[0];
         assert_eq!(receipt.serviced, 3, "readiness queries only");
-        assert!(receipt.max_gap >= budget, "idle gaps stay in the receipt");
+        assert!(
+            receipt.max_gap >= budget,
+            "a wait after a pass spans the budget"
+        );
+    }
+
+    /// The gap receipt counts a checkpoint only when service is eligible. With
+    /// an idle opportunity at 25 ms and a service pass at 30 ms, a checkpoint
+    /// at 50 ms is not an opportunity; the one at 60 ms records the 30 ms gap
+    /// a query queued at 50 ms actually waited. Time is simulated by moving
+    /// the recorded instants back, so no step sleeps.
+    #[test]
+    fn replacement_readiness_gap_receipt_follows_service_eligibility() {
+        let (_tx, rx) = mpsc::channel(1);
+        let (_general_tx, general_rx) = mpsc::channel(1);
+        let (readiness_tx, readiness_rx) = mpsc::channel(2);
+        let mut manager = RibManager::new(rx, general_rx, None, None, BgpMetrics::new());
+        manager.readiness_rx = Some(readiness_rx);
+        let ms = std::time::Duration::from_millis;
+        manager.flush_poll_budget = ms(25);
+        let queue = || {
+            let (reply, response) = oneshot::channel();
+            readiness_tx
+                .try_send(crate::update::RibReadinessQuery::LocRibCount {
+                    reply,
+                    enqueued: std::time::Instant::now(),
+                })
+                .unwrap();
+            response
+        };
+        manager.with_replacement_readiness(|manager| {
+            let context = manager.replacement_readiness.clone().unwrap();
+            let advance = |by: std::time::Duration| {
+                let mut readiness = context.lock().unwrap();
+                readiness.last_service = readiness.last_service.checked_sub(by).unwrap();
+                readiness.last_opportunity = readiness.last_opportunity.checked_sub(by).unwrap();
+            };
+            let max_gap = || context.lock().unwrap().max_gap;
+            // t=0 is the scope's forced entry checkpoint.
+            context.lock().unwrap().max_gap = std::time::Duration::ZERO;
+
+            advance(ms(25));
+            manager.replacement_checkpoint(false);
+            assert!(
+                max_gap() >= ms(25),
+                "the idle checkpoint at 25 ms is an opportunity"
+            );
+
+            advance(ms(5));
+            let mut first = queue();
+            manager.replacement_checkpoint(false);
+            assert_eq!(first.try_recv().unwrap(), Ok(0), "served at 30 ms");
+
+            advance(ms(20));
+            let mut second = queue();
+            manager.replacement_checkpoint(false);
+            assert!(
+                matches!(second.try_recv(), Err(oneshot::error::TryRecvError::Empty)),
+                "50 ms is within the budget of the 30 ms pass"
+            );
+
+            advance(ms(10));
+            manager.replacement_checkpoint(false);
+            assert_eq!(second.try_recv().unwrap(), Ok(0), "served at 60 ms");
+            assert!(
+                max_gap() >= ms(30),
+                "the receipt spans 30 ms to 60 ms, not 50 ms to 60 ms"
+            );
+        });
     }
 
     #[test]
