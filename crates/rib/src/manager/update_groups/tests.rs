@@ -778,6 +778,61 @@ fn unseed(manager: &mut RibManager, peer: IpAddr, p: Prefix) {
     }
 }
 
+/// The policy-transition destination snapshot names every Loc-RIB
+/// prefix exactly once while Add-Path peers offer several paths per
+/// prefix, and staging it chunk by chunk installs each prefix once.
+#[test]
+fn policy_transition_snapshot_stages_each_loc_rib_prefix_once() {
+    const GID: usize = 404;
+    let mut m = staging_manager();
+    m.peer_sendable_families
+        .insert(MEMBER, vec![(Afi::Ipv4, Safi::Unicast)]);
+    m.peer_is_rr_client.insert(MEMBER, true);
+    let prefixes: Vec<Prefix> = (1..=6).map(prefix).collect();
+    for &p in &prefixes {
+        let paths: Vec<Route> = [(OTHER1, 1), (OTHER1, 2), (OTHER2, 0)]
+            .into_iter()
+            .map(|(src, path_id)| {
+                let mut path = route(p, src);
+                path.path_id = path_id;
+                path
+            })
+            .collect();
+        for path in &paths {
+            seed(&mut m, path.clone());
+        }
+        m.loc_rib.recompute(p, paths.iter());
+    }
+    let candidates: usize = m.ribs.values().map(|rib| rib.iter().count()).sum();
+    assert_eq!(candidates, 3 * prefixes.len(), "three paths per prefix");
+
+    let PolicyTransitionGroupStart::Created(snapshot) =
+        m.begin_policy_transition_group(GID, MEMBER, None)
+    else {
+        panic!("a new destination group is staged from a snapshot");
+    };
+    assert_eq!(
+        snapshot.len(),
+        prefixes.len(),
+        "one entry per Loc-RIB prefix"
+    );
+    assert_eq!(
+        snapshot.iter().copied().collect::<HashSet<_>>(),
+        prefixes.iter().copied().collect::<HashSet<_>>(),
+        "no prefix is missed"
+    );
+
+    let mut memo = super::super::distribution::ExportMemo::default();
+    for chunk in snapshot.chunks(4) {
+        m.stage_policy_transition_group_chunk(GID, chunk, &mut memo);
+    }
+    let table = &m.group_ribs[&GID].table;
+    assert_eq!(table.len(), prefixes.len());
+    for p in &prefixes {
+        assert!(table.get(p, 0).is_some(), "{p} staged");
+    }
+}
+
 fn stage_pcb(manager: &mut RibManager, prefixes: &[Prefix]) -> GroupStageOutput {
     let set: HashSet<Prefix> = prefixes.iter().copied().collect();
     let mut memo = super::super::distribution::ExportMemo::default();
