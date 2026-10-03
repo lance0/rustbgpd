@@ -1518,6 +1518,13 @@ fn own_slice6(ctx: &Ctx, i: u32) -> Vec<Ipv6Prefix> {
 }
 
 fn base_attrs(i: u32) -> Vec<PathAttribute> {
+    base_attrs_for(i, ibgp_rr_asn())
+}
+
+/// [`base_attrs`] for an explicit mode (`ibgp_asn` 0 = eBGP), so tests can
+/// build iBGP attributes without flipping the process-wide mode static
+/// under concurrently running tests.
+fn base_attrs_for(i: u32, ibgp_asn: u32) -> Vec<PathAttribute> {
     // Non-loopback synthetic next-hop: the daemon rejects 127/8
     // NEXT_HOP with UPDATE error subcode 8. Route-server mode passes
     // it through untouched; RR mode reflects it unchanged (no next-hop
@@ -1529,7 +1536,7 @@ fn base_attrs(i: u32) -> Vec<PathAttribute> {
         u8::try_from(i / 200).unwrap(),
         u8::try_from(i % 200 + 1).unwrap(),
     ));
-    if ibgp_rr_asn() != 0 {
+    if ibgp_asn != 0 {
         // iBGP origination: EMPTY AS_PATH (locally-originated inside the
         // shared AS) plus LOCAL_PREF, mandatory-by-convention on iBGP
         // UPDATEs (the daemon's inbound validator mandates only
@@ -6391,9 +6398,9 @@ mod tests {
 
     #[test]
     fn ibgp_rr_attrs_switch_and_ebgp_default_is_untouched() {
-        // Single test for both modes: the mode static is process-global,
-        // so this is the only test allowed to flip it (and it restores
-        // the eBGP default before returning).
+        // The mode static is process-global and read by every concurrently
+        // running test that builds announcements, so iBGP attributes are
+        // built through the explicit-mode constructor instead of flipping it.
         let ebgp = base_attrs(7);
         assert_eq!(
             ebgp,
@@ -6407,9 +6414,7 @@ mod tests {
             "eBGP announcement attributes are a frozen contract"
         );
 
-        IBGP_RR_ASN.store(64512, Ordering::Relaxed);
-        let ibgp = base_attrs(7);
-        IBGP_RR_ASN.store(0, Ordering::Relaxed);
+        let ibgp = base_attrs_for(7, 64512);
         assert_eq!(
             ibgp,
             vec![
@@ -6422,12 +6427,7 @@ mod tests {
         );
         // The iBGP UPDATE must encode (empty AS_PATH is a valid empty
         // attribute) and decode back to the same generated shape.
-        let messages = {
-            IBGP_RR_ASN.store(64512, Ordering::Relaxed);
-            let messages = announce_msgs(7, &[base_prefix(3)]);
-            IBGP_RR_ASN.store(0, Ordering::Relaxed);
-            messages
-        };
+        let messages = announce_msgs_with(7, &base_attrs_for(7, 64512), &[base_prefix(3)]);
         assert_eq!(messages.len(), 1);
         let bytes = encode_message(&messages[0]).expect("iBGP UPDATE encodes");
         let mut buf = bytes::Bytes::copy_from_slice(&bytes);
