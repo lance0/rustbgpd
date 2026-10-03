@@ -84,9 +84,12 @@ convention in `CONTRIBUTING.md`:
       entries rather than broad rewrites of older shipped text.
 - [ ] `docs/project/roadmap.md` has one row or checkbox per remaining concern; shipped
       slices say what landed and what remains.
-- [ ] Hot tracking docs such as `docs/how-to/evpn-alpha-soak.md` and
-      `docs/project/evpn-enablement.md` update exact gates/rows instead of rewriting
-      unrelated summary prose.
+- [ ] The maintained
+      [EVPN standards tail](evpn-enablement.md#evpn-standards-tail-maintained)
+      table in `docs/project/evpn-enablement.md` reflects shipped and remaining
+      work row by row. The rest of that page and
+      `docs/how-to/evpn-alpha-soak.md` are historical records: leave their gate
+      narratives frozen.
 - [ ] New config knobs follow
       [`docs/how-to/config-knob-contributor-guide.md`](../how-to/config-knob-contributor-guide.md):
       schema, validation, reload matrix, runtime consumption, persistence,
