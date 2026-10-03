@@ -19,6 +19,12 @@ and workspace changes remain in the repository-level `CHANGELOG.md`.
   and unextractable keys remain session-reset errors. Embedders using plain
   structural decoding must call `validate_evpn_announcements` before admitting
   announcements. No multicast proxy, local origination or forwarding is added.
+- `Ipv6Prefix` now implements `Hash` by writing its 16 address octets as a
+  byte string, then its length, instead of deriving it through `Ipv6Addr`.
+  The derived form fed one native-endian `u128`, so with multiply-based word
+  hashers such as `rustc-hash`'s `FxHasher` sequential /128 or /64 keys
+  shared one hashbrown control byte and few starting buckets. `Hash` and `Eq`
+  stay consistent; hash values change, and they were never a stable output.
 - Pair this wire compatibility line with FSM 0.10 and RPKI 0.5 when sharing
   public wire types. Crate publication is a separate release step.
 
