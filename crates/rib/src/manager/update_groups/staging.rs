@@ -108,10 +108,10 @@ impl RibManager {
         reason = "one staging pass keeps the plain single-best arm and the ADR-0126 \
                   per-client-best arm over the same commit block"
     )]
-    pub(super) fn stage_group_prefixes(
+    pub(super) fn stage_group_prefixes<S: std::hash::BuildHasher>(
         &mut self,
         gid: usize,
-        prefixes: &HashSet<Prefix>,
+        prefixes: &HashSet<Prefix, S>,
         memo: &mut crate::manager::distribution::ExportMemo,
     ) -> GroupStageOutput {
         self.replacement_checkpoint(true);

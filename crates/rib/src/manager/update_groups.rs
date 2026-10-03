@@ -762,9 +762,9 @@ impl GroupRibOut {
         self.sendable.contains(&(Afi::Ipv4, Safi::RtConstrain))
     }
 
-    fn record_otc_blocked(
+    fn record_otc_blocked<S: std::hash::BuildHasher>(
         &mut self,
-        prefixes: &HashSet<Prefix>,
+        prefixes: &HashSet<Prefix, S>,
         blocked: &[Route],
         checkpoint: &mut impl FnMut(),
     ) {
@@ -1456,9 +1456,9 @@ impl GroupRibOut {
     /// pass: entries for staged prefixes are replaced by the pass's
     /// denials (same transition scope as the per-peer path's
     /// `update_policy_filtered_routes_for_prefixes`).
-    fn record_policy_filtered(
+    fn record_policy_filtered<S>(
         &mut self,
-        staged: &HashSet<Prefix>,
+        staged: &HashSet<Prefix, S>,
         current: &[(PolicyFilteredRouteKey, Option<PolicyLabel>)],
         checkpoint: &mut impl FnMut(),
     ) {

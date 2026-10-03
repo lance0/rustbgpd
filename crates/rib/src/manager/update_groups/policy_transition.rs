@@ -1,11 +1,13 @@
 use super::{
     BatchedMemberSupplement, BatchedTransitionCounters, BatchedTransitionInventory,
     CleanPolicyTransitionInventory, CleanPolicyTransitionInventoryBuilder, FastMap, GroupKey,
-    GroupMembership, GroupRibOut, HashSet, IpAddr, LargeCommunity, NextHopAction, PolicyAction,
-    PolicyChain, PolicyTransitionGroupStart, Prefix, RibManager, Route, UpdateGroupClassification,
+    GroupMembership, GroupRibOut, IpAddr, LargeCommunity, NextHopAction, PolicyAction, PolicyChain,
+    PolicyTransitionGroupStart, Prefix, RibManager, Route, UpdateGroupClassification,
     classify_update_group, routes_equal, source_control_input,
 };
 use tracing::info;
+
+use crate::fast_hash::FastSet;
 
 /// One `None` arm of the clean-transition inventory walk. Every arm
 /// degrades the WHOLE cohort back to the authoritative per-peer path,
@@ -421,17 +423,14 @@ impl RibManager {
         );
         self.replacement_checkpoint(true);
         self.group_ribs.insert(gid, group);
-        let mut prefixes = HashSet::with_capacity(self.loc_rib.len());
+        // Loc-RIB keys are unique per prefix (Add-Path paths collapse to
+        // one best before they get here), so the snapshot needs no dedup.
+        let mut snapshot = Vec::with_capacity(self.loc_rib.len());
         self.replacement_checkpoint(true);
-        for route in self.loc_rib.iter() {
+        for prefix in self.loc_rib.prefixes() {
             self.replacement_checkpoint(false);
-            prefixes.insert(route.prefix);
+            snapshot.push(prefix);
         }
-        self.replacement_checkpoint(true);
-        let snapshot = prefixes
-            .into_iter()
-            .inspect(|_| self.replacement_checkpoint(false))
-            .collect();
         self.replacement_checkpoint(true);
         PolicyTransitionGroupStart::Created(snapshot)
     }
@@ -448,7 +447,7 @@ impl RibManager {
             .iter()
             .inspect(|_| self.replacement_checkpoint(false))
             .copied()
-            .collect::<HashSet<_>>();
+            .collect::<FastSet<_>>();
         self.replacement_checkpoint(true);
         let mut output = self.stage_group_prefixes(gid, &prefixes, memo);
         output.retire_with(&mut |force| self.replacement_checkpoint(force));

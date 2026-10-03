@@ -232,6 +232,12 @@ impl LocRib {
         self.routes.values().map(|(route, _)| route)
     }
 
+    /// Every prefix with a unicast best route, each exactly once (the
+    /// table's own keys).
+    pub(crate) fn prefixes(&self) -> impl ExactSizeIterator<Item = Prefix> + '_ {
+        self.routes.keys().copied()
+    }
+
     /// Iterate best routes in route-query identity order, excluding rows at
     /// or before `after`. There is one best per prefix, so the compact prefix
     /// index supplies the full ordering and the hash map remains authoritative
