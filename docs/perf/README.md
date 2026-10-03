@@ -99,7 +99,7 @@ Each result below links to its published, reproducible receipt:
 
 The two current-main bullets are main at `481e0187d`, measured 2026-10-03 on
 the jemalloc receiver harness against a same-night harness-fix control —
-[jemalloc-harness receipt](headline-refresh-jemalloc-2026-10.md). The other rustbgpd figures above are v0.73.0 release-tree rows measured
+[jemalloc-harness receipt](headline-refresh-jemalloc-2026-10.md). The v0.73.0 figures above are release-tree rows measured
 overnight 2026-09-27 to 2026-09-28, alternating with same-night v0.72.0 and
 v0.68.0 controls. Against v0.72.0, v0.73.0 is faster at cold start,
 member-flap re-announce and RR1000, within spread on S2 policy reload, and
