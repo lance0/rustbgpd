@@ -84,9 +84,12 @@ convention in `CONTRIBUTING.md`:
       entries rather than broad rewrites of older shipped text.
 - [ ] `docs/project/roadmap.md` has one row or checkbox per remaining concern; shipped
       slices say what landed and what remains.
-- [ ] Hot tracking docs such as `docs/how-to/evpn-alpha-soak.md` and
-      `docs/project/evpn-enablement.md` update exact gates/rows instead of rewriting
-      unrelated summary prose.
+- [ ] The maintained
+      [EVPN standards tail](evpn-enablement.md#evpn-standards-tail-maintained)
+      table in `docs/project/evpn-enablement.md` reflects shipped and remaining
+      work row by row. The rest of that page and
+      `docs/how-to/evpn-alpha-soak.md` are historical records: leave their gate
+      narratives frozen.
 - [ ] New config knobs follow
       [`docs/how-to/config-knob-contributor-guide.md`](../how-to/config-knob-contributor-guide.md):
       schema, validation, reload matrix, runtime consumption, persistence,
@@ -953,6 +956,20 @@ After the tag publishes:
     and checks that canonical persistence introduces no root key the tag's
     schema rejects. Semantic round-trip tests cover the rendered values; this
     is not full previous-release schema validation or a downgrade guarantee.
+
+14. **Refresh the copyable install and deploy examples.** In
+    `docs/how-to/deployment.md`, move the pinned installer (`--tag vX.Y.Z`),
+    tarball (`releases/download/vX.Y.Z/`), and container image
+    (`ghcr.io/lance0/rustbgpd:X.Y.Z`) examples to the new tag. Verify them
+    against the published release before committing: every asset name they
+    use appears in `gh release view vX.Y.Z --json assets`;
+    `sh packaging/install.sh --tag vX.Y.Z --download-only <new-dir>` exits 0;
+    `sh packaging/install.sh --tag vX.Y.Z --prefix <new-prefix>` exits 0 and
+    `<new-prefix>/rbgp --version` reports `X.Y.Z` (the tarball extracts flat,
+    with no `bin/`; the prefix must be absent or empty); and
+    `docker buildx imagetools inspect ghcr.io/lance0/rustbgpd:X.Y.Z` lists
+    `linux/amd64` and `linux/arm64`. Leave dated and historical examples
+    unchanged.
 
 ### Published-crate documentation refresh
 

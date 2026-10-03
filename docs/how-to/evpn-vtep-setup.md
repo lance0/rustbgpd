@@ -277,13 +277,18 @@ pass).
 
 ## Common pitfalls
 
+In `rbgp evpn instances` output, `readiness=not-ready` means a readiness
+predicate failed for a bound instance and `reason=[...]` names it.
+`readiness=unbound` means the instance has no configured `bridge` binding: it
+is control-plane only and the readiness predicates do not apply.
+
 | Symptom | Cause | Fix |
 |---------|-------|-----|
-| L2VNI `NotReady` "VLAN-aware" | bridge created with `vlan_filtering=1` but instance has no `bridge_vlan` | set `bridge_vlan` and add the VLAN membership, or recreate with `vlan_filtering 0` |
-| L2VNI `NotReady` "learning enabled" | VXLAN missing `nolearning` | recreate the VXLAN with `nolearning` |
-| L2VNI `NotReady` "local IP …" | `local` ≠ `local_vtep_ip` | match the config |
-| L2VNI `NotReady` "VXLAN ports" | legacy bridge has zero or multiple VXLAN ports, or a `bridge_vlan` instance has a count other than one for its VLAN/VNI | legacy: attach exactly one VXLAN to the bridge; VLAN-aware: attach exactly one VXLAN member for the VLAN/VNI |
-| L2VNI `Unbound` unexpectedly | `bridge` omitted from config | set `bridge` if you want dataplane binding |
+| L2VNI `readiness=not-ready`, reason "VLAN-aware" | bridge created with `vlan_filtering=1` but instance has no `bridge_vlan` | set `bridge_vlan` and add the VLAN membership, or recreate with `vlan_filtering 0` |
+| L2VNI `readiness=not-ready`, reason "learning enabled" | VXLAN missing `nolearning` | recreate the VXLAN with `nolearning` |
+| L2VNI `readiness=not-ready`, reason "local IP …" | `local` ≠ `local_vtep_ip` | match the config |
+| L2VNI `readiness=not-ready`, reason "VXLAN ports" | legacy bridge has zero or multiple VXLAN ports, or a `bridge_vlan` instance has a count other than one for its VLAN/VNI | legacy: attach exactly one VXLAN to the bridge; VLAN-aware: attach exactly one VXLAN member for the VLAN/VNI |
+| L2VNI `readiness=unbound` unexpectedly | `bridge` omitted from config | set `bridge` if you want dataplane binding |
 | IP-VRF predicate 6/7 fails | L3VXLAN not enslaved to VRF, or wrong MAC | `set master ${VRF}` / `set address ${RMAC}` |
 | IP-VRF predicate 2 fails | VRF table id ≠ `table_id` | `type vrf table ${TABLE}` |
 
