@@ -527,8 +527,12 @@ impl PeerManager {
         candidate: &Config,
         actions: &[ReloadPeerAction],
     ) -> Result<ResolvedGeneration, String> {
+        // The coordinator's post-pin `validate()` bounded every named chain,
+        // and nothing after it edits one. Pins applied after that validation
+        // (`honor_blackhole`, the RFC 8212 posture) can still change the
+        // implicit tails of effective chains, so re-check those here.
         candidate
-            .validate_policy_chain_nodes()
+            .validate_effective_policy_chain_nodes()
             .map_err(|error| error.to_string())?;
         let mut kinds: BTreeMap<&PeerKey, ReloadPeerActionKind> = BTreeMap::new();
         for action in actions {
@@ -638,6 +642,7 @@ impl PeerManager {
         // dynamic. Replaced peers receive their chains on re-add.
         let mut live: Vec<&PeerKey> = self.peers.keys().collect();
         live.sort();
+        let mut stores = crate::config::ChunkedSetStore::default();
         for peer in live {
             if matches!(
                 kinds.get(peer),
@@ -657,9 +662,11 @@ impl PeerManager {
                     ));
                 }
             };
-            let mut chains = match candidate
-                .effective_policy_for_neighbor(&neighbor, managed.rfc8212_external)
-            {
+            let mut chains = match candidate.effective_policy_for_neighbor_in(
+                &neighbor,
+                managed.rfc8212_external,
+                stores.next_store(),
+            ) {
                 Ok(chains) => chains,
                 Err(error @ crate::config::ConfigError::PolicyChainTooLarge { .. }) => {
                     return Err(error.to_string());

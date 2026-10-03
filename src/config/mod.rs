@@ -3,7 +3,7 @@ pub mod diagnostic;
 mod parse;
 pub mod profiles;
 mod resolution;
-pub(crate) use resolution::transport_tcp_ao_keyring;
+pub(crate) use resolution::{ChunkedSetStore, transport_tcp_ao_keyring};
 mod schema;
 pub(crate) mod source_provenance;
 pub(crate) use source_provenance::AcceptedConfigSnapshot;
@@ -3631,6 +3631,8 @@ pub(crate) fn plan_reload_peer_actions(
         candidate.neighbors.iter().map(|n| (key(n), n)).collect();
 
     let mut actions = Vec::new();
+    let (mut prior_stores, mut candidate_stores) =
+        (ChunkedSetStore::default(), ChunkedSetStore::default());
     for (peer, old) in &prior_by_key {
         let Some(new) = candidate_by_key.get(peer) else {
             actions.push(ReloadPeerAction {
@@ -3639,8 +3641,9 @@ pub(crate) fn plan_reload_peer_actions(
             });
             continue;
         };
-        let old_resolved = prior.resolve_neighbor_for_comparison(old)?;
-        let new_resolved = candidate.resolve_neighbor_for_comparison(new)?;
+        let old_resolved = prior.resolve_neighbor_for_comparison(old, prior_stores.next_store())?;
+        let new_resolved =
+            candidate.resolve_neighbor_for_comparison(new, candidate_stores.next_store())?;
         if let Some(kind) = resolved_session_change(&old_resolved, &new_resolved) {
             if kind == ReloadPeerActionKind::Replace {
                 // Fresh scope validation precedes coordinator side effects,
@@ -5599,14 +5602,19 @@ fn compute_effective_neighbor_impact(
         .collect();
 
     let mut out: Vec<EffectiveNeighborImpact> = Vec::new();
+    let (mut old_stores, mut new_stores) = (ChunkedSetStore::default(), ChunkedSetStore::default());
     for old_neighbor in &old.neighbors {
         let Some(new_neighbor) = new_by_addr.get(old_neighbor.address.as_str()) else {
             continue;
         };
-        let Ok(old_resolved) = old.resolve_neighbor_for_comparison(old_neighbor) else {
+        let Ok(old_resolved) =
+            old.resolve_neighbor_for_comparison(old_neighbor, old_stores.next_store())
+        else {
             continue;
         };
-        let Ok(new_resolved) = new.resolve_neighbor_for_comparison(new_neighbor) else {
+        let Ok(new_resolved) =
+            new.resolve_neighbor_for_comparison(new_neighbor, new_stores.next_store())
+        else {
             continue;
         };
 

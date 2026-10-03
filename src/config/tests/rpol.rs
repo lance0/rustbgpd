@@ -1146,3 +1146,29 @@ fn chain_node_budget_inline_and_dynamic_attachment() {
             .contains("MAX_CHAIN_NODES")
     );
 }
+
+#[test]
+fn chain_node_budget_rejects_named_chains_no_neighbor_inherits() {
+    use std::fmt::Write as _;
+    let mut source = String::from("policy bulk(x: u32) {\n");
+    for i in 0..3333 {
+        writeln!(source, "term t{i} {{ if route.med >= {i} {{ accept }} }}").unwrap();
+    }
+    source.push_str("}\n");
+    let dir = rpol_config_dir(&source, "\"toml-pass\"");
+    let config = load_dir(&dir).unwrap();
+    let oversized = vec!["bulk(1)".to_string(); 101];
+
+    // Every neighbor overrides the global import chain, and no neighbor
+    // joins the group, so no effective chain contains either one.
+    let mut global = config.clone();
+    global.policy.import_chain.clone_from(&oversized);
+    let mut group = config;
+    let mut unused: PeerGroupConfig = toml::from_str("").unwrap();
+    unused.export_policy_chain = oversized;
+    group.peer_groups.insert("unused".to_string(), unused);
+    for candidate in [global, group] {
+        let error = candidate.validate().unwrap_err().to_string();
+        assert!(error.contains("MAX_CHAIN_NODES"), "{error}");
+    }
+}
