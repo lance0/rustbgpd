@@ -145,7 +145,10 @@ impl proto::control_service_server::ControlService for ControlService {
     ) -> Result<Response<proto::MetricsResponse>, Status> {
         let text = crate::metrics_render::render_text(&self.metrics)
             .await
-            .map_err(|e| Status::internal(format!("metrics encoding error: {e}")))?;
+            .map_err(|e| match e.kind() {
+                std::io::ErrorKind::TimedOut => Status::deadline_exceeded(e.to_string()),
+                _ => Status::internal(format!("metrics encoding error: {e}")),
+            })?;
 
         Ok(Response::new(proto::MetricsResponse {
             prometheus_text: text,
@@ -247,6 +250,17 @@ mod tests {
             .into_inner();
         // Response is valid UTF-8 prometheus text (may be empty if no samples)
         assert!(resp.prometheus_text.is_ascii());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn get_metrics_behind_held_render_returns_deadline_exceeded() {
+        let held = crate::metrics_render::RENDER_SLOT.acquire().await.unwrap();
+        let status = make_service()
+            .get_metrics(Request::new(proto::MetricsRequest {}))
+            .await
+            .unwrap_err();
+        drop(held);
+        assert_eq!(status.code(), tonic::Code::DeadlineExceeded, "{status}");
     }
 
     #[tokio::test]

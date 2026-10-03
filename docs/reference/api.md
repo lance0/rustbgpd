@@ -3004,7 +3004,7 @@ Daemon lifecycle, health checks, and metrics.
 |-----|-------------|
 | `CheckLiveness` | Empty authenticated request/response; Read tier. A response means only the gRPC handler answered, without actor readiness or topology. Outside the narrow v1 contract; older servers return `UNIMPLEMENTED`. |
 | `GetHealth` | Returns health status, uptime, active peers, total routes; core actor probes are bounded by the same 200 ms deadline as HTTP `/readyz` |
-| `GetMetrics` | Returns Prometheus metrics as text |
+| `GetMetrics` | Returns Prometheus metrics as text; returns `DEADLINE_EXCEEDED` when the shared one-at-a-time render does not finish within 5 s |
 | `Shutdown` | Initiates graceful shutdown |
 | `TriggerMrtDump` | Triggers an on-demand MRT TABLE_DUMP_V2 dump |
 
