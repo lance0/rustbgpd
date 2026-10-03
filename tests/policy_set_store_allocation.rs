@@ -10,9 +10,9 @@
 //! ```
 
 use std::alloc::{GlobalAlloc, Layout, System};
+use std::cell::Cell;
 use std::fmt::Write as _;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Instant;
 
 use rustbgpd::config::{Config, ResolvedNeighbor};
@@ -22,82 +22,95 @@ const SET_ENTRIES: usize = 10_000;
 const PEER_SHAPES: [usize; 4] = [1, 10, 100, 1_000];
 const DEFAULT_RUNS: usize = 5;
 
+// Counting is per thread, not per process. Resolution runs entirely on the
+// measuring thread, but the two ignored receipts run concurrently under
+// `cargo test -- --ignored`; with process-wide counters each `begin()` reset
+// the other's window and each window counted both threads' allocations. Frees
+// of memory allocated on another thread are charged to the freeing thread, so
+// live bytes are signed.
+thread_local! {
+    static ENABLED: Cell<bool> = const { Cell::new(false) };
+    static LIVE: Cell<isize> = const { Cell::new(0) };
+    static PEAK: Cell<isize> = const { Cell::new(0) };
+    static CALLS: Cell<usize> = const { Cell::new(0) };
+    static REQUESTED: Cell<usize> = const { Cell::new(0) };
+}
+
 struct TrackingAllocator {
     inner: System,
-    enabled: AtomicBool,
-    live_bytes: AtomicUsize,
-    peak_live_bytes: AtomicUsize,
-    calls: AtomicUsize,
-    requested_bytes: AtomicUsize,
+}
+
+#[expect(
+    clippy::cast_possible_wrap,
+    reason = "a single allocation never exceeds isize::MAX bytes"
+)]
+fn signed(size: usize) -> isize {
+    size as isize
+}
+
+fn window_bytes(now: isize, baseline: isize, what: &str) -> usize {
+    now.checked_sub(baseline)
+        .and_then(|delta| usize::try_from(delta).ok())
+        .unwrap_or_else(|| {
+            panic!(
+                "{what} bytes {now} fell below the window baseline {baseline}: \
+                 the window freed memory allocated before it on this thread"
+            )
+        })
 }
 
 impl TrackingAllocator {
     const fn new() -> Self {
-        Self {
-            inner: System,
-            enabled: AtomicBool::new(false),
-            live_bytes: AtomicUsize::new(0),
-            peak_live_bytes: AtomicUsize::new(0),
-            calls: AtomicUsize::new(0),
-            requested_bytes: AtomicUsize::new(0),
-        }
+        Self { inner: System }
     }
 
-    fn add_live(&self, bytes: usize) {
-        let live = self.live_bytes.fetch_add(bytes, Ordering::Relaxed) + bytes;
-        if self.enabled.load(Ordering::Relaxed) {
-            self.peak_live_bytes.fetch_max(live, Ordering::Relaxed);
-        }
-    }
-
-    fn subtract_live(&self, bytes: usize) {
-        self.live_bytes.fetch_sub(bytes, Ordering::Relaxed);
+    // `try_with` (not `with`): the allocator is reachable from TLS
+    // destructors on exiting threads, where key access would panic.
+    fn add_live(&self, delta: isize) {
+        let _ = LIVE.try_with(|live| {
+            let current = live.get().wrapping_add(delta);
+            live.set(current);
+            let _ = PEAK.try_with(|peak| peak.set(peak.get().max(current)));
+        });
     }
 
     fn count(&self, bytes: usize) {
-        if self.enabled.load(Ordering::Relaxed) {
-            self.calls.fetch_add(1, Ordering::Relaxed);
-            self.requested_bytes.fetch_add(bytes, Ordering::Relaxed);
+        if ENABLED.try_with(Cell::get).unwrap_or(false) {
+            let _ = CALLS.try_with(|calls| calls.set(calls.get() + 1));
+            let _ = REQUESTED.try_with(|requested| requested.set(requested.get() + bytes));
         }
     }
 
-    fn begin(&self) -> usize {
-        self.enabled.store(false, Ordering::Relaxed);
-        self.calls.store(0, Ordering::Relaxed);
-        self.requested_bytes.store(0, Ordering::Relaxed);
-        let baseline = self.live_bytes.load(Ordering::Relaxed);
-        self.peak_live_bytes.store(baseline, Ordering::Relaxed);
-        self.enabled.store(true, Ordering::Relaxed);
+    fn begin(&self) -> isize {
+        CALLS.set(0);
+        REQUESTED.set(0);
+        let baseline = LIVE.get();
+        PEAK.set(baseline);
+        ENABLED.set(true);
         baseline
     }
 
-    fn end(&self, baseline: usize) -> AllocationReceipt {
-        self.enabled.store(false, Ordering::Relaxed);
+    fn end(&self, baseline: isize) -> AllocationReceipt {
+        ENABLED.set(false);
         AllocationReceipt {
             baseline_live_bytes: baseline,
-            calls: self.calls.load(Ordering::Relaxed),
-            requested_bytes: self.requested_bytes.load(Ordering::Relaxed),
-            peak_live_delta_bytes: self
-                .peak_live_bytes
-                .load(Ordering::Relaxed)
-                .saturating_sub(baseline),
-            live_delta_bytes: self
-                .live_bytes
-                .load(Ordering::Relaxed)
-                .saturating_sub(baseline),
+            calls: CALLS.get(),
+            requested_bytes: REQUESTED.get(),
+            peak_live_delta_bytes: window_bytes(PEAK.get(), baseline, "peak live"),
+            live_delta_bytes: window_bytes(LIVE.get(), baseline, "live"),
         }
     }
 }
 
 // SAFETY: every operation forwards the original pointer/layout contract to the
-// same `System` allocator. The wrapper adds only allocation-free atomic
+// same `System` allocator. The wrapper adds only allocation-free thread-local
 // bookkeeping after successful operations.
 unsafe impl GlobalAlloc for TrackingAllocator {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         // SAFETY: `layout` is forwarded unchanged to the wrapped allocator.
         let pointer = unsafe { self.inner.alloc(layout) };
         if !pointer.is_null() {
-            self.add_live(layout.size());
+            self.add_live(signed(layout.size()));
             self.count(layout.size());
         }
         pointer
@@ -107,7 +120,7 @@ unsafe impl GlobalAlloc for TrackingAllocator {
         // SAFETY: `layout` is forwarded unchanged to the wrapped allocator.
         let pointer = unsafe { self.inner.alloc_zeroed(layout) };
         if !pointer.is_null() {
-            self.add_live(layout.size());
+            self.add_live(signed(layout.size()));
             self.count(layout.size());
         }
         pointer
@@ -118,11 +131,7 @@ unsafe impl GlobalAlloc for TrackingAllocator {
         // unchanged to the allocator that created the allocation.
         let resized = unsafe { self.inner.realloc(pointer, layout, new_size) };
         if !resized.is_null() {
-            if new_size >= layout.size() {
-                self.add_live(new_size - layout.size());
-            } else {
-                self.subtract_live(layout.size() - new_size);
-            }
+            self.add_live(signed(new_size) - signed(layout.size()));
             self.count(new_size);
         }
         resized
@@ -132,7 +141,7 @@ unsafe impl GlobalAlloc for TrackingAllocator {
         // SAFETY: the pointer/layout pair is forwarded unchanged to the
         // allocator that created it.
         unsafe { self.inner.dealloc(pointer, layout) };
-        self.subtract_live(layout.size());
+        self.add_live(-signed(layout.size()));
     }
 }
 
@@ -141,7 +150,8 @@ static TRACKING_ALLOCATOR: TrackingAllocator = TrackingAllocator::new();
 
 #[derive(Clone, Copy)]
 struct AllocationReceipt {
-    baseline_live_bytes: usize,
+    /// Net bytes the measuring thread held when the window opened.
+    baseline_live_bytes: isize,
     calls: usize,
     requested_bytes: usize,
     peak_live_delta_bytes: usize,
@@ -503,4 +513,48 @@ fn unique_large_set_peak_receipt() {
         );
         std::hint::black_box(resolved);
     }
+}
+
+/// The ignored receipts run concurrently under `-- --ignored`. Force two
+/// overlapping windows: both open before either resolves and both close after
+/// both resolved. Each window must report exactly what a solo window reports.
+#[test]
+fn concurrent_windows_count_only_their_own_thread() {
+    use std::sync::Barrier;
+
+    fn window(
+        fixture: Arc<Fixture>,
+        barrier: Option<Arc<Barrier>>,
+    ) -> std::thread::JoinHandle<(usize, usize, usize, usize)> {
+        std::thread::spawn(move || {
+            let wait = || {
+                if let Some(barrier) = &barrier {
+                    barrier.wait();
+                }
+            };
+            wait();
+            let baseline = TRACKING_ALLOCATOR.begin();
+            wait();
+            let resolved = fixture.config.resolved_neighbors().expect("resolves");
+            wait();
+            let receipt = TRACKING_ALLOCATOR.end(baseline);
+            drop(resolved);
+            (
+                receipt.calls,
+                receipt.requested_bytes,
+                receipt.peak_live_delta_bytes,
+                receipt.live_delta_bytes,
+            )
+        })
+    }
+
+    let fixture = Arc::new(shared_fixture(4));
+    let solo = window(Arc::clone(&fixture), None).join().unwrap();
+    let barrier = Arc::new(Barrier::new(2));
+    let first = window(Arc::clone(&fixture), Some(Arc::clone(&barrier)));
+    let second = window(Arc::clone(&fixture), Some(barrier));
+    let (first, second) = (first.join().unwrap(), second.join().unwrap());
+    assert!(solo.0 > 0, "the window must observe resolution allocations");
+    assert_eq!(first, solo, "first concurrent window differs from solo");
+    assert_eq!(second, solo, "second concurrent window differs from solo");
 }
