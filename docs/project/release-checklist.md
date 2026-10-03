@@ -954,6 +954,17 @@ After the tag publishes:
     schema rejects. Semantic round-trip tests cover the rendered values; this
     is not full previous-release schema validation or a downgrade guarantee.
 
+14. **Refresh the copyable install and deploy examples.** In
+    `docs/how-to/deployment.md`, move the pinned installer (`--tag vX.Y.Z`),
+    tarball (`releases/download/vX.Y.Z/`), and container image
+    (`ghcr.io/lance0/rustbgpd:X.Y.Z`) examples to the new tag. Verify them
+    against the published release before committing: every asset name they
+    use appears in `gh release view vX.Y.Z --json assets`,
+    `sh packaging/install.sh --tag vX.Y.Z --download-only <new-dir>` exits 0,
+    and `docker buildx imagetools inspect ghcr.io/lance0/rustbgpd:X.Y.Z`
+    lists `linux/amd64` and `linux/arm64`. Leave dated and historical
+    examples unchanged.
+
 ### Published-crate documentation refresh
 
 After changing crate versions and their workspace pins, run

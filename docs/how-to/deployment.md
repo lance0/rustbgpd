@@ -61,7 +61,7 @@ with an explicit stable tag (`vMAJOR.MINOR.PATCH`):
 
 ```sh
 less packaging/install.sh
-sh packaging/install.sh --tag v0.70.2
+sh packaging/install.sh --tag v0.73.0
 ```
 
 Without a source checkout, fetch the published asset:
@@ -77,10 +77,10 @@ systemd units. `--download-only` writes the verified selected artifact and its
 manifest without installing either.
 
 ```sh
-sh packaging/install.sh --tag v0.70.2 --prefix /opt/rustbgpd-0.70.2
-/opt/rustbgpd-0.70.2/rbgp doctor
+sh packaging/install.sh --tag v0.73.0 --prefix /opt/rustbgpd-0.73.0
+/opt/rustbgpd-0.73.0/rbgp doctor
 
-sh packaging/install.sh --tag v0.70.2 --download-only ./rustbgpd-v0.70.2
+sh packaging/install.sh --tag v0.73.0 --download-only ./rustbgpd-v0.73.0
 ```
 
 ### Pre-built binary tarball
@@ -163,7 +163,7 @@ subcommand name but not its flags. All three shells offer `--json-lines`,
 `--pager`, and `--json-version` only on command paths where those flags apply.
 
 To pin to a specific tag for reproducibility, swap `latest` for the
-version, e.g. `releases/download/v0.45.0/${TARBALL}`. SHA-256
+version, e.g. `releases/download/v0.73.0/${TARBALL}`. SHA-256
 checksums are published alongside each tarball as
 `checksums-${SUFFIX}.txt`.
 
@@ -713,8 +713,8 @@ docker compose down
 For your own deployment:
 
 - **Image name and command**: published GHCR version tags have **no leading
-  `v`**: use `ghcr.io/lance0/rustbgpd:0.68.0`, not
-  `ghcr.io/lance0/rustbgpd:v0.68.0`. That existing `:0.68.0` image is
+  `v`**: use `ghcr.io/lance0/rustbgpd:0.73.0`, not
+  `ghcr.io/lance0/rustbgpd:v0.73.0`. The older `:0.68.0` image is
   amd64-only; it is not backfilled when a later release publishes multiple
   platforms. The production image runs as uid/gid 999 — pinned in the
   `Dockerfile` runtime stage (`useradd --uid 999 --gid 999` and
@@ -804,17 +804,16 @@ Use exactly one of these deployment paths:
      --ulimit nofile=65536:524288 \
      --mount=type=bind,source=/etc/rustbgpd,target=/etc/rustbgpd,readonly \
      --mount=type=bind,source=/var/lib/rustbgpd,target=/var/lib/rustbgpd \
-     ghcr.io/lance0/rustbgpd:0.68.0
+     ghcr.io/lance0/rustbgpd:0.73.0
    ```
 
 Do not omit the host state bind when overriding the image user. The directory
 baked into the image is owned by uid 999; a root daemon expects uid 0. The
 runtime-state owner guard treats that mismatch as unsafe, logs
-`runtime-state marker/checkpoint storage unavailable`, and continues with the
-graceful-restart marker and warm checkpoint storage disabled in the pinned
-`0.68.0` image above. v0.69.0 and later images also reject the default gRPC UDS
-listener at startup. A root-owned, non-group/world-writable bind mount makes
-the authority match the running uid. The socket parent must allow the daemon
+`runtime-state marker/checkpoint storage unavailable`, and disables the
+graceful-restart marker and warm checkpoint storage. v0.69.0 and later images
+also reject the default gRPC UDS listener at startup. A root-owned,
+non-group/world-writable bind mount makes the authority match the running uid. The socket parent must allow the daemon
 read/write/search access, with no symlinks or untrusted writable ancestors;
 see [Unix socket path integrity](../reference/security.md#unix-socket-path-integrity).
 
@@ -855,7 +854,7 @@ sudo install -o root -g root -m 0600 config.toml /etc/rustbgpd/config.toml
 sudo install -m 0644 examples/systemd/rustbgpd-container.service \
   /etc/systemd/system/rustbgpd-container.service
 sudo tee /etc/rustbgpd/rustbgpd-container.env >/dev/null <<'EOF'
-RUSTBGPD_IMAGE=ghcr.io/lance0/rustbgpd:0.68.0
+RUSTBGPD_IMAGE=ghcr.io/lance0/rustbgpd:0.73.0
 EOF
 sudo chmod 0644 /etc/rustbgpd/rustbgpd-container.env
 sudo systemctl daemon-reload
@@ -885,7 +884,7 @@ docker run --rm \
   --user=root \
   --cap-drop=ALL \
   --mount=type=bind,source=/etc/rustbgpd,target=/etc/rustbgpd,readonly \
-  ghcr.io/lance0/rustbgpd:0.68.0 \
+  ghcr.io/lance0/rustbgpd:0.73.0 \
   rustbgpd --check --strict /etc/rustbgpd/config.toml
 ```
 
