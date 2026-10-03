@@ -12,9 +12,9 @@
 //! under ordinary `cargo test`.
 
 use std::alloc::{GlobalAlloc, Layout, System};
+use std::cell::Cell;
 use std::net::{IpAddr, Ipv4Addr};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
 
 use rustbgpd_rib::AttrSet;
@@ -35,48 +35,83 @@ use rustbgpd_wire::{
 /// fixture accidentally drift back to one set per prefix.
 const REPRESENTATIVE_PREFIXES_PER_ATTRIBUTE_SET: usize = 7;
 
+// Counting is per thread, not per process. Each `measure_*` window runs
+// entirely on the test thread (none of the measured RIB code spawns threads),
+// but sibling tests in this binary allocate and free megabytes on their own
+// threads; a process-wide counter let one of those frees land inside a window
+// and underflow `allocated() - baseline`. Frees of memory allocated on another
+// thread are charged to the freeing thread, so the counters are signed.
+thread_local! {
+    static LIVE: Cell<isize> = const { Cell::new(0) };
+    static PEAK: Cell<isize> = const { Cell::new(0) };
+}
+
 struct TrackingAllocator {
     inner: System,
-    allocated: AtomicUsize,
-    peak: AtomicUsize,
 }
 
 impl TrackingAllocator {
     const fn new() -> Self {
-        Self {
-            inner: System,
-            allocated: AtomicUsize::new(0),
-            peak: AtomicUsize::new(0),
-        }
+        Self { inner: System }
     }
 
-    fn allocated(&self) -> usize {
-        self.allocated.load(Ordering::Relaxed)
+    /// Net bytes allocated minus freed on the calling thread.
+    fn allocated(&self) -> isize {
+        LIVE.get()
     }
 
-    fn peak(&self) -> usize {
-        self.peak.load(Ordering::Relaxed)
+    /// Highest `allocated()` on the calling thread since `reset_peak`.
+    fn peak(&self) -> isize {
+        PEAK.get()
     }
 
     fn reset_peak(&self) {
-        self.peak
-            .store(self.allocated.load(Ordering::Relaxed), Ordering::Relaxed);
+        PEAK.set(LIVE.get());
     }
+
+    // `try_with` (not `with`): the allocator is reachable from TLS
+    // destructors on exiting threads, where key access would panic.
+    fn record(&self, delta: isize) {
+        let _ = LIVE.try_with(|live| {
+            let current = live.get().wrapping_add(delta);
+            live.set(current);
+            let _ = PEAK.try_with(|peak| peak.set(peak.get().max(current)));
+        });
+    }
+}
+
+/// Bytes `now` exceeds the window's `baseline`, both read on the measuring
+/// thread.
+fn window_bytes(now: isize, baseline: isize, what: &str) -> usize {
+    now.checked_sub(baseline)
+        .and_then(|delta| usize::try_from(delta).ok())
+        .unwrap_or_else(|| {
+            panic!(
+                "{what} bytes {now} fell below the window baseline {baseline}: \
+                 the window freed memory allocated before it on this thread"
+            )
+        })
+}
+
+#[expect(
+    clippy::cast_possible_wrap,
+    reason = "a single allocation never exceeds isize::MAX bytes"
+)]
+fn signed(size: usize) -> isize {
+    size as isize
 }
 
 unsafe impl GlobalAlloc for TrackingAllocator {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         let ptr = unsafe { self.inner.alloc(layout) };
         if !ptr.is_null() {
-            let current =
-                self.allocated.fetch_add(layout.size(), Ordering::Relaxed) + layout.size();
-            self.peak.fetch_max(current, Ordering::Relaxed);
+            self.record(signed(layout.size()));
         }
         ptr
     }
 
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
-        self.allocated.fetch_sub(layout.size(), Ordering::Relaxed);
+        self.record(-signed(layout.size()));
         unsafe { self.inner.dealloc(ptr, layout) };
     }
 }
@@ -482,8 +517,8 @@ fn measure_adj_rib_in(profile: &'static str, prefixes: &[Prefix]) -> MemoryRow {
     }
 
     let elapsed_ms = start.elapsed().as_millis();
-    let live_bytes = ALLOC.allocated() - baseline;
-    let peak_bytes = ALLOC.peak() - baseline;
+    let live_bytes = window_bytes(ALLOC.allocated(), baseline, "live");
+    let peak_bytes = window_bytes(ALLOC.peak(), baseline, "peak");
     let stats = adj_in_stats(&[&rib], &intern);
     let route_copies = stats.adj_in_routes;
     drop(rib);
@@ -526,8 +561,8 @@ fn measure_loc_rib_only(profile: &'static str, prefixes: &[Prefix]) -> MemoryRow
     drop(intern);
 
     let elapsed_ms = start.elapsed().as_millis();
-    let live_bytes = ALLOC.allocated() - baseline;
-    let peak_bytes = ALLOC.peak() - baseline;
+    let live_bytes = window_bytes(ALLOC.allocated(), baseline, "live");
+    let peak_bytes = window_bytes(ALLOC.peak(), baseline, "peak");
     let stats = ComponentStats {
         adj_in_attr_intern_entries: attribute_sets,
         ..loc_stats(&loc)
@@ -577,8 +612,8 @@ fn measure_full_rib(profile: &'static str, prefixes: &[Prefix]) -> MemoryRow {
     }
 
     let elapsed_ms = start.elapsed().as_millis();
-    let live_bytes = ALLOC.allocated() - baseline;
-    let peak_bytes = ALLOC.peak() - baseline;
+    let live_bytes = window_bytes(ALLOC.allocated(), baseline, "live");
+    let peak_bytes = window_bytes(ALLOC.peak(), baseline, "peak");
     let stats = merge_stats(&[adj_in_stats(&[&rib1, &rib2], &intern), loc_stats(&loc)]);
     let route_copies = stats.adj_in_routes + stats.loc_routes;
     drop(loc);
@@ -640,8 +675,8 @@ fn measure_full_rib_attribute_ratio(
     }
 
     let elapsed_ms = start.elapsed().as_millis();
-    let live_bytes = ALLOC.allocated() - baseline;
-    let peak_bytes = ALLOC.peak() - baseline;
+    let live_bytes = window_bytes(ALLOC.allocated(), baseline, "live");
+    let peak_bytes = window_bytes(ALLOC.peak(), baseline, "peak");
     let stats = merge_stats(&[adj_in_stats(&[&rib1, &rib2], &intern), loc_stats(&loc)]);
     let route_copies = stats.adj_in_routes + stats.loc_routes;
     drop(loc);
@@ -714,8 +749,8 @@ fn measure_rr_fanout(profile: &'static str, prefixes: &[Prefix]) -> MemoryRow {
     }
 
     let elapsed_ms = start.elapsed().as_millis();
-    let live_bytes = ALLOC.allocated() - baseline;
-    let peak_bytes = ALLOC.peak() - baseline;
+    let live_bytes = window_bytes(ALLOC.allocated(), baseline, "live");
+    let peak_bytes = window_bytes(ALLOC.peak(), baseline, "peak");
     let stats = merge_stats(&[
         adj_in_stats(&[&rib1, &rib2], &intern),
         loc_stats(&loc),
@@ -781,8 +816,8 @@ fn measure_rr_fanout_representative(profile: &'static str, prefixes: &[Prefix]) 
     }
 
     let elapsed_ms = start.elapsed().as_millis();
-    let live_bytes = ALLOC.allocated() - baseline;
-    let peak_bytes = ALLOC.peak() - baseline;
+    let live_bytes = window_bytes(ALLOC.allocated(), baseline, "live");
+    let peak_bytes = window_bytes(ALLOC.peak(), baseline, "peak");
     let stats = merge_stats(&[
         adj_in_stats(&[&rib1, &rib2], &intern),
         loc_stats(&loc),
@@ -1033,4 +1068,37 @@ fn memory_profile_high_n() {
     for row in profile_rows(profile, &sizes) {
         println!("{}", row.to_json());
     }
+}
+
+/// Sibling tests in this binary free megabytes on their own threads while a
+/// `measure_*` window is open. Force that interleaving: a sibling frees 8 MiB
+/// between the baseline and the read. A process-wide counter underflows here;
+/// the per-thread counter sees only the window's own 4 KiB.
+#[test]
+fn measure_window_ignores_frees_on_sibling_threads() {
+    use std::sync::Barrier;
+
+    let barrier = Arc::new(Barrier::new(2));
+    let sibling = {
+        let barrier = Arc::clone(&barrier);
+        std::thread::spawn(move || {
+            let buffer = std::hint::black_box(vec![1_u8; 8 << 20]);
+            barrier.wait();
+            barrier.wait();
+            drop(buffer);
+            barrier.wait();
+        })
+    };
+    barrier.wait();
+    let baseline = ALLOC.allocated();
+    ALLOC.reset_peak();
+    barrier.wait();
+    barrier.wait();
+    let window = std::hint::black_box(vec![0_u8; 4096]);
+    let live_bytes = window_bytes(ALLOC.allocated(), baseline, "live");
+    let peak_bytes = window_bytes(ALLOC.peak(), baseline, "peak");
+    drop(window);
+    sibling.join().unwrap();
+    assert_eq!(live_bytes, 4096);
+    assert_eq!(peak_bytes, 4096);
 }
