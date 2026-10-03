@@ -22,6 +22,7 @@ rustc-hash.workspace = true
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }
 criterion.workspace = true
+tikv-jemallocator.workspace = true
 
 [[bench]]
 name = "validate"

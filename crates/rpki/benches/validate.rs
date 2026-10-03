@@ -21,6 +21,11 @@ use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use rustbgpd_rpki::{VrpEntry, VrpTable};
 use rustbgpd_wire::{Ipv4Prefix, Ipv6Prefix, Prefix};
 
+/// Benches link the allocator the daemon ships with, so allocation-heavy
+/// paths are timed under jemalloc rather than the system allocator.
+#[global_allocator]
+static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
+
 /// (family label, VRP count) matrix.
 const SIZES: &[(&str, usize)] = &[
     ("v4", 1_000),

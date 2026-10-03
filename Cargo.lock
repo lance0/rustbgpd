@@ -3454,6 +3454,7 @@ dependencies = [
  "rustc-hash 2.1.3",
  "sha2 0.11.0",
  "tempfile",
+ "tikv-jemallocator",
  "tracing",
 ]
 
@@ -3489,6 +3490,7 @@ dependencies = [
  "rustc-hash 2.1.3",
  "smallvec",
  "thiserror 2.0.21",
+ "tikv-jemallocator",
  "tokio",
  "tracing",
 ]
@@ -3538,6 +3540,7 @@ dependencies = [
  "proptest",
  "syn 3.0.6",
  "thiserror 2.0.21",
+ "tikv-jemallocator",
  "tokio-util",
 ]
 

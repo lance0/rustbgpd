@@ -11,6 +11,12 @@ use rustbgpd_wire::{
     AsPath, AsPathSegment, Ipv4Prefix, Origin, PathAttribute, Prefix, RpkiValidation,
 };
 
+/// Benches link the allocator the daemon ships with, so allocation-heavy
+/// paths are timed under jemalloc rather than the system allocator.
+#[cfg(feature = "jemalloc")]
+#[global_allocator]
+static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
+
 fn table(name: &str, table_id: u32, metric: u32, allowed_neighbors: &[IpAddr]) -> FibTableConfig {
     FibTableConfig {
         name: name.to_string(),

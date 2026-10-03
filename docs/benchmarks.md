@@ -5,13 +5,15 @@
 Micro-benchmarks using [Criterion](https://github.com/bheisler/criterion.rs) 0.8,
 compiled with `--release` (LTO, codegen-units=1). Numbers below are meant
 for relative comparison and regression tracking, not absolute guarantees.
-The `rustbgpd-rib` and `rustbgpd-transport` bench targets link jemalloc as
-their global allocator, matching the shipped daemon. Through v0.73.0 they ran
-on the system allocator (glibc malloc on Linux), so their earlier baselines and
-recorded deltas are not comparable with current runs on allocation-heavy paths,
-and a `bench/compare-criterion.sh` A/B whose base is v0.73.0 or older compares
-allocators as well as code. Bench targets in other crates keep the allocator
-their source declares.
+Every Criterion bench target links jemalloc as its global allocator, matching
+the shipped daemon. Through v0.73.0 most ran on the system allocator (glibc
+malloc on Linux), so their earlier baselines and recorded deltas are not
+comparable with current runs on allocation-heavy paths, and a
+`bench/compare-criterion.sh` A/B whose base is v0.73.0 or older compares
+allocators as well as code. The root `fib_projection` target follows the
+daemon's `jemalloc` feature. The allocation-counting builds
+(`codec-allocation-diagnostics`, `snapshot-allocation-diagnostics`,
+`vpn-query-allocation`) keep the tracking allocator their source declares.
 For the consolidated operator-facing proof index that rolls benchmark, memory,
 interop, dataplane, and soak receipts together, see
 [`OPERATIONAL_PROOF.md`](operational-proof.md).
