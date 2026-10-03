@@ -2497,3 +2497,296 @@ async fn export_only_snapshot_restores_newest_first_after_rib_batch_failure() {
     drop(manager);
     assert_eq!(rib_task.await.unwrap(), vec![second, first]);
 }
+
+/// Session model for the deferred-refresh dispatch regressions: answers every
+/// command, appends each Route Refresh it receives to a log shared by all
+/// sessions (so the test sees the cross-peer order) and signals `refresh_signal`
+/// after each one, optionally rejects its first refresh, and can hold its
+/// second state query (the dispatch probe; the first is cohort admission)
+/// until released.
+fn deferred_dispatch_test_session(
+    addr: IpAddr,
+    refreshes: Arc<Mutex<Vec<IpAddr>>>,
+    refresh_signal: Option<Arc<Notify>>,
+    reject_first_refresh: bool,
+    hold_dispatch_query: Option<(Arc<Notify>, Arc<Notify>)>,
+) -> PeerHandle {
+    use rustbgpd_transport::{PeerCommand, PeerCommandError};
+
+    let (session_tx, mut session_rx) = mpsc::channel::<PeerCommand>(16);
+    let task = tokio::spawn(async move {
+        let mut queries = 0usize;
+        let mut rejected = false;
+        while let Some(command) = session_rx.recv().await {
+            match command {
+                PeerCommand::UpdateImportPolicy { reply, .. }
+                | PeerCommand::UpdateExportPolicy { reply, .. } => {
+                    let _ = reply.send(Ok(()));
+                }
+                PeerCommand::SendRouteRefresh { reply, .. } => {
+                    refreshes.lock().unwrap().push(addr);
+                    let result = if reject_first_refresh && !rejected {
+                        rejected = true;
+                        Err(PeerCommandError::CommandFailed(
+                            "injected route refresh rejection".to_string(),
+                        ))
+                    } else {
+                        Ok(())
+                    };
+                    let _ = reply.send(result);
+                    if let Some(signal) = &refresh_signal {
+                        signal.notify_one();
+                    }
+                }
+                PeerCommand::QueryState { reply } => {
+                    queries += 1;
+                    if queries == 2
+                        && let Some((entered, release)) = &hold_dispatch_query
+                    {
+                        entered.notify_one();
+                        release.notified().await;
+                    }
+                    let _ = reply.send(policy_test_peer_state(addr, SessionState::Established));
+                }
+                PeerCommand::Shutdown => break,
+                _ => {}
+            }
+        }
+        Ok(())
+    });
+    PeerHandle::from_parts(session_tx, task)
+}
+
+fn import_and_export_targets(
+    peers: &[IpAddr],
+) -> Vec<rustbgpd_api::peer_types::ResolvedPeerPolicy> {
+    let changed_import = validation_policy_chain(ImportValidationDependency::Rpki);
+    peers
+        .iter()
+        .map(|&address| rustbgpd_api::peer_types::ResolvedPeerPolicy {
+            address,
+            interface: None,
+            import_policy: Some(changed_import.clone()),
+            export_policy: Some(deny_policy_chain()),
+        })
+        .collect()
+}
+
+/// LAN-1996: the deferred-refresh dispatch fires Route Refreshes strictly in
+/// target order and stops at the first rejected one: a failing middle target
+/// leaves later members unrefreshed, and the rollback restores every member
+/// (chains, RIB export, refresh debt) with the compensated
+/// `RouteRefreshRejected` outcome.
+#[tokio::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "the regression keeps the RIB model, forward order, rollback order, and restored state in one scenario"
+)]
+async fn deferred_refresh_dispatch_keeps_target_order_and_stops_at_failing_member() {
+    let peers = [
+        IpAddr::V4(Ipv4Addr::new(10, 46, 0, 1)),
+        IpAddr::V4(Ipv4Addr::new(10, 46, 0, 2)),
+        IpAddr::V4(Ipv4Addr::new(10, 46, 0, 3)),
+        IpAddr::V4(Ipv4Addr::new(10, 46, 0, 4)),
+    ];
+    let failing = peers[1];
+    let refreshes = Arc::new(Mutex::new(Vec::new()));
+    let (rib_tx, mut rib_rx) = mpsc::channel::<RibUpdate>(16);
+    let rib_log = Arc::clone(&refreshes);
+    let restored = Arc::new(Mutex::new(Vec::new()));
+    let rib_restored = Arc::clone(&restored);
+    let _rib_task = tokio::spawn(async move {
+        while let Some(update) = rib_rx.recv().await {
+            match update {
+                RibUpdate::PrepareExportPolicyDestination { reply, .. } => {
+                    let _ = reply.send(Err("test: prestage skipped".to_string()));
+                }
+                RibUpdate::ReplacePeerExportPolicies { reply, .. } => {
+                    assert!(
+                        rib_log.lock().unwrap().is_empty(),
+                        "no deferred refresh may fire before the cohort commit"
+                    );
+                    let _ = reply.send(Ok(rustbgpd_rib::ExportPolicyCohortOutcome::Committed));
+                }
+                RibUpdate::RestorePeerExportPoliciesAuthoritatively {
+                    replacements,
+                    reply,
+                } => {
+                    let peers: Vec<IpAddr> = replacements
+                        .iter()
+                        .map(|replacement| replacement.peer)
+                        .collect();
+                    rib_restored.lock().unwrap().extend(peers.iter().copied());
+                    let _ = reply.send(Ok(peers
+                        .into_iter()
+                        .rev()
+                        .map(|peer| rustbgpd_rib::PeerExportPolicyRestoreReceipt::Restored { peer })
+                        .collect()));
+                }
+                _ => {}
+            }
+        }
+    });
+    let (_command_tx, command_rx) = mpsc::channel(16);
+    let mut manager = PeerManager::new(
+        command_rx,
+        65001,
+        Ipv4Addr::new(10, 0, 0, 1),
+        None,
+        None,
+        BgpMetrics::new(),
+        rib_tx,
+        None,
+    );
+    for peer in peers {
+        insert_test_managed_peer(
+            &mut manager,
+            peer,
+            deferred_dispatch_test_session(
+                peer,
+                Arc::clone(&refreshes),
+                None,
+                peer == failing,
+                None,
+            ),
+            false,
+        );
+    }
+
+    let failure = manager
+        .apply_resolved_policy_snapshot_classified(import_and_export_targets(&peers), true)
+        .await
+        .expect_err("a rejected deferred refresh must unwind the cohort");
+    assert_eq!(
+        failure.code,
+        RuntimeConfigPolicyFailureCode::RouteRefreshRejected
+    );
+    assert!(
+        failure.message().contains(&format!(
+            "failed to apply resolved policy to {failing}: route refresh:"
+        )) && failure.message().contains("already-applied peers restored"),
+        "compensated outcome expected: {}",
+        failure.message()
+    );
+    // Forward: the first member, then the rejected second; the third and
+    // fourth are never asked. Rollback then re-asks every member newest-first
+    // after reasserting its prior import chain.
+    let refreshes = refreshes.lock().unwrap().clone();
+    assert_eq!(
+        refreshes[..2],
+        [peers[0], failing],
+        "deferred refreshes must follow target order and stop at the failing member"
+    );
+    assert_eq!(
+        refreshes[2..],
+        [peers[3], peers[2], peers[1], peers[0]],
+        "rollback refreshes run newest-first after the forward refreshes stop"
+    );
+    let mut restored = restored.lock().unwrap().clone();
+    restored.sort();
+    assert_eq!(
+        restored,
+        peers.to_vec(),
+        "every cohort member's RIB export is restored"
+    );
+    for peer in peers {
+        let state = manager.peers.get(&key(peer)).unwrap();
+        assert_eq!(state.import_policy, None, "{peer} import restored");
+        assert_eq!(state.export_policy, None, "{peer} export restored");
+        assert!(!state.pending_export_apply, "{peer} export debt");
+        assert!(
+            !state.pending_refresh,
+            "{peer} refresh debt after a delivered rollback refresh"
+        );
+    }
+}
+
+/// LAN-1996: a session that is slow to answer the dispatch state probe does
+/// not hold the readiness lane. The second member's probe is withheld; once
+/// the first member's refresh has fired the loop is waiting on that probe,
+/// and a readiness query sent then must be answered before the probe's own
+/// 100 ms deadline (an answer only at the next seam would come after it).
+#[tokio::test(start_paused = true)]
+async fn deferred_refresh_dispatch_serves_readiness_while_a_probe_is_held() {
+    use rustbgpd_api::peer_types::PeerManagerReadinessQuery;
+
+    let peers = [
+        IpAddr::V4(Ipv4Addr::new(10, 47, 0, 1)),
+        IpAddr::V4(Ipv4Addr::new(10, 47, 0, 2)),
+    ];
+    let refreshes = Arc::new(Mutex::new(Vec::new()));
+    let entered = Arc::new(Notify::new());
+    let release = Arc::new(Notify::new());
+    let first_refreshed = Arc::new(Notify::new());
+    let (rib_tx, mut rib_rx) = mpsc::channel::<RibUpdate>(16);
+    let (_command_tx, command_rx) = mpsc::channel(16);
+    let (readiness_tx, readiness_rx) = mpsc::channel(16);
+    let mut manager = PeerManager::new(
+        command_rx,
+        65001,
+        Ipv4Addr::new(10, 0, 0, 1),
+        None,
+        None,
+        BgpMetrics::new(),
+        rib_tx,
+        None,
+    )
+    .with_readiness_queries(readiness_rx);
+    insert_test_managed_peer(
+        &mut manager,
+        peers[0],
+        deferred_dispatch_test_session(
+            peers[0],
+            Arc::clone(&refreshes),
+            Some(Arc::clone(&first_refreshed)),
+            false,
+            None,
+        ),
+        false,
+    );
+    insert_test_managed_peer(
+        &mut manager,
+        peers[1],
+        deferred_dispatch_test_session(
+            peers[1],
+            Arc::clone(&refreshes),
+            None,
+            false,
+            Some((Arc::clone(&entered), Arc::clone(&release))),
+        ),
+        false,
+    );
+
+    let apply =
+        manager.apply_resolved_policy_snapshot_classified(import_and_export_targets(&peers), true);
+    let drive = async {
+        skip_destination_prestage(&mut rib_rx).await;
+        let RibUpdate::ReplacePeerExportPolicies { reply, .. } = rib_rx.recv().await.unwrap()
+        else {
+            panic!("expected cohort RIB command");
+        };
+        reply
+            .send(Ok(rustbgpd_rib::ExportPolicyCohortOutcome::Committed))
+            .unwrap();
+        entered.notified().await;
+        first_refreshed.notified().await;
+
+        let (ping_reply, ping_response) = oneshot::channel();
+        readiness_tx
+            .send(PeerManagerReadinessQuery::Ping { reply: ping_reply })
+            .await
+            .unwrap();
+        tokio::time::timeout(PEER_QUERY_TIMEOUT / 2, ping_response)
+            .await
+            .expect("readiness must be served while the dispatch probe is held")
+            .unwrap();
+        assert!(
+            !refreshes.lock().unwrap().contains(&peers[1]),
+            "the held member must not be refreshed before its probe answers"
+        );
+        release.notify_one();
+    };
+    let (result, ()) = tokio::join!(apply, drive);
+    result.expect("both members answer Established, so the cohort commits");
+    assert_eq!(*refreshes.lock().unwrap(), peers.to_vec());
+}
