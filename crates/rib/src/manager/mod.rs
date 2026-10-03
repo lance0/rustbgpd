@@ -1127,6 +1127,8 @@ struct ReplacementReadiness {
     last_service: std::time::Instant,
     budget: std::time::Duration,
     #[cfg(any(test, feature = "bench-internals"))]
+    last_opportunity: std::time::Instant,
+    #[cfg(any(test, feature = "bench-internals"))]
     max_gap: std::time::Duration,
     #[cfg(any(test, feature = "bench-internals"))]
     serviced: usize,
@@ -1183,15 +1185,38 @@ fn replacement_readiness_checkpoint(
     let mut readiness = readiness
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let gap = readiness.last_service.elapsed();
-    if !force && gap < readiness.budget {
+    // The receipt measures opportunity gaps: the longest interval between
+    // checkpoints at which a queued query would have been served, using the
+    // same eligibility as the service pass below.
+    #[cfg(any(test, feature = "bench-internals"))]
+    if force || readiness.last_service.elapsed() >= readiness.budget {
+        let now = std::time::Instant::now();
+        readiness.max_gap = readiness
+            .max_gap
+            .max(now.duration_since(readiness.last_opportunity));
+        readiness.last_opportunity = now;
+    }
+    // Staging calls this per element and both lanes are usually empty, so
+    // skip the clock read. `last_service` then stays at the last real pass:
+    // a query queued after an idle stretch is served at the next checkpoint,
+    // one queued within the budget of a pass waits as before.
+    if !force
+        && readiness.rx.as_ref().is_none_or(mpsc::Receiver::is_empty)
+        && readiness
+            .summaries
+            .as_ref()
+            .is_none_or(|summaries| summaries.rx.is_empty())
+    {
         return;
     }
-    #[cfg(any(test, feature = "bench-internals"))]
-    {
-        readiness.max_gap = readiness.max_gap.max(gap);
+    if !force && readiness.last_service.elapsed() < readiness.budget {
+        return;
     }
     readiness.last_service = std::time::Instant::now();
+    #[cfg(any(test, feature = "bench-internals"))]
+    {
+        readiness.last_opportunity = readiness.last_service;
+    }
     for _ in 0..QUERY_BUDGET_PER_CHUNK {
         let query = match readiness.rx.as_mut() {
             Some(rx) => match rx.try_recv() {
@@ -2021,6 +2046,8 @@ impl RibManager {
             started,
             last_service: std::time::Instant::now(),
             budget: self.flush_poll_budget.min(FLUSH_POLL_BUDGET),
+            #[cfg(any(test, feature = "bench-internals"))]
+            last_opportunity: std::time::Instant::now(),
             #[cfg(any(test, feature = "bench-internals"))]
             max_gap: std::time::Duration::ZERO,
             #[cfg(any(test, feature = "bench-internals"))]
