@@ -1,4 +1,5 @@
 use std::fmt;
+use std::hash::{Hash, Hasher};
 use std::net::{Ipv4Addr, Ipv6Addr};
 
 use crate::error::DecodeError;
@@ -129,7 +130,7 @@ pub fn encode_nlri(prefixes: &[Ipv4Prefix], buf: &mut Vec<u8>) {
 /// An IPv6 prefix (network address + prefix length).
 ///
 /// Stored in canonical form: host bits are always zero.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Ipv6Prefix {
     /// Network address (host bits zeroed).
     pub addr: Ipv6Addr,
@@ -158,6 +159,20 @@ impl Ipv6Prefix {
             addr: Ipv6Addr::from(masked),
             len,
         }
+    }
+}
+
+/// Hashes the address octets as a byte string rather than through
+/// `Ipv6Addr`'s `Hash`, which feeds one native-endian `u128`. A
+/// multiply-based word hasher such as `FxHasher` only carries input bits
+/// upward, and on little-endian targets the address bits that vary most in
+/// /128 and /64 tables land at the top of each word. Such keys then share
+/// one hashbrown control byte and few starting buckets. The byte-string
+/// path mixes both halves of the address before the final word step.
+impl Hash for Ipv6Prefix {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        state.write(&self.addr.octets());
+        self.len.hash(state);
     }
 }
 
