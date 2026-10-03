@@ -9,6 +9,7 @@
 //! route key.
 
 use std::fmt;
+use std::hash::{Hash, Hasher};
 use std::net::{Ipv4Addr, Ipv6Addr};
 
 use crate::error::{DecodeError, EncodeError};
@@ -137,7 +138,7 @@ impl MplsLabelEntry {
 /// This is intentionally not [`crate::nlri::Prefix`]. VPN route identity is
 /// different from ordinary IPv4/IPv6 unicast because the Route Distinguisher is
 /// part of the address-family-specific route key.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum VpnPrefix {
     /// VPN-IPv4 prefix.
     V4 {
@@ -223,6 +224,28 @@ impl VpnPrefix {
                 out
             }
             Self::V6 { addr, .. } => addr.octets(),
+        }
+    }
+}
+
+/// Hashes a VPN-IPv6 address as a byte string, as [`crate::Ipv6Prefix`]
+/// does, rather than through `Ipv6Addr`'s `Hash`, which feeds one
+/// native-endian `u128`. With a multiply-based word hasher such as `FxHasher`,
+/// sequential /128 or /64 keys under one RD would otherwise share one
+/// hashbrown control byte and few starting buckets. The variant and the
+/// VPN-IPv4 fields hash exactly as the derived form did.
+impl Hash for VpnPrefix {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        std::mem::discriminant(self).hash(state);
+        match self {
+            Self::V4 { addr, len } => {
+                addr.hash(state);
+                len.hash(state);
+            }
+            Self::V6 { addr, len } => {
+                state.write(&addr.octets());
+                len.hash(state);
+            }
         }
     }
 }

@@ -25,6 +25,11 @@ and workspace changes remain in the repository-level `CHANGELOG.md`.
   hashers such as `rustc-hash`'s `FxHasher` sequential /128 or /64 keys
   shared one hashbrown control byte and few starting buckets. `Hash` and `Eq`
   stay consistent; hash values change, and they were never a stable output.
+- `VpnPrefix` now implements `Hash` manually: the VPN-IPv6 variant writes its
+  16 address octets as a byte string, then its length, for the same reason
+  as `Ipv6Prefix`. The variant discriminant and VPN-IPv4 fields hash as the
+  derived form did, so VPN-IPv4 hash values are unchanged. `Hash` and `Eq`
+  stay consistent; VPN-IPv6 hash values change and were never a stable output.
 - Pair this wire compatibility line with FSM 0.10 and RPKI 0.5 when sharing
   public wire types. Crate publication is a separate release step.
 
