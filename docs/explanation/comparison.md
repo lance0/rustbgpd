@@ -670,14 +670,13 @@ project's own release page and README, and makes no interoperability claim.
 **zebra-rs** (AGPL-3.0) describes itself as a BGP, OSPF, and IS-IS
 routing stack with SRv6, SR-MPLS, L3VPN, and EVPN extensions, configured
 through YANG-modeled candidate/running configuration (`zebra-rs/yang/`)
-and its own CLI, and shipped as prebuilt Ubuntu `.deb` packages with an
-apt channel. Release
+and its own CLI. Release
 [v26.8.5](https://github.com/zebra-rs/zebra-rs/releases/tag/v26.8.5)
 (2026-08-28) added RFC 7947 route-server mode
 (`neighbor X route-server-client`) and RFC 9234 BGP Roles with
 Only-to-Customer. The latest release when checked on 2026-10-02 was
 [v26.9.2](https://github.com/zebra-rs/zebra-rs/releases/tag/v26.9.2)
-(2026-09-25), and the project tags releases several times a month.
+(2026-09-25).
 
 **Holo** (MIT) is a routing-protocol suite whose BGP is IPv4 and IPv6
 unicast. Its README at
