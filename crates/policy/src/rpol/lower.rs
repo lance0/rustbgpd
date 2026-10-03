@@ -388,7 +388,14 @@ impl<'a> Lowerer<'a> {
     fn begin_chain(&mut self, bindings: &DatasetBindings) {
         self.datasets.clear();
         self.dataset_ids.clear();
-        self.bindings = bindings.clone();
+        // Lowering only looks up datasets this unit declares, so copy just
+        // those bindings instead of the daemon's whole binding set.
+        self.bindings = DatasetBindings::new();
+        for decl in &self.file.datasets {
+            if let Some(handle) = bindings.get(&decl.name.node) {
+                self.bindings.insert(Arc::clone(handle));
+            }
+        }
         self.missing_datasets.clear();
     }
 
