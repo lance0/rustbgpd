@@ -145,7 +145,12 @@ const MAX_BATCH_BYTES: usize = 256 * 1024;
 /// buffer cost about 8% of worker CPU in a 700-peer reload burst.
 #[derive(Debug, Default)]
 struct FrameBatch {
-    frames: VecDeque<Bytes>,
+    /// The frame being written. Held inline, so a single-frame write
+    /// (priority, cadence, or an uncoalesced bulk frame) allocates nothing.
+    head: Option<Bytes>,
+    /// Frames behind `head`; storage is allocated only when a second frame
+    /// is coalesced.
+    rest: VecDeque<Bytes>,
     remaining: usize,
 }
 
@@ -159,14 +164,23 @@ impl FrameBatch {
     /// Append a frame. An empty frame carries no bytes and is dropped, so
     /// `chunk()` is never empty while bytes remain.
     fn push(&mut self, frame: Bytes) {
-        if !frame.is_empty() {
-            self.remaining += frame.len();
-            self.frames.push_back(frame);
+        if frame.is_empty() {
+            return;
+        }
+        self.remaining += frame.len();
+        if self.head.is_none() {
+            self.head = Some(frame);
+        } else {
+            self.rest.push_back(frame);
         }
     }
 
     fn frame_count(&self) -> usize {
-        self.frames.len()
+        usize::from(self.head.is_some()) + self.rest.len()
+    }
+
+    fn frames(&self) -> impl Iterator<Item = &Bytes> {
+        self.head.iter().chain(&self.rest)
     }
 }
 
@@ -176,12 +190,12 @@ impl Buf for FrameBatch {
     }
 
     fn chunk(&self) -> &[u8] {
-        self.frames.front().map_or(&[], Bytes::as_ref)
+        self.head.as_ref().map_or(&[], Bytes::as_ref)
     }
 
     fn chunks_vectored<'a>(&'a self, dst: &mut [IoSlice<'a>]) -> usize {
         let mut filled = 0;
-        for (slot, frame) in dst.iter_mut().zip(&self.frames) {
+        for (slot, frame) in dst.iter_mut().zip(self.frames()) {
             *slot = IoSlice::new(frame);
             filled += 1;
         }
@@ -196,16 +210,16 @@ impl Buf for FrameBatch {
         );
         self.remaining -= cnt;
         while cnt > 0 {
-            let front = self
-                .frames
-                .front_mut()
+            let head = self
+                .head
+                .as_mut()
                 .expect("remaining bytes live in queued frames");
-            if cnt < front.len() {
-                front.advance(cnt);
+            if cnt < head.len() {
+                head.advance(cnt);
                 return;
             }
-            cnt -= front.len();
-            self.frames.pop_front();
+            cnt -= head.len();
+            self.head = self.rest.pop_front();
         }
     }
 }
@@ -1023,14 +1037,15 @@ mod tests {
         batch
     }
 
-    /// Short writes of every size, scalar and vectored, split frames and
-    /// slices at arbitrary points; the stream must still be the exact
-    /// concatenation, with nothing repeated or skipped.
+    /// Short writes of every size from one byte to past the whole stream,
+    /// scalar and vectored, split frames and slices at every point; the
+    /// stream must still be the exact concatenation, with nothing repeated
+    /// or skipped.
     #[tokio::test]
     async fn frame_batch_short_writes_reproduce_the_exact_stream() {
         let (frames, stream) = test_frames();
         for vectored in [true, false] {
-            for per_call in [1, 2, 3, 4, 6, 9, 11, 16, 34, 74, 1000] {
+            for per_call in 1..=stream.len() + 1 {
                 let mut writer = ChunkedWriter::new(per_call, vectored);
                 let mut batch = batch_of(&frames);
                 writer.write_all_buf(&mut batch).await.unwrap();
@@ -1102,8 +1117,16 @@ mod tests {
         let pointers = [first.as_ptr(), second.as_ptr()];
         tx.try_send(second).unwrap();
         let out = coalesce_bulk(first, &mut rx);
-        let batched: Vec<_> = out.frames.iter().map(|frame| frame.as_ptr()).collect();
+        let batched: Vec<_> = out.frames().map(|frame| frame.as_ptr()).collect();
         assert_eq!(batched, pointers, "coalesced frames must not be copied");
+        // A single frame stays inline: no overflow storage is allocated.
+        let single = FrameBatch::one(Bytes::from_static(b"frame"));
+        assert_eq!(single.frame_count(), 1);
+        assert_eq!(
+            single.rest.capacity(),
+            0,
+            "a single-frame write must not allocate"
+        );
     }
 
     /// Whole-frame integrity + FIFO order across many coalesced
