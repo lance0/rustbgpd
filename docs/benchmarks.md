@@ -1802,9 +1802,10 @@ serviced between route batches even during bulk loading. At 100k+ scale, the
 API remains responsive rather than blocking behind thousands of queued route
 updates.
 
-The comparison-summary ranking is removed. The historical raw rows remain in
-the table above; current comparative claims require a counterbalanced rerun
-with cell-scoped samplers and equivalent reproducibly pinned builds.
+The July comparison-summary ranking is removed. Its historical raw rows remain
+in the table above. Current comparative claims rest on the counterbalanced
+v0.68.0 campaign under [Results](#results), which used cell-scoped samplers and
+pinned builds.
 
 Historical progression of these figures across releases is in [Optimization
 History (end-to-end, bgperf2 2p/100k)](#optimization-history-end-to-end-bgperf2-2p100k)

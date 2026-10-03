@@ -18,8 +18,8 @@ M77 (GR/LLGR stale preservation), and the
 [1000-peer scale receipt](../perf/scale-receipt-2026-07.md) (2026-07-03,
 commit `b26ff11c`, in-process harness): 100k routes to 1,000 real transport
 sessions converged on the wire in 1.8 s at 419 MiB whole-process RSS, driven
-by the ADR-0098 update-group fanout (~28× faster than per-peer staging at 256
-uniform clients). Config shape
+by the ADR-0098 update-group fanout (15.1 s → 0.56 s, ~27× faster than
+per-peer staging at 256 uniform clients). Config shape
 derived from
 [`tests/interop/configs/rustbgpd-m76-orr-rr.toml`](../../tests/interop/configs/rustbgpd-m76-orr-rr.toml)
 and [`rustbgpd-m77-gr-rr.toml`](../../tests/interop/configs/rustbgpd-m77-gr-rr.toml).

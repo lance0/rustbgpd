@@ -675,9 +675,9 @@ apt channel. Release
 [v26.8.5](https://github.com/zebra-rs/zebra-rs/releases/tag/v26.8.5)
 (2026-08-28) added RFC 7947 route-server mode
 (`neighbor X route-server-client`) and RFC 9234 BGP Roles with
-Only-to-Customer. The latest release when checked on 2026-09-22 was
-[v26.9.1](https://github.com/zebra-rs/zebra-rs/releases/tag/v26.9.1)
-(2026-09-05), and the project tags releases several times a month.
+Only-to-Customer. The latest release when checked on 2026-10-02 was
+[v26.9.2](https://github.com/zebra-rs/zebra-rs/releases/tag/v26.9.2)
+(2026-09-25), and the project tags releases several times a month.
 
 **Holo** (MIT) is a routing-protocol suite whose BGP is IPv4 and IPv6
 unicast. Its README at
