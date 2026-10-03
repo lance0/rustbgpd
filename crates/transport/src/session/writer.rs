@@ -45,8 +45,9 @@
 //! `docs/perf/scale-receipt-2026-07.md`). Each drain of the bulk
 //! channel therefore coalesces up to [`MAX_BATCH_FRAMES`] /
 //! [`MAX_BATCH_BYTES`] of already-queued WHOLE frames into one
-//! contiguous buffer and issues a single `write_all + flush` — the
-//! same shape as FRR's packed subgroup streams. Only bulk frames
+//! single vectored `write_all + flush` straight from the queued frame
+//! buffers ([`FrameBatch`]; nothing is copied) — the same shape as FRR's
+//! packed subgroup streams. Only bulk frames
 //! coalesce: priority frames (OPEN, KEEPALIVE, NOTIFICATION, Cease)
 //! always write alone, so the hard-teardown guarantee that the
 //! `Cease/8` is the final frame on the wire cannot be violated by a
@@ -79,9 +80,11 @@
 //! mechanism (FRR measures `SendQ` progress the same way), detection
 //! starts only once the kernel send buffer stops accepting bytes.
 
+use std::collections::VecDeque;
+use std::io::IoSlice;
 use std::time::Duration;
 
-use bytes::{Bytes, BytesMut};
+use bytes::{Buf, Bytes};
 use rustbgpd_telemetry::BgpMetrics;
 use tokio::io::AsyncWriteExt;
 use tokio::net::tcp::OwnedWriteHalf;
@@ -132,29 +135,96 @@ const MAX_BATCH_FRAMES: usize = 64;
 /// wire time as before, while amortizing the syscall + flush cost.
 const MAX_BATCH_BYTES: usize = 256 * 1024;
 
+/// Whole frames written by one `write_all_buf + flush`, in queue order.
+///
+/// The frames stay in their own buffers: [`Buf::chunks_vectored`] hands
+/// them to the socket as one `writev` (tokio passes up to 64 slices, which
+/// is [`MAX_BATCH_FRAMES`]), and [`Buf::advance`] consumes exactly the bytes
+/// the kernel accepted, so a short write resumes mid-frame without copying
+/// or repeating anything. Copying every coalesced frame into one growing
+/// buffer cost about 8% of worker CPU in a 700-peer reload burst.
+#[derive(Debug, Default)]
+struct FrameBatch {
+    frames: VecDeque<Bytes>,
+    remaining: usize,
+}
+
+impl FrameBatch {
+    fn one(frame: Bytes) -> Self {
+        let mut batch = Self::default();
+        batch.push(frame);
+        batch
+    }
+
+    /// Append a frame. An empty frame carries no bytes and is dropped, so
+    /// `chunk()` is never empty while bytes remain.
+    fn push(&mut self, frame: Bytes) {
+        if !frame.is_empty() {
+            self.remaining += frame.len();
+            self.frames.push_back(frame);
+        }
+    }
+
+    fn frame_count(&self) -> usize {
+        self.frames.len()
+    }
+}
+
+impl Buf for FrameBatch {
+    fn remaining(&self) -> usize {
+        self.remaining
+    }
+
+    fn chunk(&self) -> &[u8] {
+        self.frames.front().map_or(&[], Bytes::as_ref)
+    }
+
+    fn chunks_vectored<'a>(&'a self, dst: &mut [IoSlice<'a>]) -> usize {
+        let mut filled = 0;
+        for (slot, frame) in dst.iter_mut().zip(&self.frames) {
+            *slot = IoSlice::new(frame);
+            filled += 1;
+        }
+        filled
+    }
+
+    fn advance(&mut self, mut cnt: usize) {
+        assert!(
+            cnt <= self.remaining,
+            "advance {cnt} past the {} bytes remaining in the batch",
+            self.remaining
+        );
+        self.remaining -= cnt;
+        while cnt > 0 {
+            let front = self
+                .frames
+                .front_mut()
+                .expect("remaining bytes live in queued frames");
+            if cnt < front.len() {
+                front.advance(cnt);
+                return;
+            }
+            cnt -= front.len();
+            self.frames.pop_front();
+        }
+    }
+}
+
 /// Coalesce already-queued bulk frames behind `first` into one
-/// contiguous buffer, up to [`MAX_BATCH_FRAMES`] / [`MAX_BATCH_BYTES`].
+/// [`FrameBatch`], up to [`MAX_BATCH_FRAMES`] / [`MAX_BATCH_BYTES`].
 /// Non-blocking: only frames already sitting in the channel join the
-/// batch. Returns `first` untouched (zero copy) when the queue is
-/// empty — the idle/trickle path is unchanged. Frames keep their
-/// queue order; frames are never split.
-fn coalesce_bulk(first: Bytes, bulk_rx: &mut mpsc::Receiver<Bytes>) -> Bytes {
-    let Ok(second) = bulk_rx.try_recv() else {
-        return first;
-    };
-    let mut batch = BytesMut::with_capacity(first.len() + second.len());
-    batch.extend_from_slice(&first);
-    batch.extend_from_slice(&second);
-    let mut frames = 2;
-    while frames < MAX_BATCH_FRAMES && batch.len() < MAX_BATCH_BYTES {
+/// batch. Frames keep their queue order, are never split, and are not
+/// copied.
+fn coalesce_bulk(first: Bytes, bulk_rx: &mut mpsc::Receiver<Bytes>) -> FrameBatch {
+    let mut batch = FrameBatch::one(first);
+    while batch.frame_count() < MAX_BATCH_FRAMES && batch.remaining() < MAX_BATCH_BYTES {
         // `Empty` and `Disconnected` both just end the batch; the run
         // loop's `bulk_rx.recv()` arm observes closure and flips
         // `bulk_open` on its own.
         let Ok(next) = bulk_rx.try_recv() else { break };
-        batch.extend_from_slice(&next);
-        frames += 1;
+        batch.push(next);
     }
-    batch.freeze()
+    batch
 }
 
 /// Channel handles + a [`JoinHandle`] held by the session task.
@@ -366,7 +436,7 @@ impl WriterTask {
                 }
             };
 
-            let bytes = if from_bulk {
+            let mut batch = if from_bulk {
                 let coalesced = coalesce_bulk(bytes, &mut self.bulk_rx);
                 // Drain-side queue-depth sample (shrink): the frames still
                 // buffered after this coalesce pass pulled a batch. Sampled
@@ -383,12 +453,13 @@ impl WriterTask {
                     .set(depth);
                 coalesced
             } else {
-                bytes
+                FrameBatch::one(bytes)
             };
-            self.write_message(&bytes).await?;
+            let batch_len = batch.remaining();
+            self.write_message(&mut batch).await?;
             if from_bulk {
                 let next = (*self.completed_tx.borrow())
-                    .checked_add(bytes.len() as u64)
+                    .checked_add(batch_len as u64)
                     .ok_or_else(|| {
                         WriterExit::Io(std::io::Error::other("bulk completion counter exhausted"))
                     })?;
@@ -402,7 +473,7 @@ impl WriterTask {
     /// when configured, and raced against the session's hard-teardown
     /// signal — a writer wedged mid-write on a saturated TCP window
     /// must not delay the teardown indefinitely.
-    async fn write_message(&mut self, bytes: &Bytes) -> Result<(), WriterExit> {
+    async fn write_message(&mut self, batch: &mut FrameBatch) -> Result<(), WriterExit> {
         let Self {
             write_half,
             teardown_rx,
@@ -411,7 +482,7 @@ impl WriterTask {
             ..
         } = self;
         let write = async {
-            write_half.write_all(bytes).await?;
+            write_half.write_all_buf(batch).await?;
             write_half.flush().await
         };
         tokio::pin!(write);
@@ -802,9 +873,11 @@ mod tests {
         for i in 0..100u8 {
             tx.try_send(Bytes::from(vec![i; 10])).unwrap();
         }
-        let batch = coalesce_bulk(Bytes::from(vec![0xAA; 10]), &mut rx);
+        let mut batch = coalesce_bulk(Bytes::from(vec![0xAA; 10]), &mut rx);
         // `first` + 63 drained frames = MAX_BATCH_FRAMES.
-        assert_eq!(batch.len(), MAX_BATCH_FRAMES * 10);
+        assert_eq!(batch.frame_count(), MAX_BATCH_FRAMES);
+        assert_eq!(batch.remaining(), MAX_BATCH_FRAMES * 10);
+        let batch = batch.copy_to_bytes(batch.remaining());
         assert_eq!(&batch[..10], &[0xAA; 10]);
         assert_eq!(&batch[10..20], &[0u8; 10]);
         // Frame 63 is the first one left behind — whole and in order.
@@ -824,7 +897,8 @@ mod tests {
         let batch = coalesce_bulk(Bytes::from(vec![0u8; FRAME]), &mut rx);
         // 100K + 100K = 200K < 256K -> pull one more whole frame ->
         // 300K >= 256K -> stop.
-        assert_eq!(batch.len(), 3 * FRAME);
+        assert_eq!(batch.remaining(), 3 * FRAME);
+        assert_eq!(batch.frame_count(), 3);
         // Three frames remain queued, whole.
         for _ in 0..3 {
             assert_eq!(rx.try_recv().unwrap().len(), FRAME);
@@ -832,15 +906,204 @@ mod tests {
         assert!(rx.try_recv().is_err());
     }
 
-    /// An empty queue returns `first` without copying it — the
-    /// idle/trickle single-frame path is unchanged.
+    /// `AsyncWrite` that accepts at most `per_call` bytes per write (scalar
+    /// or vectored), optionally fails once `fail_at` bytes are in, and
+    /// optionally parks (returns `Pending` without waking) at `park_at`.
+    struct ChunkedWriter {
+        out: Vec<u8>,
+        per_call: usize,
+        vectored: bool,
+        fail_at: Option<usize>,
+        park_at: Option<usize>,
+    }
+
+    impl ChunkedWriter {
+        fn new(per_call: usize, vectored: bool) -> Self {
+            Self {
+                out: Vec::new(),
+                per_call,
+                vectored,
+                fail_at: None,
+                park_at: None,
+            }
+        }
+
+        /// Bytes this call may take, or the injected outcome.
+        fn budget(&self) -> std::task::Poll<std::io::Result<usize>> {
+            let written = self.out.len();
+            if self.fail_at.is_some_and(|at| written >= at) {
+                return std::task::Poll::Ready(Err(std::io::Error::other("injected write error")));
+            }
+            if self.park_at.is_some_and(|at| written >= at) {
+                return std::task::Poll::Pending;
+            }
+            let mut budget = self.per_call;
+            for limit in [self.fail_at, self.park_at].into_iter().flatten() {
+                budget = budget.min(limit - written);
+            }
+            std::task::Poll::Ready(Ok(budget))
+        }
+    }
+
+    impl tokio::io::AsyncWrite for ChunkedWriter {
+        fn poll_write(
+            mut self: std::pin::Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+            buf: &[u8],
+        ) -> std::task::Poll<std::io::Result<usize>> {
+            let budget = std::task::ready!(self.budget())?;
+            let n = budget.min(buf.len());
+            self.out.extend_from_slice(&buf[..n]);
+            std::task::Poll::Ready(Ok(n))
+        }
+
+        fn poll_write_vectored(
+            mut self: std::pin::Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+            bufs: &[IoSlice<'_>],
+        ) -> std::task::Poll<std::io::Result<usize>> {
+            let mut budget = std::task::ready!(self.budget())?;
+            let mut n = 0;
+            for buf in bufs {
+                let take = budget.min(buf.len());
+                self.out.extend_from_slice(&buf[..take]);
+                n += take;
+                budget -= take;
+                if budget == 0 {
+                    break;
+                }
+            }
+            std::task::Poll::Ready(Ok(n))
+        }
+
+        fn is_write_vectored(&self) -> bool {
+            self.vectored
+        }
+
+        fn poll_flush(
+            self: std::pin::Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<std::io::Result<()>> {
+            std::task::Poll::Ready(Ok(()))
+        }
+
+        fn poll_shutdown(
+            self: std::pin::Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<std::io::Result<()>> {
+            std::task::Poll::Ready(Ok(()))
+        }
+    }
+
+    /// Frames of uneven sizes, each byte identifying its frame and offset.
+    fn test_frames() -> (Vec<Bytes>, Vec<u8>) {
+        let frames: Vec<Bytes> = [5usize, 10, 1, 33, 7, 19]
+            .iter()
+            .enumerate()
+            .map(|(frame, &len)| {
+                Bytes::from(
+                    (0..len)
+                        .map(|offset| u8::try_from(frame * 40 + offset).unwrap())
+                        .collect::<Vec<_>>(),
+                )
+            })
+            .collect();
+        let stream = frames
+            .iter()
+            .flat_map(|frame| frame.iter().copied())
+            .collect();
+        (frames, stream)
+    }
+
+    fn batch_of(frames: &[Bytes]) -> FrameBatch {
+        let mut batch = FrameBatch::default();
+        for frame in frames {
+            batch.push(frame.clone());
+        }
+        batch
+    }
+
+    /// Short writes of every size, scalar and vectored, split frames and
+    /// slices at arbitrary points; the stream must still be the exact
+    /// concatenation, with nothing repeated or skipped.
+    #[tokio::test]
+    async fn frame_batch_short_writes_reproduce_the_exact_stream() {
+        let (frames, stream) = test_frames();
+        for vectored in [true, false] {
+            for per_call in [1, 2, 3, 4, 6, 9, 11, 16, 34, 74, 1000] {
+                let mut writer = ChunkedWriter::new(per_call, vectored);
+                let mut batch = batch_of(&frames);
+                writer.write_all_buf(&mut batch).await.unwrap();
+                assert_eq!(
+                    writer.out, stream,
+                    "per_call={per_call} vectored={vectored}"
+                );
+                assert_eq!(batch.remaining(), 0);
+                assert_eq!(batch.frame_count(), 0);
+            }
+        }
+    }
+
+    /// A write error mid-frame leaves exactly the unwritten suffix in the
+    /// batch: written prefix + remainder is the original stream.
+    #[tokio::test]
+    async fn frame_batch_write_error_keeps_the_exact_unwritten_suffix() {
+        let (frames, stream) = test_frames();
+        for vectored in [true, false] {
+            for fail_at in [1, 7, 15, 16, 40, stream.len() - 1] {
+                let mut writer = ChunkedWriter::new(4, vectored);
+                writer.fail_at = Some(fail_at);
+                let mut batch = batch_of(&frames);
+                let error = writer.write_all_buf(&mut batch).await.unwrap_err();
+                assert_eq!(error.to_string(), "injected write error");
+                assert_eq!(writer.out, stream[..fail_at], "fail_at={fail_at}");
+                let rest = batch.copy_to_bytes(batch.remaining());
+                assert_eq!(
+                    rest,
+                    stream[fail_at..],
+                    "fail_at={fail_at} vectored={vectored}"
+                );
+            }
+        }
+    }
+
+    /// Dropping an in-flight write (teardown abandoning it, or a send-hold
+    /// timeout) mid-frame loses and repeats nothing: the batch holds exactly
+    /// what the socket has not taken, and a later write finishes the stream.
+    #[tokio::test]
+    async fn frame_batch_cancelled_write_resumes_without_loss_or_duplication() {
+        let (frames, stream) = test_frames();
+        for vectored in [true, false] {
+            for park_at in [3, 15, 16, 50, stream.len() - 2] {
+                let mut writer = ChunkedWriter::new(7, vectored);
+                writer.park_at = Some(park_at);
+                let mut batch = batch_of(&frames);
+                {
+                    let write = writer.write_all_buf(&mut batch);
+                    tokio::pin!(write);
+                    let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
+                    assert!(write.as_mut().poll(&mut cx).is_pending());
+                }
+                assert_eq!(writer.out, stream[..park_at]);
+                assert_eq!(batch.remaining(), stream.len() - park_at);
+                writer.park_at = None;
+                writer.write_all_buf(&mut batch).await.unwrap();
+                assert_eq!(writer.out, stream, "park_at={park_at} vectored={vectored}");
+            }
+        }
+    }
+
+    /// Coalescing never copies: every frame keeps its own buffer.
     #[test]
-    fn coalesce_empty_queue_is_zero_copy() {
-        let (_tx, mut rx) = mpsc::channel::<Bytes>(8);
+    fn coalesce_is_zero_copy() {
+        let (tx, mut rx) = mpsc::channel::<Bytes>(8);
         let first = Bytes::from(vec![7u8; 32]);
-        let ptr = first.as_ptr();
+        let second = Bytes::from(vec![8u8; 16]);
+        let pointers = [first.as_ptr(), second.as_ptr()];
+        tx.try_send(second).unwrap();
         let out = coalesce_bulk(first, &mut rx);
-        assert_eq!(out.as_ptr(), ptr, "single frame must not be copied");
+        let batched: Vec<_> = out.frames.iter().map(|frame| frame.as_ptr()).collect();
+        assert_eq!(batched, pointers, "coalesced frames must not be copied");
     }
 
     /// Whole-frame integrity + FIFO order across many coalesced
