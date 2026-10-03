@@ -1,0 +1,43 @@
+{
+  "schema": 1,
+  "cell": "rustbgpd",
+  "git": {
+    "commit": "12aefa49d05d971db2ea55e90de303bc84a45c89",
+    "tree": "dc90a0c052af909f56a2625515fcd22e72fa658b",
+    "dirty": false
+  },
+  "toolchain": "rustc 1.99.0 (b940084d7 2026-09-28)\nbinary: rustc\ncommit-hash: b940084d7eb6a299eb4bfeb8e34901bc051e7ac4\ncommit-date: 2026-09-28\nhost: x86_64-unknown-linux-gnu\nrelease: 1.99.0\nLLVM version: 23.1.1",
+  "host": "Linux 7.0.0-30-generic #30~24.04.1-Ubuntu SMP PREEMPT_DYNAMIC Fri Aug  7 13:27:52 UTC 2 x86_64 GNU/Linux",
+  "sources": {
+    "common": {
+      "bench/scale/provenance.sh": "7db6727dc99ec42515359f674e56c749453bc29c9981b67f30568f0d6cce1991",
+      "bench/scale/matrix/run-matrix.sh": "d3f69138f420cc9e46b519f65ef6dc301175358d257b902d471a32954f49250b",
+      "bench/scale/matrix/verify-provenance.py": "9bf195bc963b1b951ef7b1090710f6797b1ca91c658f6b4761eb11acb078c107",
+      "bench/scale/matrix/rss-sampler.sh": "3ecffb93298c49f8524320ecebe976efc806f9f0b0caf260d6a1431ca402a10d",
+      "bench/scale/host-quiet.sh": "abb3391cd5e0879c29aabd0aa0c316ea33d5f7c72f6d2a7d111b30025de411fd",
+      "tests/soak/host-lock.sh": "f5f419bb439f0b5e22521e9f7fa73d4ef73df159abeec31fafff63548899c658"
+    },
+    "generator": {
+      "bench/scale/reloadstall/gen-scenario.py": "e563659beef5857ee79ddac40e1cff5730c34e424b5ca074a3f9007b5dc0ab42"
+    },
+    "reloadstall": {
+      "path": "target/scale/reloadstall",
+      "sha256": "3dd1fd97f00993bc41f2b42f2676cff58f67357ad5e4f7f883322fb369c705d2"
+    }
+  },
+  "workload": {
+    "binary": "target/release/rustbgpd",
+    "sha256": "7ef213c92b7c9b1a6fc6551ec76e18cb4dbc552422c68ef7044b93d445322e8b",
+    "inputs": {
+      "N_PEERS": "700",
+      "TOTAL_PREFIXES": "400400",
+      "PORT": "1790",
+      "RELOADS": "4",
+      "CONTROL_SECS": "30",
+      "CHANGED_PEERS": "",
+      "FLAPSTORM": "",
+      "BIRD_THREADS": "8",
+      "PROBE_PREFIXES": ""
+    }
+  }
+}
