@@ -1,0 +1,10 @@
+arm base=370e211b95ec3e4a7b07556146e31dd02f391ea6:370e211b95ec3e4a7b07556146e31dd02f391ea6
+arm main=481e0187d873dd8e7715033224be0fe90cb7d4e2:481e0187d873dd8e7715033224be0fe90cb7d4e2
+cells=matrix irr
+runs=3
+overlaps=0
+irr_cells=rustbgpd-sighup
+matrix_scenarios=s2 s3
+matrix_peers=700 matrix_prefixes=400400 matrix_reloads=4
+matrix_control_secs=30 matrix_flapstorm=50
+smoke=

@@ -20,10 +20,31 @@ Each result below links to its published, reproducible receipt:
   health and warning acceptance; the dated receipt preserves those limits —
   [policy-reload receipt](ixp-dualstack-policy-noops-2026-09.md),
   measured 2026-09-08
+- **Policy reload at IXP scale, current main** (700 route-server clients ×
+  400,400 routes, live churn, same harness / same host): new policy fully
+  delivered to every member in **1.12–1.17 s p50** for main at `481e0187d`,
+  measured 2026-10-03 on the jemalloc receiver harness; the same-night
+  harness-fix control read 1.10–1.20 s, within run-to-run spread. The
+  daemon's own SIGHUP-to-reload-complete interval was 1,099–1,159 ms, against
+  886–987 ms for the v0.68.0 control in the 2026-09-28 receipt (cross-date),
+  so the daemon's reload path is still slower than v0.68.0's — [jemalloc-harness receipt](headline-refresh-jemalloc-2026-10.md).
+  Completion rows measured before 2026-10-03, including the bullet below,
+  used the earlier glibc-malloc receiver harness and are not directly
+  comparable ([why](headline-refresh-jemalloc-2026-10.md#why-earlier-receiver-bound-rows-are-not-comparable))
+- **IRR-scale filter reload, current main** (320 route-server members ×
+  183,040 generated prefixes, same harness / same host): at 0% received-view
+  overlap, main at `481e0187d` completed in **1.09–1.14 s p50** (median 1.11)
+  against 1.12–1.17 s (median 1.14) for the same-night harness-fix control,
+  within spread, measured 2026-10-03 on the jemalloc receiver harness with
+  320/320 sessions, zero parse errors and no slow root. The daemon's own
+  SIGHUP-to-reload-complete interval was 1,029–1,084 ms, against 765–826 ms
+  for the v0.68.0 control in the 2026-09-28 receipt (cross-date), so the
+  daemon's reload path is still slower than v0.68.0's — [jemalloc-harness receipt](headline-refresh-jemalloc-2026-10.md)
 - **Policy reload at IXP scale** (700 route-server clients × 400,400 routes,
   live churn, same harness / same host — the policy-file reload, not the IRR
   filter refresh below): new policy fully delivered to every member in
-  **1.38–1.69 s p50** for rustbgpd v0.73.0, measured 2026-09-28; the same-night
+  **1.38–1.69 s p50** for rustbgpd v0.73.0, measured 2026-09-28 on the earlier
+  glibc-malloc receiver harness; the same-night
   v0.72.0 control read 1.37–1.74 s, within run-to-run spread — [v0.73.0 refresh receipt](headline-refresh-v0730-2026-09.md).
   The same-night v0.68.0 arm read 1.20–1.52 s, reproducing its rows
   measured 2026-08-30 (1.21–1.35 s). The reload slowed between v0.68.0 and
@@ -35,8 +56,11 @@ Each result below links to its published, reproducible receipt:
   prefixes, same harness / same host): at 0% received-view overlap, v0.73.0
   completion p50 was **1.27–1.83 s** (median 1.38) against 1.25–1.33 s
   (median 1.27) for the same-night v0.72.0 control, measured 2026-09-28 with
-  320/320 sessions and zero parse errors. Two of five v0.73.0 roots ran
-  markedly slower; the cause is not identified — [v0.73.0 refresh receipt](headline-refresh-v0730-2026-09.md). The same-night v0.68.0
+  320/320 sessions and zero parse errors, on the earlier glibc-malloc
+  receiver harness. Two of five v0.73.0 roots ran markedly slower; they were
+  later traced to that harness's allocator contention, not to the daemon,
+  whose own reload clock was unaffected ([harness allocator](../../bench/scale/reloadstall/README.md#allocator); see the current-main bullet
+  above) — [v0.73.0 refresh receipt](headline-refresh-v0730-2026-09.md). The same-night v0.68.0
   arm read 0.86–1.01 s, and the daemon's own log places the v0.68.0 to
   v0.72.0 slowdown in its reload processing. The 10% and 50% overlap rows were
   not re-measured and remain v0.68.0 source-equivalent observations of
@@ -73,11 +97,15 @@ Each result below links to its published, reproducible receipt:
   Cross-daemon memory is not ranked in the current IRR receipt because daemon
   and container defaults differ.
 
-The rustbgpd figures above are v0.73.0 release-tree rows measured overnight
-2026-09-27 to 2026-09-28, alternating with same-night v0.72.0 and v0.68.0
-controls. Against v0.72.0, v0.73.0 is faster at cold start, member-flap
-re-announce and RR1000, within spread on S2 policy reload, and slower on the
-IRR 0% reload, session establishment, settled S2 RSS and S3 post-flap RSS.
+The two current-main bullets are main at `481e0187d`, measured 2026-10-03 on
+the jemalloc receiver harness against a same-night harness-fix control —
+[jemalloc-harness receipt](headline-refresh-jemalloc-2026-10.md). The v0.73.0 figures above are release-tree rows measured
+overnight 2026-09-27 to 2026-09-28, alternating with same-night v0.72.0 and
+v0.68.0 controls. Against v0.72.0, v0.73.0 is faster at cold start,
+member-flap re-announce and RR1000, within spread on S2 policy reload, and
+slower on the IRR 0% reload, session establishment, settled S2 RSS and S3
+post-flap RSS; the IRR 0% difference came from two slow roots later traced to
+the glibc-malloc receiver harness.
 The same campaign settles the earlier cross-date gap: v0.68.0 reproduced its
 2026-08-30 rows on this host, so the slowdown in the 2026-09-26 v0.72.0 rows
 lies between the releases, not in host drift. The IRR 10% and 50% overlap

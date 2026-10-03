@@ -643,6 +643,21 @@ seconds across 0%, 10%, and 50% received-view overlap, against BIRD's
 has 320/320 sessions and zero parse errors, and each overlap quartet passes the
 received-view delta verifier. The older IRR receipts are historical records.
 
+> **Dated caveat (2026-10-03).** The comparative results above stay as
+> measured; no competitor was rerun. The [headline refresh on the jemalloc
+> harness](../perf/headline-refresh-jemalloc-2026-10.md) measures current main (`481e0187d`) on the same host.
+> Against the v0.68.0 control in the dated [2026-09-28 v0.73.0
+> receipt](../perf/headline-refresh-v0730-2026-09.md), compared across dates, cold convergence and flap
+> re-announce have recovered: S1 cold convergence is 2.6–2.8 s against
+> 3.4–3.6 s, and S3 re-announce p50 is 0.35–0.40 s against 0.36–0.40 s.
+> First re-announcement remains about 0.03 s slower, at 0.24 s against
+> 0.20–0.21 s. The daemon's reload path is still slower: its own log puts
+> SIGHUP to reload complete at 1,099–1,159 ms for the S2 policy reload and
+> 1,029–1,084 ms for the IRR 0% reload, against 886–987 ms and 765–826 ms
+> for v0.68.0. The 2026-09-28 receipt's receiver-bound completion rows were
+> inflated by its glibc-malloc `reloadstall` harness
+> ([why](../perf/headline-refresh-jemalloc-2026-10.md#why-earlier-receiver-bound-rows-are-not-comparable)); that receipt is unchanged.
+
 A separate [1,000-peer retained receipt](../perf/route-server-1000-2026-07.md),
 measured 2026-07-20 with a source-equivalent v0.68.0 rerun measured 2026-08-30,
 exercises a uniform all-eBGP route-server fleet against
@@ -752,6 +767,17 @@ source-equivalent refresh measured 2026-08-30, vs 64–85 s for BIRD 3.3.1
 measured 2026-08-08 and 201–206 s for OpenBGPD 9.2 measured 2026-08-30, on the
 same host and wire inputs), with per-daemon wins and losses — including OpenBGPD's smaller raw
 stall and its repeated-reconnect IdleHold pacing — published in the receipt.
+
+> **Dated caveat (2026-10-03).** The completion figures above are the
+> dated comparative results; BIRD and OpenBGPD were not rerun. They
+> were taken on the glibc-malloc `reloadstall` harness, so they are not
+> directly comparable with completion times on the current jemalloc harness
+> ([why](../perf/headline-refresh-jemalloc-2026-10.md#why-earlier-receiver-bound-rows-are-not-comparable)). The
+> [headline refresh on the jemalloc harness](../perf/headline-refresh-jemalloc-2026-10.md) measures current
+> main's S2 completion p50 at 1.12–1.17 s. The daemon's own reload clock,
+> 1,099–1,159 ms from SIGHUP to reload complete, is still slower than the
+> 886–987 ms of the v0.68.0 control in the dated
+> [2026-09-28 v0.73.0 receipt](../perf/headline-refresh-v0730-2026-09.md), compared across dates.
 
 Reload speed is only half the operator concern; the other half is what an
 invalid config does to a running router. FRR's reload driver

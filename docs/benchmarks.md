@@ -33,6 +33,21 @@ superseded campaigns remain below with their original provenance.
 | Can an IRR-scale candidate use the transactional apply path? | [IRR transactional-apply receipt](perf/irr-transactional-apply-2026-08.md) and [compact evidence](perf/artifacts/irr-transactional-apply-2026-08/README.md) | Two independent single-host runs measured 2026-08-04 at clean, then-current `origin/main` commit `02c752408b2336061da050d3396c3f7a538d3389`. Each completed 4/4 streamed Plan → token-bound Apply → commit-confirm cycles for a ~295.6 MB candidate at 320 members × 183,040 routes and 3,218,965 IRR filter entries, with 320/320 sessions and zero parse errors. Explicit abort and 10 s timeout auto-revert restored disk and runtime byte-exactly; rollback completed 69.5 s / 69.0 s after the deadline under a 600 s ceiling. One fleet shape, two fixed-order repeats; not a cross-daemon comparison. |
 | Which adoption capabilities have direct proof? | [IXP evaluation matrix](explanation/ixp-evaluation.md) | Receipt or config per row, including the explicit gap for dual-stack performance evidence. |
 
+> **Dated caveat (2026-10-03).** The comparative results above stay as
+> measured; no competitor was rerun. The [headline refresh on the jemalloc
+> harness](perf/headline-refresh-jemalloc-2026-10.md) measures current main (`481e0187d`) on the same host.
+> Against the v0.68.0 control in the dated [2026-09-28 v0.73.0
+> receipt](perf/headline-refresh-v0730-2026-09.md), compared across dates, cold convergence and flap
+> re-announce have recovered: S1 cold convergence is 2.6–2.8 s against
+> 3.4–3.6 s, and S3 re-announce p50 is 0.35–0.40 s against 0.36–0.40 s.
+> First re-announcement remains about 0.03 s slower, at 0.24 s against
+> 0.20–0.21 s. The daemon's reload path is still slower: its own log puts
+> SIGHUP to reload complete at 1,099–1,159 ms for the S2 policy reload and
+> 1,029–1,084 ms for the IRR 0% reload, against 886–987 ms and 765–826 ms
+> for v0.68.0. The 2026-09-28 receipt's receiver-bound completion rows were
+> inflated by its glibc-malloc `reloadstall` harness
+> ([why](perf/headline-refresh-jemalloc-2026-10.md#why-earlier-receiver-bound-rows-are-not-comparable)); that receipt is unchanged.
+
 The three commonly cited 1,000-peer memory values are not a release trend:
 
 - [419 MiB](perf/scale-receipt-2026-07.md) is whole-process RSS for an
