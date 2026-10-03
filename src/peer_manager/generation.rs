@@ -527,8 +527,12 @@ impl PeerManager {
         candidate: &Config,
         actions: &[ReloadPeerAction],
     ) -> Result<ResolvedGeneration, String> {
+        // The coordinator's post-pin `validate()` bounded every named chain,
+        // and nothing after it edits one. Pins applied after that validation
+        // (`honor_blackhole`, the RFC 8212 posture) can still change the
+        // implicit tails of effective chains, so re-check those here.
         candidate
-            .validate_policy_chain_nodes()
+            .validate_effective_policy_chain_nodes()
             .map_err(|error| error.to_string())?;
         let mut kinds: BTreeMap<&PeerKey, ReloadPeerActionKind> = BTreeMap::new();
         for action in actions {

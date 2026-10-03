@@ -2358,3 +2358,62 @@ async fn chain_node_budget_dynamic_reload_intermediate_rejects_without_adoption(
         );
     }
 }
+
+#[tokio::test]
+async fn chain_node_budget_generation_rejects_late_tail_on_idle_dynamic_range() {
+    use crate::config::PreparedDatasetGeneration;
+    use crate::peer_manager::generation::ReloadGenerationOutcome;
+    use std::fmt::Write as _;
+
+    let (_tx, rx) = mpsc::channel(4);
+    let (rib_tx, mut rib_rx) = mpsc::channel(4);
+    let mut mgr = PeerManager::new(
+        rx,
+        65001,
+        Ipv4Addr::new(10, 0, 0, 1),
+        None,
+        None,
+        BgpMetrics::new(),
+        rib_tx,
+        None,
+    );
+    let mut source = String::from("policy bulk { ");
+    for i in 0..3333 {
+        writeln!(source, "term t{i} {{ if route.med >= {i} {{ accept }} }}").unwrap();
+    }
+    source.push('}');
+    mgr.replace_current_config(make_dynamic_manager_config());
+    mgr.current_config.policy.rpol = chain_budget_registry(&source);
+    // The group chain fits exactly, and no dynamic session is connected.
+    mgr.current_config
+        .peer_groups
+        .get_mut("ix-members")
+        .unwrap()
+        .import_policy_chain = vec!["bulk".to_string(); 100];
+    mgr.current_config.validate().unwrap();
+    let before = mgr.current_config.clone();
+
+    // A reload pin applied after the coordinator's validation can turn on an
+    // implicit import tail. The generation preflight must still reject it.
+    let mut candidate = before.clone();
+    candidate.global.honor_graceful_shutdown = true;
+    let outcome = Box::pin(mgr.apply_reload_generation(
+        candidate,
+        Vec::new(),
+        PreparedDatasetGeneration::default(),
+    ))
+    .await;
+    assert!(
+        matches!(
+            outcome,
+            ReloadGenerationOutcome::RejectedNoEffect(ref message)
+                if message.contains("effective import chain") && message.contains("MAX_CHAIN_NODES")
+        ),
+        "{outcome:?}"
+    );
+    assert_eq!(mgr.current_config, before);
+    assert!(matches!(
+        rib_rx.try_recv(),
+        Err(mpsc::error::TryRecvError::Empty)
+    ));
+}

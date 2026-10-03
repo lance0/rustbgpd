@@ -34,6 +34,15 @@ use super::{
 /// and regex retention during a resolution sweep.
 const RESOLVED_NEIGHBOR_SET_STORE_CHUNK_SIZE: usize = 32;
 
+/// Keep only a chain-budget failure; other resolution errors stay with the
+/// caller's ordinary validation or attachment path.
+fn chain_budget_only(error: Option<ConfigError>) -> Result<(), ConfigError> {
+    match error {
+        Some(error @ ConfigError::PolicyChainTooLarge { .. }) => Err(error),
+        _ => Ok(()),
+    }
+}
+
 impl Config {
     fn interface_index(interface: &str) -> Result<u32, String> {
         nix::net::if_::if_nametoindex(interface)
@@ -402,10 +411,6 @@ impl Config {
     /// Returns only [`ConfigError::PolicyChainTooLarge`]. General config
     /// validation remains responsible for all other errors.
     pub(crate) fn validate_policy_chain_nodes(&self) -> Result<(), ConfigError> {
-        let check = |error| match error {
-            Some(error @ ConfigError::PolicyChainTooLarge { .. }) => Err(error),
-            _ => Ok(()),
-        };
         let named = [
             (&self.policy.import_chain, ChainDirection::Import),
             (&self.policy.export_chain, ChainDirection::Export),
@@ -424,7 +429,7 @@ impl Config {
             ]
         }));
         for (names, direction) in named {
-            check(
+            chain_budget_only(
                 resolve_chain(
                     names,
                     &self.policy.definitions,
@@ -438,8 +443,20 @@ impl Config {
                 .err(),
             )?;
         }
+        self.validate_effective_policy_chain_nodes()
+    }
+
+    /// The effective-chain half of [`Self::validate_policy_chain_nodes`]:
+    /// every static neighbor's and every dynamic range's inherited chain,
+    /// including the implicit receiver tails and RFC 8212 substitution.
+    /// Callers that already resolved every named chain through
+    /// [`resolve_chain`] (which charges the same budget) need only this half.
+    ///
+    /// # Errors
+    /// Returns only [`ConfigError::PolicyChainTooLarge`].
+    pub(crate) fn validate_effective_policy_chain_nodes(&self) -> Result<(), ConfigError> {
         for neighbor in &self.neighbors {
-            check(self.effective_policy_for_neighbor(neighbor, false).err())?;
+            chain_budget_only(self.effective_policy_for_neighbor(neighbor, false).err())?;
         }
         for range in &self.dynamic_neighbors {
             if let Some(addr) = super::dynamic_range_representative_addr(&range.prefix) {
@@ -449,7 +466,7 @@ impl Config {
                     range.description.as_deref().unwrap_or(&range.peer_group),
                     &range.peer_group,
                 );
-                check(self.effective_policy_for_neighbor(&neighbor, false).err())?;
+                chain_budget_only(self.effective_policy_for_neighbor(&neighbor, false).err())?;
             }
         }
         Ok(())

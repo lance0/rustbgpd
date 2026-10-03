@@ -1535,7 +1535,10 @@ impl Config {
         validate_managed_netdevs(self)?;
         validate_fib_tables(self)?;
         validate_bfd(self)?;
-        self.validate_policy_chain_nodes()?;
+        // Every named chain (global, group, neighbor) already went through
+        // `resolve_chain` above, which charges the same node budget, so only
+        // the inherited effective chains remain to be bounded here.
+        self.validate_effective_policy_chain_nodes()?;
 
         Ok(())
     }
