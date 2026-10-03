@@ -686,6 +686,66 @@ fn same_as_matches_derived_equality() {
             ..RouteModifications::default()
         },
     ];
+    // Two distinct values per field, so dropping any one comparison
+    // from `same_as` makes a pair that `==` separates compare equal.
+    let per_field: [fn(u32) -> RouteModifications; 13] = [
+        |v: u32| RouteModifications {
+            set_local_pref: Some(v),
+            ..RouteModifications::default()
+        },
+        |v: u32| RouteModifications {
+            set_med: Some(v),
+            ..RouteModifications::default()
+        },
+        |v: u32| RouteModifications {
+            set_next_hop: Some(NextHopAction::Specific(IpAddr::V4(Ipv4Addr::from(v)))),
+            ..RouteModifications::default()
+        },
+        |v: u32| RouteModifications {
+            communities_add: vec![v],
+            ..RouteModifications::default()
+        },
+        |v: u32| RouteModifications {
+            communities_remove: vec![v],
+            ..RouteModifications::default()
+        },
+        |v: u32| RouteModifications {
+            extended_communities_add: vec![ExtendedCommunity::new(u64::from(v))],
+            ..RouteModifications::default()
+        },
+        |v: u32| RouteModifications {
+            extended_communities_remove: vec![ExtendedCommunity::new(u64::from(v))],
+            ..RouteModifications::default()
+        },
+        |v: u32| RouteModifications {
+            large_communities_add: vec![LargeCommunity::new(v, 0, 0)],
+            ..RouteModifications::default()
+        },
+        |v: u32| RouteModifications {
+            large_communities_remove: vec![LargeCommunity::new(v, 0, 0)],
+            ..RouteModifications::default()
+        },
+        |v: u32| RouteModifications {
+            as_path_prepend: Some((v, 1)),
+            ..RouteModifications::default()
+        },
+        |v: u32| RouteModifications {
+            as_path_prepend_computed: Some((PrependAs::PeerAs, u8::try_from(v).unwrap())),
+            ..RouteModifications::default()
+        },
+        |v: u32| RouteModifications {
+            set_local_pref_computed: Some(Arc::new(crate::ir::ValueExpr::Const(v))),
+            ..RouteModifications::default()
+        },
+        |v: u32| RouteModifications {
+            set_med_computed: Some(Arc::new(crate::ir::ValueExpr::Const(v))),
+            ..RouteModifications::default()
+        },
+    ];
+    let variants: Vec<RouteModifications> = variants
+        .into_iter()
+        .chain(per_field.iter().flat_map(|make| [make(1), make(2)]))
+        .collect();
     for a in &variants {
         for b in &variants {
             assert_eq!(a.same_as(b), a == b, "{a:?} vs {b:?}");

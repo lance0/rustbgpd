@@ -120,7 +120,7 @@ impl ExportMemo {
         }
         let entry = self.entry(&route.attributes);
         let (attrs, nh) =
-            if let Some((_, attrs, nh)) = entry.modified.iter().find(|(m, _, _)| m == mods) {
+            if let Some((_, attrs, nh)) = entry.modified.iter().find(|(m, _, _)| m.same_as(mods)) {
                 (Arc::clone(attrs), nh.clone())
             } else {
                 let mut new_attrs = route.attributes.to_vec();
