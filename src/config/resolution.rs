@@ -34,6 +34,28 @@ use super::{
 /// and regex retention during a resolution sweep.
 const RESOLVED_NEIGHBOR_SET_STORE_CHUNK_SIZE: usize = 32;
 
+/// One [`SetStore`] reused for up to [`RESOLVED_NEIGHBOR_SET_STORE_CHUNK_SIZE`]
+/// consecutive neighbors of one validation or planning pass. Sharing the store
+/// lets each AS-path regex compile once per chunk instead of once per chain,
+/// with the same retention bound as the resolved-neighbor roster.
+#[derive(Default)]
+pub(crate) struct ChunkedSetStore {
+    store: SetStore,
+    neighbors: usize,
+}
+
+impl ChunkedSetStore {
+    /// The store for the pass's next neighbor (or other resolution unit).
+    pub(crate) fn next_store(&mut self) -> &mut SetStore {
+        if self.neighbors == RESOLVED_NEIGHBOR_SET_STORE_CHUNK_SIZE {
+            self.store = SetStore::new();
+            self.neighbors = 0;
+        }
+        self.neighbors += 1;
+        &mut self.store
+    }
+}
+
 /// Keep only a chain-budget failure; other resolution errors stay with the
 /// caller's ordinary validation or attachment path.
 fn chain_budget_only(error: Option<ConfigError>) -> Result<(), ConfigError> {
@@ -398,9 +420,22 @@ impl Config {
         neighbor: &Neighbor,
         external_pinned: bool,
     ) -> Result<EffectivePolicyChains, ConfigError> {
-        let mut store = SetStore::new();
+        self.effective_policy_for_neighbor_in(neighbor, external_pinned, &mut SetStore::new())
+    }
+
+    /// [`Self::effective_policy_for_neighbor`] through a caller-owned store,
+    /// for passes that resolve many neighbors (see [`ChunkedSetStore`]).
+    ///
+    /// # Errors
+    /// As [`Self::effective_policy_for_neighbor`].
+    pub(crate) fn effective_policy_for_neighbor_in(
+        &self,
+        neighbor: &Neighbor,
+        external_pinned: bool,
+        store: &mut SetStore,
+    ) -> Result<EffectivePolicyChains, ConfigError> {
         let group = self.peer_group_for_neighbor(neighbor)?;
-        self.effective_policy_for_neighbor_with_store(neighbor, group, external_pinned, &mut store)
+        self.effective_policy_for_neighbor_with_store(neighbor, group, external_pinned, store)
     }
 
     /// Check only structural chain budgets for a candidate snapshot. Registry
@@ -455,8 +490,12 @@ impl Config {
     /// # Errors
     /// Returns only [`ConfigError::PolicyChainTooLarge`].
     pub(crate) fn validate_effective_policy_chain_nodes(&self) -> Result<(), ConfigError> {
+        let mut stores = ChunkedSetStore::default();
         for neighbor in &self.neighbors {
-            chain_budget_only(self.effective_policy_for_neighbor(neighbor, false).err())?;
+            chain_budget_only(
+                self.effective_policy_for_neighbor_in(neighbor, false, stores.next_store())
+                    .err(),
+            )?;
         }
         for range in &self.dynamic_neighbors {
             if let Some(addr) = super::dynamic_range_representative_addr(&range.prefix) {
@@ -466,7 +505,10 @@ impl Config {
                     range.description.as_deref().unwrap_or(&range.peer_group),
                     &range.peer_group,
                 );
-                chain_budget_only(self.effective_policy_for_neighbor(&neighbor, false).err())?;
+                chain_budget_only(
+                    self.effective_policy_for_neighbor_in(&neighbor, false, stores.next_store())
+                        .err(),
+                )?;
             }
         }
         Ok(())
@@ -769,8 +811,9 @@ impl Config {
     pub(super) fn resolve_neighbor_for_comparison(
         &self,
         neighbor: &Neighbor,
+        store: &mut SetStore,
     ) -> Result<ResolvedNeighbor, ConfigError> {
-        self.resolve_neighbor_pinned_with_store(neighbor, false, &mut SetStore::new(), Some(0))
+        self.resolve_neighbor_pinned_with_store(neighbor, false, store, Some(0))
     }
 
     /// Project fields for a `HotUpdatePeer` payload only. A hot update never
@@ -779,7 +822,7 @@ impl Config {
         &self,
         neighbor: &Neighbor,
     ) -> Result<ResolvedNeighbor, ConfigError> {
-        let mut resolved = self.resolve_neighbor_for_comparison(neighbor)?;
+        let mut resolved = self.resolve_neighbor_for_comparison(neighbor, &mut SetStore::new())?;
         resolved.transport_config.peer_scope_id = None;
         Ok(resolved)
     }

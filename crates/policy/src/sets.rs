@@ -539,6 +539,21 @@ impl SetStore {
                 .or_insert_with(|| Arc::new(regex.clone())),
         )
     }
+
+    /// Intern an AS-path regex by its configured pattern, compiling it only
+    /// when this store has not interned that pattern yet.
+    ///
+    /// # Errors
+    /// Returns the compile error for an invalid pattern.
+    pub fn as_path_regex_pattern(&mut self, pattern: &str) -> Result<Arc<AsPathRegex>, String> {
+        if let Some(regex) = self.as_path_regexes.get(pattern) {
+            return Ok(Arc::clone(regex));
+        }
+        let regex = Arc::new(AsPathRegex::new(pattern)?);
+        self.as_path_regexes
+            .insert(pattern.to_string(), Arc::clone(&regex));
+        Ok(regex)
+    }
 }
 
 #[cfg(test)]
@@ -705,9 +720,22 @@ mod tests {
         ));
 
         let re = AsPathRegex::new("_65001_").unwrap();
+        let interned = store.as_path_regex(&re);
         assert!(Arc::ptr_eq(
-            &store.as_path_regex(&re),
+            &interned,
             &store.as_path_regex(&AsPathRegex::new("_65001_").unwrap())
         ));
+        // Pattern interning shares the same entry and compiles only on a miss.
+        assert!(Arc::ptr_eq(
+            &interned,
+            &store.as_path_regex_pattern("_65001_").unwrap()
+        ));
+        let fresh = store.as_path_regex_pattern("_65002_").unwrap();
+        assert!(fresh.is_match("65002") && !fresh.is_match("65001"));
+        assert!(Arc::ptr_eq(
+            &fresh,
+            &store.as_path_regex(&AsPathRegex::new("_65002_").unwrap())
+        ));
+        assert!(store.as_path_regex_pattern("(").is_err());
     }
 }

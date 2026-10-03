@@ -642,6 +642,7 @@ impl PeerManager {
         // dynamic. Replaced peers receive their chains on re-add.
         let mut live: Vec<&PeerKey> = self.peers.keys().collect();
         live.sort();
+        let mut stores = crate::config::ChunkedSetStore::default();
         for peer in live {
             if matches!(
                 kinds.get(peer),
@@ -661,9 +662,11 @@ impl PeerManager {
                     ));
                 }
             };
-            let mut chains = match candidate
-                .effective_policy_for_neighbor(&neighbor, managed.rfc8212_external)
-            {
+            let mut chains = match candidate.effective_policy_for_neighbor_in(
+                &neighbor,
+                managed.rfc8212_external,
+                stores.next_store(),
+            ) {
                 Ok(chains) => chains,
                 Err(error @ crate::config::ConfigError::PolicyChainTooLarge { .. }) => {
                     return Err(error.to_string());

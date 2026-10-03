@@ -298,11 +298,12 @@ pub(crate) enum ChainDirection {
 /// call-form — `"customer-in(200)"` — and monomorphized here; the
 /// resulting chain member carries its pre-compiled IR, so evaluation
 /// and the ADR-0076 planner's structural diff both see the compiled
-/// content. Direct chain and validation callers compile each chain through
-/// one local `SetStore`. Standalone effective-policy / neighbor resolution
-/// shares one store across that single neighbor's inherited chains, while the
-/// resolved-neighbor roster uses [`resolve_chain_with_store`] with one fresh
-/// store per bounded 32-neighbor chunk.
+/// content. Direct chain callers compile each chain through one local
+/// `SetStore`. Standalone effective-policy / neighbor resolution shares one
+/// store across that single neighbor's inherited chains, while
+/// `Config::validate`, the resolved-neighbor roster and the reload planning
+/// passes use [`resolve_chain_with_store`] with one fresh store per bounded
+/// 32-neighbor chunk.
 ///
 /// LAN-296: every `.rpol` member is stamped with `local_asn` (the
 /// `[global] asn`, backing `prepend as self`), and an export-bound
@@ -341,9 +342,9 @@ pub(super) fn resolve_chain(
 
 /// Resolve one chain through a caller-owned store. Effective-policy and
 /// standalone-neighbor resolution scope the store to one neighbor call; roster
-/// resolution scopes it to one bounded 32-neighbor chunk. Validation and
-/// direct chain resolution use [`resolve_chain`] and retain one store per
-/// chain.
+/// resolution, `Config::validate` and reload planning scope it to one bounded
+/// 32-neighbor chunk. Direct chain resolution uses [`resolve_chain`] and
+/// retains one store per chain.
 #[expect(
     clippy::too_many_arguments,
     reason = "the chain resolver threads every policy namespace; a params struct would just rename them"

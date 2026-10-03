@@ -9,7 +9,7 @@ use rustbgpd_transport::TCP_AO_MAX_INSPECT_KEYS;
 
 use super::parse::{
     ChainDirection, parse_families, parse_named_policy, parse_neighbor_set, parse_policy,
-    resolve_chain,
+    resolve_chain_with_store,
 };
 use super::schema::{
     MAX_POLICY_CACHE_ENTRIES, ManagedBridgeNetdevConfig, ManagedL3VxlanNetdevConfig,
@@ -18,9 +18,9 @@ use super::schema::{
 };
 use super::schema::{OrrVantage, parse_orr_vantage, validate_orr_vantage_address};
 use super::{
-    Config, ConfigError, DEFAULT_HOLD_TIME, EventHistoryConfig, InboundAdmissionConfig, Neighbor,
-    PeerGroupConfig, SecurityConfig, TcpAoConfig, TcpAoKeyringConfig, dynamic_prefixes_intersect,
-    is_unicast_nonzero_mac, parse_mac_address,
+    ChunkedSetStore, Config, ConfigError, DEFAULT_HOLD_TIME, EventHistoryConfig,
+    InboundAdmissionConfig, Neighbor, PeerGroupConfig, SecurityConfig, TcpAoConfig,
+    TcpAoKeyringConfig, dynamic_prefixes_intersect, is_unicast_nonzero_mac, parse_mac_address,
 };
 
 /// Canonical key for a dynamic-neighbor prefix: the network address with all
@@ -610,6 +610,9 @@ impl Config {
             parse_neighbor_set(name, set, &self.peer_groups)?;
         }
 
+        // Chain validation shares chunked stores so each AS-path regex
+        // compiles once per chunk rather than once per chain.
+        let mut stores = ChunkedSetStore::default();
         for (name, group) in &self.peer_groups {
             validate_peer_group(
                 name,
@@ -620,6 +623,7 @@ impl Config {
                 &self.policy.neighbor_sets,
                 &self.peer_groups,
                 self.global.asn,
+                stores.next_store(),
             )?;
             validate_max_prefix_modes(
                 &format!("peer_group.{name}"),
@@ -636,7 +640,8 @@ impl Config {
         }
 
         // Validate global chains
-        let _global_import_chain = resolve_chain(
+        let store = stores.next_store();
+        let _global_import_chain = resolve_chain_with_store(
             &self.policy.import_chain,
             &self.policy.definitions,
             &self.policy.rpol,
@@ -645,8 +650,9 @@ impl Config {
             &self.peer_groups,
             ChainDirection::Import,
             self.global.asn,
+            store,
         )?;
-        resolve_chain(
+        resolve_chain_with_store(
             &self.policy.export_chain,
             &self.policy.definitions,
             &self.policy.rpol,
@@ -655,6 +661,7 @@ impl Config {
             &self.peer_groups,
             ChainDirection::Export,
             self.global.asn,
+            store,
         )?;
 
         // Validate neighbor address/interface identity. Numbered peers remain
@@ -985,7 +992,8 @@ impl Config {
                     ),
                 });
             }
-            let _neighbor_import_chain = resolve_chain(
+            let store = stores.next_store();
+            let _neighbor_import_chain = resolve_chain_with_store(
                 &neighbor.import_policy_chain,
                 &self.policy.definitions,
                 &self.policy.rpol,
@@ -994,8 +1002,9 @@ impl Config {
                 &self.peer_groups,
                 ChainDirection::Import,
                 self.global.asn,
+                store,
             )?;
-            resolve_chain(
+            resolve_chain_with_store(
                 &neighbor.export_policy_chain,
                 &self.policy.definitions,
                 &self.policy.rpol,
@@ -1004,6 +1013,7 @@ impl Config {
                 &self.peer_groups,
                 ChainDirection::Export,
                 self.global.asn,
+                store,
             )?;
         }
 
@@ -1536,7 +1546,7 @@ impl Config {
         validate_fib_tables(self)?;
         validate_bfd(self)?;
         // Every named chain (global, group, neighbor) already went through
-        // `resolve_chain` above, which charges the same node budget, so only
+        // `resolve_chain_with_store` above, which charges the same node budget, so only
         // the inherited effective chains remain to be bounded here.
         self.validate_effective_policy_chain_nodes()?;
 
@@ -2882,6 +2892,7 @@ fn validate_peer_group(
     neighbor_sets: &std::collections::HashMap<String, super::NeighborSetConfig>,
     peer_groups: &std::collections::HashMap<String, PeerGroupConfig>,
     local_asn: u32,
+    store: &mut rustbgpd_policy::sets::SetStore,
 ) -> Result<(), ConfigError> {
     EffectiveHoldTimers::for_peer_group(group).validate()?;
 
@@ -2982,7 +2993,7 @@ fn validate_peer_group(
             ),
         });
     }
-    let _group_import_chain = resolve_chain(
+    let _group_import_chain = resolve_chain_with_store(
         &group.import_policy_chain,
         definitions,
         rpol,
@@ -2991,8 +3002,9 @@ fn validate_peer_group(
         peer_groups,
         ChainDirection::Import,
         local_asn,
+        store,
     )?;
-    resolve_chain(
+    resolve_chain_with_store(
         &group.export_policy_chain,
         definitions,
         rpol,
@@ -3001,6 +3013,7 @@ fn validate_peer_group(
         peer_groups,
         ChainDirection::Export,
         local_asn,
+        store,
     )?;
 
     Ok(())

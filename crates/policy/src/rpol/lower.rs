@@ -962,8 +962,9 @@ impl<'a> Lowerer<'a> {
         if let Some(&id) = self.regex_ids.get(pattern) {
             return id;
         }
-        let regex = AsPathRegex::new(pattern).expect("typechecked: regex compiles");
-        let interned = store.as_path_regex(&regex);
+        let interned = store
+            .as_path_regex_pattern(pattern)
+            .expect("typechecked: regex compiles");
         let id = RegexId(u32::try_from(self.as_path_regexes.len()).expect("fits u32"));
         self.as_path_regexes.push(interned);
         self.regex_ids.insert(pattern.to_string(), id);
