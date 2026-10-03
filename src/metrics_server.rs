@@ -2,9 +2,9 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
-use prometheus::{Encoder, TextEncoder};
 use rustbgpd_api::accept_backoff::AcceptBackoff;
 use rustbgpd_api::health_probe::{CORE_READINESS_DEADLINE, CoreReadinessProbe};
+use rustbgpd_api::metrics_render::render_text;
 use rustbgpd_evpn_linux::worker_progress::WorkerProgressState;
 use rustbgpd_telemetry::BgpMetrics;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
@@ -200,7 +200,7 @@ async fn handle_connection(
     let path = request_line.split_whitespace().nth(1).unwrap_or("");
 
     let response = match path {
-        "/metrics" => match gather(metrics) {
+        "/metrics" => match render_text(metrics).await {
             Ok(body) => {
                 format!(
                     "HTTP/1.1 200 OK\r\nContent-Type: text/plain; version=0.0.4; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
@@ -261,16 +261,6 @@ fn text_response(status: &str, body: &str) -> String {
     )
 }
 
-fn gather(metrics: &BgpMetrics) -> Result<String, std::io::Error> {
-    let encoder = TextEncoder::new();
-    let families = metrics.registry().gather();
-    let mut buf = Vec::new();
-    encoder
-        .encode(&families, &mut buf)
-        .map_err(std::io::Error::other)?;
-    String::from_utf8(buf).map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
-}
-
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
@@ -324,6 +314,125 @@ pub(crate) mod tests {
 
         let response = request(addr, "/metrics").await;
         assert!(response.starts_with("HTTP/1.1 200 OK"));
+    }
+
+    /// Stands in for a slow whole-registry render: `collect()` reports entry,
+    /// then blocks until the test releases it.
+    struct GatedCollector {
+        gauge: prometheus::IntGauge,
+        entered: std::sync::mpsc::Sender<()>,
+        release: std::sync::Mutex<std::sync::mpsc::Receiver<()>>,
+    }
+
+    impl prometheus::core::Collector for GatedCollector {
+        fn desc(&self) -> Vec<&prometheus::core::Desc> {
+            prometheus::core::Collector::desc(&self.gauge)
+        }
+
+        fn collect(&self) -> Vec<prometheus::proto::MetricFamily> {
+            let _ = self.entered.send(());
+            // Bounded so a failing test cannot wedge the process.
+            let _ = self
+                .release
+                .lock()
+                .unwrap()
+                .recv_timeout(Duration::from_secs(30));
+            prometheus::core::Collector::collect(&self.gauge)
+        }
+    }
+
+    /// Serves `/metrics` on a dedicated current-thread runtime whose registry
+    /// holds a [`GatedCollector`]. A render on that runtime's only worker
+    /// stalls every other request on the server.
+    fn start_gated_server() -> (
+        SocketAddr,
+        std::sync::mpsc::Receiver<()>,
+        std::sync::mpsc::Sender<()>,
+    ) {
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let (addr_tx, addr_rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            rt.block_on(async move {
+                let metrics = BgpMetrics::new();
+                let gauge = prometheus::IntGauge::new("test_gated_render", "test").unwrap();
+                metrics
+                    .registry()
+                    .register(Box::new(GatedCollector {
+                        gauge,
+                        entered: entered_tx,
+                        release: std::sync::Mutex::new(release_rx),
+                    }))
+                    .unwrap();
+                let server = MetricsListener::bind("127.0.0.1:0".parse().unwrap())
+                    .await
+                    .unwrap();
+                addr_tx.send(server.addr).unwrap();
+                serve_metrics(server, metrics, unused_probe(), None).await;
+            });
+        });
+        (addr_rx.recv().unwrap(), entered_rx, release_tx)
+    }
+
+    /// Blocking client with a read timeout, so a stalled server fails the
+    /// request instead of hanging the test.
+    fn blocking_request(addr: SocketAddr, path: &str) -> std::io::Result<String> {
+        use std::io::{Read, Write};
+        let mut stream = std::net::TcpStream::connect(addr)?;
+        stream.set_read_timeout(Some(Duration::from_secs(5)))?;
+        stream.write_all(format!("GET {path} HTTP/1.1\r\nHost: localhost\r\n\r\n").as_bytes())?;
+        let mut response = String::new();
+        stream.read_to_string(&mut response)?;
+        Ok(response)
+    }
+
+    #[test]
+    fn livez_answers_while_metrics_render_is_blocked() {
+        let (addr, entered, release) = start_gated_server();
+        let scrape = std::thread::spawn(move || blocking_request(addr, "/metrics"));
+        entered
+            .recv_timeout(Duration::from_secs(5))
+            .expect("metrics render must start");
+
+        let livez = blocking_request(addr, "/livez");
+        release.send(()).unwrap();
+        let livez = livez.expect("/livez must answer while a /metrics render is in flight");
+        assert!(livez.starts_with("HTTP/1.1 200 OK"), "{livez}");
+
+        let scrape = scrape.join().unwrap().unwrap();
+        assert!(scrape.starts_with("HTTP/1.1 200 OK"), "{scrape}");
+        assert!(scrape.contains("test_gated_render 0\n"), "{scrape}");
+    }
+
+    #[test]
+    fn concurrent_metrics_scrapes_render_one_at_a_time_and_both_succeed() {
+        let (addr, entered, release) = start_gated_server();
+        let first = std::thread::spawn(move || blocking_request(addr, "/metrics"));
+        entered
+            .recv_timeout(Duration::from_secs(5))
+            .expect("first render must start");
+        let second = std::thread::spawn(move || blocking_request(addr, "/metrics"));
+
+        // The second scrape waits for the render slot instead of starting a
+        // second render beside the blocked one.
+        assert!(
+            entered.recv_timeout(Duration::from_millis(300)).is_err(),
+            "a second render started while the first was in flight"
+        );
+        release.send(()).unwrap();
+        entered
+            .recv_timeout(Duration::from_secs(5))
+            .expect("second render must start after the first finishes");
+        release.send(()).unwrap();
+
+        for scrape in [first, second] {
+            let response = scrape.join().unwrap().unwrap();
+            assert!(response.starts_with("HTTP/1.1 200 OK"), "{response}");
+        }
     }
 
     #[tokio::test]

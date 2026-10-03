@@ -301,7 +301,9 @@ PUBLIC_DOCS_CHECK = load_helper("check_public_tracker_ids.py", "public_docs_cont
 def production_source(source: str) -> str:
     """Drop the conventional trailing Rust test module from source discovery."""
     return re.split(
-        r"\n#\[cfg\(test\)\]\s*\nmod\s+tests\s*\{", source, maxsplit=1
+        r"\n#\[cfg\(test\)\]\s*\n(?:pub(?:\([^)]*\))?\s+)?mod\s+tests\s*\{",
+        source,
+        maxsplit=1,
     )[0]
 
 
