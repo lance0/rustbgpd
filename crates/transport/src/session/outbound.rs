@@ -335,7 +335,7 @@ impl PeerSession {
                     }
                     available -= 1;
                     self.updates_sent += 1;
-                    self.metrics.record_message_sent(&self.peer_label, "update");
+                    self.record_update_sent();
                 }
                 *next += 1;
             }
@@ -1631,7 +1631,7 @@ impl PeerSession {
             }
             info!(peer = %self.peer_label, afi = ?afi, safi = ?safi, "sent End-of-RIB");
             self.updates_sent += 1;
-            self.metrics.record_message_sent(&self.peer_label, "update");
+            self.record_update_sent();
         }
     }
     /// Split `entries` into as many wire UPDATEs as needed so each
@@ -1705,7 +1705,7 @@ impl PeerSession {
                 return false;
             }
             self.updates_sent += 1;
-            self.metrics.record_message_sent(&self.peer_label, "update");
+            self.record_update_sent();
             idx = end;
         }
         true
@@ -1792,7 +1792,7 @@ impl PeerSession {
                 return false;
             }
             self.updates_sent += 1;
-            self.metrics.record_message_sent(&self.peer_label, "update");
+            self.record_update_sent();
             idx = end;
             if idx < entries.len() {
                 successful_lower = successful_lower.max(probe_size);
@@ -1876,7 +1876,7 @@ impl PeerSession {
                 return false;
             }
             self.updates_sent += 1;
-            self.metrics.record_message_sent(&self.peer_label, "update");
+            self.record_update_sent();
             idx = end;
         }
         true
@@ -1921,7 +1921,7 @@ impl PeerSession {
                 return false;
             }
             self.updates_sent += 1;
-            self.metrics.record_message_sent(&self.peer_label, "update");
+            self.record_update_sent();
             idx = end;
         }
         true
@@ -1974,7 +1974,7 @@ impl PeerSession {
                 return false;
             }
             self.updates_sent += 1;
-            self.metrics.record_message_sent(&self.peer_label, "update");
+            self.record_update_sent();
             idx = end;
         }
         true
@@ -2019,7 +2019,7 @@ impl PeerSession {
                 return false;
             }
             self.updates_sent += 1;
-            self.metrics.record_message_sent(&self.peer_label, "update");
+            self.record_update_sent();
             idx = end;
         }
         true
@@ -2085,7 +2085,7 @@ impl PeerSession {
                 return false;
             }
             self.updates_sent += 1;
-            self.metrics.record_message_sent(&self.peer_label, "update");
+            self.record_update_sent();
             idx = end;
         }
         true
@@ -2131,7 +2131,7 @@ impl PeerSession {
                 return false;
             }
             self.updates_sent += 1;
-            self.metrics.record_message_sent(&self.peer_label, "update");
+            self.record_update_sent();
             idx = end;
         }
         true
@@ -2191,7 +2191,7 @@ impl PeerSession {
                 return false;
             }
             self.updates_sent += 1;
-            self.metrics.record_message_sent(&self.peer_label, "update");
+            self.record_update_sent();
             idx = end;
         }
         true
@@ -2243,7 +2243,7 @@ impl PeerSession {
                 return false;
             }
             self.updates_sent += 1;
-            self.metrics.record_message_sent(&self.peer_label, "update");
+            self.record_update_sent();
             idx = end;
         }
         true
@@ -2296,7 +2296,7 @@ impl PeerSession {
                 return false;
             }
             self.updates_sent += 1;
-            self.metrics.record_message_sent(&self.peer_label, "update");
+            self.record_update_sent();
             idx = end;
         }
         true
@@ -2342,7 +2342,7 @@ impl PeerSession {
                 return false;
             }
             self.updates_sent += 1;
-            self.metrics.record_message_sent(&self.peer_label, "update");
+            self.record_update_sent();
             idx = end;
         }
         true

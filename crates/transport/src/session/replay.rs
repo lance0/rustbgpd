@@ -306,7 +306,7 @@ impl PeerSession {
             }
             *offset += 1;
             self.updates_sent += 1;
-            self.metrics.record_message_sent(&self.peer_label, "update");
+            self.record_update_sent();
         }
         if *offset < terminal.len() {
             return false;

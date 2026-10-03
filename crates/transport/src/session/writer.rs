@@ -232,6 +232,7 @@ pub(super) fn spawn(
         teardown_rx,
         metrics,
         peer_label,
+        queue_depth: None,
         send_hold_time,
     };
     let join = tokio::spawn(task.run().in_current_span());
@@ -254,6 +255,9 @@ struct WriterTask {
     teardown_rx: watch::Receiver<bool>,
     metrics: BgpMetrics,
     peer_label: String,
+    /// `bgp_peer_outbound_queue_depth{peer}`, resolved on the first drain
+    /// sample and kept for the task's life (sampled once per drain wake).
+    queue_depth: Option<prometheus::IntGauge>,
     send_hold_time: Option<Duration>,
 }
 
@@ -370,10 +374,13 @@ impl WriterTask {
                 // already pulls many frames per wake — and it walks the
                 // gauge back down as the peer catches up, so a peer that
                 // has drained never reads as pinned-high.
-                self.metrics.set_peer_outbound_queue_depth(
-                    &self.peer_label,
-                    i64::try_from(self.bulk_rx.len()).unwrap_or(i64::MAX),
-                );
+                let depth = i64::try_from(self.bulk_rx.len()).unwrap_or(i64::MAX);
+                self.queue_depth
+                    .get_or_insert_with(|| {
+                        self.metrics
+                            .peer_outbound_queue_depth_gauge(&self.peer_label)
+                    })
+                    .set(depth);
                 coalesced
             } else {
                 bytes

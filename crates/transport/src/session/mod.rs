@@ -19,7 +19,7 @@ use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::ops::ControlFlow;
 use std::pin::Pin;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant, SystemTime};
 
 use bytes::Bytes;
@@ -302,6 +302,14 @@ pub(crate) struct PeerSession {
     /// the BFD runtime emit for the same peer, or `by (peer)` queries
     /// split. Diagnostics only; nothing dials or compares against it.
     peer_label: String,
+    /// `bgp_messages_sent_total{peer, type="update"}` and
+    /// `bgp_peer_outbound_queue_depth{peer}`, resolved on first use (so a
+    /// series still appears only once it is first written) and then kept:
+    /// both are written per UPDATE or per admission step, where a
+    /// label-hash lookup per write was measurable. The session ends before
+    /// the peer manager reaps a deleted peer's series.
+    update_sent_series: OnceLock<prometheus::IntCounter>,
+    outbound_queue_depth_series: OnceLock<prometheus::IntGauge>,
     peer_ip: IpAddr,
     /// Cached scope for IPv6 link-local next-hop recursion on static
     /// interface-bound peers. Built once from immutable transport config.
@@ -913,6 +921,16 @@ struct AcceptedTransport {
 }
 
 impl PeerSession {
+    /// Count one UPDATE sent (`bgp_messages_sent_total{type="update"}`).
+    fn record_update_sent(&self) {
+        self.update_sent_series
+            .get_or_init(|| {
+                self.metrics
+                    .message_sent_counter(&self.peer_label, "update")
+            })
+            .inc();
+    }
+
     fn path_receive_admission(&self) -> Option<PathReceiveAdmission> {
         (self.config.peer.paths_limit_receive_max > 0
             && [Afi::Ipv4, Afi::Ipv6]
@@ -2068,6 +2086,8 @@ impl PeerSession {
             deferred_command: None,
             rib_tx,
             peer_label,
+            update_sent_series: OnceLock::new(),
+            outbound_queue_depth_series: OnceLock::new(),
             peer_ip,
             link_local_next_hop_scope,
             negotiated: None,

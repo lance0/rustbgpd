@@ -4147,6 +4147,17 @@ impl BgpMetrics {
             .inc();
     }
 
+    /// The `bgp_messages_sent_total{peer, type}` child for one peer and
+    /// message type, for a per-message hot path to resolve once and keep
+    /// (incrementing it is identical to [`Self::record_message_sent`]).
+    /// The handle must not outlive the peer: after
+    /// [`Self::reap_peer_series`] it is detached, so a late increment no
+    /// longer reaches the registry.
+    #[must_use]
+    pub fn message_sent_counter(&self, peer: &str, msg_type: &str) -> IntCounter {
+        self.0.messages_sent.with_label_values(&[peer, msg_type])
+    }
+
     /// Record a BGP message received from a peer.
     pub fn record_message_received(&self, peer: &str, msg_type: &str) {
         self.0
@@ -4207,6 +4218,15 @@ impl BgpMetrics {
             .peer_outbound_queue_depth
             .with_label_values(&[peer])
             .set(depth);
+    }
+
+    /// The `bgp_peer_outbound_queue_depth{peer}` child, for a sampling hot
+    /// path to resolve once and keep (setting it is identical to
+    /// [`Self::set_peer_outbound_queue_depth`]). Detached after
+    /// [`Self::reap_peer_series`], like [`Self::message_sent_counter`].
+    #[must_use]
+    pub fn peer_outbound_queue_depth_gauge(&self, peer: &str) -> IntGauge {
+        self.0.peer_outbound_queue_depth.with_label_values(&[peer])
     }
 
     /// Read a peer's outbound-queue-depth gauge. Test/diagnostic helper.
@@ -6579,6 +6599,57 @@ mod tests {
     #[test]
     fn metrics_handle_is_one_pointer() {
         assert_eq!(std::mem::size_of::<BgpMetrics>(), 8);
+    }
+
+    /// Held handles scrape exactly like the per-call helpers, and a handle
+    /// kept past `reap_peer_series` cannot bring the reaped series back.
+    #[test]
+    fn held_peer_handles_scrape_like_per_call_helpers_and_stay_reaped() {
+        // Only the two families under test: process-collector series
+        // differ between any two instances.
+        let scrape = |m: &BgpMetrics| -> String {
+            gather_text(m)
+                .lines()
+                .filter(|line| {
+                    line.contains("bgp_messages_sent_total")
+                        || line.contains("bgp_peer_outbound_queue_depth")
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        let per_call = BgpMetrics::new();
+        let held = BgpMetrics::new();
+        let peer = "192.0.2.1";
+        assert_eq!(scrape(&per_call), scrape(&held));
+        let updates = held.message_sent_counter(peer, "update");
+        let depth = held.peer_outbound_queue_depth_gauge(peer);
+        for value in [7, 3] {
+            per_call.record_message_sent(peer, "update");
+            per_call.set_peer_outbound_queue_depth(peer, value);
+            updates.inc();
+            depth.set(value);
+        }
+        per_call.record_message_sent(peer, "keepalive");
+        held.record_message_sent(peer, "keepalive");
+        let text = scrape(&held);
+        assert_eq!(scrape(&per_call), text);
+        assert!(text.contains(r#"bgp_messages_sent_total{peer="192.0.2.1",type="update"} 2"#));
+        assert!(text.contains(r#"bgp_peer_outbound_queue_depth{peer="192.0.2.1"} 3"#));
+
+        held.reap_peer_series(peer);
+        updates.inc();
+        depth.set(9);
+        let reaped = gather_text(&held);
+        assert!(
+            !reaped.contains(r#"peer="192.0.2.1""#),
+            "a held handle must not resurrect a reaped series:\n{reaped}"
+        );
+        // A session for a re-added peer resolves fresh children from zero.
+        held.message_sent_counter(peer, "update").inc();
+        assert!(
+            gather_text(&held)
+                .contains(r#"bgp_messages_sent_total{peer="192.0.2.1",type="update"} 1"#)
+        );
     }
 
     #[test]

@@ -342,10 +342,12 @@ impl PeerSession {
     pub(super) fn sample_outbound_queue_depth(&mut self) {
         if let Some(tx) = &self.writer_bulk_tx {
             let depth = tx.max_capacity().saturating_sub(tx.capacity());
-            self.metrics.set_peer_outbound_queue_depth(
-                &self.peer_label,
-                i64::try_from(depth).unwrap_or(i64::MAX),
-            );
+            self.outbound_queue_depth_series
+                .get_or_init(|| {
+                    self.metrics
+                        .peer_outbound_queue_depth_gauge(&self.peer_label)
+                })
+                .set(i64::try_from(depth).unwrap_or(i64::MAX));
         }
         self.evaluate_slow_peer();
     }
