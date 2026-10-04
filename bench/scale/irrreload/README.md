@@ -36,8 +36,8 @@ refresh pair:
 - BIRD 3.3.2 at `bird:v3.3.2-m101`, built from the checksum-pinned
   `tests/interop/Dockerfile.bird-v332` with the
   [frozen comparator build args](../../../docs/interop.md#pinned-bird-3-images-m43-and-m101);
-- OpenBGPD 9.2 at
-  `openbgpd/openbgpd@sha256:b2e94bd1538102a89cff96867993eabb6dbb27720de4ab7b588860880e3e3bf9`.
+- OpenBGPD 9.3 at
+  `openbgpd/openbgpd@sha256:8f4b44f25796beaecb72ab7f099a3914961ac444a9de094ffca6a4614e741412`.
 
 The pair is closed and cannot be independently overridden. Each artifact root
 records both requested references and their resolved image IDs. The runner

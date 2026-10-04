@@ -26,7 +26,7 @@ COMPETITOR_GENERATIONS = {
     },
     "current": {
         "bird": "bird:v3.3.2-m101",
-        "openbgpd": "openbgpd/openbgpd@sha256:b2e94bd1538102a89cff96867993eabb6dbb27720de4ab7b588860880e3e3bf9",
+        "openbgpd": "openbgpd/openbgpd@sha256:8f4b44f25796beaecb72ab7f099a3914961ac444a9de094ffca6a4614e741412",
     },
 }
 

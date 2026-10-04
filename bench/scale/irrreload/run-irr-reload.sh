@@ -15,7 +15,7 @@
 #
 # COMPETITOR_GENERATION selects one fail-closed pair of image references:
 #   historical (default): BIRD 3.3.1 / OpenBGPD 9.1, the frozen receipts
-#   current: BIRD 3.3.2 / OpenBGPD 9.2, the explicit refresh generation
+#   current: BIRD 3.3.2 / OpenBGPD 9.3, the explicit refresh generation
 #
 # Usage: run-irr-reload.sh [cell ...]
 #        (measured default: rustbgpd-sighup bird openbgpd)
@@ -145,7 +145,7 @@ competitor_image_ref() {
     historical:openbgpd) printf '%s\n' openbgpd/openbgpd:9.1 ;;
     current:bird) printf '%s\n' bird:v3.3.2-m101 ;;
     current:openbgpd)
-        printf '%s\n' 'openbgpd/openbgpd@sha256:b2e94bd1538102a89cff96867993eabb6dbb27720de4ab7b588860880e3e3bf9'
+        printf '%s\n' 'openbgpd/openbgpd@sha256:8f4b44f25796beaecb72ab7f099a3914961ac444a9de094ffca6a4614e741412'
         ;;
     *) return 1 ;;
     esac
