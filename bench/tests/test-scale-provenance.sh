@@ -528,5 +528,30 @@ finally:
         pass
     process.wait()
 PY
+# Published receipts stay verifiable offline after a comparator re-pin: the
+# v0.74.0 cross-daemon receipt recorded `current` as BIRD 3.3.2 / OpenBGPD 9.2.
+published="$root/docs/perf/artifacts/cross-daemon-v0740-2026-10"
+for cell in openbgpd bird; do
+  python3 "$root/bench/scale/matrix/verify-provenance.py" \
+    "$published/matrix/matrix-$cell-r1-s2/provenance.json" "$cell" current
+done
+python3 - "$root" "$published" <<'PY'
+import importlib.util, json, pathlib, sys
+root, published = pathlib.Path(sys.argv[1]), pathlib.Path(sys.argv[2])
+spec = importlib.util.spec_from_file_location("verify_receipt", root / "bench/scale/irrreload/verify-receipt.py")
+verifier = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(verifier)
+for overlap in ("0", "10", "50"):
+    inputs = json.loads((published / f"irr/irr-ov{overlap}-rustbgpd-r1/provenance.json").read_text())["inputs"]
+    assert verifier.competitor_generation(inputs) == "current", overlap
+    mixed = dict(inputs, bird_image="bird:3.3.1")
+    try:
+        verifier.competitor_generation(mixed)
+    except verifier.InvalidReceipt:
+        pass
+    else:
+        raise AssertionError("a mixed historical/current pair was accepted")
+PY
+
 python3 -m unittest discover -s "$root/bench/scale/reloadstall" -p test_membership_churn.py
 echo "scale provenance and membership evidence tests pass"

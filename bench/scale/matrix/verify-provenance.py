@@ -29,6 +29,12 @@ COMPETITOR_GENERATIONS = {
         "openbgpd": "openbgpd/openbgpd@sha256:8f4b44f25796beaecb72ab7f099a3914961ac444a9de094ffca6a4614e741412",
     },
 }
+# Offline only: receipts measured before the OpenBGPD 9.3 re-pin (the v0.74.0
+# cross-daemon receipt) recorded `current` as OpenBGPD 9.2. Live resumes still
+# require the runner's own reference, so new runs select 9.3 only.
+PRIOR_CURRENT = {
+    "openbgpd": "openbgpd/openbgpd@sha256:b2e94bd1538102a89cff96867993eabb6dbb27720de4ab7b588860880e3e3bf9",
+}
 
 INPUT_KEYS = {
     "N_PEERS", "TOTAL_PREFIXES", "PORT", "RELOADS", "CONTROL_SECS",
@@ -93,7 +99,7 @@ def verify(path, expected_cell, competitor_generation="historical"):
     if cell == "rustbgpd":
         if set(workload) != {"binary", "sha256"} or workload["binary"] != "target/release/rustbgpd" or not HASH.fullmatch(workload["sha256"]):
             fail("malformed rustbgpd workload")
-    elif set(workload) != {"image_ref", "image_id"} or workload["image_ref"] != COMPETITOR_GENERATIONS[competitor_generation][cell] or not IMAGE.fullmatch(workload["image_id"]):
+    elif set(workload) != {"image_ref", "image_id"} or workload["image_ref"] not in {COMPETITOR_GENERATIONS[competitor_generation][cell], PRIOR_CURRENT.get(cell) if competitor_generation == "current" else None} or not IMAGE.fullmatch(workload["image_id"]):
         fail("malformed competitor workload")
 
 if __name__ == "__main__":

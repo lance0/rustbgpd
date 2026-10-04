@@ -50,6 +50,17 @@ COMPETITOR_GENERATIONS = {
         ),
     },
 }
+# Offline only: roots measured before the OpenBGPD 9.3 re-pin (the v0.74.0
+# cross-daemon receipt) recorded `current` as BIRD 3.3.2 / OpenBGPD 9.2. The
+# runner records and re-inspects only COMPETITOR_GENERATIONS, so new runs
+# select 9.3 only.
+PRIOR_CURRENT_PAIR = {
+    "bird_image": "bird:v3.3.2-m101",
+    "openbgpd_image": (
+        "openbgpd/openbgpd@sha256:"
+        "b2e94bd1538102a89cff96867993eabb6dbb27720de4ab7b588860880e3e3bf9"
+    ),
+}
 CANONICAL_FULL_INPUTS = {
     "smoke": "",
     "n_members": "320",
@@ -98,7 +109,7 @@ def fail(message: str) -> None:
 def competitor_generation(inputs: dict) -> str:
     matches = [
         name
-        for name, expected in COMPETITOR_GENERATIONS.items()
+        for name, expected in (*COMPETITOR_GENERATIONS.items(), ("current", PRIOR_CURRENT_PAIR))
         if all(inputs.get(key) == value for key, value in expected.items())
     ]
     if len(matches) != 1:
@@ -1870,7 +1881,8 @@ def validate_root(root: Path, kind: str):
     }
     canonical_inputs = dict(CANONICAL_FULL_INPUTS)
     generation = competitor_generation(inputs)
-    canonical_inputs.update(COMPETITOR_GENERATIONS[generation])
+    # competitor_generation() accepted the recorded pair exactly.
+    canonical_inputs.update({key: inputs[key] for key in COMPETITOR_GENERATIONS[generation]})
     if kind == "sighup" and inputs.get("changed_fraction") == "1.0":
         canonical_inputs["changed_fraction"] = "1.0"
     if set(inputs) != expected_input_keys or any(
@@ -2092,7 +2104,10 @@ def validate_campaigns(roots: list[Path], output_dir: Path) -> None:
         validate_root(roots[2], "grouped"),
         validate_root(roots[3], "comparison"),
     ]
-    generations = {entry["competitor_generation"] for entry in campaigns}
+    generations = {
+        (entry["competitor_generation"], entry["inputs"]["bird_image"], entry["inputs"]["openbgpd_image"])
+        for entry in campaigns
+    }
     if len(generations) != 1:
         fail("four roots do not share one exact competitor generation")
     if len({(entry["commit"], entry["shape"], entry["dataset"]) for entry in campaigns}) != 1:
