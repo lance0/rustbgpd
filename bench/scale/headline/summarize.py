@@ -3,10 +3,12 @@
 
 Usage: summarize.py SOURCE [--out DIR] [--exclude GLOB ...]
 
-SOURCE is either a campaign output directory written by run-campaign.sh or a
+SOURCE is either a campaign output directory written by run-campaign.sh, a
 compact receipt bundle under docs/perf/artifacts/ (legs under matrix/, irr/
-and rr1000/). Leg directories are named matrix-ARM-rN-sK, irr-ovF-ARM-rN and
-rr1000-ARM-cN.
+and rr1000/), or a cross-daemon queue directory (legs under legs/). Leg
+directories are named matrix-ARM-rN-sK, irr-ovF-ARM-rN and rr1000-ARM-cN; a
+cross-daemon queue names them matrix-sK-rN-DAEMON, whose arm is the daemon,
+and irr-ovF-rN, whose arm is rustbgpd.
 
 An optional SOURCE/EXCLUDED file lists leg IDs to drop, one per line (`#`
 starts a comment), and --exclude GLOB adds more. Each entry must match a leg;
@@ -21,7 +23,7 @@ error, not an empty cell: a renamed label would otherwise drop a whole row
 from the receipt table without notice.
 
 The daemon's own reload intervals come from its JSON log (daemon.log in each
-matrix S2 cell and IRR rustbgpd-sighup cell), one set per SIGHUP: SIGHUP
+rustbgpd matrix S2 cell and IRR rustbgpd-sighup cell), one set per SIGHUP: SIGHUP
 received to "config source loaded" and to "config reload complete", the
 logged validate_ms, and the RIB transition (cohort_rib_transition_us). A
 daemon log must hold exactly as many completed reloads as the harness
@@ -52,6 +54,13 @@ from pathlib import Path
 
 MATRIX = re.compile(r"^matrix-(.+)-r(\d+)-(s\d)$")
 IRR = re.compile(r"^irr-ov([\d.]+)-(.+)-r(\d+)$")
+# The run-matrix.sh cells. A competitor's daemon.log is its own text log, not
+# rustbgpd's JSON, so it yields no daemon rows.
+DAEMONS = ("rustbgpd", "bird", "openbgpd")
+# A cross-daemon queue's leg names, normalised to MATRIX's and IRR's groups.
+QUEUE_MATRIX = (re.compile(rf"^matrix-(s\d)-r(\d+)-({'|'.join(DAEMONS)})$"),
+                lambda scenario, run, daemon: (daemon, run, scenario))
+QUEUE_IRR = (re.compile(r"^irr-ov([\d.]+)-r(\d+)$"), lambda overlap, run: (overlap, "rustbgpd", run))
 RR = re.compile(r"^rr1000-(.+)-c(\d+)$")
 
 # (metric, labelled-line pattern, unit, scenarios where a pass must carry it).
@@ -77,24 +86,28 @@ class ExtractionError(Exception):
     pass
 
 
-def legs(source, subdir, pattern, exclusions):
-    """Leg directories directly under SOURCE (campaign) or SOURCE/SUBDIR (bundle).
+def legs(source, subdir, pattern, exclusions, queue=None):
+    """Leg directories directly under SOURCE (campaign), SOURCE/SUBDIR (bundle)
+    or, named by QUEUE's (pattern, normalise) pair, SOURCE/legs (queue).
 
     EXCLUSIONS is (globs, excluded): a leg matching a glob is appended to
     `excluded` instead of being returned."""
     globs, excluded = exclusions
     found = []
-    for base in (source, source / subdir):
+    for base in (source, source / subdir, source / "legs"):
         if not base.is_dir():
             continue
         for path in sorted(base.iterdir()):
             match = pattern.match(path.name)
-            if not (path.is_dir() and match):
+            groups = match.groups() if match else None
+            if queue and not match and (match := queue[0].match(path.name)):
+                groups = queue[1](*match.groups())
+            if not (path.is_dir() and groups):
                 continue
             if any(fnmatch.fnmatch(path.name, glob) for glob in globs):
                 excluded.append(path.name)
             else:
-                found.append((path, match.groups()))
+                found.append((path, groups))
     return found
 
 
@@ -193,15 +206,27 @@ def reload_rows(leg, phase, arm, run, daemon_log, expected, campaign):
     return rows
 
 
+def cell_daemon(leg, cell):
+    """The daemon a matrix cell measured, as its runner provenance names it.
+
+    Legs without provenance.json predate it and measured rustbgpd."""
+    provenance = cell / "provenance.json"
+    daemon = json.loads(read_text(provenance)).get("cell") if provenance.exists() else "rustbgpd"
+    if daemon not in DAEMONS:
+        raise ExtractionError(f"{leg.name}: provenance.json names cell {daemon!r}, not one of {', '.join(DAEMONS)}")
+    return daemon
+
+
 def matrix_rows(source, exclusions, campaign):
     rows, spans = [], []
-    for leg, (arm, run, scenario) in legs(source, "matrix", MATRIX, exclusions):
-        cell = leg / "rustbgpd" if (leg / "rustbgpd").is_dir() else leg
+    for leg, (arm, run, scenario) in legs(source, "matrix", MATRIX, exclusions, QUEUE_MATRIX):
+        cell = next((leg / d for d in DAEMONS if (leg / d).is_dir()), leg)
         status = cell / "status"
         if not status.exists() or read_text(status).strip() != "pass":
             continue
         log = read_text(cell / "reloadstall.log")
         phase = f"matrix-{scenario}"
+        rustbgpd = cell_daemon(leg, cell) == "rustbgpd"
         counts, flap_rounds = {}, {}
         for metric, pattern, unit, required in MATRIX_LINES:
             values = re.findall(pattern, log, re.M)
@@ -221,7 +246,7 @@ def matrix_rows(source, exclusions, campaign):
                 rows.append([phase, arm, run, metric, index, value, unit])
         if scenario == "s2" and counts["reload_completion_p50"] != counts["reload_changed_maxgap_p50"]:
             raise ExtractionError(f"{leg.name}: reload completion and maxgap line counts differ")
-        if scenario == "s2":
+        if scenario == "s2" and rustbgpd:
             rows += reload_rows(leg, phase, arm, run, cell / "daemon.log", counts["reload_completion_p50"], campaign)
         heap = [(int(round_), rest) for round_, rest in HEAP_LINE.findall(log)]
         if heap:
@@ -265,7 +290,7 @@ def matrix_rows(source, exclusions, campaign):
         if cg_current:
             rows.append([phase, arm, run, "settled_cg_current_last_sample", "", cg_current[-1], "KiB"])
         daemon_log = cell / "daemon.log"
-        if daemon_log.exists():
+        if rustbgpd and daemon_log.exists():
             established = re.search(r"^established (\d+) at", log, re.M)
             if established is None:
                 raise ExtractionError(f"{leg.name}: reloadstall.log has no 'established N at' line")
@@ -285,7 +310,7 @@ def establishment_span(daemon_log, peers):
 
 def irr_rows(source, exclusions, campaign):
     rows = []
-    for leg, (overlap, arm, run) in legs(source, "irr", IRR, exclusions):
+    for leg, (overlap, arm, run) in legs(source, "irr", IRR, exclusions, QUEUE_IRR):
         completed = leg / "COMPLETED"
         if not completed.exists() or json.loads(read_text(completed)).get("status") != "pass":
             continue
@@ -329,7 +354,7 @@ def extract(source, excludes=()):
     lines = read_text(listed).splitlines() if listed.exists() else []
     globs = [entry for line in lines if (entry := line.split("#", 1)[0].strip())] + list(excludes)
     exclusions = (globs, [])
-    campaign = (source / "arms.txt").exists()
+    campaign = (source / "arms.txt").exists() or (source / "legs").is_dir()
     matrix, spans = matrix_rows(source, exclusions, campaign)
     rows = matrix + irr_rows(source, exclusions, campaign) + rr_rows(source, exclusions)
     for glob in globs:
