@@ -18,10 +18,11 @@ const WRITE_TIMEOUT: Duration = Duration::from_secs(5);
 const READ_TIMEOUT: Duration = Duration::from_secs(5);
 const MAX_REQUEST_LINE: usize = 8192;
 const MAX_CONNECTIONS: usize = 64;
-/// Scrapes that may wait on a render at once. Scrapes queue behind one
-/// render, so without this cap they alone could hold every connection permit
-/// and keep `/livez` and `/readyz` from being accepted. A scrape over the cap
-/// is rejected with 503 at once, holding its permit only to write that reply.
+/// Scrapes in flight at once: waiting, rendering or writing their response.
+/// Scrapes queue behind one render, so without this cap they could hold every
+/// connection permit and keep `/livez` and `/readyz` from being accepted. A
+/// scrape over the cap is rejected with 503 at once, holding its permit only
+/// to write that reply.
 const MAX_SCRAPES: usize = MAX_CONNECTIONS - 8;
 
 /// Fixed startup worker inventory: at most FIB, EVPN intent and EVPN kernel.
