@@ -11,6 +11,535 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- Add `advertised_peer_address` and the `advertised_view` acknowledgement to
+  the alpha `ListFlowSpecRoutes` RPC, and `rbgp flowspec advertised PEER`,
+  to inspect committed post-export-policy FlowSpec rows toward one peer.
+  Rows retain their source peer; the view does not prove remote enforcement.
+- The IXP reload-stall matrix runs the native rustbgpd daemon in its own
+  systemd user scope with swap fenced (`MemorySwapMax=0`), records the
+  scope's `memory.peak` as `cg_peak` and its `memory.current` at each RSS
+  sample, and the headline summarizer reports both. The rrharness A/B driver
+  runs each leg the same way and appends `cg_peak_mib` and
+  `cg_settled_current_mib` to `results.csv`; earlier receipts without these
+  fields stay valid.
+- Record cgroup anonymous, file, and mapped-file charges alongside peak
+  memory in benchmark receipts during RSS sampling and at teardown.
+- `just bench-headline <out-dir> <label>=<ref> <label>=<ref>...` runs the
+  headline performance campaign across two or more arms in one command: it
+  builds each arm from its own tree, checks that each daemon hashes the same
+  at its ref, runs the IXP matrix S2 and S3 legs, the IRR reload roots and the
+  RR1000 campaigns with the arm order rotated each run, logs load, swap
+  counters and CPU placement at every leg, resumes an interrupted campaign
+  only with the shape it started with, and exits non-zero when a build or leg
+  fails. `just bench-headline-summary <out-dir>` re-extracts the per-run
+  `summary.csv`, including the daemon's own reload intervals, and the per-arm
+  table without running anything; a committed receipt bundle also needs
+  `--out <dir>`. See
+  [`bench/scale/headline/run-campaign.sh`](bench/scale/headline/run-campaign.sh).
+- `just bench-list` prints every Cargo bench target with its required
+  features and every benchmark driver with the recipe that runs it.
+  `just bench <package> <target>` measures one target pinned to the core in
+  `RUSTBGPD_BENCH_CORE` under the shared host lock, and refuses to start
+  without that variable. `just bench-compare` runs the Criterion A/B with four
+  alternating attempts and the performance-governor check as overridable
+  defaults. The RIB memory, route-paging, rrharness, rrtransport, IXP matrix,
+  policy-stats, route-server, enhanced route refresh, IRR reload, and VPN
+  query drivers each have a `bench-*` recipe that passes their arguments and
+  environment through; the drivers keep their own locks, quiet gates, and
+  thresholds. No `gate` recipe runs a benchmark. See
+  [`bench/README.md`](bench/README.md#recipes).
+- `just bench-rpki-cell <out-dir> <base> <head>` measures the reloadstall
+  route-server initial convergence with a static VRP table loaded, base
+  against head in alternating runs. It generates a deterministic fixture
+  (500,000 VRPs by default) in which every announced prefix is Valid, serves
+  it from a digest-pinned StayRTR container on the CPUs in `RTR_CPUS`, and
+  fails a cell unless the daemon reports the whole table before the first
+  route arrives. It writes `cells.csv` with the RIB `route_chunk` work, daemon
+  CPU time and convergence wall time per cell, plus a per-arm summary.
+  `SMOKE=1` runs a small shape as a pipeline check. See
+  [`bench/scale/rpki-cell/run-rpki-cell.sh`](bench/scale/rpki-cell/run-rpki-cell.sh).
+- `rbgp config diff --history N` previews a retained rollback with the existing
+  redacted transaction plan and source-provenance checks, without changing daemon
+  state. Missing, unreadable, metadata-only, or source-mismatched history fails
+  closed. The new outside-v1 `PreviewConfigRollback` RPC requires
+  `sensitive_read` access; older daemons fail safely without attempting rollback.
+- The reloadstall harness has an opt-in GR-helper reconnect qualification
+  cell that proves retained source routes and fresh survivor coverage before
+  measuring each joiner's exact table and EoR completion. Source replay follows
+  the measurement, with reconnect-source refresh replies held behind the same
+  guarded boundary; readiness, survivor integrity, and GR settlement are checked.
+- Opt-in alpha `/dp-readyz` on the telemetry HTTP listener via
+  `[global.telemetry].dataplane_readiness = true`. The separate probe observes
+  startup, progress, closure and unavailability of configured FIB and EVPN
+  workers without changing core readiness or watchdog behavior. It does not
+  promise forwarding or route convergence; see the
+  [probe contract](docs/reference/operations.md#http-probes).
+- The RPKI performance fixture helper can generate dual-stack owner VRPs and
+  an equal-cardinality maxLength replacement table for RTR delta experiments.
+- EVPN Type 6 Selective Multicast Ethernet Tag (SMET) relay: typed
+  receive, reflection, withdrawal, route/event inspection, and exact
+  `rbgp evpn explain smet` selection, with generic MRT, BMP, and warm-state
+  preservation. Source/group wildcards are explicit; flags remain payload
+  outside the key. Invalid announcement flag profiles use treat-as-withdraw
+  with all decoded keys retained; withdrawals ignore announcement flags.
+  This remains alpha RR support. The [M113 controlled raw-peer proof](docs/artifacts/interop/m113-smet-20261001T180815Z/README.md)
+  checks reflected bytes and error recovery with an independent TShark decoder;
+  vendor interoperability remains unproven.
+  SMET origination, IGMP/MLD proxy, multicast forwarding, and Types 7–11
+  remain outside scope. See the
+  [Type 6 boundary](docs/reference/rfc-notes.md#type-6-smet-reflection).
+- Import-policy explain reports cache eviction.
+  `ExplainImportPolicyResponse` gains optional `cache_size` and
+  `evictions_since_reset` fields, `rbgp policy explain --direction import`
+  prints them (JSON: `cache_size`, `evictions_since_reset`, null when the
+  daemon does not report them), and the new per-peer counter
+  `bgp_import_explain_cache_evictions_total{peer}` counts decisions evicted
+  from the explain cache. See
+  [operations](docs/reference/operations.md#explain-an-import-decision-adr-0073).
+- The reloadstall flapstorm harness reports each reconnecting peer's time
+  to both End-of-RIB and exact table coverage, with per-round p50/max.
+- The reloadstall flapstorm harness takes `--flap-rounds N` (default 3) and,
+  with `RELOADSTALL_HEAP_METRICS_ADDR`, logs the daemon's jemalloc allocated,
+  active, resident and mapped bytes after each round. The IXP matrix
+  (`FLAP_ROUNDS`) and headline campaign (`MATRIX_FLAP_ROUNDS`) pass the
+  round count through, and the headline summary extracts the heap values.
+- `InjectionService.AddFlowSpec` now reports whether the local rule was
+  `CREATED`, `REPLACED` or `UNCHANGED`, compared with the previous locally
+  injected rule for the same `(afi_safi, components)` key.
+  `DeleteFlowSpec` reports `DELETED` or `NOT_PRESENT` and gains an opt-in
+  `allow_missing` request field: a missing local rule then returns `OK` with
+  `NOT_PRESENT` instead of `NOT_FOUND`, which remains the default. The proto
+  and the
+  [API reference](docs/reference/api.md#flowspec-injection-contract) now
+  document the upsert and delete semantics, the `0.0.0.0` local-injection
+  sentinel, and reconciliation through `ListFlowSpecRoutes` with
+  `received_peer_address: "0.0.0.0"`. `rbgp flowspec add` prints the outcome
+  and adds an `outcome` key to its `--json` result. `rbgp flowspec delete`
+  gains `--allow-missing`, which reports a missing rule as not present with
+  exit status 0, and its `--json` result gains an `outcome` key. The fields
+  are additive; these RPCs remain outside the v1 inventory.
+- Add bounded session and route event history, policy statistics, and a capped
+  policy dry run to the source-only MCP adapter. Event results state retention
+  limits, and the dry run states its post-policy import scope.
+- `rbgp diff snapshots INCUMBENT RUSTBGPD` compares two complete advertised
+  snapshots offline, including ORIGINATOR_ID and CLUSTER_LIST wire bytes.
+  It preserves the existing `rbgp-ribdiff/1` report and 0/1/2 exit contract,
+  refuses mismatched generations or peer ASNs, and bounds both inputs.
+  The [RR comparison prerequisites](docs/cookbook/route-server-migration.md#route-reflector-snapshot-comparison)
+  document capture requirements; incumbent RR qualification remains pending.
+- Bash file-path completion accounts for flags and option values before or
+  between positional paths, preserving filenames that contain spaces.
+- `rbgp policy test` accepts candidate dataset contents and can show bounded
+  samples of candidate rejections among retained post-policy routes.
+- Rebaseline CSV sanitization preserves the bgperf2 neighbor polling mode
+  for polling-control builds while retaining historical receipt schemas.
+  The rebaseline guide documents mode selection and separate qualification
+  before adopting a new benchmark pin.
+- The scale reload harness accepts `--no-churn` for a finite zero-reload
+  control window with held sessions and no churn tasks. It checks session
+  health before the existing bounded cleanup and refresh accounting.
+- Report per-peer, per-family ROUTE-REFRESH requests, suppressed requests,
+  completed replay writes, and replayed NLRI in the reloadstall benchmark.
+- The reloadstall scenario generator accepts `GEN_RPKI_CACHE` to configure a
+  numeric RTR cache and reject RPKI-invalid routes on every route-server
+  member's import chain. It supports IPv4 and bracketed IPv6 cache endpoints.
+- Alpha `rbgp evpn explain imet --argument-rd RD --argument-esi ESI` and
+  additive `ExplainEvpnRoute` fields inspect one caller-selected IMET and
+  EAD-per-ES pair from the same RIB snapshot. Results distinguish composed
+  candidate SIDs, LOC:FUNC fallback, requested-pair Argument-length conflict,
+  unavailable inputs and ambiguity. Original egress identity and forwarding
+  are not established; existing raw SID and per-route views are unchanged.
+
+### Changed
+
+- The `rrharness` scale harness and every Criterion bench target (the
+  `rustbgpd-rib`, `rustbgpd-transport`, `rustbgpd-wire`, `rustbgpd-policy`,
+  `rustbgpd-rpki` and `rustbgpd-api` benches and the root `fib_projection`
+  bench) link jemalloc as their global allocator, matching the daemon. The
+  root `fib_projection` bench follows the daemon's default `jemalloc` feature,
+  so a `--no-default-features` build keeps the system allocator. These targets
+  time and size the daemon's own code in-process, so their numbers now come
+  from the allocator that ships.
+  rrharness receipts and Criterion baselines recorded through v0.73.0 were
+  taken under glibc malloc and are not comparable on allocation-heavy paths.
+  See [`bench/scale/rrharness/README.md`](bench/scale/rrharness/README.md)
+  and [`docs/benchmarks.md`](docs/benchmarks.md).
+- `rbgp` subcommand help lists the command's own options first and the
+  connection and output flags afterwards under one "Global options" heading,
+  instead of interleaving the two. `--json-lines`, `--pager` and
+  `--json-version` no longer appear in the help or the Bash, Zsh and Fish
+  completions of commands that reject them; they still parse in every
+  position, and the checks that reject them are unchanged. Arguments that had no help text now describe themselves
+  (`evpn add-*`, `delete-*` and `explain *` key flags, `rpki aspa`,
+  `peer-group` and `neighbor-set` names and `--from-file`), help names no
+  internal design records, service names or status codes, and the `config`
+  and `evpn` summaries describe what those commands do. `rbgp config
+  history` points to `rbgp config rollback N` without naming the RPC. Help
+  text is outside the v1 CLI contract; command paths, flags and exit codes
+  are unchanged.
+- Consolidate unicast graceful-restart End-of-RIB cleanup into one route
+  classification pass, preserving stale Add-Path removal and local LLGR
+  community cleanup.
+- A ROUTE-REFRESH response to an update-group member no longer walks the
+  Loc-RIB and every Adj-RIB-In to build a prefix inventory before replaying
+  the group table. Like a grouped join, it scopes that inventory to the
+  group's recorded residue and the peer's own residue, which is all a grouped
+  replay consults. A refresh for a family other than IPv4 or IPv6 unicast no
+  longer builds the unicast inventory at all. The response's routes,
+  End-of-RIB, BoRR/EoRR markers and `PolicyFiltered` events are unchanged.
+- `GetHealth` now fails with `UNAVAILABLE` instead of `INTERNAL` when the
+  peer manager or the RIB misses the 200 ms core-probe deadline. The miss
+  may be transient (a busy actor, as while a reload settles) or persistent
+  (a wedged actor), so a caller may retry once and should treat a repeated
+  miss as a failure. A closed actor channel, a dropped reply, and a stalled
+  readiness transition or release still return `INTERNAL`. `rbgp doctor`
+  retries `GetHealth` once, after one second, on `UNAVAILABLE`: a healthy retry reports `daemon.healthy` as a
+  warning that names the first miss, and a second miss is still a failure.
+  A single probe miss while a reload settles therefore no longer fails
+  doctor with exit 2. See the
+  [health check](docs/reference/api.md#health-check) reference.
+  **Operator-visible:** `rbgp health` reports such a miss as `temporarily
+  unavailable: ...` rather than `daemon error: ...`; its exit status is
+  unchanged. Clients that treat `INTERNAL` from `GetHealth` as the only
+  failure code should also handle `UNAVAILABLE`.
+- Retire outbound prefix indexes using small batches of keys, preserving
+  per-entry readiness checkpoints while reducing repeated trie traversal.
+  A 400,400-prefix fixture used 62.4% fewer instructions and 47.0% fewer CPU
+  cycles; end-to-end reload latency was not measured in this comparison.
+- Skip the clock read at policy-transition readiness checkpoints when no
+  readiness or operator-summary query is queued. Queued queries are served at
+  the next checkpoint once the 25 ms service budget has passed, as before, and
+  a query that arrives after an idle stretch is now served at the next
+  checkpoint. On the 700-member, 400,400-route IXP matrix reload, the median
+  SIGHUP-to-reload-complete time fell from 1,137 ms to 959 ms (4 legs and 16
+  reloads per arm).
+- SIGHUP reload and config validation compile `.rpol` policy chains less
+  often on large rosters. Validation no longer compiles every named chain a
+  second time to check the chain node bound; the bound itself is unchanged
+  and still rejects an oversized chain on file load, SIGHUP, and the policy
+  API paths. Each AS-path regex now compiles once per 32-neighbor resolution
+  chunk instead of once per chain, and each chain compile copies only the
+  dataset bindings its policy file declares.
+- The `reloadstall` harness links jemalloc as its global allocator, matching
+  the daemon. Its stub readers reallocating frame and NLRI buffers at once
+  under a coalesced post-reload burst contended on glibc's malloc arena lock,
+  which made completion medians bimodal between process starts. Receiver-bound
+  receipts recorded with glibc malloc are not directly comparable on
+  completion time. See
+  [`bench/scale/reloadstall/README.md`](bench/scale/reloadstall/README.md).
+- With RPKI or ASPA configured, the RIB no longer repeats the origin and
+  path validation a peer session already ran against the same cache
+  snapshot. Each route batch now carries the snapshots its session used,
+  and the RIB re-validates only against a table that changed in between,
+  so verdicts are unchanged. Cache updates still revalidate stored routes
+  as before.
+- Every stored route copy (Adj-RIB-In, Loc-RIB and RIB-Out) is 24 bytes
+  smaller: the receive time is kept as a whole-second monotonic stamp and the
+  per-session ASPA validation context as a small id into a shared table.
+  Allocator-live RIB bytes fall 14.5% for a 900,000-route Adj-RIB-In and
+  14.3% (106.4 MiB) on the 900,000-prefix route-reflector fanout shape. ASPA
+  revalidation still uses each route's own session context, including for
+  routes kept across a graceful restart.
+  **Operator-visible:** a route's `received_at_epoch_seconds` remains an
+  approximate wall-clock projection and can now read up to one second
+  earlier than before.
+- Build scale harnesses as root workspace members with the shared `Cargo.lock`.
+  They remain outside `default-members`; explicit builds use the `scale`
+  profile, preserving the former release settings and writing to `target/scale/`.
+- Published crates: `rustbgpd-wire` 0.22.0 → 0.23.0, `rustbgpd-fsm`
+  0.9.0 → 0.10.0 and `rustbgpd-rpki` 0.4.0 → 0.5.0. Wire decodes EVPN Type 6
+  SMET routes into the typed `EvpnRoute::Smet` variant instead of discarding
+  them, adds `validate_evpn_announcements` and
+  `PmsiTunnelType::evpn_srv6_function_bits`, and changes the `Hash` values of
+  IPv6 and VPN-IPv6 prefixes. Embedders using plain structural decoding must
+  call `validate_evpn_announcements` before admitting announcements. FSM and
+  RPKI move their public wire dependency to 0.23 with no behavior change of
+  their own, so embedders upgrade the three together. See the
+  [wire](crates/wire/CHANGELOG.md), [fsm](crates/fsm/CHANGELOG.md) and
+  [rpki](crates/rpki/CHANGELOG.md) changelogs.
+
+### Fixed
+
+- `rbgp` mutation commands no longer wait forever on a daemon that accepts
+  the connection but never answers. Runtime controls such as neighbor
+  `reset`, `gshut` and route injection stop after 11 minutes. Persisted
+  configuration changes stop after 31 minutes. Both budgets sit just past
+  the daemon's own bounds. On expiry the command exits 1 with an
+  outcome-unknown error that names a command to verify with, and it never
+  retries: the daemon may still apply the change. `mrt-dump` also stops
+  after 31 minutes. Its error says that a dump still waiting for its RIB
+  snapshot is cancelled, while one already writing completes. Each
+  `rbgp config` diff, plan, apply, confirm, abort and rollback RPC stops after
+  31 minutes, just past the daemon's 30-minute operation bound. An expired apply, confirm,
+  abort or rollback reports that the transaction may still commit or roll
+  back and points at `rbgp config history` or `rbgp config status`. Live
+  streams are unchanged.
+- Collision resolution no longer retires the configured session for an
+  inbound candidate that fell to Idle after the manager's last check, for
+  example when its 10 s verdict wait expired just before promotion. The
+  manager now asks the candidate to confirm promotion first and keeps the
+  current session if it does not. A confirmed candidate whose activation is
+  then lost is released after the same 10 s instead of being closed.
+  **Operator-visible:** a narrow simultaneous-open race no longer costs one
+  extra reconnect.
+- Bound config transactions' initial snapshot and planning waits, including
+  gNMI Set's config snapshot and requested history rollback preparation, by
+  the owner's pre-effect deadline. Queue admission and missing read replies
+  now end with a clean `UNAVAILABLE`
+  response before runtime mutation; confirmed transactions discard any
+  uncommitted revert authority. Post-commit planning, mutation acknowledgements,
+  and compensation retain their existing settlement behavior.
+
+  **Operator-visible:** an unavailable config read or initial plan no longer
+  consumes the full settlement budget and triggers fail-stop with nothing
+  applied. Retry after the peer manager becomes responsive.
+- A peer marked dirty for resync no longer has its full outbound table rebuilt
+  on every distribution pass and resync tick while its outbound channel is
+  still full. Each such rebuild failed to send and was discarded, so a few
+  slow-reading route-server members could hold the RIB actor at hundreds of
+  milliseconds per pass and keep the ingest channel full. The resync now runs
+  once the channel has room. Forced outbound refreshes likewise defer the
+  full-table rebuild while the channel is full, then replay once capacity
+  returns.
+  **Operator-visible:** while a dirty peer's channel stays full, the repeated
+  `outbound channel full or closed — marking dirty for resync` warning and the
+  matching `bgp_outbound_route_drops_total` increment no longer occur on every
+  pass; a debug-level `outbound channel still full — deferring dirty resync`
+  event is logged instead.
+- `rbgp events watch --type` help omitted accepted event types, including
+  `policy_filtered` and `otc_route_blocked`, and `events sessions --type`
+  omitted `peer_added`, `peer_removed` and `max_prefix_warning`. The
+  `--type` help and shell completions of `events watch`, `sessions`,
+  `policy` and `evpn` now list the values from the same table the event-type
+  parser and its error messages use.
+- EVPN remote-MAC and MAC/IP projection now treats an absent MAC Mobility
+  sequence as zero before selecting the lower VTEP address, matching
+  RFC 7432 section 15. An explicit sequence zero no longer displaces a
+  route from a lower VTEP solely because the community is present.
+  Type 5 gateway-IP resolution uses the same effective sequence, including
+  preserving ambiguity when distinct gateway MACs tie at sequence zero.
+- Import-policy explain no longer answers `not_seen` ("the peer has not
+  advertised this prefix") for a prefix whose cached decision was evicted.
+  Only the last 512 evicted keys were remembered, so once a session had
+  pushed more than `cache_size + 512` distinct prefixes, older evicted
+  prefixes read as never advertised. Each session now remembers every
+  evicted key until reset, at about 19 B per evicted key (27–34 B with a
+  nonzero Add-Path identifier) and at most 2,097,152 keys per session;
+  past that cap an unknown prefix answers `evicted`.
+  See the
+  [ADR-0073 amendment](docs/adr/0073-import-policy-explain.md#amendment-2026-09-29-evicted-keys-are-remembered-exactly).
+- Bound import-policy explain queries without a path ID to 4096 matches.
+  Larger queries fail with a path-ID hint instead of building an oversized
+  response; exact path-ID lookups still work.
+- IPv6 unicast prefixes and VPNv6 route keys now hash their address bytes
+  through the hasher's byte-string path. Before this change, sequential /128
+  and /64 prefixes (under one Route Distinguisher, for VPNv6) shared one
+  hashbrown control byte and few starting buckets in the RIB's `FxHash` maps,
+  so each lookup compared many candidate keys. IPv6 and VPNv6 hash values
+  change and VPNv4 hash values are unchanged; no configuration, API, or wire
+  behaviour changes.
+- Grow the import explain cache index as decisions arrive, and reject
+  explain or rejected-route cache capacities above 2,097,152 entries.
+  Update the documented per-session memory budget.
+  **Upgrade:** Previously accepted values above the ceiling now fail startup
+  and reload validation even when retention is disabled. Reduce both
+  `[policy.explain] cache_size` and `[policy.reject_retention] capacity` to
+  at most 2,097,152 and run the new binary's `--check --strict` before
+  stopping or restarting. Defaults and zero-to-one clamping are unchanged.
+- Publish the locally injected FlowSpec rule count in
+  `bgp_rib_prefixes{peer="0.0.0.0",afi_safi="flowspec"}` after injection
+  and withdrawal. The count includes local rules out-selected by received
+  routes and returns to zero when the last local rule is removed.
+- `/metrics` scrapes and the `GetMetrics` RPC (used by `rbgp doctor`) now
+  gather and encode the registry on the blocking pool, one render at a time,
+  instead of on an async runtime worker. A whole-registry render takes tens
+  of milliseconds at 1000 peers; it previously stalled `/livez`, `/readyz`,
+  gRPC operator reads and other tasks scheduled on the same worker for that
+  long. Concurrent scrapes wait for the in-flight render. Metrics output is
+  unchanged.
+- A slow or stuck `/metrics` render can no longer keep the telemetry listener
+  from answering `/livez` and `/readyz`. Scrapes queued behind one render could
+  previously occupy all 64 listener connections and wait without a deadline.
+  Now at most 56 scrapes are in flight (waiting, rendering or writing), a 57th
+  is rejected at once, and a caller's wait is bounded at 5 s; the render is not
+  cancelled and holds its slot until it finishes.
+  **Operator-visible:** `/metrics` returns `503` when 56 scrapes are already in
+  flight or the 5 s wait expires, and `GetMetrics` returns
+  `DEADLINE_EXCEEDED` when that wait expires. See
+  [HTTP probes](docs/reference/operations.md#http-probes).
+- Let OpenBGPD flapstorm matrix cells complete rejoin on exact table coverage
+  when the non-GR stub receives no End-of-RIB, reporting its absence explicitly.
+  Other cells retain the End-of-RIB requirement; missing coverage still fails.
+- ORR clients now receive updated best paths after BGP-LS prefix reachability,
+  Prefix Metric, or exact next-hop address ownership changes, even when the
+  topology's node distances remain unchanged.
+- ORR excludes IPv6 SRv6 locator-only BGP-LS prefix advertisements from
+  next-hop reachability when their Prefix Metric TLV is absent or malformed. A
+  locator with a valid metric, including zero, remains usable. Ordinary
+  prefixes, including IPv4 prefixes that carry an inapplicable SRv6 Locator
+  TLV, retain their existing default metric behavior. Raw BGP-LS reflection is
+  unchanged.
+- Preserve the underlying task error in peer-shutdown error chains while
+  keeping existing shutdown messages unchanged.
+- Identify oversized policy chains in configuration and catalog error text,
+  while preserving the underlying node-budget detail.
+- `rbgp policy check` and `rbgp policy fmt` diagnostics now follow the CLI
+  colour policy. `--no-color`, `NO_COLOR` and `TERM=dumb` remove the ANSI
+  colour codes they previously wrote to a terminal stderr; a colour-capable
+  terminal still gets coloured diagnostics.
+- Config errors for unknown TOML policy statement fields now point to the
+  `.rpol` frontend for richer policy expressions while preserving typo suggestions.
+- Raising or removing an outbound prefix limit now waits for outbound channel
+  capacity before rebuilding the pending family replay. Repeated retry ticks
+  retain recovery intent without rebuilding and dropping the same replay,
+  while healthy peers continue to recover.
+- Prepare explain-cache memory receipts with validated capacities, the newly
+  built scale harness, strict configuration checks, and bounded early/late
+  explain evidence before session release. Zero-reload cells now hold the base
+  table without churn and support two-peer qualification. Generated route-server
+  scenarios now declare their existing RFC 8212 posture explicitly for strict
+  configuration checks.
+- Reject RPKI benchmark cells that exceed reloadstall's peer address range,
+  lack a measured route chunk count increase, or pair different or duplicate
+  run IDs across arms.
+- Release session-notification outstanding accounting when receiver teardown
+  races with an already-admitted send. Queued notifications now own their
+  accounting reservation, so channel cleanup cannot leave a stale positive
+  `bgp_session_notification_outstanding` value. Lossless delivery and the
+  daemon-lifetime high-water metric are unchanged.
+- Preserve eligible EVPN IMET routes whose SRv6 P2MP PMSI label transposes up
+  to 20 Function bits through selection and reflection, and expose the derived
+  Function through existing read-only route and Argument-pair inspection.
+- The RFC 7606 treat-as-withdraw warning now counts the NLRI of every
+  family the malformed UPDATE announced. An `MP_REACH_NLRI`-only UPDATE
+  previously logged `announced=0` although its routes were withdrawn.
+  **Operator-visible:** the warning adds `families` (announced counts
+  under the configuration family labels, such as `ipv6_unicast=1` or
+  `l3vpn_ipv4_unicast=2`), `next_hop`, `link_local_next_hop`,
+  and `prefixes` (the first eight announcements) fields. The preceding
+  `UPDATE validation error` warning adds `attr_type`, the attribute type
+  code that failed validation.
+
+### Documentation
+
+- Record framing-only NHC and Tunnel Encapsulation transit, and the current
+  alpha EVPN Encapsulation Extended Community compatibility exception: default
+  eBGP boundary filtering is absent, so RFC 9012 §11 conformance is not claimed.
+  Wire behavior remains unchanged.
+- Describe the RIB memory comparison's attribute-container model against
+  `Arc<AttrSet>` and clarify its pointer/header scope. Link the EVPN plan
+  decomposer issue from the reload matrix.
+- Point the bgperf2 interpretation notes at the counterbalanced v0.68.0
+  campaign, align the route-reflector cookbook's update-group speedup with its
+  cited receipt (15.1 s to 0.56 s, about 27x), and refresh the latest zebra-rs
+  release in the comparison page.
+- Add a paired real-table memory receipt for boxed MP attributes, including
+  release-build cgroup/RSS evidence and a separate allocation attribution.
+- Date the historical RIB Operations benchmark comparison in the maintained
+  [benchmark guide](docs/benchmarks.md), so its May 2026 `main` does not
+  imply current measurements.
+- Link the opt-in FlowSpec feasibility decision from the earlier FlowSpec ADR
+  index entry, while retaining the original ADR's other decisions.
+- Add a bounded dual-stack FlowSpec controller qualification receipt and M22
+  regression driver covering 100 local rules, mutation outcomes, retained
+  intent, export policy, peer replay, and daemon-restart reconciliation.
+  The FlowSpec API remains alpha; this is control-plane evidence, without a
+  throughput, GR/LLGR, or dataplane guarantee.
+- Link the later IPv4 route-server soak outcomes from the IXP evaluation
+  guide, distinguishing release-tag failures from the passing untagged commit.
+- Document that the default jemalloc build reads run-time allocator options
+  from `_RJEM_MALLOC_CONF` and ignores `MALLOC_CONF`, and add a heap-profiling
+  how-to using jemalloc's built-in profiler and `jeprof`. See
+  [`docs/benchmarks.md`](docs/benchmarks.md#heap-profiling-with-jemalloc).
+- Describe the current kernel dataplane workflow preparation and per-job
+  archive, image, and tool setup in the [runner guide](docs/how-to/kernel-dataplane-runner.md).
+- Add a passive iBGP BMP relay example to the monitoring cookbook, with
+  explicit deny-all export, pre-policy input monitoring, peer lifecycle and
+  reconnect guidance, and the bounded withdrawal parity receipt.
+- Link the CLI command reference and published crate versions from both
+  documentation reference indexes.
+- Pin the deployment guide's installer, tarball, and container image examples
+  to v0.73.0, and add a post-tag release step that refreshes and verifies them.
+  Keep the EVPN standards-tail table as a maintained section of the historical
+  enablement roadmap, marking RFC 9721 §6.1 shipped and the §6.3/§6.7
+  stale-entry procedures as gaps. The EVPN VTEP pitfalls table now uses the
+  literal `readiness=not-ready` and `readiness=unbound` CLI output.
+- Repair external references in gNMI, route-server, build-flavor, and soak
+  documentation.
+- Clarify the flagship soak memory rationale for the default jemalloc build,
+  correcting a historical receipt's glibc attribution in the maintained guide
+  while preserving its measured RSS, gate verdict and existing acceptance
+  bounds.
+- Clarify the RFC 9819 egress and ingress PE roles for SRv6 Argument Length
+  consistency and BUM forwarding. Per-route reflector eligibility remains
+  distinct from caller-selected, read-only IMET/EAD-per-ES pair inspection.
+
+### Upgrade notes
+
+- `[policy.explain] cache_size` and `[policy.reject_retention] capacity`
+  above 2,097,152 now fail startup and reload validation, even when retention
+  is disabled. Reduce both to at most 2,097,152 and run the new binary's
+  `--check --strict` before stopping or restarting the old daemon.
+- An alpha EVPN route reflector now receives, selects and reflects Type 6
+  SMET routes that it previously discarded as an unsupported route type.
+  Clients receive them from the first session after the upgrade. To keep the
+  previous behavior toward a client, deny `route.evpn-route-type == 6` in its
+  export policy; `.rpol` now accepts route types 1-6.
+- `GetHealth` returns `UNAVAILABLE` instead of `INTERNAL` when the peer
+  manager or the RIB misses its 200 ms core-probe deadline. Clients that
+  treat only `INTERNAL` as failure should also handle `UNAVAILABLE`; retry
+  once and treat a repeated miss as a failure. `rbgp health` reports such a
+  miss as `temporarily unavailable: ...` with an unchanged exit status, and
+  `rbgp doctor` retries once before failing.
+- An unavailable config read or initial transaction plan now returns
+  `UNAVAILABLE` with nothing applied, instead of consuming the settlement
+  budget and triggering fail-stop.
+- `rbgp` mutation commands now stop waiting on an unresponsive daemon and
+  exit 1 with an outcome-unknown error: runtime controls after 11 minutes,
+  persisted configuration changes, `rbgp config` RPCs and `mrt-dump` after
+  31 minutes. The daemon may still apply the change; verify with the command
+  the error names before retrying.
+- Import-policy explain queries without a path ID that match more than 4096
+  entries now fail with a path-ID hint. Import explain no longer answers
+  `not_seen` for an evicted prefix; past 2,097,152 remembered evictions per
+  session it answers `evicted`.
+- `/metrics` returns `503` when 56 scrapes are already in flight or a
+  caller has waited 5 s for a render, and `GetMetrics` returns
+  `DEADLINE_EXCEEDED` when that wait expires.
+- EVPN remote-MAC, MAC/IP and Type 5 gateway-IP selection treats an absent
+  MAC Mobility sequence as zero, so a route that carries an explicit sequence
+  zero no longer displaces an otherwise equal route from a lower VTEP
+  address.
+- Metrics and logs: the new per-peer
+  `bgp_import_explain_cache_evictions_total` counts explain-cache evictions;
+  `bgp_rib_prefixes{peer="0.0.0.0",afi_safi="flowspec"}` now counts locally
+  injected FlowSpec rules; while a dirty peer's outbound channel stays full,
+  `bgp_outbound_route_drops_total` and the `outbound channel full or closed`
+  warning no longer repeat on every distribution pass. The RFC 7606
+  treat-as-withdraw warning adds `families`, `next_hop`,
+  `link_local_next_hop` and `prefixes` fields and counts `MP_REACH_NLRI`
+  announcements, and the `UPDATE validation error` warning adds `attr_type`.
+  A route's `received_at_epoch_seconds` can read up to one second earlier.
+- Additive API and machine-output changes: `AddFlowSpec` and
+  `DeleteFlowSpec` report an outcome, `DeleteFlowSpec` accepts
+  `allow_missing`, and `rbgp flowspec add|delete --json` adds an `outcome`
+  key; `ExplainImportPolicyResponse` and `rbgp policy explain --json` add
+  `cache_size` and `evictions_since_reset`; `ListFlowSpecRoutes` adds
+  `advertised_peer_address`; `ExplainEvpnRoute` adds IMET and EAD-per-ES
+  Argument-pair fields; the new outside-v1 `PreviewConfigRollback` RPC
+  requires `sensitive_read`.
+- Embedders of the published crates: `rustbgpd-wire` 0.23.0 decodes EVPN
+  Type 6 routes and changes IPv6 and VPN-IPv6 prefix `Hash` values, and
+  `rustbgpd-fsm` 0.10.0 and `rustbgpd-rpki` 0.5.0 move to wire 0.23; upgrade
+  the three together. Callers of plain structural decoding must call
+  `validate_evpn_announcements` before admitting announcements.
+- Benchmark receipts: the rrharness, reloadstall and Criterion targets now
+  run under jemalloc, so receipts and baselines recorded through v0.73.0 under
+  glibc malloc are not comparable on allocation-heavy paths. Scale harnesses
+  build with `--profile scale` into `target/scale/`.
+
 ## [0.73.0] — 2026-09-27
 
 ### Added
