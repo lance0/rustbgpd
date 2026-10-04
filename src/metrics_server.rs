@@ -27,8 +27,8 @@ const MAX_CONNECTIONS: usize = 64;
 /// to write that reply.
 const MAX_SCRAPES: usize = MAX_CONNECTIONS - 8;
 /// How long a connection may wait to send its request line before a full
-/// connection budget evicts it. Clients send the request line with the
-/// connection, so this only closes idle or slow-sending clients.
+/// connection budget requests its eviction. Clients send the request line with
+/// the connection, so this only closes idle or slow-sending clients.
 const IDLE_EVICTION_GRACE: Duration = Duration::from_millis(250);
 
 /// Fixed startup worker inventory: at most FIB, EVPN intent and EVPN kernel.
@@ -142,14 +142,17 @@ async fn serve_incoming<S>(
     let scrape_slots = Arc::new(Semaphore::new(MAX_SCRAPES));
     // Connections still waiting for their request line, oldest first, with
     // their accept time. A connection drops its receiver once the line is
-    // read, closing the sender; dropping a live sender evicts it.
+    // read, closing the sender; dropping a live sender requests its eviction.
     let mut unclassified: VecDeque<(Instant, oneshot::Sender<()>)> = VecDeque::new();
 
     loop {
         // Acquire permit before accepting to enforce an exact connection cap.
-        // While the budget is full, a connection that has not sent its request
-        // line within IDLE_EVICTION_GRACE of being accepted is closed, so idle
-        // or slow-sending clients cannot keep `/livez` and `/readyz` out.
+        // While the budget is full, connections that have not sent their
+        // request line within IDLE_EVICTION_GRACE of being accepted are asked
+        // to close, oldest first, so idle or slow-sending clients cannot keep
+        // `/livez` and `/readyz` out. Several overdue connections can be asked
+        // in one burst, because an evicted connection releases its permit
+        // asynchronously.
         // Every other permit holder is classified: scrapes are capped below
         // the budget, and every other response fits in the socket send buffer.
         let permit = loop {
@@ -164,7 +167,9 @@ async fn serve_incoming<S>(
                     if evict_at.is_some() =>
                 {
                     unclassified.pop_front();
-                    debug!("metrics connection budget full; closed oldest idle connection");
+                    debug!(
+                        "metrics connection budget full; requested eviction of oldest unclassified connection"
+                    );
                 }
             }
         };
@@ -204,8 +209,9 @@ async fn serve_incoming<S>(
     }
 }
 
-/// `evicted` resolves when the accept loop needs this connection's permit;
-/// it is honoured only until the request line has been read.
+/// `evicted` resolves when the accept loop requests this connection's
+/// eviction. The request is honoured only while the request line is unread; a
+/// line that is already readable wins and the connection is served.
 async fn handle_connection(
     stream: TcpStream,
     evicted: impl std::future::Future,
@@ -220,6 +226,7 @@ async fn handle_connection(
     // Read the HTTP request line with timeout
     let mut request_line = String::new();
     let read = tokio::time::timeout(READ_TIMEOUT, buf_reader.read_line(&mut request_line));
+    // Biased: a readable request line is served even if eviction was requested.
     let read = tokio::select! {
         biased;
         read = read => read,
