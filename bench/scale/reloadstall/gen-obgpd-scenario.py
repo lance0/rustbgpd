@@ -31,7 +31,7 @@ Usage:
 conf_dir: directory where the RUNNING bgpd sees these files (include paths
 are absolute; default /etc/bgpd — i.e. `docker run -v <out_dir>:/etc/bgpd`).
 competitor_generation: historical (OpenBGPD 9.1, default) or current
-(OpenBGPD 9.2). It changes only version-bearing generated comments.
+(OpenBGPD 9.3). It changes only version-bearing generated comments.
 
 Emits into <out_dir>: bgpd.conf, gen.conf (live, starts as gen-a),
 gen-a.conf, gen-b.conf.
@@ -52,8 +52,8 @@ out.mkdir(parents=True, exist_ok=True)
 COMPETITOR_GENERATIONS = {
     "historical": ("OpenBGPD 9.1", "openbgpd/openbgpd:9.1"),
     "current": (
-        "OpenBGPD 9.2",
-        "openbgpd/openbgpd@sha256:b2e94bd1538102a89cff96867993eabb6dbb27720de4ab7b588860880e3e3bf9",
+        "OpenBGPD 9.3",
+        "openbgpd/openbgpd@sha256:8f4b44f25796beaecb72ab7f099a3914961ac444a9de094ffca6a4614e741412",
     ),
 }
 if competitor_generation not in COMPETITOR_GENERATIONS:

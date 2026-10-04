@@ -1,4 +1,4 @@
-# M102: dual-stack route-server proof with an OpenBGPD 9.2 member and FRR control.
+# M102: dual-stack route-server proof with an OpenBGPD 9.3 member and FRR control.
 config_epoch = 2
 
 [global]
