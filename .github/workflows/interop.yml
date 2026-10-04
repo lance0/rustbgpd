@@ -2237,7 +2237,7 @@ jobs:
 
   m102:
     needs: [prime_dev_image]
-    name: M102 — OpenBGPD 9.2 route-server member proof
+    name: M102 — OpenBGPD 9.3 route-server member proof
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -2264,11 +2264,11 @@ jobs:
       - name: Build bmpsink:m102 capture sidecar
         run: docker build -t bmpsink:m102 -f tests/interop/Dockerfile.bmpsink tests/interop
 
-      - name: Verify and pull digest-pinned OpenBGPD 9.2 image
+      - name: Verify and pull digest-pinned OpenBGPD 9.3 image
         env:
-          OPENBGPD_IMAGE: openbgpd/openbgpd@sha256:b2e94bd1538102a89cff96867993eabb6dbb27720de4ab7b588860880e3e3bf9
-          OPENBGPD_AMD64_MANIFEST: sha256:3178027d7ca916eacec247c66472a1f95a17d83d4616fe4f118318a912ab8beb
-          OPENBGPD_CONFIG: sha256:06317b65d9fadc80f68c5c8e7c82815b0643577fd5441bd55038e43771b5807e
+          OPENBGPD_IMAGE: openbgpd/openbgpd@sha256:8f4b44f25796beaecb72ab7f099a3914961ac444a9de094ffca6a4614e741412
+          OPENBGPD_AMD64_MANIFEST: sha256:2e2fcc5185aac421aa42f865aeb93eac801d411cd88cd0557ceccdad6d2be913
+          OPENBGPD_CONFIG: sha256:91457bd753c880e0594d7ebd95aca8b3461de4b5d62ff997c2b536a02a0646eb
         run: |
           index_json=$(docker buildx imagetools inspect --raw "$OPENBGPD_IMAGE")
           amd64_manifest=$(jq -er '

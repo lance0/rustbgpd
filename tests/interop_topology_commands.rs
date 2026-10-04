@@ -1223,7 +1223,7 @@ if bird_identity; then echo 'nonlocal image accepted' >&2; exit 1; fi
 #[test]
 fn m102_pins_openbgpd92_route_server_member_contract() {
     const OPENBGPD_IMAGE: &str =
-        "openbgpd/openbgpd@sha256:b2e94bd1538102a89cff96867993eabb6dbb27720de4ab7b588860880e3e3bf9";
+        "openbgpd/openbgpd@sha256:8f4b44f25796beaecb72ab7f099a3914961ac444a9de094ffca6a4614e741412";
     const FRR_IMAGE: &str = "quay.io/frrouting/frr@sha256:f90d26a9fd5c14fc5795a73b4254ac88bc3186c45bbeb220a225fb6182de812c";
     let topology = topology("m102-routeserver-openbgpd92.clab.yml");
     assert_eq!(
@@ -1298,7 +1298,7 @@ fn m102_pins_openbgpd92_route_server_member_contract() {
     let script_path = interop_path("scripts/test-m102-routeserver-openbgpd92.sh");
     let script = fs::read_to_string(&script_path).expect("read M102 driver");
     for required in [
-        "OpenBGPD 9.2",
+        "OpenBGPD 9.3",
         "bgpctl network add",
         "bgpctl network delete",
         "CAPTURE_IMAGE=bmpsink:m102",

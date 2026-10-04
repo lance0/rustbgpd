@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# M102 — OpenBGPD 9.2 dual-stack route-server member proof (exact 32/0).
+# M102 — OpenBGPD 9.3 dual-stack route-server member proof (exact 32/0).
 # shellcheck disable=SC2015 # assertion chains deliberately record ok/fail ledger rows
 set -euo pipefail
 
@@ -7,7 +7,7 @@ TOPO=m102-routeserver-openbgpd92
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 INTEROP_TEST_OPERATOR_AUTH=1; export INTEROP_TEST_OPERATOR_AUTH
 OPENBGPD="clab-${TOPO}-openbgpd"; FRR="clab-${TOPO}-frr"
-OPENBGPD_IMAGE="openbgpd/openbgpd@sha256:b2e94bd1538102a89cff96867993eabb6dbb27720de4ab7b588860880e3e3bf9"
+OPENBGPD_IMAGE="openbgpd/openbgpd@sha256:8f4b44f25796beaecb72ab7f099a3914961ac444a9de094ffca6a4614e741412"
 FRR_IMAGE="quay.io/frrouting/frr@sha256:f90d26a9fd5c14fc5795a73b4254ac88bc3186c45bbeb220a225fb6182de812c"
 CAPTURE_IMAGE=bmpsink:m102
 CAPTURE_CONTAINER=m102-raw-capture
@@ -507,7 +507,7 @@ preflight_identities_and_configs() {
     configured=$(docker inspect -f '{{.Config.Image}}' "$OPENBGPD"); local_id=$(docker image inspect -f '{{.Id}}' "$OPENBGPD_IMAGE")
     container_id=$(docker inspect -f '{{.Image}}' "$OPENBGPD"); command=$(docker inspect -f '{{json .Config.Cmd}}' "$OPENBGPD")
     [ "$configured" = "$OPENBGPD_IMAGE" ] && [ "$container_id" = "$local_id" ] && [ "$command" = '["sleep","infinity"]' ] || die "OpenBGPD identity drift"
-    runtime=$(docker exec "$OPENBGPD" bgpd -V 2>&1); [ "$runtime" = 'OpenBGPD 9.2' ] || die "OpenBGPD runtime drift"
+    runtime=$(docker exec "$OPENBGPD" bgpd -V 2>&1); [ "$runtime" = 'OpenBGPD 9.3' ] || die "OpenBGPD runtime drift"
     docker exec "$OPENBGPD" bgpd -n -f /etc/bgpd.conf >/dev/null 2>&1 || die "OpenBGPD config rejected"
     configured=$(docker inspect -f '{{.Config.Image}}' "$FRR"); local_id=$(docker image inspect -f '{{.Id}}' "$FRR_IMAGE"); container_id=$(docker inspect -f '{{.Image}}' "$FRR")
     [ "$configured" = "$FRR_IMAGE" ] && [ "$container_id" = "$local_id" ] || die "FRR identity drift"
