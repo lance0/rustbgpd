@@ -6754,21 +6754,8 @@ fn family_distribution_skips_closed_receivers_and_keeps_live_withdrawals() {
 #[test]
 fn family_distribution_full_receivers_retry_and_replacements_stay_live() {
     for (afi, safi, ungrouped) in family_distribution_cases() {
-        let (_tx, rx) = mpsc::channel(1);
-        let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
-        manager.test_force_ungrouped = ungrouped;
-        let peer: IpAddr = "10.43.0.1".parse().unwrap();
+        let (mut manager, peer, mut receiver, permits) = full_family_receiver(afi, safi, ungrouped);
         let family = vec![(afi, safi)];
-        let mut receiver = register_direct_peer_with_families(&mut manager, peer, family.clone());
-        while receiver.try_recv().is_ok() {}
-        let permits: Vec<_> = (0..8)
-            .map(|_| {
-                manager.outbound_peers[&peer]
-                    .clone()
-                    .try_reserve_owned()
-                    .unwrap()
-            })
-            .collect();
         let source = Ipv4Addr::new(192, 0, 2, 42);
         let captured = Arc::new(Mutex::new(Vec::new()));
         tracing::subscriber::with_default(
@@ -6778,6 +6765,15 @@ fn family_distribution_full_receivers_retry_and_replacements_stay_live() {
             },
             || {
                 warm_full_outbound_warning();
+                // Each family's deferral WARN is its own callsite. Reach this
+                // family's once from the observing thread, so a sibling test
+                // without a subscriber cannot register it as disabled first.
+                {
+                    let (mut warm, _, _warm_receiver, _warm_permits) =
+                        full_family_receiver(afi, safi, ungrouped);
+                    announce_family_route(&mut warm, source, safi, 1);
+                }
+                tracing::callsite::rebuild_interest_cache();
                 captured.lock().unwrap().clear();
                 announce_family_route(&mut manager, source, safi, 1);
             },
@@ -6810,6 +6806,34 @@ fn family_distribution_full_receivers_retry_and_replacements_stay_live() {
         assert_eq!(manager.outbound_session_ids[&peer], 1);
         assert!(!manager.outbound_channel_gone(peer));
     }
+}
+
+/// A manager whose single `(afi, safi)` receiver is live but full.
+fn full_family_receiver(
+    afi: Afi,
+    safi: Safi,
+    ungrouped: bool,
+) -> (
+    RibManager,
+    IpAddr,
+    mpsc::Receiver<OutboundRouteUpdate>,
+    Vec<mpsc::OwnedPermit<OutboundRouteUpdate>>,
+) {
+    let (_tx, rx) = mpsc::channel(1);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    manager.test_force_ungrouped = ungrouped;
+    let peer: IpAddr = "10.43.0.1".parse().unwrap();
+    let mut receiver = register_direct_peer_with_families(&mut manager, peer, vec![(afi, safi)]);
+    while receiver.try_recv().is_ok() {}
+    let permits = (0..8)
+        .map(|_| {
+            manager.outbound_peers[&peer]
+                .clone()
+                .try_reserve_owned()
+                .unwrap()
+        })
+        .collect();
+    (manager, peer, receiver, permits)
 }
 
 fn warm_full_outbound_warning() {

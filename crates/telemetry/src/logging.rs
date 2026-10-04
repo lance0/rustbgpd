@@ -249,13 +249,15 @@ mod tests {
     use tracing_subscriber::reload;
 
     #[test]
-    fn init_logging_returns_result() {
-        // We can't reliably test init_logging() in unit tests because the
-        // global subscriber may already be set by another test. Instead,
-        // verify that calling it produces a well-formed Result.
-        let result = init_logging(&[], true);
-        // Either Ok (first call) or Err (already set) — neither should panic.
-        assert!(result.is_ok() || result.is_err());
+    fn init_logging_installs_once_and_refuses_a_second_install() {
+        // The only `init_logging` caller in this test binary, so the first
+        // install owns the global subscriber and publishes the reload hook.
+        init_logging(&[], true).unwrap();
+        assert!(RELOAD_HANDLE.get().is_some());
+        assert!(matches!(
+            init_logging(&[], false),
+            Err(LoggingError::AlreadyInitialized(_))
+        ));
     }
 
     /// Layer that counts events that pass the filter — a probe for whether

@@ -1078,12 +1078,6 @@ fn stale_recovery_head_is_skipped(closed_registration: bool) {
         manager.outbound_peers.remove(&peers[0]);
     }
     let before = closed_registration.then(|| ipv4_row(&manager, peers[0]));
-    let captured = Arc::new(std::sync::Mutex::new(Vec::new()));
-    let _capture = tracing::subscriber::set_default(CaptureSubscriber {
-        level: tracing::Level::WARN,
-        events: Arc::clone(&captured),
-    });
-    tracing::callsite::rebuild_interest_cache();
     assert!(manager.resync_tick_pending());
     assert!(manager.drain_outbound_limit_recovery());
     assert_eq!(manager.outbound_limit_recovery_for(peers[0]), vec![]);
@@ -1101,7 +1095,9 @@ fn stale_recovery_head_is_skipped(closed_registration: bool) {
     assert_eq!(wire_prefixes(&mut outbound[1]).len(), 2);
     assert!(!manager.outbound_limit_recovery_pending());
     assert!(!manager.resync_tick_pending());
-    assert!(captured.lock().unwrap().is_empty());
+    // A send to the closed head would bump this counter in the same branch
+    // that logs the recovery WARN; the counter has no process-wide callsite
+    // interest cache to go blind.
     assert!(
         counter_metric_value(&manager.metrics, "bgp_outbound_route_drops_total", &[]).abs()
             < f64::EPSILON
