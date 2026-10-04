@@ -172,7 +172,7 @@ This is the "MRT reader / monitor / analyzer" consumer. Links only
 ```toml
 # Cargo.toml
 [dependencies]
-rustbgpd-wire = "0.22.0"
+rustbgpd-wire = "0.23.0"
 bytes = "1"
 ```
 
@@ -232,8 +232,8 @@ intentional split (ADR-0005: pure state machine, no I/O in the FSM).
 ```toml
 # Cargo.toml
 [dependencies]
-rustbgpd-wire = "0.22.0"
-rustbgpd-fsm = "0.9.0"
+rustbgpd-wire = "0.23.0"
+rustbgpd-fsm = "0.10.0"
 bytes = "1"
 tokio = { version = "1", features = ["net", "io-util", "time", "rt"] }
 ```
@@ -297,8 +297,8 @@ verified published versions in §7.
 ```toml
 # Cargo.toml
 [dependencies]
-rustbgpd-rpki = "0.4.0"
-rustbgpd-wire = "0.22.0"
+rustbgpd-rpki = "0.5.0"
+rustbgpd-wire = "0.23.0"
 ```
 
 ```rust
@@ -484,7 +484,7 @@ boundary. `rib`, `bmp`, `mrt`, and `policy` remain demand-gated.**
    `CLUSTER_LIST`; see the crate's
    [0.22.0 compatibility note](../../crates/wire/README.md#0220-compatibility-note).
 
-   The prepared `0.23.0` line pairs with FSM `0.10` and RPKI `0.5`.
+   The `0.23.0` line pairs with FSM `0.10` and RPKI `0.5`.
    EVPN Type 6 now decodes as a typed SMET route instead of an unknown-type
    discard. Structural codec calls preserve raw flags; announcement admission
    additionally requires `validate_evpn_announcements` or
@@ -492,7 +492,6 @@ boundary. `rib`, `bmp`, `mrt`, and `policy` remain demand-gated.**
    check to MP_REACH and retains keys for treat-as-withdraw; MP_UNREACH uses
    only structural validation. See the
    [0.23.0 compatibility note](../../crates/wire/README.md#0230-compatibility-note).
-   Registry examples remain on the published versions in the table below.
 
 2. **`rustbgpd-fsm`.** The `0.4.0` release makes no
    FSM API changes of its own — it exists because the FSM's public surface
@@ -551,7 +550,7 @@ boundary. `rib`, `bmp`, `mrt`, and `policy` remain demand-gated.**
    `config`, `event`, `session`, and `state` modules are private (import from
    the crate root), and `Action::RoleMismatchObserved::remote_role` becomes
    the `#[non_exhaustive]` `ReceivedRole` enum. See the crate's
-   [changelog](../../crates/fsm/CHANGELOG.md). The prepared `0.10.0` line
+   [changelog](../../crates/fsm/CHANGELOG.md). The `0.10.0` line
    moves to wire `0.23` without direct FSM API or state-machine changes.
 
 3. **`rustbgpd-rpki`.** Its first registry release was `0.1.0`.
@@ -584,7 +583,7 @@ boundary. `rib`, `bmp`, `mrt`, and `policy` remain demand-gated.**
      `aspa_verify::validation_context`. See the crate's
      [changelog](../../crates/rpki/CHANGELOG.md).
    - The RPKI `0.4.0` line moves the public wire dependency to
-     `0.22`; verifier and RTR method signatures are unchanged. The prepared
+     `0.22`; verifier and RTR method signatures are unchanged. The
      `0.5.0` line moves to wire `0.23`, also without direct verifier or RTR
      signature changes.
 
@@ -667,9 +666,9 @@ does not mean no newer individual crate exists on the registry.
 <!-- published-crate-versions:start -->
 | Crate | Published examples | Working tree |
 |---|---|---|
-| `rustbgpd-wire` | `0.22.0` | `0.23.0` |
-| `rustbgpd-fsm` | `0.9.0` | `0.10.0` |
-| `rustbgpd-rpki` | `0.4.0` | `0.5.0` |
+| `rustbgpd-wire` | `0.23.0` | `0.23.0` |
+| `rustbgpd-fsm` | `0.10.0` | `0.10.0` |
+| `rustbgpd-rpki` | `0.5.0` | `0.5.0` |
 <!-- published-crate-versions:end -->
 
 After changing manifests, run `python3 scripts/check_embedding_versions.py --write`
