@@ -4941,6 +4941,26 @@ fn direct_clean_transition_manager(
     Vec<IpAddr>,
     Vec<mpsc::Receiver<OutboundRouteUpdate>>,
 ) {
+    direct_clean_transition_manager_with_policy(
+        &community_chain(0xFDE8_2101),
+        member_count,
+        route_count,
+        readiness_rx,
+    )
+}
+
+/// [`direct_clean_transition_manager`] with the members' current export
+/// policy chosen by the caller.
+fn direct_clean_transition_manager_with_policy(
+    old_policy: &PolicyChain,
+    member_count: usize,
+    route_count: usize,
+    readiness_rx: Option<mpsc::Receiver<crate::update::RibReadinessQuery>>,
+) -> (
+    RibManager,
+    Vec<IpAddr>,
+    Vec<mpsc::Receiver<OutboundRouteUpdate>>,
+) {
     let (_tx, rx) = mpsc::channel(1);
     let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
     // Zero flush budget parks the commit poll after every stride, making the
@@ -4951,7 +4971,6 @@ fn direct_clean_transition_manager(
     }
     let probes = Arc::new(AtomicUsize::new(0));
     let reuses = Arc::new(AtomicUsize::new(0));
-    let old_policy = community_chain(0xFDE8_2101);
     let mut peers = Vec::new();
     let mut receivers = Vec::new();
     for index in 0..member_count {
@@ -9825,6 +9844,222 @@ fn prestaged_inventory_rs_control_tag_matches_fenced_walk() {
             );
         }
     }
+}
+
+/// A one-statement permit chain adding `community`, with `edit` applied to
+/// its modifications.
+fn community_chain_with(community: u32, edit: impl FnOnce(&mut RouteModifications)) -> PolicyChain {
+    let mut statement = deny_statement(Ipv4Prefix::new(Ipv4Addr::UNSPECIFIED, 0));
+    statement.prefix = None;
+    statement.action = PolicyAction::Permit;
+    statement.modifications.communities_add.push(community);
+    edit(&mut statement.modifications);
+    PolicyChain::new(vec![Policy {
+        entries: vec![statement],
+        default_action: PolicyAction::Deny,
+    }])
+}
+
+/// Prestage `policy` for `peer` to completion, returning the
+/// (source, destination) group pair.
+fn complete_prestage(
+    manager: &mut RibManager,
+    peer: IpAddr,
+    policy: &PolicyChain,
+) -> (usize, usize) {
+    let source = manager.grouped_member_of(peer).unwrap();
+    let (reply, mut response) = oneshot::channel();
+    manager.begin_destination_prestage(peer, Some(policy), reply);
+    let destination = manager
+        .pending_destination_prestage
+        .as_ref()
+        .unwrap()
+        .destination;
+    while manager.pending_destination_prestage.is_some() {
+        manager.advance_destination_prestage();
+    }
+    response.try_recv().unwrap().unwrap();
+    assert!(manager.prestaged_inventory.is_some());
+    (source, destination)
+}
+
+/// Churn the destination stages equality-suppressed (its policy pins the
+/// changed attribute) reaches only the SOURCE group's key log; the fenced
+/// re-check must still see the source side change and announce the key.
+#[test]
+fn prestaged_inventory_recheck_catches_source_only_change() {
+    let source_peer = Ipv4Addr::new(192, 0, 2, 42);
+    let (mut manager, peers, _receivers) = direct_clean_transition_manager(2, 4, None);
+    churn_fixture_source(
+        &mut manager,
+        vec![crate::test_support::make_route_with_lp(
+            fixture_prefix(0),
+            source_peer,
+            100,
+        )],
+        vec![],
+    );
+    // Same community as the source chain, plus LOCAL_PREF pinned at the
+    // route's current value: the destination entry equals the source's.
+    let policy = community_chain_with(0xFDE8_2101, |mods| mods.set_local_pref = Some(100));
+    let (source, destination) = complete_prestage(&mut manager, peers[0], &policy);
+    churn_fixture_source(
+        &mut manager,
+        vec![crate::test_support::make_route_with_lp(
+            fixture_prefix(0),
+            source_peer,
+            200,
+        )],
+        vec![],
+    );
+    let key = (Prefix::V4(fixture_prefix(0)), 0);
+    let logged = |gid: usize| {
+        manager.group_ribs[&gid]
+            .inventory_log
+            .as_ref()
+            .is_some_and(|log| log.contains(&key))
+    };
+    assert!(logged(source), "the source restaged the key");
+    assert!(
+        !logged(destination),
+        "the destination entry was equality-suppressed"
+    );
+
+    let fenced = fenced_inventory(&mut manager, source, destination, &[]).expect("clean");
+    let super::super::update_groups::PrestagedInventoryOutcome::Ready(prestaged) =
+        manager.take_prestaged_transition_inventory(source, destination, &[])
+    else {
+        panic!("the prestaged inventory re-checks to Ready");
+    };
+    let prestaged = prestaged.finish(&mut |_| {});
+    assert!(
+        sorted_inventory_rows(&fenced)
+            .iter()
+            .any(|(route, _)| (route.prefix, route.path_id) == key),
+        "the fenced rebuild announces the source-side change"
+    );
+    assert_inventories_equal(&fenced, &prestaged);
+}
+
+/// A tag-only source-control change (both chains strip the tag, so no
+/// staged route changes) reaches the key logs only through
+/// `commit_rs_transitions`; the fenced re-check must still flip the
+/// rs-control verdict exactly as the fenced walk does.
+#[test]
+fn prestaged_inventory_recheck_catches_tag_only_transition() {
+    const RS_ASN: u32 = 64_512;
+    const TAG: u32 = (RS_ASN << 16) | 0xFDE9;
+    let source_peer = Ipv4Addr::new(192, 0, 2, 42);
+    let old_policy = community_chain_with(0xFDE8_2101, |mods| mods.communities_remove.push(TAG));
+    let (mut manager, peers, _receivers) =
+        direct_clean_transition_manager_with_policy(&old_policy, 2, 4, None);
+    manager.peer_rs_control.insert(peers[0], RS_ASN);
+    let policy = community_chain_with(0xFDE8_2102, |mods| mods.communities_remove.push(TAG));
+    let (source, destination) = complete_prestage(&mut manager, peers[0], &policy);
+    let mut tagged = crate::test_support::make_route(fixture_prefix(0), source_peer);
+    tagged.attributes = AttrSet::new(vec![PathAttribute::Communities(vec![TAG])]);
+    let staged_before = manager.group_ribs[&destination]
+        .table
+        .get(&Prefix::V4(fixture_prefix(0)), 0)
+        .cloned()
+        .unwrap();
+    churn_fixture_source(&mut manager, vec![tagged], vec![]);
+    assert!(
+        crate::manager::helpers::routes_equal(
+            &staged_before,
+            manager.group_ribs[&destination]
+                .table
+                .get(&Prefix::V4(fixture_prefix(0)), 0)
+                .unwrap()
+        ),
+        "the policy strips the tag: no staged delta"
+    );
+
+    assert!(
+        fenced_inventory(&mut manager, source, destination, &[RS_ASN]).is_none(),
+        "the fenced walk degrades on the new source-control tag"
+    );
+    assert!(matches!(
+        manager.take_prestaged_transition_inventory(source, destination, &[RS_ASN]),
+        super::super::update_groups::PrestagedInventoryOutcome::Degraded
+    ));
+}
+
+/// A prestage discarded mid-inventory-walk, by the authoritative batch path
+/// or the cohort command, takes its inventory and both key logs with it.
+#[test]
+fn mid_walk_prestage_discard_retires_inventory_and_logs() {
+    for cohort_command in [false, true] {
+        let (mut manager, peers, _receivers) = direct_clean_transition_manager(2, 8, None);
+        let policy = community_chain(0xFDE8_2102);
+        let source = manager.grouped_member_of(peers[0]).unwrap();
+        let (reply, _response) = oneshot::channel();
+        manager.begin_destination_prestage(peers[0], Some(&policy), reply);
+        while manager.prestaged_inventory.is_none() {
+            manager.advance_destination_prestage();
+        }
+        assert!(manager.pending_destination_prestage.is_some(), "mid-walk");
+        assert!(manager.group_ribs[&source].inventory_log.is_some());
+        if cohort_command {
+            let _response = start_clean_transition(&mut manager, &peers, &policy);
+        } else {
+            manager
+                .apply_export_policy_replacements_synchronously(Vec::new())
+                .unwrap();
+        }
+        assert!(manager.pending_destination_prestage.is_none());
+        assert!(
+            manager.prestaged_inventory.is_none(),
+            "cohort {cohort_command}"
+        );
+        assert!(
+            manager
+                .group_ribs
+                .values()
+                .all(|group| group.inventory_log.is_none()),
+            "cohort {cohort_command}: no group keeps logging"
+        );
+    }
+}
+
+fn fenced_inventory(
+    manager: &mut RibManager,
+    source: usize,
+    destination: usize,
+    rs_asns: &[u32],
+) -> Option<super::super::update_groups::CleanPolicyTransitionInventory> {
+    let keys = manager.begin_clean_policy_transition_inventory(source, destination)?;
+    let mut fenced = super::super::update_groups::CleanPolicyTransitionInventoryBuilder::default();
+    manager.extend_clean_policy_transition_inventory(
+        source,
+        destination,
+        &keys,
+        rs_asns,
+        &mut fenced,
+    )?;
+    Some(fenced.finish(&mut |_| {}))
+}
+
+fn assert_inventories_equal(
+    fenced: &super::super::update_groups::CleanPolicyTransitionInventory,
+    prestaged: &super::super::update_groups::CleanPolicyTransitionInventory,
+) {
+    let (fenced_rows, prestaged_rows) = (
+        sorted_inventory_rows(fenced),
+        sorted_inventory_rows(prestaged),
+    );
+    assert_eq!(fenced_rows.len(), prestaged_rows.len());
+    for ((fenced_route, fenced_nh), (prestaged_route, prestaged_nh)) in
+        fenced_rows.iter().zip(&prestaged_rows)
+    {
+        assert!(
+            crate::manager::helpers::routes_equal(fenced_route, prestaged_route),
+            "{fenced_route:?} vs {prestaged_route:?}"
+        );
+        assert_eq!(fenced_nh, prestaged_nh);
+    }
+    assert_eq!(prestaged.permit_totals, fenced.permit_totals);
+    assert_eq!(prestaged.permit_by_source, fenced.permit_by_source);
 }
 
 fn authoritative_receipt_closes(r: &AuthoritativeTransitionReceipt) -> bool {

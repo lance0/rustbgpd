@@ -3695,6 +3695,7 @@ impl RibManager {
                 return Some((reply, result));
             }
             if let Some(mut prestage) = manager.pending_destination_prestage.take() {
+                manager.retire_prestaged_transition_inventory();
                 let _ = manager.discard_uncommitted_policy_transition_group(prestage.destination);
                 #[cfg(feature = "bench-internals")]
                 prestage.memo.record_replacement_capacities(manager);
@@ -3999,7 +4000,10 @@ impl RibManager {
         }
         receipt.precondition_us = u64::try_from(phase.elapsed().as_micros()).unwrap_or(u64::MAX);
         // A still-running destination preparation cannot be trusted
-        // mid-walk (same guard as the cohort transition command).
+        // mid-walk (same guard as the cohort transition command). This
+        // path never consumes a prestaged inventory, so drop it here, ahead
+        // of every early return below.
+        self.retire_prestaged_transition_inventory();
         if let Some(mut prestage) = self.pending_destination_prestage.take() {
             let _ = self.discard_uncommitted_policy_transition_group(prestage.destination);
             #[cfg(feature = "bench-internals")]
@@ -4314,7 +4318,6 @@ impl RibManager {
         {
             let _ = self.discard_uncommitted_policy_transition_group(prepared);
         }
-        self.retire_prestaged_transition_inventory();
         let Some(&exemplar) = members.first() else {
             receipt.cohort_precheck_us = receipt
                 .cohort_precheck_us
