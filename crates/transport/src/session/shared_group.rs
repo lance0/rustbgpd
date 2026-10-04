@@ -73,6 +73,42 @@ use std::sync::{Arc, Mutex};
 /// rework that survives encoder cancellation).
 pub(super) const PROGRESSIVE_SLICE_ROUTES: usize = 2048;
 
+/// Inventory indices grouped by source peer: sources in address order,
+/// inventory order kept within each source.
+///
+/// A counting sort over dense source ids. Every observer waits for this
+/// before the first chunk exists, and comparison-sorting 400k indices by an
+/// indirect `IpAddr` key costs tens of milliseconds; this pass is linear in
+/// the inventory plus a sort of the distinct sources.
+pub(super) fn source_grouped_order(announce: &[Route]) -> Vec<usize> {
+    let mut ids: HashMap<IpAddr, usize> = HashMap::default();
+    let source_ids: Vec<usize> = announce
+        .iter()
+        .map(|route| {
+            let next = ids.len();
+            *ids.entry(route.peer).or_insert(next)
+        })
+        .collect();
+    let mut sources: Vec<(IpAddr, usize)> = ids.into_iter().collect();
+    sources.sort_unstable();
+    let mut slot = vec![0usize; sources.len()];
+    for &id in &source_ids {
+        slot[id] += 1;
+    }
+    let mut start = 0;
+    for &(_, id) in &sources {
+        let count = slot[id];
+        slot[id] = start;
+        start += count;
+    }
+    let mut order = vec![0usize; announce.len()];
+    for (i, &id) in source_ids.iter().enumerate() {
+        order[slot[id]] = i;
+        slot[id] += 1;
+    }
+    order
+}
+
 /// One pre-encoded wire UPDATE carrying routes from exactly one source peer
 /// and one unicast family.
 #[derive(Clone)]
@@ -533,11 +569,10 @@ impl PeerSession {
         // per slice in table order fragments every source across every
         // slice — measured at reload-stall shape as tens of thousands of
         // tiny UPDATEs per member and writer-channel saturation teardown.
-        // Sorting an index keeps announce/next-hop-override alignment and
+        // Permuting an index keeps announce/next-hop-override alignment and
         // is safe to reorder: the inventory carries one route per prefix,
         // and announcements of distinct prefixes are order-independent.
-        let mut order: Vec<usize> = (0..update.announce.len()).collect();
-        order.sort_unstable_by_key(|&i| update.announce[i].peer);
+        let order = source_grouped_order(&update.announce);
         // Keep publishing after this member runs out of writer capacity.
         // Its first unsent chunk becomes the same pending cursor consumers use;
         // the group's publication cannot depend on one member's reader. A
