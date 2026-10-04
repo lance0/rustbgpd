@@ -1,0 +1,5 @@
+{
+  "status": "pass",
+  "completed_at_epoch_ns": 1791102790478463922,
+  "cells": "rustbgpd-sighup,bird,openbgpd"
+}

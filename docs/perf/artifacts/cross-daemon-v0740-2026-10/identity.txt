@@ -1,0 +1,12 @@
+measured_sha=4d14851f77b064dd254f2319708dd91f281f9b0d
+tree=e5978429af576da29aaced1d4d04785c3d1ab6b1
+describe=v0.73.0-131-g4d14851f7
+rustbgpd_sha256=6e9095a4bfebe3e96050089a76d1f73e907a57f29519bad58c229a1cafe3ef72
+reloadstall_sha256=c4e393397204e8ca3580c30b72e9f5fa16c6833d1d679194ec68290d3892e18a
+rustbgpd_version=rustbgpd 0.74.0
+rustc=rustc 1.99.0 (b940084d7 2026-09-28)
+bird_image=bird:v3.3.2-m101 id=sha256:98e6c2c4ed934ab426cd8932c282ec163fb5f0be9e79cef7ff19f052b7786fc7
+openbgpd_image=openbgpd/openbgpd@sha256:b2e94bd1538102a89cff96867993eabb6dbb27720de4ab7b588860880e3e3bf9
+competitor_generation=current
+kernel=Linux 7.0.0-30-generic x86_64
+swap_devices=
