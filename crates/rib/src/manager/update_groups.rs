@@ -50,6 +50,9 @@ use rustbgpd_wire::ExtendedCommunity;
 mod membership;
 mod payload;
 mod policy_transition;
+pub(in crate::manager) use policy_transition::{
+    PrestagedInventoryOutcome, PrestagedTransitionInventory,
+};
 mod staging;
 mod views;
 
@@ -631,6 +634,12 @@ pub(in crate::manager) struct GroupRibOut {
     /// `per_client_best` bit (Decision 1) — group-uniform like every
     /// other snapshot field here.
     pub(in crate::manager) per_client_best: bool,
+    /// Keys whose staged entry, next-hop override or source-control input
+    /// changed since a prestaged clean-transition inventory began walking
+    /// this group; `None` while no such inventory tracks it. Both table
+    /// writers ([`Self::apply_delta`], [`Self::commit_rs_transitions`])
+    /// record here, so the fenced re-check revisits exactly these keys.
+    pub(in crate::manager) inventory_log: Option<crate::fast_hash::FastSet<(Prefix, u32)>>,
 }
 
 /// Placeholder target for group-level policy-denial records; restamped
@@ -687,6 +696,8 @@ impl GroupRibOut {
         checkpoint();
         drop(self.export_chain.take());
         checkpoint();
+        drop(self.inventory_log.take());
+        checkpoint();
     }
     #[expect(
         clippy::too_many_arguments,
@@ -741,6 +752,7 @@ impl GroupRibOut {
             sendable,
             llgr,
             per_client_best,
+            inventory_log: None,
         }
     }
 
@@ -937,6 +949,9 @@ impl GroupRibOut {
     /// source-count and next-hop-override residue in sync.
     fn apply_delta(&mut self, delta: &GroupDelta) {
         let key = (delta.prefix, delta.path_id);
+        if let Some(log) = &mut self.inventory_log {
+            log.insert(key);
+        }
         if let Some(old) = self.table.get(&delta.prefix, delta.path_id) {
             let old_peer = old.peer;
             self.dec_source(old_peer, &delta.prefix);
@@ -1125,6 +1140,9 @@ impl GroupRibOut {
         for transition in transitions {
             checkpoint();
             let key = (transition.prefix, transition.path_id);
+            if let Some(log) = &mut self.inventory_log {
+                log.insert(key);
+            }
             match &transition.source_attrs {
                 Some(attrs) => {
                     self.source_attrs.insert(key, Arc::clone(attrs));

@@ -1131,6 +1131,155 @@ async fn shared_group_interned_attrs_across_sources_never_merge_chunks() {
     );
 }
 
+/// The encoder's index groups each source contiguously, in address order,
+/// keeping inventory order within a source, for any first-appearance order
+/// and for mixed address families.
+#[test]
+fn shared_group_source_order_groups_each_source_contiguously() {
+    let v4 = |last: u8| IpAddr::V4(Ipv4Addr::new(10, 46, 0, last));
+    let v6: IpAddr = "2001:db8::7".parse().unwrap();
+    let pattern = [
+        v4(9),
+        v6,
+        v4(2),
+        v4(9),
+        v4(5),
+        v4(2),
+        v6,
+        v4(9),
+        v4(5),
+        v4(2),
+    ];
+    let announce: Vec<Route> = pattern
+        .iter()
+        .map(|&peer| Route {
+            peer,
+            ..make_route(100)
+        })
+        .collect();
+    let order = super::shared_group::source_grouped_order(&announce);
+    assert_eq!(
+        order,
+        vec![2, 5, 9, 4, 8, 0, 3, 7, 1, 6],
+        "sources ascending (.2, .5, .9, then IPv6), inventory order within each"
+    );
+    assert_eq!(
+        super::shared_group::source_grouped_order(&[]),
+        Vec::<usize>::new()
+    );
+}
+
+/// Chunks per source within each slice of the source-grouped walk: the
+/// minimum UPDATE count the shared stream can produce when every source
+/// carries one attribute set.
+fn grouped_chunks_per_source(announce: &[Route]) -> std::collections::BTreeMap<IpAddr, usize> {
+    let mut peers: Vec<IpAddr> = announce.iter().map(|route| route.peer).collect();
+    peers.sort();
+    let mut chunks = std::collections::BTreeMap::new();
+    for slice in peers.chunks(super::shared_group::PROGRESSIVE_SLICE_ROUTES) {
+        let distinct: std::collections::BTreeSet<_> = slice.iter().collect();
+        for &peer in distinct {
+            *chunks.entry(peer).or_insert(0) += 1;
+        }
+    }
+    chunks
+}
+
+/// A multi-slice inventory with irregularly interleaved sources, first seen
+/// out of address order, must still encode each source as one contiguous
+/// run: no member may receive more UPDATEs than the source-grouped minimum.
+/// Walking the inventory in table order would split every source in every
+/// slice.
+#[tokio::test]
+async fn shared_group_mixed_source_inventory_keeps_minimal_updates_per_member() {
+    // First seen out of address order. Twelve sources keep each source's
+    // run within one slice under one UPDATE, so the minimum is exact.
+    let sources: Vec<Ipv4Addr> = [12, 3, 7, 1, 10, 5, 2, 11, 8, 4, 6, 9]
+        .into_iter()
+        .map(|last| Ipv4Addr::new(10, 47, 0, last))
+        .collect();
+    let attrs: Vec<Arc<AttrSet>> = sources
+        .iter()
+        .enumerate()
+        .map(|(i, source)| {
+            AttrSet::new(vec![
+                PathAttribute::Origin(Origin::Igp),
+                PathAttribute::AsPath(AsPath {
+                    segments: vec![AsPathSegment::AsSequence(vec![
+                        64_701 + u32::try_from(i).unwrap(),
+                    ])],
+                }),
+                PathAttribute::NextHop(*source),
+            ])
+        })
+        .collect();
+    // Uneven (source 0 twice per cycle), interleaved across three slices.
+    let pick = |i: usize| [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 0][(i * 5) % 13];
+    let total = 5_000_usize;
+    let announce: Vec<Route> = (0..total)
+        .map(|i| {
+            let s = pick(i);
+            Route {
+                prefix: Prefix::V4(Ipv4Prefix::new(
+                    Ipv4Addr::from(0x0A40_0000_u32 + u32::try_from(i).unwrap() * 256),
+                    24,
+                )),
+                peer: IpAddr::V4(sources[s]),
+                next_hop: IpAddr::V4(sources[s]),
+                attributes: Arc::clone(&attrs[s]),
+                ..make_route(100)
+            }
+        })
+        .collect();
+    let per_source = grouped_chunks_per_source(&announce);
+    let minimal: usize = per_source.values().sum();
+    let table_order: usize = announce
+        .chunks(super::shared_group::PROGRESSIVE_SLICE_ROUTES)
+        .map(|slice| {
+            slice
+                .iter()
+                .map(|route| route.peer)
+                .collect::<std::collections::BTreeSet<_>>()
+                .len()
+        })
+        .sum();
+    assert!(
+        minimal < table_order,
+        "fixture must interleave sources: grouped {minimal} vs table order {table_order}"
+    );
+    let shared = Arc::new(rustbgpd_rib::SharedGroupEncode::default());
+
+    for excluded in [sources[0], sources[1]] {
+        let (mut member, mut wire) = shared_group_member(65001).await;
+        let update = shared_group_envelope(&member, &shared, excluded, &announce);
+        member.test_drain_outbound(update).await;
+        let (chunk_count, terminal) = shared
+            .cell
+            .get()
+            .unwrap()
+            .downcast_ref::<super::shared_group::ProgressiveUnicastEncode>()
+            .unwrap()
+            .test_snapshot();
+        assert_eq!(
+            terminal,
+            Some(super::shared_group::StreamTerminal::Complete)
+        );
+        assert_eq!(chunk_count, minimal, "shared stream UPDATE count");
+        let member_updates = minimal - per_source[&IpAddr::V4(excluded)];
+        let mut expected: Vec<Prefix> = announce
+            .iter()
+            .filter(|route| route.peer != IpAddr::V4(excluded))
+            .map(|route| route.prefix)
+            .collect();
+        expected.sort_unstable();
+        assert_eq!(
+            read_announced_prefixes(&mut wire, member_updates).await,
+            expected,
+            "every non-excluded prefix in exactly {member_updates} UPDATEs"
+        );
+    }
+}
+
 /// The encoder walks the inventory through a source-sorted index while
 /// `next_hop_override` stays parallel to the ORIGINAL announce order. If
 /// the encoder ever indexed the overrides by sorted position, an override

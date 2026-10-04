@@ -33,6 +33,9 @@ import summarize  # noqa: E402
 ARTIFACTS = REPO / "docs/perf/artifacts"
 V0720 = ARTIFACTS / "headline-refresh-v0720-2026-09"
 V0730 = ARTIFACTS / "headline-refresh-v0730-2026-09"
+V0740 = ARTIFACTS / "cross-daemon-v0740-2026-10"
+# The first lines of a competitor's daemon.log, as run-matrix.sh records it.
+BIRD_LOG = "bird: 2026-10-04 01:56:55.742 [0000] <INFO> Started\nbird: 2026-10-04 01:58:41.541 [0000] <INFO> Reconfiguring\n"
 
 
 def summary_rows(path, names):
@@ -418,6 +421,57 @@ class ExtractorFailsClosed(unittest.TestCase):
             json.dumps({"timestamp": t, "fields": {"message": "session established"}}) + "\n" for t in stamps))
         _, spans, _ = summarize.extract(self.tmp)
         self.assertEqual(spans, [["a", "1", "s3", 3, 3, "0.800"]])
+
+    def competitor_leg(self, path, daemon="bird"):
+        """A committed v0.74.0 S2 cell of DAEMON at PATH, with its own text daemon.log."""
+        shutil.copytree(V0740 / "matrix" / f"matrix-{daemon}-r1-s2", path)
+        (path / "daemon.log").write_text(BIRD_LOG)
+        return path
+
+    def test_competitor_daemon_log_is_not_parsed(self):
+        cell = self.competitor_leg(self.tmp / "matrix-bird-r1-s2")
+        rows, spans, _ = summarize.extract(self.tmp)
+        self.assertIn(["matrix-s2", "bird", "1", "reload_completion_p50", 1, "101.58", "s"], rows)
+        self.assertEqual([r for r in rows if r[3].startswith("daemon_")], [])
+        self.assertEqual(spans, [])
+        # The cell is named by its provenance, not its arm: a rustbgpd cell
+        # still has its log parsed strictly, and an unknown cell fails.
+        provenance = json.loads((cell / "provenance.json").read_text())
+        (cell / "provenance.json").write_text(json.dumps({**provenance, "cell": "rustbgpd"}))
+        with self.assertRaisesRegex(summarize.ExtractionError, "0 completed reloads, harness measured 4"):
+            summarize.extract(self.tmp)
+        (cell / "provenance.json").write_text(json.dumps({**provenance, "cell": "gobgp"}))
+        with self.assertRaisesRegex(summarize.ExtractionError, "provenance.json names cell 'gobgp'"):
+            summarize.extract(self.tmp)
+
+    def test_cross_daemon_queue_layout(self):
+        legs = self.tmp / "legs"
+        for daemon in ("bird", "openbgpd"):
+            self.competitor_leg(legs / f"matrix-s2-r1-{daemon}" / daemon, daemon)
+        cell = legs / "matrix-s2-r1-rustbgpd" / "rustbgpd"
+        shutil.copytree(V0740 / "matrix" / "matrix-rustbgpd-r1-s2", cell)
+        irr = legs / "irr-ov10-r1"
+        shutil.copytree(V0740 / "irr" / "irr-ov10-rustbgpd-r1", irr)
+        # Set-aside retries and runner logs sit beside the legs.
+        (legs / "matrix-s2-r1-rustbgpd.log").write_text("runner output\n")
+        shutil.copytree(cell, legs / "matrix-s2-r1-rustbgpd.aside.1" / "rustbgpd")
+        # A queue directory is a campaign: rustbgpd's daemon logs must be kept.
+        with self.assertRaisesRegex(summarize.ExtractionError, "matrix-s2-r1-rustbgpd: daemon.log is missing"):
+            summarize.extract(self.tmp)
+        (cell / "daemon.log").write_text(daemon_log(4))
+        with self.assertRaisesRegex(summarize.ExtractionError, "irr-ov10-r1: daemon.log is missing"):
+            summarize.extract(self.tmp)
+        (irr / "rustbgpd-sighup" / "daemon.log").write_text(daemon_log(4))
+        rows, _, _ = summarize.extract(self.tmp)
+        self.assertEqual({(r[0], r[1]) for r in rows},
+                         {("matrix-s2", "bird"), ("matrix-s2", "openbgpd"), ("matrix-s2", "rustbgpd"),
+                          ("irr-ov10", "rustbgpd")})
+        daemon = {(r[0], r[1]) for r in rows if r[3] == "daemon_sighup_to_complete"}
+        self.assertEqual(daemon, {("matrix-s2", "rustbgpd"), ("irr-ov10", "rustbgpd")})
+        # The committed bundle holds the same cells under its own names; only
+        # the stubbed daemon-log rows differ.
+        bundle = {tuple(r) for r in csv.reader((V0740 / "summary.csv").read_text().splitlines()[1:])}
+        self.assertLessEqual({tuple(map(str, r)) for r in rows if r[3] not in summarize.RELOAD_METRICS}, bundle)
 
     def test_bundle_needs_out(self):
         self.assertEqual(quiet_main([str(V0720)]), 2)

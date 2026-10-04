@@ -98,6 +98,18 @@ fleet-wide operator-read fence. Each session ACK and its matching manager
 bookkeeping remain fenced; inline runtime-setting restoration keeps its separate
 fence against inconsistent session and manager metadata.
 
+**Amended:** 2026-10-04 — `BuildInventory` no longer walks the destination table
+under the fence when the destination prestage completed for the same group pair.
+The prestage builds the inventory in its own unfenced slices after staging, and
+from that walk's first slice both groups log every key their table writers touch.
+`BuildInventory` drops the walk results for logged keys and re-checks only those
+keys against the frozen tables, using the same per-key table-drift, source-flip
+and rs-control checks as the fenced walk; the clean-pair predicate is re-run in
+full. A prestaged walk that is missing, unfinished, for another pair, outlived by
+a recreated group, or checked against a smaller RS-ASN set falls back to the
+fenced walk described in Section 3, so the commit-or-degrade outcome is that of a
+fenced walk of the same tables.
+
 ## Context
 
 A live policy reload can move hundreds of route-reflector or route-server

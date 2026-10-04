@@ -910,6 +910,10 @@ pub struct RibManager {
     /// committing cohort that resolves a different destination discards
     /// the unadopted group instead of leaking it.
     prepared_destination: Option<usize>,
+    /// The clean-transition inventory walked unfenced after the prestage
+    /// that staged `prepared_destination`; consumed (re-checked against
+    /// the churned keys only) by the fenced `BuildInventory`.
+    prestaged_inventory: Option<update_groups::PrestagedTransitionInventory>,
     /// Withdrawn NLRI identities accumulated across the current distribution
     /// window. Retired only after distribution so the exact overlay can
     /// suppress any rejected-only wire withdrawal first.
@@ -1943,6 +1947,7 @@ impl RibManager {
             post_commit_query_trace: None,
             pending_destination_prestage: None,
             prepared_destination: None,
+            prestaged_inventory: None,
             pending_exact_export_withdrawals: HashSet::new(),
             pending_distribute_changed: HashSet::new(),
             pending_distribute_affected: HashSet::new(),

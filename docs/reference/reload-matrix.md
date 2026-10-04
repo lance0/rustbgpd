@@ -28,9 +28,13 @@ bug — file an issue.
 | **live** | Change applies in place on SIGHUP or a supported runtime CRUD RPC without requiring a replacement session task. Enforcement of the new setting can still stop BGP, such as a lowered prefix limit exceeded by the current route count. The diff routes through `neighbor_runtime_equal()` / `diff_neighbors()` / `diff_policy()`. |
 | **reload-applied** | Change hot-applies to a running subsystem reconciler or derived matcher on SIGHUP / supported runtime CRUD, but unlike per-session `live` the in-memory config snapshot advances only after the subsystem or snapshot consumer **acks** the new desired set. Used by `[[fib_tables]]` (ADR-0061 FIB reconciler) and `[[dynamic_neighbors]]` matcher rebuilds. Surfaced under the `reload_applied.*` keys in `rustbgpd --diff --json`. |
 | **restart-required** | Change is accepted at parse time but **pinned back to the live value** for the duration of this reload — the new value won't take effect until the next daemon restart. Surfaced as an `ERROR`-level log line during reload and visible in `rustbgpd --diff` until restart. |
-| **rejected** | Validation refuses the change at parse time with a typed `ConfigError`. The daemon keeps running with the old value; no state mutates. |
-| **validation-only** | Field is validated at parse time (typically as a cross-field constraint marker) and has no runtime effect of its own. |
 | **coordinator-gated** | EVPN runtime tables: supported shapes hot-apply through the ADR-0063 coordinator, and the runtime snapshot advances only after the daemon actors accept the change; unsupported shapes pin back to the committed model (see the EVPN section below). |
+
+These classes describe accepted changes. A candidate that fails parse-time
+validation is refused whole and never reaches a field class: the daemon
+refuses to start, or a reload keeps the running config. See
+[Rejected configurations](#rejected-configurations-parse-time)
+and [Validation-only constraints](#validation-only-constraints).
 
 ## SIGHUP reload routes
 

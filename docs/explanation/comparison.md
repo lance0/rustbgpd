@@ -771,8 +771,8 @@ line of running config — as reported against FRR 8.1 in
 December 2021, in releases after the reporter's). rustbgpd's
 reload path makes that failure class structurally unreachable rather than
 patched: a candidate config is parsed and validated in full before anything
-is applied ([`rustbgpd --check`](../reference/configuration.md), the `rejected` class in
-the [reload matrix](../reference/reload-matrix.md)), a file that fails validation leaves
+is applied ([`rustbgpd --check`](../reference/configuration.md), the parse-time
+[rejected configurations](../reference/reload-matrix.md#rejected-configurations-parse-time)), a file that fails validation leaves
 the running daemon untouched by construction, and
 [commit-confirmed transactions](../reference/operations.md) add an explicit
 operator-confirmation window with automatic boot-revert if confirmation
