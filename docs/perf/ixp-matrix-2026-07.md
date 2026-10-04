@@ -792,3 +792,12 @@ v0.72.0 rows reflect a change between the releases, not the host. Results and
 method are in the
 [v0.73.0 headline refresh receipt](headline-refresh-v0730-2026-09.md). The
 sections above are unchanged as history.
+
+## v0.74.0 cross-daemon refresh — 2026-10-04
+
+All three daemons were re-measured overnight 2026-10-03 to 2026-10-04: the
+v0.74.0 release tree, BIRD 3.3.2 and OpenBGPD 9.2, three runs each with the
+daemon order rotated, on the jemalloc receiver harness. Results, method and
+the cross-date context for the rows above are in the
+[v0.74.0 cross-daemon receipt](cross-daemon-v0740-2026-10.md). The sections
+above are unchanged as history.

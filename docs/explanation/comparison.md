@@ -626,37 +626,28 @@ per-run values, plus the [controlled attribution
 receipt](../perf/per-peer-rss-attribution-2026-07.md) for the correction.
 
 At route-server scale, the [IXP receipt
-matrix](../perf/ixp-matrix-2026-07.md) compares rustbgpd, BIRD 3.3.1, and
-OpenBGPD 9.2 head-to-head at 700 peers × 400k prefixes under live churn
+matrix](../perf/ixp-matrix-2026-07.md) compares rustbgpd, BIRD, and
+OpenBGPD head-to-head at 700 peers × 400k prefixes under live churn
 — policy-reload stall and completion, member-flap propagation,
 convergence, and RSS — with identical wire inputs, config disclosure,
-and the losses published alongside the wins. Current rustbgpd
-source-equivalent v0.68.0 rows were measured 2026-08-30; BIRD remains dated,
-measured 2026-08-08, and the OpenBGPD 9.2 comparator amendment was measured
-2026-08-30.
+and the losses published alongside the wins. The current rows are the
+[v0.74.0 cross-daemon receipt](../perf/cross-daemon-v0740-2026-10.md), measured 2026-10-03 to 2026-10-04,
+which ran rustbgpd v0.74.0, BIRD 3.3.2, and OpenBGPD 9.2 on one host in the
+same night. The matrix's earlier rows are dated, last measured 2026-08-30,
+and their receiver-bound completion rows used the glibc-malloc harness, so
+they are not directly comparable ([why](../perf/headline-refresh-jemalloc-2026-10.md#why-earlier-receiver-bound-rows-are-not-comparable)).
 
-At IRR scale, the [current v0.68.0 receipt](../perf/irr-reload-v0680-2026-08.md),
-measured 2026-08-30, retains twelve source-equivalent roots at 320 members ×
-183,040 generated IPv4 prefixes. rustbgpd completion p50 is 0.852–1.085
-seconds across 0%, 10%, and 50% received-view overlap, against BIRD's
-11.861–15.211 seconds and OpenBGPD's 42.939–61.959 seconds. Every retained row
-has 320/320 sessions and zero parse errors, and each overlap quartet passes the
-received-view delta verifier. The older IRR receipts are historical records.
-
-> **Dated caveat (2026-10-03).** The comparative results above stay as
-> measured; no competitor was rerun. The [headline refresh on the jemalloc
-> harness](../perf/headline-refresh-jemalloc-2026-10.md) measures current main (`481e0187d`) on the same host.
-> Against the v0.68.0 control in the dated [2026-09-28 v0.73.0
-> receipt](../perf/headline-refresh-v0730-2026-09.md), compared across dates, cold convergence and flap
-> re-announce have recovered: S1 cold convergence is 2.6–2.8 s against
-> 3.4–3.6 s, and S3 re-announce p50 is 0.35–0.40 s against 0.36–0.40 s.
-> First re-announcement remains about 0.03 s slower, at 0.24 s against
-> 0.20–0.21 s. The daemon's reload path is still slower: its own log puts
-> SIGHUP to reload complete at 1,099–1,159 ms for the S2 policy reload and
-> 1,029–1,084 ms for the IRR 0% reload, against 886–987 ms and 765–826 ms
-> for v0.68.0. The 2026-09-28 receipt's receiver-bound completion rows were
-> inflated by its glibc-malloc `reloadstall` harness
-> ([why](../perf/headline-refresh-jemalloc-2026-10.md#why-earlier-receiver-bound-rows-are-not-comparable)); that receipt is unchanged.
+At IRR scale, the [same-night v0.74.0 receipt](../perf/cross-daemon-v0740-2026-10.md) runs three
+cross-daemon roots at each of 0%, 10%, and 50% received-view overlap, at
+320 members × 183,040 generated IPv4 prefixes. rustbgpd completion p50 is
+0.592–0.822 seconds across the three overlaps, against BIRD 3.3.2's
+12.412–15.191 seconds and OpenBGPD 9.2's 43.884–63.240 seconds, measured
+2026-10-03 to 2026-10-04. Every row has 320/320 sessions and zero parse
+errors. At 50% overlap, OpenBGPD's changed-observer gap p50 is shorter than
+rustbgpd's (378–445 against 566–643 ms). The
+[v0.68.0 receipt](../perf/irr-reload-v0680-2026-08.md), measured 2026-08-30,
+keeps the grouped control and its received-view delta verification; the
+older IRR receipts are historical records.
 
 A separate [1,000-peer retained receipt](../perf/route-server-1000-2026-07.md),
 measured 2026-07-20 with a source-equivalent v0.68.0 rerun measured 2026-08-30,
@@ -762,22 +753,12 @@ metric this market has actually selected on — and it is exactly what the
 [IXP receipt matrix](../perf/ixp-matrix-2026-07.md) measures head-to-head at
 700 peers × 400k prefixes: rustbgpd is the only daemon of the three tested
 that holds both sub-second median UPDATE stall and single-digit-seconds
-policy-reload completion (rustbgpd p50 1.209–1.350 s in the v0.68.0
-source-equivalent refresh measured 2026-08-30, vs 64–85 s for BIRD 3.3.1
-measured 2026-08-08 and 201–206 s for OpenBGPD 9.2 measured 2026-08-30, on the
-same host and wire inputs), with per-daemon wins and losses — including OpenBGPD's smaller raw
-stall and its repeated-reconnect IdleHold pacing — published in the receipt.
-
-> **Dated caveat (2026-10-03).** The completion figures above are the
-> dated comparative results; BIRD and OpenBGPD were not rerun. They
-> were taken on the glibc-malloc `reloadstall` harness, so they are not
-> directly comparable with completion times on the current jemalloc harness
-> ([why](../perf/headline-refresh-jemalloc-2026-10.md#why-earlier-receiver-bound-rows-are-not-comparable)). The
-> [headline refresh on the jemalloc harness](../perf/headline-refresh-jemalloc-2026-10.md) measures current
-> main's S2 completion p50 at 1.12–1.17 s. The daemon's own reload clock,
-> 1,099–1,159 ms from SIGHUP to reload complete, is still slower than the
-> 886–987 ms of the v0.68.0 control in the dated
-> [2026-09-28 v0.73.0 receipt](../perf/headline-refresh-v0730-2026-09.md), compared across dates.
+policy-reload completion (rustbgpd v0.74.0 p50 0.83–0.90 s, against
+89.06–103.61 s for BIRD 3.3.2 and 204.08–211.99 s for OpenBGPD 9.2, on the
+same host and wire inputs in the
+[same-night v0.74.0 receipt](../perf/cross-daemon-v0740-2026-10.md), measured 2026-10-03 to 2026-10-04), with
+per-daemon wins and losses — including OpenBGPD's smaller raw stall —
+published in the receipts.
 
 Reload speed is only half the operator concern; the other half is what an
 invalid config does to a running router. FRR's reload driver

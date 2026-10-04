@@ -27,26 +27,16 @@ superseded campaigns remain below with their original provenance.
 | Evaluation question | Current evidence | Boundary |
 |---|---|---|
 | How did the measured releases compare for route import and convergence? | [v0.68.0 cross-stack receipt](perf/competitive-bgperf2-v0680-2026-08.md) and [80 raw rows](perf/artifacts/competitive-bgperf2-v0680-2026-08/results.csv) | Counterbalanced same-host campaign measured 2026-08-30: exact rustbgpd v0.68.0, BIRD 2.19.2, FRR 10.7.0, and GoBGP 4.8.0. All 80 cells reached the exact expected route count across the fixed 10×1k, 2×10k, 2×100k, 30×1k, and 100×1k shapes. IPv4 import/convergence only — not a full-table, policy, reload, churn, restart, IPv6, or OpenBGPD claim. |
-| What is the current IRR reload result? | [v0.68.0 IRR reload receipt](perf/irr-reload-v0680-2026-08.md), with 96 verifier-approved rows | Source-equivalent v0.68.0 campaign measured 2026-08-30 at 320 members × 183,040 generated IPv4 prefixes, two repeats, four reloads, and 0%/10%/50% received-view overlap. All sessions remained up with zero parse errors. One fixed shape on one host. |
+| What is the current IRR reload result? | [v0.74.0 cross-daemon receipt](perf/cross-daemon-v0740-2026-10.md), with 108 verifier-checked rows | rustbgpd v0.74.0, BIRD 3.3.2, and OpenBGPD 9.2 in the same night, measured 2026-10-03 to 2026-10-04 at 320 members × 183,040 generated IPv4 prefixes, three roots per overlap, four reloads, and 0%/10%/50% received-view overlap. All sessions remained up with zero parse errors. One fixed shape on one host; the v0.68.0 receipt keeps the grouped control. |
 | What current high-N shapes have run? | [v0.68.0 high-N receipt](perf/high-n-route-server-v0680-2026-08.md) | Exact-source one-run observations measured 2026-08-30 at 2,500 and 5,000 route-server peers. No interpolation or larger-fleet extrapolation. |
-| What happens at IXP route-server scale under reload and member churn? | [IXP route-server matrix](perf/ixp-matrix-2026-07.md) | 700 clients × 400,400 IPv4 routes. Current rustbgpd source-equivalent v0.68.0 rows were measured 2026-08-30; BIRD remains the v0.64.0 refresh measured 2026-08-08, and OpenBGPD 9.2 is a supplemental comparator amendment measured 2026-08-30. |
+| What happens at IXP route-server scale under reload and member churn? | [v0.74.0 cross-daemon receipt](perf/cross-daemon-v0740-2026-10.md) and the [IXP route-server matrix](perf/ixp-matrix-2026-07.md) | 700 clients × 400,400 IPv4 routes. rustbgpd v0.74.0, BIRD 3.3.2, and OpenBGPD 9.2 were measured in the same night, 2026-10-03 to 2026-10-04, three runs each. The matrix's earlier rows are dated. |
 | Can an IRR-scale candidate use the transactional apply path? | [IRR transactional-apply receipt](perf/irr-transactional-apply-2026-08.md) and [compact evidence](perf/artifacts/irr-transactional-apply-2026-08/README.md) | Two independent single-host runs measured 2026-08-04 at clean, then-current `origin/main` commit `02c752408b2336061da050d3396c3f7a538d3389`. Each completed 4/4 streamed Plan → token-bound Apply → commit-confirm cycles for a ~295.6 MB candidate at 320 members × 183,040 routes and 3,218,965 IRR filter entries, with 320/320 sessions and zero parse errors. Explicit abort and 10 s timeout auto-revert restored disk and runtime byte-exactly; rollback completed 69.5 s / 69.0 s after the deadline under a 600 s ceiling. One fleet shape, two fixed-order repeats; not a cross-daemon comparison. |
 | Which adoption capabilities have direct proof? | [IXP evaluation matrix](explanation/ixp-evaluation.md) | Receipt or config per row, including the explicit gap for dual-stack performance evidence. |
 
-> **Dated caveat (2026-10-03).** The comparative results above stay as
-> measured; no competitor was rerun. The [headline refresh on the jemalloc
-> harness](perf/headline-refresh-jemalloc-2026-10.md) measures current main (`481e0187d`) on the same host.
-> Against the v0.68.0 control in the dated [2026-09-28 v0.73.0
-> receipt](perf/headline-refresh-v0730-2026-09.md), compared across dates, cold convergence and flap
-> re-announce have recovered: S1 cold convergence is 2.6–2.8 s against
-> 3.4–3.6 s, and S3 re-announce p50 is 0.35–0.40 s against 0.36–0.40 s.
-> First re-announcement remains about 0.03 s slower, at 0.24 s against
-> 0.20–0.21 s. The daemon's reload path is still slower: its own log puts
-> SIGHUP to reload complete at 1,099–1,159 ms for the S2 policy reload and
-> 1,029–1,084 ms for the IRR 0% reload, against 886–987 ms and 765–826 ms
-> for v0.68.0. The 2026-09-28 receipt's receiver-bound completion rows were
-> inflated by its glibc-malloc `reloadstall` harness
-> ([why](perf/headline-refresh-jemalloc-2026-10.md#why-earlier-receiver-bound-rows-are-not-comparable)); that receipt is unchanged.
+> **Harness boundary.** Receiver-bound completion and stall rows measured
+> before 2026-10-03 used the glibc-malloc `reloadstall` harness and are not
+> directly comparable with the v0.74.0 rows
+> ([why](perf/headline-refresh-jemalloc-2026-10.md#why-earlier-receiver-bound-rows-are-not-comparable)).
 
 The three commonly cited 1,000-peer memory values are not a release trend:
 
@@ -1723,17 +1713,18 @@ comparison is therefore four-way. Root cause and retained evidence are in the
 [receipt](perf/competitive-bgperf2-2026-07.md#openbgpd-could-not-be-collected--harness-defect-not-a-daemon-result).
 The [IXP receipt matrix](perf/ixp-matrix-2026-07.md) carries a head-to-head
 OpenBGPD 9.2 comparison through a different harness (700 clients × 400,400
-routes, policy reload; measured 2026-08-30), and the IRR-scale reload receipts
-retain their separate current OpenBGPD 9.2 comparison:
+routes, policy reload; the current same-night rows are in the
+[v0.74.0 cross-daemon receipt](perf/cross-daemon-v0740-2026-10.md)), and the
+IRR-scale reload receipts retain their separate OpenBGPD 9.2 comparison:
 
-| IRR-scale filter reload (320 members × 183,040 generated prefixes, 0%/10%/50% received-view overlap) | rustbgpd | BIRD 3.3.2 | OpenBGPD 9.2 |
+| IRR-scale filter reload (320 members × 183,040 generated prefixes, 0%/10%/50% received-view overlap) | rustbgpd v0.74.0 | BIRD 3.3.2 | OpenBGPD 9.2 |
 |---|---|---|---|
-| Reload completion p50 | **0.852–1.085 s** | 11.861–15.211 s | 42.939–61.959 s |
+| Reload completion p50 | **0.592–0.822 s** | 12.412–15.191 s | 43.884–63.240 s |
 
-Source: the [current v0.68.0 IRR reload
-receipt](perf/irr-reload-v0680-2026-08.md). All 96 rows retain 320/320 sessions,
-zero parse errors, and verifier-approved received-view deltas. Cross-daemon
-memory rankings are omitted because daemon and container defaults differ.
+Source: the [v0.74.0 cross-daemon receipt](perf/cross-daemon-v0740-2026-10.md), measured 2026-10-03 to
+2026-10-04, with all three daemons in each root. All 108 rows retain 320/320
+sessions and zero parse errors. Cross-daemon memory rankings are omitted
+because daemon and container defaults differ.
 
 One BIRD cell needed a third run: 100p × 1k total measured 24.51 s, then
 15.17 s, then 15.22 s, and the published median is 15.22 s. The outlier is a

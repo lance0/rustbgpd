@@ -14,9 +14,19 @@
       "measured_on": "2026-08-30"
     },
     {
+      "path": "docs/perf/cross-daemon-v0740-2026-10.md",
+      "measured_commit": "4d14851f77b064dd254f2319708dd91f281f9b0d",
+      "measured_on": "2026-10-03"
+    },
+    {
       "path": "docs/perf/fib-kernel-dump-2026-08.md",
       "measured_commit": "d3e6c3571116261c47039b603ec64db14100ea0e",
       "measured_on": "2026-08-30"
+    },
+    {
+      "path": "docs/perf/headline-refresh-jemalloc-2026-10.md",
+      "measured_commit": "481e0187d873dd8e7715033224be0fe90cb7d4e2",
+      "measured_on": "2026-10-03"
     },
     {
       "path": "docs/perf/headline-refresh-v0730-2026-09.md",
@@ -78,7 +88,7 @@
     {
       "source": "docs/benchmarks.md",
       "anchor": "| What is the current IRR reload result? |",
-      "receipt": "docs/perf/irr-reload-v0680-2026-08.md"
+      "receipt": "docs/perf/cross-daemon-v0740-2026-10.md"
     },
     {
       "source": "docs/explanation/comparison.md",
@@ -87,8 +97,23 @@
     },
     {
       "source": "docs/explanation/comparison.md",
-      "anchor": "At IRR scale, the [current v0.68.0 receipt]",
+      "anchor": "At IRR scale, the [same-night v0.74.0 receipt]",
+      "receipt": "docs/perf/cross-daemon-v0740-2026-10.md"
+    },
+    {
+      "source": "docs/explanation/comparison.md",
+      "anchor": "At IRR scale, the [same-night v0.74.0 receipt]",
       "receipt": "docs/perf/irr-reload-v0680-2026-08.md"
+    },
+    {
+      "source": "docs/explanation/comparison.md",
+      "anchor": "At route-server scale, the [IXP receipt",
+      "receipt": "docs/perf/cross-daemon-v0740-2026-10.md"
+    },
+    {
+      "source": "docs/explanation/comparison.md",
+      "anchor": "At route-server scale, the [IXP receipt",
+      "receipt": "docs/perf/headline-refresh-jemalloc-2026-10.md"
     },
     {
       "source": "docs/explanation/comparison.md",
@@ -108,6 +133,11 @@
     {
       "source": "docs/explanation/ixp-evaluation.md",
       "anchor": "| 7 | Reload at IRR scale |",
+      "receipt": "docs/perf/cross-daemon-v0740-2026-10.md"
+    },
+    {
+      "source": "docs/explanation/ixp-evaluation.md",
+      "anchor": "| 7 | Reload at IRR scale |",
       "receipt": "docs/perf/irr-reload-v0680-2026-08.md"
     },
     {
@@ -118,7 +148,7 @@
     {
       "source": "docs/perf/README.md",
       "anchor": "- **IRR-scale filter reload**",
-      "receipt": "docs/perf/headline-refresh-v0730-2026-09.md"
+      "receipt": "docs/perf/cross-daemon-v0740-2026-10.md"
     },
     {
       "source": "docs/perf/README.md",
@@ -128,7 +158,12 @@
     {
       "source": "docs/perf/README.md",
       "anchor": "- **Policy reload at IXP scale**",
-      "receipt": "docs/perf/headline-refresh-v0730-2026-09.md"
+      "receipt": "docs/perf/cross-daemon-v0740-2026-10.md"
+    },
+    {
+      "source": "docs/perf/README.md",
+      "anchor": "- **Policy reload at IXP scale**",
+      "receipt": "docs/perf/headline-refresh-jemalloc-2026-10.md"
     },
     {
       "source": "docs/perf/README.md",
