@@ -243,6 +243,19 @@ impl AdjRibOut {
         self.routes.iter()
     }
 
+    /// Unicast slab slots (occupied + vacant). Handles are stable while a
+    /// route stays staged, so a walk over `0..unicast_slot_count()` that
+    /// resumes across mutations visits every untouched route exactly once,
+    /// in [`Self::iter`] order.
+    pub(crate) fn unicast_slot_count(&self) -> usize {
+        self.routes.slot_count()
+    }
+
+    /// The unicast route in one slab slot, `None` for a vacant slot.
+    pub(crate) fn unicast_slot(&self, slot: usize) -> Option<&Route> {
+        self.routes.get(u32::try_from(slot).ok()?)
+    }
+
     /// Iterate unicast routes in route-query identity order, beginning at
     /// the cursor prefix and excluding identities at or before `after`.
     ///

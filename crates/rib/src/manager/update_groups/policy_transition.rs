@@ -24,6 +24,114 @@ fn inventory_degraded(source: usize, destination: usize, key: Option<(Prefix, u3
     );
 }
 
+/// One destination entry's verdict in a clean-transition inventory walk.
+enum InventoryEntry {
+    Unchanged,
+    /// Announced in the shared delta. `tagged` reports an RFC 7947
+    /// control-form community for one of the walk's RS ASNs.
+    Changed {
+        next_hop: Option<NextHopAction>,
+        tagged: bool,
+    },
+}
+
+/// The per-key checks every clean-transition inventory walk applies to one
+/// staged destination entry: the source group stages the same key (`Err`
+/// "source table drift") from the same source peer (`Err` "source flip").
+/// A changed entry is reported with its rs-control tag verdict, taken on
+/// EITHER side of policy (see
+/// [`RibManager::extend_clean_policy_transition_inventory`]).
+fn inventory_entry(
+    old: &GroupRibOut,
+    new: &GroupRibOut,
+    route: &Route,
+    rs_asns: &[u32],
+) -> Result<InventoryEntry, &'static str> {
+    use crate::manager::distribution::rs_control::rs_control_route_tagged;
+    let key = (route.prefix, route.path_id);
+    let prior = old
+        .table
+        .get(&route.prefix, route.path_id)
+        .ok_or("source table drift")?;
+    if prior.peer != route.peer {
+        return Err("source flip");
+    }
+    let next_hop = new.nh_override(key);
+    if routes_equal(prior, route) && old.nh_override(key) == next_hop {
+        return Ok(InventoryEntry::Unchanged);
+    }
+    let tagged = !rs_asns.is_empty() && {
+        let (old_communities, old_large) = old.source_control(key);
+        let (new_communities, new_large) = new.source_control(key);
+        rs_asns.iter().any(|&rs_asn| {
+            rs_control_route_tagged(route.communities(), route.large_communities(), rs_asn)
+                || rs_control_route_tagged(old_communities, old_large, rs_asn)
+                || rs_control_route_tagged(new_communities, new_large, rs_asn)
+        })
+    };
+    Ok(InventoryEntry::Changed { next_hop, tagged })
+}
+
+/// A clean-transition inventory built outside the fence, right after the
+/// unfenced destination prestage. From the walk's first slice on, both
+/// groups log every key a table write touches
+/// ([`GroupRibOut::inventory_log`]); the fenced `BuildInventory` drops
+/// those keys' walk results and re-checks only them against the frozen
+/// tables, so every drift check stays exact without a fenced full walk.
+pub(in crate::manager) struct PrestagedTransitionInventory {
+    source: usize,
+    destination: usize,
+    /// Every distinct RS ASN configured when the walk began; `tagged` is
+    /// relative to this set.
+    rs_asns: Vec<u32>,
+    /// Next destination slab slot to visit.
+    cursor: usize,
+    complete: bool,
+    announce: Vec<Route>,
+    next_hop_override: Vec<Option<NextHopAction>>,
+    /// Keys failing a drift check as of their last visit.
+    failed: FastMap<(Prefix, u32), &'static str>,
+    /// Changed keys tagged for an ASN in `rs_asns`.
+    tagged: FastSet<(Prefix, u32)>,
+}
+
+/// What the fenced re-check made of a prestaged inventory.
+pub(in crate::manager) enum PrestagedInventoryOutcome {
+    /// Equal to a fenced full walk of the current tables.
+    Ready(CleanPolicyTransitionInventoryBuilder),
+    /// A drift check fails on the current tables: degrade exactly as the
+    /// fenced walk would.
+    Degraded,
+    /// The prestaged walk cannot vouch for the current tables (none, for
+    /// another pair, unfinished, a group recreated, or an RS ASN outside
+    /// the walk's set): run the fenced walk.
+    Unusable,
+}
+
+/// Whether a source/destination pair is clean enough for the strict
+/// transition inventory: dirty state, residue or private-family
+/// participation rejects the optimization before a member is moved or an
+/// envelope is emitted, and equal unicast table sizes (with every
+/// destination key present in the source) prove equal key sets.
+fn clean_inventory_pair(old: &GroupRibOut, new: &GroupRibOut) -> bool {
+    let clean = |group: &GroupRibOut| {
+        // Per-client-best groups are excluded from the ADR-0105 narrow
+        // fast path outright — its clean predicate (zero
+        // policy-filtered routes on both sides) contradicts the
+        // mitigation's reason to exist. Re-inclusion is demand-gated
+        // (ADR-0126 Decision 8).
+        !group.per_client_best
+            && group.dirty_members.is_empty()
+            && group.tombstones.is_empty()
+            && group.vpn_tombstones.is_empty()
+            && group.table.vpn_len() == 0
+            && group.policy_filtered.is_empty()
+            && group.vpn_policy_denied.is_empty()
+            && group.otc_blocked.is_empty()
+    };
+    clean(old) && clean(new) && old.table.len() == new.table.len()
+}
+
 impl RibManager {
     /// Snapshot route identities for the strict clean transition inventory.
     /// Dirty state or private-family participation rejects the optimization
@@ -33,24 +141,9 @@ impl RibManager {
         source: usize,
         destination: usize,
     ) -> Option<Vec<(Prefix, u32)>> {
-        let clean = |group: &GroupRibOut| {
-            // Per-client-best groups are excluded from the ADR-0105 narrow
-            // fast path outright — its clean predicate (zero
-            // policy-filtered routes on both sides) contradicts the
-            // mitigation's reason to exist. Re-inclusion is demand-gated
-            // (ADR-0126 Decision 8).
-            !group.per_client_best
-                && group.dirty_members.is_empty()
-                && group.tombstones.is_empty()
-                && group.vpn_tombstones.is_empty()
-                && group.table.vpn_len() == 0
-                && group.policy_filtered.is_empty()
-                && group.vpn_policy_denied.is_empty()
-                && group.otc_blocked.is_empty()
-        };
         let old = self.group_ribs.get(&source)?;
         let new = self.group_ribs.get(&destination)?;
-        if !clean(old) || !clean(new) || old.table.len() != new.table.len() {
+        if !clean_inventory_pair(old, new) {
             return None;
         }
         self.replacement_checkpoint(true);
@@ -79,10 +172,6 @@ impl RibManager {
     /// shared cohort at zero extra passes; a tagged inventory hands the
     /// whole cohort to the authoritative per-peer path, whose emit seams
     /// apply the per-target filter.
-    #[expect(
-        clippy::too_many_lines,
-        reason = "keep staging and its readiness-aware temporary retirement in one transaction"
-    )]
     pub(in crate::manager) fn extend_clean_policy_transition_inventory(
         &self,
         source: usize,
@@ -91,7 +180,6 @@ impl RibManager {
         rs_asns: &[u32],
         inventory: &mut CleanPolicyTransitionInventoryBuilder,
     ) -> Option<()> {
-        use crate::manager::distribution::rs_control::rs_control_route_tagged;
         let Some(old) = self.group_ribs.get(&source) else {
             inventory_degraded(source, destination, None, "source group missing");
             return None;
@@ -124,41 +212,27 @@ impl RibManager {
                 inventory_degraded(source, destination, Some(key), "destination table drift");
                 return None;
             };
-            let Some(prior) = old.table.get(&prefix, path_id) else {
-                inventory_degraded(source, destination, Some(key), "source table drift");
-                return None;
-            };
-            if prior.peer != route.peer {
-                inventory_degraded(source, destination, Some(key), "source flip");
-                return None;
-            }
-            let next_hop = new.nh_override(key);
-            if !routes_equal(prior, route) || old.nh_override(key) != next_hop {
-                if !rs_asns.is_empty() {
-                    let (old_communities, old_large) = old.source_control(key);
-                    let (new_communities, new_large) = new.source_control(key);
-                    let tagged = rs_asns.iter().any(|&rs_asn| {
-                        rs_control_route_tagged(
-                            route.communities(),
-                            route.large_communities(),
-                            rs_asn,
-                        ) || rs_control_route_tagged(old_communities, old_large, rs_asn)
-                            || rs_control_route_tagged(new_communities, new_large, rs_asn)
-                    });
-                    if tagged {
-                        inventory_degraded(source, destination, Some(key), "rs-control tag");
-                        return None;
+            match inventory_entry(old, new, route, rs_asns) {
+                Err(term) => {
+                    inventory_degraded(source, destination, Some(key), term);
+                    return None;
+                }
+                Ok(InventoryEntry::Changed { tagged: true, .. }) => {
+                    inventory_degraded(source, destination, Some(key), "rs-control tag");
+                    return None;
+                }
+                Ok(InventoryEntry::Unchanged) => {}
+                Ok(InventoryEntry::Changed { next_hop, .. }) => {
+                    if inventory.announce.capacity() == 0 {
+                        self.replacement_checkpoint(true);
+                        inventory.announce.reserve_exact(new.table.len());
+                        self.replacement_checkpoint(true);
+                        inventory.next_hop_override.reserve_exact(new.table.len());
+                        self.replacement_checkpoint(true);
                     }
+                    inventory.announce.push(route.clone());
+                    inventory.next_hop_override.push(next_hop);
                 }
-                if inventory.announce.capacity() == 0 {
-                    self.replacement_checkpoint(true);
-                    inventory.announce.reserve_exact(new.table.len());
-                    self.replacement_checkpoint(true);
-                    inventory.next_hop_override.reserve_exact(new.table.len());
-                    self.replacement_checkpoint(true);
-                }
-                inventory.announce.push(route.clone());
-                inventory.next_hop_override.push(next_hop);
             }
 
             let label = new.permit_policy_label.as_deref();
@@ -203,6 +277,290 @@ impl RibManager {
         }
         self.replacement_checkpoint(true);
         Some(())
+    }
+
+    /// Start the unfenced inventory walk for a just-prestaged destination.
+    /// Skipped (the fence then walks as before) unless both groups exist
+    /// and are clean now; the fenced re-check repeats every pair predicate.
+    pub(in crate::manager) fn begin_prestaged_transition_inventory(
+        &mut self,
+        source: usize,
+        destination: usize,
+    ) {
+        self.retire_prestaged_transition_inventory();
+        let (Some(old), Some(new)) = (
+            self.group_ribs.get(&source),
+            self.group_ribs.get(&destination),
+        ) else {
+            return;
+        };
+        if source == destination || !clean_inventory_pair(old, new) {
+            return;
+        }
+        let mut rs_asns = self.peer_rs_control.values().copied().collect::<Vec<_>>();
+        rs_asns.sort_unstable();
+        rs_asns.dedup();
+        for gid in [source, destination] {
+            if let Some(group) = self.group_ribs.get_mut(&gid) {
+                group.inventory_log = Some(FastSet::default());
+            }
+        }
+        self.prestaged_inventory = Some(PrestagedTransitionInventory {
+            source,
+            destination,
+            rs_asns,
+            cursor: 0,
+            complete: false,
+            announce: Vec::new(),
+            next_hop_override: Vec::new(),
+            failed: FastMap::default(),
+            tagged: FastSet::default(),
+        });
+    }
+
+    /// Walk one bounded slice of destination slab slots into the prestaged
+    /// inventory. Returns `true` once no walk remains (finished, never
+    /// begun, or abandoned because a group disappeared).
+    pub(in crate::manager) fn extend_prestaged_transition_inventory(&mut self) -> bool {
+        let Some(mut prestaged) = self.prestaged_inventory.take() else {
+            return true;
+        };
+        let Some(complete) = self.walk_prestaged_transition_slice(&mut prestaged) else {
+            self.prestaged_inventory = Some(prestaged);
+            self.retire_prestaged_transition_inventory();
+            return true;
+        };
+        prestaged.complete = complete;
+        self.prestaged_inventory = Some(prestaged);
+        complete
+    }
+
+    /// `None` when a group disappeared or was recreated (its key log is
+    /// gone), else whether the walk reached the last slab slot.
+    fn walk_prestaged_transition_slice(
+        &self,
+        prestaged: &mut PrestagedTransitionInventory,
+    ) -> Option<bool> {
+        let old = self.group_ribs.get(&prestaged.source)?;
+        let new = self.group_ribs.get(&prestaged.destination)?;
+        if old.inventory_log.is_none() || new.inventory_log.is_none() {
+            return None;
+        }
+        let slots = new.table.unicast_slot_count();
+        let end = crate::manager::policy_transition_slice_end(
+            prestaged.cursor,
+            slots,
+            crate::manager::POLICY_TRANSITION_ROUTE_SLICE,
+        );
+        for slot in prestaged.cursor..end {
+            crate::manager::replacement_readiness_checkpoint_at(
+                &self.replacement_readiness,
+                "shared_inventory",
+                false,
+            );
+            let Some(route) = new.table.unicast_slot(slot) else {
+                continue;
+            };
+            let key = (route.prefix, route.path_id);
+            match inventory_entry(old, new, route, &prestaged.rs_asns) {
+                Err(term) => {
+                    prestaged.failed.insert(key, term);
+                }
+                Ok(InventoryEntry::Unchanged) => {}
+                Ok(InventoryEntry::Changed { next_hop, tagged }) => {
+                    if prestaged.announce.capacity() == 0 {
+                        self.replacement_checkpoint(true);
+                        prestaged.announce.reserve_exact(new.table.len());
+                        self.replacement_checkpoint(true);
+                        prestaged.next_hop_override.reserve_exact(new.table.len());
+                        self.replacement_checkpoint(true);
+                    }
+                    prestaged.announce.push(route.clone());
+                    prestaged.next_hop_override.push(next_hop);
+                    if tagged {
+                        prestaged.tagged.insert(key);
+                    }
+                }
+            }
+        }
+        prestaged.cursor = end;
+        Some(end == slots)
+    }
+
+    /// Under the fence: turn the prestaged inventory for `source` →
+    /// `destination` into the exact inventory a fenced full walk of the
+    /// current tables would build, re-checking only the keys churn touched
+    /// since the walk began. Always consumes the prestaged inventory and
+    /// stops both groups' key logs.
+    pub(in crate::manager) fn take_prestaged_transition_inventory(
+        &mut self,
+        source: usize,
+        destination: usize,
+        rs_asns: &[u32],
+    ) -> PrestagedInventoryOutcome {
+        let Some(mut prestaged) = self.prestaged_inventory.take() else {
+            return PrestagedInventoryOutcome::Unusable;
+        };
+        let logs = [prestaged.source, prestaged.destination].map(|gid| {
+            self.group_ribs
+                .get_mut(&gid)
+                .and_then(|group| group.inventory_log.take())
+        });
+        let usable = (prestaged.source, prestaged.destination) == (source, destination)
+            && prestaged.complete
+            && logs.iter().all(Option::is_some)
+            && rs_asns
+                .iter()
+                .all(|asn| prestaged.rs_asns.binary_search(asn).is_ok());
+        let mut dirty = FastSet::default();
+        for log in logs.into_iter().flatten() {
+            dirty.extend(log);
+        }
+        let outcome = if usable {
+            self.recheck_prestaged_transition_inventory(&mut prestaged, &dirty, rs_asns)
+        } else {
+            PrestagedInventoryOutcome::Unusable
+        };
+        crate::manager::retire_hash_set(&mut dirty, &mut || self.replacement_checkpoint(false));
+        self.prestaged_inventory = Some(prestaged);
+        self.retire_prestaged_transition_inventory();
+        outcome
+    }
+
+    fn recheck_prestaged_transition_inventory(
+        &self,
+        prestaged: &mut PrestagedTransitionInventory,
+        dirty: &FastSet<(Prefix, u32)>,
+        rs_asns: &[u32],
+    ) -> PrestagedInventoryOutcome {
+        let (source, destination) = (prestaged.source, prestaged.destination);
+        let (Some(old), Some(new)) = (
+            self.group_ribs.get(&source),
+            self.group_ribs.get(&destination),
+        ) else {
+            return PrestagedInventoryOutcome::Degraded;
+        };
+        if !clean_inventory_pair(old, new) {
+            return PrestagedInventoryOutcome::Degraded;
+        }
+        let checkpoint = || {
+            crate::manager::replacement_readiness_checkpoint_at(
+                &self.replacement_readiness,
+                "shared_inventory",
+                false,
+            );
+        };
+        if !dirty.is_empty() {
+            // Drop every walk result for a touched key (a key re-staged
+            // into a later slot can appear twice), keeping walk order.
+            let mut kept = 0;
+            for index in 0..prestaged.announce.len() {
+                checkpoint();
+                let route = &prestaged.announce[index];
+                if !dirty.contains(&(route.prefix, route.path_id)) {
+                    prestaged.announce.swap(kept, index);
+                    prestaged.next_hop_override.swap(kept, index);
+                    kept += 1;
+                }
+            }
+            prestaged.announce.truncate(kept);
+            prestaged.next_hop_override.truncate(kept);
+            prestaged.failed.retain(|key, _| !dirty.contains(key));
+            prestaged.tagged.retain(|key| !dirty.contains(key));
+        }
+        for &key in dirty {
+            checkpoint();
+            let Some(route) = new.table.get(&key.0, key.1) else {
+                continue;
+            };
+            match inventory_entry(old, new, route, &prestaged.rs_asns) {
+                Err(term) => {
+                    prestaged.failed.insert(key, term);
+                }
+                Ok(InventoryEntry::Unchanged) => {}
+                Ok(InventoryEntry::Changed { next_hop, tagged }) => {
+                    prestaged.announce.push(route.clone());
+                    prestaged.next_hop_override.push(next_hop);
+                    if tagged {
+                        prestaged.tagged.insert(key);
+                    }
+                }
+            }
+        }
+        if let Some((&key, &term)) = prestaged.failed.iter().next() {
+            inventory_degraded(source, destination, Some(key), term);
+            return PrestagedInventoryOutcome::Degraded;
+        }
+        // `tagged` is relative to the walk's ASN superset: re-ask each
+        // tagged key about the cohort's own ASNs (none ⇒ no tag check).
+        if !rs_asns.is_empty() {
+            for &key in &prestaged.tagged {
+                checkpoint();
+                let tagged = new.table.get(&key.0, key.1).is_some_and(|route| {
+                    matches!(
+                        inventory_entry(old, new, route, rs_asns),
+                        Ok(InventoryEntry::Changed { tagged: true, .. })
+                    )
+                });
+                if tagged {
+                    inventory_degraded(source, destination, Some(key), "rs-control tag");
+                    return PrestagedInventoryOutcome::Degraded;
+                }
+            }
+        }
+        // Permit counts: one per staged entry under the group-uniform
+        // label, so `source_counts` already holds the per-source fold
+        // (VPN slots are empty: `clean_inventory_pair` proved it).
+        let label = new.permit_policy_label.as_deref().map(str::to_owned);
+        let mut inventory = CleanPolicyTransitionInventoryBuilder {
+            announce: std::mem::take(&mut prestaged.announce),
+            next_hop_override: std::mem::take(&mut prestaged.next_hop_override),
+            ..CleanPolicyTransitionInventoryBuilder::default()
+        };
+        let mut total = 0;
+        for (&peer, counts) in &new.source_counts {
+            checkpoint();
+            let count = u64::try_from(counts[0] + counts[1]).unwrap_or(u64::MAX);
+            if count > 0 {
+                total += count;
+                inventory
+                    .permit_by_source
+                    .entry(peer)
+                    .or_default()
+                    .insert(label.clone(), count);
+            }
+        }
+        if total > 0 {
+            inventory.permit_totals.insert(label, total);
+        }
+        PrestagedInventoryOutcome::Ready(inventory)
+    }
+
+    /// Drop any prestaged inventory and stop its groups' key logs. Every
+    /// path that retires or hands off a prepared destination calls this.
+    pub(in crate::manager) fn retire_prestaged_transition_inventory(&mut self) {
+        let Some(mut prestaged) = self.prestaged_inventory.take() else {
+            return;
+        };
+        for gid in [prestaged.source, prestaged.destination] {
+            if let Some(mut log) = self
+                .group_ribs
+                .get_mut(&gid)
+                .and_then(|group| group.inventory_log.take())
+            {
+                crate::manager::retire_hash_set(&mut log, &mut || {
+                    self.replacement_checkpoint(false);
+                });
+            }
+        }
+        self.replacement_checkpoint(true);
+        crate::manager::retire_vec(&mut prestaged.announce, &mut || {
+            self.replacement_checkpoint(false);
+        });
+        crate::manager::retire_vec(&mut prestaged.next_hop_override, &mut || {
+            self.replacement_checkpoint(false);
+        });
+        self.replacement_checkpoint(true);
     }
 
     /// Apply the inventory's pre-aggregated permit counts to one member after

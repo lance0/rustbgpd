@@ -121,9 +121,9 @@ impl<T> RouteSlab<T> {
         self.slots.capacity()
     }
 
-    /// Total slots ever allocated (occupied + free). Test-only leak probe:
-    /// steady-state churn must not grow this.
-    #[cfg(any(test, feature = "bench-internals"))]
+    /// Total slots ever allocated (occupied + free): the bound of a
+    /// handle-order walk. Also the tests' leak probe: steady-state churn
+    /// must not grow this.
     pub(crate) fn slot_count(&self) -> usize {
         self.slots.len()
     }

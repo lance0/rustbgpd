@@ -479,6 +479,11 @@ struct PreparedCleanPolicyTransitionPeer {
 /// restaged by the churn pass itself.
 pub(super) struct DestinationPrestage {
     pub(super) destination: usize,
+    /// The current group of the preparing peer: the transition's source.
+    source: usize,
+    /// The staging walk is done and the prestaged inventory walk
+    /// ([`RibManager::extend_prestaged_transition_inventory`]) runs.
+    staged: bool,
     prefixes: Vec<Prefix>,
     cursor: usize,
     memo: ExportMemo,
@@ -795,6 +800,7 @@ impl PendingCleanPolicyTransition {
             drop(phase);
         }
         manager.replacement_checkpoint_at("retirement", true);
+        manager.retire_prestaged_transition_inventory();
         let result = if let Some(destination) = self.created_destination.take()
             && !manager.discard_uncommitted_policy_transition_group(destination)
         {
@@ -1709,6 +1715,7 @@ impl RibManager {
                     if let Some(prepared) = manager.prepared_destination.take()
                         && prepared != destination
                     {
+                        manager.retire_prestaged_transition_inventory();
                         let _ = manager.discard_uncommitted_policy_transition_group(prepared);
                     }
                     super::retire_hash_set(&mut seen, &mut || checkpoint());
@@ -1841,24 +1848,6 @@ impl RibManager {
                 mut cursor,
                 mut inventory,
             } => {
-                if keys.is_none() {
-                    let Some(snapshot) =
-                        manager.begin_clean_policy_transition_inventory(source, destination)
-                    else {
-                        pending.phase = Some(CleanPolicyTransitionPhase::BuildInventory { source, destination, keys, cursor, inventory });
-                            return CleanPolicyTransitionAdvance::Fallback(pending);
-                    };
-                    keys = Some(snapshot);
-                    pending.phase = Some(CleanPolicyTransitionPhase::BuildInventory {
-                        source,
-                        destination,
-                        keys,
-                        cursor,
-                        inventory,
-                    });
-                    return CleanPolicyTransitionAdvance::Continue(pending);
-                }
-                let snapshot = keys.as_ref().expect("initialized above");
                 // The cohort's RS ASNs (typically zero or one distinct
                 // value): the inventory walk proves untagged-ness per
                 // ASN so rs-control members can ride the shared cohort.
@@ -1869,6 +1858,39 @@ impl RibManager {
                     .collect::<Vec<u32>>();
                 rs_asns.sort_unstable();
                 rs_asns.dedup();
+                if keys.is_none() {
+                    // A prestaged inventory re-checked against the churned
+                    // keys equals this fenced walk; it then finishes in this
+                    // same poll over an empty key snapshot.
+                    match manager.take_prestaged_transition_inventory(source, destination, &rs_asns) {
+                        super::update_groups::PrestagedInventoryOutcome::Ready(prestaged) => {
+                            inventory = prestaged;
+                            keys = Some(Vec::new());
+                        }
+                        super::update_groups::PrestagedInventoryOutcome::Degraded => {
+                            pending.phase = Some(CleanPolicyTransitionPhase::BuildInventory { source, destination, keys, cursor, inventory });
+                            return CleanPolicyTransitionAdvance::Fallback(pending);
+                        }
+                        super::update_groups::PrestagedInventoryOutcome::Unusable => {
+                            let Some(snapshot) =
+                                manager.begin_clean_policy_transition_inventory(source, destination)
+                            else {
+                                pending.phase = Some(CleanPolicyTransitionPhase::BuildInventory { source, destination, keys, cursor, inventory });
+                                return CleanPolicyTransitionAdvance::Fallback(pending);
+                            };
+                            keys = Some(snapshot);
+                            pending.phase = Some(CleanPolicyTransitionPhase::BuildInventory {
+                                source,
+                                destination,
+                                keys,
+                                cursor,
+                                inventory,
+                            });
+                            return CleanPolicyTransitionAdvance::Continue(pending);
+                        }
+                    }
+                }
+                let snapshot = keys.as_ref().expect("initialized above");
                 // Budgeted stride loop (see the probe phase): extend the
                 // inventory by route-slices until the poll budget elapses.
                 let poll_start = std::time::Instant::now();
@@ -4292,6 +4314,7 @@ impl RibManager {
         {
             let _ = self.discard_uncommitted_policy_transition_group(prepared);
         }
+        self.retire_prestaged_transition_inventory();
         let Some(&exemplar) = members.first() else {
             receipt.cohort_precheck_us = receipt
                 .cohort_precheck_us
@@ -4784,7 +4807,7 @@ impl RibManager {
             return;
         }
         let completed = self.with_replacement_readiness(|manager| {
-            let Some((_, destination)) =
+            let Some((source, destination)) =
                 manager.clean_policy_transition_destination(peer, export_policy)
             else {
                 manager.reclaim_unused_update_group_policies();
@@ -4802,6 +4825,7 @@ impl RibManager {
             if let Some(stale) = manager.prepared_destination.take() {
                 let _ = manager.discard_uncommitted_policy_transition_group(stale);
             }
+            manager.retire_prestaged_transition_inventory();
             // A leftover unowned group under this id may be partially staged
             // from an aborted attempt; recreate it deterministically. An OWNED
             // group is maintained by definition — nothing to stage.
@@ -4814,6 +4838,8 @@ impl RibManager {
                     super::update_groups::PolicyTransitionGroupStart::Created(prefixes) => {
                         manager.pending_destination_prestage = Some(DestinationPrestage {
                             destination,
+                            source,
+                            staged: false,
                             prefixes,
                             cursor: 0,
                             memo: ExportMemo::default(),
@@ -4845,6 +4871,7 @@ impl RibManager {
             return;
         };
         let reply = self.with_replacement_readiness(|manager| {
+            manager.retire_prestaged_transition_inventory();
             let _ = manager.discard_uncommitted_policy_transition_group(gid);
             manager.replacement_checkpoint(true);
             #[cfg(feature = "bench-internals")]
@@ -4880,33 +4907,42 @@ impl RibManager {
             let poll_start = std::time::Instant::now();
             loop {
                 checkpoint();
-                let end = super::policy_transition_slice_end(
-                    prestage.cursor,
-                    prestage.prefixes.len(),
-                    super::POLICY_TRANSITION_ROUTE_SLICE,
-                );
-                if prestage.cursor < end {
-                    manager.stage_policy_transition_group_chunk(
-                        prestage.destination,
-                        &prestage.prefixes[prestage.cursor..end],
-                        &mut prestage.memo,
+                if !prestage.staged {
+                    let end = super::policy_transition_slice_end(
+                        prestage.cursor,
+                        prestage.prefixes.len(),
+                        super::POLICY_TRANSITION_ROUTE_SLICE,
                     );
-                    prestage.cursor = end;
-                }
-                if prestage.cursor == prestage.prefixes.len() {
+                    if prestage.cursor < end {
+                        manager.stage_policy_transition_group_chunk(
+                            prestage.destination,
+                            &prestage.prefixes[prestage.cursor..end],
+                            &mut prestage.memo,
+                        );
+                        prestage.cursor = end;
+                    }
+                    if prestage.cursor == prestage.prefixes.len() {
+                        // Staged: release the walk's buffers, then build the
+                        // transition inventory in the same unfenced slices.
+                        prestage.staged = true;
+                        #[cfg(feature = "bench-internals")]
+                        prestage.memo.record_replacement_capacities(manager);
+                        prestage.retire_with(&mut || checkpoint());
+                        manager.begin_prestaged_transition_inventory(
+                            prestage.source,
+                            prestage.destination,
+                        );
+                    }
+                } else if manager.extend_prestaged_transition_inventory() {
                     debug!(
                         destination = prestage.destination,
-                        prefixes = prestage.prefixes.len(),
+                        prefixes = prestage.cursor,
                         "prepared clean-transition destination group without the fence"
                     );
                     // Record the exact staged gid: every later discard (and the
                     // committing cohort's adopt-or-discard decision) keys off
                     // this, never a re-derivation from current attributes.
                     manager.prepared_destination = Some(prestage.destination);
-                    manager.replacement_checkpoint(true);
-                    #[cfg(feature = "bench-internals")]
-                    prestage.memo.record_replacement_capacities(manager);
-                    prestage.retire_with(&mut || checkpoint());
                     manager.replacement_checkpoint(true);
                     return prestage.reply.take();
                 }
@@ -4946,6 +4982,7 @@ impl RibManager {
             if let Some(prepared) = manager.prepared_destination.take() {
                 let _ = manager.discard_uncommitted_policy_transition_group(prepared);
             }
+            manager.retire_prestaged_transition_inventory();
             manager.reclaim_unused_update_group_policies();
             reply
         });
