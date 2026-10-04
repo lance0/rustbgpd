@@ -937,6 +937,13 @@ run_cell() {
         docker logs "$container" >"$cdir/daemon.log" 2>&1
         docker rm -f "$container" >/dev/null 2>&1
     else
+        # The daemon's own high-water mark over the whole cell, which the 5 s
+        # sampler can miss. The transaction cell's cycles already record it.
+        if [ "$cell" != rustbgpd-txn ] &&
+            ! grep -E '^(VmHWM|VmRSS):' "/proc/$daemon_pid/status" >"$cdir/vmhwm" 2>/dev/null; then
+            echo "cell $cell: daemon VmHWM readout failed" >&2
+            [ "$rc" -ne 0 ] || rc=97
+        fi
         terminate_process_group "$daemon_pid"
         ACTIVE_DAEMON_PID=""
     fi

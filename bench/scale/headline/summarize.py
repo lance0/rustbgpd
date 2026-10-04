@@ -30,6 +30,12 @@ reload must carry all four values. A campaign
 directory must keep those daemon logs; a receipt bundle
 does not carry them, so it has no daemon rows.
 
+Memory rows keep each source separate: the 5 s process-tree RSS samples
+(peak_rss_sample is a sample, not a peak), rustbgpd's VmHWM (matrix legs and
+IRR SIGHUP cells), the cgroup memory.peak of rustbgpd's own scope
+(daemon_cg_peak) and of a competitor's container (container_cg_peak).
+report.md names the source of every memory metric in its table.
+
 Writes to DIR (default SOURCE, which must then be a campaign directory;
 a bundle needs --out so a committed receipt is never rewritten): summary.csv,
 one row per run, round and metric; establishment-span.csv, the first-to-Nth
@@ -109,6 +115,33 @@ CGROUP_MEMORY = re.compile(
     r"cg_last_sample_file_mapped: \d+ kB\ncg_teardown_anon: \d+ kB\n"
     r"cg_teardown_file: \d+ kB\ncg_teardown_file_mapped: \d+ kB\n)?"
 )
+
+
+# run-matrix.sh's record_container_memory output, byte for byte. A cell's
+# cgroup peak is complete only if nothing was swapped out during the cell.
+CONTAINER_MEMORY = re.compile(r"container_cg_peak: (\d+) kB\ncontainer_cg_swap_peak: 0 kB\n")
+
+# Where each memory metric comes from, printed under report.md's table. Only
+# the two cgroup peaks are like for like across arms: the native scope and a
+# competitor's container are both cgroup v2 memory.peak, which charges anon,
+# page cache and kernel socket buffers. VmHWM is one process's resident peak.
+MEMORY_SOURCES = {
+    "peak_rss_sample": "KiB; the largest 5 s process-tree RSS sample; it misses transients shorter than the interval, so a reload peak depends on sampling phase",
+    "settled_rss_last_sample": "KiB; the last 5 s process-tree RSS sample",
+    "daemon_vmhwm": "KiB; the kernel's VmHWM for the rustbgpd process at cell end, its resident peak over the whole cell",
+    "daemon_cg_peak": "KiB; memory.peak of rustbgpd's own swap-fenced scope: resident anon and page cache plus kernel socket buffers",
+    "container_cg_peak": "KiB; memory.peak of the competitor's container cgroup (same kind as daemon_cg_peak), with zero swap peak; it also charges the `docker exec` reload clients",
+    "settled_cg_current_last_sample": "KiB; memory.current of rustbgpd's scope at the last 5 s sample",
+    "flap_post_round_rss": "MiB; the harness's per-round RSS of the daemon PID; 0 for containerised arms, whose PID the harness is not given",
+    "flap_heap_allocated": "MiB; jemalloc allocated bytes after each flap round (rustbgpd only)",
+    "flap_heap_resident": "MiB; jemalloc resident bytes after each flap round (rustbgpd only)",
+}
+
+
+def vmhwm_rows(path, phase, arm, run):
+    """The daemon_vmhwm row from a `vmhwm` readout (VmHWM/VmRSS status lines), if any."""
+    hwm = re.search(r"VmHWM:\s+(\d+)", read_text(path)) if path.exists() else None
+    return [[phase, arm, run, "daemon_vmhwm", "", hwm.group(1), "KiB"]] if hwm else []
 
 
 def rss_column(path):
@@ -245,10 +278,7 @@ def matrix_rows(source, exclusions, campaign):
             raise ExtractionError(f"{leg.name}: rss.csv has no samples")
         rows.append([phase, arm, run, "settled_rss_last_sample", "", rss[-1], "KiB"])
         rows.append([phase, arm, run, "peak_rss_sample", "", max(rss), "KiB"])
-        if (cell / "vmhwm").exists():
-            hwm = re.search(r"VmHWM:\s+(\d+)", read_text(cell / "vmhwm"))
-            if hwm:
-                rows.append([phase, arm, run, "daemon_vmhwm", "", hwm.group(1), "KiB"])
+        rows += vmhwm_rows(cell / "vmhwm", phase, arm, run)
         # Legs recorded before the daemon ran in a swap-fenced scope have no cg_peak.
         # A leg run without a usable scope says so exactly; any other readout
         # must be the complete producer format, including the swap fence.
@@ -260,6 +290,16 @@ def matrix_rows(source, exclusions, campaign):
             elif text != "cg_scope: unavailable\n":
                 raise ExtractionError(
                     f"{leg.name}: cgroup-memory must be 'cg_scope: unavailable', the legacy peak/current/swap-fence readout, or the extended readout with all cg_last_sample_* and cg_teardown_* fields"
+                )
+        # Competitor cells recorded before the container readout have none.
+        if (cell / "container-memory").exists():
+            text = read_text(cell / "container-memory")
+            readout = CONTAINER_MEMORY.fullmatch(text)
+            if readout:
+                rows.append([phase, arm, run, "container_cg_peak", "", readout.group(1), "KiB"])
+            elif text != "container_cg: unavailable\n":
+                raise ExtractionError(
+                    f"{leg.name}: container-memory must be 'container_cg: unavailable' or the peak readout with a zero swap peak"
                 )
         cg_current = cg_current_column(cell / "rss.csv")
         if cg_current:
@@ -300,6 +340,7 @@ def irr_rows(source, exclusions, campaign):
         rss = leg / "rustbgpd-sighup" / "rss.csv"
         if rss.exists():
             rows.append([phase, arm, run, "peak_rss_sample", "", max(rss_column(rss)), "KiB"])
+        rows += vmhwm_rows(leg / "rustbgpd-sighup" / "vmhwm", phase, arm, run)
     return rows
 
 
@@ -368,9 +409,13 @@ def report(table, arms, smoke, excluded):
         for arm in arms:
             values = table[(phase, metric)].get(arm)
             cells.append(
-                f"{min(values):.6g}–{max(values):.6g} (median {statistics.median(values):.6g}, n={len(values)})"
+                f"{min(values):.7g}–{max(values):.7g} (median {statistics.median(values):.7g}, n={len(values)})"
                 if values else "-")
         lines.append(f"| {phase} | {metric} | " + " | ".join(cells) + " |")
+    sources = sorted({metric for _phase, metric in table} & MEMORY_SOURCES.keys())
+    if sources:
+        lines += ["", "Memory sources:"]
+        lines += [f"- `{metric}`: {MEMORY_SOURCES[metric]}." for metric in sources]
     lines += ["", "Excluded legs, not counted in n above:" if excluded else "Excluded legs: none."]
     lines += [f"- `{name}`" for name in excluded]
     return "\n".join(lines) + "\n"

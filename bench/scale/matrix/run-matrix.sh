@@ -13,7 +13,9 @@
 # The native rustbgpd daemon runs in its own systemd user scope with
 # MemorySwapMax=0: cgroup-memory records the scope's memory.peak (cg_peak) and
 # rss.csv gains its memory.current and memory.stat per sample. Competitor
-# cells and hosts without a user scope keep the RSS/VmHWM-only receipt.
+# cells record their container cgroup's memory.peak in container-memory
+# (container_cg_peak), which also charges the `docker exec` reload clients.
+# Hosts without a user scope keep the RSS/VmHWM-only receipt for rustbgpd.
 #
 # One cell at a time: 1-min loadavg gate (< 2.0) before each cell, 5-minute
 # cool-down after. Per-cell status files under the artifacts dir make the
@@ -385,6 +387,21 @@ scope_stat_rows() {
         print "cg_" phase "_file_mapped: " int(value["file_mapped"] / 1024) " kB"
     }' "$cgroup/memory.stat"
 }
+# A competitor's high-water mark: its container cgroup's memory.peak, read
+# before removal. A zero swap peak shows no page left memory during the cell,
+# so the peak is complete. A missing readout is recorded, not fatal.
+record_container_memory() {
+    local cgroup=$1 out=$2 peak swap_peak
+    if [ -n "$cgroup" ] && peak=$(cat "$cgroup/memory.peak" 2>/dev/null) &&
+        swap_peak=$(cat "$cgroup/memory.swap.peak" 2>/dev/null) &&
+        [[ $peak =~ ^[0-9]+$ && $swap_peak =~ ^[0-9]+$ ]]; then
+        printf 'container_cg_peak: %s kB\ncontainer_cg_swap_peak: %s kB\n' \
+            $((peak / 1024)) $((swap_peak / 1024)) >"$out"
+    else
+        echo "WARNING: no readable container memory.peak/memory.swap.peak${cgroup:+ under $cgroup}; container_cg_peak will be absent" >&2
+        echo "container_cg: unavailable" >"$out"
+    fi
+}
 last_sample_stat_rows() {
     awk -F, 'NR == 1 {
         if ($0 != "epoch_s,total_rss_kib,pids,cg_current_kib,cg_anon_kib,cg_file_kib,cg_file_mapped_kib") bad=1
@@ -629,6 +646,8 @@ run_cell() {
         last_sample_stat=$(last_sample_stat_rows "$cdir/rss.csv") || cleanup_rc=1
     fi
     if [ -n "$container" ]; then
+        p=$(sed -n 's/^0:://p' "/proc/$daemon_pid/cgroup" 2>/dev/null)
+        record_container_memory "${p:+/sys/fs/cgroup$p}" "$cdir/container-memory"
         docker logs "$container" >"$cdir/daemon.log" 2>&1 || cleanup_rc=1
         docker rm -f "$container" >/dev/null 2>&1 || cleanup_rc=1
     else

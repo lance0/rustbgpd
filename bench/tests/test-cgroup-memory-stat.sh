@@ -21,7 +21,7 @@ printf '0\n' >"$cg/memory.swap.max"
 
 # Use the producer's real functions, without launching a matrix cell.
 # shellcheck disable=SC1090 # The extracted function names are checked by this fixture.
-source <(sed -n '/^record_scope_memory() {/,/^}/p; /^scope_stat_rows() {/,/^}/p; /^last_sample_stat_rows() {/,/^}/p' "$matrix")
+source <(sed -n '/^record_scope_memory() {/,/^}/p; /^scope_stat_rows() {/,/^}/p; /^last_sample_stat_rows() {/,/^}/p; /^record_container_memory() {/,/^}/p' "$matrix")
 
 write_stat() {
     printf '%s\n' "$1" >"$cg/memory.stat.next"
@@ -84,4 +84,13 @@ for bad in \
         exit 1
     fi
 done
+# Competitor container readout: peak and swap peak in kB, or an explicit absence.
+printf '0\n' >"$cg/memory.swap.peak"
+record_container_memory "$cg" "$tmp/container-memory"
+[ "$(cat "$tmp/container-memory")" = $'container_cg_peak: 4096 kB\ncontainer_cg_swap_peak: 0 kB' ]
+rm "$cg/memory.swap.peak"
+record_container_memory "$cg" "$tmp/container-memory" 2>/dev/null
+[ "$(cat "$tmp/container-memory")" = 'container_cg: unavailable' ]
+record_container_memory "" "$tmp/container-memory" 2>/dev/null
+[ "$(cat "$tmp/container-memory")" = 'container_cg: unavailable' ]
 printf 'cgroup memory stat sampling passed\n'
