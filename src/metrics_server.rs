@@ -18,6 +18,12 @@ const WRITE_TIMEOUT: Duration = Duration::from_secs(5);
 const READ_TIMEOUT: Duration = Duration::from_secs(5);
 const MAX_REQUEST_LINE: usize = 8192;
 const MAX_CONNECTIONS: usize = 64;
+/// Scrapes in flight at once: waiting, rendering or writing their response.
+/// Scrapes queue behind one render, so without this cap they could hold every
+/// connection permit and keep `/livez` and `/readyz` from being accepted. A
+/// scrape over the cap is rejected with 503 at once, holding its permit only
+/// to write that reply.
+const MAX_SCRAPES: usize = MAX_CONNECTIONS - 8;
 
 /// Fixed startup worker inventory: at most FIB, EVPN intent and EVPN kernel.
 /// A missing receiver means a configured worker could not be constructed.
@@ -127,6 +133,7 @@ async fn serve_incoming<S>(
     // rate-limited; a bare retry would spin on a still-readable listener.
     let mut incoming = AcceptBackoff::new(incoming, name);
     let semaphore = Arc::new(Semaphore::new(MAX_CONNECTIONS));
+    let scrape_slots = Arc::new(Semaphore::new(MAX_SCRAPES));
 
     loop {
         // Acquire permit before accepting to enforce an exact connection cap.
@@ -146,12 +153,14 @@ async fn serve_incoming<S>(
         let metrics = metrics.clone();
         let readiness_probe = readiness_probe.clone();
         let dataplane_probe = dataplane_probe.clone();
+        let scrape_slots = scrape_slots.clone();
         tokio::spawn(async move {
             if let Err(e) = handle_connection(
                 stream,
                 &metrics,
                 &readiness_probe,
                 dataplane_probe.as_deref(),
+                &scrape_slots,
             )
             .await
             {
@@ -167,6 +176,7 @@ async fn handle_connection(
     metrics: &BgpMetrics,
     readiness_probe: &CoreReadinessProbe,
     dataplane_probe: Option<&[DataplaneWorkerProbe]>,
+    scrape_slots: &Semaphore,
 ) -> std::io::Result<()> {
     let (reader, mut writer) = stream.into_split();
     let mut buf_reader = BufReader::new(reader.take(MAX_REQUEST_LINE as u64));
@@ -199,23 +209,16 @@ async fn handle_connection(
     // Parse path from "GET /path HTTP/1.x"
     let path = request_line.split_whitespace().nth(1).unwrap_or("");
 
+    // Held until the response is written, so a slow scrape reader also
+    // counts against the scrape cap.
+    let mut scrape_slot = None;
     let response = match path {
-        "/metrics" => match render_text(metrics).await {
-            Ok(body) => {
-                format!(
-                    "HTTP/1.1 200 OK\r\nContent-Type: text/plain; version=0.0.4; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                    body.len(),
-                    body,
-                )
+        "/metrics" => match scrape_slots.try_acquire() {
+            Ok(slot) => {
+                scrape_slot = Some(slot);
+                metrics_response(render_text(metrics).await)
             }
-            Err(e) => {
-                warn!(error = %e, "metrics encoding failed");
-                let body = "Internal Server Error\n";
-                format!(
-                    "HTTP/1.1 500 Internal Server Error\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-                    body.len(),
-                )
-            }
+            Err(_) => text_response("503 Service Unavailable", "too many concurrent scrapes\n"),
         },
         "/livez" => text_response("200 OK", "ok\n"),
         "/dp-readyz" if dataplane_probe.is_some() => {
@@ -250,8 +253,30 @@ async fn handle_connection(
 
     // Write with timeout to prevent slow-client stalls
     tokio::time::timeout(WRITE_TIMEOUT, writer.write_all(response.as_bytes())).await??;
+    drop(scrape_slot);
 
     Ok(())
+}
+
+fn metrics_response(rendered: std::io::Result<String>) -> String {
+    match rendered {
+        Ok(body) => format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: text/plain; version=0.0.4; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            body.len(),
+            body,
+        ),
+        Err(e) if e.kind() == std::io::ErrorKind::TimedOut => {
+            warn!(error = %e, "metrics render deadline exceeded");
+            text_response(
+                "503 Service Unavailable",
+                "metrics render deadline exceeded\n",
+            )
+        }
+        Err(e) => {
+            warn!(error = %e, "metrics encoding failed");
+            text_response("500 Internal Server Error", "Internal Server Error\n")
+        }
+    }
 }
 
 fn text_response(status: &str, body: &str) -> String {
@@ -406,6 +431,82 @@ pub(crate) mod tests {
         let scrape = scrape.join().unwrap().unwrap();
         assert!(scrape.starts_with("HTTP/1.1 200 OK"), "{scrape}");
         assert!(scrape.contains("test_gated_render 0\n"), "{scrape}");
+    }
+
+    #[test]
+    fn livez_answers_while_scrapes_fill_the_connection_budget() {
+        use rustbgpd_api::metrics_render::RENDER_DEADLINE;
+        use std::io::{Read, Write};
+
+        let (addr, entered, release) = start_gated_server();
+        let send_scrape = || {
+            let mut stream = std::net::TcpStream::connect(addr).unwrap();
+            stream
+                .write_all(b"GET /metrics HTTP/1.1\r\nHost: localhost\r\n\r\n")
+                .unwrap();
+            stream
+        };
+        let mut scrapes = vec![send_scrape()];
+        entered
+            .recv_timeout(Duration::from_secs(5))
+            .expect("first render must start");
+        // One scrape per connection permit, all behind the held render. The
+        // accept queue is FIFO, so the server takes every scrape before it
+        // can take the probe connected after them.
+        scrapes.extend((1..MAX_CONNECTIONS).map(|_| send_scrape()));
+
+        let livez = (|| {
+            let mut stream = std::net::TcpStream::connect(addr)?;
+            // Below the render deadline: the probe must not depend on queued
+            // scrapes timing out to get a connection permit.
+            stream.set_read_timeout(Some(RENDER_DEADLINE / 2))?;
+            stream.write_all(b"GET /livez HTTP/1.1\r\nHost: localhost\r\n\r\n")?;
+            let mut response = String::new();
+            stream.read_to_string(&mut response)?;
+            std::io::Result::Ok(response)
+        })();
+        for _ in 0..MAX_SCRAPES {
+            release.send(()).unwrap();
+        }
+        let livez = livez.expect("/livez must answer while scrapes fill the connection budget");
+        assert!(livez.starts_with("HTTP/1.1 200 OK"), "{livez}");
+
+        let (mut served, mut rejected) = (0, 0);
+        for mut stream in scrapes {
+            stream
+                .set_read_timeout(Some(Duration::from_secs(10)))
+                .unwrap();
+            let mut response = String::new();
+            stream.read_to_string(&mut response).unwrap();
+            if response.starts_with("HTTP/1.1 200 OK") {
+                served += 1;
+            } else {
+                assert!(
+                    response.starts_with("HTTP/1.1 503 Service Unavailable")
+                        && response.ends_with("too many concurrent scrapes\n"),
+                    "{response}"
+                );
+                rejected += 1;
+            }
+        }
+        assert_eq!(
+            (served, rejected),
+            (MAX_SCRAPES, MAX_CONNECTIONS - MAX_SCRAPES)
+        );
+    }
+
+    #[test]
+    fn metrics_render_deadline_maps_to_503() {
+        let response = metrics_response(Err(std::io::ErrorKind::TimedOut.into()));
+        assert!(
+            response.starts_with("HTTP/1.1 503 Service Unavailable"),
+            "{response}"
+        );
+        let response = metrics_response(Err(std::io::Error::other("encode")));
+        assert!(
+            response.starts_with("HTTP/1.1 500 Internal Server Error"),
+            "{response}"
+        );
     }
 
     #[test]
@@ -670,7 +771,9 @@ pub(crate) mod tests {
                     }
                 });
                 let (stream, _) = listener.accept().await.unwrap();
-                let _ = handle_connection(stream, &metrics, &probe, None).await;
+                let _ =
+                    handle_connection(stream, &metrics, &probe, None, &Semaphore::new(MAX_SCRAPES))
+                        .await;
             });
         });
 
@@ -774,7 +877,7 @@ pub(crate) mod tests {
                 let m = metrics.clone();
                 let probe = unused_probe();
                 tokio::spawn(async move {
-                    let _ = handle_connection(stream, &m, &probe, None).await;
+                    let _ = handle_connection(stream, &m, &probe, None, &Semaphore::new(1)).await;
                     drop(permit);
                 });
             }
