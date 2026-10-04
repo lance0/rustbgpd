@@ -11,6 +11,8 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.74.0] — 2026-10-03
+
 ### Added
 
 - Add `advertised_peer_address` and the `advertised_view` acknowledgement to

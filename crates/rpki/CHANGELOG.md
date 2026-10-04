@@ -3,7 +3,7 @@
 This changelog covers the independently versioned `rustbgpd-rpki` crate.
 Daemon and workspace changes remain in the repository-level `CHANGELOG.md`.
 
-## 0.5.0 - Unreleased
+## 0.5.0 - 2026-10-03
 
 - Move the public wire dependency to 0.23 for typed Type 6 SMET support.
   Upgrade crates exchanging public wire types together. No additional

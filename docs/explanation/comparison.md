@@ -22,13 +22,13 @@ rustbgpd-vs-GoBGP comparison, which records the primary-source verification.
 | Primary interface | gRPC | CLI (vtysh) | CLI (birdc) | gRPC | CLI (bgpctl) |
 | First release | 2026 | 2017 | 1998 | 2014 | 2004 |
 | Multithreaded | Yes (tokio) | Partial (packet I/O + keepalive pthreads; route processing single-threaded) | Yes (BIRD 3) | Yes (goroutines) | Yes (3-process) |
-| Latest release (verified 2026-09-27)[^versions] | v0.73.0 (2026-09-27) | 10.7.1 (2026-08-31) | 3.3.2 (2026-07-30) | v4.9.0 (2026-09-01) | 9.2 (2026-08-06) |
+| Latest release (verified 2026-10-03)[^versions] | v0.74.0 (2026-10-03) | 10.7.1 (2026-08-31) | 3.3.2 (2026-07-30) | v4.9.0 (2026-09-01) | 9.3 (2026-09-30) |
 
 [^versions]: Dates are the upstream release announcements: FRR
     [frr-10.7.1](https://github.com/FRRouting/frr/releases/tag/frr-10.7.1),
     BIRD [3.3.2 `NEWS`](https://gitlab.nic.cz/labs/bird/-/blob/v3.3.2/NEWS),
     GoBGP [v4.9.0](https://github.com/osrg/gobgp/releases/tag/v4.9.0),
-    OpenBGPD [9.2](https://www.mail-archive.com/announce@openbsd.org/msg00601.html),
+    OpenBGPD [9.3](https://cdn.openbsd.org/pub/OpenBSD/OpenBGPD/openbgpd-9.3-relnotes.txt),
     and the rustbgpd [changelog](../../CHANGELOG.md). This row does not
     re-derive the dated footnotes below, which keep the exact version each
     claim was verified against. Route-server config generation still pins

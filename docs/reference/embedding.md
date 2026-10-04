@@ -491,7 +491,7 @@ boundary. `rib`, `bmp`, `mrt`, and `policy` remain demand-gated.**
    `EvpnSmet::validate_announcement`. Revised UPDATE decoding applies that
    check to MP_REACH and retains keys for treat-as-withdraw; MP_UNREACH uses
    only structural validation. See the
-   [0.23.0 compatibility note](../../crates/wire/README.md#0230-compatibility-note-prepared).
+   [0.23.0 compatibility note](../../crates/wire/README.md#0230-compatibility-note).
    Registry examples remain on the published versions in the table below.
 
 2. **`rustbgpd-fsm`.** The `0.4.0` release makes no

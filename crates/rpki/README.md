@@ -7,9 +7,8 @@ Part of [rustbgpd](https://github.com/lance0/rustbgpd). Requires Rust 1.95 or
 newer. Release-by-release crate changes are recorded in the
 [changelog](CHANGELOG.md).
 
-The working tree prepares `rustbgpd-rpki` 0.5.0 with wire `0.23.0` for the
-Type 6 SMET decoder change. Verifier and RTR signatures remain unchanged.
-The published dependency examples below retain the last published versions.
+`rustbgpd-rpki` 0.5.0 moves to the wire `0.23.0` dependency for the Type 6
+SMET decoder change; verifier and RTR signatures are unchanged.
 
 `rustbgpd-rpki` 0.4.0 moves to the wire `0.22.0` dependency; verifier and RTR
 method signatures are unchanged from the `0.3` line.
@@ -171,8 +170,8 @@ releases within a compatibility line. Breaking public API changes or an
 incompatible public wire-type dependency require the next `0.x` minor version.
 The first `0.1.x` line used wire `0.19`; `0.2.x` used wire `0.20`. The
 `0.3.x` line uses wire `0.21` and adopts the enum policy below. The
-`0.4.x` line moves the public wire dependency to `0.22`, with verifier
-and RTR method signatures unchanged.
+`0.4.x` line moves the public wire dependency to `0.22`, and the `0.5.x` line
+moves it to `0.23`, each with verifier and RTR method signatures unchanged.
 
 ## Enum exhaustiveness
 

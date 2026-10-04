@@ -3,7 +3,7 @@
 This changelog covers the independently published `rustbgpd-wire` crate. Daemon
 and workspace changes remain in the repository-level `CHANGELOG.md`.
 
-## 0.23.0 - Unreleased
+## 0.23.0 - 2026-10-03
 
 - Add `PmsiTunnelType::evpn_srv6_function_bits` for the EVPN IMET
   Function transposition capacities: 24 bits for ingress replication and

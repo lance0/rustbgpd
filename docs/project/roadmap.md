@@ -156,7 +156,17 @@ format and max-prefix latch alerting, distributes queued UPDATEs in bounded
 windows and shrinks stored path attributes, with session, Graceful Restart,
 EVPN and FIB durability fixes. It ships on its
 per-change regression tests and main CI; the 2026-09-26 receipt covers an
-earlier main revision and does not qualify it. The
+earlier main revision and does not qualify it. On the v0.73.0 tag, the
+[2026-09-28 route-reflector run](../soaks/soak-rr-flagship-24h-2026-09-28.md)
+passed and the
+[2026-09-29 route-server run](../soaks/soak-rs-flagship-24h-2026-09-29.md)
+failed management correctness on one `rbgp doctor` result. v0.74.0
+(2026-10-03) is a minor release that adds alpha EVPN Type 6 SMET reflection,
+retained-rollback previews, an opt-in dataplane readiness probe and FlowSpec
+mutation outcomes, bounds `rbgp` mutation waits, shrinks stored routes and
+shortens large-roster reloads, with outbound resync, collision, ORR, EVPN
+selection and metrics-render fixes. It ships on its per-change regression
+tests and main CI; no flagship receipt covers it. The
 [release checklist](release-checklist.md#flagship-operating-proof) calls for a
 qualifying 24-hour management-load soak on the selected candidate. Earlier
 archived soaks do not automatically qualify later runtime changes.

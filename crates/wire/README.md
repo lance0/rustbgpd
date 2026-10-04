@@ -16,11 +16,11 @@ Requires Rust 1.95 or newer.
 
 Release-by-release crate changes are recorded in the [changelog](CHANGELOG.md).
 
-### 0.23.0 compatibility note (prepared)
+### 0.23.0 compatibility note
 
-The working tree prepares `rustbgpd-wire` 0.23.0 with FSM 0.10 and RPKI 0.5.
-The published dependency examples below retain the last published versions.
-Upgrade crates exchanging public wire types together when adopting this line.
+`rustbgpd-wire` 0.23.0 is a breaking minor release and pairs with FSM 0.10 and
+RPKI 0.5 when sharing public wire types. Upgrade crates exchanging public wire
+types together when adopting this line.
 
 - **Breaking decoder behavior:** EVPN Type 6 is now decoded as `EvpnRoute::Smet`
   instead of being counted and discarded as an unknown route type. The typed
