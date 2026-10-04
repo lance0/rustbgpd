@@ -1,3 +1,4 @@
+use std::collections::VecDeque;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
@@ -9,7 +10,8 @@ use rustbgpd_evpn_linux::worker_progress::WorkerProgressState;
 use rustbgpd_telemetry::BgpMetrics;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::{Semaphore, watch};
+use tokio::sync::{Semaphore, oneshot, watch};
+use tokio::time::Instant;
 use tokio_stream::wrappers::TcpListenerStream;
 use tokio_stream::{Stream, StreamExt};
 use tracing::{debug, info, warn};
@@ -24,6 +26,10 @@ const MAX_CONNECTIONS: usize = 64;
 /// scrape over the cap is rejected with 503 at once, holding its permit only
 /// to write that reply.
 const MAX_SCRAPES: usize = MAX_CONNECTIONS - 8;
+/// How long a connection may wait to send its request line before a full
+/// connection budget requests its eviction. Clients send the request line with
+/// the connection, so this only closes idle or slow-sending clients.
+const IDLE_EVICTION_GRACE: Duration = Duration::from_millis(250);
 
 /// Fixed startup worker inventory: at most FIB, EVPN intent and EVPN kernel.
 /// A missing receiver means a configured worker could not be constructed.
@@ -134,10 +140,39 @@ async fn serve_incoming<S>(
     let mut incoming = AcceptBackoff::new(incoming, name);
     let semaphore = Arc::new(Semaphore::new(MAX_CONNECTIONS));
     let scrape_slots = Arc::new(Semaphore::new(MAX_SCRAPES));
+    // Connections still waiting for their request line, oldest first, with
+    // their accept time. A connection drops its receiver once the line is
+    // read, closing the sender; dropping a live sender requests its eviction.
+    let mut unclassified: VecDeque<(Instant, oneshot::Sender<()>)> = VecDeque::new();
 
     loop {
         // Acquire permit before accepting to enforce an exact connection cap.
-        let permit = semaphore.clone().acquire_owned().await;
+        // While the budget is full, connections that have not sent their
+        // request line within IDLE_EVICTION_GRACE of being accepted are asked
+        // to close, oldest first, so idle or slow-sending clients cannot keep
+        // `/livez` and `/readyz` out. Several overdue connections can be asked
+        // in one burst, because an evicted connection releases its permit
+        // asynchronously.
+        // Every other permit holder is classified: scrapes are capped below
+        // the budget, and every other response fits in the socket send buffer.
+        let permit = loop {
+            unclassified.retain(|(_, evict)| !evict.is_closed());
+            let evict_at = unclassified
+                .front()
+                .map(|(accepted, _)| *accepted + IDLE_EVICTION_GRACE);
+            tokio::select! {
+                biased;
+                permit = semaphore.clone().acquire_owned() => break permit,
+                () = tokio::time::sleep_until(evict_at.unwrap_or_else(Instant::now)),
+                    if evict_at.is_some() =>
+                {
+                    unclassified.pop_front();
+                    debug!(
+                        "metrics connection budget full; requested eviction of oldest unclassified connection"
+                    );
+                }
+            }
+        };
         let Ok(permit) = permit else {
             warn!("metrics semaphore closed");
             return;
@@ -148,6 +183,8 @@ async fn serve_incoming<S>(
             Some(Err(_)) => continue,
             None => return,
         };
+        let (evict, evicted) = oneshot::channel();
+        unclassified.push_back((Instant::now(), evict));
 
         let peer = stream.peer_addr().ok();
         let metrics = metrics.clone();
@@ -157,6 +194,7 @@ async fn serve_incoming<S>(
         tokio::spawn(async move {
             if let Err(e) = handle_connection(
                 stream,
+                evicted,
                 &metrics,
                 &readiness_probe,
                 dataplane_probe.as_deref(),
@@ -171,8 +209,12 @@ async fn serve_incoming<S>(
     }
 }
 
+/// `evicted` resolves when the accept loop requests this connection's
+/// eviction. The request is honoured only while the request line is unread; a
+/// line that is already readable wins and the connection is served.
 async fn handle_connection(
     stream: TcpStream,
+    evicted: impl std::future::Future,
     metrics: &BgpMetrics,
     readiness_probe: &CoreReadinessProbe,
     dataplane_probe: Option<&[DataplaneWorkerProbe]>,
@@ -183,7 +225,14 @@ async fn handle_connection(
 
     // Read the HTTP request line with timeout
     let mut request_line = String::new();
-    match tokio::time::timeout(READ_TIMEOUT, buf_reader.read_line(&mut request_line)).await {
+    let read = tokio::time::timeout(READ_TIMEOUT, buf_reader.read_line(&mut request_line));
+    // Biased: a readable request line is served even if eviction was requested.
+    let read = tokio::select! {
+        biased;
+        read = read => read,
+        _ = evicted => return Ok(()),
+    };
+    match read {
         Ok(Ok(0)) => return Ok(()),
         Ok(Ok(_)) => {}
         Ok(Err(e)) => return Err(e),
@@ -496,6 +545,41 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn livez_answers_while_idle_clients_fill_the_connection_budget() {
+        use std::io::{Read, Write};
+
+        let (addr, _entered, _release) = start_gated_server();
+        // Connections that never send a request line, one per permit. The
+        // accept queue is FIFO, so the server takes every idle connection
+        // before it can take the probe connected after them.
+        let mut idle: Vec<_> = (0..MAX_CONNECTIONS)
+            .map(|_| std::net::TcpStream::connect(addr).unwrap())
+            .collect();
+
+        let livez = (|| {
+            let mut stream = std::net::TcpStream::connect(addr)?;
+            // Below the request-line timeout: the probe must not depend on
+            // idle clients timing out to get a connection permit.
+            stream.set_read_timeout(Some(READ_TIMEOUT / 2))?;
+            stream.write_all(b"GET /livez HTTP/1.1\r\nHost: localhost\r\n\r\n")?;
+            let mut response = String::new();
+            stream.read_to_string(&mut response)?;
+            std::io::Result::Ok(response)
+        })();
+        let livez = livez.expect("/livez must answer while idle clients fill the budget");
+        assert!(livez.starts_with("HTTP/1.1 200 OK"), "{livez}");
+
+        // The probe displaced the oldest idle connection, closed without a reply.
+        let oldest = &mut idle[0];
+        oldest.set_read_timeout(Some(READ_TIMEOUT / 2)).unwrap();
+        let mut buf = Vec::new();
+        oldest
+            .read_to_end(&mut buf)
+            .expect("oldest idle connection must be closed");
+        assert!(buf.is_empty(), "{buf:?}");
+    }
+
+    #[test]
     fn metrics_render_deadline_maps_to_503() {
         let response = metrics_response(Err(std::io::ErrorKind::TimedOut.into()));
         assert!(
@@ -771,9 +855,15 @@ pub(crate) mod tests {
                     }
                 });
                 let (stream, _) = listener.accept().await.unwrap();
-                let _ =
-                    handle_connection(stream, &metrics, &probe, None, &Semaphore::new(MAX_SCRAPES))
-                        .await;
+                let _ = handle_connection(
+                    stream,
+                    std::future::pending::<()>(),
+                    &metrics,
+                    &probe,
+                    None,
+                    &Semaphore::new(MAX_SCRAPES),
+                )
+                .await;
             });
         });
 
@@ -877,7 +967,15 @@ pub(crate) mod tests {
                 let m = metrics.clone();
                 let probe = unused_probe();
                 tokio::spawn(async move {
-                    let _ = handle_connection(stream, &m, &probe, None, &Semaphore::new(1)).await;
+                    let _ = handle_connection(
+                        stream,
+                        std::future::pending::<()>(),
+                        &m,
+                        &probe,
+                        None,
+                        &Semaphore::new(1),
+                    )
+                    .await;
                     drop(permit);
                 });
             }
