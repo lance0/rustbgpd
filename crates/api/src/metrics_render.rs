@@ -7,9 +7,9 @@ use prometheus::{Encoder, TextEncoder};
 use rustbgpd_telemetry::BgpMetrics;
 use tokio::sync::Semaphore;
 
-/// Bounds one caller's whole render operation: waiting for the slot plus the
-/// render itself. Far above a normal render, below Prometheus's default 10 s
-/// scrape timeout.
+/// Bounds how long one caller waits: for the slot plus the render itself. On
+/// expiry the render keeps running and holds the slot until it finishes. Far
+/// above a normal render, below Prometheus's default 10 s scrape timeout.
 pub const RENDER_DEADLINE: Duration = Duration::from_secs(5);
 
 /// One whole-registry render in flight per process; later callers wait for

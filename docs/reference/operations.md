@@ -1434,7 +1434,7 @@ The telemetry HTTP listener exposes these read-only paths:
 
 | Path | Success | Failure |
 |------|---------|---------|
-| `/metrics` | `200` Prometheus text exposition | `500` if metrics encoding fails; `503` when the render does not finish within 5 s, or when 56 scrapes are already in flight. Scrapes never hold the listener's last 8 connection slots, so they cannot block `/livez` or `/readyz` |
+| `/metrics` | `200` Prometheus text exposition | `500` if metrics encoding fails; `503` when the scrape's wait for the render exceeds 5 s (the render itself keeps running), or at once when 56 scrapes are already waiting. Queued scrapes alone cannot fill the 64-connection budget, so `/livez` and `/readyz` stay reachable while a render is stuck |
 | `/livez` | `200 ok` once the listener accepts connections | No actor checks |
 | `/readyz` | `200 ready` when PeerManager and RIB respond within 200 ms total | `503 not ready: <reason>` |
 | `/dp-readyz` (opt-in alpha) | `200 dataplane workers ready` after each configured FIB/EVPN worker has completed an initial attempt and continues making progress | `404` when disabled; `503` when not configured, starting, unavailable, closed, or stale |
