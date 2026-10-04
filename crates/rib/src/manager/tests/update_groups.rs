@@ -9985,6 +9985,39 @@ fn prestaged_inventory_recheck_catches_tag_only_transition() {
     ));
 }
 
+/// An authoritative batch with duplicate targets takes the serial
+/// duplicate fallback; it never consumes the completed prestaged inventory,
+/// so it must still retire it and stop both groups' key logs.
+#[test]
+fn duplicate_peer_authoritative_batch_retires_prestaged_inventory() {
+    let (mut manager, peers, _receivers) = direct_clean_transition_manager(2, 8, None);
+    let policy = community_chain(0xFDE8_2102);
+    complete_prestage(&mut manager, peers[0], &policy);
+    let duplicate = crate::update::PeerExportPolicyReplacement {
+        peer: peers[1],
+        export_policy: Some(policy.clone()),
+    };
+    manager
+        .apply_export_policy_replacements_synchronously(vec![duplicate.clone(), duplicate])
+        .unwrap();
+    assert_eq!(
+        manager
+            .authoritative_transition_receipts
+            .last()
+            .unwrap()
+            .classification,
+        "duplicate-fallback"
+    );
+    assert!(manager.prestaged_inventory.is_none());
+    assert!(
+        manager
+            .group_ribs
+            .values()
+            .all(|group| group.inventory_log.is_none()),
+        "no group keeps logging"
+    );
+}
+
 /// A prestage discarded mid-inventory-walk, by the authoritative batch path
 /// or the cohort command, takes its inventory and both key logs with it.
 #[test]

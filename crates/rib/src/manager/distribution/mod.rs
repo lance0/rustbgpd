@@ -3960,6 +3960,10 @@ impl RibManager {
                 "internal RIB sequencing error: policy transition already in progress",
             ));
         }
+        // This path never consumes a prestaged inventory: drop it (and stop
+        // its groups' key logs) ahead of every return below, the duplicate
+        // fallback included.
+        self.retire_prestaged_transition_inventory();
         let n_replacements = replacements.len();
         // Duplicate targets: the cohort math below assumes one
         // replacement per peer. Apply duplicates in caller order through
@@ -4000,10 +4004,7 @@ impl RibManager {
         }
         receipt.precondition_us = u64::try_from(phase.elapsed().as_micros()).unwrap_or(u64::MAX);
         // A still-running destination preparation cannot be trusted
-        // mid-walk (same guard as the cohort transition command). This
-        // path never consumes a prestaged inventory, so drop it here, ahead
-        // of every early return below.
-        self.retire_prestaged_transition_inventory();
+        // mid-walk (same guard as the cohort transition command).
         if let Some(mut prestage) = self.pending_destination_prestage.take() {
             let _ = self.discard_uncommitted_policy_transition_group(prestage.destination);
             #[cfg(feature = "bench-internals")]
