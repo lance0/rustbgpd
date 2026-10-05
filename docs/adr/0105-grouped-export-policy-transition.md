@@ -110,23 +110,6 @@ a recreated group, or checked against a smaller RS-ASN set falls back to the
 fenced walk described in Section 3, so the commit-or-degrade outcome is that of a
 fenced walk of the same tables.
 
-**Amended:** 2026-10-05 — the final member of a clean cohort detaches the
-old source group's unicast prefix index before the existing logical removal.
-Its handles are retirement-only and never resolve the departed route slab.
-Membership, gauges and advertised-page publication retain the terminal commit
-points; the commit reply does not wait for physical trie pruning.
-
-After the fence, each ordinary actor turn prunes at most 32 prefixes using the
-same structural-pruning helper as synchronous retirement. New transitions park
-this work throughout their fences. Busy turns make progress alongside normal
-work; idle turns continue pruning while admitting readiness, ordinary queries
-and queued mutations. A closed primary channel drains the queue before normal
-actor exit. Each index is emptied before releasing its trie roots. Abrupt future
-cancellation or panic retains the actor's existing owned-state destruction;
-this change adds no background owner or asynchronous destructor and does not
-promise budgeted progress after cancellation. Timing qualification remains
-pending; no measured fence or completion improvement is asserted here.
-
 ## Context
 
 A live policy reload can move hundreds of route-reflector or route-server
@@ -450,6 +433,23 @@ semantics for both newly created and already-maintained destinations.
   and the RIB. The current single-owner plus compensating rollback is adequate
   for the measured route-reflector/route-server workload with the rollback's
   aggregate RIB wait bounded.
+
+**Amended:** 2026-10-05 — the final member of a clean cohort detaches the
+old source group's unicast prefix index before the existing logical removal.
+Its handles are retirement-only and never resolve the departed route slab.
+Membership, gauges and advertised-page publication retain the terminal commit
+points; the commit reply does not wait for physical trie pruning.
+
+After the fence, each ordinary actor turn prunes at most 32 prefixes using the
+same structural-pruning helper as synchronous retirement. New transitions park
+this work throughout their fences. Busy turns make progress alongside normal
+work; idle turns continue pruning while admitting readiness, ordinary queries
+and queued mutations. A closed primary channel drains the queue before normal
+actor exit. Each index is emptied before releasing its trie roots. Abrupt future
+cancellation or panic retains the actor's existing owned-state destruction;
+this change adds no background owner or asynchronous destructor and does not
+promise budgeted progress after cancellation. Timing qualification remains
+pending; no measured fence or completion improvement is asserted here.
 
 ## Consequences
 
