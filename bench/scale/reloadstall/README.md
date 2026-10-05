@@ -4,6 +4,76 @@ Deliberate manual performance harness: CI compiles, lints, and unit-tests it, bu
 
 Route-server-scale policy-reload UPDATE-stall driver.
 
+## Unsent-data threshold experiment
+
+The experimental Linux socket hook is compiled only with
+`rustbgpd-transport/bench-internals`; ordinary daemon builds ignore it. It sets
+neither a production default nor a memory cap. `TCP_NOTSENT_LOWAT` controls
+unsent queueing and writable notification ([kernel documentation](https://docs.kernel.org/networking/ip-sysctl.html)); socket buffers and bytes already
+in flight remain separate costs. The experiment uses the existing coalescing
+writer, so a parked writer can retain a private batch as well as shared chunks.
+
+Build in a dedicated worktree, with its own `target`:
+
+```sh
+cargo build --release --locked --bin rustbgpd --features rustbgpd-transport/bench-internals
+cargo build --profile scale --locked -p reloadstall
+```
+
+`bash bench/scale/reloadstall/run-unsent-leg.sh OUT_DIR unset|BYTES [RTT_MS]`
+runs the existing matrix's rustbgpd cell with a fresh artifact directory. The
+unset arm leaves the socket option alone. A positive `u32` threshold is applied
+to every newly connected accepted and outbound BGP writer, including reconnects;
+setter/getter failures terminate that writer, and requested/read-back values are
+logged once per connection. A raw readback of zero on the unset arm means the
+kernel uses its sysctl value. The wrapper records that value before and after
+the leg and never writes it. Matrix shape knobs and the canonical cooldown are
+preserved, and threshold/RTT/diagnostic inputs are included in provenance.
+
+The side sampler records `memory.current` before/after each `memory.stat` read,
+the kernel's whole-scope `memory.peak`, `anon`/`sock`/other charges, VmHWM, daemon
+CPU seconds, and cumulative per-task voluntary/involuntary context switches at
+25 ms intervals. It requires a daemon-only scope with swap fenced. A row's
+stat fields are near-contemporaneous samples, not an atomic attribution of
+`memory.peak`; report the split at the largest sampled current alongside the
+kernel peak. Read duration and raced thread counts expose sampling overhead.
+Context switches count daemon tasks, not writer future wakeups.
+
+Start with an interleaved unset/64-KiB A/B on the same main-based binary and
+harness: three legs per arm, four reloads per leg at 700 peers × 400,400 prefixes.
+Report each whole-leg peak and each reload's completion/stall p50, worst observer,
+CPU window, and session/parse checks. Do not infer a win from `sock` alone.
+Require at least 100 MiB lower whole-cgroup peak, at most 2% regression in
+completion/stall p50, and retained tails, CPU/scheduling cost, and session health
+before considering a production opt-in. Smaller/larger thresholds are screening
+arms, not a substitute for repeated acceptance measurements.
+
+Reader qualification arms use `RELOADSTALL_READER_COUNT` (the first non-churner
+changed peers), `RELOADSTALL_READER_DELAY_MS`, `RELOADSTALL_READER_BYTES` (1–65536),
+and `RELOADSTALL_READER_PAUSE_MS`. Pacing is acknowledged before each reload
+trigger. Slow readers retain a delay between chunks; stopped readers pause for a
+finite interval and then resume so recovery is checked. Every observer must still
+complete, sessions and decode checks still hold, and separate
+`healthy_completion_s`/`healthy_maxgap_ms` lines report the unpaced survivors.
+For example, repeat both arms with 50 readers at 4 KiB per 5 ms, then with a
+5-second stopped-reader interval. These are separate qualification shapes.
+
+An RTT argument runs both loopback endpoints in a disposable user/network
+namespace, with half the requested RTT as each direction's netem delay. It
+requires unprivileged namespace support and `ip`/`tc`. A host that rejects user
+namespace creation leaves the RTT prerequisite pending. Separate daemon and
+harness containers sharing an owned network namespace are an alternative; this
+wrapper does not implement that driver. No host
+networking or sysctl is changed. Test realistic RTT (for example 20 ms) with both
+reader qualification shapes before shipping a setting.
+
+`RUSTBGPD_BENCH_WRITER_POLLS=1` enables per-write poll/pending-poll diagnostic
+logs with epoch markers, including failed/canceled attempts but excluding any
+teardown linger. They are future poll/resume counts, not actual kernel wakeups.
+These logs and their clock reads perturb the burst: keep them off for acceptance
+timings and run matched diagnostic arms separately. A smoke only validates the
+hook, accounting, and controls. No production setting is approved by this harness.
+
 ## What it measures
 
 `N` real BGP stub clients dial a running rustbgpd route server over loopback
