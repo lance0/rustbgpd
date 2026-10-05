@@ -1482,6 +1482,7 @@ impl RibManager {
         // path; grouped peers skip it (empty staging set).
         let mut vpn_group_replayed = false;
         let mut grouped_otc_blocked = Vec::new();
+        let mut grouped_unicast = None;
         if let Some(group) = member_of.and_then(|gid| self.group_ribs.get(&gid)) {
             // LAN-474: per-target divergence at the replay seam — a
             // table entry whose captured SOURCE communities tag it may
@@ -1489,6 +1490,7 @@ impl RibManager {
             // from the source, scrub post-policy) for it; untagged
             // entries replay as-is.
             let rs_control = rs_control_asn.zip(target_peer_asn);
+            let mut replay = Vec::with_capacity(group.table.len());
             for staged in group.table.iter() {
                 checkpoint_at("initial_group_replay");
                 if self.selection_deferred(prefix_family(&staged.prefix)) {
@@ -1512,15 +1514,34 @@ impl RibManager {
                 ) {
                     continue;
                 }
-                unicast.next_hop_override.push(entry.nh.cloned());
-                let mut route = entry.route.clone();
-                super::distribution::rs_control::rs_control_route_rewrite(
-                    &mut route,
-                    source_large_communities,
-                    rs_control,
-                );
-                unicast.announce.push(route);
+                replay.push(entry);
             }
+            // Keep borrowed entries until filtering is complete. Mapping the
+            // exact-sized slice iterator collects straight into each Arc,
+            // avoiding a full Vec<Route> and its copy at the replay peak.
+            let announce: std::sync::Arc<[_]> = replay
+                .iter()
+                .map(|entry| {
+                    checkpoint_at("initial_group_replay");
+                    let (_, source_large_communities) =
+                        group.source_control_for_route(entry.route, entry.source_attrs);
+                    let mut route = entry.route.clone();
+                    super::distribution::rs_control::rs_control_route_rewrite(
+                        &mut route,
+                        source_large_communities,
+                        rs_control,
+                    );
+                    route
+                })
+                .collect();
+            let next_hop_override: std::sync::Arc<[_]> = replay
+                .iter()
+                .map(|entry| {
+                    checkpoint_at("initial_group_replay");
+                    entry.nh.cloned()
+                })
+                .collect();
+            grouped_unicast = Some((announce, next_hop_override));
             // VPN join replay: table minus own-sourced, filtered by the
             // joining member's Φ (the RFC 4684 gate the per-peer dump
             // would have applied; strict-empty membership replays
@@ -2028,7 +2049,9 @@ impl RibManager {
             self.reconcile_peer_otc_blocked(peer, &otc_prefixes, grouped_otc_blocked);
         }
 
-        let has_outbound_diff = !unicast.announce.is_empty()
+        let (announce, next_hop_override) = grouped_unicast
+            .unwrap_or_else(|| (unicast.announce.into(), unicast.next_hop_override.into()));
+        let has_outbound_diff = !announce.is_empty()
             || !unicast.withdraw.is_empty()
             || !fs_announce.is_empty()
             || !fs_withdraw.is_empty()
@@ -2060,10 +2083,7 @@ impl RibManager {
                     labeled_withdraw,
                     rtc_announce,
                     rtc_withdraw,
-                    ..OutboundCommitBatch::with_unicast(
-                        unicast.announce.into(),
-                        unicast.next_hop_override.into(),
-                    )
+                    ..OutboundCommitBatch::with_unicast(announce, next_hop_override)
                 },
                 HashSet::new(),
                 None,
