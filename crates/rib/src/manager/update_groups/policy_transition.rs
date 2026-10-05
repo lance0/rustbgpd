@@ -75,9 +75,9 @@ fn inventory_entry(
 /// A clean-transition inventory built outside the fence, right after the
 /// unfenced destination prestage. From the walk's first slice on, both
 /// groups log every key a table write touches
-/// ([`GroupRibOut::inventory_log`]); the fenced `BuildInventory` drops
-/// those keys' walk results and re-checks only them against the frozen
-/// tables, so every drift check stays exact without a fenced full walk.
+/// ([`GroupRibOut::inventory_log`]). Logged keys are reconciled before
+/// sealing the payload, then again against the frozen tables during fenced
+/// `BuildInventory`, so every drift check stays exact without a fenced full walk.
 pub(in crate::manager) struct PrestagedTransitionInventory {
     source: usize,
     destination: usize,
@@ -597,15 +597,15 @@ impl RibManager {
                 routes[index] = route;
                 next_hops[index] = next_hop;
             }
-            if let Some(probe) = prestaged.probe.as_mut()
-                && !crate::manager::distribution::reprobe_prestaged_transition_rows(
+            if let Some(mut probe) = prestaged.probe.take_if(|probe| {
+                !crate::manager::distribution::reprobe_prestaged_transition_rows(
                     &sealed,
                     probe,
                     &touched_positions,
                     &mut || checkpoint(),
                 )
-            {
-                prestaged.probe = None;
+            }) {
+                probe.retire_with(&mut || checkpoint());
             }
             inventory.prebuilt = Some(sealed);
         } else {
@@ -629,7 +629,10 @@ impl RibManager {
                 inventory.announce.push(route);
                 inventory.next_hop_override.push(next_hop);
             }
-            prestaged.probe = None;
+            sealed.retire_with(&mut |force| self.replacement_checkpoint(force));
+            if let Some(mut probe) = prestaged.probe.take() {
+                probe.retire_with(&mut || checkpoint());
+            }
         }
         Some(inventory)
     }
@@ -664,6 +667,7 @@ impl RibManager {
         };
         if let Some((&key, &term)) = prestaged.failed.iter().next() {
             inventory_degraded(source, destination, Some(key), term);
+            inventory.retire_with(&mut |force| self.replacement_checkpoint(force));
             return PrestagedInventoryOutcome::Degraded;
         }
         // `tagged` is relative to the walk's ASN superset: re-ask each
@@ -679,6 +683,7 @@ impl RibManager {
                 });
                 if tagged {
                     inventory_degraded(source, destination, Some(key), "rs-control tag");
+                    inventory.retire_with(&mut |force| self.replacement_checkpoint(force));
                     return PrestagedInventoryOutcome::Degraded;
                 }
             }
