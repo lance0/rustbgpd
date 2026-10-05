@@ -1,0 +1,9 @@
+cg_peak: 586628 kB
+cg_current: 312184 kB
+cg_swap_max: 0
+cg_last_sample_anon: 371180 kB
+cg_last_sample_file: 5324 kB
+cg_last_sample_file_mapped: 0 kB
+cg_teardown_anon: 296264 kB
+cg_teardown_file: 6228 kB
+cg_teardown_file_mapped: 0 kB
