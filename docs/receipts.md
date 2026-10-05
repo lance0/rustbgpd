@@ -54,6 +54,15 @@ id names its milestone, and some jobs run several receipts (`m85` also runs
 M93 and M95; `m26_m27_m28_m59_m91` runs five). Full procedures:
 [`INTEROP.md`](interop.md).
 
+Peer stacks below describe the current CI configuration. The 2026-10-05
+current-pin local smokes used rustbgpd 0.72.0 for M76 (35/0), M77 (83/0),
+M83 (62/0), and M101 (27/0); M104 (74/0) and
+[M107 (32/0, plus 19/0 in its sibling)](../tests/interop/m107-rs-rfc8950-uniform-fleet/README.md#current-pin-refresh-2026-10-05)
+used main's rustbgpd 0.75.0. The BIRD 3.3.3 M43 TCP-AO lane also
+[passed hosted validation](https://github.com/lance0/rustbgpd/actions/runs/37342186414/job/111875641546)
+at comparator revision `79b6cbaee`. Older dated receipts retain their original
+peer versions.
+
 | Receipt | Proves | Peer stack |
 |---------|--------|------------|
 | M1 | Basic session + UPDATE receive into the RIB | FRR 10.7.1 |
@@ -85,14 +94,14 @@ M93 and M95; `m26_m27_m28_m59_m91` runs five). Full procedures:
 | M73 | BGP-LS route reflection: source → RR → sink, attributes verbatim | GoBGP 4.6.0 ×2 |
 | M74 | VPNv4/VPNv6 reflection: shared-RD identity, scoped API/sink views, same-path RFC 4456 attributes, ordered withdrawals, zero dataplane | GoBGP 3.37.0 ×2 |
 | M75 | RT-Constrain (RFC 4684) VPNv4 reflection filtering, widen/narrow without reset | GoBGP 3.37.0 ×3 |
-| M76 | RFC 9107 Optimal Route Reflection: divergent per-vantage best paths, topology-driven flip; exact 35/0 current-daemon refresh | Checksum-built GoBGP 4.8.0 ×5 |
-| M77 | GR/LLGR stale preservation for the RR families (RFC 4724 + RFC 9494); exact 83/0 current-daemon refresh | Checksum-built GoBGP 4.8.0 ×3 |
+| M76 | RFC 9107 Optimal Route Reflection: divergent per-vantage best paths, topology-driven flip; exact 35/0 current-pin smoke against rustbgpd 0.72.0 | Checksum-built GoBGP 4.10.0 ×5 |
+| M77 | GR/LLGR stale preservation for the RR families (RFC 4724 + RFC 9494); exact 83/0 current-pin smoke against rustbgpd 0.72.0 | Checksum-built GoBGP 4.10.0 ×3 |
 | M78 | Multi-cluster ORR + inter-RR Add-Path | GoBGP 4.6.0 ×5 + rustbgpd ×2 |
 | M79 | RFC 8277 labeled-unicast (SAFI 4) reflection + GR | GoBGP 4.6.0 ×2 |
 | M80 | ADR-0096 `.rpol` policy parity vs FRR route-maps (dual-family, asn-set origin-AS + `route.family` predicates), hot-apply under traffic | FRR 10.7.1 ×3 |
 | M81 | BMP trio (rib-in, rib-out, loc-rib) + RFC 9972 policy-rejection and RPKI validation-state stats + BMPv4 against three independent decoders | GoBGP ×2 + StayRTR + pmacct + gobmp + tshark |
 | M82 | ADR-0092 EVPN VLAN-Aware Bundle (non-zero Ethernet Tag) reflection: tag as route identity, same MAC under two tags uncollapsed, tag-verbatim NLRIs, tag-scoped withdraw — synthetic leg in CI plus the **first vendor-NOS receipt** (local lab) | GoBGP 3.37.0 ×2 (CI) + Nokia SR Linux 25.10.1 (local) |
-| M83 | RFC 7947 route-server profile, multi-stack: byte-level transparency, a BIRD-only inbound MED-discard boundary with raw-wire/RIB/downstream/metric proof, OTC, per-member views, ROV explain, and the §2.3 path-hiding contrast (single-best / per-client-best / Add-Path, ADR-0101) | BIRD 2.19.2 + GoBGP 4.8.0 + digest-pinned FRR 10.7.0 + StayRTR |
+| M83 | RFC 7947 route-server profile, multi-stack: byte-level transparency, a BIRD-only inbound MED-discard boundary with raw-wire/RIB/downstream/metric proof, OTC, per-member views, ROV explain, and the §2.3 path-hiding contrast (single-best / per-client-best / Add-Path, ADR-0101) | BIRD 2.19.2 + GoBGP 4.10.0 + digest-pinned FRR 10.7.0 + StayRTR |
 | M84 | Multi-cache RTR/ASPA epoch conformance: per-cache load at validated EoD, v2→v1 fallback, restart retention + session rotation, ASPA replace / empty-provider withdrawal, serial-regression resync | FRR + Routinator 0.15.2 + StayRTR + RTR v2 mock |
 | M85 | RR core reflection + GR helper truth (RFC 4456 + RFC 4724): IPv4/IPv6 reflection, ORIGINATOR_ID/CLUSTER_LIST, no reflect-back, stale preservation for a GR-capable client and immediate withdrawal for a GR-aware one | BIRD 2.19.2 ×2 + rustbgpd |
 | M86 | The M85 RR reflection + GR shape against OpenBGPD clients | OpenBGPD 9.1 ×2 + rustbgpd |
@@ -104,11 +113,11 @@ M93 and M95; `m26_m27_m28_m59_m91` runs five). Full procedures:
 | M98 | [IXP Manager Nagios monitoring](interop.md#ixp-manager-v74-manual-configuration-oracle): the pinned v7.4 `birdseye-daemons` and `birdseye-bgp-sessions` generators include the rustbgpd route server (host, service, hostgroup, both client session services with rendered alias names), and the pinned Bird's Eye daemon plugin reports `OK` with `Last Reconfigure` against the live adapter; gated by `ixp-compat.yml` | IXP Manager v7.4.0 + Bird's Eye v2.1.0 plugin + live `birdwatcher-adapter` |
 | M99 | RFC 9072 forced-small extended OPEN plus classic control: host-tshark raw TCP payload, independent retransmission-aware stream reassembly, exact 348-byte/313-capability-octet and 49-byte rustbgpd OPENs, exact type-2 parameter consumption, non-empty common capability inventories, and no NOTIFICATION | Digest-pinned FRR 10.3.1 |
 | M100 | Exact five-attribute by four-receiver Partial-flag matrix: frozen `0xa0` bytes, candidate/survivor snapshots, independent observer reconstruction, accepted MED 100, non-forwarded ORIGINATOR_ID/CLUSTER_LIST, and ordered exact UPDATE `3/4` notification/close/reconnect evidence for every reset; a fifth `rustbgpd-current` receiver built from the tree is judged separately by its own rows and exact malformed-UPDATE counters | rustbgpd 0.67.0 + BIRD 2.19.2 + OpenBGPD 9.2 + FRR 10.3.1, plus current rustbgpd |
-| M101 | Real-speaker IPv4-unicast attribute-discard at a route server: checksum-built BIRD emits exact type-40 tuple `e0 28 01 00`; post-policy Adj-RIB-In and digest-pinned FRR preserve the route, transparent AS_PATH/NEXT_HOP, and unrelated communities; only `attribute_discard` advances. Import/member-export denies, positive controls, explain/advertised views, withdrawal, and no-flap session survival complete an exact 27/0 receipt | BIRD 3.3.2 + digest-pinned FRR 10.3.1 |
+| M101 | Real-speaker IPv4-unicast attribute-discard at a route server: checksum-built BIRD emits exact type-40 tuple `e0 28 01 00`; post-policy Adj-RIB-In and digest-pinned FRR preserve the route, transparent AS_PATH/NEXT_HOP, and unrelated communities; only `attribute_discard` advances. Import/member-export denies, positive controls, explain/advertised views, withdrawal, and no-flap session survival complete an exact 27/0 receipt | BIRD 3.3.3 + digest-pinned FRR 10.3.1 |
 | M102 | Dual-stack route-server member proof: enforced role/AS4/families, bidirectional AS_PATH and community transparency, independently reassembled AS_TRANS/capability-65 and exact decoded IPv4 UPDATE fields (AS_PATH, NEXT_HOP, standard and Large Communities, and NLRI), explicit import/export policy, four directional-family withdrawals, and no-flap continuity complete exact 32/0; malformed Partial and AS_SET behavior are out of scope | Digest-pinned OpenBGPD 9.3 + FRR 10.3.1 |
 | M103 | GoBGP 4.7 → 4.8 route-server differential revalidation: immutable M92 evidence; exact 56/0 normal and 17/0 missing-EoR refusal; raw equality after deleting only recursive `age`; separately versioned M103 golden with byte-identical route/trailer records | Checksum-built GoBGP 4.8.0 ×3 + BIRD 2.0.12 |
-| M104 | Current-daemon ARouteServer filtering differential: immutable M90 inputs; exact 23/23 context-ingestion plus 74/0 live verdict, term/cause, and session-survival gates | ARouteServer 1.23.2 + checksum-built BIRD 2.19.2 + checksum-built GoBGP 4.8.0 ×3 |
-| M107 | RFC 8950 uniform-fleet route server rendered by `rs-config-render`: IPv4 and IPv6 unicast over one IPv6 session per member with exact Extended Next Hop negotiation; a sibling lab withholds IPv4 routes with IPv6 next hops from a non-ENHE receiver | GoBGP 4.8.0 ×2 (+ FRR 10.7.1 in the sibling) |
+| M104 | Current-daemon ARouteServer filtering differential: immutable M90 inputs; exact 23/23 context-ingestion plus 74/0 live verdict, term/cause, and session-survival gates | ARouteServer 1.23.2 + checksum-built BIRD 2.19.2 + checksum-built GoBGP 4.10.0 ×3 |
+| M107 | RFC 8950 uniform-fleet route server rendered by `rs-config-render`: IPv4 and IPv6 unicast over one IPv6 session per member with exact Extended Next Hop negotiation; a sibling lab withholds IPv4 routes with IPv6 next hops from a non-ENHE receiver | GoBGP 4.10.0 ×2 (+ FRR 10.7.1 in the sibling) |
 
 ## Interop labs — kernel dataplane, PR + push + manual (`kernel-dataplane.yml`)
 
@@ -126,7 +135,7 @@ proved with kernel evidence (routes, FDB rows, nexthop groups, netdev state).
 | M39b | Auto-derived Route Targets cross-vendor (RFC 8365 `AS:VNI`) | FRR 10.7.1 |
 | M40 | ADR-0059 EVPN aliasing dataplane ECMP via FDB nexthop groups | FRR EVPN-MH |
 | M42 | ADR-0061 opt-in general unicast Linux FIB runtime | FRR 10.7.1 |
-| M43 | TCP-AO dynamic `/24` queued-child deletion-foundation receipt plus two BIRD modes: uninterrupted SIGHUP add/select/deprecate/delete with a 100 ms route-continuity oracle, and SIGKILL/restart recovery after add-only, selection/deprecation `awaiting_peer`, and delete. Every restart requires BIRD disconnect, a new daemon PID, fresh `1/1` / `idle`, exact MKT inventory, mandatory TCP-AO, route/session recovery, and phase-correct Current/RNext; selection explicitly proves authenticated `degraded` `2/13` before the peer moves, then `healthy` `3/13` (probed; skips only if the runner kernel lacks TCP-AO) | BIRD 3.3.2 |
+| M43 | TCP-AO dynamic `/24` queued-child deletion-foundation receipt plus two BIRD modes: uninterrupted SIGHUP add/select/deprecate/delete with a 100 ms route-continuity oracle, and SIGKILL/restart recovery after add-only, selection/deprecation `awaiting_peer`, and delete. Every restart requires BIRD disconnect, a new daemon PID, fresh `1/1` / `idle`, exact MKT inventory, mandatory TCP-AO, route/session recovery, and phase-correct Current/RNext; selection explicitly proves authenticated `degraded` `2/13` before the peer moves, then `healthy` `3/13` (probed; skips only if the runner kernel lacks TCP-AO) | BIRD 3.3.3 |
 | M47 / M48 | ADR-0063 runtime EVPN tenant teardown (control plane / kernel L3 datapath) | FRR 10.7.1 |
 | M69 | RFC 9785 Highest-Preference DF election, cross-vendor | FRR 10.7.1 |
 | M50 / M52 | ADR-0066 unicast multipath ECMP FIB install + multipath-relax | FRR 10.7.1 ×2 |

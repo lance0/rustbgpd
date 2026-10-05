@@ -28,7 +28,7 @@ threads: BIRD 3 `threads` knob (default 8).
 conf_dir: directory where the RUNNING bird sees these files (include paths
 are absolute; default /etc/bird — i.e. `docker run -v <out_dir>:/etc/bird`).
 competitor_generation: historical (BIRD 3.3.1, default) or current
-(BIRD 3.3.2). It changes only version-bearing generated comments.
+(BIRD 3.3.3). It changes only version-bearing generated comments.
 
 Emits into <out_dir>: bird.conf, gen.conf (live, starts as gen-a),
 gen-a.conf, gen-b.conf.
@@ -49,7 +49,7 @@ out.mkdir(parents=True, exist_ok=True)
 
 COMPETITOR_GENERATIONS = {
     "historical": ("BIRD 3.3.1", "bird:3.3.1"),
-    "current": ("BIRD 3.3.2", "bird:v3.3.2-m101"),
+    "current": ("BIRD 3.3.3", "bird:v3.3.3-m101"),
 }
 if competitor_generation not in COMPETITOR_GENERATIONS:
     sys.exit("competitor_generation must be historical or current")

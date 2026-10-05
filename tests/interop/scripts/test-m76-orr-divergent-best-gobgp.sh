@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # M76 interop test — RFC 9107 Optimal Route Reflection divergent-best
-# receipt against checksum-built GoBGP v4.8.0.
+# receipt against checksum-built GoBGP v4.10.0.
 #
 # gobgp-src injects a 4-link BGP-LS square via `gobgp global rib add -a ls
 # link ...`; pe1/pe2 announce the SAME prefix 203.0.113.0/24 with next-hops
@@ -33,9 +33,9 @@
 #
 # Prerequisites:
 #   - docker build --target dev -t rustbgpd:dev .
-#   - docker build --build-arg TARGETARCH=amd64 --build-arg GOBGP_VERSION=4.8.0 \
-#       --build-arg GOBGP_SHA256=43b570ae5cc1afab7aebdd9d8f4536e27656465848270c8a6f5fda1ffe093a03 \
-#       -t gobgp:v4.8.0-m76 -f tests/interop/Dockerfile.gobgp-v47 tests/interop
+#   - docker build --build-arg TARGETARCH=amd64 --build-arg GOBGP_VERSION=4.10.0 \
+#       --build-arg GOBGP_SHA256=05a1c9fa1fe5c8d59de5a923efa4afe692c371c33b84750cfeb8f8df24db5fbe \
+#       -t gobgp:v4.10.0-m76 -f tests/interop/Dockerfile.gobgp-v47 tests/interop
 #   - containerlab deployed:
 #       containerlab deploy -t tests/interop/m76-orr-divergent-best-gobgp.clab.yml
 
@@ -50,11 +50,11 @@ GOBGP_PE1="clab-${TOPO}-gobgp-pe1"
 GOBGP_PE2="clab-${TOPO}-gobgp-pe2"
 GOBGP_C1="clab-${TOPO}-gobgp-c1"
 GOBGP_C2="clab-${TOPO}-gobgp-c2"
-readonly GOBGP_IMAGE="gobgp:v4.8.0-m76"
-readonly GOBGP_VERSION="gobgp version 4.8.0"
-readonly GOBGPD_VERSION="gobgpd version 4.8.0"
-readonly GOBGP_BINARY_SHA256="5bd2c6eddab475746d5257c4466f8377b3790bcf7159e18e03a9d44a1685348b"
-readonly GOBGPD_BINARY_SHA256="710b7c28d2b83aef887cc28ae6ddcffe82f11a27e0ba263d9f747658b45f8a97"
+readonly GOBGP_IMAGE="gobgp:v4.10.0-m76"
+readonly GOBGP_VERSION="gobgp version 4.10.0"
+readonly GOBGPD_VERSION="gobgpd version 4.10.0"
+readonly GOBGP_BINARY_SHA256="55eded2e53f5c597baab409f69d18729292a6e28084fd0ce2be9b5383a406f86"
+readonly GOBGPD_BINARY_SHA256="bea17d8561b776cb35820ce14601a617e26acb1efa687b9d949a1737ee2f670d"
 
 SRC_ADDR="10.0.0.2"
 PE1_ADDR="10.0.1.2"
@@ -77,7 +77,7 @@ RID_B="2.2.2.2"
 RID_X="9.9.9.1"
 RID_Y="9.9.9.2"
 
-# GoBGP v4.8.0 `gobgp global rib add -a ls link` descriptor arguments for
+# GoBGP v4.10.0 `gobgp global rib add -a ls link` descriptor arguments for
 # one directed link. $1=local rid, $2=remote rid, $3=ipv4-interface-address
 # (local side), $4=ipv4-neighbor-address (remote side), $5=IGP metric
 # (TLV 1095 in the BGP-LS Attribute).
@@ -124,7 +124,7 @@ preflight_gobgp_identity() {
         require_exact "$(docker exec "$container" sha256sum /usr/local/bin/gobgpd | cut -d' ' -f1)" \
             "$GOBGPD_BINARY_SHA256" "$container gobgpd binary SHA-256"
     done
-    log "Verified exact GoBGP 4.8.0 image, amd64 runtime, and binary identities"
+    log "Verified exact GoBGP 4.10.0 image, amd64 runtime, and binary identities"
 }
 
 start_gobgpd() {

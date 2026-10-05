@@ -57,7 +57,7 @@ Usage:
 
 The competitor-generation selector changes only the first two generated
 header comments for BIRD and OpenBGPD. It defaults to the historical BIRD
-3.3.1 / OpenBGPD 9.1 receipt pair; current selects BIRD 3.3.2 / OpenBGPD 9.3.
+3.3.1 / OpenBGPD 9.1 receipt pair; current selects BIRD 3.3.3 / OpenBGPD 9.3.
 
 With --overlap-fraction F > 0, round(F * total_prefixes) base prefixes gain a
 second announcing member (drawn uniformly, seed-deterministic); the second
@@ -99,7 +99,7 @@ COMPETITOR_GENERATIONS = {
         "openbgpd": ("OpenBGPD 9.1", "openbgpd/openbgpd:9.1"),
     },
     "current": {
-        "bird": ("BIRD 3.3.2", "bird:v3.3.2-m101"),
+        "bird": ("BIRD 3.3.3", "bird:v3.3.3-m101"),
         "openbgpd": (
             "OpenBGPD 9.3",
             "openbgpd/openbgpd@sha256:"

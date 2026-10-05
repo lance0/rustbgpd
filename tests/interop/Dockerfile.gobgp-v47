@@ -1,5 +1,5 @@
 # Official GoBGP 4.x linux/amd64 release binaries, checksum-pinned per image.
-# CI builds 4.6.0 (gobgp:bgpls), 4.7.0 (M92) and 4.8.0 by passing
+# CI builds 4.6.0 (gobgp:bgpls), 4.7.0 (M92), 4.8.0 (M103) and 4.10.0 by passing
 # GOBGP_VERSION and GOBGP_SHA256 build arguments.
 FROM debian:bookworm-slim AS gobgp-release
 

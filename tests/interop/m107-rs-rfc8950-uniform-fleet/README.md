@@ -37,9 +37,9 @@ keeps demand-gated.
 
 ```bash
 docker build --target dev -t rustbgpd:dev .
-docker build --build-arg TARGETARCH=amd64 --build-arg GOBGP_VERSION=4.8.0 \
-  --build-arg GOBGP_SHA256=43b570ae5cc1afab7aebdd9d8f4536e27656465848270c8a6f5fda1ffe093a03 \
-  -t gobgp:v4.8.0-m107 -f tests/interop/Dockerfile.gobgp-v47 tests/interop
+docker build --build-arg TARGETARCH=amd64 --build-arg GOBGP_VERSION=4.10.0 \
+  --build-arg GOBGP_SHA256=05a1c9fa1fe5c8d59de5a923efa4afe692c371c33b84750cfeb8f8df24db5fbe \
+  -t gobgp:v4.10.0-m107 -f tests/interop/Dockerfile.gobgp-v47 tests/interop
 containerlab deploy -t tests/interop/m107-rs-rfc8950-uniform-fleet.clab.yml
 bash tests/interop/scripts/test-m107-rs-rfc8950-uniform-fleet.sh
 containerlab destroy -t tests/interop/m107-rs-rfc8950-uniform-fleet.clab.yml
@@ -107,3 +107,34 @@ JSON at the wrong paths failed exactly those six assertions (23/29) while
 the route server had already accepted the owned routes and rejected the
 foreign one; the corrected driver passed 32/32 on a fresh deploy, and the
 driver as committed passed 32/32 again on another fresh deploy.
+
+## Current-pin refresh (2026-10-05)
+
+A fresh local deploy passed **32 checks, 0 failures** with GoBGP 4.10.0
+(`gobgp:v4.10.0-m107`, image ID
+`sha256:cb11461fb5974c334e9a501c221fb286c20400e59776aa27a5af5d94a3db32d2`)
+and rustbgpd 0.75.0 built from main
+`507ffe2abc42ac754857e517e31fca2a7911770a`. The owned development image
+(`sha256:c94681e8217ed87748ab531f6f49cce7e50e95b575c16b7309fc7117b5043312`)
+contained that daemon and a freshly built `rbgp` 0.75.0 CLI.
+The uniform-fleet proof again covered exact Extended Next Hop negotiation,
+owned and foreign next-hop handling, transparent export, and session survival.
+
+The non-ENHE sibling passed **19 checks, 0 failures** against the same
+GoBGP and daemon builds plus digest-pinned FRR 10.7.1. The offline
+context-ingestion proof passed **18 checks**, including a fresh dump from
+the same pinned arouteserver 1.23.2 image, byte equality with the sectioned
+fixture, equivalent rendering, strict configuration validation, and all
+policy checks. The inputs listed in the earlier receipt remain unchanged.
+
+| Build input | SHA-256 |
+|-------------|---------|
+| Official GoBGP 4.10.0 amd64 archive | `05a1c9fa1fe5c8d59de5a923efa4afe692c371c33b84750cfeb8f8df24db5fbe` |
+| `/usr/local/bin/gobgp` | `55eded2e53f5c597baab409f69d18729292a6e28084fd0ce2be9b5383a406f86` |
+| `/usr/local/bin/gobgpd` | `bea17d8561b776cb35820ce14601a617e26acb1efa687b9d949a1737ee2f670d` |
+| rustbgpd 0.75.0 daemon | `86653fbdedef57aa10c3225d9921b3d5403646c7c8e3744a1948e602319797e6` |
+| rbgp 0.75.0 CLI | `01654803533b9688c1463759aef2ef0e18a3261380d8be82cf8c619c7ca7f9ab` |
+
+These are bounded correctness smokes, not scale or comparative performance
+measurements. The GoBGP 4.8.0 receipt above continues to describe its original
+rustbgpd 0.68.0 run; this refresh does not change that evidence.

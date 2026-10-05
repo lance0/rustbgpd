@@ -8,7 +8,7 @@ replace its evidence. It reuses M90's site inputs, GoBGP member configs, and
 |---|---|
 | ARouteServer | Python package 1.23.2; Docker schema-2 manifest `sha256:ba0e9c0b541c63acf0765a08fd2e09c2bba9dc64af1f5bbdce7819e8d1c34d66`; image config `sha256:4a08ef740f00a119f5897b0f834da9ff172a282c93d47fdff636c3b50c9aec93`; upstream `v1.23.2` commit `85f24252564822556bd93cb9eba1f73d1e8268ea` |
 | BIRD | 2.19.2 source archive SHA-256 `aff89abba3b92b7637bd57e0168b8d7ae887747f160ada4973378ad72f5f3660`, staged by the shared producer before image build; ARouteServer target 2.16; exact runtime version plus `bird -p` before daemon start |
-| GoBGP | 4.8.0 release archive SHA-256 `43b570ae5cc1afab7aebdd9d8f4536e27656465848270c8a6f5fda1ffe093a03`; `gobgp` binary SHA-256 `5bd2c6eddab475746d5257c4466f8377b3790bcf7159e18e03a9d44a1685348b`; `gobgpd` binary SHA-256 `710b7c28d2b83aef887cc28ae6ddcffe82f11a27e0ba263d9f747658b45f8a97` |
+| GoBGP | 4.10.0 release archive SHA-256 `05a1c9fa1fe5c8d59de5a923efa4afe692c371c33b84750cfeb8f8df24db5fbe`; `gobgp` binary SHA-256 `55eded2e53f5c597baab409f69d18729292a6e28084fd0ce2be9b5383a406f86`; `gobgpd` binary SHA-256 `bea17d8561b776cb35820ce14601a617e26acb1efa687b9d949a1737ee2f670d` |
 | rustbgpd | Source contains the post-M103 boundary `350eb813b7a2a71ccfae2084d033253e96419cea`; the driver requires the exact checked-out SHA and records the same-run local `rustbgpd:dev` image ID |
 
 The ARouteServer manifest is a single linux/amd64 image manifest, not an image
@@ -80,9 +80,9 @@ docker build --target dev -t rustbgpd:dev .
 docker build -t bird:v2.19.2-m104 \
   -f tests/interop/Dockerfile.bird-v2192 tests/interop
 docker build --build-arg TARGETARCH=amd64 \
-  --build-arg GOBGP_VERSION=4.8.0 \
-  --build-arg GOBGP_SHA256=43b570ae5cc1afab7aebdd9d8f4536e27656465848270c8a6f5fda1ffe093a03 \
-  -t gobgp:v4.8.0-m104 -f tests/interop/Dockerfile.gobgp-v47 tests/interop
+  --build-arg GOBGP_VERSION=4.10.0 \
+  --build-arg GOBGP_SHA256=05a1c9fa1fe5c8d59de5a923efa4afe692c371c33b84750cfeb8f8df24db5fbe \
+  -t gobgp:v4.10.0-m104 -f tests/interop/Dockerfile.gobgp-v47 tests/interop
 docker pull \
   pierky/arouteserver@sha256:ba0e9c0b541c63acf0765a08fd2e09c2bba9dc64af1f5bbdce7819e8d1c34d66
 ```

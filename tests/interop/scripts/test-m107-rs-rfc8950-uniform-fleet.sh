@@ -36,7 +36,7 @@
 #
 # Prerequisites:
 #   - docker build --target dev -t rustbgpd:dev .
-#   - the checksum-pinned gobgp:v4.8.0-m107 image (see the topology header)
+#   - the checksum-pinned gobgp:v4.10.0-m107 image (see the topology header)
 #   - containerlab deploy -t tests/interop/m107-rs-rfc8950-uniform-fleet.clab.yml
 #   - jq on the host; cargo (builds rs-config-render)
 #
@@ -53,7 +53,7 @@ LAB_DIR="$SCRIPT_DIR/../m107-rs-rfc8950-uniform-fleet"
 RS_ADDR="2001:db8:107::9"
 MEMBER1_ADDR="2001:db8:107::11"
 MEMBER2_ADDR="2001:db8:107::12"
-GOBGP_VERSION="gobgpd version 4.8.0"
+GOBGP_VERSION="gobgpd version 4.10.0"
 
 rs_ctl() {
     docker exec "$RUSTBGPD" rbgp -s unix:///var/lib/rustbgpd/grpc.sock "$@" 2>/dev/null

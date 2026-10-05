@@ -31,7 +31,7 @@
 #                (global `no bgp enforce-first-as` alone is
 #                insufficient — the M19 finding)
 #   BIRD 2.19.2: `enforce first as off` (also the default)
-#   GoBGP 4.8.0: no first-AS enforcement exists; nothing to disable
+#   GoBGP 4.10.0: no first-AS enforcement exists; nothing to disable
 #
 # Cross-subnet static routes make the preserved BGP NEXT_HOPs
 # resolvable for this control-plane receipt. M83 sends no data-plane
@@ -40,7 +40,7 @@
 # Usage:
 #   docker build --target dev -t rustbgpd:dev .
 #   docker build -t bird:v2.19.2-m83 -f tests/interop/Dockerfile.bird-v2192 tests/interop
-#   docker build --build-arg TARGETARCH=amd64 --build-arg GOBGP_VERSION=4.8.0 --build-arg GOBGP_SHA256=43b570ae5cc1afab7aebdd9d8f4536e27656465848270c8a6f5fda1ffe093a03 -t gobgp:v4.8.0-m83 -f tests/interop/Dockerfile.gobgp-v47 tests/interop
+#   docker build --build-arg TARGETARCH=amd64 --build-arg GOBGP_VERSION=4.10.0 --build-arg GOBGP_SHA256=05a1c9fa1fe5c8d59de5a923efa4afe692c371c33b84750cfeb8f8df24db5fbe -t gobgp:v4.10.0-m83 -f tests/interop/Dockerfile.gobgp-v47 tests/interop
 #   docker pull quay.io/frrouting/frr@sha256:a0ed0e4f8727631c8303dd9a4e8199b47464a17a5253135a2c622286aeaec46b
 #   containerlab deploy -t tests/interop/m83-routeserver-multistack.clab.yml
 #   bash tests/interop/scripts/test-m83-routeserver-multistack.sh
@@ -85,7 +85,7 @@ topology:
 
     gobgp:
       kind: linux
-      image: gobgp:v4.8.0-m83
+      image: gobgp:v4.10.0-m83
       cmd: sleep infinity
       binds:
         - ./configs/gobgp-m83.toml:/config/gobgp.toml:ro
