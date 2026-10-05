@@ -33,6 +33,12 @@ class SamplerTests(unittest.TestCase):
             sampler.key_values("anon 2048\n")["sock"]
         with self.assertRaises(ValueError):
             int(sampler.key_values("sock missing\n")["sock"])
+        with self.assertRaises(ValueError):
+            int(sampler.key_values("sock\n")["sock"])
+
+    def test_proc_status_allows_empty_optional_fields(self):
+        values = sampler.key_values("VmRSS: 4096 kB\nx86_Thread_features:\nState: S (sleeping)\n")
+        self.assertEqual(values, {"VmRSS": "4096", "x86_Thread_features": "", "State": "S"})
 
     def test_daemon_scope_requires_sole_process_and_live_memory_files(self):
         with tempfile.TemporaryDirectory() as directory:

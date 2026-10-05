@@ -20,10 +20,11 @@ def proc_stat(text):
 def key_values(text):
     values = {}
     for line in text.splitlines():
-        key, value, *_ = line.replace(":", " ").split()
+        key, *fields = line.replace(":", " ").split()
         if key in values:
             raise ValueError(f"duplicate field: {key}")
-        values[key] = value
+        # /proc/status includes legitimate empty optional fields.
+        values[key] = fields[0] if fields else ""
     return values
 
 
