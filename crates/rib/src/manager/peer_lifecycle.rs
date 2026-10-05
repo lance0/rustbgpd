@@ -1490,7 +1490,7 @@ impl RibManager {
             // from the source, scrub post-policy) for it; untagged
             // entries replay as-is.
             let rs_control = rs_control_asn.zip(target_peer_asn);
-            let mut replay = Vec::with_capacity(group.table.len());
+            let mut replay = Vec::new();
             for staged in group.table.iter() {
                 checkpoint_at("initial_group_replay");
                 if self.selection_deferred(prefix_family(&staged.prefix)) {
