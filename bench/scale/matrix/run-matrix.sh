@@ -275,14 +275,14 @@ write_cell_provenance() {
         '{schema:1,cell:$cell,git:{commit:$commit,tree:$tree,dirty:$dirty},toolchain:$toolchain,host:$host,sources:{common:$common,generator:{($generator_path):$generator_hash},reloadstall:{path:"target/scale/reloadstall",sha256:$reloadstall_hash}},workload:($workload + {inputs:$inputs})}' \
         >"$ART/$cell/provenance.json" || return 1
     python3 "$REPO/bench/scale/matrix/verify-provenance.py" \
-        "$ART/$cell/provenance.json" "$cell" "$COMPETITOR_GENERATION"
+        "$ART/$cell/provenance.json" "$cell" "$COMPETITOR_GENERATION" --live
 }
 
 recheck_cell_provenance() {
     local cell=$1 relative expected
     local file="$ART/$cell/provenance.json"
     python3 "$REPO/bench/scale/matrix/verify-provenance.py" \
-        "$file" "$cell" "$COMPETITOR_GENERATION" || return 1
+        "$file" "$cell" "$COMPETITOR_GENERATION" --live || return 1
     while IFS=$'\t' read -r relative expected; do
         provenance_require_sha256 "$REPO/$relative" "$expected" || return 1
     done < <(jq -r '.sources.common + .sources.generator + {(.sources.reloadstall.path):.sources.reloadstall.sha256} | to_entries[] | [.key,.value] | @tsv' "$file")

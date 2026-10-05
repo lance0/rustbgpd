@@ -316,7 +316,9 @@ boundary explicitly. The headline summary labels these as `irr_daemon_cg_peak`
 and `irr_container_cg_peak` and accepts a peak only with actual zero-swap
 evidence. An unavailable container readout contributes no peak; an unavailable
 native scope fails the new cell. Historical receipts without these files
-retain their original timing/RSS contracts and still verify.
+retain their original timing/RSS contracts and still verify. New root provenance
+uses schema 3 and requires these regular readouts and their window for every
+selected cell; schema 2 remains the historical omission case.
 
 Cross-daemon RSS comparisons use only the outer sampler, never the row-level
 VmRSS fields (which are zero for container cells). For each reload, the
@@ -368,14 +370,14 @@ exit, daemon process-tree RSS > 100 GiB (cell aborted), or cell timeout
 failed or interrupted root is preserved for inspection; reruns always choose a
 fresh directory and never resume, repair, or overwrite prior evidence.
 
-The root schema-2 `provenance.json` is a compact context record: exact commit and tree,
+The root schema-3 `provenance.json` is a compact context record: exact commit and tree,
 the clean-worktree result, selected workload knobs, container image IDs, and
 plain tool/platform versions. Its exact `binaries` map binds the rustbgpd,
 reloadstall, rbgp, and rs-config-render bytes used by the campaign; the runner
 rechecks those bytes and the selected comparator image IDs before every cell
-and before `COMPLETED`. Older
-schema-1 roots have no binary-byte identity and must be attributed only to the
-originating commit, never treated as evidence for rebuilt binaries. Every cell retains its generator `manifest.json`,
+and before `COMPLETED`. Schema-2 roots retain the same context contract without
+requiring cgroup readouts. Older schema-1 roots lack binary-byte identity and are
+not accepted by the current verifier. Every cell retains its generator `manifest.json`,
 raw rows, RSS samples, daemon and harness logs, process identity, and semantic
 summaries. The common canonical dataset digest remains explicit at the root.
 

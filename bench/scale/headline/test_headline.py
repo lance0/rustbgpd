@@ -362,6 +362,7 @@ class ExtractorFailsClosed(unittest.TestCase):
             cell.mkdir(exist_ok=True)
             (cell / "container-memory").write_text(f"container_cg_peak: {peak} kB\ncontainer_cg_swap_peak: 0 kB\n")
             (cell / "memory-window").write_text(summarize.IRR_MEMORY_WINDOW)
+        (root / "provenance.json").write_text(json.dumps({"schema": 3, "inputs": {"cells": "rustbgpd-sighup,bird,openbgpd"}}))
         rows = summarize.extract(self.tmp)[0]
         self.assertIn(["irr-ov0", "a", "1", "irr_daemon_cg_peak", "", "812345", "KiB"], rows)
         self.assertIn(["irr-ov0", "bird", "1", "irr_container_cg_peak", "", "901234", "KiB"], rows)
@@ -390,6 +391,38 @@ class ExtractorFailsClosed(unittest.TestCase):
             summarize.extract(self.tmp)
         bird.write_text("container_cg: unavailable\n")
         self.assertNotIn("bird", {row[1] for row in summarize.extract(self.tmp)[0]})
+        for name, filename in (("rustbgpd-sighup", "cgroup-memory"), ("bird", "container-memory"), ("openbgpd", "container-memory")):
+            cell = root / name
+            path, window = cell / filename, cell / "memory-window"
+            saved = path.read_text()
+            path.unlink(); window.unlink()
+            with self.assertRaisesRegex(summarize.ExtractionError, "requires its cgroup memory readout"):
+                summarize.extract(self.tmp)
+            path.write_text(saved); window.write_text(summarize.IRR_MEMORY_WINDOW)
+            target = self.tmp / "readout-target"
+            target.write_text(saved)
+            path.unlink(); path.symlink_to(target)
+            with self.assertRaisesRegex(summarize.ExtractionError, "must be regular files"):
+                summarize.extract(self.tmp)
+            path.unlink(); path.write_text(saved)
+            target.write_text(summarize.IRR_MEMORY_WINDOW)
+            window.unlink(); window.symlink_to(target)
+            with self.assertRaisesRegex(summarize.ExtractionError, "must be regular files"):
+                summarize.extract(self.tmp)
+            window.unlink(); window.write_text(summarize.IRR_MEMORY_WINDOW)
+        provenance = root / "provenance.json"
+        saved_provenance = provenance.read_text()
+        saved_native = (native / "cgroup-memory").read_text()
+        (native / "cgroup-memory").unlink(); (native / "memory-window").unlink()
+        provenance.unlink()
+        with self.assertRaisesRegex(summarize.ExtractionError, "IRR provenance must be a regular file"):
+            summarize.extract(self.tmp)
+        provenance.symlink_to(self.tmp / "missing-provenance")
+        with self.assertRaisesRegex(summarize.ExtractionError, "IRR provenance must be a regular file"):
+            summarize.extract(self.tmp)
+        provenance.unlink(); provenance.write_text(saved_provenance)
+        (native / "cgroup-memory").write_text(saved_native)
+        (native / "memory-window").write_text(summarize.IRR_MEMORY_WINDOW)
 
     def test_report_names_memory_sources(self):
         matrix_leg(self.tmp, "matrix-a-r1-s2")

@@ -1549,13 +1549,15 @@ def validate_plan_apply(prefix, confirm_id: str, timeout: int, context: str) -> 
     return deadline
 
 
-def validate_cgroup_memory(cdir: Path, cell: str) -> set[str]:
-    """Optional newer readouts: historical receipts keep their original roster."""
+def validate_cgroup_memory(cdir: Path, cell: str, required: bool = False) -> set[str]:
+    """Schema3 requires readouts; schema2 keeps its original optional roster."""
     filename = "cgroup-memory" if cell.startswith("rustbgpd-") else "container-memory"
     path, window = cdir / filename, cdir / "memory-window"
-    if not path.exists() and not window.exists():
+    if any(p.is_symlink() for p in (path, window)):
+        fail(f"{cdir}: memory readout/window must be regular files")
+    if not required and not path.exists() and not window.exists():
         return set()
-    if any(p.is_symlink() or not p.is_file() for p in (path, window)):
+    if any(not p.is_file() for p in (path, window)):
         fail(f"{cdir}: memory readout/window must be regular files")
     if window.read_text() != "through_harness_completion_before_lifecycle\n":
         fail(f"{cdir}: memory window does not end before lifecycle probes")
@@ -1567,13 +1569,13 @@ def validate_cgroup_memory(cdir: Path, cell: str) -> set[str]:
     return {filename, "memory-window"}
 
 
-def validate_transaction_evidence(cdir: Path, identity: tuple[int, int]) -> dict:
+def validate_transaction_evidence(cdir: Path, identity: tuple[int, int], require_memory: bool = False) -> dict:
     expected_files = {
         "daemon.log", "final-evidence/ack", "final-evidence/ready", "manifest.json",
         "process.tsv", "quiet.tsv", "reloadstall.log", "rows.csv", "rss.csv", "status",
         "transactions/cycles.jsonl", "transactions/lifecycle.json",
     }
-    expected_files |= validate_cgroup_memory(cdir, TRANSACTION_CELL)
+    expected_files |= validate_cgroup_memory(cdir, TRANSACTION_CELL, required=require_memory)
     actual_files = {path.relative_to(cdir).as_posix() for path in cdir.rglob("*") if path.is_file()}
     if expected_files != actual_files:
         fail(f"{cdir}: transaction evidence file roster is not exact")
@@ -1835,7 +1837,10 @@ def validate_transaction_evidence(cdir: Path, identity: tuple[int, int]) -> dict
 
 def validate_root(root: Path, kind: str):
     validate_preflight(root / "preflight.log")
-    provenance = read_json(root / "provenance.json")
+    provenance_path = root / "provenance.json"
+    if provenance_path.is_symlink() or not provenance_path.is_file():
+        fail(f"{root}: root provenance must be a regular file")
+    provenance = read_json(provenance_path)
     if not isinstance(provenance, dict):
         fail(f"{root}: receipt context is incomplete")
     inputs, git = provenance.get("inputs"), provenance.get("git")
@@ -1878,7 +1883,7 @@ def validate_root(root: Path, kind: str):
             "binaries",
             "inputs",
         }
-        or provenance.get("schema") != 2
+        or provenance.get("schema") not in (2, 3)
         or not isinstance(provenance.get("started_at_epoch_ns"), int)
         or provenance.get("started_at_epoch_ns", -1) <= 0
         or not isinstance(environment, dict)
@@ -1968,7 +1973,7 @@ def validate_root(root: Path, kind: str):
         cdir = root / cell
         validate_quiet(cdir / "quiet.tsv")
         identities.append(validate_process(cdir / "process.tsv"))
-        validate_cgroup_memory(cdir, cell)
+        validate_cgroup_memory(cdir, cell, required=provenance["schema"] == 3)
         for marker in ("ready", "ack"):
             marker_path = cdir / "final-evidence" / marker
             if marker_path.is_symlink() or not marker_path.is_file() or marker_path.read_text() != f"{marker}\n":
@@ -2008,7 +2013,7 @@ def validate_root(root: Path, kind: str):
             if manifest.get("path_hiding") is not True or manifest.get("path_hiding_applicable") is not True:
                 fail(f"{root}: transaction path-hiding mode not explicit")
             transaction_evidence = validate_transaction_evidence(
-                cdir, identities[-1]
+                cdir, identities[-1], require_memory=provenance["schema"] == 3
             )
         elif not (
             manifest.get("path_hiding") is None
@@ -2601,7 +2606,83 @@ def self_test() -> None:
             pass
         else:
             fail("nonzero container swap peak was accepted")
-    print("cgroup memory: optional historical roster and zero-swap/window rejection boundaries passed")
+    with tempfile.TemporaryDirectory() as memory_campaign_tmp:
+        base = Path(memory_campaign_tmp)
+        for index, kind in enumerate(("comparison", "grouped", "transaction", "sighup")):
+            root = base / kind
+            make_fixture(root, kind, 10000 + index * 10, 9000 + index * 10)
+            provenance = read_json(root / "provenance.json")
+            provenance["schema"] = 3
+            (root / "provenance.json").write_text(json.dumps(provenance))
+            cells = provenance["inputs"]["cells"].split(",")
+            for cell in cells:
+                cdir = root / cell
+                filename = "cgroup-memory" if cell.startswith("rustbgpd-") else "container-memory"
+                readout = ("cg_peak: 4096 kB\ncg_current: 2048 kB\ncg_swap_max: 0\ncg_swap_peak: 0 kB\n"
+                           if filename == "cgroup-memory" else
+                           "container_cg_peak: 4096 kB\ncontainer_cg_swap_peak: 0 kB\n")
+                (cdir / filename).write_text(readout)
+                (cdir / "memory-window").write_text("through_harness_completion_before_lifecycle\n")
+            validate_root(root, kind)
+            for cell in cells:
+                cdir = root / cell
+                path = cdir / ("cgroup-memory" if cell.startswith("rustbgpd-") else "container-memory")
+                window = cdir / "memory-window"
+                saved = path.read_text()
+                path.unlink(); window.unlink()
+                try:
+                    validate_root(root, kind)
+                except InvalidReceipt:
+                    pass
+                else:
+                    fail(f"schema3 {kind}/{cell} accepted deletion of both memory files")
+                path.write_text(saved); window.write_text("after_lifecycle\n")
+                try:
+                    validate_root(root, kind)
+                except InvalidReceipt:
+                    pass
+                else:
+                    fail(f"schema3 {kind}/{cell} accepted a post-lifecycle window")
+                window.write_text("through_harness_completion_before_lifecycle\n")
+                target = base / "readout-target"
+                target.write_text(saved)
+                path.unlink(); path.symlink_to(target)
+                try:
+                    validate_root(root, kind)
+                except InvalidReceipt:
+                    pass
+                else:
+                    fail(f"schema3 {kind}/{cell} accepted a symlink readout")
+                path.unlink(); path.write_text(saved)
+                target.write_text("through_harness_completion_before_lifecycle\n")
+                window.unlink(); window.symlink_to(target)
+                try:
+                    validate_root(root, kind)
+                except InvalidReceipt:
+                    pass
+                else:
+                    fail(f"schema3 {kind}/{cell} accepted a symlink window")
+                window.unlink(); window.write_text("through_harness_completion_before_lifecycle\n")
+            context = root / "provenance.json"
+            saved_context = context.read_text()
+            target = base / f"provenance-target-{kind}"
+            target.write_text(saved_context)
+            context.unlink(); context.symlink_to(target)
+            try:
+                validate_root(root, kind)
+            except InvalidReceipt:
+                pass
+            else:
+                fail(f"schema3 {kind} accepted a symlink root context")
+            context.unlink(); context.mkdir()
+            try:
+                validate_root(root, kind)
+            except InvalidReceipt:
+                pass
+            else:
+                fail(f"schema3 {kind} accepted a non-file root context")
+            context.rmdir(); context.write_text(saved_context)
+    print("cgroup memory: schema3 required readouts, schema2 history and zero-swap/window/symlink rejection boundaries passed")
     self_test_metadata_history()
     print("metadata-only history: green fixture and 17 rejection boundaries passed")
     with tempfile.TemporaryDirectory() as phase_tmp:

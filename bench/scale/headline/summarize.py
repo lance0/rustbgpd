@@ -373,6 +373,22 @@ def irr_rows(source, exclusions, campaign):
         if not completed.exists() or json.loads(read_text(completed)).get("status") != "pass":
             continue
         phase = f"irr-ov{overlap}"
+        provenance_path = leg / "provenance.json"
+        if provenance_path.is_symlink() or not provenance_path.is_file():
+            raise ExtractionError(f"{leg.name}: IRR provenance must be a regular file")
+        provenance = json.loads(read_text(provenance_path))
+        if not isinstance(provenance, dict) or provenance.get("schema") not in (2, 3):
+            raise ExtractionError(f"{leg.name}: unknown IRR provenance schema")
+        require_memory = provenance["schema"] == 3
+        selected_cells = set()
+        if require_memory:
+            inputs = provenance.get("inputs")
+            selected = inputs.get("cells") if isinstance(inputs, dict) else None
+            if not isinstance(selected, str) or not selected:
+                raise ExtractionError(f"{leg.name}: schema3 requires the selected cell roster")
+            selected_cells = set(selected.split(","))
+            if "rustbgpd-sighup" not in selected_cells or not selected_cells <= {"rustbgpd-sighup", "bird", "openbgpd"}:
+                raise ExtractionError(f"{leg.name}: schema3 has an invalid headline cell roster")
         sighup = [r for r in csv.DictReader(read_text(leg / "rows.csv").splitlines()) if r["cell"] == "rustbgpd-sighup"]
         if not sighup:
             raise ExtractionError(f"{leg.name}: completed root has no rustbgpd-sighup rows")
@@ -390,16 +406,20 @@ def irr_rows(source, exclusions, campaign):
             ("openbgpd", "irr_container_cg_peak", "container-memory", CONTAINER_MEMORY, "openbgpd"),
         ):
             path = leg / cell / filename
-            if not path.exists():
-                continue  # Historical receipts have no cgroup readout.
             window = leg / cell / "memory-window"
-            if not window.is_file() or window.is_symlink() or read_text(window) != IRR_MEMORY_WINDOW:
+            if path.is_symlink() or window.is_symlink():
+                raise ExtractionError(f"{leg.name}: {cell} memory readout/window must be regular files")
+            if not path.is_file():
+                if (require_memory and cell in selected_cells) or path.exists() or window.exists():
+                    raise ExtractionError(f"{leg.name}: {cell} requires its cgroup memory readout")
+                continue  # Schema2 receipts may predate cgroup readouts.
+            if not window.is_file() or read_text(window) != IRR_MEMORY_WINDOW:
                 raise ExtractionError(f"{leg.name}: {cell} memory-window is not the measured harness window")
             text = read_text(path)
             if filename == "container-memory" and text == "container_cg: unavailable\n":
                 continue
             readout = pattern.fullmatch(text)
-            if not readout or path.is_symlink():
+            if not readout:
                 raise ExtractionError(f"{leg.name}: {cell} {filename} requires an exact readout with zero actual swap peak")
             rows.append([phase, row_arm, run, metric, "", readout[1], "KiB"])
     return rows
