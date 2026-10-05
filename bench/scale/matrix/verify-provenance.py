@@ -52,7 +52,7 @@ def hashed_map(value, expected):
     if not all(isinstance(v, str) and HASH.fullmatch(v) for v in value.values()):
         fail("malformed source hash")
 
-def verify(path, expected_cell, competitor_generation="historical"):
+def verify(path, expected_cell, competitor_generation="historical", live=False):
     if competitor_generation not in COMPETITOR_GENERATIONS:
         fail("unknown competitor generation")
     data = json.loads(Path(path).read_text())
@@ -81,6 +81,8 @@ def verify(path, expected_cell, competitor_generation="historical"):
         if cell != "rustbgpd":
             fail("membership churn only supports rustbgpd")
         common.add("bench/scale/reloadstall/membership_churn.py")
+    if live or (isinstance(sources["common"], dict) and "bench/scale/cgroup-memory.sh" in sources["common"]):
+        common.add("bench/scale/cgroup-memory.sh")
     hashed_map(sources["common"], common)
     hashed_map(sources["generator"], {GENERATORS[cell]})
     if set(sources["reloadstall"]) != {"path", "sha256"} or sources["reloadstall"]["path"] not in {"bench/scale/target/release/reloadstall", "target/scale/reloadstall"} or not HASH.fullmatch(sources["reloadstall"]["sha256"]):
@@ -104,9 +106,9 @@ def verify(path, expected_cell, competitor_generation="historical"):
 
 if __name__ == "__main__":
     try:
-        if len(sys.argv) not in {3, 4} or sys.argv[2] not in GENERATORS:
-            fail("usage: verify-provenance.py PROVENANCE_JSON EXPECTED_CELL [historical|current]")
-        verify(sys.argv[1], sys.argv[2], sys.argv[3] if len(sys.argv) == 4 else "historical")
+        if len(sys.argv) not in {3, 4, 5} or sys.argv[2] not in GENERATORS or (len(sys.argv) == 5 and sys.argv[4] != "--live"):
+            fail("usage: verify-provenance.py PROVENANCE_JSON EXPECTED_CELL [historical|current [--live]]")
+        verify(sys.argv[1], sys.argv[2], sys.argv[3] if len(sys.argv) >= 4 else "historical", live=len(sys.argv) == 5)
     except (OSError, ValueError, json.JSONDecodeError, KeyError, TypeError) as error:
         print(f"FAIL: {error}", file=sys.stderr)
         sys.exit(1)

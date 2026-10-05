@@ -56,6 +56,8 @@ source "$REPO/tests/soak/host-lock.sh"
 source "$REPO/bench/scale/host-quiet.sh"
 # shellcheck disable=SC1091 # REPO is resolved dynamically above
 source "$REPO/bench/scale/provenance.sh"
+# shellcheck disable=SC1091 # REPO is resolved dynamically above
+source "$REPO/bench/scale/cgroup-memory.sh"
 RSTALL="$REPO/bench/scale/reloadstall"
 HARNESS="$REPO/target/scale/reloadstall"
 SAMPLER="$REPO/bench/scale/matrix/rss-sampler.sh"
@@ -234,7 +236,7 @@ CAPTURED_DIRTY=false
 [ -z "$(git -C "$REPO" status --porcelain=v1)" ] || CAPTURED_DIRTY=true
 mkdir -p "$ART"
 
-COMMON_SOURCES=(bench/scale/provenance.sh bench/scale/matrix/run-matrix.sh
+COMMON_SOURCES=(bench/scale/provenance.sh bench/scale/cgroup-memory.sh bench/scale/matrix/run-matrix.sh
     bench/scale/matrix/verify-provenance.py bench/scale/matrix/rss-sampler.sh
     bench/scale/host-quiet.sh tests/soak/host-lock.sh)
 if [ "$MEMBERSHIP_CHURN" = 1 ]; then
@@ -273,14 +275,14 @@ write_cell_provenance() {
         '{schema:1,cell:$cell,git:{commit:$commit,tree:$tree,dirty:$dirty},toolchain:$toolchain,host:$host,sources:{common:$common,generator:{($generator_path):$generator_hash},reloadstall:{path:"target/scale/reloadstall",sha256:$reloadstall_hash}},workload:($workload + {inputs:$inputs})}' \
         >"$ART/$cell/provenance.json" || return 1
     python3 "$REPO/bench/scale/matrix/verify-provenance.py" \
-        "$ART/$cell/provenance.json" "$cell" "$COMPETITOR_GENERATION"
+        "$ART/$cell/provenance.json" "$cell" "$COMPETITOR_GENERATION" --live
 }
 
 recheck_cell_provenance() {
     local cell=$1 relative expected
     local file="$ART/$cell/provenance.json"
     python3 "$REPO/bench/scale/matrix/verify-provenance.py" \
-        "$file" "$cell" "$COMPETITOR_GENERATION" || return 1
+        "$file" "$cell" "$COMPETITOR_GENERATION" --live || return 1
     while IFS=$'\t' read -r relative expected; do
         provenance_require_sha256 "$REPO/$relative" "$expected" || return 1
     done < <(jq -r '.sources.common + .sources.generator + {(.sources.reloadstall.path):.sources.reloadstall.sha256} | to_entries[] | [.key,.value] | @tsv' "$file")
@@ -339,32 +341,6 @@ probe_query_loop() {
     return 0
 }
 
-# Native daemon memory scope: a transient systemd user scope with swap fenced,
-# so the scope's memory.peak (cg_peak) covers every page the daemon charged;
-# RSS and VmHWM miss swapped pages and kernel-side charges. Without a usable
-# user manager the cell still runs, warns, and records why cg_peak is absent.
-MEMORY_SCOPE=()
-memory_scope_launcher() {
-    local out=$1
-    rm -f "$out"
-    MEMORY_SCOPE=(systemd-run --user --scope --quiet -p MemorySwapMax=0 --)
-    # shellcheck disable=SC2016 # Expanded by the scoped shell, not here.
-    if "${MEMORY_SCOPE[@]}" sh -c 'cg=/sys/fs/cgroup$(sed -n "s/^0:://p" /proc/self/cgroup)
-        test -r "$cg/memory.peak" && test "$(cat "$cg/memory.swap.max")" = 0' >/dev/null 2>&1; then
-        return 0
-    fi
-    MEMORY_SCOPE=()
-    echo "WARNING: no systemd user scope with a readable memory.peak and memory.swap.max=0; cg_peak will be absent" >&2
-    echo "cg_scope: unavailable" >"$out"
-}
-# Print the daemon's scope cgroup directory once its fence is confirmed.
-daemon_scope_cgroup() {
-    local cgroup
-    cgroup=/sys/fs/cgroup$(sed -n 's/^0:://p' "/proc/$1/cgroup") || return 1
-    case $cgroup in *.scope) ;; *) return 1 ;; esac
-    [ -r "$cgroup/memory.peak" ] && [ "$(cat "$cgroup/memory.swap.max")" = 0 ] &&
-        printf '%s\n' "$cgroup"
-}
 record_scope_memory() {
     local cgroup=$1 out=$2 last_sample_stat=$3 peak current swap_max teardown_stat
     peak=$(cat "$cgroup/memory.peak") && current=$(cat "$cgroup/memory.current") &&
@@ -386,23 +362,6 @@ scope_stat_rows() {
         print "cg_" phase "_file: " int(value["file"] / 1024) " kB"
         print "cg_" phase "_file_mapped: " int(value["file_mapped"] / 1024) " kB"
     }' "$cgroup/memory.stat"
-}
-# A competitor's high-water mark: its container cgroup's memory.peak, read
-# before the container is removed. memory.swap.peak is recorded with it: when
-# it is 0, none of the container's pages were swapped out during the cell, so
-# memory.peak counts every page the container charged. If either file cannot
-# be read, the cell records `container_cg: unavailable` and still passes.
-record_container_memory() {
-    local cgroup=$1 out=$2 peak swap_peak
-    if [ -n "$cgroup" ] && peak=$(cat "$cgroup/memory.peak" 2>/dev/null) &&
-        swap_peak=$(cat "$cgroup/memory.swap.peak" 2>/dev/null) &&
-        [[ $peak =~ ^[0-9]+$ && $swap_peak =~ ^[0-9]+$ ]]; then
-        printf 'container_cg_peak: %s kB\ncontainer_cg_swap_peak: %s kB\n' \
-            $((peak / 1024)) $((swap_peak / 1024)) >"$out"
-    else
-        echo "WARNING: no readable container memory.peak/memory.swap.peak${cgroup:+ under $cgroup}; container_cg_peak will be absent" >&2
-        echo "container_cg: unavailable" >"$out"
-    fi
 }
 last_sample_stat_rows() {
     awk -F, 'NR == 1 {

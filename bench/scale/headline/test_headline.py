@@ -350,6 +350,129 @@ class ExtractorFailsClosed(unittest.TestCase):
         (root / "rustbgpd-sighup" / "vmhwm").write_text("VmHWM:\t  700001 kB\nVmRSS:\t  500000 kB\n")
         self.assertIn(["irr-ov0", "a", "1", "daemon_vmhwm", "", "700001", "KiB"], summarize.extract(self.tmp)[0])
 
+    def test_irr_cgroup_peaks_and_window(self):
+        root = self.tmp / "irr-ov0-a-r1"
+        shutil.copytree(V0720 / "irr" / "irr-ov0-ctrl-r1", root)
+        native = root / "rustbgpd-sighup"
+        native_readout = "cg_peak: 812345 kB\ncg_current: 700000 kB\ncg_swap_max: 0\ncg_swap_peak: 0 kB\n"
+        (native / "cgroup-memory").write_text(native_readout)
+        (native / "memory-window").write_text(summarize.IRR_MEMORY_WINDOW)
+        for name, peak in (("bird", 901234), ("openbgpd", 912345)):
+            cell = root / name
+            cell.mkdir(exist_ok=True)
+            (cell / "container-memory").write_text(f"container_cg_peak: {peak} kB\ncontainer_cg_swap_peak: 0 kB\n")
+            (cell / "memory-window").write_text(summarize.IRR_MEMORY_WINDOW)
+        (root / "provenance.json").write_text(json.dumps({"schema": 3, "inputs": {"cells": "rustbgpd-sighup,bird,openbgpd"}}))
+        rows = summarize.extract(self.tmp)[0]
+        self.assertIn(["irr-ov0", "a", "1", "irr_daemon_cg_peak", "", "812345", "KiB"], rows)
+        self.assertIn(["irr-ov0", "bird", "1", "irr_container_cg_peak", "", "901234", "KiB"], rows)
+        self.assertIn(["irr-ov0", "openbgpd", "1", "irr_container_cg_peak", "", "912345", "KiB"], rows)
+        self.assertEqual(self.run_main(), 0)
+        report = (self.tmp / "out" / "report.md").read_text()
+        self.assertIn("| Phase | Metric | a | bird | openbgpd |", report)
+        (self.tmp / "arms.txt").write_text("a=fixture\n")
+        self.assertEqual(summarize.arm_order(self.tmp, summarize.aggregate(rows, [])), ["a", "bird", "openbgpd"])
+        (self.tmp / "arms.txt").unlink()
+        self.assertIn("before transaction lifecycle probes; actual memory.swap.peak is zero", report)
+        self.assertIn("before teardown, with zero swap peak", report)
+        for bad in (native_readout.replace("cg_swap_peak: 0", "cg_swap_peak: 1"),
+                    native_readout.replace("cg_swap_peak: 0 kB\n", "")):
+            (native / "cgroup-memory").write_text(bad)
+            with self.assertRaisesRegex(summarize.ExtractionError, "zero actual swap peak"):
+                summarize.extract(self.tmp)
+        (native / "cgroup-memory").write_text(native_readout)
+        (native / "memory-window").write_text("after_lifecycle\n")
+        with self.assertRaisesRegex(summarize.ExtractionError, "memory-window"):
+            summarize.extract(self.tmp)
+        (native / "memory-window").write_text(summarize.IRR_MEMORY_WINDOW)
+        bird = root / "bird" / "container-memory"
+        bird.write_text("container_cg_peak: 901234 kB\ncontainer_cg_swap_peak: 1 kB\n")
+        with self.assertRaisesRegex(summarize.ExtractionError, "zero actual swap peak"):
+            summarize.extract(self.tmp)
+        bird.write_text("container_cg: unavailable\n")
+        self.assertNotIn("bird", {row[1] for row in summarize.extract(self.tmp)[0]})
+        for name, filename in (("rustbgpd-sighup", "cgroup-memory"), ("bird", "container-memory"), ("openbgpd", "container-memory")):
+            cell = root / name
+            path, window = cell / filename, cell / "memory-window"
+            saved = path.read_text()
+            path.unlink(); window.unlink()
+            with self.assertRaisesRegex(summarize.ExtractionError, "requires its cgroup memory readout"):
+                summarize.extract(self.tmp)
+            path.write_text(saved); window.write_text(summarize.IRR_MEMORY_WINDOW)
+            target = self.tmp / "readout-target"
+            target.write_text(saved)
+            path.unlink(); path.symlink_to(target)
+            with self.assertRaisesRegex(summarize.ExtractionError, "must be regular files"):
+                summarize.extract(self.tmp)
+            path.unlink(); path.write_text(saved)
+            target.write_text(summarize.IRR_MEMORY_WINDOW)
+            window.unlink(); window.symlink_to(target)
+            with self.assertRaisesRegex(summarize.ExtractionError, "must be regular files"):
+                summarize.extract(self.tmp)
+            window.unlink(); window.write_text(summarize.IRR_MEMORY_WINDOW)
+        provenance = root / "provenance.json"
+        saved_provenance = provenance.read_text()
+        saved_native = (native / "cgroup-memory").read_text()
+        (native / "cgroup-memory").unlink(); (native / "memory-window").unlink()
+        provenance.unlink()
+        with self.assertRaisesRegex(summarize.ExtractionError, "IRR provenance must be a regular file"):
+            summarize.extract(self.tmp)
+        provenance.symlink_to(self.tmp / "missing-provenance")
+        with self.assertRaisesRegex(summarize.ExtractionError, "IRR provenance must be a regular file"):
+            summarize.extract(self.tmp)
+        provenance.unlink(); provenance.write_text(saved_provenance)
+        (native / "cgroup-memory").write_text(saved_native)
+        (native / "memory-window").write_text(summarize.IRR_MEMORY_WINDOW)
+
+    def test_irr_schema2_rejects_memory_evidence(self):
+        root = self.tmp / "irr-ov0-a-r1"
+        shutil.copytree(V0720 / "irr" / "irr-ov0-ctrl-r1", root)
+        self.assertEqual(json.loads((root / "provenance.json").read_text())["schema"], 2)
+        self.assertNotIn("irr_daemon_cg_peak", {r[3] for r in summarize.extract(self.tmp)[0]})
+        for name, filename, readout in (
+            ("rustbgpd-sighup", "cgroup-memory", "cg_peak: 812345 kB\ncg_current: 700000 kB\ncg_swap_max: 0\ncg_swap_peak: 0 kB\n"),
+            ("bird", "container-memory", "container_cg_peak: 901234 kB\ncontainer_cg_swap_peak: 0 kB\n"),
+        ):
+            with self.subTest(cell=name):
+                cell = root / name
+                cell.mkdir(exist_ok=True)
+                (cell / filename).write_text(readout)
+                (cell / "memory-window").write_text(summarize.IRR_MEMORY_WINDOW)
+                with self.assertRaisesRegex(summarize.ExtractionError, r"outside the selected cell roster \(schema 2\)"):
+                    summarize.extract(self.tmp)
+                (cell / filename).unlink()
+                (cell / "memory-window").unlink()
+
+    def test_irr_schema3_rejects_unselected_memory(self):
+        root = self.tmp / "irr-ov0-a-r1"
+        shutil.copytree(V0720 / "irr" / "irr-ov0-ctrl-r1", root)
+        native = root / "rustbgpd-sighup"
+        (native / "cgroup-memory").write_text("cg_peak: 812345 kB\ncg_current: 700000 kB\ncg_swap_max: 0\ncg_swap_peak: 0 kB\n")
+        (native / "memory-window").write_text(summarize.IRR_MEMORY_WINDOW)
+        provenance = root / "provenance.json"
+        provenance.write_text(json.dumps({"schema": 3, "inputs": {"cells": "rustbgpd-sighup"}}))
+        self.assertIn("irr_daemon_cg_peak", {r[3] for r in summarize.extract(self.tmp)[0]})
+        for name in ("bird", "openbgpd"):
+            with self.subTest(cell=name):
+                cell = root / name
+                cell.mkdir(exist_ok=True)
+                path, window = cell / "container-memory", cell / "memory-window"
+                readout = "container_cg_peak: 901234 kB\ncontainer_cg_swap_peak: 0 kB\n"
+                path.write_text(readout); window.write_text(summarize.IRR_MEMORY_WINDOW)
+                with self.assertRaisesRegex(summarize.ExtractionError, "outside the selected cell roster"):
+                    summarize.extract(self.tmp)
+                provenance.write_text(json.dumps({"schema": 3, "inputs": {"cells": f"rustbgpd-sighup,{name}"}}))
+                self.assertIn(["irr-ov0", name, "1", "irr_container_cg_peak", "", "901234", "KiB"], summarize.extract(self.tmp)[0])
+                provenance.write_text(json.dumps({"schema": 3, "inputs": {"cells": "rustbgpd-sighup"}}))
+                path.write_text("container_cg: unavailable\n")
+                with self.assertRaisesRegex(summarize.ExtractionError, "outside the selected cell roster"):
+                    summarize.extract(self.tmp)
+                path.unlink()
+                with self.assertRaisesRegex(summarize.ExtractionError, "outside the selected cell roster"):
+                    summarize.extract(self.tmp)
+                window.unlink()
+        self.assertNotIn("irr_container_cg_peak", {r[3] for r in summarize.extract(self.tmp)[0]})
+
     def test_report_names_memory_sources(self):
         matrix_leg(self.tmp, "matrix-a-r1-s2")
         self.assertEqual(self.run_main(), 0)

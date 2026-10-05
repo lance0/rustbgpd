@@ -47,6 +47,8 @@ source "$REPO/tests/soak/host-lock.sh"
 source "$REPO/bench/scale/host-quiet.sh"
 # shellcheck disable=SC1091 # REPO is resolved dynamically above
 source "$REPO/bench/scale/provenance.sh"
+# shellcheck disable=SC1091 # REPO is resolved dynamically above
+source "$REPO/bench/scale/cgroup-memory.sh"
 RSTALL="$REPO/bench/scale/reloadstall"
 HARNESS="$REPO/target/scale/reloadstall"
 GEN="$RSTALL/gen-irr-scenario.py"
@@ -480,7 +482,7 @@ CAMPAIGN_PROVENANCE=$(jq -cn \
     --arg rbgp_sha "${CAMPAIGN_BINARY_HASHES[target/release/rbgp]}" \
     --arg render_sha "${CAMPAIGN_BINARY_HASHES[target/release/rs-config-render]}" \
     --arg rustbgpd_sha "${CAMPAIGN_BINARY_HASHES[target/release/rustbgpd]}" \
-    '{schema:2,started_at_epoch_ns:$started_at_epoch_ns,git:{commit:$commit,tree:$tree,dirty:$dirty},environment:{rustc:$rustc,cargo:$cargo,python:$python,jq:$jq,docker:$docker,kernel:$kernel,cpu_model:$cpu_model},binaries:{"target/scale/reloadstall":$reloadstall_sha,"target/release/rbgp":$rbgp_sha,"target/release/rs-config-render":$render_sha,"target/release/rustbgpd":$rustbgpd_sha},inputs:{campaign_kind:$campaign_kind,cells:$cells,smoke:$smoke,n_members:$n_members,total_prefixes:$total_prefixes,min_list:$min_list,max_list:$max_list,seed:$seed,changed_fraction:$changed_fraction,overlap_fraction:$overlap_fraction,port:$port,reloads:$reloads,control_secs:$control_secs,txn_max_candidate_bytes:$txn_max_candidate_bytes,cell_timeout:$cell_timeout,start_timeout:$start_timeout,bird_threads:$bird_threads,skip_preflight:$skip_preflight,bird_image:$bird_image,bird_image_id:$bird_image_id,openbgpd_image:$openbgpd_image,openbgpd_image_id:$openbgpd_image_id}}') || exit 1
+    '{schema:3,started_at_epoch_ns:$started_at_epoch_ns,git:{commit:$commit,tree:$tree,dirty:$dirty},environment:{rustc:$rustc,cargo:$cargo,python:$python,jq:$jq,docker:$docker,kernel:$kernel,cpu_model:$cpu_model},binaries:{"target/scale/reloadstall":$reloadstall_sha,"target/release/rbgp":$rbgp_sha,"target/release/rs-config-render":$render_sha,"target/release/rustbgpd":$rustbgpd_sha},inputs:{campaign_kind:$campaign_kind,cells:$cells,smoke:$smoke,n_members:$n_members,total_prefixes:$total_prefixes,min_list:$min_list,max_list:$max_list,seed:$seed,changed_fraction:$changed_fraction,overlap_fraction:$overlap_fraction,port:$port,reloads:$reloads,control_secs:$control_secs,txn_max_candidate_bytes:$txn_max_candidate_bytes,cell_timeout:$cell_timeout,start_timeout:$start_timeout,bird_threads:$bird_threads,skip_preflight:$skip_preflight,bird_image:$bird_image,bird_image_id:$bird_image_id,openbgpd_image:$openbgpd_image,openbgpd_image_id:$openbgpd_image_id}}') || exit 1
 printf '%s\n' "$CAMPAIGN_PROVENANCE" | jq -cS . >"$ART/provenance.json" || exit 1
 if [ -n "$PREFLIGHT_LOG" ]; then
     mv "$PREFLIGHT_LOG" "$ART/preflight.log" || exit 1
@@ -619,10 +621,11 @@ ack_pre_churn() {
     cp "$barrier/ready" "$barrier/ack" "$cdir/pre-churn/" || return 1
 }
 ack_final_evidence() {
-    local barrier=$1 cdir=$2 daemon_pid=$3 daemon_start=$4 after tmp
+    local barrier=$1 cdir=$2 daemon_pid=$3 daemon_start=$4 expected_exe=${5:-} after tmp
     [ -f "$barrier/ready" ] && [ ! -L "$barrier/ready" ] && [ ! -e "$barrier/ack" ] || return 1
     after=$(awk '{print $22}' "/proc/$daemon_pid/stat" 2>/dev/null) || return 1
     [ "$after" = "$daemon_start" ] || return 1
+    [ -z "$expected_exe" ] || [ "/proc/$daemon_pid/exe" -ef "$expected_exe" ] || return 1
     printf 'pid\tstarttime_before\tstarttime_after\n%s\t%s\t%s\n' \
         "$daemon_pid" "$daemon_start" "$after" >"$cdir/process.tsv" || return 1
     tmp="$barrier/ack.tmp"
@@ -711,14 +714,22 @@ run_cell() {
     mkdir -p "$cdir" || return 1
     mkdir -m 0700 -- "$run" || return 1
     local daemon_pid="" daemon_start="" container="" reload_cmd="" pid_arg="" topology_mode="" barrier="" final_barrier="" final_acked=false
+    local cgroup="" expected_exe=""
     local live a b entries generator_cell=$cell dataset_stage_cmd=""
+    case $cell in
+    rustbgpd-sighup | rustbgpd-txn | "$GROUPED_CELL")
+        memory_scope_launcher "$cdir/cgroup-memory"
+        [ "${#MEMORY_SCOPE[@]}" -gt 0 ] || return 1
+        expected_exe=$DAEMON
+        ;;
+    esac
     case $cell in
     rustbgpd-sighup)
         gen_scenario rustbgpd "$run" --render-bin "$RENDER" \
             --path-hiding true --admit-churn true || return 1
         record_dataset "$run" || return 1
         recheck_campaign_binaries || return 1
-        setsid "$DAEMON" "$run/config.toml" >"$cdir/daemon.log" 2>&1 &
+        setsid "${MEMORY_SCOPE[@]}" "$DAEMON" "$run/config.toml" >"$cdir/daemon.log" 2>&1 &
         daemon_pid=$!
         ACTIVE_DAEMON_PID=$daemon_pid
         live="$run/member.rpol" a="$run/gen-a.rpol" b="$run/gen-b.rpol"
@@ -735,7 +746,7 @@ run_cell() {
             --path-hiding false --admit-churn true || return 1
         record_dataset "$run" || return 1
         recheck_campaign_binaries || return 1
-        setsid "$DAEMON" "$run/config.toml" >"$cdir/daemon.log" 2>&1 &
+        setsid "${MEMORY_SCOPE[@]}" "$DAEMON" "$run/config.toml" >"$cdir/daemon.log" 2>&1 &
         daemon_pid=$!
         ACTIVE_DAEMON_PID=$daemon_pid
         live="$run/member.rpol" a="$run/gen-a.rpol" b="$run/gen-b.rpol"
@@ -764,7 +775,7 @@ run_cell() {
         done
         record_dataset "$run" || return 1
         recheck_campaign_binaries || return 1
-        setsid "$DAEMON" "$run/config.toml" >"$cdir/daemon.log" 2>&1 &
+        setsid "${MEMORY_SCOPE[@]}" "$DAEMON" "$run/config.toml" >"$cdir/daemon.log" 2>&1 &
         daemon_pid=$!
         ACTIVE_DAEMON_PID=$daemon_pid
         live="$run/candidate.toml" a="$run/gen-a.toml" b="$run/gen-b.toml"
@@ -816,6 +827,15 @@ run_cell() {
     esac
 
     wait_ready "$cell" "$cdir" || return 1
+    if [ -z "$container" ]; then
+        [ "/proc/$daemon_pid/exe" -ef "$DAEMON" ] || {
+            echo "cell $cell: scoped PID is not the exact rustbgpd executable" >&2
+            return 1
+        }
+        cgroup=$(daemon_scope_cgroup "$daemon_pid") || return 1
+    else
+        cgroup=/sys/fs/cgroup$(sed -n 's/^0:://p' "/proc/$daemon_pid/cgroup") || return 1
+    fi
     daemon_start=$(awk '{print $22}' "/proc/$daemon_pid/stat" 2>/dev/null) || return 1
     case $daemon_start in '' | *[!0-9]*) return 1 ;; esac
 
@@ -882,7 +902,7 @@ run_cell() {
             { [ -z "$topology_mode" ] || [ -f "$cdir/metrics-mid.prom" ]; }; then
             entries=$(find "$final_barrier" -mindepth 1 -maxdepth 1 -printf '%f\n' | sort)
             if [ "$entries" != ready ] || ! ack_final_evidence \
-                "$final_barrier" "$cdir" "$daemon_pid" "$daemon_start"; then
+                "$final_barrier" "$cdir" "$daemon_pid" "$daemon_start" "$expected_exe"; then
                 echo "cell $cell: final evidence identity/boundary validation failed" >&2
                 terminate_process_group "$hpid"
                 rc=92
@@ -922,6 +942,22 @@ run_cell() {
     elif [ -n "$topology_mode" ] && ! bind_first_trigger "$cdir"; then
         echo "cell $cell: first reload trigger was missing or preceded topology proof" >&2
         rc=93
+    fi
+
+    # Stop the peak window here: lifecycle/rollback probes below are not
+    # part of the measured reload harness. Both arms use this same boundary.
+    if [ "$rc" -eq 0 ]; then
+        if [ "$(awk '{print $22}' "/proc/$daemon_pid/stat" 2>/dev/null)" != "$daemon_start" ] ||
+            { [ -n "$expected_exe" ] && [ ! "/proc/$daemon_pid/exe" -ef "$expected_exe" ]; }; then
+            echo "cell $cell: daemon identity changed before memory capture" >&2
+            rc=92
+        elif [ -n "$container" ]; then
+            record_container_memory "$cgroup" "$cdir/container-memory" || rc=97
+        elif ! record_scope_peak "$cgroup" "$cdir/cgroup-memory"; then
+            echo "cell $cell: scope memory readout failed" >&2
+            rc=97
+        fi
+        printf 'through_harness_completion_before_lifecycle\n' >"$cdir/memory-window" || rc=97
     fi
 
     if [ "$cell" = rustbgpd-txn ] && [ -z "$SMOKE" ] && [ "$rc" -eq 0 ]; then

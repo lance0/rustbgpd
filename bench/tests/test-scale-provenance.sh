@@ -22,7 +22,7 @@ python3 - "$root" "$tmp" <<'PY'
 import json, pathlib, subprocess, sys
 root, tmp = pathlib.Path(sys.argv[1]), pathlib.Path(sys.argv[2])
 h = "a" * 64
-common = {p: h for p in ("bench/scale/provenance.sh", "bench/scale/matrix/run-matrix.sh", "bench/scale/matrix/verify-provenance.py", "bench/scale/matrix/rss-sampler.sh", "bench/scale/host-quiet.sh", "tests/soak/host-lock.sh")}
+common = {p: h for p in ("bench/scale/cgroup-memory.sh", "bench/scale/provenance.sh", "bench/scale/matrix/run-matrix.sh", "bench/scale/matrix/verify-provenance.py", "bench/scale/matrix/rss-sampler.sh", "bench/scale/host-quiet.sh", "tests/soak/host-lock.sh")}
 refs = {
     "historical": {"bird":"bird:3.3.1", "openbgpd":"openbgpd/openbgpd:9.1"},
     "current": {
@@ -41,14 +41,22 @@ inputs = {
 }
 (tmp / "inputs.json").write_text(json.dumps(inputs))
 verify = root / "bench/scale/matrix/verify-provenance.py"
-def accepted(name, data, want, expected=None, generation=None):
+def accepted(name, data, want, expected=None, generation=None, live=False):
     path=tmp/(name+".json"); path.write_text(json.dumps(data))
     command=[sys.executable, str(verify), str(path), expected or data.get("cell", "rustbgpd")]
-    if generation is not None:
-        command.append(generation)
+    if generation is not None or live:
+        command.append(generation or "historical")
+    if live:
+        command.append("--live")
     got=subprocess.run(command, capture_output=True).returncode == 0
     assert got == want, (name, got)
 accepted("valid", value(), True)
+accepted("live-helper-required-positive", value(), True, live=True)
+v=value(); v["sources"]["common"]={k: val for k,val in common.items() if k != "bench/scale/cgroup-memory.sh"}
+accepted("legacy-helper-omission-offline",v,True)
+accepted("helper-omission-live",v,False,live=True)
+v=value(); v["sources"]["common"]={**common,"bench/scale/cgroup-memory.sh":h}; accepted("shared-cgroup-helper",v,True)
+v["sources"]["common"]["bench/scale/cgroup-memory.sh"]="malformed"; accepted("malformed-cgroup-helper-hash",v,False)
 v=value(); v["sources"]["reloadstall"]["path"]="target/scale/reloadstall"; accepted("root-workspace-harness",v,True)
 v=value(); v["sources"]["reloadstall"]["path"]="target/release/reloadstall"; accepted("stripped-harness-path",v,False)
 v=value(); v["workload"]=list(v["workload"].items()); accepted("malformed-workload-object",v,False)

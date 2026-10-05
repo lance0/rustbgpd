@@ -130,7 +130,13 @@ CGROUP_MEMORY = re.compile(
 )
 
 
-# run-matrix.sh's record_container_memory output, byte for byte. A cell's
+# Native IRR readouts additionally prove the actual swap peak and window.
+IRR_SCOPE_MEMORY = re.compile(
+    r"cg_peak: (\d+) kB\ncg_current: \d+ kB\ncg_swap_max: 0\ncg_swap_peak: 0 kB\n"
+)
+IRR_MEMORY_WINDOW = "through_harness_completion_before_lifecycle\n"
+
+# cgroup-memory.sh's shared container readout, byte for byte. A cell's
 # cgroup peak is complete only if nothing was swapped out during the cell.
 CONTAINER_MEMORY = re.compile(r"container_cg_peak: (\d+) kB\ncontainer_cg_swap_peak: 0 kB\n")
 
@@ -143,6 +149,8 @@ MEMORY_SOURCES = {
     "settled_rss_last_sample": "KiB; the last 5 s process-tree RSS sample",
     "daemon_vmhwm": "KiB; the kernel's VmHWM for the rustbgpd process at cell end, its resident peak over the whole cell",
     "daemon_cg_peak": "KiB; memory.peak of rustbgpd's own swap-fenced scope: resident anon and page cache plus kernel socket buffers",
+    "irr_daemon_cg_peak": "KiB; memory.peak of rustbgpd's own swap-fenced scope through harness completion, before transaction lifecycle probes; actual memory.swap.peak is zero",
+    "irr_container_cg_peak": "KiB; memory.peak of the competitor's container through harness completion, before teardown, with zero swap peak; includes the `docker exec` reload clients",
     "container_cg_peak": "KiB; memory.peak of the competitor's container cgroup (same kind as daemon_cg_peak), with zero swap peak; it also charges the `docker exec` reload clients",
     "settled_cg_current_last_sample": "KiB; memory.current of rustbgpd's scope at the last 5 s sample",
     "flap_post_round_rss": "MiB; the harness's per-round RSS of the daemon PID; 0 for containerised arms, whose PID the harness is not given",
@@ -365,6 +373,22 @@ def irr_rows(source, exclusions, campaign):
         if not completed.exists() or json.loads(read_text(completed)).get("status") != "pass":
             continue
         phase = f"irr-ov{overlap}"
+        provenance_path = leg / "provenance.json"
+        if provenance_path.is_symlink() or not provenance_path.is_file():
+            raise ExtractionError(f"{leg.name}: IRR provenance must be a regular file")
+        provenance = json.loads(read_text(provenance_path))
+        if not isinstance(provenance, dict) or provenance.get("schema") not in (2, 3):
+            raise ExtractionError(f"{leg.name}: unknown IRR provenance schema")
+        require_memory = provenance["schema"] == 3
+        selected_cells = set()
+        if require_memory:
+            inputs = provenance.get("inputs")
+            selected = inputs.get("cells") if isinstance(inputs, dict) else None
+            if not isinstance(selected, str) or not selected:
+                raise ExtractionError(f"{leg.name}: schema3 requires the selected cell roster")
+            selected_cells = set(selected.split(","))
+            if "rustbgpd-sighup" not in selected_cells or not selected_cells <= {"rustbgpd-sighup", "bird", "openbgpd"}:
+                raise ExtractionError(f"{leg.name}: schema3 has an invalid headline cell roster")
         sighup = [r for r in csv.DictReader(read_text(leg / "rows.csv").splitlines()) if r["cell"] == "rustbgpd-sighup"]
         if not sighup:
             raise ExtractionError(f"{leg.name}: completed root has no rustbgpd-sighup rows")
@@ -376,6 +400,32 @@ def irr_rows(source, exclusions, campaign):
         if rss.exists():
             rows.append([phase, arm, run, "peak_rss_sample", "", max(rss_column(rss)), "KiB"])
         rows += vmhwm_rows(leg / "rustbgpd-sighup" / "vmhwm", phase, arm, run)
+        for cell, metric, filename, pattern, row_arm in (
+            ("rustbgpd-sighup", "irr_daemon_cg_peak", "cgroup-memory", IRR_SCOPE_MEMORY, arm),
+            ("bird", "irr_container_cg_peak", "container-memory", CONTAINER_MEMORY, "bird"),
+            ("openbgpd", "irr_container_cg_peak", "container-memory", CONTAINER_MEMORY, "openbgpd"),
+        ):
+            path = leg / cell / filename
+            window = leg / cell / "memory-window"
+            if path.is_symlink() or window.is_symlink():
+                raise ExtractionError(f"{leg.name}: {cell} memory readout/window must be regular files")
+            if cell not in selected_cells:  # Empty for schema2, which predates cgroup readouts.
+                if path.exists() or window.exists():
+                    raise ExtractionError(
+                        f"{leg.name}: {cell} memory evidence is outside the selected cell roster (schema {provenance['schema']})"
+                    )
+                continue
+            if not path.is_file():
+                raise ExtractionError(f"{leg.name}: {cell} requires its cgroup memory readout")
+            if not window.is_file() or read_text(window) != IRR_MEMORY_WINDOW:
+                raise ExtractionError(f"{leg.name}: {cell} memory-window is not the measured harness window")
+            text = read_text(path)
+            if filename == "container-memory" and text == "container_cg: unavailable\n":
+                continue
+            readout = pattern.fullmatch(text)
+            if not readout:
+                raise ExtractionError(f"{leg.name}: {cell} {filename} requires an exact readout with zero actual swap peak")
+            rows.append([phase, row_arm, run, metric, "", readout[1], "KiB"])
     return rows
 
 
@@ -430,7 +480,8 @@ def aggregate(rows, spans):
 def arm_order(source, table):
     arms_file = source / "arms.txt"
     if arms_file.exists():
-        return [line.split("=", 1)[0] for line in read_text(arms_file).splitlines() if line]
+        configured = [line.split("=", 1)[0] for line in read_text(arms_file).splitlines() if line]
+        return configured + sorted({arm for cells in table.values() for arm in cells} - set(configured))
     return sorted({arm for cells in table.values() for arm in cells})
 
 

@@ -1172,6 +1172,7 @@ fn irr_reload_final_evidence_captures_identity_before_ack() {
     let barrier = temp.path().join("barrier");
     let evidence = temp.path().join("evidence");
     std::fs::create_dir(&barrier).unwrap();
+    std::fs::create_dir(&evidence).unwrap();
     std::fs::write(barrier.join("ready"), "ready\n").unwrap();
     let pid = std::process::id().to_string();
     let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).unwrap();
@@ -1194,6 +1195,36 @@ fn irr_reload_final_evidence_captures_identity_before_ack() {
         .unwrap();
     assert!(!invalid.success());
     assert!(!barrier.join("ack").exists());
+
+    // A stable wrapper PID is not the exact daemon executable.
+    let invoke = |expected: &std::path::Path| {
+        std::process::Command::new("bash")
+            .args([
+                "-c",
+                &format!("{body}\nack_final_evidence \"$BARRIER\" \"$EVIDENCE\" \"$PID\" \"$START\" \"$EXPECTED\""),
+            ])
+            .env("BARRIER", &barrier)
+            .env("EVIDENCE", &evidence)
+            .env("PID", &pid)
+            .env("START", start.to_string())
+            .env("EXPECTED", expected)
+            .status()
+            .unwrap()
+    };
+    assert!(!invoke(std::path::Path::new("/bin/true")).success());
+    assert!(!barrier.join("ack").exists());
+    assert!(invoke(&std::env::current_exe().unwrap()).success());
+    assert_eq!(
+        std::fs::read_to_string(barrier.join("ack")).unwrap(),
+        "ack\n"
+    );
+    assert!(evidence.join("process.tsv").is_file());
+
+    let run_cell = runner.split_once("run_cell() {").unwrap().1;
+    let completion = run_cell.find("wait \"$hpid\"").unwrap();
+    let peak = run_cell.find("record_scope_peak ").unwrap();
+    let lifecycle = run_cell.find("if ! \"$TXN_LIFECYCLE\"").unwrap();
+    assert!(completion < peak && peak < lifecycle);
 }
 
 #[test]
