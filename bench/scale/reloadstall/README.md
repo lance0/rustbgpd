@@ -51,9 +51,12 @@ arms, not a substitute for repeated acceptance measurements.
 Reader qualification arms use `RELOADSTALL_READER_COUNT` (the first non-churner
 changed peers), `RELOADSTALL_READER_DELAY_MS`, `RELOADSTALL_READER_BYTES` (1–65536),
 and `RELOADSTALL_READER_PAUSE_MS`. Pacing is acknowledged before each reload
-trigger. Slow readers retain a delay between chunks; stopped readers pause for a
-finite interval and then resume so recovery is checked. Every observer must still
-complete, sessions and decode checks still hold, and separate
+trigger. Slow readers retain a delay between chunks; stopped readers start their
+finite pause at the first base UPDATE carrying that round's generation marker,
+before recording it or reading more output. Old-generation traffic and compile
+time do not consume the pause. A stopped-reader round fails if any selected reader
+does not activate its pause. Readers then resume so recovery is checked. Every
+observer must still complete, sessions and decode checks still hold, and separate
 `healthy_completion_s`/`healthy_maxgap_ms` lines report the unpaced survivors.
 For example, repeat both arms with 50 readers at 4 KiB per 5 ms, then with a
 5-second stopped-reader interval. These are separate qualification shapes.
