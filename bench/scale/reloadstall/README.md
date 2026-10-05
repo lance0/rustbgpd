@@ -29,6 +29,15 @@ logged once per connection. A raw readback of zero on the unset arm means the
 kernel uses its sysctl value. The wrapper records that value before and after
 the leg and never writes it. Matrix shape knobs and the canonical cooldown are
 preserved, and threshold/RTT/diagnostic inputs are included in provenance.
+`experiment.head` and `experiment.diff` record the commit and a binary patch of
+staged, unstaged and untracked (non-ignored) changes that applies to it.
+
+A leg passes only when every `session established` event in the daemon log,
+reconnects included, follows its own readback for that peer: the requested
+value read back on a positive arm, nothing requested and a raw zero on the
+unset arm (`check-unsent-readback.py`, result in `readback.exit`). A daemon
+built without `rustbgpd-transport/bench-internals` logs no readback, so it
+fails either arm instead of silently measuring the kernel default.
 
 The side sampler records `memory.current` before/after each `memory.stat` read,
 the kernel's whole-scope `memory.peak`, `anon`/`sock`/other charges, VmHWM, daemon

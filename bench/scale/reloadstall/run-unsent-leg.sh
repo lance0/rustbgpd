@@ -33,7 +33,16 @@ fi
 
 out=$(realpath -m -- "$out")
 [ ! -e "$out" ] || { echo 'OUT_DIR must be fresh' >&2; exit 2; }
+# Provenance applies to HEAD: staged, unstaged and untracked (non-ignored)
+# changes go through a scratch index, captured before OUT_DIR exists.
+prov=$(mktemp -d)
+cp "$(git -C "$repo" rev-parse --path-format=absolute --git-path index)" "$prov/index" 2>/dev/null || true
+GIT_INDEX_FILE=$prov/index git -C "$repo" add -A
+GIT_INDEX_FILE=$prov/index git -C "$repo" diff --binary --cached HEAD >"$prov/experiment.diff"
+git -C "$repo" rev-parse HEAD >"$prov/experiment.head"
 mkdir -p "$out"
+mv "$prov/experiment.diff" "$prov/experiment.head" "$out/"
+rm -rf "$prov"
 if [ ! -x "$repo/target/release/rustbgpd" ] || [ ! -x "$repo/target/scale/reloadstall" ]; then
     echo 'missing dedicated daemon/harness binaries; see reloadstall README' >&2; exit 2
 fi
@@ -44,7 +53,6 @@ export RUSTBGPD_BENCH_WRITER_POLLS=${RUSTBGPD_BENCH_WRITER_POLLS:-0}
 export RELOADSTALL_UNSENT_WRITER_POLLS=$RUSTBGPD_BENCH_WRITER_POLLS
 export ARTIFACTS_DIR=$out/matrix
 cat /proc/sys/net/ipv4/tcp_notsent_lowat >"$out/sysctl-before"
-git -C "$repo" diff --binary >"$out/experiment.diff"
 sha256sum "$repo/target/release/rustbgpd" "$repo/target/scale/reloadstall" >"$out/binaries.sha256"
 if [ "$rtt" -gt 0 ]; then tc -s qdisc show dev lo >"$out/netem-before"; fi
 
@@ -93,6 +101,13 @@ printf '%s\n' "$sampler_rc" >"$out/sampler.exit"
 cat /proc/sys/net/ipv4/tcp_notsent_lowat >"$out/sysctl-after"
 if [ "$rtt" -gt 0 ]; then tc -s qdisc show dev lo >"$out/netem-after"; fi
 cmp "$out/sysctl-before" "$out/sysctl-after"
-[ "$runner_rc" -eq 0 ] && [ "$sampler_rc" -eq 0 ] && [ -s "$out/cgroup-fast.csv" ] &&
+# The daemon must prove the arm on every established session; a build without
+# the benchmark hook logs no readback and fails here.
+readback_rc=0
+python3 "$repo/bench/scale/reloadstall/check-unsent-readback.py" \
+    "$out/matrix/rustbgpd/daemon.log" "$threshold" >"$out/readback-check.log" 2>&1 || readback_rc=$?
+printf '%s\n' "$readback_rc" >"$out/readback.exit"
+[ "$runner_rc" -eq 0 ] && [ "$sampler_rc" -eq 0 ] && [ "$readback_rc" -eq 0 ] &&
+    [ -s "$out/cgroup-fast.csv" ] &&
     awk 'NR > 1 {found = 1; exit} END {exit !found}' "$out/cgroup-fast.csv" &&
     [ "$(cat "$out/matrix/rustbgpd/status")" = pass ]
