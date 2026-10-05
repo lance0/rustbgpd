@@ -1361,6 +1361,49 @@ impl RibManager {
             .collect()
     }
 
+    /// Borrowed group entries a joining member replays: the resolved
+    /// `adv(m)` slot of every staged key outside a selection-deferred family
+    /// whose source control does not suppress it toward this member. The
+    /// vector grows with the retained set; selection deferral or
+    /// route-server suppression can leave a small replay from a full table,
+    /// so reserving the table size would make a filtered join pay for every
+    /// staged route.
+    pub(super) fn grouped_join_replay<'a>(
+        &self,
+        group: &'a super::update_groups::GroupRibOut,
+        peer: IpAddr,
+        rs_control: Option<(u32, u32)>,
+        mut checkpoint: impl FnMut(),
+    ) -> Vec<super::update_groups::AdvEntry<'a>> {
+        let mut replay = Vec::new();
+        for staged in group.table.iter() {
+            checkpoint();
+            if self.selection_deferred(prefix_family(&staged.prefix)) {
+                continue;
+            }
+            // adv(m) resolves the slot ([`GroupRibOut::adv_entry`],
+            // ADR-0126 Decision 4): the staged winner for a
+            // non-source member, the lane runner-up for the
+            // winner's own source, nothing when the lane is empty.
+            // The rs-control decision and the nh residue come from
+            // the RESOLVED entry.
+            let Some(entry) = group.adv_entry(peer, &staged.prefix, staged.path_id) else {
+                continue;
+            };
+            let (source_communities, source_large_communities) =
+                group.source_control_for_route(entry.route, entry.source_attrs);
+            if super::distribution::rs_control::rs_control_suppressed(
+                source_communities,
+                source_large_communities,
+                rs_control,
+            ) {
+                continue;
+            }
+            replay.push(entry);
+        }
+        replay
+    }
+
     #[expect(
         clippy::too_many_lines,
         reason = "initial dump stages every family queue before one Adj-RIB-Out commit"
@@ -1490,32 +1533,9 @@ impl RibManager {
             // from the source, scrub post-policy) for it; untagged
             // entries replay as-is.
             let rs_control = rs_control_asn.zip(target_peer_asn);
-            let mut replay = Vec::new();
-            for staged in group.table.iter() {
+            let replay = self.grouped_join_replay(group, peer, rs_control, || {
                 checkpoint_at("initial_group_replay");
-                if self.selection_deferred(prefix_family(&staged.prefix)) {
-                    continue;
-                }
-                // adv(m) resolves the slot ([`GroupRibOut::adv_entry`],
-                // ADR-0126 Decision 4): the staged winner for a
-                // non-source member, the lane runner-up for the
-                // winner's own source, nothing when the lane is empty.
-                // The rs-control decision and the nh residue come from
-                // the RESOLVED entry.
-                let Some(entry) = group.adv_entry(peer, &staged.prefix, staged.path_id) else {
-                    continue;
-                };
-                let (source_communities, source_large_communities) =
-                    group.source_control_for_route(entry.route, entry.source_attrs);
-                if super::distribution::rs_control::rs_control_suppressed(
-                    source_communities,
-                    source_large_communities,
-                    rs_control,
-                ) {
-                    continue;
-                }
-                replay.push(entry);
-            }
+            });
             // Keep borrowed entries until filtering is complete. Mapping the
             // exact-sized slice iterator collects straight into each Arc,
             // avoiding a full Vec<Route> and its copy at the replay peak.

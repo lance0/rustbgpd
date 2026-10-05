@@ -1087,6 +1087,65 @@ fn grouped_late_join_private_unicast_stays_unallocated_during_initial_dump() {
 }
 
 #[test]
+fn grouped_join_replay_reserves_only_retained_entries() {
+    const ROUTES: u8 = 64;
+    const RS_ASN: u32 = 64_999;
+    const PEER_ASN: u32 = 65_000;
+
+    let (_tx, rx) = mpsc::channel(1);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let peer = IpAddr::V4(Ipv4Addr::new(10, 63, 1, 5));
+    let mut outbound = register_direct_peer(&mut manager, peer);
+    assert_eq!(outbound.try_recv().unwrap().end_of_rib, ipv4_sendable());
+
+    // Every route but the first carries the RFC 7947 target-specific
+    // "do not announce to PEER" community, so route-server control keeps
+    // one entry of a full group table.
+    let source = Ipv4Addr::new(192, 0, 2, 6);
+    let kept = Ipv4Prefix::new(Ipv4Addr::new(198, 51, 0, 0), 24);
+    let announced = (0..ROUTES)
+        .map(|octet| {
+            let prefix = Ipv4Prefix::new(Ipv4Addr::new(198, 51, octet, 0), 24);
+            let mut route = crate::test_support::make_route(prefix, source);
+            if prefix != kept {
+                AttrSet::edit(&mut route.attributes, |attrs| {
+                    attrs.push(PathAttribute::Communities(vec![PEER_ASN]));
+                });
+            }
+            route
+        })
+        .collect();
+    manager.handle_update(RibUpdate::RoutesReceived {
+        peer: IpAddr::V4(source),
+        session_id: 0,
+        announced,
+        withdrawn: vec![],
+        flowspec_announced: vec![],
+        flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
+        validated_with: None,
+    });
+    while manager.process_next_route_chunk() {}
+
+    let group = &manager.group_ribs[&manager.grouped_member_of(peer).unwrap()];
+    assert_eq!(group.table.len(), usize::from(ROUTES));
+    assert_eq!(
+        manager.grouped_join_replay(group, peer, None, || {}).len(),
+        usize::from(ROUTES)
+    );
+
+    let replay = manager.grouped_join_replay(group, peer, Some((RS_ASN, PEER_ASN)), || {});
+    assert_eq!(replay.len(), 1);
+    assert_eq!(replay[0].route.prefix, Prefix::V4(kept));
+    assert!(
+        replay.capacity() < usize::from(ROUTES),
+        "filtered join reserved {} entries for 1 retained route",
+        replay.capacity()
+    );
+}
+
+#[test]
 fn grouped_peer_non_unicast_first_delta_keeps_private_unicast_unallocated() {
     let (_tx, rx) = mpsc::channel(1);
     let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
