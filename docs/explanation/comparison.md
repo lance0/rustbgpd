@@ -560,7 +560,7 @@ member individually.
 The freshest published [v0.68.0 cross-stack
 receipt](../perf/competitive-bgperf2-v0680-2026-08.md), measured 2026-08-30,
 is an 80-cell, counterbalanced same-host campaign against fresh pinned builds
-of BIRD 2.19.2, FRR 10.7.0, and GoBGP 4.8.0. GoBGP v4.10.0, released 2026-10-04, is not yet measured. Values are
+of BIRD 2.19.2, FRR 10.7.0, and GoBGP 4.8.0. FRR 10.7.1, released 2026-08-31, and GoBGP v4.10.0, released 2026-10-04, are not yet measured. Values are
 successful-run medians of **convergence seconds / total seconds**.
 
 | Scenario | rustbgpd v0.68.0 | BIRD 2.19.2 | FRR 10.7.0 | GoBGP 4.8.0 |

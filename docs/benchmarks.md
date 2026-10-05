@@ -26,7 +26,7 @@ superseded campaigns remain below with their original provenance.
 
 | Evaluation question | Current evidence | Boundary |
 |---|---|---|
-| How did the measured releases compare for route import and convergence? | [v0.68.0 cross-stack receipt](perf/competitive-bgperf2-v0680-2026-08.md) and [80 raw rows](perf/artifacts/competitive-bgperf2-v0680-2026-08/results.csv) | Counterbalanced same-host campaign measured 2026-08-30: exact rustbgpd v0.68.0, BIRD 2.19.2, FRR 10.7.0, and GoBGP 4.8.0. All 80 cells reached the exact expected route count across the fixed 10×1k, 2×10k, 2×100k, 30×1k, and 100×1k shapes. IPv4 import/convergence only — not a full-table, policy, reload, churn, restart, IPv6, or OpenBGPD claim. GoBGP v4.10.0, released 2026-10-04, is not yet measured. |
+| How did the measured releases compare for route import and convergence? | [v0.68.0 cross-stack receipt](perf/competitive-bgperf2-v0680-2026-08.md) and [80 raw rows](perf/artifacts/competitive-bgperf2-v0680-2026-08/results.csv) | Counterbalanced same-host campaign measured 2026-08-30: exact rustbgpd v0.68.0, BIRD 2.19.2, FRR 10.7.0, and GoBGP 4.8.0. All 80 cells reached the exact expected route count across the fixed 10×1k, 2×10k, 2×100k, 30×1k, and 100×1k shapes. IPv4 import/convergence only — not a full-table, policy, reload, churn, restart, IPv6, or OpenBGPD claim. FRR 10.7.1, released 2026-08-31, and GoBGP v4.10.0, released 2026-10-04, are not yet measured. |
 | What is the current IRR reload result? | [v0.75.0 cross-daemon receipt](perf/cross-daemon-v0750-2026-10.md), with 108 verifier-checked rows | rustbgpd v0.75.0, BIRD 3.3.2, and OpenBGPD 9.3 in the same night, measured 2026-10-04 to 2026-10-05 at 320 members × 183,040 generated IPv4 prefixes, three roots per overlap, four reloads, and 0%/10%/50% received-view overlap. All sessions remained up with zero parse errors. One fixed shape on one host; the v0.68.0 receipt keeps the grouped control. BIRD 3.3.3, released 2026-10-01, is not yet measured. |
 | What current high-N shapes have run? | [v0.68.0 high-N receipt](perf/high-n-route-server-v0680-2026-08.md) | Exact-source one-run observations measured 2026-08-30 at 2,500 and 5,000 route-server peers. No interpolation or larger-fleet extrapolation. |
 | What happens at IXP route-server scale under reload and member churn? | [v0.75.0 cross-daemon receipt](perf/cross-daemon-v0750-2026-10.md), the [v0.74.0 cross-daemon receipt](perf/cross-daemon-v0740-2026-10.md) and the [IXP route-server matrix](perf/ixp-matrix-2026-07.md) | 700 clients × 400,400 IPv4 routes. rustbgpd v0.75.0 and OpenBGPD 9.3 were measured in the same night, 2026-10-04 to 2026-10-05, three runs each. BIRD 3.3.2's rows are from the v0.74.0 night, 2026-10-03 to 2026-10-04; BIRD 3.3.3, released 2026-10-01, is not yet measured. The matrix's earlier rows are dated. |
@@ -1597,7 +1597,7 @@ and may include anonymous, file/cache, kernel, and socket memory.
 
 **Freshest published cross-stack receipt: v0.68.0, measured 2026-08-30.** A
 counterbalanced 80-cell campaign rebuilt and pinned exact rustbgpd v0.68.0, BIRD
-2.19.2, FRR 10.7.0, and GoBGP 4.8.0 (GoBGP v4.10.0, released 2026-10-04, is not yet measured), stopped each cell's samplers before
+2.19.2, FRR 10.7.0, and GoBGP 4.8.0 (FRR 10.7.1, released 2026-08-31, and GoBGP v4.10.0, released 2026-10-04, are not yet measured), stopped each cell's samplers before
 starting the next cell, and
 retained all raw rows in the [same cross-stack bgperf2
 receipt](perf/competitive-bgperf2-v0680-2026-08.md). All 80 cells reached the

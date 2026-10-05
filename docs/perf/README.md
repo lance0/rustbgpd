@@ -124,7 +124,7 @@ The freshest published [v0.68.0 cross-stack bgperf2
 receipt](competitive-bgperf2-v0680-2026-08.md), measured 2026-08-30,
 is the headline same-host IPv4 import/convergence comparison. All 80 cells
 reached the exact expected route count across five fixed shapes; the largest is
-two peers × 100,000 prefixes, not a full-table cell. GoBGP v4.10.0, released 2026-10-04, is not yet measured. Microbenchmarks and memory
+two peers × 100,000 prefixes, not a full-table cell. FRR 10.7.1, released 2026-08-31, and GoBGP v4.10.0, released 2026-10-04, are not yet measured. Microbenchmarks and memory
 scaling are in [Benchmarks](../benchmarks.md). That page also retains
 the corrected July campaign as explicitly historical evidence; it supports no
 cross-daemon ranking. Every receipt is indexed in
