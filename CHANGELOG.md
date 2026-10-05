@@ -11,6 +11,8 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.75.0] — 2026-10-05
+
 ### Changed
 
 - A clean export-policy reload builds its shared transition inventory during

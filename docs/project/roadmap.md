@@ -170,7 +170,12 @@ tests and main CI. The
 [2026-10-04 run](../soaks/soak-rs-flagship-24h-2026-10-04.md) then qualified
 the v0.74.0 tag under the current gates (on-host verdict, no reanalysis;
 every gate passes, with all 146 `rbgp doctor` runs `ok`), so the published
-route-server flagship receipt now describes v0.74.0. The
+route-server flagship receipt now describes v0.74.0. v0.75.0 (2026-10-05) is
+a minor release that builds a clean export-policy reload's transition
+inventory outside the RIB transition fence, groups the shared encoder's
+inventory with a counting sort, and keeps telemetry probes answerable when
+idle clients fill the listener. It ships on its per-change regression tests
+and main CI; no flagship receipt covers it. The
 [release checklist](release-checklist.md#flagship-operating-proof) calls for a
 qualifying 24-hour management-load soak on the selected candidate. Earlier
 archived soaks do not automatically qualify later runtime changes.
