@@ -5093,17 +5093,20 @@ fn start_clean_transition(
 
 /// Channel handshakes park the actual actor before each retirement batch.
 /// The commit reply, fresh reads and a subsequent route update must all
-/// precede the old index's final pruning, including a closed input channel.
+/// precede the old index's final pruning. Primary input closes while a batch
+/// remains, so the actor must keep pruning on idle turns before it exits.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[expect(
     clippy::too_many_lines,
-    reason = "the regression pins actual commit acknowledgement, query/update ordering, gauges and shutdown through three controlled retirement batches"
+    reason = "the regression pins actual commit acknowledgement, query/update ordering, gauges and shutdown through four controlled retirement batches"
 )]
 async fn source_index_retirement_interleaves_after_actor_commit_and_drains_on_close() {
     const NEXT_COMMUNITY: u32 = 0xFDE8_2111;
+    // Four 32-prefix batches: 97 -> 65 -> 33 -> 1 -> 0.
+    const ROUTES: usize = 97;
     let (readiness_tx, readiness_rx) = mpsc::channel(8);
     let (mut manager, peers, mut receivers) =
-        direct_clean_transition_manager(2, 65, Some(readiness_rx));
+        direct_clean_transition_manager(2, ROUTES, Some(readiness_rx));
     let source = manager.grouped_member_of(peers[0]).unwrap();
     let metrics = manager.metrics.clone();
     let (primary_tx, primary_rx) = mpsc::channel(8);
@@ -5142,7 +5145,7 @@ async fn source_index_retirement_interleaves_after_actor_commit_and_drains_on_cl
         while receiver.try_recv().is_ok() {}
     }
     // These requests are admitted only after the actor's real terminal reply;
-    // batch 1 still holds all 65 prefixes from the logically removed group.
+    // batch 1 still holds all 97 prefixes from the logically removed group.
     let mut readiness = queue_replacement_readiness(&readiness_tx);
     let (page_reply, mut page_response) = oneshot::channel();
     query_tx
@@ -5178,16 +5181,16 @@ async fn source_index_retirement_interleaves_after_actor_commit_and_drains_on_cl
         Some(2),
         "a full synchronous prune must not replace the bounded first batch"
     );
-    // Before batch 2, 33 prefixes remain, yet the ordinary read and readiness
+    // Before batch 2, 65 prefixes remain, yet the ordinary read and readiness
     // response already observe the committed group and exact current count.
     let page = page_response.try_recv().unwrap().unwrap();
-    assert_eq!(page.routes.len(), 65);
+    assert_eq!(page.routes.len(), ROUTES);
     assert!(
         page.routes
             .iter()
             .all(|route| route.communities().contains(&NEXT_COMMUNITY))
     );
-    assert_eq!(readiness.try_recv().unwrap(), Ok(65));
+    assert_eq!(readiness.try_recv().unwrap(), Ok(ROUTES));
     assert_metric(
         gauge_metric_value(&metrics, "bgp_update_groups", &[]),
         1.0,
@@ -5209,13 +5212,24 @@ async fn source_index_retirement_interleaves_after_actor_commit_and_drains_on_cl
             .unwrap(),
         Some(3)
     );
-    // Before batch 3, one old prefix still remains; the new primary mutation
+    // Before batch 3, 33 old prefixes still remain; the new primary mutation
     // and route chunk have nevertheless reached the outbound writer.
     let update = receivers[0].try_recv().unwrap();
     assert_eq!(update.announce.len(), 1);
     assert_eq!(update.announce[0].prefix, Prefix::V4(prefix));
     assert!(update.announce[0].communities().contains(&NEXT_COMMUNITY));
+    // Close primary input with the route chunk already delivered: the turn
+    // after batch 3 is idle with one prefix left, so exiting on the closed
+    // channel there would skip batch 4.
     drop(primary_tx);
+    release_tx.send(()).unwrap();
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(5), entered_rx.recv())
+            .await
+            .unwrap(),
+        Some(4),
+        "closed input must not end the actor before the final batch"
+    );
     release_tx.send(()).unwrap();
     tokio::time::timeout(Duration::from_secs(5), handle)
         .await
@@ -5223,8 +5237,8 @@ async fn source_index_retirement_interleaves_after_actor_commit_and_drains_on_cl
         .unwrap();
     assert_eq!(
         batches.load(Ordering::SeqCst),
-        3,
-        "closed input must finish all 65 prefixes before actor exit"
+        4,
+        "closed input must finish all 97 prefixes before actor exit"
     );
 }
 
