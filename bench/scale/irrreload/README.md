@@ -299,7 +299,9 @@ record):
   `/proc/<pid>` around each reload for the bare rustbgpd cells, plus the
   full process-tree 5 s-cadence sampler (`bench/scale/matrix/rss-sampler.sh`)
   for every cell (`rss.csv`; the only RSS instrument for the container
-  cells).
+  cells). The bare rustbgpd SIGHUP cells also keep the daemon's `VmHWM` and
+  `VmRSS` at cell end (`vmhwm`): a 5 s sample can miss a reload transient
+  that lasts well under a second, while `VmHWM` cannot.
 
 Cross-daemon RSS comparisons use only the outer sampler, never the row-level
 VmRSS fields (which are zero for container cells). For each reload, the
