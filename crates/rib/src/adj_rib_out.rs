@@ -230,12 +230,18 @@ impl AdjRibOut {
     /// Look up a route by prefix and path ID.
     #[must_use]
     pub fn get(&self, prefix: &Prefix, path_id: u32) -> Option<&Route> {
+        self.routes.get(self.unicast_handle(prefix, path_id)?)
+    }
+
+    /// Resolve a unicast identity to its current slab handle. Callers retaining
+    /// handles across writes must reconcile the touched identities before use.
+    pub(crate) fn unicast_handle(&self, prefix: &Prefix, path_id: u32) -> Option<u32> {
         let (_, handle) = self
             .prefix_path_ids
             .get(prefix)?
             .iter()
             .find(|(id, _)| *id == path_id)?;
-        self.routes.get(*handle)
+        Some(*handle)
     }
 
     /// Iterate over all advertised routes.

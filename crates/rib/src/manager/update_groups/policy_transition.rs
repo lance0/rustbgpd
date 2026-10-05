@@ -87,8 +87,11 @@ pub(in crate::manager) struct PrestagedTransitionInventory {
     /// Next destination slab slot to visit.
     cursor: usize,
     complete: bool,
-    announce: Vec<Route>,
+    /// Slab handles, reconciled against current slot identity before sealing.
+    announce: Vec<u32>,
     next_hop_override: Vec<Option<NextHopAction>>,
+    pub(in crate::manager) sealed: Option<CleanPolicyTransitionInventory>,
+    pub(in crate::manager) probe: Option<crate::manager::distribution::PrestagedTransitionProbe>,
     /// Keys failing a drift check as of their last visit.
     failed: FastMap<(Prefix, u32), &'static str>,
     /// Changed keys tagged for an ASN in `rs_asns`.
@@ -98,7 +101,10 @@ pub(in crate::manager) struct PrestagedTransitionInventory {
 /// What the fenced re-check made of a prestaged inventory.
 pub(in crate::manager) enum PrestagedInventoryOutcome {
     /// Equal to a fenced full walk of the current tables.
-    Ready(CleanPolicyTransitionInventoryBuilder),
+    Ready(
+        Box<CleanPolicyTransitionInventoryBuilder>,
+        Option<crate::manager::distribution::PrestagedTransitionProbe>,
+    ),
     /// A drift check fails on the current tables: degrade exactly as the
     /// fenced walk would.
     Degraded,
@@ -313,6 +319,8 @@ impl RibManager {
             complete: false,
             announce: Vec::new(),
             next_hop_override: Vec::new(),
+            sealed: None,
+            probe: None,
             failed: FastMap::default(),
             tagged: FastSet::default(),
         });
@@ -331,6 +339,9 @@ impl RibManager {
             return true;
         };
         prestaged.complete = complete;
+        if complete {
+            self.seal_prestaged_transition_inventory(&mut prestaged);
+        }
         self.prestaged_inventory = Some(prestaged);
         complete
     }
@@ -375,7 +386,9 @@ impl RibManager {
                         prestaged.next_hop_override.reserve_exact(new.table.len());
                         self.replacement_checkpoint(true);
                     }
-                    prestaged.announce.push(route.clone());
+                    prestaged
+                        .announce
+                        .push(u32::try_from(slot).expect("route slab uses u32 handles"));
                     prestaged.next_hop_override.push(next_hop);
                     if tagged {
                         prestaged.tagged.insert(key);
@@ -385,6 +398,103 @@ impl RibManager {
         }
         prestaged.cursor = end;
         Some(end == slots)
+    }
+
+    /// Reconcile the walk before sealing. The actor owns this whole poll:
+    /// drained logs are reset before mutation traffic can resume.
+    fn seal_prestaged_transition_inventory(
+        &mut self,
+        prestaged: &mut PrestagedTransitionInventory,
+    ) {
+        let mut dirty = FastSet::default();
+        for gid in [prestaged.source, prestaged.destination] {
+            if let Some(log) = self
+                .group_ribs
+                .get_mut(&gid)
+                .and_then(|group| group.inventory_log.as_mut())
+            {
+                dirty.extend(log.drain());
+            }
+        }
+        let new = &self.group_ribs[&prestaged.destination];
+        let old = &self.group_ribs[&prestaged.source];
+        let mut kept = 0;
+        for index in 0..prestaged.announce.len() {
+            self.replacement_checkpoint(false);
+            // Vacant slots and reused slots are discarded too: the inserted
+            // route's current identity is logged, even if its prior slot was
+            // visited under a different key earlier in the walk.
+            if new
+                .table
+                .unicast_slot(prestaged.announce[index] as usize)
+                .is_some_and(|route| !dirty.contains(&(route.prefix, route.path_id)))
+            {
+                prestaged.announce.swap(kept, index);
+                prestaged.next_hop_override.swap(kept, index);
+                kept += 1;
+            }
+        }
+        prestaged.announce.truncate(kept);
+        prestaged.next_hop_override.truncate(kept);
+        prestaged.failed.retain(|key, _| !dirty.contains(key));
+        prestaged.tagged.retain(|key| !dirty.contains(key));
+        for &key in &dirty {
+            self.replacement_checkpoint(false);
+            let Some(route) = new.table.get(&key.0, key.1) else {
+                continue;
+            };
+            match inventory_entry(old, new, route, &prestaged.rs_asns) {
+                Err(term) => {
+                    prestaged.failed.insert(key, term);
+                }
+                Ok(InventoryEntry::Unchanged) => {}
+                Ok(InventoryEntry::Changed { next_hop, tagged }) => {
+                    prestaged.announce.push(
+                        new.table
+                            .unicast_handle(&key.0, key.1)
+                            .expect("staged dirty key exists"),
+                    );
+                    prestaged.next_hop_override.push(next_hop);
+                    if tagged {
+                        prestaged.tagged.insert(key);
+                    }
+                }
+            }
+        }
+        // A slice-map is exact sized: Arc's FromIterator allocates its slice
+        // directly, avoiding a full written Vec<Route> and its second copy.
+        let announce = prestaged
+            .announce
+            .iter()
+            .map(|&handle| {
+                self.replacement_checkpoint(false);
+                new.table
+                    .unicast_slot(handle as usize)
+                    .expect("reconciled staged key exists")
+                    .clone()
+            })
+            .collect();
+        let next_hop_override = prestaged
+            .next_hop_override
+            .iter()
+            .map(|next_hop| {
+                self.replacement_checkpoint(false);
+                next_hop.clone()
+            })
+            .collect();
+        prestaged.sealed = Some(CleanPolicyTransitionInventory {
+            announce,
+            next_hop_override,
+            permit_totals: std::collections::HashMap::default(),
+            permit_by_source: std::collections::HashMap::default(),
+        });
+        crate::manager::retire_vec(&mut prestaged.announce, &mut || {
+            self.replacement_checkpoint(false);
+        });
+        crate::manager::retire_vec(&mut prestaged.next_hop_override, &mut || {
+            self.replacement_checkpoint(false);
+        });
+        crate::manager::retire_hash_set(&mut dirty, &mut || self.replacement_checkpoint(false));
     }
 
     /// Under the fence: turn the prestaged inventory for `source` →
@@ -427,6 +537,103 @@ impl RibManager {
         outcome
     }
 
+    /// Reconcile only touched rows. The ordinary vector builder remains the
+    /// resize fallback; equal cardinality retains the unpublished Arc slices.
+    fn reconcile_sealed_transition_payload(
+        &self,
+        prestaged: &mut PrestagedTransitionInventory,
+        dirty: &FastSet<(Prefix, u32)>,
+        old: &GroupRibOut,
+        new: &GroupRibOut,
+    ) -> Option<CleanPolicyTransitionInventoryBuilder> {
+        let checkpoint = || self.replacement_checkpoint(false);
+        let mut sealed = prestaged.sealed.take()?;
+        let mut inventory = CleanPolicyTransitionInventoryBuilder::default();
+        if dirty.is_empty() {
+            inventory.prebuilt = Some(sealed);
+            return Some(inventory);
+        }
+        let touched_positions = sealed
+            .announce
+            .iter()
+            .enumerate()
+            .filter_map(|(index, route)| {
+                checkpoint();
+                dirty
+                    .contains(&(route.prefix, route.path_id))
+                    .then_some(index)
+            })
+            .collect::<Vec<_>>();
+        prestaged.failed.retain(|key, _| !dirty.contains(key));
+        prestaged.tagged.retain(|key| !dirty.contains(key));
+        let mut changed = Vec::with_capacity(dirty.len());
+        for &key in dirty {
+            checkpoint();
+            let Some(route) = new.table.get(&key.0, key.1) else {
+                continue;
+            };
+            match inventory_entry(old, new, route, &prestaged.rs_asns) {
+                Err(term) => {
+                    prestaged.failed.insert(key, term);
+                }
+                Ok(InventoryEntry::Unchanged) => {}
+                Ok(InventoryEntry::Changed { next_hop, tagged }) => {
+                    changed.push((route.clone(), next_hop));
+                    if tagged {
+                        prestaged.tagged.insert(key);
+                    }
+                }
+            }
+        }
+        if touched_positions.len() == changed.len() {
+            // The sealed payload has no other Arc owners before the fence.
+            // Replace the touched rows in place; order is not a contract.
+            let routes = std::sync::Arc::get_mut(&mut sealed.announce)
+                .expect("unpublished payload is uniquely owned");
+            let next_hops = std::sync::Arc::get_mut(&mut sealed.next_hop_override)
+                .expect("unpublished next hops are uniquely owned");
+            for (&index, (route, next_hop)) in touched_positions.iter().zip(changed) {
+                checkpoint();
+                routes[index] = route;
+                next_hops[index] = next_hop;
+            }
+            if let Some(probe) = prestaged.probe.as_mut()
+                && !crate::manager::distribution::reprobe_prestaged_transition_rows(
+                    &sealed,
+                    probe,
+                    &touched_positions,
+                    &mut || checkpoint(),
+                )
+            {
+                prestaged.probe = None;
+            }
+            inventory.prebuilt = Some(sealed);
+        } else {
+            // Cardinality-changing churn cannot resize an Arc slice. Keep
+            // the authoritative vector path for this uncommon case.
+            let count = sealed.announce.len() - touched_positions.len() + changed.len();
+            self.replacement_checkpoint(true);
+            inventory.announce.reserve_exact(count);
+            self.replacement_checkpoint(true);
+            inventory.next_hop_override.reserve_exact(count);
+            self.replacement_checkpoint(true);
+            for (route, next_hop) in sealed.announce.iter().zip(sealed.next_hop_override.iter()) {
+                checkpoint();
+                if !dirty.contains(&(route.prefix, route.path_id)) {
+                    inventory.announce.push(route.clone());
+                    inventory.next_hop_override.push(next_hop.clone());
+                }
+            }
+            for (route, next_hop) in changed {
+                checkpoint();
+                inventory.announce.push(route);
+                inventory.next_hop_override.push(next_hop);
+            }
+            prestaged.probe = None;
+        }
+        Some(inventory)
+    }
+
     fn recheck_prestaged_transition_inventory(
         &self,
         prestaged: &mut PrestagedTransitionInventory,
@@ -450,43 +657,11 @@ impl RibManager {
                 false,
             );
         };
-        if !dirty.is_empty() {
-            // Drop every walk result for a touched key (a key re-staged
-            // into a later slot can appear twice), keeping walk order.
-            let mut kept = 0;
-            for index in 0..prestaged.announce.len() {
-                checkpoint();
-                let route = &prestaged.announce[index];
-                if !dirty.contains(&(route.prefix, route.path_id)) {
-                    prestaged.announce.swap(kept, index);
-                    prestaged.next_hop_override.swap(kept, index);
-                    kept += 1;
-                }
-            }
-            prestaged.announce.truncate(kept);
-            prestaged.next_hop_override.truncate(kept);
-            prestaged.failed.retain(|key, _| !dirty.contains(key));
-            prestaged.tagged.retain(|key| !dirty.contains(key));
-        }
-        for &key in dirty {
-            checkpoint();
-            let Some(route) = new.table.get(&key.0, key.1) else {
-                continue;
-            };
-            match inventory_entry(old, new, route, &prestaged.rs_asns) {
-                Err(term) => {
-                    prestaged.failed.insert(key, term);
-                }
-                Ok(InventoryEntry::Unchanged) => {}
-                Ok(InventoryEntry::Changed { next_hop, tagged }) => {
-                    prestaged.announce.push(route.clone());
-                    prestaged.next_hop_override.push(next_hop);
-                    if tagged {
-                        prestaged.tagged.insert(key);
-                    }
-                }
-            }
-        }
+        let Some(mut inventory) =
+            self.reconcile_sealed_transition_payload(prestaged, dirty, old, new)
+        else {
+            return PrestagedInventoryOutcome::Unusable;
+        };
         if let Some((&key, &term)) = prestaged.failed.iter().next() {
             inventory_degraded(source, destination, Some(key), term);
             return PrestagedInventoryOutcome::Degraded;
@@ -512,11 +687,6 @@ impl RibManager {
         // label, so `source_counts` already holds the per-source fold
         // (VPN slots are empty: `clean_inventory_pair` proved it).
         let label = new.permit_policy_label.as_deref().map(str::to_owned);
-        let mut inventory = CleanPolicyTransitionInventoryBuilder {
-            announce: std::mem::take(&mut prestaged.announce),
-            next_hop_override: std::mem::take(&mut prestaged.next_hop_override),
-            ..CleanPolicyTransitionInventoryBuilder::default()
-        };
         let mut total = 0;
         for (&peer, counts) in &new.source_counts {
             checkpoint();
@@ -533,7 +703,7 @@ impl RibManager {
         if total > 0 {
             inventory.permit_totals.insert(label, total);
         }
-        PrestagedInventoryOutcome::Ready(inventory)
+        PrestagedInventoryOutcome::Ready(Box::new(inventory), prestaged.probe.take())
     }
 
     /// Drop any prestaged inventory and stop its groups' key logs. Every
@@ -552,6 +722,12 @@ impl RibManager {
                     self.replacement_checkpoint(false);
                 });
             }
+        }
+        if let Some(mut sealed) = prestaged.sealed.take() {
+            sealed.retire_with(&mut |force| self.replacement_checkpoint(force));
+        }
+        if let Some(mut probe) = prestaged.probe.take() {
+            probe.retire_with(&mut || self.replacement_checkpoint(false));
         }
         self.replacement_checkpoint(true);
         crate::manager::retire_vec(&mut prestaged.announce, &mut || {

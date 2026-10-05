@@ -110,6 +110,24 @@ a recreated group, or checked against a smaller RS-ASN set falls back to the
 fenced walk described in Section 3, so the commit-or-degrade outcome is that of a
 fenced walk of the same tables.
 
+The unfenced inventory walk retains slab handles and aligned next-hop actions,
+then reconciles logged keys before sealing. A vacant or reused slot is discarded
+according to its current identity; changed logged keys are added exactly once.
+An exact-sized iterator allocates the `Arc<[Route]>` directly, without a written
+route-shell vector and a second bulk copy. Sealing is one actor-owned linear
+poll, with readiness checkpoints, outside the transition fence.
+
+The sealed inventory is exact-probed in unfenced slices against the preparing
+member's immutable encoder snapshot. Under the fence, equal-cardinality churn
+patches the uniquely owned payload in place and re-probes only the changed
+rows, updating their encoded lengths before deriving the shared maximum.
+Cardinality-changing churn retains the ordinary vector resize path and a full
+fenced probe. An incomplete proof, more than one route slice of changed rows,
+probe rejection, or encoder owner/generation drift also discards the proof and
+runs the fenced probe. Wire-profile compatibility and each member's ceiling
+are still checked during `ProbeAndPrepare`; `Validate` keeps its exact current
+owner/generation checks before any emission.
+
 ## Context
 
 A live policy reload can move hundreds of route-reflector or route-server
