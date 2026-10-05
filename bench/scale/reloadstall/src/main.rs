@@ -198,7 +198,7 @@ use rustbgpd_wire::{
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpSocket, TcpStream};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
 
 /// Receivers on every runtime worker reallocate their frame buffers and NLRI
 /// vectors in the same instant when the daemon delivers a coalesced
@@ -655,6 +655,50 @@ struct Obs {
     /// Closed for the GR rejoin cohort until every joiner's current table/EoR
     /// passes the explicit replay boundary. Initial/default responders stay open.
     source_replay_blocked: AtomicBool,
+    /// Experimental pacing is acknowledged before the reload is triggered.
+    reader_pacing: watch::Sender<ReaderPacing>,
+    reader_pacing_applied: AtomicU32,
+    /// Round whose first current-generation UPDATE activated its stop.
+    reader_pause_started: AtomicU32,
+    #[cfg(test)]
+    reader_observed: tokio::sync::Notify,
+}
+
+#[derive(Clone, Copy)]
+struct ReaderPacing {
+    round: u32,
+    pause: Duration,
+    delay: Duration,
+    bytes: usize,
+}
+
+impl Default for ReaderPacing {
+    fn default() -> Self {
+        Self {
+            round: 0,
+            pause: Duration::ZERO,
+            delay: Duration::ZERO,
+            bytes: 1 << 16,
+        }
+    }
+}
+
+async fn arm_reader_pacing(ctx: &Ctx, count: usize, pacing: ReaderPacing) {
+    for observer in ctx.obs.iter().take(count) {
+        observer.reader_pacing.send_replace(pacing);
+    }
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while ctx
+            .obs
+            .iter()
+            .take(count)
+            .any(|observer| observer.reader_pacing_applied.load(Ordering::Acquire) != pacing.round)
+        {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("reader pacing acknowledgement timed out");
 }
 
 impl Obs {
@@ -677,6 +721,11 @@ impl Obs {
             extras_seen: Mutex::new(Vec::new()),
             rejoin: Mutex::new(None),
             source_replay_blocked: AtomicBool::new(false),
+            reader_pacing: watch::channel(ReaderPacing::default()).0,
+            reader_pacing_applied: AtomicU32::new(0),
+            reader_pause_started: AtomicU32::new(0),
+            #[cfg(test)]
+            reader_observed: tokio::sync::Notify::new(),
         }
     }
 }
@@ -2071,11 +2120,36 @@ fn start_stub(ctx: Arc<Ctx>, i: u32, stream: TcpStream, track_rejoin: bool) -> S
     let tx_for_reader = tx.clone();
     let rctx = Arc::clone(&ctx);
     let reader_refreshes = Arc::clone(&refreshes);
+    let mut reader_control = ctx.obs[i as usize].reader_pacing.subscribe();
     let reader_handle = tokio::spawn(async move {
         let mut frame = BytesMut::with_capacity(1 << 16);
         let mut tmp = vec![0u8; 1 << 16];
+        let mut pacing = *reader_control.borrow_and_update();
+        let mut next_read = tokio::time::Instant::now();
+        let mut pause_pending = !pacing.pause.is_zero();
+        rctx.obs[i as usize]
+            .reader_pacing_applied
+            .store(pacing.round, Ordering::Release);
         loop {
-            let n = match reader.read(&mut tmp).await {
+            let read = tokio::select! {
+                biased;
+                changed = reader_control.changed() => {
+                    changed.expect("observer owns the reader control sender");
+                    pacing = *reader_control.borrow_and_update();
+                    next_read = tokio::time::Instant::now();
+                    pause_pending = !pacing.pause.is_zero();
+                    rctx.obs[i as usize].reader_pacing_applied.store(pacing.round, Ordering::Release);
+                    continue;
+                }
+                result = async {
+                    if !pacing.delay.is_zero() {
+                        tokio::time::sleep_until(next_read).await;
+                    }
+                    reader.read(&mut tmp[..pacing.bytes]).await
+                } => result,
+            };
+            next_read = tokio::time::Instant::now() + pacing.delay;
+            let n = match read {
                 Ok(0) => {
                     rctx.obs[i as usize]
                         .established
@@ -2169,7 +2243,7 @@ fn start_stub(ctx: Arc<Ctx>, i: u32, stream: TcpStream, track_rejoin: bool) -> S
                             }
                         }
                         let ob = &rctx.obs[i as usize];
-                        let t_us = now_us(&rctx);
+                        let mut t_us = now_us(&rctx);
                         if track_rejoin {
                             if let Some(rejoin) = ob.rejoin.lock().unwrap().as_mut() {
                                 rejoin.observe(
@@ -2185,6 +2259,23 @@ fn start_stub(ctx: Arc<Ctx>, i: u32, stream: TcpStream, track_rejoin: bool) -> S
                             // Borrow the communities out of the single parse;
                             // clone once only to store the last-seen sample.
                             let communities = observed_communities(&parsed.attributes);
+                            let expected = ob.expected_community.load(Ordering::Acquire);
+                            if pause_pending
+                                && base > 0
+                                && expected != 0
+                                && communities.contains(&expected)
+                            {
+                                // Compilation can take minutes. Stop only once
+                                // this round's output arrives, before recording
+                                // or reading more of it; no tracker lock is held.
+                                pause_pending = false;
+                                ob.reader_pause_started
+                                    .store(pacing.round, Ordering::Release);
+                                #[cfg(test)]
+                                ob.reader_observed.notify_one();
+                                tokio::time::sleep(pacing.pause).await;
+                                t_us = now_us(&rctx);
+                            }
                             *ob.last_comms.lock().unwrap() = communities.to_vec();
                             if communities.contains(&COMMUNITY_STABLE) {
                                 if !nlri.v4_ann.is_empty() {
@@ -2195,7 +2286,6 @@ fn start_stub(ctx: Arc<Ctx>, i: u32, stream: TcpStream, track_rejoin: bool) -> S
                                 }
                             }
 
-                            let expected = ob.expected_community.load(Ordering::Acquire);
                             if base > 0 && expected != 0 {
                                 {
                                     let mut generation = ob.generation.lock().unwrap();
@@ -2331,6 +2421,8 @@ fn start_stub(ctx: Arc<Ctx>, i: u32, stream: TcpStream, track_rejoin: bool) -> S
                         }
                         ob.base_ann_total
                             .fetch_add(u64::from(base), Ordering::Relaxed);
+                        #[cfg(test)]
+                        ob.reader_observed.notify_one();
                         if rctx.record_events.load(Ordering::Relaxed) {
                             ob.events.lock().unwrap().push(Event {
                                 t_us,
@@ -3923,6 +4015,22 @@ fn main() {
     };
     // Soak-mode knobs; every default reproduces the frozen one-shot contract.
     let cycle_quiesce_secs = env_u64("RELOADSTALL_CYCLE_QUIESCE_SECS", 20);
+    let paced_readers = usize::try_from(env_u64("RELOADSTALL_READER_COUNT", 0)).unwrap();
+    let reader_pacing = ReaderPacing {
+        round: 0,
+        pause: Duration::from_millis(env_u64("RELOADSTALL_READER_PAUSE_MS", 0)),
+        delay: Duration::from_millis(env_u64("RELOADSTALL_READER_DELAY_MS", 0)),
+        bytes: usize::try_from(env_u64("RELOADSTALL_READER_BYTES", 1 << 16)).unwrap(),
+    };
+    assert!(
+        (1..=1 << 16).contains(&reader_pacing.bytes),
+        "RELOADSTALL_READER_BYTES must be in 1..=65536"
+    );
+    assert!(paced_readers == 0 || (native_sighup && reloads > 0 && flapstorm.is_none()
+        && paced_readers < changed_peers as usize
+        && paced_readers < n_peers.saturating_sub(CHURNERS) as usize
+        && (!reader_pacing.pause.is_zero() || !reader_pacing.delay.is_zero())),
+        "reader pacing requires native reloads and a non-churner subset of changed peers with pause or delay");
     let trip_every = u32::try_from(env_u64("RELOADSTALL_TRIP_EVERY", 0)).unwrap();
     let trip_prefix_count = u32::try_from(env_u64("RELOADSTALL_TRIP_PREFIXES", 64)).unwrap();
     let trip_reestablish = Duration::from_secs(env_u64("RELOADSTALL_TRIP_REESTABLISH_SECS", 300));
@@ -4676,6 +4784,11 @@ fn main() {
             if dualstack() {
                 *ctx.churn_writes.lock().unwrap() = Some(Vec::new());
             }
+            if paced_readers > 0 {
+                arm_reader_pacing(&ctx, paced_readers, ReaderPacing { round: r, ..reader_pacing }).await;
+                println!("reload {r} reader_pacing count={paced_readers} pause_ms={} delay_ms={} bytes={}",
+                    reader_pacing.pause.as_millis(), reader_pacing.delay.as_millis(), reader_pacing.bytes);
+            }
             let t_hup = now_us(&ctx);
             for observer in ctx.obs.iter().take(changed_peers as usize) {
                 observer
@@ -4903,6 +5016,24 @@ fn main() {
                 &format!("reload {r} changed_first_generation_update_ms"),
                 firsts,
             );
+            if paced_readers > 0 {
+                if !reader_pacing.pause.is_zero() {
+                    let activated = ctx.obs.iter().take(paced_readers)
+                        .filter(|observer| observer.reader_pause_started.load(Ordering::Acquire) == r)
+                        .count();
+                    println!("reload {r} stopped_readers_activated {activated}/{paced_readers}");
+                    if activated != paced_readers {
+                        eprintln!("FAIL: reload {r} a stopped reader saw no current-generation UPDATE");
+                        std::process::exit(1);
+                    }
+                }
+                stats_line(&format!("reload {r} healthy_completion_s"),
+                    (paced_readers..changed_peers as usize).filter_map(|i| completion_us(&ctx, i))
+                        .map(|tc| (tc - t_hup) as f64 / 1e6).collect());
+                stats_line(&format!("reload {r} healthy_maxgap_ms"),
+                    (paced_readers..n_peers as usize)
+                        .map(|i| max_gap_ms(&ctx, i, t_hup, reload_end_us, true)).collect());
+            }
             let rss_after = rss_mib(pid);
             println!(
                 "reload {r} rss_mib before={rss_before} after={} comms_sample={:?}",
@@ -5133,6 +5264,96 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test(start_paused = true)]
+    async fn reader_pause_waits_for_delayed_generation_output_then_recovers() {
+        let (client, mut server) = finish_test_connection().await;
+        let ctx = finish_test_ctx();
+        let stub = start_stub(Arc::clone(&ctx), 0, client, false);
+        arm_reader_pacing(
+            &ctx,
+            1,
+            ReaderPacing {
+                round: 1,
+                pause: Duration::from_secs(5),
+                ..ReaderPacing::default()
+            },
+        )
+        .await;
+        assert_eq!(ctx.obs[0].reader_pacing_applied.load(Ordering::Acquire), 1);
+        ctx.obs[0]
+            .expected_community
+            .store(COMMUNITY_GEN_B, Ordering::Release);
+        let mut attrs = base_attrs(1);
+        attrs.push(PathAttribute::Communities(vec![COMMUNITY_GEN_A]));
+        let message = announce_msgs_with(1, &attrs, &[base_prefix(1)])
+            .pop()
+            .unwrap();
+        server
+            .write_all(&encode_message(&message).unwrap())
+            .await
+            .unwrap();
+        server
+            .write_all(&encode_message(&Message::Keepalive).unwrap())
+            .await
+            .unwrap();
+        wait_reader_observation(&ctx.obs[0], |ob| {
+            ob.base_ann_total.load(Ordering::Relaxed) == 1
+        })
+        .await;
+        tokio::time::advance(Duration::from_secs(30)).await;
+        assert_eq!(ctx.obs[0].reader_pause_started.load(Ordering::Acquire), 0);
+        *attrs.last_mut().unwrap() = PathAttribute::Communities(vec![COMMUNITY_GEN_B]);
+        let message = announce_msgs_with(1, &attrs, &[base_prefix(2)])
+            .pop()
+            .unwrap();
+        server
+            .write_all(&encode_message(&message).unwrap())
+            .await
+            .unwrap();
+        wait_reader_observation(&ctx.obs[0], |ob| {
+            ob.reader_pause_started.load(Ordering::Acquire) == 1
+        })
+        .await;
+        assert_eq!(ctx.obs[0].base_ann_total.load(Ordering::Relaxed), 1);
+        tokio::time::advance(Duration::from_secs(4)).await;
+        tokio::task::yield_now().await;
+        assert_eq!(ctx.obs[0].base_ann_total.load(Ordering::Relaxed), 1);
+        tokio::time::advance(Duration::from_secs(1)).await;
+        wait_reader_observation(&ctx.obs[0], |ob| {
+            ob.base_ann_total.load(Ordering::Relaxed) == 2
+        })
+        .await;
+        let message = announce_msgs_with(1, &attrs, &[base_prefix(3)])
+            .pop()
+            .unwrap();
+        server
+            .write_all(&encode_message(&message).unwrap())
+            .await
+            .unwrap();
+        wait_reader_observation(&ctx.obs[0], |ob| {
+            ob.base_ann_total.load(Ordering::Relaxed) == 3
+        })
+        .await;
+        stub.reader.abort();
+        stub.writer.abort();
+        let _ = stub.reader.await;
+        let _ = stub.writer.await;
+    }
+
+    async fn wait_reader_observation(observer: &Obs, condition: impl Fn(&Obs) -> bool) {
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                let changed = observer.reader_observed.notified();
+                if condition(observer) {
+                    break;
+                }
+                changed.await;
+            }
+        })
+        .await
+        .unwrap();
+    }
 
     fn finish_test_ctx() -> Arc<Ctx> {
         Arc::new(Ctx {

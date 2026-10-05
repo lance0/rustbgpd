@@ -325,6 +325,7 @@ bench-list:
       bench/scale/irrreload/run-bmp-buffer-receipt.sh
       bench/scale/irrreload/run-memory-attribution.sh
       bench/scale/reloadstall/failover_cell.sh
+      bench/scale/reloadstall/run-unsent-leg.sh
       bench/netns-calibration/run-vm.sh
       bench/evpn-load/fanout.py
       bench/run-fib-kernel-dump.py

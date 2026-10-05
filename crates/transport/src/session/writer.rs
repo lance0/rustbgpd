@@ -233,6 +233,8 @@ pub(super) fn spawn(
         metrics,
         peer_label,
         send_hold_time,
+        #[cfg(all(target_os = "linux", feature = "bench-internals"))]
+        bench_writer_polls: std::env::var("RUSTBGPD_BENCH_WRITER_POLLS").as_deref() == Ok("1"),
     };
     let join = tokio::spawn(task.run().in_current_span());
     WriterHandle {
@@ -255,6 +257,8 @@ struct WriterTask {
     metrics: BgpMetrics,
     peer_label: String,
     send_hold_time: Option<Duration>,
+    #[cfg(all(target_os = "linux", feature = "bench-internals"))]
+    bench_writer_polls: bool,
 }
 
 /// Resolve once the session has signalled hard teardown. Pends forever
@@ -283,6 +287,9 @@ async fn with_send_hold(
 
 impl WriterTask {
     async fn run(mut self) -> Result<(), WriterExit> {
+        #[cfg(all(target_os = "linux", feature = "bench-internals"))]
+        configure_bench_unsent_threshold(self.write_half.as_ref(), &self.peer_label)
+            .map_err(WriterExit::Io)?;
         let mut bulk_open = true;
         let mut priority_open = true;
         let mut cadence_open = true;
@@ -401,6 +408,8 @@ impl WriterTask {
             teardown_rx,
             send_hold_time,
             peer_label,
+            #[cfg(all(target_os = "linux", feature = "bench-internals"))]
+                bench_writer_polls: instrument,
             ..
         } = self;
         let write = async {
@@ -408,11 +417,37 @@ impl WriterTask {
             write_half.flush().await
         };
         tokio::pin!(write);
-        let outcome = tokio::select! {
-            biased;
-            result = with_send_hold(write.as_mut(), *send_hold_time) => Some(result),
-            () = teardown_requested(teardown_rx) => None,
+        #[cfg(all(target_os = "linux", feature = "bench-internals"))]
+        let started = instrument.then(std::time::SystemTime::now);
+        #[cfg(all(target_os = "linux", feature = "bench-internals"))]
+        let (mut polls, mut pending_polls) = (0u64, 0u64);
+        let outcome = {
+            #[cfg(all(target_os = "linux", feature = "bench-internals"))]
+            let mut measured_write = std::future::poll_fn(|context| {
+                let result = write.as_mut().poll(context);
+                if *instrument {
+                    polls += 1;
+                    pending_polls += u64::from(result.is_pending());
+                }
+                result
+            });
+            #[cfg(all(target_os = "linux", feature = "bench-internals"))]
+            let bounded_write = with_send_hold(&mut measured_write, *send_hold_time);
+            #[cfg(not(all(target_os = "linux", feature = "bench-internals")))]
+            let bounded_write = with_send_hold(write.as_mut(), *send_hold_time);
+            tokio::select! {
+                biased;
+                result = bounded_write => Some(result),
+                () = teardown_requested(teardown_rx) => None,
+            }
         };
+        #[cfg(all(target_os = "linux", feature = "bench-internals"))]
+        if *instrument {
+            tracing::info!(peer = %peer_label, bytes = bytes.len(), polls, pending_polls,
+                started_epoch_us = started.expect("instrumented write has a timestamp").duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default().as_micros(),
+                "benchmark writer write-future polls (not kernel wakeups)");
+        }
         let result = match outcome {
             Some(Ok(result)) => result,
             Some(Err(limit)) => {
@@ -487,12 +522,107 @@ impl WriterTask {
     }
 }
 
+// An unshipped, Linux-only experiment. Connection creation captures the process
+// override; reconnects read it again. No listener or host-wide sysctl is changed.
+#[cfg(all(target_os = "linux", feature = "bench-internals"))]
+fn configure_bench_unsent_threshold(
+    stream: &tokio::net::TcpStream,
+    peer_label: &str,
+) -> std::io::Result<()> {
+    let requested = std::env::var("RUSTBGPD_BENCH_UNSENT_THRESHOLD_BYTES")
+        .map(Some)
+        .or_else(|error| match error {
+            std::env::VarError::NotPresent => Ok(None),
+            std::env::VarError::NotUnicode(_) => {
+                Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, error))
+            }
+        })
+        .and_then(|value| parse_bench_unsent_threshold(value.as_deref()))?;
+    let actual = apply_bench_unsent_threshold(stream, requested)?;
+    tracing::info!(peer = %peer_label, ?requested, actual,
+        "benchmark unsent-data threshold read back from live socket");
+    Ok(())
+}
+
+#[cfg(all(target_os = "linux", feature = "bench-internals"))]
+fn parse_bench_unsent_threshold(value: Option<&str>) -> std::io::Result<Option<u32>> {
+    value
+        .map(|value| {
+            value
+                .parse::<std::num::NonZeroU32>()
+                .map(std::num::NonZeroU32::get)
+                .map_err(|_| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::InvalidInput,
+                        "RUSTBGPD_BENCH_UNSENT_THRESHOLD_BYTES must be a positive u32",
+                    )
+                })
+        })
+        .transpose()
+}
+
+#[cfg(all(target_os = "linux", feature = "bench-internals"))]
+fn apply_bench_unsent_threshold(
+    stream: &tokio::net::TcpStream,
+    requested: Option<u32>,
+) -> std::io::Result<u32> {
+    let socket = socket2::SockRef::from(stream);
+    if let Some(requested) = requested {
+        socket.set_tcp_notsent_lowat(requested)?;
+    }
+    let actual = socket.tcp_notsent_lowat()?;
+    verify_bench_unsent_readback(requested, actual)
+}
+
+#[cfg(all(target_os = "linux", feature = "bench-internals"))]
+fn verify_bench_unsent_readback(requested: Option<u32>, actual: u32) -> std::io::Result<u32> {
+    if requested.is_some_and(|requested| requested != actual) {
+        return Err(std::io::Error::other(format!(
+            "benchmark unsent-data threshold readback differs: requested={requested:?} actual={actual}"
+        )));
+    }
+    Ok(actual)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     use tokio::io::AsyncReadExt;
     use tokio::net::{TcpListener, TcpStream};
+
+    #[cfg(all(target_os = "linux", feature = "bench-internals"))]
+    #[tokio::test]
+    async fn bench_unsent_threshold_is_unset_or_read_back_on_both_live_socket_ends() {
+        assert_eq!(parse_bench_unsent_threshold(None).unwrap(), None);
+        assert_eq!(
+            parse_bench_unsent_threshold(Some("65536")).unwrap(),
+            Some(65536)
+        );
+        assert_eq!(
+            parse_bench_unsent_threshold(Some("4294967295")).unwrap(),
+            Some(u32::MAX)
+        );
+        let mismatch = verify_bench_unsent_readback(Some(65536), 131_072).unwrap_err();
+        assert!(mismatch.to_string().contains("requested=Some(65536)"));
+        assert!(mismatch.to_string().contains("actual=131072"));
+        for bad in ["0", "-1", "4294967296", "garbage", ""] {
+            assert!(parse_bench_unsent_threshold(Some(bad)).is_err(), "{bad}");
+        }
+        let (client, server) = tcp_pair().await;
+        for stream in [&client, &server] {
+            let before = socket2::SockRef::from(stream).tcp_notsent_lowat().unwrap();
+            assert_eq!(apply_bench_unsent_threshold(stream, None).unwrap(), before);
+            assert_eq!(
+                apply_bench_unsent_threshold(stream, Some(65536)).unwrap(),
+                65536
+            );
+            assert_eq!(
+                socket2::SockRef::from(stream).tcp_notsent_lowat().unwrap(),
+                65536
+            );
+        }
+    }
 
     /// Establish a real connected TCP pair on loopback. Returns
     /// `(server_side, client_side)` — the test owns both ends so it can
