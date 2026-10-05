@@ -253,6 +253,8 @@ reject_resume
 resume_image_id=$fixture_image_id
 
 resume_generation=current
+write_source_identity "$source_commit" "$source_tree" false bird:v3.3.2-m101 "$fixture_image_id"
+reject_resume
 write_source_identity "$source_commit" "$source_tree" false bird:v3.3.3-m101 "$fixture_image_id"
 resume_rc=0
 run_resume_check || resume_rc=$?
