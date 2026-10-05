@@ -1,0 +1,268 @@
+{
+  "verdict": "pass",
+  "samples": 2918,
+  "reloads_issued": 48,
+  "reloads_complete": 48,
+  "trips_executed": 6,
+  "trips_planned": 6,
+  "peak_rss_mb": 564.7,
+  "rss_late_slope_per_hour": 0.07641993046952457,
+  "intern_late_slope_per_hour": -0.003433190793215697,
+  "slope_window_evaluated": true,
+  "gates": {
+    "min_samples": {
+      "value": 2918,
+      "limit": 2592.0,
+      "pass": true
+    },
+    "session_floor": {
+      "value": {
+        "violations": 0,
+        "first": []
+      },
+      "pass": true
+    },
+    "reload_accounting": {
+      "value": {
+        "issued": 48,
+        "complete": 48,
+        "planned": 48
+      },
+      "pass": true
+    },
+    "trip_accounting": {
+      "value": {
+        "executed": 6,
+        "planned": 6,
+        "defects": {}
+      },
+      "pass": true
+    },
+    "exceeded_exact": {
+      "value": 6,
+      "limit": 6,
+      "pass": true
+    },
+    "flap_budget": {
+      "value": 6,
+      "limit": 6,
+      "pass": true
+    },
+    "msgs_sent_monotone": {
+      "value": {
+        "breaks": 0
+      },
+      "pass": true
+    },
+    "readyz": {
+      "value": {
+        "bad_samples": 1,
+        "status_failures": 0,
+        "latency_failures": 1,
+        "longest_consecutive": 1,
+        "first": [
+          {
+            "elapsed_sec": 20019.0,
+            "code": 200,
+            "latency_ms": 578.0,
+            "kind": "latency"
+          }
+        ],
+        "limit_ms": 250.0,
+        "limit_consecutive": 3,
+        "sample_scrape_failures": 0,
+        "observation_gaps": [],
+        "observation_gap_count": 0
+      },
+      "pass": true
+    },
+    "rss_peak_mb": {
+      "value": 564.7,
+      "limit": 3072.0,
+      "pass": true
+    },
+    "rss_late_slope_per_hour": {
+      "value": 0.07641993046952457,
+      "limit": 10.0,
+      "pass": true,
+      "note": null
+    },
+    "intern_late_slope_per_hour": {
+      "value": -0.003433190793215697,
+      "limit": 100.0,
+      "pass": true,
+      "note": null
+    },
+    "no_abort": {
+      "value": [],
+      "pass": true
+    },
+    "daemon_log": {
+      "value": {
+        "records": 76818,
+        "errors": 0,
+        "defects": 0,
+        "warnings_by_message": {
+          "TCP connect failed": 6,
+          "inbound connection from unknown peer, dropping": 292,
+          "max prefix exceeded": 6
+        },
+        "first_administrative_shutdown_unix": 1791170386.370343,
+        "examples": []
+      },
+      "pass": true
+    },
+    "management_evidence": {
+      "value": {
+        "errors": [],
+        "count_mismatches": []
+      },
+      "pass": true
+    },
+    "management_lifetime": {
+      "value": {
+        "load_start": 1146456.555598,
+        "measured_start": 1146456.691793839,
+        "measured_end": 1234011.744661909,
+        "stop_requested": 1234011.782687,
+        "load_end": 1234011.783407,
+        "last_operation_completed": 1234011.718941,
+        "engine_finish_release": 1234011.909602171,
+        "load_end_unix": 1791170386.1704993,
+        "engine_first_shutdown_unix": 1791170386.370343
+      },
+      "pass": true
+    },
+    "management_operations": {
+      "value": {
+        "metrics": 87513,
+        "neighbor": 17511,
+        "policy_stats": 17511,
+        "rib_prefix": 17511,
+        "doctor": 146
+      },
+      "pass": true
+    },
+    "management_completion": {
+      "value": {
+        "metrics": {
+          "scheduled": 87556,
+          "completed": 87513,
+          "ratio": 0.9995088857416967
+        },
+        "neighbor": {
+          "scheduled": 17511,
+          "completed": 17511,
+          "ratio": 1.0
+        },
+        "policy_stats": {
+          "scheduled": 17511,
+          "completed": 17511,
+          "ratio": 1.0
+        },
+        "rib_prefix": {
+          "scheduled": 17511,
+          "completed": 17511,
+          "ratio": 1.0
+        },
+        "doctor": {
+          "scheduled": 146,
+          "completed": 146,
+          "ratio": 1.0
+        }
+      },
+      "limit": 0.9,
+      "pass": true
+    },
+    "management_cadence": {
+      "value": {
+        "defects": [],
+        "operations": {
+          "metrics": {
+            "missed": 43,
+            "per_reload": {
+              "2": 1,
+              "3": 1,
+              "5": 1,
+              "6": 1,
+              "7": 1,
+              "9": 2,
+              "10": 1,
+              "11": 1,
+              "12": 2,
+              "13": 1,
+              "15": 1,
+              "16": 1,
+              "17": 1,
+              "18": 1,
+              "19": 1,
+              "20": 1,
+              "21": 1,
+              "22": 1,
+              "23": 1,
+              "24": 1,
+              "25": 1,
+              "26": 1,
+              "27": 1,
+              "28": 1,
+              "29": 1,
+              "30": 1,
+              "31": 1,
+              "32": 1,
+              "33": 1,
+              "35": 1,
+              "38": 1,
+              "39": 1,
+              "40": 1,
+              "41": 1,
+              "42": 1,
+              "43": 1,
+              "44": 1,
+              "45": 1,
+              "46": 1,
+              "47": 1,
+              "48": 1
+            },
+            "outside_windows": []
+          },
+          "neighbor": {
+            "missed": 0,
+            "per_reload": {},
+            "outside_windows": []
+          },
+          "policy_stats": {
+            "missed": 0,
+            "per_reload": {},
+            "outside_windows": []
+          },
+          "rib_prefix": {
+            "missed": 0,
+            "per_reload": {},
+            "outside_windows": []
+          },
+          "doctor": {
+            "missed": 0,
+            "per_reload": {},
+            "outside_windows": []
+          }
+        }
+      },
+      "limit": 2,
+      "pass": true
+    },
+    "management_failures": {
+      "value": {
+        "count": 0,
+        "first": []
+      },
+      "pass": true
+    },
+    "management_doctor": {
+      "value": {
+        "attempts": 146,
+        "failures": []
+      },
+      "pass": true
+    }
+  }
+}
