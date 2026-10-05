@@ -11,6 +11,46 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- A clean export-policy reload builds its shared transition inventory during
+  the unfenced destination prestage instead of under the RIB transition
+  fence. Both update groups log the keys that churn touches after the walk
+  starts, and the fence re-checks only those keys with the same table-drift,
+  source-flip and rs-control checks. A missing, unfinished or unverifiable
+  prestaged walk falls back to the fenced walk. On the 700-peer × 400,400-prefix
+  reload-stall matrix leg, the fenced inventory step fell from about 173 ms to
+  28 ms and the per-observer stall p50 from about 365 ms to 208 ms. Completion
+  time, UPDATEs per member and VmHWM were unchanged (3 × 4 reloads per arm).
+- The update-group shared encoder groups an export-policy transition's
+  announce inventory by source peer with a linear counting sort instead of
+  comparison-sorting every route by source address before the first UPDATE.
+  On the 700-member, 400,400-route reload-stall matrix leg, the first
+  transition UPDATE now reaches members about 50 ms sooner after the
+  transition commits (floor 55 ms to 6 ms). In the same interleaved 3 × 4
+  reload A/B, the median per-reload stall p50 was 385 ms before and 313 ms
+  after, with overlapping run ranges. Each member receives the same number
+  of UPDATEs as before.
+
+### Fixed
+
+- Idle or slow-sending clients on the telemetry HTTP listener can no longer
+  delay `/livez` and `/readyz` by holding connections for the 5 s request
+  read timeout. While all 64 connections are in use, the listener closes
+  connections that have not sent their request line within 250 ms of being
+  accepted, oldest first, so idle clients filling the budget delay a probe by
+  about 250 ms rather than 5 s.
+  **Operator-visible:** a client that connects and then delays its request
+  line can be disconnected without a reply while the listener is saturated.
+
+### Upgrade notes
+
+- While all 64 telemetry HTTP connections are in use, the listener closes
+  connections that have not sent their request line within 250 ms, oldest
+  first, without a reply. A scraper or probe that opens its connection early
+  and sends the request later should send the request line immediately after
+  connecting.
+
 ## [0.74.0] — 2026-10-03
 
 ### Added
