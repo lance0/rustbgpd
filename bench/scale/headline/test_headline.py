@@ -424,6 +424,36 @@ class ExtractorFailsClosed(unittest.TestCase):
         (native / "cgroup-memory").write_text(saved_native)
         (native / "memory-window").write_text(summarize.IRR_MEMORY_WINDOW)
 
+    def test_irr_schema3_rejects_unselected_memory(self):
+        root = self.tmp / "irr-ov0-a-r1"
+        shutil.copytree(V0720 / "irr" / "irr-ov0-ctrl-r1", root)
+        native = root / "rustbgpd-sighup"
+        (native / "cgroup-memory").write_text("cg_peak: 812345 kB\ncg_current: 700000 kB\ncg_swap_max: 0\ncg_swap_peak: 0 kB\n")
+        (native / "memory-window").write_text(summarize.IRR_MEMORY_WINDOW)
+        provenance = root / "provenance.json"
+        provenance.write_text(json.dumps({"schema": 3, "inputs": {"cells": "rustbgpd-sighup"}}))
+        self.assertIn("irr_daemon_cg_peak", {r[3] for r in summarize.extract(self.tmp)[0]})
+        for name in ("bird", "openbgpd"):
+            with self.subTest(cell=name):
+                cell = root / name
+                cell.mkdir(exist_ok=True)
+                path, window = cell / "container-memory", cell / "memory-window"
+                readout = "container_cg_peak: 901234 kB\ncontainer_cg_swap_peak: 0 kB\n"
+                path.write_text(readout); window.write_text(summarize.IRR_MEMORY_WINDOW)
+                with self.assertRaisesRegex(summarize.ExtractionError, "outside the selected cell roster"):
+                    summarize.extract(self.tmp)
+                provenance.write_text(json.dumps({"schema": 3, "inputs": {"cells": f"rustbgpd-sighup,{name}"}}))
+                self.assertIn(["irr-ov0", name, "1", "irr_container_cg_peak", "", "901234", "KiB"], summarize.extract(self.tmp)[0])
+                provenance.write_text(json.dumps({"schema": 3, "inputs": {"cells": "rustbgpd-sighup"}}))
+                path.write_text("container_cg: unavailable\n")
+                with self.assertRaisesRegex(summarize.ExtractionError, "outside the selected cell roster"):
+                    summarize.extract(self.tmp)
+                path.unlink()
+                with self.assertRaisesRegex(summarize.ExtractionError, "outside the selected cell roster"):
+                    summarize.extract(self.tmp)
+                window.unlink()
+        self.assertNotIn("irr_container_cg_peak", {r[3] for r in summarize.extract(self.tmp)[0]})
+
     def test_report_names_memory_sources(self):
         matrix_leg(self.tmp, "matrix-a-r1-s2")
         self.assertEqual(self.run_main(), 0)

@@ -409,6 +409,10 @@ def irr_rows(source, exclusions, campaign):
             window = leg / cell / "memory-window"
             if path.is_symlink() or window.is_symlink():
                 raise ExtractionError(f"{leg.name}: {cell} memory readout/window must be regular files")
+            if require_memory and cell not in selected_cells:
+                if path.exists() or window.exists():
+                    raise ExtractionError(f"{leg.name}: {cell} memory evidence is outside the selected cell roster")
+                continue
             if not path.is_file():
                 if (require_memory and cell in selected_cells) or path.exists() or window.exists():
                     raise ExtractionError(f"{leg.name}: {cell} requires its cgroup memory readout")
