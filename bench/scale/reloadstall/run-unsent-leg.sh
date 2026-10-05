@@ -92,4 +92,5 @@ cat /proc/sys/net/ipv4/tcp_notsent_lowat >"$out/sysctl-after"
 if [ "$rtt" -gt 0 ]; then tc -s qdisc show dev lo >"$out/netem-after"; fi
 cmp "$out/sysctl-before" "$out/sysctl-after"
 [ "$runner_rc" -eq 0 ] && [ "$sampler_rc" -eq 0 ] && [ -s "$out/cgroup-fast.csv" ] &&
+    awk 'NR > 1 {found = 1; exit} END {exit !found}' "$out/cgroup-fast.csv" &&
     [ "$(cat "$out/matrix/rustbgpd/status")" = pass ]

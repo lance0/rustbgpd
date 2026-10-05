@@ -34,7 +34,7 @@ class SamplerTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             int(sampler.key_values("sock missing\n")["sock"])
 
-    def test_missing_cgroup_read_for_live_daemon_is_not_teardown(self):
+    def test_daemon_scope_requires_sole_process_and_live_memory_files(self):
         with tempfile.TemporaryDirectory() as directory:
             root, pid = Path(directory), os.getpid()
             proc, cgroup = root / "proc", root / "cgroup/daemon.scope"
@@ -48,6 +48,10 @@ class SamplerTests(unittest.TestCase):
             (cgroup / "memory.swap.max").write_text("0\n")
             paths = {f"/proc/{pid}": proc, "/sys/fs/cgroup": cgroup.parent}
             with patch.object(sampler, "Path", side_effect=lambda value: paths[value]):
+                (cgroup / "cgroup.procs").write_text(f"{pid}\n{pid + 1}\n")
+                with self.assertRaisesRegex(ValueError, "sole process"):
+                    sampler.sample(pid, root / "out.csv", 0.025)
+                (cgroup / "cgroup.procs").write_text(f"{pid}\n")
                 with self.assertRaises(FileNotFoundError):
                     sampler.sample(pid, root / "out.csv", 0.025)
 
@@ -69,7 +73,8 @@ class LegWrapperTests(unittest.TestCase):
             path.parent.mkdir(parents=True)
             path.write_text("#!/bin/sh\nexit 0\n")
             path.chmod(0o755)
-        (reload / "sample-daemon-cgroup.py").write_text(
+        self.sampler = reload / "sample-daemon-cgroup.py"
+        self.sampler.write_text(
             "import sys\nfrom pathlib import Path\n"
             "Path(sys.argv[sys.argv.index('--out')+1]).write_text('header\\n1\\n')\n"
         )
@@ -88,6 +93,13 @@ class LegWrapperTests(unittest.TestCase):
 
     def test_success_requires_successful_runner_and_cell(self):
         self.assertEqual(self.run_status("pass", 0).returncode, 0)
+
+    def test_header_only_sampler_trace_is_not_evidence(self):
+        self.sampler.write_text(
+            "import sys\nfrom pathlib import Path\n"
+            "Path(sys.argv[sys.argv.index('--out')+1]).write_text('header\\n')\n"
+        )
+        self.assertNotEqual(self.run_status("pass", 0).returncode, 0)
 
     def test_runner_failure_is_not_masked_by_pass_status(self):
         self.assertNotEqual(self.run_status("pass", 3).returncode, 0)

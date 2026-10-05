@@ -51,6 +51,8 @@ def sample(pid, out, interval, expected_pgid=None):
     cgroup = Path("/sys/fs/cgroup") / unified[0].lstrip("/")
     if not cgroup.name.endswith(".scope") or (cgroup / "memory.swap.max").read_text().strip() != "0":
         raise ValueError("daemon must run in its own swap-fenced systemd scope")
+    if {int(member) for member in (cgroup / "cgroup.procs").read_text().split()} != {pid}:
+        raise ValueError("daemon must be the sole process in its measurement scope")
     pgid = os.getpgid(pid)
     if expected_pgid is not None and pgid != expected_pgid:
         raise ValueError("daemon escaped the owned matrix process group")
