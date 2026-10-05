@@ -128,7 +128,7 @@ def main():
     parser.add_argument("--expected-pgid", type=int)
     args = parser.parse_args()
     if not 0.01 <= args.interval <= 0.1 or not 0 < args.wait <= 600:
-        parser.error("interval must be 0.01–0.1 s and wait must be 0–600 s")
+        parser.error("interval must be 0.01–0.1 s and wait must be > 0 and <= 600 s")
     exe, deadline = args.exe.resolve(strict=True), time.monotonic() + args.wait
     while (pid := find_pid(exe)) is None:
         if time.monotonic() >= deadline:

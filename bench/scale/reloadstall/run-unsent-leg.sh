@@ -62,8 +62,11 @@ cleanup() {
         wait "$runner" || runner_rc=$?
         printf '%s\n' "$runner_rc" >"$out/runner.exit"
     fi
-    kill "$sampler" 2>/dev/null || true
-    wait "$sampler" 2>/dev/null || true
+    if [ -n "$sampler" ]; then
+        kill "$sampler" 2>/dev/null || true
+        wait "$sampler" 2>/dev/null || true
+        sampler=''
+    fi
 }
 trap cleanup EXIT
 trap 'exit 130' INT
@@ -81,12 +84,11 @@ wait "$runner" || runner_rc=$?
 runner=''
 printf '%s\n' "$runner_rc" >"$out/runner.exit"
 sampler_rc=0
-if [ -s "$out/cgroup-fast.csv" ]; then
-    wait "$sampler" || sampler_rc=$?
-else
+if [ ! -s "$out/cgroup-fast.csv" ]; then
     kill "$sampler" 2>/dev/null || true
-    wait "$sampler" || sampler_rc=$?
 fi
+wait "$sampler" || sampler_rc=$?
+sampler=''
 printf '%s\n' "$sampler_rc" >"$out/sampler.exit"
 cat /proc/sys/net/ipv4/tcp_notsent_lowat >"$out/sysctl-after"
 if [ "$rtt" -gt 0 ]; then tc -s qdisc show dev lo >"$out/netem-after"; fi

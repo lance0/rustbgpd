@@ -577,9 +577,9 @@ fn apply_bench_unsent_threshold(
 #[cfg(all(target_os = "linux", feature = "bench-internals"))]
 fn verify_bench_unsent_readback(requested: Option<u32>, actual: u32) -> std::io::Result<u32> {
     if requested.is_some_and(|requested| requested != actual) {
-        return Err(std::io::Error::other(
-            "benchmark unsent-data threshold readback differs",
-        ));
+        return Err(std::io::Error::other(format!(
+            "benchmark unsent-data threshold readback differs: requested={requested:?} actual={actual}"
+        )));
     }
     Ok(actual)
 }
@@ -603,7 +603,9 @@ mod tests {
             parse_bench_unsent_threshold(Some("4294967295")).unwrap(),
             Some(u32::MAX)
         );
-        assert!(verify_bench_unsent_readback(Some(65536), 131_072).is_err());
+        let mismatch = verify_bench_unsent_readback(Some(65536), 131_072).unwrap_err();
+        assert!(mismatch.to_string().contains("requested=Some(65536)"));
+        assert!(mismatch.to_string().contains("actual=131072"));
         for bad in ["0", "-1", "4294967296", "garbage", ""] {
             assert!(parse_bench_unsent_threshold(Some(bad)).is_err(), "{bad}");
         }

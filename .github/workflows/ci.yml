@@ -505,6 +505,7 @@ jobs:
           shellcheck -x bench/scale/rpki-cell/run-rpki-cell.sh
           python3 -m unittest -v bench/scale/rpki-cell/test_rpki_cell.py
           python3 -m unittest -v bench/scale/reloadstall/test_gen_scenario_rpki.py
+          python3 -m unittest -v bench/scale/reloadstall/test_daemon_cgroup_sampler.py
           python3 -m unittest -v tests/soak/test_intern_churn_analyzers.py
           python3 -m unittest -v tests/soak/test_gate8b_recovery_contract.py
           python3 -m unittest -v tests/soak/test_gate8b_mac_churn_contract.py

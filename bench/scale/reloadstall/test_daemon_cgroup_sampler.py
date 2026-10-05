@@ -87,18 +87,42 @@ class LegWrapperTests(unittest.TestCase):
         self.runner = matrix / "run-matrix.sh"
         self.out = Path(self.temp.name) / "out"
 
-    def run_status(self, status, code):
+    def run_status(self, status, code, env=None):
         self.runner.write_text(
             'mkdir -p "$ARTIFACTS_DIR/rustbgpd"\n'
             'while [ ! -f "$(dirname "$ARTIFACTS_DIR")/cgroup-fast.csv" ]; do sleep 0.01; done\n'
             f'echo {status} >"$ARTIFACTS_DIR/rustbgpd/status"\nexit {code}\n'
         )
         return subprocess.run(
-            ["bash", str(self.script), str(self.out), "unset"], capture_output=True, timeout=10
+            ["bash", str(self.script), str(self.out), "unset"], env=env,
+            capture_output=True, timeout=10
         )
 
     def test_success_requires_successful_runner_and_cell(self):
         self.assertEqual(self.run_status("pass", 0).returncode, 0)
+
+    def test_cleanup_never_signals_the_sampler_after_wait(self):
+        hook, trace = Path(self.temp.name) / "bash-env", Path(self.temp.name) / "kills"
+        hook.write_text('kill() { printf "%s\\n" "$*" >>"$WRAPPER_TEST_KILLS"; builtin kill "$@"; }\n')
+        env = dict(os.environ, BASH_ENV=str(hook), WRAPPER_TEST_KILLS=str(trace))
+        for code, content in [(0, "header\n1\n"), (7, "header\n1\n"), (7, "")]:
+            with self.subTest(code=code, trace=bool(content)):
+                self.out = Path(self.temp.name) / f"out-{code}-{bool(content)}"
+                trace.write_text("")
+                self.sampler.write_text(
+                    "import os, sys\nfrom pathlib import Path\n"
+                    "out=Path(sys.argv[sys.argv.index('--out')+1])\n"
+                    "out.with_name('sampler.pid').write_text(str(os.getpid()))\n"
+                    f"out.write_text({content!r})\nsys.exit({code})\n"
+                )
+                result = self.run_status("pass", 0, env)
+                pid = (self.out / "sampler.pid").read_text()
+                attempts = [line for line in trace.read_text().splitlines() if pid in line.split()]
+                self.assertEqual(len(attempts), 0 if content else 1)
+                if code == 0:
+                    self.assertEqual(result.returncode, 0)
+                else:
+                    self.assertNotEqual(result.returncode, 0)
 
     def test_header_only_sampler_trace_is_not_evidence(self):
         self.sampler.write_text(
