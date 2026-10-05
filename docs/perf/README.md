@@ -23,32 +23,43 @@ Each result below links to its published, reproducible receipt:
 - **Policy reload at IXP scale** (700 route-server clients × 400,400 routes,
   live churn, same harness / same host — the policy-file reload, not the IRR
   filter refresh below): new policy fully delivered to every member in
-  **0.83–0.90 s p50** for rustbgpd v0.74.0, against 89.06–103.61 s for
-  BIRD 3.3.2 and 204.08–211.99 s for OpenBGPD 9.2 in the same night, measured
-  2026-10-03 to 2026-10-04 — [v0.74.0 cross-daemon receipt](cross-daemon-v0740-2026-10.md).
-  The daemon's own SIGHUP-to-reload-complete interval was 793.0–872.5 ms.
+  **0.75–0.91 s p50** for rustbgpd v0.75.0, against 201.90–208.04 s for
+  OpenBGPD 9.3 in the same night, measured 2026-10-04 to 2026-10-05 —
+  [v0.75.0 cross-daemon receipt](cross-daemon-v0750-2026-10.md).
+  The daemon's own SIGHUP-to-reload-complete interval was 717.5–872.7 ms.
+  BIRD 3.3.2 completed in 89.06–103.61 s the night before, against
+  rustbgpd v0.74.0 at 0.83–0.90 s —
+  [v0.74.0 cross-daemon receipt](cross-daemon-v0740-2026-10.md); BIRD 3.3.3,
+  released 2026-10-01, is not yet measured.
   Earlier rows, including the dated v0.68.0 and comparator rows in the
   [IXP receipt matrix](ixp-matrix-2026-07.md), last measured 2026-08-30, used
   the glibc-malloc receiver harness, and their completion rows are not directly comparable
   ([why](headline-refresh-jemalloc-2026-10.md#why-earlier-receiver-bound-rows-are-not-comparable))
 - **IRR-scale filter reload** (320 route-server members × 183,040 generated
-  prefixes, same harness / same host): rustbgpd v0.74.0 completion p50 was
-  **0.592–0.621 s** at 0% received-view overlap, **0.638–0.689 s** at 10%
-  and **0.778–0.822 s** at 50%. In the same roots BIRD 3.3.2 completed in
-  12.412–15.191 s and OpenBGPD 9.2 in 43.884–63.240 s across the three
-  overlaps, measured 2026-10-03 to 2026-10-04 with 320/320 sessions and zero
-  parse errors in every row — [v0.74.0 cross-daemon receipt](cross-daemon-v0740-2026-10.md).
+  prefixes, same harness / same host): rustbgpd v0.75.0 completion p50 was
+  **0.584–0.611 s** at 0% received-view overlap, **0.632–0.657 s** at 10%
+  and **0.768–0.801 s** at 50%. In the same roots BIRD 3.3.2 completed in
+  12.926–14.810 s and OpenBGPD 9.3 in 44.010–63.948 s across the three
+  overlaps, measured 2026-10-04 to 2026-10-05 with 320/320 sessions and zero
+  parse errors in every row — [v0.75.0 cross-daemon receipt](cross-daemon-v0750-2026-10.md).
+  BIRD 3.3.3, released 2026-10-01, is not yet measured.
   The v0.68.0 rows measured 2026-08-30 (0.852–1.085 s) are dated, on the
   earlier harness — [v0.68.0 receipt](irr-reload-v0680-2026-08.md)
 - **Member-flap propagation** (50 members flap, 650 observers): re-announce
-  p50 **0.29–0.33 s** and withdraw p50 **0.24–0.25 s** for rustbgpd v0.74.0,
-  against 3.27–4.06 s and 0.68–0.99 s for BIRD 3.3.2 and 17.67–18.10 s and
-  8.39–9.69 s for OpenBGPD 9.2, measured 2026-10-03 to 2026-10-04 — [v0.74.0 cross-daemon receipt](cross-daemon-v0740-2026-10.md)
+  p50 **0.29–0.33 s** and withdraw p50 **0.20–0.26 s** for rustbgpd v0.75.0,
+  against 17.55–18.06 s and 8.45–9.71 s for OpenBGPD 9.3, measured
+  2026-10-04 to 2026-10-05 — [v0.75.0 cross-daemon receipt](cross-daemon-v0750-2026-10.md).
+  BIRD 3.3.2 read 3.27–4.06 s and 0.68–0.99 s the night before, against
+  rustbgpd v0.74.0 — [v0.74.0 cross-daemon receipt](cross-daemon-v0740-2026-10.md);
+  BIRD 3.3.3 is not yet measured
 - **Cold start**: full 400,400-route table delivered to all 700 members in
-  **2.8–2.9 s** for rustbgpd v0.74.0, against 67.3–70.1 s for BIRD 3.3.2 and
-  368.6–406.3 s for OpenBGPD 9.2; all 700 sessions were Established in
-  0.8 s, 15.2–17.8 s and 131.1–159.9 s, measured 2026-10-03 to 2026-10-04 —
-  [v0.74.0 cross-daemon receipt](cross-daemon-v0740-2026-10.md)
+  **2.8 s** for rustbgpd v0.75.0, against 325.2–417.8 s for OpenBGPD 9.3;
+  all 700 sessions were Established in 0.8 s and 88.6–182.5 s, measured
+  2026-10-04 to 2026-10-05 —
+  [v0.75.0 cross-daemon receipt](cross-daemon-v0750-2026-10.md). BIRD
+  3.3.2 read 67.3–70.1 s and 15.2–17.8 s the night before —
+  [v0.74.0 cross-daemon receipt](cross-daemon-v0740-2026-10.md); BIRD 3.3.3
+  is not yet measured
 - **Route-reflector scale**: 1,000 RR clients × 100k routes converge on the
   wire in **305–330 ms** at **350,504–383,660 KiB** direct-process RSS in nine
   v0.73.0 runs, against 332–356 ms at 376,440–419,292 KiB in nine same-night
@@ -56,26 +67,35 @@ Each result below links to its published, reproducible receipt:
   v0.68.0 arm read 322–349 ms, against its rows measured 2026-08-30 of
   318–341 ms; the historical receipt was measured 2026-07-03,
   [1000-peer scale receipt](scale-receipt-2026-07.md)
-- **The losses, stated plainly**, from the same-night v0.74.0 campaign:
-  OpenBGPD 9.2 holds a smaller reload stall (p50 195–203 ms against
-  rustbgpd's 347–395 ms; worst single observer 237 against 563 ms), a
-  shorter changed-observer gap at IRR 50% overlap (378–445 against
-  566–643 ms), and an earlier first re-announced route after a member flap
-  (p50 0.09–0.16 s against 0.17 s). BIRD 3.3.2 has the lower peak RSS sample
-  at both matrix shapes (407–414 against 540–541 MiB at S2, 332–377 against
-  511–544 MiB at S3). Settled RSS under flap churn is mixed (BIRD
-  377/332/373 MiB, rustbgpd 376/376/375 MiB); at S2, rustbgpd settles lower
-  (369/373/370 against 407/412/414 MiB) —
-  [v0.74.0 cross-daemon receipt](cross-daemon-v0740-2026-10.md#memory-matrix-shapes).
-  Cross-daemon memory is not otherwise ranked, because daemon and container
-  defaults differ.
+- **The losses, stated plainly**, from the same-night v0.75.0 campaign:
+  OpenBGPD 9.3 holds the smaller S2 reload stall tail (p95 198–267 ms
+  against rustbgpd's 217–365 ms; worst single observer 268 against 378 ms).
+  The stall p50 is close: rustbgpd's median is 177.3 ms against 197.8 ms,
+  about 10% lower, but the per-reload values overlap at the tails.
+  OpenBGPD 9.3 also has a shorter changed-observer gap at IRR 50% overlap
+  (377–517 against 591–627 ms) and an earlier first re-announced route after
+  a member flap (p50 0.10–0.17 s, median 0.13 s, against 0.16–0.17 s). S2
+  reload peak memory is about even by cgroup peak (rustbgpd's own scope
+  914–1,068 MiB, OpenBGPD's container 991–1,005 MiB); rustbgpd settles lower
+  at both matrix shapes —
+  [v0.75.0 cross-daemon receipt](cross-daemon-v0750-2026-10.md#memory-matrix-shapes).
+  From the v0.74.0 night, BIRD 3.3.2 has the lower peak RSS sample at both
+  matrix shapes (407–414 against 540–541 MiB at S2, 332–377 against
+  511–544 MiB at S3), and settled RSS under flap churn is mixed (BIRD
+  377/332/373 MiB, rustbgpd 376/376/375 MiB) —
+  [v0.74.0 cross-daemon receipt](cross-daemon-v0740-2026-10.md#memory-matrix-shapes);
+  BIRD 3.3.3 is not yet measured. Cross-daemon memory is not otherwise
+  ranked, because daemon and container defaults differ.
 
-The v0.74.0 rows above are the release tree `4d14851f7`, measured overnight
-2026-10-03 to 2026-10-04 against BIRD 3.3.2 and OpenBGPD 9.2 on one host,
-with the daemon order rotated in the matrix and three runs per daemon.
-OpenBGPD 9.3 was released on 2026-09-30; this campaign measured 9.2. The
-v0.73.0, current-main and v0.68.0 rows these bullets replace remain in the
-[v0.73.0 refresh receipt](headline-refresh-v0730-2026-09.md), the
+The v0.75.0 rows above measure commit `319d14e4b`, overnight 2026-10-04 to
+2026-10-05 on one host, three runs per daemon. v0.75.0 contains that commit,
+and its daemon sources differ from it only in version strings. OpenBGPD 9.3
+ran in every cell with the matrix daemon order alternated; BIRD 3.3.2 ran in
+the IRR roots only, so its matrix rows are the v0.74.0 night's. BIRD 3.3.3
+(released 2026-10-01) and GoBGP v4.10.0 (released 2026-10-04) are not yet
+measured. The v0.74.0, v0.73.0, current-main and v0.68.0 rows these bullets
+replace remain in the [v0.74.0 cross-daemon receipt](cross-daemon-v0740-2026-10.md),
+the [v0.73.0 refresh receipt](headline-refresh-v0730-2026-09.md), the
 [jemalloc-harness receipt](headline-refresh-jemalloc-2026-10.md) and the
 dated matrix and IRR receipts. The route-reflector bullet is still the
 v0.73.0 measurement.
@@ -104,7 +124,7 @@ The freshest published [v0.68.0 cross-stack bgperf2
 receipt](competitive-bgperf2-v0680-2026-08.md), measured 2026-08-30,
 is the headline same-host IPv4 import/convergence comparison. All 80 cells
 reached the exact expected route count across five fixed shapes; the largest is
-two peers × 100,000 prefixes, not a full-table cell. Microbenchmarks and memory
+two peers × 100,000 prefixes, not a full-table cell. GoBGP v4.10.0, released 2026-10-04, is not yet measured. Microbenchmarks and memory
 scaling are in [Benchmarks](../benchmarks.md). That page also retains
 the corrected July campaign as explicitly historical evidence; it supports no
 cross-daemon ranking. Every receipt is indexed in
@@ -182,6 +202,7 @@ records.
 | [`competitive-bgperf2-v0680-2026-08.md`][competitive-bgperf2-v0680-2026-08.md] | 2026-08-30 | Four daemons, five import shapes, four counterbalanced repetitions | All 80 cells reached the exact expected table | Universal throughput, memory, or CPU ranking |
 | [`config-persistence-2026-07.md`][config-persistence-2026-07.md] | 2026-07-25 | Pinned persistence, history, rollback, and commit-confirm lifecycle harness | Behavioral assertions preserved by the workspace integration test | Timing or performance |
 | [`controller-injection-2026-09.md`](controller-injection-2026-09.md) | 2026-09-20–21 | Unary inserts, replacements and deletes through 100k routes, one passive client | Scoped CPU reduction from deferred controller attribute collection; existing local-route reconciliation | Batch packing, multi-client scale or isolated-host latency |
+| [`cross-daemon-v0750-2026-10.md`](cross-daemon-v0750-2026-10.md) | 2026-10-04 to 2026-10-05 | rustbgpd v0.75.0 daemon source (`319d14e4b`) and OpenBGPD 9.3 at IXP-700 S1/S2/S3, and those two plus BIRD 3.3.2 in IRR reload at 0%, 10% and 50% overlap, three runs per daemon, 21 legs | Same-night rows against OpenBGPD 9.3 for every matrix cell and against both competitors for IRR reload, including the losses, with cgroup peaks for the matrix memory rows | BIRD in the matrix, BIRD 3.3.3, RR1000, IPv6, or attribution of any change |
 | [`cross-daemon-v0740-2026-10.md`](cross-daemon-v0740-2026-10.md) | 2026-10-03 to 2026-10-04 | rustbgpd v0.74.0, BIRD 3.3.2 and OpenBGPD 9.2 at IXP-700 S1/S2/S3 and IRR reload at 0%, 10% and 50% overlap, three runs per daemon, 27 legs | Same-night cross-daemon rows for every published comparison cell, including the losses | OpenBGPD 9.3, RR1000, IPv6, or attribution of any change |
 | [`enhanced-route-refresh-2026-07.md`][enhanced-route-refresh-2026-07.md] | Initial campaign 2026-07; latest refresh 2026-08-30 | 100k-route Enhanced Route Refresh inventory lifecycle | Completion dominated snapshot creation in the all-withdraw shape | Fleet-wide convergence or generic throughput |
 | [`event-history-producer-2026-07.md`][event-history-producer-2026-07.md] | 2026-07 | Three event-history producer shapes at 1.3–3.3 µs per event | The offload proceed gate passed and bounded delivery completed | Independent BIRD timeout evidence |
@@ -331,6 +352,7 @@ from that file; a directory name does not fill a missing date.
 | [`artifacts/competitive-bgperf2-2026-07/README.md`](artifacts/competitive-bgperf2-2026-07/README.md) | 2026-07 | Four daemons, five fleet shapes, and three runs per shape | The retained inputs can recompute the linked receipt | Unstated |
 | [`artifacts/competitive-bgperf2-v0680-2026-08/README.md`](artifacts/competitive-bgperf2-v0680-2026-08/README.md) | Unstated | Eighty rows across five fixed import shapes | The retained row and image inventory | A full-table campaign |
 | [`artifacts/controller-injection-2026-09/README.md`](artifacts/controller-injection-2026-09/README.md) | Unstated | Eight completed controller-injection cells with passive-receiver counts, paginated reconciliation, and metrics snapshots | The retained result and evidence inventory for the linked receipt | Unstated |
+| [`artifacts/cross-daemon-v0750-2026-10/README.md`](artifacts/cross-daemon-v0750-2026-10/README.md) | 2026-10-04 to 2026-10-05 | All 12 matrix legs and 9 IRR roots of the v0.75.0 cross-daemon campaign | Harness logs, status, RSS samples, VmHWM and cgroup readouts, provenance, IRR rows, and the extracted summary and tail CSVs | Daemon logs or scenario configurations |
 | [`artifacts/cross-daemon-v0740-2026-10/README.md`](artifacts/cross-daemon-v0740-2026-10/README.md) | 2026-10-03 to 2026-10-04 | All 18 matrix legs and 9 IRR roots of the v0.74.0 cross-daemon campaign | Harness logs, status, RSS samples, provenance, IRR rows, and the extracted summary and tail CSVs | Daemon logs or scenario configurations |
 | [`artifacts/current-scale-v0680-2026-08/README.md`](artifacts/current-scale-v0680-2026-08/README.md) | Unstated | IXP-700 S2/S3, route-server-1000, and three RR1000 runs | Compact source-equivalent v0.68.0 evidence | Unstated |
 | [`artifacts/enhanced-route-refresh-2026-07/README.md`](artifacts/enhanced-route-refresh-2026-07/README.md) | Unstated | One Enhanced Route Refresh peer with 100,000 IPv4 unicast routes | Retained phase, actor-duration, and memory boundaries | A 1M-route result |

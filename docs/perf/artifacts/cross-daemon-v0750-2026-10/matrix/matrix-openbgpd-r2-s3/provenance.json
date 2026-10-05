@@ -1,0 +1,43 @@
+{
+  "schema": 1,
+  "cell": "openbgpd",
+  "git": {
+    "commit": "319d14e4b78e8baaa24d27d13099a3b296ca7c10",
+    "tree": "e6a802074f2bfb3680c9e3d684f3c4a22ca002b9",
+    "dirty": false
+  },
+  "toolchain": "rustc 1.99.0 (b940084d7 2026-09-28)\nbinary: rustc\ncommit-hash: b940084d7eb6a299eb4bfeb8e34901bc051e7ac4\ncommit-date: 2026-09-28\nhost: x86_64-unknown-linux-gnu\nrelease: 1.99.0\nLLVM version: 23.1.1",
+  "host": "Linux 7.0.0-30-generic #30~24.04.1-Ubuntu SMP PREEMPT_DYNAMIC Fri Aug  7 13:27:52 UTC 2 x86_64 GNU/Linux",
+  "sources": {
+    "common": {
+      "bench/scale/provenance.sh": "7db6727dc99ec42515359f674e56c749453bc29c9981b67f30568f0d6cce1991",
+      "bench/scale/matrix/run-matrix.sh": "b40fa39982430e9bf8a13eaa00cf4e715c0351c0f7e8a7b1f5eeb089effde81a",
+      "bench/scale/matrix/verify-provenance.py": "f16e0e3f61182a7fc70b296229b26a7e427ad7a808ab7d31942cc68d93815a2d",
+      "bench/scale/matrix/rss-sampler.sh": "3ecffb93298c49f8524320ecebe976efc806f9f0b0caf260d6a1431ca402a10d",
+      "bench/scale/host-quiet.sh": "abb3391cd5e0879c29aabd0aa0c316ea33d5f7c72f6d2a7d111b30025de411fd",
+      "tests/soak/host-lock.sh": "f5f419bb439f0b5e22521e9f7fa73d4ef73df159abeec31fafff63548899c658"
+    },
+    "generator": {
+      "bench/scale/reloadstall/gen-obgpd-scenario.py": "042edf4b8c8dd0451232768b3a904e807249264b4178878ef3c315cc7dae3850"
+    },
+    "reloadstall": {
+      "path": "target/scale/reloadstall",
+      "sha256": "fe0f2d89857b2284a5f31680c2d93478d63effc09957252d7794cfa6b85e7423"
+    }
+  },
+  "workload": {
+    "image_ref": "openbgpd/openbgpd@sha256:8f4b44f25796beaecb72ab7f099a3914961ac444a9de094ffca6a4614e741412",
+    "image_id": "sha256:8f4b44f25796beaecb72ab7f099a3914961ac444a9de094ffca6a4614e741412",
+    "inputs": {
+      "N_PEERS": "700",
+      "TOTAL_PREFIXES": "400400",
+      "PORT": "1790",
+      "RELOADS": "4",
+      "CONTROL_SECS": "30",
+      "CHANGED_PEERS": "",
+      "FLAPSTORM": "50",
+      "BIRD_THREADS": "8",
+      "PROBE_PREFIXES": ""
+    }
+  }
+}

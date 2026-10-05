@@ -1,0 +1,82 @@
+[2026-10-04T11:32:00-04:00] queue start base=<campaign> go=<campaign>/GO deadline=2026-10-05T09:00:00-04:00 runs=3 blocks='s2 s3 irr0 irr10 irr50' smoke=0 dry=0
+[2026-10-04T11:32:00-04:00] waiting for GO or 2026-10-04T22:00:00-04:00 (poll 60s)
+[2026-10-04T12:02:00-04:00] still waiting for GO
+[2026-10-04T12:32:00-04:00] still waiting for GO
+[2026-10-04T13:02:00-04:00] still waiting for GO
+[2026-10-04T13:32:00-04:00] still waiting for GO
+[2026-10-04T14:02:00-04:00] still waiting for GO
+[2026-10-04T14:32:01-04:00] still waiting for GO
+[2026-10-04T14:46:59-04:00] queue start base=<campaign> go=<campaign>/GO deadline=2026-10-05T09:00:00-04:00 runs=3 blocks='s2 s3 irr0 irr10 irr50' smoke=0 dry=0
+[2026-10-04T14:46:59-04:00] waiting for GO or 2026-10-04T23:00:00-04:00 (poll 60s)
+[2026-10-04T15:16:59-04:00] still waiting for GO
+[2026-10-04T15:46:59-04:00] still waiting for GO
+[2026-10-04T16:16:59-04:00] still waiting for GO
+[2026-10-04T16:46:59-04:00] still waiting for GO
+[2026-10-04T17:17:00-04:00] still waiting for GO
+[2026-10-04T17:47:00-04:00] still waiting for GO
+[2026-10-04T18:17:00-04:00] still waiting for GO
+[2026-10-04T18:47:00-04:00] still waiting for GO
+[2026-10-04T19:17:00-04:00] still waiting for GO
+[2026-10-04T19:47:00-04:00] still waiting for GO
+[2026-10-04T20:17:00-04:00] still waiting for GO
+[2026-10-04T20:47:01-04:00] still waiting for GO
+[2026-10-04T21:17:01-04:00] still waiting for GO
+[2026-10-04T21:30:58-04:00] queue start base=<campaign> go=<campaign>/GO deadline=2026-10-05T09:00:00-04:00 runs=3 blocks='s2 s3 irr0 irr10 irr50' smoke=0 dry=0
+[2026-10-04T21:30:58-04:00] waiting for GO or 2026-10-04T21:30:58-04:00 (poll 60s)
+[2026-10-04T21:30:58-04:00] start time reached; using armed SHA: 319d14e4b78e8baaa24d27d13099a3b296ca7c10
+[2026-10-04T21:30:59-04:00] build start
+[2026-10-04T21:37:05-04:00] build done describe=v0.74.0-11-g319d14e4b rustbgpd_sha256=a013a469897af4a05620e4261726598afccc4de7179569fbf4422bdddc9af561 
+[2026-10-04T21:37:05-04:00] plan: 21 legs, estimated 7h51m, 11h22m to deadline
+[2026-10-04T21:37:05-04:00] block s2 start est=1h56m
+[2026-10-04T21:37:05-04:00] matrix-s2-r1-openbgpd start attempt=1 load=3.76 2.97 2.09
+[2026-10-04T22:05:10-04:00] matrix-s2-r1-openbgpd rc=0 status=pass secs=1685 load=1.11 1.55 1.92
+[2026-10-04T22:05:10-04:00] matrix-s2-r1-rustbgpd start attempt=1 load=1.11 1.55 1.92
+[2026-10-04T22:12:49-04:00] matrix-s2-r1-rustbgpd rc=0 status=pass secs=459 load=1.08 1.43 1.77
+[2026-10-04T22:12:49-04:00] matrix-s2-r2-rustbgpd start attempt=1 load=1.08 1.43 1.77
+[2026-10-04T22:20:28-04:00] matrix-s2-r2-rustbgpd rc=0 status=pass secs=459 load=1.09 1.37 1.65
+[2026-10-04T22:20:28-04:00] matrix-s2-r2-openbgpd start attempt=1 load=1.09 1.37 1.65
+[2026-10-04T22:47:33-04:00] matrix-s2-r2-openbgpd rc=0 status=pass secs=1625 load=1.07 1.58 1.86
+[2026-10-04T22:47:33-04:00] matrix-s2-r3-openbgpd start attempt=1 load=1.07 1.58 1.86
+[2026-10-04T23:15:33-04:00] matrix-s2-r3-openbgpd rc=0 status=pass secs=1680 load=1.04 1.53 1.89
+[2026-10-04T23:15:33-04:00] matrix-s2-r3-rustbgpd start attempt=1 load=1.04 1.53 1.89
+[2026-10-04T23:23:12-04:00] matrix-s2-r3-rustbgpd rc=0 status=pass secs=459 load=1.06 1.40 1.72
+[2026-10-04T23:23:12-04:00] block s2 done
+[2026-10-04T23:23:12-04:00] block s3 start est=1h10m
+[2026-10-04T23:23:12-04:00] matrix-s3-r1-openbgpd start attempt=1 load=1.06 1.40 1.72
+[2026-10-04T23:37:26-04:00] matrix-s3-r1-openbgpd rc=0 status=pass secs=854 load=1.08 1.67 1.89
+[2026-10-04T23:37:26-04:00] matrix-s3-r1-rustbgpd start attempt=1 load=1.08 1.67 1.89
+[2026-10-04T23:45:15-04:00] matrix-s3-r1-rustbgpd rc=0 status=pass secs=469 load=1.06 1.28 1.62
+[2026-10-04T23:45:15-04:00] matrix-s3-r2-rustbgpd start attempt=1 load=1.06 1.28 1.62
+[2026-10-04T23:53:04-04:00] matrix-s3-r2-rustbgpd rc=0 status=pass secs=469 load=1.06 1.37 1.59
+[2026-10-04T23:53:04-04:00] matrix-s3-r2-openbgpd start attempt=1 load=1.06 1.37 1.59
+[2026-10-05T00:07:03-04:00] matrix-s3-r2-openbgpd rc=0 status=pass secs=839 load=1.04 1.60 1.75
+[2026-10-05T00:07:03-04:00] matrix-s3-r3-openbgpd start attempt=1 load=1.04 1.60 1.75
+[2026-10-05T00:22:23-04:00] matrix-s3-r3-openbgpd rc=0 status=pass secs=920 load=1.05 1.59 1.78
+[2026-10-05T00:22:23-04:00] matrix-s3-r3-rustbgpd start attempt=1 load=1.05 1.59 1.78
+[2026-10-05T00:30:12-04:00] matrix-s3-r3-rustbgpd rc=0 status=pass secs=469 load=1.02 1.24 1.55
+[2026-10-05T00:30:12-04:00] block s3 done
+[2026-10-05T00:30:12-04:00] block irr0 start est=1h35m
+[2026-10-05T00:30:12-04:00] irr-ov0-r1 start attempt=1 load=1.02 1.24 1.55
+[2026-10-05T00:59:55-04:00] irr-ov0-r1 rc=0 status=pass secs=1783 load=1.27 1.53 1.61
+[2026-10-05T00:59:55-04:00] irr-ov0-r2 start attempt=1 load=1.27 1.53 1.61
+[2026-10-05T01:30:08-04:00] irr-ov0-r2 rc=0 status=pass secs=1813 load=1.11 1.67 1.69
+[2026-10-05T01:30:08-04:00] irr-ov0-r3 start attempt=1 load=1.11 1.67 1.69
+[2026-10-05T02:00:06-04:00] irr-ov0-r3 rc=0 status=pass secs=1798 load=1.13 1.45 1.58
+[2026-10-05T02:00:06-04:00] block irr0 done
+[2026-10-05T02:00:06-04:00] block irr10 start est=1h35m
+[2026-10-05T02:00:06-04:00] irr-ov10-r1 start attempt=1 load=1.20 1.46 1.58
+[2026-10-05T02:30:50-04:00] irr-ov10-r1 rc=0 status=pass secs=1844 load=1.05 1.41 1.54
+[2026-10-05T02:30:50-04:00] irr-ov10-r2 start attempt=1 load=1.05 1.41 1.54
+[2026-10-05T03:00:54-04:00] irr-ov10-r2 rc=0 status=pass secs=1804 load=1.33 1.45 1.55
+[2026-10-05T03:00:54-04:00] irr-ov10-r3 start attempt=1 load=1.33 1.45 1.55
+[2026-10-05T03:31:42-04:00] irr-ov10-r3 rc=0 status=pass secs=1848 load=1.16 1.41 1.54
+[2026-10-05T03:31:42-04:00] block irr10 done
+[2026-10-05T03:31:42-04:00] block irr50 start est=1h35m
+[2026-10-05T03:31:43-04:00] irr-ov50-r1 start attempt=1 load=1.16 1.41 1.54
+[2026-10-05T04:02:33-04:00] irr-ov50-r1 rc=0 status=pass secs=1850 load=1.08 1.43 1.56
+[2026-10-05T04:02:33-04:00] irr-ov50-r2 start attempt=1 load=1.08 1.43 1.56
+[2026-10-05T04:33:48-04:00] irr-ov50-r2 rc=0 status=pass secs=1875 load=1.04 1.40 1.55
+[2026-10-05T04:33:49-04:00] irr-ov50-r3 start attempt=1 load=1.04 1.40 1.55
+[2026-10-05T05:04:33-04:00] irr-ov50-r3 rc=0 status=pass secs=1844 load=1.16 1.49 1.65
+[2026-10-05T05:04:33-04:00] block irr50 done
+[2026-10-05T05:04:33-04:00] QUEUE DONE failed=none skipped=none

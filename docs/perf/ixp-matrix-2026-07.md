@@ -801,3 +801,14 @@ daemon order rotated, on the jemalloc receiver harness. Results, method and
 the cross-date context for the rows above are in the
 [v0.74.0 cross-daemon receipt](cross-daemon-v0740-2026-10.md). The sections
 above are unchanged as history.
+
+## v0.75.0 cross-daemon refresh — 2026-10-05
+
+rustbgpd and OpenBGPD 9.3 were re-measured overnight 2026-10-04 to
+2026-10-05: commit `319d14e4b`, whose daemon sources v0.75.0 carries with
+only version strings changed, three runs each with the daemon order
+alternated, on the jemalloc receiver harness. BIRD did not run in the matrix
+that night; its current rows are BIRD 3.3.2 in the v0.74.0 refresh above.
+Results, method and the cross-night context are in the
+[v0.75.0 cross-daemon receipt](cross-daemon-v0750-2026-10.md). The sections
+above are unchanged as history.

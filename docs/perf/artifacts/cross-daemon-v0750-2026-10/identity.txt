@@ -1,0 +1,14 @@
+measured_sha=319d14e4b78e8baaa24d27d13099a3b296ca7c10
+tree=e6a802074f2bfb3680c9e3d684f3c4a22ca002b9
+describe=v0.74.0-11-g319d14e4b
+rustbgpd_sha256=a013a469897af4a05620e4261726598afccc4de7179569fbf4422bdddc9af561
+reloadstall_sha256=fe0f2d89857b2284a5f31680c2d93478d63effc09957252d7794cfa6b85e7423
+rustbgpd_version=rustbgpd 0.74.0
+rustc=rustc 1.99.0 (b940084d7 2026-09-28)
+bird_image=bird:v3.3.2-m101 id=sha256:98e6c2c4ed934ab426cd8932c282ec163fb5f0be9e79cef7ff19f052b7786fc7
+openbgpd_image=openbgpd/openbgpd@sha256:8f4b44f25796beaecb72ab7f099a3914961ac444a9de094ffca6a4614e741412 id=sha256:8f4b44f25796beaecb72ab7f099a3914961ac444a9de094ffca6a4614e741412
+openbgpd_runtime=OpenBGPD 9.3
+daemon_sources=equal to 319d14e4b78e8baaa24d27d13099a3b296ca7c10 (319d14e4b78e8baaa24d27d13099a3b296ca7c10) outside . :!bench :!tests :!docs :!.github :!scripts :!changelog.d :!*.md
+competitor_generation=current
+kernel=Linux 7.0.0-30-generic x86_64
+swap_devices=
