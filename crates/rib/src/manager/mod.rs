@@ -898,6 +898,9 @@ pub struct RibManager {
     /// transition; armed by the terminal commit poll, finished by the next
     /// dispatch on any delivery path, including a frozen replacement view.
     post_commit_query_trace: Option<PostCommitQueryTrace>,
+    /// Logically removed source-group indexes. These handles never resolve
+    /// routes again; only bounded trie pruning may touch the detached maps.
+    retired_unicast_indexes: VecDeque<crate::adj_rib_out::UnicastPrefixIndex>,
     /// In-progress unfenced staging of a prospective clean-transition
     /// destination group (`RibUpdate::PrepareExportPolicyDestination`).
     /// Advanced one budgeted slice at a time only when no ordinary
@@ -1945,6 +1948,7 @@ impl RibManager {
             flowspec_validation: flowspec_validation::ValidationState::default(),
             pending_clean_policy_transition: None,
             post_commit_query_trace: None,
+            retired_unicast_indexes: VecDeque::new(),
             pending_destination_prestage: None,
             prepared_destination: None,
             prestaged_inventory: None,
@@ -4537,6 +4541,26 @@ impl RibManager {
         changed
     }
 
+    /// Prune one detached source index in a bounded ordinary actor turn.
+    /// Every index is emptied before its destructor releases the trie roots.
+    fn retire_unicast_index_batch(&mut self) {
+        if self.pending_clean_policy_transition.is_some() {
+            return;
+        }
+        #[cfg(test)]
+        if !self.retired_unicast_indexes.is_empty()
+            && let Some(observer) = &self.replacement_readiness_test_hook
+        {
+            observer("deferred_index_retirement");
+        }
+        let Some(index) = self.retired_unicast_indexes.front_mut() else {
+            return;
+        };
+        if index.retire_batch_with(&mut || {}) {
+            self.retired_unicast_indexes.pop_front();
+        }
+    }
+
     /// Run the RIB manager event loop until the channel is closed.
     ///
     /// When dirty peers exist (from failed outbound sends), a persistent
@@ -4683,6 +4707,11 @@ impl RibManager {
                 tokio::task::yield_now().await;
                 continue;
             }
+
+            // A newer transition owns the fence above, so detached storage
+            // never adds work to its polls. Every ordinary turn prunes one
+            // small batch even under continuous primary or query traffic.
+            self.retire_unicast_index_batch();
 
             // One bounded validation slice per ordinary actor turn, including
             // under sustained primary traffic. Clean transitions above retain
@@ -4864,6 +4893,20 @@ impl RibManager {
                     });
                     self.drain_general_queries_if_unfenced();
                 }
+            } else if !self.retired_unicast_indexes.is_empty() {
+                // Keep pruning when otherwise idle, without monopolizing the
+                // actor: one queued mutation and ordinary reads get a turn
+                // before the next batch. This also drains retirement before
+                // a closed primary channel can terminate the actor.
+                self.drain_readiness_queries(None);
+                self.drain_queries(QUERY_BUDGET_PER_CHUNK);
+                if let Some(update) = self.try_recv_primary() {
+                    self.traced(PostCommitWork::PrimaryUpdate, |manager| {
+                        manager.handle_update(update);
+                    });
+                    self.drain_general_queries_if_unfenced();
+                }
+                tokio::task::yield_now().await;
             } else if needs_timers {
                 tokio::select! {
                     readiness = Self::receive_readiness_query(&mut self.readiness_rx) => {

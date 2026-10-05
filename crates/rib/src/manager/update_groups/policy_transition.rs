@@ -848,6 +848,16 @@ impl RibManager {
         source: usize,
         destination: usize,
     ) {
+        // No query or mutation can interleave in CommitMembers. Detach only
+        // the final source member's index; logical removal and gauge updates
+        // keep their existing commit points, while pruning resumes unfenced.
+        if let Some(group) = self.group_ribs.get_mut(&source)
+            && group.members.len() == 1
+            && group.members.contains(&peer)
+        {
+            self.retired_unicast_indexes
+                .push_back(group.table.take_unicast_prefix_index());
+        }
         self.leave_group_without_gauge_refresh(source, peer);
         self.update_groups
             .members

@@ -5091,6 +5091,194 @@ fn start_clean_transition(
     response
 }
 
+/// Channel handshakes park the actual actor before each retirement batch.
+/// The commit reply, fresh reads and a subsequent route update must all
+/// precede the old index's final pruning, including a closed input channel.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "the regression pins actual commit acknowledgement, query/update ordering, gauges and shutdown through three controlled retirement batches"
+)]
+async fn source_index_retirement_interleaves_after_actor_commit_and_drains_on_close() {
+    const NEXT_COMMUNITY: u32 = 0xFDE8_2111;
+    let (readiness_tx, readiness_rx) = mpsc::channel(8);
+    let (mut manager, peers, mut receivers) =
+        direct_clean_transition_manager(2, 65, Some(readiness_rx));
+    let source = manager.grouped_member_of(peers[0]).unwrap();
+    let metrics = manager.metrics.clone();
+    let (primary_tx, primary_rx) = mpsc::channel(8);
+    manager.rx = primary_rx;
+    let (query_tx, query_rx) = mpsc::channel(8);
+    manager.query_rx = query_rx;
+    let response = start_clean_transition(&mut manager, &peers, &community_chain(NEXT_COMMUNITY));
+    let (entered_tx, mut entered_rx) = mpsc::channel(8);
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let release_rx = Mutex::new(release_rx);
+    let batches = Arc::new(AtomicUsize::new(0));
+    manager.replacement_readiness_test_hook = Some(Arc::new({
+        let batches = Arc::clone(&batches);
+        move |stage| {
+            if stage == "deferred_index_retirement" {
+                let batch = batches.fetch_add(1, Ordering::SeqCst) + 1;
+                entered_tx.try_send(batch).unwrap();
+                // Dropping the controller also releases a failed test's
+                // actor, instead of stranding a blocked runtime worker.
+                let _ = release_rx.lock().unwrap().recv();
+            }
+        }
+    }));
+    let handle = tokio::spawn(manager.run());
+    assert_eq!(
+        response.await.unwrap().unwrap(),
+        crate::update::ExportPolicyCohortOutcome::Committed
+    );
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(5), entered_rx.recv())
+            .await
+            .unwrap(),
+        Some(1)
+    );
+    for receiver in &mut receivers {
+        while receiver.try_recv().is_ok() {}
+    }
+    // These requests are admitted only after the actor's real terminal reply;
+    // batch 1 still holds all 65 prefixes from the logically removed group.
+    let mut readiness = queue_replacement_readiness(&readiness_tx);
+    let (page_reply, mut page_response) = oneshot::channel();
+    query_tx
+        .try_send(RibUpdate::QueryRoutesPage {
+            scope: RouteQueryScope::Advertised { peer: peers[0] },
+            filter: None,
+            after: None,
+            expected_version: None,
+            page_size: 128,
+            reply: page_reply,
+        })
+        .unwrap();
+    let prefix = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24);
+    let origin = Ipv4Addr::new(192, 0, 2, 42);
+    primary_tx
+        .try_send(RibUpdate::RoutesReceived {
+            session_id: 0,
+            peer: IpAddr::V4(origin),
+            announced: vec![crate::test_support::make_route(prefix, origin)],
+            withdrawn: vec![],
+            flowspec_announced: vec![],
+            flowspec_withdrawn: vec![],
+            evpn_announced: vec![],
+            evpn_withdrawn: vec![],
+            validated_with: None,
+        })
+        .unwrap();
+    release_tx.send(()).unwrap();
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(5), entered_rx.recv())
+            .await
+            .unwrap(),
+        Some(2),
+        "a full synchronous prune must not replace the bounded first batch"
+    );
+    // Before batch 2, 33 prefixes remain, yet the ordinary read and readiness
+    // response already observe the committed group and exact current count.
+    let page = page_response.try_recv().unwrap().unwrap();
+    assert_eq!(page.routes.len(), 65);
+    assert!(
+        page.routes
+            .iter()
+            .all(|route| route.communities().contains(&NEXT_COMMUNITY))
+    );
+    assert_eq!(readiness.try_recv().unwrap(), Ok(65));
+    assert_metric(
+        gauge_metric_value(&metrics, "bgp_update_groups", &[]),
+        1.0,
+        "live group count",
+    );
+    assert_metric(
+        gauge_metric_value(
+            &metrics,
+            "bgp_update_group_members",
+            &[("group", &source.to_string())],
+        ),
+        0.0,
+        "the detached source is absent from live membership gauges",
+    );
+    release_tx.send(()).unwrap();
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(5), entered_rx.recv())
+            .await
+            .unwrap(),
+        Some(3)
+    );
+    // Before batch 3, one old prefix still remains; the new primary mutation
+    // and route chunk have nevertheless reached the outbound writer.
+    let update = receivers[0].try_recv().unwrap();
+    assert_eq!(update.announce.len(), 1);
+    assert_eq!(update.announce[0].prefix, Prefix::V4(prefix));
+    assert!(update.announce[0].communities().contains(&NEXT_COMMUNITY));
+    drop(primary_tx);
+    release_tx.send(()).unwrap();
+    tokio::time::timeout(Duration::from_secs(5), handle)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        batches.load(Ordering::SeqCst),
+        3,
+        "closed input must finish all 65 prefixes before actor exit"
+    );
+}
+
+#[tokio::test]
+async fn source_index_retirement_waits_for_newer_fences_and_stays_detached_on_rollback() {
+    let (mut manager, peers, _receivers) = direct_clean_transition_manager(2, 65, None);
+    let original = manager.grouped_member_of(peers[0]).unwrap();
+    let mut response = start_clean_transition(&mut manager, &peers, &community_chain(0xFDE8_2111));
+    while step_parked_transition(&mut manager).1 != "committed" {}
+    assert_eq!(
+        response.try_recv().unwrap().unwrap(),
+        crate::update::ExportPolicyCohortOutcome::Committed
+    );
+    let moved = manager.grouped_member_of(peers[0]).unwrap();
+    assert_ne!(moved, original);
+    assert_eq!(manager.retired_unicast_indexes.len(), 1);
+    assert_eq!(
+        manager.retired_unicast_indexes[0].iter_from(None).count(),
+        65
+    );
+
+    let mut rollback = start_clean_transition(&mut manager, &peers, &community_chain(0xFDE8_2101));
+    loop {
+        manager.retire_unicast_index_batch();
+        assert_eq!(
+            manager.retired_unicast_indexes[0].iter_from(None).count(),
+            65,
+            "a newer fence must leave old retirement parked"
+        );
+        if step_parked_transition(&mut manager).1 == "committed" {
+            break;
+        }
+    }
+    assert_eq!(
+        rollback.try_recv().unwrap().unwrap(),
+        crate::update::ExportPolicyCohortOutcome::Committed
+    );
+    let restored = manager.grouped_member_of(peers[0]).unwrap();
+    assert_ne!(restored, original, "rollback creates a fresh live group");
+    assert_ne!(restored, moved);
+    assert_eq!(manager.group_ribs.len(), 1);
+    assert_eq!(manager.retired_unicast_indexes.len(), 2);
+    let mut turns = 0;
+    while !manager.retired_unicast_indexes.is_empty() {
+        manager.retire_unicast_index_batch();
+        turns += 1;
+        assert_eq!(manager.group_ribs.len(), 1);
+        assert_eq!(manager.grouped_member_of(peers[0]), Some(restored));
+        assert!(!manager.group_ribs.contains_key(&original));
+        assert!(!manager.group_ribs.contains_key(&moved));
+    }
+    assert_eq!(turns, 6, "each 65-prefix index takes three ordinary turns");
+}
+
 /// LAN-447: the dedicated readiness lane must be answerable BETWEEN commit
 /// batches. With a monolithic finalize poll (no Validate/CommitMembers
 /// split) no mid-flush seam exists and this test fails: the first

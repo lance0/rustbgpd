@@ -19,6 +19,8 @@ use crate::route::{
 use crate::slab::RouteSlab;
 use crate::update::{RouteQueryKey, route_query_key};
 
+pub(crate) type UnicastPrefixIndex = FamilyPrefixMap<SmallVec<[(u32, u32); 1]>>;
+
 /// Per-peer Adj-RIB-Out: routes advertised to a specific peer.
 ///
 /// Routes are keyed by `(Prefix, path_id)` for Add-Path (RFC 7911).
@@ -35,7 +37,7 @@ pub struct AdjRibOut {
     /// family-split prefix trie. `SmallVec<[(u32, u32); 1]>` inlines the
     /// single-best case (`path_id=0`) without heap allocation; Add-Path
     /// multi-path spills to heap transparently.
-    prefix_path_ids: FamilyPrefixMap<SmallVec<[(u32, u32); 1]>>,
+    prefix_path_ids: UnicastPrefixIndex,
     /// `FlowSpec` routes advertised to this peer (always single-best, `path_id=0`).
     flowspec_routes: HashMap<FlowSpecKey, FlowSpecRoute>,
     /// EVPN routes advertised to this peer, keyed by RFC 7432 route identity.
@@ -412,6 +414,12 @@ impl AdjRibOut {
         retire_hash_map(&mut self.labeled_routes, checkpoint);
         retire_hash_map(&mut self.labeled_key_path_ids, checkpoint);
         retire_hash_map(&mut self.rtc_routes, checkpoint);
+    }
+
+    /// Detach the unicast index of an already unobservable group. Its handles
+    /// are retirement-only: the route slab may be destroyed immediately.
+    pub(crate) fn take_unicast_prefix_index(&mut self) -> UnicastPrefixIndex {
+        std::mem::take(&mut self.prefix_path_ids)
     }
 
     /// Return the number of advertised routes.
