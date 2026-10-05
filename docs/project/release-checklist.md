@@ -136,7 +136,11 @@ v0.71.0 tag on its on-host verdict, every gate passing. The
 tag failed management correctness on one expired `policy stats` read. The
 [2026-09-26 run](../soaks/soak-rs-flagship-24h-2026-09-26.md) on untagged
 main `292c32b39` passed every gate; it covers that SHA and qualifies no tag.
-Use the
+The [2026-09-29 run](../soaks/soak-rs-flagship-24h-2026-09-29.md) on the
+v0.73.0 tag failed the doctor and management-correctness gates on one
+`rbgp doctor` result. The
+[2026-10-04 run](../soaks/soak-rs-flagship-24h-2026-10-04.md) qualified the
+v0.74.0 tag on its on-host verdict, every gate passing. Use the
 [runner procedure](../../tests/soak/README.md) and its
 [precommitted gates](../soaks/soak-acceptance-gates.md#readiness-acceptance-and-kubernetes-probes).
 

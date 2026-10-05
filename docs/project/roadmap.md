@@ -166,7 +166,11 @@ retained-rollback previews, an opt-in dataplane readiness probe and FlowSpec
 mutation outcomes, bounds `rbgp` mutation waits, shrinks stored routes and
 shortens large-roster reloads, with outbound resync, collision, ORR, EVPN
 selection and metrics-render fixes. It ships on its per-change regression
-tests and main CI; no flagship receipt covers it. The
+tests and main CI. The
+[2026-10-04 run](../soaks/soak-rs-flagship-24h-2026-10-04.md) then qualified
+the v0.74.0 tag under the current gates (on-host verdict, no reanalysis;
+every gate passes, with all 146 `rbgp doctor` runs `ok`), so the published
+route-server flagship receipt now describes v0.74.0. The
 [release checklist](release-checklist.md#flagship-operating-proof) calls for a
 qualifying 24-hour management-load soak on the selected candidate. Earlier
 archived soaks do not automatically qualify later runtime changes.
