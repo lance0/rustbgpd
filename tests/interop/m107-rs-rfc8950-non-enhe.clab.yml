@@ -54,7 +54,7 @@ topology:
 
     member1:
       kind: linux
-      image: gobgp:v4.8.0-m107
+      image: gobgp:v4.10.0-m107
       cmd: sleep infinity
       binds:
         - ./configs/gobgp-m107-member1.toml:/config/gobgp.toml:ro
@@ -64,7 +64,7 @@ topology:
 
     member2:
       kind: linux
-      image: gobgp:v4.8.0-m107
+      image: gobgp:v4.10.0-m107
       cmd: sleep infinity
       binds:
         - ./configs/gobgp-m107-member2.toml:/config/gobgp.toml:ro

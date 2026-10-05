@@ -5,7 +5,7 @@
 # daemon identities under proof:
 #   - rustbgpd: the exact workflow SHA built as rustbgpd:dev
 #   - BIRD 2.19.2, built from the staged checksum-verified source archive
-#   - GoBGP 4.8.0, built from the checksum-pinned release archive
+#   - GoBGP 4.10.0, built from the checksum-pinned release archive
 #
 # The driver renders both route-server configurations after deploy, validates
 # them before daemon start, then drives the unchanged 11-route M90 corpus.
@@ -54,7 +54,7 @@ topology:
 
     member1:
       kind: linux
-      image: gobgp:v4.8.0-m104
+      image: gobgp:v4.10.0-m104
       cmd: sleep infinity
       binds:
         - ./configs/gobgp-m90-member1.toml:/config/gobgp.toml:ro
@@ -64,7 +64,7 @@ topology:
 
     member2:
       kind: linux
-      image: gobgp:v4.8.0-m104
+      image: gobgp:v4.10.0-m104
       cmd: sleep infinity
       binds:
         - ./configs/gobgp-m90-member2.toml:/config/gobgp.toml:ro
@@ -74,7 +74,7 @@ topology:
 
     member3:
       kind: linux
-      image: gobgp:v4.8.0-m104
+      image: gobgp:v4.10.0-m104
       cmd: sleep infinity
       binds:
         - ./configs/gobgp-m90-member3.toml:/config/gobgp.toml:ro

@@ -21,9 +21,9 @@
 #
 # Usage:
 #   docker build --target dev -t rustbgpd:dev .
-#   docker build --build-arg TARGETARCH=amd64 --build-arg GOBGP_VERSION=4.8.0 \
-#     --build-arg GOBGP_SHA256=43b570ae5cc1afab7aebdd9d8f4536e27656465848270c8a6f5fda1ffe093a03 \
-#     -t gobgp:v4.8.0-m107 -f tests/interop/Dockerfile.gobgp-v47 tests/interop
+#   docker build --build-arg TARGETARCH=amd64 --build-arg GOBGP_VERSION=4.10.0 \
+#     --build-arg GOBGP_SHA256=05a1c9fa1fe5c8d59de5a923efa4afe692c371c33b84750cfeb8f8df24db5fbe \
+#     -t gobgp:v4.10.0-m107 -f tests/interop/Dockerfile.gobgp-v47 tests/interop
 #   containerlab deploy -t tests/interop/m107-rs-rfc8950-uniform-fleet.clab.yml
 #   bash tests/interop/scripts/test-m107-rs-rfc8950-uniform-fleet.sh
 #   containerlab destroy -t tests/interop/m107-rs-rfc8950-uniform-fleet.clab.yml
@@ -61,7 +61,7 @@ topology:
 
     member1:
       kind: linux
-      image: gobgp:v4.8.0-m107
+      image: gobgp:v4.10.0-m107
       cmd: sleep infinity
       binds:
         - ./configs/gobgp-m107-member1.toml:/config/gobgp.toml:ro
@@ -71,7 +71,7 @@ topology:
 
     member2:
       kind: linux
-      image: gobgp:v4.8.0-m107
+      image: gobgp:v4.10.0-m107
       cmd: sleep infinity
       binds:
         - ./configs/gobgp-m107-member2.toml:/config/gobgp.toml:ro

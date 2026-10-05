@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # M77 interop test — GR/LLGR stale preservation for the RR families
-# (RFC 4724 / RFC 9494) against checksum-built GoBGP v4.8.0.
+# (RFC 4724 / RFC 9494) against checksum-built GoBGP v4.10.0.
 #
 # rustbgpd is the RECEIVING speaker: a GoBGP PE (VPNv4 + VPNv6 + RTC, GR
 # restart-time 60 + LLGR 30 per family) is killed and relaunched with
@@ -51,9 +51,9 @@
 #
 # Prerequisites:
 #   - docker build --target dev -t rustbgpd:dev .
-#   - docker build --build-arg TARGETARCH=amd64 --build-arg GOBGP_VERSION=4.8.0 \
-#       --build-arg GOBGP_SHA256=43b570ae5cc1afab7aebdd9d8f4536e27656465848270c8a6f5fda1ffe093a03 \
-#       -t gobgp:v4.8.0-m77 -f tests/interop/Dockerfile.gobgp-v47 tests/interop
+#   - docker build --build-arg TARGETARCH=amd64 --build-arg GOBGP_VERSION=4.10.0 \
+#       --build-arg GOBGP_SHA256=05a1c9fa1fe5c8d59de5a923efa4afe692c371c33b84750cfeb8f8df24db5fbe \
+#       -t gobgp:v4.10.0-m77 -f tests/interop/Dockerfile.gobgp-v47 tests/interop
 #   - containerlab deployed:
 #       containerlab deploy -t tests/interop/m77-gr-llgr-rr-gobgp.clab.yml
 
@@ -65,11 +65,11 @@ export INTEROP_TEST_OPERATOR_AUTH
 GOBGP_PE="clab-${TOPO}-gobgp-pe"
 GOBGP_CLIENT="clab-${TOPO}-gobgp-client"
 GOBGP_LS="clab-${TOPO}-gobgp-ls"
-readonly GOBGP_IMAGE="gobgp:v4.8.0-m77"
-readonly GOBGP_VERSION="gobgp version 4.8.0"
-readonly GOBGPD_VERSION="gobgpd version 4.8.0"
-readonly GOBGP_BINARY_SHA256="5bd2c6eddab475746d5257c4466f8377b3790bcf7159e18e03a9d44a1685348b"
-readonly GOBGPD_BINARY_SHA256="710b7c28d2b83aef887cc28ae6ddcffe82f11a27e0ba263d9f747658b45f8a97"
+readonly GOBGP_IMAGE="gobgp:v4.10.0-m77"
+readonly GOBGP_VERSION="gobgp version 4.10.0"
+readonly GOBGPD_VERSION="gobgpd version 4.10.0"
+readonly GOBGP_BINARY_SHA256="55eded2e53f5c597baab409f69d18729292a6e28084fd0ce2be9b5383a406f86"
+readonly GOBGPD_BINARY_SHA256="bea17d8561b776cb35820ce14601a617e26acb1efa687b9d949a1737ee2f670d"
 
 PE_ADDR="10.0.1.2"
 CLIENT_ADDR="10.0.0.2"
@@ -217,7 +217,7 @@ preflight_gobgp_identity() {
         require_exact "$(docker exec "$container" sha256sum /usr/local/bin/gobgpd | cut -d' ' -f1)" \
             "$GOBGPD_BINARY_SHA256" "$container gobgpd binary SHA-256"
     done
-    log "Verified exact GoBGP 4.8.0 image, amd64 runtime, and binary identities"
+    log "Verified exact GoBGP 4.10.0 image, amd64 runtime, and binary identities"
 }
 
 # The M76 square: vantage A (10.0.8.1) is a node with cost-1 and cost-10

@@ -43,24 +43,31 @@ COMPETITOR_GENERATIONS = {
         "openbgpd_image": "openbgpd/openbgpd:9.1",
     },
     "current": {
-        "bird_image": "bird:v3.3.2-m101",
+        "bird_image": "bird:v3.3.3-m101",
         "openbgpd_image": (
             "openbgpd/openbgpd@sha256:"
             "8f4b44f25796beaecb72ab7f099a3914961ac444a9de094ffca6a4614e741412"
         ),
     },
 }
-# Offline only: roots measured before the OpenBGPD 9.3 re-pin (the v0.74.0
-# cross-daemon receipt) recorded `current` as BIRD 3.3.2 / OpenBGPD 9.2. The
-# runner records and re-inspects only COMPETITOR_GENERATIONS, so new runs
-# select 9.3 only.
-PRIOR_CURRENT_PAIR = {
-    "bird_image": "bird:v3.3.2-m101",
-    "openbgpd_image": (
-        "openbgpd/openbgpd@sha256:"
-        "b2e94bd1538102a89cff96867993eabb6dbb27720de4ab7b588860880e3e3bf9"
-    ),
-}
+# Offline only: published v0.74.0 and v0.75.0 receipts used these exact
+# pairs. New runs record only COMPETITOR_GENERATIONS; mixed pairs stay invalid.
+PRIOR_CURRENT_PAIRS = (
+    {
+        "bird_image": "bird:v3.3.2-m101",
+        "openbgpd_image": (
+            "openbgpd/openbgpd@sha256:"
+            "b2e94bd1538102a89cff96867993eabb6dbb27720de4ab7b588860880e3e3bf9"
+        ),
+    },
+    {
+        "bird_image": "bird:v3.3.2-m101",
+        "openbgpd_image": (
+            "openbgpd/openbgpd@sha256:"
+            "8f4b44f25796beaecb72ab7f099a3914961ac444a9de094ffca6a4614e741412"
+        ),
+    },
+)
 CANONICAL_FULL_INPUTS = {
     "smoke": "",
     "n_members": "320",
@@ -109,7 +116,10 @@ def fail(message: str) -> None:
 def competitor_generation(inputs: dict) -> str:
     matches = [
         name
-        for name, expected in (*COMPETITOR_GENERATIONS.items(), ("current", PRIOR_CURRENT_PAIR))
+        for name, expected in (
+            *COMPETITOR_GENERATIONS.items(),
+            *(("current", pair) for pair in PRIOR_CURRENT_PAIRS),
+        )
         if all(inputs.get(key) == value for key, value in expected.items())
     ]
     if len(matches) != 1:
@@ -3143,6 +3153,25 @@ def self_test() -> None:
         current_verification = read_json(current_output / "verification.json")
         if current_verification.get("competitor_generation") != "current":
             fail("current competitor generation was not retained in verification")
+        for pair_index, pair in enumerate(PRIOR_CURRENT_PAIRS):
+            prior_roots = []
+            for index, root in enumerate(current_roots):
+                copied = base / f"prior-current-{pair_index}-{index}"
+                shutil.copytree(root, copied)
+                path = copied / "provenance.json"
+                data = read_json(path)
+                data["inputs"].update(pair)
+                path.write_text(json.dumps(data))
+                prior_roots.append(copied)
+            validate_campaigns(prior_roots, base / f"prior-current-output-{pair_index}")
+            mixed_roots = prior_roots.copy()
+            mixed_roots[0] = current_roots[0]
+            try:
+                validate_campaigns(mixed_roots, base / f"mixed-current-output-{pair_index}")
+            except InvalidReceipt:
+                pass
+            else:
+                fail("a campaign mixed current and prior exact comparator pairs")
         txn_roots = [base / "transaction-a", base / "transaction-b"]
         make_fixture(txn_roots[0], "transaction", 100, 2000)
         make_fixture(txn_roots[1], "transaction", 110, 3000)
@@ -3283,7 +3312,7 @@ def self_test() -> None:
         rejected("canonical-control-secs", lambda root: change_input(root, "control_secs", "31"))
         rejected("canonical-bird-threads", lambda root: change_input(root, "bird_threads", "7"))
         rejected("competitor-ref-arbitrary", lambda root: change_input(root, "bird_image", "bird:latest"))
-        rejected("competitor-ref-drift", lambda root: change_input(root, "bird_image", "bird:v3.3.2-m102"))
+        rejected("competitor-ref-drift", lambda root: change_input(root, "bird_image", "bird:v3.3.3-m102"))
         rejected("competitor-mixed-generation", lambda root: change_input(root, "bird_image", COMPETITOR_GENERATIONS["current"]["bird_image"]))
         def change_competitor_generation(root, generation):
             alter_json(

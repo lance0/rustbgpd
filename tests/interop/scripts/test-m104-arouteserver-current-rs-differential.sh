@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # M104 — current-daemon sibling of the immutable M90 ARouteServer filtering
 # differential. The exact M90 site/config fixtures remain read-only; only the
-# daemon boundary moves to BIRD 2.19.2, GoBGP 4.8.0, and the checked-out
+# daemon boundary moves to BIRD 2.19.2, GoBGP 4.10.0, and the checked-out
 # rustbgpd SHA. The unchanged 11-row corpus must finish at 74 passed / 0 failed.
 
 set -euo pipefail
@@ -32,11 +32,11 @@ readonly ARS_TAG_COMMIT="85f24252564822556bd93cb9eba1f73d1e8268ea"
 readonly BIRD_IMAGE="bird:v2.19.2-m104"
 readonly BIRD_VERSION="BIRD version 2.19.2"
 readonly BIRD_TARGET_VERSION="2.16"
-readonly GOBGP_IMAGE="gobgp:v4.8.0-m104"
-readonly GOBGP_VERSION="gobgp version 4.8.0"
-readonly GOBGPD_VERSION="gobgpd version 4.8.0"
-readonly GOBGP_BINARY_SHA256="5bd2c6eddab475746d5257c4466f8377b3790bcf7159e18e03a9d44a1685348b"
-readonly GOBGPD_BINARY_SHA256="710b7c28d2b83aef887cc28ae6ddcffe82f11a27e0ba263d9f747658b45f8a97"
+readonly GOBGP_IMAGE="gobgp:v4.10.0-m104"
+readonly GOBGP_VERSION="gobgp version 4.10.0"
+readonly GOBGPD_VERSION="gobgpd version 4.10.0"
+readonly GOBGP_BINARY_SHA256="55eded2e53f5c597baab409f69d18729292a6e28084fd0ce2be9b5383a406f86"
+readonly GOBGPD_BINARY_SHA256="bea17d8561b776cb35820ce14601a617e26acb1efa687b9d949a1737ee2f670d"
 
 ARS_WORK=""
 RENDER_DIR=""
@@ -427,7 +427,7 @@ start_daemons() {
         return 1
     fi
 
-    log "Starting exact GoBGP 4.8.0 members..."
+    log "Starting exact GoBGP 4.10.0 members..."
     local member
     for member in member1 member2 member3; do
         docker exec -d "$(member_container "$member")" sh -c \

@@ -4,13 +4,14 @@
 # this file. Lab Dockerfiles retain local-build defaults; hosted builds pass
 # the resolved digest as a build argument. The image-primer checker catches
 # stale defaults and malformed entries.
-21297d7a02edd700ae82de5a630055a9cb88a99e2e7e45551bc7d6c1e5b4de2c  bird-3.3.2.tar.gz
+7e8b28a17dd619eb73eba959ef6a944dd9c11cf5c1700a2ecbb8eb13bd4a8a57  bird-3.3.3.tar.gz
 aff89abba3b92b7637bd57e0168b8d7ae887747f160ada4973378ad72f5f3660  bird-2.19.2.tar.gz
 e20b2a155fe14450b9fe37e5c1a1d1bfe101eb479645f5bbea860a8fde30e522  gobgp_3.37.0_linux_amd64.tar.gz
 0aaa2da6e4dcaaf57e3d0e64eae14946292b0a5894d80ef3b7ebde3bf52beb29  gobgp_3.37.0_linux_arm64.tar.gz
 6d4491a85dfbaaab8d18bd6855be6b67a117a5a9670eea3ee9f7dddaf50e869c  gobgp_4.6.0_linux_amd64.tar.gz
 05d98ca0d7bbcb2f50a6b7b6ee51c5e5b5fd64d6a310ee807040ed9d7104d5e0  gobgp_4.7.0_linux_amd64.tar.gz
 43b570ae5cc1afab7aebdd9d8f4536e27656465848270c8a6f5fda1ffe093a03  gobgp_4.8.0_linux_amd64.tar.gz
+05a1c9fa1fe5c8d59de5a923efa4afe692c371c33b84750cfeb8f8df24db5fbe  gobgp_4.10.0_linux_amd64.tar.gz
 588c9c429476d9ed66cd3b2ae32283a6da36e0cfbb7e446f5d6a1b68dc770214  grpcurl_1.9.1_linux_x86_64.tar.gz
 a3ded2f355a615df73900f31b9791f41e796e9c5c63b171e1ce041e8139ee00e  gnmic_0.46.0_Linux_x86_64.tar.gz
 bd4829de08d0c50074f9ecd5c351399fae42be06d456b3880a04aa4a7cda1137  rustbgpd-v0.64.0-linux-amd64.tar.gz

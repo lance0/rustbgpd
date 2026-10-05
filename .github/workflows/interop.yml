@@ -607,7 +607,7 @@ jobs:
 
   m76:
     needs: [prime_dev_image]
-    name: M76 — ORR divergent-best (GoBGP 4.8.0)
+    name: M76 — ORR divergent-best (GoBGP 4.10.0)
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -635,18 +635,18 @@ jobs:
           target: dev
           cache-from: type=gha,scope=rustbgpd-dev
 
-      - name: Stage verified GoBGP 4.8.0 archive
+      - name: Stage verified GoBGP 4.10.0 archive
         uses: ./.github/actions/stage-gobgp-artifact
         id: gobgp_archive
         with:
-          version: "4.8.0"
+          version: "4.10.0"
 
-      - name: Build gobgp:v4.8.0-m76
+      - name: Build gobgp:v4.10.0-m76
         run: |
           docker build --build-arg TARGETARCH=amd64 \
-          --build-arg GOBGP_VERSION=4.8.0 \
+          --build-arg GOBGP_VERSION=4.10.0 \
           --build-arg GOBGP_SHA256="${{ steps.gobgp_archive.outputs.sha256 }}" \
-          -t gobgp:v4.8.0-m76 -f tests/interop/Dockerfile.gobgp-v47 tests/interop
+          -t gobgp:v4.10.0-m76 -f tests/interop/Dockerfile.gobgp-v47 tests/interop
 
       - name: Run M76 (deploy + test + destroy with retry)
         uses: ./.github/actions/run-interop-test
@@ -657,7 +657,7 @@ jobs:
 
   m77:
     needs: [prime_dev_image]
-    name: M77 — VPNv4/VPNv6/RTC GR+LLGR + BGP-LS GR (GoBGP 4.8.0)
+    name: M77 — VPNv4/VPNv6/RTC GR+LLGR + BGP-LS GR (GoBGP 4.10.0)
     runs-on: ubuntu-latest
     timeout-minutes: 25
     steps:
@@ -685,18 +685,18 @@ jobs:
           target: dev
           cache-from: type=gha,scope=rustbgpd-dev
 
-      - name: Stage verified GoBGP 4.8.0 archive
+      - name: Stage verified GoBGP 4.10.0 archive
         uses: ./.github/actions/stage-gobgp-artifact
         id: gobgp_archive
         with:
-          version: "4.8.0"
+          version: "4.10.0"
 
-      - name: Build gobgp:v4.8.0-m77
+      - name: Build gobgp:v4.10.0-m77
         run: |
           docker build --build-arg TARGETARCH=amd64 \
-          --build-arg GOBGP_VERSION=4.8.0 \
+          --build-arg GOBGP_VERSION=4.10.0 \
           --build-arg GOBGP_SHA256="${{ steps.gobgp_archive.outputs.sha256 }}" \
-          -t gobgp:v4.8.0-m77 -f tests/interop/Dockerfile.gobgp-v47 tests/interop
+          -t gobgp:v4.10.0-m77 -f tests/interop/Dockerfile.gobgp-v47 tests/interop
 
       - name: Run M77 (deploy + test + destroy with retry)
         uses: ./.github/actions/run-interop-test
@@ -994,7 +994,7 @@ jobs:
 
   m83:
     needs: [prime_dev_image]
-    name: M83 — route-server profile, multi-stack (BIRD 2.19.2 + GoBGP 4.8.0 + FRR 10.7.0 + RTR)
+    name: M83 — route-server profile, multi-stack (BIRD 2.19.2 + GoBGP 4.10.0 + FRR 10.7.0 + RTR)
     runs-on: ubuntu-latest
     timeout-minutes: 25
     steps:
@@ -1042,18 +1042,18 @@ jobs:
           cache-from: type=gha,scope=bird2192-m83
           cache-to: type=gha,mode=max,scope=bird2192-m83,ignore-error=true
 
-      - name: Stage verified GoBGP 4.8.0 archive
+      - name: Stage verified GoBGP 4.10.0 archive
         uses: ./.github/actions/stage-gobgp-artifact
         id: gobgp_archive
         with:
-          version: "4.8.0"
+          version: "4.10.0"
 
-      - name: Build gobgp:v4.8.0-m83
+      - name: Build gobgp:v4.10.0-m83
         run: >-
           docker build --build-arg TARGETARCH=amd64
-          --build-arg GOBGP_VERSION=4.8.0
+          --build-arg GOBGP_VERSION=4.10.0
           --build-arg GOBGP_SHA256="${{ steps.gobgp_archive.outputs.sha256 }}"
-          -t gobgp:v4.8.0-m83 -f tests/interop/Dockerfile.gobgp-v47 tests/interop
+          -t gobgp:v4.10.0-m83 -f tests/interop/Dockerfile.gobgp-v47 tests/interop
 
       - name: Pull digest-pinned FRR 10.7.0 image
         run: docker pull quay.io/frrouting/frr@sha256:a0ed0e4f8727631c8303dd9a4e8199b47464a17a5253135a2c622286aeaec46b
@@ -2453,18 +2453,18 @@ jobs:
           cache-from: type=gha,scope=bird2192-m104
           cache-to: type=gha,mode=max,scope=bird2192-m104,ignore-error=true
 
-      - name: Stage verified GoBGP 4.8.0 archive
+      - name: Stage verified GoBGP 4.10.0 archive
         uses: ./.github/actions/stage-gobgp-artifact
         id: gobgp_archive
         with:
-          version: "4.8.0"
+          version: "4.10.0"
 
-      - name: Build gobgp:v4.8.0-m104
+      - name: Build gobgp:v4.10.0-m104
         run: >-
           docker build --build-arg TARGETARCH=amd64
-          --build-arg GOBGP_VERSION=4.8.0
+          --build-arg GOBGP_VERSION=4.10.0
           --build-arg GOBGP_SHA256="${{ steps.gobgp_archive.outputs.sha256 }}"
-          -t gobgp:v4.8.0-m104 -f tests/interop/Dockerfile.gobgp-v47 tests/interop
+          -t gobgp:v4.10.0-m104 -f tests/interop/Dockerfile.gobgp-v47 tests/interop
 
       - name: Run immutable M90 context proof (exact 23/23)
         env:
@@ -2522,18 +2522,18 @@ jobs:
           target: dev
           cache-from: type=gha,scope=rustbgpd-dev
 
-      - name: Stage verified GoBGP 4.8.0 archive
+      - name: Stage verified GoBGP 4.10.0 archive
         uses: ./.github/actions/stage-gobgp-artifact
         id: gobgp_archive
         with:
-          version: "4.8.0"
+          version: "4.10.0"
 
-      - name: Build gobgp:v4.8.0-m107
+      - name: Build gobgp:v4.10.0-m107
         run: >-
           docker build --build-arg TARGETARCH=amd64
-          --build-arg GOBGP_VERSION=4.8.0
+          --build-arg GOBGP_VERSION=4.10.0
           --build-arg GOBGP_SHA256="${{ steps.gobgp_archive.outputs.sha256 }}"
-          -t gobgp:v4.8.0-m107 -f tests/interop/Dockerfile.gobgp-v47 tests/interop
+          -t gobgp:v4.10.0-m107 -f tests/interop/Dockerfile.gobgp-v47 tests/interop
 
       - name: Run M107 (RFC 8950 uniform fleet, strict_peer, transparent export)
         uses: ./.github/actions/run-interop-test

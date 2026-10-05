@@ -455,9 +455,9 @@ and are sequenced by `bench/scale/matrix/run-matrix.sh`. The runner defaults
 to the frozen `historical` comparator generation (BIRD 3.3.1 / OpenBGPD 9.1).
 Set `COMPETITOR_GENERATION=current` to select the explicit current pair:
 
-- BIRD 3.3.2, built as `bird:v3.3.2-m101` from the checksum-pinned
+- BIRD 3.3.3, built as `bird:v3.3.3-m101` from the checksum-pinned
   `tests/interop/Dockerfile.bird-v332` with the
-  [frozen comparator build args](../../../docs/interop.md#pinned-bird-3-images-m43-and-m101);
+  [current comparator build args](../../../docs/interop.md#pinned-bird-3-images-m43-and-m101);
 - OpenBGPD 9.3 at
   `openbgpd/openbgpd@sha256:8f4b44f25796beaecb72ab7f099a3914961ac444a9de094ffca6a4614e741412`.
 

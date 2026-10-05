@@ -231,7 +231,7 @@ class PrimerContractTests(unittest.TestCase):
             helper = scripts / "archive-pin.sh"
             shutil.copy2(ROOT / ".github/scripts/archive-pin.sh", helper)
             manifest = scripts.parent / "pinned-archives.sha256"
-            archive = "bird-3.3.2.tar.gz"
+            archive = f"bird-{BIRD3_VERSION}.tar.gz"
 
             def lookup():
                 return subprocess.run(
