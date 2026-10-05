@@ -451,6 +451,7 @@ jobs:
           bash -n bench/scale/route-server-1000/run-receipt.sh
           bash -n bench/scale/host-quiet.sh
           bash -n bench/scale/provenance.sh
+          bash -n bench/scale/cgroup-memory.sh
           bash -n bench/scale/matrix/run-matrix.sh
           bash -n bench/scale/irrreload/run-irr-reload.sh
           bash -n bench/scale/enhanced-route-refresh/run-receipt.sh
@@ -466,8 +467,9 @@ jobs:
           bash -n bench/netns-calibration/run-vm.sh \
             bench/netns-calibration/guest-smoke.sh \
             bench/tests/test-netns-calibration-vm.sh
-          shellcheck bench/scale/host-quiet.sh \
+          shellcheck -x bench/scale/host-quiet.sh \
             bench/scale/provenance.sh \
+            bench/scale/cgroup-memory.sh \
             bench/scale/matrix/run-matrix.sh \
             bench/scale/irrreload/run-irr-reload.sh \
             bench/scale/route-server-1000/run-receipt.sh \

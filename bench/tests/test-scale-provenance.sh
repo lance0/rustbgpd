@@ -49,6 +49,8 @@ def accepted(name, data, want, expected=None, generation=None):
     got=subprocess.run(command, capture_output=True).returncode == 0
     assert got == want, (name, got)
 accepted("valid", value(), True)
+v=value(); v["sources"]["common"]={**common,"bench/scale/cgroup-memory.sh":h}; accepted("shared-cgroup-helper",v,True)
+v["sources"]["common"]["bench/scale/cgroup-memory.sh"]="malformed"; accepted("malformed-cgroup-helper-hash",v,False)
 v=value(); v["sources"]["reloadstall"]["path"]="target/scale/reloadstall"; accepted("root-workspace-harness",v,True)
 v=value(); v["sources"]["reloadstall"]["path"]="target/release/reloadstall"; accepted("stripped-harness-path",v,False)
 v=value(); v["workload"]=list(v["workload"].items()); accepted("malformed-workload-object",v,False)

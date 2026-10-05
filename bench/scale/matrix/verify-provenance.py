@@ -81,6 +81,8 @@ def verify(path, expected_cell, competitor_generation="historical"):
         if cell != "rustbgpd":
             fail("membership churn only supports rustbgpd")
         common.add("bench/scale/reloadstall/membership_churn.py")
+    if isinstance(sources["common"], dict) and "bench/scale/cgroup-memory.sh" in sources["common"]:
+        common.add("bench/scale/cgroup-memory.sh")
     hashed_map(sources["common"], common)
     hashed_map(sources["generator"], {GENERATORS[cell]})
     if set(sources["reloadstall"]) != {"path", "sha256"} or sources["reloadstall"]["path"] not in {"bench/scale/target/release/reloadstall", "target/scale/reloadstall"} or not HASH.fullmatch(sources["reloadstall"]["sha256"]):

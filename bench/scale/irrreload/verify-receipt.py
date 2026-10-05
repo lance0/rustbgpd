@@ -1549,12 +1549,31 @@ def validate_plan_apply(prefix, confirm_id: str, timeout: int, context: str) -> 
     return deadline
 
 
+def validate_cgroup_memory(cdir: Path, cell: str) -> set[str]:
+    """Optional newer readouts: historical receipts keep their original roster."""
+    filename = "cgroup-memory" if cell.startswith("rustbgpd-") else "container-memory"
+    path, window = cdir / filename, cdir / "memory-window"
+    if not path.exists() and not window.exists():
+        return set()
+    if any(p.is_symlink() or not p.is_file() for p in (path, window)):
+        fail(f"{cdir}: memory readout/window must be regular files")
+    if window.read_text() != "through_harness_completion_before_lifecycle\n":
+        fail(f"{cdir}: memory window does not end before lifecycle probes")
+    pattern = (r"cg_peak: [0-9]+ kB\ncg_current: [0-9]+ kB\ncg_swap_max: 0\ncg_swap_peak: 0 kB\n"
+               if filename == "cgroup-memory" else
+               r"container_cg_peak: [0-9]+ kB\ncontainer_cg_swap_peak: 0 kB\n|container_cg: unavailable\n")
+    if not re.fullmatch(pattern, path.read_text()):
+        fail(f"{cdir}: memory readout lacks exact zero-swap evidence")
+    return {filename, "memory-window"}
+
+
 def validate_transaction_evidence(cdir: Path, identity: tuple[int, int]) -> dict:
     expected_files = {
         "daemon.log", "final-evidence/ack", "final-evidence/ready", "manifest.json",
         "process.tsv", "quiet.tsv", "reloadstall.log", "rows.csv", "rss.csv", "status",
         "transactions/cycles.jsonl", "transactions/lifecycle.json",
     }
+    expected_files |= validate_cgroup_memory(cdir, TRANSACTION_CELL)
     actual_files = {path.relative_to(cdir).as_posix() for path in cdir.rglob("*") if path.is_file()}
     if expected_files != actual_files:
         fail(f"{cdir}: transaction evidence file roster is not exact")
@@ -1949,6 +1968,7 @@ def validate_root(root: Path, kind: str):
         cdir = root / cell
         validate_quiet(cdir / "quiet.tsv")
         identities.append(validate_process(cdir / "process.tsv"))
+        validate_cgroup_memory(cdir, cell)
         for marker in ("ready", "ack"):
             marker_path = cdir / "final-evidence" / marker
             if marker_path.is_symlink() or not marker_path.is_file() or marker_path.read_text() != f"{marker}\n":
@@ -2544,6 +2564,44 @@ def self_test_metadata_history():
 
 
 def self_test() -> None:
+    with tempfile.TemporaryDirectory() as memory_tmp:
+        cdir = Path(memory_tmp)
+        assert validate_cgroup_memory(cdir, "rustbgpd-sighup") == set()
+        window = cdir / "memory-window"
+        native = cdir / "cgroup-memory"
+        good = "cg_peak: 4096 kB\ncg_current: 2048 kB\ncg_swap_max: 0\ncg_swap_peak: 0 kB\n"
+        native.write_text(good)
+        window.write_text("through_harness_completion_before_lifecycle\n")
+        assert validate_cgroup_memory(cdir, "rustbgpd-sighup") == {"cgroup-memory", "memory-window"}
+        for bad in (good.replace("cg_swap_peak: 0", "cg_swap_peak: 1"),
+                    good.replace("cg_swap_peak: 0 kB\n", "")):
+            native.write_text(bad)
+            try:
+                validate_cgroup_memory(cdir, "rustbgpd-sighup")
+            except InvalidReceipt:
+                continue
+            fail("invalid native swap readout was accepted")
+        native.write_text(good)
+        window.write_text("after_lifecycle\n")
+        try:
+            validate_cgroup_memory(cdir, "rustbgpd-sighup")
+        except InvalidReceipt:
+            pass
+        else:
+            fail("post-lifecycle memory window was accepted")
+        native.unlink()
+        window.write_text("through_harness_completion_before_lifecycle\n")
+        container = cdir / "container-memory"
+        container.write_text("container_cg_peak: 4096 kB\ncontainer_cg_swap_peak: 0 kB\n")
+        assert validate_cgroup_memory(cdir, "bird") == {"container-memory", "memory-window"}
+        container.write_text("container_cg_peak: 4096 kB\ncontainer_cg_swap_peak: 1 kB\n")
+        try:
+            validate_cgroup_memory(cdir, "bird")
+        except InvalidReceipt:
+            pass
+        else:
+            fail("nonzero container swap peak was accepted")
+    print("cgroup memory: optional historical roster and zero-swap/window rejection boundaries passed")
     self_test_metadata_history()
     print("metadata-only history: green fixture and 17 rejection boundaries passed")
     with tempfile.TemporaryDirectory() as phase_tmp:

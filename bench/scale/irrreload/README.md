@@ -303,6 +303,21 @@ record):
   `VmRSS` at cell end (`vmhwm`): a 5 s sample can miss a reload transient
   that lasts well under a second, while `VmHWM` cannot.
 
+New IRR cells also retain cgroup v2 peaks through measured harness completion,
+before the transaction cell's abort/rollback lifecycle probes. Native cells
+require their own systemd user scope with `MemorySwapMax=0`; the launched PID
+must identify the exact daemon executable and keep its starttime through the
+final acknowledgement and memory capture. `cgroup-memory` records
+`memory.peak`, `memory.current`, `memory.swap.max` and actual `memory.swap.peak`.
+Competitor cells read `memory.peak` and `memory.swap.peak` from the container
+cgroup into `container-memory` at the same harness boundary, before teardown;
+this also charges `docker exec` reload clients. `memory-window` names this
+boundary explicitly. The headline summary labels these as `irr_daemon_cg_peak`
+and `irr_container_cg_peak` and accepts a peak only with actual zero-swap
+evidence. An unavailable container readout contributes no peak; an unavailable
+native scope fails the new cell. Historical receipts without these files
+retain their original timing/RSS contracts and still verify.
+
 Cross-daemon RSS comparisons use only the outer sampler, never the row-level
 VmRSS fields (which are zero for container cells). For each reload, the
 precommitted control statistic is the median `total_rss_kib` sample whose

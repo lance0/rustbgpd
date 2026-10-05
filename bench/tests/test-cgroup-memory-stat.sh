@@ -18,10 +18,13 @@ mkdir "$cg"
 printf '2097152\n' >"$cg/memory.current"
 printf '4194304\n' >"$cg/memory.peak"
 printf '0\n' >"$cg/memory.swap.max"
+printf '0\n' >"$cg/memory.swap.peak"
 
 # Use the producer's real functions, without launching a matrix cell.
+# shellcheck disable=SC1091 # repo is resolved dynamically above
+source "$repo/bench/scale/cgroup-memory.sh"
 # shellcheck disable=SC1090 # The extracted function names are checked by this fixture.
-source <(sed -n '/^record_scope_memory() {/,/^}/p; /^scope_stat_rows() {/,/^}/p; /^last_sample_stat_rows() {/,/^}/p; /^record_container_memory() {/,/^}/p' "$matrix")
+source <(sed -n '/^record_scope_memory() {/,/^}/p; /^scope_stat_rows() {/,/^}/p; /^last_sample_stat_rows() {/,/^}/p' "$matrix")
 
 write_stat() {
     printf '%s\n' "$1" >"$cg/memory.stat.next"
@@ -84,6 +87,20 @@ for bad in \
         exit 1
     fi
 done
+record_scope_peak "$cg" "$tmp/scope-peak"
+[ "$(cat "$tmp/scope-peak")" = $'cg_peak: 4096 kB\ncg_current: 2048 kB\ncg_swap_max: 0\ncg_swap_peak: 0 kB' ]
+printf 'broken\n' >"$cg/memory.peak"
+if record_scope_peak "$cg" "$tmp/scope-peak" >/dev/null; then
+    echo 'malformed native memory peak was accepted' >&2
+    exit 1
+fi
+printf '4194304\n' >"$cg/memory.peak"
+# A positive byte-level swap peak must never round down into a zero-swap proof.
+printf '1\n' >"$cg/memory.swap.peak"
+record_scope_peak "$cg" "$tmp/scope-peak"
+rg -q '^cg_swap_peak: 1 kB$' "$tmp/scope-peak"
+record_container_memory "$cg" "$tmp/container-memory"
+rg -q '^container_cg_swap_peak: 1 kB$' "$tmp/container-memory"
 # Competitor container readout: peak and swap peak in kB, or an explicit absence.
 printf '0\n' >"$cg/memory.swap.peak"
 record_container_memory "$cg" "$tmp/container-memory"
