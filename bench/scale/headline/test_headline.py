@@ -424,6 +424,25 @@ class ExtractorFailsClosed(unittest.TestCase):
         (native / "cgroup-memory").write_text(saved_native)
         (native / "memory-window").write_text(summarize.IRR_MEMORY_WINDOW)
 
+    def test_irr_schema2_rejects_memory_evidence(self):
+        root = self.tmp / "irr-ov0-a-r1"
+        shutil.copytree(V0720 / "irr" / "irr-ov0-ctrl-r1", root)
+        self.assertEqual(json.loads((root / "provenance.json").read_text())["schema"], 2)
+        self.assertNotIn("irr_daemon_cg_peak", {r[3] for r in summarize.extract(self.tmp)[0]})
+        for name, filename, readout in (
+            ("rustbgpd-sighup", "cgroup-memory", "cg_peak: 812345 kB\ncg_current: 700000 kB\ncg_swap_max: 0\ncg_swap_peak: 0 kB\n"),
+            ("bird", "container-memory", "container_cg_peak: 901234 kB\ncontainer_cg_swap_peak: 0 kB\n"),
+        ):
+            with self.subTest(cell=name):
+                cell = root / name
+                cell.mkdir(exist_ok=True)
+                (cell / filename).write_text(readout)
+                (cell / "memory-window").write_text(summarize.IRR_MEMORY_WINDOW)
+                with self.assertRaisesRegex(summarize.ExtractionError, r"outside the selected cell roster \(schema 2\)"):
+                    summarize.extract(self.tmp)
+                (cell / filename).unlink()
+                (cell / "memory-window").unlink()
+
     def test_irr_schema3_rejects_unselected_memory(self):
         root = self.tmp / "irr-ov0-a-r1"
         shutil.copytree(V0720 / "irr" / "irr-ov0-ctrl-r1", root)

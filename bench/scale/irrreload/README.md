@@ -318,7 +318,8 @@ evidence. An unavailable container readout contributes no peak; an unavailable
 native scope fails the new cell. Historical receipts without these files
 retain their original timing/RSS contracts and still verify. New root provenance
 uses schema 3 and requires these regular readouts and their window for every
-selected cell; schema 2 remains the historical omission case.
+selected cell. Memory evidence for a cell outside the selected roster, or any
+memory evidence in a schema-2 root (which predates these readouts), is rejected.
 
 Cross-daemon RSS comparisons use only the outer sampler, never the row-level
 VmRSS fields (which are zero for container cells). For each reload, the

@@ -409,14 +409,14 @@ def irr_rows(source, exclusions, campaign):
             window = leg / cell / "memory-window"
             if path.is_symlink() or window.is_symlink():
                 raise ExtractionError(f"{leg.name}: {cell} memory readout/window must be regular files")
-            if require_memory and cell not in selected_cells:
+            if cell not in selected_cells:  # Empty for schema2, which predates cgroup readouts.
                 if path.exists() or window.exists():
-                    raise ExtractionError(f"{leg.name}: {cell} memory evidence is outside the selected cell roster")
+                    raise ExtractionError(
+                        f"{leg.name}: {cell} memory evidence is outside the selected cell roster (schema {provenance['schema']})"
+                    )
                 continue
             if not path.is_file():
-                if (require_memory and cell in selected_cells) or path.exists() or window.exists():
-                    raise ExtractionError(f"{leg.name}: {cell} requires its cgroup memory readout")
-                continue  # Schema2 receipts may predate cgroup readouts.
+                raise ExtractionError(f"{leg.name}: {cell} requires its cgroup memory readout")
             if not window.is_file() or read_text(window) != IRR_MEMORY_WINDOW:
                 raise ExtractionError(f"{leg.name}: {cell} memory-window is not the measured harness window")
             text = read_text(path)

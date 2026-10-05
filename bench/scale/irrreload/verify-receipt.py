@@ -1549,13 +1549,18 @@ def validate_plan_apply(prefix, confirm_id: str, timeout: int, context: str) -> 
     return deadline
 
 
+MEMORY_EVIDENCE = {"cgroup-memory", "container-memory", "memory-window"}
+
+
 def validate_cgroup_memory(cdir: Path, cell: str, required: bool = False) -> set[str]:
-    """Schema3 requires readouts; schema2 keeps its original optional roster."""
+    """Schema3 requires readouts; schema2 predates them and must carry none."""
     filename = "cgroup-memory" if cell.startswith("rustbgpd-") else "container-memory"
     path, window = cdir / filename, cdir / "memory-window"
     if any(p.is_symlink() for p in (path, window)):
         fail(f"{cdir}: memory readout/window must be regular files")
-    if not required and not path.exists() and not window.exists():
+    if not required:
+        if path.exists() or window.exists():
+            fail(f"{cdir}: schema2 receipt carries memory evidence it predates")
         return set()
     if any(not p.is_file() for p in (path, window)):
         fail(f"{cdir}: memory readout/window must be regular files")
@@ -1969,6 +1974,9 @@ def validate_root(root: Path, kind: str):
         fail(f"{root}: COMPLETED does not record status/cells/time")
     identities = []
     transaction_evidence = None
+    for stray in root.glob("*/*"):
+        if stray.name in MEMORY_EVIDENCE and stray.parent.name not in expected_cells:
+            fail(f"{root}: {stray.parent.name} memory evidence is outside the selected cell roster")
     for cell in expected_cells:
         cdir = root / cell
         validate_quiet(cdir / "quiet.tsv")
@@ -2577,19 +2585,25 @@ def self_test() -> None:
         good = "cg_peak: 4096 kB\ncg_current: 2048 kB\ncg_swap_max: 0\ncg_swap_peak: 0 kB\n"
         native.write_text(good)
         window.write_text("through_harness_completion_before_lifecycle\n")
-        assert validate_cgroup_memory(cdir, "rustbgpd-sighup") == {"cgroup-memory", "memory-window"}
+        assert validate_cgroup_memory(cdir, "rustbgpd-sighup", required=True) == {"cgroup-memory", "memory-window"}
+        try:
+            validate_cgroup_memory(cdir, "rustbgpd-sighup")
+        except InvalidReceipt:
+            pass
+        else:
+            fail("schema2 cell accepted memory evidence it predates")
         for bad in (good.replace("cg_swap_peak: 0", "cg_swap_peak: 1"),
                     good.replace("cg_swap_peak: 0 kB\n", "")):
             native.write_text(bad)
             try:
-                validate_cgroup_memory(cdir, "rustbgpd-sighup")
+                validate_cgroup_memory(cdir, "rustbgpd-sighup", required=True)
             except InvalidReceipt:
                 continue
             fail("invalid native swap readout was accepted")
         native.write_text(good)
         window.write_text("after_lifecycle\n")
         try:
-            validate_cgroup_memory(cdir, "rustbgpd-sighup")
+            validate_cgroup_memory(cdir, "rustbgpd-sighup", required=True)
         except InvalidReceipt:
             pass
         else:
@@ -2598,10 +2612,10 @@ def self_test() -> None:
         window.write_text("through_harness_completion_before_lifecycle\n")
         container = cdir / "container-memory"
         container.write_text("container_cg_peak: 4096 kB\ncontainer_cg_swap_peak: 0 kB\n")
-        assert validate_cgroup_memory(cdir, "bird") == {"container-memory", "memory-window"}
+        assert validate_cgroup_memory(cdir, "bird", required=True) == {"container-memory", "memory-window"}
         container.write_text("container_cg_peak: 4096 kB\ncontainer_cg_swap_peak: 1 kB\n")
         try:
-            validate_cgroup_memory(cdir, "bird")
+            validate_cgroup_memory(cdir, "bird", required=True)
         except InvalidReceipt:
             pass
         else:
@@ -2624,6 +2638,18 @@ def self_test() -> None:
                 (cdir / filename).write_text(readout)
                 (cdir / "memory-window").write_text("through_harness_completion_before_lifecycle\n")
             validate_root(root, kind)
+            stray = root / "unselected-cell"
+            stray.mkdir()
+            for name in sorted(MEMORY_EVIDENCE):
+                (stray / name).write_text("through_harness_completion_before_lifecycle\n")
+                try:
+                    validate_root(root, kind)
+                except InvalidReceipt:
+                    pass
+                else:
+                    fail(f"schema3 {kind} accepted {name} outside the selected cell roster")
+                (stray / name).unlink()
+            stray.rmdir()
             for cell in cells:
                 cdir = root / cell
                 path = cdir / ("cgroup-memory" if cell.startswith("rustbgpd-") else "container-memory")
