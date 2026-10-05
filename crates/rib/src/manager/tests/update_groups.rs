@@ -6703,7 +6703,7 @@ fn family_distribution_skips_closed_receivers_and_keeps_live_withdrawals() {
                 events: Arc::clone(&captured),
             },
             || {
-                warm_full_outbound_warning();
+                warm_family_full_warnings(afi, safi, ungrouped);
                 captured.lock().unwrap().clear();
                 let source = Ipv4Addr::new(192, 0, 2, 42);
                 for index in 1..=3 {
@@ -6764,16 +6764,7 @@ fn family_distribution_full_receivers_retry_and_replacements_stay_live() {
                 events: Arc::clone(&captured),
             },
             || {
-                warm_full_outbound_warning();
-                // Each family's deferral WARN is its own callsite. Reach this
-                // family's once from the observing thread, so a sibling test
-                // without a subscriber cannot register it as disabled first.
-                {
-                    let (mut warm, _, _warm_receiver, _warm_permits) =
-                        full_family_receiver(afi, safi, ungrouped);
-                    announce_family_route(&mut warm, source, safi, 1);
-                }
-                tracing::callsite::rebuild_interest_cache();
+                warm_family_full_warnings(afi, safi, ungrouped);
                 captured.lock().unwrap().clear();
                 announce_family_route(&mut manager, source, safi, 1);
             },
@@ -6834,6 +6825,17 @@ fn full_family_receiver(
         })
         .collect();
     (manager, peer, receiver, permits)
+}
+
+/// Reach the unicast and this family's deferral WARN callsites from the
+/// observing thread, then rebuild interest. Each family's WARN is its own
+/// callsite, so a sibling test without a subscriber could otherwise register
+/// it as disabled first and leave a WARN assertion blind.
+fn warm_family_full_warnings(afi: Afi, safi: Safi, ungrouped: bool) {
+    warm_full_outbound_warning();
+    let (mut warm, _, _receiver, _permits) = full_family_receiver(afi, safi, ungrouped);
+    announce_family_route(&mut warm, Ipv4Addr::new(192, 0, 2, 42), safi, 1);
+    tracing::callsite::rebuild_interest_cache();
 }
 
 fn warm_full_outbound_warning() {
