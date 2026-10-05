@@ -762,6 +762,11 @@ hosted `interop.yml` or `kernel-dataplane.yml` CI, another named hosted lane,
 or local-only — the last reserved for scenarios needing privileged kernel
 capabilities or wall time a hosted runner can't sustain:
 
+Peer versions in these milestone descriptions preserve their original
+receipts. For current CI pins and the dated comparator refresh, see the
+maintained [receipts inventory](../receipts.md#interop-labs--pr-gated-interopyml)
+and [interop build recipes](../interop.md#pinned-bird-3-images-m43-and-m101).
+
 | ID | Scope | Status |
 |----|-------|--------|
 | **M30b** | EVPN Type 5 / IP-Prefix reflection through the RR against a real FRR VTEP with L3VNI binding. | Manual; blocked on hosted runners (Azure-tuned `ubuntu-latest` kernel ships without the `vrf` module so `ip link add ... type vrf` fails inside the FRR container). Runs cleanly on a local box. |
