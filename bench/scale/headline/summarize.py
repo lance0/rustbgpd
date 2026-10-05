@@ -148,7 +148,17 @@ MEMORY_SOURCES = {
     "flap_post_round_rss": "MiB; the harness's per-round RSS of the daemon PID; 0 for containerised arms, whose PID the harness is not given",
     "flap_heap_allocated": "MiB; jemalloc allocated bytes after each flap round (rustbgpd only)",
     "flap_heap_resident": "MiB; jemalloc resident bytes after each flap round (rustbgpd only)",
+    "wire_vmrss": "KiB; the RR1000 target process's own VmRSS (direct PID, not its process tree) at the wire checkpoint",
+    "wire_vmhwm": "KiB; the RR1000 target process's own VmHWM (direct PID, not its process tree) at the wire checkpoint, its resident peak up to then",
 }
+
+
+def format_value(metric, value):
+    """Memory sizes as trimmed fixed-point, which never switches to exponent
+    form; timings and counts to seven significant digits."""
+    if metric in MEMORY_SOURCES:
+        return f"{value:.3f}".rstrip("0").rstrip(".")
+    return f"{value:.7g}"
 
 
 def vmhwm_rows(path, phase, arm, run):
@@ -434,7 +444,8 @@ def report(table, arms, smoke, excluded):
         for arm in arms:
             values = table[(phase, metric)].get(arm)
             cells.append(
-                f"{min(values):.7g}–{max(values):.7g} (median {statistics.median(values):.7g}, n={len(values)})"
+                f"{format_value(metric, min(values))}–{format_value(metric, max(values))} "
+                f"(median {format_value(metric, statistics.median(values))}, n={len(values)})"
                 if values else "-")
         lines.append(f"| {phase} | {metric} | " + " | ".join(cells) + " |")
     sources = sorted({metric for _phase, metric in table} & MEMORY_SOURCES.keys())

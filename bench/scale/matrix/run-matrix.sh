@@ -388,8 +388,10 @@ scope_stat_rows() {
     }' "$cgroup/memory.stat"
 }
 # A competitor's high-water mark: its container cgroup's memory.peak, read
-# before removal. A zero swap peak shows no page left memory during the cell,
-# so the peak is complete. A missing readout is recorded, not fatal.
+# before the container is removed. memory.swap.peak is recorded with it: when
+# it is 0, none of the container's pages were swapped out during the cell, so
+# memory.peak counts every page the container charged. If either file cannot
+# be read, the cell records `container_cg: unavailable` and still passes.
 record_container_memory() {
     local cgroup=$1 out=$2 peak swap_peak
     if [ -n "$cgroup" ] && peak=$(cat "$cgroup/memory.peak" 2>/dev/null) &&

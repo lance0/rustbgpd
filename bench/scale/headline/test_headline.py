@@ -359,6 +359,24 @@ class ExtractorFailsClosed(unittest.TestCase):
         # Only metrics in the table get a source line.
         self.assertNotIn("container_cg_peak", report)
 
+    def test_report_names_rr1000_memory_sources(self):
+        shutil.copytree(V0720 / "rr1000" / "rr1000-ctrl-c1", self.tmp / "rr1000-ctrl-c1")
+        self.assertEqual(self.run_main(), 0)
+        report = (self.tmp / "out" / "report.md").read_text()
+        self.assertIn("| rr1000 | wire_vmrss | ", report)
+        self.assertIn("- `wire_vmrss`: KiB; the RR1000 target process's own VmRSS (direct PID", report)
+        self.assertIn("- `wire_vmhwm`: KiB; the RR1000 target process's own VmHWM (direct PID", report)
+
+    def test_report_memory_values_stay_fixed_point(self):
+        # Above seven digits, significant-digit formatting would print 1e+07.
+        table = {("matrix-s2", "daemon_cg_peak"): {"a": [10000000.0, 12345678.0]},
+                 ("matrix-s2", "flap_post_round_rss"): {"a": [407.0, 410.0]},
+                 ("matrix-s2", "reload_completion_p50"): {"a": [12345678.9]}}
+        text = summarize.report(table, ["a"], False, [])
+        self.assertIn("| matrix-s2 | daemon_cg_peak | 10000000–12345678 (median 11172839, n=2) |", text)
+        self.assertIn("| matrix-s2 | flap_post_round_rss | 407–410 (median 408.5, n=2) |", text)
+        self.assertIn("| matrix-s2 | reload_completion_p50 | 1.234568e+07–1.234568e+07 (median 1.234568e+07, n=1) |", text)
+
     def test_daemon_reload_intervals(self):
         cell = matrix_leg(self.tmp, "matrix-a-r1-s2")
         (cell / "daemon.log").write_text(daemon_log(4))
@@ -472,6 +490,13 @@ class ExtractorFailsClosed(unittest.TestCase):
         # the stubbed daemon-log rows differ.
         bundle = {tuple(r) for r in csv.reader((V0740 / "summary.csv").read_text().splitlines()[1:])}
         self.assertLessEqual({tuple(map(str, r)) for r in rows if r[3] not in summarize.RELOAD_METRICS}, bundle)
+        # The new memory readouts extract from queue-layout cells as well.
+        (legs / "matrix-s2-r1-bird" / "bird" / "container-memory").write_text(
+            "container_cg_peak: 456789 kB\ncontainer_cg_swap_peak: 0 kB\n")
+        (irr / "rustbgpd-sighup" / "vmhwm").write_text("VmHWM:\t  700001 kB\nVmRSS:\t  500000 kB\n")
+        rows, _, _ = summarize.extract(self.tmp)
+        self.assertIn(["matrix-s2", "bird", "1", "container_cg_peak", "", "456789", "KiB"], rows)
+        self.assertIn(["irr-ov10", "rustbgpd", "1", "daemon_vmhwm", "", "700001", "KiB"], rows)
 
     def test_bundle_needs_out(self):
         self.assertEqual(quiet_main([str(V0720)]), 2)
