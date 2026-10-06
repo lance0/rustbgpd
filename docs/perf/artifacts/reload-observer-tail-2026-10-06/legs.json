@@ -1,0 +1,70 @@
+{
+  "control": {
+    "quiet_samples": [
+      {
+        "sample": "1",
+        "epoch_s": "1791312213",
+        "load1": "1.08",
+        "pswpin": "2424677",
+        "pswpout": "2447475",
+        "performance_governors": "64",
+        "governor_count": "64",
+        "competitors": "none",
+        "quiet": "true"
+      },
+      {
+        "sample": "2",
+        "epoch_s": "1791312243",
+        "load1": "1.05",
+        "pswpin": "2424677",
+        "pswpout": "2447475",
+        "performance_governors": "64",
+        "governor_count": "64",
+        "competitors": "none",
+        "quiet": "true"
+      }
+    ],
+    "cooldown_seconds": 300,
+    "driver_exit": 0,
+    "runner_exit": 0,
+    "daemon_exit": 0,
+    "analysis_exit": 0,
+    "provenance_verification_exit": 0,
+    "pre_freeze_sha256": "4b3ff2cd6c85af3cda207aec25487809273fb842bb86495e5d4b6918387e228c",
+    "post_freeze_sha256": "4b3ff2cd6c85af3cda207aec25487809273fb842bb86495e5d4b6918387e228c"
+  },
+  "probe": {
+    "quiet_samples": [
+      {
+        "sample": "1",
+        "epoch_s": "1791312700",
+        "load1": "1.04",
+        "pswpin": "2424677",
+        "pswpout": "2447475",
+        "performance_governors": "64",
+        "governor_count": "64",
+        "competitors": "none",
+        "quiet": "true"
+      },
+      {
+        "sample": "2",
+        "epoch_s": "1791312730",
+        "load1": "1.10",
+        "pswpin": "2424677",
+        "pswpout": "2447475",
+        "performance_governors": "64",
+        "governor_count": "64",
+        "competitors": "none",
+        "quiet": "true"
+      }
+    ],
+    "cooldown_seconds": 300,
+    "driver_exit": 0,
+    "runner_exit": 0,
+    "daemon_exit": 0,
+    "analysis_exit": 0,
+    "provenance_verification_exit": 0,
+    "pre_freeze_sha256": "dd996ed79f62ffeb8e7807cb817a67c92ddcede3a8548ba60d01cbf990fa34c5",
+    "post_freeze_sha256": "dd996ed79f62ffeb8e7807cb817a67c92ddcede3a8548ba60d01cbf990fa34c5"
+  }
+}

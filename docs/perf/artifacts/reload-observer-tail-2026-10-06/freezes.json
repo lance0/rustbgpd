@@ -1,0 +1,182 @@
+{
+  "control": {
+    "pre": {
+      "head": "19842a5a114287af7a8f5ae66407aaacc9d0142a",
+      "diff_sha256": "23289bea4d89ed83e3aee623573965a556bf6636fbf1d78f46f46ab576d07dc0",
+      "source": {
+        "bench/scale/reloadstall/src/main.rs": "3434152e8e3b8f88be553331e88f7f08ecb526d23b37b5048df05743b0cd0a8c",
+        "crates/rib/src/manager/distribution/mod.rs": "6eb5b973b098b60fa3cec5da4aa40e6d50bb9904cfcc003031a1c732b00f209e",
+        "crates/transport/src/session/outbound.rs": "cf9ff27fed6f6e62ab8cd7452a662293fa8699653aeafa28c376feb5b702acb8",
+        "crates/transport/src/session/shared_group.rs": "10037d2cf539cf6602871e19c78b72579d56cf856b36cc90d5197b80f501066b",
+        "crates/transport/src/session/writer.rs": "d006c98ed145f42b6f550379d5c8979c309dfc7d4902ea2240eb3dd50798a0a0"
+      },
+      "helpers": {
+        "bench/scale/cgroup-memory.sh": "64753985d0b8c167daa1d382b70fe6f4369275713ebcaec8e4de677ff281ee3a",
+        "bench/scale/host-quiet.sh": "abb3391cd5e0879c29aabd0aa0c316ea33d5f7c72f6d2a7d111b30025de411fd",
+        "bench/scale/matrix/rss-sampler.sh": "3ecffb93298c49f8524320ecebe976efc806f9f0b0caf260d6a1431ca402a10d",
+        "bench/scale/matrix/run-matrix.sh": "d7276ac13132bf33f87cdbd3edc1bc86aec2953f8921683b2db725eca1be5f17",
+        "bench/scale/matrix/verify-provenance.py": "7da2a7088bd2a9669621895c33c60ea6fce6fc62c695be600f63efc4530aedc4",
+        "bench/scale/provenance.sh": "7db6727dc99ec42515359f674e56c749453bc29c9981b67f30568f0d6cce1991",
+        "bench/scale/reloadstall/gen-scenario.py": "e563659beef5857ee79ddac40e1cff5730c34e424b5ca074a3f9007b5dc0ab42",
+        "tests/soak/host-lock.sh": "f5f419bb439f0b5e22521e9f7fa73d4ef73df159abeec31fafff63548899c658"
+      },
+      "archived_binary": "600327d665de6764585c422c77b4b3b7c82d7b4a59b031e257aecee9759fb097",
+      "installed_binary": "600327d665de6764585c422c77b4b3b7c82d7b4a59b031e257aecee9759fb097",
+      "harness": "effe9c204e5cce66f324c49edb13c8ce5f7f4be95c411ec96bd1bcb7fa3e0e70",
+      "build_features": "rustbgpd-transport/bench-internals",
+      "probe": "0",
+      "analysis": "dcd407d3c3034a160a1588669e4b0fbe6b6e1a7cceb62f87326888a1d5dbe486",
+      "build_and_probe_archive": {
+        "run-leg-v4.sh": "876c3b34d4e173fab675cab6e2a4fbea50b25419999a363f907748bbdbdffa1f",
+        "analyze-probe-v4.py": "dcd407d3c3034a160a1588669e4b0fbe6b6e1a7cceb62f87326888a1d5dbe486",
+        "check-analysis-v4.py": "2196603029983b930888c727a3ddb15a3f7010d3d73a39a7c26199b79613977b",
+        "check-optimized-entry-v4.py": "122b3ebdef2c2d2ff5f755e0549da4eaf16ba364f46dcf5e05a65a9532e1f8ab",
+        "build-probe-v4.sh": "b1377bb06d5765aaff19d51714e78b57d8e424de0397d66678c4e97bf1f74ad2",
+        "build-clean-control.sh": "8266f6b7a308baf470baf9674602ed04ce9448f403bafc1854e9ab1af9094a73",
+        "control-source.txt": "91750a0a43ee88c89e1d775ad4e5763ffe0c5d603ccacd1ea37d34427b234894",
+        "build-clean-control.log": "b8f8494370cfae989cace4228886567450cf38a7938d27b611f67c134c407099",
+        "build-clean-control.exit": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+        "build-probe-v4.log": "71aaeaf21b69bfaf169476f184c82b8ec34f432084f65b7bc78e30a8d9917ecf",
+        "build-probe-v4.exit": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+        "build-probe-v4-witness.json": "8ddb2991d9ba274b89bb019c7da982e680026f72c2f42d5ac7876431e8a38eed",
+        "local-instrumentation-v4.diff": "23289bea4d89ed83e3aee623573965a556bf6636fbf1d78f46f46ab576d07dc0",
+        "probe-source-v4-sha256.json": "2c87cb1241ee0ef53dc5ac0623cb6e9743cac9fb326c8b9c04c0b4abc043f74e",
+        "binary-sha256-v4.txt": "f943a78133a11f4c3e5920aee879c5c18f8a484274643ab92a47158d2b56092b"
+      }
+    },
+    "post": {
+      "head": "19842a5a114287af7a8f5ae66407aaacc9d0142a",
+      "diff_sha256": "23289bea4d89ed83e3aee623573965a556bf6636fbf1d78f46f46ab576d07dc0",
+      "source": {
+        "bench/scale/reloadstall/src/main.rs": "3434152e8e3b8f88be553331e88f7f08ecb526d23b37b5048df05743b0cd0a8c",
+        "crates/rib/src/manager/distribution/mod.rs": "6eb5b973b098b60fa3cec5da4aa40e6d50bb9904cfcc003031a1c732b00f209e",
+        "crates/transport/src/session/outbound.rs": "cf9ff27fed6f6e62ab8cd7452a662293fa8699653aeafa28c376feb5b702acb8",
+        "crates/transport/src/session/shared_group.rs": "10037d2cf539cf6602871e19c78b72579d56cf856b36cc90d5197b80f501066b",
+        "crates/transport/src/session/writer.rs": "d006c98ed145f42b6f550379d5c8979c309dfc7d4902ea2240eb3dd50798a0a0"
+      },
+      "helpers": {
+        "bench/scale/cgroup-memory.sh": "64753985d0b8c167daa1d382b70fe6f4369275713ebcaec8e4de677ff281ee3a",
+        "bench/scale/host-quiet.sh": "abb3391cd5e0879c29aabd0aa0c316ea33d5f7c72f6d2a7d111b30025de411fd",
+        "bench/scale/matrix/rss-sampler.sh": "3ecffb93298c49f8524320ecebe976efc806f9f0b0caf260d6a1431ca402a10d",
+        "bench/scale/matrix/run-matrix.sh": "d7276ac13132bf33f87cdbd3edc1bc86aec2953f8921683b2db725eca1be5f17",
+        "bench/scale/matrix/verify-provenance.py": "7da2a7088bd2a9669621895c33c60ea6fce6fc62c695be600f63efc4530aedc4",
+        "bench/scale/provenance.sh": "7db6727dc99ec42515359f674e56c749453bc29c9981b67f30568f0d6cce1991",
+        "bench/scale/reloadstall/gen-scenario.py": "e563659beef5857ee79ddac40e1cff5730c34e424b5ca074a3f9007b5dc0ab42",
+        "tests/soak/host-lock.sh": "f5f419bb439f0b5e22521e9f7fa73d4ef73df159abeec31fafff63548899c658"
+      },
+      "archived_binary": "600327d665de6764585c422c77b4b3b7c82d7b4a59b031e257aecee9759fb097",
+      "installed_binary": "600327d665de6764585c422c77b4b3b7c82d7b4a59b031e257aecee9759fb097",
+      "harness": "effe9c204e5cce66f324c49edb13c8ce5f7f4be95c411ec96bd1bcb7fa3e0e70",
+      "build_features": "rustbgpd-transport/bench-internals",
+      "probe": "0",
+      "analysis": "dcd407d3c3034a160a1588669e4b0fbe6b6e1a7cceb62f87326888a1d5dbe486",
+      "build_and_probe_archive": {
+        "run-leg-v4.sh": "876c3b34d4e173fab675cab6e2a4fbea50b25419999a363f907748bbdbdffa1f",
+        "analyze-probe-v4.py": "dcd407d3c3034a160a1588669e4b0fbe6b6e1a7cceb62f87326888a1d5dbe486",
+        "check-analysis-v4.py": "2196603029983b930888c727a3ddb15a3f7010d3d73a39a7c26199b79613977b",
+        "check-optimized-entry-v4.py": "122b3ebdef2c2d2ff5f755e0549da4eaf16ba364f46dcf5e05a65a9532e1f8ab",
+        "build-probe-v4.sh": "b1377bb06d5765aaff19d51714e78b57d8e424de0397d66678c4e97bf1f74ad2",
+        "build-clean-control.sh": "8266f6b7a308baf470baf9674602ed04ce9448f403bafc1854e9ab1af9094a73",
+        "control-source.txt": "91750a0a43ee88c89e1d775ad4e5763ffe0c5d603ccacd1ea37d34427b234894",
+        "build-clean-control.log": "b8f8494370cfae989cace4228886567450cf38a7938d27b611f67c134c407099",
+        "build-clean-control.exit": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+        "build-probe-v4.log": "71aaeaf21b69bfaf169476f184c82b8ec34f432084f65b7bc78e30a8d9917ecf",
+        "build-probe-v4.exit": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+        "build-probe-v4-witness.json": "8ddb2991d9ba274b89bb019c7da982e680026f72c2f42d5ac7876431e8a38eed",
+        "local-instrumentation-v4.diff": "23289bea4d89ed83e3aee623573965a556bf6636fbf1d78f46f46ab576d07dc0",
+        "probe-source-v4-sha256.json": "2c87cb1241ee0ef53dc5ac0623cb6e9743cac9fb326c8b9c04c0b4abc043f74e",
+        "binary-sha256-v4.txt": "f943a78133a11f4c3e5920aee879c5c18f8a484274643ab92a47158d2b56092b"
+      }
+    }
+  },
+  "probe": {
+    "pre": {
+      "head": "19842a5a114287af7a8f5ae66407aaacc9d0142a",
+      "diff_sha256": "23289bea4d89ed83e3aee623573965a556bf6636fbf1d78f46f46ab576d07dc0",
+      "source": {
+        "bench/scale/reloadstall/src/main.rs": "3434152e8e3b8f88be553331e88f7f08ecb526d23b37b5048df05743b0cd0a8c",
+        "crates/rib/src/manager/distribution/mod.rs": "6eb5b973b098b60fa3cec5da4aa40e6d50bb9904cfcc003031a1c732b00f209e",
+        "crates/transport/src/session/outbound.rs": "cf9ff27fed6f6e62ab8cd7452a662293fa8699653aeafa28c376feb5b702acb8",
+        "crates/transport/src/session/shared_group.rs": "10037d2cf539cf6602871e19c78b72579d56cf856b36cc90d5197b80f501066b",
+        "crates/transport/src/session/writer.rs": "d006c98ed145f42b6f550379d5c8979c309dfc7d4902ea2240eb3dd50798a0a0"
+      },
+      "helpers": {
+        "bench/scale/cgroup-memory.sh": "64753985d0b8c167daa1d382b70fe6f4369275713ebcaec8e4de677ff281ee3a",
+        "bench/scale/host-quiet.sh": "abb3391cd5e0879c29aabd0aa0c316ea33d5f7c72f6d2a7d111b30025de411fd",
+        "bench/scale/matrix/rss-sampler.sh": "3ecffb93298c49f8524320ecebe976efc806f9f0b0caf260d6a1431ca402a10d",
+        "bench/scale/matrix/run-matrix.sh": "d7276ac13132bf33f87cdbd3edc1bc86aec2953f8921683b2db725eca1be5f17",
+        "bench/scale/matrix/verify-provenance.py": "7da2a7088bd2a9669621895c33c60ea6fce6fc62c695be600f63efc4530aedc4",
+        "bench/scale/provenance.sh": "7db6727dc99ec42515359f674e56c749453bc29c9981b67f30568f0d6cce1991",
+        "bench/scale/reloadstall/gen-scenario.py": "e563659beef5857ee79ddac40e1cff5730c34e424b5ca074a3f9007b5dc0ab42",
+        "tests/soak/host-lock.sh": "f5f419bb439f0b5e22521e9f7fa73d4ef73df159abeec31fafff63548899c658"
+      },
+      "archived_binary": "9bce83d837beddbc0235df29374298f5ac00aee9ee71f67312787cfb0d77a927",
+      "installed_binary": "9bce83d837beddbc0235df29374298f5ac00aee9ee71f67312787cfb0d77a927",
+      "harness": "effe9c204e5cce66f324c49edb13c8ce5f7f4be95c411ec96bd1bcb7fa3e0e70",
+      "build_features": "rustbgpd-transport/bench-internals",
+      "probe": "1",
+      "analysis": "dcd407d3c3034a160a1588669e4b0fbe6b6e1a7cceb62f87326888a1d5dbe486",
+      "build_and_probe_archive": {
+        "run-leg-v4.sh": "876c3b34d4e173fab675cab6e2a4fbea50b25419999a363f907748bbdbdffa1f",
+        "analyze-probe-v4.py": "dcd407d3c3034a160a1588669e4b0fbe6b6e1a7cceb62f87326888a1d5dbe486",
+        "check-analysis-v4.py": "2196603029983b930888c727a3ddb15a3f7010d3d73a39a7c26199b79613977b",
+        "check-optimized-entry-v4.py": "122b3ebdef2c2d2ff5f755e0549da4eaf16ba364f46dcf5e05a65a9532e1f8ab",
+        "build-probe-v4.sh": "b1377bb06d5765aaff19d51714e78b57d8e424de0397d66678c4e97bf1f74ad2",
+        "build-clean-control.sh": "8266f6b7a308baf470baf9674602ed04ce9448f403bafc1854e9ab1af9094a73",
+        "control-source.txt": "91750a0a43ee88c89e1d775ad4e5763ffe0c5d603ccacd1ea37d34427b234894",
+        "build-clean-control.log": "b8f8494370cfae989cace4228886567450cf38a7938d27b611f67c134c407099",
+        "build-clean-control.exit": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+        "build-probe-v4.log": "71aaeaf21b69bfaf169476f184c82b8ec34f432084f65b7bc78e30a8d9917ecf",
+        "build-probe-v4.exit": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+        "build-probe-v4-witness.json": "8ddb2991d9ba274b89bb019c7da982e680026f72c2f42d5ac7876431e8a38eed",
+        "local-instrumentation-v4.diff": "23289bea4d89ed83e3aee623573965a556bf6636fbf1d78f46f46ab576d07dc0",
+        "probe-source-v4-sha256.json": "2c87cb1241ee0ef53dc5ac0623cb6e9743cac9fb326c8b9c04c0b4abc043f74e",
+        "binary-sha256-v4.txt": "f943a78133a11f4c3e5920aee879c5c18f8a484274643ab92a47158d2b56092b"
+      }
+    },
+    "post": {
+      "head": "19842a5a114287af7a8f5ae66407aaacc9d0142a",
+      "diff_sha256": "23289bea4d89ed83e3aee623573965a556bf6636fbf1d78f46f46ab576d07dc0",
+      "source": {
+        "bench/scale/reloadstall/src/main.rs": "3434152e8e3b8f88be553331e88f7f08ecb526d23b37b5048df05743b0cd0a8c",
+        "crates/rib/src/manager/distribution/mod.rs": "6eb5b973b098b60fa3cec5da4aa40e6d50bb9904cfcc003031a1c732b00f209e",
+        "crates/transport/src/session/outbound.rs": "cf9ff27fed6f6e62ab8cd7452a662293fa8699653aeafa28c376feb5b702acb8",
+        "crates/transport/src/session/shared_group.rs": "10037d2cf539cf6602871e19c78b72579d56cf856b36cc90d5197b80f501066b",
+        "crates/transport/src/session/writer.rs": "d006c98ed145f42b6f550379d5c8979c309dfc7d4902ea2240eb3dd50798a0a0"
+      },
+      "helpers": {
+        "bench/scale/cgroup-memory.sh": "64753985d0b8c167daa1d382b70fe6f4369275713ebcaec8e4de677ff281ee3a",
+        "bench/scale/host-quiet.sh": "abb3391cd5e0879c29aabd0aa0c316ea33d5f7c72f6d2a7d111b30025de411fd",
+        "bench/scale/matrix/rss-sampler.sh": "3ecffb93298c49f8524320ecebe976efc806f9f0b0caf260d6a1431ca402a10d",
+        "bench/scale/matrix/run-matrix.sh": "d7276ac13132bf33f87cdbd3edc1bc86aec2953f8921683b2db725eca1be5f17",
+        "bench/scale/matrix/verify-provenance.py": "7da2a7088bd2a9669621895c33c60ea6fce6fc62c695be600f63efc4530aedc4",
+        "bench/scale/provenance.sh": "7db6727dc99ec42515359f674e56c749453bc29c9981b67f30568f0d6cce1991",
+        "bench/scale/reloadstall/gen-scenario.py": "e563659beef5857ee79ddac40e1cff5730c34e424b5ca074a3f9007b5dc0ab42",
+        "tests/soak/host-lock.sh": "f5f419bb439f0b5e22521e9f7fa73d4ef73df159abeec31fafff63548899c658"
+      },
+      "archived_binary": "9bce83d837beddbc0235df29374298f5ac00aee9ee71f67312787cfb0d77a927",
+      "installed_binary": "9bce83d837beddbc0235df29374298f5ac00aee9ee71f67312787cfb0d77a927",
+      "harness": "effe9c204e5cce66f324c49edb13c8ce5f7f4be95c411ec96bd1bcb7fa3e0e70",
+      "build_features": "rustbgpd-transport/bench-internals",
+      "probe": "1",
+      "analysis": "dcd407d3c3034a160a1588669e4b0fbe6b6e1a7cceb62f87326888a1d5dbe486",
+      "build_and_probe_archive": {
+        "run-leg-v4.sh": "876c3b34d4e173fab675cab6e2a4fbea50b25419999a363f907748bbdbdffa1f",
+        "analyze-probe-v4.py": "dcd407d3c3034a160a1588669e4b0fbe6b6e1a7cceb62f87326888a1d5dbe486",
+        "check-analysis-v4.py": "2196603029983b930888c727a3ddb15a3f7010d3d73a39a7c26199b79613977b",
+        "check-optimized-entry-v4.py": "122b3ebdef2c2d2ff5f755e0549da4eaf16ba364f46dcf5e05a65a9532e1f8ab",
+        "build-probe-v4.sh": "b1377bb06d5765aaff19d51714e78b57d8e424de0397d66678c4e97bf1f74ad2",
+        "build-clean-control.sh": "8266f6b7a308baf470baf9674602ed04ce9448f403bafc1854e9ab1af9094a73",
+        "control-source.txt": "91750a0a43ee88c89e1d775ad4e5763ffe0c5d603ccacd1ea37d34427b234894",
+        "build-clean-control.log": "b8f8494370cfae989cace4228886567450cf38a7938d27b611f67c134c407099",
+        "build-clean-control.exit": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+        "build-probe-v4.log": "71aaeaf21b69bfaf169476f184c82b8ec34f432084f65b7bc78e30a8d9917ecf",
+        "build-probe-v4.exit": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+        "build-probe-v4-witness.json": "8ddb2991d9ba274b89bb019c7da982e680026f72c2f42d5ac7876431e8a38eed",
+        "local-instrumentation-v4.diff": "23289bea4d89ed83e3aee623573965a556bf6636fbf1d78f46f46ab576d07dc0",
+        "probe-source-v4-sha256.json": "2c87cb1241ee0ef53dc5ac0623cb6e9743cac9fb326c8b9c04c0b4abc043f74e",
+        "binary-sha256-v4.txt": "f943a78133a11f4c3e5920aee879c5c18f8a484274643ab92a47158d2b56092b"
+      }
+    }
+  }
+}

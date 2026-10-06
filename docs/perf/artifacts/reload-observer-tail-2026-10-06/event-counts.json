@@ -1,0 +1,46 @@
+{
+  "before_first_trigger": {
+    "scout consumer entered": 244300,
+    "scout encoder sorted": 349,
+    "scout first shared enqueue": 244300,
+    "scout first publish": 349,
+    "scout encoder finished": 349,
+    "benchmark writer write-future polls (not kernel wakeups)": 701
+  },
+  "1": {
+    "scout member release": 700,
+    "scout consumer entered": 700,
+    "scout encoder sorted": 1,
+    "scout first shared enqueue": 700,
+    "scout first publish": 1,
+    "benchmark writer write-future polls (not kernel wakeups)": 744,
+    "scout encoder finished": 1
+  },
+  "2": {
+    "scout member release": 700,
+    "scout consumer entered": 700,
+    "scout encoder sorted": 1,
+    "scout first shared enqueue": 700,
+    "scout first publish": 1,
+    "benchmark writer write-future polls (not kernel wakeups)": 901,
+    "scout encoder finished": 1
+  },
+  "3": {
+    "scout member release": 700,
+    "scout consumer entered": 700,
+    "scout encoder sorted": 1,
+    "scout first shared enqueue": 700,
+    "scout first publish": 1,
+    "benchmark writer write-future polls (not kernel wakeups)": 703,
+    "scout encoder finished": 1
+  },
+  "4": {
+    "scout member release": 700,
+    "scout consumer entered": 700,
+    "scout encoder sorted": 1,
+    "scout first shared enqueue": 700,
+    "scout first publish": 1,
+    "benchmark writer write-future polls (not kernel wakeups)": 1363,
+    "scout encoder finished": 1
+  }
+}

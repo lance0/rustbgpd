@@ -1,0 +1,210 @@
+[
+  {
+    "reload": 1,
+    "observers": 700,
+    "writer_matched": 700,
+    "gap_ms": {
+      "p50": 220.363,
+      "p95": 317.6,
+      "max": 380.805
+    },
+    "gap_ends_first_base": 700,
+    "gap_ends_first_generation": 700,
+    "correlation_with_gap": {
+      "release_rank": 0.08267856229485823,
+      "consumer_ms": 0.08267072626696587,
+      "enqueue_ms": 0.9537226146623585,
+      "writer_start_ms": 0.9536979698072714,
+      "enqueue_to_writer_trace_ms": 0.7891671937777724,
+      "writer_elapsed_ms": 0.7286974659196125,
+      "writer_busy_ms": 0.7270635035622935,
+      "writer_pending_polls": null,
+      "batch_bytes": 0.9223848777484387,
+      "batch_frames": 0.9269343774095338,
+      "send_buffer": null
+    },
+    "release_to_consumer_ms": {
+      "p50": 0.011000000000080945,
+      "p95": 0.022000000000048203,
+      "max": 120.42400000000009
+    },
+    "enqueue_to_writer_trace_ms": {
+      "p50": 0.02500000000009095,
+      "p95": 0.06100000000003547,
+      "max": 6.66700000000003
+    },
+    "writer_elapsed_ms": {
+      "p50": 0.031,
+      "p95": 0.058,
+      "max": 0.169
+    },
+    "writer_busy_ms": {
+      "p50": 0.030867,
+      "p95": 0.058267,
+      "max": 0.168712
+    },
+    "writer_to_arrival_ms": {
+      "p50": 2.6154999999999973,
+      "p95": 52.11349999999993,
+      "max": 117.65949999999987
+    },
+    "first_writer_pending_count": 0,
+    "writer_started_before_enqueue_log": 0
+  },
+  {
+    "reload": 2,
+    "observers": 700,
+    "writer_matched": 700,
+    "gap_ms": {
+      "p50": 230.044,
+      "p95": 387.987,
+      "max": 400.9
+    },
+    "gap_ends_first_base": 700,
+    "gap_ends_first_generation": 700,
+    "correlation_with_gap": {
+      "release_rank": 0.4147829921366958,
+      "consumer_ms": 0.41497232472002005,
+      "enqueue_ms": 0.905474233703842,
+      "writer_start_ms": 0.9054558771936135,
+      "enqueue_to_writer_trace_ms": 0.6569795678526998,
+      "writer_elapsed_ms": 0.7833333841223925,
+      "writer_busy_ms": 0.780558102744977,
+      "writer_pending_polls": null,
+      "batch_bytes": 0.8894171841972293,
+      "batch_frames": 0.8894159008477399,
+      "send_buffer": null
+    },
+    "release_to_consumer_ms": {
+      "p50": 0.018000000000029104,
+      "p95": 0.22700000000008913,
+      "max": 144.8259999999999
+    },
+    "enqueue_to_writer_trace_ms": {
+      "p50": 0.02299999999991087,
+      "p95": 0.04099999999993997,
+      "max": 4.814999999999941
+    },
+    "writer_elapsed_ms": {
+      "p50": 0.025,
+      "p95": 0.037,
+      "max": 0.072
+    },
+    "writer_busy_ms": {
+      "p50": 0.025067,
+      "p95": 0.037176,
+      "max": 0.071657
+    },
+    "writer_to_arrival_ms": {
+      "p50": 15.277000000000044,
+      "p95": 158.784,
+      "max": 169.928
+    },
+    "first_writer_pending_count": 0,
+    "writer_started_before_enqueue_log": 0
+  },
+  {
+    "reload": 3,
+    "observers": 700,
+    "writer_matched": 700,
+    "gap_ms": {
+      "p50": 234.099,
+      "p95": 395.027,
+      "max": 406.658
+    },
+    "gap_ends_first_base": 700,
+    "gap_ends_first_generation": 700,
+    "correlation_with_gap": {
+      "release_rank": 0.0075978355452098415,
+      "consumer_ms": 0.010751046956667233,
+      "enqueue_ms": 0.9070976896738289,
+      "writer_start_ms": 0.9070029861614246,
+      "enqueue_to_writer_trace_ms": 0.7901373066070229,
+      "writer_elapsed_ms": 0.616582566361953,
+      "writer_busy_ms": 0.6136692464337264,
+      "writer_pending_polls": null,
+      "batch_bytes": 0.8730879728812952,
+      "batch_frames": 0.8849859457569192,
+      "send_buffer": null
+    },
+    "release_to_consumer_ms": {
+      "p50": 0.01700000000005275,
+      "p95": 0.9559999999999036,
+      "max": 116.36799999999994
+    },
+    "enqueue_to_writer_trace_ms": {
+      "p50": 0.021999999999934516,
+      "p95": 0.07900000000006457,
+      "max": 5.247999999999934
+    },
+    "writer_elapsed_ms": {
+      "p50": 0.031,
+      "p95": 0.083,
+      "max": 0.194
+    },
+    "writer_busy_ms": {
+      "p50": 0.031548,
+      "p95": 0.083014,
+      "max": 0.19392
+    },
+    "writer_to_arrival_ms": {
+      "p50": 0.6915000000000191,
+      "p95": 68.07450000000006,
+      "max": 78.7065
+    },
+    "first_writer_pending_count": 0,
+    "writer_started_before_enqueue_log": 0
+  },
+  {
+    "reload": 4,
+    "observers": 700,
+    "writer_matched": 700,
+    "gap_ms": {
+      "p50": 272.216,
+      "p95": 428.839,
+      "max": 464.226
+    },
+    "gap_ends_first_base": 700,
+    "gap_ends_first_generation": 700,
+    "correlation_with_gap": {
+      "release_rank": 0.2615027593761848,
+      "consumer_ms": 0.26149284556178354,
+      "enqueue_ms": 0.9487396267220075,
+      "writer_start_ms": 0.9487415071927616,
+      "enqueue_to_writer_trace_ms": 0.8398977286275583,
+      "writer_elapsed_ms": 0.8750268648723778,
+      "writer_busy_ms": 0.8752105942158372,
+      "writer_pending_polls": null,
+      "batch_bytes": 0.9376501572484078,
+      "batch_frames": 0.9376498159388887,
+      "send_buffer": null
+    },
+    "release_to_consumer_ms": {
+      "p50": 0.010999999999967258,
+      "p95": 0.019000000000005457,
+      "max": 139.49200000000008
+    },
+    "enqueue_to_writer_trace_ms": {
+      "p50": 0.02400000000000091,
+      "p95": 0.09699999999997999,
+      "max": 6.567000000000007
+    },
+    "writer_elapsed_ms": {
+      "p50": 0.027,
+      "p95": 0.087,
+      "max": 0.158
+    },
+    "writer_busy_ms": {
+      "p50": 0.02666,
+      "p95": 0.086599,
+      "max": 0.157706
+    },
+    "writer_to_arrival_ms": {
+      "p50": 7.277000000000044,
+      "p95": 72.01800000000003,
+      "max": 83.13499999999999
+    },
+    "first_writer_pending_count": 0,
+    "writer_started_before_enqueue_log": 0
+  }
+]
