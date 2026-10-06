@@ -270,7 +270,8 @@ class ContainerOwnershipTests(unittest.TestCase):
                 proc, cgroup, pid, owner = self.exit_fixture(root)
                 read_text = Path.read_text
 
-                def disappear_during_sample(path, *args, **kwargs):
+                def disappear_during_sample(path, *args, proc=proc, cgroup=cgroup,
+                                            fault=fault, read_text=read_text, **kwargs):
                     if path == cgroup / "memory.current":
                         (proc / "stat").write_text(read_text(proc / "stat").replace(") S ", ") Z "))
                         (proc / "status").write_text("State: Z\n")
@@ -287,7 +288,7 @@ class ContainerOwnershipTests(unittest.TestCase):
                     return read_text(path, *args, **kwargs)
 
                 paths = {f"/proc/{pid}": proc, "/sys/fs/cgroup": Path("/")}
-                with patch.object(sampler, "Path", side_effect=lambda value: paths[value]), \
+                with patch.object(sampler, "Path", side_effect=lambda value, paths=paths: paths[value]), \
                         patch.object(Path, "read_text", disappear_during_sample):
                     if fault in {None, "gone"}:
                         sampler.sample(pid, root / "out.csv", 0.025, owner=owner)
