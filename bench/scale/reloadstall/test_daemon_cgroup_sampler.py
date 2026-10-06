@@ -450,6 +450,14 @@ class LegWrapperTests(unittest.TestCase):
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True)
         try:
             _stdout, stderr = child.communicate(timeout=12)
+            self.assertNotEqual(child.returncode, 0)
+            self.assertTrue(ready.exists(), stderr)
+            self.assertEqual((self.out / "sampler.exit").read_text().strip(), "137")
+            self.assertIn("returned non-zero exit status 7", (self.out / "runner.log").read_text())
+            proc = Path(f"/proc/{ready.read_text()}/stat")
+            self.assertTrue(not proc.exists() or proc.read_text().split(") ")[1].startswith("Z"))
+            with lock.open("w") as stream:
+                fcntl.flock(stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
         finally:
             # A deliberately broken wrapper must not leak the regression's processes.
             groups = [child.pid]
@@ -461,14 +469,6 @@ class LegWrapperTests(unittest.TestCase):
                 except ProcessLookupError:
                     pass
             child.wait()
-        self.assertNotEqual(child.returncode, 0)
-        self.assertTrue(ready.exists(), stderr)
-        self.assertEqual((self.out / "sampler.exit").read_text().strip(), "137")
-        self.assertIn("returned non-zero exit status 7", (self.out / "runner.log").read_text())
-        proc = Path(f"/proc/{ready.read_text()}/stat")
-        self.assertTrue(not proc.exists() or proc.read_text().split(") ")[1].startswith("Z"))
-        with lock.open("w") as stream:
-            fcntl.flock(stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
 
     def test_term_ignoring_group_is_killed_before_waiting(self):
         ready = Path(self.temp.name) / "ready"
