@@ -758,6 +758,7 @@ elif cmd=='wait':
         while data['State']['Running']:
             time.sleep(.01); data=json.loads(path.read_text())
     else:
+        time.sleep(float(os.environ.get('TEST_RECEIVER_SECS','0')))
         data['State']['Running']=False
         data['State']['ExitCode']=int(os.environ.get('TEST_RECEIVER_EXIT','0'));save(path,data)
     print(data['State']['ExitCode'])
@@ -781,7 +782,8 @@ else: sys.exit(2)
 from pathlib import Path
 root=Path(os.environ['TEST_ROOT'])
 out=Path(sys.argv[sys.argv.index('--out')+1])
-out.write_text('epoch_us,monotonic_ns,read_us,vmrss_kib\\n1,1,1,4096\\n')
+out.write_text('epoch_us,monotonic_ns,read_us,vmrss_kib\\n1,1,1,4096\\n'
+               + os.environ.get('TEST_FAST_TAIL', ''))
 while not (root/'daemon-stopped').exists():
     if os.environ.get('TEST_SAMPLER_FAIL') and (root/'ready').exists(): sys.exit(7)
     time.sleep(.01)
@@ -900,6 +902,20 @@ provenance_sha256_file() { echo fake-binary-hash; }
                     for path, data in retained.items(): self.assertEqual(path.read_bytes(), data)
                     self.assertEqual(status.read_text() if status.exists() else None, old_status)
                     self.assertTrue(link.is_symlink() and dangling.is_symlink())
+
+    def test_rss_guard_skips_torn_rows_and_enforces_parsed_values(self):
+        # Torn reads of the row being written: no 4th field, or no delimiter at all.
+        for tail, expected in (("1,1", 0), ("1728300000000000", 0), ("1,1,1,2097152\n", 1)):
+            with self.subTest(tail=tail):
+                for path in (self.root / "daemon-stopped", self.trace, *self.cdir.glob("*.cid")):
+                    path.unlink(missing_ok=True)
+                result = subprocess.run(["bash", str(self.script)], env=dict(
+                    self.env, TEST_FAST_TAIL=tail,
+                    **({"TEST_BLOCK_RECEIVER": "1"} if expected else {"TEST_RECEIVER_SECS": "1"})),
+                    capture_output=True, timeout=15)
+                self.assertEqual(result.returncode, expected, result.stderr)
+                self.assertEqual(b"> 1048576 KiB, aborting cell" in result.stderr, bool(expected))
+                self.assert_cleanup_order()
 
     def test_sampler_failure_aborts_receiver_and_preserves_failure(self):
         result = subprocess.run(["bash", str(self.script)], env=dict(

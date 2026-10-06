@@ -579,8 +579,12 @@ run_container_cell() (
     while kill -0 "$waiter" 2>/dev/null; do
         kill -0 "$fast_pid" 2>/dev/null || exit 1
         local last_kib
-        last_kib=$(tail -n1 "$fast_out" | cut -d, -f4)
-        [[ $last_kib =~ ^[0-9]+$ ]] && [ "$last_kib" -le "$RSS_LIMIT_KIB" ] || exit 1
+        # A torn final row yields a missing or truncated field; skip it.
+        last_kib=$(tail -n1 "$fast_out" | cut -s -d, -f4)
+        if [[ $last_kib =~ ^[0-9]+$ ]] && [ "$last_kib" -gt "$RSS_LIMIT_KIB" ]; then
+            echo "container cell: daemon RSS ${last_kib} KiB > ${RSS_LIMIT_KIB} KiB, aborting cell" >&2
+            exit 1
+        fi
         sleep 0.2
     done
     wait "$waiter" || exit 1
@@ -747,7 +751,7 @@ run_cell() {
     local rc=""
     while kill -0 "$hpid" 2>/dev/null; do
         local last_kib
-        last_kib=$(tail -n1 "$cdir/rss.csv" 2>/dev/null | cut -d, -f2)
+        last_kib=$(tail -n1 "$cdir/rss.csv" 2>/dev/null | cut -s -d, -f2)
         case ${last_kib:-} in
         '' | *[!0-9]*) ;;
         *)
