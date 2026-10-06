@@ -110,7 +110,7 @@ def main(root):
             for key in record.keys() - {"leg", "round"}:
                 record[key] = int(record[key])
     for row in rows:
-        selected = lambda records: [r for r in records if (r["leg"], r["round"]) == (row["leg"], row["round"])]
+        selected = lambda records, row=row: [r for r in records if (r["leg"], r["round"]) == (row["leg"], row["round"])]
         peers, survivors = selected(catches), selected(arrivals)
         for c in peers:
             need(c["unique"] == c["target"] == 399828, "returning current coverage")
