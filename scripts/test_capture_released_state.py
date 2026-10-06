@@ -59,9 +59,21 @@ class ReleasedStateCaptureTests(unittest.TestCase):
                              ("capture", "nonce", "other")):
                 with self.subTest(identity=identity), self.assertRaisesRegex(ValueError, "ownership"):
                     CAPTURE["recover_container"](*identity)
-        absent = subprocess.CompletedProcess([], 1, "", "Error: No such object: capture")
-        with mock.patch.object(subprocess, "run", return_value=absent):
-            self.assertIsNone(CAPTURE["recover_container"]("capture", "nonce", "image"))
+        for message in ("Error response from daemon: No such container: capture",
+                        "Error: No such container: capture", "error: no such container: capture"):
+            absent = subprocess.CompletedProcess([], 1, "", message)
+            with self.subTest(message=message), \
+                 mock.patch.object(subprocess, "run", return_value=absent) as inspect:
+                self.assertIsNone(CAPTURE["recover_container"]("capture", "nonce", "image"))
+                self.assertEqual(inspect.call_args.args[0],
+                                 ["docker", "inspect", "--type", "container", "capture"])
+        for message in ("Error: No such image: capture", "permission denied",
+                        "error: no such container: other"):
+            failed = subprocess.CompletedProcess([], 1, "", message)
+            with self.subTest(message=message), \
+                 mock.patch.object(subprocess, "run", return_value=failed), \
+                 self.assertRaisesRegex(RuntimeError, "cannot inspect"):
+                CAPTURE["recover_container"]("capture", "nonce", "image")
 
     def test_create_timeout_recovers_owned_container_and_preserves_failure(self):
         for cleanup_failure in (None, "logs", "remove"):
@@ -94,7 +106,7 @@ class ReleasedStateCaptureTests(unittest.TestCase):
 
                 def fake_process(args, created=created, cleanup_failure=cleanup_failure, **_kwargs):
                     if args[1] == "inspect":
-                        self.assertEqual(args[2], created["Name"][1:])
+                        self.assertEqual(args[2:], ["--type", "container", created["Name"][1:]])
                         return subprocess.CompletedProcess(args, 0, json.dumps([created]), "")
                     self.assertEqual(args, ["docker", "logs", created["Id"]])
                     code = int(cleanup_failure == "logs")

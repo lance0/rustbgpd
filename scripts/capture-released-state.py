@@ -53,9 +53,11 @@ def check_history(row, expected):
 
 
 def recover_container(name, nonce, image):
-    result = subprocess.run(["docker", "inspect", name], capture_output=True, text=True, timeout=10)
+    result = subprocess.run(["docker", "inspect", "--type", "container", name],
+                            capture_output=True, text=True, timeout=10)
     if result.returncode:
-        if "No such object:" in result.stderr:
+        # Docker's absence wording and capitalization vary across releases.
+        if f"no such container: {name}" in result.stderr.lower():
             return None
         raise RuntimeError(f"cannot inspect capture container: {result.stderr}")
     inspected = json.loads(result.stdout)

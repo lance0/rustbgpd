@@ -124,6 +124,9 @@ jobs:
         run: |
           python3 -m unittest -v scripts/test_check_bench_inventory.py
           python3 scripts/check_bench_inventory.py
+      # The released-state fixture recapture helper has no other CI executor.
+      - name: Prove released-state capture helper
+        run: python3 -m unittest -v scripts/test_capture_released_state.py
       # A reintroduced floating toolchain stays invisible until an upstream
       # compiler break takes the scheduled campaign down, and the failure then
       # reads as if it came from this repository.
