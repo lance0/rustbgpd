@@ -9993,8 +9993,8 @@ fn prestaged_probe_snapshot_drift_requires_fenced_probe_or_rejection() {
 }
 
 /// A withdrawn maximum must not survive in the shared proof, and a new larger
-/// row must not inherit its predecessor's successful length. Equal-cardinality
-/// churn patches the sealed payload and re-probes only the replacement row.
+/// row must not inherit its predecessor's successful length. Dirty churn
+/// retains clean proofs and re-probes only the replacement row.
 #[test]
 fn prestaged_probe_dirty_replacement_updates_exact_maximum() {
     for (old_index, new_index, expected) in [(0, 1, "committed"), (1, 0, "fallback")] {
@@ -10023,15 +10023,6 @@ fn prestaged_probe_dirty_replacement_updates_exact_maximum() {
         let policy = community_chain(0xFDE8_0002);
         let (source, destination) = complete_prestage(&mut manager, peers[0], &policy);
         assert_eq!(probes.load(Ordering::Relaxed), 1);
-        let before = manager
-            .prestaged_inventory
-            .as_ref()
-            .unwrap()
-            .sealed
-            .as_ref()
-            .unwrap()
-            .announce
-            .as_ptr();
         churn_fixture_source(
             &mut manager,
             vec![crate::test_support::make_route(
@@ -10049,11 +10040,6 @@ fn prestaged_probe_dirty_replacement_updates_exact_maximum() {
         loop {
             let pending = manager.pending_clean_policy_transition.as_ref().unwrap();
             if let Some(prestaged) = pending.probe_inventory() {
-                assert_eq!(
-                    before,
-                    prestaged.announce.as_ptr(),
-                    "patch keeps the directly allocated Arc"
-                );
                 assert_inventories_equal(&fenced, prestaged);
                 assert_eq!(
                     probes.load(Ordering::Relaxed),
@@ -10091,8 +10077,8 @@ fn prestaged_probe_dirty_replacement_updates_exact_maximum() {
     }
 }
 
-/// New/removed keys after sealing change the payload's cardinality. The safe
-/// resize path must retain the exact current inventory and its aligned proof.
+/// New/removed keys after probing change the payload's cardinality. Compaction
+/// must retain the exact current inventory and its aligned proof.
 #[test]
 fn prestaged_inventory_cardinality_changes_match_fenced_rebuild() {
     for (add, remove) in [(true, false), (false, true), (false, false)] {
@@ -10330,7 +10316,7 @@ fn prestaged_inventory_slab_reuse_during_walk_has_no_stale_or_duplicate_rows() {
             .prefix,
         Prefix::V4(fixture_prefix(200))
     );
-    // Remove and re-announce the replacement once more before sealing.
+    // Remove and re-announce the replacement once more before probing.
     churn_fixture_source(&mut manager, vec![], vec![Prefix::V4(fixture_prefix(200))]);
     churn_fixture_source(
         &mut manager,

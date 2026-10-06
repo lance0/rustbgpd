@@ -111,23 +111,18 @@ fenced walk described in Section 3, so the commit-or-degrade outcome is that of 
 fenced walk of the same tables.
 
 **Amended:** 2026-10-06 — the unfenced inventory walk clones owned route rows and
-aligned next-hop actions in bounded slices. Sealing transfers those vectors into
-shared slices; the two contiguous copies remain linear, uninterruptible operations,
-measured separately by the seal debug event. Mutation logs remain active from the
-start of the walk through sealing and probing, so slot reuse and churn are
-reconciled at the fence.
-The `rustbgpd_rib::clean_export_probe` debug target captures seal and reconciliation
-durations (including old-payload retirement), reconciliation path and row counts,
-proof validation, and the full-probe count at entry to `Validate`, without enabling
-per-prefix distribution events.
+aligned next-hop actions in bounded slices, retaining its existing vectors. The
+rows are exact-probed in unfenced slices against the preparing member's immutable
+encoder snapshot. Mutation logs remain active throughout the walk and probe.
 
-The sealed inventory is exact-probed in unfenced slices against the preparing
-member's immutable encoder snapshot. Under the fence, equal-cardinality churn
-patches the uniquely owned payload in place. Cardinality changes rebuild aligned
-shared slices from an exact-size iterator and compact the successful encoded
-lengths in the same row order. Only new and changed rows are re-probed before
-computing the current maximum; withdrawn maxima cannot survive in the proof.
-The resize still copies route shells, but does not repeat clean-row encoding.
+Under the fence, the inventory vectors and successful encoded lengths use the
+same in-place compaction for logged keys. Changed rows are appended and re-probed
+before computing the current maximum; withdrawn maxima cannot survive in the
+proof. One final seal converts the reconciled vectors into shared slices. Those
+contiguous copies remain linear, uninterruptible operations under the fence.
+The `rustbgpd_rib::clean_export_probe` debug target captures their duration with
+`phase=fenced`, reconciliation path and row counts, proof validation, and the
+full-probe count at entry to `Validate`, without enabling per-prefix events.
 
 An incomplete proof, more than one route slice of changed rows, probe rejection,
 or encoder owner/generation drift discards the proof and runs the fenced probe.

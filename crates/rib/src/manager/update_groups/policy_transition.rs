@@ -87,10 +87,9 @@ pub(in crate::manager) struct PrestagedTransitionInventory {
     /// Next destination slab slot to visit.
     cursor: usize,
     complete: bool,
-    /// Owned rows cloned in bounded walk slices before conversion to an Arc.
-    announce: Vec<Route>,
-    next_hop_override: Vec<Option<NextHopAction>>,
-    pub(in crate::manager) sealed: Option<CleanPolicyTransitionInventory>,
+    /// Owned rows probed in bounded slices and reconciled before final sealing.
+    pub(in crate::manager) announce: Vec<Route>,
+    pub(in crate::manager) next_hop_override: Vec<Option<NextHopAction>>,
     pub(in crate::manager) probe: Option<crate::manager::distribution::PrestagedTransitionProbe>,
     /// Keys failing a drift check as of their last visit.
     failed: FastMap<(Prefix, u32), &'static str>,
@@ -319,7 +318,6 @@ impl RibManager {
             complete: false,
             announce: Vec::new(),
             next_hop_override: Vec::new(),
-            sealed: None,
             probe: None,
             failed: FastMap::default(),
             tagged: FastSet::default(),
@@ -339,9 +337,6 @@ impl RibManager {
             return true;
         };
         prestaged.complete = complete;
-        if complete {
-            self.seal_prestaged_transition_inventory(&mut prestaged);
-        }
         self.prestaged_inventory = Some(prestaged);
         complete
     }
@@ -398,29 +393,6 @@ impl RibManager {
         Some(end == slots)
     }
 
-    /// Only contiguous Vec-to-Arc transfers remain here: route cloning and
-    /// policy inspection already ran in bounded inventory-walk slices. Keep
-    /// the mutation logs intact until the fence rechecks every touched key.
-    fn seal_prestaged_transition_inventory(&self, prestaged: &mut PrestagedTransitionInventory) {
-        self.replacement_checkpoint(true);
-        let started = std::time::Instant::now();
-        let announce = std::mem::take(&mut prestaged.announce).into();
-        self.replacement_checkpoint(true);
-        let next_hop_override = std::mem::take(&mut prestaged.next_hop_override).into();
-        self.replacement_checkpoint(true);
-        prestaged.sealed = Some(CleanPolicyTransitionInventory {
-            announce,
-            next_hop_override,
-            permit_totals: std::collections::HashMap::default(),
-            permit_by_source: std::collections::HashMap::default(),
-        });
-        tracing::debug!(
-            target: "rustbgpd_rib::clean_export_probe",
-            elapsed_us = started.elapsed().as_micros(),
-            "clean policy transition prestaged payload sealed"
-        );
-    }
-
     /// Under the fence: turn the prestaged inventory for `source` →
     /// `destination` into the exact inventory a fenced full walk of the
     /// current tables would build, re-checking only the keys churn touched
@@ -461,47 +433,43 @@ impl RibManager {
         outcome
     }
 
-    /// Reconcile touched rows and their aligned proof. Equal cardinality patches
-    /// the unpublished slices; resizing copies only payload shells, not probes.
-    fn reconcile_sealed_transition_payload(
+    /// Compact rows and their successful lengths together, then re-probe only
+    /// the dirty suffix. Keep the vectors until the final shared-payload seal.
+    fn reconcile_prestaged_transition_rows(
         &self,
         prestaged: &mut PrestagedTransitionInventory,
         dirty: &FastSet<(Prefix, u32)>,
         old: &GroupRibOut,
         new: &GroupRibOut,
-    ) -> Option<CleanPolicyTransitionInventoryBuilder> {
+    ) {
         let checkpoint = || self.replacement_checkpoint(false);
-        let mut sealed = prestaged.sealed.take()?;
         let started = std::time::Instant::now();
-        let mut inventory = CleanPolicyTransitionInventoryBuilder::default();
-        if dirty.is_empty() {
-            tracing::debug!(
-                target: "rustbgpd_rib::clean_export_probe",
-                path = "unchanged",
-                dirty_keys = 0,
-                touched_rows = 0,
-                changed_rows = 0,
-                proof_retained = prestaged.probe.is_some(),
-                elapsed_us = started.elapsed().as_micros(),
-                "clean policy transition prestaged payload reconciled"
-            );
-            inventory.prebuilt = Some(sealed);
-            return Some(inventory);
+        let prior_count = prestaged.announce.len();
+        if let Some(mut probe) = prestaged.probe.take_if(|probe| {
+            probe.cursor != prior_count || probe.encoded_lengths.len() != prior_count
+        }) {
+            probe.retire_with(&mut || checkpoint());
         }
-        let touched_positions = sealed
-            .announce
-            .iter()
-            .enumerate()
-            .filter_map(|(index, route)| {
+        let mut kept = prior_count;
+        if !dirty.is_empty() {
+            kept = 0;
+            for index in 0..prior_count {
                 checkpoint();
-                dirty
-                    .contains(&(route.prefix, route.path_id))
-                    .then_some(index)
-            })
-            .collect::<Vec<_>>();
-        prestaged.failed.retain(|key, _| !dirty.contains(key));
-        prestaged.tagged.retain(|key| !dirty.contains(key));
-        let mut changed = Vec::with_capacity(dirty.len());
+                let route = &prestaged.announce[index];
+                if !dirty.contains(&(route.prefix, route.path_id)) {
+                    prestaged.announce.swap(kept, index);
+                    prestaged.next_hop_override.swap(kept, index);
+                    if let Some(probe) = prestaged.probe.as_mut() {
+                        probe.encoded_lengths.swap(kept, index);
+                    }
+                    kept += 1;
+                }
+            }
+            prestaged.announce.truncate(kept);
+            prestaged.next_hop_override.truncate(kept);
+            prestaged.failed.retain(|key, _| !dirty.contains(key));
+            prestaged.tagged.retain(|key| !dirty.contains(key));
+        }
         for &key in dirty {
             checkpoint();
             let Some(route) = new.table.get(&key.0, key.1) else {
@@ -513,122 +481,24 @@ impl RibManager {
                 }
                 Ok(InventoryEntry::Unchanged) => {}
                 Ok(InventoryEntry::Changed { next_hop, tagged }) => {
-                    changed.push((route.clone(), next_hop));
+                    prestaged.announce.push(route.clone());
+                    prestaged.next_hop_override.push(next_hop);
                     if tagged {
                         prestaged.tagged.insert(key);
                     }
                 }
             }
         }
-        let changed_rows = changed.len();
-        let path = if touched_positions.len() == changed_rows {
-            "patch"
-        } else {
-            "resize"
-        };
-        if touched_positions.len() == changed.len() {
-            // The sealed payload has no other Arc owners before the fence.
-            // Replace the touched rows in place; order is not a contract.
-            let routes = std::sync::Arc::get_mut(&mut sealed.announce)
-                .expect("unpublished payload is uniquely owned");
-            let next_hops = std::sync::Arc::get_mut(&mut sealed.next_hop_override)
-                .expect("unpublished next hops are uniquely owned");
-            for (&index, (route, next_hop)) in touched_positions.iter().zip(changed) {
-                checkpoint();
-                routes[index] = route;
-                next_hops[index] = next_hop;
-            }
-            if let Some(mut probe) = prestaged.probe.take_if(|probe| {
-                !crate::manager::distribution::reprobe_prestaged_transition_rows(
-                    &sealed,
-                    probe,
-                    &touched_positions,
-                    &mut || checkpoint(),
-                )
-            }) {
-                probe.retire_with(&mut || checkpoint());
-            }
-            inventory.prebuilt = Some(sealed);
-        } else {
-            inventory.prebuilt = Some(self.resize_sealed_transition_payload(
-                sealed,
-                &mut prestaged.probe,
-                &touched_positions,
-                changed,
-            ));
+        if let Some(probe) = prestaged.probe.as_mut() {
+            probe.encoded_lengths.truncate(kept);
+            probe.encoded_lengths.resize(prestaged.announce.len(), 0);
+            probe.cursor = prestaged.announce.len();
         }
-        tracing::debug!(
-            target: "rustbgpd_rib::clean_export_probe",
-            path,
-            dirty_keys = dirty.len(),
-            touched_rows = touched_positions.len(),
-            changed_rows,
-            proof_retained = prestaged.probe.is_some(),
-            elapsed_us = started.elapsed().as_micros(),
-            "clean policy transition prestaged payload reconciled"
-        );
-        Some(inventory)
-    }
-
-    fn resize_sealed_transition_payload(
-        &self,
-        mut sealed: CleanPolicyTransitionInventory,
-        probe: &mut Option<crate::manager::distribution::PrestagedTransitionProbe>,
-        touched_positions: &[usize],
-        mut changed: Vec<(Route, Option<NextHopAction>)>,
-    ) -> CleanPolicyTransitionInventory {
-        let checkpoint = || self.replacement_checkpoint(false);
-        // Arc slices cannot resize. Keep the same row permutation in all
-        // three channels, then probe only the changed suffix. Mapping an
-        // exact-size range allocates the Arc directly (no Vec<Route> copy).
-        let mut touched = touched_positions.iter().peekable();
-        let mut kept = (0..sealed.announce.len())
-            .filter(|index| {
-                checkpoint();
-                if touched.peek().is_some_and(|position| **position == *index) {
-                    touched.next();
-                    false
-                } else {
-                    true
-                }
-            })
-            .collect::<Vec<_>>();
-        let count = kept.len() + changed.len();
-        let announce = (0..count)
-            .map(|index| {
-                checkpoint();
-                if index < kept.len() {
-                    sealed.announce[kept[index]].clone()
-                } else {
-                    changed[index - kept.len()].0.clone()
-                }
-            })
-            .collect();
-        let next_hop_override = (0..count)
-            .map(|index| {
-                checkpoint();
-                if index < kept.len() {
-                    sealed.next_hop_override[kept[index]].clone()
-                } else {
-                    changed[index - kept.len()].1.clone()
-                }
-            })
-            .collect();
-        let resized = CleanPolicyTransitionInventory {
-            announce,
-            next_hop_override,
-            permit_totals: std::collections::HashMap::default(),
-            permit_by_source: std::collections::HashMap::default(),
-        };
-        if let Some(mut probe) = probe.take_if(|probe| {
-            !probe.realign_rows(&kept, sealed.announce.len(), count, &mut || checkpoint())
-        }) {
-            probe.retire_with(&mut || checkpoint());
-        }
-        let mut changed_positions = (kept.len()..count).collect::<Vec<_>>();
-        if let Some(mut probe) = probe.take_if(|probe| {
+        let mut changed_positions = (kept..prestaged.announce.len()).collect::<Vec<_>>();
+        if let Some(mut probe) = prestaged.probe.take_if(|probe| {
             !crate::manager::distribution::reprobe_prestaged_transition_rows(
-                &resized,
+                &prestaged.announce,
+                &prestaged.next_hop_override,
                 probe,
                 &changed_positions,
                 &mut || checkpoint(),
@@ -636,11 +506,24 @@ impl RibManager {
         }) {
             probe.retire_with(&mut || checkpoint());
         }
-        sealed.retire_with(&mut |force| self.replacement_checkpoint(force));
-        crate::manager::retire_vec(&mut kept, &mut || checkpoint());
+        let path = if dirty.is_empty() {
+            "unchanged"
+        } else if prior_count == prestaged.announce.len() {
+            "patch"
+        } else {
+            "resize"
+        };
         crate::manager::retire_vec(&mut changed_positions, &mut || checkpoint());
-        crate::manager::retire_vec(&mut changed, &mut || checkpoint());
-        resized
+        tracing::debug!(
+            target: "rustbgpd_rib::clean_export_probe",
+            path,
+            dirty_keys = dirty.len(),
+            touched_rows = prior_count - kept,
+            changed_rows = prestaged.announce.len() - kept,
+            proof_retained = prestaged.probe.is_some(),
+            elapsed_us = started.elapsed().as_micros(),
+            "clean policy transition prestaged payload reconciled"
+        );
     }
 
     fn recheck_prestaged_transition_inventory(
@@ -666,10 +549,11 @@ impl RibManager {
                 false,
             );
         };
-        let Some(mut inventory) =
-            self.reconcile_sealed_transition_payload(prestaged, dirty, old, new)
-        else {
-            return PrestagedInventoryOutcome::Unusable;
+        self.reconcile_prestaged_transition_rows(prestaged, dirty, old, new);
+        let mut inventory = CleanPolicyTransitionInventoryBuilder {
+            announce: std::mem::take(&mut prestaged.announce),
+            next_hop_override: std::mem::take(&mut prestaged.next_hop_override),
+            ..CleanPolicyTransitionInventoryBuilder::default()
         };
         if let Some((&key, &term)) = prestaged.failed.iter().next() {
             inventory_degraded(source, destination, Some(key), term);
@@ -733,9 +617,6 @@ impl RibManager {
                     self.replacement_checkpoint(false);
                 });
             }
-        }
-        if let Some(mut sealed) = prestaged.sealed.take() {
-            sealed.retire_with(&mut |force| self.replacement_checkpoint(force));
         }
         if let Some(mut probe) = prestaged.probe.take() {
             probe.retire_with(&mut || self.replacement_checkpoint(false));

@@ -470,53 +470,31 @@ struct PreparedCleanPolicyTransitionPeer {
     permit: Option<tokio::sync::mpsc::OwnedPermit<OutboundRouteUpdate>>,
 }
 
-/// A successful unfenced probe, aligned with the unpublished sealed payload.
-/// It holds no payload Arc clones, so the fence can patch changed rows in place.
+/// A successful unfenced probe, aligned with the unpublished inventory vectors.
+/// It holds no payload references, so row ownership can move during reconciliation.
 pub(in crate::manager) struct PrestagedTransitionProbe {
     peer: IpAddr,
     snapshot: Arc<dyn crate::update::ExactExportSnapshot>,
-    cursor: usize,
-    encoded_lengths: Vec<usize>,
+    pub(in crate::manager) cursor: usize,
+    pub(in crate::manager) encoded_lengths: Vec<usize>,
 }
 
 impl PrestagedTransitionProbe {
-    /// Retain lengths in exactly the resized payload's order. Newly appended
-    /// rows remain unproven until `reprobe_prestaged_transition_rows` succeeds.
-    pub(in crate::manager) fn realign_rows(
-        &mut self,
-        kept: &[usize],
-        prior_count: usize,
-        count: usize,
-        checkpoint: &mut impl FnMut(),
-    ) -> bool {
-        // Retained indexes are ascending, so compaction never overwrites an
-        // unread length. Only a completed proof can be carried into resizing.
-        if self.cursor != prior_count || self.encoded_lengths.len() != prior_count {
-            return false;
-        }
-        for (index, &prior) in kept.iter().enumerate() {
-            checkpoint();
-            self.encoded_lengths[index] = self.encoded_lengths[prior];
-        }
-        self.encoded_lengths.truncate(kept.len());
-        self.encoded_lengths.resize(count, 0);
-        self.cursor = count;
-        true
-    }
-
     pub(in crate::manager) fn retire_with(&mut self, checkpoint: &mut impl FnMut()) {
         super::retire_vec(&mut self.encoded_lengths, checkpoint);
     }
 }
 
 pub(in crate::manager) fn reprobe_prestaged_transition_rows(
-    inventory: &super::update_groups::CleanPolicyTransitionInventory,
+    announce: &[crate::route::Route],
+    next_hop_override: &[Option<rustbgpd_policy::NextHopAction>],
     probe: &mut PrestagedTransitionProbe,
     positions: &[usize],
     checkpoint: &mut impl FnMut(),
 ) -> bool {
-    if probe.cursor != inventory.announce.len()
-        || probe.encoded_lengths.len() != inventory.announce.len()
+    if announce.len() != next_hop_override.len()
+        || probe.cursor != announce.len()
+        || probe.encoded_lengths.len() != announce.len()
         || positions.len() > super::POLICY_TRANSITION_ROUTE_SLICE
     {
         return false;
@@ -526,8 +504,8 @@ pub(in crate::manager) fn reprobe_prestaged_transition_rows(
         .map(|&index| {
             checkpoint();
             crate::update::ExactExportCandidate::Unicast {
-                route: &inventory.announce[index],
-                next_hop_override: inventory.next_hop_override[index].as_ref(),
+                route: &announce[index],
+                next_hop_override: next_hop_override[index].as_ref(),
             }
         })
         .collect::<Vec<_>>();
@@ -1953,8 +1931,8 @@ impl RibManager {
                 rs_asns.dedup();
                 if keys.is_none() {
                     // A prestaged inventory re-checked against the churned
-                    // keys equals this fenced walk, and already owns the
-                    // sealed announce and next-hop slices.
+                    // keys equals this fenced walk. Seal the reconciled
+                    // vectors once, then validate their aligned proof.
                     match manager.take_prestaged_transition_inventory(source, destination, &rs_asns) {
                         super::update_groups::PrestagedInventoryOutcome::Ready(prestaged, probe) => {
                             let inventory = prestaged.finish(&mut |force| manager.replacement_checkpoint(force));
@@ -5071,16 +5049,13 @@ impl RibManager {
         }
     }
 
-    /// Probe the sealed inventory in unfenced bounded slices. Rejection costs
+    /// Probe the owned inventory in unfenced bounded slices. Rejection costs
     /// only this optimization: the fenced path remains authoritative.
     fn extend_prestaged_transition_probe(&mut self, peer: IpAddr) -> bool {
         let Some(prestaged) = self.prestaged_inventory.as_mut() else {
             return true;
         };
-        let Some(inventory) = prestaged.sealed.as_ref() else {
-            return true;
-        };
-        if inventory.announce.is_empty() {
+        if prestaged.announce.is_empty() {
             return true;
         }
         if prestaged.probe.is_none() {
@@ -5095,18 +5070,18 @@ impl RibManager {
                 peer,
                 snapshot,
                 cursor: 0,
-                encoded_lengths: Vec::with_capacity(inventory.announce.len()),
+                encoded_lengths: Vec::with_capacity(prestaged.announce.len()),
             });
         }
         let probe = prestaged.probe.as_mut().expect("initialized above");
         let end = super::policy_transition_slice_end(
             probe.cursor,
-            inventory.announce.len(),
+            prestaged.announce.len(),
             super::POLICY_TRANSITION_ROUTE_SLICE,
         );
-        let candidates = inventory.announce[probe.cursor..end]
+        let candidates = prestaged.announce[probe.cursor..end]
             .iter()
-            .zip(&inventory.next_hop_override[probe.cursor..end])
+            .zip(&prestaged.next_hop_override[probe.cursor..end])
             .map(
                 |(route, next_hop)| crate::update::ExactExportCandidate::Unicast {
                     route,
@@ -5135,7 +5110,7 @@ impl RibManager {
                 .map(|result| result.expect("all probes succeeded").encoded_len),
         );
         probe.cursor = end;
-        end == inventory.announce.len()
+        end == prestaged.announce.len()
     }
 
     fn prestaged_transition_probe_cache(
@@ -5151,6 +5126,7 @@ impl RibManager {
                 .get(&probe.peer)
                 .map(|encoder| (encoder.owner_id(), encoder.snapshot()));
             let valid = probe.cursor == inventory.announce.len()
+                && probe.encoded_lengths.len() == inventory.announce.len()
                 && current.is_some_and(|(owner, current)| {
                     owner == current.owner_id()
                         && current.owner_id() == probe.snapshot.owner_id()
