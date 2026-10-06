@@ -165,7 +165,15 @@ fn record_with(
     if rows.len() > super::HISTORY_LIMIT {
         evict_to(&directory, &mut rows, super::HISTORY_LIMIT, &mut step)?;
     }
-    decode_rows(&directory, &mut rows);
+    // Check sequence uniqueness against the full sorted roster before
+    // decoding only the newest dedupe candidate.
+    if let Some(newest) = rows.first()
+        && rows
+            .get(1)
+            .is_none_or(|next| next.sequence != newest.sequence)
+    {
+        decode_rows(&directory, &mut rows[..1]);
+    }
     if let Some(newest) = rows.first()
         && newest.status != StoredStatus::Unreadable
         && open_and_decode(&directory, newest, true).is_ok_and(|(payload, identity)| {
@@ -455,7 +463,7 @@ fn scan_pinned(directory: &File, display_path: &Path) -> io::Result<Vec<StoredRo
 }
 
 // Listing freezes its roster before any payload open. The writer uses the same
-// name-only pass to repair old over-cap stores before decoding the survivors.
+// name-only pass to repair old over-cap stores before decoding the newest row.
 fn collect_names(
     directory: &File,
     display_path: &Path,
@@ -2499,7 +2507,8 @@ mod tests {
     #[test]
     fn writer_refuses_duplicate_and_unknown_newest_dedupe() {
         let root = tempfile::tempdir().unwrap();
-        let toml = "x = 1\n";
+        // Both valid duplicate payloads match the incoming TOML and manifest.
+        let toml = "asn = 64512\n";
 
         let duplicate = root.path().join("duplicate");
         record_v2(&duplicate, toml, manifest_for(toml)).unwrap();
@@ -2638,6 +2647,116 @@ mod tests {
         ));
         write_private(&path, &super::super::v3::encode_envelope(envelope).unwrap());
         path
+    }
+
+    #[test]
+    fn writer_decodes_only_newest_while_listing_decodes_twenty() {
+        for metadata_only in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let mut v2 = sample();
+            for sequence in 1..=20 {
+                if metadata_only {
+                    write_v3(dir.path(), &metadata(sequence));
+                } else {
+                    v2.sequence = sequence;
+                    write_v2(dir.path(), &v2);
+                }
+            }
+            v2.normalized_toml = "asn = 64513\n".into();
+            reseal(&mut v2);
+            let mut v3 = metadata(0);
+            v3.normalized_toml_bytes += 1;
+            for appended in [true, false] {
+                let pending = if metadata_only {
+                    Pending::V3(v3.clone())
+                } else {
+                    Pending::V2 {
+                        normalized_toml: &v2.normalized_toml,
+                        manifest: v2.manifest.clone(),
+                    }
+                };
+                DECODE_OPENS.with(|count| count.set(0));
+                assert_eq!(
+                    record_with(dir.path(), pending, |_| Ok(())).unwrap(),
+                    (appended, usize::from(appended))
+                );
+                assert_eq!(DECODE_OPENS.with(std::cell::Cell::get), 2);
+            }
+
+            DECODE_OPENS.with(|count| count.set(0));
+            let rows = scan_mixed(dir.path()).unwrap();
+            assert_eq!(rows.len(), 20);
+            assert_eq!(DECODE_OPENS.with(std::cell::Cell::get), 20);
+            let expected = if metadata_only {
+                StoredStatus::MetadataOnly
+            } else {
+                StoredStatus::Recorded
+            };
+            assert!(rows.iter().all(|row| row.status == expected));
+        }
+    }
+
+    /// LOAD-BEARING BREAK: decoding a singleton before checking the full name
+    /// roster blesses a duplicate sequence whose valid metadata matches.
+    #[test]
+    fn writer_refuses_valid_duplicate_metadata_newest_dedupe() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut row = metadata(1);
+        write_v3(dir.path(), &row);
+        row.timestamp_unix_seconds += 1;
+        write_v3(dir.path(), &row);
+        DECODE_OPENS.with(|count| count.set(0));
+        assert_eq!(
+            record_with(dir.path(), Pending::V3(row), |_| Ok(())).unwrap(),
+            (true, 0)
+        );
+        assert_eq!(DECODE_OPENS.with(std::cell::Cell::get), 0);
+        let rows = scan_mixed(dir.path()).unwrap();
+        assert_eq!(rows.len(), 3);
+        assert_eq!(rows[0].sequence, 2);
+        assert_eq!(rows[0].status, StoredStatus::MetadataOnly);
+        assert!(
+            rows[1..]
+                .iter()
+                .all(|row| row.status == StoredStatus::Unreadable)
+        );
+    }
+
+    #[test]
+    fn writer_dedupes_unique_newest_despite_older_duplicate_sequences() {
+        for metadata_only in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let mut v2 = sample();
+            v2.sequence = 1;
+            write_v2(dir.path(), &v2);
+            write_v3(dir.path(), &metadata(1));
+            let pending = if metadata_only {
+                write_v3(dir.path(), &metadata(2));
+                Pending::V3(metadata(0))
+            } else {
+                v2.sequence = 2;
+                write_v2(dir.path(), &v2);
+                Pending::V2 {
+                    normalized_toml: &v2.normalized_toml,
+                    manifest: v2.manifest.clone(),
+                }
+            };
+            DECODE_OPENS.with(|count| count.set(0));
+            assert_eq!(
+                record_with(dir.path(), pending, |_| Ok(())).unwrap(),
+                (false, 0)
+            );
+            assert_eq!(DECODE_OPENS.with(std::cell::Cell::get), 2);
+            let rows = scan_mixed(dir.path()).unwrap();
+            assert_eq!(rows.len(), 3);
+            assert_eq!(rows[0].sequence, 2);
+            assert_ne!(rows[0].status, StoredStatus::Unreadable);
+            assert!(
+                rows[1..]
+                    .iter()
+                    .all(|row| row.status == StoredStatus::Unreadable)
+            );
+        }
     }
 
     #[test]
