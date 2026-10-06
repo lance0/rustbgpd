@@ -1,0 +1,18 @@
+{
+  "release": "v0.74.0",
+  "tag_commit": "4d14851f77b064dd254f2319708dd91f281f9b0d",
+  "archive_sha256": "03c064492da4ceb3119b09bf986c4bcc3b629e6d18950d476ad9a372a7a534ce",
+  "daemon_sha256": "672abd3c336536734df733c259be2587a89d8c762754467faf17626b44b0acaf",
+  "version_stdout": "rustbgpd 0.74.0",
+  "container_image": "sha256:d7e12182ce18b85b93007c1dedf31f2d29e01ccf3182cc4017c709b6259bc132",
+  "network_mode": "none",
+  "daemon_argv": [
+    "/usr/local/bin/rustbgpd",
+    "/etc/rustbgpd/config.toml"
+  ],
+  "signals": [
+    "HUP after boot v2 and gRPC socket",
+    "TERM after v3 publication"
+  ],
+  "exit_code": 0
+}
