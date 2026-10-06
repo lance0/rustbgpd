@@ -1,0 +1,404 @@
+{
+  "kind": "compact-quiet-settled-boundary-ab",
+  "measured_on": "2026-10-06",
+  "canonical_performance_receipt": false,
+  "independent_unit": "fresh daemon process leg; four correlated reloads per leg",
+  "order": [
+    [
+      "A",
+      "01-A"
+    ],
+    [
+      "B",
+      "02-B"
+    ],
+    [
+      "B",
+      "03-B"
+    ],
+    [
+      "A",
+      "04-A"
+    ],
+    [
+      "A",
+      "05-A"
+    ],
+    [
+      "B",
+      "06-B"
+    ]
+  ],
+  "workload": {
+    "peers": 400,
+    "generated_prefixes": 184000,
+    "seed": 61,
+    "irr_change_percent": 0,
+    "changing_export_communities": true,
+    "reloads_per_leg": 4,
+    "control_seconds": 30,
+    "history_start_sequence": 1,
+    "history_end_sequence": 5,
+    "dataset_sha256": "2b95e6582465cd54249b4a454cd0ed8f0f622d65f49a5bad5b225ff3293ccff4",
+    "native_loopback": true,
+    "trace_data_included": false,
+    "history_prefill": false
+  },
+  "primary_response": "process-leg median trigger-to-settled milliseconds",
+  "predeclared_criterion": "max(candidate process-leg medians) < min(baseline process-leg medians)",
+  "primary_criterion_met": false,
+  "settled_raw_ranges_overlap": true,
+  "candidate_settled_raw_range_disjoint_below_baseline": false,
+  "settled": {
+    "A": {
+      "three_process_leg_medians": [
+        548.4575,
+        564.5799999999999,
+        568.5955
+      ],
+      "leg_median_range": [
+        548.4575,
+        568.5955
+      ],
+      "median_of_three_legs": 564.5799999999999,
+      "raw_range": [
+        528.033,
+        614.156
+      ]
+    },
+    "B": {
+      "three_process_leg_medians": [
+        546.8975,
+        566.3215,
+        549.9970000000001
+      ],
+      "leg_median_range": [
+        546.8975,
+        566.3215
+      ],
+      "median_of_three_legs": 549.9970000000001,
+      "raw_range": [
+        529.982,
+        569.757
+      ]
+    }
+  },
+  "arms": {
+    "A": {
+      "source_commit": "dcc9b6384d2f7931d4aa905b0cdc1e55efd790c4",
+      "source_tree": "adeb355e88708a3d7ef1c96a6cd173c3f366e9f4",
+      "source_clean_at_measurement": true,
+      "build_receipt_sha256": "2cbe7c3a55972228946867898870ba6e8280daaf0df78140e3b0d666253111be",
+      "writer_source_sha256": "57d859d6f53ccacd0759fdd3af438278ca536fa309ecaa9c98b94118a4191184",
+      "binaries": {
+        "target/release/rustbgpd": "4c98759f7623858f23543754d02bca43266e5da691c62a78d3dfbc2995ab9c2d",
+        "target/release/rs-config-render": "59ea68f97292a87fec144a5a32a2423e97ef904e0d999d55805335cf514cadb4",
+        "target/scale/reloadstall": "49b64a73b9af6b77a6f59fd8408eccb1cbe1ec878c7fd572b3e06dea09deccc1"
+      },
+      "build_logs": [
+        {
+          "profile": "release",
+          "command": [
+            "cargo",
+            "build",
+            "--release",
+            "--locked",
+            "-p",
+            "rustbgpd",
+            "-p",
+            "rustbgpctl",
+            "-p",
+            "rs-config-render"
+          ],
+          "exit_code": 0,
+          "sha256": "62c16b1e08c1a13f9e3fc5be73f2aa7352d2187b3164eda70c4649dfedadaa04"
+        },
+        {
+          "profile": "scale",
+          "command": [
+            "cargo",
+            "build",
+            "--profile",
+            "scale",
+            "--locked",
+            "-p",
+            "reloadstall"
+          ],
+          "exit_code": 0,
+          "sha256": "ac81aaa7a2fd14abc44e051b4fc05c43ed8aae4b1e0b1a08d2203b57bfc35153"
+        }
+      ]
+    },
+    "B": {
+      "source_commit": "6bbc0a1e1b44df7a9b325f95762ed2da8a81c432",
+      "source_tree": "0e8958dac582c6af8d6216de2a2a34ba228da4ab",
+      "source_clean_at_measurement": true,
+      "build_receipt_sha256": "c129c5c25839de47e43cfabb6492239b3538a594445b7bc903295db6bc8467ff",
+      "writer_source_sha256": "3175cee2a95ddfcd658422782651fac32d74617898289e017bc819f1939747b0",
+      "binaries": {
+        "target/release/rustbgpd": "8cb508568b4fc522053e9c6f225af7e0582ced7821b8f15db0a3af8495527ba8",
+        "target/release/rs-config-render": "59ea68f97292a87fec144a5a32a2423e97ef904e0d999d55805335cf514cadb4",
+        "target/scale/reloadstall": "49b64a73b9af6b77a6f59fd8408eccb1cbe1ec878c7fd572b3e06dea09deccc1"
+      },
+      "build_logs": [
+        {
+          "profile": "release",
+          "command": [
+            "cargo",
+            "build",
+            "--release",
+            "--locked",
+            "-p",
+            "rustbgpd",
+            "-p",
+            "rustbgpctl",
+            "-p",
+            "rs-config-render"
+          ],
+          "exit_code": 0,
+          "sha256": "48811273694633b89da3a8f34f57163c2c553bd9195ffa0d89791bb6dd9caa76"
+        },
+        {
+          "profile": "scale",
+          "command": [
+            "cargo",
+            "build",
+            "--profile",
+            "scale",
+            "--locked",
+            "-p",
+            "reloadstall"
+          ],
+          "exit_code": 0,
+          "sha256": "ac81aaa7a2fd14abc44e051b4fc05c43ed8aae4b1e0b1a08d2203b57bfc35153"
+        }
+      ],
+      "component_provenance": {
+        "target/release/rustbgpd": {
+          "kind": "fresh-candidate-default-release-build",
+          "producer_source_commit": "6bbc0a1e1b44df7a9b325f95762ed2da8a81c432",
+          "producer_source_tree": "0e8958dac582c6af8d6216de2a2a34ba228da4ab",
+          "producer_source_clean": true,
+          "producer_build_log": {
+            "profile": "release",
+            "command": [
+              "cargo",
+              "build",
+              "--release",
+              "--locked",
+              "-p",
+              "rustbgpd",
+              "-p",
+              "rustbgpctl",
+              "-p",
+              "rs-config-render"
+            ],
+            "exit_code": 0,
+            "sha256": "48811273694633b89da3a8f34f57163c2c553bd9195ffa0d89791bb6dd9caa76"
+          }
+        },
+        "target/release/rs-config-render": {
+          "kind": "reused-unchanged-baseline-binary",
+          "producer_source_commit": "dcc9b6384d2f7931d4aa905b0cdc1e55efd790c4",
+          "producer_source_tree": "adeb355e88708a3d7ef1c96a6cd173c3f366e9f4",
+          "producer_source_clean": true,
+          "producer_build_log": {
+            "profile": "release",
+            "command": [
+              "cargo",
+              "build",
+              "--release",
+              "--locked",
+              "-p",
+              "rustbgpd",
+              "-p",
+              "rustbgpctl",
+              "-p",
+              "rs-config-render"
+            ],
+            "exit_code": 0,
+            "sha256": "62c16b1e08c1a13f9e3fc5be73f2aa7352d2187b3164eda70c4649dfedadaa04"
+          },
+          "producer_build_receipt_sha256": "2cbe7c3a55972228946867898870ba6e8280daaf0df78140e3b0d666253111be",
+          "consumed_sha256": "59ea68f97292a87fec144a5a32a2423e97ef904e0d999d55805335cf514cadb4",
+          "dependency_source_unchanged": true
+        },
+        "target/scale/reloadstall": {
+          "kind": "reused-unchanged-baseline-binary",
+          "producer_source_commit": "dcc9b6384d2f7931d4aa905b0cdc1e55efd790c4",
+          "producer_source_tree": "adeb355e88708a3d7ef1c96a6cd173c3f366e9f4",
+          "producer_source_clean": true,
+          "producer_build_log": {
+            "profile": "scale",
+            "command": [
+              "cargo",
+              "build",
+              "--profile",
+              "scale",
+              "--locked",
+              "-p",
+              "reloadstall"
+            ],
+            "exit_code": 0,
+            "sha256": "ac81aaa7a2fd14abc44e051b4fc05c43ed8aae4b1e0b1a08d2203b57bfc35153"
+          },
+          "producer_build_receipt_sha256": "2cbe7c3a55972228946867898870ba6e8280daaf0df78140e3b0d666253111be",
+          "consumed_sha256": "49b64a73b9af6b77a6f59fd8408eccb1cbe1ec878c7fd572b3e06dea09deccc1",
+          "dependency_source_unchanged": true
+        }
+      }
+    }
+  },
+  "shared_repository_helpers": {
+    "tests/soak/host-lock.sh": "f5f419bb439f0b5e22521e9f7fa73d4ef73df159abeec31fafff63548899c658",
+    "bench/scale/host-quiet.sh": "abb3391cd5e0879c29aabd0aa0c316ea33d5f7c72f6d2a7d111b30025de411fd",
+    "bench/scale/cgroup-memory.sh": "64753985d0b8c167daa1d382b70fe6f4369275713ebcaec8e4de677ff281ee3a",
+    "bench/scale/irrreload/run-irr-reload.sh": "77337a53be32fae85e3de3ea8e01f387cf50cb16228ad14f2271237a9f7162e1",
+    "bench/scale/irrreload/verify-receipt.py": "1940d5cffa9ff921f73cee02065c6aba1bb321f69c1bd8455e5d1ab4db9ce0d2",
+    "bench/scale/irrreload/stage-rustbgpd-datasets.sh": "62ea542124d4b97080d0c443ca1d1f659df9c8e0c09ffd1a17c213779164736c",
+    "bench/scale/reloadstall/gen-irr-scenario.py": "2e176324aa0562be87e9b2dcb73771461070e87b93d8af22f02e10ad07c2b384"
+  },
+  "campaign_helpers_sha256": {
+    "run.py": "8a467bd92152392a31340b51e77f9a0721f905657da881034713dd0e4e80e329",
+    "report.py": "4bdc9b3c005b42b8cefe175598de52be5b914f4ea2c8ce17bd11d53e4bc22870",
+    "driver.sh": "4789916c472df247f8358f575a56125d7e1b486bc464fe9a75539df1b593fffd",
+    "record_owned_wrapper.py": "71b1d6a2bd1973724ca948c61e0306f8346cc12000f98af172a85cc06c27d1e8",
+    "birth_exec.py": "11139b247f61ebe6d3dcc66f1b45ba64ff59bad561bf5b79bf15b01960a2f7f3",
+    "protocol.md": "544ccce3ad98fe71bb219d5c7a350b053671d20249816f9ced88ea37d0339ce3",
+    "cell/launch.sh": "684568b0db1f2d769112ac8267b712fa60e75620588ba907e1082997c96a9653",
+    "cell/analyze.py": "9945a6e8b65badb73c2e0f66cbe37a02cd738b323d65566499a49c232bee5ca3"
+  },
+  "campaign_helper_manifest_sha256": "6d59b7610a6e0f8f798fc241e127ace28e390c4c784d02f7b10a9f3ae4a1bd49",
+  "host": {
+    "kernel_release": "7.0.0-30-generic",
+    "architecture": "x86_64",
+    "logical_cpu_governors": 64
+  },
+  "toolchain": {
+    "rustc": "1.99.0 (b940084d7 2026-09-28)",
+    "cargo": "1.99.0 (5f94df478 2026-08-27)",
+    "clippy": "0.1.99 (b940084d7e 2026-09-28)",
+    "daemon_features": "default",
+    "harness_profile": "scale"
+  },
+  "postflight": {
+    "summary_sha256": "17d6061a44332c459b46812d002f389060ad81e3fcdadf098ef9245c08262592",
+    "postflight_sha256": "d8a9817db317b9fc38dcdbb0acd7aab99ffe43e1cfb2022f76e2127182ed3cb8",
+    "actual_wait_exit": 0,
+    "launch_exit": 0,
+    "recorder_exit": 0,
+    "campaign_exit": 0,
+    "wrapper_exit": 0,
+    "recorder_identity": {
+      "pid": 2459013,
+      "starttime": 280877905,
+      "pgid": 2459013,
+      "sid": 2459013,
+      "PID_absent": true,
+      "group_absent": true
+    },
+    "owned_processes_and_groups_absent": 19,
+    "daemon_cgroup_scopes_absent": 6,
+    "ports_reusable": [
+      1790,
+      9179
+    ],
+    "mutex_probe_exit": 0,
+    "source_binaries_and_receipts_unchanged": true,
+    "archived_helpers_match": true
+  },
+  "earlier_attempts": {
+    "pre_workload_wrapper_exit": 1,
+    "partial_baseline_only_wrapper_exit": 1,
+    "partial_baseline_reload_count": 4,
+    "partial_candidate_leg_count": 0,
+    "separate_failed_leg_cooldown_elapsed_seconds": 300.00017742,
+    "failed_receipts_unchanged": true,
+    "included_in_completed_ab_pool": false
+  },
+  "diagnostic": {
+    "kind": "profiling-diagnostic",
+    "summary_sha256": "836c778edf9a8bb4532b59fe9714ae429b0a8dafb821add8e8c8b7cfd178e5d6",
+    "included_in_ab_pool": false,
+    "required_durability_proven": false,
+    "gap_controls": [
+      {
+        "leg": "control-before",
+        "gap_ms": [
+          56.485,
+          83.06,
+          59.684,
+          86.889
+        ],
+        "median_ms": 71.372,
+        "range_ms": [
+          56.485,
+          86.889
+        ]
+      },
+      {
+        "leg": "trace",
+        "gap_ms": [
+          41.923,
+          66.438,
+          70.628,
+          70.479
+        ],
+        "median_ms": 68.4585,
+        "range_ms": [
+          41.923,
+          70.628
+        ]
+      },
+      {
+        "leg": "control-after",
+        "gap_ms": [
+          51.475,
+          59.795,
+          78.369,
+          75.829
+        ],
+        "median_ms": 67.812,
+        "range_ms": [
+          51.475,
+          78.369
+        ]
+      }
+    ],
+    "traced_windows": [
+      {
+        "reload": 1,
+        "operation_id": 1,
+        "gap_ns": 41923000,
+        "successful_durability_union_ns": 3162000,
+        "successful_sync_union_ns": 3049000,
+        "unattributed_ns": 38761000
+      },
+      {
+        "reload": 2,
+        "operation_id": 2,
+        "gap_ns": 66438000,
+        "successful_durability_union_ns": 11224000,
+        "successful_sync_union_ns": 11154000,
+        "unattributed_ns": 55214000
+      },
+      {
+        "reload": 3,
+        "operation_id": 3,
+        "gap_ns": 70628000,
+        "successful_durability_union_ns": 6184000,
+        "successful_sync_union_ns": 6134000,
+        "unattributed_ns": 64444000
+      },
+      {
+        "reload": 4,
+        "operation_id": 4,
+        "gap_ns": 70479000,
+        "successful_durability_union_ns": 4812000,
+        "successful_sync_union_ns": 4784000,
+        "unattributed_ns": 65667000
+      }
+    ]
+  },
+  "full_private_validation_reproducible_from_public_bundle": false
+}

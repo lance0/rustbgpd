@@ -1,0 +1,1198 @@
+{
+  "legs": [
+    {
+      "arm": "A",
+      "leg": "01-A",
+      "metric_medians": {
+        "complete_elapsed_ms": 503.76750000000004,
+        "settled_elapsed_ms": 548.4575,
+        "gap_ms": 43.387,
+        "receiver.completion_p50_s": 0.5553665,
+        "receiver.completion_p95_s": 0.560242,
+        "receiver.completion_max_s": 0.580646,
+        "receiver.changed_maxgap_p50_ms": 400.29600000000005,
+        "receiver.changed_maxgap_p95_ms": 405.1685,
+        "receiver.changed_maxgap_max_ms": 431.73,
+        "receiver.all_observer_maxgap_p50_ms": 400.29600000000005,
+        "receiver.all_observer_maxgap_p95_ms": 405.1685,
+        "receiver.all_observer_maxgap_max_ms": 431.73,
+        "receiver.changed_first_generation_update_p50_ms": 502.595,
+        "receiver.changed_first_generation_update_p95_ms": 509.8935,
+        "receiver.changed_first_generation_update_max_ms": 534.9514999999999,
+        "receiver.rss_before_mib": 637.5,
+        "receiver.rss_after_mib": 684.0
+      },
+      "control": {
+        "maxgap_p50_ms": 17.99,
+        "maxgap_p95_ms": 18.56,
+        "maxgap_max_ms": 41.98,
+        "observers": 400,
+        "rss_mib": 616
+      },
+      "memory": {
+        "cgroup_peak_kib": 806832,
+        "cgroup_current_kib": 620156,
+        "cgroup_swap_max_bytes": 0,
+        "cgroup_swap_peak_kib": 0,
+        "daemon_vmhwm_kib": 806724,
+        "daemon_vmrss_kib": 628048,
+        "window": "through_harness_completion;diagnostic_only",
+        "cgroup_cpu": null,
+        "cgroup_cpu_note": "unavailable: unchanged controlled cell does not capture cpu.stat"
+      },
+      "quiet_samples": [
+        {
+          "sample": 1,
+          "epoch_s": 1791276743,
+          "pswpin": 2424677,
+          "pswpout": 2447475,
+          "disk_available_kib": 496937256,
+          "performance_governors": 64,
+          "governor_count": 64,
+          "original_attempt": 1,
+          "load1": 1.09,
+          "port1790_free": true,
+          "port9179_free": true,
+          "governor_mode": "performance",
+          "competitors_present": false,
+          "quiet": true,
+          "failed_dimensions_present": false
+        },
+        {
+          "sample": 2,
+          "epoch_s": 1791276773,
+          "pswpin": 2424677,
+          "pswpout": 2447475,
+          "disk_available_kib": 496937208,
+          "performance_governors": 64,
+          "governor_count": 64,
+          "original_attempt": 2,
+          "load1": 1.13,
+          "port1790_free": true,
+          "port9179_free": true,
+          "governor_mode": "performance",
+          "competitors_present": false,
+          "quiet": true,
+          "failed_dimensions_present": false
+        }
+      ],
+      "cooldown": {
+        "start_epoch_ns": 1791276938616137806,
+        "end_epoch_ns": 1791277238618702371,
+        "elapsed_seconds": 300.002564565,
+        "required_seconds": 300
+      },
+      "health": {
+        "startup_ready": true,
+        "topology_pass": true,
+        "final_sessions_up": 400,
+        "final_sessions_total": 400,
+        "final_parse_errors": 0,
+        "settlement_acknowledgements": 4,
+        "all_four_withdrawal_checks_pass": true
+      },
+      "exits": {
+        "launcher": 0,
+        "leg": 0,
+        "harness": 0,
+        "daemon_wait": 0,
+        "daemon_forced": 0
+      },
+      "processes": {
+        "driver": {
+          "pid": 2459398,
+          "starttime": 280884266,
+          "pgid": 2459398,
+          "sid": 2459398,
+          "PID_absent": true,
+          "group_absent": true
+        },
+        "harness": {
+          "pid": 2459464,
+          "starttime": 280884389,
+          "pgid": 2459464,
+          "sid": 2459464,
+          "PID_absent": true,
+          "group_absent": true
+        },
+        "daemon": {
+          "pid": 2459437,
+          "starttime": 280884282,
+          "pgid": 2459437,
+          "sid": 2459437,
+          "PID_absent": true,
+          "group_absent": true
+        }
+      },
+      "daemon_starttime_unchanged": true,
+      "cgroup_scope_absent_after_campaign": true,
+      "history": [
+        {
+          "version": 2,
+          "sequence": 1,
+          "timestamp_unix_seconds": 1791276807,
+          "encoded_bytes": 754976,
+          "envelope_sha256": "e14aeebe0f05960b8fa7b6f84da530bb057bd827cac491e5a0dbd6acfffbc063",
+          "source_sha256": "9f344eca95b8410159c29f8aa53f3da4b7e45056513dc02f8e6e90f3deedb5ad",
+          "normalized_toml_sha256": "90549950b6da008cf348890a5fb9b01f178645ddfecff1f14073ff04ffc39637",
+          "normalized_toml_utf8_bytes": 306909,
+          "filename_header_match": true,
+          "normalized_digest_match": true,
+          "envelope_matches_frozen_summary": true,
+          "reload_window_match": null
+        },
+        {
+          "version": 2,
+          "sequence": 2,
+          "timestamp_unix_seconds": 1791276848,
+          "encoded_bytes": 754976,
+          "envelope_sha256": "c63439dda0b0101a54631d6cbf1473ac3c2979e58dd7e0e32c3a3501616e5a69",
+          "source_sha256": "09723305751bbc0f82457267ddf7243fbe466326877b1018741c24e530227765",
+          "normalized_toml_sha256": "90549950b6da008cf348890a5fb9b01f178645ddfecff1f14073ff04ffc39637",
+          "normalized_toml_utf8_bytes": 306909,
+          "filename_header_match": true,
+          "normalized_digest_match": true,
+          "envelope_matches_frozen_summary": true,
+          "reload_window_match": true
+        },
+        {
+          "version": 2,
+          "sequence": 3,
+          "timestamp_unix_seconds": 1791276871,
+          "encoded_bytes": 754976,
+          "envelope_sha256": "86edb47d96d499f974a6b5e026a40bf80b4a57dd0e72292d7d957c23eeceb2a7",
+          "source_sha256": "9f344eca95b8410159c29f8aa53f3da4b7e45056513dc02f8e6e90f3deedb5ad",
+          "normalized_toml_sha256": "90549950b6da008cf348890a5fb9b01f178645ddfecff1f14073ff04ffc39637",
+          "normalized_toml_utf8_bytes": 306909,
+          "filename_header_match": true,
+          "normalized_digest_match": true,
+          "envelope_matches_frozen_summary": true,
+          "reload_window_match": true
+        },
+        {
+          "version": 2,
+          "sequence": 4,
+          "timestamp_unix_seconds": 1791276893,
+          "encoded_bytes": 754976,
+          "envelope_sha256": "754a9254f69fad0e3b17c66d8f1123c4880c52922458dec5d111e34e3579b364",
+          "source_sha256": "09723305751bbc0f82457267ddf7243fbe466326877b1018741c24e530227765",
+          "normalized_toml_sha256": "90549950b6da008cf348890a5fb9b01f178645ddfecff1f14073ff04ffc39637",
+          "normalized_toml_utf8_bytes": 306909,
+          "filename_header_match": true,
+          "normalized_digest_match": true,
+          "envelope_matches_frozen_summary": true,
+          "reload_window_match": true
+        },
+        {
+          "version": 2,
+          "sequence": 5,
+          "timestamp_unix_seconds": 1791276916,
+          "encoded_bytes": 754976,
+          "envelope_sha256": "81a52f34c497ca59782bb2233e06ad236d3d777b5dd5f6386ae86abeb298ed2d",
+          "source_sha256": "9f344eca95b8410159c29f8aa53f3da4b7e45056513dc02f8e6e90f3deedb5ad",
+          "normalized_toml_sha256": "90549950b6da008cf348890a5fb9b01f178645ddfecff1f14073ff04ffc39637",
+          "normalized_toml_utf8_bytes": 306909,
+          "filename_header_match": true,
+          "normalized_digest_match": true,
+          "envelope_matches_frozen_summary": true,
+          "reload_window_match": true
+        }
+      ]
+    },
+    {
+      "arm": "B",
+      "leg": "02-B",
+      "metric_medians": {
+        "complete_elapsed_ms": 503.197,
+        "settled_elapsed_ms": 546.8975,
+        "gap_ms": 36.1315,
+        "receiver.completion_p50_s": 0.5483135,
+        "receiver.completion_p95_s": 0.5543505,
+        "receiver.completion_max_s": 0.5760025,
+        "receiver.changed_maxgap_p50_ms": 395.46349999999995,
+        "receiver.changed_maxgap_p95_ms": 402.50649999999996,
+        "receiver.changed_maxgap_max_ms": 419.5325,
+        "receiver.all_observer_maxgap_p50_ms": 395.46349999999995,
+        "receiver.all_observer_maxgap_p95_ms": 402.50649999999996,
+        "receiver.all_observer_maxgap_max_ms": 419.5325,
+        "receiver.changed_first_generation_update_p50_ms": 503.48299999999995,
+        "receiver.changed_first_generation_update_p95_ms": 510.5635,
+        "receiver.changed_first_generation_update_max_ms": 523.0509999999999,
+        "receiver.rss_before_mib": 638.0,
+        "receiver.rss_after_mib": 681.5
+      },
+      "control": {
+        "maxgap_p50_ms": 19.43,
+        "maxgap_p95_ms": 20.0,
+        "maxgap_max_ms": 42.23,
+        "observers": 400,
+        "rss_mib": 618
+      },
+      "memory": {
+        "cgroup_peak_kib": 810976,
+        "cgroup_current_kib": 619036,
+        "cgroup_swap_max_bytes": 0,
+        "cgroup_swap_peak_kib": 0,
+        "daemon_vmhwm_kib": 811868,
+        "daemon_vmrss_kib": 627756,
+        "window": "through_harness_completion;diagnostic_only",
+        "cgroup_cpu": null,
+        "cgroup_cpu_note": "unavailable: unchanged controlled cell does not capture cpu.stat"
+      },
+      "quiet_samples": [
+        {
+          "sample": 1,
+          "epoch_s": 1791277238,
+          "pswpin": 2424677,
+          "pswpout": 2447475,
+          "disk_available_kib": 496180572,
+          "performance_governors": 64,
+          "governor_count": 64,
+          "original_attempt": 1,
+          "load1": 1.28,
+          "port1790_free": true,
+          "port9179_free": true,
+          "governor_mode": "performance",
+          "competitors_present": false,
+          "quiet": true,
+          "failed_dimensions_present": false
+        },
+        {
+          "sample": 2,
+          "epoch_s": 1791277268,
+          "pswpin": 2424677,
+          "pswpout": 2447475,
+          "disk_available_kib": 496180116,
+          "performance_governors": 64,
+          "governor_count": 64,
+          "original_attempt": 2,
+          "load1": 1.36,
+          "port1790_free": true,
+          "port9179_free": true,
+          "governor_mode": "performance",
+          "competitors_present": false,
+          "quiet": true,
+          "failed_dimensions_present": false
+        }
+      ],
+      "cooldown": {
+        "start_epoch_ns": 1791277433913122096,
+        "end_epoch_ns": 1791277733916254558,
+        "elapsed_seconds": 300.003132462,
+        "required_seconds": 300
+      },
+      "health": {
+        "startup_ready": true,
+        "topology_pass": true,
+        "final_sessions_up": 400,
+        "final_sessions_total": 400,
+        "final_parse_errors": 0,
+        "settlement_acknowledgements": 4,
+        "all_four_withdrawal_checks_pass": true
+      },
+      "exits": {
+        "launcher": 0,
+        "leg": 0,
+        "harness": 0,
+        "daemon_wait": 0,
+        "daemon_forced": 0
+      },
+      "processes": {
+        "driver": {
+          "pid": 2466976,
+          "starttime": 280933794,
+          "pgid": 2466976,
+          "sid": 2466976,
+          "PID_absent": true,
+          "group_absent": true
+        },
+        "harness": {
+          "pid": 2467035,
+          "starttime": 280933916,
+          "pgid": 2467035,
+          "sid": 2467035,
+          "PID_absent": true,
+          "group_absent": true
+        },
+        "daemon": {
+          "pid": 2467008,
+          "starttime": 280933809,
+          "pgid": 2467008,
+          "sid": 2467008,
+          "PID_absent": true,
+          "group_absent": true
+        }
+      },
+      "daemon_starttime_unchanged": true,
+      "cgroup_scope_absent_after_campaign": true,
+      "history": [
+        {
+          "version": 2,
+          "sequence": 1,
+          "timestamp_unix_seconds": 1791277302,
+          "encoded_bytes": 754976,
+          "envelope_sha256": "c57319ffdaa18cc2d9563a03a9484ba07784ae9ababb6578d721b211066d7853",
+          "source_sha256": "80d2ae0a2390c9c31420ac6e886cac95ad9bf0c5d33833236386e44829bd757d",
+          "normalized_toml_sha256": "49c5b9ad5be6ac3818498f186c4c0fcf35f4b0d47d0b1e7934fec6a960803e32",
+          "normalized_toml_utf8_bytes": 306909,
+          "filename_header_match": true,
+          "normalized_digest_match": true,
+          "envelope_matches_frozen_summary": true,
+          "reload_window_match": null
+        },
+        {
+          "version": 2,
+          "sequence": 2,
+          "timestamp_unix_seconds": 1791277344,
+          "encoded_bytes": 754976,
+          "envelope_sha256": "4ee908c88a7ffcea5ce624a4a59da056d5289cd2825bf4bcd3f73e8b82f60068",
+          "source_sha256": "bf28866207e351600f1aaf64ff6b1d8ae61d0203a093584c78b368b50daf79ef",
+          "normalized_toml_sha256": "49c5b9ad5be6ac3818498f186c4c0fcf35f4b0d47d0b1e7934fec6a960803e32",
+          "normalized_toml_utf8_bytes": 306909,
+          "filename_header_match": true,
+          "normalized_digest_match": true,
+          "envelope_matches_frozen_summary": true,
+          "reload_window_match": true
+        },
+        {
+          "version": 2,
+          "sequence": 3,
+          "timestamp_unix_seconds": 1791277366,
+          "encoded_bytes": 754976,
+          "envelope_sha256": "8a6f02475c3622c95c4e3bcab1d2e8063cf6ed62ac450f4525fe9e134fe39785",
+          "source_sha256": "80d2ae0a2390c9c31420ac6e886cac95ad9bf0c5d33833236386e44829bd757d",
+          "normalized_toml_sha256": "49c5b9ad5be6ac3818498f186c4c0fcf35f4b0d47d0b1e7934fec6a960803e32",
+          "normalized_toml_utf8_bytes": 306909,
+          "filename_header_match": true,
+          "normalized_digest_match": true,
+          "envelope_matches_frozen_summary": true,
+          "reload_window_match": true
+        },
+        {
+          "version": 2,
+          "sequence": 4,
+          "timestamp_unix_seconds": 1791277389,
+          "encoded_bytes": 754976,
+          "envelope_sha256": "e19509962eb5b4895d6168e6cf0d577beb0ac5b989eb449d56d99a53872b994e",
+          "source_sha256": "bf28866207e351600f1aaf64ff6b1d8ae61d0203a093584c78b368b50daf79ef",
+          "normalized_toml_sha256": "49c5b9ad5be6ac3818498f186c4c0fcf35f4b0d47d0b1e7934fec6a960803e32",
+          "normalized_toml_utf8_bytes": 306909,
+          "filename_header_match": true,
+          "normalized_digest_match": true,
+          "envelope_matches_frozen_summary": true,
+          "reload_window_match": true
+        },
+        {
+          "version": 2,
+          "sequence": 5,
+          "timestamp_unix_seconds": 1791277411,
+          "encoded_bytes": 754976,
+          "envelope_sha256": "d66e27b985e1de0bb85045c4bc5a7134d2aeda1560468b887f2e51a2f0bcebc2",
+          "source_sha256": "80d2ae0a2390c9c31420ac6e886cac95ad9bf0c5d33833236386e44829bd757d",
+          "normalized_toml_sha256": "49c5b9ad5be6ac3818498f186c4c0fcf35f4b0d47d0b1e7934fec6a960803e32",
+          "normalized_toml_utf8_bytes": 306909,
+          "filename_header_match": true,
+          "normalized_digest_match": true,
+          "envelope_matches_frozen_summary": true,
+          "reload_window_match": true
+        }
+      ]
+    },
+    {
+      "arm": "B",
+      "leg": "03-B",
+      "metric_medians": {
+        "complete_elapsed_ms": 505.0475,
+        "settled_elapsed_ms": 566.3215,
+        "gap_ms": 61.274,
+        "receiver.completion_p50_s": 0.5568545,
+        "receiver.completion_p95_s": 0.565619,
+        "receiver.completion_max_s": 0.5814794999999999,
+        "receiver.changed_maxgap_p50_ms": 401.59299999999996,
+        "receiver.changed_maxgap_p95_ms": 420.825,
+        "receiver.changed_maxgap_max_ms": 445.199,
+        "receiver.all_observer_maxgap_p50_ms": 401.59299999999996,
+        "receiver.all_observer_maxgap_p95_ms": 420.825,
+        "receiver.all_observer_maxgap_max_ms": 445.199,
+        "receiver.changed_first_generation_update_p50_ms": 506.64300000000003,
+        "receiver.changed_first_generation_update_p95_ms": 526.5319999999999,
+        "receiver.changed_first_generation_update_max_ms": 543.7855,
+        "receiver.rss_before_mib": 637.5,
+        "receiver.rss_after_mib": 681.5
+      },
+      "control": {
+        "maxgap_p50_ms": 18.91,
+        "maxgap_p95_ms": 19.32,
+        "maxgap_max_ms": 41.97,
+        "observers": 400,
+        "rss_mib": 616
+      },
+      "memory": {
+        "cgroup_peak_kib": 847264,
+        "cgroup_current_kib": 620284,
+        "cgroup_swap_max_bytes": 0,
+        "cgroup_swap_peak_kib": 0,
+        "daemon_vmhwm_kib": 806652,
+        "daemon_vmrss_kib": 628108,
+        "window": "through_harness_completion;diagnostic_only",
+        "cgroup_cpu": null,
+        "cgroup_cpu_note": "unavailable: unchanged controlled cell does not capture cpu.stat"
+      },
+      "quiet_samples": [
+        {
+          "sample": 1,
+          "epoch_s": 1791277734,
+          "pswpin": 2424677,
+          "pswpout": 2447475,
+          "disk_available_kib": 495422344,
+          "performance_governors": 64,
+          "governor_count": 64,
+          "original_attempt": 1,
+          "load1": 1.2,
+          "port1790_free": true,
+          "port9179_free": true,
+          "governor_mode": "performance",
+          "competitors_present": false,
+          "quiet": true,
+          "failed_dimensions_present": false
+        },
+        {
+          "sample": 2,
+          "epoch_s": 1791277764,
+          "pswpin": 2424677,
+          "pswpout": 2447475,
+          "disk_available_kib": 495422336,
+          "performance_governors": 64,
+          "governor_count": 64,
+          "original_attempt": 2,
+          "load1": 1.12,
+          "port1790_free": true,
+          "port9179_free": true,
+          "governor_mode": "performance",
+          "competitors_present": false,
+          "quiet": true,
+          "failed_dimensions_present": false
+        }
+      ],
+      "cooldown": {
+        "start_epoch_ns": 1791277929529356953,
+        "end_epoch_ns": 1791278229532303611,
+        "elapsed_seconds": 300.002946658,
+        "required_seconds": 300
+      },
+      "health": {
+        "startup_ready": true,
+        "topology_pass": true,
+        "final_sessions_up": 400,
+        "final_sessions_total": 400,
+        "final_parse_errors": 0,
+        "settlement_acknowledgements": 4,
+        "all_four_withdrawal_checks_pass": true
+      },
+      "exits": {
+        "launcher": 0,
+        "leg": 0,
+        "harness": 0,
+        "daemon_wait": 0,
+        "daemon_forced": 0
+      },
+      "processes": {
+        "driver": {
+          "pid": 2474013,
+          "starttime": 280983318,
+          "pgid": 2474013,
+          "sid": 2474013,
+          "PID_absent": true,
+          "group_absent": true
+        },
+        "harness": {
+          "pid": 2474072,
+          "starttime": 280983440,
+          "pgid": 2474072,
+          "sid": 2474072,
+          "PID_absent": true,
+          "group_absent": true
+        },
+        "daemon": {
+          "pid": 2474045,
+          "starttime": 280983333,
+          "pgid": 2474045,
+          "sid": 2474045,
+          "PID_absent": true,
+          "group_absent": true
+        }
+      },
+      "daemon_starttime_unchanged": true,
+      "cgroup_scope_absent_after_campaign": true,
+      "history": [
+        {
+          "version": 2,
+          "sequence": 1,
+          "timestamp_unix_seconds": 1791277798,
+          "encoded_bytes": 754976,
+          "envelope_sha256": "19f9935dc3693d8763ace509445aa25c279b312fa23b72346aeac4ecc98a6bff",
+          "source_sha256": "a5fe7a31843e13bb08140440f95484f9c571a7f5b70ec1ab0df7cd16d904d801",
+          "normalized_toml_sha256": "edb8285b2712cb6881a4701f0a3d704afde6810c8779fa6cbfc24ead4883c47c",
+          "normalized_toml_utf8_bytes": 306909,
+          "filename_header_match": true,
+          "normalized_digest_match": true,
+          "envelope_matches_frozen_summary": true,
+          "reload_window_match": null
+        },
+        {
+          "version": 2,
+          "sequence": 2,
+          "timestamp_unix_seconds": 1791277839,
+          "encoded_bytes": 754976,
+          "envelope_sha256": "2b063ad582c2eb4eae101c2b5f91e1a0938b2899cea4894a35f968d61be16aff",
+          "source_sha256": "7256dd0954c35c874d47c91b548d4a07738e841cd7fb2f2f0c115c2f798dc599",
+          "normalized_toml_sha256": "edb8285b2712cb6881a4701f0a3d704afde6810c8779fa6cbfc24ead4883c47c",
+          "normalized_toml_utf8_bytes": 306909,
+          "filename_header_match": true,
+          "normalized_digest_match": true,
+          "envelope_matches_frozen_summary": true,
+          "reload_window_match": true
+        },
+        {
+          "version": 2,
+          "sequence": 3,
+          "timestamp_unix_seconds": 1791277862,
+          "encoded_bytes": 754976,
+          "envelope_sha256": "82b68c60f56b8d468d52d32566e37f1f58d26a439bb5cd62b9f1f4802125941b",
+          "source_sha256": "a5fe7a31843e13bb08140440f95484f9c571a7f5b70ec1ab0df7cd16d904d801",
+          "normalized_toml_sha256": "edb8285b2712cb6881a4701f0a3d704afde6810c8779fa6cbfc24ead4883c47c",
+          "normalized_toml_utf8_bytes": 306909,
+          "filename_header_match": true,
+          "normalized_digest_match": true,
+          "envelope_matches_frozen_summary": true,
+          "reload_window_match": true
+        },
+        {
+          "version": 2,
+          "sequence": 4,
+          "timestamp_unix_seconds": 1791277884,
+          "encoded_bytes": 754976,
+          "envelope_sha256": "7231efca16aee427df4a3fd461207e9255759c52fe15a01b059445ac163b5158",
+          "source_sha256": "7256dd0954c35c874d47c91b548d4a07738e841cd7fb2f2f0c115c2f798dc599",
+          "normalized_toml_sha256": "edb8285b2712cb6881a4701f0a3d704afde6810c8779fa6cbfc24ead4883c47c",
+          "normalized_toml_utf8_bytes": 306909,
+          "filename_header_match": true,
+          "normalized_digest_match": true,
+          "envelope_matches_frozen_summary": true,
+          "reload_window_match": true
+        },
+        {
+          "version": 2,
+          "sequence": 5,
+          "timestamp_unix_seconds": 1791277907,
+          "encoded_bytes": 754976,
+          "envelope_sha256": "7c1fcd9a5c09522c3b2b709399aa04ee10583413d9dab123b956a330e56ad3a4",
+          "source_sha256": "a5fe7a31843e13bb08140440f95484f9c571a7f5b70ec1ab0df7cd16d904d801",
+          "normalized_toml_sha256": "edb8285b2712cb6881a4701f0a3d704afde6810c8779fa6cbfc24ead4883c47c",
+          "normalized_toml_utf8_bytes": 306909,
+          "filename_header_match": true,
+          "normalized_digest_match": true,
+          "envelope_matches_frozen_summary": true,
+          "reload_window_match": true
+        }
+      ]
+    },
+    {
+      "arm": "A",
+      "leg": "04-A",
+      "metric_medians": {
+        "complete_elapsed_ms": 508.5475,
+        "settled_elapsed_ms": 564.5799999999999,
+        "gap_ms": 54.969,
+        "receiver.completion_p50_s": 0.557203,
+        "receiver.completion_p95_s": 0.5667745,
+        "receiver.completion_max_s": 0.5811795,
+        "receiver.changed_maxgap_p50_ms": 402.1545,
+        "receiver.changed_maxgap_p95_ms": 428.5,
+        "receiver.changed_maxgap_max_ms": 443.44899999999996,
+        "receiver.all_observer_maxgap_p50_ms": 402.1545,
+        "receiver.all_observer_maxgap_p95_ms": 428.5,
+        "receiver.all_observer_maxgap_max_ms": 443.44899999999996,
+        "receiver.changed_first_generation_update_p50_ms": 509.387,
+        "receiver.changed_first_generation_update_p95_ms": 535.0525,
+        "receiver.changed_first_generation_update_max_ms": 552.512,
+        "receiver.rss_before_mib": 637.0,
+        "receiver.rss_after_mib": 677.0
+      },
+      "control": {
+        "maxgap_p50_ms": 17.94,
+        "maxgap_p95_ms": 18.42,
+        "maxgap_max_ms": 41.96,
+        "observers": 400,
+        "rss_mib": 614
+      },
+      "memory": {
+        "cgroup_peak_kib": 849928,
+        "cgroup_current_kib": 619124,
+        "cgroup_swap_max_bytes": 0,
+        "cgroup_swap_peak_kib": 0,
+        "daemon_vmhwm_kib": 808160,
+        "daemon_vmrss_kib": 626644,
+        "window": "through_harness_completion;diagnostic_only",
+        "cgroup_cpu": null,
+        "cgroup_cpu_note": "unavailable: unchanged controlled cell does not capture cpu.stat"
+      },
+      "quiet_samples": [
+        {
+          "sample": 1,
+          "epoch_s": 1791278229,
+          "pswpin": 2424677,
+          "pswpout": 2447475,
+          "disk_available_kib": 494665796,
+          "performance_governors": 64,
+          "governor_count": 64,
+          "original_attempt": 1,
+          "load1": 1.06,
+          "port1790_free": true,
+          "port9179_free": true,
+          "governor_mode": "performance",
+          "competitors_present": false,
+          "quiet": true,
+          "failed_dimensions_present": false
+        },
+        {
+          "sample": 2,
+          "epoch_s": 1791278259,
+          "pswpin": 2424677,
+          "pswpout": 2447475,
+          "disk_available_kib": 494665740,
+          "performance_governors": 64,
+          "governor_count": 64,
+          "original_attempt": 2,
+          "load1": 1.11,
+          "port1790_free": true,
+          "port9179_free": true,
+          "governor_mode": "performance",
+          "competitors_present": false,
+          "quiet": true,
+          "failed_dimensions_present": false
+        }
+      ],
+      "cooldown": {
+        "start_epoch_ns": 1791278425236979624,
+        "end_epoch_ns": 1791278725239901056,
+        "elapsed_seconds": 300.002921432,
+        "required_seconds": 300
+      },
+      "health": {
+        "startup_ready": true,
+        "topology_pass": true,
+        "final_sessions_up": 400,
+        "final_sessions_total": 400,
+        "final_parse_errors": 0,
+        "settlement_acknowledgements": 4,
+        "all_four_withdrawal_checks_pass": true
+      },
+      "exits": {
+        "launcher": 0,
+        "leg": 0,
+        "harness": 0,
+        "daemon_wait": 0,
+        "daemon_forced": 0
+      },
+      "processes": {
+        "driver": {
+          "pid": 2480818,
+          "starttime": 281032927,
+          "pgid": 2480818,
+          "sid": 2480818,
+          "PID_absent": true,
+          "group_absent": true
+        },
+        "harness": {
+          "pid": 2480888,
+          "starttime": 281033049,
+          "pgid": 2480888,
+          "sid": 2480888,
+          "PID_absent": true,
+          "group_absent": true
+        },
+        "daemon": {
+          "pid": 2480850,
+          "starttime": 281032942,
+          "pgid": 2480850,
+          "sid": 2480850,
+          "PID_absent": true,
+          "group_absent": true
+        }
+      },
+      "daemon_starttime_unchanged": true,
+      "cgroup_scope_absent_after_campaign": true,
+      "history": [
+        {
+          "version": 2,
+          "sequence": 1,
+          "timestamp_unix_seconds": 1791278294,
+          "encoded_bytes": 754976,
+          "envelope_sha256": "f140ac72fa9178cb7a3c92450b8736784a8108678a995cb6a0ca7f8b43f6f31b",
+          "source_sha256": "8e4f051203eb2c44c7b739a61122c745a99a2d4c9d57dc71f0cdd02515b4c6e3",
+          "normalized_toml_sha256": "2cf30fbdea552d86d23cc6d2d43047efd6979ba90b236b279dbc988e59bb0462",
+          "normalized_toml_utf8_bytes": 306909,
+          "filename_header_match": true,
+          "normalized_digest_match": true,
+          "envelope_matches_frozen_summary": true,
+          "reload_window_match": null
+        },
+        {
+          "version": 2,
+          "sequence": 2,
+          "timestamp_unix_seconds": 1791278335,
+          "encoded_bytes": 754976,
+          "envelope_sha256": "1f749f7100d1ab28dbceaaea7fc2a18ffece774deddf5d7b90c69c2b44341e1a",
+          "source_sha256": "193b1576706680d3bf1a6d57dd773c940b119906ca969cb0b36063168ee5fc5f",
+          "normalized_toml_sha256": "2cf30fbdea552d86d23cc6d2d43047efd6979ba90b236b279dbc988e59bb0462",
+          "normalized_toml_utf8_bytes": 306909,
+          "filename_header_match": true,
+          "normalized_digest_match": true,
+          "envelope_matches_frozen_summary": true,
+          "reload_window_match": true
+        },
+        {
+          "version": 2,
+          "sequence": 3,
+          "timestamp_unix_seconds": 1791278357,
+          "encoded_bytes": 754976,
+          "envelope_sha256": "533fc1a3a20582a2b8498b824fee1e65a5a4289bd16e05859b7f0f0f3bb0a814",
+          "source_sha256": "8e4f051203eb2c44c7b739a61122c745a99a2d4c9d57dc71f0cdd02515b4c6e3",
+          "normalized_toml_sha256": "2cf30fbdea552d86d23cc6d2d43047efd6979ba90b236b279dbc988e59bb0462",
+          "normalized_toml_utf8_bytes": 306909,
+          "filename_header_match": true,
+          "normalized_digest_match": true,
+          "envelope_matches_frozen_summary": true,
+          "reload_window_match": true
+        },
+        {
+          "version": 2,
+          "sequence": 4,
+          "timestamp_unix_seconds": 1791278380,
+          "encoded_bytes": 754976,
+          "envelope_sha256": "883833ce47cd8665e6f7e52553d7fe2b27e901b0f8d43cddd0035028b3f8712a",
+          "source_sha256": "193b1576706680d3bf1a6d57dd773c940b119906ca969cb0b36063168ee5fc5f",
+          "normalized_toml_sha256": "2cf30fbdea552d86d23cc6d2d43047efd6979ba90b236b279dbc988e59bb0462",
+          "normalized_toml_utf8_bytes": 306909,
+          "filename_header_match": true,
+          "normalized_digest_match": true,
+          "envelope_matches_frozen_summary": true,
+          "reload_window_match": true
+        },
+        {
+          "version": 2,
+          "sequence": 5,
+          "timestamp_unix_seconds": 1791278402,
+          "encoded_bytes": 754976,
+          "envelope_sha256": "d506bcd129ebc706b637157e0b89abdc9c001ff673e7e71e76afd3561be09b7c",
+          "source_sha256": "8e4f051203eb2c44c7b739a61122c745a99a2d4c9d57dc71f0cdd02515b4c6e3",
+          "normalized_toml_sha256": "2cf30fbdea552d86d23cc6d2d43047efd6979ba90b236b279dbc988e59bb0462",
+          "normalized_toml_utf8_bytes": 306909,
+          "filename_header_match": true,
+          "normalized_digest_match": true,
+          "envelope_matches_frozen_summary": true,
+          "reload_window_match": true
+        }
+      ]
+    },
+    {
+      "arm": "A",
+      "leg": "05-A",
+      "metric_medians": {
+        "complete_elapsed_ms": 508.5085,
+        "settled_elapsed_ms": 568.5955,
+        "gap_ms": 60.741,
+        "receiver.completion_p50_s": 0.5558345,
+        "receiver.completion_p95_s": 0.5634675,
+        "receiver.completion_max_s": 0.5841765,
+        "receiver.changed_maxgap_p50_ms": 402.881,
+        "receiver.changed_maxgap_p95_ms": 423.25800000000004,
+        "receiver.changed_maxgap_max_ms": 434.703,
+        "receiver.all_observer_maxgap_p50_ms": 402.881,
+        "receiver.all_observer_maxgap_p95_ms": 423.25800000000004,
+        "receiver.all_observer_maxgap_max_ms": 434.703,
+        "receiver.changed_first_generation_update_p50_ms": 508.66200000000003,
+        "receiver.changed_first_generation_update_p95_ms": 528.925,
+        "receiver.changed_first_generation_update_max_ms": 540.9495,
+        "receiver.rss_before_mib": 637.5,
+        "receiver.rss_after_mib": 679.0
+      },
+      "control": {
+        "maxgap_p50_ms": 18.75,
+        "maxgap_p95_ms": 19.31,
+        "maxgap_max_ms": 42.02,
+        "observers": 400,
+        "rss_mib": 616
+      },
+      "memory": {
+        "cgroup_peak_kib": 825684,
+        "cgroup_current_kib": 619368,
+        "cgroup_swap_max_bytes": 0,
+        "cgroup_swap_peak_kib": 0,
+        "daemon_vmhwm_kib": 808008,
+        "daemon_vmrss_kib": 627072,
+        "window": "through_harness_completion;diagnostic_only",
+        "cgroup_cpu": null,
+        "cgroup_cpu_note": "unavailable: unchanged controlled cell does not capture cpu.stat"
+      },
+      "quiet_samples": [
+        {
+          "sample": 1,
+          "epoch_s": 1791278725,
+          "pswpin": 2424677,
+          "pswpout": 2447475,
+          "disk_available_kib": 493910216,
+          "performance_governors": 64,
+          "governor_count": 64,
+          "original_attempt": 1,
+          "load1": 1.04,
+          "port1790_free": true,
+          "port9179_free": true,
+          "governor_mode": "performance",
+          "competitors_present": false,
+          "quiet": true,
+          "failed_dimensions_present": false
+        },
+        {
+          "sample": 2,
+          "epoch_s": 1791278755,
+          "pswpin": 2424677,
+          "pswpout": 2447475,
+          "disk_available_kib": 493914068,
+          "performance_governors": 64,
+          "governor_count": 64,
+          "original_attempt": 2,
+          "load1": 1.02,
+          "port1790_free": true,
+          "port9179_free": true,
+          "governor_mode": "performance",
+          "competitors_present": false,
+          "quiet": true,
+          "failed_dimensions_present": false
+        }
+      ],
+      "cooldown": {
+        "start_epoch_ns": 1791278920727703705,
+        "end_epoch_ns": 1791279220730767752,
+        "elapsed_seconds": 300.003064047,
+        "required_seconds": 300
+      },
+      "health": {
+        "startup_ready": true,
+        "topology_pass": true,
+        "final_sessions_up": 400,
+        "final_sessions_total": 400,
+        "final_parse_errors": 0,
+        "settlement_acknowledgements": 4,
+        "all_four_withdrawal_checks_pass": true
+      },
+      "exits": {
+        "launcher": 0,
+        "leg": 0,
+        "harness": 0,
+        "daemon_wait": 0,
+        "daemon_forced": 0
+      },
+      "processes": {
+        "driver": {
+          "pid": 2487429,
+          "starttime": 281082467,
+          "pgid": 2487429,
+          "sid": 2487429,
+          "PID_absent": true,
+          "group_absent": true
+        },
+        "harness": {
+          "pid": 2487491,
+          "starttime": 281082589,
+          "pgid": 2487491,
+          "sid": 2487491,
+          "PID_absent": true,
+          "group_absent": true
+        },
+        "daemon": {
+          "pid": 2487461,
+          "starttime": 281082482,
+          "pgid": 2487461,
+          "sid": 2487461,
+          "PID_absent": true,
+          "group_absent": true
+        }
+      },
+      "daemon_starttime_unchanged": true,
+      "cgroup_scope_absent_after_campaign": true,
+      "history": [
+        {
+          "version": 2,
+          "sequence": 1,
+          "timestamp_unix_seconds": 1791278789,
+          "encoded_bytes": 754976,
+          "envelope_sha256": "0f4f9c4a73d1bc5ae5bdae4116ac1de7ddce0316d1882eb5d614099f197b91de",
+          "source_sha256": "74825418c6164869d40a5f96138a953ff1f42af62c972f9d2aa122ed5338b2cc",
+          "normalized_toml_sha256": "3b64888e948a7dfd99f30984efc145af59de3d5d1e246ab4b0add937c0e6718d",
+          "normalized_toml_utf8_bytes": 306909,
+          "filename_header_match": true,
+          "normalized_digest_match": true,
+          "envelope_matches_frozen_summary": true,
+          "reload_window_match": null
+        },
+        {
+          "version": 2,
+          "sequence": 2,
+          "timestamp_unix_seconds": 1791278830,
+          "encoded_bytes": 754976,
+          "envelope_sha256": "e2bfe4a08dea02cc3ec62bf79714f1416fc9af186709e60b9fa959d848265bf3",
+          "source_sha256": "e1abda1944fd7ce0a5d7df8a6637565d4aab37254a65d66e1ad876782d4529cb",
+          "normalized_toml_sha256": "3b64888e948a7dfd99f30984efc145af59de3d5d1e246ab4b0add937c0e6718d",
+          "normalized_toml_utf8_bytes": 306909,
+          "filename_header_match": true,
+          "normalized_digest_match": true,
+          "envelope_matches_frozen_summary": true,
+          "reload_window_match": true
+        },
+        {
+          "version": 2,
+          "sequence": 3,
+          "timestamp_unix_seconds": 1791278853,
+          "encoded_bytes": 754976,
+          "envelope_sha256": "ab02559f05423d6765f4cad1becf49a67cf32a7b663d36d413d3058d95329df7",
+          "source_sha256": "74825418c6164869d40a5f96138a953ff1f42af62c972f9d2aa122ed5338b2cc",
+          "normalized_toml_sha256": "3b64888e948a7dfd99f30984efc145af59de3d5d1e246ab4b0add937c0e6718d",
+          "normalized_toml_utf8_bytes": 306909,
+          "filename_header_match": true,
+          "normalized_digest_match": true,
+          "envelope_matches_frozen_summary": true,
+          "reload_window_match": true
+        },
+        {
+          "version": 2,
+          "sequence": 4,
+          "timestamp_unix_seconds": 1791278875,
+          "encoded_bytes": 754976,
+          "envelope_sha256": "e9772b7e324b9a113b63f32af2f98c1709b97d9ab54c0e35c9af5367fe23b062",
+          "source_sha256": "e1abda1944fd7ce0a5d7df8a6637565d4aab37254a65d66e1ad876782d4529cb",
+          "normalized_toml_sha256": "3b64888e948a7dfd99f30984efc145af59de3d5d1e246ab4b0add937c0e6718d",
+          "normalized_toml_utf8_bytes": 306909,
+          "filename_header_match": true,
+          "normalized_digest_match": true,
+          "envelope_matches_frozen_summary": true,
+          "reload_window_match": true
+        },
+        {
+          "version": 2,
+          "sequence": 5,
+          "timestamp_unix_seconds": 1791278898,
+          "encoded_bytes": 754976,
+          "envelope_sha256": "9bf87cbc92acfb490975c8addaa3b5d2306d94d2a72f36a1e62cada295eba5cd",
+          "source_sha256": "74825418c6164869d40a5f96138a953ff1f42af62c972f9d2aa122ed5338b2cc",
+          "normalized_toml_sha256": "3b64888e948a7dfd99f30984efc145af59de3d5d1e246ab4b0add937c0e6718d",
+          "normalized_toml_utf8_bytes": 306909,
+          "filename_header_match": true,
+          "normalized_digest_match": true,
+          "envelope_matches_frozen_summary": true,
+          "reload_window_match": true
+        }
+      ]
+    },
+    {
+      "arm": "B",
+      "leg": "06-B",
+      "metric_medians": {
+        "complete_elapsed_ms": 503.017,
+        "settled_elapsed_ms": 549.9970000000001,
+        "gap_ms": 43.7805,
+        "receiver.completion_p50_s": 0.546943,
+        "receiver.completion_p95_s": 0.5537685,
+        "receiver.completion_max_s": 0.5759075,
+        "receiver.changed_maxgap_p50_ms": 395.83050000000003,
+        "receiver.changed_maxgap_p95_ms": 399.746,
+        "receiver.changed_maxgap_max_ms": 413.638,
+        "receiver.all_observer_maxgap_p50_ms": 395.83050000000003,
+        "receiver.all_observer_maxgap_p95_ms": 399.746,
+        "receiver.all_observer_maxgap_max_ms": 413.638,
+        "receiver.changed_first_generation_update_p50_ms": 500.01800000000003,
+        "receiver.changed_first_generation_update_p95_ms": 510.42600000000004,
+        "receiver.changed_first_generation_update_max_ms": 519.1155,
+        "receiver.rss_before_mib": 640.0,
+        "receiver.rss_after_mib": 684.0
+      },
+      "control": {
+        "maxgap_p50_ms": 19.5,
+        "maxgap_p95_ms": 19.89,
+        "maxgap_max_ms": 42.03,
+        "observers": 400,
+        "rss_mib": 618
+      },
+      "memory": {
+        "cgroup_peak_kib": 814836,
+        "cgroup_current_kib": 621892,
+        "cgroup_swap_max_bytes": 0,
+        "cgroup_swap_peak_kib": 0,
+        "daemon_vmhwm_kib": 809592,
+        "daemon_vmrss_kib": 630444,
+        "window": "through_harness_completion;diagnostic_only",
+        "cgroup_cpu": null,
+        "cgroup_cpu_note": "unavailable: unchanged controlled cell does not capture cpu.stat"
+      },
+      "quiet_samples": [
+        {
+          "sample": 1,
+          "epoch_s": 1791279220,
+          "pswpin": 2424677,
+          "pswpout": 2447475,
+          "disk_available_kib": 493155908,
+          "performance_governors": 64,
+          "governor_count": 64,
+          "original_attempt": 1,
+          "load1": 1.05,
+          "port1790_free": true,
+          "port9179_free": true,
+          "governor_mode": "performance",
+          "competitors_present": false,
+          "quiet": true,
+          "failed_dimensions_present": false
+        },
+        {
+          "sample": 2,
+          "epoch_s": 1791279251,
+          "pswpin": 2424677,
+          "pswpout": 2447475,
+          "disk_available_kib": 493155604,
+          "performance_governors": 64,
+          "governor_count": 64,
+          "original_attempt": 2,
+          "load1": 1.11,
+          "port1790_free": true,
+          "port9179_free": true,
+          "governor_mode": "performance",
+          "competitors_present": false,
+          "quiet": true,
+          "failed_dimensions_present": false
+        }
+      ],
+      "cooldown": {
+        "start_epoch_ns": 1791279416085129920,
+        "end_epoch_ns": 1791279716087882919,
+        "elapsed_seconds": 300.002752999,
+        "required_seconds": 300
+      },
+      "health": {
+        "startup_ready": true,
+        "topology_pass": true,
+        "final_sessions_up": 400,
+        "final_sessions_total": 400,
+        "final_parse_errors": 0,
+        "settlement_acknowledgements": 4,
+        "all_four_withdrawal_checks_pass": true
+      },
+      "exits": {
+        "launcher": 0,
+        "leg": 0,
+        "harness": 0,
+        "daemon_wait": 0,
+        "daemon_forced": 0
+      },
+      "processes": {
+        "driver": {
+          "pid": 2494000,
+          "starttime": 281132012,
+          "pgid": 2494000,
+          "sid": 2494000,
+          "PID_absent": true,
+          "group_absent": true
+        },
+        "harness": {
+          "pid": 2494063,
+          "starttime": 281132135,
+          "pgid": 2494063,
+          "sid": 2494063,
+          "PID_absent": true,
+          "group_absent": true
+        },
+        "daemon": {
+          "pid": 2494036,
+          "starttime": 281132028,
+          "pgid": 2494036,
+          "sid": 2494036,
+          "PID_absent": true,
+          "group_absent": true
+        }
+      },
+      "daemon_starttime_unchanged": true,
+      "cgroup_scope_absent_after_campaign": true,
+      "history": [
+        {
+          "version": 2,
+          "sequence": 1,
+          "timestamp_unix_seconds": 1791279285,
+          "encoded_bytes": 754976,
+          "envelope_sha256": "1e9f75d387802588d2d70c31a3bdf92de4ad98038c10acf477dccf47a5ebe314",
+          "source_sha256": "d4168a046f1e8681e423ee75aaac8f6422e868142b16c9bbf1c300807a060e52",
+          "normalized_toml_sha256": "102b96b4f43c65e3649b616e34f58a15e8b576e599cee9e94372d69c49cd83e0",
+          "normalized_toml_utf8_bytes": 306909,
+          "filename_header_match": true,
+          "normalized_digest_match": true,
+          "envelope_matches_frozen_summary": true,
+          "reload_window_match": null
+        },
+        {
+          "version": 2,
+          "sequence": 2,
+          "timestamp_unix_seconds": 1791279326,
+          "encoded_bytes": 754976,
+          "envelope_sha256": "7b8a6bba181634f5fc8cf10fc4c3269424623ac7a24b8ffb559fadcba798e3f8",
+          "source_sha256": "02be3baae2fad08f3269bcb720f0c51adad89a1073d7835670e7a980aa118be7",
+          "normalized_toml_sha256": "102b96b4f43c65e3649b616e34f58a15e8b576e599cee9e94372d69c49cd83e0",
+          "normalized_toml_utf8_bytes": 306909,
+          "filename_header_match": true,
+          "normalized_digest_match": true,
+          "envelope_matches_frozen_summary": true,
+          "reload_window_match": true
+        },
+        {
+          "version": 2,
+          "sequence": 3,
+          "timestamp_unix_seconds": 1791279348,
+          "encoded_bytes": 754976,
+          "envelope_sha256": "a9e20e901d162da2b13e2c30788eed50058078b70c76df8b504de61d049f2298",
+          "source_sha256": "d4168a046f1e8681e423ee75aaac8f6422e868142b16c9bbf1c300807a060e52",
+          "normalized_toml_sha256": "102b96b4f43c65e3649b616e34f58a15e8b576e599cee9e94372d69c49cd83e0",
+          "normalized_toml_utf8_bytes": 306909,
+          "filename_header_match": true,
+          "normalized_digest_match": true,
+          "envelope_matches_frozen_summary": true,
+          "reload_window_match": true
+        },
+        {
+          "version": 2,
+          "sequence": 4,
+          "timestamp_unix_seconds": 1791279371,
+          "encoded_bytes": 754976,
+          "envelope_sha256": "1ae04ccc56b28a0ef74091600d81ce5ef145606b6d669c446ef9993e7f454b25",
+          "source_sha256": "02be3baae2fad08f3269bcb720f0c51adad89a1073d7835670e7a980aa118be7",
+          "normalized_toml_sha256": "102b96b4f43c65e3649b616e34f58a15e8b576e599cee9e94372d69c49cd83e0",
+          "normalized_toml_utf8_bytes": 306909,
+          "filename_header_match": true,
+          "normalized_digest_match": true,
+          "envelope_matches_frozen_summary": true,
+          "reload_window_match": true
+        },
+        {
+          "version": 2,
+          "sequence": 5,
+          "timestamp_unix_seconds": 1791279393,
+          "encoded_bytes": 754976,
+          "envelope_sha256": "3b6b07a6e8653e822bcf45cfcd8023d0975b0d9628ae4755328cc98db4374178",
+          "source_sha256": "d4168a046f1e8681e423ee75aaac8f6422e868142b16c9bbf1c300807a060e52",
+          "normalized_toml_sha256": "102b96b4f43c65e3649b616e34f58a15e8b576e599cee9e94372d69c49cd83e0",
+          "normalized_toml_utf8_bytes": 306909,
+          "filename_header_match": true,
+          "normalized_digest_match": true,
+          "envelope_matches_frozen_summary": true,
+          "reload_window_match": true
+        }
+      ]
+    }
+  ]
+}
