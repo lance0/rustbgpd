@@ -44,7 +44,7 @@ Every leg held the shared host mutex and passed two quiet samples at least
 no detected competitors, and unchanged swap counters. Actual wrapper, runner,
 sampler, socket-check, and daemon exit receipts were zero; each full 300-second
 cooldown completed. Every leg had 700 unique live socket readbacks, each before
-its session established: zero for unset, 131,072 for the candidate. The host
+its session was established: zero for unset, 131,072 for the candidate. The host
 sysctl stayed at 4,294,967,295. Original owned processes and scopes were confirmed
 removed and the mutex released. Cleanup success is observed from those checks;
 no separate cleanup exit file was recorded.
