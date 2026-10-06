@@ -115,7 +115,7 @@ class ArtifactValidation(unittest.TestCase):
         original = path.read_text()
         for bad in ("NaN", "Infinity", "-1"):
             path.write_text(original)
-            self.edit_rows(lambda rows: rows[0].update(completion_p50_s=bad))
+            self.edit_rows(lambda rows, bad=bad: rows[0].update(completion_p50_s=bad))
             with self.assertRaisesRegex(ValueError, "non-finite or negative"):
                 recompute.main(self.root)
 
@@ -160,7 +160,7 @@ class ArtifactValidation(unittest.TestCase):
             ([[50, 100, 100, 250], [50, 100, 100, 250], [250, 250, 250, 250]], False, True),
         ):
             path.write_text(original)
-            def change(rows):
+            def change(rows, candidate=candidate):
                 for row in rows:
                     value = 200 if row["arm"] == "A" else candidate[
                         ["02-B", "03-B", "06-B"].index(row["leg"])][int(row["reload"]) - 1]
