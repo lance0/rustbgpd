@@ -379,8 +379,8 @@ fn commit_batch(manager: &mut RibManager, peer: IpAddr, batch: ExactBatch) -> bo
 fn commit_shared_unicast_with_cache(
     manager: &mut RibManager,
     peer: IpAddr,
-    announce: Arc<[Route]>,
-    next_hop_override: Arc<[Option<rustbgpd_policy::NextHopAction>]>,
+    announce: Arc<Vec<Route>>,
+    next_hop_override: Arc<Vec<Option<rustbgpd_policy::NextHopAction>>>,
     group_prior: HashSet<ExactExportKey>,
     cache: &mut crate::manager::distribution::SharedUnicastProbeCache,
 ) -> bool {
@@ -398,8 +398,8 @@ fn commit_shared_unicast_with_cache(
 fn commit_shared_unicast_with_precommit(
     manager: &mut RibManager,
     peer: IpAddr,
-    announce: Arc<[Route]>,
-    next_hop_override: Arc<[Option<rustbgpd_policy::NextHopAction>]>,
+    announce: Arc<Vec<Route>>,
+    next_hop_override: Arc<Vec<Option<rustbgpd_policy::NextHopAction>>>,
     group_prior: HashSet<ExactExportKey>,
     cache: &mut crate::manager::distribution::SharedUnicastProbeCache,
     lazy_group_prior: Option<crate::manager::distribution::LazyCleanGroupPrior<'_>>,
@@ -789,7 +789,7 @@ fn mismatched_unicast_payload_is_unrepresentable_and_nonretryable() {
     let announcements_longer = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         manager.try_send_and_commit_outbound_update(
             peer,
-            OutboundCommitBatch::with_unicast(vec![route].into(), Arc::from([])),
+            OutboundCommitBatch::with_unicast(vec![route].into(), Vec::new().into()),
         )
     }));
     assert!(announcements_longer.is_err());
@@ -797,7 +797,7 @@ fn mismatched_unicast_payload_is_unrepresentable_and_nonretryable() {
     let overrides_longer = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         manager.try_send_and_commit_outbound_update(
             peer,
-            OutboundCommitBatch::with_unicast(Arc::from([]), vec![None].into()),
+            OutboundCommitBatch::with_unicast(Vec::new().into(), vec![None].into()),
         )
     }));
     assert!(overrides_longer.is_err());
@@ -1069,8 +1069,8 @@ fn cached_success_rechecks_target_ceiling_and_emits_owed_withdrawal() {
     let route = make_route(prefix, Ipv4Addr::new(198, 51, 100, 40));
     let key = ExactExportKey::Unicast(route.prefix, route.path_id);
     let route_identity = (route.prefix, route.path_id);
-    let announce: Arc<[Route]> = vec![route].into();
-    let next_hop_override: Arc<[Option<rustbgpd_policy::NextHopAction>]> = vec![None].into();
+    let announce: Arc<Vec<Route>> = vec![route].into();
+    let next_hop_override: Arc<Vec<Option<rustbgpd_policy::NextHopAction>>> = vec![None].into();
     let mut cache = crate::manager::distribution::SharedUnicastProbeCache::default();
 
     assert!(commit_shared_unicast_with_cache(
@@ -1125,8 +1125,8 @@ fn clean_group_all_success_preserves_shared_payload_and_target_snapshot_fence() 
         source_attrs: None,
         lane: None,
     }];
-    let announce: Arc<[Route]> = vec![route].into();
-    let next_hop_override: Arc<[Option<rustbgpd_policy::NextHopAction>]> = vec![None].into();
+    let announce: Arc<Vec<Route>> = vec![route].into();
+    let next_hop_override: Arc<Vec<Option<rustbgpd_policy::NextHopAction>>> = vec![None].into();
     let mut cache = crate::manager::distribution::SharedUnicastProbeCache::default();
 
     assert!(commit_shared_unicast_with_precommit(
@@ -1174,8 +1174,8 @@ fn clean_group_cached_failure_materializes_prior_and_emits_owed_withdrawal() {
         source_attrs: None,
         lane: None,
     }];
-    let announce: Arc<[Route]> = vec![route].into();
-    let next_hop_override: Arc<[Option<rustbgpd_policy::NextHopAction>]> = vec![None].into();
+    let announce: Arc<Vec<Route>> = vec![route].into();
+    let next_hop_override: Arc<Vec<Option<rustbgpd_policy::NextHopAction>>> = vec![None].into();
     let mut cache = crate::manager::distribution::SharedUnicastProbeCache::default();
 
     assert!(commit_shared_unicast_with_cache(
@@ -1239,8 +1239,8 @@ fn clean_group_overlay_blocks_fast_path_and_retains_unrelated_family() {
         source_attrs: None,
         lane: None,
     }];
-    let announce: Arc<[Route]> = vec![route].into();
-    let next_hop_override: Arc<[Option<rustbgpd_policy::NextHopAction>]> = vec![None].into();
+    let announce: Arc<Vec<Route>> = vec![route].into();
+    let next_hop_override: Arc<Vec<Option<rustbgpd_policy::NextHopAction>>> = vec![None].into();
     let mut cache = crate::manager::distribution::SharedUnicastProbeCache::default();
 
     assert!(commit_shared_unicast_with_precommit(

@@ -205,16 +205,16 @@ pub(in crate::manager) struct RsTagTransition {
 /// the announce vector and its aligned next-hop-override flags, enqueued
 /// per member by `Arc` clone.
 pub(in crate::manager) type SharedUnicastPayload = (
-    std::sync::Arc<[Route]>,
-    std::sync::Arc<[Option<NextHopAction>]>,
+    std::sync::Arc<Vec<Route>>,
+    std::sync::Arc<Vec<Option<NextHopAction>>>,
 );
 
 /// Immutable old-to-new inventory for the strict clean policy-transition
 /// path. The route shells and aligned next-hop decisions are materialized once
 /// for the whole cohort; transport excludes each target's own source.
 pub(in crate::manager) struct CleanPolicyTransitionInventory {
-    pub(in crate::manager) announce: std::sync::Arc<[Route]>,
-    pub(in crate::manager) next_hop_override: std::sync::Arc<[Option<NextHopAction>]>,
+    pub(in crate::manager) announce: std::sync::Arc<Vec<Route>>,
+    pub(in crate::manager) next_hop_override: std::sync::Arc<Vec<Option<NextHopAction>>>,
     /// Destination-group permit verdicts, aggregated once for counter replay.
     pub(in crate::manager) permit_totals: HashMap<Option<String>, u64>,
     /// The subset of each aggregate sourced by one peer. Split-horizon
@@ -288,10 +288,17 @@ impl CleanPolicyTransitionInventoryBuilder {
         checkpoint: &mut impl FnMut(bool),
     ) -> CleanPolicyTransitionInventory {
         checkpoint(true);
-        let announce = self.announce.into();
+        let started = std::time::Instant::now();
+        let announce = Arc::new(self.announce);
         checkpoint(true);
-        let next_hop_override = self.next_hop_override.into();
+        let next_hop_override = Arc::new(self.next_hop_override);
         checkpoint(true);
+        tracing::debug!(
+            target: "rustbgpd_rib::clean_export_probe",
+            phase = "fenced",
+            elapsed_us = started.elapsed().as_micros(),
+            "clean policy transition prestaged payload sealed"
+        );
         CleanPolicyTransitionInventory {
             announce,
             next_hop_override,
@@ -325,9 +332,9 @@ pub(in crate::manager) struct GroupStageOutput {
     /// transport's existing metric/event diagnostics.
     pub(in crate::manager) otc_blocked: Vec<Route>,
     /// Announce payload for non-exception members, built once per pass.
-    pub(in crate::manager) shared_announce: std::sync::Arc<[Route]>,
+    pub(in crate::manager) shared_announce: std::sync::Arc<Vec<Route>>,
     /// Next-hop-override flags aligned with `shared_announce`.
-    pub(in crate::manager) shared_nh: std::sync::Arc<[Option<NextHopAction>]>,
+    pub(in crate::manager) shared_nh: std::sync::Arc<Vec<Option<NextHopAction>>>,
     /// Withdraw keys for non-exception members.
     pub(in crate::manager) shared_withdraw: Vec<(Prefix, u32)>,
     /// Tag-only transitions of this pass ([`RsTagTransition`]): keys
@@ -601,9 +608,9 @@ pub(in crate::manager) struct BatchedTransitionInventory {
     /// Destination entries whose wire form differs from the source
     /// entry at the same key — `Arc`-shared across every member
     /// envelope (one `Route` shell clone per changed entry, total).
-    pub(in crate::manager) announce: Arc<[Route]>,
+    pub(in crate::manager) announce: Arc<Vec<Route>>,
     /// Next-hop-override flags aligned with `announce`.
-    pub(in crate::manager) next_hop_override: Arc<[Option<NextHopAction>]>,
+    pub(in crate::manager) next_hop_override: Arc<Vec<Option<NextHopAction>>>,
     /// Keys the destination no longer stages (over-withdraw safe).
     pub(in crate::manager) withdraw: Vec<(Prefix, u32)>,
     /// Member-scoped corrections the shared exclusion cannot express:

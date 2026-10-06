@@ -1,0 +1,632 @@
+[
+  {
+    "leg": "01-A",
+    "status": "pass",
+    "native_checks": {
+      "harness_exit": 0,
+      "cleanup_exit": 0,
+      "cell_exit": 0,
+      "daemon_exit": 0
+    },
+    "wrapper_exits": {
+      "wrapper": 0,
+      "runner": 0,
+      "sampler": 0,
+      "identity": 0,
+      "cleanup": 0
+    },
+    "workload": {
+      "N_PEERS": "700",
+      "TOTAL_PREFIXES": "400400",
+      "PORT": "1790",
+      "RELOADS": "4",
+      "CONTROL_SECS": "30",
+      "CHANGED_PEERS": "",
+      "FLAPSTORM": "",
+      "BIRD_THREADS": "8",
+      "PROBE_PREFIXES": "",
+      "FLAP_ROUNDS": ""
+    },
+    "source": {
+      "commit": "19842a5a114287af7a8f5ae66407aaacc9d0142a",
+      "tree": "fe3a2dbe6e01eb4fbb6aec5482f1184eae1973e9",
+      "dirty": false
+    },
+    "daemon": {
+      "sha256": "67ae6325f4392a23ab0c6fbb51b1ed61a25b0caa4d3391224864f278480f93df",
+      "producer_commit": "19842a5a114287af7a8f5ae66407aaacc9d0142a",
+      "producer_tree": "fe3a2dbe6e01eb4fbb6aec5482f1184eae1973e9"
+    },
+    "harness": {
+      "sha256": "4dfeccbbf9b4b25aabc1ce678d4973854f4bcddc1779bca3a82e3e7afaf063a4",
+      "producer_commit": "19842a5a114287af7a8f5ae66407aaacc9d0142a",
+      "producer_tree": "fe3a2dbe6e01eb4fbb6aec5482f1184eae1973e9"
+    },
+    "source_and_binary_freeze_equal": true,
+    "started_epoch_s": 1791313556.1903536,
+    "finished_epoch_s": 1791314015.078048,
+    "native_cell_pass_epoch_s": 1791313715.0,
+    "cooldown_requested_s": 300,
+    "cooldown_observed_s": 300.07804799079895,
+    "quiet": [
+      {
+        "sample": "1",
+        "epoch_s": "1791313556",
+        "load1": "1.19",
+        "pswpin": "2424677",
+        "pswpout": "2447475",
+        "performance_governors": "64",
+        "governor_count": "64",
+        "competitors": "none",
+        "quiet": "true",
+        "failed_dimensions": "none",
+        "original_attempt": "1"
+      },
+      {
+        "sample": "2",
+        "epoch_s": "1791313586",
+        "load1": "1.17",
+        "pswpin": "2424677",
+        "pswpout": "2447475",
+        "performance_governors": "64",
+        "governor_count": "64",
+        "competitors": "none",
+        "quiet": "true",
+        "failed_dimensions": "none",
+        "original_attempt": "2"
+      }
+    ],
+    "memory_max": "max",
+    "memory_swap_max": "0",
+    "observed_kernel_peak_bytes": 1148403712,
+    "native_peak_matches_sampler": true,
+    "sampled_rss_max_kib": 576652,
+    "vmhwm_max_kib": 580192,
+    "vmhwm_decrease_count": 39,
+    "sampled_lifetime_cpu_s": 86.76,
+    "sampled_lifetime_start_epoch_us": 1791313586768637,
+    "sampled_lifetime_end_epoch_us": 1791313714843701,
+    "sampler_read_us_median": 1101.0,
+    "sampler_read_us_max": 3923,
+    "sample_count": 5124,
+    "samples_with_thread_read_races": 0,
+    "sample_at_largest_current": {
+      "epoch_us": 1791313626418727,
+      "read_us": 1604,
+      "current_before_bytes": 1129472000,
+      "current_after_bytes": 1128161280,
+      "anon_bytes": 462622720,
+      "sock_bytes": 641265664,
+      "file_bytes": 4517888,
+      "kernel_bytes": 4849664,
+      "slab_bytes": 3161856,
+      "pagetables_bytes": 1474560
+    },
+    "owned_processes_and_scope_removed": true
+  },
+  {
+    "leg": "02-B",
+    "status": "pass",
+    "native_checks": {
+      "harness_exit": 0,
+      "cleanup_exit": 0,
+      "cell_exit": 0,
+      "daemon_exit": 0
+    },
+    "wrapper_exits": {
+      "wrapper": 0,
+      "runner": 0,
+      "sampler": 0,
+      "identity": 0,
+      "cleanup": 0
+    },
+    "workload": {
+      "N_PEERS": "700",
+      "TOTAL_PREFIXES": "400400",
+      "PORT": "1790",
+      "RELOADS": "4",
+      "CONTROL_SECS": "30",
+      "CHANGED_PEERS": "",
+      "FLAPSTORM": "",
+      "BIRD_THREADS": "8",
+      "PROBE_PREFIXES": "",
+      "FLAP_ROUNDS": ""
+    },
+    "source": {
+      "commit": "3cf0dc277dc2f729d01e40207fbdab2d2e5fda11",
+      "tree": "da79071dec28b23b23fdc26a9fe67c4f4137886d",
+      "dirty": false
+    },
+    "daemon": {
+      "sha256": "dd27aab2cb5246fb535340f9a6f4333245776b2ba78fc3ed034d44b423272d87",
+      "producer_commit": "3cf0dc277dc2f729d01e40207fbdab2d2e5fda11",
+      "producer_tree": "da79071dec28b23b23fdc26a9fe67c4f4137886d"
+    },
+    "harness": {
+      "sha256": "4dfeccbbf9b4b25aabc1ce678d4973854f4bcddc1779bca3a82e3e7afaf063a4",
+      "producer_commit": "19842a5a114287af7a8f5ae66407aaacc9d0142a",
+      "producer_tree": "fe3a2dbe6e01eb4fbb6aec5482f1184eae1973e9"
+    },
+    "source_and_binary_freeze_equal": true,
+    "started_epoch_s": 1791314027.989703,
+    "finished_epoch_s": 1791314486.8763764,
+    "native_cell_pass_epoch_s": 1791314186.0,
+    "cooldown_requested_s": 300,
+    "cooldown_observed_s": 300.87637639045715,
+    "quiet": [
+      {
+        "sample": "1",
+        "epoch_s": "1791314028",
+        "load1": "1.16",
+        "pswpin": "2424677",
+        "pswpout": "2447475",
+        "performance_governors": "64",
+        "governor_count": "64",
+        "competitors": "none",
+        "quiet": "true",
+        "failed_dimensions": "none",
+        "original_attempt": "1"
+      },
+      {
+        "sample": "2",
+        "epoch_s": "1791314058",
+        "load1": "1.26",
+        "pswpin": "2424677",
+        "pswpout": "2447475",
+        "performance_governors": "64",
+        "governor_count": "64",
+        "competitors": "none",
+        "quiet": "true",
+        "failed_dimensions": "none",
+        "original_attempt": "2"
+      }
+    ],
+    "memory_max": "max",
+    "memory_swap_max": "0",
+    "observed_kernel_peak_bytes": 1064214528,
+    "native_peak_matches_sampler": true,
+    "sampled_rss_max_kib": 548624,
+    "vmhwm_max_kib": 558052,
+    "vmhwm_decrease_count": 30,
+    "sampled_lifetime_cpu_s": 106.66,
+    "sampled_lifetime_start_epoch_us": 1791314058551851,
+    "sampled_lifetime_end_epoch_us": 1791314186651929,
+    "sampler_read_us_median": 1095,
+    "sampler_read_us_max": 4595,
+    "sample_count": 5125,
+    "samples_with_thread_read_races": 0,
+    "sample_at_largest_current": {
+      "epoch_us": 1791314098229007,
+      "read_us": 4595,
+      "current_before_bytes": 1012969472,
+      "current_after_bytes": 1015398400,
+      "anon_bytes": 467853312,
+      "sock_bytes": 529309696,
+      "file_bytes": 4464640,
+      "kernel_bytes": 4825088,
+      "slab_bytes": 3139368,
+      "pagetables_bytes": 1482752
+    },
+    "owned_processes_and_scope_removed": true
+  },
+  {
+    "leg": "03-B",
+    "status": "pass",
+    "native_checks": {
+      "harness_exit": 0,
+      "cleanup_exit": 0,
+      "cell_exit": 0,
+      "daemon_exit": 0
+    },
+    "wrapper_exits": {
+      "wrapper": 0,
+      "runner": 0,
+      "sampler": 0,
+      "identity": 0,
+      "cleanup": 0
+    },
+    "workload": {
+      "N_PEERS": "700",
+      "TOTAL_PREFIXES": "400400",
+      "PORT": "1790",
+      "RELOADS": "4",
+      "CONTROL_SECS": "30",
+      "CHANGED_PEERS": "",
+      "FLAPSTORM": "",
+      "BIRD_THREADS": "8",
+      "PROBE_PREFIXES": "",
+      "FLAP_ROUNDS": ""
+    },
+    "source": {
+      "commit": "3cf0dc277dc2f729d01e40207fbdab2d2e5fda11",
+      "tree": "da79071dec28b23b23fdc26a9fe67c4f4137886d",
+      "dirty": false
+    },
+    "daemon": {
+      "sha256": "dd27aab2cb5246fb535340f9a6f4333245776b2ba78fc3ed034d44b423272d87",
+      "producer_commit": "3cf0dc277dc2f729d01e40207fbdab2d2e5fda11",
+      "producer_tree": "da79071dec28b23b23fdc26a9fe67c4f4137886d"
+    },
+    "harness": {
+      "sha256": "4dfeccbbf9b4b25aabc1ce678d4973854f4bcddc1779bca3a82e3e7afaf063a4",
+      "producer_commit": "19842a5a114287af7a8f5ae66407aaacc9d0142a",
+      "producer_tree": "fe3a2dbe6e01eb4fbb6aec5482f1184eae1973e9"
+    },
+    "source_and_binary_freeze_equal": true,
+    "started_epoch_s": 1791314504.1732056,
+    "finished_epoch_s": 1791314963.0649893,
+    "native_cell_pass_epoch_s": 1791314663.0,
+    "cooldown_requested_s": 300,
+    "cooldown_observed_s": 300.0649893283844,
+    "quiet": [
+      {
+        "sample": "1",
+        "epoch_s": "1791314504",
+        "load1": "1.10",
+        "pswpin": "2424677",
+        "pswpout": "2447475",
+        "performance_governors": "64",
+        "governor_count": "64",
+        "competitors": "none",
+        "quiet": "true",
+        "failed_dimensions": "none",
+        "original_attempt": "1"
+      },
+      {
+        "sample": "2",
+        "epoch_s": "1791314534",
+        "load1": "1.06",
+        "pswpin": "2424677",
+        "pswpout": "2447475",
+        "performance_governors": "64",
+        "governor_count": "64",
+        "competitors": "none",
+        "quiet": "true",
+        "failed_dimensions": "none",
+        "original_attempt": "2"
+      }
+    ],
+    "memory_max": "max",
+    "memory_swap_max": "0",
+    "observed_kernel_peak_bytes": 1003130880,
+    "native_peak_matches_sampler": true,
+    "sampled_rss_max_kib": 558100,
+    "vmhwm_max_kib": 569320,
+    "vmhwm_decrease_count": 35,
+    "sampled_lifetime_cpu_s": 107.58,
+    "sampled_lifetime_start_epoch_us": 1791314534774051,
+    "sampled_lifetime_end_epoch_us": 1791314662874116,
+    "sampler_read_us_median": 1110,
+    "sampler_read_us_max": 2116,
+    "sample_count": 5125,
+    "samples_with_thread_read_races": 0,
+    "sample_at_largest_current": {
+      "epoch_us": 1791314574399132,
+      "read_us": 1234,
+      "current_before_bytes": 976846848,
+      "current_after_bytes": 976191488,
+      "anon_bytes": 450277376,
+      "sock_bytes": 488660992,
+      "file_bytes": 4517888,
+      "kernel_bytes": 4882432,
+      "slab_bytes": 3146416,
+      "pagetables_bytes": 1519616
+    },
+    "owned_processes_and_scope_removed": true
+  },
+  {
+    "leg": "04-A",
+    "status": "pass",
+    "native_checks": {
+      "harness_exit": 0,
+      "cleanup_exit": 0,
+      "cell_exit": 0,
+      "daemon_exit": 0
+    },
+    "wrapper_exits": {
+      "wrapper": 0,
+      "runner": 0,
+      "sampler": 0,
+      "identity": 0,
+      "cleanup": 0
+    },
+    "workload": {
+      "N_PEERS": "700",
+      "TOTAL_PREFIXES": "400400",
+      "PORT": "1790",
+      "RELOADS": "4",
+      "CONTROL_SECS": "30",
+      "CHANGED_PEERS": "",
+      "FLAPSTORM": "",
+      "BIRD_THREADS": "8",
+      "PROBE_PREFIXES": "",
+      "FLAP_ROUNDS": ""
+    },
+    "source": {
+      "commit": "19842a5a114287af7a8f5ae66407aaacc9d0142a",
+      "tree": "fe3a2dbe6e01eb4fbb6aec5482f1184eae1973e9",
+      "dirty": false
+    },
+    "daemon": {
+      "sha256": "67ae6325f4392a23ab0c6fbb51b1ed61a25b0caa4d3391224864f278480f93df",
+      "producer_commit": "19842a5a114287af7a8f5ae66407aaacc9d0142a",
+      "producer_tree": "fe3a2dbe6e01eb4fbb6aec5482f1184eae1973e9"
+    },
+    "harness": {
+      "sha256": "4dfeccbbf9b4b25aabc1ce678d4973854f4bcddc1779bca3a82e3e7afaf063a4",
+      "producer_commit": "19842a5a114287af7a8f5ae66407aaacc9d0142a",
+      "producer_tree": "fe3a2dbe6e01eb4fbb6aec5482f1184eae1973e9"
+    },
+    "source_and_binary_freeze_equal": true,
+    "started_epoch_s": 1791314971.305041,
+    "finished_epoch_s": 1791315430.1848285,
+    "native_cell_pass_epoch_s": 1791315130.0,
+    "cooldown_requested_s": 300,
+    "cooldown_observed_s": 300.18482851982117,
+    "quiet": [
+      {
+        "sample": "1",
+        "epoch_s": "1791314971",
+        "load1": "1.10",
+        "pswpin": "2424677",
+        "pswpout": "2447475",
+        "performance_governors": "64",
+        "governor_count": "64",
+        "competitors": "none",
+        "quiet": "true",
+        "failed_dimensions": "none",
+        "original_attempt": "1"
+      },
+      {
+        "sample": "2",
+        "epoch_s": "1791315001",
+        "load1": "1.06",
+        "pswpin": "2424677",
+        "pswpout": "2447475",
+        "performance_governors": "64",
+        "governor_count": "64",
+        "competitors": "none",
+        "quiet": "true",
+        "failed_dimensions": "none",
+        "original_attempt": "2"
+      }
+    ],
+    "memory_max": "max",
+    "memory_swap_max": "0",
+    "observed_kernel_peak_bytes": 1121165312,
+    "native_peak_matches_sampler": true,
+    "sampled_rss_max_kib": 580492,
+    "vmhwm_max_kib": 583224,
+    "vmhwm_decrease_count": 41,
+    "sampled_lifetime_cpu_s": 85.87,
+    "sampled_lifetime_start_epoch_us": 1791315001843493,
+    "sampled_lifetime_end_epoch_us": 1791315129943553,
+    "sampler_read_us_median": 1125,
+    "sampler_read_us_max": 3961,
+    "sample_count": 5125,
+    "samples_with_thread_read_races": 0,
+    "sample_at_largest_current": {
+      "epoch_us": 1791315041493591,
+      "read_us": 1631,
+      "current_before_bytes": 1113935872,
+      "current_after_bytes": 1111531520,
+      "anon_bytes": 462585856,
+      "sock_bytes": 633262080,
+      "file_bytes": 4472832,
+      "kernel_bytes": 4800512,
+      "slab_bytes": 3150360,
+      "pagetables_bytes": 1458176
+    },
+    "owned_processes_and_scope_removed": true
+  },
+  {
+    "leg": "05-A",
+    "status": "pass",
+    "native_checks": {
+      "harness_exit": 0,
+      "cleanup_exit": 0,
+      "cell_exit": 0,
+      "daemon_exit": 0
+    },
+    "wrapper_exits": {
+      "wrapper": 0,
+      "runner": 0,
+      "sampler": 0,
+      "identity": 0,
+      "cleanup": 0
+    },
+    "workload": {
+      "N_PEERS": "700",
+      "TOTAL_PREFIXES": "400400",
+      "PORT": "1790",
+      "RELOADS": "4",
+      "CONTROL_SECS": "30",
+      "CHANGED_PEERS": "",
+      "FLAPSTORM": "",
+      "BIRD_THREADS": "8",
+      "PROBE_PREFIXES": "",
+      "FLAP_ROUNDS": ""
+    },
+    "source": {
+      "commit": "19842a5a114287af7a8f5ae66407aaacc9d0142a",
+      "tree": "fe3a2dbe6e01eb4fbb6aec5482f1184eae1973e9",
+      "dirty": false
+    },
+    "daemon": {
+      "sha256": "67ae6325f4392a23ab0c6fbb51b1ed61a25b0caa4d3391224864f278480f93df",
+      "producer_commit": "19842a5a114287af7a8f5ae66407aaacc9d0142a",
+      "producer_tree": "fe3a2dbe6e01eb4fbb6aec5482f1184eae1973e9"
+    },
+    "harness": {
+      "sha256": "4dfeccbbf9b4b25aabc1ce678d4973854f4bcddc1779bca3a82e3e7afaf063a4",
+      "producer_commit": "19842a5a114287af7a8f5ae66407aaacc9d0142a",
+      "producer_tree": "fe3a2dbe6e01eb4fbb6aec5482f1184eae1973e9"
+    },
+    "source_and_binary_freeze_equal": true,
+    "started_epoch_s": 1791315447.4842803,
+    "finished_epoch_s": 1791315906.366343,
+    "native_cell_pass_epoch_s": 1791315606.0,
+    "cooldown_requested_s": 300,
+    "cooldown_observed_s": 300.3663430213928,
+    "quiet": [
+      {
+        "sample": "1",
+        "epoch_s": "1791315447",
+        "load1": "1.05",
+        "pswpin": "2424677",
+        "pswpout": "2447475",
+        "performance_governors": "64",
+        "governor_count": "64",
+        "competitors": "none",
+        "quiet": "true",
+        "failed_dimensions": "none",
+        "original_attempt": "1"
+      },
+      {
+        "sample": "2",
+        "epoch_s": "1791315477",
+        "load1": "1.10",
+        "pswpin": "2424677",
+        "pswpout": "2447475",
+        "performance_governors": "64",
+        "governor_count": "64",
+        "competitors": "none",
+        "quiet": "true",
+        "failed_dimensions": "none",
+        "original_attempt": "2"
+      }
+    ],
+    "memory_max": "max",
+    "memory_swap_max": "0",
+    "observed_kernel_peak_bytes": 1092005888,
+    "native_peak_matches_sampler": true,
+    "sampled_rss_max_kib": 570660,
+    "vmhwm_max_kib": 586112,
+    "vmhwm_decrease_count": 38,
+    "sampled_lifetime_cpu_s": 104.52,
+    "sampled_lifetime_start_epoch_us": 1791315478071442,
+    "sampled_lifetime_end_epoch_us": 1791315606121506,
+    "sampler_read_us_median": 1108,
+    "sampler_read_us_max": 2281,
+    "sample_count": 5123,
+    "samples_with_thread_read_races": 0,
+    "sample_at_largest_current": {
+      "epoch_us": 1791315517697987,
+      "read_us": 1795,
+      "current_before_bytes": 1085624320,
+      "current_after_bytes": 1085206528,
+      "anon_bytes": 477855744,
+      "sock_bytes": 589258752,
+      "file_bytes": 4468736,
+      "kernel_bytes": 4849664,
+      "slab_bytes": 3164016,
+      "pagetables_bytes": 1482752
+    },
+    "owned_processes_and_scope_removed": true
+  },
+  {
+    "leg": "06-B",
+    "status": "pass",
+    "native_checks": {
+      "harness_exit": 0,
+      "cleanup_exit": 0,
+      "cell_exit": 0,
+      "daemon_exit": 0
+    },
+    "wrapper_exits": {
+      "wrapper": 0,
+      "runner": 0,
+      "sampler": 0,
+      "identity": 0,
+      "cleanup": 0
+    },
+    "workload": {
+      "N_PEERS": "700",
+      "TOTAL_PREFIXES": "400400",
+      "PORT": "1790",
+      "RELOADS": "4",
+      "CONTROL_SECS": "30",
+      "CHANGED_PEERS": "",
+      "FLAPSTORM": "",
+      "BIRD_THREADS": "8",
+      "PROBE_PREFIXES": "",
+      "FLAP_ROUNDS": ""
+    },
+    "source": {
+      "commit": "3cf0dc277dc2f729d01e40207fbdab2d2e5fda11",
+      "tree": "da79071dec28b23b23fdc26a9fe67c4f4137886d",
+      "dirty": false
+    },
+    "daemon": {
+      "sha256": "dd27aab2cb5246fb535340f9a6f4333245776b2ba78fc3ed034d44b423272d87",
+      "producer_commit": "3cf0dc277dc2f729d01e40207fbdab2d2e5fda11",
+      "producer_tree": "da79071dec28b23b23fdc26a9fe67c4f4137886d"
+    },
+    "harness": {
+      "sha256": "4dfeccbbf9b4b25aabc1ce678d4973854f4bcddc1779bca3a82e3e7afaf063a4",
+      "producer_commit": "19842a5a114287af7a8f5ae66407aaacc9d0142a",
+      "producer_tree": "fe3a2dbe6e01eb4fbb6aec5482f1184eae1973e9"
+    },
+    "source_and_binary_freeze_equal": true,
+    "started_epoch_s": 1791315914.632773,
+    "finished_epoch_s": 1791316373.5219371,
+    "native_cell_pass_epoch_s": 1791316073.0,
+    "cooldown_requested_s": 300,
+    "cooldown_observed_s": 300.5219371318817,
+    "quiet": [
+      {
+        "sample": "1",
+        "epoch_s": "1791315914",
+        "load1": "1.02",
+        "pswpin": "2424677",
+        "pswpout": "2447475",
+        "performance_governors": "64",
+        "governor_count": "64",
+        "competitors": "none",
+        "quiet": "true",
+        "failed_dimensions": "none",
+        "original_attempt": "1"
+      },
+      {
+        "sample": "2",
+        "epoch_s": "1791315944",
+        "load1": "1.09",
+        "pswpin": "2424677",
+        "pswpout": "2447475",
+        "performance_governors": "64",
+        "governor_count": "64",
+        "competitors": "none",
+        "quiet": "true",
+        "failed_dimensions": "none",
+        "original_attempt": "2"
+      }
+    ],
+    "memory_max": "max",
+    "memory_swap_max": "0",
+    "observed_kernel_peak_bytes": 1104842752,
+    "native_peak_matches_sampler": true,
+    "sampled_rss_max_kib": 577828,
+    "vmhwm_max_kib": 578924,
+    "vmhwm_decrease_count": 39,
+    "sampled_lifetime_cpu_s": 102.61,
+    "sampled_lifetime_start_epoch_us": 1791315945208012,
+    "sampled_lifetime_end_epoch_us": 1791316073283069,
+    "sampler_read_us_median": 1111.0,
+    "sampler_read_us_max": 2427,
+    "sample_count": 5124,
+    "samples_with_thread_read_races": 0,
+    "sample_at_largest_current": {
+      "epoch_us": 1791315984883089,
+      "read_us": 1232,
+      "current_before_bytes": 1055481856,
+      "current_after_bytes": 1053904896,
+      "anon_bytes": 420315136,
+      "sock_bytes": 597303296,
+      "file_bytes": 4554752,
+      "kernel_bytes": 4849664,
+      "slab_bytes": 3171192,
+      "pagetables_bytes": 1458176
+    },
+    "owned_processes_and_scope_removed": true
+  }
+]

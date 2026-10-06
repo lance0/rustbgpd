@@ -49,7 +49,7 @@ fn attrs(med: Option<u32>) -> Vec<PathAttribute> {
     attrs
 }
 
-fn routes(count: u32, shape: &str) -> Arc<[Route]> {
+fn routes(count: u32, shape: &str) -> Arc<Vec<Route>> {
     let shared = AttrSet::new(attrs(None));
     (0..count)
         .map(|i| Route {
@@ -74,7 +74,8 @@ fn routes(count: u32, shape: &str) -> Arc<[Route]> {
             received_as_path: None,
             aspa_context: rustbgpd_rib::route::AspaContextId::DEFAULT,
         })
-        .collect()
+        .collect::<Vec<_>>()
+        .into()
 }
 
 fn bench(c: &mut Criterion) {
@@ -97,7 +98,7 @@ fn bench(c: &mut Criterion) {
 }
 
 /// 50 sources x 40 prefixes, one interned attribute set per source.
-fn failover_announce() -> Arc<[Route]> {
+fn failover_announce() -> Arc<Vec<Route>> {
     let template = routes(1, "shared_arc")[0].clone();
     (1..=50u8)
         .flat_map(|s| {
@@ -120,7 +121,8 @@ fn failover_announce() -> Arc<[Route]> {
                 }
             })
         })
-        .collect()
+        .collect::<Vec<_>>()
+        .into()
 }
 
 fn failover(c: &mut Criterion) {

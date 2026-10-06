@@ -594,8 +594,8 @@ impl RibManager {
         peer: IpAddr,
         grouped: bool,
         announce_source_exclusion: Option<IpAddr>,
-        announce: &mut Arc<[crate::route::Route]>,
-        next_hop_override: &mut Arc<[Option<rustbgpd_policy::NextHopAction>]>,
+        announce: &mut Arc<Vec<crate::route::Route>>,
+        next_hop_override: &mut Arc<Vec<Option<rustbgpd_policy::NextHopAction>>>,
         withdraw: &[(Prefix, u32)],
     ) -> bool {
         let readiness = self.replacement_readiness.clone();

@@ -110,6 +110,30 @@ a recreated group, or checked against a smaller RS-ASN set falls back to the
 fenced walk described in Section 3, so the commit-or-degrade outcome is that of a
 fenced walk of the same tables.
 
+**Amended:** 2026-10-06 — the unfenced inventory walk clones owned route rows and
+aligned next-hop actions in bounded slices, retaining its existing vectors. The
+rows are exact-probed in unfenced slices against the preparing member's immutable
+encoder snapshot. Mutation logs remain active throughout the walk and probe.
+
+Under the fence, the inventory vectors and successful encoded lengths use the
+same in-place compaction for logged keys. Changed rows are appended and re-probed
+before computing the current maximum; withdrawn maxima cannot survive in the
+proof. The unfenced route, next-hop, and encoded-length allocations reserve one
+route slice of headroom for that retained proof's dirty suffix. One final seal
+wraps the reconciled vectors in `Arc<Vec<_>>`, preserving their buffers without
+copying the route shells or next-hop actions. Capacity is retained; retiring the
+last owner still drops all rows, and the over-budget fallback can still grow its
+vectors before discarding the proof.
+The `rustbgpd_rib::clean_export_probe` debug target captures seal duration with
+`phase=fenced`, reconciliation path and row counts, proof validation, and the
+full-probe count at entry to `Validate`, without enabling per-prefix events.
+
+An incomplete proof, more than one route slice of changed rows, probe rejection,
+or encoder owner/generation drift discards the proof and runs the fenced probe.
+Wire-profile compatibility and each member's ceiling are still checked during
+`ProbeAndPrepare`; `Validate` keeps its exact current owner/generation checks
+before any emission.
+
 ## Context
 
 A live policy reload can move hundreds of route-reflector or route-server
