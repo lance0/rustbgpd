@@ -120,8 +120,14 @@ def main(root):
              leg["daemon"] == producer["daemon"] and leg["harness"] == producer["harness"],
              "arm source/binary/harness mismatch")
         need(leg["source_and_binary_freeze_equal"] is True, "source or binary drift")
-        need(number(leg["cooldown_observed_s"]) >= 300, "shortened cooldown")
         begin, end = number(leg["started_epoch_s"]), number(leg["finished_epoch_s"])
+        cell_pass = number(leg["native_cell_pass_epoch_s"])
+        need(begin < cell_pass <= end, "native cell pass outside leg interval")
+        # The cooldown is the timestamp gap; the recorded field must agree with it.
+        cooldown = end - cell_pass
+        need(cooldown >= 300, "shortened cooldown")
+        need(abs(number(leg["cooldown_observed_s"]) - cooldown) <= 1e-3,
+             "cooldown field disagrees with timestamps")
         need(begin < end and (previous_end is None or previous_end <= begin), "overlapping legs")
         previous_end = end
         quiet = leg["quiet"]

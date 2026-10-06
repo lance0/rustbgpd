@@ -138,6 +138,14 @@ class ArtifactValidation(unittest.TestCase):
 
     def test_short_cooldown(self):
         self.edit_json("legs.json", lambda legs: legs[0].update(cooldown_observed_s=299))
+        with self.assertRaisesRegex(ValueError, "cooldown field disagrees with timestamps"):
+            recompute.main(self.root)
+
+    def test_short_cooldown_timestamps_with_full_cooldown_field(self):
+        def change(legs):
+            legs[0]["finished_epoch_s"] = legs[0]["native_cell_pass_epoch_s"] + 290
+            legs[0]["cooldown_observed_s"] = 300
+        self.edit_json("legs.json", change)
         with self.assertRaisesRegex(ValueError, "shortened cooldown"):
             recompute.main(self.root)
 
