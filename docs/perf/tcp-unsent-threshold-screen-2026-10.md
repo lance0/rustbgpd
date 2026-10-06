@@ -6,8 +6,10 @@ A six-leg native-loopback screen found lower daemon cgroup memory peaks with a
 The frozen 64 KiB candidate is **NO-GO under the original +2% completion gate**:
 the median of per-reload completion p50s increased **3.846%**, while the median
 observed kernel cgroup peak fell **275.559 MiB**. This decision applies to this
-candidate and screen. The investigation remains open; a 128 KiB candidate is
-queued and unmeasured. This receipt introduces no production setting or default.
+candidate and screen. The follow-up
+[128 KiB screen](tcp-unsent-threshold-128k-screen-2026-10.md) also missed the
+completion gate (+4.378%) while lowering the observed cgroup peak. This receipt
+introduces no production setting or default.
 
 ## Shape and provenance
 
@@ -97,5 +99,5 @@ The native completion failure prevents fleet qualification for this candidate.
 Slow-reader, stopped-reader, and 20 ms RTT fleet acceptance remain unmeasured;
 separate 12-peer functional smokes establish driver behavior only. This is a
 single-daemon screen, not a canonical cross-daemon campaign. The memory reduction
-supports continuing the investigation, with 128 KiB still requiring its own
-measurements and the original acceptance criteria.
+prompted a separate [128 KiB screen](tcp-unsent-threshold-128k-screen-2026-10.md)
+under the original acceptance criteria; it was also NO-GO on completion.
