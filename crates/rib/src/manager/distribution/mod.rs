@@ -228,9 +228,9 @@ pub(in crate::manager) struct OutboundCommitBatch {
 #[derive(Default)]
 pub(in crate::manager) struct AlignedUnicastPayload {
     /// Unicast announcements indexed exactly like `next_hop_override`.
-    announce: Arc<[crate::route::Route]>,
+    announce: Arc<Vec<crate::route::Route>>,
     /// Next-hop actions indexed exactly like `announce`.
-    next_hop_override: Arc<[Option<rustbgpd_policy::NextHopAction>]>,
+    next_hop_override: Arc<Vec<Option<rustbgpd_policy::NextHopAction>>>,
 }
 
 impl OutboundCommitBatch {
@@ -261,8 +261,8 @@ impl OutboundCommitBatch {
 
     #[track_caller]
     pub(in crate::manager) fn with_unicast(
-        announce: Arc<[crate::route::Route]>,
-        next_hop_override: Arc<[Option<rustbgpd_policy::NextHopAction>]>,
+        announce: Arc<Vec<crate::route::Route>>,
+        next_hop_override: Arc<Vec<Option<rustbgpd_policy::NextHopAction>>>,
     ) -> Self {
         assert_eq!(
             announce.len(),
@@ -280,8 +280,8 @@ impl OutboundCommitBatch {
 }
 
 struct SharedUnicastProbeCacheEntry {
-    announce: Arc<[crate::route::Route]>,
-    next_hop_override: Arc<[Option<rustbgpd_policy::NextHopAction>]>,
+    announce: Arc<Vec<crate::route::Route>>,
+    next_hop_override: Arc<Vec<Option<rustbgpd_policy::NextHopAction>>>,
     source_snapshot: Arc<dyn crate::update::ExactExportSnapshot>,
     encoded_lengths: Vec<usize>,
     /// Largest entry of `encoded_lengths`, computed once at `store` time:
@@ -295,8 +295,8 @@ struct SharedUnicastProbeCacheEntry {
 impl SharedUnicastProbeCache {
     fn entry_matches_payload(
         entry: &SharedUnicastProbeCacheEntry,
-        announce: &Arc<[crate::route::Route]>,
-        next_hop_override: &Arc<[Option<rustbgpd_policy::NextHopAction>]>,
+        announce: &Arc<Vec<crate::route::Route>>,
+        next_hop_override: &Arc<Vec<Option<rustbgpd_policy::NextHopAction>>>,
     ) -> bool {
         Arc::ptr_eq(&entry.announce, announce)
             && Arc::ptr_eq(&entry.next_hop_override, next_hop_override)
@@ -306,8 +306,8 @@ impl SharedUnicastProbeCache {
     fn reuse_grouped_exact_export_ceiling(
         &self,
         group_id: usize,
-        announce: &Arc<[crate::route::Route]>,
-        next_hop_override: &Arc<[Option<rustbgpd_policy::NextHopAction>]>,
+        announce: &Arc<Vec<crate::route::Route>>,
+        next_hop_override: &Arc<Vec<Option<rustbgpd_policy::NextHopAction>>>,
         target: &dyn crate::update::ExactExportSnapshot,
         checkpoint: &mut impl FnMut(),
     ) -> Option<Vec<Result<crate::update::ExactExportResult, crate::update::ExactExportError>>>
@@ -333,8 +333,8 @@ impl SharedUnicastProbeCache {
     fn reuse_grouped_exact_export_maximum(
         &self,
         group_id: usize,
-        announce: &Arc<[crate::route::Route]>,
-        next_hop_override: &Arc<[Option<rustbgpd_policy::NextHopAction>]>,
+        announce: &Arc<Vec<crate::route::Route>>,
+        next_hop_override: &Arc<Vec<Option<rustbgpd_policy::NextHopAction>>>,
         target: &dyn crate::update::ExactExportSnapshot,
     ) -> Option<Result<crate::update::ExactExportResult, crate::update::ExactExportError>> {
         self.groups
@@ -353,8 +353,8 @@ impl SharedUnicastProbeCache {
     fn store(
         &mut self,
         group_id: usize,
-        announce: Arc<[crate::route::Route]>,
-        next_hop_override: Arc<[Option<rustbgpd_policy::NextHopAction>]>,
+        announce: Arc<Vec<crate::route::Route>>,
+        next_hop_override: Arc<Vec<Option<rustbgpd_policy::NextHopAction>>>,
         source_snapshot: Arc<dyn crate::update::ExactExportSnapshot>,
         mut encoded_lengths: Vec<usize>,
         checkpoint: &mut impl FnMut(),
@@ -997,8 +997,8 @@ mod shared_unicast_probe_cache_tests {
 
     #[test]
     fn shared_payload_cohort_storage_and_rechecks_are_strictly_bounded() {
-        let announce: Arc<[crate::route::Route]> = Vec::new().into();
-        let next_hop_override: Arc<[Option<rustbgpd_policy::NextHopAction>]> = Vec::new().into();
+        let announce: Arc<Vec<crate::route::Route>> = Vec::new().into();
+        let next_hop_override: Arc<Vec<Option<rustbgpd_policy::NextHopAction>>> = Vec::new().into();
         let mut cache = SharedUnicastProbeCache::default();
 
         for profile in 0..(MAX_SHARED_UNICAST_PROBE_COHORTS + 5) {
@@ -1015,7 +1015,8 @@ mod shared_unicast_probe_cache_tests {
             );
         }
         assert_eq!(cache.groups[&7].len(), MAX_SHARED_UNICAST_PROBE_COHORTS);
-        let different_next_hop: Arc<[Option<rustbgpd_policy::NextHopAction>]> = vec![None].into();
+        let different_next_hop: Arc<Vec<Option<rustbgpd_policy::NextHopAction>>> =
+            vec![None].into();
         cache.store(
             7,
             Arc::clone(&announce),
@@ -5070,7 +5071,12 @@ impl RibManager {
                 peer,
                 snapshot,
                 cursor: 0,
-                encoded_lengths: Vec::with_capacity(prestaged.announce.len()),
+                encoded_lengths: Vec::with_capacity(
+                    prestaged
+                        .announce
+                        .len()
+                        .saturating_add(super::POLICY_TRANSITION_ROUTE_SLICE),
+                ),
             });
         }
         let probe = prestaged.probe.as_mut().expect("initialized above");

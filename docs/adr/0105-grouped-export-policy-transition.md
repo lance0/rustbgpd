@@ -118,9 +118,13 @@ encoder snapshot. Mutation logs remain active throughout the walk and probe.
 Under the fence, the inventory vectors and successful encoded lengths use the
 same in-place compaction for logged keys. Changed rows are appended and re-probed
 before computing the current maximum; withdrawn maxima cannot survive in the
-proof. One final seal converts the reconciled vectors into shared slices. Those
-contiguous copies remain linear, uninterruptible operations under the fence.
-The `rustbgpd_rib::clean_export_probe` debug target captures their duration with
+proof. The unfenced route, next-hop, and encoded-length allocations reserve one
+route slice of headroom for that retained proof's dirty suffix. One final seal
+wraps the reconciled vectors in `Arc<Vec<_>>`, preserving their buffers without
+copying the route shells or next-hop actions. Capacity is retained; retiring the
+last owner still drops all rows, and the over-budget fallback can still grow its
+vectors before discarding the proof.
+The `rustbgpd_rib::clean_export_probe` debug target captures seal duration with
 `phase=fenced`, reconciliation path and row counts, proof validation, and the
 full-probe count at entry to `Validate`, without enabling per-prefix events.
 

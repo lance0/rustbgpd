@@ -10113,6 +10113,73 @@ fn prestaged_inventory_cardinality_changes_match_fenced_rebuild() {
     }
 }
 
+/// The unfenced buffers include room for the retained proof's dirty suffix.
+/// Reconciliation and final sharing preserve their allocations and alignment.
+#[test]
+fn prestaged_inventory_dirty_growth_and_finish_preserve_buffers() {
+    let (mut manager, peers, _receivers) = direct_clean_transition_manager(2, 3, None);
+    let mut added = deny_statement(fixture_prefix(200));
+    added.action = PolicyAction::Permit;
+    added.modifications.communities_add.push(0xFDE8_2102);
+    added.modifications.set_next_hop = Some(rustbgpd_policy::NextHopAction::Self_);
+    let mut existing = deny_statement(Ipv4Prefix::new(Ipv4Addr::UNSPECIFIED, 0));
+    existing.prefix = None;
+    existing.action = PolicyAction::Permit;
+    existing.modifications.communities_add.push(0xFDE8_2102);
+    let policy = PolicyChain::new(vec![Policy {
+        entries: vec![added, existing],
+        default_action: PolicyAction::Deny,
+    }]);
+    let (source, destination) = complete_prestage(&mut manager, peers[0], &policy);
+    let (route_buffer, next_hop_buffer, length_buffer) = {
+        let prestaged = manager.prestaged_inventory.as_ref().unwrap();
+        let proof = prestaged.probe.as_ref().unwrap();
+        assert_eq!(prestaged.announce.len(), 3);
+        assert!(prestaged.announce.capacity() >= 4);
+        assert!(prestaged.next_hop_override.capacity() >= 4);
+        assert!(proof.encoded_lengths.capacity() >= 4);
+        (
+            prestaged.announce.as_ptr(),
+            prestaged.next_hop_override.as_ptr(),
+            proof.encoded_lengths.as_ptr(),
+        )
+    };
+    churn_fixture_source(
+        &mut manager,
+        vec![crate::test_support::make_route(
+            fixture_prefix(200),
+            Ipv4Addr::new(192, 0, 2, 42),
+        )],
+        vec![],
+    );
+    let fenced = fenced_inventory(&mut manager, source, destination, &[]).unwrap();
+    let super::super::update_groups::PrestagedInventoryOutcome::Ready(prestaged, Some(proof)) =
+        manager.take_prestaged_transition_inventory(source, destination, &[])
+    else {
+        panic!("one dirty addition retains the successful proof")
+    };
+    let inventory = prestaged.finish(&mut |_| {});
+    assert_eq!(inventory.announce.len(), 4);
+    assert_eq!(inventory.next_hop_override.len(), 4);
+    assert_eq!(proof.encoded_lengths.len(), 4);
+    assert_eq!(proof.cursor, 4);
+    assert_eq!(inventory.announce.as_ptr(), route_buffer);
+    assert_eq!(inventory.next_hop_override.as_ptr(), next_hop_buffer);
+    assert_eq!(proof.encoded_lengths.as_ptr(), length_buffer);
+    assert_inventories_equal(&fenced, &inventory);
+    for (route, next_hop) in inventory
+        .announce
+        .iter()
+        .zip(inventory.next_hop_override.iter())
+    {
+        assert_eq!(
+            *next_hop,
+            (route.prefix == Prefix::V4(fixture_prefix(200)))
+                .then_some(rustbgpd_policy::NextHopAction::Self_),
+        );
+    }
+}
+
 /// A changed row can fail even though every original row fit the immutable
 /// snapshot. Discard the partial proof and let the full fenced probe reject;
 /// exercise additions, equal cardinality, and net withdrawals.

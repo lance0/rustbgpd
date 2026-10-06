@@ -82,7 +82,7 @@ impl OutboundEncodeBench {
     /// # Panics
     ///
     /// If the writer queue saturated and the session tore down.
-    pub fn send(&mut self, announce: &Arc<[Route]>) -> std::time::Duration {
+    pub fn send(&mut self, announce: &Arc<Vec<Route>>) -> std::time::Duration {
         let update = OutboundRouteUpdate {
             exact_export_snapshot: Some(self.session.publish_export_profile()),
             announce: Arc::clone(announce),
@@ -150,7 +150,7 @@ impl OutboundGroupBench {
     /// If a member's writer queue saturated and the session tore down.
     pub fn send(
         &mut self,
-        announce: &Arc<[Route]>,
+        announce: &Arc<Vec<Route>>,
         withdraw: &[(Prefix, u32)],
     ) -> std::time::Duration {
         let shared = Arc::new(SharedGroupEncode::default());

@@ -1036,8 +1036,9 @@ pub struct OutboundRouteUpdate {
     /// Routes to announce to this peer. `Arc`-shared so an update-group
     /// fanout enqueues ONE staged announce vector to every in-sync
     /// member instead of cloning the `Route` shells per member
-    /// (transport only ever reads it).
-    pub announce: Arc<[Route]>,
+    /// (transport only ever reads it). Retaining the vector's allocation
+    /// also avoids copying its rows when the payload becomes shared.
+    pub announce: Arc<Vec<Route>>,
     /// Withdrawn routes with their path IDs. For non-Add-Path peers,
     /// `path_id` is always 0.
     pub withdraw: Vec<(Prefix, u32)>,
@@ -1050,7 +1051,7 @@ pub struct OutboundRouteUpdate {
     pub refresh_markers: Vec<(Afi, Safi, RouteRefreshSubtype)>,
     /// Per-route next-hop override from export policy. Parallel to `announce` —
     /// `next_hop_override[i]` applies to `announce[i]`. Shared alongside it.
-    pub next_hop_override: Arc<[Option<rustbgpd_policy::NextHopAction>]>,
+    pub next_hop_override: Arc<Vec<Option<rustbgpd_policy::NextHopAction>>>,
     /// `FlowSpec` routes to announce (RFC 8955).
     pub flowspec_announce: Vec<FlowSpecRoute>,
     /// `FlowSpec` rules to withdraw.

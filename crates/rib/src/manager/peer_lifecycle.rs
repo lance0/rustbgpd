@@ -1536,10 +1536,10 @@ impl RibManager {
             let replay = self.grouped_join_replay(group, peer, rs_control, || {
                 checkpoint_at("initial_group_replay");
             });
-            // Keep borrowed entries until filtering is complete. Mapping the
-            // exact-sized slice iterator collects straight into each Arc,
-            // avoiding a full Vec<Route> and its copy at the replay peak.
-            let announce: std::sync::Arc<[_]> = replay
+            // Keep borrowed entries until filtering is complete, then clone
+            // each row once into an owned vector. Wrapping the vector in an
+            // Arc preserves its buffer without another route-shell copy.
+            let announce: std::sync::Arc<Vec<_>> = replay
                 .iter()
                 .map(|entry| {
                     checkpoint_at("initial_group_replay");
@@ -1553,14 +1553,16 @@ impl RibManager {
                     );
                     route
                 })
-                .collect();
-            let next_hop_override: std::sync::Arc<[_]> = replay
+                .collect::<Vec<_>>()
+                .into();
+            let next_hop_override: std::sync::Arc<Vec<_>> = replay
                 .iter()
                 .map(|entry| {
                     checkpoint_at("initial_group_replay");
                     entry.nh.cloned()
                 })
-                .collect();
+                .collect::<Vec<_>>()
+                .into();
             grouped_unicast = Some((announce, next_hop_override));
             // VPN join replay: table minus own-sourced, filtered by the
             // joining member's Φ (the RFC 4684 gate the per-peer dump

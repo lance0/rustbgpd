@@ -375,10 +375,16 @@ impl RibManager {
                 Ok(InventoryEntry::Unchanged) => {}
                 Ok(InventoryEntry::Changed { next_hop, tagged }) => {
                     if prestaged.announce.capacity() == 0 {
+                        // Reserve the retained proof's bounded dirty suffix
+                        // while unfenced, before reconciliation can append it.
+                        let capacity = new
+                            .table
+                            .len()
+                            .saturating_add(crate::manager::POLICY_TRANSITION_ROUTE_SLICE);
                         self.replacement_checkpoint(true);
-                        prestaged.announce.reserve_exact(new.table.len());
+                        prestaged.announce.reserve_exact(capacity);
                         self.replacement_checkpoint(true);
-                        prestaged.next_hop_override.reserve_exact(new.table.len());
+                        prestaged.next_hop_override.reserve_exact(capacity);
                         self.replacement_checkpoint(true);
                     }
                     prestaged.announce.push(route.clone());

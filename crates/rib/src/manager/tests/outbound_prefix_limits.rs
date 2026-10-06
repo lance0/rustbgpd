@@ -293,7 +293,7 @@ fn source_excluded_route_does_not_consume_grouped_capacity() {
         Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 10), 32),
         Ipv4Addr::new(192, 0, 2, 113),
     );
-    let mut announce: Arc<[Route]> = vec![own_route.clone(), effective_route.clone()].into();
+    let mut announce: Arc<Vec<Route>> = vec![own_route.clone(), effective_route.clone()].into();
     let mut next_hop_override = vec![None, None].into();
 
     assert!(!manager.enforce_outbound_prefix_limits(

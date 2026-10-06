@@ -5533,8 +5533,8 @@ fn single_best_group_otc_at_backstop_trips_debug_assert() {
         .members
         .insert(MEMBER, GroupMembership::Grouped(PCB_GID));
     m.group_ribs.insert(PCB_GID, empty_group());
-    let announce: Arc<[Route]> = vec![with_otc_attr(route(prefix(1), OTHER1))].into();
-    let nh: Arc<[Option<NextHopAction>]> = vec![None].into();
+    let announce: Arc<Vec<Route>> = vec![with_otc_attr(route(prefix(1), OTHER1))].into();
+    let nh: Arc<Vec<Option<NextHopAction>>> = vec![None].into();
     let _ = m.try_send_and_commit_outbound_update(
         MEMBER,
         OutboundCommitBatch::with_unicast(announce, nh),
@@ -5563,8 +5563,8 @@ fn per_client_best_group_otc_at_backstop_strips_with_pending_gated_withdraw() {
         .entry(MEMBER)
         .or_default()
         .insert((prefix(1), 0), blocked.clone());
-    let announce: Arc<[Route]> = vec![blocked].into();
-    let nh: Arc<[Option<NextHopAction>]> = vec![None].into();
+    let announce: Arc<Vec<Route>> = vec![blocked].into();
+    let nh: Arc<Vec<Option<NextHopAction>>> = vec![None].into();
     assert!(m.try_send_and_commit_outbound_update(
         MEMBER,
         OutboundCommitBatch::with_unicast(announce, nh),

@@ -1539,7 +1539,7 @@ async fn export_memo_shares_identical_modified_attrs_and_keys_peer_varying_chain
     };
     for update in &updates {
         assert_eq!(update.announce.len(), 1);
-        assert_eq!(update.next_hop_override.as_ref(), [None]);
+        assert_eq!(update.next_hop_override.as_slice(), [None]);
     }
 
     // Oracle: the pre-memo private-clone path.

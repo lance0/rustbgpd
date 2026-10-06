@@ -2501,8 +2501,8 @@ mod tests {
         };
         session.send_route_update(OutboundRouteUpdate {
             exact_export_snapshot: Some(snapshot),
-            announce: Arc::from([route]),
-            next_hop_override: Arc::from([None]),
+            announce: vec![route].into(),
+            next_hop_override: vec![None].into(),
             ..OutboundRouteUpdate::default()
         });
     }
