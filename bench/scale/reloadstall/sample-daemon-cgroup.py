@@ -78,17 +78,31 @@ def container_owner(cid, image, exe):
             "inspect": data}
 
 
+def owned_process_state(proc, owner):
+    # Identity and state must come from the same comm-safe snapshot.
+    text = (proc / "stat").read_text()
+    if proc_stat(text)[0] != owner["starttime"]:
+        raise ValueError("container daemon PID/start/cgroup ownership changed")
+    return text[text.rindex(")") + 2 :].split()[0]
+
+
 def verify_container_membership(proc, cgroup, pid, owner):
-    if (proc_stat((proc / "stat").read_text())[0] != owner["starttime"]
-            or str(cgroup) != owner["cgroup"]
+    state = owned_process_state(proc, owner)
+    if (str(cgroup) != owner["cgroup"]
             or (proc / "cgroup").read_text().strip() != "0::" + str(cgroup).removeprefix("/sys/fs/cgroup")):
         raise ValueError("container daemon PID/start/cgroup ownership changed")
     if (cgroup / "memory.swap.max").read_text().strip() != "0":
         raise ValueError("container daemon must be swap fenced")
-    if {int(p) for p in (cgroup / "cgroup.procs").read_text().split()} != {pid}:
-        raise ValueError("container daemon must be the sole process in its cgroup")
+    members = {int(p) for p in (cgroup / "cgroup.procs").read_text().split()}
     if any(p.read_text().strip() for p in cgroup.glob("*/**/cgroup.procs")):
         raise ValueError("container daemon cgroup has populated descendants")
+    if members == {pid} and state not in {"Z", "X", "x"}:
+        return True
+    # Exit can empty cgroup.procs after the loop read a live /proc/status.
+    # Recheck the original identity; an unrelated zombie is not owned exit.
+    if not members and owned_process_state(proc, owner) == "Z":
+        return False
+    raise ValueError("container daemon must be the sole process in its cgroup")
 
 
 def sample(pid, out, interval, expected_pgid=None, owner=None):
@@ -100,7 +114,8 @@ def sample(pid, out, interval, expected_pgid=None, owner=None):
         raise ValueError("daemon must have exactly one cgroup v2 membership")
     cgroup = Path("/sys/fs/cgroup") / unified[0].lstrip("/")
     if owner is not None:
-        verify_container_membership(proc, cgroup, pid, owner)
+        if not verify_container_membership(proc, cgroup, pid, owner):
+            raise ValueError("container daemon exited before sampling started")
     elif not cgroup.name.endswith(".scope") or (cgroup / "memory.swap.max").read_text().strip() != "0":
         raise ValueError("daemon must run in its own swap-fenced systemd scope")
     if {int(member) for member in (cgroup / "cgroup.procs").read_text().split()} != {pid}:
@@ -132,10 +147,11 @@ def sample(pid, out, interval, expected_pgid=None, owner=None):
                         raise ValueError("container daemon PID was reused")
                     break
                 status = key_values((proc / "status").read_text())
-                if status["State"] == "Z":
-                    break
                 if owner is not None:
-                    verify_container_membership(proc, cgroup, pid, owner)
+                    if not verify_container_membership(proc, cgroup, pid, owner):
+                        break
+                elif status["State"] == "Z":
+                    break
                 before = int((cgroup / "memory.current").read_text())
                 stat = key_values((cgroup / "memory.stat").read_text())
                 after = int((cgroup / "memory.current").read_text())
@@ -163,6 +179,15 @@ def sample(pid, out, interval, expected_pgid=None, owner=None):
             except FileNotFoundError:
                 if not proc.exists():
                     break
+                if owner is not None:
+                    try:
+                        if not verify_container_membership(proc, cgroup, pid, owner):
+                            break
+                    except FileNotFoundError:
+                        if not proc.exists():
+                            break
+                        raise
+                    raise
                 try:
                     state = key_values((proc / "status").read_text())["State"]
                 except FileNotFoundError:
@@ -192,7 +217,8 @@ def main():
             parser.error("container mode needs image-id and cannot use expected-pgid")
         cid = args.container_cidfile.read_text().strip()
         owner = container_owner(cid, args.image_id, exe)
-        verify_container_membership(Path(f"/proc/{owner['pid']}"), Path(owner["cgroup"]), owner["pid"], owner)
+        if not verify_container_membership(Path(f"/proc/{owner['pid']}"), Path(owner["cgroup"]), owner["pid"], owner):
+            raise ValueError("container daemon exited before sampling started")
         args.out.with_suffix(".owner.json").write_text(json.dumps(owner, indent=2) + "\n")
         sample(owner["pid"], args.out, args.interval, owner=owner)
         return
