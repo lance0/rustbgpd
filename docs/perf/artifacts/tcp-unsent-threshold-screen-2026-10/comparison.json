@@ -1,0 +1,85 @@
+{
+  "arms": {
+    "unset": {
+      "independent_legs": 3,
+      "correlated_reload_rows": 12,
+      "completion_p50_median_s": 0.9294825,
+      "completion_p50_range_s": [
+        0.877346,
+        1.028365
+      ],
+      "stall_p50_median_ms": 231.909,
+      "stall_p50_range_ms": [
+        217.236,
+        317.745
+      ],
+      "worst_completion_s": 1.093101,
+      "worst_stall_ms": 489.035,
+      "observed_kernel_peak_median_mib": 1064.39453125,
+      "observed_kernel_peak_range_mib": [
+        1043.19140625,
+        1084.6484375
+      ],
+      "burst_cpu_outer_bracket_median_s": 2.295,
+      "control_cpu_outer_bracket_median_s": 0.785,
+      "trace_cpu_median_s": 103.94
+    },
+    "65536": {
+      "independent_legs": 3,
+      "correlated_reload_rows": 12,
+      "completion_p50_median_s": 0.9652315,
+      "completion_p50_range_s": [
+        0.923313,
+        1.0258
+      ],
+      "stall_p50_median_ms": 224.8675,
+      "stall_p50_range_ms": [
+        214.413,
+        254.483
+      ],
+      "worst_completion_s": 1.119458,
+      "worst_stall_ms": 441.416,
+      "observed_kernel_peak_median_mib": 788.8359375,
+      "observed_kernel_peak_range_mib": [
+        764.70703125,
+        791.00390625
+      ],
+      "burst_cpu_outer_bracket_median_s": 2.435,
+      "control_cpu_outer_bracket_median_s": 0.855,
+      "trace_cpu_median_s": 105.73
+    }
+  },
+  "change_percent": {
+    "completion_p50_median_s": 3.8461186735629704,
+    "stall_p50_median_ms": -3.036320280799787,
+    "burst_cpu_outer_bracket_median_s": 6.100217864923763,
+    "trace_cpu_median_s": 1.7221473927265807
+  },
+  "observed_kernel_peak_median_reduction_mib": 275.55859375,
+  "matched_pairs": [
+    {
+      "unset_leg": 1,
+      "candidate_leg": 2,
+      "completion_p50_median_change_percent": -3.9450098476463413,
+      "observed_kernel_peak_reduction_mib": 319.94140625
+    },
+    {
+      "unset_leg": 4,
+      "candidate_leg": 3,
+      "completion_p50_median_change_percent": 8.713684776604346,
+      "observed_kernel_peak_reduction_mib": 275.55859375
+    },
+    {
+      "unset_leg": 5,
+      "candidate_leg": 6,
+      "completion_p50_median_change_percent": 4.053451543615116,
+      "observed_kernel_peak_reduction_mib": 252.1875
+    }
+  ],
+  "screen_components": {
+    "completion_at_most_plus_2_percent": false,
+    "memory_reduction_at_least_100_mib": true,
+    "writer_wakeup_gate": "unresolved",
+    "frozen_65536_byte_candidate": "NO-GO"
+  }
+}

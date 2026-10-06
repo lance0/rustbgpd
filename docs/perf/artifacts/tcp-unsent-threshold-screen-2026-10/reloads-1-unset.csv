@@ -1,0 +1,5 @@
+reloadstall_csv_header,reload,peers_total,peers_changed,peers_stable,prefixes,completion_p50_s,completion_p95_s,completion_max_s,changed_maxgap_p50_ms,changed_maxgap_p95_ms,changed_maxgap_max_ms,all_observer_maxgap_p50_ms,all_observer_maxgap_p95_ms,all_observer_maxgap_max_ms,changed_first_generation_update_p50_ms,changed_first_generation_update_p95_ms,changed_first_generation_update_max_ms,rss_before_mib,rss_after_mib,stable_marker_peers,sessions_up,parse_errors
+reloadstall_csv,1,700,700,0,400400,1.011165,1.058994,1.063716,231.508,270.430,379.448,231.508,270.430,379.448,883.657,923.428,1031.747,377,463,0,700,0
+reloadstall_csv,2,700,700,0,400400,1.028365,1.078222,1.084401,265.489,387.444,449.822,265.489,387.444,449.822,889.864,1012.997,1075.398,393,464,0,700,0
+reloadstall_csv,3,700,700,0,400400,0.923147,0.965857,0.974461,224.989,378.927,391.204,224.989,378.927,391.204,805.548,959.497,969.185,393,461,0,700,0
+reloadstall_csv,4,700,700,0,400400,0.954787,1.005743,1.012454,232.083,401.777,426.083,232.083,401.777,426.083,814.458,985.133,1006.873,394,461,0,700,0
