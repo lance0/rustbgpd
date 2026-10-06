@@ -78,6 +78,7 @@ check-fast:
     python3 scripts/reflow-release-notes.py --selftest
     python3 -m unittest -v scripts/test_check_bench_inventory.py
     python3 scripts/check_bench_inventory.py
+    python3 -m unittest -v scripts/test_capture_released_state.py
 
 # Check the slower repository contracts: public tracker ids, documentation paths, and metric consumers (minutes, no compilation).
 check-contracts:

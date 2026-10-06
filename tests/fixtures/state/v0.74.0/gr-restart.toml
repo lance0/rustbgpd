@@ -1,0 +1,8 @@
+version = 3
+expires_at_unix = 1791252519
+boot_id = "09a95161-05cc-4ab3-bd86-7e015eb32bf3"
+time_namespace_dev = 5
+time_namespace_ino = 4026531834
+boottime_offset_secs = 0
+boottime_offset_nanos = 0
+expires_at_boottime_ms = 2784555449

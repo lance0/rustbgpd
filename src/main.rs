@@ -8077,6 +8077,60 @@ mod tests {
         (dir, GrRestartMarkerStore::new(Arc::new(pinned)))
     }
 
+    #[test]
+    fn released_v074_gr_marker_accepts_bytes_but_preserves_expiry_and_version_refusal() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let bytes = include_str!("../tests/fixtures/state/v0.74.0/gr-restart.toml");
+        let (dir, store) = marker_store();
+        let path = dir.path().join(GR_RESTART_MARKER_FILE);
+        std::fs::write(&path, bytes).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let marker = store.read().unwrap().unwrap();
+        assert_eq!(marker.version, 3);
+        assert_eq!(marker.checkpoint_generation, None);
+        let domain = marker.clock_domain.as_ref().unwrap();
+        let sample = GrRestartClockSample {
+            boot_id: domain.boot_id.clone(),
+            time_namespace_dev: domain.time_namespace_dev,
+            time_namespace_ino: domain.time_namespace_ino,
+            boottime_offset_secs: domain.boottime_offset_secs,
+            boottime_offset_nanos: domain.boottime_offset_nanos,
+            boottime_ms: domain.expires_at_boottime_ms - 90_000,
+        };
+        let wall_now = marker.expires_at - Duration::from_secs(90);
+        let resolution =
+            resolve_gr_restart_marker(&marker, wall_now, Ok(sample.clone()), Some(20)).unwrap();
+        assert_eq!(resolution.remaining, Duration::from_secs(20));
+        assert_eq!(resolution.authority, GrRestartExpiryAuthority::Boottime);
+        let expired = GrRestartClockSample {
+            boottime_ms: domain.expires_at_boottime_ms,
+            ..sample
+        };
+        assert!(
+            resolve_gr_restart_marker(&marker, marker.expires_at, Ok(expired), Some(120)).is_none()
+        );
+        // On another boot/domain the archived wall expiry still forces a cold start.
+        assert!(
+            resolve_gr_restart_marker(
+                &marker,
+                marker.expires_at + Duration::from_secs(1),
+                Err("different capture clock domain".to_string()),
+                Some(120)
+            )
+            .is_none()
+        );
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), bytes);
+
+        std::fs::write(&path, bytes.replacen("version = 3", "version = 4", 1)).unwrap();
+        assert!(
+            store
+                .read()
+                .unwrap_err()
+                .contains("unsupported marker version 4")
+        );
+    }
+
     fn test_clock_sample(boottime_ms: u64) -> GrRestartClockSample {
         GrRestartClockSample {
             boot_id: "12345678-1234-4abc-8def-1234567890ab".to_string(),
