@@ -1,0 +1,602 @@
+{
+  "schema": 1,
+  "measured_date": "2026-10-06",
+  "cell": "rustbgpd",
+  "competitor_generation": "historical",
+  "competitor_generation_scope": "Native receipt vocabulary only; no other daemon was measured.",
+  "arms": {
+    "A": {
+      "source": {
+        "commit": "19842a5a114287af7a8f5ae66407aaacc9d0142a",
+        "tree": "fe3a2dbe6e01eb4fbb6aec5482f1184eae1973e9",
+        "dirty": false
+      },
+      "daemon": {
+        "sha256": "67ae6325f4392a23ab0c6fbb51b1ed61a25b0caa4d3391224864f278480f93df",
+        "producer_commit": "19842a5a114287af7a8f5ae66407aaacc9d0142a",
+        "producer_tree": "fe3a2dbe6e01eb4fbb6aec5482f1184eae1973e9"
+      },
+      "harness": {
+        "sha256": "4dfeccbbf9b4b25aabc1ce678d4973854f4bcddc1779bca3a82e3e7afaf063a4",
+        "producer_commit": "19842a5a114287af7a8f5ae66407aaacc9d0142a",
+        "producer_tree": "fe3a2dbe6e01eb4fbb6aec5482f1184eae1973e9"
+      }
+    },
+    "B": {
+      "source": {
+        "commit": "3cf0dc277dc2f729d01e40207fbdab2d2e5fda11",
+        "tree": "da79071dec28b23b23fdc26a9fe67c4f4137886d",
+        "dirty": false
+      },
+      "daemon": {
+        "sha256": "dd27aab2cb5246fb535340f9a6f4333245776b2ba78fc3ed034d44b423272d87",
+        "producer_commit": "3cf0dc277dc2f729d01e40207fbdab2d2e5fda11",
+        "producer_tree": "da79071dec28b23b23fdc26a9fe67c4f4137886d"
+      },
+      "harness": {
+        "sha256": "4dfeccbbf9b4b25aabc1ce678d4973854f4bcddc1779bca3a82e3e7afaf063a4",
+        "producer_commit": "19842a5a114287af7a8f5ae66407aaacc9d0142a",
+        "producer_tree": "fe3a2dbe6e01eb4fbb6aec5482f1184eae1973e9"
+      }
+    }
+  },
+  "auxiliary_artifact_producers": {
+    "A": {
+      "target/release/rbgp": {
+        "sha256": "be20c8fe6bfa107e03cf669edd3a9d1d78857ae20032a8ba60d230b777b688b2",
+        "producer_commit": "19842a5a114287af7a8f5ae66407aaacc9d0142a",
+        "producer_tree": "fe3a2dbe6e01eb4fbb6aec5482f1184eae1973e9"
+      },
+      "target/release/rs-config-render": {
+        "sha256": "59ea68f97292a87fec144a5a32a2423e97ef904e0d999d55805335cf514cadb4",
+        "producer_commit": "19842a5a114287af7a8f5ae66407aaacc9d0142a",
+        "producer_tree": "fe3a2dbe6e01eb4fbb6aec5482f1184eae1973e9"
+      }
+    },
+    "B": {
+      "target/release/rbgp": {
+        "sha256": "ae9ea875d35710cefc2b4c4d62c222666f742a6010bd3f0f97ed060b7c7addfb",
+        "producer_commit": "c2bccd375914494f6d01a6f7ca223d6643ae207f",
+        "producer_tree": "0e1de9a1a8f2ec950c22f0a2b5ecc70272694a90"
+      },
+      "target/release/rs-config-render": {
+        "sha256": "59ea68f97292a87fec144a5a32a2423e97ef904e0d999d55805335cf514cadb4",
+        "producer_commit": "19842a5a114287af7a8f5ae66407aaacc9d0142a",
+        "producer_tree": "fe3a2dbe6e01eb4fbb6aec5482f1184eae1973e9"
+      }
+    }
+  },
+  "build_commands": {
+    "A": [
+      "cargo",
+      "build",
+      "--release",
+      "--locked",
+      "-p",
+      "rustbgpd",
+      "-p",
+      "rustbgpctl",
+      "-p",
+      "rs-config-render"
+    ],
+    "B": [
+      "cargo",
+      "build",
+      "--release",
+      "--locked",
+      "-p",
+      "rustbgpd",
+      "-p",
+      "rustbgpctl",
+      "-p",
+      "rs-config-render"
+    ]
+  },
+  "features": "default; no --features or --all-features",
+  "build_environment": {
+    "RUSTFLAGS": null,
+    "CARGO_ENCODED_RUSTFLAGS": null,
+    "CARGO_BUILD_JOBS": "8",
+    "CARGO_TARGET_DIR": null,
+    "RUSTC_WRAPPER": null,
+    "RUSTC_WORKSPACE_WRAPPER": null,
+    "CARGO_BUILD_TARGET": null,
+    "CARGO_INCREMENTAL": null,
+    "CARGO_PROFILE_RELEASE_DEBUG": null,
+    "CARGO_PROFILE_RELEASE_LTO": null,
+    "CARGO_PROFILE_RELEASE_CODEGEN_UNITS": null
+  },
+  "toolchain": {
+    "rustc": "rustc 1.99.0 (b940084d7 2026-09-28)",
+    "cargo": "cargo 1.99.0 (5f94df478 2026-08-27)",
+    "rustc_verbose": "rustc 1.99.0 (b940084d7 2026-09-28)\nbinary: rustc\ncommit-hash: b940084d7eb6a299eb4bfeb8e34901bc051e7ac4\ncommit-date: 2026-09-28\nhost: x86_64-unknown-linux-gnu\nrelease: 1.99.0\nLLVM version: 23.1.1"
+  },
+  "kernel": "Linux 7.0.0-30-generic #30~24.04.1-Ubuntu SMP PREEMPT_DYNAMIC Fri Aug  7 13:27:52 UTC 2 x86_64 GNU/Linux",
+  "source_manifest_sha256": {
+    "Cargo.toml_sha256": "33a379ac74cc38a3f4c0dfce9abbc8a41bac3ca43f3d3fcaae4684e640ce595a",
+    "Cargo.lock_sha256": "67b2f78f4006a6428c61271fc7058fa5ea78ae29d29ff4f4b3f54e190f48e778"
+  },
+  "tool_sha256": {
+    "bench/scale/provenance.sh": "7db6727dc99ec42515359f674e56c749453bc29c9981b67f30568f0d6cce1991",
+    "bench/scale/cgroup-memory.sh": "64753985d0b8c167daa1d382b70fe6f4369275713ebcaec8e4de677ff281ee3a",
+    "bench/scale/matrix/run-matrix.sh": "d7276ac13132bf33f87cdbd3edc1bc86aec2953f8921683b2db725eca1be5f17",
+    "bench/scale/matrix/verify-provenance.py": "7da2a7088bd2a9669621895c33c60ea6fce6fc62c695be600f63efc4530aedc4",
+    "bench/scale/matrix/rss-sampler.sh": "3ecffb93298c49f8524320ecebe976efc806f9f0b0caf260d6a1431ca402a10d",
+    "bench/scale/host-quiet.sh": "abb3391cd5e0879c29aabd0aa0c316ea33d5f7c72f6d2a7d111b30025de411fd",
+    "tests/soak/host-lock.sh": "f5f419bb439f0b5e22521e9f7fa73d4ef73df159abeec31fafff63548899c658",
+    "bench/scale/reloadstall/gen-scenario.py": "e563659beef5857ee79ddac40e1cff5730c34e424b5ca074a3f9007b5dc0ab42",
+    "bench/scale/reloadstall/sample-daemon-cgroup.py": "94e926c8aa69ddb37b975431eefdc5b3873acfb8510b9464ce669620cfd5fc5f"
+  },
+  "method_sha256": {
+    "analyze.py": "7cb1927e376178b126256e9bcd4d31d98cc05e844f5bb9e9deebd45e2404c5a0",
+    "run-leg.sh": "4ce5e7883bd831ec02e3324a07a187f6e0c57b7b18f347f2691ba12359b17858",
+    "owned_process.py": "60467cda835c8245619d8098581701cd96d90730e419efcf4ba07cc3d0c68726",
+    "check-analysis.py": "8b7dd99b8163fcddd82b7f40ad422d5b545db07edb52c21783ba0cfca2a6320e",
+    "check-vmhwm.py": "71a6b48850fe121f2e07c1cb7891e7ad7ad163bfe0339c6cecd5417766547d5b",
+    "check-reconciliation.py": "014b228c36d0dc2ce4bb2af16d78f3126c3e8f976144da7c85e55bd812c790c9",
+    "check-wrapper.py": "4c2c69cef8682fb4abd484e47c7cab64dcb55d6e685b83d4ef0818bcf20238a7",
+    "check-ownership.py": "c7089d9c8a50192ba14ef395549918f89767b71504c668c49c338f0dc2f8a767"
+  },
+  "log_filter": "info,rustbgpd_rib::clean_export_probe=debug",
+  "arm_order": [
+    "A",
+    "B",
+    "B",
+    "A",
+    "A",
+    "B"
+  ],
+  "reloads_per_leg": 4,
+  "independent_legs_per_arm": 3,
+  "workload_field_origin": "Native workload.inputs except FLAP_ROUNDS, explicitly empty in the frozen wrapper.",
+  "scope": "700 changed peers; 400400 prefixes; all-peer S2 policy reload; native loopback; no added RTT or reader pacing.",
+  "acceptance": {
+    "exact_fence_gain_qualified": null,
+    "exact_fence_reason": "existing elapsed_ms ends at commit before terminal input retirement and scheduling resume",
+    "stall_p50_gain_ms": 80.87700000000001,
+    "stall_p50_gain_at_least_60ms": true,
+    "three_leg_median_stall_p50_gain_ms": 79.78750000000001,
+    "three_leg_median_stall_gain_at_least_60ms": true,
+    "all_reload_regression_within_2_percent_by_metric": {
+      "completion_p50_s": true,
+      "completion_p95_s": true,
+      "completion_max_s": true,
+      "changed_maxgap_p50_ms": true,
+      "changed_maxgap_p95_ms": true,
+      "changed_maxgap_max_ms": true,
+      "changed_first_generation_update_p50_ms": true,
+      "changed_first_generation_update_p95_ms": true,
+      "changed_first_generation_update_max_ms": true
+    },
+    "three_leg_median_regression_within_2_percent_by_metric": {
+      "completion_p50_s": true,
+      "completion_p95_s": true,
+      "completion_max_s": true,
+      "changed_maxgap_p50_ms": true,
+      "changed_maxgap_p95_ms": true,
+      "changed_maxgap_max_ms": true,
+      "changed_first_generation_update_p50_ms": true,
+      "changed_first_generation_update_p95_ms": true,
+      "changed_first_generation_update_max_ms": true
+    },
+    "candidate_path_evidence_complete": true,
+    "pass_from_measured_stall_axis": true
+  },
+  "full_analyzer_exit": 0,
+  "full_analyzer_stderr_empty": true,
+  "raw_archive": {
+    "logical_name": "export-probe-delta-arcvec-2026-10-06.tar",
+    "sha256": "ab44a1dff771a655bfa941bc6b2b7ecd4ac12acfdf27eaa0072c6898524cf456",
+    "size_bytes": 54538240,
+    "file_count": 298,
+    "published": false
+  },
+  "cleanup": {
+    "owned_processes_remaining": 0,
+    "owned_scopes_remaining": 0,
+    "host_lock_probe_exit": 0,
+    "owned_runtime_scenario_removed": true,
+    "owned_sessions_reaped": 7
+  },
+  "exclusions": [],
+  "previous_failed_candidates": [
+    {
+      "revision": "initial",
+      "source": {
+        "commit": "c2bccd375914494f6d01a6f7ca223d6643ae207f",
+        "tree": "0e1de9a1a8f2ec950c22f0a2b5ecc70272694a90",
+        "dirty": false
+      },
+      "verdict": "NO-GO",
+      "stall_p50_gain_ms": 82.86800000000001,
+      "three_leg_median_stall_p50_gain_ms": 86.65749999999998,
+      "failed_timing_metrics": {
+        "completion_p50_s": {
+          "A": 0.770091,
+          "B": 0.8237829999999999,
+          "change_percent": 6.972163030083456,
+          "aggregate": "median_of_12_correlated_reload_percentiles",
+          "A_raw": [
+            0.791982,
+            0.697092,
+            0.763793,
+            0.751419,
+            0.830642,
+            0.784579,
+            0.763746,
+            0.771921,
+            0.810102,
+            0.768261,
+            0.750297,
+            0.817181
+          ],
+          "B_raw": [
+            0.884435,
+            0.829568,
+            0.809842,
+            0.85474,
+            0.888855,
+            0.822267,
+            0.801951,
+            0.807647,
+            0.889122,
+            0.800032,
+            0.809961,
+            0.825299
+          ],
+          "median_of_12_correlated_reloads": {
+            "A": 0.770091,
+            "B": 0.8237829999999999
+          },
+          "per_leg_medians": {
+            "01-A": 0.757606,
+            "02-B": 0.8421540000000001,
+            "03-B": 0.8149569999999999,
+            "04-A": 0.77825,
+            "05-A": 0.7891815,
+            "06-B": 0.8176300000000001
+          },
+          "median_of_three_leg_medians": {
+            "A": 0.77825,
+            "B": 0.8176300000000001
+          },
+          "three_leg_median_change_percent": 5.060070671378103
+        },
+        "completion_p95_s": {
+          "A": 0.8146765,
+          "B": 0.8584145000000001,
+          "change_percent": 5.368756801012431,
+          "aggregate": "median_of_12_correlated_reload_percentiles",
+          "A_raw": [
+            0.836699,
+            0.739101,
+            0.818801,
+            0.790255,
+            0.884405,
+            0.824235,
+            0.808106,
+            0.808526,
+            0.857315,
+            0.810552,
+            0.787027,
+            0.862919
+          ],
+          "B_raw": [
+            0.932633,
+            0.876781,
+            0.849491,
+            0.902899,
+            0.932087,
+            0.857102,
+            0.842877,
+            0.83943,
+            0.928493,
+            0.848288,
+            0.843906,
+            0.859727
+          ],
+          "median_of_12_correlated_reloads": {
+            "A": 0.8146765,
+            "B": 0.8584145000000001
+          },
+          "per_leg_medians": {
+            "01-A": 0.804528,
+            "02-B": 0.88984,
+            "03-B": 0.8499895,
+            "04-A": 0.8163805,
+            "05-A": 0.8339335000000001,
+            "06-B": 0.8540075
+          },
+          "median_of_three_leg_medians": {
+            "A": 0.8163805,
+            "B": 0.8540075
+          },
+          "three_leg_median_change_percent": 4.609002787303229
+        },
+        "completion_max_s": {
+          "A": 0.889212,
+          "B": 0.936884,
+          "change_percent": 5.36115122153098,
+          "aggregate": "worst_of_12_correlated_reloads",
+          "A_raw": [
+            0.841328,
+            0.745041,
+            0.825759,
+            0.794868,
+            0.889212,
+            0.829895,
+            0.811918,
+            0.813531,
+            0.86198,
+            0.818301,
+            0.79303,
+            0.870758
+          ],
+          "B_raw": [
+            0.936411,
+            0.881639,
+            0.855022,
+            0.909089,
+            0.936884,
+            0.859892,
+            0.84925,
+            0.845081,
+            0.932339,
+            0.854385,
+            0.849408,
+            0.865632
+          ],
+          "median_of_12_correlated_reloads": {
+            "A": 0.82203,
+            "B": 0.862762
+          },
+          "per_leg_medians": {
+            "01-A": 0.8103135,
+            "02-B": 0.895364,
+            "03-B": 0.854571,
+            "04-A": 0.821713,
+            "05-A": 0.8401405,
+            "06-B": 0.8600085
+          },
+          "median_of_three_leg_medians": {
+            "A": 0.821713,
+            "B": 0.8600085
+          },
+          "three_leg_median_change_percent": 4.660447139086266
+        },
+        "changed_first_generation_update_p50_ms": {
+          "A": 631.221,
+          "B": 687.4449999999999,
+          "change_percent": 8.907181478436232,
+          "aggregate": "median_of_12_correlated_reload_percentiles",
+          "A_raw": [
+            642.522,
+            574.438,
+            610.516,
+            595.375,
+            699.458,
+            649.978,
+            614.249,
+            630.994,
+            667.507,
+            631.448,
+            618.271,
+            668.845
+          ],
+          "B_raw": [
+            740.129,
+            687.678,
+            674.508,
+            718.883,
+            750.679,
+            687.212,
+            665.9,
+            675.612,
+            758.408,
+            672.043,
+            671.641,
+            699.414
+          ],
+          "median_of_12_correlated_reloads": {
+            "A": 631.221,
+            "B": 687.4449999999999
+          },
+          "per_leg_medians": {
+            "01-A": 602.9455,
+            "02-B": 703.2805000000001,
+            "03-B": 681.412,
+            "04-A": 640.486,
+            "05-A": 649.4775,
+            "06-B": 685.7284999999999
+          },
+          "median_of_three_leg_medians": {
+            "A": 640.486,
+            "B": 685.7284999999999
+          },
+          "three_leg_median_change_percent": 7.06377656966739
+        },
+        "changed_first_generation_update_p95_ms": {
+          "A": 767.694,
+          "B": 824.8875,
+          "change_percent": 7.450038687289484,
+          "aggregate": "median_of_12_correlated_reload_percentiles",
+          "A_raw": [
+            745.539,
+            725.694,
+            791.032,
+            647.889,
+            745.612,
+            779.697,
+            762.481,
+            772.907,
+            783.47,
+            798.761,
+            748.436,
+            850.988
+          ],
+          "B_raw": [
+            850.502,
+            734.419,
+            830.758,
+            841.625,
+            827.525,
+            736.641,
+            822.592,
+            827.183,
+            801.595,
+            839.527,
+            733.159,
+            766.876
+          ],
+          "median_of_12_correlated_reloads": {
+            "A": 767.694,
+            "B": 824.8875
+          },
+          "per_leg_medians": {
+            "01-A": 735.6165,
+            "02-B": 836.1915,
+            "03-B": 824.8875,
+            "04-A": 767.694,
+            "05-A": 791.1155,
+            "06-B": 784.2355
+          },
+          "median_of_three_leg_medians": {
+            "A": 767.694,
+            "B": 824.8875
+          },
+          "three_leg_median_change_percent": 7.450038687289484
+        },
+        "changed_first_generation_update_max_ms": {
+          "A": 865.141,
+          "B": 900.94,
+          "change_percent": 4.137938208916236,
+          "aggregate": "worst_of_12_correlated_reloads",
+          "A_raw": [
+            811.096,
+            739.726,
+            819.712,
+            715.83,
+            820.843,
+            824.221,
+            805.099,
+            805.363,
+            831.389,
+            811.585,
+            787.706,
+            865.141
+          ],
+          "B_raw": [
+            886.286,
+            811.267,
+            850.156,
+            900.94,
+            882.35,
+            843.67,
+            844.03,
+            840.206,
+            894.285,
+            849.111,
+            811.756,
+            836.787
+          ],
+          "median_of_12_correlated_reloads": {
+            "A": 811.3405,
+            "B": 846.5705
+          },
+          "per_leg_medians": {
+            "01-A": 775.4110000000001,
+            "02-B": 868.221,
+            "03-B": 843.8499999999999,
+            "04-A": 813.1030000000001,
+            "05-A": 821.4870000000001,
+            "06-B": 842.9490000000001
+          },
+          "median_of_three_leg_medians": {
+            "A": 813.1030000000001,
+            "B": 843.8499999999999
+          },
+          "three_leg_median_change_percent": 3.7814397437962777
+        }
+      },
+      "raw_analysis_sha256": "e393cb32045aa5b2fa584510163e8b03d260e0ef6cd7370dc5bfae4a5bf5bb62",
+      "raw_build_receipt_sha256": "a043cd31e8bf794d175e51ef612d4dd88d442b5aebb7db71156783c3fee3bae0"
+    },
+    {
+      "revision": "vector",
+      "source": {
+        "commit": "c5db6464fae6180272e1befb291cb3eb33d8a57a",
+        "tree": "c21560fc581f090de0bf77b6f493a7022756c8b7",
+        "dirty": false
+      },
+      "verdict": "NO-GO",
+      "stall_p50_gain_ms": 43.21949999999998,
+      "three_leg_median_stall_p50_gain_ms": 42.7415,
+      "failed_timing_metrics": {
+        "completion_max_s": {
+          "A": 0.903274,
+          "B": 0.926696,
+          "change_percent": 2.5930116443072526,
+          "aggregate": "worst_of_12_correlated_reloads",
+          "A_raw": [
+            0.853899,
+            0.823773,
+            0.819054,
+            0.810609,
+            0.903274,
+            0.856518,
+            0.790599,
+            0.824211,
+            0.851315,
+            0.843424,
+            0.781259,
+            0.839795
+          ],
+          "B_raw": [
+            0.926696,
+            0.818027,
+            0.772462,
+            0.871315,
+            0.785043,
+            0.753514,
+            0.756692,
+            0.794227,
+            0.833271,
+            0.718444,
+            0.742396,
+            0.784896
+          ],
+          "median_of_12_correlated_reloads": {
+            "A": 0.832003,
+            "B": 0.7849695000000001
+          },
+          "per_leg_medians": {
+            "01-A": 0.8214135,
+            "02-B": 0.844671,
+            "03-B": 0.7708675,
+            "04-A": 0.8403645,
+            "05-A": 0.8416094999999999,
+            "06-B": 0.763646
+          },
+          "median_of_three_leg_medians": {
+            "A": 0.8403645,
+            "B": 0.7708675
+          },
+          "three_leg_median_change_percent": -8.269863850745708
+        }
+      },
+      "raw_analysis_sha256": "8280ed69e380f35516285907b91a00e43bc00b171c2f80494a4b6f99fdd2bebb",
+      "raw_build_receipt_sha256": "6b9d6265f654bde6d7108b7b406338ab5739a064836e7ed0909d21f8258d4840"
+    }
+  ],
+  "limits": [
+    "Three independent process legs per arm; twelve reloads per arm are correlated.",
+    "Native cell pass and raw validity checks are distinct from S2 performance acceptance.",
+    "Commit and caller-await timers do not measure exact actor-fence release.",
+    "Seal elapsed_us=0 is integer-microsecond resolution, not literal zero work.",
+    "CPU windows use outer brackets; task switches do not identify writer wakeups.",
+    "VmHWM is approximate and may decrease; RSS, kernel cgroup charge and lifetime CPU remain distinct.",
+    "Observed pre-stop cgroup peaks are not guaranteed final lifetime maxima; nearby memory.stat is not atomic peak attribution.",
+    "Compact arithmetic does not independently audit unpublished raw contents; hashes identify retained bytes.",
+    "No other workload, scale, family, reader pacing, network delay, S3 or cross-daemon qualification."
+  ]
+}

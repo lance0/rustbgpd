@@ -1,0 +1,207 @@
+{
+  "replication": "3 independent process legs per arm; 4 correlated reloads per leg",
+  "scope": "S2 endpoint arithmetic and compact validity checks; raw path/probe and sampling evidence require the frozen full analyzer",
+  "endpoints": {
+    "completion_p50_s": {
+      "unit": "seconds",
+      "aggregate": "median_of_12_correlated_reload_percentiles",
+      "A": 0.769401,
+      "B": 0.7521535,
+      "change_percent": -2.2416789164557804,
+      "within_2_percent": true,
+      "per_leg_medians": {
+        "01-A": 0.7538215,
+        "02-B": 0.7488365,
+        "03-B": 0.7605755000000001,
+        "04-A": 0.7628820000000001,
+        "05-A": 0.794948,
+        "06-B": 0.7582305
+      },
+      "median_of_three_leg_medians": {
+        "A": 0.7628820000000001,
+        "B": 0.7582305
+      },
+      "three_leg_median_change_percent": -0.6097273234917155,
+      "three_leg_median_within_2_percent": true
+    },
+    "completion_p95_s": {
+      "unit": "seconds",
+      "aggregate": "median_of_12_correlated_reload_percentiles",
+      "A": 0.8092355,
+      "B": 0.7897395,
+      "change_percent": -2.4091874367844657,
+      "within_2_percent": true,
+      "per_leg_medians": {
+        "01-A": 0.7997455,
+        "02-B": 0.7827999999999999,
+        "03-B": 0.8013405,
+        "04-A": 0.7998735,
+        "05-A": 0.841754,
+        "06-B": 0.808769
+      },
+      "median_of_three_leg_medians": {
+        "A": 0.7998735,
+        "B": 0.8013405
+      },
+      "three_leg_median_change_percent": 0.18340400075762542,
+      "three_leg_median_within_2_percent": true
+    },
+    "completion_max_s": {
+      "unit": "seconds",
+      "aggregate": "actual_worst_of_12",
+      "A": 0.890363,
+      "B": 0.891329,
+      "change_percent": 0.10849507448085216,
+      "within_2_percent": true,
+      "per_leg_medians": {
+        "01-A": 0.806341,
+        "02-B": 0.7875665000000001,
+        "03-B": 0.8079529999999999,
+        "04-A": 0.805345,
+        "05-A": 0.846689,
+        "06-B": 0.8138989999999999
+      },
+      "median_of_three_leg_medians": {
+        "A": 0.806341,
+        "B": 0.8079529999999999
+      },
+      "three_leg_median_change_percent": 0.19991542039905497,
+      "three_leg_median_within_2_percent": true
+    },
+    "changed_maxgap_p50_ms": {
+      "unit": "milliseconds",
+      "aggregate": "median_of_12_correlated_reload_percentiles",
+      "A": 169.5165,
+      "B": 88.6395,
+      "change_percent": -47.710399872578776,
+      "within_2_percent": true,
+      "per_leg_medians": {
+        "01-A": 183.2215,
+        "02-B": 84.39850000000001,
+        "03-B": 89.729,
+        "04-A": 163.2955,
+        "05-A": 169.5165,
+        "06-B": 101.37799999999999
+      },
+      "median_of_three_leg_medians": {
+        "A": 169.5165,
+        "B": 89.729
+      },
+      "three_leg_median_change_percent": -47.06768957594099,
+      "three_leg_median_within_2_percent": true
+    },
+    "changed_maxgap_p95_ms": {
+      "unit": "milliseconds",
+      "aggregate": "median_of_12_correlated_reload_percentiles",
+      "A": 280.733,
+      "B": 167.00549999999998,
+      "change_percent": -40.5109125040519,
+      "within_2_percent": true,
+      "per_leg_medians": {
+        "01-A": 281.5725,
+        "02-B": 158.2725,
+        "03-B": 172.77499999999998,
+        "04-A": 301.438,
+        "05-A": 236.5055,
+        "06-B": 181.50150000000002
+      },
+      "median_of_three_leg_medians": {
+        "A": 281.5725,
+        "B": 172.77499999999998
+      },
+      "three_leg_median_change_percent": -38.63924921645403,
+      "three_leg_median_within_2_percent": true
+    },
+    "changed_maxgap_max_ms": {
+      "unit": "milliseconds",
+      "aggregate": "actual_worst_of_12",
+      "A": 385.862,
+      "B": 222.55,
+      "change_percent": -42.32393964681673,
+      "within_2_percent": true,
+      "per_leg_medians": {
+        "01-A": 357.8105,
+        "02-B": 200.36599999999999,
+        "03-B": 202.83300000000003,
+        "04-A": 324.822,
+        "05-A": 329.6165,
+        "06-B": 213.863
+      },
+      "median_of_three_leg_medians": {
+        "A": 329.6165,
+        "B": 202.83300000000003
+      },
+      "three_leg_median_change_percent": -38.463942187360146,
+      "three_leg_median_within_2_percent": true
+    },
+    "changed_first_generation_update_p50_ms": {
+      "unit": "milliseconds",
+      "aggregate": "median_of_12_correlated_reload_percentiles",
+      "A": 635.685,
+      "B": 616.4695,
+      "change_percent": -3.0228021740327238,
+      "within_2_percent": true,
+      "per_leg_medians": {
+        "01-A": 607.8525,
+        "02-B": 616.4695,
+        "03-B": 621.5264999999999,
+        "04-A": 624.6814999999999,
+        "05-A": 658.499,
+        "06-B": 619.4265
+      },
+      "median_of_three_leg_medians": {
+        "A": 624.6814999999999,
+        "B": 619.4265
+      },
+      "three_leg_median_change_percent": -0.841228690140472,
+      "three_leg_median_within_2_percent": true
+    },
+    "changed_first_generation_update_p95_ms": {
+      "unit": "milliseconds",
+      "aggregate": "median_of_12_correlated_reload_percentiles",
+      "A": 754.4725000000001,
+      "B": 753.4535,
+      "change_percent": -0.13506125140414493,
+      "within_2_percent": true,
+      "per_leg_medians": {
+        "01-A": 740.4275,
+        "02-B": 745.8985,
+        "03-B": 754.2925,
+        "04-A": 767.198,
+        "05-A": 740.654,
+        "06-B": 761.835
+      },
+      "median_of_three_leg_medians": {
+        "A": 740.654,
+        "B": 754.2925
+      },
+      "three_leg_median_change_percent": 1.8414131294774538,
+      "three_leg_median_within_2_percent": true
+    },
+    "changed_first_generation_update_max_ms": {
+      "unit": "milliseconds",
+      "aggregate": "actual_worst_of_12",
+      "A": 851.852,
+      "B": 863.486,
+      "change_percent": 1.3657301972643143,
+      "within_2_percent": true,
+      "per_leg_medians": {
+        "01-A": 794.8230000000001,
+        "02-B": 781.6045,
+        "03-B": 796.8875,
+        "04-A": 786.5145,
+        "05-A": 818.169,
+        "06-B": 789.3725
+      },
+      "median_of_three_leg_medians": {
+        "A": 794.8230000000001,
+        "B": 789.3725
+      },
+      "three_leg_median_change_percent": -0.6857501607276273,
+      "three_leg_median_within_2_percent": true
+    }
+  },
+  "stall_p50_gain_ms": 80.87700000000001,
+  "three_leg_median_stall_p50_gain_ms": 79.78750000000001,
+  "timing_bars_pass": true
+}
