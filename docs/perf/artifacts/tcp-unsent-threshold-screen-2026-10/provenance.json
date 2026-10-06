@@ -1,0 +1,71 @@
+{
+  "measurement_date_utc": "2026-10-06",
+  "rust_source_base": "dcc9b6384d2f7931d4aa905b0cdc1e55efd790c4",
+  "wrapper_commit": "f98005e6b2a5c62fb5ae574d07b551865b6070cc",
+  "wrapper_tree": "e011cb1b3200f9994c753a5a119038d61e2f5e3c",
+  "worktree_clean": true,
+  "binaries_sha256": {
+    "target/release/rustbgpd": "f4ffafe1cb904536648b104b4527d602a6c6fd3cb782dea2a6f48d5165284937",
+    "target/scale/reloadstall": "f3c58170cc6a90e7b23c2bfd234cfd087c313620391c7cd97e7e871285f30bf1"
+  },
+  "tools_sha256": {
+    "bench/scale/reloadstall/run-unsent-leg.sh": "ea7e2044e063cb407afa0326cda585900a0bf4e4b0f9b24759c5fe94db6bc990",
+    "bench/scale/reloadstall/sample-daemon-cgroup.py": "42807cead92ff150e36009ce4fae449f1c2998c304a05c2473f980cdf8243372",
+    "bench/scale/reloadstall/receiver-netem.py": "0c6d374b220175b89b868848eb4cd623fc394fa299736449448b18515989ff1e",
+    "bench/scale/reloadstall/check-unsent-readback.py": "303e31928430b8dd2a9cf70d77fd91594b7dfc83298a620d8151e226bec017ec",
+    "bench/scale/reloadstall/gen-scenario.py": "e563659beef5857ee79ddac40e1cff5730c34e424b5ca074a3f9007b5dc0ab42",
+    "bench/scale/matrix/run-matrix.sh": "a370a98915c15a0779a36bca157b9f11219b25c55e3abecb3a6055339885aef3",
+    "bench/scale/matrix/verify-provenance.py": "7da2a7088bd2a9669621895c33c60ea6fce6fc62c695be600f63efc4530aedc4",
+    "bench/scale/matrix/rss-sampler.sh": "3ecffb93298c49f8524320ecebe976efc806f9f0b0caf260d6a1431ca402a10d",
+    "bench/scale/provenance.sh": "7db6727dc99ec42515359f674e56c749453bc29c9981b67f30568f0d6cce1991",
+    "bench/scale/cgroup-memory.sh": "64753985d0b8c167daa1d382b70fe6f4369275713ebcaec8e4de677ff281ee3a",
+    "bench/scale/host-quiet.sh": "abb3391cd5e0879c29aabd0aa0c316ea33d5f7c72f6d2a7d111b30025de411fd",
+    "tests/soak/host-lock.sh": "f5f419bb439f0b5e22521e9f7fa73d4ef73df159abeec31fafff63548899c658"
+  },
+  "frozen_environment_sha256": "f725289c6ccf1625d90da508b37cb2ce947edc1fbe60dc39d60a58a8bf5792ca",
+  "environment_values_omitted": "Private process environment retained only in the external archive. Workload inputs below are the actual per-leg inputs, not inherited shell defaults.",
+  "workload_inputs": {
+    "N_PEERS": "700",
+    "TOTAL_PREFIXES": "400400",
+    "PORT": "1790",
+    "RELOADS": "4",
+    "CONTROL_SECS": "30",
+    "CHANGED_PEERS": "",
+    "FLAPSTORM": "",
+    "BIRD_THREADS": "8",
+    "PROBE_PREFIXES": "",
+    "RELOADSTALL_UNSENT_RTT_MS": "0",
+    "RELOADSTALL_UNSENT_WRITER_POLLS": "0",
+    "RELOADSTALL_READER_DELAY_MS": "0",
+    "RELOADSTALL_READER_PAUSE_MS": "0",
+    "RELOADSTALL_READER_COUNT": "0",
+    "RELOADSTALL_CYCLE_QUIESCE_SECS": "20"
+  },
+  "arm_order": [
+    "unset",
+    "65536",
+    "65536",
+    "unset",
+    "unset",
+    "65536"
+  ],
+  "toolchain": "rustc 1.99.0 (b940084d7 2026-09-28)",
+  "kernel": "Linux 7.0.0-30-generic x86_64",
+  "build_commands": [
+    "cargo build --locked --release --bin rustbgpd --features rustbgpd-transport/bench-internals",
+    "cargo build --profile scale --locked -p reloadstall"
+  ],
+  "all_attestations_identical": true,
+  "all_actual_exits_zero": true,
+  "all_owned_processes_scopes_gone": true,
+  "host_mutex_released": true,
+  "host_sysctl_before_after": 4294967295,
+  "exclusions": [],
+  "limitations": [
+    "Pair 2 timing regression and control CPU differences must not be hidden behind pooled medians.",
+    "CPU uses outer sample brackets with requested durations and bracket excess retained per row. Context switches count daemon tasks, not writer/kernel wakeups; raced windows are marked unreliable.",
+    "Whole-scope peak is observed/pre-stop evidence, not a final lifetime guarantee; near-current-peak memory.stat split is not atomic kernel-peak attribution.",
+    "First-four raw audit found no source/environment/config/policy/lifetime difference explaining lower leg 4 background/control CPU; the cause remains unestablished.",
+    "Recorder for leg 1 was suspended for 54.2 seconds but resumed before teardown; actual wait and full cooldown remained intact."
+  ]
+}

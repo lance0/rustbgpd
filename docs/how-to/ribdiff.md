@@ -64,7 +64,9 @@ Both route sets are held in memory within those bounds; lower the limits for
 smaller capture hosts. The [RR comparison prerequisites](../cookbook/route-server-migration.md#route-reflector-snapshot-comparison)
 explain cluster-ID alignment and complete capture boundaries. End-to-end
 incumbent RR qualification remains outstanding: the pinned FRR 10.7.1 and
-GoBGP 4.8.0 exporters lack the required Adj-RIB-Out BMP view.
+GoBGP 4.10.0 exporters lack the required Adj-RIB-Out BMP view. The newer
+GoBGP pin does not qualify an incumbent RR capture; see the linked
+prerequisites for the source inspection and capture requirements.
 
 ## Exit codes
 

@@ -49,7 +49,7 @@ rustbgpd-vs-GoBGP comparison, which records the primary-source verification.
 | IPv6 Labeled Unicast | Partial[^mpls-rr] | Yes | Yes | Yes | No |
 | VPNv4 (RFC 4364) | Partial[^mpls-rr] | Yes | Yes | Yes | Yes |
 | VPNv6 | Partial[^mpls-rr] | Yes | Yes | Yes | Yes |
-| RT-Constrain (RFC 4684) | Partial[^rtc] | Yes | Yes | Yes | No |
+| RT-Constrain (RFC 4684) | Partial[^rtc] | No[^rtc-frr] | Yes | Yes | No |
 | L2VPN EVPN (RFC 7432) | Partial[^evpn] | Yes | Partial[^evpn-bird] | Yes | RIB only[^evpn-openbgpd] |
 | L2VPN VPLS | No | No | No | Yes | No |
 | IPv4 FlowSpec (RFC 8955) | Yes | Yes | Yes | Yes | Yes |
@@ -79,6 +79,12 @@ IPv4/IPv6 `Prefix` routes.
     Type 4 matches on its ES-Import RT, RFC 7432 §7.6). Local membership
     origination is the default (zero-length) route only; no membership is
     derived from local VRF or EVPN-instance import RTs.
+
+[^rtc-frr]: FRR 10.7.1 does not implement RT-Constrain (SAFI 132): it is
+    absent from the
+    [SAFI mapping](https://github.com/FRRouting/frr/blob/frr-10.7.1/lib/iana_afi.h#L86-L110)
+    and [NLRI dispatch](https://github.com/FRRouting/frr/blob/frr-10.7.1/bgpd/bgp_packet.c#L313-L334).
+    This claim is limited to that release.
 
 [^evpn]: rustbgpd EVPN is **alpha**; its local VTEP and dataplane support are
     Linux/VXLAN-only. Shipped and

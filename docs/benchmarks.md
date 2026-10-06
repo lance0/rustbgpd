@@ -53,6 +53,22 @@ The three commonly cited 1,000-peer memory values are not a release trend:
 Use each receipt's fleet, sampling point, and process boundary; do not compare
 the three values as if only the rustbgpd version changed.
 
+For container sizing, measure the daemon's whole-cgroup peak during representative
+reloads and leave headroom for the intended fleet and workload. Process RSS omits
+kernel TCP socket memory charged to the cgroup. In the
+[2026-10-06 native reload screen](perf/tcp-unsent-threshold-screen-2026-10.md),
+the three unset-threshold legs at 700 peers × 400,400 prefixes reached observed
+cgroup peaks of 1,043–1,085 MiB, while sampled daemon `VmHWM` maxima were about
+566–573 MiB ([per-leg evidence](perf/artifacts/tcp-unsent-threshold-screen-2026-10/legs.json)).
+Those pre-stop observations apply to that pinned source and workload; size other
+fleets from their own reload measurements and include headroom beyond observed peaks.
+
+Both the 64 KiB candidate and the separate
+[128 KiB candidate](perf/tcp-unsent-threshold-128k-screen-2026-10.md) missed the
+original +2% completion gate despite lower observed cgroup peaks. The final
+recommendation retains the existing socket behavior and budgets for whole-cgroup
+reload peaks; neither experiment introduces a production setting.
+
 jemalloc is the default allocator feature, so a plain
 `cargo build --release` produces the same allocator configuration as the
 published artifacts — the GHCR runtime image and the release tarballs
