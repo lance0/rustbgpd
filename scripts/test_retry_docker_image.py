@@ -137,6 +137,17 @@ class RetryDockerImageTests(unittest.TestCase):
                 self.assertEqual([call[0][0] for call in self.calls()[-9:]], ["buildx"] * 6 + ["pull"] * 3)
                 self.assertTrue(all(call[1] == self.env['DOCKER_CONFIG'] for call in self.calls()[-9:]))
 
+    def test_every_docker_hub_network_call_retries(self):
+        # GHCR and Quay pulls are outside this boundary; every other pull or
+        # registry inspect in the interop workflow targets Docker Hub.
+        sites = [line for line in INTEROP.splitlines()
+                 if re.search(r"docker (pull|buildx imagetools inspect)\b", line)
+                 and not re.search(r"\b(ghcr|quay)\.io/", line)]
+        self.assertGreaterEqual(len(sites), 9)
+        for line in sites:
+            with self.subTest(line=line.strip()):
+                self.assertIn(".github/scripts/retry-docker-image.sh docker ", line)
+
     def test_bad_metadata_fails_before_pull(self):
         for label in ("9.1", "9.3"):
             env, body = primer(label)

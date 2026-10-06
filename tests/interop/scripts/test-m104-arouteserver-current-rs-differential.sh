@@ -193,7 +193,8 @@ validate_arouteserver_image_identity() {
 preflight_arouteserver_image_identity() {
     local image_metadata manifest_metadata
     image_metadata=$(docker image inspect "$ARS_IMAGE")
-    manifest_metadata=$(docker buildx imagetools inspect --raw "$ARS_IMAGE")
+    manifest_metadata=$("$SCRIPT_DIR/../../../.github/scripts/retry-docker-image.sh" \
+        docker buildx imagetools inspect --raw "$ARS_IMAGE")
     validate_arouteserver_image_identity "$image_metadata" "$manifest_metadata"
 }
 

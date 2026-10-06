@@ -2143,7 +2143,7 @@ jobs:
       - name: Pull exact receiver images
         run: |
           docker pull ghcr.io/lance0/rustbgpd@sha256:cc6207fe950ee15f6793ca0119d531067c7b358b6c6193b0fda929495714c9da
-          docker pull openbgpd/openbgpd@sha256:b2e94bd1538102a89cff96867993eabb6dbb27720de4ab7b588860880e3e3bf9
+          .github/scripts/retry-docker-image.sh docker pull openbgpd/openbgpd@sha256:b2e94bd1538102a89cff96867993eabb6dbb27720de4ab7b588860880e3e3bf9
           docker pull quay.io/frrouting/frr@sha256:f90d26a9fd5c14fc5795a73b4254ac88bc3186c45bbeb220a225fb6182de812c
 
       - name: Run M100 offline diagnostic contract
@@ -2423,13 +2423,13 @@ jobs:
           AROUTESERVER_CONFIG: sha256:4a08ef740f00a119f5897b0f834da9ff172a282c93d47fdff636c3b50c9aec93
         run: |
           set -euo pipefail
-          manifest_json=$(docker buildx imagetools inspect --raw "$AROUTESERVER_IMAGE")
+          manifest_json=$(.github/scripts/retry-docker-image.sh docker buildx imagetools inspect --raw "$AROUTESERVER_IMAGE")
           test "$(jq -er '.schemaVersion' <<<"$manifest_json")" = 2
           test "$(jq -er '.mediaType' <<<"$manifest_json")" = \
             application/vnd.docker.distribution.manifest.v2+json
           test "$(jq -er '.config.digest' <<<"$manifest_json")" = \
             "$AROUTESERVER_CONFIG"
-          docker pull "$AROUTESERVER_IMAGE"
+          .github/scripts/retry-docker-image.sh docker pull "$AROUTESERVER_IMAGE"
           bash tests/interop/scripts/test-m104-arouteserver-current-rs-differential.sh \
             --preflight-arouteserver-image
           test "$(docker run --rm "$AROUTESERVER_IMAGE" python3 -c \
