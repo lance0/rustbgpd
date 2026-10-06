@@ -119,7 +119,10 @@ and filter JSON plus live observer `ss` TCP RTT samples at one-second intervals,
 and fails on missing/mismatched delay, inactive filters, queue/filter drops, or
 absent RTT evidence. A successful capability setup alone is insufficient.
 The namespace disappears with its owned processes; no host links, routes,
-sysctls, modules, bridges or published ports are changed.
+sysctls, bridges or published ports are changed. Creating the IFB device and
+its qdiscs/filters can load the `ifb`, `sch_netem`, `cls_flower` and `act_mirred`
+modules into the host kernel on first use; they stay loaded. The wrapper records
+which of them were loaded before the leg in `modules-before`.
 
 The container mode supports the existing IPv4 reload workload and reader pacing,
 including mixed changed peers. Dual-stack, membership churn, flapstorm and host

@@ -31,7 +31,6 @@ if [ "$mode" = --container ]; then
     [[ $RELOADSTALL_CONTAINER_IMAGE_ID =~ ^sha256:[0-9a-f]{64}$ ]] || exit 2
     export RELOADSTALL_CONTAINER_MEMORY_BYTES=${UNSENT_CONTAINER_MEMORY_BYTES:-107374182400}
     [[ $RELOADSTALL_CONTAINER_MEMORY_BYTES =~ ^[1-9][0-9]*$ ]] || exit 2
-    export RELOADSTALL_MEMORY_KIND=container-daemon-only
     export RELOADSTALL_HOST_NETNS
     RELOADSTALL_HOST_NETNS=$(readlink /proc/self/ns/net)
 elif [ "$rtt" -gt 0 ] && [ "$mode" != --inside-netns ]; then
@@ -40,7 +39,7 @@ elif [ "$rtt" -gt 0 ] && [ "$mode" != --inside-netns ]; then
     exec unshare --user --map-root-user --net -- bash "$0" "$out" "$threshold" "$rtt" --inside-netns
 fi
 if [ "$mode" != --container ]; then
-    unset RELOADSTALL_CONTAINER_IMAGE_ID RELOADSTALL_CONTAINER_MEMORY_BYTES RELOADSTALL_MEMORY_KIND
+    unset RELOADSTALL_CONTAINER_IMAGE_ID RELOADSTALL_CONTAINER_MEMORY_BYTES
 fi
 
 out=$(realpath -m -- "$out")
@@ -70,6 +69,9 @@ if [ "$rtt" -gt 0 ]; then
     sha256sum "$repo/bench/scale/reloadstall/receiver-netem.py" \
         "$repo/bench/scale/reloadstall/sample-daemon-cgroup.py" \
         "$repo/bench/scale/reloadstall/run-unsent-leg.sh" >"$out/tools.sha256"
+    # Shaping can autoload these host modules; record which were loaded already.
+    awk '$1 ~ /^(ifb|sch_netem|cls_flower|act_mirred)$/ {print $1}' /proc/modules \
+        >"$out/modules-before"
 fi
 if [ "$mode" = --container ]; then
     docker image inspect "$RELOADSTALL_CONTAINER_IMAGE_ID" >"$out/runtime-image.json"
