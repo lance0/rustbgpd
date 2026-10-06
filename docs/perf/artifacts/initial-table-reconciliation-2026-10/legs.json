@@ -1,0 +1,698 @@
+[
+  {
+    "leg": "01-control",
+    "status": "pass",
+    "runner_exit": 0,
+    "qualification_exit": 0,
+    "exits": {
+      "harness": 0,
+      "daemon": 0,
+      "cleanup": 0,
+      "health-before": 0,
+      "health-after": 0
+    },
+    "http": {
+      "health-before": 200,
+      "health-after": 200
+    },
+    "workload": {
+      "N_PEERS": "700",
+      "TOTAL_PREFIXES": "400400",
+      "PORT": "1790",
+      "RELOADS": "4",
+      "CONTROL_SECS": "30",
+      "CHANGED_PEERS": "",
+      "FLAPSTORM": "50",
+      "BIRD_THREADS": "8",
+      "PROBE_PREFIXES": "",
+      "FLAP_ROUNDS": "3"
+    },
+    "binary_sha256": "d1fc69a00788b4598a8065dda60a7bc9867304531a95ec1b94bf2dbadaf92aa4",
+    "harness_sha256": "16aca6bf6fc99616b8cce8de6c03584113a991b70c929a0a5026dfb62d93ddf3",
+    "source_and_binary_freeze_equal": true,
+    "quiet": [
+      {
+        "sample": "1",
+        "epoch_s": "1791325407",
+        "load1": "1.43",
+        "pswpin": "2424677",
+        "pswpout": "2447475",
+        "governors": "performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance",
+        "performance_governors": "64",
+        "governor_count": "64",
+        "competitors": "none",
+        "quiet": "true",
+        "failed_dimensions": "none",
+        "original_attempt": "1"
+      },
+      {
+        "sample": "2",
+        "epoch_s": "1791325437",
+        "load1": "1.26",
+        "pswpin": "2424677",
+        "pswpout": "2447475",
+        "governors": "performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance",
+        "performance_governors": "64",
+        "governor_count": "64",
+        "competitors": "none",
+        "quiet": "true",
+        "failed_dimensions": "none",
+        "original_attempt": "2"
+      }
+    ],
+    "stage_ns": [
+      2857440508684536,
+      2857443407092453,
+      2857473508267475,
+      2857473897854640,
+      2857476926593927,
+      2857607046303459,
+      2857607175780251,
+      2857607308685264,
+      2857907318797149,
+      2857907329132524
+    ],
+    "process_identity_sha256": {
+      "daemon": "30be99988216257e0ab9061475bce3524ac4690f6ba75c0798bb5c278660c328",
+      "harness": "dd4e4e70167a734c41aceb9c59152692679e68c273cc5abbcabdfba56b6c9892"
+    },
+    "readiness": [
+      {
+        "round": 1,
+        "samples": 30,
+        "failures": 0,
+        "deadline_ms": 250
+      },
+      {
+        "round": 2,
+        "samples": 30,
+        "failures": 0,
+        "deadline_ms": 250
+      },
+      {
+        "round": 3,
+        "samples": 30,
+        "failures": 0,
+        "deadline_ms": 250
+      }
+    ],
+    "sessions_and_parse": [
+      {
+        "round": 1,
+        "sessions_up": 700,
+        "parse_errors": 0
+      },
+      {
+        "round": 2,
+        "sessions_up": 700,
+        "parse_errors": 0
+      },
+      {
+        "round": 3,
+        "sessions_up": 700,
+        "parse_errors": 0
+      }
+    ],
+    "initial_exact_coverage": "first_exact_bitmap,mode=flapstorm,peers=700,total=400400,per_peer=572,expected=399828,completed=700,min_unique=399828,max_unique=399828"
+  },
+  {
+    "leg": "02-candidate",
+    "status": "pass",
+    "runner_exit": 0,
+    "qualification_exit": 0,
+    "exits": {
+      "harness": 0,
+      "daemon": 0,
+      "cleanup": 0,
+      "health-before": 0,
+      "health-after": 0
+    },
+    "http": {
+      "health-before": 200,
+      "health-after": 200
+    },
+    "workload": {
+      "N_PEERS": "700",
+      "TOTAL_PREFIXES": "400400",
+      "PORT": "1790",
+      "RELOADS": "4",
+      "CONTROL_SECS": "30",
+      "CHANGED_PEERS": "",
+      "FLAPSTORM": "50",
+      "BIRD_THREADS": "8",
+      "PROBE_PREFIXES": "",
+      "FLAP_ROUNDS": "3"
+    },
+    "binary_sha256": "0b7e555d848c1e833fab7fc8acd0a0865bfad78396adf5ebf8e5e35628637fdb",
+    "harness_sha256": "16aca6bf6fc99616b8cce8de6c03584113a991b70c929a0a5026dfb62d93ddf3",
+    "source_and_binary_freeze_equal": true,
+    "quiet": [
+      {
+        "sample": "1",
+        "epoch_s": "1791325872",
+        "load1": "1.15",
+        "pswpin": "2424677",
+        "pswpout": "2447475",
+        "governors": "performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance",
+        "performance_governors": "64",
+        "governor_count": "64",
+        "competitors": "none",
+        "quiet": "true",
+        "failed_dimensions": "none",
+        "original_attempt": "1"
+      },
+      {
+        "sample": "2",
+        "epoch_s": "1791325902",
+        "load1": "1.15",
+        "pswpin": "2424677",
+        "pswpout": "2447475",
+        "governors": "performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance",
+        "performance_governors": "64",
+        "governor_count": "64",
+        "competitors": "none",
+        "quiet": "true",
+        "failed_dimensions": "none",
+        "original_attempt": "2"
+      }
+    ],
+    "stage_ns": [
+      2857907795715664,
+      2857908121192765,
+      2857938224661944,
+      2857938609432305,
+      2857941633139345,
+      2858066742630756,
+      2858066871234400,
+      2858067003640869,
+      2858367014369256,
+      2858367025247116
+    ],
+    "process_identity_sha256": {
+      "daemon": "44a4a3ca37734858fb543474f3ff0b6afeeec899bb831a9a9849e493b59e9104",
+      "harness": "cdc6de43f1a29a71432e6c1fdf4ee6866860e3e011277a65b558163acf832f20"
+    },
+    "readiness": [
+      {
+        "round": 1,
+        "samples": 29,
+        "failures": 0,
+        "deadline_ms": 250
+      },
+      {
+        "round": 2,
+        "samples": 29,
+        "failures": 0,
+        "deadline_ms": 250
+      },
+      {
+        "round": 3,
+        "samples": 29,
+        "failures": 0,
+        "deadline_ms": 250
+      }
+    ],
+    "sessions_and_parse": [
+      {
+        "round": 1,
+        "sessions_up": 700,
+        "parse_errors": 0
+      },
+      {
+        "round": 2,
+        "sessions_up": 700,
+        "parse_errors": 0
+      },
+      {
+        "round": 3,
+        "sessions_up": 700,
+        "parse_errors": 0
+      }
+    ],
+    "initial_exact_coverage": "first_exact_bitmap,mode=flapstorm,peers=700,total=400400,per_peer=572,expected=399828,completed=700,min_unique=399828,max_unique=399828"
+  },
+  {
+    "leg": "03-candidate",
+    "status": "pass",
+    "runner_exit": 0,
+    "qualification_exit": 0,
+    "exits": {
+      "harness": 0,
+      "daemon": 0,
+      "cleanup": 0,
+      "health-before": 0,
+      "health-after": 0
+    },
+    "http": {
+      "health-before": 200,
+      "health-after": 200
+    },
+    "workload": {
+      "N_PEERS": "700",
+      "TOTAL_PREFIXES": "400400",
+      "PORT": "1790",
+      "RELOADS": "4",
+      "CONTROL_SECS": "30",
+      "CHANGED_PEERS": "",
+      "FLAPSTORM": "50",
+      "BIRD_THREADS": "8",
+      "PROBE_PREFIXES": "",
+      "FLAP_ROUNDS": "3"
+    },
+    "binary_sha256": "0b7e555d848c1e833fab7fc8acd0a0865bfad78396adf5ebf8e5e35628637fdb",
+    "harness_sha256": "16aca6bf6fc99616b8cce8de6c03584113a991b70c929a0a5026dfb62d93ddf3",
+    "source_and_binary_freeze_equal": true,
+    "quiet": [
+      {
+        "sample": "1",
+        "epoch_s": "1791326331",
+        "load1": "1.10",
+        "pswpin": "2424677",
+        "pswpout": "2447475",
+        "governors": "performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance",
+        "performance_governors": "64",
+        "governor_count": "64",
+        "competitors": "none",
+        "quiet": "true",
+        "failed_dimensions": "none",
+        "original_attempt": "1"
+      },
+      {
+        "sample": "2",
+        "epoch_s": "1791326361",
+        "load1": "1.06",
+        "pswpin": "2424677",
+        "pswpout": "2447475",
+        "governors": "performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance",
+        "performance_governors": "64",
+        "governor_count": "64",
+        "competitors": "none",
+        "quiet": "true",
+        "failed_dimensions": "none",
+        "original_attempt": "2"
+      }
+    ],
+    "stage_ns": [
+      2858367497500479,
+      2858367821428704,
+      2858397924526679,
+      2858398304373891,
+      2858401327553583,
+      2858526440496459,
+      2858526570885582,
+      2858526704835999,
+      2858826714662880,
+      2858826724828425
+    ],
+    "process_identity_sha256": {
+      "daemon": "3d20e18c023b927ba2b39437028b95da65ddb6e33892669f777971d79f29c5c5",
+      "harness": "e72eaf3c04aed92bc4e2f041b685833c49c3783bdb49e48c7472d1382c2ac635"
+    },
+    "readiness": [
+      {
+        "round": 1,
+        "samples": 29,
+        "failures": 0,
+        "deadline_ms": 250
+      },
+      {
+        "round": 2,
+        "samples": 29,
+        "failures": 0,
+        "deadline_ms": 250
+      },
+      {
+        "round": 3,
+        "samples": 29,
+        "failures": 0,
+        "deadline_ms": 250
+      }
+    ],
+    "sessions_and_parse": [
+      {
+        "round": 1,
+        "sessions_up": 700,
+        "parse_errors": 0
+      },
+      {
+        "round": 2,
+        "sessions_up": 700,
+        "parse_errors": 0
+      },
+      {
+        "round": 3,
+        "sessions_up": 700,
+        "parse_errors": 0
+      }
+    ],
+    "initial_exact_coverage": "first_exact_bitmap,mode=flapstorm,peers=700,total=400400,per_peer=572,expected=399828,completed=700,min_unique=399828,max_unique=399828"
+  },
+  {
+    "leg": "04-control",
+    "status": "pass",
+    "runner_exit": 0,
+    "qualification_exit": 0,
+    "exits": {
+      "harness": 0,
+      "daemon": 0,
+      "cleanup": 0,
+      "health-before": 0,
+      "health-after": 0
+    },
+    "http": {
+      "health-before": 200,
+      "health-after": 200
+    },
+    "workload": {
+      "N_PEERS": "700",
+      "TOTAL_PREFIXES": "400400",
+      "PORT": "1790",
+      "RELOADS": "4",
+      "CONTROL_SECS": "30",
+      "CHANGED_PEERS": "",
+      "FLAPSTORM": "50",
+      "BIRD_THREADS": "8",
+      "PROBE_PREFIXES": "",
+      "FLAP_ROUNDS": "3"
+    },
+    "binary_sha256": "d1fc69a00788b4598a8065dda60a7bc9867304531a95ec1b94bf2dbadaf92aa4",
+    "harness_sha256": "16aca6bf6fc99616b8cce8de6c03584113a991b70c929a0a5026dfb62d93ddf3",
+    "source_and_binary_freeze_equal": true,
+    "quiet": [
+      {
+        "sample": "1",
+        "epoch_s": "1791326791",
+        "load1": "1.35",
+        "pswpin": "2424677",
+        "pswpout": "2447475",
+        "governors": "performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance",
+        "performance_governors": "64",
+        "governor_count": "64",
+        "competitors": "none",
+        "quiet": "true",
+        "failed_dimensions": "none",
+        "original_attempt": "1"
+      },
+      {
+        "sample": "2",
+        "epoch_s": "1791326821",
+        "load1": "1.21",
+        "pswpin": "2424677",
+        "pswpout": "2447475",
+        "governors": "performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance",
+        "performance_governors": "64",
+        "governor_count": "64",
+        "competitors": "none",
+        "quiet": "true",
+        "failed_dimensions": "none",
+        "original_attempt": "2"
+      }
+    ],
+    "stage_ns": [
+      2858827187859905,
+      2858827510423791,
+      2858857612791722,
+      2858857998439148,
+      2858861022029696,
+      2858991140630994,
+      2858991270182282,
+      2858991405216533,
+      2859291415497287,
+      2859291426121379
+    ],
+    "process_identity_sha256": {
+      "daemon": "9c557b22cbad0a0ce08c77d57d342e6a51828c740354ad2bf9f38ef7fa49b2d3",
+      "harness": "4bbf0958f7adcfdef1238f5dbc64e48aebc5c970afa575d691def39cfe282649"
+    },
+    "readiness": [
+      {
+        "round": 1,
+        "samples": 30,
+        "failures": 0,
+        "deadline_ms": 250
+      },
+      {
+        "round": 2,
+        "samples": 30,
+        "failures": 0,
+        "deadline_ms": 250
+      },
+      {
+        "round": 3,
+        "samples": 30,
+        "failures": 0,
+        "deadline_ms": 250
+      }
+    ],
+    "sessions_and_parse": [
+      {
+        "round": 1,
+        "sessions_up": 700,
+        "parse_errors": 0
+      },
+      {
+        "round": 2,
+        "sessions_up": 700,
+        "parse_errors": 0
+      },
+      {
+        "round": 3,
+        "sessions_up": 700,
+        "parse_errors": 0
+      }
+    ],
+    "initial_exact_coverage": "first_exact_bitmap,mode=flapstorm,peers=700,total=400400,per_peer=572,expected=399828,completed=700,min_unique=399828,max_unique=399828"
+  },
+  {
+    "leg": "05-control",
+    "status": "pass",
+    "runner_exit": 0,
+    "qualification_exit": 0,
+    "exits": {
+      "harness": 0,
+      "daemon": 0,
+      "cleanup": 0,
+      "health-before": 0,
+      "health-after": 0
+    },
+    "http": {
+      "health-before": 200,
+      "health-after": 200
+    },
+    "workload": {
+      "N_PEERS": "700",
+      "TOTAL_PREFIXES": "400400",
+      "PORT": "1790",
+      "RELOADS": "4",
+      "CONTROL_SECS": "30",
+      "CHANGED_PEERS": "",
+      "FLAPSTORM": "50",
+      "BIRD_THREADS": "8",
+      "PROBE_PREFIXES": "",
+      "FLAP_ROUNDS": "3"
+    },
+    "binary_sha256": "d1fc69a00788b4598a8065dda60a7bc9867304531a95ec1b94bf2dbadaf92aa4",
+    "harness_sha256": "16aca6bf6fc99616b8cce8de6c03584113a991b70c929a0a5026dfb62d93ddf3",
+    "source_and_binary_freeze_equal": true,
+    "quiet": [
+      {
+        "sample": "1",
+        "epoch_s": "1791327256",
+        "load1": "1.24",
+        "pswpin": "2424677",
+        "pswpout": "2447475",
+        "governors": "performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance",
+        "performance_governors": "64",
+        "governor_count": "64",
+        "competitors": "none",
+        "quiet": "true",
+        "failed_dimensions": "none",
+        "original_attempt": "1"
+      },
+      {
+        "sample": "2",
+        "epoch_s": "1791327286",
+        "load1": "1.15",
+        "pswpin": "2424677",
+        "pswpout": "2447475",
+        "governors": "performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance",
+        "performance_governors": "64",
+        "governor_count": "64",
+        "competitors": "none",
+        "quiet": "true",
+        "failed_dimensions": "none",
+        "original_attempt": "2"
+      }
+    ],
+    "stage_ns": [
+      2859291895540096,
+      2859292217528273,
+      2859322318772482,
+      2859322706195443,
+      2859325730119464,
+      2859455848572773,
+      2859455978822618,
+      2859456112978049,
+      2859756124119348,
+      2859756134663744
+    ],
+    "process_identity_sha256": {
+      "daemon": "d2ab214866684b2b90344bdd9b06e90f2605a2425c9036dfdf0f47675f1b1420",
+      "harness": "3030936e0fd6a98e3d4d2f0937332c9e8fc08979223a85e6323d94fc8938d87a"
+    },
+    "readiness": [
+      {
+        "round": 1,
+        "samples": 30,
+        "failures": 0,
+        "deadline_ms": 250
+      },
+      {
+        "round": 2,
+        "samples": 30,
+        "failures": 0,
+        "deadline_ms": 250
+      },
+      {
+        "round": 3,
+        "samples": 30,
+        "failures": 0,
+        "deadline_ms": 250
+      }
+    ],
+    "sessions_and_parse": [
+      {
+        "round": 1,
+        "sessions_up": 700,
+        "parse_errors": 0
+      },
+      {
+        "round": 2,
+        "sessions_up": 700,
+        "parse_errors": 0
+      },
+      {
+        "round": 3,
+        "sessions_up": 700,
+        "parse_errors": 0
+      }
+    ],
+    "initial_exact_coverage": "first_exact_bitmap,mode=flapstorm,peers=700,total=400400,per_peer=572,expected=399828,completed=700,min_unique=399828,max_unique=399828"
+  },
+  {
+    "leg": "06-candidate",
+    "status": "pass",
+    "runner_exit": 0,
+    "qualification_exit": 0,
+    "exits": {
+      "harness": 0,
+      "daemon": 0,
+      "cleanup": 0,
+      "health-before": 0,
+      "health-after": 0
+    },
+    "http": {
+      "health-before": 200,
+      "health-after": 200
+    },
+    "workload": {
+      "N_PEERS": "700",
+      "TOTAL_PREFIXES": "400400",
+      "PORT": "1790",
+      "RELOADS": "4",
+      "CONTROL_SECS": "30",
+      "CHANGED_PEERS": "",
+      "FLAPSTORM": "50",
+      "BIRD_THREADS": "8",
+      "PROBE_PREFIXES": "",
+      "FLAP_ROUNDS": "3"
+    },
+    "binary_sha256": "0b7e555d848c1e833fab7fc8acd0a0865bfad78396adf5ebf8e5e35628637fdb",
+    "harness_sha256": "16aca6bf6fc99616b8cce8de6c03584113a991b70c929a0a5026dfb62d93ddf3",
+    "source_and_binary_freeze_equal": true,
+    "quiet": [
+      {
+        "sample": "1",
+        "epoch_s": "1791327720",
+        "load1": "1.12",
+        "pswpin": "2424677",
+        "pswpout": "2447475",
+        "governors": "performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance",
+        "performance_governors": "64",
+        "governor_count": "64",
+        "competitors": "none",
+        "quiet": "true",
+        "failed_dimensions": "none",
+        "original_attempt": "1"
+      },
+      {
+        "sample": "2",
+        "epoch_s": "1791327751",
+        "load1": "1.07",
+        "pswpin": "2424677",
+        "pswpout": "2447475",
+        "governors": "performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance",
+        "performance_governors": "64",
+        "governor_count": "64",
+        "competitors": "none",
+        "quiet": "true",
+        "failed_dimensions": "none",
+        "original_attempt": "2"
+      }
+    ],
+    "stage_ns": [
+      2859756627629037,
+      2859756955009071,
+      2859787057169456,
+      2859787435609804,
+      2859790459410609,
+      2859915566857023,
+      2859915696801212,
+      2859915833066394,
+      2860215843109145,
+      2860215853380976
+    ],
+    "process_identity_sha256": {
+      "daemon": "bb8f5d72807f49c9f984b50c97e4eaf34f30ff2ece5b258473a5f83d1a550422",
+      "harness": "2ce76bcacfc3309a09c77ea3a760096028cb2fee0cba00951d52835f327cc825"
+    },
+    "readiness": [
+      {
+        "round": 1,
+        "samples": 29,
+        "failures": 0,
+        "deadline_ms": 250
+      },
+      {
+        "round": 2,
+        "samples": 29,
+        "failures": 0,
+        "deadline_ms": 250
+      },
+      {
+        "round": 3,
+        "samples": 29,
+        "failures": 0,
+        "deadline_ms": 250
+      }
+    ],
+    "sessions_and_parse": [
+      {
+        "round": 1,
+        "sessions_up": 700,
+        "parse_errors": 0
+      },
+      {
+        "round": 2,
+        "sessions_up": 700,
+        "parse_errors": 0
+      },
+      {
+        "round": 3,
+        "sessions_up": 700,
+        "parse_errors": 0
+      }
+    ],
+    "initial_exact_coverage": "first_exact_bitmap,mode=flapstorm,peers=700,total=400400,per_peer=572,expected=399828,completed=700,min_unique=399828,max_unique=399828"
+  }
+]

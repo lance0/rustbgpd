@@ -112,6 +112,7 @@ Inspect the receipts behind protocol, performance, and operational claims.
 | [Performance archive](perf/README.md) | Dated performance receipts and their supporting artifacts. |
 | [Reload observer-tail diagnostic](perf/reload-observer-tail-2026-10-06.md) | First-chunk release, admission, writer, and receiver timing with complete observer coverage and explicit probe limits. |
 | [First UPDATE phase attribution](perf/first-update-phase-attribution-2026-10.md) | Measured 2026-10-06: 18 flap rounds at 700 peers; initial-table occupancy is the lead for the first-survivor delay. |
+| [Initial-table reconciliation qualification](perf/initial-table-reconciliation-2026-10.md) | Measured 2026-10-06: first-survivor p50 improved 23.660 ms in ordinary S3; complete A/B evidence and withdrawal-tail limits. |
 | TCP unsent-threshold screens | Separate [64 KiB](perf/tcp-unsent-threshold-screen-2026-10.md) and [128 KiB](perf/tcp-unsent-threshold-128k-screen-2026-10.md) memory/completion screens and container sizing guidance. |
 | [Current-source IRR comparison](perf/irr-reload-current-comparators-2026-10-06.md) | Measured 2026-10-06: unreleased `dcc9b6384`, BIRD 3.3.3 and OpenBGPD 9.3 at 320 members × 183,040 prefixes, 0% overlap; three roots and 36 reload rows. |
 | [Soak archive](soaks/README.md) | Long-running test reports, acceptance gates, and receipt templates. |
