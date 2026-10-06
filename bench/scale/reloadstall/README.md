@@ -71,13 +71,81 @@ For example, repeat both arms with 50 readers at 4 KiB per 5 ms, then with a
 5-second stopped-reader interval. These are separate qualification shapes.
 
 An RTT argument runs both loopback endpoints in a disposable user/network
-namespace, with half the requested RTT as each direction's netem delay. It
-requires unprivileged namespace support and `ip`/`tc`. A host that rejects user
-namespace creation leaves the RTT prerequisite pending. Separate daemon and
-harness containers sharing an owned network namespace are an alternative; this
-wrapper does not implement that driver. No host
-networking or sysctl is changed. Test realistic RTT (for example 20 ms) with both
-reader qualification shapes before shipping a setting.
+namespace. Where unprivileged namespaces are unavailable, add `--container`:
+
+```sh
+docker build -f bench/scale/reloadstall/Dockerfile.runtime -t unsent-runtime .
+UNSENT_CONTAINER_IMAGE=unsent-runtime \
+    bash bench/scale/reloadstall/run-unsent-leg.sh OUT_DIR unset 20 --container
+```
+
+Build the tools image before starting a leg. Its pinned Ubuntu base supports
+binaries built against glibc 2.39; use `--build-arg BASE=...` with an appropriate
+pinned image for other build hosts. The wrapper resolves the runtime tag to an
+immutable image ID, records its inspection, and mounts the separately built,
+hashed daemon and harness binaries. It does not compile or pull images during
+the measured leg.
+
+The daemon runs directly as PID 1 in a `--network none` container. A second
+container shares its network and PID namespaces, so the existing receiver can
+SIGHUP PID 1, replace the policy file, and scrape loopback metrics. Tools and
+receivers stay in that second container's cgroup; no `docker exec` processes
+enter the daemon cgroup. The daemon runs as the invoking host UID without
+capabilities. The receiver adds `NET_ADMIN`, `KILL`, `DAC_OVERRIDE` and `FOWNER` to an empty
+capability set; the last lets the unchanged receiver preserve policy-file
+permissions when copying a generation owned by the daemon UID. Both containers have equal memory and memory-swap limits
+(default 100 GiB, override `UNSENT_CONTAINER_MEMORY_BYTES`), disabling swap.
+
+The sampler labels this memory boundary `container-daemon-only`. Its ownership
+receipt pins the full container ID, image ID, host PID, PID start time, binary
+inode and exact cgroup. It rejects a different image/binary, shared or populated
+child cgroups, changed ownership, mismatched memory caps or nonzero swap limit.
+Native legs retain their daemon-only systemd scope and process-group checks.
+Receivers stop before the daemon. Logs, exits and OOM state are retained before
+removal. The `daemon-memory.pre-stop.*` files capture the whole-cgroup high-water
+mark, statistics and events **before daemon shutdown**; they are not a final
+lifetime peak. The fast trace continues through shutdown until the process exits,
+retaining later observed peaks when available. Cleanup bounds TERM then KILL, including
+interruptions and failed starts, and only removes this invocation's containers.
+
+Both RTT modes use `receiver-netem.py`: observer TCP (`127.0.0.1` ↔
+`127.1.0.0/16`) is redirected from loopback **ingress** into an IFB queue with
+half the requested RTT as each direction's delay. Loopback metric scrapes are
+unshaped. Receiver ingress avoids the TCP Small Queues interaction documented
+by [netem](https://www.man7.org/linux/man-pages/man8/netem.8.html#LIMITATIONS);
+[tc-mirred](https://www.man7.org/linux/man-pages/man8/tc-mirred.8.html#EXAMPLES)
+describes the IFB redirect. The helper refuses the host namespace, retains queue
+and filter JSON plus live observer `ss` TCP RTT samples at one-second intervals,
+and fails on missing/mismatched delay, inactive filters, queue/filter drops, or
+absent RTT evidence. A successful capability setup alone is insufficient.
+The namespace disappears with its owned processes; no host links, routes,
+sysctls, bridges or published ports are changed. Creating the IFB device and
+its qdiscs/filters can load the `ifb`, `sch_netem`, `cls_flower` and `act_mirred`
+modules into the host kernel on first use; they stay loaded. The wrapper records
+which of them were loaded before the leg in `modules-before`.
+
+The container mode supports the existing IPv4 reload workload and reader pacing,
+including mixed changed peers. Dual-stack, membership churn, flapstorm and host
+CLI probes are rejected. External file and command options (`RELOADSTALL_OVERLAP_FILE`,
+`RELOADSTALL_EVIDENCE_DIR`, `RELOADSTALL_PRE_CHURN_EVIDENCE_DIR`,
+`RELOADSTALL_RECEIVED_VIEW_FILE` and `RELOADSTALL_STAGE_CMD`) are rejected before
+startup, including empty values; their host paths are not mounted into the receiver.
+The driver supplies the loopback reload-metrics address only when `RELOADS` is
+positive, ignoring an inherited address in container mode. The matrix host mutex,
+two quiet-host samples and full 300-second cooldown still apply. The source patch,
+tool/binary hashes, image ID, workload inputs, per-establishment socket readback
+and harness status remain required evidence. For a functional check, run both
+`unset` and `65536` with
+`N_PEERS=12 TOTAL_PREFIXES=1200 RELOADS=2`, 20 ms RTT and slow/stopped readers.
+A passing smoke validates the driver; it does not qualify the 700-peer timing or
+memory gates. Test both reader qualification shapes at scale before shipping a
+setting.
+
+Container legs require a fresh, non-symlink `ARTIFACTS_DIR`; existing receipts
+cannot be resumed or overwritten. Use a new output directory for every attempt,
+and retain earlier IDs, traces and exit records when investigating a failed leg.
+Native matrix resume behavior is unchanged. Repeated interruptions are caught
+while owned cleanup finishes; cleanup children retain their normal signal handling.
 
 `RUSTBGPD_BENCH_WRITER_POLLS=1` enables per-write poll/pending-poll diagnostic
 logs with epoch markers, including failed/canceled attempts but excluding any
