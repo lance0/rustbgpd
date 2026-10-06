@@ -148,7 +148,7 @@ impl crate::update::ExactExportEncoder for CohortExactEncoder {
         let generation = if self.advance_generation {
             u64::try_from(self.generation.fetch_add(1, Ordering::Relaxed) + 1).unwrap()
         } else {
-            1
+            u64::try_from(self.generation.load(Ordering::Relaxed).max(1)).unwrap()
         };
         Arc::new(CohortExactSnapshot {
             owner: self.owner,
@@ -9823,7 +9823,7 @@ fn prestaged_inventory_recheck_matches_fenced_rebuild_after_churn() {
         .extend_clean_policy_transition_inventory(source, destination, &keys, &[], &mut fenced)
         .expect("fenced walk passes every drift check");
     let fenced = fenced.finish(&mut |_| {});
-    let PrestagedInventoryOutcome::Ready(prestaged) =
+    let PrestagedInventoryOutcome::Ready(prestaged, _) =
         manager.take_prestaged_transition_inventory(source, destination, &[])
     else {
         panic!("a complete prestaged inventory for this pair re-checks to Ready");
@@ -9874,6 +9874,501 @@ fn prestaged_inventory_recheck_matches_fenced_rebuild_after_churn() {
     assert_eq!(prestaged.permit_by_source, fenced.permit_by_source);
 }
 
+fn install_prestage_test_encoder(
+    manager: &mut RibManager,
+    peer: IpAddr,
+    owner: u64,
+    max_len: usize,
+    probes: &Arc<AtomicUsize>,
+) -> Arc<CohortExactEncoder> {
+    let encoder = Arc::new(CohortExactEncoder {
+        owner,
+        profile: 42,
+        max_len,
+        generation: AtomicUsize::new(0),
+        advance_generation: false,
+        probes: Arc::clone(probes),
+        reuses: Arc::new(AtomicUsize::new(0)),
+    });
+    manager.peer_export_encoders.insert(peer, encoder.clone());
+    encoder
+}
+
+/// Snapshot invalidation before the fence, after the cache is seeded, and
+/// immediately before Validate all preserve exact rejection. Early drift
+/// performs a full fenced probe; late drift emits nothing and falls back.
+#[test]
+fn prestaged_probe_snapshot_drift_requires_fenced_probe_or_rejection() {
+    for owner_changes in [false, true] {
+        for seam in [
+            "partial_probe",
+            "before_fence",
+            "before_prepare",
+            "before_validate",
+        ] {
+            let (mut manager, peers, mut receivers) = direct_clean_transition_manager(2, 4, None);
+            let probes = Arc::new(AtomicUsize::new(0));
+            let encoder = install_prestage_test_encoder(&mut manager, peers[0], 1, 65_535, &probes);
+            let policy = community_chain(0xFDE8_2102);
+            let invalidate = |manager: &mut RibManager| {
+                if owner_changes {
+                    install_prestage_test_encoder(manager, peers[0], 99, 65_535, &probes);
+                } else {
+                    encoder.generation.store(2, Ordering::Relaxed);
+                }
+            };
+            if seam == "partial_probe" {
+                let (reply, mut response) = oneshot::channel();
+                manager.begin_destination_prestage(peers[0], Some(&policy), reply);
+                loop {
+                    manager.advance_destination_prestage();
+                    if manager
+                        .prestaged_inventory
+                        .as_ref()
+                        .is_some_and(|inventory| inventory.probe.is_some())
+                    {
+                        break;
+                    }
+                    assert!(manager.pending_destination_prestage.is_some());
+                }
+                assert_eq!(probes.load(Ordering::Relaxed), 1, "one unfenced slice ran");
+                invalidate(&mut manager);
+                while manager.pending_destination_prestage.is_some() {
+                    manager.advance_destination_prestage();
+                }
+                response.try_recv().unwrap().unwrap();
+            } else {
+                complete_prestage(&mut manager, peers[0], &policy);
+            }
+            assert_eq!(
+                probes.load(Ordering::Relaxed),
+                4,
+                "the full probe ran unfenced"
+            );
+            assert!(manager.pending_clean_policy_transition.is_none());
+            if seam == "before_fence" {
+                invalidate(&mut manager);
+            }
+            let _response = start_clean_transition(&mut manager, &peers, &policy);
+            if !matches!(seam, "partial_probe" | "before_fence") {
+                loop {
+                    let pending = manager.pending_clean_policy_transition.as_ref().unwrap();
+                    let at_seam = if seam == "before_validate" {
+                        pending.poll_kind().as_str() == "finalize"
+                    } else {
+                        pending.probe_inventory().is_some()
+                    };
+                    if at_seam {
+                        break;
+                    }
+                    assert_eq!(step_parked_transition(&mut manager).1, "continue");
+                }
+                invalidate(&mut manager);
+            }
+            let outcome = loop {
+                let (_, outcome) = step_parked_transition(&mut manager);
+                if outcome != "continue" {
+                    break outcome;
+                }
+            };
+            if seam == "before_validate" {
+                assert_eq!(outcome, "fallback", "{seam}, owner={owner_changes}");
+                assert_eq!(probes.load(Ordering::Relaxed), 4);
+                for receiver in &mut receivers {
+                    assert!(receiver.try_recv().is_err());
+                }
+            } else {
+                assert_eq!(outcome, "committed", "{seam}, owner={owner_changes}");
+                assert_eq!(
+                    probes.load(Ordering::Relaxed),
+                    8,
+                    "exactly one full fenced re-probe"
+                );
+                for receiver in &mut receivers {
+                    assert_eq!(receiver.try_recv().unwrap().announce.len(), 4);
+                }
+            }
+        }
+    }
+}
+
+/// A withdrawn maximum must not survive in the shared proof, and a new larger
+/// row must not inherit its predecessor's successful length. Equal-cardinality
+/// churn patches the sealed payload and re-probes only the replacement row.
+#[test]
+fn prestaged_probe_dirty_replacement_updates_exact_maximum() {
+    for (old_index, new_index, expected) in [(0, 1, "committed"), (1, 0, "fallback")] {
+        let (mut manager, peers, mut receivers) = direct_clean_transition_manager(2, 0, None);
+        let source_peer = Ipv4Addr::new(192, 0, 2, 42);
+        churn_fixture_source(
+            &mut manager,
+            vec![crate::test_support::make_route(
+                fixture_prefix(old_index),
+                source_peer,
+            )],
+            vec![],
+        );
+        for receiver in &mut receivers {
+            while receiver.try_recv().is_ok() {}
+        }
+        let probes = Arc::new(AtomicUsize::new(0));
+        install_prestage_test_encoder(&mut manager, peers[0], 1, 65_535, &probes);
+        install_prestage_test_encoder(
+            &mut manager,
+            peers[1],
+            2,
+            192,
+            &Arc::new(AtomicUsize::new(0)),
+        );
+        let policy = community_chain(0xFDE8_0002);
+        let (source, destination) = complete_prestage(&mut manager, peers[0], &policy);
+        assert_eq!(probes.load(Ordering::Relaxed), 1);
+        let before = manager
+            .prestaged_inventory
+            .as_ref()
+            .unwrap()
+            .sealed
+            .as_ref()
+            .unwrap()
+            .announce
+            .as_ptr();
+        churn_fixture_source(
+            &mut manager,
+            vec![crate::test_support::make_route(
+                fixture_prefix(new_index),
+                source_peer,
+            )],
+            vec![Prefix::V4(fixture_prefix(old_index))],
+        );
+        for receiver in &mut receivers {
+            while receiver.try_recv().is_ok() {}
+        }
+        probes.store(0, Ordering::Relaxed);
+        let fenced = fenced_inventory(&mut manager, source, destination, &[]).unwrap();
+        let _response = start_clean_transition(&mut manager, &peers, &policy);
+        loop {
+            let pending = manager.pending_clean_policy_transition.as_ref().unwrap();
+            if let Some(prestaged) = pending.probe_inventory() {
+                assert_eq!(
+                    before,
+                    prestaged.announce.as_ptr(),
+                    "patch keeps the directly allocated Arc"
+                );
+                assert_inventories_equal(&fenced, prestaged);
+                assert_eq!(
+                    probes.load(Ordering::Relaxed),
+                    1,
+                    "only the dirty row is re-probed"
+                );
+                break;
+            }
+            assert_eq!(step_parked_transition(&mut manager).1, "continue");
+        }
+        let outcome = loop {
+            let (_, outcome) = step_parked_transition(&mut manager);
+            if outcome != "continue" {
+                break outcome;
+            }
+        };
+        assert_eq!(outcome, expected);
+        assert_eq!(
+            probes.load(Ordering::Relaxed),
+            1,
+            "the full unfenced proof is reused"
+        );
+        for receiver in &mut receivers {
+            if expected == "committed" {
+                let update = receiver.try_recv().unwrap();
+                assert_eq!(update.announce.len(), 1);
+                assert_eq!(
+                    update.announce[0].prefix,
+                    Prefix::V4(fixture_prefix(new_index))
+                );
+            } else {
+                assert!(receiver.try_recv().is_err(), "rejection emits nothing");
+            }
+        }
+    }
+}
+
+/// New/removed keys after sealing change the payload's cardinality. The safe
+/// resize path must retain the exact current inventory and its aligned proof.
+#[test]
+fn prestaged_inventory_cardinality_changes_match_fenced_rebuild() {
+    for (add, remove) in [(true, false), (false, true), (false, false)] {
+        let (mut manager, peers, _receivers) = direct_clean_transition_manager(2, 3, None);
+        let policy = community_chain(0xFDE8_2102);
+        let (source, destination) = complete_prestage(&mut manager, peers[0], &policy);
+        let source_peer = Ipv4Addr::new(192, 0, 2, 42);
+        churn_fixture_source(
+            &mut manager,
+            if add {
+                vec![crate::test_support::make_route(
+                    fixture_prefix(200),
+                    source_peer,
+                )]
+            } else {
+                vec![]
+            },
+            if remove {
+                vec![Prefix::V4(fixture_prefix(1))]
+            } else {
+                vec![]
+            },
+        );
+        let fenced = fenced_inventory(&mut manager, source, destination, &[]).unwrap();
+        let super::super::update_groups::PrestagedInventoryOutcome::Ready(prestaged, proof) =
+            manager.take_prestaged_transition_inventory(source, destination, &[])
+        else {
+            panic!("clean pair")
+        };
+        assert!(proof.is_some(), "cardinality changes preserve the proof");
+        assert_inventories_equal(&fenced, &prestaged.finish(&mut |_| {}));
+    }
+}
+
+/// A changed row can fail even though every original row fit the immutable
+/// snapshot. Discard the partial proof and let the full fenced probe reject;
+/// exercise additions, equal cardinality, and net withdrawals.
+#[test]
+fn prestaged_probe_dirty_failure_discards_proof_and_fenced_probe_rejects() {
+    for removed in 0..=2 {
+        let (mut manager, peers, mut receivers) = direct_clean_transition_manager(2, 0, None);
+        let source_peer = Ipv4Addr::new(192, 0, 2, 42);
+        let initial = [1, 3, 5];
+        churn_fixture_source(
+            &mut manager,
+            initial
+                .iter()
+                .map(|&index| crate::test_support::make_route(fixture_prefix(index), source_peer))
+                .collect(),
+            vec![],
+        );
+        let probes = Arc::new(AtomicUsize::new(0));
+        let encoder = install_prestage_test_encoder(&mut manager, peers[0], 1, 192, &probes);
+        let policy = community_chain(0xFDE8_0002);
+        complete_prestage(&mut manager, peers[0], &policy);
+        assert_eq!(probes.load(Ordering::Relaxed), initial.len());
+        churn_fixture_source(
+            &mut manager,
+            vec![crate::test_support::make_route(
+                fixture_prefix(0),
+                source_peer,
+            )],
+            initial[..removed]
+                .iter()
+                .map(|&index| Prefix::V4(fixture_prefix(index)))
+                .collect(),
+        );
+        for receiver in &mut receivers {
+            while receiver.try_recv().is_ok() {}
+        }
+        probes.store(0, Ordering::Relaxed);
+        encoder.reuses.store(0, Ordering::Relaxed);
+        let _response = start_clean_transition(&mut manager, &peers, &policy);
+        while manager
+            .pending_clean_policy_transition
+            .as_ref()
+            .unwrap()
+            .probe_inventory()
+            .is_none()
+        {
+            assert_eq!(step_parked_transition(&mut manager).1, "continue");
+        }
+        assert_eq!(
+            probes.load(Ordering::Relaxed),
+            1,
+            "dirty row fails its re-probe"
+        );
+        let outcome = loop {
+            let (_, outcome) = step_parked_transition(&mut manager);
+            if outcome != "continue" {
+                break outcome;
+            }
+        };
+        assert_eq!(outcome, "fallback", "removed {removed}");
+        assert!(
+            probes.load(Ordering::Relaxed) > 1,
+            "authoritative fenced probe ran"
+        );
+        assert_eq!(
+            encoder.reuses.load(Ordering::Relaxed),
+            0,
+            "failed proof cannot be reused"
+        );
+        for receiver in &mut receivers {
+            assert!(
+                receiver.try_recv().is_err(),
+                "oversized transition emits nothing"
+            );
+        }
+    }
+}
+
+/// Resize preserves surviving maxima, removes withdrawn maxima, and includes
+/// newly probed maxima when checking each target's own wire ceiling.
+#[test]
+fn prestaged_probe_resized_payload_checks_current_maximum() {
+    for (initial, added, withdrawn, expected) in [
+        (vec![0, 1], vec![], vec![0], "committed"),
+        (vec![1], vec![0], vec![], "fallback"),
+        (vec![0, 1], vec![], vec![1], "fallback"),
+    ] {
+        let (mut manager, peers, mut receivers) = direct_clean_transition_manager(2, 0, None);
+        let source_peer = Ipv4Addr::new(192, 0, 2, 42);
+        churn_fixture_source(
+            &mut manager,
+            initial
+                .iter()
+                .map(|&index| crate::test_support::make_route(fixture_prefix(index), source_peer))
+                .collect(),
+            vec![],
+        );
+        let probes = Arc::new(AtomicUsize::new(0));
+        install_prestage_test_encoder(&mut manager, peers[0], 1, 65_535, &probes);
+        install_prestage_test_encoder(
+            &mut manager,
+            peers[1],
+            2,
+            192,
+            &Arc::new(AtomicUsize::new(0)),
+        );
+        let policy = community_chain(0xFDE8_0002);
+        let (source, destination) = complete_prestage(&mut manager, peers[0], &policy);
+        churn_fixture_source(
+            &mut manager,
+            added
+                .iter()
+                .map(|&index| crate::test_support::make_route(fixture_prefix(index), source_peer))
+                .collect(),
+            withdrawn
+                .iter()
+                .map(|&index| Prefix::V4(fixture_prefix(index)))
+                .collect(),
+        );
+        for receiver in &mut receivers {
+            while receiver.try_recv().is_ok() {}
+        }
+        probes.store(0, Ordering::Relaxed);
+        let fenced = fenced_inventory(&mut manager, source, destination, &[]).unwrap();
+        let _response = start_clean_transition(&mut manager, &peers, &policy);
+        loop {
+            let pending = manager.pending_clean_policy_transition.as_ref().unwrap();
+            if let Some(inventory) = pending.probe_inventory() {
+                assert_inventories_equal(&fenced, inventory);
+                break;
+            }
+            assert_eq!(step_parked_transition(&mut manager).1, "continue");
+        }
+        let outcome = loop {
+            let (_, outcome) = step_parked_transition(&mut manager);
+            if outcome != "continue" {
+                break outcome;
+            }
+        };
+        assert_eq!(outcome, expected);
+        assert_eq!(
+            probes.load(Ordering::Relaxed),
+            added.len(),
+            "only added rows need new proofs"
+        );
+        for receiver in &mut receivers {
+            if expected == "committed" {
+                assert_eq!(receiver.try_recv().unwrap().announce.len(), 1);
+            } else {
+                assert!(receiver.try_recv().is_err());
+            }
+        }
+    }
+}
+
+/// A visited slot can become vacant, be reused for another key, and be visited
+/// again later in the same walk. Owned rows survive slot reuse, and fenced
+/// reconciliation removes every stale occurrence before retaining the proof.
+#[test]
+fn prestaged_inventory_slab_reuse_during_walk_has_no_stale_or_duplicate_rows() {
+    let (mut manager, peers, _receivers) = direct_clean_transition_manager(2, 4, None);
+    let policy = community_chain(0xFDE8_2102);
+    let source = manager.grouped_member_of(peers[0]).unwrap();
+    let (reply, mut response) = oneshot::channel();
+    manager.begin_destination_prestage(peers[0], Some(&policy), reply);
+    let destination = manager
+        .pending_destination_prestage
+        .as_ref()
+        .unwrap()
+        .destination;
+    while manager.prestaged_inventory.is_none() {
+        manager.advance_destination_prestage();
+    }
+    manager.advance_destination_prestage(); // the inventory visited slot zero
+    let original = manager.group_ribs[&destination]
+        .table
+        .unicast_slot(0)
+        .unwrap()
+        .prefix;
+    let source_peer = Ipv4Addr::new(192, 0, 2, 42);
+    churn_fixture_source(&mut manager, vec![], vec![original]);
+    assert!(
+        manager.group_ribs[&destination]
+            .table
+            .unicast_slot(0)
+            .is_none()
+    );
+    churn_fixture_source(
+        &mut manager,
+        vec![crate::test_support::make_route(
+            fixture_prefix(200),
+            source_peer,
+        )],
+        vec![],
+    );
+    assert_eq!(
+        manager.group_ribs[&destination]
+            .table
+            .unicast_slot(0)
+            .unwrap()
+            .prefix,
+        Prefix::V4(fixture_prefix(200))
+    );
+    // Remove and re-announce the replacement once more before sealing.
+    churn_fixture_source(&mut manager, vec![], vec![Prefix::V4(fixture_prefix(200))]);
+    churn_fixture_source(
+        &mut manager,
+        vec![crate::test_support::make_route_with_lp(
+            fixture_prefix(200),
+            source_peer,
+            999,
+        )],
+        vec![],
+    );
+    while manager.pending_destination_prestage.is_some() {
+        manager.advance_destination_prestage();
+    }
+    response.try_recv().unwrap().unwrap();
+    let fenced = fenced_inventory(&mut manager, source, destination, &[]).unwrap();
+    let super::super::update_groups::PrestagedInventoryOutcome::Ready(prestaged, _) =
+        manager.take_prestaged_transition_inventory(source, destination, &[])
+    else {
+        panic!("clean pair")
+    };
+    let prestaged = prestaged.finish(&mut |_| {});
+    assert_inventories_equal(&fenced, &prestaged);
+    assert_eq!(
+        prestaged
+            .announce
+            .iter()
+            .filter(|route| route.prefix == Prefix::V4(fixture_prefix(200)))
+            .count(),
+        1
+    );
+    assert!(
+        !prestaged
+            .announce
+            .iter()
+            .any(|route| route.prefix == original)
+    );
+}
+
 /// The prestaged rs-control verdict is exact for the cohort's own RS ASNs:
 /// a tag for the cohort's ASN degrades like the fenced walk, no cohort
 /// ASN means no tag check, and an ASN the walk never checked defers to
@@ -9904,7 +10399,7 @@ fn prestaged_inventory_rs_control_tag_matches_fenced_walk() {
         }
         let outcome =
             match manager.take_prestaged_transition_inventory(source, destination, &cohort_asns) {
-                PrestagedInventoryOutcome::Ready(_) => "ready",
+                PrestagedInventoryOutcome::Ready(..) => "ready",
                 PrestagedInventoryOutcome::Degraded => "degraded",
                 PrestagedInventoryOutcome::Unusable => "unusable",
             };
@@ -10011,7 +10506,7 @@ fn prestaged_inventory_recheck_catches_source_only_change() {
     );
 
     let fenced = fenced_inventory(&mut manager, source, destination, &[]).expect("clean");
-    let super::super::update_groups::PrestagedInventoryOutcome::Ready(prestaged) =
+    let super::super::update_groups::PrestagedInventoryOutcome::Ready(prestaged, _) =
         manager.take_prestaged_transition_inventory(source, destination, &[])
     else {
         panic!("the prestaged inventory re-checks to Ready");

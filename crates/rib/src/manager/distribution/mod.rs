@@ -157,6 +157,7 @@ const MAX_SHARED_UNICAST_PROBE_COHORTS: usize = 8;
 #[derive(Default)]
 pub(in crate::manager) struct SharedUnicastProbeCache {
     groups: HashMap<usize, Vec<SharedUnicastProbeCacheEntry>>,
+    prestaged_origin: Option<(IpAddr, u64, u64)>,
 }
 
 /// Deferred advertised-state input for the ordinary clean grouped path.
@@ -390,6 +391,7 @@ impl SharedUnicastProbeCache {
             checkpoint();
         }
         crate::adj_rib_out::release_hash_map(&mut self.groups, checkpoint);
+        self.prestaged_origin = None;
     }
 }
 
@@ -468,6 +470,85 @@ struct PreparedCleanPolicyTransitionPeer {
     permit: Option<tokio::sync::mpsc::OwnedPermit<OutboundRouteUpdate>>,
 }
 
+/// A successful unfenced probe, aligned with the unpublished sealed payload.
+/// It holds no payload Arc clones, so the fence can patch changed rows in place.
+pub(in crate::manager) struct PrestagedTransitionProbe {
+    peer: IpAddr,
+    snapshot: Arc<dyn crate::update::ExactExportSnapshot>,
+    cursor: usize,
+    encoded_lengths: Vec<usize>,
+}
+
+impl PrestagedTransitionProbe {
+    /// Retain lengths in exactly the resized payload's order. Newly appended
+    /// rows remain unproven until `reprobe_prestaged_transition_rows` succeeds.
+    pub(in crate::manager) fn realign_rows(
+        &mut self,
+        kept: &[usize],
+        prior_count: usize,
+        count: usize,
+        checkpoint: &mut impl FnMut(),
+    ) -> bool {
+        // Retained indexes are ascending, so compaction never overwrites an
+        // unread length. Only a completed proof can be carried into resizing.
+        if self.cursor != prior_count || self.encoded_lengths.len() != prior_count {
+            return false;
+        }
+        for (index, &prior) in kept.iter().enumerate() {
+            checkpoint();
+            self.encoded_lengths[index] = self.encoded_lengths[prior];
+        }
+        self.encoded_lengths.truncate(kept.len());
+        self.encoded_lengths.resize(count, 0);
+        self.cursor = count;
+        true
+    }
+
+    pub(in crate::manager) fn retire_with(&mut self, checkpoint: &mut impl FnMut()) {
+        super::retire_vec(&mut self.encoded_lengths, checkpoint);
+    }
+}
+
+pub(in crate::manager) fn reprobe_prestaged_transition_rows(
+    inventory: &super::update_groups::CleanPolicyTransitionInventory,
+    probe: &mut PrestagedTransitionProbe,
+    positions: &[usize],
+    checkpoint: &mut impl FnMut(),
+) -> bool {
+    if probe.cursor != inventory.announce.len()
+        || probe.encoded_lengths.len() != inventory.announce.len()
+        || positions.len() > super::POLICY_TRANSITION_ROUTE_SLICE
+    {
+        return false;
+    }
+    let candidates = positions
+        .iter()
+        .map(|&index| {
+            checkpoint();
+            crate::update::ExactExportCandidate::Unicast {
+                route: &inventory.announce[index],
+                next_hop_override: inventory.next_hop_override[index].as_ref(),
+            }
+        })
+        .collect::<Vec<_>>();
+    let (results, correct) = probe_exact_export_announcements(
+        probe.peer,
+        probe.snapshot.as_ref(),
+        &candidates,
+        checkpoint,
+    );
+    if !correct || results.iter().any(Result::is_err) {
+        return false;
+    }
+    for (&index, result) in positions.iter().zip(results) {
+        checkpoint();
+        probe.encoded_lengths[index] = result
+            .expect("all changed-row probes succeeded")
+            .encoded_len;
+    }
+    true
+}
+
 /// An in-progress unfenced staging walk for a prospective clean-transition
 /// destination group (`RibUpdate::PrepareExportPolicyDestination`). Unlike
 /// [`PendingCleanPolicyTransition`], this holds no fence: the run loop
@@ -484,6 +565,8 @@ pub(super) struct DestinationPrestage {
     /// The staging walk is done and the prestaged inventory walk
     /// ([`RibManager::extend_prestaged_transition_inventory`]) runs.
     staged: bool,
+    inventory_complete: bool,
+    peer: IpAddr,
     prefixes: Vec<Prefix>,
     cursor: usize,
     memo: ExportMemo,
@@ -774,6 +857,16 @@ impl PendingCleanPolicyTransition {
                 CleanPolicyTransitionPollKind::Commit
             }
             _ => CleanPolicyTransitionPollKind::Bounded,
+        }
+    }
+
+    #[cfg(test)]
+    pub(super) fn probe_inventory(
+        &self,
+    ) -> Option<&super::update_groups::CleanPolicyTransitionInventory> {
+        match self.phase.as_ref() {
+            Some(CleanPolicyTransitionPhase::ProbeAndPrepare { inventory, .. }) => Some(inventory),
+            _ => None,
         }
     }
 
@@ -1860,12 +1953,19 @@ impl RibManager {
                 rs_asns.dedup();
                 if keys.is_none() {
                     // A prestaged inventory re-checked against the churned
-                    // keys equals this fenced walk; it then finishes in this
-                    // same poll over an empty key snapshot.
+                    // keys equals this fenced walk, and already owns the
+                    // sealed announce and next-hop slices.
                     match manager.take_prestaged_transition_inventory(source, destination, &rs_asns) {
-                        super::update_groups::PrestagedInventoryOutcome::Ready(prestaged) => {
-                            inventory = prestaged;
-                            keys = Some(Vec::new());
+                        super::update_groups::PrestagedInventoryOutcome::Ready(prestaged, probe) => {
+                            let inventory = prestaged.finish(&mut |force| manager.replacement_checkpoint(force));
+                            let probe_cache = manager.prestaged_transition_probe_cache(destination, &inventory, probe);
+                            super::retire_vec(&mut rs_asns, &mut || checkpoint());
+                            debug!(announce_len = inventory.announce.len(), "clean policy transition entering ProbeAndPrepare with prestaged inventory");
+                            pending.phase = Some(CleanPolicyTransitionPhase::ProbeAndPrepare {
+                                source, destination, inventory, cursor: 0, probe_cache,
+                                prepared: Vec::with_capacity(pending.replacements.len()), active_probe: None, full_probe_count: 0,
+                            });
+                            return CleanPolicyTransitionAdvance::Continue(pending);
                         }
                         super::update_groups::PrestagedInventoryOutcome::Degraded => {
                             pending.phase = Some(CleanPolicyTransitionPhase::BuildInventory { source, destination, keys, cursor, inventory });
@@ -2069,6 +2169,11 @@ impl RibManager {
                                 pending.phase = Some(CleanPolicyTransitionPhase::ProbeAndPrepare { source, destination, inventory, cursor, probe_cache, prepared, active_probe, full_probe_count });
                             return CleanPolicyTransitionAdvance::Fallback(pending);
                             }
+                            if probe_cache.prestaged_origin.is_some_and(|(origin, owner, generation)| {
+                                peer == origin && (snapshot.owner_id() != owner || snapshot.generation() != generation)
+                            }) {
+                                probe_cache.retire_with(&mut || checkpoint());
+                            }
                             let reuse = probe_cache.reuse_grouped_exact_export_maximum(
                                 destination,
                                 &inventory.announce,
@@ -2124,6 +2229,7 @@ impl RibManager {
                     probe_cache.retire_with(&mut || manager.replacement_checkpoint_at("retirement", false));
                     manager.replacement_checkpoint(true);
                     debug!(
+                        target: "rustbgpd_rib::clean_export_probe",
                         full_probe_count,
                         elapsed_ms =
                             u64::try_from(pending.elapsed().as_millis()).unwrap_or(u64::MAX),
@@ -4844,6 +4950,8 @@ impl RibManager {
                             destination,
                             source,
                             staged: false,
+                            inventory_complete: false,
+                            peer,
                             prefixes,
                             cursor: 0,
                             memo: ExportMemo::default(),
@@ -4937,7 +5045,9 @@ impl RibManager {
                             prestage.destination,
                         );
                     }
-                } else if manager.extend_prestaged_transition_inventory() {
+                } else if !prestage.inventory_complete {
+                    prestage.inventory_complete = manager.extend_prestaged_transition_inventory();
+                } else if manager.extend_prestaged_transition_probe(prestage.peer) {
                     debug!(
                         destination = prestage.destination,
                         prefixes = prestage.cursor,
@@ -4959,6 +5069,113 @@ impl RibManager {
         if let Some(reply) = reply {
             let _ = reply.send(Ok(()));
         }
+    }
+
+    /// Probe the sealed inventory in unfenced bounded slices. Rejection costs
+    /// only this optimization: the fenced path remains authoritative.
+    fn extend_prestaged_transition_probe(&mut self, peer: IpAddr) -> bool {
+        let Some(prestaged) = self.prestaged_inventory.as_mut() else {
+            return true;
+        };
+        let Some(inventory) = prestaged.sealed.as_ref() else {
+            return true;
+        };
+        if inventory.announce.is_empty() {
+            return true;
+        }
+        if prestaged.probe.is_none() {
+            let Some(encoder) = self.peer_export_encoders.get(&peer) else {
+                return true;
+            };
+            let snapshot = encoder.snapshot();
+            if snapshot.owner_id() != encoder.owner_id() {
+                return true;
+            }
+            prestaged.probe = Some(PrestagedTransitionProbe {
+                peer,
+                snapshot,
+                cursor: 0,
+                encoded_lengths: Vec::with_capacity(inventory.announce.len()),
+            });
+        }
+        let probe = prestaged.probe.as_mut().expect("initialized above");
+        let end = super::policy_transition_slice_end(
+            probe.cursor,
+            inventory.announce.len(),
+            super::POLICY_TRANSITION_ROUTE_SLICE,
+        );
+        let candidates = inventory.announce[probe.cursor..end]
+            .iter()
+            .zip(&inventory.next_hop_override[probe.cursor..end])
+            .map(
+                |(route, next_hop)| crate::update::ExactExportCandidate::Unicast {
+                    route,
+                    next_hop_override: next_hop.as_ref(),
+                },
+            )
+            .collect::<Vec<_>>();
+        let readiness = self.replacement_readiness.clone();
+        let (results, correct) = probe_exact_export_announcements(
+            peer,
+            probe.snapshot.as_ref(),
+            &candidates,
+            &mut || super::replacement_readiness_checkpoint(&readiness, false),
+        );
+        if !correct || results.iter().any(Result::is_err) {
+            if let Some(mut probe) = prestaged.probe.take() {
+                probe.retire_with(&mut || {
+                    super::replacement_readiness_checkpoint(&readiness, false);
+                });
+            }
+            return true;
+        }
+        probe.encoded_lengths.extend(
+            results
+                .into_iter()
+                .map(|result| result.expect("all probes succeeded").encoded_len),
+        );
+        probe.cursor = end;
+        end == inventory.announce.len()
+    }
+
+    fn prestaged_transition_probe_cache(
+        &self,
+        destination: usize,
+        inventory: &super::update_groups::CleanPolicyTransitionInventory,
+        probe: Option<PrestagedTransitionProbe>,
+    ) -> SharedUnicastProbeCache {
+        let mut cache = SharedUnicastProbeCache::default();
+        if let Some(mut probe) = probe {
+            let current = self
+                .peer_export_encoders
+                .get(&probe.peer)
+                .map(|encoder| (encoder.owner_id(), encoder.snapshot()));
+            let valid = probe.cursor == inventory.announce.len()
+                && current.is_some_and(|(owner, current)| {
+                    owner == current.owner_id()
+                        && current.owner_id() == probe.snapshot.owner_id()
+                        && current.generation() == probe.snapshot.generation()
+                });
+            if valid {
+                cache.prestaged_origin = Some((
+                    probe.peer,
+                    probe.snapshot.owner_id(),
+                    probe.snapshot.generation(),
+                ));
+                cache.store(
+                    destination,
+                    Arc::clone(&inventory.announce),
+                    Arc::clone(&inventory.next_hop_override),
+                    probe.snapshot,
+                    probe.encoded_lengths,
+                    &mut || self.replacement_checkpoint(false),
+                );
+            } else {
+                probe.retire_with(&mut || self.replacement_checkpoint(false));
+            }
+            debug!(target: "rustbgpd_rib::clean_export_probe", valid, "clean policy transition prestaged probe validation");
+        }
+        cache
     }
 
     /// Discard a prepared destination that will never be committed

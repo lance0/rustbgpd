@@ -267,6 +267,8 @@ fn retire_clean_policy_counts(
 pub(in crate::manager) struct CleanPolicyTransitionInventoryBuilder {
     pub(super) announce: Vec<Route>,
     pub(super) next_hop_override: Vec<Option<NextHopAction>>,
+    /// An unfenced sealed payload, reconciled with churn before publication.
+    pub(super) prebuilt: Option<CleanPolicyTransitionInventory>,
     pub(super) permit_totals: HashMap<Option<String>, u64>,
     pub(super) permit_by_source: HashMap<IpAddr, HashMap<Option<String>, u64>>,
 }
@@ -274,6 +276,9 @@ pub(in crate::manager) struct CleanPolicyTransitionInventoryBuilder {
 impl CleanPolicyTransitionInventoryBuilder {
     pub(in crate::manager) fn retire_with(&mut self, checkpoint: &mut impl FnMut(bool)) {
         checkpoint(true);
+        if let Some(mut inventory) = self.prebuilt.take() {
+            inventory.retire_with(checkpoint);
+        }
         crate::manager::retire_vec(&mut self.announce, &mut || checkpoint(false));
         crate::manager::retire_vec(&mut self.next_hop_override, &mut || checkpoint(false));
         retire_clean_policy_counts(
@@ -288,9 +293,14 @@ impl CleanPolicyTransitionInventoryBuilder {
         checkpoint: &mut impl FnMut(bool),
     ) -> CleanPolicyTransitionInventory {
         checkpoint(true);
-        let announce = self.announce.into();
-        checkpoint(true);
-        let next_hop_override = self.next_hop_override.into();
+        let (announce, next_hop_override) = if let Some(prebuilt) = self.prebuilt {
+            (prebuilt.announce, prebuilt.next_hop_override)
+        } else {
+            let announce = self.announce.into();
+            checkpoint(true);
+            let next_hop_override = self.next_hop_override.into();
+            (announce, next_hop_override)
+        };
         checkpoint(true);
         CleanPolicyTransitionInventory {
             announce,
