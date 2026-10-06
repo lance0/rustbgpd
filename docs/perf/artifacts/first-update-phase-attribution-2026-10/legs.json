@@ -1,0 +1,386 @@
+[
+  {
+    "leg": "01-control",
+    "started": "2026-10-06T12:42:33-04:00",
+    "cell_passed_at": "2026-10-06T12:45:17-04:00",
+    "finished": "2026-10-06T12:50:17-04:00",
+    "runner_exit": 0,
+    "native_cleanup_exit": 0,
+    "status": "pass",
+    "exits": {
+      "harness": 0,
+      "daemon": 0,
+      "health-before": 0,
+      "health-after": 0
+    },
+    "http": {
+      "health-before": 200,
+      "health-after": 200
+    },
+    "cooldown_requested_s": 300,
+    "cooldown_observed_s": 300.0,
+    "quiet": [
+      {
+        "sample": "1",
+        "epoch_s": "1791304953",
+        "load1": "1.06",
+        "pswpin": "2424677",
+        "pswpout": "2447475",
+        "performance_governors": "64",
+        "governor_count": "64",
+        "competitors": "none",
+        "quiet": "true",
+        "failed_dimensions": "none",
+        "original_attempt": "1"
+      },
+      {
+        "sample": "2",
+        "epoch_s": "1791304983",
+        "load1": "1.04",
+        "pswpin": "2424677",
+        "pswpout": "2447475",
+        "performance_governors": "64",
+        "governor_count": "64",
+        "competitors": "none",
+        "quiet": "true",
+        "failed_dimensions": "none",
+        "original_attempt": "2"
+      }
+    ],
+    "source_and_binary_freeze_equal": true,
+    "binary_sha256": "0fd2d7308e5c7d5a5a0be620f2e4708f2331eaf646f3a37868be3508f3b9c4c6",
+    "harness_sha256": "919991d7bca469fcfda7d9940505d0c3a7be104b0aa8f354a8c17cb3919cfdc3",
+    "workload": {
+      "N_PEERS": "700",
+      "TOTAL_PREFIXES": "400400",
+      "PORT": "1790",
+      "RELOADS": "4",
+      "CONTROL_SECS": "30",
+      "CHANGED_PEERS": "",
+      "FLAPSTORM": "50",
+      "BIRD_THREADS": "8",
+      "PROBE_PREFIXES": "",
+      "FLAP_ROUNDS": "3"
+    }
+  },
+  {
+    "leg": "02-instrumented",
+    "started": "2026-10-06T12:50:18-04:00",
+    "cell_passed_at": "2026-10-06T12:53:02-04:00",
+    "finished": "2026-10-06T12:58:02-04:00",
+    "runner_exit": 0,
+    "native_cleanup_exit": 0,
+    "status": "pass",
+    "exits": {
+      "harness": 0,
+      "daemon": 0,
+      "health-before": 0,
+      "health-after": 0
+    },
+    "http": {
+      "health-before": 200,
+      "health-after": 200
+    },
+    "cooldown_requested_s": 300,
+    "cooldown_observed_s": 300.0,
+    "quiet": [
+      {
+        "sample": "1",
+        "epoch_s": "1791305418",
+        "load1": "1.10",
+        "pswpin": "2424677",
+        "pswpout": "2447475",
+        "performance_governors": "64",
+        "governor_count": "64",
+        "competitors": "none",
+        "quiet": "true",
+        "failed_dimensions": "none",
+        "original_attempt": "1"
+      },
+      {
+        "sample": "2",
+        "epoch_s": "1791305448",
+        "load1": "1.12",
+        "pswpin": "2424677",
+        "pswpout": "2447475",
+        "performance_governors": "64",
+        "governor_count": "64",
+        "competitors": "none",
+        "quiet": "true",
+        "failed_dimensions": "none",
+        "original_attempt": "2"
+      }
+    ],
+    "source_and_binary_freeze_equal": true,
+    "binary_sha256": "1f4b70fca02116ebdb63877ac72395f536b510752d7ad05d429a6576c2f95ad7",
+    "harness_sha256": "a1068612b32a76bd2af470b334d52fc1f98f82d998c48635f3f18e65d7bf7681",
+    "workload": {
+      "N_PEERS": "700",
+      "TOTAL_PREFIXES": "400400",
+      "PORT": "1790",
+      "RELOADS": "4",
+      "CONTROL_SECS": "30",
+      "CHANGED_PEERS": "",
+      "FLAPSTORM": "50",
+      "BIRD_THREADS": "8",
+      "PROBE_PREFIXES": "",
+      "FLAP_ROUNDS": "3"
+    }
+  },
+  {
+    "leg": "03-instrumented",
+    "started": "2026-10-06T12:58:03-04:00",
+    "cell_passed_at": "2026-10-06T13:00:47-04:00",
+    "finished": "2026-10-06T13:05:47-04:00",
+    "runner_exit": 0,
+    "native_cleanup_exit": 0,
+    "status": "pass",
+    "exits": {
+      "harness": 0,
+      "daemon": 0,
+      "health-before": 0,
+      "health-after": 0
+    },
+    "http": {
+      "health-before": 200,
+      "health-after": 200
+    },
+    "cooldown_requested_s": 300,
+    "cooldown_observed_s": 300.0,
+    "quiet": [
+      {
+        "sample": "1",
+        "epoch_s": "1791305883",
+        "load1": "1.04",
+        "pswpin": "2424677",
+        "pswpout": "2447475",
+        "performance_governors": "64",
+        "governor_count": "64",
+        "competitors": "none",
+        "quiet": "true",
+        "failed_dimensions": "none",
+        "original_attempt": "1"
+      },
+      {
+        "sample": "2",
+        "epoch_s": "1791305913",
+        "load1": "1.08",
+        "pswpin": "2424677",
+        "pswpout": "2447475",
+        "performance_governors": "64",
+        "governor_count": "64",
+        "competitors": "none",
+        "quiet": "true",
+        "failed_dimensions": "none",
+        "original_attempt": "2"
+      }
+    ],
+    "source_and_binary_freeze_equal": true,
+    "binary_sha256": "1f4b70fca02116ebdb63877ac72395f536b510752d7ad05d429a6576c2f95ad7",
+    "harness_sha256": "a1068612b32a76bd2af470b334d52fc1f98f82d998c48635f3f18e65d7bf7681",
+    "workload": {
+      "N_PEERS": "700",
+      "TOTAL_PREFIXES": "400400",
+      "PORT": "1790",
+      "RELOADS": "4",
+      "CONTROL_SECS": "30",
+      "CHANGED_PEERS": "",
+      "FLAPSTORM": "50",
+      "BIRD_THREADS": "8",
+      "PROBE_PREFIXES": "",
+      "FLAP_ROUNDS": "3"
+    }
+  },
+  {
+    "leg": "04-control",
+    "started": "2026-10-06T13:05:48-04:00",
+    "cell_passed_at": "2026-10-06T13:08:32-04:00",
+    "finished": "2026-10-06T13:13:32-04:00",
+    "runner_exit": 0,
+    "native_cleanup_exit": 0,
+    "status": "pass",
+    "exits": {
+      "harness": 0,
+      "daemon": 0,
+      "health-before": 0,
+      "health-after": 0
+    },
+    "http": {
+      "health-before": 200,
+      "health-after": 200
+    },
+    "cooldown_requested_s": 300,
+    "cooldown_observed_s": 300.0,
+    "quiet": [
+      {
+        "sample": "1",
+        "epoch_s": "1791306349",
+        "load1": "1.10",
+        "pswpin": "2424677",
+        "pswpout": "2447475",
+        "performance_governors": "64",
+        "governor_count": "64",
+        "competitors": "none",
+        "quiet": "true",
+        "failed_dimensions": "none",
+        "original_attempt": "1"
+      },
+      {
+        "sample": "2",
+        "epoch_s": "1791306379",
+        "load1": "1.06",
+        "pswpin": "2424677",
+        "pswpout": "2447475",
+        "performance_governors": "64",
+        "governor_count": "64",
+        "competitors": "none",
+        "quiet": "true",
+        "failed_dimensions": "none",
+        "original_attempt": "2"
+      }
+    ],
+    "source_and_binary_freeze_equal": true,
+    "binary_sha256": "0fd2d7308e5c7d5a5a0be620f2e4708f2331eaf646f3a37868be3508f3b9c4c6",
+    "harness_sha256": "919991d7bca469fcfda7d9940505d0c3a7be104b0aa8f354a8c17cb3919cfdc3",
+    "workload": {
+      "N_PEERS": "700",
+      "TOTAL_PREFIXES": "400400",
+      "PORT": "1790",
+      "RELOADS": "4",
+      "CONTROL_SECS": "30",
+      "CHANGED_PEERS": "",
+      "FLAPSTORM": "50",
+      "BIRD_THREADS": "8",
+      "PROBE_PREFIXES": "",
+      "FLAP_ROUNDS": "3"
+    }
+  },
+  {
+    "leg": "05-control",
+    "started": "2026-10-06T13:13:33-04:00",
+    "cell_passed_at": "2026-10-06T13:16:17-04:00",
+    "finished": "2026-10-06T13:21:17-04:00",
+    "runner_exit": 0,
+    "native_cleanup_exit": 0,
+    "status": "pass",
+    "exits": {
+      "harness": 0,
+      "daemon": 0,
+      "health-before": 0,
+      "health-after": 0
+    },
+    "http": {
+      "health-before": 200,
+      "health-after": 200
+    },
+    "cooldown_requested_s": 300,
+    "cooldown_observed_s": 300.0,
+    "quiet": [
+      {
+        "sample": "1",
+        "epoch_s": "1791306813",
+        "load1": "1.12",
+        "pswpin": "2424677",
+        "pswpout": "2447475",
+        "performance_governors": "64",
+        "governor_count": "64",
+        "competitors": "none",
+        "quiet": "true",
+        "failed_dimensions": "none",
+        "original_attempt": "1"
+      },
+      {
+        "sample": "2",
+        "epoch_s": "1791306843",
+        "load1": "1.13",
+        "pswpin": "2424677",
+        "pswpout": "2447475",
+        "performance_governors": "64",
+        "governor_count": "64",
+        "competitors": "none",
+        "quiet": "true",
+        "failed_dimensions": "none",
+        "original_attempt": "2"
+      }
+    ],
+    "source_and_binary_freeze_equal": true,
+    "binary_sha256": "0fd2d7308e5c7d5a5a0be620f2e4708f2331eaf646f3a37868be3508f3b9c4c6",
+    "harness_sha256": "919991d7bca469fcfda7d9940505d0c3a7be104b0aa8f354a8c17cb3919cfdc3",
+    "workload": {
+      "N_PEERS": "700",
+      "TOTAL_PREFIXES": "400400",
+      "PORT": "1790",
+      "RELOADS": "4",
+      "CONTROL_SECS": "30",
+      "CHANGED_PEERS": "",
+      "FLAPSTORM": "50",
+      "BIRD_THREADS": "8",
+      "PROBE_PREFIXES": "",
+      "FLAP_ROUNDS": "3"
+    }
+  },
+  {
+    "leg": "06-instrumented",
+    "started": "2026-10-06T13:21:17-04:00",
+    "cell_passed_at": "2026-10-06T13:24:01-04:00",
+    "finished": "2026-10-06T13:29:01-04:00",
+    "runner_exit": 0,
+    "native_cleanup_exit": 0,
+    "status": "pass",
+    "exits": {
+      "harness": 0,
+      "daemon": 0,
+      "health-before": 0,
+      "health-after": 0
+    },
+    "http": {
+      "health-before": 200,
+      "health-after": 200
+    },
+    "cooldown_requested_s": 300,
+    "cooldown_observed_s": 300.0,
+    "quiet": [
+      {
+        "sample": "1",
+        "epoch_s": "1791307278",
+        "load1": "1.05",
+        "pswpin": "2424677",
+        "pswpout": "2447475",
+        "performance_governors": "64",
+        "governor_count": "64",
+        "competitors": "none",
+        "quiet": "true",
+        "failed_dimensions": "none",
+        "original_attempt": "1"
+      },
+      {
+        "sample": "2",
+        "epoch_s": "1791307308",
+        "load1": "1.09",
+        "pswpin": "2424677",
+        "pswpout": "2447475",
+        "performance_governors": "64",
+        "governor_count": "64",
+        "competitors": "none",
+        "quiet": "true",
+        "failed_dimensions": "none",
+        "original_attempt": "2"
+      }
+    ],
+    "source_and_binary_freeze_equal": true,
+    "binary_sha256": "1f4b70fca02116ebdb63877ac72395f536b510752d7ad05d429a6576c2f95ad7",
+    "harness_sha256": "a1068612b32a76bd2af470b334d52fc1f98f82d998c48635f3f18e65d7bf7681",
+    "workload": {
+      "N_PEERS": "700",
+      "TOTAL_PREFIXES": "400400",
+      "PORT": "1790",
+      "RELOADS": "4",
+      "CONTROL_SECS": "30",
+      "CHANGED_PEERS": "",
+      "FLAPSTORM": "50",
+      "BIRD_THREADS": "8",
+      "PROBE_PREFIXES": "",
+      "FLAP_ROUNDS": "3"
+    }
+  }
+]

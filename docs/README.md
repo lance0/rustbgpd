@@ -110,6 +110,7 @@ Inspect the receipts behind protocol, performance, and operational claims.
 | [Interoperability](interop.md) | Validation against real BGP peers and network operating systems. |
 | [Benchmarks](benchmarks.md) | Microbenchmarks and their measured scope. |
 | [Performance archive](perf/README.md) | Dated performance receipts and their supporting artifacts. |
+| [First UPDATE phase attribution](perf/first-update-phase-attribution-2026-10.md) | Measured 2026-10-06: 18 flap rounds at 700 peers; initial-table occupancy is the lead for the first-survivor delay. |
 | TCP unsent-threshold screens | Separate [64 KiB](perf/tcp-unsent-threshold-screen-2026-10.md) and [128 KiB](perf/tcp-unsent-threshold-128k-screen-2026-10.md) memory/completion screens and container sizing guidance. |
 | [Soak archive](soaks/README.md) | Long-running test reports, acceptance gates, and receipt templates. |
 | [Raw artifacts](artifacts/) | Preserved data supporting published findings. |
