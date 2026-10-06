@@ -278,6 +278,120 @@ path = "customers.txt"
         )
     }
 
+    fn released_v074_history() -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o700)).unwrap();
+        let fixtures = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/state/v0.74.0/config-history");
+        for entry in fs::read_dir(fixtures).unwrap() {
+            let entry = entry.unwrap();
+            let path = dir.path().join(entry.file_name());
+            fs::copy(entry.path(), &path).unwrap();
+            fs::set_permissions(path, fs::Permissions::from_mode(0o600)).unwrap();
+        }
+        dir
+    }
+
+    #[test]
+    fn released_v074_history_accepts_payload_and_metadata_without_timestamp_rewrite() {
+        let dir = released_v074_history();
+        let entries = list_mixed(dir.path()).unwrap();
+        assert_eq!(entries.len(), 2);
+        let metadata = &entries[0];
+        assert_eq!((metadata.index, metadata.row.sequence), (0, 2));
+        assert_eq!(metadata.status, HistoryStatus::MetadataOnly);
+        assert_eq!(metadata.timestamp_unix_seconds, 1_791_252_399);
+        assert_eq!(metadata.normalized_toml_bytes, Some(10_486_982));
+        assert_eq!(
+            metadata.metadata_only_reason.as_deref(),
+            Some("normalized_toml_exceeds_v2_payload_limit")
+        );
+        assert_eq!(
+            metadata.sha256.as_deref(),
+            Some("021506ea3855d25b9c7301975742267ffa24928cadaa7c4f8e89353e468a6427")
+        );
+        assert_eq!(
+            metadata.source_sha256.as_deref(),
+            Some("a010680810cd0711a6e1a759a3e60e014e70223e699e49d20cf693a77c739bf3")
+        );
+        assert!(
+            read_mixed_rollback(dir.path(), metadata)
+                .err()
+                .unwrap()
+                .to_string()
+                .contains("metadata-only history has no rollback payload")
+        );
+
+        let recorded = &entries[1];
+        assert_eq!((recorded.index, recorded.row.sequence), (1, 1));
+        assert_eq!(recorded.status, HistoryStatus::Recorded);
+        assert_eq!(recorded.timestamp_unix_seconds, 1_791_252_399);
+        let expected_toml_sha = "14ed28de324cba207df0308d78ee133a26e6eb11668dc7e417866d3d6854679e";
+        let expected_source_sha =
+            "20547504d9be02d470a401e07762c696babb39ff7b5bd71b6565c15681885b23";
+        assert_eq!(recorded.sha256.as_deref(), Some(expected_toml_sha));
+        assert_eq!(recorded.source_sha256.as_deref(), Some(expected_source_sha));
+        let RollbackPayload::V2 {
+            normalized_toml,
+            manifest,
+            source_sha256,
+        } = read_mixed_rollback(dir.path(), recorded).unwrap();
+        let archived: serde_json::Value =
+            serde_json::from_slice(&fs::read(&recorded.row.path).unwrap()).unwrap();
+        assert_eq!(
+            normalized_toml,
+            archived["normalized_toml"].as_str().unwrap()
+        );
+        assert_eq!(v2::encode_hex(&manifest.toml_sha256), expected_toml_sha);
+        assert_eq!(v2::encode_hex(&source_sha256), expected_source_sha);
+        assert!(manifest.rpol_units.is_empty() && manifest.datasets.is_empty());
+    }
+
+    #[test]
+    fn released_v074_history_future_copy_retains_slot_and_blocks_recording() {
+        let dir = released_v074_history();
+        let entries = list_mixed(dir.path()).unwrap();
+        let metadata = &entries[0].row;
+        let path = dir.path().join(
+            metadata
+                .filename
+                .to_str()
+                .unwrap()
+                .replacen("v3-", "v4-", 1),
+        );
+        let future = fs::read_to_string(&metadata.path).unwrap().replacen(
+            "\"version\":3",
+            "\"version\":4",
+            1,
+        );
+        fs::write(&path, &future).unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+        fs::remove_file(&metadata.path).unwrap();
+        let entries = list_mixed(dir.path()).unwrap();
+        assert_eq!(entries.len(), 2);
+        assert_eq!((entries[0].index, entries[0].row.sequence), (0, 2));
+        assert_eq!(entries[0].status, HistoryStatus::Unreadable);
+        assert_eq!(entries[1].status, HistoryStatus::Recorded);
+        assert!(read_mixed_rollback(dir.path(), &entries[0]).is_err());
+        let snapshot = AcceptedConfigSnapshot::from_config_for_test(
+            crate::config::Config::load_toml_with_diagnostics(
+                &include_str!("../tests/fixtures/state/v0.74.0/config.toml")
+                    .replace("asn = 65001", "asn = 65003"),
+                "test",
+            )
+            .unwrap(),
+        );
+        assert!(
+            record_accepted(dir.path(), &snapshot)
+                .unwrap_err()
+                .to_string()
+                .contains("written by a newer rustbgpd")
+        );
+        assert_eq!(fs::read_to_string(path).unwrap(), future);
+        assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 2);
+        assert!(read_mixed_rollback(dir.path(), &entries[1]).is_ok());
+    }
+
     /// Red proof: dropping or reordering any rpol unit, import edge, dataset,
     /// kind, path, length, or digest in the storage conversion changes the
     /// stored roster or source digest and makes this full-fixture test fail.

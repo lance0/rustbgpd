@@ -1,0 +1,583 @@
+{
+  "endpoints_ms": {
+    "first_reann_s_p50": {
+      "control": {
+        "median": 133.376,
+        "min": 130.058,
+        "max": 140.727,
+        "n": 9
+      },
+      "instrumented": {
+        "median": 132.673,
+        "min": 129.771,
+        "max": 134.801,
+        "n": 9
+      },
+      "change_pct": -0.527081,
+      "leg_medians_ms": {
+        "01-control": 135.176,
+        "02-instrumented": 130.349,
+        "03-instrumented": 133.538,
+        "04-control": 132.489,
+        "05-control": 133.376,
+        "06-instrumented": 134.155
+      },
+      "pair_changes_pct": [
+        -3.5709,
+        0.791764,
+        0.584063
+      ]
+    },
+    "reannounce_s_p50": {
+      "control": {
+        "median": 276.143,
+        "min": 247.374,
+        "max": 289.155,
+        "n": 9
+      },
+      "instrumented": {
+        "median": 283.925,
+        "min": 254.054,
+        "max": 292.097,
+        "n": 9
+      },
+      "change_pct": 2.818105,
+      "leg_medians_ms": {
+        "01-control": 270.956,
+        "02-instrumented": 286.424,
+        "03-instrumented": 258.892,
+        "04-control": 276.143,
+        "05-control": 277.127,
+        "06-instrumented": 279.528
+      },
+      "pair_changes_pct": [
+        5.708676,
+        -6.247126,
+        0.86639
+      ]
+    },
+    "withdraw_s_p50": {
+      "control": {
+        "median": 247.703,
+        "min": 230.292,
+        "max": 255.809,
+        "n": 9
+      },
+      "instrumented": {
+        "median": 245.598,
+        "min": 199.983,
+        "max": 249.551,
+        "n": 9
+      },
+      "change_pct": -0.849808,
+      "leg_medians_ms": {
+        "01-control": 242.497,
+        "02-instrumented": 244.146,
+        "03-instrumented": 247.015,
+        "04-control": 245.834,
+        "05-control": 250.354,
+        "06-instrumented": 248.349
+      },
+      "pair_changes_pct": [
+        0.680008,
+        0.480405,
+        -0.800866
+      ]
+    },
+    "rejoin_complete_s_p50": {
+      "control": {
+        "median": 4178.45,
+        "min": 4147.762,
+        "max": 4221.86,
+        "n": 9
+      },
+      "instrumented": {
+        "median": 4164.914,
+        "min": 4119.633,
+        "max": 4191.391,
+        "n": 9
+      },
+      "change_pct": -0.323948,
+      "leg_medians_ms": {
+        "01-control": 4194.958,
+        "02-instrumented": 4157.282,
+        "03-instrumented": 4178.848,
+        "04-control": 4155.564,
+        "05-control": 4191.486,
+        "06-instrumented": 4179.249
+      },
+      "pair_changes_pct": [
+        -0.898126,
+        0.560309,
+        -0.291949
+      ]
+    }
+  },
+  "phase_offsets_and_observations_us": {
+    "affected_p50_us": {
+      "median": 132673.0,
+      "min": 129771.0,
+      "max": 134801.0,
+      "n": 9
+    },
+    "affected_sample_us": {
+      "median": 133206.0,
+      "min": 127889.0,
+      "max": 136569.0,
+      "n": 9
+    },
+    "marker_p50_us": {
+      "median": 133538.0,
+      "min": 129771.0,
+      "max": 251518.0,
+      "n": 9
+    },
+    "marker_sample_us": {
+      "median": 133347.0,
+      "min": 127889.0,
+      "max": 252693.0,
+      "n": 9
+    },
+    "published_p50_us": {
+      "median": 132673.0,
+      "min": 129771.0,
+      "max": 134801.0,
+      "n": 9
+    },
+    "published_sample_us": {
+      "median": 133206.0,
+      "min": 127889.0,
+      "max": 136569.0,
+      "n": 9
+    },
+    "first_to_last_established_us": {
+      "median": 18729.0,
+      "min": 17353.0,
+      "max": 23219.0,
+      "n": 9
+    },
+    "last_established_to_trigger_us": {
+      "median": 8.0,
+      "min": 7.0,
+      "max": 14.0,
+      "n": 9
+    },
+    "source_write_start_us": {
+      "median": 30.0,
+      "min": 15.0,
+      "max": 33.0,
+      "n": 9
+    },
+    "transport_rib_admit_marker_us": {
+      "median": 278.0,
+      "min": 189.0,
+      "max": 1803.0,
+      "n": 9
+    },
+    "rib_ingest_marker_us": {
+      "median": 129370.0,
+      "min": 126454.0,
+      "max": 247896.0,
+      "n": 9
+    },
+    "distribution_start_marker_us": {
+      "median": 130634.0,
+      "min": 127103.0,
+      "max": 248987.0,
+      "n": 9
+    },
+    "distribution_end_marker_us": {
+      "median": 135424.0,
+      "min": 131631.0,
+      "max": 252847.0,
+      "n": 9
+    },
+    "rib_commit_start_marker_us": {
+      "median": 133200.0,
+      "min": 127787.0,
+      "max": 252589.0,
+      "n": 9
+    },
+    "session_envelope_marker_us": {
+      "median": 133245.0,
+      "min": 127805.0,
+      "max": 252613.0,
+      "n": 9
+    },
+    "bulk_marker_end_us": {
+      "median": 133270.0,
+      "min": 127840.0,
+      "max": 252646.0,
+      "n": 9
+    },
+    "encode_order_start_marker_us": {
+      "median": 131801.0,
+      "min": 127658.0,
+      "max": 249981.0,
+      "n": 9
+    },
+    "encode_order_end_marker_us": {
+      "median": 131819.0,
+      "min": 127676.0,
+      "max": 250005.0,
+      "n": 9
+    },
+    "first_encoder_chunk_marker_us": {
+      "median": 131878.0,
+      "min": 127710.0,
+      "max": 250066.0,
+      "n": 9
+    },
+    "writer_coalesce_us": {
+      "median": 133288.0,
+      "min": 127848.0,
+      "max": 252659.0,
+      "n": 9
+    },
+    "writer_start_us": {
+      "median": 133295.0,
+      "min": 127853.0,
+      "max": 252664.0,
+      "n": 9
+    },
+    "writer_end_us": {
+      "median": 133311.0,
+      "min": 127872.0,
+      "max": 252682.0,
+      "n": 9
+    },
+    "registration_dump_p50_us": {
+      "median": 146169.0,
+      "min": 145608.5,
+      "max": 147462.5,
+      "n": 9
+    },
+    "registration_group_p50_us": {
+      "median": 210.0,
+      "min": 201.0,
+      "max": 211.5,
+      "n": 9
+    },
+    "inflight_dump_remaining_at_trigger_us": {
+      "median": 122231.0,
+      "min": 120092.0,
+      "max": 126357.0,
+      "n": 9
+    }
+  },
+  "signed_spans_us": {
+    "source_write_to_rib_admit": {
+      "median": 246,
+      "min": 174,
+      "max": 1773,
+      "n": 9
+    },
+    "rib_admit_to_ingest": {
+      "median": 129006,
+      "min": 126205,
+      "max": 246093,
+      "n": 9
+    },
+    "ingest_to_distribution": {
+      "median": 649,
+      "min": 553,
+      "max": 1296,
+      "n": 9
+    },
+    "distribution_to_sample_commit": {
+      "median": 2298,
+      "min": 684,
+      "max": 4589,
+      "n": 9
+    },
+    "sample_commit_to_envelope": {
+      "median": 22,
+      "min": 17,
+      "max": 45,
+      "n": 9
+    },
+    "envelope_to_bulk_marker": {
+      "median": 33,
+      "min": 20,
+      "max": 45,
+      "n": 9
+    },
+    "bulk_marker_to_writer_coalesce": {
+      "median": 18,
+      "min": 6,
+      "max": 22,
+      "n": 9
+    },
+    "writer_coalesce_to_write": {
+      "median": 5,
+      "min": 5,
+      "max": 9,
+      "n": 9
+    },
+    "writer_write": {
+      "median": 13,
+      "min": 7,
+      "max": 19,
+      "n": 9
+    },
+    "writer_end_to_marker_observed": {
+      "median": 30,
+      "min": 11,
+      "max": 35926,
+      "n": 9
+    },
+    "encode_source_order": {
+      "median": 22,
+      "min": 15,
+      "max": 36,
+      "n": 9
+    },
+    "encode_first_slice": {
+      "median": 61,
+      "min": 34,
+      "max": 95,
+      "n": 9
+    },
+    "distribution_duration": {
+      "median": 5022,
+      "min": 3860,
+      "max": 5843,
+      "n": 9
+    },
+    "inflight_dump_end_to_ingest": {
+      "median": 7139,
+      "min": 4169,
+      "max": 121539,
+      "n": 9
+    },
+    "inflight_dump_end_to_sample_first": {
+      "median": 9226,
+      "min": 5604,
+      "max": 13255,
+      "n": 9
+    },
+    "marker_lag_sample": {
+      "median": 0,
+      "min": 0,
+      "max": 116124,
+      "n": 9
+    }
+  },
+  "matching_marker_signed_spans_us": {
+    "source_write_to_rib_admit": {
+      "median": 239.5,
+      "min": 174,
+      "max": 347,
+      "n": 6
+    },
+    "rib_admit_to_ingest": {
+      "median": 127353.0,
+      "min": 126205,
+      "max": 130016,
+      "n": 6
+    },
+    "ingest_to_distribution": {
+      "median": 647.0,
+      "min": 603,
+      "max": 1282,
+      "n": 6
+    },
+    "distribution_to_sample_commit": {
+      "median": 2249.0,
+      "min": 684,
+      "max": 4589,
+      "n": 6
+    },
+    "sample_commit_to_envelope": {
+      "median": 24.5,
+      "min": 18,
+      "max": 45,
+      "n": 6
+    },
+    "envelope_to_bulk_marker": {
+      "median": 25.5,
+      "min": 20,
+      "max": 35,
+      "n": 6
+    },
+    "bulk_marker_to_writer_coalesce": {
+      "median": 15.5,
+      "min": 6,
+      "max": 21,
+      "n": 6
+    },
+    "writer_coalesce_to_write": {
+      "median": 5.0,
+      "min": 5,
+      "max": 7,
+      "n": 6
+    },
+    "writer_write": {
+      "median": 12.5,
+      "min": 10,
+      "max": 19,
+      "n": 6
+    },
+    "writer_end_to_marker_observed": {
+      "median": 28.0,
+      "min": 12,
+      "max": 44,
+      "n": 6
+    },
+    "encode_source_order": {
+      "median": 18.5,
+      "min": 15,
+      "max": 28,
+      "n": 6
+    },
+    "encode_first_slice": {
+      "median": 59.5,
+      "min": 34,
+      "max": 76,
+      "n": 6
+    },
+    "distribution_duration": {
+      "median": 5060.5,
+      "min": 4528,
+      "max": 5512,
+      "n": 6
+    },
+    "inflight_dump_end_to_ingest": {
+      "median": 6100.0,
+      "min": 4169,
+      "max": 7874,
+      "n": 6
+    },
+    "inflight_dump_end_to_sample_first": {
+      "median": 9421.0,
+      "min": 5604,
+      "max": 13255,
+      "n": 6
+    },
+    "marker_lag_sample": {
+      "median": 0.0,
+      "min": 0,
+      "max": 0,
+      "n": 6
+    }
+  },
+  "arrival_correlation": [
+    {
+      "leg": "02-instrumented",
+      "round": 1,
+      "observers": 650,
+      "published_equals_affected": 650,
+      "marker_equals_affected": 0,
+      "marker_lag_us": {
+        "median": 6327.0,
+        "min": 7,
+        "max": 40074,
+        "n": 650
+      }
+    },
+    {
+      "leg": "02-instrumented",
+      "round": 2,
+      "observers": 650,
+      "published_equals_affected": 650,
+      "marker_equals_affected": 650,
+      "marker_lag_us": {
+        "median": 0.0,
+        "min": 0,
+        "max": 0,
+        "n": 650
+      }
+    },
+    {
+      "leg": "02-instrumented",
+      "round": 3,
+      "observers": 650,
+      "published_equals_affected": 650,
+      "marker_equals_affected": 650,
+      "marker_lag_us": {
+        "median": 0.0,
+        "min": 0,
+        "max": 0,
+        "n": 650
+      }
+    },
+    {
+      "leg": "03-instrumented",
+      "round": 1,
+      "observers": 650,
+      "published_equals_affected": 650,
+      "marker_equals_affected": 650,
+      "marker_lag_us": {
+        "median": 0.0,
+        "min": 0,
+        "max": 0,
+        "n": 650
+      }
+    },
+    {
+      "leg": "03-instrumented",
+      "round": 2,
+      "observers": 650,
+      "published_equals_affected": 650,
+      "marker_equals_affected": 0,
+      "marker_lag_us": {
+        "median": 116719.5,
+        "min": 103083,
+        "max": 155303,
+        "n": 650
+      }
+    },
+    {
+      "leg": "03-instrumented",
+      "round": 3,
+      "observers": 650,
+      "published_equals_affected": 650,
+      "marker_equals_affected": 650,
+      "marker_lag_us": {
+        "median": 0.0,
+        "min": 0,
+        "max": 0,
+        "n": 650
+      }
+    },
+    {
+      "leg": "06-instrumented",
+      "round": 1,
+      "observers": 650,
+      "published_equals_affected": 650,
+      "marker_equals_affected": 650,
+      "marker_lag_us": {
+        "median": 0.0,
+        "min": 0,
+        "max": 0,
+        "n": 650
+      }
+    },
+    {
+      "leg": "06-instrumented",
+      "round": 2,
+      "observers": 650,
+      "published_equals_affected": 650,
+      "marker_equals_affected": 650,
+      "marker_lag_us": {
+        "median": 0.0,
+        "min": 0,
+        "max": 0,
+        "n": 650
+      }
+    },
+    {
+      "leg": "06-instrumented",
+      "round": 3,
+      "observers": 650,
+      "published_equals_affected": 650,
+      "marker_equals_affected": 0,
+      "marker_lag_us": {
+        "median": 49079.0,
+        "min": 28,
+        "max": 51937,
+        "n": 650
+      }
+    }
+  ]
+}

@@ -1,0 +1,16 @@
+[global]
+asn = 65001
+router_id = "192.0.2.1"
+listen_port = 1179
+runtime_state_dir = "/var/lib/rustbgpd"
+
+[global.telemetry]
+prometheus_addr = "127.0.0.1:9179"
+log_format = "json"
+
+[[neighbors]]
+address = "192.0.2.2"
+remote_asn = 65002
+description = "released-state-fixture"
+graceful_restart = true
+gr_restart_time = 120
