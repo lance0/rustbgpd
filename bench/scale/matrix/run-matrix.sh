@@ -224,6 +224,15 @@ for cell in "${CELLS[@]}"; do
         echo "unknown cell: $cell (want rustbgpd|bird|openbgpd)" >&2; exit 2 ;;
     esac
 done
+if [ -n "${RELOADSTALL_CONTAINER_IMAGE_ID:-}" ]; then
+    if [ "${CELLS[*]}" != rustbgpd ] || [ "$MEMBERSHIP_CHURN" != 0 ] ||
+       [ -n "$PROBE_PREFIXES$FLAPSTORM" ] || [ "${GEN_DUALSTACK:-0}" != 0 ] ||
+       [ "${RELOADSTALL_DUALSTACK:-0}" != 0 ] ||
+       [ "${RELOADSTALL_UNSENT_RTT_MS:-0}" -le 0 ]; then
+        echo 'container RTT mode requires one IPv4 rustbgpd reload cell without probes or flapstorm' >&2
+        exit 2
+    fi
+fi
 acquire_rustbgpd_host_lock || exit $?
 
 [ -x "$HARNESS" ] || {
@@ -405,11 +414,173 @@ stop_native_daemon() {
     [ "$timed_out" -eq 0 ]
 }
 
+# Two containers share only network/PID namespaces: all tools and receivers are
+# charged to the receiver cgroup, while the daemon remains its cgroup's sole PID.
+run_container_cell() (
+    local cdir=$1 run='' cid='' receiver='' fast_pid='' waiter='' rc=1
+    local image=$RELOADSTALL_CONTAINER_IMAGE_ID memory=$RELOADSTALL_CONTAINER_MEMORY_BYTES
+    local cleanup_seconds=${UNSENT_CLEANUP_TIMEOUT_SECS:-30}
+    local fast_out="$ART/../cgroup-fast.csv"
+    local owner_token
+    owner_token=$(cat /proc/sys/kernel/random/uuid) || exit 1
+    mkdir -p "$cdir" || exit 1
+    cdir=$(realpath "$cdir") || exit 1
+    # shellcheck disable=SC2317 # Called by the EXIT trap below.
+    stop_owned_container() {
+        local file=$1 role=$2 owned actual state token cleanup_rc=0
+        if [ ! -s "$file" ]; then
+            # A signal can interrupt docker create before it writes --cidfile.
+            # Recover only this invocation's exact name AND random owner label.
+            local name="rbgp-unsent-$owner_token-$role"
+            local lookup_rc=0
+            actual=$(timeout 10 docker inspect --type container "$name" 2>"$cdir/$role.lookup.stderr") || lookup_rc=$?
+            printf '%s\n' "$lookup_rc" >"$cdir/$role.lookup.exit"
+            if [ "$lookup_rc" -ne 0 ]; then
+                # Only an exact not-found response proves there is no owned resource.
+                [ "$lookup_rc" -eq 1 ] && [ "$(cat "$cdir/$role.lookup.stderr")" = \
+                    "Error response from daemon: No such container: $name" ] || return 1
+                return 0
+            fi
+            token=$(jq -r '.[0].Config.Labels["rustbgpd.unsent-owner"]' <<<"$actual") || return 1
+            [ "$token" = "$owner_token" ] || return 1
+            jq -e --arg image "$image" --arg name "/rbgp-unsent-$owner_token-$role" \
+                '.[0].Image == $image and .[0].Name == $name' <<<"$actual" >/dev/null || return 1
+            jq -r '.[0].Id' <<<"$actual" >"$file" || return 1
+        fi
+        owned=$(cat "$file")
+        [[ $owned =~ ^[0-9a-f]{64}$ ]] || return 1
+        actual=$(timeout 10 docker inspect --format '{{.Id}}' "$owned") || return 1
+        [ "$actual" = "$owned" ] || return 1
+        timeout "$((cleanup_seconds + 10))" docker stop --time "$cleanup_seconds" "$owned" >/dev/null ||
+            timeout 10 docker kill "$owned" >/dev/null || return 1
+        timeout 10 docker logs "$owned" >"$cdir/$role.log" 2>&1 || cleanup_rc=1
+        timeout 10 docker inspect "$owned" >"$cdir/$role.final.json" || return 1
+        state=$(jq -r '.[0].State | [.ExitCode,.OOMKilled,.Running] | @tsv' "$cdir/$role.final.json") || return 1
+        printf '%s\n' "$state" >"$cdir/$role.exit-state"
+        timeout 10 docker rm "$owned" >/dev/null || return 1
+        [ "$state" = $'0\tfalse\tfalse' ] && [ "$cleanup_rc" -eq 0 ]
+    }
+    # shellcheck disable=SC2317 # Invoked by EXIT, including INT/TERM failures.
+    cleanup_container_cell() {
+        local original=$? cleanup_rc=0 sampler_rc=0
+        trap - EXIT INT TERM
+        # On every path, stop receivers before collecting/stopping the daemon.
+        stop_owned_container "$cdir/receiver.cid" receiver || cleanup_rc=1
+        if [ -n "$waiter" ]; then
+            local wait_deadline=$((SECONDS + 5))
+            while jobs -pr | grep -qx "$waiter" && [ "$SECONDS" -lt "$wait_deadline" ]; do sleep 0.1; done
+            if jobs -pr | grep -qx "$waiter"; then kill -KILL "$waiter" 2>/dev/null || true; fi
+            wait "$waiter" || cleanup_rc=1
+            waiter=''
+        fi
+        if [ -s "${fast_out%.csv}.owner.json" ]; then
+            local group
+            group=$(jq -r .cgroup "${fast_out%.csv}.owner.json")
+            cat "$group/memory.peak" >"$cdir/daemon-memory.pre-stop.peak" || cleanup_rc=1
+            cat "$group/memory.stat" >"$cdir/daemon-memory.pre-stop.stat" || cleanup_rc=1
+            cat "$group/memory.events" >"$cdir/daemon-memory.pre-stop.events" || cleanup_rc=1
+        fi
+        stop_owned_container "$cdir/daemon.cid" daemon || cleanup_rc=1
+        if [ -n "$fast_pid" ]; then
+            local sample_deadline=$((SECONDS + 5))
+            while kill -0 "$fast_pid" 2>/dev/null && [ "$SECONDS" -lt "$sample_deadline" ]; do sleep 0.1; done
+            if jobs -pr | grep -qx "$fast_pid"; then kill -KILL "$fast_pid" 2>/dev/null || true; fi
+            wait "$fast_pid" || sampler_rc=$?
+            fast_pid=''
+            printf '%s\n' "$sampler_rc" >"$ART/../sampler.exit"
+            [ "$sampler_rc" -eq 0 ] || cleanup_rc=1
+        fi
+        if [ -n "$run" ]; then
+            cp -r "$run" "$cdir/scenario" || cleanup_rc=1
+            rm -rf "$run" || cleanup_rc=1
+        fi
+        printf '%s\n' "$cleanup_rc" >"$cdir/cleanup.exit"
+        [ "$original" -ne 0 ] || original=$cleanup_rc
+        exit "$original"
+    }
+    trap cleanup_container_cell EXIT
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
+    run=$(mktemp -d /tmp/ixp-container.XXXXXX) || exit 1
+    local workload_hash
+    workload_hash=$(provenance_sha256_file "$REPO/target/release/rustbgpd") || exit 1
+    write_cell_provenance rustbgpd bench/scale/reloadstall/gen-scenario.py \
+        binary target/release/rustbgpd "$workload_hash" || exit 1
+    # Same generator and workload arguments as the native cell.
+    # shellcheck disable=SC2086 # CHANGED_PEERS is an optional single positional.
+    python3 "$RSTALL/gen-scenario.py" "$N_PEERS" "$run" "$PORT" $CHANGED_PEERS || exit 1
+    recheck_cell_provenance rustbgpd || exit 1
+    local daemon_env=(-e RUSTBGPD_BENCH_WRITER_POLLS)
+    [ -z "${RUSTBGPD_BENCH_UNSENT_THRESHOLD_BYTES:-}" ] || daemon_env+=(-e RUSTBGPD_BENCH_UNSENT_THRESHOLD_BYTES)
+    docker create --cidfile "$cdir/daemon.cid" --name "rbgp-unsent-$owner_token-daemon" \
+        --label "rustbgpd.unsent-owner=$owner_token" --pull never --network none \
+        --user "$(id -u):$(id -g)" --cap-drop ALL --security-opt no-new-privileges \
+        --memory "$memory" --memory-swap "$memory" --pids-limit 4096 \
+        --ulimit nofile=65536:65536 \
+        --mount "type=bind,src=$REPO/target/release/rustbgpd,dst=/rustbgpd,readonly" \
+        --mount "type=bind,src=$run,dst=$run" "${daemon_env[@]}" \
+        --entrypoint /rustbgpd "$image" "$run/config.toml" >/dev/null || exit 1
+    cid=$(cat "$cdir/daemon.cid") || exit 1
+    docker start "$cid" >/dev/null || exit 1
+    timeout 10 docker inspect "$cid" >"$cdir/daemon.initial.json" || exit 1
+    sleep 3
+    python3 "$RSTALL/sample-daemon-cgroup.py" --exe "$REPO/target/release/rustbgpd" \
+        --out "$fast_out" --container-cidfile "$cdir/daemon.cid" --image-id "$image" \
+        >"$ART/../sampler.log" 2>&1 &
+    fast_pid=$!
+    local deadline=$((SECONDS + 15))
+    until [ -s "$fast_out" ] && [ "$(wc -l <"$fast_out")" -gt 1 ]; do
+        kill -0 "$fast_pid" 2>/dev/null && [ "$SECONDS" -lt "$deadline" ] || exit 1
+        sleep 0.1
+    done
+    local receiver_env=() name
+    while IFS= read -r name; do receiver_env+=(-e "$name"); done < <(compgen -e | grep '^RELOADSTALL_')
+    receiver_env+=(-e RELOADSTALL_RELOAD_METRICS_ADDR=127.0.0.1:9179)
+    local receiver_args=("$N_PEERS" "$TOTAL" "$PORT" 1 "$run/member.rpol" "$run/gen-a.rpol" "$run/gen-b.rpol" "$RELOADS" "$CONTROL_SECS")
+    [ -z "$CHANGED_PEERS" ] || receiver_args+=("$CHANGED_PEERS")
+    docker create --cidfile "$cdir/receiver.cid" --name "rbgp-unsent-$owner_token-receiver" \
+        --label "rustbgpd.unsent-owner=$owner_token" --pull never \
+        --network "container:$cid" --pid "container:$cid" --user 0:0 --cap-drop ALL \
+        --cap-add NET_ADMIN --cap-add KILL --cap-add DAC_OVERRIDE --cap-add FOWNER \
+        --security-opt no-new-privileges --memory "$memory" --memory-swap "$memory" \
+        --pids-limit 4096 --ulimit nofile=65536:65536 \
+        --mount "type=bind,src=$HARNESS,dst=/reloadstall,readonly" \
+        --mount "type=bind,src=$RSTALL/receiver-netem.py,dst=/receiver-netem.py,readonly" \
+        --mount "type=bind,src=$run,dst=$run" \
+        --mount "type=bind,src=$cdir,dst=/artifacts" "${receiver_env[@]}" \
+        --entrypoint python3 "$image" /receiver-netem.py \
+        --rtt "$RELOADSTALL_UNSENT_RTT_MS" --host-netns "$RELOADSTALL_HOST_NETNS" \
+        --out /artifacts/netem -- /reloadstall "${receiver_args[@]}" >/dev/null || exit 1
+    receiver=$(cat "$cdir/receiver.cid") || exit 1
+    docker start "$receiver" >/dev/null || exit 1
+    timeout 10 docker inspect "$receiver" >"$cdir/receiver.initial.json" || exit 1
+    docker wait "$receiver" >"$cdir/receiver.exit" &
+    waiter=$!
+    while kill -0 "$waiter" 2>/dev/null; do
+        kill -0 "$fast_pid" 2>/dev/null || exit 1
+        local last_kib
+        last_kib=$(tail -n1 "$fast_out" | cut -d, -f4)
+        [[ $last_kib =~ ^[0-9]+$ ]] && [ "$last_kib" -le "$RSS_LIMIT_KIB" ] || exit 1
+        sleep 0.2
+    done
+    wait "$waiter" || exit 1
+    waiter=''
+    rc=$(cat "$cdir/receiver.exit") || exit 1
+    docker logs "$receiver" >"$cdir/reloadstall.log" 2>&1 || exit 1
+    [ "$rc" = 0 ] || exit 1
+    recheck_cell_provenance rustbgpd || exit 1
+    exit 0
+)
+
 # run_cell <cell>: everything for one matrix cell. Nonzero return = cell
 # failed; the campaign moves on.
 run_cell() {
     local cell=$1 prepared_image_ref=${2:-} prepared_image_id=${3:-}
     local cdir="$ART/$cell"
+    if [ -n "${RELOADSTALL_CONTAINER_IMAGE_ID:-}" ]; then
+        run_container_cell "$cdir"
+        return $?
+    fi
     # Short run dir: gen-scenario.py's gRPC UDS path must fit SUN_LEN.
     local run="/tmp/ixp-$cell"
     rm -rf "$run"

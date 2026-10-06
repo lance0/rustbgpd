@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 """Small parsing checks for the high-frequency daemon cgroup sampler."""
 import importlib.util
+import copy
 import fcntl
 import json
 import os
 from pathlib import Path
 import shutil
+import signal
 import subprocess
 import tempfile
 import time
@@ -22,6 +24,11 @@ readback_spec = importlib.util.spec_from_file_location(
 )
 readback = importlib.util.module_from_spec(readback_spec)
 readback_spec.loader.exec_module(readback)
+netem_spec = importlib.util.spec_from_file_location(
+    "netem", Path(__file__).with_name("receiver-netem.py")
+)
+netem = importlib.util.module_from_spec(netem_spec)
+netem_spec.loader.exec_module(netem)
 
 
 def log_line(message, peer, **fields):
@@ -116,6 +123,125 @@ class SamplerTests(unittest.TestCase):
                 (cgroup / "cgroup.procs").write_text(f"{pid}\n")
                 with self.assertRaises(FileNotFoundError):
                     sampler.sample(pid, root / "out.csv", 0.025)
+
+
+class ContainerOwnershipTests(unittest.TestCase):
+    def test_full_cid_image_binary_cgroup_and_caps_are_required(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root, cid, pid = Path(directory), "a" * 64, 123
+            exe = root / "daemon"
+            exe.touch()
+            proc, cgroup = root / "proc", root / "cgroups" / f"docker-{cid}.scope"
+            proc.mkdir()
+            cgroup.mkdir(parents=True)
+            (proc / "exe").symlink_to(exe)
+            (proc / "stat").write_text("123 (daemon) S " + "0 " * 18 + "42")
+            (proc / "cgroup").write_text(f"0::/{cgroup.name}\n")
+            (cgroup / "memory.max").write_text("1024")
+            data = {"Id": cid, "Image": "sha256:" + "b" * 64,
+                    "State": {"Pid": pid, "Running": True},
+                    "HostConfig": {"NetworkMode": "none", "PidMode": "",
+                                   "Memory": 1024, "MemorySwap": 1024}}
+            paths = {f"/proc/{pid}": proc, "/sys/fs/cgroup": cgroup.parent}
+            with patch.object(sampler, "Path", side_effect=lambda value: paths[value]):
+                with patch.object(sampler.subprocess, "check_output", return_value=json.dumps([data])):
+                    owner = sampler.container_owner(cid, data["Image"], exe)
+                    self.assertEqual(owner["starttime"], 42)
+                    self.assertEqual(owner["kind"], "container-daemon-only")
+                    self.assertEqual(owner["binary_inode"], exe.stat().st_ino)
+                    with self.assertRaisesRegex(ValueError, "full container ID"):
+                        sampler.container_owner(cid[:12], data["Image"], exe)
+                for section, key, value in [(None, "Id", "c" * 64),
+                                            (None, "Image", "sha256:" + "c" * 64),
+                                            ("State", "Running", False),
+                                            ("HostConfig", "MemorySwap", -1),
+                                            ("HostConfig", "NetworkMode", "host"),
+                                            ("HostConfig", "PidMode", "host")]:
+                    bad = copy.deepcopy(data)
+                    (bad if section is None else bad[section])[key] = value
+                    with self.subTest(key=key), patch.object(
+                            sampler.subprocess, "check_output", return_value=json.dumps([bad])):
+                        with self.assertRaises(ValueError):
+                            sampler.container_owner(cid, data["Image"], exe)
+                (proc / "cgroup").write_text("0::/unowned.scope\n")
+                with patch.object(sampler.subprocess, "check_output", return_value=json.dumps([data])):
+                    with self.assertRaisesRegex(ValueError, "exact owned container"):
+                        sampler.container_owner(cid, data["Image"], exe)
+
+    def test_sampling_rejects_mixed_descendant_swap_and_reused_pid(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root, pid = Path(directory), 123
+            proc, cgroup = root / "proc", root / "group"
+            proc.mkdir()
+            cgroup.mkdir()
+            stat = "123 (daemon) S " + "0 " * 18 + "42"
+            (proc / "stat").write_text(stat)
+            (proc / "cgroup").write_text("0::" + str(cgroup))
+            (cgroup / "memory.swap.max").write_text("0")
+            (cgroup / "cgroup.procs").write_text(str(pid))
+            owner = {"starttime": 42, "cgroup": str(cgroup)}
+            sampler.verify_container_membership(proc, cgroup, pid, owner)
+            for path, bad, message in [
+                    (cgroup / "cgroup.procs", "123 124", "sole process"),
+                    (cgroup / "memory.swap.max", "max", "swap fenced"),
+                    (proc / "stat", stat[:-2] + "43", "ownership changed"),
+                    (proc / "cgroup", "0::/other", "ownership changed")]:
+                good = path.read_text()
+                path.write_text(bad)
+                with self.subTest(path=path), self.assertRaisesRegex(ValueError, message):
+                    sampler.verify_container_membership(proc, cgroup, pid, owner)
+                path.write_text(good)
+            child = cgroup / "child"
+            child.mkdir()
+            (child / "cgroup.procs").write_text("124")
+            with self.assertRaisesRegex(ValueError, "populated descendants"):
+                sampler.verify_container_membership(proc, cgroup, pid, owner)
+
+
+class NetemTests(unittest.TestCase):
+    def snapshot(self):
+        return {"qdisc": [{"kind": "netem", "dev": netem.DEVICE,
+                            "options": {"delay": {"delay": 0.01}},
+                            "drops": 0, "packets": 42}],
+                "filters": [{"kind": "flower", "protocol": "ip", "pref": priority,
+                             "options": {"keys": {"eth_type": "ipv4", "ip_proto": "tcp", "src_ip": src,
+                                                   "dst_ip": dst},
+                                         "actions": [{"kind": "mirred", "mirred_action": "redirect",
+                                                      "direction": "egress", "to_dev": netem.DEVICE,
+                                                      "stats": {"drops": 0, "packets": 21}}]}}
+                            for priority, (src, dst) in enumerate(netem.FLOWS, 10)]}
+
+    def test_queue_filters_live_traffic_and_rtt_must_all_match(self):
+        netem.verify(self.snapshot(), 20, traffic=True)
+        netem.verify_rtt("rtt:20.03/0.15", 20)
+        for mutate in [
+                lambda d: d["qdisc"].clear(),
+                lambda d: d["qdisc"][0].update(drops=1),
+                lambda d: d["qdisc"][0].update(packets=0),
+                lambda d: d["qdisc"][0]["options"]["delay"].update(delay=0),
+                lambda d: d["filters"].pop(),
+                lambda d: d["filters"][0]["options"]["keys"].update(dst_ip="127.0.0.1"),
+                lambda d: d["filters"][0]["options"]["keys"].update(ip_proto="udp"),
+                lambda d: d["filters"][0]["options"]["actions"][0]["stats"].update(packets=0),
+                lambda d: d["filters"][0]["options"]["actions"][0]["stats"].update(drops=1)]:
+            data = self.snapshot()
+            mutate(data)
+            with self.assertRaises(ValueError):
+                netem.verify(data, 20, traffic=True)
+        for text in ["", "rtt:0.01/0.005"]:
+            with self.assertRaisesRegex(ValueError, "TCP RTT evidence"):
+                netem.verify_rtt(text, 20)
+
+    def test_iproute_classifier_headers_are_not_extra_rules(self):
+        data = self.snapshot()
+        data["filters"] = [entry for rule in data["filters"]
+                           for entry in ({key: value for key, value in rule.items() if key != "options"}, rule)]
+        netem.verify(data, 20, traffic=True)
+
+    def test_host_namespace_is_rejected_before_network_commands(self):
+        host = str(Path("/proc/self/ns/net").readlink())
+        with self.assertRaisesRegex(ValueError, "host network namespace"):
+            netem.private_namespace(host)
 
 
 class LegWrapperTests(unittest.TestCase):
@@ -282,6 +408,68 @@ class LegWrapperTests(unittest.TestCase):
                 child.kill()
                 child.wait()
 
+    def test_netem_ss_failure_cleans_native_descendants_and_stubborn_sampler(self):
+        lock, ready = Path(self.temp.name) / "lock", Path(self.temp.name) / "ready"
+        tools_dir = self.repo.parent / "tools"
+        tools_dir.mkdir()
+        fixture = NetemTests().snapshot()
+        for queue in fixture["qdisc"]: queue.update(packets=0)
+        for rule in fixture["filters"]: rule["options"]["actions"][0]["stats"]["packets"] = 0
+        for name, body in {
+            "ip": "#!/bin/sh\nexit 0\n",
+            "tc": "#!/usr/bin/env python3\nimport json,sys\ndata=" + repr(fixture) +
+                  "\nprint(json.dumps(data['qdisc' if 'qdisc' in sys.argv else 'filters']))\n",
+            "ss": "#!/usr/bin/env python3\nimport os,time\nfrom pathlib import Path\n"
+                  "deadline=time.monotonic()+5\n"
+                  "while not Path(os.environ['WRAPPER_TEST_READY']).exists():\n"
+                  " if time.monotonic()>deadline: raise RuntimeError('descendant handshake missing')\n"
+                  " time.sleep(.01)\nraise SystemExit(7)\n",
+        }.items():
+            file = tools_dir / name
+            file.write_text(body)
+            file.chmod(0o755)
+        shutil.copyfile(Path(__file__).with_name("receiver-netem.py"), self.script.with_name("receiver-netem.py"))
+        descendant = self.repo.parent / "descendant.py"
+        descendant.write_text(
+            "import os,signal,time\nfrom pathlib import Path\n"
+            "signal.signal(signal.SIGTERM,signal.SIG_IGN)\n"
+            "Path(os.environ['WRAPPER_TEST_READY']).write_text(str(os.getpid()))\n"
+            "time.sleep(300)\n")
+        self.runner.write_text('exec 9>"$WRAPPER_TEST_LOCK"\nflock 9\n'
+                               f'python3 "{descendant}" &\nwait\n')
+        self.sampler.write_text(
+            "import signal,sys,time\nfrom pathlib import Path\n"
+            "signal.signal(signal.SIGTERM,signal.SIG_IGN)\n"
+            "Path(sys.argv[sys.argv.index('--out')+1]).write_text('header\\n1\\n')\n"
+            "time.sleep(300)\n")
+        child = subprocess.Popen(
+            ["bash", str(self.script), str(self.out), "unset", "20", "--inside-netns"],
+            env=dict(os.environ, PATH=f"{tools_dir}:{os.environ['PATH']}",
+                     RELOADSTALL_HOST_NETNS="net:[0]", WRAPPER_TEST_LOCK=str(lock),
+                     WRAPPER_TEST_READY=str(ready), UNSENT_CLEANUP_TIMEOUT_SECS="1"),
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True)
+        try:
+            _stdout, stderr = child.communicate(timeout=12)
+        finally:
+            # A deliberately broken wrapper must not leak the regression's processes.
+            groups = [child.pid]
+            if (self.out / "runner.pid").exists():
+                groups.append(int((self.out / "runner.pid").read_text()))
+            for group in groups:
+                try:
+                    os.killpg(group, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+            child.wait()
+        self.assertNotEqual(child.returncode, 0)
+        self.assertTrue(ready.exists(), stderr)
+        self.assertEqual((self.out / "sampler.exit").read_text().strip(), "137")
+        self.assertIn("returned non-zero exit status 7", (self.out / "runner.log").read_text())
+        proc = Path(f"/proc/{ready.read_text()}/stat")
+        self.assertTrue(not proc.exists() or proc.read_text().split(") ")[1].startswith("Z"))
+        with lock.open("w") as stream:
+            fcntl.flock(stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
+
     def test_term_ignoring_group_is_killed_before_waiting(self):
         ready = Path(self.temp.name) / "ready"
         self.runner.write_text('trap "" TERM\nsleep 300 &\necho "$!" >"$WRAPPER_TEST_READY"\nwait\n')
@@ -299,6 +487,180 @@ class LegWrapperTests(unittest.TestCase):
         finally:
             if child.poll() is None:
                 child.kill()
+                child.wait()
+
+class ContainerCellTests(unittest.TestCase):
+    """Exercise the real container branch with a stateful Docker CLI stand-in."""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+        self.bin = self.root / "bin"
+        self.bin.mkdir()
+        self.cdir = self.root / "matrix/rustbgpd"
+        self.cdir.mkdir(parents=True)
+        self.tools = self.root / "tools"
+        self.tools.mkdir()
+        (self.tools / "gen-scenario.py").write_text("import os,sys; sys.exit(int(os.environ.get('TEST_GENERATOR_EXIT','0')))\n")
+        self.trace = self.root / "docker.trace"
+        self.env = dict(os.environ, PATH=f"{self.bin}:{os.environ['PATH']}",
+                        TEST_ROOT=str(self.root), UNSENT_CLEANUP_TIMEOUT_SECS="1")
+        docker = self.bin / "docker"
+        docker.write_text('''#!/usr/bin/env python3
+import json, os, sys, time
+from pathlib import Path
+root=Path(os.environ['TEST_ROOT']); args=sys.argv[1:]
+with (root/'docker.trace').open('a') as f: f.write(json.dumps(args)+'\\n')
+image='sha256:'+'c'*64
+states=root/'states'; states.mkdir(exist_ok=True)
+def read(ref):
+    for path in states.iterdir():
+        data=json.loads(path.read_text())
+        if ref in (data['Id'],data['Name'].lstrip('/')): return path,data
+    print("Error response from daemon: No such container: "+ref, file=sys.stderr)
+    sys.exit(1)
+def save(path,data): path.write_text(json.dumps(data))
+cmd=args[0]
+if cmd=='create':
+    role=Path(args[args.index('--cidfile')+1]).stem
+    cid=('a' if role=='daemon' else 'b')*64
+    name=args[args.index('--name')+1]; label=args[args.index('--label')+1].split('=',1)[1]
+    data={'Id':cid,'Name':'/'+name,'Image':image,'Config':{'Labels':{'rustbgpd.unsent-owner':label}},
+          'State':{'Running':False,'ExitCode':0,'OOMKilled':False}}
+    save(states/cid,data)
+    if os.environ.get('TEST_INTERRUPT_CREATE') and role=='receiver':
+        (root/'ready').touch(); time.sleep(300)
+    Path(args[args.index('--cidfile')+1]).write_text(cid)
+elif cmd=='start':
+    path,data=read(args[1]);data['State']['Running']=True;save(path,data)
+    if data['Id'].startswith('b'): (root/'ready').touch()
+elif cmd=='inspect':
+    if os.environ.get('TEST_INSPECT_UNAVAILABLE'):
+        print('Cannot connect to the Docker daemon',file=sys.stderr); sys.exit(1)
+    if os.environ.get('TEST_INSPECT_TIMEOUT'): time.sleep(30)
+    path,data=read(args[-1])
+    print(data['Id'] if '--format' in args else json.dumps([data]))
+elif cmd=='wait':
+    path,data=read(args[1])
+    if os.environ.get('TEST_BLOCK_RECEIVER'):
+        while data['State']['Running']:
+            time.sleep(.01); data=json.loads(path.read_text())
+    else:
+        data['State']['Running']=False
+        data['State']['ExitCode']=int(os.environ.get('TEST_RECEIVER_EXIT','0'));save(path,data)
+    print(data['State']['ExitCode'])
+elif cmd in ('stop','kill'):
+    path,data=read(args[-1])
+    if cmd=='stop' and os.environ.get('TEST_IGNORE_TERM') and data['State']['Running']:
+        sys.exit(1)
+    if cmd=='kill': data['State']['ExitCode']=137
+    data['State']['Running']=False;save(path,data)
+    if data['Id'].startswith('a'): (root/'daemon-stopped').touch()
+elif cmd=='logs': print('retained workload log')
+elif cmd=='rm':
+    path,data=read(args[-1]); path.unlink()
+else: sys.exit(2)
+''')
+        docker.chmod(0o755)
+        (self.tools / "sample-daemon-cgroup.py").write_text('''import os,sys,time
+from pathlib import Path
+root=Path(os.environ['TEST_ROOT'])
+out=Path(sys.argv[sys.argv.index('--out')+1])
+out.write_text('epoch_us,monotonic_ns,read_us,vmrss_kib\\n1,1,1,4096\\n')
+while not (root/'daemon-stopped').exists():
+    if os.environ.get('TEST_SAMPLER_FAIL') and (root/'ready').exists(): sys.exit(7)
+    time.sleep(.01)
+''')
+        matrix = Path(__file__).parents[1] / "matrix/run-matrix.sh"
+        source = matrix.read_text()
+        function = source[source.index("run_container_cell() ("):source.index("# run_cell <cell>:")]
+        self.script = self.root / "cell.sh"
+        self.script.write_text('''set -u
+REPO=$TEST_ROOT
+RSTALL=$TEST_ROOT/tools
+HARNESS=$TEST_ROOT/reloadstall
+ART=$TEST_ROOT/matrix
+RELOADSTALL_CONTAINER_IMAGE_ID=sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
+RELOADSTALL_CONTAINER_MEMORY_BYTES=1073741824
+RELOADSTALL_UNSENT_RTT_MS=20
+RELOADSTALL_HOST_NETNS='net:[1]'
+N_PEERS=12 TOTAL=1200 PORT=1790 RELOADS=2 CONTROL_SECS=1 CHANGED_PEERS='' RSS_LIMIT_KIB=1048576
+recheck_cell_provenance() { return 0; }
+write_cell_provenance() { return 0; }
+provenance_sha256_file() { echo fake-binary-hash; }
+''' + function + '\ntrap "wait; exit 143" TERM\nrun_container_cell "$ART/rustbgpd" "$TEST_ROOT/scenario"\n')
+
+    def commands(self):
+        return [json.loads(line) for line in self.trace.read_text().splitlines()]
+
+    def assert_cleanup_order(self):
+        commands = self.commands()
+        stopped = [args[-1] for args in commands if args[0] == "stop"]
+        self.assertEqual(stopped, ["b" * 64, "a" * 64])
+        self.assertFalse(list((self.root / "states").iterdir()))
+        for role in ("receiver", "daemon"):
+            self.assertTrue((self.cdir / f"{role}.final.json").is_file())
+            self.assertTrue((self.cdir / f"{role}.log").is_file())
+
+    def test_receiver_success_and_failure_keep_status_and_cleanup(self):
+        for exit_code in (0, 7):
+            with self.subTest(exit_code=exit_code):
+                if exit_code:
+                    (self.root / "daemon-stopped").unlink()
+                    self.trace.unlink()
+                    for file in self.cdir.glob("*.cid"): file.unlink()
+                result = subprocess.run(["bash", str(self.script)], env=dict(
+                    self.env, TEST_RECEIVER_EXIT=str(exit_code)), capture_output=True, timeout=15)
+                self.assertEqual(result.returncode, 0 if exit_code == 0 else 1, result.stderr)
+                self.assertEqual((self.cdir / "receiver.exit").read_text().strip(), str(exit_code))
+                self.assert_cleanup_order()
+
+    def test_sampler_failure_aborts_receiver_and_preserves_failure(self):
+        result = subprocess.run(["bash", str(self.script)], env=dict(
+            self.env, TEST_SAMPLER_FAIL="1", TEST_BLOCK_RECEIVER="1"),
+            capture_output=True, timeout=15)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual((self.root / "sampler.exit").read_text().strip(), "7")
+        self.assert_cleanup_order()
+
+    def test_unavailable_docker_is_not_treated_as_no_owned_container(self):
+        result = subprocess.run(["bash", str(self.script)], env=dict(
+            self.env, TEST_GENERATOR_EXIT="1", TEST_INSPECT_UNAVAILABLE="1"),
+            capture_output=True, timeout=10)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual((self.cdir / "cleanup.exit").read_text().strip(), "1")
+        self.assertIn("Cannot connect", (self.cdir / "daemon.lookup.stderr").read_text())
+        self.assertFalse(any(args[0] == "rm" for args in self.commands()))
+
+    def test_inspect_timeout_is_bounded_and_fails_cleanup(self):
+        started = time.monotonic()
+        result = subprocess.run(["bash", str(self.script)], env=dict(
+            self.env, TEST_GENERATOR_EXIT="1", TEST_INSPECT_TIMEOUT="1"),
+            capture_output=True, timeout=25)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertLess(time.monotonic() - started, 24)
+        self.assertEqual((self.cdir / "daemon.lookup.exit").read_text().strip(), "124")
+        self.assertEqual((self.cdir / "cleanup.exit").read_text().strip(), "1")
+        self.assertFalse(any(args[0] == "rm" for args in self.commands()))
+
+    def test_interruption_recovers_create_identity_and_kills_term_ignoring_containers(self):
+        self.env.update(TEST_BLOCK_RECEIVER="1", TEST_INTERRUPT_CREATE="1", TEST_IGNORE_TERM="1")
+        child = subprocess.Popen(["bash", str(self.script)], env=self.env, start_new_session=True,
+                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        try:
+            deadline = time.monotonic() + 10
+            while not (self.root / "ready").exists() and time.monotonic() < deadline:
+                time.sleep(.01)
+            self.assertTrue((self.root / "ready").exists())
+            os.killpg(child.pid, signal.SIGTERM)
+            self.assertNotEqual(child.wait(timeout=10), 0)
+            self.assert_cleanup_order()
+            self.assertTrue(any(args[0] == "kill" for args in self.commands()))
+            self.assertEqual((self.cdir / "daemon.exit-state").read_text().strip(), "137\tfalse\tfalse")
+        finally:
+            if child.poll() is None:
+                os.killpg(child.pid, signal.SIGKILL)
                 child.wait()
 
 
