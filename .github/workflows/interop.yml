@@ -1232,7 +1232,7 @@ jobs:
           OPENBGPD_AMD64_MANIFEST: sha256:85c443bcb16b1e1b2c6ea6bddcd540352d280f1eaed66b7a7cd0ea1122c866e6
           OPENBGPD_CONFIG: sha256:b38add7d3ec1a0d3caea8eb5dc799fda1925e60fb7689dc532cbada6551ee1a8
         run: |
-          index_json=$(docker buildx imagetools inspect --raw "$OPENBGPD_IMAGE")
+          index_json=$(.github/scripts/retry-docker-image.sh docker buildx imagetools inspect --raw "$OPENBGPD_IMAGE")
           amd64_manifest=$(jq -er '
             [.manifests[]
              | select(.platform.os == "linux"
@@ -1243,12 +1243,12 @@ jobs:
           ' <<<"$index_json")
           test "$amd64_manifest" = "$OPENBGPD_AMD64_MANIFEST"
 
-          manifest_json=$(docker buildx imagetools inspect --raw \
+          manifest_json=$(.github/scripts/retry-docker-image.sh docker buildx imagetools inspect --raw \
             "openbgpd/openbgpd@$amd64_manifest")
           config_digest=$(jq -er '.config.digest' <<<"$manifest_json")
           test "$config_digest" = "$OPENBGPD_CONFIG"
 
-          docker pull "$OPENBGPD_IMAGE"
+          .github/scripts/retry-docker-image.sh docker pull "$OPENBGPD_IMAGE"
 
       - name: Run M86 (deploy + test + destroy with retry)
         uses: ./.github/actions/run-interop-test
@@ -2270,7 +2270,7 @@ jobs:
           OPENBGPD_AMD64_MANIFEST: sha256:2e2fcc5185aac421aa42f865aeb93eac801d411cd88cd0557ceccdad6d2be913
           OPENBGPD_CONFIG: sha256:91457bd753c880e0594d7ebd95aca8b3461de4b5d62ff997c2b536a02a0646eb
         run: |
-          index_json=$(docker buildx imagetools inspect --raw "$OPENBGPD_IMAGE")
+          index_json=$(.github/scripts/retry-docker-image.sh docker buildx imagetools inspect --raw "$OPENBGPD_IMAGE")
           amd64_manifest=$(jq -er '
             [.manifests[] | select(.platform.os == "linux"
               and .platform.architecture == "amd64"
@@ -2279,10 +2279,10 @@ jobs:
               else error("expected exactly one linux/amd64 manifest") end
           ' <<<"$index_json")
           test "$amd64_manifest" = "$OPENBGPD_AMD64_MANIFEST"
-          manifest_json=$(docker buildx imagetools inspect --raw \
+          manifest_json=$(.github/scripts/retry-docker-image.sh docker buildx imagetools inspect --raw \
             "openbgpd/openbgpd@$amd64_manifest")
           test "$(jq -er '.config.digest' <<<"$manifest_json")" = "$OPENBGPD_CONFIG"
-          docker pull "$OPENBGPD_IMAGE"
+          .github/scripts/retry-docker-image.sh docker pull "$OPENBGPD_IMAGE"
 
       - name: Pull digest-pinned FRR 10.3.1 image
         run: docker pull quay.io/frrouting/frr@sha256:f90d26a9fd5c14fc5795a73b4254ac88bc3186c45bbeb220a225fb6182de812c

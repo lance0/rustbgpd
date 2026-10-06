@@ -84,6 +84,9 @@ jobs:
           bash .github/scripts/install-grpcurl.sh --self-test
       - name: Prove CI image-primer contract
         run: |
+          bash -n .github/scripts/retry-docker-image.sh
+          shellcheck .github/scripts/retry-docker-image.sh
+          python3 -m unittest -v scripts/test_retry_docker_image.py
           python3 -m unittest -v scripts/test_check_ci_image_primer_contract.py
           python3 scripts/check_ci_image_primer_contract.py
       - name: Prove CI scale split contract
