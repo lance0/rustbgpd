@@ -1361,6 +1361,49 @@ impl RibManager {
             .collect()
     }
 
+    /// Borrowed group entries a joining member replays: the resolved
+    /// `adv(m)` slot of every staged key outside a selection-deferred family
+    /// whose source control does not suppress it toward this member. The
+    /// vector grows with the retained set; selection deferral or
+    /// route-server suppression can leave a small replay from a full table,
+    /// so reserving the table size would make a filtered join pay for every
+    /// staged route.
+    pub(super) fn grouped_join_replay<'a>(
+        &self,
+        group: &'a super::update_groups::GroupRibOut,
+        peer: IpAddr,
+        rs_control: Option<(u32, u32)>,
+        mut checkpoint: impl FnMut(),
+    ) -> Vec<super::update_groups::AdvEntry<'a>> {
+        let mut replay = Vec::new();
+        for staged in group.table.iter() {
+            checkpoint();
+            if self.selection_deferred(prefix_family(&staged.prefix)) {
+                continue;
+            }
+            // adv(m) resolves the slot ([`GroupRibOut::adv_entry`],
+            // ADR-0126 Decision 4): the staged winner for a
+            // non-source member, the lane runner-up for the
+            // winner's own source, nothing when the lane is empty.
+            // The rs-control decision and the nh residue come from
+            // the RESOLVED entry.
+            let Some(entry) = group.adv_entry(peer, &staged.prefix, staged.path_id) else {
+                continue;
+            };
+            let (source_communities, source_large_communities) =
+                group.source_control_for_route(entry.route, entry.source_attrs);
+            if super::distribution::rs_control::rs_control_suppressed(
+                source_communities,
+                source_large_communities,
+                rs_control,
+            ) {
+                continue;
+            }
+            replay.push(entry);
+        }
+        replay
+    }
+
     #[expect(
         clippy::too_many_lines,
         reason = "initial dump stages every family queue before one Adj-RIB-Out commit"
@@ -1482,6 +1525,7 @@ impl RibManager {
         // path; grouped peers skip it (empty staging set).
         let mut vpn_group_replayed = false;
         let mut grouped_otc_blocked = Vec::new();
+        let mut grouped_unicast = None;
         if let Some(group) = member_of.and_then(|gid| self.group_ribs.get(&gid)) {
             // LAN-474: per-target divergence at the replay seam — a
             // table entry whose captured SOURCE communities tag it may
@@ -1489,38 +1533,35 @@ impl RibManager {
             // from the source, scrub post-policy) for it; untagged
             // entries replay as-is.
             let rs_control = rs_control_asn.zip(target_peer_asn);
-            for staged in group.table.iter() {
+            let replay = self.grouped_join_replay(group, peer, rs_control, || {
                 checkpoint_at("initial_group_replay");
-                if self.selection_deferred(prefix_family(&staged.prefix)) {
-                    continue;
-                }
-                // adv(m) resolves the slot ([`GroupRibOut::adv_entry`],
-                // ADR-0126 Decision 4): the staged winner for a
-                // non-source member, the lane runner-up for the
-                // winner's own source, nothing when the lane is empty.
-                // The rs-control decision and the nh residue come from
-                // the RESOLVED entry.
-                let Some(entry) = group.adv_entry(peer, &staged.prefix, staged.path_id) else {
-                    continue;
-                };
-                let (source_communities, source_large_communities) =
-                    group.source_control_for_route(entry.route, entry.source_attrs);
-                if super::distribution::rs_control::rs_control_suppressed(
-                    source_communities,
-                    source_large_communities,
-                    rs_control,
-                ) {
-                    continue;
-                }
-                unicast.next_hop_override.push(entry.nh.cloned());
-                let mut route = entry.route.clone();
-                super::distribution::rs_control::rs_control_route_rewrite(
-                    &mut route,
-                    source_large_communities,
-                    rs_control,
-                );
-                unicast.announce.push(route);
-            }
+            });
+            // Keep borrowed entries until filtering is complete. Mapping the
+            // exact-sized slice iterator collects straight into each Arc,
+            // avoiding a full Vec<Route> and its copy at the replay peak.
+            let announce: std::sync::Arc<[_]> = replay
+                .iter()
+                .map(|entry| {
+                    checkpoint_at("initial_group_replay");
+                    let (_, source_large_communities) =
+                        group.source_control_for_route(entry.route, entry.source_attrs);
+                    let mut route = entry.route.clone();
+                    super::distribution::rs_control::rs_control_route_rewrite(
+                        &mut route,
+                        source_large_communities,
+                        rs_control,
+                    );
+                    route
+                })
+                .collect();
+            let next_hop_override: std::sync::Arc<[_]> = replay
+                .iter()
+                .map(|entry| {
+                    checkpoint_at("initial_group_replay");
+                    entry.nh.cloned()
+                })
+                .collect();
+            grouped_unicast = Some((announce, next_hop_override));
             // VPN join replay: table minus own-sourced, filtered by the
             // joining member's Φ (the RFC 4684 gate the per-peer dump
             // would have applied; strict-empty membership replays
@@ -2028,7 +2069,9 @@ impl RibManager {
             self.reconcile_peer_otc_blocked(peer, &otc_prefixes, grouped_otc_blocked);
         }
 
-        let has_outbound_diff = !unicast.announce.is_empty()
+        let (announce, next_hop_override) = grouped_unicast
+            .unwrap_or_else(|| (unicast.announce.into(), unicast.next_hop_override.into()));
+        let has_outbound_diff = !announce.is_empty()
             || !unicast.withdraw.is_empty()
             || !fs_announce.is_empty()
             || !fs_withdraw.is_empty()
@@ -2060,10 +2103,7 @@ impl RibManager {
                     labeled_withdraw,
                     rtc_announce,
                     rtc_withdraw,
-                    ..OutboundCommitBatch::with_unicast(
-                        unicast.announce.into(),
-                        unicast.next_hop_override.into(),
-                    )
+                    ..OutboundCommitBatch::with_unicast(announce, next_hop_override)
                 },
                 HashSet::new(),
                 None,
