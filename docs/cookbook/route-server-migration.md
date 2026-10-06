@@ -474,9 +474,11 @@ command uses the existing RPC-independent comparison engine and snapshot
 schema.
 
 **Incumbent RR qualification remains outstanding.** The pinned FRR 10.7.1
-and GoBGP 4.8.0 BMP exporters provide received-route pre/post-policy views
-and a local-RIB view, without the required RFC 8671 Adj-RIB-Out flag. Their
-post-policy feeds therefore cannot supply this comparison. The synthetic
+and GoBGP 4.10.0 BMP exporters provide received-route pre/post-policy views
+and a local-RIB view, without the required RFC 8671 Adj-RIB-Out flag.
+[GoBGP 4.10.0 source inspection](https://github.com/osrg/gobgp/blob/v4.10.0/pkg/server/bmp.go#L181-L199)
+confirms that the newer pin still selects received-route and best-path
+events. These feeds therefore cannot supply this comparison. The synthetic
 BMP fixtures prove conversion and comparison mechanics only; there is no
 end-to-end FRR/GoBGP or vendor-RR shadow-trial receipt for this command.
 
