@@ -1,0 +1,118 @@
+{
+  "schema": 1,
+  "measured_date": "2026-10-06",
+  "source_base": "19842a5a114287af7a8f5ae66407aaacc9d0142a",
+  "source_tree": "fe3a2dbe6e01eb4fbb6aec5482f1184eae1973e9",
+  "instrumentation_committed": false,
+  "arms": {
+    "control": "unmodified daemon; existing harness with report-only six-decimal formatting",
+    "instrumented": "same base daemon and harness with archived instrumentation.patch"
+  },
+  "common_runner_change": "native /readyz HTTP checks before harness launch and after harness exit; actual harness exit retained",
+  "toolchain": "rustc 1.99.0 (b940084d7 2026-09-28)\nbinary: rustc\ncommit-hash: b940084d7eb6a299eb4bfeb8e34901bc051e7ac4\ncommit-date: 2026-09-28\nhost: x86_64-unknown-linux-gnu\nrelease: 1.99.0\nLLVM version: 23.1.1\n",
+  "kernel": "Linux 7.0.0-30-generic x86_64",
+  "build_commands": [
+    "CARGO_BUILD_JOBS=8 cargo build --locked --release --bin rustbgpd",
+    "CARGO_BUILD_JOBS=8 cargo build --locked --profile scale -p reloadstall"
+  ],
+  "sha256": {
+    "rustbgpd-control": "0fd2d7308e5c7d5a5a0be620f2e4708f2331eaf646f3a37868be3508f3b9c4c6",
+    "rustbgpd-instrumented": "1f4b70fca02116ebdb63877ac72395f536b510752d7ad05d429a6576c2f95ad7",
+    "reloadstall-original": "b2aa2c8bfa371b84237cacb65899ace14803a25da295fbecf9e66fa7ea187f58",
+    "reloadstall-control": "919991d7bca469fcfda7d9940505d0c3a7be104b0aa8f354a8c17cb3919cfdc3",
+    "reloadstall-instrumented": "a1068612b32a76bd2af470b334d52fc1f98f82d998c48635f3f18e65d7bf7681",
+    "instrumentation.patch": "34085d6f8de144f3303433f4ad39051ce29594781d1c9ccebbe4058c125f9bbb",
+    "harness-common-precision.patch": "161bc949cf0951ed6d531754d3d3dbb5224150ed7ea50b4baf3a3491106cb6cd",
+    "run-six.sh": "b9f85e6fe49f9c82ff601fd9983842fa171377229a0a13d13c0f6b6de8c38219",
+    "extract.py": "b7210e22afd899f17e7f660f165438d8d5ae5b0b1912c65e68abf929ce8a6d8b",
+    "freeze.py": "24cfa46b148dbcfe1af07ffbb8fea7ba09445ac6775ca0a712e484d10977b2c7",
+    "check-extract.py": "b332e7e98ff6ea13d4bd3a2e8a73cdf5b2ee03c3bcae12b0a250954b5719f563",
+    "check-marker.rs": "62600dcd0ea7bcc01634cabac18211b6a755a6da65e2dce83b5219d32e6bb6e9",
+    "source-freeze.json": "4b271ba8ccca5336e9fac0438f553eaff3e071ef7d882657e5012e7e736274e6"
+  },
+  "experiment": {
+    "order": [
+      "control",
+      "instrumented",
+      "instrumented",
+      "control",
+      "control",
+      "instrumented"
+    ],
+    "rounds_per_leg": 3,
+    "rounds_per_arm": 9,
+    "shape": "700 peers;400400 prefixes;50 flapped;8 ongoing churners",
+    "quiet_gate": "existing matrix host lock and two accepted quiet samples at least30seconds apart",
+    "cooldown_seconds": 300,
+    "process_pair_order": "AB / BA / AB rotated; not perfectly position-balanced",
+    "replication": "three fresh process legs per arm;three correlated rounds within each process"
+  },
+  "instrumentation_limits": [
+    "Cross-process clocks use SystemTime anchored to process-local Instant; harness retains existing wall_us beside t_reann. Sub-microsecond attribution not claimed.",
+    "Marker20.0.0.0/24 traces one exact route and sampled survivor350. Actual affected-first and published-first arrivals are separately recorded at all650 survivors.",
+    "Shared encoder extraction requires exactly one marker-bearing delta inventory<=28600 per round and matches its same-peer stages; returning full-table encodes excluded.",
+    "Writer correlation requires the accepted marker byte end to fall in the exact contiguous byte bracket of one coalesced write by the same survivor, in the same round.",
+    "Successful queue acceptance is observed after the send returns. Concurrent consumers may already be running; endpoint stage stamps do not imply globally serialized execution.",
+    "A TCP receiver may observe bytes before local write_all/flush returns. Intervals retain real signed ordering; no clamping or fabricated additive breakdown.",
+    "Control differs only in post-round float formatting from original harness. Instrumentation overhead is assessed from the rotated process pairs before assigning gains."
+  ],
+  "environment_control": "The driver cleared inherited GEN_*, RELOADSTALL_*, RUSTBGPD_* and RUST_LOG variables, then set the canonical inputs retained in legs.json. Native loopback, zero added RTT, unpaced readers; no production setting candidate.",
+  "source_validation": "All six before/after freezes matched the approved source diff and measured binaries; all six exact canonical workload receipts passed.",
+  "campaign_actual_exit": 0,
+  "raw_archive": {
+    "logical_name": "first-update-scout-2026-10-06.tar",
+    "sha256": "f7e86a3df9f07e2d36b54eb0f667be417c50eac46592042c2ad44ba7a16a26c8",
+    "size_bytes": 324864000,
+    "original_file_count": 218,
+    "published": false
+  },
+  "cleanup": {
+    "owned_processes_remaining": 0,
+    "owned_scopes_remaining": 0,
+    "host_lock_probe_exit": 0,
+    "owned_runtime_scenario_removed": true
+  },
+  "limits": [
+    "Three independent processes per arm, with three correlated rounds per process. AB/BA/AB is not perfectly position-balanced.",
+    "Probe-versus-control endpoint differences include instrumentation and run variation; no statistical significance or zero-overhead conclusion.",
+    "Compact extracts reproduce reported arithmetic. Unpublished archived sources and raw logs are required to audit the extraction and build provenance.",
+    "No comparator daemon was measured; the historical 170 ms receipt used a different source cohort."
+  ],
+  "build_producers": {
+    "control": {
+      "log": "build-control.log",
+      "compiled": [
+        "rustbgpd-rib",
+        "rustbgpd-transport",
+        "rustbgpd"
+      ],
+      "source_state": "Clean measured base; instrumentation was applied after this build completed."
+    },
+    "initial_probe": {
+      "log": "build-instrumented.log",
+      "compiled": [
+        "rustbgpd-rib",
+        "rustbgpd-transport",
+        "rustbgpd"
+      ],
+      "source_writes": "Instrumentation rewrote source text with current modification times."
+    },
+    "final_probe": {
+      "log": "build-instrumented-reviewed.log",
+      "compiled": [
+        "rustbgpd-transport",
+        "rustbgpd-api",
+        "rustbgpd"
+      ],
+      "cached_rib": "All four RIB source patch sections are byte-identical between the archived initial and final instrumentation patches; the already-built instrumented RIB was reused."
+    },
+    "harnesses": {
+      "logs": [
+        "build-harness-control-precise.log",
+        "build-harness-instrumented-precise.log"
+      ],
+      "compiled": "reloadstall in both logs"
+    },
+    "runtime_witness": "All nine probe rounds contain the required RIB/transport phase coverage; every control leg contains no phase events."
+  }
+}
