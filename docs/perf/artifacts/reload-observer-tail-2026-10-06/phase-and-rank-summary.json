@@ -1,0 +1,523 @@
+{
+  "control": {
+    "rounds": [
+      {
+        "reload": 1,
+        "gap_ms": {
+          "p50": 219.888,
+          "p95": 295.679,
+          "max": 383.102
+        },
+        "gap_ends_first_generation": 700,
+        "gap_ends_first_base": 700,
+        "observer_index_gap_spearman": 0.11492814004360351
+      },
+      {
+        "reload": 2,
+        "gap_ms": {
+          "p50": 220.575,
+          "p95": 373.524,
+          "max": 388.809
+        },
+        "gap_ends_first_generation": 700,
+        "gap_ends_first_base": 700,
+        "observer_index_gap_spearman": 0.21757763900566704
+      },
+      {
+        "reload": 3,
+        "gap_ms": {
+          "p50": 217.958,
+          "p95": 372.038,
+          "max": 388.758
+        },
+        "gap_ends_first_generation": 700,
+        "gap_ends_first_base": 700,
+        "observer_index_gap_spearman": 0.07374593341678846
+      },
+      {
+        "reload": 4,
+        "gap_ms": {
+          "p50": 226.954,
+          "p95": 374.204,
+          "max": 403.168
+        },
+        "gap_ends_first_generation": 700,
+        "gap_ends_first_base": 700,
+        "observer_index_gap_spearman": 0.29819507272449197
+      }
+    ],
+    "cross_rounds": [
+      {
+        "a": 1,
+        "b": 2,
+        "spearman": 0.27853593259182263,
+        "top35_overlap": 0
+      },
+      {
+        "a": 1,
+        "b": 3,
+        "spearman": 0.7409657584435211,
+        "top35_overlap": 2
+      },
+      {
+        "a": 1,
+        "b": 4,
+        "spearman": 0.25870748794174264,
+        "top35_overlap": 10
+      },
+      {
+        "a": 2,
+        "b": 3,
+        "spearman": 0.45608928999766774,
+        "top35_overlap": 4
+      },
+      {
+        "a": 2,
+        "b": 4,
+        "spearman": 0.6974632467242173,
+        "top35_overlap": 0
+      },
+      {
+        "a": 3,
+        "b": 4,
+        "spearman": 0.359135585858114,
+        "top35_overlap": 0
+      }
+    ],
+    "top35_union": 124,
+    "top35_all_round_intersection": 0
+  },
+  "probe": {
+    "rounds": [
+      {
+        "reload": 1,
+        "gap_ms": {
+          "p50": 220.363,
+          "p95": 317.6,
+          "max": 380.805
+        },
+        "gap_ends_first_generation": 700,
+        "gap_ends_first_base": 700,
+        "observer_index_gap_spearman": 0.08267856229485823,
+        "release_ms": {
+          "min": 866.1245,
+          "span": 124.644,
+          "p50": 868.4405,
+          "p95": 870.2245,
+          "max": 990.7685
+        },
+        "consumer_ms": {
+          "min": 866.1525,
+          "span": 125.38599999999997,
+          "p50": 868.4505,
+          "p95": 870.2365,
+          "max": 991.5385
+        },
+        "enqueue_ms": {
+          "min": 871.0305,
+          "span": 120.53200000000004,
+          "p50": 875.0435,
+          "p95": 917.5655,
+          "max": 991.5625
+        },
+        "writer_start_ms": {
+          "min": 871.0655,
+          "span": 127.16399999999999,
+          "p50": 875.0635,
+          "p95": 917.6465,
+          "max": 998.2295
+        },
+        "first_generation_ms": {
+          "min": 871.178,
+          "span": 166.2879999999999,
+          "p50": 878.105,
+          "p95": 975.444,
+          "max": 1037.466
+        },
+        "gap_start_ms": {
+          "min": 649.887,
+          "span": 39.80600000000004,
+          "p50": 658.0,
+          "p95": 659.52,
+          "max": 689.693
+        },
+        "consumer_to_enqueue_ms": {
+          "p50": 5.958000000000084,
+          "p95": 50.42700000000002,
+          "max": 63.05899999999997
+        },
+        "top35": {
+          "release_to_consumer_ms": {
+            "p50": 0.013000000000033651,
+            "p95": 0.028999999999996362,
+            "max": 120.42400000000009
+          },
+          "enqueue_to_writer_trace_ms": {
+            "p50": 0.049999999999954525,
+            "p95": 0.10099999999999909,
+            "max": 6.66700000000003
+          },
+          "writer_elapsed_ms": {
+            "p50": 0.036,
+            "p95": 0.078,
+            "max": 0.169
+          },
+          "writer_to_arrival_ms": {
+            "p50": 84.8175,
+            "p95": 113.4994999999999,
+            "max": 117.65949999999987
+          },
+          "consumer_to_enqueue_ms": {
+            "p50": 48.05499999999995,
+            "p95": 62.07899999999995,
+            "max": 62.769000000000005
+          }
+        },
+        "send_buffer_values": [
+          2626560
+        ],
+        "producer": {
+          "reload": 1,
+          "inventory": "reload-1-inventory",
+          "inventory_rows": 400432,
+          "sorted_ms": 870.6785,
+          "first_publish_log_ms": 871.0785,
+          "finished_ms": 959.1755,
+          "observer": 0
+        }
+      },
+      {
+        "reload": 2,
+        "gap_ms": {
+          "p50": 230.044,
+          "p95": 387.987,
+          "max": 400.9
+        },
+        "gap_ends_first_generation": 700,
+        "gap_ends_first_base": 700,
+        "observer_index_gap_spearman": 0.4147829921366958,
+        "release_ms": {
+          "min": 764.246,
+          "span": 149.014,
+          "p50": 766.497,
+          "p95": 768.308,
+          "max": 913.26
+        },
+        "consumer_ms": {
+          "min": 764.272,
+          "span": 149.9609999999999,
+          "p50": 766.592,
+          "p95": 768.319,
+          "max": 914.233
+        },
+        "enqueue_ms": {
+          "min": 768.863,
+          "span": 145.385,
+          "p50": 771.92,
+          "p95": 790.4,
+          "max": 914.248
+        },
+        "writer_start_ms": {
+          "min": 768.903,
+          "span": 150.15999999999997,
+          "p50": 771.939,
+          "p95": 790.435,
+          "max": 919.063
+        },
+        "first_generation_ms": {
+          "min": 768.993,
+          "span": 187.4699999999999,
+          "p50": 787.039,
+          "p95": 944.519,
+          "max": 956.463
+        },
+        "gap_start_ms": {
+          "min": 555.542,
+          "span": 22.46799999999996,
+          "p50": 557.124,
+          "p95": 558.212,
+          "max": 578.01
+        },
+        "consumer_to_enqueue_ms": {
+          "p50": 4.9080000000000155,
+          "p95": 21.86200000000008,
+          "max": 28.468999999999937
+        },
+        "top35": {
+          "release_to_consumer_ms": {
+            "p50": 0.011999999999943611,
+            "p95": 0.021999999999934516,
+            "max": 144.8259999999999
+          },
+          "enqueue_to_writer_trace_ms": {
+            "p50": 0.02800000000002001,
+            "p95": 0.03700000000003456,
+            "max": 4.814999999999941
+          },
+          "writer_elapsed_ms": {
+            "p50": 0.031,
+            "p95": 0.04,
+            "max": 0.057
+          },
+          "writer_to_arrival_ms": {
+            "p50": 163.90999999999997,
+            "p95": 169.1980000000001,
+            "max": 169.928
+          },
+          "consumer_to_enqueue_ms": {
+            "p50": 18.285000000000082,
+            "p95": 21.605000000000018,
+            "max": 21.86200000000008
+          }
+        },
+        "send_buffer_values": [
+          2626560
+        ],
+        "producer": {
+          "reload": 2,
+          "inventory": "reload-2-inventory",
+          "inventory_rows": 400416,
+          "sorted_ms": 768.52,
+          "first_publish_log_ms": 768.922,
+          "finished_ms": 865.292,
+          "observer": 0
+        }
+      },
+      {
+        "reload": 3,
+        "gap_ms": {
+          "p50": 234.099,
+          "p95": 395.027,
+          "max": 406.658
+        },
+        "gap_ends_first_generation": 700,
+        "gap_ends_first_base": 700,
+        "observer_index_gap_spearman": 0.0075978355452098415,
+        "release_ms": {
+          "min": 746.5695,
+          "span": 121.25900000000001,
+          "p50": 749.2825,
+          "p95": 751.3055,
+          "max": 867.8285
+        },
+        "consumer_ms": {
+          "min": 746.5945,
+          "span": 121.98599999999999,
+          "p50": 749.3015,
+          "p95": 751.3185,
+          "max": 868.5805
+        },
+        "enqueue_ms": {
+          "min": 751.9655,
+          "span": 116.63400000000001,
+          "p50": 755.4015,
+          "p95": 856.6235,
+          "max": 868.5995
+        },
+        "writer_start_ms": {
+          "min": 751.9945,
+          "span": 121.85299999999995,
+          "p50": 755.4165,
+          "p95": 856.7055,
+          "max": 873.8475
+        },
+        "first_generation_ms": {
+          "min": 752.099,
+          "span": 175.72399999999993,
+          "p50": 755.533,
+          "p95": 917.609,
+          "max": 927.823
+        },
+        "gap_start_ms": {
+          "min": 519.56,
+          "span": 44.827,
+          "p50": 522.648,
+          "p95": 523.936,
+          "max": 564.387
+        },
+        "consumer_to_enqueue_ms": {
+          "p50": 5.656000000000063,
+          "p95": 108.44899999999996,
+          "max": 113.25
+        },
+        "top35": {
+          "release_to_consumer_ms": {
+            "p50": 0.014000000000010004,
+            "p95": 0.020999999999958163,
+            "max": 0.7520000000000664
+          },
+          "enqueue_to_writer_trace_ms": {
+            "p50": 0.06500000000005457,
+            "p95": 0.08100000000001728,
+            "max": 5.247999999999934
+          },
+          "writer_elapsed_ms": {
+            "p50": 0.052,
+            "p95": 0.125,
+            "max": 0.181
+          },
+          "writer_to_arrival_ms": {
+            "p50": 73.87450000000001,
+            "p95": 78.59349999999995,
+            "max": 78.7065
+          },
+          "consumer_to_enqueue_ms": {
+            "p50": 101.67899999999997,
+            "p95": 104.50999999999999,
+            "max": 112.3470000000001
+          }
+        },
+        "send_buffer_values": [
+          2626560
+        ],
+        "producer": {
+          "reload": 3,
+          "inventory": "reload-3-inventory",
+          "inventory_rows": 400464,
+          "sorted_ms": 751.6255,
+          "first_publish_log_ms": 752.0245,
+          "finished_ms": 837.7145,
+          "observer": 0
+        }
+      },
+      {
+        "reload": 4,
+        "gap_ms": {
+          "p50": 272.216,
+          "p95": 428.839,
+          "max": 464.226
+        },
+        "gap_ends_first_generation": 700,
+        "gap_ends_first_base": 700,
+        "observer_index_gap_spearman": 0.26150275937618483,
+        "release_ms": {
+          "min": 734.4,
+          "span": 143.37,
+          "p50": 736.456,
+          "p95": 738.136,
+          "max": 877.77
+        },
+        "consumer_ms": {
+          "min": 734.429,
+          "span": 144.36800000000005,
+          "p50": 736.468,
+          "p95": 738.147,
+          "max": 878.797
+        },
+        "enqueue_ms": {
+          "min": 739.927,
+          "span": 138.913,
+          "p50": 743.003,
+          "p95": 847.719,
+          "max": 878.84
+        },
+        "writer_start_ms": {
+          "min": 739.964,
+          "span": 145.44299999999998,
+          "p50": 743.02,
+          "p95": 847.785,
+          "max": 885.407
+        },
+        "first_generation_ms": {
+          "min": 740.076,
+          "span": 177.82799999999997,
+          "p50": 751.19,
+          "p95": 908.204,
+          "max": 917.904
+        },
+        "gap_start_ms": {
+          "min": 449.627,
+          "span": 30.730999999999995,
+          "p50": 479.023,
+          "p95": 480.297,
+          "max": 480.358
+        },
+        "consumer_to_enqueue_ms": {
+          "p50": 6.2590000000000146,
+          "p95": 110.29000000000008,
+          "max": 116.82099999999991
+        },
+        "top35": {
+          "release_to_consumer_ms": {
+            "p50": 0.010999999999967258,
+            "p95": 0.018000000000029104,
+            "max": 0.019000000000005457
+          },
+          "enqueue_to_writer_trace_ms": {
+            "p50": 0.07000000000005002,
+            "p95": 0.10799999999994725,
+            "max": 0.1209999999999809
+          },
+          "writer_elapsed_ms": {
+            "p50": 0.058,
+            "p95": 0.116,
+            "max": 0.124
+          },
+          "writer_to_arrival_ms": {
+            "p50": 73.89999999999998,
+            "p95": 77.70399999999995,
+            "max": 79.49400000000003
+          },
+          "consumer_to_enqueue_ms": {
+            "p50": 102.95399999999995,
+            "p95": 105.52599999999995,
+            "max": 109.32299999999998
+          }
+        },
+        "send_buffer_values": [
+          2626560
+        ],
+        "producer": {
+          "reload": 4,
+          "inventory": "reload-4-inventory",
+          "inventory_rows": 400448,
+          "sorted_ms": 739.58,
+          "first_publish_log_ms": 739.983,
+          "finished_ms": 823.497,
+          "observer": 0
+        }
+      }
+    ],
+    "cross_rounds": [
+      {
+        "a": 1,
+        "b": 2,
+        "spearman": 0.5264400975507636,
+        "top35_overlap": 5
+      },
+      {
+        "a": 1,
+        "b": 3,
+        "spearman": 0.5053650787553333,
+        "top35_overlap": 8
+      },
+      {
+        "a": 1,
+        "b": 4,
+        "spearman": 0.36582101642600756,
+        "top35_overlap": 0
+      },
+      {
+        "a": 2,
+        "b": 3,
+        "spearman": 0.33008668182471795,
+        "top35_overlap": 4
+      },
+      {
+        "a": 2,
+        "b": 4,
+        "spearman": 0.579364344947237,
+        "top35_overlap": 2
+      },
+      {
+        "a": 3,
+        "b": 4,
+        "spearman": 0.3107592766943487,
+        "top35_overlap": 4
+      }
+    ],
+    "top35_union": 119,
+    "top35_all_round_intersection": 0
+  },
+  "scope": "postprocessing existing complete rows; one process per arm, four correlated reloads; diagnostic associations, not causal gains"
+}

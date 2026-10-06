@@ -1,0 +1,57 @@
+{
+  "schema": 1,
+  "date": "2026-10-06",
+  "source_commit": "19842a5a114287af7a8f5ae66407aaacc9d0142a",
+  "source_tree": "fe3a2dbe6e01eb4fbb6aec5482f1184eae1973e9",
+  "probe_source_patch_sha256": "23289bea4d89ed83e3aee623573965a556bf6636fbf1d78f46f46ab576d07dc0",
+  "rust_version": "1.99.0 (b940084d7 2026-09-28)",
+  "platform": "Linux 7.0.0-30-generic x86_64",
+  "daemon_features": [
+    "rustbgpd-transport/bench-internals"
+  ],
+  "binaries": {
+    "control": "600327d665de6764585c422c77b4b3b7c82d7b4a59b031e257aecee9759fb097",
+    "probe": "9bce83d837beddbc0235df29374298f5ac00aee9ee71f67312787cfb0d77a927",
+    "observer": "effe9c204e5cce66f324c49edb13c8ce5f7f4be95c411ec96bd1bcb7fa3e0e70"
+  },
+  "workload": {
+    "N_PEERS": "700",
+    "TOTAL_PREFIXES": "400400",
+    "PORT": "1790",
+    "RELOADS": "4",
+    "CONTROL_SECS": "30",
+    "CHANGED_PEERS": "",
+    "FLAPSTORM": "",
+    "BIRD_THREADS": "8",
+    "PROBE_PREFIXES": ""
+  },
+  "order": [
+    "control",
+    "probe"
+  ],
+  "processes_per_arm": 1,
+  "correlated_reloads_per_arm": 4,
+  "added_rtt_ms": 0,
+  "reader_pacing": "none",
+  "policy_mode": "historical import plus export",
+  "inventory_aliases": "reload-N-inventory substitutes one distinct retained allocation identity per measured reload; original numeric IDs remain only in archived raw files",
+  "raw_archive": {
+    "sha256": "2a0da40e0067ff0f6530b634ece6fb190e9bf95793833aaa42e868d7541a8908",
+    "bytes": 352378880,
+    "verified_files": 148
+  },
+  "cleanup": {
+    "exit": 0,
+    "lock_exit": 0,
+    "owned_processes_remaining": 0,
+    "scenario_removed": true,
+    "source_files_restored": 5
+  },
+  "limits": [
+    "One process per arm, fixed arm order, four correlated reloads; no statistical significance or accepted probe overhead.",
+    "Probe logs were enabled for the full process lifetime, including initial convergence.",
+    "No readiness probes; no new cross-daemon or slow-reader comparison.",
+    "Public extracts cannot independently authenticate unpublished raw data or build/source equality."
+  ],
+  "receipt_vocabulary": "current"
+}

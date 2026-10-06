@@ -13,6 +13,12 @@ also covers interop and archived soaks.
 
 Each result below links to its published, reproducible receipt:
 
+- **Policy-reload observer-tail diagnostic**: a 700-peer, 400,400-prefix
+  control/probe pair traces all 2,800 instrumented first chunks through release,
+  admission, and FIFO-matched writes. The receipt retains receiver-processing
+  ambiguity and measured probe perturbation; it selects follow-up measurements
+  without qualifying an optimization —
+  [observer-tail attribution](reload-observer-tail-2026-10-06.md), measured 2026-10-06
 - **Dual-stack filtering reload after redundant-policy work removal**:
   the 200-member cell passed with 170 changed targets and no stable-peer
   remainder; median full-generation duration was 345.378 ms across four

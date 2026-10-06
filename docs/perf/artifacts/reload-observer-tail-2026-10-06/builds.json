@@ -1,0 +1,52 @@
+{
+  "control": {
+    "source_commit": "19842a5a114287af7a8f5ae66407aaacc9d0142a",
+    "source_patch_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "binary_sha256": "600327d665de6764585c422c77b4b3b7c82d7b4a59b031e257aecee9759fb097",
+    "features": [
+      "rustbgpd-transport/bench-internals"
+    ],
+    "build_exit": 0,
+    "source_clean_at_build": true
+  },
+  "probe": {
+    "source_commit": "19842a5a114287af7a8f5ae66407aaacc9d0142a",
+    "source_patch_sha256": "23289bea4d89ed83e3aee623573965a556bf6636fbf1d78f46f46ab576d07dc0",
+    "binary_sha256": "9bce83d837beddbc0235df29374298f5ac00aee9ee71f67312787cfb0d77a927",
+    "features": [
+      "rustbgpd-transport/bench-internals"
+    ],
+    "build_exit": 0,
+    "source_files": {
+      "bench/scale/reloadstall/src/main.rs": "3434152e8e3b8f88be553331e88f7f08ecb526d23b37b5048df05743b0cd0a8c",
+      "crates/rib/src/manager/distribution/mod.rs": "6eb5b973b098b60fa3cec5da4aa40e6d50bb9904cfcc003031a1c732b00f209e",
+      "crates/transport/src/session/outbound.rs": "cf9ff27fed6f6e62ab8cd7452a662293fa8699653aeafa28c376feb5b702acb8",
+      "crates/transport/src/session/shared_group.rs": "10037d2cf539cf6602871e19c78b72579d56cf856b36cc90d5197b80f501066b",
+      "crates/transport/src/session/writer.rs": "d006c98ed145f42b6f550379d5c8979c309dfc7d4902ea2240eb3dd50798a0a0"
+    },
+    "witness": {
+      "binary_sha256": "9bce83d837beddbc0235df29374298f5ac00aee9ee71f67312787cfb0d77a927",
+      "required_probe_site_counts": {
+        "scout member release": 1,
+        "scout consumer entered": 1,
+        "scout first shared enqueue": 1,
+        "scout encoder sorted": 1,
+        "scout first publish": 1,
+        "scout encoder finished": 1,
+        "benchmark writer write-future polls (not kernel wakeups)": 1
+      },
+      "compiled_packages": [
+        "rustbgpd-rib",
+        "rustbgpd-transport",
+        "rustbgpd"
+      ]
+    }
+  },
+  "observer": {
+    "source_commit": "19842a5a114287af7a8f5ae66407aaacc9d0142a",
+    "source_file_sha256": "3434152e8e3b8f88be553331e88f7f08ecb526d23b37b5048df05743b0cd0a8c",
+    "binary_sha256": "effe9c204e5cce66f324c49edb13c8ce5f7f4be95c411ec96bd1bcb7fa3e0e70",
+    "profile": "scale",
+    "build_exit": 0
+  }
+}

@@ -1,0 +1,38 @@
+[
+  {
+    "reload": 1,
+    "inventory": "reload-1-inventory",
+    "inventory_rows": 400432,
+    "sorted_ms": 870.6785,
+    "first_publish_log_ms": 871.0785,
+    "finished_ms": 959.1755,
+    "observer": 0
+  },
+  {
+    "reload": 2,
+    "inventory": "reload-2-inventory",
+    "inventory_rows": 400416,
+    "sorted_ms": 768.52,
+    "first_publish_log_ms": 768.922,
+    "finished_ms": 865.292,
+    "observer": 0
+  },
+  {
+    "reload": 3,
+    "inventory": "reload-3-inventory",
+    "inventory_rows": 400464,
+    "sorted_ms": 751.6255,
+    "first_publish_log_ms": 752.0245,
+    "finished_ms": 837.7145,
+    "observer": 0
+  },
+  {
+    "reload": 4,
+    "inventory": "reload-4-inventory",
+    "inventory_rows": 400448,
+    "sorted_ms": 739.58,
+    "first_publish_log_ms": 739.983,
+    "finished_ms": 823.497,
+    "observer": 0
+  }
+]
