@@ -111,6 +111,7 @@ Inspect the receipts behind protocol, performance, and operational claims.
 | [Benchmarks](benchmarks.md) | Microbenchmarks and their measured scope. |
 | [Performance archive](perf/README.md) | Dated performance receipts and their supporting artifacts. |
 | TCP unsent-threshold screens | Separate [64 KiB](perf/tcp-unsent-threshold-screen-2026-10.md) and [128 KiB](perf/tcp-unsent-threshold-128k-screen-2026-10.md) memory/completion screens and container sizing guidance. |
+| [Current-source IRR comparison](perf/irr-reload-current-comparators-2026-10-06.md) | Measured 2026-10-06: unreleased `dcc9b6384`, BIRD 3.3.3 and OpenBGPD 9.3 at 320 members × 183,040 prefixes, 0% overlap; three roots and 36 reload rows. |
 | [Soak archive](soaks/README.md) | Long-running test reports, acceptance gates, and receipt templates. |
 | [Raw artifacts](artifacts/) | Preserved data supporting published findings. |
 

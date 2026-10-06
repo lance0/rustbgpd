@@ -1,0 +1,5 @@
+reload,timestamp_epoch_us,total_targets,cohort_targets,remainder_targets,refresh_count,outcome,authoritative_fallback,preflight_us,cohort_selection_us,cohort_prestage_session_apply_us,cohort_rib_transition_us,authoritative_remainder_apply_us,deferred_refresh_dispatch_us,convergence_check_us,total_us,unattributed_us
+1,1791269352567216,320,320,0,0,committed,true,31,1076,875,366430,1,2,58,369638,1165
+2,1791269374801355,320,320,0,0,committed,true,57,1602,1613,382273,0,2,47,386853,1259
+3,1791269396994526,320,320,0,0,committed,true,17,1158,2377,377941,1,2,49,382549,1004
+4,1791269419179797,320,320,0,0,committed,true,26,1610,1105,372808,2,2,46,376693,1094
