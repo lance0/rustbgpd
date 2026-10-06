@@ -110,7 +110,7 @@ Inspect the receipts behind protocol, performance, and operational claims.
 | [Interoperability](interop.md) | Validation against real BGP peers and network operating systems. |
 | [Benchmarks](benchmarks.md) | Microbenchmarks and their measured scope. |
 | [Performance archive](perf/README.md) | Dated performance receipts and their supporting artifacts. |
-| [TCP unsent-threshold screen](perf/tcp-unsent-threshold-screen-2026-10.md) | Six-leg memory/completion tradeoff and the 64 KiB candidate’s failed completion gate. |
+| [TCP unsent-threshold screens](perf/tcp-unsent-threshold-128k-screen-2026-10.md) | Separate 64 KiB and 128 KiB memory/completion screens and container sizing guidance. |
 | [Soak archive](soaks/README.md) | Long-running test reports, acceptance gates, and receipt templates. |
 | [Raw artifacts](artifacts/) | Preserved data supporting published findings. |
 

@@ -1,0 +1,132 @@
+{
+  "arms": {
+    "unset": {
+      "independent_legs": 3,
+      "correlated_reload_rows": 12,
+      "completion_p50_median_s": 0.915911,
+      "completion_p50_range_s": [
+        0.860024,
+        1.007529
+      ],
+      "independent_leg_completion_medians_s": [
+        0.8952495,
+        0.913568,
+        0.9591855
+      ],
+      "independent_leg_completion_median_s": 0.913568,
+      "independent_leg_stall_medians_ms": [
+        221.067,
+        264.26800000000003,
+        219.9785
+      ],
+      "independent_leg_stall_median_ms": 221.067,
+      "stall_p50_median_ms": 222.09,
+      "stall_p50_range_ms": [
+        211.714,
+        304.013
+      ],
+      "worst_completion_s": 1.060001,
+      "worst_stall_ms": 497.914,
+      "observed_kernel_peak_median_mib": 1106.5625,
+      "observed_kernel_peak_range_mib": [
+        1037.66796875,
+        1113.546875
+      ],
+      "burst_cpu_outer_bracket_median_s": 2.1950000000000003,
+      "burst_requested_duration_median_s": 0.969761,
+      "burst_outer_bracket_width_median_s": 0.9999995,
+      "burst_cpu_rate_outer_bracket_median": 2.1882819760641423,
+      "control_cpu_outer_bracket_median_s": 0.545,
+      "control_outer_bracket_width_median_s": 1.0250225,
+      "control_cpu_rate_outer_bracket_median": 0.531686525541724,
+      "trace_cpu_seconds": [
+        82.42,
+        73.76,
+        106.8
+      ],
+      "trace_cpu_median_s": 82.42
+    },
+    "131072": {
+      "independent_legs": 3,
+      "correlated_reload_rows": 12,
+      "completion_p50_median_s": 0.956007,
+      "completion_p50_range_s": [
+        0.937196,
+        1.048013
+      ],
+      "independent_leg_completion_medians_s": [
+        0.9570685000000001,
+        0.9702605,
+        0.953209
+      ],
+      "independent_leg_completion_median_s": 0.9570685000000001,
+      "independent_leg_stall_medians_ms": [
+        220.97899999999998,
+        231.996,
+        218.22449999999998
+      ],
+      "independent_leg_stall_median_ms": 220.97899999999998,
+      "stall_p50_median_ms": 220.97899999999998,
+      "stall_p50_range_ms": [
+        214.531,
+        254.732
+      ],
+      "worst_completion_s": 1.128042,
+      "worst_stall_ms": 433.01,
+      "observed_kernel_peak_median_mib": 767.640625,
+      "observed_kernel_peak_range_mib": [
+        742.90234375,
+        819.2421875
+      ],
+      "burst_cpu_outer_bracket_median_s": 2.425,
+      "burst_requested_duration_median_s": 1.0106519999999999,
+      "burst_outer_bracket_width_median_s": 1.0250065,
+      "burst_cpu_rate_outer_bracket_median": 2.3170206752111904,
+      "control_cpu_outer_bracket_median_s": 0.87,
+      "control_outer_bracket_width_median_s": 1.025011,
+      "control_cpu_rate_outer_bracket_median": 0.8487713790388591,
+      "trace_cpu_seconds": [
+        108.71,
+        111.03,
+        103.37
+      ],
+      "trace_cpu_median_s": 108.71
+    }
+  },
+  "change_percent": {
+    "completion_p50_median_s": 4.377717922374558,
+    "stall_p50_median_ms": -0.5002476473501827,
+    "independent_leg_completion_median_s": 4.761605047462258,
+    "independent_leg_stall_median_ms": -0.03980693635866617,
+    "burst_cpu_outer_bracket_median_s": 10.478359908883794,
+    "trace_cpu_median_s": 31.897597670468315
+  },
+  "observed_kernel_peak_median_reduction_mib": 338.921875,
+  "matched_pairs": [
+    {
+      "unset_leg": 1,
+      "candidate_leg": 2,
+      "completion_p50_median_change_percent": 6.905225861617348,
+      "observed_kernel_peak_reduction_mib": 294.3046875
+    },
+    {
+      "unset_leg": 4,
+      "candidate_leg": 3,
+      "completion_p50_median_change_percent": 6.205613594171422,
+      "observed_kernel_peak_reduction_mib": 338.921875
+    },
+    {
+      "unset_leg": 5,
+      "candidate_leg": 6,
+      "completion_p50_median_change_percent": -0.6230807283888362,
+      "observed_kernel_peak_reduction_mib": 294.765625
+    }
+  ],
+  "screen_components": {
+    "completion_at_most_plus_2_percent": false,
+    "stall_at_most_plus_2_percent": true,
+    "memory_reduction_at_least_100_mib": true,
+    "writer_wakeup_gate": "unresolved",
+    "frozen_131072_byte_candidate": "NO-GO"
+  }
+}
