@@ -240,6 +240,10 @@ if [ -n "${RELOADSTALL_CONTAINER_IMAGE_ID:-}" ]; then
             exit 2
         fi
     done
+    if [ -e "$ART" ] || [ -L "$ART" ]; then
+        echo 'container RTT mode requires a fresh non-symlink ARTIFACTS_DIR; prior receipts are retained' >&2
+        exit 2
+    fi
 fi
 acquire_rustbgpd_host_lock || exit $?
 
@@ -471,7 +475,10 @@ run_container_cell() (
     # shellcheck disable=SC2317 # Invoked by EXIT, including INT/TERM failures.
     cleanup_container_cell() {
         local original=$? cleanup_rc=0 sampler_rc=0
-        trap - EXIT INT TERM
+        trap - EXIT
+        # Keep teardown alive if the wrapper signals the process group again.
+        # A caught no-op resets to the default in children; ignored signals do not.
+        trap ':' INT TERM
         # On every path, stop receivers before collecting/stopping the daemon.
         stop_owned_container "$cdir/receiver.cid" receiver || cleanup_rc=1
         if [ -n "$waiter" ]; then

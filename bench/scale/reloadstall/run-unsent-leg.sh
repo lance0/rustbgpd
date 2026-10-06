@@ -78,6 +78,9 @@ fi
 sampler=''
 runner=''
 cleanup() {
+    trap - EXIT
+    # Repeated interruption must not abort owned process/container teardown.
+    trap ':' INT TERM
     if [ -n "$runner" ]; then
         # The matrix owns every daemon, harness and sampler in this group.
         # Signal the entire group, retain the real child status, and bound exit.

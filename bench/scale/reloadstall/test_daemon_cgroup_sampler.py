@@ -489,6 +489,47 @@ class LegWrapperTests(unittest.TestCase):
                 child.kill()
                 child.wait()
 
+    def test_second_interrupt_during_sampler_cleanup_still_reaps_it(self):
+        ready = Path(self.temp.name) / "ready"
+        sampler_ready = Path(self.temp.name) / "sampler-ready"
+        cleanup_ready = Path(self.temp.name) / "cleanup-ready"
+        self.runner.write_text('trap "" TERM\nsleep 300 &\necho "$!" >"$WRAPPER_TEST_READY"\nwait\n')
+        self.sampler.write_text(
+            "import os,signal,sys,time\nfrom pathlib import Path\n"
+            "signal.signal(signal.SIGTERM,lambda *_: Path(os.environ['WRAPPER_TEST_CLEANUP_READY']).write_text(str(os.getpid())))\n"
+            "Path(os.environ['WRAPPER_TEST_SAMPLER_READY']).touch()\n"
+            "Path(sys.argv[sys.argv.index('--out')+1]).write_text('header\\n1\\n')\n"
+            "time.sleep(300)\n")
+        child = subprocess.Popen(["bash", str(self.script), str(self.out), "unset"], env=dict(
+            os.environ, WRAPPER_TEST_READY=str(ready), WRAPPER_TEST_SAMPLER_READY=str(sampler_ready),
+            WRAPPER_TEST_CLEANUP_READY=str(cleanup_ready), UNSENT_CLEANUP_TIMEOUT_SECS="1"),
+            start_new_session=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        try:
+            deadline = time.monotonic() + 5
+            while not (ready.exists() and sampler_ready.exists()) and time.monotonic() < deadline:
+                time.sleep(.01)
+            self.assertTrue(ready.exists() and sampler_ready.exists(), "owned children did not start")
+            child.terminate()
+            deadline = time.monotonic() + 5
+            while not cleanup_ready.exists() and time.monotonic() < deadline:
+                time.sleep(.01)
+            self.assertTrue(cleanup_ready.exists(), "sampler teardown did not start")
+            child.terminate()
+            self.assertEqual(child.wait(timeout=5), 143)
+            self.assertEqual((self.out / "sampler.exit").read_text().strip(), "137")
+            proc = Path(f"/proc/{cleanup_ready.read_text()}/stat")
+            self.assertTrue(not proc.exists() or proc.read_text().split(") ")[1].startswith("Z"))
+        finally:
+            groups = [child.pid]
+            if (self.out / "runner.pid").exists():
+                groups.append(int((self.out / "runner.pid").read_text()))
+            for group in groups:
+                try:
+                    os.killpg(group, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+            child.wait()
+
 class ContainerCellTests(unittest.TestCase):
     """Exercise the real container branch with a stateful Docker CLI stand-in."""
 
@@ -552,6 +593,9 @@ elif cmd=='wait':
     print(data['State']['ExitCode'])
 elif cmd in ('stop','kill'):
     path,data=read(args[-1])
+    if cmd=='stop' and data['Id'].startswith('a') and os.environ.get('TEST_PAUSE_DAEMON_STOP'):
+        (root/'cleanup-ready').touch()
+        while not (root/'cleanup-continue').exists(): time.sleep(.01)
     if cmd=='stop' and os.environ.get('TEST_IGNORE_TERM') and data['State']['Running']:
         sys.exit(1)
     if cmd=='kill': data['State']['ExitCode']=137
@@ -655,6 +699,38 @@ provenance_sha256_file() { echo fake-binary-hash; }
                 self.assertEqual(receiver[-2], str(reloads))
                 self.assert_cleanup_order()
 
+    def test_existing_or_symlink_receipts_reject_retry_without_mutation(self):
+        matrix = Path(__file__).parents[1] / "matrix/run-matrix.sh"
+        retained = {self.cdir / "daemon.cid": b"a" * 64 + b"\n",
+                    self.cdir / "receiver.cid": b"b" * 64 + b"\n",
+                    self.root / "cgroup-fast.csv": b"retained memory trace\n",
+                    self.trace: b"retained Docker trace\n"}
+        for path, data in retained.items(): path.write_bytes(data)
+        link = self.root / "linked-artifacts"
+        link.symlink_to(self.cdir.parent)
+        dangling = self.root / "dangling-artifacts"
+        dangling.symlink_to(self.root / "absent")
+        status = self.cdir / "status"
+        with (self.root / "host.lock").open("w") as stream:
+            fcntl.flock(stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            for old_status, artifacts in (("pass\n", self.cdir.parent),
+                                          ("fail rc=1\n", self.cdir.parent),
+                                          (None, self.cdir.parent), (None, link), (None, dangling)):
+                with self.subTest(old_status=old_status, artifacts=artifacts):
+                    if old_status is None: status.unlink(missing_ok=True)
+                    else: status.write_text(old_status)
+                    result = subprocess.run(["bash", str(matrix), "rustbgpd"], env=dict(
+                        self.env, RELOADSTALL_CONTAINER_IMAGE_ID="sha256:" + "c" * 64,
+                        RELOADSTALL_UNSENT_RTT_MS="20", ARTIFACTS_DIR=str(artifacts),
+                        RUSTBGPD_HOST_LOCK=str(self.root / "host.lock")),
+                        capture_output=True, text=True, timeout=5)
+                    self.assertEqual(result.returncode, 2, result.stderr)
+                    self.assertIn("requires a fresh non-symlink ARTIFACTS_DIR", result.stderr)
+                    self.assertNotIn("host.lock", result.stderr)
+                    for path, data in retained.items(): self.assertEqual(path.read_bytes(), data)
+                    self.assertEqual(status.read_text() if status.exists() else None, old_status)
+                    self.assertTrue(link.is_symlink() and dangling.is_symlink())
+
     def test_sampler_failure_aborts_receiver_and_preserves_failure(self):
         result = subprocess.run(["bash", str(self.script)], env=dict(
             self.env, TEST_SAMPLER_FAIL="1", TEST_BLOCK_RECEIVER="1"),
@@ -698,6 +774,30 @@ provenance_sha256_file() { echo fake-binary-hash; }
             self.assertTrue(any(args[0] == "kill" for args in self.commands()))
             self.assertEqual((self.cdir / "daemon.exit-state").read_text().strip(), "137\tfalse\tfalse")
         finally:
+            if child.poll() is None:
+                os.killpg(child.pid, signal.SIGKILL)
+                child.wait()
+
+    def test_interrupt_during_exit_cleanup_still_removes_owned_containers(self):
+        child = subprocess.Popen(["bash", str(self.script)], env=dict(
+            self.env, TEST_PAUSE_DAEMON_STOP="1"), start_new_session=True,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        try:
+            deadline = time.monotonic() + 10
+            while not (self.root / "cleanup-ready").exists() and time.monotonic() < deadline:
+                time.sleep(.01)
+            self.assertTrue((self.root / "cleanup-ready").exists(), "daemon teardown did not start")
+            os.killpg(child.pid, signal.SIGTERM)
+            (self.root / "cleanup-continue").touch()
+            child.communicate(timeout=5)
+            self.assertNotEqual(child.returncode, 0)
+            self.assert_cleanup_order()
+            self.assertEqual((self.cdir / "daemon.exit-state").read_text().strip(), "0\tfalse\tfalse")
+            # The group signal terminates the sampler; cleanup must retain that failure.
+            self.assertEqual((self.root / "sampler.exit").read_text().strip(), "143")
+            self.assertEqual((self.cdir / "cleanup.exit").read_text().strip(), "1")
+        finally:
+            (self.root / "cleanup-continue").touch()
             if child.poll() is None:
                 os.killpg(child.pid, signal.SIGKILL)
                 child.wait()

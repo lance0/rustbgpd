@@ -138,6 +138,12 @@ A passing smoke validates the driver; it does not qualify the 700-peer timing or
 memory gates. Test both reader qualification shapes at scale before shipping a
 setting.
 
+Container legs require a fresh, non-symlink `ARTIFACTS_DIR`; existing receipts
+cannot be resumed or overwritten. Use a new output directory for every attempt,
+and retain earlier IDs, traces and exit records when investigating a failed leg.
+Native matrix resume behavior is unchanged. Repeated interruptions are caught
+while owned cleanup finishes; cleanup children retain their normal signal handling.
+
 `RUSTBGPD_BENCH_WRITER_POLLS=1` enables per-write poll/pending-poll diagnostic
 logs with epoch markers, including failed/canceled attempts but excluding any
 teardown linger. They are future poll/resume counts, not actual kernel wakeups.
