@@ -585,7 +585,8 @@ RELOADSTALL_CONTAINER_IMAGE_ID=sha256:cccccccccccccccccccccccccccccccccccccccccc
 RELOADSTALL_CONTAINER_MEMORY_BYTES=1073741824
 RELOADSTALL_UNSENT_RTT_MS=20
 RELOADSTALL_HOST_NETNS='net:[1]'
-N_PEERS=12 TOTAL=1200 PORT=1790 RELOADS=2 CONTROL_SECS=1 CHANGED_PEERS='' RSS_LIMIT_KIB=1048576
+N_PEERS=12 TOTAL=1200 PORT=1790 CONTROL_SECS=1 CHANGED_PEERS='' RSS_LIMIT_KIB=1048576
+RELOADS=${RELOADS:-2}
 recheck_cell_provenance() { return 0; }
 write_cell_provenance() { return 0; }
 provenance_sha256_file() { echo fake-binary-hash; }
@@ -614,6 +615,44 @@ provenance_sha256_file() { echo fake-binary-hash; }
                     self.env, TEST_RECEIVER_EXIT=str(exit_code)), capture_output=True, timeout=15)
                 self.assertEqual(result.returncode, 0 if exit_code == 0 else 1, result.stderr)
                 self.assertEqual((self.cdir / "receiver.exit").read_text().strip(), str(exit_code))
+                self.assert_cleanup_order()
+
+    def test_external_file_and_command_options_fail_before_host_lock_or_containers(self):
+        matrix = Path(__file__).parents[1] / "matrix/run-matrix.sh"
+        lock = self.root / "host.lock"
+        with lock.open("w") as stream:
+            fcntl.flock(stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            for name in ("RELOADSTALL_OVERLAP_FILE", "RELOADSTALL_EVIDENCE_DIR",
+                         "RELOADSTALL_PRE_CHURN_EVIDENCE_DIR", "RELOADSTALL_RECEIVED_VIEW_FILE",
+                         "RELOADSTALL_STAGE_CMD"):
+                for value in ("", "/outside/receiver/mounts"):
+                    with self.subTest(name=name, value=value):
+                        result = subprocess.run(["bash", str(matrix), "rustbgpd"], env=dict(
+                            self.env, RELOADSTALL_CONTAINER_IMAGE_ID="sha256:" + "c" * 64,
+                            RELOADSTALL_UNSENT_RTT_MS="20", RUSTBGPD_HOST_LOCK=str(lock),
+                            **{name: value}), capture_output=True, text=True, timeout=5)
+                        self.assertEqual(result.returncode, 2, result.stderr)
+                        self.assertIn(f"container RTT mode does not support {name}", result.stderr)
+                        self.assertNotIn("host.lock", result.stderr)
+                        self.assertFalse(self.trace.exists(), "Docker ran before admission rejection")
+
+    def test_reload_metrics_address_is_owned_and_omitted_without_reloads(self):
+        for reloads in (0, 2):
+            with self.subTest(reloads=reloads):
+                if reloads:
+                    (self.root / "daemon-stopped").unlink()
+                    self.trace.unlink()
+                    for file in self.cdir.glob("*.cid"): file.unlink()
+                result = subprocess.run(["bash", str(self.script)], env=dict(
+                    self.env, RELOADS=str(reloads), RELOADSTALL_RELOAD_METRICS_ADDR="127.0.0.1:9999"),
+                    capture_output=True, timeout=15)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                receiver = next(args for args in self.commands() if args[0] == "create"
+                                and args[args.index("--cidfile") + 1].endswith("receiver.cid"))
+                forwarded = [receiver[i + 1] for i, arg in enumerate(receiver) if arg == "-e"]
+                metrics = [value for value in forwarded if value.startswith("RELOADSTALL_RELOAD_METRICS_ADDR")]
+                self.assertEqual(metrics, ["RELOADSTALL_RELOAD_METRICS_ADDR=127.0.0.1:9179"] if reloads else [])
+                self.assertEqual(receiver[-2], str(reloads))
                 self.assert_cleanup_order()
 
     def test_sampler_failure_aborts_receiver_and_preserves_failure(self):

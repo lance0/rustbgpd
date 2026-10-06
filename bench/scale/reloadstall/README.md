@@ -123,10 +123,16 @@ sysctls, modules, bridges or published ports are changed.
 
 The container mode supports the existing IPv4 reload workload and reader pacing,
 including mixed changed peers. Dual-stack, membership churn, flapstorm and host
-CLI probes are rejected. The matrix host mutex, two quiet-host samples and full
-300-second cooldown still apply. The source patch, tool/binary hashes, image ID,
-workload inputs, per-establishment socket readback and harness status remain
-required evidence. For a functional check, run both `unset` and `65536` with
+CLI probes are rejected. External file and command options (`RELOADSTALL_OVERLAP_FILE`,
+`RELOADSTALL_EVIDENCE_DIR`, `RELOADSTALL_PRE_CHURN_EVIDENCE_DIR`,
+`RELOADSTALL_RECEIVED_VIEW_FILE` and `RELOADSTALL_STAGE_CMD`) are rejected before
+startup, including empty values; their host paths are not mounted into the receiver.
+The driver supplies the loopback reload-metrics address only when `RELOADS` is
+positive, ignoring an inherited address in container mode. The matrix host mutex,
+two quiet-host samples and full 300-second cooldown still apply. The source patch,
+tool/binary hashes, image ID, workload inputs, per-establishment socket readback
+and harness status remain required evidence. For a functional check, run both
+`unset` and `65536` with
 `N_PEERS=12 TOTAL_PREFIXES=1200 RELOADS=2`, 20 ms RTT and slow/stopped readers.
 A passing smoke validates the driver; it does not qualify the 700-peer timing or
 memory gates. Test both reader qualification shapes at scale before shipping a

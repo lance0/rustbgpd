@@ -232,6 +232,14 @@ if [ -n "${RELOADSTALL_CONTAINER_IMAGE_ID:-}" ]; then
         echo 'container RTT mode requires one IPv4 rustbgpd reload cell without probes or flapstorm' >&2
         exit 2
     fi
+    # Host paths and command handshakes are outside the receiver's bind mounts.
+    for name in RELOADSTALL_OVERLAP_FILE RELOADSTALL_EVIDENCE_DIR \
+        RELOADSTALL_PRE_CHURN_EVIDENCE_DIR RELOADSTALL_RECEIVED_VIEW_FILE RELOADSTALL_STAGE_CMD; do
+        if [[ -v $name ]]; then
+            echo "container RTT mode does not support $name" >&2
+            exit 2
+        fi
+    done
 fi
 acquire_rustbgpd_host_lock || exit $?
 
@@ -534,8 +542,13 @@ run_container_cell() (
         sleep 0.1
     done
     local receiver_env=() name
-    while IFS= read -r name; do receiver_env+=(-e "$name"); done < <(compgen -e | grep '^RELOADSTALL_')
-    receiver_env+=(-e RELOADSTALL_RELOAD_METRICS_ADDR=127.0.0.1:9179)
+    while IFS= read -r name; do
+        # The driver owns this address; zero-reload runs must not inherit it.
+        [ "$name" = RELOADSTALL_RELOAD_METRICS_ADDR ] || receiver_env+=(-e "$name")
+    done < <(compgen -e | grep '^RELOADSTALL_')
+    if [ "$RELOADS" -gt 0 ]; then
+        receiver_env+=(-e RELOADSTALL_RELOAD_METRICS_ADDR=127.0.0.1:9179)
+    fi
     local receiver_args=("$N_PEERS" "$TOTAL" "$PORT" 1 "$run/member.rpol" "$run/gen-a.rpol" "$run/gen-b.rpol" "$RELOADS" "$CONTROL_SECS")
     [ -z "$CHANGED_PEERS" ] || receiver_args+=("$CHANGED_PEERS")
     docker create --cidfile "$cdir/receiver.cid" --name "rbgp-unsent-$owner_token-receiver" \
