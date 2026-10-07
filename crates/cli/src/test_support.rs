@@ -1719,6 +1719,10 @@ impl rustbgpd_api::proto::evpn_service_server::EvpnService for MockEvpnService {
                 ac_gate_interface: "eth1".to_string(),
                 fdb_nexthop_groups_count: 1,
                 fdb_nexthop_ref_macs_count: 1,
+                advertised_df_preference: 200,
+                advertised_df_dont_preempt: false,
+                df_recovery_pending: true,
+                df_recovery_remaining_ms: 1500,
             }]
         } else {
             Vec::new()
