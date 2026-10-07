@@ -171,6 +171,18 @@ impl EvpnSegmentControlProbe {
     }
 }
 
+/// Per-ESI RFC 9785 DF state the actor advertises, for the operator API.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct SegmentDfStatus {
+    /// Preference and Don't-Preempt carried (or to be carried) on the local
+    /// Type 4 route; differs from config while a preference is inherited.
+    pub(crate) advertised: (u32, bool),
+    /// Pending recovery wait before the local Type 4 is published.
+    pub(crate) recovery_deadline: Option<tokio::time::Instant>,
+}
+
+pub(crate) type SegmentDfStatusTable = BTreeMap<EthernetSegmentIdentifier, SegmentDfStatus>;
+
 /// Handle returned to the daemon for shutdown coordination.
 #[derive(Debug)]
 pub struct EvpnSegmentHandle {
@@ -179,6 +191,7 @@ pub struct EvpnSegmentHandle {
     instances_tx: watch::Sender<Arc<EvpnInstanceTable>>,
     segments_tx: watch::Sender<Arc<Vec<EthernetSegment>>>,
     drained_esis_tx: watch::Sender<Arc<BTreeSet<EthernetSegmentIdentifier>>>,
+    df_status_rx: watch::Receiver<Arc<SegmentDfStatusTable>>,
 }
 
 impl EvpnSegmentHandle {
@@ -190,6 +203,11 @@ impl EvpnSegmentHandle {
             segments_tx: self.segments_tx.clone(),
             drained_esis_tx: self.drained_esis_tx.clone(),
         }
+    }
+
+    /// Live per-ESI advertised DF state and pending recovery.
+    pub(crate) fn df_status(&self) -> watch::Receiver<Arc<SegmentDfStatusTable>> {
+        self.df_status_rx.clone()
     }
 
     /// Cancel the actor and wait for the bounded shutdown drain.
@@ -262,6 +280,7 @@ pub(crate) fn spawn_with_local_bias(
     // always starts empty, so a daemon restart clears any drain and
     // replays configured state.
     let (drained_esis_tx, drained_esis_rx) = watch::channel(Arc::new(BTreeSet::new()));
+    let (df_status_tx, df_status_rx) = watch::channel(Arc::new(SegmentDfStatusTable::new()));
     let runtime = SegmentRuntime {
         instances: instances.clone(),
         rib_tx,
@@ -279,6 +298,7 @@ pub(crate) fn spawn_with_local_bias(
         segments_rx,
         drained_esis_rx,
         es_link_bindings_rx,
+        df_status_tx,
     ));
     Some(EvpnSegmentHandle {
         shutdown: daemon_shutdown,
@@ -286,6 +306,7 @@ pub(crate) fn spawn_with_local_bias(
         instances_tx,
         segments_tx,
         drained_esis_tx,
+        df_status_rx,
     })
 }
 
@@ -352,6 +373,7 @@ async fn segment_loop(
     mut segments_rx: watch::Receiver<Arc<Vec<EthernetSegment>>>,
     mut drained_esis_rx: watch::Receiver<Arc<BTreeSet<EthernetSegmentIdentifier>>>,
     mut es_link_bindings_rx: Option<watch::Receiver<EsLinkBindings>>,
+    df_status_tx: watch::Sender<Arc<SegmentDfStatusTable>>,
 ) {
     let mut by_esi: HashMap<EthernetSegmentIdentifier, SegmentState> = HashMap::new();
     // ADR-0102 acknowledgement tracker for Type 1/4 publication.
@@ -389,6 +411,7 @@ async fn segment_loop(
     // Initial origination + election.
     initial_startup(&runtime, &mut by_esi, &mut pending_rib_ops).await;
     publish_dataplane_snapshots(&runtime, &by_esi);
+    publish_df_status(&df_status_tx, &by_esi);
 
     // Periodic re-election timer — backstop in case we're in poll-only mode
     // (broadcast subscription failed) or events get dropped under load.
@@ -511,7 +534,33 @@ async fn segment_loop(
                 reelection_sweep(&runtime, &mut by_esi, &mut pending_rib_ops).await;
             }
         }
+        publish_df_status(&df_status_tx, &by_esi);
     }
+}
+
+/// Republish the operator DF view after every actor step; watchers wake only
+/// on change. Rebuilds O(segments) per step.
+fn publish_df_status(
+    tx: &watch::Sender<Arc<SegmentDfStatusTable>>,
+    by_esi: &HashMap<EthernetSegmentIdentifier, SegmentState>,
+) {
+    let table: SegmentDfStatusTable = by_esi
+        .iter()
+        .map(|(esi, state)| {
+            let status = SegmentDfStatus {
+                advertised: state.operational_df,
+                recovery_deadline: state.recovery_deadline,
+            };
+            (*esi, status)
+        })
+        .collect();
+    tx.send_if_modified(|current| {
+        let modified = **current != table;
+        if modified {
+            *current = Arc::new(table);
+        }
+        modified
+    });
 }
 
 fn rebuild_segment_states(
@@ -4211,11 +4260,20 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn nonrevertive_boot_waits_for_evpn_end_of_rib_before_recovery() {
         let (handle, synced, routes, injected) = boot_recovery_harness(false);
+        let df_status = handle.df_status();
         tokio::time::sleep(Duration::from_millis(4500)).await;
         assert_eq!(
             advertised_type4_df(&injected).await,
             None,
             "no Type 4 before the EVPN sessions have synced"
+        );
+        let pending = df_status.borrow()[&esi(1)];
+        assert_eq!(pending.advertised, (65535, true));
+        assert!(
+            pending
+                .recovery_deadline
+                .is_some_and(|deadline| deadline > tokio::time::Instant::now()),
+            "operator view shows the pending recovery and its deadline"
         );
         let mut attrs = attrs_with_es_import_rt(esi(1));
         attrs.push(PathAttribute::ExtendedCommunities(vec![
@@ -4235,6 +4293,14 @@ mod tests {
             advertised_type4_df(&injected).await,
             Some((200, false, DfAlgorithm::HighestPreference)),
             "inherits the surviving DF's preference instead of preempting"
+        );
+        assert_eq!(
+            df_status.borrow()[&esi(1)],
+            SegmentDfStatus {
+                advertised: (200, false),
+                recovery_deadline: None,
+            },
+            "operator view reports the inherited values, not the configured ones"
         );
         handle.shutdown().await;
     }

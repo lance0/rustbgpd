@@ -1450,6 +1450,10 @@ fn ethernet_segments_to_json(resp: &ListEthernetSegmentsResponse) -> serde_json:
                 "df_algorithm": segment.df_algorithm,
                 "df_preference": segment.df_preference,
                 "df_dont_preempt": segment.df_dont_preempt,
+                "advertised_df_preference": segment.advertised_df_preference,
+                "advertised_df_dont_preempt": segment.advertised_df_dont_preempt,
+                "df_recovery_pending": segment.df_recovery_pending,
+                "df_recovery_remaining_ms": segment.df_recovery_remaining_ms,
                 "originator_ip": segment.originator_ip,
                 "drained": segment.drained,
                 "drain_reasons": segment.drain_reasons,
@@ -1485,6 +1489,11 @@ fn format_ethernet_segment_human(segment: &EthernetSegmentState) -> String {
     } else {
         format!("{}:{}", segment.ac_gate_state, segment.ac_gate_interface)
     };
+    let recovery = if segment.df_recovery_pending {
+        format!("pending:{}ms", segment.df_recovery_remaining_ms)
+    } else {
+        "none".to_string()
+    };
     let members = segment
         .members
         .iter()
@@ -1492,12 +1501,15 @@ fn format_ethernet_segment_human(segment: &EthernetSegmentState) -> String {
         .collect::<Vec<_>>()
         .join("; ");
     format!(
-        "esi={} mode={} df-alg={} df-pref={} dont-preempt={} originator={} drained={} reasons=[{}] ac-gate={} fdb-groups={} fdb-mac-refs={} members=[{}]",
+        "esi={} mode={} df-alg={} df-pref={} dont-preempt={} adv-df-pref={} adv-dont-preempt={} df-recovery={} originator={} drained={} reasons=[{}] ac-gate={} fdb-groups={} fdb-mac-refs={} members=[{}]",
         segment.esi,
         segment.redundancy_mode,
         segment.df_algorithm,
         segment.df_preference,
         segment.df_dont_preempt,
+        segment.advertised_df_preference,
+        segment.advertised_df_dont_preempt,
+        recovery,
         segment.originator_ip,
         segment.drained,
         reasons,
@@ -2318,6 +2330,10 @@ mod tests {
                 ac_gate_interface: "ac_gate_interface-value".to_string(),
                 fdb_nexthop_groups_count: 113,
                 fdb_nexthop_ref_macs_count: 114,
+                advertised_df_preference: 115,
+                advertised_df_dont_preempt: false,
+                df_recovery_pending: true,
+                df_recovery_remaining_ms: 118,
             }],
         };
         assert_eq!(
@@ -2333,6 +2349,10 @@ mod tests {
                   "df_algorithm": "df_algorithm-value",
                   "df_preference": 105,
                   "df_dont_preempt": true,
+                  "advertised_df_preference": 115,
+                  "advertised_df_dont_preempt": false,
+                  "df_recovery_pending": true,
+                  "df_recovery_remaining_ms": 118,
                   "originator_ip": "originator_ip-value",
                   "drained": true,
                   "drain_reasons": [
@@ -3233,6 +3253,10 @@ evpn_duplicate_mac_moves_total{vni="100",mac="02:aa:bb:cc:dd:01"} 2
                 ac_gate_interface: "eth1".to_string(),
                 fdb_nexthop_groups_count: 1,
                 fdb_nexthop_ref_macs_count: 2,
+                advertised_df_preference: 200,
+                advertised_df_dont_preempt: false,
+                df_recovery_pending: false,
+                df_recovery_remaining_ms: 0,
             }],
         });
 
@@ -3240,12 +3264,38 @@ evpn_duplicate_mac_moves_total{vni="100",mac="02:aa:bb:cc:dd:01"} 2
         assert_eq!(value["segments"][0]["member_vnis"][0], 100);
         assert_eq!(value["segments"][0]["redundancy_mode"], "single-active");
         assert_eq!(value["segments"][0]["df_algorithm"], "highest-preference");
+        assert_eq!(value["segments"][0]["df_preference"], 500);
+        assert_eq!(value["segments"][0]["advertised_df_preference"], 200);
+        assert_eq!(value["segments"][0]["advertised_df_dont_preempt"], false);
+        assert_eq!(value["segments"][0]["df_recovery_pending"], false);
         assert_eq!(value["segments"][0]["drained"], true);
         assert_eq!(value["segments"][0]["drain_reasons"][0], "operator");
         assert_eq!(value["segments"][0]["members"][0]["df_role"], "nondf");
         assert_eq!(value["segments"][0]["members"][0]["bridge"], "br100");
         assert_eq!(value["segments"][0]["ac_gate_state"], "blocked");
         assert_eq!(value["segments"][0]["fdb_nexthop_ref_macs_count"], 2);
+    }
+
+    #[test]
+    fn ethernet_segment_human_shows_advertised_df_and_recovery() {
+        let mut segment = crate::proto::EthernetSegmentState {
+            df_preference: 500,
+            df_dont_preempt: true,
+            advertised_df_preference: 200,
+            df_recovery_pending: true,
+            df_recovery_remaining_ms: 1500,
+            ..Default::default()
+        };
+        let line = super::format_ethernet_segment_human(&segment);
+        assert!(
+            line.contains(
+                "df-pref=500 dont-preempt=true adv-df-pref=200 adv-dont-preempt=false \
+                 df-recovery=pending:1500ms"
+            ),
+            "{line}"
+        );
+        segment.df_recovery_pending = false;
+        assert!(super::format_ethernet_segment_human(&segment).contains("df-recovery=none"));
     }
 
     #[test]

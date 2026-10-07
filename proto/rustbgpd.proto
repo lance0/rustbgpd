@@ -4461,10 +4461,11 @@ message EthernetSegmentState {
   string df_algorithm = 4;
   // Administrative (configured) DF preference for preference-based DF
   // election. While RFC 9785 non-revertive recovery inherits another PE's
-  // preference, the advertised value differs from this field.
+  // preference, `advertised_df_preference` differs from this field.
   uint32 df_preference = 5;
   // Administrative RFC 9785 Don't-Preempt bit configured for this segment.
-  // The advertised bit is cleared while an inherited preference is in use.
+  // `advertised_df_dont_preempt` is cleared while an inherited preference
+  // is in use.
   bool df_dont_preempt = 6;
   // Configured local Type 4 originator IP.
   string originator_ip = 7;
@@ -4488,6 +4489,19 @@ message EthernetSegmentState {
   uint32 fdb_nexthop_groups_count = 13;
   // MAC refs across those owned FDB nexthop groups.
   uint32 fdb_nexthop_ref_macs_count = 14;
+  // DF preference the local Type 4 route carries, or will carry once a
+  // pending recovery wait ends. Differs from `df_preference` while RFC 9785
+  // non-revertive recovery inherits another PE's preference.
+  uint32 advertised_df_preference = 15;
+  // Don't-Preempt bit the local Type 4 route carries, or will carry once a
+  // pending recovery wait ends. False while a preference is inherited.
+  bool advertised_df_dont_preempt = 16;
+  // True while RFC 9785 recovery is waiting for remote Type 4 routes before
+  // publishing the local Type 4 route.
+  bool df_recovery_pending = 17;
+  // Milliseconds left in that wait when the response was built; 0 when none
+  // is pending. The boot wait can extend it until EVPN sessions have synced.
+  uint64 df_recovery_remaining_ms = 18;
 }
 
 message EthernetSegmentMemberState {

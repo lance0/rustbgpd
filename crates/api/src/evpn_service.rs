@@ -101,6 +101,23 @@ pub type SameEsiBiasSnapshotFn = Arc<dyn Fn() -> Arc<SameEsiBiasTable> + Send + 
 pub type EthernetSegmentDrainReasonsFn =
     Arc<dyn Fn(EthernetSegmentIdentifier) -> Vec<String> + Send + Sync + 'static>;
 
+/// Live RFC 9785 DF state of one local Ethernet Segment.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EthernetSegmentDfStatus {
+    /// Preference carried (or to be carried) on the local Type 4 route.
+    pub advertised_df_preference: u32,
+    /// Don't-Preempt bit carried (or to be carried) on the local Type 4 route.
+    pub advertised_df_dont_preempt: bool,
+    /// Time left in a pending recovery wait; `None` when none is pending.
+    pub recovery_remaining: Option<std::time::Duration>,
+}
+
+/// Read-side hook for live per-segment DF state; `None` when the segment
+/// actor has no state for the ESI.
+pub type EthernetSegmentDfStatusFn = Arc<
+    dyn Fn(EthernetSegmentIdentifier) -> Option<EthernetSegmentDfStatus> + Send + Sync + 'static,
+>;
+
 /// Read-side hook for the current ADR-0063 EVPN runtime model.
 pub type EvpnRuntimeModelFn = Arc<dyn Fn() -> EvpnRuntimeModel + Send + Sync + 'static>;
 
@@ -203,6 +220,7 @@ pub struct EvpnService {
     bum_enforcement_snapshot: BumEnforcementSnapshotFn,
     same_esi_bias_snapshot: SameEsiBiasSnapshotFn,
     ethernet_segment_drain_reasons: EthernetSegmentDrainReasonsFn,
+    ethernet_segment_df_status: EthernetSegmentDfStatusFn,
     runtime_model: EvpnRuntimeModelFn,
     runtime_apply: Option<EvpnRuntimeApplyFn>,
     duplicate_mac_clear: Option<DuplicateMacClearFn>,
@@ -231,6 +249,7 @@ impl EvpnService {
             bum_enforcement_snapshot: Arc::new(|| Arc::new(BumEnforcementTable::new())),
             same_esi_bias_snapshot: Arc::new(|| Arc::new(SameEsiBiasTable::new())),
             ethernet_segment_drain_reasons: Arc::new(|_| Vec::new()),
+            ethernet_segment_df_status: Arc::new(|_| None),
             runtime_model,
             runtime_apply: None,
             duplicate_mac_clear: None,
@@ -263,6 +282,7 @@ impl EvpnService {
             bum_enforcement_snapshot: Arc::new(|| Arc::new(BumEnforcementTable::new())),
             same_esi_bias_snapshot: Arc::new(|| Arc::new(SameEsiBiasTable::new())),
             ethernet_segment_drain_reasons: Arc::new(|_| Vec::new()),
+            ethernet_segment_df_status: Arc::new(|_| None),
             runtime_model,
             runtime_apply: None,
             duplicate_mac_clear: None,
@@ -367,6 +387,7 @@ impl EvpnService {
             bum_enforcement_snapshot: Arc::new(|| Arc::new(BumEnforcementTable::new())),
             same_esi_bias_snapshot: Arc::new(|| Arc::new(SameEsiBiasTable::new())),
             ethernet_segment_drain_reasons: Arc::new(|_| Vec::new()),
+            ethernet_segment_df_status: Arc::new(|_| None),
             runtime_model,
             runtime_apply,
             duplicate_mac_clear,
@@ -424,6 +445,17 @@ impl EvpnService {
         self.bum_enforcement_snapshot = bum_enforcement_snapshot;
         self.same_esi_bias_snapshot = same_esi_bias_snapshot;
         self.ethernet_segment_drain_reasons = ethernet_segment_drain_reasons;
+        self
+    }
+
+    /// Attach the live per-segment DF state provider; absent, segments
+    /// report their administrative values and no pending recovery.
+    #[must_use]
+    pub fn with_ethernet_segment_df_status(
+        mut self,
+        ethernet_segment_df_status: EthernetSegmentDfStatusFn,
+    ) -> Self {
+        self.ethernet_segment_df_status = ethernet_segment_df_status;
         self
     }
 
@@ -576,6 +608,8 @@ impl proto::evpn_service_server::EvpnService for EvpnService {
                     .collect();
                 let (fdb_groups, fdb_refs) =
                     fdb_counts.get(&segment.esi).copied().unwrap_or_default();
+                let df_status = (self.ethernet_segment_df_status)(segment.esi);
+                let recovery_remaining = df_status.and_then(|status| status.recovery_remaining);
                 proto::EthernetSegmentState {
                     esi: segment.esi.to_string(),
                     member_vnis: segment.member_vnis.iter().map(|vni| vni.as_u32()).collect(),
@@ -595,6 +629,17 @@ impl proto::evpn_service_server::EvpnService for EvpnService {
                         .unwrap_or_default(),
                     fdb_nexthop_groups_count: fdb_groups,
                     fdb_nexthop_ref_macs_count: fdb_refs,
+                    advertised_df_preference: df_status.map_or(segment.df_preference, |status| {
+                        status.advertised_df_preference
+                    }),
+                    advertised_df_dont_preempt: df_status
+                        .map_or(segment.df_dont_preempt, |status| {
+                            status.advertised_df_dont_preempt
+                        }),
+                    df_recovery_pending: recovery_remaining.is_some(),
+                    df_recovery_remaining_ms: recovery_remaining.map_or(0, |remaining| {
+                        u64::try_from(remaining.as_millis()).unwrap_or(u64::MAX)
+                    }),
                 }
             })
             .collect();
@@ -1672,6 +1717,10 @@ mod tests {
     }
 
     #[tokio::test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one fixture checks every joined segment field, with and without actor DF state"
+    )]
     async fn list_ethernet_segments_joins_runtime_state() {
         let esi = rustbgpd_evpn::EthernetSegmentIdentifier::new([3, 0, 0, 0, 0, 0, 0, 0, 0, 7]);
         let vni = EvpnInstanceId::new(100).unwrap();
@@ -1772,6 +1821,45 @@ mod tests {
         assert_eq!(segment.members[0].bum_forwarding_action, "suppress");
         assert_eq!(segment.members[0].bridge, "br100");
         assert!(segment.members[0].same_esi_bias_eligible);
+        assert_eq!(
+            (
+                segment.advertised_df_preference,
+                segment.advertised_df_dont_preempt
+            ),
+            (500, true),
+            "without actor state the administrative values are reported"
+        );
+        assert!(!segment.df_recovery_pending);
+
+        // An inheriting PE advertises another PE's preference with DP=0.
+        let svc = svc.with_ethernet_segment_df_status(Arc::new(move |target| {
+            (target == esi).then_some(EthernetSegmentDfStatus {
+                advertised_df_preference: 200,
+                advertised_df_dont_preempt: false,
+                recovery_remaining: Some(std::time::Duration::from_millis(1500)),
+            })
+        }));
+        let resp = svc
+            .list_ethernet_segments(Request::new(proto::ListEthernetSegmentsRequest {
+                esi: String::new(),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        let segment = &resp.segments[0];
+        assert_eq!(
+            (segment.df_preference, segment.df_dont_preempt),
+            (500, true)
+        );
+        assert_eq!(
+            (
+                segment.advertised_df_preference,
+                segment.advertised_df_dont_preempt
+            ),
+            (200, false)
+        );
+        assert!(segment.df_recovery_pending);
+        assert_eq!(segment.df_recovery_remaining_ms, 1500);
     }
 
     #[tokio::test]
