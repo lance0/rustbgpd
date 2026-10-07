@@ -1680,11 +1680,19 @@ $ rbgp policy stats --neighbor 10.0.0.2 --direction both
   installed-counter state.
   Chainless sessions contribute no row. Every capture wait shares one
   absolute two-second deadline for the whole RPC; exhausting it fails the
-  RPC as `DEADLINE_EXCEEDED`. A departed session, closed publication, or
-  unavailable counter state fails the complete RPC as `UNAVAILABLE`, and a
+  RPC as `DEADLINE_EXCEEDED`. By default a departed session, closed
+  publication, or unavailable counter state fails the complete RPC as `UNAVAILABLE`, and a
   listener without the policy-stats runtime returns `FAILED_PRECONDITION`,
   all without partial rows. Counter availability does not establish session
   progress.
+- Fleet `--direction import` or `both` reads may use `--allow-partial` to
+  keep usable rows when selected sessions exit. Text marks the response
+  `Partial import stats`; JSON adds sorted unique
+  `incomplete_peer_addresses` when partial. An all-gone fleet may return no
+  import rows and a nonempty incomplete list. This flag cannot be used with
+  `--neighbor` or `--direction export`. Counter unavailability, stopped
+  roster owners, export/dataset errors and deadlines still fail the whole
+  request. Replacement sessions are not substituted into a selected roster.
 - Import chains report their **install generation** (bumps on every
   chain install), so counters that reset to zero read as a chain
   replacement, not continuous history. A session's initial chain

@@ -511,6 +511,15 @@ impl PolicyHitCounters {
         }
     }
 
+    /// Hold the error lock, as an error writer does. Test support for readers
+    /// that must not wait on it, or that must report it poisoned.
+    #[doc(hidden)]
+    pub fn hold_error_lock_for_test(&self) -> std::sync::MutexGuard<'_, Option<EvalError>> {
+        self.last_error
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
     /// Observe one term's counter; absent indices indicate a shape mismatch.
     #[must_use]
     pub fn term_hits(&self, policy_index: usize, term_index: usize) -> Option<u64> {

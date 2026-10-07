@@ -127,6 +127,7 @@ async fn import_policy_stats_rpc_reads_live_counters_while_real_session_is_held(
     let result = service
         .get_policy_stats(tonic::Request::new(
             rustbgpd_api::proto::GetPolicyStatsRequest {
+                allow_partial: false,
                 peer_address: address.to_string(),
                 direction: "import".to_string(),
             },

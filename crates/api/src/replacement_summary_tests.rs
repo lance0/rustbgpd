@@ -145,6 +145,7 @@ async fn stats(service: &PolicyService, peer: IpAddr) -> proto::GetPolicyStatsRe
     PolicyRpc::get_policy_stats(
         service,
         Request::new(proto::GetPolicyStatsRequest {
+            allow_partial: false,
             peer_address: peer.to_string(),
             direction: "export".to_string(),
         }),

@@ -16,7 +16,7 @@ use crate::audit::{GrpcAuditHandle, GrpcRequestSummary};
 use crate::health_probe::DaemonGate;
 use crate::import_roster::{
     DatasetCaptureError, ImportCaptureProgress, ImportRosterReader, capture_datasets,
-    capture_import,
+    capture_import_allow_partial,
 };
 use rustbgpd_rib::export_roster::{ExportCaptureError, ExportRosterReader, capture_export};
 
@@ -1518,6 +1518,11 @@ impl proto::policy_service_server::PolicyService for PolicyService {
                 )));
             }
         };
+        if req.allow_partial && (!req.peer_address.is_empty() || !want_import) {
+            return Err(Status::invalid_argument(
+                "allow_partial requires an unfiltered import or both query",
+            ));
+        }
         let peer: Option<IpAddr> = if req.peer_address.is_empty() {
             None
         } else {
@@ -1574,6 +1579,7 @@ impl proto::policy_service_server::PolicyService for PolicyService {
         // "both" reports export chains first, then import chains, each
         // block sorted by peer address (deterministic output).
         let mut out = Vec::new();
+        let mut incomplete_peer_addresses = Vec::new();
         if let Some(export_cell) = export_cell {
             // The RIB's published export roster, held across the awaits below.
             let export_roster = export_cell.load();
@@ -1609,7 +1615,7 @@ impl proto::policy_service_server::PolicyService for PolicyService {
         if want_import {
             let mut progress = ImportCaptureProgress::default();
             let chains = policy_stats_request(deadline, "import", audit.as_ref(), async {
-                capture_import(selected, deadline, &mut progress)
+                capture_import_allow_partial(selected, deadline, &mut progress, req.allow_partial)
                     .await
                     .map_err(|error| match error {
                         ImportPolicyStatsError::TimedOut => Status::deadline_exceeded(
@@ -1627,8 +1633,15 @@ impl proto::policy_service_server::PolicyService for PolicyService {
             if let Some(audit) = &audit {
                 append_import_progress(audit, &progress);
             }
+            let capture = chains?;
+            incomplete_peer_addresses = capture
+                .incomplete_peer_addresses
+                .into_iter()
+                .map(|peer| peer.to_string())
+                .collect();
             out.extend(
-                chains?
+                capture
+                    .rows
                     .into_iter()
                     .map(|(peer, snapshot)| proto::PolicyChainStats {
                         peer_address: peer.to_string(),
@@ -1679,6 +1692,7 @@ impl proto::policy_service_server::PolicyService for PolicyService {
         }
 
         Ok(Response::new(proto::GetPolicyStatsResponse {
+            incomplete_peer_addresses,
             chains: out,
             datasets,
         }))
@@ -2030,6 +2044,7 @@ mod tests {
         direction: &str,
     ) -> proto::GetPolicyStatsRequest {
         proto::GetPolicyStatsRequest {
+            allow_partial: false,
             peer_address: peer_address.to_string(),
             direction: direction.to_string(),
         }
@@ -4214,6 +4229,7 @@ policy customer-in(peer_lp: u32) {
         let resp = PolicyServiceRpc::get_policy_stats(
             &svc,
             Request::new(proto::GetPolicyStatsRequest {
+                allow_partial: false,
                 peer_address: "10.0.0.2".to_string(),
                 direction: String::new(),
             }),
@@ -4265,6 +4281,7 @@ policy customer-in(peer_lp: u32) {
         let resp = PolicyServiceRpc::get_policy_stats(
             &svc,
             Request::new(proto::GetPolicyStatsRequest {
+                allow_partial: false,
                 peer_address: "10.0.0.2".to_string(),
                 direction: "import".to_string(),
             }),
@@ -4341,6 +4358,7 @@ policy customer-in(peer_lp: u32) {
         let resp = PolicyServiceRpc::get_policy_stats(
             &svc,
             Request::new(proto::GetPolicyStatsRequest {
+                allow_partial: false,
                 peer_address: "10.0.0.2".to_string(),
                 direction: "both".to_string(),
             }),
@@ -4354,6 +4372,259 @@ policy customer-in(peer_lp: u32) {
             .map(|chain| chain.direction.as_str())
             .collect();
         assert_eq!(directions, ["export", "import"]);
+    }
+
+    /// Every round closes an admitted publication after the read is pending,
+    /// then replaces the roster. The read must keep the selected session set.
+    #[tokio::test]
+    async fn get_policy_stats_partial_fleet_survives_sustained_churn() {
+        use std::future::{Future, poll_fn};
+        use std::task::Poll;
+
+        let chain = roster_support::chain("live-in", 1);
+        let (healthy_tx, healthy_rx) =
+            tokio::sync::watch::channel(Some(roster_support::installed(7, Some(&chain))));
+        let (_chainless_tx, chainless_rx) =
+            tokio::sync::watch::channel(Some(roster_support::installed(0, None)));
+        let mut roster = ImportRosterPublisher::new();
+        let export = stats_export_roster(&stats_export_chain());
+        let svc = PolicyService::new(AccessMode::ReadOnly, mpsc::channel(1).0, None, None)
+            .with_import_roster(roster.reader())
+            .with_export_roster(export.reader());
+        for generation in 1..=4 {
+            for direction in ["import", "both"] {
+                for allow_partial in [false, true] {
+                    let (closing_tx, closing_rx) = tokio::sync::watch::channel(None);
+                    roster.publish(
+                        vec![
+                            roster_support::peer("10.0.0.1", healthy_rx.clone()),
+                            roster_support::peer("10.0.0.2", closing_rx),
+                            roster_support::peer("10.0.0.3", chainless_rx.clone()),
+                        ],
+                        Vec::new().into(),
+                    );
+                    let request = proto::GetPolicyStatsRequest {
+                        allow_partial,
+                        ..policy_stats_rpc_request("", direction)
+                    };
+                    let read = PolicyServiceRpc::get_policy_stats(&svc, Request::new(request));
+                    tokio::pin!(read);
+                    assert!(
+                        poll_fn(|cx| Poll::Ready(read.as_mut().poll(cx)))
+                            .await
+                            .is_pending()
+                    );
+                    assert_eq!(
+                        closing_tx.receiver_count(),
+                        2,
+                        "capture admitted the old publication"
+                    );
+                    let (_replacement_tx, replacement_rx) = tokio::sync::watch::channel(Some(
+                        roster_support::installed(generation, Some(&chain)),
+                    ));
+                    roster.publish(
+                        vec![
+                            roster_support::peer("10.0.0.2", replacement_rx.clone()),
+                            roster_support::peer("10.0.0.4", replacement_rx),
+                        ],
+                        Vec::new().into(),
+                    );
+                    drop(closing_tx);
+                    let result = read.await;
+                    if allow_partial {
+                        let response = result.unwrap().into_inner();
+                        assert_eq!(response.incomplete_peer_addresses, ["10.0.0.2"]);
+                        let rows: Vec<_> = response
+                            .chains
+                            .iter()
+                            .map(|row| (row.peer_address.as_str(), row.direction.as_str()))
+                            .collect();
+                        let mut expected = Vec::new();
+                        if direction == "both" {
+                            expected.push(("10.0.0.2", "export"));
+                        }
+                        expected.push(("10.0.0.1", "import"));
+                        assert_eq!(rows, expected, "no replacement or newly admitted rows");
+                        assert_eq!(response.chains.last().unwrap().policy_generation, 7);
+                    } else {
+                        assert_eq!(result.unwrap_err().code(), tonic::Code::Unavailable);
+                    }
+                }
+            }
+        }
+        drop(healthy_tx);
+    }
+
+    #[tokio::test]
+    async fn get_policy_stats_partial_rejects_filtered_and_export_before_backend_work() {
+        let svc = PolicyService::new(AccessMode::ReadOnly, mpsc::channel(1).0, None, None);
+        for (peer, direction) in [
+            ("", ""),
+            ("", "export"),
+            ("10.0.0.1", "import"),
+            ("10.0.0.1", "both"),
+        ] {
+            let request = proto::GetPolicyStatsRequest {
+                allow_partial: true,
+                ..policy_stats_rpc_request(peer, direction)
+            };
+            assert_eq!(
+                PolicyServiceRpc::get_policy_stats(&svc, Request::new(request))
+                    .await
+                    .unwrap_err()
+                    .code(),
+                tonic::Code::InvalidArgument
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn get_policy_stats_partial_all_gone_is_sorted_unique_and_empty_fleet_is_complete() {
+        let (tx, rx) = tokio::sync::watch::channel(None);
+        let mut scoped = roster_support::peer("192.0.2.2", rx.clone());
+        scoped.key.interface = Some("eth0".into());
+        let mut roster = roster_support::publisher(
+            vec![
+                scoped,
+                roster_support::peer("192.0.2.2", rx.clone()),
+                roster_support::peer("192.0.2.1", rx),
+            ],
+            Vec::new(),
+        );
+        drop(tx);
+        let svc = PolicyService::new(AccessMode::ReadOnly, mpsc::channel(1).0, None, None)
+            .with_import_roster(roster.reader());
+        for expected in [vec!["192.0.2.1", "192.0.2.2"], Vec::new()] {
+            let request = proto::GetPolicyStatsRequest {
+                allow_partial: true,
+                ..policy_stats_rpc_request("", "import")
+            };
+            let response = PolicyServiceRpc::get_policy_stats(&svc, Request::new(request))
+                .await
+                .unwrap()
+                .into_inner();
+            assert_eq!(response.chains, [] as [proto::PolicyChainStats; 0]);
+            assert_eq!(response.incomplete_peer_addresses, expected);
+            roster.publish(Vec::new(), Vec::new().into());
+        }
+    }
+
+    /// Skipping a closed session cannot hide a later Pending or dataset
+    /// timeout, and stopping either roster owner still fails the whole read.
+    #[tokio::test(start_paused = true)]
+    async fn get_policy_stats_partial_retains_deadline_and_owner_errors() {
+        use std::future::{Future, poll_fn};
+        use std::task::Poll;
+
+        for failure in [
+            "import_timeout",
+            "dataset_timeout",
+            "peer_owner",
+            "rib_owner",
+        ] {
+            let (closed_tx, closed_rx) = tokio::sync::watch::channel(None);
+            drop(closed_tx);
+            let (pending_tx, pending_rx) = tokio::sync::watch::channel(None);
+            let dataset = roster_support::dataset("held", "held.list");
+            let handle = Arc::clone(&dataset.handle);
+            let roster = roster_support::publisher(
+                vec![
+                    roster_support::peer("10.0.0.1", closed_rx),
+                    roster_support::peer("10.0.0.2", pending_rx),
+                ],
+                vec![dataset],
+            );
+            let export = stats_export_roster(&stats_export_chain());
+            let svc = PolicyService::new(AccessMode::ReadOnly, mpsc::channel(1).0, None, None)
+                .with_import_roster(roster.reader())
+                .with_export_roster(export.reader());
+            let request = proto::GetPolicyStatsRequest {
+                allow_partial: true,
+                ..policy_stats_rpc_request("", "both")
+            };
+            let read = PolicyServiceRpc::get_policy_stats(&svc, Request::new(request));
+            tokio::pin!(read);
+            assert!(
+                poll_fn(|cx| Poll::Ready(read.as_mut().poll(cx)))
+                    .await
+                    .is_pending()
+            );
+            let mut dataset_lock = None;
+            if failure == "import_timeout" {
+                tokio::time::advance(POLICY_STATS_AGGREGATE_TIMEOUT).await;
+            } else {
+                pending_tx.send_replace(Some(roster_support::installed(0, None)));
+                if failure == "dataset_timeout" {
+                    dataset_lock = Some(handle.hold_error_lock_for_test());
+                    assert!(
+                        poll_fn(|cx| Poll::Ready(read.as_mut().poll(cx)))
+                            .await
+                            .is_pending()
+                    );
+                    tokio::time::advance(POLICY_STATS_AGGREGATE_TIMEOUT).await;
+                }
+            }
+            if failure == "peer_owner" {
+                drop(roster);
+            }
+            if failure == "rib_owner" {
+                drop(export);
+            }
+            let error = read.await.unwrap_err();
+            assert_eq!(
+                error.code(),
+                if failure.ends_with("timeout") {
+                    tonic::Code::DeadlineExceeded
+                } else {
+                    tonic::Code::Unavailable
+                },
+                "{failure}"
+            );
+            drop(dataset_lock);
+        }
+    }
+
+    /// Only a closed session may be skipped: poisoned counters on a live
+    /// session still fail the whole opt-in read, even beside a skipped peer.
+    #[tokio::test]
+    async fn get_policy_stats_partial_still_fails_on_unavailable_counters() {
+        let chain = roster_support::chain("poisoned-in", 1);
+        let counters = Arc::clone(chain.hit_counters());
+        let poison = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _held = counters.hold_error_lock_for_test();
+            panic!("poison the import counter error lock");
+        }));
+        assert!(poison.is_err());
+        let (closed_tx, closed_rx) = tokio::sync::watch::channel(None);
+        drop(closed_tx);
+        let (_poisoned_tx, poisoned_rx) =
+            tokio::sync::watch::channel(Some(roster_support::installed(3, Some(&chain))));
+        let roster = roster_support::publisher(
+            vec![
+                roster_support::peer("10.0.0.1", closed_rx),
+                roster_support::peer("10.0.0.2", poisoned_rx),
+            ],
+            Vec::new(),
+        );
+        let export = stats_export_roster(&stats_export_chain());
+        let svc = PolicyService::new(AccessMode::ReadOnly, mpsc::channel(1).0, None, None)
+            .with_import_roster(roster.reader())
+            .with_export_roster(export.reader());
+        for direction in ["import", "both"] {
+            let request = proto::GetPolicyStatsRequest {
+                allow_partial: true,
+                ..policy_stats_rpc_request("", direction)
+            };
+            let error = PolicyServiceRpc::get_policy_stats(&svc, Request::new(request))
+                .await
+                .unwrap_err();
+            assert_eq!(error.code(), tonic::Code::Unavailable, "{direction}");
+            assert_eq!(
+                error.message(),
+                "installed import policy counters unavailable",
+                "{direction}"
+            );
+        }
     }
 
     /// A listener built without the peer manager's roster cannot answer, and
@@ -4763,6 +5034,7 @@ policy customer-in(peer_lp: u32) {
         let err = PolicyServiceRpc::get_policy_stats(
             &svc,
             Request::new(proto::GetPolicyStatsRequest {
+                allow_partial: false,
                 peer_address: String::new(),
                 direction: "sideways".to_string(),
             }),
@@ -4774,6 +5046,7 @@ policy customer-in(peer_lp: u32) {
         let err = PolicyServiceRpc::get_policy_stats(
             &svc,
             Request::new(proto::GetPolicyStatsRequest {
+                allow_partial: false,
                 peer_address: "not-an-ip".to_string(),
                 direction: String::new(),
             }),
@@ -4801,6 +5074,7 @@ policy customer-in(peer_lp: u32) {
         let err = PolicyServiceRpc::get_policy_stats(
             &svc,
             Request::new(proto::GetPolicyStatsRequest {
+                allow_partial: false,
                 peer_address: "192.0.2.99".to_string(),
                 direction: "export".to_string(),
             }),

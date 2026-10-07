@@ -3528,8 +3528,8 @@ esac
 ;;
 (stats)
 _arguments "${_arguments_options[@]}" : \
-'--neighbor=[Restrict to one neighbor'\''s installed chain]:NEIGHBOR:_default' \
-'--peer=[Restrict to one neighbor'\''s installed chain]:NEIGHBOR:_default' \
+'(--allow-partial)--neighbor=[Restrict to one neighbor'\''s installed chain]:NEIGHBOR:_default' \
+'(--allow-partial)--peer=[Restrict to one neighbor'\''s installed chain]:NEIGHBOR:_default' \
 '--direction=[Direction\: import, export, or both]:DIRECTION:(import export both)' \
 '-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
@@ -3539,6 +3539,7 @@ _arguments "${_arguments_options[@]}" : \
 '--tls-key=[PEM client private key for mTLS (requires --tls-cert)]:FILE:_files' \
 '--tls-server-name=[Server certificate name to verify instead of the HTTPS address host]:NAME:_default' \
 '--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
+'(--neighbor)--allow-partial[Return usable fleet import rows when selected sessions exit]' \
 '-j[Output in JSON format]' \
 '--json[Output in JSON format]' \
 '--no-color[Disable colored output]' \
@@ -3548,8 +3549,8 @@ _arguments "${_arguments_options[@]}" : \
 ;;
 (counters)
 _arguments "${_arguments_options[@]}" : \
-'--neighbor=[Restrict to one neighbor'\''s installed chain]:NEIGHBOR:_default' \
-'--peer=[Restrict to one neighbor'\''s installed chain]:NEIGHBOR:_default' \
+'(--allow-partial)--neighbor=[Restrict to one neighbor'\''s installed chain]:NEIGHBOR:_default' \
+'(--allow-partial)--peer=[Restrict to one neighbor'\''s installed chain]:NEIGHBOR:_default' \
 '--direction=[Direction\: import, export, or both]:DIRECTION:(import export both)' \
 '-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
@@ -3559,6 +3560,7 @@ _arguments "${_arguments_options[@]}" : \
 '--tls-key=[PEM client private key for mTLS (requires --tls-cert)]:FILE:_files' \
 '--tls-server-name=[Server certificate name to verify instead of the HTTPS address host]:NAME:_default' \
 '--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
+'(--neighbor)--allow-partial[Return usable fleet import rows when selected sessions exit]' \
 '-j[Output in JSON format]' \
 '--json[Output in JSON format]' \
 '--no-color[Disable colored output]' \
