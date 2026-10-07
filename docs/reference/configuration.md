@@ -4142,7 +4142,7 @@ default — single-homed VTEPs leave it empty.
 [[ethernet_segments]]
 esi = "00:00:00:00:00:00:00:00:00:01"          # 10-byte ESI (Type 0 here; Types 1–5 also accepted)
 member_vnis = [100, 200]                       # L2VNIs this ES is reachable on
-df_preference = 32768                          # RFC 9785 preference; default/HRW require this default
+df_preference = 32767                          # RFC 9785 preference; default/HRW require this default
 df_algorithm = "default-modulo"                # default-modulo, highest-random-weight, highest-preference, or lowest-preference
 redundancy_mode = "all-active"                 # "all-active" or "single-active"
 originator_ip = "10.0.0.1"                     # source IP used for Type 1/4 origination
@@ -4154,7 +4154,7 @@ originator_ip = "10.0.0.1"                     # source IP used for Type 1/4 ori
 |-----------------|----------|----------|---------------|-------------|
 | `esi`           | string   | yes      | --            | 10-byte non-zero ESI in colon-separated hex (RFC 7432 §5). The all-zero Type 0 single-homed sentinel is rejected; non-zero Type 0 and Types 1–5 are accepted. |
 | `member_vnis`   | u32[]    | yes      | --            | L2VNIs this segment is reachable on. Each must match a configured `[[evpn_instances]].vni` |
-| `df_preference` | u32      | no       | `32768`       | RFC 9785 preference value for `"highest-preference"` / `"lowest-preference"` (`0..=65535`). Default-modulo and HRW ignore preference, so only the default is accepted for those algorithms |
+| `df_preference` | u32      | no       | `32767`       | RFC 9785 preference value for `"highest-preference"` / `"lowest-preference"` (`0..=65535`). Default-modulo and HRW ignore preference, so only the default is accepted for those algorithms (the former default `32768` is also accepted for them) |
 | `df_algorithm`  | string   | no       | `"default-modulo"` | `"default-modulo"` (RFC 7432 §8.5 service carving), `"highest-random-weight"` (RFC 8584 §3.2), `"highest-preference"` or `"lowest-preference"` (RFC 9785) |
 | `df_dont_preempt` | bool   | no       | `false`       | RFC 9785 Don't-Preempt recovery. Only valid with `"highest-preference"` / `"lowest-preference"`. Startup and drain recovery wait three seconds for remote Type 4 routes, keeping the local role non-DF. Any recovery started within 30 seconds of daemon start (startup, drain, link, or a newly added segment) also waits until an L2VPN/EVPN session is established and every established one has sent End-of-RIB, at most until those 30 seconds pass. If the preferred remote PE advertises DP=1 and the local administrative preference would preempt it, advertise that remote preference with DP=0. Restore configured preference/DP on becoming the reference PE. Explicit DF configuration changes override inheritance. Mixed DP is allowed but cannot guarantee non-preemption; reference routes arriving after the wait can also allow preemption. |
 | `redundancy_mode` | string | no       | `"all-active"` | `"all-active"` sets the ESI Label extcomm Single-Active flag to 0 and allows receiver-side aliasing ECMP. `"single-active"` sets the flag to 1, suppresses all-active aliasing ECMP for remote single-active ES reachability, and enables the receive-side backup-path pre-install path from ADR-0083 |

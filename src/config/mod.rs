@@ -6379,17 +6379,19 @@ fn parse_ethernet_segment(
             });
         }
     };
-    let default_preference = 32_768;
+    // Default-modulo and HRW never advertise or use preference. The former
+    // default 32768 stays accepted for them so configs that spelled it out
+    // still load; it changes nothing on the wire or in the election.
     if !matches!(
         df_algorithm,
         DfAlgorithm::HighestPreference | DfAlgorithm::LowestPreference
-    ) && cfg.df_preference != default_preference
+    ) && !matches!(cfg.df_preference, DEFAULT_DF_PREFERENCE | 32_768)
     {
         return Err(ConfigError::InvalidEthernetSegment {
             reason: format!(
                 "df_preference {}: only RFC 9785 highest-/lowest-preference DF election \
                  uses preference; default-modulo and highest-random-weight require \
-                 the default {default_preference}",
+                 the default {DEFAULT_DF_PREFERENCE}",
                 cfg.df_preference
             ),
         });
