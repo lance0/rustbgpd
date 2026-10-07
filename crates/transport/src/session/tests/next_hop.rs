@@ -1691,6 +1691,33 @@ async fn negotiated_link_local_sends_sixteen_bytes_for_both_unicast_families() {
 }
 
 #[tokio::test]
+async fn legacy_ipv4_link_local_reflection_requires_source_scope() {
+    let (mut session, _rib_rx) = make_test_session_with_rib(65001, 65002);
+    configure_scoped_link_local_peer(&mut session);
+    session.config.route_server_client = true;
+    session.config.local_ipv6_nexthop = Some("fe80::1".parse().unwrap());
+    let neg = negotiated_session(65002, true);
+    assert!(!neg.link_local_next_hop);
+    session.negotiated = Some(Arc::new(neg));
+    let profile = super::super::export::SessionExportProfile::capture(&session);
+    let mut route = make_route(100);
+    route.next_hop = "fe80::2".parse().unwrap();
+    route.link_local_next_hop = Some("fe80::2".parse().unwrap());
+    route.next_hop_scope = session.link_local_next_hop_scope.clone().map(Box::new);
+    assert!(profile.prepare_unicast_candidate(&route, None).is_ok());
+    route.next_hop_scope.as_mut().unwrap().ifindex += 1;
+    for missing_scope in [false, true] {
+        if missing_scope {
+            route.next_hop_scope = None;
+        }
+        assert!(matches!(
+            profile.prepare_unicast_candidate(&route, None),
+            Err(super::super::export::ExportProbeError::LinkLocalNextHopScope)
+        ));
+    }
+}
+
+#[tokio::test]
 async fn reflected_link_local_requires_same_scope_or_explicit_self() {
     let (mut session, _rib_rx) = make_test_session_with_rib(65001, 65001);
     configure_scoped_link_local_peer(&mut session);
