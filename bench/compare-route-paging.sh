@@ -516,17 +516,6 @@ done
 compile_input_manifest_sha256=$(sha256sum "$compile_input_manifest" | awk '{print $1}')
 compile_input_count=${#base_compile_inputs[@]}
 
-source_manifest_tmp="$scratch/measurement-source-SHA256SUMS"
-(
-  cd "$source_dir"
-  find . -type f ! -path ./SHA256SUMS -print0 \
-    | sort -z \
-    | xargs -0 sha256sum >"$source_manifest_tmp"
-  mv "$source_manifest_tmp" SHA256SUMS
-  sha256sum --check SHA256SUMS >/dev/null
-)
-measurement_source_manifest_sha256=$(sha256sum "$source_dir/SHA256SUMS" | awk '{print $1}')
-
 cat >"$output_dir/metadata.txt" <<EOF
 run_utc_start=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 evidence_class=$evidence_class
@@ -547,7 +536,6 @@ harness_sha256=$harness_sha256
 harness_source_sha256=$harness_source_sha256
 bench_support_source_sha256=$bench_support_source_sha256
 driver_source_sha256=$driver_source_sha256
-measurement_source_manifest_sha256=$measurement_source_manifest_sha256
 compile_input_manifest_sha256=$compile_input_manifest_sha256
 compile_input_count=$compile_input_count
 routes=$routes_csv
@@ -1080,18 +1068,5 @@ PY
   printf 'read_write_memory_gates=passed\n'
   printf 'matrix_complete=1\n'
 } >>"$output_dir/metadata.txt"
-
-artifact_manifest_tmp="$scratch/artifact-SHA256SUMS"
-(
-  cd "$output_dir"
-  find . -type f ! -path ./SHA256SUMS -print0 \
-    | sort -z \
-    | xargs -0 sha256sum
-) >"$artifact_manifest_tmp"
-mv "$artifact_manifest_tmp" "$output_dir/SHA256SUMS"
-(
-  cd "$output_dir"
-  sha256sum --check SHA256SUMS >/dev/null
-)
 
 printf 'route paging comparison written to %s\n' "$output_dir"

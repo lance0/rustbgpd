@@ -628,11 +628,10 @@ python3 "$source_dir/parse_rrharness.py" compare \
   --input "$results" --raw-dir "$raw_dir" --output "$comparison" \
   --summary "$summary" "${gate_args[@]}"
 
+folded_members="$scratch/folded-members.txt"
 (
   cd "$output_dir"
-  find raw -type f -name '*.folded' -print0 | LC_ALL=C sort -z | xargs -0 sha256sum \
-    >folded-SHA256SUMS
-  sha256sum --check folded-SHA256SUMS >/dev/null
+  find raw -type f -name '*.folded' | LC_ALL=C sort >"$folded_members"
   while IFS= read -r member; do
     [[ $member != /* && $member != *'..'* ]] || {
       printf 'unsafe folded archive member: %s\n' "$member" >&2
@@ -642,13 +641,12 @@ python3 "$source_dir/parse_rrharness.py" compare \
       printf 'folded archive member is not a regular file: %s\n' "$member" >&2
       exit 1
     }
-  done < <(awk '{print $2}' folded-SHA256SUMS)
-  awk '{print $2}' folded-SHA256SUMS \
-    | tar --sort=name --mtime='UTC 1970-01-01' --owner=0 --group=0 \
-      --numeric-owner -T - -cf - \
+  done <"$folded_members"
+  tar --sort=name --mtime='UTC 1970-01-01' --owner=0 --group=0 \
+      --numeric-owner -T "$folded_members" -cf - \
     | gzip -n >folded-profiles.tar.gz
   tar -tzf folded-profiles.tar.gz | LC_ALL=C sort >folded-archive-members.txt
-  diff -u <(awk '{print $2}' folded-SHA256SUMS | LC_ALL=C sort) folded-archive-members.txt
+  diff -u "$folded_members" folded-archive-members.txt
 )
 
 run_utc_finish=$(date -u +%Y-%m-%dT%H:%M:%SZ)
@@ -810,15 +808,9 @@ privacy_require_no_match 'retained credentials or process identity' \
   'https?://[^/@:]+:[^/@]+@|(^|[^[:alpha:]])pid([^[:alpha:]]|$)|user(name)?=' \
   -g '!**/measurement-sources/**' "$output_dir"
 
-final_manifest_tmp="$scratch/final-SHA256SUMS"
 (
   cd "$output_dir"
-  find . -type f ! -name SHA256SUMS ! -name COMPLETED -print0 \
-    | LC_ALL=C sort -z | xargs -0 sha256sum >"$final_manifest_tmp"
-  mv "$final_manifest_tmp" SHA256SUMS
-  sha256sum --check SHA256SUMS >/dev/null
   printf 'schema=rustbgpd.rrharness-comparison.v1\n' >COMPLETED
-  printf 'sha256sums_sha256=%s\n' "$(sha256sum SHA256SUMS | awk '{print $1}')" >>COMPLETED
   printf 'matrix_complete=1\ngates=%s\n' "$receipt_gates" >>COMPLETED
   [[ $receipt_gates != pinned ]] || printf 'throughput_gates_passed=1\n' >>COMPLETED
 )
