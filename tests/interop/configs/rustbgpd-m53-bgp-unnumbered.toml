@@ -29,6 +29,7 @@ remote_asn = 65002
 description = "frr1-m53-unnumbered"
 hold_time = 90
 families = ["ipv4_unicast", "ipv6_unicast"]
+link_local_next_hop = true
 
 [[neighbors]]
 address = "fe80::3"
@@ -37,6 +38,7 @@ remote_asn = 65002
 description = "frr2-m53-unnumbered"
 hold_time = 90
 families = ["ipv4_unicast", "ipv6_unicast"]
+link_local_next_hop = true
 
 [security.grpc]
 enforcement = "tier"
