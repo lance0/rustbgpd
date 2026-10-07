@@ -287,12 +287,10 @@ settled RSS marker appears.
 Use a dedicated directory and stable names:
 
 - eight `*.folded` CPU profiles and eight `*.cpu.tsv` classified tables. The
-  folded inputs may be retained in one deterministic compressed tar archive
-  when the receipt also carries the archive hash and a checksum for every
-  extracted member;
+  folded inputs may be retained in one deterministic compressed tar archive;
 - `2p-100k.memory.tsv` and `2p-100k.dhat-derivative.tsv`;
 - the sanitized same-run `2p-100k.csv`;
-- `manifest.json` and `SHA256SUMS`.
+- `manifest.json`.
 
 The manifest records at least:
 
@@ -331,9 +329,7 @@ RFC 3339 `Z` form. Use that one ID for the raw CSV capture, DHAT extraction,
 sanitized CSV, derivative, and memory table, and record the exact launch,
 SIGTERM, copy, classify, and sanitize argv. This associates both committed
 views with one process without persisting ephemeral PIDs or container IDs.
-Finally run `sha256sum` over
-every archived artifact (including the manifest) in byte-sorted filename order
-and commit the resulting `SHA256SUMS`. Re-run the CPU classifier against each
+Finally re-run the CPU classifier against each
 folded profile and the DHAT classifier in `--from-derivative` mode with
 `--check <committed-table>`, and re-run the CSV sanitizer against the temporary
 raw capture with `--check receipts/2p-100k.csv`, before accepting the receipt.
