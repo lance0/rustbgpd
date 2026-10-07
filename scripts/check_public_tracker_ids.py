@@ -13,10 +13,11 @@ file list, so a doc added tomorrow is covered the day it lands instead of
 passing vacuously. An empty scan set is itself a failure: a guard that
 cannot fail is worse than no guard.
 
-Artifact documents under `docs/perf/artifacts/` and `docs/artifacts/` are
-historical evidence rather than living documentation, so the document tracker
-ID scan exempts them by directory. The separate artifact home-path scan still
-checks its own roots.
+Performance-receipt documents under `docs/perf/artifacts/` are historical
+evidence rather than living documentation, so the document tracker ID scan
+exempts that directory. Other published receipts, including the soak and
+interop artifacts under `docs/artifacts/`, are still written regularly and
+stay scanned. The separate artifact home-path scan still checks its own roots.
 
 Exported runtime text is the one crate-source surface fenced here. Crate
 sources stay outside the document scan (see the scope note below), but two
@@ -93,7 +94,7 @@ ARTIFACT_ROOTS = (
     Path("docs/perf/artifacts"),
     Path("docs/artifacts/soak"),
 )
-DOCUMENT_ARTIFACT_ROOTS = (Path("docs/perf/artifacts"), Path("docs/artifacts"))
+DOCUMENT_ARTIFACT_ROOTS = (Path("docs/perf/artifacts"),)
 
 
 class TrackerIdGuardError(RuntimeError):

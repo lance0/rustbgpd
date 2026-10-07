@@ -316,7 +316,7 @@ class PublicTrackerIdTests(unittest.TestCase):
         self.assertEqual(len(failures), 1)
         self.assertIn("docs/example.md:2", failures[0])
 
-    def test_artifact_documents_need_no_manifest(self) -> None:
+    def test_perf_artifact_documents_need_no_manifest(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             paths = [
@@ -324,11 +324,23 @@ class PublicTrackerIdTests(unittest.TestCase):
                 write_fixture(
                     root, "docs/perf/artifacts/new/README.md", "LAN-123\n"
                 ),
-                write_fixture(root, "docs/artifacts/new/README.md", "LAN-123\n"),
             ]
             with mock.patch.multiple(guard, ROOT=root, tracked_files=lambda: paths):
                 documents = guard.discover_documents()
             self.assertEqual(documents, {"README.md": "clean\n"})
+
+    def test_published_receipts_outside_perf_artifacts_remain_scanned(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            name = "docs/artifacts/soak/new/README.md"
+            paths = [
+                write_fixture(root, "README.md", "clean\n"),
+                write_fixture(root, name, "LAN-123\n"),
+            ]
+            with mock.patch.multiple(guard, ROOT=root, tracked_files=lambda: paths):
+                documents = guard.discover_documents()
+            self.assertIn(name, documents)
+            self.assertTrue(guard.audit_document(name, documents[name]))
 
     def test_artifact_root_near_misses_remain_scanned(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
