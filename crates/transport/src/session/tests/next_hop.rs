@@ -1847,14 +1847,19 @@ async fn link_local_malformed_replacement_withdraws_negotiated_route() {
 }
 
 #[tokio::test]
-async fn link_local_capability_advertisement_requires_scoped_peer() {
-    for (address, scoped, expected) in [
-        ("[fe80::2]:179", true, true),
-        ("[fe80::2]:179", false, false),
-        ("[2001:db8::2]:179", true, false),
-        ("192.0.2.2:179", true, false),
+async fn link_local_capability_advertisement_requires_opt_in_and_scoped_peer() {
+    for (address, scoped, opt_in, expected) in [
+        ("[fe80::2]:179", true, true, true),
+        // The default leaves capability 77 off even for a scoped peer.
+        ("[fe80::2]:179", true, false, false),
+        ("[fe80::2]:179", false, true, false),
+        ("[2001:db8::2]:179", true, true, false),
+        ("192.0.2.2:179", true, true, false),
     ] {
-        let peer = PeerConfig::new(65001, 65002, Ipv4Addr::new(10, 0, 0, 1));
+        let mut peer = PeerConfig::new(65001, 65002, Ipv4Addr::new(10, 0, 0, 1));
+        if opt_in {
+            peer.link_local_next_hop = true;
+        }
         let mut config = TransportConfig::new(peer, address.parse().unwrap());
         if scoped {
             config.peer_interface = Some("eth1".into());
@@ -1876,7 +1881,7 @@ async fn link_local_capability_advertisement_requires_scoped_peer() {
         );
         assert_eq!(
             session.config.peer.link_local_next_hop, expected,
-            "{address} scoped={scoped}"
+            "{address} scoped={scoped} opt_in={opt_in}"
         );
     }
 }

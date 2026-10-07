@@ -1743,6 +1743,7 @@ fn config_field_impact(field: &str) -> Option<(ConfigFieldImpact, &'static str)>
         | "strict_role"
         | "prefix_orf_receive"
         | "disable_ipv4_unicast"
+        | "link_local_next_hop"
         | "add_path" => (
             ConfigFieldImpact::SessionReset,
             "session reset: OPEN renegotiation",
@@ -1927,6 +1928,7 @@ pub fn describe_neighbor_changes(old: &Neighbor, new: &Neighbor) -> Vec<FieldCha
     cmp_field!(strict_role);
     cmp_field!(prefix_orf_receive);
     cmp_field!(disable_ipv4_unicast);
+    cmp_field!(link_local_next_hop);
     cmp_field!(remove_private_as);
     cmp_field!(discard_path_attributes);
     cmp_field!(add_path);
@@ -2067,6 +2069,7 @@ fn neighbor_runtime_equal(old: &Neighbor, new: &Neighbor) -> bool {
         && old.strict_role == new.strict_role
         && old.prefix_orf_receive == new.prefix_orf_receive
         && old.disable_ipv4_unicast == new.disable_ipv4_unicast
+        && old.link_local_next_hop == new.link_local_next_hop
         && old.remove_private_as == new.remove_private_as
         && old.discard_path_attributes == new.discard_path_attributes
         && old.add_path == new.add_path
@@ -3044,6 +3047,12 @@ impl Config {
                 neighbor
                     .disable_ipv4_unicast
                     .or_else(|| group.and_then(|g| g.disable_ipv4_unicast))
+                    .unwrap_or(false),
+            );
+            neighbor.link_local_next_hop = Some(
+                neighbor
+                    .link_local_next_hop
+                    .or_else(|| group.and_then(|g| g.link_local_next_hop))
                     .unwrap_or(false),
             );
             if neighbor.required_families.is_empty()
@@ -5999,6 +6008,7 @@ pub fn describe_peer_group_changes(
     cmp_field!(strict_role);
     cmp_field!(prefix_orf_receive);
     cmp_field!(disable_ipv4_unicast);
+    cmp_field!(link_local_next_hop);
     cmp_field!(remove_private_as);
     cmp_field!(discard_path_attributes);
     cmp_field!(add_path);

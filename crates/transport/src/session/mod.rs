@@ -1979,7 +1979,8 @@ impl PeerSession {
         let peer_label = rustbgpd_telemetry::peer_label(peer_ip);
         initialize_route_safety_metric_series(&config, &metrics, &peer_label);
         let link_local_next_hop_scope = Self::link_local_next_hop_scope_from_config(&config);
-        config.peer.link_local_next_hop = link_local_next_hop_scope.is_some()
+        // Capability 77 is opt-in and needs a directly attached link-local peer.
+        config.peer.link_local_next_hop &= link_local_next_hop_scope.is_some()
             && matches!(peer_ip, IpAddr::V6(addr) if is_ipv6_link_local(&addr));
         let fsm = Session::new(config.peer.clone());
         let explain_enabled = config.explain_enabled;

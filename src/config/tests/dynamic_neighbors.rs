@@ -42,6 +42,11 @@ fn dynamic_neighbor_effective_mode_validation_matrix() {
         ),
         ("role = \"peer\"", 65001, "BGP Roles require eBGP"),
         ("strict_role = true", 65002, "strict_role requires role"),
+        (
+            "link_local_next_hop = true",
+            65002,
+            "link_local_next_hop requires an interface-bound neighbor",
+        ),
     ];
     for (group_fields, remote_asn, expected) in cases {
         let err = parse(&dynamic_modes_toml(group_fields, remote_asn)).unwrap_err();

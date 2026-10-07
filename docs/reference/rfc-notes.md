@@ -878,9 +878,10 @@ not an RFC or part of the unicast v1 compatibility contract. Capability 77
 has an empty value. Nonzero values remain unknown capabilities and cannot
 negotiate the extension; duplicate valid copies are idempotent.
 
-- The daemon advertises it on explicitly interface-bound IPv6 link-local
-  sessions with an interface index. Both peers must advertise it. Each new
-  OPEN computes the negotiated state anew.
+- The daemon advertises it only when `link_local_next_hop = true` is set on
+  an explicitly interface-bound IPv6 link-local neighbor (or its peer group);
+  the default is off. Both peers must advertise it. Each new OPEN computes the
+  negotiated state anew.
 - Negotiated IPv4 and IPv6 unicast use a 16-byte link-local-only next hop.
   IPv4 additionally requires Extended Next Hop negotiation. Without capability
   77 the existing scoped IPv4 32-byte legacy encoding remains; IPv6 retains
@@ -895,8 +896,11 @@ negotiate the extension; duplicate valid copies are idempotent.
   unless policy or normal eBGP behavior selects a known local next hop.
   Optional link-local companions of global next hops are omitted on negotiated
   sessions when their source interface cannot be established. Exact export
-  diagnostics expose the rejection; withdrawals retain normal MP_UNREACH
-  encoding and do not depend on a next hop.
+  diagnostics expose the rejection under
+  `bgp_exact_export_rejections_total{reason="missing_ipv6_next_hop"}`;
+  withdrawals retain normal MP_UNREACH encoding and do not depend on a next
+  hop. This scope check applies to every session, including peers that did
+  not negotiate capability 77.
 
 Interface autodiscovery is not implemented. Operators using graceful restart
 should keep link-local addresses stable across restarts; this feature does

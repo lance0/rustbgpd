@@ -1788,6 +1788,20 @@ define_neighbor_and_peer_group_configs! {
                 /// `disable_ipv4_unicast` for semantics.
             }
         }
+        link_local_next_hop: Option<bool> {
+            neighbor {
+                /// Advertise the experimental Link-Local Next Hop capability (code 77,
+                /// draft-ietf-idr-linklocal-capability-06). When both speakers advertise
+                /// it, IPv4/IPv6 unicast may carry a 16-byte link-local-only next hop.
+                /// Only valid for interface-bound IPv6 link-local neighbors. Default:
+                /// `false`.
+            }
+            peer_group {
+                /// Link-Local Next Hop capability opt-in inherited by neighbors in this
+                /// group. Every inheriting neighbor must be an interface-bound IPv6
+                /// link-local peer. See the neighbor-level `link_local_next_hop`.
+            }
+        }
         remove_private_as: Option<String> {
             neighbor {
                 /// Remove private ASNs from `AS_PATH` before eBGP advertisement.
@@ -1945,6 +1959,7 @@ impl fmt::Debug for Neighbor {
             .field("strict_role", &self.strict_role)
             .field("prefix_orf_receive", &self.prefix_orf_receive)
             .field("disable_ipv4_unicast", &self.disable_ipv4_unicast)
+            .field("link_local_next_hop", &self.link_local_next_hop)
             .field("remove_private_as", &self.remove_private_as)
             .field("discard_path_attributes", &self.discard_path_attributes)
             .field("add_path", &self.add_path)
@@ -2141,6 +2156,7 @@ impl fmt::Debug for PeerGroupConfig {
             .field("strict_role", &self.strict_role)
             .field("prefix_orf_receive", &self.prefix_orf_receive)
             .field("disable_ipv4_unicast", &self.disable_ipv4_unicast)
+            .field("link_local_next_hop", &self.link_local_next_hop)
             .field("remove_private_as", &self.remove_private_as)
             .field("discard_path_attributes", &self.discard_path_attributes)
             .field("add_path", &self.add_path)

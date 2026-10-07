@@ -40,6 +40,7 @@ fn preserves_negotiation(current: &ResolvedNeighbor, candidate: &ResolvedNeighbo
         && left.peer.gr_restart_time == right.peer.gr_restart_time
         && left.peer.prefix_orf_receive == right.peer.prefix_orf_receive
         && left.peer.disable_ipv4_unicast == right.peer.disable_ipv4_unicast
+        && left.peer.link_local_next_hop == right.peer.link_local_next_hop
         && left.llgr_stale_time == right.llgr_stale_time
 }
 
