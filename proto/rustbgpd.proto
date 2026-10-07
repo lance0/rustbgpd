@@ -4448,10 +4448,12 @@ message EthernetSegmentState {
   // Configured DF algorithm (`default-modulo`, `hrw`,
   // `highest-preference`, or `lowest-preference`).
   string df_algorithm = 4;
-  // Configured DF preference value advertised for preference-based
-  // DF election.
+  // Administrative (configured) DF preference for preference-based DF
+  // election. While RFC 9785 non-revertive recovery inherits another PE's
+  // preference, the advertised value differs from this field.
   uint32 df_preference = 5;
-  // RFC 9785 Don't-Preempt bit configured for this segment.
+  // Administrative RFC 9785 Don't-Preempt bit configured for this segment.
+  // The advertised bit is cleared while an inherited preference is in use.
   bool df_dont_preempt = 6;
   // Configured local Type 4 originator IP.
   string originator_ip = 7;
