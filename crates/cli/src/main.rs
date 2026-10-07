@@ -1026,6 +1026,9 @@ enum PolicyAction {
         /// Direction: import, export, or both
         #[arg(long, value_parser = ["import", "export", "both"])]
         direction: String,
+        /// Return usable fleet import rows when selected sessions exit
+        #[arg(long, conflicts_with = "neighbor")]
+        allow_partial: bool,
     },
     /// Explain the policy decision for a prefix on a neighbor
     ///
@@ -5223,7 +5226,17 @@ async fn run(cli: Cli, binary_name: &'static str) -> Result<(), CliError> {
             PolicyAction::Stats {
                 neighbor,
                 direction,
-            } => commands::policy::stats(connection, neighbor.as_deref(), &direction, json).await,
+                allow_partial,
+            } => {
+                commands::policy::stats(
+                    connection,
+                    neighbor.as_deref(),
+                    &direction,
+                    allow_partial,
+                    json,
+                )
+                .await
+            }
             PolicyAction::Explain {
                 neighbor,
                 prefix,
@@ -10576,6 +10589,43 @@ printf '%s\n' "${COMPREPLY[@]}"
             }
         }
         assert!(problems.is_empty(), "{}", problems.join("\n"));
+    }
+
+    #[test]
+    fn policy_stats_partial_flag_requires_fleet_selection() {
+        let cli = Cli::try_parse_from([
+            "rbgp",
+            "policy",
+            "stats",
+            "--direction",
+            "import",
+            "--allow-partial",
+        ])
+        .unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Policy {
+                action: PolicyAction::Stats {
+                    allow_partial: true,
+                    ..
+                }
+            }
+        ));
+        for flag in ["--neighbor", "--peer"] {
+            let error = Cli::try_parse_from([
+                "rbgp",
+                "policy",
+                "stats",
+                "--direction",
+                "both",
+                "--allow-partial",
+                flag,
+                "192.0.2.1",
+            ])
+            .err()
+            .unwrap();
+            assert_eq!(error.kind(), clap::error::ErrorKind::ArgumentConflict);
+        }
     }
 
     /// `policy stats` and `policy explain` used to default to opposite

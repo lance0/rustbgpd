@@ -200,21 +200,61 @@ pub async fn capture_import(
     deadline: tokio::time::Instant,
     progress: &mut ImportCaptureProgress,
 ) -> Result<Vec<(IpAddr, ImportPolicyTermHits)>, ImportPolicyStatsError> {
+    capture_import_allow_partial(peers, deadline, progress, false)
+        .await
+        .map(|capture| capture.rows)
+}
+
+/// Captured rows and the selected session addresses that exited during capture.
+#[derive(Debug)]
+pub(crate) struct ImportCapture {
+    /// Live installed counters, in roster order; chainless sessions add no row.
+    pub rows: Vec<(IpAddr, ImportPolicyTermHits)>,
+    /// Sorted unique addresses whose selected publication closed.
+    pub incomplete_peer_addresses: Vec<IpAddr>,
+}
+
+/// Capture a fleet, optionally skipping only selected publications that closed.
+/// The held roster defines session identity: replacement sessions are never
+/// substituted mid-capture. Every other failure still fails the whole capture.
+///
+/// # Errors
+///
+/// Deadline expiry, unavailable counters, or session closure without opt-in.
+pub(crate) async fn capture_import_allow_partial(
+    peers: &[ImportRosterPeer],
+    deadline: tokio::time::Instant,
+    progress: &mut ImportCaptureProgress,
+    allow_partial: bool,
+) -> Result<ImportCapture, ImportPolicyStatsError> {
     progress.selected = peers.len();
-    let mut rows = Vec::with_capacity(peers.len());
+    let mut capture = ImportCapture {
+        rows: Vec::with_capacity(peers.len()),
+        incomplete_peer_addresses: Vec::new(),
+    };
     for peer in peers {
         let snapshot = PeerHandle::read_import_policy_counters_counting(
             &peer.publication,
             deadline,
             &progress.yields,
         )
-        .await?;
-        progress.read += 1;
-        if let Some(snapshot) = snapshot {
-            rows.push((peer.key.address, snapshot));
+        .await;
+        match snapshot {
+            Err(ImportPolicyStatsError::SessionGone) if allow_partial => {
+                capture.incomplete_peer_addresses.push(peer.key.address);
+            }
+            result => {
+                let snapshot = result?;
+                progress.read += 1;
+                if let Some(snapshot) = snapshot {
+                    capture.rows.push((peer.key.address, snapshot));
+                }
+            }
         }
     }
-    Ok(rows)
+    capture.incomplete_peer_addresses.sort_unstable();
+    capture.incomplete_peer_addresses.dedup();
+    Ok(capture)
 }
 
 /// Why a dataset status capture failed.

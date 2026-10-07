@@ -1472,6 +1472,7 @@ impl RustbgpdMcp {
             proto::policy_service_client::PolicyServiceClient::new(self.upstream.clone());
         let response = self
             .read(client.get_policy_stats(proto::GetPolicyStatsRequest {
+                allow_partial: false,
                 peer_address: params.peer_address,
                 direction: params.direction,
             }))

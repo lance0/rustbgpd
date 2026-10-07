@@ -367,6 +367,7 @@ async fn policy_stats_succeed_while_the_peer_manager_and_rib_are_never_polled() 
     let response = service
         .get_policy_stats(tonic::Request::new(
             rustbgpd_api::proto::GetPolicyStatsRequest {
+                allow_partial: false,
                 peer_address: peer.to_string(),
                 direction: "both".to_string(),
             },
@@ -432,6 +433,7 @@ async fn policy_stats_fail_when_the_peer_manager_stops_mid_capture() {
         service
             .get_policy_stats(tonic::Request::new(
                 rustbgpd_api::proto::GetPolicyStatsRequest {
+                    allow_partial: false,
                     peer_address: String::new(),
                     direction: "import".to_string(),
                 },

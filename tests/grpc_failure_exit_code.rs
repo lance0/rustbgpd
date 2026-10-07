@@ -547,6 +547,7 @@ async fn initial_roster_unknown_peer_reads_are_retryable_until_registration() {
         };
         let policy_read = || {
             observer_request(proto::GetPolicyStatsRequest {
+                allow_partial: false,
                 peer_address: peer.into(),
                 direction: "import".into(),
             })
@@ -644,6 +645,7 @@ async fn initial_roster_unknown_peer_reads_are_retryable_until_registration() {
         assert_eq!(
             policy
                 .get_policy_stats(observer_request(proto::GetPolicyStatsRequest {
+                    allow_partial: false,
                     peer_address: unknown.into(),
                     direction: "import".into(),
                 }))

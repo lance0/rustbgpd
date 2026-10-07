@@ -244,7 +244,11 @@ These meanings are part of the inventoried RPC contract:
   new whenever the counters restart. Numeric samples are not an atomic fleet
   snapshot. Peer validation and export, import and dataset waits share one
   absolute deadline; errors return no partial response and late capture
-  results do not become successful reads.
+  results do not become successful reads. Opt-in `allow_partial` fleet
+  import/both reads may skip only selected sessions whose publications close,
+  naming them in sorted unique `incomplete_peer_addresses`. A nonempty list
+  means partial, including an all-gone fleet; all other errors still fail
+  whole. Peer-filtered and export-only partial requests are invalid.
 
 The [API deadline table](api.md#operator-read-deadlines) distinguishes bounded
 operator, summary and statistics waits from general RIB listing/explain reads

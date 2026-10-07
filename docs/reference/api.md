@@ -1265,7 +1265,7 @@ changes do not retroactively re-evaluate existing Adj-RIB-In state; use
 | `ExplainImportPolicy` | Explain why a prefix was permitted / denied / withdrawn / evicted / stale / not-seen on import for a given neighbor, reading the per-session import-decision cache (ADR-0073). For `.rpol` chain members the statement trace names the deciding term and carries per-term trace lines (ADR-0096). An all-path query above 4096 matches returns `RESOURCE_EXHAUSTED`; specify `path_id` for a point lookup. A bounded read timeout returns `DEADLINE_EXCEEDED`, not synthetic `NO_SESSION`. Side-effect-free; IPv4/IPv6 unicast only. `SensitiveRead` tier. |
 | `ListRejectedRoutes` | List every rejected inbound route a peer's session has retained, each tagged with its canonical reject-reason token (`policy_reject`, `otc_route_leak`, `next_hop_ownership`, `as_path_loop`, `rr_loop`, `treat_as_withdraw`), a bounded sub-reason detail, and a best-effort attribute summary. A named `.rpol` deny identifies its deciding `policy:term`; named TOML/default denies retain policy-only detail. The enumeration complement to `ExplainImportPolicy`'s point lookup. Retention is a bounded per-peer LRU (`[policy.reject_retention]`); the response reports `retention_enabled`, `capacity`, and optional `evictions_since_reset` (absent from older daemons) so completeness is explicit. A bounded read timeout returns `DEADLINE_EXCEEDED`, not `NOT_FOUND`. Side-effect-free; IPv4/IPv6 unicast only. CLI: `rbgp rib received <peer> --rejected`. `SensitiveRead` tier. |
 | `TestPolicy` | Dry-run a candidate `.rpol` policy (source sent in the request, compiled before RIB access) read-only over a version-fenced walk of the retained post-policy Adj-RIB-In (import) or Loc-RIB best routes (export). Import sees routes admitted by import policy when they were received or last re-evaluated: retained Adj-RIB-In under an active GR/LLGR window, or not yet re-evaluated after an import-policy change, can hold routes the installed chain would now reject, and routes a candidate would newly admit are not visible (`ListRejectedRoutes` lists recent rejections). Routes are evaluated in canonical `(prefix, peer, path_id)` order in pages capped at 1,000; family, `limit`, `show_changes`, counts, and term hits apply globally. Candidate `datasets` carry `{name, entries}` text, with at most 16 bindings and a 4 MiB encoded-request limit; missing, duplicate, undeclared, or malformed bindings return `INVALID_ARGUMENT`. `show_rejected` returns up to 1,000 candidate rejections among retained post-policy routes. A conservative mutation of the selected Received/Best table returns `ABORTED` with no partial response: retry the whole RPC from the beginning. Paging-generation exhaustion or an unavailable RIB backend returns `UNAVAILABLE`. No route, session, or counter impact; IPv4/IPv6 unicast (ADR-0096). CLI: `rbgp policy test`. `SensitiveRead` tier. |
-| `GetPolicyStats` | Read live per-term hit counters for installed policy chains (since chain install; direction `import`, `export`, or `both`). Each row's `policy_generation` names its counters: the install generation for import chains, the counter-instance id for export chains. Explicit-peer validation plus export, import, and dataset reads share one absolute 2 s deadline. Peer validation, import counters and dataset status come from the roster the peer manager publishes, and export counters from the roster the RIB manager publishes, not from an actor query, so success does not show that the peer manager or the RIB manager is making progress; readiness and health test that. A request that sees, after its capture, that either owner has stopped returns `UNAVAILABLE`. Reads stop on caller disconnect and return no partial rows on deadline or unavailable errors. Chainless sessions contribute no row; unknown peers return `NOT_FOUND`. CLI: `rbgp policy stats`. `SensitiveRead` tier. |
+| `GetPolicyStats` | Read live per-term hit counters for installed policy chains (since chain install; direction `import`, `export`, or `both`). Each row's `policy_generation` names its counters: the install generation for import chains, the counter-instance id for export chains. Explicit-peer validation plus export, import, and dataset reads share one absolute 2 s deadline. Peer validation, import counters and dataset status come from the roster the peer manager publishes, and export counters from the roster the RIB manager publishes, not from an actor query, so success does not show that the peer manager or the RIB manager is making progress; readiness and health test that. A request that sees, after its capture, that either owner has stopped returns `UNAVAILABLE`. Reads stop on caller disconnect. By default, errors return no partial rows; unfiltered import/both requests may opt in to partial session-closure results as described below. Chainless sessions contribute no row; unknown peers return `NOT_FOUND`. CLI: `rbgp policy stats`. `SensitiveRead` tier. |
 | `GetValidationPolicyPosture` | Conservatively classifies RPKI-invalid and ASPA-invalid routes as `ENFORCED`, `UNENFORCED`, or `UNKNOWN` for installed static/dynamic peers and one prospective row per accepted dynamic range. The bounded response reports `complete` and `omitted`; an incomplete aggregate is never `ENFORCED`. This proves policy disposition only, not validator readiness, connectivity, configured intent, FIB state, or runtime enforcement. `SensitiveRead` tier; outside the narrow v1-stable surface. |
 
 Import rows use the selected session's actual installed counters, labels and
@@ -1273,9 +1273,9 @@ generation. Numeric fields are sampled during collection; neither a row nor
 the fleet response is one atomic snapshot, and derived ratios are not exact
 instantaneous fractions. Import error count and error detail are acquired
 together. A session that has not initialized its observation remains pending
-within the deadline; a closed session or invalid counter state returns
-`UNAVAILABLE`, without partial rows. The roster names the sessions as of the
-peer manager's last completed operation: while an operation that replaces or
+within the deadline; by default a closed session or invalid counter state
+returns `UNAVAILABLE`, without partial rows. The roster names the sessions as
+of the peer manager's last completed operation: while an operation that replaces or
 removes many peers (a reload, a configuration transaction, a peer-group
 change) is in progress, a fleet read can select a session that has already
 exited and return `UNAVAILABLE`. Counter availability does not establish
@@ -1284,6 +1284,25 @@ the live readiness checks.
 A capture result observed at or after the shared absolute deadline returns
 `DEADLINE_EXCEEDED`, including an otherwise successful final dataset read. See
 [ADR-0133](../adr/0133-installed-import-counter-reads.md).
+
+For fleet reads during peer churn, set `allow_partial=true` with an empty
+`peer_address` and `direction=import` or `both` (CLI:
+`rbgp policy stats --direction both --allow-partial`). Only a selected import
+session's closed publication may be skipped. The response's
+`incomplete_peer_addresses` lists those addresses, sorted and unique; a
+nonempty list means partial, including when every selected session exited.
+New or replacement sessions published after selection are not substituted.
+Chainless sessions add neither a row nor an incomplete address. In `both`
+mode, complete export rows precede the retained import rows. The CLI prints
+`Partial import stats` and the missing addresses; JSON includes
+`incomplete_peer_addresses` only when nonempty.
+
+Using `allow_partial` with a peer filter or the export direction (including
+the empty default direction) returns `INVALID_ARGUMENT` before backend work.
+Unavailable counters, stopped roster owners, export errors, dataset errors,
+and the shared deadline still fail the whole RPC. A later dataset timeout
+discards even successfully collected partial import and complete export rows.
+The default request contract and the live-sampling semantics are unchanged.
 
 Export rows use the counter instances the RIB manager's published roster
 designates: a peer's own export chain, or the global fallback when the peer
