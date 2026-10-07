@@ -444,6 +444,11 @@ impl RibManager {
     /// whose previous session was never torn down must not inherit its
     /// predecessor's received routes).
     fn clear_peer_adj_rib_in(&mut self, peer: IpAddr) {
+        // The discarded routes no longer back any session's End-of-RIB; only
+        // a later marker on the replayed feed may report it synced again.
+        for record in self.live_sessions.get_mut(&peer).into_iter().flatten() {
+            record.evpn_end_of_rib = false;
+        }
         self.unicast_prefix_peers.retire_peer(peer);
         let Some(rib) = self.ribs.remove(&peer) else {
             return;
@@ -808,6 +813,7 @@ impl RibManager {
             negotiated_llgr_families,
             gr_context,
             exact_export_encoder,
+            evpn_end_of_rib: false,
         };
         let sessions = self.live_sessions.entry(peer).or_default();
         // Same id = the same session re-announcing itself (legacy id-0

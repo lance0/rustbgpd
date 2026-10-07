@@ -67,9 +67,9 @@ pub struct EthernetSegment {
     pub df_algorithm: DfAlgorithm,
     /// RFC 9785 Don't-Preempt. When `true`, this PE advertises DP=1 in
     /// the DF Election extended community — the wire signal for a
-    /// non-revertive DF. Origination only: rustbgpd's election does not
-    /// act on the DP bit yet (stateful non-preemption is deferred). Only
-    /// meaningful for the preference algorithms; the daemon config layer
+    /// non-revertive DF. Recovery may temporarily advertise an inherited
+    /// preference with DP=0 to preserve the existing DF. Only meaningful
+    /// for the preference algorithms; the daemon config layer
     /// rejects `true` for default-modulo / HRW.
     pub df_dont_preempt: bool,
     /// Multi-homing redundancy mode signaled in the ESI Label

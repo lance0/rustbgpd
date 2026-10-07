@@ -3209,7 +3209,7 @@ pub(crate) fn default_fib_families() -> Vec<String> {
 ///   `"default-modulo"` (RFC 7432 §8.5) and
 ///   `"highest-random-weight"` (RFC 8584 §3.2), plus RFC 9785
 ///   `"highest-preference"` / `"lowest-preference"` (revertive;
-///   local Don't-Preempt/non-revertive behavior is deferred).
+///   Don't-Preempt recovery when `df_dont_preempt` is enabled).
 ///   Default `"default-modulo"`.
 /// - `redundancy_mode` — `"all-active"` (default) or
 ///   `"single-active"`; single-active sets the ESI Label extcomm flag

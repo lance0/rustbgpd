@@ -3146,3 +3146,127 @@ async fn evpn_route_event_withdrawn_on_last_removed() {
 }
 
 // --- FIB install-candidate view (multipath/ECMP) ---
+
+/// RFC 9785 §4.3 boot gate: synced only once every established EVPN
+/// session has sent the EVPN End-of-RIB; other families' markers do not count.
+#[tokio::test]
+async fn evpn_sessions_synced_tracks_evpn_end_of_rib_per_session() {
+    async fn synced(tx: &mpsc::Sender<RibUpdate>) -> bool {
+        let (reply, rx) = tokio::sync::oneshot::channel();
+        tx.send(RibUpdate::QueryEvpnSessionsSynced { reply })
+            .await
+            .unwrap();
+        rx.await.unwrap()
+    }
+    async fn eor(tx: &mpsc::Sender<RibUpdate>, peer: Ipv4Addr, afi: Afi, safi: Safi) {
+        tx.send(RibUpdate::EndOfRib {
+            session_id: 0,
+            peer: IpAddr::V4(peer),
+            afi,
+            safi,
+        })
+        .await
+        .unwrap();
+    }
+    let (tx, rx) = mpsc::channel(64);
+    let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let handle = tokio::spawn(manager.run());
+    let a = Ipv4Addr::new(10, 0, 0, 1);
+    let b = Ipv4Addr::new(10, 0, 0, 2);
+
+    assert!(!synced(&tx).await, "no established EVPN session");
+    let _a_out = evpn_rr_client_up(&tx, a).await;
+    assert!(!synced(&tx).await);
+    eor(&tx, a, Afi::L2Vpn, Safi::Evpn).await;
+    assert!(synced(&tx).await);
+    let _b_out = evpn_rr_client_up(&tx, b).await;
+    assert!(!synced(&tx).await, "a new EVPN session reopens the gate");
+    eor(&tx, b, Afi::Ipv4, Safi::Unicast).await;
+    assert!(!synced(&tx).await, "only the EVPN marker counts");
+    eor(&tx, b, Afi::L2Vpn, Safi::Evpn).await;
+    assert!(synced(&tx).await);
+    tx.send(RibUpdate::PeerDown {
+        peer: IpAddr::V4(b),
+        session_id: 0,
+    })
+    .await
+    .unwrap();
+    let _b_out = evpn_rr_client_up(&tx, b).await;
+    assert!(!synced(&tx).await, "a reconnect must resend End-of-RIB");
+
+    drop(tx);
+    handle.await.unwrap();
+}
+
+/// A collision-window replacement discards the peer's Adj-RIB-In, so neither
+/// the superseded record nor a failover back to it may vouch for EVPN routes
+/// that the replayed feed has not yet re-delivered with End-of-RIB.
+#[tokio::test]
+async fn evpn_sessions_synced_resets_on_collision_replacement_and_failover() {
+    async fn synced(tx: &mpsc::Sender<RibUpdate>) -> bool {
+        let (reply, rx) = tokio::sync::oneshot::channel();
+        tx.send(RibUpdate::QueryEvpnSessionsSynced { reply })
+            .await
+            .unwrap();
+        rx.await.unwrap()
+    }
+    async fn up(tx: &mpsc::Sender<RibUpdate>, peer: IpAddr, session_id: u64) {
+        let (out_tx, mut out_rx) = mpsc::channel(64);
+        tx.send(RibUpdate::PeerUp {
+            per_client_best: false,
+            interpret_rfc1997: true,
+            session_id,
+            peer,
+            peer_asn: 65000,
+            peer_router_id: Ipv4Addr::new(10, 0, 0, 1),
+            outbound_tx: out_tx,
+            export_policy: None,
+            sendable_families: evpn_sendable(),
+            is_ebgp: false,
+            route_reflector_client: true,
+            orr_vantage: None,
+            add_path_send_families: vec![],
+            add_path_send_max: 0,
+            negotiated_orf_recv: Vec::new(),
+            negotiated_llgr_families: Vec::new(),
+        })
+        .await
+        .unwrap();
+        drain_eor(&mut out_rx).await;
+        // Keep the outbound channel open so failover finds a live sender.
+        tokio::spawn(async move { while out_rx.recv().await.is_some() {} });
+    }
+    let (tx, rx) = mpsc::channel(64);
+    let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let handle = tokio::spawn(manager.run());
+    let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+
+    up(&tx, peer, 1).await;
+    tx.send(RibUpdate::EndOfRib {
+        session_id: 1,
+        peer,
+        afi: Afi::L2Vpn,
+        safi: Safi::Evpn,
+    })
+    .await
+    .unwrap();
+    assert!(synced(&tx).await);
+    up(&tx, peer, 2).await;
+    assert!(
+        !synced(&tx).await,
+        "the replacement session has not sent End-of-RIB"
+    );
+    tx.send(RibUpdate::PeerDown {
+        peer,
+        session_id: 2,
+    })
+    .await
+    .unwrap();
+    assert!(
+        !synced(&tx).await,
+        "failover back to session 1 replays a discarded Adj-RIB-In"
+    );
+
+    drop(tx);
+    handle.await.unwrap();
+}

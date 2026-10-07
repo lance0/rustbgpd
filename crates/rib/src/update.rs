@@ -2900,6 +2900,13 @@ pub enum RibUpdate {
         /// Response channel.
         reply: oneshot::Sender<Vec<EvpnRibRoute>>,
     },
+    /// Whether every established L2VPN/EVPN session has sent End-of-RIB
+    /// for the family; `false` while none is established. Gates the
+    /// RFC 9785 §4.3 boot-time Designated Forwarder recovery decision.
+    QueryEvpnSessionsSynced {
+        /// Response channel.
+        reply: oneshot::Sender<bool>,
+    },
     /// Query one bounded, version-fenced EVPN table page. Each page scans the
     /// scope but copies at most the clamped page size, ordered by typed key.
     QueryEvpnRoutesPage {

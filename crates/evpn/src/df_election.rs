@@ -37,11 +37,8 @@
 //!
 //! This module implements `DefaultModulo`, the RFC 8584 §3.2 Highest
 //! Random Weight algorithm, and the RFC 9785 Highest-/Lowest-Preference
-//! algorithms. The RFC 9785 Don't-Preempt capability is parsed but is
-//! NOT an election input: a stateless election has no incumbent /
-//! prior-role state, so it cannot implement "don't preempt the
-//! incumbent". Stateful non-revertive election is deferred and remains
-//! outside this pure election state machine.
+//! algorithms, including the DP tie-break. The caller handles RFC 9785
+//! recovery by advertising operational preference/DP values before election.
 
 use std::collections::BTreeMap;
 use std::net::IpAddr;
@@ -63,10 +60,7 @@ pub struct DfCandidate {
     /// DF preference value the PE proposed. RFC 9785 preference
     /// algorithms use this field; `DefaultModulo` and HRW ignore it.
     pub df_preference: u32,
-    /// RFC 9785 Don't-Preempt capability advertised by this PE. Parsed
-    /// and carried for telemetry / future stateful use, but NOT an
-    /// election input today (see the module docs); the preference
-    /// tie-break is the lowest originator IP.
+    /// RFC 9785 Don't-Preempt capability; wins equal-preference ties.
     pub df_dont_preempt: bool,
     /// DF election algorithm the PE proposed.
     pub df_algorithm: DfAlgorithm,
@@ -113,6 +107,18 @@ impl DfElection {
     #[must_use]
     pub fn member_vnis(&self) -> &[EvpnInstanceId] {
         &self.member_vnis
+    }
+
+    /// Select the RFC 9785 reference PE if all candidates agree on a
+    /// preference algorithm. Recovery excludes the local PE; subsequent
+    /// elections include its currently advertised operational values.
+    #[must_use]
+    pub fn preference_reference(candidates: &[DfCandidate]) -> Option<&DfCandidate> {
+        match negotiate_algorithm(candidates) {
+            DfAlgorithm::HighestPreference => preference_winner(candidates, PreferenceOrder::High),
+            DfAlgorithm::LowestPreference => preference_winner(candidates, PreferenceOrder::Low),
+            _ => None,
+        }
     }
 
     /// Run the election. Returns the per-VNI `DfRole` for the local
@@ -216,20 +222,17 @@ enum PreferenceOrder {
 }
 
 fn preference_winner(candidates: &[DfCandidate], order: PreferenceOrder) -> Option<&DfCandidate> {
-    // RFC 9785 preference election: highest- (or lowest-) `df_preference` wins,
-    // ties broken by the numerically lowest originator IP. The Don't-Preempt (DP)
-    // bit is intentionally NOT a tie-break input: a stateless election has no
-    // prior-DF / incumbent input, so it cannot implement RFC 9785 "don't preempt
-    // the incumbent DF". Using DP as a static promotion key would make it
-    // offensive extra preference weight rather than the defensive non-preemption
-    // it is meant to be. rustbgpd originates + parses the DP bit; stateful
-    // non-revertive election remains deferred work.
+    // RFC 9785 §4.1: preference, then DP=1, then lowest originator IP.
     candidates.iter().max_by_key(|c| {
         let preference_key = match order {
             PreferenceOrder::High => c.df_preference,
             PreferenceOrder::Low => u32::MAX - c.df_preference,
         };
-        (preference_key, std::cmp::Reverse(c.originator_ip))
+        (
+            preference_key,
+            c.df_dont_preempt,
+            std::cmp::Reverse(c.originator_ip),
+        )
     })
 }
 
@@ -238,12 +241,7 @@ fn preference_winner(candidates: &[DfCandidate], order: PreferenceOrder) -> Opti
 /// Extended Community, decoded as `DefaultModulo`) falls back to default
 /// service carving.
 ///
-/// Limitation: this compares only the DF Alg field. RFC 8584 §2.2 also requires
-/// fallback when the DF Election **capability bitmap** (e.g. Don't Preempt,
-/// AC-DF) differs, but rustbgpd does not yet originate or parse those
-/// capabilities — `DfCandidate` carries no capability field — so they are
-/// neither advertised nor compared. Capability-aware negotiation is a future
-/// slice; until then rustbgpd interoperates only on the DF Alg field.
+/// RFC 9785 §4.3 explicitly allows mixed DP values without algorithm fallback.
 fn negotiate_algorithm(candidates: &[DfCandidate]) -> DfAlgorithm {
     let first = candidates
         .first()
@@ -714,31 +712,28 @@ mod tests {
     }
 
     #[test]
-    fn preference_tie_breaks_on_lowest_originator_ip_ignoring_dont_preempt() {
-        // Equal preference: the numerically lowest originator IP wins. The
-        // Don't-Preempt bit must NOT promote a higher-IP candidate — DP is not a
-        // tie-break input, because a stateless election cannot implement RFC 9785
-        // "don't preempt the incumbent" without prior-role state.
-        let election = DfElection::new(esi(1), [vni(100)]);
-        let candidates = vec![
-            preference_candidate("10.0.0.1", DfAlgorithm::HighestPreference, 500, false),
-            preference_candidate("10.0.0.2", DfAlgorithm::HighestPreference, 500, true),
-            preference_candidate("10.0.0.3", DfAlgorithm::HighestPreference, 500, false),
-        ];
-        // 10.0.0.2 advertises DP=true but does not win the tie.
-        let roles = election.run(&candidates, ip("10.0.0.2")).unwrap();
-        assert_eq!(roles[&vni(100)], DfRole::NonDf);
-        // The lowest originator IP (10.0.0.1) is DF despite DP=false.
-        let roles = election.run(&candidates, ip("10.0.0.1")).unwrap();
-        assert_eq!(roles[&vni(100)], DfRole::Df);
-
-        // LowestPreference path: same lowest-IP tie-break.
-        let lowest = vec![
-            preference_candidate("10.0.0.2", DfAlgorithm::LowestPreference, 500, false),
-            preference_candidate("10.0.0.1", DfAlgorithm::LowestPreference, 500, false),
-        ];
-        let roles = election.run(&lowest, ip("10.0.0.1")).unwrap();
-        assert_eq!(roles[&vni(100)], DfRole::Df);
+    fn preference_ties_prefer_dp_then_lowest_ip() {
+        for alg in [
+            DfAlgorithm::HighestPreference,
+            DfAlgorithm::LowestPreference,
+        ] {
+            let election = DfElection::new(esi(1), [vni(100)]);
+            let candidates = [
+                preference_candidate("10.0.0.1", alg, 500, false),
+                preference_candidate("10.0.0.2", alg, 500, true),
+                preference_candidate("2001:db8::1", alg, 500, true),
+            ];
+            assert_eq!(
+                election.run(&candidates, ip("10.0.0.2")).unwrap()[&vni(100)],
+                DfRole::Df
+            );
+            assert_eq!(
+                DfElection::preference_reference(&candidates)
+                    .unwrap()
+                    .originator_ip,
+                ip("10.0.0.2")
+            );
+        }
     }
 
     #[test]
