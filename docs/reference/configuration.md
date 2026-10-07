@@ -1099,6 +1099,7 @@ and config load rejects it for any neighbor or `[[dynamic_neighbors]]` range
 without an interface-bound link-local address. A toggle resets the session so
 the new OPEN can renegotiate it. See the
 [RFC notes](rfc-notes.md#link-local-next-hop-capability--draft-ietf-idr-linklocal-capability-06).
+On an FRR peer the matching opt-in is `neighbor X capability link-local`.
 Whether or not it is enabled, a link-local next hop is advertised only to a
 peer on the interface where it was learned, unless the next hop is rewritten
 to a local address.

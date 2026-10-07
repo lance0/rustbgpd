@@ -255,6 +255,21 @@ rustbgpd ↔ FRR gate for the v1 scope:
 - Multihop unnumbered, non-point-to-point links, and policy-driven next-hop
   rewrites that synthesize link-local next-hops without an interface.
 
+## Amendment (2026-10-07): capability 77 implemented as opt-in
+
+The Link-Local Next Hop Capability deferred above is now implemented against
+`draft-ietf-idr-linklocal-capability-06` as an experimental, per-neighbor
+opt-in (`link_local_next_hop`, default off), matching FRR's default-off
+`neighbor X capability link-local`. It is valid only on explicitly
+interface-bound IPv6 link-local neighbors and not on dynamic neighbor ranges.
+When both speakers advertise it, IPv4 and IPv6 unicast may carry the 16-byte
+link-local-only next hop; peers without it keep the RFC 8950 and 32-byte
+handling decided above. Independently of the capability, a link-local
+outbound next hop is no longer advertised outside the interface it was
+learned on. The M53 lab negotiates it with one FRR peer and keeps the other on
+the legacy form. Behavior and limits are maintained in the
+[RFC notes](../reference/rfc-notes.md#link-local-next-hop-capability--draft-ietf-idr-linklocal-capability-06).
+
 ## References
 
 - RFC 4007, IPv6 scoped address architecture:

@@ -880,7 +880,9 @@ negotiate the extension; duplicate valid copies are idempotent.
 
 - The daemon advertises it only when `link_local_next_hop = true` is set on
   an explicitly interface-bound IPv6 link-local neighbor (or its peer group);
-  the default is off. Both peers must advertise it. Each new OPEN computes the
+  the default is off. This matches FRR 10.4 and later, where
+  `neighbor X capability link-local` is also a per-neighbor opt-in that is off
+  by default. Both peers must advertise it. Each new OPEN computes the
   negotiated state anew.
 - Negotiated IPv4 and IPv6 unicast use a 16-byte link-local-only next hop.
   IPv4 additionally requires Extended Next Hop negotiation. Without capability

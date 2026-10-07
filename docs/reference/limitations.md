@@ -160,10 +160,12 @@ full gate ladder.
   sessions to non-adjacent peers require no separate enablement and can be
   distance-bounded with `ttl_security_hops`.
 - BGP unnumbered supports static IPv6 link-local neighbors for IPv4 unicast.
-  Link-Local Next Hop capability 77 is experimental and opt-in per neighbor
-  (`link_local_next_hop`), following an Internet-Draft that has not completed
-  working-group last call. Interface-neighbor autodiscovery remains follow-up
-  work.
+  Interface-neighbor autodiscovery remains follow-up work.
+- Link-Local Next Hop capability 77 (`draft-ietf-idr-linklocal-capability-06`)
+  is experimental and off by default. It is enabled per neighbor or peer group
+  with `link_local_next_hop`; there is no global default. Only explicitly
+  interface-bound IPv6 link-local neighbors may enable it, and
+  `[[dynamic_neighbors]]` ranges cannot.
 
 ## Configuration control
 

@@ -2616,6 +2616,7 @@ rustbgpd uses structured logging: JSON under `log_format = "json"` (the
 | `GR restart marker` | INFO | Restart marker written or read |
 | `published GR restart marker with wall-clock fallback because boottime protection was unavailable` | WARN | Clock-domain sampling or representation failed; a complete bounded v1/v2 marker was selected. Check `publication_durability` on the final publication log for directory-sync status. |
 | `max-prefix limit exceeded` | WARN | Peer exceeded prefix limit |
+| `route rejected before Adj-RIB-Out commit because its exact wire form is unexportable` | WARN | One route withheld from one peer; `reason` matches `bgp_exact_export_rejections_total`. Detail `link-local next hop cannot be advertised outside its interface scope` (reason `missing_ipv6_next_hop`) means a link-local outbound next hop would leave the interface where it was learned; it applies with or without capability 77. Rewrite the next hop (next-hop self or `local_ipv6_nexthop`) if the route must reach that peer |
 | `gRPC TCP listener bound to a non-loopback address` | WARN | Security posture warning |
 
 Later socket or task retries in the same failed-connect episode stay at DEBUG
