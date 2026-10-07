@@ -20,8 +20,9 @@
 #      NOT the RT-65001:200 route.
 #   7. sink2 (no rtc family) receives BOTH routes unfiltered —
 #      SAFI-132-not-negotiated means no filtering.
-#   8. Widening sink's membership (adding the red RTC NLRI) delivers the
-#      red route with zero session flaps; narrowing withdraws exactly it.
+#   8. Widening sink's membership with origin AS 65002 for RT 65001:200
+#      delivers the red route with zero session flaps; narrowing withdraws
+#      exactly it. The received /96 pins origin-AS-independent matching.
 #   9. The default RTC NLRI injected by the sink matches ALL RTs (red
 #      re-delivered), and its withdrawal narrows back.
 #  10. Nothing is installed into any dataplane on the RR.
@@ -60,6 +61,8 @@ BLUE_RD="65001:100"
 RED_RD="65001:200"
 BLUE_RT="65001:100"
 RED_RT="65001:200"
+# Membership origin identifies the interested AS, not the RT administrator.
+RED_MEMBERSHIP_AS=65002
 # Extra import RT on the sink's blue VRF, matched by no VPN route: its /96
 # RTC NLRI is unique in the topology, so a sink-attributed row is visible in
 # rustbgpd's best-path-only RTC view (src and sink both originate the blue
@@ -481,7 +484,9 @@ test_widen_without_reset() {
     log "Test 6: widening sink's membership (add RTC $RED_RT) delivers red with zero flaps"
     local flap_before
     flap_before=$(sink_flap_count)
-    gobgp "$GOBGP_SINK" global rib add -a rtc asn 65001 rt "$RED_RT"
+    gobgp "$GOBGP_SINK" global rib add -a rtc asn "$RED_MEMBERSHIP_AS" rt "$RED_RT"
+    wait_rtc_row "$RED_MEMBERSHIP_AS" "RT:$RED_RT" 96 "$SINK_ADDR" \
+        "sink's differing-origin $RED_MEMBERSHIP_AS:RT:$RED_RT/96"
     wait_vpnv4_key "$GOBGP_SINK" "${RED_RD}:${RED_PREFIX}" "sink"
     wait_evpn_key_state "$GOBGP_SINK" "$RED_EVPN_KEY" true "sink red after widen" || return 1
     wait_evpn_key_state "$GOBGP_SINK" "$BLUE_EVPN_KEY" true "sink blue after widen" || return 1
@@ -492,7 +497,7 @@ test_narrow_withdraws() {
     log "Test 7: narrowing (del RTC $RED_RT) withdraws exactly the red route"
     local flap_before
     flap_before=$(sink_flap_count)
-    gobgp "$GOBGP_SINK" global rib del -a rtc asn 65001 rt "$RED_RT"
+    gobgp "$GOBGP_SINK" global rib del -a rtc asn "$RED_MEMBERSHIP_AS" rt "$RED_RT"
     wait_vpnv4_key_gone "$GOBGP_SINK" "${RED_RD}:${RED_PREFIX}" "sink"
     wait_evpn_key_state "$GOBGP_SINK" "$RED_EVPN_KEY" false "sink red after narrow" || return 1
     wait_evpn_key_state "$GOBGP_SINK" "$BLUE_EVPN_KEY" true "sink blue after narrow" || return 1

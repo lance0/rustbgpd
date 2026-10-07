@@ -469,8 +469,8 @@ impl RtcMembership {
     ///
     /// RFC 7432 §7.6 makes the EVPN ES-Import RT (type 0x06, sub-type
     /// 0x02) a Route Target that RT-Constrain MUST apply to. It has no
-    /// global administrator to stand in for the origin AS, so it matches
-    /// on the RT bits under the prefix alone (the ADR-0077 upgrade path).
+    /// two-part encoding, so it needs explicit recognition here; like
+    /// ordinary RTs, it matches on the RT bits under the prefix alone.
     fn matches_any(&self, rts: &[rustbgpd_wire::ExtendedCommunity]) -> bool {
         if self.has_default {
             return true;
