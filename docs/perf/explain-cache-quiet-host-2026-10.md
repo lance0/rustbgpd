@@ -7,8 +7,9 @@
 This receipt measures what the per-session import-explain cache costs a running
 daemon at the shipped flat default and at two raised ceilings, after the cache
 index became lazy and evicted prefixes started answering `evicted`. It supports
-keeping both per-peer defaults flat: explain cache 4,096 and rejected-route
-retention 1,024, with explain still opt-in.
+keeping the per-session explain cache default flat at 4,096, with explain still
+opt-in. The rejected-route retention default of 1,024 was not exercised: every
+cell rejected zero routes, so this receipt makes no claim about it.
 
 At two peers announcing 1,000,000 IPv4 routes each, enabling the cache at the
 4,096 default added **+40.5 MiB** of jemalloc-allocated memory and **+25.5 MiB**
@@ -115,8 +116,8 @@ complete.
 
 ## Decision
 
-This receipt supports keeping both defaults flat and explain opt-in. At the
-4,096 default, explain on a 1,000,000-route peer costs about 20 MiB, mostly
+This receipt supports keeping the explain cache default flat at 4,096 and
+explain opt-in. At the 4,096 default, explain on a 1,000,000-route peer costs about 20 MiB, mostly
 evicted-key memory that the reply reports. Retaining a full table costs
 roughly 0.5 GiB per 1,000,000-route peer at this attribute shape. Operators
 who need that coverage can raise the global ceiling deliberately and budget
