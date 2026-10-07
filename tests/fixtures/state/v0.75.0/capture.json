@@ -1,0 +1,21 @@
+{
+  "release": "v0.75.0",
+  "tag_commit": "54ed19b5af927f1c8e5064ecb1a497885c15d068",
+  "archive_sha256": "9aa9fe9f84162085ee5eef13f5090981550f1f45a5f9c3b37347178cff990489",
+  "daemon_sha256": "6141b78195ffa7a83336576cedc2d62e844c4b346865f95d9fa555185688a225",
+  "cli_sha256": "d3d1af6ca875f1e5629d0cee28ead780e5f4e1419c76e4f9c81d0fb3fabfaa5d",
+  "version_stdout": "rustbgpd 0.75.0",
+  "container_image": "sha256:d7e12182ce18b85b93007c1dedf31f2d29e01ccf3182cc4017c709b6259bc132",
+  "network": "internal 192.0.2.0/29; subject 192.0.2.2, peer 192.0.2.3",
+  "daemon_argv": [
+    "/usr/local/bin/rustbgpd",
+    "/etc/rustbgpd/config.toml"
+  ],
+  "steps": [
+    "peer injects 198.51.100.0/24 and BLACKHOLE 203.0.113.1/32; copy FIB and BLACKHOLE receipts",
+    "confirmed apply changing the neighbor description; copy pending authority; confirm",
+    "peer withdraws both routes; subject receipts empty",
+    "TERM subject; copy GR marker, events.db and warm bundle"
+  ],
+  "exit_code": 0
+}

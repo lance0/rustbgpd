@@ -2612,6 +2612,86 @@ mod tests {
         fs::write(path, serde_json::to_vec(&manifest).unwrap()).unwrap();
     }
 
+    /// The v0.75.0 release published this bundle at coordinated shutdown
+    /// (one Established IPv4 view, no routes; its GR marker carries the same
+    /// generation). Startup scavenging must keep it and the full reader must
+    /// accept it; the same manifest at format version 3 must be refused by
+    /// both without touching the files.
+    #[test]
+    fn released_v075_bundle_loads_and_future_format_is_refused() {
+        let released = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/fixtures/state/v0.75.0/warm-bundle-v1");
+        let temp = tempfile::tempdir().unwrap();
+        let mut names = Vec::new();
+        for entry in fs::read_dir(released).unwrap() {
+            let entry = entry.unwrap();
+            let path = temp.path().join(entry.file_name());
+            fs::copy(entry.path(), &path).unwrap();
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+            names.push(entry.file_name());
+        }
+        names.sort();
+        let dir = opened(&temp);
+        let listing = || {
+            let mut listed: Vec<_> = fs::read_dir(temp.path())
+                .unwrap()
+                .map(|entry| entry.unwrap().file_name())
+                .collect();
+            listed.sort();
+            listed
+        };
+
+        assert_eq!(dir.scavenge_owned_entries().unwrap().removed(), 0);
+        assert_eq!(listing(), names);
+        let manifest: WarmBundleManifestV1 =
+            serde_json::from_slice(&fs::read(temp.path().join(WARM_BUNDLE_MANIFEST_FILE)).unwrap())
+                .unwrap();
+        let identity = &manifest.identity;
+        assert_eq!(
+            identity.checkpoint_generation,
+            "0a75aa2867384f0891a21a3bba339918"
+        );
+        assert_eq!(
+            (identity.local_asn, identity.local_router_id),
+            (65_001, Ipv4Addr::new(192, 0, 2, 1))
+        );
+        assert_eq!(
+            identity.views,
+            [WarmBundleViewV1 {
+                kind: WarmBundleViewKindV1::AdjRibInPostImportPolicy,
+                peer: "192.0.2.3".parse().unwrap(),
+                peer_asn: 65_002,
+                peer_router_id: Ipv4Addr::new(192, 0, 2, 3),
+                family: WarmBundleFamilyV1::Ipv4Unicast,
+                add_path_receive: false,
+            }]
+        );
+        let freshness = WarmBundleFreshnessV1 {
+            now_utc_seconds: identity.created_at_utc_seconds + 10,
+            max_age_seconds: 60,
+            max_future_skew_seconds: 5,
+        };
+        let loaded = load_warm_bundle(&dir, &expected(identity), freshness).unwrap();
+        assert_eq!(loaded.manifest, manifest);
+        assert_eq!(loaded.manifest.view_route_counts, [0]);
+
+        rewrite_manifest(&temp, |manifest| manifest.format_version = 3);
+        let future = fs::read(temp.path().join(WARM_BUNDLE_MANIFEST_FILE)).unwrap();
+        assert!(matches!(
+            load_warm_bundle(&dir, &expected(identity), freshness),
+            Err(WarmBundleError::UnsupportedVersion { found: 3, .. })
+        ));
+        assert!(matches!(
+            dir.scavenge_owned_entries(),
+            Err(WarmBundleError::UnsupportedVersion { found: 3, .. })
+        ));
+        assert_eq!(listing(), names);
+        assert_eq!(
+            fs::read(temp.path().join(WARM_BUNDLE_MANIFEST_FILE)).unwrap(),
+            future
+        );
+    }
+
     #[test]
     fn historical_v1_addpath_is_rejected_before_ambiguous_decoding() {
         let temp = tempfile::tempdir().unwrap();

@@ -7,6 +7,8 @@ import io
 import json
 from pathlib import Path
 import runpy
+import shutil
+import sqlite3
 import subprocess
 import sys
 import tarfile
@@ -128,6 +130,70 @@ class ReleasedStateCaptureTests(unittest.TestCase):
                 self.assertEqual((root / "output/daemon.log").read_bytes(), b"retained stdoutretained stderr\n")
                 if cleanup_failure:
                     self.assertIn("capture cleanup failed:", stderr.getvalue())
+
+
+V075 = runpy.run_path(str(Path(__file__).with_name("capture-released-state-v075.py")))
+V075_FIXTURE = V075["FIXTURE"]
+
+
+def execute(path, statement):
+    """Commit and close, so the change is checkpointed out of the WAL."""
+    db = sqlite3.connect(path)
+    db.execute(statement)
+    db.commit()
+    db.close()
+    assert not path.with_name(path.name + "-wal").exists()
+
+
+class ReleasedV075CaptureTests(unittest.TestCase):
+    """The v0.75.0 recapture comparison permits only capture-specific values."""
+
+    def compare(self, mutate):
+        with tempfile.TemporaryDirectory() as tmp:
+            captured = Path(tmp) / "capture"
+            shutil.copytree(V075_FIXTURE, captured)
+            mutate(captured)
+            V075["check_artifacts"](captured, V075_FIXTURE)
+
+    def rewrite_json(self, path, *keys, value):
+        document = json.loads(path.read_bytes())
+        parent = document
+        for key in keys[:-1]:
+            parent = parent[key]
+        parent[keys[-1]] = value
+        path.write_text(json.dumps(document))
+
+    def test_capture_specific_values_may_differ(self):
+        def mutate(captured):
+            for name, varying in V075["VARYING"].items():
+                for keys in varying:
+                    self.rewrite_json(captured / name, *keys, value=1)
+            execute(captured / "events.db", "DELETE FROM events")
+        self.compare(mutate)
+
+    def test_payload_drift_is_rejected(self):
+        drifts = [lambda c, name=name: (c / name).write_bytes((c / name).read_bytes() + b" ")
+                  for name in V075["EXACT"]]
+        drifts += [
+            lambda c: self.rewrite_json(c / "commit-confirm/commit-confirm-v3-metadata.json", "confirm_id", value="x"),
+            lambda c: self.rewrite_json(c / "warm-bundle-v1/manifest.json", "format_version", value=3),
+            lambda c: self.rewrite_json(c / "warm-bundle-v1/manifest.json", "identity", "views", value=[]),
+        ]
+        for index, drift in enumerate(drifts):
+            with self.subTest(drift=index), self.assertRaisesRegex(ValueError, "differs from archive"):
+                self.compare(drift)
+
+    def test_event_schema_drift_is_rejected(self):
+        for statement in ("UPDATE metadata SET value = '2' WHERE key = 'schema_version'",
+                          "CREATE TABLE extra (id INTEGER)"):
+            def mutate(captured, statement=statement):
+                execute(captured / "events.db", statement)
+            with self.subTest(statement=statement), self.assertRaisesRegex(ValueError, "schema differs"):
+                self.compare(mutate)
+
+    def test_archived_events_are_read_without_side_files(self):
+        V075["events_schema"](V075_FIXTURE / "events.db")
+        self.assertEqual(sorted(p.name for p in V075_FIXTURE.glob("events.db*")), ["events.db"])
 
 
 if __name__ == "__main__":
