@@ -4584,6 +4584,49 @@ policy customer-in(peer_lp: u32) {
         }
     }
 
+    /// Only a closed session may be skipped: poisoned counters on a live
+    /// session still fail the whole opt-in read, even beside a skipped peer.
+    #[tokio::test]
+    async fn get_policy_stats_partial_still_fails_on_unavailable_counters() {
+        let chain = roster_support::chain("poisoned-in", 1);
+        let counters = Arc::clone(chain.hit_counters());
+        let poison = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _held = counters.hold_error_lock_for_test();
+            panic!("poison the import counter error lock");
+        }));
+        assert!(poison.is_err());
+        let (closed_tx, closed_rx) = tokio::sync::watch::channel(None);
+        drop(closed_tx);
+        let (_poisoned_tx, poisoned_rx) =
+            tokio::sync::watch::channel(Some(roster_support::installed(3, Some(&chain))));
+        let roster = roster_support::publisher(
+            vec![
+                roster_support::peer("10.0.0.1", closed_rx),
+                roster_support::peer("10.0.0.2", poisoned_rx),
+            ],
+            Vec::new(),
+        );
+        let export = stats_export_roster(&stats_export_chain());
+        let svc = PolicyService::new(AccessMode::ReadOnly, mpsc::channel(1).0, None, None)
+            .with_import_roster(roster.reader())
+            .with_export_roster(export.reader());
+        for direction in ["import", "both"] {
+            let request = proto::GetPolicyStatsRequest {
+                allow_partial: true,
+                ..policy_stats_rpc_request("", direction)
+            };
+            let error = PolicyServiceRpc::get_policy_stats(&svc, Request::new(request))
+                .await
+                .unwrap_err();
+            assert_eq!(error.code(), tonic::Code::Unavailable, "{direction}");
+            assert_eq!(
+                error.message(),
+                "installed import policy counters unavailable",
+                "{direction}"
+            );
+        }
+    }
+
     /// A listener built without the peer manager's roster cannot answer, and
     /// one without the RIB's roster cannot answer an export read.
     #[tokio::test]
