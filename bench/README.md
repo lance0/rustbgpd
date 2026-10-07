@@ -187,11 +187,9 @@ Each per-process CSV is retained under the comparison artifact's `raw/`
 directory. The exact overlaid harness, bench-support module, comparison driver,
 all twelve baseline/optimized production paging/index/invalidation sources
 under their repository-relative paths, and common Cargo/build inputs are
-retained under `measurement-sources/` with verified manifests, and an
-explicitly selected output directory must be empty.
-On successful validation, a top-level `SHA256SUMS` covers the combined/raw
-CSVs, the gate summary, logs, preflight evidence, metadata, and nested
-measurement-source manifest.
+retained under `measurement-sources/`, with a verified manifest for the
+common Cargo/build inputs, and an explicitly selected output directory must be
+empty.
 
 `--no-taskset` marks the output `mechanics-only` and is never retained as
 comparison evidence. A dirty checkout is rejected by default; the explicit

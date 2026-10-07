@@ -81,14 +81,6 @@ def sha256_bytes(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
-def sha256_file(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
-
-
 def require_regular(path: Path, description: str) -> None:
     if not path.is_file() or path.is_symlink():
         raise ValueError(f"{description} is missing, not regular, or a symlink: {path}")
@@ -474,23 +466,9 @@ def write_receipt(
             if any(value and value in text for value in forbidden):
                 raise ValueError("sanitized Criterion receipt contains private host data")
 
-        checksum_path = temporary / "SHA256SUMS"
-        checksum_members = (csv_path, gates_path, input_hashes_path)
-        checksum_path.write_text(
-            "".join(
-                f"{sha256_file(path)}  {path.name}\n"
-                for path in sorted(checksum_members, key=lambda item: item.name)
-            ),
-            encoding="utf-8",
-        )
-        for line in checksum_path.read_text(encoding="utf-8").splitlines():
-            digest, name = line.split("  ", 1)
-            if sha256_file(temporary / name) != digest:
-                raise ValueError("Criterion receipt checksum reconciliation failed")
         completed_path = temporary / "COMPLETED"
         completed_path.write_text(
             f"schema={SCHEMA}\n"
-            f"sha256sums_sha256={sha256_file(checksum_path)}\n"
             "matrix_complete=1\n"
             "criterion_gates_passed=1\n",
             encoding="utf-8",

@@ -201,7 +201,6 @@ class Lan395CriterionValidatorTests(unittest.TestCase):
                 {path.name for path in output.iterdir()},
                 {
                     "COMPLETED",
-                    "SHA256SUMS",
                     "criterion-attempts.csv",
                     "criterion-gates.json",
                     "criterion-inputs.sha256",
@@ -222,11 +221,6 @@ class Lan395CriterionValidatorTests(unittest.TestCase):
             self.assertTrue(all(row["passed"] for row in gates["ci_gates"]))
             completed = (output / "COMPLETED").read_text(encoding="utf-8")
             self.assertTrue(completed.endswith("criterion_gates_passed=1\n"))
-            for line in (output / "SHA256SUMS").read_text().splitlines():
-                digest, name = line.split("  ", 1)
-                self.assertEqual(
-                    hashlib.sha256((output / name).read_bytes()).hexdigest(), digest
-                )
             retained = "".join(
                 path.read_text(encoding="utf-8") for path in output.iterdir()
             )

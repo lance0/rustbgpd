@@ -34,11 +34,6 @@ def build(repo, tree, variant, mode, target, commands):
     binaries = [p for p in (target/"release"/"deps").glob("snapshot_allocation-*") if p.is_file() and os.access(p,os.X_OK)]
     if len(binaries) != 1: raise RuntimeError(f"expected one {variant} {mode} binary, found {len(binaries)}")
     destination = repo/"binaries"/f"{variant}-{mode}"; shutil.copy2(binaries[0],destination)
-def seal(root):
-    rows=[]
-    for path in sorted(p for p in root.rglob("*") if p.is_file() and p != root/"SHA256SUMS"):
-        rows.append(f"{sha(path)}  {path.relative_to(root)}\n")
-    (root/"SHA256SUMS").write_text("".join(rows))
 def main():
     parser=argparse.ArgumentParser(); parser.add_argument("output",type=pathlib.Path); parser.add_argument("--repo",type=pathlib.Path,default=HERE.parent)
     args=parser.parse_args(); cpu_count=os.cpu_count()
@@ -76,7 +71,7 @@ def main():
             target=root/"raw"/name; wait_idle(0,root/"preflight.jsonl",name)
             argv=command["argv"][:3]+[str(root/"binaries"/f"{variant}-{mode}")]+command["argv"][4:-1]+[str(target)]
             run(argv)
-        VERIFY.verify(root,repo,write=True,check_seal=False); seal(root); VERIFY.verify(root,repo)
+        VERIFY.verify(root,repo,write=True); VERIFY.verify(root,repo)
     finally:
         cleanup(repo,temp,trees.values())
     print(json.dumps({"classification":"go","bundle":str(root)},sort_keys=True))

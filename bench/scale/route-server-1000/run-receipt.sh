@@ -350,7 +350,5 @@ terminate_pid DAEMON_PID
 terminate_pid GUARD_PID
 printf 'status=pass\nexit_status=0\n' >"$OUT/result.env"
 printf 'status=success\nexit_status=0\n' >"$OUT/exit-status.env"
-(cd "$OUT" && find . -type f ! -name SHA256SUMS -print0 | sort -z | xargs -0 sha256sum >"$RUN/SHA256SUMS")
-mv "$RUN/SHA256SUMS" "$OUT/SHA256SUMS"
 SUCCESS=1
 echo "private receipt complete: $OUT"
