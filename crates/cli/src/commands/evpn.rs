@@ -1501,15 +1501,12 @@ fn format_ethernet_segment_human(segment: &EthernetSegmentState) -> String {
         .collect::<Vec<_>>()
         .join("; ");
     format!(
-        "esi={} mode={} df-alg={} df-pref={} dont-preempt={} adv-df-pref={} adv-dont-preempt={} df-recovery={} originator={} drained={} reasons=[{}] ac-gate={} fdb-groups={} fdb-mac-refs={} members=[{}]",
+        "esi={} mode={} df-alg={} df-pref={} dont-preempt={} originator={} drained={} reasons=[{}] ac-gate={} fdb-groups={} fdb-mac-refs={} members=[{}] adv-df-pref={} adv-dont-preempt={} df-recovery={}",
         segment.esi,
         segment.redundancy_mode,
         segment.df_algorithm,
         segment.df_preference,
         segment.df_dont_preempt,
-        segment.advertised_df_preference,
-        segment.advertised_df_dont_preempt,
-        recovery,
         segment.originator_ip,
         segment.drained,
         reasons,
@@ -1517,6 +1514,9 @@ fn format_ethernet_segment_human(segment: &EthernetSegmentState) -> String {
         segment.fdb_nexthop_groups_count,
         segment.fdb_nexthop_ref_macs_count,
         members,
+        segment.advertised_df_preference,
+        segment.advertised_df_dont_preempt,
+        recovery,
     )
 }
 
@@ -3288,14 +3288,15 @@ evpn_duplicate_mac_moves_total{vni="100",mac="02:aa:bb:cc:dd:01"} 2
         };
         let line = super::format_ethernet_segment_human(&segment);
         assert!(
-            line.contains(
-                "df-pref=500 dont-preempt=true adv-df-pref=200 adv-dont-preempt=false \
-                 df-recovery=pending:1500ms"
-            ),
+            line.contains("df-pref=500 dont-preempt=true originator="),
             "{line}"
         );
+        assert!(
+            line.ends_with("adv-df-pref=200 adv-dont-preempt=false df-recovery=pending:1500ms"),
+            "new fields append after existing columns: {line}"
+        );
         segment.df_recovery_pending = false;
-        assert!(super::format_ethernet_segment_human(&segment).contains("df-recovery=none"));
+        assert!(super::format_ethernet_segment_human(&segment).ends_with("df-recovery=none"));
     }
 
     #[test]

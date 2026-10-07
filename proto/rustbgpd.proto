@@ -4489,12 +4489,15 @@ message EthernetSegmentState {
   uint32 fdb_nexthop_groups_count = 13;
   // MAC refs across those owned FDB nexthop groups.
   uint32 fdb_nexthop_ref_macs_count = 14;
-  // DF preference the local Type 4 route carries, or will carry once a
-  // pending recovery wait ends. Differs from `df_preference` while RFC 9785
-  // non-revertive recovery inherits another PE's preference.
+  // DF preference the local Type 4 route carries. Differs from
+  // `df_preference` while RFC 9785 non-revertive recovery inherits another
+  // PE's preference. While `df_recovery_pending`, no Type 4 is advertised and
+  // this shows the configured value; recovery can then switch to an
+  // inherited one.
   uint32 advertised_df_preference = 15;
-  // Don't-Preempt bit the local Type 4 route carries, or will carry once a
-  // pending recovery wait ends. False while a preference is inherited.
+  // Don't-Preempt bit the local Type 4 route carries. False while a
+  // preference is inherited. While `df_recovery_pending`, no Type 4 is
+  // advertised and this shows the configured value.
   bool advertised_df_dont_preempt = 16;
   // True while RFC 9785 recovery is waiting for remote Type 4 routes before
   // publishing the local Type 4 route.

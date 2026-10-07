@@ -538,28 +538,31 @@ async fn segment_loop(
     }
 }
 
-/// Republish the operator DF view after every actor step; watchers wake only
-/// on change. Rebuilds O(segments) per step.
+/// Republish the operator DF view after every actor step. The current
+/// snapshot is compared in place, so an unchanged step allocates nothing and
+/// wakes no watcher.
 fn publish_df_status(
     tx: &watch::Sender<Arc<SegmentDfStatusTable>>,
     by_esi: &HashMap<EthernetSegmentIdentifier, SegmentState>,
 ) {
-    let table: SegmentDfStatusTable = by_esi
-        .iter()
-        .map(|(esi, state)| {
-            let status = SegmentDfStatus {
-                advertised: state.operational_df,
-                recovery_deadline: state.recovery_deadline,
-            };
-            (*esi, status)
-        })
-        .collect();
+    let status = |state: &SegmentState| SegmentDfStatus {
+        advertised: state.operational_df,
+        recovery_deadline: state.recovery_deadline,
+    };
     tx.send_if_modified(|current| {
-        let modified = **current != table;
-        if modified {
-            *current = Arc::new(table);
+        let unchanged = current.len() == by_esi.len()
+            && by_esi
+                .iter()
+                .all(|(esi, state)| current.get(esi) == Some(&status(state)));
+        if !unchanged {
+            *current = Arc::new(
+                by_esi
+                    .iter()
+                    .map(|(esi, state)| (*esi, status(state)))
+                    .collect(),
+            );
         }
-        modified
+        !unchanged
     });
 }
 
@@ -4301,6 +4304,14 @@ mod tests {
                 recovery_deadline: None,
             },
             "operator view reports the inherited values, not the configured ones"
+        );
+        let mut df_status = df_status;
+        df_status.mark_unchanged();
+        // Periodic re-election sweeps change no DF state.
+        tokio::time::sleep(Duration::from_secs(25)).await;
+        assert!(
+            !df_status.has_changed().unwrap(),
+            "steps that change no DF state do not republish"
         );
         handle.shutdown().await;
     }

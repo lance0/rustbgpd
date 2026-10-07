@@ -229,7 +229,8 @@ bias, whole-port AC-gate intent, and owned FDB-NHG refs. `df-pref` and
 `adv-dont-preempt` are what the local Type 4 route carries, which differ
 while RFC 9785 non-revertive recovery inherits another PE's preference.
 `df-recovery=pending:<ms>` means the segment is still waiting for remote
-Type 4 routes before advertising. The matching gRPC surface is
+Type 4 routes before advertising; meanwhile the `adv-*` fields show the
+configured values. The matching gRPC surface is
 `EvpnService.ListEthernetSegments`.
 
 Draining withdraws the ES's Type 4 (exiting DF election), EAD-per-ES,
