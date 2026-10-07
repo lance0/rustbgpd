@@ -9,6 +9,54 @@ pub(crate) type FastState = rustc_hash::FxBuildHasher;
 pub(crate) type FastMap<K, V> = std::collections::HashMap<K, V, FastState>;
 pub(crate) type FastSet<T> = std::collections::HashSet<T, FastState>;
 
+/// `FxHasher` with 128-bit words, which in practice means `Ipv6Addr`,
+/// hashed through Fx's byte-string path, as `Ipv6Prefix` hashes its
+/// address. Core hashes an `Ipv6Addr` as one native-endian `u128`, and Fx
+/// only carries input bits upward, so sequentially numbered IPv6 peers
+/// (`::1`, `::2`, ...) otherwise share one hashbrown control byte and one
+/// starting bucket. Every other write is forwarded unchanged.
+#[derive(Default)]
+pub struct AddrHasher(rustc_hash::FxHasher);
+
+impl std::hash::Hasher for AddrHasher {
+    #[inline]
+    fn write(&mut self, bytes: &[u8]) {
+        self.0.write(bytes);
+    }
+    #[inline]
+    fn write_u8(&mut self, i: u8) {
+        self.0.write_u8(i);
+    }
+    #[inline]
+    fn write_u16(&mut self, i: u16) {
+        self.0.write_u16(i);
+    }
+    #[inline]
+    fn write_u32(&mut self, i: u32) {
+        self.0.write_u32(i);
+    }
+    #[inline]
+    fn write_u64(&mut self, i: u64) {
+        self.0.write_u64(i);
+    }
+    #[inline]
+    fn write_u128(&mut self, i: u128) {
+        self.0.write(&i.to_ne_bytes());
+    }
+    #[inline]
+    fn write_usize(&mut self, i: usize) {
+        self.0.write_usize(i);
+    }
+    #[inline]
+    fn finish(&self) -> u64 {
+        self.0.finish()
+    }
+}
+
+/// `BuildHasher` for maps keyed by a peer or next-hop address.
+pub(crate) type AddrState = std::hash::BuildHasherDefault<AddrHasher>;
+pub(crate) type AddrMap<K, V> = std::collections::HashMap<K, V, AddrState>;
+
 /// Changed-customer ASN set carried by `rustbgpd_rpki`'s published
 /// `AspaTableUpdate`. Its hasher belongs to that crate's public API, so it
 /// does not follow `FastState`.
@@ -18,12 +66,12 @@ pub(crate) type AspaAsnSet = rustc_hash::FxHashSet<u32>;
 mod tests {
     use std::collections::{HashMap, HashSet};
     use std::hash::BuildHasher;
-    use std::net::{Ipv4Addr, Ipv6Addr};
+    use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
     use std::time::Instant;
 
     use rustbgpd_wire::{Ipv6Prefix, Prefix, RouteDistinguisher, VpnPrefix, VpnRouteKey};
 
-    use super::{FastMap, FastState};
+    use super::{AddrState, FastMap, FastState};
 
     const RD: RouteDistinguisher = RouteDistinguisher([0, 0, 0xfd, 0xe8, 0, 0, 0, 1]);
 
@@ -107,6 +155,63 @@ mod tests {
             assert!(
                 max_per_start <= 16,
                 "/{len}: {max_per_start} keys share one starting bucket"
+            );
+        }
+    }
+
+    /// Per-source maps key sequentially numbered IPv6 peers (`::1`, `::2`,
+    /// ...), alone or with an Add-Path ID. They must spread across
+    /// hashbrown's tag and bucket bits; core's `u128` hash under plain Fx
+    /// gives 1 tag and 1 starting bucket, so every lookup walks all keys.
+    #[test]
+    fn sequential_ipv6_peers_spread_hashbrown_tag_and_bucket_bits() {
+        const KEYS: u64 = 4096;
+        let peer = |i: u64| IpAddr::V6(Ipv6Addr::from(0x2001_0db8_u128 << 96 | u128::from(i)));
+        let hashes: [Vec<u64>; 2] = [
+            (1..=KEYS)
+                .map(|i| AddrState::default().hash_one(peer(i)))
+                .collect(),
+            (1..=KEYS)
+                .map(|i| AddrState::default().hash_one((peer(i), 0_u32)))
+                .collect(),
+        ];
+        for (shape, hashes) in ["IpAddr", "(IpAddr, u32)"].iter().zip(hashes) {
+            let tags = hashes.iter().map(|h| h >> 57).collect::<HashSet<_>>();
+            let mut per_start: HashMap<u64, u32> = HashMap::new();
+            for h in &hashes {
+                *per_start.entry(h & (KEYS - 1)).or_default() += 1;
+            }
+            let max_per_start = per_start.values().copied().max().unwrap_or(0);
+            assert!(tags.len() >= 120, "{shape}: {} distinct tags", tags.len());
+            assert!(
+                per_start.len() >= 2300,
+                "{shape}: {} distinct starting buckets",
+                per_start.len()
+            );
+            assert!(
+                max_per_start <= 16,
+                "{shape}: {max_per_start} keys share one starting bucket"
+            );
+        }
+    }
+
+    /// `AddrState` changes only 128-bit words: IPv4 peers and prefix keys
+    /// hash exactly as under `FastState`.
+    #[test]
+    fn addr_state_matches_fast_state_without_u128_words() {
+        for i in 0..256u32 {
+            let v4 = IpAddr::V4(Ipv4Addr::from(0x0a00_0000 | i));
+            assert_eq!(
+                AddrState::default().hash_one((v4, i)),
+                FastState::default().hash_one((v4, i))
+            );
+            let v6 = Prefix::V6(Ipv6Prefix::new(
+                Ipv6Addr::from(0x2001_0db8_u128 << 96 | u128::from(i)),
+                128,
+            ));
+            assert_eq!(
+                AddrState::default().hash_one(v6),
+                FastState::default().hash_one(v6)
             );
         }
     }

@@ -42,7 +42,7 @@ use tracing::{debug, info, warn};
 
 use super::distribution::OutboundCommitBatch;
 use crate::attr_set::AttrSet;
-use crate::fast_hash::{FastMap, FastState};
+use crate::fast_hash::{AddrMap, FastMap, FastState};
 
 #[cfg(test)]
 use rustbgpd_wire::ExtendedCommunity;
@@ -530,7 +530,7 @@ pub(in crate::manager) struct GroupRibOut {
     /// count synthesis (`len − own`), one slot per staged family
     /// (v4-unicast, v6-unicast, vpnv4, vpnv6) for the BMP stat-17
     /// family counts.
-    source_counts: FastMap<IpAddr, [usize; 4]>,
+    source_counts: AddrMap<IpAddr, [usize; 4]>,
     /// Running column sums of `source_counts`, so a per-family count stays
     /// O(1) instead of walking every source. Maintained at the only two
     /// sites that move a slot.
@@ -555,7 +555,7 @@ pub(in crate::manager) struct GroupRibOut {
     /// readers restamp the concrete member. Inner maps are never left
     /// empty ([`Self::record_policy_filtered`] removes whole prefixes),
     /// so outer emptiness remains "no denials".
-    policy_filtered: FastMap<Prefix, FastMap<(IpAddr, u32), Option<PolicyLabel>>>,
+    policy_filtered: FastMap<Prefix, AddrMap<(IpAddr, u32), Option<PolicyLabel>>>,
     /// Default-Permit label for every staged unicast and VPN entry.
     /// Export-chain identity is group-uniform and immutable, and a chain
     /// Permit is always attributed to the shared chain sentinel, so retaining
@@ -583,21 +583,21 @@ pub(in crate::manager) struct GroupRibOut {
     /// the table — their residue names never-staged routes, so
     /// subtracting it would double-count.
     otc_blocked_totals: [usize; 2],
-    otc_blocked_sources: FastMap<IpAddr, [usize; 2]>,
+    otc_blocked_sources: AddrMap<IpAddr, [usize; 2]>,
     /// Lane sibling of `otc_blocked_sources`: per-winner-source counts
     /// of lane entries whose runner-up is OTC-blocked toward this
     /// group — the substitution term of the same subtraction (the
     /// member sourcing the winner receives the runner-up, so ITS
     /// suppressed slot is the lane's, never the winner's). Maintained
     /// entirely by [`Self::apply_lane`], exactly like `lane_counts`.
-    lane_otc_blocked_counts: FastMap<IpAddr, [usize; 2]>,
+    lane_otc_blocked_counts: AddrMap<IpAddr, [usize; 2]>,
     /// Per-member advertised VPN counts `[vpnv4, vpnv6]`, maintained
     /// ONLY for RTC-negotiated groups (Φ makes the counts non-derivable
     /// from `source_counts`; design §2.4) at the emit seams: staging
     /// emit, membership delta, join, and resync recompute-by-walk. A
     /// dirty window may drift them; the member's resync recompute
     /// restores exactness. Non-RTC groups keep the O(1) synthesis.
-    vpn_member_counts: FastMap<IpAddr, [i64; 2]>,
+    vpn_member_counts: AddrMap<IpAddr, [i64; 2]>,
     /// ADR-0126 Decision 3 exception lane: the per-prefix runner-up
     /// sidecar of a per-client-best group. Populated only where a
     /// distinct-source permitted runner-up exists — O(overlapped
@@ -615,7 +615,7 @@ pub(in crate::manager) struct GroupRibOut {
     /// by [`Self::apply_lane`], zeroed rows dropped (the
     /// `inc_source`/`dec_source` hygiene). Always empty for plain
     /// groups.
-    pub(in crate::manager) lane_counts: FastMap<IpAddr, [usize; 2]>,
+    pub(in crate::manager) lane_counts: AddrMap<IpAddr, [usize; 2]>,
     // Group-uniform staging inputs, snapshot at group creation from the
     // first member (all members are key-equal by construction; a key
     // change moves peers to a different group, so these never mutate).
@@ -728,7 +728,7 @@ impl GroupRibOut {
             nh_overrides: FastMap::default(),
             source_attrs: FastMap::default(),
             source_control_passthrough,
-            source_counts: FastMap::default(),
+            source_counts: AddrMap::default(),
             family_totals: [0; 4],
             tombstones: HashSet::new(),
             vpn_tombstones: HashSet::new(),
@@ -739,11 +739,11 @@ impl GroupRibOut {
             vpn_policy_denied: FastMap::default(),
             otc_blocked: FastMap::default(),
             otc_blocked_totals: [0; 2],
-            otc_blocked_sources: FastMap::default(),
-            lane_otc_blocked_counts: FastMap::default(),
-            vpn_member_counts: FastMap::default(),
+            otc_blocked_sources: AddrMap::default(),
+            lane_otc_blocked_counts: AddrMap::default(),
+            vpn_member_counts: AddrMap::default(),
             runner_up: FastMap::default(),
-            lane_counts: FastMap::default(),
+            lane_counts: AddrMap::default(),
             export_chain,
             is_ebgp,
             interpret_rfc1997,
@@ -1531,7 +1531,7 @@ impl GroupRibOut {
                 .iter()
                 .map(|prefix| {
                     checkpoint();
-                    self.policy_filtered.get(prefix).map_or(0, FastMap::len)
+                    self.policy_filtered.get(prefix).map_or(0, AddrMap::len)
                 })
                 .sum()
         } else {
@@ -1549,7 +1549,7 @@ impl GroupRibOut {
         };
         let mut restamped = Vec::with_capacity(capacity);
         let mut collect = |prefix: Prefix,
-                           denials: &FastMap<(IpAddr, u32), Option<PolicyLabel>>,
+                           denials: &AddrMap<(IpAddr, u32), Option<PolicyLabel>>,
                            checkpoint: &mut dyn FnMut()| {
             checkpoint();
             restamped.extend(

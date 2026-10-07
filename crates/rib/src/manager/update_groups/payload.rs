@@ -9,7 +9,7 @@ use rustbgpd_wire::{ExtendedCommunity, LargeCommunity, PathAttribute, Prefix, Vp
 
 use super::{GroupRibOut, PolicyLabel, RtcMembership};
 use crate::attr_set::AttrSet;
-use crate::fast_hash::FastMap;
+use crate::fast_hash::{AddrMap, FastMap};
 use crate::route::{Route, VpnRibRoute, VpnRibRouteKey};
 
 /// One entry of a shared group staging pass: the new staged route (or a
@@ -616,7 +616,7 @@ pub(in crate::manager) struct BatchedTransitionInventory {
     /// Member-scoped corrections the shared exclusion cannot express:
     /// the ADR-0126 lane substitution toward each winner's source
     /// (announce) and the displaced/retired own-sourced slot (withdraw).
-    pub(in crate::manager) supplements: FastMap<IpAddr, BatchedMemberSupplement>,
+    pub(in crate::manager) supplements: AddrMap<IpAddr, BatchedMemberSupplement>,
     pub(super) counters: BatchedTransitionCounters,
 }
 
@@ -659,10 +659,10 @@ pub(in crate::manager) struct BatchedMemberSupplement {
 #[derive(Default)]
 pub(super) struct BatchedTransitionCounters {
     pub(super) permit_totals: FastMap<Option<PolicyLabel>, u64>,
-    pub(super) permit_by_source: FastMap<IpAddr, FastMap<Option<PolicyLabel>, u64>>,
-    pub(super) lane_by_winner_source: FastMap<IpAddr, FastMap<Option<PolicyLabel>, u64>>,
+    pub(super) permit_by_source: AddrMap<IpAddr, FastMap<Option<PolicyLabel>, u64>>,
+    pub(super) lane_by_winner_source: AddrMap<IpAddr, FastMap<Option<PolicyLabel>, u64>>,
     pub(super) deny_totals: FastMap<Option<PolicyLabel>, u64>,
-    pub(super) deny_by_source: FastMap<IpAddr, FastMap<Option<PolicyLabel>, u64>>,
+    pub(super) deny_by_source: AddrMap<IpAddr, FastMap<Option<PolicyLabel>, u64>>,
 }
 
 impl BatchedTransitionCounters {
@@ -796,7 +796,7 @@ impl BatchedTransitionCounters {
 #[derive(Default)]
 pub(in crate::manager) struct GroupEvalAccumulator {
     pub(super) totals: Vec<(Option<PolicyLabel>, PolicyAction, u64)>,
-    pub(super) per_source: FastMap<IpAddr, Vec<(Option<PolicyLabel>, PolicyAction, u64)>>,
+    pub(super) per_source: AddrMap<IpAddr, Vec<(Option<PolicyLabel>, PolicyAction, u64)>>,
     /// Verdict (and source peer) of the most recent evaluation, consumed
     /// per key by the staging loops to label the staged entry / denial
     /// residue (single-best stages at most one eval per key).
