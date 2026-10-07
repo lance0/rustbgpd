@@ -49,10 +49,12 @@ Before QEMU starts, the runner requires:
 
 The output is closed to `request.json`, `host.json`, `plan.json`, `quiet.tsv`,
 `console.log`, `guest/guest.json`, `guest/kernel.config`, and a final
-`SHA256SUMS`. The verifier rejects missing, extra, symlinked, oversized,
-unsanitized, or cross-profile artifacts. The manifest is written only after an
-explicit post-VM base-image check; the EXIT trap repeats that check and removes
-the manifest on every nonzero outcome, so an unsuccessful run stays unsealed.
+`COMPLETED` marker containing exactly `pass`. The verifier rejects missing,
+extra, symlinked, oversized, unsanitized, or cross-profile artifacts, and a
+receipt without the marker. The marker is written only after an explicit
+post-VM base-image check and a passing receipt verification; the EXIT trap
+repeats the image check and removes the marker on every nonzero outcome, so an
+unsuccessful run never verifies as complete.
 
 ## Invocation
 
@@ -118,8 +120,8 @@ LLADDR are strictly parsed but do not change a frozen sample's diagnostics.
 The three campaign artifacts are staged in a fresh sibling directory, checked
 against a 10 MiB aggregate limit, and atomically published. The outer VM
 receipt verifier recomputes the exact plan and report, hard-requires zero
-wrong-tenant and ambiguous events, and seals the nested artifacts in the
-receipt manifest.
+wrong-tenant and ambiguous events, and includes the nested artifacts in the
+closed receipt inventory.
 
 For a disposable parser/pairing proof on the current host kernel, build the
 repository's netns test image and run the two-sample smoke. It sends real IPv4
@@ -158,4 +160,4 @@ live smoke remains the separately authorized invocation above.
 
 The suite destructively proves the closed profile matrix, exact no-network KVM
 plan, source lifecycle anchors, guest failure cleanup, provenance binding,
-artifact inventory and size limits, sanitation, and final manifest.
+artifact inventory and size limits, sanitation, and the completion marker.

@@ -184,14 +184,19 @@ def valid_receipt(path):
     })
 
 base = tmp / "receipt-base"; valid_receipt(base)
-expect(True, "valid-finalize", "receipt", profiles_path, base, "--write-manifest")
-expect(True, "valid-sealed", "receipt", profiles_path, base)
-unsealed = tmp / "receipt-unsuccessful"; shutil.copytree(base, unsealed)
-(unsealed / "SHA256SUMS").unlink()
-expect(False, "unsuccessful-receipt-is-unsealed", "receipt", profiles_path, unsealed)
+expect(True, "valid-finalize", "receipt", profiles_path, base, "--mark-complete")
+assert (base / "COMPLETED").read_text() == "pass\n"
+expect(True, "valid-complete", "receipt", profiles_path, base)
+unmarked = tmp / "receipt-unsuccessful"; shutil.copytree(base, unmarked)
+(unmarked / "COMPLETED").unlink()
+expect(False, "unsuccessful-receipt-is-unmarked", "receipt", profiles_path, unmarked)
+wrong_marker = tmp / "receipt-wrong-marker"; shutil.copytree(base, wrong_marker)
+(wrong_marker / "COMPLETED").write_text("fail\n")
+expect(False, "wrong-marker", "receipt", profiles_path, wrong_marker)
+expect(False, "wrong-marker-finalize", "receipt", profiles_path, wrong_marker, "--mark-complete")
 
 # The explicit campaign path expands the otherwise byte-stable smoke receipt
-# by exactly one request/source field and three sealed nested artifacts.
+# by exactly one request/source field and three verified nested artifacts.
 raw_path = repo / "bench/netns-calibration/raw_bridge_skew.py"
 raw_spec = importlib.util.spec_from_file_location("raw_bridge_skew_fixture", raw_path)
 raw = importlib.util.module_from_spec(raw_spec)
@@ -199,7 +204,7 @@ assert raw_spec.loader is not None
 sys.modules[raw_spec.name] = raw
 raw_spec.loader.exec_module(raw)
 campaign = tmp / "receipt-campaign"; shutil.copytree(base, campaign)
-(campaign / "SHA256SUMS").unlink()
+(campaign / "COMPLETED").unlink()
 campaign_request = json.loads((campaign / "request.json").read_text())
 campaign_request["raw_bridge_skew"] = {"profile": "burst-8"}
 campaign_request["sources"]["raw_bridge_skew"] = verify.sha256(raw_path)
@@ -210,12 +215,8 @@ raw.write_receipt(
     [],
     campaign / "guest/skew",
 )
-expect(True, "valid-campaign-finalize", "receipt", profiles_path, campaign, "--write-manifest")
-expect(True, "valid-campaign-sealed", "receipt", profiles_path, campaign)
-manifest = (campaign / "SHA256SUMS").read_text()
-assert "guest/skew/run.json" in manifest
-assert "guest/skew/samples.csv" in manifest
-assert "guest/skew/report.json" in manifest
+expect(True, "valid-campaign-finalize", "receipt", profiles_path, campaign, "--mark-complete")
+expect(True, "valid-campaign-complete", "receipt", profiles_path, campaign)
 
 oversized_skew = tmp / "skew-oversized-report"
 shutil.copytree(campaign / "guest/skew", oversized_skew)
@@ -288,15 +289,17 @@ for name, mutate in {
     ),
 }.items():
     candidate = tmp / f"receipt-{name}"; shutil.copytree(campaign, candidate)
-    (candidate / "SHA256SUMS").unlink()
+    (candidate / "COMPLETED").unlink()
     mutate(candidate)
-    expect(False, name, "receipt", profiles_path, candidate, "--write-manifest")
+    expect(False, name, "receipt", profiles_path, candidate, "--mark-complete")
+    assert not (candidate / "COMPLETED").exists(), name
 
 def receipt_mutation(name, mutate):
     path = tmp / f"receipt-{name}"; shutil.copytree(base, path)
-    (path / "SHA256SUMS").unlink()
+    (path / "COMPLETED").unlink()
     mutate(path)
-    expect(False, name, "receipt", profiles_path, path, "--write-manifest")
+    expect(False, name, "receipt", profiles_path, path, "--mark-complete")
+    assert not (path / "COMPLETED").exists(), name
 
 def mutate_json(path, relative, mutate):
     value = json.loads((path / relative).read_text())
@@ -332,23 +335,24 @@ receipt_mutation("missing", lambda p: (p/"console.log").unlink())
 receipt_mutation("oversize", lambda p: (p/"console.log").write_bytes(b"x"*(2*1024*1024+1)))
 receipt_mutation("unsanitized", lambda p: (p/"console.log").write_text("/home/private/token\n"))
 
-symlink = tmp / "receipt-symlink"; shutil.copytree(base, symlink); (symlink/"SHA256SUMS").unlink()
+symlink = tmp / "receipt-symlink"; shutil.copytree(base, symlink); (symlink/"COMPLETED").unlink()
 (symlink/"console.log").unlink(); (symlink/"console.log").symlink_to("request.json")
-expect(False, "symlink", "receipt", profiles_path, symlink, "--write-manifest")
+expect(False, "symlink", "receipt", profiles_path, symlink, "--mark-complete")
 
-tampered = tmp / "receipt-manifest"; shutil.copytree(base, tampered)
-(tampered/"console.log").write_text("tampered\n")
-expect(False, "manifest", "receipt", profiles_path, tampered)
+marker_symlink = tmp / "receipt-marker-symlink"; shutil.copytree(base, marker_symlink)
+(marker_symlink/"COMPLETED").unlink(); (tmp/"marker-target").write_text("pass\n")
+(marker_symlink/"COMPLETED").symlink_to(tmp/"marker-target")
+expect(False, "marker-symlink", "receipt", profiles_path, marker_symlink)
 PY
 
-# Exercise the runner's real cleanup functions without booting a VM. Every
-# unsuccessful exit must destroy the final seal, including image drift that is
-# discovered only by the EXIT recheck.
+# Exercise the runner's real cleanup functions without booting a VM. A
+# successful exit keeps the COMPLETED marker; every unsuccessful exit must
+# remove it, including image drift that is discovered only by the EXIT recheck.
 cleanup_lib="$tmp/cleanup-functions.sh"
 sed -n '/^verify_pinned_image_unchanged() {/,/^trap cleanup EXIT$/p' "$runner" |
     sed '$d' >"$cleanup_lib"
 bash -n "$cleanup_lib"
-for mode in failed-command image-drift image-disappeared; do
+for mode in success failed-command image-drift image-disappeared; do
     receipt="$tmp/receipt-cleanup-$mode"
     image="$tmp/image-cleanup-$mode"
     staging="$tmp/staging-cleanup-$mode"
@@ -377,9 +381,15 @@ for mode in failed-command image-drift image-disappeared; do
     ) >/dev/null 2>&1
     cleanup_rc=$?
     set -e
-    [ "$cleanup_rc" -ne 0 ]
-    [ ! -e "$receipt/SHA256SUMS" ]
     [ ! -e "$staging" ]
+    if [ "$mode" = success ]; then
+        [ "$cleanup_rc" -eq 0 ]
+        [ "$(cat -- "$receipt/COMPLETED")" = pass ]
+        python3 "$verifier" receipt "$profiles" "$receipt" >/dev/null
+        continue
+    fi
+    [ "$cleanup_rc" -ne 0 ]
+    [ ! -e "$receipt/COMPLETED" ]
     if python3 "$verifier" receipt "$profiles" "$receipt" >/dev/null 2>&1; then
         echo "false green: unsuccessful cleanup left a verifier-green receipt: $mode" >&2
         exit 1
@@ -417,7 +427,7 @@ set -e
 [ ! -e "$state" ]
 
 # Mutating any load-bearing lifecycle anchor must fail the independent source checker.
-for anchor in root trap package qemu-path cloud-path cloud-exec qemu-exec lock quiet render timeout qemu image-preseal image-exit unseal cleanup-exit verify guest-trap guest-delete guest-readonly guest-env; do
+for anchor in root trap package qemu-path cloud-path cloud-exec qemu-exec lock quiet render timeout qemu image-preseal image-exit unmark cleanup-exit verify guest-trap guest-delete guest-readonly guest-env; do
     candidate_runner="$tmp/runner-$anchor.sh"
     candidate_guest="$tmp/guest-$anchor.sh"
     cp "$runner" "$candidate_runner"
@@ -438,7 +448,7 @@ for anchor in root trap package qemu-path cloud-path cloud-exec qemu-exec lock q
         qemu) sed -i 's/setsid timeout --signal=TERM/setsid timeout --signal=INT/' "$candidate_runner" ;;
         image-preseal) sed -i '/^verify_pinned_image_unchanged "pre-seal"$/d' "$candidate_runner" ;;
         image-exit) sed -i '/verify_pinned_image_unchanged "exit"/d' "$candidate_runner" ;;
-        unseal) sed -i '/rm -f -- "$OUTPUT\/SHA256SUMS"/d' "$candidate_runner" ;;
+        unmark) sed -i '/rm -f -- "$OUTPUT\/COMPLETED"/d' "$candidate_runner" ;;
         cleanup-exit) sed -i 's/exit "$rc"/exit 0/' "$candidate_runner" ;;
         verify) sed -i '/python3 "$VERIFIER" receipt/d' "$candidate_runner" ;;
         guest-trap) sed -i '/trap cleanup_guest EXIT/d' "$candidate_guest" ;;
