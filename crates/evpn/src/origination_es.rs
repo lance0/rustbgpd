@@ -114,8 +114,8 @@ impl LocalEsOriginator {
         self.on_refresh()
     }
 
-    /// Advertise the Type 4 route again after its path attributes change.
-    /// Replaces the existing route without withdrawing ES membership.
+    /// Emit the Type 4 advertisement, including the first one after recovery.
+    /// If already advertising, replace it without withdrawing ES membership.
     pub fn on_refresh(&mut self) -> Vec<OriginationAction> {
         let key = self.key();
         self.originated_key = Some(key);
