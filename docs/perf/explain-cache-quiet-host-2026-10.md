@@ -16,8 +16,8 @@ At two peers announcing 1,000,000 IPv4 routes each, enabling the cache at the
 of settled RSS against explain off. Its effect on the daemon cgroup peak was
 inside the off arm's own 192 MiB repetition spread. Raising the ceiling to
 262,144 or 1,048,576 added about **279 MiB** and **1.0 GiB** allocated. At
-1,000 peers × 400 routes, a 1,048,576 ceiling cost the same as 4,096. A large
-configured ceiling is not reserved per session.
+1,000 peers × 400 routes, single runs at 1,048,576 and 4,096 allocated within
+0.5 MiB of each other. A large configured ceiling is not reserved per session.
 
 ## Shape and provenance
 
@@ -90,9 +90,11 @@ no evictions, about 524 B allocated per decision. The configuration budget's
 
 The 1,000-peer pair addresses the former eager index. Each session held
 400 decisions under either ceiling. Raising the ceiling from 4,096 to
-1,048,576 moved allocated memory by +0.5 MiB and the cgroup peak by −7.8 MiB,
-both within run-to-run noise. The eager design would have reserved an index for
-each session sized to the full ceiling.
+1,048,576 moved allocated memory by +0.5 MiB and the cgroup peak by −7.8 MiB.
+These are single-run observations per arm, so they carry no repetition spread.
+The near-identical allocated totals still show that the ceiling is not
+reserved up front: the eager design would have reserved an index for each
+session sized to the full ceiling.
 
 ## Explain answers and completeness
 
