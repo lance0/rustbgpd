@@ -16,6 +16,27 @@ Requires Rust 1.95 or newer.
 
 Release-by-release crate changes are recorded in the [changelog](CHANGELOG.md).
 
+### 0.24.0 compatibility note (prepared)
+
+The prepared wire 0.24 line pairs with FSM 0.11 and RPKI 0.6 when exchanging
+public wire types. The published examples below continue to use the previous
+coordinated release until all three crates are published.
+
+`UpdateValidationOptions` gains the required `link_local_next_hop` field.
+Existing struct literals must set it to `false` or use `..Default::default()`
+to retain strict validation. Enable it only with bilateral capability 77,
+a directly attached peer's interface scope, and Extended Next Hop negotiation
+for IPv4. IPv4 callers must also set
+`allow_ipv4_link_local_mp_reach_next_hop` after establishing that context.
+The daemon normalizes legacy link-local pairs before validation;
+standalone embedders must likewise select the second link-local address in
+link-local-plus-link-local and unspecified-plus-link-local pairs.
+
+`Capability::LinkLocalNextHop` represents code 77 with an empty value from
+`draft-ietf-idr-linklocal-capability-06`. The new variant is additive within
+the non-exhaustive enum; the validation-options field drives this source
+compatibility boundary. This draft support is experimental.
+
 ### 0.23.0 compatibility note
 
 `rustbgpd-wire` 0.23.0 is a breaking minor release and pairs with FSM 0.10 and
@@ -382,7 +403,7 @@ path:
 
 ```toml
 [dependencies]
-rustbgpd-wire = { version = "0.23.0", path = "../rustbgpd/crates/wire" }
+rustbgpd-wire = { version = "0.24.0", path = "../rustbgpd/crates/wire" }
 bytes = "1"
 ```
 

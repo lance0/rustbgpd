@@ -68,6 +68,8 @@ pub struct NegotiatedSession {
     pub peer_enhanced_route_refresh: bool,
     /// Whether both sides support Extended Messages (RFC 8654).
     pub peer_extended_message: bool,
+    /// Both speakers advertised Link-Local Next Hop capability 77.
+    pub link_local_next_hop: bool,
     /// Per-AFI/SAFI negotiated Extended Next Hop encoding (RFC 8950).
     ///
     /// The key is the NLRI family, and the value is the negotiated next-hop
@@ -122,6 +124,7 @@ impl Default for NegotiatedSession {
             peer_route_refresh: false,
             peer_enhanced_route_refresh: false,
             peer_extended_message: false,
+            link_local_next_hop: false,
             extended_nexthop_families: HashMap::new(),
             peer_notification_gr: false,
             peer_llgr_capable: false,

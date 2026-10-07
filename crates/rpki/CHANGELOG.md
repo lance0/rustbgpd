@@ -3,6 +3,11 @@
 This changelog covers the independently versioned `rustbgpd-rpki` crate.
 Daemon and workspace changes remain in the repository-level `CHANGELOG.md`.
 
+## Unreleased
+
+- Prepare 0.6 with wire 0.24 for shared public wire types. Verifier and RTR
+  behavior and method signatures are unchanged. Upgrade wire/FSM/RPKI together.
+
 ## 0.5.0 - 2026-10-03
 
 - Move the public wire dependency to 0.23 for typed Type 6 SMET support.

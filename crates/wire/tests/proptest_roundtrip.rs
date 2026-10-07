@@ -109,6 +109,7 @@ fn arb_capability() -> impl Strategy<Value = Capability> {
         Just(Capability::RouteRefresh),
         Just(Capability::EnhancedRouteRefresh),
         Just(Capability::ExtendedMessage),
+        Just(Capability::LinkLocalNextHop),
         proptest::collection::vec(arb_llgr_family(), 0..=4)
             .prop_map(Capability::LongLivedGracefulRestart),
         proptest::collection::vec(arb_add_path_family(), 1..=4).prop_map(Capability::AddPath),
@@ -117,11 +118,12 @@ fn arb_capability() -> impl Strategy<Value = Capability> {
         // (1 = MultiProtocol, 2 = RouteRefresh, 3 = OutboundRouteFilter,
         // 5 = ExtendedNextHop, 6 = ExtendedMessage, 9 = BGP Role,
         // 64 = GracefulRestart, 65 = FourOctetAs, 69 = AddPath,
-        // 70 = EnhancedRouteRefresh, 71 = LLGR, 76 = PathsLimit). Codes 9 and
-        // 76 can decode as typed capabilities for valid payloads, so excluding
+        // 70 = EnhancedRouteRefresh, 71 = LLGR, 76 = PathsLimit,
+        // 77 = LinkLocalNextHop). Codes 9, 76 and
+        // 77 can decode as typed capabilities for valid payloads, so excluding
         // known codes keeps the unknown-roundtrip invariant deterministic.
         (
-            prop_oneof![Just(4u8), 7..9u8, 10..64u8, 66..69u8, 72..76u8, 77..=255u8],
+            prop_oneof![Just(4u8), 7..9u8, 10..64u8, 66..69u8, 72..76u8, 78..=255u8],
             proptest::collection::vec(any::<u8>(), 0..32)
         )
             .prop_map(|(code, data)| Capability::Unknown {

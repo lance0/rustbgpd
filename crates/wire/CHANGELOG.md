@@ -3,6 +3,13 @@
 This changelog covers the independently published `rustbgpd-wire` crate. Daemon
 and workspace changes remain in the repository-level `CHANGELOG.md`.
 
+## Unreleased
+
+- Add capability 77 encode/decode and context-dependent link-local unicast
+  validation for draft-ietf-idr-linklocal-capability-06. `UpdateValidationOptions`
+  gains `link_local_next_hop`; embedders must provide scope and negotiation
+  context before enabling it. Nonempty capability values remain unknown.
+
 ## 0.23.0 - 2026-10-03
 
 - Add `PmsiTunnelType::evpn_srv6_function_bits` for the EVPN IMET

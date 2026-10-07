@@ -3,6 +3,15 @@
 This changelog covers the independently published `rustbgpd-fsm` crate. Daemon
 and workspace changes remain in the repository-level `CHANGELOG.md`.
 
+## Unreleased
+
+- Prepare 0.11 with wire 0.24; upgrade consumers exchanging public wire types
+  together. The paired wire release adds a required validation-options field.
+
+- Add opt-in Link-Local Next Hop capability advertisement and bilateral
+  negotiation for draft-ietf-idr-linklocal-capability-06. Embedders are
+  responsible for directly attached peer interface scope.
+
 ## 0.10.0 - 2026-10-03
 
 - Move the public wire dependency to 0.23 for typed Type 6 SMET support.

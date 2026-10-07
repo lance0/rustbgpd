@@ -663,12 +663,19 @@ The working-tree column comes from the crate manifests and may run ahead
 during preparation or a partial publication. An unchanged published column
 does not mean no newer individual crate exists on the registry.
 
+The prepared wire 0.24 / FSM 0.11 / RPKI 0.6 set adds a required
+`UpdateValidationOptions::link_local_next_hop` field. Set it to `false` (or
+use `..Default::default()`) to preserve existing validation. Opting in requires
+interface scope and negotiated capability context; see the
+[0.24 compatibility note](../../crates/wire/README.md#0240-compatibility-note-prepared).
+This source break is separate from the additive non-exhaustive capability variant.
+
 <!-- published-crate-versions:start -->
 | Crate | Published examples | Working tree |
 |---|---|---|
-| `rustbgpd-wire` | `0.23.0` | `0.23.0` |
-| `rustbgpd-fsm` | `0.10.0` | `0.10.0` |
-| `rustbgpd-rpki` | `0.5.0` | `0.5.0` |
+| `rustbgpd-wire` | `0.23.0` | `0.24.0` |
+| `rustbgpd-fsm` | `0.10.0` | `0.11.0` |
+| `rustbgpd-rpki` | `0.5.0` | `0.6.0` |
 <!-- published-crate-versions:end -->
 
 After changing manifests, run `python3 scripts/check_embedding_versions.py --write`

@@ -10,6 +10,11 @@ Requires Rust 1.95 or newer.
 
 Release-by-release crate changes are recorded in the [changelog](CHANGELOG.md).
 
+The prepared 0.11 line adds `PeerConfig::link_local_next_hop` (default false)
+and exposes bilateral negotiation through `NegotiatedSession`. Advertise it
+only when the embedding transport supplies a directly attached interface
+scope. It uses wire 0.24; upgrade crates exchanging wire types together.
+
 `rustbgpd-fsm` 0.10.0 moves to wire `0.23.0` for the Type 6 SMET decoder
 change. There is no direct FSM API or state-machine change; upgrade crates
 exchanging public wire types together when adopting this line.

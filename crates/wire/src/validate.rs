@@ -97,6 +97,10 @@ pub struct UpdateValidationOptions {
     /// validation remains strict, and callers must have already established the
     /// session scope/interface needed to resolve the link-local address.
     pub allow_ipv4_link_local_mp_reach_next_hop: bool,
+    /// Permit a scoped link-local-only unicast next hop after bilateral
+    /// capability 77 negotiation. IPv4 also requires Extended Next Hop and
+    /// `allow_ipv4_link_local_mp_reach_next_hop` to be set.
+    pub link_local_next_hop: bool,
 }
 /// Well-known attribute type codes that MUST be present when NLRI is advertised.
 const MANDATORY_ATTRS: &[u8] = &[attr_type::ORIGIN, attr_type::AS_PATH];
@@ -181,10 +185,18 @@ pub fn validate_update_attributes_with_context(
                 let allow_link_local_primary = options.allow_ipv4_link_local_mp_reach_next_hop
                     && mp.afi == crate::capability::Afi::Ipv4
                     && mp.safi == Safi::Unicast;
+                let negotiated_link_local = options.link_local_next_hop
+                    && matches!(
+                        mp.afi,
+                        crate::capability::Afi::Ipv4 | crate::capability::Afi::Ipv6
+                    )
+                    && mp.safi == Safi::Unicast
+                    && (mp.afi != crate::capability::Afi::Ipv4 || allow_link_local_primary);
                 check_mp_reach_next_hop(
                     mp.next_hop,
                     mp.link_local_next_hop,
                     allow_link_local_primary,
+                    negotiated_link_local,
                 )
             }
             _ => Ok(()),
@@ -323,11 +335,14 @@ fn check_mp_reach_next_hop(
     addr: IpAddr,
     link_local: Option<std::net::Ipv6Addr>,
     allow_link_local_primary: bool,
+    negotiated_link_local: bool,
 ) -> Result<(), UpdateError> {
     match addr {
         IpAddr::V4(v4) => check_next_hop(v4)?,
         IpAddr::V6(v6) => {
-            let valid = if allow_link_local_primary && is_ipv6_link_local(&v6) {
+            let valid = if negotiated_link_local && is_ipv6_link_local(&v6) {
+                true
+            } else if allow_link_local_primary && is_ipv6_link_local(&v6) {
                 link_local.is_some_and(|ll| ll == v6)
             } else {
                 is_valid_ipv6_nexthop(&v6)
@@ -788,6 +803,7 @@ mod tests {
                 true,
                 UpdateValidationOptions {
                     allow_ipv4_link_local_mp_reach_next_hop: true,
+                    ..Default::default()
                 },
             )
             .is_ok()
@@ -804,10 +820,53 @@ mod tests {
                 true,
                 UpdateValidationOptions {
                     allow_ipv4_link_local_mp_reach_next_hop: true,
+                    ..Default::default()
                 },
             )
             .is_err()
         );
+    }
+    #[test]
+    fn negotiated_link_local_ipv4_requires_extended_next_hop_context() {
+        use crate::attribute::MpReachNlri;
+        use crate::capability::Afi;
+        for afi in [Afi::Ipv4, Afi::Ipv6] {
+            let attrs = vec![
+                PathAttribute::Origin(Origin::Igp),
+                PathAttribute::AsPath(AsPath {
+                    segments: vec![AsPathSegment::AsSequence(vec![65001])],
+                }),
+                PathAttribute::MpReachNlri(Box::new(MpReachNlri {
+                    afi,
+                    safi: Safi::Unicast,
+                    next_hop: "fe80::1".parse().unwrap(),
+                    link_local_next_hop: None,
+                    announced: vec![],
+                    flowspec_announced: vec![],
+                    evpn_announced: vec![],
+                    bgpls_announced: vec![],
+                    labeled_announced: vec![],
+                    vpn_announced: vec![],
+                    rtc_announced: vec![],
+                })),
+            ];
+            for enhe in [false, true] {
+                let result = validate_update_attributes_with_options(
+                    &attrs,
+                    true,
+                    false,
+                    true,
+                    UpdateValidationOptions {
+                        link_local_next_hop: true,
+                        allow_ipv4_link_local_mp_reach_next_hop: enhe,
+                    },
+                );
+                assert_eq!(result.is_ok(), afi == Afi::Ipv6 || enhe);
+                if let Err(error) = result {
+                    assert_eq!(error.disposition, ErrorDisposition::TreatAsWithdraw);
+                }
+            }
+        }
     }
     #[test]
     fn mp_reach_nlri_reject_loopback_v6_next_hop() {

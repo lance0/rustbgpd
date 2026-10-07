@@ -98,6 +98,19 @@ wait_frr_interface_established() {
     return 1
 }
 
+assert_link_local_capability() {
+    local frr=$1 expected=$2
+    local state
+    state=$(docker exec "$frr" vtysh -c 'show bgp neighbors fe80::1')
+    if printf '%s\n' "$state" | grep -Fq "Link-Local Next Hop Capability: $expected"; then
+        ok "$frr link-local capability: $expected"
+    else
+        fail "$frr link-local capability state differs from $expected"
+        dump_state_on_failure
+        return 1
+    fi
+}
+
 assert_no_ipv4_on_fabric() {
     if docker exec "$RUSTBGPD" sh -lc 'ip -4 addr show dev eth1; ip -4 addr show dev eth2' | grep -q ' inet '; then
         fail "rustbgpd has an IPv4 address on an unnumbered fabric interface"
@@ -261,6 +274,8 @@ assert_no_ipv4_on_fabric
 wait_frr_interface_established "$FRR1" "rustbgpd ↔ frr1"
 wait_frr_interface_established "$FRR2" "rustbgpd ↔ frr2"
 assert_neighbor_scope_status
+assert_link_local_capability "$FRR1" "advertised link-local received link-local"
+assert_link_local_capability "$FRR2" "not advertised received link-local"
 
 wait_received_paths 2
 wait_kernel_ecmp
