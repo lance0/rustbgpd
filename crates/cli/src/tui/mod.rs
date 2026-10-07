@@ -264,24 +264,40 @@ mod tests {
 
     #[tokio::test]
     async fn terminal_hangup_arrives_as_the_ctrl_c_quit_key() {
-        let pty = nix::pty::openpty(None, None).expect("open a pty pair");
-        let tty = pty.slave;
+        use nix::fcntl::OFlag;
+        use nix::pty::{grantpt, posix_openpt, ptsname_r, unlockpt};
+
+        // Both ends close-on-exec from the start, unlike `openpty`: a child
+        // that a sibling test spawns concurrently would otherwise inherit the
+        // master and keep the pty open after it is dropped here.
+        let flags = OFlag::O_RDWR | OFlag::O_NOCTTY | OFlag::O_CLOEXEC;
+        let master = posix_openpt(flags).expect("open a pty master");
+        grantpt(&master).expect("grant the pty");
+        unlockpt(&master).expect("unlock the pty");
+        let slave = ptsname_r(&master).expect("name the pty slave");
+        let tty = nix::fcntl::open(slave.as_str(), flags, nix::sys::stat::Mode::empty())
+            .expect("open the pty slave");
         assert!(
             !tty_hung_up(tty.as_fd(), PollTimeout::ZERO).expect("poll idle tty"),
             "an idle terminal has not hung up"
         );
-        nix::unistd::write(&pty.master, b"q\n").expect("type into the pty");
+        nix::unistd::write(&master, b"q\n").expect("type into the pty");
         assert!(
             !tty_hung_up(tty.as_fd(), PollTimeout::NONE).expect("poll tty with input"),
             "pending input is not a hangup"
         );
+        // Consume the input, so the poll below can only wake on the hangup.
+        // A child forked before its exec still shares the master briefly.
+        let mut line = [0; 8];
+        let n = nix::unistd::read(&tty, &mut line).expect("read the typed line");
+        assert_eq!(&line[..n], b"q\n");
 
         // Closing the master is what a dropped SSH session or a killed tmux
         // server does; reads on the slave now return EOF.
-        drop(pty.master);
+        drop(master);
         assert!(
-            tty_hung_up(tty.as_fd(), PollTimeout::NONE).expect("poll hung-up tty"),
-            "a closed master must read as a hangup"
+            tty_hung_up(tty.as_fd(), PollTimeout::from(5_000u16)).expect("poll hung-up tty"),
+            "a closed master must read as a hangup within 5s"
         );
 
         let (tx, mut rx) = mpsc::channel(1);
