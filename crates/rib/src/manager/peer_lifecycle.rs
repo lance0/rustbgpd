@@ -808,6 +808,7 @@ impl RibManager {
             negotiated_llgr_families,
             gr_context,
             exact_export_encoder,
+            evpn_end_of_rib: false,
         };
         let sessions = self.live_sessions.entry(peer).or_default();
         // Same id = the same session re-announcing itself (legacy id-0

@@ -68,6 +68,12 @@ use crate::evpn_ack::{PendingRibOps, RibAckOutcome, send_and_ack};
 use crate::evpn_es_link_drain::EsLinkBindings;
 use crate::evpn_originator::{LOCAL_PEER, route_target_to_extcomm};
 
+/// RFC 9785 §4.3 boot-timer ceiling: after a restart the recovery decision
+/// waits for every established EVPN session's End-of-RIB, but never longer.
+const BOOT_RECOVERY_MAX_WAIT: Duration = Duration::from_secs(30);
+/// Re-check interval for the boot-timer End-of-RIB condition.
+const BOOT_SYNC_POLL: Duration = Duration::from_secs(1);
+
 /// Cloneable ADR-0063 runtime control surface for the Ethernet
 /// Segment owner.
 ///
@@ -264,6 +270,7 @@ pub(crate) fn spawn_with_local_bias(
         shutdown: daemon_shutdown.clone(),
         drained_esis: Arc::new(BTreeSet::new()),
         es_link_bindings: EsLinkBindings::default(),
+        boot_until: Some(tokio::time::Instant::now() + BOOT_RECOVERY_MAX_WAIT),
     };
     let join = tokio::spawn(segment_loop(
         runtime,
@@ -302,6 +309,9 @@ struct SegmentRuntime {
     /// link name is the port handle the single-active AC gate ships
     /// to the dataplane.
     es_link_bindings: EsLinkBindings,
+    /// RFC 9785 §4.3 boot timer: while set, no recovery decision runs until
+    /// the EVPN sessions have synced or this ceiling passes.
+    boot_until: Option<tokio::time::Instant>,
 }
 
 /// Per-ESI runtime state.
@@ -487,7 +497,9 @@ async fn segment_loop(
                 }
             },
             () = crate::evpn_ack::retry_delay(by_esi.values().filter_map(|s| s.recovery_deadline).min()) => {
-                reelection_sweep(&runtime, &mut by_esi, &mut pending_rib_ops).await;
+                if settle_boot_wait(&mut runtime, &mut by_esi).await {
+                    reelection_sweep(&runtime, &mut by_esi, &mut pending_rib_ops).await;
+                }
             }
             // ADR-0102: re-drive RIB operations whose acknowledgement
             // was lost. Parks forever while nothing is pending.
@@ -924,10 +936,9 @@ async fn run_election_with_candidates(
     if runtime.drained_esis.contains(&state.config.esi) {
         return;
     }
-    if state
-        .recovery_deadline
-        .is_some_and(|deadline| tokio::time::Instant::now() < deadline)
-    {
+    if state.recovery_deadline.is_some_and(|deadline| {
+        runtime.boot_until.is_some() || tokio::time::Instant::now() < deadline
+    }) {
         return;
     }
     let recovering = state.recovery_deadline.take().is_some();
@@ -1523,6 +1534,42 @@ fn df_election_extcomm(
             ))
         }
     }
+}
+
+/// RFC 9785 §4.3 boot timer. Remote Type 4 routes cannot be present before
+/// the BGP sessions carrying them are up, so after a restart the recovery
+/// decision waits until every established EVPN session has sent End-of-RIB,
+/// bounded by `BOOT_RECOVERY_MAX_WAIT`. Returns whether recovery may proceed;
+/// otherwise expired recovery deadlines move to the next poll.
+async fn settle_boot_wait(
+    runtime: &mut SegmentRuntime,
+    by_esi: &mut HashMap<EthernetSegmentIdentifier, SegmentState>,
+) -> bool {
+    let Some(boot_until) = runtime.boot_until else {
+        return true;
+    };
+    let now = tokio::time::Instant::now();
+    if now < boot_until && !evpn_sessions_synced(&runtime.rib_tx).await {
+        let next = (now + BOOT_SYNC_POLL).min(boot_until);
+        for deadline in by_esi
+            .values_mut()
+            .filter_map(|s| s.recovery_deadline.as_mut())
+        {
+            *deadline = (*deadline).max(next);
+        }
+        return false;
+    }
+    runtime.boot_until = None;
+    true
+}
+
+async fn evpn_sessions_synced(rib_tx: &mpsc::Sender<RibUpdate>) -> bool {
+    let (reply, rx) = oneshot::channel();
+    rib_tx
+        .send(RibUpdate::QueryEvpnSessionsSynced { reply })
+        .await
+        .is_ok()
+        && rx.await.unwrap_or(false)
 }
 
 async fn query_evpn_routes(
@@ -3052,6 +3099,7 @@ mod tests {
             shutdown: CancellationToken::new(),
             drained_esis: Arc::new(BTreeSet::new()),
             es_link_bindings: EsLinkBindings::default(),
+            boot_until: None,
         };
         let mut by_esi: HashMap<EthernetSegmentIdentifier, SegmentState> = HashMap::new();
         let mut alloc = rustbgpd_evpn::EsiLabelAllocator::new();
@@ -3329,6 +3377,7 @@ mod tests {
             shutdown: CancellationToken::new(),
             drained_esis: Arc::new(BTreeSet::new()),
             es_link_bindings: EsLinkBindings::default(),
+            boot_until: None,
         };
         let mut sa_bound = segment(esi(0x31), &[100]);
         sa_bound.redundancy_mode = RedundancyMode::SingleActive;
@@ -3403,6 +3452,7 @@ mod tests {
             shutdown: CancellationToken::new(),
             drained_esis: Arc::new(BTreeSet::new()),
             es_link_bindings: EsLinkBindings::default(),
+            boot_until: None,
         };
         let mut sa = segment(esi(0x41), &[100]);
         sa.redundancy_mode = RedundancyMode::SingleActive;
@@ -3943,6 +3993,7 @@ mod tests {
             shutdown: CancellationToken::new(),
             drained_esis: Arc::new(BTreeSet::new()),
             es_link_bindings: EsLinkBindings::default(),
+            boot_until: None,
         }
     }
 
@@ -4067,6 +4118,125 @@ mod tests {
         }
     }
 
+    /// Full segment actor against a RIB whose EVPN sessions report synced
+    /// only when the test says so. Returns the sync flag, the served Type 4
+    /// rows, and every injected route.
+    #[expect(
+        clippy::type_complexity,
+        reason = "test harness returns its three shared probes together"
+    )]
+    fn boot_recovery_harness() -> (
+        EvpnSegmentHandle,
+        Arc<std::sync::atomic::AtomicBool>,
+        Arc<tokio::sync::Mutex<Vec<EvpnRibRoute>>>,
+        Arc<tokio::sync::Mutex<Vec<EvpnRibRoute>>>,
+    ) {
+        let (rib_tx, mut rib_rx) = mpsc::channel::<RibUpdate>(64);
+        let synced = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let routes = Arc::new(tokio::sync::Mutex::new(Vec::<EvpnRibRoute>::new()));
+        let injected = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let (rib_synced, rib_routes, rib_injected) =
+            (synced.clone(), routes.clone(), injected.clone());
+        tokio::spawn(async move {
+            while let Some(update) = rib_rx.recv().await {
+                match update {
+                    RibUpdate::QueryEvpnSessionsSynced { reply } => {
+                        let _ = reply.send(rib_synced.load(std::sync::atomic::Ordering::SeqCst));
+                    }
+                    RibUpdate::QueryEvpnRoutes { reply, .. } => {
+                        let _ = reply.send(rib_routes.lock().await.clone());
+                    }
+                    RibUpdate::InjectEvpn { route, reply } => {
+                        rib_injected.lock().await.push(route);
+                        let _ = reply.send(Ok(()));
+                    }
+                    RibUpdate::WithdrawEvpn { reply, .. } => {
+                        let _ = reply.send(Ok(()));
+                    }
+                    _ => {}
+                }
+            }
+        });
+        let mut table = EvpnInstanceTable::new();
+        table.insert(instance(100)).unwrap();
+        let mut config = segment(esi(1), &[100]);
+        config.df_algorithm = DfAlgorithm::HighestPreference;
+        config.df_preference = 65535;
+        config.df_dont_preempt = true;
+        let handle = spawn(
+            &Arc::new(table),
+            vec![config],
+            rib_tx,
+            None,
+            BgpMetrics::new(),
+            CancellationToken::new(),
+        )
+        .unwrap();
+        (handle, synced, routes, injected)
+    }
+
+    async fn advertised_type4_df(
+        injected: &tokio::sync::Mutex<Vec<EvpnRibRoute>>,
+    ) -> Option<(u32, bool, DfAlgorithm)> {
+        injected
+            .lock()
+            .await
+            .iter()
+            .rev()
+            .find(|r| matches!(r.route, EvpnRoute::Es(_)))
+            .and_then(|r| decode_df_election_extcomm(&r.attributes))
+    }
+
+    /// RFC 9785 §4.3(5) boot timer: after a restart, the surviving DF's
+    /// Type 4 route can arrive later than the fixed recovery window. The
+    /// recovering PE must hold its advertisement until the EVPN sessions
+    /// report End-of-RIB, then inherit instead of preempting.
+    #[tokio::test(start_paused = true)]
+    async fn nonrevertive_boot_waits_for_evpn_end_of_rib_before_recovery() {
+        let (handle, synced, routes, injected) = boot_recovery_harness();
+        tokio::time::sleep(Duration::from_millis(4500)).await;
+        assert_eq!(
+            advertised_type4_df(&injected).await,
+            None,
+            "no Type 4 before the EVPN sessions have synced"
+        );
+        let mut attrs = attrs_with_es_import_rt(esi(1));
+        attrs.push(PathAttribute::ExtendedCommunities(vec![
+            ExtendedCommunity::df_election(
+                DfAlgorithm::HighestPreference.algorithm_id(),
+                DF_ELECTION_DONT_PREEMPT,
+                Some(200),
+            ),
+        ]));
+        routes
+            .lock()
+            .await
+            .push(type_4_es_route(esi(1), "10.0.0.2", attrs));
+        synced.store(true, std::sync::atomic::Ordering::SeqCst);
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        assert_eq!(
+            advertised_type4_df(&injected).await,
+            Some((200, false, DfAlgorithm::HighestPreference)),
+            "inherits the surviving DF's preference instead of preempting"
+        );
+        handle.shutdown().await;
+    }
+
+    /// The boot wait is bounded: a PE whose EVPN sessions never sync still
+    /// advertises its administrative values once the ceiling passes.
+    #[tokio::test(start_paused = true)]
+    async fn nonrevertive_boot_wait_is_bounded_without_evpn_sessions() {
+        let (handle, _synced, _routes, injected) = boot_recovery_harness();
+        tokio::time::sleep(Duration::from_millis(29_500)).await;
+        assert_eq!(advertised_type4_df(&injected).await, None);
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        assert_eq!(
+            advertised_type4_df(&injected).await,
+            Some((65535, true, DfAlgorithm::HighestPreference))
+        );
+        handle.shutdown().await;
+    }
+
     #[tokio::test(start_paused = true)]
     #[expect(
         clippy::too_many_lines,
@@ -4104,6 +4274,7 @@ mod tests {
             shutdown: CancellationToken::new(),
             drained_esis: Arc::new(BTreeSet::new()),
             es_link_bindings: EsLinkBindings::default(),
+            boot_until: None,
         };
         for (algorithm, admin) in [
             (DfAlgorithm::HighestPreference, 65535),

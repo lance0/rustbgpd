@@ -574,7 +574,9 @@ Ships:
   Weight + RFC 9785 Highest-/Lowest-Preference, with fallback to
   default when candidates disagree, callable from a unit test. Local
   Don't-Preempt recovery (`df_dont_preempt`) waits three seconds before
-  Type 4 advertisement, inherits a protected reference PE's preference
+  Type 4 advertisement (after a daemon restart, also until an L2VPN/EVPN
+  session is established and every established one has sent End-of-RIB,
+  bounded at 30 seconds), inherits a protected reference PE's preference
   with DP=0, and restores administrative values when it becomes reference.
   Equal-preference ties prefer DP=1, then the lowest originator IP.
   Receive-side single-active

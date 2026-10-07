@@ -1337,6 +1337,8 @@ pub(super) struct LiveSessionRecord {
     negotiated_llgr_families: Vec<(Afi, Safi)>,
     gr_context: Option<PeerSelectionDeferralContext>,
     exact_export_encoder: Option<Arc<dyn ExactExportEncoder>>,
+    /// This session has sent its L2VPN/EVPN End-of-RIB.
+    evpn_end_of_rib: bool,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -3475,6 +3477,14 @@ impl RibManager {
                     let selection_transition =
                         self.selection_deferral_end_of_rib(peer, session_id, (afi, safi));
                     self.handle_end_of_rib(peer, afi, safi);
+                    if (afi, safi) == (Afi::L2Vpn, Safi::Evpn)
+                        && let Some(record) =
+                            self.live_sessions.get_mut(&peer).and_then(|sessions| {
+                                sessions.iter_mut().find(|s| s.session_id == session_id)
+                            })
+                    {
+                        record.evpn_end_of_rib = true;
+                    }
                     if let Some(transition) = selection_transition {
                         self.apply_selection_deferral_transitions(
                             [transition],
@@ -3632,6 +3642,16 @@ impl RibManager {
             }
             RibUpdate::QueryEvpnRoutes { filter, reply } => {
                 queries::send_filtered_rows(self.loc_rib.iter_evpn(), filter.as_ref(), reply);
+            }
+            RibUpdate::QueryEvpnSessionsSynced { reply } => {
+                let evpn = (Afi::L2Vpn, Safi::Evpn);
+                let peers: Vec<bool> = self
+                    .live_sessions
+                    .values()
+                    .filter(|sessions| sessions.iter().any(|s| s.sendable_families.contains(&evpn)))
+                    .map(|sessions| sessions.iter().any(|s| s.evpn_end_of_rib))
+                    .collect();
+                let _ = reply.send(!peers.is_empty() && peers.iter().all(|&synced| synced));
             }
             RibUpdate::QueryEvpnRoutesPage {
                 scope,
