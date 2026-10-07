@@ -1,0 +1,192 @@
+{
+  "two_peer_2m_routes": {
+    "arms": {
+      "off": {
+        "cells": [
+          "a-off-r1",
+          "a-off-r2"
+        ],
+        "daemon_cgroup_peak_mib": {
+          "mean": 1690.6,
+          "min": 1594.6,
+          "max": 1786.7
+        },
+        "vmhwm_mib": {
+          "mean": 1705.9,
+          "min": 1608.9,
+          "max": 1802.9
+        },
+        "settled_vmrss_mib": {
+          "mean": 1385.7,
+          "min": 1383.4,
+          "max": 1388.0
+        },
+        "jemalloc_allocated_mib": {
+          "mean": 1527.2,
+          "min": 1527.1,
+          "max": 1527.2
+        }
+      },
+      "4096": {
+        "cells": [
+          "b-4096-r1",
+          "b-4096-r2"
+        ],
+        "daemon_cgroup_peak_mib": {
+          "mean": 1692.4,
+          "min": 1686.8,
+          "max": 1698.1
+        },
+        "vmhwm_mib": {
+          "mean": 1699.4,
+          "min": 1693.5,
+          "max": 1705.3
+        },
+        "settled_vmrss_mib": {
+          "mean": 1411.2,
+          "min": 1410.3,
+          "max": 1412.1
+        },
+        "jemalloc_allocated_mib": {
+          "mean": 1567.7,
+          "min": 1567.7,
+          "max": 1567.8
+        }
+      },
+      "262144": {
+        "cells": [
+          "c-262144-r1",
+          "c-262144-r2"
+        ],
+        "daemon_cgroup_peak_mib": {
+          "mean": 1851.5,
+          "min": 1849.9,
+          "max": 1853.2
+        },
+        "vmhwm_mib": {
+          "mean": 1862.6,
+          "min": 1859.7,
+          "max": 1865.6
+        },
+        "settled_vmrss_mib": {
+          "mean": 1646.7,
+          "min": 1645.7,
+          "max": 1647.7
+        },
+        "jemalloc_allocated_mib": {
+          "mean": 1806.3,
+          "min": 1806.2,
+          "max": 1806.3
+        }
+      },
+      "1048576": {
+        "cells": [
+          "d-1048576-r1",
+          "d-1048576-r2"
+        ],
+        "daemon_cgroup_peak_mib": {
+          "mean": 2572.0,
+          "min": 2570.0,
+          "max": 2574.0
+        },
+        "vmhwm_mib": {
+          "mean": 2583.2,
+          "min": 2582.9,
+          "max": 2583.4
+        },
+        "settled_vmrss_mib": {
+          "mean": 2366.4,
+          "min": 2364.6,
+          "max": 2368.1
+        },
+        "jemalloc_allocated_mib": {
+          "mean": 2526.1,
+          "min": 2526.0,
+          "max": 2526.2
+        }
+      }
+    },
+    "minus_off": {
+      "4096": {
+        "daemon_cgroup_peak_mib": 1.8,
+        "vmhwm_mib": -6.5,
+        "settled_vmrss_mib": 25.5,
+        "jemalloc_allocated_mib": 40.5
+      },
+      "262144": {
+        "daemon_cgroup_peak_mib": 160.9,
+        "vmhwm_mib": 156.7,
+        "settled_vmrss_mib": 261.0,
+        "jemalloc_allocated_mib": 279.1
+      },
+      "1048576": {
+        "daemon_cgroup_peak_mib": 881.4,
+        "vmhwm_mib": 877.3,
+        "settled_vmrss_mib": 980.7,
+        "jemalloc_allocated_mib": 998.9
+      }
+    }
+  },
+  "fleet_1000x400": {
+    "arms": {
+      "4096": {
+        "cells": [
+          "e-1000x400-4096"
+        ],
+        "daemon_cgroup_peak_mib": {
+          "mean": 648.6,
+          "min": 648.6,
+          "max": 648.6
+        },
+        "vmhwm_mib": {
+          "mean": 666.7,
+          "min": 666.7,
+          "max": 666.7
+        },
+        "settled_vmrss_mib": {
+          "mean": 666.7,
+          "min": 666.7,
+          "max": 666.7
+        },
+        "jemalloc_allocated_mib": {
+          "mean": 553.2,
+          "min": 553.2,
+          "max": 553.2
+        }
+      },
+      "1048576": {
+        "cells": [
+          "f-1000x400-1048576"
+        ],
+        "daemon_cgroup_peak_mib": {
+          "mean": 640.8,
+          "min": 640.8,
+          "max": 640.8
+        },
+        "vmhwm_mib": {
+          "mean": 655.4,
+          "min": 655.4,
+          "max": 655.4
+        },
+        "settled_vmrss_mib": {
+          "mean": 654.4,
+          "min": 654.4,
+          "max": 654.4
+        },
+        "jemalloc_allocated_mib": {
+          "mean": 553.7,
+          "min": 553.7,
+          "max": 553.7
+        }
+      }
+    },
+    "minus_4096": {
+      "1048576": {
+        "daemon_cgroup_peak_mib": -7.8,
+        "vmhwm_mib": -11.3,
+        "settled_vmrss_mib": -12.3,
+        "jemalloc_allocated_mib": 0.5
+      }
+    }
+  }
+}
