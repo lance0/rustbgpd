@@ -68,8 +68,9 @@ use crate::evpn_ack::{PendingRibOps, RibAckOutcome, send_and_ack};
 use crate::evpn_es_link_drain::EsLinkBindings;
 use crate::evpn_originator::{LOCAL_PEER, route_target_to_extcomm};
 
-/// RFC 9785 §4.3 boot-timer ceiling: after a restart the recovery decision
-/// waits for every established EVPN session's End-of-RIB, but never longer.
+/// RFC 9785 §4.3 boot-timer ceiling: any recovery decision due within this
+/// long of actor start waits for every established EVPN session's End-of-RIB
+/// (remote routes cannot be present earlier), but never past the ceiling.
 const BOOT_RECOVERY_MAX_WAIT: Duration = Duration::from_secs(30);
 /// Re-check interval for the boot-timer End-of-RIB condition.
 const BOOT_SYNC_POLL: Duration = Duration::from_secs(1);
@@ -1549,8 +1550,8 @@ async fn settle_boot_wait(
         return true;
     };
     let now = tokio::time::Instant::now();
-    if now < boot_until && !evpn_sessions_synced(&runtime.rib_tx).await {
-        let next = (now + BOOT_SYNC_POLL).min(boot_until);
+    let next = (now + BOOT_SYNC_POLL).min(boot_until);
+    if now < boot_until && !evpn_sessions_synced(&runtime.rib_tx, next).await {
         for deadline in by_esi
             .values_mut()
             .filter_map(|s| s.recovery_deadline.as_mut())
@@ -1563,13 +1564,22 @@ async fn settle_boot_wait(
     true
 }
 
-async fn evpn_sessions_synced(rib_tx: &mpsc::Sender<RibUpdate>) -> bool {
+/// A stalled RIB must not hold the actor past the boot ceiling: the whole
+/// query is bounded by `deadline`, and a timeout counts as not synced.
+async fn evpn_sessions_synced(
+    rib_tx: &mpsc::Sender<RibUpdate>,
+    deadline: tokio::time::Instant,
+) -> bool {
     let (reply, rx) = oneshot::channel();
-    rib_tx
-        .send(RibUpdate::QueryEvpnSessionsSynced { reply })
-        .await
-        .is_ok()
-        && rx.await.unwrap_or(false)
+    tokio::time::timeout_at(deadline, async {
+        rib_tx
+            .send(RibUpdate::QueryEvpnSessionsSynced { reply })
+            .await
+            .is_ok()
+            && rx.await.unwrap_or(false)
+    })
+    .await
+    .unwrap_or(false)
 }
 
 async fn query_evpn_routes(
@@ -4119,13 +4129,16 @@ mod tests {
     }
 
     /// Full segment actor against a RIB whose EVPN sessions report synced
-    /// only when the test says so. Returns the sync flag, the served Type 4
+    /// only when the test says so, or never answer the sync query when
+    /// `stall_sync_query` is set. Returns the sync flag, the served Type 4
     /// rows, and every injected route.
     #[expect(
         clippy::type_complexity,
         reason = "test harness returns its three shared probes together"
     )]
-    fn boot_recovery_harness() -> (
+    fn boot_recovery_harness(
+        stall_sync_query: bool,
+    ) -> (
         EvpnSegmentHandle,
         Arc<std::sync::atomic::AtomicBool>,
         Arc<tokio::sync::Mutex<Vec<EvpnRibRoute>>>,
@@ -4138,8 +4151,12 @@ mod tests {
         let (rib_synced, rib_routes, rib_injected) =
             (synced.clone(), routes.clone(), injected.clone());
         tokio::spawn(async move {
+            let mut held = Vec::new();
             while let Some(update) = rib_rx.recv().await {
                 match update {
+                    RibUpdate::QueryEvpnSessionsSynced { reply } if stall_sync_query => {
+                        held.push(reply);
+                    }
                     RibUpdate::QueryEvpnSessionsSynced { reply } => {
                         let _ = reply.send(rib_synced.load(std::sync::atomic::Ordering::SeqCst));
                     }
@@ -4193,7 +4210,7 @@ mod tests {
     /// report End-of-RIB, then inherit instead of preempting.
     #[tokio::test(start_paused = true)]
     async fn nonrevertive_boot_waits_for_evpn_end_of_rib_before_recovery() {
-        let (handle, synced, routes, injected) = boot_recovery_harness();
+        let (handle, synced, routes, injected) = boot_recovery_harness(false);
         tokio::time::sleep(Duration::from_millis(4500)).await;
         assert_eq!(
             advertised_type4_df(&injected).await,
@@ -4222,11 +4239,24 @@ mod tests {
         handle.shutdown().await;
     }
 
+    /// A RIB that never answers the sync query cannot hold the actor past
+    /// the boot ceiling.
+    #[tokio::test(start_paused = true)]
+    async fn nonrevertive_boot_wait_is_bounded_with_stalled_rib_query() {
+        let (handle, _synced, _routes, injected) = boot_recovery_harness(true);
+        tokio::time::sleep(Duration::from_millis(30_500)).await;
+        assert_eq!(
+            advertised_type4_df(&injected).await,
+            Some((65535, true, DfAlgorithm::HighestPreference))
+        );
+        handle.shutdown().await;
+    }
+
     /// The boot wait is bounded: a PE whose EVPN sessions never sync still
     /// advertises its administrative values once the ceiling passes.
     #[tokio::test(start_paused = true)]
     async fn nonrevertive_boot_wait_is_bounded_without_evpn_sessions() {
-        let (handle, _synced, _routes, injected) = boot_recovery_harness();
+        let (handle, _synced, _routes, injected) = boot_recovery_harness(false);
         tokio::time::sleep(Duration::from_millis(29_500)).await;
         assert_eq!(advertised_type4_df(&injected).await, None);
         tokio::time::sleep(Duration::from_secs(1)).await;
