@@ -101,7 +101,11 @@ wait_frr_interface_established() {
 assert_link_local_capability() {
     local frr=$1 expected=$2
     local state
-    state=$(docker exec "$frr" vtysh -c 'show bgp neighbors fe80::1')
+    if ! state=$(docker exec "$frr" vtysh -c 'show bgp neighbors fe80::1'); then
+        fail "$frr link-local capability query failed"
+        dump_state_on_failure
+        return 1
+    fi
     if printf '%s\n' "$state" | grep -Fq "Link-Local Next Hop Capability: $expected"; then
         ok "$frr link-local capability: $expected"
     else

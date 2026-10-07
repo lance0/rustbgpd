@@ -13,6 +13,60 @@ fn repo_path(relative: &str) -> PathBuf {
 }
 
 #[test]
+fn m53_link_local_capability_query_failure_keeps_diagnostics_under_errexit() {
+    let source =
+        fs::read_to_string(interop_path("scripts/test-m53-bgp-unnumbered-frr.sh")).unwrap();
+    let start = source.find("assert_link_local_capability() {").unwrap();
+    let end = start + source[start..].find("\n}\n").unwrap() + 3;
+    for (producer_exit, reply, success, marker) in [
+        (
+            "7",
+            "",
+            false,
+            "FAIL:frr1 link-local capability query failed",
+        ),
+        (
+            "0",
+            "Link-Local Next Hop Capability: advertised link-local received link-local",
+            true,
+            "OK:frr1 link-local capability:",
+        ),
+        (
+            "0",
+            "Link-Local Next Hop Capability: not advertised received link-local",
+            false,
+            "FAIL:frr1 link-local capability state differs",
+        ),
+    ] {
+        let output = Command::new("bash")
+            .args([
+                "-c",
+                r#"
+set -euo pipefail
+eval "$HELPER"
+docker() { printf '%s\n' "$REPLY"; return "$PRODUCER_EXIT"; }
+ok() { printf 'OK:%s\n' "$*"; }
+fail() { printf 'FAIL:%s\n' "$*"; }
+dump_state_on_failure() { echo DUMP; }
+assert_link_local_capability frr1 'advertised link-local received link-local'
+"#,
+            ])
+            .env("HELPER", &source[start..end])
+            .env("PRODUCER_EXIT", producer_exit)
+            .env("REPLY", reply)
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert_eq!(output.status.success(), success, "{stdout}");
+        assert!(
+            stdout.contains(marker),
+            "missing diagnostic {marker}: {stdout}"
+        );
+        assert_eq!(stdout.contains("DUMP"), !success, "{stdout}");
+    }
+}
+
+#[test]
 fn m85_gr_capability_requires_the_neighbors_family_scoped_advertisement() {
     let source = fs::read_to_string(interop_path("scripts/test-m85-rr-bird.sh")).unwrap();
     let start = source.find("bird_neighbor_gr_capability() {").unwrap();
