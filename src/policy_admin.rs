@@ -180,16 +180,11 @@ fn config_neighbor_set_to_api(definition: &NeighborSetConfig) -> NeighborSetDefi
 /// Apply a `SetPeerGroup` definition to a peer group.
 ///
 /// The definition replaces every field the peer-group API expresses. Fields
-/// the API does not carry (TCP MSS, BFD, slow-peer, per-family and outbound
-/// prefix limits, BGP role, ORF, RFC 1997 and RS control communities, next-hop
-/// ownership, IPv4 unicast suppression, log level) are owned by the config
-/// file and keep the `existing` group's values; a new group starts from the
-/// schema defaults. Both destructurings are exhaustive, so a field added to
-/// either type fails to compile until it is classified here.
-#[expect(
-    clippy::too_many_lines,
-    reason = "exhaustive destructuring of both peer-group types is the guard against an unclassified field"
-)]
+/// the API does not carry are owned by the config file and keep the
+/// `existing` group's values (see
+/// [`crate::config::copy_peer_group_file_only_fields`]); a new group starts
+/// from the schema defaults. The definition is destructured exhaustively so a
+/// new API field fails to compile until it is mapped here.
 pub(crate) fn apply_peer_group_definition(
     existing: Option<&PeerGroupConfig>,
     definition: PeerGroupDefinition,
@@ -223,82 +218,17 @@ pub(crate) fn apply_peer_group_definition(
         import_policy_chain,
         export_policy_chain,
     } = definition;
-    let PeerGroupConfig {
-        tcp_mss,
-        slow_peer_threshold_pct,
-        slow_peer_duration,
-        slow_peer_isolation,
-        max_prefixes_ipv4,
-        max_prefixes_ipv6,
-        max_prefixes_received_ipv4,
-        max_prefixes_received_ipv6,
-        max_prefix_action,
-        max_prefix_warning_percent,
-        max_prefixes_out_ipv4,
-        max_prefixes_out_ipv6,
-        bfd,
-        send_non_transitive_extended_communities,
-        next_hop_ownership,
-        interpret_rfc1997,
-        rs_control_communities,
-        role,
-        strict_role,
-        prefix_orf_receive,
-        disable_ipv4_unicast,
-        log_level,
-        // Expressed by the API definition above.
-        hold_time: _,
-        min_hold_time: _,
-        send_hold_time: _,
-        max_prefixes: _,
-        max_prefix_restart_seconds: _,
-        md5_password: _,
-        ttl_security: _,
-        ttl_security_hops: _,
-        families: _,
-        required_families: _,
-        graceful_restart: _,
-        gr_restart_time: _,
-        gr_peer_restart_time_max: _,
-        gr_stale_routes_time: _,
-        llgr_stale_time: _,
-        local_ipv6_nexthop: _,
-        route_reflector_client: _,
-        orr_vantage: _,
-        route_server_client: _,
-        per_client_best: _,
-        remove_private_as: _,
-        discard_path_attributes: _,
-        add_path: _,
-        import_policy: _,
-        export_policy: _,
-        import_policy_chain: _,
-        export_policy_chain: _,
-    } = existing.cloned().unwrap_or_default();
-    PeerGroupConfig {
-        tcp_mss,
+    let mut group = PeerGroupConfig {
         hold_time,
         min_hold_time,
         send_hold_time,
-        slow_peer_threshold_pct,
-        slow_peer_duration,
-        slow_peer_isolation,
         max_prefixes,
-        max_prefixes_ipv4,
-        max_prefixes_ipv6,
-        max_prefixes_received_ipv4,
-        max_prefixes_received_ipv6,
-        max_prefix_action,
-        max_prefix_warning_percent,
-        max_prefixes_out_ipv4,
-        max_prefixes_out_ipv6,
         max_prefix_restart_seconds: max_prefix_restart_seconds.and_then(std::num::NonZeroU32::new),
         md5_password: md5_password
             .as_ref()
             .map(|secret| secret.as_ref().to_owned()),
         ttl_security,
         ttl_security_hops,
-        bfd,
         families,
         required_families,
         graceful_restart,
@@ -310,15 +240,7 @@ pub(crate) fn apply_peer_group_definition(
         route_reflector_client,
         orr_vantage,
         route_server_client,
-        send_non_transitive_extended_communities,
         per_client_best,
-        next_hop_ownership,
-        interpret_rfc1997,
-        rs_control_communities,
-        role,
-        strict_role,
-        prefix_orf_receive,
-        disable_ipv4_unicast,
         remove_private_as,
         discard_path_attributes: (!discard_path_attributes.is_empty())
             .then(|| discard_path_attributes.into_iter().collect()),
@@ -333,8 +255,12 @@ pub(crate) fn apply_peer_group_definition(
             .collect(),
         import_policy_chain,
         export_policy_chain,
-        log_level,
+        ..PeerGroupConfig::default()
+    };
+    if let Some(existing) = existing {
+        crate::config::copy_peer_group_file_only_fields(&mut group, existing);
     }
+    group
 }
 
 pub(crate) fn config_peer_group_to_api(definition: &PeerGroupConfig) -> PeerGroupDefinition {
@@ -1459,7 +1385,32 @@ peer_group = "fabric"
                 prefix_orf_receive: Some(true),
                 disable_ipv4_unicast: Some(true),
                 log_level: Some("debug".into()),
-                ..Default::default()
+                // API-owned fields. No `..Default::default()`: a new
+                // field must be added here before this test compiles.
+                min_hold_time: None,
+                send_hold_time: None,
+                max_prefixes: None,
+                max_prefix_restart_seconds: None,
+                md5_password: None,
+                ttl_security: None,
+                ttl_security_hops: None,
+                required_families: Vec::new(),
+                graceful_restart: None,
+                gr_restart_time: None,
+                gr_peer_restart_time_max: None,
+                gr_stale_routes_time: None,
+                llgr_stale_time: None,
+                local_ipv6_nexthop: None,
+                route_reflector_client: None,
+                orr_vantage: None,
+                per_client_best: None,
+                remove_private_as: None,
+                discard_path_attributes: None,
+                add_path: None,
+                import_policy: Vec::new(),
+                export_policy: Vec::new(),
+                import_policy_chain: Vec::new(),
+                export_policy_chain: Vec::new(),
             },
         );
         let mut expected = config.peer_groups["tunnel"].clone();

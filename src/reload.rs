@@ -2310,6 +2310,7 @@ pub(crate) async fn reload_config_with_tcp_ao(
         tcp_ao: tcp_ao_rotation_candidate,
         listener_auth: listener_auth_edited,
     });
+    let route = config::reject_unappliable_sequential_reload(route, current, &new_config);
     info!(route = %route.describe(), "reload route classified");
     let old_map: std::collections::HashMap<(&str, Option<&str>), &config::Neighbor> = current
         .neighbors
@@ -2344,36 +2345,10 @@ pub(crate) async fn reload_config_with_tcp_ao(
                 Err(error) => return clean_reload_failure("generation.plan", error.to_string()),
             }
         }
-        config::SighupReloadRoute::Sequential { reasons } => {
+        config::SighupReloadRoute::Sequential { .. } => {
             for neighbor in diff.added.iter().chain(&rebuild_changed) {
                 if let Err(error) = new_config.resolve_neighbor(neighbor) {
                     return clean_reload_failure("neighbors.preflight", error.to_string());
-                }
-            }
-            // The sequential route applies group edits through the
-            // `SetPeerGroup` definition, which keeps the running group's
-            // config-file-only fields. Changing one of those here would be
-            // silently skipped, so it must go through the generation route.
-            for name in peer_group_diff.added.iter().chain(&peer_group_diff.changed) {
-                let Some(new) = new_config.peer_groups.get(name) else {
-                    continue;
-                };
-                let definition = policy_admin::config_peer_group_to_api(new);
-                let mut old = current.peer_groups.get(name).cloned().unwrap_or_default();
-                // Outbound limits are applied by their own RIB step below.
-                old.max_prefixes_out_ipv4 = new.max_prefixes_out_ipv4;
-                old.max_prefixes_out_ipv6 = new.max_prefixes_out_ipv6;
-                if policy_admin::apply_peer_group_definition(Some(&old), definition.clone())
-                    != policy_admin::apply_peer_group_definition(Some(new), definition)
-                {
-                    return clean_reload_failure(
-                        "peer_groups.preflight",
-                        format!(
-                            "peer group {name:?} changes a field the sequential reload route \
-                             cannot apply ({}); reload the peer-group change on its own",
-                            reasons.join("; ")
-                        ),
-                    );
                 }
             }
             for name in &peer_group_diff.changed {
@@ -8103,10 +8078,11 @@ import_policy_chain = ["origin-guard"]
         let SighupReloadOutcome::CleanNoEffect(SighupReloadError::Failed(failure)) = outcome else {
             panic!("unexpressed group field change must reject before effects: {outcome:?}");
         };
-        assert_eq!(failure.bucket, "peer_groups.preflight");
+        assert_eq!(failure.bucket, "reload.preflight");
+        let error = failure.error.to_string();
         assert!(
-            failure.error.to_string().contains("\"edge\""),
-            "{failure:?}"
+            error.contains("peer group \"edge\" strict_role changed together with"),
+            "{error}"
         );
         assert!(tags.is_empty(), "no peer/auth mutation: {tags:?}");
         assert!(calls.is_empty());

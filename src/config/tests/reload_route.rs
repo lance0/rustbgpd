@@ -567,3 +567,48 @@ fn forwarding_state_does_not_turn_policy_impact_into_session_reshape() {
         0
     );
 }
+
+/// A sequential-route candidate that also changes a config-file-only
+/// peer-group field is rejected by `--diff` exactly as the reload rejects
+/// it, naming the group and field. The same field change alone stays on the
+/// generation route, and an API-owned group field keeps the sequential route.
+#[test]
+fn diff_rejects_sequential_candidate_with_file_only_group_change() {
+    let prior = rs(RS_TOML);
+    let md5 = RS_TOML.replace(
+        "hold_time = 180",
+        "hold_time = 180\nmd5_password = \"secret\"",
+    );
+    let orf = |toml: &str| {
+        toml.replace(
+            "max_prefixes = 1000",
+            "max_prefixes = 1000\nprefix_orf_receive = true",
+        )
+    };
+
+    let diff = diff_config(&prior, &rs(&orf(&md5)));
+    let SighupReloadRoute::Rejected { reasons } = &diff.sighup_route else {
+        panic!("{:?}", diff.sighup_route);
+    };
+    assert_eq!(
+        reasons,
+        &[
+            "peer group \"members\" prefix_orf_receive changed together with listener inbound MD5/GTSM inventory"
+                .to_string()
+        ]
+    );
+    assert!(
+        format_config_diff(&diff).contains("SIGHUP reload route: rejected"),
+        "{}",
+        format_config_diff(&diff)
+    );
+
+    let alone = diff_config(&prior, &rs(&orf(RS_TOML)));
+    assert_eq!(alone.sighup_route, SighupReloadRoute::Generation);
+
+    let api_owned = rs(&md5.replace("hold_time = 90", "hold_time = 60"));
+    assert!(matches!(
+        diff_config(&prior, &api_owned).sighup_route,
+        SighupReloadRoute::Sequential { .. }
+    ));
+}

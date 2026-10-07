@@ -9,7 +9,4 @@
   `rs_control_communities`, `send_non_transitive_extended_communities` and
   `log_level` on the group and reshaped its members without them; a gRPC
   edit also persisted the loss to the configuration file. These fields now
-  keep their configured values; a sequential reload that changes one of them
-  is rejected before any effect.
-  **Operator-visible:** reload such a change on its own, without the TCP-AO
-  or listener MD5/GTSM change that selects the sequential route.
+  keep their configured values.
