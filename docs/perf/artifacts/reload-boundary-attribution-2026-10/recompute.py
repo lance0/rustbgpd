@@ -61,7 +61,8 @@ def extract_native(root, destination):
         require(len(members) == len(manifest) and {m.name for m in members} == set(manifest),
                 'native archive coverage differs from manifest')
         for member in members:
-            require(member.isfile() and not Path(member.name).is_absolute() and
+            require(member.isfile() and member.name == Path(member.name).as_posix() and
+                    not Path(member.name).is_absolute() and
                     '..' not in Path(member.name).parts, 'unsafe native archive entry')
             data = archive.extractfile(member).read()
             require(hashlib.sha256(data).hexdigest() == manifest[member.name]['public_sha256'],

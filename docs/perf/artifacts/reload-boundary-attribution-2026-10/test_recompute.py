@@ -90,6 +90,25 @@ class BundleTests(unittest.TestCase):
                     r.extract_native(root, root/'output')
                 self.assertFalse((root/'output').exists())
 
+    def test_aliasing_native_members_rejected(self):
+        import hashlib
+        import io
+        import tarfile
+        entries = [('x/y', b'first'), ('x//y', b'second')]
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            with tarfile.open(root/'native-records.tar.gz', 'w:gz') as archive:
+                for name, data in entries:
+                    member = tarfile.TarInfo(name)
+                    member.size = len(data)
+                    archive.addfile(member, io.BytesIO(data))
+            manifest = {'files': {name: {'public_sha256': hashlib.sha256(data).hexdigest()}
+                                  for name, data in entries}}
+            (root/'native-extraction.json').write_text(json.dumps(manifest))
+            with self.assertRaisesRegex(ValueError, 'unsafe native archive'):
+                r.extract_native(root, root/'output')
+            self.assertEqual((root/'output/x/y').read_bytes(), b'first')
+
     def test_missing_native_member_rejected(self):
         import shutil
         with tempfile.TemporaryDirectory() as tmp, tempfile.TemporaryDirectory() as out:

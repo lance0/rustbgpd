@@ -20,8 +20,8 @@ PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -p 'test_*.py' -v
 
 The reader verifies the public manifest, reads only declared regular members of
 `native-records.tar.gz` into a temporary directory, and checks each member's
-normalized hash. It rejects symbolic links, absolute paths, parent traversal,
-missing/extra entries and duplicates. It then rechecks native metadata, all
+normalized hash. It rejects symbolic links, absolute paths, parent traversal, noncanonical
+names, missing/extra entries and duplicates. It then rechecks native metadata, all
 outcomes and tied maximum-gap spans, exact publication/writer/frame joins,
 clock bounds, both overhead estimators and separated phase diagnostics. The
 recomputed result must exactly match `results.json`, after JSON key
