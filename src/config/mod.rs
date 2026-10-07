@@ -1743,6 +1743,7 @@ fn config_field_impact(field: &str) -> Option<(ConfigFieldImpact, &'static str)>
         | "strict_role"
         | "prefix_orf_receive"
         | "disable_ipv4_unicast"
+        | "link_local_next_hop"
         | "add_path" => (
             ConfigFieldImpact::SessionReset,
             "session reset: OPEN renegotiation",
@@ -1927,6 +1928,7 @@ pub fn describe_neighbor_changes(old: &Neighbor, new: &Neighbor) -> Vec<FieldCha
     cmp_field!(strict_role);
     cmp_field!(prefix_orf_receive);
     cmp_field!(disable_ipv4_unicast);
+    cmp_field!(link_local_next_hop);
     cmp_field!(remove_private_as);
     cmp_field!(discard_path_attributes);
     cmp_field!(add_path);
@@ -2067,6 +2069,7 @@ fn neighbor_runtime_equal(old: &Neighbor, new: &Neighbor) -> bool {
         && old.strict_role == new.strict_role
         && old.prefix_orf_receive == new.prefix_orf_receive
         && old.disable_ipv4_unicast == new.disable_ipv4_unicast
+        && old.link_local_next_hop == new.link_local_next_hop
         && old.remove_private_as == new.remove_private_as
         && old.discard_path_attributes == new.discard_path_attributes
         && old.add_path == new.add_path
@@ -3044,6 +3047,12 @@ impl Config {
                 neighbor
                     .disable_ipv4_unicast
                     .or_else(|| group.and_then(|g| g.disable_ipv4_unicast))
+                    .unwrap_or(false),
+            );
+            neighbor.link_local_next_hop = Some(
+                neighbor
+                    .link_local_next_hop
+                    .or_else(|| group.and_then(|g| g.link_local_next_hop))
                     .unwrap_or(false),
             );
             if neighbor.required_families.is_empty()
@@ -6003,6 +6012,7 @@ pub fn describe_peer_group_changes(
     cmp_field!(strict_role);
     cmp_field!(prefix_orf_receive);
     cmp_field!(disable_ipv4_unicast);
+    cmp_field!(link_local_next_hop);
     cmp_field!(remove_private_as);
     cmp_field!(discard_path_attributes);
     cmp_field!(add_path);
@@ -6054,6 +6064,7 @@ pub fn copy_peer_group_file_only_fields(target: &mut PeerGroupConfig, source: &P
         strict_role,
         prefix_orf_receive,
         disable_ipv4_unicast,
+        link_local_next_hop,
         log_level,
         // Carried by the API definition.
         hold_time: _,
@@ -6105,6 +6116,7 @@ pub fn copy_peer_group_file_only_fields(target: &mut PeerGroupConfig, source: &P
     target.strict_role = strict_role;
     target.prefix_orf_receive = prefix_orf_receive;
     target.disable_ipv4_unicast = disable_ipv4_unicast;
+    target.link_local_next_hop = link_local_next_hop;
     target.log_level = log_level;
 }
 
@@ -6534,17 +6546,19 @@ fn parse_ethernet_segment(
             });
         }
     };
-    let default_preference = 32_768;
+    // Default-modulo and HRW never advertise or use preference. The former
+    // default 32768 stays accepted for them so configs that spelled it out
+    // still load; it changes nothing on the wire or in the election.
     if !matches!(
         df_algorithm,
         DfAlgorithm::HighestPreference | DfAlgorithm::LowestPreference
-    ) && cfg.df_preference != default_preference
+    ) && !matches!(cfg.df_preference, DEFAULT_DF_PREFERENCE | 32_768)
     {
         return Err(ConfigError::InvalidEthernetSegment {
             reason: format!(
                 "df_preference {}: only RFC 9785 highest-/lowest-preference DF election \
-                 uses preference; default-modulo and highest-random-weight require \
-                 the default {default_preference}",
+                 uses preference; default-modulo and highest-random-weight accept \
+                 only the default {DEFAULT_DF_PREFERENCE} or the former default 32768",
                 cfg.df_preference
             ),
         });

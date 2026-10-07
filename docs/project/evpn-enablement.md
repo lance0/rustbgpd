@@ -562,7 +562,7 @@ Blockers cleared.
 Ships:
 
 - `[[ethernet_segments]]` config block with ESI, non-empty member
-  VNI list, `df_preference = 32768`,
+  VNI list, `df_preference` (default 32767),
   `df_algorithm = "default-modulo"`, `"highest-random-weight"`,
   `"highest-preference"`, or `"lowest-preference"`,
   `redundancy_mode = "all-active"` or `"single-active"`, and

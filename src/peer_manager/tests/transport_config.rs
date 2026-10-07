@@ -303,6 +303,7 @@ fn build_transport_config_reflects_every_transport_field() {
         strict_role: true,
         prefix_orf_receive: true,
         disable_ipv4_unicast: true,
+        link_local_next_hop: true,
         import_policy: None,
         export_policy: None,
     };
@@ -358,6 +359,7 @@ fn build_transport_config_reflects_every_transport_field() {
         strict_role,
         prefix_orf_receive,
         disable_ipv4_unicast,
+        link_local_next_hop,
         import_policy: _import_policy, // NON-TRANSPORT: RIB-side policy chain.
         export_policy: _export_policy, // NON-TRANSPORT: RIB-side policy chain.
         min_hold_time,
@@ -501,6 +503,10 @@ fn build_transport_config_reflects_every_transport_field() {
     assert_eq!(
         t.peer.disable_ipv4_unicast, *disable_ipv4_unicast,
         "disable_ipv4_unicast"
+    );
+    assert_eq!(
+        t.peer.link_local_next_hop, *link_local_next_hop,
+        "link_local_next_hop"
     );
 }
 

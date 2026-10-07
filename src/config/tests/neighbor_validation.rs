@@ -1401,3 +1401,70 @@ fn per_neighbor_inline_policy_still_loads() {
     .unwrap();
     assert_ne!(config.neighbors[0].import_policy.len(), 0);
 }
+
+fn link_local_next_hop_toml(neighbor: &str, group: &str) -> String {
+    format!(
+        r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+
+[global.telemetry]
+prometheus_addr = "0.0.0.0:9179"
+log_format = "json"
+
+[peer_groups.fabric]
+{group}
+
+[[neighbors]]
+remote_asn = 65002
+peer_group = "fabric"
+{neighbor}
+"#
+    )
+}
+
+#[test]
+fn link_local_next_hop_is_opt_in_for_interface_bound_neighbors() {
+    let scoped = "address = \"fe80::2\"\ninterface = \"lo\"";
+    for (neighbor_field, group_field, expected) in [
+        ("", "", false),
+        ("link_local_next_hop = true", "", true),
+        ("", "link_local_next_hop = true", true),
+        (
+            "link_local_next_hop = false",
+            "link_local_next_hop = true",
+            false,
+        ),
+    ] {
+        let config = parse(&link_local_next_hop_toml(
+            &format!("{scoped}\n{neighbor_field}"),
+            group_field,
+        ))
+        .unwrap();
+        let peers = config.to_peer_configs().unwrap();
+        assert_eq!(
+            peers[0].0.peer.link_local_next_hop, expected,
+            "neighbor={neighbor_field:?} group={group_field:?}"
+        );
+    }
+}
+
+#[test]
+fn link_local_next_hop_rejects_neighbors_without_interface_scope() {
+    for (neighbor, group_field) in [
+        ("address = \"10.0.0.2\"\nlink_local_next_hop = true", ""),
+        ("address = \"2001:db8::2\"\nlink_local_next_hop = true", ""),
+        ("address = \"10.0.0.2\"", "link_local_next_hop = true"),
+    ] {
+        let err = parse(&link_local_next_hop_toml(neighbor, group_field)).unwrap_err();
+        match err {
+            ConfigError::InvalidNeighborConfig { field, reason, .. } => {
+                assert_eq!(field, "link_local_next_hop");
+                assert!(reason.contains("interface-bound"), "{reason}");
+            }
+            other => panic!("expected InvalidNeighborConfig, got {other}"),
+        }
+    }
+}

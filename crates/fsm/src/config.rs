@@ -97,6 +97,9 @@ pub struct PeerConfig {
     pub required_families: Vec<(Afi, Safi)>,
     /// Enable Graceful Restart capability (RFC 4724).
     pub graceful_restart: bool,
+    /// Advertise capability 77. The embedding transport must provide a directly
+    /// attached IPv6 peer and interface scope for link-local next hops.
+    pub link_local_next_hop: bool,
     /// Restart time advertised in GR capability (seconds, max 4095).
     pub gr_restart_time: u16,
     /// Long-lived stale routes time (RFC 9494, seconds). 0 = disabled.
@@ -142,6 +145,7 @@ impl Default for PeerConfig {
             families: Vec::new(),
             required_families: Vec::new(),
             graceful_restart: false,
+            link_local_next_hop: false,
             gr_restart_time: 0,
             llgr_stale_time: 0,
             add_path_receive: false,
@@ -244,6 +248,9 @@ impl PeerConfig {
         caps.push(Capability::RouteRefresh);
         caps.push(Capability::EnhancedRouteRefresh);
         caps.push(Capability::ExtendedMessage);
+        if self.link_local_next_hop {
+            caps.push(Capability::LinkLocalNextHop);
+        }
         let extended_nexthop_caps = self.extended_nexthop_capabilities();
         if !extended_nexthop_caps.is_empty() {
             caps.push(Capability::ExtendedNextHop(extended_nexthop_caps));
@@ -409,6 +416,7 @@ pub(crate) mod test_support {
             families: vec![(Afi::Ipv4, Safi::Unicast)],
             required_families: Vec::new(),
             graceful_restart: false,
+            link_local_next_hop: false,
             gr_restart_time: 120,
             llgr_stale_time: 0,
             add_path_receive: false,

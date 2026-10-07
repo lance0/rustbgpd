@@ -4907,6 +4907,9 @@ async fn run<T>(
     let evpn_segment_runtime_control = evpn_segment_handle
         .as_ref()
         .map(evpn_segment::EvpnSegmentHandle::runtime_control);
+    let evpn_segment_df_status_rx = evpn_segment_handle
+        .as_ref()
+        .map(evpn_segment::EvpnSegmentHandle::df_status);
 
     // Latest snapshot of `DataplaneReport.ip_vrf_status` rows for the
     // gRPC `ListIpVrfs` / `GetIpVrf` surface (Gate 9 slice 5). Backed
@@ -5536,6 +5539,16 @@ async fn run<T>(
                     .collect()
             })
         },
+        evpn_es_df_status: Arc::new(move |esi| {
+            let status = *evpn_segment_df_status_rx.as_ref()?.borrow().get(&esi)?;
+            Some(rustbgpd_api::evpn_service::EthernetSegmentDfStatus {
+                advertised_df_preference: status.advertised.0,
+                advertised_df_dont_preempt: status.advertised.1,
+                recovery_remaining: status.recovery_deadline.map(|deadline| {
+                    deadline.saturating_duration_since(tokio::time::Instant::now())
+                }),
+            })
+        }),
         evpn_runtime_model: {
             let coordinator = evpn_runtime_coordinator.clone();
             Arc::new(move || match coordinator.lock() {
@@ -5798,6 +5811,7 @@ async fn run<T>(
             strict_role: transport_config.peer.strict_role,
             prefix_orf_receive: transport_config.peer.prefix_orf_receive,
             disable_ipv4_unicast: transport_config.peer.disable_ipv4_unicast,
+            link_local_next_hop: transport_config.peer.link_local_next_hop,
             import_policy,
             export_policy,
         };
@@ -9933,6 +9947,7 @@ peer_group = "plain"
                     strict_role: None,
                     prefix_orf_receive: None,
                     disable_ipv4_unicast: None,
+                    link_local_next_hop: None,
                     remove_private_as: None,
                     discard_path_attributes: None,
                     add_path: None,
@@ -9990,6 +10005,7 @@ peer_group = "plain"
                     strict_role: None,
                     prefix_orf_receive: None,
                     disable_ipv4_unicast: None,
+                    link_local_next_hop: None,
                     remove_private_as: None,
                     discard_path_attributes: None,
                     add_path: None,
@@ -10047,6 +10063,7 @@ peer_group = "plain"
                     strict_role: None,
                     prefix_orf_receive: None,
                     disable_ipv4_unicast: None,
+                    link_local_next_hop: None,
                     remove_private_as: None,
                     discard_path_attributes: None,
                     add_path: None,

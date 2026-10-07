@@ -152,7 +152,7 @@ originator_ip = "10.0.0.100"
     assert_eq!(segments.len(), 1);
     assert_eq!(segments[0].member_vnis.len(), 1);
     assert_eq!(segments[0].df_algorithm, DfAlgorithm::DefaultModulo);
-    assert_eq!(segments[0].df_preference, 32_768);
+    assert_eq!(segments[0].df_preference, 32_767, "RFC 9785 §3 default");
     assert_eq!(segments[0].redundancy_mode, RedundancyMode::AllActive);
 }
 
@@ -644,6 +644,27 @@ originator_ip = "10.0.0.100"
 }
 
 #[test]
+fn ethernet_segment_accepts_former_default_df_preference_for_modulo() {
+    let toml = evpn_toml_with(
+        r#"
+[[evpn_instances]]
+vni = 100
+rd = "65000:100"
+route_targets = ["65000:100"]
+local_vtep_ip = "10.0.0.100"
+
+[[ethernet_segments]]
+esi = "00:00:00:00:00:00:00:00:00:01"
+member_vnis = [100]
+df_preference = 32768
+originator_ip = "10.0.0.100"
+"#,
+    );
+    let segments = parse(&toml).unwrap().resolve_ethernet_segments().unwrap();
+    assert_eq!(segments[0].df_preference, 32_768);
+}
+
+#[test]
 fn ethernet_segment_rejects_non_default_df_preference() {
     let toml = evpn_toml_with(
         r#"
@@ -667,7 +688,7 @@ originator_ip = "10.0.0.100"
         "expected InvalidEthernetSegment, got {msg}"
     );
     assert!(
-        msg.contains("32768"),
+        msg.contains("32767") && msg.contains("32768"),
         "msg must name supported preference: {msg}"
     );
 }

@@ -5,6 +5,7 @@
 #   * no IPv4 addresses on the fabric links;
 #   * rustbgpd peers with two FRR interface neighbors over fe80::/10 only;
 #   * IPv4 routes are exchanged using RFC 8950 Extended Next Hop;
+#   * FRR1 negotiates capability 77 while FRR2 retains the legacy next-hop form;
 #   * link-local next-hops carry their output interface scope into the FIB;
 #   * Linux installs two-way ECMP via `fe80::2 dev eth1` + `fe80::3 dev eth2`;
 #   * withdrawing one FRR path collapses forwarding to the surviving dev and

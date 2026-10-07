@@ -755,6 +755,7 @@ impl PeerSession {
                         hold_time = neg.hold_time,
                         keepalive_interval = neg.keepalive_interval,
                         four_octet_as = neg.four_octet_as,
+                        link_local_next_hop = neg.link_local_next_hop,
                         "session established"
                     );
                     self.add_path_receive_families = neg
@@ -788,9 +789,11 @@ impl PeerSession {
                                 IpAddr::V4(_) => None,
                             });
                         let local_or_configured_v6 = self.config.local_ipv6_nexthop.or(local_ipv6);
-                        let has_v6_nh = local_or_configured_v6
-                            .as_ref()
-                            .is_some_and(rustbgpd_wire::is_valid_ipv6_nexthop);
+                        let has_v6_nh = super::SessionExportProfile::usable_ipv6_unicast_next_hop(
+                            local_or_configured_v6,
+                            neg.link_local_next_hop && self.is_scoped_link_local_peer(),
+                        )
+                        .is_some();
                         neg.negotiated_families
                             .iter()
                             .filter(|f| {

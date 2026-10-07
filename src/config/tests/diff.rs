@@ -219,6 +219,32 @@ fn diff_neighbors_detects_disable_ipv4_unicast_only_change() {
 }
 
 #[test]
+fn link_local_next_hop_toggle_resets_session_for_open_renegotiation() {
+    // Capability 77 is advertised in OPEN, so a toggle must rebuild the session.
+    let old = test_neighbor("10.0.0.1", 65001);
+    let mut new = old.clone();
+    new.link_local_next_hop = Some(true);
+    let diff = super::diff_neighbors(std::slice::from_ref(&old), std::slice::from_ref(&new));
+    assert_eq!(diff.changed.len(), 1);
+    let changes = super::describe_neighbor_changes(&old, &new);
+    assert_eq!(changes.len(), 1);
+    assert_eq!(changes[0].field, "link_local_next_hop");
+    assert_eq!(
+        changes[0].impact,
+        Some(super::ConfigFieldImpact::SessionReset)
+    );
+
+    let old_group = PeerGroupConfig::default();
+    let new_group = PeerGroupConfig {
+        link_local_next_hop: Some(true),
+        ..PeerGroupConfig::default()
+    };
+    let changes = super::describe_peer_group_changes(&old_group, &new_group);
+    assert_eq!(changes.len(), 1);
+    assert_eq!(changes[0].field, "link_local_next_hop");
+}
+
+#[test]
 fn diff_config_flags_tcp_ao_changes_as_restart_required() {
     let mut old = parse(valid_toml()).unwrap();
     old.neighbors[0].tcp_ao = Some(
@@ -1064,6 +1090,7 @@ fn tcp_ao_pinning_keeps_new_unprotected_neighbor_peer_group_valid() {
             strict_role: None,
             prefix_orf_receive: None,
             disable_ipv4_unicast: None,
+            link_local_next_hop: None,
             remove_private_as: None,
             discard_path_attributes: None,
             add_path: None,
@@ -1132,6 +1159,7 @@ fn tcp_ao_pinning_keeps_new_unprotected_neighbor_peer_group_valid() {
         strict_role: None,
         prefix_orf_receive: None,
         disable_ipv4_unicast: None,
+        link_local_next_hop: None,
         remove_private_as: None,
         discard_path_attributes: None,
         add_path: None,
@@ -1189,6 +1217,7 @@ fn tcp_ao_pinning_keeps_new_unprotected_neighbor_peer_group_valid() {
         strict_role: None,
         prefix_orf_receive: None,
         disable_ipv4_unicast: None,
+        link_local_next_hop: None,
         remove_private_as: None,
         discard_path_attributes: None,
         add_path: None,
@@ -1275,6 +1304,7 @@ fn diff_config_does_not_mark_tcp_ao_neighbor_add_as_reload_applied() {
         strict_role: None,
         prefix_orf_receive: None,
         disable_ipv4_unicast: None,
+        link_local_next_hop: None,
         remove_private_as: None,
         discard_path_attributes: None,
         add_path: None,

@@ -2095,6 +2095,9 @@ pub struct PeerManagerNeighborConfig {
     /// peering): excluded from our `MultiProtocol` capability and the
     /// RFC 4760 §8 implicit-IPv4 fallback is suppressed.
     pub disable_ipv4_unicast: bool,
+    /// Advertise Link-Local Next Hop capability 77. Transport ignores it
+    /// unless the peer is an interface-bound IPv6 link-local neighbor.
+    pub link_local_next_hop: bool,
     /// Import policy chain applied to inbound routes.
     pub import_policy: Option<PolicyChain>,
     /// Export policy chain applied to outbound routes.

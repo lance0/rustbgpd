@@ -548,6 +548,7 @@ fn raw_neighbor(raw: &PresenceAwareNeighborCreate) -> Result<Neighbor, ConfigErr
         strict_role: raw.strict_role,
         prefix_orf_receive: None,
         disable_ipv4_unicast: None,
+        link_local_next_hop: None,
         remove_private_as: raw.remove_private_as.clone(),
         discard_path_attributes: raw
             .discard_path_attributes
@@ -655,6 +656,7 @@ pub fn apply_config_event(config: &mut Config, event: &ConfigEvent) -> Result<()
                     strict_role: Some(cfg.strict_role),
                     prefix_orf_receive: Some(cfg.prefix_orf_receive),
                     disable_ipv4_unicast: Some(cfg.disable_ipv4_unicast),
+                    link_local_next_hop: Some(cfg.link_local_next_hop),
                     remove_private_as: match cfg.remove_private_as {
                         rustbgpd_transport::RemovePrivateAs::Disabled => None,
                         rustbgpd_transport::RemovePrivateAs::Remove => Some("remove".to_string()),
@@ -1228,6 +1230,7 @@ peer_group = "fabric"
             strict_role: false,
             prefix_orf_receive: false,
             disable_ipv4_unicast: false,
+            link_local_next_hop: false,
             import_policy: None,
             export_policy: None,
         }
@@ -1384,6 +1387,7 @@ peer_group = "fabric"
                 strict_role: Some(true),
                 prefix_orf_receive: Some(true),
                 disable_ipv4_unicast: Some(true),
+                link_local_next_hop: Some(true),
                 log_level: Some("debug".into()),
                 // API-owned fields. No `..Default::default()`: a new
                 // field must be added here before this test compiles.

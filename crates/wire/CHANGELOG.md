@@ -5,6 +5,15 @@ and workspace changes remain in the repository-level `CHANGELOG.md`.
 
 ## Unreleased
 
+- Add capability 77 encode/decode and context-dependent link-local unicast
+  validation for draft-ietf-idr-linklocal-capability-06. `UpdateValidationOptions`
+  gains `link_local_next_hop`; embedders must provide scope and negotiation
+  context before enabling it. Nonempty capability values remain unknown.
+- **Breaking:** `UpdateValidationOptions` is now `#[non_exhaustive]`, so later
+  validation knobs can be added without another break. Construct it with
+  `UpdateValidationOptions::default()` and assign fields; struct literals,
+  including `..Default::default()` updates, no longer compile outside the crate.
+
 - `RtcNlri::matches` now compares only the route-target prefix bits after the
   membership's origin AS, per RFC 4684 §4 and §6: the origin AS identifies
   the membership source, not the RT's global administrator. A /32 membership

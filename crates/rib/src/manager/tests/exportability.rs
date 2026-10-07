@@ -15,6 +15,7 @@ use crate::update::{
 struct MockExportConfig {
     generation: u64,
     rejected: HashSet<ExactExportKey>,
+    required_scope: Option<crate::route::NextHopScope>,
 }
 
 pub(super) struct MockExactExportEncoder {
@@ -29,6 +30,7 @@ impl MockExactExportEncoder {
             config: RwLock::new(MockExportConfig {
                 generation,
                 rejected: HashSet::new(),
+                required_scope: None,
             }),
             probed: Arc::new(Mutex::new(Vec::new())),
             probe_batches: Arc::new(AtomicUsize::new(0)),
@@ -43,6 +45,7 @@ impl MockExactExportEncoder {
         *self.config.write().unwrap() = MockExportConfig {
             generation,
             rejected: rejected.into_iter().collect(),
+            required_scope: None,
         };
     }
 
@@ -76,6 +79,15 @@ impl ExactExportSnapshot for MockExactExportSnapshot {
     ) -> Result<ExactExportResult, ExactExportError> {
         let key = candidate.key();
         self.probed.lock().unwrap().push(key.clone());
+        if let Some(scope) = &self.config.required_scope
+            && let ExactExportCandidate::Unicast { route, .. } = candidate
+            && route.next_hop_scope.as_deref() != Some(scope)
+        {
+            return Err(ExactExportError::new(
+                ExactExportErrorCode::MissingIpv6NextHop,
+                "fixture link-local next hop is outside the destination interface scope",
+            ));
+        }
         if self.config.rejected.contains(&key) {
             return Err(ExactExportError::new(
                 ExactExportErrorCode::MessageTooLong,
@@ -1417,6 +1429,71 @@ async fn grouped_shared_unicast_falls_back_on_wrong_reuse_cardinality() {
         "wrong reuse cardinality must fall back to each target's exact batch probe"
     );
 
+    drop(tx);
+    handle.await.unwrap();
+}
+
+#[tokio::test]
+async fn grouped_link_local_scope_change_withdraws_and_restores_with_fixed_profile() {
+    let (tx, rx) = mpsc::channel(32);
+    let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let handle = tokio::spawn(manager.run());
+    let target = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 10));
+    let source = Ipv4Addr::new(198, 51, 100, 10);
+    let prefix = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24);
+    let encoder = MockExactExportEncoder::accepting(1);
+    encoder.config.write().unwrap().required_scope = Some(crate::route::NextHopScope {
+        interface: Arc::from("eth1"),
+        ifindex: 7,
+    });
+    let mut out_rx = peer_up_with_encoder(&tx, target, encoder.clone()).await;
+    let mut route = make_route(prefix, source);
+    route.next_hop = "fe80::1".parse().unwrap();
+    // Only the source scope changes: no profile replacement or route refresh
+    // may be needed to withdraw and restore the same peer/key/next-hop.
+    for (step, ifindex) in [7, 8, 7, 7].into_iter().enumerate() {
+        route.next_hop_scope = Some(Box::new(crate::route::NextHopScope {
+            interface: Arc::from("eth1"),
+            ifindex,
+        }));
+        tx.send(RibUpdate::RoutesReceived {
+            session_id: 0,
+            peer: IpAddr::V4(source),
+            announced: vec![route.clone()],
+            withdrawn: Vec::new(),
+            flowspec_announced: Vec::new(),
+            flowspec_withdrawn: Vec::new(),
+            evpn_announced: Vec::new(),
+            evpn_withdrawn: Vec::new(),
+            validated_with: None,
+        })
+        .await
+        .unwrap();
+        let best = query_best_routes(&tx).await;
+        assert_eq!(best.len(), 1);
+        assert_eq!(best[0].next_hop_scope, route.next_hop_scope);
+        if step == 3 {
+            assert!(matches!(
+                out_rx.try_recv(),
+                Err(mpsc::error::TryRecvError::Empty)
+            ));
+            continue;
+        }
+        let update = out_rx
+            .try_recv()
+            .expect("scope change reaches outbound state");
+        if ifindex == 7 {
+            assert_eq!(update.announce.len(), 1);
+            assert_eq!(update.announce[0].next_hop_scope, route.next_hop_scope);
+            assert_eq!(update.withdraw.len(), 0);
+            assert_eq!(advertised_count(&tx, target).await, 1);
+        } else {
+            assert!(update.announce.is_empty());
+            assert_eq!(update.withdraw, vec![(route.prefix, route.path_id)]);
+            assert_eq!(advertised_count(&tx, target).await, 0);
+        }
+        assert_eq!(encoder.snapshot().generation(), 1);
+    }
     drop(tx);
     handle.await.unwrap();
 }

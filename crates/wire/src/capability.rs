@@ -284,6 +284,8 @@ pub enum Capability {
     EnhancedRouteRefresh,
     /// RFC 8654: Extended Messages (raise max message length to 65535).
     ExtendedMessage,
+    /// Link-Local Next Hop (draft-ietf-idr-linklocal-capability-06).
+    LinkLocalNextHop,
     /// RFC 9494: Long-Lived Graceful Restart.
     LongLivedGracefulRestart(Vec<LlgrFamily>),
     /// RFC 7911: Add-Path — advertise/receive multiple paths per prefix.
@@ -422,6 +424,13 @@ impl Capability {
                         data: raw_data,
                     })
                 }
+            }
+            capability_code::LINK_LOCAL_NEXT_HOP => {
+                if length != 0 {
+                    let data = buf.copy_to_bytes(usize::from(length));
+                    return Ok(Capability::Unknown { code, data });
+                }
+                Ok(Capability::LinkLocalNextHop)
             }
             capability_code::EXTENDED_MESSAGE => {
                 if length != 0 {
@@ -680,6 +689,10 @@ impl Capability {
                     buf.put_u16(fam.next_hop_afi as u16);
                 }
             }
+            Capability::LinkLocalNextHop => {
+                buf.put_u8(capability_code::LINK_LOCAL_NEXT_HOP);
+                buf.put_u8(0);
+            }
             Capability::ExtendedMessage => {
                 buf.put_u8(capability_code::EXTENDED_MESSAGE);
                 buf.put_u8(0); // zero-length value
@@ -854,6 +867,7 @@ impl Capability {
             Self::EnhancedRouteRefresh => capability_code::ENHANCED_ROUTE_REFRESH,
             Self::ExtendedNextHop(_) => capability_code::EXTENDED_NEXT_HOP,
             Self::ExtendedMessage => capability_code::EXTENDED_MESSAGE,
+            Self::LinkLocalNextHop => capability_code::LINK_LOCAL_NEXT_HOP,
             Self::LongLivedGracefulRestart(_) => capability_code::LONG_LIVED_GRACEFUL_RESTART,
             Self::AddPath(_) => capability_code::ADD_PATH,
             Self::PathsLimit(_) => capability_code::PATHS_LIMIT,
@@ -870,7 +884,10 @@ impl Capability {
     pub fn encoded_len(&self) -> usize {
         2 + match self {
             Self::MultiProtocol { .. } | Self::FourOctetAs { .. } => 4,
-            Self::RouteRefresh | Self::EnhancedRouteRefresh | Self::ExtendedMessage => 0,
+            Self::RouteRefresh
+            | Self::EnhancedRouteRefresh
+            | Self::ExtendedMessage
+            | Self::LinkLocalNextHop => 0,
             Self::Role { .. } => 1,
             Self::ExtendedNextHop(families) => families.len() * 6,
             Self::LongLivedGracefulRestart(families) => families.len() * 7,
@@ -1467,6 +1484,27 @@ mod tests {
         // length so the outer parser sees both parameters.
         let result = decode_optional_parameters(&mut buf, 8);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn link_local_next_hop_roundtrip_and_invalid_lengths() {
+        let cap = Capability::LinkLocalNextHop;
+        let mut encoded = bytes::BytesMut::new();
+        cap.encode(&mut encoded).unwrap();
+        assert_eq!(&encoded[..], &[77, 0]);
+        assert_eq!(cap.code(), 77);
+        assert_eq!(cap.encoded_len(), 2);
+        assert_eq!(Capability::decode(&mut encoded.freeze()).unwrap(), cap);
+        // Invalid known capabilities are ignored/preserved under RFC 5492.
+        for length in [1u8, 2, 255] {
+            let mut raw = vec![77, length];
+            raw.resize(usize::from(length) + 2, 0xff);
+            assert!(matches!(
+                Capability::decode(&mut Bytes::from(raw)).unwrap(),
+                Capability::Unknown { code: 77, .. }
+            ));
+        }
+        assert!(Capability::decode(&mut Bytes::from_static(&[77, 1])).is_err());
     }
 
     #[test]

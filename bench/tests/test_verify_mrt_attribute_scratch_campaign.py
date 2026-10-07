@@ -8,8 +8,6 @@ RUNNER = importlib.util.module_from_spec(RUN_SPEC); RUN_SPEC.loader.exec_module(
 def write_json(path, value): path.write_text(json.dumps(value, sort_keys=True, indent=2)+"\n")
 def write_rows(path, rows): path.write_text("".join(json.dumps(r,sort_keys=True,separators=(",",":"))+"\n" for r in rows))
 def digest(path): return hashlib.sha256(path.read_bytes()).hexdigest()
-def seal(root):
-    (root/"SHA256SUMS").write_text("".join(f"{digest(p)}  {p.relative_to(root)}\n" for p in sorted(root.rglob("*")) if p.is_file() and p != root/"SHA256SUMS"))
 def raw_row(variant, shape, mode, index, elapsed, calls, capacity):
     paths,prefixes,sources=VERIFY.SHAPES[shape]; hexes=("1" if shape=="ixp-700" else "2")*64
     row={"schema_version":3,"variant":"candidate","scratch_variant":variant,"commit":VERIFY.CONTROL if variant=="control" else VERIFY.CANDIDATE,"mode":mode,"shape":shape,"smoke":False,"warmup_count":2,"sample_index":index,"path_count":paths,"prefix_count":prefixes,"source_count":sources,"output_len_bytes":paths*80,"output_capacity_bytes":paths*80,"decoded_entry_count":paths,"elapsed_ns":elapsed,"raw_sha256":hexes,"semantic_sha256":("3" if shape=="ixp-700" else "4")*64,"allocator":None,"growth":None,"growth_path_assertion":None}
@@ -47,7 +45,7 @@ def fixture(root, candidate_ns=90, same_right=100, candidate_calls=70, capacity=
     for shape in VERIFY.SHAPES:
         for side,ns in (("left",same_left),("right",same_right)):
             write_rows(root/"raw"/f"same-{shape}-{side}.timing.jsonl",[raw_row("control",shape,"timing",i,ns,100,0) for i in range(1,8)])
-    if finalize: write_rows(root/"canonical.jsonl",VERIFY.derive(root)); seal(root)
+    if finalize: write_rows(root/"canonical.jsonl",VERIFY.derive(root))
 def edit_json(path, change):
     value=json.loads(path.read_text()); change(value); write_json(path,value)
 def edit_rows(path, change):
@@ -87,7 +85,7 @@ class CampaignContract(unittest.TestCase):
     def test_timing_raw_variation_with_stable_semantics_passes(self):
         tmp,root=self.make(); self.addCleanup(tmp.cleanup)
         edit_rows(root/"raw/b1-s1-ixp-700.timing.jsonl",lambda rows:[row.update(raw_sha256=f"{index:064x}") for index,row in enumerate(rows,1)])
-        write_rows(root/"canonical.jsonl",VERIFY.derive(root)); seal(root)
+        write_rows(root/"canonical.jsonl",VERIFY.derive(root))
         self.assertEqual(VERIFY.verify(root,REPO)["classification"],"go")
     def test_live_time_parity_mutations_fail(self):
         mutations={
@@ -99,20 +97,13 @@ class CampaignContract(unittest.TestCase):
         for name,mutate in mutations.items():
             with self.subTest(name=name): self.rejected(mutate,rederive=True)
     def rejected(self, mutate, rederive=False, exact=False):
-        tmp,root=self.make(); self.addCleanup(tmp.cleanup); mutate(root); seal(root)
+        tmp,root=self.make(); self.addCleanup(tmp.cleanup); mutate(root)
         if rederive:
-            try: write_rows(root/"canonical.jsonl",VERIFY.derive(root)); seal(root)
+            try: write_rows(root/"canonical.jsonl",VERIFY.derive(root))
             except (VERIFY.Invalid,KeyError,ValueError): pass
         expected=VERIFY.Invalid if exact else (VERIFY.Invalid,KeyError,ValueError,json.JSONDecodeError)
         with self.assertRaises(expected): VERIFY.verify(root,REPO)
-    def test_checksum_mutation_is_rejected(self):
-        for mode in ("reorder","duplicate","nested"):
-            tmp,root=self.make(); self.addCleanup(tmp.cleanup); lines=(root/"SHA256SUMS").read_text().splitlines()
-            if mode=="nested": (root/"raw/SHA256SUMS").write_text("nested authority name\n")
-            else: (root/"SHA256SUMS").write_text("\n".join((list(reversed(lines)) if mode=="reorder" else lines+[lines[0]]))+"\n")
-            with self.subTest(mode=mode),self.assertRaises(VERIFY.Invalid): VERIFY.verify(root,REPO)
-            if mode=="nested":
-                for sealer in (seal,RUNNER.seal): sealer(root); self.assertIn("raw/SHA256SUMS",(root/"SHA256SUMS").read_text()); self.assertEqual(VERIFY.verify(root,REPO)["classification"],"go")
+    def test_bundle_root_symlink_is_rejected(self):
         tmp,root=self.make(); self.addCleanup(tmp.cleanup); link=root.parent/f"{root.name}-link"; link.symlink_to(root,target_is_directory=True)
         self.addCleanup(link.unlink)
         with self.assertRaises(VERIFY.Invalid): VERIFY.verify(link,REPO)

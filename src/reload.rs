@@ -257,6 +257,7 @@ pub(crate) fn build_peer_mgr_config(
         strict_role: tc.peer.strict_role,
         prefix_orf_receive: tc.peer.prefix_orf_receive,
         disable_ipv4_unicast: tc.peer.disable_ipv4_unicast,
+        link_local_next_hop: tc.peer.link_local_next_hop,
         import_policy: import.cloned(),
         export_policy: export.cloned(),
     }
@@ -11365,6 +11366,7 @@ remote_asn = 65002
                     strict_role: false,
                     prefix_orf_receive: false,
                     disable_ipv4_unicast: false,
+                    link_local_next_hop: false,
                     import_policy: None,
                     export_policy: None,
                 },
@@ -11484,6 +11486,7 @@ remote_asn = 65002
                     strict_role: false,
                     prefix_orf_receive: false,
                     disable_ipv4_unicast: false,
+                    link_local_next_hop: false,
                     import_policy: None,
                     export_policy: None,
                 },

@@ -871,6 +871,46 @@ Interpretation decisions:
 ---
 
 
+## Link-Local Next Hop capability — draft-ietf-idr-linklocal-capability-06
+
+This is experimental support for the [June 2026 Internet-Draft](https://datatracker.ietf.org/doc/html/draft-ietf-idr-linklocal-capability-06),
+not an RFC or part of the unicast v1 compatibility contract. Capability 77
+has an empty value. Nonzero values remain unknown capabilities and cannot
+negotiate the extension; duplicate valid copies are idempotent.
+
+- The daemon advertises it only when `link_local_next_hop = true` is set on
+  an explicitly interface-bound IPv6 link-local neighbor (or its peer group);
+  the default is off. This matches FRR 10.4 and later, where
+  `neighbor X capability link-local` is also a per-neighbor opt-in that is off
+  by default. Both peers must advertise it. Each new OPEN computes the
+  negotiated state anew.
+- Negotiated IPv4 and IPv6 unicast use a 16-byte link-local-only next hop.
+  IPv4 additionally requires Extended Next Hop negotiation. Without capability
+  77 the existing scoped IPv4 32-byte legacy encoding remains; IPv6 retains
+  its global-next-hop requirement. Global-only and global-plus-link-local
+  next hops remain supported. VPN and labeled families are unchanged.
+- On negotiated sessions, a 32-byte link-local-plus-link-local or
+  unspecified-plus-link-local pair selects the second address, before import
+  policy, and carries the receiving interface scope into the RIB. Invalid
+  next hops use the existing RFC 7606 error handling.
+- An unchanged link-local primary next hop can be reflected only to a peer
+  with the same interface scope. Otherwise export preparation rejects it,
+  unless policy or normal eBGP behavior selects a known local next hop.
+  Optional link-local companions of global next hops are omitted on negotiated
+  sessions when their source interface cannot be established. Exact export
+  diagnostics expose the rejection under
+  `bgp_exact_export_rejections_total{reason="missing_ipv6_next_hop"}`;
+  withdrawals retain normal MP_UNREACH encoding and do not depend on a next
+  hop. This scope check applies to every session, including peers that did
+  not negotiate capability 77.
+
+Interface autodiscovery is not implemented. Operators using graceful restart
+should keep link-local addresses stable across restarts; this feature does
+not add a neighbor-discovery monitor or make stale next hops reachable.
+
+---
+
+
 ## RFC 4760 — Multiprotocol Extensions for BGP-4
 
 ### §3 — MP_REACH_NLRI (Type 14)
@@ -2186,7 +2226,7 @@ implemented service procedures.
 | [RFC 9252](https://www.rfc-editor.org/rfc/rfc9252.html) | Partial: service-aware reflection | Recognized malformed L3/L2 Service framing follows §7 treat-as-withdraw; see the [framing contract](path-attribute-registry.md#srv6-service-framing-within-prefix-sid). Structurally valid routes with no semantically valid applicable SID remain retained but are excluded from selection, Add-Path, ORR, and ECMP; see the [service eligibility contract](path-attribute-registry.md#srv6-service-eligibility). Unchanged-next-hop reflection preserves eligible raw attributes; [transport regressions](../../crates/transport/src/session/tests/outbound_attrs.rs) cover raw receive/export. PE import, service origination, next-hop rewriting, and SRv6 forwarding are not implemented; VPN and EVPN views may show an optional display-only [`reconstructed_sid`](api.md#prefix-sid-inspection-on-vpn-and-evpn-routes) from a single route's transposition, unused by selection. This is not full RFC 9252 service support. |
 | [RFC 9251](https://www.rfc-editor.org/rfc/rfc9251.html#section-9) | Partial: Type 6 SMET relay, alpha | Typed Type 6 receive/reflect/withdraw and inspection are implemented. The [M113 controlled raw-peer proof](../artifacts/interop/m113-smet-20261001T180815Z/README.md) checks reflected bytes and recovery with an independent TShark decoder; vendor interoperability is unproven. Types 7/8 remain unsupported typed NLRIs, counted and discarded under RFC 7606 §5.4. No SMET origination, IGMP/MLD proxy, or multicast forwarding; see the [SMET boundary](#type-6-smet-reflection). |
 | RFC 9746 (Mar 2025; updates RFC 7432, RFC 8365) | Not implemented | Split Horizon Type (SHT) bits in the ESI Label extended community. §2.2: an egress NVE MUST NOT use an SHT other than 00 with VXLAN (tunnel type 8), so local bias is the only multi-homing split-horizon mechanism for VXLAN. This is the normative backing for the Linux softswitch local-bias limitation in [docs/reference/limitations.md](limitations.md); the ESI Label decoder reads only the single-active flag. |
-| RFC 9785 (Jun 2025; updates RFC 8584) | Partial | Highest-/Lowest-Preference DF election is implemented (`df_algorithm`), under the same unanimous-or-default negotiation restated in §4.1. Don't-Preempt recovery (§4.3) derives operational preference/DP from remote Type 4 routes after a three-second wait; the §4.3(5) boot timer additionally holds any recovery started within 30 seconds of daemon start until an L2VPN/EVPN session is established and every established one has sent End-of-RIB, bounded by those 30 seconds. DP wins equal-preference ties. Mixed DP does not trigger algorithm fallback. Explicit administrative preference changes override inheritance. No per-Ethernet-Tag algorithm override (§4.2), cross-vendor DP validation, or guarantee when reference routes arrive after the recovery wait (for example, from a session established after the others have synced, or a peer that sends no End-of-RIB within the 30-second bound). The existing configured default preference remains 32768 rather than the RFC's 32767. |
+| RFC 9785 (Jun 2025; updates RFC 8584) | Partial | Highest-/Lowest-Preference DF election is implemented (`df_algorithm`), under the same unanimous-or-default negotiation restated in §4.1. Don't-Preempt recovery (§4.3) derives operational preference/DP from remote Type 4 routes after a three-second wait; the §4.3(5) boot timer additionally holds any recovery started within 30 seconds of daemon start until an L2VPN/EVPN session is established, every established one has sent End-of-RIB, and graceful-restart selection deferral no longer holds L2VPN/EVPN, bounded by those 30 seconds. DP wins equal-preference ties. Mixed DP does not trigger algorithm fallback. Explicit administrative preference changes override inheritance. No per-Ethernet-Tag algorithm override (§4.2), cross-vendor DP validation, or guarantee when reference routes arrive after the recovery wait (for example, from a session established after the others have synced, or a peer that sends no End-of-RIB within the 30-second bound). The configured default preference is the RFC's 32767. |
 | RFC 9722 (May 2025; updates RFC 8584) | Not implemented | Fast DF recovery: a Service Carving Time extended community on the Type 4 route synchronizes the DF election timer across the segment's PEs so they carve at the same instant. rustbgpd runs each election on its own timer. |
 | RFC 9721 (Apr 2025; extends the RFC 7432 and RFC 9135 IRB procedures) | Partial | Extended IRB mobility. Implemented: a local bridge-port move of a MAC advertised as MAC+IP re-advertises every (MAC, IP) Type 2 for that MAC with the MAC Mobility sequence incremented (§5.1 parent/child, §6.2 inheritance; `LocalMacIpOriginator::on_local_mac_moved` in `crates/evpn/src/origination_macip.rs`). The MAC-only and per-(MAC, IP) mobility ratchets otherwise remain independent; the local-move cascade is a bump-all operation. §6.4/§6.5 peer-sync, partial: a Type 2 received from a PE on the VNI's own non-zero Ethernet Segment is a peer-sync route, excluded from mobility contention and both duplicate detectors. For an already locally learned MAC, the daemon adopts a higher peer sequence exactly, without adding one, and synchronizes locally learned MAC/IP children to the highest peer or retained local sequence. This applies in either arrival order, requires a matching configured import RT, VNI, tag zero, and a nonlocal next hop, and preserves local sticky state and lifecycle suppression (`is_same_segment_peer` and the originators' `adopt_peer_sequence` methods in `crates/evpn/src/`, coordinated in `src/evpn_originator/rib_polling.rs`). Originating a MAC or MAC/IP learned only from the ES peer (Peer-Sync-Local) is not implemented. Not applicable: §7/§8.3 RT-5 mobility — Type 5 routes carry no MAC Mobility extended community (RFC 9136 defines none for the route type; `crates/evpn/src/ip_vrf/origination.rs` builds ORIGIN, AS_PATH, and extended communities only, and the receive-side mobility comparison in `crates/rib/src/loc_rib.rs` is gated to route type 2). Mobility reaches Type 5 only through GW-IP overlay-index resolution, which already selects the highest-sequence Type 2 and fails closed when distinct MACs tie at the top sequence. §6.1 third rule: a newly activated local IPv4 or IPv6 MAC/IP binding adopts at least one above the effective maximum sequence of different imported remote MACs holding that IP, saturating at `u32::MAX`. This floor also preserves higher local and exact ES-peer sequences and synchronizes the MAC and its local IP children. Both local arrival orders are supported; duplicate observations, remote-only changes, and suppression recovery do not create another ownership event. Scope recreation refreshes the remote view before replay; initial or failed snapshots defer local activations in a bounded queue, which backpressures further observations when full. This is bounded local activation, not full simultaneous-move convergence. Absent: §6.3/§6.7 stale-entry procedures, full §8.2 duplicate-address procedures, and §6.8 probing. Optional §8.2 detect-only IP accounting is implemented: conflicting local/local or local/remote MAC ownership uses a per-(VNI, IP) M/N window, excludes sticky and duplicate-MAC-quarantined contenders, and reports counters/warnings without suppression or sequence changes. |
 | RFC 9786 (Jun 2025) | Not implemented | Port-active multi-homing redundancy mode (per-port active/standby). Demand-shaped alongside the other redundancy modes outside all-active and single-active. |

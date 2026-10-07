@@ -1951,7 +1951,7 @@ impl PeerSession {
         reason = "session constructor owns the transport dependency boundary explicitly"
     )]
     fn new_with_transport(
-        config: TransportConfig,
+        mut config: TransportConfig,
         metrics: BgpMetrics,
         commands: mpsc::Receiver<PeerCommand>,
         rib_tx: mpsc::Sender<RibUpdate>,
@@ -1979,6 +1979,9 @@ impl PeerSession {
         let peer_label = rustbgpd_telemetry::peer_label(peer_ip);
         initialize_route_safety_metric_series(&config, &metrics, &peer_label);
         let link_local_next_hop_scope = Self::link_local_next_hop_scope_from_config(&config);
+        // Capability 77 is opt-in and needs a directly attached link-local peer.
+        config.peer.link_local_next_hop &= link_local_next_hop_scope.is_some()
+            && matches!(peer_ip, IpAddr::V6(addr) if is_ipv6_link_local(&addr));
         let fsm = Session::new(config.peer.clone());
         let explain_enabled = config.explain_enabled;
         let explain_cache_size = config.explain_cache_size;

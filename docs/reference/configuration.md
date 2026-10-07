@@ -987,6 +987,7 @@ complete atomic block. There is no probe or automatic legacy fallback.
 | `strict_role`          | bool     | no       | false   | Require the peer to advertise a compatible BGP Role capability; only valid when `role` is set |
 | `prefix_orf_receive`   | bool     | no       | false   | Advertise receive-side Address-Prefix ORF (RFC 5291/5292); peer-pushed prefix filters constrain outbound advertisements |
 | `disable_ipv4_unicast` | bool     | no       | false   | True IPv6-only peering: never negotiate IPv4 unicast on this session (suppresses the RFC 4760 §8 implicit-IPv4 fallback; see below) |
+| `link_local_next_hop`  | bool     | no       | false   | Advertise the experimental Link-Local Next Hop capability 77 (`draft-ietf-idr-linklocal-capability-06`). Only valid on interface-bound IPv6 link-local neighbors; inherits from the peer-group (see below) |
 | `remove_private_as`   | string   | no       | --      | Remove private ASNs from AS_PATH: `"remove"`, `"all"`, or `"replace"` (eBGP only) |
 | `discard_path_attributes` | [u8] | no | `[]` | Route-server-client-only inbound attribute filter. Canonicalized by numeric type code; a neighbor `[]` clears an inherited group list. See [Inbound path-attribute discard](#inbound-path-attribute-discard) |
 | `route_reflector_client` | bool   | no       | false   | Mark this iBGP peer as a route reflector client (RFC 4456) |
@@ -1087,7 +1088,21 @@ address = "fe80::5054:ff:fe00:1"
 interface = "eth1"
 remote_asn = 65101
 families = ["ipv4_unicast"]
+link_local_next_hop = true  # optional, experimental capability 77
 ```
+
+`link_local_next_hop = true` advertises the experimental Link-Local Next Hop
+capability 77 on such a session. When the peer also advertises it, IPv4 and
+IPv6 unicast can carry a 16-byte link-local-only next hop; IPv4 additionally
+requires Extended Next Hop. It is off by default, inherits from the peer group,
+and config load rejects it for any neighbor or `[[dynamic_neighbors]]` range
+without an interface-bound link-local address. A toggle resets the session so
+the new OPEN can renegotiate it. See the
+[RFC notes](rfc-notes.md#link-local-next-hop-capability--draft-ietf-idr-linklocal-capability-06).
+On an FRR peer the matching opt-in is `neighbor X capability link-local`.
+Whether or not it is enabled, a link-local next hop is advertised only to a
+peer on the interface where it was learned, unless the next hop is rewritten
+to a local address.
 
 TCP-AO (RFC 5925) `tcp_ao` is accepted directly on static `[[neighbors]]` and
 on `[[dynamic_neighbors]]` ranges. It is an ordered keyring containing
@@ -4142,7 +4157,7 @@ default — single-homed VTEPs leave it empty.
 [[ethernet_segments]]
 esi = "00:00:00:00:00:00:00:00:00:01"          # 10-byte ESI (Type 0 here; Types 1–5 also accepted)
 member_vnis = [100, 200]                       # L2VNIs this ES is reachable on
-df_preference = 32768                          # RFC 9785 preference; default/HRW require this default
+df_preference = 32767                          # RFC 9785 preference; default/HRW accept only 32767 (or the former 32768)
 df_algorithm = "default-modulo"                # default-modulo, highest-random-weight, highest-preference, or lowest-preference
 redundancy_mode = "all-active"                 # "all-active" or "single-active"
 originator_ip = "10.0.0.1"                     # source IP used for Type 1/4 origination
@@ -4154,9 +4169,9 @@ originator_ip = "10.0.0.1"                     # source IP used for Type 1/4 ori
 |-----------------|----------|----------|---------------|-------------|
 | `esi`           | string   | yes      | --            | 10-byte non-zero ESI in colon-separated hex (RFC 7432 §5). The all-zero Type 0 single-homed sentinel is rejected; non-zero Type 0 and Types 1–5 are accepted. |
 | `member_vnis`   | u32[]    | yes      | --            | L2VNIs this segment is reachable on. Each must match a configured `[[evpn_instances]].vni` |
-| `df_preference` | u32      | no       | `32768`       | RFC 9785 preference value for `"highest-preference"` / `"lowest-preference"` (`0..=65535`). Default-modulo and HRW ignore preference, so only the default is accepted for those algorithms |
+| `df_preference` | u32      | no       | `32767`       | RFC 9785 preference value for `"highest-preference"` / `"lowest-preference"` (`0..=65535`). Default-modulo and HRW ignore preference, so only the default is accepted for those algorithms (the former default `32768` is also accepted for them) |
 | `df_algorithm`  | string   | no       | `"default-modulo"` | `"default-modulo"` (RFC 7432 §8.5 service carving), `"highest-random-weight"` (RFC 8584 §3.2), `"highest-preference"` or `"lowest-preference"` (RFC 9785) |
-| `df_dont_preempt` | bool   | no       | `false`       | RFC 9785 Don't-Preempt recovery. Only valid with `"highest-preference"` / `"lowest-preference"`. Startup and drain recovery wait three seconds for remote Type 4 routes, keeping the local role non-DF. Any recovery started within 30 seconds of daemon start (startup, drain, link, or a newly added segment) also waits until an L2VPN/EVPN session is established and every established one has sent End-of-RIB, at most until those 30 seconds pass. If the preferred remote PE advertises DP=1 and the local administrative preference would preempt it, advertise that remote preference with DP=0. Restore configured preference/DP on becoming the reference PE. Explicit DF configuration changes override inheritance. Mixed DP is allowed but cannot guarantee non-preemption; reference routes arriving after the wait can also allow preemption. |
+| `df_dont_preempt` | bool   | no       | `false`       | RFC 9785 Don't-Preempt recovery. Only valid with `"highest-preference"` / `"lowest-preference"`. Startup and drain recovery wait three seconds for remote Type 4 routes, keeping the local role non-DF. Any recovery started within 30 seconds of daemon start (startup, drain, link, or a newly added segment) also waits until an L2VPN/EVPN session is established, every established one has sent End-of-RIB, and graceful-restart selection deferral no longer holds L2VPN/EVPN, at most until those 30 seconds pass. If the preferred remote PE advertises DP=1 and the local administrative preference would preempt it, advertise that remote preference with DP=0. Restore configured preference/DP on becoming the reference PE. Explicit DF configuration changes override inheritance. Mixed DP is allowed but cannot guarantee non-preemption; reference routes arriving after the wait can also allow preemption. |
 | `redundancy_mode` | string | no       | `"all-active"` | `"all-active"` sets the ESI Label extcomm Single-Active flag to 0 and allows receiver-side aliasing ECMP. `"single-active"` sets the flag to 1, suppresses all-active aliasing ECMP for remote single-active ES reachability, and enables the receive-side backup-path pre-install path from ADR-0083 |
 | `originator_ip` | string   | yes      | --            | Source IP carried in Type 1/4 origination. Usually equals a member VNI's `local_vtep_ip` |
 | `interface`     | string   | no       | --            | ADR-0085 attachment-circuit link binding: name of the local link whose carrier drives this ES's link drain. When set, carrier loss on the link drains the segment automatically |
@@ -4929,6 +4944,7 @@ quoting it:
 | `route_server_client` is only valid on eBGP neighbors | `route_server_client requires eBGP` |
 | `per_client_best` requires `route_server_client = true` | `per_client_best on neighbor ... requires route_server_client = true` |
 | `disable_ipv4_unicast = true` requires at least one non-`ipv4_unicast` effective family | `invalid neighbor config` |
+| `link_local_next_hop = true` requires an interface-bound IPv6 link-local neighbor; a `[[dynamic_neighbors]]` peer group must not enable it | `invalid neighbor config` / `invalid dynamic neighbor` |
 | `role` is only valid on eBGP neighbors; `strict_role = true` requires `role` | `invalid neighbor config` |
 | `remove_private_as` must be `"remove"`, `"all"`, or `"replace"` (eBGP only) | `invalid remove_private_as` |
 | Non-empty `discard_path_attributes` requires effective `route_server_client = true`; type 0 and protected types 1/2/3/6/7/14/15/17/18/33/35 are rejected | `invalid neighbor config ... discard_path_attributes` / `invalid route server config` |
@@ -4975,6 +4991,7 @@ quoting it:
 | `per_client_best` | `false` |
 | `prefix_orf_receive` | `false` |
 | `disable_ipv4_unicast` | `false` |
+| `link_local_next_hop` | `false` |
 | `role` / `strict_role` | disabled / `false` |
 | `remove_private_as` | disabled (absent) |
 | `discard_path_attributes` | empty (disabled) |
