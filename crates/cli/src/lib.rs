@@ -3,6 +3,8 @@
 //! and by ingestion adapters.
 
 #![deny(unsafe_code)]
+#![deny(clippy::all)]
+#![warn(clippy::pedantic)]
 
 pub mod importer;
 pub mod ribdiff;

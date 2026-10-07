@@ -48,6 +48,11 @@ enum Af {
     Unsupported,
 }
 
+#[must_use]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one pass preserves stanza state before resolving inherited peer defaults"
+)]
 pub fn parse(input: &str) -> Model {
     let mut model = Model::default();
     let mut in_bgp = false;
@@ -113,7 +118,7 @@ pub fn parse(input: &str) -> Model {
                 &mut model,
                 line,
                 text,
-                &af,
+                af.as_ref(),
                 &mut default_ipv4,
                 &mut default_hold,
             );
@@ -234,7 +239,7 @@ fn bgp_line(
     model: &mut Model,
     line: usize,
     text: &str,
-    af: &Option<Af>,
+    af: Option<&Af>,
     default_ipv4: &mut bool,
     default_hold: &mut Option<u16>,
 ) {
@@ -283,7 +288,7 @@ fn bgp_line(
 }
 
 /// `neighbor <peer> ...` — `<peer>` is an address or a peer-group name.
-fn neighbor_line(model: &mut Model, line: usize, text: &str, rest: &str, af: &Option<Af>) {
+fn neighbor_line(model: &mut Model, line: usize, text: &str, rest: &str, af: Option<&Af>) {
     let mut words = rest.split_whitespace();
     let Some(peer) = words.next() else {
         skip(model, line, text.to_owned(), GENERIC_GUIDANCE);
@@ -349,11 +354,10 @@ fn neighbor_line(model: &mut Model, line: usize, text: &str, rest: &str, af: &Op
             (Some(Af::V6), Ok(limit)) => entry(model, &peer, line).max_prefixes(limit, true),
             _ => skip(model, line, text.to_owned(), GENERIC_GUIDANCE),
         },
-        ["route-map", ..]
-        | ["prefix-list", ..]
-        | ["filter-list", ..]
-        | ["distribute-list", ..]
-        | ["unsuppress-map", ..] => {
+        [
+            "route-map" | "prefix-list" | "filter-list" | "distribute-list" | "unsuppress-map",
+            ..,
+        ] => {
             skip(model, line, text.to_owned(), RPOL_GUIDANCE);
         }
         _ => skip(model, line, text.to_owned(), GENERIC_GUIDANCE),

@@ -51,6 +51,10 @@ enum Event {
 /// a session lost that way is refused rather than half-translated. Both bounds
 /// are pinned by `bird_stray_punctuation_recovers_at_the_next_reset_token` in
 /// `crates/cli/tests/config_import.rs`.
+#[expect(
+    clippy::too_many_lines,
+    reason = "one stateful scan keeps string, comment, and delimiter recovery ordering together"
+)]
 fn scan(input: &str) -> Vec<Event> {
     let mut events = Vec::new();
     let mut buf = String::new();
@@ -215,6 +219,7 @@ fn ctx(stack: &[Frame]) -> Ctx {
     }
 }
 
+#[must_use]
 pub fn parse(input: &str) -> Model {
     let mut model = Model::default();
     let mut stack: Vec<Frame> = Vec::new();
@@ -246,7 +251,7 @@ pub fn parse(input: &str) -> Model {
                             } else {
                                 GENERIC_GUIDANCE
                             };
-                        skip(&mut model, line, format!("{header} {{ ... }}"), guidance);
+                        skip(&mut model, line, &format!("{header} {{ ... }}"), guidance);
                         Frame::Ignore
                     }
                     Ctx::Ignore => Frame::Ignore,
@@ -255,7 +260,7 @@ pub fn parse(input: &str) -> Model {
             }
             Event::Stmt { line, text } => {
                 if text.split_whitespace().next() == Some("include") {
-                    skip(&mut model, line, text, INCLUDE_GUIDANCE);
+                    skip(&mut model, line, &text, INCLUDE_GUIDANCE);
                     continue;
                 }
                 match ctx(&stack) {
@@ -280,7 +285,7 @@ pub fn parse(input: &str) -> Model {
     model
 }
 
-fn skip(model: &mut Model, line: usize, stanza: String, guidance: impl Into<String>) {
+fn skip(model: &mut Model, line: usize, stanza: &str, guidance: impl Into<String>) {
     // Report text only: a stanza folded out of a multi-line source keeps
     // that source's indentation runs, which read as ragged gaps on one
     // line. The parse itself never sees this.
@@ -295,7 +300,7 @@ fn skip(model: &mut Model, line: usize, stanza: String, guidance: impl Into<Stri
 fn top_open(model: &mut Model, line: usize, header: &str) -> Frame {
     let words: Vec<&str> = header.split_whitespace().collect();
     match words.as_slice() {
-        ["protocol", "bgp", rest @ ..] | ["template", "bgp", rest @ ..] => {
+        ["protocol" | "template", "bgp", rest @ ..] => {
             let template = words[0] == "template";
             let name = rest.first().copied().unwrap_or("").to_owned();
             let from = rest
@@ -317,7 +322,7 @@ fn top_open(model: &mut Model, line: usize, header: &str) -> Frame {
             skip(
                 model,
                 line,
-                format!("protocol {kind} {}", words.get(2).unwrap_or(&"")),
+                &format!("protocol {kind} {}", words.get(2).unwrap_or(&"")),
                 format!(
                     "BIRD `{kind}` protocol is outside the BGP structural subset; \
                      kernel/static route handling differs per deployment — carry over by hand"
@@ -325,12 +330,12 @@ fn top_open(model: &mut Model, line: usize, header: &str) -> Frame {
             );
             Frame::Ignore
         }
-        ["filter", ..] | ["function", ..] => {
-            skip(model, line, header.to_owned(), RPOL_GUIDANCE);
+        ["filter" | "function", ..] => {
+            skip(model, line, header, RPOL_GUIDANCE);
             Frame::Ignore
         }
         _ => {
-            skip(model, line, header.to_owned(), GENERIC_GUIDANCE);
+            skip(model, line, header, GENERIC_GUIDANCE);
             Frame::Ignore
         }
     }
@@ -348,14 +353,14 @@ fn top_stmt(model: &mut Model, line: usize, text: &str) {
         // (rather than the block path) declared local variables after its
         // name; it is still the filter to hand-translate, not an unknown
         // structural stanza.
-        "filter" | "function" => skip(model, line, text.to_owned(), RPOL_GUIDANCE),
+        "filter" | "function" => skip(model, line, text, RPOL_GUIDANCE),
         "define" => skip(
             model,
             line,
-            text.to_owned(),
+            text,
             "constant used by filters; hand-translate alongside its filter to .rpol",
         ),
-        _ => skip(model, line, text.to_owned(), GENERIC_GUIDANCE),
+        _ => skip(model, line, text, GENERIC_GUIDANCE),
     }
 }
 
@@ -378,7 +383,7 @@ fn bgp_open(model: &mut Model, acc: &mut BgpAcc, line: usize, header: &str) -> F
             skip(
                 model,
                 line,
-                format!("{}: {header} {{ ... }}", scope(acc)),
+                &format!("{}: {header} {{ ... }}", scope(acc)),
                 guidance,
             );
             Frame::Ignore
@@ -412,12 +417,12 @@ fn bgp_stmt(model: &mut Model, acc: &mut BgpAcc, line: usize, text: &str) {
                 }
                 return;
             }
-            skip(model, line, text.to_owned(), GENERIC_GUIDANCE);
+            skip(model, line, text, GENERIC_GUIDANCE);
         }
         ["neighbor", "range", ..] => skip(
             model,
             line,
-            format!("{}: {text}", scope(acc)),
+            &format!("{}: {text}", scope(acc)),
             "dynamic neighbor range: declare via rustbgpd [[dynamic_neighbors]] by hand",
         ),
         ["neighbor", rest @ ..] if rest.len() >= 3 && rest[rest.len() - 2] == "as" => {
@@ -427,36 +432,36 @@ fn bgp_stmt(model: &mut Model, acc: &mut BgpAcc, line: usize, text: &str) {
                 acc.line = line;
                 return;
             }
-            skip(model, line, text.to_owned(), GENERIC_GUIDANCE);
+            skip(model, line, text, GENERIC_GUIDANCE);
         }
         ["description", ..] => {
             acc.description = Some(unquote(&text["description".len()..]));
         }
         ["hold", "time", value] => match value.parse() {
             Ok(hold) => acc.hold_time = Some(hold),
-            Err(_) => skip(model, line, text.to_owned(), GENERIC_GUIDANCE),
+            Err(_) => skip(model, line, text, GENERIC_GUIDANCE),
         },
         ["keepalive", "time", value] => match value.parse() {
             Ok(keepalive) => acc.keepalive = Some(keepalive),
-            Err(_) => skip(model, line, text.to_owned(), GENERIC_GUIDANCE),
+            Err(_) => skip(model, line, text, GENERIC_GUIDANCE),
         },
         ["password", ..] => acc.auth_present = true,
         ["rr", "client"] | ["rr", "client", "on"] => skip(
             model,
             line,
-            format!("{}: {text}", scope(acc)),
+            &format!("{}: {text}", scope(acc)),
             "set route_reflector_client = true on the neighbor by hand (iBGP only)",
         ),
         ["rs", "client"] | ["rs", "client", "on"] => skip(
             model,
             line,
-            format!("{}: {text}", scope(acc)),
+            &format!("{}: {text}", scope(acc)),
             "set route_server_client = true on the neighbor by hand",
         ),
         _ => skip(
             model,
             line,
-            format!("{}: {text}", scope(acc)),
+            &format!("{}: {text}", scope(acc)),
             GENERIC_GUIDANCE,
         ),
     }
@@ -474,11 +479,11 @@ fn channel_stmt(model: &mut Model, stack: &mut [Frame], ipv6: bool, line: usize,
         .unwrap_or_default();
     match words.as_slice() {
         // Accept-everything matches rustbgpd's default (no policy = accept).
-        ["import", "all"] | ["export", "all"] => {}
+        ["import" | "export", "all"] => {}
         [direction @ ("import" | "export"), "table", "on"] => skip(
             model,
             line,
-            format!("{acc_scope}: {text}"),
+            &format!("{acc_scope}: {text}"),
             format!(
                 "BIRD retained {direction} table is operational state; no rustbgpd policy translation is needed"
             ),
@@ -496,15 +501,15 @@ fn channel_stmt(model: &mut Model, stack: &mut [Frame], ipv6: bool, line: usize,
                 }
                 return;
             }
-            skip(model, line, text.to_owned(), GENERIC_GUIDANCE);
+            skip(model, line, text, GENERIC_GUIDANCE);
         }
-        ["import", ..] | ["export", ..] => {
-            skip(model, line, format!("{acc_scope}: {text}"), RPOL_GUIDANCE)
+        ["import" | "export", ..] => {
+            skip(model, line, &format!("{acc_scope}: {text}"), RPOL_GUIDANCE);
         }
         _ => skip(
             model,
             line,
-            format!("{acc_scope}: {text}"),
+            &format!("{acc_scope}: {text}"),
             GENERIC_GUIDANCE,
         ),
     }
@@ -536,7 +541,7 @@ fn finalize_bgp(model: &mut Model, acc: BgpAcc) {
         skip(
             model,
             acc.line,
-            format!("{}: no `neighbor <ip> as <asn>` statement", scope(&acc)),
+            &format!("{}: no `neighbor <ip> as <asn>` statement", scope(&acc)),
             "protocol declares no static neighbor; not translated",
         );
         return;

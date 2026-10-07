@@ -33,7 +33,7 @@
 //! Negotiated state comes from the Peer Up OPENs: Add-Path is in effect
 //! for a family iff the incumbent's sent OPEN advertised send (2/3) and
 //! the peer's received OPEN advertised receive (1/3) for it (RFC 7911);
-//! AS_PATH width follows each message's per-peer-header A flag. RFC 8671
+//! `AS_PATH` width follows each message's per-peer-header A flag. RFC 8671
 //! stat types 15/17 arriving after End-of-RIB are cross-checked against
 //! the folded route counts (completeness never *requires* them; a
 //! mismatch means a decode gap and refuses the conversion).
@@ -41,8 +41,8 @@
 //! Fail-closed: any framing error, embedded-UPDATE decode error,
 //! truncation, out-of-protocol sequence, or exceeded hard bound exits 2
 //! with nothing on stdout — a half-converted snapshot with a valid
-//! trailer cannot exist. RFC 6793 AS_PATH/AS4_PATH (types 2/17) and
-//! AGGREGATOR/AS4_AGGREGATOR (types 7/18) pairs normalize to one canonical
+//! trailer cannot exist. RFC 6793 `AS_PATH/AS4_PATH` (types 2/17) and
+//! `AGGREGATOR/AS4_AGGREGATOR` (types 7/18) pairs normalize to one canonical
 //! path and 8-byte type-7 aggregator. Other unknown and untyped attributes
 //! preserve their value bytes and semantic flags in `unknown_attrs`, never
 //! silently dropped.
@@ -92,27 +92,27 @@ const STAT_ADJ_RIB_OUT_POST_PER_AFI: u16 = 17;
 #[derive(Clone, Copy)]
 struct Limits {
     /// Maximum capture bytes read.
-    max_input_bytes: u64,
+    input_bytes: u64,
     /// Maximum single BMP message length (the common-header length
     /// field). The largest legitimate message is a Route Monitoring
     /// around one extended UPDATE (~64 KiB); 1 MiB leaves TLV headroom.
-    max_bmp_message_len: usize,
+    bmp_message_len: usize,
     /// Maximum monitored peers.
-    max_peers: usize,
+    peers: usize,
     /// Maximum retained routes across all peers.
-    max_routes: usize,
+    routes: usize,
     /// Maximum distinct source path IDs per (peer, family, NLRI).
-    max_paths_per_nlri: usize,
+    paths_per_nlri: usize,
 }
 
 impl Default for Limits {
     fn default() -> Self {
         Self {
-            max_input_bytes: 1 << 30,
-            max_bmp_message_len: 1 << 20,
-            max_peers: 4096,
-            max_routes: 4_000_000,
-            max_paths_per_nlri: 64,
+            input_bytes: 1 << 30,
+            bmp_message_len: 1 << 20,
+            peers: 4096,
+            routes: 4_000_000,
+            paths_per_nlri: 64,
         }
     }
 }
@@ -132,6 +132,7 @@ pub struct FromBmpOpts<'a> {
 
 /// Run the adapter: print the snapshot to stdout on success (notes to
 /// stderr), an error to stderr on refusal, and return the exit code.
+#[must_use]
 pub fn from_bmp(opts: &FromBmpOpts<'_>) -> i32 {
     let result = run(opts);
     let stdout = std::io::stdout();
@@ -176,10 +177,10 @@ fn run_with_limits(
     let size = std::fs::metadata(opts.file)
         .map_err(|e| format!("cannot read {display}: {e}"))?
         .len();
-    if size > limits.max_input_bytes {
+    if size > limits.input_bytes {
         return Err(format!(
             "{display}: {size} bytes exceeds the input limit of {} bytes; refusing",
-            limits.max_input_bytes
+            limits.input_bytes
         ));
     }
     let data = std::fs::read(opts.file).map_err(|e| format!("cannot read {display}: {e}"))?;
@@ -238,10 +239,10 @@ fn convert_with_limits(
                 "message length {length} below header size"
             )));
         }
-        if length > limits.max_bmp_message_len {
+        if length > limits.bmp_message_len {
             return Err(context(format!(
                 "message length {length} exceeds the {} byte limit; refusing",
-                limits.max_bmp_message_len
+                limits.bmp_message_len
             )));
         }
         if length > rest.len() {
@@ -366,7 +367,7 @@ struct Importer {
     /// Non-global instance peers (peer type != 0 or distinguisher != 0):
     /// VPN views `rbgp-ribsnap/1` cannot express; skipped entirely.
     ignored_instance_peers: BTreeSet<IpAddr>,
-    /// Total retained routes across peers (bound by `max_routes`).
+    /// Total retained routes across peers (bound by `limits.routes`).
     total_routes: usize,
     /// Pre-policy Adj-RIB-In Route Monitoring messages skipped (O=0).
     rib_in_skipped: u64,
@@ -462,10 +463,10 @@ impl Importer {
         // End-of-RIB state belong to the previous peer generation.
         if let Some(old) = self.peers.remove(&pph.addr) {
             self.total_routes -= old.routes.len();
-        } else if self.peers.len() >= limits.max_peers {
+        } else if self.peers.len() >= limits.peers {
             return Err(format!(
                 "more than {} monitored peers; refusing",
-                limits.max_peers
+                limits.peers
             ));
         }
         self.peers.insert(
@@ -796,6 +797,10 @@ fn addpath_modes(open: &OpenMessage) -> BTreeMap<Fam, AddPathMode> {
 }
 
 /// Decode and fold one encapsulated BGP UPDATE into the peer's state.
+#[expect(
+    clippy::too_many_lines,
+    reason = "one UPDATE fold keeps EOR detection and withdrawal-before-announcement ordering explicit"
+)]
 fn fold_update(
     state: &mut PeerState,
     total_routes: &mut usize,
@@ -933,7 +938,7 @@ fn split_prefix(prefix: Prefix) -> (IpAddr, u8) {
     }
 }
 
-/// Total NLRI units carried by an MP_UNREACH_NLRI across all its family
+/// Total NLRI units carried by an `MP_UNREACH_NLRI` across all its family
 /// shapes (0 = the End-of-RIB form).
 fn mp_unreach_nlri_count(mp: &MpUnreachNlri) -> usize {
     mp.withdrawn.len()
@@ -950,9 +955,9 @@ fn mp_unreach_nlri_count(mp: &MpUnreachNlri) -> usize {
 /// Attributes with typed snapshot fields map directly. The wire decoder has
 /// already combined RFC 6793 types 2/17 and 7/18; this converter stores the
 /// canonical AS path and emits the canonical 8-byte type-7 aggregator.
-/// Attributes the snapshot does not type (ORIGINATOR_ID, CLUSTER_LIST, OTC,
+/// Attributes the snapshot does not type (`ORIGINATOR_ID`, `CLUSTER_LIST`, OTC,
 /// and anything the wire decoder itself leaves untyped) retain their value
-/// bytes and semantic flags in `unknown_attrs`. The EXTENDED_LENGTH bit is
+/// bytes and semantic flags in `unknown_attrs`. The `EXTENDED_LENGTH` bit is
 /// cleared because it is an encoding artifact, not attribute semantics.
 fn convert_attribute<'a>(
     attribute: &'a PathAttribute,
@@ -968,7 +973,7 @@ fn convert_attribute<'a>(
         PathAttribute::LocalPref(local_pref) => base.local_pref = Some(*local_pref),
         PathAttribute::Communities(communities)
         | PathAttribute::CommunitiesPartial(communities) => {
-            base.communities = communities.clone();
+            base.communities.clone_from(communities);
         }
         PathAttribute::ExtendedCommunities(communities)
         | PathAttribute::ExtendedCommunitiesPartial(communities) => {
@@ -989,7 +994,10 @@ fn convert_attribute<'a>(
         PathAttribute::ClusterList(clusters) => base.unknown_attrs.push((
             attr_flags::OPTIONAL,
             attr_type::CLUSTER_LIST,
-            clusters.iter().flat_map(|c| c.octets()).collect(),
+            clusters
+                .iter()
+                .flat_map(std::net::Ipv4Addr::octets)
+                .collect(),
         )),
         PathAttribute::OnlyToCustomer(asn) => base.unknown_attrs.push((
             attr_flags::OPTIONAL | attr_flags::TRANSITIVE,
@@ -1043,7 +1051,7 @@ fn convert_attribute<'a>(
     Ok(())
 }
 
-/// Flatten AS_PATH segments into the snapshot's single ASN list
+/// Flatten `AS_PATH` segments into the snapshot's single ASN list
 /// (documented consumer limitation shared with the from-mrt adapter:
 /// segment structure is not compared).
 fn flatten_as_path(path: &AsPath) -> Vec<u32> {
@@ -1084,20 +1092,20 @@ fn insert_route(
     let (fam, addr, len, _) = key;
     state.expected.insert(fam);
     if !state.routes.contains_key(&key) {
-        if *total_routes >= limits.max_routes {
+        if *total_routes >= limits.routes {
             return Err(format!(
                 "more than {} retained routes; refusing",
-                limits.max_routes
+                limits.routes
             ));
         }
         let paths = state
             .routes
             .range((fam, addr, len, 0)..=(fam, addr, len, u32::MAX))
             .count();
-        if paths >= limits.max_paths_per_nlri {
+        if paths >= limits.paths_per_nlri {
             return Err(format!(
                 "more than {} paths for {addr}/{len}; refusing",
-                limits.max_paths_per_nlri
+                limits.paths_per_nlri
             ));
         }
         *total_routes += 1;
@@ -1232,7 +1240,7 @@ pub(crate) mod test_fixture {
         nlri
     }
 
-    /// MP_REACH_NLRI attribute for IPv6 unicast.
+    /// `MP_REACH_NLRI` attribute for IPv6 unicast.
     pub(crate) fn mp_reach_v6_attr(next_hop: &str, nlri: &[u8]) -> Vec<u8> {
         let nh: std::net::Ipv6Addr = next_hop.parse().unwrap();
         let mut value = vec![0, 2, 1, 16];
@@ -1256,14 +1264,14 @@ pub(crate) mod test_fixture {
     }
 
     /// Family End-of-RIB: an UPDATE carrying only an empty
-    /// MP_UNREACH_NLRI for the family.
+    /// `MP_UNREACH_NLRI` for the family.
     pub(crate) fn eor_mp(afi: u16, safi: u8) -> Vec<u8> {
         let mut value = afi.to_be_bytes().to_vec();
         value.push(safi);
         update_pdu(&[], &attr(attr_type::MP_UNREACH_NLRI, &value), &[])
     }
 
-    /// MP_UNREACH_NLRI withdraw for IPv6 unicast.
+    /// `MP_UNREACH_NLRI` withdraw for IPv6 unicast.
     pub(crate) fn mp_unreach_v6(nlri: &[u8]) -> Vec<u8> {
         let mut value = 2u16.to_be_bytes().to_vec();
         value.push(1);
@@ -1322,11 +1330,15 @@ pub(crate) mod test_fixture {
     /// daemon's own BMP encoder (an M83 lab capture would carry
     /// rustbgpd's *own* view rather than an incumbent's, so a synthetic
     /// stream is both cheaper and the honest source here). Exercises:
-    /// Initiation; Add-Path and plain peers; body and MP_REACH/UNREACH
+    /// Initiation; Add-Path and plain peers; body and `MP_REACH/UNREACH`
     /// announce + withdraw; dump/live interleave supersede; End-of-RIB
     /// per family; post-EoR live update; matching RFC 8671 stats;
     /// typed-but-unsnapshotted (OTC) and fully unknown attributes;
     /// interleaved Adj-RIB-In messages; Termination.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "the ordered golden stream keeps interleaved peer updates and completeness markers visible"
+    )]
     pub(crate) fn golden_capture() -> Vec<u8> {
         let peer_a = rib_out_info("192.0.2.1", 65001);
         let peer_b = rib_out_info("2001:db8::2", 65002);
@@ -1378,7 +1390,7 @@ pub(crate) mod test_fixture {
         attrs_1.extend(attr(attr_type::MULTI_EXIT_DISC, &120u32.to_be_bytes()));
         attrs_1.extend(attr(
             attr_type::COMMUNITIES,
-            &((65500u32 << 16) | 100).to_be_bytes(),
+            &((65500u32 << 16) | 0x0064).to_be_bytes(),
         ));
         capture.extend(route_monitoring(
             &peer_a,
@@ -1411,7 +1423,7 @@ pub(crate) mod test_fixture {
         attrs_1b.extend(attr(attr_type::MULTI_EXIT_DISC, &121u32.to_be_bytes()));
         attrs_1b.extend(attr(
             attr_type::COMMUNITIES,
-            &((65500u32 << 16) | 100).to_be_bytes(),
+            &((65500u32 << 16) | 0x0064).to_be_bytes(),
         ));
         capture.extend(route_monitoring(
             &peer_a,
@@ -1899,7 +1911,7 @@ mod tests {
         assert!(!snapshot.contains("path_id"));
     }
 
-    /// The per-peer header A flag switches AS_PATH decoding to legacy
+    /// The per-peer header A flag switches `AS_PATH` decoding to legacy
     /// 2-octet ASNs (RFC 7854 §4.2).
     #[test]
     fn legacy_two_octet_as_path_parses_via_a_flag() {
@@ -2052,7 +2064,7 @@ mod tests {
     #[test]
     fn hard_bounds_are_enforced() {
         let tiny = Limits {
-            max_routes: 2,
+            routes: 2,
             ..Limits::default()
         };
         let (mut capture, info) = v4_peer_capture();
@@ -2066,7 +2078,7 @@ mod tests {
 
         // Paths-per-NLRI bound: many Add-Path IDs for one prefix.
         let tiny = Limits {
-            max_paths_per_nlri: 2,
+            paths_per_nlri: 2,
             ..Limits::default()
         };
         let info = rib_out_info("192.0.2.1", 65001);
@@ -2099,7 +2111,7 @@ mod tests {
 
         // Oversized BMP message length field.
         let tiny = Limits {
-            max_bmp_message_len: 64,
+            bmp_message_len: 64,
             ..Limits::default()
         };
         let (capture, _) = v4_peer_capture();

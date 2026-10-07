@@ -1,12 +1,12 @@
 //! `rbgp config import` — a deliberately bounded structural importer
-//! for BIRD 2/3, FRR (vtysh running-config style), and GoBGP TOML
+//! for BIRD 2/3, FRR (vtysh running-config style), and `GoBGP` TOML
 //! configurations.
 //!
 //! The importer translates only the structural subset every BGP daemon
 //! shares: local AS, router-id, neighbors (address, remote AS,
 //! description), peer groups, address families, hold timers, and
 //! max-prefix limits. It never guesses at policy: BIRD filters, FRR
-//! route-maps/prefix-lists, and GoBGP policy-definitions are listed —
+//! route-maps/prefix-lists, and `GoBGP` policy-definitions are listed —
 //! with source line numbers — in the import report for hand-translation
 //! to `.rpol`. Secrets are never imported: MD5/auth *presence* is
 //! flagged (report warning + commented placeholder in the emitted
@@ -49,6 +49,7 @@ pub enum SourceFormat {
 }
 
 impl SourceFormat {
+    #[must_use]
     pub fn name(self) -> &'static str {
         match self {
             SourceFormat::Bird => "BIRD 2/3",
@@ -83,7 +84,7 @@ pub struct Model {
 #[derive(Debug, Default)]
 pub struct Group {
     pub name: String,
-    /// Group-level remote AS (FRR peer-groups, GoBGP peer-groups).
+    /// Group-level remote AS (FRR peer-groups, `GoBGP` peer-groups).
     /// rustbgpd has no group-level `remote_asn`, so this is resolved
     /// down onto member neighbors at emit time.
     pub remote_asn: Option<u32>,
@@ -124,6 +125,7 @@ pub enum ImportError {
 }
 
 impl ImportError {
+    #[must_use]
     pub fn exit_code(&self) -> i32 {
         match self {
             ImportError::Read(_) | ImportError::Format(_) | ImportError::Parse(_) => 1,
@@ -175,6 +177,7 @@ pub struct Report {
 }
 
 impl Report {
+    #[must_use]
     pub fn exit_code(&self) -> i32 {
         if self.skipped.is_empty() && self.warnings.is_empty() {
             0
@@ -183,6 +186,7 @@ impl Report {
         }
     }
 
+    #[must_use]
     pub fn render_text(&self) -> String {
         let mut out = String::new();
         let _ = writeln!(
@@ -259,6 +263,15 @@ pub struct Imported {
 
 /// Detect the source format from content (extension is only a hint —
 /// FRR and BIRD both conventionally use `.conf`).
+///
+/// # Errors
+///
+/// Returns [`ImportError::Format`] if neither the lowercase `.toml` suffix
+/// nor the supported configuration markers identify a format.
+#[expect(
+    clippy::case_sensitive_file_extension_comparisons,
+    reason = "preserve the lowercase .toml hint; broadening it changes detection precedence over content"
+)]
 pub fn detect_format(path: &str, contents: &str) -> Result<SourceFormat, ImportError> {
     if path.ends_with(".toml") || contents.contains("[global.config]") {
         return Ok(SourceFormat::Gobgp);
@@ -280,6 +293,11 @@ pub fn detect_format(path: &str, contents: &str) -> Result<SourceFormat, ImportE
 
 /// Parse and translate one source. `source_path` is used only for
 /// labels in the emitted header and report.
+///
+/// # Errors
+///
+/// Returns [`ImportError::Parse`] for invalid TOML, or [`ImportError::Empty`]
+/// when the source has no local AS or no translatable neighbors.
 pub fn import_source(
     format: SourceFormat,
     source_path: &str,
@@ -293,6 +311,10 @@ pub fn import_source(
     finish(format, source_path, model)
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "ordered validation keeps neighbor inheritance, refusal, and report emission together"
+)]
 fn finish(
     format: SourceFormat,
     source_path: &str,
@@ -661,6 +683,7 @@ fn emit_toml(
 
 /// CLI entry: read, translate, write, report. Returns the process exit
 /// code per the module-level ladder.
+#[must_use]
 pub fn run_import(source: &str, format: Option<&str>, out: Option<&str>, json: bool) -> i32 {
     let stdout = std::io::stdout();
     run_import_with_writer(source, format, out, json, &mut stdout.lock())
