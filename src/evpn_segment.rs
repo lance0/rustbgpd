@@ -1539,8 +1539,9 @@ fn df_election_extcomm(
 
 /// RFC 9785 §4.3 boot timer. Remote Type 4 routes cannot be present before
 /// the BGP sessions carrying them are up, so after a restart the recovery
-/// decision waits until every established EVPN session has sent End-of-RIB,
-/// bounded by `BOOT_RECOVERY_MAX_WAIT`. Returns whether recovery may proceed;
+/// decision waits until every established EVPN session has sent End-of-RIB
+/// and GR selection deferral has released L2VPN/EVPN, bounded by
+/// `BOOT_RECOVERY_MAX_WAIT`. Returns whether recovery may proceed;
 /// otherwise expired recovery deadlines move to the next poll.
 async fn settle_boot_wait(
     runtime: &mut SegmentRuntime,

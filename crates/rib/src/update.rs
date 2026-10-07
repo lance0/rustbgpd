@@ -2901,7 +2901,8 @@ pub enum RibUpdate {
         reply: oneshot::Sender<Vec<EvpnRibRoute>>,
     },
     /// Whether every established L2VPN/EVPN session has sent End-of-RIB
-    /// for the family; `false` while none is established. Gates the
+    /// for the family and graceful-restart selection deferral is not
+    /// holding L2VPN/EVPN; `false` while none is established. Gates the
     /// RFC 9785 §4.3 boot-time Designated Forwarder recovery decision.
     QueryEvpnSessionsSynced {
         /// Response channel.
