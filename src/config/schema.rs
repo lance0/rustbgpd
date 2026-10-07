@@ -3202,9 +3202,10 @@ pub(crate) fn default_fib_families() -> Vec<String> {
 ///   this ES. Each member contributes a slot to the per-(ESI, VNI)
 ///   DF election.
 /// - `df_preference` — RFC 9785 Designated Forwarder preference
-///   value (`0..=65535`, default 32768). Used only by
+///   value (`0..=65535`, default 32767). Used only by
 ///   `"highest-preference"` / `"lowest-preference"`; default-modulo
-///   and HRW require the default because they ignore preference.
+///   and HRW ignore preference and accept only the default or the
+///   former default 32768.
 /// - `df_algorithm` — DF election algorithm string. Gate 8 accepts
 ///   `"default-modulo"` (RFC 7432 §8.5) and
 ///   `"highest-random-weight"` (RFC 8584 §3.2), plus RFC 9785
@@ -3238,7 +3239,7 @@ pub struct EthernetSegmentConfig {
     /// VNIs participating in this ES. Each must already be declared
     /// in `[[evpn_instances]]`.
     pub member_vnis: Vec<u32>,
-    /// RFC 9785 DF preference. Default 32768.
+    /// RFC 9785 DF preference. Default 32767.
     #[serde(default = "default_df_preference")]
     pub df_preference: u32,
     /// DF algorithm string. Default `"default-modulo"`.
@@ -3291,8 +3292,11 @@ fn add_legacy_recovery_delay_secs_property(schema: &mut Schema) {
     properties.insert("recovery_delay_secs".to_string(), legacy);
 }
 
+/// RFC 9785 §3: the DF Election preference default MUST be 32767.
+pub const DEFAULT_DF_PREFERENCE: u32 = 32_767;
+
 fn default_df_preference() -> u32 {
-    32_768
+    DEFAULT_DF_PREFERENCE
 }
 
 fn default_df_algorithm() -> String {

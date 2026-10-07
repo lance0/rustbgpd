@@ -1416,7 +1416,7 @@ fn gather_candidates_from_routes(
         // Election extcomm if present; absent extcomm → DefaultModulo
         // + default preference (matches RFC 8584 fallback rules).
         let (pref, dont_preempt, alg) = decode_df_election_extcomm(&r.attributes).unwrap_or((
-            32_768,
+            crate::config::DEFAULT_DF_PREFERENCE,
             false,
             DfAlgorithm::DefaultModulo,
         ));
@@ -1478,7 +1478,9 @@ fn decode_df_election_extcomm(attrs: &[PathAttribute]) -> Option<(u32, bool, DfA
         for ec in ecs {
             if let Some(df) = ec.as_df_election() {
                 let alg = DfAlgorithm::from_algorithm_id(df.algorithm_id);
-                let pref = df.preference.map_or(32_768, u32::from);
+                let pref = df
+                    .preference
+                    .map_or(crate::config::DEFAULT_DF_PREFERENCE, u32::from);
                 let dont_preempt = (df.capabilities & 0x8000) != 0;
                 return Some((pref, dont_preempt, alg));
             }
@@ -2306,7 +2308,7 @@ mod tests {
         let ec = ExtendedCommunity::df_election(1, 0, None);
         let attrs = [PathAttribute::ExtendedCommunities(vec![ec])];
         let (pref, dont_preempt, alg) = decode_df_election_extcomm(&attrs).unwrap();
-        assert_eq!(pref, 32_768);
+        assert_eq!(pref, 32_767);
         assert!(!dont_preempt);
         assert_eq!(alg, DfAlgorithm::HighestRandomWeight);
     }
