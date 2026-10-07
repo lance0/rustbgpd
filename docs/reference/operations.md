@@ -1411,8 +1411,10 @@ service origination, next-hop rewriting, or forwarding. The optional
 not affect selection.
 
 The controlled [M111 VPN receipt](../artifacts/interop/m111-srv6-eligibility-20260906T200426Z/README.md)
-and [M112 EVPN receipt](../artifacts/interop/m112-srv6-semantic-20260906T200333Z/README.md)
-record valid reflection, invalid-candidate exclusion, and recovery.
+records valid VPNv4 and VPNv6 reflection; it does not exercise invalid VPN SIDs.
+The [M112 EVPN receipt](../artifacts/interop/m112-srv6-semantic-20260906T200333Z/README.md)
+records invalid-candidate exclusion and recovery for one MAC-only Type 2 SID
+Structure replacement.
 
 ---
 
