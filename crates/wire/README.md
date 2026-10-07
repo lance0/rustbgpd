@@ -22,9 +22,10 @@ The prepared wire 0.24 line pairs with FSM 0.11 and RPKI 0.6 when exchanging
 public wire types. The published examples below continue to use the previous
 coordinated release until all three crates are published.
 
-`UpdateValidationOptions` gains the required `link_local_next_hop` field.
-Existing struct literals must set it to `false` or use `..Default::default()`
-to retain strict validation. Enable it only with bilateral capability 77,
+`UpdateValidationOptions` gains the `link_local_next_hop` field and is now
+`#[non_exhaustive]`, so struct literals no longer compile outside the crate.
+Start from `UpdateValidationOptions::default()` (strict validation) and assign
+the fields the session context supports. Enable `link_local_next_hop` only with bilateral capability 77,
 a directly attached peer's interface scope, and Extended Next Hop negotiation
 for IPv4. IPv4 callers must also set
 `allow_ipv4_link_local_mp_reach_next_hop` after establishing that context.

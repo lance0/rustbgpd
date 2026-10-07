@@ -90,7 +90,11 @@ pub struct UpdateValidationError {
 }
 
 /// Context-dependent UPDATE validation knobs.
+///
+/// Non-exhaustive: start from `UpdateValidationOptions::default()` (strict
+/// validation) and set the relaxations the session context supports.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct UpdateValidationOptions {
     /// Permit an IPv6 link-local primary next-hop only for IPv4 unicast
     /// `MP_REACH_NLRI`. This is intentionally opt-in: ordinary IPv6 next-hop

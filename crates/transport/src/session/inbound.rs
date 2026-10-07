@@ -1753,15 +1753,14 @@ impl PeerSession {
         });
         let has_body_nlri = !parsed.announced.is_empty();
         let has_nlri = has_body_nlri || has_mp_reach_attr;
-        let validation_options = rustbgpd_wire::UpdateValidationOptions {
-            allow_ipv4_link_local_mp_reach_next_hop: self.is_scoped_link_local_peer()
-                && self.use_extended_nexthop_ipv4(),
-            link_local_next_hop: self.is_scoped_link_local_peer()
-                && self
-                    .negotiated
-                    .as_ref()
-                    .is_some_and(|n| n.link_local_next_hop),
-        };
+        let mut validation_options = rustbgpd_wire::UpdateValidationOptions::default();
+        validation_options.allow_ipv4_link_local_mp_reach_next_hop =
+            self.is_scoped_link_local_peer() && self.use_extended_nexthop_ipv4();
+        validation_options.link_local_next_hop = self.is_scoped_link_local_peer()
+            && self
+                .negotiated
+                .as_ref()
+                .is_some_and(|n| n.link_local_next_hop);
         let mut validation_payload: Option<(u8, Vec<u8>)> = None;
         // The session-reset next-hop length check runs first so a weaker
         // validation error cannot mask it (RFC 7606 §3 (h)).
