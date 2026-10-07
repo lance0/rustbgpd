@@ -534,6 +534,15 @@ fn format_detection() {
         detect_format("b.toml", "x = 1\n"),
         Ok(SourceFormat::Gobgp)
     ));
+    // Only the lowercase suffix overrides recognizable configuration content.
+    assert!(matches!(
+        detect_format("a.toml", FRR),
+        Ok(SourceFormat::Gobgp)
+    ));
+    assert!(matches!(
+        detect_format("a.TOML", FRR),
+        Ok(SourceFormat::Frr)
+    ));
 }
 
 #[test]
