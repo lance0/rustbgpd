@@ -177,79 +177,163 @@ fn config_neighbor_set_to_api(definition: &NeighborSetConfig) -> NeighborSetDefi
     }
 }
 
-pub(crate) fn api_peer_group_to_config(definition: PeerGroupDefinition) -> PeerGroupConfig {
+/// Apply a `SetPeerGroup` definition to a peer group.
+///
+/// The definition replaces every field the peer-group API expresses. Fields
+/// the API does not carry (TCP MSS, BFD, slow-peer, per-family and outbound
+/// prefix limits, BGP role, ORF, RFC 1997 and RS control communities, next-hop
+/// ownership, IPv4 unicast suppression, log level) are owned by the config
+/// file and keep the `existing` group's values; a new group starts from the
+/// schema defaults. Both destructurings are exhaustive, so a field added to
+/// either type fails to compile until it is classified here.
+#[expect(
+    clippy::too_many_lines,
+    reason = "exhaustive destructuring of both peer-group types is the guard against an unclassified field"
+)]
+pub(crate) fn apply_peer_group_definition(
+    existing: Option<&PeerGroupConfig>,
+    definition: PeerGroupDefinition,
+) -> PeerGroupConfig {
+    let PeerGroupDefinition {
+        hold_time,
+        min_hold_time,
+        send_hold_time,
+        max_prefixes,
+        max_prefix_restart_seconds,
+        md5_password,
+        ttl_security,
+        ttl_security_hops,
+        families,
+        required_families,
+        graceful_restart,
+        gr_restart_time,
+        gr_peer_restart_time_max,
+        gr_stale_routes_time,
+        llgr_stale_time,
+        local_ipv6_nexthop,
+        route_reflector_client,
+        orr_vantage,
+        route_server_client,
+        per_client_best,
+        remove_private_as,
+        discard_path_attributes,
+        add_path,
+        import_policy,
+        export_policy,
+        import_policy_chain,
+        export_policy_chain,
+    } = definition;
+    let PeerGroupConfig {
+        tcp_mss,
+        slow_peer_threshold_pct,
+        slow_peer_duration,
+        slow_peer_isolation,
+        max_prefixes_ipv4,
+        max_prefixes_ipv6,
+        max_prefixes_received_ipv4,
+        max_prefixes_received_ipv6,
+        max_prefix_action,
+        max_prefix_warning_percent,
+        max_prefixes_out_ipv4,
+        max_prefixes_out_ipv6,
+        bfd,
+        send_non_transitive_extended_communities,
+        next_hop_ownership,
+        interpret_rfc1997,
+        rs_control_communities,
+        role,
+        strict_role,
+        prefix_orf_receive,
+        disable_ipv4_unicast,
+        log_level,
+        // Expressed by the API definition above.
+        hold_time: _,
+        min_hold_time: _,
+        send_hold_time: _,
+        max_prefixes: _,
+        max_prefix_restart_seconds: _,
+        md5_password: _,
+        ttl_security: _,
+        ttl_security_hops: _,
+        families: _,
+        required_families: _,
+        graceful_restart: _,
+        gr_restart_time: _,
+        gr_peer_restart_time_max: _,
+        gr_stale_routes_time: _,
+        llgr_stale_time: _,
+        local_ipv6_nexthop: _,
+        route_reflector_client: _,
+        orr_vantage: _,
+        route_server_client: _,
+        per_client_best: _,
+        remove_private_as: _,
+        discard_path_attributes: _,
+        add_path: _,
+        import_policy: _,
+        export_policy: _,
+        import_policy_chain: _,
+        export_policy_chain: _,
+    } = existing.cloned().unwrap_or_default();
     PeerGroupConfig {
-        tcp_mss: None,
-        hold_time: definition.hold_time,
-        min_hold_time: definition.min_hold_time,
-        send_hold_time: definition.send_hold_time,
-        // Slow-peer knobs are config-file knobs (LAN-470); the gRPC
-        // peer-group surface does not carry them.
-        slow_peer_threshold_pct: None,
-        slow_peer_duration: None,
-        slow_peer_isolation: None,
-        max_prefixes: definition.max_prefixes,
-        // Per-family limits are config-file knobs (ADR-0108); the gRPC
-        // peer-group surface does not carry them.
-        max_prefixes_ipv4: None,
-        max_prefixes_ipv6: None,
-        max_prefixes_received_ipv4: None,
-        max_prefixes_received_ipv6: None,
-        max_prefix_action: None,
-        max_prefix_warning_percent: None,
-        max_prefixes_out_ipv4: None,
-        max_prefixes_out_ipv6: None,
-        max_prefix_restart_seconds: definition
-            .max_prefix_restart_seconds
-            .and_then(std::num::NonZeroU32::new),
-        md5_password: definition
-            .md5_password
+        tcp_mss,
+        hold_time,
+        min_hold_time,
+        send_hold_time,
+        slow_peer_threshold_pct,
+        slow_peer_duration,
+        slow_peer_isolation,
+        max_prefixes,
+        max_prefixes_ipv4,
+        max_prefixes_ipv6,
+        max_prefixes_received_ipv4,
+        max_prefixes_received_ipv6,
+        max_prefix_action,
+        max_prefix_warning_percent,
+        max_prefixes_out_ipv4,
+        max_prefixes_out_ipv6,
+        max_prefix_restart_seconds: max_prefix_restart_seconds.and_then(std::num::NonZeroU32::new),
+        md5_password: md5_password
             .as_ref()
             .map(|secret| secret.as_ref().to_owned()),
-        ttl_security: definition.ttl_security,
-        ttl_security_hops: definition.ttl_security_hops,
-        bfd: None,
-        families: definition.families,
-        required_families: definition.required_families,
-        graceful_restart: definition.graceful_restart,
-        gr_restart_time: definition.gr_restart_time,
-        gr_peer_restart_time_max: definition.gr_peer_restart_time_max,
-        gr_stale_routes_time: definition.gr_stale_routes_time,
-        llgr_stale_time: definition.llgr_stale_time,
-        local_ipv6_nexthop: definition.local_ipv6_nexthop,
-        route_reflector_client: definition.route_reflector_client,
-        orr_vantage: definition.orr_vantage,
-        route_server_client: definition.route_server_client,
-        send_non_transitive_extended_communities: None,
-        per_client_best: definition.per_client_best,
-        // Not exposed on the peer-group gRPC definition: absent means
-        // no ADR-0107 ownership enforcement; configure via TOML.
-        next_hop_ownership: None,
-        // Not exposed on the peer-group gRPC definition: absent means the
-        // config-derived default (!route_server_client) applies at resolve.
-        interpret_rfc1997: None,
-        rs_control_communities: None,
-        role: None,
-        strict_role: None,
-        prefix_orf_receive: None,
-        disable_ipv4_unicast: None,
-        remove_private_as: definition.remove_private_as,
-        discard_path_attributes: (!definition.discard_path_attributes.is_empty())
-            .then(|| definition.discard_path_attributes.into_iter().collect()),
-        add_path: api_add_path_to_config(definition.add_path),
-        import_policy: definition
-            .import_policy
+        ttl_security,
+        ttl_security_hops,
+        bfd,
+        families,
+        required_families,
+        graceful_restart,
+        gr_restart_time,
+        gr_peer_restart_time_max,
+        gr_stale_routes_time,
+        llgr_stale_time,
+        local_ipv6_nexthop,
+        route_reflector_client,
+        orr_vantage,
+        route_server_client,
+        send_non_transitive_extended_communities,
+        per_client_best,
+        next_hop_ownership,
+        interpret_rfc1997,
+        rs_control_communities,
+        role,
+        strict_role,
+        prefix_orf_receive,
+        disable_ipv4_unicast,
+        remove_private_as,
+        discard_path_attributes: (!discard_path_attributes.is_empty())
+            .then(|| discard_path_attributes.into_iter().collect()),
+        add_path: api_add_path_to_config(add_path),
+        import_policy: import_policy
             .into_iter()
             .map(api_statement_to_config)
             .collect(),
-        export_policy: definition
-            .export_policy
+        export_policy: export_policy
             .into_iter()
             .map(api_statement_to_config)
             .collect(),
-        import_policy_chain: definition.import_policy_chain,
-        export_policy_chain: definition.export_policy_chain,
-        log_level: None,
+        import_policy_chain,
+        export_policy_chain,
+        log_level,
     }
 }
 
@@ -796,12 +880,8 @@ pub fn apply_config_event(config: &mut Config, event: &ConfigEvent) -> Result<()
         ConfigEvent::SetPeerGroup {
             name, definition, ..
         } => {
-            let mut group = api_peer_group_to_config(definition.clone());
-            group.tcp_mss = config.peer_groups.get(name).and_then(|group| group.tcp_mss);
-            group.bfd = config
-                .peer_groups
-                .get(name)
-                .and_then(|group| group.bfd.clone());
+            let group =
+                apply_peer_group_definition(config.peer_groups.get(name), definition.clone());
             config.peer_groups.insert(name.clone(), group);
         }
         ConfigEvent::DeletePeerGroup { name, .. } => {
@@ -1336,7 +1416,7 @@ peer_group = "fabric"
     }
 
     #[test]
-    fn peer_group_event_preserves_file_only_tcp_mss_and_bfd() {
+    fn peer_group_event_preserves_every_config_file_only_field() {
         let mut config = minimal_config();
         config.bfd_profiles.push(crate::config::BfdProfileConfig {
             name: "fast".into(),
@@ -1354,11 +1434,36 @@ peer_group = "fabric"
             "tunnel".to_string(),
             PeerGroupConfig {
                 hold_time: Some(90),
+                families: vec!["ipv4_unicast".into(), "ipv6_unicast".into()],
+                route_server_client: Some(true),
+                // Every field the peer-group API does not express.
                 tcp_mss: Some(1360),
-                bfd: Some(bfd.clone()),
+                bfd: Some(bfd),
+                slow_peer_threshold_pct: Some(80),
+                slow_peer_duration: Some(30),
+                slow_peer_isolation: Some(true),
+                max_prefixes_ipv4: Some(1000),
+                max_prefixes_ipv6: Some(500),
+                max_prefixes_received_ipv4: Some(2000),
+                max_prefixes_received_ipv6: Some(1000),
+                max_prefix_action: Some("warning".into()),
+                max_prefix_warning_percent: Some(90),
+                max_prefixes_out_ipv4: std::num::NonZeroU32::new(100),
+                max_prefixes_out_ipv6: std::num::NonZeroU32::new(50),
+                send_non_transitive_extended_communities: Some(true),
+                next_hop_ownership: Some(NextHopOwnershipConfig::StrictPeer),
+                interpret_rfc1997: Some(false),
+                rs_control_communities: Some(false),
+                role: Some(BgpRoleConfig::RouteServer),
+                strict_role: Some(true),
+                prefix_orf_receive: Some(true),
+                disable_ipv4_unicast: Some(true),
+                log_level: Some("debug".into()),
                 ..Default::default()
             },
         );
+        let mut expected = config.peer_groups["tunnel"].clone();
+        expected.hold_time = Some(45);
         let mut definition = config_peer_group_to_api(&config.peer_groups["tunnel"]);
         definition.hold_time = Some(45);
 
@@ -1372,9 +1477,6 @@ peer_group = "fabric"
         )
         .unwrap();
 
-        let group = &config.peer_groups["tunnel"];
-        assert_eq!(group.hold_time, Some(45));
-        assert_eq!(group.tcp_mss, Some(1360));
-        assert_eq!(group.bfd, Some(bfd));
+        assert_eq!(config.peer_groups["tunnel"], expected);
     }
 }

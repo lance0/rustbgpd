@@ -1198,3 +1198,77 @@ async fn peer_group_reshape_rejects_member_missing_from_next_config() {
         "rejected reshape must not advance current_config"
     );
 }
+
+/// `SetPeerGroup` replaces only the fields its definition expresses. A
+/// read-modify-write edit of an unrelated field must leave config-file-only
+/// session fields on the stored group and on every reshaped member.
+#[tokio::test]
+async fn set_peer_group_preserves_config_file_only_session_fields() {
+    let config = load_test_config(&EDGE_GROUP_TOML.replace(
+        "[peer_groups.edge]\nhold_time = 90\n",
+        "[peer_groups.edge]\nhold_time = 90\nfamilies = [\"ipv4_unicast\", \"ipv6_unicast\"]\n\
+         role = \"provider\"\nstrict_role = true\nprefix_orf_receive = true\n\
+         disable_ipv4_unicast = true\n",
+    ));
+    let mut mgr = peer_group_reshape_manager(config.clone());
+    for resolved in config.resolved_neighbors().unwrap() {
+        mgr.add_peer(
+            PeerManager::peer_manager_config_from_resolved(resolved, false),
+            false,
+        )
+        .await
+        .unwrap();
+    }
+    let addresses = [
+        IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
+        IpAddr::V4(Ipv4Addr::new(10, 0, 0, 3)),
+        IpAddr::V4(Ipv4Addr::new(10, 0, 0, 4)),
+    ];
+    let group = config.peer_groups["edge"].clone();
+    let mut definition = crate::policy_admin::config_peer_group_to_api(&group);
+
+    // A policy-only edit keeps the policy fast path instead of reading the
+    // unexpressed fields as changed.
+    definition.export_policy_chain = vec!["any".to_string()];
+    assert!(mgr.peer_group_policy_only_update("edge", &definition));
+    definition.export_policy_chain.clear();
+
+    definition.hold_time = Some(45);
+    let outcome = mgr
+        .apply_peer_group_change_owned(
+            rustbgpd_api::peer_types::ConfigEvent::SetPeerGroup {
+                name: "edge".to_string(),
+                definition,
+                ack: None,
+            },
+            addresses.to_vec(),
+        )
+        .await;
+    assert!(
+        matches!(
+            outcome,
+            rustbgpd_api::peer_types::OwnedCatalogMutationOutcome::Success
+        ),
+        "{outcome:?}"
+    );
+
+    let mut expected = group;
+    expected.hold_time = Some(45);
+    assert_eq!(mgr.current_config.peer_groups["edge"], expected);
+    for addr in addresses {
+        let peer = &mgr
+            .peers
+            .get(&key(addr))
+            .expect("member")
+            .transport_config
+            .peer;
+        assert_eq!(
+            peer.local_role,
+            Some(rustbgpd_wire::BgpRole::Provider),
+            "{addr}"
+        );
+        assert!(peer.strict_role, "{addr}");
+        assert!(peer.prefix_orf_receive, "{addr}");
+        assert!(peer.disable_ipv4_unicast, "{addr}");
+    }
+}
