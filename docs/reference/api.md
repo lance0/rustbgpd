@@ -1481,8 +1481,12 @@ grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
 
 ## PeerGroupService
 
-Peer-group CRUD plus neighbor membership assignment. Group definitions are
-full-replace and persist back to TOML. When an inherited setting changes, the
+Peer-group CRUD plus neighbor membership assignment. `SetPeerGroup` replaces
+every field `PeerGroupDefinition` carries and persists back to TOML. Group
+fields the definition does not carry, such as `role`, `strict_role`,
+`prefix_orf_receive`, `disable_ipv4_unicast`, `tcp_mss`, `bfd`, and the
+per-family prefix limits, are set in the configuration file and keep their
+configured values. When an inherited setting changes, the
 daemon recomputes effective per-neighbor config and reconciles only the peers
 that reference that group. Read responses redact `md5_password` and expose
 only the non-secret `has_md5_password` presence flag. `SetPeerGroup` preserves

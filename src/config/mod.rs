@@ -4756,7 +4756,11 @@ pub fn diff_config(old: &Config, new: &Config) -> ConfigDiff {
         listener_inbound_auth_changed,
         sighup_route: SighupReloadRoute::Generation,
     };
-    diff.sighup_route = classify_sighup_reload(SighupReloadFamilies::from_diff(&diff));
+    diff.sighup_route = reject_unappliable_sequential_reload(
+        classify_sighup_reload(SighupReloadFamilies::from_diff(&diff)),
+        old,
+        new,
+    );
     diff
 }
 
@@ -6030,6 +6034,179 @@ pub fn describe_peer_group_changes(
     cmp_field!(export_policy_chain);
 
     changes
+}
+
+/// Copy the peer-group fields the `SetPeerGroup` API definition does not
+/// carry from `source` into `target`. These fields are set only in the
+/// configuration file, so an API edit keeps their configured values. The
+/// destructuring is exhaustive: a new field fails to compile until it is
+/// classified here as config-file-only or API-owned.
+pub fn copy_peer_group_file_only_fields(target: &mut PeerGroupConfig, source: &PeerGroupConfig) {
+    let PeerGroupConfig {
+        tcp_mss,
+        slow_peer_threshold_pct,
+        slow_peer_duration,
+        slow_peer_isolation,
+        max_prefixes_ipv4,
+        max_prefixes_ipv6,
+        max_prefixes_received_ipv4,
+        max_prefixes_received_ipv6,
+        max_prefix_action,
+        max_prefix_warning_percent,
+        max_prefixes_out_ipv4,
+        max_prefixes_out_ipv6,
+        bfd,
+        send_non_transitive_extended_communities,
+        next_hop_ownership,
+        interpret_rfc1997,
+        rs_control_communities,
+        role,
+        strict_role,
+        prefix_orf_receive,
+        disable_ipv4_unicast,
+        link_local_next_hop,
+        log_level,
+        // Carried by the API definition.
+        hold_time: _,
+        min_hold_time: _,
+        send_hold_time: _,
+        max_prefixes: _,
+        max_prefix_restart_seconds: _,
+        md5_password: _,
+        ttl_security: _,
+        ttl_security_hops: _,
+        families: _,
+        required_families: _,
+        graceful_restart: _,
+        gr_restart_time: _,
+        gr_peer_restart_time_max: _,
+        gr_stale_routes_time: _,
+        llgr_stale_time: _,
+        local_ipv6_nexthop: _,
+        route_reflector_client: _,
+        orr_vantage: _,
+        route_server_client: _,
+        per_client_best: _,
+        remove_private_as: _,
+        discard_path_attributes: _,
+        add_path: _,
+        import_policy: _,
+        export_policy: _,
+        import_policy_chain: _,
+        export_policy_chain: _,
+    } = source.clone();
+    target.tcp_mss = tcp_mss;
+    target.slow_peer_threshold_pct = slow_peer_threshold_pct;
+    target.slow_peer_duration = slow_peer_duration;
+    target.slow_peer_isolation = slow_peer_isolation;
+    target.max_prefixes_ipv4 = max_prefixes_ipv4;
+    target.max_prefixes_ipv6 = max_prefixes_ipv6;
+    target.max_prefixes_received_ipv4 = max_prefixes_received_ipv4;
+    target.max_prefixes_received_ipv6 = max_prefixes_received_ipv6;
+    target.max_prefix_action = max_prefix_action;
+    target.max_prefix_warning_percent = max_prefix_warning_percent;
+    target.max_prefixes_out_ipv4 = max_prefixes_out_ipv4;
+    target.max_prefixes_out_ipv6 = max_prefixes_out_ipv6;
+    target.bfd = bfd;
+    target.send_non_transitive_extended_communities = send_non_transitive_extended_communities;
+    target.next_hop_ownership = next_hop_ownership;
+    target.interpret_rfc1997 = interpret_rfc1997;
+    target.rs_control_communities = rs_control_communities;
+    target.role = role;
+    target.strict_role = strict_role;
+    target.prefix_orf_receive = prefix_orf_receive;
+    target.disable_ipv4_unicast = disable_ipv4_unicast;
+    target.link_local_next_hop = link_local_next_hop;
+    target.log_level = log_level;
+}
+
+/// Names of the config-file-only fields (see
+/// [`copy_peer_group_file_only_fields`]) that differ between `old` and
+/// `new`. The copy is the only classification, so every field it covers is
+/// compared, including those `describe_peer_group_changes` leaves out.
+fn peer_group_file_only_differences(old: &PeerGroupConfig, new: &PeerGroupConfig) -> Vec<String> {
+    let mut kept = new.clone();
+    copy_peer_group_file_only_fields(&mut kept, old);
+    if kept == *new {
+        return Vec::new();
+    }
+    // `kept` differs from `new` only in config-file-only fields.
+    match (serde_json::to_value(&kept), serde_json::to_value(new)) {
+        (Ok(serde_json::Value::Object(kept)), Ok(serde_json::Value::Object(new))) => {
+            let mut fields: Vec<String> = new
+                .iter()
+                .filter(|(field, value)| kept.get(*field) != Some(*value))
+                .map(|(field, _)| field.clone())
+                .collect();
+            fields.sort();
+            fields
+        }
+        _ => vec!["config-file-only fields".to_string()],
+    }
+}
+
+/// Config-file-only peer-group fields a candidate adds or changes, one
+/// `peer group "NAME" field, ...` entry per group. The sequential SIGHUP
+/// route applies group edits as API definitions and so cannot apply these.
+/// Outbound prefix maxima of a group that already exists are excluded: the
+/// route applies them through its own RIB step and copies them into that
+/// group. A newly added group has nothing to copy them into, so they count.
+#[must_use]
+pub fn peer_group_file_only_changes(
+    old: &HashMap<String, PeerGroupConfig>,
+    new: &HashMap<String, PeerGroupConfig>,
+) -> Vec<String> {
+    let mut names: Vec<&String> = new.keys().collect();
+    names.sort();
+    names
+        .into_iter()
+        .filter_map(|name| {
+            let group = &new[name];
+            let base = old
+                .get(name)
+                .map_or_else(PeerGroupConfig::default, |prior| {
+                    let mut prior = prior.clone();
+                    prior.max_prefixes_out_ipv4 = group.max_prefixes_out_ipv4;
+                    prior.max_prefixes_out_ipv6 = group.max_prefixes_out_ipv6;
+                    prior
+                });
+            let fields = peer_group_file_only_differences(&base, group);
+            (!fields.is_empty()).then(|| format!("peer group {name:?} {}", fields.join(", ")))
+        })
+        .collect()
+}
+
+/// Reject a sequential-route candidate whose peer-group edits include
+/// config-file-only fields that route cannot apply. Each reason names the
+/// group, its fields, and the families that selected the sequential route,
+/// so the operator can reload the two halves separately.
+#[must_use]
+pub fn reject_unappliable_sequential_reload(
+    route: SighupReloadRoute,
+    old: &Config,
+    new: &Config,
+) -> SighupReloadRoute {
+    let SighupReloadRoute::Sequential { reasons } = route else {
+        return route;
+    };
+    if reasons.is_empty() {
+        return SighupReloadRoute::Sequential { reasons };
+    }
+    // The reload pins startup-only `tcp_mss` before routing; `--diff` sees
+    // the unpinned candidate, so pin a copy here to agree with it.
+    let mut pinned = new.clone();
+    pin_tcp_mss_startup_only_runtime(&mut pinned, old);
+    let blocked = peer_group_file_only_changes(&old.peer_groups, &pinned.peer_groups);
+    if blocked.is_empty() {
+        return SighupReloadRoute::Sequential { reasons };
+    }
+    let families = reasons.join(", ");
+    SighupReloadRoute::Rejected {
+        reasons: blocked
+            .into_iter()
+            .map(|group| format!("{group} changed together with {families}"))
+            .collect(),
+    }
 }
 
 /// True when every field that differs between two versions of one peer

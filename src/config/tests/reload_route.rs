@@ -567,3 +567,121 @@ fn forwarding_state_does_not_turn_policy_impact_into_session_reshape() {
         0
     );
 }
+
+/// A sequential-route candidate that also changes a config-file-only
+/// peer-group field is rejected by `--diff` exactly as the reload rejects
+/// it, naming the group and field. The same field change alone stays on the
+/// generation route, and an API-owned group field keeps the sequential route.
+#[test]
+fn diff_rejects_sequential_candidate_with_file_only_group_change() {
+    let prior = rs(RS_TOML);
+    let md5 = RS_TOML.replace(
+        "hold_time = 180",
+        "hold_time = 180\nmd5_password = \"secret\"",
+    );
+    let orf = |toml: &str| {
+        toml.replace(
+            "max_prefixes = 1000",
+            "max_prefixes = 1000\nprefix_orf_receive = true",
+        )
+    };
+
+    let diff = diff_config(&prior, &rs(&orf(&md5)));
+    let SighupReloadRoute::Rejected { reasons } = &diff.sighup_route else {
+        panic!("{:?}", diff.sighup_route);
+    };
+    assert_eq!(
+        reasons,
+        &[
+            "peer group \"members\" prefix_orf_receive changed together with listener inbound MD5/GTSM inventory"
+                .to_string()
+        ]
+    );
+    assert!(
+        format_config_diff(&diff).contains("SIGHUP reload route: rejected"),
+        "{}",
+        format_config_diff(&diff)
+    );
+
+    let alone = diff_config(&prior, &rs(&orf(RS_TOML)));
+    assert_eq!(alone.sighup_route, SighupReloadRoute::Generation);
+
+    let api_owned = rs(&md5.replace("hold_time = 90", "hold_time = 60"));
+    assert!(matches!(
+        diff_config(&prior, &api_owned).sighup_route,
+        SighupReloadRoute::Sequential { .. }
+    ));
+}
+
+/// A group added on the sequential route has no running group to keep its
+/// config-file-only fields in, and the outbound-limit step only updates
+/// groups that already exist. Either kind of field on an added group
+/// rejects the candidate; an outbound-limit change on an existing group
+/// stays on the sequential route.
+#[test]
+fn diff_rejects_sequential_candidate_adding_group_with_file_only_fields() {
+    let prior = rs(RS_TOML);
+    let md5 = RS_TOML.replace(
+        "hold_time = 180",
+        "hold_time = 180\nmd5_password = \"secret\"",
+    );
+    for (field, line) in [
+        ("prefix_orf_receive", "prefix_orf_receive = true"),
+        ("max_prefixes_out_ipv4", "max_prefixes_out_ipv4 = 100"),
+    ] {
+        let added = rs(&format!(
+            "{md5}\n[peer_groups.edge]\nhold_time = 90\n{line}\n"
+        ));
+        let SighupReloadRoute::Rejected { reasons } = diff_config(&prior, &added).sighup_route
+        else {
+            panic!("added group with {field} must be rejected");
+        };
+        assert_eq!(
+            reasons,
+            [format!(
+                "peer group \"edge\" {field} changed together with listener inbound MD5/GTSM inventory"
+            )]
+        );
+    }
+
+    let existing = rs(&md5.replace(
+        "max_prefixes = 1000",
+        "max_prefixes = 1000\nmax_prefixes_out_ipv4 = 100",
+    ));
+    assert!(matches!(
+        diff_config(&prior, &existing).sighup_route,
+        SighupReloadRoute::Sequential { .. }
+    ));
+}
+
+/// `describe_peer_group_changes` leaves the slow-peer knobs out, so the
+/// sequential check must not depend on it: a candidate that changes only a
+/// slow-peer field is still rejected and the field is named.
+#[test]
+fn diff_rejects_sequential_candidate_changing_only_slow_peer_fields() {
+    let prior = rs(RS_TOML);
+    let md5 = RS_TOML.replace(
+        "hold_time = 180",
+        "hold_time = 180\nmd5_password = \"secret\"",
+    );
+    for (field, line) in [
+        ("slow_peer_threshold_pct", "slow_peer_threshold_pct = 80"),
+        ("slow_peer_duration", "slow_peer_duration = 30"),
+        ("slow_peer_isolation", "slow_peer_isolation = true"),
+    ] {
+        let candidate = rs(&md5.replace(
+            "max_prefixes = 1000",
+            &format!("max_prefixes = 1000\n{line}"),
+        ));
+        let SighupReloadRoute::Rejected { reasons } = diff_config(&prior, &candidate).sighup_route
+        else {
+            panic!("{field} change must be rejected");
+        };
+        assert_eq!(
+            reasons,
+            [format!(
+                "peer group \"members\" {field} changed together with listener inbound MD5/GTSM inventory"
+            )]
+        );
+    }
+}

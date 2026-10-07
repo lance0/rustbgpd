@@ -1836,7 +1836,9 @@ pub struct NamedPolicySnapshot {
     pub definition: NamedPolicyDefinition,
 }
 
-/// Full replacement definition for one peer-group.
+/// Replacement definition for one peer-group. Every field here replaces
+/// the stored value; group fields this type does not carry keep their
+/// configured values.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PeerGroupDefinition {
     /// Override hold time.

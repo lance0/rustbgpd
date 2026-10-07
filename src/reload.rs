@@ -2311,6 +2311,7 @@ pub(crate) async fn reload_config_with_tcp_ao(
         tcp_ao: tcp_ao_rotation_candidate,
         listener_auth: listener_auth_edited,
     });
+    let route = config::reject_unappliable_sequential_reload(route, current, &new_config);
     info!(route = %route.describe(), "reload route classified");
     let old_map: std::collections::HashMap<(&str, Option<&str>), &config::Neighbor> = current
         .neighbors
@@ -8037,6 +8038,75 @@ import_policy_chain = ["origin-guard"]
             drive_generation(baseline_toml(), &candidate, GenerationReply::Applied).await;
         outcome.expect("sequential reload succeeds");
         assert_eq!(tags, vec!["ReconcilePeers(+1,-0,~1)".to_string()]);
+        assert!(calls.is_empty());
+    }
+
+    /// The sequential route applies a group edit through the `SetPeerGroup`
+    /// definition, so the group's config-file-only fields must survive it,
+    /// and a candidate that changes one of them must be rejected before any
+    /// effect rather than reported applied while the running group keeps
+    /// the old value.
+    #[tokio::test]
+    async fn reload_sequential_peer_group_edit_keeps_config_file_only_fields() {
+        let initial = format!(
+            "{}\n[peer_groups.edge]\nhold_time = 90\nrole = \"provider\"\nstrict_role = true\n\n\
+             [[neighbors]]\naddress = \"10.0.0.3\"\nremote_asn = 65003\npeer_group = \"edge\"\n",
+            baseline_toml()
+        );
+        // The neighbor MD5 change keeps the candidate on the sequential route.
+        let desired = initial
+            .replace(
+                "remote_asn = 65002\nhold_time = 90",
+                "remote_asn = 65002\nhold_time = 90\nmd5_password = \"secret\"",
+            )
+            .replace(
+                "[peer_groups.edge]\nhold_time = 90",
+                "[peer_groups.edge]\nhold_time = 45",
+            );
+        let (outcome, tags, calls) =
+            drive_generation(&initial, &desired, GenerationReply::Applied).await;
+        let accepted = outcome.expect("sequential reload succeeds");
+        assert!(calls.is_empty(), "auth compound remains sequential");
+        assert!(tags.contains(&"SetPeerGroup(edge)".to_string()), "{tags:?}");
+        let group = &accepted.peer_groups["edge"];
+        assert_eq!(group.hold_time, Some(45));
+        assert_eq!(group.role, Some(config::BgpRoleConfig::Provider));
+        assert_eq!(group.strict_role, Some(true));
+
+        let desired = desired.replace("strict_role = true", "strict_role = false");
+        let (outcome, tags, calls) =
+            drive_generation(&initial, &desired, GenerationReply::Applied).await;
+        let SighupReloadOutcome::CleanNoEffect(SighupReloadError::Failed(failure)) = outcome else {
+            panic!("unexpressed group field change must reject before effects: {outcome:?}");
+        };
+        assert_eq!(failure.bucket, "reload.preflight");
+        let error = failure.error.to_string();
+        assert!(
+            error.contains("peer group \"edge\" strict_role changed together with"),
+            "{error}"
+        );
+        assert!(tags.is_empty(), "no peer/auth mutation: {tags:?}");
+        assert!(calls.is_empty());
+
+        // An added group's outbound limit has no existing group for the
+        // outbound-limit step to update, so it rejects as well.
+        let desired = desired
+            .replace("strict_role = false", "strict_role = true")
+            .replace(
+                "[[neighbors]]\naddress = \"10.0.0.3\"",
+                "[peer_groups.core]\nmax_prefixes_out_ipv4 = 100\n\n[[neighbors]]\naddress = \"10.0.0.3\"",
+            );
+        let (outcome, tags, calls) =
+            drive_generation(&initial, &desired, GenerationReply::Applied).await;
+        let SighupReloadOutcome::CleanNoEffect(SighupReloadError::Failed(failure)) = outcome else {
+            panic!("added group outbound limit must reject before effects: {outcome:?}");
+        };
+        let error = failure.error.to_string();
+        assert!(
+            error.contains("peer group \"core\" max_prefixes_out_ipv4 changed together with"),
+            "{error}"
+        );
+        assert!(tags.is_empty(), "no peer/auth mutation: {tags:?}");
         assert!(calls.is_empty());
     }
 

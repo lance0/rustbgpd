@@ -25,7 +25,7 @@ use crate::config::{
     normalized_discard_path_attributes,
 };
 use crate::policy_admin::{
-    api_peer_group_to_config, apply_config_event, catalog_config_error, neighbor_set_references,
+    apply_config_event, apply_peer_group_definition, catalog_config_error, neighbor_set_references,
     peer_group_references, policy_references,
 };
 
@@ -793,8 +793,7 @@ impl PeerManager {
         let Some(existing) = self.current_config.peer_groups.get(name) else {
             return false;
         };
-        let mut next = api_peer_group_to_config(definition.clone());
-        next.bfd.clone_from(&existing.bfd);
+        let next = apply_peer_group_definition(Some(existing), definition.clone());
         let policy_changed = existing.import_policy != next.import_policy
             || existing.export_policy != next.export_policy
             || existing.import_policy_chain != next.import_policy_chain

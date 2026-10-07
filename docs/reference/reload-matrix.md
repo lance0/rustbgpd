@@ -46,7 +46,22 @@ in `src/config/mod.rs` says how a whole candidate is executed, and
 |---|---|---|
 | **generation** | Static `[[neighbors]]`, `[peer_groups]`, BFD member attachments, inline policy / neighbor sets / global chains, `.rpol` content, dataset contents, dataset bindings (added, removed, or re-mapped `[policy.datasets]` entries), or outbound prefix maxima changed without an incompatible family. This includes adding or removing a whole static neighbor that carries `md5_password` or `ttl_security` | One owned runtime generation: one action per static neighbor from one resolved candidate; a later failure restores retained state and rejects cleanly when compensation is confirmed. Uncertain settlement recovery-fences the daemon |
 | **sequential** | No generation-class or dataset change, or a generation-class change together with TCP-AO rotation or a listener MD5/GTSM edit while dataset contents, dataset bindings, and BFD attachments are unchanged | The existing per-subsystem steps; a failure halts with an authoritative known-partial receipt or recovery-fences if state is ambiguous |
-| **rejected** | Dataset content/binding or BFD attachment changes combined with TCP-AO rotation or a listener MD5/GTSM edit; or a generation-class/dataset change combined with `[[dynamic_neighbors]]`, EVPN runtime tables, `[[fib_tables]]`, or `honor_graceful_shutdown` / `honor_blackhole` | No effect; apply independently reloadable families separately |
+| **rejected** | Dataset content/binding or BFD attachment changes combined with TCP-AO rotation or a listener MD5/GTSM edit; a sequential candidate whose peer-group edit adds or changes a config-file-only group field (below); or a generation-class/dataset change combined with `[[dynamic_neighbors]]`, EVPN runtime tables, `[[fib_tables]]`, or `honor_graceful_shutdown` / `honor_blackhole` | No effect; apply independently reloadable families separately |
+
+The sequential route applies peer-group edits as `SetPeerGroup` definitions,
+which cannot carry the config-file-only group fields: `role`, `strict_role`,
+`prefix_orf_receive`, `disable_ipv4_unicast`, `bfd`, the slow-peer knobs,
+the per-family and received prefix limits, `max_prefix_action`,
+`max_prefix_warning_percent`, `next_hop_ownership`, `interpret_rfc1997`,
+`rs_control_communities`, `send_non_transitive_extended_communities`, and
+`log_level`. A sequential candidate that adds or changes one of them is
+rejected, and the reason names the group and field, for example
+`peer group "edge" strict_role changed together with listener inbound
+MD5/GTSM inventory`. Split the reload: apply the TCP-AO or listener change
+and the peer-group change separately. Outbound prefix maxima of a group
+that already exists apply through their own step and do not cause this
+rejection; on a group the same reload adds, they do. A `tcp_mss` change the
+reload pins until restart does not cause it either.
 
 A *listener MD5/GTSM edit* changes the inbound MD5 password or GTSM setting of
 a static neighbor that stays configured, directly or through its peer group,
