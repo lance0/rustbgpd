@@ -3204,7 +3204,8 @@ pub(crate) fn default_fib_families() -> Vec<String> {
 /// - `df_preference` — RFC 9785 Designated Forwarder preference
 ///   value (`0..=65535`, default 32767). Used only by
 ///   `"highest-preference"` / `"lowest-preference"`; default-modulo
-///   and HRW require the default because they ignore preference.
+///   and HRW ignore preference and accept only the default or the
+///   former default 32768.
 /// - `df_algorithm` — DF election algorithm string. Gate 8 accepts
 ///   `"default-modulo"` (RFC 7432 §8.5) and
 ///   `"highest-random-weight"` (RFC 8584 §3.2), plus RFC 9785

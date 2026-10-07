@@ -688,7 +688,7 @@ originator_ip = "10.0.0.100"
         "expected InvalidEthernetSegment, got {msg}"
     );
     assert!(
-        msg.contains("32767"),
+        msg.contains("32767") && msg.contains("32768"),
         "msg must name supported preference: {msg}"
     );
 }

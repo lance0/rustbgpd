@@ -6390,8 +6390,8 @@ fn parse_ethernet_segment(
         return Err(ConfigError::InvalidEthernetSegment {
             reason: format!(
                 "df_preference {}: only RFC 9785 highest-/lowest-preference DF election \
-                 uses preference; default-modulo and highest-random-weight require \
-                 the default {DEFAULT_DF_PREFERENCE}",
+                 uses preference; default-modulo and highest-random-weight accept \
+                 only the default {DEFAULT_DF_PREFERENCE} or the former default 32768",
                 cfg.df_preference
             ),
         });

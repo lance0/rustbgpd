@@ -4142,7 +4142,7 @@ default — single-homed VTEPs leave it empty.
 [[ethernet_segments]]
 esi = "00:00:00:00:00:00:00:00:00:01"          # 10-byte ESI (Type 0 here; Types 1–5 also accepted)
 member_vnis = [100, 200]                       # L2VNIs this ES is reachable on
-df_preference = 32767                          # RFC 9785 preference; default/HRW require this default
+df_preference = 32767                          # RFC 9785 preference; default/HRW accept only 32767 (or the former 32768)
 df_algorithm = "default-modulo"                # default-modulo, highest-random-weight, highest-preference, or lowest-preference
 redundancy_mode = "all-active"                 # "all-active" or "single-active"
 originator_ip = "10.0.0.1"                     # source IP used for Type 1/4 origination
