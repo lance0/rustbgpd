@@ -20,9 +20,9 @@ use std::net::{IpAddr, Ipv4Addr};
 use bytes::{Bytes, BytesMut};
 use rustbgpd_bmp::{BmpPathStatus, tlv as bmp_tlv};
 use rustbgpd_wire::{
-    Afi, Capability, EXTENDED_MAX_MESSAGE_LEN, Ipv4NlriEntry, Ipv4Prefix, Ipv4UnicastMode,
-    MpReachNlri, MpUnreachNlri, NlriEntry, OpenMessage, PathAttribute, Prefix, Safi, UpdateMessage,
-    VpnNlri, VpnNlriEntry,
+    Afi, Capability, EXTENDED_MAX_MESSAGE_LEN, Ipv4NlriEntry, Ipv4UnicastMode, MpReachNlri,
+    MpUnreachNlri, NlriEntry, OpenMessage, PathAttribute, Prefix, Safi, UpdateMessage, VpnNlri,
+    VpnNlriEntry,
 };
 use tracing::warn;
 
@@ -177,60 +177,43 @@ fn build_update(
 }
 
 /// Build an announcement UPDATE from the route's borrowed attributes with
-/// one synthesized `extra` attribute injected before the attribute at
-/// `insert_pos` (or appended when `attrs` is shorter), without
+/// one synthesized `extra` attribute spliced in before the attribute at
+/// `insert_pos` (appended when `insert_pos` is past the end), without
 /// materializing a modified attribute Vec (the hot path: one PDU per
 /// Loc-RIB best change, so a full deep clone of the attributes per
-/// emission dominated BMP-on allocation).
-///
-/// [`rustbgpd_wire::attribute::encode_path_attributes`] emits
-/// attributes strictly in slice order with no cross-attribute state,
-/// so encoding them one at a time with `extra` spliced in is
-/// byte-identical to clone-and-insert followed by
-/// [`UpdateMessage::try_build`] (pinned by the `borrowed_encode_*`
-/// tests below against the clone-based oracle).
+/// emission dominated BMP-on allocation). The spliced sequence is encoded
+/// in one pass, byte-identical to clone-and-insert followed by
+/// [`UpdateMessage::try_build`] (pinned by the `borrowed_encode_*` tests
+/// below against the clone-based oracle).
 fn build_announce_with_extra<'a>(
-    announced_v4: &[Ipv4Prefix],
-    attrs: impl Iterator<Item = &'a PathAttribute>,
+    announced: &[Ipv4NlriEntry],
+    attrs: impl Iterator<Item = &'a PathAttribute> + Clone,
     insert_pos: usize,
-    extra: &PathAttribute,
+    extra: &'a PathAttribute,
     what: &str,
 ) -> Option<Bytes> {
-    let mut attrs_buf = Vec::new();
-    let mut extra = Some(extra);
+    let insert_pos = insert_pos.min(attrs.clone().count());
+    let spliced = attrs
+        .clone()
+        .take(insert_pos)
+        .chain(std::iter::once(extra))
+        .chain(attrs.skip(insert_pos));
     // 4-octet ASN encoding, no Add-Path (RFC 9069 §5.4) — must match
     // `build_update`'s flags.
-    let mut encode = |attr: &PathAttribute| {
-        rustbgpd_wire::attribute::encode_path_attributes(
-            std::slice::from_ref(attr),
-            &mut attrs_buf,
-            true,
-            false,
-        )
-    };
-    let result = attrs
-        .enumerate()
-        .try_for_each(|(index, attr)| {
-            if index == insert_pos
-                && let Some(extra) = extra.take()
-            {
-                encode(extra)?;
-            }
-            encode(attr)
-        })
-        .and_then(|()| extra.map_or(Ok(()), &mut encode));
-    if let Err(e) = result {
-        warn!(error = %e, what, "failed to synthesize Loc-RIB BMP UPDATE, skipping");
-        return None;
+    match UpdateMessage::try_build_from_attribute_iter(
+        announced,
+        &[],
+        spliced,
+        true,
+        false,
+        Ipv4UnicastMode::Body,
+    ) {
+        Ok(update) => encode_update(&update, what),
+        Err(e) => {
+            warn!(error = %e, what, "failed to synthesize Loc-RIB BMP UPDATE, skipping");
+            None
+        }
     }
-    let mut nlri_buf = Vec::new();
-    rustbgpd_wire::nlri::encode_nlri(announced_v4, &mut nlri_buf);
-    let update = UpdateMessage {
-        withdrawn_routes: Bytes::new(),
-        path_attributes: Bytes::from(attrs_buf),
-        nlri: Bytes::from(nlri_buf),
-    };
-    encode_update(&update, what)
 }
 
 /// Synthesize an announcement UPDATE for a unicast Loc-RIB best route.
@@ -251,7 +234,10 @@ pub fn synthesize_unicast_announce(route: &Route) -> Option<Bytes> {
                 .position(|a| !matches!(a, PathAttribute::Origin(_) | PathAttribute::AsPath(_)))
                 .unwrap_or(usize::MAX);
             build_announce_with_extra(
-                &[v4_prefix],
+                &[Ipv4NlriEntry {
+                    path_id: 0,
+                    prefix: v4_prefix,
+                }],
                 attrs,
                 insert_pos,
                 &PathAttribute::NextHop(nh),
@@ -266,13 +252,8 @@ pub fn synthesize_unicast_announce(route: &Route) -> Option<Bytes> {
             let mut mp_reach = empty_mp_reach(afi, Safi::Unicast, next_hop);
             mp_reach.link_local_next_hop = route.link_local_next_hop;
             mp_reach.announced = vec![NlriEntry { path_id: 0, prefix }];
-            build_announce_with_extra(
-                &[],
-                attrs,
-                usize::MAX,
-                &PathAttribute::MpReachNlri(Box::new(mp_reach)),
-                "unicast mp announce",
-            )
+            let mp_reach = PathAttribute::MpReachNlri(Box::new(mp_reach));
+            build_announce_with_extra(&[], attrs, usize::MAX, &mp_reach, "unicast mp announce")
         }
     }
 }
