@@ -1,9 +1,9 @@
 ### Added
 
 - EVPN preference DF election now honors RFC 9785 Don't-Preempt recovery:
-  recovering segments wait three seconds for remote Type 4 routes (after a
-  daemon restart, also until an L2VPN/EVPN session is established and every
-  established one has sent End-of-RIB, bounded at 30 seconds), inherit a
+  recovering segments wait three seconds for remote Type 4 routes (within
+  30 seconds of daemon start, also until an L2VPN/EVPN session is
+  established and every established one has sent End-of-RIB), inherit a
   protected reference PE's preference with DP=0, and restore configured
   values when becoming the reference. Equal-preference elections prefer
   DP=1 before the lowest originator IP. Explicit administrative DF changes
