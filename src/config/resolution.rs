@@ -918,6 +918,10 @@ impl Config {
             .disable_ipv4_unicast
             .or_else(|| group.and_then(|g| g.disable_ipv4_unicast))
             .unwrap_or(false);
+        peer.link_local_next_hop = neighbor
+            .link_local_next_hop
+            .or_else(|| group.and_then(|g| g.link_local_next_hop))
+            .unwrap_or(false);
 
         let (remote_addr, peer_interface, peer_scope_id) =
             if let (IpAddr::V6(v6), Some(interface)) = (peer_addr, neighbor.interface.as_ref()) {
@@ -1200,6 +1204,7 @@ impl Config {
             strict_role: None,
             prefix_orf_receive: None,
             disable_ipv4_unicast: None,
+            link_local_next_hop: None,
             remove_private_as: None,
             discard_path_attributes: None,
             add_path: None,

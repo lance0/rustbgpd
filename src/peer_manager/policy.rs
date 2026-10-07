@@ -4310,6 +4310,7 @@ impl PeerManager {
                 strict_role: None,
                 prefix_orf_receive: None,
                 disable_ipv4_unicast: None,
+                link_local_next_hop: None,
                 remove_private_as: None,
                 discard_path_attributes: None,
                 add_path: None,
@@ -4585,6 +4586,7 @@ impl PeerManager {
             strict_role: tc.peer.strict_role,
             prefix_orf_receive: tc.peer.prefix_orf_receive,
             disable_ipv4_unicast: tc.peer.disable_ipv4_unicast,
+            link_local_next_hop: tc.peer.link_local_next_hop,
             import_policy: resolved.import_policy,
             export_policy: resolved.export_policy,
         }

@@ -888,6 +888,23 @@ impl Config {
                 parse_families(&group.families)?;
             }
 
+            // Capability 77 needs the interface scope that only an
+            // interface-bound IPv6 link-local neighbor has (identity checked above).
+            if neighbor.interface.is_none()
+                && neighbor
+                    .link_local_next_hop
+                    .or_else(|| group.and_then(|g| g.link_local_next_hop))
+                    .unwrap_or(false)
+            {
+                return Err(ConfigError::InvalidNeighborConfig {
+                    address: neighbor.address.clone(),
+                    field: "link_local_next_hop".to_string(),
+                    reason: "link_local_next_hop = true requires an interface-bound IPv6 \
+                             link-local neighbor"
+                        .to_string(),
+                });
+            }
+
             // disable_ipv4_unicast contradicts an effective family set of
             // IPv4 unicast only: the session could never negotiate anything.
             let disable_ipv4_unicast = neighbor
@@ -1275,6 +1292,15 @@ impl Config {
                     reason: format!(
                         "dynamic_neighbors[{i}] prefix {:?} via peer_group {:?}: \
                          discard_path_attributes requires route_server_client = true",
+                        dn.prefix, dn.peer_group
+                    ),
+                });
+            }
+            if group.link_local_next_hop.unwrap_or(false) {
+                return Err(ConfigError::InvalidDynamicNeighbor {
+                    reason: format!(
+                        "dynamic_neighbors[{i}] prefix {:?} via peer_group {:?}: \
+                         link_local_next_hop requires an interface-bound neighbor",
                         dn.prefix, dn.peer_group
                     ),
                 });

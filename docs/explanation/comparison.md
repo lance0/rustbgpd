@@ -485,7 +485,9 @@ member individually.
     `address` + `interface`) with scoped Linux FIB install (egress `dev`),
     validated against FRR by M53 (ADR-0069); FRR-style pure-interface
     autodiscovery and the same link-local address on multiple interfaces are
-    deferred. FRR (`neighbor IFACE interface`), GoBGP (`neighbor-interface`),
+    deferred. The experimental Link-Local Next Hop capability 77
+    (`draft-ietf-idr-linklocal-capability-06`) is an opt-in per neighbor.
+    FRR (`neighbor IFACE interface`), GoBGP (`neighbor-interface`),
     and BIRD (`fe80::x%iface`, plus RAdv-based AutoBGP added in 3.3.0 / 2.19.0
     on 2026-05-25) support interface autodiscovery. OpenBGPd has no interface /
     unnumbered neighbor model (numeric-IP neighbors only), although it does

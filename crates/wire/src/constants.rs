@@ -75,6 +75,8 @@ pub mod capability_code {
     pub const ADD_PATH: u8 = 69;
     /// Experimental Paths-Limit capability (draft-abraitis-idr-addpath-paths-limit-04).
     pub const PATHS_LIMIT: u8 = 76;
+    /// draft-ietf-idr-linklocal-capability-06: Link-Local Next Hop.
+    pub const LINK_LOCAL_NEXT_HOP: u8 = 77;
     /// RFC 7313: Enhanced Route Refresh.
     pub const ENHANCED_ROUTE_REFRESH: u8 = 70;
     /// RFC 9494: Long-Lived Graceful Restart.

@@ -128,7 +128,9 @@ async fn process_update_rejects_ipv4_mp_link_local_without_extended_nexthop() {
     let (client, mut server) = connected_stream_pair().await;
     session.test_install_stream(client);
     establish_test_session(&mut session, 65002).await;
-    install_test_negotiated_session(&mut session, negotiated_session(65002, false));
+    let mut negotiated = negotiated_session(65002, false);
+    negotiated.link_local_next_hop = true;
+    install_test_negotiated_session(&mut session, negotiated);
     rfc7606_drain(&mut rib_rx);
     let next_hop: Ipv6Addr = "fe80::1".parse().unwrap();
     let attrs = vec![
@@ -1554,4 +1556,396 @@ async fn extended_nexthop_mixed_batch_splits_ipv4_body_and_mp_exactly_once() {
     v6_mp.extend_from_slice(&"2001:db8::3".parse::<Ipv6Addr>().unwrap().octets());
     v6_mp.extend_from_slice(&[0, 48, 0x20, 0x01, 0x0d, 0xb8, 0, 5]);
     assert_eq!(mp_reach(&msgs[3]), v6_mp);
+}
+
+#[tokio::test]
+async fn negotiated_link_local_receives_unicast_and_normalizes_legacy_pairs() {
+    for afi in [Afi::Ipv4, Afi::Ipv6] {
+        for (primary, companion, expected) in [
+            ("fe80::1", None, "fe80::1"),
+            ("fe80::1", Some("fe80::2"), "fe80::2"),
+            ("::", Some("fe80::2"), "fe80::2"),
+        ] {
+            let (mut session, mut rib_rx) = make_test_session_with_rib(65001, 65002);
+            configure_scoped_link_local_peer(&mut session);
+            let mut neg = negotiated_session(65002, true);
+            neg.link_local_next_hop = true;
+            neg.negotiated_families = vec![(Afi::Ipv4, Safi::Unicast), (Afi::Ipv6, Safi::Unicast)];
+            session.negotiated = Some(Arc::new(neg));
+            let prefix = if afi == Afi::Ipv4 {
+                make_route(100).prefix
+            } else {
+                make_v6_unicast_route("2001:db8::1".parse().unwrap()).prefix
+            };
+            let mut mp = MpReachNlri {
+                afi,
+                safi: Safi::Unicast,
+                next_hop: primary.parse().unwrap(),
+                link_local_next_hop: None,
+                announced: vec![],
+                flowspec_announced: vec![],
+                evpn_announced: vec![],
+                bgpls_announced: vec![],
+                labeled_announced: vec![],
+                vpn_announced: vec![],
+                rtc_announced: vec![],
+            };
+            mp.link_local_next_hop = companion.map(|s| s.parse().unwrap());
+            mp.announced.push(NlriEntry { path_id: 0, prefix });
+            let attrs = vec![
+                PathAttribute::Origin(Origin::Igp),
+                PathAttribute::AsPath(AsPath {
+                    segments: vec![AsPathSegment::AsSequence(vec![65002])],
+                }),
+                PathAttribute::MpReachNlri(Box::new(mp)),
+            ];
+            session
+                .process_update(UpdateMessage::build(
+                    &[],
+                    &[],
+                    &attrs,
+                    true,
+                    false,
+                    Ipv4UnicastMode::MpReach,
+                ))
+                .await;
+            let RibUpdate::RoutesReceived { announced, .. } = rib_rx.try_recv().unwrap() else {
+                panic!("expected routes");
+            };
+            assert_eq!(announced.len(), 1, "{afi:?} {primary} {companion:?}");
+            assert_eq!(announced[0].next_hop, expected.parse::<IpAddr>().unwrap());
+            assert_eq!(announced[0].link_local_next_hop, None);
+            assert_eq!(announced[0].next_hop_scope.as_ref().unwrap().ifindex, 7);
+        }
+    }
+}
+
+#[tokio::test]
+async fn negotiated_link_local_sends_sixteen_bytes_for_both_unicast_families() {
+    for afi in [Afi::Ipv4, Afi::Ipv6] {
+        let (mut session, _rib_rx) = make_test_session_with_rib(65001, 65002);
+        configure_scoped_link_local_peer(&mut session);
+        session.config.local_ipv6_nexthop = Some("fe80::1".parse().unwrap());
+        let (client, mut server) = connected_stream_pair().await;
+        session.test_install_stream(client);
+        let mut neg = negotiated_session(65002, true);
+        neg.link_local_next_hop = true;
+        neg.negotiated_families = vec![(Afi::Ipv4, Safi::Unicast), (Afi::Ipv6, Safi::Unicast)];
+        session.negotiated = Some(Arc::new(neg));
+        let route = if afi == Afi::Ipv4 {
+            make_route(100)
+        } else {
+            make_v6_unicast_route("2001:db8::2".parse().unwrap())
+        };
+        let mut update = empty_outbound_update();
+        update.exact_export_snapshot = Some(session.publish_export_profile());
+        update.announce = vec![route].into();
+        update.next_hop_override = vec![None].into();
+        session.send_route_update(update);
+        let Message::Update(msg) = read_single_bgp_message(&mut server).await else {
+            panic!("expected UPDATE");
+        };
+        let parsed = msg.parse(true, false, &[]).unwrap();
+        let mp = parsed
+            .attributes
+            .iter()
+            .find_map(|a| match a {
+                PathAttribute::MpReachNlri(mp) => Some(mp),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(mp.afi, afi);
+        assert_eq!(mp.next_hop, "fe80::1".parse::<IpAddr>().unwrap());
+        assert_eq!(
+            mp.link_local_next_hop, None,
+            "16-byte next hop has no second slot"
+        );
+        let values = attribute_values(&msg.path_attributes);
+        assert_eq!(
+            values.iter().find(|(code, _)| *code == 14).unwrap().1[3],
+            16
+        );
+        let expected = mp.announced.clone();
+        let mut withdrawal = empty_outbound_update();
+        withdrawal.exact_export_snapshot = Some(session.publish_export_profile());
+        withdrawal.withdraw = expected
+            .iter()
+            .map(|nlri| (nlri.prefix, nlri.path_id))
+            .collect();
+        session.send_route_update(withdrawal);
+        let Message::Update(msg) = read_single_bgp_message(&mut server).await else {
+            panic!("expected withdrawal");
+        };
+        let parsed = msg.parse(true, false, &[]).unwrap();
+        let mp = parsed
+            .attributes
+            .iter()
+            .find_map(|attr| match attr {
+                PathAttribute::MpUnreachNlri(mp) => Some(mp),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!((mp.afi, mp.safi), (afi, Safi::Unicast));
+        assert_eq!(mp.withdrawn, expected);
+    }
+}
+
+#[tokio::test]
+async fn legacy_ipv4_link_local_reflection_requires_source_scope() {
+    let (mut session, _rib_rx) = make_test_session_with_rib(65001, 65002);
+    configure_scoped_link_local_peer(&mut session);
+    session.config.route_server_client = true;
+    session.config.local_ipv6_nexthop = Some("fe80::1".parse().unwrap());
+    let neg = negotiated_session(65002, true);
+    assert!(!neg.link_local_next_hop);
+    session.negotiated = Some(Arc::new(neg));
+    let profile = super::super::export::SessionExportProfile::capture(&session);
+    let mut route = make_route(100);
+    route.next_hop = "fe80::2".parse().unwrap();
+    route.link_local_next_hop = Some("fe80::2".parse().unwrap());
+    route.next_hop_scope = session.link_local_next_hop_scope.clone().map(Box::new);
+    assert!(profile.prepare_unicast_candidate(&route, None).is_ok());
+    route.next_hop_scope.as_mut().unwrap().ifindex += 1;
+    for missing_scope in [false, true] {
+        if missing_scope {
+            route.next_hop_scope = None;
+        }
+        assert!(matches!(
+            profile.prepare_unicast_candidate(&route, None),
+            Err(super::super::export::ExportProbeError::LinkLocalNextHopScope)
+        ));
+    }
+}
+
+#[tokio::test]
+async fn reflected_link_local_requires_same_scope_or_explicit_self() {
+    let (mut session, _rib_rx) = make_test_session_with_rib(65001, 65001);
+    configure_scoped_link_local_peer(&mut session);
+    session.config.local_ipv6_nexthop = Some("fe80::1".parse().unwrap());
+    let mut neg = negotiated_session(65001, true);
+    neg.link_local_next_hop = true;
+    neg.negotiated_families = vec![(Afi::Ipv4, Safi::Unicast), (Afi::Ipv6, Safi::Unicast)];
+    session.negotiated = Some(Arc::new(neg));
+    let profile = super::super::export::SessionExportProfile::capture(&session);
+    for afi in [Afi::Ipv4, Afi::Ipv6] {
+        let mut route = if afi == Afi::Ipv4 {
+            make_route(100)
+        } else {
+            make_v6_unicast_route("fe80::2".parse().unwrap())
+        };
+        route.next_hop = "fe80::2".parse().unwrap();
+        route.next_hop_scope = session.link_local_next_hop_scope.clone().map(Box::new);
+        assert!(profile.prepare_unicast_candidate(&route, None).is_ok());
+        route.next_hop_scope.as_mut().unwrap().ifindex += 1;
+        assert!(profile.prepare_unicast_candidate(&route, None).is_err());
+        for specific in ["fe80::2", "fe80::3"] {
+            assert!(
+                profile
+                    .prepare_unicast_candidate(
+                        &route,
+                        Some(&rustbgpd_policy::NextHopAction::Specific(
+                            specific.parse().unwrap()
+                        ))
+                    )
+                    .is_err(),
+                "an arbitrary specific link-local override does not establish scope"
+            );
+        }
+        assert!(
+            profile
+                .prepare_unicast_candidate(
+                    &route,
+                    Some(&rustbgpd_policy::NextHopAction::Specific(
+                        "fe80::1".parse().unwrap()
+                    ))
+                )
+                .is_ok()
+        );
+        assert!(
+            profile
+                .prepare_unicast_candidate(&route, Some(&rustbgpd_policy::NextHopAction::Self_))
+                .is_ok()
+        );
+        if afi == Afi::Ipv6 {
+            session.config.local_ipv6_nexthop = None;
+            let no_local = super::super::export::SessionExportProfile::capture(&session);
+            assert!(
+                no_local
+                    .prepare_unicast_candidate(&route, Some(&rustbgpd_policy::NextHopAction::Self_))
+                    .is_err(),
+                "self without a usable local address must not bypass source scope"
+            );
+        }
+        route.next_hop_scope = None;
+        assert!(profile.prepare_unicast_candidate(&route, None).is_err());
+    }
+}
+
+#[tokio::test]
+async fn link_local_malformed_replacement_withdraws_negotiated_route() {
+    for afi in [Afi::Ipv4, Afi::Ipv6] {
+        let (mut session, mut rib_rx) = make_test_session_with_rib(65001, 65002);
+        configure_scoped_link_local_peer(&mut session);
+        let mut neg = negotiated_session(65002, true);
+        neg.link_local_next_hop = true;
+        neg.negotiated_families = vec![(Afi::Ipv4, Safi::Unicast), (Afi::Ipv6, Safi::Unicast)];
+        session.negotiated = Some(Arc::new(neg));
+        let prefix = if afi == Afi::Ipv4 {
+            make_route(100).prefix
+        } else {
+            make_v6_unicast_route("2001:db8::1".parse().unwrap()).prefix
+        };
+        for bad in [false, true] {
+            let mp = MpReachNlri {
+                afi,
+                safi: Safi::Unicast,
+                next_hop: "fe80::2".parse().unwrap(),
+                link_local_next_hop: bad.then(|| "fe80::3".parse().unwrap()),
+                announced: vec![NlriEntry { path_id: 0, prefix }],
+                flowspec_announced: vec![],
+                evpn_announced: vec![],
+                bgpls_announced: vec![],
+                labeled_announced: vec![],
+                vpn_announced: vec![],
+                rtc_announced: vec![],
+            };
+            let attrs = vec![
+                PathAttribute::Origin(Origin::Igp),
+                PathAttribute::AsPath(AsPath {
+                    segments: vec![AsPathSegment::AsSequence(vec![65002])],
+                }),
+                PathAttribute::MpReachNlri(Box::new(mp)),
+            ];
+            let mut update =
+                UpdateMessage::build(&[], &[], &attrs, true, false, Ipv4UnicastMode::MpReach);
+            if bad {
+                // Corrupt the wire value after the encoder's validity assertions.
+                let mut raw = update.path_attributes.to_vec();
+                let valid = "fe80::3".parse::<Ipv6Addr>().unwrap().octets();
+                let offset = raw.windows(16).position(|w| w == valid).unwrap();
+                raw[offset..offset + 16]
+                    .copy_from_slice(&"2001:db8::bad".parse::<Ipv6Addr>().unwrap().octets());
+                update.path_attributes = raw.into();
+            }
+            session.process_update(update).await;
+            let RibUpdate::RoutesReceived {
+                announced,
+                withdrawn,
+                ..
+            } = rib_rx.try_recv().unwrap()
+            else {
+                panic!("expected routes");
+            };
+            if bad {
+                assert!(announced.is_empty());
+                assert_eq!(withdrawn, vec![(prefix, 0)]);
+            } else {
+                assert_eq!(announced.len(), 1);
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn link_local_capability_advertisement_requires_opt_in_and_scoped_peer() {
+    for (address, scoped, opt_in, expected) in [
+        ("[fe80::2]:179", true, true, true),
+        // The default leaves capability 77 off even for a scoped peer.
+        ("[fe80::2]:179", true, false, false),
+        ("[fe80::2]:179", false, true, false),
+        ("[2001:db8::2]:179", true, true, false),
+        ("192.0.2.2:179", true, true, false),
+    ] {
+        let mut peer = PeerConfig::new(65001, 65002, Ipv4Addr::new(10, 0, 0, 1));
+        if opt_in {
+            peer.link_local_next_hop = true;
+        }
+        let mut config = TransportConfig::new(peer, address.parse().unwrap());
+        if scoped {
+            config.peer_interface = Some("eth1".into());
+            config.peer_scope_id = Some(7);
+        }
+        let (_tx, rx) = mpsc::channel(8);
+        let (rib_tx, _rib_rx) = mpsc::channel(64);
+        let session = PeerSession::new(
+            config,
+            BgpMetrics::new(),
+            rx,
+            rib_tx,
+            None,
+            None,
+            None,
+            None,
+            None,
+            false,
+        );
+        assert_eq!(
+            session.config.peer.link_local_next_hop, expected,
+            "{address} scoped={scoped} opt_in={opt_in}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn negotiated_link_local_omits_unscoped_companion_from_global_next_hop() {
+    let (mut session, _rib_rx) = make_test_session_with_rib(65001, 65001);
+    configure_scoped_link_local_peer(&mut session);
+    let mut neg = negotiated_session(65001, true);
+    neg.link_local_next_hop = true;
+    session.negotiated = Some(Arc::new(neg));
+    let profile = super::super::export::SessionExportProfile::capture(&session);
+    let mut route = make_v6_unicast_route("2001:db8::2".parse().unwrap());
+    route.link_local_next_hop = Some("fe80::2".parse().unwrap());
+    for same_scope in [false, true] {
+        if same_scope {
+            route.next_hop_scope = session.link_local_next_hop_scope.clone().map(Box::new);
+        }
+        let super::super::export::PreparedUnicastCandidate::Mp {
+            next_hop,
+            link_local_next_hop,
+            ..
+        } = profile.prepare_unicast_candidate(&route, None).unwrap()
+        else {
+            panic!("expected MP_REACH");
+        };
+        assert_eq!(next_hop, route.next_hop);
+        assert_eq!(
+            link_local_next_hop,
+            same_scope.then_some("fe80::2".parse().unwrap())
+        );
+    }
+}
+
+#[tokio::test]
+async fn link_local_next_hop_peer_up_and_reconnect_update_sendable_families() {
+    let (mut session, mut rib_rx) = make_test_session_with_rib(65001, 65002);
+    configure_scoped_link_local_peer(&mut session);
+    session.config.local_ipv6_nexthop = Some("fe80::1".parse().unwrap());
+    for negotiated in [true, false] {
+        let mut neg = negotiated_session(65002, true);
+        neg.link_local_next_hop = negotiated;
+        neg.negotiated_families = vec![(Afi::Ipv4, Safi::Unicast), (Afi::Ipv6, Safi::Unicast)];
+        session
+            .execute_actions(vec![Action::SessionEstablished(Box::new(neg))])
+            .await;
+        let mut registered = None;
+        while let Ok(message) = rib_rx.try_recv() {
+            if let RibUpdate::PeerUp {
+                sendable_families, ..
+            } = message
+            {
+                registered = Some(sendable_families);
+            }
+        }
+        let families = registered.expect("session must register with the RIB");
+        assert!(families.contains(&(Afi::Ipv4, Safi::Unicast)));
+        assert_eq!(families.contains(&(Afi::Ipv6, Safi::Unicast)), negotiated);
+        assert_eq!(
+            session.negotiated.as_ref().unwrap().link_local_next_hop,
+            negotiated
+        );
+        session.execute_actions(vec![Action::SessionDown]).await;
+        assert!(session.negotiated.is_none());
+        while rib_rx.try_recv().is_ok() {}
+    }
 }

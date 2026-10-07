@@ -46,13 +46,15 @@ pub(super) fn gauge_val(n: usize) -> i64 {
     n as i64
 }
 
-/// Compare two routes for outbound equality (same attributes, next-hop, peer).
+/// Compare two routes for outbound equality (same attributes, next-hop, scope, peer).
 /// Used to avoid re-announcing unchanged routes to multi-path peers.
 pub(super) fn routes_equal(a: &crate::route::Route, b: &crate::route::Route) -> bool {
     a.next_hop == b.next_hop
         // A change confined to the IPv6 link-local half of the next-hop
         // (RFC 2545 §3 two-address form) must still re-advertise.
         && a.link_local_next_hop == b.link_local_next_hop
+        // Interface scope controls whether a link-local hop can be exported.
+        && a.next_hop_scope == b.next_hop_scope
         && a.peer == b.peer
         && (Arc::ptr_eq(&a.attributes, &b.attributes) || a.attributes == b.attributes)
 }

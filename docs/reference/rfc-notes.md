@@ -871,6 +871,46 @@ Interpretation decisions:
 ---
 
 
+## Link-Local Next Hop capability — draft-ietf-idr-linklocal-capability-06
+
+This is experimental support for the [June 2026 Internet-Draft](https://datatracker.ietf.org/doc/html/draft-ietf-idr-linklocal-capability-06),
+not an RFC or part of the unicast v1 compatibility contract. Capability 77
+has an empty value. Nonzero values remain unknown capabilities and cannot
+negotiate the extension; duplicate valid copies are idempotent.
+
+- The daemon advertises it only when `link_local_next_hop = true` is set on
+  an explicitly interface-bound IPv6 link-local neighbor (or its peer group);
+  the default is off. This matches FRR 10.4 and later, where
+  `neighbor X capability link-local` is also a per-neighbor opt-in that is off
+  by default. Both peers must advertise it. Each new OPEN computes the
+  negotiated state anew.
+- Negotiated IPv4 and IPv6 unicast use a 16-byte link-local-only next hop.
+  IPv4 additionally requires Extended Next Hop negotiation. Without capability
+  77 the existing scoped IPv4 32-byte legacy encoding remains; IPv6 retains
+  its global-next-hop requirement. Global-only and global-plus-link-local
+  next hops remain supported. VPN and labeled families are unchanged.
+- On negotiated sessions, a 32-byte link-local-plus-link-local or
+  unspecified-plus-link-local pair selects the second address, before import
+  policy, and carries the receiving interface scope into the RIB. Invalid
+  next hops use the existing RFC 7606 error handling.
+- An unchanged link-local primary next hop can be reflected only to a peer
+  with the same interface scope. Otherwise export preparation rejects it,
+  unless policy or normal eBGP behavior selects a known local next hop.
+  Optional link-local companions of global next hops are omitted on negotiated
+  sessions when their source interface cannot be established. Exact export
+  diagnostics expose the rejection under
+  `bgp_exact_export_rejections_total{reason="missing_ipv6_next_hop"}`;
+  withdrawals retain normal MP_UNREACH encoding and do not depend on a next
+  hop. This scope check applies to every session, including peers that did
+  not negotiate capability 77.
+
+Interface autodiscovery is not implemented. Operators using graceful restart
+should keep link-local addresses stable across restarts; this feature does
+not add a neighbor-discovery monitor or make stale next hops reachable.
+
+---
+
+
 ## RFC 4760 — Multiprotocol Extensions for BGP-4
 
 ### §3 — MP_REACH_NLRI (Type 14)

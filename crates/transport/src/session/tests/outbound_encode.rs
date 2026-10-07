@@ -407,6 +407,7 @@ async fn value_grouping_packs_ipv4_mp_reach_from_distinct_allocations() {
                 v4_route_with(AttrSet::new(plain_attrs()), octet, Ipv4Addr::UNSPECIFIED);
             route.next_hop = IpAddr::V6("fe80::2".parse().unwrap());
             route.link_local_next_hop = Some("fe80::2".parse().unwrap());
+            route.next_hop_scope = session.link_local_next_hop_scope.clone().map(Box::new);
             route.peer = IpAddr::V6("fe80::2".parse().unwrap());
             route
         })
@@ -796,7 +797,7 @@ async fn send_route_update_splits_oversized_ipv4_mp_reach_across_updates() {
             )),
             next_hop: IpAddr::V6("fe80::2".parse().unwrap()),
             link_local_next_hop: Some("fe80::2".parse().unwrap()),
-            next_hop_scope: None,
+            next_hop_scope: session.link_local_next_hop_scope.clone().map(Box::new),
             peer: IpAddr::V6("fe80::2".parse().unwrap()),
             attributes: Arc::clone(&attrs),
             received_at: rustbgpd_rib::route::ReceivedAt::now(),

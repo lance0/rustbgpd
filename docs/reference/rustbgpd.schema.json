@@ -2087,6 +2087,13 @@
             "null"
           ]
         },
+        "link_local_next_hop": {
+          "description": "Advertise the experimental Link-Local Next Hop capability (code 77,\ndraft-ietf-idr-linklocal-capability-06). When both speakers advertise\nit, IPv4/IPv6 unicast may carry a 16-byte link-local-only next hop.\nOnly valid for interface-bound IPv6 link-local neighbors. Default:\n`false`.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
         "llgr_stale_time": {
           "description": "Long-lived stale routes time (RFC 9494, seconds). Default: 0 (disabled).\nWhen > 0, LLGR capability is advertised and routes enter a long-lived\nstale phase instead of being purged when the GR timer expires.\nMax: `16_777_215` (24-bit, ≈ 194 days).",
           "type": [
@@ -2599,6 +2606,13 @@
         },
         "interpret_rfc1997": {
           "description": "RFC 1997 `NO_EXPORT` egress enforcement inherited by neighbors in\nthis group. See the neighbor-level `interpret_rfc1997`.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "link_local_next_hop": {
+          "description": "Link-Local Next Hop capability opt-in inherited by neighbors in this\ngroup. Every inheriting neighbor must be an interface-bound IPv6\nlink-local peer. See the neighbor-level `link_local_next_hop`.",
           "type": [
             "boolean",
             "null"

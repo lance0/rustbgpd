@@ -1659,7 +1659,29 @@ impl PeerSession {
                 )
             })
             .collect();
-        let parsed = revised.update;
+        let mut parsed = revised.update;
+        // The draft prefers the second slot in legacy LL+LL and ::+LL forms.
+        // Normalize before validation and policy, preserving interface scope.
+        if self.is_scoped_link_local_peer()
+            && self
+                .negotiated
+                .as_ref()
+                .is_some_and(|n| n.link_local_next_hop)
+        {
+            for attr in &mut parsed.attributes {
+                if let PathAttribute::MpReachNlri(mp) = attr
+                    && mp.safi == Safi::Unicast
+                    && matches!(mp.afi, Afi::Ipv4 | Afi::Ipv6)
+                    && let IpAddr::V6(primary) = mp.next_hop
+                    && (primary.is_unspecified() || is_ipv6_link_local(&primary))
+                    && let Some(link_local) = mp.link_local_next_hop
+                    && is_ipv6_link_local(&link_local)
+                {
+                    mp.next_hop = IpAddr::V6(link_local);
+                    mp.link_local_next_hop = None;
+                }
+            }
+        }
         for (route_type, discarded) in evpn_discarded {
             self.record_evpn_discard(route_type, discarded);
         }
@@ -1731,10 +1753,14 @@ impl PeerSession {
         });
         let has_body_nlri = !parsed.announced.is_empty();
         let has_nlri = has_body_nlri || has_mp_reach_attr;
-        let validation_options = rustbgpd_wire::UpdateValidationOptions {
-            allow_ipv4_link_local_mp_reach_next_hop: self.is_scoped_link_local_peer()
-                && self.use_extended_nexthop_ipv4(),
-        };
+        let mut validation_options = rustbgpd_wire::UpdateValidationOptions::default();
+        validation_options.allow_ipv4_link_local_mp_reach_next_hop =
+            self.is_scoped_link_local_peer() && self.use_extended_nexthop_ipv4();
+        validation_options.link_local_next_hop = self.is_scoped_link_local_peer()
+            && self
+                .negotiated
+                .as_ref()
+                .is_some_and(|n| n.link_local_next_hop);
         let mut validation_payload: Option<(u8, Vec<u8>)> = None;
         // The session-reset next-hop length check runs first so a weaker
         // validation error cannot mask it (RFC 7606 §3 (h)).

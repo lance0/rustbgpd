@@ -222,6 +222,7 @@ that rebuild sessions still require fresh scope resolution during planning.
 | `strict_role` | live (effective next session) | Strict-mode toggle. On SIGHUP the reconciler rebuilds the session immediately and applies the new requirement to OPEN negotiation. |
 | `prefix_orf_receive` | live (effective next session) | RFC 5291/5292 Address-Prefix ORF receive capability — advertised in OPEN. Like `add_path`/`role`, a toggle is reconciled by the ReconcilePeers delete/re-add path and takes effect on the next session; an established session keeps whatever ORF it negotiated. Reported by `describe_neighbor_changes`; a transaction-model edit is a supported `[[neighbors]] modify`. |
 | `disable_ipv4_unicast` | live (effective next session) | IPv6-only peering: drops IPv4 unicast from the advertised MultiProtocol capability and suppresses the RFC 4760 §8 implicit-IPv4 fallback — both OPEN-time properties, so a toggle takes effect on the next session. Rejected at load when the effective `families` resolve to `ipv4_unicast` only. |
+| `link_local_next_hop` | live (effective next session) | Experimental Link-Local Next Hop capability 77, advertised in OPEN. A toggle is reconciled by the ReconcilePeers delete/re-add path and takes effect on the next session. Rejected at load unless the neighbor is interface-bound IPv6 link-local. |
 | `remove_private_as` | live | Applied to every outbound advertisement; the next distribution pass picks up the new value. |
 | `discard_path_attributes` | live (purge session reset) | Effective-list changes purge-reset the primary and any inbound collision candidate before rebuilding the static peer. Ordinary GR retention is bypassed: Cease/4 is sent normally, or RFC 8538 Cease/9 wraps Administrative Reset when Notification GR is negotiated. Previously accepted routes disappear before the replacement session can relearn them. None and an explicit empty list are effective-equivalent. |
 | `add_path` | live (effective next session) | RFC 7911 Add-Path send/receive modes and experimental Paths-Limit `receive_max` are negotiated in OPEN. On SIGHUP the reconciler rebuilds the session immediately; a lowered receive cap starts with fresh path accounting on the replacement session. |
@@ -303,6 +304,7 @@ static neighbors.
 | `strict_role` | live (effective next session) | |
 | `prefix_orf_receive` | live (effective next session) | Group-level ORF toggle is caught by `diff_peer_groups` (whole-record compare) and named by `describe_peer_group_changes`; effective on the inheriting peer's next session. |
 | `disable_ipv4_unicast` | live (effective next session) | Group-level IPv6-only toggle; same OPEN-time semantics as the neighbor field, effective on the inheriting peer's next session. |
+| `link_local_next_hop` | live (effective next session) | Group-level capability 77 opt-in; same OPEN-time semantics as the neighbor field. Every inheriting neighbor must be interface-bound IPv6 link-local, and dynamic ranges may not use such a group. |
 | `remove_private_as` | live | |
 | `discard_path_attributes` | live (purge session reset) | Inherited by route-server clients. Static inheritors are purged and rebuilt. Enabled accepted dynamic inheritors are purge-reset in every collision generation and re-accept under the committed group value; a signaling failure is surfaced rather than reported as a clean replacement. Disabled/down dynamic peers take the value on their next accepted connection. |
 | `add_path` | live (effective next session) | |
@@ -564,6 +566,7 @@ load) or rejects the reload and keeps running on the previous config
 |---|---|---|
 | `strict_role` requires `role` | `[[neighbors]] strict_role = true` without `role` | RFC 9234 requires Roles to be configured before strict mode is meaningful. |
 | `disable_ipv4_unicast` requires a non-IPv4-unicast family | `[[neighbors]] disable_ipv4_unicast = true` with effective `families` resolving to `ipv4_unicast` only | The combination is contradictory: the session could never negotiate any family. |
+| `link_local_next_hop` requires an interface-bound link-local neighbor | Effective `link_local_next_hop = true` on a numbered neighbor, or on a peer group used by `[[dynamic_neighbors]]` | Capability 77 needs the interface scope that only an interface-bound IPv6 link-local session has. |
 | `role` requires eBGP | `[[neighbors]] role = "..."` on an iBGP session (`remote_asn == global.asn`) | RFC 9234 §4 scopes Roles to eBGP. |
 | `tcp_ao` mandatory fields | Missing `key`, `send_id`, `recv_id`, or `algorithm` | TCP-AO MKT is incomplete. |
 | `bfd.profile` references unknown profile | The `[[bfd_profiles]]` entry referenced by `[[neighbors]] bfd.profile` doesn't exist | |

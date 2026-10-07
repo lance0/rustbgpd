@@ -1254,6 +1254,7 @@ impl PeerManager {
         peer.strict_role = config.strict_role;
         peer.prefix_orf_receive = config.prefix_orf_receive;
         peer.disable_ipv4_unicast = config.disable_ipv4_unicast;
+        peer.link_local_next_hop = config.link_local_next_hop;
         let scope_id = config.scope_id.or_else(|| {
             config
                 .interface

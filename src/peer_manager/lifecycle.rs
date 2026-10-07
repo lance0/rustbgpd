@@ -547,6 +547,7 @@ impl PeerManager {
             strict_role: tc.peer.strict_role,
             prefix_orf_receive: tc.peer.prefix_orf_receive,
             disable_ipv4_unicast: tc.peer.disable_ipv4_unicast,
+            link_local_next_hop: tc.peer.link_local_next_hop,
             import_policy: managed.import_policy.clone(),
             export_policy: managed.export_policy.clone(),
         }

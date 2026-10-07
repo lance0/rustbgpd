@@ -381,6 +381,11 @@ pub fn validate_open(
         peer_route_refresh,
         peer_enhanced_route_refresh,
         peer_extended_message,
+        link_local_next_hop: config.link_local_next_hop
+            && open
+                .capabilities
+                .iter()
+                .any(|c| matches!(c, Capability::LinkLocalNextHop)),
         extended_nexthop_families,
         add_path_families,
         peer_paths_limits,
@@ -2116,6 +2121,34 @@ mod tests {
                 .contains_key(&(Afi::Ipv4, Safi::Unicast)),
             "extended next hop must not be negotiated for a family outside the MP intersection"
         );
+    }
+
+    #[test]
+    fn link_local_next_hop_requires_both_speakers_and_resets_on_new_open() {
+        for local in [false, true] {
+            let mut cfg = test_config();
+            cfg.link_local_next_hop = local;
+            assert_eq!(
+                cfg.local_capabilities()
+                    .contains(&Capability::LinkLocalNextHop),
+                local
+            );
+            for copies in 0..=2 {
+                let mut open = peer_open();
+                open.capabilities
+                    .extend(std::iter::repeat_n(Capability::LinkLocalNextHop, copies));
+                assert_eq!(
+                    validate_open(&open, &cfg).unwrap().link_local_next_hop,
+                    local && copies > 0
+                );
+                // Every OPEN recomputes the flag, including reconnect without it.
+                assert!(
+                    !validate_open(&peer_open(), &cfg)
+                        .unwrap()
+                        .link_local_next_hop
+                );
+            }
+        }
     }
 
     #[test]
