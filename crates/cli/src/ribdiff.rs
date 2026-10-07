@@ -198,22 +198,22 @@ impl Nlri {
     }
 }
 
-/// AS_PATH segment kind (RFC 4271 / RFC 5065). Kind is significant in
+/// `AS_PATH` segment kind (RFC 4271 / RFC 5065). Kind is significant in
 /// comparison: a SEQUENCE and a SET over the same ASNs differ.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AsSegmentKind {
-    /// AS_SEQUENCE — ordered.
+    /// `AS_SEQUENCE` — ordered.
     Sequence,
-    /// AS_SET — unordered; members are canonicalized sorted.
+    /// `AS_SET` — unordered; members are canonicalized sorted.
     Set,
-    /// AS_CONFED_SEQUENCE — ordered.
+    /// `AS_CONFED_SEQUENCE` — ordered.
     ConfedSequence,
-    /// AS_CONFED_SET — unordered; members are canonicalized sorted.
+    /// `AS_CONFED_SET` — unordered; members are canonicalized sorted.
     ConfedSet,
 }
 
-/// One AS_PATH segment.
+/// One `AS_PATH` segment.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize)]
 pub struct AsPathSegment {
     /// Segment kind.
@@ -244,13 +244,13 @@ pub struct UnknownAttr {
 pub struct PathAttrs {
     /// ORIGIN (0 = IGP, 1 = EGP, 2 = INCOMPLETE).
     pub origin: Option<u8>,
-    /// AS_PATH segments in wire order.
+    /// `AS_PATH` segments in wire order.
     pub as_path: Vec<AsPathSegment>,
-    /// Next hop (from NEXT_HOP or MP_REACH_NLRI).
+    /// Next hop (from `NEXT_HOP` or `MP_REACH_NLRI`).
     pub next_hop: Option<IpAddr>,
-    /// MULTI_EXIT_DISC.
+    /// `MULTI_EXIT_DISC`.
     pub med: Option<u32>,
-    /// LOCAL_PREF.
+    /// `LOCAL_PREF`.
     pub local_pref: Option<u32>,
     /// RFC 1997 communities.
     pub communities: Vec<u32>,
@@ -658,8 +658,8 @@ pub fn diff(incumbent: &RouteSet, rustbgpd: &RouteSet) -> DiffReport {
     let mut summaries: BTreeMap<(PeerId, FamilyId), PeerFamilySummary> = BTreeMap::new();
     for key in keys {
         let (peer, family, nlri) = key;
-        let incumbent_paths = incumbent.routes.get(key).map(Vec::as_slice).unwrap_or(&[]);
-        let rustbgpd_paths = rustbgpd.routes.get(key).map(Vec::as_slice).unwrap_or(&[]);
+        let incumbent_paths = incumbent.routes.get(key).map_or(&[][..], Vec::as_slice);
+        let rustbgpd_paths = rustbgpd.routes.get(key).map_or(&[][..], Vec::as_slice);
         let class = classify(incumbent_paths, rustbgpd_paths);
 
         let summary =
@@ -1113,8 +1113,8 @@ mod tests {
 
     #[test]
     fn every_compared_attribute_produces_a_named_delta() {
-        let base = attrs("192.0.2.1", &[65001], Some(10), &[100]);
         type Mutation = Box<dyn Fn(&mut PathAttrs)>;
+        let base = attrs("192.0.2.1", &[65001], Some(10), &[100]);
         let mutations: Vec<(&str, Mutation)> = vec![
             ("origin", Box::new(|a| a.origin = Some(2))),
             ("as_path", Box::new(|a| a.as_path[0].asns.push(65002))),
@@ -1471,7 +1471,7 @@ mod tests {
     }
 
     fn random_entry(state: &mut u64) -> (String, RoutePath) {
-        let n = lcg(state) as u32;
+        let n = u32::try_from(lcg(state)).unwrap();
         let pfx = format!("{}/24", Ipv4Addr::from((n & 0x00FF_FFFF) << 8));
         let mut a = attrs(
             &format!("192.0.2.{}", lcg(state) % 250 + 1),
@@ -1487,7 +1487,7 @@ mod tests {
             a.unknown.push(UnknownAttr {
                 type_code: 20 + (lcg(state) % 10) as u8,
                 flags: 0xC0,
-                value: vec![(lcg(state) % 256) as u8],
+                value: vec![u8::try_from(lcg(state) % 256).unwrap()],
             });
         }
         (
@@ -1598,15 +1598,16 @@ mod tests {
         let mut incumbent = RouteSet::new(meta(1));
         let mut rustbgpd = RouteSet::new(meta(1));
         for i in 0..routes {
+            let i = u32::try_from(i).unwrap();
             let nlri = Nlri::Prefix {
-                addr: IpAddr::V4(Ipv4Addr::from(u32::try_from(i).unwrap() << 8)),
+                addr: IpAddr::V4(Ipv4Addr::from(i << 8)),
                 len: 24,
             };
             let base = attrs(
                 "192.0.2.1",
-                &[65000, 64500 + (i % 50) as u32],
-                Some((i % 3) as u32),
-                &[(65000 << 16) | (i % 100) as u32],
+                &[65000, 64500 + (i % 50)],
+                Some(i % 3),
+                &[(65000 << 16) | (i % 100)],
             );
             incumbent
                 .insert(

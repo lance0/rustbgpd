@@ -1178,6 +1178,8 @@ service PolicyService {
   // import and dataset backend waits share one absolute 2 s deadline, including
   // admission; the budget is not reset between stages. A backend reply observed
   // at or after that deadline fails, and errors return no partial rows.
+  // Fleet import/both requests may opt in with allow_partial to skipping only
+  // exited selected sessions, identified in incomplete_peer_addresses.
   //
   // Side-effect free read; does not reset any counter. Explain queries
   // and TestPolicy dry runs never move these counters either — only
@@ -1889,6 +1891,11 @@ message GetPolicyStatsRequest {
   // "both". "both" returns export chains first, then import chains,
   // each block sorted by peer address.
   string direction = 2;
+  // Opt in to skipping selected import sessions that exit during collection.
+  // Valid only with an empty peer_address and direction "import" or "both";
+  // other combinations return INVALID_ARGUMENT before backend work.
+  // Deadlines, unavailable counters, export and dataset errors still fail whole.
+  bool allow_partial = 3;
 }
 
 // One term's live hit counter within an installed chain.
@@ -1952,6 +1959,10 @@ message GetPolicyStatsResponse {
   // dataset declared in the loaded rpol files; empty when the config
   // declares none.
   repeated PolicyDatasetStatus datasets = 2;
+  // Sorted unique IP addresses of selected import sessions that exited.
+  // Nonempty means partial; emitted only for allow_partial fleet requests.
+  // An all-gone fleet may succeed with no import rows and this list populated.
+  repeated string incomplete_peer_addresses = 3;
 }
 
 // Operator-facing status of one external policy dataset (LAN-305).
@@ -4448,10 +4459,12 @@ message EthernetSegmentState {
   // Configured DF algorithm (`default-modulo`, `hrw`,
   // `highest-preference`, or `lowest-preference`).
   string df_algorithm = 4;
-  // Configured DF preference value advertised for preference-based
-  // DF election.
+  // Administrative (configured) DF preference for preference-based DF
+  // election. While RFC 9785 non-revertive recovery inherits another PE's
+  // preference, the advertised value differs from this field.
   uint32 df_preference = 5;
-  // RFC 9785 Don't-Preempt bit configured for this segment.
+  // Administrative RFC 9785 Don't-Preempt bit configured for this segment.
+  // The advertised bit is cleared while an inherited preference is in use.
   bool df_dont_preempt = 6;
   // Configured local Type 4 originator IP.
   string originator_ip = 7;

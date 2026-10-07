@@ -463,3 +463,26 @@ is route data, so a same-peer relabel re-advertises. Withdraws use the
 RFC 8277 §2.4 3-octet compatibility field, never announce-mode label
 parsing. Still out of scope per Decision 6: label allocation, label
 rewrite, next-hop-self, and MPLS FIB install.
+
+## Amendment (2026-10-06): match membership on Route Target prefix bits
+
+This supersedes decision 2 of the 2026-07-01 amendment. RFC 4684 §3.1
+uses the origin AS to identify the source of membership information and
+build the distribution graph; §6 filters routes by their Route Targets.
+An RT's global administrator need not equal that origin AS. Deriving the
+origin AS from the RT incorrectly withheld matching VPN and EVPN routes,
+including interest from one leaf in another leaf's AS-specific RT.
+
+`RtcNlri::matches` now compares only bits 32 through the membership prefix
+length. This preserves sub-96-bit filters, including non-octet boundaries.
+A /32 membership covers all RT values, but still requires a route to carry
+an RT. Only the zero-length default admits routes with no RT; empty
+membership remains deny-all. ES-Import matching retains the same rule.
+The origin AS remains part of membership route identity for storage,
+reflection, and withdrawal.
+
+The /96 behavior agrees with
+[GoBGP 3.37.0's export filter](https://github.com/osrg/gobgp/blob/v3.37.0/pkg/server/server.go#L600-L619),
+which compares RTs without deriving an AS from their administrators.
+The historical eBGP distribution deferral above remains separate from this
+shared matcher correction; this does not qualify a complete eBGP fabric.

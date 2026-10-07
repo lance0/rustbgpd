@@ -1059,6 +1059,8 @@ struct JsonPolicyDataset {
 /// dataset block alongside the chain counters).
 #[derive(Debug, Serialize)]
 struct JsonPolicyStatsDoc {
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    incomplete_peer_addresses: Vec<String>,
     chains: Vec<JsonPolicyStats>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     datasets: Vec<JsonPolicyDataset>,
@@ -1103,7 +1105,11 @@ fn stats_to_json(
             last_error: (!d.last_error.is_empty()).then(|| d.last_error.clone()),
         })
         .collect();
-    JsonPolicyStatsDoc { chains, datasets }
+    JsonPolicyStatsDoc {
+        chains,
+        datasets,
+        incomplete_peer_addresses: resp.incomplete_peer_addresses.clone(),
+    }
 }
 
 /// One chain's heading line. Import chains carry their install generation
@@ -1131,6 +1137,7 @@ pub async fn stats(
     connection: Connection,
     peer: Option<&str>,
     direction: &str,
+    allow_partial: bool,
     json: bool,
 ) -> Result<(), CliError> {
     let mut client =
@@ -1138,6 +1145,7 @@ pub async fn stats(
     let resp = read_rpc(
         "GetPolicyStats",
         client.get_policy_stats(GetPolicyStatsRequest {
+            allow_partial,
             peer_address: peer
                 .map(bare_ip_rpc_address)
                 .unwrap_or_default()
@@ -1153,12 +1161,21 @@ pub async fn stats(
         return Ok(());
     }
 
-    if resp.chains.is_empty() && resp.datasets.is_empty() {
-        outln!("No installed policy chains")?;
-        return Ok(());
+    if !resp.incomplete_peer_addresses.is_empty() {
+        outln!(
+            "Partial import stats — sessions exited: {}",
+            resp.incomplete_peer_addresses.join(", ")
+        )?;
     }
     if resp.chains.is_empty() {
-        outln!("No installed policy chains")?;
+        outln!(
+            "{}",
+            if resp.incomplete_peer_addresses.is_empty() {
+                "No installed policy chains"
+            } else {
+                "No policy chain counters collected"
+            }
+        )?;
     }
     for chain in &resp.chains {
         outln!("{}", stats_chain_heading(chain, peer))?;
@@ -3451,6 +3468,7 @@ mod tests {
         // Keep every generated response and nested message exhaustive so a
         // new API field requires an explicit JSON projection decision.
         let mut response = proto::GetPolicyStatsResponse {
+            incomplete_peer_addresses: Vec::new(),
             chains: vec![proto::PolicyChainStats {
                 peer_address: "fe80::2".into(),
                 direction: "import".into(),
@@ -3576,9 +3594,15 @@ mod tests {
     async fn stats_scoped_link_local_sends_bare_peer_and_renders() {
         let server = spawn_mock_server(None).await;
         let json_conn = connect(&server.addr, None).await.unwrap();
-        stats(json_conn, Some("fe80:0:0:0:0:0:0:2%eth0"), "export", true)
-            .await
-            .unwrap();
+        stats(
+            json_conn,
+            Some("fe80:0:0:0:0:0:0:2%eth0"),
+            "export",
+            false,
+            true,
+        )
+        .await
+        .unwrap();
         let captured = server
             .state
             .last_get_policy_stats
@@ -3589,7 +3613,9 @@ mod tests {
         assert_eq!(captured.peer_address, "fe80:0:0:0:0:0:0:2");
         assert_eq!(captured.direction, "export");
         let text_conn = connect(&server.addr, None).await.unwrap();
-        stats(text_conn, None, "export", false).await.unwrap();
+        stats(text_conn, None, "export", false, false)
+            .await
+            .unwrap();
     }
 
     /// The direction flag passes through to the RPC: the mock server
@@ -3599,11 +3625,35 @@ mod tests {
     async fn stats_renders_import_and_both_directions() {
         let server = spawn_mock_server(None).await;
         let json_conn = connect(&server.addr, None).await.unwrap();
-        stats(json_conn, Some("10.0.0.2"), "import", true)
+        stats(json_conn, Some("10.0.0.2"), "import", false, true)
             .await
             .unwrap();
         let text_conn = connect(&server.addr, None).await.unwrap();
-        stats(text_conn, None, "both", false).await.unwrap();
+        stats(text_conn, None, "both", false, false).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn stats_partial_opt_in_and_incomplete_addresses_are_visible() {
+        let server = spawn_mock_server(None).await;
+        let connection = connect(&server.addr, None).await.unwrap();
+        stats(connection, None, "both", true, false).await.unwrap();
+        let request = server
+            .state
+            .last_get_policy_stats
+            .lock()
+            .await
+            .clone()
+            .unwrap();
+        assert!(request.allow_partial);
+        assert!(request.peer_address.is_empty());
+        let response = proto::GetPolicyStatsResponse {
+            incomplete_peer_addresses: vec!["192.0.2.1".into()],
+            ..Default::default()
+        };
+        assert_eq!(
+            serde_json::to_value(stats_to_json(&response, None)).unwrap(),
+            serde_json::json!({"chains": [], "incomplete_peer_addresses": ["192.0.2.1"]})
+        );
     }
 
     #[test]

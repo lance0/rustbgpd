@@ -16,7 +16,7 @@
 //! ever present on a fully-converted snapshot. Any parse error exits 2
 //! with nothing written to stdout.
 //!
-//! Wire notes (RFC 6396 §4.3.4): AS_PATH is always 4-octet. The
+//! Wire notes (RFC 6396 §4.3.4): `AS_PATH` is always 4-octet. The
 //! `MP_REACH_NLRI` inside a RIB entry is decoded by
 //! [`rustbgpd_wire::mrt::decode_table_dump_v2_mp_reach_next_hop`], shared with the daemon's
 //! warm-checkpoint reader: both the reduced next-hop-only form and the
@@ -95,6 +95,7 @@ pub(crate) struct SnapRoute {
 
 /// Run the adapter: print the snapshot to stdout on success, an error to
 /// stderr on refusal, and return the exit code.
+#[must_use]
 pub fn from_mrt(opts: &FromMrtOpts<'_>) -> i32 {
     let result = run(opts);
     let stdout = std::io::stdout();
@@ -397,6 +398,10 @@ fn decode_prefix(bytes: &[u8], prefix_len: u8, v6: bool) -> Result<IpAddr, Strin
 /// than the wire crate's UPDATE decoder because RFC 6396 §4.3.4
 /// abbreviates `MP_REACH_NLRI` inside RIB entries (next-hop only, no
 /// AFI/SAFI/NLRI), which the standard decoder rejects.
+#[expect(
+    clippy::too_many_lines,
+    reason = "one attribute dispatch keeps each wire length check next to its decoded value"
+)]
 fn parse_attributes(mut buf: &[u8]) -> Result<SnapRoute, String> {
     let mut route = SnapRoute::default();
     while !buf.is_empty() {
@@ -507,7 +512,7 @@ fn parse_attributes(mut buf: &[u8]) -> Result<SnapRoute, String> {
     Ok(route)
 }
 
-/// Flatten AS_PATH segments (4-octet ASNs — mandatory in `TABLE_DUMP_V2`
+/// Flatten `AS_PATH` segments (4-octet ASNs — mandatory in `TABLE_DUMP_V2`
 /// per RFC 6396 §4.3.4). Segment boundaries are dropped: the snapshot
 /// format compares the flattened sequence (documented consumer
 /// limitation).
@@ -556,7 +561,7 @@ pub(crate) mod test_fixture {
         buf
     }
 
-    /// AS_PATH with one AS_SEQUENCE segment of 4-octet ASNs.
+    /// `AS_PATH` with one `AS_SEQUENCE` segment of 4-octet ASNs.
     pub(crate) fn as_path_attr(asns: &[u32]) -> Vec<u8> {
         let mut value = vec![2, u8::try_from(asns.len()).unwrap()];
         for asn in asns {
@@ -565,7 +570,7 @@ pub(crate) mod test_fixture {
         attr(attr_type::AS_PATH, &value)
     }
 
-    /// One RIB record's payload with `entries` of (path_id, attrs).
+    /// One RIB record's payload with `entries` of (`path_id`, attrs).
     pub(crate) fn rib_payload(
         prefix_len: u8,
         prefix: &[u8],
@@ -589,10 +594,10 @@ pub(crate) mod test_fixture {
     }
 
     /// The full sample dump: a skipped `PEER_INDEX_TABLE`, an IPv4
-    /// unicast record with the full attribute set (ORIGIN, AS_PATH,
-    /// NEXT_HOP, MED, LOCAL_PREF, standard + extended + large
+    /// unicast record with the full attribute set (ORIGIN, `AS_PATH`,
+    /// `NEXT_HOP`, MED, `LOCAL_PREF`, standard + extended + large
     /// communities), and an RFC 8050 Add-Path IPv6 record with two
-    /// entries (abbreviated-form MP_REACH next hop, no MED).
+    /// entries (abbreviated-form `MP_REACH` next hop, no MED).
     pub(crate) fn sample_dump() -> Vec<u8> {
         let mut dump = Vec::new();
         // PEER_INDEX_TABLE — skipped by the parser, content irrelevant.
@@ -608,7 +613,7 @@ pub(crate) mod test_fixture {
         v4_attrs.extend_from_slice(&attr(attr_type::LOCAL_PREF, &100_u32.to_be_bytes()));
         v4_attrs.extend_from_slice(&attr(
             attr_type::COMMUNITIES,
-            &((65001_u32 << 16) | 111).to_be_bytes(),
+            &((65001_u32 << 16) | 0x006f).to_be_bytes(),
         ));
         v4_attrs.extend_from_slice(&attr(
             attr_type::EXTENDED_COMMUNITIES,
@@ -790,7 +795,7 @@ mod tests {
                     assert!(result.as_ref().unwrap_err().contains("truncated"));
                     let mut output = Vec::new();
                     assert_eq!(emit_mrt_snapshot(result, &mut output), EXIT_REFUSED);
-                    assert!(output.is_empty());
+                    assert_eq!(output, [] as [u8; 0]);
                 }
             }
         }
@@ -825,7 +830,7 @@ mod tests {
                 assert!(result.as_ref().unwrap_err().contains("trailing bytes"));
                 let mut output = Vec::new();
                 assert_eq!(emit_mrt_snapshot(result, &mut output), EXIT_REFUSED);
-                assert!(output.is_empty());
+                assert_eq!(output, [] as [u8; 0]);
             }
         }
     }

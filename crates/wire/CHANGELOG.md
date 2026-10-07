@@ -10,6 +10,13 @@ and workspace changes remain in the repository-level `CHANGELOG.md`.
   gains `link_local_next_hop`; embedders must provide scope and negotiation
   context before enabling it. Nonempty capability values remain unknown.
 
+- `RtcNlri::matches` now compares only the route-target prefix bits after the
+  membership's origin AS, per RFC 4684 §4 and §6: the origin AS identifies
+  the membership source, not the RT's global administrator. A /32 membership
+  matches every Route Target, and a /96 membership whose origin AS differs
+  from the RT administrator now matches that RT. Partial prefixes still
+  compare every covered bit, and non-RT extended communities never match.
+
 ## 0.23.0 - 2026-10-03
 
 - Add `PmsiTunnelType::evpn_srv6_function_bits` for the EVPN IMET

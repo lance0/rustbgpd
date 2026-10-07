@@ -13,6 +13,11 @@ also covers interop and archived soaks.
 
 Each result below links to its published, reproducible receipt:
 
+- **S2 reload CPU variation**: an offline partition of all six retained process
+  traces places 17.800 of the high baseline leg's 18.205 additional CPU-seconds
+  outside reload windows, relative to the other two baseline legs' mean.
+  The traces cannot identify the cause or isolate a causal arm CPU effect —
+  [CPU phase analysis](reload-cpu-phases-2026-10.md), measured 2026-10-06.
 - **Policy-reload boundary measurement null result**: a six-process native
   campaign retains 8,400 complete receiver/publication joins from its three probe
   processes but fails both stall-overhead bars (+26.81% and +23.84%). No

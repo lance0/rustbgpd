@@ -1153,19 +1153,33 @@ async fn vpn_withdrawn_when_rtc_nlri_withdrawn() {
     let mut out_rx = vpn_rtc_peer_up(&tx, IpAddr::V4(target)).await;
     drain_strict_vpn_rtc_initial_dump(&mut out_rx).await;
 
-    send_rtc_interest(&tx, target, &[100]).await;
-    let announced = out_rx.recv().await.unwrap();
+    // The receiving leaf originates interest in another leaf's RT:
+    // membership origin AS 65000 differs from RT administrator 65001.
+    let interest = make_rtc_rib_route_with_nlri(
+        target,
+        rustbgpd_wire::RtcNlri::new(65000, rt(100).as_u64(), 96).unwrap(),
+    );
+    let interest_key = interest.key();
+    tx.send(RibUpdate::RtcRoutesReceived {
+        session_id: 0,
+        peer: IpAddr::V4(target),
+        announced: vec![interest],
+        withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+    let announced = next_update(&mut out_rx).await;
     assert_eq!(announced.vpn_announce.len(), 1);
 
     tx.send(RibUpdate::RtcRoutesReceived {
         session_id: 0,
         peer: IpAddr::V4(target),
         announced: vec![],
-        withdrawn: vec![make_rtc_rib_route(target, 100, 100).key()],
+        withdrawn: vec![interest_key],
     })
     .await
     .unwrap();
-    let withdrawn = out_rx.recv().await.unwrap();
+    let withdrawn = next_update(&mut out_rx).await;
     assert!(withdrawn.vpn_announce.is_empty());
     assert_eq!(withdrawn.vpn_withdraw, vec![vpn_key]);
 
@@ -1233,7 +1247,11 @@ async fn rtc_prefix_match_gates_by_masked_bits() {
 
     let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
     let covered_a = make_vpn_rib_route_with_rts(Ipv4Addr::new(10, 0, 0, 1), 60, vec![rt(100)]);
-    let covered_b = make_vpn_rib_route_with_rts(Ipv4Addr::new(10, 0, 0, 1), 61, vec![rt(999)]);
+    let covered_b = make_vpn_rib_route_with_rts(
+        Ipv4Addr::new(10, 0, 0, 1),
+        61,
+        vec![ExtendedCommunity::new(0x0002_FDEA_0000_03E7)],
+    );
     // Type 0x01 (IPv4-administrator) Route Target: outside the /48's
     // type/subtype bits, so it must stay filtered.
     let uncovered = make_vpn_rib_route_with_rts(
@@ -1255,8 +1273,8 @@ async fn rtc_prefix_match_gates_by_masked_bits() {
     let mut out_rx = vpn_rtc_peer_up(&tx, IpAddr::V4(target)).await;
     drain_strict_vpn_rtc_initial_dump(&mut out_rx).await;
 
-    // /48 = origin AS 65001 (32 bits) + RT type 0x00 / subtype 0x02 (16 bits).
-    let nlri = rustbgpd_wire::RtcNlri::new(65001, 0x0002_0000_0000_0000, 48).unwrap();
+    // /48 = origin AS 65000 (32 bits) + RT type 0x00 / subtype 0x02 (16 bits).
+    let nlri = rustbgpd_wire::RtcNlri::new(65000, 0x0002_0000_0000_0000, 48).unwrap();
     tx.send(RibUpdate::RtcRoutesReceived {
         session_id: 0,
         peer: IpAddr::V4(target),
@@ -1273,7 +1291,7 @@ async fn rtc_prefix_match_gates_by_masked_bits() {
         .collect();
     assert_eq!(
         announced_keys, covered_keys,
-        "the /48 must admit the whole RT:65001:* family and nothing else"
+        "the /48 must admit two-octet-AS RTs across administrators and nothing else"
     );
 
     drop(tx);
@@ -1840,6 +1858,10 @@ fn sorted_evpn_keys(routes: &[EvpnRibRoute]) -> Vec<rustbgpd_wire::EvpnRouteKey>
 /// withdraw, a Type 4 route via its ES-Import RT, and a route with no RT
 /// only under the default NLRI. A peer without RTC is unfiltered.
 #[tokio::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one membership lifecycle pins empty, exact, withdrawal, ES-Import, and default filtering"
+)]
 async fn evpn_rtc_membership_filters_tenants_and_route_types() {
     let (tx, rx) = mpsc::channel(64);
     let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
@@ -1893,7 +1915,21 @@ async fn evpn_rtc_membership_filters_tenants_and_route_types() {
     let eor = next_update(&mut out_rx).await;
     assert!(eor.end_of_rib.contains(&(Afi::L2Vpn, Safi::Evpn)));
 
-    send_rtc_interest(&tx, target, &[100]).await;
+    // The receiving leaf originates interest in another leaf's RT:
+    // membership origin AS 65000 differs from RT administrator 65001.
+    let interest = make_rtc_rib_route_with_nlri(
+        target,
+        rustbgpd_wire::RtcNlri::new(65000, rt(100).as_u64(), 96).unwrap(),
+    );
+    let interest_key = interest.key();
+    tx.send(RibUpdate::RtcRoutesReceived {
+        session_id: 0,
+        peer: IpAddr::V4(target),
+        announced: vec![interest],
+        withdrawn: vec![],
+    })
+    .await
+    .unwrap();
     let update = next_update(&mut out_rx).await;
     assert_eq!(sorted_evpn_keys(&update.evpn_announce), vec![key_a]);
     assert_eq!(update.evpn_withdraw.len(), 0);
@@ -1907,7 +1943,7 @@ async fn evpn_rtc_membership_filters_tenants_and_route_types() {
         session_id: 0,
         peer: IpAddr::V4(target),
         announced: vec![],
-        withdrawn: vec![make_rtc_rib_route(target, 100, 100).key()],
+        withdrawn: vec![interest_key],
     })
     .await
     .unwrap();
@@ -2040,6 +2076,9 @@ fn es_import_rt_matches_membership_on_rt_bits() {
     assert!(membership(exact).matches_any(&[es_import]));
     assert!(!membership(other_mac).matches_any(&[es_import]));
     assert!(membership(origin_only).matches_any(&[es_import]));
+    assert!(membership(origin_only).matches_any(&[rt(100)]));
+    assert!(!membership(origin_only).matches_any(&[]));
+    assert!(!membership(exact).matches_any(&[rt(100)]));
     // MAC Mobility (type 0x06, sub-type 0x00) is not a Route Target.
     assert!(!membership(origin_only).matches_any(&[ExtendedCommunity::mac_mobility(false, 1)]));
 }

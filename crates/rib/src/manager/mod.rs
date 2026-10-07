@@ -469,8 +469,8 @@ impl RtcMembership {
     ///
     /// RFC 7432 §7.6 makes the EVPN ES-Import RT (type 0x06, sub-type
     /// 0x02) a Route Target that RT-Constrain MUST apply to. It has no
-    /// global administrator to stand in for the origin AS, so it matches
-    /// on the RT bits under the prefix alone (the ADR-0077 upgrade path).
+    /// two-part encoding, so it needs explicit recognition here; like
+    /// ordinary RTs, it matches on the RT bits under the prefix alone.
     fn matches_any(&self, rts: &[rustbgpd_wire::ExtendedCommunity]) -> bool {
         if self.has_default {
             return true;
@@ -1337,6 +1337,9 @@ pub(super) struct LiveSessionRecord {
     negotiated_llgr_families: Vec<(Afi, Safi)>,
     gr_context: Option<PeerSelectionDeferralContext>,
     exact_export_encoder: Option<Arc<dyn ExactExportEncoder>>,
+    /// This session has sent its L2VPN/EVPN End-of-RIB since the peer's
+    /// Adj-RIB-In was last discarded.
+    evpn_end_of_rib: bool,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -3475,6 +3478,14 @@ impl RibManager {
                     let selection_transition =
                         self.selection_deferral_end_of_rib(peer, session_id, (afi, safi));
                     self.handle_end_of_rib(peer, afi, safi);
+                    if (afi, safi) == (Afi::L2Vpn, Safi::Evpn)
+                        && let Some(record) =
+                            self.live_sessions.get_mut(&peer).and_then(|sessions| {
+                                sessions.iter_mut().find(|s| s.session_id == session_id)
+                            })
+                    {
+                        record.evpn_end_of_rib = true;
+                    }
                     if let Some(transition) = selection_transition {
                         self.apply_selection_deferral_transitions(
                             [transition],
@@ -3632,6 +3643,19 @@ impl RibManager {
             }
             RibUpdate::QueryEvpnRoutes { filter, reply } => {
                 queries::send_filtered_rows(self.loc_rib.iter_evpn(), filter.as_ref(), reply);
+            }
+            RibUpdate::QueryEvpnSessionsSynced { reply } => {
+                let evpn = (Afi::L2Vpn, Safi::Evpn);
+                // The newest live record is the one registration uses; an
+                // older collision-window record cannot vouch for it.
+                let peers: Vec<bool> = self
+                    .live_sessions
+                    .values()
+                    .filter_map(|sessions| sessions.last())
+                    .filter(|s| s.sendable_families.contains(&evpn))
+                    .map(|s| s.evpn_end_of_rib)
+                    .collect();
+                let _ = reply.send(!peers.is_empty() && peers.iter().all(|&synced| synced));
             }
             RibUpdate::QueryEvpnRoutesPage {
                 scope,

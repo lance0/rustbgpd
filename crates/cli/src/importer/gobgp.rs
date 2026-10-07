@@ -1,14 +1,19 @@
-//! GoBGP TOML configuration structural frontend.
+//! `GoBGP` TOML configuration structural frontend.
 //!
 //! Walks the parsed TOML value against an explicit whitelist of
 //! consumed keys; everything else is reported. Line numbers are
 //! recovered by scanning the source text for the first occurrence of
-//! the offending key/table header (GoBGP configs use explicit table
+//! the offending key/table header (`GoBGP` configs use explicit table
 //! headers, so this is reliable in practice; a miss reports without a
 //! line rather than guessing).
 
 use super::{GENERIC_GUIDANCE, Group, ImportError, Model, Neighbor, RPOL_GUIDANCE, Skip};
 
+/// Parse the supported structural configuration, recording unsupported keys.
+///
+/// # Errors
+///
+/// Returns [`ImportError::Parse`] if the input is not a valid TOML table.
 pub fn parse(input: &str) -> Result<Model, ImportError> {
     let value: toml::Value =
         toml::from_str(input).map_err(|e| ImportError::Parse(e.to_string()))?;
@@ -68,7 +73,13 @@ fn as_u32(value: &toml::Value) -> Option<u32> {
         toml::Value::Float(f)
             if f.is_finite() && f.fract() == 0.0 && *f >= 0.0 && *f <= f64::from(u32::MAX) =>
         {
-            Some(*f as u32)
+            #[expect(
+                clippy::cast_possible_truncation,
+                clippy::cast_sign_loss,
+                reason = "the match guard requires a finite integral value in the u32 range"
+            )]
+            let value = *f as u32;
+            Some(value)
         }
         _ => None,
     }
@@ -87,7 +98,7 @@ fn u32_field(model: &mut Model, field: &str, value: &toml::Value) -> Option<u32>
     parsed
 }
 
-/// As `u32_field`, for fields rustbgpd bounds to u16 (hold_time).
+/// As `u32_field`, for fields rustbgpd bounds to u16 (`hold_time`).
 fn u16_field(model: &mut Model, field: &str, value: &toml::Value) -> Option<u16> {
     let parsed = as_u32(value).and_then(|v| u16::try_from(v).ok());
     if parsed.is_none() {

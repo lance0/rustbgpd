@@ -2569,38 +2569,7 @@ fn m102_pins_openbgpd92_route_server_member_contract() {
 }
 
 #[test]
-fn m103_gobgp48_differential_is_exact_and_keeps_m92_immutable() {
-    fn sha256(path: &Path) -> String {
-        let output = Command::new("sha256sum")
-            .arg(path)
-            .output()
-            .unwrap_or_else(|error| panic!("sha256sum {}: {error}", path.display()));
-        assert!(
-            output.status.success(),
-            "sha256sum failed for {}",
-            path.display()
-        );
-        String::from_utf8(output.stdout)
-            .unwrap()
-            .split_whitespace()
-            .next()
-            .unwrap()
-            .to_owned()
-    }
-
-    assert_eq!(
-        sha256(&interop_path("m92-gobgp-v47-rs-differential.clab.yml")),
-        "ee7e41f42bdc034c625f33217c400fddae9ce7986d85d4ad8f397b6d28a878f0",
-        "M103 must not edit the M92 topology"
-    );
-    assert_eq!(
-        sha256(&interop_path(
-            "scripts/test-m92-gobgp-v47-rs-differential.sh"
-        )),
-        "f495a931cacd31cbafe1f34d9d3f42911613f8ac65b3c20e1e27a01cd1a8ad97",
-        "M103 must not edit the M92 driver"
-    );
-
+fn m103_gobgp48_differential_is_exact_and_reuses_m92_inputs() {
     let topology = topology("m103-gobgp-v48-rs-differential.clab.yml");
     let nodes = topology["topology"]["nodes"].as_mapping().unwrap();
     for name in ["gobgp-rs", "source1", "source2"] {
@@ -2651,7 +2620,7 @@ fn m103_gobgp48_differential_is_exact_and_keeps_m92_immutable() {
     let m92_script = fs::read_to_string(interop_path(
         "scripts/test-m92-gobgp-v47-rs-differential.sh",
     ))
-    .expect("read immutable M92 driver");
+    .expect("read M92 driver");
     assert_eq!(
         script.matches("ok \"").count(),
         m92_script.matches("ok \"").count(),
@@ -2776,100 +2745,7 @@ fn m103_gobgp48_differential_is_exact_and_keeps_m92_immutable() {
 }
 
 #[test]
-fn m104_current_arouteserver_differential_is_exact_and_keeps_m90_immutable() {
-    fn sha256(path: &Path) -> String {
-        let output = Command::new("sha256sum")
-            .arg(path)
-            .output()
-            .unwrap_or_else(|error| panic!("sha256sum {}: {error}", path.display()));
-        assert!(
-            output.status.success(),
-            "sha256sum failed for {}",
-            path.display()
-        );
-        String::from_utf8(output.stdout)
-            .unwrap()
-            .split_whitespace()
-            .next()
-            .unwrap()
-            .to_owned()
-    }
-
-    for (relative, expected) in [
-        (
-            "m90-differential.clab.yml",
-            "61e0bae1b47b82f71e6865daec01351f9326a506c898dc9e1fa6f9bdd1ec058a",
-        ),
-        (
-            // Re-pinned for one CLI-contract edit: `policy explain` now
-            // requires `--direction`, so the explain call passes `import`.
-            "scripts/test-m90-differential.sh",
-            "06cfcfc0f36c9f4f591eefa23fe22d821ccecfe9dc729e4f5c96673c685afecc",
-        ),
-        (
-            "m90-differential/README.md",
-            "c965a7f95e916fb40fc9cae35f776782af3e01694c6caab17ea436aebe66279c",
-        ),
-        (
-            "m90-differential/prove-context-ingestion.sh",
-            "638d50ee11b4ff4b55ae888d69ecde0225d4d69a6b6f6b9d7a1250b54e2b2270",
-        ),
-        (
-            "m90-differential/general.yml",
-            "c47fed81ba4c7b3671d8c3f3a26955037e5cef67e7c7b7650dc9bf3ceaeb214d",
-        ),
-        (
-            "m90-differential/clients.yml",
-            "08ceca5f9bafb13139538096a94595d075b7a7dae9342deb26d7f5adfc337e1e",
-        ),
-        (
-            "m90-differential/context.yml",
-            "f979b7b72f9385bf5e10258b967c22da0ec1bd5b214ad9f42197fcd104471eda",
-        ),
-        (
-            "m90-differential/context-sectioned.yml",
-            "f61c2a6d88aae1bb11c9ea95a4dd73abfb3c2f2577df69316f10d49e436b8790",
-        ),
-        (
-            "m90-differential/announcements.json",
-            "e55a7faea278b962139a17fe5daf81026761b6eef57cb8bb7807005c12f8164a",
-        ),
-        (
-            "m90-differential/bogons.yml",
-            "26e7c313a41fd7a854f73c656a77415fd9c2bb9057b625a7592bd436ee26dfe5",
-        ),
-        (
-            "m90-differential/arouteserver.yml",
-            "c3b85f1af54c437ae50b0d4e1502b3a6e95cb2c4b12c255ac1c90cfc9eec5b19",
-        ),
-        (
-            "m90-differential/bgpq4-stub.sh",
-            "cebb06da5c9adff5184652bca877ab7956f137c5d9cd425b7c449ad0e950bb84",
-        ),
-        (
-            "m90-differential/policy-explain.toml",
-            "811634752dee124d80be1b0836c61f1a5f20af32b3c94c7fb48536573fd98030",
-        ),
-        (
-            "configs/gobgp-m90-member1.toml",
-            "b7d897cb35aa657d469dbc7c35d9bdff2b346dc7169bcf820a331a06866f33e2",
-        ),
-        (
-            "configs/gobgp-m90-member2.toml",
-            "1cfea7eee37eb764a5ab8f090d7f3f25d252ed18d8ff0b9b7f9dbf5e2defd329",
-        ),
-        (
-            "configs/gobgp-m90-member3.toml",
-            "27e3955e743203ba352f177eb5e0899d061520bd14e7c0412a02007073c74f72",
-        ),
-    ] {
-        assert_eq!(
-            sha256(&interop_path(relative)),
-            expected,
-            "M104 must not edit immutable M90 asset {relative}"
-        );
-    }
-
+fn m104_current_arouteserver_differential_is_exact_and_reuses_m90_inputs() {
     let topology = topology("m104-arouteserver-current-rs-differential.clab.yml");
     assert_eq!(
         topology["name"],

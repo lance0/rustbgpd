@@ -2932,6 +2932,11 @@ impl rustbgpd_api::proto::policy_service_server::PolicyService for MockPolicySer
             }
         };
         Ok(Response::new(server_proto::GetPolicyStatsResponse {
+            incomplete_peer_addresses: if req.allow_partial {
+                vec!["192.0.2.1".into()]
+            } else {
+                Vec::new()
+            },
             chains,
             datasets: vec![server_proto::PolicyDatasetStatus {
                 name: "customers".to_string(),
