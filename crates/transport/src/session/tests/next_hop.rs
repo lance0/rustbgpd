@@ -1950,36 +1950,54 @@ async fn link_local_next_hop_peer_up_and_reconnect_update_sendable_families() {
     }
 }
 
-/// Import a body IPv4 route through `process_update` under an import policy
-/// that rewrites the next hop, returning it as the RIB stores it.
-async fn imported_with_next_hop_action(action: rustbgpd_policy::NextHopAction) -> Route {
+/// A permit statement rewriting the next hop, optionally for one prefix and
+/// with a `LOCAL_PREF` (a distinct modification set).
+fn next_hop_statement(
+    action: rustbgpd_policy::NextHopAction,
+    prefix: Option<Ipv4Prefix>,
+    local_pref: Option<u32>,
+) -> PolicyStatement {
+    PolicyStatement {
+        prefix: prefix.map(Prefix::V4),
+        ge: None,
+        le: None,
+        action: PolicyAction::Permit,
+        match_community: vec![],
+        match_as_path: None,
+        match_neighbor_set: None,
+        match_route_type: None,
+        match_evpn_route_type: None,
+        match_rpki_validation: None,
+        match_aspa_validation: None,
+        match_as_path_length_ge: None,
+        match_as_path_length_le: None,
+        match_local_pref_ge: None,
+        match_local_pref_le: None,
+        match_med_ge: None,
+        match_med_le: None,
+        match_next_hop: None,
+        modifications: RouteModifications {
+            set_next_hop: Some(action),
+            set_local_pref: local_pref,
+            ..Default::default()
+        },
+    }
+}
+
+fn import_prefix(third_octet: u8) -> Ipv4Prefix {
+    Ipv4Prefix::new(Ipv4Addr::new(198, 51, third_octet, 0), 24)
+}
+
+/// Import one body IPv4 UPDATE carrying `prefixes` through `process_update`
+/// under `statements`, returning the routes as the RIB stores them.
+async fn import_body_update(
+    statements: Vec<PolicyStatement>,
+    prefixes: &[Ipv4Prefix],
+) -> Vec<Route> {
     let (mut session, mut rib_rx) = make_test_session_with_rib(65001, 65002);
     session.negotiated = Some(Arc::new(negotiated_session(65002, false)));
     session.install_import_policy(Some(PolicyChain::new(vec![Policy {
-        entries: vec![PolicyStatement {
-            prefix: None,
-            ge: None,
-            le: None,
-            action: PolicyAction::Permit,
-            match_community: vec![],
-            match_as_path: None,
-            match_neighbor_set: None,
-            match_route_type: None,
-            match_evpn_route_type: None,
-            match_rpki_validation: None,
-            match_aspa_validation: None,
-            match_as_path_length_ge: None,
-            match_as_path_length_le: None,
-            match_local_pref_ge: None,
-            match_local_pref_le: None,
-            match_med_ge: None,
-            match_med_le: None,
-            match_next_hop: None,
-            modifications: RouteModifications {
-                set_next_hop: Some(action),
-                ..Default::default()
-            },
-        }],
+        entries: statements,
         default_action: PolicyAction::Deny,
     }])));
     let attrs = vec![
@@ -1989,28 +2007,56 @@ async fn imported_with_next_hop_action(action: rustbgpd_policy::NextHopAction) -
         }),
         PathAttribute::NextHop(Ipv4Addr::new(10, 0, 0, 2)),
     ];
-    let announced = [
-        Ipv4NlriEntry {
-            path_id: 0,
-            prefix: Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 0), 24),
-        },
-        Ipv4NlriEntry {
-            path_id: 0,
-            prefix: Ipv4Prefix::new(Ipv4Addr::new(198, 51, 101, 0), 24),
-        },
-    ];
+    let announced: Vec<_> = prefixes
+        .iter()
+        .map(|&prefix| Ipv4NlriEntry { path_id: 0, prefix })
+        .collect();
     let update = UpdateMessage::build(&announced, &[], &attrs, true, false, Ipv4UnicastMode::Body);
     session.process_update(update).await;
     let RibUpdate::RoutesReceived { announced, .. } = rib_rx.try_recv().unwrap() else {
         panic!("expected RoutesReceived");
     };
-    assert_eq!(announced.len(), 2);
+    assert_eq!(announced.len(), prefixes.len());
+    announced
+}
+
+/// Import a body IPv4 route under a policy that rewrites every next hop.
+async fn imported_with_next_hop_action(action: rustbgpd_policy::NextHopAction) -> Route {
+    let routes = import_body_update(
+        vec![next_hop_statement(action, None, None)],
+        &[import_prefix(100), import_prefix(101)],
+    )
+    .await;
     // Both NLRI of one UPDATE keep sharing one stored attribute set.
-    assert!(Arc::ptr_eq(
-        &announced[0].attributes,
-        &announced[1].attributes
-    ));
-    announced.into_iter().next().unwrap()
+    assert!(Arc::ptr_eq(&routes[0].attributes, &routes[1].attributes));
+    routes.into_iter().next().unwrap()
+}
+
+/// Prefix-dependent import outcomes interleaved A/B/A in one UPDATE still
+/// share one aligned attribute set per outcome.
+#[tokio::test]
+async fn interleaved_import_outcomes_share_aligned_next_hop_sets() {
+    use rustbgpd_policy::NextHopAction;
+
+    let (a, b) = (import_prefix(100), import_prefix(101));
+    let routes = import_body_update(
+        vec![
+            next_hop_statement(NextHopAction::Self_, Some(a), None),
+            next_hop_statement(NextHopAction::Self_, Some(b), Some(200)),
+            next_hop_statement(NextHopAction::Self_, Some(import_prefix(102)), None),
+        ],
+        &[a, b, import_prefix(102)],
+    )
+    .await;
+    for route in &routes {
+        assert!(
+            route
+                .attributes
+                .contains(&PathAttribute::NextHop(Ipv4Addr::new(10, 0, 0, 1)))
+        );
+    }
+    assert!(!Arc::ptr_eq(&routes[0].attributes, &routes[1].attributes));
+    assert!(Arc::ptr_eq(&routes[0].attributes, &routes[2].attributes));
 }
 
 /// Peers that pass the next hop through (iBGP, route-server clients) must

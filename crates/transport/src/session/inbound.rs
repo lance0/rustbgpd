@@ -694,8 +694,9 @@ const IMPORT_ATTR_MEMO_SLOTS: usize = 8;
 pub struct ImportAttrMemo {
     entries: Vec<ImportAttrMemoEntry>,
     received_as_path: Option<Arc<Option<rustbgpd_wire::AsPath>>>,
-    /// Last [`Self::align_next_hop`] result: source set, next hop, aligned set.
-    aligned: Option<(Arc<AttrSet>, IpAddr, Arc<AttrSet>)>,
+    /// [`Self::align_next_hop`] results, bounded like `entries`: source set,
+    /// resolved next hop, aligned set. Entries pin the source `Arc`.
+    aligned: Vec<(Arc<AttrSet>, IpAddr, Arc<AttrSet>)>,
 }
 
 /// Canonical source, modifications, and the resulting attributes and
@@ -738,7 +739,7 @@ impl ImportAttrMemo {
     /// resolved by the session; passthrough exports (iBGP, route-server
     /// clients) send the stored attribute, so it must not keep the received
     /// address. An IPv6 next hop drops the attribute, as MP storage does.
-    /// Every NLRI of one UPDATE shares the aligned set.
+    /// NLRI of one UPDATE with the same import outcome share the aligned set.
     fn align_next_hop(&mut self, attrs: Arc<AttrSet>, next_hop: IpAddr) -> Arc<AttrSet> {
         let stale = attrs
             .iter()
@@ -746,10 +747,9 @@ impl ImportAttrMemo {
         if !stale {
             return attrs;
         }
-        if let Some((source, aligned_for, aligned)) = &self.aligned
-            && Arc::ptr_eq(source, &attrs)
-            && *aligned_for == next_hop
-        {
+        if let Some((_, _, aligned)) = self.aligned.iter().find(|(source, aligned_for, _)| {
+            Arc::ptr_eq(source, &attrs) && *aligned_for == next_hop
+        }) {
             return Arc::clone(aligned);
         }
         let mut owned = attrs.to_vec();
@@ -764,7 +764,9 @@ impl ImportAttrMemo {
             IpAddr::V6(_) => owned.retain(|attr| !matches!(attr, PathAttribute::NextHop(_))),
         }
         let aligned = AttrSet::new(owned);
-        self.aligned = Some((attrs, next_hop, Arc::clone(&aligned)));
+        if self.aligned.len() < IMPORT_ATTR_MEMO_SLOTS {
+            self.aligned.push((attrs, next_hop, Arc::clone(&aligned)));
+        }
         aligned
     }
 
