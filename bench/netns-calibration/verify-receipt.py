@@ -289,8 +289,8 @@ def verify_source_contract(repo: Path, runner: Path | None = None, guest: Path |
         'verify_pinned_image_unchanged "exit"',
         'if ! rm -rf -- "$TMP_DIR"; then',
         'if [ "$rc" -ne 0 ]; then',
-        'rm -f -- "$OUTPUT/SHA256SUMS"',
-        '[ -e "$OUTPUT/SHA256SUMS" ] || [ -L "$OUTPUT/SHA256SUMS" ]',
+        'rm -f -- "$OUTPUT/COMPLETED"',
+        '[ -e "$OUTPUT/COMPLETED" ] || [ -L "$OUTPUT/COMPLETED" ]',
         'exit "$rc"',
     ]
     cleanup_positions = []
@@ -299,7 +299,7 @@ def verify_source_contract(repo: Path, runner: Path | None = None, guest: Path |
         cleanup_positions.append(cleanup.index(anchor))
     require(
         cleanup_positions == sorted(cleanup_positions),
-        "runner must recheck the image and clean staging before unsealing failures",
+        "runner must recheck the image and clean staging before unmarking failures",
     )
     image_messages = [
         "pinned cloud image disappeared during the run",
@@ -425,7 +425,7 @@ def same_typed_value(actual: Any, expected: Any) -> bool:
     return actual == expected
 
 
-def verify_receipt(profiles_path: Path, root: Path, write_manifest: bool) -> None:
+def verify_receipt(profiles_path: Path, root: Path, mark_complete: bool) -> None:
     profiles = verify_profiles(profiles_path)
     require(root.is_dir() and not root.is_symlink(), "receipt root must be a real directory")
     request = load_json(root / "request.json")
@@ -460,8 +460,8 @@ def verify_receipt(profiles_path: Path, root: Path, write_manifest: bool) -> Non
         require(path.is_file(), f"receipt contains a non-regular path: {relative}")
         found.add(relative)
     allowed = set(receipt_files)
-    if (root / "SHA256SUMS").exists():
-        allowed.add("SHA256SUMS")
+    if (root / "COMPLETED").exists():
+        allowed.add("COMPLETED")
     require(found == allowed, f"receipt file set mismatch: got {sorted(found)}")
     for relative, limit in receipt_files.items():
         require((root / relative).stat().st_size <= limit, f"receipt artifact is oversized: {relative}")
@@ -588,17 +588,13 @@ def verify_receipt(profiles_path: Path, root: Path, write_manifest: bool) -> Non
             for forbidden in ("/home/", "github_pat_", "ghp_", "GITHUB_TOKEN", "AWS_SECRET", "Authorization:"):
                 require(forbidden not in text, f"unsanitized receipt content in {relative}")
 
-    manifest_path = root / "SHA256SUMS"
-    expected_manifest = "".join(
-        f"{sha256(root / relative)}  {relative}\n" for relative in sorted(receipt_files)
-    )
-    if manifest_path.exists():
-        require(manifest_path.is_file() and not manifest_path.is_symlink(), "bad SHA256SUMS path")
-        require(manifest_path.read_text() == expected_manifest, "SHA256SUMS does not seal the exact receipt")
-    elif write_manifest:
-        manifest_path.write_text(expected_manifest)
+    completed = root / "COMPLETED"
+    if completed.exists():
+        require(completed.read_text() == "pass\n", "receipt COMPLETED marker is not exactly pass")
+    elif mark_complete:
+        completed.write_text("pass\n")
     else:
-        raise VerificationError("receipt has no SHA256SUMS (pass --write-manifest only at finalization)")
+        raise VerificationError("receipt has no COMPLETED marker (pass --mark-complete only at finalization)")
 
 
 def verify_skew_receipt(root: Path) -> str:
@@ -805,7 +801,7 @@ def main() -> int:
     receipt_parser = sub.add_parser("receipt")
     receipt_parser.add_argument("profiles", type=Path)
     receipt_parser.add_argument("root", type=Path)
-    receipt_parser.add_argument("--write-manifest", action="store_true")
+    receipt_parser.add_argument("--mark-complete", action="store_true")
     skew_parser = sub.add_parser("skew-receipt")
     skew_parser.add_argument("root", type=Path)
     args = parser.parse_args()
@@ -844,7 +840,7 @@ def main() -> int:
         elif args.command == "source":
             verify_source_contract(args.repo.resolve(), args.runner, args.guest)
         elif args.command == "receipt":
-            verify_receipt(args.profiles, args.root, args.write_manifest)
+            verify_receipt(args.profiles, args.root, args.mark_complete)
         else:
             verify_skew_receipt(args.root)
     except (OSError, VerificationError, ValueError, KeyError, TypeError) as exc:

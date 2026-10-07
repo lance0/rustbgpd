@@ -109,9 +109,9 @@ cleanup() {
         rc=1
     fi
     if [ "$rc" -ne 0 ]; then
-        rm -f -- "$OUTPUT/SHA256SUMS" || rc=1
-        if [ -e "$OUTPUT/SHA256SUMS" ] || [ -L "$OUTPUT/SHA256SUMS" ]; then
-            echo "failed to unseal unsuccessful pinned-kernel receipt" >&2
+        rm -f -- "$OUTPUT/COMPLETED" || rc=1
+        if [ -e "$OUTPUT/COMPLETED" ] || [ -L "$OUTPUT/COMPLETED" ]; then
+            echo "failed to unmark unsuccessful pinned-kernel receipt" >&2
             rc=1
         fi
     fi
@@ -302,5 +302,5 @@ QEMU_GROUP_PID=''
 }
 
 verify_pinned_image_unchanged "pre-seal"
-python3 "$VERIFIER" receipt "$PROFILES" "$OUTPUT" --write-manifest
+python3 "$VERIFIER" receipt "$PROFILES" "$OUTPUT" --mark-complete
 echo "pinned-kernel netns smoke passed: $OUTPUT"
