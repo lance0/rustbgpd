@@ -1,0 +1,99 @@
+{
+  "measured_utc": {
+    "date": "2026-10-07",
+    "first_cell_start": "2026-10-07T20:28:11Z",
+    "last_cell_end": "2026-10-07T20:39:18Z"
+  },
+  "source": {
+    "commit": "6a22733879ccecb64c2b9e27dc799d3183549072",
+    "tree": "17511e24adca78df97ba246dbed3d464840404c2",
+    "runner": "docs/perf/run-explain-cache-variant.sh",
+    "runner_git_blob": "edc0c52e4a66d7843e06793f058e6bb57e099132",
+    "clean_tree_checks": "runner refusal before the run and HEAD/tree/status checks after each cell all passed"
+  },
+  "build": {
+    "rustc": "1.99.0 (b940084d7 2026-09-28)",
+    "cargo": "1.99.0 (5f94df478 2026-08-27)",
+    "llvm": "23.1.1",
+    "daemon_and_cli_profile": "release",
+    "harness_profile": "scale",
+    "jobs": "cargo default",
+    "commands": [
+      "cargo build --profile release --locked -p rustbgpd -p rustbgpctl",
+      "cargo build --profile scale --locked --manifest-path bench/scale/reloadstall/Cargo.toml"
+    ],
+    "note": "Both commands ran once before the first cell; each cell's identical runner build was then a no-op.",
+    "sha256": {
+      "rustbgpd": "2ed4054c3c906e00ffe6d6125eef6bb5b95e4c386726115609c4ce3198a9e868",
+      "rbgp": "ba11b631fcdf1a1728c48f8be0c0b5b927d9af60ccb72fcef24a7827894eb94d",
+      "reloadstall": "be93f4ad5ff2000dce935ae34249b2952eb0d432981cda5a1a407fcaf36c03a3"
+    },
+    "identical_across_cells": true
+  },
+  "host": {
+    "kernel": "Linux 7.0.0-30-generic x86_64",
+    "cpu": "AMD Ryzen Threadripper 7970X 32-Cores",
+    "online_cpus": 64,
+    "memtotal_kib": 131375844,
+    "swap_devices": "none",
+    "cgroup": "v2, user-delegated memory controller",
+    "allocator": "jemalloc (release default)"
+  },
+  "runner_inputs": {
+    "common": {
+      "RELOADS": 0,
+      "CONTROL_SECS": 10,
+      "COLD_CAP": 600,
+      "OVERALL_CAP": 1500,
+      "RSS_LIMIT_KIB": 16777216,
+      "DHAT": 0,
+      "PROFILE": "release",
+      "PORT": 1790,
+      "METRICS_PORT": 9179
+    },
+    "cells": {
+      "a-off": "PEERS=2 TOTAL=2000000 EXPLAIN=false",
+      "b-4096": "PEERS=2 TOTAL=2000000 EXPLAIN=true CACHE_SIZE=4096",
+      "c-262144": "PEERS=2 TOTAL=2000000 EXPLAIN=true CACHE_SIZE=262144",
+      "d-1048576": "PEERS=2 TOTAL=2000000 EXPLAIN=true CACHE_SIZE=1048576",
+      "e-1000x400-4096": "PEERS=1000 TOTAL=400000 EXPLAIN=true CACHE_SIZE=4096",
+      "f-1000x400-1048576": "PEERS=1000 TOTAL=400000 EXPLAIN=true CACHE_SIZE=1048576"
+    },
+    "order": [
+      "a-off-r1",
+      "b-4096-r1",
+      "c-262144-r1",
+      "d-1048576-r1",
+      "e-1000x400-4096",
+      "f-1000x400-1048576",
+      "a-off-r2",
+      "b-4096-r2",
+      "c-262144-r2",
+      "d-1048576-r2"
+    ]
+  },
+  "execution": {
+    "host_lock": "An outer flock held the shared host lock from before the build until after the last cell. RUSTBGPD_HOST_LOCK pointed each runner invocation's own exclusive lock at a campaign-private file, because a second open of the held shared lock file would conflict with the outer holder.",
+    "scheduling_wait": "Before each cell the campaign waited, up to one hour, for no cargo/rustc/rustbgpd/reloadstall/perf/rrharness/bgperf process and a one-minute load below 1.8. Every wait succeeded. The runner's own prebuild/postbuild preflight then gated unchanged.",
+    "runner_preflight": "All 20 runner preflight rows passed: load 1.52-1.77, 64/64 performance governors, no competitors, zero swap-in/out, free ports, at least 100 GiB available memory.",
+    "foreign_process_samples": "The 1 Hz wrapper competitor sample saw one cargo process 1.6 s after cold convergence in a-off-r1 (after its transient peak) and the runner's own no-op cargo before daemon start in f-1000x400-1048576. No cell was excluded.",
+    "exclusions": "none; every cell ran once and is reported",
+    "cleanup": "Every runner removed its runtime directory; all scopes, daemon and harness processes exited; ports 1790/9179 were free after the campaign."
+  },
+  "memory_method": {
+    "primary": "daemon cgroup memory.peak. Each cell ran in a transient delegated user scope with MemorySwapMax=0, split into runner/ and daemon/ leaf cgroups. A 10 ms watcher moved the measured daemon (not its --check invocation) into daemon/ with memory.swap.max=0 as soon as it appeared.",
+    "uncounted_startup": "Memory charged before the move stays in runner/. RssAnon at the move was 5.0-5.2 MiB for two-peer cells and 14.9-17.6 MiB for 1,000-peer cells (cells.csv).",
+    "secondary": "runner-recorded settled /proc VmRSS and VmHWM, 1 Hz process-tree RSS median after convergence, and jemalloc allocated/resident gauges from the settled metrics scrape.",
+    "harness": "runner/ peak includes the reloadstall harness, samplers and the no-op build; it is reported separately as harness_cgroup_peak_bytes."
+  },
+  "published_scripts": {
+    "cgroup-cell-wrapper.sh": {
+      "as_run_sha256": "fb0e3a4322e150836f8022ffc1d0ac68e97f3492ef2f456e4c86ba74813484b8",
+      "published_identical": true
+    },
+    "campaign.sh": {
+      "as_run_sha256": "119825e532209f1f8451e860b6a4b51a88d6a65110e1664ab6cbb0959b893a2a",
+      "published_differences": "local output and worktree paths became required BASE/WT inputs, the private scope-unit prefix became explain-cache-, and the wrapper is found beside the script"
+    }
+  }
+}

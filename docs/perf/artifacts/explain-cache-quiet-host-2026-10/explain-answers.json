@@ -1,0 +1,850 @@
+{
+  "a-off-r1": {
+    "early": {
+      "cli_status": 1,
+      "answer": {
+        "peer_address": "127.1.0.1",
+        "prefix": "20.0.0.0/24",
+        "afi_safi": "ipv4-unicast",
+        "current_policy_generation": 0,
+        "cache_size": null,
+        "evictions_since_reset": null,
+        "matches": [
+          {
+            "outcome": "cache_disabled",
+            "path_id": 0,
+            "matched_policy": null,
+            "rpki_validation": null,
+            "aspa_validation": null,
+            "modifications": null,
+            "evaluated_at_unix_ns": null,
+            "policy_generation": null,
+            "statements": []
+          }
+        ]
+      }
+    },
+    "late": {
+      "cli_status": 1,
+      "answer": {
+        "peer_address": "127.1.0.1",
+        "prefix": "35.66.63.0/24",
+        "afi_safi": "ipv4-unicast",
+        "current_policy_generation": 0,
+        "cache_size": null,
+        "evictions_since_reset": null,
+        "matches": [
+          {
+            "outcome": "cache_disabled",
+            "path_id": 0,
+            "matched_policy": null,
+            "rpki_validation": null,
+            "aspa_validation": null,
+            "modifications": null,
+            "evaluated_at_unix_ns": null,
+            "policy_generation": null,
+            "statements": []
+          }
+        ]
+      }
+    }
+  },
+  "b-4096-r1": {
+    "early": {
+      "cli_status": 0,
+      "answer": {
+        "peer_address": "127.1.0.1",
+        "prefix": "20.0.0.0/24",
+        "afi_safi": "ipv4-unicast",
+        "current_policy_generation": 0,
+        "cache_size": 4096,
+        "evictions_since_reset": 995904,
+        "matches": [
+          {
+            "outcome": "evicted",
+            "path_id": 0,
+            "matched_policy": null,
+            "rpki_validation": null,
+            "aspa_validation": null,
+            "modifications": null,
+            "evaluated_at_unix_ns": null,
+            "policy_generation": null,
+            "statements": []
+          }
+        ]
+      }
+    },
+    "late": {
+      "cli_status": 0,
+      "answer": {
+        "peer_address": "127.1.0.1",
+        "prefix": "35.66.63.0/24",
+        "afi_safi": "ipv4-unicast",
+        "current_policy_generation": 0,
+        "cache_size": 4096,
+        "evictions_since_reset": 995904,
+        "matches": [
+          {
+            "outcome": "permit",
+            "path_id": 0,
+            "matched_policy": "chain_default_permit",
+            "rpki_validation": "not_found",
+            "aspa_validation": "unknown",
+            "modifications": {
+              "set_local_pref": null,
+              "set_med": null,
+              "set_next_hop": null,
+              "communities_add": [],
+              "communities_remove": [],
+              "extended_communities_add": [],
+              "extended_communities_remove": [],
+              "large_communities_add": [],
+              "large_communities_remove": [],
+              "as_path_prepend_asn": null,
+              "as_path_prepend_count": null
+            },
+            "evaluated_at_unix_ns": 1791404947536398982,
+            "policy_generation": 0,
+            "statements": [
+              {
+                "policy_index": 0,
+                "policy_name": "member-in",
+                "statement_index": 1,
+                "default_action": false,
+                "action": "permit",
+                "matched_conditions": [
+                  "guard true"
+                ],
+                "modifications": [],
+                "term": "default",
+                "term_traces": [
+                  "term drop-blocked: route.prefix == 192.0.2.0/24 => reject [not matched]",
+                  "term default: true => accept [matched]"
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    }
+  },
+  "c-262144-r1": {
+    "early": {
+      "cli_status": 0,
+      "answer": {
+        "peer_address": "127.1.0.1",
+        "prefix": "20.0.0.0/24",
+        "afi_safi": "ipv4-unicast",
+        "current_policy_generation": 0,
+        "cache_size": 262144,
+        "evictions_since_reset": 737856,
+        "matches": [
+          {
+            "outcome": "evicted",
+            "path_id": 0,
+            "matched_policy": null,
+            "rpki_validation": null,
+            "aspa_validation": null,
+            "modifications": null,
+            "evaluated_at_unix_ns": null,
+            "policy_generation": null,
+            "statements": []
+          }
+        ]
+      }
+    },
+    "late": {
+      "cli_status": 0,
+      "answer": {
+        "peer_address": "127.1.0.1",
+        "prefix": "35.66.63.0/24",
+        "afi_safi": "ipv4-unicast",
+        "current_policy_generation": 0,
+        "cache_size": 262144,
+        "evictions_since_reset": 737856,
+        "matches": [
+          {
+            "outcome": "permit",
+            "path_id": 0,
+            "matched_policy": "chain_default_permit",
+            "rpki_validation": "not_found",
+            "aspa_validation": "unknown",
+            "modifications": {
+              "set_local_pref": null,
+              "set_med": null,
+              "set_next_hop": null,
+              "communities_add": [],
+              "communities_remove": [],
+              "extended_communities_add": [],
+              "extended_communities_remove": [],
+              "large_communities_add": [],
+              "large_communities_remove": [],
+              "as_path_prepend_asn": null,
+              "as_path_prepend_count": null
+            },
+            "evaluated_at_unix_ns": 1791404968239156756,
+            "policy_generation": 0,
+            "statements": [
+              {
+                "policy_index": 0,
+                "policy_name": "member-in",
+                "statement_index": 1,
+                "default_action": false,
+                "action": "permit",
+                "matched_conditions": [
+                  "guard true"
+                ],
+                "modifications": [],
+                "term": "default",
+                "term_traces": [
+                  "term drop-blocked: route.prefix == 192.0.2.0/24 => reject [not matched]",
+                  "term default: true => accept [matched]"
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    }
+  },
+  "d-1048576-r1": {
+    "early": {
+      "cli_status": 0,
+      "answer": {
+        "peer_address": "127.1.0.1",
+        "prefix": "20.0.0.0/24",
+        "afi_safi": "ipv4-unicast",
+        "current_policy_generation": 0,
+        "cache_size": 1048576,
+        "evictions_since_reset": 0,
+        "matches": [
+          {
+            "outcome": "permit",
+            "path_id": 0,
+            "matched_policy": "chain_default_permit",
+            "rpki_validation": "not_found",
+            "aspa_validation": "unknown",
+            "modifications": {
+              "set_local_pref": null,
+              "set_med": null,
+              "set_next_hop": null,
+              "communities_add": [],
+              "communities_remove": [],
+              "extended_communities_add": [],
+              "extended_communities_remove": [],
+              "large_communities_add": [],
+              "large_communities_remove": [],
+              "as_path_prepend_asn": null,
+              "as_path_prepend_count": null
+            },
+            "evaluated_at_unix_ns": 1791404987741365228,
+            "policy_generation": 0,
+            "statements": [
+              {
+                "policy_index": 0,
+                "policy_name": "member-in",
+                "statement_index": 1,
+                "default_action": false,
+                "action": "permit",
+                "matched_conditions": [
+                  "guard true"
+                ],
+                "modifications": [],
+                "term": "default",
+                "term_traces": [
+                  "term drop-blocked: route.prefix == 192.0.2.0/24 => reject [not matched]",
+                  "term default: true => accept [matched]"
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    },
+    "late": {
+      "cli_status": 0,
+      "answer": {
+        "peer_address": "127.1.0.1",
+        "prefix": "35.66.63.0/24",
+        "afi_safi": "ipv4-unicast",
+        "current_policy_generation": 0,
+        "cache_size": 1048576,
+        "evictions_since_reset": 0,
+        "matches": [
+          {
+            "outcome": "permit",
+            "path_id": 0,
+            "matched_policy": "chain_default_permit",
+            "rpki_validation": "not_found",
+            "aspa_validation": "unknown",
+            "modifications": {
+              "set_local_pref": null,
+              "set_med": null,
+              "set_next_hop": null,
+              "communities_add": [],
+              "communities_remove": [],
+              "extended_communities_add": [],
+              "extended_communities_remove": [],
+              "large_communities_add": [],
+              "large_communities_remove": [],
+              "as_path_prepend_asn": null,
+              "as_path_prepend_count": null
+            },
+            "evaluated_at_unix_ns": 1791404988748308115,
+            "policy_generation": 0,
+            "statements": [
+              {
+                "policy_index": 0,
+                "policy_name": "member-in",
+                "statement_index": 1,
+                "default_action": false,
+                "action": "permit",
+                "matched_conditions": [
+                  "guard true"
+                ],
+                "modifications": [],
+                "term": "default",
+                "term_traces": [
+                  "term drop-blocked: route.prefix == 192.0.2.0/24 => reject [not matched]",
+                  "term default: true => accept [matched]"
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    }
+  },
+  "e-1000x400-4096": {
+    "early": {
+      "cli_status": 0,
+      "answer": {
+        "peer_address": "127.1.0.1",
+        "prefix": "20.0.0.0/24",
+        "afi_safi": "ipv4-unicast",
+        "current_policy_generation": 0,
+        "cache_size": 4096,
+        "evictions_since_reset": 0,
+        "matches": [
+          {
+            "outcome": "permit",
+            "path_id": 0,
+            "matched_policy": "chain_default_permit",
+            "rpki_validation": "not_found",
+            "aspa_validation": "unknown",
+            "modifications": {
+              "set_local_pref": null,
+              "set_med": null,
+              "set_next_hop": null,
+              "communities_add": [],
+              "communities_remove": [],
+              "extended_communities_add": [],
+              "extended_communities_remove": [],
+              "large_communities_add": [],
+              "large_communities_remove": [],
+              "as_path_prepend_asn": null,
+              "as_path_prepend_count": null
+            },
+            "evaluated_at_unix_ns": 1791405009576174164,
+            "policy_generation": 0,
+            "statements": [
+              {
+                "policy_index": 0,
+                "policy_name": "member-in",
+                "statement_index": 1,
+                "default_action": false,
+                "action": "permit",
+                "matched_conditions": [
+                  "guard true"
+                ],
+                "modifications": [],
+                "term": "default",
+                "term_traces": [
+                  "term drop-blocked: route.prefix == 192.0.2.0/24 => reject [not matched]",
+                  "term default: true => accept [matched]"
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    },
+    "late": {
+      "cli_status": 0,
+      "answer": {
+        "peer_address": "127.1.0.1",
+        "prefix": "20.1.143.0/24",
+        "afi_safi": "ipv4-unicast",
+        "current_policy_generation": 0,
+        "cache_size": 4096,
+        "evictions_since_reset": 0,
+        "matches": [
+          {
+            "outcome": "permit",
+            "path_id": 0,
+            "matched_policy": "chain_default_permit",
+            "rpki_validation": "not_found",
+            "aspa_validation": "unknown",
+            "modifications": {
+              "set_local_pref": null,
+              "set_med": null,
+              "set_next_hop": null,
+              "communities_add": [],
+              "communities_remove": [],
+              "extended_communities_add": [],
+              "extended_communities_remove": [],
+              "large_communities_add": [],
+              "large_communities_remove": [],
+              "as_path_prepend_asn": null,
+              "as_path_prepend_count": null
+            },
+            "evaluated_at_unix_ns": 1791405009576267735,
+            "policy_generation": 0,
+            "statements": [
+              {
+                "policy_index": 0,
+                "policy_name": "member-in",
+                "statement_index": 1,
+                "default_action": false,
+                "action": "permit",
+                "matched_conditions": [
+                  "guard true"
+                ],
+                "modifications": [],
+                "term": "default",
+                "term_traces": [
+                  "term drop-blocked: route.prefix == 192.0.2.0/24 => reject [not matched]",
+                  "term default: true => accept [matched]"
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    }
+  },
+  "f-1000x400-1048576": {
+    "early": {
+      "cli_status": 0,
+      "answer": {
+        "peer_address": "127.1.0.1",
+        "prefix": "20.0.0.0/24",
+        "afi_safi": "ipv4-unicast",
+        "current_policy_generation": 0,
+        "cache_size": 1048576,
+        "evictions_since_reset": 0,
+        "matches": [
+          {
+            "outcome": "permit",
+            "path_id": 0,
+            "matched_policy": "chain_default_permit",
+            "rpki_validation": "not_found",
+            "aspa_validation": "unknown",
+            "modifications": {
+              "set_local_pref": null,
+              "set_med": null,
+              "set_next_hop": null,
+              "communities_add": [],
+              "communities_remove": [],
+              "extended_communities_add": [],
+              "extended_communities_remove": [],
+              "large_communities_add": [],
+              "large_communities_remove": [],
+              "as_path_prepend_asn": null,
+              "as_path_prepend_count": null
+            },
+            "evaluated_at_unix_ns": 1791405451889742121,
+            "policy_generation": 0,
+            "statements": [
+              {
+                "policy_index": 0,
+                "policy_name": "member-in",
+                "statement_index": 1,
+                "default_action": false,
+                "action": "permit",
+                "matched_conditions": [
+                  "guard true"
+                ],
+                "modifications": [],
+                "term": "default",
+                "term_traces": [
+                  "term drop-blocked: route.prefix == 192.0.2.0/24 => reject [not matched]",
+                  "term default: true => accept [matched]"
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    },
+    "late": {
+      "cli_status": 0,
+      "answer": {
+        "peer_address": "127.1.0.1",
+        "prefix": "20.1.143.0/24",
+        "afi_safi": "ipv4-unicast",
+        "current_policy_generation": 0,
+        "cache_size": 1048576,
+        "evictions_since_reset": 0,
+        "matches": [
+          {
+            "outcome": "permit",
+            "path_id": 0,
+            "matched_policy": "chain_default_permit",
+            "rpki_validation": "not_found",
+            "aspa_validation": "unknown",
+            "modifications": {
+              "set_local_pref": null,
+              "set_med": null,
+              "set_next_hop": null,
+              "communities_add": [],
+              "communities_remove": [],
+              "extended_communities_add": [],
+              "extended_communities_remove": [],
+              "large_communities_add": [],
+              "large_communities_remove": [],
+              "as_path_prepend_asn": null,
+              "as_path_prepend_count": null
+            },
+            "evaluated_at_unix_ns": 1791405451890006416,
+            "policy_generation": 0,
+            "statements": [
+              {
+                "policy_index": 0,
+                "policy_name": "member-in",
+                "statement_index": 1,
+                "default_action": false,
+                "action": "permit",
+                "matched_conditions": [
+                  "guard true"
+                ],
+                "modifications": [],
+                "term": "default",
+                "term_traces": [
+                  "term drop-blocked: route.prefix == 192.0.2.0/24 => reject [not matched]",
+                  "term default: true => accept [matched]"
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    }
+  },
+  "a-off-r2": {
+    "early": {
+      "cli_status": 1,
+      "answer": {
+        "peer_address": "127.1.0.1",
+        "prefix": "20.0.0.0/24",
+        "afi_safi": "ipv4-unicast",
+        "current_policy_generation": 0,
+        "cache_size": null,
+        "evictions_since_reset": null,
+        "matches": [
+          {
+            "outcome": "cache_disabled",
+            "path_id": 0,
+            "matched_policy": null,
+            "rpki_validation": null,
+            "aspa_validation": null,
+            "modifications": null,
+            "evaluated_at_unix_ns": null,
+            "policy_generation": null,
+            "statements": []
+          }
+        ]
+      }
+    },
+    "late": {
+      "cli_status": 1,
+      "answer": {
+        "peer_address": "127.1.0.1",
+        "prefix": "35.66.63.0/24",
+        "afi_safi": "ipv4-unicast",
+        "current_policy_generation": 0,
+        "cache_size": null,
+        "evictions_since_reset": null,
+        "matches": [
+          {
+            "outcome": "cache_disabled",
+            "path_id": 0,
+            "matched_policy": null,
+            "rpki_validation": null,
+            "aspa_validation": null,
+            "modifications": null,
+            "evaluated_at_unix_ns": null,
+            "policy_generation": null,
+            "statements": []
+          }
+        ]
+      }
+    }
+  },
+  "b-4096-r2": {
+    "early": {
+      "cli_status": 0,
+      "answer": {
+        "peer_address": "127.1.0.1",
+        "prefix": "20.0.0.0/24",
+        "afi_safi": "ipv4-unicast",
+        "current_policy_generation": 0,
+        "cache_size": 4096,
+        "evictions_since_reset": 995904,
+        "matches": [
+          {
+            "outcome": "evicted",
+            "path_id": 0,
+            "matched_policy": null,
+            "rpki_validation": null,
+            "aspa_validation": null,
+            "modifications": null,
+            "evaluated_at_unix_ns": null,
+            "policy_generation": null,
+            "statements": []
+          }
+        ]
+      }
+    },
+    "late": {
+      "cli_status": 0,
+      "answer": {
+        "peer_address": "127.1.0.1",
+        "prefix": "35.66.63.0/24",
+        "afi_safi": "ipv4-unicast",
+        "current_policy_generation": 0,
+        "cache_size": 4096,
+        "evictions_since_reset": 995904,
+        "matches": [
+          {
+            "outcome": "permit",
+            "path_id": 0,
+            "matched_policy": "chain_default_permit",
+            "rpki_validation": "not_found",
+            "aspa_validation": "unknown",
+            "modifications": {
+              "set_local_pref": null,
+              "set_med": null,
+              "set_next_hop": null,
+              "communities_add": [],
+              "communities_remove": [],
+              "extended_communities_add": [],
+              "extended_communities_remove": [],
+              "large_communities_add": [],
+              "large_communities_remove": [],
+              "as_path_prepend_asn": null,
+              "as_path_prepend_count": null
+            },
+            "evaluated_at_unix_ns": 1791405492432268527,
+            "policy_generation": 0,
+            "statements": [
+              {
+                "policy_index": 0,
+                "policy_name": "member-in",
+                "statement_index": 1,
+                "default_action": false,
+                "action": "permit",
+                "matched_conditions": [
+                  "guard true"
+                ],
+                "modifications": [],
+                "term": "default",
+                "term_traces": [
+                  "term drop-blocked: route.prefix == 192.0.2.0/24 => reject [not matched]",
+                  "term default: true => accept [matched]"
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    }
+  },
+  "c-262144-r2": {
+    "early": {
+      "cli_status": 0,
+      "answer": {
+        "peer_address": "127.1.0.1",
+        "prefix": "20.0.0.0/24",
+        "afi_safi": "ipv4-unicast",
+        "current_policy_generation": 0,
+        "cache_size": 262144,
+        "evictions_since_reset": 737856,
+        "matches": [
+          {
+            "outcome": "evicted",
+            "path_id": 0,
+            "matched_policy": null,
+            "rpki_validation": null,
+            "aspa_validation": null,
+            "modifications": null,
+            "evaluated_at_unix_ns": null,
+            "policy_generation": null,
+            "statements": []
+          }
+        ]
+      }
+    },
+    "late": {
+      "cli_status": 0,
+      "answer": {
+        "peer_address": "127.1.0.1",
+        "prefix": "35.66.63.0/24",
+        "afi_safi": "ipv4-unicast",
+        "current_policy_generation": 0,
+        "cache_size": 262144,
+        "evictions_since_reset": 737856,
+        "matches": [
+          {
+            "outcome": "permit",
+            "path_id": 0,
+            "matched_policy": "chain_default_permit",
+            "rpki_validation": "not_found",
+            "aspa_validation": "unknown",
+            "modifications": {
+              "set_local_pref": null,
+              "set_med": null,
+              "set_next_hop": null,
+              "communities_add": [],
+              "communities_remove": [],
+              "extended_communities_add": [],
+              "extended_communities_remove": [],
+              "large_communities_add": [],
+              "large_communities_remove": [],
+              "as_path_prepend_asn": null,
+              "as_path_prepend_count": null
+            },
+            "evaluated_at_unix_ns": 1791405523210935726,
+            "policy_generation": 0,
+            "statements": [
+              {
+                "policy_index": 0,
+                "policy_name": "member-in",
+                "statement_index": 1,
+                "default_action": false,
+                "action": "permit",
+                "matched_conditions": [
+                  "guard true"
+                ],
+                "modifications": [],
+                "term": "default",
+                "term_traces": [
+                  "term drop-blocked: route.prefix == 192.0.2.0/24 => reject [not matched]",
+                  "term default: true => accept [matched]"
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    }
+  },
+  "d-1048576-r2": {
+    "early": {
+      "cli_status": 0,
+      "answer": {
+        "peer_address": "127.1.0.1",
+        "prefix": "20.0.0.0/24",
+        "afi_safi": "ipv4-unicast",
+        "current_policy_generation": 0,
+        "cache_size": 1048576,
+        "evictions_since_reset": 0,
+        "matches": [
+          {
+            "outcome": "permit",
+            "path_id": 0,
+            "matched_policy": "chain_default_permit",
+            "rpki_validation": "not_found",
+            "aspa_validation": "unknown",
+            "modifications": {
+              "set_local_pref": null,
+              "set_med": null,
+              "set_next_hop": null,
+              "communities_add": [],
+              "communities_remove": [],
+              "extended_communities_add": [],
+              "extended_communities_remove": [],
+              "large_communities_add": [],
+              "large_communities_remove": [],
+              "as_path_prepend_asn": null,
+              "as_path_prepend_count": null
+            },
+            "evaluated_at_unix_ns": 1791405542677895838,
+            "policy_generation": 0,
+            "statements": [
+              {
+                "policy_index": 0,
+                "policy_name": "member-in",
+                "statement_index": 1,
+                "default_action": false,
+                "action": "permit",
+                "matched_conditions": [
+                  "guard true"
+                ],
+                "modifications": [],
+                "term": "default",
+                "term_traces": [
+                  "term drop-blocked: route.prefix == 192.0.2.0/24 => reject [not matched]",
+                  "term default: true => accept [matched]"
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    },
+    "late": {
+      "cli_status": 0,
+      "answer": {
+        "peer_address": "127.1.0.1",
+        "prefix": "35.66.63.0/24",
+        "afi_safi": "ipv4-unicast",
+        "current_policy_generation": 0,
+        "cache_size": 1048576,
+        "evictions_since_reset": 0,
+        "matches": [
+          {
+            "outcome": "permit",
+            "path_id": 0,
+            "matched_policy": "chain_default_permit",
+            "rpki_validation": "not_found",
+            "aspa_validation": "unknown",
+            "modifications": {
+              "set_local_pref": null,
+              "set_med": null,
+              "set_next_hop": null,
+              "communities_add": [],
+              "communities_remove": [],
+              "extended_communities_add": [],
+              "extended_communities_remove": [],
+              "large_communities_add": [],
+              "large_communities_remove": [],
+              "as_path_prepend_asn": null,
+              "as_path_prepend_count": null
+            },
+            "evaluated_at_unix_ns": 1791405543738756123,
+            "policy_generation": 0,
+            "statements": [
+              {
+                "policy_index": 0,
+                "policy_name": "member-in",
+                "statement_index": 1,
+                "default_action": false,
+                "action": "permit",
+                "matched_conditions": [
+                  "guard true"
+                ],
+                "modifications": [],
+                "term": "default",
+                "term_traces": [
+                  "term drop-blocked: route.prefix == 192.0.2.0/24 => reject [not matched]",
+                  "term default: true => accept [matched]"
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    }
+  }
+}

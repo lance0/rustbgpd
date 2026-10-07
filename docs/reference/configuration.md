@@ -3020,8 +3020,10 @@ There is no fixed 154 KiB reservation per session. The allocation discussion
 in [ADR-0073](../adr/0073-import-policy-explain.md) and the historical
 [`explain-cache opt-in receipt`](../perf/explain-cache-opt-in-2026-07.md)
 describe the previous eager index and should not be used to predict the
-memory saved by this change. The configured ceiling bounds retained
-decisions per session, not total daemon memory.
+memory saved by this change. The
+[October 2026 quiet-host receipt](../perf/explain-cache-quiet-host-2026-10.md)
+measures the current lazy index in a running daemon. The configured ceiling
+bounds retained decisions per session, not total daemon memory.
 
 This is **diagnostic state only** — it never affects which routes are
 accepted. Scope is IPv4 / IPv6 unicast. The cache resets on peer session
