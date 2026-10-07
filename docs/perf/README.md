@@ -13,6 +13,11 @@ also covers interop and archived soaks.
 
 Each result below links to its published, reproducible receipt:
 
+- **Policy-reload boundary measurement null result**: six independent processes
+  retain complete receiver/publication joins but fail both stall-overhead bars
+  (+26.81% and +23.84%). No production-tail attribution or optimization qualifies.
+  See the [failed-method receipt](reload-boundary-attribution-2026-10.md),
+  measured 2026-10-06.
 - **Policy-reload observer-tail diagnostic**: a 700-peer, 400,400-prefix
   control/probe pair traces all 2,800 instrumented first chunks through release,
   admission, and FIFO-matched writes. The receipt retains receiver-processing

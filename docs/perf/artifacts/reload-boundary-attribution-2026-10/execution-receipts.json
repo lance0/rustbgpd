@@ -1,0 +1,136 @@
+{
+  "schema": 1,
+  "legs": [
+    {
+      "label": "01-control",
+      "source_before_sha256": "321a1c8c2b9305af773d8a29917efd566be12a1228e1dd1d20e9f13c4bd72d44",
+      "source_after_sha256": "321a1c8c2b9305af773d8a29917efd566be12a1228e1dd1d20e9f13c4bd72d44",
+      "source_check_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "files_check_sha256": "95e0b6e3fe1488d79e25d4fe3bf9eba4d6602fc9caf364609a6b29ae7bf62bd9",
+      "provenance_check_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "raw_owner_sha256": "e6b1c7f8af4ae0eb2af7d3d2abb94552b979ace85e66a05ca2216506b697027d",
+      "raw_daemon_owner_sha256": "55341c149d644999c8793317b7efb6d62990725f3d5c890332b8482c21a0ced1",
+      "raw_sampler_sha256": "04c846ee4e35f0dd21dd40e6ae24947f714ebf31767b61d239ec29f25e4756c0",
+      "cleanup_exit": 0,
+      "owned_processes_remaining": 0
+    },
+    {
+      "label": "02-probe",
+      "source_before_sha256": "321a1c8c2b9305af773d8a29917efd566be12a1228e1dd1d20e9f13c4bd72d44",
+      "source_after_sha256": "321a1c8c2b9305af773d8a29917efd566be12a1228e1dd1d20e9f13c4bd72d44",
+      "source_check_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "files_check_sha256": "95e0b6e3fe1488d79e25d4fe3bf9eba4d6602fc9caf364609a6b29ae7bf62bd9",
+      "provenance_check_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "raw_owner_sha256": "352fd01981f36dc45b84edaae87ece7ef03f558414a51c625cd5f77d65e928bb",
+      "raw_daemon_owner_sha256": "bf05177e65795a17a6e4bc5885144c4b5bfdeebc5acde746d3491ee43465086e",
+      "raw_sampler_sha256": "878d0a247a77564c663c2f852c25a8f38828e616be6c3f9cc739cd8fd17b169b",
+      "cleanup_exit": 0,
+      "owned_processes_remaining": 0
+    },
+    {
+      "label": "03-probe",
+      "source_before_sha256": "321a1c8c2b9305af773d8a29917efd566be12a1228e1dd1d20e9f13c4bd72d44",
+      "source_after_sha256": "321a1c8c2b9305af773d8a29917efd566be12a1228e1dd1d20e9f13c4bd72d44",
+      "source_check_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "files_check_sha256": "95e0b6e3fe1488d79e25d4fe3bf9eba4d6602fc9caf364609a6b29ae7bf62bd9",
+      "provenance_check_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "raw_owner_sha256": "458c64e280bae71f2dcc99056c95b6234cb764c4d0008a585f276e90174f2331",
+      "raw_daemon_owner_sha256": "036ff8ee0545a6bca96d3522773a8d9a90d049a248592e171bea0c2927f87c8e",
+      "raw_sampler_sha256": "510374cbaa21356b355399cec5340a69b5059f227edad2d69b1273f124bcc1a9",
+      "cleanup_exit": 0,
+      "owned_processes_remaining": 0
+    },
+    {
+      "label": "04-control",
+      "source_before_sha256": "321a1c8c2b9305af773d8a29917efd566be12a1228e1dd1d20e9f13c4bd72d44",
+      "source_after_sha256": "321a1c8c2b9305af773d8a29917efd566be12a1228e1dd1d20e9f13c4bd72d44",
+      "source_check_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "files_check_sha256": "95e0b6e3fe1488d79e25d4fe3bf9eba4d6602fc9caf364609a6b29ae7bf62bd9",
+      "provenance_check_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "raw_owner_sha256": "88c955388656e547023b21d0aa332dfab175a4bdc99c624d43b16b878164a2e0",
+      "raw_daemon_owner_sha256": "6566dc4d8d8f06dfcaadc87d957b29b2f229ed1c78a95c6f6b73e8820d3023b7",
+      "raw_sampler_sha256": "93bd23eed8eb8e570d73d1872d169a4401372a55dc37eec7d0c96a999da6877b",
+      "cleanup_exit": 0,
+      "owned_processes_remaining": 0
+    },
+    {
+      "label": "05-control",
+      "source_before_sha256": "321a1c8c2b9305af773d8a29917efd566be12a1228e1dd1d20e9f13c4bd72d44",
+      "source_after_sha256": "321a1c8c2b9305af773d8a29917efd566be12a1228e1dd1d20e9f13c4bd72d44",
+      "source_check_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "files_check_sha256": "95e0b6e3fe1488d79e25d4fe3bf9eba4d6602fc9caf364609a6b29ae7bf62bd9",
+      "provenance_check_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "raw_owner_sha256": "7e5960bd19d8d15e46128e1b3285027430d0af6739d07db1387e5eefe1c86611",
+      "raw_daemon_owner_sha256": "5cd7fa3bc0d671905c474253d2a995be36ae0cd19bffb72d586d030039ffe70d",
+      "raw_sampler_sha256": "50b0c4b8cb2d5accc517e1bbd5c6a6f65a5e064f4e544fb0c2ac7b0071d60934",
+      "cleanup_exit": 0,
+      "owned_processes_remaining": 0
+    },
+    {
+      "label": "06-probe",
+      "source_before_sha256": "321a1c8c2b9305af773d8a29917efd566be12a1228e1dd1d20e9f13c4bd72d44",
+      "source_after_sha256": "321a1c8c2b9305af773d8a29917efd566be12a1228e1dd1d20e9f13c4bd72d44",
+      "source_check_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "files_check_sha256": "95e0b6e3fe1488d79e25d4fe3bf9eba4d6602fc9caf364609a6b29ae7bf62bd9",
+      "provenance_check_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "raw_owner_sha256": "db0043fac439c068f8603140afc220c39274bedaee4234792020a11010d82398",
+      "raw_daemon_owner_sha256": "7b008e909e08384b01f2c084c29889dfbd939088a9f4ed8efbe631a102af6275",
+      "raw_sampler_sha256": "fec32b3401b6169a0bfe53a015e42b7f9a532a9ba76c7beb105a5fefefec2eb8",
+      "cleanup_exit": 0,
+      "owned_processes_remaining": 0
+    }
+  ],
+  "source_commit": "49abbb0171cbb889b7e2618c2bdcec6ea35699ae",
+  "source_tree": "c70b6296af9880d350acea376eb1942ba8dbc72d",
+  "raw_archive": {
+    "name": "campaign-01-null-complete.tar",
+    "sha256": "1897fda58b1cce23ae03f06f8229b7b2bb358458b43add4357c7677f16d1d69b",
+    "entries": 609
+  },
+  "decision": "No retry; complete method overhead failure, no production attribution or optimization.",
+  "preparation_history": [
+    {
+      "stage": "superseded-source-preparation",
+      "status": "unmeasured",
+      "detail": "Preparation on c4639d757 was superseded by the merged runtime change before any smoke or full attempt.",
+      "canonical_rounds": 0
+    },
+    {
+      "stage": "smoke-01",
+      "status": "failed-functional-validation",
+      "detail": "Optional evidence-directory early return suppressed harness trace emission; changed and all-window gap reconstruction also needed correction.",
+      "canonical_rounds": 0
+    },
+    {
+      "stage": "smoke-02-probe",
+      "status": "failed-functional-validation",
+      "detail": "Interleaved CSV stderr and JSON stdout broke trace records. Full cooldown retained; deferred writer output moved to the same stdout stream and only the probe daemon was rebuilt.",
+      "canonical_rounds": 0
+    },
+    {
+      "stage": "smoke-03-probe",
+      "status": "passed",
+      "detail": "Full trace joins and cooldown passed under the final frozen method.",
+      "canonical_rounds": 0
+    },
+    {
+      "stage": "smoke-04-control",
+      "status": "startup-failure",
+      "detail": "Copied daemon mode was 0644; daemon exit 126 before a measured interval. Mode restored to 0755 without changing binary bytes.",
+      "canonical_rounds": 0
+    },
+    {
+      "stage": "smoke-05-control",
+      "status": "passed",
+      "detail": "Complete common outcomes/clocks and cooldown passed, with receiver capture absent.",
+      "canonical_rounds": 0
+    },
+    {
+      "stage": "canonical-wrapper-startup",
+      "status": "rejected-before-startup",
+      "detail": "Relative wrapper invocation rejected before startup or a native interval; retained separately, then the same wrapper launched by its absolute path.",
+      "canonical_rounds": 0
+    }
+  ],
+  "history_basis": "Full retained archive audit; preparation and startup failures are not successful canonical legs or measured-method retries."
+}

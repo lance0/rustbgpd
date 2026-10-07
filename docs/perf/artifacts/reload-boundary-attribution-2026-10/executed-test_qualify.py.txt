@@ -1,0 +1,65 @@
+import copy
+import unittest
+from qualify import qualify, ORDER
+
+
+def legs():
+    return [dict(pair=p,arm=a,process_identity=str(i),joins_and_clocks_qualified=True,
+                 native_rounds=[dict(round=r,stall_p50_ms=100,completion_p50_s=1) for r in range(1,5)])
+            for i,(p,a) in enumerate(ORDER)]
+
+class TestQualify(unittest.TestCase):
+    def test_valid(self):self.assertTrue(qualify(legs())['measurement_overhead_and_joins_qualified'])
+    def test_overhead(self):
+        rows=legs()
+        for row in rows:
+            if row['arm']=='probe':
+                for r in row['native_rounds']:r['stall_p50_ms']=103
+        self.assertFalse(qualify(rows)['measurement_overhead_and_joins_qualified'])
+    def test_exact_two_percent_passes(self):
+        rows=legs()
+        for row in rows:
+            if row['arm']=='probe':
+                for r in row['native_rounds']:r['stall_p50_ms']=102
+        self.assertTrue(qualify(rows)['overhead_qualified'])
+    def test_decimal_median_exact_two_percent(self):
+        rows=legs()
+        for row in rows:
+            values=([1,1.001,1.003,2] if row['arm']=='control' else [1,1.021,1.02308,2])
+            for r,v in zip(row['native_rounds'],values):r['completion_p50_s']=v
+        self.assertTrue(qualify(rows)['overhead_qualified'])
+    def test_exact_decimal_strings_preserve_boundary(self):
+        rows=legs()
+        for row in rows:
+            for r in row['native_rounds']:
+                r['stall_p50_ms']='100' if row['arm']=='control' else '102.0000000000000000000001'
+        self.assertFalse(qualify(rows)['overhead_qualified'])
+    def test_bad_clock(self):
+        rows=legs();rows[1]['joins_and_clocks_qualified']=False
+        self.assertFalse(qualify(rows)['measurement_overhead_and_joins_qualified'])
+    def test_reused_process(self):
+        rows=legs();rows[1]['process_identity']=rows[0]['process_identity']
+        with self.assertRaises(ValueError):qualify(rows)
+    def test_wrong_order(self):
+        rows=legs();rows[0],rows[1]=rows[1],rows[0]
+        with self.assertRaises(ValueError):qualify(rows)
+    def test_missing_round(self):
+        rows=legs();rows[0]['native_rounds'].pop()
+        with self.assertRaises(ValueError):qualify(rows)
+    def test_nonfinite(self):
+        rows=legs();rows[0]['native_rounds'][0]['stall_p50_ms']=float('nan')
+        with self.assertRaises(ValueError):qualify(rows)
+    def test_pooled_and_hierarchical_both_required(self):
+        rows=legs()
+        # Control hierarchy 100, pool 100; probe hierarchy 100, pool 102.5.
+        probes=[[1,99,101,1000],[1,99,101,1000],[104,104,104,104]]
+        n=0
+        for row in rows:
+            if row['arm']=='probe':
+                for r,v in zip(row['native_rounds'],probes[n]):r['stall_p50_ms']=v
+                n+=1
+        result=qualify(rows)
+        self.assertEqual(result['metrics']['stall_p50_ms']['hierarchical_change_percent'],0)
+        self.assertFalse(result['overhead_qualified'])
+
+if __name__=='__main__':unittest.main()

@@ -1,0 +1,73 @@
+{
+  "schema": 1,
+  "source_commit": "49abbb0171cbb889b7e2618c2bdcec6ea35699ae",
+  "source_disposition": "Live stable main49abbb017 with merged export-probe preservation through route churn; supersedes unmeasured c4639 preparation without combining source versions.",
+  "shape": {
+    "peers": 700,
+    "prefixes": 400400,
+    "rounds_per_process": 4,
+    "control_seconds": 30,
+    "changed_peers": "all",
+    "policy": "canonical import plus export",
+    "reader_pacing": "none",
+    "added_rtt_ms": 0,
+    "allocator": "jemalloc default",
+    "daemon_features": "default"
+  },
+  "order": [
+    {
+      "pair": 1,
+      "arm": "control"
+    },
+    {
+      "pair": 1,
+      "arm": "probe"
+    },
+    {
+      "pair": 2,
+      "arm": "probe"
+    },
+    {
+      "pair": 2,
+      "arm": "control"
+    },
+    {
+      "pair": 3,
+      "arm": "control"
+    },
+    {
+      "pair": 3,
+      "arm": "probe"
+    }
+  ],
+  "admission": "Native matrix host lock, two quiet samples 30 seconds apart, complete 300-second cooldown after every leg; native admission/lifecycle/cooldown logic preserved with two post-window monotonic witness writes around the existing cooldown sleep. No override to make a loaded host pass.",
+  "overhead": {
+    "primary": "For each metric, median of three process-leg medians; every process median uses its four native round values.",
+    "secondary": "Median of all twelve native round values per arm.",
+    "metrics": [
+      "changed_maxgap_p50_ms",
+      "completion_p50_s"
+    ],
+    "maximum_regression_percent": 2,
+    "pass": "All four hierarchical/pooled metric regressions must be <=2%; retain every pair difference and all 24 rounds."
+  },
+  "coverage": "Complete unique 700 x 4 observer outcomes for every arm. Probe additionally requires complete member/writer/read/decode/classify/event joins, exact first eligible chunk/frame byte equality, all partial accepted write ranges, no failed batches, no trace buffer overflow, and no early writer shutdown/reconnect. Changed-gap maps use trigger to each observer completion without a trailing gap; all-observer maps use the full round window including the trailing gap. Both maps retain every tied maximum and reconstruct their own unchanged native columns.",
+  "clock": {
+    "receiver_epoch_intersection_width_budget_us": 50,
+    "publication_start_end_budget_us": 100,
+    "cross_process_requirement": "All clock brackets must overlap a consistent monotonic-to-realtime epoch mapping; publication reader cross_process_clock_qualified must be true. These anchors do not measure all intervening wall-clock behavior."
+  },
+  "buffers": "Four first-generation receiver rows and writer batches per observer; at most 64 poll_write results per batch; publication rows bounded to 8192 chunks/group; reject overflow. Output only after measured rounds/at shutdown. Writer Drop emits a same-daemon-clock dump timestamp; its earliest clock bound must follow the final measured reload window.",
+  "repeatability": "Publish per-round p50/p95/max and slowest 5% observer membership, preserving process identity. Name a separated component dominant only if its phase ranking repeats across all three independent probe processes. Signed cross-process intervals retain bracket bounds; do not sum phase quantiles.",
+  "method_retry": "If overhead, joins, clocks, or process repeatability fails, retain rejected/null evidence and reduce or replace the measurement method at most once; never relax the gate.",
+  "claims_excluded": [
+    "kernel queue occupancy",
+    "OS runnable time",
+    "kernel wakeups",
+    "predicted recoverable latency",
+    "production optimization",
+    "cross-daemon ranking"
+  ],
+  "functional_smoke": "A small same-four-round trace validates both harness arms with RELOADSTALL_EVIDENCE_DIR explicitly unset and a full 300-second cooldown after each arm; it is never timing evidence and requires the root lab slot.",
+  "control_observer": "Frozen 49abbb017 harness plus the same post-round allobserver outcome map and clock brackets as probe; no receiver capture storage, atomics, stream counters, or polling wrapper. Daemon control is clean default-feature 49abbb017."
+}

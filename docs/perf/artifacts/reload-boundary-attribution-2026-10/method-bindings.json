@@ -1,0 +1,63 @@
+{
+  "schema": 1,
+  "executed_method_manifest_sha256": "b28669ef45471c6ea885f8635d4adccc6b329cf6409d887198357386a905b632",
+  "executed_binary_binding_sha256": "c74744cb4f5ddbce45cc29a1d4cd70e81ccc81c9f8f663e62d5d5b896c819def",
+  "public_method_files": {
+    "analyze_receiver.py": {
+      "executed_sha256": "27c78d9933f2782976019d6ec0eb2e613c5069054f59d0590b116d60d14d55da",
+      "public_sha256": "3a7d3e7e5f523b038c1d763edd98ce10ba2cecddb57b5afc9621aed42189c422",
+      "unchanged": false
+    },
+    "read_publication.py": {
+      "executed_sha256": "6f58d8daaddcc58c6b63479054c85dbccfc5efc489dae1755a45b2f4f6c97c51",
+      "public_sha256": "6f58d8daaddcc58c6b63479054c85dbccfc5efc489dae1755a45b2f4f6c97c51",
+      "unchanged": true
+    },
+    "qualify.py": {
+      "executed_sha256": "23aac10b97a2e23d06ed143d4b9ca2e23bb13d9bae666212d429fe9f519429b2",
+      "public_sha256": "23aac10b97a2e23d06ed143d4b9ca2e23bb13d9bae666212d429fe9f519429b2",
+      "unchanged": true
+    },
+    "collect_campaign.py": {
+      "executed_sha256": "3586a5bc1282cf8fdd2dc83fd5630b3dbce3fb6508b79311be852b2928211146",
+      "public_sha256": "3586a5bc1282cf8fdd2dc83fd5630b3dbce3fb6508b79311be852b2928211146",
+      "unchanged": true
+    },
+    "owned_process.py": {
+      "executed_sha256": "11f8b6ade3186d22f6677b56fe4cb63d0c881c3b6425ff7293977dda27c56d5f",
+      "public_sha256": "11f8b6ade3186d22f6677b56fe4cb63d0c881c3b6425ff7293977dda27c56d5f",
+      "unchanged": true
+    },
+    "plan.json": {
+      "executed_sha256": "6fa91921c2eaa7d5d2e0e1cd961cab9d3136990abae80c4008594e82fb2193ff",
+      "public_sha256": "6fa91921c2eaa7d5d2e0e1cd961cab9d3136990abae80c4008594e82fb2193ff",
+      "unchanged": true
+    },
+    "test_receiver.py": {
+      "executed_sha256": "3f4801ccf57199d1b46f8a673b05e82774aa12f7a745ce7038a1035bef1ae309",
+      "public_sha256": "7f26870a3d6d3dd8e1f22f18a8ccedb98621a5b5a474179cb5390b9afdbe3162",
+      "unchanged": false
+    },
+    "test_qualify.py": {
+      "executed_sha256": "465b2b6b7d8ea09afb93fcff865eb4b922af373ba5cd327cef9dfbe1004a7d50",
+      "public_sha256": "e609fb37953f336d5d90e88f622310505ea7221889f2604a15425268260c072f",
+      "unchanged": false
+    },
+    "test_campaign.py": {
+      "executed_sha256": "254c1117b9c92788144a4a95763483ea22965ebacbc366236e6e9e5bd1a317f5",
+      "public_sha256": "262168dd3e31870ce692a53b4b37d1db73c0a0aed5946184d7834b124ffaef5b",
+      "unchanged": false
+    }
+  },
+  "external_method_files": [
+    "run-leg.sh",
+    "run-smoke.sh",
+    "control_harness.py",
+    "build_harnesses.py",
+    "snapshot_source.py",
+    "freeze.py"
+  ],
+  "binary_binding_public_name": "build-bindings.json",
+  "reader_delta": "public-reader.patch",
+  "note": "Executed originals of modified public helpers/companions are retained as executed-*.py.txt. The execution manifest uses original relative paths; the public SHA256SUMS is separate."
+}

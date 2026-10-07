@@ -1,0 +1,621 @@
+{
+  "schema": 1,
+  "files": {
+    "01-control/started.epoch": {
+      "raw_sha256": "6980cf726a49ee5ac13a5ad2f058f7ea4d0fc2c4c8292ffa6a042aa0261fc554",
+      "public_sha256": "6980cf726a49ee5ac13a5ad2f058f7ea4d0fc2c4c8292ffa6a042aa0261fc554",
+      "normalization": "unchanged"
+    },
+    "01-control/finished.epoch": {
+      "raw_sha256": "c257dbdbb3b120767809ba70e37e50aefaad3a7df65ca8a865c0aa9c5c629529",
+      "public_sha256": "c257dbdbb3b120767809ba70e37e50aefaad3a7df65ca8a865c0aa9c5c629529",
+      "normalization": "unchanged"
+    },
+    "01-control/started.monotonic_ns": {
+      "raw_sha256": "e6e6a7d29fd444438961cad69cbfde81ae0c155902148046be5b00e6c59aabc5",
+      "public_sha256": "e6e6a7d29fd444438961cad69cbfde81ae0c155902148046be5b00e6c59aabc5",
+      "normalization": "unchanged"
+    },
+    "01-control/finished.monotonic_ns": {
+      "raw_sha256": "153d04bd5476bb860383454dc6c068832b2e8f71016dd3a22566c3d4cd4b6dd7",
+      "public_sha256": "153d04bd5476bb860383454dc6c068832b2e8f71016dd3a22566c3d4cd4b6dd7",
+      "normalization": "unchanged"
+    },
+    "01-control/runner.exit": {
+      "raw_sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+      "public_sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+      "normalization": "unchanged"
+    },
+    "01-control/identity.exit": {
+      "raw_sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+      "public_sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+      "normalization": "unchanged"
+    },
+    "01-control/sampler.exit": {
+      "raw_sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+      "public_sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+      "normalization": "unchanged"
+    },
+    "01-control/cleanup.exit": {
+      "raw_sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+      "public_sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+      "normalization": "unchanged"
+    },
+    "01-control/methods.sha256": {
+      "raw_sha256": "b28669ef45471c6ea885f8635d4adccc6b329cf6409d887198357386a905b632",
+      "public_sha256": "b28669ef45471c6ea885f8635d4adccc6b329cf6409d887198357386a905b632",
+      "normalization": "unchanged"
+    },
+    "01-control/matrix/rustbgpd/daemon.exit": {
+      "raw_sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+      "public_sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+      "normalization": "unchanged"
+    },
+    "01-control/matrix/rustbgpd/status": {
+      "raw_sha256": "9f56e761d79bfdb34304a012586cb04d16b435ef6130091a97702e559260a2f2",
+      "public_sha256": "9f56e761d79bfdb34304a012586cb04d16b435ef6130091a97702e559260a2f2",
+      "normalization": "unchanged"
+    },
+    "01-control/matrix/rustbgpd/quiet.tsv": {
+      "raw_sha256": "0b192257b941bd02b26f0d9d7af8cc9e4c4f2ace3360e3d77c4e00106e2ab21c",
+      "public_sha256": "0b192257b941bd02b26f0d9d7af8cc9e4c4f2ace3360e3d77c4e00106e2ab21c",
+      "normalization": "unchanged"
+    },
+    "01-control/matrix/rustbgpd/cooldown-start.monotonic_ns": {
+      "raw_sha256": "340396546d4daeaae2ad73f19ba38f100b7a936e561983680b7468f08eac8a77",
+      "public_sha256": "340396546d4daeaae2ad73f19ba38f100b7a936e561983680b7468f08eac8a77",
+      "normalization": "unchanged"
+    },
+    "01-control/matrix/rustbgpd/cooldown-end.monotonic_ns": {
+      "raw_sha256": "8c3d47d7283b4c365fb8fccd18ec1f77cdc42a40f8e0b8b2ac3690971583a377",
+      "public_sha256": "8c3d47d7283b4c365fb8fccd18ec1f77cdc42a40f8e0b8b2ac3690971583a377",
+      "normalization": "unchanged"
+    },
+    "01-control/matrix/rustbgpd/reloadstall.log": {
+      "raw_sha256": "d0b45f899882a1516f5e176cd284f221e081a8d118c9e5e3fd813b1dbc89a4f9",
+      "public_sha256": "c704d98cbb6298caad44911581c8afebe887ce42fade05cae8fa7ae8f1352609",
+      "normalization": "all native aggregate, outcome, tied-gap, receiver and clock rows; unrelated log lines omitted"
+    },
+    "01-control/matrix/rustbgpd/daemon.log": {
+      "raw_sha256": "a224178cf2b2b237c15839dc9811b4440b0a4fc3f43b18517a18804330199086",
+      "public_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "normalization": "all writer/poll rows; unrelated daemon lines omitted"
+    },
+    "01-control/matrix/rustbgpd/provenance.json": {
+      "raw_sha256": "31044a5e7e42e1f0c3c677716cb66b44db9f5b8d0110a86b0e29df8dda16808e",
+      "public_sha256": "31044a5e7e42e1f0c3c677716cb66b44db9f5b8d0110a86b0e29df8dda16808e",
+      "normalization": "JSON formatting only; original fields retained"
+    },
+    "01-control/runner.log": {
+      "raw_sha256": "df3d63233fbbe0cac9f56dfe101c6242ffcdcf98860ad628d882eb7f1b1c9e45",
+      "public_sha256": "4a6002635d453f9d4533f5caeba1f94eb7657e4babef1750698f88c2ad139c9b",
+      "normalization": "native start/pass/cooldown witness retained; path-only completion destination normalized; unrelated lines omitted"
+    },
+    "01-control/runner.owner.json": {
+      "raw_sha256": "e6b1c7f8af4ae0eb2af7d3d2abb94552b979ace85e66a05ca2216506b697027d",
+      "public_sha256": "b4b2ae036b503f5bf00e7a178e1ade8a8f02856b2558c3bcbc63569ae7c9aa80",
+      "normalization": "process IDs and boot ID replaced by campaign-scoped aliases; monotonic start retained"
+    },
+    "01-control/sampler.log": {
+      "raw_sha256": "04c846ee4e35f0dd21dd40e6ae24947f714ebf31767b61d239ec29f25e4756c0",
+      "public_sha256": "736a59bc73de59082d53b40b104f88d2421feaececa48a764d2ca552d104e6f3",
+      "normalization": "consistent process aliases; cgroup path omitted; monotonic start retained"
+    },
+    "02-probe/started.epoch": {
+      "raw_sha256": "eec6d53e1da58603fbe393a62971f6c7a5f551ec067aebc2a1e3a81967435716",
+      "public_sha256": "eec6d53e1da58603fbe393a62971f6c7a5f551ec067aebc2a1e3a81967435716",
+      "normalization": "unchanged"
+    },
+    "02-probe/finished.epoch": {
+      "raw_sha256": "b48fc3cca67a10b9f23f9a19b5a2e397cf0962b9858153a6dece3cd0ed52595c",
+      "public_sha256": "b48fc3cca67a10b9f23f9a19b5a2e397cf0962b9858153a6dece3cd0ed52595c",
+      "normalization": "unchanged"
+    },
+    "02-probe/started.monotonic_ns": {
+      "raw_sha256": "68a909fb832e273fecd1366443d68b61bfe59aa04c74494a5efafd617a420a0e",
+      "public_sha256": "68a909fb832e273fecd1366443d68b61bfe59aa04c74494a5efafd617a420a0e",
+      "normalization": "unchanged"
+    },
+    "02-probe/finished.monotonic_ns": {
+      "raw_sha256": "d49bc6c11ac6a5b772cc8fde11fde74096d263243875141aa74fcc1ccfe6ba35",
+      "public_sha256": "d49bc6c11ac6a5b772cc8fde11fde74096d263243875141aa74fcc1ccfe6ba35",
+      "normalization": "unchanged"
+    },
+    "02-probe/runner.exit": {
+      "raw_sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+      "public_sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+      "normalization": "unchanged"
+    },
+    "02-probe/identity.exit": {
+      "raw_sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+      "public_sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+      "normalization": "unchanged"
+    },
+    "02-probe/sampler.exit": {
+      "raw_sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+      "public_sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+      "normalization": "unchanged"
+    },
+    "02-probe/cleanup.exit": {
+      "raw_sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+      "public_sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+      "normalization": "unchanged"
+    },
+    "02-probe/methods.sha256": {
+      "raw_sha256": "b28669ef45471c6ea885f8635d4adccc6b329cf6409d887198357386a905b632",
+      "public_sha256": "b28669ef45471c6ea885f8635d4adccc6b329cf6409d887198357386a905b632",
+      "normalization": "unchanged"
+    },
+    "02-probe/matrix/rustbgpd/daemon.exit": {
+      "raw_sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+      "public_sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+      "normalization": "unchanged"
+    },
+    "02-probe/matrix/rustbgpd/status": {
+      "raw_sha256": "9f56e761d79bfdb34304a012586cb04d16b435ef6130091a97702e559260a2f2",
+      "public_sha256": "9f56e761d79bfdb34304a012586cb04d16b435ef6130091a97702e559260a2f2",
+      "normalization": "unchanged"
+    },
+    "02-probe/matrix/rustbgpd/quiet.tsv": {
+      "raw_sha256": "64f466113aa47251cc7f359ccebc41038d4233eb8efee8c7c5dc43024da81d60",
+      "public_sha256": "64f466113aa47251cc7f359ccebc41038d4233eb8efee8c7c5dc43024da81d60",
+      "normalization": "unchanged"
+    },
+    "02-probe/matrix/rustbgpd/cooldown-start.monotonic_ns": {
+      "raw_sha256": "33a50ae5d300907ae7db888ad3c39b715d5d34b9b6ad5ae6904b2fcbb4c21819",
+      "public_sha256": "33a50ae5d300907ae7db888ad3c39b715d5d34b9b6ad5ae6904b2fcbb4c21819",
+      "normalization": "unchanged"
+    },
+    "02-probe/matrix/rustbgpd/cooldown-end.monotonic_ns": {
+      "raw_sha256": "69c228926874d5e8b4ba85c863e9985ee3f9a78a587085a8fa4318106cf95aec",
+      "public_sha256": "69c228926874d5e8b4ba85c863e9985ee3f9a78a587085a8fa4318106cf95aec",
+      "normalization": "unchanged"
+    },
+    "02-probe/matrix/rustbgpd/reloadstall.log": {
+      "raw_sha256": "60db58cdd87f8e46291a9cab70cda4f3eb90e37c737f3155b8764a2f31218bc9",
+      "public_sha256": "85376ae7fc9377a5d75193cf48e5ea50b025a45e0e94794aeeb33245d69ac6bc",
+      "normalization": "all native aggregate, outcome, tied-gap, receiver and clock rows; unrelated log lines omitted"
+    },
+    "02-probe/matrix/rustbgpd/daemon.log": {
+      "raw_sha256": "cdbfe265fbd435459d247ac862984445cd385219ce927b0baed67604ec9ece1e",
+      "public_sha256": "f439791350b8e57db43e8340482648eddb4028b1e222ac008fff45fa542666c6",
+      "normalization": "all writer/poll rows; unrelated daemon lines omitted"
+    },
+    "02-probe/matrix/rustbgpd/provenance.json": {
+      "raw_sha256": "93abb6fa684251a75a772cd2274e589579e53bfc004924e73d1643adebdcd53f",
+      "public_sha256": "93abb6fa684251a75a772cd2274e589579e53bfc004924e73d1643adebdcd53f",
+      "normalization": "JSON formatting only; original fields retained"
+    },
+    "02-probe/runner.log": {
+      "raw_sha256": "42266398ca6997e699eb81be909974f3bb5d3cf523f27d704651e045eae69e60",
+      "public_sha256": "f314b17e0d2239c843217be9c7d10844fe5d5bd1de5f3eb1ce30d7acc290e2ae",
+      "normalization": "native start/pass/cooldown witness retained; path-only completion destination normalized; unrelated lines omitted"
+    },
+    "02-probe/runner.owner.json": {
+      "raw_sha256": "352fd01981f36dc45b84edaae87ece7ef03f558414a51c625cd5f77d65e928bb",
+      "public_sha256": "d88e17b8d07546dc938e1d88132564aeec12c6220ddcf2516c18cccec06c0e22",
+      "normalization": "process IDs and boot ID replaced by campaign-scoped aliases; monotonic start retained"
+    },
+    "02-probe/sampler.log": {
+      "raw_sha256": "878d0a247a77564c663c2f852c25a8f38828e616be6c3f9cc739cd8fd17b169b",
+      "public_sha256": "e64066ed745f33534c8fc5c1f1ead7524a7a4176f07436f919d79587e3b335ae",
+      "normalization": "consistent process aliases; cgroup path omitted; monotonic start retained"
+    },
+    "02-probe/publication.csv": {
+      "raw_sha256": "41492db6251c053d329ffc1b39099a59ccdd0ace82bffc02b7b5c9b7974d3434",
+      "public_sha256": "73f646dbe02ce0e77ae728b115eb42dc63e862ec649b678b447da21347b9b492",
+      "normalization": "inventory allocation addresses replaced with per-process integer aliases; all rows retained"
+    },
+    "03-probe/started.epoch": {
+      "raw_sha256": "e7329887ee0f7d99ad9bbae09b9715938f8db2d43bd95f31038e758de1f10b77",
+      "public_sha256": "e7329887ee0f7d99ad9bbae09b9715938f8db2d43bd95f31038e758de1f10b77",
+      "normalization": "unchanged"
+    },
+    "03-probe/finished.epoch": {
+      "raw_sha256": "8f9ee73970fce72ab5e1a9bfd1d0e156cef71aa033106fb5dffff651da3f4f86",
+      "public_sha256": "8f9ee73970fce72ab5e1a9bfd1d0e156cef71aa033106fb5dffff651da3f4f86",
+      "normalization": "unchanged"
+    },
+    "03-probe/started.monotonic_ns": {
+      "raw_sha256": "b7bc28cfdbcf4a81815c87cfa2d3ef5855eb76e98b724de8c3a345276e559cf6",
+      "public_sha256": "b7bc28cfdbcf4a81815c87cfa2d3ef5855eb76e98b724de8c3a345276e559cf6",
+      "normalization": "unchanged"
+    },
+    "03-probe/finished.monotonic_ns": {
+      "raw_sha256": "b943f1d1dc1d27e7bd6d1a89f0a091b336a33feacb425cc52299453dc028823d",
+      "public_sha256": "b943f1d1dc1d27e7bd6d1a89f0a091b336a33feacb425cc52299453dc028823d",
+      "normalization": "unchanged"
+    },
+    "03-probe/runner.exit": {
+      "raw_sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+      "public_sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+      "normalization": "unchanged"
+    },
+    "03-probe/identity.exit": {
+      "raw_sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+      "public_sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+      "normalization": "unchanged"
+    },
+    "03-probe/sampler.exit": {
+      "raw_sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+      "public_sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+      "normalization": "unchanged"
+    },
+    "03-probe/cleanup.exit": {
+      "raw_sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+      "public_sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+      "normalization": "unchanged"
+    },
+    "03-probe/methods.sha256": {
+      "raw_sha256": "b28669ef45471c6ea885f8635d4adccc6b329cf6409d887198357386a905b632",
+      "public_sha256": "b28669ef45471c6ea885f8635d4adccc6b329cf6409d887198357386a905b632",
+      "normalization": "unchanged"
+    },
+    "03-probe/matrix/rustbgpd/daemon.exit": {
+      "raw_sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+      "public_sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+      "normalization": "unchanged"
+    },
+    "03-probe/matrix/rustbgpd/status": {
+      "raw_sha256": "9f56e761d79bfdb34304a012586cb04d16b435ef6130091a97702e559260a2f2",
+      "public_sha256": "9f56e761d79bfdb34304a012586cb04d16b435ef6130091a97702e559260a2f2",
+      "normalization": "unchanged"
+    },
+    "03-probe/matrix/rustbgpd/quiet.tsv": {
+      "raw_sha256": "0a8a99b22e52c55e56592beea3bcda59c19028182eb21438f1e49c21552676a2",
+      "public_sha256": "0a8a99b22e52c55e56592beea3bcda59c19028182eb21438f1e49c21552676a2",
+      "normalization": "unchanged"
+    },
+    "03-probe/matrix/rustbgpd/cooldown-start.monotonic_ns": {
+      "raw_sha256": "ab51a9c10c565f93fbe7dbd45c5d4808b90c9737f409bcc8335c6e64df51b618",
+      "public_sha256": "ab51a9c10c565f93fbe7dbd45c5d4808b90c9737f409bcc8335c6e64df51b618",
+      "normalization": "unchanged"
+    },
+    "03-probe/matrix/rustbgpd/cooldown-end.monotonic_ns": {
+      "raw_sha256": "d5db5124d6fb0788408a68e16ca0cafc87bea34b13dd64324d802139bc73446e",
+      "public_sha256": "d5db5124d6fb0788408a68e16ca0cafc87bea34b13dd64324d802139bc73446e",
+      "normalization": "unchanged"
+    },
+    "03-probe/matrix/rustbgpd/reloadstall.log": {
+      "raw_sha256": "746e6f1aca659a2ce7c2a5ea8cb7f1321dbf6241f582d6e4c141289ac3156f72",
+      "public_sha256": "c89258d76e6ed634f617738c2b98fbed549256237508c3c5abaf068d5b826959",
+      "normalization": "all native aggregate, outcome, tied-gap, receiver and clock rows; unrelated log lines omitted"
+    },
+    "03-probe/matrix/rustbgpd/daemon.log": {
+      "raw_sha256": "e77e630766721471fcc10a396c79e4689dd2f793c18608f6df2dda0df4e07d21",
+      "public_sha256": "dd3caa5695d651d1e3535081afa5ae7233df9e85093434e64a7aec8d4e98c976",
+      "normalization": "all writer/poll rows; unrelated daemon lines omitted"
+    },
+    "03-probe/matrix/rustbgpd/provenance.json": {
+      "raw_sha256": "93abb6fa684251a75a772cd2274e589579e53bfc004924e73d1643adebdcd53f",
+      "public_sha256": "93abb6fa684251a75a772cd2274e589579e53bfc004924e73d1643adebdcd53f",
+      "normalization": "JSON formatting only; original fields retained"
+    },
+    "03-probe/runner.log": {
+      "raw_sha256": "25b5d5cdf8b5233cab9e71b164cd0ed600330a430f8c58ec716bd2147dd0224b",
+      "public_sha256": "7f916fad59c7e0cb6c62a50eb92be1eaceda8728d2ab3e2ba481a777de4a2647",
+      "normalization": "native start/pass/cooldown witness retained; path-only completion destination normalized; unrelated lines omitted"
+    },
+    "03-probe/runner.owner.json": {
+      "raw_sha256": "458c64e280bae71f2dcc99056c95b6234cb764c4d0008a585f276e90174f2331",
+      "public_sha256": "75c917a8b1bab23e3999e6b1101972c30245aee487080d085eea15ea1fd588e3",
+      "normalization": "process IDs and boot ID replaced by campaign-scoped aliases; monotonic start retained"
+    },
+    "03-probe/sampler.log": {
+      "raw_sha256": "510374cbaa21356b355399cec5340a69b5059f227edad2d69b1273f124bcc1a9",
+      "public_sha256": "c04d535fb035bd534c916fe7ddddbc83eb64836a2c79bb2f409e25442fe02cc7",
+      "normalization": "consistent process aliases; cgroup path omitted; monotonic start retained"
+    },
+    "03-probe/publication.csv": {
+      "raw_sha256": "6e5a71781a366c973e7f8151646864c5ddfd4fdfc2446e57183a1e37efa12ea0",
+      "public_sha256": "ff6b7318b1b13e0a9171763ca3aa73a961637251009a97e531b15b74d860cc8d",
+      "normalization": "inventory allocation addresses replaced with per-process integer aliases; all rows retained"
+    },
+    "04-control/started.epoch": {
+      "raw_sha256": "94499692ab195576dacbe4cd33348d2a8cd8f5a5db09cfd825025519f0b2a50a",
+      "public_sha256": "94499692ab195576dacbe4cd33348d2a8cd8f5a5db09cfd825025519f0b2a50a",
+      "normalization": "unchanged"
+    },
+    "04-control/finished.epoch": {
+      "raw_sha256": "55d75c7991b9af80f0ca9df7614a3669085acdbd9d708603b26b42dd63379a85",
+      "public_sha256": "55d75c7991b9af80f0ca9df7614a3669085acdbd9d708603b26b42dd63379a85",
+      "normalization": "unchanged"
+    },
+    "04-control/started.monotonic_ns": {
+      "raw_sha256": "1ad45be65fb0e437a2e71e9c76b537cad26a745da0f59fcf4d432e4db38ed90d",
+      "public_sha256": "1ad45be65fb0e437a2e71e9c76b537cad26a745da0f59fcf4d432e4db38ed90d",
+      "normalization": "unchanged"
+    },
+    "04-control/finished.monotonic_ns": {
+      "raw_sha256": "bc3028d1483b615945781905f3667f1aca14a242b50e833df1b7d86913593063",
+      "public_sha256": "bc3028d1483b615945781905f3667f1aca14a242b50e833df1b7d86913593063",
+      "normalization": "unchanged"
+    },
+    "04-control/runner.exit": {
+      "raw_sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+      "public_sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+      "normalization": "unchanged"
+    },
+    "04-control/identity.exit": {
+      "raw_sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+      "public_sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+      "normalization": "unchanged"
+    },
+    "04-control/sampler.exit": {
+      "raw_sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+      "public_sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+      "normalization": "unchanged"
+    },
+    "04-control/cleanup.exit": {
+      "raw_sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+      "public_sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+      "normalization": "unchanged"
+    },
+    "04-control/methods.sha256": {
+      "raw_sha256": "b28669ef45471c6ea885f8635d4adccc6b329cf6409d887198357386a905b632",
+      "public_sha256": "b28669ef45471c6ea885f8635d4adccc6b329cf6409d887198357386a905b632",
+      "normalization": "unchanged"
+    },
+    "04-control/matrix/rustbgpd/daemon.exit": {
+      "raw_sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+      "public_sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+      "normalization": "unchanged"
+    },
+    "04-control/matrix/rustbgpd/status": {
+      "raw_sha256": "9f56e761d79bfdb34304a012586cb04d16b435ef6130091a97702e559260a2f2",
+      "public_sha256": "9f56e761d79bfdb34304a012586cb04d16b435ef6130091a97702e559260a2f2",
+      "normalization": "unchanged"
+    },
+    "04-control/matrix/rustbgpd/quiet.tsv": {
+      "raw_sha256": "9445c95e9f771f8fe796b92c42a60d8ac471f3870190343ab63ec278e7e51d88",
+      "public_sha256": "9445c95e9f771f8fe796b92c42a60d8ac471f3870190343ab63ec278e7e51d88",
+      "normalization": "unchanged"
+    },
+    "04-control/matrix/rustbgpd/cooldown-start.monotonic_ns": {
+      "raw_sha256": "33480026470446eb24a2ace6ebeffb359b65df0968a12410f27e6fca843211ed",
+      "public_sha256": "33480026470446eb24a2ace6ebeffb359b65df0968a12410f27e6fca843211ed",
+      "normalization": "unchanged"
+    },
+    "04-control/matrix/rustbgpd/cooldown-end.monotonic_ns": {
+      "raw_sha256": "34f6f8b06045f562c94e3f151375f74556b77084010c9eb8df7d96ba69df6f18",
+      "public_sha256": "34f6f8b06045f562c94e3f151375f74556b77084010c9eb8df7d96ba69df6f18",
+      "normalization": "unchanged"
+    },
+    "04-control/matrix/rustbgpd/reloadstall.log": {
+      "raw_sha256": "caf63a64c845ba17654cca0268a2e8fc367d2a422edeb54506a55a22b69c05ab",
+      "public_sha256": "68f603cc117f1d9666ef979fe73ebdb4d335c461604f284d14fe2e33639c1798",
+      "normalization": "all native aggregate, outcome, tied-gap, receiver and clock rows; unrelated log lines omitted"
+    },
+    "04-control/matrix/rustbgpd/daemon.log": {
+      "raw_sha256": "f0666c7d27e318b5ed5c42ab19bae288c575068dac4809b697993819aad02efc",
+      "public_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "normalization": "all writer/poll rows; unrelated daemon lines omitted"
+    },
+    "04-control/matrix/rustbgpd/provenance.json": {
+      "raw_sha256": "31044a5e7e42e1f0c3c677716cb66b44db9f5b8d0110a86b0e29df8dda16808e",
+      "public_sha256": "31044a5e7e42e1f0c3c677716cb66b44db9f5b8d0110a86b0e29df8dda16808e",
+      "normalization": "JSON formatting only; original fields retained"
+    },
+    "04-control/runner.log": {
+      "raw_sha256": "603d7175bcc6721fdc5bee50add0486914bb724e3c962adbc6870e0b50fd5bf6",
+      "public_sha256": "91c523b3b35a57c4dc2beefb319150d495db91bbd563b48227d29f80d25254ff",
+      "normalization": "native start/pass/cooldown witness retained; path-only completion destination normalized; unrelated lines omitted"
+    },
+    "04-control/runner.owner.json": {
+      "raw_sha256": "88c955388656e547023b21d0aa332dfab175a4bdc99c624d43b16b878164a2e0",
+      "public_sha256": "99b6dbbd3a88e56d425dc7b48856ad534b993a5e6ac3df1dbf76b3d4ace5ad80",
+      "normalization": "process IDs and boot ID replaced by campaign-scoped aliases; monotonic start retained"
+    },
+    "04-control/sampler.log": {
+      "raw_sha256": "93bd23eed8eb8e570d73d1872d169a4401372a55dc37eec7d0c96a999da6877b",
+      "public_sha256": "35e4f78bb9397b95d1c89ab8087bba9764b22897e0142f83c0f41db4c39bb01a",
+      "normalization": "consistent process aliases; cgroup path omitted; monotonic start retained"
+    },
+    "05-control/started.epoch": {
+      "raw_sha256": "5649144174aca24e46e3ebb94f6b919c065c62bdb4e62a7b1e67602cdd8d7b3c",
+      "public_sha256": "5649144174aca24e46e3ebb94f6b919c065c62bdb4e62a7b1e67602cdd8d7b3c",
+      "normalization": "unchanged"
+    },
+    "05-control/finished.epoch": {
+      "raw_sha256": "bd1deb572c06974769ac639edff9a873b182d56090525a71723f97a2c4880bf7",
+      "public_sha256": "bd1deb572c06974769ac639edff9a873b182d56090525a71723f97a2c4880bf7",
+      "normalization": "unchanged"
+    },
+    "05-control/started.monotonic_ns": {
+      "raw_sha256": "abd76198e1884b4afe916c20a439d5e0c3b068c5e57e7aa66e95024442f0310a",
+      "public_sha256": "abd76198e1884b4afe916c20a439d5e0c3b068c5e57e7aa66e95024442f0310a",
+      "normalization": "unchanged"
+    },
+    "05-control/finished.monotonic_ns": {
+      "raw_sha256": "3a5bdc242cdfbec48e07131e15b18d946084a996f42a923e0237edf06c0ec455",
+      "public_sha256": "3a5bdc242cdfbec48e07131e15b18d946084a996f42a923e0237edf06c0ec455",
+      "normalization": "unchanged"
+    },
+    "05-control/runner.exit": {
+      "raw_sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+      "public_sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+      "normalization": "unchanged"
+    },
+    "05-control/identity.exit": {
+      "raw_sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+      "public_sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+      "normalization": "unchanged"
+    },
+    "05-control/sampler.exit": {
+      "raw_sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+      "public_sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+      "normalization": "unchanged"
+    },
+    "05-control/cleanup.exit": {
+      "raw_sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+      "public_sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+      "normalization": "unchanged"
+    },
+    "05-control/methods.sha256": {
+      "raw_sha256": "b28669ef45471c6ea885f8635d4adccc6b329cf6409d887198357386a905b632",
+      "public_sha256": "b28669ef45471c6ea885f8635d4adccc6b329cf6409d887198357386a905b632",
+      "normalization": "unchanged"
+    },
+    "05-control/matrix/rustbgpd/daemon.exit": {
+      "raw_sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+      "public_sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+      "normalization": "unchanged"
+    },
+    "05-control/matrix/rustbgpd/status": {
+      "raw_sha256": "9f56e761d79bfdb34304a012586cb04d16b435ef6130091a97702e559260a2f2",
+      "public_sha256": "9f56e761d79bfdb34304a012586cb04d16b435ef6130091a97702e559260a2f2",
+      "normalization": "unchanged"
+    },
+    "05-control/matrix/rustbgpd/quiet.tsv": {
+      "raw_sha256": "bf6072ba111b04a5e6ce591b38c15b78b390758dd8a1a26434cd28d1681c66fb",
+      "public_sha256": "bf6072ba111b04a5e6ce591b38c15b78b390758dd8a1a26434cd28d1681c66fb",
+      "normalization": "unchanged"
+    },
+    "05-control/matrix/rustbgpd/cooldown-start.monotonic_ns": {
+      "raw_sha256": "b3d2b6cb85a048d992cccd943a8ad326ac2c1b3aba1cc56f1b807f1ee3cd543e",
+      "public_sha256": "b3d2b6cb85a048d992cccd943a8ad326ac2c1b3aba1cc56f1b807f1ee3cd543e",
+      "normalization": "unchanged"
+    },
+    "05-control/matrix/rustbgpd/cooldown-end.monotonic_ns": {
+      "raw_sha256": "3a28cd19a6256947a74606df940169e78174ac6eb5cfcd80ba0e5ed0ab6bec6f",
+      "public_sha256": "3a28cd19a6256947a74606df940169e78174ac6eb5cfcd80ba0e5ed0ab6bec6f",
+      "normalization": "unchanged"
+    },
+    "05-control/matrix/rustbgpd/reloadstall.log": {
+      "raw_sha256": "9cd3f37e16e4f5ef841b01c69ac51ee5c5ed271a40118ac87ba99fc93fddf888",
+      "public_sha256": "95993e48a2721503bd69504a3f32a446d9ef5c1757c1712919eebc8f02f63e9c",
+      "normalization": "all native aggregate, outcome, tied-gap, receiver and clock rows; unrelated log lines omitted"
+    },
+    "05-control/matrix/rustbgpd/daemon.log": {
+      "raw_sha256": "86ff80e7c37dd09a1369bc8640a9737ef8a25182b963d5954560770f8cb81087",
+      "public_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "normalization": "all writer/poll rows; unrelated daemon lines omitted"
+    },
+    "05-control/matrix/rustbgpd/provenance.json": {
+      "raw_sha256": "31044a5e7e42e1f0c3c677716cb66b44db9f5b8d0110a86b0e29df8dda16808e",
+      "public_sha256": "31044a5e7e42e1f0c3c677716cb66b44db9f5b8d0110a86b0e29df8dda16808e",
+      "normalization": "JSON formatting only; original fields retained"
+    },
+    "05-control/runner.log": {
+      "raw_sha256": "ebf68b7b54c8ec89c97baf04788053c499dfd7cd33c95e4b5ef841f0df7753d4",
+      "public_sha256": "f249f5ab389bcb6bee3ef849490d69befd5a25b33ba1048391d786da0297e396",
+      "normalization": "native start/pass/cooldown witness retained; path-only completion destination normalized; unrelated lines omitted"
+    },
+    "05-control/runner.owner.json": {
+      "raw_sha256": "7e5960bd19d8d15e46128e1b3285027430d0af6739d07db1387e5eefe1c86611",
+      "public_sha256": "a975959cf941ddccdf5d16d6b5420b2542511e5e7b8553231a91b925a76368aa",
+      "normalization": "process IDs and boot ID replaced by campaign-scoped aliases; monotonic start retained"
+    },
+    "05-control/sampler.log": {
+      "raw_sha256": "50b0c4b8cb2d5accc517e1bbd5c6a6f65a5e064f4e544fb0c2ac7b0071d60934",
+      "public_sha256": "8c2528cfc9c83c50ceccaa8df24308a72400f2b0ac991eb1f51306a4391f70a6",
+      "normalization": "consistent process aliases; cgroup path omitted; monotonic start retained"
+    },
+    "06-probe/started.epoch": {
+      "raw_sha256": "7059e427d55fade43318ffd4af70843d4ad0871db7dbd9780d06bdef62131d2c",
+      "public_sha256": "7059e427d55fade43318ffd4af70843d4ad0871db7dbd9780d06bdef62131d2c",
+      "normalization": "unchanged"
+    },
+    "06-probe/finished.epoch": {
+      "raw_sha256": "fb9f4b4b9f2cfc42050a9873790ac0e31d645a9188578eae26b213d403222758",
+      "public_sha256": "fb9f4b4b9f2cfc42050a9873790ac0e31d645a9188578eae26b213d403222758",
+      "normalization": "unchanged"
+    },
+    "06-probe/started.monotonic_ns": {
+      "raw_sha256": "0f558b830335f4e8e3676768768cda5885b35f2f423b2fb9eb04269864d204e7",
+      "public_sha256": "0f558b830335f4e8e3676768768cda5885b35f2f423b2fb9eb04269864d204e7",
+      "normalization": "unchanged"
+    },
+    "06-probe/finished.monotonic_ns": {
+      "raw_sha256": "cee0e87948d73318324c16298ab20229e3a3b9dc013e8f14173bbcdffb945de9",
+      "public_sha256": "cee0e87948d73318324c16298ab20229e3a3b9dc013e8f14173bbcdffb945de9",
+      "normalization": "unchanged"
+    },
+    "06-probe/runner.exit": {
+      "raw_sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+      "public_sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+      "normalization": "unchanged"
+    },
+    "06-probe/identity.exit": {
+      "raw_sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+      "public_sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+      "normalization": "unchanged"
+    },
+    "06-probe/sampler.exit": {
+      "raw_sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+      "public_sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+      "normalization": "unchanged"
+    },
+    "06-probe/cleanup.exit": {
+      "raw_sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+      "public_sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+      "normalization": "unchanged"
+    },
+    "06-probe/methods.sha256": {
+      "raw_sha256": "b28669ef45471c6ea885f8635d4adccc6b329cf6409d887198357386a905b632",
+      "public_sha256": "b28669ef45471c6ea885f8635d4adccc6b329cf6409d887198357386a905b632",
+      "normalization": "unchanged"
+    },
+    "06-probe/matrix/rustbgpd/daemon.exit": {
+      "raw_sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+      "public_sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+      "normalization": "unchanged"
+    },
+    "06-probe/matrix/rustbgpd/status": {
+      "raw_sha256": "9f56e761d79bfdb34304a012586cb04d16b435ef6130091a97702e559260a2f2",
+      "public_sha256": "9f56e761d79bfdb34304a012586cb04d16b435ef6130091a97702e559260a2f2",
+      "normalization": "unchanged"
+    },
+    "06-probe/matrix/rustbgpd/quiet.tsv": {
+      "raw_sha256": "22ba00791ed0551676b223cfacbba2117b37e70e9bbd8aa1c4fd5146373fb9ed",
+      "public_sha256": "22ba00791ed0551676b223cfacbba2117b37e70e9bbd8aa1c4fd5146373fb9ed",
+      "normalization": "unchanged"
+    },
+    "06-probe/matrix/rustbgpd/cooldown-start.monotonic_ns": {
+      "raw_sha256": "1ec8d3d94bebeeaf4a9c9535231b4a46597f9fcc975e4111d37fd9fd02d9be65",
+      "public_sha256": "1ec8d3d94bebeeaf4a9c9535231b4a46597f9fcc975e4111d37fd9fd02d9be65",
+      "normalization": "unchanged"
+    },
+    "06-probe/matrix/rustbgpd/cooldown-end.monotonic_ns": {
+      "raw_sha256": "01165a424d357cba9843a1dcb651d00b6e2d6b81899ef9e6bd7b6e60ffd8cc6c",
+      "public_sha256": "01165a424d357cba9843a1dcb651d00b6e2d6b81899ef9e6bd7b6e60ffd8cc6c",
+      "normalization": "unchanged"
+    },
+    "06-probe/matrix/rustbgpd/reloadstall.log": {
+      "raw_sha256": "7aabd01bbff634bd79865a1adef3c5dd73a2eeecd869de5b0ea4ec563895d719",
+      "public_sha256": "ac8b8beceecdcaeac9b6151309ce7a795658b30587489e357bd7d0cfce58aedc",
+      "normalization": "all native aggregate, outcome, tied-gap, receiver and clock rows; unrelated log lines omitted"
+    },
+    "06-probe/matrix/rustbgpd/daemon.log": {
+      "raw_sha256": "ca39b4ec048965bec19b37fb1a62b09c018a1bedfef7203f72c92a4704de62c7",
+      "public_sha256": "008852c0087468ca6282a0e7bbd85ba14d28ec17eb81b81c8ede4a88193f622e",
+      "normalization": "all writer/poll rows; unrelated daemon lines omitted"
+    },
+    "06-probe/matrix/rustbgpd/provenance.json": {
+      "raw_sha256": "93abb6fa684251a75a772cd2274e589579e53bfc004924e73d1643adebdcd53f",
+      "public_sha256": "93abb6fa684251a75a772cd2274e589579e53bfc004924e73d1643adebdcd53f",
+      "normalization": "JSON formatting only; original fields retained"
+    },
+    "06-probe/runner.log": {
+      "raw_sha256": "225be222f97fc3886459d5e1a43714b0744802df75a944f14233eeb941bcef3f",
+      "public_sha256": "a048e58e1c74940af41f74c001691a1dc888ac7de57b17e970a270d6b78fa8a9",
+      "normalization": "native start/pass/cooldown witness retained; path-only completion destination normalized; unrelated lines omitted"
+    },
+    "06-probe/runner.owner.json": {
+      "raw_sha256": "db0043fac439c068f8603140afc220c39274bedaee4234792020a11010d82398",
+      "public_sha256": "1dc8804fc0d078216c6897d95629c8e4b2de40ebcd8c49b1623d49360d937e92",
+      "normalization": "process IDs and boot ID replaced by campaign-scoped aliases; monotonic start retained"
+    },
+    "06-probe/sampler.log": {
+      "raw_sha256": "fec32b3401b6169a0bfe53a015e42b7f9a532a9ba76c7beb105a5fefefec2eb8",
+      "public_sha256": "6020c84a3286ba0ab2e99700a0730a8d657bc93722d3af56fb3062f349cad147",
+      "normalization": "consistent process aliases; cgroup path omitted; monotonic start retained"
+    },
+    "06-probe/publication.csv": {
+      "raw_sha256": "c0f868c16c50d9120df7c6e40eb5e24c7720f0c6978b41d04c0e85dcad96ef1c",
+      "public_sha256": "df04bac43532b5f654770a2fab9bd937b9a67553e85b5c1ba6313b7a73797d0d",
+      "normalization": "inventory allocation addresses replaced with per-process integer aliases; all rows retained"
+    }
+  },
+  "limits": "Normalized process aliases preserve internal relationships, not independently verifiable OS identity. Raw ownership, source snapshots and logs are bound in the external archive; a compact receipt cannot reobserve process cleanup."
+}
