@@ -123,7 +123,8 @@ explain opt-in. At the 4,096 default, explain on a 1,000,000-route peer costs ab
 evicted-key memory that the reply reports. Retaining a full table costs
 roughly 0.5 GiB per 1,000,000-route peer at this attribute shape. Operators
 who need that coverage can raise the global ceiling deliberately and budget
-for it. A large ceiling no longer costs anything on small peers. Nothing here
+for it. In single runs at 1,000 × 400, the 1,048,576 ceiling allocated within
+0.5 MiB of 4,096, so the capacity is not reserved up front. Nothing here
 argues for derived sizing or a larger default. The rejected-route retention
 default was not exercised: every cell rejected zero routes.
 
