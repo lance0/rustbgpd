@@ -1337,7 +1337,8 @@ pub(super) struct LiveSessionRecord {
     negotiated_llgr_families: Vec<(Afi, Safi)>,
     gr_context: Option<PeerSelectionDeferralContext>,
     exact_export_encoder: Option<Arc<dyn ExactExportEncoder>>,
-    /// This session has sent its L2VPN/EVPN End-of-RIB.
+    /// This session has sent its L2VPN/EVPN End-of-RIB since the peer's
+    /// Adj-RIB-In was last discarded.
     evpn_end_of_rib: bool,
 }
 
@@ -3645,11 +3646,14 @@ impl RibManager {
             }
             RibUpdate::QueryEvpnSessionsSynced { reply } => {
                 let evpn = (Afi::L2Vpn, Safi::Evpn);
+                // The newest live record is the one registration uses; an
+                // older collision-window record cannot vouch for it.
                 let peers: Vec<bool> = self
                     .live_sessions
                     .values()
-                    .filter(|sessions| sessions.iter().any(|s| s.sendable_families.contains(&evpn)))
-                    .map(|sessions| sessions.iter().any(|s| s.evpn_end_of_rib))
+                    .filter_map(|sessions| sessions.last())
+                    .filter(|s| s.sendable_families.contains(&evpn))
+                    .map(|s| s.evpn_end_of_rib)
                     .collect();
                 let _ = reply.send(!peers.is_empty() && peers.iter().all(|&synced| synced));
             }
