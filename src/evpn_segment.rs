@@ -311,6 +311,10 @@ struct SegmentState {
     ead_per_es: LocalEadPerEsOriginator,
     ead_per_evi: LocalEadPerEviOriginator,
     election: DfElection,
+    /// RFC 9785 §4.3 operational advertisement, separate from admin config.
+    operational_df: (u32, bool),
+    /// Recovery waits for remote Type 4 routes before advertising locally.
+    recovery_deadline: Option<tokio::time::Instant>,
     /// Last role assignment per member VNI. Used to detect flips.
     last_roles: BTreeMap<EvpnInstanceId, DfRole>,
     /// Reference instance used for path-attribute construction. We
@@ -395,12 +399,13 @@ async fn segment_loop(
                     // receivers expose the latest value even if their own
                     // `changed()` branch has not run yet, so refresh here before
                     // rebuilding ES state.
-                    apply_runtime_instance_snapshot(&mut runtime, instances_rx.borrow().clone());
+                    let instances = instances_rx.borrow().clone();
                     let segments = segments_rx.borrow_and_update().as_ref().clone();
-                    apply_runtime_segment_snapshot(
-                        &runtime,
+                    apply_runtime_snapshot(
+                        &mut runtime,
                         &mut by_esi,
                         &mut esi_label_allocator,
+                        instances,
                         segments,
                         &mut pending_rib_ops,
                     )
@@ -415,25 +420,15 @@ async fn segment_loop(
             changed = instances_rx.changed() => {
                 if let Ok(()) = changed {
                     let instances = instances_rx.borrow_and_update().clone();
-                    if segment_member_instances_changed(
-                        runtime.instances.as_ref(),
-                        instances.as_ref(),
-                        &by_esi,
-                    ) {
-                        let segments = segments_rx.borrow().as_ref().clone();
-                        drain(&runtime, &mut by_esi, &mut pending_rib_ops).await;
-                        apply_runtime_instance_snapshot(&mut runtime, instances);
-                        rebuild_segment_states(
-                            &runtime,
-                            &mut by_esi,
-                            &mut esi_label_allocator,
-                            segments,
-                        );
-                        initial_startup(&runtime, &mut by_esi, &mut pending_rib_ops).await;
-                        publish_dataplane_snapshots(&runtime, &by_esi);
-                    } else {
-                        apply_runtime_instance_snapshot(&mut runtime, instances);
-                    }
+                    let segments = segments_rx.borrow().as_ref().clone();
+                    apply_runtime_snapshot(
+                        &mut runtime,
+                        &mut by_esi,
+                        &mut esi_label_allocator,
+                        instances,
+                        segments,
+                        &mut pending_rib_ops,
+                    ).await;
                 } else {
                     debug!("EVPN segment: runtime instance watch closed; draining");
                     drain(&runtime, &mut by_esi, &mut pending_rib_ops).await;
@@ -491,6 +486,9 @@ async fn segment_loop(
                     evpn_event_rx = None;
                 }
             },
+            () = crate::evpn_ack::retry_delay(by_esi.values().filter_map(|s| s.recovery_deadline).min()) => {
+                reelection_sweep(&runtime, &mut by_esi, &mut pending_rib_ops).await;
+            }
             // ADR-0102: re-drive RIB operations whose acknowledgement
             // was lost. Parks forever while nothing is pending.
             () = crate::evpn_ack::retry_delay(pending_rib_ops.next_deadline()) => {
@@ -501,31 +499,6 @@ async fn segment_loop(
             }
         }
     }
-}
-
-fn apply_runtime_instance_snapshot(
-    runtime: &mut SegmentRuntime,
-    instances: Arc<EvpnInstanceTable>,
-) {
-    // Assign unconditionally: the snapshot arrives as an `Arc` from a
-    // watch channel and is only republished on a runtime mutation, so a
-    // deep `EvpnInstanceTable` comparison costs more than the Arc move
-    // it would guard.
-    runtime.instances = instances;
-}
-
-fn segment_member_instances_changed(
-    old: &EvpnInstanceTable,
-    new: &EvpnInstanceTable,
-    by_esi: &HashMap<EthernetSegmentIdentifier, SegmentState>,
-) -> bool {
-    by_esi.values().any(|state| {
-        state
-            .config
-            .member_vnis
-            .iter()
-            .any(|&vni| old.get(vni) != new.get(vni))
-    })
 }
 
 fn rebuild_segment_states(
@@ -621,6 +594,8 @@ fn build_segment_state(
     ead_per_evi.set_labels(labels);
     let election = DfElection::new(seg.esi, seg.member_vnis.iter().copied());
     Some(SegmentState {
+        operational_df: (seg.df_preference, seg.df_dont_preempt),
+        recovery_deadline: None,
         config: seg,
         es_origin,
         ead_per_es,
@@ -632,26 +607,60 @@ fn build_segment_state(
     })
 }
 
-async fn apply_runtime_segment_snapshot(
-    runtime: &SegmentRuntime,
+/// Reconcile only affected ESIs. An unrelated configuration change must not
+/// turn a healthy non-revertive DF into a recovering PE and surrender its role.
+async fn apply_runtime_snapshot(
+    runtime: &mut SegmentRuntime,
     by_esi: &mut HashMap<EthernetSegmentIdentifier, SegmentState>,
     esi_label_allocator: &mut rustbgpd_evpn::EsiLabelAllocator,
+    instances: Arc<EvpnInstanceTable>,
     segments: Vec<EthernetSegment>,
     pending: &mut PendingRibOps,
 ) {
-    let changed = segments.len() != by_esi.len()
-        || segments.iter().any(|seg| {
-            by_esi
-                .get(&seg.esi)
-                .is_none_or(|state| state.config != *seg)
-        });
-    if !changed {
-        return;
+    let previous_instances = std::mem::replace(&mut runtime.instances, instances);
+    let next_esis: HashSet<_> = segments.iter().map(|seg| seg.esi).collect();
+    let removed: Vec<_> = by_esi
+        .keys()
+        .copied()
+        .filter(|esi| !next_esis.contains(esi))
+        .collect();
+    for esi in removed {
+        if let Some(mut state) = by_esi.remove(&esi) {
+            drain_segment_state(runtime, &mut state, pending).await;
+        }
+        esi_label_allocator.release(esi);
     }
-
-    drain(runtime, by_esi, pending).await;
-    rebuild_segment_states(runtime, by_esi, esi_label_allocator, segments);
-    initial_startup(runtime, by_esi, pending).await;
+    for seg in segments {
+        if by_esi.get(&seg.esi).is_some_and(|state| {
+            state.config == seg
+                && seg
+                    .member_vnis
+                    .iter()
+                    .all(|&vni| previous_instances.get(vni) == runtime.instances.get(vni))
+        }) {
+            continue;
+        }
+        let mut administrative_change = false;
+        if let Some(mut old) = by_esi.remove(&seg.esi) {
+            // RFC 9785 §4.1: explicit administrative DF changes force
+            // a switchover instead of inheriting the previous reference.
+            administrative_change = (
+                old.config.df_preference,
+                old.config.df_dont_preempt,
+                old.config.df_algorithm,
+            ) != (seg.df_preference, seg.df_dont_preempt, seg.df_algorithm);
+            drain_segment_state(runtime, &mut old, pending).await;
+        }
+        let esi = seg.esi;
+        let Some(mut state) = build_segment_state(runtime, seg, esi_label_allocator) else {
+            esi_label_allocator.release(esi);
+            continue;
+        };
+        if !runtime.drained_esis.contains(&esi) {
+            startup_segment_state(runtime, &mut state, pending, !administrative_change).await;
+        }
+        by_esi.insert(esi, state);
+    }
     publish_dataplane_snapshots(runtime, by_esi);
 }
 
@@ -700,7 +709,7 @@ async fn initial_startup(
         if runtime.drained_esis.contains(&state.config.esi) {
             continue;
         }
-        startup_segment_state(runtime, state, pending).await;
+        startup_segment_state(runtime, state, pending, true).await;
     }
 }
 
@@ -711,7 +720,21 @@ async fn startup_segment_state(
     runtime: &SegmentRuntime,
     state: &mut SegmentState,
     pending: &mut PendingRibOps,
+    recover: bool,
 ) {
+    state.operational_df = (state.config.df_preference, state.config.df_dont_preempt);
+    if recover && state.config.df_dont_preempt {
+        // RFC 9785 §4.3(5): collect remote routes before Type 4 publication.
+        // Three seconds matches the RFC 7432 default DF wait interval.
+        state.recovery_deadline = Some(tokio::time::Instant::now() + Duration::from_secs(3));
+        state.last_roles = state
+            .config
+            .member_vnis
+            .iter()
+            .map(|&vni| (vni, DfRole::NonDf))
+            .collect();
+        return;
+    }
     // Type 4 ES first so peers see us as a candidate before any
     // EAD routes show up.
     let actions = state.es_origin.on_startup();
@@ -720,8 +743,7 @@ async fn startup_segment_state(
     let actions = state.ead_per_es.on_startup();
     apply(runtime, state, actions, pending).await;
 
-    // Initial election with self as sole candidate. Local PE is
-    // DF for all member VNIs.
+    // Include already received remote Type 4 routes in the initial election.
     run_election_for(runtime, state, pending).await;
 }
 
@@ -746,6 +768,8 @@ async fn drain_segment_state(
     state: &mut SegmentState,
     pending: &mut PendingRibOps,
 ) {
+    state.recovery_deadline = None;
+    state.operational_df = (state.config.df_preference, state.config.df_dont_preempt);
     let actions = state.ead_per_evi.drain_to_withdraws();
     apply(runtime, state, actions, pending).await;
     let actions = state.ead_per_es.on_shutdown();
@@ -790,7 +814,7 @@ async fn apply_drained_esi_snapshot(
             continue;
         };
         info!(esi = %esi, "EVPN segment: undraining Ethernet Segment (operator)");
-        startup_segment_state(runtime, state, pending).await;
+        startup_segment_state(runtime, state, pending, true).await;
         changed = true;
     }
     if changed {
@@ -843,6 +867,13 @@ async fn reelection_sweep(
         Ok(r) => r,
         Err(e) => {
             warn!(error = %e, "EVPN segment: sweep candidate gather failed");
+            // Avoid an expired recovery timer spinning on an unavailable RIB.
+            for state in by_esi.values_mut() {
+                if let Some(deadline) = &mut state.recovery_deadline {
+                    *deadline =
+                        (*deadline).max(tokio::time::Instant::now() + Duration::from_secs(1));
+                }
+            }
             return;
         }
     };
@@ -883,7 +914,7 @@ async fn run_election_for_routes(
 async fn run_election_with_candidates(
     runtime: &SegmentRuntime,
     state: &mut SegmentState,
-    candidates: Vec<DfCandidate>,
+    mut candidates: Vec<DfCandidate>,
     pending: &mut PendingRibOps,
 ) {
     // ADR-0084: a drained ES has withdrawn its Type 4 and exited DF
@@ -892,6 +923,30 @@ async fn run_election_with_candidates(
     // drained).
     if runtime.drained_esis.contains(&state.config.esi) {
         return;
+    }
+    if state
+        .recovery_deadline
+        .is_some_and(|deadline| tokio::time::Instant::now() < deadline)
+    {
+        return;
+    }
+    let recovering = state.recovery_deadline.take().is_some();
+    let changed = update_operational_df(state, &candidates, recovering);
+    for candidate in &mut candidates {
+        if candidate.originator_ip == state.config.originator_ip {
+            (candidate.df_preference, candidate.df_dont_preempt) = state.operational_df;
+        }
+    }
+    if recovering || changed {
+        let actions = state.es_origin.on_refresh();
+        apply(runtime, state, actions, pending).await;
+    }
+    if recovering {
+        let actions = state.ead_per_es.on_startup();
+        apply(runtime, state, actions, pending).await;
+        // The temporary NonDf roles protected the dataplane during recovery;
+        // clear them so EAD-per-EVI is originated even if we remain NonDf.
+        state.last_roles.clear();
     }
     let new_roles = match state.election.run(&candidates, state.config.originator_ip) {
         Ok(r) => r,
@@ -941,8 +996,8 @@ async fn run_election_with_candidates(
             &inst,
             state.esi_label,
             state.config.df_algorithm,
-            state.config.df_preference,
-            state.config.df_dont_preempt,
+            state.operational_df.0,
+            state.operational_df.1,
             state.config.redundancy_mode,
             actions,
             pending,
@@ -955,6 +1010,44 @@ async fn run_election_with_candidates(
             "EVPN segment: DF role updated"
         );
     }
+}
+
+/// RFC 9785 §4.3: on recovery inherit a protected remote reference's
+/// preference with DP=0. Keep it until we become reference; then restore admin.
+fn update_operational_df(
+    state: &mut SegmentState,
+    candidates: &[DfCandidate],
+    recovering: bool,
+) -> bool {
+    let admin = (state.config.df_preference, state.config.df_dont_preempt);
+    let before = state.operational_df;
+    let agreed = candidates
+        .iter()
+        .all(|c| c.df_algorithm == state.config.df_algorithm);
+    if !agreed {
+        state.operational_df = admin;
+    } else if recovering && admin.1 {
+        let remote: Vec<_> = candidates
+            .iter()
+            .copied()
+            .filter(|c| c.originator_ip != state.config.originator_ip)
+            .collect();
+        if let Some(reference) = DfElection::preference_reference(&remote) {
+            let would_preempt = match state.config.df_algorithm {
+                DfAlgorithm::HighestPreference => admin.0 >= reference.df_preference,
+                DfAlgorithm::LowestPreference => admin.0 <= reference.df_preference,
+                _ => false,
+            };
+            if reference.df_dont_preempt && would_preempt {
+                state.operational_df = (reference.df_preference, false);
+            }
+        }
+    } else if DfElection::preference_reference(candidates)
+        .is_some_and(|reference| reference.originator_ip == state.config.originator_ip)
+    {
+        state.operational_df = admin;
+    }
+    before != state.operational_df
 }
 
 /// Publish both dataplane-supervisor snapshots the segment actor
@@ -1339,8 +1432,8 @@ fn gather_candidates_from_routes(
         state.config.originator_ip,
         DfCandidate {
             originator_ip: state.config.originator_ip,
-            df_preference: state.config.df_preference,
-            df_dont_preempt: state.config.df_dont_preempt,
+            df_preference: state.operational_df.0,
+            df_dont_preempt: state.operational_df.1,
             df_algorithm: state.config.df_algorithm,
         },
     );
@@ -1475,8 +1568,8 @@ async fn apply(
         &inst,
         state.esi_label,
         state.config.df_algorithm,
-        state.config.df_preference,
-        state.config.df_dont_preempt,
+        state.operational_df.0,
+        state.operational_df.1,
         state.config.redundancy_mode,
         actions,
         pending,
@@ -1680,8 +1773,8 @@ async fn retry_pending_rib_ops(
                         inst,
                         esi_label: state.esi_label,
                         df_algorithm: state.config.df_algorithm,
-                        df_preference: state.config.df_preference,
-                        df_dont_preempt: state.config.df_dont_preempt,
+                        df_preference: state.operational_df.0,
+                        df_dont_preempt: state.operational_df.1,
                         redundancy_mode: state.config.redundancy_mode,
                     })
                 });
@@ -1897,6 +1990,8 @@ mod tests {
             originator_ip: ipa("10.0.0.1"),
         };
         SegmentState {
+            operational_df: (config.df_preference, config.df_dont_preempt),
+            recovery_deadline: None,
             config,
             es_origin: LocalEsOriginator::new(rd(65000, 100), id, ipa("10.0.0.1")),
             ead_per_es: LocalEadPerEsOriginator::new(rd(65000, 100), id, MplsLabel::new(123)),
@@ -3852,6 +3947,305 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
+    async fn nonrevertive_df_survives_other_segment_and_instance_changes() {
+        let rib = ScriptedRib::spawn(RibReplyMode::Ok);
+        let mut runtime = scripted_runtime(&rib);
+        let mut allocator = rustbgpd_evpn::EsiLabelAllocator::new();
+        let mut pending = PendingRibOps::new();
+        let mut config_a = segment(esi(1), &[100]);
+        config_a.df_algorithm = DfAlgorithm::HighestPreference;
+        config_a.df_preference = 500;
+        config_a.df_dont_preempt = true;
+        let mut state_a = build_segment_state(&runtime, config_a.clone(), &mut allocator).unwrap();
+        startup_segment_state(&runtime, &mut state_a, &mut pending, true).await;
+        tokio::time::advance(Duration::from_secs(3)).await;
+        run_election_for_routes(&runtime, &mut state_a, &[], &mut pending).await;
+        let mut candidates = gather_candidates_from_routes(&state_a, &[]);
+        candidates.push(DfCandidate {
+            originator_ip: ipa("10.0.0.2"),
+            df_preference: 200,
+            df_dont_preempt: true,
+            df_algorithm: DfAlgorithm::HighestPreference,
+        });
+        run_election_with_candidates(&runtime, &mut state_a, candidates, &mut pending).await;
+        assert_eq!(state_a.last_roles[&vni(100)], DfRole::Df);
+        let mut states = HashMap::from([(config_a.esi, state_a)]);
+        let mut instances = runtime.instances.as_ref().clone();
+        instances.insert(instance(200)).unwrap();
+        let mut config_b = segment(esi(2), &[200]);
+        // Adding B must not withdraw A or restart its recovery timer.
+        apply_runtime_snapshot(
+            &mut runtime,
+            &mut states,
+            &mut allocator,
+            Arc::new(instances),
+            vec![config_a.clone(), config_b.clone()],
+            &mut pending,
+        )
+        .await;
+        assert_eq!(rib.withdraw_count(), 0);
+        assert!(states[&config_a.esi].recovery_deadline.is_none());
+        assert_eq!(states[&config_a.esi].operational_df, (500, true));
+        assert_eq!(states[&config_a.esi].last_roles[&vni(100)], DfRole::Df);
+        // Editing B withdraws only B's three route classes.
+        config_b.originator_ip = ipa("10.0.0.22");
+        let instances = runtime.instances.clone();
+        apply_runtime_snapshot(
+            &mut runtime,
+            &mut states,
+            &mut allocator,
+            instances,
+            vec![config_a.clone(), config_b.clone()],
+            &mut pending,
+        )
+        .await;
+        assert_eq!(rib.withdraw_count(), 3);
+        assert_eq!(states[&config_a.esi].last_roles[&vni(100)], DfRole::Df);
+        // Redefining B's member instance likewise preserves A's running state.
+        let mut replacement = EvpnInstanceTable::new();
+        replacement.insert(instance(100)).unwrap();
+        replacement.insert(instance_with_rd(200, 201)).unwrap();
+        apply_runtime_snapshot(
+            &mut runtime,
+            &mut states,
+            &mut allocator,
+            Arc::new(replacement),
+            vec![config_a.clone(), config_b],
+            &mut pending,
+        )
+        .await;
+        assert_eq!(rib.withdraw_count(), 6);
+        assert!(states[&config_a.esi].recovery_deadline.is_none());
+        assert_eq!(states[&config_a.esi].operational_df, (500, true));
+        assert_eq!(states[&config_a.esi].last_roles[&vni(100)], DfRole::Df);
+    }
+
+    #[test]
+    fn nonrevertive_reference_boundaries_and_fallback() {
+        for algorithm in [
+            DfAlgorithm::HighestPreference,
+            DfAlgorithm::LowestPreference,
+        ] {
+            for (admin, remote, dp, inherit) in [
+                (0, 0, true, true),
+                (65535, 65535, true, true),
+                (100, 100, false, false),
+                (65535, 0, true, algorithm == DfAlgorithm::HighestPreference),
+                (0, 65535, true, algorithm == DfAlgorithm::LowestPreference),
+            ] {
+                let mut state = segment_state(esi(1));
+                state.config.df_algorithm = algorithm;
+                state.config.df_preference = admin;
+                state.config.df_dont_preempt = true;
+                state.operational_df = (admin, true);
+                let candidate = DfCandidate {
+                    originator_ip: ipa("10.0.0.2"),
+                    df_preference: remote,
+                    df_dont_preempt: dp,
+                    df_algorithm: algorithm,
+                };
+                update_operational_df(&mut state, &[candidate], true);
+                assert_eq!(
+                    state.operational_df,
+                    if inherit {
+                        (remote, false)
+                    } else {
+                        (admin, true)
+                    }
+                );
+                let incompatible = DfCandidate {
+                    df_algorithm: DfAlgorithm::DefaultModulo,
+                    ..candidate
+                };
+                update_operational_df(&mut state, &[incompatible], false);
+                assert_eq!(
+                    state.operational_df,
+                    (admin, true),
+                    "mismatch clears inherited state"
+                );
+            }
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one controlled-time recovery lifecycle verifies wire advertisements and forwarding transitions together"
+    )]
+    async fn nonrevertive_recovery_updates_wire_and_single_active_gate() {
+        let (rib_tx, mut rib_rx) = mpsc::channel::<RibUpdate>(64);
+        let injected = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let captured = injected.clone();
+        let recorder = tokio::spawn(async move {
+            while let Some(update) = rib_rx.recv().await {
+                match update {
+                    RibUpdate::InjectEvpn { route, reply } => {
+                        captured.lock().await.push(route);
+                        let _ = reply.send(Ok(()));
+                    }
+                    RibUpdate::WithdrawEvpn { reply, .. } => {
+                        let _ = reply.send(Ok(()));
+                    }
+                    RibUpdate::QueryEvpnRoutes { reply, .. } => {
+                        let _ = reply.send(vec![]);
+                    }
+                    _ => {}
+                }
+            }
+        });
+        let mut instances = EvpnInstanceTable::new();
+        instances.insert(instance(100)).unwrap();
+        let mut runtime = SegmentRuntime {
+            instances: Arc::new(instances),
+            rib_tx,
+            bum_enforcement_tx: None,
+            same_esi_bias_tx: None,
+            metrics: BgpMetrics::new(),
+            shutdown: CancellationToken::new(),
+            drained_esis: Arc::new(BTreeSet::new()),
+            es_link_bindings: EsLinkBindings::default(),
+        };
+        for (algorithm, admin) in [
+            (DfAlgorithm::HighestPreference, 65535),
+            (DfAlgorithm::LowestPreference, 0),
+        ] {
+            let mut state = segment_state(esi(1));
+            state.config.df_algorithm = algorithm;
+            state.config.df_preference = admin;
+            state.config.df_dont_preempt = true;
+            state.config.redundancy_mode = RedundancyMode::SingleActive;
+            let mut pending = PendingRibOps::new();
+            let mut attrs = attrs_with_es_import_rt(state.config.esi);
+            attrs.push(PathAttribute::ExtendedCommunities(vec![
+                ExtendedCommunity::df_election(
+                    algorithm.algorithm_id(),
+                    DF_ELECTION_DONT_PREEMPT,
+                    Some(200),
+                ),
+            ]));
+            let remote = type_4_es_route(state.config.esi, "10.0.0.2", attrs);
+            injected.lock().await.clear();
+            startup_segment_state(&runtime, &mut state, &mut pending, true).await;
+            assert_eq!(
+                ac_gate_state_for_es(
+                    state.config.redundancy_mode,
+                    false,
+                    &state.config.member_vnis,
+                    &state.last_roles
+                ),
+                Some(AcGateState::Blocked)
+            );
+            tokio::time::advance(Duration::from_millis(2999)).await;
+            run_election_for_routes(
+                &runtime,
+                &mut state,
+                std::slice::from_ref(&remote),
+                &mut pending,
+            )
+            .await;
+            assert!(
+                injected.lock().await.is_empty(),
+                "no Type 4 before recovery deadline"
+            );
+            tokio::time::advance(Duration::from_millis(1)).await;
+            run_election_for_routes(
+                &runtime,
+                &mut state,
+                std::slice::from_ref(&remote),
+                &mut pending,
+            )
+            .await;
+            assert_eq!(state.operational_df, (200, false));
+            assert_eq!(
+                state.last_roles[&vni(100)],
+                DfRole::NonDf,
+                "lower local IP must not preempt protected incumbent"
+            );
+            assert_eq!(
+                ac_gate_state_for_es(
+                    state.config.redundancy_mode,
+                    false,
+                    &state.config.member_vnis,
+                    &state.last_roles
+                ),
+                Some(AcGateState::Blocked)
+            );
+            let routes = injected.lock().await;
+            let type4 = routes
+                .iter()
+                .find(|r| matches!(r.route, EvpnRoute::Es(_)))
+                .unwrap();
+            assert_eq!(
+                decode_df_election_extcomm(&type4.attributes),
+                Some((200, false, algorithm))
+            );
+            assert_eq!(routes.len(), 3, "Type 4 and both EAD classes advertised");
+            drop(routes);
+            // An owner change at equal preference remains protected even though
+            // our address wins the final IP tie-break against either owner.
+            let mut replacement = remote.clone();
+            if let EvpnRoute::Es(es) = &mut replacement.route {
+                es.originator_ip = ipa("10.0.0.3");
+            }
+            run_election_for_routes(&runtime, &mut state, &[replacement], &mut pending).await;
+            assert_eq!(state.last_roles[&vni(100)], DfRole::NonDf);
+            // Withdrawal of the reference promotes us and restores admin on wire.
+            run_election_for_routes(&runtime, &mut state, &[], &mut pending).await;
+            assert_eq!(state.operational_df, (admin, true));
+            assert_eq!(state.last_roles[&vni(100)], DfRole::Df);
+            assert_eq!(
+                ac_gate_state_for_es(
+                    state.config.redundancy_mode,
+                    false,
+                    &state.config.member_vnis,
+                    &state.last_roles
+                ),
+                Some(AcGateState::Forwarding)
+            );
+            let routes = injected.lock().await;
+            let type4 = routes
+                .iter()
+                .rev()
+                .find(|r| matches!(r.route, EvpnRoute::Es(_)))
+                .unwrap();
+            assert_eq!(
+                decode_df_election_extcomm(&type4.attributes),
+                Some((admin, true, algorithm))
+            );
+            drop(routes);
+            // Drain/rejoin loses local history and derives non-preemption anew.
+            drain_segment_state(&runtime, &mut state, &mut pending).await;
+            startup_segment_state(&runtime, &mut state, &mut pending, true).await;
+            tokio::time::advance(Duration::from_secs(3)).await;
+            run_election_for_routes(&runtime, &mut state, &[remote], &mut pending).await;
+            assert_eq!(state.operational_df, (200, false));
+            assert_eq!(state.last_roles[&vni(100)], DfRole::NonDf);
+            drain_segment_state(&runtime, &mut state, &mut pending).await;
+            // The runtime configuration path overrides inherited preference.
+            let id = state.config.esi;
+            let mut replacement = state.config.clone();
+            replacement.df_preference = if admin == 0 { 1 } else { admin - 1 };
+            let expected = replacement.df_preference;
+            let mut states = HashMap::from([(id, state)]);
+            let instances = runtime.instances.clone();
+            apply_runtime_snapshot(
+                &mut runtime,
+                &mut states,
+                &mut rustbgpd_evpn::EsiLabelAllocator::new(),
+                instances,
+                vec![replacement],
+                &mut pending,
+            )
+            .await;
+            assert!(states[&id].recovery_deadline.is_none());
+            assert_eq!(states[&id].operational_df, (expected, true));
+            drain(&runtime, &mut states, &mut pending).await;
+        }
+        drop(runtime);
+        recorder.await.unwrap();
+    }
+
+    #[tokio::test(start_paused = true)]
     async fn es_dropped_replies_keep_type_1_4_ops_pending_and_retry_confirms() {
         let rib = ScriptedRib::spawn(RibReplyMode::DropReply);
         let runtime = scripted_runtime(&rib);
@@ -3861,7 +4255,7 @@ mod tests {
         // Startup publishes Type 4 ES + Type 1 EAD-per-ES, then the
         // self-only election emits Type 1 EAD-per-EVI for the member
         // VNI — all three replies are dropped.
-        startup_segment_state(&runtime, &mut state, &mut pending).await;
+        startup_segment_state(&runtime, &mut state, &mut pending, true).await;
 
         assert_eq!(rib.inject_count(), 3, "ES + EAD-per-ES + EAD-per-EVI sent");
         assert_eq!(
@@ -3889,7 +4283,7 @@ mod tests {
         let mut pending = crate::evpn_ack::PendingRibOps::new();
         let mut state = segment_state(esi(1));
 
-        startup_segment_state(&runtime, &mut state, &mut pending).await;
+        startup_segment_state(&runtime, &mut state, &mut pending, true).await;
         assert!(pending.is_empty(), "startup acked cleanly");
 
         // Teardown withdraws lose their replies...
@@ -3921,7 +4315,7 @@ mod tests {
         let mut pending = crate::evpn_ack::PendingRibOps::new();
         let mut state = segment_state(esi(1));
 
-        startup_segment_state(&runtime, &mut state, &mut pending).await;
+        startup_segment_state(&runtime, &mut state, &mut pending, true).await;
         assert_eq!(pending.len(), 3);
 
         // The segment is removed before the retry fires: pending

@@ -111,6 +111,12 @@ impl LocalEsOriginator {
         if self.originated_key.is_some() {
             return Vec::new();
         }
+        self.on_refresh()
+    }
+
+    /// Advertise the Type 4 route again after its path attributes change.
+    /// Replaces the existing route without withdrawing ES membership.
+    pub fn on_refresh(&mut self) -> Vec<OriginationAction> {
         let key = self.key();
         self.originated_key = Some(key);
         // Type 4 routes carry no MAC, but `OriginationAction::Inject`

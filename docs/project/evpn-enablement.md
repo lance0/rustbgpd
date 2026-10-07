@@ -573,8 +573,11 @@ Ships:
   — RFC 7432 §8.5 service carving + RFC 8584 §3.2 Highest Random
   Weight + RFC 9785 Highest-/Lowest-Preference, with fallback to
   default when candidates disagree, callable from a unit test. Local
-  Don't-Preempt origination shipped (`df_dont_preempt`); stateful
-  non-revertive election remains deferred. Receive-side single-active
+  Don't-Preempt recovery (`df_dont_preempt`) waits three seconds before
+  Type 4 advertisement, inherits a protected reference PE's preference
+  with DP=0, and restores administrative values when it becomes reference.
+  Equal-preference ties prefer DP=1, then the lowest originator IP.
+  Receive-side single-active
   backup-path pre-install is covered by ADR-0083.
 - Three Type 1/4 origination state machines
   (`crates/evpn/src/origination_es.rs`) — Type 4 ES, Type 1
