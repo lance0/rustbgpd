@@ -148,12 +148,19 @@ def execute(path, statement):
 class ReleasedV075CaptureTests(unittest.TestCase):
     """The v0.75.0 recapture comparison permits only capture-specific values."""
 
-    def compare(self, mutate):
+    def compare(self, mutate, archive_side=False):
         with tempfile.TemporaryDirectory() as tmp:
-            captured = Path(tmp) / "capture"
-            shutil.copytree(V075_FIXTURE, captured)
-            mutate(captured)
-            V075["check_artifacts"](captured, V075_FIXTURE)
+            copy = Path(tmp) / "copy"
+            shutil.copytree(V075_FIXTURE, copy)
+            mutate(copy)
+            if archive_side:
+                V075["check_artifacts"](V075_FIXTURE, copy)
+            else:
+                V075["check_artifacts"](copy, V075_FIXTURE)
+
+    def snapshot(self, root):
+        manifest = root / "warm-bundle-v1/manifest.json"
+        return manifest, manifest.parent / json.loads(manifest.read_bytes())["snapshot"]["path"]
 
     def rewrite_json(self, path, *keys, value):
         document = json.loads(path.read_bytes())
@@ -167,7 +174,16 @@ class ReleasedV075CaptureTests(unittest.TestCase):
         def mutate(captured):
             for name, varying in V075["VARYING"].items():
                 for keys in varying:
-                    self.rewrite_json(captured / name, *keys, value=1)
+                    if keys[0] != "snapshot":
+                        self.rewrite_json(captured / name, *keys, value=1)
+            # A new generation renames and rehashes a same-size snapshot.
+            manifest, snapshot = self.snapshot(captured)
+            data = bytes(byte ^ 0xFF for byte in snapshot.read_bytes())
+            snapshot.unlink()
+            digest = hashlib.sha256(data).hexdigest()
+            (manifest.parent / f"snapshot-{digest}.mrt").write_bytes(data)
+            self.rewrite_json(manifest, "snapshot", "path", value=f"snapshot-{digest}.mrt")
+            self.rewrite_json(manifest, "snapshot", "sha256", value=digest)
             execute(captured / "events.db", "DELETE FROM events")
         self.compare(mutate)
 
@@ -182,6 +198,84 @@ class ReleasedV075CaptureTests(unittest.TestCase):
         for index, drift in enumerate(drifts):
             with self.subTest(drift=index), self.assertRaisesRegex(ValueError, "differs from archive"):
                 self.compare(drift)
+
+    def test_snapshot_must_match_its_manifest(self):
+        def flip(root):
+            snapshot = self.snapshot(root)[1]
+            data = bytearray(snapshot.read_bytes())
+            data[len(data) // 2] ^= 0x01
+            snapshot.write_bytes(data)
+
+        def truncate(root):
+            manifest, snapshot = self.snapshot(root)
+            snapshot.write_bytes(snapshot.read_bytes()[:-1])
+            self.rewrite_json(manifest, "snapshot", "sha256", value=hashlib.sha256(snapshot.read_bytes()).hexdigest())
+
+        def escape(root):
+            manifest, snapshot = self.snapshot(root)
+            shutil.copy(snapshot, root / snapshot.name)
+            self.rewrite_json(manifest, "snapshot", "path", value=f"../{snapshot.name}")
+
+        def remove(root):
+            self.snapshot(root)[1].unlink()
+
+        for mutate in (flip, truncate, escape, remove):
+            for archive_side in (False, True):
+                with self.subTest(mutate=mutate.__name__, archive_side=archive_side), \
+                     self.assertRaisesRegex(ValueError, "snapshot file|does not match its manifest"):
+                    self.compare(mutate, archive_side)
+
+    def test_failed_log_retrieval_fails_after_cleaning_up_both_containers(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            archive_path = root / "release.tar.gz"
+            binary = b"test binary; never executed"
+            with tarfile.open(archive_path, "w:gz") as archive:
+                for name in ("rustbgpd", "rbgp"):
+                    member = tarfile.TarInfo(name)
+                    member.size = len(binary)
+                    archive.addfile(member, io.BytesIO(binary))
+            removed = []
+            failure = RuntimeError("injected network failure")
+
+            def fake_run(*args):
+                if args[1:3] == ("image", "inspect"):
+                    return "sha256:expected"
+                if args[1:3] == ("network", "create"):
+                    nonce = args[args.index("--label") + 1].split("=", 1)[1]
+                    for role in ("subject", "peer"):
+                        containers[f"released-state-{role}-{nonce}"] = role
+                    raise failure
+                self.assertEqual(args[:3], ("docker", "rm", "--force"))
+                removed.append(args[3])
+                return ""
+
+            def fake_process(args, **_kwargs):
+                if args[1] == "inspect":
+                    nonce = args[-1].rsplit("-", 1)[1]
+                    return subprocess.CompletedProcess(args, 0, json.dumps([{
+                        "Name": f"/{args[-1]}", "Image": "sha256:expected", "Id": containers[args[-1]],
+                        "Config": {"Labels": {"org.rustbgpd.capture-owner": nonce}}}]), "")
+                if args[1] == "logs":
+                    return subprocess.CompletedProcess(args, int(args[2] == "subject"), b"out", b"err")
+                self.assertEqual(args[1:3], ["network", "inspect"])
+                return subprocess.CompletedProcess(args, 1, "", "no such network")
+
+            containers = {}
+            digest = hashlib.sha256(binary).hexdigest()
+            overrides = {"ARCHIVE_SHA256": hashlib.sha256(archive_path.read_bytes()).hexdigest(),
+                         "DAEMON_SHA256": digest, "CLI_SHA256": digest, "run": fake_run}
+            stderr = io.StringIO()
+            with mock.patch.dict(V075["main"].__globals__, overrides), \
+                 mock.patch.object(sys, "argv", ["capture", str(archive_path), str(root / "output")]), \
+                 mock.patch.object(subprocess, "run", side_effect=fake_process), \
+                 contextlib.redirect_stderr(stderr), \
+                 self.assertRaises(RuntimeError) as raised:
+                V075["main"]()
+            self.assertIs(raised.exception, failure)
+            self.assertEqual(removed, ["subject", "peer"])
+            self.assertEqual((root / "output/daemon.log").read_bytes(), b"outerr\n")
+            self.assertIn("docker logs failed; see retained daemon.log", stderr.getvalue())
 
     def test_event_schema_drift_is_rejected(self):
         for statement in ("UPDATE metadata SET value = '2' WHERE key = 'schema_version'",

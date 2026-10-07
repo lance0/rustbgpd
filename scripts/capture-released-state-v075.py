@@ -60,8 +60,21 @@ def events_schema(path):
                 db.execute("SELECT type, name, tbl_name, sql FROM sqlite_master ORDER BY name").fetchall())
 
 
+def check_snapshot(root):
+    """The manifest's snapshot fields are excluded below, so verify the file they name."""
+    snapshot = json.loads((root / "warm-bundle-v1/manifest.json").read_bytes())["snapshot"]
+    path = root / "warm-bundle-v1" / snapshot["path"]
+    require(Path(snapshot["path"]).name == snapshot["path"] and path.is_file(),
+            f"{path} is not the manifest's snapshot file")
+    data = path.read_bytes()
+    require(len(data) == snapshot["size_bytes"] and hashlib.sha256(data).hexdigest() == snapshot["sha256"],
+            f"{path} does not match its manifest size and SHA-256")
+
+
 def check_artifacts(captured, archived):
     """Compare a recapture with the archive, excluding only capture-specific values."""
+    check_snapshot(captured)
+    check_snapshot(archived)
     for name in EXACT:
         require((captured / name).read_bytes() == (archived / name).read_bytes(),
                 f"released {name} differs from archive")
@@ -72,6 +85,13 @@ def check_artifacts(captured, archived):
             "released events.db schema differs from archive")
 
 
+def extract(archive, member):
+    data = archive.extractfile(member)
+    if data is None:
+        raise ValueError(f"{member} is not a regular file")
+    return data.read()
+
+
 def read_file(container, path):
     """Copy one file out of a container without depending on its tools."""
     data = subprocess.run(["docker", "cp", f"{container}:{path}", "-"],
@@ -79,7 +99,7 @@ def read_file(container, path):
     with tarfile.open(fileobj=io.BytesIO(data)) as archive:
         members = archive.getmembers()
         require(len(members) == 1 and members[0].isfile(), f"{path} is not one regular file")
-        return archive.extractfile(members[0]).read()
+        return extract(archive, members[0])
 
 
 def exists(container, path):
@@ -110,7 +130,7 @@ def main():
         root = Path(temporary)
         with tarfile.open(args.archive) as archive:
             for name, digest in (("rustbgpd", DAEMON_SHA256), ("rbgp", CLI_SHA256)):
-                data = archive.extractfile(name).read()
+                data = extract(archive, name)
                 require(hashlib.sha256(data).hexdigest() == digest, f"unexpected release {name} SHA-256")
                 (root / name).write_bytes(data)
                 (root / name).chmod(0o755)
@@ -225,6 +245,7 @@ def main():
         finally:
             original_failure = sys.exception()
             try:
+                failed_logs = []
                 for role, name in names.items():
                     container = containers.get(role) or recover_container(name, nonce, image)
                     if container:
@@ -232,6 +253,8 @@ def main():
                             logs = subprocess.run(["docker", "logs", container], capture_output=True, timeout=10)
                             log = "daemon.log" if role == "subject" else "peer.log"
                             (args.output / log).write_bytes((logs.stdout + logs.stderr).rstrip() + b"\n")
+                            if logs.returncode:
+                                failed_logs.append(log)
                         finally:
                             run("docker", "rm", "--force", container)
                 label = subprocess.run(["docker", "network", "inspect", "--format",
@@ -239,6 +262,8 @@ def main():
                                        capture_output=True, text=True, timeout=10)
                 if label.returncode == 0 and label.stdout.strip() == nonce:
                     run("docker", "network", "rm", network)
+                # Deferred so one failed retrieval does not skip the other cleanup.
+                require(not failed_logs, f"docker logs failed; see retained {', '.join(failed_logs)}")
             except Exception as cleanup_error:
                 if original_failure is None:
                     raise
