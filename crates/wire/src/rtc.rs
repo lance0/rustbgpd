@@ -1,9 +1,7 @@
-//! RT-Constrain NLRI codec substrate (RFC 4684, AFI 1 / SAFI 132).
+//! RT-Constrain NLRI codec and membership matching (RFC 4684, AFI 1 / SAFI 132).
 //!
-//! This module is deliberately pure and unreachable from MP_REACH/MP_UNREACH
-//! dispatch today. It provides the Route Target membership NLRI codec and
-//! prefix-matching pieces needed for a future RT-Constrain route-reflector
-//! slice, mirroring the VPNv4/VPNv6 substrate in [`crate::vpn`].
+//! Provides the Route Target membership NLRI codec used by MP_REACH/MP_UNREACH
+//! dispatch and prefix matching for VPN and EVPN export filtering.
 
 use std::fmt;
 
@@ -74,31 +72,27 @@ impl RtcNlri {
         (u128::from(self.origin_as) << 64) | u128::from(self.route_target_bits)
     }
 
-    /// RFC 4684 §3 membership matching: does this NLRI cover Route Target
+    /// RFC 4684 §6 membership matching: does this NLRI cover Route Target
     /// `rt`?
     ///
     /// Only Route Target extended communities (sub-type 0x02 in a two-part
     /// encoding) can match; anything else — including Route Origin — never
-    /// matches, even against the default NLRI. The 96-bit candidate is
-    /// `(rt_global_admin << 64) | rt_raw`, where the global administrator is
-    /// the AS number for type 0x00/0x02 encodings and the IPv4 address as a
-    /// `u32` for type 0x01.
-    ///
-    /// `GoBGP` diverges here: it compares only the 64 RT bits and ignores the
-    /// origin-AS field, so when an RT's global administrator differs from the
-    /// NLRI's origin AS we under-advertise relative to `GoBGP`. That is the
-    /// RFC-defensible side of the divergence (never advertises more than the
-    /// peer asked for).
+    /// matches, even against the default NLRI. Compare the RT prefix bits
+    /// after the origin-AS field. The origin AS identifies the source of
+    /// membership information (§3.1), not the RT's global administrator.
+    /// A /32 membership has no RT bits and covers every Route Target.
     #[must_use]
     pub fn matches(&self, rt: ExtendedCommunity) -> bool {
-        let Some((global_admin, _local)) = rt.route_target() else {
+        if rt.route_target().is_none() {
             return false;
-        };
+        }
         if self.prefix_len == 0 {
             return true;
         }
-        let candidate = (u128::from(global_admin) << 64) | u128::from(rt.as_u64());
-        (candidate ^ self.value_u128()) >> (96 - u32::from(self.prefix_len)) == 0
+        (rt.as_u64() ^ self.route_target_bits)
+            .checked_shr(96 - u32::from(self.prefix_len))
+            .unwrap_or(0)
+            == 0
     }
 
     #[expect(
@@ -445,46 +439,44 @@ mod tests {
 
     #[test]
     fn prefix_48_hit_and_miss() {
-        // /48 covers origin AS + RT type/sub-type: interest in every
-        // 2-octet-AS RT whose global administrator is 65001.
-        let entry = nlri(65001, RT_65001_100, 48);
+        // /48 covers RT type/sub-type, regardless of either administrator.
+        let entry = nlri(64999, RT_65001_100, 48);
         assert!(entry.matches(ExtendedCommunity::new(RT_65001_100)));
-        assert!(entry.matches(ExtendedCommunity::new(0x0002_FDE9_0000_03E7))); // RT:65001:999
-        // RT:65002:100 — global admin mismatch flips candidate bits inside /48.
-        assert!(!entry.matches(ExtendedCommunity::new(0x0002_FDEA_0000_0064)));
+        assert!(entry.matches(ExtendedCommunity::new(0x0002_FDE9_0000_03E7)));
+        assert!(entry.matches(ExtendedCommunity::new(0x0002_FDEA_0000_0064)));
+        assert!(!entry.matches(ExtendedCommunity::new(0x0102_C000_0201_0064)));
     }
 
     #[test]
-    fn prefix_32_matches_origin_as_only() {
-        // LAN-190 §D: a /32 NLRI covers only the origin-AS field. Every RT
-        // bit below it — the RT type/sub-type byte included — is outside the
-        // prefix and ignored, so interest in AS 65001 matches that AS's RTs
-        // regardless of RT sub-type encoding or local admin.
-        let entry = nlri(65001, 0, 32);
-        // 2-octet-AS RT:65001:100 (type 0x00) — global admin 65001.
-        assert!(entry.matches(ExtendedCommunity::new(RT_65001_100)));
-        // Same global admin 65001 but a DIFFERENT RT sub-type encoding
-        // (4-octet AS, type 0x02, RT:65001:999) — still a hit; /32
-        // discriminates on origin-AS alone, not the RT sub-type.
-        assert!(entry.matches(ExtendedCommunity::new(0x0202_0000_FDE9_03E7)));
-        // A different global admin (65002) misses.
-        assert!(!entry.matches(ExtendedCommunity::new(0x0002_FDEA_0000_0064)));
-        // A non-RT community (Route Origin, sub-type 0x03) never matches,
-        // even when its global admin equals the origin AS.
+    fn prefix_32_matches_all_route_targets() {
+        // /32 carries membership origin identity but has no RT filter bits.
+        let entry = nlri(64999, 0, 32);
+        for rt in [RT_65001_100, 0x0202_0000_FDE9_03E7, 0x0102_C000_0201_0064] {
+            assert!(entry.matches(ExtendedCommunity::new(rt)));
+        }
         assert!(!entry.matches(ExtendedCommunity::new(0x0003_FDE9_0000_0064)));
     }
 
     #[test]
-    fn origin_as_mismatch_at_96_misses() {
-        // The RT bytes are identical, but the candidate's high 32 bits come
-        // from the RT's global administrator (65001), not the NLRI's origin
-        // AS (64999) — so this misses. GoBGP diverges: it compares only the
-        // 64 RT bits and would match here. Under-advertising when RT admin ≠
-        // origin AS is the RFC-defensible side of that divergence; do NOT
-        // "fix" this by switching to exact 64-bit matching (that would break
-        // legitimate <96-bit prefix filters).
-        let entry = nlri(64999, RT_65001_100, 96);
-        assert!(!entry.matches(ExtendedCommunity::new(RT_65001_100)));
+    fn origin_as_does_not_restrict_route_target_prefix() {
+        for rt in [RT_65001_100, 0x0202_0001_0001_00C8, 0x0102_C000_0201_0064] {
+            for len in (33..=96).rev() {
+                let entry = nlri(64999, rt, len);
+                assert!(entry.matches(ExtendedCommunity::new(rt)), "{rt:x}/{len}");
+                // Every covered bit matters, including non-octet boundaries.
+                let last_covered = 96 - len;
+                assert!(
+                    !entry.matches(ExtendedCommunity::new(rt ^ (1 << last_covered))),
+                    "{rt:x}/{len} must reject a changed covered bit"
+                );
+                if last_covered > 0 {
+                    assert!(
+                        entry.matches(ExtendedCommunity::new(rt ^ 1)),
+                        "{rt:x}/{len} must ignore host bits"
+                    );
+                }
+            }
+        }
     }
 
     #[test]
@@ -496,17 +488,6 @@ mod tests {
         // non-RT community.
         let entry = RtcNlri::new(65001, 0x0003_FDE9_0000_0064, 96).unwrap();
         assert!(!entry.matches(route_origin));
-    }
-
-    #[test]
-    fn ipv4_admin_rt_candidate_derivation() {
-        // Type 0x01 RT:192.0.2.1:100 — the candidate's origin-AS field is
-        // the IPv4 address as a u32 (0xC0000201).
-        let rt = ExtendedCommunity::new(0x0102_C000_0201_0064);
-        let hit = nlri(0xC000_0201, 0x0102_C000_0201_0064, 96);
-        assert!(hit.matches(rt));
-        let miss = nlri(65001, 0x0102_C000_0201_0064, 96);
-        assert!(!miss.matches(rt));
     }
 
     #[test]

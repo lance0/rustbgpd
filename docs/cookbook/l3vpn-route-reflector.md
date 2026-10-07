@@ -129,6 +129,9 @@ $ rbgp rib --prefix 10.1.0.0/24 advertised 10.0.0.12 --explain --rd 65000:1
 Toward an RTC peer the route passes `rt_membership` only when its RTs
 intersect that peer's membership; toward `controller-feed`, which did not
 negotiate RT-Constrain, the gate reports `n/a` and export is unfiltered.
+Matching uses the RT prefix bits independently of the membership's origin
+AS. A /32 membership accepts any RT; only the default /0 also accepts a
+route with no RT. Empty membership accepts no routes.
 For the full outbound view, capture a BMP `rib_out_post` stream
 ([monitoring feed](monitoring-feed.md)).
 
