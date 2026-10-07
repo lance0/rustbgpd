@@ -58,9 +58,10 @@ the per-family and received prefix limits, `max_prefix_action`,
 rejected, and the reason names the group and field, for example
 `peer group "edge" strict_role changed together with listener inbound
 MD5/GTSM inventory`. Split the reload: apply the TCP-AO or listener change
-and the peer-group change separately. Outbound prefix maxima apply through
-their own step, and `tcp_mss` stays pinned until restart, so neither causes
-this rejection.
+and the peer-group change separately. Outbound prefix maxima of a group
+that already exists apply through their own step and do not cause this
+rejection; on a group the same reload adds, they do. A `tcp_mss` change the
+reload pins until restart does not cause it either.
 
 A *listener MD5/GTSM edit* changes the inbound MD5 password or GTSM setting of
 a static neighbor that stays configured, directly or through its peer group,

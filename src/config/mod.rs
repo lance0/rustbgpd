@@ -6112,8 +6112,9 @@ pub fn copy_peer_group_file_only_fields(target: &mut PeerGroupConfig, source: &P
 /// [`copy_peer_group_file_only_fields`]) a candidate adds or changes, one
 /// `peer group "NAME" field, ...` entry per group. The sequential SIGHUP
 /// route applies group edits as API definitions and so cannot apply these.
-/// Outbound prefix maxima and `tcp_mss` are excluded: the route applies the
-/// former through its own RIB step and pins the latter until restart.
+/// Outbound prefix maxima of a group that already exists are excluded: the
+/// route applies them through its own RIB step and copies them into that
+/// group. A newly added group has nothing to copy them into, so they count.
 #[must_use]
 pub fn peer_group_file_only_changes(
     old: &HashMap<String, PeerGroupConfig>,
@@ -6130,9 +6131,10 @@ pub fn peer_group_file_only_changes(
                 &mut kept,
                 &old.get(name).cloned().unwrap_or_default(),
             );
-            kept.max_prefixes_out_ipv4 = group.max_prefixes_out_ipv4;
-            kept.max_prefixes_out_ipv6 = group.max_prefixes_out_ipv6;
-            kept.tcp_mss = group.tcp_mss;
+            if old.contains_key(name) {
+                kept.max_prefixes_out_ipv4 = group.max_prefixes_out_ipv4;
+                kept.max_prefixes_out_ipv6 = group.max_prefixes_out_ipv6;
+            }
             let fields: Vec<&str> = describe_peer_group_changes(&kept, group)
                 .iter()
                 .map(|change| change.field)
@@ -6155,8 +6157,15 @@ pub fn reject_unappliable_sequential_reload(
     let SighupReloadRoute::Sequential { reasons } = route else {
         return route;
     };
-    let blocked = peer_group_file_only_changes(&old.peer_groups, &new.peer_groups);
-    if reasons.is_empty() || blocked.is_empty() {
+    if reasons.is_empty() {
+        return SighupReloadRoute::Sequential { reasons };
+    }
+    // The reload pins startup-only `tcp_mss` before routing; `--diff` sees
+    // the unpinned candidate, so pin a copy here to agree with it.
+    let mut pinned = new.clone();
+    pin_tcp_mss_startup_only_runtime(&mut pinned, old);
+    let blocked = peer_group_file_only_changes(&old.peer_groups, &pinned.peer_groups);
+    if blocked.is_empty() {
         return SighupReloadRoute::Sequential { reasons };
     }
     let families = reasons.join(", ");

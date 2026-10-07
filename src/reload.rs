@@ -8086,6 +8086,27 @@ import_policy_chain = ["origin-guard"]
         );
         assert!(tags.is_empty(), "no peer/auth mutation: {tags:?}");
         assert!(calls.is_empty());
+
+        // An added group's outbound limit has no existing group for the
+        // outbound-limit step to update, so it rejects as well.
+        let desired = desired
+            .replace("strict_role = false", "strict_role = true")
+            .replace(
+                "[[neighbors]]\naddress = \"10.0.0.3\"",
+                "[peer_groups.core]\nmax_prefixes_out_ipv4 = 100\n\n[[neighbors]]\naddress = \"10.0.0.3\"",
+            );
+        let (outcome, tags, calls) =
+            drive_generation(&initial, &desired, GenerationReply::Applied).await;
+        let SighupReloadOutcome::CleanNoEffect(SighupReloadError::Failed(failure)) = outcome else {
+            panic!("added group outbound limit must reject before effects: {outcome:?}");
+        };
+        let error = failure.error.to_string();
+        assert!(
+            error.contains("peer group \"core\" max_prefixes_out_ipv4 changed together with"),
+            "{error}"
+        );
+        assert!(tags.is_empty(), "no peer/auth mutation: {tags:?}");
+        assert!(calls.is_empty());
     }
 
     /// The generation executor restored the prior generation: the reload is

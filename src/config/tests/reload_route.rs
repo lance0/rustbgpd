@@ -612,3 +612,44 @@ fn diff_rejects_sequential_candidate_with_file_only_group_change() {
         SighupReloadRoute::Sequential { .. }
     ));
 }
+
+/// A group added on the sequential route has no running group to keep its
+/// config-file-only fields in, and the outbound-limit step only updates
+/// groups that already exist. Either kind of field on an added group
+/// rejects the candidate; an outbound-limit change on an existing group
+/// stays on the sequential route.
+#[test]
+fn diff_rejects_sequential_candidate_adding_group_with_file_only_fields() {
+    let prior = rs(RS_TOML);
+    let md5 = RS_TOML.replace(
+        "hold_time = 180",
+        "hold_time = 180\nmd5_password = \"secret\"",
+    );
+    for (field, line) in [
+        ("prefix_orf_receive", "prefix_orf_receive = true"),
+        ("max_prefixes_out_ipv4", "max_prefixes_out_ipv4 = 100"),
+    ] {
+        let added = rs(&format!(
+            "{md5}\n[peer_groups.edge]\nhold_time = 90\n{line}\n"
+        ));
+        let SighupReloadRoute::Rejected { reasons } = diff_config(&prior, &added).sighup_route
+        else {
+            panic!("added group with {field} must be rejected");
+        };
+        assert_eq!(
+            reasons,
+            [format!(
+                "peer group \"edge\" {field} changed together with listener inbound MD5/GTSM inventory"
+            )]
+        );
+    }
+
+    let existing = rs(&md5.replace(
+        "max_prefixes = 1000",
+        "max_prefixes = 1000\nmax_prefixes_out_ipv4 = 100",
+    ));
+    assert!(matches!(
+        diff_config(&prior, &existing).sighup_route,
+        SighupReloadRoute::Sequential { .. }
+    ));
+}
