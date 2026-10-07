@@ -1410,6 +1410,10 @@ service origination, next-hop rewriting, or forwarding. The optional
 `reconstructed_sid` in VPN and EVPN inspection views is display-only and does
 not affect selection.
 
+The controlled [M111 VPN receipt](../artifacts/interop/m111-srv6-eligibility-20260906T200426Z/README.md)
+and [M112 EVPN receipt](../artifacts/interop/m112-srv6-semantic-20260906T200333Z/README.md)
+record valid reflection, invalid-candidate exclusion, and recovery.
+
 ---
 
 ## Key metrics to watch
