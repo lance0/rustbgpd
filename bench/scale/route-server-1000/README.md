@@ -41,6 +41,6 @@ bench/scale/route-server-1000/run-receipt.sh
 Raw output is private and ignored under `target/route-server-1000/`. It includes
 the preflight ledger, provenance, build logs and binary hashes, generated
 scenario, daemon and harness logs, 100/250 ms probe streams, RSS, pre/post
-metrics, advertised explanation, and checksums. Review and sanitize a bounded
+metrics, and advertised explanation. Review and sanitize a bounded
 subset before adding the separate evidence commit; never publish raw host or
 path-bearing output.

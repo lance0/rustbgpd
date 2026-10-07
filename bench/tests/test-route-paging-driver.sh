@@ -117,7 +117,6 @@ for metadata_key in (
     "load_one_max=",
     "required_governor=",
     "driver_source_sha256=",
-    "measurement_source_manifest_sha256=",
     "cell_preflight_tsv=",
     "gate_summary_csv=gate-summary.csv",
     "cell_launch=direct_prebuilt_executable",

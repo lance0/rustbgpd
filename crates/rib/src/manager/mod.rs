@@ -3655,7 +3655,13 @@ impl RibManager {
                     .filter(|s| s.sendable_families.contains(&evpn))
                     .map(|s| s.evpn_end_of_rib)
                     .collect();
-                let _ = reply.send(!peers.is_empty() && peers.iter().all(|&synced| synced));
+                // GR selection deferral keeps EVPN Loc-RIB unchanged, so
+                // remote Type 4 routes are not readable until it releases.
+                let _ = reply.send(
+                    !self.selection_deferred(evpn)
+                        && !peers.is_empty()
+                        && peers.iter().all(|&synced| synced),
+                );
             }
             RibUpdate::QueryEvpnRoutesPage {
                 scope,

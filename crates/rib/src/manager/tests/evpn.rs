@@ -3145,6 +3145,139 @@ async fn evpn_route_event_withdrawn_on_last_removed() {
     handle.await.unwrap();
 }
 
+async fn evpn_sessions_synced(tx: &mpsc::Sender<RibUpdate>) -> bool {
+    let (reply, rx) = tokio::sync::oneshot::channel();
+    tx.send(RibUpdate::QueryEvpnSessionsSynced { reply })
+        .await
+        .unwrap();
+    rx.await.unwrap()
+}
+
+/// `PeerUp` without waiting for the initial End-of-RIB, which selection
+/// deferral withholds; the outbound channel stays open and drained.
+async fn session_up(
+    tx: &mpsc::Sender<RibUpdate>,
+    peer: Ipv4Addr,
+    session_id: u64,
+    sendable_families: Vec<(Afi, Safi)>,
+) {
+    let (out_tx, mut out_rx) = mpsc::channel(64);
+    tx.send(RibUpdate::PeerUp {
+        per_client_best: false,
+        interpret_rfc1997: true,
+        session_id,
+        peer: IpAddr::V4(peer),
+        peer_asn: 65000,
+        peer_router_id: peer,
+        outbound_tx: out_tx,
+        export_policy: None,
+        sendable_families,
+        is_ebgp: false,
+        route_reflector_client: true,
+        orr_vantage: None,
+        add_path_send_families: vec![],
+        add_path_send_max: 0,
+        negotiated_orf_recv: Vec::new(),
+        negotiated_llgr_families: Vec::new(),
+    })
+    .await
+    .unwrap();
+    tokio::spawn(async move { while out_rx.recv().await.is_some() {} });
+}
+
+async fn evpn_eor(tx: &mpsc::Sender<RibUpdate>, peer: Ipv4Addr, session_id: u64) {
+    tx.send(RibUpdate::EndOfRib {
+        session_id,
+        peer: IpAddr::V4(peer),
+        afi: Afi::L2Vpn,
+        safi: Safi::Evpn,
+    })
+    .await
+    .unwrap();
+}
+
+/// GR selection deferral leaves EVPN Loc-RIB unchanged, so remote Type 4
+/// routes are unreadable; synced up sessions must not open the boot gate.
+#[tokio::test]
+async fn evpn_sessions_synced_waits_for_selection_deferral_release() {
+    let a = Ipv4Addr::new(10, 0, 0, 1);
+    let b = Ipv4Addr::new(10, 0, 0, 2);
+    let (tx, rx) = mpsc::channel(64);
+    let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new())
+        .with_selection_deferral(crate::SelectionDeferralConfig {
+            timeout: Duration::from_secs(60),
+            waiters: [a, b]
+                .into_iter()
+                .map(|peer| crate::SelectionDeferralWaiterConfig {
+                    peer: IpAddr::V4(peer),
+                    families: evpn_sendable(),
+                })
+                .collect(),
+        });
+    let handle = tokio::spawn(manager.run());
+    let gr_up = |peer: Ipv4Addr| {
+        let tx = tx.clone();
+        async move {
+            tx.send(RibUpdate::SetPeerGracefulRestartContext {
+                peer: IpAddr::V4(peer),
+                session_id: 1,
+                peer_restart_state: false,
+                peer_gr_families: evpn_sendable(),
+                peer_enhanced_refresh: true,
+                peer_llgr_families: Vec::new(),
+                local_llgr_stale_time: 0,
+            })
+            .await
+            .unwrap();
+            session_up(&tx, peer, 1, evpn_sendable()).await;
+        }
+    };
+
+    gr_up(a).await;
+    evpn_eor(&tx, a, 1).await;
+    assert!(
+        !evpn_sessions_synced(&tx).await,
+        "deferral still waits for b"
+    );
+    gr_up(b).await;
+    evpn_eor(&tx, b, 1).await;
+    assert!(evpn_sessions_synced(&tx).await);
+
+    drop(tx);
+    handle.await.unwrap();
+}
+
+/// Only established EVPN sessions count, and only their current session's
+/// End-of-RIB.
+#[tokio::test]
+async fn evpn_sessions_synced_ignores_non_evpn_sessions_and_stale_end_of_rib() {
+    let a = Ipv4Addr::new(10, 0, 0, 1);
+    let unicast = Ipv4Addr::new(10, 0, 0, 2);
+    let (tx, rx) = mpsc::channel(64);
+    let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let handle = tokio::spawn(manager.run());
+
+    session_up(&tx, unicast, 1, vec![(Afi::Ipv4, Safi::Unicast)]).await;
+    assert!(
+        !evpn_sessions_synced(&tx).await,
+        "a non-EVPN session is not an EVPN session"
+    );
+    session_up(&tx, a, 2, evpn_sendable()).await;
+    evpn_eor(&tx, a, 1).await;
+    assert!(
+        !evpn_sessions_synced(&tx).await,
+        "a stale session's End-of-RIB is ignored"
+    );
+    evpn_eor(&tx, a, 2).await;
+    assert!(
+        evpn_sessions_synced(&tx).await,
+        "the unsynced non-EVPN session does not hold the gate"
+    );
+
+    drop(tx);
+    handle.await.unwrap();
+}
+
 // --- FIB install-candidate view (multipath/ECMP) ---
 
 /// RFC 9785 §4.3 boot gate: synced only once every established EVPN

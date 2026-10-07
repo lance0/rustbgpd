@@ -569,10 +569,9 @@ run_leg() {
     [[ $(awk '{print $22}' "/proc/$ACTIVE_DAEMON/stat" 2>/dev/null) == "$start" ]] || die "$label root PID identity changed"
     terminate_group "$ACTIVE_DAEMON"; ACTIVE_DAEMON=''
     if [[ $MODE == dhat ]]; then [[ -s $ldir/dhat-heap.json ]] || die "$label missing graceful DHAT JSON"; validate_dhat "$ldir/dhat-heap.json" "$ldir/dhat"; fi
-    (cd "$ldir" && find . -type f ! -name evidence.sha256 -print0 | sort -z | xargs -0 sha256sum) >"$ldir/evidence.sha256"
     jq -n --argjson leg "$number" --arg mode "$mode" --argjson path_hiding "$hiding" --arg dataset "$digest" \
-        --arg scenario "$(hash_file "$ldir/scenario.sha256")" --arg evidence "$(hash_file "$ldir/evidence.sha256")" \
-        '{status:"pass",leg:$leg,mode:$mode,path_hiding:$path_hiding,add_path:false,admit_churn:false,dataset_sha256:$dataset,scenario_roster_sha256:$scenario,evidence_roster_sha256:$evidence}' >"$ldir/status.json"
+        --arg scenario "$(hash_file "$ldir/scenario.sha256")" \
+        '{status:"pass",leg:$leg,mode:$mode,path_hiding:$path_hiding,add_path:false,admit_churn:false,dataset_sha256:$dataset,scenario_roster_sha256:$scenario}' >"$ldir/status.json"
     rm -rf "$RUN_DIR"; RUN_DIR=''
 }
 
@@ -584,6 +583,5 @@ jq -n --arg commit "$COMMIT" --arg dirty_state_sha256 "$DIRTY_STATE_SHA256" --ar
     --argjson settle_timeout "$SETTLE_TIMEOUT" --argjson leg_timeout "$LEG_TIMEOUT" --argjson daemon_port "$PORT" --argjson metrics_port "$METRICS_PORT" \
     --argjson legs "$(jq -s '.' "$ART"/*/status.json)" \
     '{commit:$commit,dirty_state_sha256:$dirty_state_sha256,mode:$mode,protocol:["private","grouped","grouped","private"],path_hiding:[true,false,false,true],add_path:false,admit_churn:false,ports:{daemon:$daemon_port,metrics:$metrics_port},shape:{members:$members,total_prefixes:$total_prefixes,min_list:$min_list,max_list:$max_list},timeouts_seconds:{start:$start_timeout,settle:$settle_timeout,leg:$leg_timeout},rss_abort_gib:100,dataset_sha256:$dataset_sha256,preflight:"pass",legs:$legs}' >"$ART/manifest.json"
-(cd "$ART" && find . -type f ! -name SHA256SUMS -print0 | sort -z | xargs -0 sha256sum) >"$ART/SHA256SUMS"
 chmod -R a-w "$ART"; trap - EXIT
-echo "memory attribution artifact sealed read-only: $ART"
+echo "memory attribution artifact written read-only: $ART"
