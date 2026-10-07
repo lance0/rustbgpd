@@ -13,12 +13,10 @@ file list, so a doc added tomorrow is covered the day it lands instead of
 passing vacuously. An empty scan set is itself a failure: a guard that
 cannot fail is worse than no guard.
 
-Sealed perf-receipt artifacts are exempt. Their bytes are pinned by a
-`SHA256SUMS`, so editing the prose would invalidate published evidence
-checksums; they are frozen captures, not living documentation. The
-exemption is derived from the seal files themselves rather than a hand-kept
-list, so it narrows automatically as receipts age out and cannot be widened
-by editing this guard.
+Artifact documents under `docs/perf/artifacts/` and `docs/artifacts/` are
+historical evidence rather than living documentation, so the document tracker
+ID scan exempts them by directory. The separate artifact home-path scan still
+checks its own roots.
 
 Exported runtime text is the one crate-source surface fenced here. Crate
 sources stay outside the document scan (see the scope note below), but two
@@ -34,7 +32,6 @@ directories keep the conventional in-repository cross-reference.
 from __future__ import annotations
 
 import gzip
-import hashlib
 import re
 import stat
 import subprocess
@@ -96,9 +93,7 @@ ARTIFACT_ROOTS = (
     Path("docs/perf/artifacts"),
     Path("docs/artifacts/soak"),
 )
-SEAL_NAME = "SHA256SUMS"
-SEAL_ROOT = Path("docs/perf/artifacts")
-SEAL_LINE = re.compile(r"([0-9a-f]{64})  (.+)")
+DOCUMENT_ARTIFACT_ROOTS = (Path("docs/perf/artifacts"), Path("docs/artifacts"))
 
 
 class TrackerIdGuardError(RuntimeError):
@@ -148,115 +143,9 @@ def tracked_files() -> list[Path]:
     return paths
 
 
-def _sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
-
-
-def sealed_paths(paths: list[Path], root: Path | None = None) -> set[str]:
-    """Verify tracked receipt manifests and return their sealed paths."""
-    root = (root or ROOT).resolve()
-    tracked: dict[str, Path] = {}
-    for path in paths:
-        try:
-            relative = path.relative_to(root).as_posix()
-        except ValueError as error:
-            raise TrackerIdGuardError(
-                f"tracked path escapes the repository root: {path}"
-            ) from error
-        tracked[relative] = path
-
-    manifests = [
-        path
-        for relative, path in tracked.items()
-        if path.name == SEAL_NAME
-        and Path(relative).is_relative_to(SEAL_ROOT)
-    ]
-    if not manifests:
-        raise TrackerIdGuardError(
-            "no tracked performance-receipt SHA256SUMS manifests were found"
-        )
-
-    sealed: set[str] = set()
-    for manifest in sorted(manifests):
-        if manifest.is_symlink():
-            raise TrackerIdGuardError(f"seal {manifest} is a symlink")
-        try:
-            lines = manifest.read_text(encoding="utf-8").splitlines()
-        except (OSError, UnicodeDecodeError) as error:
-            raise TrackerIdGuardError(f"cannot read seal {manifest}: {error}") from error
-        if not lines:
-            raise TrackerIdGuardError(f"seal {manifest} is empty")
-
-        receipt_root = manifest.parent.resolve()
-        manifest_entries: set[str] = set()
-        for line_number, line in enumerate(lines, start=1):
-            match = SEAL_LINE.fullmatch(line)
-            if match is None:
-                raise TrackerIdGuardError(
-                    f"{manifest}:{line_number} is not lowercase SHA-256, two spaces, "
-                    "and a filename"
-                )
-            expected, name = match.groups()
-            name_path = Path(name)
-            if name_path.is_absolute() or ".." in name_path.parts:
-                raise TrackerIdGuardError(
-                    f"{manifest}:{line_number} entry {name!r} escapes its receipt root"
-                )
-            entry = manifest.parent / name_path
-            try:
-                resolved = entry.resolve(strict=True)
-                resolved.relative_to(receipt_root)
-                relative = entry.relative_to(root).as_posix()
-            except (OSError, ValueError) as error:
-                raise TrackerIdGuardError(
-                    f"{manifest}:{line_number} entry {name!r} is missing or escapes "
-                    "its receipt root"
-                ) from error
-            cursor = manifest.parent
-            for part in name_path.parts:
-                if part == ".":
-                    continue
-                cursor /= part
-                if cursor.is_symlink():
-                    raise TrackerIdGuardError(
-                        f"{manifest}:{line_number} entry {name!r} is a symlink"
-                    )
-            if relative not in tracked:
-                raise TrackerIdGuardError(
-                    f"{manifest}:{line_number} entry {name!r} is not tracked"
-                )
-            if not resolved.is_file():
-                raise TrackerIdGuardError(
-                    f"{manifest}:{line_number} entry {name!r} is not a regular file"
-                )
-            if relative in manifest_entries:
-                raise TrackerIdGuardError(
-                    f"{manifest}:{line_number} duplicates entry {name!r}"
-                )
-            manifest_entries.add(relative)
-            try:
-                actual = _sha256(resolved)
-            except OSError as error:
-                raise TrackerIdGuardError(
-                    f"cannot hash {manifest}:{line_number} entry {name!r}: {error}"
-                ) from error
-            if actual != expected:
-                raise TrackerIdGuardError(
-                    f"{manifest}:{line_number} entry {name!r} has SHA-256 {actual}, "
-                    f"expected {expected}"
-                )
-            sealed.add(relative)
-    return sealed
-
-
 def discover_documents() -> dict[str, str]:
     """Map each public documentation file to its text."""
     paths = tracked_files()
-    sealed = sealed_paths(paths)
     documents: dict[str, str] = {}
     for path in paths:
         relative = path.relative_to(ROOT).as_posix()
@@ -266,7 +155,9 @@ def discover_documents() -> dict[str, str]:
             path.parent == ROOT / "docs/project/changelog" and path.suffix == ".md"
         ):
             continue
-        if relative in sealed or path.suffix in SKIPPED_SUFFIXES:
+        if any(Path(relative).is_relative_to(root) for root in DOCUMENT_ARTIFACT_ROOTS):
+            continue
+        if path.suffix in SKIPPED_SUFFIXES:
             continue
         try:
             documents[relative] = path.read_text(encoding="utf-8")

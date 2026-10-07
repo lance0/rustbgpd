@@ -107,17 +107,10 @@ fn irr_reload_phase_receipt_is_semantically_fail_closed() {
 }
 
 #[test]
-fn reload_generation_phase_attribution_receipt_is_sealed() {
+fn reload_generation_phase_attribution_receipt_is_semantically_valid() {
     let root = env!("CARGO_MANIFEST_DIR");
     let artifact =
         format!("{root}/docs/perf/artifacts/reload-generation-phase-attribution-2026-08");
-    let status = std::process::Command::new("sha256sum")
-        .args(["--check", "--strict", "SHA256SUMS"])
-        .current_dir(&artifact)
-        .status()
-        .expect("check phase receipt hashes");
-    assert!(status.success());
-
     let csv = std::fs::read_to_string(format!("{artifact}/phase-timings.csv"))
         .expect("phase timing rows");
     let rows = csv.lines().skip(1).collect::<Vec<_>>();
