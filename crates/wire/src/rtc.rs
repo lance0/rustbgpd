@@ -464,11 +464,22 @@ mod tests {
                 let entry = nlri(64999, rt, len);
                 assert!(entry.matches(ExtendedCommunity::new(rt)), "{rt:x}/{len}");
                 // Every covered bit matters, including non-octet boundaries.
+                // The changed value stays a valid RT so the prefix compare,
+                // not the RT guard, rejects it: inside the fixed type and
+                // sub-type bits, flip the covered non-transitive type bit
+                // instead. A /33 covers only bit 63, which every RT clears.
                 let last_covered = 96 - len;
-                assert!(
-                    !entry.matches(ExtendedCommunity::new(rt ^ (1 << last_covered))),
-                    "{rt:x}/{len} must reject a changed covered bit"
-                );
+                if len >= 34 {
+                    let changed = [rt ^ (1 << last_covered), rt ^ (1 << 62)]
+                        .into_iter()
+                        .map(ExtendedCommunity::new)
+                        .find(|changed| changed.route_target().is_some())
+                        .unwrap();
+                    assert!(
+                        !entry.matches(changed),
+                        "{rt:x}/{len} must reject a changed covered bit"
+                    );
+                }
                 if last_covered > 0 {
                     assert!(
                         entry.matches(ExtendedCommunity::new(rt ^ 1)),
