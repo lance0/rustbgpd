@@ -6120,8 +6120,32 @@ pub fn copy_peer_group_file_only_fields(target: &mut PeerGroupConfig, source: &P
     target.log_level = log_level;
 }
 
-/// Config-file-only peer-group fields (see
-/// [`copy_peer_group_file_only_fields`]) a candidate adds or changes, one
+/// Names of the config-file-only fields (see
+/// [`copy_peer_group_file_only_fields`]) that differ between `old` and
+/// `new`. The copy is the only classification, so every field it covers is
+/// compared, including those `describe_peer_group_changes` leaves out.
+fn peer_group_file_only_differences(old: &PeerGroupConfig, new: &PeerGroupConfig) -> Vec<String> {
+    let mut kept = new.clone();
+    copy_peer_group_file_only_fields(&mut kept, old);
+    if kept == *new {
+        return Vec::new();
+    }
+    // `kept` differs from `new` only in config-file-only fields.
+    match (serde_json::to_value(&kept), serde_json::to_value(new)) {
+        (Ok(serde_json::Value::Object(kept)), Ok(serde_json::Value::Object(new))) => {
+            let mut fields: Vec<String> = new
+                .iter()
+                .filter(|(field, value)| kept.get(*field) != Some(*value))
+                .map(|(field, _)| field.clone())
+                .collect();
+            fields.sort();
+            fields
+        }
+        _ => vec!["config-file-only fields".to_string()],
+    }
+}
+
+/// Config-file-only peer-group fields a candidate adds or changes, one
 /// `peer group "NAME" field, ...` entry per group. The sequential SIGHUP
 /// route applies group edits as API definitions and so cannot apply these.
 /// Outbound prefix maxima of a group that already exists are excluded: the
@@ -6138,19 +6162,15 @@ pub fn peer_group_file_only_changes(
         .into_iter()
         .filter_map(|name| {
             let group = &new[name];
-            let mut kept = group.clone();
-            copy_peer_group_file_only_fields(
-                &mut kept,
-                &old.get(name).cloned().unwrap_or_default(),
-            );
-            if old.contains_key(name) {
-                kept.max_prefixes_out_ipv4 = group.max_prefixes_out_ipv4;
-                kept.max_prefixes_out_ipv6 = group.max_prefixes_out_ipv6;
-            }
-            let fields: Vec<&str> = describe_peer_group_changes(&kept, group)
-                .iter()
-                .map(|change| change.field)
-                .collect();
+            let base = old
+                .get(name)
+                .map_or_else(PeerGroupConfig::default, |prior| {
+                    let mut prior = prior.clone();
+                    prior.max_prefixes_out_ipv4 = group.max_prefixes_out_ipv4;
+                    prior.max_prefixes_out_ipv6 = group.max_prefixes_out_ipv6;
+                    prior
+                });
+            let fields = peer_group_file_only_differences(&base, group);
             (!fields.is_empty()).then(|| format!("peer group {name:?} {}", fields.join(", ")))
         })
         .collect()

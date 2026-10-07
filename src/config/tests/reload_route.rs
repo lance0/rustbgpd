@@ -653,3 +653,35 @@ fn diff_rejects_sequential_candidate_adding_group_with_file_only_fields() {
         SighupReloadRoute::Sequential { .. }
     ));
 }
+
+/// `describe_peer_group_changes` leaves the slow-peer knobs out, so the
+/// sequential check must not depend on it: a candidate that changes only a
+/// slow-peer field is still rejected and the field is named.
+#[test]
+fn diff_rejects_sequential_candidate_changing_only_slow_peer_fields() {
+    let prior = rs(RS_TOML);
+    let md5 = RS_TOML.replace(
+        "hold_time = 180",
+        "hold_time = 180\nmd5_password = \"secret\"",
+    );
+    for (field, line) in [
+        ("slow_peer_threshold_pct", "slow_peer_threshold_pct = 80"),
+        ("slow_peer_duration", "slow_peer_duration = 30"),
+        ("slow_peer_isolation", "slow_peer_isolation = true"),
+    ] {
+        let candidate = rs(&md5.replace(
+            "max_prefixes = 1000",
+            &format!("max_prefixes = 1000\n{line}"),
+        ));
+        let SighupReloadRoute::Rejected { reasons } = diff_config(&prior, &candidate).sighup_route
+        else {
+            panic!("{field} change must be rejected");
+        };
+        assert_eq!(
+            reasons,
+            [format!(
+                "peer group \"members\" {field} changed together with listener inbound MD5/GTSM inventory"
+            )]
+        );
+    }
+}
