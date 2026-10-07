@@ -11,10 +11,10 @@ contract differ, use the linked contract.
 ## Narrow stable daemon surface
 
 The only stable daemon boundary is the exact inventory in
-[`v1-stable-surface.json`](v1-stable-surface.json). It applies to the listed
-surfaces for the `route-server-unicast`, `route-reflector-unicast`, and scoped
-`flowspec-controller` roles;
-absence from that inventory means absence from the v1 promise.
+[`v1-stable-surface.json`](v1-stable-surface.json). It applies to inventoried
+surfaces for roles classified `stable` or `scoped_rr_only`, within each role's
+stated constraints. This includes the scoped `flowspec-controller` boundary
+described below. Absence from that inventory means absence from the v1 promise.
 
 Read the inventory with the
 [v1 route-server / route-reflector / controller contract](v1-stable-contract.md), which
