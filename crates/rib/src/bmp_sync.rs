@@ -20,9 +20,9 @@ use std::net::{IpAddr, Ipv4Addr};
 use bytes::{Bytes, BytesMut};
 use rustbgpd_bmp::{BmpPathStatus, tlv as bmp_tlv};
 use rustbgpd_wire::{
-    Afi, Capability, EXTENDED_MAX_MESSAGE_LEN, Ipv4NlriEntry, Ipv4Prefix, Ipv4UnicastMode,
-    MpReachNlri, MpUnreachNlri, NlriEntry, OpenMessage, PathAttribute, Prefix, Safi, UpdateMessage,
-    VpnNlri, VpnNlriEntry,
+    Afi, Capability, EXTENDED_MAX_MESSAGE_LEN, Ipv4NlriEntry, Ipv4UnicastMode, MpReachNlri,
+    MpUnreachNlri, NlriEntry, OpenMessage, PathAttribute, Prefix, Safi, UpdateMessage, VpnNlri,
+    VpnNlriEntry,
 };
 use tracing::warn;
 
@@ -176,62 +176,44 @@ fn build_update(
     }
 }
 
-/// Build an announcement UPDATE from the route's borrowed attribute
-/// slice with one synthesized `extra` attribute injected at
-/// `insert_pos`, without materializing a modified attribute Vec (the
-/// hot path: one PDU per Loc-RIB best change, so a full deep clone of
-/// the attributes per emission dominated BMP-on allocation).
-///
-/// [`rustbgpd_wire::attribute::encode_path_attributes`] emits
-/// attributes strictly in slice order with no cross-attribute state,
-/// so encoding `attrs[..pos]`, `extra`, `attrs[pos..]` piecewise is
-/// byte-identical to clone-and-insert followed by
-/// [`UpdateMessage::try_build`] (pinned by the `borrowed_encode_*`
-/// tests below against the clone-based oracle).
-fn build_announce_with_extra(
-    announced_v4: &[Ipv4Prefix],
-    attrs: &[PathAttribute],
+/// Build an announcement UPDATE from the route's borrowed attributes with
+/// one synthesized `extra` attribute spliced in before the attribute at
+/// `insert_pos` (appended when `insert_pos` is past the end), without
+/// materializing a modified attribute Vec (the hot path: one PDU per
+/// Loc-RIB best change, so a full deep clone of the attributes per
+/// emission dominated BMP-on allocation). The spliced sequence is encoded
+/// in one pass, byte-identical to clone-and-insert followed by
+/// [`UpdateMessage::try_build`] (pinned by the `borrowed_encode_*` tests
+/// below against the clone-based oracle).
+fn build_announce_with_extra<'a>(
+    announced: &[Ipv4NlriEntry],
+    attrs: impl Iterator<Item = &'a PathAttribute> + Clone,
     insert_pos: usize,
-    extra: &PathAttribute,
+    extra: &'a PathAttribute,
     what: &str,
 ) -> Option<Bytes> {
-    let mut attrs_buf = Vec::new();
+    let insert_pos = insert_pos.min(attrs.clone().count());
+    let spliced = attrs
+        .clone()
+        .take(insert_pos)
+        .chain(std::iter::once(extra))
+        .chain(attrs.skip(insert_pos));
     // 4-octet ASN encoding, no Add-Path (RFC 9069 §5.4) — must match
     // `build_update`'s flags.
-    let result = rustbgpd_wire::attribute::encode_path_attributes(
-        &attrs[..insert_pos],
-        &mut attrs_buf,
+    match UpdateMessage::try_build_from_attribute_iter(
+        announced,
+        &[],
+        spliced,
         true,
         false,
-    )
-    .and_then(|()| {
-        rustbgpd_wire::attribute::encode_path_attributes(
-            std::slice::from_ref(extra),
-            &mut attrs_buf,
-            true,
-            false,
-        )
-    })
-    .and_then(|()| {
-        rustbgpd_wire::attribute::encode_path_attributes(
-            &attrs[insert_pos..],
-            &mut attrs_buf,
-            true,
-            false,
-        )
-    });
-    if let Err(e) = result {
-        warn!(error = %e, what, "failed to synthesize Loc-RIB BMP UPDATE, skipping");
-        return None;
+        Ipv4UnicastMode::Body,
+    ) {
+        Ok(update) => encode_update(&update, what),
+        Err(e) => {
+            warn!(error = %e, what, "failed to synthesize Loc-RIB BMP UPDATE, skipping");
+            None
+        }
     }
-    let mut nlri_buf = Vec::new();
-    rustbgpd_wire::nlri::encode_nlri(announced_v4, &mut nlri_buf);
-    let update = UpdateMessage {
-        withdrawn_routes: Bytes::new(),
-        path_attributes: Bytes::from(attrs_buf),
-        nlri: Bytes::from(nlri_buf),
-    };
-    encode_update(&update, what)
 }
 
 /// Synthesize an announcement UPDATE for a unicast Loc-RIB best route.
@@ -241,16 +223,21 @@ fn build_announce_with_extra(
 /// `MP_REACH_NLRI` with the prefix inside the attribute.
 #[must_use]
 pub fn synthesize_unicast_announce(route: &Route) -> Option<Bytes> {
-    let attrs = route.attributes.as_slice();
+    // The next hop comes from `route.next_hop` only; a stored NEXT_HOP may be
+    // stale and would duplicate the synthesized one.
+    let attrs = route.attributes_except_next_hop();
     match (route.prefix, route.next_hop) {
         (Prefix::V4(v4_prefix), IpAddr::V4(nh)) => {
             // Inject NEXT_HOP after ORIGIN and AS_PATH (canonical order).
             let insert_pos = attrs
-                .iter()
+                .clone()
                 .position(|a| !matches!(a, PathAttribute::Origin(_) | PathAttribute::AsPath(_)))
-                .unwrap_or(attrs.len());
+                .unwrap_or(usize::MAX);
             build_announce_with_extra(
-                &[v4_prefix],
+                &[Ipv4NlriEntry {
+                    path_id: 0,
+                    prefix: v4_prefix,
+                }],
                 attrs,
                 insert_pos,
                 &PathAttribute::NextHop(nh),
@@ -265,13 +252,8 @@ pub fn synthesize_unicast_announce(route: &Route) -> Option<Bytes> {
             let mut mp_reach = empty_mp_reach(afi, Safi::Unicast, next_hop);
             mp_reach.link_local_next_hop = route.link_local_next_hop;
             mp_reach.announced = vec![NlriEntry { path_id: 0, prefix }];
-            build_announce_with_extra(
-                &[],
-                attrs,
-                attrs.len(),
-                &PathAttribute::MpReachNlri(Box::new(mp_reach)),
-                "unicast mp announce",
-            )
+            let mp_reach = PathAttribute::MpReachNlri(Box::new(mp_reach));
+            build_announce_with_extra(&[], attrs, usize::MAX, &mp_reach, "unicast mp announce")
         }
     }
 }
@@ -329,8 +311,8 @@ pub fn synthesize_vpn_announce(route: &VpnRibRoute) -> Option<Bytes> {
     }];
     build_announce_with_extra(
         &[],
-        attrs,
-        attrs.len(),
+        attrs.iter(),
+        usize::MAX,
         &PathAttribute::MpReachNlri(Box::new(mp_reach)),
         "vpn announce",
     )
