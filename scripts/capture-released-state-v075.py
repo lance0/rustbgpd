@@ -34,18 +34,21 @@ STATE = "/var/lib/rustbgpd"
 LOCATOR = "/etc/rustbgpd/config.toml.commit-confirm-locator.json"
 EXACT = ("fib-owned.json", "blackhole-owned.json", "commit-confirm/locator.json",
          "commit-confirm/commit-confirm-v3-prior.toml")
-# Capture-specific values: wall clock, the pending file's inode identity and
-# the per-shutdown checkpoint generation (which also names the snapshot).
+# Capture-specific values: wall clock, the pending file's inode identity, the
+# boot and time-namespace identity, and the per-shutdown checkpoint generation
+# (which also names the snapshot; its contents are compared by mrt_records).
 VARYING = {
     "commit-confirm/commit-confirm-v3-metadata.json": (("deadline_unix_seconds",), ("raw_device",), ("raw_inode",)),
     "warm-bundle-v1/manifest.json": (
         ("identity", "checkpoint_generation"), ("identity", "created_at_utc_seconds"),
         ("identity", "peer_index_table_view"), ("snapshot", "path"), ("snapshot", "sha256")),
+    "gr-restart.toml": (("expires_at_unix",), ("checkpoint_generation",), ("boot_id",),
+                        ("time_namespace_dev",), ("time_namespace_ino",), ("expires_at_boottime_ms",)),
 }
 
 
-def stable(document, varying):
-    document = json.loads(document)
+def stable(name, document, varying):
+    document = (tomllib.loads if name.endswith(".toml") else json.loads)(document)
     for path in varying:
         parent = document
         for key in path[:-1]:
@@ -60,26 +63,48 @@ def events_schema(path):
                 db.execute("SELECT type, name, tbl_name, sql FROM sqlite_master ORDER BY name").fetchall())
 
 
+def mrt_records(data, view):
+    """Split MRT records, zeroing each header timestamp and the generation-named view."""
+    records, offset = [], 0
+    while offset < len(data):
+        require(len(data) - offset >= 12, "truncated MRT record header")
+        end = offset + 12 + int.from_bytes(data[offset + 8:offset + 12], "big")
+        require(end <= len(data), "truncated MRT record")
+        record = bytearray(data[offset:end])
+        record[0:4] = bytes(4)
+        if record[4:8] == b"\x00\x0d\x00\x01":  # TABLE_DUMP_V2 PEER_INDEX_TABLE
+            name_end = 18 + int.from_bytes(record[16:18], "big")
+            require(record[18:name_end] == view.encode(), "MRT view name differs from the manifest")
+            record[18:name_end] = bytes(name_end - 18)
+        # RIB entries' originated times are not zeroed: the capture withdraws every route first.
+        records.append(bytes(record))
+        offset = end
+    return records
+
+
 def check_snapshot(root):
-    """The manifest's snapshot fields are excluded below, so verify the file they name."""
-    snapshot = json.loads((root / "warm-bundle-v1/manifest.json").read_bytes())["snapshot"]
+    """Verify the file the manifest names and return its capture-independent records."""
+    manifest = json.loads((root / "warm-bundle-v1/manifest.json").read_bytes())
+    snapshot = manifest["snapshot"]
     path = root / "warm-bundle-v1" / snapshot["path"]
     require(Path(snapshot["path"]).name == snapshot["path"] and path.is_file(),
             f"{path} is not the manifest's snapshot file")
     data = path.read_bytes()
     require(len(data) == snapshot["size_bytes"] and hashlib.sha256(data).hexdigest() == snapshot["sha256"],
             f"{path} does not match its manifest size and SHA-256")
+    return mrt_records(data, manifest["identity"]["peer_index_table_view"])
 
 
 def check_artifacts(captured, archived):
     """Compare a recapture with the archive, excluding only capture-specific values."""
-    check_snapshot(captured)
-    check_snapshot(archived)
+    require(check_snapshot(captured) == check_snapshot(archived),
+            "released warm snapshot differs from archive")
     for name in EXACT:
         require((captured / name).read_bytes() == (archived / name).read_bytes(),
                 f"released {name} differs from archive")
     for name, varying in VARYING.items():
-        require(stable((captured / name).read_bytes(), varying) == stable((archived / name).read_bytes(), varying),
+        require(stable(name, (captured / name).read_text(), varying)
+                == stable(name, (archived / name).read_text(), varying),
                 f"released {name} differs from archive")
     require(events_schema(captured / "events.db") == events_schema(archived / "events.db"),
             "released events.db schema differs from archive")
@@ -244,31 +269,41 @@ def main():
             check_artifacts(args.output, FIXTURE)
         finally:
             original_failure = sys.exception()
-            try:
-                failed_logs = []
-                for role, name in names.items():
-                    container = containers.get(role) or recover_container(name, nonce, image)
-                    if container:
-                        try:
-                            logs = subprocess.run(["docker", "logs", container], capture_output=True, timeout=10)
-                            log = "daemon.log" if role == "subject" else "peer.log"
-                            (args.output / log).write_bytes((logs.stdout + logs.stderr).rstrip() + b"\n")
-                            if logs.returncode:
-                                failed_logs.append(log)
-                        finally:
-                            run("docker", "rm", "--force", container)
+            failures = []
+
+            def attempt(step):
+                """Run one cleanup step; a failure must not skip the remaining steps."""
+                try:
+                    return step()
+                except Exception as error:
+                    failures.append(error)
+                    return None
+
+            def retain_log(container, log):
+                logs = subprocess.run(["docker", "logs", container], capture_output=True, timeout=10)
+                (args.output / log).write_bytes((logs.stdout + logs.stderr).rstrip() + b"\n")
+                require(logs.returncode == 0, f"docker logs failed; see retained {log}")
+
+            def remove_network():
                 label = subprocess.run(["docker", "network", "inspect", "--format",
                                         '{{index .Labels "org.rustbgpd.capture-owner"}}', network],
                                        capture_output=True, text=True, timeout=10)
                 if label.returncode == 0 and label.stdout.strip() == nonce:
                     run("docker", "network", "rm", network)
-                # Deferred so one failed retrieval does not skip the other cleanup.
-                require(not failed_logs, f"docker logs failed; see retained {', '.join(failed_logs)}")
-            except Exception as cleanup_error:
-                if original_failure is None:
-                    raise
-                print(f"capture cleanup failed: {cleanup_error}", file=sys.stderr)
 
+            for role, name in names.items():
+                container = containers.get(role) or attempt(
+                    lambda name=name: recover_container(name, nonce, image))
+                if container:
+                    log = "daemon.log" if role == "subject" else "peer.log"
+                    attempt(lambda container=container, log=log: retain_log(container, log))
+                    attempt(lambda container=container: run("docker", "rm", "--force", container))
+            attempt(remove_network)
+            if failures:
+                message = "; ".join(f"{type(error).__name__}: {error}" for error in failures)
+                if original_failure is None:
+                    raise RuntimeError(f"capture cleanup failed: {message}") from failures[0]
+                print(f"capture cleanup failed: {message}", file=sys.stderr)
 
 if __name__ == "__main__":
     main()

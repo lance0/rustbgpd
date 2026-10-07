@@ -162,6 +162,24 @@ class ReleasedV075CaptureTests(unittest.TestCase):
         manifest = root / "warm-bundle-v1/manifest.json"
         return manifest, manifest.parent / json.loads(manifest.read_bytes())["snapshot"]["path"]
 
+    def rewrite_snapshot(self, root, transform):
+        """Replace the snapshot with a consistently named and hashed new payload."""
+        manifest, snapshot = self.snapshot(root)
+        data = transform(snapshot.read_bytes())
+        snapshot.unlink()
+        digest = hashlib.sha256(data).hexdigest()
+        (manifest.parent / f"snapshot-{digest}.mrt").write_bytes(data)
+        self.rewrite_json(manifest, "snapshot", "path", value=f"snapshot-{digest}.mrt")
+        self.rewrite_json(manifest, "snapshot", "sha256", value=digest)
+        self.rewrite_json(manifest, "snapshot", "size_bytes", value=len(data))
+
+    def rewrite_toml(self, path, key, value):
+        text = path.read_text()
+        lines = [f"{key} = {json.dumps(value)}" if line.startswith(f"{key} = ") else line
+                 for line in text.splitlines()]
+        self.assertNotEqual(lines, text.splitlines())
+        path.write_text("\n".join(lines) + "\n")
+
     def rewrite_json(self, path, *keys, value):
         document = json.loads(path.read_bytes())
         parent = document
@@ -174,16 +192,18 @@ class ReleasedV075CaptureTests(unittest.TestCase):
         def mutate(captured):
             for name, varying in V075["VARYING"].items():
                 for keys in varying:
-                    if keys[0] != "snapshot":
+                    if name.endswith(".toml"):
+                        self.rewrite_toml(captured / name, *keys, value=1)
+                    elif keys[0] != "snapshot":
                         self.rewrite_json(captured / name, *keys, value=1)
-            # A new generation renames and rehashes a same-size snapshot.
-            manifest, snapshot = self.snapshot(captured)
-            data = bytes(byte ^ 0xFF for byte in snapshot.read_bytes())
-            snapshot.unlink()
-            digest = hashlib.sha256(data).hexdigest()
-            (manifest.parent / f"snapshot-{digest}.mrt").write_bytes(data)
-            self.rewrite_json(manifest, "snapshot", "path", value=f"snapshot-{digest}.mrt")
-            self.rewrite_json(manifest, "snapshot", "sha256", value=digest)
+            # A new generation renames the view, so the snapshot is renamed and
+            # rehashed; its record timestamp is also capture-specific.
+            manifest = self.snapshot(captured)[0]
+            view = json.loads(V075_FIXTURE.joinpath("warm-bundle-v1/manifest.json").read_bytes())[
+                "identity"]["peer_index_table_view"]
+            self.rewrite_json(manifest, "identity", "peer_index_table_view", value="f" * 32)
+            self.rewrite_snapshot(captured, lambda data: b"\x01\x02\x03\x04"
+                                  + data[4:].replace(view.encode(), b"f" * 32))
             execute(captured / "events.db", "DELETE FROM events")
         self.compare(mutate)
 
@@ -194,10 +214,18 @@ class ReleasedV075CaptureTests(unittest.TestCase):
             lambda c: self.rewrite_json(c / "commit-confirm/commit-confirm-v3-metadata.json", "confirm_id", value="x"),
             lambda c: self.rewrite_json(c / "warm-bundle-v1/manifest.json", "format_version", value=3),
             lambda c: self.rewrite_json(c / "warm-bundle-v1/manifest.json", "identity", "views", value=[]),
+            lambda c: self.rewrite_toml(c / "gr-restart.toml", "version", value=4),
+            lambda c: self.rewrite_toml(c / "gr-restart.toml", "boottime_offset_secs", value=7),
+            # Same-size MRT payload drift (peer AS) with a consistent manifest.
+            lambda c: self.rewrite_snapshot(c, lambda data: data[:-1] + bytes([data[-1] ^ 0x01])),
+            lambda c: self.rewrite_snapshot(c, lambda data: data + data),  # an extra record
         ]
         for index, drift in enumerate(drifts):
             with self.subTest(drift=index), self.assertRaisesRegex(ValueError, "differs from archive"):
                 self.compare(drift)
+        with self.assertRaisesRegex(ValueError, "view name differs from the manifest"):
+            self.compare(lambda c: self.rewrite_json(
+                c / "warm-bundle-v1/manifest.json", "identity", "peer_index_table_view", value="f" * 32))
 
     def test_snapshot_must_match_its_manifest(self):
         def flip(root):
@@ -225,7 +253,17 @@ class ReleasedV075CaptureTests(unittest.TestCase):
                      self.assertRaisesRegex(ValueError, "snapshot file|does not match its manifest"):
                     self.compare(mutate, archive_side)
 
-    def test_failed_log_retrieval_fails_after_cleaning_up_both_containers(self):
+    def test_failed_log_retrieval_does_not_skip_remaining_cleanup(self):
+        timeout = subprocess.TimeoutExpired("docker logs", 10)
+        for kind, reported in (("exit", "docker logs failed; see retained daemon.log"),
+                               ("raise", "TimeoutExpired")):
+            with self.subTest(kind=kind):
+                removed, stderr = self.cleanup_after_failure(kind, timeout)
+                self.assertEqual(removed[:2], ["subject", "peer"])
+                self.assertEqual(removed[2][:2], ("network", "rm"))
+                self.assertIn(reported, stderr)
+
+    def cleanup_after_failure(self, kind, timeout):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             archive_path = root / "release.tar.gz"
@@ -236,6 +274,7 @@ class ReleasedV075CaptureTests(unittest.TestCase):
                     member.size = len(binary)
                     archive.addfile(member, io.BytesIO(binary))
             removed = []
+            containers = {}
             failure = RuntimeError("injected network failure")
 
             def fake_run(*args):
@@ -246,6 +285,9 @@ class ReleasedV075CaptureTests(unittest.TestCase):
                     for role in ("subject", "peer"):
                         containers[f"released-state-{role}-{nonce}"] = role
                     raise failure
+                if args[1:3] == ("network", "rm"):
+                    removed.append(args[1:])
+                    return ""
                 self.assertEqual(args[:3], ("docker", "rm", "--force"))
                 removed.append(args[3])
                 return ""
@@ -257,11 +299,12 @@ class ReleasedV075CaptureTests(unittest.TestCase):
                         "Name": f"/{args[-1]}", "Image": "sha256:expected", "Id": containers[args[-1]],
                         "Config": {"Labels": {"org.rustbgpd.capture-owner": nonce}}}]), "")
                 if args[1] == "logs":
+                    if args[2] == "subject" and kind == "raise":
+                        raise timeout
                     return subprocess.CompletedProcess(args, int(args[2] == "subject"), b"out", b"err")
                 self.assertEqual(args[1:3], ["network", "inspect"])
-                return subprocess.CompletedProcess(args, 1, "", "no such network")
+                return subprocess.CompletedProcess(args, 0, args[-1].rsplit("-", 1)[1] + "\n", "")
 
-            containers = {}
             digest = hashlib.sha256(binary).hexdigest()
             overrides = {"ARCHIVE_SHA256": hashlib.sha256(archive_path.read_bytes()).hexdigest(),
                          "DAEMON_SHA256": digest, "CLI_SHA256": digest, "run": fake_run}
@@ -273,9 +316,10 @@ class ReleasedV075CaptureTests(unittest.TestCase):
                  self.assertRaises(RuntimeError) as raised:
                 V075["main"]()
             self.assertIs(raised.exception, failure)
-            self.assertEqual(removed, ["subject", "peer"])
-            self.assertEqual((root / "output/daemon.log").read_bytes(), b"outerr\n")
-            self.assertIn("docker logs failed; see retained daemon.log", stderr.getvalue())
+            self.assertEqual((root / "output/peer.log").read_bytes(), b"outerr\n")
+            if kind == "exit":
+                self.assertEqual((root / "output/daemon.log").read_bytes(), b"outerr\n")
+            return removed, stderr.getvalue()
 
     def test_event_schema_drift_is_rejected(self):
         for statement in ("UPDATE metadata SET value = '2' WHERE key = 'schema_version'",

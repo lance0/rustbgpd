@@ -62,9 +62,12 @@ cargo test --locked -p rustbgpd-event-history -p rustbgpd-mrt --lib released_v07
 
 Use a new output directory. The script compares the recapture with these
 samples: both ownership receipts, the locator and the raw prior must match
-byte for byte; the metadata and manifest must match apart from the deadline,
-raw-file device/inode, checkpoint generation, timestamps and snapshot name;
-the event store must have the same schema version and `sqlite_master`. It
+byte for byte; the metadata, manifest and GR marker must match apart from the
+deadline, raw-file device/inode, checkpoint generation, timestamps, boot and
+time-namespace identity, and snapshot name. On each side the MRT snapshot must
+match its manifest's size and SHA-256, and its records must match apart from
+the header timestamp and the generation-named view. The event store must have
+the same schema version and `sqlite_master`. It
 retains both daemon logs, removes its containers and network, and preserves
 the original failure if cleanup fails.
 

@@ -1303,8 +1303,8 @@ mod tests {
 
     /// The v0.75.0 release wrote this store (28 events) and shut down
     /// cleanly. The current reader must open it in place and continue its
-    /// allocator; the same store declaring the next schema must stay put
-    /// and refuse to open.
+    /// allocator; the same store declaring schema 2, the next version after
+    /// the archived one, must stay put and refuse to open.
     #[test]
     fn released_v075_store_opens_and_future_schema_is_refused() {
         let released = concat!(
@@ -1320,7 +1320,7 @@ mod tests {
                     .unwrap()
                     .execute(
                         "UPDATE metadata SET value = ?1 WHERE key = 'schema_version'",
-                        params![(CURRENT_SCHEMA_VERSION + 1).to_string()],
+                        params!["2"],
                     )
                     .unwrap();
             }
@@ -1331,8 +1331,7 @@ mod tests {
                     matches!(
                         result,
                         Err(EventHistoryError::SchemaDowngrade { on_disk, supported })
-                            if on_disk == CURRENT_SCHEMA_VERSION + 1
-                                && supported == CURRENT_SCHEMA_VERSION
+                            if on_disk == 2 && supported == CURRENT_SCHEMA_VERSION
                     ),
                     "expected SchemaDowngrade, got {result:?}"
                 );
