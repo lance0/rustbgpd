@@ -1,0 +1,69 @@
+# This file is maintained by rustbgpd. Runtime configuration changes
+# rewrite it in canonical form: comments and formatting from the
+# previous file are not preserved; defaults are canonicalized and
+# default-empty collections may be omitted. Keep an annotated copy
+# under version control if you need one.
+
+config_epoch = 1
+dynamic_neighbors = []
+evpn_instances = []
+ethernet_segments = []
+evpn_ip_vrfs = []
+bfd_profiles = []
+apply_bum_enforcement = true
+
+[global]
+asn = 65001
+router_id = "192.0.2.1"
+listen_port = 179
+listen_addresses = ["192.0.2.2"]
+honor_graceful_shutdown = false
+honor_blackhole = true
+multipath_relax = false
+link_bandwidth_weighted = false
+install_blackhole_discard = true
+allow_blackhole_broad_prefixes = false
+ebgp_requires_policy = false
+warm_cache_checkpoint_on_shutdown = true
+max_as_path_length = 750
+runtime_state_dir = "/var/lib/rustbgpd"
+
+[global.telemetry]
+prometheus_addr = "127.0.0.1:9179"
+dataplane_readiness = false
+log_format = "json"
+
+[[neighbors]]
+address = "192.0.2.3"
+remote_asn = 65002
+description = "released-state-fixture"
+families = ["ipv4_unicast"]
+required_families = []
+graceful_restart = true
+gr_restart_time = 120
+import_policy = []
+export_policy = []
+import_policy_chain = []
+export_policy_chain = []
+
+[peer_groups]
+
+[[fib_tables]]
+name = "fixture"
+table_id = 1000
+metric = 200
+families = ["ipv4_unicast"]
+allowed_peer_groups = []
+allowed_neighbors = ["192.0.2.3"]
+
+[event_history]
+enabled = true
+required = false
+path = ""
+max_events = 100000
+max_bytes = 256000000
+synchronous = "full"
+overflow = "drop"
+queue_capacity = 4096
+batch_size = 1024
+batch_interval_ms = 50

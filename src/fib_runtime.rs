@@ -4673,6 +4673,62 @@ mod tests {
         assert!(!stale_owned_state_path(&path).exists());
     }
 
+    /// The v0.75.0 release wrote this receipt for two installed routes. The
+    /// current reader must adopt both under the same `[[fib_tables]]` entry,
+    /// and must quarantine (not decode) the same bytes declaring version 6.
+    #[test]
+    fn released_v075_owned_state_loads_and_future_version_is_quarantined() {
+        let bytes = include_str!("../tests/fixtures/state/v0.75.0/fib-owned.json");
+        let released = crate::config::Config::load_toml_with_diagnostics(
+            include_str!("../tests/fixtures/state/v0.75.0/config.toml"),
+            "test",
+        )
+        .unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("fib-owned.json");
+        let config = FibRuntimeConfig {
+            tables: released.fib_tables,
+            owned_state_path: Some(path.clone()),
+            multipath_relax: false,
+            link_bandwidth_weighted: false,
+        };
+        std::fs::write(&path, bytes).unwrap();
+
+        let owned = load_owned_state(&config);
+        let expected: Vec<FibRoute> = [
+            (Ipv4Addr::new(198, 51, 100, 0), 24),
+            (Ipv4Addr::new(203, 0, 113, 1), 32),
+        ]
+        .into_iter()
+        .map(|(address, len)| FibRoute {
+            table_name: "fixture".to_string(),
+            key: FibRouteKey {
+                table_id: 1000,
+                metric: 200,
+                prefix: Prefix::V4(Ipv4Prefix::new(address, len)),
+            },
+            target: FibRouteTarget::single(ip("192.0.2.3")),
+            peer: ip("192.0.2.3"),
+            origin_type: RouteOrigin::Ebgp,
+            path_id: 0,
+        })
+        .collect();
+        assert_eq!(owned.routes.values().cloned().collect::<Vec<_>>(), expected);
+        assert!(owned.in_flight.is_empty() && owned.transition_tables.is_empty());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), bytes);
+        assert!(!stale_owned_state_path(&path).exists());
+
+        let future = bytes.replacen("\"version\": 5,", "\"version\": 6,", 1);
+        assert_ne!(future, bytes);
+        std::fs::write(&path, &future).unwrap();
+        assert_eq!(load_owned_state(&config), FibOwnedState::default());
+        assert!(!path.exists());
+        assert_eq!(
+            std::fs::read_to_string(stale_owned_state_path(&path)).unwrap(),
+            future
+        );
+    }
+
     /// Owned-state envelope JSON around a single route, with the "edge" table
     /// signature matching [`config`]. Optional signature keys are omitted:
     /// they deserialize identically whether absent (v1 files) or `null`

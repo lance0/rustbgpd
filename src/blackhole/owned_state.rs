@@ -415,6 +415,30 @@ fn receipt_identity_and_durability_are_strict() {
         fails(fault, true);
     }
 }
+/// The v0.75.0 release wrote this receipt for one installed discard route.
+/// The current reader must adopt it; the same bytes under the next schema
+/// must disable kernel mutations and stay untouched.
+#[cfg(test)]
+#[test]
+fn released_v075_receipt_loads_and_future_schema_is_refused() {
+    let released = include_bytes!("../../tests/fixtures/state/v0.75.0/blackhole-owned.json");
+    let future = String::from_utf8(released.to_vec()).unwrap().replacen(
+        "rustbgpd.blackhole-owned/v1",
+        "rustbgpd.blackhole-owned/v2",
+        1,
+    );
+    for (bytes, accepted) in [(released.as_slice(), true), (future.as_bytes(), false)] {
+        let (dir, store, _) = test_store();
+        let path = dir.path().join(FILE_NAME);
+        std::fs::write(&path, bytes).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let state = OwnershipState::load(Some(store.directory));
+        assert_eq!(state.available, accepted);
+        let expected = accepted.then(|| parse_prefix("203.0.113.1/32").unwrap());
+        assert_eq!(state.prefixes, expected.into_iter().collect());
+        assert_eq!(std::fs::read(path).unwrap(), bytes);
+    }
+}
 #[cfg(test)]
 #[test]
 fn strict_receipt_data_is_refused() {

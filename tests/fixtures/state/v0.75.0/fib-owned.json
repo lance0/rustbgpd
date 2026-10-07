@@ -1,0 +1,63 @@
+{
+  "version": 5,
+  "tables": [
+    {
+      "name": "fixture",
+      "table_id": 1000,
+      "metric": 200,
+      "families": [
+        "ipv4_unicast"
+      ],
+      "allowed_peer_groups": [],
+      "allowed_neighbors": [
+        "192.0.2.3"
+      ],
+      "max_routes": null,
+      "maximum_paths": null,
+      "maximum_paths_ebgp": null,
+      "maximum_paths_ibgp": null
+    }
+  ],
+  "routes": [
+    {
+      "table_name": "fixture",
+      "table_id": 1000,
+      "metric": 200,
+      "prefix_addr": "198.51.100.0",
+      "prefix_len": 24,
+      "next_hop": "192.0.2.3",
+      "next_hops": [
+        "192.0.2.3"
+      ],
+      "weights": [
+        1
+      ],
+      "next_hop_ifindexes": [
+        0
+      ],
+      "peer": "192.0.2.3",
+      "origin_type": "ebgp",
+      "path_id": 0
+    },
+    {
+      "table_name": "fixture",
+      "table_id": 1000,
+      "metric": 200,
+      "prefix_addr": "203.0.113.1",
+      "prefix_len": 32,
+      "next_hop": "192.0.2.3",
+      "next_hops": [
+        "192.0.2.3"
+      ],
+      "weights": [
+        1
+      ],
+      "next_hop_ifindexes": [
+        0
+      ],
+      "peer": "192.0.2.3",
+      "origin_type": "ebgp",
+      "path_id": 0
+    }
+  ]
+}

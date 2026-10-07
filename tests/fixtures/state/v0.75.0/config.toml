@@ -1,0 +1,34 @@
+config_epoch = 1
+
+[global]
+asn = 65001
+router_id = "192.0.2.1"
+listen_port = 179
+listen_addresses = ["192.0.2.2"]
+runtime_state_dir = "/var/lib/rustbgpd"
+ebgp_requires_policy = false
+honor_blackhole = true
+install_blackhole_discard = true
+warm_cache_checkpoint_on_shutdown = true
+
+[global.telemetry]
+prometheus_addr = "127.0.0.1:9179"
+log_format = "json"
+
+[event_history]
+enabled = true
+
+[[neighbors]]
+address = "192.0.2.3"
+remote_asn = 65002
+description = "released-state-fixture"
+families = ["ipv4_unicast"]
+graceful_restart = true
+gr_restart_time = 120
+
+[[fib_tables]]
+name = "fixture"
+table_id = 1000
+metric = 200
+families = ["ipv4_unicast"]
+allowed_neighbors = ["192.0.2.3"]
