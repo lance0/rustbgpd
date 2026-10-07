@@ -4,6 +4,8 @@
   "configuration.md": "docs/reference/configuration.md",
   "reload-matrix.md": "docs/reference/reload-matrix.md",
   "api.md": "docs/reference/api.md",
+  "rfc-notes.md": "docs/reference/rfc-notes.md",
+  "path-attribute-registry.md": "docs/reference/path-attribute-registry.md",
   "gnmi.md": "docs/reference/gnmi.md",
   "rpol-language.md": "docs/reference/rpol-language.md",
   "operations.md": "docs/reference/operations.md",
