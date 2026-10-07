@@ -667,43 +667,69 @@ async fn every_route_family_is_probed_before_commit() {
         );
     }
 
-    let encoder = MockExactExportEncoder::accepting(21);
-    let mut manager = test_manager();
-    let mut rx = register_exact_target(&mut manager, peer, encoder.clone());
-    assert!(commit_batch(
-        &mut manager,
-        peer,
-        ExactBatch {
-            announce: vec![unicast],
-            withdraw: vec![withdrawal],
-            flowspec_announce: vec![flowspec],
-            evpn_announce: vec![evpn],
-            bgpls_announce: vec![bgpls],
-            vpn_announce: vec![vpn],
-            labeled_announce: vec![labeled],
-            rtc_announce: vec![rtc],
-            ..ExactBatch::default()
-        }
-    ));
+    let mut outcomes = Vec::new();
+    for force_slow in [false, true] {
+        let encoder = MockExactExportEncoder::accepting(21);
+        let mut manager = test_manager();
+        manager.test_force_exact_export_slow_path = force_slow;
+        let mut rx = register_exact_target(&mut manager, peer, encoder.clone());
+        assert!(commit_batch(
+            &mut manager,
+            peer,
+            ExactBatch {
+                announce: vec![unicast.clone()],
+                withdraw: vec![withdrawal],
+                flowspec_announce: vec![flowspec.clone()],
+                evpn_announce: vec![evpn.clone()],
+                bgpls_announce: vec![bgpls.clone()],
+                vpn_announce: vec![vpn.clone()],
+                labeled_announce: vec![labeled.clone()],
+                rtc_announce: vec![rtc.clone()],
+                ..ExactBatch::default()
+            }
+        ));
 
-    let update = rx.recv().await.unwrap();
-    assert_eq!(update.announce.len(), 1);
-    assert_eq!(update.withdraw, vec![withdrawal]);
-    assert_eq!(update.flowspec_announce.len(), 1);
-    assert_eq!(update.evpn_announce.len(), 1);
-    assert_eq!(update.bgpls_announce.len(), 1);
-    assert_eq!(update.vpn_announce.len(), 1);
-    assert_eq!(update.labeled_announce.len(), 1);
-    assert_eq!(update.rtc_announce.len(), 1);
-    assert_eq!(
-        encoder.probe_batch_count(),
-        1,
-        "mixed announcements and withdrawals retain one nonempty exact batch"
-    );
-    assert_eq!(
-        encoder.probed().into_iter().collect::<HashSet<_>>(),
-        expected
-    );
+        let update = rx.recv().await.unwrap();
+        assert_eq!(update.announce.len(), 1);
+        assert_eq!(update.withdraw, vec![withdrawal]);
+        assert_eq!(update.flowspec_announce.len(), 1);
+        assert_eq!(update.evpn_announce.len(), 1);
+        assert_eq!(update.bgpls_announce.len(), 1);
+        assert_eq!(update.vpn_announce.len(), 1);
+        assert_eq!(update.labeled_announce.len(), 1);
+        assert_eq!(update.rtc_announce.len(), 1);
+        assert_eq!(
+            encoder.probe_batch_count(),
+            1,
+            "mixed announcements and withdrawals retain one nonempty exact batch"
+        );
+        assert_eq!(
+            encoder.probed().into_iter().collect::<HashSet<_>>(),
+            expected
+        );
+        assert_eq!(
+            manager.test_exact_export_fast_path_hits,
+            u64::from(!force_slow)
+        );
+        let snapshot = update.exact_export_snapshot.as_ref().unwrap();
+        assert_eq!((snapshot.owner_id(), snapshot.generation()), (1, 21));
+        assert!(manager.peer_unexportable.is_empty());
+        outcomes.push(format!(
+            "{:?}",
+            (
+                &update.announce,
+                &update.withdraw,
+                &update.next_hop_override,
+                &update.flowspec_announce,
+                &update.evpn_announce,
+                &update.bgpls_announce,
+                &update.vpn_announce,
+                &update.labeled_announce,
+                &update.rtc_announce,
+            )
+        ));
+    }
+    assert_eq!(outcomes[0], outcomes[1]);
 }
 
 #[tokio::test]

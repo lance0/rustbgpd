@@ -1,0 +1,263 @@
+diff --git a/bench/scale/matrix/run-matrix.sh b/bench/scale/matrix/run-matrix.sh
+index b247fdc77..d21d55efb 100755
+--- a/bench/scale/matrix/run-matrix.sh
++++ b/bench/scale/matrix/run-matrix.sh
+@@ -190,7 +190,12 @@ prepare_selected_cell() {
+         PREPARED_IMAGE_ID=$(resolve_competitor_image "$PREPARED_IMAGE_REF") || return 1
+     fi
+     matrix_prepare_event "$cell:quiet"
+-    wait_for_rustbgpd_quiet_host "$quiet_file"
++    mkdir -p "${quiet_file%/*}"
++    python3 -c 'import time; print(time.monotonic_ns())' >"${quiet_file%/*}/quiet-start.ns"
++    local quiet_rc=0
++    wait_for_rustbgpd_quiet_host "$quiet_file" || quiet_rc=$?
++    python3 -c 'import time; print(time.monotonic_ns())' >"${quiet_file%/*}/quiet-end.ns"
++    return "$quiet_rc"
+ }
+ 
+ if [ "${1:-}" = --self-test-prepare-order ]; then
+@@ -617,7 +622,39 @@ run_cell() {
+ 
+     local daemon_pid="" container="" reload_cmd="" pid_arg="" generator image_ref image_id workload_hash
+     local live a b
+-    local membership_pid=""
++    local membership_pid="" hpid="" sampler_pid="" probe_pids=()
++    native_interrupted() {
++        local signal_exit=$1 interrupted_cleanup=0 interrupted_rc p
++        trap '' INT TERM
++        if [ -n "$hpid" ] && [ ! -f "$cdir/harness.exit" ]; then
++            stop_native_daemon "$hpid" "$cdir/harness.exit" || interrupted_cleanup=1
++        fi
++        for p in "$sampler_pid" "$membership_pid" "${probe_pids[@]}"; do
++            [ -n "$p" ] || continue
++            kill "$p" 2>/dev/null || true
++            wait "$p"
++            interrupted_rc=$?
++            printf '%s\n' "$interrupted_rc" >"$cdir/interrupted-child-$p.exit"
++        done
++        if [ -n "$daemon_pid" ] && [ ! -f "$cdir/daemon.exit" ]; then
++            stop_native_daemon "$daemon_pid" "$cdir/daemon.exit" || interrupted_cleanup=1
++        fi
++        if [ -d "$run" ]; then
++            cp -r "$run" "$cdir/scenario-interrupted" || interrupted_cleanup=1
++            rm -rf "$run" || interrupted_cleanup=1
++        fi
++        printf '%s\n' "$interrupted_cleanup" >"$cdir/cleanup.exit"
++        printf '%s\n' "$signal_exit" >"$cdir/interrupted.exit"
++        if [ "$signal_exit" -ge 128 ]; then
++            exit "$signal_exit"
++        fi
++        trap - INT TERM
++        return "$signal_exit"
++    }
++    if [ "$cell" = rustbgpd ]; then
++        trap 'native_interrupted 130' INT
++        trap 'native_interrupted 143' TERM
++    fi
+     if [ "$MEMBERSHIP_CHURN" = 1 ] && [ "$cell" != rustbgpd ]; then
+         echo 'membership churn applies only to the rustbgpd cell' >&2
+         return 1
+@@ -643,6 +680,7 @@ run_cell() {
+         fi
+         recheck_cell_provenance "$cell" || return 1
+         memory_scope_launcher "$cdir/cgroup-memory" || return 1
++        python3 -c 'import time; print(time.monotonic_ns())' >"$cdir/daemon-launch.ns"
+         "${MEMORY_SCOPE[@]}" "$REPO/target/release/rustbgpd" "$run/config.toml" \
+             >"$cdir/daemon.log" 2>&1 &
+         daemon_pid=$!
+@@ -700,14 +738,18 @@ run_cell() {
+         fi
+     elif [ ! -d "/proc/$daemon_pid" ]; then
+         echo "cell $cell: daemon died at start (see $cdir/daemon.log)" >&2
++        native_interrupted 1
+         return 1
+     fi
+ 
++    local identity_rc=0
++    cat "/proc/$daemon_pid/stat" >"$cdir/daemon.proc-stat" || identity_rc=1
++    cat /proc/sys/kernel/random/boot_id >"$cdir/boot-id" || identity_rc=1
+     local cgroup=""
+     if [ "$cell" = rustbgpd ] && [ ${#MEMORY_SCOPE[@]} -gt 0 ]; then
+         cgroup=$(daemon_scope_cgroup "$daemon_pid") || {
+             echo "cell $cell: daemon is not in a swap-fenced scope; stopping" >&2
+-            stop_native_daemon "$daemon_pid" "$cdir/daemon.exit"
++            native_interrupted 1
+             return 1
+         }
+     fi
+@@ -746,9 +788,16 @@ run_cell() {
+     if [ "$cell" = rustbgpd ] && [ -n "$FLAPSTORM" ]; then
+         settlement_env+=(RELOADSTALL_HEAP_METRICS_ADDR=127.0.0.1:9179)
+     fi
++    local health_rc
++    curl --fail --silent --show-error --max-time 5 -o "$cdir/health-before.body" -w '%{http_code}' http://127.0.0.1:9179/readyz >"$cdir/health-before.http"
++    health_rc=$?
++    printf '%s\n' "$health_rc" >"$cdir/health-before.exit"
++    python3 -c 'import time; print(time.monotonic_ns())' >"$cdir/harness-launch.ns"
+     env "${settlement_env[@]}" "$HARNESS" "${hargs[@]}" >"$cdir/reloadstall.log" 2>&1 &
+     local hpid=$!
++    cat "/proc/$hpid/stat" >"$cdir/harness.proc-stat" || identity_rc=1
+     local rc=""
++    [ "$identity_rc" -eq 0 ] || rc=$identity_rc
+     while kill -0 "$hpid" 2>/dev/null; do
+         local last_kib
+         last_kib=$(tail -n1 "$cdir/rss.csv" 2>/dev/null | cut -s -d, -f2)
+@@ -767,16 +816,24 @@ run_cell() {
+     local hrc
+     wait "$hpid"
+     hrc=$?
++    python3 -c 'import time; print(time.monotonic_ns())' >"$cdir/harness-exit.ns"
++    printf '%s\n' "$hrc" >"$cdir/harness.exit"
+     [ -z "$rc" ] && rc=$hrc
++    [ "$health_rc" -eq 0 ] || rc=$health_rc
++    curl --fail --silent --show-error --max-time 5 -o "$cdir/health-after.body" -w '%{http_code}' http://127.0.0.1:9179/readyz >"$cdir/health-after.http"
++    health_rc=$?
++    printf '%s\n' "$health_rc" >"$cdir/health-after.exit"
++    [ "$health_rc" -eq 0 ] || rc=$health_rc
+ 
+     # Collect artifacts, then teardown.
+-    local cleanup_rc=0 child_rc p last_sample_stat=""
++    local cleanup_rc=0 child_rc p probe_index last_sample_stat=""
+     if [ -n "$membership_pid" ]; then
+         touch "$run/membership-stop"
+         if [ "$hrc" -ne 0 ]; then
+             kill "$membership_pid" 2>/dev/null || true
+         fi
+         wait "$membership_pid" || cleanup_rc=1
++        membership_pid=""
+     fi
+     kill "$sampler_pid" 2>/dev/null || true
+     for p in "${probe_pids[@]}"; do
+@@ -784,16 +841,20 @@ run_cell() {
+     done
+     # Signal every probe before waiting. Each loop owns its current CLI until
+     # the response and CSV row finish, so no client survives daemon shutdown.
+-    for p in "${probe_pids[@]}"; do
++    for probe_index in "${!probe_pids[@]}"; do
++        p=${probe_pids[$probe_index]}
+         wait "$p"
+         child_rc=$?
++        unset 'probe_pids[probe_index]'
+         if [ "$child_rc" -ne 0 ]; then
+             echo "cell $cell: probe loop $p exited $child_rc during cleanup" >&2
+             cleanup_rc=1
+         fi
+     done
++    probe_pids=()
+     wait "$sampler_pid"
+     child_rc=$?
++    sampler_pid=""
+     if [ "$child_rc" -ne 0 ] && [ "$child_rc" -ne 143 ]; then
+         echo "cell $cell: RSS sampler exited $child_rc during cleanup" >&2
+         cleanup_rc=1
+@@ -817,6 +878,10 @@ run_cell() {
+         stop_native_daemon "$daemon_pid" "$cdir/daemon.exit" || cleanup_rc=1
+     fi
+     cp -r "$run" "$cdir/scenario" || cleanup_rc=1
++    rm -rf "$run" || cleanup_rc=1
++    printf '%s\n' "$cleanup_rc" >"$cdir/cleanup.exit"
++    python3 -c 'import time; print(time.monotonic_ns())' >"$cdir/cleanup-end.ns"
++    trap - INT TERM
+     [ "$rc" -ne 0 ] || rc=$cleanup_rc
+     echo "cell $cell: harness rc=$hrc cleanup rc=$cleanup_rc cell rc=$rc (artifacts: $cdir)"
+     [ "$rc" -ne 0 ] || recheck_cell_provenance "$cell" || return 1
+@@ -841,6 +906,8 @@ for cell in "${CELLS[@]}"; do
+         echo "=== cell $cell FAIL (campaign continues) ==="
+     fi
+     echo "cool-down 300s"
++    python3 -c 'import time; print(time.monotonic_ns())' >"$ART/$cell/cooldown-start.ns"
+     sleep 300
++    python3 -c 'import time; print(time.monotonic_ns())' >"$ART/$cell/cooldown-end.ns"
+ done
+ echo "matrix done; per-cell status under $ART/*/status"
+diff --git a/bench/scale/reloadstall/src/main.rs b/bench/scale/reloadstall/src/main.rs
+index 6063624cb..da0bd6022 100644
+--- a/bench/scale/reloadstall/src/main.rs
++++ b/bench/scale/reloadstall/src/main.rs
+@@ -2634,7 +2634,7 @@ fn stats_line(label: &str, mut vals: Vec<f64>) -> Stats {
+         n: vals.len(),
+     };
+     println!(
+-        "{label}: p50={:.2} p95={:.2} max={:.2} (n={})",
++        "{label}: p50={:.6} p95={:.6} max={:.6} (n={})",
+         stats.p50, stats.p95, stats.max, stats.n
+     );
+     stats
+@@ -2729,7 +2729,27 @@ async fn report_rejoin_completion(ctx: &Ctx, k: u32, round: u32) -> Stats {
+             || ("absent", "absent".to_owned()),
+             |eor| ("present", (eor < progress.complete_us.unwrap()).to_string()),
+         );
+-        println!("flap {round} peer {i} rejoin_complete_s={seconds:.6} eor_before_full_table={eor_before_full_table} eor={eor}");
++        println!(
++            "flap {round} peer {i} rejoin_complete_s={seconds:.6} eor_before_full_table={eor_before_full_table} eor={eor}"
++        );
++        // Temporary common qualification: completion is latched; also verify current coverage.
++        assert_eq!(
++            progress.table.unique, progress.table.target,
++            "returning peer lost current coverage"
++        );
++        assert!(
++            progress.table.completed_at_us.is_some(),
++            "returning peer incomplete"
++        );
++        println!(
++            "catchup,round={round},peer={i},open_us={},eor_us={},complete_us={},current_full_us={},unique={},target={}",
++            progress.open_sent_us,
++            progress.eor_us.expect("native EoR"),
++            progress.complete_us.unwrap(),
++            progress.table.completed_at_us.unwrap(),
++            progress.table.unique,
++            progress.table.target
++        );
+     }
+     stats_line(&format!("flap {round} rejoin_complete_s"), values)
+ }
+@@ -3158,6 +3178,11 @@ async fn run_flapstorm(
+          rss_mib,sessions_up,parse_errors"
+     );
+     for round in 1..=rounds {
++        let (readiness_stop, stopped) = tokio::sync::oneshot::channel();
++        let readiness = tokio::spawn(watch_readiness(
++            heap_metrics_addr.expect("native metrics address"),
++            stopped,
++        ));
+         if let Some(addr) = metrics_addr {
+             let up = ctx
+                 .obs
+@@ -3331,6 +3356,22 @@ async fn run_flapstorm(
+             })
+             .collect();
+         stats_line(&format!("flap {round} first_reann_s"), first_s);
++        for i in survivors.clone() {
++            let events = ctx.obs[i].events.lock().unwrap();
++            let first = events
++                .iter()
++                .find(|e| e.t_us >= t_reann && e.base_ann > 0)
++                .expect("survivor first arrival")
++                .t_us;
++            let generation = ctx.obs[i].generation.lock().unwrap();
++            let complete = generation.completed_at_us.expect("survivor complete");
++            let affected_first = generation
++                .first_marker_base_at_us
++                .expect("first affected prefix");
++            println!(
++                "survivor,round={round},peer={i},trigger_us={t_reann},first_us={first},affected_first_us={affected_first},complete_us={complete}"
++            );
++        }
+         disarm_survivors(ctx, k as usize);
+         let rss = rss_mib(pid);
+         let up = ctx
+@@ -3392,6 +3433,13 @@ async fn run_flapstorm(
+         );
+         // Quiesce between rounds.
+         tokio::time::sleep(Duration::from_secs(10)).await;
++        let _ = readiness_stop.send(());
++        let samples = readiness
++            .await
++            .expect("readiness task")
++            .expect("readiness qualification");
++        assert!(samples > 0, "no readiness samples");
++        println!("readiness,round={round},samples={samples},failures=0,deadline_ms=250");
+     }
+ }
+ 

@@ -3095,16 +3095,13 @@ impl RibManager {
                     ));
             }
 
-            // The common grouped path is deliberately keyless: when every
-            // exact probe succeeds and there is no sparse rejection overlay,
-            // no candidate can be owed a withdrawal and no overlay entry can
-            // need reconciliation. The immutable target snapshot remains on
-            // the outbound envelope for transport's owner/generation fence.
+            // Successful probes with no rejection overlay need no per-route
+            // reconciliation, including initial dumps and private or mixed-
+            // family batches. Every candidate is kept and no withdrawal is
+            // owed, regardless of prior advertised state or source exclusion.
+            // Retain the snapshot for transport's owner/generation fence.
             let fast_path = reused_maximum.is_some()
                 || (!candidates.is_empty()
-                    && shared_unicast_precommit
-                        .as_ref()
-                        .is_some_and(|precommit| precommit.lazy_group_prior.is_some())
                     && probe_results
                         .iter()
                         .inspect(|_| checkpoint())

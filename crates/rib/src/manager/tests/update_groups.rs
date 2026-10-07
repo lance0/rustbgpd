@@ -1474,6 +1474,92 @@ fn real_caller_grouped_exact_precommit_fast_and_slow_paths_are_equivalent() {
     assert_plain_unicast_update(&normal[2].0.updates[1], 2, vec![routes[2].clone()], vec![]);
 }
 
+#[test]
+fn initial_table_exact_precommit_fast_and_slow_paths_are_equivalent() {
+    let peer = Ipv4Addr::new(10, 90, 1, 1);
+    let source = Ipv4Addr::new(192, 0, 2, 91);
+    let mut routes = [
+        crate::test_support::make_route(Ipv4Prefix::new(Ipv4Addr::new(203, 0, 110, 0), 24), source),
+        crate::test_support::make_route(Ipv4Prefix::new(Ipv4Addr::new(203, 0, 111, 0), 24), source),
+        crate::test_support::make_route(Ipv4Prefix::new(Ipv4Addr::new(203, 0, 112, 0), 24), peer),
+    ];
+    AttrSet::edit(&mut routes[1].attributes, |attrs| {
+        attrs.push(PathAttribute::Communities(vec![0xFDE8_0002]));
+    });
+    let rejected_key = ExactExportKey::Unicast(routes[1].prefix, 0);
+    for ungrouped in [false, true] {
+        for limited in [false, true] {
+            let run = |force_slow| {
+                let (_tx, rx) = mpsc::channel(1);
+                let mut manager =
+                    RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+                manager.test_force_ungrouped = ungrouped;
+                manager.test_force_exact_export_slow_path = force_slow;
+                let seed = IpAddr::V4(Ipv4Addr::new(10, 90, 1, 2));
+                let _seed_outbound = register_direct_peer(&mut manager, seed);
+                for route in &routes {
+                    manager.handle_update(RibUpdate::RoutesReceived {
+                        peer: route.peer,
+                        session_id: 0,
+                        announced: vec![route.clone()],
+                        withdrawn: vec![],
+                        flowspec_announced: vec![],
+                        flowspec_withdrawn: vec![],
+                        evpn_announced: vec![],
+                        evpn_withdrawn: vec![],
+                        validated_with: None,
+                    });
+                    while manager.process_next_route_chunk() {}
+                }
+                let probes = Arc::new(AtomicUsize::new(0));
+                manager.handle_update(RibUpdate::SetPeerExportEncoder {
+                    peer: peer.into(),
+                    session_id: 0,
+                    encoder: Arc::new(CohortExactEncoder {
+                        owner: 1,
+                        profile: 91,
+                        max_len: if limited { 128 } else { 4_096 },
+                        generation: AtomicUsize::new(0),
+                        advance_generation: false,
+                        probes: Arc::clone(&probes),
+                        reuses: Arc::new(AtomicUsize::new(0)),
+                    }),
+                });
+                let hits_before = manager.test_exact_export_fast_path_hits;
+                let mut outbound = register_direct_peer(&mut manager, peer.into());
+                assert_eq!(manager.grouped_member_of(peer.into()).is_none(), ungrouped);
+                let mut update = outbound.try_recv().unwrap();
+                Arc::make_mut(&mut update.announce).sort_by_key(|route| route.prefix);
+                assert!(update.announce.iter().all(|route| route.peer != peer));
+                assert_eq!(update.announce.len(), if limited { 1 } else { 2 });
+                assert_eq!(update.withdraw, []);
+                assert_eq!(update.end_of_rib, []);
+                assert_eq!(outbound.try_recv().unwrap().end_of_rib, ipv4_sendable());
+                assert!(outbound.try_recv().is_err());
+                assert_eq!(probes.load(Ordering::Relaxed), 2);
+                let expected_rejected = if limited {
+                    HashSet::from([rejected_key.clone()])
+                } else {
+                    HashSet::new()
+                };
+                assert_eq!(
+                    manager
+                        .peer_unexportable
+                        .get(&peer.into())
+                        .cloned()
+                        .unwrap_or_default(),
+                    expected_rejected
+                );
+                assert!(!manager.dirty_peers.contains(&peer.into()));
+                let hits = manager.test_exact_export_fast_path_hits - hits_before;
+                assert_eq!(hits, u64::from(!force_slow && !limited));
+                exact_update_semantic(&update)
+            };
+            assert_eq!(run(false), run(true));
+        }
+    }
+}
+
 async fn query_first_export_term_hits(
     tx: &mpsc::Sender<RibUpdate>,
     roster: &crate::export_roster::ExportRosterReader,

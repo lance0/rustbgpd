@@ -1,0 +1,61 @@
+{
+  "measured_date": "2026-10-06",
+  "source_control": "49abbb0171cbb889b7e2618c2bdcec6ea35699ae",
+  "source_candidate": "6a715b409130b694a48fc20cefb115cd951f1423",
+  "source_candidate_tree": "071b21ad6b3a79715e5770a5cd1277bc79970542",
+  "sha256": {
+    "rustbgpd-control": "d1fc69a00788b4598a8065dda60a7bc9867304531a95ec1b94bf2dbadaf92aa4",
+    "rustbgpd-candidate": "0b7e555d848c1e833fab7fc8acd0a0865bfad78396adf5ebf8e5e35628637fdb",
+    "reloadstall-common": "16aca6bf6fc99616b8cce8de6c03584113a991b70c929a0a5026dfb62d93ddf3",
+    "common-qualification.patch": "67afa80a2216836e00f98732726d8e4696cf349bc538acaab6898e1c4668adc8",
+    "candidate.patch": "e006111e70efb2296c361148ab2658e2ec1e59d952eeb2a7aca08c9c1a683f1d",
+    "qualify.py": "8122514fea1d54f0746f5388eccb3746708ea28f2635323f5ae75c68200e80a0",
+    "run-six.sh": "20f00c37a4ad7f0133ea55144d594f6eccc50dd49ef0565ad16c903e14d0a43b",
+    "build-producers.json": "84c69ac9c880be3a39763d6e283eeb44276e6c44058fe58dc0e6e05c5a73378c"
+  },
+  "toolchain": "rustc 1.99.0 (b940084d7 2026-09-28)\nbinary: rustc\ncommit-hash: b940084d7eb6a299eb4bfeb8e34901bc051e7ac4\ncommit-date: 2026-09-28\nhost: x86_64-unknown-linux-gnu\nrelease: 1.99.0\nLLVM version: 23.1.1",
+  "build_commands": [
+    "CARGO_BUILD_JOBS=8 cargo build --locked --release --bin rustbgpd",
+    "CARGO_BUILD_JOBS=8 cargo build --locked --profile scale -p reloadstall"
+  ],
+  "build_equivalence": {
+    "selected_dependency_nodes_per_arm": 345,
+    "selected_features_settings_and_edges_equal": true,
+    "actual_rib_and_daemon_rustc_arguments_equal_after_path_normalization": true,
+    "default_features": [
+      "default",
+      "jemalloc",
+      "tikv-jemallocator"
+    ],
+    "rustflags": [],
+    "selected_graph_sha256": "4f56a3c1081983d7c65653c86917e1d54847168dd439cc4c580cee4c2eb075ad"
+  },
+  "environment": {
+    "transport": "native loopback, zero added RTT, unpaced readers",
+    "daemon_workers": 8,
+    "harness_workers": 24,
+    "inherited_runtime_allocator_and_preload_overrides": "cleared",
+    "common_harness_patch": "post-round precision, existing clock/bitmap records, existing readiness watcher; native HTTP/lifecycle/chronology receipts",
+    "daemon_phase_instrumentation": false
+  },
+  "campaign_actual_exit": 0,
+  "cleanup": {
+    "owned_processes_remaining": 0,
+    "owned_runtime_scenario_removed": true,
+    "host_lock_probe_exit": 0
+  },
+  "raw_archive": {
+    "logical_name": "initial-table-reconciliation-2026-10-06.tar.gz",
+    "sha256": "f984db31ec891cf3b96fa8e0a0033b5a734b9465d0da3e0c0a9b630a94a97b49",
+    "size_bytes": 605374789,
+    "original_file_count": 37884,
+    "manifest_sha256": "4e2f0a4a35b6d4958d1a7a8032e38b7dd601149a16e9a3aba923121c4f2d9dcd",
+    "published": false,
+    "contents": "Qualified six-leg campaign, producer/fingerprint snapshots, validation logs, measured-source snapshots and separately identified superseded preparation/aborted campaign. Only the qualified 49abbb0 cohort enters public result CSVs."
+  },
+  "limits": [
+    "Three independent processes per arm; three correlated flap rounds per process. AB/BA/AB order is not perfectly position balanced.",
+    "Compact extracts reproduce arithmetic and validate retained compact assertions; raw logs, producer records and source snapshots remain in the unpublished archive.",
+    "No comparator daemon or historical GR-retained converged-rejoin result is part of this campaign."
+  ]
+}
