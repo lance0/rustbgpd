@@ -103,8 +103,9 @@ receive-side validation disabled. It is functional evidence, with the
 [recorded deadline caveat](api.md#flowspec-injection-contract), not a latency,
 throughput, scale or forwarding guarantee. Its historical alpha wording
 describes the contract at the time of the run; this maintained inventory
-records the subsequent scoped promotion. ADR-0125 and its dated unicast
-receipts remain unchanged and do not supply FlowSpec qualification.
+records the subsequent scoped promotion under
+[ADR-0137](../adr/0137-flowspec-controller-contract.md). ADR-0125 and its dated
+unicast receipts remain unchanged and do not supply FlowSpec qualification.
 
 #### Controller upgrade and rollback
 
