@@ -2,7 +2,7 @@
   "schema_version": 1,
   "contract": "rustbgpd-rs-rr-v1",
   "baseline_release": "v0.75.0",
-  "scope": "Narrow route-server and route-reflector product contract; unlisted surfaces are not stable by implication.",
+  "scope": "Narrow route-server, route-reflector and FlowSpec controller product contract; unlisted surfaces are not stable by implication.",
   "roles": [
     {
       "id": "route-server-unicast",
@@ -39,6 +39,23 @@
       "classification": "scoped_rr_only",
       "families": ["rtc"],
       "constraints": ["receive-reflect-query"]
+    },
+    {
+      "id": "flowspec-controller",
+      "classification": "stable",
+      "families": ["ipv4_flowspec", "ipv6_flowspec"],
+      "constraints": [
+        "control-plane-only; local origination, reconciliation and committed distribution view",
+        "InjectionService.AddFlowSpec and InjectionService.DeleteFlowSpec: local (afi_safi, components) identity, explicit outcomes and allow_missing",
+        "RibService.ListFlowSpecRoutes: selected Loc-RIB when both peer selectors are empty",
+        "RibService.ListFlowSpecRoutes: retained local intent only when received_peer_address=0.0.0.0 and advertised_peer_address is empty",
+        "RibService.ListFlowSpecRoutes: committed post-export-policy Adj-RIB-Out when advertised_peer_address names a destination peer and received_peer_address is empty",
+        "ListFlowSpecRequest.afi_safi: UNSPECIFIED selects both FlowSpec families; IPV4_FLOWSPEC or IPV6_FLOWSPEC selects one",
+        "nonempty received_peer_address other than 0.0.0.0 remains outside v1; shared receive-validation diagnostics are explicitly unstable",
+        "Config.flowspec and RFC 9117 receive-side validation remain alpha and opt-in",
+        "process-local intent; controller re-injection required after daemon restart",
+        "no remote acceptance, installation, enforcement, GR/LLGR retention or convergence-time promise"
+      ]
     },
     {
       "id": "evpn",
@@ -168,16 +185,16 @@
       {"service": "NeighborService", "methods": ["AddNeighbor", "DeleteNeighbor", "ListNeighbors", "GetNeighborState", "EnableNeighbor", "DisableNeighbor", "SoftResetIn", "RefreshOutbound", "ListDynamicNeighbors", "AddDynamicNeighbor", "DeleteDynamicNeighbor", "SetGracefulShutdown"], "signature_sha256": "2a968482c1e3a6396b5d72f89e682bbec592ce187a8c6bd6f5b48e53c42313c6", "message_graph_sha256": "6bbbd101e574207534a8d3c201bdafc360018dbf0479af1035efa15276d58a45"},
       {"service": "PolicyService", "methods": ["ListPolicies", "GetPolicy", "SetPolicy", "DeletePolicy", "ListNeighborSets", "GetNeighborSet", "SetNeighborSet", "DeleteNeighborSet", "GetGlobalPolicyChains", "SetGlobalImportChain", "SetGlobalExportChain", "ClearGlobalImportChain", "ClearGlobalExportChain", "GetNeighborPolicyChains", "SetNeighborImportChain", "SetNeighborExportChain", "ClearNeighborImportChain", "ClearNeighborExportChain", "ExplainImportPolicy", "TestPolicy", "GetPolicyStats"], "signature_sha256": "c119c0087b1dcaca56e21842eaedfc5154fee5c8a5f2fd9f9cd64463a723f8e3", "message_graph_sha256": "752d36a7684441b3616448f7326a1825c4aa58a42ac72d3ab6218e593a212e42"},
       {"service": "PeerGroupService", "methods": ["ListPeerGroups", "GetPeerGroup", "SetPeerGroup", "DeletePeerGroup", "SetNeighborPeerGroup", "ClearNeighborPeerGroup"], "signature_sha256": "069596cd50a6a472ad3ca3e1fa81e634219ede2b2e7fda99118d4ca7765b4106", "message_graph_sha256": "4d60f139e203a88eb2323efe9852057b63f1f0e9da54d7bd16cfbc995e93122b"},
-      {"service": "RibService", "methods": ["ListReceivedRoutes", "ListBestRoutes", "ListAdvertisedRoutes", "ExplainAdvertisedRoute", "ExplainBestPath", "ListRouteEvents"], "signature_sha256": "da76854063252777b30ba572ca4a8ef77ac073c528381d4e181c1b72964d42d2", "message_graph_sha256": "7c2202ab1078c36e927be91d6e2b7bc738cd4cfbe3f68d0dea9610d2bccba5bd"},
+      {"service": "RibService", "methods": ["ListReceivedRoutes", "ListBestRoutes", "ListAdvertisedRoutes", "ExplainAdvertisedRoute", "ExplainBestPath", "ListRouteEvents", "ListFlowSpecRoutes"], "signature_sha256": "784c122ee96b6f158bb725273a0724cde51fd1e62b5e36dee40a0373c83d7e5d", "message_graph_sha256": "c6c72dded74e1e83b46e16457dace7ca1c192bcdebe410905e19b01b9fe293f7"},
       {"service": "EventService", "methods": ["WatchEvents", "ListSessionEvents", "ListPolicyEvents", "SubscribeFromEvent"], "signature_sha256": "26d5bc69120c05e728a2343cade242865705dd0e26f3e7e9b21dc521fe1a7ca3", "message_graph_sha256": "8191f16374d1685b75452889ef22645993a83811769d5093afa5abcc138c4503"},
-      {"service": "InjectionService", "methods": ["AddPath", "DeletePath"], "signature_sha256": "1a056ee6bee35c4e0bab0624c5e31a3ca49252eba179aecc0ca3e3fa613d1a5c", "message_graph_sha256": "da6ff0b6137ed7dc4fb8709ea3d8dd263f18dc0081d798895848c5c46243f42a"},
+      {"service": "InjectionService", "methods": ["AddPath", "DeletePath", "AddFlowSpec", "DeleteFlowSpec"], "signature_sha256": "4f741ffa290bf681641dc90e7ac7425ff87fd564f52cdc13bf58da62819b7513", "message_graph_sha256": "5c9062dcc342f86edfae66a888cd74fc2b86f53224612c33fb1a774d81ebb8ae"},
       {"service": "ControlService", "methods": ["Shutdown", "GetHealth", "GetMetrics", "TriggerMrtDump"], "signature_sha256": "2b1392bf21a2783f5829a0b7838af9285c10f2a59dc90f6d58083c35c5aaa684", "message_graph_sha256": "4495cd5ccf21ddb5d3f4cd79328bf118f9b458d28c2f78e24b62b0499b09bb50"}
     ],
     "scoped_rr_only_method_sets": [
       {"service": "RibService", "methods": ["ListBgpLsRoutes", "ListVpnRoutes", "ListLabeledRoutes", "ListRtcRoutes", "ListTopologyNodes", "ListTopologyLinks", "ListOrrStatus"], "signature_sha256": "6e4fc15d26b9de73655759d98c31cf68e25b0e5fca712e676d59c01c710fe290", "message_graph_sha256": "dbc74dcd483fdc59a925995dbbc2923e3ee6a181601e6ffcc3c42e7b34fa7d1a"}
     ],
-    "explicitly_unstable_message_fields": ["BgpEvent.bfd", "BgpEvent.dataplane", "BgpEvent.dataplane_route", "BgpEvent.evpn", "ConfigTransactionApplyResponse.update_group_impact", "ConfigTransactionPlanResponse.update_group_impact", "DeleteNeighborRequest.interface", "GetNeighborStateRequest.interface", "NeighborConfig.interface", "NeighborConfig.paths_limit_receive_max", "NeighborState.paths_limits", "NeighborState.slow_peer", "PathsLimitState.*", "PeerGroupDefinition.paths_limit_receive_max", "UpdateGroupFamilyImpact.*", "UpdateGroupImpactPlan.*", "UpdateGroupImpactRollup.*"],
-    "explicitly_outside_v1": ["ControlService.CheckLiveness", "gnmi.gNMI", "BfdService", "RpkiService", "EvpnService", "ConfigService.ListConfigHistory", "ConfigService.PreviewConfigRollback", "ConfigService.RollbackConfigTransaction", "ConfigService.StreamPlanConfigTransaction", "ConfigService.StreamApplyConfigTransaction", "InjectionService.AddFlowSpec", "InjectionService.DeleteFlowSpec", "InjectionService.AddEvpnRoute", "InjectionService.DeleteEvpnRoute", "RibService.ListBlackholeDiscards", "RibService.ListEvpnRoutes", "RibService.ListReceivedEvpnRoutes", "RibService.ListAdvertisedEvpnRoutes", "RibService.ExplainEvpnRoute", "RibService.ListFibRoutes", "RibService.ListFibTables", "RibService.SetFibTable", "RibService.DeleteFibTable", "RibService.ListFlowSpecRoutes", "RibService.LookupBestPath", "NeighborService.ResetNeighbor", "NeighborService.ReplayOutbound", "EventService.ListEvpnEvents", "PolicyService.ListRejectedRoutes", "PolicyService.GetValidationPolicyPosture", "PolicyService.ListConditionalAdvertisements"]
+    "explicitly_unstable_message_fields": ["BgpEvent.bfd", "BgpEvent.dataplane", "BgpEvent.dataplane_route", "BgpEvent.evpn", "ConfigTransactionApplyResponse.update_group_impact", "ConfigTransactionPlanResponse.update_group_impact", "DeleteNeighborRequest.interface", "FlowSpecValidationStatus.*", "GetNeighborStateRequest.interface", "NeighborConfig.interface", "NeighborConfig.paths_limit_receive_max", "NeighborState.paths_limits", "NeighborState.slow_peer", "PathsLimitState.*", "PeerGroupDefinition.paths_limit_receive_max", "ReceivedFlowSpecRouteEntry.path_id", "ReceivedFlowSpecRouteEntry.pending", "ReceivedFlowSpecRouteEntry.reason", "ReceivedFlowSpecRouteEntry.validation", "UpdateGroupFamilyImpact.*", "UpdateGroupImpactPlan.*", "UpdateGroupImpactRollup.*"],
+    "explicitly_outside_v1": ["ControlService.CheckLiveness", "gnmi.gNMI", "BfdService", "RpkiService", "EvpnService", "ConfigService.ListConfigHistory", "ConfigService.PreviewConfigRollback", "ConfigService.RollbackConfigTransaction", "ConfigService.StreamPlanConfigTransaction", "ConfigService.StreamApplyConfigTransaction", "InjectionService.AddEvpnRoute", "InjectionService.DeleteEvpnRoute", "RibService.ListBlackholeDiscards", "RibService.ListEvpnRoutes", "RibService.ListReceivedEvpnRoutes", "RibService.ListAdvertisedEvpnRoutes", "RibService.ExplainEvpnRoute", "RibService.ListFibRoutes", "RibService.ListFibTables", "RibService.SetFibTable", "RibService.DeleteFibTable", "RibService.LookupBestPath", "NeighborService.ResetNeighbor", "NeighborService.ReplayOutbound", "EventService.ListEvpnEvents", "PolicyService.ListRejectedRoutes", "PolicyService.GetValidationPolicyPosture", "PolicyService.ListConditionalAdvertisements"]
   },
   "cli": {
     "stability_scope": "command_path_and_name_only",
@@ -325,7 +342,7 @@
     "metrics": "Stable metric names, types, and existing label meanings do not change. New metrics and bounded labels are additive; label removal or reinterpretation is breaking.",
     "events": "Stable event kinds and existing JSON/protobuf fields retain meaning. New optional fields and event kinds are additive; field removal, rename, or semantic reuse is breaking.",
     "deprecation_window": {"minimum_minor_releases": 2, "minimum_days": 90},
-    "migration_support": "During 0.x, the inventory defines the existing narrow compatibility promise for route servers and route reflectors. Under the alpha correctness-over-compatibility posture, reviewed correctness changes may require breaking upgrades before the v1.0 tag. A change that rejects previously accepted config is a breaking upgrade requiring a CHANGELOG entry, migration guidance, and a check with the new binary. The inventory freezes at the v1.0 tag. After the tag, a breaking frozen-surface change requires a new contract major, CHANGELOG entry, migration guide, and a consecutive-release fixture accepted by the new release. The fixture chain advances during release preparation. Current and immediately previous minor release migrations are supported."
+    "migration_support": "During 0.x, the inventory defines the existing narrow compatibility promise for route servers, route reflectors and the scoped FlowSpec controller role. Under the alpha correctness-over-compatibility posture, reviewed correctness changes may require breaking upgrades before the v1.0 tag. A change that rejects previously accepted config is a breaking upgrade requiring a CHANGELOG entry, migration guidance, and a check with the new binary. The inventory freezes at the v1.0 tag. After the tag, a breaking frozen-surface change requires a new contract major, CHANGELOG entry, migration guide, and a consecutive-release fixture accepted by the new release. The fixture chain advances during release preparation. Current and immediately previous minor release migrations are supported."
   },
   "mutation": {
     "canonical": "ConfigService PlanConfigTransaction/ApplyConfigTransaction with snapshot token and commit-confirmed confirm/abort lifecycle",

@@ -48,7 +48,7 @@ authorization tiers each call needs — see
 [`examples/python-client/`](../../examples/python-client/README.md).
 
 The project-wide API remains alpha outside the explicit native-gRPC methods
-listed in the narrow [v1 route-server / route-reflector contract](v1-stable-contract.md).
+listed in the narrow [v1 route-server / route-reflector / controller contract](v1-stable-contract.md).
 That machine inventory pins method names, streaming modes, and top-level
 request/response messages; a service or RPC existing in this reference does
 not by itself make it v1-stable.
@@ -1550,7 +1550,7 @@ route changes through `EventService.WatchEvents` or `EventService.SubscribeFromE
 | `ExplainAdvertisedRoute` | Dry-run export decision for one prefix (or, with `rd`, one VPN identity) to one peer: the gate ladder in live evaluation order (`best_route`, split horizon, RFC 4456 reflection, family, RFC 9494 LLGR, RFC 5291 ORF, RFC 4684 RT membership for VPN identities, the stop-only `no_advertise` / `no_export` / `rs_control` rungs, ADR-0137 conditional advertisement immediately before export policy (`conditional_advertisement_suppressed` / `conditional_advertisement_eval_error`), export-policy rejection with per-term attribution or nonempty Permit with `chain_default_permit`, then for Add-Path send the stop-only `add_path_send_max` check on the policy-compacted rank, RFC 9234 OTC, Adj-RIB-Out diff), produced by a dry run of the live staging body. The rung set and order vary by selection shape; see the [explain how-to](../how-to/explain.md). For negotiated unicast Add-Path send, optional `source { peer_address, path_id }` selects one exact Adj-RIB-In candidate. |
 | `ExplainBestPath` | Show all candidates for a prefix with decisive comparison reasons; optional `peer_address` field scopes to that peer's Add-Path send view |
 | `LookupBestPath` | Outside-v1 global-only LPM: bounded ancestor probes return the closest installed Loc-RIB winner plus every alternative for that one matched prefix from one actor turn; old daemons fail with `UNIMPLEMENTED` |
-| `ListFlowSpecRoutes` | FlowSpec selected Loc-RIB, received Adj-RIB-In, or per-peer committed advertised Adj-RIB-Out view (alpha) |
+| `ListFlowSpecRoutes` | FlowSpec selected Loc-RIB, local-intent reconciliation, or per-peer committed advertised Adj-RIB-Out within the scoped controller contract; remote received-candidate diagnostics remain alpha |
 | `ListEvpnRoutes` | EVPN routes (RFC 7432 / RFC 9136 / RFC 9251 Type 6) in Loc-RIB view, filterable by route type / source peer / RD |
 | `ListReceivedEvpnRoutes` | Bounded accepted post-policy EVPN Adj-RIB-In for one source neighbor, filterable by type / RD |
 | `ListAdvertisedEvpnRoutes` | Bounded committed EVPN Adj-RIB-Out for one destination neighbor, filterable by type / RD |
@@ -2031,7 +2031,9 @@ rbgp flowspec advertised 192.0.2.1 -a ipv4_flowspec
 Clients must check `advertised_view` before interpreting the rows: an older
 server ignores the selector and returns its selected Loc-RIB instead.
 `rbgp flowspec advertised PEER [-a ipv4_flowspec|ipv6_flowspec]` rejects that
-unacknowledged response. This surface remains alpha and `sensitive_read`.
+unacknowledged response. This gRPC mode belongs to the
+[scoped controller contract](v1-stable-contract.md#flowspec-controller-boundary)
+and retains the `sensitive_read` authorization tier.
 
 "Committed" means admitted to the destination's outbound channel. When that
 channel is full, the peer becomes outbound-dirty and this view retains the
@@ -2882,8 +2884,17 @@ older daemon's success prints `FlowSpec rule deleted (the daemon did not
 report an outcome)`.
 `rbgp flowspec received 0.0.0.0` shows the injected rules.
 
-These RPCs remain outside the v1 inventory
-([stability](stability.md)); the contract above describes current behavior.
+`AddFlowSpec`, `DeleteFlowSpec`, and the selected, local-intent and advertised
+listing modes belong to the
+[scoped v1 controller contract](v1-stable-contract.md#flowspec-controller-boundary).
+Remote received-candidate mode, `Config.flowspec`, and the shared
+`ReceivedFlowSpecRouteEntry.path_id`, `.validation`, `.reason`, `.pending`
+fields and `FlowSpecValidationStatus` enum remain alpha. The gRPC promotion
+does not promote FlowSpec CLI commands or their output. The same pre-v1
+compatibility rules apply during 0.x; once v1.0 is tagged, removal of the
+inventoried surfaces is no earlier than 2.0. Follow the
+[controller upgrade guidance](v1-stable-contract.md#controller-upgrade-and-rollback)
+for older servers, view acknowledgements and desired-state replay.
 The [bounded dual-stack controller qualification](../artifacts/interop/m22-flowspec-controller-20261002/README.md)
 exercises 100 local rules against FRR 10.7.1, including retained intent,
 committed export policy, peer replay, and restart reconciliation. It does not

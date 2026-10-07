@@ -1,10 +1,11 @@
-# Narrow v1 route-server / route-reflector contract
+# Narrow v1 route-server / route-reflector / FlowSpec controller contract
 
 > **Document class: REFERENCE.** This maintained page defines a contract, specification, or reusable procedure; follow any stated version scope.
 
 rustbgpd remains a public-alpha project overall. This document defines a much
 narrower compatibility promise for deployments that use rustbgpd as an IPv4 /
-IPv6 unicast route server or route reflector. It does not make every protocol,
+IPv6 unicast route server or route reflector, or as a FlowSpec controller's
+control-plane backend. It does not make every protocol,
 configuration key, RPC, CLI command, or Linux dataplane role stable.
 
 The machine-readable source of truth is
@@ -15,8 +16,9 @@ inventory, its CLI paths against the Clap tree, and its consecutive-release
 upgrade receipt. A surface absent from that file is outside the v1 promise.
 [ADR-0125](../adr/0125-v1-stability-contract.md) defines the accepted evidence bar
 for promoting this narrow 0.x promise to a v1.0 tag. During 0.x, the inventory
-defines the existing narrow compatibility promise for route servers and route
-reflectors. Under the alpha correctness-over-compatibility posture, reviewed
+defines the existing narrow compatibility promise for route servers, route
+reflectors and the scoped FlowSpec controller role. Under the alpha
+correctness-over-compatibility posture, reviewed
 correctness changes may still require breaking upgrades before the v1.0 tag.
 The inventory freezes at that tag, after the evidence bar is complete. A 0.x
 change that rejects previously accepted configuration is a breaking upgrade
@@ -32,14 +34,94 @@ for affected operators and needs migration guidance.
 | **Scoped RR-only** | `route-reflector-l3vpn` — VPNv4/VPNv6 | Route reflection and controller-feed use only. No PE VRF import, CE attachment, MPLS forwarding, or dataplane programming promise. |
 | **Scoped RR-only** | `route-reflector-labeled-unicast` — IPv4/IPv6 labeled-unicast | Receive, reflect, and query. Labels are not installed in a forwarding plane. |
 | **Scoped RR-only** | `route-reflector-rtc` — RT-Constrain | Receive, reflect, query, and VPN export membership within the RR boundary. |
+| **Stable** | `flowspec-controller` — IPv4/IPv6 FlowSpec controller backend | Local origination, retained local-intent reconciliation, selected routes, and committed post-export-policy advertised views through the three inventoried RPCs. Receive-side validation and dataplane enforcement remain outside this role. |
 | **Alpha** | `evpn` — EVPN RR, VTEP, IRB, multi-homing | Functional and interop-tested slices exist, but EVPN remains outside this v1 compatibility promise, including RR-only EVPN. |
 | **Alpha** | `linux-dataplane` — Linux FIB and managed netdev roles | Opt-in and tested, but not part of the control-plane RS/RR v1 contract. |
 | **Experimental** | `paths-limit` — Paths-Limit | Draft capability; semantics and wire assignments are not stable. |
 
-FlowSpec, BFD, gNMI, TCP-AO runtime lifecycle, BGP unnumbered, and other
+FlowSpec outside the controller boundary below, BFD, gNMI, TCP-AO runtime
+lifecycle, BGP unnumbered, and other
 unlisted features continue to follow the project-wide alpha posture even when
 individual slices are interoperable. In particular, “shipped” or “tested” does
 not automatically mean “v1 stable.”
+
+### FlowSpec controller boundary
+
+The `flowspec-controller` role uses the existing stable classification and
+compatibility rules, including the pre-v1 rules during 0.x. Once v1.0 is
+tagged, these inventoried surfaces remain functional for the rest of 1.x;
+breaking removal is no earlier than 2.0. This adds no separate stability tier.
+
+The exact API boundary is:
+
+| RPC / mode | Included behavior |
+|---|---|
+| `InjectionService.AddFlowSpec` | Upsert a local rule identified by `(afi_safi, components)`; report `CREATED`, `REPLACED`, or `UNCHANGED` against the previous local payload, even when a received candidate wins selection. |
+| `InjectionService.DeleteFlowSpec` | Delete only local intent; report `DELETED`, or `NOT_FOUND` for an absent key unless `allow_missing` requests `NOT_PRESENT`. |
+| `RibService.ListFlowSpecRoutes`, both peer selectors empty | Return selected Loc-RIB entries in `routes`; both view acknowledgements are false. |
+| `RibService.ListFlowSpecRoutes`, `received_peer_address = "0.0.0.0"`, advertised selector empty | Return all retained local intent in `received_routes`, including outselected rules, with `received_view = true` even when empty. The stable row projection is `route` and `selected`. |
+| `RibService.ListFlowSpecRoutes`, `advertised_peer_address` names a destination peer, received selector empty | Return committed post-export-policy entries in `routes`, with `advertised_view = true` even when empty. Each row retains its source `peer_address`, not the destination. |
+
+Injection accepts `IPV4_FLOWSPEC` and `IPV6_FLOWSPEC`. Listing accepts those
+families or `UNSPECIFIED` for both. Both peer selectors together return
+`INVALID_ARGUMENT`; the advertised mode retains the documented unknown-peer
+and initial-roster errors. The
+[API reference](api.md#flowspec-injection-contract) specifies component
+validation, outcome values, source identity, export filtering/rewriting and
+the local mutation stage confirmed by `OK`. An RPC timeout or lost response
+does not prove that an admitted mutation was canceled; reconcile retained
+intent before deciding what to retry.
+
+The following shared surfaces remain **outside v1**:
+
+- `ListFlowSpecRequest.received_peer_address` selecting any source other than
+  the local `0.0.0.0` sentinel: remote received-candidate inspection and
+  receive-side feasibility semantics remain alpha.
+- `ReceivedFlowSpecRouteEntry.path_id`, `.validation`, `.reason`, `.pending`,
+  and `FlowSpecValidationStatus`: these diagnostic fields and enum are
+  explicitly excluded even in a local-intent response. Controllers reconcile
+  using `route` and `selected`, not validation diagnostics.
+- `Config.flowspec` and RFC 9117 receive-side validation: validation remains
+  opt-in and disabled by default. Local injection remains trusted origination.
+- FlowSpec CLI commands and output, GR/LLGR retention guarantees, remote
+  acceptance, installation, forwarding and enforcement.
+
+The message-graph digest includes the shared messages as a review tripwire;
+it does not promote the excluded fields or modes. `OK` means local mutation,
+and the advertised view means admission to the destination's outbound channel.
+Selection may be deferred during GR; a full outbound channel leaves prior
+committed rows visible until resynchronization. Neither observation proves
+remote acceptance. Local intent is process-local and must be re-injected by
+the controller after a daemon restart.
+
+The [dated dual-stack qualification](../artifacts/interop/m22-flowspec-controller-20261002/README.md)
+supplies the controller lifecycle evidence: 100 rules, 50 per AFI, against
+FRR 10.7.1, matching destination prefixes, TCP and destination port 80. It
+exercises create/reapply/replace/delete, source precedence, export policy,
+peer reconnect and explicit reconciliation after daemon restart, with GR and
+receive-side validation disabled. It is functional evidence, with the
+[recorded deadline caveat](api.md#flowspec-injection-contract), not a latency,
+throughput, scale or forwarding guarantee. Its historical alpha wording
+describes the contract at the time of the run; this maintained inventory
+records the subsequent scoped promotion. ADR-0125 and its dated unicast
+receipts remain unchanged and do not supply FlowSpec qualification.
+
+#### Controller upgrade and rollback
+
+Keep desired rules outside the daemon. After upgrade or rollback, require
+`received_view` / `advertised_view` on the respective reads, including empty
+responses; an older daemon can silently ignore the selector. Require the
+explicit mutation outcomes when the controller depends on them. An older
+daemon can report `UNSPECIFIED` and ignore `allow_missing`, so use the
+[documented legacy behavior](api.md#flowspec-injection-contract) or reject an
+unsupported server rather than treating an unknown outcome as unchanged or
+absent. After restarting the daemon, re-inject desired rules and verify local
+intent separately from committed advertisements and remote observations.
+
+This promotion changes no configuration shape, default or release anchor.
+The existing consecutive-release configuration fixture chain remains the
+upgrade check; it is not a FlowSpec RPC qualification receipt. Release
+preparation advances that chain normally.
 
 ## Stable surfaces
 
