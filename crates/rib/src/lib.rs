@@ -66,6 +66,8 @@ pub use best_path::{
 };
 pub use event::{EvpnRouteEvent, RouteEvent, RouteEventType};
 pub use event_sink::{NoopRibEventSink, RibEventSink};
+/// Shared with transport's address-keyed outbound maps.
+pub use fast_hash::AddrHasher;
 pub use loc_rib::LocRib;
 pub use manager::RibManager;
 #[cfg(feature = "bench-internals")]
