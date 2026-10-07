@@ -1,0 +1,32 @@
+--- executed/analyze_receiver.py
++++ public/analyze_receiver.py
+@@ -230,7 +230,7 @@
+     require(set(writers) == expected and set(members) == expected, 'exact writer/member coverage')
+     require(set(all_polls) == {(r,p,j) for (r,p),w in writers.items() for j in range(w['count'])}, 'extraneous/missing write polls')
+     final_clock = clock_interval([clocks[4,k] for k in ('before','after')])
+-    for (round_, peer), w in writers.items():
++    for w in writers.values():
+         require_deferred_dump(w, outcomes[4,0]['end'], final_clock, daemon_clock)
+     for round_ in range(1,5):
+         receiver_clock = clock_interval([clocks[round_,k] for k in ('before','after')])
+--- executed/test_campaign.py
++++ public/test_campaign.py
+@@ -1,4 +1,3 @@
+-import copy
+ import csv
+ from datetime import datetime, timezone
+ from decimal import Decimal
+--- executed/test_qualify.py
++++ public/test_qualify.py
+@@ -1,4 +1,3 @@
+-import copy
+ import unittest
+ from qualify import qualify, ORDER
+ 
+--- executed/test_receiver.py
++++ public/test_receiver.py
+@@ -1,4 +1,3 @@
+-import copy
+ import tempfile
+ import unittest
+ from pathlib import Path
