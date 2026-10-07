@@ -1301,6 +1301,53 @@ fn oldest_event_id_blocking(conn: &Connection) -> Result<Option<u64>, EventHisto
 mod tests {
     use super::*;
 
+    /// The v0.75.0 release wrote this store (28 events) and shut down
+    /// cleanly. The current reader must open it in place and continue its
+    /// allocator; the same store declaring schema 2, the next version after
+    /// the archived one, must stay put and refuse to open.
+    #[test]
+    fn released_v075_store_opens_and_future_schema_is_refused() {
+        let released = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../tests/fixtures/state/v0.75.0/events.db"
+        );
+        for future in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("events.db");
+            std::fs::copy(released, &path).unwrap();
+            if future {
+                Connection::open(&path)
+                    .unwrap()
+                    .execute(
+                        "UPDATE metadata SET value = ?1 WHERE key = 'schema_version'",
+                        params!["2"],
+                    )
+                    .unwrap();
+            }
+            let result = open_with_recovery(&path, SynchronousMode::Full);
+            assert!(path.exists() && !stale_path(&path).exists());
+            if future {
+                assert!(
+                    matches!(
+                        result,
+                        Err(EventHistoryError::SchemaDowngrade { on_disk, supported })
+                            if on_disk == 2 && supported == CURRENT_SCHEMA_VERSION
+                    ),
+                    "expected SchemaDowngrade, got {result:?}"
+                );
+                continue;
+            }
+            let init = result.unwrap();
+            assert!(!init.had_quarantine && !init.recovered_via_fallback);
+            assert_eq!(init.initial_allocator, 28);
+            let events: i64 = Connection::open(&path)
+                .unwrap()
+                .query_row("SELECT count(*) FROM events", [], |row| row.get(0))
+                .unwrap();
+            assert_eq!(events, 28);
+        }
+    }
+
     #[test]
     fn newer_on_disk_schema_refuses_to_open_without_quarantining() {
         // Load-bearing break: the recovery ladder treated the downgrade

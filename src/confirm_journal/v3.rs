@@ -2147,4 +2147,55 @@ log_format = "json"
         );
         assert!(!fixture.config.with_extension("toml.unconfirmed").exists());
     }
+
+    /// The v0.75.0 release wrote this pending authority for a confirmed apply.
+    /// The archived metadata binds the capture host's raw-file inode, so boot
+    /// recovery cannot be replayed here; the byte decoders, linkage, digest and
+    /// retained-snapshot checks that boot runs must still accept it, and the
+    /// same documents declaring version 4 must be refused.
+    #[test]
+    fn released_v075_pending_authority_decodes_and_future_version_is_refused() {
+        let locator =
+            include_bytes!("../../tests/fixtures/state/v0.75.0/commit-confirm/locator.json");
+        let metadata = include_bytes!(
+            "../../tests/fixtures/state/v0.75.0/commit-confirm/commit-confirm-v3-metadata.json"
+        );
+        let raw = include_str!(
+            "../../tests/fixtures/state/v0.75.0/commit-confirm/commit-confirm-v3-prior.toml"
+        );
+        let locator_wire = decode_locator(locator).unwrap();
+        let metadata_wire = decode_metadata(metadata).unwrap();
+        validate_linkage(&locator_wire, &metadata_wire).unwrap();
+        let target = path_from_wire(&locator_wire.config_target).unwrap();
+        assert_eq!(target, Path::new("/etc/rustbgpd/config.toml"));
+        assert_eq!(
+            path_from_wire(&locator_wire.metadata_path).unwrap(),
+            Path::new("/var/lib/rustbgpd").join(METADATA_FILE_NAME)
+        );
+        assert_eq!(metadata_wire.confirm_id, "released-state-fixture");
+        assert!(!metadata_wire.rollback_failed);
+        let recorded = FileIdentity {
+            device: metadata_wire.raw_device,
+            inode: metadata_wire.raw_inode,
+        };
+        validate_raw(raw.as_bytes(), recorded, &metadata_wire).unwrap();
+        let accepted = AcceptedConfigSnapshot::load_retained(raw, &target).unwrap();
+        verify_snapshot(&accepted, raw, &metadata_wire).unwrap();
+        assert_eq!(
+            accepted.config_ref().neighbors[0].description.as_deref(),
+            Some("released-state-fixture")
+        );
+
+        let future = |bytes: &[u8]| {
+            String::from_utf8(bytes.to_vec()).unwrap().replacen(
+                "{\"version\":3,",
+                "{\"version\":4,",
+                1,
+            )
+        };
+        let error = decode_locator(future(locator).as_bytes()).unwrap_err();
+        assert_eq!(error.to_string(), "locator is not canonical v3");
+        let error = decode_metadata(future(metadata).as_bytes()).unwrap_err();
+        assert_eq!(error.to_string(), "metadata is not canonical v3");
+    }
 }

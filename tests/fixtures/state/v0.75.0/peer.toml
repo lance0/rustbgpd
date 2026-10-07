@@ -1,0 +1,18 @@
+config_epoch = 1
+
+[global]
+asn = 65002
+router_id = "192.0.2.3"
+listen_port = 179
+listen_addresses = ["192.0.2.3"]
+runtime_state_dir = "/var/lib/rustbgpd"
+ebgp_requires_policy = false
+
+[global.telemetry]
+prometheus_addr = "127.0.0.1:9179"
+log_format = "json"
+
+[[neighbors]]
+address = "192.0.2.2"
+remote_asn = 65001
+families = ["ipv4_unicast"]

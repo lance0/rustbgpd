@@ -8145,6 +8145,37 @@ mod tests {
         );
     }
 
+    /// v0.75.0 wrote this marker together with its warm checkpoint; the
+    /// generation must survive decoding so it can bind that bundle.
+    #[test]
+    fn released_v075_gr_marker_keeps_warm_generation_and_refuses_version_4() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let bytes = include_str!("../tests/fixtures/state/v0.75.0/gr-restart.toml");
+        let (dir, store) = marker_store();
+        let path = dir.path().join(GR_RESTART_MARKER_FILE);
+        for (contents, accepted) in [
+            (bytes.to_string(), true),
+            (bytes.replacen("version = 3", "version = 4", 1), false),
+        ] {
+            std::fs::write(&path, &contents).unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+            let read = store.read();
+            if accepted {
+                let marker = read.unwrap().unwrap();
+                assert_eq!(marker.version, 3);
+                assert_eq!(
+                    marker.checkpoint_generation.as_deref(),
+                    Some("0a75aa2867384f0891a21a3bba339918")
+                );
+                assert!(marker.clock_domain.is_some());
+            } else {
+                assert!(read.unwrap_err().contains("unsupported marker version 4"));
+            }
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), contents);
+        }
+    }
+
     fn test_clock_sample(boottime_ms: u64) -> GrRestartClockSample {
         GrRestartClockSample {
             boot_id: "12345678-1234-4abc-8def-1234567890ab".to_string(),
