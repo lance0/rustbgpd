@@ -1,7 +1,7 @@
 //! Routes as inbound stores them must re-encode with exactly one next hop.
 //!
-//! Inbound keeps the received `NEXT_HOP` among an IPv4 unicast route's stored
-//! attributes, while `Route::next_hop` carries the effective (post-import-
+//! Inbound keeps a `NEXT_HOP` among an IPv4 unicast route's stored
+//! attributes, aligned with `Route::next_hop`, the effective (post-import-
 //! policy) next hop. The MRT dump, the warm checkpoint and the BMP Loc-RIB
 //! synthesizer emit the next hop from `Route::next_hop` and must not also
 //! emit the stored attribute.
@@ -125,9 +125,9 @@ async fn mrt_dump_of_a_received_ipv4_route_carries_one_next_hop() {
     );
 }
 
-/// Import `next-hop self` rewrites only `Route::next_hop`; the stored
-/// attribute keeps the received value. The dump records the post-policy
-/// next hop the RIB selected and installs with.
+/// An import next-hop rewrite reaches both `Route::next_hop` and the stored
+/// attribute. The dump records the post-policy next hop the RIB selected and
+/// installs with.
 #[tokio::test]
 async fn mrt_dump_records_the_post_policy_next_hop() {
     for (action, expected) in [
@@ -137,20 +137,16 @@ async fn mrt_dump_records_the_post_policy_next_hop() {
             IpAddr::V4(Ipv4Addr::new(192, 0, 2, 9)),
         ),
     ] {
-        let self_ = action == NextHopAction::Self_;
         let routes = stored_routes(Some(action)).await;
         assert_eq!(routes[0].next_hop, expected);
-        // `next-hop self` leaves the received attribute stored.
-        let stored = if self_ {
-            RECEIVED
-        } else {
-            Ipv4Addr::new(192, 0, 2, 9)
+        let IpAddr::V4(expected_v4) = expected else {
+            unreachable!("IPv4 next hops above")
         };
         assert!(
             routes[0]
                 .attributes
                 .iter()
-                .any(|attr| *attr == PathAttribute::NextHop(stored))
+                .any(|attr| *attr == PathAttribute::NextHop(expected_v4))
         );
         let snapshot = rustbgpd_mrt::codec::encode_snapshot(
             Ipv4Addr::new(10, 0, 0, 1),
