@@ -1292,8 +1292,10 @@ session's closed publication may be skipped. The response's
 `incomplete_peer_addresses` lists those addresses, sorted and unique; a
 nonempty list means partial, including when every selected session exited.
 New or replacement sessions published after selection are not substituted.
-Chainless sessions add neither a row nor an incomplete address. In `both`
-mode, complete export rows precede the retained import rows. The CLI prints
+Live chainless sessions add neither a row nor an incomplete address. Closed
+selected publications are reported in `incomplete_peer_addresses` regardless
+of whether their last installed policy had a chain. In `both` mode, complete
+export rows precede the retained import rows. The CLI prints
 `Partial import stats` and the missing addresses; JSON includes
 `incomplete_peer_addresses` only when nonempty.
 
