@@ -77,7 +77,7 @@ Look up commands, configuration, and compatibility boundaries.
 | [Limitations](reference/limitations.md) | Current product boundaries and unsupported behavior. |
 | [Known issues](reference/known-issues.md) | Known defects, workarounds, and operational caveats. |
 | [Stability and compatibility](reference/stability.md) | Daemon, library, adapter, and authorization contracts. |
-| [Narrow v1 contract](reference/v1-stable-contract.md) | The route-server and route-reflector compatibility promise. |
+| [Narrow v1 contract](reference/v1-stable-contract.md) | The route-server, route-reflector, and scoped FlowSpec controller compatibility promise. |
 | [Stable surface inventory](reference/v1-stable-surface.json) | Machine-readable inventory of the narrow v1 contract. |
 | [Format and version namespaces](reference/format-version-namespaces.md) | Independent versions for stored and exchanged formats. |
 | [RFC implementation notes](reference/rfc-notes.md) | Protocol interpretations and deviations. |
