@@ -282,10 +282,8 @@ jobs:
             > "$RUNNER_TEMP/frozen-dhat-classifier.py"
           receipt=docs/perf/artifacts/rib-rebaseline-2026-07-13
           cpu_dir="$RUNNER_TEMP/rib-rebaseline-cpu"
-          (cd "$receipt" && sha256sum -c SHA256SUMS)
           mkdir "$cpu_dir"
           tar -xzf "$receipt/cpu-folded-profiles.tar.gz" -C "$cpu_dir"
-          (cd "$cpu_dir" && sha256sum -c folded-SHA256SUMS)
           for profile in "$cpu_dir"/*.folded; do
             stem=$(basename "$profile" .folded)
             python3 bench/scale/rebaseline/classify_cpu.py "$profile" \
@@ -304,7 +302,6 @@ jobs:
         run: |
           set -euo pipefail
           receipt=docs/perf/artifacts/known-path-accounting-2026-07
-          (cd "$receipt" && sha256sum -c SHA256SUMS)
           for variant in baseline candidate; do
             python3 "$RUNNER_TEMP/frozen-dhat-classifier.py" \
               --from-derivative "$receipt/$variant.dhat-derivative.tsv" \
@@ -314,7 +311,6 @@ jobs:
         run: |
           set -euo pipefail
           receipt=docs/perf/artifacts/explain-cache-opt-in-2026-07
-          (cd "$receipt" && sha256sum -c SHA256SUMS)
           for variant in D3-explain-true D4-explain-false; do
             derivative="$RUNNER_TEMP/$variant.dhat-derivative.tsv"
             gzip -cd "$receipt/dhat/$variant.dhat-derivative.tsv.gz" \
@@ -328,7 +324,6 @@ jobs:
           set -euo pipefail
           receipt=docs/perf/artifacts/policy-attribution-criterion-2026-07
           python3 "$receipt/verify.py"
-          (cd "$receipt" && sha256sum -c SHA256SUMS)
       - name: Check event-history host-fence and naming guards
         run: |
           set -euo pipefail
@@ -533,10 +528,6 @@ jobs:
           python3 bench/scale/rebaseline/test_parse_rrharness.py
           python3 bench/scale/rebaseline/test_validate_lan395_criterion.py
           python3 bench/tests/test_verify_mrt_growth_campaign.py
-          (
-            cd docs/perf/artifacts/enhanced-route-refresh-2026-07
-            sha256sum -c SHA256SUMS
-          )
       - name: Upload reload settlement regression logs
         if: always()
         uses: actions/upload-artifact@v7

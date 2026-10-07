@@ -56,10 +56,10 @@ containerlab destroy -t tests/interop/m106-rs-white-list-control-differential.cl
 ```
 
 The driver carries the M90 driver's phases (render, start, inject,
-verdicts) as a copy — the M90 script is an immutable asset pinned by M104 —
-with community-carrying injection, explain checks on accept rows, and the
-export phase added; the topology is the M90 one under its own name, reusing
-the M90 GoBGP member configs. The offline half is
+verdicts) as a copy — the M90 script stays unchanged as the record of its
+dated receipt — with community-carrying injection, explain checks on accept
+rows, and the export phase added; the topology is the M90 one under its own
+name, reusing the M90 GoBGP member configs. The offline half is
 
 ```bash
 bash tests/interop/m106-rs-white-list-control-differential/prove-context-ingestion.sh

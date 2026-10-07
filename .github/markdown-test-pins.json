@@ -29,7 +29,6 @@
     "docs/reference/security.md": ["tests/birdwatcher_adapter_smoke.rs"],
     "docs/tutorials/quickstart.md": ["crates/cli/src/main.rs", "tests/quickstart_dynamic_neighbor.rs"],
     "examples/route-server/README.md": ["crates/cli/src/main.rs"],
-    "tests/interop/m90-differential/README.md": ["tests/interop_topology_commands.rs"],
     "tools/rs-config-render/README.md": ["tools/rs-config-render/tests/exit_codes.rs"]
   },
   "not_read": {

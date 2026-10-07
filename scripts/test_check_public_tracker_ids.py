@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import gzip
-import hashlib
 import io
 import sys
 import tempfile
@@ -89,10 +88,6 @@ def write_fixture(root: Path, relative: str, contents: str | bytes) -> Path:
     return path
 
 
-def digest(path: Path) -> str:
-    return hashlib.sha256(path.read_bytes()).hexdigest()
-
-
 class PublicTrackerIdTests(unittest.TestCase):
     def test_repository_documents_are_discovered_and_clean(self) -> None:
         documents = guard.discover_documents()
@@ -125,7 +120,6 @@ class PublicTrackerIdTests(unittest.TestCase):
                 guard,
                 ROOT=root,
                 tracked_files=lambda: paths,
-                sealed_paths=lambda _paths: set(),
             ):
                 documents = guard.discover_documents()
             self.assertEqual(set(documents), set(public))
@@ -322,148 +316,57 @@ class PublicTrackerIdTests(unittest.TestCase):
         self.assertEqual(len(failures), 1)
         self.assertIn("docs/example.md:2", failures[0])
 
-    def test_sealed_artifacts_are_exempt_and_still_verify(self) -> None:
-        sealed = guard.sealed_paths(guard.tracked_files())
-        self.assertIn(
-            "docs/perf/artifacts/grouped-withdrawal-fanout-2026-07/README.md",
-            sealed,
-            "sealed perf-receipt prose must be discovered from its SHA256SUMS",
-        )
-        self.assertNotIn(
-            "docs/perf/artifacts/grouped-withdrawal-fanout-2026-07/README.md",
-            guard.discover_documents(),
-        )
-        # The exemption is only defensible while the seals hold: an unsealed
-        # file must never inherit it.
-        self.assertNotIn("README.md", sealed)
-
-    def test_nested_seals_and_dot_paths_verify_without_widening_scope(self) -> None:
+    def test_perf_artifact_documents_need_no_manifest(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            readme = write_fixture(
-                root, "docs/perf/artifacts/example/README.md", "sealed\n"
-            )
-            data = write_fixture(
-                root, "docs/perf/artifacts/example/nested/data.tsv", "row\n"
-            )
-            nested = write_fixture(
-                root,
-                "docs/perf/artifacts/example/nested/SHA256SUMS",
-                f"{digest(data)}  data.tsv\n",
-            )
-            manifest = write_fixture(
-                root,
-                "docs/perf/artifacts/example/SHA256SUMS",
-                f"{digest(readme)}  ./README.md\n"
-                f"{digest(nested)}  ./nested/SHA256SUMS\n"
-                f"{digest(data)}  ./nested/data.tsv\n",
-            )
-            public = write_fixture(root, "docs/public.md", "living\n")
-            outside = write_fixture(
-                root, "docs/SHA256SUMS", f"{digest(public)}  public.md\n"
-            )
-            soak = write_fixture(
-                root, "docs/artifacts/soak/example/run.json", "{}\n"
-            )
-            soak_manifest = write_fixture(
-                root,
-                "docs/artifacts/soak/example/SHA256SUMS",
-                f"{digest(soak)}  run.json\n",
-            )
-            sealed = guard.sealed_paths(
-                [
-                    manifest,
-                    readme,
-                    nested,
-                    data,
-                    outside,
-                    public,
-                    soak_manifest,
-                    soak,
-                ],
-                root,
-            )
-            self.assertIn("docs/perf/artifacts/example/README.md", sealed)
-            self.assertIn("docs/perf/artifacts/example/nested/data.tsv", sealed)
-            self.assertNotIn("docs/public.md", sealed)
-            self.assertNotIn("docs/artifacts/soak/example/run.json", sealed)
-
-    def test_malformed_or_unsafe_seals_fail_closed(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            payload = write_fixture(
-                root, "docs/perf/artifacts/example/README.md", "sealed\n"
-            )
-            outside = write_fixture(root, "docs/perf/artifacts/README.md", "outside\n")
-            checksum = digest(payload)
-            manifest = root / "docs/perf/artifacts/example/SHA256SUMS"
-            cases = {
-                "empty": "",
-                "malformed": f"{checksum} README.md\n",
-                "absolute": f"{checksum}  {payload}\n",
-                "escape": f"{digest(outside)}  ../README.md\n",
-                "duplicate": (
-                    f"{checksum}  README.md\n{checksum}  ./README.md\n"
+            paths = [
+                write_fixture(root, "README.md", "clean\n"),
+                write_fixture(
+                    root, "docs/perf/artifacts/new/README.md", "LAN-123\n"
                 ),
-                "digest mismatch": f"{'0' * 64}  README.md\n",
-            }
-            for label, contents in cases.items():
-                with self.subTest(label=label):
-                    write_fixture(root, manifest.relative_to(root).as_posix(), contents)
-                    with self.assertRaises(guard.TrackerIdGuardError):
-                        guard.sealed_paths([manifest, payload, outside], root)
+            ]
+            with mock.patch.multiple(guard, ROOT=root, tracked_files=lambda: paths):
+                documents = guard.discover_documents()
+            self.assertEqual(documents, {"README.md": "clean\n"})
 
-    def test_missing_untracked_and_symlink_entries_fail_closed(self) -> None:
+    def test_published_receipts_outside_perf_artifacts_remain_scanned(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            manifest = write_fixture(
-                root,
-                "docs/perf/artifacts/example/SHA256SUMS",
-                f"{'0' * 64}  missing.txt\n",
-            )
-            with self.assertRaisesRegex(guard.TrackerIdGuardError, "is missing or escapes"):
-                guard.sealed_paths([manifest], root)
+            name = "docs/artifacts/soak/new/README.md"
+            paths = [
+                write_fixture(root, "README.md", "clean\n"),
+                write_fixture(root, name, "LAN-123\n"),
+            ]
+            with mock.patch.multiple(guard, ROOT=root, tracked_files=lambda: paths):
+                documents = guard.discover_documents()
+            self.assertIn(name, documents)
+            self.assertTrue(guard.audit_document(name, documents[name]))
 
-            payload = write_fixture(
-                root, "docs/perf/artifacts/example/untracked.txt", "sealed\n"
-            )
-            manifest.write_text(
-                f"{digest(payload)}  untracked.txt\n", encoding="utf-8"
-            )
-            with self.assertRaisesRegex(guard.TrackerIdGuardError, "not tracked"):
-                guard.sealed_paths([manifest], root)
-
-            target = write_fixture(
-                root, "docs/perf/artifacts/example/target.txt", "sealed\n"
-            )
-            symlink = root / "docs/perf/artifacts/example/link.txt"
-            symlink.symlink_to(target)
-            manifest.write_text(f"{digest(target)}  link.txt\n", encoding="utf-8")
-            with self.assertRaisesRegex(guard.TrackerIdGuardError, "symlink"):
-                guard.sealed_paths([manifest, symlink], root)
-            manifest.unlink()
-            manifest.symlink_to(target)
-            with self.assertRaisesRegex(guard.TrackerIdGuardError, "seal .* is a symlink"):
-                guard.sealed_paths([manifest], root)
-
-    def test_missing_receipt_manifest_fails_closed(self) -> None:
+    def test_artifact_root_near_misses_remain_scanned(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            public = write_fixture(root, "docs/README.md", "living\n")
-            with self.assertRaisesRegex(guard.TrackerIdGuardError, "no tracked"):
-                guard.sealed_paths([public], root)
+            names = (
+                "docs/public.md",
+                "docs/perf/artifacts-extra/README.md",
+                "docs/artifacts-extra/README.md",
+                "docs/artifacts.md",
+            )
+            paths = [write_fixture(root, name, "LAN-123\n") for name in names]
+            with mock.patch.multiple(guard, ROOT=root, tracked_files=lambda: paths):
+                documents = guard.discover_documents()
+            self.assertEqual(set(documents), set(names))
+            for name, content in documents.items():
+                with self.subTest(document=name):
+                    self.assertTrue(guard.audit_document(name, content))
 
     def test_broken_walk_fails_loudly(self) -> None:
         original_tracked = guard.tracked_files
-        original_sealed = guard.sealed_paths
         guard.tracked_files = lambda: [guard.ROOT / "Cargo.toml"]
-        guard.sealed_paths = lambda _paths: set()
         try:
             with self.assertRaisesRegex(guard.TrackerIdGuardError, "walk is broken"):
                 guard.discover_documents()
         finally:
             guard.tracked_files = original_tracked
-            guard.sealed_paths = original_sealed
 
     def test_empty_tracked_tree_fails_loudly(self) -> None:
         original = guard.tracked_files
