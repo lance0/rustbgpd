@@ -435,6 +435,21 @@ async fn later_page_abort_preserves_legacy_atomicity_and_leaves_stream_unfinishe
     }
 }
 
+/// Opt-in partial stats name the exited sessions in human output.
+#[tokio::test]
+async fn partial_policy_stats_text_names_exited_sessions() {
+    let server = test_support::spawn_mock_server(None).await;
+    let args = ["policy", "stats", "--direction", "both", "--allow-partial"];
+    let output = finish(start(&server.addr, &args)).await;
+    assert!(output.status.success(), "{output:?}");
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert_eq!(
+        stdout.lines().next(),
+        Some("Partial import stats — sessions exited: 192.0.2.1"),
+        "{stdout}"
+    );
+}
+
 #[tokio::test]
 async fn versioned_json_wraps_existing_documents() {
     let server = test_support::spawn_mock_server(None).await;
