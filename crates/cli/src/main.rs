@@ -1021,7 +1021,11 @@ enum PolicyAction {
     #[command(visible_alias = "counters")]
     Stats {
         /// Restrict to one neighbor's installed chain
-        #[arg(long = "neighbor", visible_alias = "peer")]
+        #[arg(
+            long = "neighbor",
+            visible_alias = "peer",
+            conflicts_with = "allow_partial"
+        )]
         neighbor: Option<String>,
         /// Direction: import, export, or both
         #[arg(long, value_parser = ["import", "export", "both"])]
@@ -6560,6 +6564,7 @@ printf '%s\n' "${COMPREPLY[@]}"
         let json = [("json", "json_lines"), ("json_lines", "json")];
         let chain = [("neighbor", "global"), ("global", "neighbor")];
         let gshut = [("neighbor", "all"), ("all", "neighbor")];
+        let stats = [("neighbor", "allow_partial"), ("allow_partial", "neighbor")];
         for (path, pairs) in [
             (vec![], json),
             (vec!["rib"], json),
@@ -6570,6 +6575,7 @@ printf '%s\n' "${COMPREPLY[@]}"
             (vec!["policy", "chain", "clear-import"], chain),
             (vec!["policy", "chain", "clear-export"], chain),
             (vec!["gshut"], gshut),
+            (vec!["policy", "stats"], stats),
         ] {
             let mut view = &command;
             for name in &path {

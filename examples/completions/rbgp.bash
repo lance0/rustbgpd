@@ -11450,7 +11450,7 @@ _rbgp() {
             return 0
             ;;
         rbgp__subcmd__policy__subcmd__stats)
-            opts="-s -j -h --peer --neighbor --direction --addr --token-file --tls-ca --tls-cert --tls-key --tls-server-name --json --json-version --no-color --help"
+            opts="-s -j -h --peer --neighbor --direction --allow-partial --addr --token-file --tls-ca --tls-cert --tls-key --tls-server-name --json --json-version --no-color --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
