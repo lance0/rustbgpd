@@ -1,0 +1,16 @@
+first_seen	first_seen_epoch	pid	exe	rjem_malloc_conf	bg_threads_max	threads_last	checks
+2026-10-08T09:31:16-0400	1791466276.998	1705922	trees/main/target/release/rustbgpd	-	0	11	3
+2026-10-08T09:38:56-0400	1791466736.003	1708609	trees/bgth/target/release/rustbgpd	background_thread:true	4	15	3
+2026-10-08T09:46:35-0400	1791467195.013	1711139	trees/bgth/target/release/rustbgpd	background_thread:true	4	15	3
+2026-10-08T09:54:14-0400	1791467654.073	1713491	trees/main/target/release/rustbgpd	-	0	11	3
+2026-10-08T10:01:52-0400	1791468112.095	1715819	trees/main/target/release/rustbgpd	-	0	11	3
+2026-10-08T10:09:31-0400	1791468571.180	1718267	trees/bgth/target/release/rustbgpd	background_thread:true	4	15	3
+2026-10-08T10:18:54-0400	1791469134.405	1729143	trees/main/target/release/rustbgpd	-	0	11	3
+2026-10-08T10:28:29-0400	1791469709.763	1743458	trees/bgth/target/release/rustbgpd	background_thread:true	4	15	3
+2026-10-08T10:36:45-0400	1791470205.188	1749582	trees/bgth/target/release/rustbgpd	background_thread:true	4	15	3
+2026-10-08T10:45:00-0400	1791470700.673	1755670	trees/main/target/release/rustbgpd	-	0	11	3
+2026-10-08T10:53:16-0400	1791471196.136	1761731	trees/main/target/release/rustbgpd	-	0	11	3
+2026-10-08T11:01:32-0400	1791471692.625	1767755	trees/bgth/target/release/rustbgpd	background_thread:true	4	15	3
+2026-10-08T11:09:24-0400	1791472164.865	1773676	trees/main/target/release/rustbgpd	-	0	6	3
+2026-10-08T11:19:56-0400	1791472796.199	1787321	trees/bgth/target/release/rustbgpd	background_thread:true	4	10	3
+2026-10-08T11:30:27-0400	1791473427.541	1801278	trees/bgth/target/release/rustbgpd	background_thread:true	4	10	3

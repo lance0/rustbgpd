@@ -1,0 +1,493 @@
+{
+  "base": "main",
+  "arm": "bgth",
+  "conf": "background_thread:true",
+  "verdict": "INVALID",
+  "better": [
+    "irr-ov0:daemon_sighup_to_complete",
+    "irr-ov0:completion_p50"
+  ],
+  "worse": [
+    "matrix-s2:daemon_cg_peak",
+    "irr-ov0:irr_daemon_cg_peak"
+  ],
+  "deadline_misses": {
+    "main": 0,
+    "bgth": 0
+  },
+  "binary_identity": {
+    "target/release/rustbgpd": "same layout; .rodata order differs",
+    "target/scale/reloadstall": "same layout; .rodata order differs"
+  },
+  "diff_files": [
+    "bench/scale/cgroup-memory.sh",
+    "bench/scale/reloadstall/policy_stats_cell.sh"
+  ],
+  "problems": [
+    "policy-stats bgth-r1: no read:in_band_external_p50_ms value",
+    "policy-stats bgth-r1: no read:in_band_external_max_ms value",
+    "policy-stats bgth-r1: no read:in_band_stage_sum_max_ms value",
+    "policy-stats main-r1: no read:in_band_external_p50_ms value",
+    "policy-stats main-r1: no read:in_band_external_max_ms value",
+    "policy-stats main-r1: no read:in_band_stage_sum_max_ms value"
+  ],
+  "primary": [
+    {
+      "metric": "matrix-s2:daemon_sighup_to_complete",
+      "kind": "clock",
+      "main": [
+        662.55,
+        743.15,
+        748.15
+      ],
+      "bgth": [
+        677.7,
+        704.0999999999999,
+        755.5
+      ],
+      "median_delta": -39.05000000000007,
+      "result": "no difference"
+    },
+    {
+      "metric": "matrix-s2:reload_completion_p50",
+      "kind": "clock",
+      "main": [
+        0.69,
+        0.765,
+        0.77
+      ],
+      "bgth": [
+        0.71,
+        0.73,
+        0.775
+      ],
+      "median_delta": -0.03500000000000003,
+      "result": "no difference"
+    },
+    {
+      "metric": "irr-ov0:daemon_sighup_to_complete",
+      "kind": "clock",
+      "main": [
+        555.95,
+        559.1,
+        568.3499999999999
+      ],
+      "bgth": [
+        522.35,
+        529.1500000000001,
+        540.8499999999999
+      ],
+      "median_delta": -29.949999999999932,
+      "result": "better"
+    },
+    {
+      "metric": "irr-ov0:completion_p50",
+      "kind": "clock",
+      "main": [
+        0.573672,
+        0.5760535,
+        0.581616
+      ],
+      "bgth": [
+        0.5508225,
+        0.5587205,
+        0.562564
+      ],
+      "median_delta": -0.017333000000000043,
+      "result": "better"
+    },
+    {
+      "metric": "matrix-s2:daemon_cg_peak",
+      "kind": "memory",
+      "main": [
+        1018380.0,
+        1037216.0,
+        1052440.0
+      ],
+      "bgth": [
+        1069696.0,
+        1218476.0,
+        1251212.0
+      ],
+      "median_delta": 181260.0,
+      "result": "worse"
+    },
+    {
+      "metric": "irr-ov0:irr_daemon_cg_peak",
+      "kind": "memory",
+      "main": [
+        756700.0,
+        759020.0,
+        759620.0
+      ],
+      "bgth": [
+        846888.0,
+        854560.0,
+        881244.0
+      ],
+      "median_delta": 95540.0,
+      "result": "worse"
+    },
+    {
+      "metric": "matrix-s2:settled_rss_last_sample",
+      "kind": "memory",
+      "main": [
+        375352.0,
+        376428.0,
+        379096.0
+      ],
+      "bgth": [
+        379692.0,
+        379992.0,
+        384632.0
+      ],
+      "median_delta": 3564.0,
+      "result": "no difference"
+    },
+    {
+      "metric": "read:in_band_external_p50_ms",
+      "kind": "read",
+      "main": [],
+      "bgth": [],
+      "result": "insufficient"
+    },
+    {
+      "metric": "read:in_band_external_max_ms",
+      "kind": "read",
+      "main": [],
+      "bgth": [],
+      "result": "insufficient"
+    },
+    {
+      "metric": "read:in_band_stage_sum_max_ms",
+      "kind": "read",
+      "main": [],
+      "bgth": [],
+      "result": "insufficient"
+    }
+  ],
+  "secondary": [
+    {
+      "metric": "matrix-s2:peak_rss_sample",
+      "kind": "memory",
+      "main": [
+        488008.0,
+        534864.0,
+        543568.0
+      ],
+      "bgth": [
+        630356.0,
+        632920.0,
+        633296.0
+      ],
+      "median_delta": 98056.0,
+      "result": "worse"
+    },
+    {
+      "metric": "matrix-s2:daemon_vmhwm",
+      "kind": "memory",
+      "main": [
+        563044.0,
+        569232.0,
+        570136.0
+      ],
+      "bgth": [
+        615484.0,
+        619660.0,
+        622352.0
+      ],
+      "median_delta": 50428.0,
+      "result": "no difference"
+    },
+    {
+      "metric": "irr-ov0:peak_rss_sample",
+      "kind": "memory",
+      "main": [
+        641824.0,
+        651428.0,
+        657736.0
+      ],
+      "bgth": [
+        800248.0,
+        806480.0,
+        808872.0
+      ],
+      "median_delta": 155052.0,
+      "result": "worse"
+    },
+    {
+      "metric": "irr-ov0:daemon_vmhwm",
+      "kind": "memory",
+      "main": [
+        759004.0,
+        761700.0,
+        762524.0
+      ],
+      "bgth": [
+        792396.0,
+        796004.0,
+        800680.0
+      ],
+      "median_delta": 34304.0,
+      "result": "no difference"
+    },
+    {
+      "metric": "matrix-s2:settled_cg_current_last_sample",
+      "kind": "memory",
+      "main": [
+        370540.0,
+        371708.0,
+        375464.0
+      ],
+      "bgth": [
+        374612.0,
+        375528.0,
+        380756.0
+      ],
+      "median_delta": 3820.0,
+      "result": "no difference"
+    },
+    {
+      "metric": "matrix-s2:daemon_rib_transition",
+      "kind": "clock",
+      "main": [
+        65.7,
+        72.15,
+        80.15
+      ],
+      "bgth": [
+        63.650000000000006,
+        64.4,
+        67.1
+      ],
+      "median_delta": -7.75,
+      "result": "no difference"
+    },
+    {
+      "metric": "irr-ov0:daemon_rib_transition",
+      "kind": "clock",
+      "main": [
+        361.9,
+        362.75,
+        374.45
+      ],
+      "bgth": [
+        337.95,
+        350.35,
+        351.05
+      ],
+      "median_delta": -12.399999999999977,
+      "result": "better"
+    },
+    {
+      "metric": "matrix-s2:reload_changed_maxgap_p50",
+      "kind": "clock",
+      "main": [
+        83.53999999999999,
+        88.825,
+        105.115
+      ],
+      "bgth": [
+        103.07,
+        107.485,
+        116.94
+      ],
+      "median_delta": 18.659999999999997,
+      "result": "no difference"
+    },
+    {
+      "metric": "irr-ov0:changed_maxgap_p50",
+      "kind": "clock",
+      "main": [
+        372.6825,
+        375.43499999999995,
+        387.88
+      ],
+      "bgth": [
+        353.985,
+        357.7025,
+        366.2175
+      ],
+      "median_delta": -17.73249999999996,
+      "result": "better"
+    },
+    {
+      "metric": "read:quiescent_external_p50_ms",
+      "kind": "read",
+      "main": [
+        11.969916056841612
+      ],
+      "bgth": [
+        11.918663047254086
+      ],
+      "result": "insufficient"
+    },
+    {
+      "metric": "read:sighup_to_complete_p50_ms",
+      "kind": "clock",
+      "main": [
+        668.4339046478271
+      ],
+      "bgth": [
+        662.9819869995117
+      ],
+      "result": "insufficient"
+    }
+  ],
+  "allocator_verification": {
+    "matrix-main-r1-s2": {
+      "arm": "main",
+      "daemons_checked": 1,
+      "ok": true,
+      "observed": [
+        [
+          "-",
+          0
+        ]
+      ]
+    },
+    "matrix-bgth-r1-s2": {
+      "arm": "bgth",
+      "daemons_checked": 1,
+      "ok": true,
+      "observed": [
+        [
+          "background_thread:true",
+          4
+        ]
+      ]
+    },
+    "matrix-bgth-r2-s2": {
+      "arm": "bgth",
+      "daemons_checked": 1,
+      "ok": true,
+      "observed": [
+        [
+          "background_thread:true",
+          4
+        ]
+      ]
+    },
+    "matrix-main-r2-s2": {
+      "arm": "main",
+      "daemons_checked": 1,
+      "ok": true,
+      "observed": [
+        [
+          "-",
+          0
+        ]
+      ]
+    },
+    "matrix-main-r3-s2": {
+      "arm": "main",
+      "daemons_checked": 1,
+      "ok": true,
+      "observed": [
+        [
+          "-",
+          0
+        ]
+      ]
+    },
+    "matrix-bgth-r3-s2": {
+      "arm": "bgth",
+      "daemons_checked": 1,
+      "ok": true,
+      "observed": [
+        [
+          "background_thread:true",
+          4
+        ]
+      ]
+    },
+    "irr-ov0-main-r1": {
+      "arm": "main",
+      "daemons_checked": 1,
+      "ok": true,
+      "observed": [
+        [
+          "-",
+          0
+        ]
+      ]
+    },
+    "irr-ov0-bgth-r1": {
+      "arm": "bgth",
+      "daemons_checked": 1,
+      "ok": true,
+      "observed": [
+        [
+          "background_thread:true",
+          4
+        ]
+      ]
+    },
+    "irr-ov0-bgth-r2": {
+      "arm": "bgth",
+      "daemons_checked": 1,
+      "ok": true,
+      "observed": [
+        [
+          "background_thread:true",
+          4
+        ]
+      ]
+    },
+    "irr-ov0-main-r2": {
+      "arm": "main",
+      "daemons_checked": 1,
+      "ok": true,
+      "observed": [
+        [
+          "-",
+          0
+        ]
+      ]
+    },
+    "irr-ov0-main-r3": {
+      "arm": "main",
+      "daemons_checked": 1,
+      "ok": true,
+      "observed": [
+        [
+          "-",
+          0
+        ]
+      ]
+    },
+    "irr-ov0-bgth-r3": {
+      "arm": "bgth",
+      "daemons_checked": 1,
+      "ok": true,
+      "observed": [
+        [
+          "background_thread:true",
+          4
+        ]
+      ]
+    },
+    "policy-main-r1": {
+      "arm": "main",
+      "daemons_checked": 1,
+      "ok": true,
+      "observed": [
+        [
+          "-",
+          0
+        ]
+      ]
+    },
+    "policy-bgth-r1": {
+      "arm": "bgth",
+      "daemons_checked": 1,
+      "ok": true,
+      "observed": [
+        [
+          "background_thread:true",
+          4
+        ]
+      ]
+    }
+  }
+}

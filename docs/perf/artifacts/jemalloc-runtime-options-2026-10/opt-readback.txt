@@ -1,0 +1,15 @@
+== no env
+rustbgpd 0.75.0
+  opt.metadata_thp: "disabled"
+  opt.background_thread: false (background_thread: false)
+== background_thread:true
+rustbgpd 0.75.0
+  Environment variable MALLOC_CONF: "background_thread:true,stats_print:true"
+  opt.metadata_thp: "disabled"
+  opt.background_thread: true (background_thread: true)
+background_thread                   5       0               0       0               0       0               1       0               0         0               0           0
+== +metadata_thp:auto
+  opt.metadata_thp: "auto"
+  opt.background_thread: true (background_thread: true)
+== plain MALLOC_CONF (must be ignored)
+0

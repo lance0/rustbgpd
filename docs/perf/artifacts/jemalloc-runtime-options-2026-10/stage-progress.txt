@@ -1,0 +1,8 @@
+[2026-10-08T09:17:17-04:00] stage start label=bgth ref=local arm commit conf=background_thread:true base=f15804bc408273095c963a64f92e500b93af7d5c smoke=0 runs=3 ps_runs=3
+[2026-10-08T11:08:53-04:00] headline rc=0
+[2026-10-08T11:09:23-04:00] policy-main-r1 start load=1.17 1.21 1.25
+[2026-10-08T11:18:25-04:00] policy-main-r1 rc=1 load=3.23 2.96 2.14
+[2026-10-08T11:19:55-04:00] policy-bgth-r1 start load=1.52 2.46 2.04
+[2026-10-08T11:28:57-04:00] policy-bgth-r1 rc=1 load=3.24 3.10 2.55
+[2026-10-08T11:30:27-04:00] policy-bgth-r2 start load=1.52 2.57 2.41
+[2026-10-08T11:34:55-04:00] stopped deliberately after policy-main-r1 and policy-bgth-r1 had 0 in-band pairs; policy-bgth-r2 terminated mid-run (cell.exit 143); runs r2-r3 not run; no retries
