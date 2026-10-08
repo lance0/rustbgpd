@@ -160,6 +160,7 @@ states that the whole decision is Superseded.
 | [0134](0134-reload-monitoring-and-validation-endpoints.md) | Reload-apply BMP collectors, RPKI cache endpoints, and MRT dumps | Proposed | 2026-09-15 | Unstated |
 | [0135](0135-flowspec-feasibility.md) | Opt-in FlowSpec cross-RIB feasibility validation | Accepted | 2026-09-20 | Active |
 | [0136](0136-owner-published-counter-reads.md) | Owner-published counter reads | Accepted | 2026-09-25 | Active |
+| [0137](0137-conditional-advertisement.md) | Conditional advertisement | Accepted | 2026-10-07 | Active |
 
 ## Supporting records
 
