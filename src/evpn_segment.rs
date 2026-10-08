@@ -236,7 +236,10 @@ pub fn spawn(
     metrics: BgpMetrics,
     daemon_shutdown: CancellationToken,
 ) -> Option<EvpnSegmentHandle> {
-    spawn_with_local_bias(
+    if segments.is_empty() {
+        return None;
+    }
+    Some(spawn_with_local_bias(
         instances,
         segments,
         rib_tx,
@@ -245,7 +248,7 @@ pub fn spawn(
         None,
         metrics,
         daemon_shutdown,
-    )
+    ))
 }
 
 /// [`spawn`] plus the ADR-0085 decision 5 inputs: the same-ESI
@@ -254,7 +257,8 @@ pub fn spawn(
 /// `[[ethernet_segments]]` interface-binding watch (the "locally
 /// attached" half of the eligibility condition). Either may be absent
 /// — no dataplane / no binding feed — in which case no bias snapshot
-/// is published / no segment counts as bound.
+/// is published / no segment counts as bound. Spawns even with no
+/// segments, for `auto-lacp` segments that are not yet Ready.
 #[must_use = "drop the handle to shut down the EVPN segment orchestrator"]
 #[expect(
     clippy::too_many_arguments,
@@ -269,11 +273,7 @@ pub(crate) fn spawn_with_local_bias(
     es_link_bindings_rx: Option<watch::Receiver<EsLinkBindings>>,
     metrics: BgpMetrics,
     daemon_shutdown: CancellationToken,
-) -> Option<EvpnSegmentHandle> {
-    if segments.is_empty() {
-        info!("no [[ethernet_segments]] configured — EVPN segment orchestrator not spawned");
-        return None;
-    }
+) -> EvpnSegmentHandle {
     let (segments_tx, segments_rx) = watch::channel(Arc::new(segments));
     let (instances_tx, instances_rx) = watch::channel(instances.clone());
     // Drain state is runtime-only and in-memory (ADR-0084): the set
@@ -300,14 +300,14 @@ pub(crate) fn spawn_with_local_bias(
         es_link_bindings_rx,
         df_status_tx,
     ));
-    Some(EvpnSegmentHandle {
+    EvpnSegmentHandle {
         shutdown: daemon_shutdown,
         join,
         instances_tx,
         segments_tx,
         drained_esis_tx,
         df_status_rx,
-    })
+    }
 }
 
 struct SegmentRuntime {
@@ -3997,8 +3997,7 @@ mod tests {
             Some(bindings_rx),
             BgpMetrics::new(),
             CancellationToken::new(),
-        )
-        .expect("non-empty ES config should spawn segment actor");
+        );
 
         // Startup: sole candidate → DF everywhere → bias-eligible and
         // the AC gate forwarding.

@@ -43,10 +43,12 @@ use crate::EvpnInstanceId;
 ///
 /// Identifies a set of CE-facing links that this PE shares with one
 /// or more other PEs. The ESI is a 10-byte value the operator
-/// supplies literally — auto-derivation from LACP / STP is a
-/// config-time helper deferred past Gate 8 (the wire format already
-/// supports types 1 / 2; the daemon just doesn't fill them in
-/// automatically yet).
+/// supplies literally, or (opt-in, `esi = "auto-lacp"`) a type 1 ESI
+/// the daemon derives from the bond's LACP partner via
+/// [`lacp_type1_esi`]. Type 2 (STP) is not derived: RFC 7432 §5 takes
+/// it from the MSTP IST root learned from BPDUs on the segment, which
+/// the Linux bridge does not expose (its kernel STP is 802.1D and
+/// reports a root only when the PE itself participates).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EthernetSegment {
     /// 10-byte ESI per RFC 7432 §5.
@@ -80,6 +82,27 @@ pub struct EthernetSegment {
     /// but kept separable so a future multi-loopback design (e.g.,
     /// per-fabric-VRF originator IPs) doesn't have to refactor.
     pub originator_ip: IpAddr,
+}
+
+/// Build the RFC 7432 §5 type 1 (LACP) ESI.
+///
+/// RFC 7432 §5, Type 1: "CE LACP System MAC address (6 octets) ...
+/// MUST be encoded in the high-order 6 octets of the ESI Value field",
+/// "CE LACP Port Key (2 octets) ... MUST be encoded in the 2 octets
+/// next to the System MAC address", and "The remaining octet will be
+/// set to 0x00". Both values are the **CE's** — the LACP partner as
+/// seen from the PE — so every PE bundled with that CE derives the
+/// same ESI.
+#[must_use]
+pub fn lacp_type1_esi(
+    partner_system_mac: [u8; 6],
+    partner_port_key: u16,
+) -> EthernetSegmentIdentifier {
+    let mut octets = [0u8; 10];
+    octets[0] = 0x01;
+    octets[1..7].copy_from_slice(&partner_system_mac);
+    octets[7..9].copy_from_slice(&partner_port_key.to_be_bytes());
+    EthernetSegmentIdentifier::new(octets)
 }
 
 /// Ethernet Segment redundancy mode (RFC 7432 §14.1).
@@ -194,6 +217,18 @@ impl DfRole {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn lacp_type1_esi_layout_matches_rfc7432_section5() {
+        // Type 0x01, CE system MAC in octets 1..=6, CE port key
+        // big-endian in octets 7..=8, final octet 0x00.
+        let esi = lacp_type1_esi([0x02, 0x11, 0x22, 0x33, 0x44, 0x55], 0x01c1);
+        assert_eq!(
+            esi.octets(),
+            [0x01, 0x02, 0x11, 0x22, 0x33, 0x44, 0x55, 0x01, 0xc1, 0x00]
+        );
+        assert_eq!(esi.esi_type(), 1);
+    }
 
     #[test]
     fn algorithm_id_roundtrips() {

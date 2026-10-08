@@ -555,10 +555,9 @@ gobmp/pmacct already terminate it into Kafka), and BGPsec.
   breadth, not feature scope.
 - **EVPN standards tail.** The current VXLAN/Linux EVPN lane is broad but
   intentionally bounded. Native RFC 9136 GW-IP and ESI overlay-index Type 5
-  origination now ship, and the single-active ESI overlay-index receive path
-  now has a real-peer interop proof (M71, GoBGP route source); near-term
-  standards work is broader protected-recursion interop, especially the
-  all-active ESI path; demand-shaped
+  origination now ship, and both the single-active and all-active ESI
+  overlay-index receive paths have real-peer interop proofs (M71 and M72,
+  GoBGP route source); demand-shaped
   VXLAN operability includes VLAN-aware bridge support and rustbgpd-managed
   bridge / VXLAN / VLAN upper / VRF netdev creation. **ADR-0088 records that boundary:**
   VLAN-aware bridges require an explicit EVPN-to-Linux binding, and managed

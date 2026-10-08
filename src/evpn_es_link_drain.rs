@@ -948,8 +948,7 @@ mod tests {
             Some(bindings_tx.subscribe()),
             BgpMetrics::new(),
             CancellationToken::new(),
-        )
-        .expect("segment actor spawns for non-empty ES config");
+        );
 
         let drain_state = EvpnEsDrainState::default();
         let shutdown = CancellationToken::new();
