@@ -809,7 +809,8 @@ Interpretation decisions:
 - Segment types: AS_SEQUENCE (2), AS_SET (1).
 - Empty segments (count=0) are malformed AS_PATH (subcode 11); the inbound
   decoder applies RFC 7606 treat-as-withdraw and the session stays
-  Established.
+  Established, unless the UPDATE encodes no reachable NLRI, in which case
+  RFC 7606 §5.2 escalates to a session reset.
 - 4-byte ASN encoding used when `four_octet_as` capability is negotiated.
 
 ### §5.1.3 — NEXT_HOP Attribute
@@ -817,7 +818,8 @@ Interpretation decisions:
 - 4 bytes decoded as IPv4 address.
 - Validated: 0.0.0.0, 127.0.0.0/8, 224.0.0.0/4, 255.255.255.255 are
   Invalid NEXT_HOP Attribute (3, 8) and are treat-as-withdraw under
-  RFC 7606; the session stays Established.
+  RFC 7606; the session stays Established unless the UPDATE encodes no
+  reachable NLRI, which RFC 7606 §5.2 escalates to a session reset.
 - Mandatory for eBGP with NLRI. Not required for iBGP (may be omitted
   or set by the transport layer).
 
@@ -928,9 +930,11 @@ not add a neighbor-discovery monitor or make stale next hops reachable.
   Route Target prefix. Matching compares only the Route Target bits after
   the origin AS (§4, §6): the origin AS identifies the source of the
   membership, not the Route Target's global administrator.
-- A membership of length 32 or less carries no Route Target bits and covers
-  every Route Target, as does the zero-length default membership. A longer
-  partial prefix compares every covered bit.
+- Valid lengths are 0 and 32–96. The zero-length default membership covers
+  every Route Target; a /32 membership carries the origin AS but no Route
+  Target bits, so it also covers every Route Target. A longer partial prefix
+  compares every covered Route Target bit. Lengths 1–31 cannot cover the
+  origin-AS field and are rejected as malformed on decode.
 - Only Route Target extended communities match. Route Origin and other
   extended communities never match, even against the default membership.
 - The outbound RT membership gate applies this to VPN and EVPN advertisements
