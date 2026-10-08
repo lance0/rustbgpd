@@ -146,6 +146,7 @@ log_format = "json"
                         per_client_best: false,
                         orr_vantage: None,
                         orf_installed: false,
+                        conditional_advertisement: false,
                     },
                     classification: rustbgpd_rib::UpdateGroupClassification::Groupable(
                         rustbgpd_rib::UpdateGroupFingerprint {
@@ -693,6 +694,7 @@ route_server_client = true
         interpret_rfc1997: neighbor.transport_config.interpret_rfc1997,
         orr_vantage: neighbor.transport_config.orr_vantage,
         orf_installed: false,
+        conditional_advertisement: false,
     };
     let live_classification = rustbgpd_rib::classify_update_group(live_input.clone());
     let mut candidate = current.clone();
@@ -846,6 +848,7 @@ export_policy_chain = ["dataset-export"]
         interpret_rfc1997: neighbor.transport_config.interpret_rfc1997,
         orr_vantage: neighbor.transport_config.orr_vantage,
         orf_installed: false,
+        conditional_advertisement: false,
     };
     let live_classification = rustbgpd_rib::classify_update_group(live_input.clone());
     let (tx, rx) = mpsc::channel(4);

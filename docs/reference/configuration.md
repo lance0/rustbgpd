@@ -992,12 +992,12 @@ complete atomic block. There is no probe or automatic legacy fallback.
 | `discard_path_attributes` | [u8] | no | `[]` | Route-server-client-only inbound attribute filter. Canonicalized by numeric type code; a neighbor `[]` clears an inherited group list. See [Inbound path-attribute discard](#inbound-path-attribute-discard) |
 | `route_reflector_client` | bool   | no       | false   | Mark this iBGP peer as a route reflector client (RFC 4456) |
 | `orr_vantage`          | string   | no       | --      | RFC 9107 Optimal Route Reflection IGP location: either an IP identifying a node in the BGP-LS-sourced topology, or the literal `"peer_address"` (alias `"peer-address"`) meaning this peer's own peering address — on a `[[dynamic_neighbors]]` peer group that gives every accepted peer its own vantage. This client's best paths use the interior-cost tiebreak from that node's SPF. Requires `route_reflector_client = true` + iBGP; inherits from the peer-group; an unresolved vantage falls back silently to the standard best (see `rbgp orr`). ADR-0095 |
-| `local_ipv6_nexthop`   | string   | no       | --      | Override IPv6 next-hop for eBGP exports (must be valid non-link-local IPv6) |
+| `local_ipv6_nexthop`   | string   | no       | --      | Override IPv6 next-hop for eBGP exports (must be valid non-link-local IPv6); also the import `next-hop self` address for IPv6 routes on a session over IPv4 transport |
 | `import_policy_chain`  | [string] | no       | --      | Named policy chain for import (mutually exclusive with inline import_policy) |
 | `export_policy_chain`  | [string] | no       | --      | Named policy chain for export (mutually exclusive with inline export_policy) |
 | `import_policy`        | [table]  | no       | --      | Inline import policy statements (`[[neighbors.import_policy]]`, see [Policy entries](#policy-entries)); mutually exclusive with `import_policy_chain` |
 | `export_policy`        | [table]  | no       | --      | Inline export policy statements (`[[neighbors.export_policy]]`, see [Policy entries](#policy-entries)); mutually exclusive with `export_policy_chain` |
-| `conditional_advertisements` | [string] | no | `[]` | Names of [conditional advertisement](#conditional-advertisements-refused-until-enforced) definitions attached to this static neighbor. Currently refused until export enforcement ships |
+| `conditional_advertisements` | [string] | no | `[]` | Names of [conditional advertisement](#conditional-advertisements) definitions attached to this static neighbor |
 | `llgr_stale_time`      | u32      | no       | 0       | LLGR stale time in seconds (0 = disabled, max 16777215; RFC 9494)    |
 | `add_path`             | table    | no       | --      | Add-Path (RFC 7911) config table (see below)                         |
 | `log_level`            | string   | no       | --      | Override log level for this peer: `"error"`, `"warn"`, `"info"`, `"debug"`, or `"trace"` |
@@ -2407,6 +2407,7 @@ A peer falls back to the plain per-peer path (with identical semantics
 | `per_client_best` | RFC 7947 §2.3.2 per-client best-path on a session that also negotiates VPNv4/VPNv6 or RT-Constrain (unicast-only per-client-best sessions with shareable chains group instead, ADR-0126) |
 | `orr_vantage` | The peer is bound to an ORR vantage (per-vantage bests, ADR-0095) |
 | `orf_installed` | The peer negotiated ORF-receive (peer-pushed outbound filters) |
+| `conditional_advertisement` | The neighbor has [conditional advertisements](#conditional-advertisements) attached (gate state is per definition) |
 | `slow_peer` | Slow-peer isolation moved the peer onto its own path; it can rejoin a group after the backlog clears |
 
 RT-Constrain negotiation is deliberately **not** in this table: since
@@ -2832,17 +2833,13 @@ recovery of routes previously rejected at import depends on negotiated Route
 Refresh; otherwise, those routes wait for natural re-advertisement or a new
 session's replay.
 
-### Conditional advertisements (refused until enforced)
+### Conditional advertisements
 
 Conditional advertisement (ADR-0137) advertises a set of routes to a
 neighbor only while a condition route is present, or only while it is
-absent. **The daemon currently refuses these keys until export
-enforcement ships.** It validates the configuration below, reports any
-specific error, and then refuses an otherwise valid config that defines or
-attaches a conditional advertisement, at startup, `--check`, SIGHUP, and
-config transactions alike. The schema is documented here so the
-configuration can be prepared and checked against the release that
-enforces it.
+absent. The usual case is a backup edge: announce a backup aggregate to one
+upstream only while the primary upstream's default route is gone. It covers
+IPv4 and IPv6 unicast and is an alpha feature outside the v1 inventory.
 
 Definitions live under `[policy.conditional_advertisements.<name>]` and are
 attached to static neighbors by name:
@@ -2872,9 +2869,61 @@ conditional_advertisements = ["backup-via-transit-b"]
 Each referenced policy must exist, and a neighbor may attach each
 definition once; either mistake is a load error. `DeletePolicy` refuses to
 delete a policy that a definition references. Peer groups and dynamic
-neighbors do not accept attachments. Definition and attachment edits apply
-through the SIGHUP generation route; see the
-[reload matrix](reload-matrix.md).
+neighbors do not accept attachments.
+
+**The condition.** It is present when any current candidate for an exact
+`condition_prefixes` entry satisfies `condition_policy` (or exists, when no
+`condition_policy` is set). Candidates are import-accepted routes in any
+peer's Adj-RIB-In, including stale and losing Add-Path paths, plus locally
+injected routes; the candidate need not be the best path.
+`condition_policy` sees the candidate's source peer address, ASN, and peer
+group; an injected route has none of them, so match route type `local` to
+select it. A `condition_policy` evaluation error makes the condition
+`unknown`, which holds the applied state.
+
+**Timing.** A changed condition applies once it has stayed unchanged for
+`settle_time`; a shorter blip changes nothing. At startup every definition
+is pending, which suppresses its routes, until its first observation has
+settled (and RFC 4724 selection deferral, when active, has released). With
+`advertise_if = "absent"`, backup routes are therefore announced
+`settle_time` after startup if the primary condition has not arrived.
+
+**The gate.** For an attached neighbor, each candidate route that reaches
+the export chain is first checked against every attached definition that is
+not advertising. A definition's `advertise_policy` permit suppresses the
+route; an evaluation error also suppresses it (fail closed); only a clean
+reject lets the route continue to the neighbor's export chain, which still
+applies its modifications. Earlier export checks (split horizon, route
+reflection, family, LLGR, ORF, RFC 1997, route-server control) keep their
+order and their first denial. Suppression is a silent withdraw: it is not an
+export-policy denial and does not appear in policy counters. Under Add-Path
+each path is checked separately; with `per_client_best` the next ranked
+candidate is advertised. A change of applied state re-evaluates the attached
+neighbors' Adj-RIB-Out through the ordinary resync. Attached neighbors leave
+update-group sharing; `rbgp neighbor` shows the reason
+`conditional_advertisement`.
+
+**Explain.** `rbgp rib --prefix P advertised PEER --explain` reports a
+`conditional_advertisement` step just before the export policy, with code
+`conditional_advertisement_suppressed` (naming the definition, condition
+prefix, and state) or `conditional_advertisement_eval_error` (naming the
+failing policy and term).
+
+**Reload.** Definition and attachment edits apply through the SIGHUP
+generation route and policy edits (`SetPolicy`, `.rpol` reload); see the
+[reload matrix](reload-matrix.md). A definition whose content is unchanged
+keeps its state; a new or changed definition is evaluated immediately
+against the current RIB. A failed generation restores the previous
+definitions with their applied state and settle deadlines. A dataset swap
+read by an `advertise_policy` re-evaluates the attached neighbors' exports;
+one read by a `condition_policy` re-observes the condition under
+`settle_time`.
+
+Differences from FRR's `advertise-map`: conditions are event-driven rather
+than scanned every 60 seconds; the advertise policy only filters, so the
+neighbor's export chain always applies and the advertise policy's set
+actions never do; and startup waits for `settle_time` instead of advertising
+immediately.
 
 ### `.rpol` policy files (`rpol_files`, ADR-0096)
 
@@ -3189,6 +3238,17 @@ These fields modify matching routes. Only valid with `action = "permit"`.
 | `set_community_add`    | [string]    | Communities to add (standard, EC, or LC format)    |
 | `set_community_remove` | [string]    | Communities to remove                              |
 | `set_as_path_prepend`  | table       | `{ asn = 65001, count = 3 }` (ASN 1–4294967295, count 1–10) |
+
+`set_next_hop` follows the route's address family. An IPv6 address on an IPv4
+unicast route is an RFC 8950 next hop. An IPv4 address does not apply to an
+IPv6 unicast route, whose `MP_REACH_NLRI` next hop must be IPv6
+(RFC 2545 §3); the route keeps its next hop, as with FRR's `set ip next-hop`.
+On import, `"self"` for an IPv6 route resolves to the session's local IPv6
+address, else `local_ipv6_nexthop`; with neither (IPv4 transport and no
+`local_ipv6_nexthop`) the route keeps its received next hop. Export never
+encodes an IPv4 next hop for an IPv6 route: such a route is withheld from that
+peer and counted in
+`bgp_exact_export_rejections_total{reason="missing_ipv6_next_hop"}`.
 
 ### Community formats
 

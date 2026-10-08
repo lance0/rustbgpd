@@ -854,6 +854,7 @@ async fn policy_deny_gate_reports_the_deciding_chain_member() {
             "family",
             "llgr",
             "orf",
+            "conditional_advertisement",
             "export_policy"
         ]
     );

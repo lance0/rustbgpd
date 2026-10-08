@@ -1748,6 +1748,7 @@ impl RibManager {
         let target_is_rr_client = self.peer_is_rr_client.get(&peer).copied().unwrap_or(false);
         let peer_asn = self.peer_asn.get(&peer).copied();
         let peer_group = self.peer_group.get(&peer).map(String::as_str);
+        let conditional = self.conditional_gate(peer, true);
 
         // Same resolved-vantage gate as live distribution: an ORR peer
         // whose vantage did not resolve falls back to the standard
@@ -1789,6 +1790,7 @@ impl RibManager {
                 sendable,
                 llgr,
                 orf,
+                conditional.as_ref(),
                 add_path_send_max,
                 self.export_policy_for(peer),
                 orr_ctx,
@@ -1840,6 +1842,7 @@ impl RibManager {
             llgr,
             self.export_policy_for(peer),
             orf,
+            conditional.as_ref(),
             &mut memo,
             &mut result,
             false,

@@ -881,7 +881,6 @@ impl RibManager {
         if self.peer_asn.insert(peer, peer_asn) != Some(peer_asn) {
             // ADR-0137: a `condition_policy` reads the source peer's ASN,
             // and GR-retained candidates outlive the session that set it.
-            // Slice 3 marks the transitioned definitions' peers dirty.
             let _ = self.reobserve_conditional_advertisement_source(peer);
         }
         self.peer_bgp_id.insert(peer, peer_router_id);
@@ -1632,6 +1631,8 @@ impl RibManager {
             .and_then(|vantage| self.orr.spf.get(vantage))
             .map(|spf| (&self.orr.topology, spf));
         let per_client_best = self.peer_per_client_best.contains(&peer);
+        // ADR-0137: the initial dump goes through the same gate.
+        let conditional = self.conditional_gate(peer, false);
         let loc_rib = &self.loc_rib;
         let policy_stats = self.export_policy_stats.entry(peer).or_default();
         for prefix in staging_prefixes {
@@ -1671,6 +1672,7 @@ impl RibManager {
                     // ORF: gated families are skipped above; a non-gated family
                     // has no installed filter during the initial dump.
                     None,
+                    conditional.as_ref(),
                     orr_ctx,
                     &mut export_memo,
                     &metrics,
@@ -1714,6 +1716,7 @@ impl RibManager {
                     // ORF: gated families are skipped above; a non-gated family
                     // has no installed filter during the initial dump.
                     None,
+                    conditional.as_ref(),
                     None,
                     &mut export_memo,
                     &metrics,
@@ -1747,6 +1750,7 @@ impl RibManager {
                     // ORF: gated families are skipped above; a non-gated family
                     // has no installed filter during the initial dump.
                     None,
+                    conditional.as_ref(),
                     &mut export_memo,
                     &metrics,
                     policy_stats,
@@ -1782,6 +1786,7 @@ impl RibManager {
                     // ORF: gated families are skipped above; a non-gated family
                     // has no installed filter during the initial dump.
                     None,
+                    conditional.as_ref(),
                     &mut export_memo,
                     &mut unicast,
                     false, // initial dump — equality check is correct

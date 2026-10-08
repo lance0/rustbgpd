@@ -814,6 +814,8 @@ impl RibManager {
             .get(&peer)
             .and_then(|m| m.get(&family))
             .cloned();
+        // ADR-0137: a replayed family goes through the same gate.
+        let conditional = self.conditional_gate(peer, false);
         let mut unicast = super::distribution::UnicastDistributionResult::default();
         let mut fs_announce = Vec::new();
         let mut fs_withdraw = Vec::new();
@@ -1407,6 +1409,7 @@ impl RibManager {
                         llgr.as_ref(),
                         export_pol.as_ref(),
                         orf_filter.as_ref(),
+                        conditional.as_ref(),
                         orr_ctx,
                         &mut export_memo,
                         &metrics,
@@ -1448,6 +1451,7 @@ impl RibManager {
                         llgr.as_ref(),
                         export_pol.as_ref(),
                         orf_filter.as_ref(),
+                        conditional.as_ref(),
                         None,
                         &mut export_memo,
                         &metrics,
@@ -1483,6 +1487,7 @@ impl RibManager {
                         llgr.as_ref(),
                         export_pol.as_ref(),
                         orf_filter.as_ref(),
+                        conditional.as_ref(),
                         &mut export_memo,
                         &metrics,
                         policy_stats,
@@ -1520,6 +1525,7 @@ impl RibManager {
                         llgr.as_ref(),
                         export_pol.as_ref(),
                         orf_filter.as_ref(),
+                        conditional.as_ref(),
                         &mut export_memo,
                         &mut unicast,
                         false,

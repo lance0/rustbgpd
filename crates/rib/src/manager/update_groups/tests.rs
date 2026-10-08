@@ -31,6 +31,7 @@ fn test_snapshot_row(peer: IpAddr) -> UpdateGroupPeerSnapshot {
         per_client_best: false,
         orr_vantage: None,
         orf_installed: false,
+        conditional_advertisement: false,
     };
     UpdateGroupPeerSnapshot {
         peer,
@@ -507,6 +508,10 @@ fn comparison_verdicts_use_runtime_identity_and_preserve_sides() {
         (GroupMembership::OrrVantage, M::OrrVantage),
         (GroupMembership::OrfInstalled, M::OrfInstalled),
         (GroupMembership::SlowPeer, M::SlowPeer),
+        (
+            GroupMembership::ConditionalAdvertisement,
+            M::ConditionalAdvertisement,
+        ),
     ] {
         manager.update_groups.members.insert(OTHER1, private);
         assert_eq!(

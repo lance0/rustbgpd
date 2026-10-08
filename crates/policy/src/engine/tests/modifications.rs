@@ -752,3 +752,44 @@ fn same_as_matches_derived_equality() {
         }
     }
 }
+
+/// An IPv4 `set next-hop` does not apply to an IPv6 unicast route (RFC 2545
+/// §3 has no 4-octet IPv6 next hop); an IPv6 one on an IPv4 route stays
+/// (RFC 8950). Both the chain and the single-policy evaluators agree.
+#[test]
+fn ipv4_set_next_hop_does_not_apply_to_an_ipv6_unicast_route() {
+    let ipv4 = NextHopAction::Specific(IpAddr::V4(Ipv4Addr::new(192, 0, 2, 9)));
+    let ipv6 = NextHopAction::Specific("2001:db8::9".parse().unwrap());
+    let v6_route = Prefix::V6(rustbgpd_wire::Ipv6Prefix::new(
+        "2001:db8:1::".parse().unwrap(),
+        48,
+    ));
+    let v4_route = v4_prefix([10, 0, 0, 0], 8);
+    for (prefix, family, action, applies) in [
+        (v6_route, RouteFamily::Ipv6Unicast, &ipv4, false),
+        (v6_route, RouteFamily::Ipv6Unicast, &ipv6, true),
+        (v4_route, RouteFamily::Ipv4Unicast, &ipv4, true),
+        (v4_route, RouteFamily::Ipv4Unicast, &ipv6, true),
+    ] {
+        let mut statement = stmt(None, PolicyAction::Permit, vec![]);
+        statement.modifications.set_next_hop = Some(action.clone());
+        let policy = Policy {
+            entries: vec![statement],
+            default_action: PolicyAction::Deny,
+        };
+        let mut route = ctx(prefix, &[], &[], &[], "", 0, RpkiValidation::NotFound);
+        route.family = Some(family);
+        let expected = applies.then(|| action.clone());
+        let chain = PolicyChain::new(vec![policy.clone()]);
+        assert_eq!(
+            chain.evaluate(&route).modifications.set_next_hop,
+            expected,
+            "chain {family:?} {action:?}"
+        );
+        assert_eq!(
+            policy.evaluate(&route).modifications.set_next_hop,
+            expected,
+            "policy {family:?} {action:?}"
+        );
+    }
+}

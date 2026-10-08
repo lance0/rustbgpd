@@ -2858,17 +2858,27 @@ impl PeerManager {
                 .as_ref()
                 .is_some_and(|chain| swapped.iter().any(|name| chain.references_dataset(name)))
         };
+        // ADR-0137: an attached `advertise_policy` is an export dependency.
         let candidates: Vec<(PeerKey, bool, bool)> = self
             .peers
             .iter()
             .filter_map(|(peer_key, managed)| {
                 let import = references_any(&managed.import_policy);
-                let export = references_any(&managed.export_policy);
+                let export = references_any(&managed.export_policy)
+                    || self.conditional_advertise_policy_references(peer_key.address, swapped);
                 (import || export).then(|| (peer_key.clone(), import, export))
             })
             .collect();
-
+        // A `condition_policy` dependency re-observes its condition under
+        // the debounce; it is external input like a route change.
         let mut failures = Vec::new();
+        if let Err(error) = self
+            .reobserve_conditional_advertisement_datasets(swapped)
+            .await
+        {
+            failures.push(format!("conditional advertisement conditions: {error}"));
+        }
+
         let mut export_peers = Vec::new();
         let mut refreshed = 0usize;
         let mut skipped_not_established = 0usize;
@@ -2989,10 +2999,17 @@ impl PeerManager {
                 .as_ref()
                 .is_some_and(|chain| changed.iter().any(|name| chain.references_dataset(name)))
         };
+        // ADR-0137: an attached `advertise_policy`, installed or candidate,
+        // is an export dependency.
+        let candidate_conditional = candidate
+            .conditional_advertisement_set()
+            .map_err(|error| format!("conditional advertisements: {error}"))?;
         let mut dependents = Vec::new();
         for (peer, managed) in &self.peers {
             let mut import = references(&managed.import_policy);
-            let mut export = references(&managed.export_policy);
+            let mut export = references(&managed.export_policy)
+                || self.conditional_advertise_policy_references(peer.address, changed)
+                || candidate_conditional.advertise_policy_references(peer.address, changed);
             let neighbor = candidate
                 .neighbors
                 .iter()
@@ -4102,6 +4119,51 @@ impl PeerManager {
     /// resolved-policy snapshot path, then adopt `next_config` as the
     /// manager's snapshot. Returns the number of peers whose chains
     /// were applied.
+    /// ADR-0137: install the candidate's conditional advertisements before
+    /// its chains, so a changed `advertise_policy` gates before any
+    /// re-evaluated export can reach the wire. A failed snapshot restores the
+    /// captured install.
+    async fn apply_policy_snapshot_with_conditional_install(
+        &mut self,
+        next_config: &Config,
+        targets: Vec<ResolvedPeerPolicy>,
+        require_clean_convergence: bool,
+    ) -> Result<Vec<ResolvedPeerPolicy>, PolicySnapshotFailure> {
+        let conditional_prior = self
+            .install_conditional_advertisements_for(next_config)
+            .await
+            .map_err(|message| {
+                PolicySnapshotFailure::ambiguous_code(
+                    RuntimeConfigPolicyFailureCode::RibApplyRejected,
+                    message,
+                )
+            })?;
+        match self
+            .apply_resolved_policy_snapshot_with_prestage_reads(
+                targets,
+                require_clean_convergence,
+                OperatorReadAdmission::Served,
+            )
+            .await
+        {
+            Ok(applied) => Ok(applied),
+            Err(failure) => {
+                if let Some(prior) = conditional_prior
+                    && let Err(error) = self.restore_conditional_advertisements(prior).await
+                {
+                    return Err(PolicySnapshotFailure::ambiguous_code(
+                        failure.code,
+                        format!(
+                            "{}; restoring conditional advertisements also failed: {error}",
+                            failure.message
+                        ),
+                    ));
+                }
+                Err(failure)
+            }
+        }
+    }
+
     async fn refresh_policies_for_config(
         &mut self,
         next_config: Config,
@@ -4208,10 +4270,10 @@ impl PeerManager {
             "resolved live peer policy chains"
         );
         let applied = self
-            .apply_resolved_policy_snapshot_with_prestage_reads(
+            .apply_policy_snapshot_with_conditional_install(
+                &next_config,
                 targets,
                 require_clean_convergence,
-                OperatorReadAdmission::Served,
             )
             .await?;
 

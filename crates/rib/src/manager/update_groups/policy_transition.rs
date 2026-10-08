@@ -754,6 +754,9 @@ impl RibManager {
             UpdateGroupClassification::PerClientBest => return GroupMembership::PerClientBest,
             UpdateGroupClassification::OrrVantage => return GroupMembership::OrrVantage,
             UpdateGroupClassification::OrfInstalled => return GroupMembership::OrfInstalled,
+            UpdateGroupClassification::ConditionalAdvertisement => {
+                return GroupMembership::ConditionalAdvertisement;
+            }
             UpdateGroupClassification::Groupable(fingerprint) => fingerprint,
         };
 

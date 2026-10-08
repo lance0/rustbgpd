@@ -130,6 +130,7 @@ Gate ladder (live evaluation order):
   [pass] family         peer negotiated ipv4 unicast
   [pass] llgr           route is not LLGR-stale
   [n/a ] orf            peer installed no Outbound Route Filter
+  [n/a ] conditional_advertisement no conditional advertisement attached
   [pass] export_policy  export policy "chain_default_permit" permitted this route
   [n/a ] otc            RFC 9234 OTC egress suppression does not apply to this local role
   [pass] adj_rib_out    prefix not yet advertised to this peer — would announce
@@ -142,10 +143,15 @@ This is the ladder for a plain single-best peer (no ORR vantage, Add-Path
 send, or per-client best); addresses and the group ID are illustrative. The
 rung set and order depend on the peer's selection shape. An ORR, Add-Path, or
 per-client-best peer runs `family` and `orf` first, then `best_route` for its
-own candidate, then `split_horizon`, `rr_reflection`, `llgr`, `export_policy`,
-`otc`, and `adj_rib_out`. Rungs that only appear when they stop a route —
-`no_advertise`, `no_export`, `rs_control`, and the Add-Path `add_path_send_max`
-limit — sit between `llgr` and `otc`. A denial shows `[STOP]` at the gate that
+own candidate, then `split_horizon`, `rr_reflection`, `llgr`,
+`conditional_advertisement`, `export_policy`, `otc`, and `adj_rib_out`. Rungs
+that only appear when they stop a route — `no_advertise`, `no_export`,
+`rs_control`, and the Add-Path `add_path_send_max` limit — sit between `llgr`
+and `otc`. The `conditional_advertisement` rung always sits immediately before
+`export_policy`; it stops a route with `conditional_advertisement_suppressed`
+or `conditional_advertisement_eval_error` while an attached
+[conditional advertisement](../reference/configuration.md#conditional-advertisements)
+withholds it. A denial shows `[STOP]` at the gate that
 held the route back, with per-term policy attribution for `.rpol` chains.
 `--rd <rd>` explains the VPNv4/VPNv6 (RD, prefix) ladder including the RFC 4684
 RT-Constrain membership gate; `--labeled` explains the RFC 8277

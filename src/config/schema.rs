@@ -3446,13 +3446,6 @@ pub enum ConfigError {
     InvalidSlowPeerThreshold { value: u8 },
     #[error("invalid policy entry: {reason}")]
     InvalidPolicyEntry { reason: String },
-    /// ADR-0137 slice 3 removes this variant with the refusal that uses it.
-    #[error(
-        "conditional advertisement is not yet enforced by this build; remove \
-         [policy.conditional_advertisements] and neighbor conditional_advertisements \
-         attachments"
-    )]
-    UnenforcedConditionalAdvertisement,
     /// Structural chain overflow is distinct from unresolved references so
     /// registry reloads cannot mistake it for a tolerated orphaned dynamic peer.
     #[error("policy chain too large: {reason}")]

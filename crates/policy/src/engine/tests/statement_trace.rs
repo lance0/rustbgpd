@@ -1039,3 +1039,79 @@ fn action_view_walks_agree_across_action_and_error_matrix() {
         }
     }
 }
+
+const NEXT_HOP_ORDER_RPOL: &str = "
+policy order {
+    term v6 { set next-hop 2001:db8::9; }
+    term v4 { set next-hop 192.0.2.9; accept }
+}
+";
+
+/// An IPv6 `set next-hop` followed by an IPv4 one, both across chain
+/// members (TOML) and within one policy (rpol Continue then deciding term).
+fn next_hop_order_chains() -> [(&'static str, PolicyChain); 2] {
+    let set = |addr: &str| {
+        let mut statement = stmt(None, PolicyAction::Permit, vec![]);
+        statement.modifications.set_next_hop = Some(NextHopAction::Specific(addr.parse().unwrap()));
+        statement
+    };
+    let toml = PolicyChain::from_named(vec![
+        named("v6", policy(vec![set("2001:db8::9")], PolicyAction::Deny)),
+        named("v4", policy(vec![set("192.0.2.9")], PolicyAction::Deny)),
+    ]);
+    let file = crate::rpol::RpolFile::parse(NEXT_HOP_ORDER_RPOL).expect("clean rpol");
+    let mut store = crate::sets::SetStore::new();
+    let compiled = file
+        .compile_policy("order", &[], &mut store)
+        .expect("policy exists");
+    let rpol = PolicyChain::from_named(vec![NamedPolicy::from_rpol(
+        "order".to_string(),
+        std::sync::Arc::new(compiled),
+    )]);
+    [("toml", toml), ("rpol", rpol)]
+}
+
+/// An IPv4 `set next-hop` does not apply to an IPv6 unicast route, so it
+/// must not override an earlier IPv6 one (last writer wins only among
+/// applicable actions). On an IPv4 route the IPv4 action is last and wins.
+/// Explain renders exactly the next hop live evaluation produces.
+#[test]
+fn inapplicable_ipv4_next_hop_does_not_override_an_ipv6_one_live_or_in_explain() {
+    let mut v6_route = plain_ctx(Prefix::V6(rustbgpd_wire::Ipv6Prefix::new(
+        "2001:db8:1::".parse().unwrap(),
+        48,
+    )));
+    v6_route.family = Some(RouteFamily::Ipv6Unicast);
+    let mut v4_route = plain_ctx(v4_prefix([10, 0, 0, 0], 8));
+    v4_route.family = Some(RouteFamily::Ipv4Unicast);
+    for (chain_name, chain) in next_hop_order_chains() {
+        for (ctx, expected) in [(&v6_route, "2001:db8::9"), (&v4_route, "192.0.2.9")] {
+            let live = chain.evaluate(ctx);
+            assert_eq!(
+                live.modifications.set_next_hop,
+                Some(NextHopAction::Specific(expected.parse().unwrap())),
+                "live {chain_name} {:?}",
+                ctx.family
+            );
+            let rendered: Vec<String> = explain_chain_statements(Some(&chain), ctx)
+                .steps
+                .iter()
+                .flat_map(|step| step.modifications.iter())
+                .filter(|line| line.starts_with("next_hop"))
+                .cloned()
+                .collect();
+            assert_eq!(
+                rendered.last(),
+                Some(&format!("next_hop none -> {expected}")),
+                "explain {chain_name} {:?}: {rendered:?}",
+                ctx.family
+            );
+            if ctx.family == Some(RouteFamily::Ipv6Unicast) {
+                assert!(
+                    rendered.iter().all(|line| !line.contains("192.0.2.9")),
+                    "explain {chain_name} shows an inapplicable next hop: {rendered:?}"
+                );
+            }
+        }
+    }
+}

@@ -5963,8 +5963,9 @@ impl RibManager {
         // Revoke in-flight dependency revisions before filtering held families.
         self.invalidate_flowspec_dependencies(all_affected);
         // ADR-0137: re-observe conditions before deferral filtering; a held
-        // family keeps observing while its settle timers stay unarmed. Slice 3
-        // marks the transitioned definitions' peers dirty.
+        // family keeps observing while its settle timers stay unarmed. An
+        // applied transition (settle_time 0) marks its attached peers dirty
+        // for the bounded resync.
         let _ = self.observe_conditional_advertisement_prefixes(
             best_changed.iter().chain(all_affected.iter()),
         );
@@ -6913,6 +6914,9 @@ impl RibManager {
             // is cheap: ORF filters are small and present only for peers that
             // negotiated ORF (None for everyone else).
             let orf_filters = self.peer_orf_filters.get(&peer).cloned();
+            // ADR-0137 conditional-advertisement gate; `None` unless an
+            // attached definition is suppressing (or pending).
+            let conditional = self.conditional_gate(peer, false);
             // RFC 9107 ORR: a peer bound to a vantage that resolved this
             // pass takes the per-vantage best below; an unresolved
             // vantage silently falls back to the standard single-best
@@ -6987,6 +6991,7 @@ impl RibManager {
                         llgr.as_ref(),
                         export_pol.as_ref(),
                         orf,
+                        conditional.as_ref(),
                         orr_ctx,
                         &mut export_memo,
                         &metrics,
@@ -7029,6 +7034,7 @@ impl RibManager {
                         llgr.as_ref(),
                         export_pol.as_ref(),
                         orf,
+                        conditional.as_ref(),
                         None,
                         &mut export_memo,
                         &metrics,
@@ -7061,6 +7067,7 @@ impl RibManager {
                         llgr.as_ref(),
                         export_pol.as_ref(),
                         orf,
+                        conditional.as_ref(),
                         &mut export_memo,
                         &metrics,
                         policy_stats,
@@ -7095,6 +7102,7 @@ impl RibManager {
                         llgr.as_ref(),
                         export_pol.as_ref(),
                         orf,
+                        conditional.as_ref(),
                         &mut export_memo,
                         &mut unicast,
                         is_force,

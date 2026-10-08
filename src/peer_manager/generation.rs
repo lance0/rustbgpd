@@ -93,6 +93,7 @@ struct AppliedEffects {
     dataset_dependents: Vec<DatasetDependent>,
     policy_priors: Option<Vec<ResolvedPeerPolicy>>,
     prior_config: Option<Config>,
+    conditional_prior: Option<super::conditional::ConditionalAdvertisementPrior>,
     hot_priors: Vec<PeerManagerNeighborConfig>,
     reshape_priors: Option<Vec<PeerManagerNeighborConfig>>,
     removed: Vec<RemovedPeer>,
@@ -104,6 +105,7 @@ impl AppliedEffects {
         self.dataset_prior.is_some()
             || self.policy_priors.is_some()
             || self.prior_config.is_some()
+            || self.conditional_prior.is_some()
             || !self.hot_priors.is_empty()
             || self.reshape_priors.is_some()
             || !self.removed.is_empty()
@@ -283,6 +285,14 @@ impl PeerManager {
             Ok(resolved) => resolved,
             Err(error) => return ReloadGenerationOutcome::RejectedNoEffect(error),
         };
+        let conditional = match candidate.conditional_advertisement_set() {
+            Ok(set) => set,
+            Err(error) => {
+                return ReloadGenerationOutcome::RejectedNoEffect(format!(
+                    "conditional advertisements: {error}"
+                ));
+            }
+        };
         let changed_datasets = datasets.changed_names();
         let dependents = match self
             .prepare_dataset_dependents(&candidate, &changed_datasets)
@@ -301,8 +311,23 @@ impl PeerManager {
         info!(%receipt, "reload generation resolved; applying");
         let mut applied = AppliedEffects::default();
 
+        // 0. ADR-0137: conditional advertisements, before the candidate
+        //    chains can export and before any session this generation adds
+        //    or replaces can register, so no export runs under a mix of
+        //    candidate chains and prior gates. An unacknowledged install is
+        //    ambiguous: the RIB may have committed it.
+        match self.install_conditional_advertisements(conditional).await {
+            Ok(prior) => applied.conditional_prior = prior,
+            Err(error) => {
+                return ReloadGenerationOutcome::CompensationAmbiguous(format!(
+                    "conditional advertisements: {error}"
+                ));
+            }
+        }
+
         // 1. Policy chains through the rollback-capable snapshot. No session
-        //    identity is at stake yet, so a failure here costs nothing.
+        //    identity is at stake yet, so a failure here costs nothing beyond
+        //    restoring the conditional install above.
         match self
             .apply_resolved_policy_snapshot_with_prestage_reads(
                 resolved.policy_targets,
@@ -319,16 +344,22 @@ impl PeerManager {
                     "reload generation policy snapshot failed"
                 );
                 let message = format!("policy snapshot: {}", failure.message);
-                return match failure.kind {
-                    PolicySnapshotFailureKind::RejectedNoEffect => {
-                        ReloadGenerationOutcome::RejectedNoEffect(message)
-                    }
-                    PolicySnapshotFailureKind::FullyCompensated => {
-                        ReloadGenerationOutcome::FullyCompensated(message)
-                    }
-                    PolicySnapshotFailureKind::CompensationAmbiguous => {
-                        ReloadGenerationOutcome::CompensationAmbiguous(message)
-                    }
+                if failure.kind == PolicySnapshotFailureKind::CompensationAmbiguous {
+                    return ReloadGenerationOutcome::CompensationAmbiguous(message);
+                }
+                let Some(prior) = applied.conditional_prior.take() else {
+                    return match failure.kind {
+                        PolicySnapshotFailureKind::RejectedNoEffect => {
+                            ReloadGenerationOutcome::RejectedNoEffect(message)
+                        }
+                        _ => ReloadGenerationOutcome::FullyCompensated(message),
+                    };
+                };
+                return match self.restore_conditional_advertisements(prior).await {
+                    Ok(()) => ReloadGenerationOutcome::FullyCompensated(message),
+                    Err(error) => ReloadGenerationOutcome::CompensationAmbiguous(format!(
+                        "{message}; restoring conditional advertisements failed: {error}"
+                    )),
                 };
             }
         }
@@ -357,6 +388,32 @@ impl PeerManager {
         self.dynamic_neighbor_limit = self.current_config.effective_dynamic_neighbor_limit();
         self.metrics
             .set_dynamic_neighbor_capacity(self.dynamic_peer_count, self.dynamic_neighbor_limit);
+
+        // A swapped dataset read by a `condition_policy` is external input:
+        // re-observe under the ordinary debounce. An unacknowledged request
+        // is ambiguous: the RIB may have re-observed against the candidate
+        // dataset, and no capture exists to undo it. The unwind restores a
+        // successful re-observation's capture after the dataset rollback;
+        // an earlier install capture already predates it.
+        match self
+            .reobserve_conditional_advertisement_datasets(&changed_datasets)
+            .await
+        {
+            Ok(prior) => {
+                if applied.conditional_prior.is_none() {
+                    applied.conditional_prior = prior;
+                }
+            }
+            Err(error) => {
+                return self
+                    .fail_reload_generation(
+                        applied,
+                        format!("conditional advertisement re-observation: {error}"),
+                        true,
+                    )
+                    .await;
+            }
+        }
 
         // 3. Hot updates in place: knobs only, policies already match.
         for (next, prior) in resolved.hot {
@@ -746,6 +803,12 @@ impl PeerManager {
             );
         }
         let mut failures = Vec::new();
+        // Before any re-added peer registers, so it comes back gated.
+        if let Some(prior) = applied.conditional_prior
+            && let Err(error) = self.restore_conditional_advertisements(prior).await
+        {
+            failures.push(format!("restore conditional advertisements: {error}"));
+        }
         for peer in applied.added.into_iter().rev() {
             if let Err(error) = self.delete_peer(peer.clone(), false).await {
                 failures.push(format!("delete added {peer}: {error}"));

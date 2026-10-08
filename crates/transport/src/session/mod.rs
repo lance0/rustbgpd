@@ -880,19 +880,28 @@ fn initialize_route_safety_metric_series(
 
 /// Resolve next-hop for import policy modifications.
 ///
-/// `NextHopAction::Self_` uses the local TCP address (or router-id as fallback).
+/// `NextHopAction::Self_` uses the local TCP address (or router-id as
+/// fallback). For an IPv6 prefix it must be an IPv6 address (RFC 2545 §3):
+/// the local TCP address if IPv6, else `local_ipv6_nexthop`, else the route
+/// keeps `original`.
 /// `NextHopAction::Specific` uses the given address.
 /// `None` keeps the original next-hop from the UPDATE.
 fn resolve_import_nexthop(
     nh_action: Option<&rustbgpd_policy::NextHopAction>,
     original: IpAddr,
+    prefix: Prefix,
     read_half: Option<&OwnedReadHalf>,
     config: &TransportConfig,
 ) -> IpAddr {
+    let local = read_half.and_then(|h| h.local_addr().ok()).map(|a| a.ip());
     match nh_action {
-        Some(rustbgpd_policy::NextHopAction::Self_) => read_half
-            .and_then(|h| h.local_addr().ok())
-            .map_or(IpAddr::V4(config.peer.local_router_id), |a| a.ip()),
+        Some(rustbgpd_policy::NextHopAction::Self_) if matches!(prefix, Prefix::V6(_)) => local
+            .filter(IpAddr::is_ipv6)
+            .or(config.local_ipv6_nexthop.map(IpAddr::V6))
+            .unwrap_or(original),
+        Some(rustbgpd_policy::NextHopAction::Self_) => {
+            local.unwrap_or(IpAddr::V4(config.peer.local_router_id))
+        }
         Some(rustbgpd_policy::NextHopAction::Specific(addr)) => *addr,
         None => original,
     }

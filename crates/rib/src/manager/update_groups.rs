@@ -248,6 +248,9 @@ pub(super) enum GroupMembership {
     /// ORF-receive negotiated: the peer can push arbitrary per-peer
     /// prefix filters (RFC 5291).
     OrfInstalled,
+    /// ADR-0137: conditional advertisements are attached. The gate depends
+    /// on per-definition applied state that `GroupKey` does not cover.
+    ConditionalAdvertisement,
     /// Transport flagged the peer slow and `slow_peer_isolation` is
     /// configured (LAN-470): kept on the per-peer path so its wedged
     /// writer cannot hold back a shared group's staging pass. Rejoins
@@ -265,6 +268,7 @@ impl GroupMembership {
             Self::PerClientBest => "per_client_best".to_string(),
             Self::OrrVantage => "orr_vantage".to_string(),
             Self::OrfInstalled => "orf_installed".to_string(),
+            Self::ConditionalAdvertisement => "conditional_advertisement".to_string(),
             Self::SlowPeer => "slow_peer".to_string(),
         }
     }
@@ -277,6 +281,9 @@ impl GroupMembership {
             Self::PerClientBest => UpdateGroupComparisonMembership::PerClientBest,
             Self::OrrVantage => UpdateGroupComparisonMembership::OrrVantage,
             Self::OrfInstalled => UpdateGroupComparisonMembership::OrfInstalled,
+            Self::ConditionalAdvertisement => {
+                UpdateGroupComparisonMembership::ConditionalAdvertisement
+            }
             Self::SlowPeer => UpdateGroupComparisonMembership::SlowPeer,
         }
     }
@@ -2234,6 +2241,7 @@ impl RibManager {
             per_client_best: self.peer_per_client_best.contains(&peer),
             orr_vantage: self.peer_orr_vantage.get(&peer).copied(),
             orf_installed,
+            conditional_advertisement: self.peer_has_conditional_advertisements(peer),
         }
     }
 
