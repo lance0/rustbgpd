@@ -10,7 +10,7 @@ export TOPO
 
 # test-lib runs preflight while sourced. These stubs satisfy only its external
 # probes; every route observation below is supplied by an overridden vtep_ctl.
-docker() { [ "${1:-}" = "inspect" ]; }
+docker() { case "${1:-}" in inspect | ps) ;; *) return 1 ;; esac; }
 grpcurl() { :; }
 
 # shellcheck source=tests/interop/scripts/test-lib.sh

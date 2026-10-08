@@ -8,7 +8,7 @@ TOPO=test-wait-helper
 CLEANUP=0
 
 # Satisfy source-time preflight without a daemon or containerlab deployment.
-docker() { [ "${1:-}" = inspect ]; }
+docker() { case "${1:-}" in inspect | ps) ;; *) return 1 ;; esac; }
 grpcurl() { :; }
 # shellcheck source=tests/interop/scripts/test-lib.sh
 source "$SCRIPT_DIR/test-lib.sh"

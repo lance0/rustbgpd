@@ -12,13 +12,15 @@ lab=clab-source-id-guard
 
 # scripts/source-id.sh runs `docker run` in its own process, so the stub is an
 # executable on PATH rather than a shell function. STUB_CONTAINERS lists the
-# lab's containers as name|config-image|image-id; STUB_IDS maps an image id
-# to the source-id recorded in it as image-id=source-id.
+# lab's containers as name|config-image|image-id, where a config image of `!`
+# makes inspect fail; STUB_IDS maps an image id to the source-id recorded in
+# it as image-id=source-id. STUB_PS_FAIL=1 makes the lab listing fail.
 cat >"$stubs/docker" <<'EOF'
 #!/bin/sh
 echo "$*" >>"$STUB_LOG"
 case "$1" in
     ps)
+        [ -z "$STUB_PS_FAIL" ] || exit 1
         [ "$3" = label=containerlab=source-id-guard ] || exit 0
         for c in $STUB_CONTAINERS; do echo "${c%%|*}"; done
         ;;
@@ -27,6 +29,7 @@ case "$1" in
         for c in $STUB_CONTAINERS; do
             [ "${c%%|*}" = "$name" ] || continue
             rest=${c#*|}
+            [ "${rest%%|*}" != '!' ] || exit 1
             case "$3" in
                 "{{.Config.Image}}") echo "${rest%%|*}" ;;
                 "{{.Image}}") echo "${rest#*|}" ;;
@@ -47,11 +50,11 @@ chmod +x "$stubs/docker"
 
 # Source the library as an interop script would. CI and GITHUB_ACTIONS are
 # cleared so source-id.sh compares ids instead of skipping under CI.
-# Usage: source_lib "<containers>" "<image ids>"
+# Usage: [STUB_PS_FAIL=1] source_lib "<containers>" "<image ids>"
 source_lib() {
     : >"$log"
     env -u CI -u GITHUB_ACTIONS PATH="$stubs:$PATH" STUB_LOG="$log" \
-        STUB_CONTAINERS="$1" STUB_IDS="$2" \
+        STUB_CONTAINERS="$1" STUB_IDS="$2" STUB_PS_FAIL="${STUB_PS_FAIL:-}" \
         bash -c 'TOPO=source-id-guard; source tests/interop/scripts/test-lib.sh' 2>"$stubs/stderr"
 }
 fail() {
@@ -94,5 +97,25 @@ ran sha256:current || fail 'second container was not checked'
 source_lib "$released $current" "sha256:current=$tree_id" \
     || fail 'matching rustbgpd:dev container beside a released one was rejected'
 ! ran sha256:released || fail 'released container was checked'
+
+# A lab that is not deployed is left to preflight, which fails it.
+source_lib '' '' && fail 'undeployed lab was accepted'
+grep -q 'not running' "$stubs/stderr" || fail 'preflight did not report the undeployed lab'
+! grep -q '^source-id:' "$stubs/stderr" || fail 'source-id guard reported an undeployed lab'
+
+# A listed container that cannot be inspected fails instead of being skipped,
+# whether it is $RUSTBGPD or a secondary container.
+source_lib "$released $lab-rustbgpd-current|!|" '' \
+    && fail 'uninspectable labelled container was accepted'
+grep -q "cannot inspect $lab-rustbgpd-current" "$stubs/stderr" \
+    || fail 'uninspectable labelled container was not reported'
+source_lib "$lab-rustbgpd|!|" '' && fail 'uninspectable listed rustbgpd container was accepted'
+grep -q "cannot inspect $lab-rustbgpd" "$stubs/stderr" \
+    || fail 'uninspectable listed rustbgpd container was not reported'
+
+# A failed lab listing fails instead of falling back to $RUSTBGPD alone.
+STUB_PS_FAIL=1 source_lib "$dev" "sha256:dev=$tree_id" && fail 'failed lab listing was accepted'
+grep -q 'cannot list the containers of lab source-id-guard' "$stubs/stderr" \
+    || fail 'failed lab listing was not reported'
 
 echo 'shared source-id guard: PASS'

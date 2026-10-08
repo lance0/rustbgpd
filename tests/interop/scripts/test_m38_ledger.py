@@ -18,7 +18,7 @@ ROOT = DRIVER.resolve().parents[3]
 class M38LedgerTests(unittest.TestCase):
     def run_script(self, body):
         script = r'''
-docker() { [ "${1:-}" = inspect ]; }
+docker() { case "${1:-}" in inspect | ps) ;; *) return 1 ;; esac; }
 grpcurl() { :; }
 sleep() { :; }
 CLEANUP=0
