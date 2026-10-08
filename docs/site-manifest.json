@@ -27,6 +27,7 @@
   "cookbook/monitoring-feed.md": "docs/cookbook/monitoring-feed.md",
   "cookbook/evpn-fabric-rr.md": "docs/cookbook/evpn-fabric-rr.md",
   "cookbook/policy-quickstart.md": "docs/cookbook/policy-quickstart.md",
+  "cookbook/conditional-advertisement-backup.md": "docs/cookbook/conditional-advertisement-backup.md",
   "cookbook/peer-flap-triage.md": "docs/cookbook/peer-flap-triage.md",
   "cookbook/rr-pair-day2.md": "docs/cookbook/rr-pair-day2.md",
   "cookbook/activation-manual-recovery.md": "docs/cookbook/activation-manual-recovery.md"
