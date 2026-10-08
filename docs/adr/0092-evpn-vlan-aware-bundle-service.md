@@ -52,6 +52,13 @@ remote MACs to `(VNI, MAC)` because ADR-0089 keeps Ethernet Tag `0`.
 
 ### 1. Bundle service is an explicit opt-in service-interface mode
 
+> **Superseded in part by the [2026-10-08 amendment](#amendment-2026-10-08-vtep-origination-and-import-mvp-shape) (A, B, B2).**
+> The opt-in and the model below still hold. The nested
+> `[[evpn_bundle_instances]]` member-map sketch does not: each member is a flat
+> `[[evpn_instances]]` row with `service_interface = "vlan_aware_bundle"` and an
+> explicit `ethernet_tag`. The bundle is identified by its shared RT set, and
+> each member has its own RD.
+
 The default remains ADR-0089 VLAN-Based Service over Linux VLAN-aware bridge
 topologies. True VLAN-Aware Bundle is selected explicitly, for example:
 
@@ -87,6 +94,14 @@ EVPN Ethernet Tag field.
 
 ### 2. Ethernet Tag becomes route identity in bundle mode
 
+> **Superseded in part by the [2026-10-08 amendment](#amendment-2026-10-08-vtep-origination-and-import-mvp-shape) (C, E, F).**
+> Tag isolation still holds. The remote-MAC desired table is **not** widened:
+> member VNIs are globally unique, so `(VNI, MAC)` already isolates
+> `(EVI, Ethernet Tag)`. In the MVP, Type 1 EAD-per-EVI is reject-only, with no
+> origination and received routes dropped with a counted reason. Type 3 is
+> origination-only until flood-list programming from received IMET routes
+> lands.
+
 In bundle mode, Ethernet Tag is load-bearing for at least:
 
 - Type 2 MAC/IP Advertisement routes;
@@ -103,6 +118,13 @@ that must be lifted include the remote-MAC desired table and projection paths
 that currently stage by `(VNI, MAC)`.
 
 ### 3. Type 5 with non-zero Ethernet Tag is deferred from the MVP
+
+> **Superseded in part by the [2026-10-08 amendment](#amendment-2026-10-08-vtep-origination-and-import-mvp-shape) (D).**
+> The deferral and the rule against a NOTIFICATION still hold. Unsupported
+> routes are **not** removed from Adj-RIB-In, because a daemon that is also a
+> route reflector must keep reflecting them. The VTEP projection skips them
+> instead and records a counted drop reason. For Type 5 that reason goes in the
+> existing IP-VRF remote-prefix-drop counters.
 
 RFC 9136 Type 5 routes carry Ethernet Tag in the route key, so bundle-mode
 L3 behavior cannot be ignored forever. It is nevertheless out of the MVP for
@@ -125,6 +147,12 @@ every unsupported bundle shape (see Decision 4).
 
 ### 4. Multi-homing is tag-scoped but deferred from the MVP
 
+> **Refined by the [2026-10-08 amendment](#amendment-2026-10-08-vtep-origination-and-import-mvp-shape) (D, E).** The amendment lists
+> the concrete fail-closed shapes. Bundle members cannot join an Ethernet
+> Segment. For a bundle member, a remote Type 2 with a non-zero ESI and a remote
+> EAD-per-EVI route are dropped at VTEP projection with the counted reason
+> `multihoming_unsupported`. They are never handled as single-path.
+
 The service principle is clear: EAD-per-EVI, aliasing, DF election,
 single-active backup, mass-withdraw, and all-active Type 5 overlay-index
 behavior become scoped by `(ESI, EVI, Ethernet Tag)`.
@@ -134,6 +162,13 @@ cannot prove. Full tag-scoped multi-homing requires a follow-on ADR or a later
 accepted extension to this one.
 
 ### 5. Coexistence and migration are explicit
+
+> **Superseded in part by the [2026-10-08 amendment](#amendment-2026-10-08-vtep-origination-and-import-mvp-shape) (A, C, E).**
+> There is no member map. VNI uniqueness is the existing daemon-wide check. The
+> duplicate `(bridge, bridge_vlan)` check applies when a bundle row is
+> involved, whether that pair is shared with another bundle member or with a
+> VLAN-Based row. The amendment adds the RT and Ethernet Tag uniqueness rules.
+> The migration and cutover-window text still holds.
 
 Tag-0 ADR-0089 instances and bundle instances may coexist across different
 EVIs/RDs. They must not both claim the same local `(bridge, bridge_vlan)` or
@@ -156,6 +191,12 @@ promise a hitless in-place flip, and a Graceful-Restart-assisted or otherwise
 hitless migration is future work.
 
 ### 6. Interop ground truth: GoBGP-synthetic first, then a non-FRR vendor
+
+> **Refined by the [2026-10-08 amendment](#amendment-2026-10-08-vtep-origination-and-import-mvp-shape) (E, F, G).** In the MVP, GoBGP
+> Type 1 routes prove the counted drop, not import or programming. Type 3
+> receive is proven only once flood-list programming lands. SR Linux
+> bundle-interoperability mode is the named vendor receipt for origination, and
+> it lands after flood-list programming, as slice 4 of the order in G.
 
 Non-zero-Ethernet-Tag bundle behavior varies across vendors, so this ADR names
 its proof targets before implementation rather than leaving "cross-vendor
@@ -214,11 +255,12 @@ member VNI already identifies one `(EVI, Ethernet Tag)` pair. The same MAC
 under two tags lands on two different VNIs and does not collapse. This
 supersedes Decision 2's statement that the remote-MAC desired table must be
 widened; that becomes necessary only if one VNI can serve two tags. VNIs
-stay globally unique, and the MVP supports global VNIs only. A received Type 1 or Type 2 route is consumed by a member
-only when its VNI field equals the member VNI, its Ethernet Tag equals the
-member tag, and it carries a member RT. A route whose `<RT, tag>` selects a
-member but whose VNI field differs (locally assigned VNIs) is dropped with a
-reason.
+stay globally unique, and the MVP supports global VNIs only. A received Type 2
+route is consumed by a member only when its VNI field equals the member VNI,
+its Ethernet Tag equals the member tag, and it carries a member RT. A route
+whose `<RT, tag>` selects a member but whose VNI field differs (locally
+assigned VNIs) is dropped with a reason. Type 1 is covered in E, and Type 3
+in F.
 
 **D. Fail-closed drops happen at local consumption, not by removing routes
 from Adj-RIB-In.** One daemon can be a VTEP and a route reflector at once,
@@ -277,6 +319,48 @@ The proofs land in this order:
 4. after flood-list programming (F), the SR Linux origination and datapath
    receipt with a pinned image.
 
+**H. Current test obligations.** These replace the older Test Obligations
+list.
+
+- Wire round-trip tests keep non-zero Ethernet Tag intact for Type 1/2/3/5.
+- Row-level config validation, with each error message pinned:
+  - `ethernet_tag` without `service_interface = "vlan_aware_bundle"` is
+    rejected, as is the reverse;
+  - a tag of `0`, a tag above `16777215`, and the reserved `0xFFFFFFFF` are
+    rejected;
+  - `ip_vrf`, `auto_derive_route_target`, and Ethernet Segment
+    `member_vnis` that name a bundle row are rejected.
+- Table-level config validation:
+  - two bundle rows that share an RT and an Ethernet Tag are rejected;
+  - an RT shared between a bundle row and a VLAN-Based row is rejected;
+  - a `(bridge, bridge_vlan)` pair claimed twice is rejected when a bundle row
+    is involved, and is still accepted between VLAN-Based rows only;
+  - duplicate VNIs are still rejected daemon-wide;
+  - the same rules hold for runtime apply and SIGHUP candidates before commit.
+- Per-tag origination:
+  - Type 2 (MAC-only, MAC+IP, SVI) and Type 3 carry the member's tag, RD and
+    VNI;
+  - a redefine from tag 0 to a non-zero tag withdraws the old keys and
+    originates the new ones.
+- Per-tag import and projection:
+  - the same remote MAC under two member tags gives two `(VNI, MAC)` entries
+    and two VLAN-scoped FDB rows;
+  - a tag mismatch, a VNI mismatch, a non-zero ESI and an EAD-per-EVI route
+    each give no FDB row and increment their counted reason.
+- Type 5 with a non-zero tag increments the IP-VRF drop reason.
+- Fail-closed paths never send a NOTIFICATION. A route dropped at VTEP
+  projection stays in Adj-RIB-In and is still reflected when the daemon is
+  also a route reflector.
+- Linux netns: two member rows on one `vlan_filtering=1` bridge program
+  per-member VLAN-scoped FDB rows, and local-MAC attribution maps each VLAN to
+  its member.
+- GoBGP-synthetic CI leg:
+  - rustbgpd's per-tag Type 2/3 match field for field on the peer;
+  - received per-tag Type 2 routes program the right FDB rows;
+  - the negative cases move only the drop counters.
+- Received-IMET flood-list resolution per member is tested with the
+  flood-list work. SR Linux follows it, as slice 4.
+
 ## Consequences
 
 ### Positive
@@ -333,6 +417,11 @@ proofs.
 
 ## Implementation Plan
 
+> **Superseded by the [2026-10-08 amendment](#amendment-2026-10-08-vtep-origination-and-import-mvp-shape).** The amendment's slice
+> order (G) replaces this list. In particular, item 1 ("explicit member maps")
+> becomes flat member rows. Item 3's EAD-per-EVI origination is out of the MVP.
+> Item 4's resolution layer is the member row itself.
+
 1. Add the bundle config/domain model and validation:
    `service_interface = "vlan_aware_bundle"` plus explicit member maps.
 2. Add route projection/import/export isolation by `(EVI, Ethernet Tag)`.
@@ -346,6 +435,10 @@ proofs.
 7. Decide Type 5 and multi-homing follow-ons.
 
 ## Test Obligations
+
+> **Superseded by the [2026-10-08 amendment](#amendment-2026-10-08-vtep-origination-and-import-mvp-shape) (H).** H is the current
+> obligation list. The member-map and Adj-RIB-In drop wording below is
+> historical.
 
 - Wire round-trip tests proving non-zero Ethernet Tag remains preserved for
   Type 1/2/3/5.
