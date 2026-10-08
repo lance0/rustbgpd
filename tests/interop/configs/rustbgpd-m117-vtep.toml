@@ -1,0 +1,36 @@
+# M117: rustbgpd VTEP for the L2 ARP ping across VXLAN against FRR.
+# No static flood rows: BUM reaches FRR only through the zero-MAC row
+# the daemon programs from FRR's Type 3 IMET.
+[global]
+asn = 65000
+router_id = "10.0.117.1"
+listen_port = 179
+
+[global.telemetry]
+log_format = "json"
+
+[global.telemetry.grpc_tcp]
+address = "0.0.0.0:50051"
+token_file = "/run/rustbgpd/grpc-test-only-operator.token"
+principal = "rustbgpd://operator/test-only"
+
+[[evpn_instances]]
+vni = 117
+rd = "10.0.117.1:117"
+route_targets = ["65000:117"]
+local_vtep_ip = "10.0.117.1"
+bridge = "br117"
+advertise_svi_mac = false
+
+[[neighbors]]
+address = "10.0.117.2"
+remote_asn = 65000
+description = "frr-vtep"
+hold_time = 30
+families = ["l2vpn_evpn"]
+
+[security.grpc]
+enforcement = "tier"
+
+[security.grpc.roles]
+"rustbgpd://operator/test-only" = "operator"

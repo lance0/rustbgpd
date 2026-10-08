@@ -1,0 +1,84 @@
+# Containerlab topology: L2 ARP ping across VXLAN between a rustbgpd VTEP
+# and an FRR 10.7.1 VTEP, with no static flood rows and no static
+# neighbours (M117).
+#
+#   h1 ── eth2[br117] rustbgpd (10.0.117.1) eth1 ── eth1 frr (10.0.117.2) [br117]eth2 ── h2
+#   192.168.117.10                 iBGP L2VPN/EVPN, VNI 117               192.168.117.20
+#
+# h1's ARP request for h2 is a broadcast. The only way it leaves the
+# rustbgpd VTEP is the zero-MAC ingress-replication row the daemon
+# programs on vxlan117 from FRR's Type 3 IMET. Before that row existed,
+# every EVPN lab added `bridge fdb append 00:00:00:00:00:00 …` by hand
+# (M66/M67) or pinned static neighbours on the hosts. This topology does
+# neither, so a green ping means the daemon's flood list carried the ARP.
+#
+# IPv6 is disabled on both hosts, so the only host traffic is the ARP
+# exchange and the ping itself.
+#
+# Asserted by tests/interop/scripts/test-m117-evpn-l2-flood-ping-frr.sh.
+#
+# Usage:
+#   docker build --target dev -t rustbgpd:dev .
+#   containerlab deploy -t tests/interop/m117-evpn-l2-flood-ping-frr.clab.yml
+#   bash tests/interop/scripts/test-m117-evpn-l2-flood-ping-frr.sh
+#   containerlab destroy -t tests/interop/m117-evpn-l2-flood-ping-frr.clab.yml --cleanup
+
+name: m117-evpn-l2-flood-ping-frr
+
+topology:
+  nodes:
+    rustbgpd:
+      kind: linux
+      image: rustbgpd:dev
+      cmd: sleep infinity
+      binds:
+        - ./configs/rustbgpd-m117-vtep.toml:/etc/rustbgpd/config.toml:ro
+        - ../fixtures/grpc-test-only-operator.token:/run/rustbgpd/grpc-test-only-operator.token:ro
+        - ./scripts/start-rustbgpd-vtep.sh:/usr/local/bin/start-rustbgpd-vtep.sh:ro
+      exec:
+        - ip addr add 10.0.117.1/24 dev eth1
+        - ip link set eth1 up
+        - /usr/local/bin/start-rustbgpd-vtep.sh 10.0.117.1 117
+        - ip link set eth2 master br117
+        - ip link set eth2 up
+      env:
+        RUST_LOG: info,rustbgpd_evpn_linux=debug,rustbgpd::evpn_dataplane=debug
+
+    frr:
+      kind: linux
+      image: quay.io/frrouting/frr:10.7.1
+      binds:
+        - ./configs/frr-daemons:/etc/frr/daemons:ro
+        - ./configs/frr-bgpd-m117.conf:/etc/frr/frr.conf:ro
+        - ./scripts/start-frr-vtep.sh:/usr/local/bin/start-frr-vtep.sh:ro
+      exec:
+        - ip addr add 10.0.117.2/24 dev eth1
+        - ip link set eth1 up
+        - /usr/local/bin/start-frr-vtep.sh 10.0.117.2 117
+        - ip link set eth2 master br117
+        - ip link set eth2 up
+
+    h1:
+      kind: linux
+      image: rustbgpd:dev
+      cmd: sleep infinity
+      exec:
+        - sh -c "echo 1 > /proc/sys/net/ipv6/conf/all/disable_ipv6"
+        - ip link set eth1 address 02:11:17:00:00:01
+        - ip addr add 192.168.117.10/24 dev eth1
+        - ip link set eth1 up
+
+    h2:
+      kind: linux
+      image: rustbgpd:dev
+      cmd: sleep infinity
+      exec:
+        - sh -c "echo 1 > /proc/sys/net/ipv6/conf/all/disable_ipv6"
+        - ip link set eth1 address 02:11:17:00:00:02
+        - ip addr add 192.168.117.20/24 dev eth1
+        - ip link set eth1 up
+
+  links:
+    - endpoints: ["rustbgpd:eth1", "frr:eth1"]
+    - endpoints: ["rustbgpd:eth2", "h1:eth1"]
+    - endpoints: ["frr:eth2", "h2:eth1"]
