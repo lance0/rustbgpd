@@ -1301,54 +1301,178 @@ async fn scoped_extended_nexthop_global_self_hop_has_no_link_local_companion() {
     assert_eq!(mp.link_local_next_hop, None);
 }
 
-#[tokio::test]
-async fn route_server_reflection_preserves_received_link_local_companion() {
+/// Send one unchanged-next-hop route carrying a link-local companion through
+/// the real export path and return the companion that reached the wire.
+async fn exported_link_local_companion(
+    remote_asn: u32,
+    route_server_client: bool,
+    scoped_outbound: bool,
+    source_ifindex: Option<u32>,
+    afi: Afi,
+) -> Option<Ipv6Addr> {
     let primary: IpAddr = "2001:db8::2".parse().unwrap();
-    let companion: Ipv6Addr = "fe80::2".parse().unwrap();
+    let companion: Ipv6Addr = "fe80::a8c1:1".parse().unwrap();
     let v4_prefix = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24);
-    for (afi, prefix) in [
-        (Afi::Ipv4, Prefix::V4(v4_prefix)),
+    let prefix = match afi {
+        Afi::Ipv4 => Prefix::V4(v4_prefix),
+        _ => Prefix::V6(Ipv6Prefix::new("2001:db8:5::".parse().unwrap(), 48)),
+    };
+    let (mut session, _rib_rx) = make_test_session_with_rib(65001, remote_asn);
+    session.config.route_server_client = route_server_client;
+    if scoped_outbound {
+        configure_scoped_link_local_peer(&mut session);
+    }
+    let (client, mut server) = connected_stream_pair().await;
+    session.test_install_stream(client);
+    let mut negotiated = negotiated_session(remote_asn, true);
+    negotiated.negotiated_families = vec![(Afi::Ipv4, Safi::Unicast), (Afi::Ipv6, Safi::Unicast)];
+    session.negotiated = Some(Arc::new(negotiated));
+    let mut route = make_sourced_route(Ipv4Addr::new(10, 0, 0, 3), v4_prefix, 65003);
+    route.prefix = prefix;
+    route.next_hop = primary;
+    route.link_local_next_hop = Some(companion);
+    route.next_hop_scope = source_ifindex.map(|ifindex| {
+        Box::new(rustbgpd_rib::NextHopScope {
+            interface: Arc::from("eth1"),
+            ifindex,
+        })
+    });
+    AttrSet::edit(&mut route.attributes, |attrs| {
+        attrs.retain(|attr| !matches!(attr, PathAttribute::NextHop(_)));
+    });
+    let mut update = empty_outbound_update();
+    update.exact_export_snapshot = Some(session.publish_export_profile());
+    update.announce = vec![route].into();
+    update.next_hop_override = vec![None].into();
+    session.send_route_update(update);
+    let Message::Update(msg) = read_single_bgp_message(&mut server).await else {
+        panic!("expected UPDATE");
+    };
+    let parsed = msg.parse(true, false, &[]).unwrap();
+    let mp = parsed
+        .attributes
+        .iter()
+        .find_map(|attr| match attr {
+            PathAttribute::MpReachNlri(mp) => Some(mp),
+            _ => None,
+        })
+        .expect("IPv6 primary uses MP_REACH");
+    assert_eq!((mp.afi, mp.safi), (afi, Safi::Unicast));
+    assert_eq!(mp.next_hop, primary, "the global next hop stays unchanged");
+    assert_eq!(mp.announced, vec![NlriEntry { path_id: 0, prefix }]);
+    mp.link_local_next_hop
+}
+
+/// RFC 2545 §3: a received link-local companion is forwarded only to a peer
+/// on the link it was received from. Everyone else gets the 16-octet form.
+#[tokio::test]
+async fn unchanged_next_hop_forwards_link_local_companion_only_on_its_link() {
+    let companion: Ipv6Addr = "fe80::a8c1:1".parse().unwrap();
+    // (case, remote ASN, route-server client, scoped outbound, source ifindex, kept)
+    let cases = [
         (
-            Afi::Ipv6,
-            Prefix::V6(Ipv6Prefix::new("2001:db8:5::".parse().unwrap(), 48)),
+            "route-server client off link",
+            65002,
+            true,
+            false,
+            None,
+            false,
         ),
-    ] {
-        let (mut session, _rib_rx) = make_test_session_with_rib(65001, 65002);
-        session.config.route_server_client = true;
-        let (client, mut server) = connected_stream_pair().await;
-        session.test_install_stream(client);
-        let mut negotiated = negotiated_session(65002, true);
-        negotiated.negotiated_families =
-            vec![(Afi::Ipv4, Safi::Unicast), (Afi::Ipv6, Safi::Unicast)];
+        (
+            "route-server client, scoped source",
+            65002,
+            true,
+            false,
+            Some(7),
+            false,
+        ),
+        (
+            "ibgp over global transport",
+            65001,
+            false,
+            false,
+            None,
+            false,
+        ),
+        (
+            "ibgp over global transport, scoped source",
+            65001,
+            false,
+            false,
+            Some(7),
+            false,
+        ),
+        ("same interface", 65001, false, true, Some(7), true),
+        ("other interface", 65001, false, true, Some(8), false),
+        (
+            "scoped outbound, unscoped source",
+            65001,
+            false,
+            true,
+            None,
+            false,
+        ),
+    ];
+    for (case, remote_asn, rs_client, scoped, source_ifindex, kept) in cases {
+        for afi in [Afi::Ipv4, Afi::Ipv6] {
+            assert_eq!(
+                exported_link_local_companion(remote_asn, rs_client, scoped, source_ifindex, afi)
+                    .await,
+                kept.then_some(companion),
+                "{case} {afi:?}"
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn received_link_local_companion_records_the_receiving_interface() {
+    for scoped in [false, true] {
+        let (mut session, mut rib_rx) = make_test_session_with_rib(65001, 65002);
+        if scoped {
+            configure_scoped_link_local_peer(&mut session);
+        }
+        let mut negotiated = negotiated_session(65002, false);
+        negotiated.negotiated_families = vec![(Afi::Ipv6, Safi::Unicast)];
         session.negotiated = Some(Arc::new(negotiated));
-        let mut route = make_sourced_route(Ipv4Addr::new(10, 0, 0, 3), v4_prefix, 65003);
-        route.prefix = prefix;
-        route.next_hop = primary;
-        route.link_local_next_hop = Some(companion);
-        AttrSet::edit(&mut route.attributes, |attrs| {
-            attrs.retain(|attr| !matches!(attr, PathAttribute::NextHop(_)));
-        });
-        let mut update = empty_outbound_update();
-        update.exact_export_snapshot = Some(session.publish_export_profile());
-        update.announce = vec![route].into();
-        update.next_hop_override = vec![None].into();
-        session.send_route_update(update);
-        let Message::Update(msg) = read_single_bgp_message(&mut server).await else {
-            panic!("expected UPDATE");
+        let prefix = Prefix::V6(Ipv6Prefix::new("2001:db8:5::".parse().unwrap(), 48));
+        let attrs = vec![
+            PathAttribute::Origin(Origin::Igp),
+            PathAttribute::AsPath(AsPath {
+                segments: vec![AsPathSegment::AsSequence(vec![65002])],
+            }),
+            PathAttribute::MpReachNlri(Box::new(MpReachNlri {
+                afi: Afi::Ipv6,
+                safi: Safi::Unicast,
+                next_hop: "2001:db8::2".parse().unwrap(),
+                link_local_next_hop: Some("fe80::a8c1:1".parse().unwrap()),
+                announced: vec![NlriEntry { path_id: 0, prefix }],
+                flowspec_announced: vec![],
+                evpn_announced: vec![],
+                bgpls_announced: vec![],
+                labeled_announced: vec![],
+                vpn_announced: vec![],
+                rtc_announced: vec![],
+            })),
+        ];
+        let update = UpdateMessage::build(&[], &[], &attrs, true, false, Ipv4UnicastMode::Body);
+        session.process_update(update).await;
+        let RibUpdate::RoutesReceived { announced, .. } = rib_rx.try_recv().unwrap() else {
+            panic!("expected RoutesReceived");
         };
-        let parsed = msg.parse(true, false, &[]).unwrap();
-        let mp = parsed
-            .attributes
-            .iter()
-            .find_map(|attr| match attr {
-                PathAttribute::MpReachNlri(mp) => Some(mp),
-                _ => None,
-            })
-            .expect("IPv6 primary uses MP_REACH");
-        assert_eq!((mp.afi, mp.safi), (afi, Safi::Unicast));
-        assert_eq!(mp.next_hop, primary);
-        assert_eq!(mp.link_local_next_hop, Some(companion), "{afi:?}");
-        assert_eq!(mp.announced, vec![NlriEntry { path_id: 0, prefix }]);
+        assert_eq!(announced.len(), 1);
+        assert_eq!(
+            announced[0].link_local_next_hop,
+            Some("fe80::a8c1:1".parse().unwrap())
+        );
+        assert_eq!(
+            announced[0]
+                .next_hop_scope
+                .as_deref()
+                .map(|scope| (scope.interface.as_ref(), scope.ifindex)),
+            scoped.then_some(("eth1", 7)),
+            "scoped={scoped}"
+        );
     }
 }
 

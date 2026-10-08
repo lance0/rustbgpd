@@ -896,8 +896,9 @@ negotiate the extension; duplicate valid copies are idempotent.
 - An unchanged link-local primary next hop can be reflected only to a peer
   with the same interface scope. Otherwise export preparation rejects it,
   unless policy or normal eBGP behavior selects a known local next hop.
-  Optional link-local companions of global next hops are omitted on negotiated
-  sessions when their source interface cannot be established. Exact export
+  An optional link-local companion of an unchanged global next hop is
+  forwarded only between interface-bound peers on the same interface, on
+  every session (see RFC 2545 §3 under RFC 4760 below). Exact export
   diagnostics expose the rejection under
   `bgp_exact_export_rejections_total{reason="missing_ipv6_next_hop"}`;
   withdrawals retain normal MP_UNREACH encoding and do not depend on a next
@@ -930,6 +931,17 @@ AFI (2 bytes) | SAFI (1) | NH-Len (1) | Next Hop (variable) | Reserved (1) | NLR
   (round-tripped through wire / RIB / MRT since v0.11.0); ADR-0069 resolves a
   link-local next-hop as a scoped next-hop for unnumbered IPv4-over-IPv6 and
   Linux FIB `dev`.
+- RFC 2545 §3 includes the link-local only when the speaker shares a subnet
+  with both the next hop and the receiving peer. When the next hop is
+  forwarded unchanged (iBGP, route-server client, and IPv4 unicast over
+  Extended Next Hop), rustbgpd forwards a received link-local companion only
+  if both the source session and the receiving session are interface-bound
+  to the same interface. Every other receiver gets the 16-octet global form.
+  This matches FRR's default (it strips the received link-local unless
+  `nexthop-local unchanged` is set). BIRD keeps the 32-octet form toward
+  iBGP and route-server clients. A local next hop (eBGP, next-hop self)
+  never carries a companion on a global session. VPN and labeled families
+  still forward the received form.
 - NLRI: same prefix-length encoding as IPv4, but up to 128 bits (16 bytes
   of address data).
 - When `MP_REACH_NLRI` is present in an UPDATE, the body NEXT_HOP attribute
