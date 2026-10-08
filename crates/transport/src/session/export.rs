@@ -1067,6 +1067,11 @@ impl SessionExportProfile {
                     _ if force_self => usable_local.map_or(route.next_hop, IpAddr::V6),
                     _ => route.next_hop,
                 };
+                // RFC 2545 §3: an IPv6 MP_REACH next hop is 16 or 32 octets.
+                // Refuse rather than encode a 4-octet one.
+                if next_hop.is_ipv4() {
+                    return Err(ExportProbeError::MissingIpv6NextHop);
+                }
                 self.check_link_local_export(
                     next_hop,
                     route,

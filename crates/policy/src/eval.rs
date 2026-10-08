@@ -891,6 +891,7 @@ impl CompiledChain {
                 }
             }
         }
+        accumulated.drop_inapplicable_next_hop(ctx);
         // A nonempty chain that completes without rejection has no
         // terminal member. Retain one process-shared sentinel instead;
         // a genuinely empty chain remains inline / unattributed.
@@ -1136,6 +1137,7 @@ impl CompiledChain {
                 accumulated.merge_from(merged);
             }
         }
+        accumulated.drop_inapplicable_next_hop(ctx);
         PolicyResult {
             action: PolicyAction::Permit,
             modifications: accumulated,

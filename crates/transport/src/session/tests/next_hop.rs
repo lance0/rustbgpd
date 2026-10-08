@@ -2121,3 +2121,219 @@ async fn import_ipv6_next_hop_is_not_exported_as_the_received_ipv4_next_hop() {
         }
     }
 }
+
+const RECEIVED_IPV6_NEXT_HOP: &str = "2001:db8::2";
+
+fn set_next_hop_import(action: rustbgpd_policy::NextHopAction) -> PolicyChain {
+    PolicyChain::new(vec![Policy {
+        entries: vec![PolicyStatement {
+            prefix: None,
+            ge: None,
+            le: None,
+            action: PolicyAction::Permit,
+            match_community: vec![],
+            match_as_path: None,
+            match_neighbor_set: None,
+            match_route_type: None,
+            match_evpn_route_type: None,
+            match_rpki_validation: None,
+            match_aspa_validation: None,
+            match_as_path_length_ge: None,
+            match_as_path_length_le: None,
+            match_local_pref_ge: None,
+            match_local_pref_le: None,
+            match_med_ge: None,
+            match_med_le: None,
+            match_next_hop: None,
+            modifications: RouteModifications {
+                set_next_hop: Some(action),
+                ..Default::default()
+            },
+        }],
+        default_action: PolicyAction::Deny,
+    }])
+}
+
+/// Receive one IPv6 unicast route over IPv4 transport (127.0.0.1) under an
+/// import next-hop `action`, and return it as stored.
+async fn import_ipv6_over_ipv4_transport(
+    action: rustbgpd_policy::NextHopAction,
+    local_ipv6_nexthop: Option<Ipv6Addr>,
+) -> Route {
+    let (mut session, mut rib_rx) = make_test_session_with_rib(65001, 65002);
+    session.config.local_ipv6_nexthop = local_ipv6_nexthop;
+    let (client, _server) = connected_stream_pair().await;
+    session.test_install_stream(client);
+    let mut negotiated = negotiated_session(65002, false);
+    negotiated.negotiated_families = vec![(Afi::Ipv6, Safi::Unicast)];
+    session.negotiated = Some(Arc::new(negotiated));
+    session.install_import_policy(Some(set_next_hop_import(action)));
+    session
+        .process_update(ipv6_announce(
+            Ipv6Prefix::new("2001:db8:100::".parse().unwrap(), 48),
+            0,
+        ))
+        .await;
+    let RibUpdate::RoutesReceived { mut announced, .. } = rib_rx.try_recv().unwrap() else {
+        panic!("expected RoutesReceived");
+    };
+    assert_eq!(announced.len(), 1);
+    announced.remove(0)
+}
+
+/// Export `route` over IPv4 transport to an IPv6-unicast peer and return the
+/// raw UPDATE as written.
+async fn export_ipv6_raw(
+    route: Route,
+    remote_asn: u32,
+    next_hop_override: Option<rustbgpd_policy::NextHopAction>,
+) -> Vec<u8> {
+    let (mut session, _rib_rx) = make_test_session_with_rib(65001, remote_asn);
+    session.config.local_ipv6_nexthop = Some("2001:db8::1".parse().unwrap());
+    let (client, mut server) = connected_stream_pair().await;
+    session.test_install_stream(client);
+    let mut negotiated = negotiated_session(remote_asn, false);
+    negotiated.negotiated_families = vec![(Afi::Ipv6, Safi::Unicast)];
+    session.negotiated = Some(Arc::new(negotiated));
+    let mut update = empty_outbound_update();
+    update.exact_export_snapshot = Some(session.publish_export_profile());
+    update.next_hop_override = vec![next_hop_override].into();
+    update.announce = vec![route].into();
+    session.send_route_update(update);
+    read_single_raw_bgp_message(&mut server).await
+}
+
+/// The `MP_REACH_NLRI` value of a raw UPDATE: (AFI, next-hop length,
+/// next-hop bytes).
+fn raw_mp_reach_next_hop(raw: &[u8]) -> (u16, u8, Vec<u8>) {
+    let body = &raw[19..];
+    let withdrawn_len = usize::from(u16::from_be_bytes([body[0], body[1]]));
+    let attrs_start = 2 + withdrawn_len + 2;
+    let attrs_len = usize::from(u16::from_be_bytes([
+        body[2 + withdrawn_len],
+        body[3 + withdrawn_len],
+    ]));
+    let (_, value) = attribute_values(&body[attrs_start..attrs_start + attrs_len])
+        .into_iter()
+        .find(|(code, _)| *code == 14)
+        .unwrap_or_else(|| panic!("no MP_REACH_NLRI in {raw:02x?}"));
+    let nh_len = value[3];
+    (
+        u16::from_be_bytes([value[0], value[1]]),
+        nh_len,
+        value[4..4 + usize::from(nh_len)].to_vec(),
+    )
+}
+
+fn ipv6_bytes(addr: &str) -> Vec<u8> {
+    addr.parse::<Ipv6Addr>().unwrap().octets().to_vec()
+}
+
+/// Import `next-hop self` on IPv4 transport has no IPv6 self address unless
+/// `local_ipv6_nexthop` is configured; the route keeps its received next hop
+/// rather than taking the IPv4 socket address.
+#[tokio::test]
+async fn import_next_hop_self_on_ipv4_transport_keeps_an_ipv6_next_hop() {
+    use rustbgpd_policy::NextHopAction;
+    let route = import_ipv6_over_ipv4_transport(NextHopAction::Self_, None).await;
+    let raw = export_ipv6_raw(route.clone(), 65001, None).await;
+    assert_eq!(
+        raw_mp_reach_next_hop(&raw),
+        (2, 16, ipv6_bytes(RECEIVED_IPV6_NEXT_HOP)),
+        "iBGP passthrough UPDATE {raw:02x?}"
+    );
+    assert_eq!(
+        route.next_hop,
+        RECEIVED_IPV6_NEXT_HOP.parse::<IpAddr>().unwrap()
+    );
+
+    let route =
+        import_ipv6_over_ipv4_transport(NextHopAction::Self_, Some("2001:db8::7".parse().unwrap()))
+            .await;
+    assert_eq!(route.next_hop, "2001:db8::7".parse::<IpAddr>().unwrap());
+    let raw = export_ipv6_raw(route, 65001, None).await;
+    assert_eq!(
+        raw_mp_reach_next_hop(&raw),
+        (2, 16, ipv6_bytes("2001:db8::7")),
+        "iBGP passthrough UPDATE {raw:02x?}"
+    );
+}
+
+/// An IPv4 `set next-hop` does not apply to an IPv6 route (as FRR's
+/// `set ip next-hop`): the route keeps its received next hop.
+#[tokio::test]
+async fn import_ipv4_set_next_hop_does_not_apply_to_an_ipv6_route() {
+    let route = import_ipv6_over_ipv4_transport(
+        rustbgpd_policy::NextHopAction::Specific(IpAddr::V4(Ipv4Addr::new(192, 0, 2, 9))),
+        None,
+    )
+    .await;
+    let raw = export_ipv6_raw(route.clone(), 65001, None).await;
+    assert_eq!(
+        raw_mp_reach_next_hop(&raw),
+        (2, 16, ipv6_bytes(RECEIVED_IPV6_NEXT_HOP)),
+        "iBGP passthrough UPDATE {raw:02x?}"
+    );
+    assert_eq!(
+        route.next_hop,
+        RECEIVED_IPV6_NEXT_HOP.parse::<IpAddr>().unwrap()
+    );
+}
+
+/// The next hop an export preparation selected, or its refusal.
+fn prepared_next_hop(
+    result: Result<super::super::export::PreparedUnicastCandidate, ExportProbeError>,
+) -> Result<IpAddr, ExportProbeError> {
+    result.map(|candidate| match candidate {
+        super::super::export::PreparedUnicastCandidate::Mp { next_hop, .. } => next_hop,
+        super::super::export::PreparedUnicastCandidate::Ipv4Body { .. } => {
+            panic!("IPv6 prepares as MP_REACH")
+        }
+    })
+}
+
+/// Final guard: an IPv6 route whose next hop is IPv4 is refused at export
+/// preparation, never encoded with a 4-octet IPv6 `MP_REACH_NLRI` next hop.
+#[tokio::test]
+async fn ipv6_route_with_an_ipv4_next_hop_is_refused_at_export() {
+    let mut route = make_v6_unicast_route(RECEIVED_IPV6_NEXT_HOP.parse().unwrap());
+    route.next_hop = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 9));
+    let local_ipv6: IpAddr = "2001:db8::1".parse().unwrap();
+    let set_ipv4 =
+        rustbgpd_policy::NextHopAction::Specific(IpAddr::V4(Ipv4Addr::new(192, 0, 2, 10)));
+    for (remote_asn, next_hop_override, expected) in [
+        (65001, None, Err(ExportProbeError::MissingIpv6NextHop)),
+        // eBGP rewrites the next hop to the local IPv6 address.
+        (65002, None, Ok(local_ipv6)),
+        // Policy evaluation drops this override; the guard still holds.
+        (
+            65001,
+            Some(&set_ipv4),
+            Err(ExportProbeError::MissingIpv6NextHop),
+        ),
+        (
+            65002,
+            Some(&set_ipv4),
+            Err(ExportProbeError::MissingIpv6NextHop),
+        ),
+    ] {
+        let (mut session, _rib_rx) = make_test_session_with_rib(65001, remote_asn);
+        session.config.local_ipv6_nexthop = Some("2001:db8::1".parse().unwrap());
+        let mut negotiated = negotiated_session(remote_asn, false);
+        negotiated.negotiated_families = vec![(Afi::Ipv6, Safi::Unicast)];
+        session.negotiated = Some(Arc::new(negotiated));
+        let profile = session.publish_export_profile();
+        let refused = expected.is_err();
+        assert_eq!(
+            prepared_next_hop(profile.prepare_unicast_candidate(&route, next_hop_override)),
+            expected,
+            "AS{remote_asn} override {next_hop_override:?}"
+        );
+        // The RIB's exact-export preflight refuses it the same way.
+        let probe = profile.probe_announcement(ExportCandidate::Unicast {
+            route: &route,
+            next_hop_override,
+        });
+        assert_eq!(probe.is_err(), refused, "AS{remote_asn} preflight");
+    }
+}

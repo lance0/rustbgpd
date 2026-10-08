@@ -1143,6 +1143,98 @@ async fn explain_advertised_route_reports_ipv6_next_hop_override() {
     handle.await.unwrap();
 }
 
+/// An IPv4 `set next-hop` does not apply to an IPv6 unicast route (RFC 2545
+/// §3; as FRR's `set ip next-hop`): neither the staged route nor the
+/// transport override carries it, so export never selects an IPv4 next hop
+/// for an IPv6 `MP_REACH_NLRI`.
+#[tokio::test]
+async fn export_ipv4_next_hop_does_not_apply_to_an_ipv6_route() {
+    let (tx, rx) = mpsc::channel(64);
+    let export_policy = rustbgpd_policy::PolicyChain::new(vec![rustbgpd_policy::Policy {
+        default_action: rustbgpd_policy::PolicyAction::Permit,
+        entries: vec![rustbgpd_policy::PolicyStatement {
+            prefix: None,
+            ge: None,
+            le: None,
+            match_community: vec![],
+            match_as_path: None,
+            match_neighbor_set: None,
+            match_route_type: None,
+            match_evpn_route_type: None,
+            match_as_path_length_ge: None,
+            match_as_path_length_le: None,
+            match_rpki_validation: None,
+            match_aspa_validation: None,
+            match_local_pref_ge: None,
+            match_local_pref_le: None,
+            match_med_ge: None,
+            match_med_le: None,
+            match_next_hop: None,
+            modifications: rustbgpd_policy::RouteModifications {
+                set_next_hop: Some(rustbgpd_policy::NextHopAction::Specific(IpAddr::V4(
+                    Ipv4Addr::new(192, 0, 2, 9),
+                ))),
+                ..rustbgpd_policy::RouteModifications::default()
+            },
+            action: rustbgpd_policy::PolicyAction::Permit,
+        }],
+    }]);
+    let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let handle = tokio::spawn(manager.run());
+
+    let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+    let target = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let (out_tx, mut out_rx) = mpsc::channel(8);
+    tx.send(RibUpdate::PeerUp {
+        per_client_best: false,
+        interpret_rfc1997: true,
+        session_id: 0,
+        peer: target,
+        peer_asn: 65002,
+        peer_router_id: Ipv4Addr::new(10, 0, 0, 2),
+        outbound_tx: out_tx,
+        export_policy: Some(export_policy),
+        sendable_families: vec![(Afi::Ipv6, Safi::Unicast)],
+        is_ebgp: false,
+        route_reflector_client: false,
+        orr_vantage: None,
+        add_path_send_families: vec![],
+        add_path_send_max: 0,
+        negotiated_orf_recv: Vec::new(),
+        negotiated_llgr_families: Vec::new(),
+    })
+    .await
+    .unwrap();
+    drain_eor(&mut out_rx).await;
+
+    let received: IpAddr = "2001:db8::1".parse().unwrap();
+    let prefix = Ipv6Prefix::new("2001:db8:1::".parse().unwrap(), 64);
+    tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
+        peer: source,
+        announced: vec![make_v6_route(prefix, "2001:db8::1".parse().unwrap())],
+        withdrawn: vec![],
+        flowspec_announced: vec![],
+        flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
+        validated_with: None,
+    })
+    .await
+    .unwrap();
+
+    let update = out_rx.recv().await.expect("permitted route emitted");
+    assert_eq!(update.announce.len(), 1);
+    assert_eq!(update.announce[0].next_hop, received);
+    assert_eq!(update.next_hop_override.as_slice(), [None]);
+    let explain = query_explain_advertised_route(&tx, target, Prefix::V6(prefix)).await;
+    assert_eq!(explain.decision, crate::update::ExplainDecision::Advertise);
+    assert_eq!(explain.next_hop, Some(received));
+
+    drop(tx);
+    handle.await.unwrap();
+}
+
 #[tokio::test]
 async fn peer_down_cleans_up_export_policy() {
     use rustbgpd_policy::{Policy, PolicyAction, PolicyChain, PolicyStatement, RouteModifications};

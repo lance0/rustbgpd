@@ -438,6 +438,22 @@ pub struct RouteModifications {
 }
 
 impl RouteModifications {
+    /// Drop a `set next-hop` that cannot apply to the evaluated route: an
+    /// IPv6 unicast route's `MP_REACH_NLRI` next hop is 16 or 32 octets
+    /// (RFC 2545 §3), so an IPv4 address does not apply to it, as with
+    /// FRR's `set ip next-hop`. An IPv6 address on an IPv4 route stays
+    /// (RFC 8950).
+    pub(crate) fn drop_inapplicable_next_hop(&mut self, ctx: &RouteContext<'_>) {
+        if ctx.family == Some(RouteFamily::Ipv6Unicast)
+            && matches!(
+                self.set_next_hop,
+                Some(NextHopAction::Specific(IpAddr::V4(_)))
+            )
+        {
+            self.set_next_hop = None;
+        }
+    }
+
     /// Returns `true` if no modifications are configured.
     #[must_use]
     pub fn is_empty(&self) -> bool {
@@ -1183,10 +1199,14 @@ impl Policy {
         for entry in &self.entries {
             if entry.matches(ctx) {
                 return match entry.action {
-                    PolicyAction::Permit => PolicyResult {
-                        action: PolicyAction::Permit,
-                        modifications: entry.modifications.clone(),
-                    },
+                    PolicyAction::Permit => {
+                        let mut modifications = entry.modifications.clone();
+                        modifications.drop_inapplicable_next_hop(ctx);
+                        PolicyResult {
+                            action: PolicyAction::Permit,
+                            modifications,
+                        }
+                    }
                     PolicyAction::Deny => PolicyResult::deny(),
                 };
             }
