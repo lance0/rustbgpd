@@ -4226,7 +4226,7 @@ originator_ip = "10.0.0.1"                     # source IP used for Type 1/4 ori
 
 | Field           | Type     | Required | Default       | Description |
 |-----------------|----------|----------|---------------|-------------|
-| `esi`           | string   | yes      | --            | 10-byte non-zero ESI in colon-separated hex (RFC 7432 §5). The all-zero Type 0 single-homed sentinel is rejected; non-zero Type 0 and Types 1–5 are accepted. |
+| `esi`           | string   | yes      | --            | 10-byte non-zero ESI in colon-separated hex (RFC 7432 §5), or `"auto-lacp"` to derive a Type 1 ESI from the LACP partner of the bond named by `interface` (see [Auto-derived ESI](#auto-derived-esi-lacp-type-1)). The all-zero Type 0 single-homed sentinel is rejected; non-zero Type 0 and Types 1–5 are accepted. |
 | `member_vnis`   | u32[]    | yes      | --            | L2VNIs this segment is reachable on. Each must match a configured `[[evpn_instances]].vni` |
 | `df_preference` | u32      | no       | `32767`       | RFC 9785 preference value for `"highest-preference"` / `"lowest-preference"` (`0..=65535`). Default-modulo and HRW ignore preference, so only the default is accepted for those algorithms (the former default `32768` is also accepted for them) |
 | `df_algorithm`  | string   | no       | `"default-modulo"` | `"default-modulo"` (RFC 7432 §8.5 service carving), `"highest-random-weight"` (RFC 8584 §3.2), `"highest-preference"` or `"lowest-preference"` (RFC 9785) |
@@ -4235,6 +4235,70 @@ originator_ip = "10.0.0.1"                     # source IP used for Type 1/4 ori
 | `originator_ip` | string   | yes      | --            | Source IP carried in Type 1/4 origination. Usually equals a member VNI's `local_vtep_ip` |
 | `interface`     | string   | no       | --            | ADR-0085 attachment-circuit link binding: name of the local link whose carrier drives this ES's link drain. When set, carrier loss on the link drains the segment automatically |
 | `recovery_delay_seconds` | u64 | no     | `30`          | ADR-0085 hold-off (seconds, `0..=3600`) to wait after carrier returns before releasing the link drain. Only valid with `interface` — rejected without it. The earlier spelling `recovery_delay_secs` is still accepted as an alias |
+
+### Auto-derived ESI (LACP, Type 1)
+
+`esi = "auto-lacp"` derives the RFC 7432 §5 Type 1 ESI from the 802.3ad
+bond named by `interface`, so PEs bundled with the same CE agree on the ESI
+without anyone writing it by hand:
+
+```toml
+[[ethernet_segments]]
+esi = "auto-lacp"            # derive from the bond's LACP partner
+interface = "bond1"          # required: the 802.3ad bond facing the CE
+member_vnis = [100]
+originator_ip = "10.0.0.1"
+```
+
+The ESI is `01`, then the CE's LACP system MAC (6 octets), then the CE's
+LACP port key (2 octets, big-endian), then `00`. Both values belong to the
+CE, the LACP partner as seen from this PE, which the kernel reports for the
+bond's active aggregator. An explicit hex `esi` never triggers derivation.
+`interface` also binds the segment's link drain to the bond's carrier, as
+for any segment.
+
+Derivation is a runtime readiness condition, not a config check. Config
+validation, including `rustbgpd --check` on a host without the bond, checks
+only the shape: `interface` is required, the member VNIs follow the usual
+one-segment-per-VNI rule, and two `auto-lacp` segments may not name the same
+bond. The daemon starts whatever the bond's state.
+
+At runtime the daemon reads each bond's LACP partner at startup and then every
+two seconds. A segment is NotReady while its bond is missing, is not a bond,
+is not in 802.3ad mode, is admin down or without carrier, has no active
+aggregator, or has no LACP partner yet. A NotReady segment has no ESI and
+originates no Type 1 or Type 4 routes, does not appear in `rbgp evpn es list`,
+and local MACs on its member VNIs are advertised without an ESI. It is also
+NotReady when its derived ESI matches another segment's (explicit ESIs win),
+or while the re-apply that would originate it is failing and being retried.
+Each transition is logged once. NotReady is logged at `warn` with a reason
+code: `not_found`, `not_bond`, `not_lacp_mode`, `down`,
+`no_active_aggregator`, `no_partner`, `netlink_error`, `esi_collision`, or
+`reconverge_failed`. Ready is logged at `info` with the derived ESI, and only
+after the segment has been published and re-applied successfully.
+
+When the derived ESI changes, the daemon re-applies the committed config
+through the same live EVPN runtime path SIGHUP uses, with no restart. The ESI
+changes when the bond becomes Ready, goes NotReady, or learns a new partner.
+On Ready, the segment is added and its routes originated. On NotReady, the
+segment is removed and its routes withdrawn. When the CE is replaced, the old
+segment's routes are withdrawn and the new ESI's routes are originated. The
+config text keeps `esi = "auto-lacp"`, so persistence, SIGHUP, and config
+transactions always carry the spec, never derived bytes.
+
+The probe and the segment actor start only when the daemon starts with at
+least one `[[ethernet_segments]]` entry. If the daemon started with none,
+SIGHUP and `ApplyEvpnRuntime` reject a candidate that adds an `auto-lacp`
+segment with `FAILED_PRECONDITION`, rather than committing a segment that
+could never become Ready. Restart the daemon to add the first segment. This
+matches the existing rule for a first explicit-ESI segment. A bond read that
+gets no kernel reply within one second counts as `netlink_error`, and startup
+waits at most two seconds for the initial round.
+
+Type 2 (STP) derivation is not implemented. RFC 7432 §5 takes it from the
+MSTP IST root learned from BPDUs on the segment, which the Linux bridge does
+not expose. Its kernel STP is 802.1D and reports a root only when the PE
+itself participates. Type 3 (MAC-based) ESIs can be written explicitly.
 
 ### What gets originated
 
@@ -4331,7 +4395,7 @@ ip_vrf = "tenant-blue"             # optional — empty means L2-only
 | `l3vxlan_device` | string    | yes      | --      | Linux L3 VXLAN device name (operator-managed, observe-only) |
 | `table_id`       | u32       | yes      | --      | VRF route table id (> 0); cross-checked against `vrf_device`'s `IFLA_VRF_TABLE` |
 | `overlay_index_mode` | string | no      | `"interface_less"` | Outbound Type 5 overlay-index shape (ADR-0087). `"interface_less"` (RFC 9136 §4.4.2) keeps the Gateway Address zero + Router's MAC extcomm. `"gateway_ip"` (RFC 9136 §4.1/§4.2) originates a route whose kernel via lands on a connected subnet of this VRF with that via in the Gateway Address and no Router's MAC extcomm; routes without an eligible via fall back to interface-less. `"esi"` (RFC 9136 §4.3) originates with a configured non-zero ESI, zero Gateway Address, and `overlay_index_mac` as the Router MAC extcomm. `"gateway_ip"` and `"esi"` require at least one `ip_vrf`-linked L2VNI |
-| `overlay_index_esi` | string | `esi` only | -- | Non-zero ESI (`xx:xx:xx:xx:xx:xx:xx:xx:xx:xx`) used as the Type 5 overlay index when `overlay_index_mode = "esi"`; must match a configured `[[ethernet_segments]].esi` |
+| `overlay_index_esi` | string | `esi` only | -- | Non-zero ESI (`xx:xx:xx:xx:xx:xx:xx:xx:xx:xx`) used as the Type 5 overlay index when `overlay_index_mode = "esi"`; must match a configured explicit `[[ethernet_segments]].esi` (an `auto-lacp` segment does not qualify) |
 | `overlay_index_mac` | string | `esi` only | -- | Unicast non-zero virtual/transit MAC advertised as the Router MAC extcomm when `overlay_index_mode = "esi"` |
 | `overlay_index_l2vni` | u32 | conditional | -- | L2VNI disambiguator for `overlay_index_mode = "esi"` when multiple `[[evpn_instances]]` entries link to this IP-VRF; the selected L2VNI must be linked to this IP-VRF and be a member of `overlay_index_esi` |
 

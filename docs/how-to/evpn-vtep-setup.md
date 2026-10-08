@@ -258,7 +258,13 @@ What you still provide:
   L2 configuration, outside the readiness model. For a worked LACP-bond
   example, see `tests/interop/scripts/start-frr-vtep-mh.sh`.
 - Both VTEPs sharing the segment must advertise the **same 10-byte ESI**
-  (`esi` in config).
+  (`esi` in config). When the CE bundles its links to both VTEPs into one
+  LACP aggregate, `esi = "auto-lacp"` with `interface` naming the local
+  802.3ad bond derives that ESI from the CE's LACP system MAC and port key
+  (RFC 7432 §5 Type 1). The segment stays NotReady, originating nothing,
+  until the bond has an LACP partner, and follows a replaced CE without a
+  restart. See
+  [Auto-derived ESI](../reference/configuration.md#auto-derived-esi-lacp-type-1).
 
 ## Verifying
 

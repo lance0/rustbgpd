@@ -1077,12 +1077,14 @@ impl SessionExportProfile {
                     route,
                     rewritten && (!force_self || usable_local.is_some()),
                 )?;
+                // RFC 4760 §3: no NEXT_HOP beside MP_REACH-only NLRI. Import
+                // policy can store one on an IPv6 route.
                 Ok(PreparedUnicastCandidate::Mp {
                     afi: Afi::Ipv6,
                     next_hop,
                     link_local_next_hop: self
                         .route_link_local_next_hop_for_selected_primary(next_hop, route),
-                    attrs: attrs.with_next_hop,
+                    attrs: attrs.without_next_hop,
                     entry: NlriEntry {
                         path_id: route.path_id,
                         prefix: route.prefix,

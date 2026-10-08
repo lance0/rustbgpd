@@ -42,7 +42,7 @@ fn evpn_runtime_candidate_from_toml(
         Config::load_toml_with_diagnostics(&candidate_toml, "candidate EVPN runtime config")
             .map_err(GrpcEvpnRuntimeApplyError::InvalidArgument)?;
     crate::test_support::assert_tier_authorized_test_config(&candidate);
-    evpn_runtime_candidate_from_config(&candidate)
+    evpn_runtime_candidate_from_config(&candidate, &crate::config::AutoLacpEsis::default())
 }
 
 pub(crate) async fn apply_evpn_runtime_request(
@@ -452,6 +452,161 @@ impl DaemonEvpnRuntimeConverger for GatedRuntimeConverger {
             Ok(())
         })
     }
+}
+
+fn l2vni_auto_lacp_es_runtime_candidate_toml() -> &'static str {
+    r#"
+[global]
+asn = 65000
+router_id = "10.0.0.1"
+listen_port = 179
+
+[global.telemetry]
+log_format = "json"
+
+[[evpn_instances]]
+vni = 100
+rd = "65000:100"
+route_targets = ["65000:100"]
+local_vtep_ip = "10.0.0.1"
+
+[[ethernet_segments]]
+esi = "auto-lacp"
+interface = "bond0"
+member_vnis = [100]
+originator_ip = "10.0.0.1"
+"#
+}
+
+#[tokio::test]
+async fn auto_lacp_candidate_without_segment_actor_is_rejected_not_committed_inert() {
+    // No segment actor at startup means no readiness table or probe:
+    // committing the segment would leave it not ready forever.
+    let baseline = load_runtime_test_config(minimal_runtime_candidate_toml(), "baseline");
+    let candidate =
+        load_runtime_test_config(l2vni_auto_lacp_es_runtime_candidate_toml(), "candidate");
+    let coordinator = empty_evpn_runtime_coordinator();
+    let apply = EvpnRuntimeReloadApply::new(
+        coordinator.clone(),
+        Arc::new(tokio::sync::Mutex::new(())),
+        Arc::new(TestRuntimeConverger::ok()),
+        baseline,
+    );
+    let generation = coordinator.lock().unwrap().model().generation();
+    match apply.apply_config(&candidate).await {
+        Err(GrpcEvpnRuntimeApplyError::FailedPrecondition(message)) => {
+            assert!(message.contains("restart the daemon"), "{message}");
+        }
+        other => panic!("auto-lacp without a segment actor must be rejected, got {other:?}"),
+    }
+    assert_eq!(coordinator.lock().unwrap().model().generation(), generation);
+}
+
+#[tokio::test]
+async fn auto_lacp_round_publishes_only_under_the_apply_lock() {
+    let toml = l2vni_auto_lacp_es_runtime_candidate_toml();
+    let baseline = load_runtime_test_config(toml, "baseline");
+    let model = runtime_candidate_from_toml(toml);
+    let coordinator = Arc::new(Mutex::new(rustbgpd_evpn::EvpnRuntimeCoordinator::new(
+        model.instances().clone(),
+        model.ip_vrfs().clone(),
+        model.ethernet_segments().to_vec(),
+    )));
+    let apply_lock = Arc::new(tokio::sync::Mutex::new(()));
+    let esis = crate::config::AutoLacpEsis::default();
+    let before_lock = Arc::new(tokio::sync::Notify::new());
+    let mut apply = EvpnRuntimeReloadApply::new(
+        coordinator.clone(),
+        apply_lock.clone(),
+        Arc::new(TestRuntimeConverger::ok()),
+        baseline.clone(),
+    )
+    .with_auto_lacp_esis(esis.clone());
+    apply.auto_lacp_before_lock = Some(before_lock.clone());
+
+    let derived =
+        rustbgpd_wire::EthernetSegmentIdentifier::new([1, 2, 0x11, 0, 0, 0, 0, 1, 0xc1, 0]);
+    // A concurrent SIGHUP / ApplyEvpnRuntime holds the apply lock.
+    let held = apply_lock.lock().await;
+    let round = tokio::spawn({
+        let apply = apply.clone();
+        async move {
+            apply
+                .publish_auto_lacp_round(
+                    BTreeMap::from([
+                        ("bond0".to_string(), derived),
+                        // No longer configured by the time the lock is held.
+                        ("stale0".to_string(), derived),
+                    ]),
+                    false,
+                )
+                .await
+        }
+    });
+    before_lock.notified().await;
+    assert_eq!(
+        baseline.resolve_ethernet_segments_with(&esis).unwrap(),
+        Vec::new(),
+        "the lock holder must not observe the round before it takes the lock"
+    );
+    drop(held);
+
+    let round = round.await.unwrap();
+    assert!(round.collided.is_empty());
+    assert!(
+        round.result.unwrap().is_some(),
+        "a new ESI must re-converge"
+    );
+    let segments = baseline.resolve_ethernet_segments_with(&esis).unwrap();
+    assert_eq!(segments.len(), 1);
+    assert_eq!(segments[0].esi, derived);
+    assert_eq!(
+        coordinator.lock().unwrap().model().ethernet_segments()[0].esi,
+        derived,
+        "the published round and its re-converge commit together"
+    );
+    assert!(
+        !esis.replace(BTreeMap::from([("bond0".to_string(), derived)])),
+        "only configured bonds are published"
+    );
+}
+
+#[tokio::test]
+async fn failed_auto_lacp_reconverge_keeps_the_old_esi_binding() {
+    let toml = l2vni_auto_lacp_es_runtime_candidate_toml();
+    let baseline = load_runtime_test_config(toml, "baseline");
+    let old =
+        rustbgpd_wire::EthernetSegmentIdentifier::new([1, 2, 0x11, 0, 0, 0, 0xaa, 1, 0xc1, 0]);
+    let new =
+        rustbgpd_wire::EthernetSegmentIdentifier::new([1, 2, 0x11, 0, 0, 0, 0xbb, 1, 0xc1, 0]);
+    let esis = crate::config::AutoLacpEsis::default();
+    esis.replace(BTreeMap::from([("bond0".to_string(), old)]));
+    let coordinator = Arc::new(Mutex::new(rustbgpd_evpn::EvpnRuntimeCoordinator::new(
+        baseline.resolve_evpn_instances().unwrap(),
+        baseline.resolve_evpn_ip_vrfs().unwrap(),
+        baseline.resolve_ethernet_segments_with(&esis).unwrap(),
+    )));
+    let (bindings_tx, bindings_rx) =
+        tokio::sync::watch::channel(Arc::new(baseline.resolve_es_link_bindings(&esis).unwrap()));
+    let apply = EvpnRuntimeReloadApply::new(
+        coordinator,
+        Arc::new(tokio::sync::Mutex::new(())),
+        Arc::new(TestRuntimeConverger::failed("injected converge failure")),
+        baseline,
+    )
+    .with_es_link_bindings_publisher(Arc::new(bindings_tx))
+    .with_auto_lacp_esis(esis);
+
+    // CE replaced, but the runtime fails to move to the new ESI.
+    let round = apply
+        .publish_auto_lacp_round(BTreeMap::from([("bond0".to_string(), new)]), false)
+        .await;
+    assert!(round.result.is_err());
+    let bindings = bindings_rx.borrow().clone();
+    assert!(
+        bindings.contains_key(&old) && !bindings.contains_key(&new),
+        "the old ESI's routes may still be live, so its binding must stay: {bindings:?}"
+    );
 }
 
 fn minimal_runtime_candidate_toml() -> &'static str {
@@ -1721,7 +1876,7 @@ fn runtime_model_from_toml(toml: &str) -> rustbgpd_evpn::EvpnRuntimeModel {
 fn pre_authorized_runtime_candidate_from_toml(toml: &str) -> rustbgpd_evpn::EvpnRuntimeCandidate {
     let config = Config::load_toml_with_diagnostics(toml, "pre-authorized test config").unwrap();
     crate::test_support::assert_tier_authorized_test_config(&config);
-    evpn_runtime_candidate_from_config(&config).unwrap()
+    evpn_runtime_candidate_from_config(&config, &crate::config::AutoLacpEsis::default()).unwrap()
 }
 
 fn pre_authorized_runtime_model_from_toml(toml: &str) -> rustbgpd_evpn::EvpnRuntimeModel {
@@ -2658,9 +2813,12 @@ async fn committed_config_advance_republishes_es_link_bindings() {
         baseline.resolve_evpn_ip_vrfs().unwrap(),
         baseline.resolve_ethernet_segments().unwrap(),
     )));
-    let (bindings_tx, mut bindings_rx) =
-        tokio::sync::watch::channel(Arc::new(baseline.resolve_es_link_bindings().unwrap())
-            as crate::evpn_es_link_drain::EsLinkBindings);
+    let (bindings_tx, mut bindings_rx) = tokio::sync::watch::channel(Arc::new(
+        baseline
+            .resolve_es_link_bindings(&crate::config::AutoLacpEsis::default())
+            .unwrap(),
+    )
+        as crate::evpn_es_link_drain::EsLinkBindings);
     let reload_apply = EvpnRuntimeReloadApply::new(
         coordinator,
         Arc::new(tokio::sync::Mutex::new(())),

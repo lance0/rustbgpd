@@ -26,6 +26,7 @@ const NOT_MIRRORED: &[&str] = &[
     "config_transaction_control",
     "confirm_journal",
     "evpn_ack",
+    "evpn_auto_esi",
     "evpn_dataplane",
     "evpn_es_drain",
     "evpn_es_link_drain",

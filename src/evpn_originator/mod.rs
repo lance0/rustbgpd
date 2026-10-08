@@ -80,7 +80,7 @@ use crate::evpn_originator::rib_polling::{
     handle_evpn_event_coalesced, recv_evpn_event, repoll_rib, subscribe_evpn_events,
 };
 use crate::evpn_originator::rib_write::{
-    drain_to_withdraws, extract_ip_from_key, next_hop_path_attribute, retry_pending_rib_ops,
+    drain_to_withdraws, extract_ip_from_key, retry_pending_rib_ops,
 };
 use rustbgpd_evpn::{
     DuplicateMacAction, DuplicateMacDecision, DuplicateMacDetector, DuplicateMacKey, EvpnInstance,
@@ -1019,12 +1019,6 @@ pub(crate) fn build_originated_route(
     let attributes: Vec<PathAttribute> = vec![
         PathAttribute::Origin(Origin::Igp),
         PathAttribute::AsPath(AsPath { segments: vec![] }),
-        // Locally-originated routes always set the MP next-hop to our
-        // VTEP IP — encode_mp_reach_nlri pulls it from
-        // `EvpnRibRoute.next_hop` (set below) when staging EVPN
-        // updates, but a NEXT_HOP path attribute is also expected by
-        // some peers that look only at attribute 3.
-        next_hop_path_attribute(instance.local_vtep_ip),
         PathAttribute::ExtendedCommunities(ext_communities),
     ];
 

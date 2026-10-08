@@ -429,6 +429,13 @@ resolved.
   already committed and increments `evpn_runtime_decomposed_fail_stops_total`.
   L3VNI/device/table IP-VRF identity changes remain outside the hot-apply
   boundary by design (restart-required — kernel VRF lifecycle).
+- **`esi = "auto-lacp"` readiness is polled and reported only in logs.**
+  The bond's LACP partner is read every two seconds, so a partner change
+  takes up to that long to re-originate the segment. NotReady reasons are
+  logged on each transition; `rbgp evpn es list` shows only Ready segments.
+  While NotReady, local MACs on the segment's VNIs are advertised without an
+  ESI. Type 2 (STP) derivation is not implemented. See
+  [Auto-derived ESI](configuration.md#auto-derived-esi-lacp-type-1).
 - **Family scope is still limited.** MP-BGP supports AFI/SAFI negotiation,
   but rustbgpd currently implements IPv4/IPv6 unicast (AFI 1/2, SAFI 1),
   IPv4/IPv6 FlowSpec (AFI 1/2, SAFI 133), L2VPN/EVPN (AFI 25, SAFI

@@ -97,6 +97,9 @@ pub mod linux;
 pub use linux::LinuxDataplane;
 
 #[cfg(target_os = "linux")]
+pub use linux::bond_lacp::{LacpPartner, LacpPartnerError, read_bond_lacp_partner};
+
+#[cfg(target_os = "linux")]
 pub use linux::link_carrier::{
     LinkCarrierHandle, LinkCarrierMap, spawn_link_carrier_monitor,
     spawn_link_carrier_monitor_with_overrun_hook,

@@ -57,6 +57,7 @@ use crate::error::DataplaneError;
 use crate::snapshot::{InstanceProbes, KernelSnapshot};
 
 mod ac_gate;
+pub mod bond_lacp;
 mod bum_filter;
 mod fdb;
 mod fdb_nhg;

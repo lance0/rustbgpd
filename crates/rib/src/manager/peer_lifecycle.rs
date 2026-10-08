@@ -878,7 +878,12 @@ impl RibManager {
         let per_client_best = record.per_client_best;
         let interpret_rfc1997 = record.interpret_rfc1997;
 
-        self.peer_asn.insert(peer, peer_asn);
+        if self.peer_asn.insert(peer, peer_asn) != Some(peer_asn) {
+            // ADR-0137: a `condition_policy` reads the source peer's ASN,
+            // and GR-retained candidates outlive the session that set it.
+            // Slice 3 marks the transitioned definitions' peers dirty.
+            let _ = self.reobserve_conditional_advertisement_source(peer);
+        }
         self.peer_bgp_id.insert(peer, peer_router_id);
         // Session-semantic flags install IMMEDIATELY, not with the deferred
         // outbound registration: inbound processing (RFC 9234 role checks,
