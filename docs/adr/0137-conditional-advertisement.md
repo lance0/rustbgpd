@@ -647,10 +647,15 @@ plumbing:
   before its chain snapshot and restores on failure. Any other config
   replacement, such as removing a neighbor, is reconciled against the
   running config after the command, which drops that neighbor's attachment.
+  A failed reconcile is retried after an exponential backoff, without
+  holding later commands.
 - **Commands.** `InstallConditionalAdvertisements` returns the capture;
   `RestoreConditionalAdvertisements` reinstates it without re-evaluating;
   `ReobserveConditionalAdvertisements` carries a `condition_policy` dataset
-  swap. The commit point is the RIB's acknowledgement of the install.
+  swap and also returns a capture. A generation that rolls the swap back
+  restores that capture after the dataset rollback, and an unacknowledged
+  re-observation leaves the generation ambiguous. The commit point is the
+  RIB's acknowledgement of the install.
 - **Unchanged.** Content identity, immediate evaluation of new or changed
   definitions, restore of applied state and settle deadlines, dirty marking
   of affected peers, and both dataset dependencies behave as Decision 6
