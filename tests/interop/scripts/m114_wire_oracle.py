@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """M114 wire oracle: judge receiver-bound UPDATEs in a tshark PDML export.
 
-Usage: m114_wire_oracle.py PDML SOURCE RECEIVER PREFIX NEXT_HOP [RECEIVER PREFIX NEXT_HOP ...]
+Usage: m114_wire_oracle.py PDML RECEIVER PREFIX NEXT_HOP [RECEIVER PREFIX NEXT_HOP ...]
 
 Each <proto name="bgp"> element is one BGP message. The lab is IPv4 unicast
 only, so any MP_REACH_NLRI or MP_UNREACH_NLRI toward a receiver is a failure
 in its own right; an announcement hidden there cannot slip past the body-NLRI
 checks. Prints one PASS/FAIL line per expectation, then one for MP attributes
-and one for NOTIFICATIONs (see notification_verdict; SOURCE is the source
-peer's address). A malformed PDML raises and exits non-zero.
+and one for NOTIFICATIONs, each decoded. A malformed PDML raises and exits
+non-zero.
 """
 
 from __future__ import annotations
@@ -18,7 +18,6 @@ import xml.etree.ElementTree as ET
 
 NEXT_HOP = "3"
 MP_CODES = ("14", "15")
-CEASE_COLLISION = (6, 7)
 
 
 def fields(node: ET.Element, name: str) -> list[ET.Element]:
@@ -30,24 +29,20 @@ def show(node: ET.Element | None, name: str) -> str | None:
     return found[0].get("show") if found else None
 
 
-def notification_verdict(root: ET.Element, source: str) -> str:
+def notification_verdict(root: ET.Element) -> str:
     """One PASS/FAIL line covering every NOTIFICATION in the capture.
 
-    The capture is armed before rustbgpd starts, so the source peer's connection
-    can collide with rustbgpd's own. A Cease / Connection Collision Resolution
-    (6/7) on a source connection that had not carried KEEPALIVE or UPDATE in both
-    directions is that race: it is tolerated and listed. Any other NOTIFICATION
-    fails: on a receiver session, with another code, on a source connection
-    that had reached Established, or without a decodable session or code.
+    Any NOTIFICATION fails. Each is listed with its TCP connection, direction,
+    code/subcode, and whether its connection had reached Established (KEEPALIVE
+    or UPDATE seen in both directions), so a failure says what was sent.
     """
     sent: dict[frozenset, set] = {}
-    tolerated: list[str] = []
-    failed: list[str] = []
+    found: list[str] = []
     for packet in root.iter("packet"):
         protos = {p.get("name"): p for p in reversed(list(packet.iter("proto")))}
         ip, tcp = protos.get("ip"), protos.get("tcp")
-        src = (show(ip, "ip.src"), show(tcp, "tcp.srcport"))
-        dst = (show(ip, "ip.dst"), show(tcp, "tcp.dstport"))
+        src = f"{show(ip, 'ip.src') or '?'}:{show(tcp, 'tcp.srcport') or '?'}"
+        dst = f"{show(ip, 'ip.dst') or '?'}:{show(tcp, 'tcp.dstport') or '?'}"
         senders = sent.setdefault(frozenset((src, dst)), set())
         for bgp in (p for p in packet.iter("proto") if p.get("name") == "bgp"):
             kind = show(bgp, "bgp.type")
@@ -55,7 +50,7 @@ def notification_verdict(root: ET.Element, source: str) -> str:
                 senders.add(src)
             if kind != "3":
                 continue
-            major = show(bgp, "bgp.notify.major_error")
+            major = show(bgp, "bgp.notify.major_error") or "?"
             minor = next(
                 (
                     f.get("show")
@@ -63,26 +58,18 @@ def notification_verdict(root: ET.Element, source: str) -> str:
                     if (f.get("name") or "").startswith("bgp.notify.minor_error")
                     and (f.get("show") or "").isdigit()
                 ),
-                None,
+                "?",
             )
-            established = len(senders) == 2
-            text = (
-                f"{src[0]}:{src[1]} -> {dst[0]}:{dst[1]} code {major}/{minor} "
-                + ("after" if established else "before")
-                + " Established"
-            )
-            collision = (major, minor) == tuple(str(c) for c in CEASE_COLLISION)
-            benign = source in (src[0], dst[0]) and None not in src + dst
-            (tolerated if benign and collision and not established else failed).append(text)
+            when = "after" if len(senders) == 2 else "before"
+            found.append(f"{src} -> {dst} code {major}/{minor} {when} Established")
     return (
-        ("PASS " if not failed else "FAIL ")
-        + f"{len(tolerated) + len(failed)} NOTIFICATION message(s) captured"
-        + (f"; not tolerated: {failed}" if failed else "")
-        + (f"; tolerated source collision resolution: {tolerated}" if tolerated else "")
+        ("PASS " if not found else "FAIL ")
+        + f"{len(found)} NOTIFICATION message(s) captured"
+        + (f": {found}" if found else "")
     )
 
 
-def judge(root: ET.Element, source: str, expected: list[tuple[str, str, str]]) -> list[str]:
+def judge(root: ET.Element, expected: list[tuple[str, str, str]]) -> list[str]:
     receivers = {dst for dst, _, _ in expected}
     seen: dict[tuple[str, str], list[tuple[int, list[str]]]] = {
         (dst, prefix): [] for dst, prefix, _ in expected
@@ -127,17 +114,17 @@ def judge(root: ET.Element, source: str, expected: list[tuple[str, str, str]]) -
         + f"{len(mp_updates)} receiver-bound UPDATE(s) carry MP_REACH_NLRI or MP_UNREACH_NLRI"
         + (f" (to {sorted(set(mp_updates))})" if mp_updates else "")
     )
-    lines.append(notification_verdict(root, source))
+    lines.append(notification_verdict(root))
     return lines
 
 
 def main(argv: list[str]) -> int:
-    if len(argv) < 5 or (len(argv) - 2) % 3:
+    if len(argv) < 4 or (len(argv) - 1) % 3:
         print(__doc__, file=sys.stderr)
         return 2
-    path, source, *flat = argv
+    path, *flat = argv
     expected = [(flat[i], flat[i + 1], flat[i + 2]) for i in range(0, len(flat), 3)]
-    for line in judge(ET.parse(path).getroot(), source, expected):
+    for line in judge(ET.parse(path).getroot(), expected):
         print(line)
     return 0
 

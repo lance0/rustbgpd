@@ -17,8 +17,7 @@ Prints one PASS/FAIL line for each of:
    CONDITION, and withdrawn at least SETTLE seconds after the source
    re-announced it;
 5. no receiver-bound UPDATE carries MP_REACH_NLRI or MP_UNREACH_NLRI;
-6. no NOTIFICATION was captured, apart from source-session collision
-   resolution (see m114_wire_oracle.notification_verdict).
+6. no NOTIFICATION was captured; each one is decoded.
 
 A malformed PDML raises and exits non-zero.
 """
@@ -144,7 +143,7 @@ def judge(
     lines.append(
         verdict(not mp, f"{mp} receiver-bound UPDATE(s) carry MP_REACH_NLRI or MP_UNREACH_NLRI")
     )
-    lines.append(notification_verdict(root, source))
+    lines.append(notification_verdict(root))
     return lines
 
 

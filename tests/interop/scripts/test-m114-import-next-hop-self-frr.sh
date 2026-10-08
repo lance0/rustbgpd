@@ -12,8 +12,7 @@
 #   - a tshark capture in rustbgpd's network namespace: every UPDATE carrying
 #     the prefix has exactly one NEXT_HOP attribute with the expected address,
 #     no receiver-bound UPDATE carries MP_REACH_NLRI or MP_UNREACH_NLRI, and
-#     no NOTIFICATION is sent or received, apart from a listed Cease /
-#     collision resolution on the source session before it is Established;
+#     no NOTIFICATION is sent or received;
 #   - both receiver sessions stay on their first connection.
 #
 # Topology: frr-source (eBGP) -> rustbgpd -> frr-ibgp (iBGP) + frr-rs (RS client)
@@ -158,7 +157,7 @@ assert_wire() {
         10.114.2.2 "$CONTROL_PREFIX" "$RECEIVED_NH"
     )
     local want=$((${#expected[@]} / 3 + 2)) got=0 verdicts verdict message
-    if ! verdicts=$(python3 "$SCRIPT_DIR/m114_wire_oracle.py" "$CAPTURE_DIR/m114.pdml" 10.114.0.2 "${expected[@]}"); then
+    if ! verdicts=$(python3 "$SCRIPT_DIR/m114_wire_oracle.py" "$CAPTURE_DIR/m114.pdml" "${expected[@]}"); then
         fail "wire: oracle could not judge the capture"
         return
     fi

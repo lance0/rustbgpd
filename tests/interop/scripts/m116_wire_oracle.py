@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """M116 wire oracle: judge receiver-bound IPv6 MP_REACH_NLRI next hops in a tshark PDML export.
 
-Usage: m116_wire_oracle.py PDML SOURCE RECEIVER PREFIX NEXT_HOP [RECEIVER PREFIX NEXT_HOP ...]
+Usage: m116_wire_oracle.py PDML RECEIVER PREFIX NEXT_HOP [RECEIVER PREFIX NEXT_HOP ...]
 
 Each <proto name="bgp"> element is one BGP message. A path attribute's own
 PDML `value` is empty, so its raw bytes are rebuilt from the hex `value` and
@@ -11,9 +11,8 @@ next hop under AFI 2 is judged as sent. Prints one
 PASS/FAIL line per expectation: every UPDATE announcing PREFIX to RECEIVER
 must carry a 16-octet NEXT_HOP global address, or 32 octets whose second half
 is link-local. Then one line covering every receiver-bound IPv6 MP_REACH_NLRI
-(16 or 32 octets only) and one for NOTIFICATIONs (see
-m114_wire_oracle.notification_verdict; SOURCE is the source peer's address).
-A malformed PDML or attribute raises and exits non-zero.
+(16 or 32 octets only) and one for NOTIFICATIONs, each decoded. A malformed
+PDML or attribute raises and exits non-zero.
 """
 
 from __future__ import annotations
@@ -111,7 +110,7 @@ def show(next_hop: bytes) -> str:
     return next_hop.hex()
 
 
-def judge(root: ET.Element, source: str, expected: list[tuple[str, str, str]]) -> list[str]:
+def judge(root: ET.Element, expected: list[tuple[str, str, str]]) -> list[str]:
     receivers = {dst for dst, _, _ in expected}
     seen: dict[tuple[str, str], list[bytes]] = {(dst, prefix): [] for dst, prefix, _ in expected}
     invalid: list[str] = []
@@ -157,17 +156,17 @@ def judge(root: ET.Element, source: str, expected: list[tuple[str, str, str]]) -
         + f"{len(invalid)} receiver-bound IPv6 MP_REACH_NLRI with an invalid next hop"
         + (f" ({'; '.join(invalid)})" if invalid else "")
     )
-    lines.append(notification_verdict(root, source))
+    lines.append(notification_verdict(root))
     return lines
 
 
 def main(argv: list[str]) -> int:
-    if len(argv) < 5 or (len(argv) - 2) % 3:
+    if len(argv) < 4 or (len(argv) - 1) % 3:
         print(__doc__, file=sys.stderr)
         return 2
-    path, source, *flat = argv
+    path, *flat = argv
     expected = [(flat[i], flat[i + 1], flat[i + 2]) for i in range(0, len(flat), 3)]
-    for line in judge(ET.parse(path).getroot(), source, expected):
+    for line in judge(ET.parse(path).getroot(), expected):
         print(line)
     return 0
 

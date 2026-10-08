@@ -15,7 +15,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import m114_wire_oracle as oracle  # noqa: E402
 
 ORACLE = Path(__file__).resolve().parent / "m114_wire_oracle.py"
-SOURCE = "10.114.0.2"
 EXPECTED = [("10.114.1.2", "198.51.100.0/24", "10.114.0.1")]
 
 
@@ -43,15 +42,16 @@ def pdml(*messages: str, dst: str = "10.114.1.2") -> ET.Element:
 
 
 def verdicts(root: ET.Element) -> list[str]:
-    return [line.split(" ", 1)[0] for line in oracle.judge(root, SOURCE, EXPECTED)]
+    return [line.split(" ", 1)[0] for line in oracle.judge(root, EXPECTED)]
 
 
 def message(kind: int, code: int | None = None, subcode: int | None = None) -> str:
     """A BGP message; a NOTIFICATION carries code and subcode as tshark names them."""
     body = f'<field name="bgp.type" show="{kind}"/>'
     if code is not None:
+        minor = {5: "state", 6: "cease"}[code]
         body += f'<field name="bgp.notify.major_error" show="{code}"/>'
-        body += f'<field name="bgp.notify.minor_error_cease" show="{subcode}"/>'
+        body += f'<field name="bgp.notify.minor_error_{minor}" show="{subcode}"/>'
     return f'<proto name="bgp">{body}</proto>'
 
 
@@ -68,17 +68,16 @@ def segment(src: str, sport: int, dst: str, dport: int, *messages: str) -> str:
 def notification_scenarios(
     local: str, source: str, receiver: str
 ) -> dict[str, tuple[str, list[str]]]:
-    """Expected NOTIFICATION verdict and segments for each session/timing case.
+    """The decoded NOTIFICATION verdict line and segments for each case.
 
     Every case keeps a source connection that reaches Established (KEEPALIVE
-    both ways); the NOTIFICATION is placed on a second connection or after it.
+    both ways); the NOTIFICATION is on a second connection or after that.
     """
     up = [
         segment(source, 50000, local, 179, message(1)),
         segment(local, 179, source, 50000, message(1), message(4)),
         segment(source, 50000, local, 179, message(4)),
     ]
-    collision = message(3, 6, 7)
 
     def opened(peer: str) -> list[str]:
         # rustbgpd's own connection: OPEN and KEEPALIVE out, OPEN back, no KEEPALIVE back.
@@ -88,28 +87,36 @@ def notification_scenarios(
             segment(local, 40000, peer, 179, message(4)),
         ]
 
+    def line(decoded: str) -> str:
+        return f"FAIL 1 NOTIFICATION message(s) captured: ['{decoded}']"
+
     return {
-        "pre-Established source collision": (
-            "PASS",
-            opened(source) + up + [segment(source, 179, local, 40000, collision)],
+        "pre-Established source collision Cease": (
+            line(f"{source}:179 -> {local}:40000 code 6/7 before Established"),
+            opened(source) + up + [segment(source, 179, local, 40000, message(3, 6, 7))],
         ),
-        "receiver collision": (
-            "FAIL",
-            up + opened(receiver) + [segment(receiver, 179, local, 40000, collision)],
-        ),
-        "post-Established source collision": (
-            "FAIL",
-            up + [segment(source, 50000, local, 179, collision)],
-        ),
-        "pre-Established source non-collision": (
-            "FAIL",
-            opened(source) + up + [segment(source, 179, local, 40000, message(3, 6, 2))],
-        ),
-        "NOTIFICATION without TCP ports": (
-            "FAIL",
+        "receiver FSM error before Established": (
+            line(f"{receiver}:55242 -> {local}:179 code 5/0 before Established"),
             up
             + [
-                segment(source, 179, local, 40000, collision).replace(
+                segment(receiver, 55242, local, 179, message(1)),
+                segment(local, 179, receiver, 55242, message(1), message(4)),
+                segment(receiver, 55242, local, 179, message(3, 5, 0)),
+            ],
+        ),
+        "receiver collision Cease": (
+            line(f"{receiver}:179 -> {local}:40000 code 6/7 before Established"),
+            up + opened(receiver) + [segment(receiver, 179, local, 40000, message(3, 6, 7))],
+        ),
+        "post-Established source Cease": (
+            line(f"{source}:50000 -> {local}:179 code 6/2 after Established"),
+            up + [segment(source, 50000, local, 179, message(3, 6, 2))],
+        ),
+        "NOTIFICATION without TCP ports": (
+            line(f"{source}:? -> {local}:? code 6/7 before Established"),
+            up
+            + [
+                segment(source, 179, local, 40000, message(3, 6, 7)).replace(
                     '<proto name="tcp">', '<proto name="x">'
                 )
             ],
@@ -146,34 +153,19 @@ class M114WireOracleTests(unittest.TestCase):
         root = pdml(update(("3", "10.114.0.1")), notification)
         self.assertEqual(verdicts(root)[2], "FAIL")
 
-    def test_notification_scope(self) -> None:
-        cases = notification_scenarios("10.114.0.1", SOURCE, "10.114.1.2")
+    def test_every_notification_fails_decoded(self) -> None:
+        cases = notification_scenarios("10.114.0.1", "10.114.0.2", "10.114.1.2")
         for name, (want, segments) in cases.items():
             with self.subTest(name):
                 root = ET.fromstring(f"<pdml>{''.join(segments)}</pdml>")
-                line = oracle.judge(root, SOURCE, EXPECTED)[2]
-                self.assertTrue(line.startswith(want), line)
-                self.assertIn("6/", line)
-
-    def test_tolerated_notification_is_listed(self) -> None:
-        segments = notification_scenarios("10.114.0.1", SOURCE, "10.114.1.2")[
-            "pre-Established source collision"
-        ][1]
-        line = oracle.notification_verdict(
-            ET.fromstring(f"<pdml>{''.join(segments)}</pdml>"), SOURCE
-        )
-        self.assertEqual(
-            line,
-            "PASS 1 NOTIFICATION message(s) captured; tolerated source collision resolution: "
-            "['10.114.0.2:179 -> 10.114.0.1:40000 code 6/7 before Established']",
-        )
+                self.assertEqual(oracle.judge(root, EXPECTED)[2], want)
 
     def test_truncated_pdml_exits_non_zero(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "m114.pdml"
             path.write_text('<pdml><packet><proto name="ip">')
             result = subprocess.run(
-                [sys.executable, str(ORACLE), str(path), SOURCE, *EXPECTED[0]],
+                [sys.executable, str(ORACLE), str(path), *EXPECTED[0]],
                 capture_output=True,
                 text=True,
                 check=False,

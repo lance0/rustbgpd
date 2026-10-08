@@ -129,11 +129,13 @@ class M115WireOracleTests(unittest.TestCase):
         packets.append(packet(50.0, SRC, "10.115.0.1", notification))
         self.assertEqual(verdicts(packets)[6], "FAIL")
 
-    def test_notification_scope(self) -> None:
-        cases = notification_scenarios("10.115.0.1", SRC, RX)
-        for name, (want, segments) in cases.items():
+    def test_every_notification_fails_decoded(self) -> None:
+        for name, (want, segments) in notification_scenarios("10.115.0.1", SRC, RX).items():
             with self.subTest(name):
-                self.assertEqual(verdicts(good_packets() + segments)[6], want)
+                root = ET.fromstring(f"<pdml>{''.join(good_packets() + segments)}</pdml>")
+                lines = oracle.judge(root, *ARGS, 2.0)
+                self.assertEqual([x.split(" ", 1)[0] for x in lines[:6]], ["PASS"] * 6)
+                self.assertEqual(lines[6], want)
 
     def test_truncated_pdml_exits_non_zero(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
