@@ -6,6 +6,10 @@ integrations/
 clab-*/
 bench/scale/matrix/artifacts-*/
 
+# Local contributor guides, often symlinks that dangle inside the build.
+AGENTS.md
+CLAUDE.md
+
 # Test/operational artifacts that bloat the build context without being
 # referenced by the Dockerfile. None of these affect the cooked deps
 # layer or the workspace compile, so excluding them keeps `COPY . .`

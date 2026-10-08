@@ -2,8 +2,10 @@
 """GetPolicyStats reload cell helpers: CPU sampler, probe driver, analyzer.
 
 `policy_stats_cell.sh` runs the cell. Per reload the probe fires one
-concurrent `neighbor` + `policy stats --direction both` pair at a fixed offset
-after the cohort hot-apply completes (targeting the RIB commit band), and one
+concurrent `neighbor` + `policy stats --direction both` pair after the cohort
+hot-apply completes, which starts the RIB transition. The offset is the
+previous reload's observed hot-apply-to-commit time less a lead, so the pair
+targets the band before the RIB commit as reload speed changes, and one
 quiescent `policy stats --direction both` probe a fixed time after the reload
 completes. The analyzer matches each stats call to its daemon audit record,
 reports stage and import sub-stage timing, and evaluates the ADR-0136
@@ -141,6 +143,27 @@ def flat_verdict(in_band_sums, quiescent_sums):
     return {'pass': worst <= limit, 'in_band_max_ms': worst, 'quiescent_median_ms': quiet, 'limit_ms': limit}
 
 
+def pair_offset(transition_s, lead_s):
+    """Seconds after hot-apply completes to fire the pair.
+
+    Aims `lead_s` before the commit predicted by the previous reload's
+    hot-apply-to-commit time; fires at once with no observation yet or when
+    the transition is shorter than the lead.
+    """
+    return 0.0 if transition_s is None else max(0.0, transition_s - lead_s)
+
+
+def in_band_problem(per_reload):
+    """The under-bar error naming each out-of-band pair start, or None."""
+    count = sum(r['complete_pair_in_band'] for r in per_reload)
+    if count >= MIN_IN_BAND_PAIRS:
+        return None
+    misses = [f"R{r['reload']} {c['op']} {c['start_minus_rib_commit_ms']:+.1f}"
+              for r in per_reload for c in r['calls'] if c['phase'] == 'pair' and not c['in_band']]
+    return (f'{count} complete in-band pairs, need {MIN_IN_BAND_PAIRS}; band is {BAND_MS[0]:+.0f}..{BAND_MS[1]:+.0f} ms '
+            f"from RIB commit; out-of-band pair starts (ms from commit): {', '.join(misses) or 'none'}")
+
+
 def validate_reply(op, body, peers):
     data = json.loads(body)
     if op == 'neighbor':
@@ -227,6 +250,8 @@ def probe(args):
     workers = []
     reload_n = 0
     armed = False
+    hot_apply_wall = None
+    transition_s = None
     deadline = time.monotonic() + args.cap_secs
     with open(args.output, 'w', buffering=1) as out:
         def emit(row):
@@ -302,8 +327,15 @@ def probe(args):
                     # remainder, so the cohort can be smaller than the fleet.
                     armed = False
                     n = reload_n
-                    emit({'record': 'hot_apply_complete', 'reload': n, 'wall': stamp, 'cohort_targets': f['applied']})
-                    spawn(stamp + args.pair_offset, lambda n=n: pair(n))
+                    hot_apply_wall = stamp
+                    offset = pair_offset(transition_s, args.pair_lead)
+                    emit({'record': 'hot_apply_complete', 'reload': n, 'wall': stamp, 'cohort_targets': f['applied'],
+                          'pair_offset_s': offset})
+                    spawn(stamp + offset, lambda n=n: pair(n))
+                elif message == 'RIB export-policy transition completed' and hot_apply_wall is not None:
+                    transition_s = stamp - hot_apply_wall
+                    hot_apply_wall = None
+                    emit({'record': 'rib_commit', 'reload': reload_n, 'wall': stamp, 'transition_s': transition_s})
                 elif message == 'config reload complete (one runtime generation)' and reload_n:
                     n = reload_n
                     spawn(stamp + args.quiescent_offset, lambda n=n: read(n, 'quiescent', 'policy_stats'))
@@ -428,7 +460,8 @@ def analyze(root, peers, reloads):
                            'complete_pair_in_band': sum(r['in_band'] for r in rows) == 2, 'calls': rows})
     check(len(used) == len(audits), f'{len(audits) - len(used)} unmatched GetPolicyStats audits')
     pairs_in_band = sum(r['complete_pair_in_band'] for r in per_reload)
-    check(pairs_in_band >= MIN_IN_BAND_PAIRS, f'{pairs_in_band} complete in-band pairs, need {MIN_IN_BAND_PAIRS}')
+    band_problem = in_band_problem(per_reload)
+    check(band_problem is None, band_problem)
 
     engine = (root / 'reloadstall.log').read_text()
     check('final sessions_up %d/%d parse_errors=0' % (peers, peers) in engine, 'engine final inventory')
@@ -492,7 +525,7 @@ def main():
         s.add_argument(name, required=True)
     s.add_argument('--peers', type=int, required=True)
     s.add_argument('--reloads', type=int, required=True)
-    s.add_argument('--pair-offset', type=float, required=True)
+    s.add_argument('--pair-lead', type=float, required=True)
     s.add_argument('--quiescent-offset', type=float, required=True)
     s.add_argument('--cap-secs', type=float, required=True)
     s = sub.add_parser('analyze')

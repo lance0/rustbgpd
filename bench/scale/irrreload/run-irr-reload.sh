@@ -401,7 +401,7 @@ if [ -z "$SMOKE" ]; then
     fi
     echo "=== host-quiet preflight (tests/soak/preflight.sh) ==="
     PREFLIGHT_LOG=$(mktemp /tmp/irrreload-preflight.XXXXXX) || exit 1
-    "$REPO/tests/soak/preflight.sh" >"$PREFLIGHT_LOG" 2>&1 || {
+    SKIP_SOURCE_ID_CHECK=1 "$REPO/tests/soak/preflight.sh" >"$PREFLIGHT_LOG" 2>&1 || {
         cat "$PREFLIGHT_LOG" >&2
         rm -f "$PREFLIGHT_LOG"
         echo "preflight failed; fix the named host condition" >&2

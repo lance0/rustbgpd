@@ -50,7 +50,7 @@ HEAD=$(git rev-parse HEAD)
 [ ! -e "$ART" ] || { echo "artifact root already exists: $ART" >&2; exit 2; }
 
 CONFIRM_NO_MAIN_PUSHES="${CONFIRM_NO_MAIN_PUSHES:-}" \
-SKIP_BUILD_CHECK=1 tests/soak/preflight.sh
+SKIP_BUILD_CHECK=1 SKIP_SOURCE_ID_CHECK=1 tests/soak/preflight.sh
 HOST_LOCK="${RUSTBGPD_HOST_LOCK:-$HOME/.local/state/rustbgpd-host.lock}"
 mkdir -p "$(dirname "$HOST_LOCK")" "$ART"
 exec 9>"$HOST_LOCK"

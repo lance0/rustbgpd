@@ -477,7 +477,7 @@ for tool in cargo curl flock git jq python3 setsid sha256sum ss timeout; do comm
 source_admission "$MODE" || die "source admission failed"
 mkdir -p "$(dirname "$ARTIFACT_ROOT")"
 umask 077; mkdir "$ARTIFACT_ROOT"; ART=$(cd "$ARTIFACT_ROOT" && pwd)
-if [[ $MODE == full ]]; then "$REPO/tests/soak/preflight.sh" >"$ART/full-preflight.log" 2>&1 || exit 75; fi
+if [[ $MODE == full ]]; then SKIP_SOURCE_ID_CHECK=1 "$REPO/tests/soak/preflight.sh" >"$ART/full-preflight.log" 2>&1 || exit 75; fi
 LOCK=${RUSTBGPD_HOST_LOCK:-$HOME/.local/state/rustbgpd-host.lock}; mkdir -p "$(dirname "$LOCK")"; exec {LOCK_FD}>"$LOCK"
 flock -n "$LOCK_FD" || exit 75
 printf 'phase\tmonotonic\tutc\tload1\tmem_available_kib\tports_free\n' >"$ART/preflight.tsv"

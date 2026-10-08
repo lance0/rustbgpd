@@ -12,7 +12,7 @@ export TOPO INTEROP_TEST_OPERATOR_AUTH
 # test-lib runs preflight while sourced. Satisfy its external-command probes
 # without Docker or network access; grpcurl remains an argv recorder below.
 docker() {
-    [ "${1:-}" = "inspect" ]
+    case "${1:-}" in inspect | ps) ;; *) return 1 ;; esac
 }
 grpcurl() {
     printf '<%s>\n' "$@"
