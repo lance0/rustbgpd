@@ -1,0 +1,51 @@
+[global]
+asn = 65001
+router_id = "10.114.0.1"
+listen_port = 179
+
+[global.telemetry]
+prometheus_addr = "0.0.0.0:9179"
+log_format = "json"
+
+[global.telemetry.grpc_tcp]
+address = "0.0.0.0:50051"
+token_file = "/run/rustbgpd/grpc-test-only-operator.token"
+principal = "rustbgpd://operator/test-only"
+
+# eBGP source. Import `next-hop self` resolves to the local address of this
+# session (10.114.0.1); the control prefix keeps the received 10.114.0.2.
+[[neighbors]]
+address = "10.114.0.2"
+remote_asn = 65002
+description = "frr-m114-source"
+hold_time = 90
+
+[[neighbors.import_policy]]
+prefix = "198.51.100.0/24"
+action = "permit"
+set_next_hop = "self"
+
+[[neighbors.import_policy]]
+prefix = "198.51.101.0/24"
+action = "permit"
+
+# iBGP receiver: export leaves the next hop unchanged.
+[[neighbors]]
+address = "10.114.1.2"
+remote_asn = 65001
+description = "frr-m114-ibgp"
+hold_time = 90
+
+# Route-server client: transparent export keeps the stored next hop.
+[[neighbors]]
+address = "10.114.2.2"
+remote_asn = 65003
+description = "frr-m114-rs-client"
+hold_time = 90
+route_server_client = true
+
+[security.grpc]
+enforcement = "tier"
+
+[security.grpc.roles]
+"rustbgpd://operator/test-only" = "operator"
