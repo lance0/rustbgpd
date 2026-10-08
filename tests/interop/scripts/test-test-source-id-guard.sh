@@ -47,6 +47,9 @@ case "$1" in
 esac
 EOF
 chmod +x "$stubs/docker"
+# test-lib's preflight requires grpcurl on PATH; hosted runners lack it.
+printf '#!/bin/sh\nexit 0\n' >"$stubs/grpcurl"
+chmod +x "$stubs/grpcurl"
 
 # Source the library as an interop script would. CI and GITHUB_ACTIONS are
 # cleared so source-id.sh compares ids instead of skipping under CI.
