@@ -670,16 +670,18 @@ cross-daemon roots at each of 0%, 10%, and 50% received-view overlap, at
 12.926–14.810 seconds and OpenBGPD 9.3's 44.010–63.948 seconds, measured
 2026-10-04 to 2026-10-05. Every row has 320/320 sessions and zero parse errors. At 50%
 overlap, OpenBGPD's changed-observer gap p50 is shorter than rustbgpd's
-(377–517 against 591–627 ms).
-A separate
-[2026-10-06 current-source receipt](../perf/irr-reload-current-comparators-2026-10-06.md)
-measures BIRD 3.3.3 and OpenBGPD 9.3 against unreleased rustbgpd source at
-0% overlap only (completion p50 0.578–0.606 s for rustbgpd, 12.493–14.490 s
-for BIRD 3.3.3 and 44.429–59.541 s for OpenBGPD); BIRD 3.3.3 has no 10% or
-50% overlap measurement yet. The
+(377–517 against 591–627 ms). The
 [v0.68.0 receipt](../perf/irr-reload-v0680-2026-08.md), measured 2026-08-30,
 keeps the grouped control and its received-view delta verification; the
 older IRR receipts are historical records.
+
+A separate
+[2026-10-06 current-source receipt](../perf/irr-reload-current-comparators-2026-10-06.md)
+measures BIRD 3.3.3 and OpenBGPD 9.3 against unreleased rustbgpd source
+`dcc9b6384` at 0% overlap only: completion p50 was 0.578–0.606 s for
+rustbgpd, 12.493–14.490 s for BIRD 3.3.3 and 44.429–59.541 s for OpenBGPD
+9.3. It is not a release result, and BIRD 3.3.3 has no 10% or 50% overlap
+measurement yet.
 
 A separate [1,000-peer retained receipt](../perf/route-server-1000-2026-07.md),
 measured 2026-07-20 with a source-equivalent v0.68.0 rerun measured 2026-08-30,
