@@ -1146,6 +1146,7 @@ conditional_advertisements = ["backup"]
 
     #[test]
     fn policy_references_include_conditional_advertisement_predicates() {
+        let _bypass = crate::config::ConditionalAdvertisementRefusalBypass::enable();
         let config = conditional_advertisement_config();
         assert_eq!(
             policy_references(&config, "backup-routes"),
@@ -1179,6 +1180,7 @@ conditional_advertisements = ["backup"]
     /// definitions, so every one must leave them as configured.
     #[test]
     fn neighbor_and_policy_events_preserve_conditional_advertisements() {
+        let _bypass = crate::config::ConditionalAdvertisementRefusalBypass::enable();
         let address: IpAddr = "10.0.0.2".parse().unwrap();
         let names = |names: &[&str]| names.iter().map(ToString::to_string).collect::<Vec<_>>();
         let events = [

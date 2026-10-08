@@ -997,7 +997,7 @@ complete atomic block. There is no probe or automatic legacy fallback.
 | `export_policy_chain`  | [string] | no       | --      | Named policy chain for export (mutually exclusive with inline export_policy) |
 | `import_policy`        | [table]  | no       | --      | Inline import policy statements (`[[neighbors.import_policy]]`, see [Policy entries](#policy-entries)); mutually exclusive with `import_policy_chain` |
 | `export_policy`        | [table]  | no       | --      | Inline export policy statements (`[[neighbors.export_policy]]`, see [Policy entries](#policy-entries)); mutually exclusive with `export_policy_chain` |
-| `conditional_advertisements` | [string] | no | `[]` | Names of [conditional advertisement](#conditional-advertisements-not-yet-enforced) definitions attached to this static neighbor. Accepted and validated, but not yet enforced |
+| `conditional_advertisements` | [string] | no | `[]` | Names of [conditional advertisement](#conditional-advertisements-refused-until-enforced) definitions attached to this static neighbor. Currently refused until export enforcement ships |
 | `llgr_stale_time`      | u32      | no       | 0       | LLGR stale time in seconds (0 = disabled, max 16777215; RFC 9494)    |
 | `add_path`             | table    | no       | --      | Add-Path (RFC 7911) config table (see below)                         |
 | `log_level`            | string   | no       | --      | Override log level for this peer: `"error"`, `"warn"`, `"info"`, `"debug"`, or `"trace"` |
@@ -2831,13 +2831,17 @@ recovery of routes previously rejected at import depends on negotiated Route
 Refresh; otherwise, those routes wait for natural re-advertisement or a new
 session's replay.
 
-### Conditional advertisements (not yet enforced)
+### Conditional advertisements (refused until enforced)
 
 Conditional advertisement (ADR-0137) advertises a set of routes to a
 neighbor only while a condition route is present, or only while it is
-absent. **This release accepts and validates the configuration below, but
-does not yet enforce it on export:** controlled routes are advertised as
-if no definition were attached. Enforcement lands in a later release.
+absent. **The daemon currently refuses these keys until export
+enforcement ships.** It validates the configuration below, reports any
+specific error, and then refuses an otherwise valid config that defines or
+attaches a conditional advertisement, at startup, `--check`, SIGHUP, and
+config transactions alike. The schema is documented here so the
+configuration can be prepared and checked against the release that
+enforces it.
 
 Definitions live under `[policy.conditional_advertisements.<name>]` and are
 attached to static neighbors by name:
