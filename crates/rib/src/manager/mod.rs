@@ -109,6 +109,7 @@ use queries::{BMP_DUMP_CHUNK_SIZE, page_routes, send_mrt_snapshot};
 
 pub use conditional_advertisement::{
     ConditionalAdvertiseIf, ConditionalAdvertisement, ConditionalAdvertisementCapture,
+    ConditionalAdvertisementSet,
 };
 use helpers::{DIRTY_RESYNC_INTERVAL, LlgrPeerConfig, gauge_val, prefix_family};
 pub use selection_deferral::{SelectionDeferralConfig, SelectionDeferralWaiterConfig};
@@ -2246,6 +2247,16 @@ impl RibManager {
         self
     }
 
+    /// Seed the startup conditional-advertisement install (ADR-0137) before
+    /// the actor starts, so no session can register ahead of its gate.
+    /// Definitions start `pending`. Install after
+    /// [`Self::with_selection_deferral`] so RFC 4724 deferral holds them.
+    #[must_use]
+    pub fn with_conditional_advertisements(mut self, set: ConditionalAdvertisementSet) -> Self {
+        let _ = self.handle_install_conditional_advertisements(set);
+        self
+    }
+
     #[must_use]
     pub(super) fn selection_deferred(&self, family: (Afi, Safi)) -> bool {
         self.selection_deferral
@@ -2418,7 +2429,6 @@ impl RibManager {
         if changed {
             Self::advance_route_page_version(&mut self.peer_group_version);
             // ADR-0137: a `condition_policy` reads the source peer's group.
-            // Slice 3 marks the transitioned definitions' peers dirty.
             let _ = self.reobserve_conditional_advertisement_source(peer);
         }
     }
@@ -2482,6 +2492,8 @@ impl RibManager {
             | RibUpdate::RestorePeerExportPoliciesAuthoritatively { .. }
             | RibUpdate::ApplyOutboundPrefixLimits { .. }
             | RibUpdate::ReevaluatePeerExportPolicies { .. }
+            | RibUpdate::InstallConditionalAdvertisements { .. }
+            | RibUpdate::RestoreConditionalAdvertisements { .. }
             | RibUpdate::RefreshPeerOutbound { .. }
             | RibUpdate::ReplayPeerOutbound { .. } => self.advance_advertised_pages(),
             RibUpdate::PeerUp { .. }
@@ -3495,6 +3507,17 @@ impl RibManager {
             }
             RibUpdate::ReevaluatePeerExportPolicies { peers, reply } => {
                 self.handle_reevaluate_peer_export_policies(&peers, reply);
+            }
+            RibUpdate::InstallConditionalAdvertisements { set, reply } => {
+                let _ = reply.send(self.handle_install_conditional_advertisements(set));
+            }
+            RibUpdate::RestoreConditionalAdvertisements { capture, reply } => {
+                self.handle_restore_conditional_advertisements(capture);
+                let _ = reply.send(());
+            }
+            RibUpdate::ReobserveConditionalAdvertisements { datasets, reply } => {
+                let _ =
+                    reply.send(self.handle_reobserve_conditional_advertisement_datasets(&datasets));
             }
             RibUpdate::EndOfRib {
                 peer,
@@ -4876,7 +4899,6 @@ impl RibManager {
                     continue;
                 }
                 self.conditional_expiry_cutoff = None;
-                // Slice 3 marks the transitioned definitions' peers dirty.
                 let _ = self.fire_conditional_advertisement_timers();
                 continue;
             }

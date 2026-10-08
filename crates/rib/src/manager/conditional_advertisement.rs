@@ -9,11 +9,13 @@
 //! applies; `unknown` (a `condition_policy` evaluation error) cancels the
 //! timer and holds the applied state.
 //!
-//! The export gate that consumes `applied` is ADR-0137 slice 3. Until then
-//! the daemon refuses configs that define conditional advertisements, so
-//! definitions are installed only by tests.
+//! The tracker also owns the address-keyed attachments the export gate reads:
+//! one install carries both, so the gate never sees an attachment whose
+//! definition is missing. The gate itself ([`ConditionalGate`]) runs last
+//! before the export chain in every unicast export body.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::fmt::Write as _;
 use std::net::IpAddr;
 use std::sync::Arc;
 use std::time::Duration;
@@ -94,6 +96,45 @@ pub(super) enum AppliedConditionalState {
     Suppress,
 }
 
+/// One complete conditional-advertisement install (ADR-0137): every
+/// definition some static neighbor attaches, and each such neighbor's
+/// attachment names in configured order. Static neighbors only, so the
+/// neighbor address is the attachment key.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ConditionalAdvertisementSet {
+    /// Resolved definitions referenced by at least one attachment.
+    pub definitions: Vec<ConditionalAdvertisement>,
+    /// Attached definition names per static neighbor address.
+    pub attachments: BTreeMap<IpAddr, Vec<Arc<str>>>,
+}
+
+impl ConditionalAdvertisementSet {
+    /// Whether an `advertise_policy` attached to `peer` references any of
+    /// `datasets` (the dataset-refresh export dependency).
+    #[must_use]
+    pub fn advertise_policy_references(&self, peer: IpAddr, datasets: &[String]) -> bool {
+        self.attachments.get(&peer).is_some_and(|names| {
+            self.definitions.iter().any(|definition| {
+                names.contains(&definition.name)
+                    && datasets
+                        .iter()
+                        .any(|name| definition.advertise_policy.references_dataset(name))
+            })
+        })
+    }
+
+    /// Whether any `condition_policy` references one of `datasets`.
+    #[must_use]
+    pub fn condition_policy_references(&self, datasets: &[String]) -> bool {
+        self.definitions.iter().any(|definition| {
+            definition
+                .condition_policy
+                .as_ref()
+                .is_some_and(|policy| datasets.iter().any(|name| policy.references_dataset(name)))
+        })
+    }
+}
+
 #[derive(Clone, Debug)]
 struct DefinitionState {
     definition: Arc<ConditionalAdvertisement>,
@@ -107,6 +148,9 @@ struct DefinitionState {
 #[derive(Default)]
 pub(super) struct ConditionalAdvertisementTracker {
     definitions: BTreeMap<Arc<str>, DefinitionState>,
+    /// Attached definition names per static neighbor address. Installed
+    /// together with `definitions`; the only attachment state the gate reads.
+    attachments: BTreeMap<IpAddr, Vec<Arc<str>>>,
     by_prefix: FastMap<Prefix, Vec<Arc<str>>>,
     installed: bool,
     /// Condition candidates visited, for the no-table-walk proof.
@@ -119,13 +163,14 @@ pub(super) struct ConditionalAdvertisementTracker {
 #[derive(Clone, Debug)]
 pub struct ConditionalAdvertisementCapture {
     definitions: BTreeMap<Arc<str>, DefinitionState>,
+    attachments: BTreeMap<IpAddr, Vec<Arc<str>>>,
     installed: bool,
 }
 
 enum CandidateVerdict {
     Match,
     Miss,
-    Error,
+    Error(rustbgpd_policy::EvalError),
 }
 
 impl RibManager {
@@ -135,23 +180,13 @@ impl RibManager {
     /// and evaluates new or changed definitions immediately. Returns the
     /// prior state for compensation and the names whose applied state
     /// changed.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "ADR-0137 slice 3 installs definitions from the export-policy batch"
-        )
-    )]
     pub(super) fn install_conditional_advertisements(
         &mut self,
         definitions: Vec<ConditionalAdvertisement>,
     ) -> (ConditionalAdvertisementCapture, Vec<Arc<str>>) {
         let now = Instant::now();
         let startup = !self.conditional_advertisements.installed;
-        let capture = ConditionalAdvertisementCapture {
-            definitions: self.conditional_advertisements.definitions.clone(),
-            installed: self.conditional_advertisements.installed,
-        };
+        let capture = self.capture_conditional_advertisements();
         let mut prior = std::mem::take(&mut self.conditional_advertisements.definitions);
         let mut next = BTreeMap::new();
         let mut transitions = Vec::new();
@@ -211,18 +246,19 @@ impl RibManager {
         (capture, transitions)
     }
 
+    fn capture_conditional_advertisements(&self) -> ConditionalAdvertisementCapture {
+        ConditionalAdvertisementCapture {
+            definitions: self.conditional_advertisements.definitions.clone(),
+            attachments: self.conditional_advertisements.attachments.clone(),
+            installed: self.conditional_advertisements.installed,
+        }
+    }
+
     /// Reinstate the state captured by [`Self::install_conditional_advertisements`]
     /// (ADR-0137 Decision 6). The restored applied states and settle deadlines
     /// stand; only an observation the RIB has since changed restarts the
     /// debounce from now. Returns the names whose applied state differs from
     /// the replaced set.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "ADR-0137 slice 3 restores definitions from the export-policy rollback batch"
-        )
-    )]
     pub(super) fn restore_conditional_advertisements(
         &mut self,
         capture: ConditionalAdvertisementCapture,
@@ -233,6 +269,7 @@ impl RibManager {
             capture.definitions,
         );
         self.conditional_advertisements.installed = capture.installed;
+        self.conditional_advertisements.attachments = capture.attachments;
         self.rebuild_conditional_index();
         for (name, state) in &replaced {
             let restored = self.conditional_advertisements.definitions.get(name);
@@ -324,6 +361,7 @@ impl RibManager {
         for name in &names {
             self.reobserve_definition(name, now, &mut transitions);
         }
+        self.mark_conditional_advertisement_peers_dirty(&transitions);
         transitions
     }
 
@@ -365,17 +403,11 @@ impl RibManager {
                 .definitions
                 .insert(name, state);
         }
+        self.mark_conditional_advertisement_peers_dirty(&transitions);
     }
 
     /// Re-observe definitions whose `condition_policy` references a swapped
     /// dataset (ADR-0137 Decision 6), under the ordinary debounce.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "ADR-0137 slice 3 wires dataset refresh once definitions are installed"
-        )
-    )]
     pub(super) fn reevaluate_conditional_advertisement_datasets(
         &mut self,
         swapped: &[String],
@@ -400,6 +432,7 @@ impl RibManager {
         for name in &names {
             self.reobserve_definition(name, now, &mut transitions);
         }
+        self.mark_conditional_advertisement_peers_dirty(&transitions);
         transitions
     }
 
@@ -432,6 +465,7 @@ impl RibManager {
         for name in &names {
             self.reobserve_definition(name, now, &mut transitions);
         }
+        self.mark_conditional_advertisement_peers_dirty(&transitions);
         transitions
     }
 
@@ -444,8 +478,9 @@ impl RibManager {
             .min()
     }
 
-    /// Apply every definition whose settle deadline has passed. Returns the
-    /// names whose applied state changed.
+    /// Apply every definition whose settle deadline has passed, marking the
+    /// attached peers of each applied transition dirty. Returns the names
+    /// whose applied state changed.
     pub(super) fn fire_conditional_advertisement_timers(&mut self) -> Vec<Arc<str>> {
         let now = Instant::now();
         let due: Vec<_> = self
@@ -463,6 +498,7 @@ impl RibManager {
             state.deadline = None;
             Self::apply_observation(&self.metrics, state, &mut transitions);
         }
+        self.mark_conditional_advertisement_peers_dirty(&transitions);
         transitions
     }
 
@@ -579,21 +615,23 @@ impl RibManager {
         }
     }
 
+    /// Every accepted Adj-RIB-In candidate for `prefix`, including one that
+    /// selection skips (one with an invalid service SID): not
+    /// `unicast_candidates`, which applies selection eligibility.
+    fn condition_candidates<'a>(&'a self, prefix: &'a Prefix) -> impl Iterator<Item = &'a Route> {
+        self.unicast_prefix_peers
+            .peers(prefix)
+            .filter_map(|peer| self.ribs.get(&peer))
+            .flat_map(|rib| rib.iter_prefix(prefix))
+    }
+
     /// Any current candidate (received and import-accepted, stale, losing
     /// Add-Path, or locally injected) that satisfies the condition makes it
     /// present. An evaluation error is neither a match nor a miss.
     fn observe_condition(&self, definition: &ConditionalAdvertisement) -> ConditionObservation {
         let mut errored = false;
         for prefix in &definition.condition_prefixes {
-            // Every accepted Adj-RIB-In candidate counts, including one that
-            // selection skips (an invalid SRv6 service SID): not
-            // `unicast_candidates`, which applies selection eligibility.
-            let candidates = self
-                .unicast_prefix_peers
-                .peers(prefix)
-                .filter_map(|peer| self.ribs.get(&peer))
-                .flat_map(|rib| rib.iter_prefix(prefix));
-            for route in candidates {
+            for route in self.condition_candidates(prefix) {
                 #[cfg(test)]
                 self.conditional_advertisements
                     .candidate_visits
@@ -601,9 +639,9 @@ impl RibManager {
                 let Some(policy) = &definition.condition_policy else {
                     return ConditionObservation::Present;
                 };
-                match self.condition_candidate_verdict(policy, route) {
+                match self.condition_candidate_verdict(policy, route, true) {
                     CandidateVerdict::Match => return ConditionObservation::Present,
-                    CandidateVerdict::Error => errored = true,
+                    CandidateVerdict::Error(_) => errored = true,
                     CandidateVerdict::Miss => {}
                 }
             }
@@ -618,7 +656,12 @@ impl RibManager {
     /// Evaluate `condition_policy` for one candidate. A received candidate
     /// sees its source peer's address, configured ASN, and group; a locally
     /// injected one (`LOCAL_PEER`) has no peer context at all.
-    fn condition_candidate_verdict(&self, policy: &PolicyChain, route: &Route) -> CandidateVerdict {
+    fn condition_candidate_verdict(
+        &self,
+        policy: &PolicyChain,
+        route: &Route,
+        count_errors: bool,
+    ) -> CandidateVerdict {
         let (peer_address, peer_asn, peer_group): (Option<IpAddr>, Option<u32>, Option<&str>) =
             if route.peer == LOCAL_PEER {
                 (None, None, None)
@@ -658,15 +701,294 @@ impl RibManager {
             med: route.med_attr(),
         };
         let (_, evaluation) = policy.evaluate_with_attribution(&ctx);
-        if let Some(error) = &evaluation.eval_error {
-            self.metrics
-                .record_policy_eval_error("condition", error.kind.label());
-            CandidateVerdict::Error
+        if let Some(error) = evaluation.eval_error {
+            // Live observations count; the explain walk must not skew metrics.
+            if count_errors {
+                self.metrics
+                    .record_policy_eval_error("condition", error.kind.label());
+            }
+            CandidateVerdict::Error(error)
         } else if evaluation.action == PolicyAction::Permit {
             CandidateVerdict::Match
         } else {
             CandidateVerdict::Miss
         }
+    }
+
+    /// Install a complete definition and attachment set (ADR-0137 Decision 6,
+    /// as amended: one address-keyed install the gate reads). Returns the
+    /// capture that [`Self::handle_restore_conditional_advertisements`]
+    /// reinstates on compensation.
+    pub(super) fn handle_install_conditional_advertisements(
+        &mut self,
+        set: ConditionalAdvertisementSet,
+    ) -> ConditionalAdvertisementCapture {
+        let prior_attachments = self.conditional_advertisements.attachments.clone();
+        let prior_definitions = self.conditional_definition_contents();
+        let (capture, transitions) = self.install_conditional_advertisements(set.definitions);
+        self.conditional_advertisements.attachments = set.attachments;
+        self.settle_conditional_advertisement_change(
+            &prior_attachments,
+            &prior_definitions,
+            &transitions,
+        );
+        capture
+    }
+
+    /// Reinstate a captured install: applied state and settle deadlines
+    /// stand; peers whose attachments or gate inputs change are resynced.
+    pub(super) fn handle_restore_conditional_advertisements(
+        &mut self,
+        capture: ConditionalAdvertisementCapture,
+    ) {
+        let prior_attachments = self.conditional_advertisements.attachments.clone();
+        let prior_definitions = self.conditional_definition_contents();
+        let transitions = self.restore_conditional_advertisements(capture);
+        self.settle_conditional_advertisement_change(
+            &prior_attachments,
+            &prior_definitions,
+            &transitions,
+        );
+    }
+
+    /// Re-observe the definitions whose `condition_policy` references a
+    /// swapped dataset, then resync the peers of any applied transition.
+    /// Returns the prior state, for a generation that rolls the swap back.
+    pub(super) fn handle_reobserve_conditional_advertisement_datasets(
+        &mut self,
+        datasets: &[String],
+    ) -> ConditionalAdvertisementCapture {
+        let capture = self.capture_conditional_advertisements();
+        let _ = self.reevaluate_conditional_advertisement_datasets(datasets);
+        capture
+    }
+
+    fn conditional_definition_contents(&self) -> BTreeMap<Arc<str>, Arc<ConditionalAdvertisement>> {
+        self.conditional_advertisements
+            .definitions
+            .iter()
+            .map(|(name, state)| (Arc::clone(name), Arc::clone(&state.definition)))
+            .collect()
+    }
+
+    /// Regroup peers whose attachment presence changed and resync every
+    /// registered peer whose gate inputs changed: its attachment list, the
+    /// content of an attached definition, or an attached definition's
+    /// applied state.
+    fn settle_conditional_advertisement_change(
+        &mut self,
+        prior_attachments: &BTreeMap<IpAddr, Vec<Arc<str>>>,
+        prior_definitions: &BTreeMap<Arc<str>, Arc<ConditionalAdvertisement>>,
+        transitions: &[Arc<str>],
+    ) {
+        let current = self.conditional_definition_contents();
+        let mut changed: BTreeSet<Arc<str>> = transitions.iter().cloned().collect();
+        for name in prior_definitions.keys().chain(current.keys()) {
+            if prior_definitions.get(name) != current.get(name) {
+                changed.insert(Arc::clone(name));
+            }
+        }
+        let attachments = &self.conditional_advertisements.attachments;
+        let mut regroup = Vec::new();
+        let mut dirty = BTreeSet::new();
+        for peer in prior_attachments.keys().chain(attachments.keys()) {
+            let before = prior_attachments.get(peer);
+            let after = attachments.get(peer);
+            if before.is_some() != after.is_some() {
+                regroup.push(*peer);
+            }
+            if before != after
+                || before
+                    .into_iter()
+                    .chain(after)
+                    .flatten()
+                    .any(|name| changed.contains(name))
+            {
+                dirty.insert(*peer);
+            }
+        }
+        dirty.retain(|peer| self.outbound_peers.contains_key(peer));
+        if dirty.is_empty() {
+            return;
+        }
+        let mut regrouped = false;
+        for peer in regroup {
+            if self.update_groups.members.contains_key(&peer) {
+                self.recompute_update_group(peer);
+                regrouped = true;
+            }
+        }
+        for peer in dirty {
+            self.mark_outbound_dirty(peer);
+        }
+        if regrouped {
+            self.distribute_changes_after_advertised_page_advance(
+                &std::collections::HashSet::new(),
+                &std::collections::HashSet::new(),
+            );
+        }
+    }
+
+    /// Mark every registered peer attached to one of `names` outbound-dirty
+    /// (ADR-0137 Decision 4): the bounded resync re-evaluates its whole
+    /// Adj-RIB-Out through the gate, so nothing else writes Adj-RIB-Out.
+    pub(super) fn mark_conditional_advertisement_peers_dirty(&mut self, names: &[Arc<str>]) {
+        if names.is_empty() {
+            return;
+        }
+        let peers: Vec<IpAddr> = self
+            .conditional_advertisements
+            .attachments
+            .iter()
+            .filter(|(peer, attached)| {
+                self.outbound_peers.contains_key(*peer)
+                    && attached.iter().any(|name| names.contains(name))
+            })
+            .map(|(peer, _)| *peer)
+            .collect();
+        for peer in peers {
+            self.mark_outbound_dirty(peer);
+        }
+    }
+
+    /// Whether `peer` has any conditional advertisement attached.
+    pub(super) fn peer_has_conditional_advertisements(&self, peer: IpAddr) -> bool {
+        self.conditional_advertisements
+            .attachments
+            .contains_key(&peer)
+    }
+
+    /// The export gate for `peer`. Live staging gets `None` when nothing is
+    /// attached or every attached definition is advertising, so a peer in
+    /// steady state evaluates no predicate. Explain always gets the attached
+    /// entries, with their condition rendered.
+    pub(super) fn conditional_gate(&self, peer: IpAddr, explain: bool) -> Option<ConditionalGate> {
+        let names = self.conditional_advertisements.attachments.get(&peer)?;
+        let entries: Vec<GateEntry> = names
+            .iter()
+            .map(|name| {
+                let state = self.conditional_advertisements.definitions.get(name);
+                GateEntry {
+                    name: Arc::clone(name),
+                    definition: state.map(|state| Arc::clone(&state.definition)),
+                    applied: state.map_or(AppliedConditionalState::Pending, |state| state.applied),
+                    condition: if explain {
+                        state.map_or_else(
+                            || "definition is not installed; failing closed".to_string(),
+                            |state| self.explain_condition(state),
+                        )
+                    } else {
+                        String::new()
+                    },
+                }
+            })
+            .collect();
+        if !explain
+            && entries
+                .iter()
+                .all(|entry| entry.applied == AppliedConditionalState::Advertise)
+        {
+            return None;
+        }
+        Some(ConditionalGate { entries })
+    }
+
+    /// Explain rendering of the condition behind a definition's applied
+    /// state, plus any observation still waiting out `settle_time`.
+    fn explain_condition(&self, state: &DefinitionState) -> String {
+        let definition = &state.definition;
+        let mode = definition.advertise_if;
+        let (first_present, condition_error) = self.scan_condition(definition);
+        let applied_basis = match state.applied {
+            AppliedConditionalState::Pending => None,
+            AppliedConditionalState::Advertise => Some(mode),
+            AppliedConditionalState::Suppress => Some(match mode {
+                ConditionalAdvertiseIf::Present => ConditionalAdvertiseIf::Absent,
+                ConditionalAdvertiseIf::Absent => ConditionalAdvertiseIf::Present,
+            }),
+        };
+        let mut detail = match applied_basis {
+            None => "pending initial evaluation".to_string(),
+            Some(ConditionalAdvertiseIf::Present) => {
+                let prefix = first_present.unwrap_or(definition.condition_prefixes[0]);
+                format!(
+                    "condition prefix {prefix} present (advertise if {})",
+                    mode.label()
+                )
+            }
+            Some(ConditionalAdvertiseIf::Absent) => {
+                let prefixes = definition
+                    .condition_prefixes
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                let noun = if definition.condition_prefixes.len() == 1 {
+                    "prefix"
+                } else {
+                    "prefixes"
+                };
+                format!(
+                    "condition {noun} {prefixes} absent (advertise if {})",
+                    mode.label()
+                )
+            }
+        };
+        let applied_label = match state.applied {
+            AppliedConditionalState::Pending => "pending",
+            AppliedConditionalState::Advertise => "advertise",
+            AppliedConditionalState::Suppress => "suppress",
+        };
+        if state.observed == ConditionObservation::Unknown {
+            let (policy, term) = condition_error.map_or_else(
+                || ("condition_policy".to_string(), "unknown".to_string()),
+                |error| {
+                    (
+                        error.policy.unwrap_or_else(|| "inline".to_string()),
+                        error.term.unwrap_or_else(|| "unnamed".to_string()),
+                    )
+                },
+            );
+            let _ = write!(
+                detail,
+                "; condition unknown: condition_policy {policy} failed in term {term}; holding {applied_label}"
+            );
+        } else if state.deadline.is_some() {
+            let observed = state.observed.label();
+            let for_secs = Instant::now()
+                .saturating_duration_since(state.observed_since)
+                .as_secs();
+            let _ = write!(
+                detail,
+                "; observed {observed} for {for_secs}s, applies after settle_time {}s",
+                definition.settle_time.as_secs()
+            );
+        }
+        detail
+    }
+
+    /// Explain-only walk of the condition candidates: the first condition
+    /// prefix with a matching candidate, and the first evaluation error.
+    fn scan_condition(
+        &self,
+        definition: &ConditionalAdvertisement,
+    ) -> (Option<Prefix>, Option<rustbgpd_policy::EvalError>) {
+        let mut first_error = None;
+        for prefix in &definition.condition_prefixes {
+            for route in self.condition_candidates(prefix) {
+                let Some(policy) = &definition.condition_policy else {
+                    return (Some(*prefix), first_error);
+                };
+                match self.condition_candidate_verdict(policy, route, false) {
+                    CandidateVerdict::Match => return (Some(*prefix), first_error),
+                    CandidateVerdict::Error(error) => {
+                        first_error.get_or_insert(error);
+                    }
+                    CandidateVerdict::Miss => {}
+                }
+            }
+        }
+        (None, first_error)
     }
 
     #[cfg(test)]
@@ -689,5 +1011,144 @@ impl RibManager {
         self.conditional_advertisements
             .candidate_visits
             .load(std::sync::atomic::Ordering::Relaxed)
+    }
+}
+
+/// Gate step name in the explain ladder.
+pub(super) const CONDITIONAL_GATE: &str = "conditional_advertisement";
+
+/// One attached definition as the export gate sees it.
+pub(super) struct GateEntry {
+    name: Arc<str>,
+    /// `None` only if an attachment names a definition the install lacks,
+    /// which the atomic install rules out; the gate then fails closed.
+    definition: Option<Arc<ConditionalAdvertisement>>,
+    applied: AppliedConditionalState,
+    /// Explain-only rendering of the condition; empty on live paths.
+    condition: String,
+}
+
+/// The conditional-advertisement gate for one target peer (ADR-0137
+/// Decision 4): its attached definitions in configured order.
+pub(super) struct ConditionalGate {
+    entries: Vec<GateEntry>,
+}
+
+/// One candidate's gate outcome.
+pub(super) enum ConditionalVerdict<'g> {
+    /// No conditional advertisement is attached to the target.
+    NotAttached,
+    /// No attached definition suppresses the route. Carries the first
+    /// advertising definition, which explain names as the permit.
+    Pass(Option<&'g GateEntry>),
+    /// A non-advertising definition's `advertise_policy` selected the route.
+    Suppressed(&'g GateEntry),
+    /// A non-advertising definition's `advertise_policy` failed; fail closed.
+    EvalError(&'g GateEntry, rustbgpd_policy::EvalError),
+}
+
+impl ConditionalGate {
+    /// Whether a predicate the gate may evaluate reads the AS-path string.
+    pub(super) fn requires_as_path_string(gate: Option<&Self>) -> bool {
+        gate.is_some_and(|gate| {
+            gate.entries.iter().any(|entry| {
+                entry.applied != AppliedConditionalState::Advertise
+                    && entry.definition.as_ref().is_some_and(|definition| {
+                        definition.advertise_policy.requires_as_path_string()
+                    })
+            })
+        })
+    }
+
+    /// Evaluate the gate for one candidate. `ctx` is the export chain's
+    /// context: the candidate's source attributes with the target peer's
+    /// context. Advertising definitions are never evaluated; only a clean
+    /// rejection by every other attached definition passes.
+    pub(super) fn evaluate<'g>(
+        gate: Option<&'g Self>,
+        ctx: &RouteContext<'_>,
+    ) -> ConditionalVerdict<'g> {
+        let Some(gate) = gate else {
+            return ConditionalVerdict::NotAttached;
+        };
+        for entry in &gate.entries {
+            if entry.applied == AppliedConditionalState::Advertise {
+                continue;
+            }
+            let Some(definition) = &entry.definition else {
+                return ConditionalVerdict::Suppressed(entry);
+            };
+            let (_, evaluation) = definition
+                .advertise_policy
+                .compiled()
+                .evaluate_with_attribution(ctx);
+            if let Some(error) = evaluation.eval_error {
+                return ConditionalVerdict::EvalError(entry, error);
+            }
+            if evaluation.action == PolicyAction::Permit {
+                return ConditionalVerdict::Suppressed(entry);
+            }
+        }
+        ConditionalVerdict::Pass(
+            gate.entries
+                .iter()
+                .find(|entry| entry.applied == AppliedConditionalState::Advertise),
+        )
+    }
+}
+
+impl ConditionalVerdict<'_> {
+    /// Suppression is a silent withdraw, never a policy denial.
+    pub(super) const fn suppresses(&self) -> bool {
+        matches!(self, Self::Suppressed(_) | Self::EvalError(..))
+    }
+
+    pub(super) const fn code(&self) -> &'static str {
+        match self {
+            Self::Suppressed(_) => "conditional_advertisement_suppressed",
+            Self::EvalError(..) => "conditional_advertisement_eval_error",
+            Self::NotAttached | Self::Pass(_) => CONDITIONAL_GATE,
+        }
+    }
+
+    pub(super) const fn verdict(&self) -> crate::update::ExportGateVerdict {
+        use crate::update::ExportGateVerdict::{NotApplicable, Pass, Stop};
+        match self {
+            Self::Suppressed(_) | Self::EvalError(..) => Stop,
+            Self::Pass(Some(_)) => Pass,
+            Self::NotAttached | Self::Pass(None) => NotApplicable,
+        }
+    }
+
+    pub(super) fn detail(&self) -> String {
+        match self {
+            Self::NotAttached => "no conditional advertisement attached".to_string(),
+            Self::Pass(None) => "route not selected by any attached advertise policy".to_string(),
+            Self::Pass(Some(entry)) => format!(
+                "conditional advertisement {} permits: {}",
+                entry.name, entry.condition
+            ),
+            Self::Suppressed(entry) => format!(
+                "suppressed by conditional advertisement {}: {}",
+                entry.name, entry.condition
+            ),
+            Self::EvalError(entry, error) => format!(
+                "suppressed by conditional advertisement {}: advertise_policy {} failed in term {} \
+                 (evaluation error); failing closed",
+                entry.name,
+                error.policy.as_deref().unwrap_or("inline"),
+                error.term.as_deref().unwrap_or("unnamed"),
+            ),
+        }
+    }
+
+    /// Explain ladder step for this outcome.
+    pub(super) fn step(&self) -> crate::update::ExportGateStep {
+        crate::update::ExportGateStep {
+            gate: CONDITIONAL_GATE,
+            code: self.code(),
+            verdict: self.verdict(),
+            detail: self.detail(),
+        }
     }
 }

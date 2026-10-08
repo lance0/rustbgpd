@@ -1,11 +1,5 @@
 //! ADR-0137 conditional-advertisement configuration: schema, validation,
-//! diff classification, reload route, and persistence.
-//!
-//! Until ADR-0137 slice 3 enables the export gate, `validate` refuses any
-//! otherwise-valid config that uses the feature. Validation-error tests run
-//! without the test bypass, which also proves that specific errors are
-//! reported before the refusal; tests that need an accepted config hold
-//! `ConditionalAdvertisementRefusalBypass`.
+//! diff classification, reload route, persistence, and the resolved install.
 
 use super::*;
 
@@ -61,7 +55,6 @@ fn neighbor_error(toml: &str) -> (String, String) {
 
 #[test]
 fn definition_and_attachment_load_with_defaults() {
-    let _bypass = ConditionalAdvertisementRefusalBypass::enable();
     let config = parse(BASE).unwrap();
     let definition = &config.policy.conditional_advertisements["backup"];
     assert_eq!(definition.advertise_policy, "backup-routes");
@@ -98,43 +91,81 @@ fn definition_and_attachment_load_with_defaults() {
     );
 }
 
-/// Fail closed until enforcement ships: a valid definition and attachment are
-/// refused through the real load path (as startup, `--check`, SIGHUP, and
-/// config transactions load) and through `validate`.
+/// The real load path (startup, `--check`, SIGHUP, config transactions)
+/// accepts a valid definition and attachment now that the export gate
+/// enforces it.
 #[test]
-fn valid_conditional_advertisement_is_refused_until_enforced() {
-    let refused = |result: Result<Config, String>| {
-        let error = result.unwrap_err();
-        assert!(
-            error.contains("conditional advertisement is not yet enforced by this build"),
-            "{error}"
-        );
-    };
-    refused(Config::load_toml_with_diagnostics(
+fn valid_conditional_advertisement_loads() {
+    let config = Config::load_toml_with_diagnostics(
         &tier_authorized_uds_test_config(BASE),
-        "refusal.toml",
-    ));
-    assert!(matches!(
-        parse(BASE),
-        Err(ConfigError::UnenforcedConditionalAdvertisement)
-    ));
-    // A definition with no attachment is refused too.
-    let unattached = BASE.replacen("conditional_advertisements = [\"backup\"]\n", "", 1);
-    assert!(matches!(
-        parse(&unattached),
-        Err(ConfigError::UnenforcedConditionalAdvertisement)
-    ));
-    // The same load path accepts a config without the feature.
-    Config::load_toml_with_diagnostics(
-        &tier_authorized_uds_test_config(valid_toml()),
-        "plain.toml",
+        "conditional.toml",
     )
     .unwrap();
+    assert_eq!(config.neighbors[0].conditional_advertisements, ["backup"]);
+}
+
+/// The RIB install carries only attached definitions, keyed by neighbor
+/// address, with both predicates compiled and the prefixes parsed.
+#[test]
+fn resolved_install_carries_attached_definitions_by_address() {
+    let unattached = BASE.replacen(
+        "[[neighbors]]\naddress = \"10.0.0.2\"",
+        "[policy.conditional_advertisements.spare]\nadvertise_policy = \"backup-routes\"\nadvertise_if = \"present\"\ncondition_prefixes = [\"192.0.2.0/24\"]\n\n[[neighbors]]\naddress = \"10.0.0.2\"",
+        1,
+    );
+    let set = parse(&unattached)
+        .unwrap()
+        .conditional_advertisement_set()
+        .unwrap();
+    assert_eq!(
+        set.definitions.len(),
+        1,
+        "unattached `spare` is not installed"
+    );
+    let definition = &set.definitions[0];
+    assert_eq!(&*definition.name, "backup");
+    assert_eq!(
+        definition.advertise_if,
+        rustbgpd_rib::ConditionalAdvertiseIf::Absent
+    );
+    assert_eq!(
+        definition
+            .condition_prefixes
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>(),
+        ["0.0.0.0/0", "2001:db8::/32"]
+    );
+    assert!(definition.condition_policy.is_some());
+    assert_eq!(definition.settle_time, std::time::Duration::from_secs(5));
+    let attached: Vec<_> = set
+        .attachments
+        .iter()
+        .map(|(peer, names)| {
+            (
+                peer.to_string(),
+                names.iter().map(ToString::to_string).collect::<Vec<_>>(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        attached,
+        [("10.0.0.2".to_string(), vec!["backup".to_string()])]
+    );
+
+    // No attachment anywhere: nothing to install.
+    let none = BASE.replacen("conditional_advertisements = [\"backup\"]\n", "", 1);
+    assert_eq!(
+        parse(&none)
+            .unwrap()
+            .conditional_advertisement_set()
+            .unwrap(),
+        rustbgpd_rib::ConditionalAdvertisementSet::default()
+    );
 }
 
 #[test]
 fn settle_time_bounds() {
-    let _bypass = ConditionalAdvertisementRefusalBypass::enable();
     let at_max = with_definition_line(
         "advertise_if = \"absent\"",
         "advertise_if = \"absent\"\nsettle_time = 600",
@@ -273,7 +304,6 @@ fn schema_rejects_unknown_fields_values_and_unsupported_owners() {
 
 #[test]
 fn attachment_change_is_a_hot_applied_generation_change() {
-    let _bypass = ConditionalAdvertisementRefusalBypass::enable();
     let prior = parse(BASE).unwrap();
     let candidate = parse(&BASE.replacen(
         "remote_asn = 65003\n",
@@ -301,7 +331,6 @@ fn attachment_change_is_a_hot_applied_generation_change() {
 
 #[test]
 fn definition_change_is_a_reported_generation_change() {
-    let _bypass = ConditionalAdvertisementRefusalBypass::enable();
     let prior = parse(BASE).unwrap();
     let candidate = parse(&with_definition_line(
         "advertise_if = \"absent\"",
@@ -351,7 +380,6 @@ fn definition_change_is_a_reported_generation_change() {
 /// what changed. The same change alone stays on the generation route.
 #[test]
 fn sequential_route_rejects_conditional_advertisement_changes() {
-    let _bypass = ConditionalAdvertisementRefusalBypass::enable();
     let md5 = |toml: &str| {
         toml.replacen(
             "remote_asn = 65003\n",
@@ -410,7 +438,6 @@ fn sequential_route_rejects_conditional_advertisement_changes() {
 
 #[test]
 fn persistence_round_trips_sorted_and_omits_when_unused() {
-    let _bypass = ConditionalAdvertisementRefusalBypass::enable();
     let config = parse(BASE).unwrap();
     let document = persisted_config_document(&config).unwrap();
     let reloaded: Config = toml::from_str(&document).unwrap();

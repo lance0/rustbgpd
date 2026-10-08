@@ -424,41 +424,11 @@ fn validate_effective_peer_modes(
 }
 
 impl Config {
-    /// Validate the whole config, then refuse a valid config that uses a
-    /// feature this build accepts in schema but does not yet enforce. Every
-    /// load path (startup, `--check`, SIGHUP, config transactions, runtime
-    /// catalog folds) reaches this one function.
-    pub(crate) fn validate(&self) -> Result<(), ConfigError> {
-        self.validate_contents()?;
-        // ADR-0137 slice 3: the export gate is not implemented, so a
-        // conditional advertisement would be accepted and then silently do
-        // nothing. Fail closed until the commit that enables the gate removes
-        // this refusal.
-        self.refuse_unenforced_conditional_advertisement()
-    }
-
-    fn refuse_unenforced_conditional_advertisement(&self) -> Result<(), ConfigError> {
-        #[cfg(test)]
-        if conditional_advertisement_refusal_bypassed() {
-            return Ok(());
-        }
-        if self.policy.conditional_advertisements.is_empty()
-            && self
-                .neighbors
-                .iter()
-                .all(|neighbor| neighbor.conditional_advertisements.is_empty())
-        {
-            Ok(())
-        } else {
-            Err(ConfigError::UnenforcedConditionalAdvertisement)
-        }
-    }
-
     #[expect(
         clippy::too_many_lines,
         reason = "validation keeps related operator diagnostics in one ordered pass"
     )]
-    fn validate_contents(&self) -> Result<(), ConfigError> {
+    pub(crate) fn validate(&self) -> Result<(), ConfigError> {
         if self.global.asn == 0 {
             return Err(ConfigError::InvalidLocalAsn {
                 value: self.global.asn,
@@ -3706,7 +3676,7 @@ impl Config {
 
 /// Parse an exact unicast prefix (`addr/len` with no host bits set), returning
 /// its canonical key.
-fn parse_exact_unicast_prefix(prefix: &str) -> Result<(IpAddr, u8), String> {
+pub(super) fn parse_exact_unicast_prefix(prefix: &str) -> Result<(IpAddr, u8), String> {
     let (addr, len) = prefix
         .split_once('/')
         .ok_or_else(|| format!("condition prefix {prefix:?} is not in CIDR notation"))?;
@@ -3728,37 +3698,4 @@ fn parse_exact_unicast_prefix(prefix: &str) -> Result<(IpAddr, u8), String> {
         ));
     }
     Ok(key)
-}
-
-#[cfg(test)]
-thread_local! {
-    static CONDITIONAL_ADVERTISEMENT_REFUSAL_BYPASS: std::cell::Cell<bool> =
-        const { std::cell::Cell::new(false) };
-}
-
-#[cfg(test)]
-fn conditional_advertisement_refusal_bypassed() -> bool {
-    CONDITIONAL_ADVERTISEMENT_REFUSAL_BYPASS.with(std::cell::Cell::get)
-}
-
-/// Test-only seam: while held, this thread's `validate` accepts conditional
-/// advertisements so config tests can exercise the slice-1 surface. Removed
-/// with the refusal in ADR-0137 slice 3.
-#[cfg(test)]
-#[must_use]
-pub(crate) struct ConditionalAdvertisementRefusalBypass(());
-
-#[cfg(test)]
-impl ConditionalAdvertisementRefusalBypass {
-    pub(crate) fn enable() -> Self {
-        CONDITIONAL_ADVERTISEMENT_REFUSAL_BYPASS.with(|bypass| bypass.set(true));
-        Self(())
-    }
-}
-
-#[cfg(test)]
-impl Drop for ConditionalAdvertisementRefusalBypass {
-    fn drop(&mut self) {
-        CONDITIONAL_ADVERTISEMENT_REFUSAL_BYPASS.with(|bypass| bypass.set(false));
-    }
 }

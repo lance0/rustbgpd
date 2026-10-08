@@ -106,6 +106,10 @@ pub struct UpdateGroupClassifierInput {
     pub per_client_best: bool,
     pub orr_vantage: Option<IpAddr>,
     pub orf_installed: bool,
+    /// ADR-0137: the peer has conditional advertisements attached. The gate's
+    /// outcome depends on per-definition applied state that `GroupKey` does
+    /// not cover, so attached peers take the per-peer path.
+    pub conditional_advertisement: bool,
 }
 
 /// Exact runtime grouping key, excluding diagnostics and non-staging families.
@@ -143,6 +147,7 @@ pub enum UpdateGroupClassification {
     PerClientBest,
     OrrVantage,
     OrfInstalled,
+    ConditionalAdvertisement,
 }
 
 impl UpdateGroupClassification {
@@ -155,6 +160,7 @@ impl UpdateGroupClassification {
             Self::PerClientBest => Some("per_client_best"),
             Self::OrrVantage => Some("orr_vantage"),
             Self::OrfInstalled => Some("orf_installed"),
+            Self::ConditionalAdvertisement => Some("conditional_advertisement"),
         }
     }
 }
@@ -187,6 +193,8 @@ pub fn classify_update_group(mut input: UpdateGroupClassifierInput) -> UpdateGro
         UpdateGroupClassification::OrrVantage
     } else if input.orf_installed {
         UpdateGroupClassification::OrfInstalled
+    } else if input.conditional_advertisement {
+        UpdateGroupClassification::ConditionalAdvertisement
     } else {
         UpdateGroupClassification::Groupable(UpdateGroupFingerprint {
             policy_fingerprint: input.policy_fingerprint,
@@ -239,6 +247,7 @@ pub enum UpdateGroupComparisonMembership {
     OrrVantage,
     OrfInstalled,
     SlowPeer,
+    ConditionalAdvertisement,
 }
 
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
@@ -342,6 +351,7 @@ mod update_group_classifier_tests {
             per_client_best: false,
             orr_vantage: None,
             orf_installed: false,
+            conditional_advertisement: false,
         }
     }
 
@@ -414,6 +424,14 @@ mod update_group_classifier_tests {
                     ..input()
                 },
                 Some("orf_installed"),
+            ),
+            (
+                "conditional_advertisement",
+                UpdateGroupClassifierInput {
+                    conditional_advertisement: true,
+                    ..input()
+                },
+                Some("conditional_advertisement"),
             ),
             (
                 "orr",
@@ -2718,6 +2736,38 @@ pub enum RibUpdate {
         peers: Vec<IpAddr>,
         /// Response channel for success/failure.
         reply: oneshot::Sender<Result<(), RibCommandError>>,
+    },
+    /// Install the complete conditional-advertisement definition and
+    /// attachment set (ADR-0137). Definitions with unchanged content keep
+    /// their tracker state; changed ones are evaluated immediately. Peers
+    /// whose gate inputs change are resynced through the bounded resync.
+    /// The reply carries the capture that
+    /// [`RibUpdate::RestoreConditionalAdvertisements`] reinstates.
+    InstallConditionalAdvertisements {
+        /// The complete set to install.
+        set: crate::ConditionalAdvertisementSet,
+        /// Prior tracker state and attachments, for compensation.
+        reply: oneshot::Sender<crate::ConditionalAdvertisementCapture>,
+    },
+    /// Reinstate a captured conditional-advertisement install without
+    /// re-evaluating it: applied states and settle deadlines stand.
+    RestoreConditionalAdvertisements {
+        /// Capture returned by the install being compensated.
+        capture: crate::ConditionalAdvertisementCapture,
+        /// Acknowledged once the restore has committed.
+        reply: oneshot::Sender<()>,
+    },
+    /// Re-observe conditional-advertisement conditions whose
+    /// `condition_policy` references one of the swapped datasets, under the
+    /// ordinary settle debounce. The reply carries the tracker state from
+    /// before the re-observation, which
+    /// [`RibUpdate::RestoreConditionalAdvertisements`] reinstates if the
+    /// dataset swap is rolled back.
+    ReobserveConditionalAdvertisements {
+        /// Swapped dataset names.
+        datasets: Vec<String>,
+        /// Acknowledged once the observations are recomputed.
+        reply: oneshot::Sender<crate::ConditionalAdvertisementCapture>,
     },
     /// Explicit, bounded unicast wire replay for the named live session.
     ReplayPeerOutbound {

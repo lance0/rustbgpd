@@ -813,6 +813,109 @@ async fn dataset_export_refresh_batches_only_dependent_peers_for_reevaluation() 
     assert_eq!(rib.await.unwrap(), vec![peers[..2].to_vec()]);
 }
 
+/// ADR-0137: dataset refresh discovers both conditional-advertisement
+/// predicates. An attached `advertise_policy` puts its peer in the export
+/// re-evaluation batch; a `condition_policy` asks the RIB to re-observe.
+#[tokio::test]
+async fn dataset_refresh_discovers_conditional_advertisement_predicates() {
+    use rustbgpd_policy::datasets::{DatasetBindings, DatasetData, DatasetHandle, DatasetKind};
+    use rustbgpd_policy::rpol::RpolFile;
+    use rustbgpd_policy::sets::{AsnSet, SetStore};
+
+    let dataset_chain = |name: &str| {
+        let mut bindings = DatasetBindings::new();
+        bindings.insert(Arc::new(DatasetHandle::new(
+            name,
+            DatasetKind::Asn,
+            DatasetData::Asn(AsnSet::new([64500])),
+        )));
+        let compiled = RpolFile::parse(&format!(
+            "dataset asn-set {name}\npolicy p {{ term t {{ if route.origin-as in {name} {{ accept }} reject }} }}"
+        ))
+        .unwrap()
+        .compile_policy_bound("p", &[], &mut SetStore::new(), &bindings)
+        .unwrap()
+        .unwrap();
+        PolicyChain::from_named(vec![rustbgpd_policy::NamedPolicy::from_rpol(
+            "p".to_string(),
+            Arc::new(compiled),
+        )])
+    };
+    let mut mgr = test_peer_manager();
+    let (rib_tx, mut rib_rx) = mpsc::channel(8);
+    mgr.rib_tx = rib_tx;
+    let rib = tokio::spawn(async move {
+        // A real actor answers re-observations with its capture.
+        let (real_tx, real_rx) = mpsc::channel(8);
+        let real = tokio::spawn(
+            rustbgpd_rib::RibManager::new(
+                real_rx,
+                mpsc::channel(1).1,
+                None,
+                None,
+                BgpMetrics::new(),
+            )
+            .run(),
+        );
+        let mut seen = Vec::new();
+        while let Some(command) = rib_rx.recv().await {
+            match command {
+                RibUpdate::ReevaluatePeerExportPolicies { peers, reply } => {
+                    seen.push(format!("reevaluate {peers:?}"));
+                    reply.send(Ok(())).unwrap();
+                }
+                RibUpdate::ReobserveConditionalAdvertisements { ref datasets, .. } => {
+                    seen.push(format!("reobserve {datasets:?}"));
+                    real_tx.send(command).await.unwrap();
+                }
+                _ => panic!("unexpected RIB command"),
+            }
+        }
+        drop(real_tx);
+        real.await.unwrap();
+        seen
+    });
+    let attached: IpAddr = Ipv4Addr::new(10, 0, 0, 1).into();
+    let unattached: IpAddr = Ipv4Addr::new(10, 0, 0, 2).into();
+    for peer in [attached, unattached] {
+        insert_test_managed_peer(
+            &mut mgr,
+            peer,
+            acking_policy_handle(peer, SessionState::Established),
+            false,
+        );
+    }
+    mgr.conditional_advertisements = rustbgpd_rib::ConditionalAdvertisementSet {
+        definitions: vec![rustbgpd_rib::ConditionalAdvertisement {
+            name: Arc::from("backup"),
+            advertise_policy: dataset_chain("controlled"),
+            advertise_if: rustbgpd_rib::ConditionalAdvertiseIf::Absent,
+            condition_prefixes: vec![rustbgpd_wire::Prefix::V4(rustbgpd_wire::Ipv4Prefix::new(
+                Ipv4Addr::UNSPECIFIED,
+                0,
+            ))],
+            condition_policy: Some(dataset_chain("primary")),
+            settle_time: Duration::from_secs(5),
+        }],
+        attachments: [(attached, vec![Arc::from("backup")])]
+            .into_iter()
+            .collect(),
+    };
+    for dataset in ["controlled", "primary", "unrelated"] {
+        mgr.refresh_dataset_dependents(&[dataset.to_string()], &[])
+            .await
+            .unwrap();
+    }
+    drop(mgr);
+    assert_eq!(
+        rib.await.unwrap(),
+        [
+            format!("reevaluate {:?}", vec![attached]),
+            format!("reobserve {:?}", vec!["primary".to_string()]),
+        ]
+    );
+}
+
 /// ADR-0110 reap discipline: a dataset removed from config on a
 /// successful rpol sync drops BOTH its per-dataset series (loaded
 /// timestamp and failure counter); a dataset introduced by the sync
@@ -2416,4 +2519,47 @@ async fn chain_node_budget_generation_rejects_late_tail_on_idle_dynamic_range() 
         rib_rx.try_recv(),
         Err(mpsc::error::TryRecvError::Empty)
     ));
+}
+
+/// ADR-0137: mailbox admission and the acknowledgement of a conditional
+/// install share one absolute deadline. A send that waits most of the
+/// budget for mailbox space leaves only the remainder for the reply, so the
+/// request fails at `RIB_REPLY_TIMEOUT`, not up to twice that.
+#[tokio::test(start_paused = true)]
+async fn conditional_install_shares_one_deadline_across_send_and_reply() {
+    let mut mgr = test_peer_manager();
+    let (rib_tx, mut rib_rx) = mpsc::channel(1);
+    // Fill the mailbox so the install waits for admission.
+    rib_tx
+        .send(RibUpdate::PeerDeleted {
+            peer: Ipv4Addr::new(192, 0, 2, 1).into(),
+        })
+        .await
+        .unwrap();
+    mgr.rib_tx = rib_tx;
+    let admit_after = super::super::RIB_REPLY_TIMEOUT * 3 / 4;
+    let rib = tokio::spawn(async move {
+        tokio::time::sleep(admit_after).await;
+        let _queued = rib_rx.recv().await;
+        // Accept the install and hold its reply unanswered.
+        let held = rib_rx.recv().await;
+        std::future::pending::<()>().await;
+        drop(held);
+    });
+    let mut set = rustbgpd_rib::ConditionalAdvertisementSet::default();
+    set.attachments
+        .insert(Ipv4Addr::new(10, 0, 0, 1).into(), vec![Arc::from("backup")]);
+    let started = tokio::time::Instant::now();
+    let error = mgr
+        .install_conditional_advertisements(set)
+        .await
+        .err()
+        .expect("an unanswered install fails");
+    assert!(error.contains("acknowledgement timed out"), "{error}");
+    assert_eq!(
+        started.elapsed(),
+        super::super::RIB_REPLY_TIMEOUT,
+        "admission and acknowledgement share one deadline"
+    );
+    rib.abort();
 }

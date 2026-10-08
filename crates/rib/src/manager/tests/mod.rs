@@ -1407,6 +1407,7 @@ mod attr_intern;
 mod bgpls;
 mod bmp;
 mod conditional_advertisement;
+mod conditional_advertisement_export;
 mod dataplane_paging;
 mod distribution_window;
 mod events_metrics;

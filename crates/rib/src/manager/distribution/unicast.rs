@@ -1,3 +1,4 @@
+use super::super::conditional_advertisement::ConditionalGate;
 use super::super::update_groups::{
     GroupEvalAccumulator, PerClientBestPrefixStage, PolicyLabel, RunnerUp, capture_source_attrs,
 };
@@ -105,6 +106,7 @@ impl RibManager {
         llgr: Option<&Vec<(Afi, Safi)>>,
         export_pol: Option<&PolicyChain>,
         orf_filter: Option<&crate::orf::OrfFilterSet>,
+        conditional: Option<&crate::manager::conditional_advertisement::ConditionalGate>,
         memo: &mut super::ExportMemo,
         result: &mut UnicastDistributionResult,
         force: bool,
@@ -124,6 +126,7 @@ impl RibManager {
             llgr,
             export_pol,
             orf_filter,
+            conditional,
             memo,
             result,
             force,
@@ -419,6 +422,7 @@ impl RibManager {
         sendable: Option<&Vec<(Afi, Safi)>>,
         llgr: Option<&Vec<(Afi, Safi)>>,
         orf_filter: Option<&crate::orf::OrfFilterSet>,
+        conditional: Option<&crate::manager::conditional_advertisement::ConditionalGate>,
         add_path_send_max: u32,
         export_pol: Option<&PolicyChain>,
         orr: Option<(&crate::orr::OrrTopology, &crate::orr::SpfResult, IpAddr)>,
@@ -707,11 +711,14 @@ impl RibManager {
                 });
                 return explain;
             }
-            let needs_as_path_string = export_pol.is_some_and(PolicyChain::requires_as_path_string);
+            let needs_as_path_string = export_pol.is_some_and(PolicyChain::requires_as_path_string)
+                || ConditionalGate::requires_as_path_string(conditional);
             let total = ranked.len();
             let mut winner = None;
             let mut policy_memo = super::ExportMemo::default();
             let mut first_no_advertise_suppression = None;
+            let mut conditional_suppressions = 0_usize;
+            let mut first_conditional_step = None;
             for (index, &candidate) in ranked.iter().enumerate() {
                 // Per-candidate export-policy verdict — the same
                 // context the live per-candidate walk builds, evaluated
@@ -747,6 +754,26 @@ impl RibManager {
                     local_pref: candidate.local_pref_attr(),
                     med: candidate.med_attr(),
                 };
+                // ADR-0137: the live walk gates each candidate before the
+                // export chain; a suppressed candidate falls through to the
+                // next one, recorded with the conditional code.
+                let conditional_verdict = ConditionalGate::evaluate(conditional, &ctx);
+                if conditional_verdict.suppresses() {
+                    let step = conditional_verdict.step();
+                    explain.reasons.push(ExplainReason {
+                        code: step.code,
+                        message: format!(
+                            "candidate {rank} of {total} (from {peer}, next hop {next_hop}) {detail}",
+                            rank = index + 1,
+                            peer = candidate.peer,
+                            next_hop = candidate.next_hop,
+                            detail = step.detail,
+                        ),
+                    });
+                    conditional_suppressions += 1;
+                    first_conditional_step.get_or_insert(step);
+                    continue;
+                }
                 let permitted = match export_pol {
                     Some(chain) => {
                         let (result, evaluation) = chain.compiled().evaluate_with_attribution(&ctx);
@@ -805,6 +832,22 @@ impl RibManager {
                     break;
                 }
             }
+            // ADR-0137: with no winner, a suppressed candidate keeps its
+            // conditional rung even when other candidates fell to export
+            // policy or NO_ADVERTISE; the terminal outcome below names both.
+            if winner.is_none()
+                && let Some(step) = first_conditional_step
+            {
+                explain.decision = ExplainDecision::Deny;
+                explain.reasons.push(ExplainReason {
+                    code: step.code,
+                    message: step.detail.clone(),
+                });
+                explain.gates.push(step);
+                if conditional_suppressions == total {
+                    return explain;
+                }
+            }
             if winner.is_none()
                 && let Some((modifications, label)) = first_no_advertise_suppression
             {
@@ -836,10 +879,19 @@ impl RibManager {
             }
             let Some((rank, winner)) = winner else {
                 explain.decision = ExplainDecision::Deny;
-                let message = format!(
-                    "all {total} candidate(s) denied by export policy — per-client best-path \
-                     (RFC 7947 §2.3.2) advertises nothing"
-                );
+                let message = if conditional_suppressions == 0 {
+                    format!(
+                        "all {total} candidate(s) denied by export policy — per-client \
+                         best-path (RFC 7947 §2.3.2) advertises nothing"
+                    )
+                } else {
+                    format!(
+                        "no candidate of {total} is exportable: {conditional_suppressions} \
+                         suppressed by conditional advertisement, {denied} denied by export \
+                         policy — per-client best-path (RFC 7947 §2.3.2) advertises nothing",
+                        denied = total - conditional_suppressions,
+                    )
+                };
                 gate(
                     &mut explain.gates,
                     "best_route",
@@ -1066,7 +1118,9 @@ impl RibManager {
             });
             return explain;
         }
-        let aspath_str = if export_pol.is_some_and(PolicyChain::requires_as_path_string) {
+        let aspath_str = if export_pol.is_some_and(PolicyChain::requires_as_path_string)
+            || ConditionalGate::requires_as_path_string(conditional)
+        {
             best.as_path()
                 .map_or_else(String::new, rustbgpd_wire::AsPath::to_aspath_string)
         } else {
@@ -1095,6 +1149,19 @@ impl RibManager {
             local_pref: best.local_pref_attr(),
             med: best.med_attr(),
         };
+        // ADR-0137: conditional advertisement, last before the export chain.
+        let conditional_verdict = ConditionalGate::evaluate(conditional, &ctx);
+        let conditional_step = conditional_verdict.step();
+        if conditional_verdict.suppresses() {
+            explain.decision = ExplainDecision::Deny;
+            explain.reasons.push(ExplainReason {
+                code: conditional_step.code,
+                message: conditional_step.detail.clone(),
+            });
+            explain.gates.push(conditional_step);
+            return explain;
+        }
+        explain.gates.push(conditional_step);
         // Explain is a one-shot operator query path: enrich the deny /
         // permit reason with stable decision attribution but do
         // NOT increment bgp_policy_routes_total or the ADR-0096
@@ -1207,7 +1274,8 @@ impl RibManager {
                 None => ranked.sort_by(|a, b| crate::best_path::best_path_cmp(a, b)),
             }
 
-            let needs_as_path_string = export_pol.is_some_and(PolicyChain::requires_as_path_string);
+            let needs_as_path_string = export_pol.is_some_and(PolicyChain::requires_as_path_string)
+                || ConditionalGate::requires_as_path_string(conditional);
             let mut rank = 1_u32;
             let mut rank_memo = super::ExportMemo::default();
             let mut selected_rank = None;
@@ -1242,6 +1310,9 @@ impl RibManager {
                     local_pref: candidate.local_pref_attr(),
                     med: candidate.med_attr(),
                 };
+                if ConditionalGate::evaluate(conditional, &candidate_ctx).suppresses() {
+                    continue;
+                }
                 let candidate_result = match export_pol {
                     Some(chain) => chain.compiled().evaluate_with_attribution(&candidate_ctx).0,
                     None => rustbgpd_policy::PolicyResult::permit(),
@@ -1716,6 +1787,7 @@ impl RibManager {
         llgr: Option<&Vec<(Afi, Safi)>>,
         export_pol: Option<&PolicyChain>,
         orf_filter: Option<&crate::orf::OrfFilterSet>,
+        conditional: Option<&crate::manager::conditional_advertisement::ConditionalGate>,
         orr: Option<(&crate::orr::OrrTopology, &crate::orr::SpfResult)>,
         memo: &mut super::ExportMemo,
         metrics: &BgpMetrics,
@@ -1800,7 +1872,8 @@ impl RibManager {
         }
 
         // Walk candidates, evaluate export policy, assign path_ids 1..N
-        let needs_as_path_string = export_pol.is_some_and(PolicyChain::requires_as_path_string);
+        let needs_as_path_string = export_pol.is_some_and(PolicyChain::requires_as_path_string)
+            || ConditionalGate::requires_as_path_string(conditional);
         let mut next_rank: u32 = 1;
         let limit = if send_max == u32::MAX {
             usize::MAX
@@ -1840,6 +1913,15 @@ impl RibManager {
                 local_pref: candidate.local_pref_attr(),
                 med: candidate.med_attr(),
             };
+            // ADR-0137: conditional advertisement per candidate, last before
+            // the export chain. A suppressed candidate is skipped silently
+            // (no rank consumed, no policy record): Add-Path withdraws its
+            // path ID through the diff below, and per-client best moves on
+            // to the next ranked candidate.
+            checkpoint();
+            if ConditionalGate::evaluate(conditional, &ctx).suppresses() {
+                continue;
+            }
             checkpoint();
             let (result, evaluation) = evaluate_chain_with_attribution(export_pol, &ctx);
             checkpoint();
@@ -2172,6 +2254,7 @@ impl RibManager {
         llgr: Option<&Vec<(Afi, Safi)>>,
         export_pol: Option<&PolicyChain>,
         orf_filter: Option<&crate::orf::OrfFilterSet>,
+        conditional: Option<&crate::manager::conditional_advertisement::ConditionalGate>,
         memo: &mut super::ExportMemo,
         result: &mut UnicastDistributionResult,
         force: bool,
@@ -2390,9 +2473,9 @@ impl RibManager {
         // fields: a chain that reads them disqualifies its peers from
         // grouping (`requires_peer_context`), so the verdict here is
         // target-independent by construction.
-        let aspath_str = export_pol
-            .is_some_and(PolicyChain::requires_as_path_string)
-            .then(|| memo.aspath_str(best));
+        let aspath_str = (export_pol.is_some_and(PolicyChain::requires_as_path_string)
+            || ConditionalGate::requires_as_path_string(conditional))
+        .then(|| memo.aspath_str(best));
         let aspath_len = best.as_path().map_or(0, rustbgpd_wire::AsPath::len);
         let origin_asn = best.as_path().and_then(rustbgpd_wire::AsPath::origin_asn);
         let (peer_address, peer_asn, peer_group) = target.ctx_peer();
@@ -2417,6 +2500,21 @@ impl RibManager {
             local_pref: best.local_pref_attr(),
             med: best.med_attr(),
         };
+        // ADR-0137: conditional advertisement, last before the export
+        // chain. Suppression is a silent withdraw like ORF, not a policy
+        // denial: no `policy_filtered` record, no export counters.
+        checkpoint();
+        let conditional_verdict = ConditionalGate::evaluate(conditional, &ctx);
+        if let Some(trace) = target.trace() {
+            trace.gates.push(conditional_verdict.step());
+        }
+        if conditional_verdict.suppresses() {
+            for &path_id in &existing_path_ids {
+                checkpoint();
+                result.withdraw.push((*prefix, path_id));
+            }
+            return;
+        }
         checkpoint();
         let (policy_result, evaluation) = target.evaluate_export_chain(export_pol, &ctx);
         checkpoint();
@@ -2672,6 +2770,7 @@ impl RibManager {
         llgr: Option<&Vec<(Afi, Safi)>>,
         export_pol: Option<&PolicyChain>,
         orf_filter: Option<&crate::orf::OrfFilterSet>,
+        conditional: Option<&crate::manager::conditional_advertisement::ConditionalGate>,
         memo: &mut super::ExportMemo,
         metrics: &BgpMetrics,
         policy_stats: &mut NeighborPolicyStats,
@@ -2779,9 +2878,9 @@ impl RibManager {
         }
 
         // Export policy check — same tail as `distribute_single_best_prefix`.
-        let aspath_str = export_pol
-            .is_some_and(PolicyChain::requires_as_path_string)
-            .then(|| memo.aspath_str(best));
+        let aspath_str = (export_pol.is_some_and(PolicyChain::requires_as_path_string)
+            || ConditionalGate::requires_as_path_string(conditional))
+        .then(|| memo.aspath_str(best));
         let aspath_len = best.as_path().map_or(0, rustbgpd_wire::AsPath::len);
         let origin_asn = best.as_path().and_then(rustbgpd_wire::AsPath::origin_asn);
         let ctx = RouteContext {
@@ -2805,6 +2904,17 @@ impl RibManager {
             local_pref: best.local_pref_attr(),
             med: best.med_attr(),
         };
+        // ADR-0137: conditional advertisement, last before the export chain;
+        // a silent withdraw. Like RFC 1997 above, ORR does not fall back to
+        // its runner-up when the per-vantage winner is suppressed.
+        checkpoint();
+        if ConditionalGate::evaluate(conditional, &ctx).suppresses() {
+            for &path_id in &existing_path_ids {
+                checkpoint();
+                result.withdraw.push((*prefix, path_id));
+            }
+            return;
+        }
         checkpoint();
         let (policy_result, evaluation) = evaluate_chain_with_attribution(export_pol, &ctx);
         checkpoint();

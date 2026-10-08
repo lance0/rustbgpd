@@ -198,8 +198,8 @@ identical on the per-peer path — but at fleet scale you want to know
 why. The reasons ([full table](../reference/configuration.md#update-groups-automatic)):
 `policy_peer_context` (its export chain matches on peer
 address/ASN/group), `add_path_send`, `per_client_best` (only on sessions
-that also carry VPN or RT-Constrain), `orr_vantage`, `orf_installed`, and
-`slow_peer` (slow-peer isolation; the peer rejoins a group once its backlog
+that also carry VPN or RT-Constrain), `orr_vantage`, `orf_installed`,
+`conditional_advertisement`, and `slow_peer` (slow-peer isolation; the peer rejoins a group once its backlog
 clears). The first is the one you can usually fix: rewrite the chain so the
 peer-dependent match lives in a per-neighbor chain instead of a shared
 one.

@@ -320,6 +320,7 @@ impl RibManager {
                     Some(&group.llgr),
                     chain.as_ref(),
                     None, // ORF disqualifies from grouping — never present here
+                    None, // so do conditional advertisements (ADR-0137)
                     memo,
                     &mut result,
                     false,
