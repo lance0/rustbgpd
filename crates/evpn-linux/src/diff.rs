@@ -1097,6 +1097,37 @@ mod tests {
         );
     }
 
+    // An owned row whose kernel destination drifted while the route did
+    // not move is rewritten. On Linux this needs the dump to decode the
+    // bridge-family `NDA_DST`; before that fix every real row arrived with
+    // `dst: None` and the owned-dst fallback below hid the drift.
+    #[test]
+    fn update_when_owned_kernel_dst_drifted_from_unchanged_desire() {
+        let desired = desired_one(vni(100), mac(1), entry("10.0.0.2", None));
+        let mut snapshot = KernelSnapshot::new();
+        let mut e = ours("10.0.0.9");
+        e.mac = mac(1);
+        snapshot.insert_fdb(vni(100), e);
+        let applied = applied_one(vni(100), mac(1), "10.0.0.2", None);
+        let plan = compute_diff(
+            &desired,
+            &snapshot,
+            &applied,
+            &ready_probes(&[vni(100)]),
+            &GroupOwnedMap::new(),
+            &EvpnInstanceTable::new(),
+        );
+        assert_eq!(
+            plan.ops,
+            vec![DataplaneOp::UpdateRemoteFdb {
+                vni: vni(100),
+                mac: mac(1),
+                vlan: None,
+                dst: ip("10.0.0.2"),
+            }]
+        );
+    }
+
     // 2. Kernel matches desired (same dst, owned) → no-op.
     #[test]
     fn noop_when_kernel_matches_desired() {

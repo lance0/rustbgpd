@@ -180,11 +180,7 @@ fn parse_fdb_entry(msg: &NeighbourMessage, cache: &LinkCache) -> Option<FdbSnaps
                 arr.copy_from_slice(bytes);
                 mac = Some(MacAddress::new(arr));
             }
-            NeighbourAttribute::Destination(addr) => match addr {
-                NeighbourAddress::Inet(v4) => dst = Some(std::net::IpAddr::V4(*v4)),
-                NeighbourAddress::Inet6(v6) => dst = Some(std::net::IpAddr::V6(*v6)),
-                _ => {}
-            },
+            NeighbourAttribute::Destination(addr) => dst = neighbour_address_ip(addr),
             // NDA_NH_ID (kind = 13) — `netlink-packet-route 0.32.1` doesn't
             // expose a typed variant, so the kernel sends it through the
             // `Other` escape hatch with a 4-byte native-endian payload.
@@ -277,6 +273,25 @@ fn parse_fdb_entry(msg: &NeighbourMessage, cache: &LinkCache) -> Option<FdbSnaps
             flags,
         },
     ))
+}
+
+/// `NDA_DST` as an IP address. `netlink-packet-route` decodes the
+/// attribute by the message's address family, and an `AF_BRIDGE` FDB
+/// dump is neither `Inet` nor `Inet6`, so a real kernel row arrives as
+/// raw `Other` bytes: 4 octets for an IPv4 VTEP, 16 for IPv6.
+fn neighbour_address_ip(addr: &NeighbourAddress) -> Option<IpAddr> {
+    match addr {
+        NeighbourAddress::Inet(v4) => Some(IpAddr::V4(*v4)),
+        NeighbourAddress::Inet6(v6) => Some(IpAddr::V6(*v6)),
+        NeighbourAddress::Other(bytes) => match bytes.len() {
+            4 => <[u8; 4]>::try_from(bytes.as_slice()).ok().map(IpAddr::from),
+            16 => <[u8; 16]>::try_from(bytes.as_slice())
+                .ok()
+                .map(IpAddr::from),
+            _ => None,
+        },
+        _ => None,
+    }
 }
 
 fn infer_svd_bridge_vlan(cache: &LinkCache, ifindex: u32, vni: u32) -> Option<u16> {
@@ -1217,6 +1232,34 @@ mod tests {
         assert_eq!(key.0, EvpnInstanceId::new(200).unwrap());
         assert_eq!(key.1, Some(10));
         assert_eq!(entry.vlan, Some(10));
+    }
+
+    /// Round-trip through the wire codec the way a kernel dump arrives:
+    /// an `AF_BRIDGE` message decodes `NDA_DST` as raw bytes, not `Inet`.
+    fn reparse(msg: &NeighbourMessage) -> NeighbourMessage {
+        use netlink_packet_core::{Emitable, Parseable};
+        let mut buf = vec![0; msg.buffer_len()];
+        msg.emit(&mut buf);
+        NeighbourMessage::parse(buf.as_slice()).unwrap()
+    }
+
+    #[test]
+    fn parse_fdb_entry_reads_bridge_family_dst_from_the_wire() {
+        let mut cache = LinkCache::default();
+        cache.vxlan_ifindex_to_vni.insert(11, 100);
+        let mac = rustbgpd_evpn::MacAddress::new([1, 2, 3, 4, 5, 6]);
+        for dst in [ipa("10.0.0.2"), ipa("2001:db8::2")] {
+            let wire = reparse(&build_remote_fdb_message(11, mac, dst, None, None));
+            assert!(
+                wire.attributes.iter().any(|attr| matches!(
+                    attr,
+                    NeighbourAttribute::Destination(NeighbourAddress::Other(_))
+                )),
+                "the codec decodes AF_BRIDGE NDA_DST as raw bytes"
+            );
+            let (_, entry) = parse_fdb_entry(&wire, &cache).unwrap();
+            assert_eq!(entry.dst, Some(dst));
+        }
     }
 
     #[test]
