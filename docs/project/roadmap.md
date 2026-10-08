@@ -1267,9 +1267,9 @@ gobmp/pmacct already terminate it into Kafka), and BGPsec.
   deferred because the naive version regressed recompute. Shared route storage
   was measured and rejected — see Deferred.
 - **Conditional advertisement.** Policy feature for advertise-if-present /
-  advertise-if-absent workflows (FRR and GoBGP have it). Useful and common, but
-  less tied to the current positioning than ORF — defer until operator demand is
-  clearer.
+  advertise-if-absent workflows (FRR has it; GoBGP v4.10.0 does not). Design
+  proposed in [ADR-0137](../adr/0137-conditional-advertisement.md); not yet
+  implemented.
 
 ### Maybe / demand-shaped
 
