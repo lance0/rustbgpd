@@ -1,0 +1,27 @@
+56d6f6b6b9bf3fc13c87e489a59ad9bc36c35e76
+diff --git a/bench/scale/cgroup-memory.sh b/bench/scale/cgroup-memory.sh
+index 192efd06e..abaaa9eab 100644
+--- a/bench/scale/cgroup-memory.sh
++++ b/bench/scale/cgroup-memory.sh
+@@ -9,7 +9,7 @@ MEMORY_SCOPE=()
+ memory_scope_launcher() {
+     local out=$1
+     rm -f "$out"
+-    MEMORY_SCOPE=(systemd-run --user --scope --quiet -p MemorySwapMax=0 --)
++    MEMORY_SCOPE=(systemd-run --user --scope --quiet -p MemorySwapMax=0 -- env _RJEM_MALLOC_CONF=background_thread:true)
+     # shellcheck disable=SC2016 # Expanded by the scoped shell, not here.
+     if "${MEMORY_SCOPE[@]}" sh -c 'cg=/sys/fs/cgroup$(sed -n "s/^0:://p" /proc/self/cgroup)
+         test -r "$cg/memory.peak" && test "$(cat "$cg/memory.swap.max")" = 0' >/dev/null 2>&1; then
+diff --git a/bench/scale/reloadstall/policy_stats_cell.sh b/bench/scale/reloadstall/policy_stats_cell.sh
+index 51e84c64f..40b5b46df 100755
+--- a/bench/scale/reloadstall/policy_stats_cell.sh
++++ b/bench/scale/reloadstall/policy_stats_cell.sh
+@@ -84,7 +84,7 @@ fail() { echo "$1" >&2; exit 2; }
+ 
+ python3 "$HERE/gen-scenario.py" "$PEERS" "$SCEN" "$PORT" "$PEERS" >"$RUN_DIR/generator.log"
+ sed -i "s#prometheus_addr = \"127.0.0.1:9179\"#prometheus_addr = \"127.0.0.1:$MPORT\"#" "$SCEN/config.toml"
+-setsid taskset -c "$DAEMON_CPUS" "$BIN/rustbgpd" "$SCEN/config.toml" >"$RUN_DIR/rustbgpd.log" 2>&1 & DPID=$!
++setsid taskset -c "$DAEMON_CPUS" env _RJEM_MALLOC_CONF=background_thread:true "$BIN/rustbgpd" "$SCEN/config.toml" >"$RUN_DIR/rustbgpd.log" 2>&1 & DPID=$!
+ for _ in $(seq 1 1200); do
+     curl -fsS --max-time .25 "http://127.0.0.1:$MPORT/readyz" >/dev/null 2>&1 && break
+     kill -0 "$DPID" 2>/dev/null || fail 'daemon exited during startup'
