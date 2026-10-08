@@ -1384,8 +1384,10 @@ tests:
                 kind="overflow"} on edge1:9179 increased by 2 in the
                 last 15 minutes. For import or export, routes hitting
                 the failing statement are being denied; for condition,
-                the conditional advertisement keeps its last applied
-                state.
+                the failing candidate counts as neither a match nor a
+                miss, and the conditional advertisement keeps its last
+                applied state only when no other candidate matches
+                cleanly.
 
   # ── BgpExactExportRejected ───────────────────────────────
   # Load-bearing: the event is inside 15m but outside 5m at evaluation time;
