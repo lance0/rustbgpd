@@ -2258,7 +2258,7 @@ async fn generation_policy_rejection_preserves_structured_error_codes() {
     // Sibling tests may register this process-wide callsite without a
     // subscriber. Warm it inside this scope, then refresh its cached interest
     // before measuring the real rejections.
-    reject_policy_transition(SessionState::Established).await;
+    Box::pin(reject_policy_transition(SessionState::Established)).await;
     tracing::callsite::rebuild_interest_cache();
 
     for (state, code) in [
@@ -2267,7 +2267,7 @@ async fn generation_policy_rejection_preserves_structured_error_codes() {
     ] {
         // Read only what this rejection appends to the shared log.
         let start = usize::try_from(std::fs::metadata(log.path()).unwrap().len()).unwrap();
-        reject_policy_transition(state).await;
+        Box::pin(reject_policy_transition(state)).await;
         let output = std::fs::read_to_string(log.path())
             .unwrap()
             .split_off(start);
@@ -4539,6 +4539,79 @@ async fn neighbor_removal_reconcile_drops_its_attachment() {
     assert!(!harness.mgr.conditional_reconcile_pending);
     harness.shutdown().await;
     relay.abort();
+}
+
+/// ADR-0137: a reconcile the RIB never acknowledges is retried after a
+/// backoff that runs inside the run loop's `select!`, not before every
+/// command, so later commands are served without waiting out another
+/// `RIB_REPLY_TIMEOUT` and the retries stay bounded.
+#[tokio::test(start_paused = true)]
+async fn failing_conditional_reconcile_backs_off_without_stalling_the_loop() {
+    let fixture = RsFixture::new();
+    let attached = attach_backup(
+        &fixture,
+        &fixture
+            .base_toml()
+            .replace("remote_asn = 65002", "remote_asn = 65012"),
+    );
+    let (_command_tx, command_rx) = mpsc::channel(4);
+    let (readiness_tx, readiness_rx) = mpsc::channel(4);
+    let (rib_tx, mut rib_rx) = mpsc::channel::<RibUpdate>(64);
+    let mut mgr = PeerManager::new_with_config(
+        command_rx,
+        mpsc::channel(1).1,
+        attached.global.asn,
+        attached.global.router_id.parse().unwrap(),
+        None,
+        None,
+        BgpMetrics::new(),
+        rib_tx,
+        None,
+        None,
+        attached,
+    )
+    .with_readiness_queries(readiness_rx);
+    // The RIB has not acknowledged the running config's install.
+    mgr.conditional_advertisements = rustbgpd_rib::ConditionalAdvertisementSet::default();
+    mgr.conditional_reconcile_pending = true;
+    let installs = Arc::new(AtomicU32::new(0));
+    let rib = tokio::spawn({
+        let installs = Arc::clone(&installs);
+        async move {
+            // Unresponsive: every install is held, never acknowledged.
+            let mut held = Vec::new();
+            while let Some(update) = rib_rx.recv().await {
+                if let RibUpdate::InstallConditionalAdvertisements { reply, .. } = update {
+                    installs.fetch_add(1, Ordering::SeqCst);
+                    held.push(reply);
+                }
+            }
+        }
+    });
+    let manager = tokio::spawn(mgr.run());
+    while installs.load(Ordering::SeqCst) == 0 {
+        tokio::task::yield_now().await;
+    }
+    // The first attempt times out.
+    tokio::time::sleep(RIB_REPLY_TIMEOUT + Duration::from_millis(1)).await;
+    let (reply, ping) = oneshot::channel();
+    readiness_tx
+        .send(PeerManagerReadinessQuery::Ping { reply })
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_millis(100), ping)
+        .await
+        .expect("a command after the failed reconcile is not held behind a retry")
+        .unwrap();
+
+    tokio::time::sleep(Duration::from_secs(120)).await;
+    let attempts = installs.load(Ordering::SeqCst);
+    assert!(
+        (3..=8).contains(&attempts),
+        "retries continue under a bounded backoff: {attempts} attempts in ~125 s"
+    );
+    manager.abort();
+    rib.abort();
 }
 
 /// ADR-0137: a generation that changes both an attached definition and the

@@ -5,12 +5,19 @@
 //! restores a captured install on compensation, and reconciles it after
 //! config mutations that do not install it explicitly.
 
+use std::time::Duration;
+
 use rustbgpd_rib::{ConditionalAdvertisementCapture, ConditionalAdvertisementSet, RibUpdate};
 use tokio::sync::oneshot;
 use tracing::{info, warn};
 
 use super::{PeerManager, RIB_REPLY_TIMEOUT};
 use crate::config::Config;
+
+/// First retry delay after a failed reconcile; doubles per failure.
+const RECONCILE_RETRY_INITIAL: Duration = Duration::from_secs(1);
+/// Ceiling on the reconcile retry delay.
+const RECONCILE_RETRY_MAX: Duration = Duration::from_secs(60);
 
 /// A committed install and the state that restores it.
 pub(super) struct ConditionalAdvertisementPrior {
@@ -91,19 +98,36 @@ impl PeerManager {
 
     /// Bring the RIB install in line with `current_config` after a config
     /// replacement that did not install it itself, such as a neighbor
-    /// removal dropping its attachments.
+    /// removal dropping its attachments. A failure is retried from the run
+    /// loop's `select!` after an exponential backoff, so an unresponsive or
+    /// closed RIB costs one bounded attempt per backoff interval instead of
+    /// one before every command.
     pub(super) async fn reconcile_conditional_advertisements(&mut self) {
         self.conditional_reconcile_pending = false;
         let set = match self.current_config.conditional_advertisement_set() {
             Ok(set) => set,
             Err(error) => {
                 warn!(%error, "conditional advertisements unresolvable; RIB install unchanged");
+                self.conditional_reconcile_retry = None;
                 return;
             }
         };
-        if let Err(error) = self.install_conditional_advertisements(set).await {
-            warn!(%error, "conditional advertisement reconcile failed; retrying on next change");
-            self.conditional_reconcile_pending = true;
+        match self.install_conditional_advertisements(set).await {
+            Ok(_) => self.conditional_reconcile_retry = None,
+            Err(error) => {
+                let backoff = self
+                    .conditional_reconcile_retry
+                    .map_or(RECONCILE_RETRY_INITIAL, |(_, prior)| {
+                        (prior * 2).min(RECONCILE_RETRY_MAX)
+                    });
+                warn!(
+                    %error,
+                    retry_in_ms = backoff.as_millis(),
+                    "conditional advertisement reconcile failed; retrying after backoff"
+                );
+                self.conditional_reconcile_retry =
+                    Some((tokio::time::Instant::now() + backoff, backoff));
+            }
         }
     }
 

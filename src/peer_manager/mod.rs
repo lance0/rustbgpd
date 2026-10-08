@@ -532,6 +532,9 @@ pub struct PeerManager {
     /// Set by every config replacement; the run loop then reconciles the
     /// RIB install against `current_config`.
     conditional_reconcile_pending: bool,
+    /// After a failed reconcile: when the run loop retries it, and the
+    /// backoff that produced that deadline.
+    conditional_reconcile_retry: Option<(tokio::time::Instant, Duration)>,
     local_forwarding_state: Arc<crate::forwarding_state::ForwardingState>,
     /// True between typed transaction staging and the controller's
     /// persist/rollback completion signal. Dynamic inbound accepts are refused
@@ -1172,6 +1175,7 @@ impl PeerManager {
                 .conditional_advertisement_set()
                 .unwrap_or_default(),
             conditional_reconcile_pending: false,
+            conditional_reconcile_retry: None,
             current_config,
             bfd_coupling: None,
             event_history: None,
@@ -2383,6 +2387,7 @@ impl PeerManager {
             }
             let bfd_retry_at = self.bfd_retry_deadline();
             let max_prefix_restart_deadline = self.next_max_prefix_restart_deadline;
+            let conditional_retry_at = self.conditional_reconcile_retry.map(|(at, _)| at);
             tokio::select! {
                 query = Self::receive_readiness_query(&mut self.readiness_rx) => {
                     match query {
@@ -2634,6 +2639,13 @@ impl PeerManager {
                 } => {
                     self.handle_due_max_prefix_restarts().await;
                 }
+                () = async move {
+                    if let Some(deadline) = conditional_retry_at {
+                        tokio::time::sleep_until(deadline).await;
+                    } else {
+                        std::future::pending::<()>().await;
+                    }
+                } => self.conditional_reconcile_pending = true,
             }
         }
     }
