@@ -706,8 +706,12 @@ reloads on the isolated-generator placement: the daemon on CPUs 2–3 (two
 runtime workers), this harness on CPUs 4–5 and the probes and CPU sampler on
 CPUs 8–15. It runs 1,000 peers with 400 IPv4 prefixes each and 12 reloads in
 alternating directions. Each reload gets one concurrent `neighbor` and
-`policy stats --direction both` pair, fired 0.50 s after the cohort hot-apply
-completes so that it starts in the −220 to 0 ms band before the RIB commit. A
+`policy stats --direction both` pair, aimed to start in the −220 to 0 ms band
+before the RIB commit. The cohort hot-apply completion starts the RIB
+transition; the pair fires after it by the previous reload's observed
+hot-apply-to-commit time less `PAIR_LEAD` (0.110 s), or at once on the first
+reload and whenever the transition is shorter than the lead. An under-bar run
+names each out-of-band pair start in milliseconds from its commit. A
 quiescent `policy stats --direction both` probe follows 20 s after the reload
 completes, inside the 40 s inter-reload quiesce. Nothing is retried.
 

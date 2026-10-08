@@ -4,7 +4,8 @@ import unittest
 
 import json
 
-from policy_stats_cell import classify_stats_call, flat_verdict, parse_summary, percentile, run_verdict, validate_reply
+from policy_stats_cell import (MIN_IN_BAND_PAIRS, classify_stats_call, flat_verdict, in_band_problem, pair_offset,
+                               parse_summary, percentile, run_verdict, validate_reply)
 
 SUMMARY = ('stage=export elapsed_ms=597 budget_ms=1999 rpc_elapsed_ms=598 code=Ok; '
            'stage=import elapsed_ms=1402 budget_ms=1401 rpc_elapsed_ms=2000 code=DeadlineExceeded '
@@ -107,6 +108,29 @@ class FlatVerdict(unittest.TestCase):
         self.assertEqual(percentile([5], 50), 5)
         self.assertIsNone(percentile([], 50))
 
+
+class PairTiming(unittest.TestCase):
+    def test_offset_follows_observed_transition(self):
+        self.assertAlmostEqual(pair_offset(0.584, 0.110), 0.474)  # the September 2026 transition
+        self.assertEqual(pair_offset(0.051, 0.110), 0.0)           # shorter than the lead: fire at once
+        self.assertEqual(pair_offset(None, 0.110), 0.0)            # first reload: no observation yet
+
+    @staticmethod
+    def reload(n, offset_ms, in_band):
+        calls = [{'phase': 'pair', 'op': op, 'start_minus_rib_commit_ms': offset_ms, 'in_band': in_band}
+                 for op in ('neighbor', 'policy_stats')]
+        calls.append({'phase': 'quiescent', 'op': 'policy_stats', 'start_minus_rib_commit_ms': 20000, 'in_band': False})
+        return {'reload': n, 'complete_pair_in_band': in_band, 'calls': calls}
+
+    def test_under_bar_names_each_miss(self):
+        problem = in_band_problem([self.reload(1, 449.4, False), self.reload(2, -50, True)])
+        self.assertIn(f'1 complete in-band pairs, need {MIN_IN_BAND_PAIRS}', problem)
+        self.assertIn('R1 neighbor +449, R1 policy_stats +449', problem)
+        self.assertNotIn('R2', problem)
+
+    def test_bar_met(self):
+        self.assertIsNone(in_band_problem([self.reload(n, -50, True) for n in range(1, MIN_IN_BAND_PAIRS + 1)]))
+        self.assertIsNotNone(in_band_problem([self.reload(n, -50, True) for n in range(1, MIN_IN_BAND_PAIRS)]))
 
 
 def stats_reply(peers=2, **extra):
