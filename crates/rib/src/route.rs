@@ -366,6 +366,20 @@ pub struct FibInstallCandidate {
 }
 
 impl Route {
+    /// Stored attributes for an encoder that emits the next hop itself, from
+    /// [`Route::next_hop`].
+    ///
+    /// Inbound IPv4 unicast storage, route injection and import policy keep a
+    /// `NEXT_HOP` attribute, and import `next-hop self` updates only
+    /// `next_hop`, so the stored attribute can be stale. `next_hop` is the
+    /// effective post-policy next hop; MRT RIB entries, warm checkpoints and
+    /// BMP Loc-RIB announcements emit it and skip the stored attribute.
+    pub fn attributes_except_next_hop(&self) -> impl Iterator<Item = &PathAttribute> + Clone {
+        self.attributes
+            .iter()
+            .filter(|attr| !matches!(attr, PathAttribute::NextHop(_)))
+    }
+
     /// Whether this route was learned via an eBGP session.
     #[must_use]
     pub fn is_ebgp(&self) -> bool {

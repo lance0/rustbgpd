@@ -1949,3 +1949,175 @@ async fn link_local_next_hop_peer_up_and_reconnect_update_sendable_families() {
         while rib_rx.try_recv().is_ok() {}
     }
 }
+
+/// A permit statement rewriting the next hop, optionally for one prefix and
+/// with a `LOCAL_PREF` (a distinct modification set).
+fn next_hop_statement(
+    action: rustbgpd_policy::NextHopAction,
+    prefix: Option<Ipv4Prefix>,
+    local_pref: Option<u32>,
+) -> PolicyStatement {
+    PolicyStatement {
+        prefix: prefix.map(Prefix::V4),
+        ge: None,
+        le: None,
+        action: PolicyAction::Permit,
+        match_community: vec![],
+        match_as_path: None,
+        match_neighbor_set: None,
+        match_route_type: None,
+        match_evpn_route_type: None,
+        match_rpki_validation: None,
+        match_aspa_validation: None,
+        match_as_path_length_ge: None,
+        match_as_path_length_le: None,
+        match_local_pref_ge: None,
+        match_local_pref_le: None,
+        match_med_ge: None,
+        match_med_le: None,
+        match_next_hop: None,
+        modifications: RouteModifications {
+            set_next_hop: Some(action),
+            set_local_pref: local_pref,
+            ..Default::default()
+        },
+    }
+}
+
+fn import_prefix(third_octet: u8) -> Ipv4Prefix {
+    Ipv4Prefix::new(Ipv4Addr::new(198, 51, third_octet, 0), 24)
+}
+
+/// Import one body IPv4 UPDATE carrying `prefixes` through `process_update`
+/// under `statements`, returning the routes as the RIB stores them.
+async fn import_body_update(
+    statements: Vec<PolicyStatement>,
+    prefixes: &[Ipv4Prefix],
+) -> Vec<Route> {
+    let (mut session, mut rib_rx) = make_test_session_with_rib(65001, 65002);
+    session.negotiated = Some(Arc::new(negotiated_session(65002, false)));
+    session.install_import_policy(Some(PolicyChain::new(vec![Policy {
+        entries: statements,
+        default_action: PolicyAction::Deny,
+    }])));
+    let attrs = vec![
+        PathAttribute::Origin(Origin::Igp),
+        PathAttribute::AsPath(AsPath {
+            segments: vec![AsPathSegment::AsSequence(vec![65002])],
+        }),
+        PathAttribute::NextHop(Ipv4Addr::new(10, 0, 0, 2)),
+    ];
+    let announced: Vec<_> = prefixes
+        .iter()
+        .map(|&prefix| Ipv4NlriEntry { path_id: 0, prefix })
+        .collect();
+    let update = UpdateMessage::build(&announced, &[], &attrs, true, false, Ipv4UnicastMode::Body);
+    session.process_update(update).await;
+    let RibUpdate::RoutesReceived { announced, .. } = rib_rx.try_recv().unwrap() else {
+        panic!("expected RoutesReceived");
+    };
+    assert_eq!(announced.len(), prefixes.len());
+    announced
+}
+
+/// Import a body IPv4 route under a policy that rewrites every next hop.
+async fn imported_with_next_hop_action(action: rustbgpd_policy::NextHopAction) -> Route {
+    let routes = import_body_update(
+        vec![next_hop_statement(action, None, None)],
+        &[import_prefix(100), import_prefix(101)],
+    )
+    .await;
+    // Both NLRI of one UPDATE keep sharing one stored attribute set.
+    assert!(Arc::ptr_eq(&routes[0].attributes, &routes[1].attributes));
+    routes.into_iter().next().unwrap()
+}
+
+/// Prefix-dependent import outcomes interleaved A/B/A in one UPDATE still
+/// share one aligned attribute set per outcome.
+#[tokio::test]
+async fn interleaved_import_outcomes_share_aligned_next_hop_sets() {
+    use rustbgpd_policy::NextHopAction;
+
+    let (a, b) = (import_prefix(100), import_prefix(101));
+    let routes = import_body_update(
+        vec![
+            next_hop_statement(NextHopAction::Self_, Some(a), None),
+            next_hop_statement(NextHopAction::Self_, Some(b), Some(200)),
+            next_hop_statement(NextHopAction::Self_, Some(import_prefix(102)), None),
+        ],
+        &[a, b, import_prefix(102)],
+    )
+    .await;
+    for route in &routes {
+        assert!(
+            route
+                .attributes
+                .contains(&PathAttribute::NextHop(Ipv4Addr::new(10, 0, 0, 1)))
+        );
+    }
+    assert!(!Arc::ptr_eq(&routes[0].attributes, &routes[1].attributes));
+    assert!(Arc::ptr_eq(&routes[0].attributes, &routes[2].attributes));
+}
+
+/// Peers that pass the next hop through (iBGP, route-server clients) must
+/// receive the import-resolved next hop, not the received address the
+/// stored `NEXT_HOP` attribute held before import `next-hop self`.
+#[tokio::test]
+async fn import_next_hop_self_is_what_passthrough_exports_advertise() {
+    let route = imported_with_next_hop_action(rustbgpd_policy::NextHopAction::Self_).await;
+    let resolved = Ipv4Addr::new(10, 0, 0, 1);
+    assert_eq!(route.next_hop, IpAddr::V4(resolved));
+    for (remote_asn, route_server_client, extended_nexthop) in [
+        (65001, false, false),
+        (65001, false, true),
+        (65003, true, false),
+    ] {
+        let (mut session, _rib_rx) = make_test_session_with_rib(65001, remote_asn);
+        session.config.route_server_client = route_server_client;
+        session.negotiated = Some(Arc::new(negotiated_session(remote_asn, extended_nexthop)));
+        let profile = session.publish_export_profile();
+        let candidate = profile.prepare_unicast_candidate(&route, None).unwrap();
+        let export::PreparedUnicastCandidate::Ipv4Body { attrs, .. } = candidate else {
+            panic!(
+                "IPv4 next hop must keep body NLRI (remote AS {remote_asn}, extended next hop {extended_nexthop})"
+            );
+        };
+        let next_hops: Vec<_> = attrs
+            .iter()
+            .filter(|attr| matches!(attr, PathAttribute::NextHop(_)))
+            .collect();
+        assert_eq!(
+            next_hops,
+            [&PathAttribute::NextHop(resolved)],
+            "remote AS {remote_asn}, route-server client {route_server_client}, \
+             extended next hop {extended_nexthop}"
+        );
+    }
+}
+
+/// An import IPv6 next hop on a body IPv4 route leaves no IPv4 `NEXT_HOP` to
+/// pass through: without Extended Next Hop the route is not exportable to a
+/// passthrough peer, and with it the IPv6 next hop is sent.
+#[tokio::test]
+async fn import_ipv6_next_hop_is_not_exported_as_the_received_ipv4_next_hop() {
+    let ipv6: IpAddr = "2001:db8::9".parse().unwrap();
+    let route = imported_with_next_hop_action(rustbgpd_policy::NextHopAction::Specific(ipv6)).await;
+    assert_eq!(route.next_hop, ipv6);
+    for extended_nexthop in [false, true] {
+        let (mut session, _rib_rx) = make_test_session_with_rib(65001, 65001);
+        session.negotiated = Some(Arc::new(negotiated_session(65001, extended_nexthop)));
+        let profile = session.publish_export_profile();
+        let candidate = profile.prepare_unicast_candidate(&route, None);
+        if extended_nexthop {
+            let Ok(export::PreparedUnicastCandidate::Mp { next_hop, .. }) = candidate else {
+                panic!("IPv6 next hop must use MP_REACH");
+            };
+            assert_eq!(next_hop, ipv6);
+        } else {
+            let Err(error) = candidate else {
+                panic!("an IPv6 next hop needs Extended Next Hop for IPv4 NLRI");
+            };
+            assert_eq!(error, ExportProbeError::Ipv4RequiresExtendedNextHop);
+        }
+    }
+}

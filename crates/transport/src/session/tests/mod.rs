@@ -2148,6 +2148,7 @@ mod labeled;
 mod loop_detection;
 mod max_prefix;
 mod metrics;
+mod mrt_next_hop;
 mod next_hop;
 mod notification;
 mod orf;

@@ -580,14 +580,15 @@ fn encode_peer_index_table_inner(
 }
 /// Synthesize path attributes for MRT encoding from a `Route`.
 ///
-/// The route's `attributes` vec doesn't contain next-hop or `MP_REACH`
-/// (stripped per MP-BGP architecture). We reconstruct the appropriate
+/// The next hop always comes from `route.next_hop`, never from a stored
+/// `NEXT_HOP` attribute (see [`Route::attributes_except_next_hop`]); the
+/// stored attributes never contain `MP_REACH`. We reconstruct the appropriate
 /// attribute based on the route's prefix family:
 /// - IPv4: `PathAttribute::NextHop(ipv4)` (type 3)
 /// - IPv6: `PathAttribute::MpReachNlri` with IPv6 next-hop, empty NLRI
 #[must_use]
 pub fn synthesize_attributes(route: &Route) -> Vec<PathAttribute> {
-    let mut attrs = route.attributes.to_vec();
+    let mut attrs: Vec<_> = route.attributes_except_next_hop().cloned().collect();
     match route.prefix {
         Prefix::V4(_) => {
             match route.next_hop {
@@ -803,7 +804,7 @@ fn encode_route_mrt_attributes(
     let inject_ipv4_next_hop =
         matches!(route.prefix, Prefix::V4(_)) && matches!(route.next_hop, IpAddr::V4(_));
     let mut injected = false;
-    for attr in route.attributes.iter() {
+    for attr in route.attributes_except_next_hop() {
         if inject_ipv4_next_hop
             && !injected
             && !matches!(attr, PathAttribute::Origin(_) | PathAttribute::AsPath(_))
@@ -1734,6 +1735,13 @@ mod tests {
                 PathAttribute::LargeCommunities(vec![LargeCommunity::new(65_000, 1, 2)]),
                 PathAttribute::Med(9),
             ],
+            // Inbound IPv4 storage keeps the received NEXT_HOP, which import
+            // `next-hop self` leaves stale; only `route.next_hop` is encoded.
+            vec![
+                PathAttribute::Origin(Origin::Igp),
+                PathAttribute::NextHop(Ipv4Addr::new(198, 51, 100, 7)),
+                PathAttribute::Med(3),
+            ],
         ]
         .into_iter()
         .enumerate()
@@ -1757,6 +1765,16 @@ mod tests {
         }
         drop(output);
 
+        for route in &routes {
+            let next_hops: Vec<_> = synthesize_attributes(route)
+                .into_iter()
+                .filter(|attr| matches!(attr, PathAttribute::NextHop(_)))
+                .collect();
+            assert_eq!(
+                next_hops,
+                [PathAttribute::NextHop(Ipv4Addr::new(192, 0, 2, 1))]
+            );
+        }
         let mut expected = Vec::new();
         for attr in routes.iter().flat_map(synthesize_attributes) {
             let mut fresh = Vec::new();
