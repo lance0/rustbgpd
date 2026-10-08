@@ -4200,21 +4200,32 @@ bond's active aggregator. An explicit hex `esi` never triggers derivation.
 `interface` also binds the segment's link drain to the bond's carrier, as
 for any segment.
 
-Derivation fails closed. Startup, SIGHUP reload, and config transactions
-reject the config with an `InvalidEthernetSegment` error that names the
-interface and the reason when the bond is missing, is not a bond, is not in
-802.3ad mode, is admin down or without carrier, has no active aggregator, or
-has no LACP partner yet. No ESI is guessed and no routes are originated for
-it. Start the daemon after the bond has negotiated LACP, or rely on the
-service manager's restart policy.
+Derivation is a runtime readiness condition, not a config check. Config
+validation, including `rustbgpd --check` on a host without the bond, checks
+only the shape: `interface` is required, the member VNIs follow the usual
+one-segment-per-VNI rule, and two `auto-lacp` segments may not name the same
+bond. The daemon starts whatever the bond's state.
 
-The derived value is pinned per interface for the life of the process. The
-first successful derivation is logged at `info` and shown by
-`rbgp evpn segments`. Later reloads, config transactions, and partner loss
-reuse the pinned value. A CE replacement therefore changes the ESI only after
-a restart. Restart every PE on the segment so they derive the same new
-value, or configure an explicit `esi`. `rustbgpd --check` on a host without
-the bond fails the same way, because derivation reads the local kernel.
+At runtime the daemon reads each bond's LACP partner at startup and then every
+two seconds. A segment is NotReady while its bond is missing, is not a bond,
+is not in 802.3ad mode, is admin down or without carrier, has no active
+aggregator, or has no LACP partner yet. A NotReady segment has no ESI and
+originates no Type 1 or Type 4 routes, does not appear in `rbgp evpn es list`,
+and local MACs on its member VNIs are advertised without an ESI. It is also
+NotReady when its derived ESI matches another segment's; explicit ESIs win.
+Each transition is logged once, at `warn` with a reason code (`not_found`,
+`not_bond`, `not_lacp_mode`, `down`, `no_active_aggregator`, `no_partner`,
+`netlink_error`) when the segment goes NotReady, and at `info` with the
+derived ESI when it becomes Ready.
+
+When the derived ESI changes, the daemon re-applies the committed config
+through the same live EVPN runtime path SIGHUP uses, with no restart. The ESI
+changes when the bond becomes Ready, goes NotReady, or learns a new partner.
+On Ready, the segment is added and its routes originated. On NotReady, the
+segment is removed and its routes withdrawn. When the CE is replaced, the old
+segment's routes are withdrawn and the new ESI's routes are originated. The
+config text keeps `esi = "auto-lacp"`, so persistence, SIGHUP, and config
+transactions always carry the spec, never derived bytes.
 
 Type 2 (STP) derivation is not implemented. RFC 7432 §5 takes it from the
 MSTP IST root learned from BPDUs on the segment, which the Linux bridge does

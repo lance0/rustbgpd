@@ -5,7 +5,7 @@
 //! shape detectors and validators, the rollback ladder, and the gRPC apply
 //! entry point. Extracted from `src/main.rs`; see ADR-0063.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
@@ -306,6 +306,37 @@ impl EvpnRuntimeReloadApply {
         });
         join.await
             .map_err(|error| apply_task_join_error("apply", &error))?
+    }
+
+    /// Bonds named by `auto-lacp` segments in the committed config.
+    pub(crate) fn committed_auto_lacp_interfaces(&self) -> BTreeSet<String> {
+        self.committed_config_locked().auto_lacp_interfaces()
+    }
+
+    /// Re-converge the committed config against the current
+    /// `auto-lacp` readiness snapshot. The config text is unchanged;
+    /// only derived ESIs move, so the plan is an Ethernet Segment add
+    /// (became Ready), delete (became not ready), or delete + add (new
+    /// partner). The committed config is read under the apply lock so
+    /// a concurrent SIGHUP or `ApplyEvpnRuntime` commit is never
+    /// reverted.
+    pub(crate) async fn reconverge_committed(
+        &self,
+    ) -> Result<proto::ApplyEvpnRuntimeResponse, GrpcEvpnRuntimeApplyError> {
+        let this = self.clone();
+        // Same ADR-0080 shield as `apply_candidate_config`.
+        let join = tokio::spawn(async move {
+            let _apply_guard = this.apply_lock.lock().await;
+            let config = this.committed_config_locked();
+            let result = this
+                .apply_candidate_config_locked(&config, false, || {})
+                .await;
+            // Bindings are keyed by ESI, so they move with it.
+            this.publish_es_link_bindings(&config);
+            result
+        });
+        join.await
+            .map_err(|error| apply_task_join_error("auto-ESI reconverge", &error))?
     }
 
     pub(crate) async fn apply_config_if_changed<F, M>(

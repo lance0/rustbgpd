@@ -3215,9 +3215,10 @@ pub(crate) fn default_fib_families() -> Vec<String> {
 ///   because Type 0 means "single-homed" and thus shouldn't appear
 ///   in a multihoming config. The value `"auto-lacp"` instead derives
 ///   the RFC 7432 §5 type 1 ESI from the LACP partner (CE system MAC
-///   and port key) of the 802.3ad bond named by `interface`; it fails
-///   closed when that bond is absent, down, not 802.3ad, or has no
-///   partner, and the derived value is pinned until restart.
+///   and port key) of the 802.3ad bond named by `interface`. The bond
+///   is read at runtime, never at validation: the segment is not ready
+///   and originates nothing until the bond has an LACP partner, and is
+///   re-originated under a new ESI when the partner changes.
 /// - `member_vnis` — non-empty set of VNIs that participate in
 ///   this ES. Each member contributes a slot to the per-(ESI, VNI)
 ///   DF election.

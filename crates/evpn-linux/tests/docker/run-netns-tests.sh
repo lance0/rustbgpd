@@ -51,6 +51,8 @@
 #       (ADR-0085 RTNLGRP_LINK carrier monitor veth transitions)
 #   bash crates/evpn-linux/tests/docker/run-netns-tests.sh bond_lacp
 #       (802.3ad bond LACP partner read for auto-lacp type 1 ESIs)
+#   bash crates/evpn-linux/tests/docker/run-netns-tests.sh auto_lacp_daemon
+#       (daemon binary: auto-lacp segment NotReady -> Ready -> new partner)
 #   bash crates/evpn-linux/tests/docker/run-netns-tests.sh ac_gate
 #       (single-active AC-gate IFLA_BRPORT_STATE round-trip +
 #        flood-flag non-clobber proof)
@@ -125,6 +127,9 @@ SELECTOR="${1:-all}"
 # Module-path filter for `-p rustbgpd` daemon netns tests (fib/bfd);
 # empty means the default `netns_*` evpn-linux integration binary.
 RUSTBGPD_TEST_FILTER=""
+# Integration-test binary under `-p rustbgpd` that drives the real daemon
+# and `rbgp` binaries.
+RUSTBGPD_TEST_BIN=""
 case "${1:-all}" in
     spike)      FILTER="bum_filter_spike_validates_kernel_primitive" ;;
     roundtrip)  FILTER="linux_dataplane_set_bum_port_flags_round_trip" ;;
@@ -138,6 +143,7 @@ case "${1:-all}" in
     bgp_unnumbered)     TEST_BIN="netns_bgp_unnumbered"; FILTER="" ;;
     link_carrier)       TEST_BIN="netns_link_carrier"; FILTER="" ;;
     bond_lacp)          TEST_BIN="netns_bond_lacp"; FILTER="" ;;
+    auto_lacp_daemon)   FILTER=""; RUSTBGPD_TEST_BIN="evpn_auto_lacp_binary" ;;
     ac_gate)            TEST_BIN="netns_ac_gate"; FILTER="" ;;
     nexthop_raw)        TEST_BIN="netns_nexthop_raw"; FILTER="" ;;
     foreign_state_l2)   TEST_BIN="netns_foreign_state"; FILTER="l2_foreign_takeover_row_survives_withdrawal_and_shutdown" ;;
@@ -160,7 +166,7 @@ case "${1:-all}" in
     l3_single_path_cycle) TEST_BIN="netns_l3_install"; FILTER="linux_dataplane_installs_and_withdraws_l3_triple" ;;
     l3_foreign_route_cycle) TEST_BIN="netns_l3_install"; FILTER="linux_dataplane_foreign_route_survives_l3_cycle" ;;
     *)
-        echo "ERROR: unknown filter '$1' — pick one of: spike, roundtrip, all, fdb_nhg, fdb_nhg_roundtrip, fdb_nhg_cve, fib_runtime, bfd_runtime, bfd_runtime_ipv4, bgp_unnumbered, link_carrier, bond_lacp, ac_gate, nexthop_raw, foreign_state_l2, foreign_state_nhid, foreign_state_l3, l3_route_event, dataplane_vlan_fdb, dataplane_remote_mac, vlan_local_mac_attribution, macip_vlan_attribution, svd_fdb_vni, l3_multipath, l3_all_active_writer, managed_bridge, managed_vxlan, managed_svd_vxlan, managed_vlan_upper, managed_ready, managed_ip_vrf_ready, l3_single_path_cycle, l3_foreign_route_cycle" >&2
+        echo "ERROR: unknown filter '$1' — pick one of: spike, roundtrip, all, fdb_nhg, fdb_nhg_roundtrip, fdb_nhg_cve, fib_runtime, bfd_runtime, bfd_runtime_ipv4, bgp_unnumbered, link_carrier, bond_lacp, auto_lacp_daemon, ac_gate, nexthop_raw, foreign_state_l2, foreign_state_nhid, foreign_state_l3, l3_route_event, dataplane_vlan_fdb, dataplane_remote_mac, vlan_local_mac_attribution, macip_vlan_attribution, svd_fdb_vni, l3_multipath, l3_all_active_writer, managed_bridge, managed_vxlan, managed_svd_vxlan, managed_vlan_upper, managed_ready, managed_ip_vrf_ready, l3_single_path_cycle, l3_foreign_route_cycle" >&2
         exit 2
         ;;
 esac
@@ -255,7 +261,13 @@ DOCKER_ARGS=(
 # netnses and re-exec into them; running them in parallel inside
 # the same container risks them clobbering each other on the
 # `/proc/$$/ns` namespace inheritance the inner re-exec depends on.
-if [ -n "$RUSTBGPD_TEST_FILTER" ]; then
+if [ -n "$RUSTBGPD_TEST_BIN" ]; then
+    # Same stale-proto guard as the filter branch below; `rbgp` is built
+    # up front because it lives in another package.
+    TEST_ARGS=(
+        sh -c "cargo clean -p rustbgpd-api && cargo build -p rustbgpctl --bin rbgp && CARGO_BIN_EXE_rbgp=/work/target/debug/rbgp cargo test -p rustbgpd --test '${RUSTBGPD_TEST_BIN}' -- --test-threads=1 --nocapture"
+    )
+elif [ -n "$RUSTBGPD_TEST_FILTER" ]; then
     # The rustbgpd binary's gRPC types are generated from
     # `proto/rustbgpd.proto` by `rustbgpd-api`'s build script into that crate's
     # OUT_DIR. The persistent `$TARGET_CACHE_VOL` can retain a stale generated
@@ -290,7 +302,9 @@ fi
 # tests. List what the assembled command would actually run — same
 # image, env, and filters — and require the expected match count
 # before the real invocation.
-if [ -n "$RUSTBGPD_TEST_FILTER" ]; then
+if [ -n "$RUSTBGPD_TEST_BIN" ]; then
+    LIST_ARGS=(cargo test -p rustbgpd --test "$RUSTBGPD_TEST_BIN" -- --list)
+elif [ -n "$RUSTBGPD_TEST_FILTER" ]; then
     LIST_ARGS=(sh -c "${TEST_ARGS[2]} --list")
 else
     LIST_ARGS=("${TEST_ARGS[@]}" --list)

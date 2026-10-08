@@ -886,6 +886,9 @@ jobs:
       - name: Bond LACP partner (auto-lacp ESI) netns test
         run: bash crates/evpn-linux/tests/docker/run-netns-tests.sh bond_lacp
 
+      - name: Auto-lacp Ethernet Segment daemon readiness netns test
+        run: bash crates/evpn-linux/tests/docker/run-netns-tests.sh auto_lacp_daemon
+
       - name: Single-active AC-gate netns test
         run: bash crates/evpn-linux/tests/docker/run-netns-tests.sh ac_gate
 

@@ -1198,37 +1198,98 @@ impl Config {
         // which Gate 8b doesn't yet plumb. Reject the ambiguous
         // shape at config load so silent wrong-ESI origination is
         // structurally impossible.
-        let mut vni_owner: BTreeMap<EvpnInstanceId, EthernetSegmentIdentifier> = BTreeMap::new();
+        // Checked on the config shape, so a NotReady `auto-lacp`
+        // segment is held to the same rule before it has an ESI.
+        let esis = self.ethernet_segment_esis()?;
+        let mut vni_owner: BTreeMap<u32, &str> = BTreeMap::new();
+        let mut auto_interfaces: BTreeSet<&str> = BTreeSet::new();
         let mut out = Vec::with_capacity(self.ethernet_segments.len());
-        for cfg in &self.ethernet_segments {
-            let seg = parse_ethernet_segment(cfg, &known_vnis)?;
-            if !seen_esis.insert(seg.esi) {
-                return Err(ConfigError::InvalidEthernetSegment {
-                    reason: format!(
-                        "duplicate ESI {:?} (every [[ethernet_segments]] entry must have a unique ESI)",
-                        cfg.esi
-                    ),
-                });
-            }
-            for &vni in &seg.member_vnis {
-                if let Some(prior_esi) = vni_owner.insert(vni, seg.esi) {
+        for (cfg, esi) in self.ethernet_segments.iter().zip(esis) {
+            let seg = parse_ethernet_segment(cfg, esi, &known_vnis)?;
+            for &vni in &cfg.member_vnis {
+                if let Some(prior_esi) = vni_owner.insert(vni, &cfg.esi) {
                     return Err(ConfigError::InvalidEthernetSegment {
                         reason: format!(
-                            "VNI {} is listed under multiple ethernet_segments \
-                             (current segment esi {:?}, prior segment esi {:02x?}); \
+                            "VNI {vni} is listed under multiple ethernet_segments \
+                             (current segment esi {:?}, prior segment esi {prior_esi:?}); \
                              one local Ethernet Segment per VNI is required for \
                              ESI-aware MAC origination — disambiguation by \
                              learned-port ifindex is not yet plumbed",
-                            vni.as_u32(),
                             cfg.esi,
-                            prior_esi.octets(),
                         ),
                     });
                 }
             }
+            if cfg.esi == AUTO_LACP_ESI
+                && let Some(interface) = cfg.interface.as_deref()
+                && !auto_interfaces.insert(interface)
+            {
+                return Err(ConfigError::InvalidEthernetSegment {
+                    reason: format!(
+                        "two {AUTO_LACP_ESI:?} segments name interface {interface:?}; \
+                         one bond derives one ESI"
+                    ),
+                });
+            }
+            let Some(seg) = seg else {
+                continue;
+            };
+            if !seen_esis.insert(seg.esi) {
+                return Err(ConfigError::InvalidEthernetSegment {
+                    reason: format!(
+                        "duplicate ESI {} from esi {:?} (every [[ethernet_segments]] entry \
+                         must have a unique ESI)",
+                        seg.esi, cfg.esi
+                    ),
+                });
+            }
             out.push(seg);
         }
         Ok(out)
+    }
+
+    /// Per-entry ESI aligned with `ethernet_segments`. `None` is a
+    /// not-ready `auto-lacp` segment: no LACP partner yet, or a derived
+    /// ESI that collides with another segment's. A collision is kernel
+    /// state, not a config error, so validation never depends on the
+    /// live partner; explicit ESIs and the first derived one win.
+    fn ethernet_segment_esis(&self) -> Result<Vec<Option<EthernetSegmentIdentifier>>, ConfigError> {
+        let explicit: BTreeSet<EthernetSegmentIdentifier> = self
+            .ethernet_segments
+            .iter()
+            .filter(|cfg| cfg.esi != AUTO_LACP_ESI)
+            .filter_map(|cfg| parse_esi(&cfg.esi).ok())
+            .collect();
+        let mut derived = BTreeSet::new();
+        self.ethernet_segments
+            .iter()
+            .map(|cfg| {
+                let esi = segment_esi(cfg)?;
+                if cfg.esi == AUTO_LACP_ESI
+                    && let Some(esi) = esi
+                    && (explicit.contains(&esi) || !derived.insert(esi))
+                {
+                    tracing::warn!(
+                        interface = cfg.interface.as_deref().unwrap_or_default(),
+                        esi = %esi,
+                        "auto-lacp Ethernet Segment not ready: derived ESI collides \
+                         with another segment's ESI"
+                    );
+                    return Ok(None);
+                }
+                Ok(esi)
+            })
+            .collect()
+    }
+
+    /// Bonds named by `esi = "auto-lacp"` segments — the set the
+    /// runtime readiness probe watches.
+    pub(crate) fn auto_lacp_interfaces(&self) -> BTreeSet<String> {
+        self.ethernet_segments
+            .iter()
+            .filter(|cfg| cfg.esi == AUTO_LACP_ESI)
+            .filter_map(|cfg| cfg.interface.clone())
+            .collect()
     }
 
     /// Resolve the ADR-0085 attachment-circuit bindings declared on
@@ -1252,11 +1313,18 @@ impl Config {
         &self,
     ) -> Result<BTreeMap<EthernetSegmentIdentifier, EsLinkBinding>, ConfigError> {
         let mut out = BTreeMap::new();
-        for cfg in &self.ethernet_segments {
+        for (cfg, esi) in self
+            .ethernet_segments
+            .iter()
+            .zip(self.ethernet_segment_esis()?)
+        {
             let Some(interface) = cfg.interface.clone() else {
                 continue;
             };
-            let esi = segment_esi(cfg)?;
+            // A NotReady `auto-lacp` segment has no ESI to key on yet.
+            let Some(esi) = esi else {
+                continue;
+            };
             out.insert(
                 esi,
                 EsLinkBinding {
@@ -1520,14 +1588,16 @@ impl Config {
     fn overlay_index_esi_member_map(
         &self,
     ) -> Result<BTreeMap<EthernetSegmentIdentifier, BTreeSet<EvpnInstanceId>>, ConfigError> {
-        let mut out = BTreeMap::new();
-        for cfg in &self.ethernet_segments {
-            let esi = segment_esi(cfg).map_err(|e| ConfigError::InvalidEvpnIpVrf {
-                reason: format!(
-                    "ethernet_segments[esi={:?}]: invalid ESI needed for ESI overlay-index validation: {e}",
-                    cfg.esi
-                ),
+        let esis = self
+            .ethernet_segment_esis()
+            .map_err(|e| ConfigError::InvalidEvpnIpVrf {
+                reason: format!("invalid ESI needed for ESI overlay-index validation: {e}"),
             })?;
+        let mut out = BTreeMap::new();
+        for (cfg, esi) in self.ethernet_segments.iter().zip(esis) {
+            let Some(esi) = esi else {
+                continue;
+            };
             let mut members = BTreeSet::new();
             for &raw_vni in &cfg.member_vnis {
                 let vni =
@@ -6489,29 +6559,41 @@ pub struct EsLinkBinding {
 /// §5 type 1 ESI derivation from its `interface` bond's LACP partner.
 pub const AUTO_LACP_ESI: &str = "auto-lacp";
 
-/// Derived type 1 ESIs, pinned per interface for the process lifetime.
+/// Readiness snapshot for `auto-lacp` segments: bond name → the type 1
+/// ESI derived from its current LACP partner. Written only by the
+/// runtime probe (`evpn_auto_esi`); an absent entry means not ready.
 ///
-/// Every config path (startup, SIGHUP, transactions, journal replay)
-/// resolves segments repeatedly; pinning makes all of them see the one
-/// value the runtime originated, and keeps a later partner loss from
-/// failing unrelated config changes. A CE replacement therefore takes
-/// effect only after a restart.
-// ponytail: never evicted, so removing and re-adding a segment on the
-// same bond reuses the pinned ESI; add eviction if re-derivation on
-// reload is ever wanted.
-static PINNED_LACP_ESIS: std::sync::Mutex<BTreeMap<String, EthernetSegmentIdentifier>> =
-    std::sync::Mutex::new(BTreeMap::new());
+/// Config validation never reads the kernel: an `auto-lacp` segment
+/// whose bond has no entry here validates by shape and resolves to no
+/// runtime segment, so it originates nothing until the probe publishes
+/// an ESI and re-converges the committed config.
+static AUTO_LACP_ESIS: std::sync::RwLock<BTreeMap<String, EthernetSegmentIdentifier>> =
+    std::sync::RwLock::new(BTreeMap::new());
+
+/// Set (`Some`) or clear (`None`) the derived ESI for one bond.
+/// Returns whether the snapshot changed.
+pub(crate) fn set_auto_lacp_esi(interface: &str, esi: Option<EthernetSegmentIdentifier>) -> bool {
+    let mut table = AUTO_LACP_ESIS
+        .write()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    match esi {
+        Some(esi) => table.insert(interface.to_string(), esi) != Some(esi),
+        None => table.remove(interface).is_some(),
+    }
+}
 
 /// Resolve a segment's ESI: the literal hex value, or for
-/// [`AUTO_LACP_ESI`] the type 1 ESI derived from the bound bond.
-/// Derivation fails closed — no ESI and a config error naming the
-/// reason — when the bond is absent, down, not 802.3ad, or has no
-/// LACP partner.
-fn segment_esi(cfg: &EthernetSegmentConfig) -> Result<EthernetSegmentIdentifier, ConfigError> {
+/// [`AUTO_LACP_ESI`] the probe's current derived value (`None` while
+/// the bond is not ready).
+fn segment_esi(
+    cfg: &EthernetSegmentConfig,
+) -> Result<Option<EthernetSegmentIdentifier>, ConfigError> {
     if cfg.esi != AUTO_LACP_ESI {
-        return parse_esi(&cfg.esi).map_err(|e| ConfigError::InvalidEthernetSegment {
-            reason: format!("esi {:?}: {e}", cfg.esi),
-        });
+        return parse_esi(&cfg.esi)
+            .map(Some)
+            .map_err(|e| ConfigError::InvalidEthernetSegment {
+                reason: format!("esi {:?}: {e}", cfg.esi),
+            });
     }
     let Some(interface) = cfg.interface.as_deref().filter(|i| !i.is_empty()) else {
         return Err(ConfigError::InvalidEthernetSegment {
@@ -6521,50 +6603,11 @@ fn segment_esi(cfg: &EthernetSegmentConfig) -> Result<EthernetSegmentIdentifier,
             ),
         });
     };
-    let mut pinned = PINNED_LACP_ESIS
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    if let Some(esi) = pinned.get(interface) {
-        return Ok(*esi);
-    }
-    let esi =
-        read_lacp_type1_esi(interface).map_err(|reason| ConfigError::InvalidEthernetSegment {
-            reason: format!(
-                "esi {AUTO_LACP_ESI:?} on interface {interface:?}: cannot derive the \
-                 RFC 7432 type 1 ESI: {reason}"
-            ),
-        })?;
-    tracing::info!(
-        interface,
-        esi = %esi,
-        "derived RFC 7432 type 1 ESI from the bond's LACP partner; pinned until restart"
-    );
-    pinned.insert(interface.to_string(), esi);
-    Ok(esi)
-}
-
-#[cfg(target_os = "linux")]
-fn read_lacp_type1_esi(interface: &str) -> Result<EthernetSegmentIdentifier, String> {
-    let partner =
-        rustbgpd_evpn_linux::read_bond_lacp_partner(interface).map_err(|e| e.to_string())?;
-    Ok(rustbgpd_evpn::lacp_type1_esi(
-        partner.system_mac,
-        partner.port_key,
-    ))
-}
-
-#[cfg(not(target_os = "linux"))]
-fn read_lacp_type1_esi(_interface: &str) -> Result<EthernetSegmentIdentifier, String> {
-    Err("LACP partner discovery requires Linux".to_string())
-}
-
-/// Pin a derived ESI without a kernel bond, for config tests.
-#[cfg(test)]
-pub(crate) fn pin_lacp_esi_for_test(interface: &str, esi: EthernetSegmentIdentifier) {
-    PINNED_LACP_ESIS
-        .lock()
+    Ok(AUTO_LACP_ESIS
+        .read()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .insert(interface.to_string(), esi);
+        .get(interface)
+        .copied())
 }
 
 /// Parse one [`EthernetSegmentConfig`] entry into the runtime
@@ -6578,12 +6621,12 @@ pub(crate) fn pin_lacp_esi_for_test(interface: &str, esi: EthernetSegmentIdentif
 )]
 fn parse_ethernet_segment(
     cfg: &EthernetSegmentConfig,
+    esi: Option<EthernetSegmentIdentifier>,
     known_vnis: &BTreeSet<EvpnInstanceId>,
-) -> Result<EthernetSegment, ConfigError> {
+) -> Result<Option<EthernetSegment>, ConfigError> {
     // IFNAMSIZ-1 — the longest interface name the kernel can hold.
     const IFNAMSIZ_MAX: usize = 15;
-    let esi = segment_esi(cfg)?;
-    if esi.esi_type() == 0 && esi.octets().iter().all(|&b| b == 0) {
+    if esi.is_some_and(|esi| esi.is_zero()) {
         return Err(ConfigError::InvalidEthernetSegment {
             reason: format!(
                 "esi {:?}: Type 0 (all-zero) ESI is the single-homed sentinel; \
@@ -6748,7 +6791,7 @@ fn parse_ethernet_segment(
         }
     }
 
-    Ok(EthernetSegment {
+    Ok(esi.map(|esi| EthernetSegment {
         esi,
         member_vnis,
         df_preference: cfg.df_preference,
@@ -6756,7 +6799,7 @@ fn parse_ethernet_segment(
         df_dont_preempt: cfg.df_dont_preempt,
         redundancy_mode,
         originator_ip,
-    })
+    }))
 }
 
 /// Parse one [`EvpnIpVrfConfig`] entry into the runtime [`IpVrf`]

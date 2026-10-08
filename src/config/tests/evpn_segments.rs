@@ -723,7 +723,7 @@ originator_ip = "10.0.0.100"
     );
 }
 
-fn auto_lacp_toml(interface: Option<&str>) -> String {
+fn auto_lacp_toml(interface: Option<&str>, extra: &str) -> String {
     let binding = interface.map_or_else(String::new, |i| format!("interface = \"{i}\"\n"));
     evpn_toml_with(&format!(
         r#"
@@ -733,32 +733,92 @@ rd = "65000:100"
 route_targets = ["65000:100"]
 local_vtep_ip = "10.0.0.100"
 
+[[evpn_instances]]
+vni = 200
+rd = "65000:200"
+route_targets = ["65000:200"]
+local_vtep_ip = "10.0.0.100"
+
 [[ethernet_segments]]
 esi = "auto-lacp"
 member_vnis = [100]
 originator_ip = "10.0.0.100"
-{binding}"#
+{binding}{extra}"#
     ))
 }
 
+fn lacp_esi(last: u8) -> EthernetSegmentIdentifier {
+    rustbgpd_evpn::lacp_type1_esi([0x02, 0x11, 0x22, 0x33, 0x44, last], 0x01c1)
+}
+
 #[test]
-fn ethernet_segment_auto_lacp_uses_the_pinned_derived_esi() {
-    // A name no kernel link has: only the pin can satisfy resolution,
-    // so a pass proves every resolver reads the pinned value.
-    let esi = rustbgpd_evpn::lacp_type1_esi([0x02, 0x11, 0x22, 0x33, 0x44, 0x55], 0x01c1);
-    pin_lacp_esi_for_test("rbgp-pinned0", esi);
-    let config = parse(&auto_lacp_toml(Some("rbgp-pinned0"))).unwrap();
+fn ethernet_segment_auto_lacp_validates_without_a_bond_and_stays_not_ready() {
+    // No kernel read at validation: a bond that does not exist on this
+    // host (the `rustbgpd --check` off-box case) still validates, and
+    // the segment resolves to nothing until the probe publishes an ESI.
+    let config = parse(&auto_lacp_toml(Some("rbgp-nobond0"), "")).unwrap();
+    assert_eq!(config.resolve_ethernet_segments().unwrap(), Vec::new());
+    assert_eq!(config.resolve_es_link_bindings().unwrap(), BTreeMap::new());
+    assert_eq!(
+        config.auto_lacp_interfaces(),
+        BTreeSet::from(["rbgp-nobond0".to_string()])
+    );
+}
+
+#[test]
+fn ethernet_segment_auto_lacp_resolves_the_published_esi_and_follows_changes() {
+    let config = parse(&auto_lacp_toml(Some("rbgp-ready0"), "")).unwrap();
+    let not_ready = evpn_runtime_model_from_config(&config).unwrap();
+
+    assert!(set_auto_lacp_esi("rbgp-ready0", Some(lacp_esi(0x55))));
     let segments = config.resolve_ethernet_segments().unwrap();
-    assert_eq!(segments[0].esi, esi);
+    assert_eq!(segments[0].esi, lacp_esi(0x55));
     let bindings = config.resolve_es_link_bindings().unwrap();
-    assert_eq!(bindings[&esi].interface, "rbgp-pinned0");
-    // The sentinel, not the derived value, is what persists.
+    assert_eq!(bindings[&lacp_esi(0x55)].interface, "rbgp-ready0");
+    // The spec, not the derived value, is what persists.
     assert_eq!(config.ethernet_segments[0].esi, "auto-lacp");
+    let ready = evpn_runtime_candidate_from_config(&config).unwrap();
+    let plan = not_ready.plan_candidate(&ready);
+    assert_eq!(plan.ethernet_segments.added, vec![lacp_esi(0x55)]);
+
+    // CE replaced: the same config re-converges as delete old + add new.
+    let model = evpn_runtime_model_from_config(&config).unwrap();
+    assert!(set_auto_lacp_esi("rbgp-ready0", Some(lacp_esi(0x66))));
+    let replaced = evpn_runtime_candidate_from_config(&config).unwrap();
+    let plan = model.plan_candidate(&replaced);
+    assert_eq!(plan.ethernet_segments.deleted, vec![lacp_esi(0x55)]);
+    assert_eq!(plan.ethernet_segments.added, vec![lacp_esi(0x66)]);
+    assert!(set_auto_lacp_esi("rbgp-ready0", None));
+}
+
+#[test]
+fn ethernet_segment_auto_lacp_collision_stays_not_ready() {
+    let explicit = lacp_esi(0x77);
+    let extra = format!(
+        r#"
+[[ethernet_segments]]
+esi = "{explicit}"
+member_vnis = [200]
+originator_ip = "10.0.0.100"
+interface = "eth9"
+"#
+    );
+    let config = parse(&auto_lacp_toml(Some("rbgp-collide0"), &extra)).unwrap();
+    set_auto_lacp_esi("rbgp-collide0", Some(explicit));
+    let segments = config.resolve_ethernet_segments().unwrap();
+    assert_eq!(segments.len(), 1, "only the explicit segment resolves");
+    assert_eq!(segments[0].member_vnis.len(), 1);
+    assert_eq!(
+        config.resolve_es_link_bindings().unwrap()[&explicit].interface,
+        "eth9",
+        "a colliding derived ESI must not steal the explicit binding"
+    );
+    set_auto_lacp_esi("rbgp-collide0", None);
 }
 
 #[test]
 fn ethernet_segment_auto_lacp_requires_interface() {
-    let msg = parse(&auto_lacp_toml(None)).unwrap_err().to_string();
+    let msg = parse(&auto_lacp_toml(None, "")).unwrap_err().to_string();
     assert!(
         msg.contains("auto-lacp") && msg.contains("requires `interface`"),
         "{msg}"
@@ -766,15 +826,27 @@ fn ethernet_segment_auto_lacp_requires_interface() {
 }
 
 #[test]
-fn ethernet_segment_auto_lacp_fails_closed_without_a_bond() {
-    let err = parse(&auto_lacp_toml(Some("rbgp-nobond0"))).unwrap_err();
-    let msg = err.to_string();
-    assert!(
-        matches!(err, ConfigError::InvalidEthernetSegment { .. }),
-        "{msg}"
-    );
-    assert!(
-        msg.contains("\"rbgp-nobond0\"") && msg.contains("cannot derive"),
-        "{msg}"
-    );
+fn ethernet_segment_auto_lacp_shape_rules_apply_before_ready() {
+    let shared_vni = r#"
+[[ethernet_segments]]
+esi = "00:00:00:00:00:00:00:00:00:01"
+member_vnis = [100]
+originator_ip = "10.0.0.100"
+"#;
+    let msg = parse(&auto_lacp_toml(Some("rbgp-shape0"), shared_vni))
+        .unwrap_err()
+        .to_string();
+    assert!(msg.contains("multiple ethernet_segments"), "{msg}");
+
+    let same_bond = r#"
+[[ethernet_segments]]
+esi = "auto-lacp"
+member_vnis = [200]
+originator_ip = "10.0.0.100"
+interface = "rbgp-shape0"
+"#;
+    let msg = parse(&auto_lacp_toml(Some("rbgp-shape0"), same_bond))
+        .unwrap_err()
+        .to_string();
+    assert!(msg.contains("one bond derives one ESI"), "{msg}");
 }

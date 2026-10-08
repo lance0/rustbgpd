@@ -4,8 +4,9 @@
 //! carrier flags, and `IFLA_BOND_AD_INFO` (the active aggregator's
 //! partner system MAC and partner key) arrive in a single kernel
 //! message, so the MAC and key can never be torn across a partner
-//! change the way two separate sysfs reads could be. Synchronous
-//! because the caller is config resolution, which is not async.
+//! change the way two separate sysfs reads could be. Synchronous: one
+//! request/reply on a private socket, cheap enough for the daemon's
+//! periodic readiness probe to call inline.
 
 use std::fmt;
 
@@ -61,6 +62,22 @@ impl fmt::Display for LacpPartnerError {
 }
 
 impl std::error::Error for LacpPartnerError {}
+
+impl LacpPartnerError {
+    /// Stable snake-case reason code for logs and status surfaces.
+    #[must_use]
+    pub const fn code(&self) -> &'static str {
+        match self {
+            Self::NotFound => "not_found",
+            Self::NotBond => "not_bond",
+            Self::NotLacpMode => "not_lacp_mode",
+            Self::Down => "down",
+            Self::NoActiveAggregator => "no_active_aggregator",
+            Self::NoPartner => "no_partner",
+            Self::Io(_) => "netlink_error",
+        }
+    }
+}
 
 /// Read the LACP partner of bond `name` from the kernel.
 ///

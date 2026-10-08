@@ -121,7 +121,7 @@ issue #187) so reviewers can distinguish real stability from flake masking.
   `vlan_local_mac_attribution`, `macip_vlan_attribution`, `svd_fdb_vni`,
   `managed_bridge`, `managed_vxlan`, `managed_svd_vxlan`,
   `managed_vlan_upper`, `managed_ready`, `link_carrier`, `bond_lacp`,
-  `ac_gate`, `nexthop_raw`, `foreign_state_l2`, and `foreign_state_nhid`. Seven further
+  `auto_lacp_daemon`, `ac_gate`, `nexthop_raw`, `foreign_state_l2`, and `foreign_state_nhid`. Seven further
   L3 selectors run only when the job's `vrf-available` probe loads the `vrf`
   kernel module, and skip otherwise: `l3_multipath`,
   `managed_ip_vrf_ready`, `l3_all_active_writer`, `foreign_state_l3`, and
@@ -133,8 +133,8 @@ issue #187) so reviewers can distinguish real stability from flake masking.
 
 The job always publishes a stable `netns-selector-receipt` JSON artifact and a
 concise job summary. A selector is recorded only after its harness invocation
-succeeds. The finalizer requires all 26 selectors when VRF is available; when
-VRF is unavailable it requires the 19 unconditional selectors and records the
+succeeds. The finalizer requires all 27 selectors when VRF is available; when
+VRF is unavailable it requires the 20 unconditional selectors and records the
 seven L3 omissions with reason `vrf_unavailable`. Missing, duplicate, or
 unexpected required selectors fail the job.
 
