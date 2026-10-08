@@ -90,9 +90,92 @@ pub(crate) struct EvpnSegmentRuntimeControl {
     instances_tx: watch::Sender<Arc<EvpnInstanceTable>>,
     segments_tx: watch::Sender<Arc<Vec<EthernetSegment>>>,
     drained_esis_tx: watch::Sender<Arc<BTreeSet<EthernetSegmentIdentifier>>>,
+    df_status_rx: watch::Receiver<Arc<SegmentDfStatusTable>>,
+    /// Daemon wiring only: the actor task, started on the first
+    /// committed Ethernet Segment (see [`Self::with_deferred_start`]).
+    slot: Option<Arc<std::sync::Mutex<SegmentActorSlot>>>,
+}
+
+/// Starts a prepared segment actor task.
+pub(crate) type StartSegmentActor = Box<dyn FnOnce() -> EvpnSegmentHandle + Send>;
+
+/// Where the daemon's segment actor task lives. Its channels exist from
+/// startup, so the runtime control, drain hook and link-drain
+/// coordinator are wired once whether or not a segment is configured.
+enum SegmentActorSlot {
+    Pending(StartSegmentActor),
+    Running(EvpnSegmentHandle),
+    Closed,
+}
+
+impl std::fmt::Debug for SegmentActorSlot {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Pending(_) => "Pending",
+            Self::Running(_) => "Running",
+            Self::Closed => "Closed",
+        })
+    }
 }
 
 impl EvpnSegmentRuntimeControl {
+    /// Hold the actor task until [`Self::start_if_configured`] sees a
+    /// committed Ethernet Segment. Until then publishes land in the
+    /// watches, which the task reads when it starts.
+    #[must_use]
+    pub(crate) fn with_deferred_start(mut self, start: StartSegmentActor) -> Self {
+        self.slot = Some(Arc::new(std::sync::Mutex::new(SegmentActorSlot::Pending(
+            start,
+        ))));
+        self
+    }
+
+    fn slot_state(&self) -> Option<std::sync::MutexGuard<'_, SegmentActorSlot>> {
+        self.slot.as_ref().map(|slot| {
+            slot.lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+        })
+    }
+
+    /// Start the deferred actor task once the published Ethernet Segment
+    /// set is non-empty. Callers run this only after a converge succeeded,
+    /// so a refused or rolled-back apply never starts it. No-op when the
+    /// task already runs, after [`Self::close_for_shutdown`], or without
+    /// a slot.
+    pub(crate) fn start_if_configured(&self) {
+        if self.segments_tx.borrow().is_empty() {
+            return;
+        }
+        if let Some(mut state) = self.slot_state() {
+            *state = match std::mem::replace(&mut *state, SegmentActorSlot::Closed) {
+                SegmentActorSlot::Pending(start) => {
+                    info!(
+                        "first Ethernet Segment committed; starting the EVPN segment orchestrator"
+                    );
+                    SegmentActorSlot::Running(start())
+                }
+                other => other,
+            };
+        }
+    }
+
+    /// Coordinated-shutdown admission closure: no later publish starts
+    /// the task, and a task that never started drops its receivers, so
+    /// the control reports closed. Returns the running task's handle for
+    /// the bounded drain.
+    pub(crate) fn close_for_shutdown(&self) -> Option<EvpnSegmentHandle> {
+        let mut state = self.slot_state()?;
+        match std::mem::replace(&mut *state, SegmentActorSlot::Closed) {
+            SegmentActorSlot::Running(handle) => Some(handle),
+            SegmentActorSlot::Pending(_) | SegmentActorSlot::Closed => None,
+        }
+    }
+
+    /// Live per-ESI advertised DF state and pending recovery.
+    pub(crate) fn df_status(&self) -> watch::Receiver<Arc<SegmentDfStatusTable>> {
+        self.df_status_rx.clone()
+    }
+
     /// Whether the segment actor can still receive runtime instance
     /// and ES snapshots.
     #[must_use]
@@ -163,6 +246,8 @@ impl EvpnSegmentControlProbe {
                 instances_tx,
                 segments_tx,
                 drained_esis_tx,
+                df_status_rx: watch::channel(Arc::new(SegmentDfStatusTable::new())).1,
+                slot: None,
             },
             drained_rx,
             _instances_rx: instances_rx,
@@ -188,26 +273,22 @@ pub(crate) type SegmentDfStatusTable = BTreeMap<EthernetSegmentIdentifier, Segme
 pub struct EvpnSegmentHandle {
     pub(crate) shutdown: CancellationToken,
     pub(crate) join: tokio::task::JoinHandle<()>,
-    instances_tx: watch::Sender<Arc<EvpnInstanceTable>>,
-    segments_tx: watch::Sender<Arc<Vec<EthernetSegment>>>,
-    drained_esis_tx: watch::Sender<Arc<BTreeSet<EthernetSegmentIdentifier>>>,
-    df_status_rx: watch::Receiver<Arc<SegmentDfStatusTable>>,
+    /// Daemon wiring takes its control from [`prepare_with_local_bias`].
+    #[cfg(test)]
+    control: EvpnSegmentRuntimeControl,
 }
 
 impl EvpnSegmentHandle {
-    /// Cloneable ADR-0063 runtime control surface for future daemon
-    /// apply wiring.
+    /// Cloneable ADR-0063 runtime control surface.
+    #[cfg(test)]
     pub(crate) fn runtime_control(&self) -> EvpnSegmentRuntimeControl {
-        EvpnSegmentRuntimeControl {
-            instances_tx: self.instances_tx.clone(),
-            segments_tx: self.segments_tx.clone(),
-            drained_esis_tx: self.drained_esis_tx.clone(),
-        }
+        self.control.clone()
     }
 
     /// Live per-ESI advertised DF state and pending recovery.
+    #[cfg(test)]
     pub(crate) fn df_status(&self) -> watch::Receiver<Arc<SegmentDfStatusTable>> {
-        self.df_status_rx.clone()
+        self.control.df_status()
     }
 
     /// Cancel the actor and wait for the bounded shutdown drain.
@@ -221,13 +302,7 @@ impl EvpnSegmentHandle {
 /// single-homed deployments and route reflectors take this path and
 /// pay zero runtime cost.
 #[must_use = "drop the handle to shut down the EVPN segment orchestrator"]
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "daemon wiring spawns via spawn_with_local_bias since ADR-0085 decision 5; this bias-less shape is kept for the actor lifecycle tests"
-    )
-)]
+#[cfg(test)]
 pub fn spawn(
     instances: &Arc<EvpnInstanceTable>,
     segments: Vec<EthernetSegment>,
@@ -258,8 +333,9 @@ pub fn spawn(
 /// attached" half of the eligibility condition). Either may be absent
 /// — no dataplane / no binding feed — in which case no bias snapshot
 /// is published / no segment counts as bound. Spawns even with no
-/// segments, for `auto-lacp` segments that are not yet Ready.
+/// segments. Daemon wiring defers the start ([`prepare_with_local_bias`]).
 #[must_use = "drop the handle to shut down the EVPN segment orchestrator"]
+#[cfg(test)]
 #[expect(
     clippy::too_many_arguments,
     reason = "the segment actor keeps the dataplane supervisor's dependency spine explicit"
@@ -274,40 +350,83 @@ pub(crate) fn spawn_with_local_bias(
     metrics: BgpMetrics,
     daemon_shutdown: CancellationToken,
 ) -> EvpnSegmentHandle {
-    let (segments_tx, segments_rx) = watch::channel(Arc::new(segments));
-    let (instances_tx, instances_rx) = watch::channel(instances.clone());
-    // Drain state is runtime-only and in-memory (ADR-0084): the set
-    // always starts empty, so a daemon restart clears any drain and
-    // replays configured state.
-    let (drained_esis_tx, drained_esis_rx) = watch::channel(Arc::new(BTreeSet::new()));
-    let (df_status_tx, df_status_rx) = watch::channel(Arc::new(SegmentDfStatusTable::new()));
-    let runtime = SegmentRuntime {
-        instances: instances.clone(),
+    let (_, start) = prepare_with_local_bias(
+        instances,
+        segments,
         rib_tx,
         bum_enforcement_tx,
         same_esi_bias_tx,
-        metrics,
-        shutdown: daemon_shutdown.clone(),
-        drained_esis: Arc::new(BTreeSet::new()),
-        es_link_bindings: EsLinkBindings::default(),
-        boot_until: Some(tokio::time::Instant::now() + BOOT_RECOVERY_MAX_WAIT),
-    };
-    let join = tokio::spawn(segment_loop(
-        runtime,
-        instances_rx,
-        segments_rx,
-        drained_esis_rx,
         es_link_bindings_rx,
-        df_status_tx,
-    ));
-    EvpnSegmentHandle {
-        shutdown: daemon_shutdown,
-        join,
+        metrics,
+        daemon_shutdown,
+    );
+    start()
+}
+
+/// The segment actor without starting its task: the runtime
+/// control works at once, and the returned closure starts the task from
+/// the latest published instances, segments, drained set and bindings.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the segment actor keeps the dataplane supervisor's dependency spine explicit"
+)]
+pub(crate) fn prepare_with_local_bias(
+    instances: &Arc<EvpnInstanceTable>,
+    segments: Vec<EthernetSegment>,
+    rib_tx: mpsc::Sender<RibUpdate>,
+    bum_enforcement_tx: Option<watch::Sender<Arc<BumEnforcementTable>>>,
+    same_esi_bias_tx: Option<watch::Sender<Arc<SameEsiBiasTable>>>,
+    es_link_bindings_rx: Option<watch::Receiver<EsLinkBindings>>,
+    metrics: BgpMetrics,
+    daemon_shutdown: CancellationToken,
+) -> (EvpnSegmentRuntimeControl, StartSegmentActor) {
+    let (segments_tx, mut segments_rx) = watch::channel(Arc::new(segments));
+    let (instances_tx, mut instances_rx) = watch::channel(instances.clone());
+    // Drain state is runtime-only and in-memory (ADR-0084): the set
+    // always starts empty, so a daemon restart clears any drain and
+    // replays configured state.
+    let (drained_esis_tx, mut drained_esis_rx) = watch::channel(Arc::new(BTreeSet::new()));
+    let (df_status_tx, df_status_rx) = watch::channel(Arc::new(SegmentDfStatusTable::new()));
+    let control = EvpnSegmentRuntimeControl {
         instances_tx,
         segments_tx,
         drained_esis_tx,
         df_status_rx,
-    }
+        slot: None,
+    };
+    #[cfg(test)]
+    let handle_control = control.clone();
+    let start = Box::new(move || {
+        // Mark the latest snapshots seen: the loop starts from them, so
+        // a value published before the start is not replayed as a change.
+        segments_rx.borrow_and_update();
+        let runtime = SegmentRuntime {
+            instances: instances_rx.borrow_and_update().clone(),
+            rib_tx,
+            bum_enforcement_tx,
+            same_esi_bias_tx,
+            metrics,
+            shutdown: daemon_shutdown.clone(),
+            drained_esis: drained_esis_rx.borrow_and_update().clone(),
+            es_link_bindings: EsLinkBindings::default(),
+            boot_until: Some(tokio::time::Instant::now() + BOOT_RECOVERY_MAX_WAIT),
+        };
+        let join = tokio::spawn(segment_loop(
+            runtime,
+            instances_rx,
+            segments_rx,
+            drained_esis_rx,
+            es_link_bindings_rx,
+            df_status_tx,
+        ));
+        EvpnSegmentHandle {
+            shutdown: daemon_shutdown,
+            join,
+            #[cfg(test)]
+            control: handle_control,
+        }
+    });
+    (control, start)
 }
 
 struct SegmentRuntime {

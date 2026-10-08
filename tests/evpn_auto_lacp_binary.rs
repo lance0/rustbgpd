@@ -14,6 +14,11 @@
 //! - replacing the CE's LACP system MAC withdraws the old Type 4 route
 //!   and originates one under the new ESI.
 //!
+//! A second test starts the daemon with no Ethernet Segment and adds
+//! the first one — `auto-lacp` — by SIGHUP: the readiness probe and the
+//! segment actor both start live, the segment reaches Ready with no
+//! restart, and coordinated shutdown drains the live-started actor.
+//!
 //! Gates on `EVPN_LINUX_NETNS=1`; run via
 //! `bash crates/evpn-linux/tests/docker/run-netns-tests.sh auto_lacp_daemon`.
 
@@ -29,7 +34,34 @@ use std::process::{Child, Command, Output, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
-const TEST_NAME: &str = "auto_lacp_segment_follows_lacp_partner_without_restart";
+/// Outer pass: re-run `test` inside a throwaway netns and return
+/// `false`. Inner pass: return `true` so the caller runs the body.
+fn inner_netns_pass(test: &str) -> bool {
+    if std::env::var("RUSTBGPD_AUTOLACP_INNER").is_ok() {
+        return true;
+    }
+    let ns = format!("rbgp-{}-{test}", std::process::id());
+    let _ = Command::new("ip").args(["netns", "delete", &ns]).output();
+    ip(&["netns", "add", &ns]);
+    let status = Command::new("ip")
+        .args(["netns", "exec", &ns])
+        .arg(std::env::current_exe().unwrap())
+        .args(["--exact", "--nocapture", test])
+        .env("RUSTBGPD_AUTOLACP_INNER", "1")
+        .status()
+        .expect("spawn inner");
+    let _ = Command::new("ip").args(["netns", "delete", &ns]).output();
+    assert!(status.success(), "inner test invocation failed");
+    false
+}
+
+fn netns_enabled() -> bool {
+    let enabled = std::env::var("EVPN_LINUX_NETNS").as_deref() == Ok("1");
+    if !enabled {
+        eprintln!("skipping: set EVPN_LINUX_NETNS=1 to run the privileged auto-lacp daemon test");
+    }
+    enabled
+}
 
 fn ip(args: &[&str]) {
     let out = Command::new("ip").args(args).output().expect("spawn ip");
@@ -88,6 +120,23 @@ impl Daemon {
         std::fs::read_to_string(&self.stderr_path).unwrap_or_default()
     }
 
+    /// Poll the daemon log until it contains every needle.
+    fn wait_for_log(&mut self, needles: &[&str]) {
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while Instant::now() < deadline {
+            self.assert_running();
+            let log = self.stderr();
+            if needles.iter().all(|needle| log.contains(needle)) {
+                return;
+            }
+            thread::sleep(Duration::from_millis(250));
+        }
+        panic!(
+            "timed out waiting for log {needles:?}\nstderr:\n{}",
+            self.stderr()
+        );
+    }
+
     fn assert_running(&mut self) {
         if let Ok(Some(status)) = self.child.try_wait() {
             panic!("rustbgpd exited: {status}\nstderr:\n{}", self.stderr());
@@ -127,7 +176,15 @@ impl Drop for Daemon {
     }
 }
 
-fn write_config(dir: &Path) -> std::path::PathBuf {
+const AUTO_LACP_SEGMENT: &str = r#"
+[[ethernet_segments]]
+esi = "auto-lacp"
+interface = "pe-bond"
+member_vnis = [100]
+originator_ip = "10.0.0.10"
+"#;
+
+fn write_config(dir: &Path, segments: &str) -> std::path::PathBuf {
     let runtime_dir = dir.join("runtime");
     std::fs::create_dir_all(&runtime_dir).unwrap();
     std::fs::set_permissions(&runtime_dir, std::fs::Permissions::from_mode(0o700)).unwrap();
@@ -160,13 +217,7 @@ vni = 100
 rd = "65000:100"
 route_targets = ["65000:100"]
 local_vtep_ip = "10.0.0.10"
-
-[[ethernet_segments]]
-esi = "auto-lacp"
-interface = "pe-bond"
-member_vnis = [100]
-originator_ip = "10.0.0.10"
-"#,
+{segments}"#,
             runtime = runtime_dir.display()
         ),
     )
@@ -192,30 +243,9 @@ fn lacp_bond(name: &str, system_mac: &str, user_port_key: &str) {
     ]);
 }
 
-#[test]
-fn auto_lacp_segment_follows_lacp_partner_without_restart() {
-    if std::env::var("EVPN_LINUX_NETNS").as_deref() != Ok("1") {
-        eprintln!("skipping: set EVPN_LINUX_NETNS=1 to run the privileged auto-lacp daemon test");
-        return;
-    }
-    if std::env::var("RUSTBGPD_AUTOLACP_INNER").is_err() {
-        let ns = format!("rustbgpd-test-autolacp-{}", std::process::id());
-        let _ = Command::new("ip").args(["netns", "delete", &ns]).output();
-        ip(&["netns", "add", &ns]);
-        let status = Command::new("ip")
-            .args(["netns", "exec", &ns])
-            .arg(std::env::current_exe().unwrap())
-            .args(["--exact", "--nocapture", TEST_NAME])
-            .env("RUSTBGPD_AUTOLACP_INNER", "1")
-            .status()
-            .expect("spawn inner");
-        let _ = Command::new("ip").args(["netns", "delete", &ns]).output();
-        assert!(status.success(), "inner test invocation failed");
-        return;
-    }
-
-    // PE bond with carrier but no LACP partner: its veth peer is a
-    // plain interface until the CE bond adopts it.
+/// PE bond with carrier but no LACP partner: its veth peer is a plain
+/// interface until [`ce_adopts_peer_port`].
+fn pe_bond_without_partner() {
     ip(&["link", "set", "lo", "up"]);
     lacp_bond("pe-bond", "02:aa:bb:cc:dd:ee", "3");
     lacp_bond("ce-bond", "02:11:22:33:44:55", "7");
@@ -225,15 +255,20 @@ fn auto_lacp_segment_follows_lacp_partner_without_restart() {
     ip(&["link", "set", "pe-port", "master", "pe-bond"]);
     ip(&["link", "set", "ce-port", "up"]);
     ip(&["link", "set", "pe-bond", "up"]);
+}
 
-    let temp = tempfile::tempdir().unwrap();
-    std::fs::set_permissions(temp.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
-    let config = write_config(temp.path());
-    let grpc_addr = format!("unix://{}/runtime/grpc.sock", temp.path().display());
-    let stderr_path = temp.path().join("rustbgpd.stderr.log");
-    let mut daemon = Daemon {
+/// The CE adopts the PE's peer port, so LACP converges.
+fn ce_adopts_peer_port() {
+    ip(&["link", "set", "ce-port", "down"]);
+    ip(&["link", "set", "ce-port", "master", "ce-bond"]);
+    ip(&["link", "set", "ce-bond", "up"]);
+}
+
+fn start_daemon(dir: &Path, config: &Path) -> Daemon {
+    let stderr_path = dir.join("rustbgpd.stderr.log");
+    Daemon {
         child: Command::new(env!("CARGO_BIN_EXE_rustbgpd"))
-            .arg(&config)
+            .arg(config)
             // JSON logs go to stdout; keep both streams in one log.
             .stdout(Stdio::from(File::create(&stderr_path).unwrap()))
             .stderr(Stdio::from(
@@ -242,7 +277,35 @@ fn auto_lacp_segment_follows_lacp_partner_without_restart() {
             .spawn()
             .expect("spawn rustbgpd"),
         stderr_path,
-    };
+    }
+}
+
+fn private_tempdir() -> tempfile::TempDir {
+    let temp = tempfile::tempdir().unwrap();
+    std::fs::set_permissions(temp.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    temp
+}
+
+fn signal(daemon: &Daemon, name: &str) {
+    let out = Command::new("kill")
+        .args([&format!("-{name}"), &daemon.child.id().to_string()])
+        .output()
+        .expect("spawn kill");
+    assert!(out.status.success(), "kill -{name} failed");
+}
+
+#[test]
+fn auto_lacp_segment_follows_lacp_partner_without_restart() {
+    if !netns_enabled()
+        || !inner_netns_pass("auto_lacp_segment_follows_lacp_partner_without_restart")
+    {
+        return;
+    }
+    pe_bond_without_partner();
+    let temp = private_tempdir();
+    let config = write_config(temp.path(), AUTO_LACP_SEGMENT);
+    let grpc_addr = format!("unix://{}/runtime/grpc.sock", temp.path().display());
+    let mut daemon = start_daemon(temp.path(), &config);
 
     // NotReady: the daemon is up, lists no segment, originates no Type 4.
     daemon.wait_for(&grpc_addr, "NotReady with no routes", |segments, type4| {
@@ -255,9 +318,7 @@ fn auto_lacp_segment_follows_lacp_partner_without_restart() {
     );
 
     // The CE adopts the peer port and LACP converges: Ready, no restart.
-    ip(&["link", "set", "ce-port", "down"]);
-    ip(&["link", "set", "ce-port", "master", "ce-bond"]);
-    ip(&["link", "set", "ce-bond", "up"]);
+    ce_adopts_peer_port();
     let ce_prefix = "01:02:11:22:33:44:55:";
     let (segments, _) = daemon.wait_for(&grpc_addr, "Ready under the CE's ESI", |s, t| {
         s.len() == 1 && s[0].starts_with(ce_prefix) && t == s
@@ -295,4 +356,58 @@ fn auto_lacp_segment_follows_lacp_partner_without_restart() {
     assert!(!type4.contains(&first), "old Type 4 must be withdrawn");
     assert_eq!(segments, type4);
     daemon.assert_running();
+}
+
+#[test]
+fn first_auto_lacp_segment_added_by_sighup_starts_live_and_drains_on_shutdown() {
+    if !netns_enabled()
+        || !inner_netns_pass(
+            "first_auto_lacp_segment_added_by_sighup_starts_live_and_drains_on_shutdown",
+        )
+    {
+        return;
+    }
+    pe_bond_without_partner();
+    let temp = private_tempdir();
+    let config = write_config(temp.path(), "");
+    let grpc_addr = format!("unix://{}/runtime/grpc.sock", temp.path().display());
+    let mut daemon = start_daemon(temp.path(), &config);
+
+    // No Ethernet Segment: no segment task, no probe.
+    daemon.wait_for(&grpc_addr, "startup with no segment", |segments, type4| {
+        segments.is_empty() && type4.is_empty()
+    });
+    assert!(
+        !daemon
+            .stderr()
+            .contains("starting the EVPN segment orchestrator"),
+        "no segment, no segment task:\n{}",
+        daemon.stderr()
+    );
+
+    // First segment by SIGHUP: committed not ready, probe started live.
+    write_config(temp.path(), AUTO_LACP_SEGMENT);
+    signal(&daemon, "HUP");
+    daemon.wait_for_log(&["auto-lacp Ethernet Segment not ready", "no_partner"]);
+    daemon.wait_for(&grpc_addr, "NotReady with no routes", |segments, type4| {
+        segments.is_empty() && type4.is_empty()
+    });
+
+    // LACP converges: the segment actor starts and the segment is Ready.
+    ce_adopts_peer_port();
+    let (segments, type4) = daemon.wait_for(&grpc_addr, "Ready under the CE's ESI", |s, t| {
+        s.len() == 1 && s[0].starts_with("01:02:11:22:33:44:55:") && t == s
+    });
+    assert_eq!(segments, type4);
+    daemon.wait_for_log(&["starting the EVPN segment orchestrator"]);
+
+    // Coordinated shutdown drains the live-started actor.
+    signal(&daemon, "TERM");
+    let status = daemon.child.wait().expect("wait for rustbgpd");
+    let log = daemon.stderr();
+    assert!(status.success(), "rustbgpd exited {status}\nstderr:\n{log}");
+    assert!(
+        log.contains("draining EVPN segment orchestrator"),
+        "the live-started segment actor must be drained:\n{log}"
+    );
 }

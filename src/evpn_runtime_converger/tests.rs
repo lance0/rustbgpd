@@ -478,28 +478,315 @@ originator_ip = "10.0.0.1"
 "#
 }
 
+/// A daemon's segment control before any Ethernet Segment: channels
+/// open, task deferred. The flag records whether the task started.
+fn deferred_segment_control(
+    instances: &Arc<rustbgpd_evpn::EvpnInstanceTable>,
+    rib_tx: mpsc::Sender<RibUpdate>,
+) -> (
+    evpn_segment::EvpnSegmentRuntimeControl,
+    Arc<std::sync::atomic::AtomicBool>,
+) {
+    let (control, start) = evpn_segment::prepare_with_local_bias(
+        instances,
+        Vec::new(),
+        rib_tx,
+        None,
+        None,
+        None,
+        BgpMetrics::new(),
+        tokio_util::sync::CancellationToken::new(),
+    );
+    let started = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let flag = started.clone();
+    let control = control.with_deferred_start(Box::new(move || {
+        flag.store(true, std::sync::atomic::Ordering::SeqCst);
+        start()
+    }));
+    (control, started)
+}
+
+fn segment_only_converger(
+    rib_tx: mpsc::Sender<RibUpdate>,
+    segment: evpn_segment::EvpnSegmentRuntimeControl,
+    originator: Option<evpn_originator::EvpnOriginatorRuntimeControl>,
+) -> EvpnRuntimeActorConverger {
+    EvpnRuntimeActorConverger {
+        rib_tx,
+        imet_controller: Arc::new(tokio::sync::Mutex::new(evpn_imet::EvpnImetController::new())),
+        dataplane: None,
+        originator,
+        svi: None,
+        l3_originator: None,
+        segment: Some(segment),
+        es_drain: crate::evpn_es_drain::EvpnEsDrainState::default(),
+    }
+}
+
+fn coordinator_from_config(
+    config: &Config,
+    esis: &crate::config::AutoLacpEsis,
+) -> Arc<Mutex<rustbgpd_evpn::EvpnRuntimeCoordinator>> {
+    Arc::new(Mutex::new(rustbgpd_evpn::EvpnRuntimeCoordinator::new(
+        config.resolve_evpn_instances().unwrap(),
+        config.resolve_evpn_ip_vrfs().unwrap(),
+        config.resolve_ethernet_segments_with(esis).unwrap(),
+    )))
+}
+
+async fn wait_for_es_route(
+    keys: &tokio::sync::Mutex<Vec<rustbgpd_wire::EvpnRouteKey>>,
+    esi: rustbgpd_wire::EthernetSegmentIdentifier,
+    what: &str,
+) {
+    let deadline = StdInstant::now() + Duration::from_secs(5);
+    loop {
+        let observed = keys.lock().await.clone();
+        if observed.iter().any(
+            |key| matches!(key, rustbgpd_wire::EvpnRouteKey::Es { esi: seen, .. } if *seen == esi),
+        ) {
+            return;
+        }
+        assert!(
+            StdInstant::now() < deadline,
+            "timed out waiting for {what} for {esi}; observed {observed:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
 #[tokio::test]
-async fn auto_lacp_candidate_without_segment_actor_is_rejected_not_committed_inert() {
-    // No segment actor at startup means no readiness table or probe:
-    // committing the segment would leave it not ready forever.
-    let baseline = load_runtime_test_config(minimal_runtime_candidate_toml(), "baseline");
-    let candidate =
-        load_runtime_test_config(l2vni_auto_lacp_es_runtime_candidate_toml(), "candidate");
-    let coordinator = empty_evpn_runtime_coordinator();
+async fn first_explicit_ethernet_segment_apply_starts_the_segment_actor_live() {
+    // Daemon started with no Ethernet Segment: the segment task is
+    // deferred. Adding the first explicit-ESI segment by a runtime apply
+    // starts it without a restart, and coordinated shutdown drains it
+    // like a startup actor.
+    let baseline = load_runtime_test_config(l2vni_runtime_candidate_toml(), "baseline");
+    let candidate = load_runtime_test_config(l2vni_one_es_runtime_candidate_toml(), "candidate");
+    let esi = candidate
+        .resolve_ethernet_segments_with(&crate::config::AutoLacpEsis::default())
+        .unwrap()[0]
+        .esi;
+    let esis = crate::config::AutoLacpEsis::default();
+    let coordinator = coordinator_from_config(&baseline, &esis);
+    let (rib_tx, rib_rx) = mpsc::channel::<RibUpdate>(64);
+    let injects = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+    let withdraws = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+    let _rib = runtime_converger_rib_recorder(rib_rx, injects.clone(), withdraws.clone());
+    let instances = Arc::new(baseline.resolve_evpn_instances().unwrap());
+    let (segment, started) = deferred_segment_control(&instances, rib_tx.clone());
     let apply = EvpnRuntimeReloadApply::new(
         coordinator.clone(),
         Arc::new(tokio::sync::Mutex::new(())),
-        Arc::new(TestRuntimeConverger::ok()),
+        Arc::new(segment_only_converger(rib_tx, segment.clone(), None)),
         baseline,
     );
+
+    // Validate-only acquires the same actors but must not start one.
+    apply
+        .apply_candidate_config(&candidate, true)
+        .await
+        .expect("first segment validates");
+    assert!(!started.load(std::sync::atomic::Ordering::SeqCst));
+
+    let applied = apply
+        .apply_config(&candidate)
+        .await
+        .expect("first segment applies");
+    assert_eq!(applied.outcome, EvpnRuntimeReloadOutcome::Committed);
+    assert!(
+        started.load(std::sync::atomic::Ordering::SeqCst),
+        "the converge that committed the first segment starts the actor"
+    );
+    assert_eq!(
+        coordinator.lock().unwrap().model().ethernet_segments()[0].esi,
+        esi
+    );
+    wait_for_es_route(&injects, esi, "Type 4 origination").await;
+
+    let handle = segment
+        .close_for_shutdown()
+        .expect("a live-started actor is handed to the shutdown drain");
+    handle.shutdown().await;
+    wait_for_es_route(&withdraws, esi, "Type 4 withdrawal on shutdown").await;
+}
+
+#[tokio::test]
+async fn failed_first_segment_converge_leaves_the_segment_actor_unstarted() {
+    // The Type 2 originator closed under the apply: the converge fails,
+    // nothing is committed, and the deferred actor never starts — no
+    // ES route, no task for shutdown to find.
+    let baseline = load_runtime_test_config(l2vni_runtime_candidate_toml(), "baseline");
+    let candidate = load_runtime_test_config(l2vni_one_es_runtime_candidate_toml(), "candidate");
+    let esis = crate::config::AutoLacpEsis::default();
+    let coordinator = coordinator_from_config(&baseline, &esis);
     let generation = coordinator.lock().unwrap().model().generation();
-    match apply.apply_config(&candidate).await {
-        Err(GrpcEvpnRuntimeApplyError::FailedPrecondition(message)) => {
-            assert!(message.contains("restart the daemon"), "{message}");
-        }
-        other => panic!("auto-lacp without a segment actor must be rejected, got {other:?}"),
-    }
+    let (rib_tx, rib_rx) = mpsc::channel::<RibUpdate>(64);
+    let injects = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+    let _rib = runtime_converger_rib_responder(rib_rx, injects.clone());
+    let instances = Arc::new(baseline.resolve_evpn_instances().unwrap());
+    let (_local_tx, local_rx) = mpsc::channel(1);
+    let originator = evpn_originator::spawn(
+        evpn_originator::OriginatorConfig::default(),
+        &instances,
+        rib_tx.clone(),
+        Some(local_rx),
+        BgpMetrics::new(),
+        evpn_originator::OriginatedLocalMacCounts::default(),
+        tokio_util::sync::CancellationToken::new(),
+        Arc::default(),
+    )
+    .expect("originator spawns for a non-empty instance table");
+    let originator_control = originator.runtime_control();
+    originator.shutdown().await;
+    assert!(!originator_control.is_open());
+    let (segment, started) = deferred_segment_control(&instances, rib_tx.clone());
+    let converger = Arc::new(segment_only_converger(
+        rib_tx,
+        segment.clone(),
+        Some(originator_control),
+    ));
+    let apply = EvpnRuntimeReloadApply::new(
+        coordinator.clone(),
+        Arc::new(tokio::sync::Mutex::new(())),
+        converger.clone(),
+        baseline.clone(),
+    );
+
+    // The apply's availability gate refuses it before converging.
+    assert!(apply.apply_config(&candidate).await.is_err());
+    assert!(!started.load(std::sync::atomic::Ordering::SeqCst));
+    // The converge itself, reached directly, fails the same way and
+    // still starts nothing.
+    let current = runtime_model_from_candidate_toml(l2vni_runtime_candidate_toml());
+    let candidate_model = runtime_candidate_from_toml(l2vni_one_es_runtime_candidate_toml());
+    let plan = current.plan_candidate(&candidate_model);
+    assert!(
+        converger
+            .converge(&current, &candidate_model, &plan)
+            .await
+            .is_err()
+    );
+    assert!(!started.load(std::sync::atomic::Ordering::SeqCst));
     assert_eq!(coordinator.lock().unwrap().model().generation(), generation);
+    assert!(segment.close_for_shutdown().is_none());
+    assert!(
+        !injects
+            .lock()
+            .await
+            .iter()
+            .any(|key| matches!(key, rustbgpd_wire::EvpnRouteKey::Es { .. })),
+        "a failed first-segment converge originates no ES route"
+    );
+}
+
+#[tokio::test]
+async fn shutdown_closing_the_segment_slot_refuses_a_late_first_segment_apply() {
+    // Shutdown holds the apply fence and closes the slot; an apply
+    // queued behind the fence then finds the control closed. It fails
+    // without committing or starting the actor, so nothing outlives the
+    // teardown.
+    let baseline = load_runtime_test_config(l2vni_runtime_candidate_toml(), "baseline");
+    let candidate = load_runtime_test_config(l2vni_one_es_runtime_candidate_toml(), "candidate");
+    let esis = crate::config::AutoLacpEsis::default();
+    let coordinator = coordinator_from_config(&baseline, &esis);
+    let generation = coordinator.lock().unwrap().model().generation();
+    let (rib_tx, rib_rx) = mpsc::channel::<RibUpdate>(64);
+    let _rib = runtime_converger_rib_responder(rib_rx, Arc::default());
+    let instances = Arc::new(baseline.resolve_evpn_instances().unwrap());
+    let (segment, started) = deferred_segment_control(&instances, rib_tx.clone());
+    let apply_lock = Arc::new(tokio::sync::Mutex::new(()));
+    let apply = EvpnRuntimeReloadApply::new(
+        coordinator.clone(),
+        apply_lock.clone(),
+        Arc::new(segment_only_converger(rib_tx, segment.clone(), None)),
+        baseline,
+    );
+
+    let fence = apply_lock.lock().await;
+    let late = tokio::spawn({
+        let apply = apply.clone();
+        async move { apply.apply_config(&candidate).await }
+    });
+    assert!(segment.close_for_shutdown().is_none());
+    drop(fence);
+
+    assert!(late.await.unwrap().is_err());
+    assert!(!started.load(std::sync::atomic::Ordering::SeqCst));
+    assert!(!segment.is_open());
+    segment.start_if_configured();
+    assert!(!started.load(std::sync::atomic::Ordering::SeqCst));
+    assert_eq!(coordinator.lock().unwrap().model().generation(), generation);
+}
+
+#[tokio::test]
+async fn first_auto_lacp_segment_apply_starts_the_probe_then_the_segment_actor() {
+    // No segment at startup: the first `auto-lacp` segment commits not
+    // ready and starts the readiness probe; the probe round that derives
+    // its ESI re-converges an ES add, which starts the segment actor.
+    let baseline = load_runtime_test_config(l2vni_runtime_candidate_toml(), "baseline");
+    let candidate =
+        load_runtime_test_config(l2vni_auto_lacp_es_runtime_candidate_toml(), "candidate");
+    let esis = crate::config::AutoLacpEsis::default();
+    let coordinator = coordinator_from_config(&baseline, &esis);
+    let (rib_tx, rib_rx) = mpsc::channel::<RibUpdate>(64);
+    let injects = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+    let _rib = runtime_converger_rib_responder(rib_rx, injects.clone());
+    let instances = Arc::new(baseline.resolve_evpn_instances().unwrap());
+    let (segment, started) = deferred_segment_control(&instances, rib_tx.clone());
+    // Pre-cancelled, so the spawned probe exits at once instead of
+    // reading kernel bonds; this test drives its round by hand.
+    let probe_shutdown = tokio_util::sync::CancellationToken::new();
+    probe_shutdown.cancel();
+    let probe = crate::evpn_auto_esi::AutoEsiProbeStarter::new(
+        crate::evpn_auto_esi::AutoEsiProbe::new(BgpMetrics::new()),
+        probe_shutdown,
+    );
+    let apply = EvpnRuntimeReloadApply::new(
+        coordinator.clone(),
+        Arc::new(tokio::sync::Mutex::new(())),
+        Arc::new(segment_only_converger(rib_tx, segment.clone(), None)),
+        baseline.clone(),
+    )
+    .with_auto_lacp_esis(esis)
+    .with_auto_esi_probe(probe.clone());
+    apply.start_auto_esi_probe_if_needed(&baseline);
+    assert!(!probe.started(), "no auto-lacp bond, no probe");
+
+    // Not ready yet: the runtime plan is empty, but the config commits.
+    let applied = apply
+        .apply_config(&candidate)
+        .await
+        .expect("auto-lacp applies");
+    assert_eq!(applied.outcome, EvpnRuntimeReloadOutcome::Noop);
+    assert!(
+        probe.started(),
+        "committing the first auto-lacp bond starts the probe"
+    );
+    assert!(
+        coordinator
+            .lock()
+            .unwrap()
+            .model()
+            .ethernet_segments()
+            .is_empty(),
+        "the bond has no LACP partner yet, so the segment is not ready"
+    );
+    assert!(!started.load(std::sync::atomic::Ordering::SeqCst));
+
+    let derived =
+        rustbgpd_wire::EthernetSegmentIdentifier::new([1, 2, 0x11, 0, 0, 0, 0, 1, 0xc1, 0]);
+    let round = apply
+        .publish_auto_lacp_round(BTreeMap::from([("bond0".to_string(), derived)]), false)
+        .await;
+    assert!(round.result.expect("round re-converges").is_some());
+    assert!(started.load(std::sync::atomic::Ordering::SeqCst));
+    wait_for_es_route(&injects, derived, "Type 4 origination").await;
+    segment
+        .close_for_shutdown()
+        .expect("live-started actor drains at shutdown")
+        .shutdown()
+        .await;
 }
 
 #[tokio::test]

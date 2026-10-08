@@ -418,7 +418,8 @@ resolved.
 - **EVPN runtime mutation is alpha-complete with one by-design
   exception.** SIGHUP and the gRPC `EvpnService.ApplyEvpnRuntime` path
   both use the ADR-0063 coordinator for supported live shapes:
-  L2VNI / IP-VRF / Ethernet-Segment add/delete/redefine, additive
+  L2VNI / IP-VRF / Ethernet-Segment add/delete/redefine (including the
+  first segment on a daemon started without one), additive
   build-up, additive ES `member_vnis` expansion (adding L2VNIs that join
   an existing Ethernet Segment's member set in the same request, ADR-0063),
   atomic tenant teardown, `ip_vrf` relink, standalone and

@@ -18,6 +18,7 @@
 //! `evpn_es_auto_esi_state{interface, state}` state set.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use rustbgpd_telemetry::BgpMetrics;
@@ -215,10 +216,48 @@ pub(crate) async fn run_round(
     }
 }
 
+/// Starts the probe the first time it is needed, at startup or live, and
+/// never after shutdown cancelled it.
+#[derive(Clone)]
+pub(crate) struct AutoEsiProbeStarter {
+    pending: Arc<Mutex<Option<AutoEsiProbe>>>,
+    shutdown: CancellationToken,
+}
+
+impl AutoEsiProbeStarter {
+    pub(crate) fn new(probe: AutoEsiProbe, shutdown: CancellationToken) -> Self {
+        Self {
+            pending: Arc::new(Mutex::new(Some(probe))),
+            shutdown,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn started(&self) -> bool {
+        self.pending
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .is_none()
+    }
+
+    /// Spawn the probe unless it already runs. A probe spawned while
+    /// shutdown cancels the token exits on its first poll.
+    pub(crate) fn start(&self, reload_apply: &EvpnRuntimeReloadApply) {
+        let probe = self
+            .pending
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
+        if let Some(probe) = probe {
+            drop(spawn(probe, reload_apply.clone(), self.shutdown.clone()));
+        }
+    }
+}
+
 /// Run the probe until `shutdown`. Each round reads bonds outside the
 /// apply lock, then publishes and re-converges as one locked operation.
 /// A failed re-converge is retried on the next round.
-pub(crate) fn spawn(
+fn spawn(
     mut probe: AutoEsiProbe,
     reload_apply: EvpnRuntimeReloadApply,
     shutdown: CancellationToken,
@@ -229,6 +268,7 @@ pub(crate) fn spawn(
         let mut retry = false;
         loop {
             tokio::select! {
+                biased;
                 () = shutdown.cancelled() => return,
                 _ = tick.tick() => {}
             }
