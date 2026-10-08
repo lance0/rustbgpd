@@ -4004,15 +4004,18 @@ async fn run<T>(
     // originates from the first pass; one that does not stays NotReady
     // (no ESI, no routes) without blocking startup, and the runtime
     // probe spawned below brings it up when LACP converges.
-    let mut evpn_auto_esi_probe = evpn_auto_esi::AutoEsiProbe::default();
+    let evpn_auto_lacp_esis = config::AutoLacpEsis::default();
+    let mut evpn_auto_esi_probe = evpn_auto_esi::AutoEsiProbe::new(evpn_auto_lacp_esis.clone());
     let evpn_auto_lacp_interfaces = config.auto_lacp_interfaces();
-    evpn_auto_esi_probe.probe(&evpn_auto_lacp_interfaces, evpn_auto_esi::read_kernel);
-    let ethernet_segments = config.resolve_ethernet_segments().unwrap_or_else(|e| {
-        fatal_startup_error(
-            "Ethernet segments failed to re-resolve after configuration validation",
-            e,
-        );
-    });
+    evpn_auto_esi_probe.apply(evpn_auto_esi::read_bonds(evpn_auto_lacp_interfaces.clone()).await);
+    let ethernet_segments = config
+        .resolve_ethernet_segments_with(&evpn_auto_lacp_esis)
+        .unwrap_or_else(|e| {
+            fatal_startup_error(
+                "Ethernet segments failed to re-resolve after configuration validation",
+                e,
+            );
+        });
 
     // Prove the kernel accepts every RPKI cache server's TCP MD5 / TCP-AO
     // material before any teardown-owned actor starts. The RTR clients
@@ -4870,11 +4873,13 @@ async fn run<T>(
     // the link-drain coordinator (spawned further below) and the
     // segment actor (bound-ness is the "locally attached" half of the
     // decision 5 bias-eligibility condition).
-    let initial_es_link_bindings = config.resolve_es_link_bindings().unwrap_or_else(|error| {
-        // Unreachable: the config passed full validation at load.
-        warn!(%error, "failed to resolve Ethernet Segment interface bindings at startup");
-        std::collections::BTreeMap::new()
-    });
+    let initial_es_link_bindings = config
+        .resolve_es_link_bindings(&evpn_auto_lacp_esis)
+        .unwrap_or_else(|error| {
+            // Unreachable: the config passed full validation at load.
+            warn!(%error, "failed to resolve Ethernet Segment interface bindings at startup");
+            std::collections::BTreeMap::new()
+        });
     let (es_link_bindings_tx, es_link_bindings_rx) =
         watch::channel::<evpn_es_link_drain::EsLinkBindings>(Arc::new(initial_es_link_bindings));
     let es_link_bindings_tx = Arc::new(es_link_bindings_tx);
@@ -5155,6 +5160,7 @@ async fn run<T>(
     )
     .with_metrics(metrics.clone())
     .with_es_link_bindings_publisher(es_link_bindings_tx.clone())
+    .with_auto_lacp_esis(evpn_auto_lacp_esis)
     .with_forwarding_state(local_forwarding_state.clone());
     // Runtime readiness probe for `auto-lacp` segments; only useful
     // when the segment actor runs. Stopped with the link-drain
@@ -7230,7 +7236,7 @@ mod tests {
             "config.resolve_evpn_instances()",
             "config.resolve_evpn_ip_vrfs()",
             "config.resolve_managed_netdevs()",
-            "config.resolve_ethernet_segments()",
+            ".resolve_ethernet_segments_with(&evpn_auto_lacp_esis)",
             "bfd_runtime::prepare_runtime(&bfd_initial)",
             "let listener_result =",
             "metrics_server::MetricsListener::bind(prometheus_addr)",

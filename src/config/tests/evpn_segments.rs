@@ -193,7 +193,9 @@ originator_ip = "10.0.0.100"
         "bindings must not leak into the domain type"
     );
 
-    let bindings = config.resolve_es_link_bindings().unwrap();
+    let bindings = config
+        .resolve_es_link_bindings(&AutoLacpEsis::default())
+        .unwrap();
     assert_eq!(
         bindings.len(),
         1,
@@ -226,7 +228,9 @@ interface = "eth1"
 "#,
     );
     let config = parse(&toml).unwrap();
-    let bindings = config.resolve_es_link_bindings().unwrap();
+    let bindings = config
+        .resolve_es_link_bindings(&AutoLacpEsis::default())
+        .unwrap();
     assert_eq!(
         bindings.values().next().unwrap().recovery_delay,
         std::time::Duration::from_secs(30),
@@ -751,44 +755,77 @@ fn lacp_esi(last: u8) -> EthernetSegmentIdentifier {
     rustbgpd_evpn::lacp_type1_esi([0x02, 0x11, 0x22, 0x33, 0x44, last], 0x01c1)
 }
 
+/// Domain view of `config` through the readiness table `esis`.
+fn auto_lacp_candidate(
+    config: &Config,
+    esis: &AutoLacpEsis,
+) -> rustbgpd_evpn::EvpnRuntimeCandidate {
+    rustbgpd_evpn::EvpnRuntimeCandidate::new(
+        config.resolve_evpn_instances().unwrap(),
+        config.resolve_evpn_ip_vrfs().unwrap(),
+        config.resolve_ethernet_segments_with(esis).unwrap(),
+    )
+}
+
+fn auto_lacp_model(config: &Config, esis: &AutoLacpEsis) -> rustbgpd_evpn::EvpnRuntimeModel {
+    rustbgpd_evpn::EvpnRuntimeModel::startup(
+        config.resolve_evpn_instances().unwrap(),
+        config.resolve_evpn_ip_vrfs().unwrap(),
+        config.resolve_ethernet_segments_with(esis).unwrap(),
+    )
+}
+
 #[test]
 fn ethernet_segment_auto_lacp_validates_without_a_bond_and_stays_not_ready() {
     // No kernel read at validation: a bond that does not exist on this
     // host (the `rustbgpd --check` off-box case) still validates, and
     // the segment resolves to nothing until the probe publishes an ESI.
-    let config = parse(&auto_lacp_toml(Some("rbgp-nobond0"), "")).unwrap();
-    assert_eq!(config.resolve_ethernet_segments().unwrap(), Vec::new());
-    assert_eq!(config.resolve_es_link_bindings().unwrap(), BTreeMap::new());
+    let config = parse(&auto_lacp_toml(Some("bond0"), "")).unwrap();
+    let esis = AutoLacpEsis::default();
+    assert_eq!(
+        config.resolve_ethernet_segments_with(&esis).unwrap(),
+        Vec::new()
+    );
+    assert_eq!(
+        config.resolve_es_link_bindings(&esis).unwrap(),
+        BTreeMap::new()
+    );
     assert_eq!(
         config.auto_lacp_interfaces(),
-        BTreeSet::from(["rbgp-nobond0".to_string()])
+        BTreeSet::from(["bond0".to_string()])
     );
 }
 
 #[test]
 fn ethernet_segment_auto_lacp_resolves_the_published_esi_and_follows_changes() {
-    let config = parse(&auto_lacp_toml(Some("rbgp-ready0"), "")).unwrap();
-    let not_ready = evpn_runtime_model_from_config(&config).unwrap();
+    let config = parse(&auto_lacp_toml(Some("bond0"), "")).unwrap();
+    let esis = AutoLacpEsis::default();
+    let not_ready = auto_lacp_model(&config, &esis);
 
-    assert!(set_auto_lacp_esi("rbgp-ready0", Some(lacp_esi(0x55))));
-    let segments = config.resolve_ethernet_segments().unwrap();
+    assert!(esis.set("bond0", Some(lacp_esi(0x55))));
+    let segments = config.resolve_ethernet_segments_with(&esis).unwrap();
     assert_eq!(segments[0].esi, lacp_esi(0x55));
-    let bindings = config.resolve_es_link_bindings().unwrap();
-    assert_eq!(bindings[&lacp_esi(0x55)].interface, "rbgp-ready0");
+    let bindings = config.resolve_es_link_bindings(&esis).unwrap();
+    assert_eq!(bindings[&lacp_esi(0x55)].interface, "bond0");
+    // Validation and classification resolve against an empty table.
+    assert_eq!(config.resolve_ethernet_segments().unwrap(), Vec::new());
     // The spec, not the derived value, is what persists.
     assert_eq!(config.ethernet_segments[0].esi, "auto-lacp");
-    let ready = evpn_runtime_candidate_from_config(&config).unwrap();
-    let plan = not_ready.plan_candidate(&ready);
+    let plan = not_ready.plan_candidate(&auto_lacp_candidate(&config, &esis));
     assert_eq!(plan.ethernet_segments.added, vec![lacp_esi(0x55)]);
 
     // CE replaced: the same config re-converges as delete old + add new.
-    let model = evpn_runtime_model_from_config(&config).unwrap();
-    assert!(set_auto_lacp_esi("rbgp-ready0", Some(lacp_esi(0x66))));
-    let replaced = evpn_runtime_candidate_from_config(&config).unwrap();
-    let plan = model.plan_candidate(&replaced);
+    let model = auto_lacp_model(&config, &esis);
+    assert!(esis.set("bond0", Some(lacp_esi(0x66))));
+    let plan = model.plan_candidate(&auto_lacp_candidate(&config, &esis));
     assert_eq!(plan.ethernet_segments.deleted, vec![lacp_esi(0x55)]);
     assert_eq!(plan.ethernet_segments.added, vec![lacp_esi(0x66)]);
-    assert!(set_auto_lacp_esi("rbgp-ready0", None));
+
+    // Partner lost: the segment is withdrawn.
+    let model = auto_lacp_model(&config, &esis);
+    assert!(esis.set("bond0", None));
+    let plan = model.plan_candidate(&auto_lacp_candidate(&config, &esis));
+    assert_eq!(plan.ethernet_segments.deleted, vec![lacp_esi(0x66)]);
 }
 
 #[test]
@@ -803,17 +840,17 @@ originator_ip = "10.0.0.100"
 interface = "eth9"
 "#
     );
-    let config = parse(&auto_lacp_toml(Some("rbgp-collide0"), &extra)).unwrap();
-    set_auto_lacp_esi("rbgp-collide0", Some(explicit));
-    let segments = config.resolve_ethernet_segments().unwrap();
+    let config = parse(&auto_lacp_toml(Some("bond0"), &extra)).unwrap();
+    let esis = AutoLacpEsis::default();
+    esis.set("bond0", Some(explicit));
+    let segments = config.resolve_ethernet_segments_with(&esis).unwrap();
     assert_eq!(segments.len(), 1, "only the explicit segment resolves");
     assert_eq!(segments[0].member_vnis.len(), 1);
     assert_eq!(
-        config.resolve_es_link_bindings().unwrap()[&explicit].interface,
+        config.resolve_es_link_bindings(&esis).unwrap()[&explicit].interface,
         "eth9",
         "a colliding derived ESI must not steal the explicit binding"
     );
-    set_auto_lacp_esi("rbgp-collide0", None);
 }
 
 #[test]

@@ -25,7 +25,7 @@ use rustbgpd_evpn::runtime_plan_shape::{
 use rustbgpd_rib::RibUpdate;
 use rustbgpd_telemetry::BgpMetrics;
 
-use crate::config::Config;
+use crate::config::{AutoLacpEsis, Config};
 use crate::{
     evpn_dataplane, evpn_imet, evpn_l3_originator, evpn_originator, evpn_segment, evpn_svi,
 };
@@ -167,6 +167,10 @@ pub(crate) struct EvpnRuntimeReloadApply {
     /// link-drain coordinator consumes the receiver.
     es_link_bindings_tx:
         Option<Arc<tokio::sync::watch::Sender<crate::evpn_es_link_drain::EsLinkBindings>>>,
+    /// Bond → derived ESI table for `auto-lacp` segments, written by the
+    /// readiness probe. Every apply and binding publish resolves through
+    /// it; empty by default, which resolves those segments as not ready.
+    auto_lacp_esis: AutoLacpEsis,
     /// Daemon metrics handle, so a #268 decomposed-apply fail-stop can
     /// bump `evpn_runtime_decomposed_fail_stops_total`. Defaults to a
     /// throwaway registry (`with_metrics` wires the real one in `main`).
@@ -187,8 +191,15 @@ impl EvpnRuntimeReloadApply {
             committed_config: Arc::new(Mutex::new(committed_config)),
             forwarding_state: None,
             es_link_bindings_tx: None,
+            auto_lacp_esis: AutoLacpEsis::default(),
             metrics: BgpMetrics::new(),
         }
+    }
+
+    /// Resolve `auto-lacp` segments through the probe's table.
+    pub(crate) fn with_auto_lacp_esis(mut self, esis: AutoLacpEsis) -> Self {
+        self.auto_lacp_esis = esis;
+        self
     }
 
     pub(crate) fn with_forwarding_state(
@@ -242,7 +253,7 @@ impl EvpnRuntimeReloadApply {
         let Some(tx) = self.es_link_bindings_tx.as_ref() else {
             return;
         };
-        match config.resolve_es_link_bindings() {
+        match config.resolve_es_link_bindings(&self.auto_lacp_esis) {
             Ok(bindings) => {
                 tx.send_if_modified(|current| {
                     if **current == bindings {
@@ -421,7 +432,7 @@ impl EvpnRuntimeReloadApply {
     where
         M: FnOnce(),
     {
-        let candidate = evpn_runtime_candidate_from_config(config)?;
+        let candidate = evpn_runtime_candidate_from_config(config, &self.auto_lacp_esis)?;
         apply_evpn_runtime_candidate_locked(
             candidate,
             validate_only,
@@ -2470,6 +2481,7 @@ impl DaemonEvpnRuntimeConverger for EvpnRuntimeActorConverger {
 
 fn evpn_runtime_candidate_from_config(
     candidate: &Config,
+    auto_lacp_esis: &AutoLacpEsis,
 ) -> Result<rustbgpd_evpn::EvpnRuntimeCandidate, GrpcEvpnRuntimeApplyError> {
     let instances = candidate
         .resolve_evpn_instances()
@@ -2478,7 +2490,7 @@ fn evpn_runtime_candidate_from_config(
         .resolve_evpn_ip_vrfs()
         .map_err(|err| GrpcEvpnRuntimeApplyError::InvalidArgument(err.to_string()))?;
     let ethernet_segments = candidate
-        .resolve_ethernet_segments()
+        .resolve_ethernet_segments_with(auto_lacp_esis)
         .map_err(|err| GrpcEvpnRuntimeApplyError::InvalidArgument(err.to_string()))?;
     Ok(rustbgpd_evpn::EvpnRuntimeCandidate::new(
         instances,

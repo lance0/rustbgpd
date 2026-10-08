@@ -42,7 +42,7 @@ fn evpn_runtime_candidate_from_toml(
         Config::load_toml_with_diagnostics(&candidate_toml, "candidate EVPN runtime config")
             .map_err(GrpcEvpnRuntimeApplyError::InvalidArgument)?;
     crate::test_support::assert_tier_authorized_test_config(&candidate);
-    evpn_runtime_candidate_from_config(&candidate)
+    evpn_runtime_candidate_from_config(&candidate, &crate::config::AutoLacpEsis::default())
 }
 
 pub(crate) async fn apply_evpn_runtime_request(
@@ -1721,7 +1721,7 @@ fn runtime_model_from_toml(toml: &str) -> rustbgpd_evpn::EvpnRuntimeModel {
 fn pre_authorized_runtime_candidate_from_toml(toml: &str) -> rustbgpd_evpn::EvpnRuntimeCandidate {
     let config = Config::load_toml_with_diagnostics(toml, "pre-authorized test config").unwrap();
     crate::test_support::assert_tier_authorized_test_config(&config);
-    evpn_runtime_candidate_from_config(&config).unwrap()
+    evpn_runtime_candidate_from_config(&config, &crate::config::AutoLacpEsis::default()).unwrap()
 }
 
 fn pre_authorized_runtime_model_from_toml(toml: &str) -> rustbgpd_evpn::EvpnRuntimeModel {
@@ -2658,9 +2658,12 @@ async fn committed_config_advance_republishes_es_link_bindings() {
         baseline.resolve_evpn_ip_vrfs().unwrap(),
         baseline.resolve_ethernet_segments().unwrap(),
     )));
-    let (bindings_tx, mut bindings_rx) =
-        tokio::sync::watch::channel(Arc::new(baseline.resolve_es_link_bindings().unwrap())
-            as crate::evpn_es_link_drain::EsLinkBindings);
+    let (bindings_tx, mut bindings_rx) = tokio::sync::watch::channel(Arc::new(
+        baseline
+            .resolve_es_link_bindings(&crate::config::AutoLacpEsis::default())
+            .unwrap(),
+    )
+        as crate::evpn_es_link_drain::EsLinkBindings);
     let reload_apply = EvpnRuntimeReloadApply::new(
         coordinator,
         Arc::new(tokio::sync::Mutex::new(())),
