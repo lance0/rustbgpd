@@ -966,6 +966,11 @@ pub struct RibManager {
     /// distribution window, held until the run loop's next ordinary receive
     /// so a non-extending update keeps its FIFO position.
     primary_lookahead: Option<RibUpdate>,
+    /// ADR-0137: while a conditional-advertisement settle deadline is due,
+    /// the primary updates still admitted before it fires — the backlog
+    /// when expiry was first seen. Every admission counts, including one a
+    /// distribution window coalesces, and a window does not extend past it.
+    conditional_expiry_cutoff: Option<usize>,
     /// Process-local mutation versions bound into opaque route-page tokens.
     /// A successful continuation must match the requested scope's current
     /// version; no server-side snapshots are retained.
@@ -1964,6 +1969,7 @@ impl RibManager {
             pending_distribute_affected: HashSet::new(),
             distribution_window: distribution::DistributionWindow::default(),
             distribution_window_limits: distribution::DistributionWindowLimits::default(),
+            conditional_expiry_cutoff: None,
             primary_lookahead: None,
             route_page_table_version: Some(initial_route_page_version()),
             route_page_advertised_version: Some(initial_route_page_version()),
@@ -2824,9 +2830,21 @@ impl RibManager {
 
     /// The next queued primary update, the held lookahead first.
     fn try_recv_primary(&mut self) -> Option<RibUpdate> {
-        self.primary_lookahead
+        let update = self
+            .primary_lookahead
             .take()
-            .or_else(|| self.rx.try_recv().ok())
+            .or_else(|| self.rx.try_recv().ok());
+        if update.is_some() {
+            self.count_conditional_expiry_admission();
+        }
+        update
+    }
+
+    /// Charge one primary admission against a due settle deadline's cutoff.
+    fn count_conditional_expiry_admission(&mut self) {
+        if let Some(cutoff) = self.conditional_expiry_cutoff.as_mut() {
+            *cutoff = cutoff.saturating_sub(1);
+        }
     }
 
     /// Cancel-safe receive of the next primary update, the held lookahead
@@ -4624,8 +4642,6 @@ impl RibManager {
         // iteration to the earliest armed settle deadline.
         let conditional_sleep = tokio::time::sleep(std::time::Duration::from_hours(24));
         tokio::pin!(conditional_sleep);
-        // Primary updates still to apply before a due settle deadline fires.
-        let mut conditional_expiry_backlog: Option<usize> = None;
 
         loop {
             // The export roster's one publication point (ADR-0136): after
@@ -4811,7 +4827,7 @@ impl RibManager {
             let now = tokio::time::Instant::now();
             let conditional_due = has_conditional_timer && conditional_sleep.deadline() <= now;
             if !conditional_due {
-                conditional_expiry_backlog = None;
+                self.conditional_expiry_cutoff = None;
             }
             if has_attr_gc_timer && attr_gc_sleep.deadline() <= now {
                 self.gc_attr_intern_on_timer();
@@ -4838,6 +4854,30 @@ impl RibManager {
                     self.metrics.record_rib_dirty_resync("cleared");
                     resync_armed = false;
                 }
+                continue;
+            }
+            if conditional_due {
+                // ADR-0137: expiry applies only the observation of a finished
+                // batch. An open route batch, and the primary updates already
+                // queued when expiry was first seen, run first so their
+                // observation flush precedes it. Later traffic cannot defer
+                // the timer: the cutoff is captured once per expiry and
+                // charged for every admission, and this check precedes the
+                // other timers, whose drains are unbounded under traffic.
+                let cutoff = match self.conditional_expiry_cutoff {
+                    Some(cutoff) => cutoff,
+                    None => *self
+                        .conditional_expiry_cutoff
+                        .insert(self.primary_backlog()),
+                };
+                if (!self.pending_route_batches.is_empty() || cutoff > 0)
+                    && self.drain_ready_updates().await
+                {
+                    continue;
+                }
+                self.conditional_expiry_cutoff = None;
+                // Slice 3 marks the transitioned definitions' peers dirty.
+                let _ = self.fire_conditional_advertisement_timers();
                 continue;
             }
             if has_gr_timers && gr_sleep.deadline() <= now {
@@ -4876,28 +4916,6 @@ impl RibManager {
                     continue;
                 }
                 self.expire_selection_deferral();
-                continue;
-            }
-            if conditional_due {
-                // ADR-0137: expiry applies only the observation of a finished
-                // batch. An open route batch, and the primary updates already
-                // queued when expiry was first seen, run first so their
-                // observation flush precedes it. Later traffic cannot defer
-                // the timer: the backlog is counted once per expiry.
-                let backlog =
-                    conditional_expiry_backlog.get_or_insert_with(|| self.primary_backlog());
-                let open_batch = !self.pending_route_batches.is_empty();
-                if open_batch || *backlog > 0 {
-                    if !open_batch {
-                        *backlog -= 1;
-                    }
-                    if self.drain_ready_updates().await {
-                        continue;
-                    }
-                }
-                conditional_expiry_backlog = None;
-                // Slice 3 marks the transitioned definitions' peers dirty.
-                let _ = self.fire_conditional_advertisement_timers();
                 continue;
             }
 

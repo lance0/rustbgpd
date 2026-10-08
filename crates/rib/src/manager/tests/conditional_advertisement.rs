@@ -125,11 +125,15 @@ fn withdraw_injected(manager: &mut RibManager, p: Ipv4Prefix) {
 }
 
 fn peer_up(manager: &mut RibManager, source: IpAddr, session_id: u64) {
+    manager.handle_update(peer_up_update(source, session_id, 65001));
+}
+
+fn peer_up_update(source: IpAddr, session_id: u64, peer_asn: u32) -> RibUpdate {
     let (outbound_tx, _outbound_rx) = mpsc::channel(8);
-    manager.handle_update(RibUpdate::PeerUp {
+    RibUpdate::PeerUp {
         peer: source,
         session_id,
-        peer_asn: 65001,
+        peer_asn,
         peer_router_id: Ipv4Addr::new(192, 0, 2, 254),
         outbound_tx,
         export_policy: None,
@@ -143,7 +147,43 @@ fn peer_up(manager: &mut RibManager, source: IpAddr, session_id: u64) {
         add_path_send_max: 0,
         negotiated_orf_recv: Vec::new(),
         negotiated_llgr_families: Vec::new(),
-    });
+    }
+}
+
+fn routes_received(
+    source: IpAddr,
+    session_id: u64,
+    announced: Vec<Route>,
+    withdrawn: Vec<(Prefix, u32)>,
+) -> RibUpdate {
+    RibUpdate::RoutesReceived {
+        peer: source,
+        session_id,
+        announced,
+        withdrawn,
+        flowspec_announced: vec![],
+        flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
+        validated_with: None,
+    }
+}
+
+/// Round-trip one primary message through a running actor: every message
+/// queued before it has been applied once its reply arrives.
+async fn barrier(tx: &mpsc::Sender<RibUpdate>) {
+    let mut route = route_with_med(
+        peer(254),
+        Ipv4Prefix::new(Ipv4Addr::new(192, 0, 2, 0), 24),
+        None,
+    );
+    route.peer = LOCAL_PEER;
+    route.origin_type = crate::route::RouteOrigin::Local;
+    let (reply, response) = oneshot::channel();
+    tx.send(RibUpdate::InjectRoute { route, reply })
+        .await
+        .unwrap();
+    response.await.unwrap().unwrap();
 }
 
 fn received(
@@ -743,27 +783,7 @@ async fn expiry_during_an_open_batch_waits_for_its_observation() {
     let _ = manager.install_conditional_advertisements(vec![absent_if(SETTLE)]);
     let handle = tokio::spawn(manager.run());
 
-    let (outbound_tx, _outbound_rx) = mpsc::channel(8);
-    tx.send(RibUpdate::PeerUp {
-        peer: source,
-        session_id: 1,
-        peer_asn: 65001,
-        peer_router_id: Ipv4Addr::new(192, 0, 2, 254),
-        outbound_tx,
-        export_policy: None,
-        sendable_families: Vec::new(),
-        is_ebgp: true,
-        route_reflector_client: false,
-        orr_vantage: None,
-        per_client_best: false,
-        interpret_rfc1997: true,
-        add_path_send_families: Vec::new(),
-        add_path_send_max: 0,
-        negotiated_orf_recv: Vec::new(),
-        negotiated_llgr_families: Vec::new(),
-    })
-    .await
-    .unwrap();
+    tx.send(peer_up_update(source, 1, 65001)).await.unwrap();
     tokio::time::sleep(JUST_BEFORE_SETTLE).await;
     assert!(condition_gauge(&metrics, "absent") > 0.5);
 
@@ -778,19 +798,9 @@ async fn expiry_during_an_open_batch_waits_for_its_observation() {
             None,
         )
     }));
-    tx.send(RibUpdate::RoutesReceived {
-        peer: source,
-        session_id: 1,
-        announced,
-        withdrawn: vec![],
-        flowspec_announced: vec![],
-        flowspec_withdrawn: vec![],
-        evpn_announced: vec![],
-        evpn_withdrawn: vec![],
-        validated_with: None,
-    })
-    .await
-    .unwrap();
+    tx.send(routes_received(source, 1, announced, vec![]))
+        .await
+        .unwrap();
     advance(Duration::from_millis(2)).await;
     tokio::time::sleep(Duration::from_millis(1)).await;
 
@@ -804,4 +814,248 @@ async fn expiry_during_an_open_batch_waits_for_its_observation() {
 
     drop(tx);
     handle.await.unwrap();
+}
+
+/// A GR-retained candidate outlives its session; a reconnect that changes
+/// the source peer's ASN re-observes a `condition_policy` that reads it.
+#[tokio::test(start_paused = true)]
+async fn retained_route_reconnect_with_a_new_asn_reobserves() {
+    let source = peer(1);
+    let mut manager = manager();
+    manager.handle_update(peer_up_update(source, 1, 65001));
+    let _ = manager.install_conditional_advertisements(vec![definition(
+        ConditionalAdvertiseIf::Present,
+        Some(rpol_chain(
+            "policy p { term t { if peer.asn == 65002 { accept } } term r { reject } }",
+            "p",
+        )),
+        SETTLE,
+    )]);
+    received(
+        &mut manager,
+        source,
+        1,
+        vec![route_with_med(source, prefix(1), None)],
+        vec![],
+    );
+    assert_eq!(state(&manager).0, ConditionObservation::Absent);
+
+    manager.handle_update(RibUpdate::PeerGracefulRestart {
+        peer: source,
+        session_id: 1,
+        restart_time: 120,
+        stale_routes_time: 360,
+        gr_families: vec![(Afi::Ipv4, Safi::Unicast)],
+        peer_llgr_capable: false,
+        peer_llgr_families: vec![],
+        llgr_stale_time: 0,
+    });
+    drain_route_chunks(&mut manager);
+    assert!(
+        manager.ribs[&source]
+            .iter_prefix(&condition())
+            .next()
+            .is_some()
+    );
+    assert_eq!(state(&manager).0, ConditionObservation::Absent);
+
+    let reconnected = Instant::now();
+    manager.handle_update(peer_up_update(source, 2, 65002));
+    assert!(
+        manager.ribs[&source]
+            .iter_prefix(&condition())
+            .next()
+            .is_some()
+    );
+    assert_eq!(state(&manager).0, ConditionObservation::Present);
+    assert_eq!(state(&manager).2, Some(reconnected + SETTLE));
+}
+
+/// Sustained unrelated traffic while another timer (a GR stale deadline)
+/// is overdue cannot starve a due settle deadline: the channel stays full
+/// because each send waits for the actor to free a slot.
+#[tokio::test(start_paused = true)]
+async fn settle_expiry_is_served_beside_an_overdue_timer_under_traffic() {
+    let metrics = BgpMetrics::new();
+    let (source, restarting) = (peer(1), peer(2));
+    let (tx, rx) = mpsc::channel(8);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, metrics.clone());
+    let _ = manager.install_conditional_advertisements(vec![absent_if(SETTLE)]);
+    let handle = tokio::spawn(manager.run());
+
+    tx.send(peer_up_update(source, 1, 65001)).await.unwrap();
+    tx.send(peer_up_update(restarting, 1, 65002)).await.unwrap();
+    tx.send(routes_received(
+        restarting,
+        1,
+        vec![route_with_med(restarting, prefix(9), None)],
+        vec![],
+    ))
+    .await
+    .unwrap();
+    tx.send(RibUpdate::PeerGracefulRestart {
+        peer: restarting,
+        session_id: 1,
+        restart_time: 1,
+        stale_routes_time: 360,
+        gr_families: vec![(Afi::Ipv4, Safi::Unicast)],
+        peer_llgr_capable: false,
+        peer_llgr_families: vec![],
+        llgr_stale_time: 0,
+    })
+    .await
+    .unwrap();
+    barrier(&tx).await;
+
+    let unrelated = || {
+        routes_received(
+            source,
+            1,
+            vec![route_with_med(source, prefix(7), None)],
+            vec![],
+        )
+    };
+    for _ in 0..8 {
+        tx.send(unrelated()).await.unwrap();
+    }
+    // Both deadlines are now overdue, with the mailbox full.
+    advance(SETTLE + Duration::from_millis(1)).await;
+    let mut sent = 0;
+    while permitted_gauge(&metrics) < 0.5 {
+        assert!(
+            sent < 1_000,
+            "settle expiry starved behind unrelated updates"
+        );
+        tx.send(unrelated()).await.unwrap();
+        sent += 1;
+    }
+    assert!((transitions(&metrics) - 1.0).abs() < f64::EPSILON);
+
+    drop(tx);
+    handle.await.unwrap();
+}
+
+fn unrelated_two_chunk(source: IpAddr, octet: u8) -> RibUpdate {
+    routes_received(
+        source,
+        1,
+        vec![route_with_med(source, prefix(octet), None)],
+        vec![(Prefix::V4(prefix(octet.wrapping_add(100))), 0)],
+    )
+}
+
+async fn spawn_with_source(
+    metrics: &BgpMetrics,
+    source: IpAddr,
+) -> (mpsc::Sender<RibUpdate>, tokio::task::JoinHandle<()>) {
+    let (tx, rx) = mpsc::channel(16);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, metrics.clone());
+    // Coalescing must not depend on wall-clock speed under test load.
+    manager.distribution_window_limits.elapsed = Duration::from_secs(3_600);
+    let _ = manager.install_conditional_advertisements(vec![absent_if(SETTLE)]);
+    let handle = tokio::spawn(manager.run());
+    tx.send(peer_up_update(source, 1, 65001)).await.unwrap();
+    barrier(&tx).await;
+    (tx, handle)
+}
+
+/// A batch already open when the deadline falls due finishes first, but its
+/// distribution window must not coalesce a message that arrived after the
+/// cutoff: that later condition change cannot cancel the due expiry.
+#[tokio::test(start_paused = true)]
+async fn expiry_cutoff_stops_an_open_batch_window_from_extending() {
+    let metrics = BgpMetrics::new();
+    let source = peer(1);
+    let (tx, handle) = spawn_with_source(&metrics, source).await;
+
+    advance(JUST_BEFORE_SETTLE).await;
+    // Three chunks: two withdrawal chunks and one announcement.
+    let withdrawn: Vec<_> = (0..1_025_u32)
+        .map(|index| {
+            let [_, _, high, low] = index.to_be_bytes();
+            (
+                Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(203, high, low, 0), 24)),
+                0,
+            )
+        })
+        .collect();
+    tx.send(routes_received(
+        source,
+        1,
+        vec![route_with_med(source, prefix(7), None)],
+        withdrawn,
+    ))
+    .await
+    .unwrap();
+    // The actor receives the batch and runs its first chunk.
+    tokio::task::yield_now().await;
+    advance(Duration::from_millis(2)).await;
+    // The actor saw the deadline due with the batch open; this message is
+    // after the cutoff.
+    tx.send(routes_received(
+        source,
+        1,
+        vec![route_with_med(source, prefix(1), None)],
+        vec![],
+    ))
+    .await
+    .unwrap();
+    barrier(&tx).await;
+
+    assert!((transitions(&metrics) - 1.0).abs() < f64::EPSILON);
+    assert!((condition_gauge(&metrics, "present") - 1.0).abs() < f64::EPSILON);
+
+    drop(tx);
+    handle.await.unwrap();
+}
+
+/// Messages queued when the deadline falls due are admitted before it fires,
+/// coalesced or not, and each admission is charged: a condition change
+/// queued after them, even one a window could coalesce, waits for expiry.
+#[tokio::test(start_paused = true)]
+async fn expiry_cutoff_charges_coalesced_queued_messages() {
+    let metrics = BgpMetrics::new();
+    let source = peer(1);
+    let (tx, handle) = spawn_with_source(&metrics, source).await;
+
+    for octet in [7, 8, 9] {
+        tx.send(unrelated_two_chunk(source, octet)).await.unwrap();
+    }
+    advance(SETTLE + Duration::from_millis(1)).await;
+    tx.send(routes_received(
+        source,
+        1,
+        vec![route_with_med(source, prefix(1), None)],
+        vec![],
+    ))
+    .await
+    .unwrap();
+    barrier(&tx).await;
+    assert!((transitions(&metrics) - 1.0).abs() < f64::EPSILON);
+    assert!((condition_gauge(&metrics, "present") - 1.0).abs() < f64::EPSILON);
+
+    drop(tx);
+    handle.await.unwrap();
+
+    // The same condition change queued before the deadline does cancel it.
+    let metrics = BgpMetrics::new();
+    let (tx, handle_2) = spawn_with_source(&metrics, source).await;
+    for octet in [7, 8] {
+        tx.send(unrelated_two_chunk(source, octet)).await.unwrap();
+    }
+    tx.send(routes_received(
+        source,
+        1,
+        vec![route_with_med(source, prefix(1), None)],
+        vec![],
+    ))
+    .await
+    .unwrap();
+    advance(SETTLE + Duration::from_millis(1)).await;
+    barrier(&tx).await;
+    assert!(transitions(&metrics) < 0.5);
+    assert!((condition_gauge(&metrics, "present") - 1.0).abs() < f64::EPSILON);
+
+    drop(tx);
+    handle_2.await.unwrap();
 }
