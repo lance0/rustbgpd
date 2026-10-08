@@ -311,8 +311,23 @@ impl PeerManager {
         info!(%receipt, "reload generation resolved; applying");
         let mut applied = AppliedEffects::default();
 
+        // 0. ADR-0137: conditional advertisements, before the candidate
+        //    chains can export and before any session this generation adds
+        //    or replaces can register, so no export runs under a mix of
+        //    candidate chains and prior gates. An unacknowledged install is
+        //    ambiguous: the RIB may have committed it.
+        match self.install_conditional_advertisements(conditional).await {
+            Ok(prior) => applied.conditional_prior = prior,
+            Err(error) => {
+                return ReloadGenerationOutcome::CompensationAmbiguous(format!(
+                    "conditional advertisements: {error}"
+                ));
+            }
+        }
+
         // 1. Policy chains through the rollback-capable snapshot. No session
-        //    identity is at stake yet, so a failure here costs nothing.
+        //    identity is at stake yet, so a failure here costs nothing beyond
+        //    restoring the conditional install above.
         match self
             .apply_resolved_policy_snapshot_with_prestage_reads(
                 resolved.policy_targets,
@@ -329,16 +344,22 @@ impl PeerManager {
                     "reload generation policy snapshot failed"
                 );
                 let message = format!("policy snapshot: {}", failure.message);
-                return match failure.kind {
-                    PolicySnapshotFailureKind::RejectedNoEffect => {
-                        ReloadGenerationOutcome::RejectedNoEffect(message)
-                    }
-                    PolicySnapshotFailureKind::FullyCompensated => {
-                        ReloadGenerationOutcome::FullyCompensated(message)
-                    }
-                    PolicySnapshotFailureKind::CompensationAmbiguous => {
-                        ReloadGenerationOutcome::CompensationAmbiguous(message)
-                    }
+                if failure.kind == PolicySnapshotFailureKind::CompensationAmbiguous {
+                    return ReloadGenerationOutcome::CompensationAmbiguous(message);
+                }
+                let Some(prior) = applied.conditional_prior.take() else {
+                    return match failure.kind {
+                        PolicySnapshotFailureKind::RejectedNoEffect => {
+                            ReloadGenerationOutcome::RejectedNoEffect(message)
+                        }
+                        _ => ReloadGenerationOutcome::FullyCompensated(message),
+                    };
+                };
+                return match self.restore_conditional_advertisements(prior).await {
+                    Ok(()) => ReloadGenerationOutcome::FullyCompensated(message),
+                    Err(error) => ReloadGenerationOutcome::CompensationAmbiguous(format!(
+                        "{message}; restoring conditional advertisements failed: {error}"
+                    )),
                 };
             }
         }
@@ -368,22 +389,6 @@ impl PeerManager {
         self.metrics
             .set_dynamic_neighbor_capacity(self.dynamic_peer_count, self.dynamic_neighbor_limit);
 
-        // 2b. ADR-0137: conditional advertisements, before any session this
-        //     generation adds or replaces can register, so no session
-        //     exports ahead of its gate. An unacknowledged install is
-        //     ambiguous: the RIB may have committed it.
-        match self.install_conditional_advertisements(conditional).await {
-            Ok(prior) => applied.conditional_prior = prior,
-            Err(error) => {
-                return self
-                    .fail_reload_generation(
-                        applied,
-                        format!("conditional advertisements: {error}"),
-                        true,
-                    )
-                    .await;
-            }
-        }
         // A swapped dataset read by a `condition_policy` is external input:
         // re-observe under the ordinary debounce.
         if let Err(error) = self

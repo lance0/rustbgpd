@@ -19,18 +19,21 @@ pub(super) struct ConditionalAdvertisementPrior {
 }
 
 impl PeerManager {
-    /// Send one request to the RIB and wait for its reply. Any failure after
-    /// the send leaves the RIB outcome unknown.
+    /// Send one request to the RIB and wait for its reply. Mailbox admission
+    /// and the acknowledgement share one absolute deadline, so a full actor
+    /// mailbox cannot stretch the request past `RIB_REPLY_TIMEOUT`. Any
+    /// failure after the send leaves the RIB outcome unknown.
     async fn conditional_rib_request<T>(
         &self,
         request: impl FnOnce(oneshot::Sender<T>) -> RibUpdate,
     ) -> Result<T, String> {
         let (reply, response) = oneshot::channel();
-        tokio::time::timeout(RIB_REPLY_TIMEOUT, self.rib_tx.send(request(reply)))
+        let deadline = tokio::time::Instant::now() + RIB_REPLY_TIMEOUT;
+        tokio::time::timeout_at(deadline, self.rib_tx.send(request(reply)))
             .await
             .map_err(|_| "RIB conditional-advertisement request timed out before dispatch")?
             .map_err(|_| "RIB unavailable for conditional-advertisement request")?;
-        tokio::time::timeout(RIB_REPLY_TIMEOUT, response)
+        tokio::time::timeout_at(deadline, response)
             .await
             .map_err(|_| "RIB conditional-advertisement acknowledgement timed out".to_string())?
             .map_err(|_| "RIB dropped conditional-advertisement acknowledgement".to_string())

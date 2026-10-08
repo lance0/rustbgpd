@@ -4280,7 +4280,7 @@ peer_group = "edge"
 
 /// Forward conditional-advertisement commands to a real RIB actor and
 /// everything else to the generation stub, recording the conditional
-/// commands in order.
+/// commands and export-chain installs in order.
 fn relay_conditional_to_real_rib(
     harness: &mut GenerationHarness,
 ) -> (Arc<Mutex<Vec<String>>>, tokio::task::JoinHandle<()>) {
@@ -4310,6 +4310,14 @@ fn relay_conditional_to_real_rib(
                     let _ = real_tx.send(command).await;
                 }
                 other => {
+                    if matches!(
+                        other,
+                        RibUpdate::ReplacePeerExportPolicy { .. }
+                            | RibUpdate::ReplacePeerExportPolicies { .. }
+                            | RibUpdate::ReplacePeerExportPoliciesAuthoritatively { .. }
+                    ) {
+                        log.lock().unwrap().push("chains".to_string());
+                    }
                     if downstream.send(other).await.is_err() {
                         break;
                     }
@@ -4320,6 +4328,15 @@ fn relay_conditional_to_real_rib(
         let _ = real.await;
     });
     (recorded, task)
+}
+
+fn conditional_log(log: &Mutex<Vec<String>>) -> Vec<String> {
+    log.lock()
+        .unwrap()
+        .iter()
+        .filter(|entry| *entry != "chains")
+        .cloned()
+        .collect()
 }
 
 fn attach_backup(fixture: &RsFixture, toml: &str) -> Config {
@@ -4371,7 +4388,7 @@ async fn generation_installs_conditional_advertisements_and_restores_on_failure(
     // replacements whose failure the unwind then compensated by restoring
     // the captured install (not by installing the prior config afresh).
     assert_eq!(
-        *log.lock().unwrap(),
+        conditional_log(&log),
         ["install [10.0.0.2]", "restore"],
         "one forward install, one restore"
     );
@@ -4399,7 +4416,7 @@ async fn generation_installs_conditional_advertisements_and_restores_on_failure(
         ["10.0.0.2"]
     );
     assert_eq!(
-        *log.lock().unwrap(),
+        conditional_log(&log),
         ["install [10.0.0.2]", "restore", "install [10.0.0.2]"]
     );
     harness.shutdown().await;
@@ -4504,7 +4521,7 @@ async fn neighbor_removal_reconcile_drops_its_attachment() {
     // an unchanged config sends nothing.
     harness.mgr.conditional_reconcile_pending = true;
     harness.mgr.reconcile_conditional_advertisements().await;
-    assert!(log.lock().unwrap().is_empty());
+    assert_eq!(conditional_log(&log), Vec::<String>::new());
     assert_eq!(harness.mgr.conditional_advertisements.attachments.len(), 1);
 
     let mut removed = attached.clone();
@@ -4514,12 +4531,152 @@ async fn neighbor_removal_reconcile_drops_its_attachment() {
     let _ = harness.mgr.replace_current_config(removed);
     assert!(harness.mgr.conditional_reconcile_pending);
     harness.mgr.reconcile_conditional_advertisements().await;
-    assert_eq!(*log.lock().unwrap(), ["install []"]);
+    assert_eq!(conditional_log(&log), ["install []"]);
     assert_eq!(
         harness.mgr.conditional_advertisements,
         rustbgpd_rib::ConditionalAdvertisementSet::default()
     );
     assert!(!harness.mgr.conditional_reconcile_pending);
+    harness.shutdown().await;
+    relay.abort();
+}
+
+/// ADR-0137: a generation that changes both an attached definition and the
+/// neighbor's export chain commits the candidate gate before any candidate
+/// chain reaches the RIB, so no candidate chain exports behind the prior
+/// gate. The install acknowledgement is held at a handshake: while it is
+/// held, no chain install has been sent.
+#[tokio::test]
+async fn generation_installs_the_candidate_gate_before_candidate_chains() {
+    let fixture = RsFixture::new();
+    let prior = fixture.load();
+    let mut harness = GenerationHarness::new(&prior);
+    let (log, relay) = relay_conditional_to_real_rib(&mut harness);
+    // Hold the install between the manager and the relay.
+    let (tx, mut rx) = mpsc::channel::<RibUpdate>(64);
+    let relay_tx = std::mem::replace(&mut harness.mgr.rib_tx, tx);
+    let (seen_tx, seen_rx) = oneshot::channel::<()>();
+    let (release_tx, release_rx) = oneshot::channel::<()>();
+    let hold = tokio::spawn(async move {
+        let (mut seen_tx, mut release_rx) = (Some(seen_tx), Some(release_rx));
+        while let Some(command) = rx.recv().await {
+            if matches!(command, RibUpdate::InstallConditionalAdvertisements { .. })
+                && let (Some(seen), Some(release)) = (seen_tx.take(), release_rx.take())
+            {
+                let _ = seen.send(());
+                let _ = release.await;
+            }
+            if relay_tx.send(command).await.is_err() {
+                break;
+            }
+        }
+    });
+    // The `.rpol` export MED changes for every member, and 10.0.0.2 gains
+    // an attachment.
+    std::fs::write(fixture.dir.path().join("members.rpol"), RS_RPOL_MED_20).unwrap();
+    let candidate = attach_backup(
+        &fixture,
+        &fixture
+            .base_toml()
+            .replace("remote_asn = 65002", "remote_asn = 65012"),
+    );
+    let observe = async {
+        seen_rx.await.expect("the generation sends its install");
+        assert!(
+            !log.lock().unwrap().iter().any(|entry| entry == "chains"),
+            "a candidate chain reached the RIB before the candidate gate: {:?}",
+            log.lock().unwrap()
+        );
+        release_tx.send(()).unwrap();
+    };
+    let (outcome, ()) = tokio::join!(harness.apply(&candidate), observe);
+    assert!(
+        matches!(outcome, ReloadGenerationOutcome::Applied(_)),
+        "{outcome:?}"
+    );
+    let order = log.lock().unwrap().clone();
+    let install = order.iter().position(|entry| entry == "install [10.0.0.2]");
+    let chains = order.iter().position(|entry| entry == "chains");
+    assert!(
+        install.is_some() && chains.is_some() && install < chains,
+        "{order:?}"
+    );
+    assert_eq!(harness.export_med("10.0.0.2"), Some(20));
+    harness.shutdown().await;
+    hold.abort();
+    relay.abort();
+}
+
+/// ADR-0137: the conditional install precedes the policy snapshot, so a
+/// failed snapshot restores it. The generation then reports full
+/// compensation, never "no effect", because the install committed.
+#[tokio::test]
+async fn failed_policy_snapshot_restores_the_conditional_install() {
+    let fixture = RsFixture::new();
+    let prior = fixture.load();
+    let mut harness = GenerationHarness::new(&prior);
+    // Every authoritative chain apply is refused before mutation.
+    let (stub_tx, mut stub_rx) = mpsc::channel::<RibUpdate>(64);
+    harness.mgr.rib_tx = stub_tx;
+    harness.rib.abort();
+    harness.rib = tokio::spawn(async move {
+        while let Some(update) = stub_rx.recv().await {
+            match update {
+                RibUpdate::ReplacePeerExportPolicy { reply, .. }
+                | RibUpdate::ReplacePeerExportPoliciesAuthoritatively { reply, .. } => {
+                    let _ = reply.send(Err(rustbgpd_rib::RibCommandError::internal(
+                        "refused by the test",
+                    )));
+                }
+                RibUpdate::ReplacePeerExportPolicies { reply, .. } => {
+                    let _ = reply.send(Ok(
+                        rustbgpd_rib::ExportPolicyCohortOutcome::RequiresAuthoritativePerPeerApply,
+                    ));
+                }
+                RibUpdate::RestorePeerExportPoliciesAuthoritatively {
+                    replacements,
+                    reply,
+                } => {
+                    let receipts = replacements
+                        .iter()
+                        .rev()
+                        .map(
+                            |replacement| rustbgpd_rib::PeerExportPolicyRestoreReceipt::Restored {
+                                peer: replacement.peer,
+                            },
+                        )
+                        .collect();
+                    let _ = reply.send(Ok(receipts));
+                }
+                RibUpdate::PrepareExportPolicyDestination { reply, .. } => {
+                    let _ = reply.send(Ok(()));
+                }
+                RibUpdate::QueryPeerRetainedStale { reply, .. } => {
+                    let _ = reply.send(0);
+                }
+                _ => {}
+            }
+        }
+    });
+    let (log, relay) = relay_conditional_to_real_rib(&mut harness);
+    std::fs::write(fixture.dir.path().join("members.rpol"), RS_RPOL_MED_20).unwrap();
+    let candidate = attach_backup(
+        &fixture,
+        &fixture
+            .base_toml()
+            .replace("remote_asn = 65002", "remote_asn = 65012"),
+    );
+    let outcome = harness.apply(&candidate).await;
+    let ReloadGenerationOutcome::FullyCompensated(error) = outcome else {
+        panic!("{outcome:?}");
+    };
+    assert!(error.contains("policy snapshot"), "{error}");
+    assert_eq!(conditional_log(&log), ["install [10.0.0.2]", "restore"]);
+    assert_eq!(
+        harness.mgr.conditional_advertisements,
+        rustbgpd_rib::ConditionalAdvertisementSet::default()
+    );
+    assert_eq!(harness.mgr.current_config, prior);
     harness.shutdown().await;
     relay.abort();
 }
