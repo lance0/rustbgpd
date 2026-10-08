@@ -95,6 +95,7 @@ check-contracts:
     python3 -m unittest -v scripts/test_check_metric_consumers.py
     python3 scripts/check-metric-consumers.py
     python3 -m unittest -v scripts/test_check_release_preflight.py
+    python3 -m unittest -v scripts/test_source_id.py
     just check-changelog-fragments
 
 # Check the pending release notes under changelog.d/ assemble cleanly into CHANGELOG.md (seconds, no compilation).
@@ -223,6 +224,7 @@ gate-msrv:
 # Run the checks that otherwise first fail on a release commit: metric release notes, changelog fragments, crate changelogs, and the root changelog section.
 gate-release *args:
     python3 -m unittest -v scripts/test_check_release_preflight.py
+    python3 -m unittest -v scripts/test_source_id.py
     python3 scripts/check_release_preflight.py {{args}}
 
 # Excluded ignored tests: the TCP-AO kernel receipts (transport listener and
