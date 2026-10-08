@@ -50,12 +50,20 @@ Junos and IOS-XR equivalents were not surveyed for this record.
 
 ### Constraints from this codebase
 
-- Every unicast export body shares one gate ladder with the export dry run.
-  These bodies are single-best, the multipath/Add-Path walk, per-client-best,
-  and ORR. Explain therefore reports the gate order the live path uses. RFC
-  5291 ORF is the nearest existing gate: a per-peer, prefix-level gate that
-  applies before the export chain, withdraws silently, and records a distinct
-  explain code.
+- The unicast export bodies do not share one gate order. Single-best runs
+  selection, split horizon, RFC 4456 reflection, family, LLGR, ORF, then the
+  RFC 1997 and route-server control gates
+  (`crates/rib/src/manager/distribution/unicast.rs`), and its explain path
+  dry-runs that body (`crates/rib/src/manager/queries.rs`). The ORR,
+  Add-Path, and per-client-best bodies check family and ORF before selection,
+  and their explain path (`explain_single_best_prefix`) follows that order.
+  Every body evaluates the export chain last, before the Adj-RIB-Out diff.
+  RFC 5291 ORF is the nearest existing gate: a per-peer, prefix-level gate
+  that applies before the export chain, withdraws silently, and records a
+  distinct explain code.
+- Policy evaluation fails closed. An evaluation error returns `Deny` with
+  `eval_error` set (`crates/policy/src/eval.rs`), so a caller that reads
+  only the verdict cannot tell an error from an ordinary rejection.
 - Update groups share one staged table among peers with equal `GroupKey`s.
   Per-peer export state that the key does not cover must use the per-peer path.
   ORF does this with the `orf_installed` fallback reason. The per-peer path
@@ -134,6 +142,17 @@ injected routes. A candidate does **not** have to be the Loc-RIB best path.
 This follows FRR's any-path semantics: "is transit A's default route still
 here?" must be true even when transit B's default route is selected.
 
+**`condition_policy` evaluation errors do not change state.** A candidate
+whose `condition_policy` evaluation returns an `eval_error` is neither a
+match nor a miss. If another candidate matches cleanly, the condition is
+present. Otherwise, if any candidate errored, the observed state is
+`unknown`. An `unknown` observation starts no settle timer, cancels any
+pending one, and leaves `applied` unchanged, including `pending` at
+startup. Explain reports the held state and the error, and the existing
+`bgp_policy_eval_errors_total` counter and per-term error counters record it.
+A policy that fails continuously therefore freezes the definition in its last
+applied state rather than flipping it.
+
 Condition prefixes may be any unicast prefix, including routes that the
 definition itself controls. Within one speaker, a definition cannot feed back
 into itself. The condition reads Adj-RIB-In and injected routes, and the gate
@@ -188,13 +207,15 @@ FRR advertises immediately in the same situation.
 
 ### 4. Position in export, and update groups
 
-The gate runs **for each candidate path** in every unicast export body. It
-runs after the existing pre-policy gates and immediately before the export
-chain:
-
-family → ORF → selection → split horizon / RFC 4456 reflection → LLGR →
-`NO_ADVERTISE` / `NO_EXPORT` / route-server control → **conditional
-advertisement** → export chain → Adj-RIB-Out diff.
+The gate runs **for each candidate path** in every unicast body:
+single-best, ORR, the Add-Path walk, and per-client-best. In each body it is
+inserted as the last gate, immediately before that body's export-chain
+evaluation, with no other change to the body. The existing gates keep their
+current per-body order. A route that an existing gate already stops reports
+the same first denial as today, and only a route that would otherwise reach
+the export chain can be stopped by conditional advertisement. Explain gets
+the same step at the same position in both explain paths: the single-best
+dry run and `explain_single_best_prefix`.
 
 For each definition attached to the target peer whose `applied` state is not
 `advertise`, the gate evaluates `advertise_policy` on the candidate's source
@@ -202,6 +223,14 @@ attributes with the target peer's context. If the policy permits the
 candidate, the candidate is suppressed. A route must pass every attached
 definition. When every definition attached to the peer is advertising, the
 gate passes without evaluating a policy, so peers in steady state pay nothing.
+
+**`advertise_policy` evaluation errors fail closed.** While a definition is
+not advertising, an evaluation that returns an `eval_error` suppresses the
+candidate, as a match would. Explain reports it with its own code,
+`conditional_advertisement_eval_error`, which names the failing policy and
+term, rather than as an ordinary suppression or rejection. While a definition
+is advertising, the predicate is not evaluated, because no predicate result
+could change the outcome.
 
 The behavior differs from FRR in three deliberate ways:
 
@@ -281,15 +310,38 @@ Within that batch:
   and the compiled content of both policies. Unchanged content causes no
   transition and no resync, just as a chain with identical content does not.
 - A definition with new or changed content, including a change to a
-  referenced policy through SIGHUP, `.rpol` reload, `SetPolicy`, or a dataset
-  swap that affects either predicate, is evaluated **immediately** against the
-  current RIB. Its `applied` state is set without waiting for `settle_time`,
-  and attached peers are marked dirty. The RIB is warm, and the operator
-  requested the change, so a pending window would only withdraw routes that
-  are correctly advertised.
+  referenced policy through SIGHUP, `.rpol` reload, or `SetPolicy`, is
+  evaluated **immediately** against the current RIB. Its `applied` state is
+  set without waiting for `settle_time`, and attached peers are marked dirty.
+  The RIB is warm, and the operator requested the change, so a pending window
+  would only withdraw routes that are correctly advertised.
 - Attaching or detaching a definition marks that peer dirty.
-- A definition that no peer references is dropped. Restoring it during
-  compensation evaluates it immediately again, as in the previous case.
+- A definition that no peer references is dropped.
+
+**Compensation restores state; it does not evaluate it again.** The forward
+apply captures each replaced or dropped definition's `observed`, `applied`,
+`observed_since`, and settle deadline. The restore batch reinstates those
+values, so a failed generation cannot change an advertisement decision or
+skip the debounce. After the restore, `observed` is recomputed from the
+current RIB. If it matches the restored value, the restored deadline stands.
+If the RIB changed in the meantime, `observed_since` becomes the restore time
+under the ordinary debounce. Peers whose attachments the restore changes are
+marked dirty, as in the forward apply.
+
+**Dataset swaps follow the dependency-refresh path.** Dataset content swaps
+do not pass through the export-policy batch. They use the dependency-scoped
+refresh, which today checks only each peer's import and export chains
+(`refresh_dataset_dependents` in `src/peer_manager/policy.rs`). Dependency
+discovery is extended to both predicates:
+
+- When a swapped dataset is referenced by an attached definition's
+  `advertise_policy`, the peer joins the batched export re-evaluation
+  (`ReevaluatePeerExportPolicies`), just as an export-chain reference does.
+- When it is referenced by a definition's `condition_policy`, that
+  definition's `observed` state is recomputed against the current RIB under
+  the ordinary debounce. A dataset feed is external input, like a route
+  change, so it does not get the immediate application that an operator
+  edit gets.
 
 Native config transactions treat these fields as ordinary TOML. The ADR-0130
 external-input fence already covers `.rpol` and dataset inputs.
@@ -305,11 +357,15 @@ same dry run of the shared export body:
 | Stop | `conditional_advertisement_suppressed` | `suppressed by conditional advertisement backup-via-transit-b: condition prefix 0.0.0.0/0 present (advertise if absent)` |
 | Stop | `conditional_advertisement_suppressed` | `suppressed by conditional advertisement core-reach: condition prefixes 198.51.100.0/24, 2001:db8::/32 absent (advertise if present)` |
 | Stop | `conditional_advertisement_suppressed` | `suppressed by conditional advertisement backup-via-transit-b: pending initial evaluation` |
+| Stop | `conditional_advertisement_eval_error` | `suppressed by conditional advertisement backup-via-transit-b: advertise_policy backup-aggregates failed in term t3 (evaluation error); failing closed` |
 | Pass | `conditional_advertisement` | `conditional advertisement backup-via-transit-b permits: condition prefix 0.0.0.0/0 absent (advertise if absent)` |
 | NotApplicable | `conditional_advertisement` | `no conditional advertisement attached` or `route not selected by any attached advertise policy` |
 
 When the observed state differs from the applied state, the detail adds
-`observed <state> since <time>, applies after settle_time`. The present-mode
+`observed <state> since <time>, applies after settle_time`. When the observed
+state is `unknown` because of a `condition_policy` error, the detail adds
+`condition unknown: condition_policy <name> failed in term <term>; holding
+<applied state>`. The present-mode
 detail names the first matching condition prefix. The absent-mode detail names
 every configured prefix, so an operator can see why the condition is false.
 `rbgp policy explain --direction export` explains the export chain only and
@@ -386,7 +442,12 @@ Promotion would require a separate inventory decision after operational use.
    peer teardown, and GR-stale retention. A blip shorter than `settle_time`
    causes no transition, a stable change causes exactly one transition,
    continuous flapping keeps the applied state, and `settle_time = 0` applies
-   at pass end. Startup stays `pending` until deferral is released.
+   at pass end. Startup stays `pending` until deferral is released. A
+   `condition_policy` that rejects a candidate makes it a miss, but one that
+   returns an evaluation error makes the observation `unknown`. In that case
+   the applied state holds, both during a settle window and from `pending`,
+   and a clean match from another candidate still makes the condition
+   present.
 3. **Real export path:** a single-best peer goes present → absent → present
    for `advertise_if = "present"`. Gated routes receive exact withdrawals and
    re-advertisements, and other routes do not change. Run the same sequence
@@ -395,13 +456,28 @@ Promotion would require a separate inventory decision after operational use.
    route as both a condition and a controlled route. Verify that a permitted
    route still receives export-chain modifications, that attaching moves the
    peer to the fallback reason and detaching restores grouping, and that
-   explain reports each code. Prove each sequence test by temporarily removing
-   the gate or the transition dirty-mark and confirming that the test fails.
+   explain reports each code. An `advertise_policy` evaluation error while
+   suppressing withholds the route and reports
+   `conditional_advertisement_eval_error`, while an ordinary rejection
+   advertises it. For each body, a route that fails an existing earlier gate
+   (family, ORF, split horizon, reflection, LLGR, RFC 1997, or route-server
+   control) as well as an active conditional suppression must report the
+   same first denial as on `main`, in both the live result and both explain
+   paths. Prove each sequence test by temporarily removing the gate or the
+   transition dirty-mark and confirming that the test fails.
 4. **Reload:** reloading with identical content keeps the state and causes no
    resync. A policy edit causes an immediate evaluation. Generation
    compensation restores the previous attachments and their effects on the
-   wire.
-5. **Interop leg against FRR 10.7.1:** containerlab topology
+   wire. Run compensation during an active settle window and confirm that
+   the prior `applied` state and deadline are restored, not evaluated again.
+   An unchanged RIB keeps the original deadline, and a RIB change during the
+   failed generation restarts the debounce from the restore time.
+5. **Dataset refresh:** a dataset swap that affects only an attached
+   `advertise_policy` re-evaluates that peer's export, and one that affects
+   only a `condition_policy` recomputes the observed state under the debounce.
+   A swap that affects neither changes nothing. Confirm each case fails with
+   the extended dependency discovery removed.
+6. **Interop leg against FRR 10.7.1:** containerlab topology
    `frr-a → rustbgpd → frr-b`. `frr-a` originates the condition prefix, and
    rustbgpd controls a backup prefix toward `frr-b` with
    `advertise_if = "absent"`. Shut down and restore `frr-a`'s announcement,
@@ -414,18 +490,24 @@ Promotion would require a separate inventory decision after operational use.
 
 1. **Config and validation.** Add the definition and attachment structs,
    schema, `DeletePolicy` reference checks, gRPC-mutation preservation,
-   reload-matrix rows, and generation transport inside
-   `PeerExportPolicyReplacement`. There is no runtime effect yet; installed
-   definitions remain inert. Roughly 600 lines with tests.
+   reload-matrix rows, and config-diff and reload-route classification. The
+   generation commits the attachments as part of the candidate. The
+   definitions do nothing at runtime yet; they reach the RIB in slice 3,
+   alongside the gate that uses them. Roughly 600 lines with tests.
 2. **Condition tracker.** Add the prefix index, observed evaluation from the
-   affected-prefix set, the settle timer, the deferral hold, applied state,
-   the three metrics, and the transition log. Applied state has no export
-   effect yet. Roughly 500 lines with tests.
-3. **Export gate.** Add the gate step in the shared unicast bodies, the
-   `conditional_advertisement` fallback reason (with the proto enum value and
-   its digest update in a separate commit), transition-to-dirty wiring,
-   reload content-identity handling, and explain codes. Real export-path tests
-   cover Decisions 4–7. This is the risk slice. Roughly 700 lines with tests.
+   affected-prefix set, `unknown` handling for `condition_policy` errors, the
+   settle timer, the deferral hold, applied state, `condition_policy`
+   dataset-dependency recomputation, the three metrics, and the transition
+   log. Applied state has no export effect yet. Roughly 500 lines with tests.
+3. **Export gate.** Carry the attachments in `PeerExportPolicyReplacement`.
+   Insert the gate step last before the export chain in each unicast body and
+   both explain paths, failing closed on `advertise_policy` errors. Add the
+   `conditional_advertisement` fallback reason, with the proto enum value and
+   its digest update in a separate commit. Also add transition-to-dirty
+   wiring, `advertise_policy` dataset dependency, reload content identity,
+   compensation state restore, and the explain codes. Real export-path tests
+   cover Decisions 4–7, including first-denial parity. This is the risk slice.
+   Roughly 800 lines with tests.
 4. **Proof and documentation.** Add the FRR interop leg, configuration and
    explain reference pages, the update-group reason table, the metrics
    reference, the cookbook example, and the changelog fragment.
