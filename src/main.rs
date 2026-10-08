@@ -4358,6 +4358,15 @@ async fn run<T>(
             waiters,
         });
     }
+    // ADR-0137: seed conditional advertisements before any session can
+    // register, after selection deferral so deferral holds them pending.
+    match config.conditional_advertisement_set() {
+        Ok(set) => rib_manager = rib_manager.with_conditional_advertisements(set),
+        Err(e) => {
+            error!(error = %e, "failed to resolve conditional advertisements — exiting");
+            process::exit(1);
+        }
+    }
     if let Some(tx) = bmp_loc_rib_tx {
         rib_manager = rib_manager.with_bmp_tx(tx);
     }

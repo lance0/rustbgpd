@@ -464,6 +464,9 @@ fn update_group_comparison_to_proto(
         UpdateGroupComparisonMembership::SlowPeer => {
             proto::UpdateGroupComparisonMembership::SlowPeer
         }
+        UpdateGroupComparisonMembership::ConditionalAdvertisement => {
+            proto::UpdateGroupComparisonMembership::ConditionalAdvertisement
+        }
     };
     let differences = comparison
         .differences

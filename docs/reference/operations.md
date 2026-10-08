@@ -1729,10 +1729,10 @@ stuck or daemon rejecting everything" pager.
 
 ### Conditional advertisement state
 
-These series describe conditional advertisement (ADR-0137). The daemon
-currently refuses configs that define conditional advertisements until
-export enforcement ships, so the series appear only once that release
-accepts them. The label `name` is a configured definition name.
+These series describe conditional advertisement (ADR-0137). The label
+`name` is an installed definition name; only definitions attached to at
+least one static neighbor are installed, and a dropped definition's series
+are removed.
 
 | Metric | What it tells you |
 |--------|-------------------|
@@ -3819,7 +3819,12 @@ The gate ladder, in live evaluation order (unicast single-best):
 its source) -> `rr_reflection` (iBGP split horizon / RFC 4456
 client/cluster rules) -> `family` (peer negotiated the AFI/SAFI) ->
 `llgr` (RFC 9494 stale-export restriction) -> `orf` (peer-pushed
-RFC 5291 filter) -> `export_policy` (per-chain verdict, labeled
+RFC 5291 filter) -> `conditional_advertisement` (ADR-0137 gate, last
+before the export chain: `conditional_advertisement_suppressed` names
+the definition, condition prefix, and state;
+`conditional_advertisement_eval_error` names the failing
+`advertise_policy` term; n/a when nothing is attached) ->
+`export_policy` (per-chain verdict, labeled
 `policy:term` for `.rpol` members) -> `adj_rib_out` (diff against the
 advertised state: `staged_announce` = would send, `already_advertised`
 = identical route already advertised, Adj-RIB-Out in sync). Every

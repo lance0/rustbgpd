@@ -48,8 +48,6 @@ pub use resolution::{
     outbound_prefix_limits_loosen,
 };
 pub use schema::*;
-#[cfg(test)]
-pub(crate) use validation::ConditionalAdvertisementRefusalBypass;
 pub(crate) use validation::{effective_prefix, effective_prefix_str};
 
 /// Normalize the raw optional representation used by config inheritance.

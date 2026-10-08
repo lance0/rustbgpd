@@ -93,6 +93,7 @@ struct AppliedEffects {
     dataset_dependents: Vec<DatasetDependent>,
     policy_priors: Option<Vec<ResolvedPeerPolicy>>,
     prior_config: Option<Config>,
+    conditional_prior: Option<super::conditional::ConditionalAdvertisementPrior>,
     hot_priors: Vec<PeerManagerNeighborConfig>,
     reshape_priors: Option<Vec<PeerManagerNeighborConfig>>,
     removed: Vec<RemovedPeer>,
@@ -104,6 +105,7 @@ impl AppliedEffects {
         self.dataset_prior.is_some()
             || self.policy_priors.is_some()
             || self.prior_config.is_some()
+            || self.conditional_prior.is_some()
             || !self.hot_priors.is_empty()
             || self.reshape_priors.is_some()
             || !self.removed.is_empty()
@@ -283,6 +285,14 @@ impl PeerManager {
             Ok(resolved) => resolved,
             Err(error) => return ReloadGenerationOutcome::RejectedNoEffect(error),
         };
+        let conditional = match candidate.conditional_advertisement_set() {
+            Ok(set) => set,
+            Err(error) => {
+                return ReloadGenerationOutcome::RejectedNoEffect(format!(
+                    "conditional advertisements: {error}"
+                ));
+            }
+        };
         let changed_datasets = datasets.changed_names();
         let dependents = match self
             .prepare_dataset_dependents(&candidate, &changed_datasets)
@@ -357,6 +367,31 @@ impl PeerManager {
         self.dynamic_neighbor_limit = self.current_config.effective_dynamic_neighbor_limit();
         self.metrics
             .set_dynamic_neighbor_capacity(self.dynamic_peer_count, self.dynamic_neighbor_limit);
+
+        // 2b. ADR-0137: conditional advertisements, before any session this
+        //     generation adds or replaces can register, so no session
+        //     exports ahead of its gate. An unacknowledged install is
+        //     ambiguous: the RIB may have committed it.
+        match self.install_conditional_advertisements(conditional).await {
+            Ok(prior) => applied.conditional_prior = prior,
+            Err(error) => {
+                return self
+                    .fail_reload_generation(
+                        applied,
+                        format!("conditional advertisements: {error}"),
+                        true,
+                    )
+                    .await;
+            }
+        }
+        // A swapped dataset read by a `condition_policy` is external input:
+        // re-observe under the ordinary debounce.
+        if let Err(error) = self
+            .reobserve_conditional_advertisement_datasets(&changed_datasets)
+            .await
+        {
+            warn!(%error, "reload generation: conditional advertisement re-observation failed");
+        }
 
         // 3. Hot updates in place: knobs only, policies already match.
         for (next, prior) in resolved.hot {
@@ -746,6 +781,12 @@ impl PeerManager {
             );
         }
         let mut failures = Vec::new();
+        // Before any re-added peer registers, so it comes back gated.
+        if let Some(prior) = applied.conditional_prior
+            && let Err(error) = self.restore_conditional_advertisements(prior).await
+        {
+            failures.push(format!("restore conditional advertisements: {error}"));
+        }
         for peer in applied.added.into_iter().rev() {
             if let Err(error) = self.delete_peer(peer.clone(), false).await {
                 failures.push(format!("delete added {peer}: {error}"));

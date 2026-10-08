@@ -2456,3 +2456,99 @@ async fn labeled_orr_topology_metric_flip_moves_only_affected_client() {
         "non-ORR client must see zero messages"
     );
 }
+
+/// ADR-0137: the ORR body gates its per-vantage winner last, immediately
+/// before the export chain, with no runner-up fallback; an earlier RFC 1997
+/// stop keeps its first denial while the suppression is active.
+#[tokio::test(start_paused = true)]
+async fn conditional_advertisement_gates_the_orr_winner_after_earlier_gates() {
+    use crate::{ConditionalAdvertiseIf, ConditionalAdvertisement, ConditionalAdvertisementSet};
+
+    let client = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 34));
+    let condition = Ipv4Prefix::new(Ipv4Addr::new(192, 0, 2, 99), 32);
+    let compiled = rustbgpd_policy::rpol::RpolFile::parse(
+        "policy ctl { term t { if route.prefix == 198.51.100.0/24 { accept } } term rest { reject } }",
+    )
+    .unwrap()
+    .compile_policy("ctl", &[], &mut rustbgpd_policy::sets::SetStore::new())
+    .unwrap();
+    let set = ConditionalAdvertisementSet {
+        definitions: vec![ConditionalAdvertisement {
+            name: Arc::from("backup"),
+            advertise_policy: rustbgpd_policy::PolicyChain::from_named(vec![
+                rustbgpd_policy::NamedPolicy::from_rpol("ctl".to_string(), Arc::new(compiled)),
+            ]),
+            advertise_if: ConditionalAdvertiseIf::Present,
+            condition_prefixes: vec![Prefix::V4(condition)],
+            condition_policy: None,
+            settle_time: Duration::ZERO,
+        }],
+        attachments: [(client, vec![Arc::from("backup")])].into_iter().collect(),
+    };
+    let (tx, rx) = mpsc::channel(64);
+    let manager = RibManager::new(
+        rx,
+        dummy_query_rx(),
+        None,
+        Some(Ipv4Addr::new(10, 255, 0, 1)),
+        BgpMetrics::new(),
+    )
+    .with_conditional_advertisements(set);
+    let handle = tokio::spawn(manager.run());
+    feed_square_topology(&tx, ORR_FEED).await;
+    let mut out = orr_client_peer_up(&tx, client, Some(vantage_at_node_b())).await;
+    announce_divergent_bests(&tx).await;
+    assert!(
+        !drain_final_unicast(&mut out).contains_key(&orr_prefix_key()),
+        "pending suppresses the winner, with no runner-up fallback"
+    );
+    let explain = query_explain_advertised_route(&tx, client, Prefix::V4(orr_prefix())).await;
+    assert_eq!(explain.orr_vantage, Some(vantage_at_node_b()));
+    let stop = |explain: &crate::update::ExplainAdvertisedRoute| {
+        explain
+            .gates
+            .iter()
+            .find(|step| step.verdict == crate::update::ExportGateVerdict::Stop)
+            .map(|step| step.code)
+    };
+    assert_eq!(stop(&explain), Some("conditional_advertisement_suppressed"));
+
+    // An RFC 1997 winner reports its own, earlier stop.
+    let no_advertise =
+        super::unicast::with_no_advertise(ibgp_route(orr_prefix(), ORR_SRC_Y, orr_nh_y()));
+    announce_unicast(&tx, ORR_SRC_Y, vec![no_advertise]).await;
+    let explain = query_explain_advertised_route(&tx, client, Prefix::V4(orr_prefix())).await;
+    assert_eq!(stop(&explain), Some("no_advertise_suppressed"));
+    announce_unicast(
+        &tx,
+        ORR_SRC_Y,
+        vec![ibgp_route(orr_prefix(), ORR_SRC_Y, orr_nh_y())],
+    )
+    .await;
+
+    // The condition arrives (settle_time 0): the winner is announced by the
+    // bounded resync.
+    announce_unicast(
+        &tx,
+        ORR_SRC_X,
+        vec![ibgp_route(condition, ORR_SRC_X, orr_nh_x())],
+    )
+    .await;
+    let next_hop = tokio::time::timeout(Duration::from_mins(1), async {
+        loop {
+            let update = out.recv().await.expect("outbound open");
+            if let Some(route) = update
+                .announce
+                .iter()
+                .find(|route| route.prefix == Prefix::V4(orr_prefix()))
+            {
+                break route.next_hop;
+            }
+        }
+    })
+    .await
+    .expect("the transition re-advertises the ORR winner");
+    assert_eq!(next_hop, orr_nh_y(), "vantage B keeps the Y exit");
+    drop(tx);
+    handle.await.unwrap();
+}

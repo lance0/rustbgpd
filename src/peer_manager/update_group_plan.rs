@@ -53,6 +53,7 @@ fn candidate_input(
     live: &UpdateGroupPeerSnapshot,
     candidate: &ResolvedNeighbor,
     local_asn: u32,
+    conditional_advertisement: bool,
 ) -> UpdateGroupClassifierInput {
     let policy = candidate.export_policy.as_ref();
     UpdateGroupClassifierInput {
@@ -76,6 +77,7 @@ fn candidate_input(
         interpret_rfc1997: candidate.transport_config.interpret_rfc1997,
         orr_vantage: candidate.transport_config.orr_vantage,
         orf_installed: live.input.orf_installed,
+        conditional_advertisement,
     }
 }
 
@@ -214,6 +216,13 @@ impl PeerManager {
     ) -> Result<UpdateGroupImpactPlan, UpdateGroupImpactPlanError> {
         let current =
             by_peer(&self.current_config).map_err(UpdateGroupImpactPlanError::Internal)?;
+        // ADR-0137: attached static neighbors take the per-peer path.
+        let conditional_peers: BTreeSet<IpAddr> = candidate
+            .neighbors
+            .iter()
+            .filter(|neighbor| !neighbor.conditional_advertisements.is_empty())
+            .filter_map(|neighbor| neighbor.address.parse().ok())
+            .collect();
         let candidate = by_peer(candidate).map_err(UpdateGroupImpactPlanError::InvalidCandidate)?;
         let live = snapshot
             .peers
@@ -247,7 +256,12 @@ impl PeerManager {
                 (Some(live), Some(current), Some(candidate))
                     if preserves_negotiation(current, candidate) =>
                 {
-                    let input = candidate_input(live, candidate, self.local_asn);
+                    let input = candidate_input(
+                        live,
+                        candidate,
+                        self.local_asn,
+                        conditional_peers.contains(&peer),
+                    );
                     let fingerprint = format!("{input:?}");
                     raw_state(&classify_update_group(input), &fingerprint)
                 }
@@ -380,6 +394,7 @@ mod tests {
             per_client_best: false,
             orr_vantage: None,
             orf_installed: false,
+            conditional_advertisement: false,
         };
         UpdateGroupSnapshot {
             peers: vec![UpdateGroupPeerSnapshot {
@@ -540,6 +555,7 @@ mod tests {
                 per_client_best: false,
                 orr_vantage: None,
                 orf_installed: false,
+                conditional_advertisement: false,
             }
         }
         let shared_a = fixture("a");

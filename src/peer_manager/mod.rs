@@ -39,6 +39,7 @@ use crate::policy_admin::{
 
 mod admission;
 mod bfd;
+mod conditional;
 mod dynamic;
 mod events;
 pub(crate) mod generation;
@@ -524,6 +525,13 @@ pub struct PeerManager {
     policy_events_tx: broadcast::Sender<Arc<PolicyEvent>>,
     policy_event_history: VecDeque<Arc<PolicyEvent>>,
     current_config: Config,
+    /// ADR-0137: the conditional-advertisement set the RIB last
+    /// acknowledged. The RIB install is the only copy the gate reads; this
+    /// is the comparison basis for deciding when to install again.
+    conditional_advertisements: rustbgpd_rib::ConditionalAdvertisementSet,
+    /// Set by every config replacement; the run loop then reconciles the
+    /// RIB install against `current_config`.
+    conditional_reconcile_pending: bool,
     local_forwarding_state: Arc<crate::forwarding_state::ForwardingState>,
     /// True between typed transaction staging and the controller's
     /// persist/rollback completion signal. Dynamic inbound accepts are refused
@@ -761,6 +769,7 @@ impl PeerManager {
     fn replace_current_config(&mut self, config: Config) -> Config {
         let previous = std::mem::replace(&mut self.current_config, config);
         self.peers.set_datasets(&self.current_config);
+        self.conditional_reconcile_pending = true;
         previous
     }
 
@@ -1157,6 +1166,12 @@ impl PeerManager {
             local_forwarding_state: Arc::new(crate::forwarding_state::ForwardingState::new(
                 &current_config,
             )),
+            // main seeds the RIB from the same config before the actor
+            // starts; a resolution failure there exits the daemon.
+            conditional_advertisements: current_config
+                .conditional_advertisement_set()
+                .unwrap_or_default(),
+            conditional_reconcile_pending: false,
             current_config,
             bfd_coupling: None,
             event_history: None,
@@ -2363,6 +2378,9 @@ impl PeerManager {
                     && self.deferred_session_notifications.is_empty()
                     && self.deferred_session_notification_counts.is_empty()
             );
+            if self.conditional_reconcile_pending {
+                self.reconcile_conditional_advertisements().await;
+            }
             let bfd_retry_at = self.bfd_retry_deadline();
             let max_prefix_restart_deadline = self.next_max_prefix_restart_deadline;
             tokio::select! {

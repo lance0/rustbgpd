@@ -1616,3 +1616,104 @@ pub(crate) fn transport_tcp_ao_keyring(tcp_ao: &super::TcpAoKeyringConfig) -> Tc
             .collect(),
     )
 }
+
+impl Config {
+    /// Resolve the complete conditional-advertisement install (ADR-0137):
+    /// every definition a static neighbor attaches, with both predicates
+    /// compiled, and each attaching neighbor's names in configured order.
+    /// Unattached definitions are not installed. Validation has already
+    /// accepted every reference, so an error here means a broken candidate.
+    pub(crate) fn conditional_advertisement_set(
+        &self,
+    ) -> Result<rustbgpd_rib::ConditionalAdvertisementSet, ConfigError> {
+        let mut set = rustbgpd_rib::ConditionalAdvertisementSet::default();
+        let mut attached = std::collections::BTreeSet::new();
+        for neighbor in &self.neighbors {
+            if neighbor.conditional_advertisements.is_empty() {
+                continue;
+            }
+            let address: IpAddr =
+                neighbor
+                    .address
+                    .parse()
+                    .map_err(|_| ConfigError::InvalidNeighborConfig {
+                        address: neighbor.address.clone(),
+                        field: "address".to_string(),
+                        reason: "not an IP address".to_string(),
+                    })?;
+            let names: Vec<std::sync::Arc<str>> = neighbor
+                .conditional_advertisements
+                .iter()
+                .map(|name| std::sync::Arc::from(name.as_str()))
+                .collect();
+            attached.extend(neighbor.conditional_advertisements.iter().cloned());
+            set.attachments.insert(address, names);
+        }
+        let mut store = SetStore::new();
+        for name in attached {
+            let config = self
+                .policy
+                .conditional_advertisements
+                .get(&name)
+                .ok_or_else(|| ConfigError::InvalidPolicyEntry {
+                    reason: format!("undefined conditional advertisement {name:?}"),
+                })?;
+            let resolve = |policy: &String, direction, store: &mut SetStore| {
+                resolve_chain_with_store(
+                    std::slice::from_ref(policy),
+                    &self.policy.definitions,
+                    &self.policy.rpol,
+                    &self.policy.dataset_bindings,
+                    &self.policy.neighbor_sets,
+                    &self.peer_groups,
+                    direction,
+                    self.global.asn,
+                    store,
+                )
+                .map(Option::unwrap_or_default)
+            };
+            let advertise_policy =
+                resolve(&config.advertise_policy, ChainDirection::Export, &mut store)?;
+            let condition_policy = config
+                .condition_policy
+                .as_ref()
+                .map(|policy| resolve(policy, ChainDirection::Import, &mut store))
+                .transpose()?;
+            let condition_prefixes = config
+                .condition_prefixes
+                .iter()
+                .map(|prefix| {
+                    let (addr, len) = super::validation::parse_exact_unicast_prefix(prefix)
+                        .map_err(|reason| ConfigError::InvalidPolicyEntry {
+                            reason: format!("conditional advertisement {name:?}: {reason}"),
+                        })?;
+                    Ok(match addr {
+                        IpAddr::V4(addr) => {
+                            rustbgpd_wire::Prefix::V4(rustbgpd_wire::Ipv4Prefix::new(addr, len))
+                        }
+                        IpAddr::V6(addr) => {
+                            rustbgpd_wire::Prefix::V6(rustbgpd_wire::Ipv6Prefix::new(addr, len))
+                        }
+                    })
+                })
+                .collect::<Result<Vec<_>, ConfigError>>()?;
+            set.definitions
+                .push(rustbgpd_rib::ConditionalAdvertisement {
+                    name: std::sync::Arc::from(name.as_str()),
+                    advertise_policy,
+                    advertise_if: match config.advertise_if {
+                        super::ConditionalAdvertiseIf::Present => {
+                            rustbgpd_rib::ConditionalAdvertiseIf::Present
+                        }
+                        super::ConditionalAdvertiseIf::Absent => {
+                            rustbgpd_rib::ConditionalAdvertiseIf::Absent
+                        }
+                    },
+                    condition_prefixes,
+                    condition_policy,
+                    settle_time: std::time::Duration::from_secs(u64::from(config.settle_time)),
+                });
+        }
+        Ok(set)
+    }
+}

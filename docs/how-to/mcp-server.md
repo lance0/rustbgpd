@@ -157,7 +157,8 @@ order. Against a daemon whose export policy blocks the prefix:
     { "step": 4, "gate": "family",         "code": "family",          "verdict": "pass" },
     { "step": 5, "gate": "llgr",           "code": "llgr",            "verdict": "pass" },
     { "step": 6, "gate": "orf",            "code": "orf",             "verdict": "not_applicable" },
-    { "step": 7, "gate": "export_policy",  "code": "policy_denied",   "verdict": "stop",
+    { "step": 7, "gate": "conditional_advertisement", "code": "conditional_advertisement", "verdict": "not_applicable" },
+    { "step": 8, "gate": "export_policy",  "code": "policy_denied",   "verdict": "stop",
       "detail": "export policy \"block-doc-prefix\" denied this route" }
   ]
 }

@@ -27,6 +27,7 @@ struct GenerationSessionCounters {
     state_queries: AtomicU32,
     drop_state_after: AtomicU32,
     export_owners: Mutex<Vec<PolicyOwners>>,
+    stops: AtomicU32,
 }
 
 fn generation_session(addr: IpAddr) -> (PeerHandle, Arc<GenerationSessionCounters>) {
@@ -107,7 +108,10 @@ fn generation_session(addr: IpAddr) -> (PeerHandle, Arc<GenerationSessionCounter
                     state.four_octet_as = Some(true);
                     let _ = reply.send(state);
                 }
-                PeerCommand::Shutdown | PeerCommand::Stop { .. } => break,
+                PeerCommand::Shutdown | PeerCommand::Stop { .. } => {
+                    in_task.stops.fetch_add(1, Ordering::SeqCst);
+                    break;
+                }
                 _ => {}
             }
         }
@@ -4272,4 +4276,250 @@ peer_group = "edge"
     assert_eq!(retained.transport_config.peer_scope_id, Some(42));
     assert_eq!(retained.transport_config.max_prefixes, Some(5000));
     harness.shutdown().await;
+}
+
+/// Forward conditional-advertisement commands to a real RIB actor and
+/// everything else to the generation stub, recording the conditional
+/// commands in order.
+fn relay_conditional_to_real_rib(
+    harness: &mut GenerationHarness,
+) -> (Arc<Mutex<Vec<String>>>, tokio::task::JoinHandle<()>) {
+    let (tx, mut rx) = mpsc::channel::<RibUpdate>(64);
+    let downstream = std::mem::replace(&mut harness.mgr.rib_tx, tx);
+    let (real_tx, real_rx) = mpsc::channel::<RibUpdate>(64);
+    let (_query_tx, query_rx) = mpsc::channel(1);
+    let real = rustbgpd_rib::RibManager::new(real_rx, query_rx, None, None, BgpMetrics::new());
+    let real = tokio::spawn(real.run());
+    let recorded = Arc::new(Mutex::new(Vec::new()));
+    let log = Arc::clone(&recorded);
+    let task = tokio::spawn(async move {
+        while let Some(command) = rx.recv().await {
+            match command {
+                RibUpdate::InstallConditionalAdvertisements { ref set, .. } => {
+                    log.lock().unwrap().push(format!(
+                        "install {:?}",
+                        set.attachments.keys().collect::<Vec<_>>()
+                    ));
+                    let _ = real_tx.send(command).await;
+                }
+                RibUpdate::RestoreConditionalAdvertisements { .. } => {
+                    log.lock().unwrap().push("restore".to_string());
+                    let _ = real_tx.send(command).await;
+                }
+                RibUpdate::ReobserveConditionalAdvertisements { .. } => {
+                    let _ = real_tx.send(command).await;
+                }
+                other => {
+                    if downstream.send(other).await.is_err() {
+                        break;
+                    }
+                }
+            }
+        }
+        drop(real_tx);
+        let _ = real.await;
+    });
+    (recorded, task)
+}
+
+fn attach_backup(fixture: &RsFixture, toml: &str) -> Config {
+    fixture.write_toml(&toml.replacen(
+        "[[neighbors]]\naddress = \"10.0.0.2\"\nremote_asn = 65012",
+        "[policy.definitions.backup-routes]\ndefault_action = \"deny\"\n\n\
+         [policy.conditional_advertisements.backup]\nadvertise_policy = \"backup-routes\"\n\
+         advertise_if = \"absent\"\ncondition_prefixes = [\"0.0.0.0/0\"]\n\n\
+         [[neighbors]]\naddress = \"10.0.0.2\"\nremote_asn = 65012\n\
+         conditional_advertisements = [\"backup\"]",
+        1,
+    ));
+    fixture.load()
+}
+
+/// ADR-0137: a generation installs its conditional advertisements at the
+/// config swap, ahead of every session replacement and addition, and a
+/// failed generation restores the captured install.
+#[tokio::test]
+async fn generation_installs_conditional_advertisements_and_restores_on_failure() {
+    let fixture = RsFixture::new();
+    let prior = fixture.load();
+    let mut harness = GenerationHarness::new(&prior);
+    let (log, relay) = relay_conditional_to_real_rib(&mut harness);
+    std::fs::write(fixture.dir.path().join("members.rpol"), RS_RPOL_MED_20).unwrap();
+    let candidate = attach_backup(
+        &fixture,
+        &fixture
+            .base_toml()
+            .replace("hold_time = 90", "hold_time = 60")
+            .replace("remote_asn = 65002", "remote_asn = 65012"),
+    );
+    assert_eq!(
+        candidate.neighbors[0].conditional_advertisements,
+        ["backup"],
+        "fixture attaches the definition"
+    );
+    harness
+        .mgr
+        .inject_reconfigure_failures
+        .insert(key("2001:db8::3".parse().unwrap()), 0);
+
+    let outcome = harness.apply(&candidate).await;
+    assert!(
+        matches!(outcome, ReloadGenerationOutcome::FullyCompensated(_)),
+        "{outcome:?}"
+    );
+    // The install committed at the config swap, ahead of the session
+    // replacements whose failure the unwind then compensated by restoring
+    // the captured install (not by installing the prior config afresh).
+    assert_eq!(
+        *log.lock().unwrap(),
+        ["install [10.0.0.2]", "restore"],
+        "one forward install, one restore"
+    );
+    assert_eq!(
+        harness.mgr.conditional_advertisements,
+        rustbgpd_rib::ConditionalAdvertisementSet::default(),
+        "the manager's record follows the restored install"
+    );
+
+    // A clean retry commits the install and keeps it.
+    harness.mgr.inject_reconfigure_failures.clear();
+    let outcome = harness.apply(&candidate).await;
+    assert!(
+        matches!(outcome, ReloadGenerationOutcome::Applied(_)),
+        "{outcome:?}"
+    );
+    assert_eq!(
+        harness
+            .mgr
+            .conditional_advertisements
+            .attachments
+            .keys()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>(),
+        ["10.0.0.2"]
+    );
+    assert_eq!(
+        *log.lock().unwrap(),
+        ["install [10.0.0.2]", "restore", "install [10.0.0.2]"]
+    );
+    harness.shutdown().await;
+    relay.abort();
+}
+
+/// ADR-0137 ordering: while the generation's conditional install is
+/// unacknowledged, no session of that generation has been stopped or
+/// replaced, so no replacement can register ahead of its gate. The install
+/// is held at a handshake rather than raced with a sleep.
+#[tokio::test]
+async fn generation_holds_session_replacement_until_the_conditional_install_commits() {
+    let fixture = RsFixture::new();
+    let prior = fixture.load();
+    let mut harness = GenerationHarness::new(&prior);
+    let (tx, mut rx) = mpsc::channel::<RibUpdate>(64);
+    let downstream = std::mem::replace(&mut harness.mgr.rib_tx, tx);
+    let (seen_tx, seen_rx) = oneshot::channel::<()>();
+    let (release_tx, release_rx) = oneshot::channel::<()>();
+    let relay = tokio::spawn(async move {
+        let (real_tx, real_rx) = mpsc::channel::<RibUpdate>(64);
+        let real = tokio::spawn(
+            rustbgpd_rib::RibManager::new(
+                real_rx,
+                mpsc::channel(1).1,
+                None,
+                None,
+                BgpMetrics::new(),
+            )
+            .run(),
+        );
+        let (mut seen_tx, mut release_rx) = (Some(seen_tx), Some(release_rx));
+        while let Some(command) = rx.recv().await {
+            if matches!(command, RibUpdate::InstallConditionalAdvertisements { .. }) {
+                if let Some(seen) = seen_tx.take() {
+                    let _ = seen.send(());
+                }
+                if let Some(release) = release_rx.take() {
+                    let _ = release.await;
+                }
+                let _ = real_tx.send(command).await;
+            } else if downstream.send(command).await.is_err() {
+                break;
+            }
+        }
+        drop(real_tx);
+        let _ = real.await;
+    });
+    let replaced: Vec<_> = ["10.0.0.2", "2001:db8::3"]
+        .iter()
+        .map(|peer| Arc::clone(&harness.counters[&peer.parse::<IpAddr>().unwrap()]))
+        .collect();
+    let candidate = attach_backup(
+        &fixture,
+        &fixture
+            .base_toml()
+            .replace("hold_time = 90", "hold_time = 60")
+            .replace("remote_asn = 65002", "remote_asn = 65012"),
+    );
+    let observe = async {
+        seen_rx.await.expect("the generation sends its install");
+        for counters in &replaced {
+            assert_eq!(
+                counters.stops.load(Ordering::SeqCst),
+                0,
+                "no session is replaced before the install commits"
+            );
+        }
+        release_tx.send(()).unwrap();
+    };
+    let (outcome, ()) = tokio::join!(harness.apply(&candidate), observe);
+    assert!(
+        matches!(outcome, ReloadGenerationOutcome::Applied(_)),
+        "{outcome:?}"
+    );
+    for counters in &replaced {
+        assert_eq!(
+            counters.stops.load(Ordering::SeqCst),
+            1,
+            "both group members are replaced after the install"
+        );
+    }
+    harness.shutdown().await;
+    relay.abort();
+}
+
+/// ADR-0137: a config replacement outside the generation, such as a
+/// neighbor removal, is reconciled into the RIB install, which drops that
+/// neighbor's attachment and its now-unattached definition.
+#[tokio::test]
+async fn neighbor_removal_reconcile_drops_its_attachment() {
+    let fixture = RsFixture::new();
+    let attached = attach_backup(
+        &fixture,
+        &fixture
+            .base_toml()
+            .replace("remote_asn = 65002", "remote_asn = 65012"),
+    );
+    let mut harness = GenerationHarness::new(&attached);
+    let (log, relay) = relay_conditional_to_real_rib(&mut harness);
+    // Construction records the set main seeded into the RIB; reconciling
+    // an unchanged config sends nothing.
+    harness.mgr.conditional_reconcile_pending = true;
+    harness.mgr.reconcile_conditional_advertisements().await;
+    assert!(log.lock().unwrap().is_empty());
+    assert_eq!(harness.mgr.conditional_advertisements.attachments.len(), 1);
+
+    let mut removed = attached.clone();
+    removed
+        .neighbors
+        .retain(|neighbor| neighbor.address != "10.0.0.2");
+    let _ = harness.mgr.replace_current_config(removed);
+    assert!(harness.mgr.conditional_reconcile_pending);
+    harness.mgr.reconcile_conditional_advertisements().await;
+    assert_eq!(*log.lock().unwrap(), ["install []"]);
+    assert_eq!(
+        harness.mgr.conditional_advertisements,
+        rustbgpd_rib::ConditionalAdvertisementSet::default()
+    );
+    assert!(!harness.mgr.conditional_reconcile_pending);
+    harness.shutdown().await;
+    relay.abort();
 }
