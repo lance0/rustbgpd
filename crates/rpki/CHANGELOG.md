@@ -7,6 +7,11 @@ Daemon and workspace changes remain in the repository-level `CHANGELOG.md`.
 
 - Prepare 0.6 with wire 0.24 for shared public wire types. Verifier and RTR
   behavior and method signatures are unchanged. Upgrade wire/FSM/RPKI together.
+- Add `VrpManager::with_end_of_data_observer`, called with a configured
+  cache's address and `Some(instant)` after each accepted End of Data, the
+  monotonic instant `AcceptedCacheState::age_seconds` counts from, or `None`
+  when a flush or expiry drops the retained contribution. An ordinary
+  disconnect does not call it. Additive; existing observers are unchanged.
 
 ## 0.5.0 - 2026-10-03
 

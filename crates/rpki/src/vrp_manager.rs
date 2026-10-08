@@ -240,6 +240,8 @@ pub struct AspaTableUpdate {
     pub changed_customer_asns: Option<FxHashSet<u32>>,
 }
 
+type EndOfDataObserver = Box<dyn Fn(SocketAddr, Option<Instant>) + Send + Sync>;
+
 /// Merges VRP and ASPA data from multiple RTR cache servers.
 pub struct VrpManager {
     /// Per-server VRP tables. Each table owns a set for bounded incremental
@@ -264,6 +266,7 @@ pub struct VrpManager {
     aspa_rib_tx: Option<mpsc::Sender<AspaTableUpdate>>,
     readiness_observer: Option<Box<dyn Fn(SocketAddr, bool) + Send + Sync>>,
     connectivity_observer: Option<Box<dyn Fn(SocketAddr, bool) + Send + Sync>>,
+    end_of_data_observer: Option<EndOfDataObserver>,
     cache_inventory: Option<CacheInventoryAttachment>,
 }
 
@@ -284,6 +287,7 @@ impl VrpManager {
             aspa_rib_tx: None,
             readiness_observer: None,
             connectivity_observer: None,
+            end_of_data_observer: None,
             cache_inventory: None,
         }
     }
@@ -325,6 +329,37 @@ impl VrpManager {
     ) -> Self {
         self.connectivity_observer = Some(Box::new(observer));
         self
+    }
+
+    /// Observe a configured cache's last accepted End of Data: `Some` with
+    /// the monotonic instant [`AcceptedCacheState::age_seconds`] counts from,
+    /// after each accepted full or incremental transaction, and `None` when
+    /// a flush or expiry drops the retained contribution. An ordinary
+    /// disconnect does not fire it, because the contribution is retained.
+    /// Fires only for caches registered through [`CacheInventoryAttachment`],
+    /// from the updates their clients send on its [`CacheUpdateHandle`].
+    #[must_use]
+    pub fn with_end_of_data_observer(
+        mut self,
+        observer: impl Fn(SocketAddr, Option<Instant>) + Send + Sync + 'static,
+    ) -> Self {
+        self.end_of_data_observer = Some(Box::new(observer));
+        self
+    }
+
+    /// Report the cache's current accepted instant to the End-of-Data
+    /// observer, from the same state [`Self::cache_list`] serves.
+    fn notify_end_of_data(&self, server: SocketAddr) {
+        let Some(state) = self
+            .cache_inventory
+            .as_ref()
+            .and_then(|i| i.states.get(&server))
+        else {
+            return;
+        };
+        if let Some(observer) = &self.end_of_data_observer {
+            observer(server, state.accepted.as_ref().map(|m| m.accepted_at));
+        }
     }
 
     fn set_connected(&mut self, server: SocketAddr, connected: bool) {
@@ -434,6 +469,7 @@ impl VrpManager {
                 }
                 if flush {
                     self.handle_update(VrpUpdate::ServerDown { server }).await;
+                    self.notify_end_of_data(server);
                 }
             }
             EnhancedVrpUpdate::Expired { server } => {
@@ -445,6 +481,7 @@ impl VrpManager {
                     state.accepted = None;
                 }
                 self.handle_update(VrpUpdate::ServerDown { server }).await;
+                self.notify_end_of_data(server);
             }
             EnhancedVrpUpdate::Full {
                 server,
@@ -468,6 +505,7 @@ impl VrpManager {
                     Some(serial),
                     accepted_at,
                 );
+                self.notify_end_of_data(server);
             }
             EnhancedVrpUpdate::Incremental {
                 server,
@@ -495,6 +533,7 @@ impl VrpManager {
                     Some(serial),
                     accepted_at,
                 );
+                self.notify_end_of_data(server);
             }
         }
     }
@@ -713,6 +752,7 @@ impl VrpManager {
 mod tests {
     use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
     use std::sync::{Arc, Mutex};
+    use std::time::Duration;
 
     use super::*;
 
@@ -1428,6 +1468,93 @@ mod tests {
                 .unwrap()
                 .contains_key(&("connected", server2()))
         );
+    }
+
+    /// The End-of-Data observer carries the exact instant `ListCaches` ages
+    /// from, survives an ordinary disconnect, and is cleared by both a flush
+    /// and an expiry. Dropping the notify on either clearing path, or
+    /// reporting a fresh `Instant::now()` instead of the accepted instant,
+    /// turns this red.
+    #[tokio::test]
+    async fn end_of_data_observer_tracks_accepted_instant_until_flush_or_expiry() {
+        let (_legacy_tx, legacy_rx) = mpsc::channel(16);
+        let (rib_tx, _rib_rx) = mpsc::channel(16);
+        let (attachment, _updates, _queries) = CacheInventoryAttachment::new([server1()]);
+        let events = Arc::new(Mutex::new(Vec::<(SocketAddr, Option<Instant>)>::new()));
+        let sink = Arc::clone(&events);
+        let mut mgr = VrpManager::new(legacy_rx, rib_tx)
+            .with_cache_inventory(attachment)
+            .with_end_of_data_observer(move |server, accepted_at| {
+                sink.lock().unwrap().push((server, accepted_at));
+            });
+        let earlier = |secs| {
+            Instant::now()
+                .checked_sub(Duration::from_secs(secs))
+                .unwrap()
+        };
+        let full = |server, accepted_at| EnhancedVrpUpdate::Full {
+            server,
+            entries: vec![entry(Ipv4Addr::new(192, 0, 2, 0), 24, 24, 64_496)],
+            aspa_records: vec![],
+            version: 2,
+            session_id: 7,
+            serial: 11,
+            accepted_at,
+        };
+        let last = || *events.lock().unwrap().last().unwrap();
+
+        let first = earlier(30);
+        mgr.handle_enhanced_update(full(server1(), first)).await;
+        assert_eq!(last(), (server1(), Some(first)));
+        let listed = mgr.cache_list().rows[0].accepted.clone().unwrap();
+        assert!(
+            listed.age_seconds >= 30,
+            "ListCaches ages from the same instant"
+        );
+
+        // An ordinary disconnect retains the contribution: no event.
+        let count = events.lock().unwrap().len();
+        mgr.handle_enhanced_update(EnhancedVrpUpdate::Disconnected {
+            server: server1(),
+            flush: false,
+        })
+        .await;
+        assert_eq!(events.lock().unwrap().len(), count);
+
+        let second = earlier(10);
+        mgr.handle_enhanced_update(EnhancedVrpUpdate::Incremental {
+            server: server1(),
+            announced: vec![],
+            withdrawn: vec![],
+            aspa_announced: vec![],
+            aspa_withdrawn: vec![],
+            version: 2,
+            session_id: 7,
+            serial: 12,
+            accepted_at: second,
+        })
+        .await;
+        assert_eq!(last(), (server1(), Some(second)));
+
+        mgr.handle_enhanced_update(EnhancedVrpUpdate::Expired { server: server1() })
+            .await;
+        assert_eq!(last(), (server1(), None), "expiry clears the instant");
+
+        let third = earlier(5);
+        mgr.handle_enhanced_update(full(server1(), third)).await;
+        assert_eq!(last(), (server1(), Some(third)));
+        mgr.handle_enhanced_update(EnhancedVrpUpdate::Disconnected {
+            server: server1(),
+            flush: true,
+        })
+        .await;
+        assert_eq!(last(), (server1(), None), "a flush clears the instant");
+
+        // Unconfigured caches never reach the observer.
+        let count = events.lock().unwrap().len();
+        mgr.handle_enhanced_update(full(server2(), earlier(1)))
+            .await;
+        assert_eq!(events.lock().unwrap().len(), count);
     }
 
     #[tokio::test]

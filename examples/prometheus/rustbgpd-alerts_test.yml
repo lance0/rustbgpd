@@ -998,6 +998,48 @@ tests:
         alertname: RpkiCacheEndOfDataNotReady
         exp_alerts: []
 
+  # ── RpkiCacheDataNearExpiry ───────────────────────────────────
+  # 192.0.2.10 stops refreshing: its age climbs 60 s per minute against a
+  # 7200 s expire, crosses the 1800 s remaining threshold after 6m40s, and a
+  # new End of Data at 12m restarts the age. 192.0.2.11 refreshes normally.
+  # 192.0.2.12 was flushed: no age series, so no alert despite its expire.
+  - interval: 1m
+    input_series:
+      - series: 'bgp_rpki_cache_effective_expire_seconds{cache="192.0.2.10:3323", instance="edge1:9179"}'
+        values: "7200x20"
+      - series: 'bgp_rpki_cache_end_of_data_age_seconds{cache="192.0.2.10:3323", instance="edge1:9179"}'
+        values: "5000+60x11 0+60x8"
+      - series: 'bgp_rpki_cache_effective_expire_seconds{cache="192.0.2.11:3323", instance="edge1:9179"}'
+        values: "7200x20"
+      - series: 'bgp_rpki_cache_end_of_data_age_seconds{cache="192.0.2.11:3323", instance="edge1:9179"}'
+        values: "100+60x20"
+      - series: 'bgp_rpki_cache_effective_expire_seconds{cache="192.0.2.12:3323", instance="edge1:9179"}'
+        values: "7200x20"
+    alert_rule_test:
+      - eval_time: 6m
+        alertname: RpkiCacheDataNearExpiry
+        exp_alerts: []
+      - eval_time: 8m
+        alertname: RpkiCacheDataNearExpiry
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              cache: "192.0.2.10:3323"
+              instance: "edge1:9179"
+            exp_annotations:
+              summary: "RPKI cache 192.0.2.10:3323 retained data expires in 28m 40s"
+              description: >-
+                rustbgpd on edge1:9179 has had no new RTR End of Data
+                from cache 192.0.2.10:3323 for over three quarters of its
+                effective expire (bgp_rpki_cache_effective_expire_seconds); the
+                retained contribution stops counting for validation in
+                28m 40s unless the cache delivers a fresh
+                End of Data. Run rbgp rpki caches for its session state and age,
+                and check the cache and the path to it.
+      - eval_time: 14m
+        alertname: RpkiCacheDataNearExpiry
+        exp_alerts: []
+
   # ── RpkiCacheDisconnected ─────────────────────────────────────
   # 192.0.2.10 disconnected but retained (ready 1): only RpkiCacheDisconnected
   # fires, RpkiCacheEndOfDataNotReady stays silent. 192.0.2.12 was flushed

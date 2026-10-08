@@ -3367,9 +3367,10 @@ fn observe_rpki_task_exit(
     }
 }
 
-/// Seed and drive the per-cache readiness and connectivity gauges from the
-/// VRP manager. They are distinct signals: after an ordinary disconnect a
-/// cache stays ready until the effective expire; a flush drops both.
+/// Seed and drive the per-cache readiness, connectivity and End-of-Data age
+/// metrics from the VRP manager. They are distinct signals: after an ordinary
+/// disconnect a cache stays ready, and its age keeps advancing, until the
+/// effective expire; a flush or expiry drops readiness and the age series.
 fn observe_rpki_cache_metrics(
     manager: rustbgpd_rpki::VrpManager,
     metrics: &BgpMetrics,
@@ -3382,12 +3383,16 @@ fn observe_rpki_cache_metrics(
     }
     let readiness = metrics.clone();
     let connectivity = metrics.clone();
+    let end_of_data = metrics.clone();
     manager
         .with_readiness_observer(move |server, ready| {
             readiness.set_rpki_cache_end_of_data_ready(&server.to_string(), ready);
         })
         .with_connectivity_observer(move |server, connected| {
             connectivity.set_rpki_cache_connected(&server.to_string(), connected);
+        })
+        .with_end_of_data_observer(move |server, accepted_at| {
+            end_of_data.set_rpki_cache_end_of_data_accepted_at(&server.to_string(), accepted_at);
         })
 }
 
@@ -6918,22 +6923,25 @@ mod tests {
         cache: &str,
         connected: f64,
         ready: f64,
+        age: bool,
     ) {
         let observed = || {
             (
                 rpki_cache_gauge(metrics, "bgp_rpki_cache_connected", cache),
                 rpki_cache_gauge(metrics, "bgp_rpki_cache_end_of_data_ready", cache),
+                rpki_cache_gauge(metrics, "bgp_rpki_cache_end_of_data_age_seconds", cache)
+                    .is_some(),
             )
         };
         let reached = tokio::time::timeout(Duration::from_secs(10), async {
-            while observed() != (Some(connected), Some(ready)) {
+            while observed() != (Some(connected), Some(ready), age) {
                 tokio::time::sleep(Duration::from_millis(10)).await;
             }
         })
         .await;
         assert!(
             reached.is_ok(),
-            "expected connected={connected} ready={ready}, observed {:?}",
+            "expected connected={connected} ready={ready} age_present={age}, observed {:?}",
             observed()
         );
     }
@@ -6942,7 +6950,10 @@ mod tests {
     /// readiness: it rises on connect before any data, falls on an ordinary
     /// disconnect while the retained contribution stays ready, and stays 0
     /// through a flush. Wiring it as an alias of readiness makes the
-    /// connected-before-data and disconnected-but-ready waits time out.
+    /// connected-before-data and disconnected-but-ready waits time out. The
+    /// End-of-Data age series exists exactly while a contribution is
+    /// retained: from End of Data, through the ordinary disconnect, until
+    /// the flush removes it.
     #[tokio::test]
     async fn rpki_cache_connectivity_gauge_tracks_the_session_not_readiness() {
         use rustbgpd_rpki::rtr_codec::RtrPdu;
@@ -6979,7 +6990,7 @@ mod tests {
 
         let (mut stream, _) = listener.accept().await.unwrap();
         assert_eq!(read_rtr_pdu(&mut stream).await, RtrPdu::ResetQuery);
-        wait_for_rpki_cache_gauges(&metrics, &cache, 1.0, 0.0).await;
+        wait_for_rpki_cache_gauges(&metrics, &cache, 1.0, 0.0, false).await;
         write_rtr_pdus(
             &mut stream,
             &[
@@ -7001,11 +7012,11 @@ mod tests {
             ],
         )
         .await;
-        wait_for_rpki_cache_gauges(&metrics, &cache, 1.0, 1.0).await;
+        wait_for_rpki_cache_gauges(&metrics, &cache, 1.0, 1.0, true).await;
 
         // Ordinary disconnect: the retained contribution stays ready.
         drop(stream);
-        wait_for_rpki_cache_gauges(&metrics, &cache, 0.0, 1.0).await;
+        wait_for_rpki_cache_gauges(&metrics, &cache, 0.0, 1.0, true).await;
 
         // The reconnect is told to flush (Cache Shutdown); no further dial
         // can succeed, so both gauges settle at 0.
@@ -7021,7 +7032,7 @@ mod tests {
             }],
         )
         .await;
-        wait_for_rpki_cache_gauges(&metrics, &cache, 0.0, 0.0).await;
+        wait_for_rpki_cache_gauges(&metrics, &cache, 0.0, 0.0, false).await;
 
         client.abort();
         manager.abort();
