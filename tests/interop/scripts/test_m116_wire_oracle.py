@@ -14,9 +14,11 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import m116_wire_oracle as oracle  # noqa: E402
+from test_m114_wire_oracle import notification_scenarios  # noqa: E402
 
 ORACLE = Path(__file__).resolve().parent / "m116_wire_oracle.py"
 PREFIX = "2001:db8:1160::/48"
+SOURCE = "10.116.0.2"
 EXPECTED = [("10.116.1.2", PREFIX, "2001:db8:116::1")]
 GLOBAL = ipaddress.IPv6Address("2001:db8:116::1").packed
 LINK_LOCAL = ipaddress.IPv6Address("fe80::1").packed
@@ -64,7 +66,7 @@ def pdml(*messages: str, dst: str = "10.116.1.2") -> ET.Element:
 
 
 def verdicts(root: ET.Element) -> list[str]:
-    return [line.split(" ", 1)[0] for line in oracle.judge(root, EXPECTED)]
+    return [line.split(" ", 1)[0] for line in oracle.judge(root, SOURCE, EXPECTED)]
 
 
 class M116WireOracleTests(unittest.TestCase):
@@ -111,16 +113,24 @@ class M116WireOracleTests(unittest.TestCase):
         root = pdml(update(mp_reach(GLOBAL)), notification)
         self.assertEqual(verdicts(root), ["PASS", "PASS", "FAIL"])
 
+    def test_notification_scope(self) -> None:
+        cases = notification_scenarios("10.116.0.1", SOURCE, "10.116.1.2")
+        for name, (want, segments) in cases.items():
+            with self.subTest(name):
+                root = pdml(update(mp_reach(GLOBAL)))
+                root.extend(ET.fromstring(f"<pdml>{''.join(segments)}</pdml>"))
+                self.assertEqual(verdicts(root), ["PASS", "PASS", want])
+
     def test_attribute_length_mismatch_raises(self) -> None:
         broken = mp_reach(GLOBAL)[:-2]
         with self.assertRaises(ValueError):
-            oracle.judge(pdml(update(broken)), EXPECTED)
+            oracle.judge(pdml(update(broken)), SOURCE, EXPECTED)
 
     def test_uncovered_attribute_bytes_raise(self) -> None:
         body = attr_field(mp_reach(GLOBAL), cover=4)
         message = f'<proto name="bgp"><field name="bgp.type" show="2"/>{body}</proto>'
         with self.assertRaises(ValueError):
-            oracle.judge(pdml(message), EXPECTED)
+            oracle.judge(pdml(message), SOURCE, EXPECTED)
 
     def test_missing_position_raises(self) -> None:
         bare = (
@@ -128,14 +138,14 @@ class M116WireOracleTests(unittest.TestCase):
             '<field name="bgp.update.path_attribute" value=""/></proto>'
         )
         with self.assertRaises(ValueError):
-            oracle.judge(pdml(bare), EXPECTED)
+            oracle.judge(pdml(bare), SOURCE, EXPECTED)
 
     def test_truncated_pdml_exits_non_zero(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "m116.pdml"
             path.write_text('<pdml><packet><proto name="ip">')
             result = subprocess.run(
-                [sys.executable, str(ORACLE), str(path), *EXPECTED[0]],
+                [sys.executable, str(ORACLE), str(path), SOURCE, *EXPECTED[0]],
                 capture_output=True,
                 text=True,
                 check=False,

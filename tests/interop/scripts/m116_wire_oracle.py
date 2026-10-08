@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """M116 wire oracle: judge receiver-bound IPv6 MP_REACH_NLRI next hops in a tshark PDML export.
 
-Usage: m116_wire_oracle.py PDML RECEIVER PREFIX NEXT_HOP [RECEIVER PREFIX NEXT_HOP ...]
+Usage: m116_wire_oracle.py PDML SOURCE RECEIVER PREFIX NEXT_HOP [RECEIVER PREFIX NEXT_HOP ...]
 
 Each <proto name="bgp"> element is one BGP message. A path attribute's own
 PDML `value` is empty, so its raw bytes are rebuilt from the hex `value` and
@@ -11,8 +11,9 @@ next hop under AFI 2 is judged as sent. Prints one
 PASS/FAIL line per expectation: every UPDATE announcing PREFIX to RECEIVER
 must carry a 16-octet NEXT_HOP global address, or 32 octets whose second half
 is link-local. Then one line covering every receiver-bound IPv6 MP_REACH_NLRI
-(16 or 32 octets only) and one for NOTIFICATIONs. A malformed PDML or attribute
-raises and exits non-zero.
+(16 or 32 octets only) and one for NOTIFICATIONs (see
+m114_wire_oracle.notification_verdict; SOURCE is the source peer's address).
+A malformed PDML or attribute raises and exits non-zero.
 """
 
 from __future__ import annotations
@@ -20,6 +21,8 @@ from __future__ import annotations
 import ipaddress
 import sys
 import xml.etree.ElementTree as ET
+
+from m114_wire_oracle import notification_verdict
 
 MP_REACH = 14
 IPV6_UNICAST = (2, 1)
@@ -108,11 +111,10 @@ def show(next_hop: bytes) -> str:
     return next_hop.hex()
 
 
-def judge(root: ET.Element, expected: list[tuple[str, str, str]]) -> list[str]:
+def judge(root: ET.Element, source: str, expected: list[tuple[str, str, str]]) -> list[str]:
     receivers = {dst for dst, _, _ in expected}
     seen: dict[tuple[str, str], list[bytes]] = {(dst, prefix): [] for dst, prefix, _ in expected}
     invalid: list[str] = []
-    notifications = 0
     for packet in root.iter("packet"):
         ip = next((p for p in packet.iter("proto") if p.get("name") == "ip"), None)
         if ip is None:
@@ -122,8 +124,6 @@ def judge(root: ET.Element, expected: list[tuple[str, str, str]]) -> list[str]:
             kind = fields(bgp, "bgp.type")
             if not kind:
                 continue
-            if kind[0].get("show") == "3":
-                notifications += 1
             if kind[0].get("show") != "2" or dst not in receivers:
                 continue
             for attr in fields(bgp, "bgp.update.path_attribute"):
@@ -157,20 +157,17 @@ def judge(root: ET.Element, expected: list[tuple[str, str, str]]) -> list[str]:
         + f"{len(invalid)} receiver-bound IPv6 MP_REACH_NLRI with an invalid next hop"
         + (f" ({'; '.join(invalid)})" if invalid else "")
     )
-    lines.append(
-        ("PASS " if notifications == 0 else "FAIL ")
-        + f"{notifications} NOTIFICATION message(s) captured"
-    )
+    lines.append(notification_verdict(root, source))
     return lines
 
 
 def main(argv: list[str]) -> int:
-    if len(argv) < 4 or (len(argv) - 1) % 3:
+    if len(argv) < 5 or (len(argv) - 2) % 3:
         print(__doc__, file=sys.stderr)
         return 2
-    path, *flat = argv
+    path, source, *flat = argv
     expected = [(flat[i], flat[i + 1], flat[i + 2]) for i in range(0, len(flat), 3)]
-    for line in judge(ET.parse(path).getroot(), expected):
+    for line in judge(ET.parse(path).getroot(), source, expected):
         print(line)
     return 0
 

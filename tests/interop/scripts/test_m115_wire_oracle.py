@@ -13,6 +13,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import m115_wire_oracle as oracle  # noqa: E402
+from test_m114_wire_oracle import notification_scenarios  # noqa: E402
 
 ORACLE = Path(__file__).resolve().parent / "m115_wire_oracle.py"
 SRC, RX, NH = "10.115.0.2", "10.115.1.2", "10.115.1.1"
@@ -127,6 +128,12 @@ class M115WireOracleTests(unittest.TestCase):
         packets = good_packets()
         packets.append(packet(50.0, SRC, "10.115.0.1", notification))
         self.assertEqual(verdicts(packets)[6], "FAIL")
+
+    def test_notification_scope(self) -> None:
+        cases = notification_scenarios("10.115.0.1", SRC, RX)
+        for name, (want, segments) in cases.items():
+            with self.subTest(name):
+                self.assertEqual(verdicts(good_packets() + segments)[6], want)
 
     def test_truncated_pdml_exits_non_zero(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

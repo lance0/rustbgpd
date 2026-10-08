@@ -21,7 +21,8 @@
 #     MP_REACH_NLRI bytes: every UPDATE announcing the prefix has a 16- or
 #     32-octet next hop with the expected global address, no receiver-bound
 #     IPv6 MP_REACH_NLRI has any other next-hop length, and no NOTIFICATION is
-#     sent or received;
+#     sent or received, apart from a listed Cease / collision resolution on
+#     the source session before it is Established;
 #   - both receiver sessions stay on their first connection.
 #
 # Topology: frr-source (eBGP) -> rustbgpd -> frr-ibgp (iBGP) + frr-rs (RS client)
@@ -169,7 +170,7 @@ assert_wire() {
         10.116.2.2 "$EXPORT_V4_PREFIX" "$RECEIVED_NH"
     )
     local want=$((${#expected[@]} / 3 + 2)) got=0 verdicts verdict message
-    if ! verdicts=$(python3 "$SCRIPT_DIR/m116_wire_oracle.py" "$CAPTURE_DIR/m116.pdml" "${expected[@]}"); then
+    if ! verdicts=$(python3 "$SCRIPT_DIR/m116_wire_oracle.py" "$CAPTURE_DIR/m116.pdml" 10.116.0.2 "${expected[@]}"); then
         fail "wire: oracle could not judge the capture"
         return
     fi
