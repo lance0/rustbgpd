@@ -73,6 +73,8 @@ exec > >(tee -a "$SOAK_LOG") 2>&1
 # tests/soak/host-lock.sh for sudo/HOME caveats.
 # shellcheck source=./host-lock.sh
 source "$SOAK_SCRIPT_DIR/host-lock.sh"
+# shellcheck source=tests/interop/scripts/source-id-guard.sh
+source "$REPO_ROOT/tests/interop/scripts/source-id-guard.sh"
 acquire_rustbgpd_host_lock
 
 log() {
@@ -391,6 +393,7 @@ main() {
     require_tool grep
     require_container "$RUSTBGPD"
     require_container "$CONSUMER"
+    check_lab_source_ids "$TOPO" "$RUSTBGPD" "$CONSUMER" || exit 2
     validate_config
 
     write_run_json
