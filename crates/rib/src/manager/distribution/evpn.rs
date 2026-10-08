@@ -728,7 +728,7 @@ impl RibManager {
         }
 
         // This token covers exactly the projection input consumed by the
-        // daemon dataplane.  Type 3/4 changes remain visible through the
+        // daemon dataplane.  Type 4 changes remain visible through the
         // public EVPN query and event stream, but cannot change that
         // projection and therefore do not invalidate its snapshot.
         if changed_keys

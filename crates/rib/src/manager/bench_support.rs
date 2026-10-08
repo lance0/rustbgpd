@@ -115,7 +115,7 @@ pub fn bench_evpn_dataplane_generation_query(
     )
 }
 
-/// Drive the same generation equality and Type 1/2/5 materialization helper
+/// Drive the same generation equality and Type 1/2/3/5 materialization helper
 /// used by the production actor query, with a deterministic visit receipt.
 #[must_use]
 pub fn bench_evpn_dataplane_generation_snapshot(

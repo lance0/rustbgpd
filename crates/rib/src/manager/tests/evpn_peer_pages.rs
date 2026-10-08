@@ -142,6 +142,9 @@ fn evpn_received_pages_invalidate_for_types_three_four_and_attributes() {
         attrs.push(PathAttribute::Communities(vec![123]));
     });
     manager.process_evpn_announce_chunk(peer, vec![route.clone()]);
+    // An IMET best-path change feeds the VTEP flood list (Type 3 is
+    // dataplane input); the Type 4 change below is not.
+    let dataplane_generation = dataplane_generation.wrapping_add(1);
     assert_eq!(manager.evpn_dataplane_generation, dataplane_generation);
     assert_eq!(
         page(

@@ -865,6 +865,12 @@ jobs:
       - name: LAN-64 SVD collect-metadata FDB VNI netns test
         run: bash crates/evpn-linux/tests/docker/run-netns-tests.sh svd_fdb_vni
 
+      - name: IMET ingress-replication flood list netns test
+        run: bash crates/evpn-linux/tests/docker/run-netns-tests.sh flood_list
+
+      - name: SVD ingress-replication flood list netns test
+        run: bash crates/evpn-linux/tests/docker/run-netns-tests.sh svd_flood_list
+
       - name: ADR-0091 managed bridge lifecycle netns test
         run: bash crates/evpn-linux/tests/docker/run-netns-tests.sh managed_bridge
 

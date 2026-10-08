@@ -55,8 +55,9 @@
 #    and (now that the in-place port move IS observed and drops the
 #    stale local claim) pe1 originates nothing for the CE MAC until
 #    its kernel relearns it on the AC — see the phase 7 comment.
-# 7. Foreign state: the start-script's pre-loaded foreign FDB row and
-#    the static all-zero flood entries survive the whole cycle.
+# 7. Foreign state: the start-script's pre-loaded foreign FDB row
+#    survives the whole cycle, and the VTEP's flood rows toward both
+#    PEs are the daemon's own (`extern_learn`), programmed from IMET.
 #
 # Usage:
 #   docker build --target dev -t rustbgpd:dev .
@@ -605,11 +606,11 @@ else
     fail "pre-loaded foreign FDB row $PRELOADED_FOREIGN_MAC was deleted"
     rb_fdb >&2
 fi
-flood_rows=$(rb_fdb | grep -c "^00:00:00:00:00:00" || true)
-if [ "${flood_rows:-0}" -eq 2 ]; then
-    ok "both static all-zero flood entries untouched"
+flood_rows=$(rb_fdb | grep "^00:00:00:00:00:00" | grep -c extern_learn || true)
+if [ "${flood_rows:-0}" -eq 2 ] && ! rb_fdb | grep "^00:00:00:00:00:00" | grep -qv extern_learn; then
+    ok "two daemon-owned flood rows from the PEs' IMET routes"
 else
-    fail "static flood entries disturbed (count=$flood_rows, want 2)"
+    fail "flood rows not daemon-owned toward both PEs (extern_learn count=$flood_rows, want 2)"
     rb_fdb >&2
 fi
 

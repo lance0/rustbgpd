@@ -27,6 +27,8 @@ class ReceiptTest(unittest.TestCase):
                 "vlan_local_mac_attribution",
                 "macip_vlan_attribution",
                 "svd_fdb_vni",
+                "flood_list",
+                "svd_flood_list",
                 "managed_bridge",
                 "managed_vxlan",
                 "managed_svd_vxlan",
@@ -54,7 +56,7 @@ class ReceiptTest(unittest.TestCase):
             ),
         )
 
-    def test_vrf_available_requires_all_27(self):
+    def test_vrf_available_requires_all_29(self):
         errors, payload, summary = self.run_case(BASE + VRF, True)
         self.assertEqual(errors, [])
         self.assertEqual(payload["executed_selectors"], list(BASE + VRF))

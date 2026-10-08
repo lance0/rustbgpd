@@ -387,6 +387,22 @@ impl KernelFdbEntry {
     }
 }
 
+/// One instance's all-zero-MAC ingress-replication entry on its VXLAN
+/// port, as observed in the kernel.
+///
+/// The VXLAN driver keeps one flags/state set per zero-MAC entry and
+/// shares it across every appended remote, so ownership is per entry,
+/// not per destination: an operator `bridge fdb append` without
+/// `extern_learn` clears the marker for the whole entry.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct KernelFloodEntry {
+    /// Remote VTEP destinations appended to the entry.
+    pub dsts: BTreeSet<IpAddr>,
+    /// `true` when every observed row carries rustbgpd's ownership
+    /// markers (see [`KernelFdbEntry::is_extern_learned`]).
+    pub owned: bool,
+}
+
 /// Coarse-grained FDB-entry ownership flags.
 ///
 /// The Phase 4 netlink impl populates these from the netlink
@@ -508,6 +524,10 @@ pub enum InstanceProbe {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct KernelSnapshot {
     fdb: BTreeMap<(EvpnInstanceId, Option<u16>, MacAddress), KernelFdbEntry>,
+    /// All-zero-MAC ingress-replication entries per VNI. Kept apart from
+    /// `fdb`: one zero-MAC entry holds many destinations, which the
+    /// `(VNI, VLAN, MAC)` map would collapse into one.
+    flood: BTreeMap<EvpnInstanceId, KernelFloodEntry>,
     /// Every kernel link name observed in the dump, independent of
     /// link kind. This lets managed-netdev status report a same-name
     /// non-bridge collision separately from a genuinely absent bridge.
@@ -593,6 +613,39 @@ impl KernelSnapshot {
     #[must_use]
     pub fn fdb_len(&self) -> usize {
         self.fdb.len()
+    }
+
+    /// Record one zero-MAC flood row. `owned` is the row's ownership
+    /// marker; the entry stays owned only while every row carries it.
+    pub fn insert_flood_row(&mut self, vni: EvpnInstanceId, dst: IpAddr, owned: bool) {
+        let entry = self.flood.entry(vni).or_insert_with(|| KernelFloodEntry {
+            dsts: BTreeSet::new(),
+            owned: true,
+        });
+        entry.dsts.insert(dst);
+        entry.owned &= owned;
+    }
+
+    /// Remove one zero-MAC flood destination, dropping the entry with
+    /// its last destination.
+    pub fn remove_flood_row(&mut self, vni: EvpnInstanceId, dst: IpAddr) {
+        if let Some(entry) = self.flood.get_mut(&vni) {
+            entry.dsts.remove(&dst);
+            if entry.dsts.is_empty() {
+                self.flood.remove(&vni);
+            }
+        }
+    }
+
+    /// The zero-MAC flood entry for one VNI, if the kernel has one.
+    #[must_use]
+    pub fn flood(&self, vni: EvpnInstanceId) -> Option<&KernelFloodEntry> {
+        self.flood.get(&vni)
+    }
+
+    /// Iterate zero-MAC flood entries in ascending VNI order.
+    pub fn iter_flood(&self) -> impl Iterator<Item = (EvpnInstanceId, &KernelFloodEntry)> {
+        self.flood.iter().map(|(&vni, entry)| (vni, entry))
     }
 
     /// Replace the bridge inventory while preserving names of
@@ -724,9 +777,34 @@ impl KernelSnapshot {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct OwnedSet {
     entries: BTreeMap<(EvpnInstanceId, MacAddress), OwnedEntry>,
+    /// Zero-MAC ingress-replication rows we appended, per `(VNI, dst)`.
+    /// Not counted by [`Self::len`] / [`Self::keys`], which describe the
+    /// unicast `(VNI, MAC)` rows.
+    flood: BTreeSet<(EvpnInstanceId, IpAddr)>,
 }
 
 impl OwnedSet {
+    /// Record a successful flood-row append.
+    pub fn record_flood_applied(&mut self, vni: EvpnInstanceId, dst: IpAddr) {
+        self.flood.insert((vni, dst));
+    }
+
+    /// Drop a flood row on successful removal or relinquish.
+    pub fn record_flood_withdrawn(&mut self, vni: EvpnInstanceId, dst: IpAddr) -> bool {
+        self.flood.remove(&(vni, dst))
+    }
+
+    /// `true` if we appended `(vni, dst)` and have not removed it.
+    #[must_use]
+    pub fn owns_flood(&self, vni: EvpnInstanceId, dst: IpAddr) -> bool {
+        self.flood.contains(&(vni, dst))
+    }
+
+    /// Iterate owned flood rows in ascending `(VNI, dst)` order.
+    pub fn iter_flood(&self) -> impl Iterator<Item = (EvpnInstanceId, IpAddr)> + '_ {
+        self.flood.iter().copied()
+    }
+
     /// Empty owned set — the actor's startup state.
     #[must_use]
     pub fn new() -> Self {

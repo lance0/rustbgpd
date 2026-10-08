@@ -5,6 +5,10 @@ and workspace changes remain in the repository-level `CHANGELOG.md`.
 
 ## Unreleased
 
+- `is_dataplane_route_type` now returns `true` for Type 3 (IMET). Received
+  ingress-replication IMET routes feed a VTEP's BUM flood list, so they are
+  dataplane input alongside Types 1, 2 and 5. Type 4 remains excluded.
+
 - Add the non-default `strict-encode-invariants` feature. With it, debug
   builds of the path-attribute encoder (`encode_path_attributes` and the
   `UpdateMessage` builders) panic when one attribute list would emit the same

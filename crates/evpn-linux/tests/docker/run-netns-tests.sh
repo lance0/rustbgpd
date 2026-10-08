@@ -74,6 +74,11 @@
 #       (VLAN-scoped local MAC observation attribution proof)
 #   bash crates/evpn-linux/tests/docker/run-netns-tests.sh svd_fdb_vni
 #       (LAN-64 SVD collect-metadata explicit FDB VNI proof)
+#   bash crates/evpn-linux/tests/docker/run-netns-tests.sh flood_list
+#       (IMET ingress-replication zero-MAC flood rows: add, withdraw one,
+#        foreign entry preserved, shutdown drain)
+#   bash crates/evpn-linux/tests/docker/run-netns-tests.sh svd_flood_list
+#       (the same flood rows on an SVD port, scoped per VNI by src_vni)
 #   bash crates/evpn-linux/tests/docker/run-netns-tests.sh l3_multipath
 #       (LAN-70 L3VNI multipath + FDB-NHG kernel-shape proof)
 #   bash crates/evpn-linux/tests/docker/run-netns-tests.sh l3_all_active_writer
@@ -155,6 +160,8 @@ case "${1:-all}" in
     vlan_local_mac_attribution) TEST_BIN="netns_dataplane"; FILTER="linux_dataplane_attributes_vlan_local_mac_observations" ;;
     macip_vlan_attribution) TEST_BIN="netns_dataplane"; FILTER="linux_dataplane_attributes_vlan_mac_ip_observations" ;;
     svd_fdb_vni)        TEST_BIN="netns_svd"; FILTER="svd_topology_is_ready_and_programs_vni_scoped_fdb_rows" ;;
+    flood_list)         TEST_BIN="netns_flood"; FILTER="linux_reconcile_programs_imet_flood_rows_and_spares_foreign_entry" ;;
+    svd_flood_list)     TEST_BIN="netns_flood"; FILTER="linux_reconcile_programs_svd_flood_rows_per_vni" ;;
     l3_multipath)       TEST_BIN="netns_l3_install"; FILTER="l3vxlan_all_active_multipath_kernel_shape" ;;
     l3_all_active_writer) TEST_BIN="netns_l3_install"; FILTER="linux_reconcile_actor_"; EXACT_FILTER=0 ;;
     managed_bridge)     TEST_BIN="netns_managed_netdev"; FILTER="managed_bridge_create_adopt_and_reap_round_trip" ;;
@@ -166,7 +173,7 @@ case "${1:-all}" in
     l3_single_path_cycle) TEST_BIN="netns_l3_install"; FILTER="linux_dataplane_installs_and_withdraws_l3_triple" ;;
     l3_foreign_route_cycle) TEST_BIN="netns_l3_install"; FILTER="linux_dataplane_foreign_route_survives_l3_cycle" ;;
     *)
-        echo "ERROR: unknown filter '$1' — pick one of: spike, roundtrip, all, fdb_nhg, fdb_nhg_roundtrip, fdb_nhg_cve, fib_runtime, bfd_runtime, bfd_runtime_ipv4, bgp_unnumbered, link_carrier, bond_lacp, auto_lacp_daemon, ac_gate, nexthop_raw, foreign_state_l2, foreign_state_nhid, foreign_state_l3, l3_route_event, dataplane_vlan_fdb, dataplane_remote_mac, vlan_local_mac_attribution, macip_vlan_attribution, svd_fdb_vni, l3_multipath, l3_all_active_writer, managed_bridge, managed_vxlan, managed_svd_vxlan, managed_vlan_upper, managed_ready, managed_ip_vrf_ready, l3_single_path_cycle, l3_foreign_route_cycle" >&2
+        echo "ERROR: unknown filter '$1' — pick one of: spike, roundtrip, all, fdb_nhg, fdb_nhg_roundtrip, fdb_nhg_cve, fib_runtime, bfd_runtime, bfd_runtime_ipv4, bgp_unnumbered, link_carrier, bond_lacp, auto_lacp_daemon, ac_gate, nexthop_raw, foreign_state_l2, foreign_state_nhid, foreign_state_l3, l3_route_event, dataplane_vlan_fdb, dataplane_remote_mac, vlan_local_mac_attribution, macip_vlan_attribution, svd_fdb_vni, flood_list, svd_flood_list, l3_multipath, l3_all_active_writer, managed_bridge, managed_vxlan, managed_svd_vxlan, managed_vlan_upper, managed_ready, managed_ip_vrf_ready, l3_single_path_cycle, l3_foreign_route_cycle" >&2
         exit 2
         ;;
 esac

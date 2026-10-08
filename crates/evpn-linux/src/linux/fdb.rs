@@ -29,9 +29,12 @@ use std::collections::HashMap;
 use std::io;
 use std::net::IpAddr;
 
-use futures::stream::TryStreamExt;
-use netlink_packet_core::Nla;
+use futures::stream::{StreamExt, TryStreamExt};
+use netlink_packet_core::{
+    NLM_F_ACK, NLM_F_APPEND, NLM_F_CREATE, NLM_F_REQUEST, NetlinkMessage, NetlinkPayload, Nla,
+};
 use netlink_packet_route::AddressFamily;
+use netlink_packet_route::RouteNetlinkMessage;
 use netlink_packet_route::neighbour::{
     NeighbourAddress, NeighbourAttribute, NeighbourFlags, NeighbourMessage, NeighbourState,
 };
@@ -90,12 +93,20 @@ const NUD_NOARP_PERMANENT: u16 = NUD_NOARP | NUD_PERMANENT;
 /// every reconcile. [`merge_fdb_rows`] folds the two rows into one:
 /// `dst` is preserved if any contributing row had it, flags OR
 /// together, and the state bitmask covers all observed NUD bits.
+///
+/// ## Zero-MAC flood rows
+///
+/// All-zero-MAC rows on a VXLAN port are the ingress-replication flood
+/// list: one entry per VNI holding many destinations, each dumped as its
+/// own `NTF_SELF` row. They go to [`FdbDump::flood`] instead of the
+/// `(VNI, VLAN, MAC)` map, which would collapse them into one row.
 pub(crate) async fn dump_fdb(
     handle: &Handle,
     cache: &LinkCache,
-) -> Result<HashMap<(EvpnInstanceId, Option<u16>, MacAddress), KernelFdbEntry>, DataplaneError> {
+) -> Result<FdbDump, DataplaneError> {
     let mut out: HashMap<(EvpnInstanceId, Option<u16>, MacAddress), KernelFdbEntry> =
         HashMap::new();
+    let mut flood = Vec::new();
     let mut req = handle.neighbours().get();
     req.message_mut().header.family = AddressFamily::Bridge;
     let mut stream = req.execute();
@@ -107,6 +118,12 @@ pub(crate) async fn dump_fdb(
         let Some((key, entry)) = parse_fdb_entry(&msg, cache) else {
             continue;
         };
+        if entry.mac == ZERO_MAC {
+            if let Some(dst) = entry.dst {
+                flood.push((key.0, dst, entry.is_extern_learned()));
+            }
+            continue;
+        }
         match out.get_mut(&key) {
             None => {
                 out.insert(key, entry);
@@ -114,7 +131,21 @@ pub(crate) async fn dump_fdb(
             Some(existing) => merge_fdb_rows(existing, &entry),
         }
     }
-    Ok(out)
+    Ok(FdbDump {
+        unicast: out,
+        flood,
+    })
+}
+
+/// All-zero MAC: the VXLAN driver's default-destination (flood) entry.
+const ZERO_MAC: MacAddress = MacAddress::new([0; 6]);
+
+/// Result of one bridge FDB dump.
+pub(crate) struct FdbDump {
+    /// Per-MAC rows keyed by `(VNI, VLAN, MAC)`.
+    pub(crate) unicast: HashMap<(EvpnInstanceId, Option<u16>, MacAddress), KernelFdbEntry>,
+    /// Zero-MAC flood rows as `(VNI, dst, ownership marker)`.
+    pub(crate) flood: Vec<(EvpnInstanceId, IpAddr, bool)>,
 }
 
 /// Fold `incoming` into `existing` for the same `(VNI, MAC)` key.
@@ -434,7 +465,9 @@ pub(crate) async fn apply_op(
         DataplaneOp::AddRemoteFdb { vni, mac, .. }
         | DataplaneOp::UpdateRemoteFdb { vni, mac, .. }
         | DataplaneOp::RemoveRemoteFdb { vni, mac, .. } => (*vni, *mac),
-        DataplaneOp::SetBumPortFlags { .. }
+        DataplaneOp::AddFloodFdb { .. }
+        | DataplaneOp::RemoveFloodFdb { .. }
+        | DataplaneOp::SetBumPortFlags { .. }
         | DataplaneOp::SetAcPortState { .. }
         | DataplaneOp::AddRemoteIpRoute { .. }
         | DataplaneOp::RemoveRemoteIpRoute { .. }
@@ -519,7 +552,9 @@ pub(crate) async fn apply_op(
             }?;
             Ok(())
         }
-        DataplaneOp::SetBumPortFlags { .. }
+        DataplaneOp::AddFloodFdb { .. }
+        | DataplaneOp::RemoveFloodFdb { .. }
+        | DataplaneOp::SetBumPortFlags { .. }
         | DataplaneOp::SetAcPortState { .. }
         | DataplaneOp::AddRemoteIpRoute { .. }
         | DataplaneOp::RemoveRemoteIpRoute { .. }
@@ -552,6 +587,77 @@ pub(crate) async fn apply_op(
             unreachable!("non-single-dst-FDB op handled at function entry")
         }
     }
+}
+
+/// Build the `RTM_NEWNEIGH` / `RTM_DELNEIGH` message for one zero-MAC
+/// ingress-replication row: `bridge fdb append 00:00:00:00:00:00 dev
+/// vxlanX dst REMOTE self extern_learn permanent`, plus `src_vni` on an
+/// SVD port. `NTF_SELF` only: the zero MAC is VXLAN-driver state, never
+/// a bridge FDB entry. No `NDA_VLAN`: the VXLAN driver neither stores
+/// nor echoes it on self rows; SVD rows are scoped by `NDA_SRC_VNI`.
+/// Carries the same `NTF_EXT_LEARNED` and ADR-0082 `NDA_PROTOCOL`
+/// ownership stamps as unicast rows.
+fn build_flood_fdb_message(
+    vxlan_ifindex: u32,
+    dst: IpAddr,
+    source_vni: Option<EvpnInstanceId>,
+) -> NeighbourMessage {
+    let mut msg = NeighbourMessage::default();
+    msg.header.family = AddressFamily::Bridge;
+    msg.header.ifindex = vxlan_ifindex;
+    msg.header.state = NeighbourState::Other(NUD_NOARP_PERMANENT);
+    msg.header.flags = NeighbourFlags::Own | NeighbourFlags::ExtLearned;
+    msg.header.kind = RouteType::Unspec;
+    msg.attributes.push(NeighbourAttribute::LinkLayerAddress(
+        ZERO_MAC.octets().to_vec(),
+    ));
+    msg.attributes
+        .push(NeighbourAttribute::Destination(match dst {
+            IpAddr::V4(v4) => NeighbourAddress::Inet(v4),
+            IpAddr::V6(v6) => NeighbourAddress::Inet6(v6),
+        }));
+    if let Some(vni) = source_vni {
+        msg.attributes
+            .push(NeighbourAttribute::SourceVni(vni.as_u32()));
+    }
+    msg.attributes
+        .push(NeighbourAttribute::Protocol(RouteProtocol::Bgp));
+    msg
+}
+
+/// Append (`add = true`) or remove one remote VTEP in the instance's
+/// zero-MAC flood entry. The append uses `NLM_F_CREATE | NLM_F_APPEND`,
+/// which adds a destination to the entry (idempotent when present)
+/// instead of replacing the entry's destination list. A removal names
+/// the destination, so the kernel drops only that remote; a missing row
+/// is success.
+pub(crate) async fn apply_flood_op(
+    handle: &Handle,
+    cache: &LinkCache,
+    vni: EvpnInstanceId,
+    dst: IpAddr,
+    add: bool,
+) -> Result<(), DataplaneError> {
+    let target = unique_fdb_vxlan_target_for_vni(cache, vni)?;
+    let msg = build_flood_fdb_message(target.ifindex, dst, target.source_vni);
+    if !add {
+        return match handle.neighbours().del(msg).execute().await {
+            Ok(()) => Ok(()),
+            Err(e) => classify_remove_apply_error(&e),
+        };
+    }
+    let mut req = NetlinkMessage::from(RouteNetlinkMessage::NewNeighbour(msg));
+    req.header.flags = NLM_F_REQUEST | NLM_F_ACK | NLM_F_CREATE | NLM_F_APPEND;
+    let mut response = handle
+        .clone()
+        .request(req)
+        .map_err(|e| classify_apply_error(&e))?;
+    while let Some(message) = response.next().await {
+        if let NetlinkPayload::Error(err) = message.payload {
+            return Err(classify_apply_error(&rtnetlink::Error::NetlinkError(err)));
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -998,6 +1104,38 @@ mod tests {
     }
 
     #[test]
+    fn build_flood_fdb_message_is_a_self_only_zero_mac_row_with_ownership_stamps() {
+        let msg = build_flood_fdb_message(11, ipa("10.0.0.2"), None);
+        assert_eq!(msg.header.ifindex, 11);
+        assert_eq!(msg.header.state, NeighbourState::Other(NUD_NOARP_PERMANENT));
+        assert_eq!(
+            msg.header.flags,
+            NeighbourFlags::Own | NeighbourFlags::ExtLearned,
+            "no NTF_MASTER: the zero MAC is VXLAN-driver state, not a bridge FDB row"
+        );
+        assert!(
+            msg.attributes
+                .contains(&NeighbourAttribute::LinkLayerAddress(vec![0; 6]))
+        );
+        assert!(
+            msg.attributes
+                .contains(&NeighbourAttribute::Protocol(RouteProtocol::Bgp))
+        );
+        assert!(
+            !msg.attributes
+                .iter()
+                .any(|attr| matches!(attr, NeighbourAttribute::SourceVni(_)))
+        );
+
+        let vni = EvpnInstanceId::new(100).unwrap();
+        let svd = build_flood_fdb_message(11, ipa("10.0.0.2"), Some(vni));
+        assert!(
+            svd.attributes
+                .contains(&NeighbourAttribute::SourceVni(vni.as_u32()))
+        );
+    }
+
+    #[test]
     fn vxlan_ifindex_lookup_supports_multi_vxlan_vlan_aware_bridge() {
         let mut cache = LinkCache::default();
         cache.vxlan_ifindex_to_vni.insert(11, 100);
@@ -1260,6 +1398,11 @@ mod tests {
             let (_, entry) = parse_fdb_entry(&wire, &cache).unwrap();
             assert_eq!(entry.dst, Some(dst));
         }
+        let flood = reparse(&build_flood_fdb_message(11, ipa("10.0.0.3"), None));
+        let (_, entry) = parse_fdb_entry(&flood, &cache).unwrap();
+        assert_eq!(entry.mac, ZERO_MAC);
+        assert_eq!(entry.dst, Some(ipa("10.0.0.3")));
+        assert!(entry.is_extern_learned());
     }
 
     #[test]

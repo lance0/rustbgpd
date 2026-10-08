@@ -553,7 +553,8 @@ pub(crate) fn classify_route(msg: &RouteMessage, _kind: RouteEventKind) -> bool 
 /// `RTM_DELNEIGH` (`AF_BRIDGE`) drift classifier — does this delete
 /// indicate kernel-side drift of dataplane-*programmed* FDB state?
 ///
-/// Remote-MAC rows — unicast and BUM flood, plain and NHG-backed —
+/// Remote-MAC rows — unicast rows from Type 2 (plain and NHG-backed)
+/// and the zero-MAC BUM flood rows from received Type 3 IMET routes —
 /// live exclusively on the VXLAN port of a managed VNI, and they are
 /// static (`NUD_PERMANENT`-shaped) rows that never age out on their
 /// own. A delete on that port is therefore either external

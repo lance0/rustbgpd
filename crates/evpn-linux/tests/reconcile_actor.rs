@@ -6252,3 +6252,112 @@ async fn shutdown_drain_spares_foreign_l3_rows() {
     assert!(handle.kernel_has_l3_neighbor(L3_IFINDEX, ipa("10.0.0.2")));
     assert!(handle.kernel_has_l3_vxlan_fdb(L3_IFINDEX, l3_router_mac()));
 }
+
+fn flood_table(dsts: &[&str]) -> RemoteMacTable {
+    RemoteMacTable::new().with_flood_vteps(BTreeMap::from([(
+        vni(100),
+        dsts.iter().map(|d| ipa(d)).collect(),
+    )]))
+}
+
+fn flood_set(dsts: &[&str]) -> std::collections::BTreeSet<IpAddr> {
+    dsts.iter().map(|d| ipa(d)).collect()
+}
+
+async fn wait_for_flood(h: &mut Harness, want: &[&str]) -> Vec<rustbgpd_evpn::DataplaneReport> {
+    let mut reports = Vec::new();
+    for _ in 0..10 {
+        reports.push(h.next_report().await);
+        if h.handle.kernel_flood_dsts(vni(100)) == flood_set(want) {
+            return reports;
+        }
+    }
+    panic!(
+        "flood list never converged to {want:?}: {:?}",
+        h.handle.kernel_flood_dsts(vni(100))
+    );
+}
+
+// Received IMETs program one zero-MAC row per remote VTEP; a withdrawn
+// IMET removes exactly its row and shutdown drains the rest.
+#[tokio::test]
+async fn flood_list_follows_intent_and_drains_on_shutdown() {
+    let mut h = Harness::spawn(ReconcileActorConfig::for_tests());
+    h.handle.set_probe(vni(100), InstanceProbe::Ready);
+    let inst = || one_instance_table(instance(100, Some("br100"), "10.0.0.1"));
+    h.intent_tx
+        .send(intent(1, inst(), flood_table(&["10.0.0.2", "10.0.0.3"])))
+        .unwrap();
+    let reports = wait_for_flood(&mut h, &["10.0.0.2", "10.0.0.3"]).await;
+    let applied: Vec<_> = reports.iter().flat_map(|r| r.applied.clone()).collect();
+    assert_eq!(applied.len(), 2, "{applied:?}");
+    assert!(applied.iter().all(|a| matches!(
+        a.kind,
+        rustbgpd_evpn::DataplaneOpKind::AddFloodFdb { .. }
+    ) && a.vni == vni(100)));
+
+    h.intent_tx
+        .send(intent(2, inst(), flood_table(&["10.0.0.2"])))
+        .unwrap();
+    wait_for_flood(&mut h, &["10.0.0.2"]).await;
+
+    let handle = h.handle.clone();
+    h.shutdown().await;
+    assert!(handle.kernel_flood_dsts(vni(100)).is_empty());
+}
+
+// An operator's static zero-MAC entry (no extern_learn) withholds the
+// VNI's flood list: nothing is appended into it or removed from it.
+#[tokio::test]
+async fn foreign_flood_entry_is_preserved_and_counted() {
+    let mut h = Harness::spawn(ReconcileActorConfig::for_tests());
+    h.handle.set_probe(vni(100), InstanceProbe::Ready);
+    h.handle
+        .pre_load_flood_row(vni(100), ipa("10.0.0.2"), false);
+    let inst = one_instance_table(instance(100, Some("br100"), "10.0.0.1"));
+    h.intent_tx
+        .send(intent(1, inst, flood_table(&["10.0.0.2", "10.0.0.3"])))
+        .unwrap();
+    let mut blocked = 0;
+    loop {
+        let r = h.next_report().await;
+        blocked += r.foreign_state_counters.replaces_blocked;
+        assert!(r.applied.is_empty(), "{:?}", r.applied);
+        if r.intent_generation == 1 {
+            break;
+        }
+    }
+    assert_eq!(blocked, 1);
+    let handle = h.handle.clone();
+    h.shutdown().await;
+    assert_eq!(handle.kernel_flood_dsts(vni(100)), flood_set(&["10.0.0.2"]));
+}
+
+// ADR-0079 for flood rows: a crash-leftover destination still desired is
+// claimed; an unclaimed one is reaped once the deferral elapses.
+#[tokio::test]
+async fn crash_leftover_flood_rows_are_claimed_or_reaped() {
+    let cfg = ReconcileActorConfig {
+        fdb_adoption_reap_deferral: Duration::ZERO,
+        ..ReconcileActorConfig::for_tests()
+    };
+    let mut h = Harness::spawn(cfg);
+    h.handle.set_probe(vni(100), InstanceProbe::Ready);
+    h.handle.pre_load_flood_row(vni(100), ipa("10.0.0.2"), true);
+    h.handle.pre_load_flood_row(vni(100), ipa("10.0.0.9"), true);
+    let inst = one_instance_table(instance(100, Some("br100"), "10.0.0.1"));
+    h.intent_tx
+        .send(intent(1, inst, flood_table(&["10.0.0.2"])))
+        .unwrap();
+    let reports = wait_for_flood(&mut h, &["10.0.0.2"]).await;
+    let counters = sum_fdb_nhg_drift_counters(&reports);
+    assert_eq!(counters.single_dst_adopted, 2);
+    assert_eq!(counters.single_dst_reaped, 1);
+
+    let handle = h.handle.clone();
+    h.shutdown().await;
+    assert!(
+        handle.kernel_flood_dsts(vni(100)).is_empty(),
+        "the claimed row is owned, so shutdown drains it"
+    );
+}

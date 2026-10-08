@@ -535,11 +535,11 @@ pub struct RibManager {
     /// See [`UnicastPrefixPeers`] for the maintenance contract.
     unicast_prefix_peers: UnicastPrefixPeers,
     loc_rib: LocRib,
-    /// Wrapping equality token for the Type 1/2/5 Loc-RIB projection consumed
+    /// Wrapping equality token for the Type 1/2/3/5 Loc-RIB projection consumed
     /// by the daemon's EVPN dataplane supervisor.  Actor ownership makes the
     /// token and a materialized snapshot one atomic observation.
     evpn_dataplane_generation: u64,
-    /// Exact cardinality of Type 1/2/5 Loc-RIB rows. Maintained at the same
+    /// Exact cardinality of Type 1/2/3/5 Loc-RIB rows. Maintained at the same
     /// recompute seam as the generation token so an all-relevant table can
     /// retain the pre-existing bulk-clone fast path.
     evpn_dataplane_route_count: usize,
