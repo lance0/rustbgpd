@@ -734,6 +734,7 @@ fn encode_rib_entry(
         );
         encode_mrt_rib_attributes(&entry.attributes, &mut checked_attrs)?;
     }
+    debug_assert_unique_attribute_types(&attr_buf);
     let attr_len = u16::try_from(attr_buf.len()).map_err(|_| EncodeError::FieldTooLarge {
         field: "RIB entry attribute length",
         value: attr_buf.len(),
@@ -764,6 +765,7 @@ fn encode_route_rib_entry(
     buf.extend_from_slice(&0u16.to_be_bytes())?;
     let attr_start = buf.len();
     encode_route_mrt_attributes(route, buf)?;
+    debug_assert_unique_attribute_types(&buf.bytes[attr_start..]);
     let attr_len = buf.len().saturating_sub(attr_start);
     let attr_len = u16::try_from(attr_len).map_err(|_| EncodeError::FieldTooLarge {
         field: "RIB entry attribute length",
@@ -788,6 +790,7 @@ fn encode_evpn_route_rib_entry(
         encode_one_mrt_rib_attribute(attr, buf)?;
     }
     encode_mrt_mp_reach(route.next_hop, route.link_local_next_hop, buf)?;
+    debug_assert_unique_attribute_types(&buf.bytes[attr_start..]);
     let attr_len = buf.len().saturating_sub(attr_start);
     let attr_len = u16::try_from(attr_len).map_err(|_| EncodeError::FieldTooLarge {
         field: "RIB entry attribute length",
@@ -795,6 +798,31 @@ fn encode_evpn_route_rib_entry(
     })?;
     buf.patch_u16(attr_len_offset, attr_len);
     Ok(())
+}
+
+/// RFC 4271 §5: an attribute type appears at most once per RIB entry. Debug
+/// builds walk the encoded entry; release builds skip it. MRT encodes one
+/// attribute per wire-encoder call, so the wire encoder's own check cannot
+/// see a duplicate across them.
+fn debug_assert_unique_attribute_types(attrs: &[u8]) {
+    if !cfg!(debug_assertions) {
+        return;
+    }
+    let mut seen = [false; 256];
+    let mut rest = attrs;
+    while let [flags, type_code, tail @ ..] = rest {
+        let extended = flags & rustbgpd_wire::constants::attr_flags::EXTENDED_LENGTH != 0;
+        let (len, tail) = match (extended, tail) {
+            (true, [hi, lo, tail @ ..]) => (usize::from(u16::from_be_bytes([*hi, *lo])), tail),
+            (false, [len, tail @ ..]) => (usize::from(*len), tail),
+            _ => return,
+        };
+        assert!(
+            !std::mem::replace(&mut seen[usize::from(*type_code)], true),
+            "duplicate path attribute type {type_code} in one MRT RIB entry"
+        );
+        rest = tail.get(len..).unwrap_or_default();
+    }
 }
 
 fn encode_route_mrt_attributes(
@@ -3132,5 +3160,42 @@ mod tests {
             u16::from_be_bytes([data[second_offset + 6], data[second_offset + 7]]),
             RIB_IPV4_UNICAST
         );
+    }
+
+    fn encoded_mrt_attributes(attrs: &[PathAttribute]) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        encode_mrt_rib_attributes(attrs, &mut EncodeBuffer::new(&mut bytes, None)).unwrap();
+        bytes
+    }
+
+    /// An Extended Length attribute that a one-octet length reading would
+    /// split into a second type-3 header.
+    fn extended_length_unknown() -> PathAttribute {
+        PathAttribute::Unknown(rustbgpd_wire::RawAttribute {
+            flags: 0xd0,
+            type_code: 99,
+            data: bytes::Bytes::from_static(&[3, 0]),
+        })
+    }
+
+    #[test]
+    fn unique_attribute_guard_walks_extended_length_attributes() {
+        let next_hop = PathAttribute::NextHop(Ipv4Addr::new(192, 0, 2, 9));
+        debug_assert_unique_attribute_types(&encoded_mrt_attributes(&[
+            extended_length_unknown(),
+            next_hop,
+        ]));
+    }
+
+    #[cfg(debug_assertions)]
+    #[test]
+    #[should_panic(expected = "duplicate path attribute type 3 in one MRT RIB entry")]
+    fn unique_attribute_guard_rejects_a_duplicate_type() {
+        let next_hop = PathAttribute::NextHop(Ipv4Addr::new(192, 0, 2, 9));
+        debug_assert_unique_attribute_types(&encoded_mrt_attributes(&[
+            next_hop.clone(),
+            extended_length_unknown(),
+            next_hop,
+        ]));
     }
 }

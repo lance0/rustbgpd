@@ -3045,6 +3045,11 @@ fn encode_vpn_mp_next_hop(mp: &MpReachNlri, buf: &mut Vec<u8>) {
 ///
 /// Returns [`EncodeError`] when a structured MP payload cannot be represented
 /// on the wire, such as an oversized `FlowSpec` rule or BGP-LS NLRI/TLV.
+///
+/// # Panics
+///
+/// Debug builds panic when `attrs` would emit one type code twice
+/// (RFC 4271 §5). Release builds do not check.
 pub fn encode_path_attributes(
     attrs: &[PathAttribute],
     buf: &mut Vec<u8>,
@@ -3075,6 +3080,11 @@ fn encode_path_attributes_with_scratch<'a>(
     add_path_mp: bool,
     value_scratch: &mut Vec<u8>,
 ) -> Result<(), EncodeError> {
+    // RFC 4271 §5: a type appears at most once per UPDATE. Debug builds
+    // catch an emitter that copies a stored attribute and also synthesizes
+    // one of the same type; release builds skip the bookkeeping.
+    #[cfg(debug_assertions)]
+    let mut emitted = [false; 256];
     for attr in attrs {
         if matches!(
             attr,
@@ -3286,6 +3296,13 @@ fn encode_path_attributes_with_scratch<'a>(
                 type_code = raw.type_code;
                 value_scratch.extend_from_slice(&raw.data);
             }
+        }
+        #[cfg(debug_assertions)]
+        for code in std::iter::once(type_code).chain(compatibility.as_ref().map(|c| c.1)) {
+            assert!(
+                !std::mem::replace(&mut emitted[usize::from(code)], true),
+                "duplicate path attribute type {code} in one encoded attribute list"
+            );
         }
         encode_attribute_triplet(flags, type_code, value_scratch, buf);
         if let Some((compat_flags, compat_type, compat_value)) = compatibility {
@@ -6145,6 +6162,14 @@ mod tests {
         let decoded = decode_path_attributes(&buf, true, &[]).unwrap();
         assert_eq!(decoded.len(), 1);
         assert_eq!(decoded[0], PathAttribute::LargeCommunities(lcs));
+    }
+    #[cfg(debug_assertions)]
+    #[test]
+    #[should_panic(expected = "duplicate path attribute type 3 in one encoded attribute list")]
+    fn encode_rejects_a_duplicate_attribute_type_in_debug_builds() {
+        let next_hop = PathAttribute::NextHop(Ipv4Addr::new(192, 0, 2, 1));
+        let mut buf = Vec::new();
+        let _ = encode_path_attributes(&[next_hop.clone(), next_hop], &mut buf, true, false);
     }
     #[test]
     fn encode_large_community_duplicates_preserves_first_seen_order() {
