@@ -123,12 +123,14 @@ def judge(
     from_src = [e for e in all_events if e[1] == source and e[4] == condition]
 
     def gap(kind: str, trigger: str) -> float | None:
-        """Seconds from the last source CONDITION `trigger` to the first receiver PAYLOAD `kind`."""
+        """Seconds from the source's latest CONDITION change to the first receiver
+        PAYLOAD `kind`; None unless that latest change is a `trigger`, so a
+        missed trigger cannot fall back to an earlier one."""
         target = next((e for e in to_rx if e[3] == kind and e[4] == payload), None)
         if target is None:
             return None
-        before = [e for e in from_src if e[3] == trigger and e[0] <= target[0]]
-        return target[0] - before[-1][0] if before else None
+        before = [e for e in from_src if e[0] <= target[0]]
+        return target[0] - before[-1][0] if before and before[-1][3] == trigger else None
 
     for kind, trigger in (("announce", "withdraw"), ("withdraw", "announce")):
         delay = gap(kind, trigger)

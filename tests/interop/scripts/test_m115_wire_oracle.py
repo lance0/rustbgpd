@@ -111,6 +111,12 @@ class M115WireOracleTests(unittest.TestCase):
     def test_changes_before_settle_time_fail(self) -> None:
         self.assertEqual(verdicts(good_packets(settle_gap=0.5))[3:5], ["FAIL", "FAIL"])
 
+    def test_missed_source_trigger_does_not_fall_back_to_an_earlier_one(self) -> None:
+        # Without the source's condition re-announce at t=40, the payload
+        # withdrawal must not be timed from the startup announce at t=0.
+        packets = [p for p in good_packets() if 'show="40.0"' not in p]
+        self.assertEqual(verdicts(packets)[4], "FAIL")
+
     def test_mp_reach_to_receiver_fails(self) -> None:
         packets = good_packets()
         packets.append(packet(50.0, "10.115.1.1", RX, update(codes=("14",))))
