@@ -9,9 +9,9 @@
 //!   by an import rewrite), no `NEXT_HOP` is stored and the next hop is
 //!   encoded only in `MP_REACH_NLRI`.
 //! - Other `MP_REACH_NLRI` routes (IPv6 unicast, VPN, EVPN) also carry their
-//!   next hop only there. An import policy that sets an IPv4 next hop still
-//!   stores a `NEXT_HOP` on them, so export, BMP Loc-RIB and MRT skip it
-//!   (RFC 4760 §3).
+//!   next hop only there. An IPv4 `set next-hop` does not apply to an IPv6
+//!   unicast route, but on VPN and EVPN routes it still stores a `NEXT_HOP`;
+//!   export, BMP Loc-RIB and MRT skip any stored one (RFC 4760 §3).
 
 use super::*;
 use rustbgpd_mrt::warm_bundle::{
@@ -363,23 +363,9 @@ fn empty_mp_reach(afi: Afi, safi: Safi, next_hop: IpAddr) -> MpReachNlri {
     }
 }
 
-/// eBGP export rewrites the IPv6 route's next hop into `MP_REACH_NLRI`; the
-/// `NEXT_HOP` import stored must not ride beside it.
-#[tokio::test]
-async fn import_ipv4_next_hop_on_an_ipv6_route_is_not_exported_beside_mp_reach() {
-    let prefix = Prefix::V6(Ipv6Prefix::new("2001:db8:100::".parse().unwrap(), 48));
-    let mut mp_reach = empty_mp_reach(
-        Afi::Ipv6,
-        Safi::Unicast,
-        IpAddr::V6("2001:db8::2".parse().unwrap()),
-    );
-    mp_reach.announced = vec![NlriEntry { path_id: 0, prefix }];
-    let RibUpdate::RoutesReceived { announced, .. } = import_mp_update(mp_reach).await else {
-        panic!("expected RoutesReceived");
-    };
-    // The stored shape this guards against.
-    assert_eq!(next_hop_attributes(&announced[0].attributes), 1);
-
+/// Export `route` to an eBGP IPv6-unicast peer whose local IPv6 next hop is
+/// `2001:db8::1`, and return the UPDATE as parsed off the wire.
+async fn export_ipv6_to_ebgp(route: Route) -> rustbgpd_wire::ParsedUpdate {
     let (mut session, _rib_rx) = make_test_session_with_rib(65001, 65002);
     session.config.local_ipv6_nexthop = Some("2001:db8::1".parse().unwrap());
     let (client, mut server) = connected_stream_pair().await;
@@ -390,23 +376,53 @@ async fn import_ipv4_next_hop_on_an_ipv6_route_is_not_exported_beside_mp_reach()
     let mut update = empty_outbound_update();
     update.exact_export_snapshot = Some(session.publish_export_profile());
     update.next_hop_override = vec![None].into();
-    update.announce = announced.into();
+    update.announce = vec![route].into();
     session.send_route_update(update);
     let Message::Update(msg) = read_single_bgp_message(&mut server).await else {
         panic!("expected UPDATE");
     };
-    let parsed = msg.parse(true, false, &[]).unwrap();
-    assert_eq!(next_hop_attributes(&parsed.attributes), 0);
-    let mp = parsed
-        .attributes
-        .iter()
-        .find_map(|attr| match attr {
-            PathAttribute::MpReachNlri(mp) => Some(mp),
-            _ => None,
-        })
-        .expect("IPv6 unicast uses MP_REACH");
-    assert_eq!(mp.next_hop, "2001:db8::1".parse::<IpAddr>().unwrap());
-    assert_eq!(mp.announced, [NlriEntry { path_id: 0, prefix }]);
+    msg.parse(true, false, &[]).unwrap()
+}
+
+/// eBGP export carries an IPv6 route's next hop only in `MP_REACH_NLRI`, as
+/// the rewritten 16-octet local IPv6 address, with no `NEXT_HOP` beside it.
+///
+/// An import `set next-hop <IPv4>` does not apply to an IPv6 route, so the
+/// route as imported keeps its IPv6 next hop and stores no `NEXT_HOP`. A
+/// stored `NEXT_HOP` from any other source must still stay off the wire.
+#[tokio::test]
+async fn import_ipv4_next_hop_on_an_ipv6_route_is_not_exported_beside_mp_reach() {
+    let prefix = Prefix::V6(Ipv6Prefix::new("2001:db8:100::".parse().unwrap(), 48));
+    let received: IpAddr = "2001:db8::2".parse().unwrap();
+    let mut mp_reach = empty_mp_reach(Afi::Ipv6, Safi::Unicast, received);
+    mp_reach.announced = vec![NlriEntry { path_id: 0, prefix }];
+    let RibUpdate::RoutesReceived { announced, .. } = import_mp_update(mp_reach).await else {
+        panic!("expected RoutesReceived");
+    };
+    let imported = announced.into_iter().next().expect("one route");
+    assert_eq!(imported.next_hop, received);
+    assert_eq!(next_hop_attributes(&imported.attributes), 0);
+
+    let mut stored_next_hop = imported.clone();
+    AttrSet::edit(&mut stored_next_hop.attributes, |attrs| {
+        attrs.push(PathAttribute::NextHop(IMPORT_NEXT_HOP));
+    });
+    for route in [imported, stored_next_hop] {
+        let parsed = export_ipv6_to_ebgp(route).await;
+        assert_eq!(next_hop_attributes(&parsed.attributes), 0);
+        let mp = parsed
+            .attributes
+            .iter()
+            .find_map(|attr| match attr {
+                PathAttribute::MpReachNlri(mp) => Some(mp),
+                _ => None,
+            })
+            .expect("IPv6 unicast uses MP_REACH");
+        // An IPv6 next hop decodes only from 16 or 32 octets.
+        assert_eq!(mp.next_hop, "2001:db8::1".parse::<IpAddr>().unwrap());
+        assert_eq!(mp.link_local_next_hop, None);
+        assert_eq!(mp.announced, [NlriEntry { path_id: 0, prefix }]);
+    }
 }
 
 /// The BMP Loc-RIB VPN announcement carries the VPN next hop in

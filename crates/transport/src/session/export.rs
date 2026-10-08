@@ -1077,8 +1077,8 @@ impl SessionExportProfile {
                     route,
                     rewritten && (!force_self || usable_local.is_some()),
                 )?;
-                // RFC 4760 §3: no NEXT_HOP beside MP_REACH-only NLRI. Import
-                // policy can store one on an IPv6 route.
+                // RFC 4760 §3: no NEXT_HOP beside MP_REACH-only NLRI, even if
+                // one is stored.
                 Ok(PreparedUnicastCandidate::Mp {
                     afi: Afi::Ipv6,
                     next_hop,
