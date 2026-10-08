@@ -3516,8 +3516,8 @@ impl RibManager {
                 let _ = reply.send(());
             }
             RibUpdate::ReobserveConditionalAdvertisements { datasets, reply } => {
-                self.handle_reobserve_conditional_advertisement_datasets(&datasets);
-                let _ = reply.send(());
+                let _ =
+                    reply.send(self.handle_reobserve_conditional_advertisement_datasets(&datasets));
             }
             RibUpdate::EndOfRib {
                 peer,

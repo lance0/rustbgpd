@@ -2759,12 +2759,15 @@ pub enum RibUpdate {
     },
     /// Re-observe conditional-advertisement conditions whose
     /// `condition_policy` references one of the swapped datasets, under the
-    /// ordinary settle debounce.
+    /// ordinary settle debounce. The reply carries the tracker state from
+    /// before the re-observation, which
+    /// [`RibUpdate::RestoreConditionalAdvertisements`] reinstates if the
+    /// dataset swap is rolled back.
     ReobserveConditionalAdvertisements {
         /// Swapped dataset names.
         datasets: Vec<String>,
         /// Acknowledged once the observations are recomputed.
-        reply: oneshot::Sender<()>,
+        reply: oneshot::Sender<crate::ConditionalAdvertisementCapture>,
     },
     /// Explicit, bounded unicast wire replay for the named live session.
     ReplayPeerOutbound {

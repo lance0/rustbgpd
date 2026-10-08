@@ -390,12 +390,29 @@ impl PeerManager {
             .set_dynamic_neighbor_capacity(self.dynamic_peer_count, self.dynamic_neighbor_limit);
 
         // A swapped dataset read by a `condition_policy` is external input:
-        // re-observe under the ordinary debounce.
-        if let Err(error) = self
+        // re-observe under the ordinary debounce. An unacknowledged request
+        // is ambiguous: the RIB may have re-observed against the candidate
+        // dataset, and no capture exists to undo it. The unwind restores a
+        // successful re-observation's capture after the dataset rollback;
+        // an earlier install capture already predates it.
+        match self
             .reobserve_conditional_advertisement_datasets(&changed_datasets)
             .await
         {
-            warn!(%error, "reload generation: conditional advertisement re-observation failed");
+            Ok(prior) => {
+                if applied.conditional_prior.is_none() {
+                    applied.conditional_prior = prior;
+                }
+            }
+            Err(error) => {
+                return self
+                    .fail_reload_generation(
+                        applied,
+                        format!("conditional advertisement re-observation: {error}"),
+                        true,
+                    )
+                    .await;
+            }
         }
 
         // 3. Hot updates in place: knobs only, policies already match.

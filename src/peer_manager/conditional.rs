@@ -143,22 +143,29 @@ impl PeerManager {
     }
 
     /// Re-observe conditions whose `condition_policy` reads a swapped
-    /// dataset, under the ordinary settle debounce.
+    /// dataset, under the ordinary settle debounce. `Ok(Some(prior))`
+    /// restores the tracker state from before the re-observation, for a
+    /// generation that rolls the dataset swap back.
     pub(super) async fn reobserve_conditional_advertisement_datasets(
         &self,
         datasets: &[String],
-    ) -> Result<(), String> {
+    ) -> Result<Option<ConditionalAdvertisementPrior>, String> {
         if !self
             .conditional_advertisements
             .condition_policy_references(datasets)
         {
-            return Ok(());
+            return Ok(None);
         }
         let datasets = datasets.to_vec();
-        self.conditional_rib_request(|reply| RibUpdate::ReobserveConditionalAdvertisements {
-            datasets,
-            reply,
-        })
-        .await
+        let capture = self
+            .conditional_rib_request(|reply| RibUpdate::ReobserveConditionalAdvertisements {
+                datasets,
+                reply,
+            })
+            .await?;
+        Ok(Some(ConditionalAdvertisementPrior {
+            capture,
+            set: self.conditional_advertisements.clone(),
+        }))
     }
 }

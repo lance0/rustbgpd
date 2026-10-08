@@ -186,11 +186,7 @@ impl RibManager {
     ) -> (ConditionalAdvertisementCapture, Vec<Arc<str>>) {
         let now = Instant::now();
         let startup = !self.conditional_advertisements.installed;
-        let capture = ConditionalAdvertisementCapture {
-            definitions: self.conditional_advertisements.definitions.clone(),
-            attachments: self.conditional_advertisements.attachments.clone(),
-            installed: self.conditional_advertisements.installed,
-        };
+        let capture = self.capture_conditional_advertisements();
         let mut prior = std::mem::take(&mut self.conditional_advertisements.definitions);
         let mut next = BTreeMap::new();
         let mut transitions = Vec::new();
@@ -248,6 +244,14 @@ impl RibManager {
         self.conditional_advertisements.installed = true;
         self.rebuild_conditional_index();
         (capture, transitions)
+    }
+
+    fn capture_conditional_advertisements(&self) -> ConditionalAdvertisementCapture {
+        ConditionalAdvertisementCapture {
+            definitions: self.conditional_advertisements.definitions.clone(),
+            attachments: self.conditional_advertisements.attachments.clone(),
+            installed: self.conditional_advertisements.installed,
+        }
     }
 
     /// Reinstate the state captured by [`Self::install_conditional_advertisements`]
@@ -749,11 +753,14 @@ impl RibManager {
 
     /// Re-observe the definitions whose `condition_policy` references a
     /// swapped dataset, then resync the peers of any applied transition.
+    /// Returns the prior state, for a generation that rolls the swap back.
     pub(super) fn handle_reobserve_conditional_advertisement_datasets(
         &mut self,
         datasets: &[String],
-    ) {
+    ) -> ConditionalAdvertisementCapture {
+        let capture = self.capture_conditional_advertisements();
         let _ = self.reevaluate_conditional_advertisement_datasets(datasets);
+        capture
     }
 
     fn conditional_definition_contents(&self) -> BTreeMap<Arc<str>, Arc<ConditionalAdvertisement>> {

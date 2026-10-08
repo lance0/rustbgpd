@@ -4278,9 +4278,11 @@ peer_group = "edge"
     harness.shutdown().await;
 }
 
-/// Forward conditional-advertisement commands to a real RIB actor and
-/// everything else to the generation stub, recording the conditional
-/// commands and export-chain installs in order.
+/// Forward conditional-advertisement commands and route ingestion to a real
+/// RIB actor and everything else to the generation stub, recording the
+/// conditional commands and export-chain installs in order. The real RIB is
+/// seeded with the manager's install, as `main` seeds it, and publishes into
+/// the manager's metrics.
 fn relay_conditional_to_real_rib(
     harness: &mut GenerationHarness,
 ) -> (Arc<Mutex<Vec<String>>>, tokio::task::JoinHandle<()>) {
@@ -4288,7 +4290,9 @@ fn relay_conditional_to_real_rib(
     let downstream = std::mem::replace(&mut harness.mgr.rib_tx, tx);
     let (real_tx, real_rx) = mpsc::channel::<RibUpdate>(64);
     let (_query_tx, query_rx) = mpsc::channel(1);
-    let real = rustbgpd_rib::RibManager::new(real_rx, query_rx, None, None, BgpMetrics::new());
+    let real =
+        rustbgpd_rib::RibManager::new(real_rx, query_rx, None, None, harness.mgr.metrics.clone())
+            .with_conditional_advertisements(harness.mgr.conditional_advertisements.clone());
     let real = tokio::spawn(real.run());
     let recorded = Arc::new(Mutex::new(Vec::new()));
     let log = Arc::clone(&recorded);
@@ -4307,6 +4311,10 @@ fn relay_conditional_to_real_rib(
                     let _ = real_tx.send(command).await;
                 }
                 RibUpdate::ReobserveConditionalAdvertisements { .. } => {
+                    log.lock().unwrap().push("reobserve".to_string());
+                    let _ = real_tx.send(command).await;
+                }
+                RibUpdate::RoutesReceived { .. } => {
                     let _ = real_tx.send(command).await;
                 }
                 other => {
@@ -4750,6 +4758,214 @@ async fn failed_policy_snapshot_restores_the_conditional_install() {
         rustbgpd_rib::ConditionalAdvertisementSet::default()
     );
     assert_eq!(harness.mgr.current_config, prior);
+    harness.shutdown().await;
+    relay.abort();
+}
+
+/// `backup` reads its condition through the `primary` prefix-set dataset.
+const CONDITION_DATASET_RPOL: &str = "policy members-out { term all { set med 10; accept } }
+dataset prefix-set primary
+policy primary-up { term t { if route.prefix in primary { accept } } term rest { reject } }";
+
+/// The base fixture with `backup` attached to 10.0.0.2, its condition
+/// candidates filtered through `primary-up`, `primary.list` holding
+/// `primary`, and 10.0.0.9 at `remote_asn`.
+fn write_condition_dataset_fixture(fixture: &RsFixture, primary: &str, remote_asn: u32) {
+    std::fs::write(
+        fixture.dir.path().join("members.rpol"),
+        CONDITION_DATASET_RPOL,
+    )
+    .unwrap();
+    std::fs::write(fixture.dir.path().join("primary.list"), primary).unwrap();
+    fixture.write_toml(&format!(
+        "{}\n[policy.datasets.primary]\npath = \"primary.list\"\n",
+        fixture
+            .base_toml()
+            .replace(
+                "[[neighbors]]\naddress = \"10.0.0.2\"\nremote_asn = 65002",
+                "[policy.definitions.backup-routes]\ndefault_action = \"deny\"\n\n\
+                 [policy.conditional_advertisements.backup]\nadvertise_policy = \"backup-routes\"\n\
+                 advertise_if = \"absent\"\ncondition_prefixes = [\"198.51.100.0/24\"]\n\
+                 condition_policy = \"primary-up\"\n\n\
+                 [[neighbors]]\naddress = \"10.0.0.2\"\nremote_asn = 65002\n\
+                 conditional_advertisements = [\"backup\"]",
+            )
+            .replace("remote_asn = 65009", &format!("remote_asn = {remote_asn}")),
+    ));
+}
+
+/// Load the fixture's current file as a reload candidate against `prior`'s
+/// live bindings, with its staged dataset generation and session plan.
+fn prepare_condition_dataset_candidate(
+    fixture: &RsFixture,
+    prior: &Config,
+) -> (Config, Vec<ReloadPeerAction>, PreparedDatasetGeneration) {
+    let mut candidate = Config::load_with_diagnostics_and_staged_datasets(
+        fixture.config_path.to_str().unwrap(),
+        &prior.policy.dataset_bindings,
+    )
+    .unwrap();
+    let staged = candidate.prepare_staged_datasets(&prior.policy.dataset_bindings);
+    let prepared = staged.prepare_generation(prior, &candidate).unwrap();
+    assert_eq!(prepared.changed_names(), ["primary"]);
+    let actions = plan_reload_peer_actions(prior, &candidate).unwrap();
+    (candidate, actions, prepared)
+}
+
+/// The observed state `backup`'s condition gauge reports.
+fn condition_state(metrics: &BgpMetrics) -> Option<String> {
+    metrics
+        .registry()
+        .gather()
+        .iter()
+        .find(|family| family.name() == "bgp_conditional_advertisement_condition")?
+        .get_metric()
+        .iter()
+        .find(|metric| metric.get_gauge().get_value() > 0.5)?
+        .get_label()
+        .iter()
+        .find(|label| label.name() == "state")
+        .map(|label| label.value().to_string())
+}
+
+/// ADR-0137: a forward re-observation the RIB never acknowledges fails the
+/// generation as ambiguous. The RIB may have re-observed against the
+/// candidate dataset, and the content-only swap left no install capture
+/// to undo it with.
+#[tokio::test]
+async fn unacknowledged_condition_reobservation_marks_the_generation_ambiguous() {
+    let fixture = RsFixture::new();
+    write_condition_dataset_fixture(&fixture, "198.51.100.0/24\n", 65009);
+    let prior = fixture.load();
+    let mut harness = GenerationHarness::new(&prior);
+    let (log, relay) = relay_conditional_to_real_rib(&mut harness);
+    // Drop every re-observation between the manager and the relay.
+    let (tx, mut rx) = mpsc::channel::<RibUpdate>(64);
+    let relay_tx = std::mem::replace(&mut harness.mgr.rib_tx, tx);
+    let drop_reobserve = tokio::spawn(async move {
+        while let Some(command) = rx.recv().await {
+            if matches!(
+                command,
+                RibUpdate::ReobserveConditionalAdvertisements { .. }
+            ) {
+                continue;
+            }
+            if relay_tx.send(command).await.is_err() {
+                break;
+            }
+        }
+    });
+    std::fs::write(fixture.dir.path().join("primary.list"), "203.0.113.0/24\n").unwrap();
+    let (candidate, actions, prepared) = prepare_condition_dataset_candidate(&fixture, &prior);
+
+    let outcome = Box::pin(
+        harness
+            .mgr
+            .apply_reload_generation(candidate, actions, prepared),
+    )
+    .await;
+    let ReloadGenerationOutcome::CompensationAmbiguous(error) = outcome else {
+        panic!("{outcome:?}");
+    };
+    assert!(
+        error.contains("conditional advertisement re-observation"),
+        "{error}"
+    );
+    assert_eq!(
+        conditional_log(&log),
+        Vec::<String>::new(),
+        "the content-only swap installs nothing"
+    );
+    harness.shutdown().await;
+    drop_reobserve.abort();
+    relay.abort();
+}
+
+/// ADR-0137: a step after a successful re-observation fails, and the unwind
+/// rolls the dataset back. Conditions then match the restored dataset: the
+/// unwind restores the re-observation's capture, since the content-only swap
+/// made the install a no-op with nothing of its own to restore.
+#[tokio::test]
+async fn late_failure_after_condition_reobservation_restores_condition_state() {
+    let fixture = RsFixture::new();
+    write_condition_dataset_fixture(&fixture, "198.51.100.0/24\n", 65009);
+    let prior = fixture.load();
+    let mut harness = GenerationHarness::new(&prior);
+    let (log, relay) = relay_conditional_to_real_rib(&mut harness);
+    let source = Ipv4Addr::new(10, 0, 0, 50);
+    harness
+        .mgr
+        .rib_tx
+        .send(RibUpdate::RoutesReceived {
+            peer: IpAddr::V4(source),
+            session_id: 0,
+            announced: vec![rustbgpd_rib::Route {
+                prefix: rustbgpd_wire::Prefix::V4(rustbgpd_wire::Ipv4Prefix::new(
+                    Ipv4Addr::new(198, 51, 100, 0),
+                    24,
+                )),
+                next_hop: IpAddr::V4(source),
+                link_local_next_hop: None,
+                next_hop_scope: None,
+                peer: IpAddr::V4(source),
+                attributes: rustbgpd_rib::AttrSet::new(vec![rustbgpd_wire::PathAttribute::Origin(
+                    rustbgpd_wire::Origin::Igp,
+                )]),
+                received_at: rustbgpd_rib::route::ReceivedAt::now(),
+                origin_type: rustbgpd_rib::RouteOrigin::Ebgp,
+                peer_router_id: source,
+                is_stale: false,
+                is_llgr_stale: false,
+                path_id: 0,
+                validation_state: rustbgpd_wire::RpkiValidation::NotFound,
+                aspa_state: rustbgpd_wire::AspaValidation::Unknown,
+                received_as_path: None,
+                aspa_context: rustbgpd_rib::route::AspaContextId::DEFAULT,
+            }],
+            withdrawn: vec![],
+            flowspec_announced: vec![],
+            flowspec_withdrawn: vec![],
+            evpn_announced: vec![],
+            evpn_withdrawn: vec![],
+            validated_with: None,
+        })
+        .await
+        .unwrap();
+    let metrics = harness.mgr.metrics.clone();
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while condition_state(&metrics).as_deref() != Some("present") {
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+    })
+    .await
+    .expect("the condition route is ingested and passes primary-up");
+
+    // The candidate drops the condition prefix from `primary` and replaces
+    // 10.0.0.9, whose replacement then fails.
+    write_condition_dataset_fixture(&fixture, "203.0.113.0/24\n", 65019);
+    let (candidate, actions, prepared) = prepare_condition_dataset_candidate(&fixture, &prior);
+    harness
+        .mgr
+        .inject_reconfigure_failures
+        .insert(key("10.0.0.9".parse().unwrap()), 0);
+    let outcome = Box::pin(
+        harness
+            .mgr
+            .apply_reload_generation(candidate, actions, prepared),
+    )
+    .await;
+    let ReloadGenerationOutcome::FullyCompensated(error) = outcome else {
+        panic!("{outcome:?}");
+    };
+    assert!(error.contains("prior generation restored"), "{error}");
+    assert_eq!(harness.mgr.current_config, prior);
+    assert_eq!(conditional_log(&log), ["reobserve", "restore"]);
+    // The restore was acknowledged, so the RIB has already applied it.
+    assert_eq!(
+        condition_state(&metrics).as_deref(),
+        Some("present"),
+        "the condition follows the restored dataset"
+    );
     harness.shutdown().await;
     relay.abort();
 }

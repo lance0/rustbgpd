@@ -845,6 +845,18 @@ async fn dataset_refresh_discovers_conditional_advertisement_predicates() {
     let (rib_tx, mut rib_rx) = mpsc::channel(8);
     mgr.rib_tx = rib_tx;
     let rib = tokio::spawn(async move {
+        // A real actor answers re-observations with its capture.
+        let (real_tx, real_rx) = mpsc::channel(8);
+        let real = tokio::spawn(
+            rustbgpd_rib::RibManager::new(
+                real_rx,
+                mpsc::channel(1).1,
+                None,
+                None,
+                BgpMetrics::new(),
+            )
+            .run(),
+        );
         let mut seen = Vec::new();
         while let Some(command) = rib_rx.recv().await {
             match command {
@@ -852,13 +864,15 @@ async fn dataset_refresh_discovers_conditional_advertisement_predicates() {
                     seen.push(format!("reevaluate {peers:?}"));
                     reply.send(Ok(())).unwrap();
                 }
-                RibUpdate::ReobserveConditionalAdvertisements { datasets, reply } => {
+                RibUpdate::ReobserveConditionalAdvertisements { ref datasets, .. } => {
                     seen.push(format!("reobserve {datasets:?}"));
-                    reply.send(()).unwrap();
+                    real_tx.send(command).await.unwrap();
                 }
                 _ => panic!("unexpected RIB command"),
             }
         }
+        drop(real_tx);
+        real.await.unwrap();
         seen
     });
     let attached: IpAddr = Ipv4Addr::new(10, 0, 0, 1).into();
