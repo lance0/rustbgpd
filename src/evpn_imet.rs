@@ -316,10 +316,12 @@ async fn withdraw_imet_key(
 /// Path attribute set:
 /// - `Origin::Igp` (locally originated)
 /// - empty `AsPath`
-/// - `NextHop` matching the VTEP IP
 /// - `ExtendedCommunities` carrying every configured Route Target
 /// - `PmsiTunnel` for Ingress Replication, label = raw 24-bit VNI
 ///   (RFC 8365 §5.1.3), tunnel id = the VTEP's loopback IP
+///
+/// The VTEP IP is the route's `next_hop` field, encoded only in
+/// `MP_REACH_NLRI`; no `NEXT_HOP` attribute is stored.
 fn build_imet_route(instance: &EvpnInstance) -> EvpnRibRoute {
     let imet = EvpnImet {
         rd: instance.rd,

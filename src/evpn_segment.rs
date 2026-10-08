@@ -1898,8 +1898,10 @@ async fn retry_pending_rib_ops(
 
 /// Build the wire-shaped `EvpnRibRoute` for a Type 1/4 origination.
 ///
-/// Path attributes: Origin, empty `AsPath`, `NextHop`, plus the
-/// instance's configured RT extcomms. Per RFC 7432, Gate 8b prep
+/// Path attributes: Origin, empty `AsPath`, plus the instance's
+/// configured RT extcomms. The VTEP IP is carried separately as the
+/// route's `next_hop` and encoded only in `MP_REACH_NLRI`; no `NEXT_HOP`
+/// attribute is stored. Per RFC 7432, Gate 8b prep
 /// also attaches:
 ///
 /// - **Type 4 ES**: ES-Import RT extcomm (§7.6) auto-derived from
