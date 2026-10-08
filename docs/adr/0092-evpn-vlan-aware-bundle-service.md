@@ -1,6 +1,6 @@
 # ADR-0092: EVPN VLAN-Aware Bundle service (non-zero Ethernet Tag)
 
-**Status:** Accepted — Decision 6 proof-ladder slice 1 executed (M82, 2026-07-03)
+**Status:** Accepted — Decision 6 proof-ladder slice 1 executed (M82, 2026-07-03); VTEP origination MVP shape amended (2026-10-08)
 **Date:** 2026-06-19
 
 > **Proof-ladder status (2026-07-03):** the Decision 6 receive/reflect
@@ -175,6 +175,76 @@ receipt" abstract:
   VLAN-Aware Bundle (e.g. Nokia SR Linux / SR OS, Cisco NX-OS, Juniper, Arista).
   That is the eventual ground truth and is demand-/hardware-shaped; the bundle
   service stays alpha until one is in hand.
+
+## Amendment (2026-10-08): VTEP origination and import MVP shape
+
+A survey of the VTEP code before origination work refines Decisions 1-4.
+The model `(EVI / RT set, Ethernet Tag) -> (bridge, bridge_vlan, VNI)` is
+unchanged. The amendment records how the MVP maps that model onto existing
+per-VNI machinery and where fail-closed checks run.
+
+**A. Bundle members are `[[evpn_instances]]` rows.** A member is an ordinary
+instance row with `service_interface = "vlan_aware_bundle"` and a non-zero
+`ethernet_tag`; there is no separate bundle table. Every per-VNI surface
+already operates on a row: readiness, runtime add/delete/redefine, Linux
+local-MAC attribution, duplicate-MAC detection and SVI origination. A nested
+member table would need a parallel version of each one. The bundle's identity
+is its shared route-target set. This follows RFC 8365 §5.1.2 Option 2, where
+the control plane identifies a bridge table by `<RT, Ethernet Tag>`.
+
+**B. Each member keeps its own RD in the MVP.** Receivers select a bridge
+table by RT and Ethernet Tag, so a shared RD is not load-bearing on the wire.
+Nokia SR Linux uses this shape for its bundle interoperability mode.
+Allowing members to share one bundle RD can be added later by relaxing the
+duplicate-RD check, without breaking existing configurations. Member Ethernet
+Tags are `1..=16777215` (zero means VLAN-Based service, and `0xFFFFFFFF` is
+reserved for per-ES routes), and are configured explicitly.
+
+**C. `(VNI, MAC)` keys stay.** VNIs are unique across all instances, so a
+member VNI already identifies one `(EVI, Ethernet Tag)` pair. The same MAC
+under two tags lands on two different VNIs and does not collapse. This
+supersedes Decision 2's statement that the remote-MAC desired table must be
+widened; that becomes necessary only if one VNI can serve two tags. The MVP
+assumes global VNIs. A received Type 1 or Type 2 route is consumed by a member
+only when its VNI field equals the member VNI, its Ethernet Tag equals the
+member tag, and it carries a member RT. A route whose `<RT, tag>` selects a
+member but whose VNI field differs (locally assigned VNIs) is dropped with a
+reason.
+
+**D. Fail-closed drops happen at local consumption, not by removing routes
+from Adj-RIB-In.** One daemon can be a VTEP and a route reflector at once,
+and the reflection path already handles non-zero tags correctly (M82).
+Removing an unsupported route from Adj-RIB-In would stop a valid route from
+being reflected. Decisions 3 and 4 are therefore read as follows: the VTEP
+projection skips an unsupported route and records a per-instance,
+per-reason drop counter visible through the API and metrics. Type 5 drops
+use the existing IP-VRF remote-prefix-drop reasons. The rule against a
+session NOTIFICATION is unchanged.
+
+**E. MVP rejections.** Configuration rejects the following for bundle
+members: membership in `[[ethernet_segments]]` (multi-homing),
+`ip_vrf` (IRB), and `auto_derive_route_target` (the RFC 8365 auto-derived RT
+is per VNI, which splits the shared bundle RT). It also rejects two members
+that share an RT and an Ethernet Tag, an RT shared between a bundle member
+and a VLAN-Based row, and a `(bridge, bridge_vlan)` pair claimed by a bundle
+member and any other row. At runtime, the VTEP drops remote Type 2 routes
+with a non-zero ESI and remote EAD-per-EVI routes for a bundle member, and
+records a reason. DF election, aliasing and BUM enforcement state are keyed
+per VNI. Because member VNIs are unique, a later tag-scoped multi-homing
+extension can map `(ESI, EVI, Ethernet Tag)` onto those keys.
+
+**F. Type 3 scope.** The MVP originates one IMET per member, carrying the
+member tag and member VNI. Today the VTEP does not program ingress-replication
+flood lists from received IMET routes, for any service interface. That gap
+is tracked separately. When flood-list programming lands, it resolves
+received IMET routes to members through the same rule as Type 2.
+
+**G. Origination proof target.** SR Linux in bundle interoperability mode
+accepts a route into a mac-vrf only when its Ethernet Tag matches that
+mac-vrf's configured `vlan-aware-bundle-eth-tag`. It therefore checks
+rustbgpd's per-member tag stamping directly, and it is the Decision 6 vendor
+receipt for origination. FRR 10.7.1 matches received EVPN routes to VNIs by
+route target alone and does not check the tag, so it remains unsuitable.
 
 ## Consequences
 
