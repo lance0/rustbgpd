@@ -2,14 +2,20 @@
 
 A same-session A/B of jemalloc's defaults against
 `_RJEM_MALLOC_CONF=background_thread:true` on the S2 matrix, IRR 0% reload and
-`GetPolicyStats` operator-read cells. The predeclared analyzer returned
-**INVALID** because the operator-read cell produced no in-band calls in
-either arm. The headline cells were valid. They show
-`background_thread:true` is not an improvement on these shapes: the daemon's
-cgroup memory peak rose by 177 MiB (S2) and 93 MiB (IRR) at the median with
-separate ranges, while the IRR reload clocks fell by 17–30 ms.
-`metadata_thp:auto` was not run. Nothing ships: the daemon keeps jemalloc's
-defaults.
+`GetPolicyStats` operator-read cells. The predeclared contract gives two
+readings, because its analyzer and its prose disagree on a missing value
+(see [Contract inconsistency](#contract-inconsistency)):
+
+- the analyzer, as run, reported **INVALID**, because the operator-read cell
+  produced no in-band calls in either arm;
+- the prose rule treats those read metrics as insufficient, which makes the
+  primary bars **MIXED**.
+
+Either way, `background_thread:true` is not an improvement on these shapes:
+the daemon's cgroup memory peak rose by 177 MiB (S2) and 93 MiB (IRR) at the
+median with separate ranges, while the IRR reload clocks fell by 17–30 ms.
+Neither reading ships anything or opens stage 2, so `metadata_thp:auto` was
+not run and the daemon keeps jemalloc's defaults.
 
 ## Question and arms
 
@@ -34,8 +40,15 @@ directory.
 - **Checked on every leg.** A 1 Hz `/proc` watcher recorded each daemon's
   environment and its count of `jemalloc_bg_thd` threads; jemalloc creates
   those threads only when `opt.background_thread` is on. Every `bgth` daemon
-  ran with the variable and 4 background threads. Every `main` daemon had
-  neither (all 15 daemons, the terminated run included; `allocator-watch.tsv`).
+  ran with the variable and 4 background threads (8 daemons). Every `main`
+  daemon showed no variable and 0 background threads (7 daemons). The
+  15 rows in `allocator-watch.tsv` include the terminated policy run.
+- **Limitation of the base-arm evidence.** The watcher treats a failed
+  `/proc/<pid>/environ` read the same as an absent variable, so for the base
+  arm "no `_RJEM_MALLOC_CONF`" alone cannot tell absence from a read failure.
+  The independent thread count corroborates it: all 7 base daemons had 0
+  `jemalloc_bg_thd` threads. On the `bgth` side a read failure would have
+  failed the check, which requires the exact value.
 - **Binary equivalence, as checked.** Both arms built the same source
   commit with the same commands and flags, in two different directories. Each
   build embeds its directory in generated-source paths, so the raw daemon
@@ -52,12 +65,14 @@ directory.
   predeclared ([`posthoc-text-diff.py`](artifacts/jemalloc-runtime-options-2026-10/posthoc-text-diff.py),
   [output](artifacts/jemalloc-runtime-options-2026-10/posthoc-text-diff.txt)).
   It compared the two daemons' `objdump -d` listings of `.text` line by line:
-  - 6,959,404 of 6,963,967 instructions are identical, at identical addresses;
+  - 6,959,400 of 6,963,963 instructions are identical, at identical addresses;
   - the other 4,563 differ only in a RIP-relative operand whose target lies
     inside `.rodata` in both builds, which is the constant reordering above;
-  - no other instruction differs.
+  - no other instruction differs, and the 4 non-instruction listing lines
+    (header and blank lines) match.
 
-  The `reloadstall` `.text` listings match on all 552,851 instructions. A
+  The `reloadstall` `.text` listings match on all 544,603 instructions and
+  8,248 non-instruction lines (labels, with symbol names removed). A
   negative control (one changed instruction) fails the check. Relocation
   entries and `.data` contents were not compared beyond the section sizes.
 
@@ -71,23 +86,37 @@ and applied by
 - **Clocks and reads:** better or worse only if the per-leg ranges are separate.
 - **Memory:** separate ranges and a median difference of at least 50 MiB, the
   top of the 30–50 MiB noise floor.
-- **Verdict:** a WIN needs at least one primary metric better and none worse.
-  A missing primary value makes the stage INVALID.
+- **Verdict:** a WIN needs at least one primary metric better and none worse;
+  MIXED is at least one better and one worse; neither ships.
 
-**Verdict: INVALID.** The policy-stats cell fires its `GetPolicyStats` and
-`neighbor` pair 0.50 s after the cohort hot-apply completes, intending to land
-just before the RIB commit. On this main, the pairs started 445–454 ms
+**Analyzer as run: INVALID. Prose rule: MIXED.** The policy-stats cell
+fires its `GetPolicyStats` and `neighbor` pair 0.50 s after the cohort
+hot-apply completes, intending to land just before the RIB commit. On this main, the pairs started 445–454 ms
 *after* the RIB commit in all 24 reloads of both runs, so no call was in band
 and the in-band read metrics had no values. The cell itself exited 1 (FAIL:
 0 complete in-band pairs, 6 required). After both arms' first runs showed
 this, the remaining policy-stats runs were stopped deliberately: the third
-run was terminated mid-run (exit 143) and the last three were not started.
-Nothing was retried or excluded.
+run was terminated mid-run (exit 143) and the last three were not started,
+because further runs could not change the outcome. Nothing was retried or
+excluded. With one completed run per arm, the read metrics were insufficient
+by count (fewer than 2 values per arm) even had the calls landed in band.
+
+Under the prose rule, the primary bars classify as:
+
+- **better:** IRR daemon SIGHUP → reload complete, and IRR harness
+  completion p50;
+- **worse:** S2 daemon cgroup peak, and IRR daemon cgroup peak;
+- **no difference:** the S2 clocks and S2 settled RSS;
+- **insufficient:** the three in-band read metrics.
+
+That is MIXED.
 
 **Stage 2 not run.** The `background_thread:true,metadata_thp:auto` arm was
 gated on a stage-1 WIN.
 
-## Deviation from the predeclared bars
+## Deviations from the predeclared bars
+
+### Binary identity
 
 [`acceptance.md`](artifacts/jemalloc-runtime-options-2026-10/acceptance.md)
 says the arms' daemon and `reloadstall` binaries "must hash identically". The
@@ -99,7 +128,26 @@ stage used that comparison, not raw hashes. The "Arms and shape" sentence
 requiring identical hashes was left unedited and is superseded by the
 "Validity" section. Both predeclared files are kept as they were run.
 
-## Headline results (secondary evidence)
+### Contract inconsistency
+
+The predeclared analyzer and the predeclared prose disagree on a missing
+value. Both were written before the stage: the campaign copies of
+`analyze.py` and `acceptance.md` were last modified at 08:47, and the stage
+started at 09:17. This is an inconsistency inside the predeclared contract,
+not a rule added after the run.
+
+- **Analyzer:** `analyze.py` records a validity problem whenever an in-band
+  read timing is absent, and any problem makes the stage INVALID. The six
+  problems in `verdict.json` are exactly those: three in-band read metrics
+  for each of `main-r1` and `bgth-r1`. There are no other problems.
+- **Prose:** the last "Validity" bullet of `acceptance.md` says a metric with
+  fewer than 2 values in either arm is "insufficient" and cannot be better or
+  worse. It does not say that a missing value invalidates the stage.
+
+The receipt reports both readings. `verdict.*` is the analyzer's output as
+run and was not regenerated.
+
+## Headline results
 
 All 12 headline legs passed their runners' acceptance with every runner
 guard in place: two quiet samples per leg, 300 s cool-downs, swap counters
@@ -138,9 +186,8 @@ Reported but not judged:
   completion are lower in every `bgth` leg than in every `main` leg. The S2
   clocks overlap.
 - **Not shipped.** Under the predeclared rule, a clock gain does not offset
-  a memory regression beyond the noise floor. With the read cell invalid, the
-  bars themselves can only return INVALID here; the headline data rule out a
-  WIN either way. jemalloc's defaults stay. `_RJEM_MALLOC_CONF` remains
+  a memory regression beyond the noise floor. The analyzer's INVALID and the
+  prose rule's MIXED both rule out a WIN. jemalloc's defaults stay. `_RJEM_MALLOC_CONF` remains
   available to operators who want to trade memory for the IRR-scale clock.
 
 ## Not claimed
