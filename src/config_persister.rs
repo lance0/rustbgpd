@@ -523,6 +523,7 @@ log_format = "json"
             export_policy: Vec::new(),
             import_policy_chain: Vec::new(),
             export_policy_chain: Vec::new(),
+            conditional_advertisements: Vec::new(),
             log_level: None,
         }
     }

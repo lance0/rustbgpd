@@ -997,6 +997,7 @@ complete atomic block. There is no probe or automatic legacy fallback.
 | `export_policy_chain`  | [string] | no       | --      | Named policy chain for export (mutually exclusive with inline export_policy) |
 | `import_policy`        | [table]  | no       | --      | Inline import policy statements (`[[neighbors.import_policy]]`, see [Policy entries](#policy-entries)); mutually exclusive with `import_policy_chain` |
 | `export_policy`        | [table]  | no       | --      | Inline export policy statements (`[[neighbors.export_policy]]`, see [Policy entries](#policy-entries)); mutually exclusive with `export_policy_chain` |
+| `conditional_advertisements` | [string] | no | `[]` | Names of [conditional advertisement](#conditional-advertisements-not-yet-enforced) definitions attached to this static neighbor. Accepted and validated, but not yet enforced |
 | `llgr_stale_time`      | u32      | no       | 0       | LLGR stale time in seconds (0 = disabled, max 16777215; RFC 9494)    |
 | `add_path`             | table    | no       | --      | Add-Path (RFC 7911) config table (see below)                         |
 | `log_level`            | string   | no       | --      | Override log level for this peer: `"error"`, `"warn"`, `"info"`, `"debug"`, or `"trace"` |
@@ -2829,6 +2830,46 @@ replay with BoRR/EoRR, but does not reduce it to only affected routes. Active
 recovery of routes previously rejected at import depends on negotiated Route
 Refresh; otherwise, those routes wait for natural re-advertisement or a new
 session's replay.
+
+### Conditional advertisements (not yet enforced)
+
+Conditional advertisement (ADR-0137) advertises a set of routes to a
+neighbor only while a condition route is present, or only while it is
+absent. **This release accepts and validates the configuration below, but
+does not yet enforce it on export:** controlled routes are advertised as
+if no definition were attached. Enforcement lands in a later release.
+
+Definitions live under `[policy.conditional_advertisements.<name>]` and are
+attached to static neighbors by name:
+
+```toml
+[policy.conditional_advertisements.backup-via-transit-b]
+advertise_policy = "backup-aggregates"
+advertise_if = "absent"
+condition_prefixes = ["0.0.0.0/0"]
+condition_policy = "default-from-transit-a"
+settle_time = 5
+
+[[neighbors]]
+address = "203.0.113.2"
+remote_asn = 64502
+conditional_advertisements = ["backup-via-transit-b"]
+```
+
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `advertise_policy` | string | yes | -- | Named policy (TOML or `.rpol`, including call form) used as a predicate: the routes it permits are controlled. Its modifications are not applied |
+| `advertise_if` | string | yes | -- | `"present"` or `"absent"`: the condition state in which controlled routes may be advertised |
+| `condition_prefixes` | [string] | yes | -- | Nonempty list of distinct, exact IPv4 or IPv6 prefixes with no host bits set; prefix ranges are not accepted |
+| `condition_policy` | string | no | -- | Named policy used as a predicate over each condition candidate |
+| `settle_time` | u32 | no | `5` | Seconds a changed condition must stay stable before it applies (0–600) |
+
+Each referenced policy must exist, and a neighbor may attach each
+definition once; either mistake is a load error. `DeletePolicy` refuses to
+delete a policy that a definition references. Peer groups and dynamic
+neighbors do not accept attachments. Definition and attachment edits apply
+through the SIGHUP generation route; see the
+[reload matrix](reload-matrix.md).
 
 ### `.rpol` policy files (`rpol_files`, ADR-0096)
 

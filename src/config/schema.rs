@@ -1267,6 +1267,11 @@ macro_rules! define_neighbor_and_peer_group_configs {
                 $(#[$after_neighbor_attr])*
                 pub $after_field: $after_ty,
             )*
+            /// Names of `[policy.conditional_advertisements]` definitions
+            /// attached to this neighbor (ADR-0137). Static neighbors only;
+            /// peer groups and dynamic neighbors do not carry attachments.
+            #[serde(default, skip_serializing_if = "Vec::is_empty")]
+            pub conditional_advertisements: Vec<String>,
         }
 
         #[derive(Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -1968,6 +1973,10 @@ impl fmt::Debug for Neighbor {
             .field("export_policy", &self.export_policy)
             .field("import_policy_chain", &self.import_policy_chain)
             .field("export_policy_chain", &self.export_policy_chain)
+            .field(
+                "conditional_advertisements",
+                &self.conditional_advertisements,
+            )
             .finish()
     }
 }
@@ -2375,6 +2384,15 @@ pub struct PolicyConfig {
     /// Global export policy chain (references named definitions).
     #[serde(default)]
     pub export_chain: Vec<String>,
+    /// Named conditional-advertisement definitions (ADR-0137), attached
+    /// to static neighbors by name through
+    /// `[[neighbors]] conditional_advertisements`.
+    #[serde(
+        default,
+        skip_serializing_if = "HashMap::is_empty",
+        serialize_with = "serialize_sorted_hash_map"
+    )]
+    pub conditional_advertisements: HashMap<String, ConditionalAdvertisementConfig>,
     /// Import-decision explain cache tuning (ADR-0073). **Opt-in** —
     /// omitting this section leaves import explain disabled. Diagnostic
     /// retention only — does not affect which routes are accepted.
@@ -2473,6 +2491,7 @@ impl Default for PolicyConfig {
             neighbor_sets: HashMap::new(),
             import_chain: Vec::new(),
             export_chain: Vec::new(),
+            conditional_advertisements: HashMap::new(),
             explain: PolicyExplainConfig::default(),
             reject_retention: PolicyRejectRetentionConfig::default(),
             rpol_files: Vec::new(),
@@ -2649,6 +2668,48 @@ impl Default for PolicyRejectRetentionConfig {
 }
 
 pub(crate) const MAX_POLICY_CACHE_ENTRIES: usize = 1 << 21;
+
+/// Upper bound for [`ConditionalAdvertisementConfig::settle_time`], in seconds.
+pub(crate) const MAX_CONDITIONAL_ADVERTISEMENT_SETTLE_TIME: u32 = 600;
+
+/// Condition state in which a conditional advertisement's controlled
+/// routes may be advertised (ADR-0137).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ConditionalAdvertiseIf {
+    /// Advertise while a condition route is present.
+    Present,
+    /// Advertise while no condition route is present.
+    Absent,
+}
+
+/// One `[policy.conditional_advertisements.<name>]` definition (ADR-0137).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ConditionalAdvertisementConfig {
+    /// Named policy (TOML or `.rpol`, call form allowed) used as a
+    /// predicate: the routes it permits are controlled by this definition.
+    /// Its modifications are not applied.
+    pub advertise_policy: String,
+    /// Condition state in which the controlled routes may be advertised.
+    pub advertise_if: ConditionalAdvertiseIf,
+    /// Exact IPv4 or IPv6 unicast prefixes whose candidates decide the
+    /// condition. Nonempty; ranges are not accepted.
+    pub condition_prefixes: Vec<String>,
+    /// Optional named policy used as a predicate over each condition
+    /// candidate; omitted means any candidate counts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub condition_policy: Option<String>,
+    /// Seconds a changed condition must stay stable before it applies.
+    /// Default 5, range 0..=600.
+    #[serde(default = "default_conditional_advertisement_settle_time")]
+    #[schemars(range(max = 600))]
+    pub settle_time: u32,
+}
+
+const fn default_conditional_advertisement_settle_time() -> u32 {
+    5
+}
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]

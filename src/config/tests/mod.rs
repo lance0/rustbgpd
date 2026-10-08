@@ -936,6 +936,7 @@ fn test_neighbor(addr: &str, asn: u32) -> Neighbor {
         export_policy: Vec::new(),
         import_policy_chain: Vec::new(),
         export_policy_chain: Vec::new(),
+        conditional_advertisements: Vec::new(),
         log_level: None,
     }
 }
@@ -2068,6 +2069,7 @@ const RELOAD_MATRIX_NEIGHBOR_FIELDS: &[&str] = &[
     "export_policy",
     "import_policy_chain",
     "export_policy_chain",
+    "conditional_advertisements",
 ];
 
 /// All `PeerGroupConfig` field names. Mirror of the `Neighbor` list
@@ -2464,6 +2466,7 @@ fn assert_not_reserved_deny(chain: Option<&PolicyChain>) {
     }
 }
 
+mod conditional_advertisement;
 mod dataplane;
 mod datasets;
 mod diff;

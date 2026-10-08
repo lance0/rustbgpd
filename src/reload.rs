@@ -2292,6 +2292,7 @@ pub(crate) async fn reload_config_with_tcp_ao(
         || !policy_diff.neighbor_sets_changed.is_empty()
         || policy_diff.import_chain_changed
         || policy_diff.export_chain_changed
+        || !policy_diff.conditional_advertisements_changed.is_empty()
         || policy_diff.rpol_changed;
     let dataset_events_pending = !new_config.policy.dataset_events.swapped.is_empty()
         || !new_config.policy.dataset_events.failed.is_empty();

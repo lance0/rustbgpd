@@ -664,6 +664,8 @@ impl Config {
             store,
         )?;
 
+        self.validate_conditional_advertisements(stores.next_store())?;
+
         // Validate neighbor address/interface identity. Numbered peers remain
         // keyed by bare address; link-local peers are scoped by interface.
         {
@@ -1032,6 +1034,7 @@ impl Config {
                 self.global.asn,
                 store,
             )?;
+            self.validate_neighbor_conditional_advertisements(neighbor)?;
         }
 
         // Validate RPKI cache server config
@@ -3586,4 +3589,113 @@ fn validate_bfd(config: &Config) -> Result<(), ConfigError> {
 fn is_ipv6_link_local_addr(addr: &std::net::Ipv6Addr) -> bool {
     let octets = addr.octets();
     octets[0] == 0xfe && (octets[1] & 0xc0) == 0x80
+}
+
+impl Config {
+    /// Validate `[policy.conditional_advertisements]` definitions (ADR-0137):
+    /// both predicate policies resolve, and the condition prefixes are a
+    /// nonempty set of exact unicast prefixes.
+    fn validate_conditional_advertisements(
+        &self,
+        store: &mut rustbgpd_policy::sets::SetStore,
+    ) -> Result<(), ConfigError> {
+        let mut names: Vec<&String> = self.policy.conditional_advertisements.keys().collect();
+        names.sort();
+        for name in names {
+            let definition = &self.policy.conditional_advertisements[name];
+            let invalid = |reason: String| ConfigError::InvalidPolicyEntry {
+                reason: format!("conditional advertisement {name:?}: {reason}"),
+            };
+            if name.trim().is_empty() {
+                return Err(invalid("name must not be empty".to_string()));
+            }
+            for (policy, direction) in [
+                (Some(&definition.advertise_policy), ChainDirection::Export),
+                (definition.condition_policy.as_ref(), ChainDirection::Import),
+            ] {
+                let Some(policy) = policy else { continue };
+                resolve_chain_with_store(
+                    std::slice::from_ref(policy),
+                    &self.policy.definitions,
+                    &self.policy.rpol,
+                    &self.policy.dataset_bindings,
+                    &self.policy.neighbor_sets,
+                    &self.peer_groups,
+                    direction,
+                    self.global.asn,
+                    store,
+                )?;
+            }
+            if definition.condition_prefixes.is_empty() {
+                return Err(invalid("condition_prefixes must not be empty".to_string()));
+            }
+            let mut seen = HashSet::new();
+            for prefix in &definition.condition_prefixes {
+                let key = parse_exact_unicast_prefix(prefix).map_err(invalid)?;
+                if !seen.insert(key) {
+                    return Err(invalid(format!(
+                        "condition prefix {prefix:?} is listed more than once"
+                    )));
+                }
+            }
+            if definition.settle_time > super::schema::MAX_CONDITIONAL_ADVERTISEMENT_SETTLE_TIME {
+                return Err(invalid(format!(
+                    "settle_time = {} exceeds maximum {}",
+                    definition.settle_time,
+                    super::schema::MAX_CONDITIONAL_ADVERTISEMENT_SETTLE_TIME
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    /// Validate one static neighbor's conditional-advertisement attachments:
+    /// every name is defined and attached once.
+    fn validate_neighbor_conditional_advertisements(
+        &self,
+        neighbor: &Neighbor,
+    ) -> Result<(), ConfigError> {
+        let mut seen = HashSet::new();
+        for name in &neighbor.conditional_advertisements {
+            let reason = if !self.policy.conditional_advertisements.contains_key(name) {
+                format!("undefined conditional advertisement {name:?}")
+            } else if !seen.insert(name) {
+                format!("conditional advertisement {name:?} is attached more than once")
+            } else {
+                continue;
+            };
+            return Err(ConfigError::InvalidNeighborConfig {
+                address: neighbor.address.clone(),
+                field: "conditional_advertisements".to_string(),
+                reason,
+            });
+        }
+        Ok(())
+    }
+}
+
+/// Parse an exact unicast prefix (`addr/len` with no host bits set), returning
+/// its canonical key.
+fn parse_exact_unicast_prefix(prefix: &str) -> Result<(IpAddr, u8), String> {
+    let (addr, len) = prefix
+        .split_once('/')
+        .ok_or_else(|| format!("condition prefix {prefix:?} is not in CIDR notation"))?;
+    let addr: IpAddr = addr
+        .parse()
+        .map_err(|_| format!("condition prefix {prefix:?} has an invalid address"))?;
+    let len: u8 = len
+        .parse()
+        .map_err(|_| format!("condition prefix {prefix:?} has an invalid length"))?;
+    let max = if addr.is_ipv4() { 32 } else { 128 };
+    if len > max {
+        return Err(format!("condition prefix {prefix:?} length exceeds {max}"));
+    }
+    let key = effective_prefix(addr, len);
+    if key.0 != addr {
+        return Err(format!(
+            "condition prefix {prefix:?} has host bits set; use {}/{len}",
+            key.0
+        ));
+    }
+    Ok(key)
 }
