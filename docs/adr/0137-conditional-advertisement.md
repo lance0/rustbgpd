@@ -110,7 +110,7 @@ conditional_advertisements = ["backup-via-transit-b"]
 | `advertise_policy` | string | yes | — | Named policy, including the call form of a parameterized `.rpol` policy, that selects the controlled routes. Its permit/deny verdict is the only output; its modifications are not applied, matching `apply(p)`. As with `apply`, a policy that never rejects selects every route, so a predicate policy should use `default_action = "deny"` or a final rejecting term. |
 | `advertise_if` | `"present"` \| `"absent"` | yes | — | The condition state in which controlled routes may be advertised. |
 | `condition_prefixes` | array of prefixes | yes, nonempty | — | Exact IPv4 or IPv6 unicast prefixes. Prefix ranges are not accepted. One definition may mix address families. |
-| `condition_policy` | string | no | none | Named policy used as a predicate over each condition candidate. Peer context in this evaluation is the candidate's **source** peer, so a neighbor-set match can test which peer sent the route. |
+| `condition_policy` | string | no | none | Named policy used as a predicate over each condition candidate. Peer context in this evaluation is the candidate's **source** peer, so a neighbor-set match can test which peer sent the route. A locally injected candidate has no source peer (see Decision 2). |
 | `settle_time` | integer seconds | no | `5` | Range 0–600. See Decision 3. |
 | `Neighbor.conditional_advertisements` | array of names | no | `[]` | Definitions attached to this static neighbor. Duplicate entries and unknown names are load errors. |
 
@@ -142,12 +142,25 @@ injected routes. A candidate does **not** have to be the Loc-RIB best path.
 This follows FRR's any-path semantics: "is transit A's default route still
 here?" must be true even when transit B's default route is selected.
 
+**Peer context for `condition_policy`.** For a received candidate, the
+predicate sees the source peer's address, its configured remote ASN, and its
+peer group. A locally injected candidate is stored under the `LOCAL_PEER`
+sentinel (`0.0.0.0`), which is not a peer. For such a candidate, all three
+peer-context fields are **absent**. The `0.0.0.0` sentinel is never passed as
+an address. With absent fields, neither a neighbor-set match nor its negation
+(`NeighborSetMatch::matches` / `matches_ne`) is true, so a predicate such as
+"not from transit A" cannot silently count an injected route as a match.
+Group-staged export evaluation already passes absent peer context the same way.
+To select injected candidates explicitly, a predicate matches route type
+`local`.
+
 **`condition_policy` evaluation errors do not change state.** A candidate
 whose `condition_policy` evaluation returns an `eval_error` is neither a
 match nor a miss. If another candidate matches cleanly, the condition is
 present. Otherwise, if any candidate errored, the observed state is
-`unknown`. An `unknown` observation starts no settle timer, cancels any
-pending one, and leaves `applied` unchanged, including `pending` at
+`unknown`. Decision 3 defines how the tracker treats `unknown`: it starts no
+settle timer, cancels any pending one, and leaves `applied` unchanged,
+including `pending` at
 startup. Explain reports the held state and the error, and the existing
 `bgp_policy_eval_errors_total` counter and per-term error counters record it.
 A policy that fails continuously therefore freezes the definition in its last
@@ -173,14 +186,25 @@ miss. There is no table walk on route churn.
 
 Each definition holds three values:
 
-- `observed`: present or absent, recomputed as above.
+- `observed`: `present`, `absent`, or `unknown`, recomputed as above. All
+  three are first-class observations.
 - `applied`: `pending`, `advertise`, or `suppress`. The gate uses this value.
-- `observed_since`: when `observed` last changed.
+- `observed_since`: when `observed` last changed to a different observation,
+  including a change to or from `unknown`.
 
-When `observed` changes, the actor sets a timer for
+When `observed` changes to `present` or `absent`, the actor sets a timer for
 `observed_since + settle_time`. When the timer expires, if `observed` has not
 changed since then and differs from what `applied` represents, `applied`
 changes once. A `settle_time` of 0 applies the change when the pass finishes.
+
+When `observed` changes to `unknown`, the actor cancels any armed timer and
+leaves `applied` as it is. When a known observation returns after `unknown`,
+it is a new observation: `observed_since` is the time it returned, and the
+full `settle_time` interval is armed again. This holds even when the
+observation matches the one seen before the error. As a result, `absent →
+unknown → absent` always ends with an armed timer, never a cancelled one,
+and a condition must remain known and stable for a full `settle_time` before
+an error-interrupted interval can change `applied`.
 
 **Justification.** A debounce, unlike a rate limit, suppresses brief
 condition losses entirely, such as a session reset that reconnects within the
@@ -219,9 +243,10 @@ dry run and `explain_single_best_prefix`.
 
 For each definition attached to the target peer whose `applied` state is not
 `advertise`, the gate evaluates `advertise_policy` on the candidate's source
-attributes with the target peer's context. If the policy permits the
-candidate, the candidate is suppressed. A route must pass every attached
-definition. When every definition attached to the peer is advertising, the
+attributes with the target peer's context. A clean permit suppresses the
+candidate. An evaluation error also suppresses it (see below), so an error is
+never treated as a miss. Only a clean rejection lets the candidate continue
+to the export chain. A route must pass every attached definition. When every definition attached to the peer is advertising, the
 gate passes without evaluating a policy, so peers in steady state pay nothing.
 
 **`advertise_policy` evaluation errors fail closed.** While a definition is
@@ -376,14 +401,51 @@ vocabulary.
 
 | Metric | Type | Labels | Meaning |
 |--------|------|--------|---------|
-| `bgp_conditional_advertisement_condition_present` | gauge | `name` | Observed condition: 1 when present, 0 when absent |
-| `bgp_conditional_advertisement_permitted` | gauge | `name` | Applied gate: 1 when controlled routes may be advertised, 0 when suppressed or pending |
+| `bgp_conditional_advertisement_condition` | gauge | `name`, `state` | Observed condition as a state set: one series per state (`present`, `absent`, `unknown`). The current state's series is 1, and the others are 0. |
+| `bgp_conditional_advertisement_permitted` | gauge | `name`, `advertise_if` | Applied gate: 1 when controlled routes may be advertised, 0 when suppressed or pending. `advertise_if` carries the configured mode. |
 | `bgp_conditional_advertisement_transitions_total` | counter | `name` | Changes to the applied state |
 
-Label cardinality is bounded by configured definition names. A series is
-removed when its definition is dropped. Divergence between the condition-present
-and permitted gauges, with no new transitions, shows a condition that is
-flapping inside the settle window. Each applied transition logs one
+The observed condition uses the Prometheus state-set idiom (one series per
+state, with a `state` label) instead of a sentinel value such as `-1`. A
+query therefore selects `unknown` explicitly, and it cannot be mistaken for a
+numeric comparison. Label cardinality is bounded by configured definition
+names times three states. A definition's series are removed when the
+definition is dropped.
+
+**Health check.** The applied gate should equal the mode-adjusted
+expectation for the observed condition:
+
+- `permitted` should be 1 when the condition is `present` and `advertise_if`
+  is `present`;
+- `permitted` should be 1 when the condition is `absent` and `advertise_if`
+  is `absent`;
+- otherwise, `permitted` should be 0.
+
+`unknown` observations are excluded from the comparison, because the gate
+deliberately holds its last applied state while the condition is unknown.
+
+```promql
+(
+  bgp_conditional_advertisement_permitted{advertise_if="present"}
+    != on(name) bgp_conditional_advertisement_condition{state="present"}
+)
+or
+(
+  bgp_conditional_advertisement_permitted{advertise_if="absent"}
+    != on(name) bgp_conditional_advertisement_condition{state="absent"}
+)
+unless on(name) (bgp_conditional_advertisement_condition{state="unknown"} == 1)
+```
+
+A mismatch is expected for a while and does not by itself mean a fault: at
+startup the gate is `pending`, which suppresses, and after every change of
+condition the gate waits `settle_time` before following. An alert or check
+built on this expression must therefore use a `for:` window longer than the
+largest configured `settle_time`. A mismatch that lasts longer than that
+window, with no new transitions, indicates a condition that is flapping
+inside the settle window or a gate that is not following its condition.
+
+Each applied transition logs one
 `info`-level event with the definition name, the old and new states, and the
 condition prefix that decided it. Logged event fields are a compatibility
 surface, so the fields are documented when the event ships. Per-peer suppressed
@@ -447,7 +509,12 @@ Promotion would require a separate inventory decision after operational use.
    returns an evaluation error makes the observation `unknown`. In that case
    the applied state holds, both during a settle window and from `pending`,
    and a clean match from another candidate still makes the condition
-   present.
+   present. `absent → unknown → absent`, where the outer two observations
+   match, arms a fresh full `settle_time` from the return to `absent`. That
+   holds whether `applied` differs or not, and the state-set gauge reports
+   each of the three observations. A locally injected candidate sees absent
+   peer context: a neighbor-set predicate and its negation both miss it, and
+   a route-type `local` predicate matches it.
 3. **Real export path:** a single-best peer goes present → absent → present
    for `advertise_if = "present"`. Gated routes receive exact withdrawals and
    re-advertisements, and other routes do not change. Run the same sequence
