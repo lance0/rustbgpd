@@ -30,37 +30,11 @@ GRPC_ADDR=""
 RUSTBGPD="${RUSTBGPD:-clab-${TOPO}-rustbgpd}"
 
 # Refuse to test a deployed rustbgpd:dev container whose image was not built
-# from this tree (a reused BuildKit context can keep a stale COPY). Every
-# container of the lab is checked, because mixed-version labs run the tree
-# under test beside pinned releases under another name than $RUSTBGPD. Each
-# is checked by its image id, not the tag, which a later build may move.
-# Any docker failure fails closed, except an unlisted $RUSTBGPD that does not
-# exist: that lab is not deployed, and preflight reports it.
-if ! _sid_listed=$(docker ps --filter "label=containerlab=$TOPO" --format '{{.Names}}'); then
-    echo "source-id: cannot list the containers of lab $TOPO" >&2
-    exit 1
-fi
-while read -r _sid_name; do
-    [ -n "$_sid_name" ] || continue
-    if ! _sid_config=$(docker inspect -f '{{.Config.Image}}' "$_sid_name" 2>/dev/null); then
-        case $'\n'"$_sid_listed"$'\n' in
-            *$'\n'"$_sid_name"$'\n'*) ;;
-            *) continue ;;
-        esac
-        echo "source-id: cannot inspect $_sid_name" >&2
-        exit 1
-    fi
-    [ "$_sid_config" = rustbgpd:dev ] || continue
-    _sid_image=$(docker inspect -f '{{.Image}}' "$_sid_name" 2>/dev/null || true)
-    if [ -z "$_sid_image" ]; then
-        echo "source-id: cannot read the image id of $_sid_name" >&2
-        exit 1
-    fi
-    echo "source-id: checking $_sid_name (rustbgpd:dev)" >&2
-    "$(dirname "${BASH_SOURCE[0]}")/../../../scripts/source-id.sh" \
-        --check "$_sid_image" </dev/null || exit 1
-done < <(printf '%s\n' "$RUSTBGPD" "$_sid_listed" | sort -u)
-unset _sid_listed _sid_name _sid_config _sid_image
+# from this tree. Every container of the lab is checked, plus $RUSTBGPD, which
+# preflight reports if the lab is not deployed.
+# shellcheck source=tests/interop/scripts/source-id-guard.sh
+source "$(dirname "${BASH_SOURCE[0]}")/source-id-guard.sh"
+check_lab_source_ids "$TOPO" "$RUSTBGPD" || exit 1
 
 # Ordinary interop slices can opt into the shared, deliberately public
 # test-only operator credential by setting this to 1 before sourcing the

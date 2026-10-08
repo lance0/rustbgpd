@@ -158,6 +158,7 @@ jobs:
       - name: Check shared interop helpers
         run: |
           for f in tests/interop/scripts/test-lib.sh \
+            tests/interop/scripts/source-id-guard.sh \
             tests/interop/scripts/test-test-operator-auth-helper.sh \
             tests/interop/scripts/test-test-source-id-guard.sh \
             tests/interop/scripts/test-test-vtep-route-oracles.sh \
@@ -166,6 +167,7 @@ jobs:
             bash -n "$f"
           done
           shellcheck -x tests/interop/scripts/test-lib.sh \
+            tests/interop/scripts/source-id-guard.sh \
             tests/interop/scripts/test-test-operator-auth-helper.sh \
             tests/interop/scripts/test-test-source-id-guard.sh \
             tests/interop/scripts/test-test-vtep-route-oracles.sh \
