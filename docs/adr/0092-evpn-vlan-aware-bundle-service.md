@@ -53,11 +53,17 @@ remote MACs to `(VNI, MAC)` because ADR-0089 keeps Ethernet Tag `0`.
 ### 1. Bundle service is an explicit opt-in service-interface mode
 
 > **Superseded in part by the [2026-10-08 amendment](#amendment-2026-10-08-vtep-origination-and-import-mvp-shape) (A, B, B2).**
-> The opt-in and the model below still hold. The nested
-> `[[evpn_bundle_instances]]` member-map sketch does not: each member is a flat
-> `[[evpn_instances]]` row with `service_interface = "vlan_aware_bundle"` and an
-> explicit `ethernet_tag`. The bundle is identified by its shared RT set, and
-> each member has its own RD.
+> The opt-in still holds, and `bridge_vlan` stays a local selector. Two parts
+> below no longer hold:
+>
+> - The nested `[[evpn_bundle_instances]]` member-map sketch. Each member is
+>   now a flat `[[evpn_instances]]` row with
+>   `service_interface = "vlan_aware_bundle"` and an explicit `ethernet_tag`.
+> - `RD` in the shared left-hand identity of the model. Per amendment B, each
+>   member has its own RD, and the bundle is identified by its RT set alone.
+>
+> The authoritative model is now
+> `(RT set, Ethernet Tag) -> member row (bridge, bridge_vlan, VNI, own RD)`.
 
 The default remains ADR-0089 VLAN-Based Service over Linux VLAN-aware bridge
 topologies. True VLAN-Aware Bundle is selected explicitly, for example:
@@ -167,8 +173,13 @@ accepted extension to this one.
 > There is no member map. VNI uniqueness is the existing daemon-wide check. The
 > duplicate `(bridge, bridge_vlan)` check applies when a bundle row is
 > involved, whether that pair is shared with another bundle member or with a
-> VLAN-Based row. The amendment adds the RT and Ethernet Tag uniqueness rules.
-> The migration and cutover-window text still holds.
+> VLAN-Based row. Coexistence is separated by RT set, not by EVI or RD, because
+> an RT shared between a bundle row and a VLAN-Based row is rejected. The
+> amendment adds the RT and Ethernet Tag uniqueness rules. Amendment I
+> replaces the migration and transition-window text below: a row redefine
+> replays local routes rather than waiting for MACs to be re-learned, and the
+> window lasts until every PE uses the same tag set. The statement that
+> migration is not hitless still holds.
 
 Tag-0 ADR-0089 instances and bundle instances may coexist across different
 EVIs/RDs. They must not both claim the same local `(bridge, bridge_vlan)` or
@@ -222,11 +233,18 @@ receipt" abstract:
 **Status:** Accepted (2026-10-08). The points below are decided, not
 proposed.
 
-A survey of the VTEP code before origination work refines Decisions 1-4.
-The model `(EVI / RT set, Ethernet Tag) -> (bridge, bridge_vlan, VNI)` is
-unchanged. This amendment decides how the MVP maps that model onto the
-existing per-VNI machinery, where the fail-closed checks run, and the order
-in which the proofs land.
+A survey of the VTEP code before origination work refines Decisions 1-6.
+The authoritative bundle identity is now:
+
+```text
+(RT set, Ethernet Tag) -> member row (bridge, bridge_vlan, VNI, own RD)
+```
+
+This replaces Decision 1's `(EVI / RD / RT set, Ethernet Tag)`, because RD
+is no longer part of the shared identity (B). This amendment decides how the
+MVP maps that model onto the existing per-VNI machinery, where the
+fail-closed checks run, the order in which the proofs land, and how
+migration works (I).
 
 **A. Bundle members are `[[evpn_instances]]` rows.** A member is an ordinary
 instance row with `service_interface = "vlan_aware_bundle"` and a non-zero
@@ -234,11 +252,13 @@ instance row with `service_interface = "vlan_aware_bundle"` and a non-zero
 already operates on a row: readiness, runtime add/delete/redefine, Linux
 local-MAC attribution, duplicate-MAC detection and SVI origination. A nested
 member table would need a parallel version of each one. The bundle is
-identified by its shared route-target set. This follows RFC 8365 §5.1.2 Option 2, where
-the control plane identifies a bridge table by `<RT, Ethernet Tag>`.
+identified by its shared route-target set. This follows RFC 8365 §5.1.2
+Option 2, where the control plane identifies a bridge table by
+`<RT, Ethernet Tag>`.
 
-**B. Each member keeps its own RD in the MVP.** Receivers select a bridge
-table by RT and Ethernet Tag, so a shared RD is not load-bearing on the wire.
+**B. Each member keeps its own RD in the MVP.** RD is not part of the bundle
+identity. Receivers select a bridge table by RT and Ethernet Tag, so a shared
+RD is not load-bearing on the wire.
 Nokia SR Linux uses this shape for its bundle interoperability mode.
 A shared bundle RD remains a later option: it can be added by relaxing the
 duplicate-RD check, without breaking existing configurations.
@@ -341,7 +361,7 @@ list.
   - Type 2 (MAC-only, MAC+IP, SVI) and Type 3 carry the member's tag, RD and
     VNI;
   - a redefine from tag 0 to a non-zero tag withdraws the old keys and
-    originates the new ones.
+    originates the new ones (I).
 - Per-tag import and projection:
   - the same remote MAC under two member tags gives two `(VNI, MAC)` entries
     and two VLAN-scoped FDB rows;
@@ -360,6 +380,24 @@ list.
   - the negative cases move only the drop counters.
 - Received-IMET flood-list resolution per member is tested with the
   flood-list work. SR Linux follows it, as slice 4.
+
+**I. Migration.** VNIs are unique and the `(bridge, bridge_vlan)` check
+applies to bundle rows, so a VLAN-Based row and a bundle row cannot serve the
+same broadcast domain side by side. A broadcast domain moves to bundle mode in
+one of two ways:
+
+- **Redefine the existing row.** Set `service_interface` and `ethernet_tag`
+  on it. This uses the existing L2VNI redefine path: the tag-0 routes are
+  withdrawn, and local routes are replayed under the new tag. The old routes
+  are withdrawn, not reinterpreted.
+- **Build a new row alongside.** Give it a new VNI, a new `bridge_vlan` and
+  the bundle RT set, then move hosts to it.
+
+Either way, every PE in the EVI must move to the same tag set (RFC 8365
+§5.1.3). Until they all have, a PE that is still on tag 0 and a PE on the
+bundle tag do not import each other's routes, and those drops are counted as
+`ethernet_tag_mismatch`. This is the cutover window from Decision 5. The MVP
+does not promise a hitless migration.
 
 ## Consequences
 
