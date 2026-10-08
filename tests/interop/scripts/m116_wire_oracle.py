@@ -9,8 +9,9 @@ PDML `value` is empty, so its raw bytes are rebuilt from the hex `value` and
 then decoded from those bytes, not from tshark's interpretation, so a 4-octet
 next hop under AFI 2 is judged as sent. Prints one
 PASS/FAIL line per expectation: every UPDATE announcing PREFIX to RECEIVER
-must carry a 16-octet NEXT_HOP global address, or 32 octets whose second half
-is link-local. Then one line covering every receiver-bound IPv6 MP_REACH_NLRI
+must carry exactly the 16-octet global NEXT_HOP. Every M116 receiver is on a
+link other than the source's, so RFC 2545 §3 forbids the source's link-local
+toward it. Then one line covering every receiver-bound IPv6 MP_REACH_NLRI
 (16 or 32 octets only) and one for NOTIFICATIONs. A malformed PDML or attribute
 raises and exits non-zero.
 """
@@ -143,14 +144,16 @@ def judge(root: ET.Element, expected: list[tuple[str, str, str]]) -> list[str]:
     for dst, prefix, want in expected:
         hops = seen[(dst, prefix)]
         good = bool(hops) and all(
-            valid_ipv6_next_hop(h) and ipaddress.IPv6Address(h[:16]) == ipaddress.IPv6Address(want)
+            len(h) == 16
+            and valid_ipv6_next_hop(h)
+            and ipaddress.IPv6Address(h) == ipaddress.IPv6Address(want)
             for h in hops
         )
         detail = (
             f"to {dst} {prefix}: {len(hops)} MP_REACH UPDATE(s), next hops "
             f"{[f'{len(h)}-octet {show(h)}' for h in hops]}"
         )
-        suffix = "" if good else f"; expected a 16- or 32-octet next hop {want} in each"
+        suffix = "" if good else f"; expected the 16-octet next hop {want} in each"
         lines.append(("PASS " if good else "FAIL ") + detail + suffix)
     lines.append(
         ("PASS " if not invalid else "FAIL ")

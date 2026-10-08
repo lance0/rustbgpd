@@ -71,9 +71,10 @@ class M116WireOracleTests(unittest.TestCase):
     def test_sixteen_octet_global_passes(self) -> None:
         self.assertEqual(verdicts(pdml(update(mp_reach(GLOBAL)))), ["PASS", "PASS", "PASS"])
 
-    def test_global_plus_link_local_passes(self) -> None:
+    def test_link_local_toward_off_link_receiver_fails_expectation_only(self) -> None:
+        # Well formed, but RFC 2545 §3 keeps the source's link-local on its link.
         root = pdml(update(mp_reach(GLOBAL + LINK_LOCAL)))
-        self.assertEqual(verdicts(root), ["PASS", "PASS", "PASS"])
+        self.assertEqual(verdicts(root), ["FAIL", "PASS", "PASS"])
 
     def test_four_octet_next_hop_fails(self) -> None:
         # The pre-fix shape: an IPv6 NLRI behind an IPv4 next hop.
