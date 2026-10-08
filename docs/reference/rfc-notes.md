@@ -792,6 +792,12 @@ Interpretation decisions:
 
 ## Milestone 1 — RFC 4271 Sections
 
+> Updated 2026-10-08: Milestone 1 first reset the session for every UPDATE
+> validation error. The inbound path now applies RFC 7606 dispositions, so
+> the entries below give the NOTIFICATION subcode each check classifies and
+> point to the [RFC 7606 section](#rfc-7606--revised-bgp-update-error-handling)
+> for what happens to the session.
+
 ### §5.1.1 — ORIGIN Attribute
 
 - Decoded from 1-byte value: 0=IGP, 1=EGP, 2=INCOMPLETE.
@@ -801,14 +807,17 @@ Interpretation decisions:
 
 - Segments decoded as type(1) + count(1) + ASNs(2 or 4 bytes each).
 - Segment types: AS_SEQUENCE (2), AS_SET (1).
-- Empty segments (count=0) are rejected as malformed (NOTIFICATION 3,11).
+- Empty segments (count=0) are malformed AS_PATH (subcode 11); the inbound
+  decoder applies RFC 7606 treat-as-withdraw and the session stays
+  Established.
 - 4-byte ASN encoding used when `four_octet_as` capability is negotiated.
 
 ### §5.1.3 — NEXT_HOP Attribute
 
 - 4 bytes decoded as IPv4 address.
 - Validated: 0.0.0.0, 127.0.0.0/8, 224.0.0.0/4, 255.255.255.255 are
-  all rejected with NOTIFICATION (3, 8) — Invalid NEXT_HOP Attribute.
+  Invalid NEXT_HOP Attribute (3, 8) and are treat-as-withdraw under
+  RFC 7606; the session stays Established.
 - Mandatory for eBGP with NLRI. Not required for iBGP (may be omitted
   or set by the transport layer).
 
@@ -826,8 +835,11 @@ Interpretation decisions:
 
 ### §6.3 — UPDATE Message Error Handling
 
-- All validation checks produce specific NOTIFICATION subcodes:
-  - (3,1) Malformed Attribute List — duplicate type codes
+- Validation classifies each check with a NOTIFICATION subcode; the inbound
+  disposition follows the [RFC 7606 section](#rfc-7606--revised-bgp-update-error-handling):
+  - (3,1) Malformed Attribute List — duplicate type codes (the first
+    occurrence is kept; a duplicate MP_REACH_NLRI / MP_UNREACH_NLRI resets
+    the session)
   - (3,2) Unrecognized Well-known Attribute — Optional=0 + unknown type
   - (3,3) Missing Well-known Attribute — ORIGIN, AS_PATH, NEXT_HOP (eBGP)
   - (3,4) Attribute Flags Error — well-known with wrong Optional/Transitive
@@ -910,6 +922,22 @@ not add a neighbor-discovery monitor or make stale next hops reachable.
 
 ---
 
+## RFC 4684 — RT-Constrain membership matching
+
+- A membership NLRI is a 4-octet origin AS followed by up to 64 bits of
+  Route Target prefix. Matching compares only the Route Target bits after
+  the origin AS (§4, §6): the origin AS identifies the source of the
+  membership, not the Route Target's global administrator.
+- A membership of length 32 or less carries no Route Target bits and covers
+  every Route Target, as does the zero-length default membership. A longer
+  partial prefix compares every covered bit.
+- Only Route Target extended communities match. Route Origin and other
+  extended communities never match, even against the default membership.
+- The outbound RT membership gate applies this to VPN and EVPN advertisements
+  toward a peer that negotiated RT-Constrain.
+
+---
+
 
 ## RFC 4760 — Multiprotocol Extensions for BGP-4
 
@@ -929,7 +957,11 @@ AFI (2 bytes) | SAFI (1) | NH-Len (1) | Next Hop (variable) | Reserved (1) | NLR
   next-hop and preserves the trailing 16 in `link_local_next_hop`
   (round-tripped through wire / RIB / MRT since v0.11.0); ADR-0069 resolves a
   link-local next-hop as a scoped next-hop for unnumbered IPv4-over-IPv6 and
-  Linux FIB `dev`.
+  Linux FIB `dev`. On a session that negotiated Link-Local Next Hop
+  capability 77, a 16-byte link-local-only next hop and a 32-byte
+  link-local-plus-link-local or unspecified-plus-link-local pair are also
+  accepted; see
+  [Link-Local Next Hop capability](#link-local-next-hop-capability--draft-ietf-idr-linklocal-capability-06).
 - NLRI: same prefix-length encoding as IPv4, but up to 128 bits (16 bytes
   of address data).
 - When `MP_REACH_NLRI` is present in an UPDATE, the body NEXT_HOP attribute
@@ -1591,7 +1623,8 @@ carries inactive (absent), unlimited (zero), or finite.
 
 ## RFC 7854 — BMP
 
-- BMP exporter (router-initiated). All 6 message types encoded.
+- BMP exporter (router-initiated). Six of the seven RFC 7854 message types
+  are encoded; Route Mirroring (type 6) is not emitted.
 - Per-collector TCP client with reconnect/backoff.
 - Peer Up replay on collector reconnect.
 - Periodic Stats Report (type 7: Adj-RIB-In route count, 60s interval).
