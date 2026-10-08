@@ -1745,21 +1745,25 @@ The applied gate follows the observed condition after `settle_time`.
 Compare it with the mode-adjusted expectation, excluding `unknown`, and
 alert only on a mismatch that lasts longer than the largest configured
 `settle_time`, because startup and every settle delay produce a
-temporary mismatch:
+temporary mismatch. The matches ignore only `state` and `advertise_if`,
+so each scraped speaker (`instance`, `job`) is compared with itself:
 
 ```promql
 (
   (
     bgp_conditional_advertisement_permitted{advertise_if="present"}
-      != on(name) bgp_conditional_advertisement_condition{state="present"}
+      != ignoring(state, advertise_if)
+    bgp_conditional_advertisement_condition{state="present"}
   )
   or
   (
     bgp_conditional_advertisement_permitted{advertise_if="absent"}
-      != on(name) bgp_conditional_advertisement_condition{state="absent"}
+      != ignoring(state, advertise_if)
+    bgp_conditional_advertisement_condition{state="absent"}
   )
 )
-unless on(name) (bgp_conditional_advertisement_condition{state="unknown"} == 1)
+unless ignoring(state, advertise_if)
+  (bgp_conditional_advertisement_condition{state="unknown"} == 1)
 ```
 
 ### RFC 8212 explicit-policy enforcement
