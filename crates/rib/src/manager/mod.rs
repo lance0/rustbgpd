@@ -12,6 +12,7 @@ pub use bench_support::{
     bench_evpn_dataplane_generation_query, bench_evpn_dataplane_generation_snapshot,
     bench_evpn_dataplane_legacy_snapshot,
 };
+mod conditional_advertisement;
 mod distribution;
 mod export_chains;
 mod flowspec_validation;
@@ -106,6 +107,9 @@ use crate::update::{
 #[cfg(test)]
 use queries::{BMP_DUMP_CHUNK_SIZE, page_routes, send_mrt_snapshot};
 
+pub use conditional_advertisement::{
+    ConditionalAdvertiseIf, ConditionalAdvertisement, ConditionalAdvertisementCapture,
+};
 use helpers::{DIRTY_RESYNC_INTERVAL, LlgrPeerConfig, gauge_val, prefix_family};
 pub use selection_deferral::{SelectionDeferralConfig, SelectionDeferralWaiterConfig};
 
@@ -770,6 +774,8 @@ pub struct RibManager {
     peer_asn: HashMap<IpAddr, u32>,
     /// Peer-group membership used for export policy neighbor-set matching.
     peer_group: HashMap<IpAddr, String>,
+    /// ADR-0137 conditional-advertisement condition tracker.
+    conditional_advertisements: conditional_advertisement::ConditionalAdvertisementTracker,
     /// Process-local content version for exact peer-group planning seals.
     peer_group_version: Option<RoutePageVersion>,
     /// Peer BGP router ID, tracked for MRT `PEER_INDEX_TABLE`.
@@ -1897,6 +1903,8 @@ impl RibManager {
             selection_deferred_refresh: HashMap::new(),
             peer_asn: HashMap::new(),
             peer_group: HashMap::new(),
+            conditional_advertisements:
+                conditional_advertisement::ConditionalAdvertisementTracker::default(),
             peer_group_version: Some(initial_route_page_version()),
             peer_bgp_id: HashMap::new(),
             update_groups: update_groups::UpdateGroupRegistry::default(),
@@ -4609,6 +4617,11 @@ impl RibManager {
         let selection_sleep = tokio::time::sleep(std::time::Duration::from_hours(24));
         tokio::pin!(selection_sleep);
 
+        // ADR-0137 conditional-advertisement settle timer — reset each
+        // iteration to the earliest armed settle deadline.
+        let conditional_sleep = tokio::time::sleep(std::time::Duration::from_hours(24));
+        tokio::pin!(conditional_sleep);
+
         loop {
             // The export roster's one publication point (ADR-0136): after
             // each completed unit, never while a grouped transition is
@@ -4763,6 +4776,14 @@ impl RibManager {
                     false
                 };
 
+            let has_conditional_timer =
+                if let Some(deadline) = self.next_conditional_advertisement_deadline() {
+                    conditional_sleep.as_mut().reset(deadline);
+                    true
+                } else {
+                    false
+                };
+
             let has_attr_gc_timer = if let Some(deadline) = self.attr_intern_gc_deadline {
                 attr_gc_sleep.as_mut().reset(deadline);
                 true
@@ -4775,7 +4796,8 @@ impl RibManager {
                 || has_gr_timers
                 || has_llgr_timers
                 || has_refresh_timers
-                || has_selection_timer;
+                || has_selection_timer
+                || has_conditional_timer;
 
             if query_rx_open && self.query_rx.is_closed() {
                 query_rx_open = false;
@@ -4845,6 +4867,11 @@ impl RibManager {
                     continue;
                 }
                 self.expire_selection_deferral();
+                continue;
+            }
+            if has_conditional_timer && conditional_sleep.deadline() <= now {
+                // Slice 3 marks the transitioned definitions' peers dirty.
+                let _ = self.fire_conditional_advertisement_timers();
                 continue;
             }
 
@@ -4986,6 +5013,9 @@ impl RibManager {
                             continue;
                         }
                         self.expire_selection_deferral();
+                    }
+                    () = conditional_sleep.as_mut(), if has_conditional_timer => {
+                        let _ = self.fire_conditional_advertisement_timers();
                     }
                 }
             } else {

@@ -1718,6 +1718,38 @@ data-unchanged caveat — it is
 stamped on every successful SIGHUP — so it is the primary "pipeline
 stuck or daemon rejecting everything" pager.
 
+### Conditional advertisement state
+
+These series describe conditional advertisement (ADR-0137). The daemon
+currently refuses configs that define conditional advertisements until
+export enforcement ships, so the series appear only once that release
+accepts them. The label `name` is a configured definition name.
+
+| Metric | What it tells you |
+|--------|-------------------|
+| `bgp_conditional_advertisement_condition{name,state}` | Observed condition as a state set: one series per `state` (`present`, `absent`, `unknown`); the current state's series is 1 and the others are 0. `unknown` means a `condition_policy` evaluation error with no clean match; the applied gate holds its last state while it lasts |
+| `bgp_conditional_advertisement_permitted{name,advertise_if}` | Applied gate: 1 when the definition's controlled routes may be advertised, 0 when suppressed or still pending after startup. `advertise_if` is the configured mode |
+| `bgp_conditional_advertisement_transitions_total{name}` | Changes to the applied state. Each one also logs `conditional advertisement transition` at `info` |
+
+The applied gate follows the observed condition after `settle_time`.
+Compare it with the mode-adjusted expectation, excluding `unknown`, and
+alert only on a mismatch that lasts longer than the largest configured
+`settle_time`, because startup and every settle delay produce a
+temporary mismatch:
+
+```promql
+(
+  bgp_conditional_advertisement_permitted{advertise_if="present"}
+    != on(name) bgp_conditional_advertisement_condition{state="present"}
+)
+or
+(
+  bgp_conditional_advertisement_permitted{advertise_if="absent"}
+    != on(name) bgp_conditional_advertisement_condition{state="absent"}
+)
+unless on(name) (bgp_conditional_advertisement_condition{state="unknown"} == 1)
+```
+
 ### RFC 8212 explicit-policy enforcement
 
 Both 0/1 gauges exist for every configured peer, including zero-valued series

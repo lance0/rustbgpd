@@ -650,6 +650,9 @@ struct BgpMetricsInner {
     // ── Policy artifact freshness (ADR-0110) ──────────────────
     policy_generation_loaded_timestamp: IntGauge,
     policy_dataset_loaded_timestamp: IntGaugeVec,
+    conditional_advertisement_condition: IntGaugeVec,
+    conditional_advertisement_permitted: IntGaugeVec,
+    conditional_advertisement_transitions: IntCounterVec,
 
     // ── Enhanced Route Refresh ────────────────────────────────
     route_refresh_in_progress: IntGaugeVec,
@@ -2151,6 +2154,36 @@ impl BgpMetrics {
         )
         .expect("valid metric definition");
 
+        let conditional_advertisement_condition = IntGaugeVec::new(
+            Opts::new(
+                "bgp_conditional_advertisement_condition",
+                "Observed condition of a conditional advertisement (ADR-0137) as a \
+                 state set: one series per state (present, absent, unknown); the \
+                 current state's series is 1 and the others are 0.",
+            ),
+            &["name", "state"],
+        )
+        .expect("valid metric definition");
+
+        let conditional_advertisement_permitted = IntGaugeVec::new(
+            Opts::new(
+                "bgp_conditional_advertisement_permitted",
+                "Applied gate of a conditional advertisement (ADR-0137): 1 when its \
+                 controlled routes may be advertised, 0 when suppressed or pending.",
+            ),
+            &["name", "advertise_if"],
+        )
+        .expect("valid metric definition");
+
+        let conditional_advertisement_transitions = IntCounterVec::new(
+            Opts::new(
+                "bgp_conditional_advertisement_transitions_total",
+                "Changes to the applied state of a conditional advertisement (ADR-0137).",
+            ),
+            &["name"],
+        )
+        .expect("valid metric definition");
+
         let route_refresh_in_progress = IntGaugeVec::new(
             Opts::new(
                 "bgp_route_refresh_in_progress",
@@ -3108,6 +3141,15 @@ impl BgpMetrics {
             .register(Box::new(policy_dataset_loaded_timestamp.clone()))
             .expect("metric not already registered");
         registry
+            .register(Box::new(conditional_advertisement_condition.clone()))
+            .expect("metric not already registered");
+        registry
+            .register(Box::new(conditional_advertisement_permitted.clone()))
+            .expect("metric not already registered");
+        registry
+            .register(Box::new(conditional_advertisement_transitions.clone()))
+            .expect("metric not already registered");
+        registry
             .register(Box::new(route_refresh_in_progress.clone()))
             .expect("metric not already registered");
         registry
@@ -3456,6 +3498,9 @@ impl BgpMetrics {
             policy_eval_errors,
             policy_generation_loaded_timestamp,
             policy_dataset_loaded_timestamp,
+            conditional_advertisement_condition,
+            conditional_advertisement_permitted,
+            conditional_advertisement_transitions,
             route_refresh_in_progress,
             route_refresh_stale_entries,
             evpn_local_originations,
@@ -5488,6 +5533,66 @@ impl BgpMetrics {
             .policy_dataset_loaded_timestamp
             .with_label_values(&[dataset])
             .set(unix_now_seconds());
+    }
+
+    /// Publish one conditional advertisement's observed condition as a
+    /// state set (ADR-0137): `state` is `present`, `absent`, or `unknown`.
+    /// Labels are bounded by configured definition names.
+    pub fn set_conditional_advertisement_condition(&self, name: &str, state: &str) {
+        for candidate in ["present", "absent", "unknown"] {
+            self.0
+                .conditional_advertisement_condition
+                .with_label_values(&[name, candidate])
+                .set(i64::from(candidate == state));
+        }
+    }
+
+    /// Publish one conditional advertisement's applied gate (ADR-0137).
+    pub fn set_conditional_advertisement_permitted(
+        &self,
+        name: &str,
+        advertise_if: &str,
+        permitted: bool,
+    ) {
+        self.0
+            .conditional_advertisement_permitted
+            .with_label_values(&[name, advertise_if])
+            .set(i64::from(permitted));
+    }
+
+    /// Count one change to a conditional advertisement's applied state.
+    pub fn record_conditional_advertisement_transition(&self, name: &str) {
+        self.0
+            .conditional_advertisement_transitions
+            .with_label_values(&[name])
+            .inc();
+    }
+
+    /// Drop every series of a conditional advertisement whose definition
+    /// was removed, or whose `advertise_if` label is being replaced.
+    pub fn reap_conditional_advertisement_series(
+        &self,
+        name: &str,
+        advertise_if: &str,
+        keep_condition: bool,
+    ) {
+        let _ = self
+            .0
+            .conditional_advertisement_permitted
+            .remove_label_values(&[name, advertise_if]);
+        if keep_condition {
+            return;
+        }
+        for state in ["present", "absent", "unknown"] {
+            let _ = self
+                .0
+                .conditional_advertisement_condition
+                .remove_label_values(&[name, state]);
+        }
+        let _ = self
+            .0
+            .conditional_advertisement_transitions
+            .remove_label_values(&[name]);
     }
 
     /// Drop the per-dataset series (loaded-timestamp gauge and
