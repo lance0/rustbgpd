@@ -1467,6 +1467,71 @@ fn rpki_cache_session_checks(
         .collect()
 }
 
+/// One `evpn.es.<interface>.auto_esi` check per `esi = "auto-lacp"`
+/// Ethernet Segment, from the daemon's `evpn_es_auto_esi_state` gauge.
+/// A NotReady segment originates nothing and is absent from
+/// `rbgp evpn es list`, so this is where its reason surfaces.
+fn evpn_auto_esi_checks(document: &toml::Value, metrics: Option<&str>) -> Vec<Check> {
+    const FAMILY: &str = "evpn_es_auto_esi_state{";
+    let mut states: HashMap<String, Option<String>> = HashMap::new();
+    for line in metrics.unwrap_or_default().lines() {
+        let Some((labels, value)) = line
+            .strip_prefix(FAMILY)
+            .and_then(|rest| rest.split_once("} "))
+        else {
+            continue;
+        };
+        let Some(labels) = parse_metric_labels(labels) else {
+            continue;
+        };
+        let (Some(interface), Some(state)) = (labels.get("interface"), labels.get("state")) else {
+            continue;
+        };
+        let entry = states.entry(interface.clone()).or_default();
+        if value.trim() == "1" {
+            *entry = Some(state.clone());
+        }
+    }
+    config_rows(document, &["ethernet_segments"])
+        .iter()
+        .filter(|row| row.get("esi").and_then(toml::Value::as_str) == Some("auto-lacp"))
+        .filter_map(|row| row.get("interface").and_then(toml::Value::as_str))
+        .map(|interface| {
+            let (status, detail) = match (metrics, states.get(interface)) {
+                (None, _) => (
+                    CheckStatus::Warn,
+                    "auto-lacp readiness unknown: the metrics snapshot is unavailable".to_string(),
+                ),
+                (Some(_), None | Some(None)) => (
+                    CheckStatus::Warn,
+                    "no auto-lacp readiness reported for this segment yet; the daemon probes \
+                     every 2 s, so rerun doctor"
+                        .to_string(),
+                ),
+                (Some(_), Some(Some(state))) if state == "ready" => (
+                    CheckStatus::Ok,
+                    "ready: originating under the RFC 7432 type 1 ESI derived from the bond's \
+                     LACP partner"
+                        .to_string(),
+                ),
+                (Some(_), Some(Some(reason))) => (
+                    CheckStatus::Warn,
+                    format!(
+                        "not ready ({reason}): the segment originates nothing until the bond \
+                         is an 802.3ad bond that is up with an LACP partner; check \
+                         /proc/net/bonding/{interface} and the daemon log"
+                    ),
+                ),
+            };
+            Check {
+                name: format!("evpn.es.{interface}.auto_esi"),
+                status,
+                detail,
+            }
+        })
+        .collect()
+}
+
 /// One bounded TCP connect, immediately dropped on success.
 async fn probe_tcp(addr: String) -> Result<(), String> {
     match tokio::time::timeout(
@@ -2878,6 +2943,9 @@ async fn run_with_deadlines(
                                 ) {
                                     reporter.record(check.name, check.status, check.detail)?;
                                 }
+                            }
+                            for check in evpn_auto_esi_checks(&document, metrics_text.as_deref()) {
+                                reporter.record(check.name, check.status, check.detail)?;
                             }
                             if let Some(check) = authz_enforcement_check(&document) {
                                 reporter.record(check.name, check.status, check.detail)?;
@@ -5012,6 +5080,63 @@ paths = ["x"]
     /// pre-existing `rpki.vrp_table` check passes this fixture. The session
     /// check is what warns; mapping a retained disconnect to `Ok` makes the
     /// retained-cache assertion red.
+    #[test]
+    fn evpn_auto_esi_check_reports_the_not_ready_reason_and_follows_the_gauge() {
+        let document: toml::Value = toml::from_str(
+            r#"
+            [[ethernet_segments]]
+            esi = "auto-lacp"
+            interface = "bond0"
+            [[ethernet_segments]]
+            esi = "auto-lacp"
+            interface = "bond1"
+            [[ethernet_segments]]
+            esi = "00:11:22:33:44:55:66:77:88:99"
+            interface = "eth9"
+            "#,
+        )
+        .unwrap();
+        let gauge = |bond0: &str| {
+            ["ready", "no_partner", "down"]
+                .iter()
+                .map(|state| {
+                    format!(
+                        "evpn_es_auto_esi_state{{interface=\"bond0\",state=\"{state}\"}} {}\n",
+                        u8::from(*state == bond0)
+                    )
+                })
+                .collect::<String>()
+        };
+        let summary = |metrics: Option<&str>| {
+            evpn_auto_esi_checks(&document, metrics)
+                .into_iter()
+                .map(|check| (check.name, check.status, check.detail))
+                .collect::<Vec<_>>()
+        };
+
+        let not_ready = summary(Some(&gauge("no_partner")));
+        assert_eq!(not_ready.len(), 2, "only auto-lacp segments get a check");
+        assert_eq!(not_ready[0].0, "evpn.es.bond0.auto_esi");
+        assert_eq!(not_ready[0].1, CheckStatus::Warn);
+        assert!(
+            not_ready[0].2.starts_with("not ready (no_partner)"),
+            "{}",
+            not_ready[0].2
+        );
+        // bond1 has no series: unknown, never green.
+        assert_eq!(not_ready[1].0, "evpn.es.bond1.auto_esi");
+        assert_eq!(not_ready[1].1, CheckStatus::Warn);
+        assert!(not_ready[1].2.contains("no auto-lacp readiness"));
+
+        let ready = summary(Some(&gauge("ready")));
+        assert_eq!(ready[0].1, CheckStatus::Ok);
+        assert!(ready[0].2.starts_with("ready"));
+
+        let unavailable = summary(None);
+        assert_eq!(unavailable[0].1, CheckStatus::Warn);
+        assert!(unavailable[0].2.contains("metrics snapshot is unavailable"));
+    }
+
     #[test]
     fn rpki_cache_session_check_warns_on_disconnected_retained_cache() {
         let caches = vec![

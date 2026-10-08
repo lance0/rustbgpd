@@ -277,6 +277,25 @@ fn unix_now_seconds() -> i64 {
         .map_or(0, |d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX))
 }
 
+/// Closed `state` vocabulary of `evpn_es_auto_esi_state`: `ready`, then
+/// every not-ready reason code an `auto-lacp` segment can report.
+#[must_use]
+pub const fn evpn_es_auto_esi_states() -> &'static [&'static str] {
+    &[
+        "ready",
+        "not_found",
+        "not_bond",
+        "not_lacp_mode",
+        "down",
+        "no_active_aggregator",
+        "no_partner",
+        "netlink_error",
+        "esi_collision",
+        "reconverge_failed",
+        "unsupported",
+    ]
+}
+
 /// Bounded label contract for aggregate ORR topology-input diagnostics.
 const ORR_INPUT_CLASSIFICATIONS: [&str; 5] = [
     "included_default",
@@ -721,6 +740,7 @@ struct BgpMetricsInner {
     evpn_duplicate_mac_quarantine_active: IntGaugeVec,
     evpn_df_role: IntGaugeVec,
     evpn_es_ac_gate: IntGaugeVec,
+    evpn_es_auto_esi_state: IntGaugeVec,
     evpn_df_role_changes: IntCounterVec,
     evpn_es_drained: IntGaugeVec,
     evpn_ip_vrf_observed_routes: IntGaugeVec,
@@ -2355,6 +2375,23 @@ impl BgpMetrics {
         )
         .expect("valid metric definition");
 
+        let evpn_es_auto_esi_state = IntGaugeVec::new(
+            Opts::new(
+                "evpn_es_auto_esi_state",
+                "Readiness of each esi = \"auto-lacp\" Ethernet Segment as a state set \
+                 per (interface, state): the current state's series is 1 and the others \
+                 are 0. state=ready means the segment originates under the RFC 7432 type 1 \
+                 ESI derived from the bond's LACP partner; every other state is the \
+                 not-ready reason (not_found, not_bond, not_lacp_mode, down, \
+                 no_active_aggregator, no_partner, netlink_error, esi_collision, \
+                 reconverge_failed, unsupported), and the segment originates nothing. \
+                 interface is the configured bond name. Series are removed when the \
+                 segment leaves the config.",
+            ),
+            &["interface", "state"],
+        )
+        .expect("valid metric definition");
+
         let evpn_df_role_changes = IntCounterVec::new(
             Opts::new(
                 "evpn_df_role_changes_total",
@@ -3249,6 +3286,9 @@ impl BgpMetrics {
             .register(Box::new(evpn_es_ac_gate.clone()))
             .expect("metric not already registered");
         registry
+            .register(Box::new(evpn_es_auto_esi_state.clone()))
+            .expect("metric not already registered");
+        registry
             .register(Box::new(evpn_df_role_changes.clone()))
             .expect("metric not already registered");
         registry
@@ -3575,6 +3615,7 @@ impl BgpMetrics {
             evpn_duplicate_mac_quarantine_active,
             evpn_df_role,
             evpn_es_ac_gate,
+            evpn_es_auto_esi_state,
             evpn_df_role_changes,
             evpn_es_drained,
             evpn_ip_vrf_observed_routes,
@@ -5973,6 +6014,31 @@ impl BgpMetrics {
                 .evpn_es_ac_gate
                 .with_label_values(&[esi, candidate])
                 .set(0);
+        }
+    }
+
+    /// Publish one `auto-lacp` Ethernet Segment's readiness as a state
+    /// set: `state` is `ready` or a not-ready reason from
+    /// [`evpn_es_auto_esi_states`]. An unknown state leaves every series
+    /// at 0, which still reads as not ready.
+    pub fn set_evpn_es_auto_esi_state(&self, interface: &str, state: &str) {
+        let states = evpn_es_auto_esi_states();
+        debug_assert!(states.contains(&state), "unknown auto-lacp state {state:?}");
+        for candidate in states {
+            self.0
+                .evpn_es_auto_esi_state
+                .with_label_values(&[interface, candidate])
+                .set(i64::from(*candidate == state));
+        }
+    }
+
+    /// Drop every state series of an `auto-lacp` segment that left the config.
+    pub fn remove_evpn_es_auto_esi_state(&self, interface: &str) {
+        for state in evpn_es_auto_esi_states() {
+            let _ = self
+                .0
+                .evpn_es_auto_esi_state
+                .remove_label_values(&[interface, state]);
         }
     }
 

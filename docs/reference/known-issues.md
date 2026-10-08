@@ -429,10 +429,12 @@ resolved.
   already committed and increments `evpn_runtime_decomposed_fail_stops_total`.
   L3VNI/device/table IP-VRF identity changes remain outside the hot-apply
   boundary by design (restart-required — kernel VRF lifecycle).
-- **`esi = "auto-lacp"` readiness is polled and reported only in logs.**
+- **`esi = "auto-lacp"` readiness is polled.**
   The bond's LACP partner is read every two seconds, so a partner change
-  takes up to that long to re-originate the segment. NotReady reasons are
-  logged on each transition; `rbgp evpn es list` shows only Ready segments.
+  takes up to that long to re-originate the segment. `rbgp evpn es list`
+  shows only Ready segments; a NotReady segment's reason is in the
+  `evpn_es_auto_esi_state` gauge, the `rbgp doctor` check
+  `evpn.es.<interface>.auto_esi`, and the log.
   While NotReady, local MACs on the segment's VNIs are advertised without an
   ESI. Type 2 (STP) derivation is not implemented. See
   [Auto-derived ESI](configuration.md#auto-derived-esi-lacp-type-1).

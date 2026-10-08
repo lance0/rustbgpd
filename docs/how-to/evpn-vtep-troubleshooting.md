@@ -519,6 +519,31 @@ the gate while the kernel reports an STP-owned state, which prevents
 the daemon from fighting STP but also means whole-port single-active
 blocking is not enforced until STP is disabled or releases the port.
 
+## `auto-lacp` Ethernet Segment missing from `rbgp evpn es list`
+
+An `esi = "auto-lacp"` segment appears in `rbgp evpn es list` only once its
+bond is an 802.3ad bond that is up with an LACP partner. Until then it
+originates nothing, and the reason is reported in three places:
+
+- `rbgp doctor`: the `evpn.es.<interface>.auto_esi` check names the reason.
+- Prometheus: `evpn_es_auto_esi_state{interface, state}`; the state with
+  value 1 is current. The `EvpnAutoLacpSegmentNotReady` alert fires after
+  `state="ready"` has read 0 for 10 minutes.
+- The log: one `warn` line per transition, with the reason code.
+
+| Reason | Meaning and next check |
+|--------|------------------------|
+| `not_found` | No interface with that name; check `interface` |
+| `not_bond` / `not_lacp_mode` | The interface is not a bond, or the bond is not `mode 802.3ad` |
+| `down` | The bond is admin down or has no carrier |
+| `no_active_aggregator` / `no_partner` | LACP has not converged; check `/proc/net/bonding/<bond>` for the partner system MAC and the CE's LACP config |
+| `netlink_error` | The kernel read failed or did not reply within one second |
+| `esi_collision` | The derived ESI matches another segment's ESI; explicit ESIs win |
+| `reconverge_failed` | Applying the derived ESI failed and is retried every two seconds; see the daemon log |
+
+See [Auto-derived ESI](../reference/configuration.md#auto-derived-esi-lacp-type-1)
+for the readiness rules.
+
 ## IP-VRF stuck in `NotReady`
 
 Gate 9 slice 6 surfaces per-VRF readiness via gRPC

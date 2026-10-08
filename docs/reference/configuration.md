@@ -4326,6 +4326,15 @@ code: `not_found`, `not_bond`, `not_lacp_mode`, `down`,
 `reconverge_failed`. Ready is logged at `info` with the derived ESI, and only
 after the segment has been published and re-applied successfully.
 
+The same state is exported as the `evpn_es_auto_esi_state{interface, state}`
+gauge, a state set with one series per state: `ready` or one of the reason
+codes above (`unsupported` on a non-Linux build). The current state's series
+is 1 and the others are 0, and the series are removed when the segment leaves
+the config. `rbgp doctor` reports each `auto-lacp` segment as
+`evpn.es.<interface>.auto_esi`, naming the reason while it is not ready, and
+the shipped `EvpnAutoLacpSegmentNotReady` alert fires after a segment has been
+not ready for 10 minutes.
+
 When the derived ESI changes, the daemon re-applies the committed config
 through the same live EVPN runtime path SIGHUP uses, with no restart. The ESI
 changes when the bond becomes Ready, goes NotReady, or learns a new partner.

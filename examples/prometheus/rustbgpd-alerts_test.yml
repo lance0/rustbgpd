@@ -2198,3 +2198,39 @@ tests:
       - eval_time: 10m
         alertname: BgpPeerOutboundUnregistered
         exp_alerts: []
+
+  # ── EvpnAutoLacpSegmentNotReady ───────────────────────────────
+  # bond0 has no LACP partner, then loses carrier: the reason changes but the
+  # ready series stays 0, so the hold is not restarted. bond1 is ready.
+  - interval: 1m
+    input_series:
+      - series: 'evpn_es_auto_esi_state{interface="bond0", state="ready", instance="vtep1:9179"}'
+        values: "0x20"
+      - series: 'evpn_es_auto_esi_state{interface="bond0", state="no_partner", instance="vtep1:9179"}'
+        values: "1x5 0x15"
+      - series: 'evpn_es_auto_esi_state{interface="bond0", state="down", instance="vtep1:9179"}'
+        values: "0x5 1x15"
+      - series: 'evpn_es_auto_esi_state{interface="bond1", state="ready", instance="vtep1:9179"}'
+        values: "1x20"
+    alert_rule_test:
+      - eval_time: 9m
+        alertname: EvpnAutoLacpSegmentNotReady
+        exp_alerts: []
+      - eval_time: 11m
+        alertname: EvpnAutoLacpSegmentNotReady
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              interface: bond0
+              state: ready
+              instance: "vtep1:9179"
+            exp_annotations:
+              summary: "auto-lacp Ethernet Segment on bond0 is not ready"
+              description: >-
+                The esi = "auto-lacp" Ethernet Segment on bond
+                bond0 of vtep1:9179 has not been
+                ready for 10 minutes, so it originates no Ethernet Segment or
+                Ethernet A-D routes. The evpn_es_auto_esi_state series at 1 names
+                the reason (for example no_partner or down); rbgp doctor reports
+                it as evpn.es.bond0.auto_esi. Check the bond's
+                802.3ad state and LACP partner.
