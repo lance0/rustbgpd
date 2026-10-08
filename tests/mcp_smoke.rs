@@ -34,6 +34,7 @@ const LADDER: &[&str] = &[
     "family",
     "llgr",
     "orf",
+    "conditional_advertisement",
     "export_policy",
     "otc",
     "adj_rib_out",
@@ -284,14 +285,14 @@ fn assert_ladder(result: &Value, deny: bool) {
         }
     );
     let gates = result["gates"].as_array().unwrap();
-    let expected = if deny { &LADDER[..7] } else { LADDER };
+    let expected = if deny { &LADDER[..8] } else { LADDER };
     assert_eq!(gates.len(), expected.len(), "{result}");
     for (index, (gate, name)) in gates.iter().zip(expected).enumerate() {
         assert_eq!(gate["step"], index + 1);
         assert_eq!(gate["gate"], *name);
         let verdict = if deny && *name == "export_policy" {
             "stop"
-        } else if matches!(*name, "orf" | "otc") {
+        } else if matches!(*name, "orf" | "conditional_advertisement" | "otc") {
             "not_applicable"
         } else {
             "pass"
@@ -299,15 +300,15 @@ fn assert_ladder(result: &Value, deny: bool) {
         assert_eq!(gate["verdict"], verdict, "{gate}");
     }
     if deny {
-        assert_eq!(gates[6]["code"], "policy_denied");
+        assert_eq!(gates[7]["code"], "policy_denied");
         assert!(
-            gates[6]["detail"]
+            gates[7]["detail"]
                 .as_str()
                 .unwrap()
                 .contains("block-doc-prefix")
         );
     } else {
-        assert_eq!(gates[6]["code"], "policy_permitted");
+        assert_eq!(gates[7]["code"], "policy_permitted");
         assert_eq!(result["already_advertised"], true);
     }
 }
