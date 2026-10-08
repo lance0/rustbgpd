@@ -5,7 +5,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::net::IpAddr;
 use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use prometheus::{
     HistogramOpts, HistogramVec, IntCounter, IntCounterVec, IntGauge, IntGaugeVec, Opts, Registry,
@@ -130,6 +130,56 @@ impl Collector for EventOutboxQueueDepthCollector {
                 .set(i64::try_from(depth).unwrap_or(i64::MAX));
         }
         gauges.collect()
+    }
+}
+
+/// Per-cache age of the last accepted RTR End of Data, computed at scrape
+/// time from a monotonic [`Instant`] rather than exported as wall-clock time.
+#[derive(Debug)]
+struct RpkiCacheEndOfDataAgeCollector {
+    accepted_at: Arc<Mutex<BTreeMap<String, Instant>>>,
+    desc: Desc,
+}
+
+impl RpkiCacheEndOfDataAgeCollector {
+    fn new(accepted_at: Arc<Mutex<BTreeMap<String, Instant>>>) -> Self {
+        Self {
+            accepted_at,
+            desc: Desc::new(
+                "bgp_rpki_cache_end_of_data_age_seconds".to_string(),
+                "Seconds since this cache's last accepted RTR End of Data, computed at scrape time from the daemon's monotonic clock; present only while the cache has a retained contribution (removed on flush or expiry). Compare with bgp_rpki_cache_effective_expire_seconds for the time left before expiry".to_string(),
+                vec!["cache".to_string()],
+                std::collections::HashMap::new(),
+            )
+            .expect("valid metric descriptor"),
+        }
+    }
+}
+
+impl Collector for RpkiCacheEndOfDataAgeCollector {
+    fn desc(&self) -> Vec<&Desc> {
+        vec![&self.desc]
+    }
+
+    fn collect(&self) -> Vec<MetricFamily> {
+        let accepted_at = self
+            .accepted_at
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        let ages = IntGaugeVec::new(
+            Opts::new(
+                "bgp_rpki_cache_end_of_data_age_seconds",
+                "Seconds since this cache's last accepted RTR End of Data, computed at scrape time from the daemon's monotonic clock; present only while the cache has a retained contribution (removed on flush or expiry). Compare with bgp_rpki_cache_effective_expire_seconds for the time left before expiry",
+            ),
+            &["cache"],
+        )
+        .expect("valid metric definition");
+        for (cache, at) in &accepted_at {
+            ages.with_label_values(&[cache])
+                .set(i64::try_from(at.elapsed().as_secs()).unwrap_or(i64::MAX));
+        }
+        ages.collect()
     }
 }
 
@@ -636,6 +686,7 @@ struct BgpMetricsInner {
     rpki_cache_effective_expire_seconds: IntGaugeVec,
     rpki_cache_end_of_data_ready: IntGaugeVec,
     rpki_cache_connected: IntGaugeVec,
+    rpki_cache_end_of_data_accepted_at: Arc<Mutex<BTreeMap<String, Instant>>>,
 
     // ── ASPA ───────────────────────────────────────────────────
     aspa_records: IntGauge,
@@ -2092,6 +2143,8 @@ impl BgpMetrics {
         )
         .expect("valid metric definition");
 
+        let rpki_cache_end_of_data_accepted_at = Arc::new(Mutex::new(BTreeMap::new()));
+
         let aspa_records = IntGauge::new(
             "bgp_aspa_records",
             "Number of ASPA customer records in the merged table",
@@ -3090,6 +3143,11 @@ impl BgpMetrics {
             .register(Box::new(rpki_cache_connected.clone()))
             .expect("metric not already registered");
         registry
+            .register(Box::new(RpkiCacheEndOfDataAgeCollector::new(Arc::clone(
+                &rpki_cache_end_of_data_accepted_at,
+            ))))
+            .expect("metric not already registered");
+        registry
             .register(Box::new(aspa_records.clone()))
             .expect("metric not already registered");
         registry
@@ -3450,6 +3508,7 @@ impl BgpMetrics {
             rpki_cache_effective_expire_seconds,
             rpki_cache_end_of_data_ready,
             rpki_cache_connected,
+            rpki_cache_end_of_data_accepted_at,
             aspa_records,
             validation_import_refreshes,
             policy_dataset_refresh_errors,
@@ -5430,6 +5489,30 @@ impl BgpMetrics {
             .set(i64::from(connected));
     }
 
+    /// Record the monotonic instant of one cache's last accepted End of Data
+    /// (`Some`), or remove its age series when the retained contribution is
+    /// dropped by a flush or expiry (`None`). The exported age is computed
+    /// from this instant at scrape time.
+    pub fn set_rpki_cache_end_of_data_accepted_at(
+        &self,
+        cache: &str,
+        accepted_at: Option<Instant>,
+    ) {
+        let mut caches = self
+            .0
+            .rpki_cache_end_of_data_accepted_at
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        match accepted_at {
+            Some(at) => {
+                caches.insert(cache.to_string(), at);
+            }
+            None => {
+                caches.remove(cache);
+            }
+        }
+    }
+
     /// Set ASPA record count.
     pub fn set_aspa_records(&self, count: i64) {
         self.0.aspa_records.set(count);
@@ -7245,6 +7328,55 @@ mod tests {
         ));
         assert!(text.contains("bgp_rpki_cache_connected{cache=\"192.0.2.10:3323\"} 0"));
         assert!(text.contains("bgp_rpki_cache_end_of_data_ready{cache=\"192.0.2.10:3323\"} 1"));
+    }
+
+    #[test]
+    fn rpki_cache_end_of_data_age_advances_resets_and_is_removed() {
+        const CACHE: &str = "192.0.2.10:3323";
+        let age = |m: &BgpMetrics| -> Option<i64> {
+            let prefix = format!("bgp_rpki_cache_end_of_data_age_seconds{{cache=\"{CACHE}\"}} ");
+            gather_text(m)
+                .lines()
+                .find_map(|line| line.strip_prefix(prefix.as_str()))
+                .map(|value| value.parse().expect("integer age"))
+        };
+        let m = BgpMetrics::new();
+        assert_eq!(age(&m), None, "no series before the first End of Data");
+
+        let accepted = std::time::Instant::now()
+            .checked_sub(std::time::Duration::from_secs(100))
+            .expect("monotonic clock is past 100 s");
+        m.set_rpki_cache_end_of_data_accepted_at(CACHE, Some(accepted));
+        let text = gather_text(&m);
+        assert!(text.contains(
+            "# HELP bgp_rpki_cache_end_of_data_age_seconds Seconds since this cache's last accepted RTR End of Data, computed at scrape time"
+        ));
+        assert!(text.contains("# TYPE bgp_rpki_cache_end_of_data_age_seconds gauge"));
+        let first = age(&m).expect("series after End of Data");
+        assert!(
+            first >= 100,
+            "age {first} must count from the accepted instant"
+        );
+
+        // Scrape-time computation: the age advances with no further update.
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+        let later = age(&m).expect("series still present");
+        assert!(
+            later > first,
+            "age must advance between scrapes: {first} -> {later}"
+        );
+
+        // A new End of Data restarts the age.
+        m.set_rpki_cache_end_of_data_accepted_at(CACHE, Some(std::time::Instant::now()));
+        let reset = age(&m).expect("series after the new End of Data");
+        assert!(
+            reset < first,
+            "a new End of Data must restart the age: {reset}"
+        );
+
+        // A flush or expiry removes the series instead of leaving a stale age.
+        m.set_rpki_cache_end_of_data_accepted_at(CACHE, None);
+        assert_eq!(age(&m), None, "flushed cache must not keep an age series");
     }
 
     #[test]

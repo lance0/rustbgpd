@@ -1168,6 +1168,15 @@ until the full table that follows replaces it. Watch the session itself:
   to that configured cache and `0` otherwise, including at startup and while
   a retained contribution is still in use.
 - The shipped `RpkiCacheDisconnected` alert fires after 15 minutes at `0`.
+- `bgp_rpki_cache_end_of_data_age_seconds{cache}` is the seconds since that
+  cache's last accepted End of Data, computed at scrape time from the
+  daemon's monotonic clock. It appears with the first End of Data, keeps
+  advancing through an ordinary disconnect, restarts on every new End of
+  Data, and is removed on a flush or expiry.
+- The shipped `RpkiCacheDataNearExpiry` alert fires once less than a quarter
+  of `bgp_rpki_cache_effective_expire_seconds{cache}` remains before the
+  retained contribution expires. It covers a disconnected cache and a
+  connected session that has stopped delivering End of Data.
 - `rbgp rpki caches` shows each cache as `connected`, `retained` (session
   down, contribution still in use), `syncing`, or `disconnected`, with the
   age in seconds of the last accepted End of Data. A retained contribution
@@ -2475,6 +2484,7 @@ details stay in the structured daemon log and RPC status.
 | `bgp_rpki_cache_effective_expire_seconds{cache}` | Effective RTR expire per cache (`IP:port`): the cache-advertised expire after the RFC 8210 two-day maximum and the configured `max_expire_interval` ceiling. Set at client start and after every End of Data |
 | `bgp_rpki_cache_end_of_data_ready{cache}` | Per-cache retained End-of-Data readiness: `0` at startup and after flush/expiry; `1` after validated End of Data, including an empty table, and through reconnect/resync |
 | `bgp_rpki_cache_connected{cache}` | Per-cache RTR session state: `1` while a session to that configured cache is established, `0` at startup and whenever it is down, whether or not a contribution is still retained (compare `bgp_rpki_cache_end_of_data_ready`) |
+| `bgp_rpki_cache_end_of_data_age_seconds{cache}` | Seconds since the cache's last accepted End of Data, computed at scrape time from a monotonic clock (the age `rbgp rpki caches` shows). Absent until the first End of Data and after a flush or expiry; advances through an ordinary disconnect. `bgp_rpki_cache_effective_expire_seconds` minus this value is the time left before the retained contribution expires |
 | `bgp_aspa_records` | ASPA customer records loaded in the merged table. Renamed from `bgp_aspa_records_total` (a gauge must not carry the counter `_total` suffix) |
 | `bgp_validation_import_refreshes_total{dependency, outcome}` | Inbound Route Refresh work triggered by VRP / ASPA cache updates for peers whose import policy matches validation state. `dependency` is `rpki` or `aspa`; `outcome` is `eligible`, `refreshed`, `skipped_not_established`, `skipped_state_unknown`, or `failed`. A state-query timeout increments both `skipped_state_unknown` and `failed` and leaves the peer's refresh intent pending for replay. |
 

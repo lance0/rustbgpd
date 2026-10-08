@@ -56,6 +56,7 @@ CUSTOM_COLLECTORS = frozenset(
         (TELEMETRY, "JemallocCollector"),
         (TELEMETRY, "SessionNotificationDepthCollector"),
         (TELEMETRY, "EventOutboxQueueDepthCollector"),
+        (TELEMETRY, "RpkiCacheEndOfDataAgeCollector"),
         (SETTLEMENT, "RuntimeConfigSettlementCollector"),
         (CREDENTIALS, "TlsExpiryCollector"),
     }
@@ -64,6 +65,7 @@ CUSTOM_COLLECTOR_PREFIXES = {
     (TELEMETRY, "JemallocCollector"): "jemalloc_",
     (TELEMETRY, "SessionNotificationDepthCollector"): "bgp_session_notification_",
     (TELEMETRY, "EventOutboxQueueDepthCollector"): "bgp_event_outbox_queue_depth",
+    (TELEMETRY, "RpkiCacheEndOfDataAgeCollector"): "bgp_rpki_cache_end_of_data_age_seconds",
     (SETTLEMENT, "RuntimeConfigSettlementCollector"): "bgp_runtime_config_settlement_",
     (CREDENTIALS, "TlsExpiryCollector"): "bgp_grpc_tls_certificate_not_after_seconds",
 }
@@ -74,6 +76,7 @@ SPECIAL_REGISTRATIONS = {
         "jemalloc_stats::JemallocCollector::new()",
         "SessionNotificationDepthCollector::new(Arc::clone(&session_notification_outstanding_value),Arc::clone(&session_notification_outstanding_high_watermark_value),)",
         "EventOutboxQueueDepthCollector::new(Arc::clone(&event_outbox_queue_depth_source,))",
+        "RpkiCacheEndOfDataAgeCollector::new(Arc::clone(&rpki_cache_end_of_data_accepted_at,))",
     ),
     SETTLEMENT: (
         "RuntimeConfigSettlementCollector::new(Arc::clone(&self.registry,))",
@@ -654,6 +657,14 @@ def event_outbox_queue_depth_inventory(source: str) -> tuple[dict[str, str], set
     )
 
 
+def rpki_cache_end_of_data_age_inventory(source: str) -> tuple[dict[str, str], set[str]]:
+    return local_gauge_vector_inventory(
+        source, "RpkiCacheEndOfDataAgeCollector",
+        CUSTOM_COLLECTOR_PREFIXES[(TELEMETRY, "RpkiCacheEndOfDataAgeCollector")],
+        "cache",
+    )
+
+
 def tls_expiry_metric_inventory(source: str) -> dict[str, str]:
     definitions = static_metric_definitions(source)
     registered = registered_metric_variables(CREDENTIALS, source, definitions)
@@ -785,11 +796,15 @@ def workspace_metric_inventory(
     event_outbox_depth, event_outbox_depth_variables = (
         event_outbox_queue_depth_inventory(sources[TELEMETRY])
     )
+    rpki_cache_age, rpki_cache_age_variables = rpki_cache_end_of_data_age_inventory(
+        sources[TELEMETRY]
+    )
     expected_registered = (
         set(telemetry_definitions)
         - jemalloc_variables
         - session_depth_variables
         - event_outbox_depth_variables
+        - rpki_cache_age_variables
     )
     if registered != expected_registered:
         missing = sorted(
@@ -811,6 +826,7 @@ def workspace_metric_inventory(
     telemetry.update(jemalloc)
     telemetry.update(session_depth)
     telemetry.update(event_outbox_depth)
+    telemetry.update(rpki_cache_age)
 
     settlement = settlement_metric_inventory(sources[SETTLEMENT])
     expiry = tls_expiry_metric_inventory(sources[CREDENTIALS])
