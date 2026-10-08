@@ -302,10 +302,11 @@ The same applies to per-family enablement.
   as ADR-0137 does for its attachments.
 - Both fields and the `[policy.route_flap_dampening]` block are **live** on
   the generation route. The resolved per-peer enablement and the parameters
-  reach the RIB as one install, acknowledged by the RIB actor. That
-  acknowledgement is the commit point, as in ADR-0137's amendment. The
-  reload-matrix tables and the `RELOAD_MATRIX_*_FIELDS` drift lists gain the
-  rows.
+  reach the RIB as one **staged** install, which takes effect only when the
+  generation activates it after its last fallible step (Design 10). This
+  differs from ADR-0137, whose gate takes effect at the install
+  acknowledgement. The reload-matrix tables and the `RELOAD_MATRIX_*_FIELDS`
+  drift lists gain the rows.
 
 ### 3. What counts as a flap
 
@@ -316,12 +317,30 @@ announcement allocates nothing. For an enabled peer:
 |----------------------------------------------|---------|--------|
 | Announcement, no existing path, no history | 0 | Ordinary insert; no state. |
 | Announcement, no existing path, history present (re-announcement after withdrawal) | 0 | Decay the penalty, then apply the threshold check below. |
-| Announcement equal to the existing path (`routes_equal` after interning) | 0 | No state change. Covers duplicates, GR and LLGR replay, and refresh replay of an unchanged route. |
-| Announcement that differs from the existing path | +500 | Attribute change. |
+| Announcement replacing a GR-stale or LLGR-stale path | 0 | Stale-to-fresh replay: the stale flags are cleared, and the threshold check runs if history exists. Attributes are not compared. |
+| Announcement equal to a fresh existing path (`routes_equal` after interning) | 0 | No state change. Covers duplicates, and refresh replay of an unchanged route. |
+| Announcement that differs from a fresh existing path | +500 | Attribute change. |
 | Withdrawal of an existing path | +1000 | Withdrawal. |
 | Withdrawal of an unknown path | 0 | Nothing. |
 
 Penalties are added to the decayed value and clipped at the ceiling.
+
+**GR and LLGR replay is never a flap.** A path is stale when the RIB's own
+`is_stale` or `is_llgr_stale` flag is set. An `LLGR_STALE` community that a
+peer sends on a path does not make it stale for this rule. An announcement
+that replaces a stale path is a replay, not a change, and it is never
+compared, for two reasons:
+
+- LLGR promotion edits the stored path in place. It adds the `LLGR_STALE`
+  community and re-interns the attributes (`promote_to_llgr_stale` in
+  `crates/rib/src/adj_rib_in.rs`). An attribute comparison against that copy
+  would charge every replayed path an attribute-change penalty.
+- A plain GR replay may differ from the stale copy because the peer's own
+  state changed across its restart. That is not instability observed by this
+  speaker.
+
+The consequence is accepted: a peer that changes a path's attributes across
+a restart escapes one 500 penalty for that path.
 
 **Threshold check.** A path that is not suppressed becomes suppressed when its
 penalty reaches `suppress`. A suppressed path is used again when its penalty
@@ -358,7 +377,7 @@ at once. RFC 2439 §4.8.5 allows either choice.
 
 The RIB actor gains one `Dampening` owner, separate from `AdjRibIn`:
 
-- `history`: per source peer, a map from `(Prefix, path_id)` to a small
+- `history`: per peer identity, a map from `(Prefix, path_id)` to a small
   state record: penalty, last-update time, flap count, first-flap time,
   suppressed flag, scheduled tick, and an optional held route.
 - `wheel`: the reuse schedule (Design 7).
@@ -381,17 +400,34 @@ would need the same check at about ten call sites, and one missed site would
 be a silent leak. The cost is that operator views must read the held routes
 explicitly (Design 9).
 
-**History outlives the session.** `history` is keyed by the configured peer
-address and is not dropped when the peer's `AdjRibIn` is. A peer that resets
-its session therefore cannot clear its penalties, and a flapping path
-announced after reconnect is suppressed again if it is still above `reuse`.
-Held routes are dropped when the session ends, with or without GR. A held
-route is not in use, so dropping it changes no selection, and the peer
+**History is keyed by peer identity, not by address.** The identity is the
+pair of the RIB's peer key (the address that keys `AdjRibIn`) and the
+session's remote ASN. For a static neighbor the remote ASN is the configured
+`remote_asn`. For a dynamic neighbor it is the ASN the peer sent in its OPEN,
+which also covers an accept-any range (`remote_asn = 0`). History does not
+carry across an identity change:
+
+- A static neighbor's `remote_asn` edit is a delete and add of the neighbor
+  identity (`config_field_impact` in `src/config/mod.rs`). The edit drops the
+  old identity's history when it is activated, so the replacement starts
+  empty.
+- A dynamic peer that reconnects from the same address with a different
+  ASN is a different identity. It gets no history from the earlier peer, and
+  the earlier history is reclaimed by decay.
+
+**History outlives the session.** It is not dropped when the peer's
+`AdjRibIn` is. A peer that resets its session under the same identity
+therefore cannot clear its penalties, and a flapping path announced after
+reconnect is suppressed again if it is still above `reuse`. This includes a
+dynamic peer whose session ends and returns: its history remains until it
+decays. Held routes are dropped when the session ends, with or without GR. A
+held route is not in use, so dropping it changes no selection, and the peer
 announces it again after the restart. History is removed when:
 
 - its penalty decays below `reuse / 2` (FRR's reclaim point; Design 7);
-- the peer is removed from configuration, or its dampening is disabled;
-- the parameters change (Design 10);
+- its identity is removed: a static neighbor is removed or its `remote_asn`
+  changes, or a dynamic peer's range is removed;
+- dampening is disabled for the identity, or the parameters change (Design 10);
 - an operator clears it (Design 9).
 
 **Add-Path.** Identity includes the received `path_id`, so each path of a
@@ -568,23 +604,49 @@ because a suppressed path is not in the Loc-RIB that path marking describes.
   existing penalties under new thresholds would give a mixed result that no
   operator could reason about, and the change is operator-initiated.
 - A reload with identical dampening content changes nothing.
-- A failed generation restores the captured install: the parameters, the
-  per-peer enablement, and the history and held routes of any scope the
-  forward apply cleared. A failed reload therefore cannot release suppressed
-  paths. This follows ADR-0137's compensation rule: restore state, do not
-  evaluate it again.
+
+**A generation stages; it does not apply.** Restoring captured state cannot
+undo wire effects. Suppose the install took effect when the RIB acknowledged
+it. Clearing a scope would queue its held paths for reuse, and a bounded tick
+could insert and distribute them before a later generation step failed.
+Compensation could suppress them again, but it could not retract the
+announcement. The same is true in the other direction: a newly enabled peer
+could have paths suppressed and withdrawn downstream by a generation that
+then fails. So:
+
+- The RIB acknowledges the install by storing it as **staged**. The running
+  parameters, enablement, history, held routes and wheel are unchanged, and
+  received UPDATEs continue under the running configuration.
+- The generation sends **activation** as its last step, after every fallible
+  step has succeeded. Activation is the commit point for dampening. It swaps
+  the staged install in and only then performs the clears and releases above.
+  Released paths go through the bounded tick as usual.
+- A generation that fails before activation **discards** the staged install.
+  Nothing was applied, so there is no capture to restore and no wire effect to
+  undo.
+- An activation that the RIB does not acknowledge leaves the generation
+  ambiguous, and the settlement contract recovery-fences the daemon, as for
+  ADR-0137's re-observation. Until activation, the prior configuration
+  stays in force.
+
+`ClearDampening` (Design 9) is not part of a generation. It applies
+immediately.
 
 ### 11. Interactions summary
 
 | Event | Effect on dampening |
 |-------|---------------------|
-| GR restart | Held routes dropped at session end, history kept. Replayed paths equal to the stale copy add no penalty; changed paths add the attribute-change penalty. Stale sweep removal adds no penalty. |
-| LLGR promotion | The local LLGR_STALE edit happens outside the announce path and is not a flap. |
-| Enhanced route refresh | No penalties between BoRR and EoRR for the family. |
+| GR or LLGR session end | Held routes dropped, history kept. Only fresh paths are in `AdjRibIn` to be marked stale, because suppressed paths are held outside it. |
+| LLGR promotion | The local `LLGR_STALE` edit happens outside the announce path and is not a flap. |
+| Replay after restart | Replacing a stale path adds no penalty (Design 3). A replayed path with no stale copy but with history, such as a held path dropped at session end, follows the re-announcement rule: no penalty, and the threshold check runs. If the path is still above `reuse` it is held again. |
+| GR or LLGR stale sweep | Removing a path that was not replayed adds no penalty, and so does removing a `NO_LLGR` path at LLGR entry. The sweep reads only `AdjRibIn`. No held route can be stale, because held routes were dropped at session end, so no held path is left behind. |
+| Wheel reuse during the stale period | The record has no held route, so reuse clears the suppressed flag and reschedules reclaim. Nothing is inserted. |
+| Enhanced route refresh | No penalties between BoRR and EoRR for the family. The BoRR snapshot also covers held paths of that family. A held path not re-announced by EoRR is dropped with no penalty, like an unrefreshed `AdjRibIn` path, so the peer's implicit withdrawal is not lost. |
 | Plain route refresh | Ordinary rules; bounded as described in Design 3. |
 | Session reset | No penalty; held routes dropped; history kept. |
 | Max-prefix | Counted in the session task over accepted routes, so held routes still count, since the peer did announce them. A max-prefix teardown is a session reset. |
-| Neighbor removed | History for that peer dropped. |
+| Neighbor removed, or `remote_asn` changed | History for the old identity dropped at activation; a replacement identity starts empty. |
+| Dynamic peer reconnects | Same address and ASN: history kept. Different ASN: new identity, no history carried. |
 | Import policy change | A deny now arrives as a withdrawal; a replay after refresh follows the refresh rows. |
 | RPKI/ASPA revalidation | Held routes are not revalidated while held. They are validated when reused, through the announce path. |
 
@@ -625,8 +687,8 @@ removed.
    and explicit iBGP or route-server-client enablement), the peer-group
    file-only classification and
    its sequential-reload rejection, gRPC neighbor-mutation preservation,
-   reload-matrix rows and drift lists, and the RIB install with its capture
-   and restore. The install has no runtime effect yet.
+   reload-matrix rows and drift lists, and the staged RIB install with
+   activation and discard. The install has no runtime effect yet.
    *Acceptance:* each rejected case fails with a message naming the field; a
    `SetPeerGroup` edit of an unrelated field preserves the group's setting; an
    identical reload produces no install change.
@@ -642,20 +704,31 @@ removed.
    using the equality check after interning. Add the held-route store,
    suppression into the affected set, reuse through the announce path
    (including RPKI and ASPA), `dampening_sleep` in the run loop, and handling
-   for session end and GR (drop held routes, keep history). Add the enhanced
-   refresh exemption, observe mode, and clear on disable or parameter change
-   with generation restore.
+   for session end and GR (drop held routes, keep history). Add stale replay
+   handling, history keyed by peer identity, the enhanced refresh exemption
+   and held-path coverage, observe mode, and clear on disable or parameter
+   change at activation.
    *Acceptance, through the real RIB with a downstream peer:*
    - Flap, suppress, decay and reuse produce exact withdrawals and
      re-announcements downstream.
-   - Identical re-announcements and GR replay add nothing.
+   - Identical re-announcements add nothing. GR replay and LLGR replay over
+     promoted paths add nothing, including a replay whose attributes differ
+     from the stale copy.
+   - A stale sweep after a restart that does not replay a path leaves no held
+     path and adds no penalty. An unrefreshed held path is dropped at EoRR.
+   - A `remote_asn` edit starts the replacement with empty history. A dynamic
+     peer reconnecting with a different ASN inherits nothing, and with the
+     same ASN keeps its history.
    - An iBGP or RR-client path is never dampened.
    - Add-Path paths are dampened independently.
    - `per_client_best` falls through to the next candidate.
    - A session reset keeps history, and a re-announced path above `reuse`
      stays suppressed.
    - Observe mode changes no selection.
-   - A failed generation leaves suppressed paths suppressed.
+   - A generation that fails after the staged install, but before
+     activation, has no wire effect. No suppressed path is announced, and no
+     path is newly suppressed or withdrawn. Prove this by failing a later
+     generation step in the test.
    - A disabled peer allocates no state.
 4. **Operator surface.** Add the explain code, the RPCs and authz entries, the
    CLI, metrics and reaping, logs, the stable-surface inventory entries,
