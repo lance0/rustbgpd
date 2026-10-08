@@ -1406,6 +1406,7 @@ async fn llgr_gate_peer_up(
 mod attr_intern;
 mod bgpls;
 mod bmp;
+mod conditional_advertisement;
 mod dataplane_paging;
 mod distribution_window;
 mod events_metrics;

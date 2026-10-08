@@ -1326,6 +1326,7 @@ impl RibManager {
         reason = "release must sweep every typed RIB family from one atomic family gate"
     )]
     fn recompute_released_selection_family(&mut self, family: (Afi, Safi)) {
+        self.release_conditional_advertisement_family(family);
         let readiness = self.replacement_readiness.clone();
         let mut checkpoint =
             || super::replacement_readiness_checkpoint_at(&readiness, "selection_inventory", false);

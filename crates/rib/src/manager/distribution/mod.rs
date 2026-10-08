@@ -1184,7 +1184,7 @@ pub(in crate::manager) fn otc_egress_blocked(
         .any(|attribute| attribute.only_to_customer().is_some())
 }
 
-fn route_type(origin: crate::route::RouteOrigin) -> RouteType {
+pub(in crate::manager) fn route_type(origin: crate::route::RouteOrigin) -> RouteType {
     match origin {
         crate::route::RouteOrigin::Local => RouteType::Local,
         crate::route::RouteOrigin::Ibgp => RouteType::Internal,
@@ -5499,6 +5499,7 @@ impl RibManager {
         // The ingest-stall fault injection must see every message on its
         // own receive; coalescing would bypass the stall.
         if self.test_ingest_stall.is_some()
+            || self.conditional_expiry_cutoff == Some(0)
             || !self.pending_route_batches.is_empty()
             || window.messages >= limits.messages
             || window.routes >= limits.routes
@@ -5523,6 +5524,7 @@ impl RibManager {
             .primary_lookahead
             .take()
             .expect("lookahead admitted above");
+        self.count_conditional_expiry_admission();
         self.handle_update(update);
         // A stale-session message is dropped without a batch: the window
         // settles now and the next queued message waits for the next turn.
@@ -5960,6 +5962,12 @@ impl RibManager {
         // Candidate storage has already changed even when selection is held.
         // Revoke in-flight dependency revisions before filtering held families.
         self.invalidate_flowspec_dependencies(all_affected);
+        // ADR-0137: re-observe conditions before deferral filtering; a held
+        // family keeps observing while its settle timers stay unarmed. Slice 3
+        // marks the transitioned definitions' peers dirty.
+        let _ = self.observe_conditional_advertisement_prefixes(
+            best_changed.iter().chain(all_affected.iter()),
+        );
         let best_changed: HashSet<_> = best_changed
             .iter()
             .inspect(|_| checkpoint())

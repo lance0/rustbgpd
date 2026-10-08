@@ -70,6 +70,9 @@ pub use event_sink::{NoopRibEventSink, RibEventSink};
 pub use fast_hash::AddrHasher;
 pub use loc_rib::LocRib;
 pub use manager::RibManager;
+pub use manager::{
+    ConditionalAdvertiseIf, ConditionalAdvertisement, ConditionalAdvertisementCapture,
+};
 #[cfg(feature = "bench-internals")]
 pub use manager::{
     DataplanePrefixIndexBenchReceipt, EvpnDataplaneQueryBenchReceipt,
