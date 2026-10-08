@@ -374,7 +374,8 @@ fn render_modifications(
             Err(kind) => out.push(format!("med {before} -> {expr} (unresolvable: {kind})")),
         }
     }
-    if let Some(action) = mods.set_next_hop.as_ref() {
+    // Live parity: an inapplicable next-hop action is skipped, not shown.
+    if let Some(action) = mods.set_next_hop.as_ref().filter(|a| a.applies_to(ctx)) {
         let before = ctx
             .next_hop
             .map_or_else(|| "none".to_string(), |a| a.to_string());
@@ -562,7 +563,7 @@ fn trace_rpol_policy(
                             crate::eval::LoopFlow::Completed => {}
                             crate::eval::LoopFlow::Permit(mods) => {
                                 let mut merged = continued.take().unwrap_or_default();
-                                merged.merge_from(mods);
+                                merged.merge_applicable(mods, ctx);
                                 deciding_permit = Some(merged);
                                 decided = Some((index, term));
                                 break;
@@ -641,7 +642,7 @@ fn trace_rpol_policy(
                     break;
                 }
                 let mut merged = continued.take().unwrap_or_default();
-                merged.merge_from(mods.clone());
+                merged.merge_applicable(mods.clone(), ctx);
                 deciding_permit = Some(merged);
                 decided = Some((index, term));
                 break;
@@ -671,7 +672,7 @@ fn trace_rpol_policy(
                 // reuse the frame slots this term read.
                 continued
                     .get_or_insert_with(RouteModifications::default)
-                    .merge_from(resolved.unwrap_or_else(|| mods.clone()));
+                    .merge_applicable(resolved.unwrap_or_else(|| mods.clone()), ctx);
             }
         }
     }

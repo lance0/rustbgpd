@@ -881,17 +881,16 @@ impl CompiledChain {
                     );
                 }
                 PolicyDecision::Permit(Some(mods)) if !mods.is_empty() => {
-                    accumulated.merge_from(mods.clone());
+                    accumulated.merge_applicable(mods.clone(), ctx);
                 }
                 PolicyDecision::Permit(_) => {}
                 PolicyDecision::PermitOwned(mods) => {
                     if !mods.is_empty() {
-                        accumulated.merge_from(mods);
+                        accumulated.merge_applicable(mods, ctx);
                     }
                 }
             }
         }
-        accumulated.drop_inapplicable_next_hop(ctx);
         // A nonempty chain that completes without rejection has no
         // terminal member. Retain one process-shared sentinel instead;
         // a genuinely empty chain remains inline / unattributed.
@@ -1050,7 +1049,10 @@ impl CompiledChain {
                             {
                                 continued
                                     .get_or_insert_with(RouteModifications::default)
-                                    .merge_from(resolved.unwrap_or_else(|| mods.clone()));
+                                    .merge_applicable(
+                                        resolved.unwrap_or_else(|| mods.clone()),
+                                        ctx,
+                                    );
                             } else {
                                 denied = true;
                                 break;
@@ -1131,13 +1133,12 @@ impl CompiledChain {
             }
             let mut merged = continued.unwrap_or_default();
             if let Some(Some(mods)) = permit_mods {
-                merged.merge_from(mods);
+                merged.merge_applicable(mods, ctx);
             }
             if !merged.is_empty() {
-                accumulated.merge_from(merged);
+                accumulated.merge_applicable(merged, ctx);
             }
         }
-        accumulated.drop_inapplicable_next_hop(ctx);
         PolicyResult {
             action: PolicyAction::Permit,
             modifications: accumulated,
@@ -1206,7 +1207,7 @@ impl CompiledChain {
                             };
                         return match (continued, resolved) {
                             (Some(mut acc), resolved) => {
-                                acc.merge_from(resolved.unwrap_or_else(|| mods.clone()));
+                                acc.merge_applicable(resolved.unwrap_or_else(|| mods.clone()), ctx);
                                 PolicyDecision::PermitOwned(acc)
                             }
                             (None, Some(owned)) => PolicyDecision::PermitOwned(owned),
@@ -1228,7 +1229,7 @@ impl CompiledChain {
                             };
                         continued
                             .get_or_insert_with(RouteModifications::default)
-                            .merge_from(resolved.unwrap_or_else(|| mods.clone()));
+                            .merge_applicable(resolved.unwrap_or_else(|| mods.clone()), ctx);
                     }
                     // LAN-302: eager `let` — evaluate the initializer
                     // (against the frame as written so far; earlier
@@ -1264,7 +1265,7 @@ impl CompiledChain {
                                 LoopFlow::Permit(mods) => {
                                     return match continued {
                                         Some(mut acc) => {
-                                            acc.merge_from(mods);
+                                            acc.merge_applicable(mods, ctx);
                                             PolicyDecision::PermitOwned(acc)
                                         }
                                         None => PolicyDecision::PermitOwned(mods),
@@ -1419,7 +1420,7 @@ impl CompiledChain {
                             .map_err(|kind| (kind, iterations - 1))?;
                         continued
                             .get_or_insert_with(RouteModifications::default)
-                            .merge_from(resolved.unwrap_or_else(|| mods.clone()));
+                            .merge_applicable(resolved.unwrap_or_else(|| mods.clone()), ctx);
                     }
                     TermAction::Bind { slot, expr, .. } => {
                         let value = eval_value(expr, ctx, locals_slice(locals.as_ref()))

@@ -437,21 +437,33 @@ pub struct RouteModifications {
     pub set_med_computed: Option<Arc<crate::ir::ValueExpr>>,
 }
 
+impl NextHopAction {
+    /// Whether this action applies to the evaluated route. An IPv6 unicast
+    /// route's `MP_REACH_NLRI` next hop is 16 or 32 octets (RFC 2545 §3), so
+    /// an IPv4 address does not apply to it, as with FRR's `set ip
+    /// next-hop`; the action is skipped as if absent. An IPv6 address on an
+    /// IPv4 route applies (RFC 8950). Evaluation, its merges and explain
+    /// all use this one rule.
+    pub(crate) fn applies_to(&self, ctx: &RouteContext<'_>) -> bool {
+        !(ctx.family == Some(RouteFamily::Ipv6Unicast)
+            && matches!(self, Self::Specific(IpAddr::V4(_))))
+    }
+}
+
 impl RouteModifications {
-    /// Drop a `set next-hop` that cannot apply to the evaluated route: an
-    /// IPv6 unicast route's `MP_REACH_NLRI` next hop is 16 or 32 octets
-    /// (RFC 2545 §3), so an IPv4 address does not apply to it, as with
-    /// FRR's `set ip next-hop`. An IPv6 address on an IPv4 route stays
-    /// (RFC 8950).
-    pub(crate) fn drop_inapplicable_next_hop(&mut self, ctx: &RouteContext<'_>) {
-        if ctx.family == Some(RouteFamily::Ipv6Unicast)
-            && matches!(
-                self.set_next_hop,
-                Some(NextHopAction::Specific(IpAddr::V4(_)))
-            )
+    /// [`merge_from`](Self::merge_from) for an evaluation of `ctx`: a
+    /// next-hop action that does not apply to the route
+    /// ([`NextHopAction::applies_to`]) is skipped, so it neither sets nor
+    /// overrides an earlier, applicable one.
+    pub(crate) fn merge_applicable(&mut self, mut other: Self, ctx: &RouteContext<'_>) {
+        if other
+            .set_next_hop
+            .as_ref()
+            .is_some_and(|action| !action.applies_to(ctx))
         {
-            self.set_next_hop = None;
+            other.set_next_hop = None;
         }
+        self.merge_from(other);
     }
 
     /// Returns `true` if no modifications are configured.
@@ -1200,8 +1212,8 @@ impl Policy {
             if entry.matches(ctx) {
                 return match entry.action {
                     PolicyAction::Permit => {
-                        let mut modifications = entry.modifications.clone();
-                        modifications.drop_inapplicable_next_hop(ctx);
+                        let mut modifications = RouteModifications::default();
+                        modifications.merge_applicable(entry.modifications.clone(), ctx);
                         PolicyResult {
                             action: PolicyAction::Permit,
                             modifications,
