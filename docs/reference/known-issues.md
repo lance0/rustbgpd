@@ -429,6 +429,12 @@ resolved.
   already committed and increments `evpn_runtime_decomposed_fail_stops_total`.
   L3VNI/device/table IP-VRF identity changes remain outside the hot-apply
   boundary by design (restart-required — kernel VRF lifecycle).
+- **An `esi = "auto-lacp"` segment keeps its derived ESI until restart.**
+  The RFC 7432 type 1 ESI is read from the bond's LACP partner the first
+  time the segment resolves and is not re-derived on SIGHUP or other config
+  changes, so replacing the CE takes effect only after restarting every PE on
+  the segment. Type 2 (STP) derivation is not implemented. See
+  [Auto-derived ESI](configuration.md#auto-derived-esi-lacp-type-1).
 - **Family scope is still limited.** MP-BGP supports AFI/SAFI negotiation,
   but rustbgpd currently implements IPv4/IPv6 unicast (AFI 1/2, SAFI 1),
   IPv4/IPv6 FlowSpec (AFI 1/2, SAFI 133), L2VPN/EVPN (AFI 25, SAFI

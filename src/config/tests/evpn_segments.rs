@@ -722,3 +722,59 @@ originator_ip = "10.0.0.100"
         "msg must name the RFC 9785 preference range: {msg}"
     );
 }
+
+fn auto_lacp_toml(interface: Option<&str>) -> String {
+    let binding = interface.map_or_else(String::new, |i| format!("interface = \"{i}\"\n"));
+    evpn_toml_with(&format!(
+        r#"
+[[evpn_instances]]
+vni = 100
+rd = "65000:100"
+route_targets = ["65000:100"]
+local_vtep_ip = "10.0.0.100"
+
+[[ethernet_segments]]
+esi = "auto-lacp"
+member_vnis = [100]
+originator_ip = "10.0.0.100"
+{binding}"#
+    ))
+}
+
+#[test]
+fn ethernet_segment_auto_lacp_uses_the_pinned_derived_esi() {
+    // A name no kernel link has: only the pin can satisfy resolution,
+    // so a pass proves every resolver reads the pinned value.
+    let esi = rustbgpd_evpn::lacp_type1_esi([0x02, 0x11, 0x22, 0x33, 0x44, 0x55], 0x01c1);
+    pin_lacp_esi_for_test("rbgp-pinned0", esi);
+    let config = parse(&auto_lacp_toml(Some("rbgp-pinned0"))).unwrap();
+    let segments = config.resolve_ethernet_segments().unwrap();
+    assert_eq!(segments[0].esi, esi);
+    let bindings = config.resolve_es_link_bindings().unwrap();
+    assert_eq!(bindings[&esi].interface, "rbgp-pinned0");
+    // The sentinel, not the derived value, is what persists.
+    assert_eq!(config.ethernet_segments[0].esi, "auto-lacp");
+}
+
+#[test]
+fn ethernet_segment_auto_lacp_requires_interface() {
+    let msg = parse(&auto_lacp_toml(None)).unwrap_err().to_string();
+    assert!(
+        msg.contains("auto-lacp") && msg.contains("requires `interface`"),
+        "{msg}"
+    );
+}
+
+#[test]
+fn ethernet_segment_auto_lacp_fails_closed_without_a_bond() {
+    let err = parse(&auto_lacp_toml(Some("rbgp-nobond0"))).unwrap_err();
+    let msg = err.to_string();
+    assert!(
+        matches!(err, ConfigError::InvalidEthernetSegment { .. }),
+        "{msg}"
+    );
+    assert!(
+        msg.contains("\"rbgp-nobond0\"") && msg.contains("cannot derive"),
+        "{msg}"
+    );
+}

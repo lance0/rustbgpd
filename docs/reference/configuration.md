@@ -4169,7 +4169,7 @@ originator_ip = "10.0.0.1"                     # source IP used for Type 1/4 ori
 
 | Field           | Type     | Required | Default       | Description |
 |-----------------|----------|----------|---------------|-------------|
-| `esi`           | string   | yes      | --            | 10-byte non-zero ESI in colon-separated hex (RFC 7432 §5). The all-zero Type 0 single-homed sentinel is rejected; non-zero Type 0 and Types 1–5 are accepted. |
+| `esi`           | string   | yes      | --            | 10-byte non-zero ESI in colon-separated hex (RFC 7432 §5), or `"auto-lacp"` to derive a Type 1 ESI from the LACP partner of the bond named by `interface` (see [Auto-derived ESI](#auto-derived-esi-lacp-type-1)). The all-zero Type 0 single-homed sentinel is rejected; non-zero Type 0 and Types 1–5 are accepted. |
 | `member_vnis`   | u32[]    | yes      | --            | L2VNIs this segment is reachable on. Each must match a configured `[[evpn_instances]].vni` |
 | `df_preference` | u32      | no       | `32767`       | RFC 9785 preference value for `"highest-preference"` / `"lowest-preference"` (`0..=65535`). Default-modulo and HRW ignore preference, so only the default is accepted for those algorithms (the former default `32768` is also accepted for them) |
 | `df_algorithm`  | string   | no       | `"default-modulo"` | `"default-modulo"` (RFC 7432 §8.5 service carving), `"highest-random-weight"` (RFC 8584 §3.2), `"highest-preference"` or `"lowest-preference"` (RFC 9785) |
@@ -4178,6 +4178,48 @@ originator_ip = "10.0.0.1"                     # source IP used for Type 1/4 ori
 | `originator_ip` | string   | yes      | --            | Source IP carried in Type 1/4 origination. Usually equals a member VNI's `local_vtep_ip` |
 | `interface`     | string   | no       | --            | ADR-0085 attachment-circuit link binding: name of the local link whose carrier drives this ES's link drain. When set, carrier loss on the link drains the segment automatically |
 | `recovery_delay_seconds` | u64 | no     | `30`          | ADR-0085 hold-off (seconds, `0..=3600`) to wait after carrier returns before releasing the link drain. Only valid with `interface` — rejected without it. The earlier spelling `recovery_delay_secs` is still accepted as an alias |
+
+### Auto-derived ESI (LACP, Type 1)
+
+`esi = "auto-lacp"` derives the RFC 7432 §5 Type 1 ESI from the 802.3ad
+bond named by `interface`, so PEs bundled with the same CE agree on the ESI
+without anyone writing it by hand:
+
+```toml
+[[ethernet_segments]]
+esi = "auto-lacp"            # derive from the bond's LACP partner
+interface = "bond1"          # required: the 802.3ad bond facing the CE
+member_vnis = [100]
+originator_ip = "10.0.0.1"
+```
+
+The ESI is `01`, then the CE's LACP system MAC (6 octets), then the CE's
+LACP port key (2 octets, big-endian), then `00`. Both values belong to the
+CE, the LACP partner as seen from this PE, which the kernel reports for the
+bond's active aggregator. An explicit hex `esi` never triggers derivation.
+`interface` also binds the segment's link drain to the bond's carrier, as
+for any segment.
+
+Derivation fails closed. Startup, SIGHUP reload, and config transactions
+reject the config with an `InvalidEthernetSegment` error that names the
+interface and the reason when the bond is missing, is not a bond, is not in
+802.3ad mode, is admin down or without carrier, has no active aggregator, or
+has no LACP partner yet. No ESI is guessed and no routes are originated for
+it. Start the daemon after the bond has negotiated LACP, or rely on the
+service manager's restart policy.
+
+The derived value is pinned per interface for the life of the process. The
+first successful derivation is logged at `info` and shown by
+`rbgp evpn segments`. Later reloads, config transactions, and partner loss
+reuse the pinned value. A CE replacement therefore changes the ESI only after
+a restart. Restart every PE on the segment so they derive the same new
+value, or configure an explicit `esi`. `rustbgpd --check` on a host without
+the bond fails the same way, because derivation reads the local kernel.
+
+Type 2 (STP) derivation is not implemented. RFC 7432 §5 takes it from the
+MSTP IST root learned from BPDUs on the segment, which the Linux bridge does
+not expose. Its kernel STP is 802.1D and reports a root only when the PE
+itself participates. Type 3 (MAC-based) ESIs can be written explicitly.
 
 ### What gets originated
 

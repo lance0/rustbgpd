@@ -3213,7 +3213,11 @@ pub(crate) fn default_fib_families() -> Vec<String> {
 ///   `XX:XX:XX:XX:XX:XX:XX:XX:XX:XX` form. Must be exactly 10
 ///   colon-separated hex bytes. Type 0 (all zero) is rejected
 ///   because Type 0 means "single-homed" and thus shouldn't appear
-///   in a multihoming config.
+///   in a multihoming config. The value `"auto-lacp"` instead derives
+///   the RFC 7432 §5 type 1 ESI from the LACP partner (CE system MAC
+///   and port key) of the 802.3ad bond named by `interface`; it fails
+///   closed when that bond is absent, down, not 802.3ad, or has no
+///   partner, and the derived value is pinned until restart.
 /// - `member_vnis` — non-empty set of VNIs that participate in
 ///   this ES. Each member contributes a slot to the per-(ESI, VNI)
 ///   DF election.
@@ -3250,7 +3254,9 @@ pub(crate) fn default_fib_families() -> Vec<String> {
 #[serde(deny_unknown_fields)]
 #[schemars(transform = add_legacy_recovery_delay_secs_property)]
 pub struct EthernetSegmentConfig {
-    /// 10-byte ESI in colon-separated hex (`XX:XX:XX:XX:XX:XX:XX:XX:XX:XX`).
+    /// 10-byte ESI in colon-separated hex (`XX:XX:XX:XX:XX:XX:XX:XX:XX:XX`),
+    /// or `"auto-lacp"` to derive the RFC 7432 type 1 ESI from the LACP
+    /// partner of the 802.3ad bond named by `interface`.
     pub esi: String,
     /// VNIs participating in this ES. Each must already be declared
     /// in `[[evpn_instances]]`.

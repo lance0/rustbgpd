@@ -1256,9 +1256,7 @@ impl Config {
             let Some(interface) = cfg.interface.clone() else {
                 continue;
             };
-            let esi = parse_esi(&cfg.esi).map_err(|e| ConfigError::InvalidEthernetSegment {
-                reason: format!("esi {:?}: {e}", cfg.esi),
-            })?;
+            let esi = segment_esi(cfg)?;
             out.insert(
                 esi,
                 EsLinkBinding {
@@ -1524,7 +1522,7 @@ impl Config {
     ) -> Result<BTreeMap<EthernetSegmentIdentifier, BTreeSet<EvpnInstanceId>>, ConfigError> {
         let mut out = BTreeMap::new();
         for cfg in &self.ethernet_segments {
-            let esi = parse_esi(&cfg.esi).map_err(|e| ConfigError::InvalidEvpnIpVrf {
+            let esi = segment_esi(cfg).map_err(|e| ConfigError::InvalidEvpnIpVrf {
                 reason: format!(
                     "ethernet_segments[esi={:?}]: invalid ESI needed for ESI overlay-index validation: {e}",
                     cfg.esi
@@ -6487,6 +6485,88 @@ pub struct EsLinkBinding {
     pub recovery_delay: std::time::Duration,
 }
 
+/// `[[ethernet_segments]].esi` value that opts a segment into RFC 7432
+/// §5 type 1 ESI derivation from its `interface` bond's LACP partner.
+pub const AUTO_LACP_ESI: &str = "auto-lacp";
+
+/// Derived type 1 ESIs, pinned per interface for the process lifetime.
+///
+/// Every config path (startup, SIGHUP, transactions, journal replay)
+/// resolves segments repeatedly; pinning makes all of them see the one
+/// value the runtime originated, and keeps a later partner loss from
+/// failing unrelated config changes. A CE replacement therefore takes
+/// effect only after a restart.
+// ponytail: never evicted, so removing and re-adding a segment on the
+// same bond reuses the pinned ESI; add eviction if re-derivation on
+// reload is ever wanted.
+static PINNED_LACP_ESIS: std::sync::Mutex<BTreeMap<String, EthernetSegmentIdentifier>> =
+    std::sync::Mutex::new(BTreeMap::new());
+
+/// Resolve a segment's ESI: the literal hex value, or for
+/// [`AUTO_LACP_ESI`] the type 1 ESI derived from the bound bond.
+/// Derivation fails closed — no ESI and a config error naming the
+/// reason — when the bond is absent, down, not 802.3ad, or has no
+/// LACP partner.
+fn segment_esi(cfg: &EthernetSegmentConfig) -> Result<EthernetSegmentIdentifier, ConfigError> {
+    if cfg.esi != AUTO_LACP_ESI {
+        return parse_esi(&cfg.esi).map_err(|e| ConfigError::InvalidEthernetSegment {
+            reason: format!("esi {:?}: {e}", cfg.esi),
+        });
+    }
+    let Some(interface) = cfg.interface.as_deref().filter(|i| !i.is_empty()) else {
+        return Err(ConfigError::InvalidEthernetSegment {
+            reason: format!(
+                "esi {AUTO_LACP_ESI:?} requires `interface` naming the 802.3ad bond \
+                 whose LACP partner identifies the segment"
+            ),
+        });
+    };
+    let mut pinned = PINNED_LACP_ESIS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some(esi) = pinned.get(interface) {
+        return Ok(*esi);
+    }
+    let esi =
+        read_lacp_type1_esi(interface).map_err(|reason| ConfigError::InvalidEthernetSegment {
+            reason: format!(
+                "esi {AUTO_LACP_ESI:?} on interface {interface:?}: cannot derive the \
+                 RFC 7432 type 1 ESI: {reason}"
+            ),
+        })?;
+    tracing::info!(
+        interface,
+        esi = %esi,
+        "derived RFC 7432 type 1 ESI from the bond's LACP partner; pinned until restart"
+    );
+    pinned.insert(interface.to_string(), esi);
+    Ok(esi)
+}
+
+#[cfg(target_os = "linux")]
+fn read_lacp_type1_esi(interface: &str) -> Result<EthernetSegmentIdentifier, String> {
+    let partner =
+        rustbgpd_evpn_linux::read_bond_lacp_partner(interface).map_err(|e| e.to_string())?;
+    Ok(rustbgpd_evpn::lacp_type1_esi(
+        partner.system_mac,
+        partner.port_key,
+    ))
+}
+
+#[cfg(not(target_os = "linux"))]
+fn read_lacp_type1_esi(_interface: &str) -> Result<EthernetSegmentIdentifier, String> {
+    Err("LACP partner discovery requires Linux".to_string())
+}
+
+/// Pin a derived ESI without a kernel bond, for config tests.
+#[cfg(test)]
+pub(crate) fn pin_lacp_esi_for_test(interface: &str, esi: EthernetSegmentIdentifier) {
+    PINNED_LACP_ESIS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .insert(interface.to_string(), esi);
+}
+
 /// Parse one [`EthernetSegmentConfig`] entry into the runtime
 /// [`EthernetSegment`] domain type. Validates the ESI text form,
 /// rejects Type 0 (single-homed sentinel), confirms every member
@@ -6502,9 +6582,7 @@ fn parse_ethernet_segment(
 ) -> Result<EthernetSegment, ConfigError> {
     // IFNAMSIZ-1 — the longest interface name the kernel can hold.
     const IFNAMSIZ_MAX: usize = 15;
-    let esi = parse_esi(&cfg.esi).map_err(|e| ConfigError::InvalidEthernetSegment {
-        reason: format!("esi {:?}: {e}", cfg.esi),
-    })?;
+    let esi = segment_esi(cfg)?;
     if esi.esi_type() == 0 && esi.octets().iter().all(|&b| b == 0) {
         return Err(ConfigError::InvalidEthernetSegment {
             reason: format!(

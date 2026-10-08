@@ -13,7 +13,7 @@ BASE = (
     "dataplane_remote_mac", "vlan_local_mac_attribution",
     "macip_vlan_attribution", "svd_fdb_vni", "managed_bridge",
     "managed_vxlan", "managed_svd_vxlan", "managed_vlan_upper",
-    "managed_ready", "link_carrier", "ac_gate", "nexthop_raw",
+    "managed_ready", "link_carrier", "bond_lacp", "ac_gate", "nexthop_raw",
     "foreign_state_l2", "foreign_state_nhid",
 )
 VRF = (
