@@ -473,8 +473,11 @@ groups:
         # retention window and a connected session that stopped refreshing.
         # The age series is removed on flush or expiry, so this resolves
         # then and RpkiCacheEndOfDataNotReady takes over. No `for`: the
-        # remaining time only falls until a new End of Data, and a 600 s
-        # minimum expire leaves only 150 s of warning.
+        # remaining time only falls until a new End of Data, and the
+        # RFC 8210 minimum expire of 600 s leaves only 150 s of warning.
+        # The RTR client also keeps a nonzero configured or cache-advertised
+        # expire below that minimum, so the window can be shorter still,
+        # even shorter than the scrape interval; a `for` would drop it.
         expr: >-
           bgp_rpki_cache_effective_expire_seconds
           - bgp_rpki_cache_end_of_data_age_seconds
