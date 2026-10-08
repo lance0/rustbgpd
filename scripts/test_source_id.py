@@ -177,7 +177,7 @@ class CheckImage(TempTree):
                 self.assertIn("skipping", result.stderr)
 
     def test_bad_usage_is_rejected(self) -> None:
-        for args in (["--check"], ["--chek", "x"], ["x"]):
+        for args in (["--check"], ["--check", ""], ["--chek", "x"], ["x"]):
             with self.subTest(args=args):
                 result = subprocess.run(
                     [str(self.tree / "scripts" / SCRIPT.name), *args],

@@ -19,7 +19,7 @@ set -euo pipefail
 
 image=
 if [ "$#" -gt 0 ]; then
-    if [ "$#" -ne 2 ] || [ "$1" != --check ]; then
+    if [ "$#" -ne 2 ] || [ "$1" != --check ] || [ -z "$2" ]; then
         echo "usage: $0 [--check IMAGE]" >&2
         exit 2
     fi

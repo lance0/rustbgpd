@@ -30,13 +30,26 @@ GRPC_ADDR=""
 RUSTBGPD="${RUSTBGPD:-clab-${TOPO}-rustbgpd}"
 
 # Refuse to test a deployed rustbgpd:dev container whose image was not built
-# from this tree (a reused BuildKit context can keep a stale COPY). The
-# container's image id is checked, not the tag, which a later build may move.
-if [ "$(docker inspect -f '{{.Config.Image}}' "$RUSTBGPD" 2>/dev/null)" = rustbgpd:dev ]; then
-    echo "source-id: checking $RUSTBGPD (rustbgpd:dev)" >&2
+# from this tree (a reused BuildKit context can keep a stale COPY). Every
+# container of the lab is checked, because mixed-version labs run the tree
+# under test beside pinned releases under another name than $RUSTBGPD. Each
+# is checked by its image id, not the tag, which a later build may move.
+while read -r _sid_name; do
+    [ "$(docker inspect -f '{{.Config.Image}}' "$_sid_name" 2>/dev/null)" = rustbgpd:dev ] \
+        || continue
+    _sid_image=$(docker inspect -f '{{.Image}}' "$_sid_name" 2>/dev/null || true)
+    if [ -z "$_sid_image" ]; then
+        echo "source-id: cannot read the image id of $_sid_name" >&2
+        exit 1
+    fi
+    echo "source-id: checking $_sid_name (rustbgpd:dev)" >&2
     "$(dirname "${BASH_SOURCE[0]}")/../../../scripts/source-id.sh" \
-        --check "$(docker inspect -f '{{.Image}}' "$RUSTBGPD")" || exit 1
-fi
+        --check "$_sid_image" </dev/null || exit 1
+done < <({
+    echo "$RUSTBGPD"
+    docker ps --filter "label=containerlab=$TOPO" --format '{{.Names}}' 2>/dev/null || true
+} | sort -u)
+unset _sid_name _sid_image
 
 # Ordinary interop slices can opt into the shared, deliberately public
 # test-only operator credential by setting this to 1 before sourcing the
