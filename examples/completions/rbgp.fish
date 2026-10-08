@@ -1593,8 +1593,8 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and not __fish_seen_su
 complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and not __fish_seen_subcommand_from list check fmt test get set delete chain stats counters explain conditional-advertisements conditional help" -f -a "stats" -d 'Show live per-term policy hit counters'
 complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and not __fish_seen_subcommand_from list check fmt test get set delete chain stats counters explain conditional-advertisements conditional help" -f -a "counters" -d 'Show live per-term policy hit counters'
 complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and not __fish_seen_subcommand_from list check fmt test get set delete chain stats counters explain conditional-advertisements conditional help" -f -a "explain" -d 'Explain the policy decision for a prefix on a neighbor'
-complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and not __fish_seen_subcommand_from list check fmt test get set delete chain stats counters explain conditional-advertisements conditional help" -f -a "conditional-advertisements" -d 'Show conditional-advertisement state (ADR-0137)'
-complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and not __fish_seen_subcommand_from list check fmt test get set delete chain stats counters explain conditional-advertisements conditional help" -f -a "conditional" -d 'Show conditional-advertisement state (ADR-0137)'
+complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and not __fish_seen_subcommand_from list check fmt test get set delete chain stats counters explain conditional-advertisements conditional help" -f -a "conditional-advertisements" -d 'Show conditional-advertisement state'
+complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and not __fish_seen_subcommand_from list check fmt test get set delete chain stats counters explain conditional-advertisements conditional help" -f -a "conditional" -d 'Show conditional-advertisement state'
 complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and not __fish_seen_subcommand_from list check fmt test get set delete chain stats counters explain conditional-advertisements conditional help" -f -a "help" -d 'Print this message or the help of the given subcommand(s)'
 complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcommand_from list" -s s -l addr -d 'gRPC server address or unix:///path/to/socket' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcommand_from list" -l token-file -d 'Bearer token file for authenticated gRPC endpoints' -r
@@ -1772,7 +1772,7 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcom
 complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcommand_from help" -f -a "chain" -d 'Manage global / per-neighbor import/export chains'
 complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcommand_from help" -f -a "stats" -d 'Show live per-term policy hit counters'
 complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcommand_from help" -f -a "explain" -d 'Explain the policy decision for a prefix on a neighbor'
-complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcommand_from help" -f -a "conditional-advertisements" -d 'Show conditional-advertisement state (ADR-0137)'
+complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcommand_from help" -f -a "conditional-advertisements" -d 'Show conditional-advertisement state'
 complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcommand_from help" -f -a "help" -d 'Print this message or the help of the given subcommand(s)'
 complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor-set; and not __fish_seen_subcommand_from list get set delete help" -s s -l addr -d 'gRPC server address or unix:///path/to/socket' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor-set; and not __fish_seen_subcommand_from list get set delete help" -l token-file -d 'Bearer token file for authenticated gRPC endpoints' -r
@@ -2150,7 +2150,7 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand help; and __fish_seen_subcomma
 complete -c rbgp -n "__fish_rbgp_using_subcommand help; and __fish_seen_subcommand_from policy" -f -a "chain" -d 'Manage global / per-neighbor import/export chains'
 complete -c rbgp -n "__fish_rbgp_using_subcommand help; and __fish_seen_subcommand_from policy" -f -a "stats" -d 'Show live per-term policy hit counters'
 complete -c rbgp -n "__fish_rbgp_using_subcommand help; and __fish_seen_subcommand_from policy" -f -a "explain" -d 'Explain the policy decision for a prefix on a neighbor'
-complete -c rbgp -n "__fish_rbgp_using_subcommand help; and __fish_seen_subcommand_from policy" -f -a "conditional-advertisements" -d 'Show conditional-advertisement state (ADR-0137)'
+complete -c rbgp -n "__fish_rbgp_using_subcommand help; and __fish_seen_subcommand_from policy" -f -a "conditional-advertisements" -d 'Show conditional-advertisement state'
 complete -c rbgp -n "__fish_rbgp_using_subcommand help; and __fish_seen_subcommand_from neighbor-set" -f -a "list" -d 'List configured neighbor sets'
 complete -c rbgp -n "__fish_rbgp_using_subcommand help; and __fish_seen_subcommand_from neighbor-set" -f -a "get" -d 'Show one neighbor set by name'
 complete -c rbgp -n "__fish_rbgp_using_subcommand help; and __fish_seen_subcommand_from neighbor-set" -f -a "set" -d 'Set (create or replace) a neighbor set from a JSON file'

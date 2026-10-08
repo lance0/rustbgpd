@@ -1063,7 +1063,7 @@ enum PolicyAction {
         #[arg(long, value_parser = ["import", "export"])]
         direction: String,
     },
-    /// Show conditional-advertisement state (ADR-0137)
+    /// Show conditional-advertisement state
     ///
     /// One entry per installed definition (attached to at least one
     /// static neighbor, directly or through its peer group): each
