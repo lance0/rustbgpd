@@ -2737,7 +2737,9 @@ impl RibManager {
     }
 
     /// Complete one deferred outbound registration (LAN-475), targeting the
-    /// peer's CURRENT last live session. Entries whose peer no longer has a
+    /// peer's CURRENT last live session, plus the queued same-group joiners
+    /// that share its initial replay (LAN-1826,
+    /// `complete_deferred_registration`). Entries whose peer no longer has a
     /// live session (torn down while queued) or whose session already
     /// registered are discarded until one real registration completes (or
     /// the queue empties). A closed outbound channel does NOT skip the
@@ -2752,7 +2754,7 @@ impl RibManager {
                 .map(|record| record.session_id);
             match target {
                 Some(session_id) if self.outbound_session_ids.get(&peer) != Some(&session_id) => {
-                    self.complete_outbound_registration(peer);
+                    self.complete_deferred_registration(peer);
                     return;
                 }
                 _ => {

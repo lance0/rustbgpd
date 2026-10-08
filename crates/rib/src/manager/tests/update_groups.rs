@@ -41,14 +41,14 @@ fn policy_transition_production_slice_boundaries_are_exact() {
     assert_eq!(slice_ends(2_049), vec![1_024, 2_048, 2_049]);
 }
 
-struct CohortExactEncoder {
-    owner: u64,
-    profile: u64,
-    max_len: usize,
-    generation: AtomicUsize,
-    advance_generation: bool,
-    probes: Arc<AtomicUsize>,
-    reuses: Arc<AtomicUsize>,
+pub(super) struct CohortExactEncoder {
+    pub(super) owner: u64,
+    pub(super) profile: u64,
+    pub(super) max_len: usize,
+    pub(super) generation: AtomicUsize,
+    pub(super) advance_generation: bool,
+    pub(super) probes: Arc<AtomicUsize>,
+    pub(super) reuses: Arc<AtomicUsize>,
 }
 
 struct CohortExactSnapshot {
