@@ -19,6 +19,11 @@ headroom, that the daemon builds and the `rustbgpd:dev` image exists,
 and requires explicit operator confirmation that no pushes to main will land
 during the window.
 Exit 0 means ready; nonzero prints each failed check as `FAIL:`.
+Preflight checks the image behind the `rustbgpd:dev` tag. Once the lab is
+deployed, each container-based runner checks every `rustbgpd:dev` container of
+the lab by its image id with `tests/interop/scripts/source-id-guard.sh`, and
+does not start the soak when an id cannot be read or was not built from this
+tree.
 Precommitted per-scenario acceptance gates and abort criteria live in
 `docs/soaks/soak-acceptance-gates.md`; receipts follow
 `docs/soaks/soak-receipt-template.md`.

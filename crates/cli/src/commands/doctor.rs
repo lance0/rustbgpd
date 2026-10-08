@@ -7,7 +7,7 @@
 //! opt-in via `--log-file`; the daemon logs to stdout/journald and the
 //! manifest records that instead of shelling out to journalctl.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -1467,6 +1467,124 @@ fn rpki_cache_session_checks(
         .collect()
 }
 
+/// One `evpn.es.<interface>.auto_esi` check per `esi = "auto-lacp"`
+/// Ethernet Segment, from the daemon's `evpn_es_auto_esi_state` gauge.
+/// A NotReady segment is absent from `rbgp evpn es list` once its state
+/// has been applied, so this is where its reason surfaces.
+fn evpn_auto_esi_checks(document: &toml::Value, metrics: Option<&str>) -> Vec<Check> {
+    const FAMILY: &str = "evpn_es_auto_esi_state{";
+    // Every state at 1 per interface, sorted, so more than one is reported
+    // as such rather than whichever row the exposition listed last.
+    let mut states: HashMap<String, BTreeSet<String>> = HashMap::new();
+    for line in metrics.unwrap_or_default().lines() {
+        let Some((labels, value)) = line
+            .strip_prefix(FAMILY)
+            .and_then(|rest| rest.split_once("} "))
+        else {
+            continue;
+        };
+        let Some(labels) = parse_metric_labels(labels) else {
+            continue;
+        };
+        let (Some(interface), Some(state)) = (labels.get("interface"), labels.get("state")) else {
+            continue;
+        };
+        let entry = states.entry(interface.clone()).or_default();
+        if value.trim() == "1" {
+            entry.insert(state.clone());
+        }
+    }
+    config_rows(document, &["ethernet_segments"])
+        .iter()
+        .filter(|row| row.get("esi").and_then(toml::Value::as_str) == Some("auto-lacp"))
+        .filter_map(|row| row.get("interface").and_then(toml::Value::as_str))
+        .map(|interface| {
+            let active = states
+                .get(interface)
+                .map(|set| set.iter().map(String::as_str).collect::<Vec<_>>())
+                .unwrap_or_default();
+            let (status, detail) = match (metrics, active.as_slice()) {
+                (None, _) => (
+                    CheckStatus::Warn,
+                    "auto-lacp readiness unknown: the metrics snapshot is unavailable".to_string(),
+                ),
+                (Some(_), []) => (
+                    CheckStatus::Warn,
+                    "no auto-lacp readiness reported for this segment yet; the daemon probes \
+                     every 2 s, so rerun doctor"
+                        .to_string(),
+                ),
+                (Some(_), [_, _, ..]) => (
+                    CheckStatus::Warn,
+                    format!(
+                        "auto-lacp readiness ambiguous: more than one state reads 1 ({}); \
+                         rerun doctor",
+                        active.join(", ")
+                    ),
+                ),
+                (Some(_), ["ready"]) => (
+                    CheckStatus::Ok,
+                    "ready: originating under the RFC 7432 type 1 ESI derived from the bond's \
+                     LACP partner"
+                        .to_string(),
+                ),
+                (Some(_), [reason @ "reconverge_failed"]) => (
+                    CheckStatus::Warn,
+                    format!(
+                        "not ready ({reason}): readiness settlement failed, so the previous ESI \
+                         binding and its routes may still be originated; {}",
+                        auto_lacp_not_ready_hint(reason, interface)
+                    ),
+                ),
+                (Some(_), [reason]) => (
+                    CheckStatus::Warn,
+                    format!(
+                        "not ready ({reason}): the segment originates nothing; {}",
+                        auto_lacp_not_ready_hint(reason, interface)
+                    ),
+                ),
+            };
+            Check {
+                name: format!("evpn.es.{interface}.auto_esi"),
+                status,
+                detail,
+            }
+        })
+        .collect()
+}
+
+/// Remediation for one `auto-lacp` not-ready reason, as in the reasons
+/// table of the EVPN VTEP troubleshooting runbook. Only the bond reasons
+/// point at the bond: the others persist with a healthy LACP partner.
+fn auto_lacp_not_ready_hint(reason: &str, interface: &str) -> String {
+    match reason {
+        "not_found"
+        | "not_bond"
+        | "not_lacp_mode"
+        | "down"
+        | "no_active_aggregator"
+        | "no_partner" => format!(
+            "it needs an 802.3ad bond that is up with an LACP partner; check \
+             /proc/net/bonding/{interface} and the CE's LACP config"
+        ),
+        "netlink_error" => "the kernel bond read failed or got no reply within 1 s; see the \
+                            daemon log"
+            .to_string(),
+        "esi_collision" => "the derived ESI matches another segment's ESI and explicit ESIs \
+                            win; the daemon log names the derived ESI, so compare it with \
+                            rbgp evpn es list and the other [[ethernet_segments]] entries"
+            .to_string(),
+        "reconverge_failed" => "applying the derived ESI failed and is retried every 2 s; see \
+                                the daemon log line \"auto-lacp ESI change failed to \
+                                re-converge\" for the error"
+            .to_string(),
+        "unsupported" => "auto-lacp needs Linux bonding over netlink; use an explicit hex esi \
+                          on this platform"
+            .to_string(),
+        _ => "see the daemon log".to_string(),
+    }
+}
+
 /// One bounded TCP connect, immediately dropped on success.
 async fn probe_tcp(addr: String) -> Result<(), String> {
     match tokio::time::timeout(
@@ -2878,6 +2996,9 @@ async fn run_with_deadlines(
                                 ) {
                                     reporter.record(check.name, check.status, check.detail)?;
                                 }
+                            }
+                            for check in evpn_auto_esi_checks(&document, metrics_text.as_deref()) {
+                                reporter.record(check.name, check.status, check.detail)?;
                             }
                             if let Some(check) = authz_enforcement_check(&document) {
                                 reporter.record(check.name, check.status, check.detail)?;
@@ -5012,6 +5133,112 @@ paths = ["x"]
     /// pre-existing `rpki.vrp_table` check passes this fixture. The session
     /// check is what warns; mapping a retained disconnect to `Ok` makes the
     /// retained-cache assertion red.
+    #[test]
+    fn evpn_auto_esi_check_reports_the_not_ready_reason_and_follows_the_gauge() {
+        let document: toml::Value = toml::from_str(
+            r#"
+            [[ethernet_segments]]
+            esi = "auto-lacp"
+            interface = "bond0"
+            [[ethernet_segments]]
+            esi = "auto-lacp"
+            interface = "bond1"
+            [[ethernet_segments]]
+            esi = "00:11:22:33:44:55:66:77:88:99"
+            interface = "eth9"
+            "#,
+        )
+        .unwrap();
+        let gauge = |bond0: &str| {
+            ["ready", "no_partner", "down"]
+                .iter()
+                .map(|state| {
+                    format!(
+                        "evpn_es_auto_esi_state{{interface=\"bond0\",state=\"{state}\"}} {}\n",
+                        u8::from(*state == bond0)
+                    )
+                })
+                .collect::<String>()
+        };
+        let summary = |metrics: Option<&str>| {
+            evpn_auto_esi_checks(&document, metrics)
+                .into_iter()
+                .map(|check| (check.name, check.status, check.detail))
+                .collect::<Vec<_>>()
+        };
+
+        let not_ready = summary(Some(&gauge("no_partner")));
+        assert_eq!(not_ready.len(), 2, "only auto-lacp segments get a check");
+        assert_eq!(not_ready[0].0, "evpn.es.bond0.auto_esi");
+        assert_eq!(not_ready[0].1, CheckStatus::Warn);
+        assert!(
+            not_ready[0].2.starts_with("not ready (no_partner)"),
+            "{}",
+            not_ready[0].2
+        );
+        // bond1 has no series: unknown, never green.
+        assert_eq!(not_ready[1].0, "evpn.es.bond1.auto_esi");
+        assert_eq!(not_ready[1].1, CheckStatus::Warn);
+        assert!(not_ready[1].2.contains("no auto-lacp readiness"));
+
+        let ready = summary(Some(&gauge("ready")));
+        assert_eq!(ready[0].1, CheckStatus::Ok);
+        assert!(ready[0].2.starts_with("ready"));
+
+        // Two rows at 1 (a scrape mid-update): warn naming both, whatever
+        // order the exposition lists them in.
+        for metrics in [
+            "evpn_es_auto_esi_state{interface=\"bond0\",state=\"no_partner\"} 1\n\
+             evpn_es_auto_esi_state{interface=\"bond0\",state=\"ready\"} 1\n",
+            "evpn_es_auto_esi_state{interface=\"bond0\",state=\"ready\"} 1\n\
+             evpn_es_auto_esi_state{interface=\"bond0\",state=\"no_partner\"} 1\n",
+        ] {
+            let ambiguous = summary(Some(metrics));
+            assert_eq!(ambiguous[0].1, CheckStatus::Warn);
+            assert!(
+                ambiguous[0]
+                    .2
+                    .contains("more than one state reads 1 (no_partner, ready)"),
+                "{}",
+                ambiguous[0].2
+            );
+        }
+
+        let unavailable = summary(None);
+        assert_eq!(unavailable[0].1, CheckStatus::Warn);
+        assert!(unavailable[0].2.contains("metrics snapshot is unavailable"));
+
+        // The hint follows the reason: only bond reasons point at the bond,
+        // since the others persist with a healthy LACP partner.
+        let bond_hint = "/proc/net/bonding/bond0";
+        for (reason, hint, bond) in [
+            ("no_partner", bond_hint, true),
+            ("esi_collision", "rbgp evpn es list", false),
+            (
+                "reconverge_failed",
+                "auto-lacp ESI change failed to re-converge",
+                false,
+            ),
+            ("unsupported", "use an explicit hex esi", false),
+        ] {
+            let metrics =
+                format!("evpn_es_auto_esi_state{{interface=\"bond0\",state=\"{reason}\"}} 1\n");
+            let detail = &summary(Some(&metrics))[0].2;
+            assert!(
+                detail.starts_with(&format!("not ready ({reason})")),
+                "{detail}"
+            );
+            assert!(detail.contains(hint), "{reason}: {detail}");
+            assert_eq!(detail.contains(bond_hint), bond, "{reason}: {detail}");
+            // A failed settlement may leave the previous ESI's routes live.
+            assert_eq!(
+                detail.contains("originates nothing"),
+                reason != "reconverge_failed",
+                "{reason}: {detail}"
+            );
+        }
+    }
+
     #[test]
     fn rpki_cache_session_check_warns_on_disconnected_retained_cache() {
         let caches = vec![

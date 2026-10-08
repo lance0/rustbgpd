@@ -57,6 +57,8 @@ CANDIDATE_TOML="$RUN_DIR/candidate.toml"
 
 # shellcheck source=tests/soak/host-lock.sh
 source "$SOAK_SCRIPT_DIR/host-lock.sh"
+# shellcheck source=tests/interop/scripts/source-id-guard.sh
+source "$REPO_ROOT/tests/interop/scripts/source-id-guard.sh"
 
 log() {
     printf '[%s] %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*"
@@ -315,6 +317,7 @@ main() {
     require_tool python3
     require_container "$RUSTBGPD"
     require_container "$FRR"
+    check_lab_source_ids "$TOPO" "$RUSTBGPD" "$FRR" || exit 2
     ensure_daemon_running
 
     write_run_json

@@ -249,7 +249,7 @@ shape itself does not raise the tier.
 | `GetEvpnRuntime` | `sensitive_read` | ADR-0063 committed runtime generation, lifecycle, mutation state, and EVPN table counts. Exposes topology size and no mutating surface. |
 | `ListEvpnInstances` | `sensitive_read` | Per-VNI state — VTEP addresses, RT/RD, optional local bridge / `bridge_vlan` binding, L2 dataplane readiness, and originated MAC counts. |
 | `ListEvpnNexthops` | `sensitive_read` | ADR-0059 FDB nexthop groups — exposes multi-homing topology, ES layout, drift-recovery status. |
-| `ListEthernetSegments` | `sensitive_read` | ADR-0083/0085 Ethernet Segment diagnose state — exposes configured ES membership, composed drain reasons, DF/BUM role rows, AC-gate state, same-ESI local-bias eligibility, and FDB-NHG refs. |
+| `ListEthernetSegments` | `sensitive_read` | ADR-0083/0085 Ethernet Segment diagnose state — exposes configured ES membership, composed drain reasons, DF/BUM role rows, AC-gate state, same-ESI local-bias eligibility, FDB-NHG refs, configured and advertised DF preference and Don't-Preempt, and pending RFC 9785 recovery wait. |
 | `ListIpVrfs` | `sensitive_read` | Gate 9 IP-VRF table. |
 | `ListManagedNetdevs` | `sensitive_read` | ADR-0091 managed EVPN netdev status — exposes desired bridge, fixed-VNI VXLAN, VLAN upper, VRF, and L3VXLAN names, ownership stamps, observed protected attributes, and orphan/foreign/unsafe state. |
 | `GetIpVrf` | `sensitive_read` | Single-VRF detail. |

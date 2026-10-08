@@ -1209,14 +1209,14 @@ ranges configure their prefix keyring directly. The legacy singleton form is:
 [[neighbors]]
 address = "10.0.0.2"
 remote_asn = 65002
-tcp_ao = {
-  key = "secret",
-  send_id = 1,
-  recv_id = 1,
-  algorithm = "hmac(sha256)",
-  preferred = true,
-  deprecated = false,
-}
+
+[neighbors.tcp_ao]
+key = "secret"
+send_id = 1
+recv_id = 1
+algorithm = "hmac(sha256)"
+preferred = true
+deprecated = false
 ```
 
 A two-key rollover can be staged as an ordered array. First append the
@@ -1594,24 +1594,31 @@ peer_group = "rs-clients"
 hold_time = 45  # neighbor override beats peer-group default
 ```
 
-Peer-group fields mirror inheritable neighbor settings: timers, families,
+Peer-group fields mirror every neighbor setting except `address`,
+`interface`, `remote_asn`, `description`, `peer_group`, and `tcp_ao`.
+That covers timers, families,
 prefix limits (`max_prefixes`, `max_prefixes_ipv4`, `max_prefixes_ipv6`,
 `max_prefixes_received_ipv4`, `max_prefixes_received_ipv6`,
 `max_prefixes_out_ipv4`, `max_prefixes_out_ipv6`) and
 `max_prefix_restart_seconds`,
 GR/LLGR, Add-Path, route-server / RR flags, BGP Role / strict-role defaults,
-receive-side Prefix ORF, private-AS handling, MD5/GTSM, `tcp_mss`,
+receive-side Prefix ORF, `disable_ipv4_unicast`, `link_local_next_hop`,
+private-AS handling, MD5/GTSM, BFD, `tcp_mss`,
 `local_ipv6_nexthop`, `log_level`, slow-peer detection
 (`slow_peer_threshold_pct`, `slow_peer_duration`, `slow_peer_isolation`),
-and import/export inline policy or named chains. TCP-AO is intentionally not inherited through peer groups; static
+and import/export inline policy or named chains, and
+`conditional_advertisements` (static members only). TCP-AO is intentionally not inherited through peer groups; static
 neighbors and dynamic ranges configure their startup key directly.
+A gRPC `SetPeerGroup` replaces only the fields its definition carries; the
+config-file-only group fields (such as `role`, `strict_role`,
+`prefix_orf_receive`, `disable_ipv4_unicast`, `link_local_next_hop`, `bfd`,
+`conditional_advertisements`, and the per-family prefix limits) keep their
+configured values. See [PeerGroupService](api.md#peergroupservice).
 
-`conditional_advertisements` is inherited by static members only, with the
-same rule as `export_policy_chain`: a member that sets a non-empty list of its
-own uses that list instead of the group's. Dynamic neighbors that use the
-group do not inherit it. The field is set only in the configuration file:
-`SetPeerGroup` keeps the configured value, and a SIGHUP reload that changes it
-runs on the generation route (see
+`conditional_advertisements` follows the `export_policy_chain` rule: a static
+member that sets a non-empty list of its own uses that list instead of the
+group's. Dynamic neighbors that use the group do not inherit it. A SIGHUP
+reload that changes the group value runs on the generation route (see
 [Conditional advertisements](#conditional-advertisements)).
 
 `discard_path_attributes` is inherited too. A peer-group replacement supplies
@@ -4342,12 +4349,25 @@ aggregator, or has no LACP partner yet. A NotReady segment has no ESI and
 originates no Type 1 or Type 4 routes, does not appear in `rbgp evpn es list`,
 and local MACs on its member VNIs are advertised without an ESI. It is also
 NotReady when its derived ESI matches another segment's (explicit ESIs win),
-or while the re-apply that would originate it is failing and being retried.
+or while the re-apply that would publish its change is failing and being
+retried. A failed re-apply is reported as `reconverge_failed` for every
+segment in that round, whatever its bond read: the runtime has not moved, so
+the previous ESI binding and its routes may still be originated until a retry
+succeeds. Every other reason is reported once the runtime has applied it.
 Each transition is logged once. NotReady is logged at `warn` with a reason
 code: `not_found`, `not_bond`, `not_lacp_mode`, `down`,
 `no_active_aggregator`, `no_partner`, `netlink_error`, `esi_collision`, or
 `reconverge_failed`. Ready is logged at `info` with the derived ESI, and only
 after the segment has been published and re-applied successfully.
+
+The same state is exported as the `evpn_es_auto_esi_state{interface, state}`
+gauge, a state set with one series per state: `ready` or one of the reason
+codes above (`unsupported` on a non-Linux build). The current state's series
+is 1 and the others are 0, and the series are removed when the segment leaves
+the config. `rbgp doctor` reports each `auto-lacp` segment as
+`evpn.es.<interface>.auto_esi`, naming the reason while it is not ready, and
+the shipped `EvpnAutoLacpSegmentNotReady` alert fires after a segment has been
+not ready for 10 minutes.
 
 When the derived ESI changes, the daemon re-applies the committed config
 through the same live EVPN runtime path SIGHUP uses, with no restart. The ESI
@@ -5001,7 +5021,9 @@ the [operations guide](operations.md#configuration-reload-sighup) the
 settlement detail.
 
 1. **Generation** — changes to static `[[neighbors]]`, `[peer_groups]`,
-   BFD member attachments, inline policy definitions, neighbor sets, global chains, `.rpol` content,
+   BFD member attachments, inline policy definitions, neighbor sets, global chains,
+   `[policy.conditional_advertisements]` definitions and neighbor or
+   peer-group `conditional_advertisements` attachments, `.rpol` content,
    `[policy.datasets]` contents or bindings, or outbound prefix maxima settle
    as one owned runtime generation. The daemon resolves the candidate once,
    derives one action per static neighbor (unchanged, hot update in place,
@@ -5017,7 +5039,8 @@ settlement detail.
    change combined with TCP-AO rotation or a listener MD5/GTSM edit (a
    changed password or GTSM setting on a neighbor that stays configured, or
    on a dynamic range) while dataset contents, dataset bindings, and BFD
-   member attachments are unchanged, runs
+   member attachments are unchanged and no config-file-only peer-group field
+   or conditional-advertisement change is present (item 3), runs
    per-subsystem steps in dependency
    order: listener authentication, EVPN runtime, and outbound prefix maxima;
    definitions and global chains; the `[[neighbors]]` reconcile; the
@@ -5033,7 +5056,13 @@ settlement detail.
    edit, and any generation-class or dataset
    change combined with `[[dynamic_neighbors]]`, EVPN runtime tables,
    `[[fib_tables]]`, or `honor_graceful_shutdown` / `honor_blackhole`, are
-   rejected before any effect. Apply those families in separate reloads.
+   rejected before any effect. So is a sequential candidate (TCP-AO rotation
+   or a listener MD5/GTSM edit) whose peer-group edit adds or changes a
+   config-file-only group field such as `role`, `strict_role`,
+   `prefix_orf_receive`, `disable_ipv4_unicast` or `link_local_next_hop`
+   (the full list is in the [reload matrix](reload-matrix.md#sighup-reload-routes)),
+   or that changes a conditional-advertisement definition or attachment.
+   Apply those families in separate reloads.
 
 A candidate that fails to parse or validate, or whose `.rpol` or dataset files
 fail to load, is rejected before any effect on every route. A lost

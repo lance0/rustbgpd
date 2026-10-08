@@ -38,6 +38,10 @@ case "$1" in
         done
         exit 1
         ;;
+    exec)
+        # Soak runners exec into the daemon container once the guard passes.
+        exit 97
+        ;;
     run)
         for i in $STUB_IDS; do
             [ "${i%%=*}" = "$3" ] && echo "${i#*=}" && exit 0
@@ -120,5 +124,45 @@ grep -q "cannot inspect $lab-rustbgpd" "$stubs/stderr" \
 STUB_PS_FAIL=1 source_lib "$dev" "sha256:dev=$tree_id" && fail 'failed lab listing was accepted'
 grep -q 'cannot list the containers of lab source-id-guard' "$stubs/stderr" \
     || fail 'failed lab listing was not reported'
+
+# Soak runners that do not source test-lib call the same guard after their
+# own deployment checks and before the soak starts. The hot-reload runner
+# stands for them: its first step after the guard is a docker exec into the
+# daemon container, which the stub fails with 97.
+# Usage: run_soak "<containers>" "<image ids>"
+run_soak() {
+    : >"$log"
+    env -u CI -u GITHUB_ACTIONS PATH="$stubs:$PATH" STUB_LOG="$log" \
+        STUB_CONTAINERS="$1" STUB_IDS="$2" STUB_PS_FAIL= TOPO=source-id-guard \
+        RUSTBGPD_HOST_LOCK="$stubs/host.lock" RUN_DIR_OVERRIDE="$stubs/soak-run" \
+        bash tests/soak/run-soak-hot-reload.sh 2>&1 | cat >"$stubs/stderr"
+}
+frr="$lab-frr|quay.io/frrouting/frr:10.3.1|sha256:frr"
+
+status=0
+run_soak "$dev $frr" "sha256:dev=$tree_id" || status=$?
+[ "$status" = 97 ] || fail "matching soak lab did not reach the soak start (exit $status)"
+ran sha256:dev || fail 'soak runner did not check the image id'
+grep -q '^exec ' "$log" || fail 'soak runner did not start the daemon after the guard'
+
+status=0
+run_soak "$dev $frr" sha256:dev=other-tree-id || status=$?
+[ "$status" = 2 ] || fail "mismatched soak container did not stop the runner (exit $status)"
+grep -q other-tree-id "$stubs/stderr" || fail 'soak mismatch did not name the image id'
+! grep -q '^exec ' "$log" || fail 'soak started after a source-id mismatch'
+
+status=0
+run_soak "$dev $frr $lab-extra|!|" "sha256:dev=$tree_id" || status=$?
+[ "$status" = 2 ] || fail "uninspectable soak container did not stop the runner (exit $status)"
+grep -q "cannot inspect $lab-extra" "$stubs/stderr" \
+    || fail 'uninspectable soak container was not reported'
+! grep -q '^exec ' "$log" || fail 'soak started after an inspect failure'
+
+status=0
+run_soak "$lab-rustbgpd|rustbgpd:dev| $frr" '' || status=$?
+[ "$status" = 2 ] || fail "unreadable soak image id did not stop the runner (exit $status)"
+grep -q "cannot read the image id of $lab-rustbgpd" "$stubs/stderr" \
+    || fail 'unreadable soak image id was not reported'
+! grep -q '^exec ' "$log" || fail 'soak started after an unreadable image id'
 
 echo 'shared source-id guard: PASS'

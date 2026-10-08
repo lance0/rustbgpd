@@ -14,11 +14,13 @@
 //! ESI.
 //!
 //! Readiness transitions are logged with a stable reason code
-//! (`no_partner`, `down`, `not_lacp_mode`, …).
+//! (`no_partner`, `down`, `not_lacp_mode`, …) and published as the
+//! `evpn_es_auto_esi_state{interface, state}` state set.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
 
+use rustbgpd_telemetry::BgpMetrics;
 use rustbgpd_wire::EthernetSegmentIdentifier;
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
@@ -49,38 +51,64 @@ pub(crate) fn ready(
         .collect()
 }
 
-/// Last reported status per bond, for transition logging.
-#[derive(Default)]
+/// Last reported status per bond, for transition logging and the
+/// readiness gauge.
 pub(crate) struct AutoEsiProbe {
     last: BTreeMap<String, ProbeResult>,
+    metrics: BgpMetrics,
 }
 
 impl AutoEsiProbe {
+    pub(crate) fn new(metrics: BgpMetrics) -> Self {
+        Self {
+            last: BTreeMap::new(),
+            metrics,
+        }
+    }
+
     /// Settle each bond's status after the round was published, log the
-    /// transitions, and return them. A bond is Ready only when its read
-    /// succeeded, its derived ESI did not collide, and the re-converge
-    /// (if one ran) succeeded; otherwise it is not ready with reason
-    /// `esi_collision` or `reconverge_failed`. Bonds no longer read are
-    /// forgotten.
+    /// transitions, and return them. A failed re-converge settles every
+    /// bond in the round as `reconverge_failed`, whatever its read: the
+    /// runtime has not moved, so a segment whose ESI was just unpublished
+    /// may still originate under its previous ESI. Every other not-ready
+    /// reason is therefore reported only once the runtime matches it. A
+    /// bond is Ready only when its read succeeded, its derived ESI did not
+    /// collide (`esi_collision`), and the re-converge (if one ran)
+    /// succeeded. Each transition sets the bond's `evpn_es_auto_esi_state`
+    /// series. Bonds no longer read are forgotten and their series removed.
     pub(crate) fn report(
         &mut self,
         results: BTreeMap<String, ProbeResult>,
         collided: &BTreeSet<String>,
         reconverge_error: Option<&str>,
     ) -> Vec<(String, ProbeResult)> {
-        self.last.retain(|bond, _| results.contains_key(bond));
+        let metrics = &self.metrics;
+        self.last.retain(|bond, _| {
+            let keep = results.contains_key(bond);
+            if !keep {
+                metrics.remove_evpn_es_auto_esi_state(bond);
+            }
+            keep
+        });
         let mut transitions = Vec::new();
         for (bond, read) in results {
-            let status = match read {
-                Ok(esi) if collided.contains(&bond) => Err((
+            let status = match (read, reconverge_error) {
+                (read, Some(error)) => {
+                    let read = match read {
+                        Ok(esi) => format!("derived ESI {esi}"),
+                        Err((reason, _)) => reason.to_string(),
+                    };
+                    Err((
+                        "reconverge_failed",
+                        format!("{error}; bond read: {read}; retrying"),
+                    ))
+                }
+                (Ok(esi), None) if collided.contains(&bond) => Err((
                     "esi_collision",
                     format!("derived ESI {esi} matches another segment's ESI"),
                 )),
-                Ok(esi) => match reconverge_error {
-                    Some(error) => Err(("reconverge_failed", format!("{error}; retrying"))),
-                    None => Ok(esi),
-                },
-                Err(reason) => Err(reason),
+                (Ok(esi), None) => Ok(esi),
+                (Err(reason), None) => Err(reason),
             };
             if self.last.get(&bond) == Some(&status) {
                 continue;
@@ -95,9 +123,13 @@ impl AutoEsiProbe {
                     interface = %bond,
                     reason,
                     detail = %detail,
-                    "auto-lacp Ethernet Segment not ready; originating nothing for it"
+                    "auto-lacp Ethernet Segment not ready"
                 ),
             }
+            let state = status
+                .as_ref()
+                .map_or_else(|(reason, _)| *reason, |_| "ready");
+            self.metrics.set_evpn_es_auto_esi_state(&bond, state);
             self.last.insert(bond.clone(), status.clone());
             transitions.push((bond, status));
         }
@@ -146,6 +178,43 @@ fn read_kernel(_name: &str) -> ProbeResult {
     ))
 }
 
+/// Publish one round of bond reads and settle the probe against it.
+/// Reporting and series removal use the bond set the locked publish
+/// settled, so a bond a reload removed during the read loses its series
+/// in this round. Returns whether the next round must retry the
+/// re-converge.
+pub(crate) async fn run_round(
+    probe: &mut AutoEsiProbe,
+    reload_apply: &EvpnRuntimeReloadApply,
+    mut results: BTreeMap<String, ProbeResult>,
+    retry: bool,
+) -> bool {
+    let round = reload_apply
+        .publish_auto_lacp_round(ready(&results), retry)
+        .await;
+    results.retain(|bond, _| round.configured.contains(bond));
+    let reconverge_error = round.result.as_ref().err().map(|e| format!("{e:?}"));
+    probe.report(results, &round.collided, reconverge_error.as_deref());
+    match round.result {
+        Ok(None) => retry,
+        Ok(Some(response)) => {
+            info!(
+                outcome = response.outcome,
+                message = %response.message,
+                "auto-lacp ESI change re-converged"
+            );
+            false
+        }
+        Err(error) => {
+            warn!(
+                ?error,
+                "auto-lacp ESI change failed to re-converge; retrying"
+            );
+            true
+        }
+    }
+}
+
 /// Run the probe until `shutdown`. Each round reads bonds outside the
 /// apply lock, then publishes and re-converges as one locked operation.
 /// A failed re-converge is retried on the next round.
@@ -168,29 +237,7 @@ pub(crate) fn spawn(
                 () = shutdown.cancelled() => return,
                 results = read_bonds(interfaces) => results,
             };
-            let round = reload_apply
-                .publish_auto_lacp_round(ready(&results), retry)
-                .await;
-            let reconverge_error = round.result.as_ref().err().map(|e| format!("{e:?}"));
-            probe.report(results, &round.collided, reconverge_error.as_deref());
-            match round.result {
-                Ok(None) => {}
-                Ok(Some(response)) => {
-                    retry = false;
-                    info!(
-                        outcome = response.outcome,
-                        message = %response.message,
-                        "auto-lacp ESI change re-converged"
-                    );
-                }
-                Err(error) => {
-                    retry = true;
-                    warn!(
-                        ?error,
-                        "auto-lacp ESI change failed to re-converge; retrying"
-                    );
-                }
-            }
+            retry = run_round(&mut probe, &reload_apply, results, retry).await;
         }
     })
 }
@@ -216,7 +263,7 @@ mod tests {
 
     #[test]
     fn ready_is_reported_only_after_collision_and_reconverge_settle() {
-        let mut probe = AutoEsiProbe::default();
+        let mut probe = AutoEsiProbe::new(BgpMetrics::new());
         let none = BTreeSet::new();
         let codes = |t: Vec<(String, ProbeResult)>| -> Vec<Result<EthernetSegmentIdentifier, &'static str>> {
             t.into_iter().map(|(_, s)| s.map_err(|(code, _)| code)).collect()
@@ -237,6 +284,12 @@ mod tests {
             codes(probe.report(round(Some(Ok(esi(1)))), &collided, None)),
             vec![Err("esi_collision")]
         );
+        // A failed re-converge outranks a not-ready read: the runtime has
+        // not withdrawn the segment yet.
+        assert_eq!(
+            codes(probe.report(round(Some(not_ready())), &none, Some("injected"))),
+            vec![Err("reconverge_failed")]
+        );
         // Published cleanly: Ready, reported once.
         assert_eq!(
             codes(probe.report(round(Some(Ok(esi(1)))), &none, None)),
@@ -251,6 +304,97 @@ mod tests {
             ready(&round(Some(Ok(esi(2))))),
             BTreeMap::from([("bond0".to_string(), esi(2))])
         );
+    }
+
+    /// The `evpn_es_auto_esi_state` series set to 1 for `interface`, or
+    /// `None` when it has no series; panics if more than one reads 1.
+    fn gauge_state(metrics: &BgpMetrics, interface: &str) -> Option<String> {
+        let text = crate::test_support::gather_metrics_text(metrics);
+        let prefix = format!("evpn_es_auto_esi_state{{interface=\"{interface}\",state=\"");
+        let mut series = 0;
+        let mut set = Vec::new();
+        for rest in text.lines().filter_map(|line| line.strip_prefix(&prefix)) {
+            series += 1;
+            let (state, value) = rest.split_once("\"} ").unwrap();
+            if value == "1" {
+                set.push(state.to_string());
+            }
+        }
+        assert!(set.len() <= 1, "more than one state set: {set:?}");
+        (series > 0).then(|| set.pop().unwrap_or_default())
+    }
+
+    #[test]
+    fn readiness_gauge_follows_the_settled_status_and_is_removed_with_the_segment() {
+        let metrics = BgpMetrics::new();
+        let mut probe = AutoEsiProbe::new(metrics.clone());
+        let none = BTreeSet::new();
+
+        probe.report(round(Some(not_ready())), &none, None);
+        assert_eq!(
+            gauge_state(&metrics, "bond0").as_deref(),
+            Some("no_partner")
+        );
+
+        // A clean read whose re-converge failed is still not ready.
+        probe.report(round(Some(Ok(esi(1)))), &none, Some("injected"));
+        assert_eq!(
+            gauge_state(&metrics, "bond0").as_deref(),
+            Some("reconverge_failed")
+        );
+
+        probe.report(round(Some(Ok(esi(1)))), &none, None);
+        assert_eq!(gauge_state(&metrics, "bond0").as_deref(), Some("ready"));
+
+        probe.report(round(Some(not_ready())), &none, None);
+        assert_eq!(
+            gauge_state(&metrics, "bond0").as_deref(),
+            Some("no_partner")
+        );
+
+        // The segment left the config: its series go with it.
+        probe.report(round(None), &none, None);
+        assert_eq!(gauge_state(&metrics, "bond0"), None);
+    }
+
+    /// Every reason a bond read or a publish can report is a state the
+    /// gauge publishes; an unlisted one would leave every series at 0.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn every_not_ready_reason_is_a_published_gauge_state() {
+        use rustbgpd_evpn_linux::LacpPartnerError;
+        // Exhaustive: a new error variant fails to compile here until it
+        // is listed, and so reaches the vocabulary check below.
+        let listed = |e: &LacpPartnerError| -> &'static str {
+            match e {
+                LacpPartnerError::NotFound
+                | LacpPartnerError::NotBond
+                | LacpPartnerError::NotLacpMode
+                | LacpPartnerError::Down
+                | LacpPartnerError::NoActiveAggregator
+                | LacpPartnerError::NoPartner
+                | LacpPartnerError::Io(_) => e.code(),
+            }
+        };
+        let states = rustbgpd_telemetry::evpn_es_auto_esi_states();
+        let errors = [
+            LacpPartnerError::NotFound,
+            LacpPartnerError::NotBond,
+            LacpPartnerError::NotLacpMode,
+            LacpPartnerError::Down,
+            LacpPartnerError::NoActiveAggregator,
+            LacpPartnerError::NoPartner,
+            LacpPartnerError::Io(std::io::Error::other("x")),
+        ];
+        let reasons = errors.iter().map(listed).chain([
+            "esi_collision",
+            "reconverge_failed",
+            "unsupported",
+            "ready",
+        ]);
+        for reason in reasons {
+            assert!(states.contains(&reason), "{reason} is not a gauge state");
+        }
     }
 
     #[tokio::test]

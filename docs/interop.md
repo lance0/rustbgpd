@@ -173,7 +173,7 @@ support manual dispatch. Neither workflow has a scheduled trigger.
   and experimental Paths-Limit against real FRR and GoBGP (GoBGP for
   M73–M79): **M10**, **M14**, **M16**, **M17**,
   **M73**, **M74**,
-  **M75**, **M76**, **M77**, **M78**, **M79**, **M89**.
+  **M75**, **M76**, **M77**, **M78**, **M79**, **M89**, **M116**.
 - **Operational + security** — BMP, transport security, FlowSpec: **M22**, **M24**, **M25**, and the BMP trio + BMPv4 receipt **M81**.
 - **Protocol resilience + validation** — max-prefix Cease, RTR v2 ASPA
   validation (roleless and role-aware), dynamic-neighbor admission, RFC 7606
@@ -298,6 +298,7 @@ broader platform-diversity validation beyond the protected hosted matrix.
 | BIRD | 2.0.12 | `tests/interop/m0-bird.clab.yml` | Tested (M0) | All 5 tests pass | Needs `/run/bird` dir; sends empty UPDATE on establish | Cease/Admin Shutdown + Cease/Admin Reset |
 | FRR (bgpd) | 10.7.1 | `tests/interop/m4-frr.clab.yml` | Tested (M4) | 10-peer dynamic mgmt | 8 static + 2 dynamic peers | — |
 | FRR (bgpd) | 10.7.1 | `tests/interop/m10-frr-ipv6.clab.yml` | Tested (M10) | Dual-stack MP-BGP | IPv4 session, IPv6 via MP_REACH_NLRI | — |
+| FRR (bgpd) | 10.7.1 | `tests/interop/m116-ipv6-next-hop-family-frr.clab.yml` | Tested (M116) | IPv6 unicast keeps an IPv6 next hop over IPv4 transport | An eBGP FRR source sends three IPv6 prefixes over an IPv4 session. rustbgpd's import policy sets `next-hop self` on one, which resolves to the source neighbor's `local_ipv6_nexthop`, and an IPv4 `set_next_hop` on another; export policy toward both receivers sets an IPv4 `set_next_hop` on the third. The IPv4 rewrites do not apply to IPv6 routes. An FRR iBGP receiver and an FRR route-server client must hold all three in their pre-policy Adj-RIB-In with the expected IPv6 next hop. A tshark sidecar in rustbgpd's namespace decodes each receiver-bound `MP_REACH_NLRI` from its raw bytes and requires a 16- or 32-octet next hop with the expected global address, no IPv6 `MP_REACH_NLRI` with any other next-hop length, no NOTIFICATION, and both receiver sessions on their first connection | Single attempt; Extended Next Hop is not negotiated; `next-hop self` over IPv6 transport and the no-`local_ipv6_nexthop` fallback are covered by unit tests |
 | FRR (bgpd) | 10.7.1 | `tests/interop/m11-gr-frr.clab.yml` | Tested (M11) | Graceful Restart (RFC 4724) | Short timers (30s restart, 30s stale) | — |
 | FRR (bgpd) | 10.7.1 | `tests/interop/m12-ec-frr.clab.yml` | Tested (M12) | Extended Communities (RFC 4360) | RT:65002:100 via route-map | — |
 | FRR (bgpd) | 10.7.1 | `tests/interop/m13-policy-frr.clab.yml` | Tested (M13) | Policy Engine (chains, actions) | 3-node: import chain + export deny/MED/prepend, and plain eBGP export stripping non-transitive Extended Communities | — |

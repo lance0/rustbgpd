@@ -84,6 +84,8 @@ exec > >(tee -a "$SOAK_LOG") 2>&1
 # tests/soak/host-lock.sh for sudo/HOME caveats.
 # shellcheck source=./host-lock.sh
 source "$SOAK_SCRIPT_DIR/host-lock.sh"
+# shellcheck source=tests/interop/scripts/source-id-guard.sh
+source "$REPO_ROOT/tests/interop/scripts/source-id-guard.sh"
 acquire_rustbgpd_host_lock
 
 # ---------------------------------------------------------------------------
@@ -206,6 +208,7 @@ if ! container_is_running "$PE2_NAME"; then
     log "ERROR: container $PE2_NAME not running"
     exit 2
 fi
+check_lab_source_ids gate9-slice6-soak "$PE1_NAME" "$PE2_NAME" || exit 2
 
 # Provision PE1's kernel topology (VRF + L3VXLAN + tenant dummy
 # with the initial /24 address) and start the daemon. The

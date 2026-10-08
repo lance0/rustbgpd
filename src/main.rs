@@ -4012,7 +4012,7 @@ async fn run<T>(
     // The round is bounded, so a wedged netlink path only delays startup
     // by `STARTUP_PROBE_BOUND`; bonds not read in time start not ready.
     let evpn_auto_lacp_esis = config::AutoLacpEsis::default();
-    let mut evpn_auto_esi_probe = evpn_auto_esi::AutoEsiProbe::default();
+    let mut evpn_auto_esi_probe = evpn_auto_esi::AutoEsiProbe::new(metrics.clone());
     let evpn_auto_lacp_interfaces = config.auto_lacp_interfaces();
     if !evpn_auto_lacp_interfaces.is_empty() {
         let results = tokio::time::timeout(
