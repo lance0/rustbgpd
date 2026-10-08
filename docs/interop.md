@@ -425,6 +425,18 @@ IP-VRF state remain the primary operational view.
 - Docker installed and running
 - containerlab installed
 - `rustbgpd:dev` Docker image built: `docker build --target dev -t rustbgpd:dev .`
+  Images record a content hash of their Rust build inputs. Before trusting
+  a local lab result, check that it matches the tree you meant to build:
+
+  ```sh
+  test "$(docker run --rm rustbgpd:dev cat /usr/local/share/rustbgpd/source-id)" \
+    = "$(scripts/source-id.sh)"
+  ```
+
+  A mismatch means the build used a stale context. BuildKit does not resend
+  a file whose path, size and mtime are unchanged since the last build of
+  that directory, even when its content changed. Touch the changed files and
+  rebuild.
 - `bird:2-bookworm` Docker image built: `docker build -t bird:2-bookworm -f tests/interop/Dockerfile.bird tests/interop/`
 - For M43 or M101, build the pinned BIRD 3 image below.
 
