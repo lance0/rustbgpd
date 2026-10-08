@@ -7,7 +7,8 @@
 #      no containerlab process is live, no clab-managed containers are
 #      up, and no rustbgpd process is running on the host itself.
 #   3. Disk headroom on the partition holding tests/soak/runs/.
-#   4. The rustbgpd:dev image exists and the daemon compiles at HEAD.
+#   4. The rustbgpd:dev image exists, its source-id matches this tree,
+#      and the daemon compiles at HEAD.
 #   5. No pushes to main will land during the soak window, confirmed via
 #      CONFIRM_NO_MAIN_PUSHES=1 or interactively when run on a TTY.
 #
@@ -19,6 +20,8 @@
 #   SOAK_MIN_DISK_GB   minimum free space required (default 50)
 #   RUSTBGPD_HOST_LOCK lock path (same default as host-lock.sh)
 #   SKIP_BUILD_CHECK=1 skip the cargo compile check (image check stays)
+#   SKIP_SOURCE_ID_CHECK=1 skip the image source-id check, for callers that
+#                      run host binaries and only need the host-quiet checks
 
 set -uo pipefail
 
@@ -103,8 +106,13 @@ log "checking daemon image and build"
 if docker image inspect rustbgpd:dev >/dev/null 2>&1; then
     created=$(docker image inspect rustbgpd:dev --format '{{.Created}}')
     ok "rustbgpd:dev image present (created $created)"
-    head_commit=$(git -C "$REPO_ROOT" rev-parse --short HEAD 2>/dev/null || echo unknown)
-    log "  note: verify the image was built from the tip under soak (HEAD is $head_commit)"
+    if [ "${SKIP_SOURCE_ID_CHECK:-0}" = "1" ]; then
+        log "  skipping source-id check (SKIP_SOURCE_ID_CHECK=1)"
+    elif "$REPO_ROOT/scripts/source-id.sh" --check rustbgpd:dev; then
+        ok "rustbgpd:dev source-id matches this tree"
+    else
+        fail "rustbgpd:dev was not built from this tree — rebuild it"
+    fi
 else
     fail "rustbgpd:dev image missing — run: docker build --target dev -t rustbgpd:dev ."
 fi
