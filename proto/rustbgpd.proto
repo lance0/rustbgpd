@@ -627,8 +627,8 @@ message NeighborState {
   // Live outbound update-group membership: "group:N" for shared staging, or
   // the private-path reason
   // ("policy_peer_context", "add_path_send", "per_client_best",
-  // "orr_vantage", "orf_installed", "slow_peer"). Empty when the peer has no
-  // outbound registration.
+  // "orr_vantage", "orf_installed", "conditional_advertisement", "slow_peer").
+  // Empty when the peer has no outbound registration.
   string update_group = 22;
   // Total BGP messages received/sent, all types (OPEN, KEEPALIVE,
   // UPDATE, NOTIFICATION, ROUTE-REFRESH). Mirrors the
@@ -876,6 +876,7 @@ enum UpdateGroupComparisonMembership {
   UPDATE_GROUP_COMPARISON_MEMBERSHIP_ORR_VANTAGE = 6;
   UPDATE_GROUP_COMPARISON_MEMBERSHIP_ORF_INSTALLED = 7;
   UPDATE_GROUP_COMPARISON_MEMBERSHIP_SLOW_PEER = 8;
+  UPDATE_GROUP_COMPARISON_MEMBERSHIP_CONDITIONAL_ADVERTISEMENT = 9;
 }
 
 enum UpdateGroupComparisonDifference {

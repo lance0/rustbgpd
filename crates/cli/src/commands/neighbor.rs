@@ -1045,6 +1045,7 @@ fn comparison_membership_label(value: i32) -> &'static str {
         Ok(M::PerClientBest) => "per_client_best",
         Ok(M::OrrVantage) => "orr_vantage",
         Ok(M::OrfInstalled) => "orf_installed",
+        Ok(M::ConditionalAdvertisement) => "conditional_advertisement",
         Ok(M::SlowPeer) => "slow_peer",
         Ok(M::Unknown | M::Unspecified) | Err(_) => "unknown",
     }
