@@ -73,11 +73,12 @@ COPY . .
 # tree's code. Touching the copied sources first makes Cargo rebuild
 # every workspace crate from them; dependency artifacts stay cached.
 # Only local rebuilds lose incremental workspace compiles; CI runners
-# start with an empty target cache.
+# start with an empty target cache. `touch -h` updates a symlink itself,
+# so a dangling one cannot fail the step.
 RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
     --mount=type=cache,target=/build/target,sharing=locked \
-    find . -path ./target -prune -o -exec touch {} + && \
+    find . -path ./target -prune -o -exec touch -h {} + && \
     cargo build --workspace --profile ci && \
     mkdir -p /out && \
     cp target/ci/rustbgpd /out/ && \
@@ -100,7 +101,7 @@ COPY . .
 RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
     --mount=type=cache,target=/build/target,sharing=locked \
-    find . -path ./target -prune -o -exec touch {} + && \
+    find . -path ./target -prune -o -exec touch -h {} + && \
     cargo build --release --features rustbgpd/jemalloc \
       -p rustbgpd -p rustbgpctl -p birdwatcher-adapter && \
     mkdir -p /out && \
