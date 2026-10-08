@@ -869,3 +869,26 @@ groups:
             (phase={{ $labels.phase }}, reason={{ $labels.reason }}). The
             collector is not keeping up or its connection failed; its BMP
             view is incomplete until it reconnects and is re-fed.
+
+      - alert: EvpnAutoLacpSegmentNotReady
+        # An esi = "auto-lacp" Ethernet Segment is not ready until its 802.3ad
+        # bond is up with an LACP partner and the change has been applied.
+        # Keyed on the ready series,
+        # so a change between not-ready reasons does not restart the hold.
+        expr: evpn_es_auto_esi_state{state="ready"} == 0
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "auto-lacp Ethernet Segment on {{ $labels.interface }} is not ready"
+          description: >-
+            The esi = "auto-lacp" Ethernet Segment on bond
+            {{ $labels.interface }} of {{ $labels.instance }} has not been
+            ready for 10 minutes. The evpn_es_auto_esi_state series at 1 names
+            the reason; rbgp doctor reports it as
+            evpn.es.{{ $labels.interface }}.auto_esi. For a bond reason such
+            as no_partner or down, the segment originates no Ethernet Segment
+            or Ethernet A-D routes; check the bond's 802.3ad state and LACP
+            partner. For reconverge_failed, applying the change failed and is
+            retried, and the previous ESI's routes may still be originated;
+            check the daemon log.

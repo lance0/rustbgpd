@@ -37,6 +37,7 @@ EVPN_METRICS: dict[str, tuple[str, tuple[str, ...]]] = {
     "evpn_duplicate_mac_quarantine_active": ("gauge", ("vni", "mac")),
     "evpn_df_role": ("gauge", ("esi", "vni", "role")),
     "evpn_es_ac_gate": ("gauge", ("esi", "state")),
+    "evpn_es_auto_esi_state": ("gauge", ("interface", "state")),
     "evpn_df_role_changes_total": ("counter", ("esi", "vni")),
     "evpn_es_drained": ("gauge", ("esi", "reason")),
     "evpn_ip_vrf_observed_routes": ("gauge", ("vrf",)),
