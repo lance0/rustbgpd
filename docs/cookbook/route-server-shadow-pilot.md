@@ -52,8 +52,8 @@ monitoring, teardown, data return — are identical.
   single explicit deny-all policy (`shadow-receive-only`: no statements,
   `default_action = "deny"` in TOML; `term everything { reject }` in
   `.rpol`). No route announcements leave the daemon toward any member:
-  after OPEN, sessions carry KEEPALIVEs plus one empty End-of-RIB UPDATE
-  per negotiated family, which announces no routes. This is stronger
+  after OPEN, sessions carry KEEPALIVEs plus one End-of-RIB marker per
+  negotiated family, which announces no routes. This is stronger
   than "members should filter it": there is nothing to filter.
 - **The failure mode of a misedit is still silence.** With
   `ebgp_requires_policy = true` (RFC 8212,

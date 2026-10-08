@@ -48,7 +48,8 @@ the recipe is the config + runbook it enables:
 
 ## Interop labs — PR-gated (`interop.yml`)
 
-These run on every lab-relevant (non-documentation) pull request via
+These run on every lab-relevant pull request (documentation-only, standalone
+fuzz-only, and release/package-only pull requests skip them) via
 [`.github/workflows/interop.yml`](../.github/workflows/interop.yml); each job
 id names its milestone, and some jobs run several receipts (`m85` also runs
 M93 and M95; `m26_m27_m28_m59_m91` runs five). Full procedures:

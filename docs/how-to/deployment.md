@@ -1221,10 +1221,14 @@ operand, fuel/loop-cap exhaustion, ...). These denies also appear in
 "the policy said no" from "the policy is broken". The exception is
 `direction="condition"`: a conditional advertisement's `condition_policy`
 error denies no route and does not appear in `bgp_policy_routes_total`; it
-can leave the condition `unknown`. Any nonzero rate
-deserves a look — `rbgp policy stats --direction both` names the failing chain, policy,
-and term (`eval_errors` count + `last_error` per chain), and the
-rate-limited daemon WARN carries the same blame line.
+can leave the condition `unknown`. Any nonzero rate deserves a look. For
+`import` and `export` errors, `rbgp policy stats --direction both` names the
+failing chain, policy, and term (`eval_errors` count + `last_error` per
+chain), and the rate-limited daemon WARN carries the same blame line. For
+`condition` errors, `bgp_conditional_advertisement_condition{state="unknown"}`
+names the definition, and `rbgp rib --prefix P advertised PEER --explain` for
+a route its `advertise_policy` selects names the failing `condition_policy`
+and term in the `conditional_advertisement` step.
 
 ```promql
 # Any policy erroring anywhere is alert-worthy:

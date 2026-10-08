@@ -280,9 +280,11 @@ rbgp evpn es list          # Ethernet Segments currently originated
 rbgp doctor                # evpn.es.<interface>.auto_esi names an auto-lacp segment's not-ready reason
 ```
 
-A NotReady `esi = "auto-lacp"` segment is absent from `rbgp evpn es list`; its
-reason is in the `evpn_es_auto_esi_state` gauge, the `rbgp doctor` check, and a
-warn-level log line.
+A NotReady `esi = "auto-lacp"` segment is absent from `rbgp evpn es list`,
+except with reason `reconverge_failed`: the runtime has not moved, so the
+previous ESI binding and its routes may still be present until a retry
+succeeds. The reason is in the `evpn_es_auto_esi_state` gauge, the
+`rbgp doctor` check, and a warn-level log line.
 
 L2VNI rows with `readiness=not-ready` include the single failing probe reason
 in `reason=[...]`;
