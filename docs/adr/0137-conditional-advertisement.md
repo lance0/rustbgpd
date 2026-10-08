@@ -322,11 +322,12 @@ route-server clients.
 
 Definitions and attachments belong to the policy section of the
 **generation** reload class, like named policies, neighbor sets, and chains.
-Each peer's attachments, with the content of the referenced definitions, travel
-in the same `PeerExportPolicyReplacement` that installs that peer's export
-chain. The commit point is therefore the RIB actor's acknowledgement of the
-generation's authoritative export-policy batch. Compensation uses the existing
-restore batch. No new RIB command or commit point is introduced.
+*Amended during implementation; see
+[Amendment: one attachment install](#amendment-one-attachment-install-2026-10-08).*
+The RIB holds one install of the attached definitions and the attachments,
+keyed by static neighbor address. The commit point is the RIB actor's
+acknowledgement of that install, which the generation sends at its config
+swap. Compensation restores the install's capture.
 
 Within that batch:
 
@@ -566,7 +567,8 @@ Promotion would require a separate inventory decision after operational use.
    settle timer, the deferral hold, applied state, `condition_policy`
    dataset-dependency recomputation, the three metrics, and the transition
    log. Applied state has no export effect yet. Roughly 500 lines with tests.
-3. **Export gate.** Carry the attachments in `PeerExportPolicyReplacement`.
+3. **Export gate.** Install the definitions and address-keyed attachments
+   through one RIB install with a restorable capture (see the amendment).
    Insert the gate step last before the export chain in each unicast body and
    both explain paths, failing closed on `advertise_policy` errors. Add the
    `conditional_advertisement` fallback reason, with the proto enum value and
@@ -608,6 +610,48 @@ questions as follows:
    value and the resulting `NeighborService` digest update in
    `v1-stable-surface.json`. It ships in its own commit in slice 3
    (Decision 9).
+
+## Amendment: one attachment install (2026-10-08)
+
+Implementation found that attachments cannot travel in
+`PeerExportPolicyReplacement` as Decision 6 proposed:
+
+- The generation's export-policy batch names only peers whose chains
+  changed, and the RIB skips a member that is not registered for outbound
+  updates. Peers that a generation adds or replaces, and peers whose session
+  is down, receive their chains through `PeerUp` from the session task. An
+  attachment carried in the batch would never reach them.
+- Generation compensation re-applies the prior chains through the forward
+  policy snapshot, not the rollback-only restore batch, so the tracker
+  capture could not ride the restore batch either.
+
+The implemented design keeps the decision's semantics and changes its
+plumbing:
+
+- **One owner.** The RIB holds one install: every definition some static
+  neighbor attaches, and each such neighbor's attachment names keyed by its
+  address. Attachments are static-neighbor only, so the address identifies
+  the neighbor. The export gate reads only this install. Definitions and
+  attachments commit together, so the gate never sees an attachment whose
+  definition is missing; the gate still fails closed if it did.
+- **Writers.** The daemon seeds the install when it constructs the RIB,
+  before any session can register. A reload generation installs at its
+  config swap, before its hot updates, removals, session replacements, and
+  additions, so no session the generation creates registers ahead of its
+  gate; the generation's unwind restores the captured install before it
+  re-adds peers. A catalog policy edit (`SetPolicy`, `.rpol` reload) installs
+  before its chain snapshot and restores on failure. Any other config
+  replacement, such as removing a neighbor, is reconciled against the
+  running config after the command, which drops that neighbor's attachment.
+- **Commands.** `InstallConditionalAdvertisements` returns the capture;
+  `RestoreConditionalAdvertisements` reinstates it without re-evaluating;
+  `ReobserveConditionalAdvertisements` carries a `condition_policy` dataset
+  swap. The commit point is the RIB's acknowledgement of the install.
+- **Unchanged.** Content identity, immediate evaluation of new or changed
+  definitions, restore of applied state and settle deadlines, dirty marking
+  of affected peers, and both dataset dependencies behave as Decision 6
+  states. A peer registered before an install that attaches it is regrouped
+  and resynced by that install.
 
 ## Consequences
 
