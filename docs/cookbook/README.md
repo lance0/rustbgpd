@@ -73,6 +73,7 @@ two instances of any mode are [paired route servers](paired-route-servers.md).
 | [Controller / monitoring feed](monitoring-feed.md) | Streaming BMP, durable events, and MRT into a controller or collector stack | M24, M81 |
 | [EVPN fabric route reflector](evpn-fabric-rr.md) | Control-plane-only RR for a VXLAN-EVPN leaf/spine fabric | M29, M30, M82, M33 |
 | [Policy quickstart (`.rpol`)](policy-quickstart.md) | First typed policy: tests, dry-run, hot swap, explain | M80, M34 |
+| [Backup route with conditional advertisement](conditional-advertisement-backup.md) | Announce a prefix to a backup upstream only while the primary upstream's route is absent: config, metrics, explain, alerting | M115 |
 
 Operator runbooks — short, ordered checklists for a live daemon:
 

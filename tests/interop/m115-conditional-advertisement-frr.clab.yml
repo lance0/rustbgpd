@@ -1,0 +1,70 @@
+# Containerlab topology: FRR source -> rustbgpd -> FRR receiver
+# (M115 — conditional advertisement, advertise-if-absent)
+#
+# Validates: a conditional advertisement attached to frr-b advertises the
+# payload prefix only while the condition prefix is absent from rustbgpd's
+# RIB, applying each change after settle_time, while a control prefix outside
+# the definition is unaffected.
+#
+# rustbgpd (AS 65001) peers with:
+#   frr-a (AS 65002, eBGP): advertises 192.0.2.0/24 (condition) and
+#     198.51.101.0/24 (control); the test driver adds and later withdraws
+#     and re-announces prefixes on it
+#   frr-b (AS 65003, eBGP receiver) with conditional advertisement
+#     m115-backup attached: advertise 198.51.100.0/24 (payload) only while
+#     192.0.2.0/24 is absent, settle_time 2 s
+#
+# Usage:
+#   containerlab deploy -t tests/interop/m115-conditional-advertisement-frr.clab.yml
+#   containerlab destroy -t tests/interop/m115-conditional-advertisement-frr.clab.yml
+
+name: m115-conditional-advertisement-frr
+
+topology:
+  nodes:
+    rustbgpd:
+      kind: linux
+      image: rustbgpd:dev
+      cmd: sleep infinity
+      binds:
+        - ./configs/rustbgpd-m115-conditional-advertisement.toml:/etc/rustbgpd/config.toml:ro
+        - ./scripts/start-rustbgpd.sh:/usr/local/bin/start-rustbgpd.sh:ro
+        - ../fixtures/grpc-test-only-operator.token:/run/rustbgpd/grpc-test-only-operator.token:ro
+      exec:
+        - ip addr add 10.115.0.1/24 dev eth1
+        - ip link set eth1 up
+        - ip addr add 10.115.1.1/24 dev eth2
+        - ip link set eth2 up
+      env:
+        RUST_LOG: info
+
+    frr-a:
+      kind: linux
+      image: quay.io/frrouting/frr:10.7.1
+      binds:
+        - ./configs/frr-daemons:/etc/frr/daemons:ro
+        - ./configs/frr-bgpd-m115-a.conf:/etc/frr/frr.conf:ro
+        # Without this, vtysh prints "Can't open configuration file
+        # /etc/frr/vtysh.conf" on stdout and the driver's JSON reads fail.
+        - /dev/null:/etc/frr/vtysh.conf:ro
+      exec:
+        - ip addr add 10.115.0.2/24 dev eth1
+        - ip link set eth1 up
+
+    frr-b:
+      kind: linux
+      image: quay.io/frrouting/frr:10.7.1
+      binds:
+        - ./configs/frr-daemons:/etc/frr/daemons:ro
+        - ./configs/frr-bgpd-m115-b.conf:/etc/frr/frr.conf:ro
+        - /dev/null:/etc/frr/vtysh.conf:ro
+      exec:
+        - ip addr add 10.115.1.2/24 dev eth1
+        - ip link set eth1 up
+
+  links:
+    - endpoints: ["rustbgpd:eth1", "frr-a:eth1"]
+    - endpoints: ["rustbgpd:eth2", "frr-b:eth1"]
+
+# Network A: 10.115.0.0/24 — rustbgpd (10.115.0.1) ↔ frr-a (10.115.0.2, AS 65002)
+# Network B: 10.115.1.0/24 — rustbgpd (10.115.1.1) ↔ frr-b (10.115.1.2, AS 65003)
