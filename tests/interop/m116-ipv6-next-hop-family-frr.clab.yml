@@ -52,6 +52,11 @@ topology:
         # /etc/frr/vtysh.conf" on stdout and the driver's JSON reads fail.
         - /dev/null:/etc/frr/vtysh.conf:ro
       exec:
+        # FRR resets a connection with FSM Error 5/0 before its OPEN while
+        # the interface lacks a usable IPv6 link-local: IPv6 unicast is active
+        # on this IPv4 session, and zebra ignores a link-local still in DAD.
+        # A preassigned link-local is usable before the IPv4 session can start.
+        - ip -6 addr add fe80::2/64 dev eth1 nodad
         - ip addr add 10.116.0.2/24 dev eth1
         - ip -6 addr add 2001:db8:116::2/64 dev eth1 nodad
         - ip link set eth1 up
@@ -64,6 +69,8 @@ topology:
         - ./configs/frr-bgpd-m116-ibgp.conf:/etc/frr/frr.conf:ro
         - /dev/null:/etc/frr/vtysh.conf:ro
       exec:
+        # Usable IPv6 link-local before the session starts; see frr-source.
+        - ip -6 addr add fe80::2/64 dev eth1 nodad
         - ip addr add 10.116.1.2/24 dev eth1
         - ip link set eth1 up
 
@@ -75,6 +82,8 @@ topology:
         - ./configs/frr-bgpd-m116-rs.conf:/etc/frr/frr.conf:ro
         - /dev/null:/etc/frr/vtysh.conf:ro
       exec:
+        # Usable IPv6 link-local before the session starts; see frr-source.
+        - ip -6 addr add fe80::2/64 dev eth1 nodad
         - ip addr add 10.116.2.2/24 dev eth1
         - ip link set eth1 up
 
