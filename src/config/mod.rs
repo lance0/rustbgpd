@@ -6599,17 +6599,18 @@ impl AutoLacpEsis {
             .copied()
     }
 
-    /// Set (`Some`) or clear (`None`) the derived ESI for one bond.
-    /// Returns whether the snapshot changed.
-    pub(crate) fn set(&self, interface: &str, esi: Option<EthernetSegmentIdentifier>) -> bool {
+    /// Replace the whole table with one complete probe round. Returns
+    /// whether any bond's derived ESI changed.
+    pub(crate) fn replace(&self, snapshot: BTreeMap<String, EthernetSegmentIdentifier>) -> bool {
         let mut table = self
             .0
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        match esi {
-            Some(esi) => table.insert(interface.to_string(), esi) != Some(esi),
-            None => table.remove(interface).is_some(),
+        if *table == snapshot {
+            return false;
         }
+        *table = snapshot;
+        true
     }
 }
 

@@ -167,10 +167,16 @@ pub(crate) struct EvpnRuntimeReloadApply {
     /// link-drain coordinator consumes the receiver.
     es_link_bindings_tx:
         Option<Arc<tokio::sync::watch::Sender<crate::evpn_es_link_drain::EsLinkBindings>>>,
-    /// Bond → derived ESI table for `auto-lacp` segments, written by the
-    /// readiness probe. Every apply and binding publish resolves through
-    /// it; empty by default, which resolves those segments as not ready.
-    auto_lacp_esis: AutoLacpEsis,
+    /// Bond → derived ESI table for `auto-lacp` segments, published by
+    /// [`Self::publish_auto_lacp_round`] under the apply lock. Every
+    /// apply and binding publish resolves through it. `None` when no
+    /// segment actor or readiness probe runs: a candidate with an
+    /// `auto-lacp` segment is then rejected, never committed inert.
+    auto_lacp_esis: Option<AutoLacpEsis>,
+    /// Test handshake: notified just before the probe round takes the
+    /// apply lock.
+    #[cfg(test)]
+    auto_lacp_before_lock: Option<Arc<tokio::sync::Notify>>,
     /// Daemon metrics handle, so a #268 decomposed-apply fail-stop can
     /// bump `evpn_runtime_decomposed_fail_stops_total`. Defaults to a
     /// throwaway registry (`with_metrics` wires the real one in `main`).
@@ -191,15 +197,21 @@ impl EvpnRuntimeReloadApply {
             committed_config: Arc::new(Mutex::new(committed_config)),
             forwarding_state: None,
             es_link_bindings_tx: None,
-            auto_lacp_esis: AutoLacpEsis::default(),
+            auto_lacp_esis: None,
+            #[cfg(test)]
+            auto_lacp_before_lock: None,
             metrics: BgpMetrics::new(),
         }
     }
 
     /// Resolve `auto-lacp` segments through the probe's table.
     pub(crate) fn with_auto_lacp_esis(mut self, esis: AutoLacpEsis) -> Self {
-        self.auto_lacp_esis = esis;
+        self.auto_lacp_esis = Some(esis);
         self
+    }
+
+    fn auto_lacp_view(&self) -> AutoLacpEsis {
+        self.auto_lacp_esis.clone().unwrap_or_default()
     }
 
     pub(crate) fn with_forwarding_state(
@@ -253,7 +265,7 @@ impl EvpnRuntimeReloadApply {
         let Some(tx) = self.es_link_bindings_tx.as_ref() else {
             return;
         };
-        match config.resolve_es_link_bindings(&self.auto_lacp_esis) {
+        match config.resolve_es_link_bindings(&self.auto_lacp_view()) {
             Ok(bindings) => {
                 tx.send_if_modified(|current| {
                     if **current == bindings {
@@ -324,27 +336,51 @@ impl EvpnRuntimeReloadApply {
         self.committed_config_locked().auto_lacp_interfaces()
     }
 
-    /// Re-converge the committed config against the current
-    /// `auto-lacp` readiness snapshot. The config text is unchanged;
-    /// only derived ESIs move, so the plan is an Ethernet Segment add
-    /// (became Ready), delete (became not ready), or delete + add (new
-    /// partner). The committed config is read under the apply lock so
-    /// a concurrent SIGHUP or `ApplyEvpnRuntime` commit is never
-    /// reverted.
-    pub(crate) async fn reconverge_committed(
+    /// Publish one probe round and re-converge, as one operation under
+    /// the apply lock, so a concurrent SIGHUP or `ApplyEvpnRuntime`
+    /// resolves either the previous complete round or this one.
+    ///
+    /// `ready` maps bond → derived ESI from reads made outside the lock;
+    /// it is filtered to the committed config's `auto-lacp` bonds as
+    /// they stand under the lock, so a bond removed meanwhile is dropped
+    /// and one added meanwhile stays not ready until the next round.
+    /// Re-converges when the table changed or `retry` is set (a previous
+    /// round's re-converge failed). The config text is unchanged; only
+    /// derived ESIs move, so the plan is an Ethernet Segment add, delete,
+    /// or delete + add (new partner).
+    ///
+    /// Returns `Ok(None)` when nothing needed re-converging.
+    pub(crate) async fn publish_auto_lacp_round(
         &self,
-    ) -> Result<proto::ApplyEvpnRuntimeResponse, GrpcEvpnRuntimeApplyError> {
+        ready: BTreeMap<String, rustbgpd_wire::EthernetSegmentIdentifier>,
+        retry: bool,
+    ) -> Result<Option<proto::ApplyEvpnRuntimeResponse>, GrpcEvpnRuntimeApplyError> {
         let this = self.clone();
         // Same ADR-0080 shield as `apply_candidate_config`.
         let join = tokio::spawn(async move {
+            let Some(esis) = this.auto_lacp_esis.clone() else {
+                return Ok(None);
+            };
+            #[cfg(test)]
+            if let Some(hook) = &this.auto_lacp_before_lock {
+                hook.notify_one();
+            }
             let _apply_guard = this.apply_lock.lock().await;
             let config = this.committed_config_locked();
+            let configured = config.auto_lacp_interfaces();
+            let snapshot = ready
+                .into_iter()
+                .filter(|(bond, _)| configured.contains(bond))
+                .collect();
+            if !esis.replace(snapshot) && !retry {
+                return Ok(None);
+            }
             let result = this
                 .apply_candidate_config_locked(&config, false, || {})
                 .await;
             // Bindings are keyed by ESI, so they move with it.
             this.publish_es_link_bindings(&config);
-            result
+            result.map(Some)
         });
         join.await
             .map_err(|error| apply_task_join_error("auto-ESI reconverge", &error))?
@@ -432,7 +468,15 @@ impl EvpnRuntimeReloadApply {
     where
         M: FnOnce(),
     {
-        let candidate = evpn_runtime_candidate_from_config(config, &self.auto_lacp_esis)?;
+        if self.auto_lacp_esis.is_none() && !config.auto_lacp_interfaces().is_empty() {
+            return Err(GrpcEvpnRuntimeApplyError::FailedPrecondition(
+                "`esi = \"auto-lacp\"` needs the EVPN segment actor and readiness probe, \
+                 which start only when the daemon starts with [[ethernet_segments]] \
+                 configured; restart the daemon to add the first Ethernet Segment"
+                    .to_string(),
+            ));
+        }
+        let candidate = evpn_runtime_candidate_from_config(config, &self.auto_lacp_view())?;
         apply_evpn_runtime_candidate_locked(
             candidate,
             validate_only,

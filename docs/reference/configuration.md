@@ -4227,6 +4227,15 @@ segment's routes are withdrawn and the new ESI's routes are originated. The
 config text keeps `esi = "auto-lacp"`, so persistence, SIGHUP, and config
 transactions always carry the spec, never derived bytes.
 
+The probe and the segment actor start only when the daemon starts with at
+least one `[[ethernet_segments]]` entry. If the daemon started with none,
+SIGHUP and `ApplyEvpnRuntime` reject a candidate that adds an `auto-lacp`
+segment with `FAILED_PRECONDITION`, rather than committing a segment that
+could never become Ready. Restart the daemon to add the first segment. This
+matches the existing rule for a first explicit-ESI segment. A bond read that
+gets no kernel reply within one second counts as `netlink_error`, and startup
+waits at most two seconds for the initial round.
+
 Type 2 (STP) derivation is not implemented. RFC 7432 §5 takes it from the
 MSTP IST root learned from BPDUs on the segment, which the Linux bridge does
 not expose. Its kernel STP is 802.1D and reports a root only when the PE

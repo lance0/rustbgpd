@@ -454,6 +454,119 @@ impl DaemonEvpnRuntimeConverger for GatedRuntimeConverger {
     }
 }
 
+fn l2vni_auto_lacp_es_runtime_candidate_toml() -> &'static str {
+    r#"
+[global]
+asn = 65000
+router_id = "10.0.0.1"
+listen_port = 179
+
+[global.telemetry]
+log_format = "json"
+
+[[evpn_instances]]
+vni = 100
+rd = "65000:100"
+route_targets = ["65000:100"]
+local_vtep_ip = "10.0.0.1"
+
+[[ethernet_segments]]
+esi = "auto-lacp"
+interface = "bond0"
+member_vnis = [100]
+originator_ip = "10.0.0.1"
+"#
+}
+
+#[tokio::test]
+async fn auto_lacp_candidate_without_segment_actor_is_rejected_not_committed_inert() {
+    // No segment actor at startup means no readiness table or probe:
+    // committing the segment would leave it not ready forever.
+    let baseline = load_runtime_test_config(minimal_runtime_candidate_toml(), "baseline");
+    let candidate =
+        load_runtime_test_config(l2vni_auto_lacp_es_runtime_candidate_toml(), "candidate");
+    let coordinator = empty_evpn_runtime_coordinator();
+    let apply = EvpnRuntimeReloadApply::new(
+        coordinator.clone(),
+        Arc::new(tokio::sync::Mutex::new(())),
+        Arc::new(TestRuntimeConverger::ok()),
+        baseline,
+    );
+    let generation = coordinator.lock().unwrap().model().generation();
+    match apply.apply_config(&candidate).await {
+        Err(GrpcEvpnRuntimeApplyError::FailedPrecondition(message)) => {
+            assert!(message.contains("restart the daemon"), "{message}");
+        }
+        other => panic!("auto-lacp without a segment actor must be rejected, got {other:?}"),
+    }
+    assert_eq!(coordinator.lock().unwrap().model().generation(), generation);
+}
+
+#[tokio::test]
+async fn auto_lacp_round_publishes_only_under_the_apply_lock() {
+    let toml = l2vni_auto_lacp_es_runtime_candidate_toml();
+    let baseline = load_runtime_test_config(toml, "baseline");
+    let model = runtime_candidate_from_toml(toml);
+    let coordinator = Arc::new(Mutex::new(rustbgpd_evpn::EvpnRuntimeCoordinator::new(
+        model.instances().clone(),
+        model.ip_vrfs().clone(),
+        model.ethernet_segments().to_vec(),
+    )));
+    let apply_lock = Arc::new(tokio::sync::Mutex::new(()));
+    let esis = crate::config::AutoLacpEsis::default();
+    let before_lock = Arc::new(tokio::sync::Notify::new());
+    let mut apply = EvpnRuntimeReloadApply::new(
+        coordinator.clone(),
+        apply_lock.clone(),
+        Arc::new(TestRuntimeConverger::ok()),
+        baseline.clone(),
+    )
+    .with_auto_lacp_esis(esis.clone());
+    apply.auto_lacp_before_lock = Some(before_lock.clone());
+
+    let derived =
+        rustbgpd_wire::EthernetSegmentIdentifier::new([1, 2, 0x11, 0, 0, 0, 0, 1, 0xc1, 0]);
+    // A concurrent SIGHUP / ApplyEvpnRuntime holds the apply lock.
+    let held = apply_lock.lock().await;
+    let round = tokio::spawn({
+        let apply = apply.clone();
+        async move {
+            apply
+                .publish_auto_lacp_round(
+                    BTreeMap::from([
+                        ("bond0".to_string(), derived),
+                        // No longer configured by the time the lock is held.
+                        ("stale0".to_string(), derived),
+                    ]),
+                    false,
+                )
+                .await
+        }
+    });
+    before_lock.notified().await;
+    assert_eq!(
+        baseline.resolve_ethernet_segments_with(&esis).unwrap(),
+        Vec::new(),
+        "the lock holder must not observe the round before it takes the lock"
+    );
+    drop(held);
+
+    let response = round.await.unwrap().unwrap();
+    assert!(response.is_some(), "a new ESI must re-converge");
+    let segments = baseline.resolve_ethernet_segments_with(&esis).unwrap();
+    assert_eq!(segments.len(), 1);
+    assert_eq!(segments[0].esi, derived);
+    assert_eq!(
+        coordinator.lock().unwrap().model().ethernet_segments()[0].esi,
+        derived,
+        "the published round and its re-converge commit together"
+    );
+    assert!(
+        !esis.replace(BTreeMap::from([("bond0".to_string(), derived)])),
+        "only configured bonds are published"
+    );
+}
+
 fn minimal_runtime_candidate_toml() -> &'static str {
     r#"
 [global]

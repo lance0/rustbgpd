@@ -1,15 +1,17 @@
 //! Runtime readiness probe for `esi = "auto-lacp"` Ethernet Segments.
 //!
 //! Config validation never reads the kernel. This probe reads each
-//! named 802.3ad bond's LACP partner every [`PROBE_INTERVAL`] and
-//! publishes the derived RFC 7432 §5 type 1 ESI into the daemon's
-//! readiness table ([`crate::config::AutoLacpEsis`]). A bond
-//! without a usable partner is not ready: its segment resolves to no
-//! runtime segment and originates nothing. When a derived ESI appears,
-//! disappears, or changes (CE replaced), the probe re-converges the
-//! committed config through the ADR-0063 runtime apply, which adds,
-//! deletes, or deletes-then-adds the segment — withdrawing the old
-//! ES/EAD routes before originating under the new ESI.
+//! named 802.3ad bond's LACP partner every [`PROBE_INTERVAL`] and hands
+//! the derived RFC 7432 §5 type 1 ESIs to
+//! [`EvpnRuntimeReloadApply::publish_auto_lacp_round`], which publishes
+//! the complete round into the daemon's readiness table
+//! ([`crate::config::AutoLacpEsis`]) and re-converges under the EVPN
+//! apply lock. A bond without a usable partner is not ready: its
+//! segment resolves to no runtime segment and originates nothing. When
+//! a derived ESI appears, disappears, or changes (CE replaced), the
+//! re-converge adds, deletes, or deletes-then-adds the segment —
+//! withdrawing the old ES/EAD routes before originating under the new
+//! ESI.
 //!
 //! Readiness transitions are logged with a stable reason code
 //! (`no_partner`, `down`, `not_lacp_mode`, …).
@@ -21,45 +23,36 @@ use rustbgpd_wire::EthernetSegmentIdentifier;
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
-use crate::config::AutoLacpEsis;
 use crate::evpn_runtime_converger::EvpnRuntimeReloadApply;
 
 /// Partner-change detection latency bound. LACP fast rate is 1 s and
 /// slow rate 30 s, so this is never the limiting factor.
 const PROBE_INTERVAL: Duration = Duration::from_secs(2);
 
+/// Ceiling on the startup probe. Each bond read is bounded by the
+/// netlink reply timeout; this caps the whole round so startup never
+/// waits on many slow bonds. Bonds not read in time start not ready
+/// and the periodic probe picks them up.
+pub(crate) const STARTUP_PROBE_BOUND: Duration = Duration::from_secs(2);
+
 /// One bond read: the derived ESI, or `(reason code, detail)`.
 pub(crate) type ProbeResult = Result<EthernetSegmentIdentifier, (&'static str, String)>;
 
-/// The probe's writer handle on the readiness table, plus the last
-/// observed result per bond for transition logging.
+/// Last observed result per bond, for transition logging.
+#[derive(Default)]
 pub(crate) struct AutoEsiProbe {
-    esis: AutoLacpEsis,
     last: BTreeMap<String, ProbeResult>,
 }
 
 impl AutoEsiProbe {
-    pub(crate) fn new(esis: AutoLacpEsis) -> Self {
-        Self {
-            esis,
-            last: BTreeMap::new(),
-        }
-    }
-
-    /// Publish one round of bond reads into the readiness table and
-    /// forget bonds that left the config (`results` holds exactly the
-    /// configured bonds). Returns whether any derived ESI changed (the
-    /// caller must then re-converge).
-    pub(crate) fn apply(&mut self, results: BTreeMap<String, ProbeResult>) -> bool {
-        let mut changed = false;
-        let esis = &self.esis;
-        self.last.retain(|name, _| {
-            let keep = results.contains_key(name);
-            if !keep {
-                changed |= esis.set(name, None);
-            }
-            keep
-        });
+    /// Log readiness transitions for one round of bond reads, forget
+    /// bonds no longer read, and return the ready bonds' ESIs.
+    pub(crate) fn observe(
+        &mut self,
+        results: BTreeMap<String, ProbeResult>,
+    ) -> BTreeMap<String, EthernetSegmentIdentifier> {
+        self.last.retain(|name, _| results.contains_key(name));
+        let mut ready = BTreeMap::new();
         for (name, result) in results {
             if self.last.get(&name) != Some(&result) {
                 match &result {
@@ -76,17 +69,19 @@ impl AutoEsiProbe {
                     ),
                 }
             }
-            changed |= self.esis.set(&name, result.as_ref().ok().copied());
+            if let Ok(esi) = &result {
+                ready.insert(name.clone(), *esi);
+            }
             self.last.insert(name, result);
         }
-        changed
+        ready
     }
 }
 
-/// Read every bond on the blocking pool, so a slow or hung netlink
-/// reply never stalls a runtime worker. The caller awaits the read
-/// before issuing another, so a hung reply holds at most one blocking
-/// thread.
+/// Read every bond on the blocking pool, so a slow netlink reply never
+/// stalls a runtime worker. Each read is bounded by the netlink reply
+/// timeout and the caller awaits one round before starting the next, so
+/// a wedged netlink path holds at most one blocking thread, briefly.
 pub(crate) async fn read_bonds(interfaces: BTreeSet<String>) -> BTreeMap<String, ProbeResult> {
     let names = interfaces.clone();
     tokio::task::spawn_blocking(move || {
@@ -124,8 +119,9 @@ fn read_kernel(_name: &str) -> ProbeResult {
     ))
 }
 
-/// Run the probe until `shutdown`, re-converging after every change.
-/// A failed re-converge is retried on the next tick.
+/// Run the probe until `shutdown`. Each round reads bonds outside the
+/// apply lock, then publishes and re-converges as one locked operation.
+/// A failed re-converge is retried on the next round.
 pub(crate) fn spawn(
     mut probe: AutoEsiProbe,
     reload_apply: EvpnRuntimeReloadApply,
@@ -134,30 +130,35 @@ pub(crate) fn spawn(
     tokio::spawn(async move {
         let mut tick = tokio::time::interval(PROBE_INTERVAL);
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-        let mut pending = false;
+        let mut retry = false;
         loop {
             tokio::select! {
                 () = shutdown.cancelled() => return,
                 _ = tick.tick() => {}
             }
             let interfaces = reload_apply.committed_auto_lacp_interfaces();
-            pending |= probe.apply(read_bonds(interfaces).await);
-            if !pending {
-                continue;
-            }
-            match reload_apply.reconverge_committed().await {
-                Ok(response) => {
-                    pending = false;
+            let results = tokio::select! {
+                () = shutdown.cancelled() => return,
+                results = read_bonds(interfaces) => results,
+            };
+            let ready = probe.observe(results);
+            match reload_apply.publish_auto_lacp_round(ready, retry).await {
+                Ok(None) => {}
+                Ok(Some(response)) => {
+                    retry = false;
                     info!(
                         outcome = response.outcome,
                         message = %response.message,
                         "auto-lacp ESI change re-converged"
                     );
                 }
-                Err(error) => warn!(
-                    ?error,
-                    "auto-lacp ESI change failed to re-converge; retrying"
-                ),
+                Err(error) => {
+                    retry = true;
+                    warn!(
+                        ?error,
+                        "auto-lacp ESI change failed to re-converge; retrying"
+                    );
+                }
             }
         }
     })
@@ -183,28 +184,14 @@ mod tests {
     }
 
     #[test]
-    fn readiness_transitions_report_change_only_when_the_esi_moves() {
-        // The probe's own table: nothing outside this test can see it.
-        let esis = AutoLacpEsis::default();
-        let mut probe = AutoEsiProbe::new(esis.clone());
-        assert!(
-            !probe.apply(round(Some(not_ready()))),
-            "not ready publishes nothing"
+    fn observe_returns_only_ready_bonds() {
+        let mut probe = AutoEsiProbe::default();
+        assert!(probe.observe(round(Some(not_ready()))).is_empty());
+        assert_eq!(
+            probe.observe(round(Some(Ok(esi(1))))),
+            BTreeMap::from([("bond0".to_string(), esi(1))])
         );
-        assert!(probe.apply(round(Some(Ok(esi(1))))), "became ready");
-        assert!(!probe.apply(round(Some(Ok(esi(1))))), "steady ready");
-        assert!(probe.apply(round(Some(Ok(esi(2))))), "partner replaced");
-        assert!(
-            !esis.set("bond0", Some(esi(2))),
-            "the shared handle sees the write"
-        );
-        assert!(probe.apply(round(Some(not_ready()))), "partner lost");
-        assert!(probe.apply(round(Some(Ok(esi(2))))), "ready again");
-        assert!(
-            probe.apply(round(None)),
-            "a bond leaving the config clears its ESI"
-        );
-        assert!(!probe.apply(round(None)));
+        assert!(probe.observe(round(None)).is_empty());
     }
 
     #[tokio::test]

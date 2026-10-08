@@ -802,7 +802,7 @@ fn ethernet_segment_auto_lacp_resolves_the_published_esi_and_follows_changes() {
     let esis = AutoLacpEsis::default();
     let not_ready = auto_lacp_model(&config, &esis);
 
-    assert!(esis.set("bond0", Some(lacp_esi(0x55))));
+    assert!(esis.replace(BTreeMap::from([("bond0".to_string(), lacp_esi(0x55))])));
     let segments = config.resolve_ethernet_segments_with(&esis).unwrap();
     assert_eq!(segments[0].esi, lacp_esi(0x55));
     let bindings = config.resolve_es_link_bindings(&esis).unwrap();
@@ -816,14 +816,14 @@ fn ethernet_segment_auto_lacp_resolves_the_published_esi_and_follows_changes() {
 
     // CE replaced: the same config re-converges as delete old + add new.
     let model = auto_lacp_model(&config, &esis);
-    assert!(esis.set("bond0", Some(lacp_esi(0x66))));
+    assert!(esis.replace(BTreeMap::from([("bond0".to_string(), lacp_esi(0x66))])));
     let plan = model.plan_candidate(&auto_lacp_candidate(&config, &esis));
     assert_eq!(plan.ethernet_segments.deleted, vec![lacp_esi(0x55)]);
     assert_eq!(plan.ethernet_segments.added, vec![lacp_esi(0x66)]);
 
     // Partner lost: the segment is withdrawn.
     let model = auto_lacp_model(&config, &esis);
-    assert!(esis.set("bond0", None));
+    assert!(esis.replace(BTreeMap::new()));
     let plan = model.plan_candidate(&auto_lacp_candidate(&config, &esis));
     assert_eq!(plan.ethernet_segments.deleted, vec![lacp_esi(0x66)]);
 }
@@ -842,7 +842,7 @@ interface = "eth9"
     );
     let config = parse(&auto_lacp_toml(Some("bond0"), &extra)).unwrap();
     let esis = AutoLacpEsis::default();
-    esis.set("bond0", Some(explicit));
+    esis.replace(BTreeMap::from([("bond0".to_string(), explicit)]));
     let segments = config.resolve_ethernet_segments_with(&esis).unwrap();
     assert_eq!(segments.len(), 1, "only the explicit segment resolves");
     assert_eq!(segments[0].member_vnis.len(), 1);

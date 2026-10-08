@@ -4004,10 +4004,20 @@ async fn run<T>(
     // originates from the first pass; one that does not stays NotReady
     // (no ESI, no routes) without blocking startup, and the runtime
     // probe spawned below brings it up when LACP converges.
+    // The round is bounded, so a wedged netlink path only delays startup
+    // by `STARTUP_PROBE_BOUND`; bonds not read in time start not ready.
     let evpn_auto_lacp_esis = config::AutoLacpEsis::default();
-    let mut evpn_auto_esi_probe = evpn_auto_esi::AutoEsiProbe::new(evpn_auto_lacp_esis.clone());
+    let mut evpn_auto_esi_probe = evpn_auto_esi::AutoEsiProbe::default();
     let evpn_auto_lacp_interfaces = config.auto_lacp_interfaces();
-    evpn_auto_esi_probe.apply(evpn_auto_esi::read_bonds(evpn_auto_lacp_interfaces.clone()).await);
+    if !evpn_auto_lacp_interfaces.is_empty() {
+        let results = tokio::time::timeout(
+            evpn_auto_esi::STARTUP_PROBE_BOUND,
+            evpn_auto_esi::read_bonds(evpn_auto_lacp_interfaces.clone()),
+        )
+        .await
+        .unwrap_or_default();
+        evpn_auto_lacp_esis.replace(evpn_auto_esi_probe.observe(results));
+    }
     let ethernet_segments = config
         .resolve_ethernet_segments_with(&evpn_auto_lacp_esis)
         .unwrap_or_else(|e| {
@@ -5160,8 +5170,15 @@ async fn run<T>(
     )
     .with_metrics(metrics.clone())
     .with_es_link_bindings_publisher(es_link_bindings_tx.clone())
-    .with_auto_lacp_esis(evpn_auto_lacp_esis)
     .with_forwarding_state(local_forwarding_state.clone());
+    // The readiness table and probe exist only with the segment actor;
+    // without them an `auto-lacp` candidate is rejected, not committed
+    // inert.
+    let evpn_runtime_reload_apply = if evpn_segment_runtime_control.is_some() {
+        evpn_runtime_reload_apply.with_auto_lacp_esis(evpn_auto_lacp_esis)
+    } else {
+        evpn_runtime_reload_apply
+    };
     // Runtime readiness probe for `auto-lacp` segments; only useful
     // when the segment actor runs. Stopped with the link-drain
     // coordinator, before EVPN teardown.

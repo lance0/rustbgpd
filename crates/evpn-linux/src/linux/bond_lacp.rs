@@ -9,6 +9,7 @@
 //! periodic readiness probe to call inline.
 
 use std::fmt;
+use std::time::Duration;
 
 use netlink_packet_core::{NLM_F_REQUEST, NetlinkMessage, NetlinkPayload};
 use netlink_packet_route::RouteNetlinkMessage;
@@ -17,6 +18,10 @@ use netlink_packet_route::link::{
     LinkMessage,
 };
 use netlink_sys::{Socket, SocketAddr, protocols::NETLINK_ROUTE};
+
+/// Bound on the kernel's `RTM_GETLINK` reply. A lost reply or wedged
+/// netlink path becomes a `netlink_error` (not ready), never a hang.
+pub const REPLY_TIMEOUT: Duration = Duration::from_secs(1);
 
 /// The CE side of an 802.3ad bond: what the PE's bond learned from
 /// the partner's LACPDUs for its active aggregator.
@@ -99,13 +104,9 @@ fn get_link(name: &str) -> Result<LinkMessage, LacpPartnerError> {
     let mut buf = vec![0; req.buffer_len()];
     req.serialize(&mut buf);
 
-    let mut socket = Socket::new(NETLINK_ROUTE).map_err(LacpPartnerError::Io)?;
-    socket.bind_auto().map_err(LacpPartnerError::Io)?;
-    socket
-        .connect(&SocketAddr::new(0, 0))
-        .map_err(LacpPartnerError::Io)?;
+    let socket = open_socket(REPLY_TIMEOUT)?;
     socket.send(&buf, 0).map_err(LacpPartnerError::Io)?;
-    let (reply, _) = socket.recv_from_full().map_err(LacpPartnerError::Io)?;
+    let reply = recv_reply(&socket, REPLY_TIMEOUT)?;
     let msg = NetlinkMessage::<RouteNetlinkMessage>::deserialize(&reply)
         .map_err(|e| LacpPartnerError::Io(std::io::Error::other(e.to_string())))?;
     match msg.payload {
@@ -117,6 +118,38 @@ fn get_link(name: &str) -> Result<LinkMessage, LacpPartnerError> {
         other => Err(LacpPartnerError::Io(std::io::Error::other(format!(
             "unexpected RTM_GETLINK reply: {other:?}"
         )))),
+    }
+}
+
+/// A connected `NETLINK_ROUTE` socket whose receives give up after
+/// `timeout`.
+fn open_socket(timeout: Duration) -> Result<Socket, LacpPartnerError> {
+    let mut socket = Socket::new(NETLINK_ROUTE).map_err(LacpPartnerError::Io)?;
+    socket2::SockRef::from(&socket)
+        .set_read_timeout(Some(timeout))
+        .map_err(LacpPartnerError::Io)?;
+    socket.bind_auto().map_err(LacpPartnerError::Io)?;
+    socket
+        .connect(&SocketAddr::new(0, 0))
+        .map_err(LacpPartnerError::Io)?;
+    Ok(socket)
+}
+
+fn recv_reply(socket: &Socket, timeout: Duration) -> Result<Vec<u8>, LacpPartnerError> {
+    match socket.recv_from_full() {
+        Ok((reply, _)) => Ok(reply),
+        Err(e)
+            if matches!(
+                e.kind(),
+                std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+            ) =>
+        {
+            Err(LacpPartnerError::Io(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                format!("no RTM_GETLINK reply within {timeout:?}"),
+            )))
+        }
+        Err(e) => Err(LacpPartnerError::Io(e)),
     }
 }
 
@@ -226,6 +259,19 @@ mod tests {
                 port_key: 0x01c1
             }
         );
+    }
+
+    #[test]
+    fn a_missing_reply_times_out_as_netlink_error() {
+        // Nothing is sent, so the kernel never replies: the receive must
+        // give up at the bound instead of blocking forever.
+        let timeout = Duration::from_millis(100);
+        let socket = open_socket(timeout).expect("NETLINK_ROUTE socket");
+        let started = std::time::Instant::now();
+        let err = recv_reply(&socket, timeout).unwrap_err();
+        assert_eq!(err.code(), "netlink_error");
+        assert!(err.to_string().contains("no RTM_GETLINK reply"), "{err}");
+        assert!(started.elapsed() < Duration::from_secs(5));
     }
 
     #[test]
