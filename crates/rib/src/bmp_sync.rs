@@ -298,7 +298,6 @@ fn vpn_afi(nlri: &VpnNlri) -> Afi {
 /// prefix, preserved verbatim) with the route's VPN next-hop.
 #[must_use]
 pub fn synthesize_vpn_announce(route: &VpnRibRoute) -> Option<Bytes> {
-    let attrs = route.attributes.as_slice();
     let mut mp_reach = empty_mp_reach(vpn_afi(&route.nlri), Safi::MplsVpn, route.next_hop);
     // Carry the RFC 4659 IPv6 link-local next-hop half through the BMP
     // mirror, mirroring synthesize_unicast_announce — otherwise a VPNv6
@@ -309,11 +308,13 @@ pub fn synthesize_vpn_announce(route: &VpnRibRoute) -> Option<Bytes> {
         path_id: 0,
         nlri: route.nlri.clone(),
     }];
+    let mp_reach = PathAttribute::MpReachNlri(Box::new(mp_reach));
     build_announce_with_extra(
         &[],
-        attrs.iter(),
+        // Import policy can store a NEXT_HOP; the next hop is in MP_REACH.
+        route.attributes.except_next_hop(),
         usize::MAX,
-        &PathAttribute::MpReachNlri(Box::new(mp_reach)),
+        &mp_reach,
         "vpn announce",
     )
 }

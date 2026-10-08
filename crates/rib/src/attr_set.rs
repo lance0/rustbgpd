@@ -141,6 +141,16 @@ impl AttrSet {
         f(&mut guard.0.attrs)
     }
 
+    /// The attributes other than `NEXT_HOP`, for an encoder that emits the
+    /// next hop itself (see [`crate::Route::attributes_except_next_hop`]).
+    /// MP-family encoders also use it: a stored `NEXT_HOP` must not appear
+    /// beside `MP_REACH_NLRI` (RFC 4760 §3).
+    pub fn except_next_hop(&self) -> impl Iterator<Item = &PathAttribute> + Clone {
+        self.attrs
+            .iter()
+            .filter(|attr| !matches!(attr, PathAttribute::NextHop(_)))
+    }
+
     /// The attribute list, without copying when this is the last reference.
     #[must_use]
     pub fn into_vec(this: Arc<Self>) -> Vec<PathAttribute> {

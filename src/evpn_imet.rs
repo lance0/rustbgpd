@@ -340,7 +340,6 @@ fn build_imet_route(instance: &EvpnInstance) -> EvpnRibRoute {
     let attributes = vec![
         PathAttribute::Origin(Origin::Igp),
         PathAttribute::AsPath(AsPath { segments: vec![] }),
-        next_hop_path_attribute(instance.local_vtep_ip),
         PathAttribute::ExtendedCommunities(ext_communities),
         PathAttribute::PmsiTunnel(pmsi),
     ];
@@ -356,15 +355,6 @@ fn build_imet_route(instance: &EvpnInstance) -> EvpnRibRoute {
         peer_router_id: std::net::Ipv4Addr::UNSPECIFIED,
         is_stale: false,
         is_llgr_stale: false,
-    }
-}
-
-/// IPv4 next-hop attribute — see [`crate::evpn_originator`] for the
-/// matching convention.
-fn next_hop_path_attribute(vtep_ip: IpAddr) -> PathAttribute {
-    match vtep_ip {
-        IpAddr::V4(v4) => PathAttribute::NextHop(v4),
-        IpAddr::V6(_) => PathAttribute::NextHop(std::net::Ipv4Addr::UNSPECIFIED),
     }
 }
 
@@ -444,7 +434,7 @@ mod tests {
     }
 
     #[test]
-    fn build_imet_route_emits_origin_aspath_nexthop() {
+    fn build_imet_route_emits_origin_aspath_without_body_next_hop() {
         let inst = local_instance(100);
         let route = build_imet_route(&inst);
         assert!(matches!(
@@ -455,7 +445,12 @@ mod tests {
             route.attributes[1],
             PathAttribute::AsPath(AsPath { ref segments }) if segments.is_empty()
         ));
-        assert!(matches!(route.attributes[2], PathAttribute::NextHop(_)));
+        assert!(
+            !route
+                .attributes
+                .iter()
+                .any(|a| matches!(a, PathAttribute::NextHop(_)))
+        );
     }
 
     #[tokio::test]

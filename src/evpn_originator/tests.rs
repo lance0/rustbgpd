@@ -1089,8 +1089,15 @@ fn build_originated_route_carries_route_targets_and_mobility_seq() {
     );
     assert_eq!(route.next_hop, ipa("10.0.0.1"));
     assert_eq!(route.origin_type, RouteOrigin::Local);
-    // Verify the route carries: Origin, AsPath, NextHop, ExtComms.
+    // Verify the route carries: Origin, AsPath, ExtComms. The next hop is
+    // MP_REACH-only; no NEXT_HOP is stored beside it.
     assert!(matches!(route.attributes[0], PathAttribute::Origin(_)));
+    assert!(
+        !route
+            .attributes
+            .iter()
+            .any(|a| matches!(a, PathAttribute::NextHop(_)))
+    );
     let extcomms = route
         .attributes
         .iter()

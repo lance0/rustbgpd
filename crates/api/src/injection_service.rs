@@ -62,6 +62,13 @@ fn parse_prefix_and_nexthop(
                 .ok()
                 .filter(|&l| l <= 128)
                 .ok_or_else(|| Status::invalid_argument("prefix_length must be 0..=128"))?;
+            // IPv6 unicast MP_REACH carries a 16- or 32-octet next hop
+            // (RFC 2545); RFC 8950 covers only IPv4 NLRI over an IPv6 next hop.
+            if nh.is_ipv4() {
+                return Err(Status::invalid_argument(
+                    "an IPv6 prefix requires an IPv6 next_hop",
+                ));
+            }
             Ok((Prefix::V6(Ipv6Prefix::new(v6, len)), nh))
         }
     }
@@ -232,7 +239,8 @@ impl proto::injection_service_server::InjectionService for InjectionService {
 
         let mut attributes = vec![PathAttribute::Origin(origin)];
 
-        // NEXT_HOP attribute only for IPv4 (IPv6 uses MP_REACH_NLRI)
+        // NEXT_HOP attribute only for an IPv4 next hop, which parsing allows
+        // only on an IPv4 prefix; any IPv6 next hop uses MP_REACH_NLRI.
         if let IpAddr::V4(nh) = next_hop_ip {
             attributes.push(PathAttribute::NextHop(nh));
         }
@@ -1460,6 +1468,51 @@ mod tests {
                 err.message()
             );
         }
+    }
+
+    /// An IPv6 prefix has no encoding for an IPv4 next hop: IPv6 unicast
+    /// `MP_REACH` needs 16 or 32 octets, and a stored `NEXT_HOP` would sit
+    /// beside `MP_REACH`. The reverse pairing (RFC 8950) stays accepted.
+    #[tokio::test]
+    async fn add_path_rejects_ipv6_prefix_with_ipv4_next_hop() {
+        let (svc, mut rx) = make_service_with_rx();
+        let responder = tokio::spawn(async move {
+            let mut routes = Vec::new();
+            while let Some(update) = rx.recv().await {
+                let RibUpdate::InjectRoute { route, reply } = update else {
+                    panic!("expected InjectRoute");
+                };
+                reply.send(Ok(())).ok();
+                routes.push(route);
+            }
+            routes
+        });
+        let err = svc
+            .add_path(Request::new(proto::AddPathRequest {
+                prefix: "2001:db8:ff::".into(),
+                prefix_length: 48,
+                next_hop: "192.0.2.1".into(),
+                ..Default::default()
+            }))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+        assert!(err.message().contains("IPv6 next_hop"), "{}", err.message());
+
+        // IPv4 prefix, IPv6 next hop: accepted, with no stored NEXT_HOP.
+        svc.add_path(add_path_request(0, "2001:db8::1"))
+            .await
+            .unwrap();
+        drop(svc);
+        let routes = responder.await.unwrap();
+        assert_eq!(routes.len(), 1, "only the RFC 8950 route reaches the RIB");
+        assert_eq!(routes[0].next_hop, "2001:db8::1".parse::<IpAddr>().unwrap());
+        assert!(
+            !routes[0]
+                .attributes
+                .iter()
+                .any(|a| matches!(a, PathAttribute::NextHop(_)))
+        );
     }
 
     #[tokio::test]
