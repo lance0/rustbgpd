@@ -158,7 +158,7 @@ def in_band_problem(per_reload):
     count = sum(r['complete_pair_in_band'] for r in per_reload)
     if count >= MIN_IN_BAND_PAIRS:
         return None
-    misses = [f"R{r['reload']} {c['op']} {c['start_minus_rib_commit_ms']:+.0f}"
+    misses = [f"R{r['reload']} {c['op']} {c['start_minus_rib_commit_ms']:+.1f}"
               for r in per_reload for c in r['calls'] if c['phase'] == 'pair' and not c['in_band']]
     return (f'{count} complete in-band pairs, need {MIN_IN_BAND_PAIRS}; band is {BAND_MS[0]:+.0f}..{BAND_MS[1]:+.0f} ms '
             f"from RIB commit; out-of-band pair starts (ms from commit): {', '.join(misses) or 'none'}")

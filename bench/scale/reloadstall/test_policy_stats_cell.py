@@ -125,8 +125,13 @@ class PairTiming(unittest.TestCase):
     def test_under_bar_names_each_miss(self):
         problem = in_band_problem([self.reload(1, 449.4, False), self.reload(2, -50, True)])
         self.assertIn(f'1 complete in-band pairs, need {MIN_IN_BAND_PAIRS}', problem)
-        self.assertIn('R1 neighbor +449, R1 policy_stats +449', problem)
+        self.assertIn('R1 neighbor +449.4, R1 policy_stats +449.4', problem)
         self.assertNotIn('R2', problem)
+
+    def test_misses_just_outside_the_band_do_not_print_as_edges(self):
+        problem = in_band_problem([self.reload(1, 0.4, False), self.reload(2, -220.4, False)])
+        self.assertIn('R1 policy_stats +0.4,', problem)
+        self.assertIn('R2 policy_stats -220.4', problem)
 
     def test_bar_met(self):
         self.assertIsNone(in_band_problem([self.reload(n, -50, True) for n in range(1, MIN_IN_BAND_PAIRS + 1)]))
