@@ -158,12 +158,14 @@ jobs:
       - name: Check shared interop helpers
         run: |
           bash -n tests/interop/scripts/test-lib.sh \
+            tests/interop/scripts/source-id-guard.sh \
             tests/interop/scripts/test-test-operator-auth-helper.sh \
             tests/interop/scripts/test-test-source-id-guard.sh \
             tests/interop/scripts/test-test-vtep-route-oracles.sh \
             tests/interop/scripts/test-test-wait-helper.sh \
             tests/interop/scripts/test-m1-frr.sh
           shellcheck -x tests/interop/scripts/test-lib.sh \
+            tests/interop/scripts/source-id-guard.sh \
             tests/interop/scripts/test-test-operator-auth-helper.sh \
             tests/interop/scripts/test-test-source-id-guard.sh \
             tests/interop/scripts/test-test-vtep-route-oracles.sh \

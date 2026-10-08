@@ -68,6 +68,8 @@ exec > >(tee -a "$SOAK_LOG") 2>&1
 # tests/soak/host-lock.sh for sudo/HOME caveats.
 # shellcheck source=tests/soak/host-lock.sh
 source "$SOAK_SCRIPT_DIR/host-lock.sh"
+# shellcheck source=tests/interop/scripts/source-id-guard.sh
+source "$REPO_ROOT/tests/interop/scripts/source-id-guard.sh"
 acquire_rustbgpd_host_lock
 
 failures=0
@@ -428,6 +430,7 @@ bootstrap() {
     for c in "$VTEP" "$PE1" "$PE2" "$CE" "$HR"; do
         require_container "$c"
     done
+    check_lab_source_ids "$TOPO" "$VTEP" "$PE1" "$PE2" "$CE" "$HR" || exit 2
 
     write_run_json
     start_log_streams
