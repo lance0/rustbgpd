@@ -255,9 +255,6 @@ impl RibManager {
             let Some(group) = self.group_ribs.get(&gid) else {
                 return;
             };
-            let mut bump = |policy: &Option<PolicyLabel>, action: PolicyAction| {
-                bump_counter_row(&mut rows, policy.as_ref(), action);
-            };
             let in_family = |prefix: &Prefix| {
                 family.is_none_or(|f| crate::manager::helpers::prefix_family(prefix) == f)
             };
@@ -268,16 +265,47 @@ impl RibManager {
             // (Decision 2's over-replay posture), and its retained
             // decision-attribution label is exactly what the walk recorded.
             // Nothing for an own-sourced slot with no substitution.
-            for route in group.table.iter() {
-                self.replacement_checkpoint(false);
-                if !in_family(&route.prefix) {
-                    continue;
+            let walk_permits = |rows: &mut Vec<(Option<String>, PolicyAction, u64)>| {
+                for route in group.table.iter() {
+                    self.replacement_checkpoint(false);
+                    if !in_family(&route.prefix) {
+                        continue;
+                    }
+                    let Some(adv) = group.adv_entry(peer, &route.prefix, route.path_id) else {
+                        continue;
+                    };
+                    bump_counter_row(rows, adv.policy_label, PolicyAction::Permit);
                 }
-                let Some(adv) = group.adv_entry(peer, &route.prefix, route.path_id) else {
-                    continue;
-                };
-                bump(&adv.policy_label.cloned(), PolicyAction::Permit);
+            };
+            if group.per_client_best {
+                walk_permits(&mut rows);
+            } else {
+                // A plain group has no lane and stages every slot with its
+                // one permit label, so the member's permits are the staged
+                // count minus its own-sourced slots (the O(1)
+                // `family_counts_for` synthesis) — no table walk per joining
+                // member.
+                let permits = group.plain_permit_count(peer, family);
+                if permits > 0 {
+                    rows.push((
+                        group.permit_policy_label.as_ref().map(ToString::to_string),
+                        PolicyAction::Permit,
+                        permits,
+                    ));
+                }
+                #[cfg(test)]
+                {
+                    let mut walked = Vec::new();
+                    walk_permits(&mut walked);
+                    assert_eq!(
+                        rows, walked,
+                        "plain-group permit synthesis diverged from the adv(m) walk"
+                    );
+                }
             }
+            let mut bump = |policy: &Option<PolicyLabel>, action: PolicyAction| {
+                bump_counter_row(&mut rows, policy.as_ref(), action);
+            };
             for (prefix, denials) in &group.policy_filtered {
                 self.replacement_checkpoint(false);
                 if !in_family(prefix) {

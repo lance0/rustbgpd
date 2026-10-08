@@ -1344,6 +1344,24 @@ impl GroupRibOut {
         counts[1] += delta[1];
     }
 
+    /// Staged unicast slots of a plain group sourced by anyone but
+    /// `member`, optionally limited to one unicast family: exactly the
+    /// `adv(m)` permit slots of a group with no exception lane.
+    pub(in crate::manager) fn plain_permit_count(
+        &self,
+        member: IpAddr,
+        family: Option<(Afi, Safi)>,
+    ) -> u64 {
+        debug_assert!(!self.per_client_best, "lane slots are not derivable");
+        let own = self.source_counts.get(&member).copied().unwrap_or_default();
+        [(Afi::Ipv4, Safi::Unicast), (Afi::Ipv6, Safi::Unicast)]
+            .into_iter()
+            .enumerate()
+            .filter(|(_, slot_family)| family.is_none_or(|family| family == *slot_family))
+            .map(|(slot, _)| self.family_totals[slot].saturating_sub(own[slot]) as u64)
+            .sum()
+    }
+
     /// Per-family synthesized advertised counts for a member (BMP RFC
     /// 8671 stat type 17 input): table minus own-sourced plus the
     /// member's lane substitutions minus its RFC 9234
