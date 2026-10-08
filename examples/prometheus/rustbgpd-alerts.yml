@@ -684,11 +684,13 @@ groups:
             then restart the live watch.
 
       - alert: BgpPolicyEvalErrors
-        # An evaluation error makes the policy engine treat the
-        # affected route as Deny (uniform eval-error rails), so every
-        # increment is a route silently dropped by a broken policy —
-        # fix the policy (`rbgp policy check`), don't silence the
-        # alert.
+        # An import or export evaluation error makes the policy engine
+        # treat the affected route as Deny (uniform eval-error rails), so
+        # each such increment is a route silently dropped by a broken
+        # policy. A direction="condition" error (ADR-0137) leaves that
+        # conditional advertisement's observed condition unknown, so it
+        # keeps its last applied state. Either way, fix the policy
+        # (`rbgp policy check`), don't silence the alert.
         expr: increase(bgp_policy_eval_errors_total[15m]) > 0
         for: 0m
         labels:
@@ -701,8 +703,9 @@ groups:
             bgp_policy_eval_errors_total{direction="{{ $labels.direction
             }}", kind="{{ $labels.kind }}"} on {{ $labels.instance }}
             increased by {{ $value | printf "%.0f" }} in the last 15
-            minutes. Routes hitting the failing statement are being
-            denied.
+            minutes. For import or export, routes hitting the failing
+            statement are being denied; for condition, the conditional
+            advertisement keeps its last applied state.
 
       - alert: BgpExactExportRejected
         # Every increment means an announcement was withheld before

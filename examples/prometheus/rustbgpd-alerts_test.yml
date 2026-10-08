@@ -1382,8 +1382,10 @@ tests:
               description: >-
                 bgp_policy_eval_errors_total{direction="import",
                 kind="overflow"} on edge1:9179 increased by 2 in the
-                last 15 minutes. Routes hitting the failing statement
-                are being denied.
+                last 15 minutes. For import or export, routes hitting
+                the failing statement are being denied; for condition,
+                the conditional advertisement keeps its last applied
+                state.
 
   # ── BgpExactExportRejected ───────────────────────────────
   # Load-bearing: the event is inside 15m but outside 5m at evaluation time;
