@@ -992,7 +992,7 @@ complete atomic block. There is no probe or automatic legacy fallback.
 | `discard_path_attributes` | [u8] | no | `[]` | Route-server-client-only inbound attribute filter. Canonicalized by numeric type code; a neighbor `[]` clears an inherited group list. See [Inbound path-attribute discard](#inbound-path-attribute-discard) |
 | `route_reflector_client` | bool   | no       | false   | Mark this iBGP peer as a route reflector client (RFC 4456) |
 | `orr_vantage`          | string   | no       | --      | RFC 9107 Optimal Route Reflection IGP location: either an IP identifying a node in the BGP-LS-sourced topology, or the literal `"peer_address"` (alias `"peer-address"`) meaning this peer's own peering address — on a `[[dynamic_neighbors]]` peer group that gives every accepted peer its own vantage. This client's best paths use the interior-cost tiebreak from that node's SPF. Requires `route_reflector_client = true` + iBGP; inherits from the peer-group; an unresolved vantage falls back silently to the standard best (see `rbgp orr`). ADR-0095 |
-| `local_ipv6_nexthop`   | string   | no       | --      | Override IPv6 next-hop for eBGP exports (must be valid non-link-local IPv6) |
+| `local_ipv6_nexthop`   | string   | no       | --      | Override IPv6 next-hop for eBGP exports (must be valid non-link-local IPv6); also the import `next-hop self` address for IPv6 routes on a session over IPv4 transport |
 | `import_policy_chain`  | [string] | no       | --      | Named policy chain for import (mutually exclusive with inline import_policy) |
 | `export_policy_chain`  | [string] | no       | --      | Named policy chain for export (mutually exclusive with inline export_policy) |
 | `import_policy`        | [table]  | no       | --      | Inline import policy statements (`[[neighbors.import_policy]]`, see [Policy entries](#policy-entries)); mutually exclusive with `import_policy_chain` |
@@ -3189,6 +3189,17 @@ These fields modify matching routes. Only valid with `action = "permit"`.
 | `set_community_add`    | [string]    | Communities to add (standard, EC, or LC format)    |
 | `set_community_remove` | [string]    | Communities to remove                              |
 | `set_as_path_prepend`  | table       | `{ asn = 65001, count = 3 }` (ASN 1–4294967295, count 1–10) |
+
+`set_next_hop` follows the route's address family. An IPv6 address on an IPv4
+unicast route is an RFC 8950 next hop. An IPv4 address does not apply to an
+IPv6 unicast route, whose `MP_REACH_NLRI` next hop must be IPv6
+(RFC 2545 §3); the route keeps its next hop, as with FRR's `set ip next-hop`.
+On import, `"self"` for an IPv6 route resolves to the session's local IPv6
+address, else `local_ipv6_nexthop`; with neither (IPv4 transport and no
+`local_ipv6_nexthop`) the route keeps its received next hop. Export never
+encodes an IPv4 next hop for an IPv6 route: such a route is withheld from that
+peer and counted in
+`bgp_exact_export_rejections_total{reason="missing_ipv6_next_hop"}`.
 
 ### Community formats
 

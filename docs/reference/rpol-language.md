@@ -1055,7 +1055,7 @@ Two consequences worth internalizing:
 | `accept` / `reject` | terminal verdict (see evaluation order) |
 | `set local-pref <u32 \| value-expr>` | override `LOCAL_PREF`, e.g. `set local-pref min(route.local-pref * 2, 400)` |
 | `set med <u32 \| value-expr>` | override `MED`, e.g. `set med route.med + 50` |
-| `set next-hop <ip>` / `set next-hop self` | override `NEXT_HOP` |
+| `set next-hop <ip>` / `set next-hop self` | override `NEXT_HOP`; an IPv4 address does not apply to an IPv6 unicast route ([details](configuration.md#route-modifications-set-actions)) |
 | `add community 65001:999` / `remove community ...` | standard communities |
 | `add large-community 65000:1:2` / `remove ...` | large communities |
 | `remove large-community 65000:*:*` | every arrived large community with global administrator 65000 |

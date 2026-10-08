@@ -2475,6 +2475,7 @@ impl PeerSession {
                     let next_hop = resolve_import_nexthop(
                         nh_action.as_ref(),
                         body_next_hop,
+                        prefix,
                         self.read_half.as_ref(),
                         &self.config,
                     );
@@ -3084,6 +3085,7 @@ impl PeerSession {
                             let next_hop = resolve_import_nexthop(
                                 nh_action.as_ref(),
                                 mp.next_hop,
+                                entry.prefix,
                                 self.read_half.as_ref(),
                                 &self.config,
                             );

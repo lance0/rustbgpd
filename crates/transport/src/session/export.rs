@@ -1067,13 +1067,18 @@ impl SessionExportProfile {
                     _ if force_self => usable_local.map_or(route.next_hop, IpAddr::V6),
                     _ => route.next_hop,
                 };
+                // RFC 2545 §3: an IPv6 MP_REACH next hop is 16 or 32 octets.
+                // Refuse rather than encode a 4-octet one.
+                if next_hop.is_ipv4() {
+                    return Err(ExportProbeError::MissingIpv6NextHop);
+                }
                 self.check_link_local_export(
                     next_hop,
                     route,
                     rewritten && (!force_self || usable_local.is_some()),
                 )?;
-                // RFC 4760 §3: no NEXT_HOP beside MP_REACH-only NLRI. Import
-                // policy can store one on an IPv6 route.
+                // RFC 4760 §3: no NEXT_HOP beside MP_REACH-only NLRI, even if
+                // one is stored.
                 Ok(PreparedUnicastCandidate::Mp {
                     afi: Afi::Ipv6,
                     next_hop,
