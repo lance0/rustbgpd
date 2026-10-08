@@ -93,6 +93,8 @@ jobs:
         run: |
           python3 -m unittest -v scripts/test_check_ci_scale_split_contract.py
           python3 scripts/check_ci_scale_split_contract.py
+      - name: Prove image source-id contract
+        run: python3 -m unittest -v scripts/test_source_id.py
       # The Kernel Dataplane gate tolerates exactly one skip (m43, when the
       # third-party bird3 archive is unavailable upstream). Execute the real
       # aggregate body and the installer's outage/corruption split here so the
