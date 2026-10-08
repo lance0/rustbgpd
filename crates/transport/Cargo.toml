@@ -37,6 +37,7 @@ zeroize.workspace = true
 bench-internals = ["rustbgpd-rib/bench-internals"]
 
 [dev-dependencies]
+rustbgpd-wire = { workspace = true, features = ["strict-encode-invariants"] }
 rustbgpd-mrt.workspace = true
 rustbgpd-rib.workspace = true
 tempfile.workspace = true

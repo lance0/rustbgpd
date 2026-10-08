@@ -34,6 +34,7 @@ tracing.workspace = true
 bench-internals = []
 
 [dev-dependencies]
+rustbgpd-wire = { workspace = true, features = ["strict-encode-invariants"] }
 proptest.workspace = true
 tokio = { workspace = true, features = ["test-util"] }
 criterion.workspace = true

@@ -1,0 +1,84 @@
+# Containerlab topology: FRR source -> rustbgpd -> FRR iBGP + route-server-client receivers
+# (M114 — import next-hop self on the wire)
+#
+# Validates: a route whose import policy sets `next-hop self` reaches iBGP and
+# route-server-client receivers with rustbgpd's own address as its one NEXT_HOP.
+# Both receivers export the stored next hop unchanged, so the received address
+# must not reappear on the wire. An unrewritten control route keeps the
+# received next hop.
+#
+# rustbgpd (AS 65001) peers with:
+#   frr-source (AS 65002, eBGP): advertises 198.51.100.0/24 (import next-hop
+#     self) and 198.51.101.0/24 (control, no rewrite)
+#   frr-ibgp   (AS 65001, iBGP receiver)
+#   frr-rs     (AS 65003, eBGP with route_server_client = true)
+#
+# Usage:
+#   containerlab deploy -t tests/interop/m114-import-next-hop-self-frr.clab.yml
+#   containerlab destroy -t tests/interop/m114-import-next-hop-self-frr.clab.yml
+
+name: m114-import-next-hop-self-frr
+
+topology:
+  nodes:
+    rustbgpd:
+      kind: linux
+      image: rustbgpd:dev
+      cmd: sleep infinity
+      binds:
+        - ./configs/rustbgpd-m114-import-next-hop-self.toml:/etc/rustbgpd/config.toml:ro
+        - ./scripts/start-rustbgpd.sh:/usr/local/bin/start-rustbgpd.sh:ro
+        - ../fixtures/grpc-test-only-operator.token:/run/rustbgpd/grpc-test-only-operator.token:ro
+      exec:
+        - ip addr add 10.114.0.1/24 dev eth1
+        - ip link set eth1 up
+        - ip addr add 10.114.1.1/24 dev eth2
+        - ip link set eth2 up
+        - ip addr add 10.114.2.1/24 dev eth3
+        - ip link set eth3 up
+      env:
+        RUST_LOG: info
+
+    frr-source:
+      kind: linux
+      image: quay.io/frrouting/frr:10.7.1
+      binds:
+        - ./configs/frr-daemons:/etc/frr/daemons:ro
+        - ./configs/frr-bgpd-m114-source.conf:/etc/frr/frr.conf:ro
+        # Without this, vtysh prints "Can't open configuration file
+        # /etc/frr/vtysh.conf" on stdout and the driver's JSON reads fail.
+        - /dev/null:/etc/frr/vtysh.conf:ro
+      exec:
+        - ip addr add 10.114.0.2/24 dev eth1
+        - ip link set eth1 up
+
+    frr-ibgp:
+      kind: linux
+      image: quay.io/frrouting/frr:10.7.1
+      binds:
+        - ./configs/frr-daemons:/etc/frr/daemons:ro
+        - ./configs/frr-bgpd-m114-ibgp.conf:/etc/frr/frr.conf:ro
+        - /dev/null:/etc/frr/vtysh.conf:ro
+      exec:
+        - ip addr add 10.114.1.2/24 dev eth1
+        - ip link set eth1 up
+
+    frr-rs:
+      kind: linux
+      image: quay.io/frrouting/frr:10.7.1
+      binds:
+        - ./configs/frr-daemons:/etc/frr/daemons:ro
+        - ./configs/frr-bgpd-m114-rs.conf:/etc/frr/frr.conf:ro
+        - /dev/null:/etc/frr/vtysh.conf:ro
+      exec:
+        - ip addr add 10.114.2.2/24 dev eth1
+        - ip link set eth1 up
+
+  links:
+    - endpoints: ["rustbgpd:eth1", "frr-source:eth1"]
+    - endpoints: ["rustbgpd:eth2", "frr-ibgp:eth1"]
+    - endpoints: ["rustbgpd:eth3", "frr-rs:eth1"]
+
+# Network A: 10.114.0.0/24 — rustbgpd (10.114.0.1) ↔ frr-source (10.114.0.2, AS 65002)
+# Network B: 10.114.1.0/24 — rustbgpd (10.114.1.1) ↔ frr-ibgp (10.114.1.2, AS 65001)
+# Network C: 10.114.2.0/24 — rustbgpd (10.114.2.1) ↔ frr-rs (10.114.2.2, AS 65003)

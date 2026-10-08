@@ -162,9 +162,10 @@ every lane on an empty diff, a malformed path, or any mixed diff, and only
 support manual dispatch. Neither workflow has a scheduled trigger.
 
 - **Foundation** — wire-protocol + core RIB / refresh / policy (incl. the
-  ADR-0096 `.rpol` policy-parity receipt), RFC 6793 legacy-AS migration, and
+  ADR-0096 `.rpol` policy-parity receipt and import `next-hop self` toward
+  iBGP and route-server-client receivers), RFC 6793 legacy-AS migration, and
   RFC 9072 extended OPEN framing against real FRR (ExaBGP for M94): **M1**,
-  **M13**, **M15**, **M80**, **M94**, **M99**.
+  **M13**, **M15**, **M80**, **M94**, **M99**, **M114**.
 - **Address-family + topology** — MP-BGP, RR, multi-path, BGP-LS reflection,
   VPNv4 reflection, RT-Constrain filtering, ORR divergent-best, RR-family
   GR/LLGR stale preservation, multi-cluster ORR, labeled-unicast reflection,
@@ -300,6 +301,7 @@ broader platform-diversity validation beyond the protected hosted matrix.
 | FRR (bgpd) | 10.7.1 | `tests/interop/m12-ec-frr.clab.yml` | Tested (M12) | Extended Communities (RFC 4360) | RT:65002:100 via route-map | — |
 | FRR (bgpd) | 10.7.1 | `tests/interop/m13-policy-frr.clab.yml` | Tested (M13) | Policy Engine (chains, actions) | 3-node: import chain + export deny/MED/prepend, and plain eBGP export stripping non-transitive Extended Communities | — |
 | FRR (bgpd) | 10.7.1 | `tests/interop/m14-rr-frr.clab.yml` | Tested (M14) | Route Reflector (RFC 4456) | 3-node iBGP: RR + 2 clients | — |
+| FRR (bgpd) | 10.7.1 | `tests/interop/m114-import-next-hop-self-frr.clab.yml` | Tested (M114) | Import `next-hop self` toward iBGP and route-server-client receivers | An eBGP FRR source sends two IPv4 prefixes; rustbgpd's import policy sets `next-hop self` on one. An FRR iBGP receiver and an FRR route-server client must hold that prefix with rustbgpd's source-session address in their pre-policy Adj-RIB-In, while the unrewritten control prefix keeps the received next hop. A tshark sidecar in rustbgpd's namespace requires every UPDATE carrying either prefix to have exactly one `NEXT_HOP` with the expected address and no `MP_REACH_NLRI`, with no NOTIFICATION and both receiver sessions on their first connection | Single attempt; Extended Next Hop is not negotiated in this lab |
 | FRR (bgpd) | 10.7.1 | `tests/interop/m15-rr-frr.clab.yml` | Tested (M15) | Route Refresh (RFC 2918) | SoftResetIn via gRPC | — |
 | FRR (bgpd) | 10.7.1 | `tests/interop/m16-llgr-frr.clab.yml` | Tested (M16, hosted CI) | Dual-stack LLGR (RFC 9494) | Exact IPv4 2 + IPv6 1 inventory crosses fresh → GR-stale → LLGR-stale → fresh; structured MP/GR/LLGR timer and both-family EoR proof | — |
 | FRR (bgpd) | 10.7.1 | `tests/interop/m17-addpath-frr.clab.yml` | Tested (M17) | Add-Path (RFC 7911) | Multi-path send, distinct path_ids | — |

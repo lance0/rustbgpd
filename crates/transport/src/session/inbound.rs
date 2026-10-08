@@ -694,6 +694,9 @@ const IMPORT_ATTR_MEMO_SLOTS: usize = 8;
 pub struct ImportAttrMemo {
     entries: Vec<ImportAttrMemoEntry>,
     received_as_path: Option<Arc<Option<rustbgpd_wire::AsPath>>>,
+    /// [`Self::align_next_hop`] results, bounded like `entries`: source set,
+    /// resolved next hop, aligned set. Entries pin the source `Arc`.
+    aligned: Vec<(Arc<AttrSet>, IpAddr, Arc<AttrSet>)>,
 }
 
 /// Canonical source, modifications, and the resulting attributes and
@@ -728,6 +731,43 @@ impl ImportAttrMemo {
             self.received_as_path
                 .get_or_insert_with(|| Arc::new(received.cloned())),
         ))
+    }
+
+    /// Make a body IPv4 route's stored `NEXT_HOP` agree with its resolved
+    /// next hop. Import policy writes a specific IPv4 next hop into the
+    /// attribute itself, but `next-hop self` and an IPv6 next hop are only
+    /// resolved by the session; passthrough exports (iBGP, route-server
+    /// clients) send the stored attribute, so it must not keep the received
+    /// address. An IPv6 next hop drops the attribute, as MP storage does.
+    /// NLRI of one UPDATE with the same import outcome share the aligned set.
+    fn align_next_hop(&mut self, attrs: Arc<AttrSet>, next_hop: IpAddr) -> Arc<AttrSet> {
+        let stale = attrs
+            .iter()
+            .any(|attr| matches!(attr, PathAttribute::NextHop(stored) if IpAddr::V4(*stored) != next_hop));
+        if !stale {
+            return attrs;
+        }
+        if let Some((_, _, aligned)) = self.aligned.iter().find(|(source, aligned_for, _)| {
+            Arc::ptr_eq(source, &attrs) && *aligned_for == next_hop
+        }) {
+            return Arc::clone(aligned);
+        }
+        let mut owned = attrs.to_vec();
+        match next_hop {
+            IpAddr::V4(next_hop) => {
+                for attr in &mut owned {
+                    if let PathAttribute::NextHop(stored) = attr {
+                        *stored = next_hop;
+                    }
+                }
+            }
+            IpAddr::V6(_) => owned.retain(|attr| !matches!(attr, PathAttribute::NextHop(_))),
+        }
+        let aligned = AttrSet::new(owned);
+        if self.aligned.len() < IMPORT_ATTR_MEMO_SLOTS {
+            self.aligned.push((attrs, next_hop, Arc::clone(&aligned)));
+        }
+        aligned
     }
 
     /// [`materialize_attrs`], sharing the result across equal modifications
@@ -2438,6 +2478,13 @@ impl PeerSession {
                         self.read_half.as_ref(),
                         &self.config,
                     );
+                    // Without a next-hop action the stored NEXT_HOP is the
+                    // received one, so only a rewrite can leave it stale.
+                    let attrs = if nh_action.is_some() {
+                        import_attr_memo.align_next_hop(attrs, next_hop)
+                    } else {
+                        attrs
+                    };
                     Some(Route {
                         prefix,
                         next_hop,

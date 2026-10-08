@@ -5,6 +5,12 @@ and workspace changes remain in the repository-level `CHANGELOG.md`.
 
 ## Unreleased
 
+- Add the non-default `strict-encode-invariants` feature. With it, debug
+  builds of the path-attribute encoder (`encode_path_attributes` and the
+  `UpdateMessage` builders) panic when one attribute list would emit the same
+  type code twice, which RFC 4271 §5 forbids. Default builds and release
+  builds encode exactly as before.
+
 - Add capability 77 encode/decode and context-dependent link-local unicast
   validation for draft-ietf-idr-linklocal-capability-06. `UpdateValidationOptions`
   gains `link_local_next_hop`; embedders must provide scope and negotiation
