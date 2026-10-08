@@ -1,0 +1,8 @@
+# Post-hoc .text comparison, added after the run (not part of the predeclared checks)
+# rustbgpd: objdump -d --no-show-raw-insn -j .text, trees/{main,bgth}/target/release/rustbgpd; .rodata 0x222000-0x3d0be0
+instructions=6963967 identical=6959404 rip_operand_into_rodata_only=4563 other=0
+# reloadstall: same, with <symbol> annotations removed (mangled names are not compared); .rodata 0x396e0-0x59cdc
+instructions=552851 identical=552851 rip_operand_into_rodata_only=0 other=0
+# negative control: one mov in the bgth rustbgpd listing changed to movq
+instructions=6963967 identical=6959403 rip_operand_into_rodata_only=4563 other=1
+('  608951:\tmov    %rbx,%rdi', '  608951:\tmovq   %rbx,%rdi')

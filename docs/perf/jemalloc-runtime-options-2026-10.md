@@ -36,11 +36,30 @@ directory.
   those threads only when `opt.background_thread` is on. Every `bgth` daemon
   ran with the variable and 4 background threads. Every `main` daemon had
   neither (all 15 daemons, the terminated run included; `allocator-watch.tsv`).
-- **Same binaries.** Each arm's tree embeds its build directory in
-  generated-source paths, so the raw daemon hashes differ. With the directory
-  name substituted, every loaded section has the same size and `.eh_frame` and
-  `.gcc_except_table` are byte-identical. Only the order of constants in
-  `.rodata` differs. The `reloadstall` harness compares the same way.
+- **Binary equivalence, as checked.** Both arms built the same source
+  commit with the same commands and flags, in two different directories. Each
+  build embeds its directory in generated-source paths, so the raw daemon
+  hashes differ. The run's check (in `analyze.py`) substituted the directory
+  name and found:
+  - every allocated section the same size;
+  - `.eh_frame` and `.gcc_except_table` byte-identical;
+  - `.rodata` differing only by a permutation of its bytes.
+
+  It compared neither `.text` contents nor relocations, so on its own it does
+  not prove the binaries are equivalent. The `reloadstall` harness passed the
+  same check.
+- **Added after the run: `.text` disassembly.** This check was not
+  predeclared ([`posthoc-text-diff.py`](artifacts/jemalloc-runtime-options-2026-10/posthoc-text-diff.py),
+  [output](artifacts/jemalloc-runtime-options-2026-10/posthoc-text-diff.txt)).
+  It compared the two daemons' `objdump -d` listings of `.text` line by line:
+  - 6,959,404 of 6,963,967 instructions are identical, at identical addresses;
+  - the other 4,563 differ only in a RIP-relative operand whose target lies
+    inside `.rodata` in both builds, which is the constant reordering above;
+  - no other instruction differs.
+
+  The `reloadstall` `.text` listings match on all 552,851 instructions. A
+  negative control (one changed instruction) fails the check. Relocation
+  entries and `.data` contents were not compared beyond the section sizes.
 
 ## Predeclared bars and verdict
 
@@ -67,6 +86,18 @@ Nothing was retried or excluded.
 
 **Stage 2 not run.** The `background_thread:true,metadata_thp:auto` arm was
 gated on a stage-1 WIN.
+
+## Deviation from the predeclared bars
+
+[`acceptance.md`](artifacts/jemalloc-runtime-options-2026-10/acceptance.md)
+says the arms' daemon and `reloadstall` binaries "must hash identically". The
+first smoke run showed that cannot hold. Each build embeds its own directory,
+so identical sources built in two directories hash differently. Before the
+measured run, the validity check was changed to the section-level comparison
+described in its "Validity" section and implemented in `analyze.py`. The
+stage used that comparison, not raw hashes. The "Arms and shape" sentence
+requiring identical hashes was left unedited and is superseded by the
+"Validity" section. Both predeclared files are kept as they were run.
 
 ## Headline results (secondary evidence)
 
