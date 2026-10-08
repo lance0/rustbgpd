@@ -6019,16 +6019,27 @@ impl BgpMetrics {
 
     /// Publish one `auto-lacp` Ethernet Segment's readiness as a state
     /// set: `state` is `ready` or a not-ready reason from
-    /// [`evpn_es_auto_esi_states`]. An unknown state leaves every series
-    /// at 0, which still reads as not ready.
+    /// [`evpn_es_auto_esi_states`].
+    ///
+    /// As [`Self::set_peer_session_state`]: every non-current state is
+    /// reset to 0 before `state` is set to 1, so this call never makes a
+    /// second series read 1. A scrape between the two steps can see a
+    /// brief all-zero vector, which reads as not ready, never as two
+    /// states at once. An unknown state leaves every series at 0.
     pub fn set_evpn_es_auto_esi_state(&self, interface: &str, state: &str) {
         let states = evpn_es_auto_esi_states();
         debug_assert!(states.contains(&state), "unknown auto-lacp state {state:?}");
-        for candidate in states {
+        for candidate in states.iter().filter(|candidate| **candidate != state) {
             self.0
                 .evpn_es_auto_esi_state
                 .with_label_values(&[interface, candidate])
-                .set(i64::from(*candidate == state));
+                .set(0);
+        }
+        if states.contains(&state) {
+            self.0
+                .evpn_es_auto_esi_state
+                .with_label_values(&[interface, state])
+                .set(1);
         }
     }
 

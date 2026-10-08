@@ -7,7 +7,7 @@
 //! opt-in via `--log-file`; the daemon logs to stdout/journald and the
 //! manifest records that instead of shelling out to journalctl.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -1473,7 +1473,9 @@ fn rpki_cache_session_checks(
 /// `rbgp evpn es list`, so this is where its reason surfaces.
 fn evpn_auto_esi_checks(document: &toml::Value, metrics: Option<&str>) -> Vec<Check> {
     const FAMILY: &str = "evpn_es_auto_esi_state{";
-    let mut states: HashMap<String, Option<String>> = HashMap::new();
+    // Every state at 1 per interface, sorted, so more than one is reported
+    // as such rather than whichever row the exposition listed last.
+    let mut states: HashMap<String, BTreeSet<String>> = HashMap::new();
     for line in metrics.unwrap_or_default().lines() {
         let Some((labels, value)) = line
             .strip_prefix(FAMILY)
@@ -1489,7 +1491,7 @@ fn evpn_auto_esi_checks(document: &toml::Value, metrics: Option<&str>) -> Vec<Ch
         };
         let entry = states.entry(interface.clone()).or_default();
         if value.trim() == "1" {
-            *entry = Some(state.clone());
+            entry.insert(state.clone());
         }
     }
     config_rows(document, &["ethernet_segments"])
@@ -1497,24 +1499,36 @@ fn evpn_auto_esi_checks(document: &toml::Value, metrics: Option<&str>) -> Vec<Ch
         .filter(|row| row.get("esi").and_then(toml::Value::as_str) == Some("auto-lacp"))
         .filter_map(|row| row.get("interface").and_then(toml::Value::as_str))
         .map(|interface| {
-            let (status, detail) = match (metrics, states.get(interface)) {
+            let active = states
+                .get(interface)
+                .map(|set| set.iter().map(String::as_str).collect::<Vec<_>>())
+                .unwrap_or_default();
+            let (status, detail) = match (metrics, active.as_slice()) {
                 (None, _) => (
                     CheckStatus::Warn,
                     "auto-lacp readiness unknown: the metrics snapshot is unavailable".to_string(),
                 ),
-                (Some(_), None | Some(None)) => (
+                (Some(_), []) => (
                     CheckStatus::Warn,
                     "no auto-lacp readiness reported for this segment yet; the daemon probes \
                      every 2 s, so rerun doctor"
                         .to_string(),
                 ),
-                (Some(_), Some(Some(state))) if state == "ready" => (
+                (Some(_), [_, _, ..]) => (
+                    CheckStatus::Warn,
+                    format!(
+                        "auto-lacp readiness ambiguous: more than one state reads 1 ({}); \
+                         rerun doctor",
+                        active.join(", ")
+                    ),
+                ),
+                (Some(_), ["ready"]) => (
                     CheckStatus::Ok,
                     "ready: originating under the RFC 7432 type 1 ESI derived from the bond's \
                      LACP partner"
                         .to_string(),
                 ),
-                (Some(_), Some(Some(reason))) => (
+                (Some(_), [reason]) => (
                     CheckStatus::Warn,
                     format!(
                         "not ready ({reason}): the segment originates nothing until the bond \
@@ -5131,6 +5145,25 @@ paths = ["x"]
         let ready = summary(Some(&gauge("ready")));
         assert_eq!(ready[0].1, CheckStatus::Ok);
         assert!(ready[0].2.starts_with("ready"));
+
+        // Two rows at 1 (a scrape mid-update): warn naming both, whatever
+        // order the exposition lists them in.
+        for metrics in [
+            "evpn_es_auto_esi_state{interface=\"bond0\",state=\"no_partner\"} 1\n\
+             evpn_es_auto_esi_state{interface=\"bond0\",state=\"ready\"} 1\n",
+            "evpn_es_auto_esi_state{interface=\"bond0\",state=\"ready\"} 1\n\
+             evpn_es_auto_esi_state{interface=\"bond0\",state=\"no_partner\"} 1\n",
+        ] {
+            let ambiguous = summary(Some(metrics));
+            assert_eq!(ambiguous[0].1, CheckStatus::Warn);
+            assert!(
+                ambiguous[0]
+                    .2
+                    .contains("more than one state reads 1 (no_partner, ready)"),
+                "{}",
+                ambiguous[0].2
+            );
+        }
 
         let unavailable = summary(None);
         assert_eq!(unavailable[0].1, CheckStatus::Warn);
