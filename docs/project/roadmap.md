@@ -1268,7 +1268,7 @@ gobmp/pmacct already terminate it into Kafka), and BGPsec.
   was measured and rejected — see Deferred.
 - **Conditional advertisement.** Policy feature for advertise-if-present /
   advertise-if-absent workflows (FRR has it; GoBGP v4.10.0 does not). Design
-  proposed in [ADR-0137](../adr/0137-conditional-advertisement.md); not yet
+  accepted in [ADR-0137](../adr/0137-conditional-advertisement.md); not yet
   implemented.
 
 ### Maybe / demand-shaped

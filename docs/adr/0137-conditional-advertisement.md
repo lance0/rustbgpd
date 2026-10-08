@@ -1,6 +1,6 @@
 # ADR-0137: Conditional advertisement
 
-**Status:** Proposed
+**Status:** Accepted
 **Date:** 2026-10-07
 
 ## Context
@@ -352,9 +352,9 @@ change is classified as additive: no existing number or name changes, and
 the comparison JSON pins the membership as a string without a closed value
 set. Clients that switch on the enum must already handle an unknown value.
 The digest update ships in its own commit with that classification, separate
-from the feature code. If review prefers no stable-surface change, the
-peer can report the existing `UNKNOWN` membership in the comparison
-instead. This loses information, so this record does not recommend it.
+from the feature code. The review approved this change as additive on
+2026-10-07. Reporting the existing `UNKNOWN` membership instead was rejected
+because it loses information.
 
 Promotion would require a separate inventory decision after operational use.
 
@@ -434,24 +434,31 @@ Deferred until there is demand, each as a separate ticket when accepted:
 update-group keying of attachment content, peer-group inheritance, a status
 RPC or CLI, and prefix-range conditions.
 
-## Open questions for review
+## Review decisions
 
-1. **Default `settle_time` of 5 s.** This is chosen to exceed the time for a
-   session reset and reconnect while staying an order of magnitude faster than
-   FRR's 60-second poll. A value of 0 would match the instant reaction of
-   event-driven design. A value of 60 would match FRR's worst case.
+The design was accepted as proposed on 2026-10-07. Review settled the open
+questions as follows:
+
+1. **`settle_time` defaults to 5 s.** This exceeds the time for a session
+   reset and reconnect, while staying an order of magnitude faster than
+   FRR's 60-second poll. `settle_time = 0` remains available for undamped
+   reaction.
 2. **Stale candidates count as present.** GR- and LLGR-stale condition routes
-   keep the condition present, following FRR and the fact that forwarding still
-   uses them. The alternative is to treat LLGR-stale as absent, because the
-   operator's question is usually whether the primary path is alive.
-3. **Startup is `pending` (suppressed) until it settles.** Should
-   `advertise_if = "absent"` instead advertise immediately at startup, as FRR
-   does?
-4. **Neighbor-only attachment.** Should peer-group inheritance be part of
-   slice 1, given that edge operators often configure upstreams through groups?
-5. **Stable enum value.** Should the new update-group comparison membership
-   value be added, with a `NeighborService` digest update, or should the
-   comparison report `UNKNOWN` instead (Decision 9)?
+   keep the condition present, following FRR and the fact that forwarding
+   still uses them.
+3. **Startup is `pending`, which suppresses controlled routes, until the
+   condition settles.** This includes the period while RFC 4724 selection
+   deferral is active. `advertise_if = "absent"` does not advertise
+   immediately at startup, unlike FRR.
+4. **Attachment is per static neighbor only.** Peer-group inheritance remains
+   deferred.
+5. **Conditions are exact prefixes only.**
+6. **A missing policy reference is a load error.**
+7. **The v1 digest change is approved as additive.** The change is the
+   `UPDATE_GROUP_COMPARISON_MEMBERSHIP_CONDITIONAL_ADVERTISEMENT = 9` enum
+   value and the resulting `NeighborService` digest update in
+   `v1-stable-surface.json`. It ships in its own commit in slice 3
+   (Decision 9).
 
 ## Consequences
 
