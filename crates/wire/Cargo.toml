@@ -21,6 +21,11 @@ codec-allocation-diagnostics = []
 # Provides a `tokio_util::codec` adapter without making Tokio integration part
 # of the default, runtime-neutral wire crate dependency surface.
 tokio-codec = ["dep:tokio-util"]
+# Debug-build check that one encoded attribute list carries each type code at
+# most once (RFC 4271 §5). Off by default so embedders keep error-free
+# encoding of caller-supplied input; the rustbgpd workspace enables it only
+# through dev-dependencies, for its own tests.
+strict-encode-invariants = []
 
 [dependencies]
 bytes.workspace = true
