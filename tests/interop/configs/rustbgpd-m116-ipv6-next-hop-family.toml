@@ -1,0 +1,69 @@
+[global]
+asn = 65001
+router_id = "10.116.0.1"
+listen_port = 179
+
+[global.telemetry]
+prometheus_addr = "0.0.0.0:9179"
+log_format = "json"
+
+[global.telemetry.grpc_tcp]
+address = "0.0.0.0:50051"
+token_file = "/run/rustbgpd/grpc-test-only-operator.token"
+principal = "rustbgpd://operator/test-only"
+
+# eBGP source over IPv4 transport. Import `next-hop self` on an IPv6 route
+# cannot use the IPv4 session address; it resolves to local_ipv6_nexthop. An
+# IPv4 `set_next_hop` does not apply to an IPv6 route, which keeps the received
+# 2001:db8:116::2.
+[[neighbors]]
+address = "10.116.0.2"
+remote_asn = 65002
+description = "frr-m116-source"
+hold_time = 90
+families = ["ipv4_unicast", "ipv6_unicast"]
+local_ipv6_nexthop = "2001:db8:116::1"
+
+[[neighbors.import_policy]]
+prefix = "2001:db8:1160::/48"
+action = "permit"
+set_next_hop = "self"
+
+[[neighbors.import_policy]]
+prefix = "2001:db8:1161::/48"
+action = "permit"
+set_next_hop = "10.116.0.99"
+
+# iBGP receiver: export keeps the stored next hop; the IPv4 export rewrite
+# does not apply to the IPv6 route.
+[[neighbors]]
+address = "10.116.1.2"
+remote_asn = 65001
+description = "frr-m116-ibgp"
+hold_time = 90
+families = ["ipv4_unicast", "ipv6_unicast"]
+
+[[neighbors.export_policy]]
+prefix = "2001:db8:1162::/48"
+action = "permit"
+set_next_hop = "10.116.1.99"
+
+# Route-server client: transparent export keeps the stored next hop.
+[[neighbors]]
+address = "10.116.2.2"
+remote_asn = 65003
+description = "frr-m116-rs-client"
+hold_time = 90
+route_server_client = true
+families = ["ipv4_unicast", "ipv6_unicast"]
+
+[[neighbors.export_policy]]
+prefix = "2001:db8:1162::/48"
+action = "permit"
+set_next_hop = "10.116.2.99"
+
+[security.grpc]
+enforcement = "tier"
+
+[security.grpc.roles]
+"rustbgpd://operator/test-only" = "operator"

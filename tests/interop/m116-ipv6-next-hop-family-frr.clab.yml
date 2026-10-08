@@ -1,0 +1,88 @@
+# Containerlab topology: FRR source -> rustbgpd -> FRR iBGP + route-server-client receivers
+# (M116 — IPv6 routes keep an IPv6 next hop over IPv4 transport)
+#
+# Validates: IPv6 unicast routes carried over IPv4-transport sessions never
+# leave rustbgpd with an IPv4 next hop. Import `next-hop self` on an IPv6 route
+# resolves to the source neighbor's `local_ipv6_nexthop`; an IPv4
+# `set_next_hop` on import or export does not apply to an IPv6 route, which
+# keeps its received next hop. Every receiver-bound MP_REACH_NLRI must carry a
+# 16- or 32-octet IPv6 next hop.
+#
+# rustbgpd (AS 65001) peers over IPv4 with:
+#   frr-source (AS 65002, eBGP): advertises 2001:db8:1160::/48 (import next-hop
+#     self), 2001:db8:1161::/48 (import set next-hop 10.116.0.99) and
+#     2001:db8:1162::/48 (export set next-hop to an IPv4 address)
+#   frr-ibgp   (AS 65001, iBGP receiver)
+#   frr-rs     (AS 65003, eBGP with route_server_client = true)
+#
+# Usage:
+#   containerlab deploy -t tests/interop/m116-ipv6-next-hop-family-frr.clab.yml
+#   containerlab destroy -t tests/interop/m116-ipv6-next-hop-family-frr.clab.yml
+
+name: m116-ipv6-next-hop-family-frr
+
+topology:
+  nodes:
+    rustbgpd:
+      kind: linux
+      image: rustbgpd:dev
+      cmd: sleep infinity
+      binds:
+        - ./configs/rustbgpd-m116-ipv6-next-hop-family.toml:/etc/rustbgpd/config.toml:ro
+        - ./scripts/start-rustbgpd.sh:/usr/local/bin/start-rustbgpd.sh:ro
+        - ../fixtures/grpc-test-only-operator.token:/run/rustbgpd/grpc-test-only-operator.token:ro
+      exec:
+        - ip addr add 10.116.0.1/24 dev eth1
+        - ip -6 addr add 2001:db8:116::1/64 dev eth1 nodad
+        - ip link set eth1 up
+        - ip addr add 10.116.1.1/24 dev eth2
+        - ip link set eth2 up
+        - ip addr add 10.116.2.1/24 dev eth3
+        - ip link set eth3 up
+      env:
+        RUST_LOG: info
+
+    frr-source:
+      kind: linux
+      image: quay.io/frrouting/frr:10.7.1
+      binds:
+        - ./configs/frr-daemons:/etc/frr/daemons:ro
+        - ./configs/frr-bgpd-m116-source.conf:/etc/frr/frr.conf:ro
+        # Without this, vtysh prints "Can't open configuration file
+        # /etc/frr/vtysh.conf" on stdout and the driver's JSON reads fail.
+        - /dev/null:/etc/frr/vtysh.conf:ro
+      exec:
+        - ip addr add 10.116.0.2/24 dev eth1
+        - ip -6 addr add 2001:db8:116::2/64 dev eth1 nodad
+        - ip link set eth1 up
+
+    frr-ibgp:
+      kind: linux
+      image: quay.io/frrouting/frr:10.7.1
+      binds:
+        - ./configs/frr-daemons:/etc/frr/daemons:ro
+        - ./configs/frr-bgpd-m116-ibgp.conf:/etc/frr/frr.conf:ro
+        - /dev/null:/etc/frr/vtysh.conf:ro
+      exec:
+        - ip addr add 10.116.1.2/24 dev eth1
+        - ip link set eth1 up
+
+    frr-rs:
+      kind: linux
+      image: quay.io/frrouting/frr:10.7.1
+      binds:
+        - ./configs/frr-daemons:/etc/frr/daemons:ro
+        - ./configs/frr-bgpd-m116-rs.conf:/etc/frr/frr.conf:ro
+        - /dev/null:/etc/frr/vtysh.conf:ro
+      exec:
+        - ip addr add 10.116.2.2/24 dev eth1
+        - ip link set eth1 up
+
+  links:
+    - endpoints: ["rustbgpd:eth1", "frr-source:eth1"]
+    - endpoints: ["rustbgpd:eth2", "frr-ibgp:eth1"]
+    - endpoints: ["rustbgpd:eth3", "frr-rs:eth1"]
+
+# Network A: 10.116.0.0/24 + 2001:db8:116::/64 — rustbgpd (.1) ↔ frr-source (.2, AS 65002)
+# Network B: 10.116.1.0/24 — rustbgpd (10.116.1.1) ↔ frr-ibgp (10.116.1.2, AS 65001)
+# Network C: 10.116.2.0/24 — rustbgpd (10.116.2.1) ↔ frr-rs (10.116.2.2, AS 65003)
