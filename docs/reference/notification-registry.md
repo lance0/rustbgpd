@@ -9,8 +9,8 @@ The table follows the [IANA BGP error codes and subcodes registry][IANA], checke
 2026-09-08. Descriptions preserve existing diagnostic labels where applicable;
 FSM subcode 0 retains `Finite State Machine Error` for IANA's `Unspecified Error`.
 Deprecated allocations remain labeled as deprecated. Description coverage does
-not imply support for the associated protocol. The prepared wire 0.22.0 release
-decodes code 7 as `NotificationCode::RouteRefreshMessage`; code 9 still uses
+not imply support for the associated protocol. Since wire 0.22.0,
+`NotificationCode` decodes code 7 as `NotificationCode::RouteRefreshMessage`; code 9 still uses
 `NotificationCode::Unknown(9)`. Both preserve their numeric encoding.
 
 Codes 4 and 9 have no defined subcodes, so subcode 0 follows [RFC 4271 §4.5][RFC4271].
