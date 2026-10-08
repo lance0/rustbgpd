@@ -832,8 +832,10 @@ impl RibManager {
                     break;
                 }
             }
+            // ADR-0137: with no winner, a suppressed candidate keeps its
+            // conditional rung even when other candidates fell to export
+            // policy or NO_ADVERTISE; the terminal outcome below names both.
             if winner.is_none()
-                && conditional_suppressions == total
                 && let Some(step) = first_conditional_step
             {
                 explain.decision = ExplainDecision::Deny;
@@ -842,7 +844,9 @@ impl RibManager {
                     message: step.detail.clone(),
                 });
                 explain.gates.push(step);
-                return explain;
+                if conditional_suppressions == total {
+                    return explain;
+                }
             }
             if winner.is_none()
                 && let Some((modifications, label)) = first_no_advertise_suppression
@@ -875,10 +879,19 @@ impl RibManager {
             }
             let Some((rank, winner)) = winner else {
                 explain.decision = ExplainDecision::Deny;
-                let message = format!(
-                    "all {total} candidate(s) denied by export policy — per-client best-path \
-                     (RFC 7947 §2.3.2) advertises nothing"
-                );
+                let message = if conditional_suppressions == 0 {
+                    format!(
+                        "all {total} candidate(s) denied by export policy — per-client \
+                         best-path (RFC 7947 §2.3.2) advertises nothing"
+                    )
+                } else {
+                    format!(
+                        "no candidate of {total} is exportable: {conditional_suppressions} \
+                         suppressed by conditional advertisement, {denied} denied by export \
+                         policy — per-client best-path (RFC 7947 §2.3.2) advertises nothing",
+                        denied = total - conditional_suppressions,
+                    )
+                };
                 gate(
                     &mut explain.gates,
                     "best_route",

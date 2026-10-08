@@ -511,6 +511,65 @@ async fn per_client_best_moves_to_the_next_permitted_candidate() {
     );
 }
 
+/// `per_client_best` explain with one candidate conditionally suppressed and
+/// the other denied by export policy keeps both causes: the conditional rung
+/// and a terminal outcome that does not blame export policy for everything.
+#[tokio::test(start_paused = true)]
+async fn per_client_best_explain_keeps_both_causes_when_nothing_wins() {
+    let mut manager = manager_with(install_set(
+        definition(tagged_predicate(), ConditionalAdvertiseIf::Present),
+        &[TARGET],
+    ));
+    announce(
+        &mut manager,
+        SOURCE,
+        vec![route(controlled(), SOURCE, 200, true)],
+    );
+    announce(
+        &mut manager,
+        SOURCE2,
+        vec![route(controlled(), SOURCE2, 100, false)],
+    );
+    let mut rx = peer_up(
+        &mut manager,
+        TARGET,
+        Shape {
+            per_client_best: true,
+            ..Shape::default()
+        },
+    );
+    // The export chain permits only tagged routes: pending suppresses the
+    // tagged candidate, and the chain denies the untagged one.
+    let (reply, _result) = oneshot::channel();
+    manager.handle_update(RibUpdate::ReplacePeerExportPolicy {
+        peer: ip(TARGET),
+        export_policy: Some(tagged_predicate()),
+        reply,
+    });
+    resync(&mut manager);
+    let _ = drain(&mut rx);
+    assert!(!has(&manager, TARGET, controlled()));
+
+    let explanation = explain(&mut manager, TARGET, controlled());
+    assert_eq!(explanation.decision, ExplainDecision::Deny);
+    assert_eq!(
+        conditional_step(&explanation).code,
+        "conditional_advertisement_suppressed"
+    );
+    let terminal = explanation
+        .gates
+        .iter()
+        .find(|step| step.code == "per_client_all_denied")
+        .expect("terminal per-client outcome");
+    assert!(
+        terminal
+            .detail
+            .contains("1 suppressed by conditional advertisement, 1 denied by export policy"),
+        "{}",
+        terminal.detail
+    );
+}
+
 /// The gate runs after RFC 4456: it never makes a route reflectable, and a
 /// reflected route toward a client is gated like any other.
 #[tokio::test(start_paused = true)]
