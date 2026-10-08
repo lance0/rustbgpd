@@ -522,8 +522,8 @@ blocking is not enforced until STP is disabled or releases the port.
 ## `auto-lacp` Ethernet Segment missing from `rbgp evpn es list`
 
 An `esi = "auto-lacp"` segment appears in `rbgp evpn es list` only once its
-bond is an 802.3ad bond that is up with an LACP partner. Until then it
-originates nothing, and the reason is reported in three places:
+bond is an 802.3ad bond that is up with an LACP partner. While it is not
+ready, the reason is reported in three places:
 
 - `rbgp doctor`: the `evpn.es.<interface>.auto_esi` check names the reason.
 - Prometheus: `evpn_es_auto_esi_state{interface, state}`; the state with
@@ -539,8 +539,13 @@ originates nothing, and the reason is reported in three places:
 | `no_active_aggregator` / `no_partner` | LACP has not converged; check `/proc/net/bonding/<bond>` for the partner system MAC and the CE's LACP config |
 | `netlink_error` | The kernel read failed or did not reply within one second |
 | `esi_collision` | The derived ESI matches another segment's ESI; explicit ESIs win |
-| `reconverge_failed` | Applying the derived ESI failed and is retried every two seconds; see the daemon log |
+| `reconverge_failed` | Applying the change failed and is retried every two seconds. The runtime has not moved, so the previous ESI binding and its routes may still be originated; see the daemon log line `auto-lacp ESI change failed to re-converge` |
 | `unsupported` | The daemon was built for a platform other than Linux; `auto-lacp` reads the bond's LACP partner over Linux bonding netlink, so use an explicit hex `esi` there |
+
+For every reason except `reconverge_failed`, the segment originates nothing:
+the reason is reported only once the runtime has applied it. A failed apply
+is reported as `reconverge_failed` whatever the bond read, because until a
+retry succeeds the runtime still holds its previous state.
 
 See [Auto-derived ESI](../reference/configuration.md#auto-derived-esi-lacp-type-1)
 for the readiness rules.

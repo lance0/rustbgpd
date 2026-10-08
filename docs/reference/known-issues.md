@@ -432,9 +432,11 @@ resolved.
 - **`esi = "auto-lacp"` readiness is polled.**
   The bond's LACP partner is read every two seconds, so a partner change
   takes up to that long to re-originate the segment. `rbgp evpn es list`
-  shows only Ready segments; a NotReady segment's reason is in the
+  shows only applied segments; a NotReady segment's reason is in the
   `evpn_es_auto_esi_state` gauge, the `rbgp doctor` check
-  `evpn.es.<interface>.auto_esi`, and the log.
+  `evpn.es.<interface>.auto_esi`, and the log. `reconverge_failed` means
+  applying a change failed and is being retried; until it succeeds, the
+  previous ESI binding and its routes may still be originated.
   While NotReady, local MACs on the segment's VNIs are advertised without an
   ESI. Type 2 (STP) derivation is not implemented. See
   [Auto-derived ESI](configuration.md#auto-derived-esi-lacp-type-1).

@@ -156,20 +156,15 @@ struct EvpnRuntimeReloadState {
 /// One published `auto-lacp` probe round.
 #[derive(Debug)]
 pub(crate) struct AutoLacpRoundOutcome {
+    /// The committed config's `auto-lacp` bonds as they stood when the
+    /// round was published: the set the round settles. A bond read but
+    /// no longer here was removed by a reload during the read.
+    pub(crate) configured: BTreeSet<String>,
     /// Bonds whose derived ESI collides with another segment's, so the
     /// segment stays not ready.
     pub(crate) collided: BTreeSet<String>,
     /// The re-converge: `Ok(None)` when nothing needed re-converging.
     pub(crate) result: Result<Option<proto::ApplyEvpnRuntimeResponse>, GrpcEvpnRuntimeApplyError>,
-}
-
-impl Default for AutoLacpRoundOutcome {
-    fn default() -> Self {
-        Self {
-            collided: BTreeSet::new(),
-            result: Ok(None),
-        }
-    }
 }
 
 #[derive(Clone)]
@@ -368,7 +363,8 @@ impl EvpnRuntimeReloadApply {
     /// derived ESIs move, so the plan is an Ethernet Segment add, delete,
     /// or delete + add (new partner).
     ///
-    /// Reports collided bonds and the re-converge result.
+    /// Reports the configured bonds it settled, collided bonds, and the
+    /// re-converge result.
     pub(crate) async fn publish_auto_lacp_round(
         &self,
         ready: BTreeMap<String, rustbgpd_wire::EthernetSegmentIdentifier>,
@@ -378,7 +374,11 @@ impl EvpnRuntimeReloadApply {
         // Same ADR-0080 shield as `apply_candidate_config`.
         let join = tokio::spawn(async move {
             let Some(esis) = this.auto_lacp_esis.clone() else {
-                return AutoLacpRoundOutcome::default();
+                return AutoLacpRoundOutcome {
+                    configured: this.committed_auto_lacp_interfaces(),
+                    collided: BTreeSet::new(),
+                    result: Ok(None),
+                };
             };
             #[cfg(test)]
             if let Some(hook) = &this.auto_lacp_before_lock {
@@ -395,6 +395,7 @@ impl EvpnRuntimeReloadApply {
             let collided = config.auto_lacp_collisions(&esis);
             if !changed && !retry {
                 return AutoLacpRoundOutcome {
+                    configured,
                     collided,
                     result: Ok(None),
                 };
@@ -410,11 +411,13 @@ impl EvpnRuntimeReloadApply {
                 this.publish_es_link_bindings(&config);
             }
             AutoLacpRoundOutcome {
+                configured,
                 collided,
                 result: result.map(Some),
             }
         });
         join.await.unwrap_or_else(|error| AutoLacpRoundOutcome {
+            configured: self.committed_auto_lacp_interfaces(),
             collided: BTreeSet::new(),
             result: Err(apply_task_join_error("auto-ESI reconverge", &error)),
         })

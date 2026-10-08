@@ -4319,7 +4319,11 @@ aggregator, or has no LACP partner yet. A NotReady segment has no ESI and
 originates no Type 1 or Type 4 routes, does not appear in `rbgp evpn es list`,
 and local MACs on its member VNIs are advertised without an ESI. It is also
 NotReady when its derived ESI matches another segment's (explicit ESIs win),
-or while the re-apply that would originate it is failing and being retried.
+or while the re-apply that would publish its change is failing and being
+retried. A failed re-apply is reported as `reconverge_failed` for every
+segment in that round, whatever its bond read: the runtime has not moved, so
+the previous ESI binding and its routes may still be originated until a retry
+succeeds. Every other reason is reported once the runtime has applied it.
 Each transition is logged once. NotReady is logged at `warn` with a reason
 code: `not_found`, `not_bond`, `not_lacp_mode`, `down`,
 `no_active_aggregator`, `no_partner`, `netlink_error`, `esi_collision`, or

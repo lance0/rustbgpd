@@ -2384,7 +2384,9 @@ impl BgpMetrics {
                  ESI derived from the bond's LACP partner; every other state is the \
                  not-ready reason (not_found, not_bond, not_lacp_mode, down, \
                  no_active_aggregator, no_partner, netlink_error, esi_collision, \
-                 reconverge_failed, unsupported), and the segment originates nothing. \
+                 unsupported), for which the segment originates nothing, or \
+                 reconverge_failed: applying the round failed and is retried, and the \
+                 previous ESI binding and its routes may still be originated. \
                  interface is the configured bond name. Series are removed when the \
                  segment leaves the config.",
             ),

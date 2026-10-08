@@ -1469,8 +1469,8 @@ fn rpki_cache_session_checks(
 
 /// One `evpn.es.<interface>.auto_esi` check per `esi = "auto-lacp"`
 /// Ethernet Segment, from the daemon's `evpn_es_auto_esi_state` gauge.
-/// A NotReady segment originates nothing and is absent from
-/// `rbgp evpn es list`, so this is where its reason surfaces.
+/// A NotReady segment is absent from `rbgp evpn es list` once its state
+/// has been applied, so this is where its reason surfaces.
 fn evpn_auto_esi_checks(document: &toml::Value, metrics: Option<&str>) -> Vec<Check> {
     const FAMILY: &str = "evpn_es_auto_esi_state{";
     // Every state at 1 per interface, sorted, so more than one is reported
@@ -1527,6 +1527,14 @@ fn evpn_auto_esi_checks(document: &toml::Value, metrics: Option<&str>) -> Vec<Ch
                     "ready: originating under the RFC 7432 type 1 ESI derived from the bond's \
                      LACP partner"
                         .to_string(),
+                ),
+                (Some(_), [reason @ "reconverge_failed"]) => (
+                    CheckStatus::Warn,
+                    format!(
+                        "not ready ({reason}): readiness settlement failed, so the previous ESI \
+                         binding and its routes may still be originated; {}",
+                        auto_lacp_not_ready_hint(reason, interface)
+                    ),
                 ),
                 (Some(_), [reason]) => (
                     CheckStatus::Warn,
@@ -5222,6 +5230,12 @@ paths = ["x"]
             );
             assert!(detail.contains(hint), "{reason}: {detail}");
             assert_eq!(detail.contains(bond_hint), bond, "{reason}: {detail}");
+            // A failed settlement may leave the previous ESI's routes live.
+            assert_eq!(
+                detail.contains("originates nothing"),
+                reason != "reconverge_failed",
+                "{reason}: {detail}"
+            );
         }
     }
 

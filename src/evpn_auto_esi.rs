@@ -67,12 +67,15 @@ impl AutoEsiProbe {
     }
 
     /// Settle each bond's status after the round was published, log the
-    /// transitions, and return them. A bond is Ready only when its read
-    /// succeeded, its derived ESI did not collide, and the re-converge
-    /// (if one ran) succeeded; otherwise it is not ready with reason
-    /// `esi_collision` or `reconverge_failed`. Each transition sets the
-    /// bond's `evpn_es_auto_esi_state` series. Bonds no longer read are
-    /// forgotten and their series removed.
+    /// transitions, and return them. A failed re-converge settles every
+    /// bond in the round as `reconverge_failed`, whatever its read: the
+    /// runtime has not moved, so a segment whose ESI was just unpublished
+    /// may still originate under its previous ESI. Every other not-ready
+    /// reason is therefore reported only once the runtime matches it. A
+    /// bond is Ready only when its read succeeded, its derived ESI did not
+    /// collide (`esi_collision`), and the re-converge (if one ran)
+    /// succeeded. Each transition sets the bond's `evpn_es_auto_esi_state`
+    /// series. Bonds no longer read are forgotten and their series removed.
     pub(crate) fn report(
         &mut self,
         results: BTreeMap<String, ProbeResult>,
@@ -89,16 +92,23 @@ impl AutoEsiProbe {
         });
         let mut transitions = Vec::new();
         for (bond, read) in results {
-            let status = match read {
-                Ok(esi) if collided.contains(&bond) => Err((
+            let status = match (read, reconverge_error) {
+                (read, Some(error)) => {
+                    let read = match read {
+                        Ok(esi) => format!("derived ESI {esi}"),
+                        Err((reason, _)) => reason.to_string(),
+                    };
+                    Err((
+                        "reconverge_failed",
+                        format!("{error}; bond read: {read}; retrying"),
+                    ))
+                }
+                (Ok(esi), None) if collided.contains(&bond) => Err((
                     "esi_collision",
                     format!("derived ESI {esi} matches another segment's ESI"),
                 )),
-                Ok(esi) => match reconverge_error {
-                    Some(error) => Err(("reconverge_failed", format!("{error}; retrying"))),
-                    None => Ok(esi),
-                },
-                Err(reason) => Err(reason),
+                (Ok(esi), None) => Ok(esi),
+                (Err(reason), None) => Err(reason),
             };
             if self.last.get(&bond) == Some(&status) {
                 continue;
@@ -113,7 +123,7 @@ impl AutoEsiProbe {
                     interface = %bond,
                     reason,
                     detail = %detail,
-                    "auto-lacp Ethernet Segment not ready; originating nothing for it"
+                    "auto-lacp Ethernet Segment not ready"
                 ),
             }
             let state = status
@@ -168,6 +178,43 @@ fn read_kernel(_name: &str) -> ProbeResult {
     ))
 }
 
+/// Publish one round of bond reads and settle the probe against it.
+/// Reporting and series removal use the bond set the locked publish
+/// settled, so a bond a reload removed during the read loses its series
+/// in this round. Returns whether the next round must retry the
+/// re-converge.
+pub(crate) async fn run_round(
+    probe: &mut AutoEsiProbe,
+    reload_apply: &EvpnRuntimeReloadApply,
+    mut results: BTreeMap<String, ProbeResult>,
+    retry: bool,
+) -> bool {
+    let round = reload_apply
+        .publish_auto_lacp_round(ready(&results), retry)
+        .await;
+    results.retain(|bond, _| round.configured.contains(bond));
+    let reconverge_error = round.result.as_ref().err().map(|e| format!("{e:?}"));
+    probe.report(results, &round.collided, reconverge_error.as_deref());
+    match round.result {
+        Ok(None) => retry,
+        Ok(Some(response)) => {
+            info!(
+                outcome = response.outcome,
+                message = %response.message,
+                "auto-lacp ESI change re-converged"
+            );
+            false
+        }
+        Err(error) => {
+            warn!(
+                ?error,
+                "auto-lacp ESI change failed to re-converge; retrying"
+            );
+            true
+        }
+    }
+}
+
 /// Run the probe until `shutdown`. Each round reads bonds outside the
 /// apply lock, then publishes and re-converges as one locked operation.
 /// A failed re-converge is retried on the next round.
@@ -190,29 +237,7 @@ pub(crate) fn spawn(
                 () = shutdown.cancelled() => return,
                 results = read_bonds(interfaces) => results,
             };
-            let round = reload_apply
-                .publish_auto_lacp_round(ready(&results), retry)
-                .await;
-            let reconverge_error = round.result.as_ref().err().map(|e| format!("{e:?}"));
-            probe.report(results, &round.collided, reconverge_error.as_deref());
-            match round.result {
-                Ok(None) => {}
-                Ok(Some(response)) => {
-                    retry = false;
-                    info!(
-                        outcome = response.outcome,
-                        message = %response.message,
-                        "auto-lacp ESI change re-converged"
-                    );
-                }
-                Err(error) => {
-                    retry = true;
-                    warn!(
-                        ?error,
-                        "auto-lacp ESI change failed to re-converge; retrying"
-                    );
-                }
-            }
+            retry = run_round(&mut probe, &reload_apply, results, retry).await;
         }
     })
 }
@@ -258,6 +283,12 @@ mod tests {
         assert_eq!(
             codes(probe.report(round(Some(Ok(esi(1)))), &collided, None)),
             vec![Err("esi_collision")]
+        );
+        // A failed re-converge outranks a not-ready read: the runtime has
+        // not withdrawn the segment yet.
+        assert_eq!(
+            codes(probe.report(round(Some(not_ready())), &none, Some("injected"))),
+            vec![Err("reconverge_failed")]
         );
         // Published cleanly: Ready, reported once.
         assert_eq!(

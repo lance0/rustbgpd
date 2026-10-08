@@ -572,6 +572,51 @@ async fn auto_lacp_round_publishes_only_under_the_apply_lock() {
 }
 
 #[tokio::test]
+async fn auto_lacp_round_removes_a_bond_dropped_by_reload_during_the_read() {
+    // `stale0` was configured (and reported) when the round's reads began;
+    // a reload removed its segment before the round took the apply lock.
+    let toml = l2vni_auto_lacp_es_runtime_candidate_toml();
+    let baseline = load_runtime_test_config(toml, "baseline");
+    let model = runtime_candidate_from_toml(toml);
+    let coordinator = Arc::new(Mutex::new(rustbgpd_evpn::EvpnRuntimeCoordinator::new(
+        model.instances().clone(),
+        model.ip_vrfs().clone(),
+        model.ethernet_segments().to_vec(),
+    )));
+    let apply = EvpnRuntimeReloadApply::new(
+        coordinator,
+        Arc::new(tokio::sync::Mutex::new(())),
+        Arc::new(TestRuntimeConverger::ok()),
+        baseline,
+    )
+    .with_auto_lacp_esis(crate::config::AutoLacpEsis::default());
+    let metrics = BgpMetrics::new();
+    let mut probe = crate::evpn_auto_esi::AutoEsiProbe::new(metrics.clone());
+    let no_partner = || Err(("no_partner", "bond has no LACP partner yet".to_string()));
+    let reads = || {
+        BTreeMap::from([
+            ("bond0".to_string(), no_partner()),
+            ("stale0".to_string(), no_partner()),
+        ])
+    };
+    probe.report(reads(), &BTreeSet::new(), None);
+    let series = |bond: &str| {
+        crate::test_support::gather_metrics_text(&metrics)
+            .contains(&format!("evpn_es_auto_esi_state{{interface=\"{bond}\""))
+    };
+    assert!(series("stale0"));
+
+    let retry = crate::evpn_auto_esi::run_round(&mut probe, &apply, reads(), false).await;
+
+    assert!(!retry);
+    assert!(
+        !series("stale0"),
+        "a bond the locked round no longer configures loses its series in that round"
+    );
+    assert!(series("bond0"));
+}
+
+#[tokio::test]
 async fn failed_auto_lacp_reconverge_keeps_the_old_esi_binding() {
     let toml = l2vni_auto_lacp_es_runtime_candidate_toml();
     let baseline = load_runtime_test_config(toml, "baseline");

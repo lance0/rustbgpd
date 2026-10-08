@@ -2229,8 +2229,11 @@ tests:
               description: >-
                 The esi = "auto-lacp" Ethernet Segment on bond
                 bond0 of vtep1:9179 has not been
-                ready for 10 minutes, so it originates no Ethernet Segment or
-                Ethernet A-D routes. The evpn_es_auto_esi_state series at 1 names
-                the reason (for example no_partner or down); rbgp doctor reports
-                it as evpn.es.bond0.auto_esi. Check the bond's
-                802.3ad state and LACP partner.
+                ready for 10 minutes. The evpn_es_auto_esi_state series at 1 names
+                the reason; rbgp doctor reports it as
+                evpn.es.bond0.auto_esi. For a bond reason such
+                as no_partner or down, the segment originates no Ethernet Segment
+                or Ethernet A-D routes; check the bond's 802.3ad state and LACP
+                partner. For reconverge_failed, applying the change failed and is
+                retried, and the previous ESI's routes may still be originated;
+                check the daemon log.
