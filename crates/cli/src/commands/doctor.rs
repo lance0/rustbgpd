@@ -1531,9 +1531,8 @@ fn evpn_auto_esi_checks(document: &toml::Value, metrics: Option<&str>) -> Vec<Ch
                 (Some(_), [reason]) => (
                     CheckStatus::Warn,
                     format!(
-                        "not ready ({reason}): the segment originates nothing until the bond \
-                         is an 802.3ad bond that is up with an LACP partner; check \
-                         /proc/net/bonding/{interface} and the daemon log"
+                        "not ready ({reason}): the segment originates nothing; {}",
+                        auto_lacp_not_ready_hint(reason, interface)
                     ),
                 ),
             };
@@ -1544,6 +1543,38 @@ fn evpn_auto_esi_checks(document: &toml::Value, metrics: Option<&str>) -> Vec<Ch
             }
         })
         .collect()
+}
+
+/// Remediation for one `auto-lacp` not-ready reason, as in the reasons
+/// table of the EVPN VTEP troubleshooting runbook. Only the bond reasons
+/// point at the bond: the others persist with a healthy LACP partner.
+fn auto_lacp_not_ready_hint(reason: &str, interface: &str) -> String {
+    match reason {
+        "not_found"
+        | "not_bond"
+        | "not_lacp_mode"
+        | "down"
+        | "no_active_aggregator"
+        | "no_partner" => format!(
+            "it needs an 802.3ad bond that is up with an LACP partner; check \
+             /proc/net/bonding/{interface} and the CE's LACP config"
+        ),
+        "netlink_error" => "the kernel bond read failed or got no reply within 1 s; see the \
+                            daemon log"
+            .to_string(),
+        "esi_collision" => "the derived ESI matches another segment's ESI and explicit ESIs \
+                            win; the daemon log names the derived ESI, so compare it with \
+                            rbgp evpn es list and the other [[ethernet_segments]] entries"
+            .to_string(),
+        "reconverge_failed" => "applying the derived ESI failed and is retried every 2 s; see \
+                                the daemon log line \"auto-lacp ESI change failed to \
+                                re-converge\" for the error"
+            .to_string(),
+        "unsupported" => "auto-lacp needs Linux bonding over netlink; use an explicit hex esi \
+                          on this platform"
+            .to_string(),
+        _ => "see the daemon log".to_string(),
+    }
 }
 
 /// One bounded TCP connect, immediately dropped on success.
@@ -5168,6 +5199,30 @@ paths = ["x"]
         let unavailable = summary(None);
         assert_eq!(unavailable[0].1, CheckStatus::Warn);
         assert!(unavailable[0].2.contains("metrics snapshot is unavailable"));
+
+        // The hint follows the reason: only bond reasons point at the bond,
+        // since the others persist with a healthy LACP partner.
+        let bond_hint = "/proc/net/bonding/bond0";
+        for (reason, hint, bond) in [
+            ("no_partner", bond_hint, true),
+            ("esi_collision", "rbgp evpn es list", false),
+            (
+                "reconverge_failed",
+                "auto-lacp ESI change failed to re-converge",
+                false,
+            ),
+            ("unsupported", "use an explicit hex esi", false),
+        ] {
+            let metrics =
+                format!("evpn_es_auto_esi_state{{interface=\"bond0\",state=\"{reason}\"}} 1\n");
+            let detail = &summary(Some(&metrics))[0].2;
+            assert!(
+                detail.starts_with(&format!("not ready ({reason})")),
+                "{detail}"
+            );
+            assert!(detail.contains(hint), "{reason}: {detail}");
+            assert_eq!(detail.contains(bond_hint), bond, "{reason}: {detail}");
+        }
     }
 
     #[test]
