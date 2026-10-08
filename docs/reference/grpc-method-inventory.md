@@ -127,7 +127,7 @@ shape itself does not raise the tier.
 | `DeleteDynamicNeighbor` | `mutating` | Removes a prefix range; stops future accepts only — established dynamic peers keep running and drain when they next return to Idle. Deleting a range whose peer group carries `md5_password` or a `ttl_security` policy (including `ttl_security_hops`) is rejected `FAILED_PRECONDITION`, matching TCP-AO: the inbound listener key/TTL inventory is updated only by startup or SIGHUP reload. |
 | `SetGracefulShutdown` | `operator_only` | Network-wide when `address` is empty; listed here because the proto puts it in `NeighborService`. |
 
-### PolicyService (23 RPCs)
+### PolicyService (24 RPCs)
 
 | RPC | Tier | Notes |
 |-----|------|-------|
@@ -153,6 +153,7 @@ shape itself does not raise the tier.
 | `TestPolicy` | `sensitive_read` | ADR-0096. Compiles a submitted .rpol policy before RIB access, then dry-runs it read-only over version-fenced pages capped at 1,000 in canonical `(prefix, peer, path_id)` order; family/limit/diffs/counts/hits are global. A conservative Received/Best mutation returns `ABORTED` with no partial response (retry the whole RPC); generation exhaustion or an unavailable RIB backend returns `UNAVAILABLE`. Side-effect-free; no RIB, session, or counter mutation. |
 | `GetPolicyStats` | `sensitive_read` | ADR-0096 Decision 3.3. Snapshots the live per-term guard-hit counters of installed import/export chains (since chain install; reset on chain replace — import rows report their install generation, export rows their counter-instance id). Explicit-peer validation, export/import collection, and dataset reads share one absolute 2 s deadline, matching the peer-manager read and neighbor-service RIB snapshot budgets; a capture that exceeds it returns `DEADLINE_EXCEEDED` with no partial rows. Peer validation, import counters and dataset status are read from the roster the peer manager publishes, and export counters from the roster the RIB manager publishes (ADR-0136), so success does not show that either actor is making progress. Reads stop with the caller. By default all errors fail whole; opt-in unfiltered import/both requests may skip only closed selected sessions, named in sorted unique `incomplete_peer_addresses`. Deadlines and other errors still fail whole. Discloses policy structure and traffic shape. Side-effect-free; does not reset counters. |
 | `GetValidationPolicyPosture` | `sensitive_read` | Bounded conservative proof of RPKI-invalid and ASPA-invalid import disposition for installed peers and prospective dynamic ranges. It does not assert validation readiness, connectivity, intent, FIB state, or runtime enforcement. |
+| `ListConditionalAdvertisements` | `sensitive_read` | ADR-0137. Per-definition conditional-advertisement state: condition prefixes and their observations, applied gate, settle timer, and attached neighbors. Discloses route presence and policy structure. One RIB read bounded by a 2 s deadline (`DEADLINE_EXCEEDED`); no priority over route work. Side-effect-free. |
 | `ClearNeighborExportChain` | `mutating` | Per-neighbor. |
 
 ### PeerGroupService (6 RPCs)
@@ -271,10 +272,10 @@ shape itself does not raise the tier.
 | Tier | Count | % |
 |------|------:|--:|
 | `read` | 1 | 0.9% |
-| `sensitive_read` | 69 | 59.5% |
-| `mutating` | 22 | 19.0% |
-| `operator_only` | 24 | 20.7% |
-| **Total** | **116** | **100%** |
+| `sensitive_read` | 70 | 59.8% |
+| `mutating` | 22 | 18.8% |
+| `operator_only` | 24 | 20.5% |
+| **Total** | **117** | **100%** |
 
 (Counts include `SetGracefulShutdown` as one `NeighborService` RPC. The total
 includes the four `gnmi.gNMI` RPCs; the remainder are native `rustbgpd.v1`

@@ -6147,6 +6147,7 @@ pub fn describe_peer_group_changes(
     }
     cmp_field!(import_policy_chain);
     cmp_field!(export_policy_chain);
+    cmp_field!(conditional_advertisements);
 
     changes
 }
@@ -6181,6 +6182,7 @@ pub fn copy_peer_group_file_only_fields(target: &mut PeerGroupConfig, source: &P
         disable_ipv4_unicast,
         link_local_next_hop,
         log_level,
+        conditional_advertisements,
         // Carried by the API definition.
         hold_time: _,
         min_hold_time: _,
@@ -6233,6 +6235,7 @@ pub fn copy_peer_group_file_only_fields(target: &mut PeerGroupConfig, source: &P
     target.disable_ipv4_unicast = disable_ipv4_unicast;
     target.link_local_next_hop = link_local_next_hop;
     target.log_level = log_level;
+    target.conditional_advertisements = conditional_advertisements;
 }
 
 /// Names of the config-file-only fields (see
@@ -6248,12 +6251,16 @@ fn peer_group_file_only_differences(old: &PeerGroupConfig, new: &PeerGroupConfig
     // `kept` differs from `new` only in config-file-only fields.
     match (serde_json::to_value(&kept), serde_json::to_value(new)) {
         (Ok(serde_json::Value::Object(kept)), Ok(serde_json::Value::Object(new))) => {
+            // A field cleared to its omitted form is absent from `new`, so
+            // compare the keys of both sides.
             let mut fields: Vec<String> = new
-                .iter()
-                .filter(|(field, value)| kept.get(*field) != Some(*value))
-                .map(|(field, _)| field.clone())
+                .keys()
+                .chain(kept.keys())
+                .filter(|field| kept.get(*field) != new.get(*field))
+                .cloned()
                 .collect();
             fields.sort();
+            fields.dedup();
             fields
         }
         _ => vec!["config-file-only fields".to_string()],
@@ -6292,7 +6299,8 @@ pub fn peer_group_file_only_changes(
 }
 
 /// Conditional-advertisement definitions a candidate adds, removes, or
-/// changes, and attachment edits on neighbors it keeps or adds (ADR-0137).
+/// changes, and effective attachment edits (direct or inherited from a peer
+/// group) on neighbors it keeps or adds (ADR-0137).
 /// Only the generation route commits them, so the sequential route rejects a
 /// candidate that has any.
 fn conditional_advertisement_changes(old: &Config, new: &Config) -> Vec<String> {
@@ -6305,12 +6313,14 @@ fn conditional_advertisement_changes(old: &Config, new: &Config) -> Vec<String> 
         config
             .neighbors
             .iter()
-            .filter(|neighbor| !neighbor.conditional_advertisements.is_empty())
-            .map(|neighbor| {
-                (
-                    (neighbor.address.clone(), neighbor.interface.clone()),
-                    neighbor.conditional_advertisements.clone(),
-                )
+            .filter_map(|neighbor| {
+                let effective = config.effective_conditional_advertisements(neighbor);
+                (!effective.is_empty()).then(|| {
+                    (
+                        (neighbor.address.clone(), neighbor.interface.clone()),
+                        effective.to_vec(),
+                    )
+                })
             })
             .collect::<BTreeMap<_, _>>()
     };

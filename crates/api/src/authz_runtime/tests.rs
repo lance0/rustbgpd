@@ -1026,6 +1026,134 @@ async fn mtls_principal_resolution_uses_rustbgpd_connection_cache() {
     );
 }
 
+/// A RIB stand-in that answers every conditional-status query with one
+/// definition and returns how many it served.
+fn spawn_conditional_status_rib(
+    mut rib_rx: tokio::sync::mpsc::Receiver<rustbgpd_rib::RibUpdate>,
+) -> tokio::task::JoinHandle<usize> {
+    tokio::spawn(async move {
+        let mut served = 0;
+        while let Some(update) = rib_rx.recv().await {
+            let rustbgpd_rib::RibUpdate::QueryConditionalAdvertisements { reply } = update else {
+                panic!("unexpected RIB request");
+            };
+            served += 1;
+            let _ = reply.send(vec![rustbgpd_rib::ConditionalAdvertisementStatus {
+                name: "backup".into(),
+                advertise_if: rustbgpd_rib::ConditionalAdvertiseIf::Absent,
+                conditions: vec![(
+                    rustbgpd_wire::Prefix::V4(rustbgpd_wire::Ipv4Prefix::new(
+                        std::net::Ipv4Addr::UNSPECIFIED,
+                        0,
+                    )),
+                    "absent",
+                )],
+                observed: "absent",
+                observed_for: std::time::Duration::from_secs(7),
+                applied: "advertise",
+                settle_time: std::time::Duration::from_secs(5),
+                settle_remaining: None,
+                selection_deferred: false,
+                attached_peers: vec!["192.0.2.1".parse().unwrap()],
+            }]);
+        }
+        served
+    })
+}
+
+/// `ListConditionalAdvertisements` through a real gRPC server: an observer
+/// on a `sensitive_read` listener gets the RIB's answer, and a `read`
+/// listener refuses it before the RIB is asked (the method is not a pure
+/// liveness read).
+#[tokio::test]
+async fn conditional_advertisement_status_is_a_sensitive_read() {
+    use crate::proto::ListConditionalAdvertisementsRequest;
+    use crate::proto::policy_service_client::PolicyServiceClient;
+    use crate::proto::policy_service_server::PolicyServiceServer;
+    use tokio::sync::{mpsc, oneshot};
+
+    for (ceiling, expected) in [
+        (AuthTier::SensitiveRead, None),
+        (AuthTier::Read, Some(tonic::Code::PermissionDenied)),
+    ] {
+        let metrics = BgpMetrics::new();
+        let context = tier_test_context(
+            "tcp://127.0.0.1",
+            "read_only",
+            ceiling,
+            GrpcAuthnKind::BearerToken,
+            "observer.example",
+            PrincipalRole::Observer,
+        )
+        .with_bearer_token(Some("secret"));
+        let (peer_tx, _peer_rx) = mpsc::channel(1);
+        let (rib_tx, rib_rx) = mpsc::channel(1);
+        let rib = spawn_conditional_status_rib(rib_rx);
+        let policy = crate::policy_service::PolicyService::new(
+            crate::server::AccessMode::ReadOnly,
+            peer_tx,
+            None,
+            None,
+        )
+        .with_rib_query(rib_tx);
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (stop_tx, stop_rx) = oneshot::channel();
+        let server = tokio::spawn(
+            tonic::transport::Server::builder()
+                .layer(GrpcAuthzLayer::new(context, metrics.clone()))
+                .add_service(PolicyServiceServer::new(policy))
+                .serve_with_incoming_shutdown(
+                    tokio_stream::wrappers::TcpListenerStream::new(listener),
+                    async {
+                        let _ = stop_rx.await;
+                    },
+                ),
+        );
+        let mut client = PolicyServiceClient::connect(format!("http://{addr}"))
+            .await
+            .unwrap();
+        let mut request = tonic::Request::new(ListConditionalAdvertisementsRequest {});
+        request
+            .metadata_mut()
+            .insert("authorization", "Bearer secret".parse().unwrap());
+        let result = client.list_conditional_advertisements(request).await;
+        match expected {
+            None => {
+                let response = result.unwrap().into_inner();
+                assert_eq!(response.definitions.len(), 1);
+                let definition = &response.definitions[0];
+                assert_eq!(definition.name, "backup");
+                assert_eq!(definition.applied, "advertise");
+                assert_eq!(definition.observed_for_ms, 7_000);
+                assert_eq!(definition.attached_peers, ["192.0.2.1"]);
+            }
+            Some(code) => assert_eq!(result.unwrap_err().code(), code),
+        }
+        let text = gather_text(&metrics);
+        let result = if expected.is_none() {
+            "handler_ok"
+        } else {
+            "listener_tier_denied"
+        };
+        assert!(
+            text.lines()
+                .any(|line| line.starts_with("bgp_grpc_authz_decisions_total{")
+                    && line.contains("tier=\"sensitive_read\"")
+                    && line.contains(&format!("result=\"{result}\""))),
+            "{text}"
+        );
+        stop_tx.send(()).unwrap();
+        server.await.unwrap().unwrap();
+        drop(client);
+        assert_eq!(
+            rib.await.unwrap(),
+            usize::from(expected.is_none()),
+            "a refused call never reaches the RIB"
+        );
+    }
+}
+
 #[tokio::test]
 async fn liveness_rpc_authenticates_and_respects_read_listener_cap() {
     use crate::proto::control_service_client::ControlServiceClient;

@@ -154,6 +154,31 @@ the `advertise_policy` does not select while the definition is suppressing.
 `rbgp neighbor 198.51.100.1` shows `Update Group: conditional_advertisement`:
 attached neighbors use the per-peer export path.
 
+### Check status
+
+`rbgp policy conditional-advertisements` (or `rbgp policy conditional`) shows
+each definition's condition, gate, and settle timer in one place:
+
+```bash
+rbgp policy conditional
+```
+
+```text
+backup-via-transit-b
+  advertise if:  absent
+  applied:       suppress
+  observed:      present for 1834.2s
+  settle:        settled (settle_time 5s)
+  conditions:    0.0.0.0/0 present
+  attached:      198.51.100.1
+```
+
+`applied` is what the gate does now. `observed` is the current condition and
+how long it has held. While a changed condition waits out `settle_time`, the
+settle line reads `pending, 3.1s left (settle_time 5s)`; at startup under RFC
+4724 selection deferral it reads `held by selection deferral`. Add `--json`
+for scripts.
+
 When transit A's default route is withdrawn, the condition reads `absent`
 immediately. After `settle_time`, `bgp_conditional_advertisement_permitted`
 becomes 1, the transitions counter increments, and transit B receives
@@ -178,7 +203,7 @@ mode-adjusted check in the
 
 | Symptom | Check |
 |---------|-------|
-| Transit B never receives the backup | The condition may still be satisfied by another default route: run explain on the backup prefix toward transit B and read the condition state it names. Confirm `condition_policy` matches only transit A's session |
+| Transit B never receives the backup | The condition may still be satisfied by another default route: run `rbgp policy conditional` and explain on the backup prefix toward transit B, and read the condition state they name. Confirm `condition_policy` matches only transit A's session |
 | Transit B receives the backup while transit A is up | `bgp_conditional_advertisement_condition` reads `absent`: transit A is not sending the default route, or `condition_policy` rejects it. Run `rbgp rib received 192.0.2.1` to confirm |
 | Condition reads `unknown` | `condition_policy` failed to evaluate; `bgp_policy_eval_errors_total{direction="condition"}` counts it, and the applied state is held |
 | Backup appears briefly at startup | Transit A took longer than `settle_time` to deliver the default route. Raise `settle_time` |

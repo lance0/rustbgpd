@@ -451,6 +451,23 @@ async fn partial_policy_stats_text_names_exited_sessions() {
 }
 
 #[tokio::test]
+async fn conditional_advertisement_status_text_names_the_settle_timer() {
+    let server = test_support::spawn_mock_server(None).await;
+    let output = finish(start(&server.addr, &["policy", "conditional"])).await;
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(
+        String::from_utf8(output.stdout).unwrap(),
+        "backup\n\
+         \x20 advertise if:  absent\n\
+         \x20 applied:       advertise\n\
+         \x20 observed:      present for 2.0s\n\
+         \x20 settle:        pending, 3.0s left (settle_time 5s)\n\
+         \x20 conditions:    0.0.0.0/0 present\n\
+         \x20 attached:      192.0.2.1\n"
+    );
+}
+
+#[tokio::test]
 async fn versioned_json_wraps_existing_documents() {
     let server = test_support::spawn_mock_server(None).await;
     for command in [
@@ -482,6 +499,7 @@ async fn versioned_json_wraps_existing_documents() {
         &["policy", "chain", "show"],
         &["flowspec"],
         &["policy", "stats", "--direction", "export"],
+        &["policy", "conditional-advertisements"],
         &["config", "status"],
         &["rib", "--limit", "1"],
         &["neighbor", "192.0.2.1", "enable"],

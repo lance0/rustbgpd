@@ -41,7 +41,9 @@ pub enum ConditionalAdvertiseIf {
 }
 
 impl ConditionalAdvertiseIf {
-    const fn label(self) -> &'static str {
+    /// Configured label: `present` or `absent`.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
         match self {
             Self::Present => "present",
             Self::Absent => "absent",
@@ -94,6 +96,42 @@ pub(super) enum AppliedConditionalState {
     Pending,
     Advertise,
     Suppress,
+}
+
+impl AppliedConditionalState {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Pending => "pending",
+            Self::Advertise => "advertise",
+            Self::Suppress => "suppress",
+        }
+    }
+}
+
+/// One installed definition's state, for `ListConditionalAdvertisements`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ConditionalAdvertisementStatus {
+    /// Configured definition name.
+    pub name: Arc<str>,
+    /// Condition state in which controlled routes may be advertised.
+    pub advertise_if: ConditionalAdvertiseIf,
+    /// Each condition prefix with its own current observation: `present`,
+    /// `absent`, or `unknown`.
+    pub conditions: Vec<(Prefix, &'static str)>,
+    /// Tracked observation of the whole condition.
+    pub observed: &'static str,
+    /// Time since the tracked observation last changed, or since install.
+    pub observed_for: Duration,
+    /// Applied gate state: `pending`, `advertise`, or `suppress`.
+    pub applied: &'static str,
+    /// Configured settle interval.
+    pub settle_time: Duration,
+    /// Time left before an armed settle timer applies the observation.
+    pub settle_remaining: Option<Duration>,
+    /// RFC 4724 selection deferral holds a condition family.
+    pub selection_deferred: bool,
+    /// Static neighbors with this definition attached.
+    pub attached_peers: Vec<IpAddr>,
 }
 
 /// One complete conditional-advertisement install (ADR-0137): every
@@ -631,19 +669,40 @@ impl RibManager {
     fn observe_condition(&self, definition: &ConditionalAdvertisement) -> ConditionObservation {
         let mut errored = false;
         for prefix in &definition.condition_prefixes {
-            for route in self.condition_candidates(prefix) {
-                #[cfg(test)]
-                self.conditional_advertisements
-                    .candidate_visits
-                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                let Some(policy) = &definition.condition_policy else {
-                    return ConditionObservation::Present;
-                };
-                match self.condition_candidate_verdict(policy, route, true) {
-                    CandidateVerdict::Match => return ConditionObservation::Present,
-                    CandidateVerdict::Error(_) => errored = true,
-                    CandidateVerdict::Miss => {}
-                }
+            match self.observe_condition_prefix(definition, prefix, true) {
+                ConditionObservation::Present => return ConditionObservation::Present,
+                ConditionObservation::Unknown => errored = true,
+                ConditionObservation::Absent => {}
+            }
+        }
+        if errored {
+            ConditionObservation::Unknown
+        } else {
+            ConditionObservation::Absent
+        }
+    }
+
+    /// One condition prefix's observation. `count_errors` is false for
+    /// read-only callers, which must not skew the evaluation-error metric.
+    fn observe_condition_prefix(
+        &self,
+        definition: &ConditionalAdvertisement,
+        prefix: &Prefix,
+        count_errors: bool,
+    ) -> ConditionObservation {
+        let mut errored = false;
+        for route in self.condition_candidates(prefix) {
+            #[cfg(test)]
+            self.conditional_advertisements
+                .candidate_visits
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let Some(policy) = &definition.condition_policy else {
+                return ConditionObservation::Present;
+            };
+            match self.condition_candidate_verdict(policy, route, count_errors) {
+                CandidateVerdict::Match => return ConditionObservation::Present,
+                CandidateVerdict::Error(_) => errored = true,
+                CandidateVerdict::Miss => {}
             }
         }
         if errored {
@@ -934,11 +993,7 @@ impl RibManager {
                 )
             }
         };
-        let applied_label = match state.applied {
-            AppliedConditionalState::Pending => "pending",
-            AppliedConditionalState::Advertise => "advertise",
-            AppliedConditionalState::Suppress => "suppress",
-        };
+        let applied_label = state.applied.label();
         if state.observed == ConditionObservation::Unknown {
             let (policy, term) = condition_error.map_or_else(
                 || ("condition_policy".to_string(), "unknown".to_string()),
@@ -989,6 +1044,49 @@ impl RibManager {
             }
         }
         (None, first_error)
+    }
+
+    /// Serve `QueryConditionalAdvertisements`: every installed definition in
+    /// name order. Read-only; evaluation errors are not counted.
+    pub(super) fn conditional_advertisement_status(&self) -> Vec<ConditionalAdvertisementStatus> {
+        let now = Instant::now();
+        let tracker = &self.conditional_advertisements;
+        tracker
+            .definitions
+            .values()
+            .map(|state| {
+                let definition = &state.definition;
+                ConditionalAdvertisementStatus {
+                    name: Arc::clone(&definition.name),
+                    advertise_if: definition.advertise_if,
+                    conditions: definition
+                        .condition_prefixes
+                        .iter()
+                        .map(|prefix| {
+                            (
+                                *prefix,
+                                self.observe_condition_prefix(definition, prefix, false)
+                                    .label(),
+                            )
+                        })
+                        .collect(),
+                    observed: state.observed.label(),
+                    observed_for: now.saturating_duration_since(state.observed_since),
+                    applied: state.applied.label(),
+                    settle_time: definition.settle_time,
+                    settle_remaining: state
+                        .deadline
+                        .map(|deadline| deadline.saturating_duration_since(now)),
+                    selection_deferred: self.condition_deferred(definition),
+                    attached_peers: tracker
+                        .attachments
+                        .iter()
+                        .filter(|(_, names)| names.contains(&definition.name))
+                        .map(|(peer, _)| *peer)
+                        .collect(),
+                }
+            })
+            .collect()
     }
 
     #[cfg(test)]

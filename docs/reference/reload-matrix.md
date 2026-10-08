@@ -53,8 +53,8 @@ which cannot carry the config-file-only group fields: `role`, `strict_role`,
 `prefix_orf_receive`, `disable_ipv4_unicast`, `bfd`, the slow-peer knobs,
 the per-family and received prefix limits, `max_prefix_action`,
 `max_prefix_warning_percent`, `next_hop_ownership`, `interpret_rfc1997`,
-`rs_control_communities`, `send_non_transitive_extended_communities`, and
-`log_level`. A sequential candidate that adds or changes one of them is
+`rs_control_communities`, `send_non_transitive_extended_communities`,
+`log_level`, and `conditional_advertisements`. A sequential candidate that adds or changes one of them is
 rejected, and the reason names the group and field, for example
 `peer group "edge" strict_role changed together with listener inbound
 MD5/GTSM inventory`. Split the reload: apply the TCP-AO or listener change
@@ -329,6 +329,7 @@ static neighbors.
 | `export_policy` | live | Inline export statements inherited by peers that do not set their own export policy / chain. |
 | `import_policy_chain` | live | Named-chain reference inherited by peers that do not set their own import policy / chain; inheriting peers take the same ADR-0112 policy-presence qualification. |
 | `export_policy_chain` | live | Named-chain reference inherited by peers that do not set their own export policy / chain. |
+| `conditional_advertisements` | live (generation route only) | Attached `[policy.conditional_advertisements]` names (ADR-0137) inherited by static members that set no list of their own; dynamic members do not inherit them. An edit commits with the reload generation without a session reset; each inheriting member's Adj-RIB-Out is re-evaluated through the gate. Config-file-only: `SetPeerGroup` keeps the value, and the sequential route rejects a candidate that changes it. |
 
 ## `[[dynamic_neighbors]]`
 

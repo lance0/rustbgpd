@@ -3590,6 +3590,40 @@ _arguments "${_arguments_options[@]}" : \
 '--help[Print help (see more with '\''--help'\'')]' \
 && ret=0
 ;;
+(conditional-advertisements)
+_arguments "${_arguments_options[@]}" : \
+'-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
+'--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
+'--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
+'--tls-ca=[PEM CA bundle used to verify an HTTPS server (required for HTTPS)]:FILE:_files' \
+'--tls-cert=[PEM client certificate chain for mTLS (requires --tls-key)]:FILE:_files' \
+'--tls-key=[PEM client private key for mTLS (requires --tls-cert)]:FILE:_files' \
+'--tls-server-name=[Server certificate name to verify instead of the HTTPS address host]:NAME:_default' \
+'--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
+'-j[Output in JSON format]' \
+'--json[Output in JSON format]' \
+'--no-color[Disable colored output]' \
+'-h[Print help (see more with '\''--help'\'')]' \
+'--help[Print help (see more with '\''--help'\'')]' \
+&& ret=0
+;;
+(conditional)
+_arguments "${_arguments_options[@]}" : \
+'-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
+'--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
+'--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
+'--tls-ca=[PEM CA bundle used to verify an HTTPS server (required for HTTPS)]:FILE:_files' \
+'--tls-cert=[PEM client certificate chain for mTLS (requires --tls-key)]:FILE:_files' \
+'--tls-key=[PEM client private key for mTLS (requires --tls-cert)]:FILE:_files' \
+'--tls-server-name=[Server certificate name to verify instead of the HTTPS address host]:NAME:_default' \
+'--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
+'-j[Output in JSON format]' \
+'--json[Output in JSON format]' \
+'--no-color[Disable colored output]' \
+'-h[Print help (see more with '\''--help'\'')]' \
+'--help[Print help (see more with '\''--help'\'')]' \
+&& ret=0
+;;
 (help)
 _arguments "${_arguments_options[@]}" : \
 ":: :_rbgp__subcmd__policy__subcmd__help_commands" \
@@ -3671,6 +3705,10 @@ _arguments "${_arguments_options[@]}" : \
 && ret=0
 ;;
 (explain)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(conditional-advertisements)
 _arguments "${_arguments_options[@]}" : \
 && ret=0
 ;;
@@ -4916,6 +4954,10 @@ _arguments "${_arguments_options[@]}" : \
 && ret=0
 ;;
 (explain)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(conditional-advertisements)
 _arguments "${_arguments_options[@]}" : \
 && ret=0
 ;;
@@ -6719,6 +6761,7 @@ _rbgp__subcmd__help__subcmd__policy_commands() {
 'chain:Manage global / per-neighbor import/export chains' \
 'stats:Show live per-term policy hit counters' \
 'explain:Explain the policy decision for a prefix on a neighbor' \
+'conditional-advertisements:Show conditional-advertisement state (ADR-0137)' \
     )
     _describe -t commands 'rbgp help policy commands' commands "$@"
 }
@@ -6762,6 +6805,11 @@ _rbgp__subcmd__help__subcmd__policy__subcmd__chain__subcmd__show_commands() {
 _rbgp__subcmd__help__subcmd__policy__subcmd__check_commands() {
     local commands; commands=()
     _describe -t commands 'rbgp help policy check commands' commands "$@"
+}
+(( $+functions[_rbgp__subcmd__help__subcmd__policy__subcmd__conditional-advertisements_commands] )) ||
+_rbgp__subcmd__help__subcmd__policy__subcmd__conditional-advertisements_commands() {
+    local commands; commands=()
+    _describe -t commands 'rbgp help policy conditional-advertisements commands' commands "$@"
 }
 (( $+functions[_rbgp__subcmd__help__subcmd__policy__subcmd__delete_commands] )) ||
 _rbgp__subcmd__help__subcmd__policy__subcmd__delete_commands() {
@@ -7245,6 +7293,8 @@ _rbgp__subcmd__policy_commands() {
 'stats:Show live per-term policy hit counters' \
 'counters:Show live per-term policy hit counters' \
 'explain:Explain the policy decision for a prefix on a neighbor' \
+'conditional-advertisements:Show conditional-advertisement state (ADR-0137)' \
+'conditional:Show conditional-advertisement state (ADR-0137)' \
 'help:Print this message or the help of the given subcommand(s)' \
     )
     _describe -t commands 'rbgp policy commands' commands "$@"
@@ -7333,6 +7383,11 @@ _rbgp__subcmd__policy__subcmd__check_commands() {
     local commands; commands=()
     _describe -t commands 'rbgp policy check commands' commands "$@"
 }
+(( $+functions[_rbgp__subcmd__policy__subcmd__conditional-advertisements_commands] )) ||
+_rbgp__subcmd__policy__subcmd__conditional-advertisements_commands() {
+    local commands; commands=()
+    _describe -t commands 'rbgp policy conditional-advertisements commands' commands "$@"
+}
 (( $+functions[_rbgp__subcmd__policy__subcmd__delete_commands] )) ||
 _rbgp__subcmd__policy__subcmd__delete_commands() {
     local commands; commands=()
@@ -7366,6 +7421,7 @@ _rbgp__subcmd__policy__subcmd__help_commands() {
 'chain:Manage global / per-neighbor import/export chains' \
 'stats:Show live per-term policy hit counters' \
 'explain:Explain the policy decision for a prefix on a neighbor' \
+'conditional-advertisements:Show conditional-advertisement state (ADR-0137)' \
 'help:Print this message or the help of the given subcommand(s)' \
     )
     _describe -t commands 'rbgp policy help commands' commands "$@"
@@ -7410,6 +7466,11 @@ _rbgp__subcmd__policy__subcmd__help__subcmd__chain__subcmd__show_commands() {
 _rbgp__subcmd__policy__subcmd__help__subcmd__check_commands() {
     local commands; commands=()
     _describe -t commands 'rbgp policy help check commands' commands "$@"
+}
+(( $+functions[_rbgp__subcmd__policy__subcmd__help__subcmd__conditional-advertisements_commands] )) ||
+_rbgp__subcmd__policy__subcmd__help__subcmd__conditional-advertisements_commands() {
+    local commands; commands=()
+    _describe -t commands 'rbgp policy help conditional-advertisements commands' commands "$@"
 }
 (( $+functions[_rbgp__subcmd__policy__subcmd__help__subcmd__delete_commands] )) ||
 _rbgp__subcmd__policy__subcmd__help__subcmd__delete_commands() {

@@ -2017,7 +2017,7 @@
           ]
         },
         "conditional_advertisements": {
-          "description": "Names of `[policy.conditional_advertisements]` definitions\nattached to this neighbor (ADR-0137). Static neighbors only;\npeer groups and dynamic neighbors do not carry attachments.",
+          "description": "Names of `[policy.conditional_advertisements]` definitions\nattached to this neighbor (ADR-0137). A non-empty list\nreplaces the peer group's list; an empty one inherits it.\nStatic neighbors only; dynamic neighbors do not carry\nattachments.",
           "type": "array",
           "items": {
             "type": "string"
@@ -2561,6 +2561,13 @@
             }
           ]
         },
+        "conditional_advertisements": {
+          "description": "Conditional advertisements inherited by static neighbors in\nthis group that set none of their own (ADR-0137). Dynamic\nneighbors using the group do not inherit them.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
         "disable_ipv4_unicast": {
           "description": "Never treat IPv4 unicast as available for peers in this group\n(true IPv6-only peering). See the neighbor-level\n`disable_ipv4_unicast` for semantics.",
           "type": [
@@ -2974,7 +2981,7 @@
       "type": "object",
       "properties": {
         "conditional_advertisements": {
-          "description": "Named conditional-advertisement definitions (ADR-0137), attached\nto static neighbors by name through\n`[[neighbors]] conditional_advertisements`.",
+          "description": "Named conditional-advertisement definitions (ADR-0137), attached\nto static neighbors by name through\n`[[neighbors]] conditional_advertisements` or the neighbor's\n`[peer_groups.<name>] conditional_advertisements`.",
           "type": "object",
           "additionalProperties": {
             "$ref": "#/$defs/ConditionalAdvertisementConfig"

@@ -1618,18 +1618,37 @@ pub(crate) fn transport_tcp_ao_keyring(tcp_ao: &super::TcpAoKeyringConfig) -> Tc
 }
 
 impl Config {
+    /// A static neighbor's effective conditional-advertisement attachments
+    /// (ADR-0137): its own list when non-empty, else its peer group's. The
+    /// same override rule as `export_policy_chain`.
+    pub(crate) fn effective_conditional_advertisements<'a>(
+        &'a self,
+        neighbor: &'a Neighbor,
+    ) -> &'a [String] {
+        if !neighbor.conditional_advertisements.is_empty() {
+            return &neighbor.conditional_advertisements;
+        }
+        neighbor
+            .peer_group
+            .as_ref()
+            .and_then(|group| self.peer_groups.get(group))
+            .map_or(&[][..], |group| group.conditional_advertisements.as_slice())
+    }
+
     /// Resolve the complete conditional-advertisement install (ADR-0137):
-    /// every definition a static neighbor attaches, with both predicates
-    /// compiled, and each attaching neighbor's names in configured order.
-    /// Unattached definitions are not installed. Validation has already
-    /// accepted every reference, so an error here means a broken candidate.
+    /// every definition a static neighbor attaches, directly or through its
+    /// peer group, with both predicates compiled, and each attaching
+    /// neighbor's names in configured order. Unattached definitions are not
+    /// installed. Validation has already accepted every reference, so an
+    /// error here means a broken candidate.
     pub(crate) fn conditional_advertisement_set(
         &self,
     ) -> Result<rustbgpd_rib::ConditionalAdvertisementSet, ConfigError> {
         let mut set = rustbgpd_rib::ConditionalAdvertisementSet::default();
         let mut attached = std::collections::BTreeSet::new();
         for neighbor in &self.neighbors {
-            if neighbor.conditional_advertisements.is_empty() {
+            let effective = self.effective_conditional_advertisements(neighbor);
+            if effective.is_empty() {
                 continue;
             }
             let address: IpAddr =
@@ -1641,12 +1660,11 @@ impl Config {
                         field: "address".to_string(),
                         reason: "not an IP address".to_string(),
                     })?;
-            let names: Vec<std::sync::Arc<str>> = neighbor
-                .conditional_advertisements
+            let names: Vec<std::sync::Arc<str>> = effective
                 .iter()
                 .map(|name| std::sync::Arc::from(name.as_str()))
                 .collect();
-            attached.extend(neighbor.conditional_advertisements.iter().cloned());
+            attached.extend(effective.iter().cloned());
             set.attachments.insert(address, names);
         }
         let mut store = SetStore::new();

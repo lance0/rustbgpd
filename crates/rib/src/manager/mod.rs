@@ -109,7 +109,7 @@ use queries::{BMP_DUMP_CHUNK_SIZE, page_routes, send_mrt_snapshot};
 
 pub use conditional_advertisement::{
     ConditionalAdvertiseIf, ConditionalAdvertisement, ConditionalAdvertisementCapture,
-    ConditionalAdvertisementSet,
+    ConditionalAdvertisementSet, ConditionalAdvertisementStatus,
 };
 use helpers::{DIRTY_RESYNC_INTERVAL, LlgrPeerConfig, gauge_val, prefix_family};
 pub use selection_deferral::{SelectionDeferralConfig, SelectionDeferralWaiterConfig};
@@ -3814,6 +3814,9 @@ impl RibManager {
                 let _ = reply.send(snapshot);
             }
             RibUpdate::QueryOrrStatus { reply } => self.handle_query_orr_status(reply),
+            RibUpdate::QueryConditionalAdvertisements { reply } => {
+                let _ = reply.send(self.conditional_advertisement_status());
+            }
             RibUpdate::QueryMrtSnapshot { reply } => self.handle_query_mrt_snapshot(reply),
             RibUpdate::QueryWarmMrtSnapshot {
                 views,

@@ -516,6 +516,9 @@ async fn selection_deferral_holds_pending_until_release() {
     settle(&mut manager, Duration::from_secs(29)).await;
     assert_eq!(state(&manager).2, None);
     assert_eq!(applied(&manager), AppliedConditionalState::Pending);
+    let held = &manager.conditional_advertisement_status()[0];
+    assert!(held.selection_deferred);
+    assert_eq!((held.applied, held.settle_remaining), ("pending", None));
 
     advance(Duration::from_secs(1)).await;
     manager.expire_selection_deferral();
@@ -1058,4 +1061,123 @@ async fn expiry_cutoff_charges_coalesced_queued_messages() {
 
     drop(tx);
     handle_2.await.unwrap();
+}
+
+fn status(manager: &RibManager, name: &str) -> crate::ConditionalAdvertisementStatus {
+    manager
+        .conditional_advertisement_status()
+        .into_iter()
+        .find(|status| &*status.name == name)
+        .unwrap()
+}
+
+/// The status view: definitions in name order with their attached peers,
+/// each condition prefix's own observation (present, absent, or unknown
+/// beside a clean match), the applied state, and the settle timer pending
+/// with its remaining time or settled.
+#[tokio::test(start_paused = true)]
+async fn status_reports_conditions_applied_state_settle_and_attachments() {
+    let mut manager = manager();
+    let core = ConditionalAdvertisement {
+        name: Arc::from("core"),
+        advertise_policy: PolicyChain::default(),
+        advertise_if: ConditionalAdvertiseIf::Present,
+        condition_prefixes: vec![Prefix::V4(prefix(2)), Prefix::V4(prefix(3))],
+        condition_policy: Some(med_guard()),
+        settle_time: Duration::ZERO,
+    };
+    let _ = manager.handle_install_conditional_advertisements(crate::ConditionalAdvertisementSet {
+        definitions: vec![core, absent_if(SETTLE)],
+        attachments: [
+            (peer(1), vec![Arc::from(NAME)]),
+            (peer(2), vec![Arc::from(NAME), Arc::from("core")]),
+        ]
+        .into_iter()
+        .collect(),
+    });
+    let names: Vec<String> = manager
+        .conditional_advertisement_status()
+        .iter()
+        .map(|status| status.name.to_string())
+        .collect();
+    assert_eq!(names, [NAME, "core"]);
+
+    // Startup: pending behind an armed settle timer.
+    let backup = status(&manager, NAME);
+    assert_eq!(backup.advertise_if, ConditionalAdvertiseIf::Absent);
+    assert_eq!(backup.conditions, [(condition(), "absent")]);
+    assert_eq!((backup.observed, backup.applied), ("absent", "pending"));
+    assert_eq!(backup.settle_time, SETTLE);
+    assert_eq!(backup.settle_remaining, Some(SETTLE));
+    assert!(!backup.selection_deferred);
+    assert_eq!(backup.attached_peers, [peer(1), peer(2)]);
+    // settle_time 0 applies at install: settled, nothing armed.
+    let core = status(&manager, "core");
+    assert_eq!((core.observed, core.applied), ("absent", "suppress"));
+    assert_eq!(core.settle_remaining, None);
+    assert_eq!(core.attached_peers, [peer(2)]);
+
+    // A changed observation restarts the timer; time shows on both clocks.
+    advance(Duration::from_secs(2)).await;
+    inject(&mut manager, prefix(1), None);
+    advance(Duration::from_secs(2)).await;
+    let backup = status(&manager, NAME);
+    assert_eq!(backup.conditions, [(condition(), "present")]);
+    assert_eq!((backup.observed, backup.applied), ("present", "pending"));
+    assert_eq!(backup.observed_for, Duration::from_secs(2));
+    assert_eq!(backup.settle_remaining, Some(Duration::from_secs(3)));
+    settle(&mut manager, Duration::from_secs(3)).await;
+    let backup = status(&manager, NAME);
+    assert_eq!(
+        (backup.applied, backup.settle_remaining),
+        ("suppress", None)
+    );
+
+    // Per-prefix observations: a clean match on one prefix and an
+    // evaluation error on the other leave the whole condition present.
+    inject(&mut manager, prefix(2), Some(0));
+    inject(&mut manager, prefix(3), Some(u32::MAX));
+    let core = status(&manager, "core");
+    assert_eq!(
+        core.conditions,
+        [
+            (Prefix::V4(prefix(2)), "present"),
+            (Prefix::V4(prefix(3)), "unknown")
+        ]
+    );
+    assert_eq!((core.observed, core.applied), ("present", "advertise"));
+    // Without the match, the error makes the whole condition unknown and
+    // the applied state holds.
+    withdraw_injected(&mut manager, prefix(2));
+    let core = status(&manager, "core");
+    assert_eq!(
+        core.conditions,
+        [
+            (Prefix::V4(prefix(2)), "absent"),
+            (Prefix::V4(prefix(3)), "unknown")
+        ]
+    );
+    assert_eq!((core.observed, core.applied), ("unknown", "advertise"));
+}
+
+/// The query is served through the actor's channel like any RIB read.
+#[tokio::test(start_paused = true)]
+async fn status_query_is_served_by_the_running_actor() {
+    let (tx, rx) = mpsc::channel(8);
+    let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new())
+        .with_conditional_advertisements(crate::ConditionalAdvertisementSet {
+            definitions: vec![absent_if(SETTLE)],
+            attachments: [(peer(1), vec![Arc::from(NAME)])].into_iter().collect(),
+        });
+    let actor = tokio::spawn(manager.run());
+    let (reply, response) = oneshot::channel();
+    tx.send(RibUpdate::QueryConditionalAdvertisements { reply })
+        .await
+        .unwrap();
+    let statuses = response.await.unwrap();
+    assert_eq!(statuses.len(), 1);
+    assert_eq!(&*statuses[0].name, NAME);
+    assert_eq!(statuses[0].attached_peers, [peer(1)]);
+    drop(tx);
+    actor.await.unwrap();
 }

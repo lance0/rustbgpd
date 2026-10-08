@@ -1731,8 +1731,9 @@ stuck or daemon rejecting everything" pager.
 
 These series describe conditional advertisement (ADR-0137). The label
 `name` is an installed definition name; only definitions attached to at
-least one static neighbor are installed, and a dropped definition's series
-are removed.
+least one static neighbor (directly or through its peer group) are
+installed, and a dropped definition's series are removed. For the settle
+timer and per-prefix observations, run `rbgp policy conditional-advertisements`.
 
 | Metric | What it tells you |
 |--------|-------------------|

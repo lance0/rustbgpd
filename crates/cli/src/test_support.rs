@@ -2550,6 +2550,32 @@ struct MockPolicyService {
 
 #[tonic::async_trait]
 impl rustbgpd_api::proto::policy_service_server::PolicyService for MockPolicyService {
+    async fn list_conditional_advertisements(
+        &self,
+        _request: Request<server_proto::ListConditionalAdvertisementsRequest>,
+    ) -> Result<Response<server_proto::ListConditionalAdvertisementsResponse>, Status> {
+        Ok(Response::new(
+            server_proto::ListConditionalAdvertisementsResponse {
+                definitions: vec![server_proto::ConditionalAdvertisementStatus {
+                    name: "backup".to_string(),
+                    advertise_if: "absent".to_string(),
+                    conditions: vec![server_proto::ConditionalAdvertisementCondition {
+                        prefix: "0.0.0.0/0".to_string(),
+                        state: "present".to_string(),
+                    }],
+                    observed: "present".to_string(),
+                    observed_for_ms: 2_000,
+                    applied: "advertise".to_string(),
+                    settle_time_seconds: 5,
+                    settle_pending: true,
+                    settle_remaining_ms: 3_000,
+                    selection_deferred: false,
+                    attached_peers: vec!["192.0.2.1".to_string()],
+                }],
+            },
+        ))
+    }
+
     async fn get_validation_policy_posture(
         &self,
         _request: Request<server_proto::GetValidationPolicyPostureRequest>,

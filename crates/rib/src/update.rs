@@ -3028,6 +3028,12 @@ pub enum RibUpdate {
         /// Response channel.
         reply: oneshot::Sender<crate::orr::OrrStatusSnapshot>,
     },
+    /// Query the state of every installed ADR-0137 conditional-advertisement
+    /// definition, in name order.
+    QueryConditionalAdvertisements {
+        /// Response channel.
+        reply: oneshot::Sender<Vec<crate::ConditionalAdvertisementStatus>>,
+    },
     /// Query a full RIB snapshot for MRT `TABLE_DUMP_V2` export.
     QueryMrtSnapshot {
         /// Response channel.

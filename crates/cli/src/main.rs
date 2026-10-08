@@ -1063,6 +1063,15 @@ enum PolicyAction {
         #[arg(long, value_parser = ["import", "export"])]
         direction: String,
     },
+    /// Show conditional-advertisement state (ADR-0137)
+    ///
+    /// One entry per installed definition (attached to at least one
+    /// static neighbor, directly or through its peer group): each
+    /// condition prefix's observation, the applied gate (pending,
+    /// advertise, or suppress), the settle timer, and the attached
+    /// neighbors.
+    #[command(name = "conditional-advertisements", visible_alias = "conditional")]
+    ConditionalAdvertisements,
 }
 
 #[derive(Subcommand)]
@@ -3860,7 +3869,8 @@ fn validate_json_version(cli: &Cli) -> Result<(), CliError> {
             | PolicyAction::Delete { .. }
             | PolicyAction::Chain { .. }
             | PolicyAction::Stats { .. }
-            | PolicyAction::Explain { .. } => true,
+            | PolicyAction::Explain { .. }
+            | PolicyAction::ConditionalAdvertisements => true,
         },
         Command::Diff { .. }
         | Command::Watch { .. }
@@ -5220,6 +5230,9 @@ async fn run(cli: Cli, binary_name: &'static str) -> Result<(), CliError> {
                 .await
             }
             PolicyAction::List => commands::policy::list(connection, json).await,
+            PolicyAction::ConditionalAdvertisements => {
+                commands::conditional_advertisement::status(connection, json).await
+            }
             PolicyAction::Get { name } => commands::policy::get(connection, &name, json).await,
             PolicyAction::Set { name, from_file } => {
                 commands::policy::set(connection, &name, &from_file, json).await

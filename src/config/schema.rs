@@ -1267,11 +1267,6 @@ macro_rules! define_neighbor_and_peer_group_configs {
                 $(#[$after_neighbor_attr])*
                 pub $after_field: $after_ty,
             )*
-            /// Names of `[policy.conditional_advertisements]` definitions
-            /// attached to this neighbor (ADR-0137). Static neighbors only;
-            /// peer groups and dynamic neighbors do not carry attachments.
-            #[serde(default, skip_serializing_if = "Vec::is_empty")]
-            pub conditional_advertisements: Vec<String>,
         }
 
         #[derive(Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -1891,6 +1886,22 @@ define_neighbor_and_peer_group_configs! {
                 #[serde(default)]
             }
         }
+        conditional_advertisements: Vec<String> {
+            neighbor {
+                /// Names of `[policy.conditional_advertisements]` definitions
+                /// attached to this neighbor (ADR-0137). A non-empty list
+                /// replaces the peer group's list; an empty one inherits it.
+                /// Static neighbors only; dynamic neighbors do not carry
+                /// attachments.
+                #[serde(default, skip_serializing_if = "Vec::is_empty")]
+            }
+            peer_group {
+                /// Conditional advertisements inherited by static neighbors in
+                /// this group that set none of their own (ADR-0137). Dynamic
+                /// neighbors using the group do not inherit them.
+                #[serde(default, skip_serializing_if = "Vec::is_empty")]
+            }
+        }
     }
 }
 
@@ -2174,6 +2185,10 @@ impl fmt::Debug for PeerGroupConfig {
             .field("export_policy", &self.export_policy)
             .field("import_policy_chain", &self.import_policy_chain)
             .field("export_policy_chain", &self.export_policy_chain)
+            .field(
+                "conditional_advertisements",
+                &self.conditional_advertisements,
+            )
             .finish()
     }
 }
@@ -2386,7 +2401,8 @@ pub struct PolicyConfig {
     pub export_chain: Vec<String>,
     /// Named conditional-advertisement definitions (ADR-0137), attached
     /// to static neighbors by name through
-    /// `[[neighbors]] conditional_advertisements`.
+    /// `[[neighbors]] conditional_advertisements` or the neighbor's
+    /// `[peer_groups.<name>] conditional_advertisements`.
     #[serde(
         default,
         skip_serializing_if = "HashMap::is_empty",
