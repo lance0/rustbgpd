@@ -146,6 +146,8 @@ exec > >(tee -a "$SOAK_LOG") 2>&1
 # tests/soak/host-lock.sh for sudo/HOME caveats.
 # shellcheck source=./host-lock.sh
 source "$SOAK_SCRIPT_DIR/host-lock.sh"
+# shellcheck source=tests/interop/scripts/source-id-guard.sh
+source "$REPO_ROOT/tests/interop/scripts/source-id-guard.sh"
 acquire_rustbgpd_host_lock
 # shellcheck source=./gate8b-terminal-recovery.sh
 source "$SOAK_SCRIPT_DIR/gate8b-terminal-recovery.sh"
@@ -793,6 +795,7 @@ if ! container_is_running "$PE2_NAME"; then
     log "ERROR: container $PE2_NAME not running"
     exit 2
 fi
+check_lab_source_ids "$LAB_NAME" "$PE1_NAME" "$PE2_NAME" || exit 2
 
 # Run metadata.
 GIT_REV="$(cd "$REPO_ROOT" && git rev-parse HEAD 2>/dev/null || echo unknown)"
