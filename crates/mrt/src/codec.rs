@@ -804,8 +804,12 @@ fn encode_evpn_route_rib_entry(
 /// builds walk the encoded entry; release builds skip it. MRT encodes one
 /// attribute per wire-encoder call, so the wire encoder's own check cannot
 /// see a duplicate across them.
+///
+/// A block that cannot be walked faithfully is skipped, not judged: an entry
+/// over `u16::MAX` bytes may hold an attribute whose length the wire encoder
+/// narrowed, and the caller's length check rejects it as `FieldTooLarge`.
 fn debug_assert_unique_attribute_types(attrs: &[u8]) {
-    if !cfg!(debug_assertions) {
+    if !cfg!(debug_assertions) || attrs.len() > usize::from(u16::MAX) {
         return;
     }
     let mut seen = [false; 256];
@@ -821,7 +825,10 @@ fn debug_assert_unique_attribute_types(attrs: &[u8]) {
             !std::mem::replace(&mut seen[usize::from(*type_code)], true),
             "duplicate path attribute type {type_code} in one MRT RIB entry"
         );
-        rest = tail.get(len..).unwrap_or_default();
+        let Some(next) = tail.get(len..) else {
+            return;
+        };
+        rest = next;
     }
 }
 
@@ -3197,5 +3204,52 @@ mod tests {
             extended_length_unknown(),
             next_hop,
         ]));
+    }
+
+    #[test]
+    fn oversized_attribute_returns_field_too_large_instead_of_guard_panic() {
+        // The wire encoder narrows a > u16::MAX payload length, so the
+        // encoded block is not walkable; the length check must decide.
+        let oversized = PathAttribute::Unknown(rustbgpd_wire::RawAttribute {
+            flags: 0xc0,
+            type_code: 99,
+            data: bytes::Bytes::from(vec![0; usize::from(u16::MAX) + 5]),
+        });
+        let mut route = make_route(
+            Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 8)),
+            IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
+            IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
+        );
+        route.attributes = AttrSet::new(vec![oversized.clone()]);
+        let entry = RibEntry {
+            peer_index: 0,
+            originated_time: 0,
+            path_id: 0,
+            attributes: vec![oversized],
+        };
+        let mut route_bytes = Vec::new();
+        let mut entry_bytes = Vec::new();
+        for result in [
+            encode_route_rib_entry(
+                &mut EncodeBuffer::new(&mut route_bytes, None),
+                &route,
+                0,
+                0,
+                false,
+            ),
+            encode_rib_entry(
+                &mut EncodeBuffer::new(&mut entry_bytes, None),
+                &entry,
+                false,
+            ),
+        ] {
+            assert!(matches!(
+                result,
+                Err(EncodeError::FieldTooLarge {
+                    field: "RIB entry attribute length",
+                    ..
+                })
+            ));
+        }
     }
 }
