@@ -1898,8 +1898,10 @@ async fn retry_pending_rib_ops(
 
 /// Build the wire-shaped `EvpnRibRoute` for a Type 1/4 origination.
 ///
-/// Path attributes: Origin, empty `AsPath`, `NextHop`, plus the
-/// instance's configured RT extcomms. Per RFC 7432, Gate 8b prep
+/// Path attributes: Origin, empty `AsPath`, plus the instance's
+/// configured RT extcomms. The VTEP IP is carried separately as the
+/// route's `next_hop` and encoded only in `MP_REACH_NLRI`; no `NEXT_HOP`
+/// attribute is stored. Per RFC 7432, Gate 8b prep
 /// also attaches:
 ///
 /// - **Type 4 ES**: ES-Import RT extcomm (§7.6) auto-derived from
@@ -2024,7 +2026,6 @@ fn build_es_route(
     let attributes: Vec<PathAttribute> = vec![
         PathAttribute::Origin(Origin::Igp),
         PathAttribute::AsPath(AsPath { segments: vec![] }),
-        next_hop_path_attribute(instance.local_vtep_ip),
         PathAttribute::ExtendedCommunities(ext_communities),
     ];
 
@@ -2040,13 +2041,6 @@ fn build_es_route(
         is_stale: false,
         is_llgr_stale: false,
     })
-}
-
-fn next_hop_path_attribute(vtep_ip: IpAddr) -> PathAttribute {
-    match vtep_ip {
-        IpAddr::V4(v4) => PathAttribute::NextHop(v4),
-        IpAddr::V6(_) => PathAttribute::NextHop(std::net::Ipv4Addr::UNSPECIFIED),
-    }
 }
 
 /// Derive the ES-Import Route Target MAC from an ESI per
@@ -2247,7 +2241,8 @@ mod tests {
         )
         .expect("ES route builder accepts Type 1/4 keys");
         assert!(matches!(route.route, EvpnRoute::Es(_)));
-        // Must carry: Origin, AsPath, NextHop, ExtendedCommunities.
+        // Must carry: Origin, AsPath, ExtendedCommunities; no NEXT_HOP
+        // beside the MP_REACH next hop.
         assert!(
             route
                 .attributes
@@ -2261,7 +2256,7 @@ mod tests {
                 .any(|a| matches!(a, PathAttribute::AsPath(_)))
         );
         assert!(
-            route
+            !route
                 .attributes
                 .iter()
                 .any(|a| matches!(a, PathAttribute::NextHop(_)))

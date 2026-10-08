@@ -1,10 +1,17 @@
 //! Routes as inbound stores them must re-encode with exactly one next hop.
 //!
-//! Inbound keeps a `NEXT_HOP` among an IPv4 unicast route's stored
-//! attributes, aligned with `Route::next_hop`, the effective (post-import-
-//! policy) next hop. The MRT dump, the warm checkpoint and the BMP Loc-RIB
-//! synthesizer emit the next hop from `Route::next_hop` and must not also
-//! emit the stored attribute.
+//! - A body IPv4 route whose effective (post-import-policy) next hop is IPv4
+//!   keeps a `NEXT_HOP` among its stored attributes, aligned with
+//!   `Route::next_hop`. The MRT dump, the warm checkpoint and the BMP Loc-RIB
+//!   synthesizer emit the next hop from `Route::next_hop` and must not also
+//!   emit the stored attribute.
+//! - When the effective next hop is IPv6 (received in `MP_REACH_NLRI`, or set
+//!   by an import rewrite), no `NEXT_HOP` is stored and the next hop is
+//!   encoded only in `MP_REACH_NLRI`.
+//! - Other `MP_REACH_NLRI` routes (IPv6 unicast, VPN, EVPN) also carry their
+//!   next hop only there. An import policy that sets an IPv4 next hop still
+//!   stores a `NEXT_HOP` on them, so export, BMP Loc-RIB and MRT skip it
+//!   (RFC 4760 §3).
 
 use super::*;
 use rustbgpd_mrt::warm_bundle::{
@@ -17,6 +24,45 @@ use rustbgpd_policy::NextHopAction;
 use rustbgpd_rib::{MrtPeerEntry, Route};
 
 const RECEIVED: Ipv4Addr = Ipv4Addr::new(10, 0, 0, 2);
+const IMPORT_NEXT_HOP: Ipv4Addr = Ipv4Addr::new(192, 0, 2, 9);
+
+/// An import policy that permits everything and sets `action`.
+fn import_next_hop_policy(action: NextHopAction) -> PolicyChain {
+    PolicyChain::new(vec![Policy {
+        entries: vec![PolicyStatement {
+            prefix: None,
+            ge: None,
+            le: None,
+            action: PolicyAction::Permit,
+            match_community: vec![],
+            match_as_path: None,
+            match_neighbor_set: None,
+            match_route_type: None,
+            match_evpn_route_type: None,
+            match_rpki_validation: None,
+            match_aspa_validation: None,
+            match_as_path_length_ge: None,
+            match_as_path_length_le: None,
+            match_local_pref_ge: None,
+            match_local_pref_le: None,
+            match_med_ge: None,
+            match_med_le: None,
+            match_next_hop: None,
+            modifications: RouteModifications {
+                set_next_hop: Some(action),
+                ..Default::default()
+            },
+        }],
+        default_action: PolicyAction::Deny,
+    }])
+}
+
+fn next_hop_attributes(attrs: &[PathAttribute]) -> usize {
+    attrs
+        .iter()
+        .filter(|attr| matches!(attr, PathAttribute::NextHop(_)))
+        .count()
+}
 
 /// Feed one body IPv4 UPDATE through `process_update` and return the routes
 /// exactly as the session hands them to the RIB.
@@ -24,33 +70,7 @@ async fn stored_routes(import_next_hop: Option<NextHopAction>) -> Vec<Route> {
     let (mut session, mut rib_rx) = make_test_session_with_rib(65001, 65002);
     session.negotiated = Some(Arc::new(negotiated_session(65002, false)));
     if let Some(action) = import_next_hop {
-        session.install_import_policy(Some(PolicyChain::new(vec![Policy {
-            entries: vec![PolicyStatement {
-                prefix: None,
-                ge: None,
-                le: None,
-                action: PolicyAction::Permit,
-                match_community: vec![],
-                match_as_path: None,
-                match_neighbor_set: None,
-                match_route_type: None,
-                match_evpn_route_type: None,
-                match_rpki_validation: None,
-                match_aspa_validation: None,
-                match_as_path_length_ge: None,
-                match_as_path_length_le: None,
-                match_local_pref_ge: None,
-                match_local_pref_le: None,
-                match_med_ge: None,
-                match_med_le: None,
-                match_next_hop: None,
-                modifications: RouteModifications {
-                    set_next_hop: Some(action),
-                    ..Default::default()
-                },
-            }],
-            default_action: PolicyAction::Deny,
-        }])));
+        session.install_import_policy(Some(import_next_hop_policy(action)));
     }
     let attrs = vec![
         PathAttribute::Origin(Origin::Igp),
@@ -70,14 +90,7 @@ async fn stored_routes(import_next_hop: Option<NextHopAction>) -> Vec<Route> {
         panic!("expected RoutesReceived");
     };
     // The storage shape every test below depends on.
-    assert_eq!(
-        announced[0]
-            .attributes
-            .iter()
-            .filter(|attr| matches!(attr, PathAttribute::NextHop(_)))
-            .count(),
-        1
-    );
+    assert_eq!(next_hop_attributes(&announced[0].attributes), 1);
     announced
 }
 
@@ -309,4 +322,157 @@ async fn mrt_dump_of_a_received_ipv6_route_keeps_mp_reach_next_hop() {
     assert_eq!(entries[0].next_hop, Some(IpAddr::V6(global)));
     assert_eq!(entries[0].link_local_next_hop, Some(link_local));
     assert_eq!(entries[0].attributes, announced[0].attributes.as_slice());
+}
+
+/// Feed one `MP_REACH_NLRI`-only UPDATE through `process_update` under an
+/// import policy that sets [`IMPORT_NEXT_HOP`], and return what reaches the
+/// RIB.
+async fn import_mp_update(mp_reach: MpReachNlri) -> RibUpdate {
+    let (mut session, mut rib_rx) = make_test_session_with_rib(65001, 65002);
+    let mut negotiated = negotiated_session(65002, false);
+    negotiated.negotiated_families = vec![(mp_reach.afi, mp_reach.safi)];
+    session.negotiated = Some(Arc::new(negotiated));
+    session.install_import_policy(Some(import_next_hop_policy(NextHopAction::Specific(
+        IpAddr::V4(IMPORT_NEXT_HOP),
+    ))));
+    let attrs = vec![
+        PathAttribute::Origin(Origin::Igp),
+        PathAttribute::AsPath(AsPath {
+            segments: vec![AsPathSegment::AsSequence(vec![65002])],
+        }),
+        PathAttribute::MpReachNlri(Box::new(mp_reach)),
+    ];
+    let update = UpdateMessage::build(&[], &[], &attrs, true, false, Ipv4UnicastMode::Body);
+    session.process_update(update).await;
+    rib_rx.try_recv().unwrap()
+}
+
+fn empty_mp_reach(afi: Afi, safi: Safi, next_hop: IpAddr) -> MpReachNlri {
+    MpReachNlri {
+        afi,
+        safi,
+        next_hop,
+        link_local_next_hop: None,
+        announced: vec![],
+        flowspec_announced: vec![],
+        evpn_announced: vec![],
+        bgpls_announced: vec![],
+        labeled_announced: vec![],
+        vpn_announced: vec![],
+        rtc_announced: vec![],
+    }
+}
+
+/// eBGP export rewrites the IPv6 route's next hop into `MP_REACH_NLRI`; the
+/// `NEXT_HOP` import stored must not ride beside it.
+#[tokio::test]
+async fn import_ipv4_next_hop_on_an_ipv6_route_is_not_exported_beside_mp_reach() {
+    let prefix = Prefix::V6(Ipv6Prefix::new("2001:db8:100::".parse().unwrap(), 48));
+    let mut mp_reach = empty_mp_reach(
+        Afi::Ipv6,
+        Safi::Unicast,
+        IpAddr::V6("2001:db8::2".parse().unwrap()),
+    );
+    mp_reach.announced = vec![NlriEntry { path_id: 0, prefix }];
+    let RibUpdate::RoutesReceived { announced, .. } = import_mp_update(mp_reach).await else {
+        panic!("expected RoutesReceived");
+    };
+    // The stored shape this guards against.
+    assert_eq!(next_hop_attributes(&announced[0].attributes), 1);
+
+    let (mut session, _rib_rx) = make_test_session_with_rib(65001, 65002);
+    session.config.local_ipv6_nexthop = Some("2001:db8::1".parse().unwrap());
+    let (client, mut server) = connected_stream_pair().await;
+    session.test_install_stream(client);
+    let mut negotiated = negotiated_session(65002, false);
+    negotiated.negotiated_families = vec![(Afi::Ipv6, Safi::Unicast)];
+    session.negotiated = Some(Arc::new(negotiated));
+    let mut update = empty_outbound_update();
+    update.exact_export_snapshot = Some(session.publish_export_profile());
+    update.next_hop_override = vec![None].into();
+    update.announce = announced.into();
+    session.send_route_update(update);
+    let Message::Update(msg) = read_single_bgp_message(&mut server).await else {
+        panic!("expected UPDATE");
+    };
+    let parsed = msg.parse(true, false, &[]).unwrap();
+    assert_eq!(next_hop_attributes(&parsed.attributes), 0);
+    let mp = parsed
+        .attributes
+        .iter()
+        .find_map(|attr| match attr {
+            PathAttribute::MpReachNlri(mp) => Some(mp),
+            _ => None,
+        })
+        .expect("IPv6 unicast uses MP_REACH");
+    assert_eq!(mp.next_hop, "2001:db8::1".parse::<IpAddr>().unwrap());
+    assert_eq!(mp.announced, [NlriEntry { path_id: 0, prefix }]);
+}
+
+/// The BMP Loc-RIB VPN announcement carries the VPN next hop in
+/// `MP_REACH_NLRI` only.
+#[tokio::test]
+async fn bmp_loc_rib_vpn_announce_skips_an_import_stored_next_hop() {
+    let mp_next_hop = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 7));
+    let mut mp_reach = empty_mp_reach(Afi::Ipv4, Safi::MplsVpn, mp_next_hop);
+    mp_reach.vpn_announced = vec![rustbgpd_wire::VpnNlriEntry {
+        path_id: 0,
+        nlri: VpnNlri {
+            labels: vec![MplsLabelEntry::try_new(4093, 0, true).unwrap()],
+            route_distinguisher: RouteDistinguisher([0, 0, 0xFD, 0xE8, 0, 0, 0, 1]),
+            prefix: VpnPrefix::v4(Ipv4Addr::new(10, 0, 1, 0), 24).unwrap(),
+        },
+    }];
+    let RibUpdate::VpnRoutesReceived { announced, .. } = import_mp_update(mp_reach).await else {
+        panic!("expected VpnRoutesReceived");
+    };
+    assert_eq!(next_hop_attributes(&announced[0].attributes), 1);
+
+    let pdu = rustbgpd_rib::bmp_sync::synthesize_vpn_announce(&announced[0]).unwrap();
+    // The 19-byte BGP header precedes the UPDATE body.
+    let mut body = pdu.slice(19..);
+    let body_len = body.len();
+    let update = UpdateMessage::decode(&mut body, body_len).unwrap();
+    let parsed = update.parse_revised(true, false, false, &[]).unwrap();
+    assert!(parsed.malformed.is_empty(), "{:?}", parsed.malformed);
+    assert_eq!(next_hop_attributes(&parsed.update.attributes), 0);
+    let mp = parsed
+        .update
+        .attributes
+        .iter()
+        .find_map(|attr| match attr {
+            PathAttribute::MpReachNlri(mp) => Some(mp),
+            _ => None,
+        })
+        .expect("VPN uses MP_REACH");
+    assert_eq!(mp.next_hop, mp_next_hop);
+}
+
+/// An MRT EVPN RIB entry carries its next hop in the MRT-reduced
+/// `MP_REACH_NLRI` only.
+#[tokio::test]
+async fn mrt_dump_of_an_evpn_route_skips_an_import_stored_next_hop() {
+    let mp_next_hop = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 7));
+    let mut mp_reach = empty_mp_reach(Afi::L2Vpn, Safi::Evpn, mp_next_hop);
+    mp_reach.evpn_announced = vec![rustbgpd_wire::EvpnRoute::Imet(rustbgpd_wire::EvpnImet {
+        rd: RouteDistinguisher([0, 0, 0xFD, 0xE8, 0, 0, 0, 0x64]),
+        ethernet_tag: rustbgpd_wire::EthernetTagId(100),
+        originator_ip: mp_next_hop,
+    })];
+    let RibUpdate::RoutesReceived { evpn_announced, .. } = import_mp_update(mp_reach).await else {
+        panic!("expected RoutesReceived");
+    };
+    assert_eq!(next_hop_attributes(&evpn_announced[0].attributes), 1);
+
+    let snapshot = rustbgpd_mrt::codec::encode_snapshot(
+        Ipv4Addr::new(10, 0, 0, 1),
+        &peers(),
+        &[],
+        &evpn_announced,
+        1_800_000_000,
+    )
+    .unwrap();
+    assert_eq!(decoded_next_hops(&snapshot), [(Some(mp_next_hop), 0)]);
+    let synthesized = rustbgpd_mrt::codec::synthesize_evpn_attributes(&evpn_announced[0]);
+    assert_eq!(next_hop_attributes(&synthesized), 0);
 }
