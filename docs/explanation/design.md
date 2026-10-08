@@ -155,6 +155,7 @@ service ControlService {
 **Paginated unary (default).** `ListRoutesRequest` includes a `page_size` (max results per page, capped server-side) and an opaque `page_token` (cursor). Unfiltered listings resume directly from ordered route indices and clone only the requested page plus one lookahead row; `ListReceivedRoutes` without a peer performs a bounded k-way merge over the per-peer indices. A grouped advertised iterator can inspect additional underlying rows while applying member-local split horizon and exact-export rejection, but it does not restart or materialize the group view per page. API-filtered listings retain a full scan so `total_count` and filter semantics remain exact. Tokens are process-local and bind the last route key to the exact RPC scope, a fixed-size digest of canonical filter semantics, and a conservative manager-owned generation. Received and Best share the table generation so clients can atomically join the views; Advertised is independent. Reusing a token with a changed scope or filter fails with gRPC `INVALID_ARGUMENT`; `page_size` may change safely. Any mutation in the same scope class between pages makes the next request fail with gRPC `ABORTED`; this can conservatively abort a peer-specific walk after an unrelated peer changes. Clients must restart with an empty token. This fail-closed contract avoids serving a torn listing without retaining server-side snapshots or cursor registries.
 
 ```protobuf
+// Abridged: proto/rustbgpd.proto is authoritative (filter fields 5-13 omitted).
 message ListRoutesRequest {
   string neighbor_address = 1;      // filter by peer (empty = all)
   AddressFamily afi_safi = 2;       // address family filter
@@ -166,6 +167,7 @@ message ListRoutesResponse {
   repeated Route routes = 1;
   string next_page_token = 2;       // empty = no more pages
   uint64 total_count = 3;           // total matching routes (for UI/progress)
+  RoutePageVersion page_version = 4; // cross-page consistency fence
 }
 ```
 
@@ -615,10 +617,13 @@ controller-driven injection for Type 2 / Type 3. What remains:
 
 ### Interop Test Matrix
 
-Primary targets (containerlab-based, run in CI):
+Primary targets (containerlab-based, run in CI; [interop.md](../interop.md)
+lists every topology):
 - FRR (bgpd)
 - BIRD
 - GoBGP (as peer)
+- OpenBGPD
+- ExaBGP (scripted peer)
 
 Stretch targets (lab environments):
 - Junos vMX/vPTX
@@ -644,8 +649,10 @@ containerlab is the test harness — not "where feasible," but the default. Ever
   adapters.
 
 Run them per crate — `cd` into the owning crate and use `cargo fuzz list` /
-`cargo fuzz run <target>` on the pinned nightly. Seed corpora are tracked
-under each crate's `fuzz/seeds/<target>/`. The repo-root `fuzz/` directory is
+`cargo fuzz run <target>` on the pinned nightly. Tracked seed corpora live
+under each crate's `fuzz/seeds/<target>/`; `evpn` `parse_rt`, `mrt`
+`snapshot_reader_drain`, and `policy` `compile_chain` and `explain_walk` have
+none and start from an empty corpus. The repo-root `fuzz/` directory is
 OSS-Fuzz build scaffolding, not a runnable target set.
 
 All 13 wire targets have tracked roots. The scheduled workflow can reuse one

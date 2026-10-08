@@ -33,7 +33,8 @@ surface: [explain.md](../how-to/explain.md).
 
 ## Dual-stack and modern protocol support
 
-MP-BGP, Add-Path, Extended Next Hop, Extended Messages, GR/LLGR/
+MP-BGP, Add-Path, Extended Next Hop, the experimental opt-in Link-Local
+Next Hop capability 77, Extended Messages, GR/LLGR/
 Notification GR, Route Refresh/Enhanced Route Refresh, receive-side
 Prefix ORF, FlowSpec (with opt-in RFC 9117 feasibility validation),
 Route Reflector, large and extended communities.
@@ -49,7 +50,10 @@ live RIB (`rbgp policy test`), decisions explain themselves per term
 counters (`rbgp policy stats`). Mixes freely with the existing TOML
 policy chains; FRR route-map parity proven route-for-route in interop
 (M80). Designed under ADR-0096. Full language reference:
-[rpol-language.md](../reference/rpol-language.md).
+[rpol-language.md](../reference/rpol-language.md). Opt-in conditional
+advertisement (alpha, IPv4/IPv6 unicast) uses a named policy to select
+routes and sends them to a neighbor only while a condition route is present
+or absent: [backup-route cookbook](../cookbook/conditional-advertisement-backup.md).
 
 ## Full BMP monitoring trio
 
