@@ -49,6 +49,7 @@ Follow a procedure for a specific task.
 | [Controller and monitoring feed](cookbook/monitoring-feed.md) | Export BMP, durable events, and MRT. |
 | [EVPN fabric route reflector](cookbook/evpn-fabric-rr.md) | Reflect EVPN routes in a leaf/spine fabric. |
 | [Policy quickstart](cookbook/policy-quickstart.md) | Test and activate a typed routing policy. |
+| [Backup route with conditional advertisement](cookbook/conditional-advertisement-backup.md) | Announce to a backup upstream only while the primary route is gone. |
 | [Peer-flap triage](cookbook/peer-flap-triage.md) | Find and contain a recurring session failure. |
 | [Route-reflector pair operations](cookbook/rr-pair-day2.md) | Maintain a redundant pair through routine changes. |
 | [Paired route servers](cookbook/paired-route-servers.md) | Stage updates, compare output, and drain for maintenance. |
