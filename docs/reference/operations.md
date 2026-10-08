@@ -1739,6 +1739,7 @@ are removed.
 | `bgp_conditional_advertisement_condition{name,state}` | Observed condition as a state set: one series per `state` (`present`, `absent`, `unknown`); the current state's series is 1 and the others are 0. `unknown` means a `condition_policy` evaluation error with no clean match; the applied gate holds its last state while it lasts |
 | `bgp_conditional_advertisement_permitted{name,advertise_if}` | Applied gate: 1 when the definition's controlled routes may be advertised, 0 when suppressed or still pending after startup. `advertise_if` is the configured mode |
 | `bgp_conditional_advertisement_transitions_total{name}` | Changes to the applied state. Each one also logs `conditional advertisement transition` at `info` |
+| `bgp_policy_eval_errors_total{direction="condition",kind}` | `condition_policy` evaluation errors, one per erroring condition candidate per re-evaluation. Unlike `import` and `export`, an error here denies no route; it can make the condition `unknown` |
 
 The applied gate follows the observed condition after `settle_time`.
 Compare it with the mode-adjusted expectation, excluding `unknown`, and
@@ -1748,13 +1749,15 @@ temporary mismatch:
 
 ```promql
 (
-  bgp_conditional_advertisement_permitted{advertise_if="present"}
-    != on(name) bgp_conditional_advertisement_condition{state="present"}
-)
-or
-(
-  bgp_conditional_advertisement_permitted{advertise_if="absent"}
-    != on(name) bgp_conditional_advertisement_condition{state="absent"}
+  (
+    bgp_conditional_advertisement_permitted{advertise_if="present"}
+      != on(name) bgp_conditional_advertisement_condition{state="present"}
+  )
+  or
+  (
+    bgp_conditional_advertisement_permitted{advertise_if="absent"}
+      != on(name) bgp_conditional_advertisement_condition{state="absent"}
+  )
 )
 unless on(name) (bgp_conditional_advertisement_condition{state="unknown"} == 1)
 ```

@@ -2175,11 +2175,13 @@ impl BgpMetrics {
         let policy_eval_errors = IntCounterVec::new(
             Opts::new(
                 "bgp_policy_eval_errors_total",
-                "Routes denied by a policy evaluation error (ADR-0103 Decision 4 \
-                 fail-closed rail) by direction (import, export) and error kind \
-                 (the closed EvalErrorKind label set: overflow, divide-by-zero, \
-                 absent-operand, fuel-exhausted, ...). Per-chain counts and the \
-                 failing policy/term are on `rbgp policy stats`, not labels.",
+                "Policy evaluation errors (ADR-0103 Decision 4 fail-closed rail) \
+                 by direction and error kind (the closed EvalErrorKind label set: \
+                 overflow, divide-by-zero, absent-operand, fuel-exhausted, ...). \
+                 Direction import or export counts a denied route; condition \
+                 counts a conditional-advertisement condition_policy candidate \
+                 (ADR-0137) that is neither a match nor a miss. Per-chain counts \
+                 and the failing policy/term are on `rbgp policy stats`, not labels.",
             ),
             &["direction", "kind"],
         )
@@ -5693,9 +5695,11 @@ impl BgpMetrics {
             .remove_label_values(&[dataset]);
     }
 
-    /// Count one route denied by a policy evaluation error (LAN-301,
-    /// ADR-0103 Decision 4). Labels are bounded and closed:
-    /// - `direction`: `"import"` or `"export"`.
+    /// Count one policy evaluation error (LAN-301, ADR-0103 Decision 4).
+    /// Labels are bounded and closed:
+    /// - `direction`: `"import"` or `"export"`, or `"condition"` for a
+    ///   conditional-advertisement `condition_policy` candidate (ADR-0137),
+    ///   which leaves the observed condition `unknown` instead of denying.
     /// - `kind`: an `EvalErrorKind` stable label (`"overflow"`,
     ///   `"divide-by-zero"`, `"fuel-exhausted"`, ...).
     ///

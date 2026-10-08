@@ -279,6 +279,16 @@ impl RibManager {
                 );
             }
         }
+        // The restore itself changes `applied` back to the captured value:
+        // that is a transition like any other, recorded before re-observation
+        // so the captured deadline stands.
+        for (name, state) in &self.conditional_advertisements.definitions {
+            if let Some(previous) = replaced.get(name)
+                && previous.applied != state.applied
+            {
+                Self::record_transition(&self.metrics, state, previous.applied);
+            }
+        }
         let names: Vec<_> = self
             .conditional_advertisements
             .definitions
@@ -288,9 +298,24 @@ impl RibManager {
         let mut transitions = Vec::new();
         for name in &names {
             self.reobserve_definition(name, now, &mut transitions);
-            if let Some(state) = self.conditional_advertisements.definitions.get(name) {
-                self.publish_conditional_metrics(state);
+            let Some(mut state) = self.conditional_advertisements.definitions.remove(name) else {
+                continue;
+            };
+            // A state captured during selection deferral has no deadline;
+            // if deferral was released while the failed generation was
+            // installed, that release armed the replaced state, not this
+            // one. Arm a fresh interval so it cannot stay unsettled forever.
+            if state.deadline.is_none()
+                && Self::target(&state).is_some_and(|target| target != state.applied)
+                && !self.condition_deferred(&state.definition)
+            {
+                state.observed_since = now;
+                self.arm_or_apply(&mut state, now, &mut transitions);
             }
+            self.publish_conditional_metrics(&state);
+            self.conditional_advertisements
+                .definitions
+                .insert(Arc::clone(name), state);
         }
         let mut changed: BTreeSet<Arc<str>> = transitions.into_iter().collect();
         for (name, state) in &replaced {
@@ -407,6 +432,39 @@ impl RibManager {
         transitions
     }
 
+    /// Re-observe the definitions whose `condition_policy` sees `source` as
+    /// the peer context of a current condition candidate, after that peer's
+    /// policy context (its group) changed without any route churn.
+    pub(super) fn reobserve_conditional_advertisement_source(
+        &mut self,
+        source: IpAddr,
+    ) -> Vec<Arc<str>> {
+        let Some(rib) = self.ribs.get(&source) else {
+            return Vec::new();
+        };
+        let names: Vec<_> = self
+            .conditional_advertisements
+            .definitions
+            .iter()
+            .filter(|(_, state)| {
+                state.definition.condition_policy.is_some()
+                    && state
+                        .definition
+                        .condition_prefixes
+                        .iter()
+                        .any(|prefix| rib.iter_prefix(prefix).next().is_some())
+            })
+            .map(|(name, _)| Arc::clone(name))
+            .collect();
+        let now = Instant::now();
+        let mut transitions = Vec::new();
+        for name in &names {
+            self.reobserve_definition(name, now, &mut transitions);
+        }
+        self.mark_conditional_advertisement_peers_dirty(&transitions);
+        transitions
+    }
+
     /// Earliest armed settle deadline.
     pub(super) fn next_conditional_advertisement_deadline(&self) -> Option<Instant> {
         self.conditional_advertisements
@@ -469,39 +527,56 @@ impl RibManager {
         }
     }
 
+    /// The applied state a known observation implies; `unknown` implies none.
+    fn target(state: &DefinitionState) -> Option<AppliedConditionalState> {
+        match (state.observed, state.definition.advertise_if) {
+            (ConditionObservation::Unknown, _) => None,
+            (ConditionObservation::Present, ConditionalAdvertiseIf::Present)
+            | (ConditionObservation::Absent, ConditionalAdvertiseIf::Absent) => {
+                Some(AppliedConditionalState::Advertise)
+            }
+            _ => Some(AppliedConditionalState::Suppress),
+        }
+    }
+
     /// Move `applied` to what a known observation implies. `unknown` holds.
     fn apply_observation(
         metrics: &rustbgpd_telemetry::BgpMetrics,
         state: &mut DefinitionState,
         out: &mut Vec<Arc<str>>,
     ) {
-        let target = match (state.observed, state.definition.advertise_if) {
-            (ConditionObservation::Unknown, _) => return,
-            (ConditionObservation::Present, ConditionalAdvertiseIf::Present)
-            | (ConditionObservation::Absent, ConditionalAdvertiseIf::Absent) => {
-                AppliedConditionalState::Advertise
-            }
-            _ => AppliedConditionalState::Suppress,
+        let Some(target) = Self::target(state) else {
+            return;
         };
         if state.applied == target {
             return;
         }
+        let from = state.applied;
+        state.applied = target;
+        Self::record_transition(metrics, state, from);
+        out.push(Arc::clone(&state.definition.name));
+    }
+
+    /// Log and count a change of `applied` from `from` to its current value.
+    fn record_transition(
+        metrics: &rustbgpd_telemetry::BgpMetrics,
+        state: &DefinitionState,
+        from: AppliedConditionalState,
+    ) {
         info!(
             definition = %state.definition.name,
-            from = ?state.applied,
-            to = ?target,
+            from = ?from,
+            to = ?state.applied,
             observed = state.observed.label(),
             advertise_if = state.definition.advertise_if.label(),
             "conditional advertisement transition"
         );
-        state.applied = target;
         metrics.record_conditional_advertisement_transition(&state.definition.name);
         metrics.set_conditional_advertisement_permitted(
             &state.definition.name,
             state.definition.advertise_if.label(),
-            target == AppliedConditionalState::Advertise,
+            state.applied == AppliedConditionalState::Advertise,
         );
-        out.push(Arc::clone(&state.definition.name));
     }
 
     fn publish_conditional_metrics(&self, state: &DefinitionState) {
@@ -536,13 +611,23 @@ impl RibManager {
         }
     }
 
+    /// Every accepted Adj-RIB-In candidate for `prefix`, including one that
+    /// selection skips (one with an invalid service SID): not
+    /// `unicast_candidates`, which applies selection eligibility.
+    fn condition_candidates<'a>(&'a self, prefix: &'a Prefix) -> impl Iterator<Item = &'a Route> {
+        self.unicast_prefix_peers
+            .peers(prefix)
+            .filter_map(|peer| self.ribs.get(&peer))
+            .flat_map(|rib| rib.iter_prefix(prefix))
+    }
+
     /// Any current candidate (received and import-accepted, stale, losing
     /// Add-Path, or locally injected) that satisfies the condition makes it
     /// present. An evaluation error is neither a match nor a miss.
     fn observe_condition(&self, definition: &ConditionalAdvertisement) -> ConditionObservation {
         let mut errored = false;
         for prefix in &definition.condition_prefixes {
-            for route in Self::unicast_candidates(&self.ribs, &self.unicast_prefix_peers, prefix) {
+            for route in self.condition_candidates(prefix) {
                 #[cfg(test)]
                 self.conditional_advertisements
                     .candidate_visits
@@ -550,7 +635,7 @@ impl RibManager {
                 let Some(policy) = &definition.condition_policy else {
                     return ConditionObservation::Present;
                 };
-                match self.condition_candidate_verdict(policy, route) {
+                match self.condition_candidate_verdict(policy, route, true) {
                     CandidateVerdict::Match => return ConditionObservation::Present,
                     CandidateVerdict::Error(_) => errored = true,
                     CandidateVerdict::Miss => {}
@@ -567,7 +652,12 @@ impl RibManager {
     /// Evaluate `condition_policy` for one candidate. A received candidate
     /// sees its source peer's address, configured ASN, and group; a locally
     /// injected one (`LOCAL_PEER`) has no peer context at all.
-    fn condition_candidate_verdict(&self, policy: &PolicyChain, route: &Route) -> CandidateVerdict {
+    fn condition_candidate_verdict(
+        &self,
+        policy: &PolicyChain,
+        route: &Route,
+        count_errors: bool,
+    ) -> CandidateVerdict {
         let (peer_address, peer_asn, peer_group): (Option<IpAddr>, Option<u32>, Option<&str>) =
             if route.peer == LOCAL_PEER {
                 (None, None, None)
@@ -608,6 +698,11 @@ impl RibManager {
         };
         let (_, evaluation) = policy.evaluate_with_attribution(&ctx);
         if let Some(error) = evaluation.eval_error {
+            // Live observations count; the explain walk must not skew metrics.
+            if count_errors {
+                self.metrics
+                    .record_policy_eval_error("condition", error.kind.label());
+            }
             CandidateVerdict::Error(error)
         } else if evaluation.action == PolicyAction::Permit {
             CandidateVerdict::Match
@@ -873,11 +968,11 @@ impl RibManager {
     ) -> (Option<Prefix>, Option<rustbgpd_policy::EvalError>) {
         let mut first_error = None;
         for prefix in &definition.condition_prefixes {
-            for route in Self::unicast_candidates(&self.ribs, &self.unicast_prefix_peers, prefix) {
+            for route in self.condition_candidates(prefix) {
                 let Some(policy) = &definition.condition_policy else {
                     return (Some(*prefix), first_error);
                 };
-                match self.condition_candidate_verdict(policy, route) {
+                match self.condition_candidate_verdict(policy, route, false) {
                     CandidateVerdict::Match => return (Some(*prefix), first_error),
                     CandidateVerdict::Error(error) => {
                         first_error.get_or_insert(error);
