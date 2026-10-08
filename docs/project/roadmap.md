@@ -1340,10 +1340,11 @@ gobmp/pmacct already terminate it into Kafka), and BGPsec.
   cannot be negotiated/configured, or a complete vertical slice with codec, RIB,
   policy context, route-refresh/GR behavior, API/CLI surfaces, caps, docs, and
   interop receipts.
-- **Route dampening (RFC 2439).** Suppress flapping routes with penalty/decay.
-  [ADR-0138](../adr/0138-route-flap-dampening.md) proposes opt-in eBGP unicast
-  dampening with the RFC 7196 / RIPE-580 parameter set; it is not recommended
-  for route servers.
+- **Route dampening (RFC 2439).** Deferred: suppressing flapping routes with
+  penalty/decay serves eBGP edge speakers, outside the route-server and
+  route-reflector roles. [ADR-0138](../adr/0138-route-flap-dampening.md) records
+  the design and reopens on a named eBGP-edge deployment or route-server /
+  route-reflector operator demand.
 - **Scriptable policy engine.** User-defined attribute-transformation functions
   (Lua, Starlark, or WASM) beyond static match/action rules. Policy evaluation
   is already a pure `(route, context) -> (action, modifications)` function, so

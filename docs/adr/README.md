@@ -17,7 +17,7 @@ status. Accepted, Current, and Implemented records are Active; rejected records
 are Rejected (including a record whose accepted decision is to reject the
 proposal, such as ADR-0106). A Proposed record is Unstated unless its own text
 establishes another lifecycle, such as ADR-0100 (Parked as an unscheduled
-research blueprint). [ROADMAP's deferred follow-ups](../project/roadmap.md#deferred-with-rationale)
+research blueprint) and ADR-0138 (Parked until a stated reopen condition). [ROADMAP's deferred follow-ups](../project/roadmap.md#deferred-with-rationale)
 do not establish the lifecycle of their associated ADRs. No record currently
 states that the whole decision is Superseded.
 
@@ -161,7 +161,7 @@ states that the whole decision is Superseded.
 | [0135](0135-flowspec-feasibility.md) | Opt-in FlowSpec cross-RIB feasibility validation | Accepted | 2026-09-20 | Active |
 | [0136](0136-owner-published-counter-reads.md) | Owner-published counter reads | Accepted | 2026-09-25 | Active |
 | [0137](0137-conditional-advertisement.md) | Conditional advertisement | Accepted | 2026-10-07 | Active |
-| [0138](0138-route-flap-dampening.md) | Route flap dampening | Proposed | 2026-10-08 | Unstated |
+| [0138](0138-route-flap-dampening.md) | Route flap dampening | Proposed (deferred; implementation NO-GO, demand-gated) | 2026-10-08 | Parked |
 
 ## Supporting records
 
@@ -175,14 +175,13 @@ ADR or from repository history.
 
 ## Lifecycle metadata gaps
 
-The five records below do not state one of the navigation lifecycles above.
+The four records below do not state one of the navigation lifecycles above.
 They remain **Unstated** rather than being inferred as Parked:
 
 - [ADR-0093](0093-evpn-vlan-macip-fdb-correlation.md)
 - [ADR-0123](0123-aspa-v27-mitigation-and-retention.md)
 - [ADR-0129](0129-prefix-sid-domain-boundary.md)
 - [ADR-0134](0134-reload-monitoring-and-validation-endpoints.md)
-- [ADR-0138](0138-route-flap-dampening.md)
 
 ## Template
 

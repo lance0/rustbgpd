@@ -1,6 +1,6 @@
 # ADR-0138: Route flap dampening
 
-**Status:** Proposed
+**Status:** Proposed (deferred — not scheduled; implementation NO-GO, demand-gated; see [Reopen conditions](#reopen-conditions))
 **Date:** 2026-10-08
 
 ## Context
@@ -9,9 +9,9 @@ Route flap dampening (RFC 2439) keeps a decaying penalty for each received
 path. Penalties are added when the path is withdrawn or changed. When the
 penalty crosses a suppress threshold, the path stops taking part in route
 selection. It is used again once the penalty decays below a reuse threshold.
-The roadmap lists it under "Maybe". This record decides whether and how
-rustbgpd implements it, and it states the conditions under which it should
-not.
+The roadmap lists it under "Maybe". This record decides whether rustbgpd
+implements it now, records the design an implementation would follow, and
+states when the question should be reopened.
 
 ### Primary sources
 
@@ -176,24 +176,56 @@ reads it. There are no dampening parameters.
 
 ## Decision
 
-### 1. Scope and recommendation
+rustbgpd does not implement route flap dampening now. The record is parked:
+the design below is kept so that a later implementation starts from settled
+answers, and no implementation is scheduled.
 
-Implement RFC 2439 dampening for **IPv4 and IPv6 unicast paths received from
-eBGP peers**, opt-in and **off by default**. The feature is **alpha**.
+- rustbgpd's stable roles are route server and route reflector (see the
+  [stability guide](../reference/stability.md)). The design itself excludes
+  iBGP sessions and route-reflector clients, as RFC 2439 §5 requires, so the
+  route-reflector role gains nothing from it.
+- The IXP route-server ecosystem does not use dampening. arouteserver and the
+  IXP Manager route-server templates offer no dampening configuration, and
+  RFC 7947 and RFC 7948 do not mention it.
+- Among the pinned peers, BIRD has no implementation, and GoBGP's
+  `route-flap-damping` flag is read by nothing. FRR implements it, but
+  documents its commands as "not recommended nowadays".
+- The remaining users are therefore eBGP edge and transit speakers, which are
+  outside the core roles. An alpha RIB-actor feature with its own timer
+  class, held-route store, RPCs and interop leg is not justified for them
+  without a deployment that asks for it.
 
-The intended use is an edge or transit eBGP speaker that wants to shed churn
-from unstable upstream paths. It is **not recommended for route servers**.
-That is not a protocol objection: dampening applies per source path, and
-route-server clients see the outcome per source (Decision 5). The reason is
-practical. No IXP configuration generator offers dampening, BIRD has none,
-RFC 7947 and 7948 are silent, and a suppressed path hides a member's
-announcement from every client of the route server. Route-server
-documentation says so. An operator who still wants it on a route server
-should run observe mode first (Decision 8).
+The roadmap keeps the entry, marked as deferred, with a link to this record.
 
-Other families (labeled unicast, VPN, EVPN, FlowSpec, BGP-LS, RTC), iBGP and
-route-reflector clients, and locally injected routes are never dampened
-(Decision 6).
+## Reopen conditions
+
+Reopen this record when either of these holds:
+
+- a named eBGP edge deployment asks for dampening;
+- route-server or route-reflector operators ask for it.
+
+A reopened implementation follows the design below, with the
+[resolved design questions](#resolved-design-questions) as its defaults, and
+stops at any of the [no-go conditions](#no-go-conditions-if-reopened).
+
+## Design if reopened
+
+The numbered sections are the design defaults for a reopened implementation.
+They are referred to as Design 1 to Design 13.
+
+### 1. Scope
+
+Dampen **IPv4 and IPv6 unicast paths received from eBGP peers**, opt-in and
+**off by default**, as an **alpha** feature. The intended use is an edge or
+transit eBGP speaker that wants to shed churn from unstable upstream paths.
+
+Dampening never applies to:
+
+- route-server clients (Design 2 and Design 5);
+- iBGP sessions, route-reflector clients and locally injected routes
+  (Design 6);
+- families other than unicast: labeled unicast, VPN, EVPN, FlowSpec, BGP-LS
+  and RTC.
 
 ### 2. Configuration
 
@@ -225,7 +257,7 @@ route_flap_dampening = false   # overrides the group and the global default
 | `reuse` | integer | `750` | 1–49999. A suppressed path is used again when its penalty falls below this. |
 | `suppress` | integer | `6000` | Greater than `reuse`, at most 50000. A path is suppressed when its penalty reaches this. |
 | `max_suppress_time` | integer seconds | `3600` | At least `half_life`, at most 4 hours. Sets the ceiling `reuse × 2^(max_suppress_time / half_life)`, which bounds how long a path that stops flapping stays suppressed. |
-| `mode` | `"suppress"` \| `"observe"` | `"suppress"` | `observe` is the RFC 7196 §6 test mode (Decision 8). |
+| `mode` | `"suppress"` \| `"observe"` | `"suppress"` | `observe` is the RFC 7196 §6 test mode (Design 8). |
 | `Neighbor.route_flap_dampening`, `PeerGroupConfig.route_flap_dampening` | optional bool | unset | Neighbor, then peer group, then `apply_to_ebgp`. |
 
 The defaults are the RFC 7196 / RIPE-580 parameter set: the vendor defaults
@@ -246,14 +278,17 @@ defaults does not apply.
   50,000". rustbgpd has no internal maximum below the computed ceiling;
 - an explicit `route_flap_dampening = true` on a neighbor whose `remote_asn`
   equals the local ASN (RFC 2439 §5: "Implementations should disallow
-  configuration of route damping on IBGP peers").
+  configuration of route damping on IBGP peers");
+- an explicit `route_flap_dampening = true` on a neighbor with
+  `route_server_client = true` (Design 5).
 
-An inherited setting does not apply to an iBGP session; that is not an error,
-because a peer group may mix session types. The dampening view reports such
-a peer as "not applied: iBGP" (Decision 9).
+An inherited setting does not apply to an iBGP session or a route-server
+client. That is not an error, because a peer group may mix session types, and
+`apply_to_ebgp` is global. The dampening view reports such a peer as "not
+applied: iBGP" or "not applied: route-server client" (Design 9).
 
 Penalty amounts are fixed: 1000 per withdrawal, 500 per attribute change, 0
-per re-announcement (Decision 3). They are not configuration. Per-neighbor
+per re-announcement (Design 3). They are not configuration. Per-neighbor
 parameter sets, as FRR offers, are deferred until an operator names a need.
 The same applies to per-family enablement.
 
@@ -308,7 +343,10 @@ refresh is not the peer's instability:
   penalized. The bound is one attribute-change or withdrawal penalty per
   path per replay. At the default thresholds that is at most 1000 of the 6000
   needed to suppress, so a single policy change cannot suppress a stable path
-  by itself. The documentation says so.
+  by itself. This bounded false penalty is accepted. The alternative, a
+  time-bounded exemption window after locally requested refreshes, would also
+  let a genuinely flapping path escape penalties. The documentation states
+  the bound.
 
 **Session events add no penalty.** A session reset, GR or LLGR stale sweep,
 max-prefix teardown, or a peer's removal from configuration never adds a
@@ -323,7 +361,7 @@ The RIB actor gains one `Dampening` owner, separate from `AdjRibIn`:
 - `history`: per source peer, a map from `(Prefix, path_id)` to a small
   state record: penalty, last-update time, flap count, first-flap time,
   suppressed flag, scheduled tick, and an optional held route.
-- `wheel`: the reuse schedule (Decision 7).
+- `wheel`: the reuse schedule (Design 7).
 
 **A suppressed path is held outside `AdjRibIn`.** On suppression, the path's
 `Route` moves from `AdjRibIn` into its history record, and its prefix enters
@@ -341,7 +379,7 @@ ORR, per-client best path, multipath, conditional-advertisement conditions
 excluded from all of them. A selection-time filter was rejected, because it
 would need the same check at about ten call sites, and one missed site would
 be a silent leak. The cost is that operator views must read the held routes
-explicitly (Decision 9).
+explicitly (Design 9).
 
 **History outlives the session.** `history` is keyed by the configured peer
 address and is not dropped when the peer's `AdjRibIn` is. A peer that resets
@@ -351,10 +389,10 @@ Held routes are dropped when the session ends, with or without GR. A held
 route is not in use, so dropping it changes no selection, and the peer
 announces it again after the restart. History is removed when:
 
-- its penalty decays below `reuse / 2` (FRR's reclaim point; Decision 7);
+- its penalty decays below `reuse / 2` (FRR's reclaim point; Design 7);
 - the peer is removed from configuration, or its dampening is disabled;
-- the parameters change (Decision 10);
-- an operator clears it (Decision 9).
+- the parameters change (Design 10);
+- an operator clears it (Design 9).
 
 **Add-Path.** Identity includes the received `path_id`, so each path of a
 prefix is dampened on its own, as in FRR. A sender may renumber its path IDs
@@ -368,7 +406,7 @@ This is accepted and documented.
   counts, a flags byte, and an `Option<Box<Route>>` for the held route. With
   hash-table control bytes and load factor, that is roughly 65 bytes.
 - A wheel entry is a peer, prefix and path ID of about 40 bytes. Lazy
-  rescheduling (Decision 7) can leave about one stale entry per live entry.
+  rescheduling (Design 7) can leave about one stale entry per live entry.
 - Worst case at 1M paths, every path with history: about 100–145 MiB.
 - Held routes move out of the `AdjRibIn` slab rather than being copied, so the
   only added cost per held route is its box.
@@ -381,15 +419,22 @@ This is accepted and documented.
 
 The slice 5 receipt measures these figures; until then they are estimates.
 
-### 5. Route-server scope: per source, never per client
+### 5. Route servers: refused for clients, per source otherwise
 
-Adj-RIB-In is per source peer, so dampening is per source by construction. A
-suppressed path is absent for every route-server client at once. With
-`per_client_best`, a client whose best path would have been the suppressed one
-falls through to its next permitted candidate, because the held path is not a
-candidate. There is no per-client dampening state, and none is planned. A
-per-client copy would multiply memory by the number of clients and would let
-one client's export policy change another's suppression.
+Dampening never applies to a `route_server_client` neighbor. An explicit
+setting is a load error, and an inherited one does not apply (Design 2). A
+suppressed path hides a member's announcement from every client of the route
+server, and the IXP ecosystem does not dampen. Refusing it outright is
+simpler than documenting a discouraged mode.
+
+For any other eBGP peer on the same daemon, Adj-RIB-In is per source peer, so
+dampening is per source by construction. A suppressed path is absent for every
+client at once. With `per_client_best`, a client whose best path would have
+been the suppressed one falls through to its next permitted candidate,
+because the held path is not a candidate. There is no per-client dampening
+state, and none is planned. A per-client copy would multiply memory by the
+number of clients and would let one client's export policy change another's
+suppression.
 
 Per-source scope also bounds the RFC 7196 §7 concern: a peer can only add
 penalties to paths that it announced itself.
@@ -452,8 +497,8 @@ per-tick cost at the budget.
 reporting, but never moves a path out of `AdjRibIn`. The dampening view and
 the metrics report what would be suppressed and when it would be reused. This
 is RFC 7196 §6's "calculate but do not damp" test mode. It is the documented
-first step for any deployment, and the required one for a route server.
-Switching between modes is a parameter change (Decision 10).
+first step for any deployment.
+Switching between modes is a parameter change (Design 10).
 
 ### 9. Operator surfaces
 
@@ -466,8 +511,9 @@ runner-up selection or multipath. In observe mode, the path stays an ordinary
 candidate, and the detail on its row notes `would be suppressed (observe)`.
 `rbgp rib --prefix P advertised PEER --explain` needs no new step, because a
 suppressed path never reaches export. `rbgp rib received PEER` continues to
-list `AdjRibIn` only. Adding held paths to it would change a stable response
-message, so that is left as a review question.
+list `AdjRibIn` only, so held paths are absent there, and the stable
+`ListReceivedRoutes` message graph is unchanged. The dampening view and
+explain cover held paths.
 
 **Dampening view and clear.**
 
@@ -476,7 +522,7 @@ message, so that is left as a review question.
   ID, current decayed penalty, flap count, first-flap time, suppressed flag,
   reuse or reclaim time, and the held route's attributes. A summary reports
   the parameters, the mode, and the per-peer applied state, including "not
-  applied: iBGP".
+  applied: iBGP" and "not applied: route-server client".
 - `RibService.ClearDampening` clears history by peer, by prefix, or entirely.
   Held paths in the scope are reused through the bounded tick, so a full
   clear does not stall the actor.
@@ -535,7 +581,7 @@ because a suppressed path is not in the Loc-RIB that path marking describes.
 | GR restart | Held routes dropped at session end, history kept. Replayed paths equal to the stale copy add no penalty; changed paths add the attribute-change penalty. Stale sweep removal adds no penalty. |
 | LLGR promotion | The local LLGR_STALE edit happens outside the announce path and is not a flap. |
 | Enhanced route refresh | No penalties between BoRR and EoRR for the family. |
-| Plain route refresh | Ordinary rules; bounded as described in Decision 3. |
+| Plain route refresh | Ordinary rules; bounded as described in Design 3. |
 | Session reset | No penalty; held routes dropped; history kept. |
 | Max-prefix | Counted in the session task over accepted routes, so held routes still count, since the peer did announce them. A max-prefix teardown is a session reset. |
 | Neighbor removed | History for that peer dropped. |
@@ -568,7 +614,7 @@ The feature is **alpha** and outside the v1 inventory:
 - Persisting history across a daemon restart.
 - Penalizing session resets (RFC 2439 §4.8.5's per-session marking).
 
-## Implementation slices (phase 2)
+## Implementation slices (if reopened)
 
 Each slice is a separate PR. Tests go through the real RIB path wherever the
 slice changes behavior, and each regression is shown red with its mechanism
@@ -576,7 +622,8 @@ removed.
 
 1. **Config, validation and install.** Add the fields, the JSON Schema
    update, every validation case above (including suppress above the ceiling
-   and explicit iBGP enablement), the peer-group file-only classification and
+   and explicit iBGP or route-server-client enablement), the peer-group
+   file-only classification and
    its sequential-reload rejection, gRPC neighbor-mutation preservation,
    reload-matrix rows and drift lists, and the RIB install with its capture
    and restore. The install has no runtime effect yet.
@@ -612,8 +659,8 @@ removed.
    - A disabled peer allocates no state.
 4. **Operator surface.** Add the explain code, the RPCs and authz entries, the
    CLI, metrics and reaping, logs, the stable-surface inventory entries,
-   configuration and operations reference pages, and a cookbook section that
-   carries the route-server recommendation. Add a changelog fragment.
+   configuration and operations reference pages that state the route-server
+   refusal, and a changelog fragment.
    *Acceptance:* the authz tier tests and the generated method inventory are
    updated; `check-v1-stable-surface` passes, with the RPCs listed as outside
    v1; explain shows `dampening_suppressed` with penalty and reuse time.
@@ -636,17 +683,10 @@ removed.
      stated path count, under the memory measurement protocol.
    *Acceptance:* with dampening off, ingest is within the noise floor of main;
    the per-tick cost and memory are recorded in a dated receipt, and the
-   modeled figures in Decision 4 are corrected if they differ.
+   modeled figures in Design 4 are corrected if they differ.
 
-## What would make this a no-go
+## No-go conditions if reopened
 
-- **Demand from the wrong niche.** rustbgpd's v1 roles are a route server and
-  a route reflector. The evidence says route servers do not dampen, and RFC
-  2439 forbids dampening for reflector clients. If the only expected users
-  are IXP route servers, the feature adds alpha surface that the target
-  operators will not enable, and it should stay on the roadmap instead.
-  Phase 2 should go ahead for edge and transit eBGP use, with the
-  route-server recommendation documented.
 - **Any cost when off.** If slice 5 shows an ingest regression beyond noise
   with dampening disabled, the hook placement is wrong. Do not ship until
   it is fixed.
@@ -656,22 +696,32 @@ removed.
   still being present. The model must then be replaced with a selection-time
   filter at every call site before shipping, not patched per reader.
 
-## Review questions
+## Resolved design questions
 
-1. **Route-server posture.** Is "supported, but not recommended for route
-   servers; run observe mode first" the right public stance? The alternative
-   is to refuse `route_flap_dampening` on `route_server_client` neighbors
-   outright.
-2. **`rbgp rib received` and held paths.** Showing held paths there with a
-   `dampened` marker would change the stable `ListReceivedRoutes` message
-   graph. Leaving them out keeps the stable surface unchanged, and the
-   dampening view and explain already cover them.
-3. **Plain refresh penalties.** Is the bounded false penalty from an RFC 2918
-   refresh replay after a local policy change acceptable? The alternative is a
-   time-bounded exemption window after locally requested refreshes, which a
-   genuinely flapping path could also exploit.
+These were open when the record was proposed. They are settled as the
+defaults for a reopened implementation:
+
+1. **Route-server posture.** Dampening is refused on `route_server_client`
+   neighbors outright (Design 2 and Design 5). Supporting it while
+   discouraging it, with observe mode first, was rejected.
+2. **`rbgp rib received` and held paths.** Held paths stay out of
+   `rbgp rib received`, so the stable `ListReceivedRoutes` message graph is
+   unchanged. The dampening view and explain already cover them (Design 9).
+3. **Plain refresh penalties.** The bounded false penalty from an RFC 2918
+   refresh replay after a local policy change is accepted. It is at most 1000
+   of the 6000 suppress threshold. An exemption window was rejected, because a
+   flapping path could exploit it (Design 3).
 
 ## Consequences
+
+- No runtime code, configuration, RPC or metric ships. rustbgpd still has no
+  route flap dampening, and operators who need it on an eBGP edge use another
+  speaker at that edge.
+- The roadmap entry stays, marked as deferred, and links this record. A
+  request that meets a reopen condition starts from the design above rather
+  than from a new survey.
+
+If the record is reopened and implemented as designed:
 
 - Edge and transit operators get RFC 2439 dampening with the RFC 7196 /
   RIPE-580 parameter set, an RFC 7196 observe mode, and validation that
@@ -683,10 +733,11 @@ removed.
   escape suppression. It is lost on daemon restart.
 - The RIB actor gains one timer class with bounded work per tick. A daemon
   with dampening off pays one boolean check per received chunk.
-- Migrating from FRR is close but not exact: there are no per-neighbor
-  parameter sets, the suppress default is 6000 instead of 2000, iBGP
-  enablement is an error instead of a no-op, and changing parameters clears
-  history, as it does in FRR.
+- Migrating from FRR is close but not exact:
+  - there are no per-neighbor parameter sets;
+  - the suppress default is 6000 instead of 2000;
+  - iBGP and route-server-client enablement is an error instead of a no-op;
+  - changing parameters clears history, as it does in FRR.
 
 ## References
 
@@ -697,3 +748,4 @@ removed.
 - [FRR 10.7.1 `bgp_damp.c`](https://github.com/FRRouting/frr/blob/frr-10.7.1/bgpd/bgp_damp.c)
 - [ADR-0076](0076-config-transaction-model.md), the config transaction model
 - [ADR-0137](0137-conditional-advertisement.md), conditional advertisement
+- [ADR-0128](0128-route-server-next-hop-translation.md), a demand-gated route-server design precedent
