@@ -48,6 +48,8 @@ pub use resolution::{
     outbound_prefix_limits_loosen,
 };
 pub use schema::*;
+#[cfg(test)]
+pub(crate) use validation::ConditionalAdvertisementRefusalBypass;
 pub(crate) use validation::{effective_prefix, effective_prefix_str};
 
 /// Normalize the raw optional representation used by config inheritance.
@@ -1719,7 +1721,8 @@ fn config_field_impact(field: &str) -> Option<(ConfigFieldImpact, &'static str)>
         | "import_policy"
         | "export_policy"
         | "import_policy_chain"
-        | "export_policy_chain" => (ConfigFieldImpact::HotApplied, "hot-applied"),
+        | "export_policy_chain"
+        | "conditional_advertisements" => (ConfigFieldImpact::HotApplied, "hot-applied"),
         "remote_asn" => (
             ConfigFieldImpact::SessionReset,
             "session reset: peer re-established with new ASN",
@@ -1954,6 +1957,7 @@ pub fn describe_neighbor_changes(old: &Neighbor, new: &Neighbor) -> Vec<FieldCha
     }
     cmp_field!(import_policy_chain);
     cmp_field!(export_policy_chain);
+    cmp_field!(conditional_advertisements);
 
     changes
 }
@@ -2078,6 +2082,7 @@ fn neighbor_runtime_equal(old: &Neighbor, new: &Neighbor) -> bool {
         && old.export_policy == new.export_policy
         && old.import_policy_chain == new.import_policy_chain
         && old.export_policy_chain == new.export_policy_chain
+        && old.conditional_advertisements == new.conditional_advertisements
 }
 
 /// Differences between two peer group maps, keyed by name.
@@ -2103,6 +2108,9 @@ pub struct PolicyDiff {
     pub neighbor_sets_changed: Vec<String>,
     pub import_chain_changed: bool,
     pub export_chain_changed: bool,
+    /// Sorted names of `[policy.conditional_advertisements]` definitions
+    /// added, removed, or changed (ADR-0137).
+    pub conditional_advertisements_changed: Vec<String>,
     /// The `[policy] rpol_files` / `rpol_roots` / `rpol_max_graph_bytes`
     /// settings or any referenced `.rpol` file's compiled graph changed
     /// (ADR-0096). Reload-applied: chains referencing rpol policies
@@ -2163,6 +2171,7 @@ impl PolicyDiff {
             || !self.neighbor_sets_changed.is_empty()
             || self.import_chain_changed
             || self.export_chain_changed
+            || !self.conditional_advertisements_changed.is_empty()
             || self.rpol_changed
             || self.datasets_changed
     }
@@ -2530,6 +2539,7 @@ impl ConfigDiff {
             || !self.policy.neighbor_sets_changed.is_empty()
             || self.policy.import_chain_changed
             || self.policy.export_chain_changed
+            || !self.policy.conditional_advertisements_changed.is_empty()
             || self.policy.rpol_changed
             || self.policy.datasets_changed
             || self.honor_graceful_shutdown_changed
@@ -3405,6 +3415,7 @@ impl SighupReloadFamilies {
             || !diff.policy.neighbor_sets_changed.is_empty()
             || diff.policy.import_chain_changed
             || diff.policy.export_chain_changed
+            || !diff.policy.conditional_advertisements_changed.is_empty()
             || diff.policy.rpol_changed;
         Self {
             generation,
@@ -3718,6 +3729,7 @@ pub fn classify_config_transaction_v1(diff: &ConfigDiff) -> ConfigTransactionSec
     if !diff.policy.definitions_added.is_empty()
         || !diff.policy.definitions_removed.is_empty()
         || !diff.policy.definitions_changed.is_empty()
+        || !diff.policy.conditional_advertisements_changed.is_empty()
     {
         class
             .supported_sections
@@ -4128,6 +4140,7 @@ pub fn config_diff_json_value(diff: &ConfigDiff) -> serde_json::Value {
             "neighbor_sets_changed": &diff.policy.neighbor_sets_changed,
             "import_chain_changed": diff.policy.import_chain_changed,
             "export_chain_changed": diff.policy.export_chain_changed,
+            "conditional_advertisements_changed": &diff.policy.conditional_advertisements_changed,
             "rpol_changed": diff.policy.rpol_changed,
             "datasets_changed": diff.policy.datasets_changed,
             "declared_datasets_count": diff.policy.declared_datasets_count,
@@ -4233,6 +4246,7 @@ pub fn format_config_diff_with_style(diff: &ConfigDiff, style: &ConfigDiffTextSt
         || !p.neighbor_sets_changed.is_empty()
         || p.import_chain_changed
         || p.export_chain_changed
+        || !p.conditional_advertisements_changed.is_empty()
         || p.rpol_changed
         || p.datasets_changed;
 
@@ -4304,6 +4318,13 @@ pub fn format_config_diff_with_style(diff: &ConfigDiff, style: &ConfigDiffTextSt
             }
             if p.export_chain_changed {
                 let _ = writeln!(out, "    {} export_chain", style.change_marker);
+            }
+            for name in &p.conditional_advertisements_changed {
+                let _ = writeln!(
+                    out,
+                    "    {} conditional_advertisement \"{name}\"",
+                    style.change_marker
+                );
             }
             if p.rpol_changed {
                 let _ = writeln!(
@@ -6176,6 +6197,53 @@ pub fn peer_group_file_only_changes(
         .collect()
 }
 
+/// Conditional-advertisement definitions a candidate adds, removes, or
+/// changes, and attachment edits on neighbors it keeps or adds (ADR-0137).
+/// Only the generation route commits them, so the sequential route rejects a
+/// candidate that has any.
+fn conditional_advertisement_changes(old: &Config, new: &Config) -> Vec<String> {
+    let mut changes: Vec<String> = diff_policy(&old.policy, &new.policy)
+        .conditional_advertisements_changed
+        .into_iter()
+        .map(|name| format!("conditional advertisement {name:?}"))
+        .collect();
+    let attachments = |config: &Config| {
+        config
+            .neighbors
+            .iter()
+            .filter(|neighbor| !neighbor.conditional_advertisements.is_empty())
+            .map(|neighbor| {
+                (
+                    (neighbor.address.clone(), neighbor.interface.clone()),
+                    neighbor.conditional_advertisements.clone(),
+                )
+            })
+            .collect::<BTreeMap<_, _>>()
+    };
+    let (old_attachments, new_attachments) = (attachments(old), attachments(new));
+    // A removed neighbor takes its attachments with it; only neighbors that
+    // remain in the candidate carry attachment state the route must commit.
+    let retained: BTreeSet<_> = new
+        .neighbors
+        .iter()
+        .map(|neighbor| (neighbor.address.clone(), neighbor.interface.clone()))
+        .collect();
+    let mut peers: Vec<_> = old_attachments
+        .keys()
+        .chain(new_attachments.keys())
+        .filter(|peer| retained.contains(*peer))
+        .filter(|peer| old_attachments.get(*peer) != new_attachments.get(*peer))
+        .collect();
+    peers.sort();
+    peers.dedup();
+    changes.extend(
+        peers
+            .into_iter()
+            .map(|(address, _)| format!("neighbor {address} conditional_advertisements")),
+    );
+    changes
+}
+
 /// Reject a sequential-route candidate whose peer-group edits include
 /// config-file-only fields that route cannot apply. Each reason names the
 /// group, its fields, and the families that selected the sequential route,
@@ -6196,7 +6264,8 @@ pub fn reject_unappliable_sequential_reload(
     // the unpinned candidate, so pin a copy here to agree with it.
     let mut pinned = new.clone();
     pin_tcp_mss_startup_only_runtime(&mut pinned, old);
-    let blocked = peer_group_file_only_changes(&old.peer_groups, &pinned.peer_groups);
+    let mut blocked = peer_group_file_only_changes(&old.peer_groups, &pinned.peer_groups);
+    blocked.extend(conditional_advertisement_changes(old, &pinned));
     if blocked.is_empty() {
         return SighupReloadRoute::Sequential { reasons };
     }
@@ -6268,6 +6337,18 @@ pub fn diff_policy(old: &PolicyConfig, new: &PolicyConfig) -> PolicyDiff {
         .map(|(k, _)| k.clone())
         .collect();
 
+    let mut conditional_advertisements_changed: Vec<String> = old
+        .conditional_advertisements
+        .keys()
+        .chain(new.conditional_advertisements.keys())
+        .filter(|name| {
+            old.conditional_advertisements.get(*name) != new.conditional_advertisements.get(*name)
+        })
+        .cloned()
+        .collect();
+    conditional_advertisements_changed.sort();
+    conditional_advertisements_changed.dedup();
+
     PolicyDiff {
         definitions_added,
         definitions_removed,
@@ -6277,6 +6358,7 @@ pub fn diff_policy(old: &PolicyConfig, new: &PolicyConfig) -> PolicyDiff {
         neighbor_sets_changed,
         import_chain_changed: old.import_chain != new.import_chain,
         export_chain_changed: old.export_chain != new.export_chain,
+        conditional_advertisements_changed,
         rpol_changed: old.rpol_files != new.rpol_files
             || old.rpol_roots != new.rpol_roots
             || old.rpol_max_graph_bytes != new.rpol_max_graph_bytes

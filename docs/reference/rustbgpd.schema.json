@@ -493,6 +493,63 @@
         "address"
       ]
     },
+    "ConditionalAdvertiseIf": {
+      "description": "Condition state in which a conditional advertisement's controlled\nroutes may be advertised (ADR-0137).",
+      "oneOf": [
+        {
+          "description": "Advertise while a condition route is present.",
+          "type": "string",
+          "const": "present"
+        },
+        {
+          "description": "Advertise while no condition route is present.",
+          "type": "string",
+          "const": "absent"
+        }
+      ]
+    },
+    "ConditionalAdvertisementConfig": {
+      "description": "One `[policy.conditional_advertisements.<name>]` definition (ADR-0137).",
+      "type": "object",
+      "properties": {
+        "advertise_if": {
+          "description": "Condition state in which the controlled routes may be advertised.",
+          "$ref": "#/$defs/ConditionalAdvertiseIf"
+        },
+        "advertise_policy": {
+          "description": "Named policy (TOML or `.rpol`, call form allowed) used as a\npredicate: the routes it permits are controlled by this definition.\nIts modifications are not applied.",
+          "type": "string"
+        },
+        "condition_policy": {
+          "description": "Optional named policy used as a predicate over each condition\ncandidate; omitted means any candidate counts.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "condition_prefixes": {
+          "description": "Exact IPv4 or IPv6 unicast prefixes whose candidates decide the\ncondition. Nonempty; ranges are not accepted.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "settle_time": {
+          "description": "Seconds a changed condition must stay stable before it applies.\nDefault 5, range 0..=600.",
+          "type": "integer",
+          "format": "uint32",
+          "default": 5,
+          "maximum": 600,
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "advertise_policy",
+        "advertise_if",
+        "condition_prefixes"
+      ]
+    },
     "ConfigEpoch": {
       "type": "integer",
       "enum": [
@@ -1959,6 +2016,13 @@
             }
           ]
         },
+        "conditional_advertisements": {
+          "description": "Names of `[policy.conditional_advertisements]` definitions\nattached to this neighbor (ADR-0137). Static neighbors only;\npeer groups and dynamic neighbors do not carry attachments.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
         "description": {
           "description": "Free-form operator description.",
           "type": [
@@ -2909,6 +2973,13 @@
     "PolicyConfig": {
       "type": "object",
       "properties": {
+        "conditional_advertisements": {
+          "description": "Named conditional-advertisement definitions (ADR-0137), attached\nto static neighbors by name through\n`[[neighbors]] conditional_advertisements`.",
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/ConditionalAdvertisementConfig"
+          }
+        },
         "datasets": {
           "description": "External dataset file bindings: `[policy.datasets.<name>]`\nmaps each `dataset` declared in an `.rpol` file to the snapshot\nfile its content loads from. Every declared dataset needs an\nentry and every entry needs a declaration — both directions are\nload errors. Relative paths resolve against the config file's\ndirectory and are rewritten absolute at load, like `rpol_files`.",
           "type": "object",

@@ -496,6 +496,7 @@ fn empty_neighbor(address: IpAddr) -> Neighbor {
         export_policy: Vec::new(),
         import_policy_chain: Vec::new(),
         export_policy_chain: Vec::new(),
+        conditional_advertisements: Vec::new(),
     }
 }
 
@@ -1274,6 +1275,28 @@ description = "old"
         let neighbor = &candidate.neighbors[0];
         assert_eq!(neighbor.description.as_deref(), Some("new"));
         assert_eq!(neighbor.peer_group.as_deref(), Some("rs-clients"));
+    }
+
+    /// A gNMI leaf edit rebuilds the candidate from the running neighbor, so
+    /// a config-file-only field the `OpenConfig` model does not carry, such as
+    /// the ADR-0137 conditional-advertisement attachments, must survive it.
+    #[test]
+    fn set_leaf_edit_preserves_conditional_advertisement_attachments() {
+        let mut config = base_config();
+        config.neighbors[0].conditional_advertisements = vec!["backup".to_string()];
+        let candidate = apply_transaction_to_config(
+            config,
+            &transaction(vec![update(
+                "192.0.2.1",
+                "description",
+                TypedValue::JsonIetfVal(br#""new""#.to_vec()),
+            )]),
+        )
+        .unwrap();
+
+        let neighbor = &candidate.neighbors[0];
+        assert_eq!(neighbor.description.as_deref(), Some("new"));
+        assert_eq!(neighbor.conditional_advertisements, ["backup"]);
     }
 
     #[test]

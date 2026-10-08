@@ -1167,6 +1167,7 @@ fn tcp_ao_pinning_keeps_new_unprotected_neighbor_peer_group_valid() {
         export_policy: Vec::new(),
         import_policy_chain: Vec::new(),
         export_policy_chain: Vec::new(),
+        conditional_advertisements: Vec::new(),
         log_level: None,
     });
     new.neighbors.push(Neighbor {
@@ -1225,6 +1226,7 @@ fn tcp_ao_pinning_keeps_new_unprotected_neighbor_peer_group_valid() {
         export_policy: Vec::new(),
         import_policy_chain: Vec::new(),
         export_policy_chain: Vec::new(),
+        conditional_advertisements: Vec::new(),
         log_level: None,
     });
 
@@ -1312,6 +1314,7 @@ fn diff_config_does_not_mark_tcp_ao_neighbor_add_as_reload_applied() {
         export_policy: Vec::new(),
         import_policy_chain: Vec::new(),
         export_policy_chain: Vec::new(),
+        conditional_advertisements: Vec::new(),
         log_level: None,
     });
 

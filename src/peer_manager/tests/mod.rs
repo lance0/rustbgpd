@@ -1263,6 +1263,7 @@ fn config_neighbor(addr: IpAddr, remote_asn: u32) -> crate::config::Neighbor {
         export_policy: Vec::new(),
         import_policy_chain: Vec::new(),
         export_policy_chain: Vec::new(),
+        conditional_advertisements: Vec::new(),
     }
 }
 

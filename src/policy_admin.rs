@@ -349,6 +349,20 @@ pub fn policy_references(config: &Config, name: &str) -> Vec<String> {
             refs.push(format!("neighbor {} export_policy_chain", neighbor.address));
         }
     }
+    let mut conditional: Vec<_> = config.policy.conditional_advertisements.iter().collect();
+    conditional.sort_by(|left, right| left.0.cmp(right.0));
+    for (definition_name, definition) in conditional {
+        if definition.advertise_policy == name {
+            refs.push(format!(
+                "conditional_advertisement {definition_name} advertise_policy"
+            ));
+        }
+        if definition.condition_policy.as_deref() == Some(name) {
+            refs.push(format!(
+                "conditional_advertisement {definition_name} condition_policy"
+            ));
+        }
+    }
     refs
 }
 
@@ -565,6 +579,7 @@ fn raw_neighbor(raw: &PresenceAwareNeighborCreate) -> Result<Neighbor, ConfigErr
         export_policy: Vec::new(),
         import_policy_chain: Vec::new(),
         export_policy_chain: Vec::new(),
+        conditional_advertisements: Vec::new(),
     })
 }
 
@@ -687,6 +702,7 @@ pub fn apply_config_event(config: &mut Config, event: &ConfigEvent) -> Result<()
                     export_policy: Vec::new(),
                     import_policy_chain: Vec::new(),
                     export_policy_chain: Vec::new(),
+                    conditional_advertisements: Vec::new(),
                     log_level: None,
                 });
             }
@@ -1087,6 +1103,156 @@ remote_asn = 65002
         let refs = policy_references(&config, "shared");
         assert!(refs.contains(&"global import_chain".to_string()));
         assert!(refs.contains(&"neighbor 10.0.0.2 export_policy_chain".to_string()));
+    }
+
+    fn conditional_advertisement_config() -> Config {
+        let toml = r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+
+[global.telemetry]
+prometheus_addr = "127.0.0.1:9179"
+log_format = "json"
+
+[policy.definitions.backup-routes]
+default_action = "deny"
+
+[policy.definitions.transit-a]
+default_action = "permit"
+
+[policy.definitions.other]
+default_action = "permit"
+
+[policy.conditional_advertisements.backup]
+advertise_policy = "backup-routes"
+advertise_if = "absent"
+condition_prefixes = ["0.0.0.0/0"]
+condition_policy = "transit-a"
+
+[peer_groups.edge]
+hold_time = 90
+
+[[neighbors]]
+address = "10.0.0.2"
+remote_asn = 65002
+conditional_advertisements = ["backup"]
+"#;
+        let config: Config = toml::from_str(&tier_authorized_uds_test_config(toml)).unwrap();
+        config.validate().unwrap();
+        config
+    }
+
+    #[test]
+    fn policy_references_include_conditional_advertisement_predicates() {
+        let _bypass = crate::config::ConditionalAdvertisementRefusalBypass::enable();
+        let config = conditional_advertisement_config();
+        assert_eq!(
+            policy_references(&config, "backup-routes"),
+            ["conditional_advertisement backup advertise_policy"]
+        );
+        assert_eq!(
+            policy_references(&config, "transit-a"),
+            ["conditional_advertisement backup condition_policy"]
+        );
+        assert_eq!(policy_references(&config, "other"), Vec::<String>::new());
+
+        // Validation backs the reference check: a folded delete of a
+        // referenced predicate cannot produce a committable snapshot.
+        let mut deleted = config.clone();
+        let error = apply_config_event(
+            &mut deleted,
+            &ConfigEvent::DeletePolicy {
+                name: "backup-routes".to_string(),
+                ack: None,
+            },
+        )
+        .unwrap_err();
+        assert!(
+            matches!(&error, ConfigError::UndefinedPolicy { name } if name == "backup-routes"),
+            "{error}"
+        );
+    }
+
+    /// Runtime catalog and neighbor mutations fold into the running config
+    /// in place. None of them carries the ADR-0137 attachments or
+    /// definitions, so every one must leave them as configured.
+    #[test]
+    fn neighbor_and_policy_events_preserve_conditional_advertisements() {
+        let _bypass = crate::config::ConditionalAdvertisementRefusalBypass::enable();
+        let address: IpAddr = "10.0.0.2".parse().unwrap();
+        let names = |names: &[&str]| names.iter().map(ToString::to_string).collect::<Vec<_>>();
+        let events = [
+            (
+                "SetNeighborExportChain",
+                ConfigEvent::SetNeighborExportChain {
+                    address,
+                    policy_names: names(&["other"]),
+                    ack: None,
+                },
+            ),
+            (
+                "ClearNeighborExportChain",
+                ConfigEvent::ClearNeighborExportChain { address, ack: None },
+            ),
+            (
+                "SetNeighborImportChain",
+                ConfigEvent::SetNeighborImportChain {
+                    address,
+                    policy_names: names(&["other"]),
+                    ack: None,
+                },
+            ),
+            (
+                "ClearNeighborImportChain",
+                ConfigEvent::ClearNeighborImportChain { address, ack: None },
+            ),
+            (
+                "SetNeighborPeerGroup",
+                ConfigEvent::SetNeighborPeerGroup {
+                    address,
+                    peer_group: "edge".to_string(),
+                    ack: None,
+                },
+            ),
+            (
+                "ClearNeighborPeerGroup",
+                ConfigEvent::ClearNeighborPeerGroup { address, ack: None },
+            ),
+            (
+                "SetGlobalExportChain",
+                ConfigEvent::SetGlobalExportChain {
+                    policy_names: names(&["other"]),
+                    ack: None,
+                },
+            ),
+            (
+                "DeletePolicy",
+                ConfigEvent::DeletePolicy {
+                    name: "other".to_string(),
+                    ack: None,
+                },
+            ),
+        ];
+        let original = conditional_advertisement_config();
+        let mut config = original.clone();
+        for (label, event) in &events {
+            if let ConfigEvent::DeletePolicy { .. } = event {
+                config.policy.export_chain.clear();
+            }
+            apply_config_event(&mut config, event).unwrap();
+            assert_eq!(
+                config.neighbors[0].conditional_advertisements,
+                ["backup"],
+                "{label} dropped the neighbor attachment"
+            );
+            assert_eq!(
+                config.policy.conditional_advertisements,
+                original.policy.conditional_advertisements,
+                "{label} changed the definitions"
+            );
+        }
     }
 
     #[test]
