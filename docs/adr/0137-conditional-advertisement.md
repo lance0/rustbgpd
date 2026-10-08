@@ -326,8 +326,8 @@ Definitions and attachments belong to the policy section of the
 [Amendment: one attachment install](#amendment-one-attachment-install-2026-10-08).*
 The RIB holds one install of the attached definitions and the attachments,
 keyed by static neighbor address. The commit point is the RIB actor's
-acknowledgement of that install, which the generation sends at its config
-swap. Compensation restores the install's capture.
+acknowledgement of that install, which the generation sends before its
+policy snapshot. Compensation restores the install's capture.
 
 Within that batch:
 
@@ -635,11 +635,15 @@ plumbing:
   attachments commit together, so the gate never sees an attachment whose
   definition is missing; the gate still fails closed if it did.
 - **Writers.** The daemon seeds the install when it constructs the RIB,
-  before any session can register. A reload generation installs at its
-  config swap, before its hot updates, removals, session replacements, and
+  before any session can register. A reload generation installs before its
+  policy snapshot, so no candidate export chain runs behind the prior gate,
+  and so before its hot updates, removals, session replacements, and
   additions, so no session the generation creates registers ahead of its
-  gate; the generation's unwind restores the captured install before it
-  re-adds peers. A catalog policy edit (`SetPolicy`, `.rpol` reload) installs
+  gate. A failed snapshot restores the captured install, and the
+  generation's unwind restores it before it re-adds peers. Until the
+  snapshot commits, attached neighbors run their prior chains behind the
+  candidate gate; the gate only filters, and the snapshot's own resync
+  settles both. A catalog policy edit (`SetPolicy`, `.rpol` reload) installs
   before its chain snapshot and restores on failure. Any other config
   replacement, such as removing a neighbor, is reconciled against the
   running config after the command, which drops that neighbor's attachment.
