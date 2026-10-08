@@ -70,7 +70,9 @@ sys_descr = "fabric RR monitoring feed"
 # On (re)connect the collector receives Initiation and the cached Peer Up
 # state; the loc_rib view also gets a chunked Loc-RIB dump closed by
 # End-of-RIB. rib_in_pre and rib_out_post have no reconnect dump and start
-# at the next UPDATE. No daemon restart is needed to attach a collector.
+# at the next UPDATE. A configured collector can (re)connect at any time
+# without a daemon restart; adding or changing a [[bmp.collectors]] entry is
+# restart-required (see the reload matrix).
 [[bmp.collectors]]
 address = "10.20.0.10:1790"
 reconnect_interval = 5
@@ -291,7 +293,8 @@ collector-side listener first, then the daemon log for connection and
 bootstrap failures.
 
 **pmacct rejects the v4 stream (`BMPv4 BGP PDU TLV != 1`).** Known and
-expected — see the caveat in the config above. Move that collector to
+expected: pmacct does not decode the draft BMPv4 TLV framing. Per the config
+comment above, point v4 only at tooling that tracks draft-ietf-grow-bmp-tlv. Move that collector to
 `version = 3` (or drop the `version` key; 3 is the default).
 
 **The events DB was corrupted by a crash.** The bad file is renamed

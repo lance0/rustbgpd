@@ -215,9 +215,13 @@ $ rbgp rib --prefix 203.0.113.0/24 advertised 10.0.0.12 --explain
 Each rung reports pass / STOP / n/a in live evaluation order; a STOP names
 the gate holding the route back. The rung set and order depend on the
 peer's selection shape. A plain single-best client runs `best_route →
-split_horizon → rr_reflection → family → llgr → orf → export_policy → otc →
-adj_rib_out`; an ORR or Add-Path client checks `family` and `orf` before
-selecting its candidate (see [Explain](../how-to/explain.md#export-explain)).
+split_horizon → rr_reflection → family → llgr → orf →
+conditional_advertisement → export_policy → otc → adj_rib_out`; an ORR or
+Add-Path client checks `family` and `orf` before selecting its candidate (see
+[Explain](../how-to/explain.md#export-explain)). `conditional_advertisement`
+reads n/a unless a
+[conditional advertisement](conditional-advertisement-backup.md) is attached
+to the peer.
 `rr_reflection` STOPs are the classic RR misconfigurations: non-client →
 non-client reflection, or the client's own cluster id in CLUSTER_LIST.
 

@@ -51,9 +51,10 @@ monitoring, teardown, data return — are identical.
 - **Receive-only from the operator's view.** The export chain is a
   single explicit deny-all policy (`shadow-receive-only`: no statements,
   `default_action = "deny"` in TOML; `term everything { reject }` in
-  `.rpol`). Zero UPDATE messages leave the daemon toward any member —
-  sessions carry OPEN and KEEPALIVE only. This is stronger than "members
-  should filter it": there is nothing to filter.
+  `.rpol`). No route announcements leave the daemon toward any member:
+  after OPEN, sessions carry KEEPALIVEs plus one empty End-of-RIB UPDATE
+  per negotiated family, which announces no routes. This is stronger
+  than "members should filter it": there is nothing to filter.
 - **The failure mode of a misedit is still silence.** With
   `ebgp_requires_policy = true` (RFC 8212,
   [ADR-0112](../adr/0112-rfc-8212-ebgp-requires-policy.md)) — set in the
@@ -182,8 +183,8 @@ set_local_pref = 100
 
 # --- Export: deny everything. This is the shadow posture. ---
 #
-# No statements, default deny: zero UPDATEs leave this daemon toward
-# any member. Verify after every config change:
+# No statements, default deny: no route is announced to any member
+# (only End-of-RIB markers). Verify after every config change:
 #   rustbgpd --check --strict shadow.toml   # must exit 0
 #   rbgp rib sent <member>                  # must be empty
 [policy.definitions.shadow-receive-only]
@@ -422,11 +423,17 @@ Provision the shadow host like the incumbent's and check the nearest
 measured shape. The receipts are dated same-host runs, not universal
 claims; each links its full method, configs, and raw artifacts:
 
-- At **700 route-server clients × 400,400 IPv4 routes with live
-  churn** (the July 2026 same-host matrix, v0.61.0 exact-tag refresh,
-  runs A/B): settled RSS **412 / 410 MiB** after the reload leg, peak
+- At **700 route-server clients × 400,400 IPv4 routes** (the
+  [v0.74.0 cross-daemon receipt](../perf/cross-daemon-v0740-2026-10.md#memory-matrix-shapes),
+  three runs, measured 2026-10-03 to 2026-10-04): rustbgpd's process-tree RSS
+  settled at **369–373 MiB** after the S2 reload leg and 375–376 MiB after
+  the S3 flapstorm, with peak samples of 511–544 MiB. BIRD 3.3.2 had the lower
+  peak sample at both shapes (332–414 MiB); settled RSS was lower for
+  rustbgpd at S2 and mixed at S3.
+- The earlier dated run at the same shape (the July 2026 same-host
+  matrix, v0.61.0 exact-tag refresh, runs A/B): settled RSS **412 / 410 MiB** after the reload leg, peak
   590 / 577 MiB. In the same runs BIRD 3.3.1 settled at 425 / 417 MiB
-  and kept a clear advantage on the flapstorm leg (337 / 292 vs
+  and kept a clear advantage on that run's flapstorm leg (337 / 292 vs
   rustbgpd's 440 / 502 MiB settled) —
   [receipt, refresh section](../perf/ixp-matrix-2026-07.md#v0610-refresh-2026-07-27)
   and [original memory table](../perf/ixp-matrix-2026-07.md#memory).
@@ -615,10 +622,11 @@ around this pilot, consistent with [`SUPPORT.md`](../../SUPPORT.md)):
   window, or release cadence. "Direct support during the pilot" means
   best-effort attention from the maintainer, not a contract.
 - Performance receipts establish only their named fixtures, versions,
-  and environments. The losses are part of the record: OpenBGPD holds
-  a smaller reload stall, and BIRD holds the flapstorm-leg settled
-  memory, in the [same matrix](../perf/ixp-matrix-2026-07.md) that
-  reports rustbgpd's wins.
+  and environments. The losses are part of the record: in the
+  [v0.74.0 cross-daemon receipt](../perf/cross-daemon-v0740-2026-10.md)
+  that reports rustbgpd's wins, OpenBGPD holds a smaller S2 reload stall,
+  and BIRD holds the lower peak RSS sample at both matrix shapes, with
+  flapstorm settled memory mixed.
 - BIRD and OpenBGPD have well over a decade of documented IXP
   production behind them; rustbgpd does not. That gap is the reason
   this pilot is shaped to be zero-risk rather than an argument to
