@@ -34,6 +34,7 @@ flate2.workspace = true
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 
 [dev-dependencies]
+rustbgpd-wire = { workspace = true, features = ["strict-encode-invariants"] }
 tikv-jemallocator.workspace = true
 tokio = { workspace = true, features = ["test-util"] }
 tempfile.workspace = true

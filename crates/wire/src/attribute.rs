@@ -3048,8 +3048,8 @@ fn encode_vpn_mp_next_hop(mp: &MpReachNlri, buf: &mut Vec<u8>) {
 ///
 /// # Panics
 ///
-/// Debug builds panic when `attrs` would emit one type code twice
-/// (RFC 4271 §5). Release builds do not check.
+/// Only with the non-default `strict-encode-invariants` feature: debug
+/// builds panic when `attrs` would emit one type code twice (RFC 4271 §5).
 pub fn encode_path_attributes(
     attrs: &[PathAttribute],
     buf: &mut Vec<u8>,
@@ -3080,10 +3080,11 @@ fn encode_path_attributes_with_scratch<'a>(
     add_path_mp: bool,
     value_scratch: &mut Vec<u8>,
 ) -> Result<(), EncodeError> {
-    // RFC 4271 §5: a type appears at most once per UPDATE. Debug builds
-    // catch an emitter that copies a stored attribute and also synthesizes
-    // one of the same type; release builds skip the bookkeeping.
-    #[cfg(debug_assertions)]
+    // RFC 4271 §5: a type appears at most once per UPDATE. With the
+    // non-default `strict-encode-invariants` feature, debug builds catch an
+    // emitter that copies a stored attribute and also synthesizes one of the
+    // same type. Default and release builds skip the bookkeeping.
+    #[cfg(all(debug_assertions, any(test, feature = "strict-encode-invariants")))]
     let mut emitted = [false; 256];
     for attr in attrs {
         if matches!(
@@ -3297,7 +3298,7 @@ fn encode_path_attributes_with_scratch<'a>(
                 value_scratch.extend_from_slice(&raw.data);
             }
         }
-        #[cfg(debug_assertions)]
+        #[cfg(all(debug_assertions, any(test, feature = "strict-encode-invariants")))]
         for code in std::iter::once(type_code).chain(compatibility.as_ref().map(|c| c.1)) {
             assert!(
                 !std::mem::replace(&mut emitted[usize::from(code)], true),
