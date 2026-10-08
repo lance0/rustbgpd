@@ -4212,11 +4212,13 @@ is not in 802.3ad mode, is admin down or without carrier, has no active
 aggregator, or has no LACP partner yet. A NotReady segment has no ESI and
 originates no Type 1 or Type 4 routes, does not appear in `rbgp evpn es list`,
 and local MACs on its member VNIs are advertised without an ESI. It is also
-NotReady when its derived ESI matches another segment's; explicit ESIs win.
-Each transition is logged once, at `warn` with a reason code (`not_found`,
-`not_bond`, `not_lacp_mode`, `down`, `no_active_aggregator`, `no_partner`,
-`netlink_error`) when the segment goes NotReady, and at `info` with the
-derived ESI when it becomes Ready.
+NotReady when its derived ESI matches another segment's (explicit ESIs win),
+or while the re-apply that would originate it is failing and being retried.
+Each transition is logged once. NotReady is logged at `warn` with a reason
+code: `not_found`, `not_bond`, `not_lacp_mode`, `down`,
+`no_active_aggregator`, `no_partner`, `netlink_error`, `esi_collision`, or
+`reconverge_failed`. Ready is logged at `info` with the derived ESI, and only
+after the segment has been published and re-applied successfully.
 
 When the derived ESI changes, the daemon re-applies the committed config
 through the same live EVPN runtime path SIGHUP uses, with no restart. The ESI

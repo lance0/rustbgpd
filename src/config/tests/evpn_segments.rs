@@ -851,6 +851,10 @@ interface = "eth9"
         "eth9",
         "a colliding derived ESI must not steal the explicit binding"
     );
+    assert_eq!(
+        config.auto_lacp_collisions(&esis),
+        BTreeSet::from(["bond0".to_string()])
+    );
 }
 
 #[test]

@@ -4016,7 +4016,13 @@ async fn run<T>(
         )
         .await
         .unwrap_or_default();
-        evpn_auto_lacp_esis.replace(evpn_auto_esi_probe.observe(results));
+        evpn_auto_lacp_esis.replace(evpn_auto_esi::ready(&results));
+        // Startup originates through the initial actor spawn below.
+        evpn_auto_esi_probe.report(
+            results,
+            &config.auto_lacp_collisions(&evpn_auto_lacp_esis),
+            None,
+        );
     }
     let ethernet_segments = config
         .resolve_ethernet_segments_with(&evpn_auto_lacp_esis)

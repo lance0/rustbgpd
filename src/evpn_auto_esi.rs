@@ -38,43 +38,70 @@ pub(crate) const STARTUP_PROBE_BOUND: Duration = Duration::from_secs(2);
 /// One bond read: the derived ESI, or `(reason code, detail)`.
 pub(crate) type ProbeResult = Result<EthernetSegmentIdentifier, (&'static str, String)>;
 
-/// Last observed result per bond, for transition logging.
+/// The bonds a round of reads found ready, with their derived ESIs —
+/// the snapshot handed to the publish step.
+pub(crate) fn ready(
+    results: &BTreeMap<String, ProbeResult>,
+) -> BTreeMap<String, EthernetSegmentIdentifier> {
+    results
+        .iter()
+        .filter_map(|(bond, result)| result.as_ref().ok().map(|esi| (bond.clone(), *esi)))
+        .collect()
+}
+
+/// Last reported status per bond, for transition logging.
 #[derive(Default)]
 pub(crate) struct AutoEsiProbe {
     last: BTreeMap<String, ProbeResult>,
 }
 
 impl AutoEsiProbe {
-    /// Log readiness transitions for one round of bond reads, forget
-    /// bonds no longer read, and return the ready bonds' ESIs.
-    pub(crate) fn observe(
+    /// Settle each bond's status after the round was published, log the
+    /// transitions, and return them. A bond is Ready only when its read
+    /// succeeded, its derived ESI did not collide, and the re-converge
+    /// (if one ran) succeeded; otherwise it is not ready with reason
+    /// `esi_collision` or `reconverge_failed`. Bonds no longer read are
+    /// forgotten.
+    pub(crate) fn report(
         &mut self,
         results: BTreeMap<String, ProbeResult>,
-    ) -> BTreeMap<String, EthernetSegmentIdentifier> {
-        self.last.retain(|name, _| results.contains_key(name));
-        let mut ready = BTreeMap::new();
-        for (name, result) in results {
-            if self.last.get(&name) != Some(&result) {
-                match &result {
-                    Ok(esi) => info!(
-                        interface = %name,
-                        esi = %esi,
-                        "auto-lacp Ethernet Segment ready: derived RFC 7432 type 1 ESI from the LACP partner"
-                    ),
-                    Err((reason, detail)) => warn!(
-                        interface = %name,
-                        reason,
-                        detail = %detail,
-                        "auto-lacp Ethernet Segment not ready; originating nothing for it"
-                    ),
-                }
+        collided: &BTreeSet<String>,
+        reconverge_error: Option<&str>,
+    ) -> Vec<(String, ProbeResult)> {
+        self.last.retain(|bond, _| results.contains_key(bond));
+        let mut transitions = Vec::new();
+        for (bond, read) in results {
+            let status = match read {
+                Ok(esi) if collided.contains(&bond) => Err((
+                    "esi_collision",
+                    format!("derived ESI {esi} matches another segment's ESI"),
+                )),
+                Ok(esi) => match reconverge_error {
+                    Some(error) => Err(("reconverge_failed", format!("{error}; retrying"))),
+                    None => Ok(esi),
+                },
+                Err(reason) => Err(reason),
+            };
+            if self.last.get(&bond) == Some(&status) {
+                continue;
             }
-            if let Ok(esi) = &result {
-                ready.insert(name.clone(), *esi);
+            match &status {
+                Ok(esi) => info!(
+                    interface = %bond,
+                    esi = %esi,
+                    "auto-lacp Ethernet Segment ready: originating under the RFC 7432 type 1 ESI derived from the LACP partner"
+                ),
+                Err((reason, detail)) => warn!(
+                    interface = %bond,
+                    reason,
+                    detail = %detail,
+                    "auto-lacp Ethernet Segment not ready; originating nothing for it"
+                ),
             }
-            self.last.insert(name, result);
+            self.last.insert(bond.clone(), status.clone());
+            transitions.push((bond, status));
         }
-        ready
+        transitions
     }
 }
 
@@ -141,8 +168,12 @@ pub(crate) fn spawn(
                 () = shutdown.cancelled() => return,
                 results = read_bonds(interfaces) => results,
             };
-            let ready = probe.observe(results);
-            match reload_apply.publish_auto_lacp_round(ready, retry).await {
+            let round = reload_apply
+                .publish_auto_lacp_round(ready(&results), retry)
+                .await;
+            let reconverge_error = round.result.as_ref().err().map(|e| format!("{e:?}"));
+            probe.report(results, &round.collided, reconverge_error.as_deref());
+            match round.result {
                 Ok(None) => {}
                 Ok(Some(response)) => {
                     retry = false;
@@ -184,14 +215,42 @@ mod tests {
     }
 
     #[test]
-    fn observe_returns_only_ready_bonds() {
+    fn ready_is_reported_only_after_collision_and_reconverge_settle() {
         let mut probe = AutoEsiProbe::default();
-        assert!(probe.observe(round(Some(not_ready()))).is_empty());
+        let none = BTreeSet::new();
+        let codes = |t: Vec<(String, ProbeResult)>| -> Vec<Result<EthernetSegmentIdentifier, &'static str>> {
+            t.into_iter().map(|(_, s)| s.map_err(|(code, _)| code)).collect()
+        };
+
         assert_eq!(
-            probe.observe(round(Some(Ok(esi(1))))),
-            BTreeMap::from([("bond0".to_string(), esi(1))])
+            codes(probe.report(round(Some(not_ready())), &none, None)),
+            vec![Err("no_partner")]
         );
-        assert!(probe.observe(round(None)).is_empty());
+        // Read succeeded but the re-converge failed: not Ready yet.
+        assert_eq!(
+            codes(probe.report(round(Some(Ok(esi(1)))), &none, Some("injected"))),
+            vec![Err("reconverge_failed")]
+        );
+        // Read succeeded but the derived ESI collides: not Ready.
+        let collided = BTreeSet::from(["bond0".to_string()]);
+        assert_eq!(
+            codes(probe.report(round(Some(Ok(esi(1)))), &collided, None)),
+            vec![Err("esi_collision")]
+        );
+        // Published cleanly: Ready, reported once.
+        assert_eq!(
+            codes(probe.report(round(Some(Ok(esi(1)))), &none, None)),
+            vec![Ok(esi(1))]
+        );
+        assert_eq!(
+            codes(probe.report(round(Some(Ok(esi(1)))), &none, None)),
+            vec![]
+        );
+        assert_eq!(codes(probe.report(round(None), &none, None)), vec![]);
+        assert_eq!(
+            ready(&round(Some(Ok(esi(2))))),
+            BTreeMap::from([("bond0".to_string(), esi(2))])
+        );
     }
 
     #[tokio::test]

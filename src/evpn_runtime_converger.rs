@@ -153,6 +153,25 @@ struct EvpnRuntimeReloadState {
     mutation_state: rustbgpd_evpn::EvpnRuntimeMutationState,
 }
 
+/// One published `auto-lacp` probe round.
+#[derive(Debug)]
+pub(crate) struct AutoLacpRoundOutcome {
+    /// Bonds whose derived ESI collides with another segment's, so the
+    /// segment stays not ready.
+    pub(crate) collided: BTreeSet<String>,
+    /// The re-converge: `Ok(None)` when nothing needed re-converging.
+    pub(crate) result: Result<Option<proto::ApplyEvpnRuntimeResponse>, GrpcEvpnRuntimeApplyError>,
+}
+
+impl Default for AutoLacpRoundOutcome {
+    fn default() -> Self {
+        Self {
+            collided: BTreeSet::new(),
+            result: Ok(None),
+        }
+    }
+}
+
 #[derive(Clone)]
 pub(crate) struct EvpnRuntimeReloadApply {
     coordinator: Arc<Mutex<rustbgpd_evpn::EvpnRuntimeCoordinator>>,
@@ -349,17 +368,17 @@ impl EvpnRuntimeReloadApply {
     /// derived ESIs move, so the plan is an Ethernet Segment add, delete,
     /// or delete + add (new partner).
     ///
-    /// Returns `Ok(None)` when nothing needed re-converging.
+    /// Reports collided bonds and the re-converge result.
     pub(crate) async fn publish_auto_lacp_round(
         &self,
         ready: BTreeMap<String, rustbgpd_wire::EthernetSegmentIdentifier>,
         retry: bool,
-    ) -> Result<Option<proto::ApplyEvpnRuntimeResponse>, GrpcEvpnRuntimeApplyError> {
+    ) -> AutoLacpRoundOutcome {
         let this = self.clone();
         // Same ADR-0080 shield as `apply_candidate_config`.
         let join = tokio::spawn(async move {
             let Some(esis) = this.auto_lacp_esis.clone() else {
-                return Ok(None);
+                return AutoLacpRoundOutcome::default();
             };
             #[cfg(test)]
             if let Some(hook) = &this.auto_lacp_before_lock {
@@ -372,18 +391,33 @@ impl EvpnRuntimeReloadApply {
                 .into_iter()
                 .filter(|(bond, _)| configured.contains(bond))
                 .collect();
-            if !esis.replace(snapshot) && !retry {
-                return Ok(None);
+            let changed = esis.replace(snapshot);
+            let collided = config.auto_lacp_collisions(&esis);
+            if !changed && !retry {
+                return AutoLacpRoundOutcome {
+                    collided,
+                    result: Ok(None),
+                };
             }
             let result = this
                 .apply_candidate_config_locked(&config, false, || {})
                 .await;
-            // Bindings are keyed by ESI, so they move with it.
-            this.publish_es_link_bindings(&config);
-            result.map(Some)
+            // Bindings are keyed by ESI, so they move with it — but only
+            // once the runtime has moved. After a failed re-converge the
+            // old ESI's routes may still be live, so its binding (and the
+            // link drain it drives) stays until a retry succeeds.
+            if result.is_ok() {
+                this.publish_es_link_bindings(&config);
+            }
+            AutoLacpRoundOutcome {
+                collided,
+                result: result.map(Some),
+            }
         });
-        join.await
-            .map_err(|error| apply_task_join_error("auto-ESI reconverge", &error))?
+        join.await.unwrap_or_else(|error| AutoLacpRoundOutcome {
+            collided: BTreeSet::new(),
+            result: Err(apply_task_join_error("auto-ESI reconverge", &error)),
+        })
     }
 
     pub(crate) async fn apply_config_if_changed<F, M>(

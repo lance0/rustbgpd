@@ -551,8 +551,12 @@ async fn auto_lacp_round_publishes_only_under_the_apply_lock() {
     );
     drop(held);
 
-    let response = round.await.unwrap().unwrap();
-    assert!(response.is_some(), "a new ESI must re-converge");
+    let round = round.await.unwrap();
+    assert!(round.collided.is_empty());
+    assert!(
+        round.result.unwrap().is_some(),
+        "a new ESI must re-converge"
+    );
     let segments = baseline.resolve_ethernet_segments_with(&esis).unwrap();
     assert_eq!(segments.len(), 1);
     assert_eq!(segments[0].esi, derived);
@@ -564,6 +568,44 @@ async fn auto_lacp_round_publishes_only_under_the_apply_lock() {
     assert!(
         !esis.replace(BTreeMap::from([("bond0".to_string(), derived)])),
         "only configured bonds are published"
+    );
+}
+
+#[tokio::test]
+async fn failed_auto_lacp_reconverge_keeps_the_old_esi_binding() {
+    let toml = l2vni_auto_lacp_es_runtime_candidate_toml();
+    let baseline = load_runtime_test_config(toml, "baseline");
+    let old =
+        rustbgpd_wire::EthernetSegmentIdentifier::new([1, 2, 0x11, 0, 0, 0, 0xaa, 1, 0xc1, 0]);
+    let new =
+        rustbgpd_wire::EthernetSegmentIdentifier::new([1, 2, 0x11, 0, 0, 0, 0xbb, 1, 0xc1, 0]);
+    let esis = crate::config::AutoLacpEsis::default();
+    esis.replace(BTreeMap::from([("bond0".to_string(), old)]));
+    let coordinator = Arc::new(Mutex::new(rustbgpd_evpn::EvpnRuntimeCoordinator::new(
+        baseline.resolve_evpn_instances().unwrap(),
+        baseline.resolve_evpn_ip_vrfs().unwrap(),
+        baseline.resolve_ethernet_segments_with(&esis).unwrap(),
+    )));
+    let (bindings_tx, bindings_rx) =
+        tokio::sync::watch::channel(Arc::new(baseline.resolve_es_link_bindings(&esis).unwrap()));
+    let apply = EvpnRuntimeReloadApply::new(
+        coordinator,
+        Arc::new(tokio::sync::Mutex::new(())),
+        Arc::new(TestRuntimeConverger::failed("injected converge failure")),
+        baseline,
+    )
+    .with_es_link_bindings_publisher(Arc::new(bindings_tx))
+    .with_auto_lacp_esis(esis);
+
+    // CE replaced, but the runtime fails to move to the new ESI.
+    let round = apply
+        .publish_auto_lacp_round(BTreeMap::from([("bond0".to_string(), new)]), false)
+        .await;
+    assert!(round.result.is_err());
+    let bindings = bindings_rx.borrow().clone();
+    assert!(
+        bindings.contains_key(&old) && !bindings.contains_key(&new),
+        "the old ESI's routes may still be live, so its binding must stay: {bindings:?}"
     );
 }
 

@@ -1284,16 +1284,26 @@ impl Config {
                     && let Some(esi) = esi
                     && (explicit.contains(&esi) || !derived.insert(esi))
                 {
-                    tracing::warn!(
-                        interface = cfg.interface.as_deref().unwrap_or_default(),
-                        esi = %esi,
-                        "auto-lacp Ethernet Segment not ready: derived ESI collides \
-                         with another segment's ESI"
-                    );
+                    // Reported by the readiness probe as `esi_collision`.
                     return Ok(None);
                 }
                 Ok(esi)
             })
+            .collect()
+    }
+
+    /// `auto-lacp` bonds whose derived ESI in `esis` is suppressed
+    /// because it collides with another segment's ESI.
+    pub(crate) fn auto_lacp_collisions(&self, esis: &AutoLacpEsis) -> BTreeSet<String> {
+        let Ok(resolved) = self.ethernet_segment_esis(esis) else {
+            return BTreeSet::new();
+        };
+        self.ethernet_segments
+            .iter()
+            .zip(resolved)
+            .filter(|(cfg, esi)| cfg.esi == AUTO_LACP_ESI && esi.is_none())
+            .filter_map(|(cfg, _)| cfg.interface.clone())
+            .filter(|bond| esis.get(bond).is_some())
             .collect()
     }
 
