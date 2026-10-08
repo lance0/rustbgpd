@@ -146,9 +146,10 @@ Reasons:
 - conditional_advertisement_suppressed: suppressed by conditional advertisement backup-via-transit-b: condition prefix 0.0.0.0/0 present (advertise if absent)
 ```
 
-While the backup is advertised the rung reads `[pass]`. For a route the
-`advertise_policy` does not select, or toward a neighbor with nothing
-attached, it reads `n/a`.
+While the backup is advertised, the rung reads `[pass]` for every route to
+transit B, including routes the `advertise_policy` does not select. It reads
+`n/a` in two cases: toward a neighbor with nothing attached, and for a route
+the `advertise_policy` does not select while the definition is suppressing.
 
 `rbgp neighbor 198.51.100.1` shows `Update Group: conditional_advertisement`:
 attached neighbors use the per-peer export path.
