@@ -540,6 +540,7 @@ originates nothing, and the reason is reported in three places:
 | `netlink_error` | The kernel read failed or did not reply within one second |
 | `esi_collision` | The derived ESI matches another segment's ESI; explicit ESIs win |
 | `reconverge_failed` | Applying the derived ESI failed and is retried every two seconds; see the daemon log |
+| `unsupported` | The daemon was built for a platform other than Linux; `auto-lacp` reads the bond's LACP partner over Linux bonding netlink, so use an explicit hex `esi` there |
 
 See [Auto-derived ESI](../reference/configuration.md#auto-derived-esi-lacp-type-1)
 for the readiness rules.
