@@ -2411,6 +2411,9 @@ impl RibManager {
         };
         if changed {
             Self::advance_route_page_version(&mut self.peer_group_version);
+            // ADR-0137: a `condition_policy` reads the source peer's group.
+            // Slice 3 marks the transitioned definitions' peers dirty.
+            let _ = self.reobserve_conditional_advertisement_source(peer);
         }
     }
 
@@ -4621,6 +4624,8 @@ impl RibManager {
         // iteration to the earliest armed settle deadline.
         let conditional_sleep = tokio::time::sleep(std::time::Duration::from_hours(24));
         tokio::pin!(conditional_sleep);
+        // Primary updates still to apply before a due settle deadline fires.
+        let mut conditional_expiry_backlog: Option<usize> = None;
 
         loop {
             // The export roster's one publication point (ADR-0136): after
@@ -4804,6 +4809,10 @@ impl RibManager {
             }
 
             let now = tokio::time::Instant::now();
+            let conditional_due = has_conditional_timer && conditional_sleep.deadline() <= now;
+            if !conditional_due {
+                conditional_expiry_backlog = None;
+            }
             if has_attr_gc_timer && attr_gc_sleep.deadline() <= now {
                 self.gc_attr_intern_on_timer();
                 continue;
@@ -4869,7 +4878,24 @@ impl RibManager {
                 self.expire_selection_deferral();
                 continue;
             }
-            if has_conditional_timer && conditional_sleep.deadline() <= now {
+            if conditional_due {
+                // ADR-0137: expiry applies only the observation of a finished
+                // batch. An open route batch, and the primary updates already
+                // queued when expiry was first seen, run first so their
+                // observation flush precedes it. Later traffic cannot defer
+                // the timer: the backlog is counted once per expiry.
+                let backlog =
+                    conditional_expiry_backlog.get_or_insert_with(|| self.primary_backlog());
+                let open_batch = !self.pending_route_batches.is_empty();
+                if open_batch || *backlog > 0 {
+                    if !open_batch {
+                        *backlog -= 1;
+                    }
+                    if self.drain_ready_updates().await {
+                        continue;
+                    }
+                }
+                conditional_expiry_backlog = None;
                 // Slice 3 marks the transitioned definitions' peers dirty.
                 let _ = self.fire_conditional_advertisement_timers();
                 continue;
@@ -5014,9 +5040,9 @@ impl RibManager {
                         }
                         self.expire_selection_deferral();
                     }
-                    () = conditional_sleep.as_mut(), if has_conditional_timer => {
-                        let _ = self.fire_conditional_advertisement_timers();
-                    }
+                    // Expiry is applied by the due check at the top of the
+                    // loop, after any ready update that precedes it.
+                    () = conditional_sleep.as_mut(), if has_conditional_timer => {}
                 }
             } else {
                 // No timers needed — wait for a route update or query.
