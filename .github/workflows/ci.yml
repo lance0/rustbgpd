@@ -179,6 +179,7 @@ jobs:
           shellcheck tests/interop/scripts/test-m111-srv6-l3vpn-reflection.sh
           python3 tests/interop/scripts/test_m111_capture_oracle.py
           python3 tests/interop/scripts/test_m99_open_oracle.py
+          python3 tests/interop/scripts/test_m114_wire_oracle.py
       - name: Check SRv6 and SMET reflection proof helpers
         run: |
           python3 tests/interop/scripts/test_m112_capture_oracle.py

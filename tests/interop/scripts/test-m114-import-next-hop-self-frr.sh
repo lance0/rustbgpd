@@ -10,8 +10,9 @@
 # Evidence, per receiver and prefix:
 #   - FRR's pre-policy Adj-RIB-In (`received-routes`, soft-reconfiguration);
 #   - a tshark capture in rustbgpd's network namespace: every UPDATE carrying
-#     the prefix has exactly one NEXT_HOP attribute, no MP_REACH_NLRI, and the
-#     expected address; no NOTIFICATION is sent or received;
+#     the prefix has exactly one NEXT_HOP attribute with the expected address,
+#     no receiver-bound UPDATE carries MP_REACH_NLRI or MP_UNREACH_NLRI, and
+#     no NOTIFICATION is sent or received;
 #   - both receiver sessions stay on their first connection.
 #
 # Topology: frr-source (eBGP) -> rustbgpd -> frr-ibgp (iBGP) + frr-rs (RS client)
@@ -145,73 +146,29 @@ assert_first_connection() {
     fi
 }
 
-# Judge the capture. Each <proto name="bgp"> in the PDML is one BGP message;
-# the expectation list is "receiver prefix next-hop" triples.
+# Judge the capture with m114_wire_oracle.py: one verdict per expectation,
+# then one for MP_REACH/MP_UNREACH and one for NOTIFICATION. The oracle runs to
+# completion first, so a parse failure or a short verdict list is a FAIL.
 assert_wire() {
-    local verdict message
+    local -a expected=(
+        10.114.1.2 "$SELF_PREFIX" "$SELF_NH"
+        10.114.1.2 "$CONTROL_PREFIX" "$RECEIVED_NH"
+        10.114.2.2 "$SELF_PREFIX" "$SELF_NH"
+        10.114.2.2 "$CONTROL_PREFIX" "$RECEIVED_NH"
+    )
+    local want=$((${#expected[@]} / 3 + 2)) got=0 verdicts verdict message
+    if ! verdicts=$(python3 "$SCRIPT_DIR/m114_wire_oracle.py" "$CAPTURE_DIR/m114.pdml" "${expected[@]}"); then
+        fail "wire: oracle could not judge the capture"
+        return
+    fi
     while read -r verdict message; do
+        [ -n "$verdict" ] || continue
+        got=$((got + 1))
         if [ "$verdict" = PASS ]; then ok "wire: $message"; else fail "wire: $message"; fi
-    done < <(python3 - "$CAPTURE_DIR/m114.pdml" \
-        10.114.1.2 "$SELF_PREFIX" "$SELF_NH" \
-        10.114.1.2 "$CONTROL_PREFIX" "$RECEIVED_NH" \
-        10.114.2.2 "$SELF_PREFIX" "$SELF_NH" \
-        10.114.2.2 "$CONTROL_PREFIX" "$RECEIVED_NH" <<'PY'
-import sys
-import xml.etree.ElementTree as ET
-
-path, *flat = sys.argv[1:]
-expected = [tuple(flat[i : i + 3]) for i in range(0, len(flat), 3)]
-seen = {(dst, prefix): [] for dst, prefix, _ in expected}
-notifications = 0
-
-
-def fields(node, name):
-    return [f for f in node.iter("field") if f.get("name") == name]
-
-
-for packet in ET.parse(path).getroot().iter("packet"):
-    ip = next((p for p in packet.iter("proto") if p.get("name") == "ip"), None)
-    if ip is None:
-        continue
-    dst = fields(ip, "ip.dst")[0].get("show")
-    for bgp in (p for p in packet.iter("proto") if p.get("name") == "bgp"):
-        kind = fields(bgp, "bgp.type")
-        if not kind:
-            continue
-        if kind[0].get("show") == "3":
-            notifications += 1
-        if kind[0].get("show") != "2":
-            continue
-        codes = [f.get("show") for f in fields(bgp, "bgp.update.path_attribute.type_code")]
-        next_hops = [f.get("show") for f in fields(bgp, "bgp.update.path_attribute.next_hop")]
-        prefixes = {
-            f"{p.get('show')}/{n.get('show')}"
-            for nlri in fields(bgp, "bgp.update.nlri")
-            for p, n in zip(fields(nlri, "bgp.nlri_prefix"), fields(nlri, "bgp.prefix_length"))
-        }
-        for key in seen:
-            if key[0] == dst and key[1] in prefixes:
-                seen[key].append((codes.count("3"), codes.count("14"), next_hops))
-
-for dst, prefix, next_hop in expected:
-    updates = seen[(dst, prefix)]
-    detail = (
-        f"to {dst} {prefix}: {len(updates)} UPDATE(s), NEXT_HOP counts "
-        f"{[u[0] for u in updates]}, MP_REACH counts {[u[1] for u in updates]}, "
-        f"next hops {sorted({h for u in updates for h in u[2]})}"
-    )
-    good = updates and all(u[0] == 1 and u[1] == 0 and u[2] == [next_hop] for u in updates)
-    print(
-        ("PASS " if good else "FAIL ")
-        + detail
-        + ("" if good else f"; expected one NEXT_HOP {next_hop} per UPDATE")
-    )
-print(
-    ("PASS" if notifications == 0 else "FAIL")
-    + f" {notifications} NOTIFICATION message(s) captured"
-)
-PY
-    )
+    done <<<"$verdicts"
+    if [ "$got" -ne "$want" ]; then
+        fail "wire: oracle returned $got verdict(s), expected $want"
+    fi
 }
 
 # ---------------------------------------------------------------------------
