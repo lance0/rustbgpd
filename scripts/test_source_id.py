@@ -75,7 +75,9 @@ class DockerignoreMirror(unittest.TestCase):
         self.assertEqual(unmirrored("*.log\ntarget/\nclab-*/\ndocs/artifacts/\n", script), [])
 
 
-class FailClosed(unittest.TestCase):
+class TempTree(unittest.TestCase):
+    """A minimal tree holding the script and one file per hashed root."""
+
     def setUp(self) -> None:
         self.tree = Path(tempfile.mkdtemp())
         self.addCleanup(shutil.rmtree, self.tree, ignore_errors=True)
@@ -96,6 +98,8 @@ class FailClosed(unittest.TestCase):
             env=env,
         )
 
+
+class FailClosed(TempTree):
     def test_complete_tree_prints_one_digest(self) -> None:
         result = self.run_script()
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -121,6 +125,67 @@ class FailClosed(unittest.TestCase):
         result = self.run_script(env)
         self.assertNotEqual(result.returncode, 0)
         self.assertEqual(result.stdout, "")
+
+
+class CheckImage(TempTree):
+    """`--check IMAGE` against a stubbed docker that reports a fixed image id."""
+
+    def check(self, image_id: str, **extra: str) -> subprocess.CompletedProcess:
+        stubs = self.tree / "stubs"
+        stubs.mkdir(exist_ok=True)
+        stub = stubs / "docker"
+        stub.write_text('#!/bin/sh\n[ -n "$FAKE_SOURCE_ID" ] || exit 1\necho "$FAKE_SOURCE_ID"\n')
+        stub.chmod(0o755)
+        env = {k: v for k, v in os.environ.items() if k not in ("CI", "GITHUB_ACTIONS")}
+        env.update(
+            PATH=f"{stubs}{os.pathsep}{os.environ['PATH']}", FAKE_SOURCE_ID=image_id, **extra
+        )
+        return subprocess.run(
+            [str(self.tree / "scripts" / SCRIPT.name), "--check", "rustbgpd:test"],
+            capture_output=True,
+            text=True,
+            env=env,
+        )
+
+    def tree_id(self) -> str:
+        return self.run_script().stdout.strip()
+
+    def test_image_from_this_tree_passes(self) -> None:
+        result = self.check(self.tree_id())
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_image_from_another_tree_fails_naming_both_ids(self) -> None:
+        tree_a = self.tree_id()
+        (self.tree / "crates" / "lib.rs").write_text("crateS")
+        tree_b = self.tree_id()
+        self.assertNotEqual(tree_a, tree_b)
+        result = self.check(tree_a)
+        self.assertEqual(result.returncode, 1)
+        for needle in (tree_a, tree_b, "rustbgpd:test"):
+            self.assertIn(needle, result.stderr)
+
+    def test_unreadable_image_id_fails(self) -> None:
+        result = self.check("")
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("rustbgpd:test", result.stderr)
+
+    def test_ci_skips_without_running_docker(self) -> None:
+        for var in ("CI", "GITHUB_ACTIONS"):
+            with self.subTest(var=var):
+                result = self.check("", **{var: "true"})
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn("skipping", result.stderr)
+
+    def test_bad_usage_is_rejected(self) -> None:
+        for args in (["--check"], ["--chek", "x"], ["x"]):
+            with self.subTest(args=args):
+                result = subprocess.run(
+                    [str(self.tree / "scripts" / SCRIPT.name), *args],
+                    capture_output=True,
+                    text=True,
+                )
+                self.assertEqual(result.returncode, 2)
+                self.assertEqual(result.stdout, "")
 
 
 if __name__ == "__main__":
