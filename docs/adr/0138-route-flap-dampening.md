@@ -206,7 +206,64 @@ Reopen this record when either of these holds:
 
 A reopened implementation follows the design below, with the
 [resolved design questions](#resolved-design-questions) as its defaults, and
-stops at any of the [no-go conditions](#no-go-conditions-if-reopened).
+stops at any of the [no-go conditions](#no-go-conditions-if-reopened). The
+open design issues below must be resolved in this record before any
+implementation starts.
+
+### Open design issues (must be resolved before any reopen)
+
+Review found three defects in the design below. The record is parked, so they
+are recorded here rather than redesigned. The Design sections they affect
+point to this subsection.
+
+1. **Dynamic-peer identity ignores the accepting range.** Affects Design 4
+   and Design 11.
+   - Overlapping `[[dynamic_neighbors]]` ranges resolve by longest prefix
+     match (`select_dynamic_range` in `src/peer_manager/dynamic.rs`, lines
+     78–89).
+   - Each accepted session keeps the range and peer group that accepted it
+     (`DynamicRangeTarget`, `crates/api/src/peer_types.rs` lines 587–604, and
+     the `accepted_dynamic_range` provenance captured at accept time, lines
+     2619–2626).
+   - The Design 4 identity, the peer key plus remote ASN, does not include
+     that range. The same address and ASN can reconnect through a different
+     range, for example after a more specific range is added, removed, or
+     bound to another peer group. It then inherits history recorded under the
+     other range's parameters and enablement.
+   - Removing a broad range cannot clear exactly the history that range owns.
+     Its peers' identities are indistinguishable from peers accepted by a
+     narrower range at the same address.
+   - The likely direction is to include the accepted range, as the
+     `DynamicRangeTarget` provenance, in the history identity or record. Range
+     removal then drops exactly that range's history.
+2. **Lazy wheel invalidation does not bound stale entries.** Affects Design 4
+   and Design 7.
+   - A new penalty appends a new wheel key and leaves the old one in place
+     until its tick fires. A path that flaps faster than its old tick fires
+     therefore adds a stale key on every penalty.
+   - Stale entries grow with penalty event rate multiplied by the horizon
+     (`max_suppress_time + half_life`), not with the number of live records.
+     That breaks Design 4's "about one stale entry per live entry".
+   - Stale keys also count against the 4096-entry per-tick budget in Design 7,
+     so a flapping table can delay real reuse and reclaim work.
+   - The likely direction is a deduplicated, removable bucket structure: a
+     per-tick key set plus a key-to-tick index, so a reschedule moves the key
+     instead of appending one. The alternative is an explicit stale-entry cap,
+     with validation of what happens at the cap.
+   - Until this is resolved, the Design 4 memory figure is invalid.
+3. **Delayed releases can replay stale state.** Affects Design 9 and Design 10.
+   - Activation (Design 10) and `ClearDampening` (Design 9) queue held routes
+     for release through the bounded tick. A newer announcement, a withdrawal,
+     or a peer teardown or identity change can be processed before that tick.
+   - If the queued release replays the route captured at queue time, it can
+     overwrite a newer path, or resurrect a path the peer withdrew or a peer
+     that has left.
+   - The likely direction is to key pending releases by peer identity, prefix
+     and path ID, and to cancel or update them on later input for that key.
+     The alternative is to stamp each release with a session and path
+     generation, and to discard any release whose generation is stale when its
+     tick runs.
+   - The same rule must cover activation releases and `ClearDampening`.
 
 ## Design if reopened
 
@@ -358,7 +415,7 @@ refresh is not the peer's instability:
 
 - Within an enhanced route refresh window (BoRR to EoRR, per family), changes
   update the stored path and run the threshold check, but add no penalty.
-- A plain RFC 2918 refresh has no window, and changes it replays are
+- A plain RFC 2918 refresh has no window, and changes replayed through it are
   penalized. The bound is one attribute-change or withdrawal penalty per
   path per replay. At the default thresholds that is at most 1000 of the 6000
   needed to suppress, so a single policy change cannot suppress a stable path
@@ -413,7 +470,8 @@ carry across an identity change:
   empty.
 - A dynamic peer that reconnects from the same address with a different
   ASN is a different identity. It gets no history from the earlier peer, and
-  the earlier history is reclaimed by decay.
+  the earlier history is reclaimed by decay. This identity omits the accepting
+  dynamic range; see [open design issue 1](#open-design-issues-must-be-resolved-before-any-reopen).
 
 **History outlives the session.** It is not dropped when the peer's
 `AdjRibIn` is. A peer that resets its session under the same identity
@@ -443,7 +501,9 @@ This is accepted and documented.
   hash-table control bytes and load factor, that is roughly 65 bytes.
 - A wheel entry is a peer, prefix and path ID of about 40 bytes. Lazy
   rescheduling (Design 7) can leave about one stale entry per live entry.
-- Worst case at 1M paths, every path with history: about 100–145 MiB.
+  That assumption is wrong; see [open design issue 2](#open-design-issues-must-be-resolved-before-any-reopen).
+- Worst case at 1M paths, every path with history: about 100–145 MiB. **This
+  figure is invalid** until open design issue 2 is resolved.
 - Held routes move out of the `AdjRibIn` slab rather than being copied, so the
   only added cost per held route is its box.
 - Stable paths cost nothing. In practice only paths that flapped within the
@@ -508,7 +568,9 @@ wheel is a `BTreeMap<tick, Vec<key>>`. Its horizon is at most
 defaults. A new penalty does not remove the old wheel entry. Instead the
 record stores its current tick, and an entry whose record has moved is
 skipped. This avoids a search inside a tick's vector, and it bounds stale
-entries to the penalty events within one horizon.
+entries to the penalty events within one horizon. That bound grows with the
+event rate, and stale keys consume the per-tick budget; see
+[open design issue 2](#open-design-issues-must-be-resolved-before-any-reopen).
 
 **One timer class.** The RIB actor adds one pinned `dampening_sleep`, armed
 for the earliest non-empty tick and disarmed when the wheel is empty. A
@@ -561,7 +623,8 @@ explain cover held paths.
   applied: iBGP" and "not applied: route-server client".
 - `RibService.ClearDampening` clears history by peer, by prefix, or entirely.
   Held paths in the scope are reused through the bounded tick, so a full
-  clear does not stall the actor.
+  clear does not stall the actor. The ordering of those releases against
+  later input is unresolved; see [open design issue 3](#open-design-issues-must-be-resolved-before-any-reopen).
 - The CLI is `rbgp rib dampening [--peer P] [--prefix X] [--suppressed]` and
   `rbgp rib dampening clear [--peer P] [--prefix X] [--all]`.
 - Authorization tiers: `ListDampenedPaths` is **SensitiveRead**, the tier of
@@ -620,7 +683,9 @@ then fails. So:
 - The generation sends **activation** as its last step, after every fallible
   step has succeeded. Activation is the commit point for dampening. It swaps
   the staged install in and only then performs the clears and releases above.
-  Released paths go through the bounded tick as usual.
+  Released paths go through the bounded tick as usual. The ordering of
+  those releases against later input is unresolved; see
+  [open design issue 3](#open-design-issues-must-be-resolved-before-any-reopen).
 - A generation that fails before activation **discards** the staged install.
   Nothing was applied, so there is no capture to restore and no wire effect to
   undo.
@@ -646,7 +711,7 @@ immediately.
 | Session reset | No penalty; held routes dropped; history kept. |
 | Max-prefix | Counted in the session task over accepted routes, so held routes still count, since the peer did announce them. A max-prefix teardown is a session reset. |
 | Neighbor removed, or `remote_asn` changed | History for the old identity dropped at activation; a replacement identity starts empty. |
-| Dynamic peer reconnects | Same address and ASN: history kept. Different ASN: new identity, no history carried. |
+| Dynamic peer reconnects | Same address and ASN: history kept. Different ASN: new identity, no history carried. A different accepting range is not distinguished; see [open design issue 1](#open-design-issues-must-be-resolved-before-any-reopen). |
 | Import policy change | A deny now arrives as a withdrawal; a replay after refresh follows the refresh rows. |
 | RPKI/ASPA revalidation | Held routes are not revalidated while held. They are validated when reused, through the announce path. |
 
