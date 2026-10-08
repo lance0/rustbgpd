@@ -656,7 +656,7 @@ pub fn synthesize_attributes(route: &Route) -> Vec<PathAttribute> {
 /// reduced form (NH-Len + NH bytes only).
 #[must_use]
 pub fn synthesize_evpn_attributes(route: &EvpnRibRoute) -> Vec<PathAttribute> {
-    let mut attrs = route.attributes.to_vec();
+    let mut attrs: Vec<_> = route.attributes.except_next_hop().cloned().collect();
     attrs.push(PathAttribute::MpReachNlri(Box::new(MpReachNlri {
         afi: Afi::L2Vpn,
         safi: Safi::Evpn,
@@ -786,7 +786,8 @@ fn encode_evpn_route_rib_entry(
     let attr_len_offset = buf.len();
     buf.extend_from_slice(&0u16.to_be_bytes())?;
     let attr_start = buf.len();
-    for attr in route.attributes.iter() {
+    // The next hop rides in MP_REACH; never beside it as a stored NEXT_HOP.
+    for attr in route.attributes.except_next_hop() {
         encode_one_mrt_rib_attribute(attr, buf)?;
     }
     encode_mrt_mp_reach(route.next_hop, route.link_local_next_hop, buf)?;

@@ -2756,6 +2756,8 @@ Optional fields: `as_path`, `origin`, `local_pref`, `med`, `communities`, `exten
 
 The `prefix` and `next_hop` fields accept both IPv4 and IPv6 addresses. Prefix
 length is validated against the address family (max 32 for IPv4, 128 for IPv6).
+An IPv4 prefix takes either next-hop family (RFC 8950). An IPv6 prefix requires
+an IPv6 next hop; an IPv4 `next_hop` is rejected with `INVALID_ARGUMENT`.
 `path_id` defaults to `0` (default path) when omitted.
 
 ### Withdraw a route

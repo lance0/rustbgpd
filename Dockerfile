@@ -50,7 +50,8 @@ ENV RUSTFLAGS="-C link-arg=-fuse-ld=mold"
 
 FROM chef AS planner
 COPY . .
-RUN cargo chef prepare --recipe-path recipe.json
+RUN cargo chef prepare --recipe-path recipe.json && \
+    scripts/source-id.sh > source-id
 
 # ── builder: fast `ci`-profile build for the dev image ───────────────
 FROM chef AS builder
@@ -65,9 +66,18 @@ COPY . .
 # Build workspace + stash binaries outside the cache mount so the
 # final-stage COPY can find them. The target/ cache directory is a
 # tmpfs-style mount that the next stage cannot read directly.
+#
+# The target cache is shared by every build on the host, and Cargo
+# decides freshness by mtime. COPY keeps the context's mtimes, so a tree
+# whose files are older than the cached artifacts would link another
+# tree's code. Touching the copied sources first makes Cargo rebuild
+# every workspace crate from them; dependency artifacts stay cached.
+# Only local rebuilds lose incremental workspace compiles; CI runners
+# start with an empty target cache.
 RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
     --mount=type=cache,target=/build/target,sharing=locked \
+    find . -path ./target -prune -o -exec touch {} + && \
     cargo build --workspace --profile ci && \
     mkdir -p /out && \
     cp target/ci/rustbgpd /out/ && \
@@ -86,9 +96,11 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,target=/build/target,sharing=locked \
     cargo chef cook --release --features rustbgpd/jemalloc --recipe-path recipe.json
 COPY . .
+# Same shared-cache mtime guard as the builder stage.
 RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
     --mount=type=cache,target=/build/target,sharing=locked \
+    find . -path ./target -prune -o -exec touch {} + && \
     cargo build --release --features rustbgpd/jemalloc \
       -p rustbgpd -p rustbgpctl -p birdwatcher-adapter && \
     mkdir -p /out && \
@@ -115,6 +127,8 @@ COPY --from=builder /out/rbgp /usr/local/bin/rbgp
 COPY --from=builder /out/evpn-tester /usr/local/bin/evpn-tester
 COPY --from=builder /out/evpn-monitor /usr/local/bin/evpn-monitor
 COPY tests/interop/scripts/start-rustbgpd.sh /usr/local/bin/start-rustbgpd.sh
+# Content hash of the build inputs; compare with scripts/source-id.sh.
+COPY --from=planner /build/source-id /usr/local/share/rustbgpd/source-id
 
 RUN mkdir -p /var/lib/rustbgpd
 
@@ -155,6 +169,7 @@ COPY --from=builder-release /out/birdwatcher-adapter /usr/local/bin/birdwatcher-
 # interactive shell on a derived image).
 COPY --from=builder-release /out/rbgp.bash-completion /usr/share/bash-completion/completions/rbgp
 COPY LICENSE-MIT LICENSE-APACHE /
+COPY --from=planner /build/source-id /usr/local/share/rustbgpd/source-id
 
 # Numeric, not the account name: Kubernetes `runAsNonRoot: true` cannot
 # resolve a name-form USER and fails the container at admission unless

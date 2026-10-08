@@ -33,6 +33,8 @@ class ReceiptTest(unittest.TestCase):
                 "managed_vlan_upper",
                 "managed_ready",
                 "link_carrier",
+                "bond_lacp",
+                "auto_lacp_daemon",
                 "ac_gate",
                 "nexthop_raw",
                 "foreign_state_l2",
@@ -52,14 +54,14 @@ class ReceiptTest(unittest.TestCase):
             ),
         )
 
-    def test_vrf_available_requires_all_25(self):
+    def test_vrf_available_requires_all_27(self):
         errors, payload, summary = self.run_case(BASE + VRF, True)
         self.assertEqual(errors, [])
         self.assertEqual(payload["executed_selectors"], list(BASE + VRF))
         self.assertEqual(payload["omitted_selectors"], [])
         self.assertIn("PASS", summary)
 
-    def test_vrf_unavailable_requires_18_and_publishes_seven_omissions(self):
+    def test_vrf_unavailable_requires_20_and_publishes_seven_omissions(self):
         errors, payload, _ = self.run_case(BASE, False)
         self.assertEqual(errors, [])
         self.assertEqual(

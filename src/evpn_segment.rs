@@ -236,7 +236,10 @@ pub fn spawn(
     metrics: BgpMetrics,
     daemon_shutdown: CancellationToken,
 ) -> Option<EvpnSegmentHandle> {
-    spawn_with_local_bias(
+    if segments.is_empty() {
+        return None;
+    }
+    Some(spawn_with_local_bias(
         instances,
         segments,
         rib_tx,
@@ -245,7 +248,7 @@ pub fn spawn(
         None,
         metrics,
         daemon_shutdown,
-    )
+    ))
 }
 
 /// [`spawn`] plus the ADR-0085 decision 5 inputs: the same-ESI
@@ -254,7 +257,8 @@ pub fn spawn(
 /// `[[ethernet_segments]]` interface-binding watch (the "locally
 /// attached" half of the eligibility condition). Either may be absent
 /// — no dataplane / no binding feed — in which case no bias snapshot
-/// is published / no segment counts as bound.
+/// is published / no segment counts as bound. Spawns even with no
+/// segments, for `auto-lacp` segments that are not yet Ready.
 #[must_use = "drop the handle to shut down the EVPN segment orchestrator"]
 #[expect(
     clippy::too_many_arguments,
@@ -269,11 +273,7 @@ pub(crate) fn spawn_with_local_bias(
     es_link_bindings_rx: Option<watch::Receiver<EsLinkBindings>>,
     metrics: BgpMetrics,
     daemon_shutdown: CancellationToken,
-) -> Option<EvpnSegmentHandle> {
-    if segments.is_empty() {
-        info!("no [[ethernet_segments]] configured — EVPN segment orchestrator not spawned");
-        return None;
-    }
+) -> EvpnSegmentHandle {
     let (segments_tx, segments_rx) = watch::channel(Arc::new(segments));
     let (instances_tx, instances_rx) = watch::channel(instances.clone());
     // Drain state is runtime-only and in-memory (ADR-0084): the set
@@ -300,14 +300,14 @@ pub(crate) fn spawn_with_local_bias(
         es_link_bindings_rx,
         df_status_tx,
     ));
-    Some(EvpnSegmentHandle {
+    EvpnSegmentHandle {
         shutdown: daemon_shutdown,
         join,
         instances_tx,
         segments_tx,
         drained_esis_tx,
         df_status_rx,
-    })
+    }
 }
 
 struct SegmentRuntime {
@@ -1898,8 +1898,10 @@ async fn retry_pending_rib_ops(
 
 /// Build the wire-shaped `EvpnRibRoute` for a Type 1/4 origination.
 ///
-/// Path attributes: Origin, empty `AsPath`, `NextHop`, plus the
-/// instance's configured RT extcomms. Per RFC 7432, Gate 8b prep
+/// Path attributes: Origin, empty `AsPath`, plus the instance's
+/// configured RT extcomms. The VTEP IP is carried separately as the
+/// route's `next_hop` and encoded only in `MP_REACH_NLRI`; no `NEXT_HOP`
+/// attribute is stored. Per RFC 7432, Gate 8b prep
 /// also attaches:
 ///
 /// - **Type 4 ES**: ES-Import RT extcomm (§7.6) auto-derived from
@@ -2024,7 +2026,6 @@ fn build_es_route(
     let attributes: Vec<PathAttribute> = vec![
         PathAttribute::Origin(Origin::Igp),
         PathAttribute::AsPath(AsPath { segments: vec![] }),
-        next_hop_path_attribute(instance.local_vtep_ip),
         PathAttribute::ExtendedCommunities(ext_communities),
     ];
 
@@ -2040,13 +2041,6 @@ fn build_es_route(
         is_stale: false,
         is_llgr_stale: false,
     })
-}
-
-fn next_hop_path_attribute(vtep_ip: IpAddr) -> PathAttribute {
-    match vtep_ip {
-        IpAddr::V4(v4) => PathAttribute::NextHop(v4),
-        IpAddr::V6(_) => PathAttribute::NextHop(std::net::Ipv4Addr::UNSPECIFIED),
-    }
 }
 
 /// Derive the ES-Import Route Target MAC from an ESI per
@@ -2247,7 +2241,8 @@ mod tests {
         )
         .expect("ES route builder accepts Type 1/4 keys");
         assert!(matches!(route.route, EvpnRoute::Es(_)));
-        // Must carry: Origin, AsPath, NextHop, ExtendedCommunities.
+        // Must carry: Origin, AsPath, ExtendedCommunities; no NEXT_HOP
+        // beside the MP_REACH next hop.
         assert!(
             route
                 .attributes
@@ -2261,7 +2256,7 @@ mod tests {
                 .any(|a| matches!(a, PathAttribute::AsPath(_)))
         );
         assert!(
-            route
+            !route
                 .attributes
                 .iter()
                 .any(|a| matches!(a, PathAttribute::NextHop(_)))
@@ -4002,8 +3997,7 @@ mod tests {
             Some(bindings_rx),
             BgpMetrics::new(),
             CancellationToken::new(),
-        )
-        .expect("non-empty ES config should spawn segment actor");
+        );
 
         // Startup: sole candidate → DF everywhere → bias-eligible and
         // the AC gate forwarding.

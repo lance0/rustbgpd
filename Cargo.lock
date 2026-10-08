@@ -3369,6 +3369,7 @@ dependencies = [
  "netlink-sys",
  "rtnetlink",
  "rustbgpd-evpn",
+ "socket2",
  "thiserror 2.0.21",
  "tokio",
  "tokio-util",

@@ -23,6 +23,7 @@ mod config_persister;
 mod config_transaction_control;
 mod confirm_journal;
 mod evpn_ack;
+mod evpn_auto_esi;
 mod evpn_dataplane;
 mod evpn_es_drain;
 mod evpn_es_link_drain;
@@ -4004,12 +4005,38 @@ async fn run<T>(
                 e,
             );
         }));
-    let ethernet_segments = config.resolve_ethernet_segments().unwrap_or_else(|e| {
-        fatal_startup_error(
-            "Ethernet segments failed to re-resolve after configuration validation",
-            e,
+    // `auto-lacp` segments: a bond that already has its LACP partner
+    // originates from the first pass; one that does not stays NotReady
+    // (no ESI, no routes) without blocking startup, and the runtime
+    // probe spawned below brings it up when LACP converges.
+    // The round is bounded, so a wedged netlink path only delays startup
+    // by `STARTUP_PROBE_BOUND`; bonds not read in time start not ready.
+    let evpn_auto_lacp_esis = config::AutoLacpEsis::default();
+    let mut evpn_auto_esi_probe = evpn_auto_esi::AutoEsiProbe::default();
+    let evpn_auto_lacp_interfaces = config.auto_lacp_interfaces();
+    if !evpn_auto_lacp_interfaces.is_empty() {
+        let results = tokio::time::timeout(
+            evpn_auto_esi::STARTUP_PROBE_BOUND,
+            evpn_auto_esi::read_bonds(evpn_auto_lacp_interfaces.clone()),
+        )
+        .await
+        .unwrap_or_default();
+        evpn_auto_lacp_esis.replace(evpn_auto_esi::ready(&results));
+        // Startup originates through the initial actor spawn below.
+        evpn_auto_esi_probe.report(
+            results,
+            &config.auto_lacp_collisions(&evpn_auto_lacp_esis),
+            None,
         );
-    });
+    }
+    let ethernet_segments = config
+        .resolve_ethernet_segments_with(&evpn_auto_lacp_esis)
+        .unwrap_or_else(|e| {
+            fatal_startup_error(
+                "Ethernet segments failed to re-resolve after configuration validation",
+                e,
+            );
+        });
 
     // Prove the kernel accepts every RPKI cache server's TCP MD5 / TCP-AO
     // material before any teardown-owned actor starts. The RTR clients
@@ -4876,11 +4903,13 @@ async fn run<T>(
     // the link-drain coordinator (spawned further below) and the
     // segment actor (bound-ness is the "locally attached" half of the
     // decision 5 bias-eligibility condition).
-    let initial_es_link_bindings = config.resolve_es_link_bindings().unwrap_or_else(|error| {
-        // Unreachable: the config passed full validation at load.
-        warn!(%error, "failed to resolve Ethernet Segment interface bindings at startup");
-        std::collections::BTreeMap::new()
-    });
+    let initial_es_link_bindings = config
+        .resolve_es_link_bindings(&evpn_auto_lacp_esis)
+        .unwrap_or_else(|error| {
+            // Unreachable: the config passed full validation at load.
+            warn!(%error, "failed to resolve Ethernet Segment interface bindings at startup");
+            std::collections::BTreeMap::new()
+        });
     let (es_link_bindings_tx, es_link_bindings_rx) =
         watch::channel::<evpn_es_link_drain::EsLinkBindings>(Arc::new(initial_es_link_bindings));
     let es_link_bindings_tx = Arc::new(es_link_bindings_tx);
@@ -4894,30 +4923,32 @@ async fn run<T>(
     let evpn_segment_shutdown = tokio_util::sync::CancellationToken::new();
     // `ethernet_segments` was resolved upstream so the originator
     // could build its `vni_to_esi` lookup before we got here.
-    let evpn_segment_handle = if ethernet_segments.is_empty() {
-        None
-    } else {
-        let bum_enforcement_tx = evpn_dataplane_handle
-            .as_ref()
-            .map(evpn_dataplane::EvpnDataplaneHandle::bum_enforcement_sender);
-        // ADR-0085 decision 5: the segment actor publishes the
-        // same-ESI bias-eligibility snapshot toward the dataplane
-        // supervisor (alongside the BUM-enforcement flow) and consumes
-        // the binding watch for the bound-ESI projection.
-        let same_esi_bias_tx = evpn_dataplane_handle
-            .as_ref()
-            .map(evpn_dataplane::EvpnDataplaneHandle::same_esi_bias_sender);
-        evpn_segment::spawn_with_local_bias(
-            &evpn_instances,
-            ethernet_segments,
-            rib_tx.clone(),
-            bum_enforcement_tx,
-            same_esi_bias_tx,
-            Some(es_link_bindings_tx.subscribe()),
-            metrics.clone(),
-            evpn_segment_shutdown.clone(),
-        )
-    };
+    let evpn_segment_handle =
+        if ethernet_segments.is_empty() && evpn_auto_lacp_interfaces.is_empty() {
+            info!("no [[ethernet_segments]] configured — EVPN segment orchestrator not spawned");
+            None
+        } else {
+            let bum_enforcement_tx = evpn_dataplane_handle
+                .as_ref()
+                .map(evpn_dataplane::EvpnDataplaneHandle::bum_enforcement_sender);
+            // ADR-0085 decision 5: the segment actor publishes the
+            // same-ESI bias-eligibility snapshot toward the dataplane
+            // supervisor (alongside the BUM-enforcement flow) and consumes
+            // the binding watch for the bound-ESI projection.
+            let same_esi_bias_tx = evpn_dataplane_handle
+                .as_ref()
+                .map(evpn_dataplane::EvpnDataplaneHandle::same_esi_bias_sender);
+            Some(evpn_segment::spawn_with_local_bias(
+                &evpn_instances,
+                ethernet_segments,
+                rib_tx.clone(),
+                bum_enforcement_tx,
+                same_esi_bias_tx,
+                Some(es_link_bindings_tx.subscribe()),
+                metrics.clone(),
+                evpn_segment_shutdown.clone(),
+            ))
+        };
     let evpn_segment_runtime_control = evpn_segment_handle
         .as_ref()
         .map(evpn_segment::EvpnSegmentHandle::runtime_control);
@@ -5160,6 +5191,25 @@ async fn run<T>(
     .with_metrics(metrics.clone())
     .with_es_link_bindings_publisher(es_link_bindings_tx.clone())
     .with_forwarding_state(local_forwarding_state.clone());
+    // The readiness table and probe exist only with the segment actor;
+    // without them an `auto-lacp` candidate is rejected, not committed
+    // inert.
+    let evpn_runtime_reload_apply = if evpn_segment_runtime_control.is_some() {
+        evpn_runtime_reload_apply.with_auto_lacp_esis(evpn_auto_lacp_esis)
+    } else {
+        evpn_runtime_reload_apply
+    };
+    // Runtime readiness probe for `auto-lacp` segments; only useful
+    // when the segment actor runs. Stopped with the link-drain
+    // coordinator, before EVPN teardown.
+    let evpn_auto_esi_shutdown = tokio_util::sync::CancellationToken::new();
+    let _evpn_auto_esi_task = evpn_segment_runtime_control.as_ref().map(|_| {
+        evpn_auto_esi::spawn(
+            evpn_auto_esi_probe,
+            evpn_runtime_reload_apply.clone(),
+            evpn_auto_esi_shutdown.clone(),
+        )
+    });
 
     // RFC 7999 BLACKHOLE kernel-discard reconciler (ADR-0060 FIB
     // slice). Completely opt-in: `install_blackhole_discard = true`
@@ -6636,6 +6686,7 @@ async fn run<T>(
     // not race the orchestrated withdraws (any in-flight apply still
     // serializes on the EVPN runtime apply lock).
     evpn_es_link_drain_shutdown.cancel();
+    evpn_auto_esi_shutdown.cancel();
 
     // 1.9a Drain the EVPN local-MAC originator first — BEFORE the
     // peer manager shutdown — so its Type 2 Withdraws ride the still-
@@ -7228,7 +7279,7 @@ mod tests {
             "config.resolve_evpn_instances()",
             "config.resolve_evpn_ip_vrfs()",
             "config.resolve_managed_netdevs()",
-            "config.resolve_ethernet_segments()",
+            ".resolve_ethernet_segments_with(&evpn_auto_lacp_esis)",
             "bfd_runtime::prepare_runtime(&bfd_initial)",
             "let listener_result =",
             "metrics_server::MetricsListener::bind(prometheus_addr)",

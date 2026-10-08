@@ -1,8 +1,7 @@
 use super::{
     ACTION_INJECT, ACTION_WITHDRAW, BTreeSet, BgpMetrics, EthernetSegmentIdentifier, EvpnInstance,
     EvpnInstanceId, EvpnInstanceTable, EvpnRouteKey, IpAddr, OriginatedLocalMacCounts,
-    OriginationAction, OriginatorState, PathAttribute, RibUpdate, build_originated_route, debug,
-    mpsc, warn,
+    OriginationAction, OriginatorState, RibUpdate, build_originated_route, debug, mpsc, warn,
 };
 use crate::evpn_ack::{PendingRibOps, RibAckOutcome, send_and_ack};
 
@@ -269,15 +268,5 @@ pub(super) fn extract_ip_from_key(key: &EvpnRouteKey) -> Option<IpAddr> {
     match key {
         EvpnRouteKey::MacIp { ip, .. } => *ip,
         _ => None,
-    }
-}
-
-/// IPv4 next-hop attribute — for IPv6 VTEP IPs the `MP_REACH_NLRI`
-/// next-hop carries the address; we still emit a `NEXT_HOP` attribute
-/// pointing at 0.0.0.0 in that case to satisfy peers that expect one.
-pub(super) fn next_hop_path_attribute(vtep_ip: IpAddr) -> PathAttribute {
-    match vtep_ip {
-        IpAddr::V4(v4) => PathAttribute::NextHop(v4),
-        IpAddr::V6(_) => PathAttribute::NextHop(std::net::Ipv4Addr::UNSPECIFIED),
     }
 }

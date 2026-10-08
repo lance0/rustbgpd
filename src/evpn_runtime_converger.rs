@@ -5,7 +5,7 @@
 //! shape detectors and validators, the rollback ladder, and the gRPC apply
 //! entry point. Extracted from `src/main.rs`; see ADR-0063.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
@@ -25,7 +25,7 @@ use rustbgpd_evpn::runtime_plan_shape::{
 use rustbgpd_rib::RibUpdate;
 use rustbgpd_telemetry::BgpMetrics;
 
-use crate::config::Config;
+use crate::config::{AutoLacpEsis, Config};
 use crate::{
     evpn_dataplane, evpn_imet, evpn_l3_originator, evpn_originator, evpn_segment, evpn_svi,
 };
@@ -153,6 +153,25 @@ struct EvpnRuntimeReloadState {
     mutation_state: rustbgpd_evpn::EvpnRuntimeMutationState,
 }
 
+/// One published `auto-lacp` probe round.
+#[derive(Debug)]
+pub(crate) struct AutoLacpRoundOutcome {
+    /// Bonds whose derived ESI collides with another segment's, so the
+    /// segment stays not ready.
+    pub(crate) collided: BTreeSet<String>,
+    /// The re-converge: `Ok(None)` when nothing needed re-converging.
+    pub(crate) result: Result<Option<proto::ApplyEvpnRuntimeResponse>, GrpcEvpnRuntimeApplyError>,
+}
+
+impl Default for AutoLacpRoundOutcome {
+    fn default() -> Self {
+        Self {
+            collided: BTreeSet::new(),
+            result: Ok(None),
+        }
+    }
+}
+
 #[derive(Clone)]
 pub(crate) struct EvpnRuntimeReloadApply {
     coordinator: Arc<Mutex<rustbgpd_evpn::EvpnRuntimeCoordinator>>,
@@ -167,6 +186,16 @@ pub(crate) struct EvpnRuntimeReloadApply {
     /// link-drain coordinator consumes the receiver.
     es_link_bindings_tx:
         Option<Arc<tokio::sync::watch::Sender<crate::evpn_es_link_drain::EsLinkBindings>>>,
+    /// Bond → derived ESI table for `auto-lacp` segments, published by
+    /// [`Self::publish_auto_lacp_round`] under the apply lock. Every
+    /// apply and binding publish resolves through it. `None` when no
+    /// segment actor or readiness probe runs: a candidate with an
+    /// `auto-lacp` segment is then rejected, never committed inert.
+    auto_lacp_esis: Option<AutoLacpEsis>,
+    /// Test handshake: notified just before the probe round takes the
+    /// apply lock.
+    #[cfg(test)]
+    auto_lacp_before_lock: Option<Arc<tokio::sync::Notify>>,
     /// Daemon metrics handle, so a #268 decomposed-apply fail-stop can
     /// bump `evpn_runtime_decomposed_fail_stops_total`. Defaults to a
     /// throwaway registry (`with_metrics` wires the real one in `main`).
@@ -187,8 +216,21 @@ impl EvpnRuntimeReloadApply {
             committed_config: Arc::new(Mutex::new(committed_config)),
             forwarding_state: None,
             es_link_bindings_tx: None,
+            auto_lacp_esis: None,
+            #[cfg(test)]
+            auto_lacp_before_lock: None,
             metrics: BgpMetrics::new(),
         }
+    }
+
+    /// Resolve `auto-lacp` segments through the probe's table.
+    pub(crate) fn with_auto_lacp_esis(mut self, esis: AutoLacpEsis) -> Self {
+        self.auto_lacp_esis = Some(esis);
+        self
+    }
+
+    fn auto_lacp_view(&self) -> AutoLacpEsis {
+        self.auto_lacp_esis.clone().unwrap_or_default()
     }
 
     pub(crate) fn with_forwarding_state(
@@ -242,7 +284,7 @@ impl EvpnRuntimeReloadApply {
         let Some(tx) = self.es_link_bindings_tx.as_ref() else {
             return;
         };
-        match config.resolve_es_link_bindings() {
+        match config.resolve_es_link_bindings(&self.auto_lacp_view()) {
             Ok(bindings) => {
                 tx.send_if_modified(|current| {
                     if **current == bindings {
@@ -306,6 +348,76 @@ impl EvpnRuntimeReloadApply {
         });
         join.await
             .map_err(|error| apply_task_join_error("apply", &error))?
+    }
+
+    /// Bonds named by `auto-lacp` segments in the committed config.
+    pub(crate) fn committed_auto_lacp_interfaces(&self) -> BTreeSet<String> {
+        self.committed_config_locked().auto_lacp_interfaces()
+    }
+
+    /// Publish one probe round and re-converge, as one operation under
+    /// the apply lock, so a concurrent SIGHUP or `ApplyEvpnRuntime`
+    /// resolves either the previous complete round or this one.
+    ///
+    /// `ready` maps bond → derived ESI from reads made outside the lock;
+    /// it is filtered to the committed config's `auto-lacp` bonds as
+    /// they stand under the lock, so a bond removed meanwhile is dropped
+    /// and one added meanwhile stays not ready until the next round.
+    /// Re-converges when the table changed or `retry` is set (a previous
+    /// round's re-converge failed). The config text is unchanged; only
+    /// derived ESIs move, so the plan is an Ethernet Segment add, delete,
+    /// or delete + add (new partner).
+    ///
+    /// Reports collided bonds and the re-converge result.
+    pub(crate) async fn publish_auto_lacp_round(
+        &self,
+        ready: BTreeMap<String, rustbgpd_wire::EthernetSegmentIdentifier>,
+        retry: bool,
+    ) -> AutoLacpRoundOutcome {
+        let this = self.clone();
+        // Same ADR-0080 shield as `apply_candidate_config`.
+        let join = tokio::spawn(async move {
+            let Some(esis) = this.auto_lacp_esis.clone() else {
+                return AutoLacpRoundOutcome::default();
+            };
+            #[cfg(test)]
+            if let Some(hook) = &this.auto_lacp_before_lock {
+                hook.notify_one();
+            }
+            let _apply_guard = this.apply_lock.lock().await;
+            let config = this.committed_config_locked();
+            let configured = config.auto_lacp_interfaces();
+            let snapshot = ready
+                .into_iter()
+                .filter(|(bond, _)| configured.contains(bond))
+                .collect();
+            let changed = esis.replace(snapshot);
+            let collided = config.auto_lacp_collisions(&esis);
+            if !changed && !retry {
+                return AutoLacpRoundOutcome {
+                    collided,
+                    result: Ok(None),
+                };
+            }
+            let result = this
+                .apply_candidate_config_locked(&config, false, || {})
+                .await;
+            // Bindings are keyed by ESI, so they move with it — but only
+            // once the runtime has moved. After a failed re-converge the
+            // old ESI's routes may still be live, so its binding (and the
+            // link drain it drives) stays until a retry succeeds.
+            if result.is_ok() {
+                this.publish_es_link_bindings(&config);
+            }
+            AutoLacpRoundOutcome {
+                collided,
+                result: result.map(Some),
+            }
+        });
+        join.await.unwrap_or_else(|error| AutoLacpRoundOutcome {
+            collided: BTreeSet::new(),
+            result: Err(apply_task_join_error("auto-ESI reconverge", &error)),
+        })
     }
 
     pub(crate) async fn apply_config_if_changed<F, M>(
@@ -390,7 +502,15 @@ impl EvpnRuntimeReloadApply {
     where
         M: FnOnce(),
     {
-        let candidate = evpn_runtime_candidate_from_config(config)?;
+        if self.auto_lacp_esis.is_none() && !config.auto_lacp_interfaces().is_empty() {
+            return Err(GrpcEvpnRuntimeApplyError::FailedPrecondition(
+                "`esi = \"auto-lacp\"` needs the EVPN segment actor and readiness probe, \
+                 which start only when the daemon starts with [[ethernet_segments]] \
+                 configured; restart the daemon to add the first Ethernet Segment"
+                    .to_string(),
+            ));
+        }
+        let candidate = evpn_runtime_candidate_from_config(config, &self.auto_lacp_view())?;
         apply_evpn_runtime_candidate_locked(
             candidate,
             validate_only,
@@ -2439,6 +2559,7 @@ impl DaemonEvpnRuntimeConverger for EvpnRuntimeActorConverger {
 
 fn evpn_runtime_candidate_from_config(
     candidate: &Config,
+    auto_lacp_esis: &AutoLacpEsis,
 ) -> Result<rustbgpd_evpn::EvpnRuntimeCandidate, GrpcEvpnRuntimeApplyError> {
     let instances = candidate
         .resolve_evpn_instances()
@@ -2447,7 +2568,7 @@ fn evpn_runtime_candidate_from_config(
         .resolve_evpn_ip_vrfs()
         .map_err(|err| GrpcEvpnRuntimeApplyError::InvalidArgument(err.to_string()))?;
     let ethernet_segments = candidate
-        .resolve_ethernet_segments()
+        .resolve_ethernet_segments_with(auto_lacp_esis)
         .map_err(|err| GrpcEvpnRuntimeApplyError::InvalidArgument(err.to_string()))?;
     Ok(rustbgpd_evpn::EvpnRuntimeCandidate::new(
         instances,
