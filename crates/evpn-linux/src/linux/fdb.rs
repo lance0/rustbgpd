@@ -529,23 +529,7 @@ pub(crate) async fn apply_op(
             Ok(())
         }
         DataplaneOp::RemoveRemoteFdb { vlan, .. } => {
-            // Delete the same row we programmed: single NTF_SELF |
-            // NTF_MASTER message on the VXLAN port. Kernel cleans
-            // up both the bridge-FDB row and the VXLAN-encap row.
-            let mut msg = NeighbourMessage::default();
-            msg.header.family = AddressFamily::Bridge;
-            msg.header.ifindex = target.ifindex;
-            msg.header.kind = RouteType::Unspec;
-            msg.header.flags = NeighbourFlags::Own | NeighbourFlags::Controller;
-            msg.attributes
-                .push(NeighbourAttribute::LinkLayerAddress(mac.octets().to_vec()));
-            if let Some(vlan) = vlan {
-                msg.attributes.push(NeighbourAttribute::Vlan(*vlan));
-            }
-            if let Some(vni) = target.source_vni {
-                msg.attributes
-                    .push(NeighbourAttribute::SourceVni(vni.as_u32()));
-            }
+            let msg = build_remove_fdb_message(target.ifindex, mac, *vlan, target.source_vni);
             match handle.neighbours().del(msg).execute().await {
                 Ok(()) => Ok(()),
                 Err(e) => classify_remove_apply_error(&e),
@@ -587,6 +571,33 @@ pub(crate) async fn apply_op(
             unreachable!("non-single-dst-FDB op handled at function entry")
         }
     }
+}
+
+/// Build the `RTM_DELNEIGH` message for the row [`build_remote_fdb_message`]
+/// programs: a single `NTF_SELF | NTF_MASTER` message on the VXLAN port,
+/// from which the kernel removes both the bridge-FDB row and the
+/// VXLAN-encap row.
+fn build_remove_fdb_message(
+    vxlan_ifindex: u32,
+    mac: MacAddress,
+    vlan: Option<u16>,
+    source_vni: Option<EvpnInstanceId>,
+) -> NeighbourMessage {
+    let mut msg = NeighbourMessage::default();
+    msg.header.family = AddressFamily::Bridge;
+    msg.header.ifindex = vxlan_ifindex;
+    msg.header.kind = RouteType::Unspec;
+    msg.header.flags = NeighbourFlags::Own | NeighbourFlags::Controller;
+    msg.attributes
+        .push(NeighbourAttribute::LinkLayerAddress(mac.octets().to_vec()));
+    if let Some(vlan) = vlan {
+        msg.attributes.push(NeighbourAttribute::Vlan(vlan));
+    }
+    if let Some(vni) = source_vni {
+        msg.attributes
+            .push(NeighbourAttribute::SourceVni(vni.as_u32()));
+    }
+    msg
 }
 
 /// Build the `RTM_NEWNEIGH` / `RTM_DELNEIGH` message for one zero-MAC

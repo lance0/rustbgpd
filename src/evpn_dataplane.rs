@@ -1403,31 +1403,14 @@ fn project_intent_tables(
     // the mass-withdraw gate. Drives the
     // `evpn_single_active_backup_active` gauge so operators can tell
     // "expected egress DF wait" apart from "repair failed".
-    let single_active_backup_active = routes
-        .iter()
-        .filter_map(|r| {
-            let key = single_active_swap_window_key(r, &active_ead_per_es, &single_active_index)?;
-            let EvpnRoute::MacIp(macip) = &r.route else {
-                return None;
-            };
-            let vni = rustbgpd_evpn::EvpnInstanceId::new(macip.label1.as_vni()).ok()?;
-            let instance = instances.get(vni)?;
-            if !instance.imports_mac_ip(macip, r.next_hop, &r.attributes) {
-                return None;
-            }
-            // Mirror the projection's quarantine + same-ESI bias gates
-            // — a route that contributes no desired state must not
-            // light the gauge either.
-            if quarantined_macs.contains(&DuplicateMacKey::new(vni, macip.mac)) {
-                return None;
-            }
-            if same_esi_bias.is_eligible(macip.esi, vni) {
-                return None;
-            }
-            Some(key)
-        })
-        .collect::<BTreeSet<_>>()
-        .len();
+    let single_active_backup_active = count_single_active_backup_windows(
+        routes,
+        instances,
+        &active_ead_per_es,
+        &single_active_index,
+        quarantined_macs,
+        same_esi_bias,
+    );
 
     // Gate 9 slice 6c: project Type 5 (`EvpnRoute::IpPrefix`) routes
     // through the pure helper. Skip when no IP-VRFs are configured
@@ -1474,6 +1457,44 @@ fn project_intent_tables(
         remote_ip_prefixes,
         single_active_backup_active,
     }
+}
+
+/// Count the (VNI, ESI, Ethernet Tag) groups in the post-failover backup
+/// window: at least one locally relevant Type 2 kept by the swap arm of the
+/// mass-withdraw gate.
+fn count_single_active_backup_windows(
+    routes: &[EvpnRibRoute],
+    instances: &EvpnInstanceTable,
+    active_ead_per_es: &BTreeSet<(std::net::IpAddr, rustbgpd_wire::EthernetSegmentIdentifier)>,
+    single_active_index: &rustbgpd_evpn::SingleActiveEligibleIndex,
+    quarantined_macs: &BTreeSet<DuplicateMacKey>,
+    same_esi_bias: &SameEsiBiasTable,
+) -> usize {
+    routes
+        .iter()
+        .filter_map(|r| {
+            let key = single_active_swap_window_key(r, active_ead_per_es, single_active_index)?;
+            let EvpnRoute::MacIp(macip) = &r.route else {
+                return None;
+            };
+            let vni = rustbgpd_evpn::EvpnInstanceId::new(macip.label1.as_vni()).ok()?;
+            let instance = instances.get(vni)?;
+            if !instance.imports_mac_ip(macip, r.next_hop, &r.attributes) {
+                return None;
+            }
+            // Mirror the projection's quarantine + same-ESI bias gates
+            // — a route that contributes no desired state must not
+            // light the gauge either.
+            if quarantined_macs.contains(&DuplicateMacKey::new(vni, macip.mac)) {
+                return None;
+            }
+            if same_esi_bias.is_eligible(macip.esi, vni) {
+                return None;
+            }
+            Some(key)
+        })
+        .collect::<BTreeSet<_>>()
+        .len()
 }
 
 /// ADR-0083 slice 3: returns the `(VNI, ESI, EthernetTag)` group key when
