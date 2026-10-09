@@ -50,6 +50,7 @@ pub(crate) struct SessionExportProfile {
     extended_messages: bool,
     extended_nexthop_ipv4: bool,
     extended_nexthop_vpnv4: bool,
+    extended_nexthop_labeled_ipv4: bool,
     add_path_send_families: Arc<[(Afi, Safi)]>,
     peer_llgr_families: Arc<[(Afi, Safi)]>,
     local_addr: Option<IpAddr>,
@@ -84,6 +85,10 @@ impl std::fmt::Debug for SessionExportProfile {
             .field("extended_messages", &self.extended_messages)
             .field("extended_nexthop_ipv4", &self.extended_nexthop_ipv4)
             .field("extended_nexthop_vpnv4", &self.extended_nexthop_vpnv4)
+            .field(
+                "extended_nexthop_labeled_ipv4",
+                &self.extended_nexthop_labeled_ipv4,
+            )
             .field("add_path_send_families", &self.add_path_send_families)
             .field("peer_llgr_families", &self.peer_llgr_families)
             .field("local_addr", &self.local_addr)
@@ -162,6 +167,11 @@ impl SessionExportProfile {
                     .get(&(Afi::Ipv4, Safi::MplsVpn))
                     .is_some_and(|afi| *afi == Afi::Ipv6)
             }),
+            extended_nexthop_labeled_ipv4: session.negotiated.as_ref().is_some_and(|neg| {
+                neg.extended_nexthop_families
+                    .get(&(Afi::Ipv4, Safi::LabeledUnicast))
+                    .is_some_and(|afi| *afi == Afi::Ipv6)
+            }),
             add_path_send_families: Arc::from(
                 session
                     .negotiated
@@ -228,6 +238,7 @@ impl SessionExportProfile {
             extended_messages: false,
             extended_nexthop_ipv4: false,
             extended_nexthop_vpnv4: false,
+            extended_nexthop_labeled_ipv4: false,
             add_path_send_families: Arc::from(Vec::new()),
             peer_llgr_families: Arc::from(Vec::new()),
             local_addr,
@@ -881,6 +892,11 @@ impl SessionExportProfile {
         // octets. Refuse rather than encode a 4-octet one.
         if afi == Afi::Ipv6 && route.next_hop.is_ipv4() {
             return Err(ExportProbeError::MissingIpv6NextHop);
+        }
+        // RFC 8950 §5: an IPv6 next hop on labeled IPv4 (AFI 1 / SAFI 4)
+        // needs the recipient's <1,4,2> Extended Next Hop support.
+        if afi == Afi::Ipv4 && route.next_hop.is_ipv6() && !self.extended_nexthop_labeled_ipv4 {
+            return Err(ExportProbeError::Ipv4RequiresExtendedNextHop);
         }
         Ok(PreparedMpCandidate {
             afi,
@@ -2334,6 +2350,7 @@ pub fn fanout_bench_add_path_export_encoder() -> Arc<dyn ExactExportEncoder> {
         extended_messages: false,
         extended_nexthop_ipv4: false,
         extended_nexthop_vpnv4: false,
+        extended_nexthop_labeled_ipv4: false,
         add_path_send_families: Arc::from(Vec::new()),
         peer_llgr_families: Arc::from(Vec::new()),
         local_addr: Some(IpAddr::V4(Ipv4Addr::new(10, 255, 255, 255))),
@@ -2368,6 +2385,7 @@ fn fanout_bench_encoder(
         extended_messages: false,
         extended_nexthop_ipv4: false,
         extended_nexthop_vpnv4: false,
+        extended_nexthop_labeled_ipv4: false,
         add_path_send_families: Arc::from(Vec::new()),
         peer_llgr_families: Arc::from(Vec::new()),
         local_addr: Some(IpAddr::V4(Ipv4Addr::new(10, 255, 255, 255))),
@@ -2918,7 +2936,7 @@ mod tests {
 
         let config = config_with_auth_secret("not-retained");
         let target = SessionExportProfile::initial(&config, None, false);
-        let cases: [(&str, ProfileMutation); 12] = [
+        let cases: [(&str, ProfileMutation); 13] = [
             ("local ASN", |profile| profile.local_asn += 1),
             ("router ID", |profile| {
                 profile.local_router_id = Ipv4Addr::new(192, 0, 2, 99);
@@ -2938,6 +2956,9 @@ mod tests {
             }),
             ("VPNv4 extended next hop", |profile| {
                 profile.extended_nexthop_vpnv4 = !profile.extended_nexthop_vpnv4;
+            }),
+            ("labeled-IPv4 extended next hop", |profile| {
+                profile.extended_nexthop_labeled_ipv4 = !profile.extended_nexthop_labeled_ipv4;
             }),
             ("link-local capability", |profile| {
                 profile.link_local_next_hop = !profile.link_local_next_hop;

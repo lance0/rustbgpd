@@ -2472,6 +2472,110 @@ async fn ipv4_mp_reach_next_hop_length_boundary() {
     }
 }
 
+/// Labeled-IPv4 (AFI 1 / SAFI 4) `MP_REACH_NLRI` next-hop boundary, the
+/// same rule as IPv4 unicast above. RFC 8950 §3 lists SAFI 4 among the
+/// families whose 16/32-octet IPv6 next hop needs `<1,4,2>`; without it that
+/// length is not the one expected (RFC 7606 §7.11), so the session resets
+/// with UPDATE Message Error / Optional Attribute Error carrying the
+/// attribute as received. `<1,1,2>` for IPv4 unicast does not stand in for
+/// `<1,4,2>`. A 4-octet next hop needs only the family.
+#[tokio::test]
+async fn labeled_ipv4_mp_reach_next_hop_length_boundary() {
+    let global: Ipv6Addr = "2001:db8::1".parse().unwrap();
+    let mut nh32 = global.octets().to_vec();
+    nh32.extend_from_slice(&"fe80::1".parse::<Ipv6Addr>().unwrap().octets());
+    let cases: [(Vec<u8>, IpAddr); 3] = [
+        (vec![10, 0, 0, 2], IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2))),
+        (global.octets().to_vec(), IpAddr::V6(global)),
+        (nh32, IpAddr::V6(global)),
+    ];
+    // (unicast <1,1,2>, labeled <1,4,2>)
+    for (unicast_enhe, labeled_enhe) in [(false, false), (true, false), (false, true)] {
+        for (next_hop, expected_next_hop) in &cases {
+            let case = format!(
+                "NH-Len={} <1,1,2>={unicast_enhe} <1,4,2>={labeled_enhe}",
+                next_hop.len()
+            );
+            let (mut session, mut rib_rx) = make_test_session_with_rib(65001, 65002);
+            let (client, mut server) = connected_stream_pair().await;
+            session.test_install_stream(client);
+            establish_test_session(&mut session, 65002).await;
+            let mut negotiated = negotiated_session(65002, unicast_enhe);
+            negotiated.negotiated_families = vec![(Afi::Ipv4, Safi::LabeledUnicast)];
+            if labeled_enhe {
+                negotiated
+                    .extended_nexthop_families
+                    .insert((Afi::Ipv4, Safi::LabeledUnicast), Afi::Ipv6);
+            }
+            install_test_negotiated_session(&mut session, negotiated);
+            rfc7606_drain(&mut rib_rx);
+
+            let mut mp_reach = vec![0x80, 14, 0, 0, 1, 4];
+            mp_reach.push(u8::try_from(next_hop.len()).unwrap());
+            mp_reach.extend_from_slice(next_hop);
+            // reserved; 48 bits = label 100 (bottom of stack) + 203.0.113.0/24
+            mp_reach.extend([0, 48, 0x00, 0x06, 0x41, 203, 0, 113]);
+            mp_reach[2] = u8::try_from(mp_reach.len() - 3).unwrap();
+            let mut attrs = vec![0x40, 1, 1, 0]; // ORIGIN = IGP
+            attrs.extend([0x40, 2, 6, 2, 1, 0, 0, 0xFD, 0xEA]); // AS_PATH [65002]
+            attrs.extend_from_slice(&mp_reach);
+            session
+                .process_update(UpdateMessage {
+                    withdrawn_routes: Bytes::new(),
+                    path_attributes: Bytes::from(attrs),
+                    nlri: Bytes::new(),
+                })
+                .await;
+
+            if next_hop.len() == 4 || labeled_enhe {
+                let RibUpdate::LabeledRoutesReceived { announced, .. } = rib_rx.try_recv().unwrap()
+                else {
+                    panic!("{case}: expected the labeled announcement");
+                };
+                assert_eq!(announced.len(), 1, "{case}");
+                assert_eq!(
+                    announced[0].nlri.prefix,
+                    Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24)),
+                    "{case}"
+                );
+                assert_eq!(announced[0].next_hop, *expected_next_hop, "{case}");
+                assert_eq!(session.fsm.state(), SessionState::Established, "{case}");
+                assert_eq!(session.notifications_sent, 0, "{case}");
+                assert!(malformed_cause_rows(&session).is_empty(), "{case}");
+            } else {
+                assert_ne!(
+                    session.fsm.state(),
+                    SessionState::Established,
+                    "{case}: the session must leave Established"
+                );
+                while let Ok(message) = rib_rx.try_recv() {
+                    assert!(
+                        !matches!(message, RibUpdate::LabeledRoutesReceived { .. }),
+                        "{case}: no route may reach the RIB"
+                    );
+                }
+                assert_single_malformed_disposition(&session, "session_reset");
+                let notification = read_until_notification(&mut server).await;
+                assert_eq!(
+                    notification.code,
+                    rustbgpd_wire::notification::NotificationCode::UpdateMessage,
+                    "{case}"
+                );
+                assert_eq!(
+                    notification.subcode,
+                    rustbgpd_wire::notification::update_subcode::OPTIONAL_ATTRIBUTE_ERROR,
+                    "{case}"
+                );
+                assert_eq!(
+                    notification.data.as_ref(),
+                    mp_reach,
+                    "{case}: NOTIFICATION data must be the attribute as received"
+                );
+            }
+        }
+    }
+}
+
 fn malformed_cause_rows(session: &PeerSession) -> Vec<(String, String, String, f64)> {
     let mut rows: Vec<_> = counter_samples(&session.metrics, "bgp_update_malformed_causes_total")
         .into_iter()

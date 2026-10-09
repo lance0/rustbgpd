@@ -1503,6 +1503,14 @@ carries inactive (absent), unlimited (zero), or finite.
   rejected replacement withdraws any previously advertised route; ordinary
   IPv4-next-hop VPNv4 routes and VPN withdrawals remain eligible without it.
   The peer's receive capability is not an inbound admission requirement.
+- Labeled IPv4 (AFI 1 / SAFI 4) follows the IPv4-unicast rules with tuple
+  1/4/2, which rustbgpd does not advertise, so the tuple is never negotiated.
+  A labeled-IPv4 route with an IPv6 next hop, whether received that way or
+  given one by an export `set next-hop`, is withheld at export and counted in
+  `bgp_exact_export_rejections_total{reason="ipv4_requires_extended_next_hop"}`.
+  Inbound, a 16- or 32-octet labeled-IPv4 next hop resets the session as
+  described below for IPv4 unicast; 1/1/2 does not stand in for 1/4/2.
+  Earlier releases sent and accepted these routes without the capability.
 - Inbound, IPv4 unicast may use `MP_REACH_NLRI` / `MP_UNREACH_NLRI` on any
   session that negotiated the family. Extended Next Hop governs only the
   next-hop encoding, not whether the AFI/SAFI is allowed (§4). A 4-octet IPv4
