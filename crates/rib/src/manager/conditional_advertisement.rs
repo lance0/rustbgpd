@@ -1140,6 +1140,13 @@ impl RibManager {
     pub(super) fn conditional_advertisement_status(&self) -> Vec<ConditionalAdvertisementStatus> {
         let now = Instant::now();
         let tracker = &self.conditional_advertisements;
+        // One pass over the attachments; peers come out in address order.
+        let mut attached: BTreeMap<&Arc<str>, Vec<IpAddr>> = BTreeMap::new();
+        for (peer, names) in &tracker.attachments {
+            for name in names {
+                attached.entry(name).or_default().push(*peer);
+            }
+        }
         tracker
             .definitions
             .values()
@@ -1161,12 +1168,7 @@ impl RibManager {
                         .deadline
                         .map(|deadline| deadline.saturating_duration_since(now)),
                     selection_deferred: self.condition_deferred(definition),
-                    attached_peers: tracker
-                        .attachments
-                        .iter()
-                        .filter(|(_, names)| names.contains(&definition.name))
-                        .map(|(peer, _)| *peer)
-                        .collect(),
+                    attached_peers: attached.remove(&definition.name).unwrap_or_default(),
                 }
             })
             .collect()

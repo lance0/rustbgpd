@@ -1400,3 +1400,39 @@ async fn status_reports_range_counts_with_a_bounded_sample() {
     assert_eq!(row.conditions[1].present_sample, Vec::<Prefix>::new());
     assert_eq!(row.observed, "present");
 }
+
+/// The status query copies the tracked per-prefix observations: it visits
+/// no condition candidate and evaluates no `condition_policy`, however many
+/// candidates the condition prefix holds.
+#[tokio::test(start_paused = true)]
+async fn status_query_evaluates_no_policy() {
+    let mut manager = manager();
+    let _ = manager.install_conditional_advertisements(vec![definition(
+        ConditionalAdvertiseIf::Absent,
+        Some(med_guard()),
+        SETTLE,
+    )]);
+    for octet in 1..=10 {
+        let source = peer(octet);
+        peer_up(&mut manager, source, 1);
+        received(
+            &mut manager,
+            source,
+            1,
+            vec![route_with_med(source, prefix(1), Some(7))],
+            vec![],
+        );
+    }
+    assert!(manager.conditional_advertisement_candidate_visits() >= 10);
+    let before = manager.conditional_advertisement_candidate_visits();
+    let status = manager.conditional_advertisement_status();
+    assert_eq!(
+        condition_states(&status[0]),
+        [(condition().to_string(), "absent")]
+    );
+    assert_eq!(
+        manager.conditional_advertisement_candidate_visits(),
+        before,
+        "the status query must not evaluate condition candidates"
+    );
+}

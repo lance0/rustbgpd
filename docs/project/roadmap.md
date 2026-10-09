@@ -368,7 +368,10 @@ framing → path-marking TLV (streaming "why this path won/lost" — the
 best-path/ORR reasons on the wire) → the M81 pmacct/gobmp/tshark interop
 receipt. REL was deferred from the arc (zero collectors decode it
 today; the policy-discard/validation inputs it needs already exist).
-Details in the "Recently shipped" section below and ADR-0097.
+Path Marking has since been withdrawn pending a non-colliding TLV type (see
+the status table). Details in the
+["Recently shipped" section of the roadmap history](roadmap-history.md#recently-shipped-2026-07-0103-condensed--details-in-changelogadrs)
+and ADR-0097.
 
 **RFC 8212 secure-by-default — activated 2026-08-14 (#1666, ADR-0119
 under ADR-0125 DR4)**: opt-in `ebgp_requires_policy` enforcement
@@ -1265,9 +1268,14 @@ gobmp/pmacct already terminate it into Kafka), and BGPsec.
   trie-backed prefix indexes shipped; the larger LocRib trie swap remains
   deferred because the naive version regressed recompute. Shared route storage
   was measured and rejected — see Deferred.
-- **Conditional advertisement.** Policy feature for advertise-if-present /
-  advertise-if-absent workflows (FRR has it; GoBGP v4.10.0 does not). Design
-  accepted in [ADR-0137](../adr/0137-conditional-advertisement.md); not yet
+- ~~**Conditional advertisement.**~~ **Shipped (unreleased; alpha, outside
+  the v1 inventory)** — advertise-if-present / advertise-if-absent for IPv4
+  and IPv6 unicast, attached to static neighbors
+  ([ADR-0137](../adr/0137-conditional-advertisement.md),
+  [configuration](../reference/configuration.md#conditional-advertisements),
+  M115 FRR interop in [interop](../interop.md),
+  [backup recipe](../cookbook/conditional-advertisement-backup.md)).
+  Peer-group and dynamic-neighbor attachment, and other families, are not
   implemented.
 
 ### Maybe / demand-shaped
@@ -1309,7 +1317,8 @@ gobmp/pmacct already terminate it into Kafka), and BGPsec.
   and folding a slow or optional dataplane actor into the default gate risks
   flapping pods), so the stricter probe should be opt-in, not a redefinition.
 - ~~**Optimal Route Reflection (RFC 9107).**~~ **Shipped 2026-07-02**
-  (ADR-0095, M76) — see "Recently shipped" under Next. The remaining ORR
+  (ADR-0095, M76) — see
+["Recently shipped" in the roadmap history](roadmap-history.md#recently-shipped-2026-07-0103-condensed--details-in-changelogadrs). The remaining ORR
   tail (backup vantages, inter-RR Add-Path for multi-cluster, selectable
   TE/non-default/Flex-Algorithm SPF, §3.2 per-policy Decision Processes) is
   recorded in ADR-0095's deferral register with un-defer triggers.

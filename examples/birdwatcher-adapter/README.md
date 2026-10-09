@@ -417,10 +417,12 @@ each explained by `RibService.ExplainAdvertisedRoute` — a dry run of the same
 export staging body the live path executes, so the reason cannot drift from
 the real decision. Precisely what the view contains:
 
-- **All export-ladder suppressions**, not only NO_EXPORT-community routes:
-  split horizon, iBGP/RFC 4456 reflection rules, family negotiation,
-  RFC 9494 LLGR-stale handling, RFC 5291 ORF, RFC 4684 RT membership, and
-  export-policy denial. Each route names its stopping gate.
+- **All unicast export-ladder suppressions**, not only NO_EXPORT-community
+  routes: split horizon, iBGP/RFC 4456 reflection rules, family negotiation,
+  RFC 9494 LLGR-stale handling, RFC 5291 ORF, well-known `NO_ADVERTISE` /
+  `NO_EXPORT`, route-server control communities, conditional advertisement,
+  export-policy denial, and RFC 9234 OTC egress suppression. Each route names
+  its stopping gate.
 - **Prefix-granular**: a prefix with any advertised path is "exported" —
   an Add-Path peer's partially-suppressed extra paths are not reported.
 - **IPv4/IPv6 unicast, single-best candidates only** (Loc-RIB best routes
@@ -464,8 +466,10 @@ reject-reason function `65520`, distinct so the `[rejection_reasons]` and
 | `orf`            | `64496:65521:5`  | RFC 5291 outbound route filter                   |
 | `rt_membership`  | `64496:65521:6`  | RFC 4684 RT-Constrain membership gate            |
 | `export_policy`  | `64496:65521:7`  | Denied by export policy (detail = deciding term) |
-| *(unrecognized)* | `64496:65521:0`  | Future gate this adapter build predates          |
+| *(other)*        | `64496:65521:0`  | Any gate without a dedicated id: currently `no_advertise`, `no_export`, `rs_control`, `conditional_advertisement` and `otc`, or a gate newer than this adapter build. The `noexport_reason` key still names the gate |
 
+`rt_membership` (id 6) belongs to the VPN export ladder and does not occur
+in this unicast-only view.
 The ids are append-only. Each noexport route also carries human-readable
 `noexport_reason` (the gate name) / `noexport_reason_detail` extra JSON
 keys, ignored by parsers that don't know them.

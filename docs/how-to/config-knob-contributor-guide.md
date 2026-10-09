@@ -47,6 +47,13 @@ move with it.
      passes silently.
    - For load-bearing live-vs-restart claims, extend
      `reload_matrix_pins_load_bearing_field_classes`.
+   - A new `PeerGroupConfig` field (including one shared with `Neighbor`)
+     must also be classified in `copy_peer_group_file_only_fields` in `src/config/mod.rs`. Its
+     destructuring is exhaustive, so a new field fails to compile until it is
+     marked config-file-only or API-owned (carried by `SetPeerGroup`). A
+     config-file-only field makes a sequential SIGHUP candidate that changes it
+     a `rejected` route; add it to the config-file-only field list under
+     "SIGHUP reload routes" in `docs/reference/reload-matrix.md`.
    - Classify the field for diffs and reloads in `src/config/mod.rs`:
      `config_field_impact` (the hot-applied / session-reset / restart-required
      annotation), `neighbor_runtime_equal` (a neighbor field it omits never

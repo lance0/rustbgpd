@@ -557,12 +557,19 @@ Every protocol feature must be validated against real peers in containerlab.
 Unit tests are necessary but not sufficient.
 
 ```bash
+# Build the lab image and confirm it matches this tree
+docker build --target dev -t rustbgpd:dev .
+scripts/source-id.sh --check rustbgpd:dev
+
 # Deploy a test topology
 containerlab deploy -t tests/interop/m0-frr.clab.yml
 
 # Tear down
 containerlab destroy -t tests/interop/m0-frr.clab.yml
 ```
+
+The scripted runners and per-lab prerequisites are in
+[docs/interop.md](docs/interop.md#running-interop-tests).
 
 ## License
 

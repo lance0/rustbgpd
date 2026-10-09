@@ -145,9 +145,13 @@ rung set and order depend on the peer's selection shape. An ORR, Add-Path, or
 per-client-best peer runs `family` and `orf` first, then `best_route` for its
 own candidate, then `split_horizon`, `rr_reflection`, `llgr`,
 `conditional_advertisement`, `export_policy`, `otc`, and `adj_rib_out`. Rungs
-that only appear when they stop a route — `no_advertise`, `no_export`,
-`rs_control`, and the Add-Path `add_path_send_max` limit — sit between `llgr`
-and `otc`. The `conditional_advertisement` rung always sits immediately before
+that only appear when they stop a route are placed by when they are
+evaluated: `no_advertise`, `no_export`, and `rs_control` run after `llgr`
+(and `orf`, on the single-best ladder) and before
+`conditional_advertisement`; `no_advertise` runs again after `export_policy`
+for a policy-added NO_ADVERTISE. The Add-Path `add_path_send_max` limit runs
+after `export_policy`, on the policy-compacted rank walk, and before `otc`.
+The `conditional_advertisement` rung always sits immediately before
 `export_policy`; it stops a route with `conditional_advertisement_suppressed`
 or `conditional_advertisement_eval_error` while an attached
 [conditional advertisement](../reference/configuration.md#conditional-advertisements)

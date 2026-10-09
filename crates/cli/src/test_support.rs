@@ -191,6 +191,8 @@ pub(crate) struct MockState {
     // Canned ListBgpLsRoutes response — when set, served verbatim so the
     // decode-ceiling tests can push multi-MiB listings through loopback.
     pub(crate) list_bgpls_response: Mutex<Option<server_proto::ListBgpLsResponse>>,
+    pub(crate) list_conditional_response:
+        Mutex<Option<server_proto::ListConditionalAdvertisementsResponse>>,
     pub(crate) last_list_vpn: Mutex<Option<server_proto::ListVpnRoutesRequest>>,
     pub(crate) list_vpn_response: Mutex<Option<server_proto::ListVpnRoutesResponse>>,
     pub(crate) last_list_labeled: Mutex<Option<server_proto::ListLabeledRoutesRequest>>,
@@ -2554,6 +2556,9 @@ impl rustbgpd_api::proto::policy_service_server::PolicyService for MockPolicySer
         &self,
         _request: Request<server_proto::ListConditionalAdvertisementsRequest>,
     ) -> Result<Response<server_proto::ListConditionalAdvertisementsResponse>, Status> {
+        if let Some(canned) = self.state.list_conditional_response.lock().await.clone() {
+            return Ok(Response::new(canned));
+        }
         Ok(Response::new(
             server_proto::ListConditionalAdvertisementsResponse {
                 definitions: vec![server_proto::ConditionalAdvertisementStatus {
