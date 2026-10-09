@@ -1187,13 +1187,18 @@ impl PeerSession {
             && self.config.peer_interface.is_some()
             && self.config.peer_scope_id.is_some()
     }
-    fn link_local_next_hop_scope(&self, next_hop: IpAddr) -> Option<Box<NextHopScope>> {
-        match next_hop {
-            IpAddr::V6(v6) if is_ipv6_link_local(&v6) => {
-                self.link_local_next_hop_scope.clone().map(Box::new)
-            }
-            _ => None,
-        }
+    /// The receiving interface for a link-local primary next hop or a
+    /// link-local companion; export forwards a companion only on that link.
+    fn link_local_next_hop_scope(
+        &self,
+        next_hop: IpAddr,
+        link_local_next_hop: Option<std::net::Ipv6Addr>,
+    ) -> Option<Box<NextHopScope>> {
+        let link_local = matches!(next_hop, IpAddr::V6(v6) if is_ipv6_link_local(&v6))
+            || link_local_next_hop.is_some();
+        link_local
+            .then(|| self.link_local_next_hop_scope.clone().map(Box::new))
+            .flatten()
     }
     pub(super) fn aspa_validation_context(&self) -> AspaValidationContext {
         rustbgpd_rpki::aspa_verify::validation_context(
@@ -2490,7 +2495,7 @@ impl PeerSession {
                         prefix,
                         next_hop,
                         link_local_next_hop: None,
-                        next_hop_scope: self.link_local_next_hop_scope(next_hop),
+                        next_hop_scope: self.link_local_next_hop_scope(next_hop, None),
                         peer: self.peer_ip,
                         received_as_path: import_attr_memo.received_path_override(
                             parsed_as_path,
@@ -3098,7 +3103,8 @@ impl PeerSession {
                                 prefix: entry.prefix,
                                 next_hop,
                                 link_local_next_hop,
-                                next_hop_scope: self.link_local_next_hop_scope(next_hop),
+                                next_hop_scope: self
+                                    .link_local_next_hop_scope(next_hop, link_local_next_hop),
                                 peer: self.peer_ip,
                                 received_as_path: import_attr_memo.received_path_override(
                                     parsed_as_path,

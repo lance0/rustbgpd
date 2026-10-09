@@ -504,6 +504,7 @@ fn fib_dedup_preserves_link_local_scope_and_normalizes_max_paths() {
     let mut manager = manager(true);
     let dedup_prefix = prefix(40);
     let scoped_prefix = Prefix::V6(Ipv6Prefix::new("2001:db8:40::".parse().unwrap(), 48));
+    let companion_prefix = Prefix::V6(Ipv6Prefix::new("2001:db8:41::".parse().unwrap(), 48));
     for index in 0..300usize {
         let source = peer(index);
         let mut dedup = route(
@@ -521,6 +522,20 @@ fn fib_dedup_preserves_link_local_scope_and_normalizes_max_paths() {
                 ifindex: u32::try_from(index + 1).unwrap(),
             }));
             rows.push(scoped);
+            // A global next hop carries its link-local companion's scope;
+            // that scope must not split one global egress in two.
+            let mut companion = route(
+                companion_prefix,
+                source,
+                "2001:db8::1".parse().unwrap(),
+                &[65001],
+            );
+            companion.link_local_next_hop = Some("fe80::1".parse().unwrap());
+            companion.next_hop_scope = Some(Box::new(NextHopScope {
+                interface: Arc::from(format!("eth{index}")),
+                ifindex: u32::try_from(index + 1).unwrap(),
+            }));
+            rows.push(companion);
         }
         apply_routes(&mut manager, source, rows);
     }
@@ -541,6 +556,16 @@ fn fib_dedup_preserves_link_local_scope_and_normalizes_max_paths() {
     assert_ne!(
         scoped.next_hops[0].next_hop_scope,
         scoped.next_hops[1].next_hop_scope
+    );
+    let companion = page
+        .candidates
+        .iter()
+        .find(|candidate| candidate.best.prefix == companion_prefix)
+        .unwrap();
+    assert_eq!(
+        companion.next_hops.len(),
+        1,
+        "same global egress must dedupe"
     );
 
     // Give one prefix 300 distinct egresses; the page-specific normalization

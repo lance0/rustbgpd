@@ -18,8 +18,9 @@
 #     the route is present, so it was not treated as withdrawn, and carries
 #     the expected next hop;
 #   - a tshark capture in rustbgpd's network namespace, judged from raw
-#     MP_REACH_NLRI bytes: every UPDATE announcing the prefix has a 16- or
-#     32-octet next hop with the expected global address, no receiver-bound
+#     MP_REACH_NLRI bytes: every UPDATE announcing the prefix has exactly the
+#     expected 16-octet global next hop (both receivers are off the source's
+#     link, so the source's link-local must not reach them), no receiver-bound
 #     IPv6 MP_REACH_NLRI has any other next-hop length, and no NOTIFICATION is
 #     sent or received;
 #   - both receiver sessions stay on their first connection.

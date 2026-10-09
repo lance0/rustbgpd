@@ -364,11 +364,14 @@ impl SessionExportProfile {
         next_hop: IpAddr,
         route: &Route,
     ) -> Option<Ipv6Addr> {
+        // RFC 2545 §3: the source's link-local belongs to its own link.
+        // Forward it only between sessions bound to the same interface;
+        // everywhere else (iBGP, route-server clients, global transport)
+        // send the 16-octet global form.
         (next_hop == route.next_hop
             && !matches!(next_hop, IpAddr::V6(addr) if is_ipv6_link_local(&addr))
-            && (!self.link_local_next_hop
-                || (self.scoped_link_local_peer
-                    && route.next_hop_scope.as_deref() == self.next_hop_scope.as_ref())))
+            && self.next_hop_scope.is_some()
+            && route.next_hop_scope.as_deref() == self.next_hop_scope.as_ref())
         .then_some(route.link_local_next_hop)
         .flatten()
     }
