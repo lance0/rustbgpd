@@ -8,7 +8,6 @@ use std::time::Duration;
 use crate::connection::{Connection, read_rpc};
 use crate::error::CliError;
 use crate::output;
-use crate::proto::policy_service_client::PolicyServiceClient;
 use crate::proto::{
     ConditionalAdvertisementStatus, ListConditionalAdvertisementsRequest,
     ListConditionalAdvertisementsResponse,
@@ -18,8 +17,7 @@ const NONE_INSTALLED: &str =
     "No conditional advertisements installed (none attached to a static neighbor)";
 
 pub async fn status(connection: Connection, json: bool) -> Result<(), CliError> {
-    let mut client =
-        PolicyServiceClient::with_interceptor(connection.channel(), connection.interceptor());
+    let mut client = connection.policy_listing_client();
     let resp = read_rpc(
         "ListConditionalAdvertisements",
         client.list_conditional_advertisements(ListConditionalAdvertisementsRequest {}),
