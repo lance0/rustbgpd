@@ -933,9 +933,6 @@ fn startup_runtime_model_fn(
     Arc::new(move || model.clone())
 }
 
-/// Build an `EvpnInstanceId -> &InstanceDataplaneStatus` index from
-/// the per-call snapshot so `ListEvpnInstances` joins config rows
-/// with status rows in O(N) instead of O(N²).
 /// Group the flat L2 drop-count snapshot by VNI, each VNI's rows sorted by
 /// reason.
 fn index_l2_remote_route_drop_counts(
@@ -957,6 +954,9 @@ fn index_l2_remote_route_drop_counts(
     index
 }
 
+/// Build an `EvpnInstanceId -> &InstanceDataplaneStatus` index from
+/// the per-call snapshot so `ListEvpnInstances` joins config rows
+/// with status rows in O(N) instead of O(N²).
 fn instance_status_index(
     snapshot: &[InstanceDataplaneStatus],
 ) -> HashMap<EvpnInstanceId, &InstanceDataplaneStatus> {
