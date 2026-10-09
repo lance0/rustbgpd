@@ -2747,3 +2747,294 @@ async fn received_mpls_v6_link_local_companion_records_the_receiving_interface()
         }
     }
 }
+
+/// The `MP_REACH_NLRI` family and next hop of a raw UPDATE: (AFI, SAFI,
+/// next-hop length, next-hop bytes); `None` for an UPDATE without one, such
+/// as an End-of-RIB marker.
+fn raw_mp_reach_family_next_hop(raw: &[u8]) -> Option<(u16, u8, u8, Vec<u8>)> {
+    let body = &raw[19..];
+    let withdrawn_len = usize::from(u16::from_be_bytes([body[0], body[1]]));
+    let attrs_start = 2 + withdrawn_len + 2;
+    let (_, value) = attribute_values(&body[attrs_start..])
+        .into_iter()
+        .find(|(code, _)| *code == 14)?;
+    let nh_len = value[3];
+    Some((
+        u16::from_be_bytes([value[0], value[1]]),
+        value[2],
+        nh_len,
+        value[4..4 + usize::from(nh_len)].to_vec(),
+    ))
+}
+
+fn labeled_route_with(prefix: Prefix, next_hop: IpAddr) -> rustbgpd_rib::LabeledRibRoute {
+    let mut route = make_labeled_rib_route(100);
+    route.nlri.prefix = prefix;
+    route.next_hop = next_hop;
+    route.peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 9));
+    route
+}
+
+fn vpn_route_with(prefix: VpnPrefix, next_hop: IpAddr) -> rustbgpd_rib::VpnRibRoute {
+    let mut route = make_vpn_rib_route(100);
+    route.nlri.prefix = prefix;
+    route.next_hop = next_hop;
+    route.peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 9));
+    route
+}
+
+const MPLS_FAMILIES: [(Afi, Safi); 4] = [
+    (Afi::Ipv4, Safi::LabeledUnicast),
+    (Afi::Ipv6, Safi::LabeledUnicast),
+    (Afi::Ipv4, Safi::MplsVpn),
+    (Afi::Ipv6, Safi::MplsVpn),
+];
+
+/// A dual-stack export policy shared across families sets an IPv4 next hop.
+/// Through the real RIB staging, exact-export preflight and transport
+/// encoder, labeled-IPv6 and `VPNv6` routes keep their IPv6 next hop (16 and
+/// 24 octets), while labeled-IPv4 and `VPNv4` routes take the IPv4 one (4 and
+/// 12 octets). A `VPNv6` route stored with an IPv4 next hop (the 12-octet form
+/// the decoder accepts) is withheld rather than encoded. Explain reports the
+/// next hop that reaches the wire.
+#[tokio::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one ordered RIB-to-wire scenario across four MPLS families"
+)]
+async fn ipv4_export_set_next_hop_skips_labeled_ipv6_and_vpnv6_on_the_wire() {
+    let (mut session, rib_rx) =
+        make_test_session_with_metrics_and_identity(BgpMetrics::new(), SessionIdentity::primary(7));
+    let (client, mut server) = connected_stream_pair().await;
+    session.test_install_stream(client);
+    let mut negotiated = negotiated_session(65002, false);
+    negotiated.negotiated_families = MPLS_FAMILIES.to_vec();
+    install_test_negotiated_session(&mut session, negotiated);
+    session.publish_export_profile();
+    let (_query_tx, query_rx) = mpsc::channel(8);
+    let manager = rustbgpd_rib::RibManager::new(rib_rx, query_rx, None, None, BgpMetrics::new());
+    let manager_task = tokio::spawn(manager.run());
+
+    let set_ipv4 = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 9));
+    let policy = set_next_hop_import(rustbgpd_policy::NextHopAction::Specific(set_ipv4));
+    let (outbound_tx, mut outbound_rx) = mpsc::channel(16);
+    session
+        .rib_tx
+        .send(RibUpdate::SetPeerExportEncoder {
+            peer: session.peer_ip,
+            session_id: 7,
+            encoder: session.export_encoder.clone(),
+        })
+        .await
+        .unwrap();
+    session
+        .rib_tx
+        .send(RibUpdate::PeerUp {
+            peer: session.peer_ip,
+            session_id: 7,
+            peer_asn: 65002,
+            peer_router_id: Ipv4Addr::new(10, 0, 0, 2),
+            outbound_tx,
+            export_policy: Some(policy),
+            sendable_families: MPLS_FAMILIES.to_vec(),
+            is_ebgp: true,
+            route_reflector_client: false,
+            orr_vantage: None,
+            per_client_best: false,
+            interpret_rfc1997: true,
+            add_path_send_families: vec![],
+            add_path_send_max: 0,
+            negotiated_orf_recv: vec![],
+            negotiated_llgr_families: vec![],
+        })
+        .await
+        .unwrap();
+
+    let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 9));
+    let v6_next_hop: IpAddr = RECEIVED_IPV6_NEXT_HOP.parse().unwrap();
+    let labeled_v4 = Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(10, 0, 1, 0), 24));
+    let labeled_v6 = Prefix::V6(Ipv6Prefix::new("2001:db8:1::".parse().unwrap(), 48));
+    let vpn_v4 = VpnPrefix::v4(Ipv4Addr::new(10, 0, 2, 0), 24).unwrap();
+    let vpn_v6 = VpnPrefix::v6("2001:db8:2::".parse().unwrap(), 48).unwrap();
+    let vpn_v6_stored_ipv4 = VpnPrefix::v6("2001:db8:3::".parse().unwrap(), 48).unwrap();
+    session
+        .rib_tx
+        .send(RibUpdate::LabeledRoutesReceived {
+            peer: source,
+            session_id: 0,
+            announced: vec![
+                labeled_route_with(labeled_v4, IpAddr::V4(Ipv4Addr::new(192, 0, 2, 7))),
+                labeled_route_with(labeled_v6, v6_next_hop),
+            ],
+            withdrawn: vec![],
+        })
+        .await
+        .unwrap();
+    session
+        .rib_tx
+        .send(RibUpdate::VpnRoutesReceived {
+            peer: source,
+            session_id: 0,
+            announced: vec![
+                vpn_route_with(vpn_v4, IpAddr::V4(Ipv4Addr::new(192, 0, 2, 7))),
+                vpn_route_with(vpn_v6, v6_next_hop),
+                vpn_route_with(vpn_v6_stored_ipv4, IpAddr::V4(Ipv4Addr::new(192, 0, 2, 8))),
+            ],
+            withdrawn: vec![],
+        })
+        .await
+        .unwrap();
+
+    // Forward every RIB export (End-of-RIB included) to the transport until
+    // all four sendable routes have been staged.
+    let (mut labeled_seen, mut vpn_seen) = (Vec::new(), Vec::new());
+    while !(labeled_seen.contains(&labeled_v4)
+        && labeled_seen.contains(&labeled_v6)
+        && vpn_seen.contains(&vpn_v4)
+        && vpn_seen.contains(&vpn_v6))
+    {
+        let update = tokio::time::timeout(Duration::from_secs(3), outbound_rx.recv())
+            .await
+            .unwrap_or_else(|_| {
+                panic!("RIB export; staged labeled {labeled_seen:?}, VPN {vpn_seen:?}")
+            })
+            .expect("outbound channel open");
+        labeled_seen.extend(update.labeled_announce.iter().map(|r| r.nlri.prefix));
+        vpn_seen.extend(update.vpn_announce.iter().map(|r| r.nlri.prefix));
+        session.send_route_update(update);
+    }
+    assert!(
+        !vpn_seen.contains(&vpn_v6_stored_ipv4),
+        "VPNv6 route with an IPv4 next hop staged for the wire: {vpn_seen:?}"
+    );
+
+    let rd_zero = [0_u8; 8];
+    let with_rd = |ip: Vec<u8>| [rd_zero.to_vec(), ip].concat();
+    let mut expected = vec![
+        (1, 4, 4, vec![192, 0, 2, 9]),
+        (2, 4, 16, ipv6_bytes(RECEIVED_IPV6_NEXT_HOP)),
+        (1, 128, 12, with_rd(vec![192, 0, 2, 9])),
+        (2, 128, 24, with_rd(ipv6_bytes(RECEIVED_IPV6_NEXT_HOP))),
+    ];
+    let mut wire = Vec::new();
+    while wire.len() < expected.len() {
+        let raw = tokio::time::timeout(
+            Duration::from_secs(3),
+            read_single_raw_bgp_message(&mut server),
+        )
+        .await
+        .unwrap_or_else(|_| panic!("UPDATE on the wire; read so far {wire:?}"));
+        wire.extend(raw_mp_reach_family_next_hop(&raw));
+    }
+    wire.sort();
+    expected.sort();
+    assert_eq!(wire, expected, "MP_REACH (AFI, SAFI, NH-Len, next hop)");
+
+    // Explain reports the next hop that reached the wire, and no
+    // inapplicable IPv4 next-hop modification.
+    for (prefix, rd, labeled, next_hop) in [
+        (labeled_v4, None, true, set_ipv4),
+        (labeled_v6, None, true, v6_next_hop),
+        (
+            Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(10, 0, 2, 0), 24)),
+            Some(()),
+            false,
+            set_ipv4,
+        ),
+        (
+            Prefix::V6(Ipv6Prefix::new("2001:db8:2::".parse().unwrap(), 48)),
+            Some(()),
+            false,
+            v6_next_hop,
+        ),
+    ] {
+        let (reply, explained) = oneshot::channel();
+        session
+            .rib_tx
+            .send(RibUpdate::ExplainAdvertisedRoute {
+                peer: session.peer_ip,
+                prefix,
+                rd: rd.map(|()| RouteDistinguisher([0, 0, 0xFD, 0xE8, 0, 0, 0, 1])),
+                labeled,
+                source: None,
+                reply,
+            })
+            .await
+            .unwrap();
+        let explain = explained.await.unwrap().unwrap();
+        assert_eq!(explain.next_hop, Some(next_hop), "explain {prefix}");
+        let expected_mod = next_hop
+            .is_ipv4()
+            .then_some(rustbgpd_policy::NextHopAction::Specific(set_ipv4));
+        assert_eq!(
+            explain.modifications.set_next_hop, expected_mod,
+            "explain modifications {prefix}"
+        );
+    }
+
+    drop(session);
+    manager_task.abort();
+}
+
+/// Final guard: a labeled-IPv6 or `VPNv6` route whose next hop is IPv4 is
+/// refused at export preparation (live send and exact-export preflight),
+/// never encoded as a 4-octet labeled or 12-octet VPN next hop under AFI 2.
+/// The IPv4 families keep their existing next-hop rules.
+#[tokio::test]
+async fn ipv6_labeled_and_vpn_routes_with_an_ipv4_next_hop_are_refused_at_export() {
+    let (mut session, _rib_rx) = make_test_session_with_rib(65001, 65001);
+    let mut negotiated = negotiated_session(65001, false);
+    negotiated.negotiated_families = MPLS_FAMILIES.to_vec();
+    session.negotiated = Some(Arc::new(negotiated));
+    let profile = session.publish_export_profile();
+    let ipv4 = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 9));
+    let ipv6: IpAddr = RECEIVED_IPV6_NEXT_HOP.parse().unwrap();
+    let ipv4_mapped: IpAddr = "::ffff:192.0.2.9".parse().unwrap();
+    let v4 = Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(10, 0, 1, 0), 24));
+    let v6 = Prefix::V6(Ipv6Prefix::new("2001:db8:1::".parse().unwrap(), 48));
+    let vpn4 = VpnPrefix::v4(Ipv4Addr::new(10, 0, 2, 0), 24).unwrap();
+    let vpn6 = VpnPrefix::v6("2001:db8:2::".parse().unwrap(), 48).unwrap();
+    let refused = || Some(ExportProbeError::MissingIpv6NextHop);
+    for (route, expected) in [
+        (labeled_route_with(v6, ipv4), refused()),
+        (labeled_route_with(v6, ipv6), None),
+        // An IPv4-mapped IPv6 next hop (RFC 4798 form) is an IPv6 address.
+        (labeled_route_with(v6, ipv4_mapped), None),
+        (labeled_route_with(v4, ipv4), None),
+        // An IPv6 next hop on labeled IPv4 is unchanged by this guard.
+        (labeled_route_with(v4, ipv6), None),
+    ] {
+        let live = profile.prepare_labeled_candidate(&route).err();
+        assert_eq!(
+            live, expected,
+            "labeled {} via {}",
+            route.nlri.prefix, route.next_hop
+        );
+        let probe = profile
+            .probe_announcement(ExportCandidate::Labeled(&route))
+            .err();
+        assert_eq!(probe, expected, "labeled preflight {}", route.nlri.prefix);
+    }
+    for (route, expected) in [
+        (vpn_route_with(vpn6, ipv4), refused()),
+        (vpn_route_with(vpn6, ipv6), None),
+        (vpn_route_with(vpn6, ipv4_mapped), None),
+        (vpn_route_with(vpn4, ipv4), None),
+        // VPNv4 with an IPv6 next hop still needs Extended Next Hop.
+        (
+            vpn_route_with(vpn4, ipv6),
+            Some(ExportProbeError::Vpnv4RequiresExtendedNextHop),
+        ),
+    ] {
+        let live = profile.prepare_vpn_candidate(&route).err();
+        assert_eq!(
+            live, expected,
+            "VPN {:?} via {}",
+            route.nlri.prefix, route.next_hop
+        );
+        let probe = profile
+            .probe_announcement(ExportCandidate::Vpn(&route))
+            .err();
+        assert_eq!(probe, expected, "VPN preflight {:?}", route.nlri.prefix);
+    }
+}

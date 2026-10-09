@@ -3248,14 +3248,19 @@ These fields modify matching routes. Only valid with `action = "permit"`.
 | `set_as_path_prepend`  | table       | `{ asn = 65001, count = 3 }` (ASN 1–4294967295, count 1–10) |
 
 `set_next_hop` follows the route's address family. An IPv6 address on an IPv4
-unicast route is an RFC 8950 next hop. An IPv4 address does not apply to an
-IPv6 unicast route, whose `MP_REACH_NLRI` next hop must be IPv6
-(RFC 2545 §3); the route keeps its next hop, as with FRR's `set ip next-hop`.
-On import, `"self"` for an IPv6 route resolves to the session's local IPv6
-address, else `local_ipv6_nexthop`; with neither (IPv4 transport and no
-`local_ipv6_nexthop`) the route keeps its received next hop. Export never
-encodes an IPv4 next hop for an IPv6 route: such a route is withheld from that
-peer and counted in
+unicast route is an RFC 8950 next hop. An IPv4 address does not apply to a
+route with IPv6 NLRI (IPv6 unicast, IPv6 labeled unicast, or VPNv6), whose
+`MP_REACH_NLRI` next hop must be IPv6 (RFC 2545 §3, RFC 8277, RFC 4659
+§3.2.1); the route keeps its next hop, as with FRR's `set ip next-hop`.
+rustbgpd does not originate 6PE or 6VPE routes and never converts an IPv4
+`set_next_hop` into an IPv4-mapped IPv6 address. To set one deliberately, give
+the IPv6 form, such as `"::ffff:192.0.2.9"`. A received IPv4-mapped next hop
+is reflected unchanged. On import, `"self"` for an IPv6 route resolves to the
+session's local IPv6 address, else `local_ipv6_nexthop`; with neither (IPv4
+transport and no `local_ipv6_nexthop`) the route keeps its received next hop.
+Export never encodes an IPv4 next hop for a route with IPv6 NLRI, including a
+VPNv6 route received with a 12-octet RD + IPv4 next hop: such a route is
+withheld from that peer and counted in
 `bgp_exact_export_rejections_total{reason="missing_ipv6_next_hop"}`.
 
 ### Community formats

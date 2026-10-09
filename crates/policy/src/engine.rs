@@ -438,15 +438,18 @@ pub struct RouteModifications {
 }
 
 impl NextHopAction {
-    /// Whether this action applies to the evaluated route. An IPv6 unicast
-    /// route's `MP_REACH_NLRI` next hop is 16 or 32 octets (RFC 2545 §3), so
-    /// an IPv4 address does not apply to it, as with FRR's `set ip
-    /// next-hop`; the action is skipped as if absent. An IPv6 address on an
-    /// IPv4 route applies (RFC 8950). Evaluation, its merges and explain
-    /// all use this one rule.
+    /// Whether this action applies to the evaluated route. An IPv6-NLRI
+    /// route's `MP_REACH_NLRI` next hop is IPv6: 16 or 32 octets for
+    /// unicast and labeled unicast (RFC 2545 §3, RFC 8277), an RD-prefixed
+    /// IPv6 address for `VPNv6` (RFC 4659 §3.2.1). An IPv4 address does not
+    /// apply to such a route, as with FRR's `set ip next-hop`; the action is
+    /// skipped as if absent. An IPv6 address on an IPv4 route applies
+    /// (RFC 8950). Evaluation, its merges and explain all use this one rule.
     pub(crate) fn applies_to(&self, ctx: &RouteContext<'_>) -> bool {
-        !(ctx.family == Some(RouteFamily::Ipv6Unicast)
-            && matches!(self, Self::Specific(IpAddr::V4(_))))
+        !(matches!(
+            ctx.family,
+            Some(RouteFamily::Ipv6Unicast | RouteFamily::Ipv6LabeledUnicast | RouteFamily::Vpnv6)
+        ) && matches!(self, Self::Specific(IpAddr::V4(_))))
     }
 }
 
