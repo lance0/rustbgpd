@@ -553,7 +553,7 @@ If the release includes EVPN changes (any commit touching
 `crates/rib/src/`, the EVPN gRPC surface, `crates/evpn-linux/src/`,
 `crates/evpn/src/`, `src/evpn_ack.rs`, `src/evpn_dataplane.rs`,
 `src/evpn_es_drain.rs`, `src/evpn_es_link_drain.rs`, `src/evpn_imet.rs`,
-`src/evpn_l3_originator.rs`, `src/evpn_originator/`,
+`src/evpn_auto_esi.rs`, `src/evpn_l3_originator.rs`, `src/evpn_originator/`,
 `src/evpn_plan_decomposer.rs`, `src/evpn_runtime_converger.rs`,
 `src/evpn_segment.rs`, or `src/evpn_svi.rs`), run at least one of
 M29 (capability sanity) or M30 (real Type 2 reflection). Run M33
@@ -613,7 +613,8 @@ containerlab destroy -t tests/interop/m37-evpn-local-origination.clab.yml
 If the release touches **Gate 7b+2** (MAC-with-IP Type 2 via ARP/ND
 suppression — `crates/evpn/src/origination_macip.rs`), also run
 M37+IP. If the release touches **Gate 8 / 8b** (Type 1/4 origination
-in `crates/evpn/src/origination_es.rs`, DF election in
+in `crates/evpn/src/origination_es.rs`, auto-LACP Type 1 ESI derivation in
+`src/evpn_auto_esi.rs`, DF election in
 `crates/evpn/src/df_election.rs`, ESI Label / ES-Import RT extcomms,
 aliasing in `crates/evpn/src/aliasing.rs`, receive-side mass-withdraw
 projection and BUM-port supervision in `src/evpn_dataplane.rs`, or

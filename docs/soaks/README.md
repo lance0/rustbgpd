@@ -25,9 +25,9 @@ the run they describe.
 | [M33 50k-route EVPN scale soak](soak-m33-evpn-scale-10h-leak.md) | Attribute-intern behavior at 50,000 EVPN routes under churn |
 | [M37 local-origination MAC-churn 24-hour soak](soak-m37-local-origination-churn-24h.md) | Local MAC origination under bounded bridge-FDB churn |
 | [M67 link-drain churn 24-hour soak](soak-m67-link-drain-24h-evpn-leak.md) | Attribute-intern behavior under link drain and MAC mobility |
-| [Route-reflector flagship 24-hour soak](soak-rr-flagship-24h.md) | Route reflection under churn |
+| [Route-reflector flagship 24-hour soak, 2026-08-17 (PASS)](soak-rr-flagship-24h.md) | Run on unreleased `a88666c41`; route reflection under churn |
 | [Route-reflector flagship 24-hour soak, 2026-09-28 (PASS)](soak-rr-flagship-24h-2026-09-28.md) | Run on the v0.73.0 tag; every gate passes on the on-host verdict; terminal reflected delivery exact at 99,900 non-self prefixes per observer after 5,493,035 churn cycles; zero flaps |
-| [Route-server flagship 24-hour soak](soak-rs-flagship-24h.md) | Reload and maximum-prefix behavior under sustained load |
+| [Route-server flagship 24-hour soak, 2026-08-16 (PASS)](soak-rs-flagship-24h.md) | Run on unreleased `a88666c41`; reload and maximum-prefix behavior under sustained load |
 | [Route-server flagship 24-hour soak, 2026-09-11 (FAIL)](soak-rs-flagship-24h-2026-09-11.md) | Reload, maximum-prefix, and management-plane load; management read timeouts and missed metrics slots |
 | [Route-server flagship 24-hour soak, 2026-09-12 (FAIL)](soak-rs-flagship-24h-2026-09-12.md) | Reload, maximum-prefix, and management-plane load; missed metrics slots only |
 | [Route-server flagship 24-hour soak, 2026-09-14 (PASS on reanalysis)](soak-rs-flagship-24h-2026-09-14.md) | Qualifying run on v0.70.0; passes under the reload-window cadence rule; original verdict failed the zero-miss cadence rule only |

@@ -36,7 +36,7 @@ superseded campaigns remain below with their original provenance.
 
 > **Harness boundary.** Receiver-bound completion and stall rows measured
 > before 2026-10-03 used the glibc-malloc `reloadstall` harness and are not
-> directly comparable with the v0.74.0 rows
+> directly comparable with the v0.74.0 and later rows
 > ([why](perf/headline-refresh-jemalloc-2026-10.md#why-earlier-receiver-bound-rows-are-not-comparable)).
 
 The three commonly cited 1,000-peer memory values are not a release trend:
