@@ -633,6 +633,23 @@ jobs:
       # Pre-build the harness image with GHA cache so the warm path
       # (no Dockerfile change) skips the `apt-get install` rebuild.
       - name: Build netns-test harness image
+        id: netns_image
+        continue-on-error: true
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: crates/evpn-linux/tests/docker/Dockerfile
+          load: true
+          tags: rustbgpd-netns-tests:latest
+          cache-from: type=gha,scope=evpn-bum-kernel
+          cache-to: type=gha,scope=evpn-bum-kernel,mode=max,ignore-error=true
+
+      - name: Wait before retrying the netns image build
+        if: steps.netns_image.outcome == 'failure'
+        run: sleep 30
+
+      - name: Retry Build netns-test harness image
+        if: steps.netns_image.outcome == 'failure'
         uses: docker/build-push-action@v7
         with:
           context: .

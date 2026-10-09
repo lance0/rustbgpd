@@ -833,6 +833,8 @@ jobs:
     name: Privileged netns selectors (kernel dataplane inventory)
     runs-on: ubuntu-latest
     timeout-minutes: 40
+    env:
+      SKIP_BUILD: "1"
     steps:
       - uses: actions/checkout@v7
 
@@ -842,7 +844,12 @@ jobs:
           : > "$receipt"
           printf 'NETNS_SELECTOR_RECEIPT=%s\n' "$receipt" >> "$GITHUB_ENV"
 
-      # The Docker netns harness builds its own image and runs the privileged
+      - name: Build netns-test harness image
+        run: |
+          RETRY_DELAY_SECONDS=10 .github/scripts/retry-docker-image.sh docker build \
+            -f crates/evpn-linux/tests/docker/Dockerfile -t rustbgpd-netns-tests:latest .
+
+      # The Docker netns harness uses the pre-built image and runs the privileged
       # tests inside `docker run --cap-add=NET_ADMIN --cap-add=SYS_ADMIN`, so the
       # netns never leaks to the host namespace. Most selectors are vrf-free and
       # need no host setup beyond Docker (preinstalled). The L3 selectors create

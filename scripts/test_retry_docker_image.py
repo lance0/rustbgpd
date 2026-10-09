@@ -44,7 +44,7 @@ class RetryDockerImageTests(unittest.TestCase):
             import json, os, pathlib, sys, time
             base = pathlib.Path(os.environ['FAKE_LOG'])
             args = sys.argv[1:]
-            op = 'pull' if args[0] == 'pull' else ('leaf' if args[-1] != os.environ['OPENBGPD_IMAGE'] else 'index')
+            op = args[0] if args[0] in ('pull', 'build') else ('leaf' if args[-1] != os.environ['OPENBGPD_IMAGE'] else 'index')
             count_file = base / op
             count = int(count_file.read_text()) + 1 if count_file.exists() else 1
             count_file.write_text(str(count))
@@ -60,6 +60,8 @@ class RetryDockerImageTests(unittest.TestCase):
                 sys.exit(int(os.environ.get('FAIL_CODE', '37')))
             if op == 'pull':
                 print('pulled')
+            elif op == 'build':
+                print('built')
             elif op == 'leaf':
                 print(json.dumps({'config': {'digest': os.environ.get('FAKE_CONFIG', os.environ['OPENBGPD_CONFIG'])}}))
             else:
@@ -161,6 +163,25 @@ class RetryDockerImageTests(unittest.TestCase):
         result = self.run_helper(FAIL_INDEX="2", RETRY_DELAY_SECONDS="10")
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(self.sleeps(), ["10", "20"])
+
+    def test_netns_prebuild_recovers_or_preserves_build_failure(self):
+        step = next(s for s in workflow_steps("kernel-dataplane.yml", "netns")
+                    if s.get("name") == "Build netns-test harness image")
+        for failures, expected in (("0", 0), ("2", 0), ("3", 47)):
+            with self.subTest(failures=failures):
+                for name in ("build", "calls", "sleeps"):
+                    (self.path / name).unlink(missing_ok=True)
+                result = subprocess.run(
+                    ["bash", "-eo", "pipefail", "-c", step["run"]], cwd=ROOT,
+                    env={**self.env, "FAIL_BUILD": failures, "FAIL_CODE": "47"},
+                    capture_output=True, text=True, check=False,
+                )
+                self.assertEqual(result.returncode, expected, result.stderr)
+                attempts = 1 if failures == "0" else 3
+                self.assertEqual([c[0] for c in self.calls()], [["build", "-f",
+                    "crates/evpn-linux/tests/docker/Dockerfile", "-t",
+                    "rustbgpd-netns-tests:latest", "."]] * attempts)
+                self.assertEqual(self.sleeps(), [] if attempts == 1 else ["10", "20"])
 
     def test_buildkit_pre_pull_retries_and_never_fails_the_step(self):
         for action in ("build-rustbgpd-dev", "prime-rustbgpd-dev-cache"):
@@ -280,9 +301,21 @@ ACTIONS = ROOT / ".github/actions"
 def action_steps(action):
     """The steps of a local composite action as flat dicts; `with` stays raw text."""
     text = (ACTIONS / action / "action.yml").read_text().split("\n  steps:\n", 1)[1]
+    return parse_steps(text)
+
+
+def workflow_steps(workflow, job):
+    text = (ROOT / ".github/workflows" / workflow).read_text()
+    match = re.search(rf"(?ms)^  {job}:\n(.*?)(?=^  \w+:|\Z)", text)
+    assert match, job
+    text = match.group(1).split("\n    steps:\n", 1)[1]
+    return parse_steps(re.sub(r"(?m)^  ", "", text))
+
+
+def parse_steps(text):
     steps = []
     for chunk in re.split(r"(?m)^    - ", text)[1:]:
-        step = dict(re.findall(r"(?m)^(?:      )?(name|uses|id|if|continue-on-error): (.+)$", chunk))
+        step = dict(re.findall(r"(?m)^(?:      )?(name|uses|id|if|continue-on-error|run): (.+)$", chunk))
         run = re.search(r"(?ms)^      run: \|\n(.*?)(?=^\S|^    \S|\Z)", chunk)
         if run:
             step["run"] = textwrap.dedent(run.group(1))
@@ -308,7 +341,7 @@ def build_retry_errors(steps):
                 errors.append(f"{step.get('name')}: BuildKit image not pre-pulled first")
         if uses.startswith("docker/build-push-action@") and "if" not in step:
             retry = f"steps.{step.get('id')}.outcome == 'failure'"
-            if not step.get("continue-on-error") or not any(
+            if step.get("continue-on-error") != "true" or not any(
                 s.get("if") == retry and s.get("uses") == uses and s.get("with") == step.get("with")
                 for s in steps[index + 1:]
             ):
@@ -317,6 +350,34 @@ def build_retry_errors(steps):
 
 
 class BuildRetryShapeTests(unittest.TestCase):
+    def test_ci_netns_build_has_identical_guarded_retry(self):
+        steps = workflow_steps("ci.yml", "evpn_bum_filter_kernel")
+        index = next(i for i, s in enumerate(steps)
+                     if s.get("name") == "Build netns-test harness image")
+        self.assertEqual(build_retry_errors(steps[index:]), [])
+        self.assertEqual(steps[index + 1].get("if"), "steps.netns_image.outcome == 'failure'")
+        self.assertEqual(steps[index + 1].get("run").strip(), "sleep 30")
+        self.assertNotIn("continue-on-error", steps[index + 2])
+        validation = next(s for s in steps if s.get("name") == "Run BUM-filter primitive validation")
+        self.assertEqual(validation.get("run"), "bash crates/evpn-linux/tests/docker/run-netns-tests.sh")
+        self.assertNotIn("retry", validation.get("run"))
+
+    def test_kernel_netns_selectors_use_prebuilt_image_without_retry(self):
+        text = (ROOT / ".github/workflows/kernel-dataplane.yml").read_text()
+        job = text.split("\n  netns:\n", 1)[1]
+        self.assertIn('    env:\n      SKIP_BUILD: "1"\n', job)
+        steps = workflow_steps("kernel-dataplane.yml", "netns")
+        names = [s.get("name") for s in steps]
+        self.assertLess(names.index("Initialize netns selector receipt"),
+                        names.index("Build netns-test harness image"))
+        self.assertLess(names.index("Build netns-test harness image"),
+                        names.index("ADR-0059 FDB nexthop group netns tests"))
+        selectors = [s for s in steps if "run-netns-tests.sh" in s.get("run", "")]
+        self.assertGreater(len(selectors), 20)
+        for step in selectors:
+            self.assertTrue(step["run"].startswith("bash crates/evpn-linux/tests/docker/run-netns-tests.sh "))
+            self.assertNotIn("continue-on-error", step)
+
     def test_lab_builds_go_through_the_retried_composites(self):
         for workflow in ("interop.yml", "kernel-dataplane.yml"):
             with self.subTest(workflow=workflow):
@@ -332,6 +393,7 @@ class BuildRetryShapeTests(unittest.TestCase):
         cases = {
             "no pre-pull": lambda s: s.pop(0),
             "no continue-on-error": lambda s: s[2].pop("continue-on-error"),
+            "continue-on-error false": lambda s: s[2].update({"continue-on-error": "false"}),
             "no retry": lambda s: s.pop(),
             "retry inputs drift": lambda s: s[-1].update({"with": s[-1]["with"] + "\ncache-to: type=gha"}),
             "retry unguarded": lambda s: s[-1].update({"if": "always()"}),
