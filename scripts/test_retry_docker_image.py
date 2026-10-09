@@ -175,6 +175,42 @@ class RetryDockerImageTests(unittest.TestCase):
                                      [["pull", "moby/buildkit:buildx-stable-1"]] * pulls)
                     self.assertEqual("::warning::" in result.stdout, fail == "3")
 
+    def test_lab_deploy_pre_pulls_missing_topology_images(self):
+        body = action_step("run-interop-test", "Run interop test with retry")["run"]
+        for tool in ("sudo", "containerlab"):
+            fake = self.path / "bin" / tool
+            fake.write_text('#!/bin/sh\n[ "$(basename "$0")" = sudo ] && exec "$@"\nexit 0\n')
+            fake.chmod(0o755)
+        topology = self.path / "lab.clab.yml"
+        topology.write_text(
+            "topology:\n  nodes:\n"
+            "    a:\n      image: quay.io/frrouting/frr:10.7.1\n"
+            "    b:\n      image: \"quay.io/frrouting/frr:10.7.1\"\n"
+            "    c:\n      image: rustbgpd:dev\n"
+        )
+        script = self.path / "test.sh"
+        script.write_text("exit 0\n")
+        env = {**self.env, "INTEROP_TOPOLOGY": str(topology), "INTEROP_SCRIPT": str(script),
+               "INTEROP_MAX_ATTEMPTS": "1", "INTEROP_LABEL": "MX", "GITHUB_STEP_SUMMARY": ""}
+        for present, fail, pulls in (("0", "2", []), ("99", "2", ["frr", "rustbgpd"]), ("99", "3", ["frr", "rustbgpd"])):
+            with self.subTest(present=present == "0", fail=fail):
+                for name in ("pull", "leaf", "calls", "sleeps"):
+                    (self.path / name).unlink(missing_ok=True)
+                # FAIL_LEAF makes `docker image inspect` report the image as absent.
+                result = subprocess.run(
+                    ["bash", "-c", body], cwd=ROOT,
+                    env={**env, "FAIL_LEAF": present, "FAIL_PULL": fail},
+                    capture_output=True, text=True, check=False,
+                )
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                pulled = [c[0][1] for c in self.calls() if c[0][0] == "pull"]
+                expected = {"frr": "quay.io/frrouting/frr:10.7.1", "rustbgpd": "rustbgpd:dev"}
+                # The first image uses all three attempts (two or three failures);
+                # the duplicate is pulled once and the next image pulls at once.
+                self.assertEqual(pulled, [expected[pulls[0]]] * 3 + [expected[p] for p in pulls[1:]]
+                                 if pulls else [])
+                self.assertEqual("pre-pull of quay.io" in result.stdout, fail == "3")
+
     def test_bad_metadata_fails_before_pull(self):
         for label in ("9.1", "9.3"):
             env, body = primer(label)
