@@ -3136,7 +3136,7 @@ semantics used by both `ApplyEvpnRuntime` and SIGHUP reload.
 | RPC | Description |
 |-----|-------------|
 | `GetEvpnRuntime` | Return the committed EVPN runtime generation, lifecycle, mutation state, configured EVI/IP-VRF/ES counts, and a concise status message |
-| `ListEvpnInstances` | List configured local EVPN instances sorted by VNI (vni, rd, resolved route_targets including any auto-derived RT, local_vtep_ip, optional bridge, optional local `bridge_vlan`, advertise_svi_mac flag, originated_local_macs_count, L2 dataplane `readiness_state`, and `not_ready_reason` when NotReady) |
+| `ListEvpnInstances` | List configured local EVPN instances sorted by VNI (vni, rd, resolved route_targets including any auto-derived RT, local_vtep_ip, optional bridge, optional local `bridge_vlan`, advertise_svi_mac flag, originated_local_macs_count, L2 dataplane `readiness_state`, `not_ready_reason` when NotReady, and `remote_route_drop_counts`) |
 | `ListEvpnNexthops`  | List Linux dataplane reconciler-owned ADR-0059 FDB nexthop groups (per-VNI groups with ESI / Ethernet Tag / kernel group ID, per-VTEP member nexthop IDs + gateways, MAC refs) plus top-level L2 and L3 orphan-NH and pending-delete counts and the `drift_recovery_disabled` latch — read-only operator visibility |
 | `ListEthernetSegments` | List configured Ethernet Segments sorted by ESI, joined with live multi-homing state: composed drain reasons, advertised DF preference/Don't-Preempt beside the administrative values (they differ while RFC 9785 recovery inherits another PE's preference), any pending recovery wait with its remaining milliseconds, per-member DF role and BUM forwarding action, same-ESI local-bias eligibility, whole-port AC-gate state/interface, and matching FDB-NHG group / MAC-ref counts — read-only ADR-0083/0085 diagnose visibility |
 | `ListIpVrfs`        | List configured IP-VRFs / L3VNI tenants (name, l3vni, rd, resolved route_targets including any auto-derived RT, local_vtep_ip, router_mac, optional `evpn_instance` link, readiness state, originated_routes_count, installed_routes_count, remote_prefix_drop_counts) — Gate 9 / ADR-0058 |
@@ -3232,6 +3232,16 @@ the probe requires `vlan_filtering=1`, exactly one VXLAN member for the
 instance VNI, and the configured VLAN on both the bridge and that VXLAN
 member; remote-MAC FDB rows are then programmed with `NDA_VLAN`. A
 `vlan_filtering=1` bridge without `bridge_vlan` remains `NotReady`.
+
+`remote_route_drop_counts` lists, by reason, the remote Type 1
+EAD-per-EVI and Type 2 routes that select the instance by VNI and route
+target but that the VTEP does not program, such as
+`ethernet_tag_mismatch`. It reports the same current values as the
+`evpn_l2_remote_route_drops{vni,reason}` gauge, sorted by reason; a reason
+with no drops is omitted. The routes stay in Adj-RIB-In and are still
+reflected. The human CLI adds
+`remote-route-drops=[ethernet_tag_mismatch=2]` when the list is non-empty,
+and JSON exposes it as `remote_route_drop_counts` (`[]` when empty).
 
 ### List EVPN FDB nexthop groups
 

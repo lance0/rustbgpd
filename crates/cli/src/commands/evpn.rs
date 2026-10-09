@@ -1111,36 +1111,49 @@ pub async fn list_instances(connection: Connection, json: bool) -> Result<(), Cl
         outln!("No local EVPN instances configured")?;
     } else {
         for inst in &resp.instances {
-            let mut detail = vec![
-                format!("vni={}", inst.vni),
-                format!("rd={}", inst.rd),
-                format!("vtep={}", inst.local_vtep_ip),
-                format!("rts=[{}]", inst.route_targets.join(",")),
-                format!(
-                    "readiness={}",
-                    evpn_instance_readiness_label(inst.readiness_state)
-                ),
-            ];
-            if !inst.bridge.is_empty() {
-                detail.push(format!("bridge={}", inst.bridge));
-            }
-            if let Some(bridge_vlan) = inst.bridge_vlan {
-                detail.push(format!("bridge-vlan={bridge_vlan}"));
-            }
-            if inst.advertise_svi_mac {
-                detail.push("advertise-svi-mac".to_string());
-            }
-            detail.push(format!(
-                "originated-local-macs={}",
-                inst.originated_local_macs_count
-            ));
-            if !inst.not_ready_reason.is_empty() {
-                detail.push(format!("reason=[{}]", inst.not_ready_reason));
-            }
-            outln!("{}", detail.join(" "))?;
+            outln!("{}", format_evpn_instance_human(inst))?;
         }
     }
     Ok(())
+}
+
+fn format_evpn_instance_human(inst: &EvpnInstanceState) -> String {
+    let mut detail = vec![
+        format!("vni={}", inst.vni),
+        format!("rd={}", inst.rd),
+        format!("vtep={}", inst.local_vtep_ip),
+        format!("rts=[{}]", inst.route_targets.join(",")),
+        format!(
+            "readiness={}",
+            evpn_instance_readiness_label(inst.readiness_state)
+        ),
+    ];
+    if !inst.bridge.is_empty() {
+        detail.push(format!("bridge={}", inst.bridge));
+    }
+    if let Some(bridge_vlan) = inst.bridge_vlan {
+        detail.push(format!("bridge-vlan={bridge_vlan}"));
+    }
+    if inst.advertise_svi_mac {
+        detail.push("advertise-svi-mac".to_string());
+    }
+    detail.push(format!(
+        "originated-local-macs={}",
+        inst.originated_local_macs_count
+    ));
+    if !inst.remote_route_drop_counts.is_empty() {
+        let drops = inst
+            .remote_route_drop_counts
+            .iter()
+            .map(|row| format!("{}={}", row.reason, row.count))
+            .collect::<Vec<_>>()
+            .join(",");
+        detail.push(format!("remote-route-drops=[{drops}]"));
+    }
+    if !inst.not_ready_reason.is_empty() {
+        detail.push(format!("reason=[{}]", inst.not_ready_reason));
+    }
+    detail.join(" ")
 }
 
 fn evpn_instance_readiness_label(state: i32) -> &'static str {
@@ -1166,6 +1179,12 @@ fn evpn_instance_to_json(instance: &EvpnInstanceState) -> serde_json::Value {
         "originated_local_macs_count": instance.originated_local_macs_count,
         "readiness": evpn_instance_readiness_label(instance.readiness_state),
         "not_ready_reason": instance.not_ready_reason,
+        "remote_route_drop_counts": instance.remote_route_drop_counts.iter().map(|row| {
+            serde_json::json!({
+                "reason": row.reason,
+                "count": row.count,
+            })
+        }).collect::<Vec<_>>(),
     })
 }
 
@@ -2441,7 +2460,10 @@ mod tests {
             readiness_state: 999,
             not_ready_reason: "not_ready_reason-value".to_string(),
             bridge_vlan: Some(110),
-            remote_route_drop_counts: vec![],
+            remote_route_drop_counts: vec![crate::proto::EvpnInstanceRemoteRouteDropCount {
+                reason: "reason-value".to_string(),
+                count: 111,
+            }],
         };
         let response = crate::proto::ListEvpnInstancesResponse {
             instances: vec![response],
@@ -2461,6 +2483,12 @@ mod tests {
               "originated_local_macs_count": 107,
               "not_ready_reason": "not_ready_reason-value",
               "bridge_vlan": 110,
+              "remote_route_drop_counts": [
+                {
+                  "reason": "reason-value",
+                  "count": 111
+                }
+              ],
               "readiness": "unknown"
             })
         );
@@ -3334,6 +3362,55 @@ evpn_duplicate_mac_moves_total{vni="100",mac="02:aa:bb:cc:dd:01"} 2
             "unresolved_overlay_index_gateway"
         );
         assert_eq!(value["remote_prefix_drop_counts"][0]["count"], 4);
+    }
+
+    #[test]
+    fn evpn_instance_human_and_json_render_remote_route_drop_counts() {
+        let mut inst = crate::proto::EvpnInstanceState {
+            vni: 100,
+            rd: "65000:100".to_string(),
+            route_targets: vec!["65000:100".to_string()],
+            local_vtep_ip: "10.0.0.1".to_string(),
+            bridge: "br100".to_string(),
+            bridge_vlan: None,
+            advertise_svi_mac: false,
+            originated_local_macs_count: 3,
+            readiness_state: crate::proto::EvpnInstanceReadinessState::EvpnInstanceReadinessReady
+                as i32,
+            not_ready_reason: String::new(),
+            remote_route_drop_counts: vec![
+                crate::proto::EvpnInstanceRemoteRouteDropCount {
+                    reason: "ethernet_tag_mismatch".to_string(),
+                    count: 2,
+                },
+                crate::proto::EvpnInstanceRemoteRouteDropCount {
+                    reason: "vni_mismatch".to_string(),
+                    count: 1,
+                },
+            ],
+        };
+
+        assert_eq!(
+            super::format_evpn_instance_human(&inst),
+            "vni=100 rd=65000:100 vtep=10.0.0.1 rts=[65000:100] readiness=ready bridge=br100 \
+             originated-local-macs=3 remote-route-drops=[ethernet_tag_mismatch=2,vni_mismatch=1]"
+        );
+        let value = super::evpn_instance_to_json(&inst);
+        assert_eq!(
+            value["remote_route_drop_counts"],
+            serde_json::json!([
+                {"reason": "ethernet_tag_mismatch", "count": 2},
+                {"reason": "vni_mismatch", "count": 1},
+            ])
+        );
+
+        // No drops: the human field is omitted and JSON keeps an empty list.
+        inst.remote_route_drop_counts.clear();
+        assert!(!super::format_evpn_instance_human(&inst).contains("remote-route-drops"));
+        assert_eq!(
+            super::evpn_instance_to_json(&inst)["remote_route_drop_counts"],
+            serde_json::json!([])
+        );
     }
 
     #[test]

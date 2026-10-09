@@ -2596,7 +2596,7 @@ per-cache readiness metrics and RTR logs for those questions.
 | `evpn_ip_vrf_originated_routes{vrf}` | Locally originated Type 5 routes currently advertised from each IP-VRF |
 | `evpn_ip_vrf_installed_routes{vrf}` | Remote Type 5 routes currently owned in each IP-VRF kernel table |
 | `evpn_ip_vrf_remote_prefix_drops{vrf,reason}` | Current remote Type 5 projection drops by bounded IP-VRF/reason labels. Overlay-index reasons include `overlay_index_no_linked_l2vni`, `unresolved_overlay_index_gateway`, and `ambiguous_overlay_index_gateway`; `vrf="_unscoped"` means the drop happened before a configured IP-VRF could be selected. `non_zero_ethernet_tag` counts routes for a configured IP-VRF that carry a non-zero Ethernet Tag; Type 5 VLAN-aware bundle routes are not imported. |
-| `evpn_l2_remote_route_drops{vni,reason}` | Current remote Type 1 EAD-per-EVI and Type 2 routes that match a local L2VNI by VNI and route target but that the VTEP does not program, by local VNI and reason. `ethernet_tag_mismatch` means the route carries another Ethernet Tag than the instance (`0` for `vlan_based` rows). `vni_mismatch` and `multihoming_unsupported` are reserved for VLAN-aware bundle members and do not occur yet. The routes stay in Adj-RIB-In and are still reflected. |
+| `evpn_l2_remote_route_drops{vni,reason}` | Current remote Type 1 EAD-per-EVI and Type 2 routes that match a local L2VNI by VNI and route target but that the VTEP does not program, by local VNI and reason. `ethernet_tag_mismatch` means the route carries another Ethernet Tag than the instance (`0` for `vlan_based` rows). `vni_mismatch` and `multihoming_unsupported` are reserved for VLAN-aware bundle members and do not occur yet. The routes stay in Adj-RIB-In and are still reflected. `rbgp evpn instances` shows the same counts per instance. |
 | `evpn_foreign_replaces_blocked_total` | Installs or replaces withheld because an exact-key foreign kernel row already exists |
 | `evpn_foreign_deletes_skipped_total` | Deletes skipped after the live kernel row ceased to be rustbgpd-owned |
 | `evpn_foreign_owned_relinquished_total` | Owned keys released after another writer replaced the live kernel row |
@@ -2644,9 +2644,11 @@ to `0`, republishes the quarantine set, and replays still-live local MAC or
 MAC+IP state through the normal recovery path.
 `rbgp evpn instances` also reports each L2VNI's
 `readiness=ready|not-ready|unbound|unknown` and
-`originated-local-macs=N`; `rbgp evpn instances --json` exposes the
-same values as `readiness`, `not_ready_reason`, and
-`originated_local_macs_count`.
+`originated-local-macs=N`, plus `remote-route-drops=[reason=N,...]` when
+remote L2 routes for the VNI are not programmed;
+`rbgp evpn instances --json` exposes the same values as `readiness`,
+`not_ready_reason`, `originated_local_macs_count`, and
+`remote_route_drop_counts`.
 
 ---
 
