@@ -1922,8 +1922,9 @@ type FloodVteps = BTreeMap<rustbgpd_evpn::EvpnInstanceId, BTreeSet<std::net::IpA
 /// replicated to).
 ///
 /// An IMET contributes its PMSI tunnel endpoint when the PMSI label names a
-/// configured VNI that passes the instance's import check (zero Ethernet
-/// Tag, matching Route Target, VXLAN-compatible encapsulation). Routes
+/// configured VNI that passes the instance's import check (the instance's
+/// configured service Ethernet Tag, 0 for a VLAN-based service; matching
+/// Route Target; VXLAN-compatible encapsulation). Routes
 /// whose next hop or tunnel endpoint is a local VTEP address are our own
 /// and never become a flood row. A route that imports but cannot be
 /// replicated to (no PMSI, a non-ingress-replication tunnel type, an
@@ -1988,7 +1989,9 @@ fn project_flood_vteps(
         if local_vtep_ips.contains(&dst) {
             continue;
         }
-        if dst.is_unspecified() || dst.is_multicast() {
+        // Same rule as a local VTEP address (`EvpnInstance::new`): never
+        // replicate toward an unspecified, multicast or loopback endpoint.
+        if dst.is_unspecified() || dst.is_multicast() || dst.is_loopback() {
             skips.insert(skip("invalid_pmsi_tunnel_endpoint"));
             continue;
         }
@@ -3017,6 +3020,63 @@ mod tests {
                 (vni(100), ipa("10.0.0.3"), "unsupported_pmsi_tunnel_type"),
                 (vni(100), ipa("10.0.0.4"), "address_family_mismatch"),
                 (vni(100), ipa("10.0.0.5"), "invalid_pmsi_tunnel_endpoint"),
+            ]
+        );
+    }
+
+    #[test]
+    fn imet_flood_projection_rejects_loopback_tunnel_endpoints() {
+        let ipv6_instance = |v: u32| {
+            EvpnInstance::new(
+                vni(v),
+                rd(65001, v),
+                vec![RouteTarget::TwoOctetAs {
+                    asn: 65001,
+                    value: v,
+                }],
+                ipa("2001:db8::1"),
+                None,
+                false,
+            )
+            .unwrap()
+        };
+        let mut instances = local_instance_table(100, Some("br100"));
+        instances.insert(ipv6_instance(200)).unwrap();
+        let loopback_imet = |v: u32, originator: &str, endpoint: &str| {
+            evpn_imet_route(
+                v,
+                originator,
+                Some(rustbgpd_wire::PmsiTunnel::for_evpn_ingress_replication(
+                    v,
+                    ipa(endpoint),
+                )),
+            )
+        };
+        let routes = vec![
+            loopback_imet(100, "10.0.0.2", "127.0.0.1"),
+            loopback_imet(100, "10.0.0.3", "127.1.2.3"),
+            loopback_imet(200, "2001:db8::2", "::1"),
+            ir_imet(100, "10.0.0.4"),
+            ir_imet(200, "2001:db8::4"),
+        ];
+        let (flood, skips) = project_flood(&routes, &instances);
+        assert_eq!(
+            flood,
+            BTreeMap::from([
+                (vni(100), BTreeSet::from([ipa("10.0.0.4")])),
+                (vni(200), BTreeSet::from([ipa("2001:db8::4")])),
+            ])
+        );
+        let reasons: Vec<_> = skips
+            .iter()
+            .map(|skip| (skip.vni, skip.originator, skip.reason))
+            .collect();
+        assert_eq!(
+            reasons,
+            vec![
+                (vni(100), ipa("10.0.0.2"), "invalid_pmsi_tunnel_endpoint"),
+                (vni(100), ipa("10.0.0.3"), "invalid_pmsi_tunnel_endpoint"),
+                (vni(200), ipa("2001:db8::2"), "invalid_pmsi_tunnel_endpoint"),
             ]
         );
     }
