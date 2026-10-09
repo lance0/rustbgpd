@@ -627,6 +627,11 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      - name: Configure Docker Hub cache mirror
+        run: |
+          sudo python3 .github/scripts/configure-docker-mirror.py
+          sudo systemctl restart docker
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
         with:

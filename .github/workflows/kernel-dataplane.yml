@@ -846,27 +846,7 @@ jobs:
 
       - name: Configure Docker Hub cache mirror
         run: |
-          sudo python3 - <<'PY'
-          import json
-          from pathlib import Path
-          import subprocess
-          import tempfile
-
-          path = Path("/etc/docker/daemon.json")
-          config = json.loads(path.read_text()) if path.exists() else {}
-          if not isinstance(config, dict):
-              raise ValueError("Docker daemon configuration must be an object")
-          mirrors = config.get("registry-mirrors", [])
-          if not isinstance(mirrors, list) or not all(isinstance(m, str) for m in mirrors):
-              raise ValueError("Docker registry-mirrors must be an array of strings")
-          mirror = "https://mirror.gcr.io"
-          config["registry-mirrors"] = [mirror, *(m for m in mirrors if m != mirror)]
-          with tempfile.NamedTemporaryFile(mode="w") as candidate:
-              json.dump(config, candidate)
-              candidate.flush()
-              subprocess.run(["dockerd", "--validate", "--config-file", candidate.name], check=True)
-          path.write_text(json.dumps(config) + "\n")
-          PY
+          sudo python3 .github/scripts/configure-docker-mirror.py
           sudo systemctl restart docker
 
       - name: Build netns-test harness image

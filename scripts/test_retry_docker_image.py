@@ -6,6 +6,7 @@ import json
 import os
 from pathlib import Path
 import re
+import shlex
 import subprocess
 import tempfile
 import time
@@ -188,8 +189,11 @@ class RetryDockerImageTests(unittest.TestCase):
                     if s.get("name") == "Configure Docker Hub cache mirror")
         body = step["run"]
         path = self.path / "daemon.json"
-        self.assertEqual(body.count('Path("/etc/docker/daemon.json")'), 1)
-        body = body.replace('Path("/etc/docker/daemon.json")', f"Path({str(path)!r})")
+        helper = ROOT / ".github/scripts/configure-docker-mirror.py"
+        command = "python3 .github/scripts/configure-docker-mirror.py"
+        self.assertEqual(body.count(command), 1)
+        code = f"import runpy; from pathlib import Path; runpy.run_path({str(helper)!r})['configure'](Path({str(path)!r}))"
+        body = body.replace(command, shlex.join(["python3", "-c", code]))
         return subprocess.run(
             ["bash", "-eo", "pipefail", "-c", body], cwd=ROOT,
             env={**self.env, **extra}, capture_output=True, text=True, check=False,
@@ -406,14 +410,16 @@ def action_step(action, name):
 
 
 def build_retry_errors(steps):
-    """Every Buildx bootstrap is pre-pulled and every build-push has a guarded retry."""
+    """Every Buildx bootstrap has pull protection and builds have a guarded retry."""
     errors = []
     for index, step in enumerate(steps):
         uses = step.get("uses", "")
         if uses.startswith("docker/setup-buildx-action@"):
-            if not any("retry-docker-image.sh" in s.get("run", "") and "moby/buildkit" in s.get("run", "")
-                       for s in steps[:index]):
-                errors.append(f"{step.get('name')}: BuildKit image not pre-pulled first")
+            mirror = ["sudo python3 .github/scripts/configure-docker-mirror.py", "sudo systemctl restart docker"]
+            if not any(("retry-docker-image.sh" in s.get("run", "") and "moby/buildkit" in s.get("run", ""))
+                       or ("if" not in s and s.get("continue-on-error", "false") == "false"
+                           and s.get("run", "").strip().splitlines() == mirror) for s in steps[:index]):
+                errors.append(f"{step.get('name')}: BuildKit bootstrap has no prior pull protection")
         if uses.startswith("docker/build-push-action@") and "if" not in step:
             retry = f"steps.{step.get('id')}.outcome == 'failure'"
             if step.get("continue-on-error") != "true" or not any(
@@ -433,13 +439,33 @@ class BuildRetryShapeTests(unittest.TestCase):
         self.assertIn('mirrors = ["mirror.gcr.io"]', setup["with"])
         index = next(i for i, s in enumerate(steps)
                      if s.get("name") == "Build netns-test harness image")
-        self.assertEqual(build_retry_errors(steps[index:]), [])
+        self.assertEqual(build_retry_errors(steps), [])
+        preparation = next(s for s in steps if s.get("name") == "Configure Docker Hub cache mirror")
+        preparation["continue-on-error"] = "false"
+        self.assertEqual(build_retry_errors(steps), [])
         self.assertEqual(steps[index + 1].get("if"), "steps.netns_image.outcome == 'failure'")
         self.assertEqual(steps[index + 1].get("run").strip(), "sleep 30")
         self.assertNotIn("continue-on-error", steps[index + 2])
         validation = next(s for s in steps if s.get("name") == "Run BUM-filter primitive validation")
         self.assertEqual(validation.get("run"), "bash crates/evpn-linux/tests/docker/run-netns-tests.sh")
         self.assertNotIn("retry", validation.get("run"))
+
+    def test_broken_ci_bootstrap_mirror_preparation_fails(self):
+        steps = workflow_steps("ci.yml", "evpn_bum_filter_kernel")
+        for case in ("missing", "late", "skipped", "tolerated"):
+            with self.subTest(case=case):
+                broken = copy.deepcopy(steps)
+                mirror = next(s for s in broken if s.get("name") == "Configure Docker Hub cache mirror")
+                if case in ("missing", "late"):
+                    broken.remove(mirror)
+                if case == "late":
+                    index = next(i for i, s in enumerate(broken) if s.get("name") == "Set up Docker Buildx")
+                    broken.insert(index + 1, mirror)
+                elif case == "skipped":
+                    mirror["if"] = "false"
+                elif case == "tolerated":
+                    mirror["continue-on-error"] = "true"
+                self.assertTrue(any("BuildKit bootstrap" in e for e in build_retry_errors(broken)))
 
     def test_kernel_netns_selectors_use_prebuilt_image_without_retry(self):
         text = (ROOT / ".github/workflows/kernel-dataplane.yml").read_text()
