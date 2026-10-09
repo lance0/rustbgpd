@@ -497,6 +497,7 @@ fn empty_neighbor(address: IpAddr) -> Neighbor {
         import_policy_chain: Vec::new(),
         export_policy_chain: Vec::new(),
         conditional_advertisements: Vec::new(),
+        route_flap_dampening: None,
     }
 }
 
@@ -1284,6 +1285,7 @@ description = "old"
     fn set_leaf_edit_preserves_conditional_advertisement_attachments() {
         let mut config = base_config();
         config.neighbors[0].conditional_advertisements = vec!["backup".to_string()];
+        config.neighbors[0].route_flap_dampening = Some(false);
         let candidate = apply_transaction_to_config(
             config,
             &transaction(vec![update(
@@ -1297,6 +1299,7 @@ description = "old"
         let neighbor = &candidate.neighbors[0];
         assert_eq!(neighbor.description.as_deref(), Some("new"));
         assert_eq!(neighbor.conditional_advertisements, ["backup"]);
+        assert_eq!(neighbor.route_flap_dampening, Some(false));
     }
 
     #[test]

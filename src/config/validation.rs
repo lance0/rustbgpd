@@ -424,6 +424,26 @@ fn validate_effective_peer_modes(
 }
 
 impl Config {
+    /// Refuse effective dynamic-peer enablement until received-route hooks exist.
+    /// Shared by config validation and runtime range admission before mutation.
+    pub(crate) fn validate_dynamic_route_flap_dampening(
+        &self,
+        remote_asn: u32,
+        group: &PeerGroupConfig,
+    ) -> Result<(), &'static str> {
+        let requested = group.route_flap_dampening.unwrap_or_else(|| {
+            self.policy
+                .route_flap_dampening
+                .as_ref()
+                .is_some_and(|p| p.apply_to_ebgp)
+        });
+        if requested && remote_asn != self.global.asn && !group.route_server_client.unwrap_or(false)
+        {
+            Err("runtime integration is not implemented; effective enablement is unavailable")
+        } else {
+            Ok(())
+        }
+    }
     #[expect(
         clippy::too_many_lines,
         reason = "validation keeps related operator diagnostics in one ordered pass"
@@ -665,6 +685,17 @@ impl Config {
         )?;
 
         self.validate_conditional_advertisements(stores.next_store())?;
+        if let Some(parameters) = &self.policy.route_flap_dampening {
+            rustbgpd_rib::dampening::DampeningParameters::new(
+                parameters.half_life,
+                parameters.reuse,
+                parameters.suppress,
+                parameters.max_suppress_time,
+            )
+            .map_err(|error| ConfigError::InvalidPolicyEntry {
+                reason: format!("policy.route_flap_dampening.{error}"),
+            })?;
+        }
         let mut group_names: Vec<&String> = self.peer_groups.keys().collect();
         group_names.sort();
         for name in group_names {
@@ -848,6 +879,37 @@ impl Config {
                 &neighbor.address,
             )
             .map_err(|violation| violation.into_static_error(&neighbor.address))?;
+
+            let dampening = neighbor
+                .route_flap_dampening
+                .or_else(|| group.and_then(|group| group.route_flap_dampening))
+                .unwrap_or_else(|| {
+                    self.policy
+                        .route_flap_dampening
+                        .as_ref()
+                        .is_some_and(|p| p.apply_to_ebgp)
+                });
+            let reason = if neighbor.route_flap_dampening == Some(true)
+                && neighbor.remote_asn == self.global.asn
+            {
+                Some("cannot be enabled on an iBGP neighbor (RFC 2439 section 5)")
+            } else if neighbor.route_flap_dampening == Some(true) && modes.route_server_client {
+                Some("cannot be enabled on a route-server client")
+            } else if dampening
+                && neighbor.remote_asn != self.global.asn
+                && !modes.route_server_client
+            {
+                Some("runtime integration is not implemented; effective enablement is unavailable")
+            } else {
+                None
+            };
+            if let Some(reason) = reason {
+                return Err(ConfigError::InvalidNeighborConfig {
+                    address: neighbor.address.clone(),
+                    field: "route_flap_dampening".to_string(),
+                    reason: reason.to_string(),
+                });
+            }
 
             let discard_path_attributes = neighbor
                 .discard_path_attributes
@@ -1296,6 +1358,13 @@ impl Config {
                     violation.reason()
                 ),
             })?;
+            self.validate_dynamic_route_flap_dampening(dn.remote_asn, group)
+                .map_err(|reason| ConfigError::InvalidDynamicNeighbor {
+                    reason: format!(
+                        "dynamic_neighbors[{i}] route_flap_dampening via peer_group {:?}: {reason}",
+                        dn.peer_group
+                    ),
+                })?;
             if group
                 .discard_path_attributes
                 .as_ref()

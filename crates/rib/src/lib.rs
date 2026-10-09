@@ -25,6 +25,8 @@ pub mod attr_set;
 pub mod best_path;
 /// RFC 9069 Loc-RIB BMP synthesis (UPDATE PDUs + fabricated OPEN).
 pub mod bmp_sync;
+/// Pure route flap dampening accounting, without received-route activation.
+pub mod dampening;
 /// Route change event types for broadcast subscribers.
 pub mod event;
 /// Sink boundary for handing route + EVPN events to an out-of-crate

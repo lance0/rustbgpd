@@ -937,6 +937,7 @@ fn test_neighbor(addr: &str, asn: u32) -> Neighbor {
         import_policy_chain: Vec::new(),
         export_policy_chain: Vec::new(),
         conditional_advertisements: Vec::new(),
+        route_flap_dampening: None,
         log_level: None,
     }
 }
@@ -2070,12 +2071,14 @@ const RELOAD_MATRIX_NEIGHBOR_FIELDS: &[&str] = &[
     "import_policy_chain",
     "export_policy_chain",
     "conditional_advertisements",
+    "route_flap_dampening",
 ];
 
 /// All `PeerGroupConfig` field names. Mirror of the `Neighbor` list
 /// minus the identity triple (`address`, `interface`, `remote_asn`) and
 /// TCP-AO.
 const RELOAD_MATRIX_PEER_GROUP_FIELDS: &[&str] = &[
+    "route_flap_dampening",
     "hold_time",
     "min_hold_time",
     "slow_peer_threshold_pct",
@@ -2489,3 +2492,5 @@ mod rpol;
 mod telemetry;
 mod transaction;
 mod transport_auth;
+
+mod dampening;

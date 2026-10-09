@@ -1915,6 +1915,7 @@ fn config_field_impact(field: &str) -> Option<(ConfigFieldImpact, &'static str)>
         | "export_policy"
         | "import_policy_chain"
         | "export_policy_chain"
+        | "route_flap_dampening"
         | "conditional_advertisements" => (ConfigFieldImpact::HotApplied, "hot-applied"),
         "remote_asn" => (
             ConfigFieldImpact::SessionReset,
@@ -2151,6 +2152,7 @@ pub fn describe_neighbor_changes(old: &Neighbor, new: &Neighbor) -> Vec<FieldCha
     cmp_field!(import_policy_chain);
     cmp_field!(export_policy_chain);
     cmp_field!(conditional_advertisements);
+    cmp_field!(route_flap_dampening);
 
     changes
 }
@@ -2276,6 +2278,7 @@ fn neighbor_runtime_equal(old: &Neighbor, new: &Neighbor) -> bool {
         && old.import_policy_chain == new.import_policy_chain
         && old.export_policy_chain == new.export_policy_chain
         && old.conditional_advertisements == new.conditional_advertisements
+        && old.route_flap_dampening == new.route_flap_dampening
 }
 
 /// Differences between two peer group maps, keyed by name.
@@ -2304,6 +2307,8 @@ pub struct PolicyDiff {
     /// Sorted names of `[policy.conditional_advertisements]` definitions
     /// added, removed, or changed (ADR-0137).
     pub conditional_advertisements_changed: Vec<String>,
+    /// Disabled-only alpha dampening schema changed; no route behavior changes.
+    pub route_flap_dampening_changed: bool,
     /// The `[policy] rpol_files` / `rpol_roots` / `rpol_max_graph_bytes`
     /// settings or any referenced `.rpol` file's compiled graph changed
     /// (ADR-0096). Reload-applied: chains referencing rpol policies
@@ -2365,6 +2370,7 @@ impl PolicyDiff {
             || self.import_chain_changed
             || self.export_chain_changed
             || !self.conditional_advertisements_changed.is_empty()
+            || self.route_flap_dampening_changed
             || self.rpol_changed
             || self.datasets_changed
     }
@@ -2733,6 +2739,7 @@ impl ConfigDiff {
             || self.policy.import_chain_changed
             || self.policy.export_chain_changed
             || !self.policy.conditional_advertisements_changed.is_empty()
+            || self.policy.route_flap_dampening_changed
             || self.policy.rpol_changed
             || self.policy.datasets_changed
             || self.honor_graceful_shutdown_changed
@@ -3609,6 +3616,7 @@ impl SighupReloadFamilies {
             || diff.policy.import_chain_changed
             || diff.policy.export_chain_changed
             || !diff.policy.conditional_advertisements_changed.is_empty()
+            || diff.policy.route_flap_dampening_changed
             || diff.policy.rpol_changed;
         Self {
             generation,
@@ -3923,6 +3931,7 @@ pub fn classify_config_transaction_v1(diff: &ConfigDiff) -> ConfigTransactionSec
         || !diff.policy.definitions_removed.is_empty()
         || !diff.policy.definitions_changed.is_empty()
         || !diff.policy.conditional_advertisements_changed.is_empty()
+        || diff.policy.route_flap_dampening_changed
     {
         class
             .supported_sections
@@ -4334,6 +4343,7 @@ pub fn config_diff_json_value(diff: &ConfigDiff) -> serde_json::Value {
             "import_chain_changed": diff.policy.import_chain_changed,
             "export_chain_changed": diff.policy.export_chain_changed,
             "conditional_advertisements_changed": &diff.policy.conditional_advertisements_changed,
+            "route_flap_dampening_changed": diff.policy.route_flap_dampening_changed,
             "rpol_changed": diff.policy.rpol_changed,
             "datasets_changed": diff.policy.datasets_changed,
             "declared_datasets_count": diff.policy.declared_datasets_count,
@@ -4440,6 +4450,7 @@ pub fn format_config_diff_with_style(diff: &ConfigDiff, style: &ConfigDiffTextSt
         || p.import_chain_changed
         || p.export_chain_changed
         || !p.conditional_advertisements_changed.is_empty()
+        || p.route_flap_dampening_changed
         || p.rpol_changed
         || p.datasets_changed;
 
@@ -4511,6 +4522,13 @@ pub fn format_config_diff_with_style(diff: &ConfigDiff, style: &ConfigDiffTextSt
             }
             if p.export_chain_changed {
                 let _ = writeln!(out, "    {} export_chain", style.change_marker);
+            }
+            if p.route_flap_dampening_changed {
+                let _ = writeln!(
+                    out,
+                    "    {} route_flap_dampening (disabled-only schema)",
+                    style.change_marker
+                );
             }
             for name in &p.conditional_advertisements_changed {
                 let _ = writeln!(
@@ -6252,6 +6270,7 @@ pub fn describe_peer_group_changes(
     cmp_field!(import_policy_chain);
     cmp_field!(export_policy_chain);
     cmp_field!(conditional_advertisements);
+    cmp_field!(route_flap_dampening);
 
     changes
 }
@@ -6287,6 +6306,7 @@ pub fn copy_peer_group_file_only_fields(target: &mut PeerGroupConfig, source: &P
         link_local_next_hop,
         log_level,
         conditional_advertisements,
+        route_flap_dampening,
         // Carried by the API definition.
         hold_time: _,
         min_hold_time: _,
@@ -6340,6 +6360,7 @@ pub fn copy_peer_group_file_only_fields(target: &mut PeerGroupConfig, source: &P
     target.link_local_next_hop = link_local_next_hop;
     target.log_level = log_level;
     target.conditional_advertisements = conditional_advertisements;
+    target.route_flap_dampening = route_flap_dampening;
 }
 
 /// Names of the config-file-only fields (see
@@ -6474,6 +6495,9 @@ pub fn reject_unappliable_sequential_reload(
     pin_tcp_mss_startup_only_runtime(&mut pinned, old);
     let mut blocked = peer_group_file_only_changes(&old.peer_groups, &pinned.peer_groups);
     blocked.extend(conditional_advertisement_changes(old, &pinned));
+    if old.policy.route_flap_dampening != pinned.policy.route_flap_dampening {
+        blocked.push("policy.route_flap_dampening".to_string());
+    }
     if blocked.is_empty() {
         return SighupReloadRoute::Sequential { reasons };
     }
@@ -6567,6 +6591,7 @@ pub fn diff_policy(old: &PolicyConfig, new: &PolicyConfig) -> PolicyDiff {
         import_chain_changed: old.import_chain != new.import_chain,
         export_chain_changed: old.export_chain != new.export_chain,
         conditional_advertisements_changed,
+        route_flap_dampening_changed: old.route_flap_dampening != new.route_flap_dampening,
         rpol_changed: old.rpol_files != new.rpol_files
             || old.rpol_roots != new.rpol_roots
             || old.rpol_max_graph_bytes != new.rpol_max_graph_bytes

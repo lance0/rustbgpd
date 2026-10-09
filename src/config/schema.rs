@@ -1909,6 +1909,18 @@ define_neighbor_and_peer_group_configs! {
                 #[serde(default)]
             }
         }
+        route_flap_dampening: Option<bool> {
+            neighbor {
+                /// Alpha route flap dampening enablement override. Runtime hooks
+                /// are not implemented; effective enablement is rejected.
+                #[serde(default, skip_serializing_if = "Option::is_none")]
+            }
+            peer_group {
+                /// Alpha dampening override inherited by eBGP neighbors. File-only;
+                /// effective enablement is rejected until runtime hooks exist.
+                #[serde(default, skip_serializing_if = "Option::is_none")]
+            }
+        }
         conditional_advertisements: Vec<String> {
             neighbor {
                 /// Names of `[policy.conditional_advertisements]` definitions
@@ -2006,6 +2018,7 @@ impl fmt::Debug for Neighbor {
             .field("import_policy", &self.import_policy)
             .field("export_policy", &self.export_policy)
             .field("import_policy_chain", &self.import_policy_chain)
+            .field("route_flap_dampening", &self.route_flap_dampening)
             .field("export_policy_chain", &self.export_policy_chain)
             .field(
                 "conditional_advertisements",
@@ -2207,6 +2220,7 @@ impl fmt::Debug for PeerGroupConfig {
             .field("import_policy", &self.import_policy)
             .field("export_policy", &self.export_policy)
             .field("import_policy_chain", &self.import_policy_chain)
+            .field("route_flap_dampening", &self.route_flap_dampening)
             .field("export_policy_chain", &self.export_policy_chain)
             .field(
                 "conditional_advertisements",
@@ -2432,6 +2446,10 @@ pub struct PolicyConfig {
         serialize_with = "serialize_sorted_hash_map"
     )]
     pub conditional_advertisements: HashMap<String, ConditionalAdvertisementConfig>,
+    /// Alpha dampening parameter schema. Effective enablement is rejected:
+    /// the pure penalty engine is not yet connected to received routes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub route_flap_dampening: Option<RouteFlapDampeningConfig>,
     /// Import-decision explain cache tuning (ADR-0073). **Opt-in** —
     /// omitting this section leaves import explain disabled. Diagnostic
     /// retention only — does not affect which routes are accepted.
@@ -2531,6 +2549,7 @@ impl Default for PolicyConfig {
             import_chain: Vec::new(),
             export_chain: Vec::new(),
             conditional_advertisements: HashMap::new(),
+            route_flap_dampening: None,
             explain: PolicyExplainConfig::default(),
             reject_retention: PolicyRejectRetentionConfig::default(),
             rpol_files: Vec::new(),
@@ -2543,6 +2562,52 @@ impl Default for PolicyConfig {
             external_sources_digest: ExternalSourcesDigest::default(),
         }
     }
+}
+
+/// `[policy.route_flap_dampening]` parameters, reserved for an alpha runtime
+/// implementation. Loading validates them but refuses effective enablement.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(default, deny_unknown_fields)]
+pub struct RouteFlapDampeningConfig {
+    /// Default enablement for eligible eBGP peers; effective enablement is unavailable.
+    pub apply_to_ebgp: bool,
+    /// Seconds for a penalty to halve (60..=2700).
+    #[schemars(range(min = 60, max = 2700))]
+    pub half_life: u32,
+    /// Reuse strictly below this penalty (1..=49999).
+    #[schemars(range(min = 1, max = 49999))]
+    pub reuse: u32,
+    /// Suppress at this penalty; must exceed reuse and not exceed the ceiling.
+    #[schemars(range(min = 2, max = 50000))]
+    pub suppress: u32,
+    /// Maximum hold seconds after flapping stops (`half_life`..=14400).
+    #[schemars(range(min = 60, max = 14400))]
+    pub max_suppress_time: u32,
+    /// Future runtime behavior; neither mode is activated in this slice.
+    pub mode: DampeningMode,
+}
+
+impl Default for RouteFlapDampeningConfig {
+    fn default() -> Self {
+        Self {
+            apply_to_ebgp: false,
+            half_life: 900,
+            reuse: 750,
+            suppress: 6000,
+            max_suppress_time: 3600,
+            mode: DampeningMode::Suppress,
+        }
+    }
+}
+
+/// Future dampening runtime mode (RFC 7196 test mode is observe).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum DampeningMode {
+    /// Suppress unstable received paths.
+    Suppress,
+    /// Calculate penalties without changing route eligibility.
+    Observe,
 }
 
 /// One `[policy.datasets.<name>]` binding.

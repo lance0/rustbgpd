@@ -56,7 +56,7 @@ which cannot carry the config-file-only group fields: `role`, `strict_role`,
 the per-family and received prefix limits, `max_prefix_action`,
 `max_prefix_warning_percent`, `next_hop_ownership`, `interpret_rfc1997`,
 `rs_control_communities`, `send_non_transitive_extended_communities`,
-`log_level`, and `conditional_advertisements`. A sequential candidate that adds or changes one of them is
+`log_level`, `route_flap_dampening`, and `conditional_advertisements`. A sequential candidate that adds or changes one of them is
 rejected, and the reason names the group and field, for example
 `peer group "edge" strict_role changed together with listener inbound
 MD5/GTSM inventory`. Split the reload: apply the TCP-AO or listener change
@@ -78,6 +78,10 @@ session is re-added. A re-added session is new: its TCP connection, uptime,
 and counters start again. If the generation applies but the withdrawal step
 cannot reach the listener, the reload returns a known-partial receipt. The
 entries it leaves cover only addresses that are no longer configured.
+
+Disabled `[policy.route_flap_dampening]` parameter edits use the generation
+snapshot too. A sequential candidate with incompatible families that edits
+the block is rejected before any effect; there is no RIB activation yet.
 
 Daemon restart-required fields are pinned on every route.
 An explain-only change stays sequential; `[policy.explain]` is carried with the
@@ -250,6 +254,7 @@ that rebuild sessions still require fresh scope resolution during planning.
 | `import_policy_chain` | live | Named-chain reference; same re-evaluation behavior, including the policy-presence qualification above. |
 | `export_policy_chain` | live | Named-chain reference; same re-evaluation behavior. |
 | `conditional_advertisements` | live (generation route only) | Attached `[policy.conditional_advertisements]` names (ADR-0137). An attachment edit commits with the reload generation without a session reset; the neighbor's Adj-RIB-Out is re-evaluated through the gate and its update-group membership follows. The sequential route rejects a candidate that changes an attachment; reload it separately. |
+| `route_flap_dampening` | live (disabled-only schema) | Optional alpha override. Effective eligible enablement is refused until runtime integration exists. Accepted edits preserve the config snapshot without a session reset; no route behavior changes. |
 
 ## `[peer_groups.<name>]`
 
@@ -335,6 +340,7 @@ static neighbors.
 | `import_policy_chain` | live | Named-chain reference inherited by peers that do not set their own import policy / chain; inheriting peers take the same ADR-0112 policy-presence qualification. |
 | `export_policy_chain` | live | Named-chain reference inherited by peers that do not set their own export policy / chain. |
 | `conditional_advertisements` | live (generation route only) | Attached `[policy.conditional_advertisements]` names (ADR-0137) inherited by static members that set no list of their own; dynamic members do not inherit them. An edit commits with the reload generation without a session reset; each inheriting member's Adj-RIB-Out is re-evaluated through the gate. Config-file-only: `SetPeerGroup` keeps the value, and the sequential route rejects a candidate that changes it. |
+| `route_flap_dampening` | live (generation route only, disabled-only schema) | Config-file-only alpha override; `SetPeerGroup` preserves it. Effective eligible enablement is refused. Accepted edits adopt with the generation; incompatible sequential edits are rejected. No route behavior changes. |
 
 ## `[[dynamic_neighbors]]`
 
@@ -437,6 +443,7 @@ chains all add/change/remove cleanly via reload.
 | `neighbor_sets` (named) | live | Add/remove/edit named neighbor sets; the resolved set drives per-peer chain bindings. |
 | `import_chain` (named) | live | Reorder, add, or remove named imports. Removing the last entry while eBGP peers inherit it is a fleet-wide ADR-0112 policy-presence transition: it is qualified for Route Refresh across every affected peer first, and rejected whole if any peer cannot converge it. |
 | `export_chain` (named) | live | Reorder, add, or remove named exports. |
+| `[policy.route_flap_dampening]` | live (generation route only, disabled-only schema) | Validate the parameters and adopt the disabled block with the generation snapshot. Effective eligible enablement is refused in both modes. Incompatible sequential edits are rejected; there is no RIB install or route effect yet. |
 | `[policy.conditional_advertisements]` | live (generation route only) | Add, remove, or edit named conditional-advertisement definitions (ADR-0137). A definition must name defined policies and a nonempty set of exact unicast condition prefixes. Edits commit with the reload generation; the sequential route rejects a candidate that changes a definition. Unchanged content (mode, prefixes, `settle_time`, and both compiled policies) keeps its state and resyncs nothing; new or changed content, including an edit to a referenced policy, is evaluated immediately and resyncs the attached neighbors. A failed generation restores the prior applied state and settle deadlines. |
 | `rpol_files` | live | SIGHUP recompiles the referenced `.rpol` files and hot-applies materially changed chains to exactly the affected peers (Route Refresh for changed import chains). Config transactions reject a candidate whose compiled `.rpol` registry changed as unsupported — the files live outside the candidate TOML (`src/config/mod.rs`, transaction classification) — so apply `.rpol` changes via SIGHUP. |
 | `rpol_roots` | live | Extra `import` resolution roots; a change takes effect through the same SIGHUP recompile path (it matters only when it changes the resolved module graph's content, which reloads as an rpol content change). |
@@ -587,6 +594,8 @@ load) or rejects the reload and keeps running on the previous config
 
 | Validation rule | Trigger | Notes |
 |---|---|---|
+| `route_flap_dampening` effective enablement | Eligible static or dynamic eBGP neighbor resolves true | Runtime integration is not implemented; explicit true on iBGP or route-server clients is also refused. Inherited settings do not apply to these excluded roles. |
+| Dampening parameter constraints | `[policy.route_flap_dampening]` timers or thresholds are invalid | Validated even while disabled; `suppress` must not exceed the computed ceiling. |
 | `strict_role` requires `role` | `[[neighbors]] strict_role = true` without `role` | RFC 9234 requires Roles to be configured before strict mode is meaningful. |
 | `disable_ipv4_unicast` requires a non-IPv4-unicast family | `[[neighbors]] disable_ipv4_unicast = true` with effective `families` resolving to `ipv4_unicast` only | The combination is contradictory: the session could never negotiate any family. |
 | `link_local_next_hop` requires an interface-bound link-local neighbor | Effective `link_local_next_hop = true` on a numbered neighbor, or on a peer group used by `[[dynamic_neighbors]]` | Capability 77 needs the interface scope that only an interface-bound IPv6 link-local session has. |
