@@ -1,0 +1,58 @@
+# Two VLAN-aware bundle members; the unlinked IP-VRF is a Type 5 negative control.
+[global]
+asn = 65000
+router_id = "10.0.118.1"
+listen_port = 179
+
+[global.telemetry]
+log_format = "json"
+
+[global.telemetry.grpc_tcp]
+address = "0.0.0.0:50051"
+token_file = "/run/rustbgpd/grpc-test-only-operator.token"
+principal = "rustbgpd://operator/test-only"
+
+[[evpn_instances]]
+vni = 10010
+rd = "10.0.118.1:10"
+route_targets = ["65000:100"]
+service_interface = "vlan_aware_bundle"
+ethernet_tag = 10
+local_vtep_ip = "10.0.118.1"
+bridge = "brbundle"
+bridge_vlan = 10
+advertise_svi_mac = false
+
+[[evpn_instances]]
+vni = 10020
+rd = "10.0.118.1:20"
+route_targets = ["65000:100"]
+service_interface = "vlan_aware_bundle"
+ethernet_tag = 20
+local_vtep_ip = "10.0.118.1"
+bridge = "brbundle"
+bridge_vlan = 20
+advertise_svi_mac = false
+
+[[evpn_ip_vrfs]]
+name = "negative"
+vni = 10500
+rd = "10.0.118.1:500"
+route_targets = ["65000:500"]
+local_vtep_ip = "10.0.118.1"
+router_mac = "02:00:00:01:18:50"
+vrf_device = "vrfnegative"
+l3vxlan_device = "l3vxlan10500"
+table_id = 10500
+
+[[neighbors]]
+address = "10.0.118.2"
+remote_asn = 65000
+hold_time = 30
+families = ["l2vpn_evpn"]
+
+[security.grpc]
+enforcement = "tier"
+
+[security.grpc.roles]
+"rustbgpd://operator/test-only" = "operator"

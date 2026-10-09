@@ -2211,7 +2211,7 @@ jobs:
       m13, m80, m15, m10, m14, m17, m73, m74, m75, m76, m77, m78, m79, m22, m24,
       m81, m82, m83, m85, m94, m86, m25, m29, m30, m34, m35, m35b, m35c,
       m41, m44, m54, m55, m56, m45, m57, m63, m64,
-      m26_m27_m28_m59_m91, m92, m84, m99, m100, m101, m102, m103, m104, m107, m114, m115, m116]
+      m26_m27_m28_m59_m91, m92, m84, m99, m100, m101, m102, m103, m104, m107, m114, m115, m116, m118]
     env:
       NEEDS_CONTEXT: ${{ toJSON(needs) }}
       EXPECTED_JOBS: >-
@@ -2219,7 +2219,7 @@ jobs:
         m1 m13 m80 m15 m10
         m14 m17 m73 m74 m75 m76 m77 m78 m79 m22 m24 m81 m82 m83 m85 m94
         m86 m25 m29 m30 m34 m35 m35b m35c m41 m44 m54 m55 m56 m45 m57
-        m63 m64 m26_m27_m28_m59_m91 m92 m84 m99 m100 m101 m102 m103 m104 m107 m114 m115 m116
+        m63 m64 m26_m27_m28_m59_m91 m92 m84 m99 m100 m101 m102 m103 m104 m107 m114 m115 m116 m118
     steps:
       - name: Aggregate required Interop result
         shell: bash
@@ -2247,3 +2247,66 @@ jobs:
           if failed:
               sys.exit(1)
           PY
+
+  m118:
+    needs: [prime_dev_image]
+    name: M118 — VLAN-aware bundle VTEP origination and receive (GoBGP 4.10.0)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up dataplane host
+        uses: ./.github/actions/setup-dataplane-host
+        id: dataplane
+        with:
+          build-image: "false"
+
+      - name: Require VRF support for M118 qualification
+        env:
+          VRF_AVAILABLE: ${{ steps.dataplane.outputs.vrf-available }}
+        run: |
+          if [ "$VRF_AVAILABLE" != true ]; then
+            echo "::error::M118 requires the VRF module; qualification cannot be skipped"
+            exit 1
+          fi
+
+      - name: Check M118 offline assertions
+        run: |
+          python3 tests/interop/scripts/test_m118_bundle_oracle.py
+          bash -n tests/interop/scripts/test-m118-evpn-bundle-vtep-gobgp.sh
+          sh -n tests/interop/scripts/start-rustbgpd-m118-bundle-vtep.sh
+
+      - name: Build rustbgpd:dev
+        uses: ./.github/actions/build-rustbgpd-dev
+
+      - name: Stage verified GoBGP 4.10.0 archive
+        uses: ./.github/actions/stage-gobgp-artifact
+        id: gobgp_archive
+        with:
+          version: "4.10.0"
+
+      - name: Build gobgp:v4.10.0-m118
+        run: >-
+          docker build --build-arg TARGETARCH=amd64
+          --build-arg GOBGP_VERSION=4.10.0
+          --build-arg GOBGP_SHA256="${{ steps.gobgp_archive.outputs.sha256 }}"
+          -t gobgp:v4.10.0-m118 -f tests/interop/Dockerfile.gobgp-v47 tests/interop
+
+      - name: Run M118 (single-attempt synthetic bundle VTEP proof)
+        env:
+          M118_ARTIFACT_DIR: ${{ runner.temp }}/m118
+        uses: ./.github/actions/run-interop-test
+        with:
+          label: M118
+          topology: tests/interop/m118-evpn-bundle-vtep-gobgp.clab.yml
+          script: tests/interop/scripts/test-m118-evpn-bundle-vtep-gobgp.sh
+          max_attempts: "1"
+
+      - name: Upload M118 observations
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: m118-bundle-vtep-${{ github.sha }}
+          path: ${{ runner.temp }}/m118
+          if-no-files-found: warn
