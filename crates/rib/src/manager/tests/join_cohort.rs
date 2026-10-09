@@ -515,3 +515,48 @@ async fn cohort_admission_work_is_bounded_per_turn() {
     let oracle = run(true, &joiners, &[], None).await;
     assert_eq!(grouped.streams, oracle.streams);
 }
+
+/// Members with a local RFC 9234 role: the plain group's staging gate keeps
+/// an OTC-carrying route out of the shared table, so the cohort commit skips
+/// the per-member backstop scan and still matches the per-peer oracle, which
+/// runs that backstop.
+#[tokio::test]
+async fn otc_gate_holds_for_cohort_members_without_a_backstop_scan() {
+    let mut joiners = vec![joiner(1, 65_101), joiner(2, 65_102), joiner(3, 65_103)];
+    for joiner in &mut joiners {
+        joiner.role = Some(rustbgpd_wire::BgpRole::Customer);
+    }
+    let mut otc = route(4, SOURCE, vec![]);
+    AttrSet::edit(&mut otc.attributes, |attrs| {
+        attrs.push(PathAttribute::OnlyToCustomerPartial(64_512));
+    });
+    let grouped = run(false, &joiners, std::slice::from_ref(&otc), None).await;
+    let oracle = run(true, &joiners, std::slice::from_ref(&otc), None).await;
+    assert_eq!(grouped.streams, oracle.streams);
+    assert_eq!(
+        grouped.first_turn,
+        joiners.iter().map(|joiner| joiner.addr).collect::<Vec<_>>()
+    );
+    for joiner in &joiners {
+        let table = assert_table_then_eor(&grouped, joiner.addr);
+        assert!(
+            !table
+                .announce
+                .iter()
+                .any(|route| route.prefix == otc.prefix)
+        );
+        let oracle_table = assert_table_then_eor(&oracle, joiner.addr);
+        assert_eq!(
+            table
+                .otc_blocked
+                .iter()
+                .map(|route| route.prefix)
+                .collect::<Vec<_>>(),
+            oracle_table
+                .otc_blocked
+                .iter()
+                .map(|route| route.prefix)
+                .collect::<Vec<_>>()
+        );
+    }
+}

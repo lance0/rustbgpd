@@ -51,7 +51,10 @@ enum ActiveSessionRegistration {
 /// Most registrations, leader included, one deferred-registration turn
 /// completes together. The cohort runs as one synchronous actor turn, so
 /// this bounds how long a mass rejoin holds survivors' queued mutations
-/// (LAN-475): one shared replay plus this many per-member commits.
+/// (LAN-475): one shared replay and exact-export probe pass, plus this many
+/// per-member commits. A member's commit reuses the cohort's probe and OTC
+/// proof and touches only its own residue, so it carries no table-sized
+/// scan of its own.
 const MAX_JOIN_COHORT: usize = 64;
 
 /// Most queued registrations one turn's cohort admission examines; the rest
@@ -2366,6 +2369,10 @@ impl RibManager {
             || !rtc_announce.is_empty()
             || !rtc_withdraw.is_empty()
             || self.pending_otc_blocked.contains_key(&peer);
+        // A cohort's group is plain: its staging already applied the
+        // group-uniform RFC 9234 egress gate to every row, exactly as the
+        // live pass's shared emission records (`!per_client_best`).
+        let unicast_otc_prechecked = cohort.is_some();
         let announce_source_exclusion = cohort.is_some().then_some(peer);
         let shared_group_encode = cohort
             .as_deref()
@@ -2385,6 +2392,7 @@ impl RibManager {
             || self.try_send_and_commit_outbound_update_with_group_prior_and_otc_scope(
                 peer,
                 OutboundCommitBatch {
+                    unicast_otc_prechecked,
                     announce_source_exclusion,
                     shared_group_encode,
                     withdraw: unicast.withdraw,
