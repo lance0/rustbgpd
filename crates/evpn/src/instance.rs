@@ -338,10 +338,10 @@ impl EvpnInstance {
     }
 
     /// Classify a route for local consumption: it is accepted with the
-    /// matching VNI, at least one configured Route Target, compatible
-    /// encapsulation for the local VXLAN profile, and this instance's
-    /// Ethernet Tag. A route that matches VNI and RT under another tag is a
-    /// counted drop rather than a silent miss.
+    /// matching VNI, at least one configured Route Target, this instance's
+    /// Ethernet Tag, and compatible encapsulation for the local VXLAN
+    /// profile. A route that matches VNI and RT under another tag is a
+    /// counted drop rather than a silent miss, whatever its encapsulation.
     /// This gates local consumption, not global RIB retention or export.
     #[must_use]
     pub fn evi_import(
@@ -351,7 +351,6 @@ impl EvpnInstance {
         attributes: &[PathAttribute],
     ) -> EviImport {
         let selected = vni == self.id.as_u32()
-            && vxlan_encapsulation_compatible(attributes)
             && attributes
                 .iter()
                 .filter_map(PathAttribute::extended_communities)
@@ -362,6 +361,8 @@ impl EvpnInstance {
             EviImport::NotApplicable
         } else if ethernet_tag != self.ethernet_tag {
             EviImport::Dropped(L2RemoteRouteDropReason::EthernetTagMismatch)
+        } else if !vxlan_encapsulation_compatible(attributes) {
+            EviImport::NotApplicable
         } else {
             EviImport::Accepted
         }
@@ -715,6 +716,20 @@ mod tests {
         assert_eq!(
             vlan_based.evi_import(100, EthernetTagId(10), &matching),
             tag_mismatch
+        );
+        // A non-VXLAN encapsulation does not hide a tag mismatch, and with the
+        // right tag it is still not consumed.
+        let nvgre_matching = [PathAttribute::ExtendedCommunities(vec![
+            rt("65000:100").to_extended_community(),
+            rustbgpd_wire::ExtendedCommunity::bgp_encapsulation(9),
+        ])];
+        assert_eq!(
+            vlan_based.evi_import(100, EthernetTagId(10), &nvgre_matching),
+            tag_mismatch
+        );
+        assert_eq!(
+            vlan_based.evi_import(100, EthernetTagId(0), &nvgre_matching),
+            EviImport::NotApplicable
         );
         // Another EVI's route is not a drop, whatever its tag.
         assert_eq!(

@@ -914,8 +914,11 @@ where
 
         let overlay_gateway = !route.gateway.is_unspecified();
 
+        // A non-zero Ethernet Tag is never imported, so its RT, L3VNI and tag
+        // verdict below takes precedence over a resolution-shape error.
         let resolution = match classify_prefix_resolution(&route, esi_overlay_mode) {
-            Ok(resolution) => resolution,
+            Ok(resolution) => Some(resolution),
+            Err(_) if route.ethernet_tag.0 != 0 => None,
             Err(reason) => {
                 table.drops.push(reason);
                 continue;
@@ -955,6 +958,10 @@ where
                 });
                 continue;
             }
+            // Tag 0 here, so classification succeeded above.
+            let Some(resolution) = resolution else {
+                continue;
+            };
             let (targets, router_mac) = match resolve_prefix_for_vrf(
                 vrfs,
                 vrf,
@@ -1708,6 +1715,22 @@ mod tests {
             table.drops()[0],
             DropReason::NonZeroEthernetTag { ref vrf, ethernet_tag: 10, .. } if vrf == "blue"
         ));
+        assert_eq!(
+            table.drop_counts_by_vrf_reason(),
+            BTreeMap::from([(("blue".to_string(), "non_zero_ethernet_tag"), 1)])
+        );
+    }
+
+    /// The tag verdict wins over a resolution-shape error such as a missing
+    /// Router MAC, so the drop stays scoped to the IP-VRF.
+    #[test]
+    fn non_zero_ethernet_tag_type5_without_router_mac_drops_as_tagged() {
+        let vrfs = one_vrf("blue", 5000, "10.0.0.1", &["65000:5000"]);
+        let mut r = route(v4([10, 1, 0, 0], 24), "10.0.0.2", &["65000:5000"]);
+        r.ethernet_tag = EthernetTagId(10);
+        r.router_mac = None;
+        let table = project_ip_prefix_routes(&vrfs, vec![r]);
+        assert!(table.is_empty());
         assert_eq!(
             table.drop_counts_by_vrf_reason(),
             BTreeMap::from([(("blue".to_string(), "non_zero_ethernet_tag"), 1)])
