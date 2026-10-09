@@ -609,6 +609,8 @@ impl LocRib {
                         || old.is_stale != new_best.is_stale
                         || old.is_llgr_stale != new_best.is_llgr_stale
                         || old.next_hop != new_best.next_hop
+                        || old.link_local_next_hop != new_best.link_local_next_hop
+                        || old.next_hop_scope != new_best.next_hop_scope
                         || old.peer_router_id != new_best.peer_router_id
                         || old.nlri != new_best.nlri
                         || old.attributes != new_best.attributes
@@ -696,6 +698,8 @@ impl LocRib {
                         || old.is_stale != new_best.is_stale
                         || old.is_llgr_stale != new_best.is_llgr_stale
                         || old.next_hop != new_best.next_hop
+                        || old.link_local_next_hop != new_best.link_local_next_hop
+                        || old.next_hop_scope != new_best.next_hop_scope
                         || old.peer_router_id != new_best.peer_router_id
                         || old.nlri != new_best.nlri
                         || old.attributes != new_best.attributes
@@ -1863,6 +1867,64 @@ mod tests {
         );
         // Both unknown falls through (peer address decides).
         assert_eq!(vpn_tiebreak_orr(&a, &b, None, None), Ordering::Less);
+    }
+
+    fn link_local_scope(ifindex: u32) -> crate::route::NextHopScope {
+        crate::route::NextHopScope {
+            interface: Arc::from("eth1"),
+            ifindex,
+        }
+    }
+
+    /// The same selected route relearned with only its link-local companion
+    /// or its receiving-interface scope changed is a payload change: export
+    /// decides from both whether the link-local reaches a peer.
+    #[test]
+    fn recompute_vpn_and_labeled_replace_a_link_local_or_scope_only_change() {
+        let link_local = Some("fe80::1".parse().unwrap());
+        let variants = [
+            (link_local, Some(Box::new(link_local_scope(7)))),
+            (link_local, Some(Box::new(link_local_scope(8)))),
+            (link_local, None),
+            (Some("fe80::2".parse().unwrap()), None),
+            (None, None),
+        ];
+        let mut loc = LocRib::new();
+        let vpn_nlri = vpn_nlri([10, 0, 3, 0], 24, 100);
+        let vpn_key = vpn_nlri.key();
+        let labeled_nlri = labeled_nlri([10, 0, 3, 0], 24, 100);
+        let labeled_key = labeled_nlri.prefix;
+        for (step, (link_local_next_hop, next_hop_scope)) in variants.into_iter().enumerate() {
+            let mut vpn = make_vpn_route(vpn_nlri.clone(), 1, 100);
+            vpn.link_local_next_hop = link_local_next_hop;
+            vpn.next_hop_scope = next_hop_scope.clone();
+            assert!(
+                loc.recompute_vpn(vpn_key, [&vpn].into_iter()),
+                "vpn step {step}"
+            );
+            assert!(
+                !loc.recompute_vpn(vpn_key, [&vpn].into_iter()),
+                "vpn step {step} repeat"
+            );
+            let stored = loc.get_vpn(&vpn_key).unwrap();
+            assert_eq!(stored.link_local_next_hop, link_local_next_hop);
+            assert_eq!(stored.next_hop_scope, next_hop_scope);
+
+            let mut labeled = make_labeled_route(labeled_nlri.clone(), 1, 100);
+            labeled.link_local_next_hop = link_local_next_hop;
+            labeled.next_hop_scope = next_hop_scope.clone();
+            assert!(
+                loc.recompute_labeled(labeled_key, [&labeled].into_iter()),
+                "labeled step {step}"
+            );
+            assert!(
+                !loc.recompute_labeled(labeled_key, [&labeled].into_iter()),
+                "labeled step {step} repeat"
+            );
+            let stored = loc.get_labeled(&labeled_key).unwrap();
+            assert_eq!(stored.link_local_next_hop, link_local_next_hop);
+            assert_eq!(stored.next_hop_scope, next_hop_scope);
+        }
     }
 
     #[test]
