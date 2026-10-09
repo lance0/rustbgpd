@@ -1099,6 +1099,7 @@ fn tcp_ao_pinning_keeps_new_unprotected_neighbor_peer_group_valid() {
             export_policy: Vec::new(),
             import_policy_chain: Vec::new(),
             export_policy_chain: Vec::new(),
+            conditional_advertisements: Vec::new(),
         },
     );
     new.neighbors.push(Neighbor {

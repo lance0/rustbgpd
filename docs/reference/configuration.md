@@ -997,7 +997,7 @@ complete atomic block. There is no probe or automatic legacy fallback.
 | `export_policy_chain`  | [string] | no       | --      | Named policy chain for export (mutually exclusive with inline export_policy) |
 | `import_policy`        | [table]  | no       | --      | Inline import policy statements (`[[neighbors.import_policy]]`, see [Policy entries](#policy-entries)); mutually exclusive with `import_policy_chain` |
 | `export_policy`        | [table]  | no       | --      | Inline export policy statements (`[[neighbors.export_policy]]`, see [Policy entries](#policy-entries)); mutually exclusive with `export_policy_chain` |
-| `conditional_advertisements` | [string] | no | `[]` | Names of [conditional advertisement](#conditional-advertisements) definitions attached to this static neighbor |
+| `conditional_advertisements` | [string] | no | `[]` | Names of [conditional advertisement](#conditional-advertisements) definitions attached to this static neighbor. A non-empty list replaces the peer group's list; an empty one inherits it |
 | `llgr_stale_time`      | u32      | no       | 0       | LLGR stale time in seconds (0 = disabled, max 16777215; RFC 9494)    |
 | `add_path`             | table    | no       | --      | Add-Path (RFC 7911) config table (see below)                         |
 | `log_level`            | string   | no       | --      | Override log level for this peer: `"error"`, `"warn"`, `"info"`, `"debug"`, or `"trace"` |
@@ -1595,8 +1595,8 @@ hold_time = 45  # neighbor override beats peer-group default
 ```
 
 Peer-group fields mirror every neighbor setting except `address`,
-`interface`, `remote_asn`, `description`, `peer_group`, `tcp_ao`, and
-`conditional_advertisements`. That covers timers, families,
+`interface`, `remote_asn`, `description`, `peer_group`, and `tcp_ao`.
+That covers timers, families,
 prefix limits (`max_prefixes`, `max_prefixes_ipv4`, `max_prefixes_ipv6`,
 `max_prefixes_received_ipv4`, `max_prefixes_received_ipv6`,
 `max_prefixes_out_ipv4`, `max_prefixes_out_ipv6`) and
@@ -1606,13 +1606,20 @@ receive-side Prefix ORF, `disable_ipv4_unicast`, `link_local_next_hop`,
 private-AS handling, MD5/GTSM, BFD, `tcp_mss`,
 `local_ipv6_nexthop`, `log_level`, slow-peer detection
 (`slow_peer_threshold_pct`, `slow_peer_duration`, `slow_peer_isolation`),
-and import/export inline policy or named chains. TCP-AO is intentionally not inherited through peer groups; static
+and import/export inline policy or named chains, and
+`conditional_advertisements` (static members only). TCP-AO is intentionally not inherited through peer groups; static
 neighbors and dynamic ranges configure their startup key directly.
 A gRPC `SetPeerGroup` replaces only the fields its definition carries; the
 config-file-only group fields (such as `role`, `strict_role`,
 `prefix_orf_receive`, `disable_ipv4_unicast`, `link_local_next_hop`, `bfd`,
-and the per-family prefix limits) keep their configured values. See
-[PeerGroupService](api.md#peergroupservice).
+`conditional_advertisements`, and the per-family prefix limits) keep their
+configured values. See [PeerGroupService](api.md#peergroupservice).
+
+`conditional_advertisements` follows the `export_policy_chain` rule: a static
+member that sets a non-empty list of its own uses that list instead of the
+group's. Dynamic neighbors that use the group do not inherit it. A SIGHUP
+reload that changes the group value runs on the generation route (see
+[Conditional advertisements](#conditional-advertisements)).
 
 `discard_path_attributes` is inherited too. A peer-group replacement supplies
 the complete list (an empty or omitted list clears the group value); a neighbor
@@ -1680,6 +1687,12 @@ An IPv6 next-hop VPNv4 announcement is exported only to a peer advertising
 that exact receive capability; IPv4 next-hop VPNv4 routes and VPN withdrawals
 do not require it. This remains route reflection, with no next-hop rewrite,
 VRF import, or forwarding behavior.
+
+`"ipv4_labeled_unicast"` does not advertise IPv6 next-hop support (AFI 1,
+SAFI 4, next-hop AFI 2). Labeled IPv4 routes therefore use IPv4 next hops: one
+with an IPv6 next hop is not exported, and a peer that sends one has its
+session reset (see the
+[RFC 8950 notes](rfc-notes.md#rfc-8950--extended-next-hop)).
 
 ---
 
@@ -2850,7 +2863,7 @@ upstream only while the primary upstream's default route is gone. It covers
 IPv4 and IPv6 unicast and is an alpha feature outside the v1 inventory.
 
 Definitions live under `[policy.conditional_advertisements.<name>]` and are
-attached to static neighbors by name:
+attached by name to static neighbors, directly or through their peer group:
 
 ```toml
 [policy.conditional_advertisements.backup-via-transit-b]
@@ -2874,10 +2887,16 @@ conditional_advertisements = ["backup-via-transit-b"]
 | `condition_policy` | string | no | -- | Named policy used as a predicate over each condition candidate |
 | `settle_time` | u32 | no | `5` | Seconds a changed condition must stay stable before it applies (0–600) |
 
-Each referenced policy must exist, and a neighbor may attach each
-definition once; either mistake is a load error. `DeletePolicy` refuses to
-delete a policy that a definition references. Peer groups and dynamic
-neighbors do not accept attachments.
+Each referenced policy must exist, and a neighbor or peer group may attach
+each definition once; either mistake is a load error. `DeletePolicy` refuses
+to delete a policy that a definition references.
+
+**Peer groups.** `[peer_groups.<name>] conditional_advertisements` attaches
+definitions to every static member that sets no list of its own; a member's
+non-empty list replaces the group's, as for `export_policy_chain`. Dynamic
+neighbors do not accept attachments and do not inherit a group's. The group
+field is not part of the `SetPeerGroup` definition, so an API edit of the
+group keeps it.
 
 **The condition.** It is present when any current candidate for an exact
 `condition_prefixes` entry satisfies `condition_policy` (or exists, when no
@@ -2910,6 +2929,15 @@ candidate is advertised. A change of applied state re-evaluates the attached
 neighbors' Adj-RIB-Out through the ordinary resync. Attached neighbors leave
 update-group sharing; `rbgp neighbor` shows the reason
 `conditional_advertisement`.
+
+**Status.** `rbgp policy conditional-advertisements` (alias `conditional`;
+`PolicyService.ListConditionalAdvertisements`) lists each installed
+definition, meaning each one attached to at least one static neighbor. For
+each, it shows every condition prefix's own observation, the whole
+condition (`present`, `absent`, or `unknown`) and how long it has held, the
+applied state (`pending`, `advertise`, or `suppress`), the settle timer
+(pending with the time left, held by selection deferral, or settled), and
+the attached neighbors. `--json` prints the same fields.
 
 **Explain.** `rbgp rib --prefix P advertised PEER --explain` reports a
 `conditional_advertisement` step just before the export policy, with code
@@ -3248,14 +3276,19 @@ These fields modify matching routes. Only valid with `action = "permit"`.
 | `set_as_path_prepend`  | table       | `{ asn = 65001, count = 3 }` (ASN 1–4294967295, count 1–10) |
 
 `set_next_hop` follows the route's address family. An IPv6 address on an IPv4
-unicast route is an RFC 8950 next hop. An IPv4 address does not apply to an
-IPv6 unicast route, whose `MP_REACH_NLRI` next hop must be IPv6
-(RFC 2545 §3); the route keeps its next hop, as with FRR's `set ip next-hop`.
-On import, `"self"` for an IPv6 route resolves to the session's local IPv6
-address, else `local_ipv6_nexthop`; with neither (IPv4 transport and no
-`local_ipv6_nexthop`) the route keeps its received next hop. Export never
-encodes an IPv4 next hop for an IPv6 route: such a route is withheld from that
-peer and counted in
+unicast route is an RFC 8950 next hop. An IPv4 address does not apply to a
+route with IPv6 NLRI (IPv6 unicast, IPv6 labeled unicast, or VPNv6), whose
+`MP_REACH_NLRI` next hop must be IPv6 (RFC 2545 §3, RFC 8277, RFC 4659
+§3.2.1); the route keeps its next hop, as with FRR's `set ip next-hop`.
+rustbgpd does not originate 6PE or 6VPE routes and never converts an IPv4
+`set_next_hop` into an IPv4-mapped IPv6 address. To set one deliberately, give
+the IPv6 form, such as `"::ffff:192.0.2.9"`. A received IPv4-mapped next hop
+is reflected unchanged. On import, `"self"` for an IPv6 route resolves to the
+session's local IPv6 address, else `local_ipv6_nexthop`; with neither (IPv4
+transport and no `local_ipv6_nexthop`) the route keeps its received next hop.
+Export never encodes an IPv4 next hop for a route with IPv6 NLRI, including a
+VPNv6 route received with a 12-octet RD + IPv4 next hop: such a route is
+withheld from that peer and counted in
 `bgp_exact_export_rejections_total{reason="missing_ipv6_next_hop"}`.
 
 ### Community formats
@@ -4117,6 +4150,8 @@ duplicate_mac_detection = { action = "detect", window_seconds = 180, threshold =
 | `apply_aliasing_ecmp` | bool     | no       | `true`  | Program ADR-0059 FDB nexthop groups for multi-homed Type 2 routes (aliasing-ECMP via `NDA_NH_ID` + `NHA_FDB`). Flip to `false` to roll this L2VNI back to single-dst FDB rows at the primary VTEP. Single-homed Type 2 entries are unaffected |
 | `duplicate_mac_detection` | table | no | `{ action = "detect", window_seconds = 180, threshold = 5, recovery_seconds = 540 }` | RFC 7432 §15.1 duplicate-MAC M/N detector. `action = "detect"` records threshold crossings only; `action = "suppress_local"` additionally withdraws/suppresses locally-originated Type 2 MAC-only and MAC+IP routes for the offending `(VNI, MAC)` until `recovery_seconds` elapses |
 | `duplicate_ip_detection` | table | no | `{ enabled = false, window_seconds = 180, threshold = 5 }` | Optional per-IP M/N diagnostics for conflicting MAC ownership within a VNI. Detect-only: increments counters and logs threshold crossings, without suppressing or withdrawing routes |
+| `service_interface`   | string   | no       | `"vlan_based"` | EVPN service interface. `vlan_based` keeps Ethernet Tag ID `0`. `vlan_aware_bundle` (RFC 8365 VLAN-aware bundle member, ADR-0092) is **not accepted yet**: the row is checked against the rules below and then rejected |
+| `ethernet_tag`        | u32      | no       | --      | Ethernet Tag of a `vlan_aware_bundle` member, `1..=16777215`, set explicitly (never derived from `vni`). **Not accepted yet**, since it is valid only with `service_interface = "vlan_aware_bundle"` |
 
 Duplicate-IP diagnostics can be enabled independently of duplicate-MAC policy:
 
@@ -4180,6 +4215,18 @@ crossings, not to applying a configuration change.
   `recovery_seconds` must all be greater than zero.
 - `duplicate_mac_detection.recovery_seconds` must be no greater than
   31,536,000 seconds (365 days).
+- `service_interface = "vlan_aware_bundle"` is not accepted yet. A bundle
+  row is first checked against the bundle rules, then rejected with
+  `vni N: service_interface = "vlan_aware_bundle" is not supported yet`.
+  The rules are: `ethernet_tag` is required, explicit, and in
+  `1..=16777215`, and it is rejected on `vlan_based` rows. A bundle row
+  cannot set `ip_vrf` or `auto_derive_route_target`, and it cannot be
+  listed in `[[ethernet_segments]].member_vnis`. Two bundle rows that
+  share a route target need different Ethernet Tags. A route target
+  cannot be shared between a `vlan_based` row and a bundle row. A bundle
+  row's `(bridge, bridge_vlan)` cannot be claimed by any other row;
+  `vlan_based` rows alone keep their existing behavior. The same rules
+  apply to SIGHUP reload and `ApplyEvpnRuntime` candidates.
 - Same VNI must not appear in multiple `[[ethernet_segments]]`
   `member_vnis` lists until per-port learned disambiguation is plumbed.
 
@@ -4354,7 +4401,10 @@ On Ready, the segment is added and its routes originated. On NotReady, the
 segment is removed and its routes withdrawn. When the CE is replaced, the old
 segment's routes are withdrawn and the new ESI's routes are originated. The
 config text keeps `esi = "auto-lacp"`, so persistence, SIGHUP, and config
-transactions always carry the spec, never derived bytes.
+transactions always carry the spec, never derived bytes. `rustbgpd --diff` and
+`DiffRuntimeConfig` cannot see the bond, so they classify an `auto-lacp` edit as
+if the segment were Ready. A NotReady segment has no runtime row, so SIGHUP can
+hot-apply an edit that the diff reports as restart-required.
 
 The probe and the segment actor start only when the daemon starts with at
 least one `[[ethernet_segments]]` entry. If the daemon started with none,
@@ -5000,8 +5050,8 @@ settlement detail.
 
 1. **Generation** — changes to static `[[neighbors]]`, `[peer_groups]`,
    BFD member attachments, inline policy definitions, neighbor sets, global chains,
-   `[policy.conditional_advertisements]` definitions and neighbor
-   `conditional_advertisements` attachments, `.rpol` content,
+   `[policy.conditional_advertisements]` definitions and neighbor or
+   peer-group `conditional_advertisements` attachments, `.rpol` content,
    `[policy.datasets]` contents or bindings, or outbound prefix maxima settle
    as one owned runtime generation. The daemon resolves the candidate once,
    derives one action per static neighbor (unchanged, hot update in place,

@@ -59,7 +59,11 @@ Each result below links to its published, reproducible receipt:
   12.926–14.810 s and OpenBGPD 9.3 in 44.010–63.948 s across the three
   overlaps, measured 2026-10-04 to 2026-10-05 with 320/320 sessions and zero
   parse errors in every row — [v0.75.0 cross-daemon receipt](cross-daemon-v0750-2026-10.md).
-  BIRD 3.3.3, released 2026-10-01, is not yet measured.
+  BIRD 3.3.3 was measured only at 0% overlap, against unreleased source
+  `dcc9b6384` on 2026-10-06 (completion p50 12.493–14.490 s, against
+  rustbgpd's 0.578–0.606 s) — the current-source IRR comparison under
+  [Primary records](#primary-records); its 10% and 50% overlaps are not yet
+  measured.
   The v0.68.0 rows measured 2026-08-30 (0.852–1.085 s) are dated, on the
   earlier harness — [v0.68.0 receipt](irr-reload-v0680-2026-08.md)
 - **Member-flap propagation** (50 members flap, 650 observers): re-announce
@@ -109,8 +113,9 @@ The v0.75.0 rows above measure commit `319d14e4b`, overnight 2026-10-04 to
 and its daemon sources differ from it only in version strings. OpenBGPD 9.3
 ran in every cell with the matrix daemon order alternated; BIRD 3.3.2 ran in
 the IRR roots only, so its matrix rows are the v0.74.0 night's. BIRD 3.3.3
-(released 2026-10-01) and GoBGP v4.10.0 (released 2026-10-04) are not yet
-measured. The v0.74.0, v0.73.0, current-main and v0.68.0 rows these bullets
+(released 2026-10-01) is measured only in the separate 0%-overlap IRR
+comparison against unreleased source, and GoBGP v4.10.0 (released
+2026-10-04) is not yet measured. The v0.74.0, v0.73.0, current-main and v0.68.0 rows these bullets
 replace remain in the [v0.74.0 cross-daemon receipt](cross-daemon-v0740-2026-10.md),
 the [v0.73.0 refresh receipt](headline-refresh-v0730-2026-09.md), the
 [jemalloc-harness receipt](headline-refresh-jemalloc-2026-10.md) and the
@@ -271,6 +276,7 @@ records.
 | [`policy-attribution-criterion-2026-07.md`][policy-attribution-criterion-2026-07.md] | Unstated | Four Criterion policy-evaluation shapes with same-SHA and isolated controls | The measured deltas do not support CPU-gain attribution | Convergence, reload latency, throughput, or end-to-end gain |
 | [`policy-fallback-per-peer-handoff-2026-07.md`][policy-fallback-per-peer-handoff-2026-07.md] | July 2026 | Clean policy transition with typed grouped and fallback outcomes | Per-member fallback work moved out of the clean actor poll | Total-work improvement or wall-clock scheduler latency |
 | [`policy-regroup-shared-plan-2026-07.md`][policy-regroup-shared-plan-2026-07.md] | July 2026 | Four alternating reloads between pinned base and candidate revisions | Shared regroup-plan transition result for the disclosed fleet | General RIB-query latency during the transition |
+| [`prefix-retirement-2026-10.md`][prefix-retirement-2026-10.md] | 2026-10-02 | 400,400 IPv4 prefix index entries; three runs per arm | 62.4% fewer retirement instructions and 47.0% fewer cycles, retaining per-value checkpoints | End-to-end reload or IRR latency |
 | [`private-single-best-fanout-2026-07.md`][private-single-best-fanout-2026-07.md] | 2026-07-30 | Manager-path fanout at 1, 8, 64, and 256 peers | Improvement at 8, 64, and 256 peers with linear absolute scaling there | A one-peer improvement |
 | [`probe-mp-reach-borrowed-attrs-2026-08.md`][probe-mp-reach-borrowed-attrs-2026-08.md] | August 2026 | IPv6 MP_REACH exact-export probe with paired allocation campaigns | Removed a temporary attribute-vector clone in the measured path | RSS, live heap, convergence, or whole-daemon memory |
 | [`rebaseline-2026-07.md`][rebaseline-2026-07.md] | 2026-07 | Manager-direct RR fanout reconstruction and memory attribution | Post-update-group manager-phase and allocation breakdown | Transport, encode, writer, network, or backpressure cost |
@@ -336,6 +342,7 @@ records.
 [policy-attribution-criterion-2026-07.md]: policy-attribution-criterion-2026-07.md
 [policy-fallback-per-peer-handoff-2026-07.md]: policy-fallback-per-peer-handoff-2026-07.md
 [policy-regroup-shared-plan-2026-07.md]: policy-regroup-shared-plan-2026-07.md
+[prefix-retirement-2026-10.md]: prefix-retirement-2026-10.md
 [private-single-best-fanout-2026-07.md]: private-single-best-fanout-2026-07.md
 [probe-mp-reach-borrowed-attrs-2026-08.md]: probe-mp-reach-borrowed-attrs-2026-08.md
 [rebaseline-2026-07.md]: rebaseline-2026-07.md
@@ -365,7 +372,6 @@ from that file; a directory name does not fill a missing date.
 
 | Document | Date stated | Workload, shape, or role | Establishes | Does not establish |
 |---|---|---|---|---|
-| [Prefix-index retirement](prefix-retirement-2026-10.md) | 2026-10-02 | 400,400 IPv4 prefix index entries; three runs per arm | 62.4% fewer retirement instructions and 47.0% fewer cycles, retaining per-value checkpoints | End-to-end reload or IRR latency |
 | [`artifacts/adj-rib-out-family-gauge-2026-07/README.md`](artifacts/adj-rib-out-family-gauge-2026-07/README.md) | Unstated | Exact unrounded estimates and controls for the linked family-gauge receipt | Unstated | Unstated |
 | [`artifacts/adj-rib-out-family-gauge-2026-07/rejected-attempts.md`](artifacts/adj-rib-out-family-gauge-2026-07/rejected-attempts.md) | Unstated | Preflight-invalid and threshold-crossing attempts | Why those attempts were excluded | A retained result |
 | [`artifacts/attribute-layout-2026-08/README.md`](artifacts/attribute-layout-2026-08/README.md) | Unstated | 100k, 500k, and 900k structural rows plus a 200k-route bgperf2 result | The container-layout migration was rejected before a prototype | A live-byte A/B or throughput result |

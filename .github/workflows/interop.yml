@@ -212,17 +212,8 @@ jobs:
       - name: Install exact grpcurl offline
         uses: ./.github/actions/install-grpcurl-artifact
 
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v4
-
       - name: Build rustbgpd:dev
-        uses: docker/build-push-action@v7
-        with:
-          context: .
-          load: true
-          tags: rustbgpd:dev
-          target: dev
-          cache-from: type=gha,scope=rustbgpd-dev
+        uses: ./.github/actions/build-rustbgpd-dev
 
       - name: Run M1 (deploy + test + destroy with retry)
         uses: ./.github/actions/run-interop-test
@@ -245,17 +236,8 @@ jobs:
       - name: Install exact grpcurl offline
         uses: ./.github/actions/install-grpcurl-artifact
 
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v4
-
       - name: Build rustbgpd:dev
-        uses: docker/build-push-action@v7
-        with:
-          context: .
-          load: true
-          tags: rustbgpd:dev
-          target: dev
-          cache-from: type=gha,scope=rustbgpd-dev
+        uses: ./.github/actions/build-rustbgpd-dev
 
       - name: Run M13 (deploy + test + destroy with retry)
         uses: ./.github/actions/run-interop-test
@@ -284,17 +266,8 @@ jobs:
         run: |
           command -v jq >/dev/null || { sudo apt-get update -y && sudo apt-get install -y jq; }
 
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v4
-
       - name: Build rustbgpd:dev
-        uses: docker/build-push-action@v7
-        with:
-          context: .
-          load: true
-          tags: rustbgpd:dev
-          target: dev
-          cache-from: type=gha,scope=rustbgpd-dev
+        uses: ./.github/actions/build-rustbgpd-dev
 
       - name: Run M80 (deploy + test + destroy with retry)
         uses: ./.github/actions/run-interop-test
@@ -317,17 +290,8 @@ jobs:
       - name: Install exact grpcurl offline
         uses: ./.github/actions/install-grpcurl-artifact
 
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v4
-
       - name: Build rustbgpd:dev
-        uses: docker/build-push-action@v7
-        with:
-          context: .
-          load: true
-          tags: rustbgpd:dev
-          target: dev
-          cache-from: type=gha,scope=rustbgpd-dev
+        uses: ./.github/actions/build-rustbgpd-dev
 
       - name: Run M15 (deploy + test + destroy with retry)
         uses: ./.github/actions/run-interop-test
@@ -350,17 +314,8 @@ jobs:
       - name: Install exact grpcurl offline
         uses: ./.github/actions/install-grpcurl-artifact
 
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v4
-
       - name: Build rustbgpd:dev
-        uses: docker/build-push-action@v7
-        with:
-          context: .
-          load: true
-          tags: rustbgpd:dev
-          target: dev
-          cache-from: type=gha,scope=rustbgpd-dev
+        uses: ./.github/actions/build-rustbgpd-dev
 
       - name: Run M10 (deploy + test + destroy with retry)
         uses: ./.github/actions/run-interop-test
@@ -390,17 +345,8 @@ jobs:
       - name: Install exact grpcurl offline
         uses: ./.github/actions/install-grpcurl-artifact
 
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v4
-
       - name: Build rustbgpd:dev
-        uses: docker/build-push-action@v7
-        with:
-          context: .
-          load: true
-          tags: rustbgpd:dev
-          target: dev
-          cache-from: type=gha,scope=rustbgpd-dev
+        uses: ./.github/actions/build-rustbgpd-dev
 
       - name: Run M14 (deploy + test + destroy with retry)
         uses: ./.github/actions/run-interop-test
@@ -427,17 +373,8 @@ jobs:
         run: |
           command -v jq >/dev/null || { sudo apt-get update -y && sudo apt-get install -y jq; }
 
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v4
-
       - name: Build rustbgpd:dev
-        uses: docker/build-push-action@v7
-        with:
-          context: .
-          load: true
-          tags: rustbgpd:dev
-          target: dev
-          cache-from: type=gha,scope=rustbgpd-dev
+        uses: ./.github/actions/build-rustbgpd-dev
 
       - name: Run M17 (deploy + test + destroy with retry)
         uses: ./.github/actions/run-interop-test
@@ -471,17 +408,8 @@ jobs:
         run: |
           command -v jq >/dev/null || { sudo apt-get update -y && sudo apt-get install -y jq; }
 
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v4
-
       - name: Build rustbgpd:dev
-        uses: docker/build-push-action@v7
-        with:
-          context: .
-          load: true
-          tags: rustbgpd:dev
-          target: dev
-          cache-from: type=gha,scope=rustbgpd-dev
+        uses: ./.github/actions/build-rustbgpd-dev
 
       - name: Stage verified GoBGP 4.6.0 archive
         uses: ./.github/actions/stage-gobgp-artifact
@@ -531,17 +459,8 @@ jobs:
         run: |
           command -v jq >/dev/null || { sudo apt-get update -y && sudo apt-get install -y jq; }
 
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v4
-
       - name: Build rustbgpd:dev
-        uses: docker/build-push-action@v7
-        with:
-          context: .
-          load: true
-          tags: rustbgpd:dev
-          target: dev
-          cache-from: type=gha,scope=rustbgpd-dev
+        uses: ./.github/actions/build-rustbgpd-dev
 
       - name: Stage verified GoBGP archive
         uses: ./.github/actions/stage-gobgp-artifact
@@ -577,17 +496,8 @@ jobs:
         run: |
           command -v jq >/dev/null || { sudo apt-get update -y && sudo apt-get install -y jq; }
 
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v4
-
       - name: Build rustbgpd:dev
-        uses: docker/build-push-action@v7
-        with:
-          context: .
-          load: true
-          tags: rustbgpd:dev
-          target: dev
-          cache-from: type=gha,scope=rustbgpd-dev
+        uses: ./.github/actions/build-rustbgpd-dev
 
       - name: Stage verified GoBGP archive
         uses: ./.github/actions/stage-gobgp-artifact
@@ -623,17 +533,8 @@ jobs:
         run: |
           command -v jq >/dev/null || { sudo apt-get update -y && sudo apt-get install -y jq; }
 
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v4
-
       - name: Build rustbgpd:dev
-        uses: docker/build-push-action@v7
-        with:
-          context: .
-          load: true
-          tags: rustbgpd:dev
-          target: dev
-          cache-from: type=gha,scope=rustbgpd-dev
+        uses: ./.github/actions/build-rustbgpd-dev
 
       - name: Stage verified GoBGP 4.10.0 archive
         uses: ./.github/actions/stage-gobgp-artifact
@@ -673,17 +574,8 @@ jobs:
         run: |
           command -v jq >/dev/null || { sudo apt-get update -y && sudo apt-get install -y jq; }
 
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v4
-
       - name: Build rustbgpd:dev
-        uses: docker/build-push-action@v7
-        with:
-          context: .
-          load: true
-          tags: rustbgpd:dev
-          target: dev
-          cache-from: type=gha,scope=rustbgpd-dev
+        uses: ./.github/actions/build-rustbgpd-dev
 
       - name: Stage verified GoBGP 4.10.0 archive
         uses: ./.github/actions/stage-gobgp-artifact
@@ -723,17 +615,8 @@ jobs:
         run: |
           command -v jq >/dev/null || { sudo apt-get update -y && sudo apt-get install -y jq; }
 
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v4
-
       - name: Build rustbgpd:dev
-        uses: docker/build-push-action@v7
-        with:
-          context: .
-          load: true
-          tags: rustbgpd:dev
-          target: dev
-          cache-from: type=gha,scope=rustbgpd-dev
+        uses: ./.github/actions/build-rustbgpd-dev
 
       - name: Stage verified GoBGP 4.6.0 archive
         uses: ./.github/actions/stage-gobgp-artifact
@@ -773,17 +656,8 @@ jobs:
         run: |
           command -v jq >/dev/null || { sudo apt-get update -y && sudo apt-get install -y jq; }
 
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v4
-
       - name: Build rustbgpd:dev
-        uses: docker/build-push-action@v7
-        with:
-          context: .
-          load: true
-          tags: rustbgpd:dev
-          target: dev
-          cache-from: type=gha,scope=rustbgpd-dev
+        uses: ./.github/actions/build-rustbgpd-dev
 
       - name: Stage verified GoBGP 4.6.0 archive
         uses: ./.github/actions/stage-gobgp-artifact
@@ -826,17 +700,8 @@ jobs:
         run: |
           command -v jq >/dev/null || { sudo apt-get update -y && sudo apt-get install -y jq; }
 
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v4
-
       - name: Build rustbgpd:dev
-        uses: docker/build-push-action@v7
-        with:
-          context: .
-          load: true
-          tags: rustbgpd:dev
-          target: dev
-          cache-from: type=gha,scope=rustbgpd-dev
+        uses: ./.github/actions/build-rustbgpd-dev
 
       - name: Run M22 (deploy + test + destroy with retry)
         uses: ./.github/actions/run-interop-test
@@ -869,17 +734,8 @@ jobs:
       - name: Install exact grpcurl offline
         uses: ./.github/actions/install-grpcurl-artifact
 
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v4
-
       - name: Build rustbgpd:dev
-        uses: docker/build-push-action@v7
-        with:
-          context: .
-          load: true
-          tags: rustbgpd:dev
-          target: dev
-          cache-from: type=gha,scope=rustbgpd-dev
+        uses: ./.github/actions/build-rustbgpd-dev
 
       - name: Run M24 (deploy + test + destroy with retry)
         uses: ./.github/actions/run-interop-test
@@ -907,17 +763,8 @@ jobs:
         run: |
           command -v jq >/dev/null || { sudo apt-get update -y && sudo apt-get install -y jq; }
 
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v4
-
       - name: Build rustbgpd:dev
-        uses: docker/build-push-action@v7
-        with:
-          context: .
-          load: true
-          tags: rustbgpd:dev
-          target: dev
-          cache-from: type=gha,scope=rustbgpd-dev
+        uses: ./.github/actions/build-rustbgpd-dev
 
       - name: Stage verified GoBGP archive
         uses: ./.github/actions/stage-gobgp-artifact
@@ -964,17 +811,8 @@ jobs:
         run: |
           command -v jq >/dev/null || { sudo apt-get update -y && sudo apt-get install -y jq; }
 
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v4
-
       - name: Build rustbgpd:dev
-        uses: docker/build-push-action@v7
-        with:
-          context: .
-          load: true
-          tags: rustbgpd:dev
-          target: dev
-          cache-from: type=gha,scope=rustbgpd-dev
+        uses: ./.github/actions/build-rustbgpd-dev
 
       - name: Stage verified GoBGP archive
         uses: ./.github/actions/stage-gobgp-artifact
@@ -1011,17 +849,8 @@ jobs:
         run: |
           command -v jq >/dev/null || { sudo apt-get update -y && sudo apt-get install -y jq; }
 
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v4
-
       - name: Build rustbgpd:dev
-        uses: docker/build-push-action@v7
-        with:
-          context: .
-          load: true
-          tags: rustbgpd:dev
-          target: dev
-          cache-from: type=gha,scope=rustbgpd-dev
+        uses: ./.github/actions/build-rustbgpd-dev
 
       - name: Stage verified BIRD 2.19.2 archive
         uses: ./.github/actions/stage-bird3-artifact
@@ -1093,17 +922,8 @@ jobs:
         run: |
           command -v jq >/dev/null || { sudo apt-get update -y && sudo apt-get install -y jq; }
 
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v4
-
       - name: Build rustbgpd:dev
-        uses: docker/build-push-action@v7
-        with:
-          context: .
-          load: true
-          tags: rustbgpd:dev
-          target: dev
-          cache-from: type=gha,scope=rustbgpd-dev
+        uses: ./.github/actions/build-rustbgpd-dev
 
       - name: Stage verified BIRD 2.19.2 archive
         uses: ./.github/actions/stage-bird3-artifact
@@ -1166,17 +986,8 @@ jobs:
         run: |
           command -v jq >/dev/null || { sudo apt-get update -y && sudo apt-get install -y jq; }
 
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v4
-
       - name: Build rustbgpd:dev
-        uses: docker/build-push-action@v7
-        with:
-          context: .
-          load: true
-          tags: rustbgpd:dev
-          target: dev
-          cache-from: type=gha,scope=rustbgpd-dev
+        uses: ./.github/actions/build-rustbgpd-dev
 
       - name: Pull pinned ExaBGP 5.0.9 source
         run: docker pull ghcr.io/exa-networks/exabgp@sha256:5554ac053766e66ca3b99eb6b66e83e32113913729a184dcbaf0cc4abd2f4244
@@ -1209,17 +1020,8 @@ jobs:
         run: |
           command -v jq >/dev/null || { sudo apt-get update -y && sudo apt-get install -y jq; }
 
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v4
-
       - name: Build rustbgpd:dev
-        uses: docker/build-push-action@v7
-        with:
-          context: .
-          load: true
-          tags: rustbgpd:dev
-          target: dev
-          cache-from: type=gha,scope=rustbgpd-dev
+        uses: ./.github/actions/build-rustbgpd-dev
 
       - name: Verify and pull digest-pinned OpenBGPD 9.1
         # Pin the multi-platform index used by the topology, then prove the
@@ -1271,17 +1073,8 @@ jobs:
       - name: Install exact grpcurl offline
         uses: ./.github/actions/install-grpcurl-artifact
 
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v4
-
       - name: Build rustbgpd:dev
-        uses: docker/build-push-action@v7
-        with:
-          context: .
-          load: true
-          tags: rustbgpd:dev
-          target: dev
-          cache-from: type=gha,scope=rustbgpd-dev
+        uses: ./.github/actions/build-rustbgpd-dev
 
       - name: Run M25 (deploy + test + destroy with retry)
         uses: ./.github/actions/run-interop-test
@@ -1313,17 +1106,8 @@ jobs:
       # Buildx cache cuts the docker build step from ~6 min to ~30 s on
       # cache hits. The cargo registry / target dir gets reused via the
       # GitHub Actions cache backend (type=gha).
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v4
-
       - name: Build rustbgpd:dev
-        uses: docker/build-push-action@v7
-        with:
-          context: .
-          load: true
-          tags: rustbgpd:dev
-          target: dev
-          cache-from: type=gha,scope=rustbgpd-dev
+        uses: ./.github/actions/build-rustbgpd-dev
 
       - name: Run M29 (deploy + test + destroy with retry)
         # The composite always destroys before each attempt, so an
@@ -1355,17 +1139,8 @@ jobs:
         run: |
           command -v jq >/dev/null || { sudo apt-get update -y && sudo apt-get install -y jq; }
 
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v4
-
       - name: Build rustbgpd:dev
-        uses: docker/build-push-action@v7
-        with:
-          context: .
-          load: true
-          tags: rustbgpd:dev
-          target: dev
-          cache-from: type=gha,scope=rustbgpd-dev
+        uses: ./.github/actions/build-rustbgpd-dev
 
       - name: Run M30 (deploy + test + destroy with retry)
         uses: ./.github/actions/run-interop-test
@@ -1394,17 +1169,8 @@ jobs:
         run: |
           command -v jq >/dev/null || { sudo apt-get update -y && sudo apt-get install -y jq; }
 
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v4
-
       - name: Build rustbgpd:dev
-        uses: docker/build-push-action@v7
-        with:
-          context: .
-          load: true
-          tags: rustbgpd:dev
-          target: dev
-          cache-from: type=gha,scope=rustbgpd-dev
+        uses: ./.github/actions/build-rustbgpd-dev
 
       - name: Run M34 (deploy + test + destroy with retry)
         uses: ./.github/actions/run-interop-test
@@ -1433,17 +1199,8 @@ jobs:
         run: |
           command -v jq >/dev/null || { sudo apt-get update -y && sudo apt-get install -y jq; }
 
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v4
-
       - name: Build rustbgpd:dev
-        uses: docker/build-push-action@v7
-        with:
-          context: .
-          load: true
-          tags: rustbgpd:dev
-          target: dev
-          cache-from: type=gha,scope=rustbgpd-dev
+        uses: ./.github/actions/build-rustbgpd-dev
 
       - name: Run M35 (deploy + test + destroy with retry)
         uses: ./.github/actions/run-interop-test
@@ -1472,17 +1229,8 @@ jobs:
         run: |
           command -v jq >/dev/null || { sudo apt-get update -y && sudo apt-get install -y jq; }
 
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v4
-
       - name: Build rustbgpd:dev
-        uses: docker/build-push-action@v7
-        with:
-          context: .
-          load: true
-          tags: rustbgpd:dev
-          target: dev
-          cache-from: type=gha,scope=rustbgpd-dev
+        uses: ./.github/actions/build-rustbgpd-dev
 
       - name: Run M35b (deploy + test + destroy with retry)
         uses: ./.github/actions/run-interop-test
@@ -1510,17 +1258,8 @@ jobs:
         run: |
           command -v jq >/dev/null || { sudo apt-get update -y && sudo apt-get install -y jq; }
 
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v4
-
       - name: Build rustbgpd:dev
-        uses: docker/build-push-action@v7
-        with:
-          context: .
-          load: true
-          tags: rustbgpd:dev
-          target: dev
-          cache-from: type=gha,scope=rustbgpd-dev
+        uses: ./.github/actions/build-rustbgpd-dev
 
       - name: Run M35c (deploy + test + destroy with retry)
         uses: ./.github/actions/run-interop-test
@@ -1550,17 +1289,8 @@ jobs:
         run: |
           command -v jq >/dev/null || { sudo apt-get update -y && sudo apt-get install -y jq; }
 
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v4
-
       - name: Build rustbgpd:dev
-        uses: docker/build-push-action@v7
-        with:
-          context: .
-          load: true
-          tags: rustbgpd:dev
-          target: dev
-          cache-from: type=gha,scope=rustbgpd-dev
+        uses: ./.github/actions/build-rustbgpd-dev
 
       - name: Run M41 (deploy + test + destroy with retry)
         uses: ./.github/actions/run-interop-test
@@ -1583,17 +1313,8 @@ jobs:
       - name: Install exact grpcurl offline
         uses: ./.github/actions/install-grpcurl-artifact
 
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v4
-
       - name: Build rustbgpd:dev
-        uses: docker/build-push-action@v7
-        with:
-          context: .
-          load: true
-          tags: rustbgpd:dev
-          target: dev
-          cache-from: type=gha,scope=rustbgpd-dev
+        uses: ./.github/actions/build-rustbgpd-dev
 
       # The mTLS PKI fixture must exist before deploy so the topology
       # can bind-mount it into the rustbgpd container. Generated here
@@ -1630,17 +1351,8 @@ jobs:
         run: |
           command -v jq >/dev/null || { sudo apt-get update -y && sudo apt-get install -y jq; }
 
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v4
-
       - name: Build rustbgpd:dev
-        uses: docker/build-push-action@v7
-        with:
-          context: .
-          load: true
-          tags: rustbgpd:dev
-          target: dev
-          cache-from: type=gha,scope=rustbgpd-dev
+        uses: ./.github/actions/build-rustbgpd-dev
 
       # The mTLS PKI fixture must exist before deploy so the topology
       # can bind-mount it into the rustbgpd container.
@@ -1672,17 +1384,8 @@ jobs:
         run: |
           command -v jq >/dev/null || { sudo apt-get update -y && sudo apt-get install -y jq; }
 
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v4
-
       - name: Build rustbgpd:dev
-        uses: docker/build-push-action@v7
-        with:
-          context: .
-          load: true
-          tags: rustbgpd:dev
-          target: dev
-          cache-from: type=gha,scope=rustbgpd-dev
+        uses: ./.github/actions/build-rustbgpd-dev
 
       - name: Run M55 (deploy + test + destroy with retry)
         uses: ./.github/actions/run-interop-test
@@ -1712,17 +1415,8 @@ jobs:
         run: |
           command -v jq >/dev/null || { sudo apt-get update -y && sudo apt-get install -y jq; }
 
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v4
-
       - name: Build rustbgpd:dev
-        uses: docker/build-push-action@v7
-        with:
-          context: .
-          load: true
-          tags: rustbgpd:dev
-          target: dev
-          cache-from: type=gha,scope=rustbgpd-dev
+        uses: ./.github/actions/build-rustbgpd-dev
 
       # Reuses the M54 mTLS PKI; same operator cert chain.
       - name: Generate M54 mTLS certs
@@ -1749,17 +1443,8 @@ jobs:
       - name: Install exact grpcurl offline
         uses: ./.github/actions/install-grpcurl-artifact
 
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v4
-
       - name: Build rustbgpd:dev
-        uses: docker/build-push-action@v7
-        with:
-          context: .
-          load: true
-          tags: rustbgpd:dev
-          target: dev
-          cache-from: type=gha,scope=rustbgpd-dev
+        uses: ./.github/actions/build-rustbgpd-dev
 
       - name: Run M45 (deploy + test + destroy with retry)
         uses: ./.github/actions/run-interop-test
@@ -1788,17 +1473,8 @@ jobs:
         run: |
           command -v jq >/dev/null || { sudo apt-get update -y && sudo apt-get install -y jq; }
 
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v4
-
       - name: Build rustbgpd:dev
-        uses: docker/build-push-action@v7
-        with:
-          context: .
-          load: true
-          tags: rustbgpd:dev
-          target: dev
-          cache-from: type=gha,scope=rustbgpd-dev
+        uses: ./.github/actions/build-rustbgpd-dev
 
       - name: Run M57 (deploy + test + destroy with retry)
         uses: ./.github/actions/run-interop-test
@@ -1828,17 +1504,8 @@ jobs:
         run: |
           command -v jq >/dev/null || { sudo apt-get update -y && sudo apt-get install -y jq; }
 
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v4
-
       - name: Build rustbgpd:dev
-        uses: docker/build-push-action@v7
-        with:
-          context: .
-          load: true
-          tags: rustbgpd:dev
-          target: dev
-          cache-from: type=gha,scope=rustbgpd-dev
+        uses: ./.github/actions/build-rustbgpd-dev
 
       - name: Run M63 (deploy + test + destroy with retry)
         uses: ./.github/actions/run-interop-test
@@ -1868,17 +1535,8 @@ jobs:
         run: |
           command -v jq >/dev/null || { sudo apt-get update -y && sudo apt-get install -y jq; }
 
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v4
-
       - name: Build rustbgpd:dev
-        uses: docker/build-push-action@v7
-        with:
-          context: .
-          load: true
-          tags: rustbgpd:dev
-          target: dev
-          cache-from: type=gha,scope=rustbgpd-dev
+        uses: ./.github/actions/build-rustbgpd-dev
 
       - name: Run M64 (deploy + test + destroy with retry)
         uses: ./.github/actions/run-interop-test
@@ -1905,17 +1563,8 @@ jobs:
         run: |
           command -v jq >/dev/null || { sudo apt-get update -y && sudo apt-get install -y jq; }
 
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v4
-
       - name: Build rustbgpd:dev
-        uses: docker/build-push-action@v7
-        with:
-          context: .
-          load: true
-          tags: rustbgpd:dev
-          target: dev
-          cache-from: type=gha,scope=rustbgpd-dev
+        uses: ./.github/actions/build-rustbgpd-dev
 
       - name: Run M26 (deploy + test + destroy with retry)
         uses: ./.github/actions/run-interop-test
@@ -1970,17 +1619,8 @@ jobs:
         run: |
           command -v jq >/dev/null || { sudo apt-get update -y && sudo apt-get install -y jq; }
 
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v4
-
       - name: Build rustbgpd:dev
-        uses: docker/build-push-action@v7
-        with:
-          context: .
-          load: true
-          tags: rustbgpd:dev
-          target: dev
-          cache-from: type=gha,scope=rustbgpd-dev
+        uses: ./.github/actions/build-rustbgpd-dev
 
       - name: Build bird:2-bookworm
         run: docker build -t bird:2-bookworm -f tests/interop/Dockerfile.bird tests/interop
@@ -2030,17 +1670,8 @@ jobs:
         run: |
           command -v jq >/dev/null || { sudo apt-get update -y && sudo apt-get install -y jq; }
 
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v4
-
       - name: Build rustbgpd:dev
-        uses: docker/build-push-action@v7
-        with:
-          context: .
-          load: true
-          tags: rustbgpd:dev
-          target: dev
-          cache-from: type=gha,scope=rustbgpd-dev
+        uses: ./.github/actions/build-rustbgpd-dev
 
       - name: Run M84 (deploy + test + destroy with retry)
         uses: ./.github/actions/run-interop-test
@@ -2073,17 +1704,8 @@ jobs:
           tshark --version
           nsenter --version
 
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v4
-
       - name: Build rustbgpd:dev
-        uses: docker/build-push-action@v7
-        with:
-          context: .
-          load: true
-          tags: rustbgpd:dev
-          target: dev
-          cache-from: type=gha,scope=rustbgpd-dev
+        uses: ./.github/actions/build-rustbgpd-dev
 
       - name: Run M99 (single-attempt byte proof)
         uses: ./.github/actions/run-interop-test
@@ -2107,18 +1729,9 @@ jobs:
       - name: Install exact grpcurl offline
         uses: ./.github/actions/install-grpcurl-artifact
 
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v4
-
       # The current-daemon receiver beside the frozen released-image receiver.
       - name: Build rustbgpd:dev
-        uses: docker/build-push-action@v7
-        with:
-          context: .
-          load: true
-          tags: rustbgpd:dev
-          target: dev
-          cache-from: type=gha,scope=rustbgpd-dev
+        uses: ./.github/actions/build-rustbgpd-dev
 
       - name: Stage verified BIRD 2.19.2 archive
         uses: ./.github/actions/stage-bird3-artifact
@@ -2195,17 +1808,8 @@ jobs:
         run: |
           command -v jq >/dev/null || { sudo apt-get update -y && sudo apt-get install -y jq; }
 
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v4
-
       - name: Build rustbgpd:dev
-        uses: docker/build-push-action@v7
-        with:
-          context: .
-          load: true
-          tags: rustbgpd:dev
-          target: dev
-          cache-from: type=gha,scope=rustbgpd-dev
+        uses: ./.github/actions/build-rustbgpd-dev
 
       - name: Stage verified BIRD 3 archive
         uses: ./.github/actions/stage-bird3-artifact
@@ -2249,17 +1853,8 @@ jobs:
       - name: Install exact grpcurl offline
         uses: ./.github/actions/install-grpcurl-artifact
 
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v4
-
       - name: Build rustbgpd:dev
-        uses: docker/build-push-action@v7
-        with:
-          context: .
-          load: true
-          tags: rustbgpd:dev
-          target: dev
-          cache-from: type=gha,scope=rustbgpd-dev
+        uses: ./.github/actions/build-rustbgpd-dev
 
       - name: Build bmpsink:m102 capture sidecar
         run: docker build -t bmpsink:m102 -f tests/interop/Dockerfile.bmpsink tests/interop
@@ -2315,17 +1910,8 @@ jobs:
         run: |
           command -v jq >/dev/null || { sudo apt-get update -y && sudo apt-get install -y jq; }
 
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v4
-
       - name: Build rustbgpd:dev
-        uses: docker/build-push-action@v7
-        with:
-          context: .
-          load: true
-          tags: rustbgpd:dev
-          target: dev
-          cache-from: type=gha,scope=rustbgpd-dev
+        uses: ./.github/actions/build-rustbgpd-dev
 
       - name: Build bird:2-bookworm
         run: docker build -t bird:2-bookworm -f tests/interop/Dockerfile.bird tests/interop
@@ -2405,17 +1991,8 @@ jobs:
         run: |
           command -v jq >/dev/null || { sudo apt-get update -y && sudo apt-get install -y jq; }
 
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v4
-
       - name: Build rustbgpd:dev
-        uses: docker/build-push-action@v7
-        with:
-          context: .
-          load: true
-          tags: rustbgpd:dev
-          target: dev
-          cache-from: type=gha,scope=rustbgpd-dev
+        uses: ./.github/actions/build-rustbgpd-dev
 
       - name: Verify and pull exact ARouteServer 1.23.2 image
         env:
@@ -2510,17 +2087,8 @@ jobs:
         run: |
           command -v jq >/dev/null || { sudo apt-get update -y && sudo apt-get install -y jq; }
 
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v4
-
       - name: Build rustbgpd:dev
-        uses: docker/build-push-action@v7
-        with:
-          context: .
-          load: true
-          tags: rustbgpd:dev
-          target: dev
-          cache-from: type=gha,scope=rustbgpd-dev
+        uses: ./.github/actions/build-rustbgpd-dev
 
       - name: Stage verified GoBGP 4.10.0 archive
         uses: ./.github/actions/stage-gobgp-artifact
@@ -2563,17 +2131,8 @@ jobs:
       - name: Install exact grpcurl offline
         uses: ./.github/actions/install-grpcurl-artifact
 
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v4
-
       - name: Build rustbgpd:dev
-        uses: docker/build-push-action@v7
-        with:
-          context: .
-          load: true
-          tags: rustbgpd:dev
-          target: dev
-          cache-from: type=gha,scope=rustbgpd-dev
+        uses: ./.github/actions/build-rustbgpd-dev
 
       - name: Build bmpsink:m114 capture sidecar
         run: docker build -t bmpsink:m114 -f tests/interop/Dockerfile.bmpsink tests/interop
@@ -2600,17 +2159,8 @@ jobs:
       - name: Install exact grpcurl offline
         uses: ./.github/actions/install-grpcurl-artifact
 
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v4
-
       - name: Build rustbgpd:dev
-        uses: docker/build-push-action@v7
-        with:
-          context: .
-          load: true
-          tags: rustbgpd:dev
-          target: dev
-          cache-from: type=gha,scope=rustbgpd-dev
+        uses: ./.github/actions/build-rustbgpd-dev
 
       - name: Build bmpsink:m115 capture sidecar
         run: docker build -t bmpsink:m115 -f tests/interop/Dockerfile.bmpsink tests/interop
@@ -2637,17 +2187,8 @@ jobs:
       - name: Install exact grpcurl offline
         uses: ./.github/actions/install-grpcurl-artifact
 
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v4
-
       - name: Build rustbgpd:dev
-        uses: docker/build-push-action@v7
-        with:
-          context: .
-          load: true
-          tags: rustbgpd:dev
-          target: dev
-          cache-from: type=gha,scope=rustbgpd-dev
+        uses: ./.github/actions/build-rustbgpd-dev
 
       - name: Build bmpsink:m116 capture sidecar
         run: docker build -t bmpsink:m116 -f tests/interop/Dockerfile.bmpsink tests/interop

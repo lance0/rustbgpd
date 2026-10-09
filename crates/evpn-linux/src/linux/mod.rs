@@ -531,8 +531,11 @@ impl Dataplane for LinuxDataplane {
         }
         let fdb_entries = fdb::dump_fdb(&self.handle, &cache).await?;
         let mut snap = KernelSnapshot::new();
-        for ((vni, _vlan, _mac), entry) in fdb_entries {
+        for ((vni, _vlan, _mac), entry) in fdb_entries.unicast {
             snap.insert_fdb(vni, entry);
+        }
+        for (vni, dst, owned) in fdb_entries.flood {
+            snap.insert_flood_row(vni, dst, owned);
         }
         snap.set_link_names(cache.all_link_names.iter().cloned().collect());
         snap.set_vxlans(
@@ -701,6 +704,14 @@ impl Dataplane for LinuxDataplane {
             | DataplaneOp::RemoveRemoteFdb { .. } => {
                 let cache = self.link_cache.lock().await.clone();
                 fdb::apply_op(&self.handle, &cache, op).await
+            }
+            DataplaneOp::AddFloodFdb { vni, dst } => {
+                let cache = self.link_cache.lock().await.clone();
+                fdb::apply_flood_op(&self.handle, &cache, *vni, *dst, true).await
+            }
+            DataplaneOp::RemoveFloodFdb { vni, dst } => {
+                let cache = self.link_cache.lock().await.clone();
+                fdb::apply_flood_op(&self.handle, &cache, *vni, *dst, false).await
             }
             DataplaneOp::AddRemoteIpRoute { .. }
             | DataplaneOp::RemoveRemoteIpRoute { .. }

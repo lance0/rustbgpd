@@ -1115,6 +1115,29 @@ pub enum GrpcMaxTierConfig {
     OperatorOnly,
 }
 
+/// EVPN service interface of one `[[evpn_instances]]` row (RFC 7432 §6).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum EvpnServiceInterfaceConfig {
+    /// One broadcast domain per EVI, Ethernet Tag ID `0` (ADR-0089).
+    #[default]
+    VlanBased,
+    /// Member of an RFC 8365 VLAN-aware bundle, identified by its shared
+    /// route targets and its own non-zero `ethernet_tag` (ADR-0092). Not
+    /// accepted yet.
+    VlanAwareBundle,
+}
+
+impl EvpnServiceInterfaceConfig {
+    #[expect(
+        clippy::trivially_copy_pass_by_ref,
+        reason = "serde skip_serializing_if passes the field by reference"
+    )]
+    fn is_vlan_based(&self) -> bool {
+        *self == Self::VlanBased
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum EvpnDuplicateMacActionConfig {
@@ -1267,11 +1290,6 @@ macro_rules! define_neighbor_and_peer_group_configs {
                 $(#[$after_neighbor_attr])*
                 pub $after_field: $after_ty,
             )*
-            /// Names of `[policy.conditional_advertisements]` definitions
-            /// attached to this neighbor (ADR-0137). Static neighbors only;
-            /// peer groups and dynamic neighbors do not carry attachments.
-            #[serde(default, skip_serializing_if = "Vec::is_empty")]
-            pub conditional_advertisements: Vec<String>,
         }
 
         #[derive(Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -1891,6 +1909,22 @@ define_neighbor_and_peer_group_configs! {
                 #[serde(default)]
             }
         }
+        conditional_advertisements: Vec<String> {
+            neighbor {
+                /// Names of `[policy.conditional_advertisements]` definitions
+                /// attached to this neighbor (ADR-0137). A non-empty list
+                /// replaces the peer group's list; an empty one inherits it.
+                /// Static neighbors only; dynamic neighbors do not carry
+                /// attachments.
+                #[serde(default, skip_serializing_if = "Vec::is_empty")]
+            }
+            peer_group {
+                /// Conditional advertisements inherited by static neighbors in
+                /// this group that set none of their own (ADR-0137). Dynamic
+                /// neighbors using the group do not inherit them.
+                #[serde(default, skip_serializing_if = "Vec::is_empty")]
+            }
+        }
     }
 }
 
@@ -2174,6 +2208,10 @@ impl fmt::Debug for PeerGroupConfig {
             .field("export_policy", &self.export_policy)
             .field("import_policy_chain", &self.import_policy_chain)
             .field("export_policy_chain", &self.export_policy_chain)
+            .field(
+                "conditional_advertisements",
+                &self.conditional_advertisements,
+            )
             .finish()
     }
 }
@@ -2386,7 +2424,8 @@ pub struct PolicyConfig {
     pub export_chain: Vec<String>,
     /// Named conditional-advertisement definitions (ADR-0137), attached
     /// to static neighbors by name through
-    /// `[[neighbors]] conditional_advertisements`.
+    /// `[[neighbors]] conditional_advertisements` or the neighbor's
+    /// `[peer_groups.<name>] conditional_advertisements`.
     #[serde(
         default,
         skip_serializing_if = "HashMap::is_empty",
@@ -2840,6 +2879,10 @@ pub struct AsPathPrependConfig {
 /// - `bridge_vlan` — optional local Linux bridge VLAN selector
 ///   (`1..=4094`). Valid only with `bridge`; ADR-0089 v1 keeps EVPN
 ///   Ethernet Tag ID `0`, so this is not a wire-protocol tag.
+/// - `service_interface` — `vlan_based` (default) or `vlan_aware_bundle`
+///   (ADR-0092; validated, then rejected as not supported yet).
+/// - `ethernet_tag` — explicit `1..=16_777_215` Ethernet Tag of a
+///   `vlan_aware_bundle` member; rejected on `vlan_based` rows.
 /// - `advertise_svi_mac` — toggle for Type 2 origination of the SVI's
 ///   own MAC address (RFC 9135 §6.1). Off by default. Origination is
 ///   gated on dataplane readiness for the instance.
@@ -2873,6 +2916,19 @@ pub struct EvpnInstanceConfig {
     /// VLAN-aware bridge attribution. This is not an EVPN Ethernet Tag.
     #[serde(default)]
     pub bridge_vlan: Option<u32>,
+    /// EVPN service interface (RFC 7432 §6, ADR-0092). `vlan_based`, the
+    /// default, keeps Ethernet Tag ID `0`. `vlan_aware_bundle` rows are
+    /// validated but not accepted yet.
+    #[serde(
+        default,
+        skip_serializing_if = "EvpnServiceInterfaceConfig::is_vlan_based"
+    )]
+    pub service_interface: EvpnServiceInterfaceConfig,
+    /// EVPN Ethernet Tag of a `vlan_aware_bundle` member (`1..=16_777_215`).
+    /// Required for, and only valid with, `service_interface =
+    /// "vlan_aware_bundle"`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ethernet_tag: Option<u32>,
     /// Originate Type 2 routes for the SVI's own MAC address (RFC 9135 §6.1).
     /// Off by default.
     #[serde(default)]

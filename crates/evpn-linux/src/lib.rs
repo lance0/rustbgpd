@@ -4,7 +4,8 @@
 //! in `rustbgpd-evpn`) over a `tokio::sync::watch` channel, observes
 //! Linux bridge / VXLAN topology through netlink, and programs *only*
 //! rustbgpd-owned remote-MAC FDB entries through the bridge/master
-//! path with `extern_learn`.
+//! path with `extern_learn`, plus `extern_learn` all-zero-MAC
+//! ingress-replication rows on the VXLAN port for BUM flooding.
 //!
 //! The contract is locked by ADR-0054. By design, this crate cannot
 //! depend on `rustbgpd-rib` or `rustbgpd-transport` — see §1 of that
@@ -122,5 +123,5 @@ pub use l3_adoption::{AdoptedL3Route, AdoptedL3VxlanFdb, AdoptedL3VxlanFdbTarget
 pub use reconcile::{ReconcileActor, ReconcileActorConfig};
 pub use snapshot::{
     InstanceProbe, InstanceProbes, KernelBridgePortInfo, KernelFdbEntry, KernelFdbFlags,
-    KernelLinkInfo, KernelSnapshot, OwnedEntry, OwnedSet,
+    KernelFloodEntry, KernelLinkInfo, KernelSnapshot, OwnedEntry, OwnedSet,
 };

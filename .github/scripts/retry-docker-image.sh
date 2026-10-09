@@ -13,7 +13,7 @@ for attempt in 1 2 3; do
     cat "$output" >&2
   fi
   if (( attempt < 3 )); then
-    sleep "$((attempt * 5))"
+    sleep "$((attempt * ${RETRY_DELAY_SECONDS:-5}))"
   fi
 done
 exit "$status"

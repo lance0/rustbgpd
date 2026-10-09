@@ -265,7 +265,7 @@ fn neighbor_attachment_errors_are_rejected() {
 }
 
 #[test]
-fn schema_rejects_unknown_fields_values_and_unsupported_owners() {
+fn schema_rejects_unknown_fields_values_and_dynamic_owners() {
     for (label, toml) in [
         (
             "advertise_if value",
@@ -281,10 +281,6 @@ fn schema_rejects_unknown_fields_values_and_unsupported_owners() {
                 "advertise_if = \"absent\"",
                 "advertise_if = \"absent\"\nexist_map = \"x\"",
             ),
-        ),
-        (
-            "peer-group attachment",
-            format!("{BASE}\n[peer_groups.edge]\nconditional_advertisements = [\"backup\"]\n"),
         ),
         (
             "dynamic-neighbor attachment",
@@ -473,4 +469,156 @@ fn persistence_round_trips_sorted_and_omits_when_unused() {
         !document.contains("conditional_advertisements"),
         "{document}"
     );
+}
+
+/// `BASE` with peer group `edge` carrying `group_list`, neighbor 10.0.0.3 in
+/// it with no list of its own, and neighbor 10.0.0.2 in it with its own
+/// `["backup"]`, plus a second definition `core`.
+fn grouped(group_list: &str) -> String {
+    BASE.replacen(
+        "[[neighbors]]\naddress = \"10.0.0.2\"\nremote_asn = 65002\n",
+        &format!(
+            "[policy.conditional_advertisements.core]\nadvertise_policy = \"backup-routes\"\n\
+             advertise_if = \"present\"\ncondition_prefixes = [\"192.0.2.0/24\"]\n\n\
+             [peer_groups.edge]\nhold_time = 90\n{group_list}\n\
+             [[neighbors]]\naddress = \"10.0.0.2\"\nremote_asn = 65002\npeer_group = \"edge\"\n"
+        ),
+        1,
+    )
+    .replacen(
+        "address = \"10.0.0.3\"\nremote_asn = 65003\n",
+        "address = \"10.0.0.3\"\nremote_asn = 65003\npeer_group = \"edge\"\n",
+        1,
+    )
+}
+
+fn attachments(config: &Config) -> Vec<(String, Vec<String>)> {
+    config
+        .conditional_advertisement_set()
+        .unwrap()
+        .attachments
+        .into_iter()
+        .map(|(peer, names)| {
+            (
+                peer.to_string(),
+                names.iter().map(ToString::to_string).collect(),
+            )
+        })
+        .collect()
+}
+
+/// A member with no list of its own inherits the group's; a member's own
+/// non-empty list replaces it (the `export_policy_chain` rule). Only
+/// attached definitions are installed.
+#[test]
+fn peer_group_attachment_is_inherited_unless_the_neighbor_sets_its_own() {
+    let config = parse(&grouped("conditional_advertisements = [\"core\"]\n")).unwrap();
+    assert_eq!(
+        attachments(&config),
+        [
+            ("10.0.0.2".to_string(), vec!["backup".to_string()]),
+            ("10.0.0.3".to_string(), vec!["core".to_string()]),
+        ]
+    );
+    let set = config.conditional_advertisement_set().unwrap();
+    let mut names: Vec<_> = set.definitions.iter().map(|d| d.name.to_string()).collect();
+    names.sort();
+    assert_eq!(names, ["backup", "core"]);
+
+    let detached = parse(&grouped("")).unwrap();
+    assert_eq!(
+        attachments(&detached),
+        [("10.0.0.2".to_string(), vec!["backup".to_string()])]
+    );
+}
+
+#[test]
+fn peer_group_attachment_errors_are_rejected() {
+    for (list, expected) in [
+        (
+            "conditional_advertisements = [\"missing\"]\n",
+            "undefined conditional advertisement \"missing\"",
+        ),
+        (
+            "conditional_advertisements = [\"core\", \"core\"]\n",
+            "attached more than once",
+        ),
+    ] {
+        match parse(&grouped(list)).unwrap_err() {
+            ConfigError::InvalidNeighborConfig {
+                address,
+                field,
+                reason,
+            } => {
+                assert_eq!(address, "peer_group.edge");
+                assert_eq!(field, "conditional_advertisements");
+                assert!(reason.contains(expected), "{reason}");
+            }
+            other => panic!("expected InvalidNeighborConfig, got {other:?}"),
+        }
+    }
+}
+
+/// Attaching, changing, and detaching at the group is a hot-applied group
+/// change on the generation route that moves no session, and a sequential
+/// candidate carrying it is rejected, naming the group field and the
+/// inheriting neighbor.
+#[test]
+fn peer_group_attachment_changes_reload_on_the_generation_route() {
+    let md5 = |toml: &str| {
+        toml.replacen(
+            "remote_asn = 65003\n",
+            "remote_asn = 65003\nmd5_password = \"secret\"\n",
+            1,
+        )
+    };
+    let none = grouped("");
+    let backup = grouped("conditional_advertisements = [\"backup\"]\n");
+    let core = grouped("conditional_advertisements = [\"core\"]\n");
+    for (label, prior_toml, candidate_toml) in [
+        ("attach", &none, &backup),
+        ("change", &backup, &core),
+        ("detach", &core, &none),
+    ] {
+        let prior = parse(prior_toml).unwrap();
+        let candidate = parse(candidate_toml).unwrap();
+        let diff = diff_config(&prior, &candidate);
+        assert_eq!(diff.peer_groups.changed, ["edge"], "{label}");
+        assert!(diff.neighbors.changed.is_empty(), "{label}");
+        let changes =
+            describe_peer_group_changes(&prior.peer_groups["edge"], &candidate.peer_groups["edge"]);
+        assert_eq!(changes.len(), 1, "{label}");
+        assert_eq!(changes[0].field, "conditional_advertisements", "{label}");
+        assert_eq!(
+            changes[0].impact,
+            Some(ConfigFieldImpact::HotApplied),
+            "{label}"
+        );
+        assert_eq!(diff.sighup_route, SighupReloadRoute::Generation, "{label}");
+        assert!(
+            plan_reload_peer_actions(&prior, &candidate)
+                .unwrap()
+                .is_empty(),
+            "{label}: no session action"
+        );
+        assert_ne!(attachments(&prior), attachments(&candidate), "{label}");
+
+        let sequential = parse(&md5(candidate_toml)).unwrap();
+        let SighupReloadRoute::Rejected { reasons } = diff_config(&prior, &sequential).sighup_route
+        else {
+            panic!("{label}: a sequential candidate must be rejected");
+        };
+        assert!(
+            reasons
+                .iter()
+                .any(|reason| reason.starts_with("peer group \"edge\" conditional_advertisements")),
+            "{label}: {reasons:?}"
+        );
+        assert!(
+            reasons
+                .iter()
+                .any(|reason| reason.starts_with("neighbor 10.0.0.3 conditional_advertisements")),
+            "{label}: {reasons:?}"
+        );
+    }
 }

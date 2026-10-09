@@ -55,7 +55,8 @@ independent observations; no fleet-wide atomic snapshot is implied.
   (GR/LLGR), refresh-stale tracking (Enhanced Route Refresh), and
   per-prefix Add-Path support
 - **Loc-RIB** — best-path selection per RFC 4271 section 9.1.2 with
-  extensions: RPKI validation (step 0.5), stale demotion (step 0),
+  extensions: RPKI validation (step 0.5), ASPA path verification (step 0.7),
+  stale demotion (step 0),
   deterministic MED (always-compare), route reflector tiebreakers, and a
   deterministic same-peer unicast Add-Path identity tie after all BGP criteria
 - **SRv6 service eligibility** — RFC 9252 service SID structure and
@@ -77,6 +78,10 @@ independent observations; no fleet-wide atomic snapshot is implied.
   RT-Constrain membership (SAFI 132)
 - **BGP-LS and EVPN** — typed route storage, best-path selection, and outbound
   distribution for link-state and EVPN families
+- **Conditional advertisement (alpha)** — advertise-if-present /
+  advertise-if-absent gating of IPv4/IPv6 unicast exports to attached static
+  neighbors, driven by exact condition prefixes in the Loc-RIB and enforced
+  immediately before the neighbor's export policy (ADR-0137)
 - **Optimal Route Reflection** — RFC 9107 BGP-LS topology, per-vantage SPF,
   and vantage-scoped next-hop cost comparison
 - **Selection deferral** — RFC 4724 restarting-speaker startup gates that

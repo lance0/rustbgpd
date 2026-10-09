@@ -1192,6 +1192,15 @@ service PolicyService {
   // This is a bounded disposition proof, not a readiness or forwarding-state
   // assertion.
   rpc GetValidationPolicyPosture(GetValidationPolicyPostureRequest) returns (GetValidationPolicyPostureResponse);
+
+  // ListConditionalAdvertisements — per-definition state of the installed
+  // conditional advertisements (ADR-0137): condition, applied gate, settle
+  // timer, and attached neighbors. Lists only definitions attached to at
+  // least one static neighbor; an unattached definition is not installed.
+  // Side-effect free read from the RIB with a bounded 2 s deadline
+  // (DEADLINE_EXCEEDED); it has no priority over route work. Alpha, outside
+  // the v1 inventory.
+  rpc ListConditionalAdvertisements(ListConditionalAdvertisementsRequest) returns (ListConditionalAdvertisementsResponse);
 }
 
 service PeerGroupService {
@@ -1964,6 +1973,52 @@ message GetPolicyStatsResponse {
   // Nonempty means partial; emitted only for allow_partial fleet requests.
   // An all-gone fleet may succeed with no import rows and this list populated.
   repeated string incomplete_peer_addresses = 3;
+}
+
+message ListConditionalAdvertisementsRequest {}
+
+message ListConditionalAdvertisementsResponse {
+  // Installed definitions, sorted by name.
+  repeated ConditionalAdvertisementStatus definitions = 1;
+}
+
+// One condition prefix and its own current observation.
+message ConditionalAdvertisementCondition {
+  // Exact unicast condition prefix in CIDR form.
+  string prefix = 1;
+  // "present", "absent", or "unknown" (a condition_policy evaluation error
+  // and no clean match for this prefix).
+  string state = 2;
+}
+
+// State of one installed conditional-advertisement definition.
+message ConditionalAdvertisementStatus {
+  // Configured definition name.
+  string name = 1;
+  // Configured mode: "present" or "absent".
+  string advertise_if = 2;
+  // Configured condition prefixes in order, each with its own observation.
+  repeated ConditionalAdvertisementCondition conditions = 3;
+  // Tracked observation of the whole condition: "present", "absent", or
+  // "unknown".
+  string observed = 4;
+  // Milliseconds since the tracked observation last changed, or since the
+  // definition was installed.
+  uint64 observed_for_ms = 5;
+  // Applied gate state: "pending" (not yet settled; suppresses),
+  // "advertise", or "suppress".
+  string applied = 6;
+  // Configured settle_time in seconds.
+  uint32 settle_time_seconds = 7;
+  // True while a settle timer is armed to apply the observation.
+  bool settle_pending = 8;
+  // Milliseconds left on the armed settle timer; 0 when none is armed.
+  uint64 settle_remaining_ms = 9;
+  // True while RFC 4724 selection deferral holds a condition prefix's
+  // family; no settle timer is armed until it is released.
+  bool selection_deferred = 10;
+  // Static neighbor addresses with this definition attached, sorted.
+  repeated string attached_peers = 11;
 }
 
 // Operator-facing status of one external policy dataset (LAN-305).
@@ -4791,4 +4846,17 @@ message EvpnInstanceState {
   // attribution key only; EVPN Ethernet Tag ID remains zero in the
   // ADR-0089 v1 service model.
   optional uint32 bridge_vlan = 10;
+  // Current remote Type 1 EAD-per-EVI and Type 2 routes that select this
+  // instance by VNI and route target but that the VTEP does not program,
+  // by reason, sorted by reason. Omitted reasons are zero. Mirrors
+  // `evpn_l2_remote_route_drops{vni,reason}`; the routes stay in
+  // Adj-RIB-In and are still reflected.
+  repeated EvpnInstanceRemoteRouteDropCount remote_route_drop_counts = 11;
+}
+
+message EvpnInstanceRemoteRouteDropCount {
+  // Stable bounded projection reason label, e.g. "ethernet_tag_mismatch".
+  string reason = 1;
+  // Current number of remote routes dropped for `reason`.
+  uint64 count = 2;
 }

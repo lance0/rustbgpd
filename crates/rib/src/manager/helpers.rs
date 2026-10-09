@@ -99,6 +99,8 @@ pub(super) fn vpn_routes_equal(
         // A change confined to the IPv6 link-local half of the next-hop
         // (RFC 4659 two-address form) must still re-advertise (LAN-217).
         && a.link_local_next_hop == b.link_local_next_hop
+        // Interface scope controls whether the link-local is exported.
+        && a.next_hop_scope == b.next_hop_scope
         && a.peer == b.peer
         && a.path_id == b.path_id
         && (Arc::ptr_eq(&a.attributes, &b.attributes) || a.attributes == b.attributes)
@@ -117,6 +119,8 @@ pub(super) fn labeled_routes_equal(
         // A change confined to the IPv6 link-local half of the next-hop
         // (RFC 8950 two-address form) must still re-advertise (LAN-190).
         && a.link_local_next_hop == b.link_local_next_hop
+        // Interface scope controls whether the link-local is exported.
+        && a.next_hop_scope == b.next_hop_scope
         && a.peer == b.peer
         && a.path_id == b.path_id
         && (Arc::ptr_eq(&a.attributes, &b.attributes) || a.attributes == b.attributes)

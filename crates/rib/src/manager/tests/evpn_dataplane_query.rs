@@ -60,18 +60,16 @@ pub(super) fn relevant_routes() -> Vec<EvpnRibRoute> {
             gateway: IpAddr::V4(Ipv4Addr::UNSPECIFIED),
             label: MplsLabel::new(5000),
         })),
+        make_evpn_imet(PEER, 100),
     ]
 }
 
 pub(super) fn irrelevant_routes() -> Vec<EvpnRibRoute> {
-    vec![
-        make_evpn_imet(PEER, 100),
-        rib_route(EvpnRoute::Es(EvpnEs {
-            rd: RD,
-            esi: ESI,
-            originator_ip: IpAddr::V4(PEER),
-        })),
-    ]
+    vec![rib_route(EvpnRoute::Es(EvpnEs {
+        rd: RD,
+        esi: ESI,
+        originator_ip: IpAddr::V4(PEER),
+    }))]
 }
 
 fn install_and_recompute(manager: &mut RibManager, route: EvpnRibRoute) {
@@ -121,8 +119,8 @@ fn initial_snapshot_filters_exact_types_and_equal_token_does_zero_work() {
         .expect("startup must receive a full snapshot");
     let mut types: Vec<u8> = routes.iter().map(EvpnRibRoute::route_type).collect();
     types.sort_unstable();
-    assert_eq!(types, vec![1, 1, 2, 5]);
-    assert_eq!(initial.generation, 4);
+    assert_eq!(types, vec![1, 1, 2, 3, 5]);
+    assert_eq!(initial.generation, 5);
     let visits = manager.evpn_dataplane_query_row_visits;
 
     let unchanged = query(&mut manager, Some(initial.generation));
@@ -131,7 +129,7 @@ fn initial_snapshot_filters_exact_types_and_equal_token_does_zero_work() {
 }
 
 #[test]
-fn type_three_and_four_changes_do_not_advance_projection_generation() {
+fn type_four_changes_do_not_advance_projection_generation() {
     let mut manager = manager();
     for route in irrelevant_routes() {
         install_and_recompute(&mut manager, route.clone());
@@ -181,12 +179,12 @@ fn every_relevant_shape_add_change_withdraw_advances_exactly_once() {
     assert_eq!(
         manager.evpn_dataplane_generation,
         expected + 1,
-        "one completed recompute call advances once even when four relevant keys change"
+        "one completed recompute call advances once even when five relevant keys change"
     );
-    assert_eq!(manager.evpn_dataplane_route_count, 4);
+    assert_eq!(manager.evpn_dataplane_route_count, 5);
     assert_eq!(manager.loc_rib.evpn_len(), 6);
     let response = query(&mut manager, None);
-    assert_eq!(response.routes.unwrap().len(), 4);
+    assert_eq!(response.routes.unwrap().len(), 5);
 }
 
 #[test]

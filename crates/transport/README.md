@@ -81,6 +81,11 @@ before forwarding to the RIB — the FSM sees only payloadless events.
 - **Extended next hop** (RFC 8950) — IPv4 unicast and VPNv4 NLRI over
   IPv6 next hops; VPNv4 reflection preserves the received encoding and gates
   export on the recipient's VPNv4 receive capability
+- **Link-local next hop** (experimental, draft-ietf-idr-linklocal-capability-06) —
+  opt-in capability 77 negotiation on interface-bound IPv6 link-local
+  sessions. A unicast route whose outbound next hop is link-local is exported
+  only to an interface-bound peer on the interface it was learned on, unless
+  the next hop is rewritten to a local address
 - **Graceful Restart + LLGR** (RFC 4724, RFC 9494) — stale-route retention
   across peer restart, with long-lived retention via `llgr_stale_time`
 - **BGP Roles + Only-to-Customer** (RFC 9234) — OPEN-time role-mismatch

@@ -665,6 +665,14 @@ impl Config {
         )?;
 
         self.validate_conditional_advertisements(stores.next_store())?;
+        let mut group_names: Vec<&String> = self.peer_groups.keys().collect();
+        group_names.sort();
+        for name in group_names {
+            self.validate_conditional_advertisement_attachments(
+                &format!("peer_group.{name}"),
+                &self.peer_groups[name].conditional_advertisements,
+            )?;
+        }
 
         // Validate neighbor address/interface identity. Numbered peers remain
         // keyed by bare address; link-local peers are scoped by interface.
@@ -1034,7 +1042,10 @@ impl Config {
                 self.global.asn,
                 store,
             )?;
-            self.validate_neighbor_conditional_advertisements(neighbor)?;
+            self.validate_conditional_advertisement_attachments(
+                &neighbor.address,
+                &neighbor.conditional_advertisements,
+            )?;
         }
 
         // Validate RPKI cache server config
@@ -3649,14 +3660,16 @@ impl Config {
         Ok(())
     }
 
-    /// Validate one static neighbor's conditional-advertisement attachments:
-    /// every name is defined and attached once.
-    fn validate_neighbor_conditional_advertisements(
+    /// Validate one static neighbor's or peer group's conditional-advertisement
+    /// attachments: every name is defined and attached once. `owner` is the
+    /// neighbor address or `peer_group.<name>`.
+    fn validate_conditional_advertisement_attachments(
         &self,
-        neighbor: &Neighbor,
+        owner: &str,
+        names: &[String],
     ) -> Result<(), ConfigError> {
         let mut seen = HashSet::new();
-        for name in &neighbor.conditional_advertisements {
+        for name in names {
             let reason = if !self.policy.conditional_advertisements.contains_key(name) {
                 format!("undefined conditional advertisement {name:?}")
             } else if !seen.insert(name) {
@@ -3665,7 +3678,7 @@ impl Config {
                 continue;
             };
             return Err(ConfigError::InvalidNeighborConfig {
-                address: neighbor.address.clone(),
+                address: owner.to_string(),
                 field: "conditional_advertisements".to_string(),
                 reason,
             });

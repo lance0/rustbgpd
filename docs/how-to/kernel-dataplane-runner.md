@@ -119,7 +119,7 @@ issue #187) so reviewers can distinguish real stability from flake masking.
 - Docker netns selectors, in job order — `fdb_nhg`, `fib_runtime`,
   `bfd_runtime`, `dataplane_vlan_fdb`, `dataplane_remote_mac`,
   `vlan_local_mac_attribution`, `macip_vlan_attribution`, `svd_fdb_vni`,
-  `managed_bridge`, `managed_vxlan`, `managed_svd_vxlan`,
+  `flood_list`, `svd_flood_list`, `managed_bridge`, `managed_vxlan`, `managed_svd_vxlan`,
   `managed_vlan_upper`, `managed_ready`, `link_carrier`, `bond_lacp`,
   `auto_lacp_daemon`, `ac_gate`, `nexthop_raw`, `foreign_state_l2`, and `foreign_state_nhid`. Seven further
   L3 selectors run only when the job's `vrf-available` probe loads the `vrf`

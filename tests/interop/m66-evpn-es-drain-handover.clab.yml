@@ -43,13 +43,10 @@
 # BUM flood path so the surviving PE's MAC-learning gap is bridged
 # after the drain: all three nodes originate Type 3 IMET (the
 # default), and the IMET routes are asserted present in the VTEP's
-# RIB. rustbgpd does not yet program kernel flood entries from
-# received IMET (the L2VNI dataplane boundary programs Type 2 MACs
-# only), so the topology pre-installs the equivalent static all-zero
-# VXLAN FDB entries on each node toward the other two VTEPs — the
-# exact rows an IMET-driven flood programmer would install. They are
-# foreign to the daemon's FDB diff (never claimed, never deleted;
-# ADR-0054 §5/§7).
+# RIB. Each daemon programs its own kernel flood rows from the IMET
+# routes it receives: one `extern_learn` all-zero VXLAN FDB row per
+# remote VTEP. The topology installs no static flood rows; the driver
+# asserts the VTEP's two daemon-owned rows at the end.
 #
 # Known enforcement limit (designed around, not asserted away):
 # rustbgpd's dataplane DF enforcement today is BUM-flood-only — a
@@ -144,10 +141,6 @@ topology:
         - ip link set dev eth3 multicast off
         - ip link set eth3 master br100
         - ip link set eth3 up
-        # Static stand-in for IMET-driven flood programming (see
-        # header): BUM toward both segment PEs.
-        - bridge fdb append 00:00:00:00:00:00 dev vxlan100 dst 10.0.1.2 self permanent
-        - bridge fdb append 00:00:00:00:00:00 dev vxlan100 dst 10.0.2.2 self permanent
       env:
         RUST_LOG: info,rustbgpd_evpn_linux=debug,rustbgpd::evpn_dataplane=debug
         RUSTBGPD_TOKEN_FILE: /run/rustbgpd/grpc-test-only-operator.token
@@ -164,8 +157,6 @@ topology:
         - ip addr add 10.0.1.2/24 dev eth1
         - ip link set eth1 up
         - /usr/local/bin/start-rustbgpd-sa-pe.sh 10.0.1.2 100 10.0.2.0/24 10.0.1.1
-        - bridge fdb append 00:00:00:00:00:00 dev vxlan100 dst 10.0.1.1 self permanent
-        - bridge fdb append 00:00:00:00:00:00 dev vxlan100 dst 10.0.2.2 self permanent
       env:
         RUST_LOG: info,rustbgpd_evpn_linux=debug
 
@@ -181,8 +172,6 @@ topology:
         - ip addr add 10.0.2.2/24 dev eth1
         - ip link set eth1 up
         - /usr/local/bin/start-rustbgpd-sa-pe.sh 10.0.2.2 100 10.0.1.0/24 10.0.2.1
-        - bridge fdb append 00:00:00:00:00:00 dev vxlan100 dst 10.0.1.1 self permanent
-        - bridge fdb append 00:00:00:00:00:00 dev vxlan100 dst 10.0.1.2 self permanent
       env:
         RUST_LOG: info,rustbgpd_evpn_linux=debug
 

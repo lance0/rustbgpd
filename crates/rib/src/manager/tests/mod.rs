@@ -232,6 +232,7 @@ fn make_labeled_rib_route(
         nlri,
         next_hop: IpAddr::V4(peer),
         link_local_next_hop: None,
+        next_hop_scope: None,
         peer: IpAddr::V4(peer),
         attributes: AttrSet::new(vec![
             PathAttribute::Origin(Origin::Igp),
@@ -295,6 +296,7 @@ fn make_vpn_rib_route(
         nlri,
         next_hop: IpAddr::V4(peer),
         link_local_next_hop: None,
+        next_hop_scope: None,
         peer: IpAddr::V4(peer),
         attributes: AttrSet::new(vec![
             PathAttribute::Origin(Origin::Igp),
@@ -1138,6 +1140,7 @@ fn make_vpn6_rib_route_with_rts(
         nlri,
         next_hop: IpAddr::V4(peer),
         link_local_next_hop: None,
+        next_hop_scope: None,
         peer: IpAddr::V4(peer),
         attributes: AttrSet::new(vec![
             PathAttribute::Origin(Origin::Igp),

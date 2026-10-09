@@ -1221,6 +1221,9 @@ pub struct ServeConfig {
     /// Live snapshot reader for current remote Type 5 projection-drop
     /// counts by bounded `(vrf, reason)` labels.
     pub evpn_remote_ip_prefix_drop_counts: crate::evpn_service::RemoteIpPrefixDropCountSnapshotFn,
+    /// Live snapshot reader for current remote L2 projection-drop counts
+    /// by bounded `(vni, reason)` labels.
+    pub evpn_l2_remote_route_drop_counts: crate::evpn_service::L2RemoteRouteDropCountSnapshotFn,
     /// Live snapshot reader for ADR-0059 FDB nexthop-group owned
     /// state. Returns an empty summary when the dataplane actor is
     /// not running.
@@ -1800,6 +1803,7 @@ async fn run_listener(
     let evpn_originated_ip_vrf_route_count = config.evpn_originated_ip_vrf_route_count;
     let evpn_installed_ip_vrf_route_count = config.evpn_installed_ip_vrf_route_count;
     let evpn_remote_ip_prefix_drop_counts = config.evpn_remote_ip_prefix_drop_counts;
+    let evpn_l2_remote_route_drop_counts = config.evpn_l2_remote_route_drop_counts;
     let evpn_fdb_nexthop_snapshot = config.evpn_fdb_nexthop_snapshot;
     let evpn_bum_enforcement_snapshot = config.evpn_bum_enforcement_snapshot;
     let evpn_same_esi_bias_snapshot = config.evpn_same_esi_bias_snapshot;
@@ -1875,6 +1879,7 @@ async fn run_listener(
                 evpn_originated_ip_vrf_route_count,
                 evpn_installed_ip_vrf_route_count,
                 evpn_remote_ip_prefix_drop_counts,
+                evpn_l2_remote_route_drop_counts,
                 evpn_fdb_nexthop_snapshot,
                 evpn_bum_enforcement_snapshot,
                 evpn_same_esi_bias_snapshot,
@@ -1947,6 +1952,7 @@ async fn run_listener(
                 evpn_originated_ip_vrf_route_count,
                 evpn_installed_ip_vrf_route_count,
                 evpn_remote_ip_prefix_drop_counts,
+                evpn_l2_remote_route_drop_counts,
                 evpn_fdb_nexthop_snapshot,
                 evpn_bum_enforcement_snapshot,
                 evpn_same_esi_bias_snapshot,
@@ -2026,6 +2032,7 @@ async fn run_tcp_listener(
     evpn_originated_ip_vrf_route_count: crate::evpn_service::OriginatedIpVrfRouteCountFn,
     evpn_installed_ip_vrf_route_count: crate::evpn_service::InstalledIpVrfRouteCountFn,
     evpn_remote_ip_prefix_drop_counts: crate::evpn_service::RemoteIpPrefixDropCountSnapshotFn,
+    evpn_l2_remote_route_drop_counts: crate::evpn_service::L2RemoteRouteDropCountSnapshotFn,
     evpn_fdb_nexthop_snapshot: crate::evpn_service::FdbNexthopSnapshotFn,
     evpn_bum_enforcement_snapshot: BumEnforcementSnapshotFn,
     evpn_same_esi_bias_snapshot: SameEsiBiasSnapshotFn,
@@ -2254,6 +2261,7 @@ async fn run_tcp_listener(
         .with_instance_status_snapshot(evpn_instance_status_snapshot)
         .with_managed_netdev_status_snapshot(evpn_managed_netdev_status_snapshot)
         .with_remote_ip_prefix_drop_counts(evpn_remote_ip_prefix_drop_counts)
+        .with_l2_remote_route_drop_counts(evpn_l2_remote_route_drop_counts)
         .with_duplicate_mac_quarantine_snapshot(evpn_duplicate_mac_quarantine_snapshot)
         .with_ethernet_segment_state(
             evpn_bum_enforcement_snapshot,
@@ -2344,6 +2352,7 @@ async fn run_uds_listener(
     evpn_originated_ip_vrf_route_count: crate::evpn_service::OriginatedIpVrfRouteCountFn,
     evpn_installed_ip_vrf_route_count: crate::evpn_service::InstalledIpVrfRouteCountFn,
     evpn_remote_ip_prefix_drop_counts: crate::evpn_service::RemoteIpPrefixDropCountSnapshotFn,
+    evpn_l2_remote_route_drop_counts: crate::evpn_service::L2RemoteRouteDropCountSnapshotFn,
     evpn_fdb_nexthop_snapshot: crate::evpn_service::FdbNexthopSnapshotFn,
     evpn_bum_enforcement_snapshot: BumEnforcementSnapshotFn,
     evpn_same_esi_bias_snapshot: SameEsiBiasSnapshotFn,
@@ -2529,6 +2538,7 @@ async fn run_uds_listener(
         .with_instance_status_snapshot(evpn_instance_status_snapshot)
         .with_managed_netdev_status_snapshot(evpn_managed_netdev_status_snapshot)
         .with_remote_ip_prefix_drop_counts(evpn_remote_ip_prefix_drop_counts)
+        .with_l2_remote_route_drop_counts(evpn_l2_remote_route_drop_counts)
         .with_duplicate_mac_quarantine_snapshot(evpn_duplicate_mac_quarantine_snapshot)
         .with_ethernet_segment_state(
             evpn_bum_enforcement_snapshot,

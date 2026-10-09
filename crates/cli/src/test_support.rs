@@ -191,6 +191,8 @@ pub(crate) struct MockState {
     // Canned ListBgpLsRoutes response — when set, served verbatim so the
     // decode-ceiling tests can push multi-MiB listings through loopback.
     pub(crate) list_bgpls_response: Mutex<Option<server_proto::ListBgpLsResponse>>,
+    pub(crate) list_conditional_response:
+        Mutex<Option<server_proto::ListConditionalAdvertisementsResponse>>,
     pub(crate) last_list_vpn: Mutex<Option<server_proto::ListVpnRoutesRequest>>,
     pub(crate) list_vpn_response: Mutex<Option<server_proto::ListVpnRoutesResponse>>,
     pub(crate) last_list_labeled: Mutex<Option<server_proto::ListLabeledRoutesRequest>>,
@@ -1620,6 +1622,7 @@ impl rustbgpd_api::proto::evpn_service_server::EvpnService for MockEvpnService {
                 local_vtep_ip: "10.0.0.1".to_string(),
                 bridge: "br100".to_string(),
                 bridge_vlan: Some(10),
+                remote_route_drop_counts: vec![],
                 advertise_svi_mac: false,
                 originated_local_macs_count: 2,
                 readiness_state:
@@ -2550,6 +2553,35 @@ struct MockPolicyService {
 
 #[tonic::async_trait]
 impl rustbgpd_api::proto::policy_service_server::PolicyService for MockPolicyService {
+    async fn list_conditional_advertisements(
+        &self,
+        _request: Request<server_proto::ListConditionalAdvertisementsRequest>,
+    ) -> Result<Response<server_proto::ListConditionalAdvertisementsResponse>, Status> {
+        if let Some(canned) = self.state.list_conditional_response.lock().await.clone() {
+            return Ok(Response::new(canned));
+        }
+        Ok(Response::new(
+            server_proto::ListConditionalAdvertisementsResponse {
+                definitions: vec![server_proto::ConditionalAdvertisementStatus {
+                    name: "backup".to_string(),
+                    advertise_if: "absent".to_string(),
+                    conditions: vec![server_proto::ConditionalAdvertisementCondition {
+                        prefix: "0.0.0.0/0".to_string(),
+                        state: "present".to_string(),
+                    }],
+                    observed: "present".to_string(),
+                    observed_for_ms: 2_000,
+                    applied: "advertise".to_string(),
+                    settle_time_seconds: 5,
+                    settle_pending: true,
+                    settle_remaining_ms: 3_000,
+                    selection_deferred: false,
+                    attached_peers: vec!["192.0.2.1".to_string()],
+                }],
+            },
+        ))
+    }
+
     async fn get_validation_policy_posture(
         &self,
         _request: Request<server_proto::GetValidationPolicyPostureRequest>,

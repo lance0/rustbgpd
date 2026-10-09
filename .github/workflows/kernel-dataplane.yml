@@ -250,6 +250,22 @@ jobs:
           topology: tests/interop/m109-evpn-ipv6-underlay-vtep.clab.yml
           script: tests/interop/scripts/test-m109-evpn-ipv6-underlay-vtep.sh
 
+  m117:
+    needs: [prime_dev_image]
+    name: M117 — EVPN L2 ARP ping over daemon flood lists (FRR 10.7.1)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/setup-dataplane-host
+        id: dataplane
+      - name: Run M117 (deploy + test + destroy with retry)
+        uses: ./.github/actions/run-interop-test
+        with:
+          label: M117
+          topology: tests/interop/m117-evpn-l2-flood-ping-frr.clab.yml
+          script: tests/interop/scripts/test-m117-evpn-l2-flood-ping-frr.sh
+
   m110:
     needs: [prime_dev_image]
     name: M110 — EVPN IPv6-underlay symmetric Interface-less IRB (FRR 10.7.1)
@@ -865,6 +881,12 @@ jobs:
       - name: LAN-64 SVD collect-metadata FDB VNI netns test
         run: bash crates/evpn-linux/tests/docker/run-netns-tests.sh svd_fdb_vni
 
+      - name: IMET ingress-replication flood list netns test
+        run: bash crates/evpn-linux/tests/docker/run-netns-tests.sh flood_list
+
+      - name: SVD ingress-replication flood list netns test
+        run: bash crates/evpn-linux/tests/docker/run-netns-tests.sh svd_flood_list
+
       - name: ADR-0091 managed bridge lifecycle netns test
         run: bash crates/evpn-linux/tests/docker/run-netns-tests.sh managed_bridge
 
@@ -988,7 +1010,7 @@ jobs:
     timeout-minutes: 5
     if: ${{ always() }}
     needs: [classify_changes, bird3_archive, prime_dev_image, m36,
-      m37, m37-ip, m38, m39, m39b, m109, m110, m48, m60, m61, m62, m40, m42, m50, m52,
+      m37, m37-ip, m38, m39, m39b, m109, m117, m110, m48, m60, m61, m62, m40, m42, m50, m52,
       m58, m53, m51, m108, m43, m47, m69, m70, m65, m71, m72, m66,
       m67, m68, netns]
     env:
@@ -996,7 +1018,7 @@ jobs:
       EXPECTED_JOBS: >-
         classify_changes bird3_archive prime_dev_image
         m36 m37 m37-ip m38 m39
-        m39b m109 m110 m48 m60 m61 m62 m40 m42 m50 m52 m58 m53 m51 m108 m43 m47
+        m39b m109 m117 m110 m48 m60 m61 m62 m40 m42 m50 m52 m58 m53 m51 m108 m43 m47
         m69 m70 m65 m71 m72 m66 m67 m68 netns
     steps:
       - name: Aggregate required Kernel Dataplane result

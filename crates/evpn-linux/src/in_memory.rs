@@ -417,6 +417,15 @@ impl InMemoryDataplane {
             DataplaneOp::RemoveRemoteFdb { vni, mac, vlan } => {
                 state.kernel.remove_fdb_in_vlan(*vni, *mac, *vlan);
             }
+            DataplaneOp::AddFloodFdb { vni, dst } => {
+                // Mirrors the VXLAN driver: an append onto an existing
+                // entry keeps that entry's ownership marker.
+                let owned = state.kernel.flood(*vni).is_none_or(|entry| entry.owned);
+                state.kernel.insert_flood_row(*vni, *dst, owned);
+            }
+            DataplaneOp::RemoveFloodFdb { vni, dst } => {
+                state.kernel.remove_flood_row(*vni, *dst);
+            }
             DataplaneOp::SetBumPortFlags { ifindex, flags } => {
                 state.bum_port_flags.insert(*ifindex, *flags);
             }
@@ -1275,6 +1284,28 @@ impl InMemoryHandle {
             .expect("poisoned")
             .kernel
             .insert_fdb(vni, entry);
+    }
+
+    /// Pre-load one zero-MAC flood row; `owned` is its `extern_learn`
+    /// marker (the entry stays owned only while every row carries it).
+    pub fn pre_load_flood_row(&self, vni: EvpnInstanceId, dst: IpAddr, owned: bool) {
+        self.state
+            .lock()
+            .expect("poisoned")
+            .kernel
+            .insert_flood_row(vni, dst, owned);
+    }
+
+    /// Destinations of the kernel zero-MAC flood entry for `vni`.
+    #[must_use]
+    pub fn kernel_flood_dsts(&self, vni: EvpnInstanceId) -> BTreeSet<IpAddr> {
+        self.state
+            .lock()
+            .expect("poisoned")
+            .kernel
+            .flood(vni)
+            .map(|entry| entry.dsts.clone())
+            .unwrap_or_default()
     }
 
     /// Replace the fake link inventory wholesale.

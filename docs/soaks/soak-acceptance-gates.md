@@ -502,7 +502,10 @@ coverage:
    load are uncovered.
 5. **Rapid peer flap storm.** The fastest failure cadence in the suite
    is one event per 90 s (scenario 6). Sub-minute repeated flaps
-   (damping/pending-delete pressure) have bench coverage but no soak.
+   (session re-establishment and pending-withdrawal pressure; rustbgpd
+   implements no route flap dampening, see
+   [ADR-0138](../adr/0138-route-flap-dampening.md)) have bench coverage
+   but no soak.
 6. **Prefix-limit trip and timed restart.** ~~No soak drives a peer over
    a configured max-prefix bound and through the timed-restart cycle.~~
    **Closed by scenario 10**, which trips the designated member's

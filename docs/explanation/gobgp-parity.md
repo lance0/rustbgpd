@@ -5,20 +5,22 @@
 For release-by-release feature history, see [CHANGELOG.md](../../CHANGELOG.md).
 
 This document is the canonical source for GoBGP capability claims in the
-project docs (the [comparison matrix](comparison.md) defers to it). GoBGP
-cells are verified against the exact GoBGP `v4.9.0` tag (2026-09-01), its
-[release notes](https://github.com/osrg/gobgp/releases/tag/v4.9.0), and the
-tagged [capability definitions](https://github.com/osrg/gobgp/blob/v4.9.0/pkg/packet/bgp/bgp.go#L410-L424):
+project docs (the [comparison matrix](comparison.md) defers to it). The
+capability, ASPA, TCP-AO and conditional-advertisement cells are verified
+against the exact GoBGP `v4.10.0` tag (2026-10-04), its
+[release notes](https://github.com/osrg/gobgp/releases/tag/v4.10.0), and the
+tagged [capability definitions](https://github.com/osrg/gobgp/blob/v4.10.0/pkg/packet/bgp/bgp.go#L410-L424):
 Extended Messages (code 6, added in v4.7.0) and Enhanced Route Refresh (code
 70) are present; ORF (code 3), BGP Role (code 9), and Add-Path Paths-Limit
 (code 76) are absent. The latter two remain open upstream as
 [osrg/gobgp#3244](https://github.com/osrg/gobgp/issues/3244) and
 [osrg/gobgp#2786](https://github.com/osrg/gobgp/issues/2786), respectively,
-and the tag contains no ASPA implementation; v4.9.0 adds a TCP-AO keychain
-configuration API but binds no keychain to a BGP session (see the TCP-AO row
-below). Verified 2026-09-01; TCP-AO re-checked 2026-09-22. These are
-upstream capability claims, not rustbgpd interoperability receipts; receipts
-are identified explicitly where they exist.
+and the tag contains no ASPA implementation; v4.10.0 applies TCP-AO
+keychains to peer sockets (see the TCP-AO row below). Rows that cite `v4.9.0`
+were verified at that tag on 2026-09-01; the v4.10.0 cells were checked on
+2026-10-08. These are upstream capability claims, not rustbgpd
+interoperability receipts; receipts are identified explicitly where they
+exist.
 
 One trajectory caveat: GoBGP merged outbound UPDATE coalescing and
 table-scale improvements in early 2026
@@ -45,7 +47,7 @@ releases rather than carried forward from older measurements.
 | BGP-LS (RFC 9552) | Yes | Partial | ADR-0077 slice negotiates BGP-LS / BGP-LS VPN, stores opaque RFC 9552 NLRI/TLV objects, exposes them through `ListBgpLsRoutes` / `rbgp rib bgpls`, and reflects them to eligible negotiated peers; the received topology also feeds the RFC 9107 ORR SPF engine (`rbgp topology`, ADR-0095). Local IGP topology production remains deferred |
 | SR Policy | Yes | No | |
 | SRv6 MUP | Yes | No | |
-| Route Target Constraints (RFC 4684) | Yes | Partial (RR) | Strict per-peer VPN and EVPN reflection filtering (a negotiated peer with empty interest receives nothing; EVPN Type 4 routes match on their ES-Import RT per RFC 7432 §7.6), RFC-faithful 96-bit prefix matching, self-originated default membership (no membership derived from local VRF or EVPN-instance import RTs), RFC-minimal deltas on membership change. M75 receipt — which also surfaced a GoBGP `vrf del` segfault triggered by default-RTC peers |
+| Route Target Constraints (RFC 4684) | Yes | Partial (RR) | Strict per-peer VPN and EVPN reflection filtering (a negotiated peer with empty interest receives nothing; EVPN Type 4 routes match on their ES-Import RT per RFC 7432 §7.6), Route Target prefix matching independent of the membership origin AS (bits 32 through the membership length; a /32 accepts any RT, and only the default /0 admits routes with no RT; ADR-0077 2026-10-06 amendment), self-originated default membership (no membership derived from local VRF or EVPN-instance import RTs), RFC-minimal deltas on membership change. M75 receipt — which also surfaced a GoBGP `vrf del` segfault triggered by default-RTC peers |
 
 ## Core Protocol
 
@@ -116,6 +118,7 @@ releases rather than carried forward from older measurements.
 | Scriptable policy language | No | Yes | `.rpol` (ADR-0096): typed + compiled, named prefix/community sets as indexed matchers, parameterized policies, `apply()` composition, in-language unit tests via `rbgp policy check`; route-for-route parity vs FRR route-maps proven in M80 |
 | Policy dry-run against the live RIB | No | Yes | `rbgp policy test` / `TestPolicy` RPC — a candidate `.rpol` policy evaluated read-only over a retained post-policy Adj-RIB-In / Loc-RIB snapshot: counts, per-term hits, before/after diffs |
 | Live per-term policy hit counters | No | Yes | `rbgp policy stats --direction import\|export\|both` / `GetPolicyStats` — since-chain-install counters on installed import and export chains; import rows carry the session-local policy generation and export rows the counter-instance id |
+| Conditional advertisement (if present / if absent) | No | Yes (alpha) | rustbgpd: opt-in for IPv4/IPv6 unicast static neighbors, outside the v1 inventory ([ADR-0137](../adr/0137-conditional-advertisement.md), [cookbook](../cookbook/conditional-advertisement-backup.md)). Every [GoBGP v4.10.0 policy condition](https://github.com/osrg/gobgp/blob/v4.10.0/internal/pkg/table/policy.go#L160-L177) evaluates the path being filtered; none tests whether another route is in the RIB |
 
 ## gRPC API
 
@@ -169,7 +172,7 @@ releases rather than carried forward from older measurements.
 | Feature | GoBGP | rustbgpd | Notes |
 |---------|:-----:|:--------:|-------|
 | TCP MD5 (RFC 2385) | Yes | Yes | |
-| TCP-AO (RFC 5925) | Keychain API only (v4.9.0) | Partial live rotation | GoBGP [v4.9.0](https://github.com/osrg/gobgp/releases/tag/v4.9.0) adds a TCP-AO keychain configuration API, server-side keychain management, config-file keychains, and HMAC-SHA256 profiles. At that tag no keychain reaches a session socket: the Linux helper `AddTCPAOKeysSockopt` (`internal/pkg/netutils/tcp_ao_linux.go`) is called only from its test file, and `pkg/server/server.go` installs TCP MD5 keys on listeners but no TCP-AO key. GoBGP master applies TCP-AO keys to peer sockets from commit [`15e9be9`](https://github.com/osrg/gobgp/commit/15e9be9198ae51abad50b3d9b42aa63c3b462834) (2026-09-15), unreleased when checked on 2026-09-22 (upstream source reading, not an interoperability receipt). rustbgpd applies ordered static-neighbor and direct dynamic-prefix TCP-AO keyrings on Linux, appends non-preferred successor MKTs on SIGHUP, can later select an installed successor with cohort-observed deprecation, and can then delete deprecated unselected MKTs; key edits/reordering and protected-owner CRUD remain restart-required |
+| TCP-AO (RFC 5925) | Yes (v4.10.0) | Partial live rotation | GoBGP [v4.9.0](https://github.com/osrg/gobgp/releases/tag/v4.9.0) added a TCP-AO keychain configuration API, config-file keychains and HMAC-SHA256 profiles, but bound no keychain to a session. [v4.10.0](https://github.com/osrg/gobgp/releases/tag/v4.10.0) adds per-peer and peer-group TCP-AO configuration and state to the API, `gobgp` CLI commands, and commit [`15e9be9`](https://github.com/osrg/gobgp/commit/15e9be9198ae51abad50b3d9b42aa63c3b462834), which installs a peer's keychain on matching listening sockets and outbound connections ([`server.go`](https://github.com/osrg/gobgp/blob/v4.10.0/pkg/server/server.go#L3720-L3741)). Keychain key additions and deletions propagate to listeners and established connections on a best-effort basis ([`server.go`](https://github.com/osrg/gobgp/blob/v4.10.0/pkg/server/server.go#L5790-L5867)); attaching, removing or changing a peer's keychain restarts the session (upstream source reading, not an interoperability receipt). rustbgpd applies ordered static-neighbor and direct dynamic-prefix TCP-AO keyrings on Linux, appends non-preferred successor MKTs on SIGHUP, can later select an installed successor with cohort-observed deprecation, and can then delete deprecated unselected MKTs; key edits/reordering and protected-owner CRUD remain restart-required |
 | GTSM / TTL Security (RFC 5082) | Yes | Yes | |
 | BFD (RFC 5880/5881/5882/5883) | Yes | Yes | GoBGP documents native single-hop async BFD for BGP neighbors. rustbgpd ships single-hop and multihop async BFD for static neighbors with inspection, metrics/events, and strict + non-strict RFC 5882 coupling. M51 and M108 validate the respective modes against FRR `bfdd`. Deferred: echo/demand, authentication, dynamic-neighbor BFD, and interface-neighbor autodiscovery |
 | RPKI/RTR (RFC 6811/8210) | Yes | Yes | Persistent RTR session with `SerialNotify`, fallback serial polling, and enforced expiry |
@@ -314,11 +317,11 @@ scope:
 4. **EVPN standards tail** — VXLAN local-bias split-horizon, true
    non-zero-Ethernet-Tag / shared-VNI service, managed netdev ergonomics,
    EVPN over MPLS/PBB, SMET service procedures, and route types 7–11.
-5. **Operational policy features** — send-side ORF / Outbound Route Filtering
-   (RFC 5291; client-side use, demand-shaped after the receive-side route-server
-   path) and conditional advertisement (advertise-if-present /
-   advertise-if-absent; demand-shaped). These are broader operational polish
-   items rather than blockers for the current route-server positioning.
+5. **Send-side ORF** — Outbound Route Filtering (RFC 5291) for client-side
+   use, demand-shaped after the receive-side route-server path. This is
+   operational polish rather than a blocker for the current route-server
+   positioning. Conditional advertisement shipped as an alpha IPv4/IPv6 unicast
+   feature (see the Policy Engine table).
 
 ## Pre-1.0 Tech Debt
 

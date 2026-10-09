@@ -108,8 +108,9 @@ selection-deferral timeout and ledger overflow, outbound route loss, RFC 9687
 send-hold teardown, session event source loss, live event-stream
 lag/desynchronization, BMP feed loss and stream divergence, BMP
 control-event and Loc-RIB source drops, policy evaluation errors, BLACKHOLE
-discard install activity and admission limits, RPKI cache RTR session loss
-and End-of-Data readiness, and stale MRT dumps)
+discard install activity and admission limits, RPKI cache RTR session loss,
+End-of-Data readiness and retained-data near-expiry, stale MRT dumps, and an
+`esi = "auto-lacp"` Ethernet Segment that stays not ready)
 ships at
 [`examples/prometheus/rustbgpd-alerts.yml`](../../examples/prometheus/rustbgpd-alerts.yml),
 with per-rule unit tests in

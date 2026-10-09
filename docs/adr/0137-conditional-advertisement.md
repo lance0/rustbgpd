@@ -669,6 +669,30 @@ plumbing:
   states. A peer registered before an install that attaches it is regrouped
   and resynced by that install.
 
+## Amendment: status view and peer-group inheritance (2026-10-08)
+
+Two deferred items were accepted after the first cut:
+
+- **Status read.** `PolicyService.ListConditionalAdvertisements` and
+  `rbgp policy conditional-advertisements` report each installed
+  definition: every condition prefix's own observation, the tracked
+  observation and how long it has held, the applied state, the settle timer
+  (armed with its remaining time, held by selection deferral, or settled),
+  and the attached neighbors. It is one RIB query on the general lane with a
+  2 s deadline and no priority over route work, at the `sensitive_read`
+  tier, and outside the v1 inventory. The tracker records no applied
+  transition time, so the view reports none.
+- **Peer-group inheritance.** `[peer_groups.<name>] conditional_advertisements`
+  attaches definitions to every static member that sets no list of its own;
+  a member's non-empty list replaces the group's, as for
+  `export_policy_chain`. The install stays keyed by static neighbor address,
+  so dynamic members do not inherit. The group field is config-file-only
+  under the `SetPeerGroup` classification, so an API edit keeps it and the
+  sequential reload route rejects a change to it.
+
+Update-group keying by attachment content and prefix-range conditions remain
+deferred.
+
 ## Consequences
 
 - Operators get FRR-style advertise-if-present and advertise-if-absent behavior

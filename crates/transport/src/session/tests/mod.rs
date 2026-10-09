@@ -1366,6 +1366,7 @@ fn make_vpn_rib_route(label: u32) -> rustbgpd_rib::VpnRibRoute {
         },
         next_hop: IpAddr::V4(Ipv4Addr::new(192, 0, 2, 7)),
         link_local_next_hop: None,
+        next_hop_scope: None,
         peer: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
         attributes: AttrSet::new(vec![
             PathAttribute::Origin(Origin::Igp),
@@ -1392,6 +1393,7 @@ fn make_labeled_rib_route(label: u32) -> rustbgpd_rib::LabeledRibRoute {
         },
         next_hop: IpAddr::V4(Ipv4Addr::new(192, 0, 2, 7)),
         link_local_next_hop: None,
+        next_hop_scope: None,
         peer: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
         attributes: AttrSet::new(vec![
             PathAttribute::Origin(Origin::Igp),

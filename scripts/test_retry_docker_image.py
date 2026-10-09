@@ -1,14 +1,17 @@
 #!/usr/bin/env python3
-"""Offline checks for the OpenBGPD image-primer retry boundary."""
+"""Offline checks for the Docker Hub retry boundary in the lab workflows."""
 
+import copy
 import json
 import os
 from pathlib import Path
 import re
 import subprocess
 import tempfile
+import time
 import textwrap
 import unittest
+
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -38,13 +41,17 @@ class RetryDockerImageTests(unittest.TestCase):
         docker = bin_dir / "docker"
         docker.write_text(textwrap.dedent("""\
             #!/usr/bin/env python3
-            import json, os, pathlib, sys
+            import json, os, pathlib, sys, time
             base = pathlib.Path(os.environ['FAKE_LOG'])
             args = sys.argv[1:]
             op = 'pull' if args[0] == 'pull' else ('leaf' if args[-1] != os.environ['OPENBGPD_IMAGE'] else 'index')
             count_file = base / op
             count = int(count_file.read_text()) + 1 if count_file.exists() else 1
             count_file.write_text(str(count))
+            if op == 'pull' and os.environ.get('FAKE_PULL_HANG'):
+                with (base / 'calls').open('a') as log:
+                    log.write(json.dumps([args, os.environ.get('DOCKER_CONFIG')]) + '\\n')
+                time.sleep(float(os.environ['FAKE_PULL_HANG']))
             with (base / 'calls').open('a') as log:
                 log.write(json.dumps([args, os.environ.get('DOCKER_CONFIG')]) + '\\n')
             if count <= int(os.environ.get('FAIL_' + op.upper(), '0')):
@@ -139,14 +146,112 @@ class RetryDockerImageTests(unittest.TestCase):
 
     def test_every_docker_hub_network_call_retries(self):
         # GHCR and Quay pulls are outside this boundary; every other pull or
-        # registry inspect in the interop workflow targets Docker Hub.
-        sites = [line for line in INTEROP.splitlines()
+        # registry inspect in the interop workflow and the local actions
+        # targets Docker Hub.
+        texts = [INTEROP, *(p.read_text() for p in ACTIONS.glob("*/action.yml"))]
+        sites = [line for text in texts for line in text.splitlines()
                  if re.search(r"docker (pull|buildx imagetools inspect)\b", line)
                  and not re.search(r"\b(ghcr|quay)\.io/", line)]
-        self.assertGreaterEqual(len(sites), 9)
+        self.assertGreaterEqual(len(sites), 11)
         for line in sites:
             with self.subTest(line=line.strip()):
-                self.assertIn(".github/scripts/retry-docker-image.sh docker ", line)
+                self.assertRegex(line, r"\.github/scripts/retry-docker-image\.sh (timeout (--foreground )?\d+ )?docker ")
+
+    def test_retry_delay_scales_backoff(self):
+        result = self.run_helper(FAIL_INDEX="2", RETRY_DELAY_SECONDS="10")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.sleeps(), ["10", "20"])
+
+    def test_buildkit_pre_pull_retries_and_never_fails_the_step(self):
+        for action in ("build-rustbgpd-dev", "prime-rustbgpd-dev-cache"):
+            body = action_step(action, "Pre-pull BuildKit image")["run"]
+            for fail, pulls in (("2", 3), ("3", 3)):
+                with self.subTest(action=action, fail=fail):
+                    (self.path / "pull").unlink(missing_ok=True)
+                    (self.path / "calls").unlink(missing_ok=True)
+                    (self.path / "sleeps").unlink(missing_ok=True)
+                    result = subprocess.run(
+                        ["bash", "-eo", "pipefail", "-c", body], cwd=ROOT,
+                        env={**self.env, "FAIL_PULL": fail}, capture_output=True, text=True, check=False,
+                    )
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertEqual(self.sleeps(), ["10", "20"])
+                    self.assertEqual([c[0] for c in self.calls()],
+                                     [["pull", "moby/buildkit:buildx-stable-1"]] * pulls)
+                    self.assertEqual("::warning::" in result.stdout, fail == "3")
+
+    def lab_env(self):
+        """Fake sudo/containerlab and a three-node topology for run-interop-test."""
+        (self.path / "bin" / "sudo").write_text('#!/bin/sh\nexec "$@"\n')
+        (self.path / "bin" / "containerlab").write_text(
+            "#!/bin/sh\nprintf '%s\\n' \"$1\" >>\"$FAKE_LOG/clab\"\n")
+        for tool in ("sudo", "containerlab"):
+            (self.path / "bin" / tool).chmod(0o755)
+        topology = self.path / "lab.clab.yml"
+        topology.write_text(
+            "topology:\n  nodes:\n"
+            "    a:\n      image: quay.io/frrouting/frr:10.7.1\n"
+            "    b:\n      image: \"quay.io/frrouting/frr:10.7.1\"\n"
+            "    c:\n      image: rustbgpd:dev\n"
+        )
+        script = self.path / "test.sh"
+        script.write_text("exit 0\n")
+        return {**self.env, "INTEROP_TOPOLOGY": str(topology), "INTEROP_SCRIPT": str(script),
+                "INTEROP_MAX_ATTEMPTS": "1", "INTEROP_LABEL": "MX", "GITHUB_STEP_SUMMARY": ""}
+
+    def run_hung(self, body, real, short, env):
+        """Run a step body against a pull that never returns, with its budget shortened."""
+        self.assertEqual(body.count(real), 1, real)
+        start = time.monotonic()
+        result = subprocess.run(
+            ["bash", "-c", body.replace(real, short)], cwd=ROOT,
+            env={**env, "FAKE_PULL_HANG": "600"}, capture_output=True, text=True,
+            check=False, timeout=60,
+        )
+        return result, time.monotonic() - start
+
+    def test_hung_buildkit_pre_pull_stops_at_its_budget(self):
+        for action in ("build-rustbgpd-dev", "prime-rustbgpd-dev-cache"):
+            with self.subTest(action=action):
+                body = action_step(action, "Pre-pull BuildKit image")["run"]
+                result, elapsed = self.run_hung(body, "timeout 120 ", "timeout 3 ", self.env)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertLess(elapsed, 10)
+                self.assertIn("::warning::BuildKit image pre-pull failed", result.stdout)
+
+    def test_hung_topology_pre_pull_stops_at_its_budget_then_deploys(self):
+        body = action_step("run-interop-test", "Run interop test with retry")["run"]
+        env = {**self.lab_env(), "FAIL_LEAF": "99"}
+        result, elapsed = self.run_hung(body, "pull_budget=240\n", "pull_budget=3\n", env)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        # One deadline for all images: the hung first pull spends it, the next
+        # image is skipped without a pull, and deploy still runs.
+        self.assertLess(elapsed, 10)
+        self.assertEqual(result.stdout.count("ran out of budget"), 2)
+        self.assertEqual(len([c for c in self.calls() if c[0][0] == "pull"]), 1)
+        self.assertIn("deploy", (self.path / "clab").read_text().split())
+
+    def test_lab_deploy_pre_pulls_missing_topology_images(self):
+        body = action_step("run-interop-test", "Run interop test with retry")["run"]
+        env = self.lab_env()
+        for present, fail, pulls in (("0", "2", []), ("99", "2", ["frr", "rustbgpd"]), ("99", "3", ["frr", "rustbgpd"])):
+            with self.subTest(present=present == "0", fail=fail):
+                for name in ("pull", "leaf", "calls", "sleeps"):
+                    (self.path / name).unlink(missing_ok=True)
+                # FAIL_LEAF makes `docker image inspect` report the image as absent.
+                result = subprocess.run(
+                    ["bash", "-c", body], cwd=ROOT,
+                    env={**env, "FAIL_LEAF": present, "FAIL_PULL": fail},
+                    capture_output=True, text=True, check=False,
+                )
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                pulled = [c[0][1] for c in self.calls() if c[0][0] == "pull"]
+                expected = {"frr": "quay.io/frrouting/frr:10.7.1", "rustbgpd": "rustbgpd:dev"}
+                # The first image uses all three attempts (two or three failures);
+                # the duplicate is pulled once and the next image pulls at once.
+                self.assertEqual(pulled, [expected[pulls[0]]] * 3 + [expected[p] for p in pulls[1:]]
+                                 if pulls else [])
+                self.assertEqual("pre-pull of quay.io" in result.stdout, fail == "3")
 
     def test_bad_metadata_fails_before_pull(self):
         for label in ("9.1", "9.3"):
@@ -167,6 +272,75 @@ class RetryDockerImageTests(unittest.TestCase):
                     calls = self.calls()[before:]
                     self.assertFalse(any(call[0][0] == "pull" for call in calls))
                     self.assertEqual(len(calls), 2 if case == "wrong_config" else 1)
+
+
+ACTIONS = ROOT / ".github/actions"
+
+
+def action_steps(action):
+    """The steps of a local composite action as flat dicts; `with` stays raw text."""
+    text = (ACTIONS / action / "action.yml").read_text().split("\n  steps:\n", 1)[1]
+    steps = []
+    for chunk in re.split(r"(?m)^    - ", text)[1:]:
+        step = dict(re.findall(r"(?m)^(?:      )?(name|uses|id|if|continue-on-error): (.+)$", chunk))
+        run = re.search(r"(?ms)^      run: \|\n(.*?)(?=^\S|^    \S|\Z)", chunk)
+        if run:
+            step["run"] = textwrap.dedent(run.group(1))
+        inputs = re.search(r"(?ms)^      with:\n(.*?)(?=^      \S|^    \S|\Z)", chunk)
+        if inputs:
+            step["with"] = inputs.group(1).strip()
+        steps.append(step)
+    return steps
+
+
+def action_step(action, name):
+    return next(step for step in action_steps(action) if step.get("name") == name)
+
+
+def build_retry_errors(steps):
+    """Every Buildx bootstrap is pre-pulled and every build-push has a guarded retry."""
+    errors = []
+    for index, step in enumerate(steps):
+        uses = step.get("uses", "")
+        if uses.startswith("docker/setup-buildx-action@"):
+            if not any("retry-docker-image.sh" in s.get("run", "") and "moby/buildkit" in s.get("run", "")
+                       for s in steps[:index]):
+                errors.append(f"{step.get('name')}: BuildKit image not pre-pulled first")
+        if uses.startswith("docker/build-push-action@") and "if" not in step:
+            retry = f"steps.{step.get('id')}.outcome == 'failure'"
+            if not step.get("continue-on-error") or not any(
+                s.get("if") == retry and s.get("uses") == uses and s.get("with") == step.get("with")
+                for s in steps[index + 1:]
+            ):
+                errors.append(f"{step.get('name')}: build has no identical guarded retry")
+    return errors
+
+
+class BuildRetryShapeTests(unittest.TestCase):
+    def test_lab_builds_go_through_the_retried_composites(self):
+        for workflow in ("interop.yml", "kernel-dataplane.yml"):
+            with self.subTest(workflow=workflow):
+                text = (ROOT / ".github/workflows" / workflow).read_text()
+                self.assertNotIn("docker/setup-buildx-action@", text)
+        for action in ("build-rustbgpd-dev", "prime-rustbgpd-dev-cache"):
+            with self.subTest(action=action):
+                steps = action_steps(action)
+                self.assertEqual(build_retry_errors(steps), [])
+
+    def test_broken_retry_shapes_fail(self):
+        steps = action_steps("build-rustbgpd-dev")
+        cases = {
+            "no pre-pull": lambda s: s.pop(0),
+            "no continue-on-error": lambda s: s[2].pop("continue-on-error"),
+            "no retry": lambda s: s.pop(),
+            "retry inputs drift": lambda s: s[-1].update({"with": s[-1]["with"] + "\ncache-to: type=gha"}),
+            "retry unguarded": lambda s: s[-1].update({"if": "always()"}),
+        }
+        for case, mutate in cases.items():
+            with self.subTest(case=case):
+                broken = copy.deepcopy(steps)
+                mutate(broken)
+                self.assertNotEqual(build_retry_errors(broken), [])
 
 
 if __name__ == "__main__":

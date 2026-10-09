@@ -838,7 +838,7 @@
       "additionalProperties": false
     },
     "EvpnInstanceConfig": {
-      "description": "One local EVPN instance entry in TOML.\n\nThis is the *operator-facing* shape; resolution into the runtime\n[`rustbgpd_evpn::EvpnInstance`] domain type happens in\n[`Config::resolve_evpn_instances`]. Phase-2 fields (e.g. inbound\nMAC-mobility knobs, IRB router-mac) will be added here without\nreshaping the existing surface.\n\nField semantics:\n\n- `vni` — 24-bit VXLAN VNI (RFC 8365 §5). Required, must be 1..=`16_777_215`.\n- `rd` — Route Distinguisher (RFC 4364 §4.2). Required, parsed via\n  the wire crate's [`rustbgpd_wire::RouteDistinguisher`] textual\n  forms (`asn:val`, `ipv4:val`, 4-octet AS).\n- `route_targets` — bidirectional Route Target list (RFC 4360 / RFC 5668).\n  Required and non-empty unless `auto_derive_route_target = true`; each\n  entry parses through [`rustbgpd_evpn::RouteTarget`].\n- `auto_derive_route_target` — derive the RFC 8365 §5.1.2.1 VXLAN RT from\n  `[global].asn` and `vni`. Off by default; requires a 2-octet AS.\n- `local_vtep_ip` — VXLAN tunnel source IP for this EVI. Required,\n  must be a unicast address (rejects unspecified / multicast /\n  loopback).\n- `bridge` — optional Linux bridge name this EVI is bound to.\n  Kernel reconciliation reports `NotReady` until the named bridge exists.\n- `bridge_vlan` — optional local Linux bridge VLAN selector\n  (`1..=4094`). Valid only with `bridge`; ADR-0089 v1 keeps EVPN\n  Ethernet Tag ID `0`, so this is not a wire-protocol tag.\n- `advertise_svi_mac` — toggle for Type 2 origination of the SVI's\n  own MAC address (RFC 9135 §6.1). Off by default. Origination is\n  gated on dataplane readiness for the instance.\n- `sticky_macs` — list of MAC addresses (`aa:bb:cc:dd:ee:ff` form)\n  that, when learned by the local kernel, are originated with the\n  RFC 7432 §15.4 \"sticky\" bit set in the MAC Mobility extended\n  community. **Not** a static FDB: rustbgpd does not synthesize\n  Type 2s for these MACs; the flag only marks them on origination.\n  Empty by default. See ADR-0056.",
+      "description": "One local EVPN instance entry in TOML.\n\nThis is the *operator-facing* shape; resolution into the runtime\n[`rustbgpd_evpn::EvpnInstance`] domain type happens in\n[`Config::resolve_evpn_instances`]. Phase-2 fields (e.g. inbound\nMAC-mobility knobs, IRB router-mac) will be added here without\nreshaping the existing surface.\n\nField semantics:\n\n- `vni` — 24-bit VXLAN VNI (RFC 8365 §5). Required, must be 1..=`16_777_215`.\n- `rd` — Route Distinguisher (RFC 4364 §4.2). Required, parsed via\n  the wire crate's [`rustbgpd_wire::RouteDistinguisher`] textual\n  forms (`asn:val`, `ipv4:val`, 4-octet AS).\n- `route_targets` — bidirectional Route Target list (RFC 4360 / RFC 5668).\n  Required and non-empty unless `auto_derive_route_target = true`; each\n  entry parses through [`rustbgpd_evpn::RouteTarget`].\n- `auto_derive_route_target` — derive the RFC 8365 §5.1.2.1 VXLAN RT from\n  `[global].asn` and `vni`. Off by default; requires a 2-octet AS.\n- `local_vtep_ip` — VXLAN tunnel source IP for this EVI. Required,\n  must be a unicast address (rejects unspecified / multicast /\n  loopback).\n- `bridge` — optional Linux bridge name this EVI is bound to.\n  Kernel reconciliation reports `NotReady` until the named bridge exists.\n- `bridge_vlan` — optional local Linux bridge VLAN selector\n  (`1..=4094`). Valid only with `bridge`; ADR-0089 v1 keeps EVPN\n  Ethernet Tag ID `0`, so this is not a wire-protocol tag.\n- `service_interface` — `vlan_based` (default) or `vlan_aware_bundle`\n  (ADR-0092; validated, then rejected as not supported yet).\n- `ethernet_tag` — explicit `1..=16_777_215` Ethernet Tag of a\n  `vlan_aware_bundle` member; rejected on `vlan_based` rows.\n- `advertise_svi_mac` — toggle for Type 2 origination of the SVI's\n  own MAC address (RFC 9135 §6.1). Off by default. Origination is\n  gated on dataplane readiness for the instance.\n- `sticky_macs` — list of MAC addresses (`aa:bb:cc:dd:ee:ff` form)\n  that, when learned by the local kernel, are originated with the\n  RFC 7432 §15.4 \"sticky\" bit set in the MAC Mobility extended\n  community. **Not** a static FDB: rustbgpd does not synthesize\n  Type 2s for these MACs; the flag only marks them on origination.\n  Empty by default. See ADR-0056.",
       "type": "object",
       "properties": {
         "advertise_svi_mac": {
@@ -893,6 +893,15 @@
             "window_seconds": 180
           }
         },
+        "ethernet_tag": {
+          "description": "EVPN Ethernet Tag of a `vlan_aware_bundle` member (`1..=16_777_215`).\nRequired for, and only valid with, `service_interface =\n\"vlan_aware_bundle\"`.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0
+        },
         "ip_vrf": {
           "description": "Optional name of an `[[evpn_ip_vrfs]]` entry that binds this\nL2VNI into Gate 9 symmetric Interface-less IRB. When set, the\ndaemon validates the referenced IP-VRF, originates local Type 5\nroutes from that VRF's kernel table, and imports remote Type 5\nroutes into the corresponding L3 FIB. Empty / unset means this\nL2VNI remains bridging-only. See ADR-0058.",
           "type": [
@@ -916,6 +925,10 @@
           "items": {
             "type": "string"
           }
+        },
+        "service_interface": {
+          "description": "EVPN service interface (RFC 7432 §6, ADR-0092). `vlan_based`, the\ndefault, keeps Ethernet Tag ID `0`. `vlan_aware_bundle` rows are\nvalidated but not accepted yet.",
+          "$ref": "#/$defs/EvpnServiceInterfaceConfig"
         },
         "sticky_macs": {
           "description": "MACs to be originated with the RFC 7432 §15.4 sticky bit when\nthe local kernel learns them. Textual form: `aa:bb:cc:dd:ee:ff`\n(six two-digit hex octets, either case). Empty by default. See ADR-0056.",
@@ -1034,6 +1047,21 @@
         "vrf_device",
         "l3vxlan_device",
         "table_id"
+      ]
+    },
+    "EvpnServiceInterfaceConfig": {
+      "description": "EVPN service interface of one `[[evpn_instances]]` row (RFC 7432 §6).",
+      "oneOf": [
+        {
+          "description": "One broadcast domain per EVI, Ethernet Tag ID `0` (ADR-0089).",
+          "type": "string",
+          "const": "vlan_based"
+        },
+        {
+          "description": "Member of an RFC 8365 VLAN-aware bundle, identified by its shared\nroute targets and its own non-zero `ethernet_tag` (ADR-0092). Not\naccepted yet.",
+          "type": "string",
+          "const": "vlan_aware_bundle"
+        }
       ]
     },
     "FibTableConfig": {
@@ -2017,7 +2045,7 @@
           ]
         },
         "conditional_advertisements": {
-          "description": "Names of `[policy.conditional_advertisements]` definitions\nattached to this neighbor (ADR-0137). Static neighbors only;\npeer groups and dynamic neighbors do not carry attachments.",
+          "description": "Names of `[policy.conditional_advertisements]` definitions\nattached to this neighbor (ADR-0137). A non-empty list\nreplaces the peer group's list; an empty one inherits it.\nStatic neighbors only; dynamic neighbors do not carry\nattachments.",
           "type": "array",
           "items": {
             "type": "string"
@@ -2561,6 +2589,13 @@
             }
           ]
         },
+        "conditional_advertisements": {
+          "description": "Conditional advertisements inherited by static neighbors in\nthis group that set none of their own (ADR-0137). Dynamic\nneighbors using the group do not inherit them.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
         "disable_ipv4_unicast": {
           "description": "Never treat IPv4 unicast as available for peers in this group\n(true IPv6-only peering). See the neighbor-level\n`disable_ipv4_unicast` for semantics.",
           "type": [
@@ -2974,7 +3009,7 @@
       "type": "object",
       "properties": {
         "conditional_advertisements": {
-          "description": "Named conditional-advertisement definitions (ADR-0137), attached\nto static neighbors by name through\n`[[neighbors]] conditional_advertisements`.",
+          "description": "Named conditional-advertisement definitions (ADR-0137), attached\nto static neighbors by name through\n`[[neighbors]] conditional_advertisements` or the neighbor's\n`[peer_groups.<name>] conditional_advertisements`.",
           "type": "object",
           "additionalProperties": {
             "$ref": "#/$defs/ConditionalAdvertisementConfig"

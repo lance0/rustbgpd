@@ -1,95 +1,6 @@
 use super::*;
 use rustbgpd_rib::AttrSet;
 
-/// LAN-217: a `VPNv6` route carrying an RFC 4659 §3.2.1.1 48-byte two-address
-/// next-hop (global + link-local) reflects the link-local half — the emitted
-/// `MP_REACH` uses the 48-byte next-hop form, not the 24-byte single-address
-/// form.
-/// Without this, `VPNv6` link-local forwarding breaks on reflection.
-#[tokio::test]
-async fn send_route_update_reflects_vpnv6_link_local_next_hop() {
-    let (mut session, _rib_rx) = make_test_session_with_rib(65001, 65002);
-    let (client, mut server) = connected_stream_pair().await;
-    session.test_install_stream(client);
-    let mut negotiated = negotiated_session(65002, false);
-    negotiated.negotiated_families = vec![(Afi::Ipv6, Safi::MplsVpn)];
-    session.negotiated = Some(Arc::new(negotiated));
-
-    let global: Ipv6Addr = "2001:db8::1".parse().unwrap();
-    let link_local: Ipv6Addr = "fe80::1".parse().unwrap();
-    let route = rustbgpd_rib::VpnRibRoute {
-        nlri: VpnNlri {
-            labels: vec![MplsLabelEntry::try_new(4093, 0, true).unwrap()],
-            route_distinguisher: RouteDistinguisher([0, 0, 0xFD, 0xE8, 0, 0, 0, 1]),
-            prefix: VpnPrefix::v6("2001:db8:100::".parse().unwrap(), 48).unwrap(),
-        },
-        next_hop: IpAddr::V6(global),
-        link_local_next_hop: Some(link_local),
-        peer: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
-        attributes: AttrSet::new(vec![
-            PathAttribute::Origin(Origin::Igp),
-            PathAttribute::AsPath(AsPath {
-                segments: vec![AsPathSegment::AsSequence(vec![65002])],
-            }),
-        ]),
-        received_at: Instant::now(),
-        origin_type: rustbgpd_rib::RouteOrigin::Ebgp,
-        peer_router_id: Ipv4Addr::new(10, 0, 0, 2),
-        is_stale: false,
-        is_llgr_stale: false,
-        path_id: 0,
-    };
-    session.send_route_update(OutboundRouteUpdate {
-        replay: None,
-        exact_export_snapshot: Some(session.publish_export_profile()),
-        announce_source_exclusion: None,
-        otc_blocked: vec![],
-        announce: vec![].into(),
-        withdraw: vec![],
-        end_of_rib: vec![],
-        refresh_markers: vec![],
-        next_hop_override: vec![].into(),
-        flowspec_announce: vec![],
-        flowspec_withdraw: vec![],
-        evpn_announce: vec![],
-        evpn_withdraw: vec![],
-        bgpls_announce: vec![],
-        bgpls_withdraw: vec![],
-        vpn_announce: vec![route.clone()],
-        labeled_announce: vec![],
-        rtc_announce: vec![],
-        vpn_withdraw: vec![],
-        labeled_withdraw: vec![],
-        rtc_withdraw: vec![],
-        request_refresh_all_negotiated: false,
-        shared_group_encode: None,
-    });
-    let Message::Update(msg) = read_single_bgp_message(&mut server).await else {
-        panic!("expected VPN MP_REACH UPDATE");
-    };
-    let parsed = msg.parse(true, false, &[]).unwrap();
-    let mp = parsed
-        .attributes
-        .iter()
-        .find_map(|attr| match attr {
-            PathAttribute::MpReachNlri(mp) => Some(mp),
-            _ => None,
-        })
-        .expect("VPN announcement must use MP_REACH");
-    assert_eq!(mp.afi, Afi::Ipv6);
-    assert_eq!(mp.safi, Safi::MplsVpn);
-    assert_eq!(
-        mp.next_hop,
-        IpAddr::V6(global),
-        "VPN global next-hop must pass through reflection unchanged"
-    );
-    assert_eq!(
-        mp.link_local_next_hop,
-        Some(link_local),
-        "VPNv6 link-local next-hop must survive reflection (LAN-217)"
-    );
-}
-
 /// VPN `MP_REACH` must carry the original label stack and the stored VPN
 /// next-hop verbatim — even on an eBGP session, where unicast would rewrite
 /// to next-hop-self (ADR-0077 §6: next-hop-self is inert for SAFI 128). The
@@ -656,6 +567,11 @@ async fn vpnv4_ipv6_next_hop_reflection_matches_exact_probe() {
         for link_local in [None, Some("fe80::7".parse().unwrap())] {
             for add_path in [false, true] {
                 let (mut session, _rib_rx) = make_test_session_with_rib(65001, remote_asn);
+                // The 48-octet form keeps its link-local half only toward
+                // the source's link.
+                if link_local.is_some() {
+                    configure_scoped_link_local_peer(&mut session);
+                }
                 let (client, mut server) = connected_stream_pair().await;
                 session.test_install_stream(client);
                 let mut negotiated = negotiated_session(remote_asn, false);
@@ -672,6 +588,7 @@ async fn vpnv4_ipv6_next_hop_reflection_matches_exact_probe() {
                 let mut route = make_vpn_rib_route(4093);
                 route.next_hop = "2001:db8::7".parse().unwrap();
                 route.link_local_next_hop = link_local;
+                route.next_hop_scope = session.link_local_next_hop_scope.clone().map(Box::new);
                 route.path_id = if add_path { 42 } else { 0 };
                 let profile = session.publish_export_profile();
                 let probe = profile

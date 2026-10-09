@@ -49,6 +49,9 @@ const OWNED_POLICY_ACTOR_TIMEOUT: Duration = Duration::from_mins(10);
 /// swap, so a sub-second bound turns normal bounded reload work into a hard
 /// `DEADLINE_EXCEEDED` for an operator polling live counters.
 const POLICY_STATS_AGGREGATE_TIMEOUT: Duration = Duration::from_secs(2);
+/// Bound on `ListConditionalAdvertisements`, covering admission and reply:
+/// the neighbor service's `RIB_SNAPSHOT_TIMEOUT` class for a cheap RIB read.
+const CONDITIONAL_STATUS_TIMEOUT: Duration = Duration::from_secs(2);
 // Match tonic's default decoded-message limit without narrowing valid requests.
 const TEST_POLICY_MAX_REQUEST_BYTES: usize = 4 * 1024 * 1024;
 const TEST_POLICY_MAX_REJECTED_SAMPLES: u32 = 1000;
@@ -646,6 +649,31 @@ impl proto::policy_service_server::PolicyService for PolicyService {
             complete: snapshot.complete,
             omitted: snapshot.omitted,
         }))
+    }
+
+    async fn list_conditional_advertisements(
+        &self,
+        _request: Request<proto::ListConditionalAdvertisementsRequest>,
+    ) -> Result<Response<proto::ListConditionalAdvertisementsResponse>, Status> {
+        let rib_tx = self.rib_tx.as_ref().ok_or_else(|| {
+            Status::failed_precondition("RIB query runtime unavailable on this listener")
+        })?;
+        let definitions = tokio::time::timeout(
+            CONDITIONAL_STATUS_TIMEOUT,
+            rib_manager_read(rib_tx, |reply| {
+                rustbgpd_rib::RibUpdate::QueryConditionalAdvertisements { reply }
+            }),
+        )
+        .await
+        .map_err(|_| Status::deadline_exceeded("conditional advertisement status timed out"))??;
+        Ok(Response::new(
+            proto::ListConditionalAdvertisementsResponse {
+                definitions: definitions
+                    .into_iter()
+                    .map(conditional_status_to_proto)
+                    .collect(),
+            },
+        ))
     }
 
     async fn list_policies(
@@ -1710,6 +1738,36 @@ fn posture_dimension_to_proto(
     proto::ValidationPolicyDimensionPosture {
         disposition: disposition.into(),
         reason: snapshot.reason.to_string(),
+    }
+}
+
+fn conditional_status_to_proto(
+    status: rustbgpd_rib::ConditionalAdvertisementStatus,
+) -> proto::ConditionalAdvertisementStatus {
+    let millis = |duration: Duration| u64::try_from(duration.as_millis()).unwrap_or(u64::MAX);
+    proto::ConditionalAdvertisementStatus {
+        name: status.name.to_string(),
+        advertise_if: status.advertise_if.label().to_string(),
+        conditions: status
+            .conditions
+            .into_iter()
+            .map(|(prefix, state)| proto::ConditionalAdvertisementCondition {
+                prefix: prefix.to_string(),
+                state: state.to_string(),
+            })
+            .collect(),
+        observed: status.observed.to_string(),
+        observed_for_ms: millis(status.observed_for),
+        applied: status.applied.to_string(),
+        settle_time_seconds: u32::try_from(status.settle_time.as_secs()).unwrap_or(u32::MAX),
+        settle_pending: status.settle_remaining.is_some(),
+        settle_remaining_ms: status.settle_remaining.map_or(0, millis),
+        selection_deferred: status.selection_deferred,
+        attached_peers: status
+            .attached_peers
+            .iter()
+            .map(ToString::to_string)
+            .collect(),
     }
 }
 
@@ -3490,6 +3548,114 @@ policy customer-in(peer_lp: u32) {
             PolicyService::new(AccessMode::ReadOnly, peer_tx, None, None).with_rib_query(rib_tx),
             commands,
         )
+    }
+
+    fn conditional_status(name: &str) -> rustbgpd_rib::ConditionalAdvertisementStatus {
+        rustbgpd_rib::ConditionalAdvertisementStatus {
+            name: Arc::from(name),
+            advertise_if: rustbgpd_rib::ConditionalAdvertiseIf::Absent,
+            conditions: vec![
+                (
+                    rustbgpd_wire::Prefix::V4(rustbgpd_wire::Ipv4Prefix::new(
+                        std::net::Ipv4Addr::UNSPECIFIED,
+                        0,
+                    )),
+                    "present",
+                ),
+                (
+                    rustbgpd_wire::Prefix::V6(rustbgpd_wire::Ipv6Prefix::new(
+                        "2001:db8::".parse().unwrap(),
+                        32,
+                    )),
+                    "absent",
+                ),
+            ],
+            observed: "present",
+            observed_for: Duration::from_millis(1_250),
+            applied: "advertise",
+            settle_time: Duration::from_secs(5),
+            settle_remaining: Some(Duration::from_millis(3_750)),
+            selection_deferred: false,
+            attached_peers: vec!["192.0.2.1".parse().unwrap(), "2001:db8::2".parse().unwrap()],
+        }
+    }
+
+    /// The RIB reply maps field for field; an unarmed timer reports zero.
+    #[tokio::test]
+    async fn list_conditional_advertisements_maps_the_rib_status() {
+        let (peer_tx, _peer_rx) = mpsc::channel(1);
+        let (rib_tx, mut rib_rx) = mpsc::channel(1);
+        let service =
+            PolicyService::new(AccessMode::ReadOnly, peer_tx, None, None).with_rib_query(rib_tx);
+        tokio::spawn(async move {
+            let Some(rustbgpd_rib::RibUpdate::QueryConditionalAdvertisements { reply }) =
+                rib_rx.recv().await
+            else {
+                panic!("expected the conditional status query");
+            };
+            let mut settled = conditional_status("core");
+            settled.settle_remaining = None;
+            let _ = reply.send(vec![conditional_status("backup"), settled]);
+        });
+        let response = PolicyServiceRpc::list_conditional_advertisements(
+            &service,
+            Request::new(proto::ListConditionalAdvertisementsRequest {}),
+        )
+        .await
+        .unwrap()
+        .into_inner();
+        assert_eq!(
+            response.definitions[0],
+            proto::ConditionalAdvertisementStatus {
+                name: "backup".to_string(),
+                advertise_if: "absent".to_string(),
+                conditions: vec![
+                    proto::ConditionalAdvertisementCondition {
+                        prefix: "0.0.0.0/0".to_string(),
+                        state: "present".to_string(),
+                    },
+                    proto::ConditionalAdvertisementCondition {
+                        prefix: "2001:db8::/32".to_string(),
+                        state: "absent".to_string(),
+                    },
+                ],
+                observed: "present".to_string(),
+                observed_for_ms: 1_250,
+                applied: "advertise".to_string(),
+                settle_time_seconds: 5,
+                settle_pending: true,
+                settle_remaining_ms: 3_750,
+                selection_deferred: false,
+                attached_peers: vec!["192.0.2.1".to_string(), "2001:db8::2".to_string()],
+            }
+        );
+        assert_eq!(response.definitions[1].name, "core");
+        assert!(!response.definitions[1].settle_pending);
+        assert_eq!(response.definitions[1].settle_remaining_ms, 0);
+    }
+
+    /// A RIB that admits the query but never replies fails the read at its
+    /// 2 s deadline instead of holding the RPC until client cancel.
+    #[tokio::test(start_paused = true)]
+    async fn list_conditional_advertisements_stops_at_its_deadline() {
+        let (peer_tx, _peer_rx) = mpsc::channel(1);
+        let (rib_tx, mut rib_rx) = mpsc::channel(1);
+        let service =
+            PolicyService::new(AccessMode::ReadOnly, peer_tx, None, None).with_rib_query(rib_tx);
+        let held = tokio::spawn(async move { rib_rx.recv().await });
+        let started = tokio::time::Instant::now();
+        let error = PolicyServiceRpc::list_conditional_advertisements(
+            &service,
+            Request::new(proto::ListConditionalAdvertisementsRequest {}),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.code(), tonic::Code::DeadlineExceeded);
+        assert_eq!(started.elapsed(), CONDITIONAL_STATUS_TIMEOUT);
+        assert!(matches!(
+            held.await.unwrap(),
+            Some(rustbgpd_rib::RibUpdate::QueryConditionalAdvertisements { .. })
+        ));
     }
 
     fn test_policy_service(routes: Vec<rustbgpd_rib::Route>) -> PolicyService {

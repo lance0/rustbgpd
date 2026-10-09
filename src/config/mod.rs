@@ -29,8 +29,8 @@ use rustbgpd_policy::{
 // RIB's export explain, and the CLI all test the same identity.
 pub use rustbgpd_policy::{RFC8212_MISSING_EXPORT_POLICY, RFC8212_MISSING_IMPORT_POLICY};
 use rustbgpd_wire::{
-    Afi, EthernetSegmentIdentifier, ExtendedCommunity, Ipv4Prefix, Ipv6Prefix, LargeCommunity,
-    MacAddress, Prefix, RouteDistinguisher, Safi,
+    Afi, EthernetSegmentIdentifier, EthernetTagId, ExtendedCommunity, Ipv4Prefix, Ipv6Prefix,
+    LargeCommunity, MacAddress, Prefix, RouteDistinguisher, Safi,
 };
 
 pub(crate) use resolution::UnpolicedEbgpBoundary;
@@ -1166,7 +1166,106 @@ impl Config {
                     reason: e.to_string(),
                 })?;
         }
+        self.validate_vlan_aware_bundle_rows(&table)?;
         Ok(table)
+    }
+
+    /// ADR-0092 amendment E table-level rules for `vlan_aware_bundle` rows,
+    /// checked in declaration order so the error names the later row. Every
+    /// load, SIGHUP and runtime-apply candidate resolves through
+    /// [`Self::resolve_evpn_instances`], so each one runs these rules
+    /// before commit.
+    fn validate_vlan_aware_bundle_rows(
+        &self,
+        table: &EvpnInstanceTable,
+    ) -> Result<(), ConfigError> {
+        let is_bundle = |cfg: &EvpnInstanceConfig| {
+            cfg.service_interface == EvpnServiceInterfaceConfig::VlanAwareBundle
+        };
+        if !self.evpn_instances.iter().any(is_bundle) {
+            // VLAN-Based-only configurations keep their existing rules.
+            return Ok(());
+        }
+        let invalid = |reason: String| Err(ConfigError::InvalidEvpnInstance { reason });
+        let mode = |bundle: bool| {
+            if bundle {
+                "vlan_aware_bundle"
+            } else {
+                "vlan_based"
+            }
+        };
+        let mut rt_owner: BTreeMap<RouteTarget, (bool, u32)> = BTreeMap::new();
+        let mut rt_tag_owner: BTreeMap<(RouteTarget, EthernetTagId), u32> = BTreeMap::new();
+        let mut bridge_owner: BTreeMap<(&str, Option<u32>), (bool, u32)> = BTreeMap::new();
+        for cfg in &self.evpn_instances {
+            let bundle = is_bundle(cfg);
+            let Some(inst) = EvpnInstanceId::new(cfg.vni)
+                .ok()
+                .and_then(|id| table.get(id))
+            else {
+                continue;
+            };
+            for rt in &inst.route_targets {
+                let (owner_bundle, owner) = *rt_owner.entry(*rt).or_insert((bundle, cfg.vni));
+                if owner_bundle != bundle {
+                    return invalid(format!(
+                        "vni {}: route target {rt} is also used by {} vni {owner}; \
+                         a route target cannot be shared between vlan_based and \
+                         vlan_aware_bundle instances",
+                        cfg.vni,
+                        mode(owner_bundle),
+                    ));
+                }
+                if bundle
+                    && let Some(owner) = rt_tag_owner.insert((*rt, inst.ethernet_tag), cfg.vni)
+                {
+                    return invalid(format!(
+                        "vni {}: ethernet_tag {} for route target {rt} is already used by vni {owner}",
+                        cfg.vni, inst.ethernet_tag.0,
+                    ));
+                }
+            }
+            if let Some(bridge) = cfg.bridge.as_deref() {
+                let (owner_bundle, owner) = *bridge_owner
+                    .entry((bridge, cfg.bridge_vlan))
+                    .or_insert((bundle, cfg.vni));
+                if owner != cfg.vni && (bundle || owner_bundle) {
+                    let vlan = cfg
+                        .bridge_vlan
+                        .map_or_else(|| "unset".to_string(), |vlan| vlan.to_string());
+                    return invalid(format!(
+                        "vni {}: bridge {bridge:?} bridge_vlan {vlan} is already claimed by \
+                         {} vni {owner}; a vlan_aware_bundle row needs its own \
+                         (bridge, bridge_vlan)",
+                        cfg.vni,
+                        mode(owner_bundle),
+                    ));
+                }
+            }
+        }
+        for cfg in self.evpn_instances.iter().filter(|cfg| is_bundle(cfg)) {
+            if let Some(segment) = self
+                .ethernet_segments
+                .iter()
+                .find(|segment| segment.member_vnis.contains(&cfg.vni))
+            {
+                return invalid(format!(
+                    "vni {}: ethernet segment esi {:?} lists this vlan_aware_bundle row in \
+                     member_vnis; multi-homing is not supported for bundle members yet",
+                    cfg.vni, segment.esi,
+                ));
+            }
+        }
+        // LAN-65 S1: every shape rule above runs first, then bundle rows are
+        // refused, because origination still stamps Ethernet Tag 0 (a bundle
+        // row would advertise a tag-0 IMET). S2 removes this gate.
+        match self.evpn_instances.iter().find(|cfg| is_bundle(cfg)) {
+            Some(cfg) => invalid(format!(
+                "vni {}: service_interface = \"vlan_aware_bundle\" is not supported yet",
+                cfg.vni
+            )),
+            None => Ok(()),
+        }
     }
 
     /// Resolve `[[ethernet_segments]]` entries into runtime
@@ -4889,10 +4988,11 @@ fn classify_evpn_runtime_change(old: &Config, new: &Config) -> EvpnRuntimeChange
     if !evpn_runtime_config_changed(old, new) {
         return EvpnRuntimeChangeClass::Unchanged;
     }
-    let Ok(current) = evpn_runtime_model_from_config(old) else {
+    let esis = AutoLacpEsis::assume_ready(old, new);
+    let Ok(current) = evpn_runtime_model_from_config(old, &esis) else {
         return EvpnRuntimeChangeClass::RestartRequired;
     };
-    let Ok(candidate) = evpn_runtime_candidate_from_config(new) else {
+    let Ok(candidate) = evpn_runtime_candidate_from_config(new, &esis) else {
         return EvpnRuntimeChangeClass::RestartRequired;
     };
     let plan = current.plan_candidate(&candidate);
@@ -4913,10 +5013,13 @@ fn classify_evpn_runtime_change(old: &Config, new: &Config) -> EvpnRuntimeChange
     }
 }
 
-fn evpn_runtime_model_from_config(config: &Config) -> Result<EvpnRuntimeModel, ConfigError> {
+fn evpn_runtime_model_from_config(
+    config: &Config,
+    esis: &AutoLacpEsis,
+) -> Result<EvpnRuntimeModel, ConfigError> {
     let instances = config.resolve_evpn_instances()?;
     let ip_vrfs = config.resolve_evpn_ip_vrfs()?;
-    let ethernet_segments = config.resolve_ethernet_segments()?;
+    let ethernet_segments = config.resolve_ethernet_segments_with(esis)?;
     Ok(EvpnRuntimeModel::startup(
         instances,
         ip_vrfs,
@@ -4926,11 +5029,12 @@ fn evpn_runtime_model_from_config(config: &Config) -> Result<EvpnRuntimeModel, C
 
 fn evpn_runtime_candidate_from_config(
     config: &Config,
+    esis: &AutoLacpEsis,
 ) -> Result<EvpnRuntimeCandidate, ConfigError> {
     Ok(EvpnRuntimeCandidate::new(
         config.resolve_evpn_instances()?,
         config.resolve_evpn_ip_vrfs()?,
-        config.resolve_ethernet_segments()?,
+        config.resolve_ethernet_segments_with(esis)?,
     ))
 }
 
@@ -6147,6 +6251,7 @@ pub fn describe_peer_group_changes(
     }
     cmp_field!(import_policy_chain);
     cmp_field!(export_policy_chain);
+    cmp_field!(conditional_advertisements);
 
     changes
 }
@@ -6181,6 +6286,7 @@ pub fn copy_peer_group_file_only_fields(target: &mut PeerGroupConfig, source: &P
         disable_ipv4_unicast,
         link_local_next_hop,
         log_level,
+        conditional_advertisements,
         // Carried by the API definition.
         hold_time: _,
         min_hold_time: _,
@@ -6233,6 +6339,7 @@ pub fn copy_peer_group_file_only_fields(target: &mut PeerGroupConfig, source: &P
     target.disable_ipv4_unicast = disable_ipv4_unicast;
     target.link_local_next_hop = link_local_next_hop;
     target.log_level = log_level;
+    target.conditional_advertisements = conditional_advertisements;
 }
 
 /// Names of the config-file-only fields (see
@@ -6248,12 +6355,16 @@ fn peer_group_file_only_differences(old: &PeerGroupConfig, new: &PeerGroupConfig
     // `kept` differs from `new` only in config-file-only fields.
     match (serde_json::to_value(&kept), serde_json::to_value(new)) {
         (Ok(serde_json::Value::Object(kept)), Ok(serde_json::Value::Object(new))) => {
+            // A field cleared to its omitted form is absent from `new`, so
+            // compare the keys of both sides.
             let mut fields: Vec<String> = new
-                .iter()
-                .filter(|(field, value)| kept.get(*field) != Some(*value))
-                .map(|(field, _)| field.clone())
+                .keys()
+                .chain(kept.keys())
+                .filter(|field| kept.get(*field) != new.get(*field))
+                .cloned()
                 .collect();
             fields.sort();
+            fields.dedup();
             fields
         }
         _ => vec!["config-file-only fields".to_string()],
@@ -6292,7 +6403,8 @@ pub fn peer_group_file_only_changes(
 }
 
 /// Conditional-advertisement definitions a candidate adds, removes, or
-/// changes, and attachment edits on neighbors it keeps or adds (ADR-0137).
+/// changes, and effective attachment edits (direct or inherited from a peer
+/// group) on neighbors it keeps or adds (ADR-0137).
 /// Only the generation route commits them, so the sequential route rejects a
 /// candidate that has any.
 fn conditional_advertisement_changes(old: &Config, new: &Config) -> Vec<String> {
@@ -6305,12 +6417,14 @@ fn conditional_advertisement_changes(old: &Config, new: &Config) -> Vec<String> 
         config
             .neighbors
             .iter()
-            .filter(|neighbor| !neighbor.conditional_advertisements.is_empty())
-            .map(|neighbor| {
-                (
-                    (neighbor.address.clone(), neighbor.interface.clone()),
-                    neighbor.conditional_advertisements.clone(),
-                )
+            .filter_map(|neighbor| {
+                let effective = config.effective_conditional_advertisements(neighbor);
+                (!effective.is_empty()).then(|| {
+                    (
+                        (neighbor.address.clone(), neighbor.interface.clone()),
+                        effective.to_vec(),
+                    )
+                })
             })
             .collect::<BTreeMap<_, _>>()
     };
@@ -6503,6 +6617,7 @@ fn parse_evpn_instance(
     let id = EvpnInstanceId::new(cfg.vni).map_err(|e| ConfigError::InvalidEvpnInstance {
         reason: format!("vni {}: {e}", cfg.vni),
     })?;
+    let ethernet_tag = parse_evpn_service_interface(cfg)?;
 
     let rd =
         cfg.rd
@@ -6602,9 +6717,49 @@ fn parse_evpn_instance(
     Ok(inst
         .with_duplicate_ip_detection(duplicate_ip_detection)
         .with_bridge_vlan(bridge_vlan)
+        .with_ethernet_tag(ethernet_tag)
         .with_sticky_macs(sticky_macs)
         .with_apply_aliasing_ecmp(cfg.apply_aliasing_ecmp)
         .with_duplicate_mac_detection(duplicate_mac_detection))
+}
+
+/// ADR-0092 amendment B2/E row-level rules: the Ethernet Tag is explicit,
+/// non-zero and bundle-only, and a bundle row carries no IRB binding and no
+/// per-VNI auto-derived route target. Returns the row's Ethernet Tag.
+fn parse_evpn_service_interface(cfg: &EvpnInstanceConfig) -> Result<EthernetTagId, ConfigError> {
+    let invalid = |reason: String| Err(ConfigError::InvalidEvpnInstance { reason });
+    let vni = cfg.vni;
+    match (cfg.service_interface, cfg.ethernet_tag) {
+        (EvpnServiceInterfaceConfig::VlanBased, None) => Ok(EthernetTagId(0)),
+        (EvpnServiceInterfaceConfig::VlanBased, Some(_)) => invalid(format!(
+            "vni {vni}: ethernet_tag requires service_interface = \"vlan_aware_bundle\""
+        )),
+        (EvpnServiceInterfaceConfig::VlanAwareBundle, None) => invalid(format!(
+            "vni {vni}: service_interface = \"vlan_aware_bundle\" requires ethernet_tag"
+        )),
+        (EvpnServiceInterfaceConfig::VlanAwareBundle, Some(tag))
+            if !(1..=rustbgpd_evpn::MAX_BUNDLE_ETHERNET_TAG).contains(&tag) =>
+        {
+            invalid(format!(
+                "vni {vni}: ethernet_tag must be in 1..={} (got {tag})",
+                rustbgpd_evpn::MAX_BUNDLE_ETHERNET_TAG
+            ))
+        }
+        (EvpnServiceInterfaceConfig::VlanAwareBundle, Some(_)) if cfg.auto_derive_route_target => {
+            invalid(format!(
+                "vni {vni}: auto_derive_route_target is not supported with \
+                 service_interface = \"vlan_aware_bundle\"; configure the bundle's shared \
+                 route_targets explicitly"
+            ))
+        }
+        (EvpnServiceInterfaceConfig::VlanAwareBundle, Some(_)) if cfg.ip_vrf.is_some() => {
+            invalid(format!(
+                "vni {vni}: ip_vrf is not supported with service_interface = \
+                 \"vlan_aware_bundle\" yet"
+            ))
+        }
+        (EvpnServiceInterfaceConfig::VlanAwareBundle, Some(tag)) => Ok(EthernetTagId(tag)),
+    }
 }
 
 fn parse_duplicate_ip_detection(
@@ -6673,14 +6828,39 @@ pub const AUTO_LACP_ESI: &str = "auto-lacp";
 /// the runtime apply resolves segments through it. An absent entry
 /// means not ready.
 ///
-/// Config validation and diff classification resolve against an empty
-/// table, so they never depend on the live bond: an `auto-lacp`
-/// segment validates by shape and resolves to no runtime segment until
-/// the probe publishes an ESI and re-converges the committed config.
+/// Config validation resolves against an empty table, so it never
+/// depends on the live bond: an `auto-lacp` segment validates by shape
+/// and resolves to no runtime segment until the probe publishes an ESI
+/// and re-converges the committed config. Diff classification uses
+/// [`Self::assume_ready`] instead.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct AutoLacpEsis(Arc<std::sync::RwLock<BTreeMap<String, EthernetSegmentIdentifier>>>);
 
 impl AutoLacpEsis {
+    /// A table in which every `auto-lacp` bond of `old` or `new` is ready,
+    /// with a stand-in ESI per bond that is stable across both configs and
+    /// distinct from their explicit ESIs. Diff classification has no live
+    /// table (`rustbgpd --diff` runs off-box), so it assumes the steady
+    /// state: an edit to a ready segment plans as the redefine the live
+    /// apply will see. A `NotReady` segment has no runtime row, so its live
+    /// apply may accept what this classifies as restart-required.
+    fn assume_ready(old: &Config, new: &Config) -> Self {
+        let explicit: BTreeSet<EthernetSegmentIdentifier> = old
+            .ethernet_segments
+            .iter()
+            .chain(&new.ethernet_segments)
+            .filter_map(|cfg| parse_esi(&cfg.esi).ok())
+            .collect();
+        let stand_ins = (1..=u16::MAX)
+            .map(|key| rustbgpd_evpn::lacp_type1_esi([0x02, 0, 0, 0, 0, 0], key))
+            .filter(|esi| !explicit.contains(esi));
+        let mut bonds = old.auto_lacp_interfaces();
+        bonds.extend(new.auto_lacp_interfaces());
+        Self(Arc::new(std::sync::RwLock::new(
+            bonds.into_iter().zip(stand_ins).collect(),
+        )))
+    }
+
     fn get(&self, interface: &str) -> Option<EthernetSegmentIdentifier> {
         self.0
             .read()

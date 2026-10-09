@@ -807,7 +807,7 @@ fn ethernet_segment_auto_lacp_resolves_the_published_esi_and_follows_changes() {
     assert_eq!(segments[0].esi, lacp_esi(0x55));
     let bindings = config.resolve_es_link_bindings(&esis).unwrap();
     assert_eq!(bindings[&lacp_esi(0x55)].interface, "bond0");
-    // Validation and classification resolve against an empty table.
+    // Validation resolves against an empty table.
     assert_eq!(config.resolve_ethernet_segments().unwrap(), Vec::new());
     // The spec, not the derived value, is what persists.
     assert_eq!(config.ethernet_segments[0].esi, "auto-lacp");

@@ -220,7 +220,11 @@ impl PeerManager {
         let conditional_peers: BTreeSet<IpAddr> = candidate
             .neighbors
             .iter()
-            .filter(|neighbor| !neighbor.conditional_advertisements.is_empty())
+            .filter(|neighbor| {
+                !candidate
+                    .effective_conditional_advertisements(neighbor)
+                    .is_empty()
+            })
             .filter_map(|neighbor| neighbor.address.parse().ok())
             .collect();
         let candidate = by_peer(candidate).map_err(UpdateGroupImpactPlanError::InvalidCandidate)?;

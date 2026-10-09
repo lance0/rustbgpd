@@ -5035,6 +5035,15 @@ async fn run<T>(
         },
         evpn_dataplane::EvpnDataplaneHandle::remote_prefix_drop_counts_receiver,
     );
+    let evpn_l2_remote_route_drop_counts_rx = evpn_dataplane_handle.as_ref().map_or_else(
+        || {
+            let (_, rx) = tokio::sync::watch::channel(std::sync::Arc::new(
+                evpn_dataplane::L2RemoteRouteDropCounts::new(),
+            ));
+            rx
+        },
+        evpn_dataplane::EvpnDataplaneHandle::l2_remote_route_drop_counts_receiver,
+    );
     if let Some(handle) = evpn_dataplane_handle.as_ref() {
         let mut reports = handle.subscribe_reports();
         // Resolve IpVrfId → operator-facing name for the metric labels
@@ -5575,6 +5584,21 @@ async fn run<T>(
                         rustbgpd_api::evpn_service::RemoteIpPrefixDropCount {
                             vrf: vrf.clone(),
                             reason: reason.clone(),
+                            count: *count,
+                        }
+                    })
+                    .collect()
+            })
+        },
+        evpn_l2_remote_route_drop_counts: {
+            let rx = evpn_l2_remote_route_drop_counts_rx.clone();
+            Arc::new(move || {
+                rx.borrow()
+                    .iter()
+                    .map(|((vni, reason), count)| {
+                        rustbgpd_api::evpn_service::L2RemoteRouteDropCount {
+                            vni: *vni,
+                            reason: (*reason).to_string(),
                             count: *count,
                         }
                     })

@@ -19,7 +19,11 @@ headroom, that the daemon builds and the `rustbgpd:dev` image exists,
 and requires explicit operator confirmation that no pushes to main will land
 during the window.
 Exit 0 means ready; nonzero prints each failed check as `FAIL:`.
-Preflight checks the image behind the `rustbgpd:dev` tag. Once the lab is
+Preflight checks the image behind the `rustbgpd:dev` tag and fails when it
+was not built from this tree. A bare-host soak that runs host binaries can
+set `SKIP_SOURCE_ID_CHECK=1` to skip that comparison; the image must still
+exist. `SKIP_BUILD_CHECK=1` skips the `cargo check` compile step and keeps
+the image checks. Once the lab is
 deployed, each container-based runner checks every `rustbgpd:dev` container of
 the lab by its image id with `tests/interop/scripts/source-id-guard.sh`, and
 does not start the soak when an id cannot be read or was not built from this

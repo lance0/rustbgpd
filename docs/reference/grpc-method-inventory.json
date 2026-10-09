@@ -6,10 +6,10 @@
   "additional_protos": [
     "proto/github.com/openconfig/gnmi/proto/gnmi/gnmi.proto"
   ],
-  "method_count": 116,
+  "method_count": 117,
   "tier_counts": {
     "read": 1,
-    "sensitive_read": 69,
+    "sensitive_read": 70,
     "mutating": 22,
     "operator_only": 24
   },
@@ -67,6 +67,7 @@
     { "service": "rustbgpd.v1.PolicyService", "method": "TestPolicy", "path": "/rustbgpd.v1.PolicyService/TestPolicy", "tier": "sensitive_read" },
     { "service": "rustbgpd.v1.PolicyService", "method": "GetPolicyStats", "path": "/rustbgpd.v1.PolicyService/GetPolicyStats", "tier": "sensitive_read" },
     { "service": "rustbgpd.v1.PolicyService", "method": "GetValidationPolicyPosture", "path": "/rustbgpd.v1.PolicyService/GetValidationPolicyPosture", "tier": "sensitive_read" },
+    { "service": "rustbgpd.v1.PolicyService", "method": "ListConditionalAdvertisements", "path": "/rustbgpd.v1.PolicyService/ListConditionalAdvertisements", "tier": "sensitive_read" },
     { "service": "rustbgpd.v1.PolicyService", "method": "ClearNeighborExportChain", "path": "/rustbgpd.v1.PolicyService/ClearNeighborExportChain", "tier": "mutating" },
     { "service": "rustbgpd.v1.PeerGroupService", "method": "ListPeerGroups", "path": "/rustbgpd.v1.PeerGroupService/ListPeerGroups", "tier": "sensitive_read" },
     { "service": "rustbgpd.v1.PeerGroupService", "method": "GetPeerGroup", "path": "/rustbgpd.v1.PeerGroupService/GetPeerGroup", "tier": "sensitive_read" },

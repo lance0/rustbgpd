@@ -1135,18 +1135,25 @@ impl PeerSession {
                 .is_some_and(|afi| *afi == Afi::Ipv6)
         })
     }
-    /// An IPv4-unicast `MP_REACH_NLRI` for a negotiated family whose
-    /// 16/32-octet (IPv6) next hop needs RFC 8950 Extended Next Hop, which
-    /// this session did not negotiate. A 4-octet IPv4 next hop is plain
-    /// RFC 4760 and needs only the family (RFC 8950 §4).
+    /// An IPv4-unicast or labeled-IPv4 `MP_REACH_NLRI` for a negotiated
+    /// family whose 16/32-octet (IPv6) next hop needs RFC 8950 Extended Next
+    /// Hop for that family (`<1,1,2>` or `<1,4,2>`), which this session did
+    /// not negotiate. A 4-octet IPv4 next hop is plain RFC 4760 / RFC 8277
+    /// and needs only the family (RFC 8950 §4).
     fn is_unnegotiated_ipv4_mp_ipv6_next_hop(&self, mp: &rustbgpd_wire::MpReachNlri) -> bool {
-        (mp.afi, mp.safi) == (Afi::Ipv4, Safi::Unicast)
+        let family = (mp.afi, mp.safi);
+        mp.afi == Afi::Ipv4
+            && matches!(mp.safi, Safi::Unicast | Safi::LabeledUnicast)
             && mp.next_hop.is_ipv6()
-            && self.negotiated_families().contains(&(mp.afi, mp.safi))
-            && !self.use_extended_nexthop_ipv4()
+            && self.negotiated_families().contains(&family)
+            && !self
+                .negotiated
+                .as_ref()
+                .is_some_and(|n| n.extended_nexthop_families.get(&family) == Some(&Afi::Ipv6))
     }
     /// RFC 7606 §7.11: without negotiated Extended Next Hop, a 16/32-octet
-    /// next hop is not the length expected for IPv4 unicast (RFC 8950 §4), so
+    /// next hop is not the length expected for IPv4 unicast or labeled IPv4
+    /// (RFC 8950 §4), so
     /// the `MP_REACH_NLRI` is malformed and the session resets (AFI/SAFI
     /// disable is not implemented). Same NOTIFICATION as the decoder's other
     /// `MP_REACH_NLRI` next-hop failures: UPDATE Message Error / Optional Attribute
@@ -1187,13 +1194,18 @@ impl PeerSession {
             && self.config.peer_interface.is_some()
             && self.config.peer_scope_id.is_some()
     }
-    fn link_local_next_hop_scope(&self, next_hop: IpAddr) -> Option<Box<NextHopScope>> {
-        match next_hop {
-            IpAddr::V6(v6) if is_ipv6_link_local(&v6) => {
-                self.link_local_next_hop_scope.clone().map(Box::new)
-            }
-            _ => None,
-        }
+    /// The receiving interface for a link-local primary next hop or a
+    /// link-local companion; export forwards a companion only on that link.
+    fn link_local_next_hop_scope(
+        &self,
+        next_hop: IpAddr,
+        link_local_next_hop: Option<std::net::Ipv6Addr>,
+    ) -> Option<Box<NextHopScope>> {
+        let link_local = matches!(next_hop, IpAddr::V6(v6) if is_ipv6_link_local(&v6))
+            || link_local_next_hop.is_some();
+        link_local
+            .then(|| self.link_local_next_hop_scope.clone().map(Box::new))
+            .flatten()
     }
     pub(super) fn aspa_validation_context(&self) -> AspaValidationContext {
         rustbgpd_rpki::aspa_verify::validation_context(
@@ -2490,7 +2502,7 @@ impl PeerSession {
                         prefix,
                         next_hop,
                         link_local_next_hop: None,
-                        next_hop_scope: self.link_local_next_hop_scope(next_hop),
+                        next_hop_scope: self.link_local_next_hop_scope(next_hop, None),
                         peer: self.peer_ip,
                         received_as_path: import_attr_memo.received_path_override(
                             parsed_as_path,
@@ -2838,10 +2850,14 @@ impl PeerSession {
                                 vpn_announced.push(VpnRibRoute {
                                     nlri: entry.nlri.clone(),
                                     next_hop: mp.next_hop,
-                                    // Carry the RFC 4659 two-address IPv6
-                                    // link-local half so VPNv6 reflection
-                                    // re-emits it (LAN-217).
+                                    // Keep the two-address link-local half
+                                    // with its receiving interface; export
+                                    // re-emits it only on that link.
                                     link_local_next_hop: mp.link_local_next_hop,
+                                    next_hop_scope: self.link_local_next_hop_scope(
+                                        mp.next_hop,
+                                        mp.link_local_next_hop,
+                                    ),
                                     peer: self.peer_ip,
                                     attributes: attrs,
                                     received_at: now,
@@ -2909,10 +2925,14 @@ impl PeerSession {
                                 labeled_announced.push(LabeledRibRoute {
                                     nlri: entry.nlri.clone(),
                                     next_hop: mp.next_hop,
-                                    // Carry the RFC 8950 two-address IPv6
-                                    // link-local half so labeled IPv6
-                                    // reflection re-emits it (LAN-190).
+                                    // Keep the two-address link-local half
+                                    // with its receiving interface; export
+                                    // re-emits it only on that link.
                                     link_local_next_hop: mp.link_local_next_hop,
+                                    next_hop_scope: self.link_local_next_hop_scope(
+                                        mp.next_hop,
+                                        mp.link_local_next_hop,
+                                    ),
                                     peer: self.peer_ip,
                                     attributes: attrs,
                                     received_at: now,
@@ -3098,7 +3118,8 @@ impl PeerSession {
                                 prefix: entry.prefix,
                                 next_hop,
                                 link_local_next_hop,
-                                next_hop_scope: self.link_local_next_hop_scope(next_hop),
+                                next_hop_scope: self
+                                    .link_local_next_hop_scope(next_hop, link_local_next_hop),
                                 peer: self.peer_ip,
                                 received_as_path: import_attr_memo.received_path_override(
                                     parsed_as_path,

@@ -72,7 +72,7 @@ pub use loc_rib::LocRib;
 pub use manager::RibManager;
 pub use manager::{
     ConditionalAdvertiseIf, ConditionalAdvertisement, ConditionalAdvertisementCapture,
-    ConditionalAdvertisementSet,
+    ConditionalAdvertisementSet, ConditionalAdvertisementStatus,
 };
 #[cfg(feature = "bench-internals")]
 pub use manager::{

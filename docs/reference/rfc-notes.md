@@ -25,7 +25,7 @@ deviations; [docs/interop.md](../interop.md) has the interop matrix,
 | Route reflection | RFC 4456, RFC 9107 (ORR, ADR-0095) | Per-client best paths via BGP-LS-sourced SPF |
 | Route server (IXP) | RFC 7947 (ADR-0039/0101), RFC 8195 | Transparent redistribution, §2.3.2 per-client best-path, member-set control communities (per-target announce/prepend steering, scrubbed on egress) |
 | Graceful restart | RFC 4724 (GR helper), RFC 9494 (LLGR) | Stale retention across all RR families; role-derived forwarding-state bits |
-| VPN / MPLS families (RR / controller-feed only, ADR-0077) | RFC 4364/4659 VPNv4/v6 (SAFI 128), RFC 4684 RT-Constrain (SAFI 132), RFC 8277 labeled-unicast (SAFI 4), RFC 9552 BGP-LS (SAFI 71/72) | RD/label/next-hop/RT preserved verbatim; no VRF import, no MPLS FIB, no local BGP-LS production |
+| VPN / MPLS families (RR / controller-feed only, ADR-0077) | RFC 4364/4659 VPNv4/v6 (SAFI 128), RFC 4684 RT-Constrain (SAFI 132), RFC 8277 labeled-unicast (SAFI 4), RFC 9552 BGP-LS (SAFI 71/72) | RD/label/next-hop/RT preserved verbatim (a received IPv6 link-local next hop only toward its own link); no VRF import, no MPLS FIB, no local BGP-LS production |
 | EVPN (Linux/VXLAN alpha) | RFC 7432, RFC 9135/9136 (symmetric IRB), RFC 9012/8365 (VXLAN encap), RFC 9251 (SMET relay) | Route types 1–6; Type 6 SMET relay only; RR + VTEP + multi-homing building blocks; RFC 9721 §5.1/§6.2 local-move cascade (partial) |
 | Origin / path security | RFC 6811 + RFC 8210 (RPKI/RTR), ASPA, RFC 9234 (Roles + OTC, ADR-0071) | Origin validation, AS-path verification, leak prevention |
 | Transport security | RFC 5925 (TCP-AO), TCP MD5, RFC 5082 (GTSM) | TCP-AO: static-neighbor and direct dynamic-prefix keyrings on Linux; add-only successor installation, observation-gated successor selection/deprecation, then deprecated unselected-MKT deletion on separate SIGHUP generations; RPKI cache (RTR) sockets take the same MD5 or TCP-AO material |
@@ -910,8 +910,9 @@ negotiate the extension; duplicate valid copies are idempotent.
 - An unchanged link-local primary next hop can be reflected only to a peer
   with the same interface scope. Otherwise export preparation rejects it,
   unless policy or normal eBGP behavior selects a known local next hop.
-  Optional link-local companions of global next hops are omitted on negotiated
-  sessions when their source interface cannot be established. Exact export
+  An optional link-local companion of an unchanged global next hop is
+  forwarded only between interface-bound peers on the same interface, on
+  every session (see RFC 2545 §3 under RFC 4760 below). Exact export
   diagnostics expose the rejection under
   `bgp_exact_export_rejections_total{reason="missing_ipv6_next_hop"}`;
   withdrawals retain normal MP_UNREACH encoding and do not depend on a next
@@ -966,6 +967,21 @@ AFI (2 bytes) | SAFI (1) | NH-Len (1) | Next Hop (variable) | Reserved (1) | NLR
   link-local-plus-link-local or unspecified-plus-link-local pair are also
   accepted; see
   [Link-Local Next Hop capability](#link-local-next-hop-capability--draft-ietf-idr-linklocal-capability-06).
+- RFC 2545 §3 includes the link-local only when the speaker shares a subnet
+  with both the next hop and the receiving peer. When the next hop is
+  forwarded unchanged (iBGP, route-server client, and IPv4 unicast over
+  Extended Next Hop), rustbgpd forwards a received link-local companion only
+  if both the source session and the receiving session are interface-bound
+  to the same interface. Every other receiver gets the 16-octet global form.
+  This matches FRR's default (it strips the received link-local unless
+  `nexthop-local unchanged` is set). BIRD keeps the 32-octet form toward
+  iBGP and route-server clients. A local next hop (eBGP, next-hop self)
+  never carries a companion on a global session. Labeled-unicast (RFC 8277,
+  which defers to RFC 4798 and so to RFC 2545) and VPN (RFC 4659 §3.2.1.1,
+  RFC 8950 §4) follow the same rule: a reflected 32-octet labeled or 48-octet
+  VPN next hop keeps its link-local half only toward a peer bound to the
+  source's interface, and every other receiver gets the 16- or 24-octet
+  global form. FRR's default does the same for these families.
 - NLRI: same prefix-length encoding as IPv4, but up to 128 bits (16 bytes
   of address data).
 - When `MP_REACH_NLRI` is present in an UPDATE, the body NEXT_HOP attribute
@@ -1486,11 +1502,21 @@ carries inactive (absent), unlimited (zero), or finite.
   is suppressed rather than sending classic IPv4 NLRI without NEXT_HOP.
   Ordinary eBGP, next-hop-self, and explicit IPv4 export-policy rewrites
   remain eligible when they supply a classic IPv4 NEXT_HOP.
-- VPNv4 reflection preserves the 24- or 48-octet next-hop encoding (§3/§5)
-  and requires the recipient's VPNv4 IPv6-next-hop receive capability. A
+- VPNv4 reflection preserves the 24- or 48-octet next-hop encoding (§3/§5),
+  except that the 48-octet form's link-local half is forwarded only toward a
+  peer on the source's link (see RFC 2545 §3 under RFC 4760), and requires
+  the recipient's VPNv4 IPv6-next-hop receive capability. A
   rejected replacement withdraws any previously advertised route; ordinary
   IPv4-next-hop VPNv4 routes and VPN withdrawals remain eligible without it.
   The peer's receive capability is not an inbound admission requirement.
+- Labeled IPv4 (AFI 1 / SAFI 4) follows the IPv4-unicast rules with tuple
+  1/4/2, which rustbgpd does not advertise, so the tuple is never negotiated.
+  A labeled-IPv4 route with an IPv6 next hop, whether received that way or
+  given one by an export `set next-hop`, is withheld at export and counted in
+  `bgp_exact_export_rejections_total{reason="ipv4_requires_extended_next_hop"}`.
+  Inbound, a 16- or 32-octet labeled-IPv4 next hop resets the session as
+  described below for IPv4 unicast; 1/1/2 does not stand in for 1/4/2.
+  Earlier releases sent and accepted these routes without the capability.
 - Inbound, IPv4 unicast may use `MP_REACH_NLRI` / `MP_UNREACH_NLRI` on any
   session that negotiated the family. Extended Next Hop governs only the
   next-hop encoding, not whether the AFI/SAFI is allowed (§4). A 4-octet IPv4

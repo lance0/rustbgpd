@@ -244,6 +244,7 @@ fn route(index: usize, attributes: &Arc<AttrSet>) -> VpnRibRoute {
         },
         next_hop: Ipv4Addr::new(192, 0, 2, 1).into(),
         link_local_next_hop: None,
+        next_hop_scope: None,
         peer: peer.into(),
         attributes: Arc::clone(attributes),
         received_at: Instant::now(),

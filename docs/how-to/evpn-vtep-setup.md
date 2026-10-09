@@ -20,9 +20,10 @@ Two independent readiness surfaces govern this:
 | L2VNI bridge/VXLAN probe | `[[evpn_instances]]` | ADR-0054 §4 | `rbgp evpn instances` |
 | IP-VRF / L3VNI predicates | `[[evpn_ip_vrfs]]` | ADR-0058 §3 | `rbgp evpn vrfs [NAME]` |
 
-Ethernet Segments (`[[ethernet_segments]]`) are **control-plane only**
-(Type 1/4 origination) and do **not** probe a kernel netdev — see
-[Multi-homing](#multi-homing-ethernet-segments).
+Ethernet Segments (`[[ethernet_segments]]`) with an explicit `esi` are
+**control-plane only** (Type 1/4 origination) and do **not** probe a kernel
+netdev. An `esi = "auto-lacp"` segment probes its 802.3ad bond for an LACP
+partner — see [Multi-homing](#multi-homing-ethernet-segments).
 
 The authoritative recipes this guide is derived from live in
 `tests/interop/scripts/start-rustbgpd-vtep.sh` (L2VNI) and
@@ -121,6 +122,8 @@ the SVD shape, see `[[managed_netdevs.svd_vxlans]]` in
 `bridge_vlan` is not the EVPN Ethernet Tag; Type 2 / Type 3 /
 EAD-per-EVI routes remain Ethernet Tag ID `0`. It is the local Linux VLAN
 selector used for readiness and for `NDA_VLAN` on remote-MAC FDB writes.
+Zero-MAC flood rows carry no `NDA_VLAN`: the kernel scopes them by VXLAN
+port, or by `src_vni` on an SVD port.
 
 ### Local Type 2 import
 
@@ -135,6 +138,64 @@ When upgrading from a version without this filter, check the RTs advertised
 by remote VTEPs. Previously installed Type 2 rows that fail these requirements
 are removed from local forwarding and gateway-IP resolution; correct the
 sender's RTs or the intended instance configuration before upgrading.
+
+### BUM flooding (ingress replication)
+
+Broadcast, unknown-unicast and multicast (BUM) frames reach remote VTEPs by
+head-end replication. Each remote VTEP's Type 3 IMET route that passes the same
+local import check as Type 2 adds one all-zero-MAC row to the instance's VXLAN
+port. The check requires:
+
+- a PMSI label equal to the instance VNI;
+- the instance's configured service Ethernet Tag (`0` for a VLAN-based
+  service);
+- a matching Route Target;
+- VXLAN-compatible encapsulation.
+
+```text
+00:00:00:00:00:00 dst <remote VTEP> self extern_learn permanent
+```
+
+On an SVD port the row also carries `src_vni <VNI>`. When an IMET is
+withdrawn, its row is removed, and a clean daemon exit removes every row the
+daemon wrote. After a restart, rows from the previous run keep forwarding until
+BGP reconverges. They are then claimed again or reaped on the same schedule as
+remote-MAC rows.
+
+How the daemon treats IMET routes:
+
+- **No replication target.** An IMET whose PMSI Tunnel attribute is
+  missing, is not type 6 (ingress replication), or names an unusable endpoint
+  is skipped. The daemon logs a `received IMET route programs no BUM flood row`
+  warning with the reason, and the BGP session is unaffected.
+- **Own IMET.** An IMET from one of the local VTEP addresses never produces
+  a row.
+
+Leave flood lists to the daemon:
+
+- Do not set `remote` or `group` on the VXLAN device.
+- Do not add static `bridge fdb append 00:00:00:00:00:00 …` rows.
+
+If any zero-MAC row on a VNI's VXLAN port lacks `extern_learn`, the daemon
+treats that whole VNI's entry as operator-owned. The kernel keeps one ownership
+flag per zero-MAC entry, so a static `append` takes over the entry. While the
+entry is operator-owned, the daemon neither adds nor removes destinations for
+that VNI. It logs a warning and increments `evpn_foreign_replaces_blocked_total`.
+To hand an existing deployment's flood lists to the daemon, delete every
+zero-MAC row on that VNI's port. Because the flag is shared, all of them show
+without `extern_learn`, including any the daemon added before the takeover.
+The next reconcile pass then programs the list:
+
+```bash
+bridge fdb del 00:00:00:00:00:00 dev "${VXLAN}" dst <remote VTEP>
+```
+
+On all-active multi-homed segments, the flood list includes the other PEs
+on the segment. Non-DF filtering still drops overlay BUM toward the
+segment on the non-DF PE. Local-bias split horizon is not implemented on
+the Linux software dataplane
+([ADR-0065](../adr/0065-evpn-localbias-split-horizon.md)), so the DF PE can
+still send a CE's own BUM back to it.
 
 ### VXLAN encapsulation compatibility
 
@@ -240,8 +301,11 @@ predicate table below is the contract rustbgpd checks.
 rustbgpd's `[[ethernet_segments]]` is **control-plane only**: when the
 EVPN reconcile actor is running it originates Type 4 (ES route), Type 1
 EAD-per-ES, and Type 1 EAD-per-EVI for the configured ESI over its
-`member_vnis`, and runs DF election. It does **not** probe or require a
-kernel bond/ES netdev — there is no ES readiness gate. Optionally, an
+`member_vnis`, and runs DF election. With an explicit `esi` it does **not**
+probe or require a kernel bond/ES netdev, and there is no ES readiness gate.
+The exception is `esi = "auto-lacp"`, whose segment stays NotReady (no ESI,
+no Type 1/4 routes) until the bond named by `interface` has an LACP partner.
+Optionally, an
 `interface = "<linkname>"` binding (ADR-0085) makes the ES's drain
 state follow that link's carrier — an AC failure then withdraws the
 ES routes automatically (see the drain section in
@@ -272,7 +336,15 @@ What you still provide:
 rbgp evpn instances        # readiness=ready|not-ready|unbound|unknown, reason=[...]
 rbgp evpn vrfs <name>      # readiness=ready|not-ready|unknown, reasons=[...]
 rbgp evpn vrfs <name> --json # includes not_ready_reasons and remote_prefix_drop_counts
+rbgp evpn es list          # Ethernet Segments currently originated
+rbgp doctor                # evpn.es.<interface>.auto_esi names an auto-lacp segment's not-ready reason
 ```
+
+A NotReady `esi = "auto-lacp"` segment is absent from `rbgp evpn es list`,
+except with reason `reconverge_failed`: the runtime has not moved, so the
+previous ESI binding and its routes may still be present until a retry
+succeeds. The reason is in the `evpn_es_auto_esi_state` gauge, the
+`rbgp doctor` check, and a warn-level log line.
 
 L2VNI rows with `readiness=not-ready` include the single failing probe reason
 in `reason=[...]`;
