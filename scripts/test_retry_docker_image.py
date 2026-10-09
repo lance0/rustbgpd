@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
-"""Offline checks for the OpenBGPD image-primer retry boundary."""
+"""Offline checks for the Docker Hub retry boundary in the lab workflows."""
 
+import copy
 import json
 import os
 from pathlib import Path
@@ -9,6 +10,7 @@ import subprocess
 import tempfile
 import textwrap
 import unittest
+
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -139,14 +141,39 @@ class RetryDockerImageTests(unittest.TestCase):
 
     def test_every_docker_hub_network_call_retries(self):
         # GHCR and Quay pulls are outside this boundary; every other pull or
-        # registry inspect in the interop workflow targets Docker Hub.
-        sites = [line for line in INTEROP.splitlines()
+        # registry inspect in the interop workflow and the local actions
+        # targets Docker Hub.
+        texts = [INTEROP, *(p.read_text() for p in ACTIONS.glob("*/action.yml"))]
+        sites = [line for text in texts for line in text.splitlines()
                  if re.search(r"docker (pull|buildx imagetools inspect)\b", line)
                  and not re.search(r"\b(ghcr|quay)\.io/", line)]
-        self.assertGreaterEqual(len(sites), 9)
+        self.assertGreaterEqual(len(sites), 11)
         for line in sites:
             with self.subTest(line=line.strip()):
-                self.assertIn(".github/scripts/retry-docker-image.sh docker ", line)
+                self.assertRegex(line, r"\.github/scripts/retry-docker-image\.sh (timeout \d+ )?docker ")
+
+    def test_retry_delay_scales_backoff(self):
+        result = self.run_helper(FAIL_INDEX="2", RETRY_DELAY_SECONDS="10")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.sleeps(), ["10", "20"])
+
+    def test_buildkit_pre_pull_retries_and_never_fails_the_step(self):
+        for action in ("build-rustbgpd-dev", "prime-rustbgpd-dev-cache"):
+            body = action_step(action, "Pre-pull BuildKit image")["run"]
+            for fail, pulls in (("2", 3), ("3", 3)):
+                with self.subTest(action=action, fail=fail):
+                    (self.path / "pull").unlink(missing_ok=True)
+                    (self.path / "calls").unlink(missing_ok=True)
+                    (self.path / "sleeps").unlink(missing_ok=True)
+                    result = subprocess.run(
+                        ["bash", "-eo", "pipefail", "-c", body], cwd=ROOT,
+                        env={**self.env, "FAIL_PULL": fail}, capture_output=True, text=True, check=False,
+                    )
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertEqual(self.sleeps(), ["10", "20"])
+                    self.assertEqual([c[0] for c in self.calls()],
+                                     [["pull", "moby/buildkit:buildx-stable-1"]] * pulls)
+                    self.assertEqual("::warning::" in result.stdout, fail == "3")
 
     def test_bad_metadata_fails_before_pull(self):
         for label in ("9.1", "9.3"):
@@ -167,6 +194,75 @@ class RetryDockerImageTests(unittest.TestCase):
                     calls = self.calls()[before:]
                     self.assertFalse(any(call[0][0] == "pull" for call in calls))
                     self.assertEqual(len(calls), 2 if case == "wrong_config" else 1)
+
+
+ACTIONS = ROOT / ".github/actions"
+
+
+def action_steps(action):
+    """The steps of a local composite action as flat dicts; `with` stays raw text."""
+    text = (ACTIONS / action / "action.yml").read_text().split("\n  steps:\n", 1)[1]
+    steps = []
+    for chunk in re.split(r"(?m)^    - ", text)[1:]:
+        step = dict(re.findall(r"(?m)^(?:      )?(name|uses|id|if|continue-on-error): (.+)$", chunk))
+        run = re.search(r"(?ms)^      run: \|\n(.*?)(?=^\S|^    \S|\Z)", chunk)
+        if run:
+            step["run"] = textwrap.dedent(run.group(1))
+        inputs = re.search(r"(?ms)^      with:\n(.*?)(?=^      \S|^    \S|\Z)", chunk)
+        if inputs:
+            step["with"] = inputs.group(1).strip()
+        steps.append(step)
+    return steps
+
+
+def action_step(action, name):
+    return next(step for step in action_steps(action) if step.get("name") == name)
+
+
+def build_retry_errors(steps):
+    """Every Buildx bootstrap is pre-pulled and every build-push has a guarded retry."""
+    errors = []
+    for index, step in enumerate(steps):
+        uses = step.get("uses", "")
+        if uses.startswith("docker/setup-buildx-action@"):
+            if not any("retry-docker-image.sh" in s.get("run", "") and "moby/buildkit" in s.get("run", "")
+                       for s in steps[:index]):
+                errors.append(f"{step.get('name')}: BuildKit image not pre-pulled first")
+        if uses.startswith("docker/build-push-action@") and "if" not in step:
+            retry = f"steps.{step.get('id')}.outcome == 'failure'"
+            if not step.get("continue-on-error") or not any(
+                s.get("if") == retry and s.get("uses") == uses and s.get("with") == step.get("with")
+                for s in steps[index + 1:]
+            ):
+                errors.append(f"{step.get('name')}: build has no identical guarded retry")
+    return errors
+
+
+class BuildRetryShapeTests(unittest.TestCase):
+    def test_lab_builds_go_through_the_retried_composites(self):
+        for workflow in ("interop.yml", "kernel-dataplane.yml"):
+            with self.subTest(workflow=workflow):
+                text = (ROOT / ".github/workflows" / workflow).read_text()
+                self.assertNotIn("docker/setup-buildx-action@", text)
+        for action in ("build-rustbgpd-dev", "prime-rustbgpd-dev-cache"):
+            with self.subTest(action=action):
+                steps = action_steps(action)
+                self.assertEqual(build_retry_errors(steps), [])
+
+    def test_broken_retry_shapes_fail(self):
+        steps = action_steps("build-rustbgpd-dev")
+        cases = {
+            "no pre-pull": lambda s: s.pop(0),
+            "no continue-on-error": lambda s: s[2].pop("continue-on-error"),
+            "no retry": lambda s: s.pop(),
+            "retry inputs drift": lambda s: s[-1].update({"with": s[-1]["with"] + "\ncache-to: type=gha"}),
+            "retry unguarded": lambda s: s[-1].update({"if": "always()"}),
+        }
+        for case, mutate in cases.items():
+            with self.subTest(case=case):
+                broken = copy.deepcopy(steps)
+                mutate(broken)
+                self.assertNotEqual(build_retry_errors(broken), [])
 
 
 if __name__ == "__main__":

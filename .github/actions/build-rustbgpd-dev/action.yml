@@ -1,10 +1,12 @@
-name: "Prime rustbgpd:dev build cache"
-description: "Warm the fixed heavy-lane image cache without loading a local image."
+name: "Build rustbgpd:dev"
+description: >-
+  Set up Buildx and load the `rustbgpd:dev` image from the primer's fixed GHA
+  cache scope, retrying the Docker Hub fetches that fail transiently: the
+  BuildKit image is pre-pulled with bounded retries (Buildx falls back to the
+  local copy when its own pull fails), and a failed build runs once more.
 runs:
   using: "composite"
   steps:
-    # Same Docker Hub retry structure as build-rustbgpd-dev: a primer failure
-    # skips every lab job, so it gets the bounded retry too.
     - name: Pre-pull BuildKit image
       shell: bash
       run: |
@@ -14,30 +16,28 @@ runs:
     - name: Set up Docker Buildx
       uses: docker/setup-buildx-action@v4
 
-    - name: Prime rustbgpd:dev build cache
-      id: prime
+    - name: Build rustbgpd:dev
+      id: build
       continue-on-error: true
       uses: docker/build-push-action@v7
       with:
         context: .
-        load: false
+        load: true
         tags: rustbgpd:dev
         target: dev
         cache-from: type=gha,scope=rustbgpd-dev
-        cache-to: type=gha,scope=rustbgpd-dev,mode=max,ignore-error=true
 
-    - name: Wait before retrying the cache prime
-      if: steps.prime.outcome == 'failure'
+    - name: Wait before retrying the build
+      if: steps.build.outcome == 'failure'
       shell: bash
       run: sleep 30
 
-    - name: Retry Prime rustbgpd:dev build cache
-      if: steps.prime.outcome == 'failure'
+    - name: Retry Build rustbgpd:dev
+      if: steps.build.outcome == 'failure'
       uses: docker/build-push-action@v7
       with:
         context: .
-        load: false
+        load: true
         tags: rustbgpd:dev
         target: dev
         cache-from: type=gha,scope=rustbgpd-dev
-        cache-to: type=gha,scope=rustbgpd-dev,mode=max,ignore-error=true
