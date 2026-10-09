@@ -12,8 +12,8 @@ PASS/FAIL line per expectation: every UPDATE announcing PREFIX to RECEIVER
 must carry exactly the 16-octet global NEXT_HOP. Every M116 receiver is on a
 link other than the source's, so RFC 2545 §3 forbids the source's link-local
 toward it. Then one line covering every receiver-bound IPv6 MP_REACH_NLRI
-(16 or 32 octets only) and one for NOTIFICATIONs. A malformed PDML or attribute
-raises and exits non-zero.
+(16 or 32 octets only) and one for NOTIFICATIONs, each decoded. A malformed
+PDML or attribute raises and exits non-zero.
 """
 
 from __future__ import annotations
@@ -21,6 +21,8 @@ from __future__ import annotations
 import ipaddress
 import sys
 import xml.etree.ElementTree as ET
+
+from m114_wire_oracle import notification_verdict
 
 MP_REACH = 14
 IPV6_UNICAST = (2, 1)
@@ -113,7 +115,6 @@ def judge(root: ET.Element, expected: list[tuple[str, str, str]]) -> list[str]:
     receivers = {dst for dst, _, _ in expected}
     seen: dict[tuple[str, str], list[bytes]] = {(dst, prefix): [] for dst, prefix, _ in expected}
     invalid: list[str] = []
-    notifications = 0
     for packet in root.iter("packet"):
         ip = next((p for p in packet.iter("proto") if p.get("name") == "ip"), None)
         if ip is None:
@@ -123,8 +124,6 @@ def judge(root: ET.Element, expected: list[tuple[str, str, str]]) -> list[str]:
             kind = fields(bgp, "bgp.type")
             if not kind:
                 continue
-            if kind[0].get("show") == "3":
-                notifications += 1
             if kind[0].get("show") != "2" or dst not in receivers:
                 continue
             for attr in fields(bgp, "bgp.update.path_attribute"):
@@ -160,10 +159,7 @@ def judge(root: ET.Element, expected: list[tuple[str, str, str]]) -> list[str]:
         + f"{len(invalid)} receiver-bound IPv6 MP_REACH_NLRI with an invalid next hop"
         + (f" ({'; '.join(invalid)})" if invalid else "")
     )
-    lines.append(
-        ("PASS " if notifications == 0 else "FAIL ")
-        + f"{notifications} NOTIFICATION message(s) captured"
-    )
+    lines.append(notification_verdict(root))
     return lines
 
 

@@ -109,7 +109,9 @@ resolved.
   2545) is decoded, stored on `Route` / `EvpnRibRoute`, re-emitted by
   the BGP UPDATE encoder, and round-trips through MRT
   `TABLE_DUMP_V2` exports as a 33-byte reduced-form attribute value
-  (NH-Len=32 + 16-byte global + 16-byte link-local).
+  (NH-Len=32 + 16-byte global + 16-byte link-local). The link-local
+  part is re-emitted only on the interface where it was learned; see
+  [Link-Local Next Hop limits](limitations.md#transport-and-session-features).
 
 - **Native gRPC mTLS (resolved).** TCP listeners terminate TLS
   in-process via tonic + rustls/ring. Configure via three TOML keys
@@ -411,7 +413,9 @@ resolved.
   successful steps is not implemented. Generation-class or dataset changes
   mixed with `[[dynamic_neighbors]]`, EVPN runtime tables, `[[fib_tables]]`,
   or `honor_graceful_shutdown` / `honor_blackhole` are rejected before any
-  effect. See [SIGHUP reload routes](reload-matrix.md#sighup-reload-routes).
+  effect, as is a TCP-AO or listener MD5/GTSM candidate that also changes a
+  config-file-only peer-group field or a conditional advertisement. See
+  [SIGHUP reload routes](reload-matrix.md#sighup-reload-routes).
 - **Injected routes support multiple paths via path_id.** `InjectionService`
   supports multiple injected routes per prefix using explicit `path_id`.
   Path ID 0 is the default path.
@@ -429,10 +433,14 @@ resolved.
   already committed and increments `evpn_runtime_decomposed_fail_stops_total`.
   L3VNI/device/table IP-VRF identity changes remain outside the hot-apply
   boundary by design (restart-required — kernel VRF lifecycle).
-- **`esi = "auto-lacp"` readiness is polled and reported only in logs.**
+- **`esi = "auto-lacp"` readiness is polled.**
   The bond's LACP partner is read every two seconds, so a partner change
-  takes up to that long to re-originate the segment. NotReady reasons are
-  logged on each transition; `rbgp evpn es list` shows only Ready segments.
+  takes up to that long to re-originate the segment. `rbgp evpn es list`
+  shows only applied segments; a NotReady segment's reason is in the
+  `evpn_es_auto_esi_state` gauge, the `rbgp doctor` check
+  `evpn.es.<interface>.auto_esi`, and the log. `reconverge_failed` means
+  applying a change failed and is being retried; until it succeeds, the
+  previous ESI binding and its routes may still be originated.
   While NotReady, local MACs on the segment's VNIs are advertised without an
   ESI. Type 2 (STP) derivation is not implemented. See
   [Auto-derived ESI](configuration.md#auto-derived-esi-lacp-type-1).

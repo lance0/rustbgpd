@@ -204,7 +204,7 @@ Prints rustc-style diagnostics on error, or `config OK` on success.
 A valid config can still be worth flagging. When it is, the summary reads
 `config VALID, <n> WARNINGS — NOT a clean check` instead of `config OK`,
 the warnings are framed on stderr above it, and the exit code stays 0 —
-these are things to look at, not failures. Three conditions are counted today:
+these are things to look at, not failures. Four conditions are counted today:
 
 1. a configured eBGP neighbor or dynamic range with no explicit policy in a
    direction — unfiltered with `[global] ebgp_requires_policy` off, carrying no
@@ -214,12 +214,16 @@ these are things to look at, not failures. Three conditions are counted today:
    `config_epoch = 1` with `[global] ebgp_requires_policy = false`, or
    `config_epoch = 2` with `ebgp_requires_policy = true`;
 3. `orr_vantage` configured while no neighbor negotiates the `linkstate`
-   family, so the optimal-route-reflection topology feed stays empty.
+   family, so the optimal-route-reflection topology feed stays empty;
+4. a native gRPC TLS certificate (`server_leaf`, `server_bundle_min` or
+   `client_ca_bundle_min`) whose `notAfter`, including a past date, falls
+   within a positive `tls_expiry_warning_seconds` window. The window is `0`
+   (off) by default; see [Native gRPC certificate expiry](#native-grpc-certificate-expiry).
 
 All are legitimate configurations and none is rejected; none should reach
 production unnoticed. Note that (2) fires on the omission alone, however well
-policed the config is — a `--strict` gate on an epoch-less config exits 1 for
-that reason and no other.
+policed the config is — with no expiry window configured, a `--strict` gate
+on an otherwise clean epoch-less config exits 1 for that reason and no other.
 
 Add `--strict` to make any warning exit 1 instead of 0
 (`rustbgpd --check --strict /etc/rustbgpd/config.toml`) — for CI and
@@ -642,7 +646,8 @@ What happens:
    loader errors when choosing the actual route.
 2. **Generation route** — a candidate whose reload-applied changes are
    static `[[neighbors]]`, `[peer_groups]`, BFD member attachments, inline policy definitions,
-   neighbor sets, global chains, changed `.rpol` content (imports included),
+   neighbor sets, global chains, conditional-advertisement definitions and
+   neighbor attachments, changed `.rpol` content (imports included),
    dataset contents, dataset bindings (added, removed, or re-mapped
    `[policy.datasets]` entries), or outbound
    prefix maxima settles as one owned runtime generation. The daemon resolves
@@ -673,7 +678,8 @@ What happens:
    `[gnmi_dialout]`) runs the existing
    per-subsystem steps. A generation-class change combined with a TCP-AO
    rotation or an in-place listener MD5/GTSM edit also stays on this path
-   when dataset contents, dataset bindings, and BFD attachments are unchanged.
+   when dataset contents, dataset bindings, and BFD attachments are unchanged
+   and no change in step 4 is present.
    An in-place edit changes the password or GTSM setting of a neighbor that
    stays configured, or of a
    dynamic range. The daemon logs that the change runs without generation
@@ -688,8 +694,15 @@ What happens:
    any effect. A generation-class or dataset change combined with
    `[[dynamic_neighbors]]`, EVPN runtime tables, `[[fib_tables]]`, or
    `honor_graceful_shutdown` / `honor_blackhole` also rejects: those families
-   do not retain and restore priors. Apply independently reloadable families
-   in separate reloads.
+   do not retain and restore priors. A sequential-route candidate (for
+   example a TCP-AO rotation or listener MD5/GTSM edit) is also rejected
+   when its peer-group edit adds or changes a config-file-only group field
+   such as `role`, `strict_role`, `prefix_orf_receive`,
+   `disable_ipv4_unicast` or `link_local_next_hop`, or when it changes a
+   conditional-advertisement definition or attachment; the reason names the
+   group and field or the definition or neighbor. See the
+   [reload matrix](reload-matrix.md#sighup-reload-routes). Apply
+   independently reloadable families in separate reloads.
 5. **Automatic Route Refresh on import-policy hot-apply** — when a
    peer's effective import chain changes (whether triggered by a
    SIGHUP reload or a gRPC mutation), the peer manager issues
@@ -1258,9 +1271,9 @@ continue on the next interval without replaying missed intervals in a catch-up
 burst. The daemon does not crash on MRT failures. Dump health is exported as
 the `mrt_*` metrics (see the MRT table under Metrics below):
 `mrt_dump_failures_total{stage}` names the failing stage and
-`mrt_last_dump_success_timestamp_seconds` stops advancing, which the shipped
-`MrtDumpStale` alert turns into a page once the newest dump is older than twice
-`dump_interval`.
+`mrt_last_dump_success_timestamp_seconds` stops advancing. The shipped
+`MrtDumpStale` alert (severity `warning`) fires when the newest dump has been
+older than twice `dump_interval` for five minutes.
 
 If an on-demand request is already canceled when the RIB actor handles it, the
 actor skips route materialization. Cancellation observed while the manager
@@ -1567,6 +1580,7 @@ one beside it, so `group_left` joins never match two identities for one peer.
 | `bgp_peer_info{peer,interface,remote_asn,description,peer_group}` | Configured identity of each exact peer, always `1`. Join it onto any per-peer family with `* on (instance, peer, interface) group_left(remote_asn, description, peer_group) bgp_peer_info` so dashboards and alerts name the member instead of the bare address. `remote_asn` is the configured ASN, or the ASN learned from OPEN for an accept-any dynamic range (`0` until then); `description` falls back to the neighbor address when none is configured, and dynamic peers without a range description carry `dynamic:<peer_group>`; `peer_group` is empty for ungrouped neighbors. `description` and `peer_group` are scrubbed — control characters dropped, surrounding whitespace trimmed, and bounded to 128 characters |
 | `bgp_session_established_total` | Cumulative sessions that reached Established (per-process counter; resets on restart) |
 | `bgp_session_flaps_total` | Cumulative session flaps |
+| `bgp_send_hold_expirations_total{peer}` | Sessions torn down because the RFC 9687 send-hold timer expired: the peer stopped draining its TCP socket, so the session closed locally without a NOTIFICATION. The shipped `BgpSendHoldExpired` alert is critical on any increase |
 | `bgp_session_down_total{peer,interface,reason}` | Established active-primary sessions that ended. `local_notification` means a locally initiated NOTIFICATION teardown even if best-effort delivery failed; `remote_notification` means a received NOTIFICATION; `local_no_notification` includes forced local close such as send-hold expiry; `remote_no_notification` means remote TCP close without a NOTIFICATION; the remaining bounded values are `transport_error` and defensive `unknown`. |
 | `bgp_session_state_transitions_total` | FSM state transitions |
 
@@ -1649,6 +1663,7 @@ exactly under the floods these drops account for.
 | `bgp_outbound_route_drops_total{peer}` | Outbound BGP work dropped because the peer writer channel was full or closed. Unlike inbound RIB backpressure, this is a loss signal, not safe producer parking. Ordinary route updates, peer-refresh responses, and initial dumps enter dirty-peer resync; prefix-limit recovery remains queued for automatic family-scoped retry. Collision-failback inbound ROUTE-REFRESH requests retain one peer/session-generation-scoped intent and retry on the same bounded cadence, so temporary saturation of that request does not increment this counter; a closed matching session is terminal and does increment it |
 | `bgp_peer_outbound_queue_depth{peer}` | Coalesced update frames buffered for a peer's outbound writer — the "which clients are behind" signal during convergence. Sampled at batch granularity (once per enqueue batch and once per writer drain pass, never per message). A value pinned near the writer's bulk-buffer capacity marks a slow or stuck client that is not draining our output; a healthy peer's depth returns to 0 after each burst. At large route-reflector fanout, sort peers by this gauge to find the laggard holding up convergence. Series reaped on session teardown |
 | `bgp_peer_update_group{peer}` | Which update group a peer currently belongs to — the "which group is this client in" lookup that `bgp_update_group_members{group}` (member counts) cannot answer. The value is the numeric group id (matches the `group` label of `bgp_update_group_members`), stable while the policy content remains live; reinstalling a fully retired policy gets a new ID; the sentinel `-1` marks a peer on the per-peer/ungrouped fallback path (peer-context policy, Add-Path send, per-client-best on a VPN/RTC session, ORR vantage, negotiated ORF, or slow-peer isolation). Refreshed on every membership change; the peer's series is removed when its outbound registration ends, including session-down and graceful-restart teardown |
+| `bgp_update_group_residue_entries` | Withdrawal residue held for dirty update-group members (group tombstones plus per-member pending withdraws). The resync timer normally drains it; the shipped `BgpUpdateGroupResidueGrowing` alert fires when it has grown for over an hour, which points at a wedged member |
 | `bgp_peer_slow{peer}` | 1 while the peer is flagged slow: Established and alive (keepalives flowing, so the RFC 9687 send-hold teardown never fires) but persistently not draining its outbound queue — backlog at or above `slow_peer_threshold_pct` of the writer buffer for `slow_peer_duration` seconds. See "Slow peers" below for interpretation and actions. Refreshed on both transitions and on session teardown; series reaped on peer delete |
 | `bgp_route_refresh_in_progress{peer,afi_safi}` | Active inbound Enhanced Route Refresh window for a peer/family (1 = active, 0 = inactive) |
 | `bgp_route_refresh_stale_entries{peer,afi_safi}` | Routes still awaiting replacement before EoRR or timeout during an inbound Enhanced Route Refresh window |
@@ -1664,6 +1679,8 @@ exactly under the floods these drops account for.
 | `bgp_rib_policy_transition_last_duration_milliseconds` | Monotonic elapsed duration of the most recently completed atomic export-policy transition; retained across idle periods for post-event diagnosis |
 | `bgp_rib_policy_transition_actor_poll_duration_seconds{poll_kind}` | Duration of each real RIB actor transition poll. Bounded `poll_kind` values are `bounded` (chunked phase work), `prefix_snapshot` (the two complete O(table) snapshot polls), `finalize` (atomic membership/emission commit plus the global dirty/forced retry opportunity), and `commit` (bounded `CommitMembers` batches — at most eight members flushed per poll) |
 | `bgp_rib_policy_transition_total{outcome}` | Terminal actor-owned policy transitions. `committed` means the atomic cohort transition committed; `fallback_handoff` means uncommitted cleanup succeeded and authoritative per-peer apply is required; `fallback_cleanup_error` means that cleanup failed. Empty, rejected, missing, in-progress, abandoned, continued, pre-ownership, and synthetic actor-exit paths do not increment it |
+| `bgp_policy_routes_total{peer,policy,direction,action}` | Routes evaluated through an import or export policy chain, attributed to the denying member (`policy`), `chain_default_permit` for a nonempty-chain Permit, or `inline` for an anonymous denial or an absent or empty chain |
+| `bgp_policy_eval_errors_total{direction,kind}` | Policy evaluation errors by `kind`. With `direction` `import` or `export`, each one denied a route (fail closed); the per-chain policy and term are in `rbgp policy stats`. `direction="condition"` is described under [Conditional advertisement state](#conditional-advertisement-state) |
 | `bgp_rib_outbound_prefix_limit_actor_duration_seconds{operation}` | Duration of complete synchronous outbound prefix-limit work on the RIB actor. The closed `operation` set is `apply` (one active transaction after its identity/epoch gates, including the live-peer precondition recheck and any successful installation) and `recovery` (one non-empty scheduled batch that replays at least one live peer/family). An apply whose live precondition recheck rejects still contributes its real scan time; discarded, missing, superseded, idempotent, and empty paths do not contribute samples |
 | `bgp_rib_actor_work_duration_seconds{work_unit}` | Wall-clock duration of RIB actor work components. The closed `work_unit` set is `route_chunk` (construction and processing of one bounded route chunk, excluding its drained-batch tail), `distribute_flush` (one outbound pass across the peer set per distribution window: a route batch plus any unicast-only route messages that were already queued when it drained, up to 256 messages, 4,096 routes, 1,024 changed prefixes or 5 ms, so one observation can cover many UPDATE messages and the series count is windows, not messages; includes readiness servicing at peer boundaries), `exact_export_retire` (retiring exact-export rejections when that window settles), `attribute_gc` (deadline-triggered attribute-intern collection outside ingest chunks), and `flowspec_validation` (a receive-side feasibility slice, including completed selection/distribution). Validation slices cap candidate visits; dependency discovery, peer inventory, and distribution add work outside that visit count. Count-triggered collection remains included in its route chunk. Compare the `le="0.2"` bucket against the series count to count components above 200 ms. These are component timings for correlation with readiness waits, not uninterrupted stalls, a bound on probe latency, or coverage of all actor work |
 | `bgp_rib_readiness_query_wait_seconds{seam}` | Wall-clock delay from admission to the dedicated RIB readiness lane until actor service. The closed `seam` set is `actor_loop` (ordinary drains, including in-pass ingest servicing), `policy_transition_fence` (synchronous replacement checkpoints), and `selection_release` (synchronous selection-deferral release checkpoints). Records service even after a caller times out, but queries canceled before admission or never served contribute no sample. Excludes channel admission wait, the prior peer-manager probe, and reply delivery; it is not full `/readyz` latency or a probe-timeout rate |
@@ -1919,7 +1936,7 @@ drop that already recovered.
 
 | Metric | What it tells you |
 |--------|-------------------|
-| `mrt_dump_interval_seconds` | The configured `[mrt] dump_interval`. Exported on every instance: 0 when `[mrt]` is not configured, otherwise always > 0. The alert pack's `MrtDumpStale` guards on a value > 0 and fires once the newest dump is older than twice it |
+| `mrt_dump_interval_seconds` | The configured `[mrt] dump_interval`. Exported on every instance: 0 when `[mrt]` is not configured, otherwise always > 0. The alert pack's `MrtDumpStale` (severity `warning`) guards on a value > 0 and fires when the newest dump has been older than twice it for five minutes |
 | `mrt_last_dump_success_timestamp_seconds` | Unix time the last periodic or on-demand dump was published successfully; 0 until the first success after start. A failed dump does not advance it, so `time() - <this>` is the age of the newest dump file |
 | `mrt_last_dump_duration_milliseconds` | Wall-clock duration of the last successful dump from trigger to published file (RIB snapshot, encode, write, rename) |
 | `mrt_dump_bytes_written_total` | Bytes of dump files published on disk (after compression) |
@@ -2436,6 +2453,11 @@ counters, using a 15-minute increase window:
 - `BgpSelectionDeferralLedgerOverflow` means the bounded identity ledger fell
   back to a complete release sweep. Safety is preserved, but table scale and
   retained-key pressure merit investigation.
+- `BgpPolicyEvalErrors` reports policy evaluation errors. An `import` or
+  `export` error denied a route; find the failing policy and term with
+  `rbgp policy stats` and fix the policy rather than silencing the alert.
+  The rule also matches `direction="condition"`; such an error denies no
+  route but can leave a conditional advertisement's condition `unknown`.
 
 ### Graceful Restart
 
@@ -2664,7 +2686,8 @@ rustbgpd uses structured logging: JSON under `log_format = "json"` (the
 | `config reload stopped at this step; settling the acknowledged partial runtime authority before another reload may begin` | ERROR | A reload step failed after the coordinator established the resulting authority; inspect the structured `bucket`, `target`, and `error` fields |
 | `GR restart marker` | INFO | Restart marker written or read |
 | `published GR restart marker with wall-clock fallback because boottime protection was unavailable` | WARN | Clock-domain sampling or representation failed; a complete bounded v1/v2 marker was selected. Check `publication_durability` on the final publication log for directory-sync status. |
-| `max-prefix limit exceeded` | WARN | Peer exceeded prefix limit |
+| `max prefix exceeded` | WARN | Peer exceeded its aggregate max-prefix bound and the session closes with Cease. Per-family variants: `per-family max prefix exceeded`, `pre-policy received max prefix exceeded` and `per-prefix Add-Path receive limit exceeded`, each with `afi`/`safi` |
+| `peer latched disabled after max-prefix breach; one automatic restart scheduled` | INFO | The breach latched the peer down; the `error` field carries `max-prefix limit exceeded: …`. The `explicit enable required` variant means no automatic restart is configured |
 | `route rejected before Adj-RIB-Out commit because its exact wire form is unexportable` | WARN | One route withheld from one peer; `reason` matches `bgp_exact_export_rejections_total`. Detail `link-local next hop cannot be advertised outside its interface scope` (reason `missing_ipv6_next_hop`) means a link-local outbound next hop would leave the interface where it was learned; it applies with or without capability 77. Rewrite the next hop (next-hop self or `local_ipv6_nexthop`) if the route must reach that peer |
 | `gRPC TCP listener bound to a non-loopback address` | WARN | Security posture warning |
 
@@ -2838,6 +2861,7 @@ First-deploy checks (network probes are bounded to a 2s timeout; all are read-on
 | `rpki.vrp_table` | With configured caches and a reachable daemon, requires a nonzero complete IPv4 + IPv6 `bgp_rpki_vrp_count` snapshot and retained accepted complete End-of-Data readiness for every configured cache | yellow when the merged table is zero/missing/malformed/unavailable or a configured cache is not ready/missing from the readiness snapshot; this is retained readiness, not current RTR connectivity |
 | `rpki.cache.<addr>.session` | With configured caches and a reachable daemon, the daemon's `ListCaches` row for each `[rpki] cache_servers` entry | yellow when the RTR session is down (the detail says whether a contribution is still retained and its age), when the cache has no inventory row, or when `ListCaches` fails, for example because the token cannot read RPKI cache state |
 | `rpki.cache.<addr>.reachable_from_cli` | TCP connect from the `rbgp` process to each `[rpki] cache_servers` entry | yellow on failure because this is CLI-network-vantage evidence, not daemon-side connectivity; use `rpki.cache.<addr>.session` and `rpki.vrp_table` for the daemon's state |
+| `evpn.es.<interface>.auto_esi` | With a reachable daemon, the `evpn_es_auto_esi_state` series at 1 for each `esi = "auto-lacp"` segment in the effective config | yellow when the segment is not ready (the detail names the reason, such as `no_partner` or `down`), when no readiness is reported for it yet, or when the metrics snapshot is unavailable; a not-ready segment originates nothing and is absent from `rbgp evpn es list` |
 | `bmp.collector.<addr>.reachable_from_cli` | TCP connect from the `rbgp` process to each `[bmp] collectors` entry | yellow on failure because the daemon may have a different network vantage; inspect rustbgpd and collector logs for actual export state |
 | `gnmi_dialout.<name>.reachable_from_cli` | TCP connect from the `rbgp` process to each `[gnmi_dialout] targets` entry | yellow on failure because the daemon may have a different network vantage; inspect `gnmi_dialout_connected` and daemon logs for actual dial-out state |
 | `state_dir.writable` / `state_dir.disk` | `runtime_state_dir` writability and free space (yellow < 1 GiB, red < 100 MiB) | journal, MRT dumps, crash reports, and the event-history DB write there |

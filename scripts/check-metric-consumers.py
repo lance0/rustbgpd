@@ -218,6 +218,11 @@ CLOSED_LABEL_SOURCES = (
     (("bgp_messages_sent_total",), "type", (("call", "record_message_sent", 1),)),
     (("evpn_df_role",), "role", (("fn", TELEMETRY, None, "set_evpn_df_role"),)),
     (
+        ("evpn_es_auto_esi_state",),
+        "state",
+        (("fn", TELEMETRY, None, "evpn_es_auto_esi_states"),),
+    ),
+    (
         ("bgp_rib_policy_transition_actor_poll_duration_seconds",),
         "le",
         (("buckets", TELEMETRY, "RIB_ACTOR_DURATION_BUCKETS"),),

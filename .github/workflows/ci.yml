@@ -157,13 +157,15 @@ jobs:
           python3 scripts/check-clippy-reasons.py
       - name: Check shared interop helpers
         run: |
-          bash -n tests/interop/scripts/test-lib.sh \
+          for f in tests/interop/scripts/test-lib.sh \
             tests/interop/scripts/source-id-guard.sh \
             tests/interop/scripts/test-test-operator-auth-helper.sh \
             tests/interop/scripts/test-test-source-id-guard.sh \
             tests/interop/scripts/test-test-vtep-route-oracles.sh \
             tests/interop/scripts/test-test-wait-helper.sh \
-            tests/interop/scripts/test-m1-frr.sh
+            tests/interop/scripts/test-m1-frr.sh; do
+            bash -n "$f"
+          done
           shellcheck -x tests/interop/scripts/test-lib.sh \
             tests/interop/scripts/source-id-guard.sh \
             tests/interop/scripts/test-test-operator-auth-helper.sh \
@@ -452,9 +454,9 @@ jobs:
           python3 bench/scale/irrreload/verify-receipt.py self-test
           python3 bench/scale/irrreload/verify-receipt.py authoritative-publication \
             --artifact-dir docs/perf/artifacts/reload-authoritative-batch-discriminator-2026-08
-          bash -n bench/compare-criterion.sh bench/tests/test-compare-criterion-harness.sh
+          for f in bench/compare-criterion.sh bench/tests/test-compare-criterion-harness.sh; do bash -n "$f"; done
           shellcheck bench/compare-criterion.sh bench/tests/test-compare-criterion-harness.sh
-          bash -n bench/compare-rib-memory.sh bench/tests/test-rib-memory-comparator.sh
+          for f in bench/compare-rib-memory.sh bench/tests/test-rib-memory-comparator.sh; do bash -n "$f"; done
           shellcheck bench/compare-route-paging.sh \
             bench/compare-rib-memory.sh \
             bench/tests/test-rib-memory-comparator.sh
@@ -476,9 +478,11 @@ jobs:
           bash -n bench/tests/test-vpn-query-receipt.sh
           bash -n bench/tests/test-vpn-query-campaign.sh
           bash -n bench/run-vpn-query-campaign.sh
-          bash -n bench/netns-calibration/run-vm.sh \
+          for f in bench/netns-calibration/run-vm.sh \
             bench/netns-calibration/guest-smoke.sh \
-            bench/tests/test-netns-calibration-vm.sh
+            bench/tests/test-netns-calibration-vm.sh; do
+            bash -n "$f"
+          done
           shellcheck -x bench/scale/host-quiet.sh \
             bench/scale/provenance.sh \
             bench/scale/cgroup-memory.sh \
