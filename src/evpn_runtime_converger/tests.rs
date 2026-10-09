@@ -998,6 +998,66 @@ async fn shutdown_close_after_the_first_segment_publish_reports_unrestored_state
     assert_eq!(apply.committed_config_locked().ethernet_segments.len(), 0);
 }
 
+#[tokio::test]
+async fn shutdown_cut_off_bound_segment_add_keeps_its_link_drain_seed() {
+    // A running segment actor, and an apply that adds a bound segment.
+    // The apply seeds the new ESI link-drained, the converge publishes the
+    // candidate segments, then shutdown closes the slot before the start
+    // decision. The publishes stay in place, so the seed must stay too:
+    // restoring the prior drain set would let the still-running actor
+    // originate the uncommitted segment before the teardown drains it.
+    let baseline = load_runtime_test_config(two_l2vni_one_es_runtime_candidate_toml(), "baseline");
+    let bound_toml = format!(
+        "{}interface = \"bond0\"\n",
+        two_l2vni_two_es_runtime_candidate_toml()
+    );
+    let candidate = load_runtime_test_config(&bound_toml, "candidate");
+    let esis = crate::config::AutoLacpEsis::default();
+    let added = candidate.resolve_ethernet_segments_with(&esis).unwrap()[1].esi;
+    let coordinator = coordinator_from_config(&baseline, &esis);
+    let (rib_tx, rib_rx) = mpsc::channel::<RibUpdate>(64);
+    let _rib = runtime_converger_rib_responder(rib_rx, Arc::default());
+    let instances = Arc::new(baseline.resolve_evpn_instances().unwrap());
+    let (segment, started) = deferred_segment_control(&instances, rib_tx.clone());
+    let committed = runtime_model_from_candidate_toml(two_l2vni_one_es_runtime_candidate_toml());
+    assert!(segment.replace_segments(Arc::new(committed.ethernet_segments().to_vec())));
+    assert!(segment.start_if_configured());
+    assert!(started.load(std::sync::atomic::Ordering::SeqCst));
+    let converger = segment_only_converger(rib_tx, segment.clone(), None);
+    let drain = converger.es_drain.clone();
+    let (bindings_tx, _bindings_rx) =
+        watch::channel(crate::evpn_es_link_drain::EsLinkBindings::default());
+    let apply = EvpnRuntimeReloadApply::new(
+        coordinator,
+        Arc::new(tokio::sync::Mutex::new(())),
+        Arc::new(converger),
+        baseline,
+    )
+    .with_es_link_bindings_publisher(Arc::new(bindings_tx));
+
+    // Shutdown takes the running slot between the publish and the start.
+    segment.close_at_next_start();
+    let error = apply
+        .apply_candidate_config(&candidate, false)
+        .await
+        .expect_err("a converge cut off by shutdown fails");
+
+    assert!(
+        matches!(error, GrpcEvpnRuntimeApplyError::Unavailable(_)),
+        "{error:?}"
+    );
+    assert_eq!(
+        drain.reasons_for(added),
+        BTreeSet::from([crate::evpn_es_drain::EsDrainReason::Link]),
+        "the uncommitted bound segment stays link-drained"
+    );
+    segment
+        .take_closed_handle()
+        .expect("shutdown took the running actor's handle")
+        .shutdown()
+        .await;
+}
+
 /// Converger whose every converge is cut off by shutdown after publishing.
 struct ShutdownInterruptedConverger;
 

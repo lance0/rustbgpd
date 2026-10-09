@@ -620,8 +620,13 @@ impl EvpnRuntimeReloadApply {
             self.forwarding_state.as_deref(),
         )
         .await;
+        // Once shutdown closed the segment slot, keep the seed: a converge
+        // it cut off left the candidate segments published, and undraining
+        // them would let the still-running actor originate an uncommitted
+        // segment before the teardown drains it.
         if let Some(prior) = seeded
             && !result.as_ref().is_ok_and(apply_commits)
+            && !self.converger.segment_closed_for_shutdown()
         {
             self.converger.restore_link_drain(prior);
         }

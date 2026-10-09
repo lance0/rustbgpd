@@ -98,6 +98,10 @@ pub(crate) struct EvpnSegmentRuntimeControl {
     /// after the converge's publishes landed.
     #[cfg(test)]
     close_at_next_start: Arc<std::sync::atomic::AtomicBool>,
+    /// Test-only: the running actor's handle that hook-driven close took,
+    /// kept for the test's shutdown drain.
+    #[cfg(test)]
+    closed_handle: Arc<std::sync::Mutex<Option<EvpnSegmentHandle>>>,
 }
 
 /// Starts a prepared segment actor task.
@@ -159,10 +163,11 @@ impl EvpnSegmentRuntimeControl {
             .close_at_next_start
             .swap(false, std::sync::atomic::Ordering::SeqCst)
         {
-            assert!(
-                self.close_for_shutdown().is_none(),
-                "the close hook models a slot that never started"
-            );
+            let handle = self.close_for_shutdown();
+            *self
+                .closed_handle
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = handle;
         }
         let Some(mut state) = self.slot_state() else {
             return true;
@@ -191,6 +196,15 @@ impl EvpnSegmentRuntimeControl {
     pub(crate) fn close_at_next_start(&self) {
         self.close_at_next_start
             .store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// Test-only: the running actor's handle a hook-driven close took.
+    #[cfg(test)]
+    pub(crate) fn take_closed_handle(&self) -> Option<EvpnSegmentHandle> {
+        self.closed_handle
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
     }
 
     /// Whether coordinated shutdown has closed the actor slot. Runtime
@@ -292,6 +306,7 @@ impl EvpnSegmentControlProbe {
                 df_status_rx: watch::channel(Arc::new(SegmentDfStatusTable::new())).1,
                 slot: None,
                 close_at_next_start: Arc::default(),
+                closed_handle: Arc::default(),
             },
             drained_rx,
             _instances_rx: instances_rx,
@@ -439,6 +454,8 @@ pub(crate) fn prepare_with_local_bias(
         slot: None,
         #[cfg(test)]
         close_at_next_start: Arc::default(),
+        #[cfg(test)]
+        closed_handle: Arc::default(),
     };
     #[cfg(test)]
     let handle_control = control.clone();
