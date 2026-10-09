@@ -4401,7 +4401,10 @@ On Ready, the segment is added and its routes originated. On NotReady, the
 segment is removed and its routes withdrawn. When the CE is replaced, the old
 segment's routes are withdrawn and the new ESI's routes are originated. The
 config text keeps `esi = "auto-lacp"`, so persistence, SIGHUP, and config
-transactions always carry the spec, never derived bytes.
+transactions always carry the spec, never derived bytes. `rustbgpd --diff` and
+`DiffRuntimeConfig` cannot see the bond, so they classify an `auto-lacp` edit as
+if the segment were Ready. A NotReady segment has no runtime row, so SIGHUP can
+hot-apply an edit that the diff reports as restart-required.
 
 The probe and the segment actor start only when the daemon starts with at
 least one `[[ethernet_segments]]` entry. If the daemon started with none,
