@@ -29,8 +29,8 @@ use rustbgpd_policy::{
 // RIB's export explain, and the CLI all test the same identity.
 pub use rustbgpd_policy::{RFC8212_MISSING_EXPORT_POLICY, RFC8212_MISSING_IMPORT_POLICY};
 use rustbgpd_wire::{
-    Afi, EthernetSegmentIdentifier, ExtendedCommunity, Ipv4Prefix, Ipv6Prefix, LargeCommunity,
-    MacAddress, Prefix, RouteDistinguisher, Safi,
+    Afi, EthernetSegmentIdentifier, EthernetTagId, ExtendedCommunity, Ipv4Prefix, Ipv6Prefix,
+    LargeCommunity, MacAddress, Prefix, RouteDistinguisher, Safi,
 };
 
 pub(crate) use resolution::UnpolicedEbgpBoundary;
@@ -1166,7 +1166,106 @@ impl Config {
                     reason: e.to_string(),
                 })?;
         }
+        self.validate_vlan_aware_bundle_rows(&table)?;
         Ok(table)
+    }
+
+    /// ADR-0092 amendment E table-level rules for `vlan_aware_bundle` rows,
+    /// checked in declaration order so the error names the later row. Every
+    /// load, SIGHUP and runtime-apply candidate resolves through
+    /// [`Self::resolve_evpn_instances`], so each one runs these rules
+    /// before commit.
+    fn validate_vlan_aware_bundle_rows(
+        &self,
+        table: &EvpnInstanceTable,
+    ) -> Result<(), ConfigError> {
+        let is_bundle = |cfg: &EvpnInstanceConfig| {
+            cfg.service_interface == EvpnServiceInterfaceConfig::VlanAwareBundle
+        };
+        if !self.evpn_instances.iter().any(is_bundle) {
+            // VLAN-Based-only configurations keep their existing rules.
+            return Ok(());
+        }
+        let invalid = |reason: String| Err(ConfigError::InvalidEvpnInstance { reason });
+        let mode = |bundle: bool| {
+            if bundle {
+                "vlan_aware_bundle"
+            } else {
+                "vlan_based"
+            }
+        };
+        let mut rt_owner: BTreeMap<RouteTarget, (bool, u32)> = BTreeMap::new();
+        let mut rt_tag_owner: BTreeMap<(RouteTarget, EthernetTagId), u32> = BTreeMap::new();
+        let mut bridge_owner: BTreeMap<(&str, Option<u32>), (bool, u32)> = BTreeMap::new();
+        for cfg in &self.evpn_instances {
+            let bundle = is_bundle(cfg);
+            let Some(inst) = EvpnInstanceId::new(cfg.vni)
+                .ok()
+                .and_then(|id| table.get(id))
+            else {
+                continue;
+            };
+            for rt in &inst.route_targets {
+                let (owner_bundle, owner) = *rt_owner.entry(*rt).or_insert((bundle, cfg.vni));
+                if owner_bundle != bundle {
+                    return invalid(format!(
+                        "vni {}: route target {rt} is also used by {} vni {owner}; \
+                         a route target cannot be shared between vlan_based and \
+                         vlan_aware_bundle instances",
+                        cfg.vni,
+                        mode(owner_bundle),
+                    ));
+                }
+                if bundle
+                    && let Some(owner) = rt_tag_owner.insert((*rt, inst.ethernet_tag), cfg.vni)
+                {
+                    return invalid(format!(
+                        "vni {}: ethernet_tag {} for route target {rt} is already used by vni {owner}",
+                        cfg.vni, inst.ethernet_tag.0,
+                    ));
+                }
+            }
+            if let Some(bridge) = cfg.bridge.as_deref() {
+                let (owner_bundle, owner) = *bridge_owner
+                    .entry((bridge, cfg.bridge_vlan))
+                    .or_insert((bundle, cfg.vni));
+                if owner != cfg.vni && (bundle || owner_bundle) {
+                    let vlan = cfg
+                        .bridge_vlan
+                        .map_or_else(|| "unset".to_string(), |vlan| vlan.to_string());
+                    return invalid(format!(
+                        "vni {}: bridge {bridge:?} bridge_vlan {vlan} is already claimed by \
+                         {} vni {owner}; a vlan_aware_bundle row needs its own \
+                         (bridge, bridge_vlan)",
+                        cfg.vni,
+                        mode(owner_bundle),
+                    ));
+                }
+            }
+        }
+        for cfg in self.evpn_instances.iter().filter(|cfg| is_bundle(cfg)) {
+            if let Some(segment) = self
+                .ethernet_segments
+                .iter()
+                .find(|segment| segment.member_vnis.contains(&cfg.vni))
+            {
+                return invalid(format!(
+                    "vni {}: ethernet segment esi {:?} lists this vlan_aware_bundle row in \
+                     member_vnis; multi-homing is not supported for bundle members yet",
+                    cfg.vni, segment.esi,
+                ));
+            }
+        }
+        // LAN-65 S1: every shape rule above runs first, then bundle rows are
+        // refused, because origination still stamps Ethernet Tag 0 (a bundle
+        // row would advertise a tag-0 IMET). S2 removes this gate.
+        match self.evpn_instances.iter().find(|cfg| is_bundle(cfg)) {
+            Some(cfg) => invalid(format!(
+                "vni {}: service_interface = \"vlan_aware_bundle\" is not supported yet",
+                cfg.vni
+            )),
+            None => Ok(()),
+        }
     }
 
     /// Resolve `[[ethernet_segments]]` entries into runtime
@@ -6503,6 +6602,7 @@ fn parse_evpn_instance(
     let id = EvpnInstanceId::new(cfg.vni).map_err(|e| ConfigError::InvalidEvpnInstance {
         reason: format!("vni {}: {e}", cfg.vni),
     })?;
+    let ethernet_tag = parse_evpn_service_interface(cfg)?;
 
     let rd =
         cfg.rd
@@ -6602,9 +6702,49 @@ fn parse_evpn_instance(
     Ok(inst
         .with_duplicate_ip_detection(duplicate_ip_detection)
         .with_bridge_vlan(bridge_vlan)
+        .with_ethernet_tag(ethernet_tag)
         .with_sticky_macs(sticky_macs)
         .with_apply_aliasing_ecmp(cfg.apply_aliasing_ecmp)
         .with_duplicate_mac_detection(duplicate_mac_detection))
+}
+
+/// ADR-0092 amendment B2/E row-level rules: the Ethernet Tag is explicit,
+/// non-zero and bundle-only, and a bundle row carries no IRB binding and no
+/// per-VNI auto-derived route target. Returns the row's Ethernet Tag.
+fn parse_evpn_service_interface(cfg: &EvpnInstanceConfig) -> Result<EthernetTagId, ConfigError> {
+    let invalid = |reason: String| Err(ConfigError::InvalidEvpnInstance { reason });
+    let vni = cfg.vni;
+    match (cfg.service_interface, cfg.ethernet_tag) {
+        (EvpnServiceInterfaceConfig::VlanBased, None) => Ok(EthernetTagId(0)),
+        (EvpnServiceInterfaceConfig::VlanBased, Some(_)) => invalid(format!(
+            "vni {vni}: ethernet_tag requires service_interface = \"vlan_aware_bundle\""
+        )),
+        (EvpnServiceInterfaceConfig::VlanAwareBundle, None) => invalid(format!(
+            "vni {vni}: service_interface = \"vlan_aware_bundle\" requires ethernet_tag"
+        )),
+        (EvpnServiceInterfaceConfig::VlanAwareBundle, Some(tag))
+            if !(1..=rustbgpd_evpn::MAX_BUNDLE_ETHERNET_TAG).contains(&tag) =>
+        {
+            invalid(format!(
+                "vni {vni}: ethernet_tag must be in 1..={} (got {tag})",
+                rustbgpd_evpn::MAX_BUNDLE_ETHERNET_TAG
+            ))
+        }
+        (EvpnServiceInterfaceConfig::VlanAwareBundle, Some(_)) if cfg.auto_derive_route_target => {
+            invalid(format!(
+                "vni {vni}: auto_derive_route_target is not supported with \
+                 service_interface = \"vlan_aware_bundle\"; configure the bundle's shared \
+                 route_targets explicitly"
+            ))
+        }
+        (EvpnServiceInterfaceConfig::VlanAwareBundle, Some(_)) if cfg.ip_vrf.is_some() => {
+            invalid(format!(
+                "vni {vni}: ip_vrf is not supported with service_interface = \
+                 \"vlan_aware_bundle\" yet"
+            ))
+        }
+        (EvpnServiceInterfaceConfig::VlanAwareBundle, Some(tag)) => Ok(EthernetTagId(tag)),
+    }
 }
 
 fn parse_duplicate_ip_detection(
