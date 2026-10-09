@@ -106,6 +106,32 @@ pub(crate) trait DaemonEvpnRuntimeConverger: Send + Sync {
         let _ = (current, candidate, plan);
         Ok(())
     }
+
+    /// Whether coordinated shutdown closed the segment actor slot. An
+    /// apply whose config names an Ethernet Segment is then refused even
+    /// when its runtime plan is a no-op (an unready `auto-lacp` segment).
+    fn segment_closed_for_shutdown(&self) -> bool {
+        false
+    }
+
+    /// ADR-0085 fail-closed seed: hold the `Link` drain reason for newly
+    /// added interface-bound segments before the converge publishes them,
+    /// so no actor originates for them until the link coordinator's
+    /// first carrier probe, which runs only after the commit publishes
+    /// the bindings. Returns the prior reason map for
+    /// [`Self::restore_link_drain`], or `None` when nothing changed.
+    fn seed_link_drain(
+        &self,
+        esis: &BTreeSet<rustbgpd_wire::EthernetSegmentIdentifier>,
+    ) -> Option<Arc<crate::evpn_es_drain::EsDrainReasonMap>> {
+        let _ = esis;
+        None
+    }
+
+    /// Undo [`Self::seed_link_drain`] after an apply that did not commit.
+    fn restore_link_drain(&self, prior: Arc<crate::evpn_es_drain::EsDrainReasonMap>) {
+        let _ = prior;
+    }
 }
 
 fn apply_task_join_error(context: &str, error: &JoinError) -> GrpcEvpnRuntimeApplyError {
@@ -183,10 +209,11 @@ pub(crate) struct EvpnRuntimeReloadApply {
         Option<Arc<tokio::sync::watch::Sender<crate::evpn_es_link_drain::EsLinkBindings>>>,
     /// Bond → derived ESI table for `auto-lacp` segments, published by
     /// [`Self::publish_auto_lacp_round`] under the apply lock. Every
-    /// apply and binding publish resolves through it. `None` when no
-    /// segment actor or readiness probe runs: a candidate with an
-    /// `auto-lacp` segment is then rejected, never committed inert.
-    auto_lacp_esis: Option<AutoLacpEsis>,
+    /// apply and binding publish resolves through it.
+    auto_lacp_esis: AutoLacpEsis,
+    /// Starts the readiness probe the first time a committed config
+    /// names an `auto-lacp` bond.
+    auto_esi_probe: Option<crate::evpn_auto_esi::AutoEsiProbeStarter>,
     /// Test handshake: notified just before the probe round takes the
     /// apply lock.
     #[cfg(test)]
@@ -211,7 +238,8 @@ impl EvpnRuntimeReloadApply {
             committed_config: Arc::new(Mutex::new(committed_config)),
             forwarding_state: None,
             es_link_bindings_tx: None,
-            auto_lacp_esis: None,
+            auto_lacp_esis: AutoLacpEsis::default(),
+            auto_esi_probe: None,
             #[cfg(test)]
             auto_lacp_before_lock: None,
             metrics: BgpMetrics::new(),
@@ -220,12 +248,29 @@ impl EvpnRuntimeReloadApply {
 
     /// Resolve `auto-lacp` segments through the probe's table.
     pub(crate) fn with_auto_lacp_esis(mut self, esis: AutoLacpEsis) -> Self {
-        self.auto_lacp_esis = Some(esis);
+        self.auto_lacp_esis = esis;
         self
     }
 
-    fn auto_lacp_view(&self) -> AutoLacpEsis {
-        self.auto_lacp_esis.clone().unwrap_or_default()
+    /// Attach the readiness probe, started by
+    /// [`Self::start_auto_esi_probe_if_needed`].
+    pub(crate) fn with_auto_esi_probe(
+        mut self,
+        probe: crate::evpn_auto_esi::AutoEsiProbeStarter,
+    ) -> Self {
+        self.auto_esi_probe = Some(probe);
+        self
+    }
+
+    /// Start the readiness probe once `config` names an `auto-lacp`
+    /// bond: at startup, or when an apply or SIGHUP commits the first
+    /// one. Later calls are no-ops.
+    pub(crate) fn start_auto_esi_probe_if_needed(&self, config: &Config) {
+        if let Some(probe) = &self.auto_esi_probe
+            && !config.auto_lacp_interfaces().is_empty()
+        {
+            probe.start(self);
+        }
     }
 
     pub(crate) fn with_forwarding_state(
@@ -267,6 +312,7 @@ impl EvpnRuntimeReloadApply {
             Err(poisoned) => *poisoned.into_inner() = config.clone(),
         }
         self.publish_es_link_bindings(config);
+        self.start_auto_esi_probe_if_needed(config);
     }
 
     /// Re-resolve and republish the ADR-0085 interface bindings for a
@@ -279,7 +325,7 @@ impl EvpnRuntimeReloadApply {
         let Some(tx) = self.es_link_bindings_tx.as_ref() else {
             return;
         };
-        match config.resolve_es_link_bindings(&self.auto_lacp_view()) {
+        match config.resolve_es_link_bindings(&self.auto_lacp_esis) {
             Ok(bindings) => {
                 tx.send_if_modified(|current| {
                     if **current == bindings {
@@ -330,13 +376,7 @@ impl EvpnRuntimeReloadApply {
             let response = this
                 .apply_candidate_config_locked(&config, validate_only, || {})
                 .await?;
-            if !validate_only
-                && matches!(
-                    response.outcome,
-                    value if value == proto::EvpnRuntimeApplyOutcome::EvpnRuntimeApplyNoop as i32
-                        || value == proto::EvpnRuntimeApplyOutcome::EvpnRuntimeApplyCommitted as i32
-                )
-            {
+            if !validate_only && apply_commits(&response) {
                 this.set_committed_config(&config);
             }
             Ok(response)
@@ -373,13 +413,7 @@ impl EvpnRuntimeReloadApply {
         let this = self.clone();
         // Same ADR-0080 shield as `apply_candidate_config`.
         let join = tokio::spawn(async move {
-            let Some(esis) = this.auto_lacp_esis.clone() else {
-                return AutoLacpRoundOutcome {
-                    configured: this.committed_auto_lacp_interfaces(),
-                    collided: BTreeSet::new(),
-                    result: Ok(None),
-                };
-            };
+            let esis = &this.auto_lacp_esis;
             #[cfg(test)]
             if let Some(hook) = &this.auto_lacp_before_lock {
                 hook.notify_one();
@@ -392,7 +426,7 @@ impl EvpnRuntimeReloadApply {
                 .filter(|(bond, _)| configured.contains(bond))
                 .collect();
             let changed = esis.replace(snapshot);
-            let collided = config.auto_lacp_collisions(&esis);
+            let collided = config.auto_lacp_collisions(esis);
             if !changed && !retry {
                 return AutoLacpRoundOutcome {
                     configured,
@@ -505,16 +539,51 @@ impl EvpnRuntimeReloadApply {
     where
         M: FnOnce(),
     {
-        if self.auto_lacp_esis.is_none() && !config.auto_lacp_interfaces().is_empty() {
+        // Shutdown closed the segment slot: refuse before planning, so an
+        // unready `auto-lacp` segment (a no-op runtime plan) cannot commit
+        // its config or start the cancelled probe after teardown began.
+        // The committed side counts too: removing the final segment has an
+        // empty candidate list but must not commit during teardown either.
+        if self.converger.segment_closed_for_shutdown()
+            && (!config.ethernet_segments.is_empty()
+                || !self
+                    .committed_config
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .ethernet_segments
+                    .is_empty())
+        {
             return Err(GrpcEvpnRuntimeApplyError::FailedPrecondition(
-                "`esi = \"auto-lacp\"` needs the EVPN segment actor and readiness probe, \
-                 which start only when the daemon starts with [[ethernet_segments]] \
-                 configured; restart the daemon to add the first Ethernet Segment"
+                "EVPN segment actor is closed for shutdown; Ethernet Segment changes are refused"
                     .to_string(),
             ));
         }
-        let candidate = evpn_runtime_candidate_from_config(config, &self.auto_lacp_view())?;
-        apply_evpn_runtime_candidate_locked(
+        let candidate = evpn_runtime_candidate_from_config(config, &self.auto_lacp_esis)?;
+        // ADR-0085 fail-closed: the link coordinator first probes a new
+        // binding only after the commit publishes it, so a newly added
+        // bound segment starts link-drained and originates nothing until
+        // that probe finds its link up.
+        let seeded = if validate_only || self.es_link_bindings_tx.is_none() {
+            None
+        } else {
+            let committed: BTreeSet<_> = self
+                .coordinator
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .model()
+                .ethernet_segments()
+                .iter()
+                .map(|segment| segment.esi)
+                .collect();
+            let added: BTreeSet<_> = config
+                .resolve_es_link_bindings(&self.auto_lacp_esis)
+                .map_err(|err| GrpcEvpnRuntimeApplyError::InvalidArgument(err.to_string()))?
+                .into_keys()
+                .filter(|esi| !committed.contains(esi))
+                .collect();
+            self.converger.seed_link_drain(&added)
+        };
+        let result = apply_evpn_runtime_candidate_locked(
             candidate,
             validate_only,
             &self.coordinator,
@@ -523,7 +592,13 @@ impl EvpnRuntimeReloadApply {
             begin_mutation,
             self.forwarding_state.as_deref(),
         )
-        .await
+        .await;
+        if let Some(prior) = seeded
+            && !result.as_ref().is_ok_and(apply_commits)
+        {
+            self.converger.restore_link_drain(prior);
+        }
+        result
     }
 }
 
@@ -579,6 +654,12 @@ fn classify_reload_terminal(
         ) => EvpnRuntimeReloadTerminal::PublicationAmbiguous(error),
         Err(error) => EvpnRuntimeReloadTerminal::KnownDivergence(error),
     }
+}
+
+/// Whether an apply response advances the committed config.
+fn apply_commits(response: &proto::ApplyEvpnRuntimeResponse) -> bool {
+    response.outcome == proto::EvpnRuntimeApplyOutcome::EvpnRuntimeApplyNoop as i32
+        || response.outcome == proto::EvpnRuntimeApplyOutcome::EvpnRuntimeApplyCommitted as i32
 }
 
 fn response_to_reload_outcome(
@@ -1145,8 +1226,8 @@ impl EvpnRuntimeActorConverger {
     ) -> Result<&evpn_segment::EvpnSegmentRuntimeControl, DaemonEvpnRuntimeConvergeError> {
         let segment = self.segment.as_ref().ok_or_else(|| {
             DaemonEvpnRuntimeConvergeError::unsupported(format!(
-                "Ethernet Segment runtime {operation} requires an active EVPN segment actor; \
-                 live segment actor-spawn is not supported yet"
+                "Ethernet Segment runtime {operation} requires the EVPN segment actor \
+                 runtime control"
             ))
         })?;
         if !segment.is_open() {
@@ -2488,8 +2569,55 @@ impl DaemonEvpnRuntimeConverger for EvpnRuntimeActorConverger {
                 SupportedPlanRoute::SingleEthernetSegmentAdd(esi) => {
                     self.converge_ethernet_segment_add(current, candidate, esi)
                 }
+            }?;
+            // The commit point for a segment actor that is not running
+            // yet: start it only once the converge that published the
+            // first Ethernet Segment succeeded. A refused or rolled-back
+            // converge leaves it unstarted.
+            if let Some(segment) = &self.segment
+                && !segment.start_if_configured()
+            {
+                return Err(DaemonEvpnRuntimeConvergeError::failed(
+                    "EVPN segment actor closed for shutdown during the converge",
+                ));
             }
+            Ok(())
         })
+    }
+
+    fn segment_closed_for_shutdown(&self) -> bool {
+        self.segment
+            .as_ref()
+            .is_some_and(evpn_segment::EvpnSegmentRuntimeControl::is_closed_for_shutdown)
+    }
+
+    fn seed_link_drain(
+        &self,
+        esis: &BTreeSet<rustbgpd_wire::EthernetSegmentIdentifier>,
+    ) -> Option<Arc<crate::evpn_es_drain::EsDrainReasonMap>> {
+        let mut prior = None;
+        for esi in esis {
+            if let Some(transition) =
+                self.es_drain
+                    .set_reason(*esi, crate::evpn_es_drain::EsDrainReason::Link, true)
+            {
+                prior.get_or_insert(transition.prior_reasons);
+            }
+        }
+        // A closed control means teardown; the shutdown guard refuses it.
+        if prior.is_some()
+            && let Some(segment) = &self.segment
+        {
+            let _ = segment.replace_drained_esis(self.es_drain.snapshot());
+        }
+        prior
+    }
+
+    fn restore_link_drain(&self, prior: Arc<crate::evpn_es_drain::EsDrainReasonMap>) {
+        self.es_drain.restore(prior);
+        if let Some(segment) = &self.segment {
+            let _ = segment.replace_drained_esis(self.es_drain.snapshot());
+        }
     }
 
     fn validate_availability(

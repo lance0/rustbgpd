@@ -4406,12 +4406,11 @@ transactions always carry the spec, never derived bytes. `rustbgpd --diff` and
 if the segment were Ready. A NotReady segment has no runtime row, so SIGHUP can
 hot-apply an edit that the diff reports as restart-required.
 
-The probe and the segment actor start only when the daemon starts with at
-least one `[[ethernet_segments]]` entry. If the daemon started with none,
-SIGHUP and `ApplyEvpnRuntime` reject a candidate that adds an `auto-lacp`
-segment with `FAILED_PRECONDITION`, rather than committing a segment that
-could never become Ready. Restart the daemon to add the first segment. This
-matches the existing rule for a first explicit-ESI segment. A bond read that
+The probe starts the first time the committed config names an `auto-lacp`
+segment, at startup or when SIGHUP or `ApplyEvpnRuntime` adds it. The
+Ethernet Segment orchestrator starts with the first Ready segment, whether
+explicit or derived, so a daemon started with no `[[ethernet_segments]]`
+takes its first segment live, with no restart. A bond read that
 gets no kernel reply within one second counts as `netlink_error`, and startup
 waits at most two seconds for the initial round.
 

@@ -4915,46 +4915,37 @@ async fn run<T>(
     let es_link_bindings_tx = Arc::new(es_link_bindings_tx);
 
     // EVPN Ethernet Segment orchestrator (Gate 8 multihoming
-    // foundation — observable DF election, no enforcement). Spawned
-    // when `[[ethernet_segments]]` has at least one entry and at
-    // least one configured `[[evpn_instances]]` exists for the
-    // member-VNI table to resolve against. Returns `None` for
-    // single-homed deployments and route reflectors.
+    // foundation — observable DF election, no enforcement). Its
+    // channels and runtime control exist in every daemon; the task
+    // starts with the first committed Ethernet Segment, here or from
+    // a live apply / SIGHUP, so single-homed deployments and route
+    // reflectors run no segment task.
     let evpn_segment_shutdown = tokio_util::sync::CancellationToken::new();
+    // ADR-0085 decision 5: the segment actor publishes the same-ESI
+    // bias-eligibility snapshot toward the dataplane supervisor
+    // (alongside the BUM-enforcement flow) and consumes the binding
+    // watch for the bound-ESI projection.
     // `ethernet_segments` was resolved upstream so the originator
     // could build its `vni_to_esi` lookup before we got here.
-    let evpn_segment_handle =
-        if ethernet_segments.is_empty() && evpn_auto_lacp_interfaces.is_empty() {
-            info!("no [[ethernet_segments]] configured — EVPN segment orchestrator not spawned");
-            None
-        } else {
-            let bum_enforcement_tx = evpn_dataplane_handle
-                .as_ref()
-                .map(evpn_dataplane::EvpnDataplaneHandle::bum_enforcement_sender);
-            // ADR-0085 decision 5: the segment actor publishes the
-            // same-ESI bias-eligibility snapshot toward the dataplane
-            // supervisor (alongside the BUM-enforcement flow) and consumes
-            // the binding watch for the bound-ESI projection.
-            let same_esi_bias_tx = evpn_dataplane_handle
-                .as_ref()
-                .map(evpn_dataplane::EvpnDataplaneHandle::same_esi_bias_sender);
-            Some(evpn_segment::spawn_with_local_bias(
-                &evpn_instances,
-                ethernet_segments,
-                rib_tx.clone(),
-                bum_enforcement_tx,
-                same_esi_bias_tx,
-                Some(es_link_bindings_tx.subscribe()),
-                metrics.clone(),
-                evpn_segment_shutdown.clone(),
-            ))
-        };
-    let evpn_segment_runtime_control = evpn_segment_handle
-        .as_ref()
-        .map(evpn_segment::EvpnSegmentHandle::runtime_control);
-    let evpn_segment_df_status_rx = evpn_segment_handle
-        .as_ref()
-        .map(evpn_segment::EvpnSegmentHandle::df_status);
+    let (evpn_segment_runtime_control, evpn_segment_start) = evpn_segment::prepare_with_local_bias(
+        &evpn_instances,
+        ethernet_segments,
+        rib_tx.clone(),
+        evpn_dataplane_handle
+            .as_ref()
+            .map(evpn_dataplane::EvpnDataplaneHandle::bum_enforcement_sender),
+        evpn_dataplane_handle
+            .as_ref()
+            .map(evpn_dataplane::EvpnDataplaneHandle::same_esi_bias_sender),
+        Some(es_link_bindings_tx.subscribe()),
+        metrics.clone(),
+        evpn_segment_shutdown.clone(),
+    );
+    let evpn_segment_runtime_control =
+        evpn_segment_runtime_control.with_deferred_start(evpn_segment_start);
+    // Shutdown has not closed the slot this early, so the start is admitted.
+    let _ = evpn_segment_runtime_control.start_if_configured();
+    let evpn_segment_df_status_rx = evpn_segment_runtime_control.df_status();
 
     // Latest snapshot of `DataplaneReport.ip_vrf_status` rows for the
     // gRPC `ListIpVrfs` / `GetIpVrf` surface (Gate 9 slice 5). Backed
@@ -5188,9 +5179,13 @@ async fn run<T>(
         evpn_originator_runtime_control.clone(),
         evpn_svi_runtime_control,
         evpn_l3_originator_runtime_control,
-        evpn_segment_runtime_control.clone(),
+        Some(evpn_segment_runtime_control.clone()),
         evpn_es_drain_state.clone(),
     ));
+    // Runtime readiness probe for `auto-lacp` segments, started the
+    // first time the committed config names one (here or live).
+    // Stopped with the link-drain coordinator, before EVPN teardown.
+    let evpn_auto_esi_shutdown = tokio_util::sync::CancellationToken::new();
     let evpn_runtime_reload_apply = evpn_runtime_converger::EvpnRuntimeReloadApply::new(
         evpn_runtime_coordinator.clone(),
         evpn_runtime_apply_lock.clone(),
@@ -5199,26 +5194,13 @@ async fn run<T>(
     )
     .with_metrics(metrics.clone())
     .with_es_link_bindings_publisher(es_link_bindings_tx.clone())
-    .with_forwarding_state(local_forwarding_state.clone());
-    // The readiness table and probe exist only with the segment actor;
-    // without them an `auto-lacp` candidate is rejected, not committed
-    // inert.
-    let evpn_runtime_reload_apply = if evpn_segment_runtime_control.is_some() {
-        evpn_runtime_reload_apply.with_auto_lacp_esis(evpn_auto_lacp_esis)
-    } else {
-        evpn_runtime_reload_apply
-    };
-    // Runtime readiness probe for `auto-lacp` segments; only useful
-    // when the segment actor runs. Stopped with the link-drain
-    // coordinator, before EVPN teardown.
-    let evpn_auto_esi_shutdown = tokio_util::sync::CancellationToken::new();
-    let _evpn_auto_esi_task = evpn_segment_runtime_control.as_ref().map(|_| {
-        evpn_auto_esi::spawn(
-            evpn_auto_esi_probe,
-            evpn_runtime_reload_apply.clone(),
-            evpn_auto_esi_shutdown.clone(),
-        )
-    });
+    .with_forwarding_state(local_forwarding_state.clone())
+    .with_auto_lacp_esis(evpn_auto_lacp_esis)
+    .with_auto_esi_probe(evpn_auto_esi::AutoEsiProbeStarter::new(
+        evpn_auto_esi_probe,
+        evpn_auto_esi_shutdown.clone(),
+    ));
+    evpn_runtime_reload_apply.start_auto_esi_probe_if_needed(&config);
 
     // RFC 7999 BLACKHOLE kernel-discard reconciler (ADR-0060 FIB
     // slice). Completely opt-in: `install_blackhole_discard = true`
@@ -5374,18 +5356,17 @@ async fn run<T>(
             }) as rustbgpd_api::evpn_service::DuplicateMacClearFuture
         }) as rustbgpd_api::evpn_service::DuplicateMacClearFn
     });
-    // ADR-0084 SetEthernetSegmentDrain hook. Only offered when the
-    // segment actor is running (no [[ethernet_segments]] → no actor →
-    // every ESI is NotFound anyway, so the hook stays absent and the
-    // RPC fails closed). The hook validates against the committed
-    // coordinator model and pushes the mutation to BOTH actors through
-    // the shared `apply_ethernet_segment_drain` primitive, serialized
-    // by the EVPN runtime apply lock.
-    let evpn_es_drain = evpn_segment_runtime_control.as_ref().map(|_| {
+    // ADR-0084 SetEthernetSegmentDrain hook. The hook validates against
+    // the committed coordinator model (an unconfigured ESI is NotFound)
+    // and pushes the mutation to BOTH actors through the shared
+    // `apply_ethernet_segment_drain` primitive, serialized by the EVPN
+    // runtime apply lock. The segment control exists before its task
+    // starts, so the hook is wired once for live and startup segments.
+    let evpn_es_drain = {
         let apply_lock = evpn_runtime_apply_lock.clone();
         let coordinator = evpn_runtime_coordinator.clone();
         let drain_state = evpn_es_drain_state.clone();
-        let segment_control = evpn_segment_runtime_control.clone();
+        let segment_control = Some(evpn_segment_runtime_control.clone());
         let originator_control = evpn_originator_runtime_control.clone();
         Arc::new(
             move |esi: rustbgpd_wire::EthernetSegmentIdentifier, drained: bool| {
@@ -5437,32 +5418,28 @@ async fn run<T>(
                 }) as rustbgpd_api::evpn_service::EthernetSegmentDrainFuture
             },
         ) as rustbgpd_api::evpn_service::EthernetSegmentDrainFn
-    });
-    // ADR-0085 link-driven drain coordinator. Spawned whenever the
-    // segment actor runs (the drain target): bindings may be empty at
-    // startup and arrive later via SIGHUP / ApplyEvpnRuntime — the
-    // coordinator lazily spawns the kernel carrier monitor when the
-    // first binding appears and drops it when the last one goes. All
-    // its drain mutations go through the shared ADR-0084 primitive
-    // under the same EVPN runtime apply lock.
+    };
+    // ADR-0085 link-driven drain coordinator. Always spawned: bindings
+    // may be empty at startup and arrive later via SIGHUP /
+    // ApplyEvpnRuntime — the coordinator parks on the empty watch,
+    // lazily spawns the kernel carrier monitor when the first binding
+    // appears and drops it when the last one goes. All its drain
+    // mutations go through the shared ADR-0084 primitive under the same
+    // EVPN runtime apply lock.
     let evpn_es_link_drain_shutdown = tokio_util::sync::CancellationToken::new();
-    let _evpn_es_link_drain_task = evpn_segment_runtime_control
-        .as_ref()
-        .map(|segment_control| {
-            evpn_es_link_drain::spawn(
-                es_link_bindings_rx,
-                evpn_es_link_drain::CarrierFeed::Kernel,
-                evpn_es_link_drain::EsLinkDrainDeps {
-                    apply_lock: evpn_runtime_apply_lock.clone(),
-                    coordinator: evpn_runtime_coordinator.clone(),
-                    drain_state: evpn_es_drain_state.clone(),
-                    segment: Some(segment_control.clone()),
-                    originator: evpn_originator_runtime_control.clone(),
-                    metrics: metrics.clone(),
-                },
-                evpn_es_link_drain_shutdown.clone(),
-            )
-        });
+    let _evpn_es_link_drain_task = evpn_es_link_drain::spawn(
+        es_link_bindings_rx,
+        evpn_es_link_drain::CarrierFeed::Kernel,
+        evpn_es_link_drain::EsLinkDrainDeps {
+            apply_lock: evpn_runtime_apply_lock.clone(),
+            coordinator: evpn_runtime_coordinator.clone(),
+            drain_state: evpn_es_drain_state.clone(),
+            segment: Some(evpn_segment_runtime_control.clone()),
+            originator: evpn_originator_runtime_control.clone(),
+            metrics: metrics.clone(),
+        },
+        evpn_es_link_drain_shutdown.clone(),
+    );
     // Coordinator lock serializing persisted runtime config mutations with
     // SIGHUP reload. FIB-table CRUD, dynamic-neighbor CRUD, policy/peer-group
     // catalog CRUD, and the SIGHUP reload path hold it across their
@@ -5628,7 +5605,7 @@ async fn run<T>(
             })
         },
         evpn_es_df_status: Arc::new(move |esi| {
-            let status = *evpn_segment_df_status_rx.as_ref()?.borrow().get(&esi)?;
+            let status = *evpn_segment_df_status_rx.borrow().get(&esi)?;
             Some(rustbgpd_api::evpn_service::EthernetSegmentDfStatus {
                 advertised_df_preference: status.advertised.0,
                 advertised_df_dont_preempt: status.advertised.1,
@@ -5658,7 +5635,7 @@ async fn run<T>(
             let rx = evpn_duplicate_mac_quarantine_tx.subscribe();
             Arc::new(move || rx.borrow().clone())
         },
-        evpn_es_drain,
+        evpn_es_drain: Some(evpn_es_drain),
         blackhole_discard_snapshot: {
             let rx = blackhole_status_rx.clone();
             Arc::new(move || {
@@ -6711,6 +6688,10 @@ async fn run<T>(
     // serializes on the EVPN runtime apply lock).
     evpn_es_link_drain_shutdown.cancel();
     evpn_auto_esi_shutdown.cancel();
+    // Admission closure for the segment actor: an apply that outlived
+    // the fence can no longer start it, and one it already started is
+    // handed to the 1.9a'' drain below, like a startup actor.
+    let evpn_segment_handle = evpn_segment_runtime_control.close_for_shutdown();
 
     // 1.9a Drain the EVPN local-MAC originator first — BEFORE the
     // peer manager shutdown — so its Type 2 Withdraws ride the still-
