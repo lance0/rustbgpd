@@ -6,7 +6,6 @@
   `evpn_l2_remote_route_drops{vni,reason}` gauge reports them with reason
   `ethernet_tag_mismatch`. The routes stay in Adj-RIB-In and are still
   reflected. `[[evpn_instances]]` also gains `service_interface` and
-  `ethernet_tag` for the VLAN-aware bundle service. These are not
-  accepted yet: a `vlan_aware_bundle` row is checked against the bundle
-  rules and then rejected. See
+  `ethernet_tag` for the VLAN-aware bundle service, validated against the
+  bundle rules. See
   [the configuration reference](../docs/reference/configuration.md#validation).

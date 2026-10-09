@@ -1720,11 +1720,20 @@ fn evpn_instance_error(rows: &str) -> String {
     err.to_string()
 }
 
-const NOT_SUPPORTED_YET: &str = "invalid EVPN instance config: vni 10010: \
-     service_interface = \"vlan_aware_bundle\" is not supported yet";
+/// Resolve `rows` and return each instance's `(vni, ethernet_tag)`, sorted.
+fn resolved_tags(rows: &str) -> Vec<(u32, u32)> {
+    parse(&evpn_toml_with(rows))
+        .unwrap()
+        .resolve_evpn_instances()
+        .unwrap()
+        .sorted()
+        .into_iter()
+        .map(|inst| (inst.id.as_u32(), inst.ethernet_tag.0))
+        .collect()
+}
 
 #[test]
-fn vlan_aware_bundle_row_passes_shape_rules_then_is_refused() {
+fn vlan_aware_bundle_rows_resolve_with_their_member_tags() {
     let member = |vni, tag, vlan| {
         bundle_row(
             vni,
@@ -1735,11 +1744,11 @@ fn vlan_aware_bundle_row_passes_shape_rules_then_is_refused() {
         )
     };
     let rows = format!("{}{}", member(10010, 10, 10), member(10020, 20, 20));
-    assert_eq!(evpn_instance_error(&rows), NOT_SUPPORTED_YET);
-    // The highest tag is valid; only the final gate refuses the row.
+    assert_eq!(resolved_tags(&rows), vec![(10010, 10), (10020, 20)]);
+    // The highest tag is valid.
     assert_eq!(
-        evpn_instance_error(&member(10010, 16_777_215, 10)),
-        NOT_SUPPORTED_YET
+        resolved_tags(&member(10010, 16_777_215, 10)),
+        vec![(10010, 16_777_215)]
     );
 }
 
@@ -1842,12 +1851,18 @@ fn vlan_aware_bundle_table_level_rules_are_pinned() {
     }
 
     // Different tags under one RT, or one tag under different RTs, are a
-    // valid bundle shape; only the final gate refuses it.
-    for rows in [
-        member(10010, "65000:100", 10, 10) + &member(10020, "65000:100", 20, 20),
-        member(10010, "65000:100", 10, 10) + &member(10020, "65000:200", 10, 20),
+    // valid bundle shape.
+    for (rows, tags) in [
+        (
+            member(10010, "65000:100", 10, 10) + &member(10020, "65000:100", 20, 20),
+            vec![(10010, 10), (10020, 20)],
+        ),
+        (
+            member(10010, "65000:100", 10, 10) + &member(10020, "65000:200", 10, 20),
+            vec![(10010, 10), (10020, 10)],
+        ),
     ] {
-        assert_eq!(evpn_instance_error(&rows), NOT_SUPPORTED_YET, "{rows}");
+        assert_eq!(resolved_tags(&rows), tags, "{rows}");
     }
 }
 
@@ -1891,14 +1906,26 @@ originator_ip = "10.0.0.100"
 
 /// SIGHUP and runtime-apply candidates resolve through the same
 /// `resolve_evpn_instances`, so a candidate that already passed `validate`
-/// elsewhere still cannot smuggle a bundle row through resolution.
+/// elsewhere still cannot smuggle an invalid bundle shape through resolution.
 #[test]
-fn vlan_aware_bundle_rows_are_refused_on_resolution_too() {
-    let mut config = parse(&evpn_toml_with(&bundle_row(10010, "65000:100", ""))).unwrap();
-    config.evpn_instances[0].service_interface = EvpnServiceInterfaceConfig::VlanAwareBundle;
-    config.evpn_instances[0].ethernet_tag = Some(10);
+fn vlan_aware_bundle_rules_hold_on_resolution_too() {
+    let rows = bundle_row(10010, "65000:100", "bridge_vlan = 10")
+        + &bundle_row(10020, "65000:100", "bridge_vlan = 20");
+    let mut config = parse(&evpn_toml_with(&rows)).unwrap();
+    for row in &mut config.evpn_instances {
+        row.service_interface = EvpnServiceInterfaceConfig::VlanAwareBundle;
+        row.ethernet_tag = Some(10);
+    }
     assert_eq!(
         config.resolve_evpn_instances().unwrap_err().to_string(),
-        NOT_SUPPORTED_YET
+        "invalid EVPN instance config: vni 10020: ethernet_tag 10 for route target \
+         65000:100 is already used by vni 10010"
+    );
+    config.evpn_instances[1].ethernet_tag = Some(20);
+    let table = config.resolve_evpn_instances().unwrap();
+    assert!(
+        table
+            .iter()
+            .all(rustbgpd_evpn::EvpnInstance::is_vlan_aware_bundle)
     );
 }

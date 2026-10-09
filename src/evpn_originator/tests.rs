@@ -7,7 +7,7 @@ use rustbgpd_evpn::{
 };
 use rustbgpd_rib::AttrSet;
 use rustbgpd_rib::{RibCommandError, route::RouteOrigin};
-use rustbgpd_wire::{EvpnImet, EvpnMacIp};
+use rustbgpd_wire::{EthernetTagId, EvpnImet, EvpnMacIp};
 
 use crate::test_support::{
     RibReplyMode, ScriptedRib, evpn_instance, gather_metrics_text, ip as ipa, mac, rd, vni,
@@ -1946,6 +1946,103 @@ async fn runtime_model_redefine_reoriginates_local_mac_under_new_rd() {
         "redefine should re-originate the local MAC route under the new RD",
     )
     .await;
+    h.shutdown().await;
+}
+
+/// ADR-0092 amendments H and I: local MAC-only and MAC+IP Type 2 routes carry
+/// the instance's Ethernet Tag, and a redefine from tag 0 to a bundle member
+/// tag withdraws the tag-0 keys and re-originates under the member tag.
+#[tokio::test]
+async fn runtime_model_redefine_to_bundle_tag_reoriginates_under_member_tag() {
+    let instances = instance_table(100);
+    let (rib_tx, rib_rx) = mpsc::channel::<RibUpdate>(32);
+    let (local_tx, local_rx) = mpsc::channel(16);
+    let injects = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+    let withdraws = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+    let _responder = runtime_model_rib_responder(rib_rx, injects.clone(), withdraws.clone());
+
+    let h = spawn(
+        OriginatorConfig {
+            poll_interval: Duration::from_mins(1),
+        },
+        &instances,
+        rib_tx,
+        Some(local_rx),
+        BgpMetrics::new(),
+        OriginatedLocalMacCounts::default(),
+        CancellationToken::new(),
+        Arc::new(std::collections::BTreeMap::new()),
+    )
+    .expect("originator spawned");
+
+    // MAC 0xAA stays MAC-only; MAC 0xBB gains an IP, which replaces its
+    // MAC-only route with a MAC+IP route.
+    let key = |tag, m, ip: Option<&str>| EvpnRouteKey::MacIp {
+        rd: rd(65000, 100),
+        ethernet_tag: EthernetTagId(tag),
+        mac: mac(m),
+        ip: ip.map(ipa),
+    };
+    let mac_only = (0xAA, None);
+    let mac_ip = (0xBB, Some("192.0.2.10"));
+    for (m, ifindex) in [(0xAA, 10), (0xBB, 11)] {
+        local_tx
+            .send(LocalMacObservation::Learned {
+                vni: vni(100),
+                mac: mac(m),
+                ifindex,
+            })
+            .await
+            .unwrap();
+    }
+    local_tx
+        .send(LocalMacObservation::IpAdded {
+            vni: vni(100),
+            mac: mac(0xBB),
+            ip: ipa("192.0.2.10"),
+        })
+        .await
+        .unwrap();
+    for (m, ip) in [mac_only, mac_ip] {
+        wait_for_key(&injects, key(0, m, ip), "VLAN-Based origination uses tag 0").await;
+    }
+
+    let member = local_instance(100).with_ethernet_tag(EthernetTagId(10));
+    assert!(h.replace_runtime_model(
+        instance_table_with(member),
+        Arc::new(std::collections::BTreeMap::new()),
+        Arc::new(std::collections::BTreeSet::new()),
+    ));
+    for (m, ip) in [mac_only, mac_ip] {
+        wait_for_key(
+            &withdraws,
+            key(0, m, ip),
+            "redefine withdraws the tag-0 key",
+        )
+        .await;
+        wait_for_key(
+            &injects,
+            key(10, m, ip),
+            "redefine originates the member tag",
+        )
+        .await;
+    }
+    // The originator tracks the member-tag keys, so aging withdraws them.
+    for (m, ip) in [mac_only, mac_ip] {
+        local_tx
+            .send(LocalMacObservation::Aged {
+                vni: vni(100),
+                mac: mac(m),
+            })
+            .await
+            .unwrap();
+        wait_for_key(
+            &withdraws,
+            key(10, m, ip),
+            "aging withdraws the member-tag key",
+        )
+        .await;
+    }
     h.shutdown().await;
 }
 

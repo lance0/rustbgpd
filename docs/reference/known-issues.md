@@ -445,16 +445,21 @@ resolved.
   While NotReady, local MACs on the segment's VNIs are advertised without an
   ESI. Type 2 (STP) derivation is not implemented. See
   [Auto-derived ESI](configuration.md#auto-derived-esi-lacp-type-1).
-- **The VTEP serves only the VLAN-Based EVPN service (Ethernet Tag `0`).**
-  `service_interface = "vlan_aware_bundle"` rows are checked against the
-  [bundle rules](configuration.md#validation) and then rejected as not
-  supported yet. A remote Type 1 EAD-per-EVI or Type 2 route that matches a
-  local L2VNI under a non-zero Ethernet Tag is not programmed and is counted
-  in `evpn_l2_remote_route_drops{reason="ethernet_tag_mismatch"}` and in
-  the instance's `remote-route-drops` in `rbgp evpn instances`. A Type 5
-  route with a non-zero Ethernet Tag is not imported and is counted as
+- **VLAN-aware bundle members are single-homed, L2-only, and unproven
+  against a vendor.** A
+  [`vlan_aware_bundle` row](configuration.md#vlan-aware-bundle-members)
+  originates and imports Type 2 and Type 3 routes under its own Ethernet
+  Tag, but it cannot join an Ethernet Segment, link an `ip_vrf`, or use a
+  locally assigned VNI. A multi-homed Type 2 or an EAD-per-EVI route for a
+  member is not programmed and is counted as `multihoming_unsupported`; a
+  route under another tag counts as `ethernet_tag_mismatch`, and one whose
+  route target and tag select a member under another VNI counts as
+  `vni_mismatch`. These appear in `evpn_l2_remote_route_drops` and in the
+  instance's `remote-route-drops` in `rbgp evpn instances`. A Type 5 route
+  with a non-zero Ethernet Tag is not imported and is counted as
   `non_zero_ethernet_tag` in `evpn_ip_vrf_remote_prefix_drops`. Reflection of
-  these routes is unaffected. See
+  all these routes is unaffected. The member tag stamping and per-tag import
+  are covered by unit tests only; no peer interop receipt exists yet. See
   [ADR-0092](../adr/0092-evpn-vlan-aware-bundle-service.md).
 - **Family scope is still limited.** MP-BGP supports AFI/SAFI negotiation,
   but rustbgpd currently implements IPv4/IPv6 unicast (AFI 1/2, SAFI 1),

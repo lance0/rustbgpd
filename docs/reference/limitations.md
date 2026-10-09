@@ -109,6 +109,9 @@ Shipped and interop-tested:
 - Opt-in managed bridge, fixed-VNI VXLAN, SVD / collect-metadata VXLAN, VLAN
   upper, VRF, and fixed-VNI L3VXLAN lifecycle under `[managed_netdevs]`.
 - Non-zero Ethernet Tag VLAN-aware-bundle receive/reflect in RR mode.
+- Single-homed VLAN-aware bundle members on the VTEP: per-member Ethernet Tag
+  Type 2 and Type 3 origination and per-tag import onto the member's bridge
+  VLAN, with global VNIs only.
 
 Type 6 SMET typed receive, reflection, withdrawal, and inspection are also
 implemented in the alpha RR lane. The [M113 controlled raw-peer proof](../artifacts/interop/m113-smet-20261001T180815Z/README.md)
@@ -123,8 +126,10 @@ Known EVPN gaps:
   Supported decomposable EVPN runtime edits commit live in ordered primitive steps;
   unsupported dependency cycles fail closed before commit, and residual
   mid-sequence convergence failures fail-stop on the last committed generation.
-- True RFC VLAN-aware bundle VTEP origination and dataplane for non-zero
-  Ethernet Tag remains future work; RR receive/reflect is implemented.
+- VLAN-aware bundle members on the VTEP have no peer interop receipt yet,
+  and tag-scoped multi-homing, IRB, locally assigned VNIs, and non-zero
+  Ethernet Tag Type 5 routes remain future work; RR receive/reflect is
+  implemented.
 - VXLAN local-bias split-horizon for all-active shared segments remains an
   ASIC/offload-dependent limitation of the Linux softswitch path. RFC 9746
   §2.2 makes local bias the only split-horizon mechanism for VXLAN (the ESI

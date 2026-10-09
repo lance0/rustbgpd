@@ -247,6 +247,7 @@ async fn svd_topology_is_ready_and_programs_vni_scoped_fdb_rows_inner() {
         .find_fdb_in_vlan(vni(100), test_mac, Some(10))
         .unwrap_or_else(|| panic!("src_vni FDB row missing from parsed snapshot: {snapshot:?}"));
     assert_eq!(entry.vlan, Some(10));
+    assert_eq!(entry.dst, Some("127.0.0.20".parse().unwrap()));
     assert!(entry.flags.extern_learn);
     assert!(
         snapshot

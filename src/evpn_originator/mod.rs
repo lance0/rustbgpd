@@ -92,8 +92,8 @@ use rustbgpd_rib::AttrSet;
 use rustbgpd_rib::{EvpnRouteEvent, RibUpdate, route::EvpnRibRoute};
 use rustbgpd_telemetry::BgpMetrics;
 use rustbgpd_wire::{
-    AsPath, EthernetSegmentIdentifier, EthernetTagId, EvpnMacIp, EvpnRoute, EvpnRouteKey,
-    ExtendedCommunity, MplsLabel, Origin, PathAttribute,
+    AsPath, EthernetSegmentIdentifier, EvpnMacIp, EvpnRoute, EvpnRouteKey, ExtendedCommunity,
+    MplsLabel, Origin, PathAttribute,
 };
 use tokio::sync::{broadcast, mpsc, oneshot, watch};
 use tokio_util::sync::CancellationToken;
@@ -602,8 +602,8 @@ impl OriginatorState {
         let mut mac_originators = BTreeMap::new();
         let mut mac_ip_originators = BTreeMap::new();
         for inst in instances.iter() {
-            mac_originators.insert(inst.id, LocalMacOriginator::new(inst.id, inst.rd));
-            mac_ip_originators.insert(inst.id, LocalMacIpOriginator::new(inst.id, inst.rd));
+            mac_originators.insert(inst.id, LocalMacOriginator::for_instance(inst));
+            mac_ip_originators.insert(inst.id, LocalMacIpOriginator::for_instance(inst));
         }
         Self {
             mac_originators,
@@ -992,7 +992,7 @@ pub(crate) fn build_originated_route(
     let macip = EvpnMacIp {
         rd: instance.rd,
         esi,
-        ethernet_tag: EthernetTagId(0),
+        ethernet_tag: instance.ethernet_tag,
         mac,
         ip: extract_ip_from_key(&key),
         // VXLAN encap: the EVPN label carries the full 24-bit VNI

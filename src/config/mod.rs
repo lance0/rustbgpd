@@ -1256,16 +1256,7 @@ impl Config {
                 ));
             }
         }
-        // LAN-65 S1: every shape rule above runs first, then bundle rows are
-        // refused, because origination still stamps Ethernet Tag 0 (a bundle
-        // row would advertise a tag-0 IMET). S2 removes this gate.
-        match self.evpn_instances.iter().find(|cfg| is_bundle(cfg)) {
-            Some(cfg) => invalid(format!(
-                "vni {}: service_interface = \"vlan_aware_bundle\" is not supported yet",
-                cfg.vni
-            )),
-            None => Ok(()),
-        }
+        Ok(())
     }
 
     /// Resolve `[[ethernet_segments]]` entries into runtime

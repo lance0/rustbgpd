@@ -43,6 +43,7 @@ bash crates/evpn-linux/tests/docker/run-netns-tests.sh link_carrier # ADR-0085 c
 bash crates/evpn-linux/tests/docker/run-netns-tests.sh ac_gate # AC-gate port-state round-trip
 bash crates/evpn-linux/tests/docker/run-netns-tests.sh nexthop_raw # all five raw nexthop tests
 bash crates/evpn-linux/tests/docker/run-netns-tests.sh foreign_state_l2 # L2 foreign takeover
+bash crates/evpn-linux/tests/docker/run-netns-tests.sh foreign_state_l2_dst # owned FDB destination drift repair
 bash crates/evpn-linux/tests/docker/run-netns-tests.sh foreign_state_nhid # reserved-NHID non-clobber
 bash crates/evpn-linux/tests/docker/run-netns-tests.sh foreign_state_l3 # L3 foreign takeover (VRF)
 bash crates/evpn-linux/tests/docker/run-netns-tests.sh l3_route_event # route-event wake (VRF)
@@ -83,7 +84,7 @@ caches across runs.
 | `link_carrier` | `link_carrier_monitor_tracks_veth_carrier_transitions` | RTNLGRP_LINK carrier transitions |
 | `ac_gate` | `linux_dataplane_set_ac_port_state_round_trip` | AC-gate port state and flood-flag preservation |
 | `nexthop_raw` | `netns_nexthop_raw` | all five raw nexthop socket tests |
-| `foreign_state_l2` / `foreign_state_nhid` | exact `netns_foreign_state` L2/NHID tests | foreign takeover and reserved-NHID non-clobber |
+| `foreign_state_l2` / `foreign_state_l2_dst` / `foreign_state_nhid` | exact `netns_foreign_state` L2/NHID tests | foreign takeover, owned destination drift repair, and reserved-NHID non-clobber |
 | `foreign_state_l3` / `l3_route_event` | exact VRF-dependent tests | L3 foreign takeover and route-event wake latency |
 | `dataplane_vlan_fdb` | `linux_dataplane_programs_vlan_scoped_remote_mac_add_remove` | ADR-0089 VLAN-scoped single-dst FDB add/remove and scoped delete |
 | `dataplane_remote_mac` | `linux_dataplane_programs_remote_mac_with_extern_learn` | Remote MAC install/remove shape plus foreign-entry preservation |

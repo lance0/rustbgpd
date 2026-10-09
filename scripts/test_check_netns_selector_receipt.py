@@ -40,6 +40,7 @@ class ReceiptTest(unittest.TestCase):
                 "ac_gate",
                 "nexthop_raw",
                 "foreign_state_l2",
+                "foreign_state_l2_dst",
                 "foreign_state_nhid",
             ),
         )
@@ -56,7 +57,7 @@ class ReceiptTest(unittest.TestCase):
             ),
         )
 
-    def test_vrf_available_requires_all_29(self):
+    def test_vrf_available_requires_all_30(self):
         errors, payload, summary = self.run_case(BASE + VRF, True)
         self.assertEqual(errors, [])
         self.assertEqual(payload["executed_selectors"], list(BASE + VRF))
