@@ -276,6 +276,11 @@ struct DefinitionState {
     observed_since: Instant,
     deadline: Option<Instant>,
     applied: AppliedConditionalState,
+    /// Installed while the datasets its `condition_policy` reads still held
+    /// the prior generation's contents. No observation runs until the
+    /// post-publish re-observation clears it; a rollback discards it with
+    /// the replaced state.
+    held: bool,
 }
 
 /// Tracker state owned by the RIB actor.
@@ -312,15 +317,34 @@ enum CandidateVerdict {
 }
 
 impl RibManager {
+    /// [`Self::install_conditional_advertisements_holding`] with no dataset
+    /// swap pending.
+    #[cfg(test)]
+    pub(super) fn install_conditional_advertisements(
+        &mut self,
+        definitions: Vec<ConditionalAdvertisement>,
+    ) -> (ConditionalAdvertisementCapture, Vec<Arc<str>>) {
+        self.install_conditional_advertisements_holding(definitions, &[])
+    }
+
     /// Install a definition set (ADR-0137 Decision 6). The first install,
     /// at startup, leaves new definitions `pending` behind the debounce. A
     /// later install keeps the state of definitions with unchanged content
     /// and evaluates new or changed definitions immediately. Returns the
     /// prior state for compensation and the names whose applied state
     /// changed.
-    pub(super) fn install_conditional_advertisements(
+    ///
+    /// A new or changed definition whose `condition_policy` reads one of
+    /// `swapping` is not evaluated: those datasets still hold the prior
+    /// contents, and the same generation publishes the candidate contents
+    /// next. Such a definition keeps its prior applied state (a new one
+    /// stays `pending`), so no gate flips and no peer resyncs on contents
+    /// that belong to neither generation. The re-observation after the
+    /// publish evaluates it immediately.
+    fn install_conditional_advertisements_holding(
         &mut self,
         definitions: Vec<ConditionalAdvertisement>,
+        swapping: &[String],
     ) -> (ConditionalAdvertisementCapture, Vec<Arc<str>>) {
         let now = Instant::now();
         let startup = !self.conditional_advertisements.installed;
@@ -339,17 +363,42 @@ impl RibManager {
                 continue;
             }
             let definition = Arc::new(definition);
-            let matches = self.scan_condition(&definition);
-            let observed = matches.observation();
+            let held = definition
+                .condition_policy
+                .as_ref()
+                .is_some_and(|policy| swapping.iter().any(|name| policy.references_dataset(name)));
+            let (matches, observed) = if held {
+                previous
+                    .as_ref()
+                    .filter(|state| {
+                        state.definition.condition_prefixes == definition.condition_prefixes
+                    })
+                    .map_or_else(
+                        || {
+                            (
+                                Arc::new(ConditionMatches::new(
+                                    definition.condition_prefixes.len(),
+                                )),
+                                ConditionObservation::Unknown,
+                            )
+                        },
+                        |state| (Arc::clone(&state.matches), state.observed),
+                    )
+            } else {
+                let matches = self.scan_condition(&definition);
+                let observed = matches.observation();
+                (Arc::new(matches), observed)
+            };
             let deferred = self.condition_deferred(&definition);
             let prior_applied = previous.as_ref().map(|state| state.applied);
             let mut state = DefinitionState {
                 definition,
-                matches: Arc::new(matches),
+                matches,
                 observed,
                 observed_since: now,
                 deadline: None,
                 applied: prior_applied.unwrap_or(AppliedConditionalState::Pending),
+                held,
             };
             if let Some(previous) = &previous
                 && previous.definition.advertise_if != state.definition.advertise_if
@@ -360,7 +409,7 @@ impl RibManager {
                     true,
                 );
             }
-            if observed != ConditionObservation::Unknown && !deferred {
+            if !held && observed != ConditionObservation::Unknown && !deferred {
                 if startup {
                     self.arm_or_apply(&mut state, now, &mut transitions);
                 } else {
@@ -394,7 +443,7 @@ impl RibManager {
         }
     }
 
-    /// Reinstate the state captured by [`Self::install_conditional_advertisements`]
+    /// Reinstate the state captured by [`Self::install_conditional_advertisements_holding`]
     /// (ADR-0137 Decision 6). The restored applied states and settle deadlines
     /// stand; only an observation the RIB has since changed restarts the
     /// debounce from now. Returns the names whose applied state differs from
@@ -509,6 +558,12 @@ impl RibManager {
             let Some(mut state) = self.conditional_advertisements.definitions.remove(&name) else {
                 continue;
             };
+            if state.held {
+                self.conditional_advertisements
+                    .definitions
+                    .insert(name, state);
+                continue;
+            }
             let matches = Arc::make_mut(&mut state.matches);
             for prefix in prefixes {
                 let verdict = self.observe_condition_prefix(&state.definition, &prefix);
@@ -549,6 +604,12 @@ impl RibManager {
             let Some(mut state) = self.conditional_advertisements.definitions.remove(&name) else {
                 continue;
             };
+            if state.held {
+                self.conditional_advertisements
+                    .definitions
+                    .insert(name, state);
+                continue;
+            }
             let matches = self.scan_condition(&state.definition);
             state.observed = matches.observation();
             state.matches = Arc::new(matches);
@@ -568,10 +629,15 @@ impl RibManager {
     }
 
     /// Re-observe definitions whose `condition_policy` references a swapped
-    /// dataset (ADR-0137 Decision 6), under the ordinary debounce.
+    /// dataset (ADR-0137 Decision 6), under the ordinary debounce. A held or
+    /// `changed` definition was installed in the same generation without
+    /// being evaluated against the prior dataset contents; it is evaluated
+    /// now, against the published contents, and applies immediately, as its
+    /// install would have. This clears its hold.
     pub(super) fn reevaluate_conditional_advertisement_datasets(
         &mut self,
         swapped: &[String],
+        changed: &[Arc<str>],
     ) -> Vec<Arc<str>> {
         let names: Vec<_> = self
             .conditional_advertisements
@@ -591,10 +657,44 @@ impl RibManager {
         let now = Instant::now();
         let mut transitions = Vec::new();
         for name in &names {
-            self.reobserve_definition(name, now, &mut transitions);
+            let held = self
+                .conditional_advertisements
+                .definitions
+                .get(name)
+                .is_some_and(|state| state.held);
+            if held || changed.contains(name) {
+                self.evaluate_definition_now(name, now, &mut transitions);
+            } else {
+                self.reobserve_definition(name, now, &mut transitions);
+            }
         }
         self.mark_conditional_advertisement_peers_dirty(&transitions);
         transitions
+    }
+
+    /// Evaluate `name` the way a non-startup install evaluates a new or
+    /// changed definition: observe and apply now, without a settle interval.
+    fn evaluate_definition_now(&mut self, name: &Arc<str>, now: Instant, out: &mut Vec<Arc<str>>) {
+        let Some(mut state) = self.conditional_advertisements.definitions.remove(name) else {
+            return;
+        };
+        state.held = false;
+        let matches = self.scan_condition(&state.definition);
+        let observed = matches.observation();
+        state.matches = Arc::new(matches);
+        if observed != state.observed {
+            state.observed = observed;
+            state.observed_since = now;
+        }
+        state.deadline = None;
+        if observed != ConditionObservation::Unknown && !self.condition_deferred(&state.definition)
+        {
+            Self::apply_observation(&self.metrics, &mut state, out);
+        }
+        self.publish_conditional_metrics(&state);
+        self.conditional_advertisements
+            .definitions
+            .insert(Arc::clone(name), state);
     }
 
     /// Re-observe the definitions whose `condition_policy` sees `source` as
@@ -662,7 +762,17 @@ impl RibManager {
         transitions
     }
 
+    /// Re-observe under the debounce. A held definition is skipped: its
+    /// datasets still hold the prior contents until the publish.
     fn reobserve_definition(&mut self, name: &Arc<str>, now: Instant, out: &mut Vec<Arc<str>>) {
+        if self
+            .conditional_advertisements
+            .definitions
+            .get(name)
+            .is_none_or(|state| state.held)
+        {
+            return;
+        }
         let Some(mut state) = self.conditional_advertisements.definitions.remove(name) else {
             return;
         };
@@ -924,10 +1034,12 @@ impl RibManager {
     pub(super) fn handle_install_conditional_advertisements(
         &mut self,
         set: ConditionalAdvertisementSet,
+        swapping: &[String],
     ) -> ConditionalAdvertisementCapture {
         let prior_attachments = self.conditional_advertisements.attachments.clone();
         let prior_definitions = self.conditional_definition_contents();
-        let (capture, transitions) = self.install_conditional_advertisements(set.definitions);
+        let (capture, transitions) =
+            self.install_conditional_advertisements_holding(set.definitions, swapping);
         self.conditional_advertisements.attachments = set.attachments;
         self.settle_conditional_advertisement_change(
             &prior_attachments,
@@ -959,9 +1071,10 @@ impl RibManager {
     pub(super) fn handle_reobserve_conditional_advertisement_datasets(
         &mut self,
         datasets: &[String],
+        changed: &[Arc<str>],
     ) -> ConditionalAdvertisementCapture {
         let capture = self.capture_conditional_advertisements();
-        let _ = self.reevaluate_conditional_advertisement_datasets(datasets);
+        let _ = self.reevaluate_conditional_advertisement_datasets(datasets, changed);
         capture
     }
 

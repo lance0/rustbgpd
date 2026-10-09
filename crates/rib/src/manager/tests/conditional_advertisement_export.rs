@@ -824,14 +824,17 @@ async fn attachment_selects_the_fallback_reason_and_detach_regroups() {
     assert_eq!(label(&manager, TARGET), "conditional_advertisement");
     assert!(label(&manager, BYSTANDER).starts_with("group:"));
 
-    let _ =
-        manager.handle_install_conditional_advertisements(ConditionalAdvertisementSet::default());
+    let _ = manager
+        .handle_install_conditional_advertisements(ConditionalAdvertisementSet::default(), &[]);
     assert_eq!(label(&manager, TARGET), label(&manager, BYSTANDER));
 
-    let _ = manager.handle_install_conditional_advertisements(install_set(
-        definition(prefix_predicate(), ConditionalAdvertiseIf::Present),
-        &[TARGET],
-    ));
+    let _ = manager.handle_install_conditional_advertisements(
+        install_set(
+            definition(prefix_predicate(), ConditionalAdvertiseIf::Present),
+            &[TARGET],
+        ),
+        &[],
+    );
     assert_eq!(label(&manager, TARGET), "conditional_advertisement");
 }
 
@@ -862,7 +865,7 @@ async fn reload_content_identity() {
     let deadline = manager.next_conditional_advertisement_deadline();
     assert!(deadline.is_some(), "absent observation is settling");
 
-    let _ = manager.handle_install_conditional_advertisements(installed());
+    let _ = manager.handle_install_conditional_advertisements(installed(), &[]);
     assert!(
         manager.dirty_peers.is_empty(),
         "identical content resyncs nothing"
@@ -872,10 +875,13 @@ async fn reload_content_identity() {
     assert_eq!(drain(&mut rx), Wire::default());
 
     // A changed advertise mode applies at once: absent now advertises.
-    let _ = manager.handle_install_conditional_advertisements(install_set(
-        definition(prefix_predicate(), ConditionalAdvertiseIf::Absent),
-        &[TARGET],
-    ));
+    let _ = manager.handle_install_conditional_advertisements(
+        install_set(
+            definition(prefix_predicate(), ConditionalAdvertiseIf::Absent),
+            &[TARGET],
+        ),
+        &[],
+    );
     assert!(manager.dirty_peers.contains(&ip(TARGET)));
     assert_eq!(manager.next_conditional_advertisement_deadline(), None);
     resync(&mut manager);
@@ -911,8 +917,8 @@ async fn restore_during_a_settle_window_reinstates_state_and_wire() {
     let deadline = manager.next_conditional_advertisement_deadline();
 
     // A failed generation detaches the peer, then compensates.
-    let capture =
-        manager.handle_install_conditional_advertisements(ConditionalAdvertisementSet::default());
+    let capture = manager
+        .handle_install_conditional_advertisements(ConditionalAdvertisementSet::default(), &[]);
     resync(&mut manager);
     assert_eq!(manager.next_conditional_advertisement_deadline(), None);
     manager.handle_restore_conditional_advertisements(capture);
@@ -1000,7 +1006,7 @@ async fn dataset_swap_reaches_both_predicates() {
 
     // condition_policy dataset drops the condition: re-observed, debounced.
     condition_set.refresh(data(None));
-    manager.handle_reobserve_conditional_advertisement_datasets(&["primary".to_string()]);
+    manager.handle_reobserve_conditional_advertisement_datasets(&["primary".to_string()], &[]);
     assert!(manager.next_conditional_advertisement_deadline().is_some());
     // advertise_policy dataset now selects the controlled prefix, and the
     // export re-evaluation the peer manager sends for it re-gates.
@@ -1133,10 +1139,13 @@ async fn install_gates_a_peer_registered_before_it() {
 
     // Warm install of a changed definition: evaluated at once (absent, so
     // advertise-if-present suppresses) and the attached peer is resynced.
-    let _ = manager.handle_install_conditional_advertisements(install_set(
-        definition(prefix_predicate(), ConditionalAdvertiseIf::Present),
-        &[TARGET],
-    ));
+    let _ = manager.handle_install_conditional_advertisements(
+        install_set(
+            definition(prefix_predicate(), ConditionalAdvertiseIf::Present),
+            &[TARGET],
+        ),
+        &[],
+    );
     assert_eq!(
         manager.update_groups.members[&ip(TARGET)].label(),
         "conditional_advertisement"

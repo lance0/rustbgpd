@@ -643,14 +643,137 @@ async fn dataset_swap_reobserves_only_dependent_definitions() {
 
     handle.refresh(data(true));
     let visits = manager.conditional_advertisement_candidate_visits();
-    let _ = manager.reevaluate_conditional_advertisement_datasets(&["unrelated".to_string()]);
+    let _ = manager.reevaluate_conditional_advertisement_datasets(&["unrelated".to_string()], &[]);
     assert_eq!(manager.conditional_advertisement_candidate_visits(), visits);
     assert_eq!(state(&manager).0, ConditionObservation::Absent);
 
     let swapped = Instant::now();
-    let _ = manager.reevaluate_conditional_advertisement_datasets(&["allowed".to_string()]);
+    let _ = manager.reevaluate_conditional_advertisement_datasets(&["allowed".to_string()], &[]);
     assert_eq!(state(&manager).0, ConditionObservation::Present);
     assert_eq!(state(&manager).2, Some(swapped + SETTLE));
+
+    // A definition its generation just installed against the prior
+    // contents applies at once and cancels the armed deadline.
+    let _ = manager.reevaluate_conditional_advertisement_datasets(
+        &["allowed".to_string()],
+        &[Arc::from(NAME)],
+    );
+    assert_eq!(
+        state(&manager),
+        (
+            ConditionObservation::Present,
+            AppliedConditionalState::Advertise,
+            None
+        )
+    );
+}
+
+/// A definition installed while its `condition_policy` dataset is being
+/// swapped stays held: route churn before the publish does not observe it
+/// against the prior contents. Only the post-publish re-observation clears
+/// the hold, after which churn observes it as usual.
+#[tokio::test(start_paused = true)]
+async fn held_definition_ignores_route_churn_until_the_publish() {
+    use rustbgpd_policy::datasets::{DatasetBindings, DatasetData, DatasetHandle, DatasetKind};
+    use rustbgpd_policy::sets::{PrefixSet, PrefixSetEntry};
+
+    let data = |listed: bool| {
+        DatasetData::Prefix(PrefixSet::new(listed.then_some(PrefixSetEntry {
+            prefix: condition(),
+            ge: None,
+            le: None,
+        })))
+    };
+    let handle = Arc::new(DatasetHandle::new(
+        "allowed",
+        DatasetKind::Prefix,
+        data(true),
+    ));
+    let mut bindings = DatasetBindings::new();
+    bindings.insert(Arc::clone(&handle));
+    let compiled = Arc::new(
+        RpolFile::parse(
+            "dataset prefix-set allowed\npolicy p { term t { if route.prefix in allowed { accept } reject } }",
+        )
+        .unwrap()
+        .compile_policy_bound("p", &[], &mut SetStore::new(), &bindings)
+        .unwrap()
+        .unwrap(),
+    );
+    let policy = || {
+        PolicyChain::from_named(vec![rustbgpd_policy::NamedPolicy::from_rpol(
+            "p".to_string(),
+            Arc::clone(&compiled),
+        )])
+    };
+    let install =
+        |manager: &mut RibManager, entry: PrefixSetEntry, condition_policy, swapping: &[String]| {
+            let mut definition = definition(
+                ConditionalAdvertiseIf::Absent,
+                condition_policy,
+                Duration::ZERO,
+            );
+            definition.condition_prefixes = vec![entry];
+            let _ = manager.handle_install_conditional_advertisements(
+                crate::ConditionalAdvertisementSet {
+                    definitions: vec![definition],
+                    attachments: BTreeMap::new(),
+                },
+                swapping,
+            );
+        };
+
+    // An exact condition, then a range whose churn reaches the definition
+    // through the range tracker's cover walk.
+    let in_range = PrefixSetEntry {
+        prefix: Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 0), 24)),
+        ge: None,
+        le: Some(32),
+    };
+    for entry in [PrefixSetEntry::exact(condition()), in_range] {
+        handle.refresh(data(true));
+        let mut manager = manager();
+        install(&mut manager, entry, None, &[]);
+        assert_eq!(state(&manager).1, AppliedConditionalState::Advertise);
+
+        // The edit adds a `condition_policy` that passes the condition route
+        // under the prior `allowed` contents but not under the candidate's.
+        install(
+            &mut manager,
+            entry,
+            Some(policy()),
+            &["allowed".to_string()],
+        );
+        assert_eq!(state(&manager).1, AppliedConditionalState::Advertise);
+        let visits = manager.conditional_advertisement_candidate_visits();
+        inject(&mut manager, prefix(1), None);
+        assert_eq!(
+            state(&manager).1,
+            AppliedConditionalState::Advertise,
+            "{entry}: churn before the publish must not flip the gate on the prior contents"
+        );
+        assert_eq!(
+            manager.conditional_advertisement_candidate_visits(),
+            visits,
+            "churn before the publish does not observe a held definition"
+        );
+
+        handle.refresh(data(false));
+        let _ =
+            manager.reevaluate_conditional_advertisement_datasets(&["allowed".to_string()], &[]);
+        assert_eq!(
+            state(&manager),
+            (
+                ConditionObservation::Absent,
+                AppliedConditionalState::Advertise,
+                None
+            )
+        );
+        // Released: churn observes it again.
+        handle.refresh(data(true));
+        inject(&mut manager, prefix(1), Some(6));
+        assert_eq!(state(&manager).1, AppliedConditionalState::Suppress);
+    }
 }
 
 /// The actor's run loop arms and fires the settle timer itself.
@@ -1098,15 +1221,18 @@ async fn status_reports_conditions_applied_state_settle_and_attachments() {
         condition_policy: Some(med_guard()),
         settle_time: Duration::ZERO,
     };
-    let _ = manager.handle_install_conditional_advertisements(crate::ConditionalAdvertisementSet {
-        definitions: vec![core, absent_if(SETTLE)],
-        attachments: [
-            (peer(1), vec![Arc::from(NAME)]),
-            (peer(2), vec![Arc::from(NAME), Arc::from("core")]),
-        ]
-        .into_iter()
-        .collect(),
-    });
+    let _ = manager.handle_install_conditional_advertisements(
+        crate::ConditionalAdvertisementSet {
+            definitions: vec![core, absent_if(SETTLE)],
+            attachments: [
+                (peer(1), vec![Arc::from(NAME)]),
+                (peer(2), vec![Arc::from(NAME), Arc::from("core")]),
+            ]
+            .into_iter()
+            .collect(),
+        },
+        &[],
+    );
     let names: Vec<String> = manager
         .conditional_advertisement_status()
         .iter()

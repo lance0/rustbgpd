@@ -2550,7 +2550,7 @@ async fn conditional_install_shares_one_deadline_across_send_and_reply() {
         .insert(Ipv4Addr::new(10, 0, 0, 1).into(), vec![Arc::from("backup")]);
     let started = tokio::time::Instant::now();
     let error = mgr
-        .install_conditional_advertisements(set)
+        .install_conditional_advertisements(set, &[])
         .await
         .err()
         .expect("an unanswered install fails");

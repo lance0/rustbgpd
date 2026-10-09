@@ -311,12 +311,33 @@ impl PeerManager {
         info!(%receipt, "reload generation resolved; applying");
         let mut applied = AppliedEffects::default();
 
+        // The install holds these when their `condition_policy` reads a
+        // dataset this generation swaps; the re-observation after the
+        // dataset publish evaluates them immediately.
+        let changed_definitions: Vec<_> = conditional
+            .definitions
+            .iter()
+            .filter(|definition| {
+                !self
+                    .conditional_advertisements
+                    .definitions
+                    .contains(definition)
+            })
+            .map(|definition| Arc::clone(&definition.name))
+            .collect();
+
         // 0. ADR-0137: conditional advertisements, before the candidate
         //    chains can export and before any session this generation adds
         //    or replaces can register, so no export runs under a mix of
-        //    candidate chains and prior gates. An unacknowledged install is
+        //    candidate chains and prior gates. A changed definition that
+        //    reads a dataset this generation swaps keeps its prior applied
+        //    state until the re-observation, since the dataset handles still
+        //    hold the prior contents. An unacknowledged install is
         //    ambiguous: the RIB may have committed it.
-        match self.install_conditional_advertisements(conditional).await {
+        match self
+            .install_conditional_advertisements(conditional, &changed_datasets)
+            .await
+        {
             Ok(prior) => applied.conditional_prior = prior,
             Err(error) => {
                 return ReloadGenerationOutcome::CompensationAmbiguous(format!(
@@ -390,13 +411,17 @@ impl PeerManager {
             .set_dynamic_neighbor_capacity(self.dynamic_peer_count, self.dynamic_neighbor_limit);
 
         // A swapped dataset read by a `condition_policy` is external input:
-        // re-observe under the ordinary debounce. An unacknowledged request
-        // is ambiguous: the RIB may have re-observed against the candidate
-        // dataset, and no capture exists to undo it. The unwind restores a
-        // successful re-observation's capture after the dataset rollback;
-        // an earlier install capture already predates it.
+        // re-observe under the ordinary debounce. A definition step 0 added
+        // or changed was held rather than evaluated against the prior
+        // contents, so it is evaluated now, immediately (ADR-0137 Decision
+        // 6). An
+        // unacknowledged request is ambiguous: the RIB may have re-observed
+        // against the candidate dataset, and no capture exists to undo it.
+        // The unwind restores a successful re-observation's capture after
+        // the dataset rollback; an earlier install capture already predates
+        // it.
         match self
-            .reobserve_conditional_advertisement_datasets(&changed_datasets)
+            .reobserve_conditional_advertisement_datasets(&changed_datasets, changed_definitions)
             .await
         {
             Ok(prior) => {

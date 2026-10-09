@@ -2873,7 +2873,7 @@ impl PeerManager {
         // the debounce; it is external input like a route change.
         let mut failures = Vec::new();
         if let Err(error) = self
-            .reobserve_conditional_advertisement_datasets(swapped)
+            .reobserve_conditional_advertisement_datasets(swapped, Vec::new())
             .await
         {
             failures.push(format!("conditional advertisement conditions: {error}"));

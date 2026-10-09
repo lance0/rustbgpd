@@ -2253,7 +2253,7 @@ impl RibManager {
     /// [`Self::with_selection_deferral`] so RFC 4724 deferral holds them.
     #[must_use]
     pub fn with_conditional_advertisements(mut self, set: ConditionalAdvertisementSet) -> Self {
-        let _ = self.handle_install_conditional_advertisements(set);
+        let _ = self.handle_install_conditional_advertisements(set, &[]);
         self
     }
 
@@ -3508,16 +3508,26 @@ impl RibManager {
             RibUpdate::ReevaluatePeerExportPolicies { peers, reply } => {
                 self.handle_reevaluate_peer_export_policies(&peers, reply);
             }
-            RibUpdate::InstallConditionalAdvertisements { set, reply } => {
-                let _ = reply.send(self.handle_install_conditional_advertisements(set));
+            RibUpdate::InstallConditionalAdvertisements {
+                set,
+                swapping_datasets,
+                reply,
+            } => {
+                let _ = reply
+                    .send(self.handle_install_conditional_advertisements(set, &swapping_datasets));
             }
             RibUpdate::RestoreConditionalAdvertisements { capture, reply } => {
                 self.handle_restore_conditional_advertisements(capture);
                 let _ = reply.send(());
             }
-            RibUpdate::ReobserveConditionalAdvertisements { datasets, reply } => {
-                let _ =
-                    reply.send(self.handle_reobserve_conditional_advertisement_datasets(&datasets));
+            RibUpdate::ReobserveConditionalAdvertisements {
+                datasets,
+                changed,
+                reply,
+            } => {
+                let _ = reply.send(
+                    self.handle_reobserve_conditional_advertisement_datasets(&datasets, &changed),
+                );
             }
             RibUpdate::EndOfRib {
                 peer,

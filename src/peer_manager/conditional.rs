@@ -5,6 +5,7 @@
 //! restores a captured install on compensation, and reconciles it after
 //! config mutations that do not install it explicitly.
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use rustbgpd_rib::{ConditionalAdvertisementCapture, ConditionalAdvertisementSet, RibUpdate};
@@ -51,6 +52,7 @@ impl PeerManager {
     pub(super) async fn install_conditional_advertisements(
         &mut self,
         set: ConditionalAdvertisementSet,
+        swapping_datasets: &[String],
     ) -> Result<Option<ConditionalAdvertisementPrior>, String> {
         if set == self.conditional_advertisements {
             return Ok(None);
@@ -58,6 +60,7 @@ impl PeerManager {
         let capture = self
             .conditional_rib_request(|reply| RibUpdate::InstallConditionalAdvertisements {
                 set: set.clone(),
+                swapping_datasets: swapping_datasets.to_vec(),
                 reply,
             })
             .await?;
@@ -93,7 +96,7 @@ impl PeerManager {
         let set = candidate
             .conditional_advertisement_set()
             .map_err(|error| format!("conditional advertisements: {error}"))?;
-        self.install_conditional_advertisements(set).await
+        self.install_conditional_advertisements(set, &[]).await
     }
 
     /// Bring the RIB install in line with `current_config` after a config
@@ -112,7 +115,7 @@ impl PeerManager {
                 return;
             }
         };
-        match self.install_conditional_advertisements(set).await {
+        match self.install_conditional_advertisements(set, &[]).await {
             Ok(_) => self.conditional_reconcile_retry = None,
             Err(error) => {
                 let backoff = self
@@ -143,12 +146,14 @@ impl PeerManager {
     }
 
     /// Re-observe conditions whose `condition_policy` reads a swapped
-    /// dataset, under the ordinary settle debounce. `Ok(Some(prior))`
-    /// restores the tracker state from before the re-observation, for a
-    /// generation that rolls the dataset swap back.
+    /// dataset, under the ordinary settle debounce; `changed` definitions,
+    /// installed earlier in the same generation, apply immediately.
+    /// `Ok(Some(prior))` restores the tracker state from before the
+    /// re-observation, for a generation that rolls the dataset swap back.
     pub(super) async fn reobserve_conditional_advertisement_datasets(
         &self,
         datasets: &[String],
+        changed: Vec<Arc<str>>,
     ) -> Result<Option<ConditionalAdvertisementPrior>, String> {
         if !self
             .conditional_advertisements
@@ -160,6 +165,7 @@ impl PeerManager {
         let capture = self
             .conditional_rib_request(|reply| RibUpdate::ReobserveConditionalAdvertisements {
                 datasets,
+                changed,
                 reply,
             })
             .await?;

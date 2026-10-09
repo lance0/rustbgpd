@@ -2739,13 +2739,22 @@ pub enum RibUpdate {
     },
     /// Install the complete conditional-advertisement definition and
     /// attachment set (ADR-0137). Definitions with unchanged content keep
-    /// their tracker state; changed ones are evaluated immediately. Peers
-    /// whose gate inputs change are resynced through the bounded resync.
+    /// their tracker state; changed ones are evaluated immediately, except
+    /// that one whose `condition_policy` reads a dataset in
+    /// `swapping_datasets` is held: it keeps its prior applied state (a new
+    /// one stays pending) and is not observed, even on route churn, until
+    /// [`RibUpdate::ReobserveConditionalAdvertisements`] runs after the
+    /// dataset publish. Peers whose gate inputs change are resynced through
+    /// the bounded resync.
     /// The reply carries the capture that
     /// [`RibUpdate::RestoreConditionalAdvertisements`] reinstates.
     InstallConditionalAdvertisements {
         /// The complete set to install.
         set: crate::ConditionalAdvertisementSet,
+        /// Datasets the same generation publishes after this install. A new
+        /// or changed definition whose `condition_policy` reads one is held
+        /// until the re-observation after the publish.
+        swapping_datasets: Vec<String>,
         /// Prior tracker state and attachments, for compensation.
         reply: oneshot::Sender<crate::ConditionalAdvertisementCapture>,
     },
@@ -2766,6 +2775,10 @@ pub enum RibUpdate {
     ReobserveConditionalAdvertisements {
         /// Swapped dataset names.
         datasets: Vec<String>,
+        /// Definitions the same generation's install added or changed. The
+        /// install evaluated them against the prior dataset contents, so
+        /// they are evaluated again immediately rather than debounced.
+        changed: Vec<Arc<str>>,
         /// Acknowledged once the observations are recomputed.
         reply: oneshot::Sender<crate::ConditionalAdvertisementCapture>,
     },
