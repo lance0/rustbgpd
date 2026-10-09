@@ -19,6 +19,7 @@ use super::update_groups::CohortExactEncoder;
 use super::update_groups_oracle::{NormMsg, normalize};
 use super::*;
 use crate::manager::peer_lifecycle::MAX_JOIN_COHORT_EXAMINED;
+use rustbgpd_wire::LargeCommunity;
 
 const SESSION: u64 = 1;
 const RS_AS: u32 = 65_000;
@@ -514,6 +515,142 @@ async fn cohort_admission_work_is_bounded_per_turn() {
     assert!(grouped.manager.pending_initial_registrations.is_empty());
     let oracle = run(true, &joiners, &[], None).await;
     assert_eq!(grouped.streams, oracle.streams);
+}
+
+fn modifying_chain(
+    modifications: rustbgpd_policy::RouteModifications,
+) -> rustbgpd_policy::PolicyChain {
+    use rustbgpd_policy::{Policy, PolicyAction, PolicyChain, PolicyStatement};
+    PolicyChain::new(vec![Policy {
+        entries: vec![PolicyStatement {
+            prefix: None,
+            ge: None,
+            le: None,
+            action: PolicyAction::Permit,
+            match_community: vec![],
+            match_as_path: None,
+            match_neighbor_set: None,
+            match_route_type: None,
+            match_evpn_route_type: None,
+            match_rpki_validation: None,
+            match_aspa_validation: None,
+            match_as_path_length_ge: None,
+            match_as_path_length_le: None,
+            match_local_pref_ge: None,
+            match_local_pref_le: None,
+            match_med_ge: None,
+            match_med_le: None,
+            match_next_hop: None,
+            modifications,
+        }],
+        default_action: PolicyAction::Permit,
+    }])
+}
+
+/// RFC 7947 admission reads BOTH sides of export policy. Every member shares
+/// an export chain that either strips or adds the large community
+/// `RS:0:65102` ("do not announce to 65102"):
+/// - strip: the source route carries it, the staged route does not. The
+///   decision is source-based, so the route stays suppressed toward the
+///   rs-control member 65102, which therefore cannot share the replay;
+/// - add: the source route is clean, the staged route carries it. It must
+///   not steer but must be scrubbed toward the rs-control member, which
+///   therefore cannot share the replay either.
+///
+/// Both compare against the per-peer oracle. Dropping the source-route half
+/// of the admission inventory makes the strip case red (the suppressed route
+/// reaches 65102); dropping the post-policy half makes the add case red (the
+/// control community reaches 65102 unscrubbed).
+#[tokio::test]
+async fn rs_control_admission_reads_source_and_post_policy_tags() {
+    let control = LargeCommunity {
+        global_admin: RS_AS,
+        local_data1: 0,
+        local_data2: 65_102,
+    };
+    let strip = rustbgpd_policy::RouteModifications {
+        large_communities_remove: vec![control],
+        ..rustbgpd_policy::RouteModifications::default()
+    };
+    let add = rustbgpd_policy::RouteModifications {
+        large_communities_add: vec![control],
+        ..rustbgpd_policy::RouteModifications::default()
+    };
+    let mut tagged = route(4, SOURCE, vec![]);
+    AttrSet::edit(&mut tagged.attributes, |attrs| {
+        attrs.push(PathAttribute::LargeCommunities(vec![control]));
+    });
+    for (case, modifications, extra) in [
+        ("strip", strip, vec![tagged]),
+        ("add", add, vec![route(4, SOURCE, vec![])]),
+    ] {
+        let chain = modifying_chain(modifications);
+        let mut joiners = vec![joiner(1, 65_101), rs_joiner(2, 65_102), joiner(3, 65_103)];
+        for joiner in &mut joiners {
+            joiner.export_policy = Some(chain.clone());
+        }
+        let grouped = run(false, &joiners, &extra, None).await;
+        let oracle = run(true, &joiners, &extra, None).await;
+        assert_eq!(grouped.streams, oracle.streams, "{case}");
+        assert_eq!(
+            grouped.first_turn,
+            vec![joiners[0].addr, joiners[2].addr],
+            "{case}: the rs-control member keeps its own replay"
+        );
+        let rs_table = assert_table_then_eor(&grouped, joiners[1].addr);
+        assert!(rs_table.shared_group_encode.is_none(), "{case}");
+        for peer in [joiners[0].addr, joiners[2].addr] {
+            assert!(
+                assert_table_then_eor(&grouped, peer)
+                    .shared_group_encode
+                    .is_some(),
+                "{case}"
+            );
+        }
+    }
+}
+
+/// A cohort member whose exact-export ceiling rejects one shared route keeps
+/// the rest of its table, records the rejection and loses only its own
+/// shared encode cell; its siblings keep the shared payload and encode.
+/// Streams match the per-peer oracle.
+#[tokio::test]
+async fn exact_export_rejection_stays_with_its_cohort_member() {
+    let mut joiners = vec![joiner(1, 65_101), joiner(2, 65_102), joiner(3, 65_103)];
+    joiners[1].max_len = 200;
+    // `CohortExactEncoder` sizes this route at 256 bytes (even third octet).
+    let oversized = route(4, SOURCE, vec![0xFDE8_0002]);
+    let grouped = run(false, &joiners, std::slice::from_ref(&oversized), None).await;
+    let oracle = run(true, &joiners, std::slice::from_ref(&oversized), None).await;
+    assert_eq!(grouped.streams, oracle.streams);
+    assert_eq!(
+        grouped.first_turn,
+        joiners.iter().map(|joiner| joiner.addr).collect::<Vec<_>>()
+    );
+    let limited = assert_table_then_eor(&grouped, joiners[1].addr);
+    assert!(limited.shared_group_encode.is_none());
+    assert!(
+        !limited
+            .announce
+            .iter()
+            .any(|route| route.prefix == oversized.prefix)
+    );
+    assert!(
+        grouped
+            .manager
+            .peer_unexportable
+            .contains_key(&IpAddr::V4(joiners[1].addr))
+    );
+    for peer in [joiners[0].addr, joiners[2].addr] {
+        let table = assert_table_then_eor(&grouped, peer);
+        assert!(table.shared_group_encode.is_some());
+        assert!(
+            table
+                .announce
+                .iter()
+                .any(|route| route.prefix == oversized.prefix)
+        );
+    }
 }
 
 /// Members with a local RFC 9234 role: the plain group's staging gate keeps
