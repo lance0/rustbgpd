@@ -150,12 +150,13 @@ impl EvpnSegmentRuntimeControl {
     /// so a refused or rolled-back apply never starts it. No-op when the
     /// task already runs, the set is empty, or without a slot.
     ///
-    /// Returns `false` when [`Self::close_for_shutdown`] closed the slot
-    /// while a segment is published: shutdown took the slot between the
-    /// converge's publish and this start, so the caller must fail the
-    /// converge rather than commit a segment no actor serves. The
-    /// publishes stay in place; the caller reports them as not restored.
-    /// The empty check and the transition both run under the slot mutex.
+    /// Returns `false` whenever [`Self::close_for_shutdown`] has closed the
+    /// slot, including for an empty segment set: shutdown took the slot
+    /// before this commit point, so the caller must fail the converge
+    /// rather than commit state (a first segment no actor serves, or the
+    /// final segment's removal) during teardown. The publishes stay in
+    /// place; the caller reports them as not restored. The closed check,
+    /// the empty check and the transition all run under the slot mutex.
     #[must_use]
     pub(crate) fn start_if_configured(&self) -> bool {
         #[cfg(test)]
@@ -172,6 +173,9 @@ impl EvpnSegmentRuntimeControl {
         let Some(mut state) = self.slot_state() else {
             return true;
         };
+        if matches!(*state, SegmentActorSlot::Closed) {
+            return false;
+        }
         if self.segments_tx.borrow().is_empty() {
             return true;
         }
