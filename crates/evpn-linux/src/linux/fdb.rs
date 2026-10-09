@@ -154,13 +154,20 @@ pub(crate) struct FdbDump {
 /// carries it, the bridge-master row doesn't); flag bools OR
 /// together so an entry that has both `extern_learn` (set by
 /// rustbgpd) and `master` (set by the bridge-FDB plumbing) reads
-/// owned normally. An unmarked static master overrides it to foreign.
+/// owned normally. An unmarked static master or unmarked self+dst row
+/// overrides it to foreign.
 fn merge_fdb_rows(existing: &mut KernelFdbEntry, incoming: &KernelFdbEntry) {
-    let foreign_static_master = |row: &KernelFdbEntry| {
-        !row.flags.extern_learn && row.flags.master && (row.flags.permanent || row.flags.noarp)
+    // Either leg written without the marker is foreign. The kernel keeps
+    // the marker per row: `bridge fdb replace MAC dev vxlanX self dst R`
+    // clears it on the VXLAN self row while our bridge master row keeps
+    // it, so OR-ing the flags alone would hand the operator's row back
+    // to the repair path.
+    let foreign_leg = |row: &KernelFdbEntry| {
+        !row.flags.extern_learn
+            && ((row.flags.master && (row.flags.permanent || row.flags.noarp))
+                || (row.flags.self_flag && row.dst.is_some()))
     };
-    let has_foreign_static_master =
-        foreign_static_master(existing) || foreign_static_master(incoming);
+    let has_foreign_leg = foreign_leg(existing) || foreign_leg(incoming);
     if existing.dst.is_none() && incoming.dst.is_some() {
         existing.dst = incoming.dst;
     }
@@ -182,7 +189,7 @@ fn merge_fdb_rows(existing: &mut KernelFdbEntry, incoming: &KernelFdbEntry) {
     existing.flags.noarp |= incoming.flags.noarp;
     existing.flags.master |= incoming.flags.master;
     existing.flags.self_flag |= incoming.flags.self_flag;
-    if has_foreign_static_master {
+    if has_foreign_leg {
         existing.flags.extern_learn = false;
     }
 }
@@ -945,6 +952,37 @@ mod tests {
         merge_fdb_rows(&mut foreign_master, &self_row);
         assert!(!foreign_master.flags.extern_learn);
         assert_eq!(foreign_master.dst, Some(ipa("10.0.0.2")));
+    }
+
+    #[test]
+    fn merge_unmarked_self_row_with_dst_reads_foreign() {
+        // `bridge fdb replace MAC dev vxlanX self dst R` drops the marker
+        // from the VXLAN self row only; our master row keeps it.
+        let marked_master = fdb_row(
+            None,
+            flags(FlagSet {
+                extern_learn: true,
+                master: true,
+                ..FlagSet::default()
+            }),
+        );
+        let operator_self = fdb_row(
+            Some("10.0.0.9"),
+            flags(FlagSet {
+                self_flag: true,
+                permanent: true,
+                ..FlagSet::default()
+            }),
+        );
+        for (first, second) in [
+            (&marked_master, &operator_self),
+            (&operator_self, &marked_master),
+        ] {
+            let mut acc = first.clone();
+            merge_fdb_rows(&mut acc, second);
+            assert!(!acc.flags.extern_learn);
+            assert_eq!(acc.dst, Some(ipa("10.0.0.9")));
+        }
     }
 
     #[test]

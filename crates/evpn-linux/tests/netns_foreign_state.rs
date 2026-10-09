@@ -385,6 +385,118 @@ async fn l2_foreign_takeover_row_survives_withdrawal_and_shutdown() {
     );
 }
 
+/// The VXLAN self row (the encap destination) for `mac`, if any.
+fn l2_self_row(mac: &str) -> Option<String> {
+    shell("bridge", &["fdb", "show", "dev", "vxlan100"])
+        .lines()
+        .find(|line| line.starts_with(mac) && line.split_whitespace().any(|t| t == "self"))
+        .map(str::to_owned)
+}
+
+fn has_tokens(row: &Option<String>, tokens: &str) -> bool {
+    row.as_deref().is_some_and(|row| {
+        let have: Vec<_> = row.split_whitespace().collect();
+        tokens.split_whitespace().all(|t| have.contains(&t))
+    })
+}
+
+/// An owned remote MAC whose VXLAN destination changes out of band.
+/// The kernel keeps `extern_learn` per row:
+///
+/// - `bridge fdb replace ... self dst X extern_learn` keeps the marker on
+///   the self row, so the next reconcile rewrites it to the route's VTEP;
+/// - `bridge fdb del ... self` leaves our marked bridge master row with
+///   no destination; the delete wakes the actor, which restores the row;
+/// - `bridge fdb replace ... self dst X` without the marker is an
+///   operator write: ownership is relinquished and the row survives
+///   withdrawal and shutdown.
+#[tokio::test]
+async fn l2_owned_destination_drift_is_repaired_and_unmarked_rewrite_relinquished() {
+    const TEST: &str = "l2_owned_destination_drift_is_repaired_and_unmarked_rewrite_relinquished";
+    if !netns_gate() {
+        eprintln!("skipping: set EVPN_LINUX_NETNS=1 to run privileged foreign-state test");
+        return;
+    }
+    if !is_inner() {
+        let ns = NetnsFixture::create("l2drift");
+        setup_l2_topology(&ns);
+        run_inner(&ns, TEST);
+        return;
+    }
+
+    let (intent_tx, mut report_rx, shutdown, actor_join) = spawn_reconcile_actor().await;
+    let mac = mac_str(l2_mac());
+    let owned = "dst 10.0.0.2 self extern_learn";
+
+    intent_tx.send(l2_intent(1, true)).unwrap();
+    let report = wait_for_report_generation(&mut report_rx, 1).await;
+    assert!(report.failed.is_empty(), "install: {:?}", report.failed);
+    assert!(has_tokens(&l2_self_row(&mac), owned), "install");
+
+    // 1. Marker-preserving destination change: repaired in one pass.
+    run(
+        "bridge",
+        &[
+            "fdb",
+            "replace",
+            &mac,
+            "dev",
+            "vxlan100",
+            "self",
+            "dst",
+            "10.0.0.9",
+            "extern_learn",
+        ],
+    );
+    let row = l2_self_row(&mac);
+    assert!(has_tokens(&row, "dst 10.0.0.9 extern_learn"), "{row:?}");
+    intent_tx.send(l2_intent(2, true)).unwrap();
+    let report = wait_for_report_generation(&mut report_rx, 2).await;
+    assert!(report.failed.is_empty(), "repair: {:?}", report.failed);
+    assert_eq!(report.foreign_state_counters, Default::default());
+    let row = l2_self_row(&mac);
+    assert!(has_tokens(&row, owned), "drifted dst not repaired: {row:?}");
+
+    // 2. Self row deleted, marked master row left without a destination.
+    //    The delete wakes the actor (FDB drift), and that pass restores it.
+    run("bridge", &["fdb", "del", &mac, "dev", "vxlan100", "self"]);
+    let report = tokio::time::timeout(Duration::from_secs(10), report_rx.recv())
+        .await
+        .expect("timed out waiting for the drift-wake pass")
+        .expect("dataplane report channel");
+    assert!(report.failed.is_empty(), "restore: {:?}", report.failed);
+    let row = l2_self_row(&mac);
+    assert!(has_tokens(&row, owned), "self row not restored: {row:?}");
+
+    // 3. Marker-clearing rewrite: foreign, never repaired over.
+    run(
+        "bridge",
+        &[
+            "fdb", "replace", &mac, "dev", "vxlan100", "self", "dst", "10.0.0.9",
+        ],
+    );
+    let row = l2_self_row(&mac);
+    assert!(
+        has_tokens(&row, "dst 10.0.0.9") && !has_tokens(&row, "extern_learn"),
+        "{row:?}"
+    );
+    intent_tx.send(l2_intent(3, true)).unwrap();
+    let report = wait_for_report_generation(&mut report_rx, 3).await;
+    assert_eq!(report.foreign_state_counters.owned_relinquished, 1);
+    let foreign = l2_self_row(&mac);
+    assert_eq!(foreign, row, "foreign self row was rewritten");
+
+    intent_tx.send(l2_intent(4, false)).unwrap();
+    wait_for_report_generation(&mut report_rx, 4).await;
+    assert_eq!(l2_self_row(&mac), foreign, "withdrawal");
+    shutdown.cancel();
+    tokio::time::timeout(Duration::from_secs(10), actor_join)
+        .await
+        .expect("actor shutdown timed out")
+        .expect("actor panicked");
+    assert_eq!(l2_self_row(&mac), foreign, "shutdown drain");
+}
+
 // ─────────────────────────────────────────────────────────────────
 // LAN-290: reserved NHID range single-writer contract
 // ─────────────────────────────────────────────────────────────────

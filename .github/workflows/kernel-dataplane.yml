@@ -920,6 +920,9 @@ jobs:
       - name: L2 foreign-takeover preservation netns test
         run: bash crates/evpn-linux/tests/docker/run-netns-tests.sh foreign_state_l2
 
+      - name: L2 owned-destination drift repair netns test
+        run: bash crates/evpn-linux/tests/docker/run-netns-tests.sh foreign_state_l2_dst
+
       - name: Reserved-NHID non-clobber netns test
         run: bash crates/evpn-linux/tests/docker/run-netns-tests.sh foreign_state_nhid
 
