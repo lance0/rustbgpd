@@ -297,7 +297,7 @@ rbgp policy check <file.rpol>                          # parse, typecheck, and r
 rbgp policy check <file.rpol> --coverage-matched-min 100 # require every source term to match a test route; --coverage-min gates evaluated terms separately
 rbgp policy fmt <file.rpol>... [--check]               # canonical .rpol formatter (in-place; --check for CI; - = stdin)
 rbgp policy test <file.rpol> --policy <name> --direction import|export [--neighbor <addr>]   # dry-run over the live RIB
-rbgp policy stats --direction import|export|both [--neighbor <addr>]  # live per-term hit counters
+rbgp policy stats --direction import|export|both [--neighbor <addr> | --allow-partial]  # live per-term hit counters
 rbgp policy counters --direction both                     # alias
 
 rbgp flowspec
@@ -404,7 +404,10 @@ compatibility evidence from an older or otherwise unreporting daemon, not the
 normal output from a current server.
 
 `policy explain` and `policy stats` require `--direction`; neither has a
-default. `policy explain --direction import` requires the daemon's
+default. `policy stats --allow-partial` applies only to fleet `import`/`both`
+reads (it conflicts with `--neighbor`): rows from sessions that exit during the
+read are dropped and their addresses listed in `incomplete_peer_addresses`.
+Without it, such a request fails whole. `policy explain --direction import` requires the daemon's
 import-decision cache, which is opt-in: set `[policy.explain] enabled = true` in the daemon config. On a
 stock daemon the command exits nonzero with that hint. `--direction export`
 is the `rib --prefix <cidr> advertised <addr> --explain` dry run under the
@@ -545,7 +548,9 @@ as raw unsigned 64-bit integers, preserving route-target and other extended
 community values. Both fields are empty arrays when the route has none.
 
 `evpn explain` selects one exact `mac-ip`, `imet`, `es`, `ip-prefix`,
-`ead-per-es`, or `ead-per-evi` key. Omit Type 2 `--ip` for MAC-only;
+`ead-per-es`, `ead-per-evi`, or `smet` key. Type 6 `smet` takes `--source`,
+`--group` (an exact IP or `*`; a wildcard group requires a wildcard source),
+`--originator-ip`, and an optional `--ethernet-tag`. Omit Type 2 `--ip` for MAC-only;
 Type 3/4 require `--originator-ip`, and Type 1/4 require `--esi`.
 Per-ES fixes the Ethernet Tag at MAX_ET; per-EVI requires a non-MAX_ET tag.
 Type 5 accepts nonzero tags and requires a canonical CIDR prefix.

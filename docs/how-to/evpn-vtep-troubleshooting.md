@@ -228,7 +228,7 @@ bias, whole-port AC-gate intent, and owned FDB-NHG refs. `df-pref` and
 `dont-preempt` are the configured values; `adv-df-pref` and
 `adv-dont-preempt` are what the local Type 4 route carries, which differ
 while RFC 9785 non-revertive recovery inherits another PE's preference.
-`df-recovery=pending:<ms>` means the segment is still waiting for remote
+`df-recovery=pending:<N>ms` (for example `pending:1500ms`) means the segment is still waiting for remote
 Type 4 routes before advertising; meanwhile the `adv-*` fields show the
 configured values. The matching gRPC surface is
 `EvpnService.ListEthernetSegments`.
@@ -257,7 +257,10 @@ recovery_delay_seconds = 30  # hold-off after carrier returns (0-3600)
 
 - **Carrier loss drains immediately** (cable pull and `ip link set
   ... down` both clear `IFF_LOWER_UP`). A bound link that does not
-  exist in the kernel counts as down — fail-closed toward drain.
+  exist in the kernel counts as down — fail-closed toward drain. For an
+  `esi = "auto-lacp"` segment, a missing bond also leaves the segment
+  NotReady with no ESI, so it originates nothing (see
+  [`auto-lacp` Ethernet Segment missing](#auto-lacp-ethernet-segment-missing-from-rbgp-evpn-es-list)).
 - **Recovery is held off** for `recovery_delay_seconds` after carrier
   returns, and the hold re-arms on every up edge, so a flapping
   circuit stays drained until it holds carrier for the full window.
@@ -508,7 +511,13 @@ value 1 is current).
    `evpn_es_drained{esi, reason}` / `rbgp evpn es list <esi>`.
 2. **This PE lost DF election** for every member VNI — check
    `evpn_df_role{esi, vni, role}`.
-3. A crash-stopped daemon can leave the port disabled (clean
+3. **DF recovery wait** — with `df_dont_preempt`, RFC 9785 recovery
+   holds every member VNI as non-DF while it collects remote Type 4
+   routes: about 3 s, and within 30 s of daemon start until every
+   established EVPN session has sent End-of-RIB (see `df_dont_preempt` in
+   [configuration](../reference/configuration.md)). `rbgp evpn es list <esi>` shows
+   `df-recovery=pending:<N>ms` meanwhile.
+4. A crash-stopped daemon can leave the port disabled (clean
    shutdown restores forwarding; a kill cannot). The next daemon
    start re-evaluates and re-opens it if this PE is DF, and a
    carrier flap re-enables it kernel-side regardless.

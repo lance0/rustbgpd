@@ -17,7 +17,7 @@ Prints one PASS/FAIL line for each of:
    CONDITION, and withdrawn at least SETTLE seconds after the source
    re-announced it;
 5. no receiver-bound UPDATE carries MP_REACH_NLRI or MP_UNREACH_NLRI;
-6. no NOTIFICATION was captured.
+6. no NOTIFICATION was captured; each one is decoded.
 
 A malformed PDML raises and exits non-zero.
 """
@@ -27,7 +27,7 @@ from __future__ import annotations
 import sys
 import xml.etree.ElementTree as ET
 
-from m114_wire_oracle import MP_CODES, NEXT_HOP, fields
+from m114_wire_oracle import MP_CODES, NEXT_HOP, fields, notification_verdict
 
 
 def prefixes(node: ET.Element, container: str, address: str) -> list[str]:
@@ -38,13 +38,11 @@ def prefixes(node: ET.Element, container: str, address: str) -> list[str]:
     ]
 
 
-def events(root: ET.Element) -> tuple[list[tuple], list[str], int]:
-    """Route events (time, src, dst, kind, prefix, NEXT_HOP count, next hops),
-    the destination of each UPDATE carrying an MP attribute, and the
-    NOTIFICATION count."""
+def events(root: ET.Element) -> tuple[list[tuple], list[str]]:
+    """Route events (time, src, dst, kind, prefix, NEXT_HOP count, next hops)
+    and the destination of each UPDATE carrying an MP attribute."""
     out: list[tuple] = []
     mp_dsts: list[str] = []
-    notifications = 0
     for packet in root.iter("packet"):
         ip = next((p for p in packet.iter("proto") if p.get("name") == "ip"), None)
         if ip is None:
@@ -57,8 +55,6 @@ def events(root: ET.Element) -> tuple[list[tuple], list[str], int]:
             kind = fields(bgp, "bgp.type")
             if not kind:
                 continue
-            if kind[0].get("show") == "3":
-                notifications += 1
             if kind[0].get("show") != "2":
                 continue
             codes = [f.get("show") for f in fields(bgp, "bgp.update.path_attribute.type_code")]
@@ -69,7 +65,7 @@ def events(root: ET.Element) -> tuple[list[tuple], list[str], int]:
                 out.append((when, src, dst, "withdraw", prefix, 0, []))
             for prefix in prefixes(bgp, "bgp.update.nlri", "bgp.nlri_prefix"):
                 out.append((when, src, dst, "announce", prefix, codes.count(NEXT_HOP), hops))
-    return out, mp_dsts, notifications
+    return out, mp_dsts
 
 
 def verdict(good: bool, message: str) -> str:
@@ -86,7 +82,7 @@ def judge(
     control: str,
     settle: float,
 ) -> list[str]:
-    all_events, mp_dsts, notifications = events(root)
+    all_events, mp_dsts = events(root)
     to_rx = [e for e in all_events if e[2] == receiver]
     lines = []
 
@@ -147,7 +143,7 @@ def judge(
     lines.append(
         verdict(not mp, f"{mp} receiver-bound UPDATE(s) carry MP_REACH_NLRI or MP_UNREACH_NLRI")
     )
-    lines.append(verdict(notifications == 0, f"{notifications} NOTIFICATION message(s) captured"))
+    lines.append(notification_verdict(root))
     return lines
 
 

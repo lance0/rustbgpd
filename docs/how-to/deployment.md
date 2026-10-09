@@ -970,7 +970,9 @@ systemd's `Restart=on-failure`. If the config moves the socket, set
 [Containerlab](https://containerlab.dev/) is the easiest way to get a
 working rustbgpd ↔ FRR session on your laptop with no real routers.
 The simplest topology in the repo is
-[`tests/interop/m0-frr.clab.yml`](../../tests/interop/m0-frr.clab.yml):
+[`tests/interop/m0-frr.clab.yml`](../../tests/interop/m0-frr.clab.yml)
+(abridged below; the file adds the config and start-script binds and the
+interface addresses):
 
 ```yaml
 name: m0-frr
@@ -996,8 +998,14 @@ docker build --target dev -t rustbgpd:dev .
 # Deploy
 sudo containerlab deploy -t tests/interop/m0-frr.clab.yml
 
-# Inspect (the test driver scripts under tests/interop/scripts/ show
-# the typical incantations for FRR vtysh + rbgp gRPC).
+# Start rustbgpd (the node runs `sleep infinity` until you do)
+sudo docker exec -d clab-m0-frr-rustbgpd /usr/local/bin/start-rustbgpd.sh
+
+# Check the session from the FRR side
+sudo docker exec clab-m0-frr-frr vtysh -c "show bgp summary"
+
+# More checks: the test driver scripts under tests/interop/scripts/ show
+# the typical incantations for FRR vtysh + rbgp gRPC.
 
 # Tear down
 sudo containerlab destroy -t tests/interop/m0-frr.clab.yml --cleanup
@@ -1042,8 +1050,10 @@ scaling out.
    `[global] ebgp_requires_policy` is off, carrying no routes in that
    direction when it is on); an RFC 8212 posture still inherited from legacy
    omission (`rfc8212_secure_default_ready` — set an explicit root
-   `config_epoch` plus `[global] ebgp_requires_policy`); and an `orr_vantage`
-   with no `linkstate`-negotiating neighbor. None is rejected — a permit-all
+   `config_epoch` plus `[global] ebgp_requires_policy`); an `orr_vantage`
+   with no `linkstate`-negotiating neighbor; and, when a gRPC TCP listener
+   sets a positive `tls_expiry_warning_seconds`, a TLS certificate whose
+   notAfter falls inside that window. None is rejected — a permit-all
    route server is a legitimate configuration — but none should reach
    production unnoticed.
 
@@ -1115,12 +1125,15 @@ These cover the config lifecycle, from bootstrap to reload:
 | `rustbgpd --check <file>` | Parse + validate; print `config OK`, `config VALID, <n> WARNINGS — NOT a clean check` (warnings framed on stderr; still exit 0), or a rustc-style diagnostic (exit 1). Does not start the daemon. |
 | `rustbgpd --check --strict <file>` | The same check, but any warning exits 1 instead of 0 — for CI and deployment gates that must not accept a valid-but-risky config. A clean check still exits 0. `--strict` without `--check` is an error (exit 2). |
 | `rustbgpd --migrate-config <pin-legacy\|prepare-secure\|downgrade-v0.64> --offline [--dry-run] <file>` | Rewrite the RFC 8212 posture representation in place, offline (Linux only). `pin-legacy` writes epoch 1 + explicit `false`; `prepare-secure` writes epoch 2 + explicit `true`; `downgrade-v0.64` preserves the effective boolean, removes the epoch, and requires `--validator` naming an exact v0.64.0 binary. `--dry-run` performs the same validation proof and discards the stage. `--offline` is an operator assertion, not a daemon probe — stop or quiesce the daemon first. |
-| `rustbgpd --diff <candidate> [<current>]` | Compare a candidate file against the current on-disk config (`<current>` defaults to `/etc/rustbgpd/config.toml`); print per-section change list with expected reload class. This is a static file-vs-file compare — to compare against the running daemon's view, use `rbgp config diff`. |
+| `rustbgpd --diff <candidate> [<current>]` | Compare a candidate file against the current on-disk config (`<current>` defaults to `/etc/rustbgpd/config.toml`); print per-section change list with expected reload class and the `SIGHUP reload route`. Exit 0 = no actionable changes, 1 = actionable changes, 2 = load error. This is a static file-vs-file compare — to compare against the running daemon's view, use `rbgp config diff`. |
 | `systemctl reload rustbgpd` (or `kill -HUP $(pidof rustbgpd)`) | Apply the diff. Live fields hot-apply; restart-required fields are pinned and logged at `ERROR` (the live values are kept). |
 
 The validation pipeline is the same in all three places: TOML parse
 → `validate()` → `ConfigDiff`. A config that passes `--check` will
-not error on `--diff`; a clean `--diff` will not error on reload.
+not error on `--diff`; a `--diff` that loads cleanly and does not report
+`SIGHUP reload route: rejected` will not error on reload. A `rejected` route
+means the reload would change nothing; split it as the reason says (see
+[SIGHUP reload routes](../reference/reload-matrix.md#sighup-reload-routes)).
 
 ## Observability
 
@@ -1205,14 +1218,21 @@ Deny attribution. The sentinel interpretation applies only when
 error rail (ADR-0103 Decision 4: checked-arithmetic failure, absent
 operand, fuel/loop-cap exhaustion, ...). These denies also appear in
 `bgp_policy_routes_total` as `action="deny"`; this counter separates
-"the policy said no" from "the policy is broken". Any nonzero rate
-deserves a look — `rbgp policy stats --direction both` names the failing chain, policy,
-and term (`eval_errors` count + `last_error` per chain), and the
-rate-limited daemon WARN carries the same blame line.
+"the policy said no" from "the policy is broken". The exception is
+`direction="condition"`: a conditional advertisement's `condition_policy`
+error denies no route and does not appear in `bgp_policy_routes_total`; it
+can leave the condition `unknown`. Any nonzero rate deserves a look. For
+`import` and `export` errors, `rbgp policy stats --direction both` names the
+failing chain, policy, and term (`eval_errors` count + `last_error` per
+chain), and the rate-limited daemon WARN carries the same blame line. For
+`condition` errors, `bgp_conditional_advertisement_condition{state="unknown"}`
+names the definition, and `rbgp rib --prefix P advertised PEER --explain` for
+a route its `advertise_policy` selects names the failing `condition_policy`
+and term in the `conditional_advertisement` step.
 
 ```promql
 # Any policy erroring anywhere is alert-worthy:
-sum by (kind) (rate(bgp_policy_eval_errors_total[5m])) > 0
+sum by (direction, kind) (rate(bgp_policy_eval_errors_total[5m])) > 0
 ```
 
 **Policy filtering visibility — gRPC scalar aggregates.** `NeighborState`

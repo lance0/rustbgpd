@@ -49,7 +49,7 @@ rustbgpd-vs-GoBGP comparison, which records the primary-source verification.
 | IPv6 Labeled Unicast | Partial[^mpls-rr] | Yes | Yes | Yes | No |
 | VPNv4 (RFC 4364) | Partial[^mpls-rr] | Yes | Yes | Yes | Yes |
 | VPNv6 | Partial[^mpls-rr] | Yes | Yes | Yes | Yes |
-| RT-Constrain (RFC 4684) | Partial[^rtc] | No[^rtc-frr] | Yes | Yes | No |
+| RT-Constrain (RFC 4684) | Partial[^rtc] | No[^rtc-frr] | No[^rtc-bird] | Yes | No |
 | L2VPN EVPN (RFC 7432) | Partial[^evpn] | Yes | Partial[^evpn-bird] | Yes | RIB only[^evpn-openbgpd] |
 | L2VPN VPLS | No | No | No | Yes | No |
 | IPv4 FlowSpec (RFC 8955) | Yes | Yes | Yes | Yes | Yes |
@@ -85,6 +85,12 @@ IPv4/IPv6 `Prefix` routes.
     [SAFI mapping](https://github.com/FRRouting/frr/blob/frr-10.7.1/lib/iana_afi.h#L86-L110)
     and [NLRI dispatch](https://github.com/FRRouting/frr/blob/frr-10.7.1/bgpd/bgp_packet.c#L313-L334).
     This claim is limited to that release.
+
+[^rtc-bird]: BIRD 3.3.3 does not implement RT-Constrain (SAFI 132): it is
+    absent from the
+    [BGP SAFI definitions](https://gitlab.nic.cz/labs/bird/-/blob/v3.3.3/proto/bgp/bgp.h#L31-L37)
+    and from the manual's BGP channel AFI/SAFI table, and the manual does not
+    cite RFC 4684. This claim is limited to that release.
 
 [^evpn]: rustbgpd EVPN is **alpha**; its local VTEP and dataplane support are
     Linux/VXLAN-only. Shipped and
@@ -138,7 +144,7 @@ IPv4/IPv6 `Prefix` routes.
     [8.8](https://marc.info/?l=openbsd-announce&m=173887198302373) announced
     "Preliminary support for EVPN in the RIB", and the
     [OpenBSD-current `bgpd.conf(5)`](https://man.openbsd.org/bgpd.conf)
-    documents `announce EVPN [enforce]` per neighbor. The pinned 9.2 release
+    documents `announce EVPN [enforce]` per neighbor. The pinned 9.3 release
     postdates 8.8; the announcement scopes the support to the RIB.
 
 ## Core Protocol
@@ -199,7 +205,16 @@ IPv4/IPv6 `Prefix` routes.
 | Policy dry-run against the live RIB | Yes | No | No | No | No |
 | Live per-term policy hit counters | Yes | No | No | No | No |
 | RFC 8212 default eBGP policy | Opt-in | Profile-dependent[^rfc8212-frr] | Yes[^rfc8212-bird] | No[^rfc8212-gobgp] | Yes[^rfc8212-openbgpd] |
+| Conditional advertisement (if present / if absent) | Alpha[^condadv] | Yes | No | No | No |
 
+[^condadv]: rustbgpd's opt-in IPv4/IPv6 unicast conditional advertisement
+    ([ADR-0137](../adr/0137-conditional-advertisement.md),
+    [cookbook](../cookbook/conditional-advertisement-backup.md)) is alpha and
+    outside the v1 inventory. FRR 10.7.1 documents
+    [`neighbor advertise-map ... exist-map|non-exist-map`](https://github.com/FRRouting/frr/blob/frr-10.7.1/doc/user/bgp.rst#bgp-conditional-advertisement).
+    The BIRD 3.3.3 manual, the GoBGP v4.10.0 tree and the OpenBGPD 9.3
+    `bgpd.conf(5)` describe no mechanism that gates one route's export on
+    another route's presence; these claims are limited to those releases.
 [^rfc8212-frr]: [FRR latest](https://docs.frrouting.org/en/latest/bgp.html#require-policy-on-ebgp)
     documents `bgp ebgp-requires-policy` as enabled by default in the
     traditional profile and disabled by default in the datacenter profile.
@@ -220,7 +235,7 @@ IPv4/IPv6 `Prefix` routes.
 | Feature | rustbgpd | FRR | BIRD | GoBGP | OpenBGPd |
 |---|:---:|:---:|:---:|:---:|:---:|
 | TCP MD5 (RFC 2385) | Yes | Yes | Yes | Yes | Yes |
-| TCP-AO (RFC 5925) | Static + dynamic-prefix keyrings; observation-gated live rotation; deprecated/unselected-key deletion on SIGHUP | No | Yes | Keychain API only[^tcpao-gobgp] | No |
+| TCP-AO (RFC 5925) | Static + dynamic-prefix keyrings; observation-gated live rotation; deprecated/unselected-key deletion on SIGHUP | No | Yes | Per-peer keychains (v4.10.0)[^tcpao-gobgp] | No |
 | GTSM / TTL Security | Configurable hops[^gtsm-distance] | Yes | Yes | Yes | Yes |
 | eBGP multihop enablement | None needed[^multihop-rustbgpd] | Required[^multihop-frr] | Required[^multihop-bird] | Configurable[^multihop-gobgp] | Required[^multihop-openbgpd] |
 | RPKI origin validation | Yes | Yes | Yes | Yes | Yes |
@@ -306,20 +321,19 @@ member individually.
 
 [^tcpao-gobgp]: GoBGP
     [v4.9.0](https://github.com/osrg/gobgp/releases/tag/v4.9.0) (2026-09-01)
-    adds a TCP-AO keychain API: keychains from the API or the configuration
-    file are added, updated and deleted on the server object
-    ([`pkg/config/config.go`](https://github.com/osrg/gobgp/blob/v4.9.0/pkg/config/config.go#L439-L575),
-    `pkg/server/tcp_ao.go`). At that tag no keychain is bound to a BGP
-    session: the Linux socket helper `AddTCPAOKeysSockopt`
-    ([`internal/pkg/netutils/tcp_ao_linux.go`](https://github.com/osrg/gobgp/blob/v4.9.0/internal/pkg/netutils/tcp_ao_linux.go#L34))
-    is called only from its test file, and `pkg/server` installs TCP MD5
-    keys on listeners
-    ([`server.go`](https://github.com/osrg/gobgp/blob/v4.9.0/pkg/server/server.go#L3567),
-    [`server.go`](https://github.com/osrg/gobgp/blob/v4.9.0/pkg/server/server.go#L3708)) but no TCP-AO key.
-    GoBGP master applies TCP-AO keys to peer sockets from commit
-    [`15e9be9`](https://github.com/osrg/gobgp/commit/15e9be9198ae51abad50b3d9b42aa63c3b462834)
-    (2026-09-15), which no release contained when checked on 2026-09-22.
-    Upstream source reading, not a rustbgpd/GoBGP interoperability receipt.
+    added a TCP-AO keychain API but bound no keychain to a BGP session.
+    [v4.10.0](https://github.com/osrg/gobgp/releases/tag/v4.10.0) (2026-10-04)
+    adds per-peer and peer-group TCP-AO configuration and state to the API,
+    `gobgp` CLI commands, and commit
+    [`15e9be9`](https://github.com/osrg/gobgp/commit/15e9be9198ae51abad50b3d9b42aa63c3b462834),
+    which installs a peer's keychain on matching listening sockets and on
+    outbound connections
+    ([`server.go`](https://github.com/osrg/gobgp/blob/v4.10.0/pkg/server/server.go#L3720-L3741)). Keychain key
+    additions and deletions propagate to listeners and established connections
+    on a best-effort basis
+    ([`server.go`](https://github.com/osrg/gobgp/blob/v4.10.0/pkg/server/server.go#L5790-L5867)); attaching, removing
+    or changing a peer's keychain restarts the session. Upstream source
+    reading at that tag, not a rustbgpd/GoBGP interoperability receipt.
 
 [^aspa]: rustbgpd ships RTR v2 ASPA input, role-aware upstream/downstream path
     verification selected by BGP Roles, best-path preference, policy matching
@@ -387,7 +401,7 @@ member individually.
     [openbgpd-portable/openbgpd-container](https://github.com/openbgpd-portable/openbgpd-container)
     and publishes it as
     [`openbgpd/openbgpd`](https://hub.docker.com/r/openbgpd/openbgpd) on
-    Docker Hub and Quay; the `9.2` tag was pushed 2026-08-30.
+    Docker Hub and Quay; the `9.3` tag was pushed 2026-10-07.
 
 [^lg]: This row records a looking-glass surface the project itself
     ships. rustbgpd's is the in-tree `examples/birdwatcher-adapter`, which
@@ -486,7 +500,8 @@ member individually.
     validated against FRR by M53 (ADR-0069); FRR-style pure-interface
     autodiscovery and the same link-local address on multiple interfaces are
     deferred. The experimental Link-Local Next Hop capability 77
-    (`draft-ietf-idr-linklocal-capability-06`) is an opt-in per neighbor.
+    (`draft-ietf-idr-linklocal-capability-06`) is opt-in per neighbor or peer group
+    (`link_local_next_hop = true`).
     FRR (`neighbor IFACE interface`), GoBGP (`neighbor-interface`),
     and BIRD (`fe80::x%iface`, plus RAdv-based AutoBGP added in 3.3.0 / 2.19.0
     on 2026-05-25) support interface autodiscovery. OpenBGPd has no interface /
@@ -653,13 +668,20 @@ cross-daemon roots at each of 0%, 10%, and 50% received-view overlap, at
 320 members × 183,040 generated IPv4 prefixes. rustbgpd completion p50 is
 0.584–0.801 seconds across the three overlaps, against BIRD 3.3.2's
 12.926–14.810 seconds and OpenBGPD 9.3's 44.010–63.948 seconds, measured
-2026-10-04 to 2026-10-05. BIRD 3.3.3, released 2026-10-01, is not yet
-measured. Every row has 320/320 sessions and zero parse errors. At 50%
+2026-10-04 to 2026-10-05. Every row has 320/320 sessions and zero parse errors. At 50%
 overlap, OpenBGPD's changed-observer gap p50 is shorter than rustbgpd's
 (377–517 against 591–627 ms). The
 [v0.68.0 receipt](../perf/irr-reload-v0680-2026-08.md), measured 2026-08-30,
 keeps the grouped control and its received-view delta verification; the
 older IRR receipts are historical records.
+
+A separate
+[2026-10-06 current-source receipt](../perf/irr-reload-current-comparators-2026-10-06.md)
+measures BIRD 3.3.3 and OpenBGPD 9.3 against unreleased rustbgpd source
+`dcc9b6384` at 0% overlap only: completion p50 was 0.578–0.606 s for
+rustbgpd, 12.493–14.490 s for BIRD 3.3.3 and 44.429–59.541 s for OpenBGPD
+9.3. It is not a release result, and BIRD 3.3.3 has no 10% or 50% overlap
+measurement yet.
 
 A separate [1,000-peer retained receipt](../perf/route-server-1000-2026-07.md),
 measured 2026-07-20 with a source-equivalent v0.68.0 rerun measured 2026-08-30,

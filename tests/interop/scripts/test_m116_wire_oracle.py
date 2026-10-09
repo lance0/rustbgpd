@@ -14,6 +14,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import m116_wire_oracle as oracle  # noqa: E402
+from test_m114_wire_oracle import notification_scenarios  # noqa: E402
 
 ORACLE = Path(__file__).resolve().parent / "m116_wire_oracle.py"
 PREFIX = "2001:db8:1160::/48"
@@ -110,6 +111,16 @@ class M116WireOracleTests(unittest.TestCase):
         notification = '<proto name="bgp"><field name="bgp.type" show="3"/></proto>'
         root = pdml(update(mp_reach(GLOBAL)), notification)
         self.assertEqual(verdicts(root), ["PASS", "PASS", "FAIL"])
+
+    def test_every_notification_fails_decoded(self) -> None:
+        cases = notification_scenarios("10.116.0.1", "10.116.0.2", "10.116.1.2")
+        for name, (want, segments) in cases.items():
+            with self.subTest(name):
+                root = pdml(update(mp_reach(GLOBAL)))
+                root.extend(ET.fromstring(f"<pdml>{''.join(segments)}</pdml>"))
+                lines = oracle.judge(root, EXPECTED)
+                self.assertEqual([x.split(" ", 1)[0] for x in lines[:2]], ["PASS", "PASS"])
+                self.assertEqual(lines[2], want)
 
     def test_attribute_length_mismatch_raises(self) -> None:
         broken = mp_reach(GLOBAL)[:-2]

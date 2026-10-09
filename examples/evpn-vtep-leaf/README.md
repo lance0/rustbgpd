@@ -2,9 +2,8 @@
 
 Leaf-mode rustbgpd config: an iBGP peering to one or more spine route
 reflectors, plus three local **EVPN instances** declared in TOML. This
-is the operator-facing surface of the Gate 7a / 7b / 7b+1 bidirectional
-VTEP alpha path: the daemon consumes the resolved `[[evpn_instances]]`
-table to program remote Type 2 routes into the Linux bridge FDB,
+is the operator-facing surface of the bidirectional VTEP alpha path: the
+daemon consumes the resolved `[[evpn_instances]]` table to program remote Type 2 routes into the Linux bridge FDB,
 originate Type 2 routes from kernel-learned local MACs, and emit one
 Type 3 IMET per configured L2VNI.
 
@@ -141,9 +140,9 @@ rbgp evpn diagnose
   which only records threshold crossings. The daemon also ships
   `action = "suppress_local"`, which withdraws and suppresses local Type 2
   originations for the duplicate MAC until recovery; `rbgp evpn clear-duplicate-mac` clears a quarantine early.
-- Configure an IP-VRF / L3VNI tenant. Gate 9 Type 5 origination and
-  symmetric Interface-less IRB dataplane programming ship in the main daemon
-  (`[[evpn_ip_vrfs]]`, `rbgp evpn vrfs`, M39), but this example is kept
+- Configure an IP-VRF / L3VNI tenant. Type 5 origination and symmetric
+  Interface-less IRB dataplane programming ship in the main daemon
+  (`[[evpn_ip_vrfs]]`, `rbgp evpn vrfs`), but this example is kept
   as a single-homed L2VNI leaf and intentionally omits the L3VNI/VRF pieces.
 
 ## Related
