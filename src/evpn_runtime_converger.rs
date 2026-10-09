@@ -113,6 +113,25 @@ pub(crate) trait DaemonEvpnRuntimeConverger: Send + Sync {
     fn segment_closed_for_shutdown(&self) -> bool {
         false
     }
+
+    /// ADR-0085 fail-closed seed: hold the `Link` drain reason for newly
+    /// added interface-bound segments before the converge publishes them,
+    /// so no actor originates for them until the link coordinator's
+    /// first carrier probe, which runs only after the commit publishes
+    /// the bindings. Returns the prior reason map for
+    /// [`Self::restore_link_drain`], or `None` when nothing changed.
+    fn seed_link_drain(
+        &self,
+        esis: &BTreeSet<rustbgpd_wire::EthernetSegmentIdentifier>,
+    ) -> Option<Arc<crate::evpn_es_drain::EsDrainReasonMap>> {
+        let _ = esis;
+        None
+    }
+
+    /// Undo [`Self::seed_link_drain`] after an apply that did not commit.
+    fn restore_link_drain(&self, prior: Arc<crate::evpn_es_drain::EsDrainReasonMap>) {
+        let _ = prior;
+    }
 }
 
 fn apply_task_join_error(context: &str, error: &JoinError) -> GrpcEvpnRuntimeApplyError {
@@ -357,13 +376,7 @@ impl EvpnRuntimeReloadApply {
             let response = this
                 .apply_candidate_config_locked(&config, validate_only, || {})
                 .await?;
-            if !validate_only
-                && matches!(
-                    response.outcome,
-                    value if value == proto::EvpnRuntimeApplyOutcome::EvpnRuntimeApplyNoop as i32
-                        || value == proto::EvpnRuntimeApplyOutcome::EvpnRuntimeApplyCommitted as i32
-                )
-            {
+            if !validate_only && apply_commits(&response) {
                 this.set_committed_config(&config);
             }
             Ok(response)
@@ -546,7 +559,31 @@ impl EvpnRuntimeReloadApply {
             ));
         }
         let candidate = evpn_runtime_candidate_from_config(config, &self.auto_lacp_esis)?;
-        apply_evpn_runtime_candidate_locked(
+        // ADR-0085 fail-closed: the link coordinator first probes a new
+        // binding only after the commit publishes it, so a newly added
+        // bound segment starts link-drained and originates nothing until
+        // that probe finds its link up.
+        let seeded = if validate_only || self.es_link_bindings_tx.is_none() {
+            None
+        } else {
+            let committed: BTreeSet<_> = self
+                .coordinator
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .model()
+                .ethernet_segments()
+                .iter()
+                .map(|segment| segment.esi)
+                .collect();
+            let added: BTreeSet<_> = config
+                .resolve_es_link_bindings(&self.auto_lacp_esis)
+                .map_err(|err| GrpcEvpnRuntimeApplyError::InvalidArgument(err.to_string()))?
+                .into_keys()
+                .filter(|esi| !committed.contains(esi))
+                .collect();
+            self.converger.seed_link_drain(&added)
+        };
+        let result = apply_evpn_runtime_candidate_locked(
             candidate,
             validate_only,
             &self.coordinator,
@@ -555,7 +592,13 @@ impl EvpnRuntimeReloadApply {
             begin_mutation,
             self.forwarding_state.as_deref(),
         )
-        .await
+        .await;
+        if let Some(prior) = seeded
+            && !result.as_ref().is_ok_and(apply_commits)
+        {
+            self.converger.restore_link_drain(prior);
+        }
+        result
     }
 }
 
@@ -611,6 +654,12 @@ fn classify_reload_terminal(
         ) => EvpnRuntimeReloadTerminal::PublicationAmbiguous(error),
         Err(error) => EvpnRuntimeReloadTerminal::KnownDivergence(error),
     }
+}
+
+/// Whether an apply response advances the committed config.
+fn apply_commits(response: &proto::ApplyEvpnRuntimeResponse) -> bool {
+    response.outcome == proto::EvpnRuntimeApplyOutcome::EvpnRuntimeApplyNoop as i32
+        || response.outcome == proto::EvpnRuntimeApplyOutcome::EvpnRuntimeApplyCommitted as i32
 }
 
 fn response_to_reload_outcome(
@@ -2540,6 +2589,35 @@ impl DaemonEvpnRuntimeConverger for EvpnRuntimeActorConverger {
         self.segment
             .as_ref()
             .is_some_and(evpn_segment::EvpnSegmentRuntimeControl::is_closed_for_shutdown)
+    }
+
+    fn seed_link_drain(
+        &self,
+        esis: &BTreeSet<rustbgpd_wire::EthernetSegmentIdentifier>,
+    ) -> Option<Arc<crate::evpn_es_drain::EsDrainReasonMap>> {
+        let mut prior = None;
+        for esi in esis {
+            if let Some(transition) =
+                self.es_drain
+                    .set_reason(*esi, crate::evpn_es_drain::EsDrainReason::Link, true)
+            {
+                prior.get_or_insert(transition.prior_reasons);
+            }
+        }
+        // A closed control means teardown; the shutdown guard refuses it.
+        if prior.is_some()
+            && let Some(segment) = &self.segment
+        {
+            let _ = segment.replace_drained_esis(self.es_drain.snapshot());
+        }
+        prior
+    }
+
+    fn restore_link_drain(&self, prior: Arc<crate::evpn_es_drain::EsDrainReasonMap>) {
+        self.es_drain.restore(prior);
+        if let Some(segment) = &self.segment {
+            let _ = segment.replace_drained_esis(self.es_drain.snapshot());
+        }
     }
 
     fn validate_availability(

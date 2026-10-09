@@ -612,6 +612,90 @@ async fn first_explicit_ethernet_segment_apply_starts_the_segment_actor_live() {
 }
 
 #[tokio::test]
+async fn first_bound_segment_starts_link_drained_until_the_link_coordinator_probes() {
+    // The link coordinator first probes a new binding only after the
+    // commit publishes it. The live-started actor must therefore start
+    // with the segment link-drained and originate no Type 1/4 for it,
+    // even when the bound link is down or missing.
+    let baseline = load_runtime_test_config(l2vni_runtime_candidate_toml(), "baseline");
+    let bound_toml = format!(
+        "{}interface = \"bond0\"\n",
+        l2vni_one_es_runtime_candidate_toml()
+    );
+    let candidate = load_runtime_test_config(&bound_toml, "candidate");
+    let esis = crate::config::AutoLacpEsis::default();
+    let esi = candidate.resolve_ethernet_segments_with(&esis).unwrap()[0].esi;
+    let coordinator = coordinator_from_config(&baseline, &esis);
+    let (rib_tx, rib_rx) = mpsc::channel::<RibUpdate>(64);
+    let injects = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+    let _rib = runtime_converger_rib_responder(rib_rx, injects.clone());
+    let instances = Arc::new(baseline.resolve_evpn_instances().unwrap());
+    let (segment, started) = deferred_segment_control(&instances, rib_tx.clone());
+    let mut df_status = segment.df_status();
+    let converger = segment_only_converger(rib_tx.clone(), segment.clone(), None);
+    let drain = converger.es_drain.clone();
+    let (bindings_tx, bindings_rx) =
+        watch::channel(crate::evpn_es_link_drain::EsLinkBindings::default());
+    let apply = EvpnRuntimeReloadApply::new(
+        coordinator,
+        Arc::new(tokio::sync::Mutex::new(())),
+        Arc::new(converger),
+        baseline,
+    )
+    .with_es_link_bindings_publisher(Arc::new(bindings_tx));
+
+    let applied = apply
+        .apply_config(&candidate)
+        .await
+        .expect("first bound segment applies");
+    assert_eq!(applied.outcome, EvpnRuntimeReloadOutcome::Committed);
+    assert!(started.load(std::sync::atomic::Ordering::SeqCst));
+    assert!(bindings_rx.borrow().contains_key(&esi));
+    assert_eq!(
+        drain.reasons_for(esi),
+        BTreeSet::from([crate::evpn_es_drain::EsDrainReason::Link])
+    );
+
+    // The actor publishes DF status after its initial origination pass;
+    // a RIB round trip after that flushes anything it queued before.
+    df_status.changed().await.unwrap();
+    let (reply, flushed) = tokio::sync::oneshot::channel();
+    rib_tx
+        .send(RibUpdate::QueryEvpnRoutes {
+            filter: None,
+            reply,
+        })
+        .await
+        .unwrap();
+    flushed.await.unwrap();
+    let originated: Vec<_> = injects
+        .lock()
+        .await
+        .iter()
+        .filter(|key| {
+            matches!(
+                key,
+                rustbgpd_wire::EvpnRouteKey::EadPerEs { esi: seen, .. }
+                    | rustbgpd_wire::EvpnRouteKey::EadPerEvi { esi: seen, .. }
+                    | rustbgpd_wire::EvpnRouteKey::Es { esi: seen, .. }
+                    if *seen == esi
+            )
+        })
+        .copied()
+        .collect();
+    assert!(
+        originated.is_empty(),
+        "no Type 1/4 before the link coordinator probes: {originated:?}"
+    );
+
+    segment
+        .close_for_shutdown()
+        .expect("the live-started actor is handed to the drain")
+        .shutdown()
+        .await;
+}
+
+#[tokio::test]
 async fn failed_first_segment_converge_leaves_the_segment_actor_unstarted() {
     // The Type 2 originator closed under the apply: the converge fails,
     // nothing is committed, and the deferred actor never starts — no
