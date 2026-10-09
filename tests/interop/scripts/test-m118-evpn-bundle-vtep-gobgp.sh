@@ -108,6 +108,16 @@ gobgp global rib add -a evpn prefix 203.0.118.0/24 etag 10 label 10500 \
 qualify "unsupported routes affect only the exact per-member and Type 5 drop reasons" negative_drops
 qualify "every unsupported input is observed intact in the received RIB" retained
 qualify "negative routes leave both positive FDB members intact" received
+# EAD has no MAC: compare every row so unsupported inputs cannot change flood
+# entries or any other FDB state outside the named-MAC assertions.
+LC_ALL=C sort "$OUT/received-fdb.txt" > "$OUT/baseline-fdb-sorted.txt"
+LC_ALL=C sort "$OUT/fdb.txt" > "$OUT/negative-fdb-sorted.txt"
+if ! diff -u "$OUT/baseline-fdb-sorted.txt" "$OUT/negative-fdb-sorted.txt" > "$OUT/negative-fdb.diff"; then
+    cat "$OUT/negative-fdb.diff"
+    fail "unsupported routes altered the complete FDB inventory"
+    exit 1
+fi
+ok "unsupported routes left the complete FDB inventory unchanged"
 docker exec "$VTEP" ip route show table 10500 > "$OUT/negative-vrf-routes.txt"
 if grep -Fq 203.0.118.0/24 "$OUT/negative-vrf-routes.txt"; then
     fail "non-zero-tag Type 5 installed a kernel route"
