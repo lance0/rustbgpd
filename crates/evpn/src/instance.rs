@@ -27,6 +27,50 @@ use crate::route_target::RouteTarget;
 /// Maximum 24-bit VXLAN Network Identifier (RFC 8365 §5).
 pub const MAX_VNI: u32 = (1 << 24) - 1;
 
+/// Largest Ethernet Tag a VLAN-aware bundle member may use (ADR-0092
+/// amendment B2). Zero means VLAN-Based service and `0xFFFFFFFF` is the
+/// reserved per-ES value, so bundle members use `1..=MAX_BUNDLE_ETHERNET_TAG`.
+pub const MAX_BUNDLE_ETHERNET_TAG: u32 = (1 << 24) - 1;
+
+/// Why the VTEP skips a remote route that selects a local L2VNI by VNI and
+/// Route Target (ADR-0092 amendment D). The route stays in Adj-RIB-In and is
+/// still reflected; only local consumption is refused.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum L2RemoteRouteDropReason {
+    /// The route's Ethernet Tag differs from the instance's tag.
+    EthernetTagMismatch,
+    /// `<RT, Ethernet Tag>` selects a bundle member but the route carries a
+    /// different VNI (locally assigned VNIs are unsupported).
+    VniMismatch,
+    /// Multi-homed route (non-zero ESI Type 2, or EAD-per-EVI) for a
+    /// bundle member.
+    MultihomingUnsupported,
+}
+
+impl L2RemoteRouteDropReason {
+    /// Stable, bounded label for Prometheus and status surfaces.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::EthernetTagMismatch => "ethernet_tag_mismatch",
+            Self::VniMismatch => "vni_mismatch",
+            Self::MultihomingUnsupported => "multihoming_unsupported",
+        }
+    }
+}
+
+/// Local-consumption decision for one remote route against one instance.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EviImport {
+    /// The route belongs to this EVI and the VTEP consumes it.
+    Accepted,
+    /// The route is not addressed to this EVI (VNI, Route Target, next hop
+    /// or encapsulation); this is not a drop.
+    NotApplicable,
+    /// The route selects this EVI, but the VTEP cannot consume it.
+    Dropped(L2RemoteRouteDropReason),
+}
+
 /// Whether an advertisement can be consumed by the local VXLAN profile.
 /// RFC 8365 §6 requires a common advertised encapsulation; absence uses the
 /// statically configured VXLAN fallback. Global retention/export is separate.
@@ -189,6 +233,11 @@ pub struct EvpnInstance {
     /// This is a kernel/dataplane binding only. EVPN Type 2 / Type 3 /
     /// EAD-per-EVI routes keep Ethernet Tag ID `0`.
     pub bridge_vlan: Option<BridgeVlan>,
+    /// EVPN Ethernet Tag this instance consumes: `0` for VLAN-Based
+    /// service, the configured member tag for a VLAN-aware bundle row
+    /// (ADR-0092). Remote routes under any other tag are dropped at VTEP
+    /// projection with [`L2RemoteRouteDropReason::EthernetTagMismatch`].
+    pub ethernet_tag: EthernetTagId,
     /// Originate Type 2 routes for the SVI's MAC address (RFC 9135 §6.1).
     /// Wired through to origination only once Type 2 origination
     /// lands; persisted on the domain type so the operator-facing
@@ -253,6 +302,7 @@ impl EvpnInstance {
             local_vtep_ip,
             bridge,
             bridge_vlan: None,
+            ethernet_tag: EthernetTagId(0),
             advertise_svi_mac,
             sticky_macs: BTreeSet::new(),
             apply_aliasing_ecmp: true,
@@ -261,7 +311,7 @@ impl EvpnInstance {
         })
     }
 
-    /// Whether a remote Type 2 is eligible for this local VLAN-based service.
+    /// Whether a remote Type 2 is eligible for this local service.
     ///
     /// Call before discarding path attributes for forwarding, mobility, or
     /// gateway-IP recursion. This does not filter global RIB retention or export.
@@ -276,10 +326,7 @@ impl EvpnInstance {
             && self.imports_evi(route.label1.as_vni(), route.ethernet_tag, attributes)
     }
 
-    /// Whether a route belongs to this local VLAN-based EVI: matching VNI,
-    /// zero Ethernet Tag, at least one configured Route Target, and compatible
-    /// encapsulation for the local VXLAN profile.
-    /// This gates local consumption, not global RIB retention or export.
+    /// Whether a route belongs to this local EVI; see [`Self::evi_import`].
     #[must_use]
     pub fn imports_evi(
         &self,
@@ -287,15 +334,37 @@ impl EvpnInstance {
         ethernet_tag: EthernetTagId,
         attributes: &[PathAttribute],
     ) -> bool {
-        vni == self.id.as_u32()
-            && ethernet_tag.0 == 0
+        self.evi_import(vni, ethernet_tag, attributes) == EviImport::Accepted
+    }
+
+    /// Classify a route for local consumption: it is accepted with the
+    /// matching VNI, at least one configured Route Target, compatible
+    /// encapsulation for the local VXLAN profile, and this instance's
+    /// Ethernet Tag. A route that matches VNI and RT under another tag is a
+    /// counted drop rather than a silent miss.
+    /// This gates local consumption, not global RIB retention or export.
+    #[must_use]
+    pub fn evi_import(
+        &self,
+        vni: u32,
+        ethernet_tag: EthernetTagId,
+        attributes: &[PathAttribute],
+    ) -> EviImport {
+        let selected = vni == self.id.as_u32()
             && vxlan_encapsulation_compatible(attributes)
             && attributes
                 .iter()
                 .filter_map(PathAttribute::extended_communities)
                 .flatten()
                 .filter_map(|ec| RouteTarget::from_extended_community(*ec))
-                .any(|rt| self.route_targets.contains(&rt))
+                .any(|rt| self.route_targets.contains(&rt));
+        if !selected {
+            EviImport::NotApplicable
+        } else if ethernet_tag != self.ethernet_tag {
+            EviImport::Dropped(L2RemoteRouteDropReason::EthernetTagMismatch)
+        } else {
+            EviImport::Accepted
+        }
     }
 
     /// Replace the sticky-MAC set on this instance. Used by the config
@@ -311,6 +380,13 @@ impl EvpnInstance {
     #[must_use]
     pub const fn with_bridge_vlan(mut self, bridge_vlan: Option<BridgeVlan>) -> Self {
         self.bridge_vlan = bridge_vlan;
+        self
+    }
+
+    /// Attach the EVPN Ethernet Tag parsed from config (ADR-0092).
+    #[must_use]
+    pub const fn with_ethernet_tag(mut self, ethernet_tag: EthernetTagId) -> Self {
+        self.ethernet_tag = ethernet_tag;
         self
     }
 
@@ -619,6 +695,50 @@ mod tests {
                 ]
             ));
         }
+    }
+
+    #[test]
+    fn evi_import_counts_a_tag_mismatch_only_after_vni_and_rt_select_the_evi() {
+        use rustbgpd_wire::EthernetTagId;
+        let matching = [PathAttribute::ExtendedCommunities(vec![
+            rt("65000:100").to_extended_community(),
+        ])];
+        let foreign = [PathAttribute::ExtendedCommunities(vec![
+            rt("65000:999").to_extended_community(),
+        ])];
+        let tag_mismatch = EviImport::Dropped(L2RemoteRouteDropReason::EthernetTagMismatch);
+        let vlan_based = make_instance(100, "65000:100", "10.0.0.1");
+        assert_eq!(
+            vlan_based.evi_import(100, EthernetTagId(0), &matching),
+            EviImport::Accepted
+        );
+        assert_eq!(
+            vlan_based.evi_import(100, EthernetTagId(10), &matching),
+            tag_mismatch
+        );
+        // Another EVI's route is not a drop, whatever its tag.
+        assert_eq!(
+            vlan_based.evi_import(100, EthernetTagId(10), &foreign),
+            EviImport::NotApplicable
+        );
+        assert_eq!(
+            vlan_based.evi_import(200, EthernetTagId(10), &matching),
+            EviImport::NotApplicable
+        );
+
+        let member = vlan_based.with_ethernet_tag(EthernetTagId(10));
+        assert_eq!(
+            member.evi_import(100, EthernetTagId(10), &matching),
+            EviImport::Accepted
+        );
+        assert_eq!(
+            member.evi_import(100, EthernetTagId(0), &matching),
+            tag_mismatch
+        );
+        assert_eq!(
+            L2RemoteRouteDropReason::EthernetTagMismatch.as_str(),
+            "ethernet_tag_mismatch"
+        );
     }
 
     #[test]

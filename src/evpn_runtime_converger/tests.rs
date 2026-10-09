@@ -2087,6 +2087,65 @@ async fn apply_evpn_runtime_validate_only_plans_without_advancing() {
     assert_eq!(coordinator.lock().unwrap().model().generation().as_u64(), 1);
 }
 
+/// ADR-0092 amendment H: a runtime candidate whose first Ethernet Segment
+/// names a `vlan_aware_bundle` row is rejected before commit, for a dry run
+/// and a real apply alike. Written against the restart-only first-ES add of
+/// today; the live first-ES add (LAN-2061) must keep resolving the full
+/// candidate through `resolve_evpn_instances` for this to hold.
+#[tokio::test]
+async fn apply_evpn_runtime_rejects_first_segment_naming_a_bundle_row() {
+    let current = runtime_candidate_from_toml(l2vni_runtime_candidate_toml());
+    let coordinator = Arc::new(Mutex::new(rustbgpd_evpn::EvpnRuntimeCoordinator::new(
+        current.instances().clone(),
+        current.ip_vrfs().clone(),
+        current.ethernet_segments().to_vec(),
+    )));
+    let apply_lock = tokio::sync::Mutex::new(());
+    let converger = TestRuntimeConverger::failed("a bundle candidate must not converge");
+    let candidate_toml = format!(
+        r#"{}
+[[evpn_instances]]
+vni = 10010
+rd = "65000:10010"
+route_targets = ["65000:1000"]
+local_vtep_ip = "10.0.0.1"
+service_interface = "vlan_aware_bundle"
+ethernet_tag = 10
+
+[[ethernet_segments]]
+esi = "00:00:00:00:00:00:00:00:00:01"
+member_vnis = [10010]
+originator_ip = "10.0.0.1"
+"#,
+        l2vni_runtime_candidate_toml()
+    );
+    for validate_only in [true, false] {
+        let error = apply_evpn_runtime_request(
+            &proto::ApplyEvpnRuntimeRequest {
+                candidate_toml: candidate_toml.clone(),
+                validate_only,
+            },
+            coordinator.as_ref(),
+            &apply_lock,
+            &converger,
+        )
+        .await
+        .unwrap_err();
+        let GrpcEvpnRuntimeApplyError::InvalidArgument(message) = error else {
+            panic!("expected InvalidArgument, got: {error:?}");
+        };
+        assert!(
+            message.contains(
+                "vni 10010: ethernet segment esi \"00:00:00:00:00:00:00:00:00:01\" lists this \
+                 vlan_aware_bundle row in member_vnis; multi-homing is not supported for \
+                 bundle members yet"
+            ),
+            "{message}"
+        );
+        assert_eq!(coordinator.lock().unwrap().model().generation().as_u64(), 1);
+    }
+}
+
 #[tokio::test]
 async fn apply_evpn_runtime_validate_only_rejects_unsupported_shape() {
     // LAN-214 #9: a dry-run must reject what a real apply rejects. An

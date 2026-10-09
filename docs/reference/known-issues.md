@@ -440,6 +440,16 @@ resolved.
   While NotReady, local MACs on the segment's VNIs are advertised without an
   ESI. Type 2 (STP) derivation is not implemented. See
   [Auto-derived ESI](configuration.md#auto-derived-esi-lacp-type-1).
+- **The VTEP serves only the VLAN-Based EVPN service (Ethernet Tag `0`).**
+  `service_interface = "vlan_aware_bundle"` rows are checked against the
+  [bundle rules](configuration.md#validation) and then rejected as not
+  supported yet. A remote Type 1 EAD-per-EVI or Type 2 route that matches a
+  local L2VNI under a non-zero Ethernet Tag is not programmed and is counted
+  in `evpn_l2_remote_route_drops{reason="ethernet_tag_mismatch"}`. A Type 5
+  route with a non-zero Ethernet Tag is not imported and is counted as
+  `non_zero_ethernet_tag` in `evpn_ip_vrf_remote_prefix_drops`. Reflection of
+  these routes is unaffected. See
+  [ADR-0092](../adr/0092-evpn-vlan-aware-bundle-service.md).
 - **Family scope is still limited.** MP-BGP supports AFI/SAFI negotiation,
   but rustbgpd currently implements IPv4/IPv6 unicast (AFI 1/2, SAFI 1),
   IPv4/IPv6 FlowSpec (AFI 1/2, SAFI 133), L2VPN/EVPN (AFI 25, SAFI

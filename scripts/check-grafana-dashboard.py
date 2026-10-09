@@ -52,6 +52,7 @@ EVPN_METRICS: dict[str, tuple[str, tuple[str, ...]]] = {
     "evpn_ip_vrf_originated_routes": ("gauge", ("vrf",)),
     "evpn_ip_vrf_installed_routes": ("gauge", ("vrf",)),
     "evpn_ip_vrf_remote_prefix_drops": ("gauge", ("vrf", "reason")),
+    "evpn_l2_remote_route_drops": ("gauge", ("vni", "reason")),
     "evpn_managed_netdev_state": (
         "gauge",
         ("class", "name", "desired", "state"),

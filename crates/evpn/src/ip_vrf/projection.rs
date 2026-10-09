@@ -728,6 +728,16 @@ pub enum DropReason {
         observed_vni: u32,
         configured_vni: u32,
     },
+    /// The route matched an IP-VRF but carries a non-zero Ethernet Tag.
+    /// Type 5 VLAN-aware bundle semantics are undefined here (ADR-0092
+    /// Decision 3), so the VTEP does not import it; the route stays in the
+    /// RIB and is still reflected.
+    NonZeroEthernetTag {
+        prefix: EvpnIpPrefixValue,
+        next_hop: IpAddr,
+        vrf: String,
+        ethernet_tag: u32,
+    },
 }
 
 impl DropReason {
@@ -751,6 +761,7 @@ impl DropReason {
             Self::UnsupportedEsiOverlayIndex { .. } => "unsupported_esi_overlay_index",
             Self::SelfOriginated { .. } => "self_originated",
             Self::L3VniMismatch { .. } => "l3vni_mismatch",
+            Self::NonZeroEthernetTag { .. } => "non_zero_ethernet_tag",
         }
     }
 
@@ -770,7 +781,8 @@ impl DropReason {
             | Self::AmbiguousEsiOverlayIndex { vrf, .. }
             | Self::UnsupportedEsiOverlayIndex { vrf, .. }
             | Self::SelfOriginated { vrf, .. }
-            | Self::L3VniMismatch { vrf, .. } => vrf,
+            | Self::L3VniMismatch { vrf, .. }
+            | Self::NonZeroEthernetTag { vrf, .. } => vrf,
             Self::NoMatchingIpVrf { .. } | Self::MissingRouterMac { .. } => UNSCOPED_DROP_VRF_LABEL,
         }
     }
@@ -931,6 +943,15 @@ where
                     vrf: vrf.name.clone(),
                     observed_vni: route.l3vni,
                     configured_vni: vrf.id.as_u32(),
+                });
+                continue;
+            }
+            if route.ethernet_tag.0 != 0 {
+                table.drops.push(DropReason::NonZeroEthernetTag {
+                    prefix: route.prefix,
+                    next_hop: route.next_hop,
+                    vrf: vrf.name.clone(),
+                    ethernet_tag: route.ethernet_tag.0,
                 });
                 continue;
             }
@@ -1672,12 +1693,32 @@ mod tests {
         ));
     }
 
+    /// ADR-0092 Decision 3: a Type 5 with a non-zero Ethernet Tag is never
+    /// imported, and the drop is scoped to the IP-VRF it would have entered.
+    #[test]
+    fn non_zero_ethernet_tag_type5_drops_with_reason() {
+        let vrfs = one_vrf("blue", 5000, "10.0.0.1", &["65000:5000"]);
+        let mut tagged = route(v4([10, 1, 0, 0], 24), "10.0.0.2", &["65000:5000"]);
+        tagged.ethernet_tag = EthernetTagId(10);
+        let untagged = route(v4([10, 2, 0, 0], 24), "10.0.0.2", &["65000:5000"]);
+        let table = project_ip_prefix_routes(&vrfs, vec![tagged, untagged]);
+        assert_eq!(table.len(), 1, "only the tag-0 route imports");
+        assert_eq!(table.drops().len(), 1);
+        assert!(matches!(
+            table.drops()[0],
+            DropReason::NonZeroEthernetTag { ref vrf, ethernet_tag: 10, .. } if vrf == "blue"
+        ));
+        assert_eq!(
+            table.drop_counts_by_vrf_reason(),
+            BTreeMap::from([(("blue".to_string(), "non_zero_ethernet_tag"), 1)])
+        );
+    }
+
     #[test]
     fn non_zero_esi_type5_drops_without_ead_recursion_input() {
         let vrfs = one_vrf("blue", 5000, "10.0.0.1", &["65000:5000"]);
         let mut r = route(v4([10, 1, 0, 0], 24), "10.0.0.2", &["65000:5000"]);
         r.esi = EthernetSegmentIdentifier::new([0, 0, 0, 0, 0, 0, 0, 0, 0, 1]);
-        r.ethernet_tag = EthernetTagId(101);
         let table = project_ip_prefix_routes(&vrfs, vec![r]);
         assert!(
             table.is_empty(),
@@ -1721,14 +1762,16 @@ mod tests {
         let esi = esi([0, 0, 0, 0, 0, 0, 0, 0, 0, 9]);
         let mut r = route(v4([10, 1, 0, 0], 24), "10.0.0.9", &["65000:5000"]);
         r.esi = esi;
-        r.ethernet_tag = EthernetTagId(42);
         r.router_mac = Some(mac_with_tail(0xee));
 
         let table = project_ip_prefix_routes_with_overlay_and_esi_index(
             &vrfs,
             vec![r],
             Vec::new(),
-            vec![esi_ead(100, esi, 42, "10.0.0.2", true)],
+            vec![
+                esi_ead(100, esi, 0, "10.0.0.2", true),
+                esi_ead(100, esi, 42, "10.0.0.3", true),
+            ],
         );
 
         assert_eq!(table.drops().len(), 0);
@@ -1745,14 +1788,13 @@ mod tests {
         let esi = esi([0, 0, 0, 0, 0, 0, 0, 0, 0, 10]);
         let mut r = route(v4([10, 2, 0, 0], 24), "10.0.0.9", &["65000:5000"]);
         r.esi = esi;
-        r.ethernet_tag = EthernetTagId(42);
 
         let table = project_ip_prefix_routes_with_overlay_and_esi_index(
             &vrfs,
             vec![r],
             Vec::new(),
             vec![
-                esi_ead(200, esi, 42, "10.0.0.2", true),
+                esi_ead(200, esi, 0, "10.0.0.2", true),
                 esi_ead(100, esi, 43, "10.0.0.3", true),
             ],
         );
