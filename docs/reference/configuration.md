@@ -997,7 +997,7 @@ complete atomic block. There is no probe or automatic legacy fallback.
 | `export_policy_chain`  | [string] | no       | --      | Named policy chain for export (mutually exclusive with inline export_policy) |
 | `import_policy`        | [table]  | no       | --      | Inline import policy statements (`[[neighbors.import_policy]]`, see [Policy entries](#policy-entries)); mutually exclusive with `import_policy_chain` |
 | `export_policy`        | [table]  | no       | --      | Inline export policy statements (`[[neighbors.export_policy]]`, see [Policy entries](#policy-entries)); mutually exclusive with `export_policy_chain` |
-| `conditional_advertisements` | [string] | no | `[]` | Names of [conditional advertisement](#conditional-advertisements) definitions attached to this static neighbor |
+| `conditional_advertisements` | [string] | no | `[]` | Names of [conditional advertisement](#conditional-advertisements) definitions attached to this static neighbor. A non-empty list replaces the peer group's list; an empty one inherits it |
 | `llgr_stale_time`      | u32      | no       | 0       | LLGR stale time in seconds (0 = disabled, max 16777215; RFC 9494)    |
 | `add_path`             | table    | no       | --      | Add-Path (RFC 7911) config table (see below)                         |
 | `log_level`            | string   | no       | --      | Override log level for this peer: `"error"`, `"warn"`, `"info"`, `"debug"`, or `"trace"` |
@@ -1595,8 +1595,8 @@ hold_time = 45  # neighbor override beats peer-group default
 ```
 
 Peer-group fields mirror every neighbor setting except `address`,
-`interface`, `remote_asn`, `description`, `peer_group`, `tcp_ao`, and
-`conditional_advertisements`. That covers timers, families,
+`interface`, `remote_asn`, `description`, `peer_group`, and `tcp_ao`.
+That covers timers, families,
 prefix limits (`max_prefixes`, `max_prefixes_ipv4`, `max_prefixes_ipv6`,
 `max_prefixes_received_ipv4`, `max_prefixes_received_ipv6`,
 `max_prefixes_out_ipv4`, `max_prefixes_out_ipv6`) and
@@ -1606,13 +1606,20 @@ receive-side Prefix ORF, `disable_ipv4_unicast`, `link_local_next_hop`,
 private-AS handling, MD5/GTSM, BFD, `tcp_mss`,
 `local_ipv6_nexthop`, `log_level`, slow-peer detection
 (`slow_peer_threshold_pct`, `slow_peer_duration`, `slow_peer_isolation`),
-and import/export inline policy or named chains. TCP-AO is intentionally not inherited through peer groups; static
+and import/export inline policy or named chains, and
+`conditional_advertisements` (static members only). TCP-AO is intentionally not inherited through peer groups; static
 neighbors and dynamic ranges configure their startup key directly.
 A gRPC `SetPeerGroup` replaces only the fields its definition carries; the
 config-file-only group fields (such as `role`, `strict_role`,
 `prefix_orf_receive`, `disable_ipv4_unicast`, `link_local_next_hop`, `bfd`,
-and the per-family prefix limits) keep their configured values. See
-[PeerGroupService](api.md#peergroupservice).
+`conditional_advertisements`, and the per-family prefix limits) keep their
+configured values. See [PeerGroupService](api.md#peergroupservice).
+
+`conditional_advertisements` follows the `export_policy_chain` rule: a static
+member that sets a non-empty list of its own uses that list instead of the
+group's. Dynamic neighbors that use the group do not inherit it. A SIGHUP
+reload that changes the group value runs on the generation route (see
+[Conditional advertisements](#conditional-advertisements)).
 
 `discard_path_attributes` is inherited too. A peer-group replacement supplies
 the complete list (an empty or omitted list clears the group value); a neighbor
@@ -2850,7 +2857,7 @@ upstream only while the primary upstream's default route is gone. It covers
 IPv4 and IPv6 unicast and is an alpha feature outside the v1 inventory.
 
 Definitions live under `[policy.conditional_advertisements.<name>]` and are
-attached to static neighbors by name:
+attached by name to static neighbors, directly or through their peer group:
 
 ```toml
 [policy.conditional_advertisements.backup-via-transit-b]
@@ -2874,10 +2881,16 @@ conditional_advertisements = ["backup-via-transit-b"]
 | `condition_policy` | string | no | -- | Named policy used as a predicate over each condition candidate |
 | `settle_time` | u32 | no | `5` | Seconds a changed condition must stay stable before it applies (0–600) |
 
-Each referenced policy must exist, and a neighbor may attach each
-definition once; either mistake is a load error. `DeletePolicy` refuses to
-delete a policy that a definition references. Peer groups and dynamic
-neighbors do not accept attachments.
+Each referenced policy must exist, and a neighbor or peer group may attach
+each definition once; either mistake is a load error. `DeletePolicy` refuses
+to delete a policy that a definition references.
+
+**Peer groups.** `[peer_groups.<name>] conditional_advertisements` attaches
+definitions to every static member that sets no list of its own; a member's
+non-empty list replaces the group's, as for `export_policy_chain`. Dynamic
+neighbors do not accept attachments and do not inherit a group's. The group
+field is not part of the `SetPeerGroup` definition, so an API edit of the
+group keeps it.
 
 **The condition.** It is present when any current candidate for an exact
 `condition_prefixes` entry satisfies `condition_policy` (or exists, when no
@@ -2910,6 +2923,15 @@ candidate is advertised. A change of applied state re-evaluates the attached
 neighbors' Adj-RIB-Out through the ordinary resync. Attached neighbors leave
 update-group sharing; `rbgp neighbor` shows the reason
 `conditional_advertisement`.
+
+**Status.** `rbgp policy conditional-advertisements` (alias `conditional`;
+`PolicyService.ListConditionalAdvertisements`) lists each installed
+definition, meaning each one attached to at least one static neighbor. For
+each, it shows every condition prefix's own observation, the whole
+condition (`present`, `absent`, or `unknown`) and how long it has held, the
+applied state (`pending`, `advertise`, or `suppress`), the settle timer
+(pending with the time left, held by selection deferral, or settled), and
+the attached neighbors. `--json` prints the same fields.
 
 **Explain.** `rbgp rib --prefix P advertised PEER --explain` reports a
 `conditional_advertisement` step just before the export policy, with code
@@ -5019,8 +5041,8 @@ settlement detail.
 
 1. **Generation** — changes to static `[[neighbors]]`, `[peer_groups]`,
    BFD member attachments, inline policy definitions, neighbor sets, global chains,
-   `[policy.conditional_advertisements]` definitions and neighbor
-   `conditional_advertisements` attachments, `.rpol` content,
+   `[policy.conditional_advertisements]` definitions and neighbor or
+   peer-group `conditional_advertisements` attachments, `.rpol` content,
    `[policy.datasets]` contents or bindings, or outbound prefix maxima settle
    as one owned runtime generation. The daemon resolves the candidate once,
    derives one action per static neighbor (unchanged, hot update in place,

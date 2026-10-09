@@ -46,7 +46,7 @@ prints the result as `SIGHUP reload route`:
 
 | Route | Candidate | Guarantee |
 |---|---|---|
-| **generation** | Static `[[neighbors]]`, `[peer_groups]`, BFD member attachments, inline policy / neighbor sets / global chains, `[policy.conditional_advertisements]` definitions and neighbor attachments, `.rpol` content, dataset contents, dataset bindings (added, removed, or re-mapped `[policy.datasets]` entries), or outbound prefix maxima changed without an incompatible family. This includes adding or removing a whole static neighbor that carries `md5_password` or `ttl_security` | One owned runtime generation: one action per static neighbor from one resolved candidate; a later failure restores retained state and rejects cleanly when compensation is confirmed. Uncertain settlement recovery-fences the daemon |
+| **generation** | Static `[[neighbors]]`, `[peer_groups]`, BFD member attachments, inline policy / neighbor sets / global chains, `[policy.conditional_advertisements]` definitions and neighbor or peer-group attachments, `.rpol` content, dataset contents, dataset bindings (added, removed, or re-mapped `[policy.datasets]` entries), or outbound prefix maxima changed without an incompatible family. This includes adding or removing a whole static neighbor that carries `md5_password` or `ttl_security` | One owned runtime generation: one action per static neighbor from one resolved candidate; a later failure restores retained state and rejects cleanly when compensation is confirmed. Uncertain settlement recovery-fences the daemon |
 | **sequential** | No generation-class or dataset change, or a generation-class change together with TCP-AO rotation or a listener MD5/GTSM edit while dataset contents, dataset bindings, and BFD attachments are unchanged | The existing per-subsystem steps; a failure halts with an authoritative known-partial receipt or recovery-fences if state is ambiguous |
 | **rejected** | Dataset content/binding or BFD attachment changes combined with TCP-AO rotation or a listener MD5/GTSM edit; a sequential candidate whose peer-group edit adds or changes a config-file-only group field (below), or that changes a conditional-advertisement definition or neighbor attachment; or a generation-class/dataset change combined with `[[dynamic_neighbors]]`, EVPN runtime tables, `[[fib_tables]]`, or `honor_graceful_shutdown` / `honor_blackhole` | No effect; apply independently reloadable families separately |
 
@@ -55,8 +55,8 @@ which cannot carry the config-file-only group fields: `role`, `strict_role`,
 `prefix_orf_receive`, `disable_ipv4_unicast`, `link_local_next_hop`, `bfd`, the slow-peer knobs,
 the per-family and received prefix limits, `max_prefix_action`,
 `max_prefix_warning_percent`, `next_hop_ownership`, `interpret_rfc1997`,
-`rs_control_communities`, `send_non_transitive_extended_communities`, and
-`log_level`. A sequential candidate that adds or changes one of them is
+`rs_control_communities`, `send_non_transitive_extended_communities`,
+`log_level`, and `conditional_advertisements`. A sequential candidate that adds or changes one of them is
 rejected, and the reason names the group and field, for example
 `peer group "edge" strict_role changed together with listener inbound
 MD5/GTSM inventory`. Split the reload: apply the TCP-AO or listener change
@@ -254,8 +254,9 @@ that rebuild sessions still require fresh scope resolution during planning.
 ## `[peer_groups.<name>]`
 
 Peer-group fields mirror `[[neighbors]]` minus the identity triple
-(`address`, `interface`, `remote_asn`), `description`, `peer_group`,
-`conditional_advertisements`, and TCP-AO. Inheritance is resolved at
+(`address`, `interface`, `remote_asn`), `description`, `peer_group`, and
+TCP-AO; `conditional_advertisements` is inherited by static members only.
+Inheritance is resolved at
 each reconcile. Neighbor-level policy fields override inherited peer-group
 policy fields. TCP-AO is never inherited: static neighbors and dynamic ranges
 configure their keyring directly.
@@ -333,6 +334,7 @@ static neighbors.
 | `export_policy` | live | Inline export statements inherited by peers that do not set their own export policy / chain. |
 | `import_policy_chain` | live | Named-chain reference inherited by peers that do not set their own import policy / chain; inheriting peers take the same ADR-0112 policy-presence qualification. |
 | `export_policy_chain` | live | Named-chain reference inherited by peers that do not set their own export policy / chain. |
+| `conditional_advertisements` | live (generation route only) | Attached `[policy.conditional_advertisements]` names (ADR-0137) inherited by static members that set no list of their own; dynamic members do not inherit them. An edit commits with the reload generation without a session reset; each inheriting member's Adj-RIB-Out is re-evaluated through the gate. Config-file-only: `SetPeerGroup` keeps the value, and the sequential route rejects a candidate that changes it. |
 
 ## `[[dynamic_neighbors]]`
 

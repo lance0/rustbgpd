@@ -1,4 +1,5 @@
 pub mod bfd;
+pub mod conditional_advertisement;
 pub mod config;
 pub mod control;
 pub mod diff;

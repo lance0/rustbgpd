@@ -21,6 +21,7 @@ use tower::service_fn;
 
 use crate::error::CliError;
 use crate::proto::config_service_client::ConfigServiceClient;
+use crate::proto::policy_service_client::PolicyServiceClient;
 use crate::proto::rib_service_client::RibServiceClient;
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
@@ -354,6 +355,17 @@ impl Connection {
         self.rib_client_with_decode_limit(LISTING_MAX_DECODE_BYTES)
     }
 
+    /// A `PolicyService` client for the full unary listing RPC
+    /// `ListConditionalAdvertisements`, whose response grows with the
+    /// configured definitions and attached neighbors. Same ceiling as
+    /// [`Self::rib_listing_client`]; other policy RPCs keep tonic's 4 MiB
+    /// default.
+    pub(crate) fn policy_listing_client(
+        &self,
+    ) -> PolicyServiceClient<InterceptedService<Channel, AuthInterceptor>> {
+        self.policy_client_with_decode_limit(LISTING_MAX_DECODE_BYTES)
+    }
+
     /// A `ConfigService` client only for `GetEffectiveConfig`, with room for
     /// one full bounded normalized-config document. Other config operations
     /// continue to use the generated client's default decode ceiling.
@@ -370,6 +382,16 @@ impl Connection {
         limit: usize,
     ) -> RibServiceClient<InterceptedService<Channel, AuthInterceptor>> {
         RibServiceClient::with_interceptor(self.channel(), self.interceptor())
+            .max_decoding_message_size(limit)
+    }
+
+    /// Shared constructor core; tests inject a small cap to prove the limit
+    /// is enforced rather than advisory.
+    fn policy_client_with_decode_limit(
+        &self,
+        limit: usize,
+    ) -> PolicyServiceClient<InterceptedService<Channel, AuthInterceptor>> {
+        PolicyServiceClient::with_interceptor(self.channel(), self.interceptor())
             .max_decoding_message_size(limit)
     }
 
@@ -1115,6 +1137,60 @@ mod tests {
         assert_eq!(err.code(), tonic::Code::Unauthenticated, "{err}");
     }
 
+    /// A conditional-advertisement status response of `count` definitions,
+    /// each attached to `peers` neighbors.
+    fn conditional_status_fixture(
+        count: usize,
+        peers: usize,
+    ) -> server_proto::ListConditionalAdvertisementsResponse {
+        let definition = server_proto::ConditionalAdvertisementStatus {
+            name: "backup".to_string(),
+            advertise_if: "absent".to_string(),
+            observed: "absent".to_string(),
+            applied: "advertise".to_string(),
+            attached_peers: (0..peers).map(|i| format!("2001:db8::{i:x}")).collect(),
+            ..Default::default()
+        };
+        server_proto::ListConditionalAdvertisementsResponse {
+            definitions: vec![definition; count],
+        }
+    }
+
+    // A large install's status listing exceeds tonic's 4 MiB default: the
+    // bounded policy listing client decodes it, and the raw generated
+    // client fails it with OutOfRange.
+    #[tokio::test]
+    async fn conditional_status_client_decodes_response_over_default_ceiling() {
+        let handle = crate::test_support::spawn_mock_server(None).await;
+        let resp = conditional_status_fixture(40, 10_000);
+        assert!(
+            resp.encoded_len() > 4 * 1024 * 1024,
+            "fixture must exceed the 4 MiB default: {} bytes",
+            resp.encoded_len()
+        );
+        *handle.state.list_conditional_response.lock().await = Some(resp);
+
+        let connection = connect(&handle.addr, None).await.unwrap();
+        let got = connection
+            .policy_listing_client()
+            .list_conditional_advertisements(
+                crate::proto::ListConditionalAdvertisementsRequest::default(),
+            )
+            .await
+            .expect("bounded policy listing client must decode a >4 MiB listing")
+            .into_inner();
+        assert_eq!(got.definitions.len(), 40);
+
+        let err =
+            PolicyServiceClient::with_interceptor(connection.channel(), connection.interceptor())
+                .list_conditional_advertisements(
+                    crate::proto::ListConditionalAdvertisementsRequest::default(),
+                )
+                .await
+                .expect_err("default client must reject a >4 MiB listing");
+        assert_eq!(err.code(), tonic::Code::OutOfRange, "{err}");
+    }
+
     fn effective_config_fixture(payload_len: usize) -> String {
         "#".repeat(payload_len)
     }
@@ -1316,6 +1392,7 @@ mod tests {
             ".list_topology_nodes(",
             ".list_topology_links(",
             ".list_orr_status(",
+            ".list_conditional_advertisements(",
         ];
         // (file, source, bounded constructor sites, listing RPC invocations)
         let surfaces = [
@@ -1334,13 +1411,20 @@ mod tests {
                 2,
             ),
             ("commands/orr.rs", include_str!("commands/orr.rs"), 1, 1),
+            (
+                "commands/conditional_advertisement.rs",
+                include_str!("commands/conditional_advertisement.rs"),
+                1,
+                1,
+            ),
         ];
 
         let mut total_ctors = 0;
         let mut total_rpcs = 0;
         for (name, source, expect_ctors, expect_rpcs) in surfaces {
             let code = source.split("#[cfg(test)]").next().unwrap();
-            let ctors = code.matches(".rib_listing_client()").count();
+            let ctors = code.matches(".rib_listing_client()").count()
+                + code.matches(".policy_listing_client()").count();
             let rpcs: usize = LISTING_RPCS
                 .iter()
                 .map(|rpc| code.matches(rpc).count())
@@ -1358,8 +1442,8 @@ mod tests {
             total_ctors += ctors;
             total_rpcs += rpcs;
         }
-        assert_eq!(total_ctors, 14, "inventoried constructor sites");
-        assert_eq!(total_rpcs, 16, "inventoried listing RPC invocations");
+        assert_eq!(total_ctors, 15, "inventoried constructor sites");
+        assert_eq!(total_rpcs, 17, "inventoried listing RPC invocations");
     }
 
     // Budget rationale for the 64 MiB ceiling: it must hold at least

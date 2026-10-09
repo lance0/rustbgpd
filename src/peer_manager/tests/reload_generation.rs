@@ -4431,6 +4431,91 @@ async fn generation_installs_conditional_advertisements_and_restores_on_failure(
     relay.abort();
 }
 
+fn group_attachment(fixture: &RsFixture, list: &str) -> Config {
+    fixture.write_toml(&fixture.base_toml().replacen(
+        "[peer_groups.members]\n",
+        &format!(
+            "[policy.definitions.backup-routes]\ndefault_action = \"deny\"\n\n\
+             [policy.conditional_advertisements.backup]\nadvertise_policy = \"backup-routes\"\n\
+             advertise_if = \"absent\"\ncondition_prefixes = [\"0.0.0.0/0\"]\n\n\
+             [policy.conditional_advertisements.core]\nadvertise_policy = \"backup-routes\"\n\
+             advertise_if = \"present\"\ncondition_prefixes = [\"192.0.2.0/24\"]\n\n\
+             [peer_groups.members]\n{list}"
+        ),
+        1,
+    ));
+    fixture.load()
+}
+
+fn installed_attachments(harness: &GenerationHarness) -> Vec<(String, Vec<String>)> {
+    harness
+        .mgr
+        .conditional_advertisements
+        .attachments
+        .iter()
+        .map(|(peer, names)| {
+            (
+                peer.to_string(),
+                names.iter().map(ToString::to_string).collect(),
+            )
+        })
+        .collect()
+}
+
+/// ADR-0137 peer-group inheritance through reload: attaching, changing, and
+/// detaching at the group each commit one install that carries every
+/// inheriting static member, with no session action.
+#[tokio::test]
+async fn generation_installs_peer_group_attachment_changes() {
+    let fixture = RsFixture::new();
+    let prior = group_attachment(&fixture, "");
+    let mut harness = GenerationHarness::new(&prior);
+    let (log, relay) = relay_conditional_to_real_rib(&mut harness);
+    let members = |name: &str| {
+        vec![
+            ("10.0.0.2".to_string(), vec![name.to_string()]),
+            ("2001:db8::3".to_string(), vec![name.to_string()]),
+        ]
+    };
+    for (label, list, expected) in [
+        (
+            "attach",
+            "conditional_advertisements = [\"backup\"]\n",
+            members("backup"),
+        ),
+        (
+            "change",
+            "conditional_advertisements = [\"core\"]\n",
+            members("core"),
+        ),
+        ("detach", "", Vec::new()),
+    ] {
+        let candidate = group_attachment(&fixture, list);
+        assert!(
+            plan_reload_peer_actions(&harness.mgr.current_config, &candidate)
+                .unwrap()
+                .is_empty(),
+            "{label}: a group attachment change moves no session"
+        );
+        let outcome = harness.apply(&candidate).await;
+        assert!(
+            matches!(outcome, ReloadGenerationOutcome::Applied(_)),
+            "{label}: {outcome:?}"
+        );
+        assert_eq!(installed_attachments(&harness), expected, "{label}");
+    }
+    assert_eq!(
+        conditional_log(&log),
+        [
+            "install [10.0.0.2, 2001:db8::3]",
+            "install [10.0.0.2, 2001:db8::3]",
+            "install []"
+        ]
+    );
+    harness.shutdown().await;
+    relay.abort();
+}
+
 /// ADR-0137 ordering: while the generation's conditional install is
 /// unacknowledged, no session of that generation has been stopped or
 /// replaced, so no replacement can register ahead of its gate. The install

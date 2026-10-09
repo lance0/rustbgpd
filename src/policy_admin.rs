@@ -1511,6 +1511,9 @@ peer_group = "fabric"
     #[test]
     fn peer_group_event_preserves_every_config_file_only_field() {
         let mut config = minimal_config();
+        let attached = conditional_advertisement_config();
+        config.policy.definitions = attached.policy.definitions;
+        config.policy.conditional_advertisements = attached.policy.conditional_advertisements;
         config.bfd_profiles.push(crate::config::BfdProfileConfig {
             name: "fast".into(),
             min_tx_interval: 300,
@@ -1553,6 +1556,7 @@ peer_group = "fabric"
                 disable_ipv4_unicast: Some(true),
                 link_local_next_hop: Some(true),
                 log_level: Some("debug".into()),
+                conditional_advertisements: vec!["backup".into()],
                 // API-owned fields. No `..Default::default()`: a new
                 // field must be added here before this test compiles.
                 min_hold_time: None,

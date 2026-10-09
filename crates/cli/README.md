@@ -299,6 +299,7 @@ rbgp policy fmt <file.rpol>... [--check]               # canonical .rpol formatt
 rbgp policy test <file.rpol> --policy <name> --direction import|export [--neighbor <addr>]   # dry-run over the live RIB
 rbgp policy stats --direction import|export|both [--neighbor <addr> | --allow-partial]  # live per-term hit counters
 rbgp policy counters --direction both                     # alias
+rbgp policy conditional-advertisements                  # conditional advertisement state (alias: conditional)
 
 rbgp flowspec
 rbgp flowspec received 192.0.2.1 -a ipv4_flowspec
@@ -724,6 +725,7 @@ a non-TTY.
 | Explain export policy / gates | `rbgp rib --prefix <cidr> advertised <peer> --explain` |
 | Explain import policy | `rbgp policy explain --neighbor <peer> --prefix <cidr> --direction import` |
 | Policy hit counters | `rbgp policy stats --direction both` or `rbgp policy counters --direction both` |
+| Conditional advertisement state | `rbgp policy conditional-advertisements` |
 | Route-server clients | `rbgp summary`, then `rbgp neighbor <peer>` for distribution mode |
 | Bounce one session (`clear bgp <peer>`, `bgpctl neighbor <peer> clear`) | `rbgp neighbor <peer> reset [--reason <text>]` |
 | Support bundle + triage checks | `rbgp doctor --output ./support.tar.gz` |
