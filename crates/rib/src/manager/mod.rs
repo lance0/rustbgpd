@@ -1015,6 +1015,10 @@ pub struct RibManager {
     /// grouped run.
     #[cfg(test)]
     test_force_ungrouped: bool,
+    /// Full group-table control-tag scans run by deferred-registration
+    /// cohort admission (LAN-1826): the per-turn work bound.
+    #[cfg(test)]
+    join_cohort_tag_scans: usize,
     #[cfg(test)]
     test_force_exact_export_slow_path: bool,
     #[cfg(test)]
@@ -1919,6 +1923,8 @@ impl RibManager {
             pending_extra_withdraws: HashMap::new(),
             #[cfg(test)]
             test_force_ungrouped: false,
+            #[cfg(test)]
+            join_cohort_tag_scans: 0,
             #[cfg(test)]
             test_force_exact_export_slow_path: false,
             #[cfg(test)]

@@ -18,6 +18,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use super::update_groups::CohortExactEncoder;
 use super::update_groups_oracle::{NormMsg, normalize};
 use super::*;
+use crate::manager::peer_lifecycle::MAX_JOIN_COHORT_EXAMINED;
 
 const SESSION: u64 = 1;
 const RS_AS: u32 = 65_000;
@@ -28,7 +29,13 @@ const SURVIVOR: Ipv4Addr = Ipv4Addr::new(10, 70, 0, 1);
 struct Joiner {
     addr: Ipv4Addr,
     asn: u32,
-    rs_control: bool,
+    /// RFC 7947 control context staged before `PeerUp`: the RS ASN.
+    rs_asn: Option<u32>,
+    /// Local RFC 9234 role staged before `PeerUp`.
+    role: Option<rustbgpd_wire::BgpRole>,
+    export_policy: Option<rustbgpd_policy::PolicyChain>,
+    /// The session's exact-export ceiling (`CohortExactEncoder`).
+    max_len: usize,
     sendable: Vec<(Afi, Safi)>,
 }
 
@@ -36,14 +43,32 @@ fn joiner(last: u8, asn: u32) -> Joiner {
     Joiner {
         addr: Ipv4Addr::new(10, 70, 1, last),
         asn,
-        rs_control: false,
+        rs_asn: None,
+        role: None,
+        export_policy: None,
+        max_len: 4_096,
         sendable: ipv4_sendable(),
     }
 }
 
+/// `count` same-profile joiners with distinct addresses and peer ASNs.
+fn fleet(count: usize) -> Vec<Joiner> {
+    (0..count)
+        .map(|index| {
+            let index = u16::try_from(index).unwrap();
+            Joiner {
+                addr: Ipv4Addr::new(10, 71, u8::try_from(index / 250).unwrap(), {
+                    u8::try_from(index % 250).unwrap() + 1
+                }),
+                ..joiner(0, 65_200 + u32::from(index))
+            }
+        })
+        .collect()
+}
+
 fn rs_joiner(last: u8, asn: u32) -> Joiner {
     Joiner {
-        rs_control: true,
+        rs_asn: Some(RS_AS),
         ..joiner(last, asn)
     }
 }
@@ -52,6 +77,7 @@ fn peer_up(
     peer: Ipv4Addr,
     peer_asn: u32,
     sendable_families: Vec<(Afi, Safi)>,
+    export_policy: Option<rustbgpd_policy::PolicyChain>,
     outbound_tx: mpsc::Sender<OutboundRouteUpdate>,
 ) -> RibUpdate {
     RibUpdate::PeerUp {
@@ -62,7 +88,7 @@ fn peer_up(
         peer_asn,
         peer_router_id: peer,
         outbound_tx,
-        export_policy: None,
+        export_policy,
         sendable_families,
         is_ebgp: true,
         route_reflector_client: false,
@@ -109,6 +135,7 @@ fn route(third_octet: u8, source: Ipv4Addr, communities: Vec<u32>) -> Route {
 fn encoder(
     peer: Ipv4Addr,
     owner: u64,
+    max_len: usize,
     probes: &Arc<AtomicUsize>,
     reuses: &Arc<AtomicUsize>,
 ) -> RibUpdate {
@@ -118,7 +145,7 @@ fn encoder(
         encoder: Arc::new(CohortExactEncoder {
             owner,
             profile: 1826,
-            max_len: 4_096,
+            max_len,
             generation: AtomicUsize::new(0),
             advance_generation: false,
             probes: Arc::clone(probes),
@@ -133,12 +160,14 @@ struct Run {
     raw: BTreeMap<IpAddr, Vec<OutboundRouteUpdate>>,
     /// Joiners whose registration the FIRST advance completed.
     first_turn: Vec<Ipv4Addr>,
+    /// Group-table control-tag scans the first advance ran.
+    first_turn_tag_scans: usize,
     probes: usize,
     reuses: usize,
 }
 
-/// `tag_asn`: the table carries one route with the RFC 7947 standard
-/// "do not announce to `tag_asn`" control community. `dead`: that joiner's
+/// `extra`: routes the table source announces besides its three plain
+/// ones. `dead`: that joiner's
 /// session receiver is dropped at the first readiness checkpoint inside the
 /// first advance, after its registration was admitted and before any table
 /// of that turn is sent.
@@ -149,7 +178,7 @@ struct Run {
 async fn run(
     force_ungrouped: bool,
     joiners: &[Joiner],
-    tag_asn: Option<u32>,
+    extra: &[Route],
     dead: Option<Ipv4Addr>,
 ) -> Run {
     let (tx, rx) = mpsc::channel(64);
@@ -160,10 +189,11 @@ async fn run(
     let reuses = Arc::new(AtomicUsize::new(0));
     let mut receivers = BTreeMap::new();
 
-    // Survivor: a quiet actor registers it inline.
-    let (out_tx, out_rx) = mpsc::channel(64);
-    manager.handle_update(encoder(SURVIVOR, 1, &probes, &reuses));
-    manager.handle_update(peer_up(SURVIVOR, 65_001, ipv4_sendable(), out_tx));
+    // Survivor: a quiet actor registers it inline. It receives one UPDATE
+    // per joiner route, so its channel holds the largest fleet below.
+    let (out_tx, out_rx) = mpsc::channel(1_024);
+    manager.handle_update(encoder(SURVIVOR, 1, 4_096, &probes, &reuses));
+    manager.handle_update(peer_up(SURVIVOR, 65_001, ipv4_sendable(), None, out_tx));
     receivers.insert(IpAddr::V4(SURVIVOR), out_rx);
 
     let mut table = vec![
@@ -171,9 +201,7 @@ async fn run(
         route(2, SOURCE, vec![]),
         route(3, SOURCE, vec![]),
     ];
-    if let Some(asn) = tag_asn {
-        table.push(route(4, SOURCE, vec![asn]));
-    }
+    table.extend_from_slice(extra);
     manager.handle_update(announce(SOURCE, table));
     drain_route_chunks(&mut manager);
 
@@ -181,16 +209,24 @@ async fn run(
     tx.try_send(announce(SOURCE, vec![])).unwrap();
     for (index, joiner) in joiners.iter().enumerate() {
         let peer = IpAddr::V4(joiner.addr);
-        if joiner.rs_control {
+        if joiner.role.is_some() {
+            manager.handle_update(RibUpdate::SetPeerExportContext {
+                peer,
+                session_id: SESSION,
+                local_role: joiner.role,
+            });
+        }
+        if joiner.rs_asn.is_some() {
             manager.handle_update(RibUpdate::SetPeerRsControl {
                 peer,
                 session_id: SESSION,
-                rs_control_asn: Some(RS_AS),
+                rs_control_asn: joiner.rs_asn,
             });
         }
         manager.handle_update(encoder(
             joiner.addr,
             u64::try_from(index).unwrap() + 2,
+            joiner.max_len,
             &probes,
             &reuses,
         ));
@@ -199,6 +235,7 @@ async fn run(
             joiner.addr,
             joiner.asn,
             joiner.sendable.clone(),
+            joiner.export_policy.clone(),
             out_tx,
         ));
         assert!(manager.pending_initial_registrations.contains(&peer));
@@ -207,11 +244,17 @@ async fn run(
     // Each joiner's own route imports (and reaches the survivor) while every
     // joiner's table is still pending; joiner tables replay it to the others.
     for (index, joiner) in joiners.iter().enumerate() {
-        let third_octet = 100 + u8::try_from(index).unwrap();
-        manager.handle_update(announce(
-            joiner.addr,
-            vec![route(third_octet, joiner.addr, vec![])],
-        ));
+        let index = u16::try_from(index).unwrap();
+        let prefix = Ipv4Prefix::new(
+            Ipv4Addr::new(
+                10,
+                201 + u8::try_from(index / 256).unwrap(),
+                u8::try_from(index % 256).unwrap(),
+                0,
+            ),
+            24,
+        );
+        manager.handle_update(announce(joiner.addr, vec![make_route(prefix, joiner.addr)]));
         drain_route_chunks(&mut manager);
     }
     assert!(!manager.drain_ready_updates().await);
@@ -228,6 +271,7 @@ async fn run(
         manager.replacement_readiness_test_hook = Some(hook);
     }
     manager.advance_pending_initial_registration();
+    let first_turn_tag_scans = manager.join_cohort_tag_scans;
     manager.replacement_readiness_test_hook = None;
     if let Some(dead_rx) = dead_rx {
         assert!(
@@ -263,6 +307,7 @@ async fn run(
         streams,
         raw,
         first_turn,
+        first_turn_tag_scans,
         probes: probes.load(Ordering::Relaxed),
         reuses: reuses.load(Ordering::Relaxed),
     }
@@ -306,8 +351,8 @@ async fn deferred_same_group_joiners_share_one_replay_like_ungrouped_oracle() {
         mixed.clone(),
         joiner(3, 65_103),
     ];
-    let grouped = run(false, &joiners, None, None).await;
-    let oracle = run(true, &joiners, None, None).await;
+    let grouped = run(false, &joiners, &[], None).await;
+    let oracle = run(true, &joiners, &[], None).await;
     assert_eq!(grouped.streams, oracle.streams);
 
     let cohort = [joiners[0].addr, joiners[1].addr, joiners[3].addr];
@@ -353,8 +398,12 @@ async fn deferred_same_group_joiners_share_one_replay_like_ungrouped_oracle() {
 async fn rs_control_joiner_with_tagged_table_keeps_its_own_replay() {
     let joiners = vec![joiner(1, 65_101), rs_joiner(2, 65_102), joiner(3, 65_103)];
     for tag_asn in [Some(65_102), None] {
-        let grouped = run(false, &joiners, tag_asn, None).await;
-        let oracle = run(true, &joiners, tag_asn, None).await;
+        let extra: Vec<_> = tag_asn
+            .map(|asn| route(4, SOURCE, vec![asn]))
+            .into_iter()
+            .collect();
+        let grouped = run(false, &joiners, &extra, None).await;
+        let oracle = run(true, &joiners, &extra, None).await;
         assert_eq!(grouped.streams, oracle.streams, "tag {tag_asn:?}");
         let expected_first: Vec<_> = if tag_asn.is_some() {
             vec![joiners[0].addr, joiners[2].addr]
@@ -389,8 +438,8 @@ async fn rs_control_joiner_with_tagged_table_keeps_its_own_replay() {
 async fn dead_cohort_member_does_not_stall_or_corrupt_the_others() {
     let joiners = vec![joiner(1, 65_101), joiner(2, 65_102), joiner(3, 65_103)];
     let dead = joiners[1].addr;
-    let grouped = run(false, &joiners, None, Some(dead)).await;
-    let oracle = run(true, &joiners, None, Some(dead)).await;
+    let grouped = run(false, &joiners, &[], Some(dead)).await;
+    let oracle = run(true, &joiners, &[], Some(dead)).await;
     assert_eq!(grouped.streams, oracle.streams);
     assert_eq!(
         grouped.first_turn,
@@ -408,4 +457,61 @@ async fn dead_cohort_member_does_not_stall_or_corrupt_the_others() {
         let table = assert_table_then_eor(&grouped, peer);
         assert!(table.shared_group_encode.is_some());
     }
+}
+
+/// The cohort bound counts the leader: with 64 joiners queued, one turn
+/// completes all 64 registrations; with 65, the 65th stays queued for the
+/// next turn, and every joiner still gets the oracle's stream.
+///
+/// Admitting `MAX_JOIN_COHORT` members besides the leader makes the 65-joiner
+/// case red (65 registrations in one turn).
+#[tokio::test]
+async fn cohort_bound_counts_the_leader() {
+    for queued in [64, 65] {
+        let joiners = fleet(queued);
+        let grouped = run(false, &joiners, &[], None).await;
+        let expected: Vec<_> = joiners.iter().take(64).map(|joiner| joiner.addr).collect();
+        assert_eq!(grouped.first_turn, expected, "{queued} queued");
+        assert!(grouped.manager.pending_initial_registrations.is_empty());
+        let oracle = run(true, &joiners, &[], None).await;
+        assert_eq!(grouped.streams, oracle.streams, "{queued} queued");
+        for joiner in &joiners {
+            assert_table_then_eor(&grouped, joiner.addr);
+        }
+    }
+}
+
+/// A reconnect burst of route-server members, each with its own RS ASN, on an
+/// untagged table: admission reads the group table's control tags ONCE per
+/// turn, whatever the number of distinct RS ASNs, and examines a bounded
+/// prefix of the queue. A same-profile joiner queued behind more than that
+/// many mismatched joiners stays queued.
+///
+/// The per-RS-ASN table scan this replaced makes the scan-count assertion red
+/// (one scan per distinct RS ASN); examining the whole queue makes the tail
+/// assertion red.
+#[tokio::test]
+async fn cohort_admission_work_is_bounded_per_turn() {
+    let mut joiners = fleet(64);
+    for (index, joiner) in joiners.iter_mut().enumerate() {
+        joiner.rs_asn = Some(64_600 + u32::try_from(index).unwrap());
+    }
+    let grouped = run(false, &joiners, &[], None).await;
+    assert_eq!(grouped.first_turn_tag_scans, 1);
+    assert_eq!(
+        grouped.first_turn,
+        joiners.iter().map(|joiner| joiner.addr).collect::<Vec<_>>()
+    );
+
+    // Leader, then a full examination window of dual-stack joiners, then one
+    // joiner sharing the leader's profile.
+    let mut joiners = fleet(MAX_JOIN_COHORT_EXAMINED + 2);
+    for joiner in &mut joiners[1..=MAX_JOIN_COHORT_EXAMINED] {
+        joiner.sendable = vec![(Afi::Ipv4, Safi::Unicast), (Afi::Ipv6, Safi::Unicast)];
+    }
+    let grouped = run(false, &joiners, &[], None).await;
+    assert_eq!(grouped.first_turn, vec![joiners[0].addr]);
+    assert!(grouped.manager.pending_initial_registrations.is_empty());
+    let oracle = run(true, &joiners, &[], None).await;
+    assert_eq!(grouped.streams, oracle.streams);
 }

@@ -48,11 +48,16 @@ enum ActiveSessionRegistration {
     CollisionFailback,
 }
 
-/// Most joiners one deferred-registration turn completes together. The
-/// cohort runs as one synchronous actor turn, so this bounds how long a
-/// mass rejoin holds survivors' queued mutations (LAN-475): one shared
-/// replay plus this many per-member commits.
+/// Most registrations, leader included, one deferred-registration turn
+/// completes together. The cohort runs as one synchronous actor turn, so
+/// this bounds how long a mass rejoin holds survivors' queued mutations
+/// (LAN-475): one shared replay plus this many per-member commits.
 const MAX_JOIN_COHORT: usize = 64;
+
+/// Most queued registrations one turn's cohort admission examines; the rest
+/// stay queued in order. Bounds admission's own work when the queue head
+/// holds joiners that cannot share the leader's replay.
+pub(super) const MAX_JOIN_COHORT_EXAMINED: usize = 256;
 
 /// The shared initial unicast replay of one joiner cohort: the plain group
 /// table outside selection-deferred families, with the encode cell and
@@ -1389,8 +1394,12 @@ impl RibManager {
     /// group table holds no control-form community for its RS ASN, on the
     /// source or the post-policy route (the LAN-474 emit-filter
     /// predicate). Membership is re-checked after each joiner installs.
+    ///
+    /// One turn's admission work is bounded: at most one control-tag pass
+    /// over the group table, whatever the number of distinct RS ASNs, and
+    /// at most [`MAX_JOIN_COHORT_EXAMINED`] queued entries examined.
     fn take_join_cohort(&mut self, leader: IpAddr) -> Vec<IpAddr> {
-        use super::distribution::rs_control::rs_control_route_tagged;
+        use super::distribution::rs_control::ControlTagInventory;
 
         if self.pending_initial_registrations.is_empty() {
             return Vec::new();
@@ -1416,22 +1425,30 @@ impl RibManager {
         else {
             return Vec::new();
         };
-        let mut rs_untagged: HashMap<u32, bool> = HashMap::new();
+        // One table pass answers every RS ASN in the queue (built on first
+        // need: most turns have no rs-control joiner).
+        #[cfg(test)]
+        let mut scans = 0;
+        let mut tags: Option<ControlTagInventory> = None;
         let mut rs_inert = |rs_asn: Option<u32>| {
             rs_asn.is_none_or(|rs_asn| {
-                *rs_untagged.entry(rs_asn).or_insert_with(|| {
-                    !group.table.iter().any(|route| {
-                        checkpoint();
-                        let (communities, large_communities) =
-                            group.source_control((route.prefix, route.path_id));
-                        rs_control_route_tagged(communities, large_communities, rs_asn)
-                            || rs_control_route_tagged(
-                                route.communities(),
-                                route.large_communities(),
-                                rs_asn,
-                            )
+                !tags
+                    .get_or_insert_with(|| {
+                        #[cfg(test)]
+                        {
+                            scans += 1;
+                        }
+                        let mut tags = ControlTagInventory::default();
+                        for route in group.table.iter() {
+                            checkpoint();
+                            let (communities, large_communities) =
+                                group.source_control((route.prefix, route.path_id));
+                            tags.record(communities, large_communities);
+                            tags.record(route.communities(), route.large_communities());
+                        }
+                        tags
                     })
-                })
+                    .tagged(rs_asn)
             })
         };
         if !rs_inert(profile.rs_control_asn) {
@@ -1439,8 +1456,10 @@ impl RibManager {
         }
         let queued = std::mem::take(&mut self.pending_initial_registrations);
         let mut members = Vec::new();
-        for peer in queued {
-            let joins = members.len() < MAX_JOIN_COHORT
+        for (examined, peer) in queued.into_iter().enumerate() {
+            // The leader is the cohort's first registration.
+            let joins = examined < MAX_JOIN_COHORT_EXAMINED
+                && members.len() + 1 < MAX_JOIN_COHORT
                 && self
                     .live_sessions
                     .get(&peer)
@@ -1469,6 +1488,10 @@ impl RibManager {
             } else {
                 self.pending_initial_registrations.push_back(peer);
             }
+        }
+        #[cfg(test)]
+        {
+            self.join_cohort_tag_scans += scans;
         }
         members
     }
