@@ -84,7 +84,9 @@ fn definition(
         name: Arc::from(NAME),
         advertise_policy,
         advertise_if,
-        condition_prefixes: vec![v4(condition())],
+        condition_prefixes: vec![rustbgpd_policy::sets::PrefixSetEntry::exact(
+            v4(condition()),
+        )],
         condition_policy: None,
         settle_time: SETTLE,
     }

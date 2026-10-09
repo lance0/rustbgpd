@@ -2877,13 +2877,33 @@ conditional_advertisements = ["backup-via-transit-b"]
 |-------|------|----------|---------|-------------|
 | `advertise_policy` | string | yes | -- | Named policy (TOML or `.rpol`, including call form) used as a predicate: the routes it permits are controlled. Its modifications are not applied |
 | `advertise_if` | string | yes | -- | `"present"` or `"absent"`: the condition state in which controlled routes may be advertised |
-| `condition_prefixes` | [string] | yes | -- | Nonempty list of distinct, exact IPv4 or IPv6 prefixes with no host bits set; prefix ranges are not accepted |
+| `condition_prefixes` | [string \| table] | yes | -- | Nonempty list of distinct IPv4 or IPv6 condition entries with no host bits set: an exact prefix string, or a prefix range table `{ prefix, ge, le }` (see below) |
 | `condition_policy` | string | no | -- | Named policy used as a predicate over each condition candidate |
 | `settle_time` | u32 | no | `5` | Seconds a changed condition must stay stable before it applies (0–600) |
 
 Each referenced policy must exist, and a neighbor or peer group may attach
 each definition once; either mistake is a load error. `DeletePolicy` refuses
 to delete a policy that a definition references.
+
+**Prefix ranges.** A `condition_prefixes` entry may be a table that matches
+every prefix inside a base prefix within a length range, with prefix-list
+semantics (the same rule as a policy statement's `prefix`/`ge`/`le`, and as
+an FRR `ip prefix-list` entry used in an `exist-map`):
+
+```toml
+condition_prefixes = [
+  "0.0.0.0/0",                                  # exact
+  { prefix = "10.0.0.0/8", le = 24 },           # /8 through /24 inside 10/8
+  { prefix = "2001:db8::/32", ge = 48, le = 64 },
+]
+```
+
+With `le` only, lengths run from the base length to `le`; with `ge` only,
+from `ge` to 32 or 128; with both, from `ge` to `le`; a table with neither
+is the exact prefix. The bounds must satisfy
+`base length <= ge <= le <= 32/128`, or the load fails. Ranges may overlap,
+within one definition or across definitions. An exact entry is stored back
+as a plain string.
 
 **Peer groups.** `[peer_groups.<name>] conditional_advertisements` attaches
 definitions to every static member that sets no list of its own; a member's
@@ -2892,9 +2912,9 @@ neighbors do not accept attachments and do not inherit a group's. The group
 field is not part of the `SetPeerGroup` definition, so an API edit of the
 group keeps it.
 
-**The condition.** It is present when any current candidate for an exact
-`condition_prefixes` entry satisfies `condition_policy` (or exists, when no
-`condition_policy` is set). Candidates are import-accepted routes in any
+**The condition.** It is present when any current candidate for any prefix
+matched by a `condition_prefixes` entry satisfies `condition_policy` (or
+exists, when no `condition_policy` is set). Candidates are import-accepted routes in any
 peer's Adj-RIB-In, including stale and losing Add-Path paths, plus locally
 injected routes; the candidate need not be the best path.
 `condition_policy` sees the candidate's source peer address, ASN, and peer
@@ -2927,7 +2947,10 @@ update-group sharing; `rbgp neighbor` shows the reason
 **Status.** `rbgp policy conditional-advertisements` (alias `conditional`;
 `PolicyService.ListConditionalAdvertisements`) lists each installed
 definition, meaning each one attached to at least one static neighbor. For
-each, it shows every condition prefix's own observation, the whole
+each, it shows every condition entry's own observation (for a range, also
+the number of present prefixes in it and up to eight of them, for example
+`10.0.0.0/8 le 24 present (3 matching: 10.1.0.0/16, 10.2.0.0/16,
+10.3.0.0/24)`), the whole
 condition (`present`, `absent`, or `unknown`) and how long it has held, the
 applied state (`pending`, `advertise`, or `suppress`), the settle timer
 (pending with the time left, held by selection deferral, or settled), and
@@ -2935,8 +2958,8 @@ the attached neighbors. `--json` prints the same fields.
 
 **Explain.** `rbgp rib --prefix P advertised PEER --explain` reports a
 `conditional_advertisement` step just before the export policy, with code
-`conditional_advertisement_suppressed` (naming the definition, condition
-prefix, and state) or `conditional_advertisement_eval_error` (naming the
+`conditional_advertisement_suppressed` (naming the definition, the present
+condition prefix or every configured entry when absent, and the state) or `conditional_advertisement_eval_error` (naming the
 failing policy and term).
 
 **Reload.** Definition and attachment edits apply through the SIGHUP

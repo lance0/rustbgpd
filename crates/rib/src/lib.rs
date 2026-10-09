@@ -71,8 +71,8 @@ pub use fast_hash::AddrHasher;
 pub use loc_rib::LocRib;
 pub use manager::RibManager;
 pub use manager::{
-    ConditionalAdvertiseIf, ConditionalAdvertisement, ConditionalAdvertisementCapture,
-    ConditionalAdvertisementSet, ConditionalAdvertisementStatus,
+    ConditionEntryStatus, ConditionalAdvertiseIf, ConditionalAdvertisement,
+    ConditionalAdvertisementCapture, ConditionalAdvertisementSet, ConditionalAdvertisementStatus,
 };
 #[cfg(feature = "bench-internals")]
 pub use manager::{

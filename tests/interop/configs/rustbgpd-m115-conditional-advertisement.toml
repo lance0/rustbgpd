@@ -22,10 +22,12 @@ prefix = "198.51.100.0/24"
 action = "permit"
 
 # Backup semantics: advertise the payload only while the condition is absent.
+# The condition is a prefix range, so frr-a's 192.0.2.0/24 counts as one /24
+# inside 192.0.0.0/16; the payload and the control fall outside it.
 [policy.conditional_advertisements.m115-backup]
 advertise_policy = "m115-payload"
 advertise_if = "absent"
-condition_prefixes = ["192.0.2.0/24"]
+condition_prefixes = [{ prefix = "192.0.0.0/16", ge = 24, le = 24 }]
 settle_time = 2
 
 # Source of the condition, the payload and the control.

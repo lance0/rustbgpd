@@ -153,12 +153,43 @@ pub struct PrefixSetEntry {
 }
 
 impl PrefixSetEntry {
+    /// An exact-length entry: no `ge`, no `le`.
+    #[must_use]
+    pub const fn exact(prefix: Prefix) -> Self {
+        Self {
+            prefix,
+            ge: None,
+            le: None,
+        }
+    }
+
+    /// Whether `candidate` matches this entry ([`prefix_entry_matches`]).
+    #[must_use]
+    #[inline]
+    pub fn matches(&self, candidate: Prefix) -> bool {
+        prefix_entry_matches(self.prefix, self.ge, self.le, candidate)
+    }
+
     /// Canonical ordering/interning key.
     fn key(&self) -> PrefixEntryKey {
         match self.prefix {
             Prefix::V4(p) => (4, u128::from(u32::from(p.addr)), p.len, self.ge, self.le),
             Prefix::V6(p) => (6, u128::from(p.addr), p.len, self.ge, self.le),
         }
+    }
+}
+
+impl std::fmt::Display for PrefixSetEntry {
+    /// Prefix-list form: `10.0.0.0/8`, `10.0.0.0/8 le 24`, `10.0.0.0/8 ge 16 le 24`.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.prefix)?;
+        if let Some(ge) = self.ge {
+            write!(f, " ge {ge}")?;
+        }
+        if let Some(le) = self.le {
+            write!(f, " le {le}")?;
+        }
+        Ok(())
     }
 }
 

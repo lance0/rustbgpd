@@ -10,8 +10,8 @@ use crate::error::CliError;
 use crate::output;
 use crate::proto::policy_service_client::PolicyServiceClient;
 use crate::proto::{
-    ConditionalAdvertisementStatus, ListConditionalAdvertisementsRequest,
-    ListConditionalAdvertisementsResponse,
+    ConditionalAdvertisementCondition, ConditionalAdvertisementStatus,
+    ListConditionalAdvertisementsRequest, ListConditionalAdvertisementsResponse,
 };
 
 const NONE_INSTALLED: &str =
@@ -41,7 +41,11 @@ fn status_json(resp: &ListConditionalAdvertisementsResponse) -> serde_json::Valu
             "advertise_if": definition.advertise_if,
             "conditions": definition.conditions.iter().map(|condition| serde_json::json!({
                 "prefix": condition.prefix,
+                "ge": condition.ge,
+                "le": condition.le,
                 "state": condition.state,
+                "present_prefix_count": condition.present_prefix_count,
+                "present_prefixes": condition.present_prefixes,
             })).collect::<Vec<_>>(),
             "observed": definition.observed,
             "observed_for_ms": definition.observed_for_ms,
@@ -73,6 +77,35 @@ fn settle_text(definition: &ConditionalAdvertisementStatus) -> String {
     }
 }
 
+/// `10.0.0.0/8 le 24 present (2 matching: 10.1.0.0/16, 10.2.0.0/16)`; an
+/// exact entry is just `prefix state`.
+fn condition_text(condition: &ConditionalAdvertisementCondition) -> String {
+    let mut text = condition.prefix.clone();
+    if let Some(ge) = condition.ge {
+        text.push_str(&format!(" ge {ge}"));
+    }
+    if let Some(le) = condition.le {
+        text.push_str(&format!(" le {le}"));
+    }
+    text.push(' ');
+    text.push_str(&condition.state);
+    if (condition.ge.is_some() || condition.le.is_some()) && condition.present_prefix_count > 0 {
+        let listed = u64::try_from(condition.present_prefixes.len()).unwrap_or(u64::MAX);
+        let more = condition.present_prefix_count.saturating_sub(listed);
+        text.push_str(&format!(
+            " ({} matching: {}{})",
+            condition.present_prefix_count,
+            condition.present_prefixes.join(", "),
+            if more > 0 {
+                format!(", +{more} more")
+            } else {
+                String::new()
+            }
+        ));
+    }
+    text
+}
+
 fn write_status(
     writer: &mut impl Write,
     resp: &ListConditionalAdvertisementsResponse,
@@ -87,7 +120,7 @@ fn write_status(
         let conditions = definition
             .conditions
             .iter()
-            .map(|condition| format!("{} {}", condition.prefix, condition.state))
+            .map(condition_text)
             .collect::<Vec<_>>()
             .join(", ");
         let attached = if definition.attached_peers.is_empty() {
@@ -114,7 +147,6 @@ fn write_status(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::proto::ConditionalAdvertisementCondition;
 
     fn response() -> ListConditionalAdvertisementsResponse {
         ListConditionalAdvertisementsResponse {
@@ -125,6 +157,7 @@ mod tests {
                     conditions: vec![ConditionalAdvertisementCondition {
                         prefix: "0.0.0.0/0".to_string(),
                         state: "absent".to_string(),
+                        ..Default::default()
                     }],
                     observed: "absent".to_string(),
                     observed_for_ms: 42_000,
@@ -142,10 +175,25 @@ mod tests {
                         ConditionalAdvertisementCondition {
                             prefix: "198.51.100.0/24".to_string(),
                             state: "present".to_string(),
+                            present_prefix_count: 1,
+                            present_prefixes: vec!["198.51.100.0/24".to_string()],
+                            ..Default::default()
                         },
                         ConditionalAdvertisementCondition {
                             prefix: "2001:db8::/32".to_string(),
                             state: "absent".to_string(),
+                            ..Default::default()
+                        },
+                        ConditionalAdvertisementCondition {
+                            prefix: "10.0.0.0/8".to_string(),
+                            state: "present".to_string(),
+                            le: Some(24),
+                            present_prefix_count: 10,
+                            present_prefixes: vec![
+                                "10.1.0.0/16".to_string(),
+                                "10.2.0.0/24".to_string(),
+                            ],
+                            ..Default::default()
                         },
                     ],
                     observed: "present".to_string(),
@@ -180,7 +228,8 @@ mod tests {
              \x20 applied:       pending\n\
              \x20 observed:      present for 1.5s\n\
              \x20 settle:        pending, 3.5s left (settle_time 5s)\n\
-             \x20 conditions:    198.51.100.0/24 present, 2001:db8::/32 absent\n\
+             \x20 conditions:    198.51.100.0/24 present, 2001:db8::/32 absent, \
+             10.0.0.0/8 le 24 present (10 matching: 10.1.0.0/16, 10.2.0.0/24, +8 more)\n\
              \x20 attached:      192.0.2.1 192.0.2.2\n"
         );
     }
@@ -211,8 +260,13 @@ mod tests {
                 "name": "core",
                 "advertise_if": "present",
                 "conditions": [
-                    {"prefix": "198.51.100.0/24", "state": "present"},
-                    {"prefix": "2001:db8::/32", "state": "absent"},
+                    {"prefix": "198.51.100.0/24", "ge": null, "le": null, "state": "present",
+                     "present_prefix_count": 1, "present_prefixes": ["198.51.100.0/24"]},
+                    {"prefix": "2001:db8::/32", "ge": null, "le": null, "state": "absent",
+                     "present_prefix_count": 0, "present_prefixes": []},
+                    {"prefix": "10.0.0.0/8", "ge": null, "le": 24, "state": "present",
+                     "present_prefix_count": 10,
+                     "present_prefixes": ["10.1.0.0/16", "10.2.0.0/24"]},
                 ],
                 "observed": "present",
                 "observed_for_ms": 1500,

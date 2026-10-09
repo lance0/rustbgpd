@@ -493,6 +493,52 @@
         "address"
       ]
     },
+    "ConditionPrefixConfig": {
+      "description": "One `condition_prefixes` entry (ADR-0137): an exact prefix written as a\nCIDR string, or a range table `{ prefix = \"10.0.0.0/8\", le = 24 }` with\nprefix-list `ge`/`le` semantics. A table without bounds is the exact form\nand serializes back to the plain string.",
+      "type": "object",
+      "properties": {
+        "ge": {
+          "description": "Minimum candidate prefix length (inclusive); omitted with `le` means\nthe base length.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint8",
+          "maximum": 255,
+          "minimum": 0
+        },
+        "le": {
+          "description": "Maximum candidate prefix length (inclusive); omitted with `ge` means\nthe family's maximum.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint8",
+          "maximum": 255,
+          "minimum": 0
+        },
+        "prefix": {
+          "description": "Base prefix in CIDR form, with no host bits set.",
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "prefix"
+      ]
+    },
+    "ConditionPrefixWire": {
+      "anyOf": [
+        {
+          "description": "Exact prefix in CIDR form.",
+          "type": "string"
+        },
+        {
+          "description": "Prefix range.",
+          "$ref": "#/$defs/ConditionPrefixConfig"
+        }
+      ]
+    },
     "ConditionalAdvertiseIf": {
       "description": "Condition state in which a conditional advertisement's controlled\nroutes may be advertised (ADR-0137).",
       "oneOf": [
@@ -528,10 +574,10 @@
           ]
         },
         "condition_prefixes": {
-          "description": "Exact IPv4 or IPv6 unicast prefixes whose candidates decide the\ncondition. Nonempty; ranges are not accepted.",
+          "description": "IPv4 or IPv6 unicast condition entries whose candidates decide the\ncondition: an exact prefix string, or a prefix range table with\n`ge`/`le`. Nonempty.",
           "type": "array",
           "items": {
-            "type": "string"
+            "$ref": "#/$defs/ConditionPrefixWire"
           }
         },
         "settle_time": {

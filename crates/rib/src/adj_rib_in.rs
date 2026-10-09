@@ -555,6 +555,14 @@ impl AdjRibIn {
         true
     }
 
+    /// Every stored unicast prefix equal to or more specific than `covering`:
+    /// a trie walk under `covering`, never a table scan.
+    pub fn prefixes_within(&self, covering: &Prefix) -> impl Iterator<Item = Prefix> {
+        self.prefix_index
+            .children(covering)
+            .map(|(prefix, _)| prefix)
+    }
+
     /// Iterate over all routes for a given prefix (all path IDs).
     ///
     /// Uses the prefix index for O(candidates) lookup instead of an O(N)
