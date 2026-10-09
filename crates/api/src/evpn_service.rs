@@ -74,6 +74,23 @@ pub struct RemoteIpPrefixDropCount {
 pub type RemoteIpPrefixDropCountSnapshotFn =
     Arc<dyn Fn() -> Vec<RemoteIpPrefixDropCount> + Send + Sync + 'static>;
 
+/// One bounded current projection-drop count for remote EVPN Type 1
+/// EAD-per-EVI and Type 2 routes that select a local L2VNI. `vni` and
+/// `reason` mirror the labels of the Prometheus
+/// `evpn_l2_remote_route_drops` gauge.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct L2RemoteRouteDropCount {
+    pub vni: u32,
+    pub reason: String,
+    pub count: u64,
+}
+
+/// Read-side hook for current remote L2 projection-drop counts. The
+/// daemon backs it with the same projection summary used for
+/// Prometheus metrics.
+pub type L2RemoteRouteDropCountSnapshotFn =
+    Arc<dyn Fn() -> Vec<L2RemoteRouteDropCount> + Send + Sync + 'static>;
+
 /// Read-side hook for the latest per-IP-VRF readiness snapshot.
 ///
 /// The daemon subscribes to `DataplaneReport.ip_vrf_status` and
@@ -216,6 +233,7 @@ pub struct EvpnService {
     originated_ip_vrf_route_count: OriginatedIpVrfRouteCountFn,
     installed_ip_vrf_route_count: InstalledIpVrfRouteCountFn,
     remote_ip_prefix_drop_counts_snapshot: RemoteIpPrefixDropCountSnapshotFn,
+    l2_remote_route_drop_counts_snapshot: L2RemoteRouteDropCountSnapshotFn,
     fdb_nexthop_snapshot: FdbNexthopSnapshotFn,
     bum_enforcement_snapshot: BumEnforcementSnapshotFn,
     same_esi_bias_snapshot: SameEsiBiasSnapshotFn,
@@ -245,6 +263,7 @@ impl EvpnService {
             originated_ip_vrf_route_count: Arc::new(|_| 0),
             installed_ip_vrf_route_count: Arc::new(|_| 0),
             remote_ip_prefix_drop_counts_snapshot: Arc::new(Vec::new),
+            l2_remote_route_drop_counts_snapshot: Arc::new(Vec::new),
             fdb_nexthop_snapshot: Arc::new(FdbNexthopDataplaneStatus::default),
             bum_enforcement_snapshot: Arc::new(|| Arc::new(BumEnforcementTable::new())),
             same_esi_bias_snapshot: Arc::new(|| Arc::new(SameEsiBiasTable::new())),
@@ -278,6 +297,7 @@ impl EvpnService {
             originated_ip_vrf_route_count: Arc::new(|_| 0),
             installed_ip_vrf_route_count: Arc::new(|_| 0),
             remote_ip_prefix_drop_counts_snapshot: Arc::new(Vec::new),
+            l2_remote_route_drop_counts_snapshot: Arc::new(Vec::new),
             fdb_nexthop_snapshot: Arc::new(FdbNexthopDataplaneStatus::default),
             bum_enforcement_snapshot: Arc::new(|| Arc::new(BumEnforcementTable::new())),
             same_esi_bias_snapshot: Arc::new(|| Arc::new(SameEsiBiasTable::new())),
@@ -383,6 +403,7 @@ impl EvpnService {
             originated_ip_vrf_route_count,
             installed_ip_vrf_route_count,
             remote_ip_prefix_drop_counts_snapshot: Arc::new(Vec::new),
+            l2_remote_route_drop_counts_snapshot: Arc::new(Vec::new),
             fdb_nexthop_snapshot,
             bum_enforcement_snapshot: Arc::new(|| Arc::new(BumEnforcementTable::new())),
             same_esi_bias_snapshot: Arc::new(|| Arc::new(SameEsiBiasTable::new())),
@@ -427,6 +448,16 @@ impl EvpnService {
         remote_ip_prefix_drop_counts_snapshot: RemoteIpPrefixDropCountSnapshotFn,
     ) -> Self {
         self.remote_ip_prefix_drop_counts_snapshot = remote_ip_prefix_drop_counts_snapshot;
+        self
+    }
+
+    /// Override the remote L2 projection-drop count provider.
+    #[must_use]
+    pub fn with_l2_remote_route_drop_counts(
+        mut self,
+        l2_remote_route_drop_counts_snapshot: L2RemoteRouteDropCountSnapshotFn,
+    ) -> Self {
+        self.l2_remote_route_drop_counts_snapshot = l2_remote_route_drop_counts_snapshot;
         self
     }
 
@@ -499,6 +530,8 @@ impl proto::evpn_service_server::EvpnService for EvpnService {
     ) -> Result<Response<proto::ListEvpnInstancesResponse>, Status> {
         let snapshot = (self.instance_status_snapshot)();
         let by_vni = instance_status_index(&snapshot);
+        let mut drops_by_vni =
+            index_l2_remote_route_drop_counts(&(self.l2_remote_route_drop_counts_snapshot)());
         let model = (self.runtime_model)();
         let instances = model
             .instances()
@@ -509,6 +542,7 @@ impl proto::evpn_service_server::EvpnService for EvpnService {
                     inst,
                     by_vni.get(&inst.id).copied(),
                     (self.originated_local_mac_count)(inst.id.as_u32()),
+                    drops_by_vni.remove(&inst.id.as_u32()).unwrap_or_default(),
                 )
             })
             .collect();
@@ -902,6 +936,27 @@ fn startup_runtime_model_fn(
 /// Build an `EvpnInstanceId -> &InstanceDataplaneStatus` index from
 /// the per-call snapshot so `ListEvpnInstances` joins config rows
 /// with status rows in O(N) instead of O(N²).
+/// Group the flat L2 drop-count snapshot by VNI, each VNI's rows sorted by
+/// reason.
+fn index_l2_remote_route_drop_counts(
+    counts: &[L2RemoteRouteDropCount],
+) -> HashMap<u32, Vec<proto::EvpnInstanceRemoteRouteDropCount>> {
+    let mut index: HashMap<u32, Vec<proto::EvpnInstanceRemoteRouteDropCount>> = HashMap::new();
+    for count in counts {
+        index
+            .entry(count.vni)
+            .or_default()
+            .push(proto::EvpnInstanceRemoteRouteDropCount {
+                reason: count.reason.clone(),
+                count: count.count,
+            });
+    }
+    for rows in index.values_mut() {
+        rows.sort_by(|a, b| a.reason.cmp(&b.reason));
+    }
+    index
+}
+
 fn instance_status_index(
     snapshot: &[InstanceDataplaneStatus],
 ) -> HashMap<EvpnInstanceId, &InstanceDataplaneStatus> {
@@ -916,6 +971,7 @@ fn evpn_instance_to_proto(
     inst: &EvpnInstance,
     status: Option<&InstanceDataplaneStatus>,
     originated_local_macs_count: u64,
+    remote_route_drop_counts: Vec<proto::EvpnInstanceRemoteRouteDropCount>,
 ) -> proto::EvpnInstanceState {
     let mut state = proto::EvpnInstanceState {
         vni: inst.id.as_u32(),
@@ -928,6 +984,7 @@ fn evpn_instance_to_proto(
         readiness_state: proto::EvpnInstanceReadinessState::EvpnInstanceReadinessUnknown as i32,
         not_ready_reason: String::new(),
         bridge_vlan: inst.bridge_vlan.map(BridgeVlan::as_u32),
+        remote_route_drop_counts,
     };
 
     let Some(row) = status else {
@@ -1557,6 +1614,71 @@ mod tests {
         assert!(resp.instances[3].not_ready_reason.contains("VLAN-aware"));
     }
 
+    #[tokio::test]
+    async fn list_evpn_instances_surfaces_scoped_remote_route_drop_counts() {
+        let mut table = EvpnInstanceTable::new();
+        for vni in [100, 200] {
+            table
+                .insert(
+                    EvpnInstance::new(
+                        EvpnInstanceId::new(vni).unwrap(),
+                        rd(&format!("65000:{vni}")),
+                        vec![rt(&format!("65000:{vni}"))],
+                        ip("10.0.0.1"),
+                        None,
+                        false,
+                    )
+                    .unwrap(),
+                )
+                .unwrap();
+        }
+        let svc =
+            EvpnService::new(Arc::new(table)).with_l2_remote_route_drop_counts(Arc::new(|| {
+                vec![
+                    L2RemoteRouteDropCount {
+                        vni: 100,
+                        reason: "vni_mismatch".into(),
+                        count: 1,
+                    },
+                    L2RemoteRouteDropCount {
+                        vni: 100,
+                        reason: "ethernet_tag_mismatch".into(),
+                        count: 2,
+                    },
+                    // A VNI that is no longer configured is not reported.
+                    L2RemoteRouteDropCount {
+                        vni: 999,
+                        reason: "ethernet_tag_mismatch".into(),
+                        count: 7,
+                    },
+                ]
+            }));
+
+        let resp = svc
+            .list_evpn_instances(Request::new(proto::ListEvpnInstancesRequest {}))
+            .await
+            .unwrap()
+            .into_inner();
+
+        assert_eq!(resp.instances.len(), 2);
+        let drops = |row: &proto::EvpnInstanceState| {
+            row.remote_route_drop_counts
+                .iter()
+                .map(|d| (d.reason.clone(), d.count))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(resp.instances[0].vni, 100);
+        assert_eq!(
+            drops(&resp.instances[0]),
+            vec![
+                ("ethernet_tag_mismatch".to_string(), 2),
+                ("vni_mismatch".to_string(), 1),
+            ]
+        );
+        assert_eq!(resp.instances[1].vni, 200);
+        assert_eq!(resp.instances[1].remote_route_drop_counts, Vec::new());
+    }
+
     #[test]
     fn not_ready_without_message_gets_diagnostic_fallback() {
         let inst = EvpnInstance::new(
@@ -1575,7 +1697,7 @@ mod tests {
             bridge_mac: None,
         };
 
-        let row = evpn_instance_to_proto(&inst, Some(&status), 0);
+        let row = evpn_instance_to_proto(&inst, Some(&status), 0, Vec::new());
 
         assert_eq!(
             row.readiness_state,

@@ -2441,6 +2441,7 @@ mod tests {
             readiness_state: 999,
             not_ready_reason: "not_ready_reason-value".to_string(),
             bridge_vlan: Some(110),
+            remote_route_drop_counts: vec![],
         };
         let response = crate::proto::ListEvpnInstancesResponse {
             instances: vec![response],
@@ -3344,6 +3345,7 @@ evpn_duplicate_mac_moves_total{vni="100",mac="02:aa:bb:cc:dd:01"} 2
             local_vtep_ip: "10.0.0.1".to_string(),
             bridge: "br100".to_string(),
             bridge_vlan: Some(10),
+            remote_route_drop_counts: vec![],
             advertise_svi_mac: true,
             originated_local_macs_count: 5,
             readiness_state: crate::proto::EvpnInstanceReadinessState::EvpnInstanceReadinessNotReady

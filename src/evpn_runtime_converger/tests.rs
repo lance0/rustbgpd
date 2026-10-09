@@ -3635,8 +3635,6 @@ async fn runtime_actor_converger_l2vni_add_publishes_imet_and_actor_models() {
         watch::channel(Arc::new(rustbgpd_evpn::BumEnforcementTable::new()));
     let (same_esi_bias_tx, _bias_rx) =
         watch::channel(Arc::new(rustbgpd_evpn::SameEsiBiasTable::new()));
-    let (_drop_counts_tx, remote_prefix_drop_counts_rx) =
-        watch::channel(Arc::new(evpn_dataplane::RemoteIpPrefixDropCounts::new()));
     let (report_tx, _) = broadcast::channel::<rustbgpd_evpn::DataplaneReport>(1);
     let dataplane_handle = evpn_dataplane::EvpnDataplaneHandle {
         supervisor_progress: WorkerProgress::default().subscribe(),
@@ -3650,7 +3648,8 @@ async fn runtime_actor_converger_l2vni_add_publishes_imet_and_actor_models() {
         same_esi_bias_tx,
         evpn_instances_tx,
         ip_vrfs_tx,
-        remote_prefix_drop_counts_rx,
+        remote_prefix_drop_counts_rx: watch::channel(Arc::default()).1,
+        l2_remote_route_drop_counts_rx: watch::channel(Arc::default()).1,
     };
     let (_local_tx, local_rx) = mpsc::channel(1);
     let originator_handle = evpn_originator::spawn(
@@ -3727,8 +3726,6 @@ async fn runtime_actor_converger_l2vni_add_updates_segment_instance_view() {
         watch::channel(Arc::new(rustbgpd_evpn::BumEnforcementTable::new()));
     let (same_esi_bias_tx, _bias_rx) =
         watch::channel(Arc::new(rustbgpd_evpn::SameEsiBiasTable::new()));
-    let (_drop_counts_tx, remote_prefix_drop_counts_rx) =
-        watch::channel(Arc::new(evpn_dataplane::RemoteIpPrefixDropCounts::new()));
     let (report_tx, _) = broadcast::channel::<rustbgpd_evpn::DataplaneReport>(1);
     let dataplane_handle = evpn_dataplane::EvpnDataplaneHandle {
         supervisor_progress: WorkerProgress::default().subscribe(),
@@ -3742,7 +3739,8 @@ async fn runtime_actor_converger_l2vni_add_updates_segment_instance_view() {
         same_esi_bias_tx,
         evpn_instances_tx,
         ip_vrfs_tx,
-        remote_prefix_drop_counts_rx,
+        remote_prefix_drop_counts_rx: watch::channel(Arc::default()).1,
+        l2_remote_route_drop_counts_rx: watch::channel(Arc::default()).1,
     };
     let (_local_tx, local_rx) = mpsc::channel(1);
     let originator_handle = evpn_originator::spawn(
@@ -3835,8 +3833,6 @@ async fn runtime_actor_converger_additive_build_up_rejects_missing_originator() 
         watch::channel(Arc::new(rustbgpd_evpn::BumEnforcementTable::new()));
     let (same_esi_bias_tx, _bias_rx) =
         watch::channel(Arc::new(rustbgpd_evpn::SameEsiBiasTable::new()));
-    let (_drop_counts_tx, remote_prefix_drop_counts_rx) =
-        watch::channel(Arc::new(evpn_dataplane::RemoteIpPrefixDropCounts::new()));
     let (report_tx, _) = broadcast::channel::<rustbgpd_evpn::DataplaneReport>(1);
     let dataplane_handle = evpn_dataplane::EvpnDataplaneHandle {
         supervisor_progress: WorkerProgress::default().subscribe(),
@@ -3850,7 +3846,8 @@ async fn runtime_actor_converger_additive_build_up_rejects_missing_originator() 
         same_esi_bias_tx,
         evpn_instances_tx,
         ip_vrfs_tx,
-        remote_prefix_drop_counts_rx,
+        remote_prefix_drop_counts_rx: watch::channel(Arc::default()).1,
+        l2_remote_route_drop_counts_rx: watch::channel(Arc::default()).1,
     };
     let converger = EvpnRuntimeActorConverger {
         rib_tx,
@@ -3890,8 +3887,6 @@ async fn runtime_actor_converger_additive_build_up_rejects_missing_segment_actor
         watch::channel(Arc::new(rustbgpd_evpn::BumEnforcementTable::new()));
     let (same_esi_bias_tx, _bias_rx) =
         watch::channel(Arc::new(rustbgpd_evpn::SameEsiBiasTable::new()));
-    let (_drop_counts_tx, remote_prefix_drop_counts_rx) =
-        watch::channel(Arc::new(evpn_dataplane::RemoteIpPrefixDropCounts::new()));
     let (report_tx, _) = broadcast::channel::<rustbgpd_evpn::DataplaneReport>(1);
     let dataplane_handle = evpn_dataplane::EvpnDataplaneHandle {
         supervisor_progress: WorkerProgress::default().subscribe(),
@@ -3905,7 +3900,8 @@ async fn runtime_actor_converger_additive_build_up_rejects_missing_segment_actor
         same_esi_bias_tx,
         evpn_instances_tx,
         ip_vrfs_tx,
-        remote_prefix_drop_counts_rx,
+        remote_prefix_drop_counts_rx: watch::channel(Arc::default()).1,
+        l2_remote_route_drop_counts_rx: watch::channel(Arc::default()).1,
     };
     let (_local_tx, local_rx) = mpsc::channel(1);
     let originator_handle = evpn_originator::spawn(
@@ -3993,8 +3989,6 @@ async fn runtime_actor_converger_additive_build_up_rollback_restores_imet_and_mo
         watch::channel(Arc::new(rustbgpd_evpn::BumEnforcementTable::new()));
     let (same_esi_bias_tx, _bias_rx) =
         watch::channel(Arc::new(rustbgpd_evpn::SameEsiBiasTable::new()));
-    let (_drop_counts_tx, remote_prefix_drop_counts_rx) =
-        watch::channel(Arc::new(evpn_dataplane::RemoteIpPrefixDropCounts::new()));
     let (report_tx, _) = broadcast::channel::<rustbgpd_evpn::DataplaneReport>(8);
     let dataplane_handle = evpn_dataplane::EvpnDataplaneHandle {
         supervisor_progress: WorkerProgress::default().subscribe(),
@@ -4008,7 +4002,8 @@ async fn runtime_actor_converger_additive_build_up_rollback_restores_imet_and_mo
         same_esi_bias_tx,
         evpn_instances_tx,
         ip_vrfs_tx,
-        remote_prefix_drop_counts_rx,
+        remote_prefix_drop_counts_rx: watch::channel(Arc::default()).1,
+        l2_remote_route_drop_counts_rx: watch::channel(Arc::default()).1,
     };
 
     let (_local_tx, local_rx) = mpsc::channel(1);
@@ -4169,8 +4164,6 @@ async fn runtime_actor_converger_additive_build_up_publishes_all_actor_models() 
         watch::channel(Arc::new(rustbgpd_evpn::BumEnforcementTable::new()));
     let (same_esi_bias_tx, _bias_rx) =
         watch::channel(Arc::new(rustbgpd_evpn::SameEsiBiasTable::new()));
-    let (_drop_counts_tx, remote_prefix_drop_counts_rx) =
-        watch::channel(Arc::new(evpn_dataplane::RemoteIpPrefixDropCounts::new()));
     let (report_tx, _) = broadcast::channel::<rustbgpd_evpn::DataplaneReport>(8);
     let dataplane_handle = evpn_dataplane::EvpnDataplaneHandle {
         supervisor_progress: WorkerProgress::default().subscribe(),
@@ -4184,7 +4177,8 @@ async fn runtime_actor_converger_additive_build_up_publishes_all_actor_models() 
         same_esi_bias_tx,
         evpn_instances_tx,
         ip_vrfs_tx,
-        remote_prefix_drop_counts_rx,
+        remote_prefix_drop_counts_rx: watch::channel(Arc::default()).1,
+        l2_remote_route_drop_counts_rx: watch::channel(Arc::default()).1,
     };
 
     let (local_tx, local_rx) = mpsc::channel(16);
@@ -4398,8 +4392,6 @@ async fn runtime_actor_converger_additive_existing_es_member_expansion_publishes
         watch::channel(Arc::new(rustbgpd_evpn::BumEnforcementTable::new()));
     let (same_esi_bias_tx, _bias_rx) =
         watch::channel(Arc::new(rustbgpd_evpn::SameEsiBiasTable::new()));
-    let (_drop_counts_tx, remote_prefix_drop_counts_rx) =
-        watch::channel(Arc::new(evpn_dataplane::RemoteIpPrefixDropCounts::new()));
     let (report_tx, _) = broadcast::channel::<rustbgpd_evpn::DataplaneReport>(1);
     let dataplane_handle = evpn_dataplane::EvpnDataplaneHandle {
         supervisor_progress: WorkerProgress::default().subscribe(),
@@ -4413,7 +4405,8 @@ async fn runtime_actor_converger_additive_existing_es_member_expansion_publishes
         same_esi_bias_tx,
         evpn_instances_tx,
         ip_vrfs_tx,
-        remote_prefix_drop_counts_rx,
+        remote_prefix_drop_counts_rx: watch::channel(Arc::default()).1,
+        l2_remote_route_drop_counts_rx: watch::channel(Arc::default()).1,
     };
     let (local_tx, local_rx) = mpsc::channel(8);
     let originator_handle = evpn_originator::spawn(
@@ -4529,8 +4522,6 @@ async fn runtime_actor_converger_l2vni_delete_drains_imet_and_actor_models() {
         watch::channel(Arc::new(rustbgpd_evpn::BumEnforcementTable::new()));
     let (same_esi_bias_tx, _bias_rx) =
         watch::channel(Arc::new(rustbgpd_evpn::SameEsiBiasTable::new()));
-    let (_drop_counts_tx, remote_prefix_drop_counts_rx) =
-        watch::channel(Arc::new(evpn_dataplane::RemoteIpPrefixDropCounts::new()));
     let (report_tx, _) = broadcast::channel::<rustbgpd_evpn::DataplaneReport>(1);
     let dataplane_handle = evpn_dataplane::EvpnDataplaneHandle {
         supervisor_progress: WorkerProgress::default().subscribe(),
@@ -4544,7 +4535,8 @@ async fn runtime_actor_converger_l2vni_delete_drains_imet_and_actor_models() {
         same_esi_bias_tx,
         evpn_instances_tx,
         ip_vrfs_tx,
-        remote_prefix_drop_counts_rx,
+        remote_prefix_drop_counts_rx: watch::channel(Arc::default()).1,
+        l2_remote_route_drop_counts_rx: watch::channel(Arc::default()).1,
     };
     let (local_tx, local_rx) = mpsc::channel(8);
     let originator_handle = evpn_originator::spawn(
@@ -4660,8 +4652,6 @@ async fn runtime_actor_converger_l2vni_swap_updates_models_and_imet() {
         watch::channel(Arc::new(rustbgpd_evpn::BumEnforcementTable::new()));
     let (same_esi_bias_tx, _bias_rx) =
         watch::channel(Arc::new(rustbgpd_evpn::SameEsiBiasTable::new()));
-    let (_drop_counts_tx, remote_prefix_drop_counts_rx) =
-        watch::channel(Arc::new(evpn_dataplane::RemoteIpPrefixDropCounts::new()));
     let (report_tx, _) = broadcast::channel::<rustbgpd_evpn::DataplaneReport>(1);
     let dataplane_handle = evpn_dataplane::EvpnDataplaneHandle {
         supervisor_progress: WorkerProgress::default().subscribe(),
@@ -4675,7 +4665,8 @@ async fn runtime_actor_converger_l2vni_swap_updates_models_and_imet() {
         same_esi_bias_tx,
         evpn_instances_tx,
         ip_vrfs_tx,
-        remote_prefix_drop_counts_rx,
+        remote_prefix_drop_counts_rx: watch::channel(Arc::default()).1,
+        l2_remote_route_drop_counts_rx: watch::channel(Arc::default()).1,
     };
     let (_local_tx, local_rx) = mpsc::channel(1);
     let originator_handle = evpn_originator::spawn(
@@ -4759,8 +4750,6 @@ async fn runtime_actor_converger_l2vni_swap_publishes_ip_vrf_metadata() {
         watch::channel(Arc::new(rustbgpd_evpn::BumEnforcementTable::new()));
     let (same_esi_bias_tx, _bias_rx) =
         watch::channel(Arc::new(rustbgpd_evpn::SameEsiBiasTable::new()));
-    let (_drop_counts_tx, remote_prefix_drop_counts_rx) =
-        watch::channel(Arc::new(evpn_dataplane::RemoteIpPrefixDropCounts::new()));
     let (report_tx, _) = broadcast::channel::<rustbgpd_evpn::DataplaneReport>(1);
     let dataplane_handle = evpn_dataplane::EvpnDataplaneHandle {
         supervisor_progress: WorkerProgress::default().subscribe(),
@@ -4774,7 +4763,8 @@ async fn runtime_actor_converger_l2vni_swap_publishes_ip_vrf_metadata() {
         same_esi_bias_tx,
         evpn_instances_tx,
         ip_vrfs_tx,
-        remote_prefix_drop_counts_rx,
+        remote_prefix_drop_counts_rx: watch::channel(Arc::default()).1,
+        l2_remote_route_drop_counts_rx: watch::channel(Arc::default()).1,
     };
     let (_local_tx, local_rx) = mpsc::channel(1);
     let originator_handle = evpn_originator::spawn(
@@ -4878,8 +4868,6 @@ async fn runtime_actor_converger_l2vni_mixed_redefine_swap_updates_models_and_im
         watch::channel(Arc::new(rustbgpd_evpn::BumEnforcementTable::new()));
     let (same_esi_bias_tx, _bias_rx) =
         watch::channel(Arc::new(rustbgpd_evpn::SameEsiBiasTable::new()));
-    let (_drop_counts_tx, remote_prefix_drop_counts_rx) =
-        watch::channel(Arc::new(evpn_dataplane::RemoteIpPrefixDropCounts::new()));
     let (report_tx, _) = broadcast::channel::<rustbgpd_evpn::DataplaneReport>(1);
     let dataplane_handle = evpn_dataplane::EvpnDataplaneHandle {
         supervisor_progress: WorkerProgress::default().subscribe(),
@@ -4893,7 +4881,8 @@ async fn runtime_actor_converger_l2vni_mixed_redefine_swap_updates_models_and_im
         same_esi_bias_tx,
         evpn_instances_tx,
         ip_vrfs_tx,
-        remote_prefix_drop_counts_rx,
+        remote_prefix_drop_counts_rx: watch::channel(Arc::default()).1,
+        l2_remote_route_drop_counts_rx: watch::channel(Arc::default()).1,
     };
     let (_local_tx, local_rx) = mpsc::channel(1);
     let originator_handle = evpn_originator::spawn(
@@ -5008,8 +4997,6 @@ async fn runtime_actor_converger_l2vni_batch_redefine_updates_models_and_imet() 
         watch::channel(Arc::new(rustbgpd_evpn::BumEnforcementTable::new()));
     let (same_esi_bias_tx, _bias_rx) =
         watch::channel(Arc::new(rustbgpd_evpn::SameEsiBiasTable::new()));
-    let (_drop_counts_tx, remote_prefix_drop_counts_rx) =
-        watch::channel(Arc::new(evpn_dataplane::RemoteIpPrefixDropCounts::new()));
     let (report_tx, _) = broadcast::channel::<rustbgpd_evpn::DataplaneReport>(1);
     let dataplane_handle = evpn_dataplane::EvpnDataplaneHandle {
         supervisor_progress: WorkerProgress::default().subscribe(),
@@ -5023,7 +5010,8 @@ async fn runtime_actor_converger_l2vni_batch_redefine_updates_models_and_imet() 
         same_esi_bias_tx,
         evpn_instances_tx,
         ip_vrfs_tx,
-        remote_prefix_drop_counts_rx,
+        remote_prefix_drop_counts_rx: watch::channel(Arc::default()).1,
+        l2_remote_route_drop_counts_rx: watch::channel(Arc::default()).1,
     };
     let (_local_tx, local_rx) = mpsc::channel(1);
     let originator_handle = evpn_originator::spawn(
@@ -5141,8 +5129,6 @@ async fn runtime_actor_converger_l2vni_mixed_redefine_withdraw_failure_rolls_bac
         watch::channel(Arc::new(rustbgpd_evpn::BumEnforcementTable::new()));
     let (same_esi_bias_tx, _bias_rx) =
         watch::channel(Arc::new(rustbgpd_evpn::SameEsiBiasTable::new()));
-    let (_drop_counts_tx, remote_prefix_drop_counts_rx) =
-        watch::channel(Arc::new(evpn_dataplane::RemoteIpPrefixDropCounts::new()));
     let (report_tx, _) = broadcast::channel::<rustbgpd_evpn::DataplaneReport>(1);
     let dataplane_handle = evpn_dataplane::EvpnDataplaneHandle {
         supervisor_progress: WorkerProgress::default().subscribe(),
@@ -5156,7 +5142,8 @@ async fn runtime_actor_converger_l2vni_mixed_redefine_withdraw_failure_rolls_bac
         same_esi_bias_tx,
         evpn_instances_tx,
         ip_vrfs_tx,
-        remote_prefix_drop_counts_rx,
+        remote_prefix_drop_counts_rx: watch::channel(Arc::default()).1,
+        l2_remote_route_drop_counts_rx: watch::channel(Arc::default()).1,
     };
     let (_local_tx, local_rx) = mpsc::channel(1);
     let originator_handle = evpn_originator::spawn(
@@ -5243,8 +5230,6 @@ async fn runtime_actor_converger_l2vni_swap_rollback_restores_imet_and_models() 
         watch::channel(Arc::new(rustbgpd_evpn::BumEnforcementTable::new()));
     let (same_esi_bias_tx, _bias_rx) =
         watch::channel(Arc::new(rustbgpd_evpn::SameEsiBiasTable::new()));
-    let (_drop_counts_tx, remote_prefix_drop_counts_rx) =
-        watch::channel(Arc::new(evpn_dataplane::RemoteIpPrefixDropCounts::new()));
     let (report_tx, _) = broadcast::channel::<rustbgpd_evpn::DataplaneReport>(1);
     let dataplane_handle = evpn_dataplane::EvpnDataplaneHandle {
         supervisor_progress: WorkerProgress::default().subscribe(),
@@ -5258,7 +5243,8 @@ async fn runtime_actor_converger_l2vni_swap_rollback_restores_imet_and_models() 
         same_esi_bias_tx,
         evpn_instances_tx,
         ip_vrfs_tx,
-        remote_prefix_drop_counts_rx,
+        remote_prefix_drop_counts_rx: watch::channel(Arc::default()).1,
+        l2_remote_route_drop_counts_rx: watch::channel(Arc::default()).1,
     };
     let (_local_tx, local_rx) = mpsc::channel(1);
     let originator_handle = evpn_originator::spawn(
@@ -5423,8 +5409,6 @@ async fn runtime_actor_converger_l2vni_delete_publishes_ip_vrf_metadata() {
         watch::channel(Arc::new(rustbgpd_evpn::BumEnforcementTable::new()));
     let (same_esi_bias_tx, _bias_rx) =
         watch::channel(Arc::new(rustbgpd_evpn::SameEsiBiasTable::new()));
-    let (_drop_counts_tx, remote_prefix_drop_counts_rx) =
-        watch::channel(Arc::new(evpn_dataplane::RemoteIpPrefixDropCounts::new()));
     let (report_tx, _) = broadcast::channel::<rustbgpd_evpn::DataplaneReport>(1);
     let dataplane_handle = evpn_dataplane::EvpnDataplaneHandle {
         supervisor_progress: WorkerProgress::default().subscribe(),
@@ -5438,7 +5422,8 @@ async fn runtime_actor_converger_l2vni_delete_publishes_ip_vrf_metadata() {
         same_esi_bias_tx,
         evpn_instances_tx,
         ip_vrfs_tx,
-        remote_prefix_drop_counts_rx,
+        remote_prefix_drop_counts_rx: watch::channel(Arc::default()).1,
+        l2_remote_route_drop_counts_rx: watch::channel(Arc::default()).1,
     };
     let (_local_tx, local_rx) = mpsc::channel(1);
     let originator_handle = evpn_originator::spawn(
@@ -6199,8 +6184,6 @@ async fn runtime_actor_converger_ip_vrf_add_publishes_dataplane_model() {
         watch::channel(Arc::new(rustbgpd_evpn::BumEnforcementTable::new()));
     let (same_esi_bias_tx, _bias_rx) =
         watch::channel(Arc::new(rustbgpd_evpn::SameEsiBiasTable::new()));
-    let (_drop_counts_tx, remote_prefix_drop_counts_rx) =
-        watch::channel(Arc::new(evpn_dataplane::RemoteIpPrefixDropCounts::new()));
     let (report_tx, _) = broadcast::channel::<rustbgpd_evpn::DataplaneReport>(1);
     let dataplane_handle = evpn_dataplane::EvpnDataplaneHandle {
         supervisor_progress: WorkerProgress::default().subscribe(),
@@ -6214,7 +6197,8 @@ async fn runtime_actor_converger_ip_vrf_add_publishes_dataplane_model() {
         same_esi_bias_tx,
         evpn_instances_tx,
         ip_vrfs_tx,
-        remote_prefix_drop_counts_rx,
+        remote_prefix_drop_counts_rx: watch::channel(Arc::default()).1,
+        l2_remote_route_drop_counts_rx: watch::channel(Arc::default()).1,
     };
     let (_obs_tx, obs_rx) = watch::channel(Arc::new(std::collections::HashMap::<
         rustbgpd_evpn::IpVrfId,
@@ -6277,8 +6261,6 @@ async fn runtime_actor_converger_ip_vrf_relink_republishes_ip_vrfs() {
         watch::channel(Arc::new(rustbgpd_evpn::BumEnforcementTable::new()));
     let (same_esi_bias_tx, _bias_rx) =
         watch::channel(Arc::new(rustbgpd_evpn::SameEsiBiasTable::new()));
-    let (_drop_counts_tx, remote_prefix_drop_counts_rx) =
-        watch::channel(Arc::new(evpn_dataplane::RemoteIpPrefixDropCounts::new()));
     let (report_tx, _) = broadcast::channel::<rustbgpd_evpn::DataplaneReport>(1);
     let dataplane_handle = evpn_dataplane::EvpnDataplaneHandle {
         supervisor_progress: WorkerProgress::default().subscribe(),
@@ -6292,7 +6274,8 @@ async fn runtime_actor_converger_ip_vrf_relink_republishes_ip_vrfs() {
         same_esi_bias_tx,
         evpn_instances_tx,
         ip_vrfs_tx,
-        remote_prefix_drop_counts_rx,
+        remote_prefix_drop_counts_rx: watch::channel(Arc::default()).1,
+        l2_remote_route_drop_counts_rx: watch::channel(Arc::default()).1,
     };
     let converger = EvpnRuntimeActorConverger {
         rib_tx,
@@ -6343,8 +6326,6 @@ async fn runtime_actor_converger_ip_vrf_delete_publishes_dataplane_and_l3_model(
         watch::channel(Arc::new(rustbgpd_evpn::BumEnforcementTable::new()));
     let (same_esi_bias_tx, _bias_rx) =
         watch::channel(Arc::new(rustbgpd_evpn::SameEsiBiasTable::new()));
-    let (_drop_counts_tx, remote_prefix_drop_counts_rx) =
-        watch::channel(Arc::new(evpn_dataplane::RemoteIpPrefixDropCounts::new()));
     let (report_tx, _) = broadcast::channel::<rustbgpd_evpn::DataplaneReport>(1);
     let dataplane_handle = evpn_dataplane::EvpnDataplaneHandle {
         supervisor_progress: WorkerProgress::default().subscribe(),
@@ -6358,7 +6339,8 @@ async fn runtime_actor_converger_ip_vrf_delete_publishes_dataplane_and_l3_model(
         same_esi_bias_tx,
         evpn_instances_tx,
         ip_vrfs_tx,
-        remote_prefix_drop_counts_rx,
+        remote_prefix_drop_counts_rx: watch::channel(Arc::default()).1,
+        l2_remote_route_drop_counts_rx: watch::channel(Arc::default()).1,
     };
     let (obs_tx, obs_rx) = watch::channel(Arc::new(std::collections::HashMap::<
         rustbgpd_evpn::IpVrfId,
@@ -6431,8 +6413,6 @@ async fn runtime_actor_converger_ip_vrf_redefine_reoriginates_type5() {
         watch::channel(Arc::new(rustbgpd_evpn::BumEnforcementTable::new()));
     let (same_esi_bias_tx, _bias_rx) =
         watch::channel(Arc::new(rustbgpd_evpn::SameEsiBiasTable::new()));
-    let (_drop_counts_tx, remote_prefix_drop_counts_rx) =
-        watch::channel(Arc::new(evpn_dataplane::RemoteIpPrefixDropCounts::new()));
     let (report_tx, _) = broadcast::channel::<rustbgpd_evpn::DataplaneReport>(1);
     let dataplane_handle = evpn_dataplane::EvpnDataplaneHandle {
         supervisor_progress: WorkerProgress::default().subscribe(),
@@ -6446,7 +6426,8 @@ async fn runtime_actor_converger_ip_vrf_redefine_reoriginates_type5() {
         same_esi_bias_tx,
         evpn_instances_tx,
         ip_vrfs_tx,
-        remote_prefix_drop_counts_rx,
+        remote_prefix_drop_counts_rx: watch::channel(Arc::default()).1,
+        l2_remote_route_drop_counts_rx: watch::channel(Arc::default()).1,
     };
     let (obs_tx, obs_rx) = watch::channel(Arc::new(std::collections::HashMap::<
         rustbgpd_evpn::IpVrfId,
@@ -6940,8 +6921,6 @@ async fn runtime_actor_converger_l2vni_redefine_reoriginates_imet() {
         watch::channel(Arc::new(rustbgpd_evpn::BumEnforcementTable::new()));
     let (same_esi_bias_tx, _bias_rx) =
         watch::channel(Arc::new(rustbgpd_evpn::SameEsiBiasTable::new()));
-    let (_drop_counts_tx, remote_prefix_drop_counts_rx) =
-        watch::channel(Arc::new(evpn_dataplane::RemoteIpPrefixDropCounts::new()));
     let (report_tx, _) = broadcast::channel::<rustbgpd_evpn::DataplaneReport>(1);
     let dataplane_handle = evpn_dataplane::EvpnDataplaneHandle {
         supervisor_progress: WorkerProgress::default().subscribe(),
@@ -6955,7 +6934,8 @@ async fn runtime_actor_converger_l2vni_redefine_reoriginates_imet() {
         same_esi_bias_tx,
         evpn_instances_tx,
         ip_vrfs_tx,
-        remote_prefix_drop_counts_rx,
+        remote_prefix_drop_counts_rx: watch::channel(Arc::default()).1,
+        l2_remote_route_drop_counts_rx: watch::channel(Arc::default()).1,
     };
     let (_local_tx, local_rx) = mpsc::channel(1);
     let originator_handle = evpn_originator::spawn(
@@ -7273,8 +7253,6 @@ async fn runtime_actor_converger_tenant_teardown_drains_imet_and_es_routes() {
         watch::channel(Arc::new(rustbgpd_evpn::BumEnforcementTable::new()));
     let (same_esi_bias_tx, _bias_rx) =
         watch::channel(Arc::new(rustbgpd_evpn::SameEsiBiasTable::new()));
-    let (_drop_counts_tx, remote_prefix_drop_counts_rx) =
-        watch::channel(Arc::new(evpn_dataplane::RemoteIpPrefixDropCounts::new()));
     let (report_tx, _) = broadcast::channel::<rustbgpd_evpn::DataplaneReport>(1);
     let dataplane_handle = evpn_dataplane::EvpnDataplaneHandle {
         supervisor_progress: WorkerProgress::default().subscribe(),
@@ -7288,7 +7266,8 @@ async fn runtime_actor_converger_tenant_teardown_drains_imet_and_es_routes() {
         same_esi_bias_tx,
         evpn_instances_tx,
         ip_vrfs_tx,
-        remote_prefix_drop_counts_rx,
+        remote_prefix_drop_counts_rx: watch::channel(Arc::default()).1,
+        l2_remote_route_drop_counts_rx: watch::channel(Arc::default()).1,
     };
     let (_local_tx, local_rx) = mpsc::channel(1);
     let originator_handle = evpn_originator::spawn(
@@ -7467,8 +7446,6 @@ async fn runtime_actor_converger_tenant_teardown_rollback_restores_imet_and_mode
         watch::channel(Arc::new(rustbgpd_evpn::BumEnforcementTable::new()));
     let (same_esi_bias_tx, _bias_rx) =
         watch::channel(Arc::new(rustbgpd_evpn::SameEsiBiasTable::new()));
-    let (_drop_counts_tx, remote_prefix_drop_counts_rx) =
-        watch::channel(Arc::new(evpn_dataplane::RemoteIpPrefixDropCounts::new()));
     let (report_tx, _) = broadcast::channel::<rustbgpd_evpn::DataplaneReport>(1);
     let dataplane_handle = evpn_dataplane::EvpnDataplaneHandle {
         supervisor_progress: WorkerProgress::default().subscribe(),
@@ -7482,7 +7459,8 @@ async fn runtime_actor_converger_tenant_teardown_rollback_restores_imet_and_mode
         same_esi_bias_tx,
         evpn_instances_tx,
         ip_vrfs_tx,
-        remote_prefix_drop_counts_rx,
+        remote_prefix_drop_counts_rx: watch::channel(Arc::default()).1,
+        l2_remote_route_drop_counts_rx: watch::channel(Arc::default()).1,
     };
     let (_local_tx, local_rx) = mpsc::channel(1);
     let originator_handle = evpn_originator::spawn(
@@ -7643,8 +7621,6 @@ async fn runtime_actor_converger_tenant_teardown_drains_svi_mac() {
         watch::channel(Arc::new(rustbgpd_evpn::BumEnforcementTable::new()));
     let (same_esi_bias_tx, _bias_rx) =
         watch::channel(Arc::new(rustbgpd_evpn::SameEsiBiasTable::new()));
-    let (_drop_counts_tx, remote_prefix_drop_counts_rx) =
-        watch::channel(Arc::new(evpn_dataplane::RemoteIpPrefixDropCounts::new()));
     let (report_tx, _) = broadcast::channel::<rustbgpd_evpn::DataplaneReport>(1);
     let dataplane_handle = evpn_dataplane::EvpnDataplaneHandle {
         supervisor_progress: WorkerProgress::default().subscribe(),
@@ -7658,7 +7634,8 @@ async fn runtime_actor_converger_tenant_teardown_drains_svi_mac() {
         same_esi_bias_tx,
         evpn_instances_tx,
         ip_vrfs_tx,
-        remote_prefix_drop_counts_rx,
+        remote_prefix_drop_counts_rx: watch::channel(Arc::default()).1,
+        l2_remote_route_drop_counts_rx: watch::channel(Arc::default()).1,
     };
     let (_local_tx, local_rx) = mpsc::channel(1);
     let originator_handle = evpn_originator::spawn(
@@ -7958,8 +7935,6 @@ async fn runtime_apply_preserves_operator_drain_across_unrelated_l2vni_add() {
         watch::channel(Arc::new(rustbgpd_evpn::BumEnforcementTable::new()));
     let (same_esi_bias_tx, _bias_rx) =
         watch::channel(Arc::new(rustbgpd_evpn::SameEsiBiasTable::new()));
-    let (_drop_counts_tx, remote_prefix_drop_counts_rx) =
-        watch::channel(Arc::new(evpn_dataplane::RemoteIpPrefixDropCounts::new()));
     let (report_tx, _) = broadcast::channel::<rustbgpd_evpn::DataplaneReport>(1);
     let dataplane_handle = evpn_dataplane::EvpnDataplaneHandle {
         supervisor_progress: WorkerProgress::default().subscribe(),
@@ -7973,7 +7948,8 @@ async fn runtime_apply_preserves_operator_drain_across_unrelated_l2vni_add() {
         same_esi_bias_tx,
         evpn_instances_tx,
         ip_vrfs_tx,
-        remote_prefix_drop_counts_rx,
+        remote_prefix_drop_counts_rx: watch::channel(Arc::default()).1,
+        l2_remote_route_drop_counts_rx: watch::channel(Arc::default()).1,
     };
     let converger = EvpnRuntimeActorConverger {
         rib_tx,
@@ -8172,8 +8148,6 @@ async fn failed_tenant_teardown_keeps_coordinator_and_actor_drain_agreeing() {
         watch::channel(Arc::new(rustbgpd_evpn::BumEnforcementTable::new()));
     let (same_esi_bias_tx, _bias_rx) =
         watch::channel(Arc::new(rustbgpd_evpn::SameEsiBiasTable::new()));
-    let (_drop_counts_tx, remote_prefix_drop_counts_rx) =
-        watch::channel(Arc::new(evpn_dataplane::RemoteIpPrefixDropCounts::new()));
     let (report_tx, _) = broadcast::channel::<rustbgpd_evpn::DataplaneReport>(1);
     let dataplane_handle = evpn_dataplane::EvpnDataplaneHandle {
         supervisor_progress: WorkerProgress::default().subscribe(),
@@ -8187,7 +8161,8 @@ async fn failed_tenant_teardown_keeps_coordinator_and_actor_drain_agreeing() {
         same_esi_bias_tx,
         evpn_instances_tx,
         ip_vrfs_tx,
-        remote_prefix_drop_counts_rx,
+        remote_prefix_drop_counts_rx: watch::channel(Arc::default()).1,
+        l2_remote_route_drop_counts_rx: watch::channel(Arc::default()).1,
     };
     let converger = EvpnRuntimeActorConverger {
         rib_tx,

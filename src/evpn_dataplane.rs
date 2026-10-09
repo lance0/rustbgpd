@@ -72,6 +72,9 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
 pub(crate) type RemoteIpPrefixDropCounts = BTreeMap<(String, String), u64>;
+/// Current remote Type 1 EAD-per-EVI / Type 2 projection drops by bounded
+/// `(VNI, reason)` labels (ADR-0092 amendment D).
+pub(crate) type L2RemoteRouteDropCounts = BTreeMap<(u32, &'static str), u64>;
 
 /// Debounce window for RIB EVPN route events. An event re-arms the
 /// timer (trailing edge), so a burst — an EAD-per-ES withdrawal
@@ -239,6 +242,9 @@ pub struct EvpnDataplaneHandle {
     /// reason)` labels. Fed from the same projection summary used by
     /// Prometheus.
     pub(crate) remote_prefix_drop_counts_rx: watch::Receiver<Arc<RemoteIpPrefixDropCounts>>,
+    /// Current remote L2 projection drops by bounded `(vni, reason)`
+    /// labels. Fed from the same snapshot as `evpn_l2_remote_route_drops`.
+    pub(crate) l2_remote_route_drop_counts_rx: watch::Receiver<Arc<L2RemoteRouteDropCounts>>,
 }
 
 /// EVPN intent tables used to seed the dataplane supervisor.
@@ -297,6 +303,15 @@ impl EvpnDataplaneHandle {
         self.remote_prefix_drop_counts_rx.clone()
     }
 
+    /// Subscribe to the latest remote L2 projection-drop count snapshot
+    /// for API/CLI status surfaces.
+    #[must_use]
+    pub(crate) fn l2_remote_route_drop_counts_receiver(
+        &self,
+    ) -> watch::Receiver<Arc<L2RemoteRouteDropCounts>> {
+        self.l2_remote_route_drop_counts_rx.clone()
+    }
+
     /// Replace the effective L2VNI table consumed by the supervisor.
     ///
     /// ADR-0063 runtime commits publish complete snapshots rather than
@@ -334,6 +349,7 @@ impl EvpnDataplaneHandle {
             evpn_instances_tx,
             ip_vrfs_tx,
             remote_prefix_drop_counts_rx: _,
+            l2_remote_route_drop_counts_rx: _,
         } = self;
         shutdown.cancel();
         drop((evpn_instances_tx, ip_vrfs_tx));
@@ -477,6 +493,8 @@ where
     let (ip_vrfs_tx, ip_vrfs_rx) = watch::channel(ip_vrfs.clone());
     let (remote_prefix_drop_counts_tx, remote_prefix_drop_counts_rx) =
         watch::channel(Arc::new(RemoteIpPrefixDropCounts::new()));
+    let (l2_remote_route_drop_counts_tx, l2_remote_route_drop_counts_rx) =
+        watch::channel(Arc::new(L2RemoteRouteDropCounts::new()));
 
     // Reconcile actor sends reports through a bounded mpsc; a
     // forwarder task drains it and republishes through a broadcast
@@ -543,6 +561,7 @@ where
         same_esi_bias_rx,
         duplicate_mac_quarantine_rx,
         remote_prefix_drop_counts_tx,
+        l2_remote_route_drop_counts_tx,
         metrics.clone(),
         supervisor_shutdown,
         progress,
@@ -571,6 +590,7 @@ where
         evpn_instances_tx,
         ip_vrfs_tx,
         remote_prefix_drop_counts_rx,
+        l2_remote_route_drop_counts_rx,
     }
 }
 
@@ -712,7 +732,9 @@ struct SupervisorIntentState {
     last_table: Arc<RemoteMacTable>,
     last_ip_prefixes: Arc<RemoteIpPrefixTable>,
     last_ip_prefix_drop_counts: BTreeMap<(String, &'static str), u64>,
-    last_l2_drop_counts: BTreeMap<(u32, &'static str), u64>,
+    last_l2_drop_counts: L2RemoteRouteDropCounts,
+    /// Publishes `last_l2_drop_counts` to the API status surface on change.
+    l2_drop_counts_tx: watch::Sender<Arc<L2RemoteRouteDropCounts>>,
     last_bum_enforcement: BumEnforcementTable,
 }
 
@@ -729,6 +751,7 @@ impl Default for SupervisorIntentState {
             last_ip_prefixes: Arc::new(RemoteIpPrefixTable::new()),
             last_ip_prefix_drop_counts: BTreeMap::new(),
             last_l2_drop_counts: BTreeMap::new(),
+            l2_drop_counts_tx: watch::channel(Arc::default()).0,
             last_bum_enforcement: BumEnforcementTable::new(),
         }
     }
@@ -809,11 +832,15 @@ async fn publish_dataplane_intent(
     // ADR-0092 amendment D: the L2 drop gauge also derives from the RIB
     // snapshot, and a newly dropped route leaves the remote-MAC table
     // unchanged, so it is refreshed before the unchanged-table early return.
-    record_drop_gauge_snapshot(
+    if record_drop_gauge_snapshot(
         &mut state.last_l2_drop_counts,
         tables.l2_remote_route_drops,
         |(vni, reason), count| metrics.set_evpn_l2_remote_route_drops(*vni, reason, count),
-    );
+    ) {
+        state
+            .l2_drop_counts_tx
+            .send_replace(Arc::new(state.last_l2_drop_counts.clone()));
+    }
     if state.generation > 0
         && instances.as_ref() == state.last_instances.as_ref()
         && ip_vrfs.as_ref() == state.last_ip_vrfs.as_ref()
@@ -938,6 +965,7 @@ async fn supervisor_loop(
     mut same_esi_bias_rx: watch::Receiver<Arc<SameEsiBiasTable>>,
     mut duplicate_mac_quarantine_rx: watch::Receiver<Arc<BTreeSet<DuplicateMacKey>>>,
     remote_prefix_drop_counts_tx: watch::Sender<Arc<RemoteIpPrefixDropCounts>>,
+    l2_drop_counts_tx: watch::Sender<Arc<L2RemoteRouteDropCounts>>,
     metrics: BgpMetrics,
     shutdown: CancellationToken,
     progress: WorkerProgress,
@@ -945,6 +973,7 @@ async fn supervisor_loop(
     let mut state = SupervisorIntentState {
         progress,
         managed_netdevs,
+        l2_drop_counts_tx,
         ..SupervisorIntentState::default()
     };
     let mut duplicate_mac_quarantine_updates_open = true;
@@ -2424,7 +2453,12 @@ mod tests {
         let (intent_tx, intent_rx) = watch::channel(Arc::new(DataplaneIntent::empty()));
         let (drop_counts_tx, _drop_counts_rx) =
             watch::channel(Arc::new(RemoteIpPrefixDropCounts::new()));
-        let mut state = SupervisorIntentState::default();
+        let (l2_drop_counts_tx, l2_drop_counts_rx) =
+            watch::channel(Arc::new(L2RemoteRouteDropCounts::new()));
+        let mut state = SupervisorIntentState {
+            l2_drop_counts_tx,
+            ..SupervisorIntentState::default()
+        };
         for _ in 0..2 {
             assert!(
                 publish_dataplane_intent(
@@ -2460,6 +2494,11 @@ mod tests {
                     ),
                     "{text}"
                 );
+                // The API status surface reads the same snapshot.
+                assert_eq!(
+                    **l2_drop_counts_rx.borrow(),
+                    BTreeMap::from([((100, "ethernet_tag_mismatch"), 2)])
+                );
             } else {
                 assert!(
                     text.contains(
@@ -2467,6 +2506,7 @@ mod tests {
                     ),
                     "stale L2 drop gauge must reset: {text}"
                 );
+                assert!(l2_drop_counts_rx.borrow().is_empty());
             }
         }
     }
@@ -2669,6 +2709,10 @@ mod tests {
             evpn_instances_tx,
             ip_vrfs_tx,
             remote_prefix_drop_counts_rx,
+            l2_remote_route_drop_counts_rx: watch::channel(
+                Arc::new(L2RemoteRouteDropCounts::new()),
+            )
+            .1,
         };
 
         assert!(handle.replace_evpn_instances(replacement));
@@ -4619,6 +4663,7 @@ mod tests {
             bias_rx,
             quarantine_rx,
             drop_counts_tx,
+            watch::channel(Arc::default()).0,
             BgpMetrics::new(),
             supervisor_shutdown,
             WorkerProgress::default(),
@@ -4698,6 +4743,7 @@ mod tests {
             bias_rx,
             quarantine_rx,
             drop_counts_tx,
+            watch::channel(Arc::default()).0,
             BgpMetrics::new(),
             shutdown.clone(),
             WorkerProgress::default(),
@@ -4781,6 +4827,7 @@ mod tests {
             bias_rx,
             quarantine_rx,
             drop_counts_tx,
+            watch::channel(Arc::default()).0,
             BgpMetrics::new(),
             supervisor_shutdown,
             WorkerProgress::default(),
@@ -4853,6 +4900,7 @@ mod tests {
             bias_rx,
             quarantine_rx,
             drop_counts_tx,
+            watch::channel(Arc::default()).0,
             BgpMetrics::new(),
             supervisor_shutdown,
             WorkerProgress::default(),
@@ -4931,6 +4979,7 @@ mod tests {
             bias_rx,
             quarantine_rx,
             drop_counts_tx,
+            watch::channel(Arc::default()).0,
             BgpMetrics::new(),
             supervisor_shutdown,
             WorkerProgress::default(),
@@ -4982,6 +5031,7 @@ mod tests {
             last_ip_prefixes: Arc::new(RemoteIpPrefixTable::new()),
             last_ip_prefix_drop_counts: BTreeMap::new(),
             last_l2_drop_counts: BTreeMap::new(),
+            l2_drop_counts_tx: watch::channel(Arc::default()).0,
             last_bum_enforcement: BumEnforcementTable::new(),
         };
         let mut table = BumEnforcementTable::new();
@@ -5047,6 +5097,7 @@ mod tests {
             bias_rx,
             quarantine_rx,
             drop_counts_tx,
+            watch::channel(Arc::default()).0,
             BgpMetrics::new(),
             supervisor_shutdown,
             WorkerProgress::default(),
@@ -5128,6 +5179,7 @@ mod tests {
             bias_rx,
             quarantine_rx,
             drop_counts_tx,
+            watch::channel(Arc::default()).0,
             BgpMetrics::new(),
             supervisor_shutdown,
             WorkerProgress::default(),
@@ -5284,6 +5336,7 @@ mod tests {
             bias_rx,
             quarantine_rx,
             drop_counts_tx,
+            watch::channel(Arc::default()).0,
             BgpMetrics::new(),
             supervisor_shutdown,
             WorkerProgress::default(),
@@ -5344,6 +5397,7 @@ mod tests {
             bias_rx,
             quarantine_rx,
             drop_counts_tx,
+            watch::channel(Arc::default()).0,
             BgpMetrics::new(),
             supervisor_shutdown,
             WorkerProgress::default(),
