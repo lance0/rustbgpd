@@ -140,23 +140,42 @@ impl EvpnSegmentRuntimeControl {
     /// Start the deferred actor task once the published Ethernet Segment
     /// set is non-empty. Callers run this only after a converge succeeded,
     /// so a refused or rolled-back apply never starts it. No-op when the
-    /// task already runs, after [`Self::close_for_shutdown`], or without
-    /// a slot.
-    pub(crate) fn start_if_configured(&self) {
+    /// task already runs, the set is empty, or without a slot.
+    ///
+    /// Returns `false` when [`Self::close_for_shutdown`] closed the slot
+    /// while a segment is published: shutdown took the slot between the
+    /// converge's publish and this start, so the caller must fail the
+    /// converge rather than commit a segment no actor serves. The empty
+    /// check and the transition both run under the slot mutex.
+    #[must_use]
+    pub(crate) fn start_if_configured(&self) -> bool {
+        let Some(mut state) = self.slot_state() else {
+            return true;
+        };
         if self.segments_tx.borrow().is_empty() {
-            return;
+            return true;
         }
-        if let Some(mut state) = self.slot_state() {
-            *state = match std::mem::replace(&mut *state, SegmentActorSlot::Closed) {
-                SegmentActorSlot::Pending(start) => {
-                    info!(
-                        "first Ethernet Segment committed; starting the EVPN segment orchestrator"
-                    );
-                    SegmentActorSlot::Running(start())
-                }
-                other => other,
-            };
+        match std::mem::replace(&mut *state, SegmentActorSlot::Closed) {
+            SegmentActorSlot::Pending(start) => {
+                info!("first Ethernet Segment committed; starting the EVPN segment orchestrator");
+                *state = SegmentActorSlot::Running(start());
+                true
+            }
+            running @ SegmentActorSlot::Running(_) => {
+                *state = running;
+                true
+            }
+            SegmentActorSlot::Closed => false,
         }
+    }
+
+    /// Whether coordinated shutdown has closed the actor slot. Runtime
+    /// applies that name an Ethernet Segment are refused from then on,
+    /// even when their runtime plan is a no-op.
+    #[must_use]
+    pub(crate) fn is_closed_for_shutdown(&self) -> bool {
+        self.slot_state()
+            .is_some_and(|state| matches!(*state, SegmentActorSlot::Closed))
     }
 
     /// Coordinated-shutdown admission closure: no later publish starts

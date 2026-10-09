@@ -714,9 +714,110 @@ async fn shutdown_closing_the_segment_slot_refuses_a_late_first_segment_apply() 
     assert!(late.await.unwrap().is_err());
     assert!(!started.load(std::sync::atomic::Ordering::SeqCst));
     assert!(!segment.is_open());
-    segment.start_if_configured();
+    assert!(segment.is_closed_for_shutdown());
+    // Nothing is published, so there is nothing to refuse.
+    assert!(segment.start_if_configured());
     assert!(!started.load(std::sync::atomic::Ordering::SeqCst));
     assert_eq!(coordinator.lock().unwrap().model().generation(), generation);
+}
+
+#[tokio::test]
+async fn shutdown_closing_the_segment_slot_refuses_a_late_first_auto_lacp_apply() {
+    // An unready `auto-lacp` segment plans as a runtime no-op, so no
+    // actor availability check runs. The closed slot must still refuse
+    // it: the config does not commit and the cancelled probe stays
+    // unstarted.
+    let baseline = load_runtime_test_config(l2vni_runtime_candidate_toml(), "baseline");
+    let candidate =
+        load_runtime_test_config(l2vni_auto_lacp_es_runtime_candidate_toml(), "candidate");
+    let esis = crate::config::AutoLacpEsis::default();
+    let coordinator = coordinator_from_config(&baseline, &esis);
+    let generation = coordinator.lock().unwrap().model().generation();
+    let (rib_tx, rib_rx) = mpsc::channel::<RibUpdate>(64);
+    let _rib = runtime_converger_rib_responder(rib_rx, Arc::default());
+    let instances = Arc::new(baseline.resolve_evpn_instances().unwrap());
+    let (segment, started) = deferred_segment_control(&instances, rib_tx.clone());
+    // Shutdown cancels the probe token before closing the slot.
+    let probe_shutdown = tokio_util::sync::CancellationToken::new();
+    probe_shutdown.cancel();
+    let probe = crate::evpn_auto_esi::AutoEsiProbeStarter::new(
+        crate::evpn_auto_esi::AutoEsiProbe::new(BgpMetrics::new()),
+        probe_shutdown,
+    );
+    let apply_lock = Arc::new(tokio::sync::Mutex::new(()));
+    let apply = EvpnRuntimeReloadApply::new(
+        coordinator.clone(),
+        apply_lock.clone(),
+        Arc::new(segment_only_converger(rib_tx, segment.clone(), None)),
+        baseline,
+    )
+    .with_auto_lacp_esis(esis)
+    .with_auto_esi_probe(probe.clone());
+
+    let fence = apply_lock.lock().await;
+    let late = tokio::spawn({
+        let apply = apply.clone();
+        async move { apply.apply_config(&candidate).await }
+    });
+    assert!(segment.close_for_shutdown().is_none());
+    drop(fence);
+
+    assert!(
+        late.await.unwrap().is_err(),
+        "a late auto-lacp apply is refused after the slot closed"
+    );
+    assert!(apply.committed_auto_lacp_interfaces().is_empty());
+    assert!(!probe.started());
+    assert!(!started.load(std::sync::atomic::Ordering::SeqCst));
+    assert_eq!(coordinator.lock().unwrap().model().generation(), generation);
+}
+
+#[tokio::test]
+async fn shutdown_closing_the_slot_after_a_segment_publish_fails_the_converge() {
+    // Shutdown can take the slot between a converge's segment publish
+    // and its start decision. The converge must then fail rather than
+    // report success for a segment no admitted actor serves.
+
+    // Pending: the publish lands, close drops the deferred task, and the
+    // start decision reports the closed slot.
+    let instances = Arc::new(
+        runtime_model_from_candidate_toml(two_l2vni_runtime_candidate_toml())
+            .instances()
+            .clone(),
+    );
+    let (rib_tx, rib_rx) = mpsc::channel::<RibUpdate>(64);
+    let injects = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+    let _rib = runtime_converger_rib_responder(rib_rx, injects.clone());
+    let (pending, pending_started) = deferred_segment_control(&instances, rib_tx.clone());
+    let one_es = runtime_model_from_candidate_toml(two_l2vni_one_es_runtime_candidate_toml());
+    assert!(pending.replace_segments(Arc::new(one_es.ethernet_segments().to_vec())));
+    assert!(pending.close_for_shutdown().is_none());
+    assert!(!pending.start_if_configured());
+    assert!(!pending_started.load(std::sync::atomic::Ordering::SeqCst));
+
+    // Running: shutdown has taken the handle but not drained yet, so the
+    // publish is still accepted; the converge reports the closed slot.
+    let (segment, started) = deferred_segment_control(&instances, rib_tx.clone());
+    let converger = segment_only_converger(rib_tx, segment.clone(), None);
+    let none = runtime_model_from_candidate_toml(two_l2vni_runtime_candidate_toml());
+    let first = runtime_candidate_from_toml(two_l2vni_one_es_runtime_candidate_toml());
+    converger
+        .converge(&none, &first, &none.plan_candidate(&first))
+        .await
+        .expect("the first segment starts the actor");
+    assert!(started.load(std::sync::atomic::Ordering::SeqCst));
+    let handle = segment
+        .close_for_shutdown()
+        .expect("the running actor is handed to the drain");
+    let second = runtime_candidate_from_toml(two_l2vni_two_es_runtime_candidate_toml());
+    assert!(
+        converger
+            .converge(&one_es, &second, &one_es.plan_candidate(&second))
+            .await
+            .is_err(),
+        "a converge that publishes after shutdown took the slot fails"
+    );
+    handle.shutdown().await;
 }
 
 #[tokio::test]

@@ -4943,7 +4943,8 @@ async fn run<T>(
     );
     let evpn_segment_runtime_control =
         evpn_segment_runtime_control.with_deferred_start(evpn_segment_start);
-    evpn_segment_runtime_control.start_if_configured();
+    // Shutdown has not closed the slot this early, so the start is admitted.
+    let _ = evpn_segment_runtime_control.start_if_configured();
     let evpn_segment_df_status_rx = evpn_segment_runtime_control.df_status();
 
     // Latest snapshot of `DataplaneReport.ip_vrf_status` rows for the

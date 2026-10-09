@@ -106,6 +106,13 @@ pub(crate) trait DaemonEvpnRuntimeConverger: Send + Sync {
         let _ = (current, candidate, plan);
         Ok(())
     }
+
+    /// Whether coordinated shutdown closed the segment actor slot. An
+    /// apply whose config names an Ethernet Segment is then refused even
+    /// when its runtime plan is a no-op (an unready `auto-lacp` segment).
+    fn segment_closed_for_shutdown(&self) -> bool {
+        false
+    }
 }
 
 fn apply_task_join_error(context: &str, error: &JoinError) -> GrpcEvpnRuntimeApplyError {
@@ -519,6 +526,15 @@ impl EvpnRuntimeReloadApply {
     where
         M: FnOnce(),
     {
+        // Shutdown closed the segment slot: refuse before planning, so an
+        // unready `auto-lacp` segment (a no-op runtime plan) cannot commit
+        // its config or start the cancelled probe after teardown began.
+        if !config.ethernet_segments.is_empty() && self.converger.segment_closed_for_shutdown() {
+            return Err(GrpcEvpnRuntimeApplyError::FailedPrecondition(
+                "EVPN segment actor is closed for shutdown; Ethernet Segment changes are refused"
+                    .to_string(),
+            ));
+        }
         let candidate = evpn_runtime_candidate_from_config(config, &self.auto_lacp_esis)?;
         apply_evpn_runtime_candidate_locked(
             candidate,
@@ -2499,11 +2515,21 @@ impl DaemonEvpnRuntimeConverger for EvpnRuntimeActorConverger {
             // yet: start it only once the converge that published the
             // first Ethernet Segment succeeded. A refused or rolled-back
             // converge leaves it unstarted.
-            if let Some(segment) = &self.segment {
-                segment.start_if_configured();
+            if let Some(segment) = &self.segment
+                && !segment.start_if_configured()
+            {
+                return Err(DaemonEvpnRuntimeConvergeError::failed(
+                    "EVPN segment actor closed for shutdown during the converge",
+                ));
             }
             Ok(())
         })
+    }
+
+    fn segment_closed_for_shutdown(&self) -> bool {
+        self.segment
+            .as_ref()
+            .is_some_and(evpn_segment::EvpnSegmentRuntimeControl::is_closed_for_shutdown)
     }
 
     fn validate_availability(
