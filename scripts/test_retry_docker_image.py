@@ -8,6 +8,7 @@ from pathlib import Path
 import re
 import subprocess
 import tempfile
+import time
 import textwrap
 import unittest
 
@@ -40,13 +41,17 @@ class RetryDockerImageTests(unittest.TestCase):
         docker = bin_dir / "docker"
         docker.write_text(textwrap.dedent("""\
             #!/usr/bin/env python3
-            import json, os, pathlib, sys
+            import json, os, pathlib, sys, time
             base = pathlib.Path(os.environ['FAKE_LOG'])
             args = sys.argv[1:]
             op = 'pull' if args[0] == 'pull' else ('leaf' if args[-1] != os.environ['OPENBGPD_IMAGE'] else 'index')
             count_file = base / op
             count = int(count_file.read_text()) + 1 if count_file.exists() else 1
             count_file.write_text(str(count))
+            if op == 'pull' and os.environ.get('FAKE_PULL_HANG'):
+                with (base / 'calls').open('a') as log:
+                    log.write(json.dumps([args, os.environ.get('DOCKER_CONFIG')]) + '\\n')
+                time.sleep(float(os.environ['FAKE_PULL_HANG']))
             with (base / 'calls').open('a') as log:
                 log.write(json.dumps([args, os.environ.get('DOCKER_CONFIG')]) + '\\n')
             if count <= int(os.environ.get('FAIL_' + op.upper(), '0')):
@@ -150,7 +155,7 @@ class RetryDockerImageTests(unittest.TestCase):
         self.assertGreaterEqual(len(sites), 11)
         for line in sites:
             with self.subTest(line=line.strip()):
-                self.assertRegex(line, r"\.github/scripts/retry-docker-image\.sh (timeout \d+ )?docker ")
+                self.assertRegex(line, r"\.github/scripts/retry-docker-image\.sh (timeout (--foreground )?\d+ )?docker ")
 
     def test_retry_delay_scales_backoff(self):
         result = self.run_helper(FAIL_INDEX="2", RETRY_DELAY_SECONDS="10")
@@ -175,12 +180,13 @@ class RetryDockerImageTests(unittest.TestCase):
                                      [["pull", "moby/buildkit:buildx-stable-1"]] * pulls)
                     self.assertEqual("::warning::" in result.stdout, fail == "3")
 
-    def test_lab_deploy_pre_pulls_missing_topology_images(self):
-        body = action_step("run-interop-test", "Run interop test with retry")["run"]
+    def lab_env(self):
+        """Fake sudo/containerlab and a three-node topology for run-interop-test."""
+        (self.path / "bin" / "sudo").write_text('#!/bin/sh\nexec "$@"\n')
+        (self.path / "bin" / "containerlab").write_text(
+            "#!/bin/sh\nprintf '%s\\n' \"$1\" >>\"$FAKE_LOG/clab\"\n")
         for tool in ("sudo", "containerlab"):
-            fake = self.path / "bin" / tool
-            fake.write_text('#!/bin/sh\n[ "$(basename "$0")" = sudo ] && exec "$@"\nexit 0\n')
-            fake.chmod(0o755)
+            (self.path / "bin" / tool).chmod(0o755)
         topology = self.path / "lab.clab.yml"
         topology.write_text(
             "topology:\n  nodes:\n"
@@ -190,8 +196,44 @@ class RetryDockerImageTests(unittest.TestCase):
         )
         script = self.path / "test.sh"
         script.write_text("exit 0\n")
-        env = {**self.env, "INTEROP_TOPOLOGY": str(topology), "INTEROP_SCRIPT": str(script),
-               "INTEROP_MAX_ATTEMPTS": "1", "INTEROP_LABEL": "MX", "GITHUB_STEP_SUMMARY": ""}
+        return {**self.env, "INTEROP_TOPOLOGY": str(topology), "INTEROP_SCRIPT": str(script),
+                "INTEROP_MAX_ATTEMPTS": "1", "INTEROP_LABEL": "MX", "GITHUB_STEP_SUMMARY": ""}
+
+    def run_hung(self, body, real, short, env):
+        """Run a step body against a pull that never returns, with its budget shortened."""
+        self.assertEqual(body.count(real), 1, real)
+        start = time.monotonic()
+        result = subprocess.run(
+            ["bash", "-c", body.replace(real, short)], cwd=ROOT,
+            env={**env, "FAKE_PULL_HANG": "600"}, capture_output=True, text=True,
+            check=False, timeout=60,
+        )
+        return result, time.monotonic() - start
+
+    def test_hung_buildkit_pre_pull_stops_at_its_budget(self):
+        for action in ("build-rustbgpd-dev", "prime-rustbgpd-dev-cache"):
+            with self.subTest(action=action):
+                body = action_step(action, "Pre-pull BuildKit image")["run"]
+                result, elapsed = self.run_hung(body, "timeout 120 ", "timeout 3 ", self.env)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertLess(elapsed, 10)
+                self.assertIn("::warning::BuildKit image pre-pull failed", result.stdout)
+
+    def test_hung_topology_pre_pull_stops_at_its_budget_then_deploys(self):
+        body = action_step("run-interop-test", "Run interop test with retry")["run"]
+        env = {**self.lab_env(), "FAIL_LEAF": "99"}
+        result, elapsed = self.run_hung(body, "pull_budget=240\n", "pull_budget=3\n", env)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        # One deadline for all images: the hung first pull spends it, the next
+        # image is skipped without a pull, and deploy still runs.
+        self.assertLess(elapsed, 10)
+        self.assertEqual(result.stdout.count("ran out of budget"), 2)
+        self.assertEqual(len([c for c in self.calls() if c[0][0] == "pull"]), 1)
+        self.assertIn("deploy", (self.path / "clab").read_text().split())
+
+    def test_lab_deploy_pre_pulls_missing_topology_images(self):
+        body = action_step("run-interop-test", "Run interop test with retry")["run"]
+        env = self.lab_env()
         for present, fail, pulls in (("0", "2", []), ("99", "2", ["frr", "rustbgpd"]), ("99", "3", ["frr", "rustbgpd"])):
             with self.subTest(present=present == "0", fail=fail):
                 for name in ("pull", "leaf", "calls", "sleeps"):

@@ -57,10 +57,18 @@ runs:
         # bounded registry retry: containerlab's own deploy-time pull makes
         # one attempt, and a transient Quay or Docker Hub error there costs
         # the whole deploy. Non-fatal: deploy still pulls whatever is missing.
+        # One deadline covers every image and attempt, so a hung registry
+        # costs at most pull_budget seconds. Jobs calling this action have a
+        # 15-minute timeout at the shortest; this budget plus the 120 s
+        # BuildKit pre-pull budget leaves about 9 minutes for the build,
+        # deploy and test, so the warn-and-deploy path is reached first.
+        pull_budget=240
+        deadline=$((SECONDS + pull_budget))
         for image in $(awk '$1 == "image:" { gsub(/["\047]/, "", $2); print $2 }' "$topology" | sort -u); do
           docker image inspect "$image" >/dev/null 2>&1 && continue
-          RETRY_DELAY_SECONDS=10 .github/scripts/retry-docker-image.sh timeout 300 docker pull "$image" >/dev/null \
-            || echo "::warning::${label} pre-pull of ${image} failed; containerlab deploy will pull it itself"
+          left=$((deadline - SECONDS))
+          [ "$left" -gt 0 ] && RETRY_DELAY_SECONDS=10 timeout "$left" .github/scripts/retry-docker-image.sh timeout --foreground 60 docker pull "$image" >/dev/null \
+            || echo "::warning::${label} pre-pull of ${image} failed or ran out of budget; containerlab deploy will pull it itself"
         done
 
         attempt=0

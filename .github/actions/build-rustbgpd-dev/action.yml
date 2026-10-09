@@ -7,10 +7,14 @@ description: >-
 runs:
   using: "composite"
   steps:
+    # The outer timeout bounds every attempt and backoff together at 120 s;
+    # with the 240 s topology pre-pull budget in run-interop-test, a hung
+    # registry still leaves about 9 minutes of the shortest (15-minute) lab
+    # job timeout for the build, deploy and test.
     - name: Pre-pull BuildKit image
       shell: bash
       run: |
-        RETRY_DELAY_SECONDS=10 .github/scripts/retry-docker-image.sh timeout 90 docker pull moby/buildkit:buildx-stable-1 \
+        RETRY_DELAY_SECONDS=10 timeout 120 .github/scripts/retry-docker-image.sh timeout --foreground 60 docker pull moby/buildkit:buildx-stable-1 \
           || echo "::warning::BuildKit image pre-pull failed; setup-buildx will pull it itself"
 
     - name: Set up Docker Buildx

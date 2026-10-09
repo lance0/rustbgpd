@@ -4,11 +4,12 @@ runs:
   using: "composite"
   steps:
     # Same Docker Hub retry structure as build-rustbgpd-dev: a primer failure
-    # skips every lab job, so it gets the bounded retry too.
+    # skips every lab job, so it gets the bounded retry too. The outer
+    # timeout caps the pre-pull at 120 s of the primer job's 30 minutes.
     - name: Pre-pull BuildKit image
       shell: bash
       run: |
-        RETRY_DELAY_SECONDS=10 .github/scripts/retry-docker-image.sh timeout 90 docker pull moby/buildkit:buildx-stable-1 \
+        RETRY_DELAY_SECONDS=10 timeout 120 .github/scripts/retry-docker-image.sh timeout --foreground 60 docker pull moby/buildkit:buildx-stable-1 \
           || echo "::warning::BuildKit image pre-pull failed; setup-buildx will pull it itself"
 
     - name: Set up Docker Buildx
