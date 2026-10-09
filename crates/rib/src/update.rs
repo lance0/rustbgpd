@@ -2766,6 +2766,10 @@ pub enum RibUpdate {
     ReobserveConditionalAdvertisements {
         /// Swapped dataset names.
         datasets: Vec<String>,
+        /// Definitions the same generation's install added or changed. The
+        /// install evaluated them against the prior dataset contents, so
+        /// they are evaluated again immediately rather than debounced.
+        changed: Vec<Arc<str>>,
         /// Acknowledged once the observations are recomputed.
         reply: oneshot::Sender<crate::ConditionalAdvertisementCapture>,
     },

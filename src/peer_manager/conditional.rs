@@ -5,6 +5,7 @@
 //! restores a captured install on compensation, and reconciles it after
 //! config mutations that do not install it explicitly.
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use rustbgpd_rib::{ConditionalAdvertisementCapture, ConditionalAdvertisementSet, RibUpdate};
@@ -143,12 +144,14 @@ impl PeerManager {
     }
 
     /// Re-observe conditions whose `condition_policy` reads a swapped
-    /// dataset, under the ordinary settle debounce. `Ok(Some(prior))`
-    /// restores the tracker state from before the re-observation, for a
-    /// generation that rolls the dataset swap back.
+    /// dataset, under the ordinary settle debounce; `changed` definitions,
+    /// installed earlier in the same generation, apply immediately.
+    /// `Ok(Some(prior))` restores the tracker state from before the
+    /// re-observation, for a generation that rolls the dataset swap back.
     pub(super) async fn reobserve_conditional_advertisement_datasets(
         &self,
         datasets: &[String],
+        changed: Vec<Arc<str>>,
     ) -> Result<Option<ConditionalAdvertisementPrior>, String> {
         if !self
             .conditional_advertisements
@@ -160,6 +163,7 @@ impl PeerManager {
         let capture = self
             .conditional_rib_request(|reply| RibUpdate::ReobserveConditionalAdvertisements {
                 datasets,
+                changed,
                 reply,
             })
             .await?;

@@ -640,14 +640,29 @@ async fn dataset_swap_reobserves_only_dependent_definitions() {
 
     handle.refresh(data(true));
     let visits = manager.conditional_advertisement_candidate_visits();
-    let _ = manager.reevaluate_conditional_advertisement_datasets(&["unrelated".to_string()]);
+    let _ = manager.reevaluate_conditional_advertisement_datasets(&["unrelated".to_string()], &[]);
     assert_eq!(manager.conditional_advertisement_candidate_visits(), visits);
     assert_eq!(state(&manager).0, ConditionObservation::Absent);
 
     let swapped = Instant::now();
-    let _ = manager.reevaluate_conditional_advertisement_datasets(&["allowed".to_string()]);
+    let _ = manager.reevaluate_conditional_advertisement_datasets(&["allowed".to_string()], &[]);
     assert_eq!(state(&manager).0, ConditionObservation::Present);
     assert_eq!(state(&manager).2, Some(swapped + SETTLE));
+
+    // A definition its generation just installed against the prior
+    // contents applies at once and cancels the armed deadline.
+    let _ = manager.reevaluate_conditional_advertisement_datasets(
+        &["allowed".to_string()],
+        &[Arc::from(NAME)],
+    );
+    assert_eq!(
+        state(&manager),
+        (
+            ConditionObservation::Present,
+            AppliedConditionalState::Advertise,
+            None
+        )
+    );
 }
 
 /// The actor's run loop arms and fires the settle timer itself.

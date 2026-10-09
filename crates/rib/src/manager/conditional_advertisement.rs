@@ -407,10 +407,14 @@ impl RibManager {
     }
 
     /// Re-observe definitions whose `condition_policy` references a swapped
-    /// dataset (ADR-0137 Decision 6), under the ordinary debounce.
+    /// dataset (ADR-0137 Decision 6), under the ordinary debounce. A
+    /// `changed` definition was just installed against the prior dataset
+    /// contents; it applies its observation immediately, as its install
+    /// would have against the swapped dataset.
     pub(super) fn reevaluate_conditional_advertisement_datasets(
         &mut self,
         swapped: &[String],
+        changed: &[Arc<str>],
     ) -> Vec<Arc<str>> {
         let names: Vec<_> = self
             .conditional_advertisements
@@ -430,10 +434,36 @@ impl RibManager {
         let now = Instant::now();
         let mut transitions = Vec::new();
         for name in &names {
-            self.reobserve_definition(name, now, &mut transitions);
+            if changed.contains(name) {
+                self.evaluate_definition_now(name, now, &mut transitions);
+            } else {
+                self.reobserve_definition(name, now, &mut transitions);
+            }
         }
         self.mark_conditional_advertisement_peers_dirty(&transitions);
         transitions
+    }
+
+    /// Evaluate `name` the way a non-startup install evaluates a new or
+    /// changed definition: observe and apply now, without a settle interval.
+    fn evaluate_definition_now(&mut self, name: &Arc<str>, now: Instant, out: &mut Vec<Arc<str>>) {
+        let Some(mut state) = self.conditional_advertisements.definitions.remove(name) else {
+            return;
+        };
+        let observed = self.observe_condition(&state.definition);
+        if observed != state.observed {
+            state.observed = observed;
+            state.observed_since = now;
+        }
+        state.deadline = None;
+        if observed != ConditionObservation::Unknown && !self.condition_deferred(&state.definition)
+        {
+            Self::apply_observation(&self.metrics, &mut state, out);
+        }
+        self.publish_conditional_metrics(&state);
+        self.conditional_advertisements
+            .definitions
+            .insert(Arc::clone(name), state);
     }
 
     /// Re-observe the definitions whose `condition_policy` sees `source` as
@@ -757,9 +787,10 @@ impl RibManager {
     pub(super) fn handle_reobserve_conditional_advertisement_datasets(
         &mut self,
         datasets: &[String],
+        changed: &[Arc<str>],
     ) -> ConditionalAdvertisementCapture {
         let capture = self.capture_conditional_advertisements();
-        let _ = self.reevaluate_conditional_advertisement_datasets(datasets);
+        let _ = self.reevaluate_conditional_advertisement_datasets(datasets, changed);
         capture
     }
 

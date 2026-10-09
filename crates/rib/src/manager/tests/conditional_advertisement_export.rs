@@ -981,7 +981,7 @@ async fn dataset_swap_reaches_both_predicates() {
 
     // condition_policy dataset drops the condition: re-observed, debounced.
     condition_set.refresh(data(None));
-    manager.handle_reobserve_conditional_advertisement_datasets(&["primary".to_string()]);
+    manager.handle_reobserve_conditional_advertisement_datasets(&["primary".to_string()], &[]);
     assert!(manager.next_conditional_advertisement_deadline().is_some());
     // advertise_policy dataset now selects the controlled prefix, and the
     // export re-evaluation the peer manager sends for it re-gates.

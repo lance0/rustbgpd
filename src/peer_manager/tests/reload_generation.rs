@@ -4828,6 +4828,58 @@ fn condition_state(metrics: &BgpMetrics) -> Option<String> {
         .map(|label| label.value().to_string())
 }
 
+/// Feed `backup`'s condition route (198.51.100.0/24 from 10.0.0.50) into the
+/// real RIB and wait until `primary-up` observes it present.
+async fn inject_condition_route(harness: &GenerationHarness) {
+    let source = Ipv4Addr::new(10, 0, 0, 50);
+    harness
+        .mgr
+        .rib_tx
+        .send(RibUpdate::RoutesReceived {
+            peer: IpAddr::V4(source),
+            session_id: 0,
+            announced: vec![rustbgpd_rib::Route {
+                prefix: rustbgpd_wire::Prefix::V4(rustbgpd_wire::Ipv4Prefix::new(
+                    Ipv4Addr::new(198, 51, 100, 0),
+                    24,
+                )),
+                next_hop: IpAddr::V4(source),
+                link_local_next_hop: None,
+                next_hop_scope: None,
+                peer: IpAddr::V4(source),
+                attributes: rustbgpd_rib::AttrSet::new(vec![rustbgpd_wire::PathAttribute::Origin(
+                    rustbgpd_wire::Origin::Igp,
+                )]),
+                received_at: rustbgpd_rib::route::ReceivedAt::now(),
+                origin_type: rustbgpd_rib::RouteOrigin::Ebgp,
+                peer_router_id: source,
+                is_stale: false,
+                is_llgr_stale: false,
+                path_id: 0,
+                validation_state: rustbgpd_wire::RpkiValidation::NotFound,
+                aspa_state: rustbgpd_wire::AspaValidation::Unknown,
+                received_as_path: None,
+                aspa_context: rustbgpd_rib::route::AspaContextId::DEFAULT,
+            }],
+            withdrawn: vec![],
+            flowspec_announced: vec![],
+            flowspec_withdrawn: vec![],
+            evpn_announced: vec![],
+            evpn_withdrawn: vec![],
+            validated_with: None,
+        })
+        .await
+        .unwrap();
+    let metrics = harness.mgr.metrics.clone();
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while condition_state(&metrics).as_deref() != Some("present") {
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+    })
+    .await
+    .expect("the condition route is ingested and passes primary-up");
+}
+
 /// ADR-0137: a forward re-observation the RIB never acknowledges fails the
 /// generation as ambiguous. The RIB may have re-observed against the
 /// candidate dataset, and the content-only swap left no install capture
@@ -4892,53 +4944,8 @@ async fn late_failure_after_condition_reobservation_restores_condition_state() {
     let prior = fixture.load();
     let mut harness = GenerationHarness::new(&prior);
     let (log, relay) = relay_conditional_to_real_rib(&mut harness);
-    let source = Ipv4Addr::new(10, 0, 0, 50);
-    harness
-        .mgr
-        .rib_tx
-        .send(RibUpdate::RoutesReceived {
-            peer: IpAddr::V4(source),
-            session_id: 0,
-            announced: vec![rustbgpd_rib::Route {
-                prefix: rustbgpd_wire::Prefix::V4(rustbgpd_wire::Ipv4Prefix::new(
-                    Ipv4Addr::new(198, 51, 100, 0),
-                    24,
-                )),
-                next_hop: IpAddr::V4(source),
-                link_local_next_hop: None,
-                next_hop_scope: None,
-                peer: IpAddr::V4(source),
-                attributes: rustbgpd_rib::AttrSet::new(vec![rustbgpd_wire::PathAttribute::Origin(
-                    rustbgpd_wire::Origin::Igp,
-                )]),
-                received_at: rustbgpd_rib::route::ReceivedAt::now(),
-                origin_type: rustbgpd_rib::RouteOrigin::Ebgp,
-                peer_router_id: source,
-                is_stale: false,
-                is_llgr_stale: false,
-                path_id: 0,
-                validation_state: rustbgpd_wire::RpkiValidation::NotFound,
-                aspa_state: rustbgpd_wire::AspaValidation::Unknown,
-                received_as_path: None,
-                aspa_context: rustbgpd_rib::route::AspaContextId::DEFAULT,
-            }],
-            withdrawn: vec![],
-            flowspec_announced: vec![],
-            flowspec_withdrawn: vec![],
-            evpn_announced: vec![],
-            evpn_withdrawn: vec![],
-            validated_with: None,
-        })
-        .await
-        .unwrap();
     let metrics = harness.mgr.metrics.clone();
-    tokio::time::timeout(Duration::from_secs(10), async {
-        while condition_state(&metrics).as_deref() != Some("present") {
-            tokio::time::sleep(Duration::from_millis(1)).await;
-        }
-    })
-    .await
-    .expect("the condition route is ingested and passes primary-up");
+    inject_condition_route(&harness).await;
 
     // The candidate drops the condition prefix from `primary` and replaces
     // 10.0.0.9, whose replacement then fails.
@@ -4965,6 +4972,82 @@ async fn late_failure_after_condition_reobservation_restores_condition_state() {
         condition_state(&metrics).as_deref(),
         Some("present"),
         "the condition follows the restored dataset"
+    );
+    harness.shutdown().await;
+    relay.abort();
+}
+
+/// Whether `backup`'s applied state advertises, from its permitted gauge.
+fn condition_permitted(metrics: &BgpMetrics) -> Option<bool> {
+    metrics
+        .registry()
+        .gather()
+        .iter()
+        .find(|family| family.name() == "bgp_conditional_advertisement_permitted")?
+        .get_metric()
+        .first()
+        .map(|metric| metric.get_gauge().get_value() > 0.5)
+}
+
+/// ADR-0137 Decision 6: one generation that both changes a definition and
+/// swaps the dataset its `condition_policy` reads evaluates the changed
+/// definition immediately against the candidate dataset. The install runs
+/// before the dataset publish, so it must not leave a decision taken
+/// against the prior dataset waiting out the new `settle_time`.
+#[tokio::test]
+async fn changed_definition_with_swapped_condition_dataset_applies_against_candidate_dataset() {
+    let set_settle = |fixture: &RsFixture, seconds: u32| {
+        let toml = std::fs::read_to_string(&fixture.config_path).unwrap();
+        std::fs::write(
+            &fixture.config_path,
+            toml.replacen(
+                "condition_policy = \"primary-up\"\n",
+                &format!("condition_policy = \"primary-up\"\nsettle_time = {seconds}\n"),
+                1,
+            ),
+        )
+        .unwrap();
+    };
+    let fixture = RsFixture::new();
+    write_condition_dataset_fixture(&fixture, "198.51.100.0/24\n", 65009);
+    set_settle(&fixture, 0);
+    let prior = fixture.load();
+    let mut harness = GenerationHarness::new(&prior);
+    let (log, relay) = relay_conditional_to_real_rib(&mut harness);
+    let metrics = harness.mgr.metrics.clone();
+    inject_condition_route(&harness).await;
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while condition_permitted(&metrics) != Some(false) {
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+    })
+    .await
+    .expect("advertise-if-absent suppresses while primary-up matches");
+
+    // The candidate changes the definition (settle_time) and drops the
+    // condition prefix from `primary`, so under the candidate the condition
+    // is absent and `backup` advertises.
+    write_condition_dataset_fixture(&fixture, "203.0.113.0/24\n", 65009);
+    set_settle(&fixture, 600);
+    let (candidate, actions, prepared) = prepare_condition_dataset_candidate(&fixture, &prior);
+    let outcome = Box::pin(
+        harness
+            .mgr
+            .apply_reload_generation(candidate, actions, prepared),
+    )
+    .await;
+    assert!(
+        matches!(outcome, ReloadGenerationOutcome::Applied(_)),
+        "{outcome:?}"
+    );
+    assert_eq!(conditional_log(&log), ["install [10.0.0.2]", "reobserve"]);
+    // Both requests were acknowledged, so the RIB has already applied them.
+    assert_eq!(condition_state(&metrics).as_deref(), Some("absent"));
+    assert_eq!(
+        condition_permitted(&metrics),
+        Some(true),
+        "the changed definition applies against the candidate dataset at commit, \
+         not after its 600 s settle_time"
     );
     harness.shutdown().await;
     relay.abort();
