@@ -11793,7 +11793,12 @@ async fn run_confirmed_live_policy_fault_child(root: &Path) {
         60,
     ));
     tokio::pin!(applying);
-    let result = tokio::time::timeout(Duration::from_secs(10), async {
+    // An owned apply settles or fences within its budget; past budget plus
+    // grace the watchdog has already exited the process.
+    let (budget, grace) =
+        rustbgpd_api::runtime_config_settlement::settlement_test_control::duration_override()
+            .expect("the parent provides a settlement control directory");
+    let result = tokio::time::timeout(budget + grace, async {
         tokio::select! {
             result = &mut applying => Some(result),
             () = async {
@@ -11901,11 +11906,21 @@ async fn confirmed_live_policy_faults_are_enumerated() {
         let root = tempfile::tempdir().unwrap();
         std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
         let settings = root.path().join("settings.v1");
-        // Use the control schema's maximum grace for the child to validate and
-        // persist its receipt after fencing; fault ordering never uses this clock.
+        // Only a reply that never arrives needs the budget: its pre-effect
+        // wait ends at the pre-effect deadline, leaving budget/10 to settle
+        // cleanly, and its post-effect wait ends at the fence. Every other
+        // outcome follows from fault ordering alone, so it gets the schema's
+        // maximum budget and a slow fsync on a loaded host cannot fence a
+        // clean apply. Use the maximum grace for the child to validate and
+        // persist its receipt after fencing.
+        let budget_ms = if fault.is_some_and(|(_, fault)| fault == TransactionTestFault::NoReply) {
+            10_000
+        } else {
+            60_000
+        };
         std::fs::write(
             &settings,
-            "version=settlement-control-v1\nbudget_ms=2000\ngrace_ms=5000\n",
+            format!("version=settlement-control-v1\nbudget_ms={budget_ms}\ngrace_ms=5000\n"),
         )
         .unwrap();
         std::fs::set_permissions(settings, std::fs::Permissions::from_mode(0o600)).unwrap();
