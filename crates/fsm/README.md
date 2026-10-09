@@ -47,7 +47,9 @@ transitions.
 All six RFC 4271 states are implemented: Idle, Connect, Active,
 OpenSent, OpenConfirm, Established. Capability negotiation (4-octet AS,
 multi-protocol, Add-Path, experimental Paths-Limit, graceful restart,
-extended messages) is handled during OPEN exchange. Paths-Limit is applied
+long-lived graceful restart, extended messages, Extended Next Hop, BGP Role,
+Outbound Route Filtering, Enhanced Route Refresh, and experimental Link-Local
+Next Hop) is handled during OPEN exchange. Paths-Limit is applied
 only to matching negotiated Add-Path send families; negotiated state exposes
 the peer-advertised and effective family-local limits.
 
@@ -183,6 +185,10 @@ helpers `local_capabilities`, `add_path_capabilities`,
   `peer_paths_limits` / `effective_add_path_send_limits`, GR state, extended
   message support, and `negotiated_orf_recv`, the negotiated families where
   the peer may send Address-Prefix ORF entries (RFC 5291/5292)
+- **`PeerConfig::link_local_next_hop`** / **`NegotiatedSession::link_local_next_hop`** —
+  advertise experimental Link-Local Next Hop capability 77 (`bool`, default
+  `false`), and whether both speakers advertised it. The embedding transport
+  must supply a directly attached IPv6 peer and interface scope
 - **`PeerConfig::prefix_orf_receive`** — advertise the Address-Prefix ORF
   Receive role on each configured unicast family (`bool`, default `false`)
 - **`PeerConfig::paths_limit_receive_max`** — the preferred per-family receive

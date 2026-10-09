@@ -20,9 +20,10 @@ Two independent readiness surfaces govern this:
 | L2VNI bridge/VXLAN probe | `[[evpn_instances]]` | ADR-0054 §4 | `rbgp evpn instances` |
 | IP-VRF / L3VNI predicates | `[[evpn_ip_vrfs]]` | ADR-0058 §3 | `rbgp evpn vrfs [NAME]` |
 
-Ethernet Segments (`[[ethernet_segments]]`) are **control-plane only**
-(Type 1/4 origination) and do **not** probe a kernel netdev — see
-[Multi-homing](#multi-homing-ethernet-segments).
+Ethernet Segments (`[[ethernet_segments]]`) with an explicit `esi` are
+**control-plane only** (Type 1/4 origination) and do **not** probe a kernel
+netdev. An `esi = "auto-lacp"` segment probes its 802.3ad bond for an LACP
+partner — see [Multi-homing](#multi-homing-ethernet-segments).
 
 The authoritative recipes this guide is derived from live in
 `tests/interop/scripts/start-rustbgpd-vtep.sh` (L2VNI) and
@@ -240,8 +241,11 @@ predicate table below is the contract rustbgpd checks.
 rustbgpd's `[[ethernet_segments]]` is **control-plane only**: when the
 EVPN reconcile actor is running it originates Type 4 (ES route), Type 1
 EAD-per-ES, and Type 1 EAD-per-EVI for the configured ESI over its
-`member_vnis`, and runs DF election. It does **not** probe or require a
-kernel bond/ES netdev — there is no ES readiness gate. Optionally, an
+`member_vnis`, and runs DF election. With an explicit `esi` it does **not**
+probe or require a kernel bond/ES netdev, and there is no ES readiness gate.
+The exception is `esi = "auto-lacp"`, whose segment stays NotReady (no ESI,
+no Type 1/4 routes) until the bond named by `interface` has an LACP partner.
+Optionally, an
 `interface = "<linkname>"` binding (ADR-0085) makes the ES's drain
 state follow that link's carrier — an AC failure then withdraws the
 ES routes automatically (see the drain section in
@@ -272,7 +276,15 @@ What you still provide:
 rbgp evpn instances        # readiness=ready|not-ready|unbound|unknown, reason=[...]
 rbgp evpn vrfs <name>      # readiness=ready|not-ready|unknown, reasons=[...]
 rbgp evpn vrfs <name> --json # includes not_ready_reasons and remote_prefix_drop_counts
+rbgp evpn es list          # Ethernet Segments currently originated
+rbgp doctor                # evpn.es.<interface>.auto_esi names an auto-lacp segment's not-ready reason
 ```
+
+A NotReady `esi = "auto-lacp"` segment is absent from `rbgp evpn es list`,
+except with reason `reconverge_failed`: the runtime has not moved, so the
+previous ESI binding and its routes may still be present until a retry
+succeeds. The reason is in the `evpn_es_auto_esi_state` gauge, the
+`rbgp doctor` check, and a warn-level log line.
 
 L2VNI rows with `readiness=not-ready` include the single failing probe reason
 in `reason=[...]`;
