@@ -1982,13 +1982,24 @@ message ListConditionalAdvertisementsResponse {
   repeated ConditionalAdvertisementStatus definitions = 1;
 }
 
-// One condition prefix and its own current observation.
+// One condition entry and its own current observation.
 message ConditionalAdvertisementCondition {
-  // Exact unicast condition prefix in CIDR form.
+  // Unicast condition prefix in CIDR form: the exact prefix, or the base of
+  // a range when ge or le is set.
   string prefix = 1;
   // "present", "absent", or "unknown" (a condition_policy evaluation error
-  // and no clean match for this prefix).
+  // and no clean match for any prefix in this entry).
   string state = 2;
+  // Range minimum prefix length (inclusive), when configured.
+  optional uint32 ge = 3;
+  // Range maximum prefix length (inclusive), when configured.
+  optional uint32 le = 4;
+  // Number of prefixes in this entry that are currently present. At most 1
+  // for an exact entry.
+  uint64 present_prefix_count = 5;
+  // The first present prefixes in address order, at most 8; see
+  // present_prefix_count for the total.
+  repeated string present_prefixes = 6;
 }
 
 // State of one installed conditional-advertisement definition.

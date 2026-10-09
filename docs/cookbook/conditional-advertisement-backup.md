@@ -199,6 +199,41 @@ flap. To catch a gate that disagrees with its condition, use the
 mode-adjusted check in the
 [operations reference](../reference/operations.md#conditional-advertisement-state).
 
+## Variant: transit A sends no default route
+
+If transit A sends a partial or full table instead of a default route, make
+the condition a prefix range: any route from transit A of length /24 or
+shorter counts as "transit A is up". Replace the condition predicate and the
+definition's condition:
+
+```toml
+[policy.definitions.from-transit-a]
+default_action = "deny"
+[[policy.definitions.from-transit-a.statements]]
+action = "permit"
+match_neighbor_set = "transit-a"
+
+[policy.conditional_advertisements.backup-via-transit-b]
+advertise_policy = "our-prefixes"
+advertise_if = "absent"
+condition_prefixes = [{ prefix = "0.0.0.0/0", le = 24 }]
+condition_policy = "from-transit-a"
+settle_time = 5
+```
+
+`le = 24` keeps more-specific routes out of the condition; `ge` sets a lower
+bound in the same way. The status line for a range shows how many prefixes in
+it are present, with the first few:
+
+```text
+  conditions:    0.0.0.0/0 le 24 present (812 matching: 1.0.0.0/24, 1.0.4.0/22, 1.0.16.0/24, 1.0.64.0/18, 1.0.128.0/17, 1.1.1.0/24, 1.1.8.0/24, 1.6.0.0/16, +804 more)
+```
+
+The backup is announced only after the last such route from transit A is
+gone and `settle_time` has passed. A range is matched as routes arrive and
+leave, without a table walk; a wide range costs memory for each present
+prefix it covers.
+
 ## Failure modes
 
 | Symptom | Check |

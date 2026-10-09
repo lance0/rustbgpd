@@ -890,10 +890,9 @@ async fn dataset_refresh_discovers_conditional_advertisement_predicates() {
             name: Arc::from("backup"),
             advertise_policy: dataset_chain("controlled"),
             advertise_if: rustbgpd_rib::ConditionalAdvertiseIf::Absent,
-            condition_prefixes: vec![rustbgpd_wire::Prefix::V4(rustbgpd_wire::Ipv4Prefix::new(
-                Ipv4Addr::UNSPECIFIED,
-                0,
-            ))],
+            condition_prefixes: vec![rustbgpd_policy::sets::PrefixSetEntry::exact(
+                rustbgpd_wire::Prefix::V4(rustbgpd_wire::Ipv4Prefix::new(Ipv4Addr::UNSPECIFIED, 0)),
+            )],
             condition_policy: Some(dataset_chain("primary")),
             settle_time: Duration::from_secs(5),
         }],

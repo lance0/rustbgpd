@@ -2732,9 +2732,15 @@ pub struct ConditionalAdvertisementConfig {
     pub advertise_policy: String,
     /// Condition state in which the controlled routes may be advertised.
     pub advertise_if: ConditionalAdvertiseIf,
-    /// Exact IPv4 or IPv6 unicast prefixes whose candidates decide the
-    /// condition. Nonempty; ranges are not accepted.
-    pub condition_prefixes: Vec<String>,
+    /// IPv4 or IPv6 unicast condition entries whose candidates decide the
+    /// condition: an exact prefix string, or a prefix range table with
+    /// `ge`/`le`. Nonempty.
+    #[serde(
+        serialize_with = "serialize_condition_prefixes",
+        deserialize_with = "deserialize_condition_prefixes"
+    )]
+    #[schemars(with = "Vec<ConditionPrefixWire>")]
+    pub condition_prefixes: Vec<ConditionPrefixConfig>,
     /// Optional named policy used as a predicate over each condition
     /// candidate; omitted means any candidate counts.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2748,6 +2754,106 @@ pub struct ConditionalAdvertisementConfig {
 
 const fn default_conditional_advertisement_settle_time() -> u32 {
     5
+}
+
+/// One `condition_prefixes` entry (ADR-0137): an exact prefix written as a
+/// CIDR string, or a range table `{ prefix = "10.0.0.0/8", le = 24 }` with
+/// prefix-list `ge`/`le` semantics. A table without bounds is the exact form
+/// and serializes back to the plain string.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ConditionPrefixConfig {
+    /// Base prefix in CIDR form, with no host bits set.
+    pub prefix: String,
+    /// Minimum candidate prefix length (inclusive); omitted with `le` means
+    /// the base length.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ge: Option<u8>,
+    /// Maximum candidate prefix length (inclusive); omitted with `ge` means
+    /// the family's maximum.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub le: Option<u8>,
+}
+
+impl ConditionPrefixConfig {
+    /// The exact-prefix form.
+    #[must_use]
+    pub fn exact(prefix: impl Into<String>) -> Self {
+        Self {
+            prefix: prefix.into(),
+            ge: None,
+            le: None,
+        }
+    }
+}
+
+#[derive(Serialize, JsonSchema)]
+#[serde(untagged)]
+enum ConditionPrefixWire {
+    /// Exact prefix in CIDR form.
+    Exact(String),
+    /// Prefix range.
+    Range(ConditionPrefixConfig),
+}
+
+/// The wire form: exact entries stay plain strings in persisted TOML.
+fn serialize_condition_prefixes<S>(
+    entries: &[ConditionPrefixConfig],
+    serializer: S,
+) -> Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    serializer.collect_seq(entries.iter().map(|entry| {
+        if entry.ge.is_none() && entry.le.is_none() {
+            ConditionPrefixWire::Exact(entry.prefix.clone())
+        } else {
+            ConditionPrefixWire::Range(entry.clone())
+        }
+    }))
+}
+
+/// Accept a string or a table per entry. Not an untagged derive, so a
+/// misspelled range field reports the field instead of "no variant matched".
+fn deserialize_condition_prefixes<'de, D>(
+    deserializer: D,
+) -> Result<Vec<ConditionPrefixConfig>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    struct Entry(ConditionPrefixConfig);
+
+    impl<'de> Deserialize<'de> for Entry {
+        fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+            struct Visitor;
+            impl<'de> serde::de::Visitor<'de> for Visitor {
+                type Value = ConditionPrefixConfig;
+
+                fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                    f.write_str("a CIDR prefix string or a { prefix, ge, le } table")
+                }
+
+                fn visit_str<E: serde::de::Error>(self, value: &str) -> Result<Self::Value, E> {
+                    Ok(ConditionPrefixConfig::exact(value))
+                }
+
+                fn visit_map<A: serde::de::MapAccess<'de>>(
+                    self,
+                    map: A,
+                ) -> Result<Self::Value, A::Error> {
+                    ConditionPrefixConfig::deserialize(
+                        serde::de::value::MapAccessDeserializer::new(map),
+                    )
+                }
+            }
+            deserializer.deserialize_any(Visitor).map(Entry)
+        }
+    }
+
+    Ok(Vec::<Entry>::deserialize(deserializer)?
+        .into_iter()
+        .map(|entry| entry.0)
+        .collect())
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]

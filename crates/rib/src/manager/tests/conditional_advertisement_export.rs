@@ -84,7 +84,9 @@ fn definition(
         name: Arc::from(NAME),
         advertise_policy,
         advertise_if,
-        condition_prefixes: vec![v4(condition())],
+        condition_prefixes: vec![rustbgpd_policy::sets::PrefixSetEntry::exact(
+            v4(condition()),
+        )],
         condition_policy: None,
         settle_time: SETTLE,
     }
@@ -776,6 +778,12 @@ async fn explain_names_the_definition_condition_and_state() {
          present (advertise if absent)"
     );
     withdraw(&mut manager, SOURCE, condition());
+    // Settle window: the suppression stands, but nothing is present now.
+    assert_eq!(
+        conditional_step(&explain(&mut manager, TARGET, controlled())).detail,
+        "suppressed by conditional advertisement backup: condition present when last \
+         applied (advertise if absent); observed absent for 0s, applies after settle_time 5s"
+    );
     elapse(&mut manager, SETTLE).await;
     let step = conditional_step(&explain(&mut manager, TARGET, controlled())).clone();
     assert_eq!(step.verdict, crate::update::ExportGateVerdict::Pass);
@@ -783,6 +791,17 @@ async fn explain_names_the_definition_condition_and_state() {
         step.detail,
         "conditional advertisement backup permits: condition prefix 198.51.100.1/32 absent \
          (advertise if absent)"
+    );
+    announce(
+        &mut manager,
+        SOURCE,
+        vec![route(condition(), SOURCE, 100, false)],
+    );
+    assert_eq!(
+        conditional_step(&explain(&mut manager, TARGET, controlled())).detail,
+        "conditional advertisement backup permits: condition prefix 198.51.100.1/32 absent \
+         when last applied (advertise if absent); observed present for 0s, applies after \
+         settle_time 5s"
     );
     let unattached = explain(&mut manager, BYSTANDER, controlled());
     assert_eq!(

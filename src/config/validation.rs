@@ -3641,11 +3641,11 @@ impl Config {
                 return Err(invalid("condition_prefixes must not be empty".to_string()));
             }
             let mut seen = HashSet::new();
-            for prefix in &definition.condition_prefixes {
-                let key = parse_exact_unicast_prefix(prefix).map_err(invalid)?;
-                if !seen.insert(key) {
+            for entry in &definition.condition_prefixes {
+                let parsed = parse_condition_prefix(entry).map_err(invalid)?;
+                if !seen.insert((parsed.prefix, parsed.ge, parsed.le)) {
                     return Err(invalid(format!(
-                        "condition prefix {prefix:?} is listed more than once"
+                        "condition prefix {parsed} is listed more than once"
                     )));
                 }
             }
@@ -3685,6 +3685,31 @@ impl Config {
         }
         Ok(())
     }
+}
+
+/// Parse one condition entry: an exact unicast prefix with optional
+/// prefix-list `ge`/`le` bounds, which must satisfy `len <= ge <= le <= max`.
+pub(super) fn parse_condition_prefix(
+    entry: &super::schema::ConditionPrefixConfig,
+) -> Result<rustbgpd_policy::sets::PrefixSetEntry, String> {
+    let (addr, len) = parse_exact_unicast_prefix(&entry.prefix)?;
+    let (prefix, max) = match addr {
+        IpAddr::V4(addr) => (
+            rustbgpd_wire::Prefix::V4(rustbgpd_wire::Ipv4Prefix::new(addr, len)),
+            32,
+        ),
+        IpAddr::V6(addr) => (
+            rustbgpd_wire::Prefix::V6(rustbgpd_wire::Ipv6Prefix::new(addr, len)),
+            128,
+        ),
+    };
+    rustbgpd_policy::sets::check_length_bounds(len, max, entry.ge, entry.le)
+        .map_err(|reason| format!("condition prefix {:?}: {reason}", entry.prefix))?;
+    Ok(rustbgpd_policy::sets::PrefixSetEntry {
+        prefix,
+        ge: entry.ge,
+        le: entry.le,
+    })
 }
 
 /// Parse an exact unicast prefix (`addr/len` with no host bits set), returning

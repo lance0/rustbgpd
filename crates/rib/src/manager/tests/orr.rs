@@ -2479,7 +2479,9 @@ async fn conditional_advertisement_gates_the_orr_winner_after_earlier_gates() {
                 rustbgpd_policy::NamedPolicy::from_rpol("ctl".to_string(), Arc::new(compiled)),
             ]),
             advertise_if: ConditionalAdvertiseIf::Present,
-            condition_prefixes: vec![Prefix::V4(condition)],
+            condition_prefixes: vec![rustbgpd_policy::sets::PrefixSetEntry::exact(Prefix::V4(
+                condition,
+            ))],
             condition_policy: None,
             settle_time: Duration::ZERO,
         }],
