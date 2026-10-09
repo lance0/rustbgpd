@@ -1135,18 +1135,25 @@ impl PeerSession {
                 .is_some_and(|afi| *afi == Afi::Ipv6)
         })
     }
-    /// An IPv4-unicast `MP_REACH_NLRI` for a negotiated family whose
-    /// 16/32-octet (IPv6) next hop needs RFC 8950 Extended Next Hop, which
-    /// this session did not negotiate. A 4-octet IPv4 next hop is plain
-    /// RFC 4760 and needs only the family (RFC 8950 §4).
+    /// An IPv4-unicast or labeled-IPv4 `MP_REACH_NLRI` for a negotiated
+    /// family whose 16/32-octet (IPv6) next hop needs RFC 8950 Extended Next
+    /// Hop for that family (`<1,1,2>` or `<1,4,2>`), which this session did
+    /// not negotiate. A 4-octet IPv4 next hop is plain RFC 4760 / RFC 8277
+    /// and needs only the family (RFC 8950 §4).
     fn is_unnegotiated_ipv4_mp_ipv6_next_hop(&self, mp: &rustbgpd_wire::MpReachNlri) -> bool {
-        (mp.afi, mp.safi) == (Afi::Ipv4, Safi::Unicast)
+        let family = (mp.afi, mp.safi);
+        mp.afi == Afi::Ipv4
+            && matches!(mp.safi, Safi::Unicast | Safi::LabeledUnicast)
             && mp.next_hop.is_ipv6()
-            && self.negotiated_families().contains(&(mp.afi, mp.safi))
-            && !self.use_extended_nexthop_ipv4()
+            && self.negotiated_families().contains(&family)
+            && !self
+                .negotiated
+                .as_ref()
+                .is_some_and(|n| n.extended_nexthop_families.get(&family) == Some(&Afi::Ipv6))
     }
     /// RFC 7606 §7.11: without negotiated Extended Next Hop, a 16/32-octet
-    /// next hop is not the length expected for IPv4 unicast (RFC 8950 §4), so
+    /// next hop is not the length expected for IPv4 unicast or labeled IPv4
+    /// (RFC 8950 §4), so
     /// the `MP_REACH_NLRI` is malformed and the session resets (AFI/SAFI
     /// disable is not implemented). Same NOTIFICATION as the decoder's other
     /// `MP_REACH_NLRI` next-hop failures: UPDATE Message Error / Optional Attribute

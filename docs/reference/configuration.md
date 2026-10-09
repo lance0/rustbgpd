@@ -1681,6 +1681,12 @@ that exact receive capability; IPv4 next-hop VPNv4 routes and VPN withdrawals
 do not require it. This remains route reflection, with no next-hop rewrite,
 VRF import, or forwarding behavior.
 
+`"ipv4_labeled_unicast"` does not advertise IPv6 next-hop support (AFI 1,
+SAFI 4, next-hop AFI 2). Labeled IPv4 routes therefore use IPv4 next hops: one
+with an IPv6 next hop is not exported, and a peer that sends one has its
+session reset (see the
+[RFC 8950 notes](rfc-notes.md#rfc-8950--extended-next-hop)).
+
 ---
 
 ## `[[dynamic_neighbors]]`

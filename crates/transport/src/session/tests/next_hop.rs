@@ -2715,8 +2715,11 @@ async fn ipv6_labeled_and_vpn_routes_with_an_ipv4_next_hop_are_refused_at_export
         // An IPv4-mapped IPv6 next hop (RFC 4798 form) is an IPv6 address.
         (labeled_route_with(v6, ipv4_mapped), None),
         (labeled_route_with(v4, ipv4), None),
-        // An IPv6 next hop on labeled IPv4 is unchanged by this guard.
-        (labeled_route_with(v4, ipv6), None),
+        // Labeled IPv4 with an IPv6 next hop still needs Extended Next Hop.
+        (
+            labeled_route_with(v4, ipv6),
+            Some(ExportProbeError::Ipv4RequiresExtendedNextHop),
+        ),
     ] {
         let live = profile.prepare_labeled_candidate(&route).err();
         assert_eq!(
@@ -2750,5 +2753,254 @@ async fn ipv6_labeled_and_vpn_routes_with_an_ipv4_next_hop_are_refused_at_export
             .probe_announcement(ExportCandidate::Vpn(&route))
             .err();
         assert_eq!(probe, expected, "VPN preflight {:?}", route.nlri.prefix);
+    }
+}
+
+/// Which Extended Next Hop tuple a labeled-IPv4 test session negotiated.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum LabeledEnhe {
+    None,
+    /// `<1,1,2>` only: IPv4 unicast, not labeled IPv4.
+    UnicastOnly,
+    /// `<1,4,2>`.
+    Labeled,
+}
+
+fn labeled_ipv4_negotiated(remote_asn: u32, enhe: LabeledEnhe) -> NegotiatedSession {
+    let mut negotiated = negotiated_session(remote_asn, enhe == LabeledEnhe::UnicastOnly);
+    negotiated.negotiated_families = vec![(Afi::Ipv4, Safi::LabeledUnicast)];
+    if enhe == LabeledEnhe::Labeled {
+        negotiated
+            .extended_nexthop_families
+            .insert((Afi::Ipv4, Safi::LabeledUnicast), Afi::Ipv6);
+    }
+    negotiated
+}
+
+/// RFC 8950 §5: a labeled-IPv4 (AFI 1 / SAFI 4) route with an IPv6 next hop
+/// goes only to a peer that negotiated `<1,4,2>`. Without it, both live
+/// preparation and the exact-export preflight refuse the route under the
+/// Extended Next Hop reason; `<1,1,2>` for IPv4 unicast does not stand in for
+/// it. An IPv4 next hop needs no capability.
+#[tokio::test]
+async fn labeled_ipv4_route_with_ipv6_next_hop_requires_labeled_extended_nexthop() {
+    let ipv4 = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 7));
+    let ipv6: IpAddr = RECEIVED_IPV6_NEXT_HOP.parse().unwrap();
+    for enhe in [
+        LabeledEnhe::None,
+        LabeledEnhe::UnicastOnly,
+        LabeledEnhe::Labeled,
+    ] {
+        let (mut session, _rib_rx) = make_test_session_with_rib(65001, 65001);
+        session.negotiated = Some(Arc::new(labeled_ipv4_negotiated(65001, enhe)));
+        let profile = session.publish_export_profile();
+        for next_hop in [ipv4, ipv6] {
+            let route = labeled_route_with(
+                Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(10, 0, 1, 0), 24)),
+                next_hop,
+            );
+            let expected = (next_hop.is_ipv6() && enhe != LabeledEnhe::Labeled)
+                .then_some(ExportProbeError::Ipv4RequiresExtendedNextHop);
+            let live = profile.prepare_labeled_candidate(&route);
+            assert_eq!(
+                live.as_ref().err(),
+                expected.as_ref(),
+                "{enhe:?} via {next_hop}"
+            );
+            if let Ok(prepared) = live {
+                assert_eq!(prepared.next_hop, next_hop, "{enhe:?}: next hop unchanged");
+            }
+            let probe = profile
+                .probe_announcement(ExportCandidate::Labeled(&route))
+                .err();
+            assert_eq!(probe, expected, "{enhe:?} preflight via {next_hop}");
+        }
+    }
+}
+
+/// Labeled-IPv4 export through the real RIB staging, exact-export preflight,
+/// transport encoder and a socket read, for both sources of an IPv6 next hop:
+/// a route received with one (from an Extended Next Hop peer), and an export
+/// policy `set next-hop <IPv6>`. A control route keeps its IPv4 next hop.
+///
+/// With `<1,4,2>` negotiated the IPv6 next hops reach the wire as 16 octets.
+/// Without it neither route is staged or encoded, and each is counted as
+/// `bgp_exact_export_rejections_total{reason="ipv4_requires_extended_next_hop"}`.
+#[tokio::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one ordered RIB-to-wire scenario per Extended Next Hop state"
+)]
+async fn labeled_ipv4_ipv6_next_hop_export_requires_extended_nexthop_on_the_wire() {
+    let received_v6: IpAddr = RECEIVED_IPV6_NEXT_HOP.parse().unwrap();
+    let set_v6: IpAddr = "2001:db8::9".parse().unwrap();
+    let ipv4 = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 7));
+    let received_prefix = Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(10, 0, 1, 0), 24));
+    let set_prefix = Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(10, 0, 2, 0), 24));
+    let control_prefix = Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(10, 0, 3, 0), 24));
+
+    for enhe in [LabeledEnhe::None, LabeledEnhe::Labeled] {
+        let rib_metrics = BgpMetrics::new();
+        let (mut session, rib_rx) = make_test_session_with_metrics_and_identity(
+            BgpMetrics::new(),
+            SessionIdentity::primary(7),
+        );
+        let (client, mut server) = connected_stream_pair().await;
+        session.test_install_stream(client);
+        install_test_negotiated_session(&mut session, labeled_ipv4_negotiated(65002, enhe));
+        session.publish_export_profile();
+        let (_query_tx, query_rx) = mpsc::channel(8);
+        let manager =
+            rustbgpd_rib::RibManager::new(rib_rx, query_rx, None, None, rib_metrics.clone());
+        let manager_task = tokio::spawn(manager.run());
+
+        // Rewrite only `set_prefix` to an IPv6 next hop; permit the rest.
+        let mut set_statement =
+            set_next_hop_import(rustbgpd_policy::NextHopAction::Specific(set_v6)).policies[0]
+                .policy
+                .entries[0]
+                .clone();
+        set_statement.prefix = Some(set_prefix);
+        let mut permit = set_statement.clone();
+        permit.prefix = None;
+        permit.modifications = RouteModifications::default();
+        let policy = PolicyChain::new(vec![Policy {
+            entries: vec![set_statement, permit],
+            default_action: PolicyAction::Deny,
+        }]);
+
+        let (outbound_tx, mut outbound_rx) = mpsc::channel(16);
+        session
+            .rib_tx
+            .send(RibUpdate::SetPeerExportEncoder {
+                peer: session.peer_ip,
+                session_id: 7,
+                encoder: session.export_encoder.clone(),
+            })
+            .await
+            .unwrap();
+        session
+            .rib_tx
+            .send(RibUpdate::PeerUp {
+                peer: session.peer_ip,
+                session_id: 7,
+                peer_asn: 65002,
+                peer_router_id: Ipv4Addr::new(10, 0, 0, 2),
+                outbound_tx,
+                export_policy: Some(policy),
+                sendable_families: vec![(Afi::Ipv4, Safi::LabeledUnicast)],
+                is_ebgp: true,
+                route_reflector_client: false,
+                orr_vantage: None,
+                per_client_best: false,
+                interpret_rfc1997: true,
+                add_path_send_families: vec![],
+                add_path_send_max: 0,
+                negotiated_orf_recv: vec![],
+                negotiated_llgr_families: vec![],
+            })
+            .await
+            .unwrap();
+        session
+            .rib_tx
+            .send(RibUpdate::LabeledRoutesReceived {
+                peer: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 9)),
+                session_id: 0,
+                announced: vec![
+                    labeled_route_with(received_prefix, received_v6),
+                    labeled_route_with(set_prefix, ipv4),
+                    labeled_route_with(control_prefix, ipv4),
+                ],
+                withdrawn: vec![],
+            })
+            .await
+            .unwrap();
+
+        let mut expected = vec![(control_prefix, 4, ipv4)];
+        if enhe == LabeledEnhe::Labeled {
+            expected.push((received_prefix, 16, received_v6));
+            expected.push((set_prefix, 16, set_v6));
+        }
+        let rejections = || {
+            counter_samples(&rib_metrics, "bgp_exact_export_rejections_total")
+                .into_iter()
+                .filter(|(labels, _)| {
+                    labels["family"] == "ipv4_labeled_unicast"
+                        && labels["reason"] == "ipv4_requires_extended_next_hop"
+                })
+                .map(|(_, value)| value)
+                .sum::<f64>()
+        };
+        let expected_rejections = if enhe == LabeledEnhe::Labeled {
+            0.0
+        } else {
+            2.0
+        };
+
+        // Forward every RIB export (End-of-RIB included) to the transport
+        // until each expected route is staged and every refusal is counted.
+        let mut staged = Vec::new();
+        while !(expected.iter().all(|(prefix, ..)| staged.contains(prefix))
+            && rejections() >= expected_rejections)
+        {
+            let update = tokio::time::timeout(Duration::from_secs(3), outbound_rx.recv())
+                .await
+                .unwrap_or_else(|_| {
+                    panic!(
+                        "{enhe:?}: RIB export; staged {staged:?}, rejections {}",
+                        rejections()
+                    )
+                })
+                .expect("outbound channel open");
+            staged.extend(update.labeled_announce.iter().map(|r| r.nlri.prefix));
+            session.send_route_update(update);
+        }
+        assert_eq!(staged.len(), expected.len(), "{enhe:?}: staged {staged:?}");
+        assert!(
+            (rejections() - expected_rejections).abs() < f64::EPSILON,
+            "{enhe:?}: rejections {}",
+            rejections()
+        );
+
+        let mut wire = Vec::new();
+        while wire.len() < expected.len() {
+            let raw = tokio::time::timeout(
+                Duration::from_secs(3),
+                read_single_raw_bgp_message(&mut server),
+            )
+            .await
+            .unwrap_or_else(|_| panic!("{enhe:?}: UPDATE on the wire; read so far {wire:?}"));
+            let body = &raw[19..];
+            let withdrawn_len = usize::from(u16::from_be_bytes([body[0], body[1]]));
+            let Some((_, value)) = attribute_values(&body[2 + withdrawn_len + 2..])
+                .into_iter()
+                .find(|(code, _)| *code == 14)
+            else {
+                continue; // End-of-RIB
+            };
+            assert_eq!(&value[..3], &[0, 1, 4], "{enhe:?}: AFI 1 / SAFI 4");
+            let nh_len = value[3];
+            let Message::Update(update) = rustbgpd_wire::decode_message(
+                &mut Bytes::from(raw.clone()),
+                rustbgpd_wire::MAX_MESSAGE_LEN,
+            )
+            .unwrap() else {
+                panic!("expected UPDATE");
+            };
+            let parsed = update.parse(true, false, &[]).unwrap();
+            for attr in &parsed.attributes {
+                if let PathAttribute::MpReachNlri(mp) = attr {
+                    for entry in &mp.labeled_announced {
+                        wire.push((entry.nlri.prefix, nh_len, mp.next_hop));
+                    }
+                }
+            }
+        }
+        wire.sort();
+        expected.sort();
+        assert_eq!(wire, expected, "{enhe:?}: (prefix, NH-Len, next hop)");
+
+        drop(session);
+        manager_task.abort();
     }
 }
