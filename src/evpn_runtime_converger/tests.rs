@@ -8665,3 +8665,90 @@ local_vtep_ip = "10.0.0.1"
         "rejected candidate must remain preflight"
     );
 }
+
+/// One Ethernet Segment over the given L2VNIs, keyed by `esi` (a literal or
+/// `auto-lacp` on `bond0`), with an RFC 9785 preference.
+fn es_reclassify_toml(esi: &str, vnis: &[u32], members: &[u32], df_preference: u32) -> String {
+    use std::fmt::Write as _;
+    let mut toml = "[global]\nasn = 65000\nrouter_id = \"10.0.0.1\"\nlisten_port = 179\n\n\
+                    [global.telemetry]\nlog_format = \"json\"\n"
+        .to_string();
+    for vni in vnis {
+        let _ = write!(
+            toml,
+            "\n[[evpn_instances]]\nvni = {vni}\nrd = \"65000:{vni}\"\n\
+             route_targets = [\"65000:{vni}\"]\nlocal_vtep_ip = \"10.0.0.1\"\n"
+        );
+    }
+    let _ = write!(
+        toml,
+        "\n[[ethernet_segments]]\nesi = \"{esi}\"\ninterface = \"bond0\"\n\
+         member_vnis = {members:?}\noriginator_ip = \"10.0.0.1\"\n\
+         df_algorithm = \"highest-preference\"\ndf_preference = {df_preference}\n"
+    );
+    toml
+}
+
+/// SIGHUP classification (`diff_config`, the `rustbgpd --diff` and
+/// `DiffRuntimeConfig` view) must agree with the live apply for an edit to a
+/// READY `auto-lacp` segment, as it does for the same edit to an explicit
+/// ESI. Classification has no live readiness table; the live apply resolves
+/// through the probe's table.
+#[tokio::test]
+async fn sighup_classification_matches_live_apply_for_ready_auto_lacp_segment() {
+    // (edit, baseline (vnis, members, pref), candidate (vnis, members, pref))
+    type Segment<'a> = (&'a [u32], &'a [u32], u32);
+    let derived =
+        rustbgpd_wire::EthernetSegmentIdentifier::new([1, 2, 0x11, 0, 0, 0, 0, 1, 0xc1, 0]);
+    let cases: [(&str, Segment, Segment); 2] = [
+        // A supported single-segment redefine.
+        (
+            "df_preference",
+            (&[100], &[100], 100),
+            (&[100], &[100], 200),
+        ),
+        // Membership moved onto a VNI the same reload adds: the redefine
+        // step would leave the segment memberless, so it fails closed.
+        (
+            "members onto added VNI",
+            (&[100], &[100], 100),
+            (&[100, 300], &[300], 100),
+        ),
+    ];
+    for (edit, (bv, bm, bp), (cv, cm, cp)) in cases {
+        for esi in ["00:11:22:33:44:55:66:77:88:99", "auto-lacp"] {
+            let baseline = load_runtime_test_config(&es_reclassify_toml(esi, bv, bm, bp), "base");
+            let candidate = load_runtime_test_config(&es_reclassify_toml(esi, cv, cm, cp), "cand");
+            let esis = crate::config::AutoLacpEsis::default();
+            esis.replace(BTreeMap::from([("bond0".to_string(), derived)]));
+            let segments = baseline.resolve_ethernet_segments_with(&esis).unwrap();
+            assert_eq!(segments.len(), 1, "{edit}/{esi}: the segment is ready");
+            let coordinator = Arc::new(Mutex::new(rustbgpd_evpn::EvpnRuntimeCoordinator::new(
+                baseline.resolve_evpn_instances().unwrap(),
+                baseline.resolve_evpn_ip_vrfs().unwrap(),
+                segments,
+            )));
+            let apply = EvpnRuntimeReloadApply::new(
+                coordinator,
+                Arc::new(tokio::sync::Mutex::new(())),
+                Arc::new(TestRuntimeConverger::ok()),
+                baseline.clone(),
+            )
+            .with_auto_lacp_esis(esis);
+            let attempt = apply
+                .apply_config_if_changed(&candidate, evpn_runtime_changed_for_test, || {})
+                .await;
+            let live_rejected = match attempt.terminal {
+                EvpnRuntimeReloadTerminal::Applied(_) => false,
+                EvpnRuntimeReloadTerminal::RejectedNoEffect(_) => true,
+                other => panic!("{edit}/{esi}: unexpected live terminal {other:?}"),
+            };
+            let class = crate::config::diff_config(&baseline, &candidate).evpn_runtime_change_class;
+            assert_eq!(
+                class == crate::config::EvpnRuntimeChangeClass::RestartRequired,
+                live_rejected,
+                "{edit}/{esi}: classified {class:?} but the live apply rejected={live_rejected}"
+            );
+        }
+    }
+}

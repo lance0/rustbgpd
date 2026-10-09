@@ -4889,10 +4889,11 @@ fn classify_evpn_runtime_change(old: &Config, new: &Config) -> EvpnRuntimeChange
     if !evpn_runtime_config_changed(old, new) {
         return EvpnRuntimeChangeClass::Unchanged;
     }
-    let Ok(current) = evpn_runtime_model_from_config(old) else {
+    let esis = AutoLacpEsis::assume_ready(old, new);
+    let Ok(current) = evpn_runtime_model_from_config(old, &esis) else {
         return EvpnRuntimeChangeClass::RestartRequired;
     };
-    let Ok(candidate) = evpn_runtime_candidate_from_config(new) else {
+    let Ok(candidate) = evpn_runtime_candidate_from_config(new, &esis) else {
         return EvpnRuntimeChangeClass::RestartRequired;
     };
     let plan = current.plan_candidate(&candidate);
@@ -4913,10 +4914,13 @@ fn classify_evpn_runtime_change(old: &Config, new: &Config) -> EvpnRuntimeChange
     }
 }
 
-fn evpn_runtime_model_from_config(config: &Config) -> Result<EvpnRuntimeModel, ConfigError> {
+fn evpn_runtime_model_from_config(
+    config: &Config,
+    esis: &AutoLacpEsis,
+) -> Result<EvpnRuntimeModel, ConfigError> {
     let instances = config.resolve_evpn_instances()?;
     let ip_vrfs = config.resolve_evpn_ip_vrfs()?;
-    let ethernet_segments = config.resolve_ethernet_segments()?;
+    let ethernet_segments = config.resolve_ethernet_segments_with(esis)?;
     Ok(EvpnRuntimeModel::startup(
         instances,
         ip_vrfs,
@@ -4926,11 +4930,12 @@ fn evpn_runtime_model_from_config(config: &Config) -> Result<EvpnRuntimeModel, C
 
 fn evpn_runtime_candidate_from_config(
     config: &Config,
+    esis: &AutoLacpEsis,
 ) -> Result<EvpnRuntimeCandidate, ConfigError> {
     Ok(EvpnRuntimeCandidate::new(
         config.resolve_evpn_instances()?,
         config.resolve_evpn_ip_vrfs()?,
-        config.resolve_ethernet_segments()?,
+        config.resolve_ethernet_segments_with(esis)?,
     ))
 }
 
@@ -6673,14 +6678,39 @@ pub const AUTO_LACP_ESI: &str = "auto-lacp";
 /// the runtime apply resolves segments through it. An absent entry
 /// means not ready.
 ///
-/// Config validation and diff classification resolve against an empty
-/// table, so they never depend on the live bond: an `auto-lacp`
-/// segment validates by shape and resolves to no runtime segment until
-/// the probe publishes an ESI and re-converges the committed config.
+/// Config validation resolves against an empty table, so it never
+/// depends on the live bond: an `auto-lacp` segment validates by shape
+/// and resolves to no runtime segment until the probe publishes an ESI
+/// and re-converges the committed config. Diff classification uses
+/// [`Self::assume_ready`] instead.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct AutoLacpEsis(Arc<std::sync::RwLock<BTreeMap<String, EthernetSegmentIdentifier>>>);
 
 impl AutoLacpEsis {
+    /// A table in which every `auto-lacp` bond of `old` or `new` is ready,
+    /// with a stand-in ESI per bond that is stable across both configs and
+    /// distinct from their explicit ESIs. Diff classification has no live
+    /// table (`rustbgpd --diff` runs off-box), so it assumes the steady
+    /// state: an edit to a ready segment plans as the redefine the live
+    /// apply will see. A `NotReady` segment has no runtime row, so its live
+    /// apply may accept what this classifies as restart-required.
+    fn assume_ready(old: &Config, new: &Config) -> Self {
+        let explicit: BTreeSet<EthernetSegmentIdentifier> = old
+            .ethernet_segments
+            .iter()
+            .chain(&new.ethernet_segments)
+            .filter_map(|cfg| parse_esi(&cfg.esi).ok())
+            .collect();
+        let stand_ins = (1..=u16::MAX)
+            .map(|key| rustbgpd_evpn::lacp_type1_esi([0x02, 0, 0, 0, 0, 0], key))
+            .filter(|esi| !explicit.contains(esi));
+        let mut bonds = old.auto_lacp_interfaces();
+        bonds.extend(new.auto_lacp_interfaces());
+        Self(Arc::new(std::sync::RwLock::new(
+            bonds.into_iter().zip(stand_ins).collect(),
+        )))
+    }
+
     fn get(&self, interface: &str) -> Option<EthernetSegmentIdentifier> {
         self.0
             .read()
