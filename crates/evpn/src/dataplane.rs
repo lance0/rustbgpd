@@ -763,6 +763,17 @@ pub enum DataplaneOpKind {
         /// MAC the entry programmed.
         mac: MacAddress,
     },
+    /// Append a remote VTEP to the instance's ingress-replication
+    /// flood list (all-zero-MAC FDB row).
+    AddFloodFdb {
+        /// Remote VTEP destination IP.
+        dst: IpAddr,
+    },
+    /// Remove a remote VTEP from the instance's flood list.
+    RemoveFloodFdb {
+        /// Remote VTEP destination IP.
+        dst: IpAddr,
+    },
     /// Apply the BUM-suppression flag triplet to a CE-facing bridge
     /// port (Gate 8b kernel primitive). The MAC / VNI fields used by
     /// FDB ops aren't meaningful here — the affected kernel object

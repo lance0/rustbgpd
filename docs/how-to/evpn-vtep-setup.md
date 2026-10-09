@@ -122,6 +122,8 @@ the SVD shape, see `[[managed_netdevs.svd_vxlans]]` in
 `bridge_vlan` is not the EVPN Ethernet Tag; Type 2 / Type 3 /
 EAD-per-EVI routes remain Ethernet Tag ID `0`. It is the local Linux VLAN
 selector used for readiness and for `NDA_VLAN` on remote-MAC FDB writes.
+Zero-MAC flood rows carry no `NDA_VLAN`: the kernel scopes them by VXLAN
+port, or by `src_vni` on an SVD port.
 
 ### Local Type 2 import
 
@@ -136,6 +138,64 @@ When upgrading from a version without this filter, check the RTs advertised
 by remote VTEPs. Previously installed Type 2 rows that fail these requirements
 are removed from local forwarding and gateway-IP resolution; correct the
 sender's RTs or the intended instance configuration before upgrading.
+
+### BUM flooding (ingress replication)
+
+Broadcast, unknown-unicast and multicast (BUM) frames reach remote VTEPs by
+head-end replication. Each remote VTEP's Type 3 IMET route that passes the same
+local import check as Type 2 adds one all-zero-MAC row to the instance's VXLAN
+port. The check requires:
+
+- a PMSI label equal to the instance VNI;
+- the instance's configured service Ethernet Tag (`0` for a VLAN-based
+  service);
+- a matching Route Target;
+- VXLAN-compatible encapsulation.
+
+```text
+00:00:00:00:00:00 dst <remote VTEP> self extern_learn permanent
+```
+
+On an SVD port the row also carries `src_vni <VNI>`. When an IMET is
+withdrawn, its row is removed, and a clean daemon exit removes every row the
+daemon wrote. After a restart, rows from the previous run keep forwarding until
+BGP reconverges. They are then claimed again or reaped on the same schedule as
+remote-MAC rows.
+
+How the daemon treats IMET routes:
+
+- **No replication target.** An IMET whose PMSI Tunnel attribute is
+  missing, is not type 6 (ingress replication), or names an unusable endpoint
+  is skipped. The daemon logs a `received IMET route programs no BUM flood row`
+  warning with the reason, and the BGP session is unaffected.
+- **Own IMET.** An IMET from one of the local VTEP addresses never produces
+  a row.
+
+Leave flood lists to the daemon:
+
+- Do not set `remote` or `group` on the VXLAN device.
+- Do not add static `bridge fdb append 00:00:00:00:00:00 …` rows.
+
+If any zero-MAC row on a VNI's VXLAN port lacks `extern_learn`, the daemon
+treats that whole VNI's entry as operator-owned. The kernel keeps one ownership
+flag per zero-MAC entry, so a static `append` takes over the entry. While the
+entry is operator-owned, the daemon neither adds nor removes destinations for
+that VNI. It logs a warning and increments `evpn_foreign_replaces_blocked_total`.
+To hand an existing deployment's flood lists to the daemon, delete every
+zero-MAC row on that VNI's port. Because the flag is shared, all of them show
+without `extern_learn`, including any the daemon added before the takeover.
+The next reconcile pass then programs the list:
+
+```bash
+bridge fdb del 00:00:00:00:00:00 dev "${VXLAN}" dst <remote VTEP>
+```
+
+On all-active multi-homed segments, the flood list includes the other PEs
+on the segment. Non-DF filtering still drops overlay BUM toward the
+segment on the non-DF PE. Local-bias split horizon is not implemented on
+the Linux software dataplane
+([ADR-0065](../adr/0065-evpn-localbias-split-horizon.md)), so the DF PE can
+still send a CE's own BUM back to it.
 
 ### VXLAN encapsulation compatibility
 

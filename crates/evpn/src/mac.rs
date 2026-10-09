@@ -40,7 +40,7 @@
 //! - ADR-0054 §5 (Local MACs observed; remote MACs programmed)
 //! - RFC 7432 §15 (MAC mobility procedures)
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::net::IpAddr;
 
 pub use rustbgpd_wire::MacAddress;
@@ -137,9 +137,15 @@ pub struct RemoteMacEntry {
 /// `BTreeMap` is deliberate: ordered iteration produces deterministic
 /// diff output and makes property tests reproducible. The cost of the
 /// `BTreeMap` over a `HashMap` is negligible at expected operator scale.
+///
+/// The table also carries each instance's ingress-replication flood list:
+/// the remote VTEPs whose received Type 3 IMET routes passed local import.
+/// The dataplane programs one all-zero-MAC append row per remote VTEP on
+/// the instance's VXLAN port, so BUM traffic is head-end replicated.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct RemoteMacTable {
     entries: BTreeMap<(EvpnInstanceId, MacAddress), RemoteMacEntry>,
+    flood_vteps: BTreeMap<EvpnInstanceId, BTreeSet<IpAddr>>,
 }
 
 impl RemoteMacTable {
@@ -176,6 +182,29 @@ impl RemoteMacTable {
     /// Iterate entries in deterministic `(VNI, MAC)` ascending order.
     pub fn iter(&self) -> impl Iterator<Item = (&(EvpnInstanceId, MacAddress), &RemoteMacEntry)> {
         self.entries.iter()
+    }
+
+    /// Replace the ingress-replication flood lists. Instances with an
+    /// empty set are dropped so equality does not depend on them.
+    #[must_use]
+    pub fn with_flood_vteps(
+        mut self,
+        mut flood_vteps: BTreeMap<EvpnInstanceId, BTreeSet<IpAddr>>,
+    ) -> Self {
+        flood_vteps.retain(|_, vteps| !vteps.is_empty());
+        self.flood_vteps = flood_vteps;
+        self
+    }
+
+    /// Remote VTEPs in one instance's ingress-replication flood list.
+    #[must_use]
+    pub fn flood_vteps(&self, vni: EvpnInstanceId) -> Option<&BTreeSet<IpAddr>> {
+        self.flood_vteps.get(&vni)
+    }
+
+    /// Iterate every instance's flood list in ascending VNI order.
+    pub fn iter_flood_vteps(&self) -> impl Iterator<Item = (EvpnInstanceId, &BTreeSet<IpAddr>)> {
+        self.flood_vteps.iter().map(|(&vni, vteps)| (vni, vteps))
     }
 
     /// Iterate entries scoped to one EVPN instance.
@@ -221,6 +250,7 @@ impl RemoteMacTableBuilder {
     pub fn build(self) -> RemoteMacTable {
         RemoteMacTable {
             entries: self.entries,
+            flood_vteps: BTreeMap::new(),
         }
     }
 }

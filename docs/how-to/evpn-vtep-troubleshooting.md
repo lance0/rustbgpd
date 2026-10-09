@@ -188,6 +188,28 @@ If IMET is absent, verify the session reached Established with
 check structured logs for the EVPN originator and IMET drain messages
 before peer shutdown.
 
+## BUM traffic does not reach a remote VTEP
+
+ARP requests, broadcast and unknown unicast reach a remote VTEP only
+through that VNI's zero-MAC flood row. Check the rows:
+
+```bash
+bridge fdb show dev vxlan100 | grep 00:00:00:00:00:00
+```
+
+Each remote VTEP whose IMET passed local import has one row, `dst
+<remote-vtep> self extern_learn permanent`. If a row is missing, look for
+these causes:
+
+- **No usable IMET.** Run `rbgp evpn --route-type 3`. The route needs the
+  instance's Route Target and a PMSI Tunnel attribute of type 6 (ingress
+  replication) whose label is the VNI. Skipped IMETs are logged as `received
+  IMET route programs no BUM flood row`, with the reason.
+- **A static row owns the entry.** If any zero-MAC row lacks `extern_learn`,
+  the daemon leaves that VNI's flood list alone and logs `foreign zero-MAC
+  flood entry`. Delete every zero-MAC row on that port; see
+  [BUM flooding](evpn-vtep-setup.md#bum-flooding-ingress-replication).
+
 ## Duplicate-MAC / mobility noise
 
 Duplicate-MAC detection runs per `(VNI, MAC)` using the RFC 7432 §15.1

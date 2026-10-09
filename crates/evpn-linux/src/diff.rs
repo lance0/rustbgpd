@@ -76,6 +76,12 @@ pub struct Plan {
     /// Level-triggered: once the foreign row goes away the next pass
     /// emits normally.
     pub foreign_blocked_keys: BTreeSet<(EvpnInstanceId, MacAddress)>,
+    /// VNIs whose ingress-replication flood list was withheld this pass
+    /// because their kernel zero-MAC entry is foreign (an operator or
+    /// another agent wrote it without `extern_learn`). Same fail-closed,
+    /// level-triggered contract as [`Self::foreign_blocked_keys`]: no
+    /// append or removal touches the entry until it goes away.
+    pub foreign_blocked_flood_vnis: BTreeSet<EvpnInstanceId>,
 }
 
 impl Plan {
@@ -416,6 +422,15 @@ pub fn compute_diff(
         });
     }
 
+    let foreign_blocked_flood_vnis = flood_pass(
+        desired,
+        snapshot,
+        last_applied,
+        probes,
+        &mut creates,
+        &mut deletes,
+    );
+
     let mut ops = deletes;
     ops.append(&mut conversions);
     ops.append(&mut creates);
@@ -424,7 +439,59 @@ pub fn compute_diff(
         ops,
         ipv6_alias_fallback_keys,
         foreign_blocked_keys: foreign_blocked,
+        foreign_blocked_flood_vnis,
     }
+}
+
+/// Ingress-replication flood rows: append each desired remote VTEP on a
+/// Ready instance that is not already both in the kernel entry and
+/// owned, and remove each owned destination that is no longer desired
+/// (or whose instance left Ready). Deletes iterate the owned set, never
+/// the kernel entry. A foreign zero-MAC entry withholds the whole VNI;
+/// see [`Plan::foreign_blocked_flood_vnis`].
+fn flood_pass(
+    desired: &RemoteMacTable,
+    snapshot: &KernelSnapshot,
+    last_applied: &OwnedSet,
+    probes: &InstanceProbes,
+    creates: &mut Vec<DataplaneOp>,
+    deletes: &mut Vec<DataplaneOp>,
+) -> BTreeSet<EvpnInstanceId> {
+    let foreign = |vni| snapshot.flood(vni).is_some_and(|entry| !entry.owned);
+    let mut blocked = BTreeSet::new();
+    for (vni, vteps) in desired.iter_flood_vteps() {
+        if !probes.is_ready(vni) {
+            continue;
+        }
+        if foreign(vni) {
+            blocked.insert(vni);
+            continue;
+        }
+        let kernel = snapshot.flood(vni);
+        for &dst in vteps {
+            let present = kernel.is_some_and(|entry| entry.dsts.contains(&dst));
+            if !(present && last_applied.owns_flood(vni, dst)) {
+                creates.push(DataplaneOp::AddFloodFdb { vni, dst });
+            }
+        }
+    }
+    for (vni, dst) in last_applied.iter_flood() {
+        let still_desired = probes.is_ready(vni)
+            && desired
+                .flood_vteps(vni)
+                .is_some_and(|vteps| vteps.contains(&dst));
+        if still_desired {
+            continue;
+        }
+        if foreign(vni) {
+            blocked.insert(vni);
+            continue;
+        }
+        // Emitted even when the row already vanished: removal of a
+        // missing destination is success and clears the stale claim.
+        deletes.push(DataplaneOp::RemoveFloodFdb { vni, dst });
+    }
+    blocked
 }
 
 /// `true` when the kernel snapshot holds a row at `(vni, vlan, mac)`
@@ -1071,6 +1138,125 @@ mod tests {
         o
     }
 
+    fn flood_desired(vnis: &[(EvpnInstanceId, &[&str])]) -> RemoteMacTable {
+        RemoteMacTable::new().with_flood_vteps(
+            vnis.iter()
+                .map(|(v, dsts)| (*v, dsts.iter().map(|d| ip(d)).collect()))
+                .collect(),
+        )
+    }
+
+    fn flood_plan(
+        desired: &RemoteMacTable,
+        snapshot: &KernelSnapshot,
+        applied: &OwnedSet,
+        ready: &[EvpnInstanceId],
+    ) -> Plan {
+        compute_diff(
+            desired,
+            snapshot,
+            applied,
+            &ready_probes(ready),
+            &GroupOwnedMap::new(),
+            &EvpnInstanceTable::new(),
+        )
+    }
+
+    #[test]
+    fn flood_appends_each_desired_vtep_and_skips_owned_present_rows() {
+        let desired = flood_desired(&[(vni(100), &["10.0.0.2", "10.0.0.3"])]);
+        let plan = flood_plan(
+            &desired,
+            &KernelSnapshot::new(),
+            &OwnedSet::new(),
+            &[vni(100)],
+        );
+        assert_eq!(
+            plan.ops,
+            vec![
+                DataplaneOp::AddFloodFdb {
+                    vni: vni(100),
+                    dst: ip("10.0.0.2"),
+                },
+                DataplaneOp::AddFloodFdb {
+                    vni: vni(100),
+                    dst: ip("10.0.0.3"),
+                },
+            ]
+        );
+
+        let mut snapshot = KernelSnapshot::new();
+        snapshot.insert_flood_row(vni(100), ip("10.0.0.2"), true);
+        snapshot.insert_flood_row(vni(100), ip("10.0.0.3"), true);
+        let mut applied = OwnedSet::new();
+        applied.record_flood_applied(vni(100), ip("10.0.0.2"));
+        // 10.0.0.3 is present but unclaimed (adopted leftover): the
+        // idempotent append claims it.
+        let plan = flood_plan(&desired, &snapshot, &applied, &[vni(100)]);
+        assert_eq!(
+            plan.ops,
+            vec![DataplaneOp::AddFloodFdb {
+                vni: vni(100),
+                dst: ip("10.0.0.3"),
+            }]
+        );
+        // NotReady instances get no appends.
+        assert!(flood_plan(&desired, &KernelSnapshot::new(), &OwnedSet::new(), &[]).is_noop());
+    }
+
+    #[test]
+    fn flood_removes_only_owned_undesired_vteps() {
+        let mut snapshot = KernelSnapshot::new();
+        for dst in ["10.0.0.2", "10.0.0.3"] {
+            snapshot.insert_flood_row(vni(100), ip(dst), true);
+        }
+        let mut applied = OwnedSet::new();
+        applied.record_flood_applied(vni(100), ip("10.0.0.2"));
+        applied.record_flood_applied(vni(100), ip("10.0.0.3"));
+        let desired = flood_desired(&[(vni(100), &["10.0.0.2"])]);
+        let plan = flood_plan(&desired, &snapshot, &applied, &[vni(100)]);
+        assert_eq!(
+            plan.ops,
+            vec![DataplaneOp::RemoveFloodFdb {
+                vni: vni(100),
+                dst: ip("10.0.0.3"),
+            }]
+        );
+        // An instance leaving Ready drains every owned destination.
+        let plan = flood_plan(&desired, &snapshot, &applied, &[]);
+        assert_eq!(plan.ops.len(), 2);
+        // A destination we never owned is never removed.
+        let plan = flood_plan(
+            &RemoteMacTable::new(),
+            &snapshot,
+            &OwnedSet::new(),
+            &[vni(100)],
+        );
+        assert!(plan.is_noop());
+    }
+
+    #[test]
+    fn foreign_flood_entry_withholds_the_whole_vni() {
+        let mut snapshot = KernelSnapshot::new();
+        snapshot.insert_flood_row(vni(100), ip("10.0.0.2"), false);
+        let mut applied = OwnedSet::new();
+        applied.record_flood_applied(vni(100), ip("10.0.0.9"));
+        let desired = flood_desired(&[
+            (vni(100), &["10.0.0.2", "10.0.0.3"]),
+            (vni(200), &["10.0.0.3"]),
+        ]);
+        let plan = flood_plan(&desired, &snapshot, &applied, &[vni(100), vni(200)]);
+        assert_eq!(
+            plan.ops,
+            vec![DataplaneOp::AddFloodFdb {
+                vni: vni(200),
+                dst: ip("10.0.0.3"),
+            }],
+            "no append or removal touches the foreign VNI-100 entry"
+        );
+        assert_eq!(plan.foreign_blocked_flood_vnis, BTreeSet::from([vni(100)]));
+    }
+
     // 1. Empty kernel + one desired entry → one create.
     #[test]
     fn creates_when_kernel_empty() {
@@ -1089,6 +1275,37 @@ mod tests {
         assert_eq!(
             plan.ops,
             vec![DataplaneOp::AddRemoteFdb {
+                vni: vni(100),
+                mac: mac(1),
+                vlan: None,
+                dst: ip("10.0.0.2"),
+            }]
+        );
+    }
+
+    // An owned row whose kernel destination drifted while the route did
+    // not move is rewritten. On Linux this needs the dump to decode the
+    // bridge-family `NDA_DST`; before that fix every real row arrived with
+    // `dst: None` and the owned-dst fallback below hid the drift.
+    #[test]
+    fn update_when_owned_kernel_dst_drifted_from_unchanged_desire() {
+        let desired = desired_one(vni(100), mac(1), entry("10.0.0.2", None));
+        let mut snapshot = KernelSnapshot::new();
+        let mut e = ours("10.0.0.9");
+        e.mac = mac(1);
+        snapshot.insert_fdb(vni(100), e);
+        let applied = applied_one(vni(100), mac(1), "10.0.0.2", None);
+        let plan = compute_diff(
+            &desired,
+            &snapshot,
+            &applied,
+            &ready_probes(&[vni(100)]),
+            &GroupOwnedMap::new(),
+            &EvpnInstanceTable::new(),
+        );
+        assert_eq!(
+            plan.ops,
+            vec![DataplaneOp::UpdateRemoteFdb {
                 vni: vni(100),
                 mac: mac(1),
                 vlan: None,
@@ -1830,7 +2047,9 @@ mod tests {
                         "Remove key not in applied: {op:?}"
                     );
                 }
-                DataplaneOp::SetBumPortFlags { .. }
+                DataplaneOp::AddFloodFdb { .. }
+                | DataplaneOp::RemoveFloodFdb { .. }
+                | DataplaneOp::SetBumPortFlags { .. }
                 | DataplaneOp::SetAcPortState { .. }
                 | DataplaneOp::CreateManagedBridge { .. }
                 | DataplaneOp::RemoveManagedBridge { .. }

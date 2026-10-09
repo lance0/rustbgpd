@@ -2022,6 +2022,10 @@ fn overflow_fallback_sweeps_every_typed_loc_rib_store() {
             .loc_rib
             .recompute_evpn(evpn_key, std::iter::once(&evpn))
     );
+    // Seeding the Loc-RIB directly bypasses the distribution seam that
+    // counts dataplane rows (IMET is one); keep the count consistent so the
+    // sweep's withdrawal does not underflow it.
+    manager.evpn_dataplane_route_count += 1;
 
     let vpn = make_vpn_rib_route(route_peer, 31, 100, 100);
     let vpn_key = vpn.nlri.key();

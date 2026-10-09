@@ -90,6 +90,25 @@ pub enum DataplaneOp {
         /// VLAN instead of matching another VLAN's row.
         vlan: Option<u16>,
     },
+    /// Append one remote VTEP to the instance's all-zero-MAC
+    /// ingress-replication entry on its VXLAN port (`bridge fdb append
+    /// 00:00:00:00:00:00 dev vxlanX dst REMOTE self extern_learn`), so
+    /// BUM traffic is head-end replicated to it. SVD ports carry the VNI
+    /// as `NDA_SRC_VNI`.
+    AddFloodFdb {
+        /// EVPN instance identifying the VXLAN port.
+        vni: EvpnInstanceId,
+        /// Remote VTEP from a received Type 3 IMET route.
+        dst: IpAddr,
+    },
+    /// Remove one remote VTEP from the instance's zero-MAC entry,
+    /// leaving every other destination in place.
+    RemoveFloodFdb {
+        /// EVPN instance identifying the VXLAN port.
+        vni: EvpnInstanceId,
+        /// Remote VTEP to stop replicating to.
+        dst: IpAddr,
+    },
     /// Apply the per-port flood-flag triplet to a CE-facing bridge
     /// port (Gate 8b BUM-suppression primitive). Realized in
     /// [`crate::LinuxDataplane`] via a single `RTM_NEWLINK`

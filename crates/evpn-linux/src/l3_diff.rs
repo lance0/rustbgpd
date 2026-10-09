@@ -1039,6 +1039,8 @@ pub fn record_l3_success(
         DataplaneOp::AddRemoteFdb { .. }
         | DataplaneOp::UpdateRemoteFdb { .. }
         | DataplaneOp::RemoveRemoteFdb { .. }
+        | DataplaneOp::AddFloodFdb { .. }
+        | DataplaneOp::RemoveFloodFdb { .. }
         | DataplaneOp::SetBumPortFlags { .. }
         | DataplaneOp::SetAcPortState { .. }
         | DataplaneOp::CreateManagedBridge { .. }

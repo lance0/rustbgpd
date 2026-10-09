@@ -227,6 +227,17 @@ struct ActorState {
     owned: OwnedSet,
     /// Retry schedule for FDB ops, keyed by `(VNI, MAC)`.
     retry: RetrySchedule<(EvpnInstanceId, MacAddress)>,
+    /// Flood-row ops keyed by `(VNI, dst)`: one VNI's zero-MAC entry
+    /// holds many destinations, so they cannot share the `(VNI, MAC)`
+    /// schedule without one remote's backoff gating another's.
+    flood_retry: RetrySchedule<(EvpnInstanceId, IpAddr)>,
+    flood_permanent_failures: BTreeMap<(EvpnInstanceId, IpAddr), DataplaneOp>,
+    /// VNIs already warned as foreign-blocked flood lists.
+    warned_foreign_flood: BTreeSet<EvpnInstanceId>,
+    /// ADR-0079: `extern_learn` zero-MAC flood destinations adopted from
+    /// the first snapshot on managed VNIs; reaped with `adopted_fdb`
+    /// unless a desired IMET re-claims them first.
+    adopted_flood: BTreeSet<(EvpnInstanceId, IpAddr)>,
     /// Per-op-fingerprint suppression for permanent FDB failures.
     /// Keyed by `(VNI, MAC)`; the value is the exact [`DataplaneOp`]
     /// that hit the permanent failure (e.g.,
@@ -527,6 +538,10 @@ impl ActorState {
             progress: WorkerProgress::default(),
             owned: OwnedSet::new(),
             retry: RetrySchedule::new(),
+            flood_retry: RetrySchedule::new(),
+            flood_permanent_failures: BTreeMap::new(),
+            warned_foreign_flood: BTreeSet::new(),
+            adopted_flood: BTreeSet::new(),
             permanent_failures: BTreeMap::new(),
             bum_retry: RetrySchedule::new(),
             bum_permanent_failures: BTreeMap::new(),
@@ -641,6 +656,7 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
             // only retried on the next unrelated wake), and Gate 9 L3
             // ops keyed by `L3OpKey`. The earliest wakes the actor.
             let next_fdb = self.state.retry.earliest_due();
+            let next_flood = self.state.flood_retry.earliest_due();
             let next_bum = self.state.bum_retry.earliest_due();
             let next_ac_gate = self.state.ac_gate_retry.earliest_due();
             let next_nhg = self.state.nhg_retry.earliest_due();
@@ -648,6 +664,7 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
             let next_l3 = self.state.l3_retry.earliest_due();
             let retry_due = [
                 next_fdb,
+                next_flood,
                 next_bum,
                 next_ac_gate,
                 next_nhg,
@@ -865,6 +882,23 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
                     );
                 }
             }
+            for (vni, entry) in snapshot.iter_flood() {
+                if !entry.owned || intent.instances.get(vni).is_none() {
+                    continue;
+                }
+                for &dst in &entry.dsts {
+                    if !self.state.owned.owns_flood(vni, dst)
+                        && self.state.adopted_flood.insert((vni, dst))
+                    {
+                        self.state.fdb_nhg_drift_since_report.single_dst_adopted += 1;
+                        tracing::info!(
+                            ?vni,
+                            %dst,
+                            "adopted extern_learn flood FDB row from a previous daemon lifetime"
+                        );
+                    }
+                }
+            }
         }
 
         // ADR-0059 slice 3b: one-shot startup adoption. Dump tagged
@@ -1048,6 +1082,21 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
         self.state
             .warned_foreign_fdb
             .clone_from(&plan.foreign_blocked_keys);
+        for vni in plan
+            .foreign_blocked_flood_vnis
+            .difference(&self.state.warned_foreign_flood)
+        {
+            self.state.foreign_since_report.replaces_blocked += 1;
+            tracing::warn!(
+                ?vni,
+                "foreign zero-MAC flood entry on this VNI's VXLAN port (no extern_learn); \
+                 flood-list programming withheld until every foreign zero-MAC row for the \
+                 VNI is removed (fail-closed)"
+            );
+        }
+        self.state
+            .warned_foreign_flood
+            .clone_from(&plan.foreign_blocked_flood_vnis);
 
         // ADR-0059 mixed-family alias fallback warn: log only for
         // `(VNI, MAC)` keys that newly entered the fallback this pass.
@@ -1960,8 +2009,13 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
         let mut planned_ac_gate: BTreeSet<u32> = BTreeSet::new();
         let mut planned_nhg: BTreeSet<crate::group_state::AliasGroupKey> = BTreeSet::new();
         let mut planned_managed: BTreeSet<ManagedNetdevOpKey> = BTreeSet::new();
+        let mut planned_flood: BTreeSet<(EvpnInstanceId, IpAddr)> = BTreeSet::new();
         for op in &plan.ops {
             match op {
+                DataplaneOp::AddFloodFdb { vni, dst }
+                | DataplaneOp::RemoveFloodFdb { vni, dst } => {
+                    planned_flood.insert((*vni, *dst));
+                }
                 DataplaneOp::SetBumPortFlags { ifindex, .. } => {
                     planned_bum.insert(*ifindex);
                 }
@@ -1991,6 +2045,9 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
             }
         }
         self.state.retry.retain(|key| planned_fdb.contains(key));
+        self.state
+            .flood_retry
+            .retain(|key| planned_flood.contains(key));
         self.state.bum_retry.retain(|key| planned_bum.contains(key));
         self.state
             .ac_gate_retry
@@ -2007,6 +2064,13 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
             // ops (`AliasGroupKey`), and per-MAC FDB ops (`(VNI, MAC)`).
             // No sentinel-key collision risk.
             let permanently_suppressed = match op {
+                DataplaneOp::AddFloodFdb { vni, dst }
+                | DataplaneOp::RemoveFloodFdb { vni, dst } => check_permanent_suppression(
+                    &mut self.state.flood_permanent_failures,
+                    &(*vni, *dst),
+                    op,
+                    "flood FDB",
+                ),
                 DataplaneOp::SetBumPortFlags { ifindex, .. } => check_permanent_suppression(
                     &mut self.state.bum_permanent_failures,
                     ifindex,
@@ -2060,6 +2124,10 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
             // exponential-backoff deadline passes. Same three-way
             // dispatch as permanent suppression.
             let next_due_ms_opt = match op {
+                DataplaneOp::AddFloodFdb { vni, dst }
+                | DataplaneOp::RemoveFloodFdb { vni, dst } => {
+                    self.state.flood_retry.next_due_for((*vni, *dst))
+                }
                 DataplaneOp::SetBumPortFlags { ifindex, .. } => {
                     self.state.bum_retry.next_due_for(*ifindex)
                 }
@@ -2121,6 +2189,10 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
                     match class {
                         FailureClass::Transient | FailureClass::Conflict => {
                             let next_due_ms = match op {
+                                DataplaneOp::AddFloodFdb { vni, dst }
+                                | DataplaneOp::RemoveFloodFdb { vni, dst } => {
+                                    self.state.flood_retry.record_failure((*vni, *dst), now_ms)
+                                }
                                 DataplaneOp::SetBumPortFlags { ifindex, .. } => {
                                     self.state.bum_retry.record_failure(*ifindex, now_ms)
                                 }
@@ -2172,6 +2244,13 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
                             // automatically. Drop from the transient
                             // retry schedule so we don't double-tick.
                             match op {
+                                DataplaneOp::AddFloodFdb { vni, dst }
+                                | DataplaneOp::RemoveFloodFdb { vni, dst } => {
+                                    self.state.flood_retry.record_success((*vni, *dst));
+                                    self.state
+                                        .flood_permanent_failures
+                                        .insert((*vni, *dst), op.clone());
+                                }
                                 DataplaneOp::SetBumPortFlags { ifindex, .. } => {
                                     self.state.bum_retry.record_success(*ifindex);
                                     self.state
@@ -3312,6 +3391,23 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
     /// MAC was the last referrer. A missing row is NOT a takeover
     /// (interface flap self-heals through the normal diff).
     async fn relinquish_foreign_l2(&mut self, snapshot: &KernelSnapshot) {
+        let flood_takeovers: Vec<(EvpnInstanceId, IpAddr)> = self
+            .state
+            .owned
+            .iter_flood()
+            .filter(|&(vni, _)| snapshot.flood(vni).is_some_and(|entry| !entry.owned))
+            .collect();
+        for (vni, dst) in flood_takeovers {
+            self.state.owned.record_flood_withdrawn(vni, dst);
+            self.state.flood_retry.record_success((vni, dst));
+            self.state.foreign_since_report.owned_relinquished += 1;
+            tracing::warn!(
+                ?vni,
+                %dst,
+                "owned zero-MAC flood entry was taken over by a foreign writer; relinquishing \
+                 ownership (foreign entry preserved)"
+            );
+        }
         let takeovers: Vec<(EvpnInstanceId, MacAddress, Option<u16>, OwnedEntryKind)> = self
             .state
             .owned
@@ -3361,6 +3457,8 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
         instances: &EvpnInstanceTable,
         pass_had_failures: bool,
     ) {
+        self.reap_adopted_flood(snapshot, desired, instances, pass_had_failures)
+            .await;
         if self.state.adopted_fdb.is_empty() {
             return;
         }
@@ -3432,6 +3530,71 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
                         ?vni,
                         %mac,
                         "failed to reap adopted single-dst FDB row; will retry next pass"
+                    );
+                }
+            }
+        }
+    }
+
+    /// ADR-0079 reap for adopted zero-MAC flood destinations: same
+    /// deadline and convergence gate as the single-dst reap. A desired
+    /// destination is re-claimed by the diff's idempotent append instead.
+    async fn reap_adopted_flood(
+        &mut self,
+        snapshot: &KernelSnapshot,
+        desired: &RemoteMacTable,
+        instances: &EvpnInstanceTable,
+        pass_had_failures: bool,
+    ) {
+        let owned = &self.state.owned;
+        self.state
+            .adopted_flood
+            .retain(|&(vni, dst)| !owned.owns_flood(vni, dst));
+        if self.state.adopted_flood.is_empty() || pass_had_failures {
+            return;
+        }
+        if self
+            .state
+            .fdb_adoption_reap_after
+            .is_none_or(|reap_after| Instant::now() < reap_after)
+        {
+            return;
+        }
+        let candidates: Vec<_> = self.state.adopted_flood.iter().copied().collect();
+        for (vni, dst) in candidates {
+            self.state.progress.checkpoint();
+            if instances.get(vni).is_none()
+                || desired
+                    .flood_vteps(vni)
+                    .is_some_and(|vteps| vteps.contains(&dst))
+            {
+                continue;
+            }
+            if !snapshot
+                .flood(vni)
+                .is_some_and(|entry| entry.owned && entry.dsts.contains(&dst))
+            {
+                // Gone or taken over since adoption: not ours to reap.
+                self.state.adopted_flood.remove(&(vni, dst));
+                continue;
+            }
+            let op = DataplaneOp::RemoveFloodFdb { vni, dst };
+            match self.dataplane.apply(&op).await {
+                Ok(()) => {
+                    self.state.adopted_flood.remove(&(vni, dst));
+                    self.state.fdb_nhg_drift_since_report.single_dst_reaped += 1;
+                    tracing::info!(
+                        ?vni,
+                        %dst,
+                        "reaped adopted flood FDB row that no IMET route re-claimed"
+                    );
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        error = %e,
+                        ?vni,
+                        %dst,
+                        "failed to reap adopted flood FDB row; will retry next pass"
                     );
                 }
             }
@@ -3741,6 +3904,15 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
                 self.state.owned.record_withdrawn(*vni, *mac);
                 self.state.retry.record_success((*vni, *mac));
             }
+            DataplaneOp::AddFloodFdb { vni, dst } => {
+                self.state.owned.record_flood_applied(*vni, *dst);
+                self.state.adopted_flood.remove(&(*vni, *dst));
+                self.state.flood_retry.record_success((*vni, *dst));
+            }
+            DataplaneOp::RemoveFloodFdb { vni, dst } => {
+                self.state.owned.record_flood_withdrawn(*vni, *dst);
+                self.state.flood_retry.record_success((*vni, *dst));
+            }
             DataplaneOp::SetBumPortFlags { ifindex, .. } => {
                 // BUM-port-flag ops do not interact with the FDB
                 // OwnedSet — they program a different kernel surface
@@ -3814,6 +3986,15 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
     }
 
     fn prune_stale_fdb_permanent_failures(&mut self, desired: &RemoteMacTable) {
+        let owned = &self.state.owned;
+        self.state
+            .flood_permanent_failures
+            .retain(|&(vni, dst), _| {
+                owned.owns_flood(vni, dst)
+                    || desired
+                        .flood_vteps(vni)
+                        .is_some_and(|vteps| vteps.contains(&dst))
+            });
         if self.state.permanent_failures.is_empty() {
             return;
         }
@@ -4249,6 +4430,7 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
         };
 
         if self.state.owned.is_empty()
+            && self.state.owned.iter_flood().next().is_none()
             && bum_restore_ops.is_empty()
             && ac_gate_restore_ops.is_empty()
             && l3_drain_plan.ops.is_empty()
@@ -4374,6 +4556,36 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
                     // for the group/member teardown.
                 } else {
                     self.state.owned.record_withdrawn(vni, mac);
+                }
+            }
+
+            // Flood rows drain under the same revalidation: a VNI whose
+            // zero-MAC entry turned foreign keeps every destination.
+            let flood_drain: Vec<(EvpnInstanceId, IpAddr)> = if drain_snapshot.is_some() {
+                self.state.owned.iter_flood().collect()
+            } else {
+                Vec::new()
+            };
+            for (vni, dst) in flood_drain {
+                if drain_snapshot
+                    .as_ref()
+                    .and_then(|snap| snap.flood(vni))
+                    .is_some_and(|entry| !entry.owned)
+                {
+                    self.state.owned.record_flood_withdrawn(vni, dst);
+                    self.state.foreign_since_report.deletes_skipped += 1;
+                    tracing::warn!(
+                        ?vni,
+                        %dst,
+                        "foreign zero-MAC flood entry at shutdown; drain skips it"
+                    );
+                    continue;
+                }
+                let op = DataplaneOp::RemoveFloodFdb { vni, dst };
+                if let Err(e) = self.dataplane.apply(&op).await {
+                    tracing::debug!(error = %e, ?op, "drain apply failed");
+                } else {
+                    self.state.owned.record_flood_withdrawn(vni, dst);
                 }
             }
 
@@ -7637,7 +7849,9 @@ fn fdb_op_vni(op: &DataplaneOp) -> rustbgpd_evpn::EvpnInstanceId {
         | DataplaneOp::UpdateRemoteFdb { vni, .. }
         | DataplaneOp::RemoveRemoteFdb { vni, .. }
         | DataplaneOp::InstallFdbNhg { vni, .. }
-        | DataplaneOp::RemoveFdbNhg { vni, .. } => *vni,
+        | DataplaneOp::RemoveFdbNhg { vni, .. }
+        | DataplaneOp::AddFloodFdb { vni, .. }
+        | DataplaneOp::RemoveFloodFdb { vni, .. } => *vni,
         DataplaneOp::UpdateFdbNhgMembers { group_key, .. } => group_key.vni,
         DataplaneOp::SetBumPortFlags { .. }
         | DataplaneOp::SetAcPortState { .. }
@@ -7681,6 +7895,8 @@ fn fdb_op_mac(op: &DataplaneOp) -> rustbgpd_evpn::MacAddress {
         | DataplaneOp::InstallFdbNhg { mac, .. }
         | DataplaneOp::RemoveFdbNhg { mac, .. } => *mac,
         DataplaneOp::UpdateFdbNhgMembers { .. }
+        | DataplaneOp::AddFloodFdb { .. }
+        | DataplaneOp::RemoveFloodFdb { .. }
         | DataplaneOp::SetBumPortFlags { .. }
         | DataplaneOp::SetAcPortState { .. }
         | DataplaneOp::CreateManagedBridge { .. }
@@ -7719,6 +7935,8 @@ fn op_to_kind(op: &DataplaneOp) -> DataplaneOpKind {
             dst: *dst,
         },
         DataplaneOp::RemoveRemoteFdb { mac, .. } => DataplaneOpKind::RemoveRemoteFdb { mac: *mac },
+        DataplaneOp::AddFloodFdb { dst, .. } => DataplaneOpKind::AddFloodFdb { dst: *dst },
+        DataplaneOp::RemoveFloodFdb { dst, .. } => DataplaneOpKind::RemoveFloodFdb { dst: *dst },
         DataplaneOp::SetBumPortFlags { ifindex, .. } => {
             DataplaneOpKind::SetBumPortFlags { ifindex: *ifindex }
         }

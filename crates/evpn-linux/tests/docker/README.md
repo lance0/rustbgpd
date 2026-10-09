@@ -89,6 +89,8 @@ caches across runs.
 | `dataplane_remote_mac` | `linux_dataplane_programs_remote_mac_with_extern_learn` | Remote MAC install/remove shape plus foreign-entry preservation |
 | `vlan_local_mac_attribution` | `linux_dataplane_attributes_vlan_local_mac_observations` | Same-MAC observations attributed independently across two VLANs |
 | `svd_fdb_vni` | `svd_topology_is_ready_and_programs_vni_scoped_fdb_rows` | LAN-64 collect-metadata VXLAN Ready + explicit `src_vni` FDB programming / scoped-delete proof |
+| `flood_list` | `linux_reconcile_programs_imet_flood_rows_and_spares_foreign_entry` | Reconcile actor programs one zero-MAC ingress-replication row per remote VTEP, removes exactly a withdrawn one, and never touches a foreign static zero-MAC entry |
+| `svd_flood_list` | `linux_reconcile_programs_svd_flood_rows_per_vni` | The same flood rows on an SVD port, scoped per VNI with `src_vni` |
 | `l3_multipath` | `l3vxlan_all_active_multipath_kernel_shape` | LAN-70 L3VNI route multipath acceptance, same-MAC FDB collapse, and FDB-NHG lifecycle |
 | `l3_all_active_writer` | `linux_reconcile_actor_installs_and_withdraws_all_active_l3_writer` | LAN-76 production actor all-active Type 5 writer install + withdraw proof |
 | `l3_single_path_cycle` | `linux_dataplane_installs_and_withdraws_l3_triple` | Single-path route, neighbor, and FDB install/withdraw lifecycle |

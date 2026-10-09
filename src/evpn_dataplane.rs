@@ -4,7 +4,7 @@
 //! ADR-0054 §1 forbids `rustbgpd-evpn-linux` from depending on
 //! `rustbgpd-rib` or `rustbgpd-transport`. The daemon binary owns the
 //! coordination between the two: it generation-queries the RIB for current
-//! best-path EVPN Type 1/2/5 projection inputs, builds the portable L2 and L3
+//! best-path EVPN Type 1/2/3/5 projection inputs, builds the portable L2 and L3
 //! intent tables, wraps them in a [`DataplaneIntent`], and publishes via a
 //! `tokio::sync::watch::Sender<Arc<DataplaneIntent>>` that the
 //! [`ReconcileActor`] consumes.
@@ -17,7 +17,7 @@
 //! [`EVPN_ROUTE_EVENT_DEBOUNCE`] after the last event of a burst —
 //! the same debounced trigger shape as the blackhole reconciler. Any
 //! EVPN best-path change (Type 1/2/3/4/5 add / withdraw / best-change)
-//! marks the supervisor dirty. Type 3/4 triggers and stable Type 1/2/5
+//! marks the supervisor dirty. Type 4 triggers and stable Type 1/2/3/5
 //! generations are O(1) equality responses without a RIB walk or clone. This
 //! makes the ADR-0083 single-active failover repair sub-second
 //! instead of poll-cadence-bound.
@@ -722,7 +722,7 @@ fn publish_remote_prefix_drop_counts(
 struct SupervisorIntentState {
     progress: WorkerProgress,
     generation: u64,
-    /// Last Type 1/2/5 RIB equality token successfully materialized. `None`
+    /// Last Type 1/2/3/5 RIB equality token successfully materialized. `None`
     /// forces a full actor snapshot after startup or any local projection
     /// input change and stays invalid across query failures.
     evpn_dataplane_generation: Option<u64>,
@@ -736,6 +736,8 @@ struct SupervisorIntentState {
     /// Publishes `last_l2_drop_counts` to the API status surface on change.
     l2_drop_counts_tx: watch::Sender<Arc<L2RemoteRouteDropCounts>>,
     last_bum_enforcement: BumEnforcementTable,
+    /// IMET flood skips already warned about; pruned when they clear.
+    warned_flood_skips: BTreeSet<FloodSkip>,
 }
 
 impl Default for SupervisorIntentState {
@@ -753,6 +755,7 @@ impl Default for SupervisorIntentState {
             last_l2_drop_counts: BTreeMap::new(),
             l2_drop_counts_tx: watch::channel(Arc::default()).0,
             last_bum_enforcement: BumEnforcementTable::new(),
+            warned_flood_skips: BTreeSet::new(),
         }
     }
 }
@@ -818,6 +821,7 @@ async fn publish_dataplane_intent(
         same_esi_bias,
     );
     state.progress.checkpoint();
+    warn_flood_skip_transitions(&mut state.warned_flood_skips, &tables.flood_skips);
     // A successful full snapshot repairs startup/local invalidation. Set this
     // before semantic intent deduplication: an unchanged projection is still
     // a successfully materialized view of the new RIB generation.
@@ -895,6 +899,20 @@ async fn publish_dataplane_intent(
     }
     state.progress.complete_pass();
     Ok(true)
+}
+
+/// Warn once per IMET flood skip on its transition into the skipped set,
+/// and forget skips that cleared so a later recurrence warns again.
+fn warn_flood_skip_transitions(warned: &mut BTreeSet<FloodSkip>, current: &BTreeSet<FloodSkip>) {
+    for skip in current.difference(warned) {
+        warn!(
+            vni = skip.vni.as_u32(),
+            originator = %skip.originator,
+            reason = skip.reason,
+            "received IMET route programs no BUM flood row"
+        );
+    }
+    warned.clone_from(current);
 }
 
 fn publish_cached_dataplane_intent(
@@ -1292,7 +1310,8 @@ async fn recv_evpn_route_event(
 /// for the same ESI. Active duplicate-MAC quarantine keys are also
 /// dropped from the remote-FDB intent so the dataplane stops forwarding
 /// toward a quarantined remote MAC while the RIB/RR surfaces remain
-/// visible. Type 5 IP-Prefix routes feed the L3 IP-VRF table. Type 3 IMET and
+/// visible. Type 5 IP-Prefix routes feed the L3 IP-VRF table. Type 3 IMET
+/// routes with an ingress-replication PMSI feed each instance's BUM flood list.
 /// Type 4 ES routes remain available to the RR/public RIB surfaces but are
 /// excluded from this dataplane projection input.
 /// Outcome of one generation-filtered internal RIB snapshot: the L2 (Type 2,
@@ -1301,6 +1320,10 @@ async fn recv_evpn_route_event(
 /// on one best-path generation.
 struct IntentTables {
     remote_macs: rustbgpd_evpn::RemoteMacTable,
+    /// Received IMET routes that passed local import but cannot feed the
+    /// flood list. The supervisor warns once per entry on its transition
+    /// into this set.
+    flood_skips: BTreeSet<FloodSkip>,
     remote_ip_prefixes: rustbgpd_evpn::ip_vrf::RemoteIpPrefixTable,
     /// ADR-0083 slice 3: number of `(ESI, EthernetTag)` single-active
     /// groups currently retargeted at their backup PE (origin VTEP
@@ -1441,31 +1464,14 @@ fn project_intent_tables(
     // the mass-withdraw gate. Drives the
     // `evpn_single_active_backup_active` gauge so operators can tell
     // "expected egress DF wait" apart from "repair failed".
-    let single_active_backup_active = routes
-        .iter()
-        .filter_map(|r| {
-            let key = single_active_swap_window_key(r, &active_ead_per_es, &single_active_index)?;
-            let EvpnRoute::MacIp(macip) = &r.route else {
-                return None;
-            };
-            let vni = rustbgpd_evpn::EvpnInstanceId::new(macip.label1.as_vni()).ok()?;
-            let instance = instances.get(vni)?;
-            if !instance.imports_mac_ip(macip, r.next_hop, &r.attributes) {
-                return None;
-            }
-            // Mirror the projection's quarantine + same-ESI bias gates
-            // — a route that contributes no desired state must not
-            // light the gauge either.
-            if quarantined_macs.contains(&DuplicateMacKey::new(vni, macip.mac)) {
-                return None;
-            }
-            if same_esi_bias.is_eligible(macip.esi, vni) {
-                return None;
-            }
-            Some(key)
-        })
-        .collect::<BTreeSet<_>>()
-        .len();
+    let single_active_backup_active = count_single_active_backup_windows(
+        routes,
+        instances,
+        &active_ead_per_es,
+        &single_active_index,
+        quarantined_macs,
+        same_esi_bias,
+    );
 
     // Gate 9 slice 6c: project Type 5 (`EvpnRoute::IpPrefix`) routes
     // through the pure helper. Skip when no IP-VRFs are configured
@@ -1497,19 +1503,60 @@ fn project_intent_tables(
             esi_overlay_ead,
         )
     };
+    let (flood_vteps, flood_skips) = project_flood_vteps(routes, instances, &local_vtep_ips);
     let remote_macs = rustbgpd_evpn::project_evpn_routes_with_backup_paths(
         instances,
         projected,
         ead_per_evi,
         &single_active_index,
-    );
+    )
+    .with_flood_vteps(flood_vteps);
 
     IntentTables {
         remote_macs,
+        flood_skips,
         remote_ip_prefixes,
         single_active_backup_active,
         l2_remote_route_drops: l2_remote_route_drop_counts(routes, instances, &local_vtep_ips),
     }
+}
+
+/// Count the (VNI, ESI, Ethernet Tag) groups in the post-failover backup
+/// window: at least one locally relevant Type 2 kept by the swap arm of the
+/// mass-withdraw gate.
+fn count_single_active_backup_windows(
+    routes: &[EvpnRibRoute],
+    instances: &EvpnInstanceTable,
+    active_ead_per_es: &BTreeSet<(std::net::IpAddr, rustbgpd_wire::EthernetSegmentIdentifier)>,
+    single_active_index: &rustbgpd_evpn::SingleActiveEligibleIndex,
+    quarantined_macs: &BTreeSet<DuplicateMacKey>,
+    same_esi_bias: &SameEsiBiasTable,
+) -> usize {
+    routes
+        .iter()
+        .filter_map(|r| {
+            let key = single_active_swap_window_key(r, active_ead_per_es, single_active_index)?;
+            let EvpnRoute::MacIp(macip) = &r.route else {
+                return None;
+            };
+            let vni = rustbgpd_evpn::EvpnInstanceId::new(macip.label1.as_vni()).ok()?;
+            let instance = instances.get(vni)?;
+            if !instance.imports_mac_ip(macip, r.next_hop, &r.attributes) {
+                return None;
+            }
+            // Mirror the projection's quarantine + same-ESI bias gates
+            // — a route that contributes no desired state must not
+            // light the gauge either.
+            if quarantined_macs.contains(&DuplicateMacKey::new(vni, macip.mac)) {
+                return None;
+            }
+            if same_esi_bias.is_eligible(macip.esi, vni) {
+                return None;
+            }
+            Some(key)
+        })
+        .collect::<BTreeSet<_>>()
+        .len()
 }
 
 /// ADR-0083 slice 3: returns the `(VNI, ESI, EthernetTag)` group key when
@@ -1887,6 +1934,103 @@ fn project_one(
         esi: macip.esi,
         ethernet_tag: macip.ethernet_tag,
     })
+}
+
+/// A received IMET that passed local import but programs no flood row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+struct FloodSkip {
+    vni: rustbgpd_evpn::EvpnInstanceId,
+    originator: std::net::IpAddr,
+    reason: &'static str,
+}
+
+type FloodVteps = BTreeMap<rustbgpd_evpn::EvpnInstanceId, BTreeSet<std::net::IpAddr>>;
+
+/// Project received Type 3 IMET routes into per-instance ingress-replication
+/// flood lists (RFC 8365 §9: the remote VTEPs BUM traffic is head-end
+/// replicated to).
+///
+/// An IMET contributes its PMSI tunnel endpoint when the PMSI label names a
+/// configured VNI that passes the instance's import check (the instance's
+/// configured service Ethernet Tag, 0 for a VLAN-based service; matching
+/// Route Target; VXLAN-compatible encapsulation). Routes
+/// whose next hop or tunnel endpoint is a local VTEP address are our own
+/// and never become a flood row. A route that imports but cannot be
+/// replicated to (no PMSI, a non-ingress-replication tunnel type, an
+/// unusable endpoint) is returned as a [`FloodSkip`] instead; it never
+/// affects the BGP session.
+fn project_flood_vteps(
+    routes: &[EvpnRibRoute],
+    instances: &EvpnInstanceTable,
+    local_vtep_ips: &BTreeSet<std::net::IpAddr>,
+) -> (FloodVteps, BTreeSet<FloodSkip>) {
+    let mut flood = FloodVteps::new();
+    let mut skips = BTreeSet::new();
+    for route in routes {
+        let EvpnRoute::Imet(imet) = &route.route else {
+            continue;
+        };
+        if local_vtep_ips.contains(&route.next_hop) || local_vtep_ips.contains(&imet.originator_ip)
+        {
+            continue;
+        }
+        let attrs = &route.attributes;
+        let Some(pmsi) = attrs.iter().find_map(PathAttribute::pmsi_tunnel) else {
+            // Without a PMSI the VNI is unknown: attribute the skip to every
+            // instance whose own VNI the route would otherwise import into.
+            for instance in instances.iter().filter(|instance| {
+                instance.imports_evi(instance.id.as_u32(), imet.ethernet_tag, attrs)
+            }) {
+                skips.insert(FloodSkip {
+                    vni: instance.id,
+                    originator: imet.originator_ip,
+                    reason: "missing_pmsi_tunnel",
+                });
+            }
+            continue;
+        };
+        let Ok(vni) = rustbgpd_evpn::EvpnInstanceId::new(pmsi.mpls_label) else {
+            continue;
+        };
+        let Some(instance) = instances.get(vni) else {
+            continue;
+        };
+        if !instance.imports_evi(pmsi.mpls_label, imet.ethernet_tag, attrs) {
+            continue;
+        }
+        let skip = |reason| FloodSkip {
+            vni,
+            originator: imet.originator_ip,
+            reason,
+        };
+        if pmsi.tunnel_type != rustbgpd_wire::PmsiTunnelType::IngressReplication {
+            skips.insert(skip("unsupported_pmsi_tunnel_type"));
+            continue;
+        }
+        let dst = match &pmsi.tunnel_identifier {
+            rustbgpd_wire::PmsiTunnelIdentifier::Ipv4(v4) => std::net::IpAddr::V4(*v4),
+            rustbgpd_wire::PmsiTunnelIdentifier::Ipv6(v6) => std::net::IpAddr::V6(*v6),
+            _ => {
+                skips.insert(skip("invalid_pmsi_tunnel_endpoint"));
+                continue;
+            }
+        };
+        if local_vtep_ips.contains(&dst) {
+            continue;
+        }
+        // Same rule as a local VTEP address (`EvpnInstance::new`): never
+        // replicate toward an unspecified, multicast or loopback endpoint.
+        if dst.is_unspecified() || dst.is_multicast() || dst.is_loopback() {
+            skips.insert(skip("invalid_pmsi_tunnel_endpoint"));
+            continue;
+        }
+        if dst.is_ipv4() != instance.local_vtep_ip.is_ipv4() {
+            skips.insert(skip("address_family_mismatch"));
+            continue;
+        }
+        flood.entry(vni).or_default().insert(dst);
+    }
+    (flood, skips)
 }
 
 /// Extract the MAC mobility sequence number from path attributes per
@@ -2768,6 +2912,248 @@ mod tests {
             )
             .is_none()
         );
+    }
+
+    fn evpn_imet_route(
+        v: u32,
+        originator: &str,
+        pmsi: Option<rustbgpd_wire::PmsiTunnel>,
+    ) -> EvpnRibRoute {
+        let mut attrs = vec![PathAttribute::ExtendedCommunities(vec![
+            RouteTarget::TwoOctetAs {
+                asn: 65001,
+                value: v,
+            }
+            .to_extended_community(),
+        ])];
+        attrs.extend(pmsi.map(PathAttribute::PmsiTunnel));
+        EvpnRibRoute {
+            route: EvpnRoute::Imet(rustbgpd_wire::EvpnImet {
+                rd: RouteDistinguisher::ZERO,
+                ethernet_tag: EthernetTagId(0),
+                originator_ip: ipa(originator),
+            }),
+            next_hop: ipa(originator),
+            link_local_next_hop: None,
+            peer: ipa("10.0.0.99"),
+            attributes: AttrSet::new(attrs),
+            received_at: std::time::Instant::now(),
+            origin_type: rustbgpd_rib::route::RouteOrigin::Ebgp,
+            peer_router_id: std::net::Ipv4Addr::new(10, 0, 0, 99),
+            is_stale: false,
+            is_llgr_stale: false,
+        }
+    }
+
+    fn ir_imet(v: u32, originator: &str) -> EvpnRibRoute {
+        evpn_imet_route(
+            v,
+            originator,
+            Some(rustbgpd_wire::PmsiTunnel::for_evpn_ingress_replication(
+                v,
+                ipa(originator),
+            )),
+        )
+    }
+
+    fn project_flood(
+        routes: &[EvpnRibRoute],
+        instances: &EvpnInstanceTable,
+    ) -> (FloodVteps, BTreeSet<FloodSkip>) {
+        let local: BTreeSet<_> = instances.iter().map(|i| i.local_vtep_ip).collect();
+        project_flood_vteps(routes, instances, &local)
+    }
+
+    #[test]
+    fn imet_flood_projection_lists_each_remote_vtep_once_and_never_self() {
+        let instances = local_instance_table_many(&[(100, Some("br100")), (200, Some("br200"))]);
+        let mut rd_change = ir_imet(100, "10.0.0.2");
+        let EvpnRoute::Imet(imet) = &mut rd_change.route else {
+            unreachable!()
+        };
+        imet.rd = rd(65001, 7);
+        let routes = vec![
+            ir_imet(100, "10.0.0.2"),
+            rd_change,
+            ir_imet(100, "10.0.0.3"),
+            ir_imet(200, "10.0.0.3"),
+            // Our own IMET (local VTEP 10.0.0.1) reflected back.
+            ir_imet(100, "10.0.0.1"),
+            // Unconfigured VNI.
+            ir_imet(300, "10.0.0.4"),
+        ];
+        let (flood, skips) = project_flood(&routes, &instances);
+        assert_eq!(
+            flood,
+            BTreeMap::from([
+                (vni(100), BTreeSet::from([ipa("10.0.0.2"), ipa("10.0.0.3")])),
+                (vni(200), BTreeSet::from([ipa("10.0.0.3")])),
+            ])
+        );
+        assert!(skips.is_empty(), "{skips:?}");
+    }
+
+    #[test]
+    fn imet_flood_projection_requires_instance_import() {
+        let instances = local_instance_table(100, Some("br100"));
+        let mut wrong_rt = ir_imet(100, "10.0.0.2");
+        wrong_rt.attributes = AttrSet::new(
+            wrong_rt
+                .attributes
+                .iter()
+                .filter(|attr| attr.pmsi_tunnel().is_some())
+                .cloned()
+                .chain([PathAttribute::ExtendedCommunities(vec![
+                    RouteTarget::TwoOctetAs {
+                        asn: 65001,
+                        value: 999,
+                    }
+                    .to_extended_community(),
+                ])])
+                .collect(),
+        );
+        let mut tagged = ir_imet(100, "10.0.0.3");
+        let EvpnRoute::Imet(imet) = &mut tagged.route else {
+            unreachable!()
+        };
+        imet.ethernet_tag = EthernetTagId(10);
+        let (flood, skips) = project_flood(&[wrong_rt, tagged], &instances);
+        assert!(flood.is_empty(), "{flood:?}");
+        assert!(skips.is_empty(), "{skips:?}");
+    }
+
+    #[test]
+    fn imet_flood_projection_skips_unusable_pmsi_with_a_reason() {
+        let instances = local_instance_table(100, Some("br100"));
+        let mut pim = rustbgpd_wire::PmsiTunnel::for_evpn_ingress_replication(100, ipa("10.0.0.3"));
+        pim.tunnel_type = rustbgpd_wire::PmsiTunnelType::PimSsm;
+        let routes = vec![
+            evpn_imet_route(100, "10.0.0.2", None),
+            evpn_imet_route(100, "10.0.0.3", Some(pim)),
+            evpn_imet_route(
+                100,
+                "10.0.0.4",
+                Some(rustbgpd_wire::PmsiTunnel::for_evpn_ingress_replication(
+                    100,
+                    ipa("2001:db8::4"),
+                )),
+            ),
+            evpn_imet_route(
+                100,
+                "10.0.0.5",
+                Some(rustbgpd_wire::PmsiTunnel::for_evpn_ingress_replication(
+                    100,
+                    ipa("0.0.0.0"),
+                )),
+            ),
+            ir_imet(100, "10.0.0.6"),
+        ];
+        let (flood, skips) = project_flood(&routes, &instances);
+        assert_eq!(
+            flood,
+            BTreeMap::from([(vni(100), BTreeSet::from([ipa("10.0.0.6")]))])
+        );
+        let reasons: Vec<_> = skips
+            .iter()
+            .map(|skip| (skip.vni, skip.originator, skip.reason))
+            .collect();
+        assert_eq!(
+            reasons,
+            vec![
+                (vni(100), ipa("10.0.0.2"), "missing_pmsi_tunnel"),
+                (vni(100), ipa("10.0.0.3"), "unsupported_pmsi_tunnel_type"),
+                (vni(100), ipa("10.0.0.4"), "address_family_mismatch"),
+                (vni(100), ipa("10.0.0.5"), "invalid_pmsi_tunnel_endpoint"),
+            ]
+        );
+    }
+
+    #[test]
+    fn imet_flood_projection_rejects_loopback_tunnel_endpoints() {
+        let ipv6_instance = |v: u32| {
+            EvpnInstance::new(
+                vni(v),
+                rd(65001, v),
+                vec![RouteTarget::TwoOctetAs {
+                    asn: 65001,
+                    value: v,
+                }],
+                ipa("2001:db8::1"),
+                None,
+                false,
+            )
+            .unwrap()
+        };
+        let mut instances = local_instance_table(100, Some("br100"));
+        instances.insert(ipv6_instance(200)).unwrap();
+        let loopback_imet = |v: u32, originator: &str, endpoint: &str| {
+            evpn_imet_route(
+                v,
+                originator,
+                Some(rustbgpd_wire::PmsiTunnel::for_evpn_ingress_replication(
+                    v,
+                    ipa(endpoint),
+                )),
+            )
+        };
+        let routes = vec![
+            loopback_imet(100, "10.0.0.2", "127.0.0.1"),
+            loopback_imet(100, "10.0.0.3", "127.1.2.3"),
+            loopback_imet(200, "2001:db8::2", "::1"),
+            ir_imet(100, "10.0.0.4"),
+            ir_imet(200, "2001:db8::4"),
+        ];
+        let (flood, skips) = project_flood(&routes, &instances);
+        assert_eq!(
+            flood,
+            BTreeMap::from([
+                (vni(100), BTreeSet::from([ipa("10.0.0.4")])),
+                (vni(200), BTreeSet::from([ipa("2001:db8::4")])),
+            ])
+        );
+        let reasons: Vec<_> = skips
+            .iter()
+            .map(|skip| (skip.vni, skip.originator, skip.reason))
+            .collect();
+        assert_eq!(
+            reasons,
+            vec![
+                (vni(100), ipa("10.0.0.2"), "invalid_pmsi_tunnel_endpoint"),
+                (vni(100), ipa("10.0.0.3"), "invalid_pmsi_tunnel_endpoint"),
+                (vni(200), ipa("2001:db8::2"), "invalid_pmsi_tunnel_endpoint"),
+            ]
+        );
+    }
+
+    #[test]
+    fn intent_tables_carry_imet_flood_list_without_unicast_rows() {
+        let instances = local_instance_table(100, Some("br100"));
+        let tables = project_intent_tables(
+            &[ir_imet(100, "10.0.0.2")],
+            &instances,
+            &IpVrfTable::new(),
+            &BTreeSet::new(),
+            &no_bias(),
+        );
+        assert!(tables.remote_macs.is_empty(), "IMET never yields a MAC row");
+        assert_eq!(
+            tables.remote_macs.flood_vteps(vni(100)),
+            Some(&BTreeSet::from([ipa("10.0.0.2")]))
+        );
+    }
+
+    #[test]
+    fn flood_skip_warnings_fire_once_per_transition() {
+        let skip = FloodSkip {
+            vni: vni(100),
+            originator: ipa("10.0.0.2"),
+            reason: "missing_pmsi_tunnel",
+        };
+        let mut warned = BTreeSet::new();
+        warn_flood_skip_transitions(&mut warned, &BTreeSet::from([skip]));
+        assert_eq!(warned, BTreeSet::from([skip]));
+        warn_flood_skip_transitions(&mut warned, &BTreeSet::new());
+        assert!(warned.is_empty(), "cleared skips are forgotten");
     }
 
     #[test]
@@ -5033,6 +5419,7 @@ mod tests {
             last_l2_drop_counts: BTreeMap::new(),
             l2_drop_counts_tx: watch::channel(Arc::default()).0,
             last_bum_enforcement: BumEnforcementTable::new(),
+            warned_flood_skips: BTreeSet::new(),
         };
         let mut table = BumEnforcementTable::new();
         let esi = EthernetSegmentIdentifier::new([9; 10]);
