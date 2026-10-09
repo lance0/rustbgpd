@@ -2462,6 +2462,292 @@ async fn ipv6_route_with_an_ipv4_next_hop_is_refused_at_export() {
     }
 }
 
+/// The raw `MP_REACH_NLRI` Next Hop field (after AFI, SAFI, NH-Len) of one
+/// encoded UPDATE.
+fn mp_reach_next_hop_field(raw: &[u8]) -> Vec<u8> {
+    let body = &raw[19..];
+    let withdrawn = usize::from(u16::from_be_bytes([body[0], body[1]]));
+    let attrs_at = 2 + withdrawn;
+    let attrs_len = usize::from(u16::from_be_bytes([body[attrs_at], body[attrs_at + 1]]));
+    let mut attrs = &body[attrs_at + 2..attrs_at + 2 + attrs_len];
+    while !attrs.is_empty() {
+        let (flags, code) = (attrs[0], attrs[1]);
+        let (len, header) = if flags & 0x10 == 0 {
+            (usize::from(attrs[2]), 3)
+        } else {
+            (usize::from(u16::from_be_bytes([attrs[2], attrs[3]])), 4)
+        };
+        let value = &attrs[header..header + len];
+        if code == 14 {
+            return value[4..4 + usize::from(value[3])].to_vec();
+        }
+        attrs = &attrs[header + len..];
+    }
+    panic!("no MP_REACH_NLRI");
+}
+
+/// Send one labeled-IPv6 or `VPNv6` route carrying a received link-local
+/// companion through the real export path; return the encoded Next Hop field.
+async fn exported_mpls_v6_next_hop_field(
+    safi: Safi,
+    remote_asn: u32,
+    route_reflector_client: bool,
+    route_server_client: bool,
+    scoped_outbound: bool,
+    source_ifindex: Option<u32>,
+) -> Vec<u8> {
+    let (mut session, _rib_rx) = make_test_session_with_rib(65001, remote_asn);
+    session.config.route_reflector_client = route_reflector_client;
+    session.config.route_server_client = route_server_client;
+    if route_reflector_client {
+        session.config.cluster_id = Some(Ipv4Addr::new(10, 0, 0, 1));
+    }
+    if scoped_outbound {
+        configure_scoped_link_local_peer(&mut session);
+    }
+    let (client, mut server) = connected_stream_pair().await;
+    session.test_install_stream(client);
+    let mut negotiated = negotiated_session(remote_asn, false);
+    negotiated.negotiated_families = vec![(Afi::Ipv6, safi)];
+    session.negotiated = Some(Arc::new(negotiated));
+    let next_hop: IpAddr = "2001:db8::2".parse().unwrap();
+    let link_local_next_hop = Some("fe80::a8c1:1".parse().unwrap());
+    let next_hop_scope = source_ifindex.map(|ifindex| {
+        Box::new(rustbgpd_rib::NextHopScope {
+            interface: Arc::from("eth1"),
+            ifindex,
+        })
+    });
+    let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 3));
+    let attributes = AttrSet::new(vec![
+        PathAttribute::Origin(Origin::Igp),
+        PathAttribute::AsPath(AsPath {
+            segments: vec![AsPathSegment::AsSequence(vec![65003])],
+        }),
+    ]);
+    let label = vec![MplsLabelEntry::try_new(4093, 0, true).unwrap()];
+    let mut update = empty_outbound_update();
+    update.exact_export_snapshot = Some(session.publish_export_profile());
+    if safi == Safi::MplsVpn {
+        update.vpn_announce = vec![rustbgpd_rib::VpnRibRoute {
+            nlri: VpnNlri {
+                labels: label,
+                route_distinguisher: RouteDistinguisher([0, 0, 0xFD, 0xE8, 0, 0, 0, 1]),
+                prefix: VpnPrefix::v6("2001:db8:100::".parse().unwrap(), 48).unwrap(),
+            },
+            next_hop,
+            link_local_next_hop,
+            next_hop_scope,
+            peer,
+            attributes,
+            received_at: Instant::now(),
+            origin_type: rustbgpd_rib::RouteOrigin::Ibgp,
+            peer_router_id: Ipv4Addr::new(10, 0, 0, 3),
+            is_stale: false,
+            is_llgr_stale: false,
+            path_id: 0,
+        }];
+    } else {
+        update.labeled_announce = vec![rustbgpd_rib::LabeledRibRoute {
+            nlri: rustbgpd_wire::LabeledNlri {
+                labels: label,
+                prefix: Prefix::V6(Ipv6Prefix::new("2001:db8:100::".parse().unwrap(), 48)),
+            },
+            next_hop,
+            link_local_next_hop,
+            next_hop_scope,
+            peer,
+            attributes,
+            received_at: Instant::now(),
+            origin_type: rustbgpd_rib::RouteOrigin::Ibgp,
+            peer_router_id: Ipv4Addr::new(10, 0, 0, 3),
+            is_stale: false,
+            is_llgr_stale: false,
+            path_id: 0,
+        }];
+    }
+    session.send_route_update(update);
+    mp_reach_next_hop_field(&read_single_raw_bgp_message(&mut server).await)
+}
+
+/// RFC 2545 §3, RFC 4659 §3.2.1.1: labeled-IPv6 and `VPNv6` forward a
+/// received link-local companion only to a peer on the link it came from.
+/// Everyone else gets the global-only form (16 or 24 octets).
+#[tokio::test]
+async fn mpls_v6_families_forward_link_local_companion_only_on_its_link() {
+    let global = "2001:db8::2".parse::<Ipv6Addr>().unwrap().octets();
+    let companion = "fe80::a8c1:1".parse::<Ipv6Addr>().unwrap().octets();
+    // (case, remote ASN, RR client, RS client, scoped outbound, source ifindex, kept)
+    let cases = [
+        (
+            "rr client over global transport",
+            65001,
+            true,
+            false,
+            false,
+            Some(7),
+            false,
+        ),
+        (
+            "ibgp over global transport",
+            65001,
+            false,
+            false,
+            false,
+            Some(7),
+            false,
+        ),
+        ("rs client", 65002, false, true, false, Some(7), false),
+        (
+            "rs client, unscoped source",
+            65002,
+            false,
+            true,
+            false,
+            None,
+            false,
+        ),
+        (
+            "same interface, ibgp",
+            65001,
+            false,
+            false,
+            true,
+            Some(7),
+            true,
+        ),
+        (
+            "same interface, rr client",
+            65001,
+            true,
+            false,
+            true,
+            Some(7),
+            true,
+        ),
+        (
+            "same interface, rs client",
+            65002,
+            false,
+            true,
+            true,
+            Some(7),
+            true,
+        ),
+        ("other interface", 65001, false, false, true, Some(8), false),
+        (
+            "scoped outbound, unscoped source",
+            65001,
+            false,
+            false,
+            true,
+            None,
+            false,
+        ),
+    ];
+    for (case, remote_asn, rr, rs, scoped, source_ifindex, kept) in cases {
+        for safi in [Safi::LabeledUnicast, Safi::MplsVpn] {
+            let vpn = safi == Safi::MplsVpn;
+            let mut expected = Vec::new();
+            for (address, present) in [(global, true), (companion, kept)] {
+                if present {
+                    if vpn {
+                        expected.extend_from_slice(&[0; 8]);
+                    }
+                    expected.extend_from_slice(&address);
+                }
+            }
+            assert_eq!(
+                exported_mpls_v6_next_hop_field(safi, remote_asn, rr, rs, scoped, source_ifindex)
+                    .await,
+                expected,
+                "{case} vpn={vpn}"
+            );
+        }
+    }
+}
+
+/// Inbound labeled-IPv6 and `VPNv6` routes record the receiving interface of
+/// a link-local companion when the source session is interface-bound.
+#[tokio::test]
+async fn received_mpls_v6_link_local_companion_records_the_receiving_interface() {
+    let companion: Ipv6Addr = "fe80::a8c1:1".parse().unwrap();
+    for vpn in [false, true] {
+        for scoped in [false, true] {
+            let (mut session, mut rib_rx) = make_test_session_with_rib(65001, 65002);
+            if scoped {
+                configure_scoped_link_local_peer(&mut session);
+            }
+            let safi = if vpn {
+                Safi::MplsVpn
+            } else {
+                Safi::LabeledUnicast
+            };
+            let mut negotiated = negotiated_session(65002, false);
+            negotiated.negotiated_families = vec![(Afi::Ipv6, safi)];
+            session.negotiated = Some(Arc::new(negotiated));
+            let labels = vec![MplsLabelEntry::try_new(4093, 0, true).unwrap()];
+            let mut mp = MpReachNlri {
+                afi: Afi::Ipv6,
+                safi,
+                next_hop: "2001:db8::2".parse().unwrap(),
+                link_local_next_hop: Some(companion),
+                announced: vec![],
+                flowspec_announced: vec![],
+                evpn_announced: vec![],
+                bgpls_announced: vec![],
+                labeled_announced: vec![],
+                vpn_announced: vec![],
+                rtc_announced: vec![],
+            };
+            if vpn {
+                mp.vpn_announced = vec![rustbgpd_wire::VpnNlriEntry {
+                    path_id: 0,
+                    nlri: VpnNlri {
+                        labels,
+                        route_distinguisher: RouteDistinguisher([0, 0, 0xFD, 0xE8, 0, 0, 0, 1]),
+                        prefix: VpnPrefix::v6("2001:db8:100::".parse().unwrap(), 48).unwrap(),
+                    },
+                }];
+            } else {
+                mp.labeled_announced = vec![rustbgpd_wire::LabeledNlriEntry {
+                    path_id: 0,
+                    nlri: rustbgpd_wire::LabeledNlri {
+                        labels,
+                        prefix: Prefix::V6(Ipv6Prefix::new("2001:db8:100::".parse().unwrap(), 48)),
+                    },
+                }];
+            }
+            let attrs = vec![
+                PathAttribute::Origin(Origin::Igp),
+                PathAttribute::AsPath(AsPath {
+                    segments: vec![AsPathSegment::AsSequence(vec![65002])],
+                }),
+                PathAttribute::MpReachNlri(Box::new(mp)),
+            ];
+            let update = UpdateMessage::build(&[], &[], &attrs, true, false, Ipv4UnicastMode::Body);
+            session.process_update(update).await;
+            let (link_local, scope) = match rib_rx.try_recv().unwrap() {
+                RibUpdate::VpnRoutesReceived { announced, .. } if vpn => (
+                    announced[0].link_local_next_hop,
+                    announced[0].next_hop_scope.clone(),
+                ),
+                RibUpdate::LabeledRoutesReceived { announced, .. } if !vpn => (
+                    announced[0].link_local_next_hop,
+                    announced[0].next_hop_scope.clone(),
+                ),
+                _ => panic!("unexpected RIB update"),
+            };
+            assert_eq!(link_local, Some(companion));
+            assert_eq!(
+                scope.map(|scope| (scope.interface.to_string(), scope.ifindex)),
+                scoped.then(|| ("eth1".to_string(), 7)),
+                "vpn={vpn} scoped={scoped}"
+            );
+        }
+    }
+}
+
 /// The `MP_REACH_NLRI` family and next hop of a raw UPDATE: (AFI, SAFI,
 /// next-hop length, next-hop bytes); `None` for an UPDATE without one, such
 /// as an End-of-RIB marker.
