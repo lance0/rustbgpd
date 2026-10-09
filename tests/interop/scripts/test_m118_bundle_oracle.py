@@ -13,7 +13,9 @@ def peer_rib():
     rib = {}
     for tag in (10, 20):
         rd = {"type": 1, "admin": oracle.VTEP, "assigned": tag}
-        attrs = [{"type": 16, "value": [{"type": 0, "subtype": 2, "value": "65000:100"}]}]
+        attrs = [{"type": 16, "value": [{"type": 0, "subtype": 2, "value": "65000:100"},
+                                         {"type": 3, "subtype": 12, "tunnel_type": 8}]},
+                 {"type": 14, "afi": 25, "safi": 70, "nexthop": oracle.VTEP}]
         mac_key = f"[type:macadv][rd:{oracle.VTEP}:{tag}][etag:{tag}][mac:{oracle.LOCAL_MAC}]"
         imet_key = f"[type:multicast][rd:{oracle.VTEP}:{tag}][etag:{tag}][ip:{oracle.VTEP}]"
         rib[mac_key] = [{"nlri": {"type": 2, "value": {
@@ -70,9 +72,44 @@ class BundleOracleTests(unittest.TestCase):
         for field in ("label", "tunnel-type", "tunnel-id", "is-leaf-info-required"):
             with self.subTest(pmsi=field):
                 broken = copy.deepcopy(good)
-                del broken[key][0]["attrs"][1][field]
+                del next(a for a in broken[key][0]["attrs"] if a["type"] == 22)[field]
                 with self.assertRaises(ValueError):
                     oracle.originated(broken)
+
+    def test_each_decoded_path_requires_one_evpn_vtep_next_hop(self):
+        good = peer_rib()
+        for key in good:
+            for case in ("missing", "wrong", "duplicate", "wrong_afi", "wrong_safi"):
+                with self.subTest(key=key, case=case):
+                    broken = copy.deepcopy(good)
+                    attrs = broken[key][0]["attrs"]
+                    mp_reach = next(a for a in attrs if a["type"] == 14)
+                    if case == "missing":
+                        attrs.remove(mp_reach)
+                    elif case == "duplicate":
+                        attrs.append(copy.deepcopy(mp_reach))
+                    else:
+                        field = {"wrong": "nexthop", "wrong_afi": "afi", "wrong_safi": "safi"}[case]
+                        mp_reach[field] = "10.0.118.3" if field == "nexthop" else 1
+                    with self.assertRaises(ValueError):
+                        oracle.originated(broken)
+
+    def test_each_decoded_path_requires_only_vxlan_encapsulation(self):
+        good = peer_rib()
+        for key in good:
+            for case in ("missing", "nvgre", "mpls", "additional"):
+                with self.subTest(key=key, case=case):
+                    broken = copy.deepcopy(good)
+                    communities = broken[key][0]["attrs"][0]["value"]
+                    encap = next(c for c in communities if c["type"] == 3)
+                    if case == "missing":
+                        communities.remove(encap)
+                    elif case == "additional":
+                        communities.append({"type": 3, "subtype": 12, "tunnel_type": 10})
+                    else:
+                        encap["tunnel_type"] = 9 if case == "nvgre" else 10
+                    with self.assertRaises(ValueError):
+                        oracle.originated(broken)
 
     def test_missing_collapsed_or_extra_mac_and_wrong_rt_fail(self):
         good = peer_rib()

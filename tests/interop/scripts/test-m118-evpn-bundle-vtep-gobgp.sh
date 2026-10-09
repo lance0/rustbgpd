@@ -40,6 +40,7 @@ dump_state() {
     gobgp neighbor -j > "$OUT/final-peer-session.json" 2>&1 || true
     docker exec "$VTEP" bridge fdb show > "$OUT/final-fdb.txt" 2>&1 || true
     docker exec "$VTEP" ip route show table 10500 > "$OUT/final-vrf-routes.txt" 2>&1 || true
+    docker exec "$VTEP" ip route show table all > "$OUT/final-all-routes.txt" 2>&1 || true
     docker exec "$VTEP" cat /var/log/rustbgpd.log > "$OUT/rustbgpd.log" 2>&1 || true
     docker exec "$GOBGP" cat /tmp/gobgpd.log > "$OUT/gobgpd.log" 2>&1 || true
 }
@@ -119,11 +120,12 @@ if ! diff -u "$OUT/baseline-fdb-sorted.txt" "$OUT/negative-fdb-sorted.txt" > "$O
 fi
 ok "unsupported routes left the complete FDB inventory unchanged"
 docker exec "$VTEP" ip route show table 10500 > "$OUT/negative-vrf-routes.txt"
-if grep -Fq 203.0.118.0/24 "$OUT/negative-vrf-routes.txt"; then
-    fail "non-zero-tag Type 5 installed a kernel route"
+docker exec "$VTEP" ip route show table all > "$OUT/negative-all-routes.txt"
+if grep -Fq 203.0.118.0/24 "$OUT/negative-all-routes.txt"; then
+    fail "non-zero-tag Type 5 installed a kernel route in any table"
     exit 1
 fi
-ok "non-zero-tag Type 5 installed no kernel route"
+ok "non-zero-tag Type 5 installed no kernel route in any table"
 wait_vtep_established 10.0.118.2 "session after unsupported routes"
 test "$(vtep_ctl neighbor 10.0.118.2 -j | jq -er '.flap_count')" = "$baseline_flaps"
 ok "unsupported routes left the established session's flap count unchanged"
@@ -135,4 +137,7 @@ qualify "received withdrawal preserves both local per-tag advertisements" origin
 docker exec "$VTEP" bridge fdb del "$LOCAL_MAC" dev access10 master vlan 10
 qualify "local tag-10 withdrawal preserves the tag-20 MAC and both IMETs on the peer" originated withdrawn
 qualify "local withdrawal leaves the received tag-20 FDB rows intact" received withdrawn
+wait_vtep_established 10.0.118.2 "session after member withdrawals"
+test "$(vtep_ctl neighbor 10.0.118.2 -j | jq -er '.flap_count')" = "$baseline_flaps"
+ok "member withdrawals left the established session's flap count unchanged"
 print_summary

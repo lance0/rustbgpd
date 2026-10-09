@@ -31,10 +31,18 @@ def originated(rib, tags=(10, 20)):
             if len(paths) != 1 or paths[0]["nlri"] != {"type": route_type, "value": value}:
                 raise ValueError(f"decoded NLRI differs for {key}")
             attrs = paths[0]["attrs"]
+            mp_reach = [a for a in attrs if a["type"] == 14]
+            if len(mp_reach) != 1 or (
+                    mp_reach[0].get("afi"), mp_reach[0].get("safi"), mp_reach[0].get("nexthop")) != (25, 70, VTEP):
+                raise ValueError(f"EVPN MP_REACH next hop differs for {key}")
             rts = [c["value"] for a in attrs if a["type"] == 16
                    for c in a["value"] if c["type"] in (0, 1, 2) and c["subtype"] == 2]
             if rts != ["65000:100"]:
                 raise ValueError(f"bundle RT differs for {key}")
+            encaps = [c["tunnel_type"] for a in attrs if a["type"] == 16
+                      for c in a["value"] if c["type"] == 3 and c["subtype"] == 12]
+            if encaps != [8]:
+                raise ValueError(f"VXLAN encapsulation differs for {key}")
             if key == imet_key:
                 pmsi = [a for a in attrs if a["type"] == 22]
                 if len(pmsi) != 1 or any(pmsi[0].get(k) != v for k, v in {
