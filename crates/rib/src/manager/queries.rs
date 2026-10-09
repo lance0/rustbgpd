@@ -972,7 +972,13 @@ impl RibManager {
             if next_hops.len() >= cap {
                 break;
             }
-            let scope_ifindex = route.next_hop_scope.as_ref().map(|scope| scope.ifindex);
+            // A scope distinguishes only link-local next hops; a global one
+            // may carry its companion's scope.
+            let scope_ifindex = route
+                .next_hop_scope
+                .as_ref()
+                .filter(|_| matches!(route.next_hop, IpAddr::V6(v6) if v6.is_unicast_link_local()))
+                .map(|scope| scope.ifindex);
             if seen.insert((route.next_hop, scope_ifindex)) {
                 next_hops.push(FibInstallNextHop {
                     next_hop: route.next_hop,

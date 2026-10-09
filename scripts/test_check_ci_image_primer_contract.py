@@ -93,6 +93,8 @@ PR_FILES = {
 
 INTEROP = ".github/workflows/interop.yml"
 KERNEL = ".github/workflows/kernel-dataplane.yml"
+# Line of the `run:` in a step injected just before M1's lab call.
+INJECTED_RUN_LINE = (ROOT / INTEROP).read_text().split("      - name: Run M1 (")[0].count("\n") + 2
 MANIFEST = ".github/pinned-archives.sha256"
 ARCHIVE_PINS = dict(
     (archive, digest)
@@ -362,7 +364,7 @@ class PrimerContractTests(unittest.TestCase):
     def test_workflow_and_action_fetches_verify_their_archive(self):
         with self.subTest("workflow step fetches without a checksum"):
             self.assert_red(
-                f"{INTEROP}:228: fetches without verifying a SHA-256",
+                f"{INTEROP}:{INJECTED_RUN_LINE}: fetches without verifying a SHA-256",
                 (INTEROP, "      - name: Run M1 (", UNVERIFIED_STEP + "      - name: Run M1 ("),
             )
         with self.subTest("composite action drops its checksum"):
@@ -392,7 +394,7 @@ class PrimerContractTests(unittest.TestCase):
             "          echo \"$SUM  tool.tgz\" | sha256sum -c -\n\n"
         )
         self.assert_red(
-            f"{INTEROP}:228: streams network bytes into tar or a shell",
+            f"{INTEROP}:{INJECTED_RUN_LINE}: streams network bytes into tar or a shell",
             (INTEROP, "      - name: Run M1 (", streamed + "      - name: Run M1 ("),
         )
 
@@ -406,7 +408,7 @@ class PrimerContractTests(unittest.TestCase):
             "          echo \"$SUM  tool.tgz\" | sha256sum -c -\n\n"
         )
         self.assert_red(
-            f"{INTEROP}:228: streams network bytes into tar or a shell",
+            f"{INTEROP}:{INJECTED_RUN_LINE}: streams network bytes into tar or a shell",
             (INTEROP, "      - name: Run M1 (", continued + "      - name: Run M1 ("),
         )
 

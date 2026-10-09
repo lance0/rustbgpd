@@ -282,8 +282,9 @@ pub struct Route {
     /// `MP_REACH_NLRI` had a 32-byte next-hop. Re-encoded by the MRT
     /// exporter and the BGP UPDATE encoder when present.
     pub link_local_next_hop: Option<Ipv6Addr>,
-    /// Interface scope for an IPv6 link-local primary next-hop. Boxed so the
-    /// common `None` case keeps clone-heavy `Route` values small.
+    /// Receiving interface for an IPv6 link-local primary next-hop or
+    /// link-local companion, when the source session is interface-bound.
+    /// Boxed so the common `None` case keeps clone-heavy `Route` values small.
     pub next_hop_scope: Option<Box<NextHopScope>>,
     /// The peer that advertised this route.
     pub peer: IpAddr,
@@ -334,7 +335,8 @@ pub struct FibInstallNextHop {
     pub next_hop: IpAddr,
     /// IPv6 link-local next-hop carried alongside the global one, if any.
     pub link_local_next_hop: Option<Ipv6Addr>,
-    /// Interface scope for an IPv6 link-local primary next-hop, if any.
+    /// Receiving interface for a link-local primary next-hop or companion, if
+    /// any. FIB projection uses it only for a link-local primary.
     pub next_hop_scope: Option<NextHopScope>,
     /// The peer that advertised the path this next-hop came from.
     pub peer: IpAddr,

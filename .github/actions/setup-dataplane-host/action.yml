@@ -79,18 +79,8 @@ runs:
         echo "vrf-available=${vrf_available}" >> "$GITHUB_OUTPUT"
         sudo modprobe vxlan bridge bonding || true
 
-    - name: Set up Docker Buildx
-      if: ${{ inputs.build-image == 'true' }}
-      uses: docker/setup-buildx-action@v4
-
+    # Consumers load locally from the primer's fixed scope but never write it;
+    # a cache miss simply falls back to a normal source build.
     - name: Build rustbgpd:dev
       if: ${{ inputs.build-image == 'true' }}
-      uses: docker/build-push-action@v7
-      with:
-        context: .
-        load: true
-        tags: rustbgpd:dev
-        target: dev
-        # Consumers load locally from the primer's fixed scope but never write
-        # it; a cache miss simply falls back to a normal source build.
-        cache-from: type=gha,scope=rustbgpd-dev
+      uses: ./.github/actions/build-rustbgpd-dev

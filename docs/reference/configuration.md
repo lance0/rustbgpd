@@ -3293,14 +3293,19 @@ These fields modify matching routes. Only valid with `action = "permit"`.
 | `set_as_path_prepend`  | table       | `{ asn = 65001, count = 3 }` (ASN 1–4294967295, count 1–10) |
 
 `set_next_hop` follows the route's address family. An IPv6 address on an IPv4
-unicast route is an RFC 8950 next hop. An IPv4 address does not apply to an
-IPv6 unicast route, whose `MP_REACH_NLRI` next hop must be IPv6
-(RFC 2545 §3); the route keeps its next hop, as with FRR's `set ip next-hop`.
-On import, `"self"` for an IPv6 route resolves to the session's local IPv6
-address, else `local_ipv6_nexthop`; with neither (IPv4 transport and no
-`local_ipv6_nexthop`) the route keeps its received next hop. Export never
-encodes an IPv4 next hop for an IPv6 route: such a route is withheld from that
-peer and counted in
+unicast route is an RFC 8950 next hop. An IPv4 address does not apply to a
+route with IPv6 NLRI (IPv6 unicast, IPv6 labeled unicast, or VPNv6), whose
+`MP_REACH_NLRI` next hop must be IPv6 (RFC 2545 §3, RFC 8277, RFC 4659
+§3.2.1); the route keeps its next hop, as with FRR's `set ip next-hop`.
+rustbgpd does not originate 6PE or 6VPE routes and never converts an IPv4
+`set_next_hop` into an IPv4-mapped IPv6 address. To set one deliberately, give
+the IPv6 form, such as `"::ffff:192.0.2.9"`. A received IPv4-mapped next hop
+is reflected unchanged. On import, `"self"` for an IPv6 route resolves to the
+session's local IPv6 address, else `local_ipv6_nexthop`; with neither (IPv4
+transport and no `local_ipv6_nexthop`) the route keeps its received next hop.
+Export never encodes an IPv4 next hop for a route with IPv6 NLRI, including a
+VPNv6 route received with a 12-octet RD + IPv4 next hop: such a route is
+withheld from that peer and counted in
 `bgp_exact_export_rejections_total{reason="missing_ipv6_next_hop"}`.
 
 ### Community formats
@@ -4162,6 +4167,8 @@ duplicate_mac_detection = { action = "detect", window_seconds = 180, threshold =
 | `apply_aliasing_ecmp` | bool     | no       | `true`  | Program ADR-0059 FDB nexthop groups for multi-homed Type 2 routes (aliasing-ECMP via `NDA_NH_ID` + `NHA_FDB`). Flip to `false` to roll this L2VNI back to single-dst FDB rows at the primary VTEP. Single-homed Type 2 entries are unaffected |
 | `duplicate_mac_detection` | table | no | `{ action = "detect", window_seconds = 180, threshold = 5, recovery_seconds = 540 }` | RFC 7432 §15.1 duplicate-MAC M/N detector. `action = "detect"` records threshold crossings only; `action = "suppress_local"` additionally withdraws/suppresses locally-originated Type 2 MAC-only and MAC+IP routes for the offending `(VNI, MAC)` until `recovery_seconds` elapses |
 | `duplicate_ip_detection` | table | no | `{ enabled = false, window_seconds = 180, threshold = 5 }` | Optional per-IP M/N diagnostics for conflicting MAC ownership within a VNI. Detect-only: increments counters and logs threshold crossings, without suppressing or withdrawing routes |
+| `service_interface`   | string   | no       | `"vlan_based"` | EVPN service interface. `vlan_based` keeps Ethernet Tag ID `0`. `vlan_aware_bundle` (RFC 8365 VLAN-aware bundle member, ADR-0092) is **not accepted yet**: the row is checked against the rules below and then rejected |
+| `ethernet_tag`        | u32      | no       | --      | Ethernet Tag of a `vlan_aware_bundle` member, `1..=16777215`, set explicitly (never derived from `vni`). **Not accepted yet**, since it is valid only with `service_interface = "vlan_aware_bundle"` |
 
 Duplicate-IP diagnostics can be enabled independently of duplicate-MAC policy:
 
@@ -4225,6 +4232,18 @@ crossings, not to applying a configuration change.
   `recovery_seconds` must all be greater than zero.
 - `duplicate_mac_detection.recovery_seconds` must be no greater than
   31,536,000 seconds (365 days).
+- `service_interface = "vlan_aware_bundle"` is not accepted yet. A bundle
+  row is first checked against the bundle rules, then rejected with
+  `vni N: service_interface = "vlan_aware_bundle" is not supported yet`.
+  The rules are: `ethernet_tag` is required, explicit, and in
+  `1..=16777215`, and it is rejected on `vlan_based` rows. A bundle row
+  cannot set `ip_vrf` or `auto_derive_route_target`, and it cannot be
+  listed in `[[ethernet_segments]].member_vnis`. Two bundle rows that
+  share a route target need different Ethernet Tags. A route target
+  cannot be shared between a `vlan_based` row and a bundle row. A bundle
+  row's `(bridge, bridge_vlan)` cannot be claimed by any other row;
+  `vlan_based` rows alone keep their existing behavior. The same rules
+  apply to SIGHUP reload and `ApplyEvpnRuntime` candidates.
 - Same VNI must not appear in multiple `[[ethernet_segments]]`
   `member_vnis` lists until per-port learned disambiguation is plumbed.
 

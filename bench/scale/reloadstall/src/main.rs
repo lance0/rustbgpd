@@ -3086,18 +3086,35 @@ async fn run_converged_rejoin(
                 .collect(),
         );
         println!(
-            "converged_rejoin_csv,{round},{},{k},{},{:.6},{:.6},{:.6},{samples},{},{},0",
-            ctx.n_peers,
-            ctx.totals[0],
-            rejoin.p50,
-            rejoin.max,
-            gap.max,
-            rss_mib(pid),
-            ctx.n_peers
+            "{}",
+            converged_rejoin_csv_row(ctx, round, k, &rejoin, gap.max, samples, rss_mib(pid))
         );
         tokio::time::sleep(Duration::from_secs(10)).await;
     }
     Ok(())
+}
+
+/// One `converged_rejoin_csv` row. `sessions_up` and `parse_errors` are read
+/// live at row time so the columns can show a failure.
+fn converged_rejoin_csv_row(
+    ctx: &Ctx,
+    round: u32,
+    k: u32,
+    rejoin: &Stats,
+    gap_max: f64,
+    samples: u64,
+    rss: u64,
+) -> String {
+    let up = ctx
+        .obs
+        .iter()
+        .filter(|o| o.established.load(Ordering::Relaxed))
+        .count();
+    let parse_errors = ctx.parse_errors.load(Ordering::Relaxed);
+    format!(
+        "converged_rejoin_csv,{round},{},{k},{},{:.6},{:.6},{gap_max:.6},{samples},{rss},{up},{parse_errors}",
+        ctx.n_peers, ctx.totals[0], rejoin.p50, rejoin.max,
+    )
 }
 
 /// `--flapstorm K` mode: the alternative to the reload loop (see the crate
@@ -5382,6 +5399,30 @@ mod tests {
             listener.accept()
         );
         (client.unwrap(), server.unwrap().0)
+    }
+
+    #[test]
+    fn converged_rejoin_row_reports_live_sessions_and_parse_errors() {
+        let ctx = finish_test_ctx();
+        let stats = Stats {
+            p50: 1.0,
+            p95: 1.0,
+            max: 2.0,
+            n: 1,
+        };
+        for observer in ctx.obs.iter().skip(1) {
+            observer.established.store(true, Ordering::Relaxed);
+        }
+        ctx.parse_errors.store(3, Ordering::Relaxed);
+        let row = converged_rejoin_csv_row(&ctx, 1, 2, &stats, 0.5, 4, 100);
+        let fields: Vec<&str> = row.split(',').collect();
+        assert_eq!(
+            fields.len(),
+            12,
+            "column count must match the header: {row}"
+        );
+        assert_eq!(fields[10], (CHURNERS - 1).to_string(), "sessions_up: {row}");
+        assert_eq!(fields[11], "3", "parse_errors: {row}");
     }
 
     #[test]
