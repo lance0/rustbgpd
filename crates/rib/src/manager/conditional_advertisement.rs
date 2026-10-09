@@ -142,6 +142,11 @@ struct DefinitionState {
     observed_since: Instant,
     deadline: Option<Instant>,
     applied: AppliedConditionalState,
+    /// Installed while the datasets its `condition_policy` reads still held
+    /// the prior generation's contents. No observation runs until the
+    /// post-publish re-observation clears it; a rollback discards it with
+    /// the replaced state.
+    held: bool,
 }
 
 /// Tracker state owned by the RIB actor.
@@ -239,6 +244,7 @@ impl RibManager {
                 observed_since: now,
                 deadline: None,
                 applied: prior_applied.unwrap_or(AppliedConditionalState::Pending),
+                held,
             };
             if let Some(previous) = &previous
                 && previous.definition.advertise_if != state.definition.advertise_if
@@ -419,6 +425,12 @@ impl RibManager {
             let Some(mut state) = self.conditional_advertisements.definitions.remove(&name) else {
                 continue;
             };
+            if state.held {
+                self.conditional_advertisements
+                    .definitions
+                    .insert(name, state);
+                continue;
+            }
             state.observed = self.observe_condition(&state.definition);
             state.observed_since = now;
             state.deadline = None;
@@ -463,7 +475,12 @@ impl RibManager {
         let now = Instant::now();
         let mut transitions = Vec::new();
         for name in &names {
-            if changed.contains(name) {
+            let held = self
+                .conditional_advertisements
+                .definitions
+                .get(name)
+                .is_some_and(|state| state.held);
+            if held || changed.contains(name) {
                 self.evaluate_definition_now(name, now, &mut transitions);
             } else {
                 self.reobserve_definition(name, now, &mut transitions);
@@ -479,6 +496,7 @@ impl RibManager {
         let Some(mut state) = self.conditional_advertisements.definitions.remove(name) else {
             return;
         };
+        state.held = false;
         let observed = self.observe_condition(&state.definition);
         if observed != state.observed {
             state.observed = observed;
@@ -561,7 +579,17 @@ impl RibManager {
         transitions
     }
 
+    /// Re-observe under the debounce. A held definition is skipped: its
+    /// datasets still hold the prior contents until the publish.
     fn reobserve_definition(&mut self, name: &Arc<str>, now: Instant, out: &mut Vec<Arc<str>>) {
+        if self
+            .conditional_advertisements
+            .definitions
+            .get(name)
+            .is_none_or(|state| state.held)
+        {
+            return;
+        }
         let Some(mut state) = self.conditional_advertisements.definitions.remove(name) else {
             return;
         };

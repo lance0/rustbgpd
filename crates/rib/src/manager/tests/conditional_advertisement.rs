@@ -665,6 +665,95 @@ async fn dataset_swap_reobserves_only_dependent_definitions() {
     );
 }
 
+/// A definition installed while its `condition_policy` dataset is being
+/// swapped stays held: route churn before the publish does not observe it
+/// against the prior contents. Only the post-publish re-observation clears
+/// the hold, after which churn observes it as usual.
+#[tokio::test(start_paused = true)]
+async fn held_definition_ignores_route_churn_until_the_publish() {
+    use rustbgpd_policy::datasets::{DatasetBindings, DatasetData, DatasetHandle, DatasetKind};
+    use rustbgpd_policy::sets::{PrefixSet, PrefixSetEntry};
+
+    let data = |listed: bool| {
+        DatasetData::Prefix(PrefixSet::new(listed.then_some(PrefixSetEntry {
+            prefix: condition(),
+            ge: None,
+            le: None,
+        })))
+    };
+    let handle = Arc::new(DatasetHandle::new(
+        "allowed",
+        DatasetKind::Prefix,
+        data(true),
+    ));
+    let mut bindings = DatasetBindings::new();
+    bindings.insert(Arc::clone(&handle));
+    let compiled = Arc::new(
+        RpolFile::parse(
+            "dataset prefix-set allowed\npolicy p { term t { if route.prefix in allowed { accept } reject } }",
+        )
+        .unwrap()
+        .compile_policy_bound("p", &[], &mut SetStore::new(), &bindings)
+        .unwrap()
+        .unwrap(),
+    );
+    let policy = || {
+        PolicyChain::from_named(vec![rustbgpd_policy::NamedPolicy::from_rpol(
+            "p".to_string(),
+            Arc::clone(&compiled),
+        )])
+    };
+    let install = |manager: &mut RibManager, condition_policy, swapping: &[String]| {
+        let _ = manager.handle_install_conditional_advertisements(
+            crate::ConditionalAdvertisementSet {
+                definitions: vec![definition(
+                    ConditionalAdvertiseIf::Absent,
+                    condition_policy,
+                    Duration::ZERO,
+                )],
+                attachments: BTreeMap::new(),
+            },
+            swapping,
+        );
+    };
+
+    let mut manager = manager();
+    install(&mut manager, None, &[]);
+    assert_eq!(state(&manager).1, AppliedConditionalState::Advertise);
+
+    // The edit adds a `condition_policy` that passes the condition route
+    // under the prior `allowed` contents but not under the candidate's.
+    install(&mut manager, Some(policy()), &["allowed".to_string()]);
+    assert_eq!(state(&manager).1, AppliedConditionalState::Advertise);
+    let visits = manager.conditional_advertisement_candidate_visits();
+    inject(&mut manager, prefix(1), None);
+    assert_eq!(
+        state(&manager).1,
+        AppliedConditionalState::Advertise,
+        "churn before the publish must not flip the gate on the prior contents"
+    );
+    assert_eq!(
+        manager.conditional_advertisement_candidate_visits(),
+        visits,
+        "churn before the publish does not observe a held definition"
+    );
+
+    handle.refresh(data(false));
+    let _ = manager.reevaluate_conditional_advertisement_datasets(&["allowed".to_string()], &[]);
+    assert_eq!(
+        state(&manager),
+        (
+            ConditionObservation::Absent,
+            AppliedConditionalState::Advertise,
+            None
+        )
+    );
+    // Released: churn observes it again.
+    handle.refresh(data(true));
+    inject(&mut manager, prefix(1), Some(6));
+    assert_eq!(state(&manager).1, AppliedConditionalState::Suppress);
+}
+
 /// The actor's run loop arms and fires the settle timer itself.
 #[tokio::test(start_paused = true)]
 async fn run_loop_fires_the_settle_timer() {
