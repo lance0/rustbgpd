@@ -448,10 +448,11 @@ impl RibManager {
     }
 
     /// Re-observe definitions whose `condition_policy` references a swapped
-    /// dataset (ADR-0137 Decision 6), under the ordinary debounce. A
-    /// `changed` definition was just installed against the prior dataset
-    /// contents; it applies its observation immediately, as its install
-    /// would have against the swapped dataset.
+    /// dataset (ADR-0137 Decision 6), under the ordinary debounce. A held or
+    /// `changed` definition was installed in the same generation without
+    /// being evaluated against the prior dataset contents; it is evaluated
+    /// now, against the published contents, and applies immediately, as its
+    /// install would have. This clears its hold.
     pub(super) fn reevaluate_conditional_advertisement_datasets(
         &mut self,
         swapped: &[String],
