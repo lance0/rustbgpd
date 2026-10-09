@@ -2,12 +2,14 @@
 //!
 //! Each installed definition tracks an `observed` condition (present, absent,
 //! or unknown) and an `applied` state (pending, advertise, or suppress).
-//! Observations are recomputed only for definitions indexed by a condition
-//! prefix that a selection pass reported as affected, so ordinary route churn
-//! costs one hash probe per affected prefix and never walks the table. A
-//! changed known observation must stay stable for `settle_time` before it
-//! applies; `unknown` (a `condition_policy` evaluation error) cancels the
-//! timer and holds the applied state.
+//! Condition entries are prefix ranges (an exact prefix is the range
+//! `len..=len`), indexed in a per-family trie by their base prefix. Each
+//! definition keeps the in-range prefixes that are currently present or
+//! unknown, so a selection pass's affected prefix costs one trie cover walk
+//! plus that prefix's own candidates, and never walks the table or the
+//! definition's other prefixes. A changed known observation must stay stable
+//! for `settle_time` before it applies; `unknown` (a `condition_policy`
+//! evaluation error) cancels the timer and holds the applied state.
 //!
 //! The tracker also owns the address-keyed attachments the export gate reads:
 //! one install carries both, so the gate never sees an attachment whose
@@ -20,6 +22,7 @@ use std::net::IpAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
+use rustbgpd_policy::sets::PrefixSetEntry;
 use rustbgpd_policy::{PolicyAction, PolicyChain, RouteContext};
 use rustbgpd_wire::{Afi, Prefix, Safi};
 use tokio::time::Instant;
@@ -27,7 +30,7 @@ use tracing::info;
 
 use super::RibManager;
 use super::helpers::{LOCAL_PEER, prefix_family};
-use crate::fast_hash::FastMap;
+use crate::prefix_map::FamilyPrefixMap;
 use crate::route::Route;
 
 /// Condition state in which a definition's controlled routes may be
@@ -62,8 +65,9 @@ pub struct ConditionalAdvertisement {
     pub advertise_policy: PolicyChain,
     /// Condition state in which controlled routes may be advertised.
     pub advertise_if: ConditionalAdvertiseIf,
-    /// Exact unicast prefixes whose candidates decide the condition.
-    pub condition_prefixes: Vec<Prefix>,
+    /// Unicast prefix ranges (prefix-list `ge`/`le` semantics; neither bound
+    /// means the exact prefix) whose candidates decide the condition.
+    pub condition_prefixes: Vec<PrefixSetEntry>,
     /// Optional predicate over each condition candidate.
     pub condition_policy: Option<PolicyChain>,
     /// How long a changed known observation must stay stable to apply.
@@ -108,6 +112,22 @@ impl AppliedConditionalState {
     }
 }
 
+/// Most present prefixes one condition entry lists in the status view.
+pub const CONDITION_STATUS_SAMPLE: usize = 8;
+
+/// One condition entry's current observation, for the status view.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ConditionEntryStatus {
+    /// The configured entry.
+    pub entry: PrefixSetEntry,
+    /// `present`, `absent`, or `unknown` (only evaluation errors in range).
+    pub state: &'static str,
+    /// How many prefixes in the entry's range are currently present.
+    pub present_count: usize,
+    /// The first eight of them (`CONDITION_STATUS_SAMPLE`), in address order.
+    pub present_sample: Vec<Prefix>,
+}
+
 /// One installed definition's state, for `ListConditionalAdvertisements`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ConditionalAdvertisementStatus {
@@ -115,9 +135,8 @@ pub struct ConditionalAdvertisementStatus {
     pub name: Arc<str>,
     /// Condition state in which controlled routes may be advertised.
     pub advertise_if: ConditionalAdvertiseIf,
-    /// Each condition prefix with its own current observation: `present`,
-    /// `absent`, or `unknown`.
-    pub conditions: Vec<(Prefix, &'static str)>,
+    /// Each condition entry with its own current observation.
+    pub conditions: Vec<ConditionEntryStatus>,
     /// Tracked observation of the whole condition.
     pub observed: &'static str,
     /// Time since the tracked observation last changed, or since install.
@@ -173,14 +192,87 @@ impl ConditionalAdvertisementSet {
     }
 }
 
+/// One condition entry's in-range prefixes with a present or unknown
+/// verdict. Absent prefixes are not stored.
+#[derive(Clone, Debug, Default)]
+struct EntryMatches {
+    present: BTreeSet<Prefix>,
+    unknown: BTreeSet<Prefix>,
+}
+
+/// A definition's verdicts, kept per condition entry (in
+/// `condition_prefixes` order) so the status view reads each entry's count
+/// and sample without walking the others. The totals count set members
+/// across entries, so the whole observation is O(1).
+#[derive(Clone, Debug, Default)]
+struct ConditionMatches {
+    entries: Vec<EntryMatches>,
+    present: usize,
+    unknown: usize,
+}
+
+impl ConditionMatches {
+    fn new(entries: usize) -> Self {
+        Self {
+            entries: vec![EntryMatches::default(); entries],
+            present: 0,
+            unknown: 0,
+        }
+    }
+
+    /// Record `prefix`'s verdict in every entry of `definition` whose range
+    /// holds it.
+    fn record(
+        &mut self,
+        definition: &ConditionalAdvertisement,
+        prefix: Prefix,
+        verdict: ConditionObservation,
+    ) {
+        for (entry, matches) in definition.condition_prefixes.iter().zip(&mut self.entries) {
+            if !entry.matches(prefix) {
+                continue;
+            }
+            self.present -= usize::from(matches.present.remove(&prefix));
+            self.unknown -= usize::from(matches.unknown.remove(&prefix));
+            match verdict {
+                ConditionObservation::Present => {
+                    self.present += usize::from(matches.present.insert(prefix));
+                }
+                ConditionObservation::Unknown => {
+                    self.unknown += usize::from(matches.unknown.insert(prefix));
+                }
+                ConditionObservation::Absent => {}
+            }
+        }
+    }
+
+    /// Any clean match makes the condition present; otherwise any error
+    /// makes it unknown.
+    fn observation(&self) -> ConditionObservation {
+        if self.present > 0 {
+            ConditionObservation::Present
+        } else if self.unknown > 0 {
+            ConditionObservation::Unknown
+        } else {
+            ConditionObservation::Absent
+        }
+    }
+
+    /// The lowest present prefix across entries.
+    fn first_present(&self) -> Option<&Prefix> {
+        self.entries
+            .iter()
+            .filter_map(|entry| entry.present.first())
+            .min()
+    }
+}
+
 #[derive(Clone, Debug)]
 struct DefinitionState {
     definition: Arc<ConditionalAdvertisement>,
+    /// Shared with any install capture; copied only when next changed.
+    matches: Arc<ConditionMatches>,
     observed: ConditionObservation,
-    /// Each condition prefix's own observation, in `condition_prefixes`
-    /// order, recorded whenever `observed` is recomputed. The status query
-    /// copies it instead of evaluating policies on the actor.
-    conditions: Vec<ConditionObservation>,
     observed_since: Instant,
     deadline: Option<Instant>,
     applied: AppliedConditionalState,
@@ -198,11 +290,15 @@ pub(super) struct ConditionalAdvertisementTracker {
     /// Attached definition names per static neighbor address. Installed
     /// together with `definitions`; the only attachment state the gate reads.
     attachments: BTreeMap<IpAddr, Vec<Arc<str>>>,
-    by_prefix: FastMap<Prefix, Vec<Arc<str>>>,
+    /// Condition entries by base prefix, for the per-change cover walk.
+    by_prefix: FamilyPrefixMap<Vec<(Arc<str>, PrefixSetEntry)>>,
     installed: bool,
     /// Condition candidates visited, for the no-table-walk proof.
     #[cfg(test)]
     candidate_visits: std::sync::atomic::AtomicUsize,
+    /// Present prefixes the status view visited, for its bounded-work proof.
+    #[cfg(test)]
+    status_prefix_visits: std::sync::atomic::AtomicUsize,
 }
 
 /// Tracker state captured by an install, for generation compensation. The
@@ -271,7 +367,7 @@ impl RibManager {
                 .condition_policy
                 .as_ref()
                 .is_some_and(|policy| swapping.iter().any(|name| policy.references_dataset(name)));
-            let (observed, conditions) = if held {
+            let (matches, observed) = if held {
                 previous
                     .as_ref()
                     .filter(|state| {
@@ -280,24 +376,25 @@ impl RibManager {
                     .map_or_else(
                         || {
                             (
+                                Arc::new(ConditionMatches::new(
+                                    definition.condition_prefixes.len(),
+                                )),
                                 ConditionObservation::Unknown,
-                                vec![
-                                    ConditionObservation::Unknown;
-                                    definition.condition_prefixes.len()
-                                ],
                             )
                         },
-                        |state| (state.observed, state.conditions.clone()),
+                        |state| (Arc::clone(&state.matches), state.observed),
                     )
             } else {
-                self.observe_condition(&definition)
+                let matches = self.scan_condition(&definition);
+                let observed = matches.observation();
+                (Arc::new(matches), observed)
             };
             let deferred = self.condition_deferred(&definition);
             let prior_applied = previous.as_ref().map(|state| state.applied);
             let mut state = DefinitionState {
                 definition,
+                matches,
                 observed,
-                conditions,
                 observed_since: now,
                 deadline: None,
                 applied: prior_applied.unwrap_or(AppliedConditionalState::Pending),
@@ -393,7 +490,7 @@ impl RibManager {
             .collect();
         let mut transitions = Vec::new();
         for name in &names {
-            self.reobserve_definition_prefixes(name, None, now, &mut transitions);
+            self.reobserve_definition(name, now, &mut transitions);
             let Some(mut state) = self.conditional_advertisements.definitions.remove(name) else {
                 continue;
             };
@@ -442,22 +539,41 @@ impl RibManager {
         if self.conditional_advertisements.definitions.is_empty() {
             return Vec::new();
         }
-        let tracker = &self.conditional_advertisements;
-        let prefixes: BTreeSet<Prefix> = affected
-            .into_iter()
-            .filter(|prefix| tracker.by_prefix.contains_key(prefix))
-            .copied()
-            .collect();
-        let names: BTreeSet<Arc<str>> = prefixes
-            .iter()
-            .filter_map(|prefix| tracker.by_prefix.get(prefix))
-            .flatten()
-            .cloned()
-            .collect();
+        let mut touched: BTreeMap<Arc<str>, BTreeSet<Prefix>> = BTreeMap::new();
+        for prefix in affected {
+            for (name, entry) in self
+                .conditional_advertisements
+                .by_prefix
+                .cover(prefix)
+                .flatten()
+            {
+                if entry.matches(*prefix) {
+                    touched.entry(Arc::clone(name)).or_default().insert(*prefix);
+                }
+            }
+        }
         let now = Instant::now();
         let mut transitions = Vec::new();
-        for name in &names {
-            self.reobserve_definition_prefixes(name, Some(&prefixes), now, &mut transitions);
+        for (name, prefixes) in touched {
+            let Some(mut state) = self.conditional_advertisements.definitions.remove(&name) else {
+                continue;
+            };
+            if state.held {
+                self.conditional_advertisements
+                    .definitions
+                    .insert(name, state);
+                continue;
+            }
+            let matches = Arc::make_mut(&mut state.matches);
+            for prefix in prefixes {
+                let verdict = self.observe_condition_prefix(&state.definition, &prefix);
+                matches.record(&state.definition, prefix, verdict);
+            }
+            let observed = matches.observation();
+            self.settle_observation(&mut state, observed, now, &mut transitions);
+            self.conditional_advertisements
+                .definitions
+                .insert(name, state);
         }
         self.mark_conditional_advertisement_peers_dirty(&transitions);
         transitions
@@ -478,7 +594,7 @@ impl RibManager {
                     .definition
                     .condition_prefixes
                     .iter()
-                    .any(|prefix| prefix_family(prefix) == family)
+                    .any(|entry| prefix_family(&entry.prefix) == family)
             })
             .map(|(name, _)| Arc::clone(name))
             .collect();
@@ -494,7 +610,9 @@ impl RibManager {
                     .insert(name, state);
                 continue;
             }
-            (state.observed, state.conditions) = self.observe_condition(&state.definition);
+            let matches = self.scan_condition(&state.definition);
+            state.observed = matches.observation();
+            state.matches = Arc::new(matches);
             state.observed_since = now;
             state.deadline = None;
             if state.observed != ConditionObservation::Unknown
@@ -547,7 +665,7 @@ impl RibManager {
             if held || changed.contains(name) {
                 self.evaluate_definition_now(name, now, &mut transitions);
             } else {
-                self.reobserve_definition_prefixes(name, None, now, &mut transitions);
+                self.reobserve_definition(name, now, &mut transitions);
             }
         }
         self.mark_conditional_advertisement_peers_dirty(&transitions);
@@ -561,8 +679,9 @@ impl RibManager {
             return;
         };
         state.held = false;
-        let (observed, conditions) = self.observe_condition(&state.definition);
-        state.conditions = conditions;
+        let matches = self.scan_condition(&state.definition);
+        let observed = matches.observation();
+        state.matches = Arc::new(matches);
         if observed != state.observed {
             state.observed = observed;
             state.observed_since = now;
@@ -594,18 +713,17 @@ impl RibManager {
             .iter()
             .filter(|(_, state)| {
                 state.definition.condition_policy.is_some()
-                    && state
-                        .definition
-                        .condition_prefixes
-                        .iter()
-                        .any(|prefix| rib.iter_prefix(prefix).next().is_some())
+                    && state.definition.condition_prefixes.iter().any(|entry| {
+                        rib.prefixes_within(&entry.prefix)
+                            .any(|prefix| entry.matches(prefix))
+                    })
             })
             .map(|(name, _)| Arc::clone(name))
             .collect();
         let now = Instant::now();
         let mut transitions = Vec::new();
         for name in &names {
-            self.reobserve_definition_prefixes(name, None, now, &mut transitions);
+            self.reobserve_definition(name, now, &mut transitions);
         }
         self.mark_conditional_advertisement_peers_dirty(&transitions);
         transitions
@@ -644,18 +762,9 @@ impl RibManager {
         transitions
     }
 
-    /// Re-observe one definition. With `only`, route churn re-observes just
-    /// the affected condition prefixes and recombines the cached rest;
-    /// without it (install, policy or dataset change) every prefix is
-    /// observed. A held definition is skipped: its datasets still hold the
-    /// prior contents until the publish.
-    fn reobserve_definition_prefixes(
-        &mut self,
-        name: &Arc<str>,
-        only: Option<&BTreeSet<Prefix>>,
-        now: Instant,
-        out: &mut Vec<Arc<str>>,
-    ) {
+    /// Re-observe under the debounce. A held definition is skipped: its
+    /// datasets still hold the prior contents until the publish.
+    fn reobserve_definition(&mut self, name: &Arc<str>, now: Instant, out: &mut Vec<Arc<str>>) {
         if self
             .conditional_advertisements
             .definitions
@@ -667,23 +776,23 @@ impl RibManager {
         let Some(mut state) = self.conditional_advertisements.definitions.remove(name) else {
             return;
         };
-        let observed = if let Some(only) = only {
-            let definition = Arc::clone(&state.definition);
-            for (prefix, cached) in definition
-                .condition_prefixes
-                .iter()
-                .zip(state.conditions.iter_mut())
-            {
-                if only.contains(prefix) {
-                    *cached = self.observe_condition_prefix(&definition, prefix);
-                }
-            }
-            combine_observations(&state.conditions)
-        } else {
-            let (observed, conditions) = self.observe_condition(&state.definition);
-            state.conditions = conditions;
-            observed
-        };
+        let matches = self.scan_condition(&state.definition);
+        let observed = matches.observation();
+        state.matches = Arc::new(matches);
+        self.settle_observation(&mut state, observed, now, out);
+        self.conditional_advertisements
+            .definitions
+            .insert(Arc::clone(name), state);
+    }
+
+    /// Record a recomputed observation; a changed one restarts the debounce.
+    fn settle_observation(
+        &self,
+        state: &mut DefinitionState,
+        observed: ConditionObservation,
+        now: Instant,
+        out: &mut Vec<Arc<str>>,
+    ) {
         if observed != state.observed {
             state.observed = observed;
             state.observed_since = now;
@@ -691,13 +800,10 @@ impl RibManager {
             if observed != ConditionObservation::Unknown
                 && !self.condition_deferred(&state.definition)
             {
-                self.arm_or_apply(&mut state, now, out);
+                self.arm_or_apply(state, now, out);
             }
-            self.publish_conditional_metrics(&state);
+            self.publish_conditional_metrics(state);
         }
-        self.conditional_advertisements
-            .definitions
-            .insert(Arc::clone(name), state);
     }
 
     fn arm_or_apply(&self, state: &mut DefinitionState, now: Instant, out: &mut Vec<Arc<str>>) {
@@ -775,19 +881,18 @@ impl RibManager {
         definition
             .condition_prefixes
             .iter()
-            .any(|prefix| self.selection_deferred(prefix_family(prefix)))
+            .any(|entry| self.selection_deferred(prefix_family(&entry.prefix)))
     }
 
     fn rebuild_conditional_index(&mut self) {
         let tracker = &mut self.conditional_advertisements;
         tracker.by_prefix.clear();
         for (name, state) in &tracker.definitions {
-            for prefix in &state.definition.condition_prefixes {
+            for entry in &state.definition.condition_prefixes {
                 tracker
                     .by_prefix
-                    .entry(*prefix)
-                    .or_default()
-                    .push(Arc::clone(name));
+                    .entry_or_default(entry.prefix)
+                    .push((Arc::clone(name), *entry));
             }
         }
     }
@@ -802,24 +907,37 @@ impl RibManager {
             .flat_map(|rib| rib.iter_prefix(prefix))
     }
 
-    /// Any current candidate (received and import-accepted, stale, losing
-    /// Add-Path, or locally injected) that satisfies the condition makes it
-    /// present. An evaluation error is neither a match nor a miss. Every
-    /// prefix is observed, so the per-prefix results can be cached for the
-    /// status query; each prefix still stops at its first match.
-    fn observe_condition(
-        &self,
-        definition: &ConditionalAdvertisement,
-    ) -> (ConditionObservation, Vec<ConditionObservation>) {
-        let conditions: Vec<_> = definition
-            .condition_prefixes
-            .iter()
-            .map(|prefix| self.observe_condition_prefix(definition, prefix))
-            .collect();
-        (combine_observations(&conditions), conditions)
+    /// Full rescan of a definition's condition: every prefix inside an
+    /// entry's range that some Adj-RIB-In holds (a trie walk under each range
+    /// root; an exact entry is one prefix), with its verdict. Any current
+    /// candidate (received and import-accepted, stale, losing Add-Path, or
+    /// locally injected) that satisfies the condition makes it present.
+    fn scan_condition(&self, definition: &ConditionalAdvertisement) -> ConditionMatches {
+        let mut prefixes = BTreeSet::new();
+        for entry in &definition.condition_prefixes {
+            if entry.ge.is_none() && entry.le.is_none() {
+                prefixes.insert(entry.prefix);
+                continue;
+            }
+            for rib in self.ribs.values() {
+                prefixes.extend(
+                    rib.prefixes_within(&entry.prefix)
+                        .filter(|prefix| entry.matches(*prefix)),
+                );
+            }
+        }
+        let mut matches = ConditionMatches::new(definition.condition_prefixes.len());
+        for prefix in prefixes {
+            matches.record(
+                definition,
+                prefix,
+                self.observe_condition_prefix(definition, &prefix),
+            );
+        }
+        matches
     }
 
-    /// One condition prefix's observation.
+    /// One condition prefix's observation from its own candidates.
     fn observe_condition_prefix(
         &self,
         definition: &ConditionalAdvertisement,
@@ -1095,7 +1213,8 @@ impl RibManager {
     fn explain_condition(&self, state: &DefinitionState) -> String {
         let definition = &state.definition;
         let mode = definition.advertise_if;
-        let (first_present, condition_error) = self.scan_condition(definition);
+        let first_present = state.matches.first_present();
+        let condition_error = self.first_condition_error(state);
         let applied_basis = match state.applied {
             AppliedConditionalState::Pending => None,
             AppliedConditionalState::Advertise => Some(mode),
@@ -1106,13 +1225,18 @@ impl RibManager {
         };
         let mut detail = match applied_basis {
             None => "pending initial evaluation".to_string(),
-            Some(ConditionalAdvertiseIf::Present) => {
-                let prefix = first_present.unwrap_or(definition.condition_prefixes[0]);
-                format!(
+            // In a settle window the current verdicts can contradict the
+            // applied state; the detail then names what held when applied.
+            Some(ConditionalAdvertiseIf::Present) => match first_present {
+                Some(prefix) => format!(
                     "condition prefix {prefix} present (advertise if {})",
                     mode.label()
-                )
-            }
+                ),
+                None => format!(
+                    "condition present when last applied (advertise if {})",
+                    mode.label()
+                ),
+            },
             Some(ConditionalAdvertiseIf::Absent) => {
                 let prefixes = definition
                     .condition_prefixes
@@ -1125,8 +1249,13 @@ impl RibManager {
                 } else {
                     "prefixes"
                 };
+                let when = if first_present.is_some() {
+                    " when last applied"
+                } else {
+                    ""
+                };
                 format!(
-                    "condition {noun} {prefixes} absent (advertise if {})",
+                    "condition {noun} {prefixes} absent{when} (advertise if {})",
                     mode.label()
                 )
             }
@@ -1160,33 +1289,27 @@ impl RibManager {
         detail
     }
 
-    /// Explain-only walk of the condition candidates: the first condition
-    /// prefix with a matching candidate, and the first evaluation error.
-    fn scan_condition(
-        &self,
-        definition: &ConditionalAdvertisement,
-    ) -> (Option<Prefix>, Option<rustbgpd_policy::EvalError>) {
-        let mut first_error = None;
-        for prefix in &definition.condition_prefixes {
-            for route in self.condition_candidates(prefix) {
-                let Some(policy) = &definition.condition_policy else {
-                    return (Some(*prefix), first_error);
-                };
+    /// Explain-only: the first evaluation error among the in-range prefixes
+    /// whose verdict is unknown. Not counted in the error metric.
+    fn first_condition_error(&self, state: &DefinitionState) -> Option<rustbgpd_policy::EvalError> {
+        let policy = state.definition.condition_policy.as_ref()?;
+        let mut unknown = state
+            .matches
+            .entries
+            .iter()
+            .flat_map(|entry| &entry.unknown);
+        unknown.find_map(|prefix| {
+            self.condition_candidates(prefix).find_map(|route| {
                 match self.condition_candidate_verdict(policy, route, false) {
-                    CandidateVerdict::Match => return (Some(*prefix), first_error),
-                    CandidateVerdict::Error(error) => {
-                        first_error.get_or_insert(error);
-                    }
-                    CandidateVerdict::Miss => {}
+                    CandidateVerdict::Error(error) => Some(error),
+                    CandidateVerdict::Match | CandidateVerdict::Miss => None,
                 }
-            }
-        }
-        (None, first_error)
+            })
+        })
     }
 
     /// Serve `QueryConditionalAdvertisements`: every installed definition in
-    /// name order, copied from tracked state. It evaluates no policy and
-    /// visits no candidate, so its cost is the size of the install.
+    /// name order, from the tracked per-prefix verdicts.
     pub(super) fn conditional_advertisement_status(&self) -> Vec<ConditionalAdvertisementStatus> {
         let now = Instant::now();
         let tracker = &self.conditional_advertisements;
@@ -1208,8 +1331,8 @@ impl RibManager {
                     conditions: definition
                         .condition_prefixes
                         .iter()
-                        .zip(&state.conditions)
-                        .map(|(prefix, observation)| (*prefix, observation.label()))
+                        .zip(&state.matches.entries)
+                        .map(|(entry, matches)| self.condition_entry_status(*entry, matches))
                         .collect(),
                     observed: state.observed.label(),
                     observed_for: now.saturating_duration_since(state.observed_since),
@@ -1223,6 +1346,52 @@ impl RibManager {
                 }
             })
             .collect()
+    }
+
+    /// One entry's status from its own tracked verdicts: a count and at
+    /// most [`CONDITION_STATUS_SAMPLE`] prefixes, whatever the range holds.
+    #[cfg_attr(
+        not(test),
+        expect(
+            clippy::unused_self,
+            reason = "self carries the test-only status work counter"
+        )
+    )]
+    fn condition_entry_status(
+        &self,
+        entry: PrefixSetEntry,
+        matches: &EntryMatches,
+    ) -> ConditionEntryStatus {
+        let present_sample: Vec<Prefix> = matches
+            .present
+            .iter()
+            .take(CONDITION_STATUS_SAMPLE)
+            .copied()
+            .collect();
+        #[cfg(test)]
+        self.conditional_advertisements
+            .status_prefix_visits
+            .fetch_add(present_sample.len(), std::sync::atomic::Ordering::Relaxed);
+        let state = if !matches.present.is_empty() {
+            ConditionObservation::Present
+        } else if !matches.unknown.is_empty() {
+            ConditionObservation::Unknown
+        } else {
+            ConditionObservation::Absent
+        };
+        ConditionEntryStatus {
+            entry,
+            state: state.label(),
+            present_count: matches.present.len(),
+            present_sample,
+        }
+    }
+
+    #[cfg(test)]
+    pub(super) fn conditional_advertisement_status_prefix_visits(&self) -> usize {
+        self.conditional_advertisements
+            .status_prefix_visits
+            .load(std::sync::atomic::Ordering::Relaxed)
     }
 
     #[cfg(test)]
@@ -1384,17 +1553,5 @@ impl ConditionalVerdict<'_> {
             verdict: self.verdict(),
             detail: self.detail(),
         }
-    }
-}
-
-/// Any present prefix makes the condition present; otherwise any evaluation
-/// error leaves it unknown.
-fn combine_observations(conditions: &[ConditionObservation]) -> ConditionObservation {
-    if conditions.contains(&ConditionObservation::Present) {
-        ConditionObservation::Present
-    } else if conditions.contains(&ConditionObservation::Unknown) {
-        ConditionObservation::Unknown
-    } else {
-        ConditionObservation::Absent
     }
 }

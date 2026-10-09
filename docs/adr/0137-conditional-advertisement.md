@@ -114,6 +114,9 @@ conditional_advertisements = ["backup-via-transit-b"]
 | `settle_time` | integer seconds | no | `5` | Range 0–600. See Decision 3. |
 | `Neighbor.conditional_advertisements` | array of names | no | `[]` | Definitions attached to this static neighbor. Duplicate entries and unknown names are load errors. |
 
+*Prefix ranges were added later; see
+[Amendment: prefix-range conditions](#amendment-prefix-range-conditions-2026-10-08).*
+
 Load-time validation rejects unknown fields, empty or duplicate condition
 prefixes, references to undefined policies, duplicate attachments, and an
 out-of-range `settle_time`. FRR accepts a missing route-map with a warning;
@@ -486,6 +489,8 @@ Promotion would require a separate inventory decision after operational use.
 - Prefix-range, covering-prefix, or attribute-only conditions. Conditions are
   exact prefixes plus an optional predicate. Range conditions would need trie
   queries on every change and should be added only for a named use.
+  *Prefix ranges were added later; see
+  [Amendment: prefix-range conditions](#amendment-prefix-range-conditions-2026-10-08).*
 - A periodic scan timer and RFC 2439-style penalty damping.
 - Peer-group inheritance, dynamic-neighbor attachment, a dedicated status RPC
   or CLI subcommand, and update-group keying of attachments. Each is deferred
@@ -692,6 +697,70 @@ Two deferred items were accepted after the first cut:
 
 Update-group keying by attachment content and prefix-range conditions remain
 deferred.
+
+## Amendment: prefix-range conditions (2026-10-08)
+
+A `condition_prefixes` entry may now be a prefix range as well as an exact
+prefix: `{ prefix = "10.0.0.0/8", le = 24 }`, with optional `ge` and `le`.
+
+**Reference semantics.** In FRR 10.7.1 a condition route-map usually matches
+with `match ip address prefix-list`. `prefix_list_entry_match`
+([lib/plist.c](https://github.com/FRRouting/frr/blob/frr-10.7.1/lib/plist.c#L739-L768))
+requires the same family and containment in the entry prefix. With neither
+bound the length must equal the entry's; with `le` only it runs from the
+entry length to `le`; with `ge` only, from `ge` to the family maximum; with
+both, from `ge` to `le`. Configuration requires `mask length <= ge <= le`
+([lib/filter_nb.c](https://github.com/FRRouting/frr/blob/frr-10.7.1/lib/filter_nb.c#L20-L77)).
+The condition walk applies that per path of every destination, as Decision 2
+already records. This is the rule the policy engine's prefix statements
+already implement, so conditions reuse the policy crate's
+`prefix_entry_matches` and `check_length_bounds` rather than a second
+matcher. FRR's prefix-list sequence numbers and deny entries have no
+counterpart: an entry only adds prefixes to the condition, and
+`condition_policy` remains the place to exclude candidates.
+
+**Configuration.** An entry is the existing string or a table
+`{ prefix, ge, le }` with the policy statement's field names. A table with
+neither bound is the exact prefix and is persisted as the plain string, so
+existing configurations serialize unchanged. Load rejects a range whose bounds
+break `len <= ge <= le <= 32/128`, a base prefix with host bits set, and a
+repeated `(prefix, ge, le)` entry. Overlapping entries are allowed.
+
+**Indexing.** The tracker's exact-prefix hash becomes a per-family prefix
+trie keyed by each entry's base prefix; an exact entry is the range
+`len..=len`. Each definition keeps the set of prefixes inside its entries
+whose candidates are currently present, and the set whose candidates only
+errored. For each prefix a selection pass reports as affected, the tracker
+walks the trie path to that prefix (only the indexed bases that cover it),
+checks each covering entry's length bounds, evaluates that one prefix's
+candidates once per matched definition, updates the sets, and derives the
+observation from whether they are empty. There is no walk of the
+definition's other prefixes and no table walk. Events that already
+re-observed a whole definition (new or changed content, deferral release, a
+`condition_policy` dataset swap, a compensation restore, a source-peer
+context change) rebuild the sets with a walk under each range's base in every
+Adj-RIB-In trie, which is the same shape as RPKI covered revalidation. An
+exact entry is still one lookup. The sets cost memory for each present or
+unknown prefix a definition covers, and an install capture shares them
+rather than copying them.
+
+**Presence.** The condition is present when any candidate of any prefix
+matched by any entry passes `condition_policy`. It is `unknown` when there is
+no such match and at least one matched prefix's candidates only errored.
+Explain names the first present prefix in address order; when the condition
+is absent it lists every configured entry in prefix-list form.
+
+**Status.** Each `ConditionalAdvertisementCondition` gains `ge`, `le`, a
+count of present prefixes in that entry, and the first eight of them in
+address order, so the output stays bounded however wide a range is. The
+entry's own state is `present` when the count is nonzero, `unknown` when it
+has only errored prefixes, and `absent` otherwise. The fields are additive on
+messages outside the v1 inventory, so no stable digest changes.
+
+The settle timer, `unknown` handling, startup `pending`, the RFC 4724
+deferral hold (the family of each entry's base prefix), reload content
+identity, compensation, and dirty marking are unchanged. An edited range is
+new content and is evaluated immediately, as any other edit is.
 
 ## Consequences
 

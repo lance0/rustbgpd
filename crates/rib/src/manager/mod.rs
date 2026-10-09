@@ -108,8 +108,8 @@ use crate::update::{
 use queries::{BMP_DUMP_CHUNK_SIZE, page_routes, send_mrt_snapshot};
 
 pub use conditional_advertisement::{
-    ConditionalAdvertiseIf, ConditionalAdvertisement, ConditionalAdvertisementCapture,
-    ConditionalAdvertisementSet, ConditionalAdvertisementStatus,
+    ConditionEntryStatus, ConditionalAdvertiseIf, ConditionalAdvertisement,
+    ConditionalAdvertisementCapture, ConditionalAdvertisementSet, ConditionalAdvertisementStatus,
 };
 use helpers::{DIRTY_RESYNC_INTERVAL, LlgrPeerConfig, gauge_val, prefix_family};
 pub use selection_deferral::{SelectionDeferralConfig, SelectionDeferralWaiterConfig};

@@ -1041,13 +1041,14 @@ fn spawn_conditional_status_rib(
             let _ = reply.send(vec![rustbgpd_rib::ConditionalAdvertisementStatus {
                 name: "backup".into(),
                 advertise_if: rustbgpd_rib::ConditionalAdvertiseIf::Absent,
-                conditions: vec![(
-                    rustbgpd_wire::Prefix::V4(rustbgpd_wire::Ipv4Prefix::new(
-                        std::net::Ipv4Addr::UNSPECIFIED,
-                        0,
+                conditions: vec![rustbgpd_rib::ConditionEntryStatus {
+                    entry: rustbgpd_policy::sets::PrefixSetEntry::exact(rustbgpd_wire::Prefix::V4(
+                        rustbgpd_wire::Ipv4Prefix::new(std::net::Ipv4Addr::UNSPECIFIED, 0),
                     )),
-                    "absent",
-                )],
+                    state: "absent",
+                    present_count: 0,
+                    present_sample: vec![],
+                }],
                 observed: "absent",
                 observed_for: std::time::Duration::from_secs(7),
                 applied: "advertise",

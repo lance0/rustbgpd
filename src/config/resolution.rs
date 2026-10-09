@@ -1700,17 +1700,10 @@ impl Config {
             let condition_prefixes = config
                 .condition_prefixes
                 .iter()
-                .map(|prefix| {
-                    let (addr, len) = super::validation::parse_exact_unicast_prefix(prefix)
-                        .map_err(|reason| ConfigError::InvalidPolicyEntry {
+                .map(|entry| {
+                    super::validation::parse_condition_prefix(entry).map_err(|reason| {
+                        ConfigError::InvalidPolicyEntry {
                             reason: format!("conditional advertisement {name:?}: {reason}"),
-                        })?;
-                    Ok(match addr {
-                        IpAddr::V4(addr) => {
-                            rustbgpd_wire::Prefix::V4(rustbgpd_wire::Ipv4Prefix::new(addr, len))
-                        }
-                        IpAddr::V6(addr) => {
-                            rustbgpd_wire::Prefix::V6(rustbgpd_wire::Ipv6Prefix::new(addr, len))
                         }
                     })
                 })

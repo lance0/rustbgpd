@@ -4,7 +4,8 @@
 # Validates: conditional advertisement m115-backup, attached to frr-b with
 # advertise_if = "absent" and settle_time = 2, advertises the payload prefix
 # 198.51.100.0/24 to frr-b only while the condition prefix 192.0.2.0/24 is
-# absent from rustbgpd's RIB. frr-a sources all three prefixes:
+# absent from rustbgpd's RIB. The definition's condition is the range
+# 192.0.0.0/16 ge 24 le 24, which that /24 falls inside. frr-a sources all three prefixes:
 #   1. condition present: frr-b does not receive the payload, explain stops it
 #      with conditional_advertisement_suppressed, and the metrics read
 #      present / not permitted;

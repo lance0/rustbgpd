@@ -2568,6 +2568,9 @@ impl rustbgpd_api::proto::policy_service_server::PolicyService for MockPolicySer
                     conditions: vec![server_proto::ConditionalAdvertisementCondition {
                         prefix: "0.0.0.0/0".to_string(),
                         state: "present".to_string(),
+                        present_prefix_count: 1,
+                        present_prefixes: vec!["0.0.0.0/0".to_string()],
+                        ..Default::default()
                     }],
                     observed: "present".to_string(),
                     observed_for_ms: 2_000,

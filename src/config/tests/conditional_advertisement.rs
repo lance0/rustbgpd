@@ -61,7 +61,10 @@ fn definition_and_attachment_load_with_defaults() {
     assert_eq!(definition.advertise_if, ConditionalAdvertiseIf::Absent);
     assert_eq!(
         definition.condition_prefixes,
-        ["0.0.0.0/0", "2001:db8::/32"]
+        [
+            ConditionPrefixConfig::exact("0.0.0.0/0"),
+            ConditionPrefixConfig::exact("2001:db8::/32")
+        ]
     );
     assert_eq!(definition.condition_policy.as_deref(), Some("transit-a"));
     assert_eq!(definition.settle_time, 5);
@@ -233,6 +236,114 @@ fn condition_prefix_errors_are_rejected() {
             "{prefixes}: {reason}"
         );
     }
+}
+
+/// Range entries load beside exact strings, resolve to prefix-list
+/// triples, and persist with exact entries kept as plain strings.
+#[test]
+fn condition_prefix_ranges_load_resolve_and_round_trip() {
+    let toml = with_definition_line(
+        "condition_prefixes = [\"0.0.0.0/0\", \"2001:db8::/32\"]",
+        "condition_prefixes = [\"0.0.0.0/0\", { prefix = \"10.0.0.0/8\", le = 24 }, \
+         { prefix = \"2001:db8::/32\", ge = 48, le = 64 }, { prefix = \"192.0.2.0/24\" }]",
+    );
+    let config = parse(&toml).unwrap();
+    assert_eq!(
+        config.policy.conditional_advertisements["backup"].condition_prefixes,
+        [
+            ConditionPrefixConfig::exact("0.0.0.0/0"),
+            ConditionPrefixConfig {
+                prefix: "10.0.0.0/8".to_string(),
+                ge: None,
+                le: Some(24),
+            },
+            ConditionPrefixConfig {
+                prefix: "2001:db8::/32".to_string(),
+                ge: Some(48),
+                le: Some(64),
+            },
+            ConditionPrefixConfig::exact("192.0.2.0/24"),
+        ]
+    );
+    let set = config.conditional_advertisement_set().unwrap();
+    assert_eq!(
+        set.definitions[0]
+            .condition_prefixes
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>(),
+        [
+            "0.0.0.0/0",
+            "10.0.0.0/8 le 24",
+            "2001:db8::/32 ge 48 le 64",
+            "192.0.2.0/24"
+        ]
+    );
+    let persisted = toml::to_string(&config.policy.conditional_advertisements["backup"]).unwrap();
+    assert!(
+        persisted.contains(
+            "condition_prefixes = [\"0.0.0.0/0\", { prefix = \"10.0.0.0/8\", le = 24 }, \
+             { prefix = \"2001:db8::/32\", ge = 48, le = 64 }, \"192.0.2.0/24\"]"
+        ),
+        "{persisted}"
+    );
+    assert_eq!(
+        toml::from_str::<ConditionalAdvertisementConfig>(&persisted).unwrap(),
+        config.policy.conditional_advertisements["backup"]
+    );
+}
+
+/// Invalid ranges are load errors with the prefix-list bound rule
+/// (`len <= ge <= le <= max`), and a misspelled range field names itself.
+#[test]
+fn invalid_condition_prefix_ranges_are_rejected() {
+    for (entry, expected) in [
+        (
+            "{ prefix = \"10.0.0.0/8\", le = 7 }",
+            "le value 7 is less than prefix length 8",
+        ),
+        (
+            "{ prefix = \"10.0.0.0/8\", ge = 7 }",
+            "ge value 7 is less than prefix length 8",
+        ),
+        (
+            "{ prefix = \"10.0.0.0/8\", ge = 33 }",
+            "ge value 33 exceeds 32",
+        ),
+        (
+            "{ prefix = \"2001:db8::/32\", le = 129 }",
+            "le value 129 exceeds 128",
+        ),
+        (
+            "{ prefix = \"10.0.0.0/8\", ge = 24, le = 16 }",
+            "ge value 24 exceeds le value 16",
+        ),
+        (
+            "{ prefix = \"10.0.0.1/8\", le = 24 }",
+            "has host bits set; use 10.0.0.0/8",
+        ),
+        (
+            "{ prefix = \"10.0.0.0/8\", le = 24 }, { prefix = \"10.0.0.0/8\", le = 24 }",
+            "condition prefix 10.0.0.0/8 le 24 is listed more than once",
+        ),
+    ] {
+        let toml = with_definition_line(
+            "condition_prefixes = [\"0.0.0.0/0\", \"2001:db8::/32\"]",
+            &format!("condition_prefixes = [{entry}]"),
+        );
+        let reason = policy_error(&toml);
+        assert!(
+            reason.starts_with("conditional advertisement \"backup\": ")
+                && reason.contains(expected),
+            "{entry}: {reason}"
+        );
+    }
+    let misspelled = with_definition_line(
+        "condition_prefixes = [\"0.0.0.0/0\", \"2001:db8::/32\"]",
+        "condition_prefixes = [{ prefix = \"10.0.0.0/8\", lee = 24 }]",
+    );
+    let error = parse(&misspelled).unwrap_err().to_string();
+    assert!(error.contains("unknown field `lee`"), "{error}");
 }
 
 #[test]

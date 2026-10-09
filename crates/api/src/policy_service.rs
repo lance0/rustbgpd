@@ -1751,9 +1751,17 @@ fn conditional_status_to_proto(
         conditions: status
             .conditions
             .into_iter()
-            .map(|(prefix, state)| proto::ConditionalAdvertisementCondition {
-                prefix: prefix.to_string(),
-                state: state.to_string(),
+            .map(|condition| proto::ConditionalAdvertisementCondition {
+                prefix: condition.entry.prefix.to_string(),
+                state: condition.state.to_string(),
+                ge: condition.entry.ge.map(u32::from),
+                le: condition.entry.le.map(u32::from),
+                present_prefix_count: u64::try_from(condition.present_count).unwrap_or(u64::MAX),
+                present_prefixes: condition
+                    .present_sample
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect(),
             })
             .collect(),
         observed: status.observed.to_string(),
@@ -3555,20 +3563,29 @@ policy customer-in(peer_lp: u32) {
             name: Arc::from(name),
             advertise_if: rustbgpd_rib::ConditionalAdvertiseIf::Absent,
             conditions: vec![
-                (
-                    rustbgpd_wire::Prefix::V4(rustbgpd_wire::Ipv4Prefix::new(
-                        std::net::Ipv4Addr::UNSPECIFIED,
-                        0,
+                rustbgpd_rib::ConditionEntryStatus {
+                    entry: rustbgpd_policy::sets::PrefixSetEntry::exact(rustbgpd_wire::Prefix::V4(
+                        rustbgpd_wire::Ipv4Prefix::new(std::net::Ipv4Addr::UNSPECIFIED, 0),
                     )),
-                    "present",
-                ),
-                (
-                    rustbgpd_wire::Prefix::V6(rustbgpd_wire::Ipv6Prefix::new(
-                        "2001:db8::".parse().unwrap(),
-                        32,
-                    )),
-                    "absent",
-                ),
+                    state: "present",
+                    present_count: 1,
+                    present_sample: vec![rustbgpd_wire::Prefix::V4(
+                        rustbgpd_wire::Ipv4Prefix::new(std::net::Ipv4Addr::UNSPECIFIED, 0),
+                    )],
+                },
+                rustbgpd_rib::ConditionEntryStatus {
+                    entry: rustbgpd_policy::sets::PrefixSetEntry {
+                        prefix: rustbgpd_wire::Prefix::V6(rustbgpd_wire::Ipv6Prefix::new(
+                            "2001:db8::".parse().unwrap(),
+                            32,
+                        )),
+                        ge: Some(48),
+                        le: Some(64),
+                    },
+                    state: "absent",
+                    present_count: 0,
+                    present_sample: vec![],
+                },
             ],
             observed: "present",
             observed_for: Duration::from_millis(1_250),
@@ -3613,10 +3630,18 @@ policy customer-in(peer_lp: u32) {
                     proto::ConditionalAdvertisementCondition {
                         prefix: "0.0.0.0/0".to_string(),
                         state: "present".to_string(),
+                        ge: None,
+                        le: None,
+                        present_prefix_count: 1,
+                        present_prefixes: vec!["0.0.0.0/0".to_string()],
                     },
                     proto::ConditionalAdvertisementCondition {
                         prefix: "2001:db8::/32".to_string(),
                         state: "absent".to_string(),
+                        ge: Some(48),
+                        le: Some(64),
+                        present_prefix_count: 0,
+                        present_prefixes: vec![],
                     },
                 ],
                 observed: "present".to_string(),

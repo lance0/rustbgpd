@@ -188,6 +188,16 @@ impl<V> FamilyPrefixMap<V> {
 }
 
 impl<V> FamilyPrefixMap<V> {
+    /// Values of every stored prefix that covers `prefix`, including
+    /// `prefix` itself, shortest first. Walks only the trie path to `prefix`.
+    pub(crate) fn cover(&self, prefix: &Prefix) -> impl Iterator<Item = &V> {
+        let (v4, v6) = match prefix {
+            Prefix::V4(p) => (Some(self.v4.cover_values(&v4_net(*p))), None),
+            Prefix::V6(p) => (None, Some(self.v6.cover_values(&v6_net(*p)))),
+        };
+        v4.into_iter().flatten().chain(v6.into_iter().flatten())
+    }
+
     /// Iterate `covering` and every stored more-specific prefix contained
     /// within it (network containment), with their values. The other address
     /// family contributes nothing.

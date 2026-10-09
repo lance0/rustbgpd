@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use rustbgpd_policy::PolicyChain;
 use rustbgpd_policy::rpol::RpolFile;
-use rustbgpd_policy::sets::SetStore;
+use rustbgpd_policy::sets::{PrefixSetEntry, SetStore};
 use rustbgpd_wire::{Afi, Ipv4Prefix, Prefix, Safi};
 use tokio::time::{Instant, advance};
 
@@ -74,7 +74,7 @@ fn definition(
         name: Arc::from(NAME),
         advertise_policy: PolicyChain::default(),
         advertise_if,
-        condition_prefixes: vec![condition()],
+        condition_prefixes: vec![rustbgpd_policy::sets::PrefixSetEntry::exact(condition())],
         condition_policy,
         settle_time,
     }
@@ -706,55 +706,74 @@ async fn held_definition_ignores_route_churn_until_the_publish() {
             Arc::clone(&compiled),
         )])
     };
-    let install = |manager: &mut RibManager, condition_policy, swapping: &[String]| {
-        let _ = manager.handle_install_conditional_advertisements(
-            crate::ConditionalAdvertisementSet {
-                definitions: vec![definition(
-                    ConditionalAdvertiseIf::Absent,
-                    condition_policy,
-                    Duration::ZERO,
-                )],
-                attachments: BTreeMap::new(),
-            },
-            swapping,
-        );
+    let install =
+        |manager: &mut RibManager, entry: PrefixSetEntry, condition_policy, swapping: &[String]| {
+            let mut definition = definition(
+                ConditionalAdvertiseIf::Absent,
+                condition_policy,
+                Duration::ZERO,
+            );
+            definition.condition_prefixes = vec![entry];
+            let _ = manager.handle_install_conditional_advertisements(
+                crate::ConditionalAdvertisementSet {
+                    definitions: vec![definition],
+                    attachments: BTreeMap::new(),
+                },
+                swapping,
+            );
+        };
+
+    // An exact condition, then a range whose churn reaches the definition
+    // through the range tracker's cover walk.
+    let in_range = PrefixSetEntry {
+        prefix: Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 0), 24)),
+        ge: None,
+        le: Some(32),
     };
+    for entry in [PrefixSetEntry::exact(condition()), in_range] {
+        handle.refresh(data(true));
+        let mut manager = manager();
+        install(&mut manager, entry, None, &[]);
+        assert_eq!(state(&manager).1, AppliedConditionalState::Advertise);
 
-    let mut manager = manager();
-    install(&mut manager, None, &[]);
-    assert_eq!(state(&manager).1, AppliedConditionalState::Advertise);
-
-    // The edit adds a `condition_policy` that passes the condition route
-    // under the prior `allowed` contents but not under the candidate's.
-    install(&mut manager, Some(policy()), &["allowed".to_string()]);
-    assert_eq!(state(&manager).1, AppliedConditionalState::Advertise);
-    let visits = manager.conditional_advertisement_candidate_visits();
-    inject(&mut manager, prefix(1), None);
-    assert_eq!(
-        state(&manager).1,
-        AppliedConditionalState::Advertise,
-        "churn before the publish must not flip the gate on the prior contents"
-    );
-    assert_eq!(
-        manager.conditional_advertisement_candidate_visits(),
-        visits,
-        "churn before the publish does not observe a held definition"
-    );
-
-    handle.refresh(data(false));
-    let _ = manager.reevaluate_conditional_advertisement_datasets(&["allowed".to_string()], &[]);
-    assert_eq!(
-        state(&manager),
-        (
-            ConditionObservation::Absent,
+        // The edit adds a `condition_policy` that passes the condition route
+        // under the prior `allowed` contents but not under the candidate's.
+        install(
+            &mut manager,
+            entry,
+            Some(policy()),
+            &["allowed".to_string()],
+        );
+        assert_eq!(state(&manager).1, AppliedConditionalState::Advertise);
+        let visits = manager.conditional_advertisement_candidate_visits();
+        inject(&mut manager, prefix(1), None);
+        assert_eq!(
+            state(&manager).1,
             AppliedConditionalState::Advertise,
-            None
-        )
-    );
-    // Released: churn observes it again.
-    handle.refresh(data(true));
-    inject(&mut manager, prefix(1), Some(6));
-    assert_eq!(state(&manager).1, AppliedConditionalState::Suppress);
+            "{entry}: churn before the publish must not flip the gate on the prior contents"
+        );
+        assert_eq!(
+            manager.conditional_advertisement_candidate_visits(),
+            visits,
+            "churn before the publish does not observe a held definition"
+        );
+
+        handle.refresh(data(false));
+        let _ =
+            manager.reevaluate_conditional_advertisement_datasets(&["allowed".to_string()], &[]);
+        assert_eq!(
+            state(&manager),
+            (
+                ConditionObservation::Absent,
+                AppliedConditionalState::Advertise,
+                None
+            )
+        );
+        // Released: churn observes it again.
+        handle.refresh(data(true));
+        inject(&mut manager, prefix(1), Some(6));
+        assert_eq!(state(&manager).1, AppliedConditionalState::Suppress);
+    }
 }
 
 /// The actor's run loop arms and fires the settle timer itself.
@@ -1167,6 +1186,15 @@ async fn expiry_cutoff_charges_coalesced_queued_messages() {
     handle_2.await.unwrap();
 }
 
+/// `(entry, state)` per condition entry of a status row.
+fn condition_states(status: &crate::ConditionalAdvertisementStatus) -> Vec<(String, &'static str)> {
+    status
+        .conditions
+        .iter()
+        .map(|condition| (condition.entry.to_string(), condition.state))
+        .collect()
+}
+
 fn status(manager: &RibManager, name: &str) -> crate::ConditionalAdvertisementStatus {
     manager
         .conditional_advertisement_status()
@@ -1186,7 +1214,10 @@ async fn status_reports_conditions_applied_state_settle_and_attachments() {
         name: Arc::from("core"),
         advertise_policy: PolicyChain::default(),
         advertise_if: ConditionalAdvertiseIf::Present,
-        condition_prefixes: vec![Prefix::V4(prefix(2)), Prefix::V4(prefix(3))],
+        condition_prefixes: vec![
+            rustbgpd_policy::sets::PrefixSetEntry::exact(Prefix::V4(prefix(2))),
+            rustbgpd_policy::sets::PrefixSetEntry::exact(Prefix::V4(prefix(3))),
+        ],
         condition_policy: Some(med_guard()),
         settle_time: Duration::ZERO,
     };
@@ -1212,7 +1243,10 @@ async fn status_reports_conditions_applied_state_settle_and_attachments() {
     // Startup: pending behind an armed settle timer.
     let backup = status(&manager, NAME);
     assert_eq!(backup.advertise_if, ConditionalAdvertiseIf::Absent);
-    assert_eq!(backup.conditions, [(condition(), "absent")]);
+    assert_eq!(
+        condition_states(&backup),
+        [(condition().to_string(), "absent")]
+    );
     assert_eq!((backup.observed, backup.applied), ("absent", "pending"));
     assert_eq!(backup.settle_time, SETTLE);
     assert_eq!(backup.settle_remaining, Some(SETTLE));
@@ -1229,7 +1263,10 @@ async fn status_reports_conditions_applied_state_settle_and_attachments() {
     inject(&mut manager, prefix(1), None);
     advance(Duration::from_secs(2)).await;
     let backup = status(&manager, NAME);
-    assert_eq!(backup.conditions, [(condition(), "present")]);
+    assert_eq!(
+        condition_states(&backup),
+        [(condition().to_string(), "present")]
+    );
     assert_eq!((backup.observed, backup.applied), ("present", "pending"));
     assert_eq!(backup.observed_for, Duration::from_secs(2));
     assert_eq!(backup.settle_remaining, Some(Duration::from_secs(3)));
@@ -1246,10 +1283,10 @@ async fn status_reports_conditions_applied_state_settle_and_attachments() {
     inject(&mut manager, prefix(3), Some(u32::MAX));
     let core = status(&manager, "core");
     assert_eq!(
-        core.conditions,
+        condition_states(&core),
         [
-            (Prefix::V4(prefix(2)), "present"),
-            (Prefix::V4(prefix(3)), "unknown")
+            (prefix(2).to_string(), "present"),
+            (prefix(3).to_string(), "unknown")
         ]
     );
     assert_eq!((core.observed, core.applied), ("present", "advertise"));
@@ -1258,10 +1295,10 @@ async fn status_reports_conditions_applied_state_settle_and_attachments() {
     withdraw_injected(&mut manager, prefix(2));
     let core = status(&manager, "core");
     assert_eq!(
-        core.conditions,
+        condition_states(&core),
         [
-            (Prefix::V4(prefix(2)), "absent"),
-            (Prefix::V4(prefix(3)), "unknown")
+            (prefix(2).to_string(), "absent"),
+            (prefix(3).to_string(), "unknown")
         ]
     );
     assert_eq!((core.observed, core.applied), ("unknown", "advertise"));
@@ -1289,6 +1326,341 @@ async fn status_query_is_served_by_the_running_actor() {
     actor.await.unwrap();
 }
 
+fn v4(a: u8, b: u8, c: u8, len: u8) -> Ipv4Prefix {
+    Ipv4Prefix::new(Ipv4Addr::new(10, a, b, c), len)
+}
+
+fn range(base: Ipv4Prefix, ge: Option<u8>, le: Option<u8>) -> PrefixSetEntry {
+    PrefixSetEntry {
+        prefix: Prefix::V4(base),
+        ge,
+        le,
+    }
+}
+
+fn ranged(name: &str, entries: Vec<PrefixSetEntry>, settle: Duration) -> ConditionalAdvertisement {
+    ConditionalAdvertisement {
+        name: Arc::from(name),
+        advertise_policy: PolicyChain::default(),
+        advertise_if: ConditionalAdvertiseIf::Absent,
+        condition_prefixes: entries,
+        condition_policy: None,
+        settle_time: settle,
+    }
+}
+
+fn observed(manager: &RibManager, name: &str) -> ConditionObservation {
+    manager.conditional_advertisement_state(name).unwrap().0
+}
+
+/// A range condition (`10.0.0.0/8 le 24`) through the real RIB path: a
+/// prefix already held at install counts (the full rescan), a received or
+/// injected prefix inside the range makes it present under the ordinary
+/// debounce, the condition stays present until the last in-range prefix
+/// goes, and prefixes outside the range never count.
+#[tokio::test(start_paused = true)]
+async fn range_condition_appears_and_disappears() {
+    let mut manager = manager();
+    let source = peer(1);
+    peer_up(&mut manager, source, 1);
+    received(
+        &mut manager,
+        source,
+        1,
+        vec![route_with_med(source, v4(9, 0, 0, 16), None)],
+        vec![],
+    );
+    let _ = manager.install_conditional_advertisements(vec![ranged(
+        NAME,
+        vec![range(v4(0, 0, 0, 8), None, Some(24))],
+        SETTLE,
+    )]);
+    assert_eq!(state(&manager).0, ConditionObservation::Present);
+    received(
+        &mut manager,
+        source,
+        1,
+        vec![],
+        vec![(Prefix::V4(v4(9, 0, 0, 16)), 0)],
+    );
+    assert_eq!(state(&manager).0, ConditionObservation::Absent);
+    settle(&mut manager, SETTLE).await;
+    assert_eq!(applied(&manager), AppliedConditionalState::Advertise);
+
+    // Outside the range: a longer prefix than `le`, and another /8.
+    inject(&mut manager, v4(3, 3, 0, 25), None);
+    inject(
+        &mut manager,
+        Ipv4Prefix::new(Ipv4Addr::new(11, 1, 0, 0), 16),
+        None,
+    );
+    assert_eq!(state(&manager).0, ConditionObservation::Absent);
+
+    inject(&mut manager, v4(1, 0, 0, 16), None);
+    let (observed_now, applied_now, deadline) = state(&manager);
+    assert_eq!(observed_now, ConditionObservation::Present);
+    assert_eq!(applied_now, AppliedConditionalState::Advertise);
+    assert_eq!(deadline, Some(Instant::now() + SETTLE));
+    settle(&mut manager, SETTLE).await;
+    assert_eq!(applied(&manager), AppliedConditionalState::Suppress);
+
+    // Two in-range prefixes: losing one keeps the condition present.
+    received(
+        &mut manager,
+        source,
+        1,
+        vec![route_with_med(source, v4(2, 0, 0, 24), None)],
+        vec![],
+    );
+    withdraw_injected(&mut manager, v4(1, 0, 0, 16));
+    assert_eq!(state(&manager).0, ConditionObservation::Present);
+    received(
+        &mut manager,
+        source,
+        1,
+        vec![],
+        vec![(Prefix::V4(v4(2, 0, 0, 24)), 0)],
+    );
+    assert_eq!(state(&manager).0, ConditionObservation::Absent);
+    settle(&mut manager, SETTLE).await;
+    assert_eq!(applied(&manager), AppliedConditionalState::Advertise);
+}
+
+/// Overlapping ranges in two definitions: one prefix inside both drives
+/// both; a prefix inside only the wider range drives only that one.
+#[tokio::test(start_paused = true)]
+async fn overlapping_ranges_across_definitions_track_independently() {
+    let mut manager = manager();
+    let _ = manager.install_conditional_advertisements(vec![
+        ranged("wide", vec![range(v4(0, 0, 0, 8), None, Some(24))], SETTLE),
+        ranged(
+            "narrow",
+            vec![range(v4(1, 0, 0, 16), Some(24), Some(24))],
+            SETTLE,
+        ),
+    ]);
+    inject(&mut manager, v4(1, 2, 0, 24), None);
+    assert_eq!(observed(&manager, "wide"), ConditionObservation::Present);
+    assert_eq!(observed(&manager, "narrow"), ConditionObservation::Present);
+
+    inject(&mut manager, v4(2, 0, 0, 16), None);
+    withdraw_injected(&mut manager, v4(1, 2, 0, 24));
+    assert_eq!(observed(&manager, "wide"), ConditionObservation::Present);
+    assert_eq!(observed(&manager, "narrow"), ConditionObservation::Absent);
+
+    withdraw_injected(&mut manager, v4(2, 0, 0, 16));
+    assert_eq!(observed(&manager, "wide"), ConditionObservation::Absent);
+}
+
+/// `ge`/`le` bounds are inclusive: a prefix one bit outside either bound
+/// misses, and one on each bound matches.
+#[tokio::test(start_paused = true)]
+async fn range_bounds_match_inclusively_and_miss_one_bit_outside() {
+    let mut manager = manager();
+    let _ = manager.install_conditional_advertisements(vec![ranged(
+        NAME,
+        vec![range(v4(0, 0, 0, 8), Some(16), Some(24))],
+        SETTLE,
+    )]);
+    for outside in [v4(0, 0, 0, 15), v4(0, 0, 0, 25), v4(0, 0, 0, 8)] {
+        inject(&mut manager, outside, None);
+        assert_eq!(
+            state(&manager).0,
+            ConditionObservation::Absent,
+            "{outside} is outside ge 16 le 24"
+        );
+        withdraw_injected(&mut manager, outside);
+    }
+    for inside in [v4(0, 0, 0, 16), v4(0, 0, 0, 24)] {
+        inject(&mut manager, inside, None);
+        assert_eq!(
+            state(&manager).0,
+            ConditionObservation::Present,
+            "{inside} is on a bound of ge 16 le 24"
+        );
+        withdraw_injected(&mut manager, inside);
+        assert_eq!(state(&manager).0, ConditionObservation::Absent);
+    }
+}
+
+fn v6(addr: &str, len: u8) -> Prefix {
+    Prefix::V6(rustbgpd_wire::Ipv6Prefix::new(addr.parse().unwrap(), len))
+}
+
+fn v6_route(source: IpAddr, prefix: Prefix) -> Route {
+    let mut route = route_with_med(source, v4(0, 0, 0, 32), None);
+    route.prefix = prefix;
+    route
+}
+
+/// An IPv6 range (`2001:db8::/32 ge 40 le 48`) through the IPv6 trie: the
+/// install rescan finds a held /48 under the range root and skips held
+/// prefixes outside it, and received announcements and withdrawals match on
+/// the bounds and miss one bit outside them, or outside the root.
+#[tokio::test(start_paused = true)]
+async fn ipv6_range_bounds_match_through_the_rescan_and_route_churn() {
+    let mut manager = manager();
+    let source = peer(1);
+    peer_up(&mut manager, source, 1);
+    let held = v6("2001:db8:1::", 48);
+    let held_outside = [
+        v6("2001:db8::", 32),
+        v6("2001:db8:2::", 49),
+        v6("2001:db9::", 48),
+    ];
+    received(
+        &mut manager,
+        source,
+        1,
+        std::iter::once(held)
+            .chain(held_outside)
+            .map(|prefix| v6_route(source, prefix))
+            .collect(),
+        vec![],
+    );
+    let _ = manager.install_conditional_advertisements(vec![ranged(
+        NAME,
+        vec![PrefixSetEntry {
+            prefix: v6("2001:db8::", 32),
+            ge: Some(40),
+            le: Some(48),
+        }],
+        SETTLE,
+    )]);
+    assert_eq!(state(&manager).0, ConditionObservation::Present);
+    let row = status(&manager, NAME);
+    assert_eq!(row.conditions[0].present_count, 1);
+    assert_eq!(row.conditions[0].present_sample, [held]);
+
+    received(&mut manager, source, 1, vec![], vec![(held, 0)]);
+    assert_eq!(
+        state(&manager).0,
+        ConditionObservation::Absent,
+        "only the /48 was in range"
+    );
+
+    for outside in [
+        v6("2001:db8::", 39),
+        v6("2001:db8:3::", 49),
+        v6("2001:db9:1::", 48),
+    ] {
+        received(
+            &mut manager,
+            source,
+            1,
+            vec![v6_route(source, outside)],
+            vec![],
+        );
+        assert_eq!(
+            state(&manager).0,
+            ConditionObservation::Absent,
+            "{outside} is outside 2001:db8::/32 ge 40 le 48"
+        );
+        received(&mut manager, source, 1, vec![], vec![(outside, 0)]);
+    }
+    for inside in [v6("2001:db8:100::", 40), v6("2001:db8:4::", 48)] {
+        received(
+            &mut manager,
+            source,
+            1,
+            vec![v6_route(source, inside)],
+            vec![],
+        );
+        assert_eq!(
+            state(&manager).0,
+            ConditionObservation::Present,
+            "{inside} is on a bound of ge 40 le 48"
+        );
+        received(&mut manager, source, 1, vec![], vec![(inside, 0)]);
+        assert_eq!(state(&manager).0, ConditionObservation::Absent);
+    }
+}
+
+/// The status view of a range entry: its bounds, its own state, the count of
+/// present in-range prefixes, and at most eight of them in address order.
+/// An entry with only evaluation errors in range reports `unknown`.
+#[tokio::test(start_paused = true)]
+async fn status_reports_range_counts_with_a_bounded_sample() {
+    let mut manager = manager();
+    let mut definition = ranged(
+        NAME,
+        vec![
+            range(v4(0, 0, 0, 8), None, Some(24)),
+            range(v4(200, 0, 0, 16), Some(24), None),
+            PrefixSetEntry::exact(condition()),
+        ],
+        SETTLE,
+    );
+    definition.condition_policy = Some(med_guard());
+    let _ = manager.install_conditional_advertisements(vec![definition]);
+    for octet in (1..=10).rev() {
+        inject(&mut manager, v4(octet, 0, 0, 16), Some(0));
+    }
+    inject(&mut manager, v4(200, 0, 7, 24), Some(u32::MAX));
+
+    let row = status(&manager, NAME);
+    assert_eq!(
+        condition_states(&row),
+        [
+            ("10.0.0.0/8 le 24".to_string(), "present"),
+            ("10.200.0.0/16 ge 24".to_string(), "unknown"),
+            (condition().to_string(), "absent"),
+        ]
+    );
+    let wide = &row.conditions[0];
+    assert_eq!(wide.present_count, 10);
+    assert_eq!(
+        wide.present_sample,
+        (1..=8)
+            .map(|octet| Prefix::V4(v4(octet, 0, 0, 16)))
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(row.conditions[1].present_count, 0);
+    assert_eq!(row.conditions[1].present_sample, Vec::<Prefix>::new());
+    assert_eq!(row.observed, "present");
+}
+
+/// The status view reads each entry's tracked count and the head of its own
+/// set: a range holding many present prefixes costs at most
+/// `CONDITION_STATUS_SAMPLE` prefix visits per entry, not a walk of the
+/// range, and an entry overlapping another keeps its own count.
+#[tokio::test(start_paused = true)]
+async fn status_work_is_bounded_per_entry() {
+    let mut manager = manager();
+    let _ = manager.install_conditional_advertisements(vec![ranged(
+        NAME,
+        vec![
+            range(v4(0, 0, 0, 8), None, Some(32)),
+            range(v4(1, 0, 0, 16), Some(24), Some(24)),
+        ],
+        SETTLE,
+    )]);
+    for a in 1..=4 {
+        for b in 0..50 {
+            inject(&mut manager, v4(a, b, 0, 24), None);
+        }
+    }
+    let before = manager.conditional_advertisement_status_prefix_visits();
+    let row = status(&manager, NAME);
+    assert_eq!(
+        manager.conditional_advertisement_status_prefix_visits() - before,
+        2 * crate::manager::conditional_advertisement::CONDITION_STATUS_SAMPLE,
+        "one sample per entry, not a walk of the 200 present prefixes"
+    );
+    assert_eq!(row.conditions[0].present_count, 200);
+    assert_eq!(row.conditions[1].present_count, 50);
+
+    // Withdrawing a prefix inside both ranges updates both counts.
+    withdraw_injected(&mut manager, v4(1, 0, 0, 24));
+    let row = status(&manager, NAME);
+    assert_eq!(row.conditions[0].present_count, 199);
+    assert_eq!(row.conditions[1].present_count, 49);
+    assert_eq!(
+        row.conditions[1].present_sample[0],
+        Prefix::V4(v4(1, 1, 0, 24))
+    );
+}
+
 /// The status query copies the tracked per-prefix observations: it visits
 /// no condition candidate and evaluates no `condition_policy`, however many
 /// candidates the condition prefix holds.
@@ -1314,7 +1686,10 @@ async fn status_query_evaluates_no_policy() {
     assert!(manager.conditional_advertisement_candidate_visits() >= 10);
     let before = manager.conditional_advertisement_candidate_visits();
     let status = manager.conditional_advertisement_status();
-    assert_eq!(status[0].conditions, [(condition(), "absent")]);
+    assert_eq!(
+        condition_states(&status[0]),
+        [(condition().to_string(), "absent")]
+    );
     assert_eq!(
         manager.conditional_advertisement_candidate_visits(),
         before,
@@ -1329,11 +1704,9 @@ async fn status_query_evaluates_no_policy() {
 async fn route_churn_reobserves_only_the_affected_condition_prefix() {
     let mut manager = manager();
     let mut multi = definition(ConditionalAdvertiseIf::Absent, Some(med_guard()), SETTLE);
-    multi.condition_prefixes = vec![
-        Prefix::V4(prefix(1)),
-        Prefix::V4(prefix(2)),
-        Prefix::V4(prefix(3)),
-    ];
+    multi.condition_prefixes = (1..=3)
+        .map(|octet| PrefixSetEntry::exact(Prefix::V4(prefix(octet))))
+        .collect();
     let _ = manager.install_conditional_advertisements(vec![multi]);
     for octet in 1..=10 {
         let source = peer(octet);
@@ -1369,6 +1742,6 @@ async fn route_churn_reobserves_only_the_affected_condition_prefix() {
         status[0]
             .conditions
             .iter()
-            .all(|(_, state)| *state == "absent")
+            .all(|condition| condition.state == "absent")
     );
 }
