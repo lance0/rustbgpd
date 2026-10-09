@@ -4166,15 +4166,15 @@ duplicate_mac_detection = { action = "detect", window_seconds = 180, threshold =
 | `auto_derive_route_target` | bool | no | `false` | Append the RFC 8365 §5.1.2.1 VXLAN auto-derived Route Target using `[global].asn` and `vni` (`2-octet AS only`) |
 | `local_vtep_ip`       | string   | yes      | --      | Source IP for VXLAN encap on this VTEP |
 | `bridge`              | string   | no       | --      | Linux bridge name for kernel reconciliation. Omit for RR-only deployments. Without `bridge_vlan`, a `Ready` L2VNI requires a non-VLAN-aware bridge with exactly one VXLAN port carrying `nolearning`; with `bridge_vlan`, it requires a traditional `vlan_filtering=1` bridge whose matching VXLAN member carries the configured VLAN |
-| `bridge_vlan`         | u32      | no       | --      | Local Linux bridge VLAN selector (`1..=4094`) for ADR-0089 VLAN-aware bridge attribution. Valid only with `bridge`; this is **not** an EVPN Ethernet Tag, EVPN routes still use Ethernet Tag ID `0`, and FDB writes plus AF_BRIDGE local-MAC observations for this instance are scoped with `NDA_VLAN` |
+| `bridge_vlan`         | u32      | no       | --      | Local Linux bridge VLAN selector (`1..=4094`) for ADR-0089 VLAN-aware bridge attribution. Valid only with `bridge`; this is **not** an EVPN Ethernet Tag (routes use `ethernet_tag`, `0` for `vlan_based` rows), and FDB writes plus AF_BRIDGE local-MAC observations for this instance are scoped with `NDA_VLAN` |
 | `advertise_svi_mac`   | bool     | no       | `false` | Originate a Type 2 route for the bridge's own MAC (RFC 9135 §6.1) when the instance has a Ready bridge report |
 | `sticky_macs`         | string[] | no       | `[]`    | MAC addresses to originate with the RFC 7432 §15.4 sticky bit; SVI MAC origination honors the same list (ADR-0056) |
 | `ip_vrf`              | string   | no       | --      | Name of an `[[evpn_ip_vrfs]]` entry to link this L2VNI to (Gate 9 IRB binding) |
 | `apply_aliasing_ecmp` | bool     | no       | `true`  | Program ADR-0059 FDB nexthop groups for multi-homed Type 2 routes (aliasing-ECMP via `NDA_NH_ID` + `NHA_FDB`). Flip to `false` to roll this L2VNI back to single-dst FDB rows at the primary VTEP. Single-homed Type 2 entries are unaffected |
 | `duplicate_mac_detection` | table | no | `{ action = "detect", window_seconds = 180, threshold = 5, recovery_seconds = 540 }` | RFC 7432 §15.1 duplicate-MAC M/N detector. `action = "detect"` records threshold crossings only; `action = "suppress_local"` additionally withdraws/suppresses locally-originated Type 2 MAC-only and MAC+IP routes for the offending `(VNI, MAC)` until `recovery_seconds` elapses |
 | `duplicate_ip_detection` | table | no | `{ enabled = false, window_seconds = 180, threshold = 5 }` | Optional per-IP M/N diagnostics for conflicting MAC ownership within a VNI. Detect-only: increments counters and logs threshold crossings, without suppressing or withdrawing routes |
-| `service_interface`   | string   | no       | `"vlan_based"` | EVPN service interface. `vlan_based` keeps Ethernet Tag ID `0`. `vlan_aware_bundle` (RFC 8365 VLAN-aware bundle member, ADR-0092) is **not accepted yet**: the row is checked against the rules below and then rejected |
-| `ethernet_tag`        | u32      | no       | --      | Ethernet Tag of a `vlan_aware_bundle` member, `1..=16777215`, set explicitly (never derived from `vni`). **Not accepted yet**, since it is valid only with `service_interface = "vlan_aware_bundle"` |
+| `service_interface`   | string   | no       | `"vlan_based"` | EVPN service interface. `vlan_based` uses Ethernet Tag ID `0`. `vlan_aware_bundle` makes the row an RFC 8365 VLAN-aware bundle member (ADR-0092): it originates and imports Type 2 and Type 3 routes under its `ethernet_tag`. See [VLAN-aware bundle members](#vlan-aware-bundle-members) |
+| `ethernet_tag`        | u32      | no       | --      | Ethernet Tag of a `vlan_aware_bundle` member, `1..=16777215`, set explicitly (never derived from `vni`). Required with, and only valid with, `service_interface = "vlan_aware_bundle"` |
 
 Duplicate-IP diagnostics can be enabled independently of duplicate-MAC policy:
 
@@ -4238,10 +4238,8 @@ crossings, not to applying a configuration change.
   `recovery_seconds` must all be greater than zero.
 - `duplicate_mac_detection.recovery_seconds` must be no greater than
   31,536,000 seconds (365 days).
-- `service_interface = "vlan_aware_bundle"` is not accepted yet. A bundle
-  row is first checked against the bundle rules, then rejected with
-  `vni N: service_interface = "vlan_aware_bundle" is not supported yet`.
-  The rules are: `ethernet_tag` is required, explicit, and in
+- `service_interface = "vlan_aware_bundle"` rows follow the bundle rules:
+  `ethernet_tag` is required, explicit, and in
   `1..=16777215`, and it is rejected on `vlan_based` rows. A bundle row
   cannot set `ip_vrf` or `auto_derive_route_target`, and it cannot be
   listed in `[[ethernet_segments]].member_vnis`. Two bundle rows that
@@ -4252,6 +4250,62 @@ crossings, not to applying a configuration change.
   apply to SIGHUP reload and `ApplyEvpnRuntime` candidates.
 - Same VNI must not appear in multiple `[[ethernet_segments]]`
   `member_vnis` lists until per-port learned disambiguation is plumbed.
+
+### VLAN-aware bundle members
+
+A VLAN-aware bundle (RFC 7432 §6.3, RFC 8365 §5.1.2) carries several
+broadcast domains in one EVI. Each broadcast domain is an ordinary
+`[[evpn_instances]]` row with `service_interface = "vlan_aware_bundle"` and
+its own `ethernet_tag`; the bundle is the set of rows that share route
+targets. Each member keeps its own VNI, RD, and local `(bridge, bridge_vlan)`
+([ADR-0092](../adr/0092-evpn-vlan-aware-bundle-service.md)):
+
+```toml
+[[evpn_instances]]
+vni = 10010
+rd = "10.0.0.1:10"
+route_targets = ["65000:100"]
+service_interface = "vlan_aware_bundle"
+ethernet_tag = 10
+local_vtep_ip = "10.0.0.1"
+bridge = "br0"
+bridge_vlan = 10
+
+[[evpn_instances]]
+vni = 10020
+rd = "10.0.0.1:20"
+route_targets = ["65000:100"]
+service_interface = "vlan_aware_bundle"
+ethernet_tag = 20
+local_vtep_ip = "10.0.0.1"
+bridge = "br0"
+bridge_vlan = 20
+```
+
+- **Origination.** A member originates its IMET and its local MAC-only,
+  MAC+IP, and SVI-MAC Type 2 routes under its own Ethernet Tag, RD, and VNI.
+- **Import.** A remote Type 2 or Type 3 route is programmed for a member only
+  when it carries a member route target, the member's Ethernet Tag, and the
+  member's VNI (the IMET PMSI label). Remote-MAC FDB rows use the member's
+  `bridge_vlan`, so the same MAC under two tags lands in two VLANs, and
+  IMET flood rows join the member VNI's flood list.
+- **Counted drops.** A route that selects a member by VNI and route target
+  under another Ethernet Tag counts as `ethernet_tag_mismatch`. A route
+  whose route target and Ethernet Tag select a member but whose VNI differs
+  counts as `vni_mismatch`, since only global VNIs are supported. A
+  multi-homed Type 2 (non-zero ESI) or any EAD-per-EVI route for a member
+  counts as `multihoming_unsupported`; it is never handled as single-homed.
+  These counts appear in `evpn_l2_remote_route_drops{vni,reason}` and in
+  `rbgp evpn instances`. The routes stay in Adj-RIB-In and are still
+  reflected.
+- **Not supported.** Multi-homing, IRB (`ip_vrf`), locally assigned VNIs, and
+  Type 5 routes with a non-zero Ethernet Tag. Those Type 5 routes are counted
+  as `non_zero_ethernet_tag` in `evpn_ip_vrf_remote_prefix_drops`.
+- **Migration.** Changing `service_interface` or `ethernet_tag` on a live row
+  goes through the L2VNI redefine path: routes under the old tag are
+  withdrawn and local routes are replayed under the new one. Every PE in the
+  EVI must move to the same tag set; until it does, routes from the other
+  side count as `ethernet_tag_mismatch`. The cutover is not hitless.
 
 The auto-derived RT form depends on the VNI's scope:
 

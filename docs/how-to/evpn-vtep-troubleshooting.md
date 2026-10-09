@@ -36,8 +36,12 @@ Expected signals:
   `readiness=ready|not-ready|unbound|unknown`, and
   `originated-local-macs=N`. A `not-ready` row includes the readiness
   probe reason. `remote-route-drops=[ethernet_tag_mismatch=N]` means remote
-  Type 2 or EAD-per-EVI routes for that VNI carry another Ethernet Tag and
-  are not programmed.
+  Type 2, Type 3 or EAD-per-EVI routes for that VNI carry another Ethernet
+  Tag and are not programmed; check that every PE uses the same tag for the
+  broadcast domain. A VLAN-aware bundle member also shows
+  `service=vlan-aware-bundle ethernet-tag=N`, and may count `vni_mismatch`
+  (a peer uses another VNI for the member's tag) or
+  `multihoming_unsupported` (a multi-homed Type 2 or EAD-per-EVI route).
 - `rbgp evpn --route-type 3` lists one IMET for each configured
   L2VNI after the daemon starts.
 - `bridge fdb show` contains remote MACs as `extern_learn` rows with a

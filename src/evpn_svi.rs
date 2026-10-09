@@ -74,7 +74,7 @@ use rustbgpd_evpn::{
 };
 use rustbgpd_rib::RibUpdate;
 use rustbgpd_telemetry::BgpMetrics;
-use rustbgpd_wire::{EthernetTagId, EvpnRouteKey, RouteDistinguisher};
+use rustbgpd_wire::EvpnRouteKey;
 use tokio::sync::{broadcast, mpsc, oneshot, watch};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
@@ -324,7 +324,7 @@ async fn inject_svi_mac(
     mac: MacAddress,
     runtime: &SviRuntime,
 ) -> Option<EvpnRouteKey> {
-    let key = svi_mac_key(inst.rd, mac);
+    let key = svi_mac_key(inst, mac);
     // SVI MAC origination uses no mobility seq (no contender to
     // defend against — this is a steady-state advertisement of the
     // bridge's own MAC). The sticky bit (RFC 7432 §15.4) is set
@@ -442,14 +442,14 @@ async fn withdraw_svi_mac(inst: &EvpnInstance, key: EvpnRouteKey, runtime: &SviR
 }
 
 /// Build the synthetic Type 2 key for an SVI MAC. The shape mirrors
-/// what `LocalMacOriginator` produces for kernel-learned MACs:
-/// `ethernet_tag = 0`, no host IP. Keeping the shapes aligned means
-/// downstream consumers (peers, BMP) treat SVI MACs the same as any
+/// what `LocalMacOriginator` produces for kernel-learned MACs: the
+/// instance's RD and Ethernet Tag, no host IP. Keeping the shapes aligned
+/// means downstream consumers (peers, BMP) treat SVI MACs the same as any
 /// other Type 2 entry.
-fn svi_mac_key(rd: RouteDistinguisher, mac: MacAddress) -> EvpnRouteKey {
+fn svi_mac_key(inst: &EvpnInstance, mac: MacAddress) -> EvpnRouteKey {
     EvpnRouteKey::MacIp {
-        rd,
-        ethernet_tag: EthernetTagId(0),
+        rd: inst.rd,
+        ethernet_tag: inst.ethernet_tag,
         mac,
         ip: None,
     }
@@ -657,6 +657,46 @@ mod tests {
         assert_eq!(*mac, svi_mac);
         assert_eq!(captured.lock().await.len(), 1, "exactly one Inject");
         assert!(withdraws.lock().await.is_empty());
+    }
+
+    /// ADR-0092 amendment H: a VLAN-aware bundle member originates its SVI
+    /// MAC under its own Ethernet Tag, and the tracked key (used for the
+    /// later withdraw) matches the injected route.
+    #[tokio::test]
+    async fn bundle_member_svi_mac_carries_member_tag() {
+        let mut table = EvpnInstanceTable::new();
+        table
+            .insert(instance(100, true).with_ethernet_tag(rustbgpd_wire::EthernetTagId(10)))
+            .unwrap();
+        let (rib_tx, rib_rx) = mpsc::channel::<RibUpdate>(16);
+        let captured = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let withdraws = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let _responder = drain_responder(rib_rx, captured.clone(), withdraws.clone());
+        let runtime = SviRuntime {
+            instances: Arc::new(table),
+            rib_tx,
+            metrics: BgpMetrics::new(),
+            originated_local_mac_counts: OriginatedLocalMacCounts::default(),
+            shutdown: CancellationToken::new(),
+        };
+        let mut originated = OriginatedSet::new();
+        let svi_mac = MacAddress::new([0xde, 0xad, 0xbe, 0xef, 0x00, 0x01]);
+        apply_report(
+            &report_with(100, InstanceState::Ready, Some(svi_mac)),
+            &mut originated,
+            &runtime,
+        )
+        .await;
+
+        let injected = captured.lock().await;
+        let [route] = injected.as_slice() else {
+            panic!("expected one Inject, got {injected:?}");
+        };
+        let rustbgpd_wire::EvpnRoute::MacIp(macip) = &route.route else {
+            panic!("expected Type 2, got {:?}", route.route);
+        };
+        assert_eq!(macip.ethernet_tag, rustbgpd_wire::EthernetTagId(10));
+        assert_eq!(originated.get(&vni(100)).unwrap().0, route.key());
     }
 
     /// Bridge-MAC change must withdraw the old key and inject the new

@@ -985,6 +985,8 @@ fn evpn_instance_to_proto(
         not_ready_reason: String::new(),
         bridge_vlan: inst.bridge_vlan.map(BridgeVlan::as_u32),
         remote_route_drop_counts,
+        service_interface: inst.service_interface().to_string(),
+        ethernet_tag: inst.ethernet_tag.0,
     };
 
     let Some(row) = status else {
@@ -1459,6 +1461,41 @@ mod tests {
             proto::EvpnInstanceReadinessState::EvpnInstanceReadinessUnbound as i32
         );
         assert_eq!(resp.instances[0].not_ready_reason.len(), 0);
+        assert_eq!(resp.instances[0].service_interface, "vlan_based");
+        assert_eq!(resp.instances[0].ethernet_tag, 0);
+    }
+
+    /// ADR-0092 amendment D: the status surface names a bundle member's
+    /// service interface and Ethernet Tag.
+    #[tokio::test]
+    async fn list_surfaces_bundle_service_interface_and_ethernet_tag() {
+        let mut table = EvpnInstanceTable::new();
+        install(&mut table, 100, "65000:100", "10.0.0.1");
+        let member = EvpnInstance::new(
+            EvpnInstanceId::new(10010).unwrap(),
+            rd("65000:10010"),
+            vec![rt("65000:1000")],
+            ip("10.0.0.1"),
+            Some("br0".into()),
+            false,
+        )
+        .unwrap()
+        .with_ethernet_tag(rustbgpd_evpn::EthernetTagId(10));
+        table.insert(member).unwrap();
+        let resp = EvpnService::new(Arc::new(table))
+            .list_evpn_instances(Request::new(proto::ListEvpnInstancesRequest {}))
+            .await
+            .unwrap()
+            .into_inner();
+        let shape: Vec<_> = resp
+            .instances
+            .iter()
+            .map(|row| (row.vni, row.service_interface.as_str(), row.ethernet_tag))
+            .collect();
+        assert_eq!(
+            shape,
+            vec![(100, "vlan_based", 0), (10010, "vlan_aware_bundle", 10)]
+        );
     }
 
     #[tokio::test]

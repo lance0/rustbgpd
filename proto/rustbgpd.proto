@@ -4854,15 +4854,21 @@ message EvpnInstanceState {
   string not_ready_reason = 9;
   // Optional local Linux bridge VLAN selector (`1..=4094`) configured
   // by `[[evpn_instances]].bridge_vlan`. This is a dataplane
-  // attribution key only; EVPN Ethernet Tag ID remains zero in the
-  // ADR-0089 v1 service model.
+  // attribution key only, never the EVPN Ethernet Tag (`ethernet_tag`).
   optional uint32 bridge_vlan = 10;
-  // Current remote Type 1 EAD-per-EVI and Type 2 routes that select this
-  // instance by VNI and route target but that the VTEP does not program,
-  // by reason, sorted by reason. Omitted reasons are zero. Mirrors
-  // `evpn_l2_remote_route_drops{vni,reason}`; the routes stay in
+  // Current remote Type 1 EAD-per-EVI, Type 2 and Type 3 IMET routes that
+  // select this instance (by VNI and route target, or for a VLAN-aware
+  // bundle member by route target and Ethernet Tag) but that the VTEP does
+  // not program, by reason, sorted by reason. Omitted reasons are zero.
+  // Mirrors `evpn_l2_remote_route_drops{vni,reason}`; the routes stay in
   // Adj-RIB-In and are still reflected.
   repeated EvpnInstanceRemoteRouteDropCount remote_route_drop_counts = 11;
+  // EVPN service interface (ADR-0092): "vlan_based" or "vlan_aware_bundle",
+  // as configured by `[[evpn_instances]].service_interface`.
+  string service_interface = 12;
+  // EVPN Ethernet Tag this instance originates and imports L2 routes under:
+  // 0 for "vlan_based", the member tag for "vlan_aware_bundle".
+  uint32 ethernet_tag = 13;
 }
 
 message EvpnInstanceRemoteRouteDropCount {

@@ -672,35 +672,66 @@ fn record_remote_prefix_install_drop_metrics(
     })
 }
 
-/// Remote Type 1 EAD-per-EVI and Type 2 routes that select a local L2VNI by
-/// VNI and Route Target but that the VTEP refuses to consume, counted per
-/// `(VNI, reason)` (ADR-0092 amendment D). Projection reads the RIB snapshot
-/// and never edits it, so these routes stay in Adj-RIB-In and keep being
-/// reflected; this only explains the projection gap.
+/// Remote Type 1 EAD-per-EVI, Type 2 and Type 3 IMET routes that select a
+/// local L2VNI but that the VTEP refuses to consume, counted per
+/// `(VNI, reason)` (ADR-0092 amendments C-E). A route selects an instance by
+/// VNI (the IMET PMSI label) and Route Target; failing that, a VLAN-aware
+/// bundle member selects it by `<RT, Ethernet Tag>`, and the differing VNI
+/// is counted as `vni_mismatch` on that member. Projection reads the RIB
+/// snapshot and never edits it, so these routes stay in Adj-RIB-In and keep
+/// being reflected; this only explains the projection gap.
 fn l2_remote_route_drop_counts(
     routes: &[EvpnRibRoute],
     instances: &EvpnInstanceTable,
     local_vtep_ips: &std::collections::BTreeSet<std::net::IpAddr>,
 ) -> BTreeMap<(u32, &'static str), u64> {
+    use rustbgpd_evpn::{EviImport, L2RemoteRouteDropReason};
     let mut counts = BTreeMap::new();
     for route in routes {
-        let (vni, ethernet_tag) = match &route.route {
-            EvpnRoute::MacIp(macip) => (macip.label1.as_vni(), macip.ethernet_tag),
-            EvpnRoute::EadPerEvi(ead) => (ead.label.as_vni(), ead.ethernet_tag),
-            _ => continue,
-        };
         if local_vtep_ips.contains(&route.next_hop) {
             continue;
         }
-        let Some(instance) = rustbgpd_evpn::EvpnInstanceId::new(vni)
-            .ok()
-            .and_then(|id| instances.get(id))
-        else {
-            continue;
+        let attrs = &route.attributes;
+        let instance_for = |vni| {
+            rustbgpd_evpn::EvpnInstanceId::new(vni)
+                .ok()
+                .and_then(|id| instances.get(id))
         };
-        if let rustbgpd_evpn::EviImport::Dropped(reason) =
-            instance.evi_import(vni, ethernet_tag, &route.attributes)
-        {
+        let (vni, ethernet_tag, verdict) = match &route.route {
+            EvpnRoute::MacIp(macip) => {
+                let vni = macip.label1.as_vni();
+                let verdict = instance_for(vni).map(|inst| inst.mac_ip_import(macip, attrs));
+                (vni, macip.ethernet_tag, verdict)
+            }
+            EvpnRoute::EadPerEvi(ead) => {
+                let vni = ead.label.as_vni();
+                let verdict = instance_for(vni).map(|inst| inst.ead_per_evi_import(ead, attrs));
+                (vni, ead.ethernet_tag, verdict)
+            }
+            EvpnRoute::Imet(imet) => {
+                // Without a PMSI the VNI is unknown; the flood projection
+                // reports that as a flood skip instead.
+                let Some(pmsi) = attrs.iter().find_map(PathAttribute::pmsi_tunnel) else {
+                    continue;
+                };
+                if local_vtep_ips.contains(&imet.originator_ip) {
+                    continue;
+                }
+                let vni = pmsi.mpls_label;
+                let verdict =
+                    instance_for(vni).map(|inst| inst.evi_import(vni, imet.ethernet_tag, attrs));
+                (vni, imet.ethernet_tag, verdict)
+            }
+            _ => continue,
+        };
+        let drop = match verdict {
+            Some(EviImport::Dropped(reason)) => Some((vni, reason)),
+            Some(EviImport::Accepted) => None,
+            Some(EviImport::NotApplicable) | None => instances
+                .bundle_member_for_foreign_vni(vni, ethernet_tag, attrs)
+                .map(|member| (member.id.as_u32(), L2RemoteRouteDropReason::VniMismatch)),
+        };
+        if let Some((vni, reason)) = drop {
             *counts.entry((vni, reason.as_str())).or_insert(0) += 1;
         }
     }
@@ -1818,7 +1849,9 @@ fn project_esi_overlay_ead_per_evi(
 /// "single-active EAD-per-ES AND EAD-per-EVI" join itself (decision
 /// 2's both-route-types rule). Self-originated rows are still
 /// filtered: we are never our own backup path. All consumers require a
-/// configured VNI, matching Route Target, and zero Ethernet Tag.
+/// configured VLAN-Based VNI, matching Route Target, and the instance's
+/// Ethernet Tag; a bundle member drops every EAD-per-EVI (ADR-0092
+/// amendment E).
 fn project_ead_per_evi_unfiltered(
     route: &EvpnRibRoute,
     local_vtep_ips: &std::collections::BTreeSet<std::net::IpAddr>,
@@ -1831,9 +1864,10 @@ fn project_ead_per_evi_unfiltered(
         return None;
     }
     let vni = rustbgpd_evpn::EvpnInstanceId::new(ead.label.as_vni()).ok()?;
-    if !instances
+    if instances
         .get(vni)?
-        .imports_evi(ead.label.as_vni(), ead.ethernet_tag, &route.attributes)
+        .ead_per_evi_import(ead, &route.attributes)
+        != rustbgpd_evpn::EviImport::Accepted
     {
         return None;
     }
@@ -5826,5 +5860,203 @@ mod tests {
 
         shutdown.cancel();
         let _ = tokio::time::timeout(Duration::from_millis(200), join).await;
+    }
+
+    /// Two VLAN-aware bundle members on one VLAN-aware bridge sharing route
+    /// target 65001:500: VNI 10010 (Ethernet Tag 10, VLAN 10) and VNI 10020
+    /// (Ethernet Tag 20, VLAN 20).
+    fn bundle_table() -> EvpnInstanceTable {
+        let mut table = EvpnInstanceTable::new();
+        for (v, tag) in [(10010, 10), (10020, 20)] {
+            let mut member = local_instance(v, Some("br0"))
+                .with_bridge_vlan(Some(rustbgpd_evpn::BridgeVlan::new(tag).unwrap()))
+                .with_ethernet_tag(EthernetTagId(tag));
+            member.route_targets = vec![RouteTarget::TwoOctetAs {
+                asn: 65001,
+                value: 500,
+            }];
+            table.insert(member).unwrap();
+        }
+        table
+    }
+
+    /// Re-address `route` to the bundle: the shared route target, Ethernet
+    /// Tag `tag` and VNI `v` (the IMET VNI rides the PMSI label the caller
+    /// built it with).
+    fn bundle_route(mut route: EvpnRibRoute, v: u32, tag: u32) -> EvpnRibRoute {
+        match &mut route.route {
+            EvpnRoute::MacIp(macip) => {
+                macip.label1 = MplsLabel::new(v);
+                macip.ethernet_tag = EthernetTagId(tag);
+            }
+            EvpnRoute::EadPerEvi(ead) => {
+                ead.label = MplsLabel::new(v);
+                ead.ethernet_tag = EthernetTagId(tag);
+            }
+            EvpnRoute::Imet(imet) => imet.ethernet_tag = EthernetTagId(tag),
+            other => panic!("not an L2 route: {other:?}"),
+        }
+        let attrs = route
+            .attributes
+            .iter()
+            .filter(|attr| attr.extended_communities().is_none())
+            .cloned()
+            .chain([PathAttribute::ExtendedCommunities(vec![
+                RouteTarget::TwoOctetAs {
+                    asn: 65001,
+                    value: 500,
+                }
+                .to_extended_community(),
+            ])])
+            .collect();
+        route.attributes = AttrSet::new(attrs);
+        route
+    }
+
+    fn with_esi(mut route: EvpnRibRoute, esi: EthernetSegmentIdentifier) -> EvpnRibRoute {
+        let EvpnRoute::MacIp(macip) = &mut route.route else {
+            unreachable!()
+        };
+        macip.esi = esi;
+        route
+    }
+
+    /// ADR-0092 amendments C-E through the real projection: each member
+    /// consumes Type 2 only under its own VNI and Ethernet Tag, so one MAC
+    /// under tags 10 and 20 lands on two VNIs and two VLAN-scoped FDB rows.
+    /// A wrong tag, tag 0, a foreign VNI selected by `<RT, tag>`, a
+    /// multi-homed Type 2 and an EAD-per-EVI program nothing and each move
+    /// their counted reason on the member they select. A Type 5 under a
+    /// member's tag stays an IP-VRF drop (Decision 3).
+    #[test]
+    fn bundle_members_project_type2_per_tag_onto_member_vlans() {
+        let instances = bundle_table();
+        let ip_vrfs = ip_vrf_table_one("blue", 5000, 5000);
+        let esi = EthernetSegmentIdentifier::new([7; 10]);
+        let routes = vec![
+            bundle_route(evpn_macip_route(0, 0xaa, "10.0.0.2", None), 10010, 10),
+            bundle_route(evpn_macip_route(0, 0xaa, "10.0.0.3", None), 10020, 20),
+            bundle_route(evpn_macip_route(0, 0xbb, "10.0.0.2", None), 10010, 30),
+            bundle_route(evpn_macip_route(0, 0xcc, "10.0.0.2", None), 10010, 0),
+            bundle_route(evpn_macip_route(0, 0xdd, "10.0.0.2", None), 5000, 20),
+            // Multi-homed, with the EAD-per-ES that would let a VLAN-Based
+            // row program it.
+            bundle_route(
+                with_esi(evpn_macip_route(0, 0xee, "10.0.0.4", None), esi),
+                10010,
+                10,
+            ),
+            evpn_ead_per_es_route(esi, "10.0.0.4", false),
+            bundle_route(evpn_ead_per_evi_route(esi, 10, "10.0.0.4"), 10010, 10),
+            type5_with_esi_and_router_mac(
+                "10.9.0.0/24",
+                "10.0.0.9",
+                5000,
+                EthernetSegmentIdentifier::ZERO,
+                10,
+                [2; 6],
+            ),
+        ];
+        let tables =
+            project_intent_tables(&routes, &instances, &ip_vrfs, &BTreeSet::new(), &no_bias());
+
+        let programmed: Vec<_> = tables
+            .remote_macs
+            .iter()
+            .map(|(&(v, m), entry)| (v.as_u32(), m, entry.remote_vtep_ip))
+            .collect();
+        assert_eq!(
+            programmed,
+            vec![
+                (10010, mac(0xaa), ipa("10.0.0.2")),
+                (10020, mac(0xaa), ipa("10.0.0.3")),
+            ]
+        );
+        assert_eq!(
+            tables.l2_remote_route_drops,
+            BTreeMap::from([
+                ((10010, "ethernet_tag_mismatch"), 2),
+                ((10010, "multihoming_unsupported"), 2),
+                ((10020, "vni_mismatch"), 1),
+            ])
+        );
+        assert!(tables.remote_ip_prefixes.is_empty());
+        assert_eq!(
+            tables.remote_ip_prefixes.drop_counts_by_vrf_reason(),
+            BTreeMap::from([(("blue".to_string(), "non_zero_ethernet_tag"), 1)])
+        );
+
+        // The kernel diff places each member's row on its own bridge VLAN.
+        let mut probes = rustbgpd_evpn_linux::InstanceProbes::new();
+        for v in [10010, 10020] {
+            probes.insert(vni(v), InstanceProbe::Ready);
+        }
+        let plan = rustbgpd_evpn_linux::compute_diff(
+            &tables.remote_macs,
+            &rustbgpd_evpn_linux::KernelSnapshot::new(),
+            &rustbgpd_evpn_linux::OwnedSet::new(),
+            &probes,
+            &rustbgpd_evpn_linux::group_state::GroupOwnedMap::new(),
+            &instances,
+        );
+        assert_eq!(
+            plan.ops,
+            vec![
+                rustbgpd_evpn_linux::DataplaneOp::AddRemoteFdb {
+                    vni: vni(10010),
+                    mac: mac(0xaa),
+                    vlan: Some(10),
+                    dst: ipa("10.0.0.2"),
+                },
+                rustbgpd_evpn_linux::DataplaneOp::AddRemoteFdb {
+                    vni: vni(10020),
+                    mac: mac(0xaa),
+                    vlan: Some(20),
+                    dst: ipa("10.0.0.3"),
+                },
+            ]
+        );
+    }
+
+    /// ADR-0092 amendment F: received IMET routes resolve to members by the
+    /// same rule as Type 2. A member's flood list takes only IMETs under its
+    /// own VNI (PMSI label) and Ethernet Tag; the rest are counted drops.
+    #[test]
+    fn bundle_members_build_flood_lists_per_tag() {
+        let instances = bundle_table();
+        let routes = vec![
+            bundle_route(ir_imet(10010, "10.0.0.2"), 10010, 10),
+            bundle_route(ir_imet(10020, "10.0.0.3"), 10020, 20),
+            bundle_route(ir_imet(10010, "10.0.0.4"), 10010, 20),
+            bundle_route(ir_imet(10010, "10.0.0.5"), 10010, 0),
+            bundle_route(ir_imet(5000, "10.0.0.6"), 5000, 10),
+        ];
+        let tables = project_intent_tables(
+            &routes,
+            &instances,
+            &IpVrfTable::new(),
+            &BTreeSet::new(),
+            &no_bias(),
+        );
+        let flood: Vec<_> = tables
+            .remote_macs
+            .iter_flood_vteps()
+            .map(|(v, vteps)| (v.as_u32(), vteps.iter().copied().collect::<Vec<_>>()))
+            .collect();
+        assert_eq!(
+            flood,
+            vec![
+                (10010, vec![ipa("10.0.0.2")]),
+                (10020, vec![ipa("10.0.0.3")]),
+            ]
+        );
+        assert!(tables.flood_skips.is_empty(), "{:?}", tables.flood_skips);
+        assert_eq!(
+            tables.l2_remote_route_drops,
+            BTreeMap::from([
+                ((10010, "ethernet_tag_mismatch"), 2),
+                ((10010, "vni_mismatch"), 1),
+            ])
+        );
     }
 }
