@@ -2843,10 +2843,14 @@ impl PeerSession {
                                 vpn_announced.push(VpnRibRoute {
                                     nlri: entry.nlri.clone(),
                                     next_hop: mp.next_hop,
-                                    // Carry the RFC 4659 two-address IPv6
-                                    // link-local half so VPNv6 reflection
-                                    // re-emits it (LAN-217).
+                                    // Keep the two-address link-local half
+                                    // with its receiving interface; export
+                                    // re-emits it only on that link.
                                     link_local_next_hop: mp.link_local_next_hop,
+                                    next_hop_scope: self.link_local_next_hop_scope(
+                                        mp.next_hop,
+                                        mp.link_local_next_hop,
+                                    ),
                                     peer: self.peer_ip,
                                     attributes: attrs,
                                     received_at: now,
@@ -2914,10 +2918,14 @@ impl PeerSession {
                                 labeled_announced.push(LabeledRibRoute {
                                     nlri: entry.nlri.clone(),
                                     next_hop: mp.next_hop,
-                                    // Carry the RFC 8950 two-address IPv6
-                                    // link-local half so labeled IPv6
-                                    // reflection re-emits it (LAN-190).
+                                    // Keep the two-address link-local half
+                                    // with its receiving interface; export
+                                    // re-emits it only on that link.
                                     link_local_next_hop: mp.link_local_next_hop,
+                                    next_hop_scope: self.link_local_next_hop_scope(
+                                        mp.next_hop,
+                                        mp.link_local_next_hop,
+                                    ),
                                     peer: self.peer_ip,
                                     attributes: attrs,
                                     received_at: now,

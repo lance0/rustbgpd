@@ -364,16 +364,29 @@ impl SessionExportProfile {
         next_hop: IpAddr,
         route: &Route,
     ) -> Option<Ipv6Addr> {
-        // RFC 2545 §3: the source's link-local belongs to its own link.
-        // Forward it only between sessions bound to the same interface;
-        // everywhere else (iBGP, route-server clients, global transport)
-        // send the 16-octet global form.
         (next_hop == route.next_hop
-            && !matches!(next_hop, IpAddr::V6(addr) if is_ipv6_link_local(&addr))
-            && self.next_hop_scope.is_some()
-            && route.next_hop_scope.as_deref() == self.next_hop_scope.as_ref())
-        .then_some(route.link_local_next_hop)
+            && !matches!(next_hop, IpAddr::V6(addr) if is_ipv6_link_local(&addr)))
+        .then(|| {
+            self.link_local_companion_on_its_link(
+                route.link_local_next_hop,
+                route.next_hop_scope.as_deref(),
+            )
+        })
         .flatten()
+    }
+
+    /// RFC 2545 §3 (and RFC 4659 §3.2.1.1 for `VPNv6`): a received
+    /// link-local companion belongs to its own link. Forward it only between
+    /// sessions bound to the same interface; everywhere else (iBGP,
+    /// route-server clients, global transport) send the global-only form.
+    fn link_local_companion_on_its_link(
+        &self,
+        companion: Option<Ipv6Addr>,
+        source_scope: Option<&rustbgpd_rib::NextHopScope>,
+    ) -> Option<Ipv6Addr> {
+        companion.filter(|_| {
+            self.next_hop_scope.is_some() && source_scope == self.next_hop_scope.as_ref()
+        })
     }
 
     fn peer_accepts_llgr_stale(&self, family: (Afi, Safi)) -> bool {
@@ -858,7 +871,10 @@ impl SessionExportProfile {
             afi,
             safi,
             next_hop: route.next_hop,
-            link_local_next_hop: route.link_local_next_hop,
+            link_local_next_hop: self.link_local_companion_on_its_link(
+                route.link_local_next_hop,
+                route.next_hop_scope.as_deref(),
+            ),
             attrs: self.prepare_vpn_attributes(route),
             nlri: rustbgpd_wire::VpnNlriEntry {
                 path_id: route.path_id,
@@ -876,7 +892,10 @@ impl SessionExportProfile {
             afi,
             safi,
             next_hop: route.next_hop,
-            link_local_next_hop: route.link_local_next_hop,
+            link_local_next_hop: self.link_local_companion_on_its_link(
+                route.link_local_next_hop,
+                route.next_hop_scope.as_deref(),
+            ),
             attrs: self.prepare_labeled_attributes(route),
             nlri: rustbgpd_wire::LabeledNlriEntry {
                 path_id: route.path_id,

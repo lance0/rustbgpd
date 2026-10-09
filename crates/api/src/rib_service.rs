@@ -4021,6 +4021,7 @@ mod tests {
             },
             next_hop: peer,
             link_local_next_hop: None,
+            next_hop_scope: None,
             peer: common.0,
             attributes: Arc::clone(&common.1),
             received_at: common.2,
@@ -4037,6 +4038,7 @@ mod tests {
             },
             next_hop: peer,
             link_local_next_hop: None,
+            next_hop_scope: None,
             peer: common.0,
             attributes: Arc::clone(&common.1),
             received_at: common.2,
@@ -6071,6 +6073,7 @@ mod tests {
             },
             next_hop: Ipv4Addr::new(192, 0, 2, 1).into(),
             link_local_next_hop: None,
+            next_hop_scope: None,
             peer: Ipv4Addr::new(192, 0, 2, 2).into(),
             attributes: AttrSet::new(vec![
                 PathAttribute::AsPath(AsPath {

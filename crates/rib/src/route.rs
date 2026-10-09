@@ -700,10 +700,14 @@ pub struct VpnRibRoute {
     pub next_hop: IpAddr,
     /// IPv6 link-local next-hop carried alongside the global one (RFC 4659
     /// §3.2.1.1 48-byte two-address form), populated when the received
-    /// `VPNv6` `MP_REACH_NLRI` had a 48-byte next-hop. Reflected verbatim so
-    /// `VPNv6` link-local forwarding survives reflection (LAN-217); `None`
-    /// for `VPNv4` or single-address `VPNv6` next-hops.
+    /// `VPNv6` `MP_REACH_NLRI` had a 48-byte next-hop. Re-emitted only
+    /// toward a peer on the same link (see `next_hop_scope`); `None` for
+    /// `VPNv4` or single-address `VPNv6` next-hops.
     pub link_local_next_hop: Option<Ipv6Addr>,
+    /// Receiving interface for `link_local_next_hop`, when the source session
+    /// is interface-bound. Export forwards the link-local only to a session
+    /// bound to the same interface (RFC 4659 §3.2.1.1).
+    pub next_hop_scope: Option<Box<NextHopScope>>,
     /// The peer that advertised this route.
     pub peer: IpAddr,
     /// BGP path attributes. Route Targets ride here as extended communities.
@@ -871,10 +875,14 @@ pub struct LabeledRibRoute {
     pub next_hop: IpAddr,
     /// IPv6 link-local next-hop carried alongside the global one (RFC 8950 §4
     /// / RFC 2545 §3 two-address form), populated when the received labeled
-    /// `MP_REACH_NLRI` had a 32-byte next-hop. Reflected verbatim so labeled
-    /// IPv6 link-local forwarding survives reflection (LAN-190); `None` for
-    /// IPv4 or single-address IPv6 next-hops.
+    /// `MP_REACH_NLRI` had a 32-byte next-hop. Re-emitted only toward a peer
+    /// on the same link (see `next_hop_scope`); `None` for IPv4 or
+    /// single-address IPv6 next-hops.
     pub link_local_next_hop: Option<Ipv6Addr>,
+    /// Receiving interface for `link_local_next_hop`, when the source session
+    /// is interface-bound. Export forwards the link-local only to a session
+    /// bound to the same interface (RFC 2545 §3).
+    pub next_hop_scope: Option<Box<NextHopScope>>,
     /// The peer that advertised this route.
     pub peer: IpAddr,
     /// BGP path attributes.
@@ -1609,6 +1617,7 @@ mod tests {
             nlri,
             next_hop: IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1)),
             link_local_next_hop: None,
+            next_hop_scope: None,
             peer: IpAddr::V4(Ipv4Addr::new(192, 0, 2, 2)),
             attributes: AttrSet::new(vec![PathAttribute::Origin(Origin::Igp)]),
             received_at: Instant::now(),

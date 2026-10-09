@@ -3838,6 +3838,7 @@ fn vpn_route(n: u8, src: IpAddr) -> VpnRibRoute {
         },
         next_hop: src,
         link_local_next_hop: None,
+        next_hop_scope: None,
         peer: src,
         attributes: AttrSet::new(vec![PathAttribute::Origin(Origin::Igp)]),
         received_at: std::time::Instant::now(),

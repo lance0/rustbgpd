@@ -1702,6 +1702,7 @@ mod tests {
             nlri,
             next_hop: peer,
             link_local_next_hop: None,
+            next_hop_scope: None,
             peer,
             attributes: AttrSet::new(vec![
                 PathAttribute::Origin(Origin::Igp),
@@ -1887,6 +1888,7 @@ mod tests {
             nlri,
             next_hop: peer,
             link_local_next_hop: None,
+            next_hop_scope: None,
             peer,
             attributes: AttrSet::new(vec![
                 PathAttribute::Origin(Origin::Igp),

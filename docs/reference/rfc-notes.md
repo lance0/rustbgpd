@@ -25,7 +25,7 @@ deviations; [docs/interop.md](../interop.md) has the interop matrix,
 | Route reflection | RFC 4456, RFC 9107 (ORR, ADR-0095) | Per-client best paths via BGP-LS-sourced SPF |
 | Route server (IXP) | RFC 7947 (ADR-0039/0101), RFC 8195 | Transparent redistribution, §2.3.2 per-client best-path, member-set control communities (per-target announce/prepend steering, scrubbed on egress) |
 | Graceful restart | RFC 4724 (GR helper), RFC 9494 (LLGR) | Stale retention across all RR families; role-derived forwarding-state bits |
-| VPN / MPLS families (RR / controller-feed only, ADR-0077) | RFC 4364/4659 VPNv4/v6 (SAFI 128), RFC 4684 RT-Constrain (SAFI 132), RFC 8277 labeled-unicast (SAFI 4), RFC 9552 BGP-LS (SAFI 71/72) | RD/label/next-hop/RT preserved verbatim; no VRF import, no MPLS FIB, no local BGP-LS production |
+| VPN / MPLS families (RR / controller-feed only, ADR-0077) | RFC 4364/4659 VPNv4/v6 (SAFI 128), RFC 4684 RT-Constrain (SAFI 132), RFC 8277 labeled-unicast (SAFI 4), RFC 9552 BGP-LS (SAFI 71/72) | RD/label/next-hop/RT preserved verbatim (a received IPv6 link-local next hop only toward its own link); no VRF import, no MPLS FIB, no local BGP-LS production |
 | EVPN (Linux/VXLAN alpha) | RFC 7432, RFC 9135/9136 (symmetric IRB), RFC 9012/8365 (VXLAN encap), RFC 9251 (SMET relay) | Route types 1–6; Type 6 SMET relay only; RR + VTEP + multi-homing building blocks; RFC 9721 §5.1/§6.2 local-move cascade (partial) |
 | Origin / path security | RFC 6811 + RFC 8210 (RPKI/RTR), ASPA, RFC 9234 (Roles + OTC, ADR-0071) | Origin validation, AS-path verification, leak prevention |
 | Transport security | RFC 5925 (TCP-AO), TCP MD5, RFC 5082 (GTSM) | TCP-AO: static-neighbor and direct dynamic-prefix keyrings on Linux; add-only successor installation, observation-gated successor selection/deprecation, then deprecated unselected-MKT deletion on separate SIGHUP generations; RPKI cache (RTR) sockets take the same MD5 or TCP-AO material |
@@ -976,8 +976,12 @@ AFI (2 bytes) | SAFI (1) | NH-Len (1) | Next Hop (variable) | Reserved (1) | NLR
   This matches FRR's default (it strips the received link-local unless
   `nexthop-local unchanged` is set). BIRD keeps the 32-octet form toward
   iBGP and route-server clients. A local next hop (eBGP, next-hop self)
-  never carries a companion on a global session. VPN and labeled families
-  still forward the received form.
+  never carries a companion on a global session. Labeled-unicast (RFC 8277,
+  which defers to RFC 4798 and so to RFC 2545) and VPN (RFC 4659 §3.2.1.1,
+  RFC 8950 §4) follow the same rule: a reflected 32-octet labeled or 48-octet
+  VPN next hop keeps its link-local half only toward a peer bound to the
+  source's interface, and every other receiver gets the 16- or 24-octet
+  global form. FRR's default does the same for these families.
 - NLRI: same prefix-length encoding as IPv4, but up to 128 bits (16 bytes
   of address data).
 - When `MP_REACH_NLRI` is present in an UPDATE, the body NEXT_HOP attribute
@@ -1498,8 +1502,10 @@ carries inactive (absent), unlimited (zero), or finite.
   is suppressed rather than sending classic IPv4 NLRI without NEXT_HOP.
   Ordinary eBGP, next-hop-self, and explicit IPv4 export-policy rewrites
   remain eligible when they supply a classic IPv4 NEXT_HOP.
-- VPNv4 reflection preserves the 24- or 48-octet next-hop encoding (§3/§5)
-  and requires the recipient's VPNv4 IPv6-next-hop receive capability. A
+- VPNv4 reflection preserves the 24- or 48-octet next-hop encoding (§3/§5),
+  except that the 48-octet form's link-local half is forwarded only toward a
+  peer on the source's link (see RFC 2545 §3 under RFC 4760), and requires
+  the recipient's VPNv4 IPv6-next-hop receive capability. A
   rejected replacement withdraws any previously advertised route; ordinary
   IPv4-next-hop VPNv4 routes and VPN withdrawals remain eligible without it.
   The peer's receive capability is not an inbound admission requirement.

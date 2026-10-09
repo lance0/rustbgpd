@@ -453,6 +453,7 @@ mod tests {
             nlri: vpn_nlri(),
             next_hop: IpAddr::V4(Ipv4Addr::new(192, 0, 2, 9)),
             link_local_next_hop: None,
+            next_hop_scope: None,
             peer: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
             attributes: AttrSet::new(base_attrs()),
             received_at: Instant::now(),
