@@ -147,7 +147,8 @@ local import check as Type 2 adds one all-zero-MAC row to the instance's VXLAN
 port. The check requires:
 
 - a PMSI label equal to the instance VNI;
-- Ethernet Tag `0`;
+- the instance's configured service Ethernet Tag (`0` for a VLAN-based
+  service);
 - a matching Route Target;
 - VXLAN-compatible encapsulation.
 
