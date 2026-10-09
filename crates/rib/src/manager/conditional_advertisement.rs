@@ -1112,16 +1112,18 @@ impl RibManager {
         };
         let mut detail = match applied_basis {
             None => "pending initial evaluation".to_string(),
-            Some(ConditionalAdvertiseIf::Present) => {
-                let prefix = first_present.map_or_else(
-                    || definition.condition_prefixes[0].to_string(),
-                    ToString::to_string,
-                );
-                format!(
+            // In a settle window the current verdicts can contradict the
+            // applied state; the detail then names what held when applied.
+            Some(ConditionalAdvertiseIf::Present) => match first_present {
+                Some(prefix) => format!(
                     "condition prefix {prefix} present (advertise if {})",
                     mode.label()
-                )
-            }
+                ),
+                None => format!(
+                    "condition present when last applied (advertise if {})",
+                    mode.label()
+                ),
+            },
             Some(ConditionalAdvertiseIf::Absent) => {
                 let prefixes = definition
                     .condition_prefixes
@@ -1134,8 +1136,13 @@ impl RibManager {
                 } else {
                     "prefixes"
                 };
+                let when = if first_present.is_some() {
+                    " when last applied"
+                } else {
+                    ""
+                };
                 format!(
-                    "condition {noun} {prefixes} absent (advertise if {})",
+                    "condition {noun} {prefixes} absent{when} (advertise if {})",
                     mode.label()
                 )
             }
