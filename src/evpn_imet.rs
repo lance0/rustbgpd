@@ -53,8 +53,7 @@ use rustbgpd_evpn::{EvpnInstance, EvpnInstanceId};
 use rustbgpd_rib::AttrSet;
 use rustbgpd_rib::{RibUpdate, route::EvpnRibRoute};
 use rustbgpd_wire::{
-    AsPath, EthernetTagId, EvpnImet, EvpnRoute, EvpnRouteKey, ExtendedCommunity, Origin,
-    PathAttribute, PmsiTunnel,
+    AsPath, EvpnImet, EvpnRoute, EvpnRouteKey, ExtendedCommunity, Origin, PathAttribute, PmsiTunnel,
 };
 use tokio::sync::mpsc;
 use tracing::{debug, warn};
@@ -311,7 +310,9 @@ async fn withdraw_imet_key(
     }
 }
 
-/// Build the wire-shaped Type 3 IMET `EvpnRibRoute` for `instance`.
+/// Build the wire-shaped Type 3 IMET `EvpnRibRoute` for `instance`, under
+/// the instance's RD and Ethernet Tag (the member tag for a VLAN-aware
+/// bundle row, ADR-0092 amendment F).
 ///
 /// Path attribute set:
 /// - `Origin::Igp` (locally originated)
@@ -325,7 +326,7 @@ async fn withdraw_imet_key(
 fn build_imet_route(instance: &EvpnInstance) -> EvpnRibRoute {
     let imet = EvpnImet {
         rd: instance.rd,
-        ethernet_tag: EthernetTagId(0),
+        ethernet_tag: instance.ethernet_tag,
         originator_ip: instance.local_vtep_ip,
     };
 
@@ -366,12 +367,38 @@ mod tests {
     use std::sync::Arc;
 
     use rustbgpd_rib::{RibCommandError, route::RouteOrigin};
-    use rustbgpd_wire::{PmsiTunnelIdentifier, PmsiTunnelType};
+    use rustbgpd_wire::{EthernetTagId, PmsiTunnelIdentifier, PmsiTunnelType};
 
     use crate::test_support::{evpn_instance, rd, vni};
 
     fn local_instance(v: u32) -> EvpnInstance {
         evpn_instance(65000, v, v, Some(format!("br{v}")), false)
+    }
+
+    /// ADR-0092 amendment F: a VLAN-aware bundle member originates its IMET
+    /// under its own Ethernet Tag, RD and VNI (PMSI label).
+    #[test]
+    fn build_imet_route_stamps_bundle_member_tag() {
+        let inst = local_instance(10010).with_ethernet_tag(EthernetTagId(10));
+        let route = build_imet_route(&inst);
+        let EvpnRoute::Imet(imet) = &route.route else {
+            panic!("expected Imet, got {:?}", route.route);
+        };
+        assert_eq!(imet.ethernet_tag, EthernetTagId(10));
+        assert_eq!(imet.rd, rd(65000, 10010));
+        let pmsi = route
+            .attributes
+            .iter()
+            .find_map(PathAttribute::pmsi_tunnel)
+            .expect("PMSI Tunnel present");
+        assert_eq!(pmsi.mpls_label, 10010);
+        assert!(matches!(
+            route.key(),
+            EvpnRouteKey::Imet {
+                ethernet_tag: EthernetTagId(10),
+                ..
+            }
+        ));
     }
 
     #[test]

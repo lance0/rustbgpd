@@ -1625,6 +1625,8 @@ impl rustbgpd_api::proto::evpn_service_server::EvpnService for MockEvpnService {
                 remote_route_drop_counts: vec![],
                 advertise_svi_mac: false,
                 originated_local_macs_count: 2,
+                service_interface: "vlan_based".to_string(),
+                ethernet_tag: 0,
                 readiness_state:
                     server_proto::EvpnInstanceReadinessState::EvpnInstanceReadinessReady as i32,
                 not_ready_reason: String::new(),

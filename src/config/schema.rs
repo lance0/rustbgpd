@@ -1123,8 +1123,7 @@ pub enum EvpnServiceInterfaceConfig {
     #[default]
     VlanBased,
     /// Member of an RFC 8365 VLAN-aware bundle, identified by its shared
-    /// route targets and its own non-zero `ethernet_tag` (ADR-0092). Not
-    /// accepted yet.
+    /// route targets and its own non-zero `ethernet_tag` (ADR-0092).
     VlanAwareBundle,
 }
 
@@ -2983,10 +2982,10 @@ pub struct AsPathPrependConfig {
 /// - `bridge` — optional Linux bridge name this EVI is bound to.
 ///   Kernel reconciliation reports `NotReady` until the named bridge exists.
 /// - `bridge_vlan` — optional local Linux bridge VLAN selector
-///   (`1..=4094`). Valid only with `bridge`; ADR-0089 v1 keeps EVPN
-///   Ethernet Tag ID `0`, so this is not a wire-protocol tag.
+///   (`1..=4094`). Valid only with `bridge`; this is never the EVPN
+///   Ethernet Tag, which is `ethernet_tag`.
 /// - `service_interface` — `vlan_based` (default) or `vlan_aware_bundle`
-///   (ADR-0092; validated, then rejected as not supported yet).
+///   (ADR-0092).
 /// - `ethernet_tag` — explicit `1..=16_777_215` Ethernet Tag of a
 ///   `vlan_aware_bundle` member; rejected on `vlan_based` rows.
 /// - `advertise_svi_mac` — toggle for Type 2 origination of the SVI's
@@ -3023,8 +3022,8 @@ pub struct EvpnInstanceConfig {
     #[serde(default)]
     pub bridge_vlan: Option<u32>,
     /// EVPN service interface (RFC 7432 §6, ADR-0092). `vlan_based`, the
-    /// default, keeps Ethernet Tag ID `0`. `vlan_aware_bundle` rows are
-    /// validated but not accepted yet.
+    /// default, uses Ethernet Tag ID `0`. A `vlan_aware_bundle` row
+    /// originates and imports L2 routes under its `ethernet_tag`.
     #[serde(
         default,
         skip_serializing_if = "EvpnServiceInterfaceConfig::is_vlan_based"

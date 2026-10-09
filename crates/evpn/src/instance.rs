@@ -18,7 +18,10 @@
 use std::collections::{BTreeSet, HashMap};
 use std::net::IpAddr;
 
-use rustbgpd_wire::{EthernetTagId, EvpnMacIp, MacAddress, PathAttribute, RouteDistinguisher};
+use rustbgpd_wire::{
+    EthernetSegmentIdentifier, EthernetTagId, EvpnEadPerEvi, EvpnMacIp, MacAddress, PathAttribute,
+    RouteDistinguisher,
+};
 
 use crate::duplicate_ip::DuplicateIpConfig;
 use crate::duplicate_mac::DuplicateMacConfig;
@@ -230,12 +233,12 @@ pub struct EvpnInstance {
     /// Optional local Linux bridge VLAN selector for ADR-0089 v1
     /// VLAN-aware bridge attribution.
     ///
-    /// This is a kernel/dataplane binding only. EVPN Type 2 / Type 3 /
-    /// EAD-per-EVI routes keep Ethernet Tag ID `0`.
+    /// This is a kernel/dataplane binding only; it is never the EVPN
+    /// Ethernet Tag, which is [`Self::ethernet_tag`].
     pub bridge_vlan: Option<BridgeVlan>,
-    /// EVPN Ethernet Tag this instance consumes: `0` for VLAN-Based
-    /// service, the configured member tag for a VLAN-aware bundle row
-    /// (ADR-0092). Remote routes under any other tag are dropped at VTEP
+    /// EVPN Ethernet Tag this instance originates and consumes: `0` for
+    /// VLAN-Based service, the configured member tag for a VLAN-aware bundle
+    /// row (ADR-0092). Remote routes under any other tag are dropped at VTEP
     /// projection with [`L2RemoteRouteDropReason::EthernetTagMismatch`].
     pub ethernet_tag: EthernetTagId,
     /// Originate Type 2 routes for the SVI's MAC address (RFC 9135 §6.1).
@@ -323,7 +326,71 @@ impl EvpnInstance {
         attributes: &[PathAttribute],
     ) -> bool {
         next_hop != self.local_vtep_ip
-            && self.imports_evi(route.label1.as_vni(), route.ethernet_tag, attributes)
+            && self.mac_ip_import(route, attributes) == EviImport::Accepted
+    }
+
+    /// Classify a remote Type 2 for local consumption: [`Self::evi_import`],
+    /// then, for a VLAN-aware bundle member, a non-zero ESI is a counted
+    /// [`L2RemoteRouteDropReason::MultihomingUnsupported`] drop (ADR-0092
+    /// amendment E). It is never handled as single-homed.
+    #[must_use]
+    pub fn mac_ip_import(&self, route: &EvpnMacIp, attributes: &[PathAttribute]) -> EviImport {
+        let verdict = self.evi_import(route.label1.as_vni(), route.ethernet_tag, attributes);
+        if verdict == EviImport::Accepted
+            && self.is_vlan_aware_bundle()
+            && route.esi != EthernetSegmentIdentifier::ZERO
+        {
+            EviImport::Dropped(L2RemoteRouteDropReason::MultihomingUnsupported)
+        } else {
+            verdict
+        }
+    }
+
+    /// Classify a remote Type 1 EAD-per-EVI for local consumption. A bundle
+    /// member has no multi-homing in the MVP, so a route it would otherwise
+    /// accept is a counted
+    /// [`L2RemoteRouteDropReason::MultihomingUnsupported`] drop (ADR-0092
+    /// amendment E).
+    #[must_use]
+    pub fn ead_per_evi_import(
+        &self,
+        route: &EvpnEadPerEvi,
+        attributes: &[PathAttribute],
+    ) -> EviImport {
+        match self.evi_import(route.label.as_vni(), route.ethernet_tag, attributes) {
+            EviImport::Accepted if self.is_vlan_aware_bundle() => {
+                EviImport::Dropped(L2RemoteRouteDropReason::MultihomingUnsupported)
+            }
+            verdict => verdict,
+        }
+    }
+
+    /// Whether this row is a VLAN-aware bundle member (ADR-0092): its
+    /// Ethernet Tag is non-zero. VLAN-Based rows always use tag `0`.
+    #[must_use]
+    pub const fn is_vlan_aware_bundle(&self) -> bool {
+        self.ethernet_tag.0 != 0
+    }
+
+    /// The configured service interface, spelled as in config and on the
+    /// status surface: `vlan_based` or `vlan_aware_bundle`.
+    #[must_use]
+    pub const fn service_interface(&self) -> &'static str {
+        if self.is_vlan_aware_bundle() {
+            "vlan_aware_bundle"
+        } else {
+            "vlan_based"
+        }
+    }
+
+    /// Whether `attributes` carry at least one of this instance's Route Targets.
+    fn carries_route_target(&self, attributes: &[PathAttribute]) -> bool {
+        attributes
+            .iter()
+            .filter_map(PathAttribute::extended_communities)
+            .flatten()
+            .filter_map(|ec| RouteTarget::from_extended_community(*ec))
+            .any(|rt| self.route_targets.contains(&rt))
     }
 
     /// Whether a route belongs to this local EVI; see [`Self::evi_import`].
@@ -350,13 +417,7 @@ impl EvpnInstance {
         ethernet_tag: EthernetTagId,
         attributes: &[PathAttribute],
     ) -> EviImport {
-        let selected = vni == self.id.as_u32()
-            && attributes
-                .iter()
-                .filter_map(PathAttribute::extended_communities)
-                .flatten()
-                .filter_map(|ec| RouteTarget::from_extended_community(*ec))
-                .any(|rt| self.route_targets.contains(&rt));
+        let selected = vni == self.id.as_u32() && self.carries_route_target(attributes);
         if !selected {
             EviImport::NotApplicable
         } else if ethernet_tag != self.ethernet_tag {
@@ -522,6 +583,25 @@ impl EvpnInstanceTable {
         out
     }
 
+    /// Index the VLAN-aware bundle members by `<Ethernet Tag, RT>`
+    /// (ADR-0092 amendment C). Build it once per route snapshot; each lookup
+    /// then costs one probe per route target the route carries.
+    #[must_use]
+    pub fn bundle_member_index(&self) -> BundleMemberIndex {
+        let mut by_tag_rt = HashMap::new();
+        for inst in self.sorted() {
+            if !inst.is_vlan_aware_bundle() {
+                continue;
+            }
+            for rt in &inst.route_targets {
+                // Validation keeps `<RT, tag>` unique; ascending VNI order
+                // keeps the lowest VNI if an unvalidated table repeats one.
+                by_tag_rt.entry((inst.ethernet_tag, *rt)).or_insert(inst.id);
+            }
+        }
+        BundleMemberIndex { by_tag_rt }
+    }
+
     /// Install an instance.
     ///
     /// # Errors
@@ -546,6 +626,41 @@ impl EvpnInstanceTable {
         self.rds.insert(instance.rd, instance.id);
         self.by_vni.insert(instance.id, instance);
         Ok(())
+    }
+}
+
+/// VLAN-aware bundle members keyed by `<Ethernet Tag, RT>`; see
+/// [`EvpnInstanceTable::bundle_member_index`].
+#[derive(Debug, Clone, Default)]
+pub struct BundleMemberIndex {
+    by_tag_rt: HashMap<(EthernetTagId, RouteTarget), EvpnInstanceId>,
+}
+
+impl BundleMemberIndex {
+    /// The bundle member whose `<RT, Ethernet Tag>` a remote route selects
+    /// although the route carries another VNI (ADR-0092 amendment C). The
+    /// MVP supports global VNIs only, so the caller counts such a route as
+    /// [`L2RemoteRouteDropReason::VniMismatch`] against the member. Tag `0`
+    /// never selects a member. When the route's RTs select two members, the
+    /// lower VNI is returned.
+    #[must_use]
+    pub fn member_for_foreign_vni(
+        &self,
+        vni: u32,
+        ethernet_tag: EthernetTagId,
+        attributes: &[PathAttribute],
+    ) -> Option<EvpnInstanceId> {
+        if ethernet_tag.0 == 0 || self.by_tag_rt.is_empty() {
+            return None;
+        }
+        attributes
+            .iter()
+            .filter_map(PathAttribute::extended_communities)
+            .flatten()
+            .filter_map(|ec| RouteTarget::from_extended_community(*ec))
+            .filter_map(|rt| self.by_tag_rt.get(&(ethernet_tag, rt)).copied())
+            .filter(|member| member.as_u32() != vni)
+            .min()
     }
 }
 
@@ -753,6 +868,135 @@ mod tests {
         assert_eq!(
             L2RemoteRouteDropReason::EthernetTagMismatch.as_str(),
             "ethernet_tag_mismatch"
+        );
+    }
+
+    /// ADR-0092 amendment E: a bundle member has no multi-homing, so a remote
+    /// Type 2 with a non-zero ESI and any remote EAD-per-EVI it would
+    /// otherwise accept are counted drops. A VLAN-Based row is unchanged.
+    #[test]
+    fn bundle_member_drops_multihomed_type2_and_ead_per_evi() {
+        use rustbgpd_wire::MplsLabel;
+        let attributes = [PathAttribute::ExtendedCommunities(vec![
+            rt("65000:100").to_extended_community(),
+        ])];
+        let esi = EthernetSegmentIdentifier::new([7; 10]);
+        let multihoming = EviImport::Dropped(L2RemoteRouteDropReason::MultihomingUnsupported);
+        let vlan_based = make_instance(100, "65000:100", "10.0.0.1");
+        let member = vlan_based.clone().with_ethernet_tag(EthernetTagId(10));
+        assert_eq!(vlan_based.service_interface(), "vlan_based");
+        assert_eq!(member.service_interface(), "vlan_aware_bundle");
+
+        let macip = |tag, esi| EvpnMacIp {
+            rd: rd("65001:100"),
+            esi,
+            ethernet_tag: EthernetTagId(tag),
+            mac: MacAddress::new([0xaa; 6]),
+            ip: None,
+            label1: MplsLabel::new(100),
+            label2: None,
+        };
+        let remote = vtep_ip("10.0.0.2");
+        let single_homed = macip(10, EthernetSegmentIdentifier::ZERO);
+        assert_eq!(
+            member.mac_ip_import(&single_homed, &attributes),
+            EviImport::Accepted
+        );
+        assert!(member.imports_mac_ip(&single_homed, remote, &attributes));
+        assert_eq!(
+            member.mac_ip_import(&macip(10, esi), &attributes),
+            multihoming
+        );
+        assert!(!member.imports_mac_ip(&macip(10, esi), remote, &attributes));
+        // A tag mismatch is still reported as such, ESI or not.
+        assert_eq!(
+            member.mac_ip_import(&macip(20, esi), &attributes),
+            EviImport::Dropped(L2RemoteRouteDropReason::EthernetTagMismatch)
+        );
+        assert_eq!(
+            vlan_based.mac_ip_import(&macip(0, esi), &attributes),
+            EviImport::Accepted
+        );
+
+        let ead = |tag| EvpnEadPerEvi {
+            rd: rd("65001:100"),
+            esi,
+            ethernet_tag: EthernetTagId(tag),
+            label: MplsLabel::new(100),
+        };
+        assert_eq!(
+            member.ead_per_evi_import(&ead(10), &attributes),
+            multihoming
+        );
+        assert_eq!(
+            member.ead_per_evi_import(&ead(0), &attributes),
+            EviImport::Dropped(L2RemoteRouteDropReason::EthernetTagMismatch)
+        );
+        assert_eq!(
+            vlan_based.ead_per_evi_import(&ead(0), &attributes),
+            EviImport::Accepted
+        );
+        assert_eq!(
+            L2RemoteRouteDropReason::MultihomingUnsupported.as_str(),
+            "multihoming_unsupported"
+        );
+    }
+
+    /// ADR-0092 amendment C: `<RT, Ethernet Tag>` selects a bundle member even
+    /// when the route carries another VNI; tag 0, a foreign RT, and the
+    /// member's own VNI never do.
+    #[test]
+    fn bundle_member_index_matches_rt_and_tag_only() {
+        let attributes = |rts: &[&str]| {
+            [PathAttribute::ExtendedCommunities(
+                rts.iter()
+                    .map(|rt_str| rt(rt_str).to_extended_community())
+                    .collect(),
+            )]
+        };
+        let mut table = EvpnInstanceTable::new();
+        table
+            .insert(make_instance(100, "65000:100", "10.0.0.1"))
+            .unwrap();
+        // Two members share RT 65000:500 under tags 10 and 20; a second
+        // bundle reuses tag 10 under RT 65000:600.
+        for (vni, tag, bundle_rt) in [
+            (10010, 10, "65000:500"),
+            (10020, 20, "65000:500"),
+            (20010, 10, "65000:600"),
+        ] {
+            let mut member = make_instance(vni, &format!("65000:{vni}"), "10.0.0.1")
+                .with_ethernet_tag(EthernetTagId(tag));
+            member.route_targets = vec![rt(bundle_rt)];
+            table.insert(member).unwrap();
+        }
+        let index = table.bundle_member_index();
+        let bundle_rt = attributes(&["65000:500"]);
+        let found = |vni, tag, attrs: &[PathAttribute]| {
+            index
+                .member_for_foreign_vni(vni, EthernetTagId(tag), attrs)
+                .map(EvpnInstanceId::as_u32)
+        };
+        assert_eq!(found(5000, 10, &attributes(&["65000:600"])), Some(20010));
+        assert_eq!(
+            found(5000, 10, &attributes(&["65000:600", "65000:500"])),
+            Some(10010),
+            "two selected members: lowest VNI"
+        );
+        assert_eq!(found(5000, 10, &bundle_rt), Some(10010));
+        assert_eq!(found(10020, 10, &bundle_rt), Some(10010));
+        assert_eq!(found(10010, 20, &bundle_rt), Some(10020));
+        assert_eq!(found(10010, 10, &bundle_rt), None, "own VNI");
+        assert_eq!(found(5000, 30, &bundle_rt), None, "unknown tag");
+        assert_eq!(
+            found(5000, 10, &attributes(&["65000:999"])),
+            None,
+            "foreign RT"
+        );
+        assert_eq!(found(5000, 0, &attributes(&["65000:100"])), None, "tag 0");
+        assert_eq!(
+            L2RemoteRouteDropReason::VniMismatch.as_str(),
+            "vni_mismatch"
         );
     }
 

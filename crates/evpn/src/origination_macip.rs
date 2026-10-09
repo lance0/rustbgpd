@@ -177,17 +177,30 @@ impl LocalMacIpOriginationState {
 pub struct LocalMacIpOriginator {
     instance_id: EvpnInstanceId,
     rd: RouteDistinguisher,
+    ethernet_tag: EthernetTagId,
     by_key: BTreeMap<MacIpKey, LocalMacIpOriginationState>,
 }
 
 impl LocalMacIpOriginator {
-    /// Build a fresh originator scoped to one EVPN instance.
+    /// Build a fresh originator scoped to one EVPN instance, under
+    /// Ethernet Tag `0`.
     #[must_use]
     pub fn new(instance_id: EvpnInstanceId, rd: RouteDistinguisher) -> Self {
         Self {
             instance_id,
             rd,
+            ethernet_tag: EthernetTagId(0),
             by_key: BTreeMap::new(),
+        }
+    }
+
+    /// Build a fresh originator for `instance`, keyed by its RD and its
+    /// Ethernet Tag (non-zero for a VLAN-aware bundle member, ADR-0092).
+    #[must_use]
+    pub fn for_instance(instance: &crate::EvpnInstance) -> Self {
+        Self {
+            ethernet_tag: instance.ethernet_tag,
+            ..Self::new(instance.id, instance.rd)
         }
     }
 
@@ -259,7 +272,7 @@ impl LocalMacIpOriginator {
     fn key(&self, mac: MacAddress, ip: IpAddr) -> EvpnRouteKey {
         EvpnRouteKey::MacIp {
             rd: self.rd,
-            ethernet_tag: EthernetTagId(0),
+            ethernet_tag: self.ethernet_tag,
             mac,
             ip: Some(ip),
         }

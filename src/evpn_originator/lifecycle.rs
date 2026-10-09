@@ -60,6 +60,7 @@ pub(super) async fn apply_runtime_model(
             Some(next) => {
                 redefined.push(old.id);
                 if old.rd != next.rd
+                    || old.ethernet_tag != next.ethernet_tag
                     || old.route_targets != next.route_targets
                     || old.local_vtep_ip != next.local_vtep_ip
                     || old.bridge != next.bridge
@@ -168,11 +169,11 @@ pub(super) async fn apply_runtime_model(
         state
             .mac_originators
             .entry(inst.id)
-            .or_insert_with(|| LocalMacOriginator::new(inst.id, inst.rd));
+            .or_insert_with(|| LocalMacOriginator::for_instance(inst));
         state
             .mac_ip_originators
             .entry(inst.id)
-            .or_insert_with(|| LocalMacIpOriginator::new(inst.id, inst.rd));
+            .or_insert_with(|| LocalMacIpOriginator::for_instance(inst));
     }
 
     runtime.instances = model.instances.clone();

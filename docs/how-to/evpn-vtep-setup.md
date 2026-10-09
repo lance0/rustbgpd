@@ -119,9 +119,10 @@ the SVD shape, see `[[managed_netdevs.svd_vxlans]]` in
 
 (No `bridge` configured ⇒ `Unbound`, not `NotReady`.)
 
-`bridge_vlan` is not the EVPN Ethernet Tag; Type 2 / Type 3 /
-EAD-per-EVI routes remain Ethernet Tag ID `0`. It is the local Linux VLAN
-selector used for readiness and for `NDA_VLAN` on remote-MAC FDB writes.
+`bridge_vlan` is not the EVPN Ethernet Tag: routes use Ethernet Tag ID `0`
+unless the row is a [VLAN-aware bundle member](#vlan-aware-bundle-members).
+It is the local Linux VLAN selector used for readiness and for `NDA_VLAN` on
+remote-MAC FDB writes.
 Zero-MAC flood rows carry no `NDA_VLAN`: the kernel scopes them by VXLAN
 port, or by `src_vni` on an SVD port.
 
@@ -129,7 +130,8 @@ port, or by `src_vni` on an SVD port.
 
 Remote Type 2 routes contribute to local FDB state, MAC/MAC+IP mobility,
 duplicate detection, and Type 5 gateway-IP resolution only when their VNI
-matches a configured instance, Ethernet Tag is `0`, next hop differs from
+matches a configured instance, the Ethernet Tag is the instance's (`0` for a
+VLAN-based service), next hop differs from
 that instance's local VTEP, and at least one Route Target matches its
 `route_targets`. Missing or mismatched RTs do not satisfy local import.
 Global EVPN retention and reflection remain independent of this local filter.
@@ -250,6 +252,40 @@ see the [RFC 9721 coverage](../reference/rfc-notes.md#later-evpn-standards-again
 Set `advertise_svi_mac = true` on the instance to originate a Type 2 for
 the bridge's own MAC (RFC 9135 §6.1). This requires `bridge` to be set;
 rustbgpd reads the bridge MAC from the probe — no extra netdev step.
+
+### VLAN-aware bundle members
+
+To carry several broadcast domains in one EVI under distinct Ethernet Tags
+(RFC 8365 §5.1.2), configure one `[[evpn_instances]]` row per VLAN with
+`service_interface = "vlan_aware_bundle"`, its own `ethernet_tag`, VNI, RD
+and `bridge_vlan`, and the bundle's shared `route_targets`. The kernel shape
+is the same VLAN-aware bridge as above (fixed-VNI members or one SVD port),
+one VLAN per member:
+
+```bash
+BRIDGE=br0
+ip link add name "${BRIDGE}" type bridge vlan_filtering 1
+ip link set dev "${BRIDGE}" up
+for VID in 10 20; do
+  VNI="100${VID}"   # members 10010 and 10020
+  ip link add "vxlan${VNI}" type vxlan \
+      id "${VNI}" dstport 4789 local "${LOCAL_IP}" nolearning
+  ip link set dev "vxlan${VNI}" master "${BRIDGE}"
+  bridge vlan add dev "${BRIDGE}" vid "${VID}" self
+  bridge vlan add dev "vxlan${VNI}" vid "${VID}"
+  ip link set dev "vxlan${VNI}" up
+done
+```
+
+Each member originates its IMET and Type 2 routes under its own tag and
+programs only remote routes that carry its tag, VNI and a bundle route
+target, so the same MAC under tags 10 and 20 lands in VLANs 10 and 20. Every
+PE in the EVI must use the same tag for the same broadcast domain. Members
+are single-homed and L2-only: no Ethernet Segments, no `ip_vrf`, and global
+VNIs only. Check `rbgp evpn instances` for
+`service=vlan-aware-bundle ethernet-tag=N` and for counted
+`remote-route-drops`. See the
+[configuration reference](../reference/configuration.md#vlan-aware-bundle-members).
 
 ## IP-VRF / L3VNI VTEP (Type 5 / symmetric IRB)
 

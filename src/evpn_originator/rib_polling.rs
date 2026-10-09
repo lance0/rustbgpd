@@ -383,8 +383,9 @@ pub(super) async fn handle_evpn_event_coalesced(
 }
 
 /// Sequence floors for locally scoped peer-sync routes. Unlike mobility
-/// contenders, these never feed duplicate detection. Tag zero is the local
-/// origination scope; an exact configured RT match is required for adoption.
+/// contenders, these never feed duplicate detection. The instance's Ethernet
+/// Tag is the local origination scope; an exact configured RT match is
+/// required for adoption.
 fn build_peer_sync_sequences(
     instances: &EvpnInstanceTable,
     routes: &[EvpnRibRoute],

@@ -3226,18 +3226,27 @@ bridge-bound but no dataplane verdict is on file yet, usually cold start
 before the first reconcile report or an RR-only / dataplane-disabled
 deployment. `originated_local_macs_count` counts MAC-only Type 2 routes
 currently originated by this daemon for the instance and accepted by the
-RIB. `bridge_vlan` is local Linux attribution only: EVPN Type 2 / Type 3 /
-EAD-per-EVI routes still use Ethernet Tag ID `0`. When present, it
+RIB. `bridge_vlan` is local Linux attribution only, never the EVPN Ethernet
+Tag. When present, it
 selects ADR-0089's traditional VNI-per-broadcast-domain VLAN-aware path:
 the probe requires `vlan_filtering=1`, exactly one VXLAN member for the
 instance VNI, and the configured VLAN on both the bridge and that VXLAN
 member; remote-MAC FDB rows are then programmed with `NDA_VLAN`. A
 `vlan_filtering=1` bridge without `bridge_vlan` remains `NotReady`.
 
+`service_interface` is `vlan_based` or `vlan_aware_bundle`, as configured,
+and `ethernet_tag` is the Ethernet Tag the instance originates and imports
+L2 routes under: `0` for `vlan_based`, the member tag for a
+[VLAN-aware bundle member](configuration.md#vlan-aware-bundle-members). The
+human CLI adds `service=vlan-aware-bundle ethernet-tag=N` for bundle members
+only; JSON always carries both fields and reports `vlan_based` for a daemon
+that predates them.
+
 `remote_route_drop_counts` lists, by reason, the remote Type 1
-EAD-per-EVI and Type 2 routes that select the instance by VNI and route
-target but that the VTEP does not program, such as
-`ethernet_tag_mismatch`. It reports the same current values as the
+EAD-per-EVI, Type 2 and Type 3 IMET routes that select the instance but
+that the VTEP does not program: `ethernet_tag_mismatch`, `vni_mismatch` or
+`multihoming_unsupported`, as described for
+`evpn_l2_remote_route_drops`. It reports the same current values as the
 `evpn_l2_remote_route_drops{vni,reason}` gauge, sorted by reason; a reason
 with no drops is omitted. The routes stay in Adj-RIB-In and are still
 reflected. The human CLI adds

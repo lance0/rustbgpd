@@ -2443,11 +2443,12 @@ impl BgpMetrics {
         let evpn_l2_remote_route_drops = IntGaugeVec::new(
             Opts::new(
                 "evpn_l2_remote_route_drops",
-                "Current remote EVPN Type 1 EAD-per-EVI and Type 2 routes that select \
-                 a local L2VNI by VNI and route target but are skipped at VTEP \
-                 projection, by local VNI and bounded reason (ethernet_tag_mismatch, \
-                 vni_mismatch, multihoming_unsupported). The routes stay in \
-                 Adj-RIB-In and are still reflected.",
+                "Current remote EVPN Type 1 EAD-per-EVI, Type 2 and Type 3 IMET \
+                 routes that select a local L2VNI (by VNI and route target, or a \
+                 VLAN-aware bundle member by route target and Ethernet Tag) but are \
+                 skipped at VTEP projection, by local VNI and bounded reason \
+                 (ethernet_tag_mismatch, vni_mismatch, multihoming_unsupported). The \
+                 routes stay in Adj-RIB-In and are still reflected.",
             ),
             &["vni", "reason"],
         )

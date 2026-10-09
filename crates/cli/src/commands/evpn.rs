@@ -1134,6 +1134,12 @@ fn format_evpn_instance_human(inst: &EvpnInstanceState) -> String {
     if let Some(bridge_vlan) = inst.bridge_vlan {
         detail.push(format!("bridge-vlan={bridge_vlan}"));
     }
+    if inst.service_interface == "vlan_aware_bundle" {
+        detail.push(format!(
+            "service=vlan-aware-bundle ethernet-tag={}",
+            inst.ethernet_tag
+        ));
+    }
     if inst.advertise_svi_mac {
         detail.push("advertise-svi-mac".to_string());
     }
@@ -1175,6 +1181,13 @@ fn evpn_instance_to_json(instance: &EvpnInstanceState) -> serde_json::Value {
         "bridge_vlan": instance
             .bridge_vlan
             .map_or(serde_json::Value::Null, serde_json::Value::from),
+        // A daemon without the field reports VLAN-Based service.
+        "service_interface": if instance.service_interface.is_empty() {
+            "vlan_based"
+        } else {
+            instance.service_interface.as_str()
+        },
+        "ethernet_tag": instance.ethernet_tag,
         "advertise_svi_mac": instance.advertise_svi_mac,
         "originated_local_macs_count": instance.originated_local_macs_count,
         "readiness": evpn_instance_readiness_label(instance.readiness_state),
@@ -2464,6 +2477,8 @@ mod tests {
                 reason: "reason-value".to_string(),
                 count: 111,
             }],
+            service_interface: "service_interface-value".to_string(),
+            ethernet_tag: 113,
         };
         let response = crate::proto::ListEvpnInstancesResponse {
             instances: vec![response],
@@ -2479,6 +2494,8 @@ mod tests {
               ],
               "local_vtep_ip": "local_vtep_ip-value",
               "bridge": "bridge-value",
+              "service_interface": "service_interface-value",
+              "ethernet_tag": 113,
               "advertise_svi_mac": true,
               "originated_local_macs_count": 107,
               "not_ready_reason": "not_ready_reason-value",
@@ -3388,6 +3405,8 @@ evpn_duplicate_mac_moves_total{vni="100",mac="02:aa:bb:cc:dd:01"} 2
                     count: 1,
                 },
             ],
+            service_interface: "vlan_based".to_string(),
+            ethernet_tag: 0,
         };
 
         assert_eq!(
@@ -3413,6 +3432,41 @@ evpn_duplicate_mac_moves_total{vni="100",mac="02:aa:bb:cc:dd:01"} 2
         );
     }
 
+    /// ADR-0092 amendment D: a bundle member shows its service interface and
+    /// Ethernet Tag; a VLAN-Based row keeps its human line unchanged, and a
+    /// daemon that predates the fields reads as VLAN-Based in JSON.
+    #[test]
+    fn evpn_instance_human_and_json_render_service_interface_and_tag() {
+        let mut inst = crate::proto::EvpnInstanceState {
+            vni: 10010,
+            rd: "65000:10010".to_string(),
+            route_targets: vec!["65000:100".to_string()],
+            local_vtep_ip: "10.0.0.1".to_string(),
+            bridge: "br0".to_string(),
+            bridge_vlan: Some(10),
+            readiness_state: crate::proto::EvpnInstanceReadinessState::EvpnInstanceReadinessReady
+                as i32,
+            service_interface: "vlan_aware_bundle".to_string(),
+            ethernet_tag: 10,
+            ..Default::default()
+        };
+        assert_eq!(
+            super::format_evpn_instance_human(&inst),
+            "vni=10010 rd=65000:10010 vtep=10.0.0.1 rts=[65000:100] readiness=ready bridge=br0 \
+             bridge-vlan=10 service=vlan-aware-bundle ethernet-tag=10 originated-local-macs=0"
+        );
+        let value = super::evpn_instance_to_json(&inst);
+        assert_eq!(value["service_interface"], "vlan_aware_bundle");
+        assert_eq!(value["ethernet_tag"], 10);
+
+        inst.service_interface = String::new();
+        inst.ethernet_tag = 0;
+        assert!(!super::format_evpn_instance_human(&inst).contains("service="));
+        let value = super::evpn_instance_to_json(&inst);
+        assert_eq!(value["service_interface"], "vlan_based");
+        assert_eq!(value["ethernet_tag"], 0);
+    }
+
     #[test]
     fn evpn_instance_json_shape_includes_readiness() {
         let value = super::evpn_instance_to_json(&crate::proto::EvpnInstanceState {
@@ -3428,6 +3482,8 @@ evpn_duplicate_mac_moves_total{vni="100",mac="02:aa:bb:cc:dd:01"} 2
             readiness_state: crate::proto::EvpnInstanceReadinessState::EvpnInstanceReadinessNotReady
                 as i32,
             not_ready_reason: "bridge br100 is VLAN-aware (vlan_filtering=1)".to_string(),
+            service_interface: "vlan_based".to_string(),
+            ethernet_tag: 0,
         });
 
         assert_eq!(value["vni"], 100);
