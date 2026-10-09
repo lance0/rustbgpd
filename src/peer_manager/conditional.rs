@@ -52,6 +52,7 @@ impl PeerManager {
     pub(super) async fn install_conditional_advertisements(
         &mut self,
         set: ConditionalAdvertisementSet,
+        swapping_datasets: &[String],
     ) -> Result<Option<ConditionalAdvertisementPrior>, String> {
         if set == self.conditional_advertisements {
             return Ok(None);
@@ -59,6 +60,7 @@ impl PeerManager {
         let capture = self
             .conditional_rib_request(|reply| RibUpdate::InstallConditionalAdvertisements {
                 set: set.clone(),
+                swapping_datasets: swapping_datasets.to_vec(),
                 reply,
             })
             .await?;
@@ -94,7 +96,7 @@ impl PeerManager {
         let set = candidate
             .conditional_advertisement_set()
             .map_err(|error| format!("conditional advertisements: {error}"))?;
-        self.install_conditional_advertisements(set).await
+        self.install_conditional_advertisements(set, &[]).await
     }
 
     /// Bring the RIB install in line with `current_config` after a config
@@ -113,7 +115,7 @@ impl PeerManager {
                 return;
             }
         };
-        match self.install_conditional_advertisements(set).await {
+        match self.install_conditional_advertisements(set, &[]).await {
             Ok(_) => self.conditional_reconcile_retry = None,
             Err(error) => {
                 let backoff = self

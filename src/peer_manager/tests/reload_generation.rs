@@ -5052,3 +5052,82 @@ async fn changed_definition_with_swapped_condition_dataset_applies_against_candi
     harness.shutdown().await;
     relay.abort();
 }
+
+/// ADR-0137 Decision 6: a changed definition whose `condition_policy` reads
+/// a dataset the same generation swaps is not applied against the prior
+/// contents at the step-0 install. Prior: advertise-if-absent with the
+/// condition prefix in `primary`, so `backup` suppresses. Candidate:
+/// advertise-if-present with the prefix dropped from `primary`. Under the
+/// prior contents the edited definition would advertise; under the
+/// candidate contents it suppresses. The gate must read suppress both when
+/// the re-observation reaches the RIB (between the install and the
+/// re-observation, where the policy phase and the dataset refresh can
+/// resync attached peers) and after commit.
+#[tokio::test]
+async fn changed_definition_is_not_applied_against_the_prior_condition_dataset() {
+    let fixture = RsFixture::new();
+    write_condition_dataset_fixture(&fixture, "198.51.100.0/24\n", 65009);
+    let prior = fixture.load();
+    let mut harness = GenerationHarness::new(&prior);
+    let (log, relay) = relay_conditional_to_real_rib(&mut harness);
+    let metrics = harness.mgr.metrics.clone();
+    inject_condition_route(&harness).await;
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while condition_permitted(&metrics) != Some(false) {
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+    })
+    .await
+    .expect("advertise-if-absent suppresses while primary-up matches");
+
+    // Sample the gate when the re-observation arrives: the install has been
+    // acknowledged, and nothing has evaluated the candidate contents yet.
+    let at_reobserve = Arc::new(Mutex::new(None));
+    let (tx, mut rx) = mpsc::channel::<RibUpdate>(64);
+    let relay_tx = std::mem::replace(&mut harness.mgr.rib_tx, tx);
+    let slot = Arc::clone(&at_reobserve);
+    let sample_metrics = metrics.clone();
+    let interposer = tokio::spawn(async move {
+        while let Some(command) = rx.recv().await {
+            if matches!(
+                command,
+                RibUpdate::ReobserveConditionalAdvertisements { .. }
+            ) {
+                *slot.lock().unwrap() = Some(condition_permitted(&sample_metrics));
+            }
+            if relay_tx.send(command).await.is_err() {
+                break;
+            }
+        }
+    });
+
+    write_condition_dataset_fixture(&fixture, "203.0.113.0/24\n", 65009);
+    let toml = std::fs::read_to_string(&fixture.config_path).unwrap();
+    std::fs::write(
+        &fixture.config_path,
+        toml.replacen("advertise_if = \"absent\"", "advertise_if = \"present\"", 1),
+    )
+    .unwrap();
+    let (candidate, actions, prepared) = prepare_condition_dataset_candidate(&fixture, &prior);
+    let outcome = Box::pin(
+        harness
+            .mgr
+            .apply_reload_generation(candidate, actions, prepared),
+    )
+    .await;
+    assert!(
+        matches!(outcome, ReloadGenerationOutcome::Applied(_)),
+        "{outcome:?}"
+    );
+    assert_eq!(conditional_log(&log), ["install [10.0.0.2]", "reobserve"]);
+    assert_eq!(
+        *at_reobserve.lock().unwrap(),
+        Some(Some(false)),
+        "the install must not advertise on the prior dataset's contents"
+    );
+    assert_eq!(condition_state(&metrics).as_deref(), Some("absent"));
+    assert_eq!(condition_permitted(&metrics), Some(false));
+    harness.shutdown().await;
+    interposer.abort();
+    relay.abort();
+}

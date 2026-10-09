@@ -2746,6 +2746,10 @@ pub enum RibUpdate {
     InstallConditionalAdvertisements {
         /// The complete set to install.
         set: crate::ConditionalAdvertisementSet,
+        /// Datasets the same generation publishes after this install. A new
+        /// or changed definition whose `condition_policy` reads one keeps its
+        /// prior applied state until the re-observation after the publish.
+        swapping_datasets: Vec<String>,
         /// Prior tracker state and attachments, for compensation.
         reply: oneshot::Sender<crate::ConditionalAdvertisementCapture>,
     },

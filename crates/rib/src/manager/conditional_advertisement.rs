@@ -174,15 +174,34 @@ enum CandidateVerdict {
 }
 
 impl RibManager {
+    /// [`Self::install_conditional_advertisements_holding`] with no dataset
+    /// swap pending.
+    #[cfg(test)]
+    pub(super) fn install_conditional_advertisements(
+        &mut self,
+        definitions: Vec<ConditionalAdvertisement>,
+    ) -> (ConditionalAdvertisementCapture, Vec<Arc<str>>) {
+        self.install_conditional_advertisements_holding(definitions, &[])
+    }
+
     /// Install a definition set (ADR-0137 Decision 6). The first install,
     /// at startup, leaves new definitions `pending` behind the debounce. A
     /// later install keeps the state of definitions with unchanged content
     /// and evaluates new or changed definitions immediately. Returns the
     /// prior state for compensation and the names whose applied state
     /// changed.
-    pub(super) fn install_conditional_advertisements(
+    ///
+    /// A new or changed definition whose `condition_policy` reads one of
+    /// `swapping` is not evaluated: those datasets still hold the prior
+    /// contents, and the same generation publishes the candidate contents
+    /// next. Such a definition keeps its prior applied state (a new one
+    /// stays `pending`), so no gate flips and no peer resyncs on contents
+    /// that belong to neither generation. The re-observation after the
+    /// publish evaluates it immediately.
+    fn install_conditional_advertisements_holding(
         &mut self,
         definitions: Vec<ConditionalAdvertisement>,
+        swapping: &[String],
     ) -> (ConditionalAdvertisementCapture, Vec<Arc<str>>) {
         let now = Instant::now();
         let startup = !self.conditional_advertisements.installed;
@@ -201,7 +220,17 @@ impl RibManager {
                 continue;
             }
             let definition = Arc::new(definition);
-            let observed = self.observe_condition(&definition);
+            let held = definition
+                .condition_policy
+                .as_ref()
+                .is_some_and(|policy| swapping.iter().any(|name| policy.references_dataset(name)));
+            let observed = if held {
+                previous
+                    .as_ref()
+                    .map_or(ConditionObservation::Unknown, |state| state.observed)
+            } else {
+                self.observe_condition(&definition)
+            };
             let deferred = self.condition_deferred(&definition);
             let prior_applied = previous.as_ref().map(|state| state.applied);
             let mut state = DefinitionState {
@@ -220,7 +249,7 @@ impl RibManager {
                     true,
                 );
             }
-            if observed != ConditionObservation::Unknown && !deferred {
+            if !held && observed != ConditionObservation::Unknown && !deferred {
                 if startup {
                     self.arm_or_apply(&mut state, now, &mut transitions);
                 } else {
@@ -254,7 +283,7 @@ impl RibManager {
         }
     }
 
-    /// Reinstate the state captured by [`Self::install_conditional_advertisements`]
+    /// Reinstate the state captured by [`Self::install_conditional_advertisements_holding`]
     /// (ADR-0137 Decision 6). The restored applied states and settle deadlines
     /// stand; only an observation the RIB has since changed restarts the
     /// debounce from now. Returns the names whose applied state differs from
@@ -752,10 +781,12 @@ impl RibManager {
     pub(super) fn handle_install_conditional_advertisements(
         &mut self,
         set: ConditionalAdvertisementSet,
+        swapping: &[String],
     ) -> ConditionalAdvertisementCapture {
         let prior_attachments = self.conditional_advertisements.attachments.clone();
         let prior_definitions = self.conditional_definition_contents();
-        let (capture, transitions) = self.install_conditional_advertisements(set.definitions);
+        let (capture, transitions) =
+            self.install_conditional_advertisements_holding(set.definitions, swapping);
         self.conditional_advertisements.attachments = set.attachments;
         self.settle_conditional_advertisement_change(
             &prior_attachments,

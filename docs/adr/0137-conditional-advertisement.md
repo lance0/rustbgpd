@@ -653,8 +653,12 @@ plumbing:
   `RestoreConditionalAdvertisements` reinstates it without re-evaluating;
   `ReobserveConditionalAdvertisements` carries a `condition_policy` dataset
   swap and also returns a capture. It names the definitions the same
-  generation's install added or changed: the install ran before the dataset
-  publish, so those are evaluated again immediately rather than debounced.
+  generation's install added or changed. The install runs before the dataset
+  publish, so it does not evaluate a new or changed definition whose
+  `condition_policy` reads a dataset the generation swaps: that definition
+  keeps its prior applied state (a new one stays `pending`), and no attached
+  peer resyncs on contents that belong to neither generation. The
+  re-observation evaluates and applies it immediately rather than debounced.
   A generation that rolls the swap back restores that capture after the
   dataset rollback, and an unacknowledged re-observation leaves the
   generation ambiguous. The commit point is the RIB's acknowledgement of the
