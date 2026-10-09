@@ -529,7 +529,17 @@ impl EvpnRuntimeReloadApply {
         // Shutdown closed the segment slot: refuse before planning, so an
         // unready `auto-lacp` segment (a no-op runtime plan) cannot commit
         // its config or start the cancelled probe after teardown began.
-        if !config.ethernet_segments.is_empty() && self.converger.segment_closed_for_shutdown() {
+        // The committed side counts too: removing the final segment has an
+        // empty candidate list but must not commit during teardown either.
+        if self.converger.segment_closed_for_shutdown()
+            && (!config.ethernet_segments.is_empty()
+                || !self
+                    .committed_config
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .ethernet_segments
+                    .is_empty())
+        {
             return Err(GrpcEvpnRuntimeApplyError::FailedPrecondition(
                 "EVPN segment actor is closed for shutdown; Ethernet Segment changes are refused"
                     .to_string(),

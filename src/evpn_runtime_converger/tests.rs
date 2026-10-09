@@ -722,6 +722,52 @@ async fn shutdown_closing_the_segment_slot_refuses_a_late_first_segment_apply() 
 }
 
 #[tokio::test]
+async fn shutdown_closing_the_segment_slot_refuses_a_late_final_segment_delete() {
+    // Removing the final segment has an empty candidate list. Shutdown
+    // took the running actor's handle but has not drained it, so the
+    // publish would still land; the closed slot must refuse the apply
+    // because the committed config names a segment.
+    let baseline = load_runtime_test_config(l2vni_one_es_runtime_candidate_toml(), "baseline");
+    let candidate = load_runtime_test_config(l2vni_runtime_candidate_toml(), "candidate");
+    let esis = crate::config::AutoLacpEsis::default();
+    let coordinator = coordinator_from_config(&baseline, &esis);
+    let generation = coordinator.lock().unwrap().model().generation();
+    let (rib_tx, rib_rx) = mpsc::channel::<RibUpdate>(64);
+    let _rib = runtime_converger_rib_responder(rib_rx, Arc::default());
+    let instances = Arc::new(baseline.resolve_evpn_instances().unwrap());
+    let (segment, started) = deferred_segment_control(&instances, rib_tx.clone());
+    let one_es = runtime_model_from_candidate_toml(l2vni_one_es_runtime_candidate_toml());
+    assert!(segment.replace_segments(Arc::new(one_es.ethernet_segments().to_vec())));
+    assert!(segment.start_if_configured());
+    assert!(started.load(std::sync::atomic::Ordering::SeqCst));
+    let apply_lock = Arc::new(tokio::sync::Mutex::new(()));
+    let apply = EvpnRuntimeReloadApply::new(
+        coordinator.clone(),
+        apply_lock.clone(),
+        Arc::new(segment_only_converger(rib_tx, segment.clone(), None)),
+        baseline,
+    );
+
+    let fence = apply_lock.lock().await;
+    let late = tokio::spawn({
+        let apply = apply.clone();
+        async move { apply.apply_config(&candidate).await }
+    });
+    let handle = segment
+        .close_for_shutdown()
+        .expect("the running actor is handed to the drain");
+    drop(fence);
+
+    assert!(
+        late.await.unwrap().is_err(),
+        "a late final-segment delete is refused after the slot closed"
+    );
+    assert_eq!(apply.committed_config_locked().ethernet_segments.len(), 1);
+    assert_eq!(coordinator.lock().unwrap().model().generation(), generation);
+    handle.shutdown().await;
+}
+
+#[tokio::test]
 async fn shutdown_closing_the_segment_slot_refuses_a_late_first_auto_lacp_apply() {
     // An unready `auto-lacp` segment plans as a runtime no-op, so no
     // actor availability check runs. The closed slot must still refuse
