@@ -449,7 +449,8 @@ resolved.
   [bundle rules](configuration.md#validation) and then rejected as not
   supported yet. A remote Type 1 EAD-per-EVI or Type 2 route that matches a
   local L2VNI under a non-zero Ethernet Tag is not programmed and is counted
-  in `evpn_l2_remote_route_drops{reason="ethernet_tag_mismatch"}`. A Type 5
+  in `evpn_l2_remote_route_drops{reason="ethernet_tag_mismatch"}` and in
+  the instance's `remote-route-drops` in `rbgp evpn instances`. A Type 5
   route with a non-zero Ethernet Tag is not imported and is counted as
   `non_zero_ethernet_tag` in `evpn_ip_vrf_remote_prefix_drops`. Reflection of
   these routes is unaffected. See

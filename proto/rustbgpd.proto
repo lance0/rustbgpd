@@ -4846,4 +4846,17 @@ message EvpnInstanceState {
   // attribution key only; EVPN Ethernet Tag ID remains zero in the
   // ADR-0089 v1 service model.
   optional uint32 bridge_vlan = 10;
+  // Current remote Type 1 EAD-per-EVI and Type 2 routes that select this
+  // instance by VNI and route target but that the VTEP does not program,
+  // by reason, sorted by reason. Omitted reasons are zero. Mirrors
+  // `evpn_l2_remote_route_drops{vni,reason}`; the routes stay in
+  // Adj-RIB-In and are still reflected.
+  repeated EvpnInstanceRemoteRouteDropCount remote_route_drop_counts = 11;
+}
+
+message EvpnInstanceRemoteRouteDropCount {
+  // Stable bounded projection reason label, e.g. "ethernet_tag_mismatch".
+  string reason = 1;
+  // Current number of remote routes dropped for `reason`.
+  uint64 count = 2;
 }

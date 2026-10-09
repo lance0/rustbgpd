@@ -35,7 +35,9 @@ Expected signals:
 - `rbgp evpn instances` lists each configured VNI, its L2 dataplane
   `readiness=ready|not-ready|unbound|unknown`, and
   `originated-local-macs=N`. A `not-ready` row includes the readiness
-  probe reason.
+  probe reason. `remote-route-drops=[ethernet_tag_mismatch=N]` means remote
+  Type 2 or EAD-per-EVI routes for that VNI carry another Ethernet Tag and
+  are not programmed.
 - `rbgp evpn --route-type 3` lists one IMET for each configured
   L2VNI after the daemon starts.
 - `bridge fdb show` contains remote MACs as `extern_learn` rows with a

@@ -261,6 +261,7 @@ fn daemon_binary_surfaces_configured_evpn_instances_through_rbgp() {
     assert_eq!(rows[0]["advertise_svi_mac"], false);
     assert_eq!(rows[0]["readiness"], "unbound");
     assert_eq!(optional_json_string(&rows[0], "not_ready_reason"), "");
+    assert_eq!(rows[0]["remote_route_drop_counts"], serde_json::json!([]));
 
     assert_eq!(rows[1]["vni"], 200);
     assert_eq!(rows[1]["rd"], "65000:200");
