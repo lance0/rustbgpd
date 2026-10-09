@@ -177,6 +177,10 @@ impl ConditionalAdvertisementSet {
 struct DefinitionState {
     definition: Arc<ConditionalAdvertisement>,
     observed: ConditionObservation,
+    /// Each condition prefix's own observation, in `condition_prefixes`
+    /// order, recorded whenever `observed` is recomputed. The status query
+    /// copies it instead of evaluating policies on the actor.
+    conditions: Vec<ConditionObservation>,
     observed_since: Instant,
     deadline: Option<Instant>,
     applied: AppliedConditionalState,
@@ -239,12 +243,13 @@ impl RibManager {
                 continue;
             }
             let definition = Arc::new(definition);
-            let observed = self.observe_condition(&definition);
+            let (observed, conditions) = self.observe_condition(&definition);
             let deferred = self.condition_deferred(&definition);
             let prior_applied = previous.as_ref().map(|state| state.applied);
             let mut state = DefinitionState {
                 definition,
                 observed,
+                conditions,
                 observed_since: now,
                 deadline: None,
                 applied: prior_applied.unwrap_or(AppliedConditionalState::Pending),
@@ -428,7 +433,7 @@ impl RibManager {
             let Some(mut state) = self.conditional_advertisements.definitions.remove(&name) else {
                 continue;
             };
-            state.observed = self.observe_condition(&state.definition);
+            (state.observed, state.conditions) = self.observe_condition(&state.definition);
             state.observed_since = now;
             state.deadline = None;
             if state.observed != ConditionObservation::Unknown
@@ -544,7 +549,8 @@ impl RibManager {
         let Some(mut state) = self.conditional_advertisements.definitions.remove(name) else {
             return;
         };
-        let observed = self.observe_condition(&state.definition);
+        let (observed, conditions) = self.observe_condition(&state.definition);
+        state.conditions = conditions;
         if observed != state.observed {
             state.observed = observed;
             state.observed_since = now;
@@ -665,30 +671,33 @@ impl RibManager {
 
     /// Any current candidate (received and import-accepted, stale, losing
     /// Add-Path, or locally injected) that satisfies the condition makes it
-    /// present. An evaluation error is neither a match nor a miss.
-    fn observe_condition(&self, definition: &ConditionalAdvertisement) -> ConditionObservation {
-        let mut errored = false;
-        for prefix in &definition.condition_prefixes {
-            match self.observe_condition_prefix(definition, prefix, true) {
-                ConditionObservation::Present => return ConditionObservation::Present,
-                ConditionObservation::Unknown => errored = true,
-                ConditionObservation::Absent => {}
-            }
-        }
-        if errored {
+    /// present. An evaluation error is neither a match nor a miss. Every
+    /// prefix is observed, so the per-prefix results can be cached for the
+    /// status query; each prefix still stops at its first match.
+    fn observe_condition(
+        &self,
+        definition: &ConditionalAdvertisement,
+    ) -> (ConditionObservation, Vec<ConditionObservation>) {
+        let conditions: Vec<_> = definition
+            .condition_prefixes
+            .iter()
+            .map(|prefix| self.observe_condition_prefix(definition, prefix))
+            .collect();
+        let observed = if conditions.contains(&ConditionObservation::Present) {
+            ConditionObservation::Present
+        } else if conditions.contains(&ConditionObservation::Unknown) {
             ConditionObservation::Unknown
         } else {
             ConditionObservation::Absent
-        }
+        };
+        (observed, conditions)
     }
 
-    /// One condition prefix's observation. `count_errors` is false for
-    /// read-only callers, which must not skew the evaluation-error metric.
+    /// One condition prefix's observation.
     fn observe_condition_prefix(
         &self,
         definition: &ConditionalAdvertisement,
         prefix: &Prefix,
-        count_errors: bool,
     ) -> ConditionObservation {
         let mut errored = false;
         for route in self.condition_candidates(prefix) {
@@ -699,7 +708,7 @@ impl RibManager {
             let Some(policy) = &definition.condition_policy else {
                 return ConditionObservation::Present;
             };
-            match self.condition_candidate_verdict(policy, route, count_errors) {
+            match self.condition_candidate_verdict(policy, route, true) {
                 CandidateVerdict::Match => return ConditionObservation::Present,
                 CandidateVerdict::Error(_) => errored = true,
                 CandidateVerdict::Miss => {}
@@ -1047,10 +1056,18 @@ impl RibManager {
     }
 
     /// Serve `QueryConditionalAdvertisements`: every installed definition in
-    /// name order. Read-only; evaluation errors are not counted.
+    /// name order, copied from tracked state. It evaluates no policy and
+    /// visits no candidate, so its cost is the size of the install.
     pub(super) fn conditional_advertisement_status(&self) -> Vec<ConditionalAdvertisementStatus> {
         let now = Instant::now();
         let tracker = &self.conditional_advertisements;
+        // One pass over the attachments; peers come out in address order.
+        let mut attached: BTreeMap<&Arc<str>, Vec<IpAddr>> = BTreeMap::new();
+        for (peer, names) in &tracker.attachments {
+            for name in names {
+                attached.entry(name).or_default().push(*peer);
+            }
+        }
         tracker
             .definitions
             .values()
@@ -1062,13 +1079,8 @@ impl RibManager {
                     conditions: definition
                         .condition_prefixes
                         .iter()
-                        .map(|prefix| {
-                            (
-                                *prefix,
-                                self.observe_condition_prefix(definition, prefix, false)
-                                    .label(),
-                            )
-                        })
+                        .zip(&state.conditions)
+                        .map(|(prefix, observation)| (*prefix, observation.label()))
                         .collect(),
                     observed: state.observed.label(),
                     observed_for: now.saturating_duration_since(state.observed_since),
@@ -1078,12 +1090,7 @@ impl RibManager {
                         .deadline
                         .map(|deadline| deadline.saturating_duration_since(now)),
                     selection_deferred: self.condition_deferred(definition),
-                    attached_peers: tracker
-                        .attachments
-                        .iter()
-                        .filter(|(_, names)| names.contains(&definition.name))
-                        .map(|(peer, _)| *peer)
-                        .collect(),
+                    attached_peers: attached.remove(&definition.name).unwrap_or_default(),
                 }
             })
             .collect()
