@@ -111,6 +111,7 @@ Inspect the receipts behind protocol, performance, and operational claims.
 | [Interoperability](interop.md) | Validation against real BGP peers and network operating systems. |
 | [Benchmarks](benchmarks.md) | Microbenchmarks and their measured scope. |
 | [Performance archive](perf/README.md) | Dated performance receipts and their supporting artifacts. |
+| [v0.75.0 cross-daemon refresh](perf/cross-daemon-v0750-2026-10.md) | Release headline: rustbgpd v0.75.0 against OpenBGPD 9.3 on the IXP matrix, with BIRD 3.3.2 added in the IRR reload roots, measured on one host. |
 | [Reload boundary measurement null result](perf/reload-boundary-attribution-2026-10.md) | Six-process receiver/publication method fails both stall-overhead bars; complete diagnostic evidence retained without production attribution. |
 | [Reload observer-tail diagnostic](perf/reload-observer-tail-2026-10-06.md) | First-chunk release, admission, writer, and receiver timing with complete observer coverage and explicit probe limits. |
 | [First UPDATE phase attribution](perf/first-update-phase-attribution-2026-10.md) | Measured 2026-10-06: 18 flap rounds at 700 peers; initial-table occupancy is the lead for the first-survivor delay. |

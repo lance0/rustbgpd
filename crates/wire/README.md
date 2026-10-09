@@ -38,6 +38,14 @@ link-local-plus-link-local and unspecified-plus-link-local pairs.
 the non-exhaustive enum; the validation-options field drives this source
 compatibility boundary. This draft support is experimental.
 
+Behavior change: `RtcNlri::matches` now compares only the Route Target bits
+after the membership's origin-AS field (RFC 4684 §4, §6). The origin AS no
+longer filters, so a /32 membership matches every Route Target.
+
+The new non-default `strict-encode-invariants` feature makes debug builds of
+the path-attribute encoder panic when one attribute list would emit the same
+type code twice. Default and release builds encode as before.
+
 ### 0.23.0 compatibility note
 
 `rustbgpd-wire` 0.23.0 is a breaking minor release and pairs with FSM 0.10 and
@@ -341,7 +349,7 @@ later registry additions land without a breaking release.
 | 4364 / 4659 | VPNv4/VPNv6 labeled NLRI substrate: label-stack + RD + IPv4/IPv6 prefix encode/decode. No daemon AFI/SAFI negotiation or RIB support by itself |
 | 4456 | Route reflector: ORIGINATOR_ID, CLUSTER_LIST |
 | 4486 | NOTIFICATION subcodes: Cease subcode constants, and `notification::description` labels for registered and deprecated code/subcode pairs, with explicit fallbacks for reserved or unassigned values |
-| 4684 | Route Target Constrain (RTC) NLRI codec (SAFI 132): `RtcNlri` encode/decode with default-route and prefix-bit bounds. Inert codec substrate — negotiation/distribution live in the daemon |
+| 4684 | Route Target Constrain (RTC) NLRI codec (SAFI 132): `RtcNlri` encode/decode inside `MP_REACH_NLRI` / `MP_UNREACH_NLRI` with default-route and prefix-bit bounds, plus `RtcNlri::matches` membership matching over the Route Target bits after the origin-AS field (§4, §6; a /32 membership covers every Route Target). Capability negotiation and RT-filtered distribution live in the daemon |
 | 4724 | Graceful restart capability |
 | 4760 | MP-BGP: `MP_REACH_NLRI` / `MP_UNREACH_NLRI` |
 | 5291 | Outbound Route Filtering (ORF) capability (code 3) + ORF-carrying Route Refresh |
@@ -362,7 +370,7 @@ later registry additions land without a breaking release.
 | 7999 | `BLACKHOLE` well-known community (`0xFFFF_029A`, rendered as `65535:666`) |
 | 8092 | Large communities (3× u32), represented by `LargeCommunities` or the received Partial-preserving `LargeCommunitiesPartial` variant; duplicate values normalize in first-seen order |
 | 8097 | Origin Validation State Extended Community (type 0x43): `ORIGIN_VALIDATION_{VALID,NOT_FOUND,INVALID}` `ExtendedCommunity` constants with `OV_*` textual rendering. Codec only — RPKI-to-community stamping lives in the daemon |
-| 8277 | IPv4/IPv6 labeled-unicast NLRI codec (SAFI 4): label-stack + prefix encode/decode, Add-Path and withdraw forms. Inert codec substrate |
+| 8277 | IPv4/IPv6 labeled-unicast NLRI codec (SAFI 4): label-stack + prefix encode/decode, Add-Path and withdraw forms, decoded from and encoded into `MP_REACH_NLRI` / `MP_UNREACH_NLRI` (`labeled_announced` / `labeled_withdrawn`). Session negotiation and distribution live in the daemon |
 | 8317 | PMSI Tunnel composite tunnel-type encoding: valid composites use an assigned base tunnel type other than 0 or 6 and require the 3-octet receiver-label prefix |
 | 8326 | `GRACEFUL_SHUTDOWN` well-known community (`0xFFFF_0000`) |
 | 8365 | EVPN over VXLAN encapsulation |
@@ -382,12 +390,13 @@ later registry additions land without a breaking release.
 | 9252 §7 | SRv6 L3/L2 Service TLV framing inside Prefix-SID, with treat-as-withdraw for recognized service malformation; `decode_prefix_sid_services` returns the first L3/L2 services, advertised SIDs, behavior codes, flags, and SID Structure fields. No SID reconstruction, eligibility decision, origination, or forwarding |
 | 9384 | Cease subcode 10, BFD Down (`cease_subcode::BFD_DOWN`) |
 | 9494 | Long-lived graceful restart capability |
-| 9552 | BGP-LS and BGP-LS-VPN NLRI/TLV codec with opaque preservation of unknown NLRI types and TLVs. Attribute 29 enforces optional non-transitive flags and structural TLV framing; malformed contained framing uses RFC 9552 whole-attribute discard while retaining the NLRI. The daemon consumes the codec for the ADR-0077 receive/API tranche. Typed topology read accessors live in `bgpls_topo`; local topology production remains outside the wire crate |
+| 9552 | BGP-LS and BGP-LS-VPN NLRI/TLV codec with opaque preservation of unknown NLRI types and TLVs. Attribute 29 enforces optional non-transitive flags and structural TLV framing; malformed contained framing uses RFC 9552 whole-attribute discard while retaining the NLRI. The daemon consumes the codec for BGP-LS receive, API, and reflection. Typed topology read accessors live in `bgpls_topo`; local topology production remains outside the wire crate |
 | 9687 | Send Hold Timer: NOTIFICATION code 8 (`NotificationCode::SendHoldTimerExpired`, subcode always 0 per §6). Codec only — the timer itself lives in the daemon |
 | 9774 | AS_SET / AS_CONFED_SET deprecation: prohibited segment types in `AS_PATH` / `AS4_PATH` are rejected on decode with RFC 7606 treat-as-withdraw disposition, and an `AS_PATH` containing an AS_SET refuses to encode (`EncodeError::ValueOutOfRange`) |
 | 9785 §3 | DF Election preference algorithms + Don't-Preempt bit, extending the RFC 8584 DF Election Extended Community |
 | 10005 | Link Bandwidth Extended Community receiver subset: decode exact transitive/non-transitive types 0x00/0x40, subtype 0x04, as raw AS + IEEE-754 bytes/second; the constructor remains non-transitive type 0x40 |
 | draft-abraitis-idr-addpath-paths-limit-04 | Experimental Paths-Limit capability (`PathsLimitFamily`, IANA-assigned capability code 76). The draft is expired and archived; interoperability and behavior remain experimental |
+| draft-ietf-idr-linklocal-capability-06 | Experimental Link-Local Next Hop capability (`Capability::LinkLocalNextHop`, code 77, empty value) plus context-dependent link-local unicast next-hop validation through `UpdateValidationOptions::link_local_next_hop`; the caller supplies negotiation and interface-scope context |
 
 ## Usage
 
@@ -414,10 +423,6 @@ dependency of `rustbgpd-wire`, but the crate root does not expose a stable
 dependency.
 
 Decode a single BGP message from raw bytes:
-
-For a deterministic interoperability check, run the standalone captured UPDATE
-decoder in `examples/decode_update.rs` with
-`cargo run -p rustbgpd-wire --example decode_update`.
 
 ```rust
 use bytes::Bytes;
@@ -449,6 +454,10 @@ fn handle(raw_bytes: Vec<u8>) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 ```
+
+For a deterministic interoperability check, run the standalone captured UPDATE
+decoder in `examples/decode_update.rs` with
+`cargo run -p rustbgpd-wire --example decode_update`.
 
 Build and encode an OPEN message:
 
@@ -522,7 +531,8 @@ cargo run -p rustbgpd-wire --features tokio-codec --example tokio_codec
   RIB, policy, transport, and RPKI crates
 - **`Capability`** — OPEN capabilities: multi-protocol, 4-octet AS, Add-Path,
   experimental Paths-Limit (`Capability::PathsLimit` / `PathsLimitFamily`,
-  code 76), graceful restart, Outbound Route Filtering, etc.
+  code 76), experimental Link-Local Next Hop (`Capability::LinkLocalNextHop`,
+  code 77), graceful restart, Outbound Route Filtering, etc.
 - **ORF types** (`orf` module, RFC 5291/5292) — `OrfCapEntry` (capability blocks), `OrfPayload` / `OrfEntryGroup` / `OrfEntries` (the Route Refresh ORF section), and `AddressPrefixOrf` (one Address-Prefix entry: action, match, sequence, min/max length, prefix). `RouteRefreshMessage::orf` carries the decoded section; a malformed IPv4/IPv6 unicast Address-Prefix group decodes to `OrfEntries::Malformed` (RFC 5291 §6 reset) rather than failing the message, while non-unicast / future-family Address-Prefix groups are preserved as raw bytes until those family encodings are implemented. Adding `orf` to `RouteRefreshMessage` made that struct `Clone` rather than `Copy` (0.11.0)
 - **`FlowSpecRule`** / **`FlowSpecComponent`** — FlowSpec NLRI with all 13 match types
 - **`EvpnRoute`** / **`EvpnRouteKey`** — typed EVPN routes (Types 1–6) with
@@ -531,8 +541,8 @@ cargo run -p rustbgpd-wire --features tokio-codec --example tokio_codec
 - **`vpn` module** — VPNv4/VPNv6 labeled NLRI substrate, including label-stack
   validation, Route Distinguisher, and IPv4/IPv6 prefix payloads
 - **`bgpls` module** — BGP-LS/BGP-LS-VPN NLRI and TLV codec, preserving
-  unknown object types and TLVs for the daemon's receive/API surface and
-  future reflection support
+  unknown object types and TLVs for the daemon's receive, API, and
+  reflection surfaces
 - **`bgpls_topo` module** — typed read accessors over the opaque BGP-LS codec
   (`bgp_ls_attribute_tlvs`, `igp_metric`, `prefix_metric`, `te_default_metric`,
   `BgpLsNodeKey`, and the `BGP_LS_TLV_*` type constants)
@@ -542,8 +552,10 @@ cargo run -p rustbgpd-wire --features tokio-codec --example tokio_codec
   `LABELED_UNICAST_SAFI` is defined in the `vpn` module and re-exported at the
   crate root
 - **`rtc` module** — Route Target Constrain NLRI codec (SAFI 132, RFC 4684):
-  `RtcNlri` / `RTC_SAFI` / `RTC_MAX_PREFIX_BITS`, `decode_rtc_nlri` /
-  `encode_rtc_nlri` with default-route and prefix-bit bounds
+  `RtcNlri` / `RTC_SAFI` / `RTC_MAX_PREFIX_BITS` /
+  `RTC_MIN_NON_DEFAULT_PREFIX_BITS`, `decode_rtc_nlri` / `encode_rtc_nlri`
+  with default-route and prefix-bit bounds, and `RtcNlri::matches` for
+  RFC 4684 §6 membership matching
 - **`mrt` module** — `decode_table_dump_v2_mp_reach_next_hop`, the RFC 6396
   §4.3.4 `TABLE_DUMP_V2` RIB-entry `MP_REACH_NLRI` next-hop decoder (reduced
   and full RFC 4760 forms; returns the next hop plus the RFC 2545 link-local
@@ -573,9 +585,11 @@ cargo run -p rustbgpd-wire --features tokio-codec --example tokio_codec
   `malformed_attr_disposition(type_code, is_ibgp)`. `UpdateError` from
   attribute validation also exposes the disposition a revised-error-handling
   caller should apply
-- **`UpdateValidationOptions`** — opt-in relaxations for
-  `validate_update_attributes_with_options`, e.g. accepting a link-local-primary
-  IPv4 `MP_REACH_NLRI` next-hop on a scoped unnumbered session (RFC 8950)
+- **`UpdateValidationOptions`** (`#[non_exhaustive]`; start from `default()`) —
+  opt-in relaxations for `validate_update_attributes_with_options`, e.g.
+  accepting a link-local-primary IPv4 `MP_REACH_NLRI` next-hop on a scoped
+  unnumbered session (RFC 8950) or, with `link_local_next_hop`, a link-local
+  unicast next hop after capability 77 negotiation
 - **`DecodeError`** / **`EncodeError`** — structured error types via `thiserror`
 - **`UpdateMessage::build`** / **`UpdateMessage::try_build`** — build a wire
   UPDATE from typed components; `try_build` is the fallible counterpart that

@@ -610,34 +610,36 @@ fn record_l3_adoption_metrics(metrics: &BgpMetrics, counters: L3AdoptionCounters
     metrics.add_evpn_l3vxlan_fdb_reaped(counters.l3vxlan_fdb_reaped);
 }
 
-/// Returns `true` when the drop-count set changed since the last pass
-/// (so the caller can skip re-publishing an identical status snapshot).
+/// Mirror a per-pass drop-count snapshot onto a gauge family: labels that
+/// left the snapshot reset to zero. Returns `true` when the set changed since
+/// the last pass (so the caller can skip re-publishing an identical status
+/// snapshot).
+fn record_drop_gauge_snapshot<K: Ord + Clone>(
+    previous: &mut BTreeMap<K, u64>,
+    current: BTreeMap<K, u64>,
+    set: impl Fn(&K, i64),
+) -> bool {
+    if *previous == current {
+        return false;
+    }
+    for key in previous.keys().filter(|key| !current.contains_key(*key)) {
+        set(key, 0);
+    }
+    for (key, count) in &current {
+        set(key, i64::try_from(*count).unwrap_or(i64::MAX));
+    }
+    *previous = current;
+    true
+}
+
 fn record_remote_prefix_drop_metrics(
     metrics: &BgpMetrics,
     previous: &mut BTreeMap<(String, &'static str), u64>,
     current: BTreeMap<(String, &'static str), u64>,
 ) -> bool {
-    if *previous == current {
-        return false;
-    }
-
-    let stale: Vec<(String, &'static str)> = previous
-        .keys()
-        .filter(|key| !current.contains_key(*key))
-        .cloned()
-        .collect();
-    for (vrf, reason) in stale {
-        metrics.set_evpn_ip_vrf_remote_prefix_drops(&vrf, reason, 0);
-    }
-    for ((vrf, reason), count) in &current {
-        metrics.set_evpn_ip_vrf_remote_prefix_drops(
-            vrf,
-            reason,
-            i64::try_from(*count).unwrap_or(i64::MAX),
-        );
-    }
-    *previous = current;
-    true
+    record_drop_gauge_snapshot(previous, current, |(vrf, reason), count| {
+        metrics.set_evpn_ip_vrf_remote_prefix_drops(vrf, reason, count);
+    })
 }
 
 fn record_remote_prefix_install_drop_metrics(
@@ -645,27 +647,44 @@ fn record_remote_prefix_install_drop_metrics(
     previous: &mut BTreeMap<(String, String), u64>,
     current: BTreeMap<(String, String), u64>,
 ) -> bool {
-    if *previous == current {
-        return false;
-    }
+    record_drop_gauge_snapshot(previous, current, |(vrf, reason), count| {
+        metrics.set_evpn_ip_vrf_remote_prefix_drops(vrf, reason, count);
+    })
+}
 
-    let stale: Vec<(String, String)> = previous
-        .keys()
-        .filter(|key| !current.contains_key(*key))
-        .cloned()
-        .collect();
-    for (vrf, reason) in stale {
-        metrics.set_evpn_ip_vrf_remote_prefix_drops(&vrf, &reason, 0);
+/// Remote Type 1 EAD-per-EVI and Type 2 routes that select a local L2VNI by
+/// VNI and Route Target but that the VTEP refuses to consume, counted per
+/// `(VNI, reason)` (ADR-0092 amendment D). Projection reads the RIB snapshot
+/// and never edits it, so these routes stay in Adj-RIB-In and keep being
+/// reflected; this only explains the projection gap.
+fn l2_remote_route_drop_counts(
+    routes: &[EvpnRibRoute],
+    instances: &EvpnInstanceTable,
+    local_vtep_ips: &std::collections::BTreeSet<std::net::IpAddr>,
+) -> BTreeMap<(u32, &'static str), u64> {
+    let mut counts = BTreeMap::new();
+    for route in routes {
+        let (vni, ethernet_tag) = match &route.route {
+            EvpnRoute::MacIp(macip) => (macip.label1.as_vni(), macip.ethernet_tag),
+            EvpnRoute::EadPerEvi(ead) => (ead.label.as_vni(), ead.ethernet_tag),
+            _ => continue,
+        };
+        if local_vtep_ips.contains(&route.next_hop) {
+            continue;
+        }
+        let Some(instance) = rustbgpd_evpn::EvpnInstanceId::new(vni)
+            .ok()
+            .and_then(|id| instances.get(id))
+        else {
+            continue;
+        };
+        if let rustbgpd_evpn::EviImport::Dropped(reason) =
+            instance.evi_import(vni, ethernet_tag, &route.attributes)
+        {
+            *counts.entry((vni, reason.as_str())).or_insert(0) += 1;
+        }
     }
-    for ((vrf, reason), count) in &current {
-        metrics.set_evpn_ip_vrf_remote_prefix_drops(
-            vrf,
-            reason,
-            i64::try_from(*count).unwrap_or(i64::MAX),
-        );
-    }
-    *previous = current;
-    true
+    counts
 }
 
 fn publish_remote_prefix_drop_counts(
@@ -693,6 +712,7 @@ struct SupervisorIntentState {
     last_table: Arc<RemoteMacTable>,
     last_ip_prefixes: Arc<RemoteIpPrefixTable>,
     last_ip_prefix_drop_counts: BTreeMap<(String, &'static str), u64>,
+    last_l2_drop_counts: BTreeMap<(u32, &'static str), u64>,
     last_bum_enforcement: BumEnforcementTable,
     /// IMET flood skips already warned about; pruned when they clear.
     warned_flood_skips: BTreeSet<FloodSkip>,
@@ -710,6 +730,7 @@ impl Default for SupervisorIntentState {
             last_table: Arc::new(RemoteMacTable::new()),
             last_ip_prefixes: Arc::new(RemoteIpPrefixTable::new()),
             last_ip_prefix_drop_counts: BTreeMap::new(),
+            last_l2_drop_counts: BTreeMap::new(),
             last_bum_enforcement: BumEnforcementTable::new(),
             warned_flood_skips: BTreeSet::new(),
         }
@@ -788,6 +809,14 @@ async fn publish_dataplane_intent(
     // back to zero once the new active PE's re-advertisements land.
     metrics.set_evpn_single_active_backup_active(
         i64::try_from(tables.single_active_backup_active).unwrap_or(i64::MAX),
+    );
+    // ADR-0092 amendment D: the L2 drop gauge also derives from the RIB
+    // snapshot, and a newly dropped route leaves the remote-MAC table
+    // unchanged, so it is refreshed before the unchanged-table early return.
+    record_drop_gauge_snapshot(
+        &mut state.last_l2_drop_counts,
+        tables.l2_remote_route_drops,
+        |(vni, reason), count| metrics.set_evpn_l2_remote_route_drops(*vni, reason, count),
     );
     if state.generation > 0
         && instances.as_ref() == state.last_instances.as_ref()
@@ -1272,6 +1301,9 @@ struct IntentTables {
     /// withdrew its EAD-per-ES; eligible survivors remain). Mirrored
     /// onto the `evpn_single_active_backup_active` gauge.
     single_active_backup_active: usize,
+    /// ADR-0092 amendment D: remote Type 1/2 routes skipped at projection,
+    /// by `(VNI, reason)`. Mirrored onto `evpn_l2_remote_route_drops`.
+    l2_remote_route_drops: BTreeMap<(u32, &'static str), u64>,
 }
 
 async fn query_evpn_dataplane_routes(
@@ -1456,6 +1488,7 @@ fn project_intent_tables(
         flood_skips,
         remote_ip_prefixes,
         single_active_backup_active,
+        l2_remote_route_drops: l2_remote_route_drop_counts(routes, instances, &local_vtep_ips),
     }
 }
 
@@ -2487,6 +2520,264 @@ mod tests {
             ),
             "stale drop gauge should be reset in metrics text: {text}"
         );
+    }
+
+    /// ADR-0092 Decision 3 and amendment D: non-zero-tag Type 1/2 routes for
+    /// a configured L2VNI and a non-zero-tag Type 5 for a configured IP-VRF
+    /// program nothing and each move their drop gauge, which resets once the
+    /// routes leave the RIB snapshot.
+    #[tokio::test]
+    async fn non_zero_tag_projection_drops_track_current_snapshot() {
+        let esi = EthernetSegmentIdentifier::new([7; 10]);
+        let mut tagged_t2 = evpn_macip_route(100, 0xaa, "10.0.0.2", None);
+        let EvpnRoute::MacIp(macip) = &mut tagged_t2.route else {
+            unreachable!()
+        };
+        macip.ethernet_tag = EthernetTagId(10);
+        let snapshot = vec![
+            tagged_t2,
+            evpn_macip_route(100, 0xbb, "10.0.0.2", None),
+            evpn_ead_per_evi_route(esi, 10, "10.0.0.3"),
+            type5_with_esi_and_router_mac(
+                "10.9.0.0/24",
+                "10.0.0.9",
+                5000,
+                EthernetSegmentIdentifier::ZERO,
+                10,
+                [2; 6],
+            ),
+        ];
+        let (rib_tx, mut rib_rx) = mpsc::channel::<RibUpdate>(2);
+        let _rib_responder = tokio::spawn(async move {
+            for (generation, routes) in [(1, snapshot), (2, vec![])] {
+                if let Some(RibUpdate::QueryEvpnDataplaneRoutes {
+                    known_generation,
+                    reply,
+                }) = rib_rx.recv().await
+                {
+                    reply_dataplane_query(known_generation, reply, generation, routes);
+                }
+            }
+        });
+        let metrics = BgpMetrics::new();
+        let instances = Arc::new(local_instance_table(100, Some("br100")));
+        let ip_vrfs = Arc::new(ip_vrf_table_one("blue", 5000, 5000));
+        let (intent_tx, intent_rx) = watch::channel(Arc::new(DataplaneIntent::empty()));
+        let (drop_counts_tx, _drop_counts_rx) =
+            watch::channel(Arc::new(RemoteIpPrefixDropCounts::new()));
+        let mut state = SupervisorIntentState::default();
+        for _ in 0..2 {
+            assert!(
+                publish_dataplane_intent(
+                    &rib_tx,
+                    &intent_tx,
+                    instances.clone(),
+                    ip_vrfs.clone(),
+                    BumEnforcementTable::new(),
+                    &BTreeSet::new(),
+                    &no_bias(),
+                    &metrics,
+                    &mut state,
+                    &drop_counts_tx,
+                )
+                .await
+                .unwrap()
+            );
+            let text = gather_metrics_text(&metrics);
+            let intent = intent_rx.borrow().clone();
+            if intent.generation == 1 {
+                assert!(intent.remote_macs.get(vni(100), mac(0xaa)).is_none());
+                assert!(intent.remote_macs.get(vni(100), mac(0xbb)).is_some());
+                assert!(intent.remote_ip_prefixes.is_empty());
+                assert!(
+                    text.contains(
+                        "evpn_l2_remote_route_drops{reason=\"ethernet_tag_mismatch\",vni=\"100\"} 2"
+                    ),
+                    "{text}"
+                );
+                assert!(
+                    text.contains(
+                        "evpn_ip_vrf_remote_prefix_drops{reason=\"non_zero_ethernet_tag\",vrf=\"blue\"} 1"
+                    ),
+                    "{text}"
+                );
+            } else {
+                assert!(
+                    text.contains(
+                        "evpn_l2_remote_route_drops{reason=\"ethernet_tag_mismatch\",vni=\"100\"} 0"
+                    ),
+                    "stale L2 drop gauge must reset: {text}"
+                );
+            }
+        }
+    }
+
+    fn rr_client_up(
+        peer: Ipv4Addr,
+        outbound_tx: mpsc::Sender<rustbgpd_rib::OutboundRouteUpdate>,
+    ) -> RibUpdate {
+        RibUpdate::PeerUp {
+            peer: std::net::IpAddr::V4(peer),
+            session_id: 0,
+            peer_asn: 65000,
+            peer_router_id: peer,
+            outbound_tx,
+            export_policy: None,
+            sendable_families: vec![(rustbgpd_wire::Afi::L2Vpn, rustbgpd_wire::Safi::Evpn)],
+            is_ebgp: false,
+            route_reflector_client: true,
+            orr_vantage: None,
+            per_client_best: false,
+            interpret_rfc1997: true,
+            add_path_send_families: Vec::new(),
+            add_path_send_max: 0,
+            negotiated_orf_recv: Vec::new(),
+            negotiated_llgr_families: Vec::new(),
+        }
+    }
+
+    async fn next_update(
+        rx: &mut mpsc::Receiver<rustbgpd_rib::OutboundRouteUpdate>,
+        what: &str,
+    ) -> rustbgpd_rib::OutboundRouteUpdate {
+        tokio::time::timeout(Duration::from_secs(2), rx.recv())
+            .await
+            .unwrap_or_else(|_| panic!("{what}: no outbound update within 2s"))
+            .expect("outbound channel open")
+    }
+
+    /// Accepts every route, standing in for a session's wire encoder.
+    struct AnyExport;
+    impl rustbgpd_rib::ExactExportSnapshot for AnyExport {
+        fn owner_id(&self) -> u64 {
+            0
+        }
+        fn generation(&self) -> u64 {
+            0
+        }
+        fn probe_announcement(
+            &self,
+            _candidate: rustbgpd_rib::ExactExportCandidate<'_>,
+        ) -> Result<rustbgpd_rib::ExactExportResult, rustbgpd_rib::ExactExportError> {
+            Ok(rustbgpd_rib::ExactExportResult {
+                encoded_len: 0,
+                max_len: usize::MAX,
+                generation: 0,
+            })
+        }
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
+        }
+    }
+    impl rustbgpd_rib::ExactExportEncoder for AnyExport {
+        fn owner_id(&self) -> u64 {
+            0
+        }
+        fn snapshot(&self) -> Arc<dyn rustbgpd_rib::ExactExportSnapshot> {
+            Arc::new(Self)
+        }
+    }
+
+    /// ADR-0092 amendment D: a route the VTEP drops at projection stays in
+    /// Adj-RIB-In and is still reflected when the daemon is also a route
+    /// reflector.
+    #[tokio::test]
+    async fn projection_dropped_non_zero_tag_route_is_still_reflected() {
+        use rustbgpd_wire::{AsPath, Origin};
+        let (rib_tx, rib_rx) = mpsc::channel(64);
+        let rib = tokio::spawn(
+            rustbgpd_rib::RibManager::new(
+                rib_rx,
+                mpsc::channel(1).1,
+                None,
+                Some(Ipv4Addr::new(10, 0, 0, 100)),
+                BgpMetrics::new(),
+            )
+            .run(),
+        );
+        let origin = Ipv4Addr::new(10, 0, 0, 2);
+        let client = Ipv4Addr::new(10, 0, 0, 3);
+        for peer in [origin, client] {
+            rib_tx
+                .send(RibUpdate::SetPeerExportEncoder {
+                    peer: std::net::IpAddr::V4(peer),
+                    session_id: 0,
+                    encoder: Arc::new(AnyExport),
+                })
+                .await
+                .unwrap();
+        }
+        let (origin_tx, mut origin_rx) = mpsc::channel(64);
+        rib_tx.send(rr_client_up(origin, origin_tx)).await.unwrap();
+        assert_eq!(
+            next_update(&mut origin_rx, "origin EoR").await.end_of_rib,
+            [(rustbgpd_wire::Afi::L2Vpn, rustbgpd_wire::Safi::Evpn)]
+        );
+        let (client_tx, mut client_rx) = mpsc::channel(64);
+        rib_tx.send(rr_client_up(client, client_tx)).await.unwrap();
+        assert_eq!(
+            next_update(&mut client_rx, "client EoR").await.end_of_rib,
+            [(rustbgpd_wire::Afi::L2Vpn, rustbgpd_wire::Safi::Evpn)]
+        );
+
+        let mut route = evpn_macip_route(100, 0xaa, "10.0.0.2", None);
+        let EvpnRoute::MacIp(macip) = &mut route.route else {
+            unreachable!()
+        };
+        macip.ethernet_tag = EthernetTagId(10);
+        macip.rd = rd(65001, 100);
+        route.peer = std::net::IpAddr::V4(origin);
+        route.peer_router_id = origin;
+        route.origin_type = rustbgpd_rib::route::RouteOrigin::Ibgp;
+        AttrSet::edit(&mut route.attributes, |attrs| {
+            attrs.insert(0, PathAttribute::Origin(Origin::Igp));
+            attrs.insert(1, PathAttribute::AsPath(AsPath { segments: vec![] }));
+            attrs.insert(2, PathAttribute::NextHop(origin));
+        });
+        let key = route.key();
+        rib_tx
+            .send(RibUpdate::RoutesReceived {
+                session_id: 0,
+                peer: std::net::IpAddr::V4(origin),
+                announced: vec![],
+                withdrawn: vec![],
+                flowspec_announced: vec![],
+                flowspec_withdrawn: vec![],
+                evpn_announced: vec![route],
+                evpn_withdrawn: vec![],
+                validated_with: None,
+            })
+            .await
+            .unwrap();
+
+        // The VTEP projection skips the route but leaves it in the RIB...
+        let instances = local_instance_table(100, Some("br100"));
+        let tables = build_intent_tables(
+            &rib_tx,
+            &instances,
+            &IpVrfTable::new(),
+            &BTreeSet::new(),
+            &no_bias(),
+        )
+        .await
+        .unwrap();
+        assert!(tables.remote_macs.get(vni(100), mac(0xaa)).is_none());
+        assert_eq!(
+            tables.l2_remote_route_drops,
+            BTreeMap::from([((100, "ethernet_tag_mismatch"), 1)])
+        );
+
+        // ...and the reflector still sends it, tag intact, to the other client.
+        let update = next_update(&mut client_rx, "reflected route").await;
+        assert_eq!(update.evpn_announce.len(), 1);
+        assert_eq!(update.evpn_announce[0].key(), key);
+        let EvpnRoute::MacIp(reflected) = &update.evpn_announce[0].route else {
+            panic!("reflected route must stay a Type 2");
+        };
+        assert_eq!(reflected.ethernet_tag, EthernetTagId(10));
+
+        drop(rib_tx);
+        rib.await.unwrap();
     }
 
     #[tokio::test]
@@ -3922,6 +4213,14 @@ mod tests {
                 accepted,
                 "{case}"
             );
+            // Only a route that selects VNI 100 by RT under another tag is a
+            // counted drop; other misses are not addressed to this EVI.
+            let expected_drops = if case == "tag" {
+                BTreeMap::from([((100, "ethernet_tag_mismatch"), 1)])
+            } else {
+                BTreeMap::new()
+            };
+            assert_eq!(tables.l2_remote_route_drops, expected_drops, "{case}");
             let entries: Vec<_> = tables
                 .remote_ip_prefixes
                 .for_vrf(IpVrfId::new(5000).unwrap())
@@ -5008,6 +5307,7 @@ mod tests {
             last_table: Arc::new(RemoteMacTable::new()),
             last_ip_prefixes: Arc::new(RemoteIpPrefixTable::new()),
             last_ip_prefix_drop_counts: BTreeMap::new(),
+            last_l2_drop_counts: BTreeMap::new(),
             last_bum_enforcement: BumEnforcementTable::new(),
             warned_flood_skips: BTreeSet::new(),
         };

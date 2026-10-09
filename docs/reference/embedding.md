@@ -671,6 +671,12 @@ validation. Opting in requires
 interface scope and negotiated capability context; see the
 [0.24 compatibility note](../../crates/wire/README.md#0240-compatibility-note-prepared).
 This source break is separate from the additive non-exhaustive capability variant.
+The same set also changes `RtcNlri::matches` behaviour: it compares only the
+route-target bits after the membership's origin AS (RFC 4684 §4 and §6), so a
+/32 membership matches every Route Target and the origin AS no longer has to
+equal the RT's global administrator. RPKI 0.6 adds
+`VrpManager::with_end_of_data_observer`; it is additive. The crate
+changelogs carry the detail.
 
 <!-- published-crate-versions:start -->
 | Crate | Published examples | Working tree |
@@ -728,9 +734,12 @@ gRPC consumer gains from the recent proto additions
   can place it up to one second early. It is a display timestamp, not a
   precise event ordering key — use the monotonic `event_id` for that.
 - **`RibService.ExplainAdvertisedRoute`** — the export decision as
-  data: the full gate ladder (`split_horizon`, `rr_reflection`,
-  `family`, `llgr`, `orf`, `rt_membership`, `export_policy`,
-  `adj_rib_out`) with per-gate verdict + detail, produced by a dry
+  data: the gate ladder (for example `best_route`, `split_horizon`,
+  `rr_reflection`, `family`, `llgr`, `orf`, `rt_membership`,
+  `conditional_advertisement`, `export_policy`, `otc`, `adj_rib_out`; the
+  rung set and order follow the selection shape, see
+  [operations](operations.md#explain-an-export-decision-why-diddidnt-route-x-go-to-peer-y))
+  with per-gate verdict + detail, produced by a dry
   run of the same staging body live distribution executes. A
   controller can answer "why isn't prefix X on peer Y" without
   screen-scraping. The response's `update_group_id` and

@@ -749,6 +749,7 @@ struct BgpMetricsInner {
     evpn_ip_vrf_originated_routes: IntGaugeVec,
     evpn_ip_vrf_installed_routes: IntGaugeVec,
     evpn_ip_vrf_remote_prefix_drops: IntGaugeVec,
+    evpn_l2_remote_route_drops: IntGaugeVec,
     evpn_managed_netdev_state: IntGaugeVec,
     evpn_fdb_nhg_drift_members_repaired: IntCounter,
     evpn_fdb_nhg_drift_groups_replaced: IntCounter,
@@ -2439,6 +2440,19 @@ impl BgpMetrics {
         )
         .expect("valid metric definition");
 
+        let evpn_l2_remote_route_drops = IntGaugeVec::new(
+            Opts::new(
+                "evpn_l2_remote_route_drops",
+                "Current remote EVPN Type 1 EAD-per-EVI and Type 2 routes that select \
+                 a local L2VNI by VNI and route target but are skipped at VTEP \
+                 projection, by local VNI and bounded reason (ethernet_tag_mismatch, \
+                 vni_mismatch, multihoming_unsupported). The routes stay in \
+                 Adj-RIB-In and are still reflected.",
+            ),
+            &["vni", "reason"],
+        )
+        .expect("valid metric definition");
+
         let evpn_ip_vrf_origination_suppressed = IntCounterVec::new(
             Opts::new(
                 "evpn_ip_vrf_origination_suppressed_total",
@@ -3315,6 +3329,9 @@ impl BgpMetrics {
             .register(Box::new(evpn_ip_vrf_remote_prefix_drops.clone()))
             .expect("metric not already registered");
         registry
+            .register(Box::new(evpn_l2_remote_route_drops.clone()))
+            .expect("metric not already registered");
+        registry
             .register(Box::new(evpn_managed_netdev_state.clone()))
             .expect("metric not already registered");
         registry
@@ -3626,6 +3643,7 @@ impl BgpMetrics {
             evpn_ip_vrf_originated_routes,
             evpn_ip_vrf_installed_routes,
             evpn_ip_vrf_remote_prefix_drops,
+            evpn_l2_remote_route_drops,
             evpn_managed_netdev_state,
             evpn_fdb_nhg_drift_members_repaired,
             evpn_fdb_nhg_drift_groups_replaced,
@@ -6147,6 +6165,15 @@ impl BgpMetrics {
         self.0
             .evpn_ip_vrf_remote_prefix_drops
             .with_label_values(&[vrf, reason])
+            .set(count);
+    }
+
+    /// Set the current L2 VTEP projection-drop gauge for one bounded
+    /// `(vni, reason)` label pair (ADR-0092 amendment D).
+    pub fn set_evpn_l2_remote_route_drops(&self, vni: u32, reason: &str, count: i64) {
+        self.0
+            .evpn_l2_remote_route_drops
+            .with_label_values(&[&vni.to_string(), reason])
             .set(count);
     }
 
@@ -8942,6 +8969,20 @@ mod tests {
             ) || text.contains(
                 "evpn_ip_vrf_remote_prefix_drops{vrf=\"blue\",reason=\"unresolved_overlay_index_gateway\"} 2"
             )
+        );
+    }
+
+    #[test]
+    fn evpn_l2_remote_route_drop_gauge_is_exported() {
+        let m = BgpMetrics::new();
+        m.set_evpn_l2_remote_route_drops(100, "ethernet_tag_mismatch", 3);
+
+        let text = gather_text(&m);
+        assert!(
+            text.contains(
+                "evpn_l2_remote_route_drops{reason=\"ethernet_tag_mismatch\",vni=\"100\"} 3"
+            ),
+            "{text}"
         );
     }
 

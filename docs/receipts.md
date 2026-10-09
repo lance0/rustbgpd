@@ -48,7 +48,8 @@ the recipe is the config + runbook it enables:
 
 ## Interop labs — PR-gated (`interop.yml`)
 
-These run on every pull request via
+These run on every lab-relevant pull request (documentation-only, standalone
+fuzz-only, and release/package-only pull requests skip them) via
 [`.github/workflows/interop.yml`](../.github/workflows/interop.yml); each job
 id names its milestone, and some jobs run several receipts (`m85` also runs
 M93 and M95; `m26_m27_m28_m59_m91` runs five). Full procedures:
@@ -118,6 +119,9 @@ peer versions.
 | M103 | GoBGP 4.7 → 4.8 route-server differential revalidation: immutable M92 evidence; exact 56/0 normal and 17/0 missing-EoR refusal; raw equality after deleting only recursive `age`; separately versioned M103 golden with byte-identical route/trailer records | Checksum-built GoBGP 4.8.0 ×3 + BIRD 2.0.12 |
 | M104 | Current-daemon ARouteServer filtering differential: immutable M90 inputs; exact 23/23 context-ingestion plus 74/0 live verdict, term/cause, and session-survival gates | ARouteServer 1.23.2 + checksum-built BIRD 2.19.2 + checksum-built GoBGP 4.10.0 ×3 |
 | M107 | RFC 8950 uniform-fleet route server rendered by `rs-config-render`: IPv4 and IPv6 unicast over one IPv6 session per member with exact Extended Next Hop negotiation; a sibling lab withholds IPv4 routes with IPv6 next hops from a non-ENHE receiver | GoBGP 4.10.0 ×2 (+ FRR 10.7.1 in the sibling) |
+| M114 | Import `next-hop self` toward an iBGP receiver and a route-server client: the rewritten prefix carries rustbgpd's source-session address and the control prefix keeps its received next hop, with tshark-checked single `NEXT_HOP` UPDATEs and no NOTIFICATION | FRR 10.7.1 |
+| M115 | Conditional advertisement, advertise-if-absent (ADR-0137): the payload reaches the receiver only while the condition prefix is absent, with explain, metrics, and a tshark-checked receiver-bound UPDATE order that respects `settle_time` | FRR 10.7.1 |
+| M116 | IPv6 unicast keeps an IPv6 next hop over IPv4 transport: import `next-hop self` and IPv4 `set_next_hop` rewrites do not give IPv6 routes an IPv4 next hop, checked at an iBGP receiver and a route-server client | FRR 10.7.1 |
 
 ## Interop labs — kernel dataplane, PR + push + manual (`kernel-dataplane.yml`)
 

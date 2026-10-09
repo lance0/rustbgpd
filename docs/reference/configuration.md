@@ -1209,14 +1209,14 @@ ranges configure their prefix keyring directly. The legacy singleton form is:
 [[neighbors]]
 address = "10.0.0.2"
 remote_asn = 65002
-tcp_ao = {
-  key = "secret",
-  send_id = 1,
-  recv_id = 1,
-  algorithm = "hmac(sha256)",
-  preferred = true,
-  deprecated = false,
-}
+
+[neighbors.tcp_ao]
+key = "secret"
+send_id = 1
+recv_id = 1
+algorithm = "hmac(sha256)"
+preferred = true
+deprecated = false
 ```
 
 A two-key rollover can be staged as an ordered array. First append the
@@ -1594,17 +1594,25 @@ peer_group = "rs-clients"
 hold_time = 45  # neighbor override beats peer-group default
 ```
 
-Peer-group fields mirror inheritable neighbor settings: timers, families,
+Peer-group fields mirror every neighbor setting except `address`,
+`interface`, `remote_asn`, `description`, `peer_group`, `tcp_ao`, and
+`conditional_advertisements`. That covers timers, families,
 prefix limits (`max_prefixes`, `max_prefixes_ipv4`, `max_prefixes_ipv6`,
 `max_prefixes_received_ipv4`, `max_prefixes_received_ipv6`,
 `max_prefixes_out_ipv4`, `max_prefixes_out_ipv6`) and
 `max_prefix_restart_seconds`,
 GR/LLGR, Add-Path, route-server / RR flags, BGP Role / strict-role defaults,
-receive-side Prefix ORF, private-AS handling, MD5/GTSM, `tcp_mss`,
+receive-side Prefix ORF, `disable_ipv4_unicast`, `link_local_next_hop`,
+private-AS handling, MD5/GTSM, BFD, `tcp_mss`,
 `local_ipv6_nexthop`, `log_level`, slow-peer detection
 (`slow_peer_threshold_pct`, `slow_peer_duration`, `slow_peer_isolation`),
 and import/export inline policy or named chains. TCP-AO is intentionally not inherited through peer groups; static
 neighbors and dynamic ranges configure their startup key directly.
+A gRPC `SetPeerGroup` replaces only the fields its definition carries; the
+config-file-only group fields (such as `role`, `strict_role`,
+`prefix_orf_receive`, `disable_ipv4_unicast`, `link_local_next_hop`, `bfd`,
+and the per-family prefix limits) keep their configured values. See
+[PeerGroupService](api.md#peergroupservice).
 
 `discard_path_attributes` is inherited too. A peer-group replacement supplies
 the complete list (an empty or omitted list clears the group value); a neighbor
@@ -3240,14 +3248,19 @@ These fields modify matching routes. Only valid with `action = "permit"`.
 | `set_as_path_prepend`  | table       | `{ asn = 65001, count = 3 }` (ASN 1–4294967295, count 1–10) |
 
 `set_next_hop` follows the route's address family. An IPv6 address on an IPv4
-unicast route is an RFC 8950 next hop. An IPv4 address does not apply to an
-IPv6 unicast route, whose `MP_REACH_NLRI` next hop must be IPv6
-(RFC 2545 §3); the route keeps its next hop, as with FRR's `set ip next-hop`.
-On import, `"self"` for an IPv6 route resolves to the session's local IPv6
-address, else `local_ipv6_nexthop`; with neither (IPv4 transport and no
-`local_ipv6_nexthop`) the route keeps its received next hop. Export never
-encodes an IPv4 next hop for an IPv6 route: such a route is withheld from that
-peer and counted in
+unicast route is an RFC 8950 next hop. An IPv4 address does not apply to a
+route with IPv6 NLRI (IPv6 unicast, IPv6 labeled unicast, or VPNv6), whose
+`MP_REACH_NLRI` next hop must be IPv6 (RFC 2545 §3, RFC 8277, RFC 4659
+§3.2.1); the route keeps its next hop, as with FRR's `set ip next-hop`.
+rustbgpd does not originate 6PE or 6VPE routes and never converts an IPv4
+`set_next_hop` into an IPv4-mapped IPv6 address. To set one deliberately, give
+the IPv6 form, such as `"::ffff:192.0.2.9"`. A received IPv4-mapped next hop
+is reflected unchanged. On import, `"self"` for an IPv6 route resolves to the
+session's local IPv6 address, else `local_ipv6_nexthop`; with neither (IPv4
+transport and no `local_ipv6_nexthop`) the route keeps its received next hop.
+Export never encodes an IPv4 next hop for a route with IPv6 NLRI, including a
+VPNv6 route received with a 12-octet RD + IPv4 next hop: such a route is
+withheld from that peer and counted in
 `bgp_exact_export_rejections_total{reason="missing_ipv6_next_hop"}`.
 
 ### Community formats
@@ -4109,6 +4122,8 @@ duplicate_mac_detection = { action = "detect", window_seconds = 180, threshold =
 | `apply_aliasing_ecmp` | bool     | no       | `true`  | Program ADR-0059 FDB nexthop groups for multi-homed Type 2 routes (aliasing-ECMP via `NDA_NH_ID` + `NHA_FDB`). Flip to `false` to roll this L2VNI back to single-dst FDB rows at the primary VTEP. Single-homed Type 2 entries are unaffected |
 | `duplicate_mac_detection` | table | no | `{ action = "detect", window_seconds = 180, threshold = 5, recovery_seconds = 540 }` | RFC 7432 §15.1 duplicate-MAC M/N detector. `action = "detect"` records threshold crossings only; `action = "suppress_local"` additionally withdraws/suppresses locally-originated Type 2 MAC-only and MAC+IP routes for the offending `(VNI, MAC)` until `recovery_seconds` elapses |
 | `duplicate_ip_detection` | table | no | `{ enabled = false, window_seconds = 180, threshold = 5 }` | Optional per-IP M/N diagnostics for conflicting MAC ownership within a VNI. Detect-only: increments counters and logs threshold crossings, without suppressing or withdrawing routes |
+| `service_interface`   | string   | no       | `"vlan_based"` | EVPN service interface. `vlan_based` keeps Ethernet Tag ID `0`. `vlan_aware_bundle` (RFC 8365 VLAN-aware bundle member, ADR-0092) is **not accepted yet**: the row is checked against the rules below and then rejected |
+| `ethernet_tag`        | u32      | no       | --      | Ethernet Tag of a `vlan_aware_bundle` member, `1..=16777215`, set explicitly (never derived from `vni`). **Not accepted yet**, since it is valid only with `service_interface = "vlan_aware_bundle"` |
 
 Duplicate-IP diagnostics can be enabled independently of duplicate-MAC policy:
 
@@ -4172,6 +4187,18 @@ crossings, not to applying a configuration change.
   `recovery_seconds` must all be greater than zero.
 - `duplicate_mac_detection.recovery_seconds` must be no greater than
   31,536,000 seconds (365 days).
+- `service_interface = "vlan_aware_bundle"` is not accepted yet. A bundle
+  row is first checked against the bundle rules, then rejected with
+  `vni N: service_interface = "vlan_aware_bundle" is not supported yet`.
+  The rules are: `ethernet_tag` is required, explicit, and in
+  `1..=16777215`, and it is rejected on `vlan_based` rows. A bundle row
+  cannot set `ip_vrf` or `auto_derive_route_target`, and it cannot be
+  listed in `[[ethernet_segments]].member_vnis`. Two bundle rows that
+  share a route target need different Ethernet Tags. A route target
+  cannot be shared between a `vlan_based` row and a bundle row. A bundle
+  row's `(bridge, bridge_vlan)` cannot be claimed by any other row;
+  `vlan_based` rows alone keep their existing behavior. The same rules
+  apply to SIGHUP reload and `ApplyEvpnRuntime` candidates.
 - Same VNI must not appear in multiple `[[ethernet_segments]]`
   `member_vnis` lists until per-port learned disambiguation is plumbed.
 
@@ -4991,7 +5018,9 @@ the [operations guide](operations.md#configuration-reload-sighup) the
 settlement detail.
 
 1. **Generation** — changes to static `[[neighbors]]`, `[peer_groups]`,
-   BFD member attachments, inline policy definitions, neighbor sets, global chains, `.rpol` content,
+   BFD member attachments, inline policy definitions, neighbor sets, global chains,
+   `[policy.conditional_advertisements]` definitions and neighbor
+   `conditional_advertisements` attachments, `.rpol` content,
    `[policy.datasets]` contents or bindings, or outbound prefix maxima settle
    as one owned runtime generation. The daemon resolves the candidate once,
    derives one action per static neighbor (unchanged, hot update in place,
@@ -5007,7 +5036,8 @@ settlement detail.
    change combined with TCP-AO rotation or a listener MD5/GTSM edit (a
    changed password or GTSM setting on a neighbor that stays configured, or
    on a dynamic range) while dataset contents, dataset bindings, and BFD
-   member attachments are unchanged, runs
+   member attachments are unchanged and no config-file-only peer-group field
+   or conditional-advertisement change is present (item 3), runs
    per-subsystem steps in dependency
    order: listener authentication, EVPN runtime, and outbound prefix maxima;
    definitions and global chains; the `[[neighbors]]` reconcile; the
@@ -5023,7 +5053,13 @@ settlement detail.
    edit, and any generation-class or dataset
    change combined with `[[dynamic_neighbors]]`, EVPN runtime tables,
    `[[fib_tables]]`, or `honor_graceful_shutdown` / `honor_blackhole`, are
-   rejected before any effect. Apply those families in separate reloads.
+   rejected before any effect. So is a sequential candidate (TCP-AO rotation
+   or a listener MD5/GTSM edit) whose peer-group edit adds or changes a
+   config-file-only group field such as `role`, `strict_role`,
+   `prefix_orf_receive`, `disable_ipv4_unicast` or `link_local_next_hop`
+   (the full list is in the [reload matrix](reload-matrix.md#sighup-reload-routes)),
+   or that changes a conditional-advertisement definition or attachment.
+   Apply those families in separate reloads.
 
 A candidate that fails to parse or validate, or whose `.rpol` or dataset files
 fail to load, is rejected before any effect on every route. A lost

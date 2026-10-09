@@ -1693,3 +1693,212 @@ duplicate_ip_detection = {{ {setting} }}
         assert!(parse(&text).is_err(), "accepted {setting}");
     }
 }
+
+// ── ADR-0092 VLAN-aware bundle rows (LAN-65 S1: validated, then refused) ──
+
+/// One `[[evpn_instances]]` row on `br0`; `extra` adds or overrides keys.
+fn bundle_row(vni: u32, rt: &str, extra: &str) -> String {
+    format!(
+        r#"
+[[evpn_instances]]
+vni = {vni}
+rd = "10.0.0.100:{vni}"
+route_targets = ["{rt}"]
+local_vtep_ip = "10.0.0.100"
+bridge = "br0"
+{extra}
+"#
+    )
+}
+
+fn evpn_instance_error(rows: &str) -> String {
+    let err = parse(&evpn_toml_with(rows)).unwrap_err();
+    assert!(
+        matches!(err, ConfigError::InvalidEvpnInstance { .. }),
+        "got {err}"
+    );
+    err.to_string()
+}
+
+const NOT_SUPPORTED_YET: &str = "invalid EVPN instance config: vni 10010: \
+     service_interface = \"vlan_aware_bundle\" is not supported yet";
+
+#[test]
+fn vlan_aware_bundle_row_passes_shape_rules_then_is_refused() {
+    let member = |vni, tag, vlan| {
+        bundle_row(
+            vni,
+            "65000:100",
+            &format!(
+                "service_interface = \"vlan_aware_bundle\"\nethernet_tag = {tag}\nbridge_vlan = {vlan}"
+            ),
+        )
+    };
+    let rows = format!("{}{}", member(10010, 10, 10), member(10020, 20, 20));
+    assert_eq!(evpn_instance_error(&rows), NOT_SUPPORTED_YET);
+    // The highest tag is valid; only the final gate refuses the row.
+    assert_eq!(
+        evpn_instance_error(&member(10010, 16_777_215, 10)),
+        NOT_SUPPORTED_YET
+    );
+}
+
+#[test]
+fn vlan_aware_bundle_row_level_rules_are_pinned() {
+    let bundle = "service_interface = \"vlan_aware_bundle\"";
+    for (extra, expected) in [
+        (
+            "ethernet_tag = 10".to_string(),
+            "vni 10010: ethernet_tag requires service_interface = \"vlan_aware_bundle\"",
+        ),
+        (
+            "service_interface = \"vlan_based\"\nethernet_tag = 10".to_string(),
+            "vni 10010: ethernet_tag requires service_interface = \"vlan_aware_bundle\"",
+        ),
+        (
+            bundle.to_string(),
+            "vni 10010: service_interface = \"vlan_aware_bundle\" requires ethernet_tag",
+        ),
+        (
+            format!("{bundle}\nethernet_tag = 0"),
+            "vni 10010: ethernet_tag must be in 1..=16777215 (got 0)",
+        ),
+        (
+            format!("{bundle}\nethernet_tag = 16777216"),
+            "vni 10010: ethernet_tag must be in 1..=16777215 (got 16777216)",
+        ),
+        (
+            format!("{bundle}\nethernet_tag = 4294967295"),
+            "vni 10010: ethernet_tag must be in 1..=16777215 (got 4294967295)",
+        ),
+        (
+            format!("{bundle}\nethernet_tag = 10\nauto_derive_route_target = true"),
+            "vni 10010: auto_derive_route_target is not supported with \
+             service_interface = \"vlan_aware_bundle\"; configure the bundle's shared \
+             route_targets explicitly",
+        ),
+        (
+            format!("{bundle}\nethernet_tag = 10\nip_vrf = \"blue\""),
+            "vni 10010: ip_vrf is not supported with service_interface = \
+             \"vlan_aware_bundle\" yet",
+        ),
+    ] {
+        assert_eq!(
+            evpn_instance_error(&bundle_row(10010, "65000:100", &extra)),
+            format!("invalid EVPN instance config: {expected}"),
+            "{extra}"
+        );
+    }
+}
+
+#[test]
+fn vlan_aware_bundle_table_level_rules_are_pinned() {
+    let member = |vni, rt, tag, vlan| {
+        bundle_row(
+            vni,
+            rt,
+            &format!(
+                "service_interface = \"vlan_aware_bundle\"\nethernet_tag = {tag}\nbridge_vlan = {vlan}"
+            ),
+        )
+    };
+    let based = |vni, rt, vlan| bundle_row(vni, rt, &format!("bridge_vlan = {vlan}"));
+    for (rows, expected) in [
+        (
+            member(10010, "65000:100", 10, 10) + &member(10020, "65000:100", 10, 20),
+            "vni 10020: ethernet_tag 10 for route target 65000:100 is already used by vni 10010",
+        ),
+        (
+            based(100, "65000:100", 30) + &member(10010, "65000:100", 10, 10),
+            "vni 10010: route target 65000:100 is also used by vlan_based vni 100; a route \
+             target cannot be shared between vlan_based and vlan_aware_bundle instances",
+        ),
+        (
+            member(10010, "65000:100", 10, 10) + &based(100, "65000:100", 30),
+            "vni 100: route target 65000:100 is also used by vlan_aware_bundle vni 10010; a \
+             route target cannot be shared between vlan_based and vlan_aware_bundle instances",
+        ),
+        (
+            based(100, "65000:1", 10) + &member(10010, "65000:100", 10, 10),
+            "vni 10010: bridge \"br0\" bridge_vlan 10 is already claimed by vlan_based vni \
+             100; a vlan_aware_bundle row needs its own (bridge, bridge_vlan)",
+        ),
+        (
+            member(10010, "65000:100", 10, 10) + &member(10020, "65000:100", 20, 10),
+            "vni 10020: bridge \"br0\" bridge_vlan 10 is already claimed by vlan_aware_bundle \
+             vni 10010; a vlan_aware_bundle row needs its own (bridge, bridge_vlan)",
+        ),
+        (
+            member(10010, "65000:100", 10, 10) + &member(10010, "65000:100", 20, 20),
+            "duplicate VNI 10010: an EVPN instance with that VNI is already installed \
+             (existing rd=10.0.0.100:10010)",
+        ),
+    ] {
+        assert_eq!(
+            evpn_instance_error(&rows),
+            format!("invalid EVPN instance config: {expected}"),
+            "{rows}"
+        );
+    }
+
+    // Different tags under one RT, or one tag under different RTs, are a
+    // valid bundle shape; only the final gate refuses it.
+    for rows in [
+        member(10010, "65000:100", 10, 10) + &member(10020, "65000:100", 20, 20),
+        member(10010, "65000:100", 10, 10) + &member(10020, "65000:200", 10, 20),
+    ] {
+        assert_eq!(evpn_instance_error(&rows), NOT_SUPPORTED_YET, "{rows}");
+    }
+}
+
+/// The duplicate `(bridge, bridge_vlan)` rule applies only when a bundle row
+/// is involved: VLAN-Based-only configurations keep their existing behavior.
+#[test]
+fn vlan_based_rows_may_still_share_bridge_vlan() {
+    let rows = bundle_row(100, "65000:100", "bridge_vlan = 10")
+        + &bundle_row(200, "65000:200", "bridge_vlan = 10");
+    let table = parse(&evpn_toml_with(&rows))
+        .unwrap()
+        .resolve_evpn_instances()
+        .unwrap();
+    assert_eq!(table.len(), 2);
+    assert!(
+        table
+            .iter()
+            .all(|inst| inst.ethernet_tag == rustbgpd_wire::EthernetTagId(0))
+    );
+}
+
+#[test]
+fn vlan_aware_bundle_row_cannot_join_an_ethernet_segment() {
+    let rows = bundle_row(
+        10010,
+        "65000:100",
+        "service_interface = \"vlan_aware_bundle\"\nethernet_tag = 10",
+    ) + r#"
+[[ethernet_segments]]
+esi = "00:00:00:00:00:00:00:00:00:01"
+member_vnis = [10010]
+originator_ip = "10.0.0.100"
+"#;
+    assert_eq!(
+        evpn_instance_error(&rows),
+        "invalid EVPN instance config: vni 10010: ethernet segment esi \
+         \"00:00:00:00:00:00:00:00:00:01\" lists this vlan_aware_bundle row in member_vnis; \
+         multi-homing is not supported for bundle members yet"
+    );
+}
+
+/// SIGHUP and runtime-apply candidates resolve through the same
+/// `resolve_evpn_instances`, so a candidate that already passed `validate`
+/// elsewhere still cannot smuggle a bundle row through resolution.
+#[test]
+fn vlan_aware_bundle_rows_are_refused_on_resolution_too() {
+    let mut config = parse(&evpn_toml_with(&bundle_row(10010, "65000:100", ""))).unwrap();
+    config.evpn_instances[0].service_interface = EvpnServiceInterfaceConfig::VlanAwareBundle;
+    config.evpn_instances[0].ethernet_tag = Some(10);
+    assert_eq!(
+        config.resolve_evpn_instances().unwrap_err().to_string(),
+        NOT_SUPPORTED_YET
+    );
+}

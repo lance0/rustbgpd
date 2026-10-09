@@ -40,6 +40,11 @@ surfaces; it does not promote the rest of the project out of alpha.
   [ADR-0135](../adr/0135-flowspec-feasibility.md). VPN FlowSpec (SAFI 134) is
   not implemented.
 - Confederations are not implemented.
+- Conditional advertisement ([ADR-0137](../adr/0137-conditional-advertisement.md))
+  is alpha and outside the v1 inventory. It covers IPv4 and IPv6 unicast only,
+  `[[dynamic_neighbors]]` ranges do not accept attachments, and an attached
+  neighbor leaves update-group sharing. See
+  [Conditional advertisements](configuration.md#conditional-advertisements).
 - RFC 5004 (prefer the existing external best path) is not implemented. Path
   selection is deterministic: below the eBGP-over-iBGP step, ties are broken
   by the lowest effective BGP Identifier, then the shorter CLUSTER_LIST, then
@@ -90,7 +95,11 @@ Shipped and interop-tested:
   next hops, and remote-VTEP FDB rows with an IPv6 `dst`.
 - Active-active multi-homing building blocks: DF election, Type 1/4, BUM
   suppression, aliasing ECMP via FDB nexthop groups, and all-active Type 5
-  receive.
+  receive. Preference-based DF election can opt into RFC 9785 Don't-Preempt
+  (`df_dont_preempt`), and `esi = "auto-lacp"` derives a Type 1 ESI from a
+  Linux bond's LACP partner; a first `[[ethernet_segments]]` entry still
+  needs a restart, and Type 2 (STP) ESI derivation is not implemented. See
+  [Ethernet Segments](configuration.md#auto-derived-esi-lacp-type-1).
 - Duplicate-MAC detection with quarantine, bounded key-only status listing,
   and manual clear. The listing intentionally exposes no detector clocks or
   recovery durations and caps each atomic snapshot response at 4096 rows.
@@ -165,7 +174,11 @@ full gate ladder.
   is experimental and off by default. It is enabled per neighbor or peer group
   with `link_local_next_hop`; there is no global default. Only explicitly
   interface-bound IPv6 link-local neighbors may enable it, and
-  `[[dynamic_neighbors]]` ranges cannot.
+  `[[dynamic_neighbors]]` ranges cannot. With or without the capability, a
+  link-local next hop is exported only on the interface where it was learned;
+  a route that would carry it elsewhere is withheld and counted in
+  `bgp_exact_export_rejections_total{reason="missing_ipv6_next_hop"}` unless
+  next-hop self or `local_ipv6_nexthop` rewrites it.
 
 ## Configuration control
 
@@ -187,7 +200,10 @@ full gate ladder.
   queue on either actor; it can still wait for a pending session publication
   or a busy counter or dataset error lock under its one absolute two-second
   deadline, and returns `DEADLINE_EXCEEDED` with no partial rows when that
-  deadline expires.
+  deadline expires. A fleet import read can opt into `allow_partial`, which
+  skips closed import-session publications and lists them in
+  `incomplete_peer_addresses` instead of failing; see
+  [`GetPolicyStats`](api.md#policyservice).
 
 ## Operational proof
 
