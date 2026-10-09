@@ -36,6 +36,7 @@ lock, quiet gates, provenance, and thresholds, and a lock or quiet-gate exit
 | `just bench-route-server-1000` | `scale/route-server-1000/run-receipt.sh` |
 | `just bench-enhanced-route-refresh` | `scale/enhanced-route-refresh/run-receipt.sh` |
 | `just bench-irr-reload [cells]` | `scale/irrreload/run-irr-reload.sh` (`SMOKE=1` for its pipeline check) |
+| `just bench-rpki-cell <out-dir> <base> <head>` | `scale/rpki-cell/run-rpki-cell.sh`: the reloadstall convergence cell, base against head, with a StayRTR-served VRP table (`DAEMON_CPUS` and `RTR_CPUS` required) |
 | `just bench-vpn-query <output> [--smoke] [--retry]` | `run-vpn-query-campaign.sh`, with `--cpu $RUSTBGPD_BENCH_CORE` unless `--cpu` is given |
 | `just bench-headline <out-dir> <label>=<ref>...` | `scale/headline/run-campaign.sh`: the headline matrix, IRR, and RR1000 cells across several arms, in rotated order |
 | `just bench-headline-summary <dir> [--out DIR]` | `scale/headline/summarize.py`: re-extraction of a campaign or receipt bundle, no measurement |
@@ -95,7 +96,8 @@ feature-gated; the same Cargo feature set is applied to both refs.
 Retained fanout comparisons additionally use `--fanout-gate-out PATH`. That
 mode rejects any missing or unexpected fanout row, requires the exact pinned
 two-attempt transport matrix on a performance-governor CPU, applies every
-acceptance threshold, and writes only a checksummed sanitized receipt. Generic
+acceptance threshold, and writes only a sanitized receipt that records SHA-256
+hashes of its Criterion inputs and pin. Generic
 metadata, logs, absolute paths, and Criterion reports are local diagnostics and
 must not be published.
 
@@ -196,8 +198,7 @@ comparison evidence. A dirty checkout is rejected by default; the explicit
 `--allow-dirty-mechanics --no-taskset` combination exists only to exercise the
 driver while editing it. Metadata records the invoking HEAD, dirty flag and
 status hash, evidence class, lock policy/digest, preflight thresholds, and exact driver,
-harness, bench-support, compile-input-manifest, and measurement-source-manifest
-hashes.
+harness, bench-support, and compile-input-manifest hashes.
 
 For a quick single-process mechanics check, invoke the bench target directly
 with one `--routes`, `--page-size`, and `--scope` value. Do not retain or publish
@@ -335,7 +336,7 @@ result). Guard test: `bench/tests/test_verify_mrt_growth_campaign.py`.
 coverage unless CI already invokes its native smoke contract. Criterion
 benchmark bodies run exactly once through `cargo test --bench` (no measurement), while
 `route_paging` and `dataplane_prefix_paging` run bounded multi-page fixtures
-through their custom CLIs. The other four custom harnesses retain their
+through their custom CLIs, and `gr_end_of_rib` runs its bounded self-test. The other four custom harnesses retain their
 separate CI smoke invocations. The target list comes from `cargo metadata`, so
 new bench targets are covered automatically.
 

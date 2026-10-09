@@ -930,20 +930,20 @@ Be honest about where rustbgpd isn't the right tool:
   programming through the transactional `L3OwnedState` model,
   sub-second `RTNLGRP_IPV4/IPV6_ROUTE` withdraw, `rbgp evpn
   vrfs` CLI, M39 hosted smoke. **ADR-0059** (v0.19.0) adds
-	  receive-path aliasing-ECMP via FDB nexthop groups (M40
-	  FRR-validated). Auto-derived RTs, Type 5 gRPC injection
-	  including non-zero Gateway Address, receive-side RFC 9135
-	  overlay-index recursion, native GW-IP overlay-index Type 5
-	  origination, single-active ESI overlay-index Type 5 receive
-	  with M71 GoBGP proof, all-active ESI overlay-index Type 5
-	  receive with M72 GoBGP proof, duplicate-MAC remote suppression +
-	  manual clear, and production-default DF/non-DF BUM suppression
-	  have also shipped. **Still missing for full VTEP parity:**
-	  Linux softswitch local-bias split-horizon,
-	  optional import-side ES-Import RT filtering, EVPN over MPLS/PBB,
-	  SMET service procedures, and EVPN route types 7–11. For a single-homed
-	  L2VNI fabric without
-	  MPLS/PBB or service-provider EVPN requirements, rustbgpd is a fit today.
+  receive-path aliasing-ECMP via FDB nexthop groups (M40
+  FRR-validated). Auto-derived RTs, Type 5 gRPC injection
+  including non-zero Gateway Address, receive-side RFC 9135
+  overlay-index recursion, native GW-IP overlay-index Type 5
+  origination, single-active ESI overlay-index Type 5 receive
+  with M71 GoBGP proof, all-active ESI overlay-index Type 5
+  receive with M72 GoBGP proof, duplicate-MAC remote suppression +
+  manual clear, and production-default DF/non-DF BUM suppression
+  have also shipped. **Still missing for full VTEP parity:**
+  Linux softswitch local-bias split-horizon,
+  optional import-side ES-Import RT filtering, EVPN over MPLS/PBB,
+  SMET service procedures, and EVPN route types 7–11. For a single-homed
+  L2VNI fabric without
+  MPLS/PBB or service-provider EVPN requirements, rustbgpd is a fit today.
 - **VPLS fabrics** — No RFC 4761 VPLS address family support.
 - **Service provider core** — No Confederation (RFC 5065). VPNv4/VPNv6 and
   labeled-unicast ship only as a route-reflector / controller-feed slice
