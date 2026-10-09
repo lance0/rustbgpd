@@ -10043,3 +10043,31 @@ async fn link_drain_seed_is_undone_only_after_a_no_effect_failure() {
         );
     }
 }
+
+#[test]
+fn restore_watch_counts_a_receiver_closing_during_the_rollback_as_unrestored() {
+    let committed = Arc::new(1_u32);
+    let candidate = Arc::new(2_u32);
+
+    // The actor took the candidate, then exits while the rollback is
+    // published: it cannot consume the committed value, so not restored.
+    let (tx, rx) = watch::channel(committed.clone());
+    tx.send_replace(candidate.clone());
+    let mut closing = Some(rx);
+    assert!(!restore_watch_with(&tx, committed.clone(), || drop(
+        closing.take()
+    )));
+
+    // Still attached after the publish: it observes the committed value.
+    let (tx, _rx) = watch::channel(candidate.clone());
+    assert!(restore_watch(&tx, committed.clone()));
+
+    // Closed before the rollback: restored only if the candidate never
+    // replaced the committed value.
+    let (tx, rx) = watch::channel(committed.clone());
+    drop(rx);
+    assert!(restore_watch(&tx, committed.clone()));
+    let (tx, rx) = watch::channel(candidate);
+    drop(rx);
+    assert!(!restore_watch(&tx, committed));
+}

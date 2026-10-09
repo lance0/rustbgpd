@@ -124,19 +124,30 @@ impl DaemonEvpnRuntimeConvergeError {
     }
 }
 
-/// Republish `value` as a rollback step. A closed channel cannot take a
-/// send, so the rollback holds only when its last value already equals
-/// `value`: this converge never published anything else to it.
+/// Republish `value` as a rollback step. The verdict is taken after the
+/// publish: a receiver still attached then observes `value`. Once none is,
+/// whether it closed before or during the publish, the rollback reached
+/// nobody and holds only when the replaced value already equalled `value`,
+/// i.e. this converge never published anything else to it.
 #[must_use]
 pub(crate) fn restore_watch<T: PartialEq>(
     tx: &tokio::sync::watch::Sender<Arc<T>>,
     value: Arc<T>,
 ) -> bool {
-    if tx.is_closed() {
-        return **tx.borrow() == *value;
-    }
-    tx.send_replace(value);
-    true
+    restore_watch_with(tx, value, || {})
+}
+
+/// [`restore_watch`] with `after_publish` run between the publish and the
+/// verdict, so a test can close the channel inside that window.
+fn restore_watch_with<T: PartialEq>(
+    tx: &tokio::sync::watch::Sender<Arc<T>>,
+    value: Arc<T>,
+    after_publish: impl FnOnce(),
+) -> bool {
+    let committed = Arc::clone(&value);
+    let replaced = tx.send_replace(value);
+    after_publish();
+    !tx.is_closed() || *replaced == *committed
 }
 
 impl From<SupportedPlanShapeError> for DaemonEvpnRuntimeConvergeError {
