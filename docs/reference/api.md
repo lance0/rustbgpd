@@ -3177,6 +3177,11 @@ visible, the coordinator pins `mutation_state=Failed`, an ERROR log names the
 step, and `evpn_runtime_decomposed_fail_stops_total` increments for the
 mid-sequence stop.
 
+An apply that daemon shutdown cuts off after it published to the EVPN actors
+returns `UNAVAILABLE`, not `FAILED_PRECONDITION`: the coordinator pins
+`mutation_state=Failed` and those publishes are not rolled back, because the
+same shutdown drains the actors next.
+
 Operators configure instances via the `[[evpn_instances]]` TOML block.
 SIGHUP reload submits EVPN table edits through the same coordinator for
 supported ADR-0063 shapes. Unsupported dependency cycles, L3VNI/device/table

@@ -50,6 +50,12 @@ pub(crate) fn evpn_vni_to_esi_map(
 pub(crate) enum DaemonEvpnRuntimeConvergeError {
     Unsupported(String),
     Failed(rustbgpd_evpn::EvpnRuntimeConvergeError),
+    /// Coordinated shutdown closed the segment actor slot after the
+    /// converge published to its actors. Those publishes are not
+    /// restored: shutdown drains the same actors next, so a republish
+    /// would race the drain. Surfaced as `UNAVAILABLE`, never as the
+    /// no-effect `FAILED_PRECONDITION`.
+    InterruptedByShutdown(rustbgpd_evpn::EvpnRuntimeConvergeError),
 }
 
 impl DaemonEvpnRuntimeConvergeError {
@@ -64,7 +70,28 @@ impl DaemonEvpnRuntimeConvergeError {
     pub(crate) fn message(&self) -> &str {
         match self {
             Self::Unsupported(message) => message,
-            Self::Failed(source) => source.message(),
+            Self::Failed(source) | Self::InterruptedByShutdown(source) => source.message(),
+        }
+    }
+
+    /// The source to pin the coordinator with: every variant except
+    /// `Unsupported` may have had side effects.
+    fn side_effect_source(&self) -> Option<rustbgpd_evpn::EvpnRuntimeConvergeError> {
+        match self {
+            Self::Unsupported(_) => None,
+            Self::Failed(source) | Self::InterruptedByShutdown(source) => Some(source.clone()),
+        }
+    }
+
+    /// The apply error for this converge failure. A converge cut off by
+    /// shutdown left its publishes in place, so it cannot use the
+    /// no-effect `FAILED_PRECONDITION`.
+    fn apply_error(&self, message: String) -> GrpcEvpnRuntimeApplyError {
+        match self {
+            Self::InterruptedByShutdown(_) => GrpcEvpnRuntimeApplyError::Unavailable(message),
+            Self::Unsupported(_) | Self::Failed(_) => {
+                GrpcEvpnRuntimeApplyError::FailedPrecondition(message)
+            }
         }
     }
 }
@@ -2574,11 +2601,22 @@ impl DaemonEvpnRuntimeConverger for EvpnRuntimeActorConverger {
             // yet: start it only once the converge that published the
             // first Ethernet Segment succeeded. A refused or rolled-back
             // converge leaves it unstarted.
+            //
+            // A refusal here means shutdown closed the slot after this
+            // converge published. Those publishes stay in place: the
+            // shutdown that closed the slot drains the same actors next,
+            // so a republish of the committed model would race that drain
+            // and could not be confirmed. The error says so instead of
+            // reporting a no-effect refusal.
             if let Some(segment) = &self.segment
                 && !segment.start_if_configured()
             {
-                return Err(DaemonEvpnRuntimeConvergeError::failed(
-                    "EVPN segment actor closed for shutdown during the converge",
+                return Err(DaemonEvpnRuntimeConvergeError::InterruptedByShutdown(
+                    rustbgpd_evpn::EvpnRuntimeConvergeError::new(
+                        "EVPN segment actor closed for shutdown during the converge; \
+                         its published runtime state was not restored and is left to the \
+                         shutdown teardown",
+                    ),
                 ));
             }
             Ok(())
@@ -2967,7 +3005,7 @@ where
                 }
             }
         }
-        if let DaemonEvpnRuntimeConvergeError::Failed(source) = error.clone() {
+        if let Some(source) = error.side_effect_source() {
             // #268 decomposition is only attempted for `Unsupported` mixes;
             // a `Failed` converge had side effects and pins here instead.
             tracing::error!(
@@ -2983,7 +3021,7 @@ where
             })?;
             let _ = coordinator.apply_candidate(candidate, Err(source));
         }
-        return Err(GrpcEvpnRuntimeApplyError::FailedPrecondition(format!(
+        return Err(error.apply_error(format!(
             "EVPN runtime mutation failed: {}; generation {} remains committed",
             error.message(),
             snapshot.generation.as_u64()
@@ -3072,7 +3110,7 @@ async fn apply_decomposed_evpn_runtime_steps(
             .converge(&step_current, &step.candidate, &step_plan)
             .await
         {
-            if let DaemonEvpnRuntimeConvergeError::Failed(source) = error.clone() {
+            if let Some(source) = error.side_effect_source() {
                 let mut coordinator = lock_coordinator()?;
                 let _ = coordinator.apply_candidate(step.candidate.clone(), Err(source));
                 // Fail-stop pinned the coordinator (mutation_state=Failed);
@@ -3098,7 +3136,7 @@ async fn apply_decomposed_evpn_runtime_steps(
                  candidate config and re-SIGHUP / re-apply — the next attempt replans from the \
                  committed model and converges only the remainder"
             );
-            return Err(GrpcEvpnRuntimeApplyError::FailedPrecondition(format!(
+            return Err(error.apply_error(format!(
                 "EVPN runtime mutation failed at decomposed step {step_number}/{total} ({}): {}; \
                  {committed_summary}; fix the config and re-SIGHUP / re-apply to converge the \
                  remainder",

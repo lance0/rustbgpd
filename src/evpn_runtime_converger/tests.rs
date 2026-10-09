@@ -951,6 +951,54 @@ async fn shutdown_closing_the_slot_after_a_segment_publish_fails_the_converge() 
 }
 
 #[tokio::test]
+async fn shutdown_close_after_the_first_segment_publish_reports_unrestored_state() {
+    // Publish -> close -> start, in that order: the first segment's
+    // converge publishes, shutdown closes the pending slot, and the start
+    // decision is refused. The publishes are not rolled back, so the
+    // apply must not answer with the no-effect FAILED_PRECONDITION.
+    let baseline = load_runtime_test_config(l2vni_runtime_candidate_toml(), "baseline");
+    let candidate = load_runtime_test_config(l2vni_one_es_runtime_candidate_toml(), "candidate");
+    let esis = crate::config::AutoLacpEsis::default();
+    let coordinator = coordinator_from_config(&baseline, &esis);
+    let generation = coordinator.lock().unwrap().model().generation();
+    let (rib_tx, rib_rx) = mpsc::channel::<RibUpdate>(64);
+    let _rib = runtime_converger_rib_responder(rib_rx, Arc::default());
+    let instances = Arc::new(baseline.resolve_evpn_instances().unwrap());
+    let (segment, started) = deferred_segment_control(&instances, rib_tx.clone());
+    let apply = EvpnRuntimeReloadApply::new(
+        coordinator.clone(),
+        Arc::new(tokio::sync::Mutex::new(())),
+        Arc::new(segment_only_converger(rib_tx, segment.clone(), None)),
+        baseline,
+    );
+
+    segment.close_at_next_start();
+    let error = apply
+        .apply_candidate_config(&candidate, false)
+        .await
+        .expect_err("a converge cut off by shutdown fails");
+
+    let GrpcEvpnRuntimeApplyError::Unavailable(message) = &error else {
+        panic!("expected UNAVAILABLE for unrestored publishes, got {error:?}");
+    };
+    assert!(
+        message.contains("published runtime state was not restored"),
+        "{message}"
+    );
+    assert!(segment.is_closed_for_shutdown());
+    assert!(!started.load(std::sync::atomic::Ordering::SeqCst));
+    let guard = coordinator.lock().unwrap();
+    assert_eq!(guard.model().generation(), generation);
+    assert_eq!(
+        guard.model().mutation_state(),
+        rustbgpd_evpn::EvpnRuntimeMutationState::Failed,
+        "the coordinator pins on the side effects left in place"
+    );
+    drop(guard);
+    assert_eq!(apply.committed_config_locked().ethernet_segments.len(), 0);
+}
+
+#[tokio::test]
 async fn first_auto_lacp_segment_apply_starts_the_probe_then_the_segment_actor() {
     // No segment at startup: the first `auto-lacp` segment commits not
     // ready and starts the readiness probe; the probe round that derives

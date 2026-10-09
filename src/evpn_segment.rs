@@ -94,6 +94,10 @@ pub(crate) struct EvpnSegmentRuntimeControl {
     /// Daemon wiring only: the actor task, started on the first
     /// committed Ethernet Segment (see [`Self::with_deferred_start`]).
     slot: Option<Arc<std::sync::Mutex<SegmentActorSlot>>>,
+    /// Test-only: shutdown closes the slot at the next start decision,
+    /// after the converge's publishes landed.
+    #[cfg(test)]
+    close_at_next_start: Arc<std::sync::atomic::AtomicBool>,
 }
 
 /// Starts a prepared segment actor task.
@@ -145,10 +149,21 @@ impl EvpnSegmentRuntimeControl {
     /// Returns `false` when [`Self::close_for_shutdown`] closed the slot
     /// while a segment is published: shutdown took the slot between the
     /// converge's publish and this start, so the caller must fail the
-    /// converge rather than commit a segment no actor serves. The empty
-    /// check and the transition both run under the slot mutex.
+    /// converge rather than commit a segment no actor serves. The
+    /// publishes stay in place; the caller reports them as not restored.
+    /// The empty check and the transition both run under the slot mutex.
     #[must_use]
     pub(crate) fn start_if_configured(&self) -> bool {
+        #[cfg(test)]
+        if self
+            .close_at_next_start
+            .swap(false, std::sync::atomic::Ordering::SeqCst)
+        {
+            assert!(
+                self.close_for_shutdown().is_none(),
+                "the close hook models a slot that never started"
+            );
+        }
         let Some(mut state) = self.slot_state() else {
             return true;
         };
@@ -167,6 +182,15 @@ impl EvpnSegmentRuntimeControl {
             }
             SegmentActorSlot::Closed => false,
         }
+    }
+
+    /// Test-only: close the slot for shutdown at the next
+    /// [`Self::start_if_configured`], placing the close between a
+    /// converge's publishes and its start decision.
+    #[cfg(test)]
+    pub(crate) fn close_at_next_start(&self) {
+        self.close_at_next_start
+            .store(true, std::sync::atomic::Ordering::SeqCst);
     }
 
     /// Whether coordinated shutdown has closed the actor slot. Runtime
@@ -267,6 +291,7 @@ impl EvpnSegmentControlProbe {
                 drained_esis_tx,
                 df_status_rx: watch::channel(Arc::new(SegmentDfStatusTable::new())).1,
                 slot: None,
+                close_at_next_start: Arc::default(),
             },
             drained_rx,
             _instances_rx: instances_rx,
@@ -412,6 +437,8 @@ pub(crate) fn prepare_with_local_bias(
         drained_esis_tx,
         df_status_rx,
         slot: None,
+        #[cfg(test)]
+        close_at_next_start: Arc::default(),
     };
     #[cfg(test)]
     let handle_control = control.clone();
