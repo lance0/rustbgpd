@@ -1140,10 +1140,12 @@ struct ReplacementReadiness {
     /// Only selection release changes Loc-RIB while this owner is held.
     selection_release: bool,
     started: tokio::time::Instant,
-    last_service: std::time::Instant,
+    /// Tokio's clock, so a test can hold the service budget still with a
+    /// paused clock; outside a paused runtime it reads the system clock.
+    last_service: tokio::time::Instant,
     budget: std::time::Duration,
     #[cfg(any(test, feature = "bench-internals"))]
-    last_opportunity: std::time::Instant,
+    last_opportunity: tokio::time::Instant,
     #[cfg(any(test, feature = "bench-internals"))]
     max_gap: std::time::Duration,
     #[cfg(any(test, feature = "bench-internals"))]
@@ -1206,7 +1208,7 @@ fn replacement_readiness_checkpoint(
     // same eligibility as the service pass below.
     #[cfg(any(test, feature = "bench-internals"))]
     if force || readiness.last_service.elapsed() >= readiness.budget {
-        let now = std::time::Instant::now();
+        let now = tokio::time::Instant::now();
         readiness.max_gap = readiness
             .max_gap
             .max(now.duration_since(readiness.last_opportunity));
@@ -1228,7 +1230,7 @@ fn replacement_readiness_checkpoint(
     if !force && readiness.last_service.elapsed() < readiness.budget {
         return;
     }
-    readiness.last_service = std::time::Instant::now();
+    readiness.last_service = tokio::time::Instant::now();
     #[cfg(any(test, feature = "bench-internals"))]
     {
         readiness.last_opportunity = readiness.last_service;
@@ -2067,10 +2069,10 @@ impl RibManager {
             count: self.loc_rib.len(),
             selection_release,
             started,
-            last_service: std::time::Instant::now(),
+            last_service: tokio::time::Instant::now(),
             budget: self.flush_poll_budget.min(FLUSH_POLL_BUDGET),
             #[cfg(any(test, feature = "bench-internals"))]
-            last_opportunity: std::time::Instant::now(),
+            last_opportunity: tokio::time::Instant::now(),
             #[cfg(any(test, feature = "bench-internals"))]
             max_gap: std::time::Duration::ZERO,
             #[cfg(any(test, feature = "bench-internals"))]
