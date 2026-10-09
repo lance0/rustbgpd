@@ -15,7 +15,8 @@ BASE = (
     "managed_bridge",
     "managed_vxlan", "managed_svd_vxlan", "managed_vlan_upper",
     "managed_ready", "link_carrier", "bond_lacp", "auto_lacp_daemon",
-    "ac_gate", "nexthop_raw", "foreign_state_l2", "foreign_state_nhid",
+    "ac_gate", "nexthop_raw", "foreign_state_l2",
+    "foreign_state_l2_dst", "foreign_state_nhid",
 )
 VRF = (
     "l3_multipath", "managed_ip_vrf_ready", "l3_all_active_writer",

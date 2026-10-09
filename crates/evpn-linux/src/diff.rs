@@ -968,14 +968,10 @@ fn handle_existing_kernel_entry(
         if let Some(owned) = last_applied.get(vni, mac)
             && owned.vlan == desired_vlan
         {
-            let dst_matches = match &owned.kind {
-                OwnedEntryKind::SingleDst { dst, .. } => {
-                    kernel_entry.dst == Some(desired_dst)
-                        || (kernel_entry.dst.is_none() && *dst == desired_dst)
-                }
-                OwnedEntryKind::FdbNhg { .. } => kernel_entry.dst == Some(desired_dst),
-            };
-            if !dst_matches {
+            // A marked row without `dst` is not a match: on a real kernel
+            // it means the VXLAN self row is gone while our bridge master
+            // row survives, so the replace below restores the encap row.
+            if kernel_entry.dst != Some(desired_dst) {
                 updates.push(DataplaneOp::UpdateRemoteFdb {
                     vni,
                     mac,
@@ -1286,32 +1282,38 @@ mod tests {
     // An owned row whose kernel destination drifted while the route did
     // not move is rewritten. On Linux this needs the dump to decode the
     // bridge-family `NDA_DST`; before that fix every real row arrived with
-    // `dst: None` and the owned-dst fallback below hid the drift.
+    // `dst: None` and an owned-dst fallback hid the drift. A marked row
+    // with no `dst` (VXLAN self row deleted, bridge master row left) is
+    // repaired too.
     #[test]
     fn update_when_owned_kernel_dst_drifted_from_unchanged_desire() {
         let desired = desired_one(vni(100), mac(1), entry("10.0.0.2", None));
-        let mut snapshot = KernelSnapshot::new();
-        let mut e = ours("10.0.0.9");
-        e.mac = mac(1);
-        snapshot.insert_fdb(vni(100), e);
-        let applied = applied_one(vni(100), mac(1), "10.0.0.2", None);
-        let plan = compute_diff(
-            &desired,
-            &snapshot,
-            &applied,
-            &ready_probes(&[vni(100)]),
-            &GroupOwnedMap::new(),
-            &EvpnInstanceTable::new(),
-        );
-        assert_eq!(
-            plan.ops,
-            vec![DataplaneOp::UpdateRemoteFdb {
-                vni: vni(100),
-                mac: mac(1),
-                vlan: None,
-                dst: ip("10.0.0.2"),
-            }]
-        );
+        for kernel_dst in [Some(ip("10.0.0.9")), None] {
+            let mut snapshot = KernelSnapshot::new();
+            let mut e = ours("10.0.0.9");
+            e.mac = mac(1);
+            e.dst = kernel_dst;
+            snapshot.insert_fdb(vni(100), e);
+            let applied = applied_one(vni(100), mac(1), "10.0.0.2", None);
+            let plan = compute_diff(
+                &desired,
+                &snapshot,
+                &applied,
+                &ready_probes(&[vni(100)]),
+                &GroupOwnedMap::new(),
+                &EvpnInstanceTable::new(),
+            );
+            assert_eq!(
+                plan.ops,
+                vec![DataplaneOp::UpdateRemoteFdb {
+                    vni: vni(100),
+                    mac: mac(1),
+                    vlan: None,
+                    dst: ip("10.0.0.2"),
+                }],
+                "kernel dst {kernel_dst:?}"
+            );
+        }
     }
 
     // 2. Kernel matches desired (same dst, owned) → no-op.
@@ -1331,34 +1333,6 @@ mod tests {
             &probes,
             &GroupOwnedMap::new(),
             &EvpnInstanceTable::new(),
-        );
-        assert!(plan.is_noop(), "expected no-op, got {:?}", plan.ops);
-    }
-
-    #[test]
-    fn noop_when_owned_svd_echo_omits_dst_but_owned_dst_matches() {
-        let desired = desired_one(vni(100), mac(1), entry("10.0.0.2", None));
-        let mut snapshot = KernelSnapshot::new();
-        let mut e = ours("10.0.0.2");
-        e.mac = mac(1);
-        e.dst = None;
-        e.vlan = Some(10);
-        snapshot.insert_fdb(vni(100), e);
-        let mut applied = OwnedSet::new();
-        applied.record_applied(
-            vni(100),
-            mac(1),
-            OwnedEntry::single_dst_in_vlan(ip("10.0.0.2"), None, Some(10)),
-        );
-        let probes = ready_probes(&[vni(100)]);
-        let instances = instances_with_vlan(10, &[vni(100)]);
-        let plan = compute_diff(
-            &desired,
-            &snapshot,
-            &applied,
-            &probes,
-            &GroupOwnedMap::new(),
-            &instances,
         );
         assert!(plan.is_noop(), "expected no-op, got {:?}", plan.ops);
     }
