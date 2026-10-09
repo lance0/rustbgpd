@@ -583,28 +583,23 @@ impl EvpnInstanceTable {
         out
     }
 
-    /// The VLAN-aware bundle member whose `<RT, Ethernet Tag>` a remote route
-    /// selects although the route carries another VNI (ADR-0092 amendment
-    /// C). The MVP supports global VNIs only, so the caller counts such a
-    /// route as [`L2RemoteRouteDropReason::VniMismatch`] against the member.
-    /// Tag `0` never selects a member. When two members qualify (the route
-    /// carries both members' RTs), the lower VNI is returned.
+    /// Index the VLAN-aware bundle members by `<Ethernet Tag, RT>`
+    /// (ADR-0092 amendment C). Build it once per route snapshot; each lookup
+    /// then costs one probe per route target the route carries.
     #[must_use]
-    pub fn bundle_member_for_foreign_vni(
-        &self,
-        vni: u32,
-        ethernet_tag: EthernetTagId,
-        attributes: &[PathAttribute],
-    ) -> Option<&EvpnInstance> {
-        self.by_vni
-            .values()
-            .filter(|inst| {
-                inst.is_vlan_aware_bundle()
-                    && inst.ethernet_tag == ethernet_tag
-                    && inst.id.as_u32() != vni
-                    && inst.carries_route_target(attributes)
-            })
-            .min_by_key(|inst| inst.id)
+    pub fn bundle_member_index(&self) -> BundleMemberIndex {
+        let mut by_tag_rt = HashMap::new();
+        for inst in self.sorted() {
+            if !inst.is_vlan_aware_bundle() {
+                continue;
+            }
+            for rt in &inst.route_targets {
+                // Validation keeps `<RT, tag>` unique; ascending VNI order
+                // keeps the lowest VNI if an unvalidated table repeats one.
+                by_tag_rt.entry((inst.ethernet_tag, *rt)).or_insert(inst.id);
+            }
+        }
+        BundleMemberIndex { by_tag_rt }
     }
 
     /// Install an instance.
@@ -631,6 +626,41 @@ impl EvpnInstanceTable {
         self.rds.insert(instance.rd, instance.id);
         self.by_vni.insert(instance.id, instance);
         Ok(())
+    }
+}
+
+/// VLAN-aware bundle members keyed by `<Ethernet Tag, RT>`; see
+/// [`EvpnInstanceTable::bundle_member_index`].
+#[derive(Debug, Clone, Default)]
+pub struct BundleMemberIndex {
+    by_tag_rt: HashMap<(EthernetTagId, RouteTarget), EvpnInstanceId>,
+}
+
+impl BundleMemberIndex {
+    /// The bundle member whose `<RT, Ethernet Tag>` a remote route selects
+    /// although the route carries another VNI (ADR-0092 amendment C). The
+    /// MVP supports global VNIs only, so the caller counts such a route as
+    /// [`L2RemoteRouteDropReason::VniMismatch`] against the member. Tag `0`
+    /// never selects a member. When the route's RTs select two members, the
+    /// lower VNI is returned.
+    #[must_use]
+    pub fn member_for_foreign_vni(
+        &self,
+        vni: u32,
+        ethernet_tag: EthernetTagId,
+        attributes: &[PathAttribute],
+    ) -> Option<EvpnInstanceId> {
+        if ethernet_tag.0 == 0 || self.by_tag_rt.is_empty() {
+            return None;
+        }
+        attributes
+            .iter()
+            .filter_map(PathAttribute::extended_communities)
+            .flatten()
+            .filter_map(|ec| RouteTarget::from_extended_community(*ec))
+            .filter_map(|rt| self.by_tag_rt.get(&(ethernet_tag, rt)).copied())
+            .filter(|member| member.as_u32() != vni)
+            .min()
     }
 }
 
@@ -916,39 +946,54 @@ mod tests {
     /// when the route carries another VNI; tag 0, a foreign RT, and the
     /// member's own VNI never do.
     #[test]
-    fn bundle_member_for_foreign_vni_matches_rt_and_tag_only() {
-        let attributes = |rt_str: &str| {
-            [PathAttribute::ExtendedCommunities(vec![
-                rt(rt_str).to_extended_community(),
-            ])]
+    fn bundle_member_index_matches_rt_and_tag_only() {
+        let attributes = |rts: &[&str]| {
+            [PathAttribute::ExtendedCommunities(
+                rts.iter()
+                    .map(|rt_str| rt(rt_str).to_extended_community())
+                    .collect(),
+            )]
         };
         let mut table = EvpnInstanceTable::new();
         table
             .insert(make_instance(100, "65000:100", "10.0.0.1"))
             .unwrap();
-        for (vni, tag) in [(10010, 10), (10020, 20)] {
+        // Two members share RT 65000:500 under tags 10 and 20; a second
+        // bundle reuses tag 10 under RT 65000:600.
+        for (vni, tag, bundle_rt) in [
+            (10010, 10, "65000:500"),
+            (10020, 20, "65000:500"),
+            (20010, 10, "65000:600"),
+        ] {
             let mut member = make_instance(vni, &format!("65000:{vni}"), "10.0.0.1")
                 .with_ethernet_tag(EthernetTagId(tag));
-            member.route_targets = vec![rt("65000:500")];
+            member.route_targets = vec![rt(bundle_rt)];
             table.insert(member).unwrap();
         }
-        let bundle_rt = attributes("65000:500");
+        let index = table.bundle_member_index();
+        let bundle_rt = attributes(&["65000:500"]);
         let found = |vni, tag, attrs: &[PathAttribute]| {
-            table
-                .bundle_member_for_foreign_vni(vni, EthernetTagId(tag), attrs)
-                .map(|inst| inst.id.as_u32())
+            index
+                .member_for_foreign_vni(vni, EthernetTagId(tag), attrs)
+                .map(EvpnInstanceId::as_u32)
         };
+        assert_eq!(found(5000, 10, &attributes(&["65000:600"])), Some(20010));
+        assert_eq!(
+            found(5000, 10, &attributes(&["65000:600", "65000:500"])),
+            Some(10010),
+            "two selected members: lowest VNI"
+        );
         assert_eq!(found(5000, 10, &bundle_rt), Some(10010));
         assert_eq!(found(10020, 10, &bundle_rt), Some(10010));
         assert_eq!(found(10010, 20, &bundle_rt), Some(10020));
         assert_eq!(found(10010, 10, &bundle_rt), None, "own VNI");
         assert_eq!(found(5000, 30, &bundle_rt), None, "unknown tag");
         assert_eq!(
-            found(5000, 10, &attributes("65000:999")),
+            found(5000, 10, &attributes(&["65000:999"])),
             None,
             "foreign RT"
         );
-        assert_eq!(found(5000, 0, &attributes("65000:100")), None, "tag 0");
+        assert_eq!(found(5000, 0, &attributes(&["65000:100"])), None, "tag 0");
         assert_eq!(
             L2RemoteRouteDropReason::VniMismatch.as_str(),
             "vni_mismatch"

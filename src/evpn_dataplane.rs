@@ -687,6 +687,7 @@ fn l2_remote_route_drop_counts(
 ) -> BTreeMap<(u32, &'static str), u64> {
     use rustbgpd_evpn::{EviImport, L2RemoteRouteDropReason};
     let mut counts = BTreeMap::new();
+    let bundle_members = instances.bundle_member_index();
     for route in routes {
         if local_vtep_ips.contains(&route.next_hop) {
             continue;
@@ -727,9 +728,9 @@ fn l2_remote_route_drop_counts(
         let drop = match verdict {
             Some(EviImport::Dropped(reason)) => Some((vni, reason)),
             Some(EviImport::Accepted) => None,
-            Some(EviImport::NotApplicable) | None => instances
-                .bundle_member_for_foreign_vni(vni, ethernet_tag, attrs)
-                .map(|member| (member.id.as_u32(), L2RemoteRouteDropReason::VniMismatch)),
+            Some(EviImport::NotApplicable) | None => bundle_members
+                .member_for_foreign_vni(vni, ethernet_tag, attrs)
+                .map(|member| (member.as_u32(), L2RemoteRouteDropReason::VniMismatch)),
         };
         if let Some((vni, reason)) = drop {
             *counts.entry((vni, reason.as_str())).or_insert(0) += 1;
@@ -5938,7 +5939,9 @@ mod tests {
             bundle_route(evpn_macip_route(0, 0xaa, "10.0.0.3", None), 10020, 20),
             bundle_route(evpn_macip_route(0, 0xbb, "10.0.0.2", None), 10010, 30),
             bundle_route(evpn_macip_route(0, 0xcc, "10.0.0.2", None), 10010, 0),
+            // A foreign VNI under the shared RT is attributed by its tag.
             bundle_route(evpn_macip_route(0, 0xdd, "10.0.0.2", None), 5000, 20),
+            bundle_route(evpn_macip_route(0, 0xdf, "10.0.0.2", None), 5000, 10),
             // Multi-homed, with the EAD-per-ES that would let a VLAN-Based
             // row program it.
             bundle_route(
@@ -5977,6 +5980,7 @@ mod tests {
             BTreeMap::from([
                 ((10010, "ethernet_tag_mismatch"), 2),
                 ((10010, "multihoming_unsupported"), 2),
+                ((10010, "vni_mismatch"), 1),
                 ((10020, "vni_mismatch"), 1),
             ])
         );

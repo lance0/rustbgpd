@@ -137,9 +137,9 @@ pub use duplicate_mac::{
     DuplicateMacDetector, DuplicateMacKey,
 };
 pub use instance::{
-    BridgeVlan, BridgeVlanError, EviImport, EvpnInstance, EvpnInstanceId, EvpnInstanceIdError,
-    EvpnInstanceTable, EvpnInstanceTableError, L2RemoteRouteDropReason, MAX_BUNDLE_ETHERNET_TAG,
-    vxlan_encapsulation_compatible,
+    BridgeVlan, BridgeVlanError, BundleMemberIndex, EviImport, EvpnInstance, EvpnInstanceId,
+    EvpnInstanceIdError, EvpnInstanceTable, EvpnInstanceTableError, L2RemoteRouteDropReason,
+    MAX_BUNDLE_ETHERNET_TAG, vxlan_encapsulation_compatible,
 };
 pub use ip_vrf::{
     IpVrf, IpVrfError, IpVrfId, IpVrfIdError, IpVrfRouteDump, IpVrfTable, IpVrfTableError,
