@@ -29,9 +29,14 @@ api            ──► wire, fsm, rib, policy, transport, telemetry, evpn, eve
 cli            ──► wire, policy    (dev tests also use api, evpn, bmp)
 ```
 
-The daemon binary (`src/`) depends on every crate above; it wires them
+The daemon binary (`src/`) depends on every crate above except `cli`; it wires them
 together and owns the runtime actors that are not themselves crates (the
 unicast Linux FIB, the BFD socket actor, and the EVPN dataplane glue).
+The other workspace members, the `bench/` harnesses, the `examples/`
+programs and the `tools/` binaries (`rs-config-render`, the MCP server),
+consume these crates or the gRPC API from outside the daemon; the daemon does
+not depend on them (root integration tests use `rs-config-render` and `cli`
+as dev-dependencies).
 
 ### Crate summary
 
