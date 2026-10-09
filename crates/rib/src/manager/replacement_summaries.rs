@@ -503,10 +503,11 @@ mod tests {
     /// The gap receipt counts a checkpoint only when service is eligible. With
     /// an idle opportunity at 25 ms and a service pass at 30 ms, a checkpoint
     /// at 50 ms is not an opportunity; the one at 60 ms records the 30 ms gap
-    /// a query queued at 50 ms actually waited. Time is simulated by moving
-    /// the recorded instants back, so no step sleeps.
-    #[test]
-    fn replacement_readiness_gap_receipt_follows_service_eligibility() {
+    /// a query queued at 50 ms actually waited. The clock is paused and time
+    /// is simulated by moving the recorded instants back, so no step sleeps
+    /// and host scheduling cannot carry a checkpoint across the budget.
+    #[tokio::test(start_paused = true)]
+    async fn replacement_readiness_gap_receipt_follows_service_eligibility() {
         let (_tx, rx) = mpsc::channel(1);
         let (_general_tx, general_rx) = mpsc::channel(1);
         let (readiness_tx, readiness_rx) = mpsc::channel(2);
