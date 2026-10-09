@@ -3127,19 +3127,28 @@ async fn apply_decomposed_evpn_runtime_steps(
                      committed (fail-stop: no cross-step rollback)"
                 )
             };
+            // A shutdown-interrupted step says nothing about the candidate,
+            // and the closing daemon refuses another apply: no config fix.
+            let recovery = if matches!(
+                error,
+                DaemonEvpnRuntimeConvergeError::InterruptedByShutdown(_)
+            ) {
+                "the daemon is shutting down, so no further apply is accepted; the published \
+                 state was not restored and the candidate config needs no fix"
+            } else {
+                "fix the config and re-SIGHUP / re-apply; the next attempt replans from the \
+                 committed model and converges only the remainder"
+            };
             tracing::error!(
                 step = step_number,
                 total_steps = total,
                 description = %step.description,
                 error = %error.message(),
-                "decomposed EVPN runtime apply failed mid-sequence; {committed_summary}; fix the \
-                 candidate config and re-SIGHUP / re-apply — the next attempt replans from the \
-                 committed model and converges only the remainder"
+                "decomposed EVPN runtime apply failed mid-sequence; {committed_summary}; {recovery}"
             );
             return Err(error.apply_error(format!(
                 "EVPN runtime mutation failed at decomposed step {step_number}/{total} ({}): {}; \
-                 {committed_summary}; fix the config and re-SIGHUP / re-apply to converge the \
-                 remainder",
+                 {committed_summary}; {recovery}",
                 step.description,
                 error.message(),
             )));

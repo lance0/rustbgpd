@@ -998,6 +998,62 @@ async fn shutdown_close_after_the_first_segment_publish_reports_unrestored_state
     assert_eq!(apply.committed_config_locked().ethernet_segments.len(), 0);
 }
 
+/// Converger whose every converge is cut off by shutdown after publishing.
+struct ShutdownInterruptedConverger;
+
+impl DaemonEvpnRuntimeConverger for ShutdownInterruptedConverger {
+    fn converge<'a>(
+        &'a self,
+        _current: &'a rustbgpd_evpn::EvpnRuntimeModel,
+        _candidate: &'a rustbgpd_evpn::EvpnRuntimeCandidate,
+        _plan: &'a rustbgpd_evpn::EvpnRuntimePlan,
+    ) -> DaemonEvpnRuntimeConvergeFuture<'a> {
+        Box::pin(async {
+            Err(DaemonEvpnRuntimeConvergeError::InterruptedByShutdown(
+                rustbgpd_evpn::EvpnRuntimeConvergeError::new(
+                    "EVPN segment actor closed for shutdown during the converge",
+                ),
+            ))
+        })
+    }
+}
+
+#[tokio::test]
+async fn shutdown_interrupted_decomposed_step_gives_no_config_fix_guidance() {
+    // The candidate is valid and the daemon is tearing down, so the
+    // decomposed path must not tell the operator to fix it and re-apply.
+    let coordinator = one_es_coordinator();
+    let current = coordinator.lock().unwrap().model().clone();
+    let candidate = runtime_candidate_from_toml(decomposer_mixed_candidate_toml());
+    let plan = current.plan_candidate(&candidate);
+    let steps =
+        crate::evpn_plan_decomposer::decompose_evpn_runtime_candidate(&current, &candidate, &plan)
+            .expect("the mixed candidate decomposes");
+
+    let error = apply_decomposed_evpn_runtime_steps(
+        steps,
+        &plan,
+        &coordinator,
+        &ShutdownInterruptedConverger,
+        &BgpMetrics::new(),
+        None,
+    )
+    .await
+    .unwrap_err();
+
+    let GrpcEvpnRuntimeApplyError::Unavailable(message) = &error else {
+        panic!("a shutdown-interrupted step is UNAVAILABLE, got {error:?}");
+    };
+    assert!(message.contains("decomposed step 1/3"), "{message}");
+    assert!(message.contains("the daemon is shutting down"), "{message}");
+    assert!(message.contains("needs no fix"), "{message}");
+    assert!(!message.contains("re-SIGHUP"), "{message}");
+    assert_eq!(
+        coordinator.lock().unwrap().model().mutation_state(),
+        rustbgpd_evpn::EvpnRuntimeMutationState::Failed
+    );
+}
+
 #[tokio::test]
 async fn first_auto_lacp_segment_apply_starts_the_probe_then_the_segment_actor() {
     // No segment at startup: the first `auto-lacp` segment commits not
