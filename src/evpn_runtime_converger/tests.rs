@@ -9906,3 +9906,53 @@ async fn converge_failure_not_restored_is_internal() {
         rustbgpd_evpn::EvpnRuntimeMutationState::Failed
     );
 }
+
+/// Converger whose every converge leaves an effect it could not restore.
+struct DivergentConverger;
+
+impl DaemonEvpnRuntimeConverger for DivergentConverger {
+    fn converge<'a>(
+        &'a self,
+        _current: &'a rustbgpd_evpn::EvpnRuntimeModel,
+        _candidate: &'a rustbgpd_evpn::EvpnRuntimeCandidate,
+        _plan: &'a rustbgpd_evpn::EvpnRuntimePlan,
+    ) -> DaemonEvpnRuntimeConvergeFuture<'a> {
+        Box::pin(async {
+            Err(DaemonEvpnRuntimeConvergeError::step_failure(
+                false,
+                "EVPN segment runtime model publish failed",
+                "EVPN runtime state was not restored to the committed model",
+            ))
+        })
+    }
+}
+
+#[tokio::test]
+async fn divergent_decomposed_step_is_internal_without_config_fix_guidance() {
+    let coordinator = one_es_coordinator();
+    let current = coordinator.lock().unwrap().model().clone();
+    let candidate = runtime_candidate_from_toml(decomposer_mixed_candidate_toml());
+    let plan = current.plan_candidate(&candidate);
+    let steps =
+        crate::evpn_plan_decomposer::decompose_evpn_runtime_candidate(&current, &candidate, &plan)
+            .expect("the mixed candidate decomposes");
+
+    let error = apply_decomposed_evpn_runtime_steps(
+        steps,
+        &plan,
+        &coordinator,
+        &DivergentConverger,
+        &BgpMetrics::new(),
+        None,
+    )
+    .await
+    .unwrap_err();
+
+    let GrpcEvpnRuntimeApplyError::Internal(message) = &error else {
+        panic!("a divergent decomposed step is INTERNAL, got {error:?}");
+    };
+    assert!(message.contains("decomposed step 1/3"), "{message}");
+    assert!(message.contains("not restored"), "{message}");
+    assert!(message.contains("repair it or restart"), "{message}");
+    assert!(!message.contains("re-SIGHUP"), "{message}");
+}

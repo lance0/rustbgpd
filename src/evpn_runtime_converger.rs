@@ -3221,17 +3221,22 @@ async fn apply_decomposed_evpn_runtime_steps(
                      committed (fail-stop: no cross-step rollback)"
                 )
             };
-            // A shutdown-interrupted step says nothing about the candidate,
-            // and the closing daemon refuses another apply: no config fix.
-            let recovery = if matches!(
-                error,
-                DaemonEvpnRuntimeConvergeError::InterruptedByShutdown(_)
-            ) {
-                "the daemon is shutting down, so no further apply is accepted; the published \
-                 state was not restored and the candidate config needs no fix"
-            } else {
-                "fix the config and re-SIGHUP / re-apply; the next attempt replans from the \
-                 committed model and converges only the remainder"
+            // Neither a shutdown-interrupted nor a divergent step says
+            // anything about the candidate, so neither implies a config fix.
+            let recovery = match error {
+                DaemonEvpnRuntimeConvergeError::InterruptedByShutdown(_) => {
+                    "the daemon is shutting down, so no further apply is accepted; the \
+                     published state was not restored and the candidate config needs no fix"
+                }
+                DaemonEvpnRuntimeConvergeError::KnownDivergence(_) => {
+                    "live EVPN state diverges from the committed model; repair it or restart \
+                     the daemon before re-applying"
+                }
+                DaemonEvpnRuntimeConvergeError::Unsupported(_)
+                | DaemonEvpnRuntimeConvergeError::Failed(_) => {
+                    "fix the config and re-SIGHUP / re-apply; the next attempt replans from the \
+                     committed model and converges only the remainder"
+                }
             };
             tracing::error!(
                 step = step_number,
