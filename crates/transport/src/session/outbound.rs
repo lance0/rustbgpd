@@ -1486,7 +1486,17 @@ impl PeerSession {
                 if !self.negotiated_families().contains(&family) {
                     continue;
                 }
-                let prepared = export.prepare_labeled_candidate(labeled_route);
+                let prepared = match export.prepare_labeled_candidate(labeled_route) {
+                    Ok(prepared) => prepared,
+                    Err(error) => {
+                        warn!(
+                            peer = %self.peer_label,
+                            %error,
+                            "not sending labeled announcement: exact export preparation failed"
+                        );
+                        continue;
+                    }
+                };
                 let attrs = prepared.attrs;
                 let nh = prepared.next_hop;
                 let ll = prepared.link_local_next_hop;

@@ -851,6 +851,11 @@ impl SessionExportProfile {
         if afi == Afi::Ipv4 && route.next_hop.is_ipv6() && !self.extended_nexthop_vpnv4 {
             return Err(ExportProbeError::Vpnv4RequiresExtendedNextHop);
         }
+        // RFC 4659 §3.2.1: a VPNv6 next hop is an RD-prefixed IPv6 address.
+        // Refuse rather than encode a 12-octet RD + IPv4 one.
+        if afi == Afi::Ipv6 && route.next_hop.is_ipv4() {
+            return Err(ExportProbeError::MissingIpv6NextHop);
+        }
         Ok(PreparedMpCandidate {
             afi,
             safi,
@@ -867,9 +872,14 @@ impl SessionExportProfile {
     pub(super) fn prepare_labeled_candidate(
         &self,
         route: &LabeledRibRoute,
-    ) -> PreparedMpCandidate<rustbgpd_wire::LabeledNlriEntry> {
+    ) -> Result<PreparedMpCandidate<rustbgpd_wire::LabeledNlriEntry>, ExportProbeError> {
         let (afi, safi) = route.afi_safi();
-        PreparedMpCandidate {
+        // RFC 8277 / RFC 2545 §3: a labeled-IPv6 next hop is 16 or 32
+        // octets. Refuse rather than encode a 4-octet one.
+        if afi == Afi::Ipv6 && route.next_hop.is_ipv4() {
+            return Err(ExportProbeError::MissingIpv6NextHop);
+        }
+        Ok(PreparedMpCandidate {
             afi,
             safi,
             next_hop: route.next_hop,
@@ -879,7 +889,7 @@ impl SessionExportProfile {
                 path_id: route.path_id,
                 nlri: route.nlri.clone(),
             },
-        }
+        })
     }
 
     pub(super) fn prepare_rtc_candidate(
@@ -1269,7 +1279,7 @@ impl SessionExportProfile {
                 .map_err(Into::into)
             }
             ExportCandidate::Labeled(route) => {
-                let prepared = self.prepare_labeled_candidate(route);
+                let prepared = self.prepare_labeled_candidate(route)?;
                 self.probe_mp_reach(
                     prepared.afi,
                     prepared.safi,
