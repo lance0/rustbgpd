@@ -1357,6 +1357,99 @@ async fn range_bounds_match_inclusively_and_miss_one_bit_outside() {
     }
 }
 
+fn v6(addr: &str, len: u8) -> Prefix {
+    Prefix::V6(rustbgpd_wire::Ipv6Prefix::new(addr.parse().unwrap(), len))
+}
+
+fn v6_route(source: IpAddr, prefix: Prefix) -> Route {
+    let mut route = route_with_med(source, v4(0, 0, 0, 32), None);
+    route.prefix = prefix;
+    route
+}
+
+/// An IPv6 range (`2001:db8::/32 ge 40 le 48`) through the IPv6 trie: the
+/// install rescan finds a held /48 under the range root and skips held
+/// prefixes outside it, and received announcements and withdrawals match on
+/// the bounds and miss one bit outside them, or outside the root.
+#[tokio::test(start_paused = true)]
+async fn ipv6_range_bounds_match_through_the_rescan_and_route_churn() {
+    let mut manager = manager();
+    let source = peer(1);
+    peer_up(&mut manager, source, 1);
+    let held = v6("2001:db8:1::", 48);
+    let held_outside = [
+        v6("2001:db8::", 32),
+        v6("2001:db8:2::", 49),
+        v6("2001:db9::", 48),
+    ];
+    received(
+        &mut manager,
+        source,
+        1,
+        std::iter::once(held)
+            .chain(held_outside)
+            .map(|prefix| v6_route(source, prefix))
+            .collect(),
+        vec![],
+    );
+    let _ = manager.install_conditional_advertisements(vec![ranged(
+        NAME,
+        vec![PrefixSetEntry {
+            prefix: v6("2001:db8::", 32),
+            ge: Some(40),
+            le: Some(48),
+        }],
+        SETTLE,
+    )]);
+    assert_eq!(state(&manager).0, ConditionObservation::Present);
+    let row = status(&manager, NAME);
+    assert_eq!(row.conditions[0].present_count, 1);
+    assert_eq!(row.conditions[0].present_sample, [held]);
+
+    received(&mut manager, source, 1, vec![], vec![(held, 0)]);
+    assert_eq!(
+        state(&manager).0,
+        ConditionObservation::Absent,
+        "only the /48 was in range"
+    );
+
+    for outside in [
+        v6("2001:db8::", 39),
+        v6("2001:db8:3::", 49),
+        v6("2001:db9:1::", 48),
+    ] {
+        received(
+            &mut manager,
+            source,
+            1,
+            vec![v6_route(source, outside)],
+            vec![],
+        );
+        assert_eq!(
+            state(&manager).0,
+            ConditionObservation::Absent,
+            "{outside} is outside 2001:db8::/32 ge 40 le 48"
+        );
+        received(&mut manager, source, 1, vec![], vec![(outside, 0)]);
+    }
+    for inside in [v6("2001:db8:100::", 40), v6("2001:db8:4::", 48)] {
+        received(
+            &mut manager,
+            source,
+            1,
+            vec![v6_route(source, inside)],
+            vec![],
+        );
+        assert_eq!(
+            state(&manager).0,
+            ConditionObservation::Present,
+            "{inside} is on a bound of ge 40 le 48"
+        );
+        received(&mut manager, source, 1, vec![], vec![(inside, 0)]);
+        assert_eq!(state(&manager).0, ConditionObservation::Absent);
+    }
+}
+
 /// The status view of a range entry: its bounds, its own state, the count of
 /// present in-range prefixes, and at most eight of them in address order.
 /// An entry with only evaluation errors in range reports `unknown`.
