@@ -1214,3 +1214,54 @@ async fn status_query_evaluates_no_policy() {
         "the status query must not evaluate condition candidates"
     );
 }
+
+/// Route churn on one condition prefix re-observes only that prefix: the
+/// other prefixes of the same definition keep their cached observations
+/// instead of re-evaluating their candidates on the actor.
+#[tokio::test(start_paused = true)]
+async fn route_churn_reobserves_only_the_affected_condition_prefix() {
+    let mut manager = manager();
+    let mut multi = definition(ConditionalAdvertiseIf::Absent, Some(med_guard()), SETTLE);
+    multi.condition_prefixes = vec![
+        Prefix::V4(prefix(1)),
+        Prefix::V4(prefix(2)),
+        Prefix::V4(prefix(3)),
+    ];
+    let _ = manager.install_conditional_advertisements(vec![multi]);
+    for octet in 1..=10 {
+        let source = peer(octet);
+        peer_up(&mut manager, source, 1);
+        received(
+            &mut manager,
+            source,
+            1,
+            vec![
+                route_with_med(source, prefix(2), Some(7)),
+                route_with_med(source, prefix(3), Some(7)),
+            ],
+            vec![],
+        );
+    }
+    let before = manager.conditional_advertisement_candidate_visits();
+    let source = peer(11);
+    peer_up(&mut manager, source, 1);
+    received(
+        &mut manager,
+        source,
+        1,
+        vec![route_with_med(source, prefix(1), Some(7))],
+        vec![],
+    );
+    assert_eq!(
+        manager.conditional_advertisement_candidate_visits() - before,
+        1,
+        "only the one candidate on the churned prefix is visited"
+    );
+    let status = manager.conditional_advertisement_status();
+    assert!(
+        status[0]
+            .conditions
+            .iter()
+            .all(|(_, state)| *state == "absent")
+    );
+}

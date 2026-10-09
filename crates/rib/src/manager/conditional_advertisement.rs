@@ -344,7 +344,7 @@ impl RibManager {
             .collect();
         let mut transitions = Vec::new();
         for name in &names {
-            self.reobserve_definition(name, now, &mut transitions);
+            self.reobserve_definition_prefixes(name, None, now, &mut transitions);
             let Some(mut state) = self.conditional_advertisements.definitions.remove(name) else {
                 continue;
             };
@@ -393,16 +393,22 @@ impl RibManager {
         if self.conditional_advertisements.definitions.is_empty() {
             return Vec::new();
         }
-        let names: BTreeSet<Arc<str>> = affected
+        let tracker = &self.conditional_advertisements;
+        let prefixes: BTreeSet<Prefix> = affected
             .into_iter()
-            .filter_map(|prefix| self.conditional_advertisements.by_prefix.get(prefix))
+            .filter(|prefix| tracker.by_prefix.contains_key(prefix))
+            .copied()
+            .collect();
+        let names: BTreeSet<Arc<str>> = prefixes
+            .iter()
+            .filter_map(|prefix| tracker.by_prefix.get(prefix))
             .flatten()
             .cloned()
             .collect();
         let now = Instant::now();
         let mut transitions = Vec::new();
         for name in &names {
-            self.reobserve_definition(name, now, &mut transitions);
+            self.reobserve_definition_prefixes(name, Some(&prefixes), now, &mut transitions);
         }
         self.mark_conditional_advertisement_peers_dirty(&transitions);
         transitions
@@ -473,7 +479,7 @@ impl RibManager {
         let now = Instant::now();
         let mut transitions = Vec::new();
         for name in &names {
-            self.reobserve_definition(name, now, &mut transitions);
+            self.reobserve_definition_prefixes(name, None, now, &mut transitions);
         }
         self.mark_conditional_advertisement_peers_dirty(&transitions);
         transitions
@@ -506,7 +512,7 @@ impl RibManager {
         let now = Instant::now();
         let mut transitions = Vec::new();
         for name in &names {
-            self.reobserve_definition(name, now, &mut transitions);
+            self.reobserve_definition_prefixes(name, None, now, &mut transitions);
         }
         self.mark_conditional_advertisement_peers_dirty(&transitions);
         transitions
@@ -545,12 +551,37 @@ impl RibManager {
         transitions
     }
 
-    fn reobserve_definition(&mut self, name: &Arc<str>, now: Instant, out: &mut Vec<Arc<str>>) {
+    /// Re-observe one definition. With `only`, route churn re-observes just
+    /// the affected condition prefixes and recombines the cached rest;
+    /// without it (install, policy or dataset change) every prefix is
+    /// observed.
+    fn reobserve_definition_prefixes(
+        &mut self,
+        name: &Arc<str>,
+        only: Option<&BTreeSet<Prefix>>,
+        now: Instant,
+        out: &mut Vec<Arc<str>>,
+    ) {
         let Some(mut state) = self.conditional_advertisements.definitions.remove(name) else {
             return;
         };
-        let (observed, conditions) = self.observe_condition(&state.definition);
-        state.conditions = conditions;
+        let observed = if let Some(only) = only {
+            let definition = Arc::clone(&state.definition);
+            for (prefix, cached) in definition
+                .condition_prefixes
+                .iter()
+                .zip(state.conditions.iter_mut())
+            {
+                if only.contains(prefix) {
+                    *cached = self.observe_condition_prefix(&definition, prefix);
+                }
+            }
+            combine_observations(&state.conditions)
+        } else {
+            let (observed, conditions) = self.observe_condition(&state.definition);
+            state.conditions = conditions;
+            observed
+        };
         if observed != state.observed {
             state.observed = observed;
             state.observed_since = now;
@@ -683,14 +714,7 @@ impl RibManager {
             .iter()
             .map(|prefix| self.observe_condition_prefix(definition, prefix))
             .collect();
-        let observed = if conditions.contains(&ConditionObservation::Present) {
-            ConditionObservation::Present
-        } else if conditions.contains(&ConditionObservation::Unknown) {
-            ConditionObservation::Unknown
-        } else {
-            ConditionObservation::Absent
-        };
-        (observed, conditions)
+        (combine_observations(&conditions), conditions)
     }
 
     /// One condition prefix's observation.
@@ -1255,5 +1279,17 @@ impl ConditionalVerdict<'_> {
             verdict: self.verdict(),
             detail: self.detail(),
         }
+    }
+}
+
+/// Any present prefix makes the condition present; otherwise any evaluation
+/// error leaves it unknown.
+fn combine_observations(conditions: &[ConditionObservation]) -> ConditionObservation {
+    if conditions.contains(&ConditionObservation::Present) {
+        ConditionObservation::Present
+    } else if conditions.contains(&ConditionObservation::Unknown) {
+        ConditionObservation::Unknown
+    } else {
+        ConditionObservation::Absent
     }
 }
