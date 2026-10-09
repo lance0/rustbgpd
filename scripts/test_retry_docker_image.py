@@ -183,6 +183,81 @@ class RetryDockerImageTests(unittest.TestCase):
                     "rustbgpd-netns-tests:latest", "."]] * attempts)
                 self.assertEqual(self.sleeps(), [] if attempts == 1 else ["10", "20"])
 
+    def run_mirror_config(self, **extra):
+        step = next(s for s in workflow_steps("kernel-dataplane.yml", "netns")
+                    if s.get("name") == "Configure Docker Hub cache mirror")
+        body = step["run"]
+        path = self.path / "daemon.json"
+        self.assertEqual(body.count('Path("/etc/docker/daemon.json")'), 1)
+        body = body.replace('Path("/etc/docker/daemon.json")', f"Path({str(path)!r})")
+        return subprocess.run(
+            ["bash", "-eo", "pipefail", "-c", body], cwd=ROOT,
+            env={**self.env, **extra}, capture_output=True, text=True, check=False,
+        )
+
+    def mirror_tools(self):
+        tools = {
+            "sudo": '#!/bin/sh\nexec "$@"\n',
+            "systemctl": textwrap.dedent("""\
+                #!/usr/bin/env python3
+                import json, os, pathlib, sys
+                base = pathlib.Path(os.environ['FAKE_LOG'])
+                config = json.loads((base / 'daemon.json').read_text())
+                assert config == json.loads((base / 'candidate').read_text())
+                assert config['registry-mirrors'][0] == 'https://mirror.gcr.io'
+                with (base / 'restarts').open('a') as log:
+                    log.write(' '.join(sys.argv[1:]) + '\\n')
+                """),
+            "dockerd": textwrap.dedent("""\
+                #!/usr/bin/env python3
+                import json, os, pathlib, sys
+                assert sys.argv[1:3] == ['--validate', '--config-file']
+                config = json.loads(pathlib.Path(sys.argv[3]).read_text())
+                (pathlib.Path(os.environ['FAKE_LOG']) / 'candidate').write_text(json.dumps(config))
+                sys.exit(int(os.environ.get('FAKE_CONFIG_INVALID', '0')))
+                """),
+        }
+        for name, script in tools.items():
+            path = self.path / "bin" / name
+            path.write_text(script)
+            path.chmod(0o755)
+
+    def test_mirror_config_preserves_settings_and_mirrors(self):
+        self.mirror_tools()
+        path = self.path / "daemon.json"
+        for original in (None, {"data-root": "/existing", "features": {"containerd-snapshotter": True},
+                               "registry-mirrors": ["https://old.example", "https://mirror.gcr.io"]}):
+            with self.subTest(original=original):
+                path.unlink(missing_ok=True)
+                if original is not None:
+                    path.write_text(json.dumps(original))
+                result = self.run_mirror_config()
+                self.assertEqual(result.returncode, 0, result.stderr)
+                expected = {**(original or {}), "registry-mirrors": ["https://mirror.gcr.io"]}
+                if original is not None:
+                    expected["registry-mirrors"].append("https://old.example")
+                self.assertEqual(json.loads(path.read_text()), expected)
+                self.assertEqual(json.loads((self.path / "candidate").read_text()), expected)
+                before = path.read_text()
+                result = self.run_mirror_config()
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(path.read_text(), before)
+        self.assertEqual((self.path / "restarts").read_text().splitlines(), ["restart docker"] * 4)
+
+    def test_invalid_mirror_config_fails_without_overwrite_or_restart(self):
+        self.mirror_tools()
+        path = self.path / "daemon.json"
+        for original, rejection in (("{bad", "0"), ("[]", "0"),
+                                    ('{"registry-mirrors": null}', "0"),
+                                    ('{"registry-mirrors": [1]}', "0"),
+                                    ('{"unknown-option": true}', "59")):
+            with self.subTest(original=original):
+                path.write_text(original)
+                result = self.run_mirror_config(FAKE_CONFIG_INVALID=rejection)
+                self.assertNotEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(path.read_text(), original)
+                self.assertFalse((self.path / "restarts").exists())
+
     def test_buildkit_pre_pull_retries_and_never_fails_the_step(self):
         for action in ("build-rustbgpd-dev", "prime-rustbgpd-dev-cache"):
             body = action_step(action, "Pre-pull BuildKit image")["run"]
@@ -352,6 +427,10 @@ def build_retry_errors(steps):
 class BuildRetryShapeTests(unittest.TestCase):
     def test_ci_netns_build_has_identical_guarded_retry(self):
         steps = workflow_steps("ci.yml", "evpn_bum_filter_kernel")
+        setup = next(s for s in steps if s.get("name") == "Set up Docker Buildx")
+        self.assertIn('buildkitd-config-inline: |', setup["with"])
+        self.assertIn('[registry."docker.io"]', setup["with"])
+        self.assertIn('mirrors = ["mirror.gcr.io"]', setup["with"])
         index = next(i for i, s in enumerate(steps)
                      if s.get("name") == "Build netns-test harness image")
         self.assertEqual(build_retry_errors(steps[index:]), [])
@@ -369,6 +448,8 @@ class BuildRetryShapeTests(unittest.TestCase):
         steps = workflow_steps("kernel-dataplane.yml", "netns")
         names = [s.get("name") for s in steps]
         self.assertLess(names.index("Initialize netns selector receipt"),
+                        names.index("Configure Docker Hub cache mirror"))
+        self.assertLess(names.index("Configure Docker Hub cache mirror"),
                         names.index("Build netns-test harness image"))
         self.assertLess(names.index("Build netns-test harness image"),
                         names.index("ADR-0059 FDB nexthop group netns tests"))

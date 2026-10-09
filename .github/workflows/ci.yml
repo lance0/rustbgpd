@@ -629,6 +629,10 @@ jobs:
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
+        with:
+          buildkitd-config-inline: |
+            [registry."docker.io"]
+              mirrors = ["mirror.gcr.io"]
 
       # Pre-build the harness image with GHA cache so the warm path
       # (no Dockerfile change) skips the `apt-get install` rebuild.
