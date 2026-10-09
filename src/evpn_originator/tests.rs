@@ -2027,6 +2027,22 @@ async fn runtime_model_redefine_to_bundle_tag_reoriginates_under_member_tag() {
         )
         .await;
     }
+    // The originator tracks the member-tag keys, so aging withdraws them.
+    for (m, ip) in [mac_only, mac_ip] {
+        local_tx
+            .send(LocalMacObservation::Aged {
+                vni: vni(100),
+                mac: mac(m),
+            })
+            .await
+            .unwrap();
+        wait_for_key(
+            &withdraws,
+            key(10, m, ip),
+            "aging withdraws the member-tag key",
+        )
+        .await;
+    }
     h.shutdown().await;
 }
 
