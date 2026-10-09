@@ -9956,3 +9956,90 @@ async fn divergent_decomposed_step_is_internal_without_config_fix_guidance() {
     assert!(message.contains("repair it or restart"), "{message}");
     assert!(!message.contains("re-SIGHUP"), "{message}");
 }
+
+/// Converger that fails every converge with `error` and records whether
+/// the apply undid its link-drain seed.
+struct SeedTrackingConverger {
+    error: DaemonEvpnRuntimeConvergeError,
+    restored: std::sync::atomic::AtomicBool,
+}
+
+impl DaemonEvpnRuntimeConverger for SeedTrackingConverger {
+    fn converge<'a>(
+        &'a self,
+        _current: &'a rustbgpd_evpn::EvpnRuntimeModel,
+        _candidate: &'a rustbgpd_evpn::EvpnRuntimeCandidate,
+        _plan: &'a rustbgpd_evpn::EvpnRuntimePlan,
+    ) -> DaemonEvpnRuntimeConvergeFuture<'a> {
+        let error = self.error.clone();
+        Box::pin(async move { Err(error) })
+    }
+
+    fn seed_link_drain(
+        &self,
+        esis: &BTreeSet<rustbgpd_wire::EthernetSegmentIdentifier>,
+    ) -> Option<Arc<crate::evpn_es_drain::EsDrainReasonMap>> {
+        (!esis.is_empty()).then(Arc::default)
+    }
+
+    fn restore_link_drain(&self, _prior: Arc<crate::evpn_es_drain::EsDrainReasonMap>) {
+        self.restored
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+#[tokio::test]
+async fn link_drain_seed_is_undone_only_after_a_no_effect_failure() {
+    // A bound segment add is seeded link-drained before the converge. A
+    // compensated failure undoes the seed; a known divergence may have left
+    // the candidate segment published, so it keeps the seed.
+    let bound_toml = format!(
+        "{}interface = \"bond0\"\n",
+        two_l2vni_two_es_runtime_candidate_toml()
+    );
+    let cases = [
+        (
+            DaemonEvpnRuntimeConvergeError::failed("EVPN segment runtime model publish failed"),
+            true,
+        ),
+        (
+            DaemonEvpnRuntimeConvergeError::step_failure(
+                false,
+                "EVPN segment runtime model publish failed",
+                "EVPN runtime state was not restored to the committed model",
+            ),
+            false,
+        ),
+    ];
+    for (error, undone) in cases {
+        let baseline =
+            load_runtime_test_config(two_l2vni_one_es_runtime_candidate_toml(), "baseline");
+        let candidate = load_runtime_test_config(&bound_toml, "candidate");
+        let coordinator =
+            coordinator_from_config(&baseline, &crate::config::AutoLacpEsis::default());
+        let converger = Arc::new(SeedTrackingConverger {
+            error: error.clone(),
+            restored: std::sync::atomic::AtomicBool::new(false),
+        });
+        let (bindings_tx, _bindings_rx) =
+            watch::channel(crate::evpn_es_link_drain::EsLinkBindings::default());
+        let apply = EvpnRuntimeReloadApply::new(
+            coordinator,
+            Arc::new(tokio::sync::Mutex::new(())),
+            converger.clone(),
+            baseline,
+        )
+        .with_es_link_bindings_publisher(Arc::new(bindings_tx));
+
+        apply
+            .apply_candidate_config(&candidate, false)
+            .await
+            .expect_err("the converge fails");
+
+        assert_eq!(
+            converger.restored.load(std::sync::atomic::Ordering::SeqCst),
+            undone,
+            "{error:?}"
+        );
+    }
+}
