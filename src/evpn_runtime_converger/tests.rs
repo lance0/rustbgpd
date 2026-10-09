@@ -799,8 +799,8 @@ async fn shutdown_closing_the_segment_slot_refuses_a_late_first_segment_apply() 
     assert!(!started.load(std::sync::atomic::Ordering::SeqCst));
     assert!(!segment.is_open());
     assert!(segment.is_closed_for_shutdown());
-    // Nothing is published, so there is nothing to refuse.
-    assert!(segment.start_if_configured());
+    // A closed slot refuses the start decision even with nothing published.
+    assert!(!segment.start_if_configured());
     assert!(!started.load(std::sync::atomic::Ordering::SeqCst));
     assert_eq!(coordinator.lock().unwrap().model().generation(), generation);
 }
@@ -948,6 +948,276 @@ async fn shutdown_closing_the_slot_after_a_segment_publish_fails_the_converge() 
         "a converge that publishes after shutdown took the slot fails"
     );
     handle.shutdown().await;
+}
+
+#[tokio::test]
+async fn shutdown_close_after_the_first_segment_publish_reports_unrestored_state() {
+    // Publish -> close -> start, in that order: the first segment's
+    // converge publishes, shutdown closes the pending slot, and the start
+    // decision is refused. The publishes are not rolled back, so the
+    // apply must not answer with the no-effect FAILED_PRECONDITION.
+    let baseline = load_runtime_test_config(l2vni_runtime_candidate_toml(), "baseline");
+    let candidate = load_runtime_test_config(l2vni_one_es_runtime_candidate_toml(), "candidate");
+    let esis = crate::config::AutoLacpEsis::default();
+    let coordinator = coordinator_from_config(&baseline, &esis);
+    let generation = coordinator.lock().unwrap().model().generation();
+    let (rib_tx, rib_rx) = mpsc::channel::<RibUpdate>(64);
+    let _rib = runtime_converger_rib_responder(rib_rx, Arc::default());
+    let instances = Arc::new(baseline.resolve_evpn_instances().unwrap());
+    let (segment, started) = deferred_segment_control(&instances, rib_tx.clone());
+    let apply = EvpnRuntimeReloadApply::new(
+        coordinator.clone(),
+        Arc::new(tokio::sync::Mutex::new(())),
+        Arc::new(segment_only_converger(rib_tx, segment.clone(), None)),
+        baseline,
+    );
+
+    segment.close_at_next_start();
+    let error = apply
+        .apply_candidate_config(&candidate, false)
+        .await
+        .expect_err("a converge cut off by shutdown fails");
+
+    let GrpcEvpnRuntimeApplyError::Unavailable(message) = &error else {
+        panic!("expected UNAVAILABLE for unrestored publishes, got {error:?}");
+    };
+    assert!(
+        message.contains("published runtime state was not restored"),
+        "{message}"
+    );
+    assert!(segment.is_closed_for_shutdown());
+    assert!(!started.load(std::sync::atomic::Ordering::SeqCst));
+    let guard = coordinator.lock().unwrap();
+    assert_eq!(guard.model().generation(), generation);
+    assert_eq!(
+        guard.model().mutation_state(),
+        rustbgpd_evpn::EvpnRuntimeMutationState::Failed,
+        "the coordinator pins on the side effects left in place"
+    );
+    drop(guard);
+    assert_eq!(apply.committed_config_locked().ethernet_segments.len(), 0);
+}
+
+#[tokio::test]
+async fn shutdown_cut_off_bound_segment_add_keeps_its_link_drain_seed() {
+    // A running segment actor, and an apply that adds a bound segment.
+    // The apply seeds the new ESI link-drained, the converge publishes the
+    // candidate segments, then shutdown closes the slot before the start
+    // decision. The publishes stay in place, so the seed must stay too:
+    // restoring the prior drain set would let the still-running actor
+    // originate the uncommitted segment before the teardown drains it.
+    let baseline = load_runtime_test_config(two_l2vni_one_es_runtime_candidate_toml(), "baseline");
+    let bound_toml = format!(
+        "{}interface = \"bond0\"\n",
+        two_l2vni_two_es_runtime_candidate_toml()
+    );
+    let candidate = load_runtime_test_config(&bound_toml, "candidate");
+    let esis = crate::config::AutoLacpEsis::default();
+    let added = candidate.resolve_ethernet_segments_with(&esis).unwrap()[1].esi;
+    let coordinator = coordinator_from_config(&baseline, &esis);
+    let (rib_tx, rib_rx) = mpsc::channel::<RibUpdate>(64);
+    let _rib = runtime_converger_rib_responder(rib_rx, Arc::default());
+    let instances = Arc::new(baseline.resolve_evpn_instances().unwrap());
+    let (segment, started) = deferred_segment_control(&instances, rib_tx.clone());
+    let committed = runtime_model_from_candidate_toml(two_l2vni_one_es_runtime_candidate_toml());
+    assert!(segment.replace_segments(Arc::new(committed.ethernet_segments().to_vec())));
+    assert!(segment.start_if_configured());
+    assert!(started.load(std::sync::atomic::Ordering::SeqCst));
+    let converger = segment_only_converger(rib_tx, segment.clone(), None);
+    let drain = converger.es_drain.clone();
+    let (bindings_tx, _bindings_rx) =
+        watch::channel(crate::evpn_es_link_drain::EsLinkBindings::default());
+    let apply = EvpnRuntimeReloadApply::new(
+        coordinator,
+        Arc::new(tokio::sync::Mutex::new(())),
+        Arc::new(converger),
+        baseline,
+    )
+    .with_es_link_bindings_publisher(Arc::new(bindings_tx));
+
+    // Shutdown takes the running slot between the publish and the start.
+    segment.close_at_next_start();
+    let error = apply
+        .apply_candidate_config(&candidate, false)
+        .await
+        .expect_err("a converge cut off by shutdown fails");
+
+    assert!(
+        matches!(error, GrpcEvpnRuntimeApplyError::Unavailable(_)),
+        "{error:?}"
+    );
+    assert_eq!(
+        drain.reasons_for(added),
+        BTreeSet::from([crate::evpn_es_drain::EsDrainReason::Link]),
+        "the uncommitted bound segment stays link-drained"
+    );
+    segment
+        .take_closed_handle()
+        .expect("shutdown took the running actor's handle")
+        .shutdown()
+        .await;
+}
+
+#[tokio::test]
+async fn shutdown_cut_off_final_segment_delete_reports_unrestored_state() {
+    // The running actor serves the only segment; the apply removes it.
+    // The converge publishes the empty segment set, then shutdown closes
+    // the slot before the start decision. An empty set must not let the
+    // removal commit during teardown.
+    let baseline = load_runtime_test_config(l2vni_one_es_runtime_candidate_toml(), "baseline");
+    let candidate = load_runtime_test_config(l2vni_runtime_candidate_toml(), "candidate");
+    let esis = crate::config::AutoLacpEsis::default();
+    let coordinator = coordinator_from_config(&baseline, &esis);
+    let generation = coordinator.lock().unwrap().model().generation();
+    let (rib_tx, rib_rx) = mpsc::channel::<RibUpdate>(64);
+    let _rib = runtime_converger_rib_responder(rib_rx, Arc::default());
+    let instances = Arc::new(baseline.resolve_evpn_instances().unwrap());
+    let (segment, started) = deferred_segment_control(&instances, rib_tx.clone());
+    let one_es = runtime_model_from_candidate_toml(l2vni_one_es_runtime_candidate_toml());
+    assert!(segment.replace_segments(Arc::new(one_es.ethernet_segments().to_vec())));
+    assert!(segment.start_if_configured());
+    assert!(started.load(std::sync::atomic::Ordering::SeqCst));
+    let apply = EvpnRuntimeReloadApply::new(
+        coordinator.clone(),
+        Arc::new(tokio::sync::Mutex::new(())),
+        Arc::new(segment_only_converger(rib_tx, segment.clone(), None)),
+        baseline,
+    );
+
+    segment.close_at_next_start();
+    let error = apply
+        .apply_candidate_config(&candidate, false)
+        .await
+        .expect_err("a final-segment delete cut off by shutdown fails");
+
+    let GrpcEvpnRuntimeApplyError::Unavailable(message) = &error else {
+        panic!("expected UNAVAILABLE for unrestored publishes, got {error:?}");
+    };
+    assert!(
+        message.contains("published runtime state was not restored"),
+        "{message}"
+    );
+    assert_eq!(apply.committed_config_locked().ethernet_segments.len(), 1);
+    let (committed_generation, mutation_state) = {
+        let guard = coordinator.lock().unwrap();
+        (guard.model().generation(), guard.model().mutation_state())
+    };
+    assert_eq!(committed_generation, generation);
+    assert_eq!(
+        mutation_state,
+        rustbgpd_evpn::EvpnRuntimeMutationState::Failed
+    );
+    segment
+        .take_closed_handle()
+        .expect("shutdown took the running actor's handle")
+        .shutdown()
+        .await;
+}
+
+#[tokio::test]
+async fn segment_start_decision_covers_every_exit_path() {
+    let instances = Arc::new(
+        runtime_model_from_candidate_toml(l2vni_runtime_candidate_toml())
+            .instances()
+            .clone(),
+    );
+    let one_es = Arc::new(
+        runtime_model_from_candidate_toml(l2vni_one_es_runtime_candidate_toml())
+            .ethernet_segments()
+            .to_vec(),
+    );
+    let (rib_tx, rib_rx) = mpsc::channel::<RibUpdate>(64);
+    let _rib = runtime_converger_rib_responder(rib_rx, Arc::default());
+
+    // No slot (the runtime control without daemon wiring): always true.
+    let probe = evpn_segment::EvpnSegmentControlProbe::new();
+    assert!(probe.control.start_if_configured());
+
+    // Empty set on an open slot: true, the task stays deferred.
+    let (segment, started) = deferred_segment_control(&instances, rib_tx.clone());
+    assert!(segment.start_if_configured());
+    assert!(!started.load(std::sync::atomic::Ordering::SeqCst));
+
+    // First segment published: true, the task starts.
+    assert!(segment.replace_segments(one_es.clone()));
+    assert!(segment.start_if_configured());
+    assert!(started.load(std::sync::atomic::Ordering::SeqCst));
+
+    // Already running, set unchanged or changed (here emptied): true.
+    assert!(segment.start_if_configured());
+    assert!(segment.replace_segments(Arc::new(Vec::new())));
+    assert!(segment.start_if_configured());
+
+    // Closed for shutdown, empty or not: false.
+    let handle = segment
+        .close_for_shutdown()
+        .expect("the running actor is handed to the drain");
+    assert!(!segment.start_if_configured());
+    assert!(segment.replace_segments(one_es.clone()));
+    assert!(!segment.start_if_configured());
+    handle.shutdown().await;
+
+    // Closed while still pending: false, the task never starts.
+    let (pending, pending_started) = deferred_segment_control(&instances, rib_tx);
+    assert!(pending.close_for_shutdown().is_none());
+    assert!(!pending.start_if_configured());
+    assert!(!pending_started.load(std::sync::atomic::Ordering::SeqCst));
+}
+
+/// Converger whose every converge is cut off by shutdown after publishing.
+struct ShutdownInterruptedConverger;
+
+impl DaemonEvpnRuntimeConverger for ShutdownInterruptedConverger {
+    fn converge<'a>(
+        &'a self,
+        _current: &'a rustbgpd_evpn::EvpnRuntimeModel,
+        _candidate: &'a rustbgpd_evpn::EvpnRuntimeCandidate,
+        _plan: &'a rustbgpd_evpn::EvpnRuntimePlan,
+    ) -> DaemonEvpnRuntimeConvergeFuture<'a> {
+        Box::pin(async {
+            Err(DaemonEvpnRuntimeConvergeError::InterruptedByShutdown(
+                rustbgpd_evpn::EvpnRuntimeConvergeError::new(
+                    "EVPN segment actor closed for shutdown during the converge",
+                ),
+            ))
+        })
+    }
+}
+
+#[tokio::test]
+async fn shutdown_interrupted_decomposed_step_gives_no_config_fix_guidance() {
+    // The candidate is valid and the daemon is tearing down, so the
+    // decomposed path must not tell the operator to fix it and re-apply.
+    let coordinator = one_es_coordinator();
+    let current = coordinator.lock().unwrap().model().clone();
+    let candidate = runtime_candidate_from_toml(decomposer_mixed_candidate_toml());
+    let plan = current.plan_candidate(&candidate);
+    let steps =
+        crate::evpn_plan_decomposer::decompose_evpn_runtime_candidate(&current, &candidate, &plan)
+            .expect("the mixed candidate decomposes");
+
+    let error = apply_decomposed_evpn_runtime_steps(
+        steps,
+        &plan,
+        &coordinator,
+        &ShutdownInterruptedConverger,
+        &BgpMetrics::new(),
+        None,
+    )
+    .await
+    .unwrap_err();
+
+    let GrpcEvpnRuntimeApplyError::Unavailable(message) = &error else {
+        panic!("a shutdown-interrupted step is UNAVAILABLE, got {error:?}");
+    };
+    assert!(message.contains("decomposed step 1/3"), "{message}");
+    assert!(message.contains("the daemon is shutting down"), "{message}");
+    assert!(message.contains("needs no fix"), "{message}");
+    assert!(!message.contains("re-SIGHUP"), "{message}");
+    assert_eq!(
+        coordinator.lock().unwrap().model().mutation_state(),
+        rustbgpd_evpn::EvpnRuntimeMutationState::Failed
+    );
 }
 
 #[tokio::test]
