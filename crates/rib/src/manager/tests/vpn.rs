@@ -19,6 +19,7 @@ fn make_vpn_v6_rib_route(peer: Ipv4Addr, local_pref: u32) -> VpnRibRoute {
         },
         next_hop: IpAddr::V6("2001:db8::1".parse().unwrap()),
         link_local_next_hop: None,
+        next_hop_scope: None,
         peer: IpAddr::V4(peer),
         attributes: AttrSet::new(vec![
             PathAttribute::Origin(Origin::Igp),

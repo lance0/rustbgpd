@@ -126,6 +126,7 @@ pub(super) fn vpn_route(
         nlri,
         next_hop: IpAddr::V4(src),
         link_local_next_hop: None,
+        next_hop_scope: None,
         peer: IpAddr::V4(src),
         attributes: AttrSet::new(attributes),
         received_at: Instant::now(),
