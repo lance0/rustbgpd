@@ -192,35 +192,78 @@ impl ConditionalAdvertisementSet {
     }
 }
 
-/// In-condition prefixes of one definition with a present or unknown
+/// One condition entry's in-range prefixes with a present or unknown
 /// verdict. Absent prefixes are not stored.
 #[derive(Clone, Debug, Default)]
-struct ConditionMatches {
+struct EntryMatches {
     present: BTreeSet<Prefix>,
     unknown: BTreeSet<Prefix>,
 }
 
+/// A definition's verdicts, kept per condition entry (in
+/// `condition_prefixes` order) so the status view reads each entry's count
+/// and sample without walking the others. The totals count set members
+/// across entries, so the whole observation is O(1).
+#[derive(Clone, Debug, Default)]
+struct ConditionMatches {
+    entries: Vec<EntryMatches>,
+    present: usize,
+    unknown: usize,
+}
+
 impl ConditionMatches {
-    fn record(&mut self, prefix: Prefix, verdict: ConditionObservation) {
-        self.present.remove(&prefix);
-        self.unknown.remove(&prefix);
-        match verdict {
-            ConditionObservation::Present => self.present.insert(prefix),
-            ConditionObservation::Unknown => self.unknown.insert(prefix),
-            ConditionObservation::Absent => false,
-        };
+    fn new(entries: usize) -> Self {
+        Self {
+            entries: vec![EntryMatches::default(); entries],
+            present: 0,
+            unknown: 0,
+        }
+    }
+
+    /// Record `prefix`'s verdict in every entry of `definition` whose range
+    /// holds it.
+    fn record(
+        &mut self,
+        definition: &ConditionalAdvertisement,
+        prefix: Prefix,
+        verdict: ConditionObservation,
+    ) {
+        for (entry, matches) in definition.condition_prefixes.iter().zip(&mut self.entries) {
+            if !entry.matches(prefix) {
+                continue;
+            }
+            self.present -= usize::from(matches.present.remove(&prefix));
+            self.unknown -= usize::from(matches.unknown.remove(&prefix));
+            match verdict {
+                ConditionObservation::Present => {
+                    self.present += usize::from(matches.present.insert(prefix));
+                }
+                ConditionObservation::Unknown => {
+                    self.unknown += usize::from(matches.unknown.insert(prefix));
+                }
+                ConditionObservation::Absent => {}
+            }
+        }
     }
 
     /// Any clean match makes the condition present; otherwise any error
     /// makes it unknown.
     fn observation(&self) -> ConditionObservation {
-        if !self.present.is_empty() {
+        if self.present > 0 {
             ConditionObservation::Present
-        } else if !self.unknown.is_empty() {
+        } else if self.unknown > 0 {
             ConditionObservation::Unknown
         } else {
             ConditionObservation::Absent
         }
+    }
+
+    /// The lowest present prefix across entries.
+    fn first_present(&self) -> Option<&Prefix> {
+        self.entries
+            .iter()
+            .filter_map(|entry| entry.present.first())
+            .min()
     }
 }
 
@@ -248,6 +291,9 @@ pub(super) struct ConditionalAdvertisementTracker {
     /// Condition candidates visited, for the no-table-walk proof.
     #[cfg(test)]
     candidate_visits: std::sync::atomic::AtomicUsize,
+    /// Present prefixes the status view visited, for its bounded-work proof.
+    #[cfg(test)]
+    status_prefix_visits: std::sync::atomic::AtomicUsize,
 }
 
 /// Tracker state captured by an install, for generation compensation. The
@@ -465,10 +511,8 @@ impl RibManager {
             };
             let matches = Arc::make_mut(&mut state.matches);
             for prefix in prefixes {
-                matches.record(
-                    prefix,
-                    self.observe_condition_prefix(&state.definition, &prefix),
-                );
+                let verdict = self.observe_condition_prefix(&state.definition, &prefix);
+                matches.record(&state.definition, prefix, verdict);
             }
             let observed = matches.observation();
             self.settle_observation(&mut state, observed, now, &mut transitions);
@@ -772,9 +816,13 @@ impl RibManager {
                 );
             }
         }
-        let mut matches = ConditionMatches::default();
+        let mut matches = ConditionMatches::new(definition.condition_prefixes.len());
         for prefix in prefixes {
-            matches.record(prefix, self.observe_condition_prefix(definition, &prefix));
+            matches.record(
+                definition,
+                prefix,
+                self.observe_condition_prefix(definition, &prefix),
+            );
         }
         matches
     }
@@ -1052,7 +1100,7 @@ impl RibManager {
     fn explain_condition(&self, state: &DefinitionState) -> String {
         let definition = &state.definition;
         let mode = definition.advertise_if;
-        let first_present = state.matches.present.first();
+        let first_present = state.matches.first_present();
         let condition_error = self.first_condition_error(state);
         let applied_basis = match state.applied {
             AppliedConditionalState::Pending => None,
@@ -1125,7 +1173,12 @@ impl RibManager {
     /// whose verdict is unknown. Not counted in the error metric.
     fn first_condition_error(&self, state: &DefinitionState) -> Option<rustbgpd_policy::EvalError> {
         let policy = state.definition.condition_policy.as_ref()?;
-        state.matches.unknown.iter().find_map(|prefix| {
+        let mut unknown = state
+            .matches
+            .entries
+            .iter()
+            .flat_map(|entry| &entry.unknown);
+        unknown.find_map(|prefix| {
             self.condition_candidates(prefix).find_map(|route| {
                 match self.condition_candidate_verdict(policy, route, false) {
                     CandidateVerdict::Error(error) => Some(error),
@@ -1158,7 +1211,8 @@ impl RibManager {
                     conditions: definition
                         .condition_prefixes
                         .iter()
-                        .map(|entry| condition_entry_status(&state.matches, *entry))
+                        .zip(&state.matches.entries)
+                        .map(|(entry, matches)| self.condition_entry_status(*entry, matches))
                         .collect(),
                     observed: state.observed.label(),
                     observed_for: now.saturating_duration_since(state.observed_since),
@@ -1172,6 +1226,52 @@ impl RibManager {
                 }
             })
             .collect()
+    }
+
+    /// One entry's status from its own tracked verdicts: a count and at
+    /// most [`CONDITION_STATUS_SAMPLE`] prefixes, whatever the range holds.
+    #[cfg_attr(
+        not(test),
+        expect(
+            clippy::unused_self,
+            reason = "self carries the test-only status work counter"
+        )
+    )]
+    fn condition_entry_status(
+        &self,
+        entry: PrefixSetEntry,
+        matches: &EntryMatches,
+    ) -> ConditionEntryStatus {
+        let present_sample: Vec<Prefix> = matches
+            .present
+            .iter()
+            .take(CONDITION_STATUS_SAMPLE)
+            .copied()
+            .collect();
+        #[cfg(test)]
+        self.conditional_advertisements
+            .status_prefix_visits
+            .fetch_add(present_sample.len(), std::sync::atomic::Ordering::Relaxed);
+        let state = if !matches.present.is_empty() {
+            ConditionObservation::Present
+        } else if !matches.unknown.is_empty() {
+            ConditionObservation::Unknown
+        } else {
+            ConditionObservation::Absent
+        };
+        ConditionEntryStatus {
+            entry,
+            state: state.label(),
+            present_count: matches.present.len(),
+            present_sample,
+        }
+    }
+
+    #[cfg(test)]
+    pub(super) fn conditional_advertisement_status_prefix_visits(&self) -> usize {
+        self.conditional_advertisements
+            .status_prefix_visits
+            .load(std::sync::atomic::Ordering::Relaxed)
     }
 
     #[cfg(test)]
@@ -1194,39 +1294,6 @@ impl RibManager {
         self.conditional_advertisements
             .candidate_visits
             .load(std::sync::atomic::Ordering::Relaxed)
-    }
-}
-
-/// One entry's slice of a definition's tracked verdicts. Bounded output: a
-/// count and at most [`CONDITION_STATUS_SAMPLE`] prefixes.
-fn condition_entry_status(
-    matches: &ConditionMatches,
-    entry: PrefixSetEntry,
-) -> ConditionEntryStatus {
-    // ponytail: filters the definition's whole present set per entry; a
-    // BTreeSet range bound per entry if a status read ever shows up in a profile.
-    let mut present = matches
-        .present
-        .iter()
-        .filter(|prefix| entry.matches(**prefix));
-    let present_sample: Vec<Prefix> = present
-        .by_ref()
-        .take(CONDITION_STATUS_SAMPLE)
-        .copied()
-        .collect();
-    let present_count = present_sample.len() + present.count();
-    let state = if present_count > 0 {
-        ConditionObservation::Present
-    } else if matches.unknown.iter().any(|prefix| entry.matches(*prefix)) {
-        ConditionObservation::Unknown
-    } else {
-        ConditionObservation::Absent
-    };
-    ConditionEntryStatus {
-        entry,
-        state: state.label(),
-        present_count,
-        present_sample,
     }
 }
 

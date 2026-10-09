@@ -1401,6 +1401,47 @@ async fn status_reports_range_counts_with_a_bounded_sample() {
     assert_eq!(row.observed, "present");
 }
 
+/// The status view reads each entry's tracked count and the head of its own
+/// set: a range holding many present prefixes costs at most
+/// `CONDITION_STATUS_SAMPLE` prefix visits per entry, not a walk of the
+/// range, and an entry overlapping another keeps its own count.
+#[tokio::test(start_paused = true)]
+async fn status_work_is_bounded_per_entry() {
+    let mut manager = manager();
+    let _ = manager.install_conditional_advertisements(vec![ranged(
+        NAME,
+        vec![
+            range(v4(0, 0, 0, 8), None, Some(32)),
+            range(v4(1, 0, 0, 16), Some(24), Some(24)),
+        ],
+        SETTLE,
+    )]);
+    for a in 1..=4 {
+        for b in 0..50 {
+            inject(&mut manager, v4(a, b, 0, 24), None);
+        }
+    }
+    let before = manager.conditional_advertisement_status_prefix_visits();
+    let row = status(&manager, NAME);
+    assert_eq!(
+        manager.conditional_advertisement_status_prefix_visits() - before,
+        2 * crate::manager::conditional_advertisement::CONDITION_STATUS_SAMPLE,
+        "one sample per entry, not a walk of the 200 present prefixes"
+    );
+    assert_eq!(row.conditions[0].present_count, 200);
+    assert_eq!(row.conditions[1].present_count, 50);
+
+    // Withdrawing a prefix inside both ranges updates both counts.
+    withdraw_injected(&mut manager, v4(1, 0, 0, 24));
+    let row = status(&manager, NAME);
+    assert_eq!(row.conditions[0].present_count, 199);
+    assert_eq!(row.conditions[1].present_count, 49);
+    assert_eq!(
+        row.conditions[1].present_sample[0],
+        Prefix::V4(v4(1, 1, 0, 24))
+    );
+}
+
 /// The status query copies the tracked per-prefix observations: it visits
 /// no condition candidate and evaluates no `condition_policy`, however many
 /// candidates the condition prefix holds.
