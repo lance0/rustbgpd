@@ -1,0 +1,24 @@
+01:00:5e:00:00:01 dev eth0 self permanent
+33:33:00:00:00:01 dev brbundle self permanent
+01:00:5e:00:00:6a dev brbundle self permanent
+33:33:00:00:00:6a dev brbundle self permanent
+01:00:5e:00:00:01 dev brbundle self permanent
+76:d0:82:7c:6f:a9 dev brbundle vlan 20 master brbundle permanent
+76:d0:82:7c:6f:a9 dev brbundle vlan 10 master brbundle permanent
+b6:8b:e2:72:8c:db dev vxlan10010 vlan 10 master brbundle permanent
+b6:8b:e2:72:8c:db dev vxlan10010 master brbundle permanent
+02:aa:bb:01:19:01 dev access10 vlan 10 master brbundle static
+a6:84:c5:e2:05:a3 dev access10 vlan 10 master brbundle permanent
+a6:84:c5:e2:05:a3 dev access10 master brbundle permanent
+33:33:00:00:00:01 dev access10 self permanent
+01:00:5e:00:00:01 dev access10 self permanent
+02:aa:bb:01:19:02 dev vxlan10020 vlan 20 extern_learn master brbundle 
+76:d0:82:7c:6f:a9 dev vxlan10020 master brbundle permanent
+00:00:00:00:00:00 dev vxlan10020 dst 192.0.2.2 self extern_learn permanent
+02:aa:bb:01:19:02 dev vxlan10020 dst 192.0.2.2 self extern_learn permanent
+02:aa:bb:01:19:01 dev access20 vlan 20 master brbundle static
+c2:4b:93:91:3d:75 dev access20 vlan 20 master brbundle permanent
+c2:4b:93:91:3d:75 dev access20 master brbundle permanent
+33:33:00:00:00:01 dev access20 self permanent
+01:00:5e:00:00:01 dev access20 self permanent
+01:00:5e:00:00:01 dev eth1 self permanent

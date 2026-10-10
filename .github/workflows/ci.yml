@@ -191,6 +191,10 @@ jobs:
           python3 tests/interop/scripts/test_m114_wire_oracle.py
           python3 tests/interop/scripts/test_m115_wire_oracle.py
           python3 tests/interop/scripts/test_m116_wire_oracle.py
+          python3 tests/interop/scripts/test_m119_bundle_oracle.py
+          python3 tests/interop/scripts/m119_bundle_oracle.py docs/artifacts/interop/m119-evpn-bundle-vtep-20261010T124729Z replay
+          bash -n tests/interop/scripts/test-m119-evpn-bundle-vtep-srlinux.sh
+          shellcheck -x tests/interop/scripts/test-m119-evpn-bundle-vtep-srlinux.sh tests/interop/scripts/setup-m119-hosts.sh
       - name: Check SRv6 and SMET reflection proof helpers
         run: |
           python3 tests/interop/scripts/test_m112_capture_oracle.py

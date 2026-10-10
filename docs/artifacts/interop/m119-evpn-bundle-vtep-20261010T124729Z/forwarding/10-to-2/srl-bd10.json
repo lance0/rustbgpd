@@ -1,0 +1,140 @@
+{
+  "network-instance": [
+    {
+      "name": "bd10",
+      "bridge-table": {
+        "discard-unknown-dest-mac": false,
+        "protect-anycast-gw-mac": false,
+        "mac-learning": {
+          "admin-state": "enable",
+          "oper-mac-learning": "up",
+          "mac-relearn-only": false,
+          "aging": {
+            "admin-state": "enable",
+            "age-time": 300
+          },
+          "learnt-entries": {
+          }
+        },
+        "mac-duplication": {
+          "admin-state": "enable",
+          "monitoring-window": 3,
+          "num-moves": 5,
+          "hold-down-time": 9,
+          "action": "stop-learning",
+          "duplicate-entries": {
+          }
+        },
+        "mac-limit": {
+          "maximum-entries": 250,
+          "warning-threshold-pct": 95
+        },
+        "static-mac": {
+          "mac": [
+            {
+              "address": "02:AA:BB:01:19:02",
+              "destination": "ethernet-1/2.10"
+            }
+          ]
+        },
+        "mac-table": {
+          "mac": [
+            {
+              "address": "02:AA:BB:01:19:01",
+              "destination-type": "vxlan",
+              "destination-index": "316847364584",
+              "type": "evpn",
+              "last-update": "2026-10-10T12:47:32.000Z (10 seconds ago)",
+              "destination": "vxlan-interface:vxlan1.10 vtep:10.0.119.1 vni:10010",
+              "is-protected": false
+            },
+            {
+              "address": "02:AA:BB:01:19:02",
+              "destination-type": "sub-interface",
+              "destination-index": "5",
+              "type": "static",
+              "last-update": "2026-10-10T12:47:26.000Z (16 seconds ago)",
+              "destination": "ethernet-1/2.10",
+              "is-protected": true
+            }
+          ]
+        },
+        "statistics": {
+          "active-entries": "2",
+          "total-entries": "2",
+          "failed-entries": "0",
+          "mac-type": [
+            {
+              "type": "static",
+              "active-entries": "1",
+              "total-entries": "1",
+              "failed-entries": "0"
+            },
+            {
+              "type": "duplicate",
+              "active-entries": "0",
+              "total-entries": "0",
+              "failed-entries": "0"
+            },
+            {
+              "type": "learnt",
+              "active-entries": "0",
+              "total-entries": "0",
+              "failed-entries": "0"
+            },
+            {
+              "type": "irb-interface",
+              "active-entries": "0",
+              "total-entries": "0",
+              "failed-entries": "0"
+            },
+            {
+              "type": "evpn",
+              "active-entries": "1",
+              "total-entries": "1",
+              "failed-entries": "0"
+            },
+            {
+              "type": "evpn-static",
+              "active-entries": "0",
+              "total-entries": "0",
+              "failed-entries": "0"
+            },
+            {
+              "type": "irb-interface-anycast",
+              "active-entries": "0",
+              "total-entries": "0",
+              "failed-entries": "0"
+            },
+            {
+              "type": "proxy-anti-spoof",
+              "active-entries": "0",
+              "total-entries": "0",
+              "failed-entries": "0"
+            },
+            {
+              "type": "reserved",
+              "active-entries": "0",
+              "total-entries": "0",
+              "failed-entries": "0"
+            },
+            {
+              "type": "eth-cfm",
+              "active-entries": "0",
+              "total-entries": "0",
+              "failed-entries": "0"
+            },
+            {
+              "type": "irb-interface-vrrp",
+              "active-entries": "0",
+              "total-entries": "0",
+              "failed-entries": "0"
+            }
+          ]
+        },
+        "reserved-macs": {
+        }
+      }
+    }
+  ]
+}

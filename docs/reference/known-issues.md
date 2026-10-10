@@ -445,8 +445,7 @@ resolved.
   While NotReady, local MACs on the segment's VNIs are advertised without an
   ESI. Type 2 (STP) derivation is not implemented. See
   [Auto-derived ESI](configuration.md#auto-derived-esi-lacp-type-1).
-- **VLAN-aware bundle members are single-homed, L2-only, and unproven
-  against a vendor.** A
+- **VLAN-aware bundle members are single-homed and L2-only.** A
   [`vlan_aware_bundle` row](configuration.md#vlan-aware-bundle-members)
   originates and imports Type 2 and Type 3 routes under its own Ethernet
   Tag, but it cannot join an Ethernet Segment, link an `ip_vrf`, or use a
@@ -458,8 +457,11 @@ resolved.
   instance's `remote-route-drops` in `rbgp evpn instances`. A Type 5 route
   with a non-zero Ethernet Tag is not imported and is counted as
   `non_zero_ethernet_tag` in `evpn_ip_vrf_remote_prefix_drops`. Reflection of
-  all these routes is unaffected. The member tag stamping and per-tag import
-  are covered by unit tests only; no peer interop receipt exists yet. See
+  all these routes is unaffected. M118 qualifies decoded wire fields and local
+  receive programming against GoBGP; the
+  [M119 local receipt](../artifacts/interop/m119-evpn-bundle-vtep-20261010T124729Z/README.md)
+  qualifies SR Linux 25.10.1 import, per-tag forwarding with fresh ARP, and
+  withdrawal/restore isolation in a two-VTEP fixture. EVPN remains alpha. See
   [ADR-0092](../adr/0092-evpn-vlan-aware-bundle-service.md).
 - **Family scope is still limited.** MP-BGP supports AFI/SAFI negotiation,
   but rustbgpd currently implements IPv4/IPv6 unicast (AFI 1/2, SAFI 1),

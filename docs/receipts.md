@@ -165,6 +165,7 @@ covered by later CI receipts). Procedures and results:
 
 | Receipt | Proves | Peer stack |
 |---------|--------|------------|
+| [M119](artifacts/interop/m119-evpn-bundle-vtep-20261010T124729Z/README.md) | VLAN-aware bundle VTEP vendor import, fresh-ARP forwarding, per-tag withdrawal/restore | SR Linux 25.10.1-399 (local only) |
 | M0 | Session establishment, restart/reset recovery, 30-min soak | FRR 10.7.1 and BIRD 2.0.12 |
 | M2 | Best-path selection + `ListBestRoutes` pagination | FRR 10.7.1 |
 | M3 | Redistribution, split horizon, injection, withdrawal propagation | FRR 10.7.1 ×2 |

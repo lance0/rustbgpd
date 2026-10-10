@@ -1,0 +1,51 @@
+{
+  "started_utc": "2026-10-10T12:47:29Z",
+  "finished_utc": "2026-10-10T12:48:45Z",
+  "cleanup_utc": "2026-10-10T12:49:23Z",
+  "daemon_source_commit": "cc56f7c029e02dbd367fa2b443ef35b9d45e8981",
+  "daemon_rust_inputs_source_id": "629232bc13c5a6e567e5c24af80b637f842eb03587c9009ba3e00a13b6693991",
+  "daemon_image_id": "sha256:efd5669227e214abc71065c90a76dee4b443d41a318217b986bb65dae09a9801",
+  "srl_image": "ghcr.io/nokia/srlinux:25.10.1@sha256:bc8112667b5a87bee5039ade65b504ac2ef35511210d0675db6c7b0754e8cc4c",
+  "srl_image_id": "sha256:bc8112667b5a87bee5039ade65b504ac2ef35511210d0675db6c7b0754e8cc4c",
+  "srl_version": "25.10.1-399-g90c1dbe35ef",
+  "containerlab_version": "0.74.3",
+  "kernel": "7.0.0-30-generic",
+  "binary_sha256": {
+    "rustbgpd": "3bae7f783fb44c8ac60cd3b6229d486a3ec0ef2627b07bb1c47dcb37a9ee0b8b",
+    "rbgp": "2546d10450b0d8095607a6f3d652c0f4e05d1ca85b147447fbbefbf446e99dc4"
+  },
+  "exit_codes": {
+    "image_build_and_source_check": 0,
+    "deploy": 0,
+    "runner": 0,
+    "replay": 0,
+    "destroy": 0
+  },
+  "summary": {
+    "passed": 18,
+    "failed": 0,
+    "ping_directions": 10,
+    "echo_requests_per_direction": 3,
+    "empty_before_neighbor_snapshots": 40,
+    "state_snapshots": 15,
+    "daemon_flaps": 0,
+    "daemon_notifications_sent": 0,
+    "daemon_notifications_received": 0,
+    "srl_established_transitions": 1
+  },
+  "harness_sha256": {
+    "tests/interop/m119-evpn-bundle-vtep-srlinux.clab.yml": "d5b2380b810c042749ed74dfb442cb857cff127f7f14aae09cf0e4cfbaaf6e36",
+    "tests/interop/configs/rustbgpd-m119-bundle-vtep.toml": "3a6e1d39b00bda2f6a83356ac8408ae7a46a0ab6f750c5a40b2724b88d51b0bf",
+    "tests/interop/configs/srl-m119-bundle.cli": "df4d4fab8824cbc3d24a75c2b6a02c3517b2cbe54c11d0da638cbdb4e91f3ee9",
+    "tests/interop/scripts/setup-m119-hosts.sh": "9a26f14b6f174730744d42c4327df0b02fc6b74fb7363f1d7a370b19c5cb52d0",
+    "tests/interop/scripts/test-m119-evpn-bundle-vtep-srlinux.sh": "5f98ff07c86ed4a646d191b8849ef71c09e240b304d52cf5e4910d0ea77dab4c",
+    "tests/interop/scripts/m119_bundle_oracle.py": "d1e8924c81052513270761186ccd1aeaa87bd2cbe945e08b027e96c060bfd8a7",
+    "tests/interop/scripts/start-rustbgpd.sh": "47bafe51af0a2d46eb9d085000bc3c49a66e4d1d978fb87c6e05b41d4841d8ad",
+    "tests/interop/scripts/test-lib.sh": "bae9f334ffa2b2ae65fb416ffd05e02813d100faad296f95830fb6e31bf5bcd2",
+    "tests/interop/scripts/source-id-guard.sh": "d4bddf6b1a72f09ab18041887559fe4b2fd9ce83c0a1b1afe6d5bc0de614835e",
+    "scripts/source-id.sh": "703efb7e015d4e98e18160486d1ef3bb1a1a542eb42ea6699358804924fca5d6"
+  },
+  "normalization": {
+    "run.log": "ANSI colors removed; other text unchanged. All JSON, FDB, neighbor, ping and daemon log observations are unchanged."
+  }
+}

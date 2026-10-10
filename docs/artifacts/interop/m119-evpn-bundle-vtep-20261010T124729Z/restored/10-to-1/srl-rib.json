@@ -1,0 +1,656 @@
+{
+  "network-instance": [
+    {
+      "name": "default",
+      "bgp-rib": {
+        "afi-safi": [
+          {
+            "afi-safi-name": "evpn",
+            "evpn": {
+              "local-rib": {
+                "mac-ip-route": [
+                  {
+                    "route-distinguisher": "10.0.119.1:10",
+                    "mac-length": 48,
+                    "mac-address": "02:AA:BB:01:19:01",
+                    "ip-address": "0.0.0.0",
+                    "ethernet-tag-id": 10,
+                    "neighbor": "10.0.119.1",
+                    "path-id": 0,
+                    "esi": "00:00:00:00:00:00:00:00:00:00",
+                    "attr-id": "10",
+                    "last-modified": "2026-10-10T12:48:16.600Z (11 seconds ago)",
+                    "used-route": true,
+                    "unused-weight-only": false,
+                    "valid-route": true,
+                    "best-route": true,
+                    "backup-route": false,
+                    "stale-route": false,
+                    "pending-delete": false,
+                    "neighbor-as": 65000,
+                    "group-best": true,
+                    "tie-break-reason": "none",
+                    "imported-network-instances": [
+                      "bd20",
+                      "bd10"
+                    ],
+                    "label1": {
+                      "value": 10010,
+                      "value-type": "vni"
+                    }
+                  },
+                  {
+                    "route-distinguisher": "10.0.119.1:20",
+                    "mac-length": 48,
+                    "mac-address": "02:AA:BB:01:19:01",
+                    "ip-address": "0.0.0.0",
+                    "ethernet-tag-id": 20,
+                    "neighbor": "10.0.119.1",
+                    "path-id": 0,
+                    "esi": "00:00:00:00:00:00:00:00:00:00",
+                    "attr-id": "10",
+                    "last-modified": "2026-10-10T12:48:16.600Z (11 seconds ago)",
+                    "used-route": true,
+                    "unused-weight-only": false,
+                    "valid-route": true,
+                    "best-route": true,
+                    "backup-route": false,
+                    "stale-route": false,
+                    "pending-delete": false,
+                    "neighbor-as": 65000,
+                    "group-best": true,
+                    "tie-break-reason": "none",
+                    "imported-network-instances": [
+                      "bd20",
+                      "bd10"
+                    ],
+                    "label1": {
+                      "value": 10020,
+                      "value-type": "vni"
+                    }
+                  },
+                  {
+                    "route-distinguisher": "192.0.2.2:100",
+                    "mac-length": 48,
+                    "mac-address": "02:AA:BB:01:19:02",
+                    "ip-address": "0.0.0.0",
+                    "ethernet-tag-id": 10,
+                    "neighbor": "0.0.0.0",
+                    "path-id": 0,
+                    "esi": "00:00:00:00:00:00:00:00:00:00",
+                    "attr-id": "4",
+                    "last-modified": "2026-10-10T12:48:14.800Z (13 seconds ago)",
+                    "used-route": false,
+                    "unused-weight-only": false,
+                    "valid-route": true,
+                    "best-route": true,
+                    "backup-route": false,
+                    "stale-route": false,
+                    "pending-delete": false,
+                    "neighbor-as": 0,
+                    "group-best": true,
+                    "tie-break-reason": "none",
+                    "label1": {
+                      "value": 10010,
+                      "value-type": "vni"
+                    }
+                  },
+                  {
+                    "route-distinguisher": "192.0.2.2:101",
+                    "mac-length": 48,
+                    "mac-address": "02:AA:BB:01:19:02",
+                    "ip-address": "0.0.0.0",
+                    "ethernet-tag-id": 20,
+                    "neighbor": "0.0.0.0",
+                    "path-id": 0,
+                    "esi": "00:00:00:00:00:00:00:00:00:00",
+                    "attr-id": "4",
+                    "last-modified": "2026-10-10T12:47:26.800Z (a minute ago)",
+                    "used-route": false,
+                    "unused-weight-only": false,
+                    "valid-route": true,
+                    "best-route": true,
+                    "backup-route": false,
+                    "stale-route": false,
+                    "pending-delete": false,
+                    "neighbor-as": 0,
+                    "group-best": true,
+                    "tie-break-reason": "none",
+                    "label1": {
+                      "value": 10020,
+                      "value-type": "vni"
+                    }
+                  }
+                ],
+                "imet-route": [
+                  {
+                    "route-distinguisher": "10.0.119.1:10",
+                    "originating-router": "10.0.119.1",
+                    "ethernet-tag-id": 10,
+                    "neighbor": "10.0.119.1",
+                    "path-id": 0,
+                    "attr-id": "8",
+                    "last-modified": "2026-10-10T12:48:16.600Z (11 seconds ago)",
+                    "used-route": true,
+                    "unused-weight-only": false,
+                    "valid-route": true,
+                    "best-route": true,
+                    "backup-route": false,
+                    "stale-route": false,
+                    "pending-delete": false,
+                    "neighbor-as": 65000,
+                    "group-best": true,
+                    "tie-break-reason": "none",
+                    "imported-network-instances": [
+                      "bd20",
+                      "bd10"
+                    ]
+                  },
+                  {
+                    "route-distinguisher": "10.0.119.1:20",
+                    "originating-router": "10.0.119.1",
+                    "ethernet-tag-id": 20,
+                    "neighbor": "10.0.119.1",
+                    "path-id": 0,
+                    "attr-id": "9",
+                    "last-modified": "2026-10-10T12:48:16.600Z (11 seconds ago)",
+                    "used-route": true,
+                    "unused-weight-only": false,
+                    "valid-route": true,
+                    "best-route": true,
+                    "backup-route": false,
+                    "stale-route": false,
+                    "pending-delete": false,
+                    "neighbor-as": 65000,
+                    "group-best": true,
+                    "tie-break-reason": "none",
+                    "imported-network-instances": [
+                      "bd20",
+                      "bd10"
+                    ]
+                  },
+                  {
+                    "route-distinguisher": "192.0.2.2:100",
+                    "originating-router": "192.0.2.2",
+                    "ethernet-tag-id": 10,
+                    "neighbor": "0.0.0.0",
+                    "path-id": 0,
+                    "attr-id": "14",
+                    "last-modified": "2026-10-10T12:48:14.800Z (13 seconds ago)",
+                    "used-route": false,
+                    "unused-weight-only": false,
+                    "valid-route": true,
+                    "best-route": true,
+                    "backup-route": false,
+                    "stale-route": false,
+                    "pending-delete": false,
+                    "neighbor-as": 0,
+                    "group-best": true,
+                    "tie-break-reason": "none"
+                  },
+                  {
+                    "route-distinguisher": "192.0.2.2:101",
+                    "originating-router": "192.0.2.2",
+                    "ethernet-tag-id": 20,
+                    "neighbor": "0.0.0.0",
+                    "path-id": 0,
+                    "attr-id": "6",
+                    "last-modified": "2026-10-10T12:47:26.800Z (a minute ago)",
+                    "used-route": false,
+                    "unused-weight-only": false,
+                    "valid-route": true,
+                    "best-route": true,
+                    "backup-route": false,
+                    "stale-route": false,
+                    "pending-delete": false,
+                    "neighbor-as": 0,
+                    "group-best": true,
+                    "tie-break-reason": "none"
+                  }
+                ]
+              },
+              "rib-in-out": {
+                "rib-in-pre": {
+                  "mac-ip-route": [
+                    {
+                      "route-distinguisher": "10.0.119.1:10",
+                      "mac-length": 48,
+                      "mac-address": "02:AA:BB:01:19:01",
+                      "ip-address": "0.0.0.0",
+                      "ethernet-tag-id": 10,
+                      "neighbor": "10.0.119.1",
+                      "path-id": 0,
+                      "esi": "00:00:00:00:00:00:00:00:00:00",
+                      "attr-id": "10",
+                      "label1": {
+                        "value": 10010,
+                        "value-type": "vni"
+                      }
+                    },
+                    {
+                      "route-distinguisher": "10.0.119.1:20",
+                      "mac-length": 48,
+                      "mac-address": "02:AA:BB:01:19:01",
+                      "ip-address": "0.0.0.0",
+                      "ethernet-tag-id": 20,
+                      "neighbor": "10.0.119.1",
+                      "path-id": 0,
+                      "esi": "00:00:00:00:00:00:00:00:00:00",
+                      "attr-id": "10",
+                      "label1": {
+                        "value": 10020,
+                        "value-type": "vni"
+                      }
+                    }
+                  ],
+                  "imet-route": [
+                    {
+                      "route-distinguisher": "10.0.119.1:10",
+                      "originating-router": "10.0.119.1",
+                      "ethernet-tag-id": 10,
+                      "neighbor": "10.0.119.1",
+                      "path-id": 0,
+                      "attr-id": "8"
+                    },
+                    {
+                      "route-distinguisher": "10.0.119.1:20",
+                      "originating-router": "10.0.119.1",
+                      "ethernet-tag-id": 20,
+                      "neighbor": "10.0.119.1",
+                      "path-id": 0,
+                      "attr-id": "9"
+                    }
+                  ]
+                },
+                "rib-in-post": {
+                  "mac-ip-route": [
+                    {
+                      "route-distinguisher": "10.0.119.1:10",
+                      "mac-length": 48,
+                      "mac-address": "02:AA:BB:01:19:01",
+                      "ip-address": "0.0.0.0",
+                      "ethernet-tag-id": 10,
+                      "neighbor": "10.0.119.1",
+                      "path-id": 0,
+                      "esi": "00:00:00:00:00:00:00:00:00:00",
+                      "attr-id": "10",
+                      "last-modified": "2026-10-10T12:48:16.600Z (11 seconds ago)",
+                      "used-route": true,
+                      "unused-weight-only": false,
+                      "valid-route": true,
+                      "best-route": true,
+                      "backup-route": false,
+                      "stale-route": false,
+                      "pending-delete": false,
+                      "neighbor-as": 65000,
+                      "group-best": true,
+                      "tie-break-reason": "none",
+                      "label1": {
+                        "value": 10010,
+                        "value-type": "vni"
+                      }
+                    },
+                    {
+                      "route-distinguisher": "10.0.119.1:20",
+                      "mac-length": 48,
+                      "mac-address": "02:AA:BB:01:19:01",
+                      "ip-address": "0.0.0.0",
+                      "ethernet-tag-id": 20,
+                      "neighbor": "10.0.119.1",
+                      "path-id": 0,
+                      "esi": "00:00:00:00:00:00:00:00:00:00",
+                      "attr-id": "10",
+                      "last-modified": "2026-10-10T12:48:16.600Z (11 seconds ago)",
+                      "used-route": true,
+                      "unused-weight-only": false,
+                      "valid-route": true,
+                      "best-route": true,
+                      "backup-route": false,
+                      "stale-route": false,
+                      "pending-delete": false,
+                      "neighbor-as": 65000,
+                      "group-best": true,
+                      "tie-break-reason": "none",
+                      "label1": {
+                        "value": 10020,
+                        "value-type": "vni"
+                      }
+                    }
+                  ],
+                  "imet-route": [
+                    {
+                      "route-distinguisher": "10.0.119.1:10",
+                      "originating-router": "10.0.119.1",
+                      "ethernet-tag-id": 10,
+                      "neighbor": "10.0.119.1",
+                      "path-id": 0,
+                      "attr-id": "8",
+                      "last-modified": "2026-10-10T12:48:16.600Z (11 seconds ago)",
+                      "used-route": true,
+                      "unused-weight-only": false,
+                      "valid-route": true,
+                      "best-route": true,
+                      "backup-route": false,
+                      "stale-route": false,
+                      "pending-delete": false,
+                      "neighbor-as": 65000,
+                      "group-best": true,
+                      "tie-break-reason": "none"
+                    },
+                    {
+                      "route-distinguisher": "10.0.119.1:20",
+                      "originating-router": "10.0.119.1",
+                      "ethernet-tag-id": 20,
+                      "neighbor": "10.0.119.1",
+                      "path-id": 0,
+                      "attr-id": "9",
+                      "last-modified": "2026-10-10T12:48:16.600Z (11 seconds ago)",
+                      "used-route": true,
+                      "unused-weight-only": false,
+                      "valid-route": true,
+                      "best-route": true,
+                      "backup-route": false,
+                      "stale-route": false,
+                      "pending-delete": false,
+                      "neighbor-as": 65000,
+                      "group-best": true,
+                      "tie-break-reason": "none"
+                    }
+                  ]
+                },
+                "rib-out-post": {
+                  "mac-ip-route": [
+                    {
+                      "route-distinguisher": "192.0.2.2:100",
+                      "mac-length": 48,
+                      "mac-address": "02:AA:BB:01:19:02",
+                      "ip-address": "0.0.0.0",
+                      "ethernet-tag-id": 10,
+                      "neighbor": "10.0.119.1",
+                      "path-id": 0,
+                      "esi": "00:00:00:00:00:00:00:00:00:00",
+                      "attr-id": "11",
+                      "next-hop": "192.0.2.2",
+                      "label1": {
+                        "value": 10010,
+                        "value-type": "vni"
+                      }
+                    },
+                    {
+                      "route-distinguisher": "192.0.2.2:101",
+                      "mac-length": 48,
+                      "mac-address": "02:AA:BB:01:19:02",
+                      "ip-address": "0.0.0.0",
+                      "ethernet-tag-id": 20,
+                      "neighbor": "10.0.119.1",
+                      "path-id": 0,
+                      "esi": "00:00:00:00:00:00:00:00:00:00",
+                      "attr-id": "11",
+                      "next-hop": "192.0.2.2",
+                      "label1": {
+                        "value": 10020,
+                        "value-type": "vni"
+                      }
+                    }
+                  ],
+                  "imet-route": [
+                    {
+                      "route-distinguisher": "192.0.2.2:100",
+                      "originating-router": "192.0.2.2",
+                      "ethernet-tag-id": 10,
+                      "neighbor": "10.0.119.1",
+                      "path-id": 0,
+                      "attr-id": "15",
+                      "next-hop": "192.0.2.2"
+                    },
+                    {
+                      "route-distinguisher": "192.0.2.2:101",
+                      "originating-router": "192.0.2.2",
+                      "ethernet-tag-id": 20,
+                      "neighbor": "10.0.119.1",
+                      "path-id": 0,
+                      "attr-id": "13",
+                      "next-hop": "192.0.2.2"
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          {
+            "afi-safi-name": "ipv4-unicast",
+            "ipv4-unicast": {
+              "local-rib": {
+                "route": [
+                  {
+                    "prefix": "10.0.119.0/24",
+                    "neighbor": "0.0.0.0",
+                    "origin-protocol": "local",
+                    "path-id": 0,
+                    "last-modified": "2026-10-10T12:47:31.600Z (56 seconds ago)",
+                    "used-route": true,
+                    "unused-weight-only": false,
+                    "valid-route": true,
+                    "best-route": true,
+                    "backup-route": false,
+                    "stale-route": false,
+                    "fib-disabled": false,
+                    "pending-delete": false,
+                    "group-best": true,
+                    "tie-break-reason": "none",
+                    "attr-id": "7"
+                  },
+                  {
+                    "prefix": "192.0.2.2/32",
+                    "neighbor": "0.0.0.0",
+                    "origin-protocol": "local",
+                    "path-id": 0,
+                    "last-modified": "2026-10-10T12:47:28.500Z (59 seconds ago)",
+                    "used-route": true,
+                    "unused-weight-only": false,
+                    "valid-route": true,
+                    "best-route": true,
+                    "backup-route": false,
+                    "stale-route": false,
+                    "fib-disabled": false,
+                    "pending-delete": false,
+                    "group-best": true,
+                    "tie-break-reason": "none",
+                    "attr-id": "3"
+                  }
+                ]
+              }
+            }
+          }
+        ],
+        "attr-sets": {
+          "attr-set": [
+            {
+              "index": "2",
+              "origin": "incomplete",
+              "atomic-aggregate": false,
+              "next-hop": "0.0.0.0",
+              "med": 0
+            },
+            {
+              "index": "3",
+              "origin": "igp",
+              "atomic-aggregate": false,
+              "next-hop": "0.0.0.0"
+            },
+            {
+              "index": "4",
+              "origin": "igp",
+              "atomic-aggregate": false,
+              "next-hop": "192.0.2.2",
+              "communities": {
+                "ext-community": [
+                  "target:65000:100",
+                  "bgp-tunnel-encap:VXLAN",
+                  "mac-mobility:Seq:0/Static"
+                ]
+              }
+            },
+            {
+              "index": "6",
+              "origin": "igp",
+              "atomic-aggregate": false,
+              "next-hop": "192.0.2.2",
+              "pmsi-tunnel": {
+                "tunnel-type": "ingress-replication",
+                "tunnel-endpoint": "192.0.2.2",
+                "label": {
+                  "value": 10020,
+                  "value-type": "vni"
+                }
+              },
+              "communities": {
+                "ext-community": [
+                  "target:65000:100",
+                  "bgp-tunnel-encap:VXLAN"
+                ]
+              }
+            },
+            {
+              "index": "7",
+              "origin": "igp",
+              "atomic-aggregate": false,
+              "next-hop": "0.0.0.0"
+            },
+            {
+              "index": "8",
+              "origin": "igp",
+              "atomic-aggregate": false,
+              "next-hop": "10.0.119.1",
+              "local-pref": 100,
+              "pmsi-tunnel": {
+                "tunnel-type": "ingress-replication",
+                "tunnel-endpoint": "10.0.119.1",
+                "label": {
+                  "value": 10010,
+                  "value-type": "vni"
+                }
+              },
+              "communities": {
+                "ext-community": [
+                  "target:65000:100",
+                  "bgp-tunnel-encap:VXLAN"
+                ]
+              }
+            },
+            {
+              "index": "9",
+              "origin": "igp",
+              "atomic-aggregate": false,
+              "next-hop": "10.0.119.1",
+              "local-pref": 100,
+              "pmsi-tunnel": {
+                "tunnel-type": "ingress-replication",
+                "tunnel-endpoint": "10.0.119.1",
+                "label": {
+                  "value": 10020,
+                  "value-type": "vni"
+                }
+              },
+              "communities": {
+                "ext-community": [
+                  "target:65000:100",
+                  "bgp-tunnel-encap:VXLAN"
+                ]
+              }
+            },
+            {
+              "index": "10",
+              "origin": "igp",
+              "atomic-aggregate": false,
+              "next-hop": "10.0.119.1",
+              "local-pref": 100,
+              "communities": {
+                "ext-community": [
+                  "target:65000:100",
+                  "bgp-tunnel-encap:VXLAN"
+                ]
+              }
+            },
+            {
+              "index": "11",
+              "origin": "igp",
+              "atomic-aggregate": false,
+              "next-hop": "192.0.2.2",
+              "local-pref": 100,
+              "communities": {
+                "ext-community": [
+                  "target:65000:100",
+                  "bgp-tunnel-encap:VXLAN",
+                  "mac-mobility:Seq:0/Static"
+                ]
+              }
+            },
+            {
+              "index": "13",
+              "origin": "igp",
+              "atomic-aggregate": false,
+              "next-hop": "192.0.2.2",
+              "local-pref": 100,
+              "pmsi-tunnel": {
+                "tunnel-type": "ingress-replication",
+                "tunnel-endpoint": "192.0.2.2",
+                "label": {
+                  "value": 10020,
+                  "value-type": "vni"
+                }
+              },
+              "communities": {
+                "ext-community": [
+                  "target:65000:100",
+                  "bgp-tunnel-encap:VXLAN"
+                ]
+              }
+            },
+            {
+              "index": "14",
+              "origin": "igp",
+              "atomic-aggregate": false,
+              "next-hop": "192.0.2.2",
+              "pmsi-tunnel": {
+                "tunnel-type": "ingress-replication",
+                "tunnel-endpoint": "192.0.2.2",
+                "label": {
+                  "value": 10010,
+                  "value-type": "vni"
+                }
+              },
+              "communities": {
+                "ext-community": [
+                  "target:65000:100",
+                  "bgp-tunnel-encap:VXLAN"
+                ]
+              }
+            },
+            {
+              "index": "15",
+              "origin": "igp",
+              "atomic-aggregate": false,
+              "next-hop": "192.0.2.2",
+              "local-pref": 100,
+              "pmsi-tunnel": {
+                "tunnel-type": "ingress-replication",
+                "tunnel-endpoint": "192.0.2.2",
+                "label": {
+                  "value": 10010,
+                  "value-type": "vni"
+                }
+              },
+              "communities": {
+                "ext-community": [
+                  "target:65000:100",
+                  "bgp-tunnel-encap:VXLAN"
+                ]
+              }
+            }
+          ]
+        }
+      }
+    }
+  ]
+}

@@ -27,7 +27,7 @@
 # Prerequisites:
 #   - docker build --target dev -t rustbgpd:dev .
 #   - docker build -t gobgp:interop -f tests/interop/Dockerfile.gobgp tests/interop
-#   - docker pull ghcr.io/nokia/srlinux:latest
+#   - docker pull ghcr.io/nokia/srlinux:25.10.1@sha256:bc8112667b5a87bee5039ade65b504ac2ef35511210d0675db6c7b0754e8cc4c
 #   - containerlab deploy -t tests/interop/m82-evpn-bundle-srlinux.clab.yml
 
 TOPO="m82-evpn-bundle-srlinux"

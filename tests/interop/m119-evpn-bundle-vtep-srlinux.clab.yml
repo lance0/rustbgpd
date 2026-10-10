@@ -1,0 +1,41 @@
+# Local vendor import and datapath qualification; SR Linux is pinned to 25.10.1.
+name: m119-evpn-bundle-vtep-srlinux
+
+topology:
+  nodes:
+    rustbgpd:
+      kind: linux
+      image: rustbgpd:m119
+      cmd: sleep infinity
+      binds:
+        - ./configs/rustbgpd-m119-bundle-vtep.toml:/etc/rustbgpd/config.toml:ro
+        - ../fixtures/grpc-test-only-operator.token:/run/rustbgpd/grpc-test-only-operator.token:ro
+        - ./scripts/start-rustbgpd.sh:/usr/local/bin/start-rustbgpd.sh:ro
+        - ./scripts/setup-m119-hosts.sh:/usr/local/bin/setup-hosts.sh:ro
+      exec:
+        - ip addr add 10.0.119.1/24 dev eth1
+        - ip link set eth1 up
+        - ip route add 192.0.2.2/32 via 10.0.119.2
+        - sh /usr/local/bin/setup-hosts.sh vtep
+      env:
+        RUST_LOG: info,rustbgpd_evpn_linux=debug
+        RUSTBGPD_TOKEN_FILE: /run/rustbgpd/grpc-test-only-operator.token
+
+    srl:
+      kind: nokia_srlinux
+      image: ghcr.io/nokia/srlinux:25.10.1@sha256:bc8112667b5a87bee5039ade65b504ac2ef35511210d0675db6c7b0754e8cc4c
+      startup-config: ./configs/srl-m119-bundle.cli
+
+    client:
+      kind: linux
+      image: rustbgpd:m119
+      cmd: sleep infinity
+      binds:
+        - ./scripts/setup-m119-hosts.sh:/usr/local/bin/setup-hosts.sh:ro
+      exec:
+        - ip link set eth1 up
+        - sh /usr/local/bin/setup-hosts.sh client
+
+  links:
+    - endpoints: ["srl:e1-1", "rustbgpd:eth1"]
+    - endpoints: ["srl:e1-2", "client:eth1"]

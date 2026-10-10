@@ -1,0 +1,5 @@
+PING 198.18.20.2 (198.18.20.2) 56(84) bytes of data.
+
+--- 198.18.20.2 ping statistics ---
+3 packets transmitted, 3 received, 0% packet loss, time 2052ms
+rtt min/avg/max/mdev = 0.354/0.459/0.652/0.136 ms
