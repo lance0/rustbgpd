@@ -5,6 +5,9 @@ two-slice results remain separate; their baseline distributions differ. The
 INVALID aborted build-confounded attempt supplies no timing rows to either.
 Historical receipts are unchanged.
 
+[Read the dated receipt](../../shared-encoding-slice-fairness-2026-10-10.md)
+for the measured clocks, workload and scoped release decision.
+
 | File | Retained evidence |
 |---|---|
 | `initial-records.json`, `final-records.json` | All 64 reloads: selected original daemon boundary/phase/trace events, all 192 raw RPC starts/ends/durations/reply shapes and selected audit events, and exact engine CSV fields |

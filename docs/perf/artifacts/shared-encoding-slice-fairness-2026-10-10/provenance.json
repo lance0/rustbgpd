@@ -85,7 +85,7 @@
           "started": "2026-10-10T16:07:10-04:00"
         }
       },
-      "definition": "yield after two complete 2048-route slice publications; keep each publication at2048",
+      "definition": "yield after two complete 2048-route slice publications; keep each publication at 2048",
       "driver_sha256": "7123e4921bce880066dc9f5d92125188d7d2f794d843f79077ecf906187c16f8",
       "end_integrity_exit": 0,
       "outer_process_exit": 0,
@@ -1619,7 +1619,7 @@
   },
   "variant_assessment": {
     "campaign": "final",
-    "definition": "yield after two complete 2048-route slice publications; keep each publication at2048",
+    "definition": "yield after two complete 2048-route slice publications; keep each publication at 2048",
     "recommendation": "scoped GO with median wire completion tradeoff",
     "status": "MEASURED"
   },
