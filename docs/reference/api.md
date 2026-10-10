@@ -3181,8 +3181,8 @@ A failed `ApplyEvpnRuntime` status states what the failure left behind:
 
 | Status | Meaning |
 |--------|---------|
-| `FAILED_PRECONDITION` | No externally visible mutation. The candidate was refused before any side effect, or the failing step had no effect and every earlier step was rolled back to the committed model. Retrying the same candidate is safe. |
-| `INTERNAL` | Known divergence. A rollback step did not restore the committed model, or the failing step may have taken effect without an acknowledgement (for example, a Type 3 inject whose RIB acknowledgement timed out). The message says the state was not restored; live EVPN state may need repair or a restart. |
+| `FAILED_PRECONDITION` | No remaining divergence. Either the candidate was refused before any side effect, or the failing step had no effect and every earlier step was rolled back to the committed model. A rolled-back failure is not a no-effect refusal: earlier publishes, such as an acknowledged Type 3 IMET originate and its compensating withdraw, can be observed before the rollback, and a retry can repeat those transient changes. |
+| `INTERNAL` | Known divergence. A rollback step did not restore the committed model, or the failing step may have taken effect without an acknowledgement (for example, a Type 3 inject whose RIB acknowledgement timed out or whose reply was dropped). The message says the state was not restored; live EVPN state may need repair or a restart. |
 | `UNAVAILABLE` | Daemon shutdown cut the apply off after it published to the EVPN actors. Those publishes are not rolled back, because the same shutdown drains the actors next. |
 
 The committed generation is unchanged in every case. A refusal before the
@@ -3190,7 +3190,7 @@ converge starts leaves the coordinator idle; a converge that failed after it
 started pins `mutation_state=Failed` until a later apply succeeds, whichever
 status it returned. A rollback counts as restored only when every actor the
 apply published to holds the committed snapshot again and every Type 3 IMET
-route it changed has been put back through the RIB.
+route it changed has been put back with a RIB acknowledgement.
 
 Operators configure instances via the `[[evpn_instances]]` TOML block.
 SIGHUP reload submits EVPN table edits through the same coordinator for

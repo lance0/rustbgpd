@@ -53,7 +53,10 @@ pub(crate) enum DaemonEvpnRuntimeConvergeError {
     /// Rejected before any side effect, as a pure plan.
     Unsupported(String),
     /// The failing step had no effect and every earlier step was rolled
-    /// back to the committed model: no externally visible mutation.
+    /// back to the committed model: no remaining divergence. Earlier
+    /// publishes may have been observable before the rollback undid them
+    /// (an acknowledged IMET originate followed by its compensating
+    /// withdraw, for example), so a retry can repeat those transient changes.
     Failed(rustbgpd_evpn::EvpnRuntimeConvergeError),
     /// An effect of this converge was not restored: a rollback step
     /// failed, or the failing step may have taken effect without an
