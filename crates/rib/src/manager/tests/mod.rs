@@ -1426,6 +1426,7 @@ mod flowspec;
 mod flowspec_advertised;
 mod gr_llgr;
 mod incremental_best;
+mod join_cohort;
 mod labeled;
 mod lifecycle;
 mod llgr_families;

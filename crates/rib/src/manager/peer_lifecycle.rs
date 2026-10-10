@@ -1,5 +1,6 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, Ipv4Addr};
+use std::sync::Arc;
 
 use rustbgpd_policy::PolicyChain;
 use rustbgpd_telemetry::metrics::StaleSessionMessageKind;
@@ -45,6 +46,32 @@ pub(super) enum SessionTeardownDisposition {
 enum ActiveSessionRegistration {
     PeerUp,
     CollisionFailback,
+}
+
+/// Most registrations, leader included, one deferred-registration turn
+/// completes together. The cohort runs as one synchronous actor turn, so
+/// this bounds how long a mass rejoin holds survivors' queued mutations
+/// (LAN-475): one shared replay and exact-export probe pass, plus this many
+/// per-member commits. A member's commit reuses the cohort's probe and OTC
+/// proof and touches only its own residue, so it carries no table-sized
+/// scan of its own.
+const MAX_JOIN_COHORT: usize = 64;
+
+/// Most queued registrations one turn's cohort admission examines; the rest
+/// stay queued in order. Bounds admission's own work when the queue head
+/// holds joiners that cannot share the leader's replay.
+pub(super) const MAX_JOIN_COHORT_EXAMINED: usize = 256;
+
+/// The shared initial unicast replay of one joiner cohort: the plain group
+/// table outside selection-deferred families, with the encode cell and
+/// exact-export probe cache every member's commit reuses. Each member's
+/// envelope excludes its own source in transport (ADR-0109).
+struct JoinCohortReplay {
+    gid: usize,
+    announce: Arc<Vec<crate::route::Route>>,
+    next_hop_override: Arc<Vec<Option<rustbgpd_policy::NextHopAction>>>,
+    encode: Arc<crate::update::SharedGroupEncode>,
+    probe_cache: super::distribution::SharedUnicastProbeCache,
 }
 
 impl RibManager {
@@ -1138,13 +1165,22 @@ impl RibManager {
     /// re-reads the live-session record so a deferred completion always
     /// registers the CURRENT session's negotiated state.
     pub(super) fn complete_outbound_registration(&mut self, peer: IpAddr) {
+        if self.install_outbound_registration(peer) {
+            self.send_initial_table(peer);
+        }
+    }
+
+    /// Everything [`Self::complete_outbound_registration`] does before the
+    /// initial table: install the CURRENT live session's outbound state and
+    /// update-group membership. `false` only when no live session exists.
+    fn install_outbound_registration(&mut self, peer: IpAddr) -> bool {
         let Some(record) = self
             .live_sessions
             .get(&peer)
             .and_then(|sessions| sessions.last())
         else {
             debug_assert!(false, "complete_outbound_registration with no live session");
-            return;
+            return false;
         };
         let session_id = record.session_id;
         let outbound_tx = record.outbound_tx.clone();
@@ -1238,7 +1274,7 @@ impl RibManager {
         // it is over one. `recompute_update_group` above decided whether the
         // bounded member set or the private prefix index is authoritative.
         self.install_registration_outbound_limits(peer);
-        self.send_initial_table(peer);
+        true
     }
 
     /// Insert the local default RT-Constrain NLRI into the `LOCAL_PEER`
@@ -1318,9 +1354,221 @@ impl RibManager {
     pub(super) fn send_initial_table(&mut self, peer: IpAddr) {
         super::with_executor_handoff(|| {
             self.with_replacement_readiness(|manager| {
-                manager.send_initial_table_with_readiness(peer);
+                manager.send_initial_table_with_readiness(peer, None);
             });
         });
+    }
+
+    /// Complete a deferred registration popped by the run loop (LAN-475)
+    /// together with the queued joiners it can share one initial replay
+    /// with (LAN-1826). The leader registers exactly as before. When it
+    /// lands in a plain update group, every queued joiner whose session
+    /// would land in the same group and receive the same replay leaves the
+    /// queue and joins one synchronous turn: one group-table replay, one
+    /// exact-export probe cohort and one shared encode cell, then each
+    /// member's own registration, residue, commit and `EoR` in queue order.
+    /// Nothing else runs on the actor in between, so no live update can
+    /// overtake an unfinished member's initial table.
+    pub(super) fn complete_deferred_registration(&mut self, leader: IpAddr) {
+        if !self.install_outbound_registration(leader) {
+            return;
+        }
+        super::with_executor_handoff(|| {
+            self.with_replacement_readiness(|manager| {
+                let members = manager.take_join_cohort(leader);
+                if members.is_empty() {
+                    manager.send_initial_table_with_readiness(leader, None);
+                } else {
+                    manager.send_cohort_initial_tables(leader, members);
+                }
+            });
+        });
+    }
+
+    /// Remove and return the queued joiners that share `leader`'s initial
+    /// replay, preserving the queue order of everyone left behind. Empty
+    /// unless `leader` is a member of a plain (single-best) group whose
+    /// table it replays unmodified.
+    ///
+    /// A joiner qualifies when its pending registration is still current
+    /// (the advance seam's own re-check), its live session carries the
+    /// leader's update-group inputs with no grouping disqualifier, and
+    /// RFC 7947 control leaves every table row untouched toward it: the
+    /// group table holds no control-form community for its RS ASN, on the
+    /// source or the post-policy route (the LAN-474 emit-filter
+    /// predicate). Membership is re-checked after each joiner installs.
+    ///
+    /// One turn's admission work is bounded: at most one control-tag pass
+    /// over the group table, whatever the number of distinct RS ASNs, and
+    /// at most [`MAX_JOIN_COHORT_EXAMINED`] queued entries examined.
+    fn take_join_cohort(&mut self, leader: IpAddr) -> Vec<IpAddr> {
+        use super::distribution::rs_control::ControlTagInventory;
+
+        if self.pending_initial_registrations.is_empty() {
+            return Vec::new();
+        }
+        let readiness = self.replacement_readiness.clone();
+        let checkpoint = || {
+            super::replacement_readiness_checkpoint_at(&readiness, "initial_group_replay", false);
+        };
+        let Some(gid) = self.grouped_member_of(leader) else {
+            return Vec::new();
+        };
+        let Some(group) = self
+            .group_ribs
+            .get(&gid)
+            .filter(|group| !group.per_client_best)
+        else {
+            return Vec::new();
+        };
+        let Some(profile) = self
+            .live_sessions
+            .get(&leader)
+            .and_then(|sessions| sessions.last())
+        else {
+            return Vec::new();
+        };
+        // One table pass answers every RS ASN in the queue (built on first
+        // need: most turns have no rs-control joiner).
+        #[cfg(test)]
+        let mut scans = 0;
+        let mut tags: Option<ControlTagInventory> = None;
+        let mut rs_inert = |rs_asn: Option<u32>| {
+            rs_asn.is_none_or(|rs_asn| {
+                !tags
+                    .get_or_insert_with(|| {
+                        #[cfg(test)]
+                        {
+                            scans += 1;
+                        }
+                        let mut tags = ControlTagInventory::default();
+                        for route in group.table.iter() {
+                            checkpoint();
+                            let (communities, large_communities) =
+                                group.source_control((route.prefix, route.path_id));
+                            tags.record(communities, large_communities);
+                            tags.record(route.communities(), route.large_communities());
+                        }
+                        tags
+                    })
+                    .tagged(rs_asn)
+            })
+        };
+        if !rs_inert(profile.rs_control_asn) {
+            return Vec::new();
+        }
+        let queued = std::mem::take(&mut self.pending_initial_registrations);
+        let mut members = Vec::new();
+        for (examined, peer) in queued.into_iter().enumerate() {
+            // The leader is the cohort's first registration.
+            let joins = examined < MAX_JOIN_COHORT_EXAMINED
+                && members.len() + 1 < MAX_JOIN_COHORT
+                && self
+                    .live_sessions
+                    .get(&peer)
+                    .and_then(|sessions| sessions.last())
+                    .is_some_and(|record| {
+                        self.outbound_session_ids.get(&peer) != Some(&record.session_id)
+                            && record.export_policy == profile.export_policy
+                            && record.sendable_families == profile.sendable_families
+                            && record.is_ebgp == profile.is_ebgp
+                            && record.route_reflector_client == profile.route_reflector_client
+                            && record.local_role == profile.local_role
+                            && record.interpret_rfc1997 == profile.interpret_rfc1997
+                            && record.negotiated_llgr_families == profile.negotiated_llgr_families
+                            && record.orr_vantage.is_none()
+                            && !record.per_client_best
+                            && (record.add_path_send_max == 0
+                                || record.add_path_send_families.is_empty())
+                            && record.negotiated_orf_recv.is_empty()
+                            && rs_inert(record.rs_control_asn)
+                    })
+                && !self.slow_isolated_peers.contains(&peer)
+                && !self.peer_orf_filters.contains_key(&peer)
+                && !self.peer_has_conditional_advertisements(peer);
+            if joins {
+                members.push(peer);
+            } else {
+                self.pending_initial_registrations.push_back(peer);
+            }
+        }
+        #[cfg(test)]
+        {
+            self.join_cohort_tag_scans += scans;
+        }
+        members
+    }
+
+    /// Register each cohort member and send every member its initial table
+    /// from one shared replay of the leader's group table.
+    fn send_cohort_initial_tables(&mut self, leader: IpAddr, members: Vec<IpAddr>) {
+        let gid = self
+            .grouped_member_of(leader)
+            .expect("cohort leader is grouped");
+        let mut cohort = vec![leader];
+        let mut regrouped = Vec::new();
+        for peer in members {
+            if !self.install_outbound_registration(peer) {
+                continue;
+            }
+            // The admission profile predicts membership; the installed
+            // registration decides it. A joiner that lands elsewhere still
+            // gets its table in this turn, on the ordinary path.
+            if self.grouped_member_of(peer) == Some(gid) {
+                cohort.push(peer);
+            } else {
+                regrouped.push(peer);
+            }
+        }
+        let readiness = self.replacement_readiness.clone();
+        let checkpoint = || {
+            super::replacement_readiness_checkpoint_at(&readiness, "initial_group_replay", false);
+        };
+        let group = self.group_ribs.get(&gid).expect("cohort group exists");
+        let mut announce = Vec::new();
+        let mut next_hop_override = Vec::new();
+        for route in group.table.iter() {
+            checkpoint();
+            if self.selection_deferred(prefix_family(&route.prefix)) {
+                continue;
+            }
+            announce.push(route.clone());
+            next_hop_override.push(group.nh_override((route.prefix, route.path_id)));
+        }
+        // A member that sourced every replayed row would get an envelope
+        // carrying nothing after exclusion; the ordinary path sends it
+        // none, so keep it there.
+        let mut own_rows: HashMap<IpAddr, usize> = cohort.iter().map(|peer| (*peer, 0)).collect();
+        for route in &announce {
+            checkpoint();
+            if let Some(count) = own_rows.get_mut(&route.peer) {
+                *count += 1;
+            }
+        }
+        let keeps_rows =
+            |peer: &IpAddr| own_rows.get(peer).is_some_and(|own| *own < announce.len());
+        let (sharing, solo): (Vec<_>, Vec<_>) = cohort.into_iter().partition(keeps_rows);
+        let mut replay = JoinCohortReplay {
+            gid,
+            announce: announce.into(),
+            next_hop_override: next_hop_override.into(),
+            encode: Arc::new(crate::update::SharedGroupEncode::default()),
+            probe_cache: super::distribution::SharedUnicastProbeCache::default(),
+        };
+        debug!(
+            %leader,
+            group = gid,
+            members = sharing.len(),
+            routes = replay.announce.len(),
+            "completing deferred registrations from one shared group replay"
+        );
+        for peer in sharing {
+            self.send_initial_table_with_readiness(peer, Some(&mut replay));
+        }
+        drop(replay);
+        for peer in solo.into_iter().chain(regrouped) {
+            self.send_initial_table_with_readiness(peer, None);
+        }
     }
 
     /// The prefix inventory of a grouped join or unicast route-refresh
@@ -1418,7 +1666,11 @@ impl RibManager {
         clippy::too_many_lines,
         reason = "initial dump stages every family queue before one Adj-RIB-Out commit"
     )]
-    fn send_initial_table_with_readiness(&mut self, peer: IpAddr) {
+    fn send_initial_table_with_readiness(
+        &mut self,
+        peer: IpAddr,
+        cohort: Option<&mut JoinCohortReplay>,
+    ) {
         let readiness = self.replacement_readiness.clone();
         let checkpoint_at = |stage| {
             super::replacement_readiness_checkpoint_at(&readiness, stage, false);
@@ -1543,37 +1795,50 @@ impl RibManager {
             // from the source, scrub post-policy) for it; untagged
             // entries replay as-is.
             let rs_control = rs_control_asn.zip(target_peer_asn);
-            let replay = self.grouped_join_replay(group, peer, rs_control, || {
-                checkpoint_at("initial_group_replay");
+            grouped_unicast = Some(if let Some(shared) = cohort.as_deref() {
+                // Cohort member: the group table's shared replay, with this
+                // member's own-source rows left to transport's exclusion.
+                // Admission proved the rs-control rewrite and suppression
+                // inert for every row, and the group plain (no lane).
+                debug_assert_eq!(member_of, Some(shared.gid));
+                (
+                    std::sync::Arc::clone(&shared.announce),
+                    std::sync::Arc::clone(&shared.next_hop_override),
+                )
+            } else {
+                let replay = self.grouped_join_replay(group, peer, rs_control, || {
+                    checkpoint_at("initial_group_replay");
+                });
+                // Keep borrowed entries until filtering is complete, then
+                // clone each row once into an owned vector. Wrapping the
+                // vector in an Arc preserves its buffer without another
+                // route-shell copy.
+                let announce: std::sync::Arc<Vec<_>> = replay
+                    .iter()
+                    .map(|entry| {
+                        checkpoint_at("initial_group_replay");
+                        let (_, source_large_communities) =
+                            group.source_control_for_route(entry.route, entry.source_attrs);
+                        let mut route = entry.route.clone();
+                        super::distribution::rs_control::rs_control_route_rewrite(
+                            &mut route,
+                            source_large_communities,
+                            rs_control,
+                        );
+                        route
+                    })
+                    .collect::<Vec<_>>()
+                    .into();
+                let next_hop_override: std::sync::Arc<Vec<_>> = replay
+                    .iter()
+                    .map(|entry| {
+                        checkpoint_at("initial_group_replay");
+                        entry.nh.cloned()
+                    })
+                    .collect::<Vec<_>>()
+                    .into();
+                (announce, next_hop_override)
             });
-            // Keep borrowed entries until filtering is complete, then clone
-            // each row once into an owned vector. Wrapping the vector in an
-            // Arc preserves its buffer without another route-shell copy.
-            let announce: std::sync::Arc<Vec<_>> = replay
-                .iter()
-                .map(|entry| {
-                    checkpoint_at("initial_group_replay");
-                    let (_, source_large_communities) =
-                        group.source_control_for_route(entry.route, entry.source_attrs);
-                    let mut route = entry.route.clone();
-                    super::distribution::rs_control::rs_control_route_rewrite(
-                        &mut route,
-                        source_large_communities,
-                        rs_control,
-                    );
-                    route
-                })
-                .collect::<Vec<_>>()
-                .into();
-            let next_hop_override: std::sync::Arc<Vec<_>> = replay
-                .iter()
-                .map(|entry| {
-                    checkpoint_at("initial_group_replay");
-                    entry.nh.cloned()
-                })
-                .collect::<Vec<_>>()
-                .into();
-            grouped_unicast = Some((announce, next_hop_override));
             // VPN join replay: table minus own-sourced, filtered by the
             // joining member's Φ (the RFC 4684 gate the per-peer dump
             // would have applied; strict-empty membership replays
@@ -2104,10 +2369,32 @@ impl RibManager {
             || !rtc_announce.is_empty()
             || !rtc_withdraw.is_empty()
             || self.pending_otc_blocked.contains_key(&peer);
+        // A cohort's group is plain: its staging already applied the
+        // group-uniform RFC 9234 egress gate to every row, exactly as the
+        // live pass's shared emission records (`!per_client_best`).
+        let unicast_otc_prechecked = cohort.is_some();
+        let announce_source_exclusion = cohort.is_some().then_some(peer);
+        let shared_group_encode = cohort
+            .as_deref()
+            .map(|shared| std::sync::Arc::clone(&shared.encode));
+        let shared_unicast_precommit = cohort.map(|shared| {
+            super::distribution::SharedUnicastPrecommit {
+                group_id: shared.gid,
+                probe_cache: &mut shared.probe_cache,
+                // A join has no prior advertised state to withdraw from.
+                lazy_group_prior: Some(super::distribution::LazyCleanGroupPrior {
+                    peer,
+                    deltas: &[],
+                }),
+            }
+        });
         let sent = !has_outbound_diff
             || self.try_send_and_commit_outbound_update_with_group_prior_and_otc_scope(
                 peer,
                 OutboundCommitBatch {
+                    unicast_otc_prechecked,
+                    announce_source_exclusion,
+                    shared_group_encode,
                     withdraw: unicast.withdraw,
                     flowspec_announce: fs_announce,
                     flowspec_withdraw: fs_withdraw,
@@ -2124,7 +2411,7 @@ impl RibManager {
                     ..OutboundCommitBatch::with_unicast(announce, next_hop_override)
                 },
                 HashSet::new(),
-                None,
+                shared_unicast_precommit,
                 member_of.is_none().then_some(&otc_prefixes),
             );
         export_memo.retire_with(&mut checkpoint);

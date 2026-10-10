@@ -762,6 +762,36 @@ impl RibManager {
         );
     }
 
+    /// Register RR clients the way a reconnect burst on a busy actor does:
+    /// every `PeerUp` installs its inbound half and defers its outbound
+    /// registration and initial table to the run loop's queue. An
+    /// unregistered placeholder at the queue head makes the actor look busy
+    /// to the first joiner; the queue drain discards it like any entry whose
+    /// session is gone.
+    pub fn bench_defer_route_reflector_peers(
+        &mut self,
+        joiners: Vec<(
+            usize,
+            mpsc::Sender<OutboundRouteUpdate>,
+            Arc<dyn ExactExportEncoder>,
+        )>,
+    ) {
+        self.initial_dump_defer_min_routes = 0;
+        self.pending_initial_registrations
+            .push_back(IpAddr::V4(Ipv4Addr::new(203, 0, 113, 255)));
+        for (index, outbound_tx, encoder) in joiners {
+            self.bench_join_route_reflector_peer(index, outbound_tx, encoder);
+        }
+    }
+
+    /// Complete every deferred registration through the run loop's
+    /// production advance seam, one call per loop turn.
+    pub fn bench_complete_deferred_registrations(&mut self) {
+        while !self.pending_initial_registrations.is_empty() {
+            self.advance_pending_initial_registration();
+        }
+    }
+
     /// Register synthetic eBGP route-server clients with the supplied remote
     /// ASNs. All other manager-side grouping inputs remain homogeneous, so the
     /// benchmark isolates exact-export snapshot compatibility at realistic IXP

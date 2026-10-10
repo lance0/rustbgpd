@@ -129,8 +129,51 @@ fn is_std_control(community: u32, rs_asn: u32) -> bool {
 /// A large community in the control space: global administrator `RS`
 /// with a control function (`0`, `1`, `101`–`103`).
 fn is_large_control(lc: &LargeCommunity, rs_asn: u32) -> bool {
-    lc.global_admin == rs_asn
-        && (lc.local_data1 <= 1 || PREPEND_FUNCTIONS.iter().any(|&(f, _)| f == lc.local_data1))
+    lc.global_admin == rs_asn && is_large_control_function(lc.local_data1)
+}
+
+fn is_large_control_function(local_data1: u32) -> bool {
+    local_data1 <= 1 || PREPEND_FUNCTIONS.iter().any(|&(f, _)| f == local_data1)
+}
+
+/// Every RS ASN for which [`rs_control_route_tagged`] holds on at least one
+/// recorded route, collected in one pass so a cohort of route-server members
+/// with distinct RS ASNs needs one table walk, not one per ASN. A standard
+/// community administered by `0` tags every RS ASN; any other control-space
+/// standard administrator, and the global administrator of a large community
+/// with a control function, tags only that ASN.
+#[derive(Default)]
+pub(in crate::manager) struct ControlTagInventory {
+    every_asn: bool,
+    asns: std::collections::HashSet<u32>,
+}
+
+impl ControlTagInventory {
+    pub(in crate::manager) fn record(
+        &mut self,
+        communities: &[u32],
+        large_communities: &[LargeCommunity],
+    ) {
+        for &community in communities {
+            match community >> 16 {
+                0 => self.every_asn = true,
+                0xFFFF => {}
+                admin => {
+                    self.asns.insert(admin);
+                }
+            }
+        }
+        for lc in large_communities {
+            if is_large_control_function(lc.local_data1) {
+                self.asns.insert(lc.global_admin);
+            }
+        }
+    }
+
+    /// Whether any recorded route is tagged for `rs_asn`.
+    pub(in crate::manager) fn tagged(&self, rs_asn: u32) -> bool {
+        self.every_asn || self.asns.contains(&rs_asn)
+    }
 }
 
 /// Route-granular classification for the emit-time filter (LAN-474):
@@ -378,6 +421,55 @@ mod tests {
         // Wrong global admin never counts.
         let lc = [large(64999, 103, PEER_A)];
         assert_eq!(rs_control_prepend_count(&lc, RS, PEER_A), 0);
+    }
+
+    /// The one-pass inventory answers exactly as the per-route predicate
+    /// over the same routes, for every RS ASN shape: zero, 16-bit, 4-byte,
+    /// the RFC 1997 well-known administrator, and absent ones.
+    #[test]
+    fn control_tag_inventory_matches_per_route_predicate() {
+        let routes: [(Vec<u32>, Vec<LargeCommunity>); 7] = [
+            (vec![], vec![]),
+            (vec![std(65_000, 7)], vec![]),
+            (vec![std(0, 65_010)], vec![]),
+            (vec![std(0xFFFF, 1)], vec![]),
+            (vec![], vec![large(4_200_000_000, 0, 1)]),
+            (vec![], vec![large(65_020, 102, 5)]),
+            (vec![], vec![large(65_030, 7, 1)]),
+        ];
+        let asns = [
+            0,
+            1,
+            65_000,
+            65_010,
+            65_020,
+            65_030,
+            0xFFFF,
+            4_200_000_000,
+            4_200_000_001,
+        ];
+        for mask in 0..(1_u32 << routes.len()) {
+            let chosen: Vec<_> = routes
+                .iter()
+                .enumerate()
+                .filter(|(index, _)| mask & (1 << index) != 0)
+                .map(|(_, route)| route)
+                .collect();
+            let mut inventory = ControlTagInventory::default();
+            for (communities, large_communities) in &chosen {
+                inventory.record(communities, large_communities);
+            }
+            for rs_asn in asns {
+                let expected = chosen.iter().any(|(communities, large_communities)| {
+                    rs_control_route_tagged(communities, large_communities, rs_asn)
+                });
+                assert_eq!(
+                    inventory.tagged(rs_asn),
+                    expected,
+                    "mask {mask} rs {rs_asn}"
+                );
+            }
+        }
     }
 
     #[test]

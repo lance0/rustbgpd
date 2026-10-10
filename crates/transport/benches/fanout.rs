@@ -32,6 +32,12 @@
 //! joining iBGP RR client, no export policy, no Add-Path, and one negotiated
 //! IPv4 unicast family.
 //!
+//! `initial_table_deferred_group_join` queues 4 or 16 RR clients behind a busy
+//! actor against one converged 65,536-route group, then times only the
+//! production drain of the deferred-registration queue (registration, replay,
+//! exact-export probe, commit and enqueue for every joiner). Fixture and
+//! `PeerUp` admission stay outside accumulated time.
+//!
 //! `grouped_withdrawal_fanout` is the complementary route-server withdrawal
 //! shape. It pre-advertises 64 routes to one real update group, drains setup
 //! output, and times one production `RoutesReceived` withdrawal through direct
@@ -1865,6 +1871,58 @@ fn bench_initial_table_group_join(c: &mut Criterion) {
     group.finish();
 }
 
+/// `joiners` RR clients reconnecting together against one converged update
+/// group: each `PeerUp` defers behind the busy actor (untimed), then the timed
+/// section completes the whole deferred-registration queue through the run
+/// loop's production advance seam. Receipt checks stay outside the timer.
+fn bench_initial_table_deferred_group_join(c: &mut Criterion) {
+    let mut group = c.benchmark_group("initial_table_deferred_group_join");
+    group.sample_size(10);
+    let routes = 65_536;
+    for joiners in [4usize, 16] {
+        group.bench_function(
+            BenchmarkId::new(format!("{joiners}_joiners"), routes),
+            |bench| {
+                bench.iter_custom(|iterations| {
+                    let mut accumulated = Duration::ZERO;
+                    for _ in 0..iterations {
+                        let mut manager = build_group_join(1, routes);
+                        let mut receivers = Vec::with_capacity(joiners);
+                        let queued = (1..=joiners)
+                            .map(|index| {
+                                let (sender, receiver) = mpsc::channel(2);
+                                receivers.push(receiver);
+                                (index, sender, fanout_bench_export_encoder())
+                            })
+                            .collect();
+                        manager.bench_defer_route_reflector_peers(queued);
+                        for receiver in &mut receivers {
+                            assert!(receiver.try_recv().is_err(), "joins must be deferred");
+                        }
+                        let started = Instant::now();
+                        manager.bench_complete_deferred_registrations();
+                        accumulated += started.elapsed();
+                        for mut receiver in receivers {
+                            let dump = receiver.try_recv().expect("joiner dump");
+                            assert_eq!(dump.announce.len(), routes);
+                            let eor = receiver.try_recv().expect("joiner EoR");
+                            assert_eq!(eor.end_of_rib, vec![(Afi::Ipv4, Safi::Unicast)]);
+                        }
+                        let receipt = manager.bench_adj_rib_out_fanout_receipt();
+                        assert_eq!(
+                            receipt.update_groups, 1,
+                            "joiners share the founder's group"
+                        );
+                        assert_eq!(receipt.grouped_peers, 1 + joiners);
+                    }
+                    accumulated
+                });
+            },
+        );
+    }
+    group.finish();
+}
+
 #[derive(Clone, Copy)]
 enum AddPathPolicy {
     PermitAll,
@@ -2832,6 +2890,7 @@ criterion_group!(
     bench_grouped_policy_denial_fanout,
     bench_initial_table_peer_join,
     bench_initial_table_group_join,
+    bench_initial_table_deferred_group_join,
     bench_route_refresh_group_member,
     bench_add_path_export_staging,
     bench_policy_regroup_resync,

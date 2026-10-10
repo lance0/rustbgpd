@@ -290,7 +290,7 @@ pub(super) struct NormMsg {
     pub(super) vpn_withdraw: Vec<(String, u32)>,
 }
 
-fn normalize(update: &OutboundRouteUpdate) -> NormMsg {
+pub(super) fn normalize(update: &OutboundRouteUpdate) -> NormMsg {
     // Transport drops the receiving member's own routes from a shared payload
     // before encoding; the normalized stream is what reaches the wire.
     let mut announce: Vec<_> = update

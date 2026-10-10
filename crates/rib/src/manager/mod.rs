@@ -1015,6 +1015,10 @@ pub struct RibManager {
     /// grouped run.
     #[cfg(test)]
     test_force_ungrouped: bool,
+    /// Full group-table control-tag scans run by deferred-registration
+    /// cohort admission (LAN-1826): the per-turn work bound.
+    #[cfg(test)]
+    join_cohort_tag_scans: usize,
     #[cfg(test)]
     test_force_exact_export_slow_path: bool,
     #[cfg(test)]
@@ -1922,6 +1926,8 @@ impl RibManager {
             #[cfg(test)]
             test_force_ungrouped: false,
             #[cfg(test)]
+            join_cohort_tag_scans: 0,
+            #[cfg(test)]
             test_force_exact_export_slow_path: false,
             #[cfg(test)]
             test_exact_export_fast_path_hits: 0,
@@ -2739,7 +2745,9 @@ impl RibManager {
     }
 
     /// Complete one deferred outbound registration (LAN-475), targeting the
-    /// peer's CURRENT last live session. Entries whose peer no longer has a
+    /// peer's CURRENT last live session, plus the queued same-group joiners
+    /// that share its initial replay (LAN-1826,
+    /// `complete_deferred_registration`). Entries whose peer no longer has a
     /// live session (torn down while queued) or whose session already
     /// registered are discarded until one real registration completes (or
     /// the queue empties). A closed outbound channel does NOT skip the
@@ -2754,7 +2762,7 @@ impl RibManager {
                 .map(|record| record.session_id);
             match target {
                 Some(session_id) if self.outbound_session_ids.get(&peer) != Some(&session_id) => {
-                    self.complete_outbound_registration(peer);
+                    self.complete_deferred_registration(peer);
                     return;
                 }
                 _ => {
