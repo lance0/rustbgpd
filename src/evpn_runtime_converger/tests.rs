@@ -326,15 +326,14 @@ async fn forwarding_state_evpn_failure_preserves_model_and_possible_effects() {
         let apply = EvpnRuntimeReloadApply::new(
             coordinator.clone(),
             Arc::new(tokio::sync::Mutex::new(())),
-            Arc::new(TestRuntimeConverger::failed("injected candidate failure")),
+            Arc::new(DivergentConverger),
             baseline.clone(),
         )
         .with_forwarding_state(state.clone());
 
         assert!(matches!(
             apply.apply_config(&candidate).await,
-            Err(GrpcEvpnRuntimeApplyError::FailedPrecondition(ref message))
-                if message.contains("injected candidate failure")
+            Err(GrpcEvpnRuntimeApplyError::Internal(_))
         ));
         assert_eq!(state.kernel_families(), vec![(Afi::L2Vpn, Safi::Evpn)]);
         assert_eq!(coordinator.lock().unwrap().model().generation().as_u64(), 1);
@@ -4373,19 +4372,22 @@ fn validate_single_ethernet_segment_delete_accepts_one_removed_segment() {
 }
 
 #[tokio::test]
-async fn apply_evpn_runtime_convergence_failure_marks_runtime_failed() {
+async fn apply_evpn_runtime_compensated_failure_preserves_runtime_authority() {
+    use rustbgpd_transport::LocalForwardingState;
+
+    let baseline = load_runtime_test_config(minimal_runtime_candidate_toml(), "baseline");
+    let state = crate::forwarding_state::ForwardingState::new(&baseline);
     let coordinator = empty_evpn_runtime_coordinator();
-    let apply_lock = tokio::sync::Mutex::new(());
     let converger = TestRuntimeConverger::failed("RIB unavailable");
 
-    let error = apply_evpn_runtime_request(
-        &proto::ApplyEvpnRuntimeRequest {
-            candidate_toml: l2vni_runtime_candidate_toml().to_string(),
-            validate_only: false,
-        },
+    let error = apply_evpn_runtime_candidate_locked(
+        runtime_candidate_from_toml(l2vni_runtime_candidate_toml()),
+        false,
         coordinator.as_ref(),
-        &apply_lock,
         &converger,
+        &BgpMetrics::new(),
+        || {},
+        Some(&state),
     )
     .await
     .unwrap_err();
@@ -4394,15 +4396,19 @@ async fn apply_evpn_runtime_convergence_failure_marks_runtime_failed() {
         error,
         GrpcEvpnRuntimeApplyError::FailedPrecondition(_)
     ));
+    assert_eq!(
+        state.kernel_families(),
+        Vec::<(rustbgpd_wire::Afi, rustbgpd_wire::Safi)>::new()
+    );
     let snapshot = coordinator.lock().unwrap().snapshot();
     assert_eq!(snapshot.generation.as_u64(), 1);
     assert_eq!(
         snapshot.lifecycle,
-        rustbgpd_evpn::EvpnRuntimeLifecycle::Degraded
+        rustbgpd_evpn::EvpnRuntimeLifecycle::Active
     );
     assert_eq!(
         snapshot.mutation_state,
-        rustbgpd_evpn::EvpnRuntimeMutationState::Failed
+        rustbgpd_evpn::EvpnRuntimeMutationState::Idle
     );
 }
 
@@ -9096,8 +9102,10 @@ impl DaemonEvpnRuntimeConverger for ShapeCheckingConverger {
                 accepted.len()
             };
             if self.fail_on_accepted_call == Some(call_number) {
-                return Err(DaemonEvpnRuntimeConvergeError::failed(
+                return Err(DaemonEvpnRuntimeConvergeError::step_failure(
+                    false,
                     "injected decomposed-step failure",
+                    "rollback was not acknowledged",
                 ));
             }
             Ok(())
@@ -9156,7 +9164,7 @@ async fn forwarding_state_evpn_decomposed_commit_survives_later_failure() {
         .await
         .unwrap_err();
         assert!(
-            matches!(error, GrpcEvpnRuntimeApplyError::FailedPrecondition(ref message)
+            matches!(error, GrpcEvpnRuntimeApplyError::Internal(ref message)
             if message.contains("step 2/2"))
         );
         let committed = coordinator.lock().unwrap();
@@ -9297,8 +9305,8 @@ async fn apply_evpn_runtime_decomposed_mid_sequence_failure_is_fail_stop_and_rec
     .await
     .unwrap_err();
 
-    let GrpcEvpnRuntimeApplyError::FailedPrecondition(message) = error else {
-        panic!("expected FailedPrecondition, got: {error:?}");
+    let GrpcEvpnRuntimeApplyError::Internal(message) = error else {
+        panic!("expected Internal, got: {error:?}");
     };
     assert!(
         message.contains("decomposed step 2/3"),
@@ -9313,7 +9321,7 @@ async fn apply_evpn_runtime_decomposed_mid_sequence_failure_is_fail_stop_and_rec
         "must state fail-stop semantics: {message}"
     );
     assert!(
-        message.contains("re-SIGHUP"),
+        message.contains("repair it or restart"),
         "must carry the recovery instruction: {message}"
     );
 
@@ -9411,10 +9419,7 @@ async fn apply_evpn_runtime_decomposed_fail_stop_increments_metric() {
     )
     .await
     .unwrap_err();
-    assert!(matches!(
-        error,
-        GrpcEvpnRuntimeApplyError::FailedPrecondition(_)
-    ));
+    assert!(matches!(error, GrpcEvpnRuntimeApplyError::Internal(_)));
 
     let encoder = prometheus::TextEncoder::new();
     let mut buf = Vec::new();

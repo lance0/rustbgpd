@@ -66,7 +66,14 @@ impl fmt::Display for LacpPartnerError {
     }
 }
 
-impl std::error::Error for LacpPartnerError {}
+impl std::error::Error for LacpPartnerError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Io(error) => Some(error),
+            _ => None,
+        }
+    }
+}
 
 impl LacpPartnerError {
     /// Stable snake-case reason code for logs and status surfaces.
@@ -240,6 +247,29 @@ mod tests {
 
     fn up() -> LinkFlags {
         LinkFlags::Up | LinkFlags::LowerUp
+    }
+
+    #[test]
+    fn io_cause_is_preserved_and_classification_errors_have_no_source() {
+        use std::error::Error as _;
+
+        let error = LacpPartnerError::Io(std::io::Error::from_raw_os_error(libc::EIO));
+        let cause = error
+            .source()
+            .unwrap()
+            .downcast_ref::<std::io::Error>()
+            .unwrap();
+        assert_eq!(cause.raw_os_error(), Some(libc::EIO));
+        for error in [
+            LacpPartnerError::NotFound,
+            LacpPartnerError::NotBond,
+            LacpPartnerError::NotLacpMode,
+            LacpPartnerError::Down,
+            LacpPartnerError::NoActiveAggregator,
+            LacpPartnerError::NoPartner,
+        ] {
+            assert!(error.source().is_none());
+        }
     }
 
     #[test]

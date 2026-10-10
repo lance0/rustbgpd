@@ -103,14 +103,14 @@ impl DaemonEvpnRuntimeConvergeError {
         }
     }
 
-    /// The source to pin the coordinator with: every variant except
-    /// `Unsupported` may have had side effects.
+    /// Pin only effects whose restoration was not acknowledged. A fully
+    /// compensated failure leaves the committed coordinator authoritative.
     fn side_effect_source(&self) -> Option<rustbgpd_evpn::EvpnRuntimeConvergeError> {
         match self {
-            Self::Unsupported(_) => None,
-            Self::Failed(source)
-            | Self::KnownDivergence(source)
-            | Self::InterruptedByShutdown(source) => Some(source.clone()),
+            Self::Unsupported(_) | Self::Failed(_) => None,
+            Self::KnownDivergence(source) | Self::InterruptedByShutdown(source) => {
+                Some(source.clone())
+            }
         }
     }
 
@@ -3085,8 +3085,8 @@ where
         // #268: a candidate the dispatch rejects as an unsupported *mixed*
         // composition may still converge as an ordered sequence of
         // already-supported primitive steps, each committing its own
-        // generation. Only `Unsupported` triggers the attempt — a `Failed`
-        // converge had side effects and must pin, exactly as before.
+        // generation. Only `Unsupported` triggers the attempt; a compensated
+        // failure must return its error without retrying transient effects.
         if matches!(error, DaemonEvpnRuntimeConvergeError::Unsupported(_)) {
             if let Some(attempt) = forwarding_attempt.take() {
                 attempt.reject_no_effect();
@@ -3119,8 +3119,7 @@ where
             }
         }
         if let Some(source) = error.side_effect_source() {
-            // #268 decomposition is only attempted for `Unsupported` mixes;
-            // a `Failed` converge had side effects and pins here instead.
+            // Unrestored or unacknowledged effects require recovery.
             tracing::error!(
                 error = %error.message(),
                 generation = snapshot.generation.as_u64(),
@@ -3133,6 +3132,8 @@ where
                 )
             })?;
             let _ = coordinator.apply_candidate(candidate, Err(source));
+        } else if let Some(attempt) = forwarding_attempt.take() {
+            attempt.reject_no_effect();
         }
         return Err(error.apply_error(format!(
             "EVPN runtime mutation failed: {}; generation {} remains committed",
@@ -3172,7 +3173,7 @@ where
 /// order, each through the unchanged converge path and each committing
 /// its own runtime generation (operators see N generations for one
 /// SIGHUP / apply). A mid-sequence failure is **fail-stop**: earlier
-/// generations stay committed (no cross-step rollback), a `Failed`
+/// generations stay committed (no cross-step rollback), an unrestored
 /// converge pins the coordinator exactly like the single-shot path, and
 /// the error + `ERROR` log name the completed generations, the failed
 /// step, and the re-SIGHUP recovery. The caller holds the apply lock.

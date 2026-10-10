@@ -43,6 +43,13 @@ process reconstructs authority from durable state — the atomically
 published config file and, for commit-confirmed transactions, the
 config-adjacent locator — which is the one thing that can decide.
 
+An EVPN SIGHUP converge failure whose rollback is fully acknowledged leaves
+its committed EVPN model authoritative. With no other reload effect,
+the reload settles as `rejected_no_effect` and releases mutation admission. When
+independent reload changes are accepted, the reload retains those changes and
+reports `known_partial`. An unacknowledged effect, failed rollback, or earlier committed
+step in a decomposed EVPN apply still requires SIGHUP recovery fencing.
+
 Exit 70 is therefore not a crash. It is the daemon concluding that a
 restart under supervision is the only trustworthy way forward, and
 arranging for that restart to be safe.
