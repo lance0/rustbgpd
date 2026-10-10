@@ -1,0 +1,2 @@
+test manager::tests::update_groups::scratch_fenced_recheck_split ... SPLIT n=400400 dirty=40 route_size=112B scan+compaction=2.98ms (of which checkpoints 0.16ms) vec->arc<[Route]>=23.24ms nh->arc=2.35ms
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1550 filtered out; finished in 0.37s

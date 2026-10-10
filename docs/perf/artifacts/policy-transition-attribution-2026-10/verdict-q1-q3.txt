@@ -1,0 +1,35 @@
+== Q1 policy-stats cell: #2952 step at 1000 x 400k (pooled per-reload values, both runs) ==
+  q1/pre2952-r1          cell.exit=0 rib_elapsed_ms    196.0 [192.0-237.0] n=12
+  q1/pre2952-r2          cell.exit=0 rib_elapsed_ms    199.0 [194.0-222.0] n=12
+  q1/post2952-r1         cell.exit=0 rib_elapsed_ms     55.5 [52.0-57.0] n=12
+  q1/post2952-r2         cell.exit=0 rib_elapsed_ms     56.0 [52.0-60.0] n=12
+  rib_elapsed_ms             pre2952      197.5 [192.0-237.0] n=24
+  rib_elapsed_ms             post2952      56.0 [52.0-60.0] n=24
+  cohort_rib_transition_ms   pre2952      198.1 [192.8-238.1] n=24
+  cohort_rib_transition_ms   post2952     273.6 [52.4-314.7] n=24
+  sighup_to_complete_ms      pre2952      723.3 [670.3-913.2] n=24
+  sighup_to_complete_ms      post2952     852.5 [615.5-948.7] n=24
+  info: pre2952 median 197.5 ms inside predicted 170-230 ms
+  info: post2952 median 56.0 ms inside predicted 45-60 ms
+  bar: post2952 max RIB elapsed < pre2952 min (disjoint) -> met
+== Q2 headline S2 + IRR ov0: main (591ac39d4) vs v0.75.0, per-leg medians ==
+  matrix-s2:daemon_rib_transition        v075      206.1 [203.2-209.9]  main       78.4 [73.2-78.8]  delta -127.7  better
+  matrix-s2:daemon_sighup_to_complete    v075      749.4 [747.8-750.2]  main      753.2 [739.0-765.0]  delta +3.9  no difference
+  matrix-s2:reload_completion_p50        v075        0.8 [0.8-0.8]  main        0.8 [0.8-0.8]  delta +0.0  no difference
+  matrix-s2:daemon_cg_peak               v075  1059664.0 [986120.0-1068172.0]  main  1123872.0 [1043656.0-1150076.0]  delta +64208.0  no difference
+  irr-ov0:daemon_rib_transition          v075      372.4 [368.2-376.9]  main      361.4 [360.0-361.7]  delta -11.0  better
+  irr-ov0:daemon_sighup_to_complete      v075      564.3 [557.8-564.5]  main      558.8 [549.2-561.5]  delta -5.5  no difference
+  irr-ov0:completion_p50                 v075        0.6 [0.6-0.6]  main        0.6 [0.6-0.6]  delta -0.0  better
+  irr-ov0:irr_daemon_cg_peak             insufficient
+  bar: S2 RIB transition better on main (disjoint) and no primary metric worse -> s2_better=True worse=none
+== Q3 S2 filtering discriminator (GEN/RELOADSTALL_FILTER_COUNT=64) ==
+  pre2952   RIB outcomes {'fallback_handoff': 4}  authoritative_fallback 4/4  cohort_rib_transition_ms    794.8 [776.5-799.8] n=4  total_ms   1229.6 [1208.7-1252.7] n=4
+  post2952  RIB outcomes {'fallback_handoff': 4}  authoritative_fallback 4/4  cohort_rib_transition_ms    753.1 [741.5-758.2] n=4  total_ms   1188.3 [1146.3-1211.4] n=4
+  bar: zero committed fast-path transitions (got 0) and |post-pre| cohort median 41.6 <= 79.5 ms
+== Q4 policy-stats cell at v0.73.0 (1 run) ==
+  skipped (past Q4_NOT_AFTER)
+Q1 VERDICT: PASS
+  invalid q2: irr-ov0:irr_daemon_cg_peak: legs v075=0 main=3, need 3 each
+Q2 VERDICT: INVALID
+Q3 VERDICT: PASS
+Q4 VERDICT: SKIPPED

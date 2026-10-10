@@ -1,0 +1,149 @@
+{
+  "schema": 1,
+  "receipt": "prestaged-transition-inventory-2026-10",
+  "measured_date": "2026-10-04",
+  "measured_window_utc": [
+    "2026-10-04T20:34:54Z",
+    "2026-10-04T21:08:01Z"
+  ],
+  "published_date": "2026-10-10",
+  "published_retroactively_from_retained_raw_data": true,
+  "public_change": {
+    "pr": 2930,
+    "merge_commit": "aceacb435677291fdb20c2e792f58cb9e4575b74",
+    "pr_commits": [
+      "18b6c81fe577842b16eb3c2590eefd42a08e9a6d",
+      "424d4976fc0d97dab6b4f70fb2b97d5a734da972",
+      "542435cb78ec748bc11f9b7f8e5b0f27e29b86ad"
+    ],
+    "measured_revision": "fix.diff is byte-identical to 'git diff 65aa92cc0 18b6c81fe -- crates/' (the first PR commit). The two later PR commits (mid-walk retirement and duplicate-fallback retirement fixes) and the squash merge onto a newer main were not measured."
+  },
+  "instrumented_builds": true,
+  "instrumentation": "Both arms carry instrumentation.diff: a per-poll 'scout transition poll' info log in the RIB transition loop and a scout_gap per-observer line in the reloadstall harness. It is not part of #2930 or of main.",
+  "arms": {
+    "main": {
+      "base_commit": "65aa92cc017e0905584563d9041f17f7ecdbb06c",
+      "base_tree": "41593a9ad40bb982c752ba3d219aead2df71fe18",
+      "applied_diffs": [
+        "instrumentation.diff"
+      ],
+      "reconstructed_tree": "5799f1fe58ef88d9d0dfd6cd0f98671f3ae78a5f",
+      "recorded_worktree_diff_sha256_prefix": "6bee995b9a35",
+      "reconstruction_matches_recorded_fingerprint": true,
+      "daemon_sha256": "ab8a5902eb2c6c908cbd66b1dd90d7df1fc3ea580627dab2674ac5b47a365ea1"
+    },
+    "fix": {
+      "base_commit": "65aa92cc017e0905584563d9041f17f7ecdbb06c",
+      "base_tree": "41593a9ad40bb982c752ba3d219aead2df71fe18",
+      "applied_diffs": [
+        "fix.diff",
+        "instrumentation.diff"
+      ],
+      "reconstructed_tree": "94d5cbdd257b2f8ee1c0551dd101ca449f8d5ef2",
+      "recorded_worktree_diff_sha256_prefix": "0860ec4ba0ee",
+      "reconstruction_diff_sha256_prefix": "ca52d1fc47a4",
+      "reconstruction_matches_recorded_fingerprint": false,
+      "fingerprint_note": "The recorded fingerprint of the fix worktree's uncommitted diff is not reproduced by applying fix.diff and instrumentation.diff to the base, nor with the first PR commit's full diff. The exact fix-arm source bytes are therefore not independently verified from retained material; the daemon digest identifies the measured binary.",
+      "daemon_sha256": "ef83eae041e4301ced7a11046a12f61445399304ec89a3db68a500f7bf43b833"
+    }
+  },
+  "harness": {
+    "name": "reloadstall",
+    "sha256": "7651f049971e3c0ccb909457db1465e87305b043de6302e1cf4b80c2a80d0884",
+    "producer": "main arm worktree (base + instrumentation.diff), --profile scale; the same file was copied to the fix arm"
+  },
+  "build_commands": {
+    "daemon": [
+      "cargo",
+      "build",
+      "--release",
+      "--locked",
+      "-q",
+      "-p",
+      "rustbgpd",
+      "--bin",
+      "rustbgpd"
+    ],
+    "harness": [
+      "cargo",
+      "build",
+      "--profile",
+      "scale",
+      "--locked",
+      "-q",
+      "-p",
+      "reloadstall"
+    ],
+    "notes": "Each arm built in its own CARGO_TARGET_DIR under the host lock, pinned to CPUs 40-63. Default features."
+  },
+  "toolchain": "rustc 1.99.0 (b940084d7 2026-09-28)\nbinary: rustc\ncommit-hash: b940084d7eb6a299eb4bfeb8e34901bc051e7ac4\ncommit-date: 2026-09-28\nhost: x86_64-unknown-linux-gnu\nrelease: 1.99.0\nLLVM version: 23.1.1",
+  "kernel": "Linux 7.0.0-30-generic #30~24.04.1-Ubuntu SMP PREEMPT_DYNAMIC Fri Aug  7 13:27:52 UTC 2 x86_64 GNU/Linux",
+  "host_class": "x86_64 workstation, 64 hardware threads, all 64 cpufreq governors in performance mode; no hostname recorded",
+  "driver": {
+    "command": "bench/scale/matrix/run-matrix.sh rustbgpd",
+    "env": {
+      "RUSTBGPD_HOST_LOCK": "<bench-dir>/inner-runner.lock",
+      "ARTIFACTS_DIR": "<bench-dir>/<leg>"
+    },
+    "tool_sha256": {
+      "bench/scale/provenance.sh": "7db6727dc99ec42515359f674e56c749453bc29c9981b67f30568f0d6cce1991",
+      "bench/scale/matrix/run-matrix.sh": "12b1d986000c0e0222d3fda85b39fbf39fa941bff65a0ebe5b1bd13130a52442",
+      "bench/scale/matrix/verify-provenance.py": "f16e0e3f61182a7fc70b296229b26a7e427ad7a808ab7d31942cc68d93815a2d",
+      "bench/scale/matrix/rss-sampler.sh": "3ecffb93298c49f8524320ecebe976efc806f9f0b0caf260d6a1431ca402a10d",
+      "bench/scale/host-quiet.sh": "abb3391cd5e0879c29aabd0aa0c316ea33d5f7c72f6d2a7d111b30025de411fd",
+      "tests/soak/host-lock.sh": "f5f419bb439f0b5e22521e9f7fa73d4ef73df159abeec31fafff63548899c658"
+    },
+    "generator_sha256": {
+      "bench/scale/reloadstall/gen-scenario.py": "e563659beef5857ee79ddac40e1cff5730c34e424b5ca074a3f9007b5dc0ab42"
+    },
+    "wrappers": [
+      "drivers/go.sh",
+      "drivers/run-ab.sh",
+      "drivers/run-leg.sh",
+      "drivers/build-arm.sh"
+    ]
+  },
+  "workload_inputs": {
+    "N_PEERS": "700",
+    "TOTAL_PREFIXES": "400400",
+    "PORT": "1790",
+    "RELOADS": "4",
+    "CONTROL_SECS": "30",
+    "CHANGED_PEERS": "",
+    "FLAPSTORM": "",
+    "BIRD_THREADS": "8",
+    "PROBE_PREFIXES": ""
+  },
+  "shape": "S2: 700 peers, all 700 changed, 400,400 prefixes, 4 SIGHUP policy reloads alternating gen-b/gen-a, 30 s control window, native loopback",
+  "arm_order": [
+    "main",
+    "fix",
+    "fix",
+    "main",
+    "main",
+    "fix"
+  ],
+  "legs": [
+    "main-1",
+    "fix-2",
+    "fix-3",
+    "main-4",
+    "main-5",
+    "fix-6"
+  ],
+  "reloads_per_leg": 4,
+  "deviations_from_native_runner": [
+    "The runner's 300 s post-cell cool-down was cut by the leg wrapper; each next leg instead waited for the shared host lock (0 s to about 5 min between legs; fix-6 started immediately after main-5).",
+    "The runner's inner host lock was redirected to a private file while the wrapper held the shared host lock for one leg."
+  ],
+  "exclusions": [],
+  "artifact_sha256": {
+    "instrumentation.diff": "6bee995b9a355493e796860ffcfa49c13b0fa49d1fb4c3b379b9026c6ee220ec",
+    "fix.diff": "1fa9bc57655fd1cfc4d7c34e79e4847cd43c9f9713d7d2c88dfedd2fbdc62b73"
+  },
+  "raw_archive": {
+    "published": false,
+    "file_count": 139,
+    "contents": "full daemon logs, harness logs, scenario and runner records for the six legs; compact extracts are committed here"
+  }
+}

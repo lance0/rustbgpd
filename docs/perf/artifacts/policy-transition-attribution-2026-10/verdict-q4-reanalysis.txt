@@ -1,0 +1,7 @@
+== Q4 policy-stats cell at v0.73.0 (1 run) ==
+  q4/v073-r1             cell.exit=0 rib_elapsed_ms    576.5 [568.0-590.0] n=12
+  rib_elapsed_ms             v073         576.5 [568.0-590.0] n=12
+  cohort_rib_transition_ms   v073         579.2 [568.6-815.2] n=12
+  sighup_to_complete_ms      v073        1113.6 [1095.7-1336.2] n=12
+  bar: median RIB elapsed in 525-641 ms (reproduces ~583 ms) -> met
+Q4 VERDICT: PASS

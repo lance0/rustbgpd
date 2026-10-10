@@ -1,0 +1,14 @@
+# reloadstall peers=700 changed_peers=700 stable_peers=0 prefixes=400400 per_peer=572 pid=2065868
+established 700 at 0.8s
+establishment transport_retries=0 recovered_peers=0
+first_exact_bitmap,mode=flapstorm,peers=700,total=400400,per_peer=572,expected=399828,completed=700,min_unique=399828,max_unique=399828
+converged (>= 399828/observer) at 3.6s rss_mib=404
+control_maxgap_ms: p50=19.27 p95=19.81 max=42.02 (n=700)
+control_rss_mib 348
+converged_rejoin_csv_header,round,peers_total,peers_flapped,prefixes,rejoin_p50_s,rejoin_max_s,survivor_maxgap_ms,readiness_samples,rss_mib,sessions_up,parse_errors
+converged_table_checkpoint,round=1,phase=disconnected,observers=1:2,unique=399828,eor=present
+converged_rejoin 1 reconnect transport_retries=0
+flap 1 peer 0 rejoin_complete_s=0.183614 eor_before_full_table=false eor=present
+flap 1 rejoin_complete_s: p50=0.18 p95=0.18 max=0.18 (n=1)
+converged_table_checkpoint,round=1,phase=settled,observers=1:2,unique=399828,eor=present
+FAIL: converged rejoin: metrics HTTP status is not 200

@@ -1,0 +1,32 @@
+[2026-10-09T22:07:17-04:00] campaign start arms=v075 main cells=matrix,irr runs=3 smoke=0 cpus=0-63
+[2026-10-09T22:07:18-04:00] build v075 start
+[2026-10-09T22:07:18-04:00] build v075 done daemon_sha256=6eb3cad8b8f4b11cd5348f4fa2b3f98d40e7d6e40a3c10a254f37431da350205
+[2026-10-09T22:07:18-04:00] build main start
+[2026-10-09T22:07:19-04:00] build main done daemon_sha256=6a72730280960d52389df322dc8c2ccd22ecfcbb1437c840838bcfac2157d7f0
+[2026-10-09T22:07:19-04:00] matrix-v075-r1-s2 start load=3.36 3.47 3.01 pswpin=2424677 pswpout=2447475  cpus=0-63
+[2026-10-09T22:15:58-04:00] matrix-v075-r1-s2 rc=0 status=pass load=1.08 1.82 2.42 pswpin=2424677 pswpout=2447475  cpus=0-63
+[2026-10-09T22:15:58-04:00] matrix-main-r1-s2 start load=1.08 1.82 2.42 pswpin=2424677 pswpout=2447475  cpus=0-63
+[2026-10-09T22:23:37-04:00] matrix-main-r1-s2 rc=0 status=pass load=1.08 1.50 2.08 pswpin=2424677 pswpout=2447475  cpus=0-63
+[2026-10-09T22:23:37-04:00] matrix-main-r2-s2 start load=1.08 1.50 2.08 pswpin=2424677 pswpout=2447475  cpus=0-63
+[2026-10-09T22:31:16-04:00] matrix-main-r2-s2 rc=0 status=pass load=1.07 1.49 1.91 pswpin=2424677 pswpout=2447475  cpus=0-63
+[2026-10-09T22:31:16-04:00] matrix-v075-r2-s2 start load=1.07 1.49 1.91 pswpin=2424677 pswpout=2447475  cpus=0-63
+[2026-10-09T22:38:55-04:00] matrix-v075-r2-s2 rc=0 status=pass load=1.19 1.49 1.79 pswpin=2424677 pswpout=2447475  cpus=0-63
+[2026-10-09T22:38:55-04:00] matrix-v075-r3-s2 start load=1.19 1.49 1.79 pswpin=2424677 pswpout=2447475  cpus=0-63
+[2026-10-09T22:46:34-04:00] matrix-v075-r3-s2 rc=0 status=pass load=1.13 1.40 1.68 pswpin=2424677 pswpout=2447475  cpus=0-63
+[2026-10-09T22:46:34-04:00] matrix-main-r3-s2 start load=1.13 1.40 1.68 pswpin=2424677 pswpout=2447475  cpus=0-63
+[2026-10-09T22:54:13-04:00] matrix-main-r3-s2 rc=0 status=pass load=1.16 1.21 1.48 pswpin=2424677 pswpout=2447475  cpus=0-63
+[2026-10-09T22:54:13-04:00] reparented v075 onto origin/main 85224b2e4102682c186f4aa83e7d0b17a0a8e2e4
+[2026-10-09T22:54:13-04:00] irr-ov0-v075-r1 start load=1.16 1.21 1.48 pswpin=2424677 pswpout=2447475  cpus=0-63
+[2026-10-09T23:02:28-04:00] irr-ov0-v075-r1 rc=0 completed=pass load=1.13 1.20 1.37 pswpin=2424677 pswpout=2447475  cpus=0-63
+[2026-10-09T23:02:29-04:00] reparented main onto origin/main 85224b2e4102682c186f4aa83e7d0b17a0a8e2e4
+[2026-10-09T23:02:29-04:00] irr-ov0-main-r1 start load=1.13 1.20 1.37 pswpin=2424677 pswpout=2447475  cpus=0-63
+[2026-10-09T23:10:44-04:00] irr-ov0-main-r1 rc=0 completed=pass load=1.08 1.13 1.27 pswpin=2424677 pswpout=2447475  cpus=0-63
+[2026-10-09T23:10:44-04:00] irr-ov0-main-r2 start load=1.08 1.13 1.27 pswpin=2424677 pswpout=2447475  cpus=0-63
+[2026-10-09T23:18:59-04:00] irr-ov0-main-r2 rc=0 completed=pass load=1.09 1.14 1.23 pswpin=2424677 pswpout=2447475  cpus=0-63
+[2026-10-09T23:18:59-04:00] irr-ov0-v075-r2 start load=1.09 1.14 1.23 pswpin=2424677 pswpout=2447475  cpus=0-63
+[2026-10-09T23:27:14-04:00] irr-ov0-v075-r2 rc=0 completed=pass load=1.14 1.39 1.36 pswpin=2424677 pswpout=2447475  cpus=0-63
+[2026-10-09T23:27:15-04:00] irr-ov0-v075-r3 start load=1.14 1.39 1.36 pswpin=2424677 pswpout=2447475  cpus=0-63
+[2026-10-09T23:35:30-04:00] irr-ov0-v075-r3 rc=0 completed=pass load=1.02 1.25 1.33 pswpin=2424677 pswpout=2447475  cpus=0-63
+[2026-10-09T23:35:30-04:00] irr-ov0-main-r3 start load=1.02 1.25 1.33 pswpin=2424677 pswpout=2447475  cpus=0-63
+[2026-10-09T23:43:45-04:00] irr-ov0-main-r3 rc=0 completed=pass load=1.08 1.20 1.29 pswpin=2424677 pswpout=2447475  cpus=0-63
+[2026-10-09T23:43:45-04:00] campaign done rc=0 failed=none

@@ -1,0 +1,2 @@
+cpus_allowed=0-63 online_cpus=64
+Every runner, harness and daemon inherits this affinity; none sets its own.

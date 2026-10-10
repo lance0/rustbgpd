@@ -1,0 +1,7 @@
+acquired host lock: <bench-dir>/inner-runner.lock
+host quiet: retained two accepted samples in <bench-dir>/main-4/rustbgpd/quiet.tsv
+=== cell rustbgpd start 2026-10-04T16:56:53-04:00 ===
+wrote <scenario-dir>/config.toml (700 neighbors), member.rpol, gen-a.rpol, gen-b.rpol; listen_port=1790, changed_peers=700, stable_peers=0, grpc_uds=<scenario-dir>/grpc.sock
+cell rustbgpd: harness rc=0 cleanup rc=0 cell rc=0 (artifacts: <bench-dir>/main-4/rustbgpd)
+=== cell rustbgpd PASS 2026-10-04T16:59:01-04:00 ===
+cool-down 300s

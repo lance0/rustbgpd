@@ -1,0 +1,33 @@
+{
+  "schema": 1,
+  "measured_on": "2026-10-10",
+  "measured_window_utc": ["2026-10-10T01:26:41Z", "2026-10-10T08:00:08Z"],
+  "published_on": "2026-10-10",
+  "acceptance_predeclared_on": "2026-10-08",
+  "host": "one 32-core / 64-thread AMD Ryzen Threadripper 7970X Linux host, kernel 7.0.0-30-generic, performance governor, canonical quiet-host gate before every cell",
+  "toolchain": "rustc 1.99.0 (b940084d7 2026-09-28)",
+  "arms": {
+    "pre2952": {"commit": "3bbc1576cc3fd1f97a6c723131f183f82d4952f4", "tree": "09a0c96c246eee2db6863b82f9c8f3eb7756cc37", "role": "parent of #2952", "rustbgpd_sha256": "ac283bec7f5c964ad1ce7cbc85b2cae0788d991da07affab625816b6e601b5c7", "rbgp_sha256": "0f0fcc1873d6605c8df2ac88503879904471cfe55a67e984ee4ebacf52d8ec33"},
+    "post2952": {"commit": "49abbb0171cbb889b7e2618c2bdcec6ea35699ae", "tree": "c70b6296af9880d350acea376eb1942ba8dbc72d", "role": "#2952", "rustbgpd_sha256": "1dda8cbf9b1803fb63f47a79760d08f425933dba6f94c7df228d2d003150ee60", "rbgp_sha256": "71d27f988b3a574081413d609a4ceaaafbf427db32e0d54bc626a73ba68724d9"},
+    "v073": {"commit": "335676078965ae5a7d24273821dab12da79222d2", "tree": "8a15d254039aa680371702c9deb5bf87bacedfb7", "role": "v0.73.0", "rustbgpd_sha256": "58853b0ff4d4b58ae72f1cc087b56100be3e262759a23870ea5227efe2d1fd0d", "rbgp_sha256": "bc280fe668fe252327af576edf31b5022b4d29dd69368890d5a3f4c1ce61b8bf"},
+    "v075": {"commit": "54ed19b5af927f1c8e5064ecb1a497885c15d068", "tree": "47ba5f6a356284c11530a9ada9d991f05df454ac", "role": "v0.75.0 (Q2)", "rustbgpd_sha256": "6eb3cad8b8f4b11cd5348f4fa2b3f98d40e7d6e40a3c10a254f37431da350205"},
+    "main": {"commit": "591ac39d4b50fc2c647942713a9ea99c0588a51a", "tree": "f82868fd192f54acc0c68197e4f23fdcf9ab7eeb", "role": "origin/main at window start (Q2)", "rustbgpd_sha256": "6a72730280960d52389df322dc8c2ccd22ecfcbb1437c840838bcfac2157d7f0"}
+  },
+  "instruments": {
+    "policy_stats_cell": "bench/scale/reloadstall/policy_stats_cell.sh at 591ac39d4 (sha256 171a07117f6936aabcfa8486376acc8fc3ae31e476f8fbd7661f018e9dd02600), shared by Q1 and Q4",
+    "reloadstall_q1_q4": "built at 591ac39d4 with --profile scale (sha256 2701b6b81deca419dbcb55692cc74a9e976b73bcc628507dfa6c284116880b30)",
+    "q2": "bench/scale/headline/run-campaign.sh at 591ac39d4; each arm runs its own runners and harness (see q2/identity.tsv)",
+    "q3": "each arm's own bench/scale/matrix/run-matrix.sh and harness"
+  },
+  "build_commands": {
+    "q1_q3_q4_daemons": "cargo build --release --locked -p rustbgpd -p rustbgpctl -p rs-config-render",
+    "reloadstall": "cargo build --profile scale --locked -p reloadstall"
+  },
+  "commands": {
+    "q1": "policy_stats_cell.sh <arm-bin-dir> <reloadstall> q1/<arm>-r<n>, order pre2952, post2952, post2952, pre2952, default shape",
+    "q2": "CELLS=matrix,irr MATRIX_SCENARIOS=s2 RUNS=3 OVERLAPS=0 IRR_CELLS=rustbgpd-sighup just bench-headline q2 v075=54ed19b5a main=591ac39d4",
+    "q3": "N_PEERS=700 TOTAL_PREFIXES=400400 RELOADS=4 CONTROL_SECS=30 GEN_FILTER_COUNT=64 RELOADSTALL_FILTER_COUNT=64 ARTIFACTS_DIR=q3/<arm> bash bench/scale/matrix/run-matrix.sh rustbgpd, pre2952 then post2952",
+    "q4": "policy_stats_cell.sh <v073-bin-dir> <reloadstall> q4/v073-r1, default shape, rerun alone after the first window's cutoff skipped it",
+    "analysis": "python3 analyze.py <out-dir>"
+  }
+}

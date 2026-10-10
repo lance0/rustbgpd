@@ -1,0 +1,2274 @@
+{
+  "environment": {
+    "source_head": "591ac39d4b50fc2c647942713a9ea99c0588a51a",
+    "source_dirty": "",
+    "binaries": {
+      "rustbgpd": "1dda8cbf9b1803fb63f47a79760d08f425933dba6f94c7df228d2d003150ee60",
+      "rbgp": "71d27f988b3a574081413d609a4ceaaafbf427db32e0d54bc626a73ba68724d9",
+      "reloadstall": "2701b6b81deca419dbcb55692cc74a9e976b73bcc628507dfa6c284116880b30"
+    },
+    "versions": {
+      "rustbgpd": "rustbgpd 0.75.0",
+      "rbgp": "rbgp 0.75.0"
+    },
+    "shape": {
+      "peers": 1000,
+      "prefixes": 400000,
+      "reloads": 12,
+      "control_secs": 15,
+      "quiesce_secs": 40,
+      "run_cap_secs": 1515,
+      "pair_lead_s": 0.11,
+      "quiescent_offset_s": 20
+    },
+    "placement": {
+      "daemon_cpus": "2-3",
+      "engine_cpus": "4-5",
+      "probe_cpus": "8-15"
+    },
+    "kernel": "7.0.0-30-generic",
+    "nproc": 64,
+    "loadavg_start": [
+      "1.66",
+      "2.54",
+      "2.06"
+    ],
+    "cpu_model": "AMD Ryzen Threadripper 7970X 32-Cores",
+    "cpu_topology": "CPU CORE SOCKET NODE\n  0    0      0    0\n  1    1      0    0\n  2    2      0    0\n  3    3      0    0\n  4    4      0    0\n  5    5      0    0\n  6    6      0    0\n  7    7      0    0\n  8    8      0    0\n  9    9      0    0\n 10   10      0    0\n 11   11      0    0\n 12   12      0    0\n 13   13      0    0\n 14   14      0    0\n 15   15      0    0\n 16   16      0    0\n 17   17      0    0\n 18   18      0    0\n 19   19      0    0\n 20   20      0    0\n 21   21      0    0\n 22   22      0    0\n 23   23      0    0\n 24   24      0    0\n 25   25      0    0\n 26   26      0    0\n 27   27      0    0\n 28   28      0    0\n 29   29      0    0\n 30   30      0    0\n 31   31      0    0\n 32    0      0    0\n 33    1      0    0\n 34    2      0    0\n 35    3      0    0\n 36    4      0    0\n 37    5      0    0\n 38    6      0    0\n 39    7      0    0\n 40    8      0    0\n 41    9      0    0\n 42   10      0    0\n 43   11      0    0\n 44   12      0    0\n 45   13      0    0\n 46   14      0    0\n 47   15      0    0\n 48   16      0    0\n 49   17      0    0\n 50   18      0    0\n 51   19      0    0\n 52   20      0    0\n 53   21      0    0\n 54   22      0    0\n 55   23      0    0\n 56   24      0    0\n 57   25      0    0\n 58   26      0    0\n 59   27      0    0\n 60   28      0    0\n 61   29      0    0\n 62   30      0    0\n 63   31      0    0",
+    "compiler_processes_at_start": 0
+  },
+  "verdict": "PASS",
+  "invalid_calls": [],
+  "checks_pass": true,
+  "errors": [],
+  "flat": {
+    "pass": true,
+    "in_band_max_ms": 0,
+    "quiescent_median_ms": 0.0,
+    "limit_ms": 50.0
+  },
+  "in_band_pairs": 12,
+  "deadline_misses": 0,
+  "calls_over_2s": 0,
+  "neighbor_stale_rows": [
+    0,
+    202,
+    0,
+    0,
+    46,
+    102,
+    21,
+    0,
+    0,
+    0,
+    228,
+    111
+  ],
+  "timing": {
+    "in_band": {
+      "external_ms": {
+        "n": 12,
+        "min": 11.164649855345488,
+        "p50": 12.046653777360916,
+        "p95": 274.43829691037536,
+        "max": 274.43829691037536
+      },
+      "stage_sum_ms": {
+        "n": 12,
+        "min": 0,
+        "p50": 0,
+        "p95": 0,
+        "max": 0
+      },
+      "stages_ms": {
+        "export": {
+          "n": 12,
+          "min": 0,
+          "p50": 0,
+          "p95": 0,
+          "max": 0
+        },
+        "import": {
+          "n": 12,
+          "min": 0,
+          "p50": 0,
+          "p95": 0,
+          "max": 0
+        },
+        "datasets": {
+          "n": 12,
+          "min": 0,
+          "p50": 0,
+          "p95": 0,
+          "max": 0
+        }
+      },
+      "import_substages": {
+        "admission_ms": {
+          "n": 0,
+          "min": null,
+          "p50": null,
+          "p95": null,
+          "max": null
+        },
+        "collection_ms": {
+          "n": 0,
+          "min": null,
+          "p50": null,
+          "p95": null,
+          "max": null
+        },
+        "yields": {
+          "n": 12,
+          "min": 0,
+          "p50": 0,
+          "p95": 0,
+          "max": 0
+        },
+        "publications_read": {
+          "n": 12,
+          "min": 1000,
+          "p50": 1000,
+          "p95": 1000,
+          "max": 1000
+        }
+      },
+      "import_admission_pending": 0
+    },
+    "pair_all": {
+      "external_ms": {
+        "n": 12,
+        "min": 11.164649855345488,
+        "p50": 12.046653777360916,
+        "p95": 274.43829691037536,
+        "max": 274.43829691037536
+      },
+      "stage_sum_ms": {
+        "n": 12,
+        "min": 0,
+        "p50": 0,
+        "p95": 0,
+        "max": 0
+      },
+      "stages_ms": {
+        "export": {
+          "n": 12,
+          "min": 0,
+          "p50": 0,
+          "p95": 0,
+          "max": 0
+        },
+        "import": {
+          "n": 12,
+          "min": 0,
+          "p50": 0,
+          "p95": 0,
+          "max": 0
+        },
+        "datasets": {
+          "n": 12,
+          "min": 0,
+          "p50": 0,
+          "p95": 0,
+          "max": 0
+        }
+      },
+      "import_substages": {
+        "admission_ms": {
+          "n": 0,
+          "min": null,
+          "p50": null,
+          "p95": null,
+          "max": null
+        },
+        "collection_ms": {
+          "n": 0,
+          "min": null,
+          "p50": null,
+          "p95": null,
+          "max": null
+        },
+        "yields": {
+          "n": 12,
+          "min": 0,
+          "p50": 0,
+          "p95": 0,
+          "max": 0
+        },
+        "publications_read": {
+          "n": 12,
+          "min": 1000,
+          "p50": 1000,
+          "p95": 1000,
+          "max": 1000
+        }
+      },
+      "import_admission_pending": 0
+    },
+    "quiescent": {
+      "external_ms": {
+        "n": 12,
+        "min": 11.214575730264187,
+        "p50": 12.003347743302584,
+        "p95": 12.360794004052877,
+        "max": 12.360794004052877
+      },
+      "stage_sum_ms": {
+        "n": 12,
+        "min": 0,
+        "p50": 0,
+        "p95": 0,
+        "max": 0
+      },
+      "stages_ms": {
+        "export": {
+          "n": 12,
+          "min": 0,
+          "p50": 0,
+          "p95": 0,
+          "max": 0
+        },
+        "import": {
+          "n": 12,
+          "min": 0,
+          "p50": 0,
+          "p95": 0,
+          "max": 0
+        },
+        "datasets": {
+          "n": 12,
+          "min": 0,
+          "p50": 0,
+          "p95": 0,
+          "max": 0
+        }
+      },
+      "import_substages": {
+        "admission_ms": {
+          "n": 0,
+          "min": null,
+          "p50": null,
+          "p95": null,
+          "max": null
+        },
+        "collection_ms": {
+          "n": 0,
+          "min": null,
+          "p50": null,
+          "p95": null,
+          "max": null
+        },
+        "yields": {
+          "n": 12,
+          "min": 0,
+          "p50": 0,
+          "p95": 0,
+          "max": 0
+        },
+        "publications_read": {
+          "n": 12,
+          "min": 1000,
+          "p50": 1000,
+          "p95": 1000,
+          "max": 1000
+        }
+      },
+      "import_admission_pending": 0
+    }
+  },
+  "remainder_targets": [
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0
+  ],
+  "reload_ms": {
+    "sighup_to_commit": {
+      "n": 12,
+      "min": 595.7109928131104,
+      "p50": 629.6231746673584,
+      "p95": 755.234956741333,
+      "max": 755.234956741333
+    },
+    "sighup_to_complete": {
+      "n": 12,
+      "min": 615.4639720916748,
+      "p50": 826.4760971069336,
+      "p95": 904.2830467224121,
+      "max": 904.2830467224121
+    }
+  },
+  "cpu": {
+    "placement": {
+      "daemon_cpus": [
+        2,
+        3
+      ],
+      "engine_cpus": [
+        4,
+        5
+      ],
+      "sibling_cpus": [
+        34,
+        35,
+        36,
+        37
+      ]
+    },
+    "whole_run": {
+      "daemon_cores": {
+        "n": 532,
+        "min": 0.08873737183778782,
+        "p50": 0.20715077208481478,
+        "p95": 0.6609066529194525,
+        "max": 1.7056745494545171
+      },
+      "foreign_on_daemon_cpus": {
+        "n": 532,
+        "min": 0.0,
+        "p50": 0.0,
+        "p95": 0.03945764255321549,
+        "max": 0.1479636540493148
+      },
+      "smt_sibling_busy": {
+        "n": 532,
+        "min": 0.0,
+        "p50": 0.03945875617027562,
+        "p95": 0.06905886536967032,
+        "max": 0.1577318198719603
+      },
+      "compilers": {
+        "n": 532,
+        "min": 0,
+        "p50": 0,
+        "p95": 0,
+        "max": 0
+      }
+    },
+    "during_calls": {
+      "daemon_cores": {
+        "n": 27,
+        "min": 0.13808314064407323,
+        "p50": 0.4637272008731981,
+        "p95": 1.272760413971296,
+        "max": 1.3514814703314568
+      },
+      "foreign_on_daemon_cpus": {
+        "n": 27,
+        "min": 0.0,
+        "p50": 0.0,
+        "p95": 0.019732719596454285,
+        "max": 0.08878345425535117
+      },
+      "smt_sibling_busy": {
+        "n": 27,
+        "min": 0.0,
+        "p50": 0.049272444180152565,
+        "p95": 0.05918469606543428,
+        "max": 0.05918509971886528
+      },
+      "compilers": {
+        "n": 27,
+        "min": 0,
+        "p50": 0,
+        "p95": 0,
+        "max": 0
+      }
+    }
+  },
+  "daemon_non_json_lines": 6,
+  "reloads": [
+    {
+      "reload": 1,
+      "sighup_wall": 1791596316.065108,
+      "rib_commit_wall": 1791596316.820343,
+      "complete_wall": 1791596316.82495,
+      "sighup_to_commit_ms": 755.234956741333,
+      "sighup_to_complete_ms": 759.8419189453125,
+      "rib_transition": {
+        "message": "RIB export-policy transition completed",
+        "outcome": "committed",
+        "member_count": 1000,
+        "elapsed_ms": 52
+      },
+      "phase_timing": {
+        "message": "reload generation phase timing",
+        "target": "reload_generation_phase",
+        "total_targets": 1000,
+        "cohort_targets": 1000,
+        "remainder_targets": 0,
+        "refresh_count": 0,
+        "outcome": "committed",
+        "authoritative_fallback": false,
+        "preflight_us": 156,
+        "cohort_selection_us": 6494,
+        "cohort_prestage_session_apply_us": 634038,
+        "cohort_rib_transition_us": 52456,
+        "authoritative_remainder_apply_us": 1,
+        "deferred_refresh_dispatch_us": 7,
+        "convergence_check_us": 158,
+        "total_us": 694392,
+        "unattributed_us": 1082
+      },
+      "cohort_exclusions": [
+        {
+          "excluded_non_established": 0,
+          "excluded_session_gone": 0,
+          "excluded_state_timeout": 0
+        }
+      ],
+      "complete_pair_in_band": true,
+      "calls": [
+        {
+          "phase": "pair",
+          "op": "policy_stats",
+          "duration_ms": 245.33161614090204,
+          "exit": 0,
+          "shape": {
+            "export_policy_generations": {
+              "2002": 1000
+            },
+            "export_rows": 1000,
+            "import_policy_generations": {
+              "0": 1000
+            },
+            "import_rows": 1000
+          },
+          "invalid_reply": null,
+          "start_minus_rib_commit_ms": -48.36416244506836,
+          "in_band": true,
+          "audit": {
+            "result": "handler_ok",
+            "request_summary": "stage=export elapsed_ms=0 budget_ms=1999 rpc_elapsed_ms=0 code=Ok; stage=import elapsed_ms=0 budget_ms=1999 rpc_elapsed_ms=1 code=Ok publications=1000/1000 yields=0; stage=datasets elapsed_ms=0 budget_ms=1998 rpc_elapsed_ms=1 code=Ok"
+          },
+          "stages": [
+            {
+              "stage": "export",
+              "elapsed_ms": 0,
+              "budget_ms": 1999,
+              "rpc_elapsed_ms": 0,
+              "code": "Ok"
+            },
+            {
+              "stage": "import",
+              "elapsed_ms": 0,
+              "budget_ms": 1999,
+              "rpc_elapsed_ms": 1,
+              "code": "Ok",
+              "publications_read": 1000,
+              "publications_selected": 1000,
+              "yields": 0
+            },
+            {
+              "stage": "datasets",
+              "elapsed_ms": 0,
+              "budget_ms": 1998,
+              "rpc_elapsed_ms": 1,
+              "code": "Ok"
+            }
+          ],
+          "stage_sum_ms": 0
+        },
+        {
+          "phase": "pair",
+          "op": "neighbor",
+          "duration_ms": 264.58312291651964,
+          "exit": 0,
+          "shape": {
+            "rows": 1000,
+            "stale_rows": 0
+          },
+          "invalid_reply": null,
+          "start_minus_rib_commit_ms": -49.14259910583496,
+          "in_band": true
+        },
+        {
+          "phase": "quiescent",
+          "op": "policy_stats",
+          "duration_ms": 11.898797005414963,
+          "exit": 0,
+          "shape": {
+            "export_policy_generations": {
+              "2002": 1000
+            },
+            "export_rows": 1000,
+            "import_policy_generations": {
+              "0": 1000
+            },
+            "import_rows": 1000
+          },
+          "invalid_reply": null,
+          "start_minus_rib_commit_ms": 20004.685640335083,
+          "in_band": false,
+          "start_minus_reload_complete_ms": 20000.078678131104,
+          "audit": {
+            "result": "handler_ok",
+            "request_summary": "stage=export elapsed_ms=0 budget_ms=1999 rpc_elapsed_ms=0 code=Ok; stage=import elapsed_ms=0 budget_ms=1999 rpc_elapsed_ms=1 code=Ok publications=1000/1000 yields=0; stage=datasets elapsed_ms=0 budget_ms=1998 rpc_elapsed_ms=1 code=Ok"
+          },
+          "stages": [
+            {
+              "stage": "export",
+              "elapsed_ms": 0,
+              "budget_ms": 1999,
+              "rpc_elapsed_ms": 0,
+              "code": "Ok"
+            },
+            {
+              "stage": "import",
+              "elapsed_ms": 0,
+              "budget_ms": 1999,
+              "rpc_elapsed_ms": 1,
+              "code": "Ok",
+              "publications_read": 1000,
+              "publications_selected": 1000,
+              "yields": 0
+            },
+            {
+              "stage": "datasets",
+              "elapsed_ms": 0,
+              "budget_ms": 1998,
+              "rpc_elapsed_ms": 1,
+              "code": "Ok"
+            }
+          ],
+          "stage_sum_ms": 0
+        }
+      ]
+    },
+    {
+      "reload": 2,
+      "sighup_wall": 1791596359.33397,
+      "rib_commit_wall": 1791596359.934898,
+      "complete_wall": 1791596360.152651,
+      "sighup_to_commit_ms": 600.9278297424316,
+      "sighup_to_complete_ms": 818.681001663208,
+      "rib_transition": {
+        "message": "RIB export-policy transition completed",
+        "outcome": "committed",
+        "member_count": 1000,
+        "elapsed_ms": 55
+      },
+      "phase_timing": {
+        "message": "reload generation phase timing",
+        "target": "reload_generation_phase",
+        "total_targets": 1000,
+        "cohort_targets": 1000,
+        "remainder_targets": 0,
+        "refresh_count": 0,
+        "outcome": "committed",
+        "authoritative_fallback": false,
+        "preflight_us": 170,
+        "cohort_selection_us": 17756,
+        "cohort_prestage_session_apply_us": 470437,
+        "cohort_rib_transition_us": 268165,
+        "authoritative_remainder_apply_us": 1,
+        "deferred_refresh_dispatch_us": 7,
+        "convergence_check_us": 142,
+        "total_us": 758239,
+        "unattributed_us": 1561
+      },
+      "cohort_exclusions": [
+        {
+          "excluded_non_established": 0,
+          "excluded_session_gone": 0,
+          "excluded_state_timeout": 0
+        }
+      ],
+      "complete_pair_in_band": true,
+      "calls": [
+        {
+          "phase": "pair",
+          "op": "policy_stats",
+          "duration_ms": 11.285198852419853,
+          "exit": 0,
+          "shape": {
+            "export_policy_generations": {
+              "2002": 1000
+            },
+            "export_rows": 1000,
+            "import_policy_generations": {
+              "0": 1000
+            },
+            "import_rows": 1000
+          },
+          "invalid_reply": null,
+          "start_minus_rib_commit_ms": -52.21915245056152,
+          "in_band": true,
+          "audit": {
+            "result": "handler_ok",
+            "request_summary": "stage=export elapsed_ms=0 budget_ms=1999 rpc_elapsed_ms=0 code=Ok; stage=import elapsed_ms=0 budget_ms=1999 rpc_elapsed_ms=0 code=Ok publications=1000/1000 yields=0; stage=datasets elapsed_ms=0 budget_ms=1998 rpc_elapsed_ms=1 code=Ok"
+          },
+          "stages": [
+            {
+              "stage": "export",
+              "elapsed_ms": 0,
+              "budget_ms": 1999,
+              "rpc_elapsed_ms": 0,
+              "code": "Ok"
+            },
+            {
+              "stage": "import",
+              "elapsed_ms": 0,
+              "budget_ms": 1999,
+              "rpc_elapsed_ms": 0,
+              "code": "Ok",
+              "publications_read": 1000,
+              "publications_selected": 1000,
+              "yields": 0
+            },
+            {
+              "stage": "datasets",
+              "elapsed_ms": 0,
+              "budget_ms": 1998,
+              "rpc_elapsed_ms": 1,
+              "code": "Ok"
+            }
+          ],
+          "stage_sum_ms": 0
+        },
+        {
+          "phase": "pair",
+          "op": "neighbor",
+          "duration_ms": 275.0919871032238,
+          "exit": 0,
+          "shape": {
+            "rows": 1000,
+            "stale_rows": 202
+          },
+          "invalid_reply": null,
+          "start_minus_rib_commit_ms": -53.01952362060547,
+          "in_band": true
+        },
+        {
+          "phase": "quiescent",
+          "op": "policy_stats",
+          "duration_ms": 12.265227269381285,
+          "exit": 0,
+          "shape": {
+            "export_policy_generations": {
+              "2003": 1000
+            },
+            "export_rows": 1000,
+            "import_policy_generations": {
+              "0": 1000
+            },
+            "import_rows": 1000
+          },
+          "invalid_reply": null,
+          "start_minus_rib_commit_ms": 20217.788457870483,
+          "in_band": false,
+          "start_minus_reload_complete_ms": 20000.035285949707,
+          "audit": {
+            "result": "handler_ok",
+            "request_summary": "stage=export elapsed_ms=0 budget_ms=1999 rpc_elapsed_ms=0 code=Ok; stage=import elapsed_ms=0 budget_ms=1999 rpc_elapsed_ms=1 code=Ok publications=1000/1000 yields=0; stage=datasets elapsed_ms=0 budget_ms=1998 rpc_elapsed_ms=1 code=Ok"
+          },
+          "stages": [
+            {
+              "stage": "export",
+              "elapsed_ms": 0,
+              "budget_ms": 1999,
+              "rpc_elapsed_ms": 0,
+              "code": "Ok"
+            },
+            {
+              "stage": "import",
+              "elapsed_ms": 0,
+              "budget_ms": 1999,
+              "rpc_elapsed_ms": 1,
+              "code": "Ok",
+              "publications_read": 1000,
+              "publications_selected": 1000,
+              "yields": 0
+            },
+            {
+              "stage": "datasets",
+              "elapsed_ms": 0,
+              "budget_ms": 1998,
+              "rpc_elapsed_ms": 1,
+              "code": "Ok"
+            }
+          ],
+          "stage_sum_ms": 0
+        }
+      ]
+    },
+    {
+      "reload": 3,
+      "sighup_wall": 1791596402.465254,
+      "rib_commit_wall": 1791596403.160431,
+      "complete_wall": 1791596403.36623,
+      "sighup_to_commit_ms": 695.1768398284912,
+      "sighup_to_complete_ms": 900.9759426116943,
+      "rib_transition": {
+        "message": "RIB export-policy transition completed",
+        "outcome": "committed",
+        "member_count": 1000,
+        "elapsed_ms": 57
+      },
+      "phase_timing": {
+        "message": "reload generation phase timing",
+        "target": "reload_generation_phase",
+        "total_targets": 1000,
+        "cohort_targets": 1000,
+        "remainder_targets": 0,
+        "refresh_count": 0,
+        "outcome": "committed",
+        "authoritative_fallback": false,
+        "preflight_us": 181,
+        "cohort_selection_us": 4560,
+        "cohort_prestage_session_apply_us": 575003,
+        "cohort_rib_transition_us": 258213,
+        "authoritative_remainder_apply_us": 1,
+        "deferred_refresh_dispatch_us": 6,
+        "convergence_check_us": 204,
+        "total_us": 839497,
+        "unattributed_us": 1329
+      },
+      "cohort_exclusions": [
+        {
+          "excluded_non_established": 0,
+          "excluded_session_gone": 0,
+          "excluded_state_timeout": 0
+        }
+      ],
+      "complete_pair_in_band": true,
+      "calls": [
+        {
+          "phase": "pair",
+          "op": "policy_stats",
+          "duration_ms": 11.326773092150688,
+          "exit": 0,
+          "shape": {
+            "export_policy_generations": {
+              "2003": 1000
+            },
+            "export_rows": 1000,
+            "import_policy_generations": {
+              "0": 1000
+            },
+            "import_rows": 1000
+          },
+          "invalid_reply": null,
+          "start_minus_rib_commit_ms": -56.13255500793457,
+          "in_band": true,
+          "audit": {
+            "result": "handler_ok",
+            "request_summary": "stage=export elapsed_ms=0 budget_ms=1999 rpc_elapsed_ms=0 code=Ok; stage=import elapsed_ms=0 budget_ms=1999 rpc_elapsed_ms=1 code=Ok publications=1000/1000 yields=0; stage=datasets elapsed_ms=0 budget_ms=1998 rpc_elapsed_ms=1 code=Ok"
+          },
+          "stages": [
+            {
+              "stage": "export",
+              "elapsed_ms": 0,
+              "budget_ms": 1999,
+              "rpc_elapsed_ms": 0,
+              "code": "Ok"
+            },
+            {
+              "stage": "import",
+              "elapsed_ms": 0,
+              "budget_ms": 1999,
+              "rpc_elapsed_ms": 1,
+              "code": "Ok",
+              "publications_read": 1000,
+              "publications_selected": 1000,
+              "yields": 0
+            },
+            {
+              "stage": "datasets",
+              "elapsed_ms": 0,
+              "budget_ms": 1998,
+              "rpc_elapsed_ms": 1,
+              "code": "Ok"
+            }
+          ],
+          "stage_sum_ms": 0
+        },
+        {
+          "phase": "pair",
+          "op": "neighbor",
+          "duration_ms": 273.57297809794545,
+          "exit": 0,
+          "shape": {
+            "rows": 1000,
+            "stale_rows": 0
+          },
+          "invalid_reply": null,
+          "start_minus_rib_commit_ms": -56.30946159362793,
+          "in_band": true
+        },
+        {
+          "phase": "quiescent",
+          "op": "policy_stats",
+          "duration_ms": 11.950565967708826,
+          "exit": 0,
+          "shape": {
+            "export_policy_generations": {
+              "2004": 1000
+            },
+            "export_rows": 1000,
+            "import_policy_generations": {
+              "0": 1000
+            },
+            "import_rows": 1000
+          },
+          "invalid_reply": null,
+          "start_minus_rib_commit_ms": 20205.88183403015,
+          "in_band": false,
+          "start_minus_reload_complete_ms": 20000.08273124695,
+          "audit": {
+            "result": "handler_ok",
+            "request_summary": "stage=export elapsed_ms=0 budget_ms=1999 rpc_elapsed_ms=0 code=Ok; stage=import elapsed_ms=0 budget_ms=1999 rpc_elapsed_ms=1 code=Ok publications=1000/1000 yields=0; stage=datasets elapsed_ms=0 budget_ms=1998 rpc_elapsed_ms=1 code=Ok"
+          },
+          "stages": [
+            {
+              "stage": "export",
+              "elapsed_ms": 0,
+              "budget_ms": 1999,
+              "rpc_elapsed_ms": 0,
+              "code": "Ok"
+            },
+            {
+              "stage": "import",
+              "elapsed_ms": 0,
+              "budget_ms": 1999,
+              "rpc_elapsed_ms": 1,
+              "code": "Ok",
+              "publications_read": 1000,
+              "publications_selected": 1000,
+              "yields": 0
+            },
+            {
+              "stage": "datasets",
+              "elapsed_ms": 0,
+              "budget_ms": 1998,
+              "rpc_elapsed_ms": 1,
+              "code": "Ok"
+            }
+          ],
+          "stage_sum_ms": 0
+        }
+      ]
+    },
+    {
+      "reload": 4,
+      "sighup_wall": 1791596445.688549,
+      "rib_commit_wall": 1791596446.299322,
+      "complete_wall": 1791596446.304013,
+      "sighup_to_commit_ms": 610.7728481292725,
+      "sighup_to_complete_ms": 615.4639720916748,
+      "rib_transition": {
+        "message": "RIB export-policy transition completed",
+        "outcome": "committed",
+        "member_count": 1000,
+        "elapsed_ms": 54
+      },
+      "phase_timing": {
+        "message": "reload generation phase timing",
+        "target": "reload_generation_phase",
+        "total_targets": 1000,
+        "cohort_targets": 1000,
+        "remainder_targets": 0,
+        "refresh_count": 0,
+        "outcome": "committed",
+        "authoritative_fallback": false,
+        "preflight_us": 192,
+        "cohort_selection_us": 11697,
+        "cohort_prestage_session_apply_us": 484737,
+        "cohort_rib_transition_us": 55327,
+        "authoritative_remainder_apply_us": 1,
+        "deferred_refresh_dispatch_us": 6,
+        "convergence_check_us": 153,
+        "total_us": 553431,
+        "unattributed_us": 1318
+      },
+      "cohort_exclusions": [
+        {
+          "excluded_non_established": 0,
+          "excluded_session_gone": 0,
+          "excluded_state_timeout": 0
+        }
+      ],
+      "complete_pair_in_band": true,
+      "calls": [
+        {
+          "phase": "pair",
+          "op": "policy_stats",
+          "duration_ms": 13.821428176015615,
+          "exit": 0,
+          "shape": {
+            "export_policy_generations": {
+              "2004": 1000
+            },
+            "export_rows": 1000,
+            "import_policy_generations": {
+              "0": 1000
+            },
+            "import_rows": 1000
+          },
+          "invalid_reply": null,
+          "start_minus_rib_commit_ms": -54.29697036743164,
+          "in_band": true,
+          "audit": {
+            "result": "handler_ok",
+            "request_summary": "stage=export elapsed_ms=0 budget_ms=1999 rpc_elapsed_ms=0 code=Ok; stage=import elapsed_ms=0 budget_ms=1999 rpc_elapsed_ms=0 code=Ok publications=1000/1000 yields=0; stage=datasets elapsed_ms=0 budget_ms=1998 rpc_elapsed_ms=1 code=Ok"
+          },
+          "stages": [
+            {
+              "stage": "export",
+              "elapsed_ms": 0,
+              "budget_ms": 1999,
+              "rpc_elapsed_ms": 0,
+              "code": "Ok"
+            },
+            {
+              "stage": "import",
+              "elapsed_ms": 0,
+              "budget_ms": 1999,
+              "rpc_elapsed_ms": 0,
+              "code": "Ok",
+              "publications_read": 1000,
+              "publications_selected": 1000,
+              "yields": 0
+            },
+            {
+              "stage": "datasets",
+              "elapsed_ms": 0,
+              "budget_ms": 1998,
+              "rpc_elapsed_ms": 1,
+              "code": "Ok"
+            }
+          ],
+          "stage_sum_ms": 0
+        },
+        {
+          "phase": "pair",
+          "op": "neighbor",
+          "duration_ms": 295.2833161689341,
+          "exit": 0,
+          "shape": {
+            "rows": 1000,
+            "stale_rows": 0
+          },
+          "invalid_reply": null,
+          "start_minus_rib_commit_ms": -54.474592208862305,
+          "in_band": true
+        },
+        {
+          "phase": "quiescent",
+          "op": "policy_stats",
+          "duration_ms": 12.071647681295872,
+          "exit": 0,
+          "shape": {
+            "export_policy_generations": {
+              "2005": 1000
+            },
+            "export_rows": 1000,
+            "import_policy_generations": {
+              "0": 1000
+            },
+            "import_rows": 1000
+          },
+          "invalid_reply": null,
+          "start_minus_rib_commit_ms": 20004.754304885864,
+          "in_band": false,
+          "start_minus_reload_complete_ms": 20000.063180923462,
+          "audit": {
+            "result": "handler_ok",
+            "request_summary": "stage=export elapsed_ms=0 budget_ms=1999 rpc_elapsed_ms=0 code=Ok; stage=import elapsed_ms=0 budget_ms=1999 rpc_elapsed_ms=0 code=Ok publications=1000/1000 yields=0; stage=datasets elapsed_ms=0 budget_ms=1998 rpc_elapsed_ms=1 code=Ok"
+          },
+          "stages": [
+            {
+              "stage": "export",
+              "elapsed_ms": 0,
+              "budget_ms": 1999,
+              "rpc_elapsed_ms": 0,
+              "code": "Ok"
+            },
+            {
+              "stage": "import",
+              "elapsed_ms": 0,
+              "budget_ms": 1999,
+              "rpc_elapsed_ms": 0,
+              "code": "Ok",
+              "publications_read": 1000,
+              "publications_selected": 1000,
+              "yields": 0
+            },
+            {
+              "stage": "datasets",
+              "elapsed_ms": 0,
+              "budget_ms": 1998,
+              "rpc_elapsed_ms": 1,
+              "code": "Ok"
+            }
+          ],
+          "stage_sum_ms": 0
+        }
+      ]
+    },
+    {
+      "reload": 5,
+      "sighup_wall": 1791596488.805041,
+      "rib_commit_wall": 1791596489.402443,
+      "complete_wall": 1791596489.632897,
+      "sighup_to_commit_ms": 597.4018573760986,
+      "sighup_to_complete_ms": 827.8558254241943,
+      "rib_transition": {
+        "message": "RIB export-policy transition completed",
+        "outcome": "committed",
+        "member_count": 1000,
+        "elapsed_ms": 55
+      },
+      "phase_timing": {
+        "message": "reload generation phase timing",
+        "target": "reload_generation_phase",
+        "total_targets": 1000,
+        "cohort_targets": 1000,
+        "remainder_targets": 0,
+        "refresh_count": 0,
+        "outcome": "committed",
+        "authoritative_fallback": false,
+        "preflight_us": 62,
+        "cohort_selection_us": 20054,
+        "cohort_prestage_session_apply_us": 465577,
+        "cohort_rib_transition_us": 281495,
+        "authoritative_remainder_apply_us": 1,
+        "deferred_refresh_dispatch_us": 8,
+        "convergence_check_us": 153,
+        "total_us": 768684,
+        "unattributed_us": 1334
+      },
+      "cohort_exclusions": [
+        {
+          "excluded_non_established": 0,
+          "excluded_session_gone": 0,
+          "excluded_state_timeout": 0
+        }
+      ],
+      "complete_pair_in_band": true,
+      "calls": [
+        {
+          "phase": "pair",
+          "op": "policy_stats",
+          "duration_ms": 11.164649855345488,
+          "exit": 0,
+          "shape": {
+            "export_policy_generations": {
+              "2005": 1000
+            },
+            "export_rows": 1000,
+            "import_policy_generations": {
+              "0": 1000
+            },
+            "import_rows": 1000
+          },
+          "invalid_reply": null,
+          "start_minus_rib_commit_ms": -54.48651313781738,
+          "in_band": true,
+          "audit": {
+            "result": "handler_ok",
+            "request_summary": "stage=export elapsed_ms=0 budget_ms=1999 rpc_elapsed_ms=0 code=Ok; stage=import elapsed_ms=0 budget_ms=1999 rpc_elapsed_ms=1 code=Ok publications=1000/1000 yields=0; stage=datasets elapsed_ms=0 budget_ms=1998 rpc_elapsed_ms=1 code=Ok"
+          },
+          "stages": [
+            {
+              "stage": "export",
+              "elapsed_ms": 0,
+              "budget_ms": 1999,
+              "rpc_elapsed_ms": 0,
+              "code": "Ok"
+            },
+            {
+              "stage": "import",
+              "elapsed_ms": 0,
+              "budget_ms": 1999,
+              "rpc_elapsed_ms": 1,
+              "code": "Ok",
+              "publications_read": 1000,
+              "publications_selected": 1000,
+              "yields": 0
+            },
+            {
+              "stage": "datasets",
+              "elapsed_ms": 0,
+              "budget_ms": 1998,
+              "rpc_elapsed_ms": 1,
+              "code": "Ok"
+            }
+          ],
+          "stage_sum_ms": 0
+        },
+        {
+          "phase": "pair",
+          "op": "neighbor",
+          "duration_ms": 287.8520009107888,
+          "exit": 0,
+          "shape": {
+            "rows": 1000,
+            "stale_rows": 46
+          },
+          "invalid_reply": null,
+          "start_minus_rib_commit_ms": -54.61311340332031,
+          "in_band": true
+        },
+        {
+          "phase": "quiescent",
+          "op": "policy_stats",
+          "duration_ms": 11.737368069589138,
+          "exit": 0,
+          "shape": {
+            "export_policy_generations": {
+              "2006": 1000
+            },
+            "export_rows": 1000,
+            "import_policy_generations": {
+              "0": 1000
+            },
+            "import_rows": 1000
+          },
+          "invalid_reply": null,
+          "start_minus_rib_commit_ms": 20230.541229248047,
+          "in_band": false,
+          "start_minus_reload_complete_ms": 20000.08726119995,
+          "audit": {
+            "result": "handler_ok",
+            "request_summary": "stage=export elapsed_ms=0 budget_ms=1999 rpc_elapsed_ms=0 code=Ok; stage=import elapsed_ms=0 budget_ms=1999 rpc_elapsed_ms=1 code=Ok publications=1000/1000 yields=0; stage=datasets elapsed_ms=0 budget_ms=1998 rpc_elapsed_ms=1 code=Ok"
+          },
+          "stages": [
+            {
+              "stage": "export",
+              "elapsed_ms": 0,
+              "budget_ms": 1999,
+              "rpc_elapsed_ms": 0,
+              "code": "Ok"
+            },
+            {
+              "stage": "import",
+              "elapsed_ms": 0,
+              "budget_ms": 1999,
+              "rpc_elapsed_ms": 1,
+              "code": "Ok",
+              "publications_read": 1000,
+              "publications_selected": 1000,
+              "yields": 0
+            },
+            {
+              "stage": "datasets",
+              "elapsed_ms": 0,
+              "budget_ms": 1998,
+              "rpc_elapsed_ms": 1,
+              "code": "Ok"
+            }
+          ],
+          "stage_sum_ms": 0
+        }
+      ]
+    },
+    {
+      "reload": 6,
+      "sighup_wall": 1791596531.903462,
+      "rib_commit_wall": 1791596532.584305,
+      "complete_wall": 1791596532.807745,
+      "sighup_to_commit_ms": 680.8431148529053,
+      "sighup_to_complete_ms": 904.2830467224121,
+      "rib_transition": {
+        "message": "RIB export-policy transition completed",
+        "outcome": "committed",
+        "member_count": 1000,
+        "elapsed_ms": 56
+      },
+      "phase_timing": {
+        "message": "reload generation phase timing",
+        "target": "reload_generation_phase",
+        "total_targets": 1000,
+        "cohort_targets": 1000,
+        "remainder_targets": 0,
+        "refresh_count": 0,
+        "outcome": "committed",
+        "authoritative_fallback": false,
+        "preflight_us": 66,
+        "cohort_selection_us": 17497,
+        "cohort_prestage_session_apply_us": 552502,
+        "cohort_rib_transition_us": 275082,
+        "authoritative_remainder_apply_us": 1,
+        "deferred_refresh_dispatch_us": 7,
+        "convergence_check_us": 141,
+        "total_us": 846760,
+        "unattributed_us": 1464
+      },
+      "cohort_exclusions": [
+        {
+          "excluded_non_established": 0,
+          "excluded_session_gone": 0,
+          "excluded_state_timeout": 0
+        }
+      ],
+      "complete_pair_in_band": true,
+      "calls": [
+        {
+          "phase": "pair",
+          "op": "policy_stats",
+          "duration_ms": 13.416183181107044,
+          "exit": 0,
+          "shape": {
+            "export_policy_generations": {
+              "2006": 1000
+            },
+            "export_rows": 1000,
+            "import_policy_generations": {
+              "0": 1000
+            },
+            "import_rows": 1000
+          },
+          "invalid_reply": null,
+          "start_minus_rib_commit_ms": -55.907487869262695,
+          "in_band": true,
+          "audit": {
+            "result": "handler_ok",
+            "request_summary": "stage=export elapsed_ms=0 budget_ms=1999 rpc_elapsed_ms=0 code=Ok; stage=import elapsed_ms=0 budget_ms=1999 rpc_elapsed_ms=1 code=Ok publications=1000/1000 yields=0; stage=datasets elapsed_ms=0 budget_ms=1998 rpc_elapsed_ms=1 code=Ok"
+          },
+          "stages": [
+            {
+              "stage": "export",
+              "elapsed_ms": 0,
+              "budget_ms": 1999,
+              "rpc_elapsed_ms": 0,
+              "code": "Ok"
+            },
+            {
+              "stage": "import",
+              "elapsed_ms": 0,
+              "budget_ms": 1999,
+              "rpc_elapsed_ms": 1,
+              "code": "Ok",
+              "publications_read": 1000,
+              "publications_selected": 1000,
+              "yields": 0
+            },
+            {
+              "stage": "datasets",
+              "elapsed_ms": 0,
+              "budget_ms": 1998,
+              "rpc_elapsed_ms": 1,
+              "code": "Ok"
+            }
+          ],
+          "stage_sum_ms": 0
+        },
+        {
+          "phase": "pair",
+          "op": "neighbor",
+          "duration_ms": 295.92450335621834,
+          "exit": 0,
+          "shape": {
+            "rows": 1000,
+            "stale_rows": 102
+          },
+          "invalid_reply": null,
+          "start_minus_rib_commit_ms": -56.005239486694336,
+          "in_band": true
+        },
+        {
+          "phase": "quiescent",
+          "op": "policy_stats",
+          "duration_ms": 11.214575730264187,
+          "exit": 0,
+          "shape": {
+            "export_policy_generations": {
+              "2007": 1000
+            },
+            "export_rows": 1000,
+            "import_policy_generations": {
+              "0": 1000
+            },
+            "import_rows": 1000
+          },
+          "invalid_reply": null,
+          "start_minus_rib_commit_ms": 20223.501443862915,
+          "in_band": false,
+          "start_minus_reload_complete_ms": 20000.06151199341,
+          "audit": {
+            "result": "handler_ok",
+            "request_summary": "stage=export elapsed_ms=0 budget_ms=1999 rpc_elapsed_ms=0 code=Ok; stage=import elapsed_ms=0 budget_ms=1999 rpc_elapsed_ms=1 code=Ok publications=1000/1000 yields=0; stage=datasets elapsed_ms=0 budget_ms=1998 rpc_elapsed_ms=1 code=Ok"
+          },
+          "stages": [
+            {
+              "stage": "export",
+              "elapsed_ms": 0,
+              "budget_ms": 1999,
+              "rpc_elapsed_ms": 0,
+              "code": "Ok"
+            },
+            {
+              "stage": "import",
+              "elapsed_ms": 0,
+              "budget_ms": 1999,
+              "rpc_elapsed_ms": 1,
+              "code": "Ok",
+              "publications_read": 1000,
+              "publications_selected": 1000,
+              "yields": 0
+            },
+            {
+              "stage": "datasets",
+              "elapsed_ms": 0,
+              "budget_ms": 1998,
+              "rpc_elapsed_ms": 1,
+              "code": "Ok"
+            }
+          ],
+          "stage_sum_ms": 0
+        }
+      ]
+    },
+    {
+      "reload": 7,
+      "sighup_wall": 1791596575.103542,
+      "rib_commit_wall": 1791596575.7242,
+      "complete_wall": 1791596575.951207,
+      "sighup_to_commit_ms": 620.6579208374023,
+      "sighup_to_complete_ms": 847.6648330688477,
+      "rib_transition": {
+        "message": "RIB export-policy transition completed",
+        "outcome": "committed",
+        "member_count": 1000,
+        "elapsed_ms": 56
+      },
+      "phase_timing": {
+        "message": "reload generation phase timing",
+        "target": "reload_generation_phase",
+        "total_targets": 1000,
+        "cohort_targets": 1000,
+        "remainder_targets": 0,
+        "refresh_count": 0,
+        "outcome": "committed",
+        "authoritative_fallback": false,
+        "preflight_us": 60,
+        "cohort_selection_us": 4785,
+        "cohort_prestage_session_apply_us": 501599,
+        "cohort_rib_transition_us": 279647,
+        "authoritative_remainder_apply_us": 1,
+        "deferred_refresh_dispatch_us": 6,
+        "convergence_check_us": 61,
+        "total_us": 787285,
+        "unattributed_us": 1126
+      },
+      "cohort_exclusions": [
+        {
+          "excluded_non_established": 0,
+          "excluded_session_gone": 0,
+          "excluded_state_timeout": 0
+        }
+      ],
+      "complete_pair_in_band": true,
+      "calls": [
+        {
+          "phase": "pair",
+          "op": "policy_stats",
+          "duration_ms": 12.134694028645754,
+          "exit": 0,
+          "shape": {
+            "export_policy_generations": {
+              "2007": 1000
+            },
+            "export_rows": 1000,
+            "import_policy_generations": {
+              "0": 1000
+            },
+            "import_rows": 1000
+          },
+          "invalid_reply": null,
+          "start_minus_rib_commit_ms": -55.65929412841797,
+          "in_band": true,
+          "audit": {
+            "result": "handler_ok",
+            "request_summary": "stage=export elapsed_ms=0 budget_ms=1999 rpc_elapsed_ms=0 code=Ok; stage=import elapsed_ms=0 budget_ms=1999 rpc_elapsed_ms=1 code=Ok publications=1000/1000 yields=0; stage=datasets elapsed_ms=0 budget_ms=1998 rpc_elapsed_ms=1 code=Ok"
+          },
+          "stages": [
+            {
+              "stage": "export",
+              "elapsed_ms": 0,
+              "budget_ms": 1999,
+              "rpc_elapsed_ms": 0,
+              "code": "Ok"
+            },
+            {
+              "stage": "import",
+              "elapsed_ms": 0,
+              "budget_ms": 1999,
+              "rpc_elapsed_ms": 1,
+              "code": "Ok",
+              "publications_read": 1000,
+              "publications_selected": 1000,
+              "yields": 0
+            },
+            {
+              "stage": "datasets",
+              "elapsed_ms": 0,
+              "budget_ms": 1998,
+              "rpc_elapsed_ms": 1,
+              "code": "Ok"
+            }
+          ],
+          "stage_sum_ms": 0
+        },
+        {
+          "phase": "pair",
+          "op": "neighbor",
+          "duration_ms": 292.1071979217231,
+          "exit": 0,
+          "shape": {
+            "rows": 1000,
+            "stale_rows": 21
+          },
+          "invalid_reply": null,
+          "start_minus_rib_commit_ms": -55.84573745727539,
+          "in_band": true
+        },
+        {
+          "phase": "quiescent",
+          "op": "policy_stats",
+          "duration_ms": 12.241102755069733,
+          "exit": 0,
+          "shape": {
+            "export_policy_generations": {
+              "2008": 1000
+            },
+            "export_rows": 1000,
+            "import_policy_generations": {
+              "0": 1000
+            },
+            "import_rows": 1000
+          },
+          "invalid_reply": null,
+          "start_minus_rib_commit_ms": 20227.087259292603,
+          "in_band": false,
+          "start_minus_reload_complete_ms": 20000.080347061157,
+          "audit": {
+            "result": "handler_ok",
+            "request_summary": "stage=export elapsed_ms=0 budget_ms=1999 rpc_elapsed_ms=0 code=Ok; stage=import elapsed_ms=0 budget_ms=1999 rpc_elapsed_ms=1 code=Ok publications=1000/1000 yields=0; stage=datasets elapsed_ms=0 budget_ms=1998 rpc_elapsed_ms=1 code=Ok"
+          },
+          "stages": [
+            {
+              "stage": "export",
+              "elapsed_ms": 0,
+              "budget_ms": 1999,
+              "rpc_elapsed_ms": 0,
+              "code": "Ok"
+            },
+            {
+              "stage": "import",
+              "elapsed_ms": 0,
+              "budget_ms": 1999,
+              "rpc_elapsed_ms": 1,
+              "code": "Ok",
+              "publications_read": 1000,
+              "publications_selected": 1000,
+              "yields": 0
+            },
+            {
+              "stage": "datasets",
+              "elapsed_ms": 0,
+              "budget_ms": 1998,
+              "rpc_elapsed_ms": 1,
+              "code": "Ok"
+            }
+          ],
+          "stage_sum_ms": 0
+        }
+      ]
+    },
+    {
+      "reload": 8,
+      "sighup_wall": 1791596618.242565,
+      "rib_commit_wall": 1791596618.990265,
+      "complete_wall": 1791596618.994885,
+      "sighup_to_commit_ms": 747.6999759674072,
+      "sighup_to_complete_ms": 752.3200511932373,
+      "rib_transition": {
+        "message": "RIB export-policy transition completed",
+        "outcome": "committed",
+        "member_count": 1000,
+        "elapsed_ms": 52
+      },
+      "phase_timing": {
+        "message": "reload generation phase timing",
+        "target": "reload_generation_phase",
+        "total_targets": 1000,
+        "cohort_targets": 1000,
+        "remainder_targets": 0,
+        "refresh_count": 0,
+        "outcome": "committed",
+        "authoritative_fallback": false,
+        "preflight_us": 188,
+        "cohort_selection_us": 18264,
+        "cohort_prestage_session_apply_us": 615454,
+        "cohort_rib_transition_us": 53349,
+        "authoritative_remainder_apply_us": 1,
+        "deferred_refresh_dispatch_us": 7,
+        "convergence_check_us": 148,
+        "total_us": 688724,
+        "unattributed_us": 1313
+      },
+      "cohort_exclusions": [
+        {
+          "excluded_non_established": 0,
+          "excluded_session_gone": 0,
+          "excluded_state_timeout": 0
+        }
+      ],
+      "complete_pair_in_band": true,
+      "calls": [
+        {
+          "phase": "pair",
+          "op": "policy_stats",
+          "duration_ms": 274.43829691037536,
+          "exit": 0,
+          "shape": {
+            "export_policy_generations": {
+              "2009": 1000
+            },
+            "export_rows": 1000,
+            "import_policy_generations": {
+              "0": 1000
+            },
+            "import_rows": 1000
+          },
+          "invalid_reply": null,
+          "start_minus_rib_commit_ms": -49.555063247680664,
+          "in_band": true,
+          "audit": {
+            "result": "handler_ok",
+            "request_summary": "stage=export elapsed_ms=0 budget_ms=1999 rpc_elapsed_ms=0 code=Ok; stage=import elapsed_ms=0 budget_ms=1999 rpc_elapsed_ms=1 code=Ok publications=1000/1000 yields=0; stage=datasets elapsed_ms=0 budget_ms=1998 rpc_elapsed_ms=1 code=Ok"
+          },
+          "stages": [
+            {
+              "stage": "export",
+              "elapsed_ms": 0,
+              "budget_ms": 1999,
+              "rpc_elapsed_ms": 0,
+              "code": "Ok"
+            },
+            {
+              "stage": "import",
+              "elapsed_ms": 0,
+              "budget_ms": 1999,
+              "rpc_elapsed_ms": 1,
+              "code": "Ok",
+              "publications_read": 1000,
+              "publications_selected": 1000,
+              "yields": 0
+            },
+            {
+              "stage": "datasets",
+              "elapsed_ms": 0,
+              "budget_ms": 1998,
+              "rpc_elapsed_ms": 1,
+              "code": "Ok"
+            }
+          ],
+          "stage_sum_ms": 0
+        },
+        {
+          "phase": "pair",
+          "op": "neighbor",
+          "duration_ms": 283.06290367618203,
+          "exit": 0,
+          "shape": {
+            "rows": 1000,
+            "stale_rows": 0
+          },
+          "invalid_reply": null,
+          "start_minus_rib_commit_ms": -49.73411560058594,
+          "in_band": true
+        },
+        {
+          "phase": "quiescent",
+          "op": "policy_stats",
+          "duration_ms": 12.245059944689274,
+          "exit": 0,
+          "shape": {
+            "export_policy_generations": {
+              "2009": 1000
+            },
+            "export_rows": 1000,
+            "import_policy_generations": {
+              "0": 1000
+            },
+            "import_rows": 1000
+          },
+          "invalid_reply": null,
+          "start_minus_rib_commit_ms": 20004.708290100098,
+          "in_band": false,
+          "start_minus_reload_complete_ms": 20000.088214874268,
+          "audit": {
+            "result": "handler_ok",
+            "request_summary": "stage=export elapsed_ms=0 budget_ms=1999 rpc_elapsed_ms=0 code=Ok; stage=import elapsed_ms=0 budget_ms=1999 rpc_elapsed_ms=1 code=Ok publications=1000/1000 yields=0; stage=datasets elapsed_ms=0 budget_ms=1998 rpc_elapsed_ms=1 code=Ok"
+          },
+          "stages": [
+            {
+              "stage": "export",
+              "elapsed_ms": 0,
+              "budget_ms": 1999,
+              "rpc_elapsed_ms": 0,
+              "code": "Ok"
+            },
+            {
+              "stage": "import",
+              "elapsed_ms": 0,
+              "budget_ms": 1999,
+              "rpc_elapsed_ms": 1,
+              "code": "Ok",
+              "publications_read": 1000,
+              "publications_selected": 1000,
+              "yields": 0
+            },
+            {
+              "stage": "datasets",
+              "elapsed_ms": 0,
+              "budget_ms": 1998,
+              "rpc_elapsed_ms": 1,
+              "code": "Ok"
+            }
+          ],
+          "stage_sum_ms": 0
+        }
+      ]
+    },
+    {
+      "reload": 9,
+      "sighup_wall": 1791596661.432669,
+      "rib_commit_wall": 1791596662.140358,
+      "complete_wall": 1791596662.144902,
+      "sighup_to_commit_ms": 707.6890468597412,
+      "sighup_to_complete_ms": 712.2330665588379,
+      "rib_transition": {
+        "message": "RIB export-policy transition completed",
+        "outcome": "committed",
+        "member_count": 1000,
+        "elapsed_ms": 57
+      },
+      "phase_timing": {
+        "message": "reload generation phase timing",
+        "target": "reload_generation_phase",
+        "total_targets": 1000,
+        "cohort_targets": 1000,
+        "remainder_targets": 0,
+        "refresh_count": 0,
+        "outcome": "committed",
+        "authoritative_fallback": false,
+        "preflight_us": 161,
+        "cohort_selection_us": 5090,
+        "cohort_prestage_session_apply_us": 560346,
+        "cohort_rib_transition_us": 87509,
+        "authoritative_remainder_apply_us": 2,
+        "deferred_refresh_dispatch_us": 6,
+        "convergence_check_us": 147,
+        "total_us": 654468,
+        "unattributed_us": 1207
+      },
+      "cohort_exclusions": [
+        {
+          "excluded_non_established": 0,
+          "excluded_session_gone": 0,
+          "excluded_state_timeout": 0
+        }
+      ],
+      "complete_pair_in_band": true,
+      "calls": [
+        {
+          "phase": "pair",
+          "op": "policy_stats",
+          "duration_ms": 11.59715000540018,
+          "exit": 0,
+          "shape": {
+            "export_policy_generations": {
+              "2009": 1000
+            },
+            "export_rows": 1000,
+            "import_policy_generations": {
+              "0": 1000
+            },
+            "import_rows": 1000
+          },
+          "invalid_reply": null,
+          "start_minus_rib_commit_ms": -86.77124977111816,
+          "in_band": true,
+          "audit": {
+            "result": "handler_ok",
+            "request_summary": "stage=export elapsed_ms=0 budget_ms=1999 rpc_elapsed_ms=0 code=Ok; stage=import elapsed_ms=0 budget_ms=1999 rpc_elapsed_ms=1 code=Ok publications=1000/1000 yields=0; stage=datasets elapsed_ms=0 budget_ms=1998 rpc_elapsed_ms=1 code=Ok"
+          },
+          "stages": [
+            {
+              "stage": "export",
+              "elapsed_ms": 0,
+              "budget_ms": 1999,
+              "rpc_elapsed_ms": 0,
+              "code": "Ok"
+            },
+            {
+              "stage": "import",
+              "elapsed_ms": 0,
+              "budget_ms": 1999,
+              "rpc_elapsed_ms": 1,
+              "code": "Ok",
+              "publications_read": 1000,
+              "publications_selected": 1000,
+              "yields": 0
+            },
+            {
+              "stage": "datasets",
+              "elapsed_ms": 0,
+              "budget_ms": 1998,
+              "rpc_elapsed_ms": 1,
+              "code": "Ok"
+            }
+          ],
+          "stage_sum_ms": 0
+        },
+        {
+          "phase": "pair",
+          "op": "neighbor",
+          "duration_ms": 26.85304917395115,
+          "exit": 0,
+          "shape": {
+            "rows": 1000,
+            "stale_rows": 0
+          },
+          "invalid_reply": null,
+          "start_minus_rib_commit_ms": -86.87210083007812,
+          "in_band": true
+        },
+        {
+          "phase": "quiescent",
+          "op": "policy_stats",
+          "duration_ms": 12.003347743302584,
+          "exit": 0,
+          "shape": {
+            "export_policy_generations": {
+              "2010": 1000
+            },
+            "export_rows": 1000,
+            "import_policy_generations": {
+              "0": 1000
+            },
+            "import_rows": 1000
+          },
+          "invalid_reply": null,
+          "start_minus_rib_commit_ms": 20004.62293624878,
+          "in_band": false,
+          "start_minus_reload_complete_ms": 20000.078916549683,
+          "audit": {
+            "result": "handler_ok",
+            "request_summary": "stage=export elapsed_ms=0 budget_ms=1999 rpc_elapsed_ms=0 code=Ok; stage=import elapsed_ms=0 budget_ms=1999 rpc_elapsed_ms=1 code=Ok publications=1000/1000 yields=0; stage=datasets elapsed_ms=0 budget_ms=1998 rpc_elapsed_ms=1 code=Ok"
+          },
+          "stages": [
+            {
+              "stage": "export",
+              "elapsed_ms": 0,
+              "budget_ms": 1999,
+              "rpc_elapsed_ms": 0,
+              "code": "Ok"
+            },
+            {
+              "stage": "import",
+              "elapsed_ms": 0,
+              "budget_ms": 1999,
+              "rpc_elapsed_ms": 1,
+              "code": "Ok",
+              "publications_read": 1000,
+              "publications_selected": 1000,
+              "yields": 0
+            },
+            {
+              "stage": "datasets",
+              "elapsed_ms": 0,
+              "budget_ms": 1998,
+              "rpc_elapsed_ms": 1,
+              "code": "Ok"
+            }
+          ],
+          "stage_sum_ms": 0
+        }
+      ]
+    },
+    {
+      "reload": 10,
+      "sighup_wall": 1791596704.639714,
+      "rib_commit_wall": 1791596705.275215,
+      "complete_wall": 1791596705.494379,
+      "sighup_to_commit_ms": 635.5009078979492,
+      "sighup_to_complete_ms": 854.6650409698486,
+      "rib_transition": {
+        "message": "RIB export-policy transition completed",
+        "outcome": "committed",
+        "member_count": 1000,
+        "elapsed_ms": 56
+      },
+      "phase_timing": {
+        "message": "reload generation phase timing",
+        "target": "reload_generation_phase",
+        "total_targets": 1000,
+        "cohort_targets": 1000,
+        "remainder_targets": 0,
+        "refresh_count": 0,
+        "outcome": "committed",
+        "authoritative_fallback": false,
+        "preflight_us": 184,
+        "cohort_selection_us": 13488,
+        "cohort_prestage_session_apply_us": 497122,
+        "cohort_rib_transition_us": 272127,
+        "authoritative_remainder_apply_us": 1,
+        "deferred_refresh_dispatch_us": 7,
+        "convergence_check_us": 80,
+        "total_us": 784599,
+        "unattributed_us": 1590
+      },
+      "cohort_exclusions": [
+        {
+          "excluded_non_established": 0,
+          "excluded_session_gone": 0,
+          "excluded_state_timeout": 0
+        }
+      ],
+      "complete_pair_in_band": true,
+      "calls": [
+        {
+          "phase": "pair",
+          "op": "policy_stats",
+          "duration_ms": 12.046653777360916,
+          "exit": 0,
+          "shape": {
+            "export_policy_generations": {
+              "2010": 1000
+            },
+            "export_rows": 1000,
+            "import_policy_generations": {
+              "0": 1000
+            },
+            "import_rows": 1000
+          },
+          "invalid_reply": null,
+          "start_minus_rib_commit_ms": -55.893898010253906,
+          "in_band": true,
+          "audit": {
+            "result": "handler_ok",
+            "request_summary": "stage=export elapsed_ms=0 budget_ms=1999 rpc_elapsed_ms=0 code=Ok; stage=import elapsed_ms=0 budget_ms=1999 rpc_elapsed_ms=1 code=Ok publications=1000/1000 yields=0; stage=datasets elapsed_ms=0 budget_ms=1998 rpc_elapsed_ms=1 code=Ok"
+          },
+          "stages": [
+            {
+              "stage": "export",
+              "elapsed_ms": 0,
+              "budget_ms": 1999,
+              "rpc_elapsed_ms": 0,
+              "code": "Ok"
+            },
+            {
+              "stage": "import",
+              "elapsed_ms": 0,
+              "budget_ms": 1999,
+              "rpc_elapsed_ms": 1,
+              "code": "Ok",
+              "publications_read": 1000,
+              "publications_selected": 1000,
+              "yields": 0
+            },
+            {
+              "stage": "datasets",
+              "elapsed_ms": 0,
+              "budget_ms": 1998,
+              "rpc_elapsed_ms": 1,
+              "code": "Ok"
+            }
+          ],
+          "stage_sum_ms": 0
+        },
+        {
+          "phase": "pair",
+          "op": "neighbor",
+          "duration_ms": 285.04382027313113,
+          "exit": 0,
+          "shape": {
+            "rows": 1000,
+            "stale_rows": 0
+          },
+          "invalid_reply": null,
+          "start_minus_rib_commit_ms": -55.991172790527344,
+          "in_band": true
+        },
+        {
+          "phase": "quiescent",
+          "op": "policy_stats",
+          "duration_ms": 12.11269199848175,
+          "exit": 0,
+          "shape": {
+            "export_policy_generations": {
+              "2011": 1000
+            },
+            "export_rows": 1000,
+            "import_policy_generations": {
+              "0": 1000
+            },
+            "import_rows": 1000
+          },
+          "invalid_reply": null,
+          "start_minus_rib_commit_ms": 20219.223022460938,
+          "in_band": false,
+          "start_minus_reload_complete_ms": 20000.058889389038,
+          "audit": {
+            "result": "handler_ok",
+            "request_summary": "stage=export elapsed_ms=0 budget_ms=1999 rpc_elapsed_ms=0 code=Ok; stage=import elapsed_ms=0 budget_ms=1999 rpc_elapsed_ms=1 code=Ok publications=1000/1000 yields=0; stage=datasets elapsed_ms=0 budget_ms=1998 rpc_elapsed_ms=1 code=Ok"
+          },
+          "stages": [
+            {
+              "stage": "export",
+              "elapsed_ms": 0,
+              "budget_ms": 1999,
+              "rpc_elapsed_ms": 0,
+              "code": "Ok"
+            },
+            {
+              "stage": "import",
+              "elapsed_ms": 0,
+              "budget_ms": 1999,
+              "rpc_elapsed_ms": 1,
+              "code": "Ok",
+              "publications_read": 1000,
+              "publications_selected": 1000,
+              "yields": 0
+            },
+            {
+              "stage": "datasets",
+              "elapsed_ms": 0,
+              "budget_ms": 1998,
+              "rpc_elapsed_ms": 1,
+              "code": "Ok"
+            }
+          ],
+          "stage_sum_ms": 0
+        }
+      ]
+    },
+    {
+      "reload": 11,
+      "sighup_wall": 1791596747.738684,
+      "rib_commit_wall": 1791596748.368307,
+      "complete_wall": 1791596748.613279,
+      "sighup_to_commit_ms": 629.6231746673584,
+      "sighup_to_complete_ms": 874.5951652526855,
+      "rib_transition": {
+        "message": "RIB export-policy transition completed",
+        "outcome": "committed",
+        "member_count": 1000,
+        "elapsed_ms": 55
+      },
+      "phase_timing": {
+        "message": "reload generation phase timing",
+        "target": "reload_generation_phase",
+        "total_targets": 1000,
+        "cohort_targets": 1000,
+        "remainder_targets": 0,
+        "refresh_count": 0,
+        "outcome": "committed",
+        "authoritative_fallback": false,
+        "preflight_us": 178,
+        "cohort_selection_us": 17704,
+        "cohort_prestage_session_apply_us": 496728,
+        "cohort_rib_transition_us": 296371,
+        "authoritative_remainder_apply_us": 1,
+        "deferred_refresh_dispatch_us": 6,
+        "convergence_check_us": 138,
+        "total_us": 812524,
+        "unattributed_us": 1398
+      },
+      "cohort_exclusions": [
+        {
+          "excluded_non_established": 0,
+          "excluded_session_gone": 0,
+          "excluded_state_timeout": 0
+        }
+      ],
+      "complete_pair_in_band": true,
+      "calls": [
+        {
+          "phase": "pair",
+          "op": "policy_stats",
+          "duration_ms": 12.30900688096881,
+          "exit": 0,
+          "shape": {
+            "export_policy_generations": {
+              "2011": 1000
+            },
+            "export_rows": 1000,
+            "import_policy_generations": {
+              "0": 1000
+            },
+            "import_rows": 1000
+          },
+          "invalid_reply": null,
+          "start_minus_rib_commit_ms": -52.559614181518555,
+          "in_band": true,
+          "audit": {
+            "result": "handler_ok",
+            "request_summary": "stage=export elapsed_ms=0 budget_ms=1999 rpc_elapsed_ms=0 code=Ok; stage=import elapsed_ms=0 budget_ms=1999 rpc_elapsed_ms=1 code=Ok publications=1000/1000 yields=0; stage=datasets elapsed_ms=0 budget_ms=1998 rpc_elapsed_ms=1 code=Ok"
+          },
+          "stages": [
+            {
+              "stage": "export",
+              "elapsed_ms": 0,
+              "budget_ms": 1999,
+              "rpc_elapsed_ms": 0,
+              "code": "Ok"
+            },
+            {
+              "stage": "import",
+              "elapsed_ms": 0,
+              "budget_ms": 1999,
+              "rpc_elapsed_ms": 1,
+              "code": "Ok",
+              "publications_read": 1000,
+              "publications_selected": 1000,
+              "yields": 0
+            },
+            {
+              "stage": "datasets",
+              "elapsed_ms": 0,
+              "budget_ms": 1998,
+              "rpc_elapsed_ms": 1,
+              "code": "Ok"
+            }
+          ],
+          "stage_sum_ms": 0
+        },
+        {
+          "phase": "pair",
+          "op": "neighbor",
+          "duration_ms": 305.6316156871617,
+          "exit": 0,
+          "shape": {
+            "rows": 1000,
+            "stale_rows": 228
+          },
+          "invalid_reply": null,
+          "start_minus_rib_commit_ms": -52.65378952026367,
+          "in_band": true
+        },
+        {
+          "phase": "quiescent",
+          "op": "policy_stats",
+          "duration_ms": 12.360794004052877,
+          "exit": 0,
+          "shape": {
+            "export_policy_generations": {
+              "2012": 1000
+            },
+            "export_rows": 1000,
+            "import_policy_generations": {
+              "0": 1000
+            },
+            "import_rows": 1000
+          },
+          "invalid_reply": null,
+          "start_minus_rib_commit_ms": 20245.031356811523,
+          "in_band": false,
+          "start_minus_reload_complete_ms": 20000.059366226196,
+          "audit": {
+            "result": "handler_ok",
+            "request_summary": "stage=export elapsed_ms=0 budget_ms=1999 rpc_elapsed_ms=0 code=Ok; stage=import elapsed_ms=0 budget_ms=1999 rpc_elapsed_ms=1 code=Ok publications=1000/1000 yields=0; stage=datasets elapsed_ms=0 budget_ms=1998 rpc_elapsed_ms=1 code=Ok"
+          },
+          "stages": [
+            {
+              "stage": "export",
+              "elapsed_ms": 0,
+              "budget_ms": 1999,
+              "rpc_elapsed_ms": 0,
+              "code": "Ok"
+            },
+            {
+              "stage": "import",
+              "elapsed_ms": 0,
+              "budget_ms": 1999,
+              "rpc_elapsed_ms": 1,
+              "code": "Ok",
+              "publications_read": 1000,
+              "publications_selected": 1000,
+              "yields": 0
+            },
+            {
+              "stage": "datasets",
+              "elapsed_ms": 0,
+              "budget_ms": 1998,
+              "rpc_elapsed_ms": 1,
+              "code": "Ok"
+            }
+          ],
+          "stage_sum_ms": 0
+        }
+      ]
+    },
+    {
+      "reload": 12,
+      "sighup_wall": 1791596790.882134,
+      "rib_commit_wall": 1791596791.477845,
+      "complete_wall": 1791596791.70861,
+      "sighup_to_commit_ms": 595.7109928131104,
+      "sighup_to_complete_ms": 826.4760971069336,
+      "rib_transition": {
+        "message": "RIB export-policy transition completed",
+        "outcome": "committed",
+        "member_count": 1000,
+        "elapsed_ms": 56
+      },
+      "phase_timing": {
+        "message": "reload generation phase timing",
+        "target": "reload_generation_phase",
+        "total_targets": 1000,
+        "cohort_targets": 1000,
+        "remainder_targets": 0,
+        "refresh_count": 0,
+        "outcome": "committed",
+        "authoritative_fallback": false,
+        "preflight_us": 68,
+        "cohort_selection_us": 4874,
+        "cohort_prestage_session_apply_us": 476426,
+        "cohort_rib_transition_us": 282800,
+        "authoritative_remainder_apply_us": 1,
+        "deferred_refresh_dispatch_us": 7,
+        "convergence_check_us": 143,
+        "total_us": 765663,
+        "unattributed_us": 1344
+      },
+      "cohort_exclusions": [
+        {
+          "excluded_non_established": 0,
+          "excluded_session_gone": 0,
+          "excluded_state_timeout": 0
+        }
+      ],
+      "complete_pair_in_band": true,
+      "calls": [
+        {
+          "phase": "pair",
+          "op": "policy_stats",
+          "duration_ms": 11.916239280253649,
+          "exit": 0,
+          "shape": {
+            "export_policy_generations": {
+              "2012": 1000
+            },
+            "export_rows": 1000,
+            "import_policy_generations": {
+              "0": 1000
+            },
+            "import_rows": 1000
+          },
+          "invalid_reply": null,
+          "start_minus_rib_commit_ms": -55.36651611328125,
+          "in_band": true,
+          "audit": {
+            "result": "handler_ok",
+            "request_summary": "stage=export elapsed_ms=0 budget_ms=1999 rpc_elapsed_ms=0 code=Ok; stage=import elapsed_ms=0 budget_ms=1999 rpc_elapsed_ms=1 code=Ok publications=1000/1000 yields=0; stage=datasets elapsed_ms=0 budget_ms=1998 rpc_elapsed_ms=1 code=Ok"
+          },
+          "stages": [
+            {
+              "stage": "export",
+              "elapsed_ms": 0,
+              "budget_ms": 1999,
+              "rpc_elapsed_ms": 0,
+              "code": "Ok"
+            },
+            {
+              "stage": "import",
+              "elapsed_ms": 0,
+              "budget_ms": 1999,
+              "rpc_elapsed_ms": 1,
+              "code": "Ok",
+              "publications_read": 1000,
+              "publications_selected": 1000,
+              "yields": 0
+            },
+            {
+              "stage": "datasets",
+              "elapsed_ms": 0,
+              "budget_ms": 1998,
+              "rpc_elapsed_ms": 1,
+              "code": "Ok"
+            }
+          ],
+          "stage_sum_ms": 0
+        },
+        {
+          "phase": "pair",
+          "op": "neighbor",
+          "duration_ms": 306.0905607417226,
+          "exit": 0,
+          "shape": {
+            "rows": 1000,
+            "stale_rows": 111
+          },
+          "invalid_reply": null,
+          "start_minus_rib_commit_ms": -55.50646781921387,
+          "in_band": true
+        },
+        {
+          "phase": "quiescent",
+          "op": "policy_stats",
+          "duration_ms": 11.958210729062557,
+          "exit": 0,
+          "shape": {
+            "export_policy_generations": {
+              "2013": 1000
+            },
+            "export_rows": 1000,
+            "import_policy_generations": {
+              "0": 1000
+            },
+            "import_rows": 1000
+          },
+          "invalid_reply": null,
+          "start_minus_rib_commit_ms": 20230.84044456482,
+          "in_band": false,
+          "start_minus_reload_complete_ms": 20000.075340270996,
+          "audit": {
+            "result": "handler_ok",
+            "request_summary": "stage=export elapsed_ms=0 budget_ms=1999 rpc_elapsed_ms=0 code=Ok; stage=import elapsed_ms=0 budget_ms=1999 rpc_elapsed_ms=1 code=Ok publications=1000/1000 yields=0; stage=datasets elapsed_ms=0 budget_ms=1998 rpc_elapsed_ms=1 code=Ok"
+          },
+          "stages": [
+            {
+              "stage": "export",
+              "elapsed_ms": 0,
+              "budget_ms": 1999,
+              "rpc_elapsed_ms": 0,
+              "code": "Ok"
+            },
+            {
+              "stage": "import",
+              "elapsed_ms": 0,
+              "budget_ms": 1999,
+              "rpc_elapsed_ms": 1,
+              "code": "Ok",
+              "publications_read": 1000,
+              "publications_selected": 1000,
+              "yields": 0
+            },
+            {
+              "stage": "datasets",
+              "elapsed_ms": 0,
+              "budget_ms": 1998,
+              "rpc_elapsed_ms": 1,
+              "code": "Ok"
+            }
+          ],
+          "stage_sum_ms": 0
+        }
+      ]
+    }
+  ]
+}

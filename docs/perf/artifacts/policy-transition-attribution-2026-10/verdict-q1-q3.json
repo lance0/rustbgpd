@@ -1,0 +1,20 @@
+{
+  "q1": {
+    "verdict": "PASS",
+    "problems": []
+  },
+  "q2": {
+    "verdict": "INVALID",
+    "problems": [
+      "irr-ov0:irr_daemon_cg_peak: legs v075=0 main=3, need 3 each"
+    ]
+  },
+  "q3": {
+    "verdict": "PASS",
+    "problems": []
+  },
+  "q4": {
+    "verdict": "SKIPPED",
+    "problems": []
+  }
+}

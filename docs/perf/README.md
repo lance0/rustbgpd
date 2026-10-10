@@ -277,9 +277,12 @@ records.
 | [`policy-attribution-criterion-2026-07.md`][policy-attribution-criterion-2026-07.md] | Unstated | Four Criterion policy-evaluation shapes with same-SHA and isolated controls | The measured deltas do not support CPU-gain attribution | Convergence, reload latency, throughput, or end-to-end gain |
 | [`policy-fallback-per-peer-handoff-2026-07.md`][policy-fallback-per-peer-handoff-2026-07.md] | July 2026 | Clean policy transition with typed grouped and fallback outcomes | Per-member fallback work moved out of the clean actor poll | Total-work improvement or wall-clock scheduler latency |
 | [`policy-regroup-shared-plan-2026-07.md`][policy-regroup-shared-plan-2026-07.md] | July 2026 | Four alternating reloads between pinned base and candidate revisions | Shared regroup-plan transition result for the disclosed fleet | General RIB-query latency during the transition |
+| [`policy-transition-attribution-2026-10.md`][policy-transition-attribution-2026-10.md] | 2026-10-10 | 1,000 × 400 policy-stats reload cell at v0.73.0, #2952's parent and #2952; S2 700 × 400,400 and IRR 0% main against v0.75.0; S2 with 64 filtered routes | Same host and harness: RIB transition 576.5 ms at v0.73.0, 197.5 ms before #2952 and 56.0 ms after (Q1 PASS, Q4 PASS after re-analysis); a filtered route forces the per-peer path in both arms (Q3 PASS); Q2 INVALID on one missing v0.75.0 IRR memory value, its timing bar met | An end-to-end reload improvement at the 1,000-peer cell (cohort and SIGHUP → complete medians rose), a release result, or attribution of the steps before #2952 |
 | [`prefix-retirement-2026-10.md`][prefix-retirement-2026-10.md] | 2026-10-02 | 400,400 IPv4 prefix index entries; three runs per arm | 62.4% fewer retirement instructions and 47.0% fewer cycles, retaining per-value checkpoints | End-to-end reload or IRR latency |
+| [`prestaged-transition-inventory-2026-10.md`][prestaged-transition-inventory-2026-10.md] | 2026-10-04 | S2 reload-stall leg, 700 changed peers × 400,400 prefixes, ABBAAB 3 × 4 reloads per arm, instrumented builds of `65aa92cc0` vs the first #2930 commit | Fenced BuildInventory time 173.2 → 28.1 ms and changed-observer stall p50 364.9 → 208.3 ms (12-reload medians, no overlap between arms); one BuildInventory poll per fix reload; UPDATEs per member unchanged | Uninstrumented behaviour, the merged `aceacb435` code, other shapes or hosts, statistical significance, or completion/memory/CPU improvement (prestage grew by 132 ms) |
 | [`private-single-best-fanout-2026-07.md`][private-single-best-fanout-2026-07.md] | 2026-07-30 | Manager-path fanout at 1, 8, 64, and 256 peers | Improvement at 8, 64, and 256 peers with linear absolute scaling there | A one-peer improvement |
 | [`probe-mp-reach-borrowed-attrs-2026-08.md`][probe-mp-reach-borrowed-attrs-2026-08.md] | August 2026 | IPv6 MP_REACH exact-export probe with paired allocation campaigns | Removed a temporary attribute-vector clone in the measured path | RSS, live heap, convergence, or whole-daemon memory |
+| [`readiness-checkpoint-clock-2026-10.md`][readiness-checkpoint-clock-2026-10.md] | 2026-10-03 | S2: 700 changed peers × 400,400 prefixes, ABBAABBA, four legs × four reloads per arm; main `aae915bb4` against #2920 head `5fedc3499` | Skipping the idle readiness-checkpoint clock read lowered the daemon's median SIGHUP → reload complete from 1,137.15 to 959.15 ms, and the RIB transition by about 129 ms, with separate per-reload ranges; deferred refresh dispatch rose by about 48 ms | Other shapes, operator-read latency, the merged build, a memory change, statistical significance |
 | [`rebaseline-2026-07.md`][rebaseline-2026-07.md] | 2026-07 | Manager-direct RR fanout reconstruction and memory attribution | Post-update-group manager-phase and allocation breakdown | Transport, encode, writer, network, or backpressure cost |
 | [`reload-authoritative-batch-discriminator-2026-08.md`][reload-authoritative-batch-discriminator-2026-08.md] | August 2026 | Two identical 320-member, 183,040-prefix roots on one candidate | Localized later-reload growth to registration/membership, with a negative adjudicator result | A mechanism, improvement, or authorization to optimize |
 | [`reload-flush-envelope-2026-07.md`][reload-flush-envelope-2026-07.md] | 2026-07 | 100-peer fleets with 100k, 300k, and 500k tables | Reload-flush depooling tracked fleet shape more than route volume | A fitted coefficient or fully orthogonalized peer-axis result |
@@ -291,6 +294,7 @@ records.
 | [`rib-ops-prefix-fixture-audit-2026-08.md`][rib-ops-prefix-fixture-audit-2026-08.md] | 2026-08 | Audit of the pre-fix prefix generator above 65,536 entries | Historical rows remain valid only for their duplicate-shaped workload | Unique-table throughput or high-N extrapolation |
 | [`rib-rebaseline-2026-07-13.md`][rib-rebaseline-2026-07-13.md] | 2026-07-13 | Flood and churn shapes plus a two-peer 100k-route run | Production-encoder CPU attribution and a one-capture 210,338,877-byte live-heap component breakdown | Independently measured BIRD tester timeouts |
 | [`rib-route-paging-2026-07.md`][rib-route-paging-2026-07.md] | Initial campaign 2026-07; ordered-index follow-up 2026-07-18 | Bounded unicast pages and grouped advertised-route materialization | Identified full-scope scans and removed grouped full-view cloning | Performance for the later ordered-index method without a receipt |
+| [`route-refresh-readiness-2026-10.md`][route-refresh-readiness-2026-10.md] | 2026-10-10 | Converged-rejoin cell, 700 peers × 400,400 prefixes, K=1, three rounds; four cells per arm, base `85224b2e4` against #3038 | Base: 3 of 4 cells failed on one 200 ms readiness-probe timeout each during back-to-back full-table refresh replays (211–227 ms); fix: 4 of 4 passed with zero misses, replay 231–246 ms (about 9% slower) | A miss rate, other table sizes or families, concurrent-refresh coalescing, or a release result |
 | [`route-server-1000-2026-07.md`][route-server-1000-2026-07.md] | Initial campaign 2026-07-20; latest refresh 2026-08-30 | 1,000 eBGP clients, 400k routes, uniform export policy | The real daemon completed the disclosed capacity and reload gates | Competitor comparison or universal forecast |
 | [`scale-receipt-2026-07.md`][scale-receipt-2026-07.md] | Initial campaign 2026-07-03; latest refresh 2026-08-30 | 1,000 RR clients × 100k routes in the rrharness | Absolute route-reflector fanout and memory baseline | Larger-fleet scaling or real-NIC behavior |
 | [`shared-source-ordering-2026-07.md`][shared-source-ordering-2026-07.md] | 2026-07 | Multi-source speedup target with retained one-source guards | NO-GO because the 400k/1-source row regressed 5.298% | A shipped performance change |
@@ -343,9 +347,12 @@ records.
 [policy-attribution-criterion-2026-07.md]: policy-attribution-criterion-2026-07.md
 [policy-fallback-per-peer-handoff-2026-07.md]: policy-fallback-per-peer-handoff-2026-07.md
 [policy-regroup-shared-plan-2026-07.md]: policy-regroup-shared-plan-2026-07.md
+[policy-transition-attribution-2026-10.md]: policy-transition-attribution-2026-10.md
 [prefix-retirement-2026-10.md]: prefix-retirement-2026-10.md
+[prestaged-transition-inventory-2026-10.md]: prestaged-transition-inventory-2026-10.md
 [private-single-best-fanout-2026-07.md]: private-single-best-fanout-2026-07.md
 [probe-mp-reach-borrowed-attrs-2026-08.md]: probe-mp-reach-borrowed-attrs-2026-08.md
+[readiness-checkpoint-clock-2026-10.md]: readiness-checkpoint-clock-2026-10.md
 [rebaseline-2026-07.md]: rebaseline-2026-07.md
 [reload-authoritative-batch-discriminator-2026-08.md]: reload-authoritative-batch-discriminator-2026-08.md
 [reload-flush-envelope-2026-07.md]: reload-flush-envelope-2026-07.md
@@ -357,6 +364,7 @@ records.
 [rib-ops-prefix-fixture-audit-2026-08.md]: rib-ops-prefix-fixture-audit-2026-08.md
 [rib-rebaseline-2026-07-13.md]: rib-rebaseline-2026-07-13.md
 [rib-route-paging-2026-07.md]: rib-route-paging-2026-07.md
+[route-refresh-readiness-2026-10.md]: route-refresh-readiness-2026-10.md
 [route-server-1000-2026-07.md]: route-server-1000-2026-07.md
 [scale-receipt-2026-07.md]: scale-receipt-2026-07.md
 [shared-source-ordering-2026-07.md]: shared-source-ordering-2026-07.md

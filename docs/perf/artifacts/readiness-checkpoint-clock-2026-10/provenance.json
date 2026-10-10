@@ -1,0 +1,61 @@
+{
+  "schema": 1,
+  "measured_date": "2026-10-03",
+  "measured_window_local": "2026-10-03T08:47:44-04:00/2026-10-03T09:48:57-04:00",
+  "published_date": "2026-10-10",
+  "published_retroactively_from_retained_raw_data": true,
+  "driver": "bench/scale/headline/run-campaign.sh (just bench-headline), CELLS=matrix MATRIX_SCENARIOS=s2 RUNS=4",
+  "shape": {
+    "scenario": "s2",
+    "peers": 700,
+    "changed_peers": 700,
+    "prefixes": 400400,
+    "reloads_per_leg": 4,
+    "control_secs": 30,
+    "bird_threads": 8
+  },
+  "order": ["main-r1", "fast-r1", "fast-r2", "main-r2", "main-r3", "fast-r3", "fast-r4", "main-r4"],
+  "order_pattern": "ABBAABBA",
+  "legs_per_arm": 4,
+  "reloads_per_arm": 16,
+  "excluded_legs": [],
+  "arms": {
+    "main": {
+      "role": "base: main before #2920",
+      "source_commit": "aae915bb49600a6711f2edecc6d374038ebe061a",
+      "tree": "c10d9494ee2a923d856664c31613b042b3f65dca",
+      "runner_provenance_commit": "3c533ac809ee00d124ec266666eafb921c256bbe",
+      "runner_provenance_commit_note": "local, never-published commit with the same tree, parented on aae915bb4",
+      "daemon_sha256": "d99bdc7d0fec9ecfa2dacebb6b2ec7f5d3ed354a69490ed01095615a4ee9c874",
+      "reloadstall_sha256": "2d461bb7c553ef064658a742715252479fdbacdd93487dce6715ac4de0cbde7b"
+    },
+    "fast": {
+      "role": "candidate: #2920 head as measured",
+      "source_commit": "5fedc3499cadf3e99c7996c8b8190a08fc3fd47e",
+      "tree": "e47fff14f512c2852c691783dc367855dff6a2f2",
+      "runner_provenance_commit": "bd7847212ee34d6d1ccb523cbf801e945b372436",
+      "runner_provenance_commit_note": "local, never-published commit with the same tree",
+      "daemon_sha256": "d2b1ac4c6ad49857fd2a642685fb2d687a7f02776e80a62dcc7f89837a895147",
+      "reloadstall_sha256": "034d46dd61b1e7d493756f0b04abd97b051551d0d1a0f3db9a1f6e723ef47235"
+    }
+  },
+  "pull_request": {
+    "number": 2920,
+    "title": "perf(rib): skip the readiness clock when no query is queued",
+    "final_head": "2d4c03ddabf0efac69e6dffdbc49b1f849b3f061",
+    "merge_commit": "ff666f7ecb57e3dba06fce824d65d428e73e3de1",
+    "measured_head_to_final_head": "two later commits: a changelog fragment, and a change to code compiled only under cfg(test) or the non-default bench-internals feature plus a unit test; the measured release daemon was not rebuilt from the final head or the merge commit"
+  },
+  "builds": [
+    "cargo build --release --locked -p rustbgpd -p rustbgpctl -p rs-config-render",
+    "cargo build --profile scale --locked --manifest-path bench/scale/reloadstall/Cargo.toml"
+  ],
+  "toolchain": "rustc 1.99.0 (b940084d7 2026-09-28)",
+  "host_class": {
+    "cpu": "AMD Ryzen Threadripper 7970X, 64 CPUs, all performance governors",
+    "kernel": "Linux 7.0.0-30-generic x86_64",
+    "cpu_affinity": "0-63 inherited by every runner, harness and daemon",
+    "memory_fence": "daemon in a cgroup v2 scope with memory.swap.max=0",
+    "lock": "shared host lock taken per leg by the runners"
+  }
+}
