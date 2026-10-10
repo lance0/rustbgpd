@@ -773,8 +773,8 @@ check at 16 peers × 1,600 prefixes, not a measurement. `DRY_RUN=1` prints the
 arms, the campaign file and every command without locking or building.
 
 Before the first cell, `converged_rejoin.py init` fixes the shape and the bars
-in `OUT_DIR/campaign.json`, and the driver records that file's sha256 in
-`manifest.txt` before any cell runs. The verdict reads no other bars, and a
+in `OUT_DIR/campaign.json`, and the driver hashes that file as soon as init
+writes it, before the builds, and records the sha256 in `manifest.txt`. The verdict reads no other bars, and a
 `campaign.json` edited after init no longer matches the recorded digest, so
 the verdict is INVALID rather than a different PASS or FAIL. The default bars:
 

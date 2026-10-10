@@ -17,9 +17,9 @@
 # Before the first cell, converged_rejoin.py writes OUT_DIR/campaign.json:
 # the shape, the schedule's inputs and the bars. ACCEPTANCE names a JSON file
 # that overrides the default bars (see converged_rejoin.py); write it before
-# the run, because the verdict reads only campaign.json; its sha256 goes in
-# manifest.txt before the first cell, and the analyzer returns INVALID if
-# campaign.json changes afterwards. Every cell runs a
+# the run, because the verdict reads only campaign.json; its sha256, taken
+# as soon as init writes it, goes in manifest.txt, and the analyzer returns
+# INVALID if campaign.json changes afterwards. Every cell runs a
 # fresh daemon. Repetition 1, 3, ... runs base-Klo head-Klo head-Khi
 # base-Khi; even repetitions run the reverse. Each cell keeps
 # raw/ARM-kK-repN/{reloadstall.log,daemon.log,metrics-final.prom,...}; the
@@ -175,6 +175,8 @@ mkdir "$OUT"
 mkdir "$OUT/raw" "$OUT/quiet" "$OUT/bin" "$OUT/trees"
 [[ -z $SMOKE ]] || echo "pipeline check at a reduced shape; not a measurement" >"$OUT/SMOKE"
 python3 "$PY" init "$OUT" "${init_args[@]}" || exit 2
+# Pin the bars now: an edit during the builds must not become the expected digest.
+CAMPAIGN_SHA=$(provenance_sha256_file "$OUT/campaign.json") || { echo "cannot hash $OUT/campaign.json" >&2; exit 2; }
 SCEN='' DPID='' HPID=''
 
 log() { echo "$(date -u +%FT%TZ) $*" | tee -a "$OUT/progress.txt"; }
@@ -240,7 +242,7 @@ rmdir "$OUT/trees"
     echo "reloadstall_sha256=$(provenance_sha256_file "$HARNESS")"
     echo "gen_scenario_sha256=$(provenance_sha256_file "$REPO/bench/scale/reloadstall/gen-scenario.py")"
     echo "analyzer_sha256=$(provenance_sha256_file "$PY")"
-    echo "campaign_sha256=$(provenance_sha256_file "$OUT/campaign.json")"
+    echo "campaign_sha256=$CAMPAIGN_SHA"
     echo "rustc=$(rustc --version)"
     echo "kernel=$(uname -r)"
     echo "peers=$PEERS prefixes=$PREFIXES ks=$KLO,$KHI repeats=$REPEATS rounds=$ROUNDS control_secs=$CONTROL_SECS quiet=$QUIET smoke=${SMOKE:+1}"

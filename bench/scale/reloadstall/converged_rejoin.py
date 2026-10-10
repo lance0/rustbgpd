@@ -4,8 +4,8 @@
 run-converged-rejoin.sh drives the cells; this file owns everything the
 verdict depends on, so the shape, the schedule and the bars are fixed in
 OUT_DIR/campaign.json before the first cell runs and the analysis reads only
-that file and the cell outputs. The driver records campaign.json's sha256 in
-OUT_DIR/manifest.txt before the first cell; the analyzer refuses a
+that file and the cell outputs. The driver hashes campaign.json right after
+init and records the sha256 in OUT_DIR/manifest.txt; the analyzer refuses a
 campaign.json that no longer matches it, so a bar edited after the run makes
 the verdict INVALID rather than flipping it.
 
