@@ -9,11 +9,13 @@
 //! UPDATE by the total encode time divided by the core count.
 //!
 //! The first member to consume its envelope is elected encoder through the
-//! envelope's [`rustbgpd_rib::SharedGroupEncode`] cell (a synchronous `OnceLock`, so the
-//! election commits with no await point that could strand an initialized
-//! cell without a live encoder). The encoder prepares, groups, and encodes
-//! the inventory in bounded route slices, publishing each slice's chunks as
-//! they are produced; every other member proves byte-equivalence with
+//! envelope's [`rustbgpd_rib::SharedGroupEncode`] cell, a synchronous `OnceLock`.
+//! Election and terminal-guard installation complete before any suspension;
+//! the producer retains the guard across slice yields, so an initialized cell
+//! has either a live encoder or a terminal stream. After grouping the whole
+//! inventory by source, the encoder prepares, groups, and encodes bounded
+//! route slices, publishing each slice's chunks as they are produced. Every
+//! other member proves byte-equivalence with
 //! [`SessionExportProfile::has_same_wire_encoding`] and then *streams* the
 //! chunks — sending chunk `i` as soon as it exists instead of awaiting the
 //! whole payload — skipping the chunks of its own source (split horizon)
@@ -22,10 +24,11 @@
 //!
 //! Failure semantics: any anomaly (preparation failure, OTC filter hit,
 //! single-entry oversize, scoped-link-local IPv4 drop) terminates the
-//! stream as `Failed` — published by a drop guard even if the encoder
-//! unwinds — and every member falls back to the ordinary per-session
-//! encode, which owns the established diagnostics and teardown semantics
-//! for each case. Mid-stream fallback is safe by construction — the
+//! stream as `Failed`. The drop guard also publishes failure and notifies
+//! waiters if the encoder unwinds or its suspended future is cancelled.
+//! Every member falls back to the ordinary per-session encode, which owns
+//! the established diagnostics and teardown semantics for each case.
+//! Mid-stream fallback is safe by construction — the
 //! invariant is per-NLRI attribute identity, not byte-identical chunks (an
 //! extended-message member's local re-encode chunks at its negotiated
 //! ceiling, and the shared stream's source-sorted walk yields different
@@ -61,16 +64,10 @@ use std::sync::{Arc, Mutex};
 /// digit milliseconds at reload-stall route shapes — instead of the full
 /// table. Sources spanning a slice boundary cost one extra UPDATE each.
 ///
-/// INVARIANT — do NOT "fix" the long full-table encode (~1 s at 400k
-/// routes) by adding a yield or await to the slice loop in
-/// `encode_and_send_shared_group`. Consumers await the stream's `Notify`
-/// with no timeout, and the liveness proof (an initialized cell always
-/// reaches a terminal) relies on the encoder being fully synchronous after
-/// election: task abort cannot preempt sync code, so the drop guard is
-/// guaranteed to run. An await point plus cancellation at that await would
-/// strand every consumer forever. Any yield here requires first giving
-/// consumers a cancellation-safe wake (watchdog timeout or a drop-guard
-/// rework that survives encoder cancellation).
+/// The elected encoder yields only after publishing a complete slice. Its
+/// guard survives every suspension and publishes `Failed` if the producer
+/// future is dropped, waking followers so they can use ordinary fallback.
+/// Source grouping still prepares the whole inventory before the first slice.
 pub(super) const PROGRESSIVE_SLICE_ROUTES: usize = 2048;
 
 /// Inventory indices grouped by source peer: sources in address order,
@@ -226,9 +223,10 @@ impl ProgressiveUnicastEncode {
     }
 }
 
-/// Publishes `Failed` if the encoder unwinds (panic or early return) before
-/// its explicit `finish(Complete)`, so consumers can never wait forever on a
-/// stream with no live encoder.
+/// Publishes `Failed` and notifies waiters if the producer returns early,
+/// unwinds, or is cancelled before its explicit `finish(Complete)`. Installed
+/// before the first suspension and retained across slice yields, the guard
+/// keeps the stream backed by either a live encoder or a terminal result.
 pub(super) struct EncoderGuard<'cell>(pub(super) &'cell ProgressiveUnicastEncode);
 
 impl Drop for EncoderGuard<'_> {
@@ -503,9 +501,9 @@ impl PeerSession {
         }
     }
 
-    /// Elect and publish synchronously; both roles then resume from a cursor
-    /// owned by the ordinary session loop.
-    pub(super) fn prepare_shared_group(
+    /// Elect synchronously, then publish with cooperative slice boundaries.
+    /// Both roles subsequently resume from the ordinary session cursor.
+    pub(super) async fn prepare_shared_group(
         &mut self,
         update: &OutboundRouteUpdate,
     ) -> Option<(Arc<ProgressiveUnicastEncode>, usize)> {
@@ -529,7 +527,9 @@ impl PeerSession {
             .downcast::<ProgressiveUnicastEncode>()
             .ok()?;
         if elected_encoder {
-            let next = self.encode_and_send_shared_group(&encode, update, export)?;
+            let next = self
+                .encode_and_send_shared_group(&encode, update, export)
+                .await?;
             Some((encode, next))
         } else if export.has_same_wire_encoding(&encode.profile) {
             Some((encode, 0))
@@ -543,16 +543,11 @@ impl PeerSession {
     /// the way. Scoped-link-local peers and any slice failure terminate the
     /// stream as `Failed` (via the guard) and fall back locally.
     ///
-    /// INVARIANT — this function must stay fully synchronous (no `.await`,
-    /// no yield) between the `OnceLock` election and `finish`/guard drop.
-    /// Consumers await the stream's `Notify` with no timeout; the liveness
-    /// proof that an initialized cell always has a live encoder (or its
-    /// guard's terminal) depends on task abort being unable to preempt sync
-    /// code. Introducing an await point here means a cancelled encoder task
-    /// strands every consumer forever. Do not make this `async` — any yield
-    /// requires first giving consumers a cancellation-safe wake (watchdog
-    /// timeout or a drop-guard rework that survives encoder cancellation).
-    fn encode_and_send_shared_group(
+    /// Election and guard construction precede the first suspension. The
+    /// producer owns the guard through every slice yield, so cancellation
+    /// publishes `Failed` and wakes every follower. Yield only after whole
+    /// chunks are published and the stream mutex has been released.
+    async fn encode_and_send_shared_group(
         &mut self,
         encode: &ProgressiveUnicastEncode,
         update: &OutboundRouteUpdate,
@@ -584,8 +579,6 @@ impl PeerSession {
         let mut sent: u64 = 0;
         let mut idx = 0;
         while idx < order.len() {
-            // Synchronous only: do not weaken the encoder election/guard
-            // liveness invariant to service a queued operator snapshot.
             self.poll_shared_group_command();
             let end = (idx + PROGRESSIVE_SLICE_ROUTES).min(order.len());
             let chunks = encode_shared_unicast_slice(
@@ -618,6 +611,9 @@ impl PeerSession {
             }
             encode.publish(chunks);
             idx = end;
+            if idx < order.len() && idx.is_multiple_of(2 * PROGRESSIVE_SLICE_ROUTES) {
+                tokio::task::yield_now().await;
+            }
         }
         encode.finish(StreamTerminal::Complete);
         drop(guard);

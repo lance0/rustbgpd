@@ -1029,10 +1029,11 @@ pub enum ExportPolicyCohortOutcome {
 /// export profile and the encoder's, and falls back to its ordinary
 /// per-session encode when the proof fails.
 ///
-/// The lock is synchronous on purpose: initialization only *constructs* the
-/// (empty) progressive stream state, so encoder election commits with no
-/// await point between winning the election and starting to encode — a
-/// cancelled task can never leave an initialized cell with no live encoder.
+/// The synchronous lock only constructs the empty progressive stream state.
+/// Transport installs its terminal guard after election, before the first
+/// suspension, and retains it across slice yields. Cancelling the producer
+/// future publishes a failed terminal and notifies waiting members: an
+/// initialized cell has either a live encoder or a terminal stream.
 #[derive(Default)]
 pub struct SharedGroupEncode {
     /// First-consumer-initializes cell; losers stream instead of re-encoding.
