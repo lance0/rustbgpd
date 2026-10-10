@@ -67,7 +67,7 @@ impl PeerSession {
     /// Direct encoder fixtures explicitly drive the same bounded cursor used
     /// by `run()`; control responsiveness is tested through the real actor.
     async fn test_drain_outbound(&mut self, update: OutboundRouteUpdate) {
-        self.handle_outbound_route_update(update);
+        self.handle_outbound_route_update(update).await;
         while let Some(pending) = self.pending_outbound.as_ref() {
             pending.ready(self.writer_bulk_tx.as_ref()).await;
             self.advance_pending_outbound();
@@ -406,7 +406,7 @@ async fn shared_group_pending_stream_waits_without_self_waking() {
     }
     let (mut member, _wire) = shared_group_member(65001).await;
     let (typed, update, chunks) = shared_query_update(&member, &[make_route(100)]);
-    member.handle_outbound_route_update(update);
+    member.handle_outbound_route_update(update).await;
     {
         let pending = member.pending_outbound.as_ref().unwrap();
         let ready = pending.ready(member.writer_bulk_tx.as_ref());
@@ -599,7 +599,7 @@ async fn shared_group_encoder_and_buffered_consumer_service_queued_reads() {
             typed.test_finish(super::shared_group::StreamTerminal::Complete);
             update
         };
-        member.handle_outbound_route_update(update);
+        member.handle_outbound_route_update(update).await;
         if !elected_encoder {
             assert_eq!(member.updates_sent, 2048);
             assert!(member.pending_outbound.is_some());
@@ -643,6 +643,240 @@ async fn shared_group_encoder_and_buffered_consumer_service_queued_reads() {
     }
 }
 
+fn shared_fairness_routes() -> Vec<Route> {
+    (0..=2 * super::shared_group::PROGRESSIVE_SLICE_ROUTES)
+        .map(|index| {
+            let index = u32::try_from(index).unwrap();
+            let source = Ipv4Addr::new(10, 44, 0, if index % 2 == 0 { 1 } else { 2 });
+            let mut route = make_sourced_route(
+                source,
+                Ipv4Prefix::new(Ipv4Addr::from((20 << 24) | index), 32),
+                64_601,
+            );
+            AttrSet::edit(&mut route.attributes, |attrs| {
+                attrs.push(PathAttribute::Med(index));
+            });
+            route
+        })
+        .collect()
+}
+
+fn shared_fairness_member() -> (
+    PeerSession,
+    mpsc::Sender<PeerCommand>,
+    mpsc::Receiver<Bytes>,
+) {
+    let (mut member, commands, _rib_rx) = make_test_session_with_channels(65001, 65002, 64);
+    member.negotiated = Some(Arc::new(negotiated_session(65002, false)));
+    member.config.route_server_client = true;
+    let (bulk, frames) = mpsc::channel(8192);
+    member.writer_bulk_tx = Some(bulk);
+    (member, commands, frames)
+}
+
+/// The synchronous benchmark must drive real slice yields without a runtime.
+#[cfg(feature = "bench-internals")]
+#[test]
+fn shared_group_benchmark_drives_slice_yields_without_runtime() {
+    assert!(tokio::runtime::Handle::try_current().is_err());
+    let mut bench = crate::OutboundGroupBench::new(2, 1 << 16);
+    let _ = bench.send(&Arc::new(shared_fairness_routes()), &[]);
+}
+
+/// A read queued after encoding starts must run before all slices complete,
+/// even with enough writer capacity to admit the entire inventory immediately.
+#[tokio::test]
+async fn shared_group_elected_encoder_yields_for_new_reads() {
+    use super::shared_group::{ProgressiveUnicastEncode, StreamTerminal};
+    use std::future::Future;
+    use std::task::{Context, Waker};
+
+    let (mut member, commands, _frames) = shared_fairness_member();
+    let shared = Arc::new(rustbgpd_rib::SharedGroupEncode::default());
+    let routes = shared_fairness_routes();
+    let update = shared_group_envelope(&member, &shared, Ipv4Addr::new(10, 44, 0, 2), &routes);
+    let mut delivery = Box::pin(member.handle_outbound_route_update(update));
+    let mut cx = Context::from_waker(Waker::noop());
+    assert!(delivery.as_mut().poll(&mut cx).is_pending());
+    let stream = shared
+        .cell
+        .get()
+        .unwrap()
+        .downcast_ref::<ProgressiveUnicastEncode>()
+        .unwrap();
+    let (published, terminal) = stream.test_snapshot();
+    assert_eq!(published, super::shared_group::PROGRESSIVE_SLICE_ROUTES);
+    assert_eq!(terminal, None);
+
+    let (reply, mut response) = oneshot::channel();
+    commands
+        .try_send(PeerCommand::QueryState { reply })
+        .unwrap();
+    assert!(delivery.as_mut().poll(&mut cx).is_pending());
+    let snapshot = response
+        .try_recv()
+        .expect("new read answered between slices");
+    assert_eq!(snapshot.updates_sent, u64::try_from(published).unwrap());
+    assert_eq!(stream.test_snapshot().1, None);
+    assert!(delivery.as_mut().poll(&mut cx).is_ready());
+    assert_eq!(stream.test_snapshot().1, Some(StreamTerminal::Complete));
+}
+
+/// A yield must not let a later read pass the first deferred policy mutation.
+#[tokio::test]
+async fn shared_group_elected_encoder_keeps_mutation_before_later_read() {
+    use std::future::Future;
+    use std::task::{Context, Waker};
+
+    let (mut member, commands, _frames) = shared_fairness_member();
+    let generation = member.import_policy_generation;
+    let shared = Arc::new(rustbgpd_rib::SharedGroupEncode::default());
+    let update = shared_group_envelope(
+        &member,
+        &shared,
+        Ipv4Addr::new(10, 44, 0, 2),
+        &shared_fairness_routes(),
+    );
+    let mut delivery = Box::pin(member.handle_outbound_route_update(update));
+    let mut cx = Context::from_waker(Waker::noop());
+    assert!(delivery.as_mut().poll(&mut cx).is_pending());
+    let (reply, mut mutation) = oneshot::channel();
+    commands
+        .try_send(PeerCommand::UpdateImportPolicy {
+            policy: Some(Box::new(PolicyChain::new(vec![Policy {
+                entries: vec![],
+                default_action: PolicyAction::Deny,
+            }]))),
+            reply,
+        })
+        .unwrap();
+    let (reply, mut response) = oneshot::channel();
+    commands
+        .try_send(PeerCommand::QueryImportPolicyTermHits { reply })
+        .unwrap();
+    assert!(delivery.as_mut().poll(&mut cx).is_pending());
+    assert!(matches!(
+        response.try_recv(),
+        Err(oneshot::error::TryRecvError::Empty)
+    ));
+    assert!(matches!(
+        mutation.try_recv(),
+        Err(oneshot::error::TryRecvError::Empty)
+    ));
+    assert!(delivery.as_mut().poll(&mut cx).is_ready());
+    drop(delivery);
+    assert!(matches!(
+        response.try_recv(),
+        Err(oneshot::error::TryRecvError::Empty)
+    ));
+    {
+        let actor = member.run();
+        tokio::pin!(actor);
+        let snapshot = tokio::select! {
+            reply = &mut response => reply.unwrap().unwrap(),
+            stopped = &mut actor => panic!("actor stopped before ordered reply: {stopped:?}"),
+        };
+        assert_eq!(snapshot.generation, generation + 1);
+        mutation
+            .try_recv()
+            .expect("mutation acknowledged before snapshot")
+            .unwrap();
+    }
+}
+
+/// Dropping an initialized producer at its real yield wakes a waiting follower,
+/// which retains source exclusion while replaying the complete local fallback.
+#[tokio::test]
+async fn shared_group_elected_encoder_cancellation_wakes_follower_and_falls_back() {
+    use super::shared_group::{ProgressiveUnicastEncode, StreamTerminal};
+    use std::future::Future;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::task::{Context, Wake, Waker};
+
+    struct WakeCount(AtomicUsize);
+    impl Wake for WakeCount {
+        fn wake(self: Arc<Self>) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+        fn wake_by_ref(self: &Arc<Self>) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+    let (mut encoder, _commands, _own_frames) = shared_fairness_member();
+    let (mut follower, _commands, mut frames) = shared_fairness_member();
+    let shared = Arc::new(rustbgpd_rib::SharedGroupEncode::default());
+    let routes = shared_fairness_routes();
+    let excluded = Ipv4Addr::new(10, 44, 0, 2);
+    let update = shared_group_envelope(&encoder, &shared, excluded, &routes);
+    let mut producer = Box::pin(encoder.handle_outbound_route_update(update));
+    assert!(
+        producer
+            .as_mut()
+            .poll(&mut Context::from_waker(Waker::noop()))
+            .is_pending()
+    );
+    let stream = shared
+        .cell
+        .get()
+        .unwrap()
+        .downcast_ref::<ProgressiveUnicastEncode>()
+        .unwrap();
+    assert_eq!(
+        stream.test_snapshot(),
+        (super::shared_group::PROGRESSIVE_SLICE_ROUTES, None)
+    );
+    let update = shared_group_envelope(&follower, &shared, excluded, &routes);
+    follower.handle_outbound_route_update(update).await;
+    {
+        let pending = follower.pending_outbound.as_ref().unwrap();
+        let ready = pending.ready(follower.writer_bulk_tx.as_ref());
+        tokio::pin!(ready);
+        let notifications = Arc::new(WakeCount(AtomicUsize::new(0)));
+        let waker = Waker::from(Arc::clone(&notifications));
+        assert!(
+            ready
+                .as_mut()
+                .poll(&mut Context::from_waker(&waker))
+                .is_pending()
+        );
+        let before = notifications.0.load(Ordering::SeqCst);
+        drop(producer);
+        assert_eq!(stream.test_snapshot().1, Some(StreamTerminal::Failed));
+        assert!(
+            notifications.0.load(Ordering::SeqCst) > before,
+            "registered follower was notified"
+        );
+        assert!(
+            ready
+                .as_mut()
+                .poll(&mut Context::from_waker(&waker))
+                .is_ready()
+        );
+    }
+    while follower.pending_outbound.is_some() {
+        follower.advance_pending_outbound();
+    }
+    let mut counts = std::collections::BTreeMap::new();
+    while let Ok(frame) = frames.try_recv() {
+        let parsed = parse_frame(&frame, false);
+        for entry in parsed.announced {
+            let index = u32::from(entry.prefix.addr) & 0x00ff_ffff;
+            assert_eq!(index % 2, 0, "excluded source must never reach the writer");
+            assert!(parsed.attributes.contains(&PathAttribute::Med(index)));
+            *counts.entry(entry.prefix).or_insert(0_usize) += 1;
+        }
+    }
+    assert_eq!(
+        counts.len(),
+        super::shared_group::PROGRESSIVE_SLICE_ROUTES + 1
+    );
+    assert_eq!(
+        counts.values().filter(|&&count| count == 2).count(),
+        super::shared_group::PROGRESSIVE_SLICE_ROUTES
+    );
+    assert_eq!(counts.values().filter(|&&count| count == 1).count(), 1);
+}
+
 #[tokio::test]
 async fn shared_group_buffered_consumer_yields_for_new_reads() {
     let (mut member, commands, _rib_rx) = make_test_session_with_channels(65001, 65002, 64);
@@ -671,7 +905,7 @@ async fn shared_group_buffered_consumer_yields_for_new_reads() {
     member.writer_join.take().unwrap().abort();
     let (bulk, _held) = mpsc::channel(2048);
     member.writer_bulk_tx = Some(bulk);
-    member.handle_outbound_route_update(update);
+    member.handle_outbound_route_update(update).await;
     assert_eq!(member.updates_sent, 2048);
     let (reply, state) = oneshot::channel();
     commands
@@ -1765,7 +1999,7 @@ async fn shared_group_withdrawals_do_not_wait_for_the_first_shared_chunk() {
         (parsed.withdrawn.len(), parsed.announced.len())
     };
 
-    member.handle_outbound_route_update(update);
+    member.handle_outbound_route_update(update).await;
     assert_eq!(withdrawn(frames.try_recv().unwrap()), (1, 0));
     {
         let pending = member.pending_outbound.as_ref().unwrap();

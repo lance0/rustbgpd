@@ -2831,7 +2831,7 @@ impl PeerSession {
                 // Outbound route updates from RIB manager
                 Some(update) = outbound_rx.recv(),
                     if receive_outbound => {
-                    self.handle_outbound_route_update(update);
+                    self.handle_outbound_route_update(update).await;
                     tokio::task::yield_now().await;
                 }
             }

@@ -2,8 +2,10 @@
 //! in-memory writer queue, so the outbound grouping and encode path can be
 //! timed without TCP.
 
+use std::future::Future;
 use std::net::Ipv4Addr;
 use std::sync::Arc;
+use std::task::{Context, Waker};
 
 use bytes::Bytes;
 use rustbgpd_fsm::NegotiatedSession;
@@ -108,7 +110,15 @@ impl OutboundEncodeBench {
     /// outside the returned duration.
     fn deliver(&mut self, update: OutboundRouteUpdate) -> std::time::Duration {
         let start = std::time::Instant::now();
-        self.session.handle_outbound_route_update(update);
+        {
+            // This producer future only suspends to yield between encoded
+            // slices; writer admission never awaits capacity or I/O. Poll it
+            // directly so this synchronous microbench continues to measure
+            // session work without adding a runtime or writer-drain work.
+            let mut delivery = std::pin::pin!(self.session.handle_outbound_route_update(update));
+            let mut cx = Context::from_waker(Waker::noop());
+            while delivery.as_mut().poll(&mut cx).is_pending() {}
+        }
         let mut elapsed = start.elapsed();
         while self.session.pending_outbound.is_some() {
             while self.bulk_rx.try_recv().is_ok() {}

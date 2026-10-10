@@ -99,7 +99,7 @@ async fn outbound_pacing_full_writer_services_snapshot_and_shutdown() {
     bulk.try_send(Bytes::from_static(b"held")).unwrap();
     session.writer_bulk_tx = Some(bulk);
     let update = pacing_update(&session, pacing_routes(5_000, true));
-    session.handle_outbound_route_update(update);
+    session.handle_outbound_route_update(update).await;
     assert!(session.pending_outbound.is_some());
     let actor = tokio::spawn(async move {
         session.run().await.unwrap();
@@ -132,7 +132,7 @@ async fn outbound_pacing_resource_deadline_is_finite_with_send_hold_disabled() {
     let (priority, mut priority_rx) = mpsc::unbounded_channel();
     session.writer_priority_tx = Some(priority);
     let update = pacing_update(&session, pacing_routes(2, true));
-    session.handle_outbound_route_update(update);
+    session.handle_outbound_route_update(update).await;
     let deadline = session
         .outbound_admission_timer
         .as_ref()
@@ -199,7 +199,7 @@ async fn outbound_pacing_samples_backlog_before_envelope_completion() {
     session.writer_bulk_tx = Some(bulk);
 
     let update = pacing_update(&session, pacing_routes(3, true));
-    session.handle_outbound_route_update(update);
+    session.handle_outbound_route_update(update).await;
     assert!(session.pending_outbound.is_some());
     assert_eq!(session.writer_bulk_tx.as_ref().unwrap().capacity(), 0);
     assert_eq!(
@@ -273,7 +273,7 @@ async fn outbound_pacing_exact_capacity_finishes_without_waiting_for_drain() {
     session.writer_bulk_tx = Some(bulk);
     let mut update = pacing_update(&session, pacing_routes(1, true));
     update.end_of_rib.clear();
-    session.handle_outbound_route_update(update);
+    session.handle_outbound_route_update(update).await;
     assert!(session.pending_outbound.is_none());
     assert!(session.outbound_admission_timer.is_none());
 }
@@ -317,7 +317,7 @@ async fn outbound_pacing_releases_deadline_after_filtered_slice() {
             update.announce_source_exclusion = Some(IpAddr::V4(excluded));
             update
         };
-        session.handle_outbound_route_update(update);
+        session.handle_outbound_route_update(update).await;
         let original_deadline = session
             .outbound_admission_timer
             .as_ref()
@@ -385,7 +385,7 @@ async fn outbound_pacing_shared_encoder_full_does_not_truncate_group() {
     let routes = pacing_routes(5_000, true);
     let excluded = Ipv4Addr::new(192, 0, 2, 254);
     let update = shared_group_envelope(&encoder, &shared, excluded, &routes);
-    encoder.handle_outbound_route_update(update);
+    encoder.handle_outbound_route_update(update).await;
     assert!(encoder.pending_outbound.is_some());
     let published = shared
         .cell
@@ -398,7 +398,7 @@ async fn outbound_pacing_shared_encoder_full_does_not_truncate_group() {
         (5_000, Some(StreamTerminal::Complete))
     );
     let update = shared_group_envelope(&consumer, &shared, excluded, &routes);
-    consumer.handle_outbound_route_update(update);
+    consumer.handle_outbound_route_update(update).await;
     while consumer.pending_outbound.is_some() {
         consumer.advance_pending_outbound();
     }
@@ -439,7 +439,7 @@ async fn outbound_pacing_slice_frame_count_preserves_grouping() {
         session.writer_bulk_tx = Some(bulk);
         let mut update = pacing_update(&session, pacing_routes(5_000, distinct));
         update.end_of_rib.clear();
-        session.handle_outbound_route_update(update);
+        session.handle_outbound_route_update(update).await;
         while session.pending_outbound.is_some() {
             session.advance_pending_outbound();
         }
@@ -473,7 +473,7 @@ async fn outbound_pacing_stalled_writer_keeps_policy_apply_restore_fifo() {
     bulk.try_send(Bytes::from_static(b"held")).unwrap();
     session.writer_bulk_tx = Some(bulk);
     let update = pacing_update(&session, pacing_routes(2, true));
-    session.handle_outbound_route_update(update);
+    session.handle_outbound_route_update(update).await;
     while rib_rx.try_recv().is_ok() {}
     let actor = tokio::spawn(async move { session.run().await });
     let (reply, lost_ack) = oneshot::channel();
@@ -518,7 +518,7 @@ async fn outbound_pacing_keeps_original_snapshot_across_config_publication() {
     let (bulk, mut receiver) = mpsc::channel(1);
     session.writer_bulk_tx = Some(bulk);
     let update = pacing_update(&session, pacing_routes(2, true));
-    session.handle_outbound_route_update(update);
+    session.handle_outbound_route_update(update).await;
     let (reply, response) = oneshot::channel();
     let _ = session
         .handle_command(PeerCommand::UpdateGracefulShutdown {
@@ -535,7 +535,7 @@ async fn outbound_pacing_keeps_original_snapshot_across_config_publication() {
         }
     }
     let update = pacing_update(&session, pacing_routes(1, true));
-    session.handle_outbound_route_update(update);
+    session.handle_outbound_route_update(update).await;
     while session.pending_outbound.is_some() {
         while let Ok(frame) = receiver.try_recv() {
             captured.push(frame);
@@ -594,7 +594,7 @@ async fn outbound_pacing_mixed_family_markers_and_overrides_fit_one_slot() {
         end_of_rib: vec![(Afi::Ipv4, Safi::Unicast), (Afi::Ipv6, Safi::Unicast)],
         ..OutboundRouteUpdate::default()
     };
-    session.handle_outbound_route_update(update);
+    session.handle_outbound_route_update(update).await;
     let mut messages = Vec::new();
     loop {
         while let Ok(mut bytes) = receiver.try_recv() {
@@ -651,7 +651,7 @@ async fn outbound_pacing_closed_writer_retires_admission_deadline() {
         bulk.try_send(Bytes::from_static(b"held")).unwrap();
         session.writer_bulk_tx = Some(bulk);
         let update = pacing_update(&session, pacing_routes(2, true));
-        session.handle_outbound_route_update(update);
+        session.handle_outbound_route_update(update).await;
         assert!(session.outbound_admission_timer.is_some());
         drop(held);
         if expiry_first {

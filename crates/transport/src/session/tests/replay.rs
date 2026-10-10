@@ -996,7 +996,7 @@ async fn replay_terminal_pacing_fences_all_markers_and_cancels_tail() {
         let mut terminal = empty_outbound_update();
         terminal.replay = Some(token);
         terminal.end_of_rib = vec![(Afi::Ipv4, Safi::Unicast), (Afi::Ipv6, Safi::Unicast)];
-        session.handle_outbound_route_update(terminal);
+        session.handle_outbound_route_update(terminal).await;
         assert_eq!(receiver.len(), 1);
         assert!(session.pending_outbound.is_some());
         assert!(session.pending_replay.as_ref().unwrap().target.is_none());

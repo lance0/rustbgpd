@@ -218,10 +218,10 @@ impl PendingOutbound {
 }
 
 impl PeerSession {
-    pub(super) fn handle_outbound_route_update(&mut self, mut update: OutboundRouteUpdate) {
+    pub(super) async fn handle_outbound_route_update(&mut self, mut update: OutboundRouteUpdate) {
         debug_assert!(self.pending_outbound.is_none());
         let shared = if update.replay.is_none() {
-            self.prepare_shared_group(&update)
+            self.prepare_shared_group(&update).await
         } else {
             None
         };
