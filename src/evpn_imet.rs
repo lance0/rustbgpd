@@ -52,9 +52,7 @@ use std::time::Instant;
 use rustbgpd_evpn::{EvpnInstance, EvpnInstanceId};
 use rustbgpd_rib::AttrSet;
 use rustbgpd_rib::{RibUpdate, route::EvpnRibRoute};
-use rustbgpd_wire::{
-    AsPath, EvpnImet, EvpnRoute, EvpnRouteKey, ExtendedCommunity, Origin, PathAttribute, PmsiTunnel,
-};
+use rustbgpd_wire::{AsPath, EvpnImet, EvpnRoute, EvpnRouteKey, Origin, PathAttribute, PmsiTunnel};
 use tokio::sync::mpsc;
 use tracing::{debug, warn};
 
@@ -317,7 +315,8 @@ async fn withdraw_imet_key(
 /// Path attribute set:
 /// - `Origin::Igp` (locally originated)
 /// - empty `AsPath`
-/// - `ExtendedCommunities` carrying every configured Route Target
+/// - `ExtendedCommunities` carrying every configured Route Target and the
+///   VXLAN BGP Encapsulation community (RFC 8365 §5.1.3)
 /// - `PmsiTunnel` for Ingress Replication, label = raw 24-bit VNI
 ///   (RFC 8365 §5.1.3), tunnel id = the VTEP's loopback IP
 ///
@@ -330,12 +329,7 @@ fn build_imet_route(instance: &EvpnInstance) -> EvpnRibRoute {
         originator_ip: instance.local_vtep_ip,
     };
 
-    let ext_communities: Vec<ExtendedCommunity> = instance
-        .route_targets
-        .iter()
-        .copied()
-        .map(crate::evpn_originator::route_target_to_extcomm)
-        .collect();
+    let ext_communities = crate::evpn_originator::instance_extcomms(instance);
 
     let pmsi =
         PmsiTunnel::for_evpn_ingress_replication(instance.id.as_u32(), instance.local_vtep_ip);
@@ -369,7 +363,10 @@ mod tests {
     use rustbgpd_rib::{RibCommandError, route::RouteOrigin};
     use rustbgpd_wire::{EthernetTagId, PmsiTunnelIdentifier, PmsiTunnelType};
 
-    use crate::test_support::{evpn_instance, rd, vni};
+    use crate::test_support::{
+        VXLAN_ENCAPSULATION_EXTCOMM, assert_wire_vxlan_encapsulation, evpn_instance, rd, vni,
+        wire_extcomms,
+    };
 
     fn local_instance(v: u32) -> EvpnInstance {
         evpn_instance(65000, v, v, Some(format!("br{v}")), false)
@@ -399,6 +396,25 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    /// RFC 8365 §5.1.3: every IMET, VLAN-based or bundle member, reaches the
+    /// wire with its RT and the VXLAN Encapsulation extended community.
+    #[test]
+    fn imet_wire_attributes_carry_vxlan_encapsulation_for_every_member() {
+        for (vni, tag) in [(100, 0), (10010, 10), (10020, 20)] {
+            let inst = local_instance(vni).with_ethernet_tag(EthernetTagId(tag));
+            let route = build_imet_route(&inst);
+            assert_wire_vxlan_encapsulation(&route);
+            assert_eq!(
+                wire_extcomms(&route),
+                [
+                    0x0002_fde8_0000_0000 | u64::from(vni),
+                    VXLAN_ENCAPSULATION_EXTCOMM
+                ],
+                "vni {vni} tag {tag}"
+            );
+        }
     }
 
     #[test]
@@ -446,8 +462,8 @@ mod tests {
                 _ => None,
             })
             .unwrap();
-        // 1 RT, no MAC Mobility (this is Type 3, not Type 2).
-        assert_eq!(extcomms.len(), 1);
+        // 1 RT + VXLAN encapsulation, no MAC Mobility (this is Type 3).
+        assert_eq!(extcomms.len(), 2);
         // 2-octet AS RT for 65000:100 — verify the encoded form decodes.
         let (admin, value) = extcomms[0].route_target().expect("RT extcomm");
         assert_eq!(admin, 65000);
