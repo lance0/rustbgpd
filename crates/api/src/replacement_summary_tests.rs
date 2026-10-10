@@ -368,25 +368,39 @@ async fn replacement_summaries_complete_api_reads_inside_actual_rib_restore() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn health_completes_inside_actual_rib_initial_export() {
-    health_completes_inside_actual_rib_export(false).await;
+    health_completes_inside_actual_rib_export(HeldExport::InitialExport).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn health_completes_inside_actual_rib_selection_release() {
-    health_completes_inside_actual_rib_export(true).await;
+    health_completes_inside_actual_rib_export(HeldExport::SelectionRelease).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn health_completes_inside_actual_rib_route_refresh() {
+    health_completes_inside_actual_rib_export(HeldExport::RouteRefresh).await;
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum HeldExport {
+    InitialExport,
+    SelectionRelease,
+    /// A peer ROUTE-REFRESH replay after the initial dump has completed.
+    RouteRefresh,
 }
 
 #[expect(
     clippy::too_many_lines,
     reason = "shared end-to-end fixture holds real export and proves health completion and command fencing before owner release"
 )]
-async fn health_completes_inside_actual_rib_export(selection_release: bool) {
+async fn health_completes_inside_actual_rib_export(mode: HeldExport) {
+    let selection_release = mode == HeldExport::SelectionRelease;
     let peer: IpAddr = "192.0.2.1".parse().unwrap();
     let source: IpAddr = "192.0.2.9".parse().unwrap();
     let (entered_tx, mut entered_rx) = mpsc::unbounded_channel();
     let (release_tx, release_rx) = std::sync::mpsc::channel();
     let hold = Arc::new(ProbeHold {
-        armed: AtomicBool::new(true),
+        armed: AtomicBool::new(mode != HeldExport::RouteRefresh),
         calls: AtomicUsize::new(0),
         entered: entered_tx,
         release: Mutex::new(release_rx),
@@ -505,6 +519,30 @@ async fn health_completes_inside_actual_rib_export(selection_release: bool) {
                 session_id: 1,
                 afi: Afi::Ipv4,
                 safi: Safi::Unicast,
+            })
+            .await
+            .unwrap();
+    }
+    if mode == HeldExport::RouteRefresh {
+        // Let the unheld initial dump finish, then hold the refresh replay.
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while let Some(update) = outbound_rx.recv().await {
+                if !update.end_of_rib.is_empty() {
+                    return;
+                }
+            }
+            panic!("outbound closed before initial EoR");
+        })
+        .await
+        .expect("initial dump finishes before the refresh");
+        hold.armed.store(true, Ordering::SeqCst);
+        rib_tx
+            .send(RibUpdate::RouteRefreshRequest {
+                peer,
+                session_id: 0,
+                afi: Afi::Ipv4,
+                safi: Safi::Unicast,
+                queued: Arc::default(),
             })
             .await
             .unwrap();

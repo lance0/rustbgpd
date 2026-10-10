@@ -763,11 +763,30 @@ impl RibManager {
     /// deferred GR `EoR`, RFC 2918 `EoR`, RFC 7313 markers, and generic refresh
     /// retries. Prefix-limit recovery observes those gates but owns its own
     /// queue and retry semantics.
+    ///
+    /// A full-table replay only changes outbound state, so it services the
+    /// readiness lane at its interior checkpoints with the Loc-RIB count held
+    /// exact, as initial export does. Ordinary queries and mutations stay
+    /// queued; a nested call keeps the enclosing owner's context and age.
+    pub(super) fn send_route_refresh_response_inner(
+        &mut self,
+        peer: IpAddr,
+        afi: Afi,
+        safi: Safi,
+        replay_kind: FamilyReplayKind,
+    ) -> FamilyReplayOutcome {
+        super::with_executor_handoff(|| {
+            self.with_replacement_readiness(|manager| {
+                manager.send_route_refresh_response_with_readiness(peer, afi, safi, replay_kind)
+            })
+        })
+    }
+
     #[expect(
         clippy::too_many_lines,
         reason = "route-refresh replay keeps family staging, ORF gating, and EoR together"
     )]
-    pub(super) fn send_route_refresh_response_inner(
+    fn send_route_refresh_response_with_readiness(
         &mut self,
         peer: IpAddr,
         afi: Afi,

@@ -28,7 +28,9 @@ state. The same executor handoff lets health replies complete during export;
 standalone export leaves general and summary queries and mutations queued.
 Nested export retains the existing owner’s frozen-summary contract, age, and
 stalled-transition verdict. This covers both
-initial registration and negotiated Add-Path limit replay.
+initial registration and negotiated Add-Path limit replay. Family replays
+take the same owner: peer ROUTE-REFRESH responses, deferred refresh retries,
+outbound prefix-limit recovery and operator outbound replay.
 
 Selection-deferral release and collision-failback staging also service readiness
 through inventory, selection, outbound staging, and temporary-key cleanup. The

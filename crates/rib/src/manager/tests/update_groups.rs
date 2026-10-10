@@ -8626,6 +8626,122 @@ fn initial_export_services_interior_readiness_and_fences_other_lanes() {
     }
 }
 
+/// A peer ROUTE-REFRESH replays the full table on the actor. Its interior
+/// checkpoints must answer a queued readiness probe before the replay
+/// returns, while ordinary queries and mutations stay queued and the
+/// response keeps announcements before its End-of-RIB.
+#[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "the regression covers grouped and ungrouped replay with the non-readiness lanes fenced"
+)]
+fn route_refresh_services_interior_readiness_and_fences_other_lanes() {
+    use rustbgpd_wire::RouteRefreshSubtype;
+
+    for ungrouped in [false, true] {
+        let mut fleet = replacement_readiness_fleet(&community_chain(0xFDE8_0001));
+        let peer = fleet.members[0];
+        if ungrouped {
+            // Grouping is decided at registration: rejoin outside the group.
+            fleet.manager.test_force_ungrouped = true;
+            fleet.manager.handle_update(RibUpdate::PeerDown {
+                peer,
+                session_id: 0,
+            });
+            fleet.receivers[0] = register_direct_peer(&mut fleet.manager, peer);
+            while fleet.receivers[0].try_recv().is_ok() {}
+            fleet.manager.replacement_readiness_receipts.clear();
+        }
+        let (readiness_tx, readiness_rx) = mpsc::channel(8);
+        fleet.manager.readiness_rx = Some(readiness_rx);
+        let (query_tx, query_rx) = mpsc::channel(1);
+        fleet.manager.query_rx = query_rx;
+        let (reply, general) = oneshot::channel();
+        query_tx
+            .try_send(RibUpdate::QueryLocRibCount { reply })
+            .unwrap();
+        let general = Arc::new(Mutex::new(general));
+        let (mutation_tx, mutation_rx) = mpsc::channel(1);
+        fleet.manager.rx = mutation_rx;
+        mutation_tx
+            .try_send(RibUpdate::PeerDown {
+                peer,
+                session_id: 0,
+            })
+            .unwrap();
+        let visits = Arc::new(AtomicUsize::new(0));
+        let pending = Mutex::new(None);
+        fleet.manager.replacement_readiness_test_hook = Some(Arc::new({
+            let visits = Arc::clone(&visits);
+            let general = Arc::clone(&general);
+            move |observed| {
+                assert!(matches!(
+                    general.lock().unwrap().try_recv(),
+                    Err(oneshot::error::TryRecvError::Empty)
+                ));
+                assert_eq!(mutation_tx.capacity(), 0);
+                if observed != "refresh" {
+                    return;
+                }
+                match visits.fetch_add(1, Ordering::Relaxed) {
+                    0 => {
+                        *pending.lock().unwrap() = Some(queue_replacement_readiness(&readiness_tx));
+                    }
+                    1 => assert_eq!(
+                        pending
+                            .lock()
+                            .unwrap()
+                            .as_mut()
+                            .unwrap()
+                            .try_recv()
+                            .unwrap(),
+                        Ok(4),
+                        "ungrouped={ungrouped}: readiness must progress inside the refresh replay"
+                    ),
+                    _ => {}
+                }
+            }
+        }));
+        fleet.manager.handle_update(RibUpdate::RouteRefreshRequest {
+            queued: Arc::default(),
+            peer,
+            session_id: 0,
+            afi: Afi::Ipv4,
+            safi: Safi::Unicast,
+        });
+        assert!(
+            visits.load(Ordering::Relaxed) >= 2,
+            "ungrouped={ungrouped}: refresh interior not reached"
+        );
+        assert_eq!(fleet.manager.loc_rib.len(), 4);
+        assert_eq!(fleet.manager.grouped_member_of(peer).is_none(), ungrouped);
+        assert_eq!(fleet.manager.replacement_readiness_receipts.len(), 1);
+        assert_eq!(fleet.manager.replacement_readiness_receipts[0].serviced, 1);
+        let mut announced = 0;
+        let mut eor = false;
+        while let Ok(update) = fleet.receivers[0].try_recv() {
+            assert!(!eor, "announcements must precede EoR");
+            announced += update.announce.len();
+            eor = !update.end_of_rib.is_empty();
+            if eor {
+                assert_eq!(update.end_of_rib, vec![(Afi::Ipv4, Safi::Unicast)]);
+                assert_eq!(
+                    update.refresh_markers,
+                    vec![
+                        (Afi::Ipv4, Safi::Unicast, RouteRefreshSubtype::BoRR),
+                        (Afi::Ipv4, Safi::Unicast, RouteRefreshSubtype::EoRR),
+                    ]
+                );
+            }
+        }
+        assert_eq!(announced, 2);
+        assert!(eor);
+        fleet.manager.replacement_readiness_test_hook = None;
+        fleet.manager.drain_general_queries_if_unfenced();
+        assert_eq!(general.lock().unwrap().try_recv().unwrap(), 4);
+    }
+}
+
 #[test]
 fn initial_export_nested_readiness_keeps_owner_age_and_exact_count() {
     let mut fleet = replacement_readiness_fleet(&community_chain(0xFDE8_0001));
