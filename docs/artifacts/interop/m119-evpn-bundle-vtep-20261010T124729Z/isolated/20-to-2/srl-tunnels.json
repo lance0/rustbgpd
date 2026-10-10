@@ -1,0 +1,132 @@
+{
+  "tunnel-interface": [
+    {
+      "name": "vxlan1",
+      "vxlan-interface": [
+        {
+          "index": 10,
+          "type": "bridged",
+          "oper-state": "up",
+          "ingress": {
+            "vni": 10010
+          },
+          "egress": {
+            "source-ip": "use-system-ipv4-address"
+          },
+          "bridge-table": {
+            "multicast-destinations": {
+              "multicast-limit": {
+                "maximum-entries": 768,
+                "current-usage": 0
+              }
+            },
+            "statistics": {
+              "active-entries": "0",
+              "total-entries": "0",
+              "failed-entries": "0",
+              "mac-type": [
+                {
+                  "type": "evpn",
+                  "active-entries": "0",
+                  "total-entries": "0",
+                  "failed-entries": "0"
+                },
+                {
+                  "type": "evpn-static",
+                  "active-entries": "0",
+                  "total-entries": "0",
+                  "failed-entries": "0"
+                }
+              ]
+            },
+            "unicast-destinations": {
+            }
+          }
+        },
+        {
+          "index": 20,
+          "type": "bridged",
+          "oper-state": "up",
+          "ingress": {
+            "vni": 10020
+          },
+          "egress": {
+            "source-ip": "use-system-ipv4-address"
+          },
+          "bridge-table": {
+            "multicast-destinations": {
+              "multicast-limit": {
+                "maximum-entries": 768,
+                "current-usage": 1
+              },
+              "destination": [
+                {
+                  "vtep": "10.0.119.1",
+                  "vni": 10020,
+                  "multicast-forwarding": "BUM",
+                  "destination-index": "316847364585"
+                }
+              ]
+            },
+            "statistics": {
+              "active-entries": "1",
+              "total-entries": "1",
+              "failed-entries": "0",
+              "mac-type": [
+                {
+                  "type": "evpn",
+                  "active-entries": "1",
+                  "total-entries": "1",
+                  "failed-entries": "0"
+                },
+                {
+                  "type": "evpn-static",
+                  "active-entries": "0",
+                  "total-entries": "0",
+                  "failed-entries": "0"
+                }
+              ]
+            },
+            "unicast-destinations": {
+              "destination": [
+                {
+                  "vtep": "10.0.119.1",
+                  "vni": 10020,
+                  "destination-index": "316847364585",
+                  "statistics": {
+                    "active-entries": "1",
+                    "total-entries": "1",
+                    "failed-entries": "0",
+                    "mac-type": [
+                      {
+                        "type": "evpn",
+                        "active-entries": "1",
+                        "total-entries": "1",
+                        "failed-entries": "0"
+                      },
+                      {
+                        "type": "evpn-static",
+                        "active-entries": "0",
+                        "total-entries": "0",
+                        "failed-entries": "0"
+                      }
+                    ]
+                  },
+                  "mac-table": {
+                    "mac": [
+                      {
+                        "address": "02:AA:BB:01:19:01",
+                        "type": "evpn",
+                        "last-update": "2026-10-10T12:47:32.000Z (36 seconds ago)"
+                      }
+                    ]
+                  }
+                }
+              ]
+            }
+          }
+        }
+      ]
+    }
+  ]
+}

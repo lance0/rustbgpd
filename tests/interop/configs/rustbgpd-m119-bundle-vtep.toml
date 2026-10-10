@@ -1,0 +1,47 @@
+# M119: shared RT, distinct Ethernet Tags and fixed member VNIs.
+[global]
+asn = 65000
+router_id = "10.0.119.1"
+listen_port = 179
+
+[global.telemetry]
+log_format = "json"
+
+[global.telemetry.grpc_tcp]
+address = "0.0.0.0:50051"
+token_file = "/run/rustbgpd/grpc-test-only-operator.token"
+principal = "rustbgpd://operator/test-only"
+
+[[evpn_instances]]
+vni = 10010
+rd = "10.0.119.1:10"
+route_targets = ["65000:100"]
+service_interface = "vlan_aware_bundle"
+ethernet_tag = 10
+local_vtep_ip = "10.0.119.1"
+bridge = "brbundle"
+bridge_vlan = 10
+advertise_svi_mac = false
+
+[[evpn_instances]]
+vni = 10020
+rd = "10.0.119.1:20"
+route_targets = ["65000:100"]
+service_interface = "vlan_aware_bundle"
+ethernet_tag = 20
+local_vtep_ip = "10.0.119.1"
+bridge = "brbundle"
+bridge_vlan = 20
+advertise_svi_mac = false
+
+[[neighbors]]
+address = "10.0.119.2"
+remote_asn = 65000
+hold_time = 30
+families = ["l2vpn_evpn"]
+
+[security.grpc]
+enforcement = "tier"
+
+[security.grpc.roles]
+"rustbgpd://operator/test-only" = "operator"

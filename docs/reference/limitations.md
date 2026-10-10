@@ -126,10 +126,10 @@ Known EVPN gaps:
   Supported decomposable EVPN runtime edits commit live in ordered primitive steps;
   unsupported dependency cycles fail closed before commit, and residual
   mid-sequence convergence failures fail-stop on the last committed generation.
-- VLAN-aware bundle members on the VTEP have no peer interop receipt yet,
-  and tag-scoped multi-homing, IRB, locally assigned VNIs, and non-zero
-  Ethernet Tag Type 5 routes remain future work; RR receive/reflect is
-  implemented.
+- VLAN-aware bundle VTEP members have a bounded
+  [SR Linux 25.10.1 import and forwarding receipt](../artifacts/interop/m119-evpn-bundle-vtep-20261010T124729Z/README.md).
+  Tag-scoped multi-homing, IRB, locally assigned VNIs, and non-zero Ethernet
+  Tag Type 5 routes remain future work. EVPN remains alpha.
 - VXLAN local-bias split-horizon for all-active shared segments remains an
   ASIC/offload-dependent limitation of the Linux softswitch path. RFC 9746
   §2.2 makes local bias the only split-horizon mechanism for VXLAN (the ESI

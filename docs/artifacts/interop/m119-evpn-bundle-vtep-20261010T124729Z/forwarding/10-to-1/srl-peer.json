@@ -1,0 +1,178 @@
+{
+  "network-instance": [
+    {
+      "name": "default",
+      "protocols": {
+        "bgp": {
+          "neighbor": [
+            {
+              "peer-address": "10.0.119.1",
+              "admin-state": "enable",
+              "under-maintenance": false,
+              "maintenance-group": "",
+              "peer-type": "ibgp",
+              "local-preference": 100,
+              "next-hop-self": false,
+              "peer-as": 65000,
+              "peer-group": "rr",
+              "route-flap-damping": false,
+              "peer-router-id": "10.0.119.1",
+              "session-state": "established",
+              "last-state": "openconfirm",
+              "last-event": "recvOpen",
+              "last-established": "2026-10-10T12:47:31.800Z (14 seconds ago)",
+              "established-transitions": "1",
+              "advertised-capabilities": [
+                "ROUTE_REFRESH",
+                "4-OCTET_ASN",
+                "MP_BGP",
+                "GRACEFUL_RESTART"
+              ],
+              "received-capabilities": [
+                "ROUTE_REFRESH",
+                "4-OCTET_ASN",
+                "MP_BGP",
+                "GRACEFUL_RESTART"
+              ],
+              "received-afi-safi": [
+                "evpn"
+              ],
+              "received-end-of-rib": [
+                "evpn"
+              ],
+              "sent-end-of-rib": [
+                "evpn"
+              ],
+              "as-path-options": {
+                "allow-own-as": 0,
+                "replace-peer-as": false,
+                "remove-private-as": {
+                  "mode": "disabled",
+                  "leading-only": false,
+                  "ignore-peer-as": false
+                }
+              },
+              "authentication": {
+                "transmit-active": false
+              },
+              "failure-detection": {
+                "enable-bfd": false,
+                "fast-failover": true
+              },
+              "graceful-restart": {
+                "admin-state": "disable",
+                "mode": "HELPER_ONLY"
+              },
+              "multihop": {
+                "admin-state": "disable"
+              },
+              "afi-safi": [
+                {
+                  "afi-safi-name": "evpn",
+                  "admin-state": "enable",
+                  "oper-state": "up",
+                  "received-routes": 4,
+                  "sent-routes": 4,
+                  "active-routes": 4,
+                  "rejected-routes": 0,
+                  "suppressed-routes": 0,
+                  "received-routes-withdrawn-due-to-error": 0,
+                  "send-community-type": [
+                    "standard",
+                    "extended",
+                    "large"
+                  ],
+                  "add-paths": {
+                    "receive": false,
+                    "send": false
+                  },
+                  "evpn": {
+                    "advertise-ipv6-next-hops": false,
+                    "default-received-encapsulation": "vxlan",
+                    "prefix-limit-received": {
+                      "max-received-routes": 4294967295,
+                      "warning-threshold-pct": 90,
+                      "prefix-limit-exceeded": false
+                    }
+                  }
+                },
+                {
+                  "afi-safi-name": "ipv4-unicast",
+                  "admin-state": "disable",
+                  "oper-state": "down",
+                  "ipv4-unicast": {
+                    "link-bandwidth": {
+                      "add-next-hop-count-to-received-bgp-routes": "disable"
+                    }
+                  }
+                },
+                {
+                  "afi-safi-name": "ipv6-unicast",
+                  "admin-state": "disable",
+                  "oper-state": "down",
+                  "ipv6-unicast": {
+                    "link-bandwidth": {
+                      "add-next-hop-count-to-received-bgp-routes": "disable"
+                    }
+                  }
+                },
+                {
+                  "afi-safi-name": "route-target",
+                  "admin-state": "disable",
+                  "oper-state": "down"
+                }
+              ],
+              "local-as": {
+                "as-number": 65000,
+                "prepend-global-as": true,
+                "prepend-local-as": true
+              },
+              "route-reflector": {
+                "client": false
+              },
+              "send-default-route": {
+                "ipv4-unicast": false,
+                "ipv6-unicast": false
+              },
+              "timers": {
+                "connect-retry": 120,
+                "hold-time": 90,
+                "keepalive-interval": 30,
+                "minimum-advertisement-interval": 5,
+                "prefix-limit-restart-timer": 0,
+                "negotiated-hold-time": 30,
+                "negotiated-keepalive-interval": 10
+              },
+              "transport": {
+                "mtu-discovery": true,
+                "tcp-mss": 1448,
+                "passive-mode": false,
+                "local-address": "10.0.119.2",
+                "local-port": 35076,
+                "remote-port": 179
+              },
+              "sent-messages": {
+                "queue-depth": 0,
+                "total-updates": "4",
+                "total-non-updates": "4",
+                "route-refresh": "0",
+                "total-messages": "8",
+                "total-notifications": 0
+              },
+              "received-messages": {
+                "queue-depth": 0,
+                "total-updates": "5",
+                "total-non-updates": "3",
+                "malformed-updates": "0",
+                "route-refresh": "0",
+                "total-messages": "8",
+                "last-update-time": "2026-10-10T12:47:31.800Z (14 seconds ago)",
+                "total-notifications": 0
+              }
+            }
+          ]
+        }
+      }
+    }
+  ]
+}

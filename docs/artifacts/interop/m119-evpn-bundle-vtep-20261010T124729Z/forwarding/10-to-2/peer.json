@@ -1,0 +1,76 @@
+{
+  "add_path_receive": false,
+  "add_path_send": false,
+  "address": "10.0.119.2",
+  "authentication": "plaintext",
+  "description": "10.0.119.2",
+  "distribution_mode": "single-best",
+  "effective_posture": {
+    "interpret_rfc1997": true,
+    "next_hop_ownership": "disabled",
+    "rs_control_communities": false
+  },
+  "export_policy_routes_permitted": 4,
+  "families": [
+    "l2vpn_evpn"
+  ],
+  "flap_count": 0,
+  "graceful_shutdown_advertise_intent": false,
+  "hold_time": 30,
+  "import_policy_routes_permitted": 4,
+  "is_dynamic": false,
+  "last_error": "",
+  "max_prefix_action": "shutdown",
+  "messages_received": 8,
+  "messages_sent": 8,
+  "negotiated_session": {
+    "families": [
+      "l2vpn_evpn"
+    ],
+    "four_octet_as": true,
+    "hold_time_seconds": 30,
+    "keepalive_interval_seconds": 10,
+    "local_address": "10.0.119.1",
+    "outbound_max_message_bytes": 4096,
+    "peer_enhanced_route_refresh": false,
+    "peer_extended_message": false,
+    "peer_route_refresh": true,
+    "remote_router_id": "10.0.119.2"
+  },
+  "negotiation_available": true,
+  "notifications_received": 0,
+  "notifications_sent": 0,
+  "outbound_prefix_limits": [
+    {
+      "blocking": false,
+      "family": "ipv4_unicast",
+      "usage": 0
+    },
+    {
+      "blocking": false,
+      "family": "ipv6_unicast",
+      "usage": 0
+    }
+  ],
+  "prefixes_received": 4,
+  "prefixes_received_ipv4": 0,
+  "prefixes_received_ipv6": 0,
+  "prefixes_sent": 0,
+  "remote_asn": 65000,
+  "rfc8212_export_policy": "not_required",
+  "rfc8212_import_policy": "not_required",
+  "role_negotiated": false,
+  "route_reflector_client": false,
+  "route_server_client": false,
+  "send_hold_time": 480,
+  "state": "Established",
+  "strict_role": false,
+  "tcp_ao_applied_generation": 1,
+  "tcp_ao_desired_generation": 1,
+  "tcp_ao_health": "not_applicable",
+  "tcp_ao_rotation_phase": "idle",
+  "update_group": "group:0",
+  "updates_received": 4,
+  "updates_sent": 5,
+  "uptime_seconds": 11
+}

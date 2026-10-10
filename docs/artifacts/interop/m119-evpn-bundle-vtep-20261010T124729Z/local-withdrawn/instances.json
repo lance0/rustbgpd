@@ -1,0 +1,36 @@
+[
+  {
+    "advertise_svi_mac": false,
+    "bridge": "brbundle",
+    "bridge_vlan": 10,
+    "ethernet_tag": 10,
+    "local_vtep_ip": "10.0.119.1",
+    "not_ready_reason": "",
+    "originated_local_macs_count": 0,
+    "rd": "10.0.119.1:10",
+    "readiness": "ready",
+    "remote_route_drop_counts": [],
+    "route_targets": [
+      "65000:100"
+    ],
+    "service_interface": "vlan_aware_bundle",
+    "vni": 10010
+  },
+  {
+    "advertise_svi_mac": false,
+    "bridge": "brbundle",
+    "bridge_vlan": 20,
+    "ethernet_tag": 20,
+    "local_vtep_ip": "10.0.119.1",
+    "not_ready_reason": "",
+    "originated_local_macs_count": 1,
+    "rd": "10.0.119.1:20",
+    "readiness": "ready",
+    "remote_route_drop_counts": [],
+    "route_targets": [
+      "65000:100"
+    ],
+    "service_interface": "vlan_aware_bundle",
+    "vni": 10020
+  }
+]

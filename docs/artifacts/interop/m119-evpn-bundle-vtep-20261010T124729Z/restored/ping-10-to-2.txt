@@ -1,0 +1,5 @@
+PING 198.18.10.2 (198.18.10.2) 56(84) bytes of data.
+
+--- 198.18.10.2 ping statistics ---
+3 packets transmitted, 3 received, 0% packet loss, time 2081ms
+rtt min/avg/max/mdev = 0.222/0.374/0.548/0.133 ms
