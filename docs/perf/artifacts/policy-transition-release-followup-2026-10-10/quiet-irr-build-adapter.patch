@@ -1,0 +1,11 @@
+--- a/bench/scale/irrreload/run-irr-reload.sh
++++ b/bench/scale/irrreload/run-irr-reload.sh
+@@ -412,7 +412,7 @@
+ acquire_rustbgpd_host_lock || exit $?
+ 
+ echo "=== builds ==="
+-(cd "$REPO" && cargo build --release --locked -q -p rustbgpd -p rustbgpctl -p rs-config-render) || exit 1
++(cd "$REPO" && cargo build --release --locked -q -p rustbgpctl -p rs-config-render) || exit 1
+ (cd "$REPO" && cargo build --profile scale --locked -q -p reloadstall) || exit 1
+ for bin in "$HARNESS" "$RBGP" "$RENDER" "$DAEMON"; do
+     [ -x "$bin" ] || {

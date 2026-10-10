@@ -1,0 +1,79 @@
+{
+  "schema": 1,
+  "status": "prepared recipe; not applied, built, smoked, queued or measured",
+  "prepared_on": "2026-10-10",
+  "prepared_main_commit": "76d037e8a43a3e102fc2e025a383016b89b4cd86",
+  "prepared_main_tree": "1eb6fe1d88b1d549f59a64cbc079e55f67412dcb",
+  "refresh_main_before_queue": true,
+  "arms": {
+    "v075": {
+      "daemon_commit": "54ed19b5af927f1c8e5064ecb1a497885c15d068",
+      "daemon_tree": "47ba5f6a356284c11530a9ada9d991f05df454ac",
+      "retained_daemon_sha256": "6eb3cad8b8f4b11cd5348f4fa2b3f98d40e7d6e40a3c10a254f37431da350205",
+      "retained_binary_build_commit": "32942900b6948e2eaaf45ee09ee5142da4784e68",
+      "retained_binary_build_tree": "47ba5f6a356284c11530a9ada9d991f05df454ac",
+      "retained_source_equivalence": "retained build commit and v0.75.0 tag have identical Git trees; both source identities are recorded separately from binary digest"
+    },
+    "main": {
+      "daemon_commit": "freeze at preparation of the quiet window",
+      "daemon_tree": null,
+      "daemon_sha256": null
+    }
+  },
+  "instrumentation": {
+    "runner_and_reloadstall": "same frozen main source for both arms",
+    "rbgp_and_rs_config_render": "same frozen main binaries for both arms",
+    "irr_adapter": "quiet-irr-build-adapter.patch applied equally to both runner trees; omits rebuilding rustbgpd only",
+    "daemon_installation": "copy the independently built pinned arm binary into each owned runner tree's target/release/rustbgpd before the leg; hash before and after",
+    "matrix": "unmodified main run-matrix.sh; no build step in the runner",
+    "original_q2_gap": "v0.75.0 own IRR runner predates #2942 and has no daemon cgroup memory.peak; new pairing measures v0.75.0 binary with main's runner"
+  },
+  "runs_per_cell_per_arm": 3,
+  "reloads_per_process": 4,
+  "order_each_cell": [
+    "v075-r1",
+    "main-r1",
+    "main-r2",
+    "v075-r2",
+    "v075-r3",
+    "main-r3"
+  ],
+  "s2": {
+    "peers": 700,
+    "prefixes": 400400,
+    "control_secs": 30,
+    "changed_peers": null
+  },
+  "irr": {
+    "members": 320,
+    "prefixes": 183040,
+    "min_list": 1000,
+    "max_list": 40000,
+    "seed": 61,
+    "changed_fraction": 0.1,
+    "overlap_fraction": 0,
+    "control_secs": 30,
+    "cell": "rustbgpd-sighup"
+  },
+  "primary_metrics": [
+    "daemon_sighup_to_complete_ms",
+    "harness_completion_p50_s",
+    "daemon_cgroup_peak_kib",
+    "cohort_rib_transition_ms"
+  ],
+  "additional_clocks": [
+    "logged_rib_elapsed_ms_and_outcome",
+    "prestage_session_apply_ms",
+    "phase_total_ms",
+    "changed_observer_stall_p50_ms"
+  ],
+  "bar": "S2 transition better with disjoint process-leg medians, no primary metric worse with disjoint leg ranges; cgroup change requires at least 50 MiB; missing or failed leg/metric is INVALID",
+  "quiet_host": "canonical host lock for the whole window; unmodified quiet gate before every cell; native cooldowns; no competing builds, labs or measurements; no main pushes",
+  "unresolved_before_queue": [
+    "freeze and build final main plus its shared tools",
+    "instantiate owned runner trees with the identical declared IRR adapter and record their clean candidate identities",
+    "record both runner hashes, all binary hashes and build provenance",
+    "smoke the old daemon against main's generated inputs and verifier before measuring",
+    "use a new output directory and retain every raw log, cgroup proof, status, provenance and checksum"
+  ]
+}

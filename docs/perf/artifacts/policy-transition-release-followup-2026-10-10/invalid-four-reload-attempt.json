@@ -1,0 +1,228 @@
+{
+  "status": "INVALID as a confirmation: declared four reloads cannot meet the unchanged six-pair minimum",
+  "cell_verdict": "FAIL",
+  "errors": [
+    "4 complete in-band pairs, need 6; band is -220..+0 ms from RIB commit; out-of-band pair starts (ms from commit): none"
+  ],
+  "in_band_pairs": 4,
+  "wrapper_exit": 1,
+  "exits": {
+    "cell": 1,
+    "daemon": 0,
+    "engine": 0,
+    "probe": 0
+  },
+  "window_start": "2026-10-10T11:05:52-04:00",
+  "run_start": "2026-10-10T11:06:53-04:00",
+  "run_finish": "2026-10-10T11:10:09-04:00",
+  "environment": {
+    "source_head": "591ac39d4b50fc2c647942713a9ea99c0588a51a",
+    "source_dirty": "",
+    "binaries": {
+      "rustbgpd": "ac283bec7f5c964ad1ce7cbc85b2cae0788d991da07affab625816b6e601b5c7",
+      "rbgp": "0f0fcc1873d6605c8df2ac88503879904471cfe55a67e984ee4ebacf52d8ec33",
+      "reloadstall": "2701b6b81deca419dbcb55692cc74a9e976b73bcc628507dfa6c284116880b30"
+    },
+    "shape": {
+      "peers": 1000,
+      "prefixes": 400000,
+      "reloads": 4,
+      "control_secs": 15,
+      "quiesce_secs": 40,
+      "run_cap_secs": 715,
+      "pair_lead_s": 0.11,
+      "quiescent_offset_s": 20
+    },
+    "placement": {
+      "daemon_cpus": "2-3",
+      "engine_cpus": "4-5",
+      "probe_cpus": "8-15"
+    }
+  },
+  "reloads": [
+    {
+      "reload": 1,
+      "rib_transition": {
+        "message": "RIB export-policy transition completed",
+        "outcome": "committed",
+        "member_count": 1000,
+        "elapsed_ms": 200
+      },
+      "phase_timing": {
+        "message": "reload generation phase timing",
+        "target": "reload_generation_phase",
+        "total_targets": 1000,
+        "cohort_targets": 1000,
+        "remainder_targets": 0,
+        "refresh_count": 0,
+        "outcome": "committed",
+        "authoritative_fallback": false,
+        "preflight_us": 78,
+        "cohort_selection_us": 20718,
+        "cohort_prestage_session_apply_us": 505559,
+        "cohort_rib_transition_us": 200767,
+        "authoritative_remainder_apply_us": 1,
+        "deferred_refresh_dispatch_us": 6,
+        "convergence_check_us": 139,
+        "total_us": 728414,
+        "unattributed_us": 1146
+      },
+      "sighup_to_complete_ms": 794.8288917541504
+    },
+    {
+      "reload": 2,
+      "rib_transition": {
+        "message": "RIB export-policy transition completed",
+        "outcome": "committed",
+        "member_count": 1000,
+        "elapsed_ms": 201
+      },
+      "phase_timing": {
+        "message": "reload generation phase timing",
+        "target": "reload_generation_phase",
+        "total_targets": 1000,
+        "cohort_targets": 1000,
+        "remainder_targets": 0,
+        "refresh_count": 0,
+        "outcome": "committed",
+        "authoritative_fallback": false,
+        "preflight_us": 122,
+        "cohort_selection_us": 33206,
+        "cohort_prestage_session_apply_us": 444105,
+        "cohort_rib_transition_us": 201554,
+        "authoritative_remainder_apply_us": 1,
+        "deferred_refresh_dispatch_us": 7,
+        "convergence_check_us": 143,
+        "total_us": 680531,
+        "unattributed_us": 1393
+      },
+      "sighup_to_complete_ms": 742.933988571167
+    },
+    {
+      "reload": 3,
+      "rib_transition": {
+        "message": "RIB export-policy transition completed",
+        "outcome": "committed",
+        "member_count": 1000,
+        "elapsed_ms": 200
+      },
+      "phase_timing": {
+        "message": "reload generation phase timing",
+        "target": "reload_generation_phase",
+        "total_targets": 1000,
+        "cohort_targets": 1000,
+        "remainder_targets": 0,
+        "refresh_count": 0,
+        "outcome": "committed",
+        "authoritative_fallback": false,
+        "preflight_us": 73,
+        "cohort_selection_us": 4044,
+        "cohort_prestage_session_apply_us": 452095,
+        "cohort_rib_transition_us": 201171,
+        "authoritative_remainder_apply_us": 1,
+        "deferred_refresh_dispatch_us": 6,
+        "convergence_check_us": 144,
+        "total_us": 658740,
+        "unattributed_us": 1206
+      },
+      "sighup_to_complete_ms": 723.5758304595947
+    },
+    {
+      "reload": 4,
+      "rib_transition": {
+        "message": "RIB export-policy transition completed",
+        "outcome": "committed",
+        "member_count": 1000,
+        "elapsed_ms": 195
+      },
+      "phase_timing": {
+        "message": "reload generation phase timing",
+        "target": "reload_generation_phase",
+        "total_targets": 1000,
+        "cohort_targets": 1000,
+        "remainder_targets": 0,
+        "refresh_count": 0,
+        "outcome": "committed",
+        "authoritative_fallback": false,
+        "preflight_us": 170,
+        "cohort_selection_us": 16826,
+        "cohort_prestage_session_apply_us": 432269,
+        "cohort_rib_transition_us": 196015,
+        "authoritative_remainder_apply_us": 1,
+        "deferred_refresh_dispatch_us": 6,
+        "convergence_check_us": 144,
+        "total_us": 646832,
+        "unattributed_us": 1401
+      },
+      "sighup_to_complete_ms": 707.9041004180908
+    }
+  ],
+  "source_sha256": {
+    "four-reload-attempt/pre2952-r1/cell.exit": "4355a46b19d348dc2f57c046f8ef63d4538ebb936000f3c9ee954a27460dd865",
+    "four-reload-attempt/pre2952-r1/cpu.jsonl": "baae80d1de70e198aec3d0cfc3a898044e5bd7217e797745de4bcf810df07180",
+    "four-reload-attempt/pre2952-r1/daemon.exit": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+    "four-reload-attempt/pre2952-r1/engine.exit": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+    "four-reload-attempt/pre2952-r1/environment.json": "cb0f945d6439e3e5bc6fbefbc670b1d22d2d7c6c123cd16affa0c204478b7ec1",
+    "four-reload-attempt/pre2952-r1/final-evidence/ack": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "four-reload-attempt/pre2952-r1/final-evidence/ready": "ed1a545bb85e55816bbf9566b028b2a0bc456b88f49f6f266c0401048824194b",
+    "four-reload-attempt/pre2952-r1/final-evidence-completed.json": "aed08b9b364c9aaf97e161bb4e0f36baed9733f8c91277df5897e0af93999e03",
+    "four-reload-attempt/pre2952-r1/generator.log": "1614142e3e25e5a64f27bfc8004f961b4681ad61f82df94dbdd7de713d3a0907",
+    "four-reload-attempt/pre2952-r1/metrics-after.prom": "fee4d0daf625475bc89feabf07ea813e710246a20868b0a4a7a9b02e1f9bddf5",
+    "four-reload-attempt/pre2952-r1/metrics-before.prom": "b8d97b7834caac5050df7e31fc4ca7ccd0aa0ccdf24d3c4079ac2b5ccee51baf",
+    "four-reload-attempt/pre2952-r1/probe-01-pair-neighbor.stdout.gz": "6beb4a92d5338d2dc851ba434ba13fe3fd333aa28c67e1333e78f03c1f3820b4",
+    "four-reload-attempt/pre2952-r1/probe-01-pair-policy_stats.stdout.gz": "a692651a3b9d75e325191217b102c659920c7bf745986a03f26295eaf6b734f3",
+    "four-reload-attempt/pre2952-r1/probe-01-quiescent-policy_stats.stdout.gz": "e7152605e9258582d9fababbbbbe83398232e8a025a919723fe6d28f54b80e27",
+    "four-reload-attempt/pre2952-r1/probe-02-pair-neighbor.stdout.gz": "cf550081f79ac870b62aa014face37b3e0fdfdc944c16af339a50ec8c404a794",
+    "four-reload-attempt/pre2952-r1/probe-02-pair-policy_stats.stdout.gz": "c408361dce81b07684a0d33f549f77c04c15b31160634719a3e44cb940ee3998",
+    "four-reload-attempt/pre2952-r1/probe-02-quiescent-policy_stats.stdout.gz": "91d14f9c12ca9bc54d7d796fd27b43cb01982e85a912fdf6279646b1e7eb635f",
+    "four-reload-attempt/pre2952-r1/probe-03-pair-neighbor.stdout.gz": "72dae1e7bdcf6619068b9d1549205a6a71e7a94da7e311a0273ae23fc53235e1",
+    "four-reload-attempt/pre2952-r1/probe-03-pair-policy_stats.stdout.gz": "402ce6c7975b98fc5aef6ffee73df25471afec4bb07c01b38fb8f369024f3988",
+    "four-reload-attempt/pre2952-r1/probe-03-quiescent-policy_stats.stdout.gz": "e78a3761c3ccbf149d4ee335dc0f9145d6a81d1af91a3248c62a73529e8c80e4",
+    "four-reload-attempt/pre2952-r1/probe-04-pair-neighbor.stdout.gz": "0df67a5b5c9b354ac60b61a7df516cbfb31d3a3047fa616edc1bb6e2c1634d75",
+    "four-reload-attempt/pre2952-r1/probe-04-pair-policy_stats.stdout.gz": "f4db247f3fe69ee7adbf39d5eb2fe1871c11d2bebbf41bc5d87b3d50baa0cde2",
+    "four-reload-attempt/pre2952-r1/probe-04-quiescent-policy_stats.stdout.gz": "a8a6057a64677c7e7a37a110b455872ceab8861d10b0f7298261dd8b7878ce4d",
+    "four-reload-attempt/pre2952-r1/probe.exit": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+    "four-reload-attempt/pre2952-r1/probe.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "four-reload-attempt/pre2952-r1/probes.jsonl": "7b7a195a81647b3f0d37a7f156272f369655de4ac35fb7d692ed94768640259a",
+    "four-reload-attempt/pre2952-r1/reloadstall.log": "9be36996545dad5d092b4d3d90ae527c8c53d7f76390b3332de8424a01f7fa7a",
+    "four-reload-attempt/pre2952-r1/rustbgpd.log": "28b72b639d5ddc60052c1713728d000eec5d6d15352ab224c6403b5c9f78865a",
+    "four-reload-attempt/pre2952-r1/scenario/config.toml": "5a725298fc2a65a7c962efe10a05471ead424a4021a57cf4792191aa4bb39005",
+    "four-reload-attempt/pre2952-r1/scenario/gen-a.rpol": "21adb20cd35f2bd33564d258463e80548579aaa0597479b6cb8a0f068ddaecaa",
+    "four-reload-attempt/pre2952-r1/scenario/gen-b.rpol": "62571446e179726524a5768b636a13bceac7d11e327f6299627968664d7e1c41",
+    "four-reload-attempt/pre2952-r1/scenario/member.rpol": "21adb20cd35f2bd33564d258463e80548579aaa0597479b6cb8a0f068ddaecaa",
+    "four-reload-attempt/pre2952-r1/summary.json": "78afac59e32273dd62ab28048683d5113b040d395713763a6b9c6cc3457561af",
+    "four-reload-attempt/pre2952-r1/summary.txt": "7fd772c92d3f21c1297cea4a4cafe5bf47e1e36ddefccd6e6b5553e151db80cb",
+    "four-reload-attempt/pre2952-r1.quiet.tsv": "fb59bb702b3e3def4389c0ec00ba6c65bee330caccfad3183545f2b51274bd2e"
+  },
+  "arm_source": "3bbc1576cc3fd1f97a6c723131f183f82d4952f4",
+  "quiet_samples": [
+    {
+      "sample": "1",
+      "epoch_s": "1791644783",
+      "load1": "1.80",
+      "pswpin": "2424677",
+      "pswpout": "2447475",
+      "governors": "performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance",
+      "performance_governors": "64",
+      "governor_count": "64",
+      "competitors": "none",
+      "quiet": "true",
+      "failed_dimensions": "none",
+      "original_attempt": "2"
+    },
+    {
+      "sample": "2",
+      "epoch_s": "1791644813",
+      "load1": "1.55",
+      "pswpin": "2424677",
+      "pswpout": "2447475",
+      "governors": "performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance",
+      "performance_governors": "64",
+      "governor_count": "64",
+      "competitors": "none",
+      "quiet": "true",
+      "failed_dimensions": "none",
+      "original_attempt": "3"
+    }
+  ]
+}

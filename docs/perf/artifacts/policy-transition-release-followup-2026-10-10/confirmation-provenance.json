@@ -1,0 +1,394 @@
+{
+  "run_order": [
+    "pre2952-r1",
+    "post2952-r1",
+    "post2952-r2",
+    "pre2952-r2"
+  ],
+  "window_start": "2026-10-10T12:03:28-04:00",
+  "window_finish": "2026-10-10T12:34:04-04:00",
+  "wrapper_exit": 0,
+  "canonical_host_lock_held": true,
+  "arm_sources": {
+    "pre2952": "3bbc1576cc3fd1f97a6c723131f183f82d4952f4",
+    "post2952": "49abbb0171cbb889b7e2618c2bdcec6ea35699ae"
+  },
+  "instruments": {
+    "trees/j1-ctl/bench/scale/reloadstall/policy_stats_cell.sh": "171a07117f6936aabcfa8486376acc8fc3ae31e476f8fbd7661f018e9dd02600",
+    "trees/j1-ctl/bench/scale/reloadstall/policy_stats_cell.py": "f4c25450473cc811b4a9a108892408b68bef972b5a1109f2ef162b7a6c0fa535",
+    "bin/harness-main/reloadstall": "2701b6b81deca419dbcb55692cc74a9e976b73bcc628507dfa6c284116880b30",
+    "bin/pre2952/rustbgpd": "ac283bec7f5c964ad1ce7cbc85b2cae0788d991da07affab625816b6e601b5c7",
+    "bin/pre2952/rbgp": "0f0fcc1873d6605c8df2ac88503879904471cfe55a67e984ee4ebacf52d8ec33",
+    "bin/post2952/rustbgpd": "1dda8cbf9b1803fb63f47a79760d08f425933dba6f94c7df228d2d003150ee60",
+    "bin/post2952/rbgp": "71d27f988b3a574081413d609a4ceaaafbf427db32e0d54bc626a73ba68724d9"
+  },
+  "runs": {
+    "pre2952-r1": {
+      "started": "2026-10-10T12:04:58-04:00",
+      "finished": "2026-10-10T12:11:07-04:00",
+      "wrapper_exit": 0,
+      "cell_verdict": "PASS",
+      "exits": {
+        "cell": 0,
+        "daemon": 0,
+        "engine": 0,
+        "probe": 0
+      },
+      "errors": [],
+      "invalid_calls": [],
+      "deadline_misses": 0,
+      "calls_over_2s": 0,
+      "environment": {
+        "source_head": "591ac39d4b50fc2c647942713a9ea99c0588a51a",
+        "source_dirty": "",
+        "binaries": {
+          "rustbgpd": "ac283bec7f5c964ad1ce7cbc85b2cae0788d991da07affab625816b6e601b5c7",
+          "rbgp": "0f0fcc1873d6605c8df2ac88503879904471cfe55a67e984ee4ebacf52d8ec33",
+          "reloadstall": "2701b6b81deca419dbcb55692cc74a9e976b73bcc628507dfa6c284116880b30"
+        },
+        "versions": {
+          "rustbgpd": "rustbgpd 0.75.0",
+          "rbgp": "rbgp 0.75.0"
+        },
+        "shape": {
+          "peers": 1000,
+          "prefixes": 400000,
+          "reloads": 8,
+          "control_secs": 15,
+          "quiesce_secs": 40,
+          "run_cap_secs": 1115,
+          "pair_lead_s": 0.11,
+          "quiescent_offset_s": 20
+        },
+        "placement": {
+          "daemon_cpus": "2-3",
+          "engine_cpus": "4-5",
+          "probe_cpus": "8-15"
+        },
+        "kernel": "7.0.0-30-generic",
+        "compiler_processes_at_start": 0
+      },
+      "quiet_samples": [
+        {
+          "sample": "1",
+          "epoch_s": "1791648268",
+          "load1": "1.81",
+          "pswpin": "2424677",
+          "pswpout": "2447475",
+          "governors": "performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance",
+          "performance_governors": "64",
+          "governor_count": "64",
+          "competitors": "none",
+          "quiet": "true",
+          "failed_dimensions": "none",
+          "original_attempt": "3"
+        },
+        {
+          "sample": "2",
+          "epoch_s": "1791648298",
+          "load1": "1.49",
+          "pswpin": "2424677",
+          "pswpout": "2447475",
+          "governors": "performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance",
+          "performance_governors": "64",
+          "governor_count": "64",
+          "competitors": "none",
+          "quiet": "true",
+          "failed_dimensions": "none",
+          "original_attempt": "4"
+        }
+      ]
+    },
+    "post2952-r1": {
+      "started": "2026-10-10T12:13:08-04:00",
+      "finished": "2026-10-10T12:19:16-04:00",
+      "wrapper_exit": 0,
+      "cell_verdict": "PASS",
+      "exits": {
+        "cell": 0,
+        "daemon": 0,
+        "engine": 0,
+        "probe": 0
+      },
+      "errors": [],
+      "invalid_calls": [],
+      "deadline_misses": 0,
+      "calls_over_2s": 0,
+      "environment": {
+        "source_head": "591ac39d4b50fc2c647942713a9ea99c0588a51a",
+        "source_dirty": "",
+        "binaries": {
+          "rustbgpd": "1dda8cbf9b1803fb63f47a79760d08f425933dba6f94c7df228d2d003150ee60",
+          "rbgp": "71d27f988b3a574081413d609a4ceaaafbf427db32e0d54bc626a73ba68724d9",
+          "reloadstall": "2701b6b81deca419dbcb55692cc74a9e976b73bcc628507dfa6c284116880b30"
+        },
+        "versions": {
+          "rustbgpd": "rustbgpd 0.75.0",
+          "rbgp": "rbgp 0.75.0"
+        },
+        "shape": {
+          "peers": 1000,
+          "prefixes": 400000,
+          "reloads": 8,
+          "control_secs": 15,
+          "quiesce_secs": 40,
+          "run_cap_secs": 1115,
+          "pair_lead_s": 0.11,
+          "quiescent_offset_s": 20
+        },
+        "placement": {
+          "daemon_cpus": "2-3",
+          "engine_cpus": "4-5",
+          "probe_cpus": "8-15"
+        },
+        "kernel": "7.0.0-30-generic",
+        "compiler_processes_at_start": 0
+      },
+      "quiet_samples": [
+        {
+          "sample": "1",
+          "epoch_s": "1791648758",
+          "load1": "1.98",
+          "pswpin": "2424677",
+          "pswpout": "2447475",
+          "governors": "performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance",
+          "performance_governors": "64",
+          "governor_count": "64",
+          "competitors": "none",
+          "quiet": "true",
+          "failed_dimensions": "none",
+          "original_attempt": "4"
+        },
+        {
+          "sample": "2",
+          "epoch_s": "1791648788",
+          "load1": "1.59",
+          "pswpin": "2424677",
+          "pswpout": "2447475",
+          "governors": "performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance",
+          "performance_governors": "64",
+          "governor_count": "64",
+          "competitors": "none",
+          "quiet": "true",
+          "failed_dimensions": "none",
+          "original_attempt": "5"
+        }
+      ]
+    },
+    "post2952-r2": {
+      "started": "2026-10-10T12:21:16-04:00",
+      "finished": "2026-10-10T12:27:25-04:00",
+      "wrapper_exit": 0,
+      "cell_verdict": "PASS",
+      "exits": {
+        "cell": 0,
+        "daemon": 0,
+        "engine": 0,
+        "probe": 0
+      },
+      "errors": [],
+      "invalid_calls": [],
+      "deadline_misses": 0,
+      "calls_over_2s": 0,
+      "environment": {
+        "source_head": "591ac39d4b50fc2c647942713a9ea99c0588a51a",
+        "source_dirty": "",
+        "binaries": {
+          "rustbgpd": "1dda8cbf9b1803fb63f47a79760d08f425933dba6f94c7df228d2d003150ee60",
+          "rbgp": "71d27f988b3a574081413d609a4ceaaafbf427db32e0d54bc626a73ba68724d9",
+          "reloadstall": "2701b6b81deca419dbcb55692cc74a9e976b73bcc628507dfa6c284116880b30"
+        },
+        "versions": {
+          "rustbgpd": "rustbgpd 0.75.0",
+          "rbgp": "rbgp 0.75.0"
+        },
+        "shape": {
+          "peers": 1000,
+          "prefixes": 400000,
+          "reloads": 8,
+          "control_secs": 15,
+          "quiesce_secs": 40,
+          "run_cap_secs": 1115,
+          "pair_lead_s": 0.11,
+          "quiescent_offset_s": 20
+        },
+        "placement": {
+          "daemon_cpus": "2-3",
+          "engine_cpus": "4-5",
+          "probe_cpus": "8-15"
+        },
+        "kernel": "7.0.0-30-generic",
+        "compiler_processes_at_start": 0
+      },
+      "quiet_samples": [
+        {
+          "sample": "1",
+          "epoch_s": "1791649246",
+          "load1": "1.79",
+          "pswpin": "2424677",
+          "pswpout": "2447475",
+          "governors": "performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance",
+          "performance_governors": "64",
+          "governor_count": "64",
+          "competitors": "none",
+          "quiet": "true",
+          "failed_dimensions": "none",
+          "original_attempt": "4"
+        },
+        {
+          "sample": "2",
+          "epoch_s": "1791649276",
+          "load1": "1.70",
+          "pswpin": "2424677",
+          "pswpout": "2447475",
+          "governors": "performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance",
+          "performance_governors": "64",
+          "governor_count": "64",
+          "competitors": "none",
+          "quiet": "true",
+          "failed_dimensions": "none",
+          "original_attempt": "5"
+        }
+      ]
+    },
+    "pre2952-r2": {
+      "started": "2026-10-10T12:27:55-04:00",
+      "finished": "2026-10-10T12:34:04-04:00",
+      "wrapper_exit": 0,
+      "cell_verdict": "PASS",
+      "exits": {
+        "cell": 0,
+        "daemon": 0,
+        "engine": 0,
+        "probe": 0
+      },
+      "errors": [],
+      "invalid_calls": [],
+      "deadline_misses": 0,
+      "calls_over_2s": 0,
+      "environment": {
+        "source_head": "591ac39d4b50fc2c647942713a9ea99c0588a51a",
+        "source_dirty": "",
+        "binaries": {
+          "rustbgpd": "ac283bec7f5c964ad1ce7cbc85b2cae0788d991da07affab625816b6e601b5c7",
+          "rbgp": "0f0fcc1873d6605c8df2ac88503879904471cfe55a67e984ee4ebacf52d8ec33",
+          "reloadstall": "2701b6b81deca419dbcb55692cc74a9e976b73bcc628507dfa6c284116880b30"
+        },
+        "versions": {
+          "rustbgpd": "rustbgpd 0.75.0",
+          "rbgp": "rbgp 0.75.0"
+        },
+        "shape": {
+          "peers": 1000,
+          "prefixes": 400000,
+          "reloads": 8,
+          "control_secs": 15,
+          "quiesce_secs": 40,
+          "run_cap_secs": 1115,
+          "pair_lead_s": 0.11,
+          "quiescent_offset_s": 20
+        },
+        "placement": {
+          "daemon_cpus": "2-3",
+          "engine_cpus": "4-5",
+          "probe_cpus": "8-15"
+        },
+        "kernel": "7.0.0-30-generic",
+        "compiler_processes_at_start": 0
+      },
+      "quiet_samples": [
+        {
+          "sample": "1",
+          "epoch_s": "1791649645",
+          "load1": "1.78",
+          "pswpin": "2424677",
+          "pswpout": "2447475",
+          "governors": "performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance",
+          "performance_governors": "64",
+          "governor_count": "64",
+          "competitors": "none",
+          "quiet": "true",
+          "failed_dimensions": "none",
+          "original_attempt": "1"
+        },
+        {
+          "sample": "2",
+          "epoch_s": "1791649675",
+          "load1": "1.47",
+          "pswpin": "2424677",
+          "pswpout": "2447475",
+          "governors": "performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance",
+          "performance_governors": "64",
+          "governor_count": "64",
+          "competitors": "none",
+          "quiet": "true",
+          "failed_dimensions": "none",
+          "original_attempt": "2"
+        }
+      ]
+    }
+  },
+  "source_sha256": {
+    "confirmation/pre2952-r1/rustbgpd.log": "d7ffa80beaf7e547126049505dc3d3b00c77155da1316bdd93fd92813dcd6e54",
+    "confirmation/pre2952-r1/summary.json": "060b334bca2ae0232d248532b0ee702d6c50d9ce886e701e6d53ef8d50ab1c27",
+    "confirmation/pre2952-r1/probes.jsonl": "26582a398caf832022da575a35f151ef58769e7986589be857662dfc774b13b4",
+    "confirmation/pre2952-r1/environment.json": "40d7989b01749f3ea475d7f1c5c014dfd28bf2da6e2ecf69dc88741d5e6efe4a",
+    "confirmation/pre2952-r1/cpu.jsonl": "4e58bfb3cd39065fd7db2a63e2d5f99c37bf5449bd5a74981b7bf00a196b0759",
+    "confirmation/pre2952-r1/reloadstall.log": "0554d7ae08ec6078a80c18fc3e4fcb4ea81801382142aaf90a0ba446657e44db",
+    "confirmation/pre2952-r1/cell.exit": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+    "confirmation/pre2952-r1/daemon.exit": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+    "confirmation/pre2952-r1/engine.exit": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+    "confirmation/pre2952-r1/probe.exit": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+    "confirmation/pre2952-r1.quiet.tsv": "43218596e60cb7f130439adfda1bbc383c4f9f7cb84f82b14adc802330ad0605",
+    "confirmation/pre2952-r1.started": "9bfd376f80402d3c13a8cb61cbb311670375f4a3b48b919e1ce2c93b0fe2fcd2",
+    "confirmation/pre2952-r1.finished": "971e8f76e87d9c53fa31ae3a05d821b1c918d3e1199fe94dac782388f1011e13",
+    "confirmation/pre2952-r1.exit": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+    "confirmation/pre2952-r1.log": "a812a9b6eac624cfcea3b23f601d7d719cca011d4abbcf80affd42a893c1bcc6",
+    "confirmation/post2952-r1/rustbgpd.log": "340f96eb79eea19a6e3fbcaf45b2c348a2c3e9210278e08d9ec269fdaf836349",
+    "confirmation/post2952-r1/summary.json": "57a15a936a53224a0e6357fb6041b6e57e74907d734be66373f9b0130fa55b42",
+    "confirmation/post2952-r1/probes.jsonl": "8c6ec583960781a1a2bc77d7fc3b899a2b5505e84d9b8417990c8918807f307b",
+    "confirmation/post2952-r1/environment.json": "6825ddde00fb880457ac006d223dd9cd9b8f46b20e93639f0b2bd5872817cef1",
+    "confirmation/post2952-r1/cpu.jsonl": "ba15e0a1f62f91e21b0d9d255b24042d8e6330b3f15f9f5da9207b6e3f484db5",
+    "confirmation/post2952-r1/reloadstall.log": "9c0bb9e7ceac548347d316904ec54ce7835973246af669d3ececfa55f58e3f62",
+    "confirmation/post2952-r1/cell.exit": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+    "confirmation/post2952-r1/daemon.exit": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+    "confirmation/post2952-r1/engine.exit": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+    "confirmation/post2952-r1/probe.exit": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+    "confirmation/post2952-r1.quiet.tsv": "136f90c3f885d735939455f8f92787696c5cca9a66112cdb860c38a48803f2ba",
+    "confirmation/post2952-r1.started": "da7dcfc7ce302f6129fc7d4dacebf30cade49b32da5f2b9c1fb1e8ead88e5e7c",
+    "confirmation/post2952-r1.finished": "48318568a5b65062753c695d03168ca309f359fc65573476afae6a7c70b8f0dc",
+    "confirmation/post2952-r1.exit": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+    "confirmation/post2952-r1.log": "c496f5a924b7c04be86636560f609ef4416ee7b0c0aa26d6c06a965e4cb358fb",
+    "confirmation/post2952-r2/rustbgpd.log": "d47c5b46488943681c3ba3e861db44184c0fccb30534cbfeb7db62e185026af9",
+    "confirmation/post2952-r2/summary.json": "db92b72e4ba697234c3ac88235995898b110bd356d31bcf13c3b0a12a95fa9eb",
+    "confirmation/post2952-r2/probes.jsonl": "ddb4cb41d4efea84c4af58202fcee3bc7100d18a02bde9f4fc65ae539d20c87c",
+    "confirmation/post2952-r2/environment.json": "70af3a8f3543ab66f794dbb9424c4585cce3583e997cf39546a45035dbc37d17",
+    "confirmation/post2952-r2/cpu.jsonl": "77799c39353fff3b5ef76e9ff338243a8c6ec2960bc32cb915950e9973bcc2a8",
+    "confirmation/post2952-r2/reloadstall.log": "adf721dc0a114e5f638a3de4355d4b160e9076440a024361c755ed87b8e78fb5",
+    "confirmation/post2952-r2/cell.exit": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+    "confirmation/post2952-r2/daemon.exit": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+    "confirmation/post2952-r2/engine.exit": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+    "confirmation/post2952-r2/probe.exit": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+    "confirmation/post2952-r2.quiet.tsv": "54d883f78ffc6961a14ec56c3fdbf9cbfe94956c09b36f058e02939ef83e1100",
+    "confirmation/post2952-r2.started": "1727f05e7fc0299724fdeda85dd91102188e822c5ef0612b4868495d1e523731",
+    "confirmation/post2952-r2.finished": "1f2d05a6d29d802f977380204b79628fc4046641a4b345e50bbec11852b34ed7",
+    "confirmation/post2952-r2.exit": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+    "confirmation/post2952-r2.log": "e65165286c3cc8b70b87c60d79c544ee52a65806f2de23991d9ba3bb0afc131c",
+    "confirmation/pre2952-r2/rustbgpd.log": "901dbf6685b669cd30c0cff45b6af431a973f2e474176d22ecfb6786c70a1962",
+    "confirmation/pre2952-r2/summary.json": "475d6e02b5c921540b36c7e99cb0c58e1c51939b595c07d77892d907e71ae34c",
+    "confirmation/pre2952-r2/probes.jsonl": "194b4c5634cc4603ac447c3d84e6008df841850d6c301a6610f7620c27b32549",
+    "confirmation/pre2952-r2/environment.json": "c6749e36bca96b8dc4e6de7e3390e714c306190e943eb913158e3fee3b6dc834",
+    "confirmation/pre2952-r2/cpu.jsonl": "089d52934f5c68721b5177260fa06dd0bfbaa292bede99a1777680def41dd4ed",
+    "confirmation/pre2952-r2/reloadstall.log": "808f3557ad940e13394efa111d079ab0aaf0950a20076163893f39e9d9a68b0b",
+    "confirmation/pre2952-r2/cell.exit": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+    "confirmation/pre2952-r2/daemon.exit": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+    "confirmation/pre2952-r2/engine.exit": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+    "confirmation/pre2952-r2/probe.exit": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+    "confirmation/pre2952-r2.quiet.tsv": "2192c7653ce4ecd7fff1c9f0b6d31b545db4b33af98a9c5281dd10511eca63cb",
+    "confirmation/pre2952-r2.started": "c64ce0bff600adb19ac584e786a1e15e6290687cb378e6f3b159d005bd9ab12c",
+    "confirmation/pre2952-r2.finished": "689ee8a079cb92f1f0557eb8cbac4a25ca009867dd0d77ed0f5c64b43d5ceff2",
+    "confirmation/pre2952-r2.exit": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+    "confirmation/pre2952-r2.log": "cbf071574e375d3d19b4c72a9c9e9da05a3f61fa07895abae6b61a48e05a9c93"
+  },
+  "driver_sha256": "5dc9d36541333d83459a6ddce0dcb6296c7937c346f95431b775855c919efc28"
+}
