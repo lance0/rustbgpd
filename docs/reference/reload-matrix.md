@@ -492,9 +492,10 @@ L3VNI/device/table identity redefine, or a shape the fixed phase order
 cannot express — relink away from an IP-VRF deleted in the same candidate,
 relink onto an IP-VRF added in the same candidate, an ES left memberless
 mid-sequence) fails closed naming the offending step. A residual
-mid-sequence convergence failure is fail-stop: generations committed by
-earlier steps stay committed (no cross-step rollback), the model pins, and a
-re-SIGHUP after fixing the config converges only the remainder. The runtime
+mid-sequence convergence failure stops the sequence: generations committed by
+earlier steps stay committed (no cross-step rollback). A fully compensated
+failing step preserves the prior model; unrestored or unacknowledged effects pin
+the coordinator. SIGHUP fences either partial sequence for recovery. The runtime
 snapshot advances only after the coordinator and daemon actor converger
 accept the candidate. Unsupported shapes, missing EVPN actors, or actor
 convergence failure are pinned back to the committed runtime model and

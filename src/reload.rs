@@ -2624,6 +2624,7 @@ pub(crate) async fn reload_config_with_tcp_ao(
         }
     }
 
+    let mut completion = SighupCompletion::Complete;
     if let Some(apply) = evpn_runtime_apply {
         let evpn_operation = operation.cloned();
         let attempt = apply
@@ -2652,6 +2653,21 @@ pub(crate) async fn reload_config_with_tcp_ao(
                      restart-required EVPN identity changes."
                 );
                 copy_evpn_runtime_fields(&mut new_config, &attempt.baseline);
+                let failure = ReloadStepFailure {
+                    bucket: "evpn_runtime.apply",
+                    target: String::new(),
+                    error: ReloadStepError::Rejected(format!("{error:?}")),
+                };
+                if !progress.accepted_effect
+                    && !config::diff_config(current, &new_config).has_any_changes()
+                    && !dataset_commit_pending
+                    && !dataset_events_pending
+                {
+                    return SighupReloadOutcome::CleanNoEffect(SighupReloadError::Failed(failure));
+                }
+                completion = SighupCompletion::KnownPartial {
+                    failures: vec![failure],
+                };
             }
             EvpnRuntimeReloadTerminal::KnownPartial(error)
             | EvpnRuntimeReloadTerminal::KnownDivergence(error) => {
@@ -2713,12 +2729,7 @@ pub(crate) async fn reload_config_with_tcp_ao(
         } else {
             info!("config reloaded — no neighbor / policy / peer-group changes detected");
         }
-        return acknowledged_reload(
-            new_config,
-            desired_snapshot,
-            dialout_targets,
-            SighupCompletion::Complete,
-        );
+        return acknowledged_reload(new_config, desired_snapshot, dialout_targets, completion);
     }
 
     if explain_changed {
@@ -3964,7 +3975,7 @@ pub(crate) async fn reload_config_with_tcp_ao(
         working_config,
         desired_snapshot,
         dialout_targets,
-        SighupCompletion::Complete,
+        completion,
     )
 }
 
@@ -5399,8 +5410,8 @@ originator_ip = "10.0.0.1"
         // #268: an ES delete + its (surviving) member L2VNI redefine + a new
         // L2VNI add in ONE SIGHUP. Pure shape planning decomposes the mixed
         // whole before mutation begins; the delete commits, then the redefine
-        // fails after effects and pins the coordinator. The reload must fence
-        // without dispatching the later honor-graceful-shutdown mutation.
+        // fails with compensation. The earlier committed delete still requires
+        // the reload to fence before the later honor-graceful-shutdown mutation.
         let path = unique_temp_path("reload-evpn-decomposed-mixed");
         std::fs::write(
             &path,
@@ -5500,6 +5511,11 @@ local_vtep_ip = "10.0.0.1"
             "the committed delete remains authoritative after the later step fails"
         );
         assert_eq!(guard.model().ethernet_segments().len(), 0);
+        assert_eq!(
+            guard.model().mutation_state(),
+            rustbgpd_evpn::EvpnRuntimeMutationState::Idle,
+            "the failed step was compensated, but the earlier generation committed"
+        );
         assert_eq!(
             guard
                 .model()
@@ -5624,7 +5640,7 @@ local_vtep_ip = "10.0.0.1"
     }
 
     #[tokio::test]
-    async fn reload_pins_evpn_runtime_when_coordinator_rejects() {
+    async fn reload_rejects_evpn_without_advancing_runtime_snapshot() {
         let path = unique_temp_path("reload-evpn-hot-apply-reject");
         std::fs::write(
             &path,
@@ -5684,7 +5700,7 @@ local_vtep_ip = "10.0.0.1"
         .unwrap();
 
         let (peer_mgr_tx, _peer_mgr_rx) = mpsc::channel(8);
-        let returned = reload_config(
+        let outcome = reload_config(
             path.to_str().unwrap(),
             &initial,
             live_grpc_tcp.as_ref(),
@@ -5693,14 +5709,10 @@ local_vtep_ip = "10.0.0.1"
             None,
             Some(&apply),
         )
-        .await
-        .expect("reload returns a config even when EVPN runtime apply is rejected");
+        .await;
 
         let added = rustbgpd_evpn::EvpnInstanceId::new(200).unwrap();
-        assert_eq!(
-            returned.evpn_instances, initial.evpn_instances,
-            "rejected EVPN runtime apply must keep the returned runtime snapshot pinned"
-        );
+        assert!(matches!(outcome, SighupReloadOutcome::CleanNoEffect(_)));
         assert!(
             coordinator
                 .lock()
@@ -5761,6 +5773,175 @@ local_vtep_ip = "10.0.0.1"
     }
 
     #[tokio::test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one SIGHUP matrix checks compensation, failed rollback, lost acknowledgement, and shutdown"
+    )]
+    async fn reload_evpn_converge_failures_classify_compensation_and_fence_uncertainty() {
+        use crate::evpn_runtime_converger::DaemonEvpnRuntimeConvergeError as ConvergeError;
+        use rustbgpd_evpn::{EvpnRuntimeConvergeError, EvpnRuntimeMutationState};
+
+        for (failure, compensated) in [
+            (
+                ConvergeError::Failed(EvpnRuntimeConvergeError::new("rollback acknowledged")),
+                true,
+            ),
+            (
+                ConvergeError::KnownDivergence(EvpnRuntimeConvergeError::new("rollback failed")),
+                false,
+            ),
+            (
+                ConvergeError::KnownDivergence(EvpnRuntimeConvergeError::new(
+                    "apply acknowledgement lost",
+                )),
+                false,
+            ),
+            (
+                ConvergeError::InterruptedByShutdown(EvpnRuntimeConvergeError::new(
+                    "published state not restored",
+                )),
+                false,
+            ),
+        ] {
+            let path = unique_temp_path("reload-evpn-compensation");
+            std::fs::write(&path, EVPN_VNI_100_TOML).unwrap();
+            let initial = load_tier_test_config(&path);
+            let (apply, coordinator) = evpn_reload_apply(&initial, Err(failure));
+            std::fs::write(&path, EVPN_VNI_100_200_TOML).unwrap();
+            let (peer_mgr_tx, mut peer_mgr_rx) = mpsc::channel(8);
+            let reload_path = path.clone();
+            let reload = async move {
+                reload_config(
+                    reload_path.to_str().unwrap(),
+                    &initial,
+                    initial.global.telemetry.grpc_tcp.as_ref(),
+                    initial.global.telemetry.grpc_uds.as_ref(),
+                    &peer_mgr_tx,
+                    None,
+                    Some(&apply),
+                )
+                .await
+            };
+            if compensated {
+                let settlement = crate::RuntimeConfigSettlementWatchdog::new();
+                let runtime_lock = crate::RuntimeConfigCoordinator::new();
+                let result = settlement
+                    .execute_owned(
+                        crate::RuntimeConfigOperationKind::Sighup,
+                        runtime_lock.clone(),
+                        crate::DaemonGate::new(),
+                        crate::OwnedRuntimeConfigRequestContext::detached().response_attached(),
+                        move |operation| async move {
+                            operation.advance_phase(RuntimeConfigSettlementPhase::Mutating);
+                            let outcome = reload.await;
+                            let SighupReloadOutcome::CleanNoEffect(error) = outcome else {
+                                panic!("fully acknowledged compensation must settle cleanly: {outcome:?}");
+                            };
+                            OwnedRuntimeConfigOutcome::<SighupAuthority, _>::CleanNoEffect(Err(error))
+                        },
+                    )
+                    .await;
+                assert!(result.is_err());
+                assert!(settlement.owner_fence_reason().is_none());
+                let _permit = runtime_lock
+                    .try_acquire()
+                    .expect("clean failure releases mutation admission");
+                assert_eq!(
+                    crate::sighup_reload_metric_outcome(&Ok(result)),
+                    crate::SighupReloadMetricOutcome::RejectedNoEffect
+                );
+            } else {
+                let outcome = reload.await;
+                assert!(
+                    matches!(
+                        outcome,
+                        SighupReloadOutcome::RecoveryFenced {
+                            reason: RuntimeConfigFenceReason::KnownDivergence,
+                            ..
+                        }
+                    ),
+                    "uncertain effects must fence: {outcome:?}"
+                );
+            }
+            assert!(
+                peer_mgr_rx.try_recv().is_err(),
+                "no later reload command may run"
+            );
+            let guard = coordinator.lock().unwrap();
+            assert_eq!(guard.model().generation().as_u64(), 1);
+            assert_eq!(
+                guard.model().mutation_state(),
+                if compensated {
+                    EvpnRuntimeMutationState::Idle
+                } else {
+                    EvpnRuntimeMutationState::Failed
+                }
+            );
+            drop(guard);
+            std::fs::remove_file(path).unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn reload_rejected_evpn_keeps_independent_changes_and_reports_partial() {
+        use crate::evpn_runtime_converger::DaemonEvpnRuntimeConvergeError as ConvergeError;
+        for failure in [
+            ConvergeError::Unsupported("unsupported candidate".into()),
+            ConvergeError::Failed(rustbgpd_evpn::EvpnRuntimeConvergeError::new(
+                "rollback acknowledged",
+            )),
+        ] {
+            let path = unique_temp_path("reload-evpn-rejected-plus-honor");
+            std::fs::write(&path, EVPN_VNI_100_TOML).unwrap();
+            let initial = load_tier_test_config(&path);
+            let (apply, coordinator) = evpn_reload_apply(&initial, Err(failure));
+            std::fs::write(
+                &path,
+                EVPN_VNI_100_200_TOML
+                    .replace("asn = 65001", "asn = 65001\nhonor_graceful_shutdown = true"),
+            )
+            .unwrap();
+            let (peer_mgr_tx, mut peer_mgr_rx) = mpsc::channel(8);
+            let peer_mgr = tokio::spawn(async move {
+                let Some(PeerManagerCommand::SetHonorGracefulShutdown { enabled, reply }) =
+                    peer_mgr_rx.recv().await
+                else {
+                    panic!("expected independent honor knob change");
+                };
+                assert!(enabled);
+                reply.send(Ok(())).unwrap();
+            });
+            let authority = reload_config(
+                path.to_str().unwrap(),
+                &initial,
+                initial.global.telemetry.grpc_tcp.as_ref(),
+                initial.global.telemetry.grpc_uds.as_ref(),
+                &peer_mgr_tx,
+                None,
+                Some(&apply),
+            )
+            .await
+            .expect("independent reload change must still apply");
+            assert!(authority.runtime.global.honor_graceful_shutdown);
+            assert_eq!(authority.runtime.evpn_instances, initial.evpn_instances);
+            assert!(
+                matches!(&authority.completion, SighupCompletion::KnownPartial { failures }
+                if failures.len() == 1 && failures[0].bucket == "evpn_runtime.apply")
+            );
+            assert_eq!(
+                crate::sighup_reload_metric_outcome(&Ok(Ok(authority))),
+                crate::SighupReloadMetricOutcome::KnownPartial
+            );
+            assert_eq!(
+                coordinator.lock().unwrap().model().mutation_state(),
+                rustbgpd_evpn::EvpnRuntimeMutationState::Idle
+            );
+            peer_mgr.await.unwrap();
+            std::fs::remove_file(path).unwrap();
+        }
+    }
+
+    #[tokio::test]
     async fn reload_failed_evpn_candidate_fences_at_committed_runtime_baseline() {
         let path = unique_temp_path("reload-evpn-reject-committed-baseline");
         std::fs::write(&path, EVPN_VNI_100_TOML).unwrap();
@@ -5772,7 +5953,7 @@ local_vtep_ip = "10.0.0.1"
             vec![
                 Ok(()),
                 Err(
-                    crate::evpn_runtime_converger::DaemonEvpnRuntimeConvergeError::Failed(
+                    crate::evpn_runtime_converger::DaemonEvpnRuntimeConvergeError::KnownDivergence(
                         rustbgpd_evpn::EvpnRuntimeConvergeError::new(
                             "test convergence failure after committed baseline",
                         ),

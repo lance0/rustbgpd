@@ -3145,7 +3145,7 @@ semantics used by both `ApplyEvpnRuntime` and SIGHUP reload.
 | `GetIpVrf`          | Detail view of a single IP-VRF including the seven readiness predicates (`not_ready_reasons`) when `readiness_state != Ready` and scoped remote Type 5 projection-drop counts |
 | `ListDuplicateMacQuarantines` | List at most 4096 active duplicate-MAC local-origin quarantine keys from one actor-published snapshot, ordered by VNI and raw MAC. `omitted` is exact and `complete` is true exactly when no rows were omitted. |
 | `ClearDuplicateMacQuarantine` | Clear one RFC 7432 §15.1 duplicate-MAC local-origin quarantine by `(vni, mac)`. Returns `cleared=false` when no active quarantine exists; read-only listeners reject it. |
-| `ApplyEvpnRuntime` | Validate or apply a full candidate EVPN runtime model through the ADR-0063 coordinator. `validate_only=true` returns the plan without mutation; no-op applies succeed. Supported live changes include single L2VNI/IP-VRF/Ethernet-Segment add/delete/redefine, additive build-up, atomic tenant teardown, `ip_vrf` relink, and decomposable mixed edits ordered as deletes -> redefines -> `ip_vrf` relinks -> adds. L2VNI add/delete republishes the current instance table to the segment actor so later ES add/redefine can bind a VNI added at runtime, including the first segment on a daemon started without one; ES-member L2VNI redefine rebuilds the segment actor's Type 1/4 routes from the candidate instance snapshot. L3VNI/device/table IP-VRF identity changes remain restart-required by design. Unsupported dependency cycles fail closed before commit; residual mid-sequence convergence failures fail-stop after already committed generations and are surfaced by `evpn_runtime_decomposed_fail_stops_total`. |
+| `ApplyEvpnRuntime` | Validate or apply a full candidate EVPN runtime model through the ADR-0063 coordinator. `validate_only=true` returns the plan without mutation; no-op applies succeed. Supported live changes include single L2VNI/IP-VRF/Ethernet-Segment add/delete/redefine, additive build-up, atomic tenant teardown, `ip_vrf` relink, and decomposable mixed edits ordered as deletes -> redefines -> `ip_vrf` relinks -> adds. L2VNI add/delete republishes the current instance table to the segment actor so later ES add/redefine can bind a VNI added at runtime, including the first segment on a daemon started without one; ES-member L2VNI redefine rebuilds the segment actor's Type 1/4 routes from the candidate instance snapshot. L3VNI/device/table IP-VRF identity changes remain restart-required by design. Unsupported dependency cycles fail closed before commit; mid-sequence convergence failures stop after already committed generations; unrestored failures pin the coordinator and increment `evpn_runtime_decomposed_fail_stops_total`. |
 
 Instance mutation (`AddEvpnInstance` / `DeleteEvpnInstance`) remains out
 of scope. `GetEvpnRuntime` now reports the daemon-owned ADR-0063
@@ -3173,24 +3173,28 @@ retaining the stable ESI label. L3VNI/device/table IP-VRF identity changes
 remain restart-required by design. Unsupported dependency cycles fail closed
 before commit. If a later primitive step or actor command fails after earlier
 steps committed, the sequence fail-stops there: the committed generations stay
-visible, the coordinator pins `mutation_state=Failed`, an ERROR log names the
-step, and `evpn_runtime_decomposed_fail_stops_total` increments for the
-mid-sequence stop.
+visible and an ERROR log names the step. If the failing step leaves unrestored
+or unacknowledged effects, the coordinator pins `mutation_state=Failed` and
+`evpn_runtime_decomposed_fail_stops_total` increments. A fully compensated step
+leaves the prior committed model authoritative; it does not undo earlier
+primitive commits. SIGHUP still fences that partial sequence for recovery.
 
 A failed `ApplyEvpnRuntime` status states what the failure left behind:
 
 | Status | Meaning |
 |--------|---------|
-| `FAILED_PRECONDITION` | No remaining divergence. Either the candidate was refused before any side effect, or the failing step had no effect and every earlier step was rolled back to the committed model. A rolled-back failure is not a no-effect refusal: earlier publishes, such as an acknowledged Type 3 IMET originate and its compensating withdraw, can be observed before the rollback, and a retry can repeat those transient changes. |
+| `FAILED_PRECONDITION` | No new divergence from the failing primitive step. Either the candidate was refused before any side effect, or every effect from the failing primitive converge was rolled back to its previously committed model. Earlier primitive commits in a decomposed apply remain committed. A rolled-back failure is not a no-effect refusal: earlier publishes, such as an acknowledged Type 3 IMET originate and its compensating withdraw, can be observed before the rollback, and a retry can repeat those transient changes. |
 | `INTERNAL` | Known divergence. A rollback step did not restore the committed model, or the failing step may have taken effect without an acknowledgement (for example, a Type 3 inject whose RIB acknowledgement timed out or whose reply was dropped). The message says the state was not restored; live EVPN state may need repair or a restart. |
 | `UNAVAILABLE` | Daemon shutdown cut the apply off after it published to the EVPN actors. Those publishes are not rolled back, because the same shutdown drains the actors next. |
 
-The committed generation is unchanged in every case. A refusal before the
-converge starts leaves the coordinator idle; a converge that failed after it
-started pins `mutation_state=Failed` until a later apply succeeds, whichever
-status it returned. A rollback counts as restored only when every actor the
-apply published to holds the committed snapshot again and every Type 3 IMET
-route it changed has been put back with a RIB acknowledgement.
+The failing step does not advance the committed generation; earlier primitive
+commits in a decomposed apply remain committed and are named in the error.
+A refusal before convergence or a fully compensated failure preserves the
+coordinator's prior state. Unrestored or unacknowledged effects pin
+`mutation_state=Failed` until a later apply succeeds. A rollback counts as
+restored only when every actor the step published to holds the committed
+snapshot again and every Type 3 IMET route it changed has been put back with a
+RIB acknowledgement.
 
 Operators configure instances via the `[[evpn_instances]]` TOML block.
 SIGHUP reload submits EVPN table edits through the same coordinator for

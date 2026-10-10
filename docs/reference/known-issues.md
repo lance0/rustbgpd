@@ -430,8 +430,11 @@ resolved.
   IP-VRF-linked L2VNI swaps, and decomposable mixed edits ordered as
   deletes -> redefines -> `ip_vrf` relinks -> adds. Unsupported dependency
   cycles fail closed without advancing the committed generation; a later
-  primitive convergence failure fail-stops after any earlier generations that
-  already committed and increments `evpn_runtime_decomposed_fail_stops_total`.
+  primitive convergence failure stops after any earlier generations that
+  already committed. Unrestored or unacknowledged effects pin the coordinator
+  and increment `evpn_runtime_decomposed_fail_stops_total`; fully compensated
+  steps preserve the prior committed model. SIGHUP fences a partial sequence
+  even when the failing step was compensated.
   L3VNI/device/table IP-VRF identity changes remain outside the hot-apply
   boundary by design (restart-required — kernel VRF lifecycle).
 - **`esi = "auto-lacp"` readiness is polled.**
