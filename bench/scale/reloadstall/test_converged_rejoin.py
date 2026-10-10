@@ -200,6 +200,18 @@ class Invalid(unittest.TestCase):
         rc, text, v = analyze(out)
         self.assertEqual((rc, v["verdict"]), (4, "INVALID"), text)
 
+    def test_malformed_run_row(self):
+        # A short row leaves DictReader None values and an overlong one a None key. Next to another
+        # unscheduled row, a None in the key made sorting the unscheduled keys raise TypeError.
+        runs = self.out / "runs.tsv"
+        good = runs.read_text()
+        for row, why in (("head\t50\t3\t0\t0\nhead\t50\n", "malformed runs.tsv row ['head', '50']"),
+                         ("head\t50\t3\t0\t0\nbase\t50\t3\t0\t0\textra\n",
+                          "malformed runs.tsv row ['base', '50', '3', '0', '0', 'extra']")):
+            with self.subTest(row=row):
+                runs.write_text(good + row)
+                self.assert_invalid(why)
+
     def test_run_outside_schedule(self):
         with (self.out / "runs.tsv").open("a") as f:
             f.write("head\t50\t3\t0\t0\n")

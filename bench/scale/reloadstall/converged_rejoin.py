@@ -288,7 +288,11 @@ def cmd_analyze(a: argparse.Namespace) -> int:
     problems = []
     runs = {}
     for r in csv.DictReader(read(out / "runs.tsv").splitlines(), delimiter="\t"):
-        key = (r.get("arm"), r.get("k"), r.get("rep"))
+        if None in r or None in r.values():  # a short row (None values) or an overlong one (None key)
+            fields = [v for k, v in r.items() if k is not None and v is not None] + r.get(None, [])
+            problems.append(f"malformed runs.tsv row {fields}")
+            continue
+        key = (r["arm"], r["k"], r["rep"])
         if key in runs:
             problems.append(f"duplicate runs.tsv row {key}")
         runs[key] = r
