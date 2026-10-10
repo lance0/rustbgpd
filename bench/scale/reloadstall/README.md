@@ -773,8 +773,10 @@ check at 16 peers × 1,600 prefixes, not a measurement. `DRY_RUN=1` prints the
 arms, the campaign file and every command without locking or building.
 
 Before the first cell, `converged_rejoin.py init` fixes the shape and the bars
-in `OUT_DIR/campaign.json`; the verdict reads nothing else, so bars cannot
-move after the data arrives. The default bars:
+in `OUT_DIR/campaign.json`, and the driver records that file's sha256 in
+`manifest.txt` before any cell runs. The verdict reads no other bars, and a
+`campaign.json` edited after init no longer matches the recorded digest, so
+the verdict is INVALID rather than a different PASS or FAIL. The default bars:
 
 - **B1:** at the high K, head's `rejoin_max_s` median is below base's and its
   range is disjoint below base's.
@@ -789,7 +791,8 @@ rather than speed it up. An unknown key is refused.
 The verdict is PASS, FAIL or INVALID (exit 0, 1 or 4). It fails closed:
 INVALID results from any of the following:
 
-- a malformed `campaign.json`;
+- a malformed `campaign.json`, or one whose sha256 differs from
+  `manifest.txt`'s `campaign_sha256` (or that line is missing);
 - a missing cell, or a `runs.tsv` or `schedule.txt` that differs from the
   campaign's schedule;
 - a non-zero harness or daemon exit;

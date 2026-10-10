@@ -4,7 +4,10 @@
 run-converged-rejoin.sh drives the cells; this file owns everything the
 verdict depends on, so the shape, the schedule and the bars are fixed in
 OUT_DIR/campaign.json before the first cell runs and the analysis reads only
-that file and the cell outputs.
+that file and the cell outputs. The driver records campaign.json's sha256 in
+OUT_DIR/manifest.txt before the first cell; the analyzer refuses a
+campaign.json that no longer matches it, so a bar edited after the run makes
+the verdict INVALID rather than flipping it.
 
 usage:
   converged_rejoin.py init OUT_DIR --peers N --prefixes N --ks KLO,KHI
@@ -20,7 +23,8 @@ usage:
       Read campaign.json, runs.tsv, quiet/*.tsv and raw/*/reloadstall.log;
       write samples.tsv and verdict.json; print a table and one verdict line.
       Exit 0 PASS, 1 FAIL, 4 INVALID (any scheduled cell missing or invalid,
-      a run outside the schedule, or a malformed campaign.json). A smoke
+      a run outside the schedule, a malformed campaign.json, or one whose
+      sha256 differs from manifest.txt's campaign_sha256). A smoke
       campaign gets every validity check but no bars: its verdict is SMOKE
       (exit 0) or INVALID.
 
@@ -47,7 +51,9 @@ The harness exits non-zero on a /readyz sample that is not 200 within
 from __future__ import annotations
 
 import argparse
+import contextlib
 import csv
+import hashlib
 import json
 import math
 import statistics as st
@@ -266,8 +272,17 @@ def cmd_analyze(a: argparse.Namespace) -> int:
     out = a.out
     try:
         c = load_campaign(out)
+        digest = hashlib.sha256((out / "campaign.json").read_bytes()).hexdigest()
+        recorded = [line.split("=", 1)[1] for line in read(out / "manifest.txt").splitlines()
+                    if line.startswith("campaign_sha256=")]
+        if recorded != [digest]:
+            raise ValueError(f"sha256 {digest} does not match manifest.txt campaign_sha256 "
+                             f"{recorded or 'missing'}; it changed after init")
     except (OSError, ValueError, KeyError, TypeError) as e:
-        print(f"VERDICT: INVALID (campaign.json: {e})")
+        problem = f"campaign.json: {e}"
+        with contextlib.suppress(OSError):  # replace any earlier verdict; OUT_DIR itself may be missing
+            (out / "verdict.json").write_text(json.dumps({"verdict": "INVALID", "problems": [problem]}, indent=2) + "\n")
+        print(f"VERDICT: INVALID ({problem})")
         return 4
     klo, khi = c["ks"]
     problems = []

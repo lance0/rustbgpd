@@ -4,6 +4,7 @@ and the analyzer's refusal (INVALID) of doctored or incomplete campaigns."""
 
 from __future__ import annotations
 
+import hashlib
 import json
 import shutil
 import subprocess
@@ -48,6 +49,8 @@ def campaign(out: Path, *, scale: dict | None = None, bars: dict | None = None, 
     c = {"peers": 700, "prefixes": 400400, "ks": [1, 50], "repeats": 2, "rounds": 3, "quiet": quiet,
          "smoke": smoke, "bars": {**converged_rejoin.DEFAULT_BARS, **(bars or {})}}
     (out / "campaign.json").write_text(json.dumps(c))
+    digest = hashlib.sha256((out / "campaign.json").read_bytes()).hexdigest()
+    (out / "manifest.txt").write_text(f"analyzer_sha256=0\ncampaign_sha256={digest}\nkernel=test\n")
     runs = ["arm\tk\trep\tharness_rc\tdaemon_rc"]
     for arm, k, rep in converged_rejoin.schedule(c):
         name = f"{arm}-k{k}-rep{rep}"
@@ -247,6 +250,19 @@ class Invalid(unittest.TestCase):
                 q.write_text(QUIET)
                 edit(q, old, new)
                 self.assert_invalid(f"base-k50-rep1: quiet-host gate: {why}")
+
+    def test_bar_edited_after_init(self):
+        # Identical arms FAIL B1 under "improve" and would PASS under "not_worse"; a bar
+        # edited after init must not flip the verdict on the same data.
+        self.out = campaign(self.tmp / "same")
+        rc, text, v = analyze(self.out)
+        self.assertEqual((rc, v["verdict"]), (1, "FAIL"), text)
+        edit(self.out / "campaign.json", '"high_k": "improve"', '"high_k": "not_worse"')
+        self.assert_invalid("does not match manifest.txt campaign_sha256")
+        edit(self.out / "manifest.txt", "campaign_sha256=", "campaign_sha256_was=")
+        self.assert_invalid("campaign_sha256 missing")
+        (self.out / "manifest.txt").unlink()
+        self.assert_invalid("campaign_sha256 missing")
 
     def test_campaign_json_missing_or_tampered(self):
         good = json.loads((self.out / "campaign.json").read_text())

@@ -17,7 +17,9 @@
 # Before the first cell, converged_rejoin.py writes OUT_DIR/campaign.json:
 # the shape, the schedule's inputs and the bars. ACCEPTANCE names a JSON file
 # that overrides the default bars (see converged_rejoin.py); write it before
-# the run, because the verdict reads only campaign.json. Every cell runs a
+# the run, because the verdict reads only campaign.json; its sha256 goes in
+# manifest.txt before the first cell, and the analyzer returns INVALID if
+# campaign.json changes afterwards. Every cell runs a
 # fresh daemon. Repetition 1, 3, ... runs base-Klo head-Klo head-Khi
 # base-Khi; even repetitions run the reverse. Each cell keeps
 # raw/ARM-kK-repN/{reloadstall.log,daemon.log,metrics-final.prom,...}; the
@@ -238,6 +240,7 @@ rmdir "$OUT/trees"
     echo "reloadstall_sha256=$(provenance_sha256_file "$HARNESS")"
     echo "gen_scenario_sha256=$(provenance_sha256_file "$REPO/bench/scale/reloadstall/gen-scenario.py")"
     echo "analyzer_sha256=$(provenance_sha256_file "$PY")"
+    echo "campaign_sha256=$(provenance_sha256_file "$OUT/campaign.json")"
     echo "rustc=$(rustc --version)"
     echo "kernel=$(uname -r)"
     echo "peers=$PEERS prefixes=$PREFIXES ks=$KLO,$KHI repeats=$REPEATS rounds=$ROUNDS control_secs=$CONTROL_SECS quiet=$QUIET smoke=${SMOKE:+1}"
