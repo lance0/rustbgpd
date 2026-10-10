@@ -2,8 +2,8 @@
   "schema": 1,
   "status": "prepared recipe; not applied, built, smoked, queued or measured",
   "prepared_on": "2026-10-10",
-  "prepared_main_commit": "76d037e8a43a3e102fc2e025a383016b89b4cd86",
-  "prepared_main_tree": "1eb6fe1d88b1d549f59a64cbc079e55f67412dcb",
+  "prepared_main_commit": "c18a1bd5888e13887f090632931b0a73cce20302",
+  "prepared_main_tree": "c634114c0b1b42266b3e35cecd8eefc22bf1a3b9",
   "refresh_main_before_queue": true,
   "arms": {
     "v075": {
@@ -75,5 +75,17 @@
     "record both runner hashes, all binary hashes and build provenance",
     "smoke the old daemon against main's generated inputs and verifier before measuring",
     "use a new output directory and retain every raw log, cgroup proof, status, provenance and checksum"
+  ],
+  "preparation_history": [
+    {
+      "prepared_main_commit": "76d037e8a43a3e102fc2e025a383016b89b4cd86",
+      "prepared_main_tree": "1eb6fe1d88b1d549f59a64cbc079e55f67412dcb",
+      "status": "initial preparation snapshot; not run"
+    },
+    {
+      "prepared_main_commit": "c18a1bd5888e13887f090632931b0a73cce20302",
+      "prepared_main_tree": "c634114c0b1b42266b3e35cecd8eefc22bf1a3b9",
+      "status": "refreshed source snapshot only; no quiet recipe applied, built, smoked, queued or run"
+    }
   ]
 }

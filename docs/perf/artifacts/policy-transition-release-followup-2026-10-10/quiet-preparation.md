@@ -15,6 +15,12 @@ binary was built at the recorded campaign commit, whose Git tree is identical
 to the v0.75.0 tag; both commit identities and the binary digest are declared
 separately in the manifest.
 
+The source preparation snapshot was refreshed from `76d037e8a` to
+`c18a1bd58` after the daytime attribution work. Both identities and their
+trees remain in the manifest's preparation history. This refresh did not
+apply, build, smoke, queue or run the quiet recipe; the final source and
+binary manifests still need to be frozen before its future window.
+
 ## Avoid two misleading shortcuts
 
 - `LABEL=MAIN_REF:DAEMON_REF` in the headline driver supports matrix legs

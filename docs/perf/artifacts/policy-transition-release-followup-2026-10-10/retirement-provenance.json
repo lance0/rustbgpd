@@ -1,0 +1,756 @@
+{
+  "build_exit": 0,
+  "abba_exit": 0,
+  "window_start": "2026-10-10T13:19:55-04:00",
+  "window_finish": "2026-10-10T13:45:50-04:00",
+  "canonical_host_lock_held": true,
+  "run_order": [
+    "parent-r1",
+    "child-r1",
+    "child-r2",
+    "parent-r2"
+  ],
+  "driver_sha256": "bc2f69014519bbe948a7c83917810d6c762cf5f4c0bec9b6432084dbba11392c",
+  "instrument": {
+    "source_commit": "591ac39d4b50fc2c647942713a9ea99c0588a51a",
+    "source_tree": "f82868fd192f54acc0c68197e4f23fdcf9ab7eeb",
+    "files": {
+      "trees/j1-ctl/bench/scale/reloadstall/policy_stats_cell.sh": "171a07117f6936aabcfa8486376acc8fc3ae31e476f8fbd7661f018e9dd02600",
+      "trees/j1-ctl/bench/scale/reloadstall/policy_stats_cell.py": "f4c25450473cc811b4a9a108892408b68bef972b5a1109f2ef162b7a6c0fa535",
+      "trees/j1-ctl/bench/scale/reloadstall/gen-scenario.py": "e563659beef5857ee79ddac40e1cff5730c34e424b5ca074a3f9007b5dc0ab42",
+      "trees/j1-ctl/bench/scale/host-quiet.sh": "abb3391cd5e0879c29aabd0aa0c316ea33d5f7c72f6d2a7d111b30025de411fd",
+      "trees/j1-ctl/tests/soak/host-lock.sh": "f5f419bb439f0b5e22521e9f7fa73d4ef73df159abeec31fafff63548899c658",
+      "trees/j1-ctl/tests/soak/fd-headroom.sh": "f55832b71079cdcd0f708fe3b764cf35d020dfe4ab894ff81191c436a4d04b2b",
+      "trees/j1-ctl/scripts/build-lock.sh": "2bb48e5b02c3c3e49084a1c5456be34a476ecb09e0ee8f879e858d8ba17eea75",
+      "bin/harness-main/reloadstall": "2701b6b81deca419dbcb55692cc74a9e976b73bcc628507dfa6c284116880b30"
+    }
+  },
+  "preparation": {
+    "prepared_utc": "2026-10-10T15:26:15.820039+00:00",
+    "status": "prepared; no builds or measurements queued or started",
+    "shape": {
+      "peers": 1000,
+      "prefixes": 400000,
+      "reloads_per_leg": 7,
+      "control_secs": 15,
+      "quiesce_secs": 40
+    },
+    "driver_sha256": "bc2f69014519bbe948a7c83917810d6c762cf5f4c0bec9b6432084dbba11392c",
+    "original_proposal_reload_count": 6,
+    "reload_count_decision": "Root selected seven before launch: retained Q4 first pair is outside the [-220,0] ms band; one calibration reload plus six qualifying pairs preserves the unchanged minimum.",
+    "cache_freshness": {
+      "status": "prepared only; source timestamps not refreshed",
+      "method": "git ls-files -z followed by xargs -0 -r touch -- in each arm before its Cargo build",
+      "pathspecs": [
+        "*.rs",
+        "*.proto",
+        "Cargo.toml",
+        "Cargo.lock",
+        "**/Cargo.toml",
+        "**/Cargo.lock"
+      ],
+      "locks_required": [
+        "canonical host lock",
+        "shared Cargo target build lock"
+      ],
+      "content_changes": false,
+      "selection": {
+        "parent": {
+          "count": 764,
+          "input_list_sha256": "3de2b144a5a7e50548d0f3c62403bc3779c92b71e14b6ce956b2f180dd992f61",
+          "rust": 724,
+          "protobuf": 5,
+          "Cargo.toml": 34,
+          "Cargo.lock": 1
+        },
+        "child": {
+          "count": 765,
+          "input_list_sha256": "9d1393cda1a9b84139af9fefa887143cb3b6264626149c900a39cb569802bba7",
+          "rust": 725,
+          "protobuf": 5,
+          "Cargo.toml": 34,
+          "Cargo.lock": 1
+        }
+      },
+      "binary_identity_records": [
+        "input_list",
+        "input_count",
+        "input_list_sha256",
+        "refreshed_at",
+        "locks_held"
+      ]
+    },
+    "pre_cache_freshness": {
+      "driver.sh": "490b5e92259f2f9c835364c95c83b8aff3c3c2b4dd49bca94015425072705f67",
+      "PLAN.md": "22d2dea6b8e52070e701994c24697cc97bb852b80b3ccd678911606014c3a4a0",
+      "manifest.json": "8698d4f113211bd1829b20ad5bd4dff0d34b95b5ff6907961dc0f658d4e233b5"
+    }
+  },
+  "toolchain": [
+    "rustc 1.99.0 (b940084d7 2026-09-28)",
+    "binary: rustc",
+    "commit-hash: b940084d7eb6a299eb4bfeb8e34901bc051e7ac4",
+    "commit-date: 2026-09-28",
+    "host: x86_64-unknown-linux-gnu",
+    "release: 1.99.0",
+    "LLVM version: 23.1.1",
+    "cargo 1.99.0 (5f94df478 2026-08-27)"
+  ],
+  "arms": {
+    "parent": {
+      "source_commit": "2c55425547bb1fddcb0a4bc30937f26474751020",
+      "source_tree": "e6cd620b5a7c65e66f43d6a962ca86e6791935fa",
+      "tracked_dirty": false,
+      "profile": "release",
+      "jobs": 4,
+      "cpu_affinity": "40-63",
+      "command": "cargo build --release --locked -j 4 -p rustbgpd -p rustbgpctl -p rs-config-render",
+      "binaries": {
+        "rustbgpd": {
+          "sha256": "4dc6d41a1a1f7f0769314dd27e44ed90efdc89f9c6bc46e61b35cb190087d0a2",
+          "version": "rustbgpd 0.73.0"
+        },
+        "rbgp": {
+          "sha256": "10c307572a97b6c388dc81735647a09520e6a5af37dec1103b328094f00cb8e5",
+          "version": "rbgp 0.73.0"
+        }
+      },
+      "cache_freshness": {
+        "method": "touch tracked Rust, protobuf and Cargo input timestamps; no content edits",
+        "format": "NUL-delimited paths relative to source_worktree",
+        "input_count": 764,
+        "input_list_sha256": "3de2b144a5a7e50548d0f3c62403bc3779c92b71e14b6ce956b2f180dd992f61",
+        "refreshed_at": "2026-10-10T13:09:26-04:00",
+        "locks_held": [
+          "canonical host lock",
+          "shared Cargo target build lock"
+        ],
+        "input_list": "logs/build-parent-inputs.nul"
+      },
+      "build_started": "2026-10-10T13:09:25-04:00",
+      "build_finished": "2026-10-10T13:14:06-04:00",
+      "build_exit": 0
+    },
+    "child": {
+      "source_commit": "2a5b299ebcfd1659b12ff0f2df7a3aad34954d0b",
+      "source_tree": "5d372360bcd3aec816a9954c64dcb76be0ce8cff",
+      "tracked_dirty": false,
+      "profile": "release",
+      "jobs": 4,
+      "cpu_affinity": "40-63",
+      "command": "cargo build --release --locked -j 4 -p rustbgpd -p rustbgpctl -p rs-config-render",
+      "binaries": {
+        "rustbgpd": {
+          "sha256": "a0df58a53020f0bd525884fe4942092ae35fa13c93874bb7d3c71f79acc4d0f5",
+          "version": "rustbgpd 0.73.0"
+        },
+        "rbgp": {
+          "sha256": "10c307572a97b6c388dc81735647a09520e6a5af37dec1103b328094f00cb8e5",
+          "version": "rbgp 0.73.0"
+        }
+      },
+      "cache_freshness": {
+        "method": "touch tracked Rust, protobuf and Cargo input timestamps; no content edits",
+        "format": "NUL-delimited paths relative to source_worktree",
+        "input_count": 765,
+        "input_list_sha256": "9d1393cda1a9b84139af9fefa887143cb3b6264626149c900a39cb569802bba7",
+        "refreshed_at": "2026-10-10T13:14:06-04:00",
+        "locks_held": [
+          "canonical host lock",
+          "shared Cargo target build lock"
+        ],
+        "input_list": "logs/build-child-inputs.nul"
+      },
+      "build_started": "2026-10-10T13:14:06-04:00",
+      "build_finished": "2026-10-10T13:18:45-04:00",
+      "build_exit": 0
+    }
+  },
+  "runs": {
+    "parent-r1": {
+      "started": "2026-10-10T13:20:25-04:00",
+      "finished": "2026-10-10T13:25:54-04:00",
+      "wrapper_exit": 0,
+      "cell_verdict": "PASS",
+      "exits": {
+        "cell": 0,
+        "daemon": 0,
+        "engine": 0,
+        "probe": 0
+      },
+      "checks_pass": true,
+      "errors": [],
+      "invalid_calls": [],
+      "deadline_misses": 0,
+      "calls_over_2s": 0,
+      "in_band_pairs": 6,
+      "flat": {
+        "pass": true,
+        "in_band_max_ms": 0,
+        "quiescent_median_ms": 0,
+        "limit_ms": 50
+      },
+      "environment": {
+        "source_head": "591ac39d4b50fc2c647942713a9ea99c0588a51a",
+        "source_dirty": "",
+        "binaries": {
+          "rustbgpd": "4dc6d41a1a1f7f0769314dd27e44ed90efdc89f9c6bc46e61b35cb190087d0a2",
+          "rbgp": "10c307572a97b6c388dc81735647a09520e6a5af37dec1103b328094f00cb8e5",
+          "reloadstall": "2701b6b81deca419dbcb55692cc74a9e976b73bcc628507dfa6c284116880b30"
+        },
+        "versions": {
+          "rustbgpd": "rustbgpd 0.73.0",
+          "rbgp": "rbgp 0.73.0"
+        },
+        "shape": {
+          "peers": 1000,
+          "prefixes": 400000,
+          "reloads": 7,
+          "control_secs": 15,
+          "quiesce_secs": 40,
+          "run_cap_secs": 1015,
+          "pair_lead_s": 0.11,
+          "quiescent_offset_s": 20
+        },
+        "placement": {
+          "daemon_cpus": "2-3",
+          "engine_cpus": "4-5",
+          "probe_cpus": "8-15"
+        },
+        "kernel": "7.0.0-30-generic",
+        "compiler_processes_at_start": 0
+      },
+      "quiet_samples": [
+        {
+          "sample": "1",
+          "epoch_s": "1791652795",
+          "load1": "1.47",
+          "pswpin": "2424677",
+          "pswpout": "2447475",
+          "governors": "performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance",
+          "performance_governors": "64",
+          "governor_count": "64",
+          "competitors": "none",
+          "quiet": "true",
+          "failed_dimensions": "none",
+          "original_attempt": "1"
+        },
+        {
+          "sample": "2",
+          "epoch_s": "1791652825",
+          "load1": "1.28",
+          "pswpin": "2424677",
+          "pswpout": "2447475",
+          "governors": "performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance",
+          "performance_governors": "64",
+          "governor_count": "64",
+          "competitors": "none",
+          "quiet": "true",
+          "failed_dimensions": "none",
+          "original_attempt": "2"
+        }
+      ]
+    },
+    "child-r1": {
+      "started": "2026-10-10T13:26:24-04:00",
+      "finished": "2026-10-10T13:31:53-04:00",
+      "wrapper_exit": 0,
+      "cell_verdict": "PASS",
+      "exits": {
+        "cell": 0,
+        "daemon": 0,
+        "engine": 0,
+        "probe": 0
+      },
+      "checks_pass": true,
+      "errors": [],
+      "invalid_calls": [],
+      "deadline_misses": 0,
+      "calls_over_2s": 0,
+      "in_band_pairs": 6,
+      "flat": {
+        "pass": true,
+        "in_band_max_ms": 0,
+        "quiescent_median_ms": 0,
+        "limit_ms": 50
+      },
+      "environment": {
+        "source_head": "591ac39d4b50fc2c647942713a9ea99c0588a51a",
+        "source_dirty": "",
+        "binaries": {
+          "rustbgpd": "a0df58a53020f0bd525884fe4942092ae35fa13c93874bb7d3c71f79acc4d0f5",
+          "rbgp": "10c307572a97b6c388dc81735647a09520e6a5af37dec1103b328094f00cb8e5",
+          "reloadstall": "2701b6b81deca419dbcb55692cc74a9e976b73bcc628507dfa6c284116880b30"
+        },
+        "versions": {
+          "rustbgpd": "rustbgpd 0.73.0",
+          "rbgp": "rbgp 0.73.0"
+        },
+        "shape": {
+          "peers": 1000,
+          "prefixes": 400000,
+          "reloads": 7,
+          "control_secs": 15,
+          "quiesce_secs": 40,
+          "run_cap_secs": 1015,
+          "pair_lead_s": 0.11,
+          "quiescent_offset_s": 20
+        },
+        "placement": {
+          "daemon_cpus": "2-3",
+          "engine_cpus": "4-5",
+          "probe_cpus": "8-15"
+        },
+        "kernel": "7.0.0-30-generic",
+        "compiler_processes_at_start": 0
+      },
+      "quiet_samples": [
+        {
+          "sample": "1",
+          "epoch_s": "1791653154",
+          "load1": "1.79",
+          "pswpin": "2424677",
+          "pswpout": "2447475",
+          "governors": "performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance",
+          "performance_governors": "64",
+          "governor_count": "64",
+          "competitors": "none",
+          "quiet": "true",
+          "failed_dimensions": "none",
+          "original_attempt": "1"
+        },
+        {
+          "sample": "2",
+          "epoch_s": "1791653184",
+          "load1": "1.53",
+          "pswpin": "2424677",
+          "pswpout": "2447475",
+          "governors": "performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance",
+          "performance_governors": "64",
+          "governor_count": "64",
+          "competitors": "none",
+          "quiet": "true",
+          "failed_dimensions": "none",
+          "original_attempt": "2"
+        }
+      ]
+    },
+    "child-r2": {
+      "started": "2026-10-10T13:33:23-04:00",
+      "finished": "2026-10-10T13:38:51-04:00",
+      "wrapper_exit": 0,
+      "cell_verdict": "PASS",
+      "exits": {
+        "cell": 0,
+        "daemon": 0,
+        "engine": 0,
+        "probe": 0
+      },
+      "checks_pass": true,
+      "errors": [],
+      "invalid_calls": [],
+      "deadline_misses": 0,
+      "calls_over_2s": 0,
+      "in_band_pairs": 6,
+      "flat": {
+        "pass": true,
+        "in_band_max_ms": 0,
+        "quiescent_median_ms": 0,
+        "limit_ms": 50
+      },
+      "environment": {
+        "source_head": "591ac39d4b50fc2c647942713a9ea99c0588a51a",
+        "source_dirty": "",
+        "binaries": {
+          "rustbgpd": "a0df58a53020f0bd525884fe4942092ae35fa13c93874bb7d3c71f79acc4d0f5",
+          "rbgp": "10c307572a97b6c388dc81735647a09520e6a5af37dec1103b328094f00cb8e5",
+          "reloadstall": "2701b6b81deca419dbcb55692cc74a9e976b73bcc628507dfa6c284116880b30"
+        },
+        "versions": {
+          "rustbgpd": "rustbgpd 0.73.0",
+          "rbgp": "rbgp 0.73.0"
+        },
+        "shape": {
+          "peers": 1000,
+          "prefixes": 400000,
+          "reloads": 7,
+          "control_secs": 15,
+          "quiesce_secs": 40,
+          "run_cap_secs": 1015,
+          "pair_lead_s": 0.11,
+          "quiescent_offset_s": 20
+        },
+        "placement": {
+          "daemon_cpus": "2-3",
+          "engine_cpus": "4-5",
+          "probe_cpus": "8-15"
+        },
+        "kernel": "7.0.0-30-generic",
+        "compiler_processes_at_start": 0
+      },
+      "quiet_samples": [
+        {
+          "sample": "1",
+          "epoch_s": "1791653573",
+          "load1": "1.86",
+          "pswpin": "2424677",
+          "pswpout": "2447475",
+          "governors": "performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance",
+          "performance_governors": "64",
+          "governor_count": "64",
+          "competitors": "none",
+          "quiet": "true",
+          "failed_dimensions": "none",
+          "original_attempt": "3"
+        },
+        {
+          "sample": "2",
+          "epoch_s": "1791653603",
+          "load1": "1.52",
+          "pswpin": "2424677",
+          "pswpout": "2447475",
+          "governors": "performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance",
+          "performance_governors": "64",
+          "governor_count": "64",
+          "competitors": "none",
+          "quiet": "true",
+          "failed_dimensions": "none",
+          "original_attempt": "4"
+        }
+      ]
+    },
+    "parent-r2": {
+      "started": "2026-10-10T13:40:21-04:00",
+      "finished": "2026-10-10T13:45:50-04:00",
+      "wrapper_exit": 0,
+      "cell_verdict": "PASS",
+      "exits": {
+        "cell": 0,
+        "daemon": 0,
+        "engine": 0,
+        "probe": 0
+      },
+      "checks_pass": true,
+      "errors": [],
+      "invalid_calls": [],
+      "deadline_misses": 0,
+      "calls_over_2s": 0,
+      "in_band_pairs": 6,
+      "flat": {
+        "pass": true,
+        "in_band_max_ms": 0,
+        "quiescent_median_ms": 0,
+        "limit_ms": 50
+      },
+      "environment": {
+        "source_head": "591ac39d4b50fc2c647942713a9ea99c0588a51a",
+        "source_dirty": "",
+        "binaries": {
+          "rustbgpd": "4dc6d41a1a1f7f0769314dd27e44ed90efdc89f9c6bc46e61b35cb190087d0a2",
+          "rbgp": "10c307572a97b6c388dc81735647a09520e6a5af37dec1103b328094f00cb8e5",
+          "reloadstall": "2701b6b81deca419dbcb55692cc74a9e976b73bcc628507dfa6c284116880b30"
+        },
+        "versions": {
+          "rustbgpd": "rustbgpd 0.73.0",
+          "rbgp": "rbgp 0.73.0"
+        },
+        "shape": {
+          "peers": 1000,
+          "prefixes": 400000,
+          "reloads": 7,
+          "control_secs": 15,
+          "quiesce_secs": 40,
+          "run_cap_secs": 1015,
+          "pair_lead_s": 0.11,
+          "quiescent_offset_s": 20
+        },
+        "placement": {
+          "daemon_cpus": "2-3",
+          "engine_cpus": "4-5",
+          "probe_cpus": "8-15"
+        },
+        "kernel": "7.0.0-30-generic",
+        "compiler_processes_at_start": 0
+      },
+      "quiet_samples": [
+        {
+          "sample": "1",
+          "epoch_s": "1791653991",
+          "load1": "1.64",
+          "pswpin": "2424677",
+          "pswpout": "2447475",
+          "governors": "performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance",
+          "performance_governors": "64",
+          "governor_count": "64",
+          "competitors": "none",
+          "quiet": "true",
+          "failed_dimensions": "none",
+          "original_attempt": "3"
+        },
+        {
+          "sample": "2",
+          "epoch_s": "1791654021",
+          "load1": "1.45",
+          "pswpin": "2424677",
+          "pswpout": "2447475",
+          "governors": "performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance",
+          "performance_governors": "64",
+          "governor_count": "64",
+          "competitors": "none",
+          "quiet": "true",
+          "failed_dimensions": "none",
+          "original_attempt": "4"
+        }
+      ]
+    }
+  },
+  "source_sha256": {
+    "binaries/child/SHA256SUMS": "7c08ee83a1226fc2929a25640c7c461bc4fa384cfbae39e1014482bc2a1f2138",
+    "binaries/child/identity.json": "207eea0405a8b64fc6ef86272036507d7a368f44303942869c617f308b5a0f4d",
+    "binaries/child/rbgp": "10c307572a97b6c388dc81735647a09520e6a5af37dec1103b328094f00cb8e5",
+    "binaries/child/rustbgpd": "a0df58a53020f0bd525884fe4942092ae35fa13c93874bb7d3c71f79acc4d0f5",
+    "binaries/parent/SHA256SUMS": "b79424f5dee9bd9ceb847fc9e6a9ae4dbf002382acffdd0aeea78eae0ad18dff",
+    "binaries/parent/identity.json": "4803298616d3df93fb2dd8de94c2a696d7756c38b4e620974753964bcacec8c9",
+    "binaries/parent/rbgp": "10c307572a97b6c388dc81735647a09520e6a5af37dec1103b328094f00cb8e5",
+    "binaries/parent/rustbgpd": "4dc6d41a1a1f7f0769314dd27e44ed90efdc89f9c6bc46e61b35cb190087d0a2",
+    "build-preparation-manifest.json": "a60a2210990e565437100b76c9a57baf30ba7bab939986c5fe2e7383ffca0bbf",
+    "child-r1/cell.exit": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+    "child-r1/cpu.jsonl": "0e8831f993104525846b12cf79fad82257a6957af42fdbf77a1132d3c27d6309",
+    "child-r1/daemon.exit": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+    "child-r1/engine.exit": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+    "child-r1/environment.json": "3ccd2abf36635154586e01c107c20936afc868d0e4915f6183879c07bade624c",
+    "child-r1/final-evidence/ack": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "child-r1/final-evidence/ready": "ed1a545bb85e55816bbf9566b028b2a0bc456b88f49f6f266c0401048824194b",
+    "child-r1/final-evidence-completed.json": "92b5cdb59187c32d6a07311c1baf544c4c16683d50d309f64113b4bd2b3c1ace",
+    "child-r1/generator.log": "d9c09258f941aefa8e65d44ec0eefd5c4fb7115a3404dcb60b83c54525cc965f",
+    "child-r1/metrics-after.prom": "52aa5a8dcad6b77c21f3b2446a93349444b432f445e70f74e6afb5a48ec59a18",
+    "child-r1/metrics-before.prom": "309a1277f4edaa76be4edad298bcaaa8a0e22e997666fe61692c8a4930d7ac0b",
+    "child-r1/probe-01-pair-neighbor.stdout.gz": "57f33e09fe2e85d36acaae4109f1ab34a36d287ab8c6c430e33ecb3d69f3bc7b",
+    "child-r1/probe-01-pair-policy_stats.stdout.gz": "c35033bd86ac34bfa6259f377ae750781fdd42dfaf2c1f1debb7d41e66808aeb",
+    "child-r1/probe-01-quiescent-policy_stats.stdout.gz": "a1cc5912c0efb39a7d998323bf27e1e400ad16b408de275a46b348753e852cf4",
+    "child-r1/probe-02-pair-neighbor.stdout.gz": "dc7011dafe2d6bd80f6b0cbf795bbd85c521659d76ae3ed12248290357de6ffd",
+    "child-r1/probe-02-pair-policy_stats.stdout.gz": "5ffa966c9edfd68029c6477489e68bfb941960fe28909707893c79b2089edfee",
+    "child-r1/probe-02-quiescent-policy_stats.stdout.gz": "8862f859a1cacab2daa925d56a3faaf8f8c362bc4aedb149f5a64bfd7b92d54b",
+    "child-r1/probe-03-pair-neighbor.stdout.gz": "a1eb3860afda70f14c9308e14281b12fd57129a18f64a5d5bfdd06718ad0d7c4",
+    "child-r1/probe-03-pair-policy_stats.stdout.gz": "c5b36105a870283e5e54edb2bb67985d370e86ab73530c21e77eccd3635840d3",
+    "child-r1/probe-03-quiescent-policy_stats.stdout.gz": "8259ca7fc4e3d297b743e9ad63da5ee1af5e5bed92d06ee2fe2751452e9d6f55",
+    "child-r1/probe-04-pair-neighbor.stdout.gz": "c42e96ef5c55342c30f43dd069f0dcdee1d4ce4193003fabcb3cecedb84f8365",
+    "child-r1/probe-04-pair-policy_stats.stdout.gz": "3714be77f95dd57ae78e55b03aad367741d7cda66d768e47b2c60962046da657",
+    "child-r1/probe-04-quiescent-policy_stats.stdout.gz": "f8cfc26f16ccdcbabf870b9253ac765d3474d61fc8c833fbeccfa571b01199de",
+    "child-r1/probe-05-pair-neighbor.stdout.gz": "76ffbca38e951141eb87a66d0ec02d423865fe37c96fba08871d6ad31673a3e0",
+    "child-r1/probe-05-pair-policy_stats.stdout.gz": "75b7b6e842e250895bd6b35f948be45c55aaf7c96224335561fe9ec921c48f8e",
+    "child-r1/probe-05-quiescent-policy_stats.stdout.gz": "19e58aaafe647e8e61280cb149aff5d41649a3b7ab6a4847cdaa9981f3813f69",
+    "child-r1/probe-06-pair-neighbor.stdout.gz": "7cee1d9c52ff6d75fa37245dac28844db6adb70c9d8e47f2bb8c9e414c931f9d",
+    "child-r1/probe-06-pair-policy_stats.stdout.gz": "9d93516d458eda422d808cc9b43935a5e015f6d61a80f67c7a435711ce92263e",
+    "child-r1/probe-06-quiescent-policy_stats.stdout.gz": "f25d1514431882d592c9962cbb0cb2c9b70a5b66ebafb2e0b33f7852d6838a09",
+    "child-r1/probe-07-pair-neighbor.stdout.gz": "992edca09934421cf41c35766dd983f490ae6954a674a3a4df1ca1f4cfb9dca0",
+    "child-r1/probe-07-pair-policy_stats.stdout.gz": "d203a4e1a12685c70aacba53b71246398be55d3a73e16022f79dfc8cb70cf8c9",
+    "child-r1/probe-07-quiescent-policy_stats.stdout.gz": "246d5286db43d8dcf656fe9f6e65e3f71d613b5da11a4c933a5254a3d6dfbaea",
+    "child-r1/probe.exit": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+    "child-r1/probe.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "child-r1/probes.jsonl": "45e404de5320afca56bb750b10f4ed83e98544c8e3bde3d829c9672a8e349c4e",
+    "child-r1/reloadstall.log": "59c04ef66fef74f3b67295419b72867525fbf3fda1357bf3afbd89dbb9ae4068",
+    "child-r1/rustbgpd.log": "8a58f7406dbe39698c679792770e4fdc1dc9ab70030d636963eeab5405413a1a",
+    "child-r1/scenario/config.toml": "3289eb2835f581a7b11576b323cb99c8377ecd7b251d41a6aeb68611140b7b25",
+    "child-r1/scenario/gen-a.rpol": "21adb20cd35f2bd33564d258463e80548579aaa0597479b6cb8a0f068ddaecaa",
+    "child-r1/scenario/gen-b.rpol": "62571446e179726524a5768b636a13bceac7d11e327f6299627968664d7e1c41",
+    "child-r1/scenario/member.rpol": "62571446e179726524a5768b636a13bceac7d11e327f6299627968664d7e1c41",
+    "child-r1/summary.json": "9657027841d4fdb7ea572ee7d68401d3b01e260273512927de58f804036a4cfd",
+    "child-r1/summary.txt": "fb2e01000f62e71b0ebd7fbf855156923661531ba4907e2f971a66efa364d8b9",
+    "child-r1.exit": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+    "child-r1.finished": "56f1cbd0c849f711d0047ba4551a62ee4499163cb1429d3d220a089d29d91c5f",
+    "child-r1.log": "057acfd5eb7f35a60df0ecf51ab56d56bda0451a577c0c594ba988edb7464ee4",
+    "child-r1.quiet.tsv": "22c8b56c1c27477da5cb6de9775d1f2c59c0b56e2baf1c11f023bd3b76deb68e",
+    "child-r1.started": "73b5fac1ca44b644c88aba7a5c5fc3eb27487d48824426fa2bda6321057dbc48",
+    "child-r2/cell.exit": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+    "child-r2/cpu.jsonl": "b265b45a026369abfd1a5730f07480d877f63f297145c9c61ef58d24c42c2008",
+    "child-r2/daemon.exit": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+    "child-r2/engine.exit": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+    "child-r2/environment.json": "3b42576e30b1354ce79022238f5ef2679f28bf4da3ee3d09813c622dd6b16f8e",
+    "child-r2/final-evidence/ack": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "child-r2/final-evidence/ready": "ed1a545bb85e55816bbf9566b028b2a0bc456b88f49f6f266c0401048824194b",
+    "child-r2/final-evidence-completed.json": "107723e726382d50a841952b311890825b10318c6a8d67345acfad1b5c75548d",
+    "child-r2/generator.log": "d69fa721c917b90cdbb91bd758b5ccc99fe4a2959f97c1255260f2ab6504072f",
+    "child-r2/metrics-after.prom": "8f925b451ac59e79da2f65af4047de5e92cef07ddeada675cc10b0b8291bf746",
+    "child-r2/metrics-before.prom": "828e0a126e42d3e56b0fe568a7212d0775521f1a6887ebcfc4e4213066b300a8",
+    "child-r2/probe-01-pair-neighbor.stdout.gz": "a7e388387c7d1490c36865872597210ebbb0014facdb83f1ca1e7c3d923ad3e3",
+    "child-r2/probe-01-pair-policy_stats.stdout.gz": "979e94d05cd59db4bf0a0e11149a9800e8862a65d37bf577a190fd05e1cac597",
+    "child-r2/probe-01-quiescent-policy_stats.stdout.gz": "39732276337457231b6e74170844f39e6a823d8555aa122bb45263a6aa2fb5a9",
+    "child-r2/probe-02-pair-neighbor.stdout.gz": "9f63d8ff8ce1519d8f0c8a1a2990ef6e609dbe7faabf322c337065e367073e23",
+    "child-r2/probe-02-pair-policy_stats.stdout.gz": "bc3320dda740c40a9626aa3412883dbdc8aa2b779d7f7b020aaf4d8afb95d410",
+    "child-r2/probe-02-quiescent-policy_stats.stdout.gz": "119cd92226fd507078a870d3424519dc207e79a501464c2051ef00fe190a18ce",
+    "child-r2/probe-03-pair-neighbor.stdout.gz": "afc1b5172d96af41935ccfb08809aebb307d9e36383b5c2d3a29f49a89af0a86",
+    "child-r2/probe-03-pair-policy_stats.stdout.gz": "e16ffb0af9dc1dc843739e66685748253e80294e3a97f74f208a908e37fbb6ce",
+    "child-r2/probe-03-quiescent-policy_stats.stdout.gz": "3f7343ee6b7482aaafcda89c8f3ec4868627c4700b71b507543855afd9671be9",
+    "child-r2/probe-04-pair-neighbor.stdout.gz": "4e3ed92f78da8272ef8dbf6f6f5df10e8f18ab319207d8ebf1ee656a3036b058",
+    "child-r2/probe-04-pair-policy_stats.stdout.gz": "4c3f5b16945ac2e2ed6cb54e24cc726f79d990673d0784e16c36f419b254c90a",
+    "child-r2/probe-04-quiescent-policy_stats.stdout.gz": "3fecdb599a542fdde1c061d920d0065c9c016064d96f95322934ee8fe5f229ff",
+    "child-r2/probe-05-pair-neighbor.stdout.gz": "2f29cf07c5d289cc2faab92cae8221b36bee0e2ad3225659662ec57ceea985cb",
+    "child-r2/probe-05-pair-policy_stats.stdout.gz": "c36a4100ed5301fbf84e9899391ec47ea547047263e03f7aca0c428c7b08f15d",
+    "child-r2/probe-05-quiescent-policy_stats.stdout.gz": "a27f50f3bbb7bfc8945a9f5d833cf64ac15cf6f645f405ab3be8c4b1bc96fb35",
+    "child-r2/probe-06-pair-neighbor.stdout.gz": "00df9045dfb64532473b3c66a0af6e9c805339fbdc515eceae61da902b190924",
+    "child-r2/probe-06-pair-policy_stats.stdout.gz": "7d31fe611db22d4fe2c1f71cd0f0132d1a6c9efda0e45bca797f4dd8fd65e7b4",
+    "child-r2/probe-06-quiescent-policy_stats.stdout.gz": "6e1dd4c965e4411fdac810eebe335cce602fdf5a381cc24c0b544d868d9936ec",
+    "child-r2/probe-07-pair-neighbor.stdout.gz": "18d8b874c76bd29b104d35e2edaa43ef7ea903fa86bef589d5720b52e4c455a5",
+    "child-r2/probe-07-pair-policy_stats.stdout.gz": "422a0adee00c15366fa50a6f052d0725946a03a1bc0e91744cca5580dd25d30f",
+    "child-r2/probe-07-quiescent-policy_stats.stdout.gz": "cf2f439dfa0f5adfb52f12fb7b14afbd01081ce97569534713c80ed55340e69f",
+    "child-r2/probe.exit": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+    "child-r2/probe.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "child-r2/probes.jsonl": "d8e784115598e063e63b658f288716695d1a5b4527df417ec31ed3a606d512c9",
+    "child-r2/reloadstall.log": "d3844f7ccc37287d40d60e2ed69a1d3c6f3cb30b8979c4626aef6c112479bfb5",
+    "child-r2/rustbgpd.log": "123ad723bd4818cb58768ee1f79f3769767c949568183256d889de60520c87c5",
+    "child-r2/scenario/config.toml": "85a6574705242b15b5bafe4825b75bef7a86b6e89c9c8d2d5abfa5439ef3958a",
+    "child-r2/scenario/gen-a.rpol": "21adb20cd35f2bd33564d258463e80548579aaa0597479b6cb8a0f068ddaecaa",
+    "child-r2/scenario/gen-b.rpol": "62571446e179726524a5768b636a13bceac7d11e327f6299627968664d7e1c41",
+    "child-r2/scenario/member.rpol": "62571446e179726524a5768b636a13bceac7d11e327f6299627968664d7e1c41",
+    "child-r2/summary.json": "9668f207984ef3eedfc1105ae120d350bc1127edccd53c4a713513bdeb603e5c",
+    "child-r2/summary.txt": "8724402140cdf28e6d72dde7cfe079b1594ff3ce372bcfaa8110d6e7bee046b7",
+    "child-r2.exit": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+    "child-r2.finished": "35046d4174737d13ea528c8ef5a68214c59269a8bf4f24cfe061c078a8ef165d",
+    "child-r2.log": "74d3c9ece8d67604398fa8b221d029384729631ef3aab34cc71925f8dfcb46eb",
+    "child-r2.quiet.tsv": "f79c5e13260c3eb9ac0cee559714c9f84071dc2da501a7c0e6befe756405b9bc",
+    "child-r2.started": "452716dd892180d394cffebb81c5e2e5fd4debbd5d8b8f484f94a2c4be96035c",
+    "driver-as-run.sh": "bc2f69014519bbe948a7c83917810d6c762cf5f4c0bec9b6432084dbba11392c",
+    "logs/abba.exit": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+    "logs/abba.log": "d0c775cdf964507b37ebbfd813b7c0a7a632cd3cc1a3be2bde9dfd80f60948a2",
+    "logs/build-child-inputs.nul": "9d1393cda1a9b84139af9fefa887143cb3b6264626149c900a39cb569802bba7",
+    "logs/build-child-inputs.refreshed": "a84ae0442b92bdf5cdf2fd7319edacd4512b11820b4a8a59b5d58e40d14f2761",
+    "logs/build-child-inputs.sha256": "267525d417794c38e56902460a30e7b16f54ba35bc1d732fa009c80deb08f097",
+    "logs/build-child.exit": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+    "logs/build-child.finished": "103ffc4f9245db66e846370e18812e9a3e498faac2eb5d28f288035c0aded7fd",
+    "logs/build-child.log": "146a58b31f4b4101065d4604717bad0ce1bc91d507945e5e20101a8b581e806d",
+    "logs/build-child.started": "a84ae0442b92bdf5cdf2fd7319edacd4512b11820b4a8a59b5d58e40d14f2761",
+    "logs/build-parent-inputs.nul": "3de2b144a5a7e50548d0f3c62403bc3779c92b71e14b6ce956b2f180dd992f61",
+    "logs/build-parent-inputs.refreshed": "82a0df27d5d0ee28200fa2dbf37a8cbb521a798d0c9366555c3e1aa84c13a3c9",
+    "logs/build-parent-inputs.sha256": "3f54b978c4caaae22b3e1bb92268e448b720d58992fe7052b0c58efa0e9f827e",
+    "logs/build-parent.exit": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+    "logs/build-parent.finished": "a84ae0442b92bdf5cdf2fd7319edacd4512b11820b4a8a59b5d58e40d14f2761",
+    "logs/build-parent.log": "5228fef66551632aa2cd90ae3918df39979b37145b308d7b3bd0cdc71954000a",
+    "logs/build-parent.started": "9a155ff548837468f02c5a15f26774c391217eb8b32a98058d7d349d78d6ea13",
+    "logs/build.exit": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+    "logs/build.log": "11b2786adbb13f28c1044f9eb2cf698e8222ac40893affd0e620198afd5dee3c",
+    "logs/driver-as-run.sha256": "9b598bcf281465bd14bb75d2bec7e38d53260743eb5953a6d733f3fa125047f3",
+    "logs/toolchain.txt": "91a27f7fa86c27583f5a7c3d1f23dbd9a7e42ed18dc031db7472502cc55c88b9",
+    "parent-r1/cell.exit": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+    "parent-r1/cpu.jsonl": "4a0466665a44d0f1b82d78029c71ef750dd6386cb0bf4bd59c54b8ab1a34bbb0",
+    "parent-r1/daemon.exit": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+    "parent-r1/engine.exit": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+    "parent-r1/environment.json": "32afc4c92631a5e14cd4356f6c8cf2e6a272dc02f05b528c5e24e37c6a6d130d",
+    "parent-r1/final-evidence/ack": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "parent-r1/final-evidence/ready": "ed1a545bb85e55816bbf9566b028b2a0bc456b88f49f6f266c0401048824194b",
+    "parent-r1/final-evidence-completed.json": "fb1d933ffc4aa7a77ae9740cb53aac425040b3cb0dffe46235fb54e15221ce59",
+    "parent-r1/generator.log": "993213a4536a321be5a9462b85d5ce4763d568d353d1f605d598a915d87cd56c",
+    "parent-r1/metrics-after.prom": "fad83a3d1b6075e9d5d11cf47f114df72e264714bd3d665cedf2bf3fba79ccb9",
+    "parent-r1/metrics-before.prom": "079b874d28f4ad50279b97849fbecded9f535a337cb8e7de2c53a2ec621fd19c",
+    "parent-r1/probe-01-pair-neighbor.stdout.gz": "70efce8b523c424677e00636112f793cb6eba5f846b942bf0cf3c6c907aa2549",
+    "parent-r1/probe-01-pair-policy_stats.stdout.gz": "c654f77343d6aa0d8dd690f1cc43c607fddb986ed98f6ab9e33a12c33bb8f68d",
+    "parent-r1/probe-01-quiescent-policy_stats.stdout.gz": "7ab4e6226b6d6f854bb20aa336b6e165a0cf232fffef5a8902133c1865d96ccd",
+    "parent-r1/probe-02-pair-neighbor.stdout.gz": "b5ddac43990f3c0abf5f527705937a3f98c8ffc68b266184d9f4c495dff4da86",
+    "parent-r1/probe-02-pair-policy_stats.stdout.gz": "6972775b4fe775d8a3e429dde33f1013bace6211925a03fce75b7ad93387cf95",
+    "parent-r1/probe-02-quiescent-policy_stats.stdout.gz": "7d3addf8c316131ddd95bb93033889e6d381bb41c7c27b644185cbd332236b3e",
+    "parent-r1/probe-03-pair-neighbor.stdout.gz": "de043b650b37240e28ac50ea125f62bdfcc3364bf3f4f426b3bd479de00087b1",
+    "parent-r1/probe-03-pair-policy_stats.stdout.gz": "f0ef42f305e14540314640e6c37473dc4a812fbbeea36bbf0f0145c7828b89fa",
+    "parent-r1/probe-03-quiescent-policy_stats.stdout.gz": "94d9255abb02e842ec448bac617fdff65cc5d5330c53cdb2458a236331a6aea1",
+    "parent-r1/probe-04-pair-neighbor.stdout.gz": "daa9d05bcbeb98c7c9ed0bd1ca805d050df4f95e7e4433fd895f3c1cb00f8ea4",
+    "parent-r1/probe-04-pair-policy_stats.stdout.gz": "81ced90ae051297943135a1612e9729d4389f994363b00410e2703961b62e725",
+    "parent-r1/probe-04-quiescent-policy_stats.stdout.gz": "7a8baaff4de70f17227afab0dc316003f7c7f5a0163dc6f26001bbe77835fdb7",
+    "parent-r1/probe-05-pair-neighbor.stdout.gz": "5d91955b6533ae3f967fff05039945418e95fd10d969f6a0668ffbd1e85031ed",
+    "parent-r1/probe-05-pair-policy_stats.stdout.gz": "6e70ff58ba280a2d4f8a298860c87b0d46e4bf05a5610d78c07fc9f77103cf02",
+    "parent-r1/probe-05-quiescent-policy_stats.stdout.gz": "5f8c0f1eb319391d4f9a909be9288f097c302586dfc2e7fb9d0b4c6610cf6792",
+    "parent-r1/probe-06-pair-neighbor.stdout.gz": "2732de3a9fe293347bc3c2e929ea48e9c6b69dfbcd2af3227f469650f4d34acb",
+    "parent-r1/probe-06-pair-policy_stats.stdout.gz": "4d0b6c25f33569e26d485aaeb01bc7055a6192fb2aa2b55d4786747759a5d3d4",
+    "parent-r1/probe-06-quiescent-policy_stats.stdout.gz": "9e3b62692b5711c06d57aa9876e3e0e771db0d37d263ad47ed18d609f30cd10e",
+    "parent-r1/probe-07-pair-neighbor.stdout.gz": "4ac4ee27a5485cbd32c2db32938411f5722013255603fdf1d8d332bc1e7ab689",
+    "parent-r1/probe-07-pair-policy_stats.stdout.gz": "33cad34d804f5f531ae576c007097619213a51549e6c47882d8e43488500afc4",
+    "parent-r1/probe-07-quiescent-policy_stats.stdout.gz": "c2ec4f72ab8375e378b8a45ede574a9654f39e750a9a2eadedae5f0b9911c10f",
+    "parent-r1/probe.exit": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+    "parent-r1/probe.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "parent-r1/probes.jsonl": "2f5505b51f5df23ca10fea96ff70cc700980927e4d09eec0fd3c59ba5c5bd7e9",
+    "parent-r1/reloadstall.log": "06c8db958944a5fc87750659e0debd1e34b81a925c68b7a1e3add2ddabdfc6ab",
+    "parent-r1/rustbgpd.log": "2b16b12a8c778377913b7a8e3972bfa524ba5805630b27529444e475af1d3483",
+    "parent-r1/scenario/config.toml": "a78383c97fba7fef8ae515b4bd7815d5268eb1e6d28519169acf7008e2ee93d3",
+    "parent-r1/scenario/gen-a.rpol": "21adb20cd35f2bd33564d258463e80548579aaa0597479b6cb8a0f068ddaecaa",
+    "parent-r1/scenario/gen-b.rpol": "62571446e179726524a5768b636a13bceac7d11e327f6299627968664d7e1c41",
+    "parent-r1/scenario/member.rpol": "62571446e179726524a5768b636a13bceac7d11e327f6299627968664d7e1c41",
+    "parent-r1/summary.json": "bcda2917e4b68120131ef0f3bc2868dd367add5628db3c2b47eaa378432586ce",
+    "parent-r1/summary.txt": "862c19fb459d8bd3b6f79e1e18e16f99f18c25c3a18ccba30aaada4c5228da3d",
+    "parent-r1.exit": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+    "parent-r1.finished": "527d20b7abdefffc96dfc43fa961a288001b34fe496064dc0a9ffc7e7afe45d7",
+    "parent-r1.log": "1ca5a178bc9b84bf1edbde03ee32eeadb6468bd431260271c990ef6a7666b664",
+    "parent-r1.quiet.tsv": "67d203015945a91850f3d8acdd1c3acd311d9a116f2c7ebba3add7999bc599d4",
+    "parent-r1.started": "afdb8a6aadc89a8606043e42cecc9aa845b8e6356676b148b09dc6980a7a72b8",
+    "parent-r2/cell.exit": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+    "parent-r2/cpu.jsonl": "13d4925c88d2ca088c71cd3fd4e4c881deba06e24abdc09f51411df92e51a915",
+    "parent-r2/daemon.exit": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+    "parent-r2/engine.exit": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+    "parent-r2/environment.json": "8ac49f4f3871f40920dbe64f4d20c4daf06cbccb1c0c70f67373f2f431419e15",
+    "parent-r2/final-evidence/ack": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "parent-r2/final-evidence/ready": "ed1a545bb85e55816bbf9566b028b2a0bc456b88f49f6f266c0401048824194b",
+    "parent-r2/final-evidence-completed.json": "717073197f0163a656a798be9015ad42d0814bf1dcdbcfd51487a4c8ba4a5197",
+    "parent-r2/generator.log": "7962d18171f401586fccf8953d81bb14a49d193ca806441d3be5c51ca9188ff3",
+    "parent-r2/metrics-after.prom": "eebce8b112e8468f753f15e29f90f137364c54ae6ce82bc09f26eeb074c44afc",
+    "parent-r2/metrics-before.prom": "f6d3ff714c2af558631f9b2d6d65ca092acca335de9666a069733f15a6253624",
+    "parent-r2/probe-01-pair-neighbor.stdout.gz": "570c79d47acfc65f0ed182289f3eb99df4c57b65842806905221aa85337dc8dc",
+    "parent-r2/probe-01-pair-policy_stats.stdout.gz": "c654f77343d6aa0d8dd690f1cc43c607fddb986ed98f6ab9e33a12c33bb8f68d",
+    "parent-r2/probe-01-quiescent-policy_stats.stdout.gz": "48c86bcc5ff879a7ca5f0512c8db4c15d1b220c7617b4ebdcd1180789b1f3eaa",
+    "parent-r2/probe-02-pair-neighbor.stdout.gz": "8f35a352c537d8e304b330c6f6619745082d82edc581fe7356c97199569869d5",
+    "parent-r2/probe-02-pair-policy_stats.stdout.gz": "a3c7143f5d7d7383da72dc8d6d5b9b4ab95598ef7629818aaa09b10dbb3ef90e",
+    "parent-r2/probe-02-quiescent-policy_stats.stdout.gz": "8be19b6ac1db6e9948679d14f13e383b20db21ac05d68e6921660d65f5a24123",
+    "parent-r2/probe-03-pair-neighbor.stdout.gz": "f4e8f7478c36195e0898c854f13399a4304c8e4137fc0f6b0ee2e0e5a9f30aaf",
+    "parent-r2/probe-03-pair-policy_stats.stdout.gz": "2013fd824f83c31169cf51c2b72238952f9ba88467cb48512ba5d480f8bb18b8",
+    "parent-r2/probe-03-quiescent-policy_stats.stdout.gz": "ac87a4092a5cc4d9243db25120ec0ffea08e627b8a6606991bb3421392045b41",
+    "parent-r2/probe-04-pair-neighbor.stdout.gz": "3b2a7a4883d929a3fb58c68f87b9f4f011ddd6d1ef2a74386ca7536445b2ec4d",
+    "parent-r2/probe-04-pair-policy_stats.stdout.gz": "6c22ba6f179b331401df8c8f20d84edf5175a3d52deae8025d93d8cc83d52dba",
+    "parent-r2/probe-04-quiescent-policy_stats.stdout.gz": "065b3f5775d2ecabaa4d378c7cc2eb42b48dde77b52d5bc4c96f8b785428469d",
+    "parent-r2/probe-05-pair-neighbor.stdout.gz": "3097ba3d49b81d823c949960a89c6b7d6428586fdb0d16dd3cd76e3e36f17fdd",
+    "parent-r2/probe-05-pair-policy_stats.stdout.gz": "020d99275712626086418285876082ec34a4db19f5acacf65014ab968ecdf3f9",
+    "parent-r2/probe-05-quiescent-policy_stats.stdout.gz": "02050819a2bb57bd31c0d2ca2707e42a2dc86db3e57a196b453e0d02a0e2df4d",
+    "parent-r2/probe-06-pair-neighbor.stdout.gz": "090ed4098cf08a70bd761e44bbb712653e5cc91e99e0c75e5228f6041ab7e42c",
+    "parent-r2/probe-06-pair-policy_stats.stdout.gz": "e8fde752dcf41ebdac10fca9ec6c5ef1d48fc0ce2f201b5d2be3dad8195c679d",
+    "parent-r2/probe-06-quiescent-policy_stats.stdout.gz": "fe1529ce0a53bce60d4ce476784c84f8fcf5f4db97546187bd3cef08a57a8a08",
+    "parent-r2/probe-07-pair-neighbor.stdout.gz": "850e84e62b9edf392b4c48b5e27ee4e6ec69375c07f1e2606b19baee2a9cb7fa",
+    "parent-r2/probe-07-pair-policy_stats.stdout.gz": "d371da7ee13bacd6f5543bd794d3db57e3025693810e66a9244da5ce4f209d70",
+    "parent-r2/probe-07-quiescent-policy_stats.stdout.gz": "49d28ca6dba2b382d9c0cb891d9d2fcc65a46ea893977b1460309ea26cf4aabd",
+    "parent-r2/probe.exit": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+    "parent-r2/probe.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "parent-r2/probes.jsonl": "48d31e838a7f8940ed2aa9747b81068484a3ad99352be3b08f1cadf5d20f9886",
+    "parent-r2/reloadstall.log": "36645f2f502b328dd6a131abdd2d0b04ff12c2cd04e75498e02e7b4f4f6d4364",
+    "parent-r2/rustbgpd.log": "5c88fc4edd38c213874af7bc56a2f0246bc5622578eba8d8951e1acf0a090a0f",
+    "parent-r2/scenario/config.toml": "4b8dabcd6e03197d5b91922c233f515d4aaaa946e8b26ef32ab6d6fad303b11d",
+    "parent-r2/scenario/gen-a.rpol": "21adb20cd35f2bd33564d258463e80548579aaa0597479b6cb8a0f068ddaecaa",
+    "parent-r2/scenario/gen-b.rpol": "62571446e179726524a5768b636a13bceac7d11e327f6299627968664d7e1c41",
+    "parent-r2/scenario/member.rpol": "62571446e179726524a5768b636a13bceac7d11e327f6299627968664d7e1c41",
+    "parent-r2/summary.json": "babc33c64d0d3f427ae3c4d02a7e9013c42cecae36ff6d5d66b640dd9f05b13d",
+    "parent-r2/summary.txt": "1edd328601362282258c1fa2bf379d1c711981b02cabe4a948c864cc4452756f",
+    "parent-r2.exit": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+    "parent-r2.finished": "3a51d1cb818166fe14f0dcd28688e0fe3bd965a17f0cfe9b6190cf18fd7ff1b2",
+    "parent-r2.log": "9394373880bc165f0344b3ba3b501179ed0c2b63fa69c0d045b0900b8a7a76ad",
+    "parent-r2.quiet.tsv": "e954cc13c9e3ba98627d5a028b0d5704230d062cb46d33c75a850e3b078bcca7",
+    "parent-r2.started": "c0d7aab5dc9ff8671f05ab2128fcf2d1c841193b539eee146b14cd510eb32a5a",
+    "preparation-manifest.json": "8698d4f113211bd1829b20ad5bd4dff0d34b95b5ff6907961dc0f658d4e233b5",
+    "window-finish": "3a51d1cb818166fe14f0dcd28688e0fe3bd965a17f0cfe9b6190cf18fd7ff1b2",
+    "window-start": "a97015b3acfade2a7fffebbea81c41d337a5a759a529b7ed9b44447de3626040"
+  },
+  "source_relation": {
+    "child_parent": "2c55425547bb1fddcb0a4bc30937f26474751020",
+    "changed_files": [
+      "changelog.d/changed-prefix-retirement-traversal.md",
+      "crates/rib/src/prefix_map.rs",
+      "docs/perf/README.md",
+      "docs/perf/artifacts/prefix-retirement-2026-10/counters.csv",
+      "docs/perf/artifacts/prefix-retirement-2026-10/fixture.rs",
+      "docs/perf/artifacts/prefix-retirement-2026-10/measure.py",
+      "docs/perf/artifacts/prefix-retirement-2026-10/provenance.json",
+      "docs/perf/prefix-retirement-2026-10.md"
+    ],
+    "production_patch_sha256": "0315513e88555c0ae285e2740aa08681e5af00d7ca72e1ce8a541165c5b60a41"
+  },
+  "source_audit_sha256": "906df698a3ee126f2195b11864f2c0c0ed0b6c5866c228a09c1777b3cb633abd",
+  "owner_extraction_sha256": {
+    "summarize.py": "012179713f26cc5b0b34e5749bf5444842c42a88c4c5b459fb093c2ad7e696f1",
+    "timing-report.json": "111d30f558c84e7e810f8d85cf9487d1c798be533907cc58bc468d62e89eefb9",
+    "timing-report.md": "5cc2a6b57ccd3385d089aeb0c33f022f55c3f7c96bb118935740a37629c5296b",
+    "timing-reloads.tsv": "8ea6b0de59e9a2b32225ab06281a77395e96f2e356e39fa9cf0001bc6229e172"
+  },
+  "build_method": "serial normal locked release builds using one shared warm Cargo cache; per-arm inputs refreshed under canonical host and shared-target build locks; copied binaries retained separately"
+}

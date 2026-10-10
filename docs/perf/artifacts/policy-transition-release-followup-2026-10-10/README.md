@@ -3,6 +3,8 @@
 This bundle analyzes the retained Q1 campaign and a new, valid short ABBA
 confirmation. Original Q1–Q4 logs and verdicts are unchanged. Two earlier
 confirmation attempts remain separately INVALID.
+A separate adjacent-source ABBA isolates prefix retirement on the default
+shape; all 28 reloads, including calibration and the child outlier, are kept.
 
 | File | Contents |
 |---|---|
@@ -11,13 +13,17 @@ confirmation attempts remain separately INVALID.
 | `j2-correlation.csv` | Derived boundaries for every reload, including all six short post-#2952 cases |
 | `j2-summary.json` | Per-run and pooled median/mean/range summaries |
 | `source-sha256.json` | Digests of full original daemon/probe/environment/summary files and exits; labels identify sources without local paths |
-| `pre2952-actor-reloads.csv`, `pre2952-provenance.json`, `pre2952-summary.json` | 72 actor values from the early S2 interval and prefix-snapshot scout, with all arm identities, original-file hashes and recomputed medians/ranges |
+| `pre2952-actor-reloads.csv`, `pre2952-provenance.json`, `pre2952-summary.json` | 72 actor values from the early S2 interval and prefix-snapshot measurement, with all arm identities, original-file hashes and recomputed medians/ranges |
 | `acceptance.md`, `invalid-four-reload-attempt.json` | Original four-reload declaration and FAIL/INVALID attempt; it could not meet the unchanged six-pair minimum |
 | `confirmation-acceptance.md`, `invalid-six-reload-attempt.json` | Six-reload declaration and INVALID ABBA: the final parent had only five complete in-band pairs |
 | `confirmation-eight-acceptance.md` | Final eight-reload confirmation declared before it ran |
 | `confirmation-reloads.json`, `confirmation-timeline.jsonl` | All 32 reloads and selected original records from the valid eight-reload ABBA |
 | `confirmation-correlation.csv`, `confirmation-summary.json` | Derived per-reload components and per-process/pooled median/mean/range summaries |
 | `confirmation-provenance.json` | Four PASS cells, exits, quiet samples, pinned instruments, window timing and original-file hashes |
+| `retirement-acceptance.md`, `retirement-provenance.json` | Original-control extraction, four native PASS cells, outer build/ABBA results, quiet samples, actual source/tree/binary/build/input-refresh/toolchain identities, frozen instruments/driver and original-file hashes |
+| `retirement-reloads.json`, `retirement-timeline.jsonl` | All 28 isolated parent/child clock records and selected original events |
+| `retirement-correlation.csv`, `retirement-summary.json`, `retirement-slices.json` | Derived per-reload components, process/arm summaries and all/first/later distributions |
+| `pre2952-source-audit.md` | All 26 early-S2 commits and 24 retained actor windows, with metrics overlap explicitly unproven |
 | `recompute.py`, `test_recompute.py` | Reproduction and negative controls |
 | `quiet-preparation.json`, `quiet-preparation.md`, `quiet-irr-build-adapter.patch` | Explicitly unexecuted corrected S2/IRR recipe |
 
@@ -33,8 +39,9 @@ python3 recompute.py
 python3 test_recompute.py
 ```
 
-The first command requires and verifies both campaigns' stored summaries and
-boundary tables, then reproduces the earlier actor evidence. Medians use
+The first command requires and verifies all three campaigns' stored summaries
+and boundary tables, the isolated build/execution metadata and first/later
+slices, then reproduces the earlier actor evidence. Medians use
 `statistics.median` on the per-reload values, including the midpoint of the
 two middle values for even counts. The tests cover all reloads, the original
 18 long cases and the confirmation's 13 long cases, reproduce the prior-step
@@ -45,6 +52,10 @@ pairs in a process. The original cell's full audit, reply-shape, flatness,
 CPU and settlement checks are retained as its native verdict and hashes;
 this extraction does not reimplement those omitted records. The checks do
 not turn an inference about task scheduling into a measured profile.
+The isolated controls also reject an unsuccessful outer stage, missing finish,
+wrong source or binary, failed native check, mismatched input refresh or
+incorrect pair coverage. Its cell environment describes the shared instrument;
+each arm's separate identity describes the actual daemon and CLI.
 
 The trace-arm estimate subtracts its monotonic wait duration from the wall
 timestamp of its log event. The actor arms that trace after terminal input
@@ -58,3 +69,7 @@ All times are milliseconds unless the selected source field ends in `_us`.
 Phase medians must not be added. Values from 12 reloads in one process are
 correlated; the original has two launches per arm and the short confirmation
 also has two, with eight reloads each.
+The isolated retirement comparison has two launches per arm and seven
+correlated reloads in each. SIGHUP-to-complete starts at the daemon's received
+signal log and ends at its configuration-reload-complete log, separately from
+the harness signal and later durable settlement.

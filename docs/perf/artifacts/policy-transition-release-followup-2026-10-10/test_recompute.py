@@ -30,6 +30,48 @@ class RecomputeTest(unittest.TestCase):
         self.assertEqual(summary["pre2952"]["long_post_commit_cases"], 0)
         self.assertEqual(summary["post2952"]["rib_to_trace_arm_ms"]["n"], 16)
 
+    def test_retirement_keeps_calibration_and_outlier(self):
+        summary, _ = RECOMPUTE.compute(ROOT, "retirement", 7, ("parent", "child"))
+        self.assertEqual(summary["parent"]["rib_ms"]["median"], 561.5)
+        self.assertEqual(summary["child"]["rib_ms"]["median"], 518.5)
+        slices = RECOMPUTE.retirement(ROOT)
+        self.assertEqual(slices["parent"]["first"]["actor_ms"]["n"], 2)
+        self.assertEqual(slices["parent"]["later"]["actor_ms"]["median"], 559.5)
+        self.assertEqual(slices["child"]["later"]["actor_ms"]["median"], 519.5)
+        self.assertEqual(slices["child-r2"]["all"]["cohort_ms"]["max"], 757.740)
+        self.assertEqual(slices["child-r2"]["all"]["sighup_to_complete_ms"]["max"], 1365.308)
+
+    def test_retirement_failed_outer_stage_is_invalid(self):
+        self.rejected_retirement(lambda proof: proof.update({"abba_exit": 1}))
+
+    def test_retirement_missing_finish_is_invalid(self):
+        self.rejected_retirement(lambda proof: proof.pop("window_finish"))
+
+    def test_retirement_wrong_source_is_invalid(self):
+        self.rejected_retirement(lambda proof: proof["arms"]["parent"].update({"source_commit": "wrong"}))
+
+    def test_retirement_wrong_binary_is_invalid(self):
+        self.rejected_retirement(lambda proof: proof["arms"]["child"]["binaries"]["rustbgpd"].update({"sha256": "wrong"}))
+
+    def test_retirement_failed_native_check_is_invalid(self):
+        self.rejected_retirement(lambda proof: proof["runs"]["child-r1"].update({"errors": ["failed audit"]}))
+
+    def test_retirement_wrong_input_refresh_is_invalid(self):
+        self.rejected_retirement(lambda proof: proof["arms"]["child"]["cache_freshness"].update({"input_list_sha256": "wrong"}))
+
+    def test_retirement_wrong_pair_coverage_is_invalid(self):
+        self.rejected_retirement(lambda proof: proof["runs"]["parent-r1"].update({"in_band_pairs": 7}))
+
+    def rejected_retirement(self, mutate):
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            proof = json.loads((ROOT / "retirement-provenance.json").read_text())
+            mutate(proof)
+            (root / "retirement-provenance.json").write_text(json.dumps(proof))
+            (root / "retirement-reloads.json").write_bytes((ROOT / "retirement-reloads.json").read_bytes())
+            with self.assertRaises(AssertionError):
+                RECOMPUTE.retirement(root)
+
     def test_missing_reload_is_invalid(self):
         self.rejected(lambda records: records.pop())
 

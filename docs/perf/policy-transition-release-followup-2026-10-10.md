@@ -1,4 +1,4 @@
-# Policy-stats reload completion after #2952 — 2026-10-10
+# Policy reload attribution and release limits — 2026-10-10
 
 The retained 2026-10-10 Q1 daemon logs place the long post-commit interval after
 the RIB transition's input retirement, before the peer manager resumes.
@@ -8,6 +8,11 @@ the original campaign's verdict. A short ABBA confirms the shorter RIB timer
 and the longer completion clock with concurrent reads. Note this workload
 limitation for the release and keep the performance claim on the fenced RIB
 transition.
+
+A separate historical parent/child comparison isolates prefix-map retirement
+at the same default shape. It reduces the actor median 561.5→518.5 ms, with
+disjoint actor ranges. It does not allocate the earlier 700-peer S2 interval
+or establish a general end-to-end improvement.
 
 The measured arms are #2952's parent
 `3bbc1576cc3fd1f97a6c723131f183f82d4952f4` and #2952
@@ -232,14 +237,14 @@ bar or any instrument.
 
 Q4 reproduces a 576.5 ms RIB timer at v0.73.0 on the same harness as Q1;
 Q1's parent is 197.5 ms. The original cross-date policy-stats observation was
-585.5 ms. Retained S2 scouts identify several contributing changes, but are
+585.5 ms. Retained S2 measurements identify several contributing changes, but are
 700-peer measurements rather than isolated measurements of each change at
 the 1,000-peer cell. Their medians must not be summed into an attribution of
 the exact 379 ms Q4→parent difference.
 
 | S2 evidence, actor timer in ms | Observed step | Attribution limit |
 |---|---:|---|
-| `370e211b9` → `481e0187d`, 12 reloads per arm | 574 → 486 | 88 ms across 26 commits, still unisolated. Batched source-group prefix-index retirement `2a5b299eb` is a candidate; its fixture receipt does not measure daemon latency |
+| `370e211b9` → `481e0187d`, 12 reloads per arm | 574 → 486 | 88 ms across 26 commits. The separate default-shape parent/child comparison below measures prefix retirement, without allocating this S2 interval |
 | [#2920 readiness clock](readiness-checkpoint-clock-2026-10.md), measured parent `aae915bb4` → `5fedc3499`, 16 reloads per arm | 494.5 → 365 | Avoids per-element readiness clock reads; direct measured parent/child |
 | #2921 memo arm `003a6fd19` → snapshot arm `befc1ce08`, 16 reloads per arm | 368.5 → 329 | Isolates cached prefix snapshots within an earlier memo experiment. The merged snapshot patch matches, but the memo experiment was omitted from the merge. First reloads overlap; reloads 2–4 read 369.5 → 325 |
 | [#2930 prestaged inventory](prestaged-transition-inventory-2026-10.md), instrumented base/first-change binaries, 12 reloads per arm | 335 → 185 | Inventory moves to prestage, whose phase clock rises 130.404 ms (about 130 ms). Both arms are instrumented; the fix-arm source fingerprint could not be reconstructed, so the recorded daemon digest identifies the measured binary |
@@ -251,20 +256,102 @@ sends through its reserved permits. This does not exclude other end-to-end
 effects. The fast #2952 child already precedes #2955. Neither a no-op policy
 interpretation nor #2955 explains that clean actor-timer reduction.
 
-The earliest 88 ms remains an interval attribution, not a commit result.
-An exact attribution of that residual needs isolated parent/child evidence;
-the existing fixture evidence does not supply it. These qualifications leave
-the measured endpoints intact and prevent a broader numerical claim than the
-receipts support.
-The unpublished early-interval and prefix-snapshot scouts are now represented
+The earliest S2 88 ms remains an interval observation rather than an exact
+allocation to a commit. The separate isolated default-shape result below
+establishes an effect of prefix retirement on that workload. Differences in
+shape, campaign and instruments prevent subtracting that result from the S2
+interval or adding it to the other cross-campaign steps.
+Previously unpublished early-interval and prefix-snapshot evidence is now represented
 by their [72 per-reload actor values](artifacts/policy-transition-release-followup-2026-10-10/pre2952-actor-reloads.csv),
 [source/binary identities and original-file hashes](artifacts/policy-transition-release-followup-2026-10-10/pre2952-provenance.json),
-and a recomputed summary in this bundle. They used each arm's own runner and
+and a recomputed summary in this bundle. Those measurements used each arm's own runner and
 harness; the digest differences remain in the provenance. Memo→snapshot
 leaves the harness source and dependency inputs unchanged. The earlier
 interval keeps the harness runtime source unchanged but changes some
 dependency inputs outside the measured IPv4 path; it is not a common-binary
 comparison. No full private daemon log is copied into the repository.
+
+### Isolated prefix-retirement step
+
+The exact adjacent sources are parent
+`2c55425547bb1fddcb0a4bc30937f26474751020` and child
+`2a5b299ebcfd1659b12ff0f2df7a3aad34954d0b`. The sole changed production
+algorithm is
+[`FamilyPrefixMap::retire_with`](https://github.com/lance0/rustbgpd/blob/2a5b299ebcfd1659b12ff0f2df7a3aad34954d0b/crates/rib/src/prefix_map.rs#L112):
+it retires up to 32 prefixes per iterator startup while preserving per-value
+checkpoints. When the final member leaves the old source group, this prefix
+index retirement runs within CommitMembers before the actor timer ends.
+The timer measures wall time, including yielding and scheduling; the receipt
+does not measure actor CPU time.
+
+Both exact sources were built serially with the same Rust 1.99.0 toolchain
+and locked release settings. Tracked Rust, protobuf and Cargo input timestamps
+were refreshed under the host and shared-target build locks before each
+build; tracked contents stayed clean. Each daemon and CLI was copied and
+hashed before the next build. The
+[provenance](artifacts/policy-transition-release-followup-2026-10-10/retirement-provenance.json)
+separates those source/tree/binary/build identities from the shared
+`591ac39d4` cell and `reloadstall` instrument. Its original-file hashes retain
+the build logs, input lists, toolchain, frozen preparation and actual driver.
+
+The canonical-lock window was 13:19:55–13:45:50 EDT on 2026-10-10.
+Parent/child/child/parent used the same 1,000-peer/400,000-prefix cell, CPUs,
+40 s quiescence and read workload as Q1. Seven reloads per process were
+declared before launch: the first calibrates the previous-transition read
+aim, leaving six possible qualifying pairs under the unchanged six-pair bar.
+All four legs pass with six complete in-band pairs each, seven committed
+1,000-member transitions, every process/leg exit zero, no native error or
+read deadline miss, and outer build and ABBA exits zero. The native quiet
+gate passed before each leg. The
+[control extraction](artifacts/policy-transition-release-followup-2026-10-10/retirement-acceptance.md)
+records the original declaration and its hashes; it is not a new acceptance
+criterion written after the result.
+
+There are **two process launches and 14 correlated reloads per arm**. Each
+entry below is a median [minimum–maximum] in ms, including calibration and
+the outlier. Process rows are the primary replication view; the pooled
+reloads do not provide 14 independent repetitions or statistical significance.
+
+| Process | Actor | Cohort | Prestage/session apply | SIGHUP → complete |
+|---|---:|---:|---:|---:|
+| Parent r1 | 556.000 [551–572] | 559.355 [551.949–582.255] | 503.350 [502.376–609.775] | 1140.296 [1119.259–1255.359] |
+| Child r1 | 518.000 [508–523] | 519.098 [509.150–524.255] | 490.217 [480.356–513.372] | 1099.483 [1067.777–1113.476] |
+| Child r2 | 522.000 [502–526] | 523.784 [503.272–757.740] | 493.765 [468.659–566.567] | 1104.034 [1060.413–1365.308] |
+| Parent r2 | 563.000 [557–568] | 564.221 [557.852–569.278] | 517.312 [480.778–594.522] | 1163.895 [1115.198–1226.074] |
+
+Pooled all-reload actor medians are 561.5→518.5 ms, with disjoint ranges
+551–572 and 502–526 ms. The cohort is 563.782→521.243 ms; prestage/session
+apply is 510.331→491.991 ms; completion is 1152.095→1099.491 ms. The complete
+reload ranges overlap, so this supports the shorter actor timer on this
+shape without establishing a general completion gain. Medians are not
+additive.
+
+The first reloads have actor values 562/564 ms in the parent and 519/505 ms
+in the child. Later-only pooled medians, with 12 correlated reloads per arm,
+are actor 559.5→519.5 ms and completion 1133.242→1099.491 ms.
+[`retirement-slices.json`](artifacts/policy-transition-release-followup-2026-10-10/retirement-slices.json)
+retains all, first and later distributions for every process and arm.
+Child r2 reload 5 remains in every applicable summary: actor 510 ms,
+cohort 757.740 ms, prestage 525.831 ms, completion 1365.308 ms. No reload is
+excluded. The
+[28 per-reload clock records](artifacts/policy-transition-release-followup-2026-10-10/retirement-reloads.json)
+and [selected original timeline](artifacts/policy-transition-release-followup-2026-10-10/retirement-timeline.jsonl)
+bind SIGHUP receipt to the configuration-reload-complete event. That start
+is not the harness signal; that end is not later durable terminal settlement.
+Cohort includes preparation, send and reply return; prestage includes the
+destination round trip and session hot-apply. Original `_us` values are
+divided by 1,000.
+
+The [26-commit source inventory](artifacts/policy-transition-release-followup-2026-10-10/pre2952-source-audit.md)
+finds prefix retirement as the direct changed successful clean IPv4 actor
+algorithm. The metrics-rendering change affects scheduling, but actual
+HTTP scrape overlap with that actor is unproven: the nominal first scrape
+is earlier, all 12 main actor windows end before the earliest second scrape,
+and no request timestamps were retained. The retained S2 configuration has no
+additional gRPC query loop; successful shared encoding bypasses #2906's
+ordinary encoder. These observations do not assign any part of the S2 88 ms
+or a residual to metrics, and the isolated 43 ms is not summed with
+cross-shape deltas to claim an exact total attribution.
 
 ## Prepared quiet-host comparison
 
