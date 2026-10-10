@@ -1,0 +1,186 @@
+{
+  "early-s2": {
+    "peers": 700,
+    "prefixes": 400400,
+    "reloads_per_process": 4,
+    "runs_per_arm": 3,
+    "source_identity_sha256": "46d106a70bc10dda764eb4cf0a4f8187b08c6c2ef2fb6ba5a3f7bf59518ccbaa",
+    "source_manifest_sha256": "9c9cb1fa6c9eea9b0664c34cce12744a1e0b4095f9819a79dda19647d352958e",
+    "instruments": "each arm own runner and reloadstall; hashes retained separately",
+    "arms": {
+      "base": {
+        "tree": "cae43a47f9d597342c3ec0599a1ddbbfe23fbe36",
+        "daemon": "370e211b95ec3e4a7b07556146e31dd02f391ea6",
+        "daemon_sha256": "f7b540cb49dd62ecab48f2462c6f773e65fab0e47f71ddecfb85208169e85d8e",
+        "reloadstall_sha256": "b1e30a7ac543eeb859d091df93e3ad4323d048e457d501556ce451c35bcba420"
+      },
+      "main": {
+        "tree": "dc90a0c052af909f56a2625515fcd22e72fa658b",
+        "daemon": "481e0187d873dd8e7715033224be0fe90cb7d4e2",
+        "daemon_sha256": "7ef213c92b7c9b1a6fc6551ec76e18cb4dbc552422c68ef7044b93d445322e8b",
+        "reloadstall_sha256": "3dd1fd97f00993bc41f2b42f2676cff58f67357ad5e4f7f883322fb369c705d2"
+      }
+    },
+    "sources": {
+      "matrix-base-r1-s2/rustbgpd": {
+        "daemon_log_sha256": "596ba9ece62accbe9066f15a17634c42d4740f3a7b85a6e588eaccd880414ab7",
+        "status_sha256": "9f56e761d79bfdb34304a012586cb04d16b435ef6130091a97702e559260a2f2",
+        "daemon_exit_sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+        "status": "pass",
+        "daemon_exit": 0
+      },
+      "matrix-base-r2-s2/rustbgpd": {
+        "daemon_log_sha256": "2653559a1d223d9d4fcb691c45537c4f327035b3857f93de77eb6151ff4ba11d",
+        "status_sha256": "9f56e761d79bfdb34304a012586cb04d16b435ef6130091a97702e559260a2f2",
+        "daemon_exit_sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+        "status": "pass",
+        "daemon_exit": 0
+      },
+      "matrix-base-r3-s2/rustbgpd": {
+        "daemon_log_sha256": "dad8d34bb18112d7cb3ee74763e7c9e393188c5d56655fea5aaebcd19431ecf1",
+        "status_sha256": "9f56e761d79bfdb34304a012586cb04d16b435ef6130091a97702e559260a2f2",
+        "daemon_exit_sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+        "status": "pass",
+        "daemon_exit": 0
+      },
+      "matrix-main-r1-s2/rustbgpd": {
+        "daemon_log_sha256": "3869cd0a455fcda64526d92d947fafba83b815b19358848fc8ca8075356c6a89",
+        "status_sha256": "9f56e761d79bfdb34304a012586cb04d16b435ef6130091a97702e559260a2f2",
+        "daemon_exit_sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+        "status": "pass",
+        "daemon_exit": 0
+      },
+      "matrix-main-r2-s2/rustbgpd": {
+        "daemon_log_sha256": "c42ce667d64f1901302db62741cb57c0f1993e332b0cce4ceb18fa5f3c5e1421",
+        "status_sha256": "9f56e761d79bfdb34304a012586cb04d16b435ef6130091a97702e559260a2f2",
+        "daemon_exit_sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+        "status": "pass",
+        "daemon_exit": 0
+      },
+      "matrix-main-r3-s2/rustbgpd": {
+        "daemon_log_sha256": "789d41496b7e436dde313adb42066052ee96db5c00668baa70768e4df39b9b55",
+        "status_sha256": "9f56e761d79bfdb34304a012586cb04d16b435ef6130091a97702e559260a2f2",
+        "daemon_exit_sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+        "status": "pass",
+        "daemon_exit": 0
+      }
+    },
+    "instrument_source_qualification": "reloadstall runtime source unchanged (README-only harness change); complete dependency inputs differ: IPv6 prefix hashing and dev dependencies changed, outside the measured IPv4 runtime path; independently built instrument bytes retained"
+  },
+  "prefix-snapshot-s2": {
+    "peers": 700,
+    "prefixes": 400400,
+    "reloads_per_process": 4,
+    "runs_per_arm": 4,
+    "source_identity_sha256": "0d7db74f970f798072c80abd3cf8bbc21a8bb63d69fda165c4ce1e1e1ae80ed3",
+    "source_manifest_sha256": "eac64088d9f7c27374647c88fd9a1415a6f51cea8fbcd0f94ad9cdf999b57f33",
+    "instruments": "each arm own runner and reloadstall; hashes retained separately",
+    "arms": {
+      "main": {
+        "tree": "bbee4718148d16e595b0fe07eb82330dd32aaa71",
+        "daemon": "ff666f7ecb57e3dba06fce824d65d428e73e3de1",
+        "daemon_sha256": "a41f13b7ba7d5591eb9d7ce6e0921e1010df4e7308374905bf822dd6eeb10524",
+        "reloadstall_sha256": "79693e13401f00b028ce9135a98d80aa972d80a007a8260cd03f6a9a04ef7c83"
+      },
+      "memo": {
+        "tree": "2598700f14ed36318c8bb34a88005c3369000b32",
+        "daemon": "003a6fd19fced5a4bfec7cb483b5184cd2830c7a",
+        "daemon_sha256": "957c2af9fa56d64f5b7690e1c65bfef77b2df0b242a74e15bb5903d42fae567d",
+        "reloadstall_sha256": "92c838de453733fab348fa35cfc76d1d31b5509bf0831f3a7d8c5348ea13c231"
+      },
+      "snap": {
+        "tree": "981d9e0135c406c1711af462eeb5e2d30dacfdb3",
+        "daemon": "befc1ce089b91d0bc760b166c214073d3fcab51e",
+        "daemon_sha256": "537e2da16d120612586e4a2f268626bf86e9dfae375ab82bafd859d80dba03a6",
+        "reloadstall_sha256": "dd2a5c70464da9a423ca30ee6b40f28638aaa6505f1c714ed6dc9539dfb36073"
+      }
+    },
+    "sources": {
+      "matrix-main-r1-s2/rustbgpd": {
+        "daemon_log_sha256": "a268faa7cdeadac61477cb93f00679a75b0aa65048779672eef492d97f86d784",
+        "status_sha256": "9f56e761d79bfdb34304a012586cb04d16b435ef6130091a97702e559260a2f2",
+        "daemon_exit_sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+        "status": "pass",
+        "daemon_exit": 0
+      },
+      "matrix-main-r2-s2/rustbgpd": {
+        "daemon_log_sha256": "08f99b07a9a752b0d596da8f61e378d7bf2cf60e19623fd2d1a3bd5bdd39c9c8",
+        "status_sha256": "9f56e761d79bfdb34304a012586cb04d16b435ef6130091a97702e559260a2f2",
+        "daemon_exit_sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+        "status": "pass",
+        "daemon_exit": 0
+      },
+      "matrix-main-r3-s2/rustbgpd": {
+        "daemon_log_sha256": "f15a6f3c47b05c17bb3e4a5b2c9b4ab75e322004db72b0a9967d6049b0ce9cb0",
+        "status_sha256": "9f56e761d79bfdb34304a012586cb04d16b435ef6130091a97702e559260a2f2",
+        "daemon_exit_sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+        "status": "pass",
+        "daemon_exit": 0
+      },
+      "matrix-main-r4-s2/rustbgpd": {
+        "daemon_log_sha256": "7e493661cb5caa27fd9c68dfca3fd2af49a60f09046114dd28dcef0f7eb9de18",
+        "status_sha256": "9f56e761d79bfdb34304a012586cb04d16b435ef6130091a97702e559260a2f2",
+        "daemon_exit_sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+        "status": "pass",
+        "daemon_exit": 0
+      },
+      "matrix-memo-r1-s2/rustbgpd": {
+        "daemon_log_sha256": "0b319f2a3ec897f8bc85dd5331a8a3628457e497a6a65872a770917479d184ff",
+        "status_sha256": "9f56e761d79bfdb34304a012586cb04d16b435ef6130091a97702e559260a2f2",
+        "daemon_exit_sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+        "status": "pass",
+        "daemon_exit": 0
+      },
+      "matrix-memo-r2-s2/rustbgpd": {
+        "daemon_log_sha256": "03e203e94ec3461329a19b9c52040d6657569f13ee3dfdcefc8095dd86ca58bc",
+        "status_sha256": "9f56e761d79bfdb34304a012586cb04d16b435ef6130091a97702e559260a2f2",
+        "daemon_exit_sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+        "status": "pass",
+        "daemon_exit": 0
+      },
+      "matrix-memo-r3-s2/rustbgpd": {
+        "daemon_log_sha256": "ea1fb2c6dfbc684f2b6925fdb0f8651365dbbec27f743739a208d29e108a5262",
+        "status_sha256": "9f56e761d79bfdb34304a012586cb04d16b435ef6130091a97702e559260a2f2",
+        "daemon_exit_sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+        "status": "pass",
+        "daemon_exit": 0
+      },
+      "matrix-memo-r4-s2/rustbgpd": {
+        "daemon_log_sha256": "3b901626083ae99f2c089de49ff853b0d3da897ec9f492577712e5fa6c1386b2",
+        "status_sha256": "9f56e761d79bfdb34304a012586cb04d16b435ef6130091a97702e559260a2f2",
+        "daemon_exit_sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+        "status": "pass",
+        "daemon_exit": 0
+      },
+      "matrix-snap-r1-s2/rustbgpd": {
+        "daemon_log_sha256": "c99ea3e4dcc1f70654a1942d623488dfa04fa4e72e63f736e35a84ed32101ef3",
+        "status_sha256": "9f56e761d79bfdb34304a012586cb04d16b435ef6130091a97702e559260a2f2",
+        "daemon_exit_sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+        "status": "pass",
+        "daemon_exit": 0
+      },
+      "matrix-snap-r2-s2/rustbgpd": {
+        "daemon_log_sha256": "a091645137b4d805ee289aa33a3dd3b1a1fe3122d8f380a0213a20801e2ae4f4",
+        "status_sha256": "9f56e761d79bfdb34304a012586cb04d16b435ef6130091a97702e559260a2f2",
+        "daemon_exit_sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+        "status": "pass",
+        "daemon_exit": 0
+      },
+      "matrix-snap-r3-s2/rustbgpd": {
+        "daemon_log_sha256": "b758828ef93bc1fbac550eff6250d0b0865c0405474a458f483b1c01e5a810ce",
+        "status_sha256": "9f56e761d79bfdb34304a012586cb04d16b435ef6130091a97702e559260a2f2",
+        "daemon_exit_sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+        "status": "pass",
+        "daemon_exit": 0
+      },
+      "matrix-snap-r4-s2/rustbgpd": {
+        "daemon_log_sha256": "ef8613f023fc3dcaa3db0d033d9e295a7aba7f1b200ed30c5ce752832d536ca7",
+        "status_sha256": "9f56e761d79bfdb34304a012586cb04d16b435ef6130091a97702e559260a2f2",
+        "daemon_exit_sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+        "status": "pass",
+        "daemon_exit": 0
+      }
+    },
+    "instrument_source_qualification": "memo to snapshot changes only five RIB files; reloadstall source, Cargo manifest/lock and all harness dependency sources unchanged; independently built instrument bytes retained"
+  }
+}
