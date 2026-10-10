@@ -8913,6 +8913,7 @@ fn selection_release_past_bound_reports_its_own_reason_and_seam() {
             .replacement_readiness
             .as_ref()
             .unwrap()
+            .state
             .lock()
             .unwrap()
             .started -= super::super::MAX_HEALTHY_POLICY_TRANSITION_AGE;

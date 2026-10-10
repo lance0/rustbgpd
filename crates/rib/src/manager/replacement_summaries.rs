@@ -9,6 +9,7 @@ use crate::update::{
 };
 use std::collections::{HashMap, HashSet};
 use std::net::IpAddr;
+use std::task::{Context, Poll};
 use tokio::sync::mpsc;
 
 pub(super) struct ReplacementSummaries {
@@ -25,9 +26,13 @@ struct SummaryProjection {
 }
 
 impl ReplacementSummaries {
-    pub(super) fn drain(&mut self) {
+    pub(super) fn drain(&mut self, cx: &mut Context<'_>) -> usize {
+        let mut received = 0;
         for _ in 0..QUERY_BUDGET_PER_CHUNK {
-            let Ok(query) = self.rx.try_recv() else { break };
+            let Poll::Ready(Some(query)) = super::poll_readiness_query(&mut self.rx, cx) else {
+                break;
+            };
+            received += 1;
             if let Some(trace) = self.post_commit_query_trace.take() {
                 trace.emit("summary");
             }
@@ -63,6 +68,7 @@ impl ReplacementSummaries {
                 }
             }
         }
+        received
     }
 }
 
@@ -136,6 +142,7 @@ impl RibManager {
                 .expect("summary capture owns the replacement scope")
                 .clone();
             context
+                .state
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .summaries = Some(ReplacementSummaries {
@@ -150,6 +157,7 @@ impl RibManager {
             let result = work(manager);
             manager.replacement_checkpoint_at("summary_terminal", true);
             let summaries = context
+                .state
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .summaries
@@ -303,6 +311,7 @@ mod tests {
                 .replacement_readiness
                 .as_ref()
                 .unwrap()
+                .state
                 .lock()
                 .unwrap()
                 .summaries
@@ -413,6 +422,297 @@ mod tests {
         );
         assert!(manager.replacement_readiness.is_none());
         assert!(manager.summary_rx.is_some());
+    }
+
+    #[test]
+    fn replacement_readiness_idle_dispatch_does_not_lock_owner() {
+        use std::sync::Arc;
+        use std::time::Duration;
+
+        let (_tx, rx) = mpsc::channel(1);
+        let (_general_tx, general_rx) = mpsc::channel(1);
+        let (_readiness_tx, readiness_rx) = mpsc::channel(1);
+        let (_summary_tx, summary_rx) = mpsc::channel(1);
+        let mut manager = RibManager::new(rx, general_rx, None, None, BgpMetrics::new())
+            .with_readiness_queries(readiness_rx)
+            .with_summary_queries(summary_rx);
+        manager.with_replacement_summary_reads("apply", |manager| {
+            let context = Arc::clone(manager.replacement_readiness.as_ref().unwrap());
+            let guard = context.state.lock().unwrap();
+            std::thread::scope(|scope| {
+                let (done, completed) = std::sync::mpsc::channel();
+                let context = &context;
+                let worker = scope.spawn(move || {
+                    // This is the production dispatch, without test-only gap
+                    // instrumentation, while the owner mutex is held elsewhere.
+                    super::super::service_replacement_readiness(context, false);
+                    done.send(()).unwrap();
+                });
+                let result = completed.recv_timeout(Duration::from_secs(1));
+                // Release and join even for the deliberately broken control.
+                drop(guard);
+                worker.join().unwrap();
+                result.expect("idle dispatch must finish before the owner mutex is released");
+            });
+        });
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn replacement_readiness_retains_enqueue_after_lane_empty_poll() {
+        use std::future::Future;
+        use std::sync::{Arc, Mutex};
+        use std::task::{Wake, Waker};
+
+        use crate::{RibReadinessError, RibReadinessQuery};
+
+        struct EnqueueReadiness {
+            tx: mpsc::Sender<RibReadinessQuery>,
+            reply: Mutex<Option<oneshot::Sender<Result<usize, RibReadinessError>>>>,
+        }
+        impl Wake for EnqueueReadiness {
+            fn wake(self: Arc<Self>) {
+                self.wake_by_ref();
+            }
+
+            fn wake_by_ref(self: &Arc<Self>) {
+                if let Some(reply) = self.reply.lock().unwrap().take() {
+                    self.tx
+                        .try_send(RibReadinessQuery::LocRibCount {
+                            reply,
+                            enqueued: std::time::Instant::now(),
+                        })
+                        .unwrap();
+                }
+            }
+        }
+
+        let (_tx, rx) = mpsc::channel(1);
+        let (_general_tx, general_rx) = mpsc::channel(1);
+        let (readiness_tx, readiness_rx) = mpsc::channel(1);
+        let (summary_tx, summary_rx) = mpsc::channel(1);
+        let mut manager = RibManager::new(rx, general_rx, None, None, BgpMetrics::new())
+            .with_readiness_queries(readiness_rx)
+            .with_summary_queries(summary_rx);
+        let budget = std::time::Duration::from_millis(25);
+        manager.with_replacement_summary_reads("apply", |manager| {
+            let context = manager.replacement_readiness.as_ref().unwrap().clone();
+            let (reply, mut readiness_response) = oneshot::channel();
+            let waker = Waker::from(Arc::new(EnqueueReadiness {
+                tx: readiness_tx,
+                reply: Mutex::new(Some(reply)),
+            }));
+            let mut cx = Context::from_waker(&waker);
+            let (reply, mut summary_response) = oneshot::channel();
+            assert!(
+                std::pin::Pin::new(&mut summary_response)
+                    .poll(&mut cx)
+                    .is_pending()
+            );
+            summary_tx
+                .try_send(RibSummaryQuery::NeighborRibSnapshots {
+                    peers: Vec::new(),
+                    comparison: None,
+                    reply,
+                })
+                .unwrap();
+            context.state.lock().unwrap().last_service -= budget;
+            // Readiness first polls empty. Sending the summary reply then
+            // synchronously enqueues readiness through the registered waker.
+            manager.replacement_checkpoint(false);
+            assert!(summary_response.try_recv().is_ok());
+            assert!(matches!(
+                readiness_response.try_recv(),
+                Err(oneshot::error::TryRecvError::Empty)
+            ));
+            manager.replacement_checkpoint(false);
+            assert!(
+                matches!(
+                    readiness_response.try_recv(),
+                    Err(oneshot::error::TryRecvError::Empty)
+                ),
+                "the wake does not bypass the existing service budget"
+            );
+            context.state.lock().unwrap().last_service -= budget;
+            manager.replacement_checkpoint(false);
+            assert_eq!(readiness_response.try_recv().unwrap(), Ok(0));
+        });
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn replacement_readiness_wake_caps_drain_without_tokio_budget_throttling() {
+        use std::future::Future;
+
+        let (_tx, rx) = mpsc::channel(1);
+        let (_general_tx, general_rx) = mpsc::channel(1);
+        let (readiness_tx, readiness_rx) = mpsc::channel(QUERY_BUDGET_PER_CHUNK + 1);
+        let (summary_tx, summary_rx) = mpsc::channel(QUERY_BUDGET_PER_CHUNK + 1);
+        let mut manager = RibManager::new(rx, general_rx, None, None, BgpMetrics::new())
+            .with_readiness_queries(readiness_rx)
+            .with_summary_queries(summary_rx);
+        let budget = std::time::Duration::from_millis(25);
+        std::future::poll_fn(|cx| {
+            // Establish an exhausted cooperative budget without yielding or
+            // sleeping. Readiness still owes its existing eight-query pass.
+            for _ in 0..1024 {
+                if std::pin::pin!(tokio::task::consume_budget())
+                    .poll(cx)
+                    .is_pending()
+                {
+                    break;
+                }
+            }
+            assert!(!tokio::task::coop::has_budget_remaining());
+            manager.with_replacement_summary_reads("apply", |manager| {
+                let context = manager.replacement_readiness.as_ref().unwrap().clone();
+                let mut counts = Vec::new();
+                let mut snapshots = Vec::new();
+                for _ in 0..=QUERY_BUDGET_PER_CHUNK {
+                    let (reply, response) = oneshot::channel();
+                    readiness_tx
+                        .try_send(crate::RibReadinessQuery::LocRibCount {
+                            reply,
+                            enqueued: std::time::Instant::now(),
+                        })
+                        .unwrap();
+                    counts.push(response);
+                    let (reply, response) = oneshot::channel();
+                    summary_tx
+                        .try_send(RibSummaryQuery::NeighborRibSnapshots {
+                            peers: Vec::new(),
+                            comparison: None,
+                            reply,
+                        })
+                        .unwrap();
+                    snapshots.push(response);
+                }
+                // Canceled replies still occupy and release their queued slot.
+                drop(counts.remove(0));
+                drop(snapshots.remove(0));
+                context.state.lock().unwrap().last_service -= budget;
+                manager.replacement_checkpoint(false);
+                for response in &mut counts[..QUERY_BUDGET_PER_CHUNK - 1] {
+                    assert_eq!(response.try_recv().unwrap(), Ok(0));
+                }
+                for response in &mut snapshots[..QUERY_BUDGET_PER_CHUNK - 1] {
+                    assert!(response.try_recv().is_ok());
+                }
+                assert!(matches!(
+                    counts.last_mut().unwrap().try_recv(),
+                    Err(oneshot::error::TryRecvError::Empty)
+                ));
+                assert!(matches!(
+                    snapshots.last_mut().unwrap().try_recv(),
+                    Err(oneshot::error::TryRecvError::Empty)
+                ));
+                context.state.lock().unwrap().last_service -= budget;
+                manager.replacement_checkpoint(false);
+                assert_eq!(counts.last_mut().unwrap().try_recv().unwrap(), Ok(0));
+                assert!(snapshots.last_mut().unwrap().try_recv().is_ok());
+                assert_eq!(readiness_tx.capacity(), QUERY_BUDGET_PER_CHUNK + 1);
+                assert_eq!(summary_tx.capacity(), QUERY_BUDGET_PER_CHUNK + 1);
+                assert!(!tokio::task::coop::has_budget_remaining());
+            });
+            Poll::Ready(())
+        })
+        .await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn replacement_readiness_wake_enqueues_inside_owner_and_restores_actor_wakers() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::task::{Wake, Waker};
+
+        struct ActorWake(AtomicUsize);
+        impl Wake for ActorWake {
+            fn wake(self: Arc<Self>) {
+                self.0.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+
+        let (_tx, rx) = mpsc::channel(1);
+        let (_general_tx, general_rx) = mpsc::channel(1);
+        let (readiness_tx, readiness_rx) = mpsc::channel(1);
+        let (summary_tx, summary_rx) = mpsc::channel(1);
+        let mut manager = RibManager::new(rx, general_rx, None, None, BgpMetrics::new())
+            .with_readiness_queries(readiness_rx)
+            .with_summary_queries(summary_rx);
+        let enqueue = || {
+            let (reply, count) = oneshot::channel();
+            readiness_tx
+                .try_send(crate::RibReadinessQuery::LocRibCount {
+                    reply,
+                    enqueued: std::time::Instant::now(),
+                })
+                .unwrap();
+            let (reply, snapshot) = oneshot::channel();
+            summary_tx
+                .try_send(RibSummaryQuery::NeighborRibSnapshots {
+                    peers: Vec::new(),
+                    comparison: None,
+                    reply,
+                })
+                .unwrap();
+            (count, snapshot)
+        };
+        let retired = manager.with_replacement_summary_reads("apply", |manager| {
+            let context = manager.replacement_readiness.as_ref().unwrap().clone();
+            std::thread::scope(|scope| {
+                let (begin, ready) = std::sync::mpsc::channel();
+                let worker = scope.spawn(move || {
+                    ready.recv().unwrap();
+                    enqueue()
+                });
+                // Both empty receivers are registered by the owner's forced
+                // entry. Only after this idle checkpoint may the sender run.
+                manager.replacement_checkpoint(false);
+                begin.send(()).unwrap();
+                let (mut count, mut snapshot) = worker.join().unwrap();
+                context.state.lock().unwrap().last_service -= std::time::Duration::from_millis(25);
+                manager.replacement_checkpoint(false);
+                assert_eq!(count.try_recv().unwrap(), Ok(0));
+                assert!(snapshot.try_recv().is_ok());
+            });
+            Arc::downgrade(&context)
+        });
+        assert!(
+            retired.upgrade().is_none(),
+            "receiver wakers must not retain their owner"
+        );
+
+        // Back in the ordinary actor, poll both returned receivers with the
+        // actor's waker. New messages must wake that actor and remain FIFO.
+        let actor = Arc::new(ActorWake(AtomicUsize::new(0)));
+        let waker = Waker::from(Arc::clone(&actor));
+        let mut cx = Context::from_waker(&waker);
+        assert!(
+            manager
+                .readiness_rx
+                .as_mut()
+                .unwrap()
+                .poll_recv(&mut cx)
+                .is_pending()
+        );
+        assert!(
+            manager
+                .summary_rx
+                .as_mut()
+                .unwrap()
+                .poll_recv(&mut cx)
+                .is_pending()
+        );
+        let (mut count, mut snapshot) = enqueue();
+        assert_eq!(actor.0.load(Ordering::Relaxed), 2);
+        manager.drain_readiness_queries(None);
+        manager.drain_summary_queries();
+        assert_eq!(count.try_recv().unwrap(), Ok(0));
+        assert!(snapshot.try_recv().is_ok());
+        drop(readiness_tx);
+        drop(summary_tx);
+        manager.drain_readiness_queries(None);
+        manager.drain_summary_queries();
+        assert!(manager.readiness_rx.is_none());
+        assert!(manager.summary_rx.is_none());
     }
 
     /// Unforced checkpoints skip the clock while both lanes are empty. A query
@@ -528,13 +828,13 @@ mod tests {
         manager.with_replacement_readiness(|manager| {
             let context = manager.replacement_readiness.clone().unwrap();
             let advance = |by: std::time::Duration| {
-                let mut readiness = context.lock().unwrap();
+                let mut readiness = context.state.lock().unwrap();
                 readiness.last_service = readiness.last_service.checked_sub(by).unwrap();
                 readiness.last_opportunity = readiness.last_opportunity.checked_sub(by).unwrap();
             };
-            let max_gap = || context.lock().unwrap().max_gap;
+            let max_gap = || context.state.lock().unwrap().max_gap;
             // t=0 is the scope's forced entry checkpoint.
-            context.lock().unwrap().max_gap = std::time::Duration::ZERO;
+            context.state.lock().unwrap().max_gap = std::time::Duration::ZERO;
 
             advance(ms(25));
             manager.replacement_checkpoint(false);
