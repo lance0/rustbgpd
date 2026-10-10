@@ -888,14 +888,12 @@ impl EvpnRuntimeActorConverger {
             .await
             .originate_instance(instance, &self.rib_tx)
             .await;
-        if !matches!(
-            imet_outcome,
-            evpn_imet::ImetOriginateOutcome::Originated { .. }
-                | evpn_imet::ImetOriginateOutcome::AlreadyOriginated { .. }
-                | evpn_imet::ImetOriginateOutcome::ReplyDropped { .. }
-        ) {
+        if !imet_originate_acknowledged(&imet_outcome) {
+            // A dropped reply leaves the key tracked; withdraw it so a retry
+            // re-injects instead of short-circuiting on `AlreadyOriginated`.
+            let restored = self.rollback_imet(added_vni).await;
             return Err(runtime_step_failure(
-                imet_originate_had_no_effect(&imet_outcome),
+                restored && imet_originate_had_no_effect(&imet_outcome),
                 &format!("EVPN IMET origination failed for L2VNI {added_vni}: {imet_outcome:?}"),
             ));
         }
@@ -1403,12 +1401,10 @@ impl EvpnRuntimeActorConverger {
                 .await
                 .originate_instance(instance.clone(), &self.rib_tx)
                 .await;
-            if !matches!(
-                outcome,
-                evpn_imet::ImetOriginateOutcome::Originated { .. }
-                    | evpn_imet::ImetOriginateOutcome::AlreadyOriginated { .. }
-                    | evpn_imet::ImetOriginateOutcome::ReplyDropped { .. }
-            ) {
+            // Recorded before the check so the rollback also withdraws a
+            // dropped-reply key, which the controller tracks.
+            originated_instances.push(instance.clone());
+            if !imet_originate_acknowledged(&outcome) {
                 let restored = self
                     .rollback_additive_build_up(current, &originated_instances)
                     .await;
@@ -1420,7 +1416,6 @@ impl EvpnRuntimeActorConverger {
                     ),
                 ));
             }
-            originated_instances.push(instance.clone());
         }
 
         if let Some(dataplane) = dataplane {
@@ -1587,12 +1582,10 @@ impl EvpnRuntimeActorConverger {
                 .await
                 .originate_instance(instance.clone(), &self.rib_tx)
                 .await;
-            if !matches!(
-                outcome,
-                evpn_imet::ImetOriginateOutcome::Originated { .. }
-                    | evpn_imet::ImetOriginateOutcome::AlreadyOriginated { .. }
-                    | evpn_imet::ImetOriginateOutcome::ReplyDropped { .. }
-            ) {
+            // Recorded before the check so the rollback also withdraws a
+            // dropped-reply key, which the controller tracks.
+            originated_added.push(instance.clone());
+            if !imet_originate_acknowledged(&outcome) {
                 let restored = self
                     .rollback_l2vni_mixed(
                         current,
@@ -1610,7 +1603,6 @@ impl EvpnRuntimeActorConverger {
                     ),
                 ));
             }
-            originated_added.push(instance.clone());
         }
 
         let mut redefined_old_instances = Vec::with_capacity(changes.redefined.len());
@@ -1659,12 +1651,9 @@ impl EvpnRuntimeActorConverger {
                     ));
                 }
                 Ok(originate_outcome) => {
-                    if !matches!(
-                        originate_outcome,
-                        evpn_imet::ImetOriginateOutcome::Originated { .. }
-                            | evpn_imet::ImetOriginateOutcome::AlreadyOriginated { .. }
-                            | evpn_imet::ImetOriginateOutcome::ReplyDropped { .. }
-                    ) {
+                    // A dropped-reply new key stays tracked; the rollback's
+                    // `rollback_imet_redefine` withdraws it before restoring.
+                    if !imet_originate_acknowledged(&originate_outcome) {
                         let restored = self
                             .rollback_l2vni_mixed(
                                 current,
@@ -2233,17 +2222,14 @@ impl EvpnRuntimeActorConverger {
             }
             imet.originate_instance(new_instance, &self.rib_tx).await
         };
-        if !matches!(
-            originate_outcome,
-            evpn_imet::ImetOriginateOutcome::Originated { .. }
-                | evpn_imet::ImetOriginateOutcome::AlreadyOriginated { .. }
-                | evpn_imet::ImetOriginateOutcome::ReplyDropped { .. }
-        ) {
-            // The new route was not originated, so the old key is no longer
-            // tracked (we withdrew it above): a plain re-originate of the old
-            // instance restores the committed route. Escalate if even that
-            // fails — the committed Type 3 is then withdrawn with no fallback.
-            let restored = self.restore_imet(old_instance).await;
+        if !imet_originate_acknowledged(&originate_outcome) {
+            // The old key was withdrawn above; a dropped reply left the new
+            // key tracked. Withdraw whatever is tracked, then re-originate
+            // the old instance. Escalate if that fails — the committed Type 3
+            // is then withdrawn with no fallback.
+            let restored = self
+                .rollback_imet_redefine(redefined_vni, old_instance)
+                .await;
             return Err(redefine_imet_failure(
                 restored && imet_originate_had_no_effect(&originate_outcome),
                 redefined_vni,
@@ -2529,21 +2515,17 @@ impl EvpnRuntimeActorConverger {
     }
 
     /// Re-originate a committed instance's Type 3 IMET after a failed
-    /// convergence step withdrew it. Returns `false` if the route could not be
-    /// restored, so callers on the redefine path can escalate (the committed
-    /// Type 3 is then withdrawn with no fallback). Best-effort callers may
-    /// ignore the result.
+    /// convergence step withdrew it. Returns `true` only for an acknowledged
+    /// origination, so the caller escalates to known divergence when the
+    /// committed route is not provably back.
     async fn restore_imet(&self, instance: rustbgpd_evpn::EvpnInstance) -> bool {
-        matches!(
-            self.imet_controller
-                .lock()
-                .await
-                .originate_instance(instance, &self.rib_tx)
-                .await,
-            evpn_imet::ImetOriginateOutcome::Originated { .. }
-                | evpn_imet::ImetOriginateOutcome::AlreadyOriginated { .. }
-                | evpn_imet::ImetOriginateOutcome::ReplyDropped { .. }
-        )
+        let outcome = self
+            .imet_controller
+            .lock()
+            .await
+            .originate_instance(instance, &self.rib_tx)
+            .await;
+        imet_originate_acknowledged(&outcome)
     }
 
     /// Roll a redefine's IMET (Type 3) state back to the committed instance
@@ -2573,14 +2555,12 @@ impl EvpnRuntimeActorConverger {
         ) {
             return false;
         }
-        // With the new key cleared, a genuine re-origination yields
-        // `Originated` (or `ReplyDropped`, accepted optimistically as the
-        // main path does); `AlreadyOriginated` here would mean the key was
-        // never cleared and is treated as failure.
+        // With the new key cleared, only an acknowledged `Originated` proves
+        // the committed route is back: a dropped reply is unknown, and
+        // `AlreadyOriginated` here would mean the key was never cleared.
         matches!(
             imet.originate_instance(old_instance, &self.rib_tx).await,
             evpn_imet::ImetOriginateOutcome::Originated { .. }
-                | evpn_imet::ImetOriginateOutcome::ReplyDropped { .. }
         )
     }
 }
@@ -2649,9 +2629,20 @@ fn runtime_step_failure(restored: bool, step_message: &str) -> DaemonEvpnRuntime
     )
 }
 
+/// Only an acknowledged originate counts as success or restoration.
+/// `ReplyDropped` and `RibUnavailable` carry no acknowledgement: the route may
+/// or may not be installed.
+fn imet_originate_acknowledged(outcome: &evpn_imet::ImetOriginateOutcome) -> bool {
+    matches!(
+        outcome,
+        evpn_imet::ImetOriginateOutcome::Originated { .. }
+            | evpn_imet::ImetOriginateOutcome::AlreadyOriginated { .. }
+    )
+}
+
 /// The failed IMET step itself had no effect only when the RIB rejected it;
-/// `RibUnavailable` covers an acknowledgement timeout, after which the route
-/// may or may not be installed.
+/// after an unacknowledged inject (`RibUnavailable` or `ReplyDropped`) the
+/// route may or may not be installed.
 fn imet_originate_had_no_effect(outcome: &evpn_imet::ImetOriginateOutcome) -> bool {
     matches!(outcome, evpn_imet::ImetOriginateOutcome::Rejected { .. })
 }

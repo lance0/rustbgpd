@@ -7897,6 +7897,35 @@ async fn restore_imet_reports_failure_when_origination_rejected() {
 }
 
 #[tokio::test]
+async fn restore_imet_reports_failure_when_origination_reply_dropped() {
+    // A dropped reply leaves the re-origination unacknowledged, so the
+    // committed Type 3 is not provably restored.
+    let current = runtime_model_from_candidate_toml(two_l2vni_runtime_candidate_toml());
+    let old_instance = current
+        .instances()
+        .get(rustbgpd_evpn::EvpnInstanceId::new(100).unwrap())
+        .unwrap()
+        .clone();
+    let (rib_tx, rib_rx) = mpsc::channel::<RibUpdate>(32);
+    let _rib = scripted_imet_rib(rib_rx, Box::new(|| None), ack());
+    let converger = EvpnRuntimeActorConverger {
+        rib_tx,
+        imet_controller: Arc::new(tokio::sync::Mutex::new(evpn_imet::EvpnImetController::new())),
+        dataplane: None,
+        originator: None,
+        svi: None,
+        l3_originator: None,
+        segment: None,
+        es_drain: crate::evpn_es_drain::EvpnEsDrainState::default(),
+    };
+
+    assert!(
+        !converger.restore_imet(old_instance).await,
+        "restore_imet must not count a dropped reply as restored"
+    );
+}
+
+#[tokio::test]
 async fn apply_evpn_runtime_l2vni_redefine_aliasing_toggle_commits() {
     // Toggling apply_aliasing_ecmp off is a redefine; it is now
     // runtime-drivable (the dataplane diff converges it via the
@@ -9599,10 +9628,12 @@ async fn sighup_classification_matches_live_apply_for_ready_auto_lacp_segment() 
 // ApplyEvpnRuntime status each one maps to.
 // ---------------------------------------------------------------------------
 
-type RibScript = Box<dyn FnMut() -> Result<(), RibCommandError> + Send>;
+/// One scripted RIB reply; `None` drops the reply unanswered.
+type RibScript = Box<dyn FnMut() -> Option<Result<(), RibCommandError>> + Send>;
 
 /// RIB stand-in whose Type 3 inject / withdraw replies come from `inject` and
-/// `withdraw`, so a test can reject a step or close an actor at that step.
+/// `withdraw`, so a test can reject or drop a step's reply, or close an actor
+/// at that step.
 fn scripted_imet_rib(
     mut rib_rx: mpsc::Receiver<RibUpdate>,
     mut inject: RibScript,
@@ -9619,10 +9650,14 @@ fn scripted_imet_rib(
                     let _ = reply.send(vec![]);
                 }
                 RibUpdate::InjectEvpn { reply, .. } => {
-                    let _ = reply.send(inject());
+                    if let Some(result) = inject() {
+                        let _ = reply.send(result);
+                    }
                 }
                 RibUpdate::WithdrawEvpn { reply, .. } => {
-                    let _ = reply.send(withdraw());
+                    if let Some(result) = withdraw() {
+                        let _ = reply.send(result);
+                    }
                 }
                 _ => {}
             }
@@ -9631,7 +9666,7 @@ fn scripted_imet_rib(
 }
 
 fn ack() -> RibScript {
-    Box::new(|| Ok(()))
+    Box::new(|| Some(Ok(())))
 }
 
 /// A dataplane control backed by watch channels the test owns, plus the
@@ -9724,7 +9759,7 @@ async fn converge_failure_with_no_effect_is_failed_precondition() {
     let (rib_tx, rib_rx) = mpsc::channel::<RibUpdate>(64);
     let _rib = scripted_imet_rib(
         rib_rx,
-        Box::new(|| Err(RibCommandError::internal("inject rejected"))),
+        Box::new(|| Some(Err(RibCommandError::internal("inject rejected")))),
         ack(),
     );
     let current = runtime_model_from_candidate_toml(l2vni_runtime_candidate_toml());
@@ -9800,6 +9835,123 @@ async fn converge_failure_with_unacknowledged_first_step_is_internal() {
 }
 
 #[tokio::test]
+async fn converge_failure_with_dropped_imet_reply_is_internal() {
+    // The RIB drops the IMET inject reply: the route may or may not be
+    // installed, so the add is known divergence, not a success. The rollback
+    // withdraws the tracked key so a retry re-injects instead of
+    // short-circuiting on `AlreadyOriginated`.
+    let withdrawn = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let (rib_tx, rib_rx) = mpsc::channel::<RibUpdate>(64);
+    let _rib = scripted_imet_rib(
+        rib_rx,
+        Box::new(|| None),
+        Box::new({
+            let withdrawn = withdrawn.clone();
+            move || {
+                withdrawn.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Some(Ok(()))
+            }
+        }),
+    );
+    let current = runtime_model_from_candidate_toml(l2vni_runtime_candidate_toml());
+    let committed = Arc::new(current.instances().clone());
+    let (dataplane, instances_rx, _ip_vrfs_rx) = owned_dataplane(committed.clone());
+    let imet = Arc::new(tokio::sync::Mutex::new(evpn_imet::EvpnImetController::new()));
+
+    let (error, coordinator) = apply_l2vni_class_case(
+        l2vni_runtime_candidate_toml(),
+        two_l2vni_runtime_candidate_toml(),
+        rib_tx,
+        &dataplane,
+        imet.clone(),
+    )
+    .await;
+
+    let GrpcEvpnRuntimeApplyError::Internal(message) = &error else {
+        panic!("a dropped IMET reply is known divergence, got {error:?}");
+    };
+    assert!(message.contains("ReplyDropped"), "{message}");
+    assert!(message.contains("not restored"), "{message}");
+    assert_eq!(**instances_rx.borrow(), *committed);
+    assert_eq!(
+        withdrawn.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "the rollback withdrew the unacknowledged IMET key"
+    );
+    assert_eq!(
+        imet.lock()
+            .await
+            .originated_key(rustbgpd_evpn::EvpnInstanceId::new(200).unwrap()),
+        None
+    );
+    assert_eq!(
+        coordinator.lock().unwrap().model().generation(),
+        current.generation()
+    );
+}
+
+#[tokio::test]
+async fn converge_rollback_with_dropped_imet_reply_is_internal() {
+    // A VNI 100 redefine withdraws the committed Type 3, the RIB rejects the
+    // new one, and the rollback's re-origination of the committed route has
+    // its reply dropped. That restore is unproven, so the failure is known
+    // divergence rather than a compensated FAILED_PRECONDITION.
+    let mut injects = 0_u32;
+    let (rib_tx, rib_rx) = mpsc::channel::<RibUpdate>(64);
+    let _rib = scripted_imet_rib(
+        rib_rx,
+        Box::new(move || {
+            injects += 1;
+            match injects {
+                1 => Some(Ok(())),
+                2 => Some(Err(RibCommandError::internal("inject rejected"))),
+                _ => None,
+            }
+        }),
+        ack(),
+    );
+    let current = runtime_model_from_candidate_toml(two_l2vni_runtime_candidate_toml());
+    let (dataplane, _instances_rx, _ip_vrfs_rx) =
+        owned_dataplane(Arc::new(current.instances().clone()));
+    // VNI 100's committed Type 3 is live (first inject, acknowledged).
+    let imet = Arc::new(tokio::sync::Mutex::new(evpn_imet::EvpnImetController::new()));
+    let committed_100 = current
+        .instances()
+        .get(rustbgpd_evpn::EvpnInstanceId::new(100).unwrap())
+        .unwrap()
+        .clone();
+    assert!(matches!(
+        imet.lock()
+            .await
+            .originate_instance(committed_100, &rib_tx)
+            .await,
+        evpn_imet::ImetOriginateOutcome::Originated { .. }
+    ));
+
+    let (error, coordinator) = apply_l2vni_class_case(
+        two_l2vni_runtime_candidate_toml(),
+        two_l2vni_one_redefined_l2vni_runtime_candidate_toml(),
+        rib_tx,
+        &dataplane,
+        imet,
+    )
+    .await;
+
+    let GrpcEvpnRuntimeApplyError::Internal(message) = &error else {
+        panic!("an unproven IMET restore is known divergence, got {error:?}");
+    };
+    assert!(
+        message.contains("IMET origination failed for redefined L2VNI 100"),
+        "{message}"
+    );
+    assert!(message.contains("was not restored"), "{message}");
+    assert_eq!(
+        coordinator.lock().unwrap().model().generation(),
+        current.generation()
+    );
+}
+
+#[tokio::test]
 async fn converge_failure_fully_compensated_is_failed_precondition() {
     // The IMET inject succeeds, then the dataplane exits before its
     // publish. The rollback withdraws the IMET; the closed dataplane never
@@ -9814,13 +9966,13 @@ async fn converge_failure_fully_compensated_is_failed_precondition() {
         rib_rx,
         Box::new(move || {
             drop(closing.take());
-            Ok(())
+            Some(Ok(()))
         }),
         Box::new({
             let withdrawn = withdrawn.clone();
             move || {
                 withdrawn.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                Ok(())
+                Some(Ok(()))
             }
         }),
     );
@@ -9869,7 +10021,7 @@ async fn converge_failure_not_restored_is_internal() {
         ack(),
         Box::new(move || {
             drop(closing.take());
-            Err(RibCommandError::internal("withdraw rejected"))
+            Some(Err(RibCommandError::internal("withdraw rejected")))
         }),
     );
     // VNI 200's committed Type 3 is live, so the delete must withdraw it.
