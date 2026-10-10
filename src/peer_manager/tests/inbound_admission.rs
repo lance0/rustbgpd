@@ -379,6 +379,10 @@ async fn dynamic_inbound_peer_records_most_specific_accepted_range() {
     assert_eq!(accepted.addr, IpAddr::V4(Ipv4Addr::new(127, 0, 0, 0)));
     assert_eq!(accepted.prefix_len, 24);
     assert_eq!(accepted.peer_group, "narrow-members");
+    assert_eq!(
+        managed.transport_config.accepted_dynamic_range.as_ref(),
+        Some(accepted)
+    );
 
     mgr.delete_dynamic_range("127.0.0.9/24").unwrap();
     let current_match = mgr
@@ -388,6 +392,10 @@ async fn dynamic_inbound_peer_records_most_specific_accepted_range() {
     assert_eq!(current_match.peer_group, "ix-members");
 
     let managed = mgr.peers.get(&key(peer_addr)).unwrap();
+    assert_eq!(
+        managed.transport_config.accepted_dynamic_range,
+        managed.accepted_dynamic_range
+    );
     let snapshot = super::snapshot::build_peer_info(&key(peer_addr), managed, None, false);
     assert_eq!(
         snapshot.accepted_dynamic_range,

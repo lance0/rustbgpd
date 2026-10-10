@@ -2147,7 +2147,19 @@ pub enum RibUpdate {
         /// Effective policy to replay; `None` explicitly means permit-all.
         export_policy: Option<PolicyChain>,
     },
-    /// Update per-peer policy identity metadata used during export policy evaluation.
+    /// Stage accepted provenance immediately before `PeerUp`. Only that
+    /// session consumes it; collision failback preserves the surviving value.
+    SetPeerSourceContext {
+        /// Remote transport address.
+        peer: IpAddr,
+        /// Transport session that will register with `PeerUp`.
+        session_id: u64,
+        /// Immutable accepted provenance; does not authorize dampening.
+        context: Arc<PeerSourceContext>,
+    },
+    /// Stage policy identity before the matching `PeerUp`, or update an
+    /// existing live session's retained identity. Only the current session
+    /// publishes it; a displaced session keeps its value for collision failback.
     SetPeerPolicyContext {
         /// Peer whose policy identity is being updated.
         peer: IpAddr,
@@ -3198,4 +3210,41 @@ impl WarmMrtSnapshotView {
             self.add_path_receive,
         )
     }
+}
+
+/// Canonical dynamic range captured when a transport connection is accepted.
+/// Later matcher changes do not reattribute an already accepted session.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AcceptedDynamicRange {
+    /// Canonical network address, with host bits cleared.
+    pub addr: IpAddr,
+    /// Network prefix length.
+    pub prefix_len: u8,
+    /// Peer group that accepted this connection.
+    pub peer_group: String,
+}
+
+/// Immutable accepted configuration provenance, independent of policy updates.
+/// This is not a committed owner token and does not authorize dampening.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PeerSourceContext {
+    /// Configured interface, using the manager's scoped peer identity.
+    pub peer_interface: Option<String>,
+    /// Accepting range for a dynamic session, absent for configured peers.
+    pub accepted_dynamic_range: Option<AcceptedDynamicRange>,
+    /// Explicit route-server-client exclusion, independent of negotiated role.
+    pub route_server_client: bool,
+}
+
+/// Source/session stamp captured when a received batch is admitted.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ReceivedRouteSource {
+    /// Remote transport address.
+    pub peer: IpAddr,
+    /// Transport session identity; never an owner incarnation token.
+    pub session_id: u64,
+    /// Negotiated OPEN ASN, absent for legacy senders without a registration.
+    pub peer_asn: Option<u32>,
+    /// Accepted provenance, absent when the sender did not supply it.
+    pub context: Option<Arc<PeerSourceContext>>,
 }

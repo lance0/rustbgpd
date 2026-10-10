@@ -6,6 +6,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
+use std::ops::RangeBounds;
 use std::time::Duration;
 
 use rustbgpd_wire::Prefix;
@@ -161,8 +162,21 @@ pub struct DampeningState {
     pub first_flap: Duration,
 }
 
+/// A read-only view at a caller-supplied observation time.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct DampeningInspection {
+    /// Penalty is decayed for the observation; suppression remains the stored
+    /// eligibility state until a mutating operation processes the transition.
+    pub state: DampeningState,
+    /// Last input write, comparable only within this engine instance.
+    pub revision: u64,
+    /// Existing scheduled deadline; inspecting does not reschedule it.
+    pub due: Duration,
+}
+
 struct History {
     state: DampeningState,
+    revision: u64,
     updated: Duration,
     due: Duration,
 }
@@ -185,6 +199,7 @@ pub struct DampeningEngine {
     history: BTreeMap<DampeningKey, History>,
     schedule: BTreeSet<(Duration, DampeningKey)>,
     now: Duration,
+    revision: u64,
 }
 
 impl DampeningEngine {
@@ -196,6 +211,7 @@ impl DampeningEngine {
             history: BTreeMap::new(),
             schedule: BTreeSet::new(),
             now: Duration::ZERO,
+            revision: 0,
         }
     }
 
@@ -217,6 +233,78 @@ impl DampeningEngine {
         self.schedule.first().map(|(due, _)| *due)
     }
 
+    /// Latest input write. Timer decay preserves each entry's input revision.
+    /// A clear cursor can retain this cutoff and skip later input writes.
+    #[must_use]
+    pub const fn revision(&self) -> u64 {
+        self.revision
+    }
+
+    /// Inspect one entry without changing eligibility, scheduling, or time.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the observation predates the engine's last mutation time.
+    #[must_use]
+    pub fn inspect(&self, key: DampeningKey, now: Duration) -> Option<DampeningInspection> {
+        assert!(now >= self.now, "dampening observation must be monotonic");
+        self.history
+            .get(&key)
+            .map(|history| self.inspection(history, now))
+    }
+
+    /// Lazily inspect a key range. Callers bound examined entries with `take`
+    /// and retain the last examined key when continuing a scoped operation.
+    ///
+    /// # Panics
+    ///
+    /// Panics for invalid range bounds or an observation before the last mutation.
+    pub fn inspect_range(
+        &self,
+        range: impl RangeBounds<DampeningKey>,
+        now: Duration,
+    ) -> impl DoubleEndedIterator<Item = (DampeningKey, DampeningInspection)> + '_ {
+        assert!(now >= self.now, "dampening observation must be monotonic");
+        self.history
+            .range(range)
+            .map(move |(key, history)| (*key, self.inspection(history, now)))
+    }
+
+    fn inspection(&self, history: &History, now: Duration) -> DampeningInspection {
+        let mut state = history.state;
+        state.penalty *= self.decay_factor(history.updated, now);
+        DampeningInspection {
+            state,
+            revision: history.revision,
+            due: history.due,
+        }
+    }
+
+    /// Remove exactly one history entry and its deadline. This never announces
+    /// a route; the caller must resolve any current held value separately.
+    pub fn remove(&mut self, key: DampeningKey) -> bool {
+        let Some(history) = self.history.remove(&key) else {
+            return false;
+        };
+        self.schedule.remove(&(history.due, key));
+        true
+    }
+
+    /// Retire at most `budget` entries in key order, including their deadlines.
+    /// Returned keys contain no saved routes and need current-owner validation
+    /// before any caller releases a held value.
+    pub fn retire(&mut self, budget: usize) -> Vec<DampeningKey> {
+        let mut removed = Vec::new();
+        while removed.len() < budget {
+            let Some((key, history)) = self.history.pop_first() else {
+                break;
+            };
+            self.schedule.remove(&(history.due, key));
+            removed.push(key);
+        }
+        removed
+    }
+
     fn advance(&mut self, now: Duration) {
         assert!(now >= self.now, "dampening time must be monotonic");
         let horizon = Duration::from_secs(
@@ -234,12 +322,15 @@ impl DampeningEngine {
     }
 
     fn decay(&self, history: &mut History, now: Duration) {
-        let elapsed = now
-            .checked_sub(history.updated)
-            .expect("monotonic time checked before decay");
-        history.state.penalty *=
-            (-elapsed.as_secs_f64() / f64::from(self.parameters.half_life)).exp2();
+        history.state.penalty *= self.decay_factor(history.updated, now);
         history.updated = now;
+    }
+
+    fn decay_factor(&self, updated: Duration, now: Duration) -> f64 {
+        let elapsed = now
+            .checked_sub(updated)
+            .expect("monotonic time checked before decay");
+        (-elapsed.as_secs_f64() / f64::from(self.parameters.half_life)).exp2()
     }
 
     fn due(&self, state: DampeningState, now: Duration) -> Duration {
@@ -259,13 +350,19 @@ impl DampeningEngine {
     /// # Panics
     ///
     /// Panics if the caller moves its monotonic clock backwards or supplies a
-    /// time too close to `Duration::MAX` to represent the scheduling horizon.
+    /// time too close to `Duration::MAX` to represent the scheduling horizon,
+    /// or exhausts the engine's input revision counter.
     pub fn record(
         &mut self,
         key: DampeningKey,
         event: DampeningEvent,
         now: Duration,
     ) -> Option<DampeningState> {
+        // Check exhaustion before removing retained history or its schedule.
+        let revision = self
+            .revision
+            .checked_add(1)
+            .expect("dampening input revision exhausted");
         self.advance(now);
         let mut history = if let Some(mut history) = self.history.remove(&key) {
             self.schedule.remove(&(history.due, key));
@@ -282,10 +379,13 @@ impl DampeningEngine {
                     flap_count: 0,
                     first_flap: now,
                 },
+                revision,
                 updated: now,
                 due: now,
             }
         };
+        self.revision = revision;
+        history.revision = revision;
         history.state.penalty =
             (history.state.penalty + f64::from(event.penalty())).min(self.parameters.ceiling);
         if event.penalty() != 0 {
@@ -364,6 +464,106 @@ mod tests {
             prefix: Prefix::V4(Ipv4Prefix::new("192.0.2.0".parse().unwrap(), 24)),
             path_id,
         }
+    }
+
+    #[test]
+    fn inspection_decays_without_reuse_reclaim_or_clock_mutation() {
+        let mut engine = DampeningEngine::new(DampeningParameters::default());
+        for _ in 0..6 {
+            engine.record(key(0), DampeningEvent::Withdrawal, Duration::ZERO);
+        }
+        let before = engine.inspect(key(0), Duration::ZERO).unwrap();
+        let view = engine.inspect(key(0), Duration::from_secs(10_000)).unwrap();
+        assert!(view.state.penalty < 375.0);
+        assert!(
+            view.state.suppressed,
+            "inspection cannot release a held path"
+        );
+        assert_eq!(view.revision, before.revision);
+        assert_eq!(view.due, before.due);
+        assert_eq!(engine.len(), 1);
+        assert_eq!(engine.schedule.len(), 1);
+        assert_eq!(engine.inspect(key(0), Duration::ZERO), Some(before));
+        let due = engine.process_due(Duration::from_secs(10_000), 1);
+        assert_eq!(due.reused, [key(0)]);
+        assert_eq!(due.reclaimed, [key(0)]);
+    }
+
+    #[test]
+    fn scoped_revision_cutoff_preserves_new_input_and_timer_keeps_old_revision() {
+        let mut engine = DampeningEngine::new(DampeningParameters::default());
+        for id in 0..3 {
+            for _ in 0..6 {
+                engine.record(key(id), DampeningEvent::Withdrawal, Duration::ZERO);
+            }
+        }
+        let cutoff = engine.revision();
+        let upper = engine
+            .inspect_range(.., Duration::ZERO)
+            .next_back()
+            .unwrap()
+            .0;
+        assert_eq!(upper, key(2));
+        assert_eq!(
+            engine.process_due(Duration::from_secs(2710), 1).reused,
+            [key(0)]
+        );
+        assert!(
+            engine
+                .inspect(key(0), Duration::from_secs(2710))
+                .unwrap()
+                .revision
+                <= cutoff
+        );
+        engine.record(
+            key(1),
+            DampeningEvent::AttributeChange,
+            Duration::from_secs(2710),
+        );
+        engine.record(
+            key(3),
+            DampeningEvent::Withdrawal,
+            Duration::from_secs(2710),
+        );
+        let candidates: Vec<_> = engine
+            .inspect_range(key(0)..=upper, Duration::from_secs(2710))
+            .take(3)
+            .map(|(key, view)| (key, view.revision))
+            .collect();
+        for (key, revision) in candidates {
+            if revision <= cutoff {
+                assert!(engine.remove(key));
+            }
+        }
+        assert_eq!(
+            engine
+                .inspect_range(.., Duration::from_secs(2710))
+                .map(|(key, _)| key)
+                .collect::<Vec<_>>(),
+            [key(1), key(3)]
+        );
+        assert_eq!(engine.len(), engine.schedule.len());
+        assert!(!engine.remove(key(0)));
+        assert_eq!(engine.retire(0), [] as [DampeningKey; 0]);
+        assert_eq!(engine.retire(1), [key(1)]);
+        assert_eq!(engine.len(), engine.schedule.len());
+        assert_eq!(engine.retire(usize::MAX), [key(3)]);
+        assert!(engine.is_empty());
+        assert!(engine.next_due().is_none());
+    }
+
+    #[test]
+    fn revision_exhaustion_preserves_retained_history_and_schedule() {
+        let mut engine = DampeningEngine::new(DampeningParameters::default());
+        engine.record(key(0), DampeningEvent::Withdrawal, Duration::ZERO);
+        let before = engine.inspect(key(0), Duration::ZERO);
+        engine.revision = u64::MAX;
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            engine.record(key(0), DampeningEvent::Withdrawal, Duration::from_secs(1));
+        }));
+        assert!(result.is_err());
+        assert_eq!(engine.inspect(key(0), Duration::ZERO), before);
+        assert_eq!(engine.schedule.len(), 1);
     }
 
     #[test]

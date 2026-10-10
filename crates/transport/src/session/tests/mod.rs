@@ -1013,7 +1013,23 @@ async fn recv_peer_up_after_export_context(rib_rx: &mut mpsc::Receiver<RibUpdate
         rib_rx.recv().await.unwrap(),
         RibUpdate::SetPeerPolicyContext { .. }
     ));
-    rib_rx.recv().await.unwrap()
+    let RibUpdate::SetPeerSourceContext {
+        peer: source_peer,
+        session_id: source_session,
+        ..
+    } = rib_rx.recv().await.unwrap()
+    else {
+        panic!("expected accepted source context before PeerUp");
+    };
+    let update = rib_rx.recv().await.unwrap();
+    let RibUpdate::PeerUp {
+        peer, session_id, ..
+    } = &update
+    else {
+        panic!("expected PeerUp immediately after source context");
+    };
+    assert_eq!((*peer, *session_id), (source_peer, source_session));
+    update
 }
 
 /// Export chain that denies every route advertised to a member of

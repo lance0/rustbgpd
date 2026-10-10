@@ -82,6 +82,7 @@ fn transport_config(addr: SocketAddr) -> TransportConfig {
         remote_addr: addr,
         local_address: None,
         peer_interface: None,
+        accepted_dynamic_range: None,
         peer_scope_id: None,
         connect_timeout: Duration::from_secs(5),
         max_prefixes: None,
@@ -169,9 +170,17 @@ async fn full_handshake_reaches_established() {
     let addr = listener.local_addr().unwrap();
     let metrics = BgpMetrics::new();
 
-    let (rib_tx, _rib_rx) = mpsc::channel::<RibUpdate>(64);
+    let (rib_tx, mut rib_rx) = mpsc::channel::<RibUpdate>(64);
+    let mut config = transport_config(addr);
+    config.peer.remote_asn = 0;
+    let accepted = rustbgpd_rib::update::AcceptedDynamicRange {
+        addr: "127.0.0.0".parse().unwrap(),
+        prefix_len: 8,
+        peer_group: "wildcard-members".into(),
+    };
+    config.accepted_dynamic_range = Some(accepted.clone());
     let handle = PeerHandle::spawn(
-        transport_config(addr),
+        config,
         metrics.clone(),
         rib_tx,
         None,
@@ -200,6 +209,42 @@ async fn full_handshake_reaches_established() {
     assert!(matches!(msg, Message::Keepalive));
 
     wait_for_fsm_state(&handle, SessionState::Established).await;
+
+    let mut source_session = None;
+    loop {
+        let update = tokio::time::timeout(Duration::from_secs(5), rib_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        match update {
+            RibUpdate::SetPeerSourceContext {
+                session_id,
+                context,
+                ..
+            } => {
+                assert_eq!(context.accepted_dynamic_range, Some(accepted.clone()));
+                assert!(!context.route_server_client);
+                source_session = Some(session_id);
+            }
+            RibUpdate::PeerUp {
+                session_id,
+                peer_asn,
+                ..
+            } => {
+                assert_eq!(
+                    source_session,
+                    Some(session_id),
+                    "source context precedes registration"
+                );
+                assert_eq!(
+                    peer_asn, 65002,
+                    "accept-any range uses the negotiated OPEN ASN"
+                );
+                break;
+            }
+            _ => {}
+        }
+    }
 
     // Clean shutdown
     handle.shutdown().await.unwrap().unwrap();

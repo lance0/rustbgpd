@@ -445,6 +445,7 @@ impl PeerManager {
                 let rfc8212_external = resolved.rfc8212_external;
                 let cfg = Self::peer_manager_config_from_resolved(resolved, false);
                 let mut transport = self.build_transport_config(&cfg);
+                transport.accepted_dynamic_range = Some(accepted_dynamic_range.clone());
                 let import_policy = cfg.import_policy.clone();
                 let export_policy = cfg.export_policy.clone();
                 let advertise_graceful_shutdown = self

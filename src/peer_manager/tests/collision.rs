@@ -1432,10 +1432,7 @@ async fn peer_presence_dynamic_inbound_added_then_back_to_idle_removed_fifo() {
     mgr.handle_inbound(server_stream, sock(peer_addr), None, None)
         .await;
 
-    assert_eq!(
-        mgr.dynamic_peer_count, 1,
-        "dynamic peer count should increment"
-    );
+    assert_eq!(mgr.dynamic_peer_count, 1);
     assert_dynamic_neighbor_capacity(&metrics_view, 1.0, 100.0, 99.0, 0.0);
     let info = mgr.get_peer_info(&key(peer_addr)).await.unwrap();
     assert!(info.is_dynamic, "peer should be marked dynamic");
@@ -1458,6 +1455,11 @@ async fn peer_presence_dynamic_inbound_added_then_back_to_idle_removed_fifo() {
         SessionState::Connect,
     );
 
+    let accepted = mgr.peers[&key(peer_addr)]
+        .transport_config
+        .accepted_dynamic_range
+        .clone();
+    assert!(accepted.is_some());
     let session_id = mgr.peers.get(&key(peer_addr)).unwrap().session_id();
     mgr.handle_session_notification(SessionNotification::BackToIdle {
         session_id,
@@ -1466,10 +1468,7 @@ async fn peer_presence_dynamic_inbound_added_then_back_to_idle_removed_fifo() {
     })
     .await;
 
-    assert_eq!(
-        mgr.dynamic_peer_count, 0,
-        "dynamic peer count should decrement"
-    );
+    assert_eq!(mgr.dynamic_peer_count, 0);
     assert!(
         mgr.get_peer_info(&key(peer_addr)).await.is_none(),
         "dynamic peer should be removed when it goes idle"
@@ -1490,6 +1489,18 @@ async fn peer_presence_dynamic_inbound_added_then_back_to_idle_removed_fifo() {
     );
 
     drop(client_stream);
+    let reconnect = tokio::spawn(async move { TcpStream::connect(listener_addr).await.unwrap() });
+    let (server_stream, remote_addr) = listener.accept().await.unwrap();
+    let reconnect_stream = reconnect.await.unwrap();
+    mgr.handle_inbound(server_stream, sock(remote_addr.ip()), None, None)
+        .await;
+    let managed = &mgr.peers[&key(peer_addr)];
+    assert_ne!(managed.session_id(), session_id);
+    assert_eq!(
+        managed.transport_config.accepted_dynamic_range, accepted,
+        "dynamic auto-removal and reconnect retain accepted range provenance"
+    );
+    drop(reconnect_stream);
 }
 
 /// Load-bearing saturated-drop proof: removing the rejection increment leaves

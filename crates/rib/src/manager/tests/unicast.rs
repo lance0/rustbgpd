@@ -2772,6 +2772,23 @@ async fn query_peer_groups_returns_current_policy_context() {
     tx.send(RibUpdate::QueryPeerGroups { reply: reply_tx })
         .await
         .unwrap();
+    assert!(
+        !reply_rx.await.unwrap().contains_key(&peer),
+        "staged identity is not installed"
+    );
+    let (out_tx, _out_rx) = mpsc::channel(64);
+    tx.send(super::lifecycle::session_peer_up(
+        peer,
+        0,
+        out_tx,
+        ipv4_sendable(),
+    ))
+    .await
+    .unwrap();
+    let (reply_tx, reply_rx) = oneshot::channel();
+    tx.send(RibUpdate::QueryPeerGroups { reply: reply_tx })
+        .await
+        .unwrap();
 
     let groups = reply_rx.await.unwrap();
     assert_eq!(groups.get(&peer).map(String::as_str), Some("transit"));

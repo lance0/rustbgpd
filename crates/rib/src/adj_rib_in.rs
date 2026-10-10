@@ -223,10 +223,16 @@ impl AdjRibIn {
 
     /// Withdraw a route by prefix and path ID. Returns `true` if it existed.
     pub fn withdraw(&mut self, prefix: &Prefix, path_id: u32) -> bool {
+        self.take_route(prefix, path_id).is_some()
+    }
+
+    /// Move one received unicast path out, maintaining every removal index.
+    /// The caller owns subsequent selection and distribution bookkeeping.
+    pub(crate) fn take_route(&mut self, prefix: &Prefix, path_id: u32) -> Option<Route> {
         if !self.llgr_stale_local_tags.is_empty() {
             self.llgr_stale_local_tags.remove(&(*prefix, path_id));
         }
-        self.remove_route_entry(prefix, path_id).is_some()
+        self.remove_route_entry(prefix, path_id)
     }
 
     /// Slab handle for the route stored at `(prefix, path_id)`, if any.
@@ -3548,6 +3554,36 @@ mod tests {
         assert!(rib.get(&Prefix::V4(prefix), 1).is_some());
         assert!(rib.get(&Prefix::V4(prefix), 2).is_some());
         assert!(rib.get(&Prefix::V4(prefix), 0).is_none());
+    }
+
+    #[test]
+    fn take_route_moves_only_selected_path_and_cleans_indexes() {
+        let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let mut rib = AdjRibIn::new(peer);
+        let prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 1, 0), 24);
+        let mut selected = make_route(prefix, Ipv4Addr::new(10, 0, 0, 1));
+        selected.path_id = 1;
+        selected.validation_state = RpkiValidation::Valid;
+        let attributes = selected.attributes.clone();
+        let mut other = selected.clone();
+        other.path_id = 2;
+        other.validation_state = RpkiValidation::Invalid;
+        rib.insert(selected);
+        rib.insert(other);
+        rib.llgr_stale_local_tags.insert((Prefix::V4(prefix), 1));
+
+        let taken = rib.take_route(&Prefix::V4(prefix), 1).unwrap();
+        assert_eq!(taken.path_id, 1);
+        assert!(Arc::ptr_eq(&taken.attributes, &attributes));
+        assert_eq!(rib.rpki_counts_v4.valid, 0);
+        assert_eq!(rib.rpki_counts_v4.invalid, 1);
+        assert!(!rib.llgr_stale_local_tags.contains(&(Prefix::V4(prefix), 1)));
+        assert_eq!(rib.iter_prefix(&Prefix::V4(prefix)).count(), 1);
+        assert!(rib.take_route(&Prefix::V4(prefix), 1).is_none());
+        assert!(rib.take_route(&Prefix::V4(prefix), 2).is_some());
+        assert!(rib.prefix_index.get(&Prefix::V4(prefix)).is_none());
+        assert!(rib.is_empty());
+        assert_eq!(rib.rpki_counts_v4.invalid, 0);
     }
 
     #[test]

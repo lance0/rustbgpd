@@ -3023,11 +3023,14 @@ rejected, as the [reload matrix](reload-matrix.md) describes.
 
 The standalone engine accounts for withdrawals (+1000), attribute changes
 (+500) and re-announcements (+0), with exponential decay, suppress/reuse
-hysteresis and one removable deadline per history key. Processing due work
-has an explicit entry budget. It neither holds routes nor runs an actor
-timer. Future received-route integration must bind each owner to the full
-peer identity, including accepted dynamic-range provenance, and resolve
-release keys against current route/session state rather than saved routes.
+hysteresis and one removable deadline per history key. Due processing and
+history retirement have explicit entry budgets; read-only inspection returns a
+decayed penalty without changing eligibility. Accepted dynamic-range provenance
+and the negotiated ASN now accompany RIB session registration and queued input.
+These values do not authorize dampening: committed owner installation and
+received-route integration remain unfinished. The engine neither holds routes nor runs an actor
+timer. Future releases must resolve keys against current route/session state
+rather than saved routes.
 These requirements address the identity and release-order questions in the
 historical [ADR-0138](../adr/0138-route-flap-dampening.md); its parked design
 and modeled memory figures remain historical, not runtime evidence.
