@@ -148,7 +148,7 @@ states that the whole decision is Superseded.
 | [0122](0122-compatibility-debt-inventory.md) | Compatibility-debt inventory and removal schedule | Accepted | 2026-08-03 | Active |
 | [0123](0123-aspa-v27-mitigation-and-retention.md) | ASPA draft-v27 mitigation requires lossless retention | Proposed (behavior activation NO-GO until retention gates pass) | 2026-08-03 | Unstated |
 | [0124](0124-bounded-config-history-retention.md) | Bounded config-history retention for oversized snapshots | Implemented | 2026-08-04 | Active |
-| [0125](0125-v1-stability-contract.md) | v1.0 stability contract; scoped FlowSpec exclusion superseded by [0137](0137-flowspec-controller-contract.md) | Accepted (tagging remains evidence-gated; no tag is scheduled) | 2026-08-04 | Active |
+| [0125](0125-v1-stability-contract.md) | v1.0 stability contract; scoped FlowSpec exclusion superseded by [0139](0139-flowspec-controller-contract.md) | Accepted (tagging remains evidence-gated; no tag is scheduled) | 2026-08-04 | Active |
 | [0126](0126-shared-group-per-client-best.md) | Shared-group per-client best-path — path-hiding mitigation inside update groups | Accepted | 2026-08-05 | Active |
 | [0127](0127-config-transaction-settlement-watchdog.md) | Persisted runtime-config settlement watchdog | Accepted | 2026-08-11 | Active |
 | [0128](0128-route-server-next-hop-translation.md) | Route-server next-hop translation | Accepted (architecture GO if activated; implementation NO-GO, demand-gated) | 2026-08-29 | Active |

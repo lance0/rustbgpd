@@ -9,9 +9,10 @@ IX route-server pilots, and programmable control-plane deployments where the
 operator is comfortable with an evolving config and gRPC API.
 
 The exception is the deliberately narrow, machine-inventoried
-[v1 route-server / route-reflector contract](v1-stable-contract.md). That
-promise applies only to the listed IPv4/IPv6 unicast RS/RR and scoped RR-only
-surfaces; it does not promote the rest of the project out of alpha.
+[v1 route-server / route-reflector / controller contract](v1-stable-contract.md).
+That promise applies only to the listed IPv4/IPv6 unicast RS/RR, scoped RR-only,
+and FlowSpec controller surfaces; it does not promote the rest of the project
+out of alpha.
 
 ## Routing role
 
@@ -35,7 +36,9 @@ surfaces; it does not promote the rest of the project out of alpha.
   MT/Flex isolation above scopes topology inputs, not speakers.
 - FlowSpec (SAFI 133, IPv4 and IPv6) is control plane only: rules are
   received, injected, and distributed, but rustbgpd installs no FlowSpec
-  filters in a dataplane. RFC 9117 feasibility validation of received rules
+  filters in a dataplane. The [scoped controller contract](v1-stable-contract.md#flowspec-controller-boundary)
+  covers local origination, reconciliation, and committed advertised views.
+  RFC 9117 feasibility validation of received rules remains alpha and
   is opt-in (`[flowspec] validation = "rfc9117"`; the default is `"off"`); see
   [ADR-0135](../adr/0135-flowspec-feasibility.md). VPN FlowSpec (SAFI 134) is
   not implemented.

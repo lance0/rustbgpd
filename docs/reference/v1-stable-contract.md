@@ -14,6 +14,8 @@ against the generated JSON Schema, its RPC and top-level request/response
 signatures against the protobuf, its RPC membership against the authorization
 inventory, its CLI paths against the Clap tree, and its consecutive-release
 upgrade receipt. A surface absent from that file is outside the v1 promise.
+Its `rustbgpd-rs-rr-v1` contract ID is a stable identifier; the inventoried roles
+and exclusions define its scope.
 [ADR-0125](../adr/0125-v1-stability-contract.md) defines the accepted evidence bar
 for promoting this narrow 0.x promise to a v1.0 tag. During 0.x, the inventory
 defines the existing narrow compatibility promise for route servers, route
