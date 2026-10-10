@@ -43,8 +43,9 @@
 #                            then exit without locking, building or writing
 #
 # The shared host lock (tests/soak/host-lock.sh) is held from before the
-# first build to exit; a busy host exits 75. Exit: 0 PASS, 1 FAIL, 2 usage,
-# setup or build failure, 4 INVALID, 75 host busy or a quiet gate timed out.
+# first build to exit; a busy host exits 75. Exit: 0 PASS (or a valid SMOKE
+# run, which judges no bars), 1 FAIL, 2 usage, setup or build failure,
+# 4 INVALID, 75 host busy or a quiet gate timed out.
 set -euo pipefail
 
 usage() {

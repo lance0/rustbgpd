@@ -786,11 +786,21 @@ To change them, point `ACCEPTANCE` at a JSON file written before the run, for
 example `{"high_k": "not_worse"}` for a change that must not slow the high K
 rather than speed it up. An unknown key is refused.
 
-The verdict is PASS, FAIL or INVALID (exit 0, 1 or 4). It fails closed: a
-missing cell, a non-zero harness or daemon exit, a missing accepted
-quiet-host sample, or a `converged_rejoin_csv` row with the wrong fleet, K,
-prefix count, session count, decode errors, zero readiness samples or
-malformed timings makes it INVALID. The harness exits non-zero on any
+The verdict is PASS, FAIL or INVALID (exit 0, 1 or 4). It fails closed:
+INVALID results from any of the following:
+
+- a malformed `campaign.json`;
+- a missing cell, or a `runs.tsv` or `schedule.txt` that differs from the
+  campaign's schedule;
+- a non-zero harness or daemon exit;
+- a quiet-host gate that is not two accepted samples: quiet, no competitors,
+  load1 below 2.0, performance governors, unchanged swap, and at least 30 s
+  apart;
+- a `converged_rejoin_csv` row with the wrong fleet, K, prefix count,
+  session count, decode errors, zero readiness samples or malformed timings.
+
+A `SMOKE=1` campaign gets every validity check but no bars, so its verdict
+is SMOKE (exit 0) or INVALID. The harness exits non-zero on any
 `/readyz` miss, so a readiness regression is INVALID rather than FAIL. Re-run
 the analyzer with
 `python3 bench/scale/reloadstall/converged_rejoin.py analyze OUT_DIR`, and

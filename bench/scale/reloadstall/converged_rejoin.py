@@ -19,7 +19,10 @@ usage:
   converged_rejoin.py analyze OUT_DIR
       Read campaign.json, runs.tsv, quiet/*.tsv and raw/*/reloadstall.log;
       write samples.tsv and verdict.json; print a table and one verdict line.
-      Exit 0 PASS, 1 FAIL, 4 INVALID (any scheduled cell missing or invalid).
+      Exit 0 PASS, 1 FAIL, 4 INVALID (any scheduled cell missing or invalid,
+      a run outside the schedule, or a malformed campaign.json). A smoke
+      campaign gets every validity check but no bars: its verdict is SMOKE
+      (exit 0) or INVALID.
 
 Bars (head against base, per-round values pooled over the repetitions):
   B1  K_hi rejoin_max_s. high_k="improve": head median below base median and
@@ -31,8 +34,9 @@ Bars (head against base, per-round values pooled over the repetitions):
       (1 + gap_median_rel) + gap_median_abs_ms and head max <= base max *
       (1 + gap_max_rel) + gap_max_abs_ms.
 
-Cell validity: harness and daemon exit 0, an accepted second quiet-host
-sample when the campaign is quiet-gated, and exactly ROUNDS
+Cell validity: harness and daemon exit 0, an accepted quiet-host gate when
+the campaign is quiet-gated (samples 1 and 2 quiet, no competitors, load1
+< 2.0, performance governors, unchanged swap, >= 30 s apart), and exactly ROUNDS
 converged_rejoin_csv rows numbered 1..ROUNDS, each with peers_total =
 PEERS, peers_flapped = K, sessions_up = PEERS, parse_errors = 0,
 readiness_samples > 0 and finite non-negative timings with p50 <= max.
@@ -60,26 +64,33 @@ DEFAULT_BARS = {
     "gap_max_abs_ms": 100.0,
 }
 ARMS = ("base", "head")
+QUIET_MIN_SPACING_S = 30  # host-quiet.sh's default RUSTBGPD_HOST_QUIET_MIN_SPACING_SECS
 CSV_FIELDS = ("round", "total", "flapped", "prefixes", "p50", "max", "gap", "ready", "rss", "up", "perr")
 
 
-def bars_from(path: Path | None) -> dict:
-    bars = dict(DEFAULT_BARS)
-    if path is None:
-        return bars
-    override = json.loads(path.read_text())
-    if not isinstance(override, dict):
-        raise ValueError(f"{path}: acceptance must be a JSON object")
-    for key, value in override.items():
-        if key not in bars:
-            raise ValueError(f"{path}: unknown bar {key!r}")
+def check_bars(bars: object, where: str, partial: bool) -> None:
+    """Refuse unknown bars and ill-typed values; partial allows a subset (an override file)."""
+    if not isinstance(bars, dict):
+        raise ValueError(f"{where}: bars must be a JSON object")
+    unknown = set(bars) - set(DEFAULT_BARS)
+    if unknown:
+        raise ValueError(f"{where}: unknown bar(s) {sorted(unknown)}")
+    if not partial and set(bars) != set(DEFAULT_BARS):
+        raise ValueError(f"{where}: missing bar(s) {sorted(set(DEFAULT_BARS) - set(bars))}")
+    for key, value in bars.items():
         if key == "high_k":
             if value not in ("improve", "not_worse"):
-                raise ValueError(f"{path}: high_k must be 'improve' or 'not_worse'")
+                raise ValueError(f"{where}: high_k must be 'improve' or 'not_worse'")
         elif isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value < 0:
-            raise ValueError(f"{path}: {key} must be a non-negative number")
-        bars[key] = value
-    return bars
+            raise ValueError(f"{where}: {key} must be a non-negative number")
+
+
+def bars_from(path: Path | None) -> dict:
+    if path is None:
+        return dict(DEFAULT_BARS)
+    override = json.loads(path.read_text())
+    check_bars(override, str(path), partial=True)
+    return {**DEFAULT_BARS, **override}
 
 
 def schedule(c: dict) -> list[tuple[str, int, int]]:
@@ -116,16 +127,28 @@ def cmd_init(a: argparse.Namespace) -> int:
     return 0
 
 
+CAMPAIGN_KEYS = {"peers", "prefixes", "ks", "repeats", "rounds", "quiet", "smoke", "bars"}
+
+
+def is_int(v: object) -> bool:
+    return isinstance(v, int) and not isinstance(v, bool)
+
+
 def load_campaign(out: Path) -> dict:
+    """campaign.json, with every persisted field type-checked; ValueError otherwise."""
     c = json.loads((out / "campaign.json").read_text())
-    klo, khi = c["ks"]
-    if not (isinstance(klo, int) and isinstance(khi, int) and 1 <= klo < khi):
-        raise ValueError(f"bad ks {c['ks']}")
+    if not isinstance(c, dict) or set(c) != CAMPAIGN_KEYS:
+        raise ValueError(f"keys must be exactly {sorted(CAMPAIGN_KEYS)}")
+    ks = c["ks"]
+    if not (isinstance(ks, list) and len(ks) == 2 and all(is_int(k) for k in ks) and 1 <= ks[0] < ks[1]):
+        raise ValueError(f"bad ks {ks!r}")
     for key in ("peers", "prefixes", "repeats", "rounds"):
-        if not isinstance(c[key], int) or c[key] < 1:
+        if not is_int(c[key]) or c[key] < 1:
             raise ValueError(f"bad {key} {c[key]!r}")
-    if set(c["bars"]) != set(DEFAULT_BARS):
-        raise ValueError(f"bars keys {sorted(c['bars'])} differ from {sorted(DEFAULT_BARS)}")
+    for key in ("quiet", "smoke"):
+        if not isinstance(c[key], bool):
+            raise ValueError(f"{key} must be a boolean, got {c[key]!r}")
+    check_bars(c["bars"], "bars", partial=False)
     return c
 
 
@@ -142,13 +165,39 @@ def read(p: Path) -> str:
         return ""
 
 
+def quiet_problem(text: str) -> str | None:
+    """Why a bench/scale/host-quiet.sh TSV is not an accepted gate, or None.
+
+    An accepted gate is exactly samples 1 and 2, each quiet with no failed
+    dimension, load1 < 2.0, no competitors and every governor `performance`,
+    with unchanged swap counters and at least QUIET_MIN_SPACING_S between them.
+    """
+    try:
+        rows = list(csv.DictReader(text.splitlines(), delimiter="\t"))
+        if [r["sample"] for r in rows] != ["1", "2"]:
+            return f"samples {[r['sample'] for r in rows]}, expected ['1', '2']"
+        for r in rows:
+            if not (r["quiet"] == "true" and r["failed_dimensions"] == "none" and r["competitors"] == "none"
+                    and float(r["load1"]) < 2.0
+                    and int(r["governor_count"]) > 0 and r["performance_governors"] == r["governor_count"]):
+                return f"sample {r['sample']} is not quiet: {dict(r)}"
+        a, b = rows
+        if (a["pswpin"], a["pswpout"]) != (b["pswpin"], b["pswpout"]):
+            return "swap counters moved between the samples"
+        if int(b["epoch_s"]) - int(a["epoch_s"]) < QUIET_MIN_SPACING_S:
+            return f"samples {int(b['epoch_s']) - int(a['epoch_s'])} s apart, need {QUIET_MIN_SPACING_S}"
+    except (KeyError, TypeError, ValueError) as e:
+        return f"unparseable ({e.__class__.__name__}: {e})"
+    return None
+
+
 def cell_rows(c: dict, out: Path, arm: str, k: int, rep: int) -> tuple[list[dict], str | None]:
     """The cell's per-round rows, or the reason it is invalid."""
     name = f"{arm}-k{k}-rep{rep}"
     if c["quiet"]:
-        q = read(out / "quiet" / f"{name}.tsv")
-        if not any(line.startswith("2\t") for line in q.splitlines()):
-            return [], "no accepted second quiet-host sample"
+        why = quiet_problem(read(out / "quiet" / f"{name}.tsv"))
+        if why:
+            return [], f"quiet-host gate: {why}"
     log = read(out / "raw" / name / "reloadstall.log")
     raw = [line.split(",")[1:] for line in log.splitlines() if line.startswith("converged_rejoin_csv,")]
     if len(raw) != c["rounds"]:
@@ -228,8 +277,15 @@ def cmd_analyze(a: argparse.Namespace) -> int:
         if key in runs:
             problems.append(f"duplicate runs.tsv row {key}")
         runs[key] = r
+    planned = schedule(c)
+    want = {(arm, str(k), str(rep)) for arm, k, rep in planned}
+    for key in sorted(set(runs) - want):
+        problems.append(f"runs.tsv row {key} is not in the schedule")
+    sched = [tuple(line.split()) for line in read(out / "schedule.txt").splitlines() if line.strip()]
+    if sched != [(arm, str(k), str(rep)) for arm, k, rep in planned]:
+        problems.append("schedule.txt differs from the campaign's schedule")
     rows = []
-    for arm, k, rep in schedule(c):
+    for arm, k, rep in planned:
         name = f"{arm}-k{k}-rep{rep}"
         r = runs.get((arm, str(k), str(rep)))
         if r is None:
@@ -268,7 +324,7 @@ def cmd_analyze(a: argparse.Namespace) -> int:
             if (t or {}).get("n", 0) != need:
                 problems.append(f"{arm} K={k}: {(t or {}).get('n', 0)} valid rounds, need {need}")
 
-    bars = judge(c, table) if len(table) == 4 else {}
+    bars = judge(c, table) if len(table) == 4 and not c["smoke"] else {}
     for name, (ok, text) in sorted(bars.items()):
         print(f'{name} {"PASS" if ok else "FAIL"}: {text}')
     for arm in ARMS:
@@ -277,6 +333,8 @@ def cmd_analyze(a: argparse.Namespace) -> int:
             print(f"info: {arm} K={khi}/K={klo} median rejoin_max ratio {hi['max_med'] / lo['max_med']:.2f}")
     if problems:
         verdict = "INVALID"
+    elif c["smoke"]:
+        verdict = "SMOKE"
     elif bars and all(ok for ok, _ in bars.values()):
         verdict = "PASS"
     else:
@@ -286,8 +344,10 @@ def cmd_analyze(a: argparse.Namespace) -> int:
     (out / "verdict.json").write_text(json.dumps(
         {"verdict": verdict, "smoke": c["smoke"], "problems": problems, "table": table,
          "bars": {n: {"pass": ok, "detail": t} for n, (ok, t) in bars.items()}}, indent=2) + "\n")
-    print(f"VERDICT: {verdict}" + (f" ({len(problems)} validity problems)" if problems else ""))
-    return {"PASS": 0, "FAIL": 1, "INVALID": 4}[verdict]
+    note = (f" ({len(problems)} validity problems)" if problems
+            else " (valid pipeline check; performance bars not judged at the smoke shape)" if verdict == "SMOKE" else "")
+    print(f"VERDICT: {verdict}{note}")
+    return {"PASS": 0, "SMOKE": 0, "FAIL": 1, "INVALID": 4}[verdict]
 
 
 def main(argv: list[str]) -> int:

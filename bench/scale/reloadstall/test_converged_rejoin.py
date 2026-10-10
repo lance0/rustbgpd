@@ -34,14 +34,19 @@ FIXTURE = {
     (50, 2): [(1, 6.874453, 13.157993, 1295.195, 26, 447), (2, 6.679188, 12.753079, 5567.347, 26, 412),
               (3, 6.646099, 12.759939, 4821.097, 26, 432)],
 }
-QUIET = "sample\tepoch_s\tload1\n1\t100\t0.5\n2\t130\t0.4\n"
+QUIET_HEADER = ("sample\tepoch_s\tload1\tpswpin\tpswpout\tgovernors\tperformance_governors\tgovernor_count"
+                "\tcompetitors\tquiet\tfailed_dimensions\toriginal_attempt")
+QUIET = "\n".join([QUIET_HEADER,
+                   "1\t1000\t0.50\t77\t88\tperformance,performance\t2\t2\tnone\ttrue\tnone\t1",
+                   "2\t1030\t0.40\t77\t88\tperformance,performance\t2\t2\tnone\ttrue\tnone\t2"]) + "\n"
 
 
-def campaign(out: Path, *, scale: dict | None = None, bars: dict | None = None, quiet: bool = True) -> Path:
+def campaign(out: Path, *, scale: dict | None = None, bars: dict | None = None, quiet: bool = True,
+             smoke: bool = False) -> Path:
     """Both arms from FIXTURE; scale maps (arm, K) to a factor on the two rejoin clocks."""
     out.mkdir(parents=True, exist_ok=True)
     c = {"peers": 700, "prefixes": 400400, "ks": [1, 50], "repeats": 2, "rounds": 3, "quiet": quiet,
-         "smoke": False, "bars": {**converged_rejoin.DEFAULT_BARS, **(bars or {})}}
+         "smoke": smoke, "bars": {**converged_rejoin.DEFAULT_BARS, **(bars or {})}}
     (out / "campaign.json").write_text(json.dumps(c))
     runs = ["arm\tk\trep\tharness_rc\tdaemon_rc"]
     for arm, k, rep in converged_rejoin.schedule(c):
@@ -56,6 +61,7 @@ def campaign(out: Path, *, scale: dict | None = None, bars: dict | None = None, 
             (out / "quiet" / f"{name}.tsv").write_text(QUIET)
         runs.append(f"{arm}\t{k}\t{rep}\t0\t0")
     (out / "runs.tsv").write_text("\n".join(runs) + "\n")
+    (out / "schedule.txt").write_text("".join(f"{a} {k} {r}\n" for a, k, r in converged_rejoin.schedule(c)))
     return out
 
 
@@ -118,6 +124,12 @@ class Analyzer(unittest.TestCase):
         rc, _, v = analyze(campaign(self.tmp / "b", bars={"high_k": "not_worse"}, scale={("head", 50): 1.2}))
         self.assertEqual((rc, v["bars"]["B1"]["pass"]), (1, False))
 
+    def test_smoke_judges_validity_but_no_bars(self):
+        # A regression big enough to fail B1 and B2 is still a valid smoke.
+        rc, text, v = analyze(campaign(self.tmp / "c", smoke=True, scale={("head", 1): 3.0}))
+        self.assertEqual((rc, v["verdict"], v["bars"]), (0, "SMOKE", {}), text)
+        self.assertIn("performance bars not judged", text)
+
     def test_unquieted_campaign_needs_no_quiet_samples(self):
         rc, text, _ = analyze(campaign(self.tmp / "c", quiet=False, scale={("head", 50): 0.1}))
         self.assertEqual(rc, 0, text)
@@ -171,9 +183,33 @@ class Invalid(unittest.TestCase):
         edit(self.log, ",700,50,400400,", ",700,49,400400,")
         self.assert_invalid("head-k50-rep1: round 1 fails")
 
-    def test_wrong_fleet_and_prefixes(self):
+    def test_wrong_fleet(self):
         edit(self.log, "converged_rejoin_csv,1,700,", "converged_rejoin_csv,1,699,")
         self.assert_invalid("head-k50-rep1: round 1 fails")
+
+    def test_wrong_prefix_count(self):
+        edit(self.log, "converged_rejoin_csv,2,700,50,400400,", "converged_rejoin_csv,2,700,50,400399,")
+        self.assert_invalid("head-k50-rep1: round 2 fails")
+
+    def test_smoke_cell_still_invalid(self):
+        out = campaign(self.tmp / "s", smoke=True)
+        (out / "raw" / "base-k1-rep1" / "reloadstall.log").unlink()
+        rc, text, v = analyze(out)
+        self.assertEqual((rc, v["verdict"]), (4, "INVALID"), text)
+
+    def test_run_outside_schedule(self):
+        with (self.out / "runs.tsv").open("a") as f:
+            f.write("head\t50\t3\t0\t0\n")
+        self.assert_invalid("runs.tsv row ('head', '50', '3') is not in the schedule")
+
+    def test_relabelled_run_row(self):
+        # Same row count, but one scheduled cell is replaced by an unscheduled one.
+        edit(self.out / "runs.tsv", "base\t1\t2\t0\t0", "base\t2\t2\t0\t0")
+        self.assert_invalid("runs.tsv row ('base', '2', '2') is not in the schedule")
+
+    def test_schedule_file_differs(self):
+        edit(self.out / "schedule.txt", "head 1 1\nhead 50 1\n", "head 50 1\nhead 1 1\n")
+        self.assert_invalid("schedule.txt differs")
 
     def test_parse_errors_and_sessions(self):
         edit(self.log, ",700,0\n", ",699,0\n")
@@ -194,13 +230,42 @@ class Invalid(unittest.TestCase):
         self.assert_invalid("unparseable row")
 
     def test_no_accepted_quiet_sample(self):
-        edit(self.out / "quiet" / "base-k50-rep1.tsv", "2\t130", "1\t130")
-        self.assert_invalid("base-k50-rep1: no accepted second quiet-host sample")
+        edit(self.out / "quiet" / "base-k50-rep1.tsv", "\n2\t1030", "\n1\t1030")
+        self.assert_invalid("base-k50-rep1: quiet-host gate: samples ['1', '1']")
+
+    def test_quiet_gate_fields(self):
+        q = self.out / "quiet" / "base-k50-rep1.tsv"
+        for old, new, why in (
+                ("\ttrue\tnone\t2", "\tfalse\tload1\t2", "sample 2 is not quiet"),
+                ("\t0.40\t", "\t2.40\t", "sample 2 is not quiet"),
+                ("\tnone\ttrue\tnone\t2", "\t123:cargo\ttrue\tnone\t2", "sample 2 is not quiet"),
+                ("\t2\t2\tnone\ttrue\tnone\t2", "\t1\t2\tnone\ttrue\tnone\t2", "sample 2 is not quiet"),
+                ("1030\t0.40\t77\t88", "1030\t0.40\t78\t88", "swap counters moved"),
+                ("2\t1030\t", "2\t1029\t", "samples 29 s apart, need 30"),
+                ("2\t1030\t", "2\tlater\t", "unparseable")):
+            with self.subTest(why=why, new=new):
+                q.write_text(QUIET)
+                edit(q, old, new)
+                self.assert_invalid(f"base-k50-rep1: quiet-host gate: {why}")
 
     def test_campaign_json_missing_or_tampered(self):
-        c = json.loads((self.out / "campaign.json").read_text())
-        c["bars"]["extra"] = 1
-        (self.out / "campaign.json").write_text(json.dumps(c))
+        good = json.loads((self.out / "campaign.json").read_text())
+        for field, value in (("bars.extra", 1), ("bars.rejoin_rel", "0.1"), ("bars.gap_max_abs_ms", None),
+                             ("bars.gap_median_rel", True), ("bars.high_k", "faster"), ("bars", []),
+                             ("quiet", "yes"), ("smoke", 0), ("peers", True), ("prefixes", 400400.0),
+                             ("ks", [1, "50"]), ("ks", [1]), ("extra", 1)):
+            with self.subTest(field=field, value=value):
+                c = json.loads(json.dumps(good))
+                if field.startswith("bars."):
+                    c["bars"][field[5:]] = value
+                else:
+                    c[field] = value
+                (self.out / "campaign.json").write_text(json.dumps(c))
+                self.assert_invalid("campaign.json")
+        (self.out / "campaign.json").write_text(json.dumps({**good, "bars": {
+            k: v for k, v in good["bars"].items() if k != "gap_max_rel"}}))
+        self.assert_invalid("missing bar(s) ['gap_max_rel']")
+        (self.out / "campaign.json").write_text("[]")
         self.assert_invalid("campaign.json")
         (self.out / "campaign.json").unlink()
         self.assert_invalid("campaign.json")
