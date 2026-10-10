@@ -1332,7 +1332,7 @@ async fn failover_inbound_refresh_covers_negotiated_but_not_sendable_families() 
 
 /// `RibUpdate::PeerUp` boilerplate for the stale-data-message tests
 /// below: an iBGP RR-client peer with the given sendable families.
-fn session_peer_up(
+pub(super) fn session_peer_up(
     peer: IpAddr,
     session_id: u64,
     outbound_tx: mpsc::Sender<OutboundRouteUpdate>,
@@ -2207,6 +2207,72 @@ async fn accepted_source_context_survives_collision_failback_and_stamps_pending_
 }
 
 #[tokio::test]
+async fn repeated_peer_up_preserves_only_matching_source_context() {
+    use crate::update::PeerSourceContext;
+    for session_id in [0, 7] {
+        for (next_id, replacement) in [
+            (session_id, false),
+            (session_id, true),
+            (session_id + 1, false),
+        ] {
+            let (_tx, rx) = mpsc::channel(64);
+            let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+            let peer: IpAddr = "192.0.2.1".parse().unwrap();
+            let context = Arc::new(PeerSourceContext {
+                peer_interface: Some("eth1".into()),
+                accepted_dynamic_range: None,
+                route_server_client: false,
+            });
+            manager.handle_update(RibUpdate::SetPeerSourceContext {
+                peer,
+                session_id,
+                context: context.clone(),
+            });
+            let (initial_tx, _initial_rx) = mpsc::channel(64);
+            manager.handle_update(session_peer_up(
+                peer,
+                session_id,
+                initial_tx,
+                ipv4_sendable(),
+            ));
+            let expected = if replacement {
+                let replacement = Arc::new(PeerSourceContext {
+                    peer_interface: Some("eth2".into()),
+                    ..(*context).clone()
+                });
+                manager.handle_update(RibUpdate::SetPeerSourceContext {
+                    peer,
+                    session_id: next_id,
+                    context: replacement.clone(),
+                });
+                Some(replacement)
+            } else {
+                (next_id == session_id).then_some(context)
+            };
+            let (next_tx, _next_rx) = mpsc::channel(64);
+            manager.handle_update(session_peer_up(peer, next_id, next_tx, ipv4_sendable()));
+            manager.handle_update(RibUpdate::RoutesReceived {
+                peer,
+                session_id: next_id,
+                announced: vec![],
+                withdrawn: vec![],
+                flowspec_announced: vec![],
+                flowspec_withdrawn: vec![],
+                evpn_announced: vec![],
+                evpn_withdrawn: vec![],
+                validated_with: None,
+            });
+            let admitted = &manager.pending_route_batches.back().unwrap().source;
+            assert_eq!(admitted.session_id, next_id);
+            assert_eq!(admitted.context, expected);
+            if let Some(expected) = expected {
+                assert!(Arc::ptr_eq(admitted.context.as_ref().unwrap(), &expected));
+            }
+        }
+    }
+}
+
+#[tokio::test]
 async fn ending_session_preserves_newer_staged_registration_context() {
     use crate::update::PeerSourceContext;
     let (_tx, rx) = mpsc::channel(64);
@@ -2250,12 +2316,21 @@ async fn ending_session_preserves_newer_staged_registration_context() {
         session_id: 2,
         encoder: encoder.clone(),
     });
+    manager.handle_update(RibUpdate::SetPeerPolicyContext {
+        peer,
+        session_id: 2,
+        peer_group: Some("replacement".into()),
+    });
     manager.handle_update(RibUpdate::PeerDown {
         peer,
         session_id: 1,
     });
     let (new_tx, _new_rx) = mpsc::channel(64);
     manager.handle_update(session_peer_up(peer, 2, new_tx, ipv4_sendable()));
+    assert_eq!(
+        manager.peer_group.get(&peer).map(String::as_str),
+        Some("replacement")
+    );
     let record = &manager.live_sessions[&peer][0];
     assert_eq!(record.source_context, Some(context));
     assert!(record.gr_context.as_ref().unwrap().peer_enhanced_refresh);
@@ -2291,6 +2366,13 @@ async fn aborted_registration_reaps_only_its_own_staged_source_context() {
                     }),
                 });
             }
+            for session_id in [1, 2] {
+                manager.handle_update(RibUpdate::SetPeerPolicyContext {
+                    peer,
+                    session_id,
+                    peer_group: Some(format!("group-{session_id}")),
+                });
+            }
             if graceful {
                 manager.handle_update(RibUpdate::PeerGracefulRestart {
                     peer,
@@ -2310,11 +2392,96 @@ async fn aborted_registration_reaps_only_its_own_staged_source_context() {
             }
             assert!(!manager.pending_peer_source_context.contains_key(&(peer, 1)));
             assert!(manager.pending_peer_source_context.contains_key(&(peer, 2)));
+            assert!(!manager.pending_peer_policy_context.contains_key(&(peer, 1)));
+            assert!(manager.pending_peer_policy_context.contains_key(&(peer, 2)));
             if registered {
                 assert_eq!(manager.live_sessions[&peer][0].session_id, 99);
             }
             manager.handle_update(RibUpdate::PeerDeleted { peer });
             assert!(manager.pending_peer_source_context.is_empty());
+            assert!(manager.pending_peer_policy_context.is_empty());
         }
     }
+}
+
+#[tokio::test]
+async fn live_peer_policy_context_follows_failback_without_publishing_standby_updates() {
+    let (_tx, rx) = mpsc::channel(64);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let peer: IpAddr = "192.0.2.1".parse().unwrap();
+    let (first_tx, _first_rx) = mpsc::channel(64);
+    manager.handle_update(RibUpdate::SetPeerPolicyContext {
+        peer,
+        session_id: 1,
+        peer_group: Some("first".into()),
+    });
+    manager.handle_update(session_peer_up(peer, 1, first_tx, ipv4_sendable()));
+    manager.handle_update(RibUpdate::SetPeerPolicyContext {
+        peer,
+        session_id: 1,
+        peer_group: Some("first-current".into()),
+    });
+    assert_eq!(
+        manager.peer_group.get(&peer).map(String::as_str),
+        Some("first-current")
+    );
+    let (second_tx, _second_rx) = mpsc::channel(64);
+    manager.handle_update(RibUpdate::SetPeerPolicyContext {
+        peer,
+        session_id: 2,
+        peer_group: Some("second".into()),
+    });
+    manager.handle_update(session_peer_up(peer, 2, second_tx, ipv4_sendable()));
+    assert_eq!(
+        manager.peer_group.get(&peer).map(String::as_str),
+        Some("second")
+    );
+    let before = (
+        manager.peer_group_version,
+        manager.route_page_advertised_version,
+    );
+    manager.handle_update(RibUpdate::SetPeerPolicyContext {
+        peer,
+        session_id: 1,
+        peer_group: Some("first-standby".into()),
+    });
+    assert_eq!(
+        manager.peer_group.get(&peer).map(String::as_str),
+        Some("second")
+    );
+    assert_eq!(
+        (
+            manager.peer_group_version,
+            manager.route_page_advertised_version
+        ),
+        before
+    );
+    manager.handle_update(RibUpdate::PeerDown {
+        peer,
+        session_id: 2,
+    });
+    assert_eq!(
+        manager.peer_group.get(&peer).map(String::as_str),
+        Some("first-standby")
+    );
+    let before = (
+        manager.peer_group_version,
+        manager.route_page_advertised_version,
+    );
+    manager.handle_update(RibUpdate::SetPeerPolicyContext {
+        peer,
+        session_id: 2,
+        peer_group: Some("ended".into()),
+    });
+    assert_eq!(
+        manager.peer_group.get(&peer).map(String::as_str),
+        Some("first-standby")
+    );
+    assert_eq!(
+        (
+            manager.peer_group_version,
+            manager.route_page_advertised_version
+        ),
+        before
+    );
 }

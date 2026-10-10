@@ -2157,7 +2157,9 @@ pub enum RibUpdate {
         /// Immutable accepted provenance; does not authorize dampening.
         context: Arc<PeerSourceContext>,
     },
-    /// Update per-peer policy identity metadata used during export policy evaluation.
+    /// Stage policy identity before the matching `PeerUp`, or update an
+    /// existing live session's retained identity. Only the current session
+    /// publishes it; a displaced session keeps its value for collision failback.
     SetPeerPolicyContext {
         /// Peer whose policy identity is being updated.
         peer: IpAddr,

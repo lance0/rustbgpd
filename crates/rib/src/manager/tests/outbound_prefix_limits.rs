@@ -1556,6 +1556,129 @@ fn a_registration_inherits_its_peer_group_unless_the_neighbor_overrides_it() {
     assert_eq!(ipv4_row(&manager, overriding).limit, Some(9));
 }
 
+/// A replacement's group must be installed before its first table dump,
+/// including when the old session ends between the context and `PeerUp`.
+#[test]
+fn replacement_peer_policy_context_limits_initial_dump() {
+    for old_ends_first in [false, true] {
+        let (_tx, rx) = mpsc::channel(1);
+        let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+        manager.test_force_ungrouped = true;
+        let peer: IpAddr = "10.113.0.1".parse().unwrap();
+        let mut old_rx = register_peer(&mut manager, peer);
+        install(
+            &mut manager,
+            1,
+            limit_config(&[], &[("clients", Some(1), None)]),
+        );
+        let source = Ipv4Addr::new(192, 0, 2, 113);
+        announce(
+            &mut manager,
+            source.into(),
+            source_routes(source, &[1, 2, 3]),
+        );
+        assert_eq!(
+            wire_prefixes(&mut old_rx).len(),
+            3,
+            "unlimited control receives all routes"
+        );
+        manager.handle_update(RibUpdate::SetPeerPolicyContext {
+            peer,
+            session_id: 1,
+            peer_group: Some("clients".into()),
+        });
+        if old_ends_first {
+            manager.handle_update(RibUpdate::PeerDown {
+                peer,
+                session_id: 0,
+            });
+        }
+        let (new_tx, mut new_rx) = mpsc::channel(64);
+        manager.handle_update(super::lifecycle::session_peer_up(
+            peer,
+            1,
+            new_tx,
+            ipv4_sendable(),
+        ));
+        assert_eq!(
+            wire_prefixes(&mut new_rx).len(),
+            1,
+            "replacement initial dump must use its group cap"
+        );
+        assert_eq!(ipv4_row(&manager, peer).limit, Some(1));
+    }
+}
+
+/// Re-registering one session keeps its policy identity unless explicitly
+/// cleared; a different session cannot inherit that identity implicitly.
+#[test]
+fn repeated_peer_up_preserves_only_matching_policy_context() {
+    for session_id in [0, 7] {
+        for (next_id, ungroup, stage_ungroup) in [
+            (session_id, false, false),
+            (session_id, true, false),
+            (session_id, false, true),
+            (session_id + 1, false, false),
+        ] {
+            let (_tx, rx) = mpsc::channel(1);
+            let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+            manager.test_force_ungrouped = true;
+            let peer: IpAddr = "10.113.0.1".parse().unwrap();
+            install(
+                &mut manager,
+                1,
+                limit_config(&[], &[("clients", Some(1), None)]),
+            );
+            let source = Ipv4Addr::new(192, 0, 2, 113);
+            announce(
+                &mut manager,
+                source.into(),
+                source_routes(source, &[1, 2, 3]),
+            );
+            manager.handle_update(RibUpdate::SetPeerPolicyContext {
+                peer,
+                session_id,
+                peer_group: Some("clients".into()),
+            });
+            let (initial_tx, mut initial_rx) = mpsc::channel(64);
+            manager.handle_update(super::lifecycle::session_peer_up(
+                peer,
+                session_id,
+                initial_tx,
+                ipv4_sendable(),
+            ));
+            assert_eq!(wire_prefixes(&mut initial_rx).len(), 1);
+            if ungroup {
+                manager.handle_update(RibUpdate::SetPeerPolicyContext {
+                    peer,
+                    session_id,
+                    peer_group: None,
+                });
+            }
+            if stage_ungroup {
+                // A staged explicit None must outrank a retained live group.
+                manager
+                    .pending_peer_policy_context
+                    .insert((peer, session_id), None);
+            }
+            let (next_tx, mut next_rx) = mpsc::channel(64);
+            manager.handle_update(super::lifecycle::session_peer_up(
+                peer,
+                next_id,
+                next_tx,
+                ipv4_sendable(),
+            ));
+            let keeps_group = next_id == session_id && !ungroup && !stage_ungroup;
+            assert_eq!(
+                wire_prefixes(&mut next_rx).len(),
+                if keeps_group { 1 } else { 3 },
+                "initial dump must reflect matching session policy context",
+            );
+            assert_eq!(ipv4_row(&manager, peer).limit, keeps_group.then_some(1));
+        }
+    }
+}
+
 /// Load-bearing break: mutating any peer before every affected peer passes
 /// preflight lets a group-wide lowering land on the members that fit and
 /// leaves the running configuration disagreeing with admission state.

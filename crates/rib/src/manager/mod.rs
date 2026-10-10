@@ -45,7 +45,7 @@ use rustbgpd_telemetry::BgpMetrics;
 use rustbgpd_telemetry::metrics::RibPolicyTransitionOutcome;
 use rustbgpd_telemetry::metrics::StaleSessionMessageKind as Kind;
 use rustbgpd_telemetry::metrics::StaleSessionMessageKind::{
-    BgpLs, Eor, Labeled, Orf, PolicyContext, Refresh, Routes, Rtc, Vpn,
+    BgpLs, Eor, Labeled, Orf, Refresh, Routes, Rtc, Vpn,
 };
 use rustbgpd_wire::{Afi, BgpRole, Prefix, Safi};
 use tokio::sync::{broadcast, mpsc, watch};
@@ -609,6 +609,8 @@ pub struct RibManager {
     pending_peer_gr_context: HashMap<(IpAddr, u64), PeerSelectionDeferralContext>,
     /// Accepted provenance awaiting its matching session registration.
     pending_peer_source_context: HashMap<(IpAddr, u64), Arc<crate::update::PeerSourceContext>>,
+    /// Policy identity awaiting its matching registration, before initial export.
+    pending_peer_policy_context: HashMap<(IpAddr, u64), Option<String>>,
     /// Exact encoder owned by the active outbound registration. Every
     /// precommit pass captures one immutable snapshot from this handle and
     /// attaches that same snapshot to the outbound envelope.
@@ -1331,6 +1333,7 @@ pub(in crate::manager) const MAX_PRECOMMIT_POLICY_TRANSITION_OWNERSHIP: std::tim
 pub(super) struct LiveSessionRecord {
     session_id: u64,
     source_context: Option<Arc<crate::update::PeerSourceContext>>,
+    peer_group: Option<String>,
     outbound_tx: mpsc::Sender<OutboundRouteUpdate>,
     peer_asn: u32,
     peer_router_id: Ipv4Addr,
@@ -1866,6 +1869,7 @@ impl RibManager {
             pending_peer_export_encoders: HashMap::new(),
             pending_peer_gr_context: HashMap::new(),
             pending_peer_source_context: HashMap::new(),
+            pending_peer_policy_context: HashMap::new(),
             peer_export_encoders: HashMap::new(),
             peer_unexportable: HashMap::new(),
             #[cfg(test)]
@@ -3212,14 +3216,29 @@ impl RibManager {
                 session_id,
                 peer_group,
             } => {
-                if !self.stale_session_message(
-                    peer,
-                    session_id,
-                    "SetPeerPolicyContext",
-                    PolicyContext,
-                ) {
-                    self.advance_advertised_pages();
-                    self.handle_set_peer_policy_context(peer, peer_group);
+                let current = self
+                    .live_sessions
+                    .get(&peer)
+                    .and_then(|sessions| sessions.last())
+                    .is_some_and(|record| record.session_id == session_id);
+                if let Some(record) = self.live_sessions.get_mut(&peer).and_then(|sessions| {
+                    sessions
+                        .iter_mut()
+                        .find(|record| record.session_id == session_id)
+                }) {
+                    // A displaced live session retains updates for failback,
+                    // but only the current session publishes installed identity.
+                    record.peer_group.clone_from(&peer_group);
+                    if current {
+                        self.advance_advertised_pages();
+                        self.handle_set_peer_policy_context(peer, peer_group);
+                    }
+                } else {
+                    // Establishment sends this before PeerUp, while an older
+                    // registration may still be active. Do not apply its stale
+                    // data-message gate or mutate that registration's identity.
+                    self.pending_peer_policy_context
+                        .insert((peer, session_id), peer_group);
                 }
             }
             RibUpdate::SetPeerSourceContext {

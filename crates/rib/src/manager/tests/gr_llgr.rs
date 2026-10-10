@@ -1348,6 +1348,11 @@ async fn gr_expiry_sweep_spares_reestablished_peer_awaiting_eor() {
     // Peer re-establishes during GR, but its End-of-RIB is late: the
     // stale-time sweep fires while the session is up. Stale routes go,
     // the live session's state must not.
+    manager.handle_update(RibUpdate::SetPeerPolicyContext {
+        peer,
+        session_id: 0,
+        peer_group: Some("edge".to_string()),
+    });
     let _out_rx2 = establish_peer(&mut manager, peer);
     manager.sweep_gr_stale(peer);
 

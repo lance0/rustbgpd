@@ -126,6 +126,7 @@ impl RibManager {
             .remove(&(peer, session_id));
         self.pending_peer_gr_context.remove(&(peer, session_id));
         self.pending_peer_source_context.remove(&(peer, session_id));
+        self.pending_peer_policy_context.remove(&(peer, session_id));
         let Some(&registered) = self.outbound_session_ids.get(&peer) else {
             // No registration. Ordinarily `live_sessions` is empty for the
             // peer here and the full teardown proceeds; during the LAN-475
@@ -193,8 +194,8 @@ impl RibManager {
     /// REPLACEMENT session's state: stale routes landing in its
     /// Adj-RIB-In, a stale `EoR` prematurely completing its GR sweep, a
     /// stale `EoRR` closing its enhanced-refresh window early, or stale
-    /// ORF entries installed as its outbound filter, or stale peer-group
-    /// policy context being assigned to the replacement session.
+    /// ORF entries installed as its outbound filter. Registration context
+    /// uses session-stamped staging instead of this data-message gate.
     ///
     /// A message for a peer with NO registration keeps the pre-stamping
     /// accept-all behavior, mirroring the teardown rule in
@@ -597,6 +598,8 @@ impl RibManager {
             .retain(|(context_peer, _), _| *context_peer != peer);
         self.pending_peer_source_context
             .retain(|(context_peer, _), _| *context_peer != peer);
+        self.pending_peer_policy_context
+            .retain(|(context_peer, _), _| *context_peer != peer);
         // Deletion also removes the peer from the startup selection-deferral
         // roster: no future session can satisfy its waiters, and leaving them
         // in a blocking state would freeze the family until timer expiry even
@@ -828,9 +831,22 @@ impl RibManager {
             .remove(&(peer, session_id));
         let gr_context = self.pending_peer_gr_context.remove(&(peer, session_id));
 
+        let previous_session = self.live_sessions.get(&peer).and_then(|sessions| {
+            sessions
+                .iter()
+                .find(|record| record.session_id == session_id)
+        });
         let record = LiveSessionRecord {
             session_id,
-            source_context: self.pending_peer_source_context.remove(&(peer, session_id)),
+            source_context: self
+                .pending_peer_source_context
+                .remove(&(peer, session_id))
+                .or_else(|| previous_session.and_then(|record| record.source_context.clone())),
+            peer_group: self
+                .pending_peer_policy_context
+                .remove(&(peer, session_id))
+                .or_else(|| previous_session.map(|record| record.peer_group.clone()))
+                .flatten(),
             outbound_tx,
             peer_asn,
             peer_router_id,
@@ -909,6 +925,7 @@ impl RibManager {
         let session_id = record.session_id;
         let peer_asn = record.peer_asn;
         let peer_router_id = record.peer_router_id;
+        let peer_group = record.peer_group.clone();
         let sendable_families = record.sendable_families.clone();
         let negotiated_orf_recv = record.negotiated_orf_recv.clone();
         let gr_context = record.gr_context.clone();
@@ -919,7 +936,12 @@ impl RibManager {
         let per_client_best = record.per_client_best;
         let interpret_rfc1997 = record.interpret_rfc1997;
 
-        if self.peer_asn.insert(peer, peer_asn) != Some(peer_asn) {
+        let asn_changed = self.peer_asn.insert(peer, peer_asn) != Some(peer_asn);
+        // Install the active session's identity before deferred registration,
+        // inherited outbound maxima, and the initial export evaluation. The
+        // setter's conditional-policy reobservation sees the current ASN too.
+        self.set_peer_group(peer, peer_group);
+        if asn_changed {
             // ADR-0137: a `condition_policy` reads the source peer's ASN,
             // and GR-retained candidates outlive the session that set it.
             let _ = self.reobserve_conditional_advertisement_source(peer);
