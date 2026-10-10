@@ -17,6 +17,11 @@ All 12 cells and 36 rounds are retained. No measured round was excluded.
 - `samples.tsv`: the 36 parsed rounds.
 - `analyze_j1.py`: the analyzer with the predeclared bars B1–B4.
 - `verdict.txt`: the analyzer's table and verdict.
+- `verify-inputs.py`: checks three input properties the as-run analyzer did not:
+  - the exact unique cell set in `schedule.txt`, `runs.tsv`, `raw/` and
+    `quiet/`;
+  - every quiet sample's fields against the gate's thresholds;
+  - each round's peer, flapped and prefix counts against the shape.
 
 The published analyzer differs from the one that ran only in its module
 docstring, one comment and the title line it prints, where internal tracker
@@ -37,3 +42,12 @@ diff docs/perf/artifacts/join-cohort-converged-rejoin-2026-10/samples.tsv "$tmp/
 ```
 
 Both diffs are empty and the analyzer exits 0 (PASS).
+
+`python3 docs/perf/artifacts/join-cohort-converged-rejoin-2026-10/verify-inputs.py`
+exits 0. It exits 1 on a doctored copy with any one of these changes:
+
+- a duplicated repetition in `schedule.txt`;
+- a `quiet=false` sample;
+- a round reporting a prefix count of 1.
+
+The as-run analyzer still reports PASS for each of those copies.

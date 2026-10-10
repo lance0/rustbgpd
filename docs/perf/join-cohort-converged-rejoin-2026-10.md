@@ -92,6 +92,19 @@ samples taken and finite timings. The harness also exits non-zero on survivor
 prefix loss or withdrawal, a session not Established after rejoin, or lost
 joiner coverage after GR settles. All 12 cells passed.
 
+The as-run analyzer did not check three input properties. It counted schedule
+rows without rejecting duplicate cells. It accepted any second quiet sample
+without reading its fields. It also parsed each round's prefix count without
+comparing it. The separate
+[`verify-inputs.py`](artifacts/join-cohort-converged-rejoin-2026-10/verify-inputs.py)
+checked all three on the archived inputs, and all passed:
+
+- the cells are exactly the unique set of two arms × K ∈ {1, 50} × three
+  repetitions;
+- every quiet sample met the gate's thresholds (load, competitors, governors,
+  swap and spacing);
+- every round reported 700 peers and 400,400 prefixes.
+
 ## Predeclared bars
 
 Fixed before the run and encoded in the published analyzer:
