@@ -63,8 +63,8 @@ def q1_clocks() -> bool:
         for run in (1, 2):
             for x in json.loads((HERE / "q1" / f"{arm}-r{run}" / "summary.json").read_text())["reloads"]:
                 rows[arm].append((x["rib_transition"]["elapsed_ms"], x["phase_timing"]["cohort_rib_transition_us"] / 1000))
-    pre_ok = len(rows["pre2952"]) == 24 and all(c - r <= 35 for r, c in rows["pre2952"])
-    apart = [(r, c) for r, c in rows["post2952"] if c - r > 35]
+    pre_ok = len(rows["pre2952"]) == 24 and all(abs(c - r) <= 35 for r, c in rows["pre2952"])
+    apart = [(r, c) for r, c in rows["post2952"] if abs(c - r) > 35]
     post_ok = (len(rows["post2952"]) == 24 and len(apart) == 18
                and (round(min(c for _, c in apart)), round(max(c for _, c in apart))) == (238, 315)
                and (min(r for r, _ in apart), max(r for r, _ in apart)) == (55, 60)
