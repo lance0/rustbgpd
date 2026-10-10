@@ -1,0 +1,35 @@
+job J1
+ctl  1d0e4e155d0cf8e42ab007c399067540855c02df tree e6be5128b32b4f39fa7e157398e2d26fb6805fba
+pr_head	1e862f306df1153db429fe8eec92a69d2db90892
+cand_commit	2a9cd95eb11a3431b9ac87f45a4e4ea4773e1871
+cand_tree	a49dabbaf7cabf963411c7613ac3e2ca64877c5a
+cand_sha256	249fdc1af75a60f96a1adc49cb4de4f684d94013d41c4881de3b9238e8f10896
+built_at	2026-10-10T06:26:28-04:00
+candidate_note J1 candidate at PR head 1e862f306df1153db429fe8eec92a69d2db90892 (unchanged since preparation)
+pr_head_at_launch 1e862f306df1153db429fe8eec92a69d2db90892 (matches build)
+cand 2a9cd95eb11a3431b9ac87f45a4e4ea4773e1871 tree a49dabbaf7cabf963411c7613ac3e2ca64877c5a parents 1d0e4e155d0cf8e42ab007c399067540855c02df 1e862f306df1153db429fe8eec92a69d2db90892
+ changelog.d/changed-batched-group-joiners.md       |  13 +
+ crates/rib/src/manager/bench_support.rs            |  30 +
+ crates/rib/src/manager/distribution/rs_control.rs  |  96 ++-
+ crates/rib/src/manager/mod.rs                      |  12 +-
+ crates/rib/src/manager/peer_lifecycle.rs           | 359 +++++++++--
+ crates/rib/src/manager/tests/join_cohort.rs        | 699 +++++++++++++++++++++
+ crates/rib/src/manager/tests/mod.rs                |   1 +
+ crates/rib/src/manager/tests/update_groups.rs      |  16 +-
+ .../rib/src/manager/tests/update_groups_oracle.rs  |   2 +-
+ crates/rib/src/manager/update_groups.rs            |  18 +
+ crates/rib/src/manager/update_groups/views.rs      |  50 +-
+ crates/transport/benches/fanout.rs                 |  59 ++
+ 12 files changed, 1295 insertions(+), 60 deletions(-)
+rustc 1.99.0 (b940084d7 2026-09-28)
+cargo 1.99.0 (5f94df478 2026-08-27)
+47a2c186ba6749c5e27c5a834c8f315e65d64db5a085bb3df8c012ecc707d993  bin/j1-ctl/rustbgpd
+249fdc1af75a60f96a1adc49cb4de4f684d94013d41c4881de3b9238e8f10896  bin/j1-cand/rustbgpd
+3af6acfd00e8d2ae4688f92694ef8bb0f734eb9c7e18d3e1625d3599d99ad3a1  bin/harness-main/reloadstall
+e563659beef5857ee79ddac40e1cff5730c34e424b5ca074a3f9007b5dc0ab42  bench/scale/reloadstall/gen-scenario.py
+abb3391cd5e0879c29aabd0aa0c316ea33d5f7c72f6d2a7d111b30025de411fd  bench/scale/host-quiet.sh
+f55832b71079cdcd0f708fe3b764cf35d020dfe4ab894ff81191c436a4d04b2b  tests/soak/fd-headroom.sh
+ff69a22dcac49b026d307105b95db9762042998152b40a13e7724dbc8647e60c  job-j1.sh
+54198febdb7f3fe03e45d06250dbbc0b6f033840e406400b6a7d5d17be2b487f  analyze_j1.py
+daemon_cpus 12-32,34-39 engine_cpus 40-63 kernel 7.0.0-30-generic
+shape peers=700 prefixes=400400 ks='1 50' repeats=3 rounds=3 control_secs=30 quiet=1

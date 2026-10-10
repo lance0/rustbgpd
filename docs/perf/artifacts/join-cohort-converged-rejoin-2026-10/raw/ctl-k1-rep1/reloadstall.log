@@ -1,0 +1,30 @@
+# reloadstall peers=700 changed_peers=700 stable_peers=0 prefixes=400400 per_peer=572 pid=2299108
+established 700 at 0.8s
+establishment transport_retries=0 recovered_peers=0
+first_exact_bitmap,mode=flapstorm,peers=700,total=400400,per_peer=572,expected=399828,completed=700,min_unique=399828,max_unique=399828
+converged (>= 399828/observer) at 3.5s rss_mib=410
+control_maxgap_ms: p50=19.60 p95=20.96 max=41.94 (n=700)
+control_rss_mib 349
+converged_rejoin_csv_header,round,peers_total,peers_flapped,prefixes,rejoin_p50_s,rejoin_max_s,survivor_maxgap_ms,readiness_samples,rss_mib,sessions_up,parse_errors
+converged_table_checkpoint,round=1,phase=disconnected,observers=1:2,unique=399828,eor=present
+converged_rejoin 1 reconnect transport_retries=0
+flap 1 peer 0 rejoin_complete_s=0.181750 eor_before_full_table=false eor=present
+flap 1 rejoin_complete_s: p50=0.18 p95=0.18 max=0.18 (n=1)
+converged_table_checkpoint,round=1,phase=settled,observers=1:2,unique=399828,eor=present
+converged_rejoin 1 survivor_maxgap_ms: p50=120.80 p95=122.43 max=122.62 (n=699)
+converged_rejoin_csv,1,700,1,400400,0.181750,0.181750,122.621000,12,429,700,0
+converged_table_checkpoint,round=2,phase=disconnected,observers=1:2,unique=399828,eor=present
+converged_rejoin 2 reconnect transport_retries=0
+flap 2 peer 0 rejoin_complete_s=0.181370 eor_before_full_table=false eor=present
+flap 2 rejoin_complete_s: p50=0.18 p95=0.18 max=0.18 (n=1)
+converged_table_checkpoint,round=2,phase=settled,observers=1:2,unique=399828,eor=present
+converged_rejoin 2 survivor_maxgap_ms: p50=121.86 p95=123.35 max=123.59 (n=699)
+converged_rejoin_csv,2,700,1,400400,0.181370,0.181370,123.588000,12,415,700,0
+converged_table_checkpoint,round=3,phase=disconnected,observers=1:2,unique=399828,eor=present
+converged_rejoin 3 reconnect transport_retries=0
+flap 3 peer 0 rejoin_complete_s=0.186030 eor_before_full_table=false eor=present
+flap 3 rejoin_complete_s: p50=0.19 p95=0.19 max=0.19 (n=1)
+converged_table_checkpoint,round=3,phase=settled,observers=1:2,unique=399828,eor=present
+converged_rejoin 3 survivor_maxgap_ms: p50=123.58 p95=124.89 max=125.05 (n=699)
+converged_rejoin_csv,3,700,1,400400,0.186030,0.186030,125.053000,12,427,700,0
+done rss_mib=351

@@ -1,0 +1,12 @@
+ctl 1 1
+cand 1 1
+cand 50 1
+ctl 50 1
+ctl 50 2
+cand 50 2
+cand 1 2
+ctl 1 2
+ctl 1 3
+cand 1 3
+cand 50 3
+ctl 50 3
