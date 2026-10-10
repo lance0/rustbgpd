@@ -1,0 +1,12 @@
+[global.config]
+as = 65000
+router-id = "10.0.118.2"
+
+[[neighbors]]
+[neighbors.config]
+neighbor-address = "10.0.118.1"
+peer-as = 65000
+
+[[neighbors.afi-safis]]
+[neighbors.afi-safis.config]
+afi-safi-name = "l2vpn-evpn"

@@ -1,0 +1,36 @@
+# Synthetic Type 2/3 origination and VLAN-scoped receive proof.
+# GoBGP decodes the wire and injects routes; it does not prove vendor import
+# semantics or forwarding across a second VTEP.
+name: m118-evpn-bundle-vtep-gobgp
+
+topology:
+  nodes:
+    rustbgpd:
+      kind: linux
+      image: rustbgpd:dev
+      cmd: sleep infinity
+      binds:
+        - ./configs/rustbgpd-m118-bundle-vtep.toml:/etc/rustbgpd/config.toml:ro
+        - ../fixtures/grpc-test-only-operator.token:/run/rustbgpd/grpc-test-only-operator.token:ro
+        - ./scripts/start-rustbgpd.sh:/usr/local/bin/start-rustbgpd.sh:ro
+        - ./scripts/start-rustbgpd-m118-bundle-vtep.sh:/usr/local/bin/setup-bundle.sh:ro
+      exec:
+        - ip addr add 10.0.118.1/24 dev eth1
+        - ip link set eth1 up
+        - sh /usr/local/bin/setup-bundle.sh
+      env:
+        RUST_LOG: info,rustbgpd_evpn_linux=debug
+        RUSTBGPD_TOKEN_FILE: /run/rustbgpd/grpc-test-only-operator.token
+
+    gobgp:
+      kind: linux
+      image: gobgp:v4.10.0-m118
+      cmd: sleep infinity
+      binds:
+        - ./configs/gobgp-m118-peer.toml:/config/gobgp.toml:ro
+      exec:
+        - ip addr add 10.0.118.2/24 dev eth1
+        - ip link set eth1 up
+
+  links:
+    - endpoints: ["rustbgpd:eth1", "gobgp:eth1"]
