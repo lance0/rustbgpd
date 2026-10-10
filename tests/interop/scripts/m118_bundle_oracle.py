@@ -13,6 +13,7 @@ PEER = "10.0.118.2"
 
 
 def originated(rib, tags=(10, 20)):
+    expected = set()
     for tag in (10, 20):
         vni = 10000 + tag
         rd = {"type": 1, "admin": VTEP, "assigned": tag}
@@ -27,6 +28,7 @@ def originated(rib, tags=(10, 20)):
                 if key in rib:
                     raise ValueError(f"withdrawn local tag {tag} still advertised")
                 continue
+            expected.add(key)
             paths = rib.get(key, [])
             if len(paths) != 1 or paths[0]["nlri"] != {"type": route_type, "value": value}:
                 raise ValueError(f"decoded NLRI differs for {key}")
@@ -52,6 +54,13 @@ def originated(rib, tags=(10, 20)):
                     raise ValueError(f"IMET member VNI/tunnel differs for tag {tag}")
     if sum(LOCAL_MAC in key for key in rib) != len(tags):
         raise ValueError("local MAC has the wrong number of per-member route keys")
+    # GoBGP's own injected routes carry exactly one MP_REACH next hop: the peer.
+    # Every other key is VTEP-originated and must be exactly the expected set.
+    local = {key for key, paths in rib.items()
+             if not all([a.get("nexthop") for a in p["attrs"] if a["type"] == 14] == [PEER]
+                        for p in paths)}
+    if local != expected:
+        raise ValueError(f"VTEP-originated route inventory differs: {sorted(local ^ expected)}")
 
 
 def fdb(text, tags=(10, 20)):

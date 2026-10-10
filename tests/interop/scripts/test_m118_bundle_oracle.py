@@ -133,6 +133,25 @@ class BundleOracleTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     oracle.originated(broken)
 
+    def test_extra_vtep_imet_with_other_tag_or_rd_fails(self):
+        good = peer_rib()
+        key = next(k for k in good if "multicast" in k and "[etag:10]" in k)
+        for case, extra in (
+            ("other_tag", f"[type:multicast][rd:{oracle.VTEP}:10][etag:30][ip:{oracle.VTEP}]"),
+            ("other_rd", f"[type:multicast][rd:{oracle.VTEP}:99][etag:10][ip:{oracle.VTEP}]"),
+        ):
+            with self.subTest(case=case):
+                broken = copy.deepcopy(good)
+                broken[extra] = copy.deepcopy(good[key])
+                with self.assertRaises(ValueError):
+                    oracle.originated(broken)
+
+    def test_peer_injected_routes_are_not_vtep_originated(self):
+        rib = peer_rib()
+        rib[f"[type:macadv][rd:{oracle.PEER}:10][etag:10][mac:{oracle.REMOTE_MAC}]"] = [
+            {"nlri": {"type": 2}, "attrs": [{"type": 14, "afi": 25, "safi": 70, "nexthop": oracle.PEER}]}]
+        oracle.originated(rib)
+
     def test_local_withdraw_preserves_other_mac_and_both_imets(self):
         rib = peer_rib()
         key = next(k for k in rib if "macadv" in k and "[etag:10]" in k)
