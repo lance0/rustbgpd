@@ -4431,6 +4431,44 @@ async fn generation_installs_conditional_advertisements_and_restores_on_failure(
     relay.abort();
 }
 
+#[tokio::test]
+async fn generation_adopts_disabled_dampening_schema_without_session_effects() {
+    let fixture = RsFixture::new();
+    let prior = fixture.load();
+    let mut harness = GenerationHarness::new(&prior);
+    let session = harness.session_id("10.0.0.2");
+    let mut candidate = prior.clone();
+    candidate.policy.route_flap_dampening =
+        Some(crate::config::RouteFlapDampeningConfig::default());
+    candidate.neighbors[0].route_flap_dampening = Some(false);
+    candidate
+        .peer_groups
+        .get_mut("members")
+        .unwrap()
+        .route_flap_dampening = Some(false);
+    candidate.validate().unwrap();
+    assert_eq!(plan_reload_peer_actions(&prior, &candidate).unwrap(), []);
+    assert!(matches!(
+        harness.apply(&candidate).await,
+        ReloadGenerationOutcome::Applied(_)
+    ));
+    assert_eq!(
+        harness.mgr.current_config.policy.route_flap_dampening,
+        candidate.policy.route_flap_dampening
+    );
+    assert_eq!(
+        harness.mgr.current_config.neighbors[0].route_flap_dampening,
+        Some(false)
+    );
+    assert_eq!(
+        harness.mgr.current_config.peer_groups["members"].route_flap_dampening,
+        Some(false)
+    );
+    assert_eq!(harness.session_id("10.0.0.2"), session);
+    assert_eq!(harness.runtime_config_updates("10.0.0.2"), 0);
+    harness.shutdown().await;
+}
+
 fn group_attachment(fixture: &RsFixture, list: &str) -> Config {
     fixture.write_toml(&fixture.base_toml().replacen(
         "[peer_groups.members]\n",

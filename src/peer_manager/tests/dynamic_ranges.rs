@@ -56,6 +56,39 @@ fn add_dynamic_range_appends_and_is_matchable() {
 }
 
 #[test]
+fn add_dynamic_range_refuses_effective_dampening_before_mutation() {
+    for global_default in [false, true] {
+        let mut mgr = dynamic_test_manager();
+        mgr.current_config.policy.route_flap_dampening =
+            Some(crate::config::RouteFlapDampeningConfig {
+                apply_to_ebgp: global_default,
+                ..crate::config::RouteFlapDampeningConfig::default()
+            });
+        mgr.current_config
+            .peer_groups
+            .get_mut("ix-members")
+            .unwrap()
+            .route_flap_dampening = (!global_default).then_some(true);
+        let before = mgr.dynamic_ranges.len();
+        let cfg_before = mgr.current_config.dynamic_neighbors.len();
+        for remote_asn in [0, 65002] {
+            let error = mgr
+                .add_dynamic_range("10.9.0.0/24".into(), "ix-members".into(), remote_asn, None)
+                .unwrap_err();
+            assert!(
+                matches!(error, rustbgpd_api::peer_types::DynamicRangeError::Invalid(ref reason) if reason.contains("route_flap_dampening") && reason.contains("runtime integration is not implemented"))
+            );
+            assert_eq!(mgr.dynamic_ranges.len(), before);
+            assert_eq!(mgr.current_config.dynamic_neighbors.len(), cfg_before);
+            assert!(
+                mgr.match_dynamic_range("10.9.0.1".parse().unwrap())
+                    .is_none()
+            );
+        }
+    }
+}
+
+#[test]
 fn add_dynamic_range_rejects_duplicate_effective_prefix() {
     let mut mgr = dynamic_test_manager();
     mgr.add_dynamic_range("10.0.0.0/24".into(), "ix-members".into(), 0, None)

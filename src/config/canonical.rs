@@ -379,6 +379,7 @@ fn policy_is_default(value: &PolicyConfig) -> bool {
         import_chain,
         export_chain,
         conditional_advertisements,
+        route_flap_dampening,
         explain,
         reject_retention,
         rpol_files,
@@ -395,6 +396,7 @@ fn policy_is_default(value: &PolicyConfig) -> bool {
         && import_chain.is_empty()
         && export_chain.is_empty()
         && conditional_advertisements.is_empty()
+        && route_flap_dampening.is_none()
         && *explain == PolicyExplainConfig::default()
         && *reject_retention == PolicyRejectRetentionConfig::default()
         && rpol_files.is_empty()
