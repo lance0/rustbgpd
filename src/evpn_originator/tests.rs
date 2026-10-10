@@ -10,7 +10,8 @@ use rustbgpd_rib::{RibCommandError, route::RouteOrigin};
 use rustbgpd_wire::{EthernetTagId, EvpnImet, EvpnMacIp};
 
 use crate::test_support::{
-    RibReplyMode, ScriptedRib, evpn_instance, gather_metrics_text, ip as ipa, mac, rd, vni,
+    RibReplyMode, ScriptedRib, VXLAN_ENCAPSULATION_EXTCOMM, assert_wire_vxlan_encapsulation,
+    evpn_instance, gather_metrics_text, ip as ipa, mac, rd, vni, wire_extcomms,
 };
 
 fn assert_quarantine_metric(metrics: &BgpMetrics, v: u32, m: u8, value: u32) {
@@ -1106,8 +1107,8 @@ fn build_originated_route_carries_route_targets_and_mobility_seq() {
             _ => None,
         })
         .unwrap();
-    // 1 RT + 1 MAC Mobility = 2 extcomms.
-    assert_eq!(extcomms.len(), 2);
+    // 1 RT + VXLAN encapsulation + 1 MAC Mobility = 3 extcomms.
+    assert_eq!(extcomms.len(), 3);
     assert!(
         extcomms
             .iter()
@@ -1140,8 +1141,8 @@ fn build_originated_route_omits_mobility_extcomm_when_seq_none_and_not_sticky() 
             _ => None,
         })
         .unwrap();
-    // RT only, no MAC Mobility.
-    assert_eq!(extcomms.len(), 1);
+    // RT + VXLAN encapsulation, no MAC Mobility.
+    assert_eq!(extcomms.len(), 2);
     assert!(extcomms.iter().all(|ec| ec.as_mac_mobility().is_none()));
 }
 
@@ -1213,6 +1214,47 @@ fn build_originated_route_carries_segment_esi_when_provided() {
         panic!("expected MacIp route");
     };
     assert_eq!(macip_zero.esi, EthernetSegmentIdentifier::ZERO);
+}
+
+/// RFC 8365 §5.1.3: every locally originated Type 2, MAC-only or MAC+IP,
+/// VLAN-based or VLAN-aware bundle member, reaches the wire with its RT and
+/// the VXLAN Encapsulation extended community; MAC Mobility follows them.
+#[test]
+fn type2_wire_attributes_carry_vxlan_encapsulation_for_every_member() {
+    for (v, tag) in [(100, 0), (10010, 10), (10020, 20)] {
+        let inst = local_instance(v).with_ethernet_tag(EthernetTagId(tag));
+        for ip in [None, Some(ipa("192.0.2.10"))] {
+            for mobility_seq in [None, Some(3)] {
+                let key = EvpnRouteKey::MacIp {
+                    rd: inst.rd,
+                    ethernet_tag: inst.ethernet_tag,
+                    mac: mac(0xAA),
+                    ip,
+                };
+                let route = build_originated_route(
+                    &inst,
+                    mac(0xAA),
+                    mobility_seq,
+                    false,
+                    key,
+                    EthernetSegmentIdentifier::ZERO,
+                );
+                assert_wire_vxlan_encapsulation(&route);
+                let mut expected = vec![
+                    0x0002_fde8_0000_0000 | u64::from(v),
+                    VXLAN_ENCAPSULATION_EXTCOMM,
+                ];
+                expected.extend(
+                    mobility_seq.map(|seq| ExtendedCommunity::mac_mobility(false, seq).as_u64()),
+                );
+                assert_eq!(
+                    wire_extcomms(&route),
+                    expected,
+                    "vni {v} tag {tag} ip {ip:?} seq {mobility_seq:?}"
+                );
+            }
+        }
+    }
 }
 
 #[tokio::test]

@@ -940,6 +940,7 @@ mod tests {
                 _ => None,
             })
             .expect("originated SVI route must carry ExtendedCommunities");
+        crate::test_support::assert_wire_vxlan_encapsulation(route);
         let mobility = extcomms
             .iter()
             .find_map(|ec| ec.as_mac_mobility())

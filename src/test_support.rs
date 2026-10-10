@@ -11,11 +11,12 @@ use std::sync::Arc;
 use prometheus::Encoder;
 use rustbgpd_evpn::{EvpnInstance, EvpnInstanceId, RouteTarget};
 use rustbgpd_rib::AttrSet;
-use rustbgpd_rib::route::{NextHopScope, Route, RouteOrigin};
+use rustbgpd_rib::route::{EvpnRibRoute, NextHopScope, Route, RouteOrigin};
 use rustbgpd_rib::{RouteEvent, RouteEventType};
 use rustbgpd_telemetry::BgpMetrics;
 use rustbgpd_wire::{
-    AsPath, MacAddress, Origin, PathAttribute, Prefix, RouteDistinguisher, RpkiValidation,
+    AsPath, ExtendedCommunity, MacAddress, Origin, PathAttribute, Prefix, RouteDistinguisher,
+    RpkiValidation,
 };
 
 use crate::config::{Config, FibTableConfig, GrpcEnforcementConfig, GrpcRoleConfig};
@@ -157,6 +158,44 @@ pub(crate) fn evpn_instance(
         advertise_svi,
     )
     .unwrap()
+}
+
+/// BGP Encapsulation extended community for VXLAN as encoded on the wire:
+/// type `0x03`, subtype `0x0c`, four reserved zero octets, tunnel type 8.
+pub(crate) const VXLAN_ENCAPSULATION_EXTCOMM: u64 = 0x030c_0000_0000_0008;
+
+/// Encode `route`'s path attributes as they go on the wire, decode them
+/// back, and return the extended communities carried in attribute 16.
+pub(crate) fn wire_extcomms(route: &EvpnRibRoute) -> Vec<u64> {
+    let attrs: Vec<PathAttribute> = route.attributes.iter().cloned().collect();
+    let mut wire = Vec::new();
+    rustbgpd_wire::attribute::encode_path_attributes(&attrs, &mut wire, true, false)
+        .expect("originated attributes encode");
+    rustbgpd_wire::attribute::decode_path_attributes(&wire, true, &[])
+        .expect("originated attributes decode")
+        .into_iter()
+        .filter_map(|attr| match attr {
+            PathAttribute::ExtendedCommunities(values) => Some(values),
+            _ => None,
+        })
+        .flatten()
+        .map(ExtendedCommunity::as_u64)
+        .collect()
+}
+
+/// Assert `route` reaches the wire with exactly one BGP Encapsulation
+/// community, and that it names VXLAN (RFC 8365 §5.1.3).
+pub(crate) fn assert_wire_vxlan_encapsulation(route: &EvpnRibRoute) {
+    let encapsulations: Vec<u64> = wire_extcomms(route)
+        .into_iter()
+        .filter(|raw| raw >> 48 == 0x030c)
+        .collect();
+    assert_eq!(
+        encapsulations,
+        [VXLAN_ENCAPSULATION_EXTCOMM],
+        "{:?} must carry exactly the VXLAN Encapsulation extended community",
+        route.route
+    );
 }
 
 pub(crate) fn fib_table(
