@@ -371,6 +371,7 @@ pub(crate) enum SighupReloadOutcome {
 struct SighupMutationProgress<'a> {
     operation: Option<&'a OwnedRuntimeConfigOperation>,
     accepted_effect: bool,
+    completion: SighupCompletion,
 }
 
 impl<'a> SighupMutationProgress<'a> {
@@ -378,6 +379,7 @@ impl<'a> SighupMutationProgress<'a> {
         let progress = Self {
             operation,
             accepted_effect,
+            completion: SighupCompletion::Complete,
         };
         if accepted_effect && let Some(operation) = operation {
             operation.mark_sighup_accepted_effect();
@@ -2624,7 +2626,6 @@ pub(crate) async fn reload_config_with_tcp_ao(
         }
     }
 
-    let mut completion = SighupCompletion::Complete;
     if let Some(apply) = evpn_runtime_apply {
         let evpn_operation = operation.cloned();
         let attempt = apply
@@ -2665,7 +2666,7 @@ pub(crate) async fn reload_config_with_tcp_ao(
                 {
                     return SighupReloadOutcome::CleanNoEffect(SighupReloadError::Failed(failure));
                 }
-                completion = SighupCompletion::KnownPartial {
+                progress.completion = SighupCompletion::KnownPartial {
                     failures: vec![failure],
                 };
             }
@@ -2729,7 +2730,12 @@ pub(crate) async fn reload_config_with_tcp_ao(
         } else {
             info!("config reloaded — no neighbor / policy / peer-group changes detected");
         }
-        return acknowledged_reload(new_config, desired_snapshot, dialout_targets, completion);
+        return acknowledged_reload(
+            new_config,
+            desired_snapshot,
+            dialout_targets,
+            progress.completion,
+        );
     }
 
     if explain_changed {
@@ -3975,7 +3981,7 @@ pub(crate) async fn reload_config_with_tcp_ao(
         working_config,
         desired_snapshot,
         dialout_targets,
-        completion,
+        progress.completion,
     )
 }
 
@@ -4255,8 +4261,8 @@ async fn reload_generation_route(
     }
 }
 
-/// Record the first known SIGHUP step failure and return its explicit
-/// known-partial authority. Composite finalization must acknowledge the same
+/// Record the terminal known SIGHUP step failure, retaining earlier failures,
+/// and return explicit known-partial authority. Composite finalization must acknowledge the same
 /// peer-manager snapshot, bridge/persister snapshot, tracing projection, and
 /// dial-out targets before the owner can settle.
 ///
@@ -4283,13 +4289,16 @@ fn acknowledge_partial(
         return SighupReloadOutcome::CleanNoEffect(SighupReloadError::Failed(failure));
     }
     let dialout_targets = config::gnmi_dialout_targets(&working_config).unwrap_or_default();
+    let mut failures = match &progress.completion {
+        SighupCompletion::Complete => Vec::new(),
+        SighupCompletion::KnownPartial { failures } => failures.clone(),
+    };
+    failures.push(failure);
     acknowledged_reload(
         working_config,
         Arc::clone(desired_config),
         dialout_targets,
-        SighupCompletion::KnownPartial {
-            failures: vec![failure],
-        },
+        SighupCompletion::KnownPartial { failures },
     )
 }
 
@@ -4364,7 +4373,7 @@ log_format = "json"
         let expected_seams = [
             (concat!("explicit_tier", "_test_toml("), 4),
             (concat!("write_tier", "_test_config("), 25),
-            (concat!("load_tier", "_test_config("), 29),
+            (concat!("load_tier", "_test_config("), 32),
             (concat!("load_tier", "_test_toml("), 9),
             (concat!("tier_authorized_uds", "_test_config("), 4),
             (concat!("assert_tier_authorized", "_test_config("), 13),
@@ -5937,6 +5946,92 @@ local_vtep_ip = "10.0.0.1"
                 rustbgpd_evpn::EvpnRuntimeMutationState::Idle
             );
             peer_mgr.await.unwrap();
+            std::fs::remove_file(path).unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn reload_partial_receipt_preserves_evpn_rejection_before_later_failure() {
+        for reject_fib in [false, true] {
+            let path = unique_temp_path("reload-evpn-partial-receipt");
+            let fib_table = "\n[[fib_tables]]\nname = \"edge\"\ntable_id = 100\nmetric = 200\n";
+            std::fs::write(&path, format!("{EVPN_VNI_100_TOML}{fib_table}")).unwrap();
+            let initial = load_tier_test_config(&path);
+            let (apply, coordinator) = evpn_reload_apply(
+                &initial,
+                Err(
+                    crate::evpn_runtime_converger::DaemonEvpnRuntimeConvergeError::Failed(
+                        rustbgpd_evpn::EvpnRuntimeConvergeError::new("rollback acknowledged"),
+                    ),
+                ),
+            );
+            std::fs::write(
+                &path,
+                format!("{EVPN_VNI_100_200_TOML}{fib_table}")
+                    .replace("asn = 65001", "asn = 65001\nhonor_graceful_shutdown = true")
+                    .replace("metric = 200", "metric = 201"),
+            )
+            .unwrap();
+            let (peer_mgr_tx, mut peer_mgr_rx) = mpsc::channel(8);
+            let (fib_tx, mut fib_rx) = mpsc::channel(8);
+            let actor = tokio::spawn(async move {
+                let Some(PeerManagerCommand::SetHonorGracefulShutdown { reply, .. }) =
+                    peer_mgr_rx.recv().await
+                else {
+                    panic!("expected accepted honor change before FIB failure");
+                };
+                if !reject_fib {
+                    // Close admission before acknowledging the preceding effect.
+                    fib_rx.close();
+                }
+                reply.send(Ok(())).unwrap();
+                if reject_fib {
+                    let Some(FibRuntimeCommand::OwnedReplaceTables { reply, .. }) =
+                        fib_rx.recv().await
+                    else {
+                        panic!("expected table change after honor change");
+                    };
+                    reply
+                        .send(OwnedFibReplaceOutcome::RejectedNoEffect(
+                            "FIB rejected without effect".into(),
+                        ))
+                        .unwrap();
+                }
+            });
+            let authority = reload_config(
+                path.to_str().unwrap(),
+                &initial,
+                initial.global.telemetry.grpc_tcp.as_ref(),
+                initial.global.telemetry.grpc_uds.as_ref(),
+                &peer_mgr_tx,
+                Some(&fib_tx),
+                Some(&apply),
+            )
+            .await
+            .expect("accepted honor change must retain partial authority");
+            actor.await.unwrap();
+            assert_eq!(authority.runtime.evpn_instances, initial.evpn_instances);
+            assert!(authority.runtime.global.honor_graceful_shutdown);
+            assert_eq!(authority.runtime.fib_tables, initial.fib_tables);
+            let SighupCompletion::KnownPartial { failures } = &authority.completion else {
+                panic!("expected partial receipt");
+            };
+            assert_eq!(
+                failures
+                    .iter()
+                    .map(|failure| failure.bucket)
+                    .collect::<Vec<_>>(),
+                vec!["evpn_runtime.apply", "fib_tables.apply"],
+            );
+            assert!(matches!(failures[0].error, ReloadStepError::Rejected(_)));
+            assert_eq!(
+                matches!(failures[1].error, ReloadStepError::Rejected(_)),
+                reject_fib,
+            );
+            assert_eq!(
+                coordinator.lock().unwrap().model().mutation_state(),
+                rustbgpd_evpn::EvpnRuntimeMutationState::Idle,
+            );
             std::fs::remove_file(path).unwrap();
         }
     }
