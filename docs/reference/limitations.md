@@ -100,8 +100,9 @@ Shipped and interop-tested:
   suppression, aliasing ECMP via FDB nexthop groups, and all-active Type 5
   receive. Preference-based DF election can opt into RFC 9785 Don't-Preempt
   (`df_dont_preempt`), and `esi = "auto-lacp"` derives a Type 1 ESI from a
-  Linux bond's LACP partner; a first `[[ethernet_segments]]` entry still
-  needs a restart, and Type 2 (STP) ESI derivation is not implemented. See
+  Linux bond's LACP partner. A daemon started with no `[[ethernet_segments]]`
+  takes its first segment, explicit-ESI or `auto-lacp`, live through SIGHUP or
+  `ApplyEvpnRuntime`. Type 2 (STP) ESI derivation is not implemented. See
   [Ethernet Segments](configuration.md#auto-derived-esi-lacp-type-1).
 - Duplicate-MAC detection with quarantine, bounded key-only status listing,
   and manual clear. The listing intentionally exposes no detector clocks or
