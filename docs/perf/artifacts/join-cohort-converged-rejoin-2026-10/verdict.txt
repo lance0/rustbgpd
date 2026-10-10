@@ -1,0 +1,18 @@
+J1 converged rejoin, 700 peers x 400400 prefixes, 3 reps x 3 rounds per arm and K
+candidate: pr_head	1e862f306df1153db429fe8eec92a69d2db90892
+candidate: cand_commit	2a9cd95eb11a3431b9ac87f45a4e4ea4773e1871
+candidate: candidate_note J1 candidate at PR head 1e862f306df1153db429fe8eec92a69d2db90892 (unchanged since preparation)
+candidate: pr_head_at_launch 1e862f306df1153db429fe8eec92a69d2db90892 (matches build)
+candidate: cand 2a9cd95eb11a3431b9ac87f45a4e4ea4773e1871 tree a49dabbaf7cabf963411c7613ac3e2ca64877c5a parents 1d0e4e155d0cf8e42ab007c399067540855c02df 1e862f306df1153db429fe8eec92a69d2db90892
+arm     K   n     rejoin_max med [min-max] s  rejoin_p50 med s  gap med ms  gap max ms  ready rss med MiB
+ctl     1   9      0.183 [0.180-0.187]                 0.183       122.7       127.8    108         426
+cand    1   9      0.164 [0.161-0.170]                 0.164       106.7       108.8    108         426
+ctl    50   9      5.972 [5.905-6.040]                 3.159       129.6       131.7    171         416
+cand   50   9      0.282 [0.250-0.297]                 0.245       119.0       126.1    117         436
+B1 PASS: K=50 rejoin_max: cand median 0.282s vs ctl 5.972s; cand max 0.297s < ctl min 5.905s required (disjoint)
+B2 PASS: K=1 rejoin_max: cand median 0.164s <= 0.231s
+B3 PASS: survivor max gap: K=1 cand median 106.7 <= 184.9 ms and max 108.8 <= 240.6 ms; K=50 cand median 119.0 <= 192.5 ms and max 126.1 <= 244.8 ms
+B4 PASS: readiness: 504 samples over 36 valid rounds; the harness fails a run on any non-200 or >250 ms /readyz, so harness rc 0 = zero failures
+info: ctl K=50/K=1 median rejoin_max ratio 32.71 (original kill bar 3x, informational)
+info: cand K=50/K=1 median rejoin_max ratio 1.72 (original kill bar 3x, informational)
+J1 VERDICT: PASS

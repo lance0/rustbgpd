@@ -1,0 +1,39 @@
+2026-10-10T10:34:28Z START j1 peers=700 prefixes=400400 ks='1 50' repeats=3 rounds=3 quiet=1 load=1.08 1.45 2.12
+file-descriptor headroom: nofile soft 65536 (hard 1048576)
+host quiet: retained two accepted samples in out/j1/quiet/ctl-k1-rep1.tsv
+2026-10-10T10:34:58Z cell ctl-k1-rep1 start load=1.05
+2026-10-10T10:36:40Z cell ctl-k1-rep1 harness_rc=0 daemon_rc=0
+host quiet: retained two accepted samples in out/j1/quiet/cand-k1-rep1.tsv
+2026-10-10T10:37:10Z cell cand-k1-rep1 start load=1.28
+2026-10-10T10:38:52Z cell cand-k1-rep1 harness_rc=0 daemon_rc=0
+host quiet: retained two accepted samples in out/j1/quiet/cand-k50-rep1.tsv
+2026-10-10T10:39:22Z cell cand-k50-rep1 start load=1.56
+2026-10-10T10:41:07Z cell cand-k50-rep1 harness_rc=0 daemon_rc=0
+host quiet: retained two accepted samples in out/j1/quiet/ctl-k50-rep1.tsv
+2026-10-10T10:42:37Z cell ctl-k50-rep1 start load=1.60
+2026-10-10T10:44:39Z cell ctl-k50-rep1 harness_rc=0 daemon_rc=0
+host quiet: retained two accepted samples in out/j1/quiet/ctl-k50-rep2.tsv
+2026-10-10T10:45:40Z cell ctl-k50-rep2 start load=1.54
+2026-10-10T10:47:42Z cell ctl-k50-rep2 harness_rc=0 daemon_rc=0
+host quiet: retained two accepted samples in out/j1/quiet/cand-k50-rep2.tsv
+2026-10-10T10:49:12Z cell cand-k50-rep2 start load=1.46
+2026-10-10T10:50:57Z cell cand-k50-rep2 harness_rc=0 daemon_rc=0
+host quiet: retained two accepted samples in out/j1/quiet/cand-k1-rep2.tsv
+2026-10-10T10:51:57Z cell cand-k1-rep2 start load=1.39
+2026-10-10T10:53:39Z cell cand-k1-rep2 harness_rc=0 daemon_rc=0
+host quiet: retained two accepted samples in out/j1/quiet/ctl-k1-rep2.tsv
+2026-10-10T10:54:39Z cell ctl-k1-rep2 start load=1.57
+2026-10-10T10:56:20Z cell ctl-k1-rep2 harness_rc=0 daemon_rc=0
+host quiet: retained two accepted samples in out/j1/quiet/ctl-k1-rep3.tsv
+2026-10-10T10:56:50Z cell ctl-k1-rep3 start load=1.61
+2026-10-10T10:58:33Z cell ctl-k1-rep3 harness_rc=0 daemon_rc=0
+host quiet: retained two accepted samples in out/j1/quiet/cand-k1-rep3.tsv
+2026-10-10T10:59:03Z cell cand-k1-rep3 start load=1.51
+2026-10-10T11:00:45Z cell cand-k1-rep3 harness_rc=0 daemon_rc=0
+host quiet: retained two accepted samples in out/j1/quiet/cand-k50-rep3.tsv
+2026-10-10T11:01:15Z cell cand-k50-rep3 start load=1.43
+2026-10-10T11:02:59Z cell cand-k50-rep3 harness_rc=0 daemon_rc=0
+host quiet: retained two accepted samples in out/j1/quiet/ctl-k50-rep3.tsv
+2026-10-10T11:04:29Z cell ctl-k50-rep3 start load=1.38
+2026-10-10T11:06:32Z cell ctl-k50-rep3 harness_rc=0 daemon_rc=0
+2026-10-10T11:06:32Z END j1 analyzer_rc=0 rc=0 
