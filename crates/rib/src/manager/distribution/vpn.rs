@@ -330,6 +330,10 @@ impl RibManager {
                             rustbgpd_policy::apply_modifications(attrs, &result.modifications)
                         });
                         if let Some(rustbgpd_policy::NextHopAction::Specific(addr)) = nh {
+                            if addr != modified.next_hop {
+                                modified.link_local_next_hop = None;
+                                modified.next_hop_scope = None;
+                            }
                             modified.next_hop = addr;
                         }
                         checkpoint.borrow_mut()();
@@ -710,6 +714,10 @@ impl RibManager {
                     rustbgpd_policy::apply_modifications(attrs, &result.modifications)
                 });
                 if let Some(rustbgpd_policy::NextHopAction::Specific(addr)) = nh {
+                    if addr != modified.next_hop {
+                        modified.link_local_next_hop = None;
+                        modified.next_hop_scope = None;
+                    }
                     modified.next_hop = addr;
                 }
                 checkpoint.borrow_mut()();
