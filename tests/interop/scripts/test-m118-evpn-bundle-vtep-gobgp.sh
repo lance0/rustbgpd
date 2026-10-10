@@ -103,7 +103,8 @@ gobgp global rib add -a evpn a-d esi arbitrary 01:02:03:04:05:06:07:08:09 \
     etag 10 label 10010 rd 10.0.118.2:304 rt 65000:100 encap vxlan nexthop 10.0.118.2
 
 # Bundle rows cannot link an IP-VRF. An independent VRF tests the Type 5 gate.
-gobgp global rib add -a evpn prefix 203.0.118.0/24 etag 10 label 10500 \
+# GoBGP 4.10.0 rejects a Type 5 without gw; 0.0.0.0 encodes the absent gateway.
+gobgp global rib add -a evpn prefix 203.0.118.0/24 gw 0.0.0.0 etag 10 label 10500 \
     rd 10.0.118.2:500 rt 65000:500 encap vxlan nexthop 10.0.118.2 \
     router-mac 02:00:00:01:18:52
 qualify "unsupported routes affect only the exact per-member and Type 5 drop reasons" negative_drops
