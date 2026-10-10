@@ -187,6 +187,15 @@ route arrives. It writes `cells.csv` and `summary.txt` with the RIB actor's
 a tiny shape as a pipeline check. The table is VRP only: StayRTR speaks RTR
 version 1 and serves no ASPA records.
 
+Graceful-restart helper rejoin changes have a daemon-level A/B campaign:
+`DAEMON_CPUS=<list> ENGINE_CPUS=<list> just bench-converged-rejoin <out-dir> <base> <head>`
+runs the reloadstall `--converged-rejoin` flapstorm at 700 peers × 400,400
+prefixes, K=1 and K=50, three alternating repetitions of three rounds per
+arm. Its bars are fixed in `campaign.json` before the first cell, and any
+incomplete or malformed cell makes the verdict INVALID; `SMOKE=1` and
+`DRY_RUN=1` check the pipeline without measuring. See
+[the reloadstall README](../../bench/scale/reloadstall/README.md#converged-rejoin-ab-campaign).
+
 The fixture helper can also prepare a dual-stack VRP table without running a
 cell. `python3 bench/scale/rpki-cell/rpki_cell.py vrps 700 400400 500000
 base.json 200200` assigns 200,200 IPv4 /24s and 200,200 IPv6 /48s to the

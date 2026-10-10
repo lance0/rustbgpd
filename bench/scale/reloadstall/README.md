@@ -750,3 +750,65 @@ comparable. Run the focused checks with:
 ```bash
 python3 -m unittest discover -s bench/scale/reloadstall -p test_policy_stats_cell.py
 ```
+
+## Converged-rejoin A/B campaign
+
+`run-converged-rejoin.sh` compares two commits on the `--converged-rejoin`
+flapstorm above: the disjoint 700-peer × 400,400-prefix IPv4 route server,
+K peers flapped per round under GR helper, at a low and a high K. It builds
+each arm's daemon at its ref (`cargo build --release --locked -p rustbgpd
+--bin rustbgpd`) and this checkout's `reloadstall` and generator, holds the
+shared host lock throughout, and runs one fresh daemon per cell behind the
+quiet-host gate. Odd repetitions run base-Klo, head-Klo, head-Khi, base-Khi;
+even repetitions run the reverse.
+
+```bash
+DAEMON_CPUS=12-31 ENGINE_CPUS=40-63 just bench-converged-rejoin "$(mktemp -d)/cr" <base> <head>
+SMOKE=1 DAEMON_CPUS=12-31 ENGINE_CPUS=40-63 just bench-converged-rejoin "$(mktemp -d)/cr" <base> <head>
+DRY_RUN=1 DAEMON_CPUS=12-31 ENGINE_CPUS=40-63 just bench-converged-rejoin "$(mktemp -d)/cr" <base> <head>
+```
+
+The defaults are `KS="1 50" REPEATS=3 ROUNDS=3`. `SMOKE=1` is a pipeline
+check at 16 peers × 1,600 prefixes, not a measurement. `DRY_RUN=1` prints the
+arms, the campaign file and every command without locking or building.
+
+Before the first cell, `converged_rejoin.py init` fixes the shape and the bars
+in `OUT_DIR/campaign.json`, and the driver hashes that file as soon as init
+writes it, before the builds, and records the sha256 in `manifest.txt`. The verdict reads no other bars, and a
+`campaign.json` edited after init no longer matches the recorded digest, so
+the verdict is INVALID rather than a different PASS or FAIL. The default bars:
+
+- **B1:** at the high K, head's `rejoin_max_s` median is below base's and its
+  range is disjoint below base's.
+- **B2:** at the low K, head's median is at most base's × 1.10 + 30 ms.
+- **B3:** at each K, head's `survivor_maxgap_ms` median is at most base's
+  × 1.10 + 50 ms, and its maximum at most base's × 1.10 + 100 ms.
+
+To change them, point `ACCEPTANCE` at a JSON file written before the run, for
+example `{"high_k": "not_worse"}` for a change that must not slow the high K
+rather than speed it up. An unknown key is refused.
+
+The verdict is PASS, FAIL or INVALID (exit 0, 1 or 4). It fails closed:
+INVALID results from any of the following:
+
+- a malformed `campaign.json`, or one whose sha256 differs from
+  `manifest.txt`'s `campaign_sha256` (or that line is missing);
+- a missing cell, or a `runs.tsv` or `schedule.txt` that differs from the
+  campaign's schedule;
+- a non-zero harness or daemon exit;
+- a quiet-host gate that is not two accepted samples: quiet, no competitors,
+  load1 below 2.0, performance governors, unchanged swap, and at least 30 s
+  apart;
+- a `converged_rejoin_csv` row with the wrong fleet, K, prefix count,
+  session count, decode errors, zero readiness samples or malformed timings.
+
+A `SMOKE=1` campaign gets every validity check but no bars, so its verdict
+is SMOKE (exit 0) or INVALID. The harness exits non-zero on any
+`/readyz` miss, so a readiness regression is INVALID rather than FAIL. Re-run
+the analyzer with
+`python3 bench/scale/reloadstall/converged_rejoin.py analyze OUT_DIR`, and
+the focused checks with:
+
+```bash
+python3 -m unittest -v bench/scale/reloadstall/test_converged_rejoin.py
+```

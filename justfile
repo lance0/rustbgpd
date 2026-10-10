@@ -322,6 +322,7 @@ bench-list:
       bench-headline                bench/scale/headline/run-campaign.sh (multi-arm headline campaign)
       bench-headline-summary        bench/scale/headline/summarize.py (extraction only)
       bench-rpki-cell               bench/scale/rpki-cell/run-rpki-cell.sh (A/B with a VRP table loaded)
+      bench-converged-rejoin        bench/scale/reloadstall/run-converged-rejoin.sh (GR-helper rejoin A/B)
       gate-contract                 bench/smoke-benches.sh (smoke only, no measurement)
 
     Drivers without a recipe (run directly; see their headers):
@@ -547,6 +548,13 @@ bench-rpki-cell out_dir base head:
     #!/usr/bin/env bash
     set -euo pipefail
     exec bash bench/scale/rpki-cell/run-rpki-cell.sh "$@"
+
+# Measure the reloadstall converged-rejoin (GR helper) flapstorm, BASE against HEAD at a low and a high K, alternating arms, into OUT_DIR (a new directory), and judge it against bars fixed before the first cell; DAEMON_CPUS and ENGINE_CPUS are required, and SMOKE=1, DRY_RUN=1, KS, REPEATS, ACCEPTANCE and the other knobs are in bench/scale/reloadstall/run-converged-rejoin.sh.
+[positional-arguments]
+bench-converged-rejoin out_dir base head:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    exec bash bench/scale/reloadstall/run-converged-rejoin.sh "$@"
 
 # Re-extract summary.csv, establishment-span.csv and report.md from a headline campaign or receipt bundle without running anything (`--out DIR` for a bundle, `--exclude GLOB` to drop legs).
 [positional-arguments]
