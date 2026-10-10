@@ -153,6 +153,12 @@ impl EvpnL3OriginatorRuntimeControl {
         self.ip_vrfs_tx.send_replace(ip_vrfs);
         true
     }
+
+    /// Rollback republish; see [`crate::evpn_runtime_converger::restore_watch`].
+    #[must_use]
+    pub(crate) fn restore_ip_vrfs(&self, ip_vrfs: Arc<IpVrfTable>) -> bool {
+        crate::evpn_runtime_converger::restore_watch(&self.ip_vrfs_tx, ip_vrfs)
+    }
 }
 
 pub struct EvpnL3OriginatorHandle {

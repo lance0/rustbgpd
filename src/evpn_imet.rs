@@ -45,7 +45,7 @@
 //! - RFC 8365 §5.1.3 — VXLAN encap convention (label field = raw
 //!   24-bit VNI; the §5 MPLS-style high-20-bits shift does not apply)
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::net::IpAddr;
 use std::time::Instant;
 
@@ -129,6 +129,11 @@ pub enum ImetWithdrawOutcome {
 #[derive(Debug, Default)]
 pub struct EvpnImetController {
     originated: BTreeMap<EvpnInstanceId, EvpnRouteKey>,
+    /// Tracked VNIs whose last inject reply was dropped: the route may or
+    /// may not be installed. The key stays tracked so a withdraw covers it,
+    /// but a later originate re-injects instead of reporting
+    /// `AlreadyOriginated`.
+    unacknowledged: BTreeSet<EvpnInstanceId>,
 }
 
 impl EvpnImetController {
@@ -156,13 +161,18 @@ impl EvpnImetController {
         self.originated.get(&vni).copied()
     }
 
-    /// Originate Type 3 IMET for one instance unless it is already present.
+    /// Originate Type 3 IMET for one instance unless it is already present
+    /// and acknowledged. A tracked VNI whose inject reply was dropped is
+    /// re-injected (the inject is idempotent per key), so
+    /// `AlreadyOriginated` always means an acknowledged route.
     pub async fn originate_instance(
         &mut self,
         instance: EvpnInstance,
         rib_tx: &mpsc::Sender<RibUpdate>,
     ) -> ImetOriginateOutcome {
-        if let Some(key) = self.originated_key(instance.id) {
+        if let Some(key) = self.originated_key(instance.id)
+            && !self.unacknowledged.contains(&instance.id)
+        {
             debug!(
                 ?key,
                 vni = instance.id.as_u32(),
@@ -175,11 +185,19 @@ impl EvpnImetController {
         debug_assert!(matches!(route.route, EvpnRoute::Imet(_)));
         let key = route.key();
         let outcome = inject_imet_route(route, instance.id, rib_tx).await;
-        if matches!(
-            outcome,
-            ImetOriginateOutcome::Originated { .. } | ImetOriginateOutcome::ReplyDropped { .. }
-        ) {
-            self.originated.insert(instance.id, key);
+        match outcome {
+            ImetOriginateOutcome::Originated { .. } => {
+                self.originated.insert(instance.id, key);
+                self.unacknowledged.remove(&instance.id);
+            }
+            ImetOriginateOutcome::ReplyDropped { .. } => {
+                self.originated.insert(instance.id, key);
+                self.unacknowledged.insert(instance.id);
+            }
+            // An unacknowledged entry stays tracked and unacknowledged.
+            ImetOriginateOutcome::AlreadyOriginated { .. }
+            | ImetOriginateOutcome::RibUnavailable { .. }
+            | ImetOriginateOutcome::Rejected { .. } => {}
         }
         outcome
     }
@@ -198,6 +216,7 @@ impl EvpnImetController {
         let outcome = withdraw_imet_key(key, rib_tx).await;
         if matches!(outcome, ImetWithdrawOutcome::Withdrawn { .. }) {
             self.originated.remove(&vni);
+            self.unacknowledged.remove(&vni);
         }
         outcome
     }
@@ -615,6 +634,54 @@ mod tests {
 
         assert!(matches!(outcome, ImetOriginateOutcome::Rejected { .. }));
         assert!(controller.is_empty());
+    }
+
+    /// A dropped inject reply leaves the key tracked but unacknowledged: the
+    /// next originate re-injects instead of reporting `AlreadyOriginated`,
+    /// which callers read as an acknowledged route.
+    #[tokio::test]
+    async fn controller_reinjects_an_unacknowledged_key_instead_of_already_originated() {
+        let (rib_tx, mut rib_rx) = mpsc::channel::<RibUpdate>(8);
+        let responder = tokio::spawn(async move {
+            let mut injects = 0;
+            while let Some(msg) = rib_rx.recv().await {
+                if let RibUpdate::InjectEvpn { reply, .. } = msg {
+                    injects += 1;
+                    // Drop the first reply, acknowledge the rest.
+                    if injects > 1 {
+                        let _ = reply.send(Ok(()));
+                    }
+                }
+            }
+            injects
+        });
+
+        let mut controller = EvpnImetController::new();
+        let ImetOriginateOutcome::ReplyDropped { key } = controller
+            .originate_instance(local_instance(100), &rib_tx)
+            .await
+        else {
+            panic!("expected reply-dropped originate");
+        };
+        assert_eq!(controller.originated_key(vni(100)), Some(key));
+
+        assert_eq!(
+            controller
+                .originate_instance(local_instance(100), &rib_tx)
+                .await,
+            ImetOriginateOutcome::Originated { key },
+            "an unacknowledged key is re-injected"
+        );
+        assert_eq!(
+            controller
+                .originate_instance(local_instance(100), &rib_tx)
+                .await,
+            ImetOriginateOutcome::AlreadyOriginated { key },
+            "an acknowledged key short-circuits"
+        );
+        assert_eq!(controller.len(), 1);
+        drop(rib_tx);
+        assert_eq!(responder.await.unwrap(), 2);
     }
 
     #[tokio::test]

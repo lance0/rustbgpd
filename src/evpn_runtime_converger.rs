@@ -46,10 +46,24 @@ pub(crate) fn evpn_vni_to_esi_map(
     Arc::new(map)
 }
 
+/// Why a routed converge failed, classified by what it left behind.
+/// Only the no-effect classes may surface as `FAILED_PRECONDITION`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum DaemonEvpnRuntimeConvergeError {
+    /// Rejected before any side effect, as a pure plan.
     Unsupported(String),
+    /// The failing step had no effect and every earlier step was rolled
+    /// back to the committed model: no remaining divergence. Earlier
+    /// publishes may have been observable before the rollback undid them
+    /// (an acknowledged IMET originate followed by its compensating
+    /// withdraw, for example), so a retry can repeat those transient changes.
     Failed(rustbgpd_evpn::EvpnRuntimeConvergeError),
+    /// An effect of this converge was not restored: a rollback step
+    /// failed, or the failing step may have taken effect without an
+    /// acknowledgement. The live runtime diverges from the committed
+    /// generation (the settlement contract's known divergence) and is
+    /// surfaced as `INTERNAL`.
+    KnownDivergence(rustbgpd_evpn::EvpnRuntimeConvergeError),
     /// Coordinated shutdown closed the segment actor slot after the
     /// converge published to its actors. Those publishes are not
     /// restored: shutdown drains the same actors next, so a republish
@@ -67,10 +81,25 @@ impl DaemonEvpnRuntimeConvergeError {
         Self::Failed(rustbgpd_evpn::EvpnRuntimeConvergeError::new(message))
     }
 
+    /// A step that failed after earlier side effects: `Failed` when the
+    /// rollback restored the committed model, otherwise `KnownDivergence`
+    /// with `escalation` appended to the step's message.
+    fn step_failure(restored: bool, step_message: &str, escalation: &str) -> Self {
+        if restored {
+            Self::failed(step_message)
+        } else {
+            Self::KnownDivergence(rustbgpd_evpn::EvpnRuntimeConvergeError::new(format!(
+                "{step_message}; {escalation}"
+            )))
+        }
+    }
+
     pub(crate) fn message(&self) -> &str {
         match self {
             Self::Unsupported(message) => message,
-            Self::Failed(source) | Self::InterruptedByShutdown(source) => source.message(),
+            Self::Failed(source)
+            | Self::KnownDivergence(source)
+            | Self::InterruptedByShutdown(source) => source.message(),
         }
     }
 
@@ -79,21 +108,49 @@ impl DaemonEvpnRuntimeConvergeError {
     fn side_effect_source(&self) -> Option<rustbgpd_evpn::EvpnRuntimeConvergeError> {
         match self {
             Self::Unsupported(_) => None,
-            Self::Failed(source) | Self::InterruptedByShutdown(source) => Some(source.clone()),
+            Self::Failed(source)
+            | Self::KnownDivergence(source)
+            | Self::InterruptedByShutdown(source) => Some(source.clone()),
         }
     }
 
-    /// The apply error for this converge failure. A converge cut off by
-    /// shutdown left its publishes in place, so it cannot use the
-    /// no-effect `FAILED_PRECONDITION`.
+    /// The apply error for this converge failure. Only the no-effect and
+    /// fully compensated classes may use `FAILED_PRECONDITION`.
     fn apply_error(&self, message: String) -> GrpcEvpnRuntimeApplyError {
         match self {
+            Self::KnownDivergence(_) => GrpcEvpnRuntimeApplyError::Internal(message),
             Self::InterruptedByShutdown(_) => GrpcEvpnRuntimeApplyError::Unavailable(message),
             Self::Unsupported(_) | Self::Failed(_) => {
                 GrpcEvpnRuntimeApplyError::FailedPrecondition(message)
             }
         }
     }
+}
+
+/// Republish `value` as a rollback step. The verdict is taken after the
+/// publish: a receiver still attached then observes `value`. Once none is,
+/// whether it closed before or during the publish, the rollback reached
+/// nobody and holds only when the replaced value already equalled `value`,
+/// i.e. this converge never published anything else to it.
+#[must_use]
+pub(crate) fn restore_watch<T: PartialEq>(
+    tx: &tokio::sync::watch::Sender<Arc<T>>,
+    value: Arc<T>,
+) -> bool {
+    restore_watch_with(tx, value, || {})
+}
+
+/// [`restore_watch`] with `after_publish` run between the publish and the
+/// verdict, so a test can close the channel inside that window.
+fn restore_watch_with<T: PartialEq>(
+    tx: &tokio::sync::watch::Sender<Arc<T>>,
+    value: Arc<T>,
+    after_publish: impl FnOnce(),
+) -> bool {
+    let committed = Arc::clone(&value);
+    let replaced = tx.send_replace(value);
+    after_publish();
+    !tx.is_closed() || *replaced == *committed
 }
 
 impl From<SupportedPlanShapeError> for DaemonEvpnRuntimeConvergeError {
@@ -620,12 +677,17 @@ impl EvpnRuntimeReloadApply {
             self.forwarding_state.as_deref(),
         )
         .await;
-        // Once shutdown closed the segment slot, keep the seed: a converge
-        // it cut off left the candidate segments published, and undraining
-        // them would let the still-running actor originate an uncommitted
-        // segment before the teardown drains it.
+        // Undo the seed only when the apply provably left the committed
+        // model in place (a no-effect status). A converge that left
+        // candidate segments published (known divergence, or cut off once
+        // shutdown closed the segment slot) keeps it: undraining them would
+        // let a live actor originate an uncommitted segment.
         if let Some(prior) = seeded
-            && !result.as_ref().is_ok_and(apply_commits)
+            && matches!(
+                result,
+                Err(GrpcEvpnRuntimeApplyError::InvalidArgument(_)
+                    | GrpcEvpnRuntimeApplyError::FailedPrecondition(_))
+            )
             && !self.converger.segment_closed_for_shutdown()
         {
             self.converger.restore_link_drain(prior);
@@ -826,27 +888,29 @@ impl EvpnRuntimeActorConverger {
             .await
             .originate_instance(instance, &self.rib_tx)
             .await;
-        if !matches!(
-            imet_outcome,
-            evpn_imet::ImetOriginateOutcome::Originated { .. }
-                | evpn_imet::ImetOriginateOutcome::AlreadyOriginated { .. }
-                | evpn_imet::ImetOriginateOutcome::ReplyDropped { .. }
-        ) {
-            return Err(DaemonEvpnRuntimeConvergeError::failed(format!(
-                "EVPN IMET origination failed for L2VNI {added_vni}: {imet_outcome:?}"
-            )));
+        if !imet_originate_acknowledged(&imet_outcome) {
+            // A dropped reply leaves the key tracked; withdraw it so a retry
+            // re-injects instead of short-circuiting on `AlreadyOriginated`.
+            let restored = self.rollback_imet(added_vni).await;
+            return Err(runtime_step_failure(
+                restored && imet_originate_had_no_effect(&imet_outcome),
+                &format!("EVPN IMET origination failed for L2VNI {added_vni}: {imet_outcome:?}"),
+            ));
         }
 
         if ip_vrf_metadata_changed && !dataplane.replace_ip_vrfs(candidate_ip_vrfs) {
-            self.rollback_imet(added_vni).await;
-            return Err(DaemonEvpnRuntimeConvergeError::failed(
+            let restored = self.rollback_imet(added_vni).await;
+            return Err(runtime_step_failure(
+                restored,
                 "EVPN dataplane IP-VRF runtime model publish failed",
             ));
         }
         if !dataplane.replace_evpn_instances(candidate_instances.clone()) {
-            Self::rollback_l2vni_dataplane(dataplane, current, ip_vrf_metadata_changed);
-            self.rollback_imet(added_vni).await;
-            return Err(DaemonEvpnRuntimeConvergeError::failed(
+            let mut restored =
+                Self::rollback_l2vni_dataplane(dataplane, current, ip_vrf_metadata_changed);
+            restored &= self.rollback_imet(added_vni).await;
+            return Err(runtime_step_failure(
+                restored,
                 "EVPN dataplane runtime model publish failed",
             ));
         }
@@ -855,29 +919,33 @@ impl EvpnRuntimeActorConverger {
             candidate_vni_to_esi,
             self.es_drain.snapshot(),
         ) {
-            Self::rollback_l2vni_dataplane(dataplane, current, ip_vrf_metadata_changed);
-            self.rollback_imet(added_vni).await;
-            return Err(DaemonEvpnRuntimeConvergeError::failed(
+            let mut restored =
+                Self::rollback_l2vni_dataplane(dataplane, current, ip_vrf_metadata_changed);
+            restored &= self.rollback_imet(added_vni).await;
+            return Err(runtime_step_failure(
+                restored,
                 "EVPN Type 2 originator runtime model publish failed",
             ));
         }
         if let Some(svi) = svi
             && !svi.replace_evpn_instances(candidate_instances.clone())
         {
-            Self::rollback_l2vni_dataplane(dataplane, current, ip_vrf_metadata_changed);
-            let current_instances = Arc::new(current.instances().clone());
-            let _ = originator.replace_runtime_model(
-                current_instances,
-                evpn_vni_to_esi_map(current.ethernet_segments()),
-                self.es_drain.snapshot(),
+            let mut restored = self.rollback_l2vni_runtime_models(
+                dataplane,
+                Some(originator),
+                None,
+                None,
+                current,
+                ip_vrf_metadata_changed,
             );
-            self.rollback_imet(added_vni).await;
-            return Err(DaemonEvpnRuntimeConvergeError::failed(
+            restored &= self.rollback_imet(added_vni).await;
+            return Err(runtime_step_failure(
+                restored,
                 "EVPN SVI runtime model publish failed",
             ));
         }
         if let Err(err) = Self::publish_segment_instances(segment, candidate_instances) {
-            self.rollback_l2vni_runtime_models(
+            let mut restored = self.rollback_l2vni_runtime_models(
                 dataplane,
                 Some(originator),
                 svi,
@@ -885,22 +953,26 @@ impl EvpnRuntimeActorConverger {
                 current,
                 ip_vrf_metadata_changed,
             );
-            self.rollback_imet(added_vni).await;
-            return Err(err);
+            restored &= self.rollback_imet(added_vni).await;
+            return Err(runtime_step_failure(restored, err.message()));
         }
 
         Ok(())
     }
 
+    /// Restore the dataplane's committed snapshots. Returns whether both
+    /// hold the committed model.
+    #[must_use]
     fn rollback_l2vni_dataplane(
         dataplane: &evpn_dataplane::EvpnDataplaneRuntimeControl,
         current: &rustbgpd_evpn::EvpnRuntimeModel,
         rollback_ip_vrf_metadata: bool,
-    ) {
-        let _ = dataplane.replace_evpn_instances(Arc::new(current.instances().clone()));
+    ) -> bool {
+        let mut restored = dataplane.restore_evpn_instances(Arc::new(current.instances().clone()));
         if rollback_ip_vrf_metadata {
-            let _ = dataplane.replace_ip_vrfs(Arc::new(current.ip_vrfs().clone()));
+            restored &= dataplane.restore_ip_vrfs(Arc::new(current.ip_vrfs().clone()));
         }
+        restored
     }
 
     fn require_l2vni_dataplane(
@@ -1211,6 +1283,7 @@ impl EvpnRuntimeActorConverger {
         })
     }
 
+    #[must_use]
     fn rollback_l2vni_runtime_models(
         &self,
         dataplane: &evpn_dataplane::EvpnDataplaneRuntimeControl,
@@ -1219,22 +1292,24 @@ impl EvpnRuntimeActorConverger {
         segment: Option<&evpn_segment::EvpnSegmentRuntimeControl>,
         current: &rustbgpd_evpn::EvpnRuntimeModel,
         rollback_ip_vrf_metadata: bool,
-    ) {
-        Self::rollback_l2vni_dataplane(dataplane, current, rollback_ip_vrf_metadata);
+    ) -> bool {
+        let mut restored =
+            Self::rollback_l2vni_dataplane(dataplane, current, rollback_ip_vrf_metadata);
         let current_instances = Arc::new(current.instances().clone());
         if let Some(originator) = originator {
-            let _ = originator.replace_runtime_model(
+            restored &= originator.restore_runtime_model(
                 current_instances.clone(),
                 evpn_vni_to_esi_map(current.ethernet_segments()),
                 self.es_drain.snapshot(),
             );
         }
         if let Some(svi) = svi {
-            let _ = svi.replace_evpn_instances(current_instances.clone());
+            restored &= svi.restore_evpn_instances(current_instances.clone());
         }
         if let Some(segment) = segment {
-            let _ = segment.replace_instances(current_instances);
+            restored &= segment.restore_instances(current_instances);
         }
+        restored
     }
 
     fn open_segment_runtime_control(
@@ -1326,24 +1401,21 @@ impl EvpnRuntimeActorConverger {
                 .await
                 .originate_instance(instance.clone(), &self.rib_tx)
                 .await;
-            if !matches!(
-                outcome,
-                evpn_imet::ImetOriginateOutcome::Originated { .. }
-                    | evpn_imet::ImetOriginateOutcome::AlreadyOriginated { .. }
-                    | evpn_imet::ImetOriginateOutcome::ReplyDropped { .. }
-            ) {
+            // Recorded before the check so the rollback also withdraws a
+            // dropped-reply key, which the controller tracks.
+            originated_instances.push(instance.clone());
+            if !imet_originate_acknowledged(&outcome) {
                 let restored = self
                     .rollback_additive_build_up(current, &originated_instances)
                     .await;
                 return Err(additive_build_failure(
-                    restored,
+                    restored && imet_originate_had_no_effect(&outcome),
                     &format!(
                         "EVPN IMET origination failed for L2VNI {}: {outcome:?}",
                         instance.id
                     ),
                 ));
             }
-            originated_instances.push(instance.clone());
         }
 
         if let Some(dataplane) = dataplane {
@@ -1442,25 +1514,25 @@ impl EvpnRuntimeActorConverger {
 
         let mut restored = true;
         if let Some(dataplane) = self.dataplane.as_ref() {
-            restored &= dataplane.replace_ip_vrfs(current_ip_vrfs.clone());
-            restored &= dataplane.replace_evpn_instances(current_instances.clone());
+            restored &= dataplane.restore_ip_vrfs(current_ip_vrfs.clone());
+            restored &= dataplane.restore_evpn_instances(current_instances.clone());
         }
         if let Some(originator) = self.originator.as_ref() {
-            restored &= originator.replace_runtime_model(
+            restored &= originator.restore_runtime_model(
                 current_instances.clone(),
                 current_vni_to_esi,
                 self.es_drain.snapshot(),
             );
         }
         if let Some(svi) = self.svi.as_ref() {
-            restored &= svi.replace_evpn_instances(current_instances.clone());
+            restored &= svi.restore_evpn_instances(current_instances.clone());
         }
         if let Some(segment) = self.segment.as_ref() {
-            restored &= segment.replace_instances(current_instances);
-            restored &= segment.replace_segments(current_segments);
+            restored &= segment.restore_instances(current_instances);
+            restored &= segment.restore_segments(current_segments);
         }
         if let Some(l3) = self.l3_originator.as_ref() {
-            restored &= l3.replace_ip_vrfs(current_ip_vrfs);
+            restored &= l3.restore_ip_vrfs(current_ip_vrfs);
         }
         for instance in added_instances {
             restored &= matches!(
@@ -1510,12 +1582,10 @@ impl EvpnRuntimeActorConverger {
                 .await
                 .originate_instance(instance.clone(), &self.rib_tx)
                 .await;
-            if !matches!(
-                outcome,
-                evpn_imet::ImetOriginateOutcome::Originated { .. }
-                    | evpn_imet::ImetOriginateOutcome::AlreadyOriginated { .. }
-                    | evpn_imet::ImetOriginateOutcome::ReplyDropped { .. }
-            ) {
+            // Recorded before the check so the rollback also withdraws a
+            // dropped-reply key, which the controller tracks.
+            originated_added.push(instance.clone());
+            if !imet_originate_acknowledged(&outcome) {
                 let restored = self
                     .rollback_l2vni_mixed(
                         current,
@@ -1526,14 +1596,13 @@ impl EvpnRuntimeActorConverger {
                     )
                     .await;
                 return Err(l2vni_swap_failure(
-                    restored,
+                    restored && imet_originate_had_no_effect(&outcome),
                     &format!(
                         "EVPN IMET origination failed for added L2VNI {}: {outcome:?}",
                         instance.id
                     ),
                 ));
             }
-            originated_added.push(instance.clone());
         }
 
         let mut redefined_old_instances = Vec::with_capacity(changes.redefined.len());
@@ -1565,6 +1634,15 @@ impl EvpnRuntimeActorConverger {
             redefined_old_instances.push(old_instance.clone());
             match rekey {
                 Err(withdraw_outcome) => {
+                    // A rejected withdraw left the committed route and its key
+                    // in place: exclude it from the rollback, which would
+                    // otherwise withdraw and re-add it. An unacknowledged one
+                    // stays in, so the rollback puts the route back, but that
+                    // compensating re-add is still an effect.
+                    let no_effect = imet_withdraw_had_no_effect(&withdraw_outcome);
+                    if no_effect {
+                        redefined_old_instances.pop();
+                    }
                     let restored = self
                         .rollback_l2vni_mixed(
                             current,
@@ -1575,19 +1653,16 @@ impl EvpnRuntimeActorConverger {
                         )
                         .await;
                     return Err(l2vni_swap_failure(
-                        restored,
+                        restored && no_effect,
                         &format!(
                             "EVPN IMET withdrawal failed for redefined L2VNI {redefined_vni}: {withdraw_outcome:?}"
                         ),
                     ));
                 }
                 Ok(originate_outcome) => {
-                    if !matches!(
-                        originate_outcome,
-                        evpn_imet::ImetOriginateOutcome::Originated { .. }
-                            | evpn_imet::ImetOriginateOutcome::AlreadyOriginated { .. }
-                            | evpn_imet::ImetOriginateOutcome::ReplyDropped { .. }
-                    ) {
+                    // A dropped-reply new key stays tracked; the rollback's
+                    // `rollback_imet_redefine` withdraws it before restoring.
+                    if !imet_originate_acknowledged(&originate_outcome) {
                         let restored = self
                             .rollback_l2vni_mixed(
                                 current,
@@ -1598,7 +1673,7 @@ impl EvpnRuntimeActorConverger {
                             )
                             .await;
                         return Err(l2vni_swap_failure(
-                            restored,
+                            restored && imet_originate_had_no_effect(&originate_outcome),
                             &format!(
                                 "EVPN IMET origination failed for redefined L2VNI {redefined_vni}: {originate_outcome:?}"
                             ),
@@ -1679,7 +1754,7 @@ impl EvpnRuntimeActorConverger {
                     )
                     .await;
                 return Err(l2vni_swap_failure(
-                    restored,
+                    restored && imet_withdraw_had_no_effect(&outcome),
                     &format!(
                         "EVPN IMET withdrawal failed for deleted L2VNI {}: {outcome:?}",
                         instance.id
@@ -1737,22 +1812,22 @@ impl EvpnRuntimeActorConverger {
         let mut restored = true;
         if let Some(dataplane) = self.dataplane.as_ref() {
             if ip_vrf_metadata_changed {
-                restored &= dataplane.replace_ip_vrfs(current_ip_vrfs);
+                restored &= dataplane.restore_ip_vrfs(current_ip_vrfs);
             }
-            restored &= dataplane.replace_evpn_instances(current_instances.clone());
+            restored &= dataplane.restore_evpn_instances(current_instances.clone());
         }
         if let Some(originator) = self.originator.as_ref() {
-            restored &= originator.replace_runtime_model(
+            restored &= originator.restore_runtime_model(
                 current_instances.clone(),
                 evpn_vni_to_esi_map(current.ethernet_segments()),
                 self.es_drain.snapshot(),
             );
         }
         if let Some(svi) = self.svi.as_ref() {
-            restored &= svi.replace_evpn_instances(current_instances.clone());
+            restored &= svi.restore_evpn_instances(current_instances.clone());
         }
         if let Some(segment) = self.segment.as_ref() {
-            restored &= segment.replace_instances(current_instances);
+            restored &= segment.restore_instances(current_instances);
         }
         for instance in added_instances {
             restored &= matches!(
@@ -1801,16 +1876,20 @@ impl EvpnRuntimeActorConverger {
             ));
         }
         if !dataplane.replace_evpn_instances(candidate_instances.clone()) {
-            Self::rollback_l2vni_dataplane(dataplane, current, ip_vrf_metadata_changed);
-            return Err(DaemonEvpnRuntimeConvergeError::failed(
+            let restored =
+                Self::rollback_l2vni_dataplane(dataplane, current, ip_vrf_metadata_changed);
+            return Err(runtime_step_failure(
+                restored,
                 "EVPN dataplane runtime model publish failed",
             ));
         }
         if let Some(svi) = svi
             && !svi.replace_evpn_instances(candidate_instances.clone())
         {
-            Self::rollback_l2vni_dataplane(dataplane, current, ip_vrf_metadata_changed);
-            return Err(DaemonEvpnRuntimeConvergeError::failed(
+            let restored =
+                Self::rollback_l2vni_dataplane(dataplane, current, ip_vrf_metadata_changed);
+            return Err(runtime_step_failure(
+                restored,
                 "EVPN SVI runtime model publish failed",
             ));
         }
@@ -1826,13 +1905,15 @@ impl EvpnRuntimeActorConverger {
             evpn_imet::ImetWithdrawOutcome::Withdrawn { .. }
                 | evpn_imet::ImetWithdrawOutcome::NotOriginated { .. }
         ) {
-            Self::rollback_l2vni_dataplane(dataplane, current, ip_vrf_metadata_changed);
+            let mut restored =
+                Self::rollback_l2vni_dataplane(dataplane, current, ip_vrf_metadata_changed);
             if let Some(svi) = svi {
-                let _ = svi.replace_evpn_instances(current_instances.clone());
+                restored &= svi.restore_evpn_instances(current_instances.clone());
             }
-            return Err(DaemonEvpnRuntimeConvergeError::failed(format!(
-                "EVPN IMET withdrawal failed for L2VNI {deleted_vni}: {imet_outcome:?}"
-            )));
+            return Err(runtime_step_failure(
+                restored && imet_withdraw_had_no_effect(&imet_outcome),
+                &format!("EVPN IMET withdrawal failed for L2VNI {deleted_vni}: {imet_outcome:?}"),
+            ));
         }
 
         if !originator.replace_runtime_model(
@@ -1840,17 +1921,19 @@ impl EvpnRuntimeActorConverger {
             evpn_vni_to_esi_map(candidate.ethernet_segments()),
             self.es_drain.snapshot(),
         ) {
-            Self::rollback_l2vni_dataplane(dataplane, current, ip_vrf_metadata_changed);
+            let mut restored =
+                Self::rollback_l2vni_dataplane(dataplane, current, ip_vrf_metadata_changed);
             if let Some(svi) = svi {
-                let _ = svi.replace_evpn_instances(current_instances);
+                restored &= svi.restore_evpn_instances(current_instances);
             }
-            let _ = self.restore_imet(deleted_instance).await;
-            return Err(DaemonEvpnRuntimeConvergeError::failed(
+            restored &= self.restore_imet(deleted_instance).await;
+            return Err(runtime_step_failure(
+                restored,
                 "EVPN Type 2 originator runtime model publish failed",
             ));
         }
         if let Err(err) = Self::publish_segment_instances(segment, candidate_instances) {
-            self.rollback_l2vni_runtime_models(
+            let mut restored = self.rollback_l2vni_runtime_models(
                 dataplane,
                 Some(originator),
                 svi,
@@ -1858,8 +1941,8 @@ impl EvpnRuntimeActorConverger {
                 current,
                 ip_vrf_metadata_changed,
             );
-            let _ = self.restore_imet(deleted_instance).await;
-            return Err(err);
+            restored &= self.restore_imet(deleted_instance).await;
+            return Err(runtime_step_failure(restored, err.message()));
         }
 
         Ok(())
@@ -1954,7 +2037,7 @@ impl EvpnRuntimeActorConverger {
                     .rollback_tenant_teardown(current, &deleted_instances)
                     .await;
                 return Err(teardown_failure(
-                    restored,
+                    restored && imet_withdraw_had_no_effect(&outcome),
                     &format!("EVPN IMET withdrawal failed for L2VNI {vni}: {outcome:?}"),
                 ));
             }
@@ -2048,11 +2131,10 @@ impl EvpnRuntimeActorConverger {
         Ok(())
     }
 
-    /// Best-effort rollback of a tenant teardown: republish every committed
-    /// snapshot to its actor (all idempotent, level-triggered) and re-originate
-    /// the Type 3 IMET for each deleted L2VNI. Returns whether every IMET route
-    /// was restored, so the caller can escalate when live Type 3 state is left
-    /// withdrawn.
+    /// Rollback of a tenant teardown: republish every committed snapshot to
+    /// its actor (all idempotent, level-triggered) and re-originate the Type 3
+    /// IMET for each deleted L2VNI. Returns whether every actor and IMET route
+    /// holds the committed model, so the caller can report known divergence.
     async fn rollback_tenant_teardown(
         &self,
         current: &rustbgpd_evpn::EvpnRuntimeModel,
@@ -2063,33 +2145,32 @@ impl EvpnRuntimeActorConverger {
         let current_segments = Arc::new(current.ethernet_segments().to_vec());
         let current_vni_to_esi = evpn_vni_to_esi_map(current.ethernet_segments());
 
+        let mut restored = true;
         if let Some(dataplane) = self.dataplane.as_ref() {
-            let _ = dataplane.replace_ip_vrfs(current_ip_vrfs.clone());
-            let _ = dataplane.replace_evpn_instances(current_instances.clone());
+            restored &= dataplane.restore_ip_vrfs(current_ip_vrfs.clone());
+            restored &= dataplane.restore_evpn_instances(current_instances.clone());
         }
         if let Some(svi) = self.svi.as_ref() {
-            let _ = svi.replace_evpn_instances(current_instances.clone());
+            restored &= svi.restore_evpn_instances(current_instances.clone());
         }
         if let Some(originator) = self.originator.as_ref() {
-            let _ = originator.replace_runtime_model(
+            restored &= originator.restore_runtime_model(
                 current_instances.clone(),
                 current_vni_to_esi,
                 self.es_drain.snapshot(),
             );
         }
         if let Some(segment) = self.segment.as_ref() {
-            let _ = segment.replace_instances(current_instances);
-            let _ = segment.replace_segments(current_segments);
+            restored &= segment.restore_instances(current_instances);
+            restored &= segment.restore_segments(current_segments);
         }
         if let Some(l3) = self.l3_originator.as_ref() {
-            let _ = l3.replace_ip_vrfs(current_ip_vrfs);
+            restored &= l3.restore_ip_vrfs(current_ip_vrfs);
         }
-
-        let mut all_restored = true;
         for inst in deleted_instances {
-            all_restored &= self.restore_imet(inst.clone()).await;
+            restored &= self.restore_imet(inst.clone()).await;
         }
-        all_restored
+        restored
     }
 
     #[expect(
@@ -2137,28 +2218,29 @@ impl EvpnRuntimeActorConverger {
                 evpn_imet::ImetWithdrawOutcome::Withdrawn { .. }
                     | evpn_imet::ImetWithdrawOutcome::NotOriginated { .. }
             ) {
-                // Nothing new is tracked yet; the committed route stands or has
-                // already been removed by the failed withdraw. Surface the error
-                // (the guard drops as we return, releasing the lock).
-                return Err(DaemonEvpnRuntimeConvergeError::failed(format!(
-                    "EVPN IMET withdrawal failed for redefined L2VNI {redefined_vni}: {withdraw_outcome:?}"
-                )));
+                // Nothing new is tracked yet. A rejected withdraw leaves the
+                // committed route standing; an unacknowledged one may have
+                // removed it, so only a rejection is a no-effect failure (the
+                // guard drops as we return, releasing the lock).
+                return Err(runtime_step_failure(
+                    imet_withdraw_had_no_effect(&withdraw_outcome),
+                    &format!(
+                        "EVPN IMET withdrawal failed for redefined L2VNI {redefined_vni}: {withdraw_outcome:?}"
+                    ),
+                ));
             }
             imet.originate_instance(new_instance, &self.rib_tx).await
         };
-        if !matches!(
-            originate_outcome,
-            evpn_imet::ImetOriginateOutcome::Originated { .. }
-                | evpn_imet::ImetOriginateOutcome::AlreadyOriginated { .. }
-                | evpn_imet::ImetOriginateOutcome::ReplyDropped { .. }
-        ) {
-            // The new route was not originated, so the old key is no longer
-            // tracked (we withdrew it above): a plain re-originate of the old
-            // instance restores the committed route. Escalate if even that
-            // fails — the committed Type 3 is then withdrawn with no fallback.
-            let restored = self.restore_imet(old_instance).await;
+        if !imet_originate_acknowledged(&originate_outcome) {
+            // The old key was withdrawn above; a dropped reply left the new
+            // key tracked. Withdraw whatever is tracked, then re-originate
+            // the old instance. Escalate if that fails — the committed Type 3
+            // is then withdrawn with no fallback.
+            let restored = self
+                .rollback_imet_redefine(redefined_vni, old_instance)
+                .await;
             return Err(redefine_imet_failure(
-                restored,
+                restored && imet_originate_had_no_effect(&originate_outcome),
                 redefined_vni,
                 &format!(
                     "EVPN IMET origination failed for redefined L2VNI {redefined_vni}: {originate_outcome:?}"
@@ -2172,8 +2254,8 @@ impl EvpnRuntimeActorConverger {
         // metadata is guaranteed unchanged (validated above), so there is no
         // dataplane IP-VRF republish on the redefine path.
         if !dataplane.replace_evpn_instances(candidate_instances.clone()) {
-            Self::rollback_l2vni_dataplane(dataplane, current, false);
-            let restored = self
+            let mut restored = Self::rollback_l2vni_dataplane(dataplane, current, false);
+            restored &= self
                 .rollback_imet_redefine(redefined_vni, old_instance)
                 .await;
             return Err(redefine_imet_failure(
@@ -2187,8 +2269,8 @@ impl EvpnRuntimeActorConverger {
             candidate_vni_to_esi,
             self.es_drain.snapshot(),
         ) {
-            Self::rollback_l2vni_dataplane(dataplane, current, false);
-            let restored = self
+            let mut restored = Self::rollback_l2vni_dataplane(dataplane, current, false);
+            restored &= self
                 .rollback_imet_redefine(redefined_vni, old_instance)
                 .await;
             return Err(redefine_imet_failure(
@@ -2200,14 +2282,15 @@ impl EvpnRuntimeActorConverger {
         if let Some(svi) = svi
             && !svi.replace_evpn_instances(candidate_instances.clone())
         {
-            Self::rollback_l2vni_dataplane(dataplane, current, false);
-            let current_instances = Arc::new(current.instances().clone());
-            let _ = originator.replace_runtime_model(
-                current_instances,
-                evpn_vni_to_esi_map(current.ethernet_segments()),
-                self.es_drain.snapshot(),
+            let mut restored = self.rollback_l2vni_runtime_models(
+                dataplane,
+                Some(originator),
+                None,
+                None,
+                current,
+                false,
             );
-            let restored = self
+            restored &= self
                 .rollback_imet_redefine(redefined_vni, old_instance)
                 .await;
             return Err(redefine_imet_failure(
@@ -2217,7 +2300,7 @@ impl EvpnRuntimeActorConverger {
             ));
         }
         if let Err(err) = Self::publish_segment_instances(segment, candidate_instances) {
-            self.rollback_l2vni_runtime_models(
+            let mut restored = self.rollback_l2vni_runtime_models(
                 dataplane,
                 Some(originator),
                 svi,
@@ -2225,7 +2308,7 @@ impl EvpnRuntimeActorConverger {
                 current,
                 false,
             );
-            let restored = self
+            restored &= self
                 .rollback_imet_redefine(redefined_vni, old_instance)
                 .await;
             return Err(redefine_imet_failure(
@@ -2259,12 +2342,9 @@ impl EvpnRuntimeActorConverger {
             ));
         }
         if !l3_originator.replace_ip_vrfs(candidate_ip_vrfs) {
-            if !dataplane.replace_ip_vrfs(Arc::new(current.ip_vrfs().clone())) {
-                return Err(DaemonEvpnRuntimeConvergeError::failed(
-                    "EVPN Type 5 originator runtime model publish failed and EVPN dataplane IP-VRF rollback failed; live dataplane state may require daemon restart",
-                ));
-            }
-            return Err(DaemonEvpnRuntimeConvergeError::failed(
+            let restored = dataplane.restore_ip_vrfs(Arc::new(current.ip_vrfs().clone()));
+            return Err(runtime_step_failure(
+                restored,
                 "EVPN Type 5 originator runtime model publish failed",
             ));
         }
@@ -2287,12 +2367,9 @@ impl EvpnRuntimeActorConverger {
             ));
         }
         if !l3_originator.replace_ip_vrfs(candidate_ip_vrfs) {
-            if !dataplane.replace_ip_vrfs(Arc::new(current.ip_vrfs().clone())) {
-                return Err(DaemonEvpnRuntimeConvergeError::failed(
-                    "EVPN Type 5 originator runtime model publish failed and EVPN dataplane IP-VRF rollback failed; live dataplane state may require daemon restart",
-                ));
-            }
-            return Err(DaemonEvpnRuntimeConvergeError::failed(
+            let restored = dataplane.restore_ip_vrfs(Arc::new(current.ip_vrfs().clone()));
+            return Err(runtime_step_failure(
+                restored,
                 "EVPN Type 5 originator runtime model publish failed",
             ));
         }
@@ -2320,12 +2397,9 @@ impl EvpnRuntimeActorConverger {
             ));
         }
         if !l3_originator.replace_ip_vrfs(candidate_ip_vrfs) {
-            if !dataplane.replace_ip_vrfs(Arc::new(current.ip_vrfs().clone())) {
-                return Err(DaemonEvpnRuntimeConvergeError::failed(
-                    "EVPN Type 5 originator runtime model publish failed and EVPN dataplane IP-VRF rollback failed; live dataplane state may require daemon restart",
-                ));
-            }
-            return Err(DaemonEvpnRuntimeConvergeError::failed(
+            let restored = dataplane.restore_ip_vrfs(Arc::new(current.ip_vrfs().clone()));
+            return Err(runtime_step_failure(
+                restored,
                 "EVPN Type 5 originator runtime model publish failed",
             ));
         }
@@ -2389,7 +2463,9 @@ impl EvpnRuntimeActorConverger {
                 evpn_vni_to_esi_map(candidate.ethernet_segments()),
                 self.es_drain.snapshot(),
             ) {
-                return Err(DaemonEvpnRuntimeConvergeError::failed(
+                let restored = segment.restore_instances(Arc::new(current.instances().clone()));
+                return Err(runtime_step_failure(
+                    restored,
                     "EVPN Type 2 originator runtime model publish failed",
                 ));
             }
@@ -2403,15 +2479,18 @@ impl EvpnRuntimeActorConverger {
         // on the full desired snapshot, mirroring the L2VNI/IP-VRF paths.
         let candidate_segments = Arc::new(candidate.ethernet_segments().to_vec());
         if !segment.replace_segments(candidate_segments) {
+            let current_instances = Arc::new(current.instances().clone());
+            let mut restored = segment.restore_instances(current_instances.clone());
             if republished_originator && let Some(originator) = originator {
                 // Roll the originator back to the committed vni->esi map.
-                let _ = originator.replace_runtime_model(
-                    Arc::new(current.instances().clone()),
+                restored &= originator.restore_runtime_model(
+                    current_instances,
                     evpn_vni_to_esi_map(current.ethernet_segments()),
                     self.es_drain.snapshot(),
                 );
             }
-            return Err(DaemonEvpnRuntimeConvergeError::failed(
+            return Err(runtime_step_failure(
+                restored,
                 "EVPN segment runtime model publish failed",
             ));
         }
@@ -2429,31 +2508,33 @@ impl EvpnRuntimeActorConverger {
         Ok(())
     }
 
-    async fn rollback_imet(&self, vni: rustbgpd_evpn::EvpnInstanceId) {
-        let _ = self
-            .imet_controller
-            .lock()
-            .await
-            .withdraw_instance(vni, &self.rib_tx)
-            .await;
-    }
-
-    /// Re-originate a committed instance's Type 3 IMET after a failed
-    /// convergence step withdrew it. Returns `false` if the route could not be
-    /// restored, so callers on the redefine path can escalate (the committed
-    /// Type 3 is then withdrawn with no fallback). Best-effort callers may
-    /// ignore the result.
-    async fn restore_imet(&self, instance: rustbgpd_evpn::EvpnInstance) -> bool {
+    /// Withdraw a Type 3 IMET this converge originated. Returns whether
+    /// the route is provably gone.
+    #[must_use]
+    async fn rollback_imet(&self, vni: rustbgpd_evpn::EvpnInstanceId) -> bool {
         matches!(
             self.imet_controller
                 .lock()
                 .await
-                .originate_instance(instance, &self.rib_tx)
+                .withdraw_instance(vni, &self.rib_tx)
                 .await,
-            evpn_imet::ImetOriginateOutcome::Originated { .. }
-                | evpn_imet::ImetOriginateOutcome::AlreadyOriginated { .. }
-                | evpn_imet::ImetOriginateOutcome::ReplyDropped { .. }
+            evpn_imet::ImetWithdrawOutcome::Withdrawn { .. }
+                | evpn_imet::ImetWithdrawOutcome::NotOriginated { .. }
         )
+    }
+
+    /// Re-originate a committed instance's Type 3 IMET after a failed
+    /// convergence step withdrew it. Returns `true` only for an acknowledged
+    /// origination, so the caller escalates to known divergence when the
+    /// committed route is not provably back.
+    async fn restore_imet(&self, instance: rustbgpd_evpn::EvpnInstance) -> bool {
+        let outcome = self
+            .imet_controller
+            .lock()
+            .await
+            .originate_instance(instance, &self.rib_tx)
+            .await;
+        imet_originate_acknowledged(&outcome)
     }
 
     /// Roll a redefine's IMET (Type 3) state back to the committed instance
@@ -2483,73 +2564,100 @@ impl EvpnRuntimeActorConverger {
         ) {
             return false;
         }
-        // With the new key cleared, a genuine re-origination yields
-        // `Originated` (or `ReplyDropped`, accepted optimistically as the
-        // main path does); `AlreadyOriginated` here would mean the key was
-        // never cleared and is treated as failure.
+        // With the new key cleared, only an acknowledged `Originated` proves
+        // the committed route is back: a dropped reply is unknown, and
+        // `AlreadyOriginated` here would mean the key was never cleared.
         matches!(
             imet.originate_instance(old_instance, &self.rib_tx).await,
             evpn_imet::ImetOriginateOutcome::Originated { .. }
-                | evpn_imet::ImetOriginateOutcome::ReplyDropped { .. }
         )
     }
 }
 
 /// Build the failure returned from a redefine convergence step that ran after
-/// the new IMET route was originated. When the IMET rollback restored the
-/// committed Type 3 route the original step message stands; otherwise the
-/// message is escalated because live Type 3 state may need operator repair.
+/// the old IMET route was withdrawn. When the rollback restored the committed
+/// model the original step message stands; otherwise the converge reports
+/// known divergence because live Type 3 state may need operator repair.
 fn redefine_imet_failure(
-    imet_restored: bool,
+    restored: bool,
     vni: rustbgpd_evpn::EvpnInstanceId,
     step_message: &str,
 ) -> DaemonEvpnRuntimeConvergeError {
-    if imet_restored {
-        DaemonEvpnRuntimeConvergeError::failed(step_message.to_string())
-    } else {
-        DaemonEvpnRuntimeConvergeError::failed(format!(
-            "{step_message}; EVPN IMET redefine rollback also failed for L2VNI {vni} — \
+    DaemonEvpnRuntimeConvergeError::step_failure(
+        restored,
+        step_message,
+        &format!(
+            "EVPN L2VNI {vni} redefine was not restored to the committed model — \
              live Type 3 state may require repair/restart"
-        ))
-    }
+        ),
+    )
 }
 
-/// Build the failure returned from an additive build-up step. Escalates when
-/// the rollback could not republish committed snapshots or withdraw newly
-/// originated Type 3 routes.
+/// Build the failure returned from an additive build-up step: known
+/// divergence when the rollback could not restore committed snapshots or
+/// withdraw newly originated Type 3 routes.
 fn additive_build_failure(restored: bool, step_message: &str) -> DaemonEvpnRuntimeConvergeError {
-    if restored {
-        DaemonEvpnRuntimeConvergeError::failed(step_message.to_string())
-    } else {
-        DaemonEvpnRuntimeConvergeError::failed(format!(
-            "{step_message}; EVPN additive build-up rollback also failed — \
-             live runtime state may require repair/restart"
-        ))
-    }
+    DaemonEvpnRuntimeConvergeError::step_failure(
+        restored,
+        step_message,
+        "EVPN additive build-up was not restored to the committed model — \
+         live runtime state may require repair/restart",
+    )
 }
 
 fn l2vni_swap_failure(restored: bool, step_message: &str) -> DaemonEvpnRuntimeConvergeError {
-    if restored {
-        DaemonEvpnRuntimeConvergeError::failed(step_message.to_string())
-    } else {
-        DaemonEvpnRuntimeConvergeError::failed(format!(
-            "{step_message}; EVPN L2VNI swap rollback also failed — \
-             live runtime state may require repair/restart"
-        ))
-    }
+    DaemonEvpnRuntimeConvergeError::step_failure(
+        restored,
+        step_message,
+        "EVPN L2VNI swap was not restored to the committed model — \
+         live runtime state may require repair/restart",
+    )
 }
 
-/// Build the failure returned from a tenant-teardown step. Escalates when the
-/// IMET rollback could not restore the committed Type 3 routes.
-fn teardown_failure(imet_restored: bool, step_message: &str) -> DaemonEvpnRuntimeConvergeError {
-    if imet_restored {
-        DaemonEvpnRuntimeConvergeError::failed(step_message.to_string())
-    } else {
-        DaemonEvpnRuntimeConvergeError::failed(format!(
-            "{step_message}; EVPN IMET teardown rollback also failed — \
-             live Type 3 state may require repair/restart"
-        ))
-    }
+/// Build the failure returned from a tenant-teardown step: known divergence
+/// when the rollback could not restore the committed snapshots and Type 3
+/// routes.
+fn teardown_failure(restored: bool, step_message: &str) -> DaemonEvpnRuntimeConvergeError {
+    DaemonEvpnRuntimeConvergeError::step_failure(
+        restored,
+        step_message,
+        "EVPN tenant teardown was not restored to the committed model — \
+         live runtime state may require repair/restart",
+    )
+}
+
+/// Build the failure returned from a single-row converge step (L2VNI add or
+/// delete, IP-VRF, Ethernet Segment): known divergence when the rollback
+/// could not restore the committed model.
+fn runtime_step_failure(restored: bool, step_message: &str) -> DaemonEvpnRuntimeConvergeError {
+    DaemonEvpnRuntimeConvergeError::step_failure(
+        restored,
+        step_message,
+        "EVPN runtime state was not restored to the committed model — \
+         live runtime state may require repair/restart",
+    )
+}
+
+/// Only an acknowledged originate counts as success or restoration.
+/// `ReplyDropped` and `RibUnavailable` carry no acknowledgement: the route may
+/// or may not be installed.
+fn imet_originate_acknowledged(outcome: &evpn_imet::ImetOriginateOutcome) -> bool {
+    matches!(
+        outcome,
+        evpn_imet::ImetOriginateOutcome::Originated { .. }
+            | evpn_imet::ImetOriginateOutcome::AlreadyOriginated { .. }
+    )
+}
+
+/// The failed IMET step itself had no effect only when the RIB rejected it;
+/// after an unacknowledged inject (`RibUnavailable` or `ReplyDropped`) the
+/// route may or may not be installed.
+fn imet_originate_had_no_effect(outcome: &evpn_imet::ImetOriginateOutcome) -> bool {
+    matches!(outcome, evpn_imet::ImetOriginateOutcome::Rejected { .. })
+}
+
+fn imet_withdraw_had_no_effect(outcome: &evpn_imet::ImetWithdrawOutcome) -> bool {
+    matches!(outcome, evpn_imet::ImetWithdrawOutcome::Rejected { .. })
 }
 
 impl DaemonEvpnRuntimeConverger for EvpnRuntimeActorConverger {
@@ -3132,17 +3240,22 @@ async fn apply_decomposed_evpn_runtime_steps(
                      committed (fail-stop: no cross-step rollback)"
                 )
             };
-            // A shutdown-interrupted step says nothing about the candidate,
-            // and the closing daemon refuses another apply: no config fix.
-            let recovery = if matches!(
-                error,
-                DaemonEvpnRuntimeConvergeError::InterruptedByShutdown(_)
-            ) {
-                "the daemon is shutting down, so no further apply is accepted; the published \
-                 state was not restored and the candidate config needs no fix"
-            } else {
-                "fix the config and re-SIGHUP / re-apply; the next attempt replans from the \
-                 committed model and converges only the remainder"
+            // Neither a shutdown-interrupted nor a divergent step says
+            // anything about the candidate, so neither implies a config fix.
+            let recovery = match error {
+                DaemonEvpnRuntimeConvergeError::InterruptedByShutdown(_) => {
+                    "the daemon is shutting down, so no further apply is accepted; the \
+                     published state was not restored and the candidate config needs no fix"
+                }
+                DaemonEvpnRuntimeConvergeError::KnownDivergence(_) => {
+                    "live EVPN state diverges from the committed model; repair it or restart \
+                     the daemon before re-applying"
+                }
+                DaemonEvpnRuntimeConvergeError::Unsupported(_)
+                | DaemonEvpnRuntimeConvergeError::Failed(_) => {
+                    "fix the config and re-SIGHUP / re-apply; the next attempt replans from the \
+                     committed model and converges only the remainder"
+                }
             };
             tracing::error!(
                 step = step_number,

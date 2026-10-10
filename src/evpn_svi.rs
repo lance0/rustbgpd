@@ -106,6 +106,12 @@ impl EvpnSviRuntimeControl {
         self.instances_tx.send_replace(instances);
         true
     }
+
+    /// Rollback republish; see [`crate::evpn_runtime_converger::restore_watch`].
+    #[must_use]
+    pub(crate) fn restore_evpn_instances(&self, instances: Arc<EvpnInstanceTable>) -> bool {
+        crate::evpn_runtime_converger::restore_watch(&self.instances_tx, instances)
+    }
 }
 
 #[derive(Debug)]

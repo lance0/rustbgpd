@@ -269,6 +269,18 @@ impl EvpnSegmentRuntimeControl {
         true
     }
 
+    /// Rollback republish; see [`crate::evpn_runtime_converger::restore_watch`].
+    #[must_use]
+    pub(crate) fn restore_instances(&self, instances: Arc<EvpnInstanceTable>) -> bool {
+        crate::evpn_runtime_converger::restore_watch(&self.instances_tx, instances)
+    }
+
+    /// Rollback republish; see [`crate::evpn_runtime_converger::restore_watch`].
+    #[must_use]
+    pub(crate) fn restore_segments(&self, segments: Arc<Vec<EthernetSegment>>) -> bool {
+        crate::evpn_runtime_converger::restore_watch(&self.segments_tx, segments)
+    }
+
     /// Replace the operator-drained ESI set (ADR-0084). Newly-drained
     /// ESIs withdraw their Type 4 + EAD-per-ES + EAD-per-EVI routes
     /// without dropping their `SegmentState`; newly-undrained ESIs

@@ -166,6 +166,25 @@ impl EvpnOriginatorRuntimeControl {
         }));
         true
     }
+
+    /// Rollback republish of the committed runtime model; see
+    /// [`crate::evpn_runtime_converger::restore_watch`].
+    #[must_use]
+    pub(crate) fn restore_runtime_model(
+        &self,
+        instances: Arc<EvpnInstanceTable>,
+        vni_to_esi: Arc<std::collections::BTreeMap<EvpnInstanceId, EthernetSegmentIdentifier>>,
+        drained_esis: Arc<BTreeSet<EthernetSegmentIdentifier>>,
+    ) -> bool {
+        crate::evpn_runtime_converger::restore_watch(
+            &self.model_tx,
+            Arc::new(OriginatorRuntimeModel {
+                instances,
+                vni_to_esi,
+                drained_esis,
+            }),
+        )
+    }
 }
 
 #[cfg(test)]
@@ -383,7 +402,7 @@ struct OriginatorRuntime {
     drained_esis: Arc<BTreeSet<EthernetSegmentIdentifier>>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 struct OriginatorRuntimeModel {
     instances: Arc<EvpnInstanceTable>,
     vni_to_esi: Arc<std::collections::BTreeMap<EvpnInstanceId, EthernetSegmentIdentifier>>,
