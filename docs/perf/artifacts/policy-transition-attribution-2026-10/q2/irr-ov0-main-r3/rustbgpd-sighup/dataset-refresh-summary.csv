@@ -1,0 +1,5 @@
+reload,load_timestamp_epoch_us,refresh_timestamp_epoch_us,hashed,parsed,exact_reused,source_rebound,changed,failed,eligible,refreshed,skipped_not_established,refresh_failures,sessions_up,parse_errors
+1,1791603424592883,1791603425028118,640,36,604,0,36,0,36,36,0,0,320,0
+2,1791603446843696,1791603447278752,640,36,604,0,36,0,36,36,0,0,320,0
+3,1791603469106378,1791603469563402,640,36,604,0,36,0,36,36,0,0,320,0
+4,1791603491376966,1791603491824494,640,36,604,0,36,0,36,36,0,0,320,0

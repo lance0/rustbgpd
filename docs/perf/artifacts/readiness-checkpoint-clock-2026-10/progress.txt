@@ -1,0 +1,45 @@
+[2026-10-03T08:33:23-04:00] campaign start arms=main fast cells=matrix runs=4 smoke=0 cpus=0-63
+[2026-10-03T08:33:24-04:00] build main start
+[2026-10-03T08:38:35-04:00] build main done daemon_sha256=d99bdc7d0fec9ecfa2dacebb6b2ec7f5d3ed354a69490ed01095615a4ee9c874
+[2026-10-03T08:38:36-04:00] build fast start
+[2026-10-03T08:43:51-04:00] build fast done daemon_sha256=d2b1ac4c6ad49857fd2a642685fb2d687a7f02776e80a62dcc7f89837a895147
+[2026-10-03T08:43:51-04:00] matrix-main-r1-s2 start load=3.04 4.25 4.30 pswpin=2424677 pswpout=2447475  cpus=0-63
+[2026-10-03T08:43:51-04:00] matrix-main-r1-s2 rc=75 status=missing load=3.04 4.25 4.30 pswpin=2424677 pswpout=2447475  cpus=0-63
+[2026-10-03T08:43:51-04:00] matrix-fast-r1-s2 start load=3.04 4.25 4.30 pswpin=2424677 pswpout=2447475  cpus=0-63
+[2026-10-03T08:43:51-04:00] matrix-fast-r1-s2 rc=75 status=missing load=3.04 4.25 4.30 pswpin=2424677 pswpout=2447475  cpus=0-63
+[2026-10-03T08:43:51-04:00] matrix-fast-r2-s2 start load=3.04 4.25 4.30 pswpin=2424677 pswpout=2447475  cpus=0-63
+[2026-10-03T08:43:51-04:00] matrix-fast-r2-s2 rc=75 status=missing load=3.04 4.25 4.30 pswpin=2424677 pswpout=2447475  cpus=0-63
+[2026-10-03T08:43:51-04:00] matrix-main-r2-s2 start load=3.04 4.25 4.30 pswpin=2424677 pswpout=2447475  cpus=0-63
+[2026-10-03T08:43:51-04:00] matrix-main-r2-s2 rc=75 status=missing load=3.04 4.25 4.30 pswpin=2424677 pswpout=2447475  cpus=0-63
+[2026-10-03T08:43:51-04:00] matrix-main-r3-s2 start load=3.04 4.25 4.30 pswpin=2424677 pswpout=2447475  cpus=0-63
+[2026-10-03T08:43:51-04:00] matrix-main-r3-s2 rc=75 status=missing load=3.04 4.25 4.30 pswpin=2424677 pswpout=2447475  cpus=0-63
+[2026-10-03T08:43:51-04:00] matrix-fast-r3-s2 start load=3.04 4.25 4.30 pswpin=2424677 pswpout=2447475  cpus=0-63
+[2026-10-03T08:43:51-04:00] matrix-fast-r3-s2 rc=75 status=missing load=3.04 4.25 4.30 pswpin=2424677 pswpout=2447475  cpus=0-63
+[2026-10-03T08:43:51-04:00] matrix-fast-r4-s2 start load=3.04 4.25 4.30 pswpin=2424677 pswpout=2447475  cpus=0-63
+[2026-10-03T08:43:51-04:00] matrix-fast-r4-s2 rc=75 status=missing load=3.04 4.25 4.30 pswpin=2424677 pswpout=2447475  cpus=0-63
+[2026-10-03T08:43:51-04:00] matrix-main-r4-s2 start load=3.04 4.25 4.30 pswpin=2424677 pswpout=2447475  cpus=0-63
+[2026-10-03T08:43:51-04:00] matrix-main-r4-s2 rc=75 status=missing load=3.04 4.25 4.30 pswpin=2424677 pswpout=2447475  cpus=0-63
+[2026-10-03T08:43:51-04:00] summarize.py failed rc=1 (see summarize.log)
+[2026-10-03T08:43:51-04:00] campaign done rc=1 failed=matrix-main-r1-s2 matrix-fast-r1-s2 matrix-fast-r2-s2 matrix-main-r2-s2 matrix-main-r3-s2 matrix-fast-r3-s2 matrix-fast-r4-s2 matrix-main-r4-s2
+[2026-10-03T08:47:44-04:00] campaign start arms=main fast cells=matrix runs=4 smoke=0 cpus=0-63
+[2026-10-03T08:47:45-04:00] build main start
+[2026-10-03T08:47:45-04:00] build main done daemon_sha256=d99bdc7d0fec9ecfa2dacebb6b2ec7f5d3ed354a69490ed01095615a4ee9c874
+[2026-10-03T08:47:45-04:00] build fast start
+[2026-10-03T08:47:46-04:00] build fast done daemon_sha256=d2b1ac4c6ad49857fd2a642685fb2d687a7f02776e80a62dcc7f89837a895147
+[2026-10-03T08:47:46-04:00] matrix-main-r1-s2 start load=1.76 2.82 3.69 pswpin=2424677 pswpout=2447475  cpus=0-63
+[2026-10-03T08:55:25-04:00] matrix-main-r1-s2 rc=0 status=pass load=1.12 1.60 2.76 pswpin=2424677 pswpout=2447475  cpus=0-63
+[2026-10-03T08:55:25-04:00] matrix-fast-r1-s2 start load=1.12 1.60 2.76 pswpin=2424677 pswpout=2447475  cpus=0-63
+[2026-10-03T09:03:03-04:00] matrix-fast-r1-s2 rc=0 status=pass load=1.06 1.34 2.20 pswpin=2424677 pswpout=2447475  cpus=0-63
+[2026-10-03T09:03:03-04:00] matrix-fast-r2-s2 start load=1.06 1.34 2.20 pswpin=2424677 pswpout=2447475  cpus=0-63
+[2026-10-03T09:10:42-04:00] matrix-fast-r2-s2 rc=0 status=pass load=1.01 1.17 1.79 pswpin=2424677 pswpout=2447475  cpus=0-63
+[2026-10-03T09:10:42-04:00] matrix-main-r2-s2 start load=1.01 1.17 1.79 pswpin=2424677 pswpout=2447475  cpus=0-63
+[2026-10-03T09:18:21-04:00] matrix-main-r2-s2 rc=0 status=pass load=1.01 1.20 1.59 pswpin=2424677 pswpout=2447475  cpus=0-63
+[2026-10-03T09:18:21-04:00] matrix-main-r3-s2 start load=1.01 1.20 1.59 pswpin=2424677 pswpout=2447475  cpus=0-63
+[2026-10-03T09:26:00-04:00] matrix-main-r3-s2 rc=0 status=pass load=1.14 1.20 1.44 pswpin=2424677 pswpout=2447475  cpus=0-63
+[2026-10-03T09:26:00-04:00] matrix-fast-r3-s2 start load=1.14 1.20 1.44 pswpin=2424677 pswpout=2447475  cpus=0-63
+[2026-10-03T09:33:39-04:00] matrix-fast-r3-s2 rc=0 status=pass load=1.01 1.25 1.42 pswpin=2424677 pswpout=2447475  cpus=0-63
+[2026-10-03T09:33:39-04:00] matrix-fast-r4-s2 start load=1.01 1.25 1.42 pswpin=2424677 pswpout=2447475  cpus=0-63
+[2026-10-03T09:41:18-04:00] matrix-fast-r4-s2 rc=0 status=pass load=1.01 1.17 1.32 pswpin=2424677 pswpout=2447475  cpus=0-63
+[2026-10-03T09:41:18-04:00] matrix-main-r4-s2 start load=1.01 1.17 1.32 pswpin=2424677 pswpout=2447475  cpus=0-63
+[2026-10-03T09:48:57-04:00] matrix-main-r4-s2 rc=0 status=pass load=1.03 1.35 1.42 pswpin=2424677 pswpout=2447475  cpus=0-63
+[2026-10-03T09:48:57-04:00] campaign done rc=0 failed=none

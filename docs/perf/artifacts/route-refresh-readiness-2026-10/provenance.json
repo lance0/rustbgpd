@@ -1,0 +1,19 @@
+{
+  "schema": 1,
+  "measured_on": "2026-10-10",
+  "measured_window_utc": ["2026-10-10T08:57:45Z", "2026-10-10T09:19:52Z"],
+  "published_on": "2026-10-10",
+  "host": "one 32-core / 64-thread AMD Ryzen Threadripper 7970X Linux host, kernel 7.0.0-30-generic, performance governor, shared host lock held per cell, canonical quiet-host gate before every cell",
+  "arms": {
+    "base": {"commit": "85224b2e4102682c186f4aa83e7d0b17a0a8e2e4", "rustbgpd_sha256": "9388724beb37534facc9eb7e51eb6d7c97df2f5d0b4b54e748394e3d4b6dc971"},
+    "fix": {"source": "the #3038 working tree on base 85224b2e4, built 2026-10-10T08:25Z, about six minutes before it was committed as 0a56c75cb578b2876d8fc27494b5df09c602dc11 (merged as 1d0e4e155d0cf8e42ab007c399067540855c02df); the binary is not bound to a commit hash", "rustbgpd_sha256": "4971c99169fffcbb137aea927f7e82aa347261e724878dda59087d0ca8546a59"}
+  },
+  "build": "cargo build --release --locked -p rustbgpd --bin rustbgpd",
+  "instrument": {
+    "reloadstall": "built at 591ac39d4b50fc2c647942713a9ea99c0588a51a with --profile scale, sha256 2701b6b81deca419dbcb55692cc74a9e976b73bcc628507dfa6c284116880b30",
+    "generator": "bench/scale/reloadstall/gen-scenario.py at 591ac39d4 with GEN_CONVERGED_REJOIN=1",
+    "cell": "cell.sh (this bundle)"
+  },
+  "shape": {"peers": 700, "prefixes": 400400, "flapstorm_k": 1, "flap_rounds": 3, "control_secs": 30, "daemon_cpus": "12-32,34-39", "engine_cpus": "40-63"},
+  "cell_order": ["fix-k1-rep1", "fix-k1-rep2", "base-k1-rep1", "fix-k1-rep3", "base-k1-rep2", "fix-k1-rep4", "base-k1-rep3", "base-k1-rep4"]
+}

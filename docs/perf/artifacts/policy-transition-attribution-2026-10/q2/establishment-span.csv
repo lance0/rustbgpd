@@ -1,0 +1,7 @@
+arm,run,scenario,session_established_log_lines,peers,first_to_nth_established_s
+main,1,s2,700,700,0.739
+main,2,s2,700,700,0.750
+main,3,s2,700,700,0.753
+v075,1,s2,700,700,0.745
+v075,2,s2,700,700,0.739
+v075,3,s2,700,700,0.755

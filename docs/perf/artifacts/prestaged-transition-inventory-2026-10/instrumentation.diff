@@ -1,0 +1,103 @@
+diff --git a/bench/scale/reloadstall/src/main.rs b/bench/scale/reloadstall/src/main.rs
+index eb4e22393..c2419692c 100644
+--- a/bench/scale/reloadstall/src/main.rs
++++ b/bench/scale/reloadstall/src/main.rs
+@@ -2429,6 +2429,39 @@ fn max_gap_ms_family(
+     max_gap as f64 / 1000.0
+ }
+ 
++/// Local scout instrumentation: where the max gap sits, relative to SIGHUP.
++fn scout_gap_line(ctx: &Ctx, r: u32, i: usize, s_us: u64, e_us: u64) {
++    let ev = ctx.obs[i].events.lock().unwrap();
++    let (mut last, mut best, mut bs, mut be, mut be_base, mut n_pre, mut first_base) =
++        (s_us, 0u64, s_us, s_us, 0u32, 0u32, None::<u64>);
++    let (mut n_base_upd, mut n_all_upd) = (0u32, 0u32);
++    for e in ev.iter().filter(|e| e.t_us >= s_us && e.t_us <= e_us) {
++        n_all_upd += 1;
++        if e.base_ann > 0 {
++            n_base_upd += 1;
++        }
++        if e.base_ann > 0 && first_base.is_none() {
++            first_base = Some(e.t_us);
++        }
++        if first_base.is_none() {
++            n_pre += 1;
++        }
++        if e.t_us - last > best {
++            (best, bs, be, be_base) = (e.t_us - last, last, e.t_us, e.base_ann);
++        }
++        last = e.t_us;
++    }
++    let ms = |t: u64| (t - s_us) as f64 / 1000.0;
++    println!(
++        "scout_gap,{r},{i},{:.3},{:.3},{:.3},{be_base},{n_pre},{:.3},{:.3},{n_base_upd},{n_all_upd}",
++        best as f64 / 1000.0,
++        ms(bs),
++        ms(be),
++        first_base.map_or(f64::NAN, ms),
++        ms(e_us)
++    );
++}
++
+ /// First event time at which every expected unique base prefix was observed
+ /// with the active policy-generation community marker.
+ fn completion_us(ctx: &Ctx, i: usize) -> Option<u64> {
+@@ -4879,6 +4912,7 @@ fn main() {
+                 if let Some(tc) = completion_us(&ctx, i) {
+                     comp_s.push((tc - t_hup) as f64 / 1e6);
+                     gaps.push(max_gap_ms(&ctx, i, t_hup, tc, false));
++                    scout_gap_line(&ctx, r, i, t_hup, tc);
+                     // Leading generation stall: trigger -> first base-prefix
+                     // UPDATE carrying the expected generation marker.
+                     let generation = ctx.obs[i].generation.lock().unwrap();
+diff --git a/crates/rib/src/manager/distribution/mod.rs b/crates/rib/src/manager/distribution/mod.rs
+index 87b3dd6e4..754007d0d 100644
+--- a/crates/rib/src/manager/distribution/mod.rs
++++ b/crates/rib/src/manager/distribution/mod.rs
+@@ -756,6 +756,19 @@ impl PendingCleanPolicyTransition {
+         self.reply.take()
+     }
+ 
++    /// Local scout instrumentation: the parked phase's name.
++    pub(super) fn scout_phase(&self) -> &'static str {
++        match self.phase.as_ref() {
++            Some(CleanPolicyTransitionPhase::Classify { .. }) => "classify",
++            Some(CleanPolicyTransitionPhase::StageDestination { .. }) => "stage_destination",
++            Some(CleanPolicyTransitionPhase::BuildInventory { .. }) => "build_inventory",
++            Some(CleanPolicyTransitionPhase::ProbeAndPrepare { .. }) => "probe_and_prepare",
++            Some(CleanPolicyTransitionPhase::Validate { .. }) => "validate",
++            Some(CleanPolicyTransitionPhase::CommitMembers { .. }) => "commit_members",
++            None => "none",
++        }
++    }
++
+     pub(super) fn poll_kind(&self) -> CleanPolicyTransitionPollKind {
+         match self.phase.as_ref() {
+             Some(
+diff --git a/crates/rib/src/manager/mod.rs b/crates/rib/src/manager/mod.rs
+index fa96f0248..1a4d3043e 100644
+--- a/crates/rib/src/manager/mod.rs
++++ b/crates/rib/src/manager/mod.rs
+@@ -4601,6 +4601,8 @@ impl RibManager {
+                 Self::warn_if_policy_transition_slow(&mut pending, member_count);
+                 self.drain_readiness_queries(Some(pending.elapsed()));
+                 let kind = pending.poll_kind();
++                let scout_phase = pending.scout_phase();
++                let scout_backlog = self.primary_backlog();
+                 let started = std::time::Instant::now();
+                 let mut terminal_reply = None;
+                 let policy_transition_elapsed = self.with_replacement_readiness_age(pending.elapsed(), |manager| { match manager.advance_clean_policy_transition(pending)
+@@ -4670,6 +4672,13 @@ impl RibManager {
+                         None
+                     }
+                 } });
++                info!(
++                    phase = scout_phase,
++                    poll_us = u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX),
++                    terminal = terminal_reply.is_some() || policy_transition_elapsed.is_none(),
++                    primary_backlog = scout_backlog,
++                    "scout transition poll"
++                );
+                 if let Some((reply, result)) = terminal_reply {
+                     let _ = reply.send(result);
+                 }

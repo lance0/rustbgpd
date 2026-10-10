@@ -1,0 +1,36 @@
+ef83eae041e4301ced7a11046a12f61445399304ec89a3db68a500f7bf43b833  <worktree>-fix/target/release/rustbgpd
+ab8a5902eb2c6c908cbd66b1dd90d7df1fc3ea580627dab2674ac5b47a365ea1  <worktree>-main/target/release/rustbgpd
+7651f049971e3c0ccb909457db1465e87305b043de6302e1cf4b80c2a80d0884  <worktree>-fix/target/scale/reloadstall
+7651f049971e3c0ccb909457db1465e87305b043de6302e1cf4b80c2a80d0884  <worktree>-main/target/scale/reloadstall
+daemons differ; starting A/B 2026-10-04T16:29:45-04:00
+leg main-1 (main) waiting for host lock 2026-10-04T16:29:45-04:00
+leg main-1 (main) acquired host lock 2026-10-04T16:34:54-04:00 head=65aa92cc017e0905584563d9041f17f7ecdbb06c daemon=ab8a5902eb2c6c90 harness=7651f049971e3c0c
+cut cool-down
+leg main-1 (main) runner rc=0 status=pass 2026-10-04T16:39:04-04:00
+leg main-1 rc=0
+leg fix-2 (fix) waiting for host lock 2026-10-04T16:39:04-04:00
+leg fix-2 (fix) acquired host lock 2026-10-04T16:42:44-04:00 head=65aa92cc017e0905584563d9041f17f7ecdbb06c daemon=ef83eae041e4301c harness=7651f049971e3c0c
+cut cool-down
+leg fix-2 (fix) runner rc=0 status=pass 2026-10-04T16:45:23-04:00
+leg fix-2 rc=0
+leg fix-3 (fix) waiting for host lock 2026-10-04T16:45:23-04:00
+leg fix-3 (fix) acquired host lock 2026-10-04T16:48:33-04:00 head=65aa92cc017e0905584563d9041f17f7ecdbb06c daemon=ef83eae041e4301c harness=7651f049971e3c0c
+cut cool-down
+leg fix-3 (fix) runner rc=0 status=pass 2026-10-04T16:52:13-04:00
+leg fix-3 rc=0
+leg main-4 (main) waiting for host lock 2026-10-04T16:52:13-04:00
+leg main-4 (main) acquired host lock 2026-10-04T16:55:22-04:00 head=65aa92cc017e0905584563d9041f17f7ecdbb06c daemon=ab8a5902eb2c6c90 harness=7651f049971e3c0c
+cut cool-down
+leg main-4 (main) runner rc=0 status=pass 2026-10-04T16:59:02-04:00
+leg main-4 rc=0
+leg main-5 (main) waiting for host lock 2026-10-04T16:59:02-04:00
+leg main-5 (main) acquired host lock 2026-10-04T17:02:42-04:00 head=65aa92cc017e0905584563d9041f17f7ecdbb06c daemon=ab8a5902eb2c6c90 harness=7651f049971e3c0c
+cut cool-down
+leg main-5 (main) runner rc=0 status=pass 2026-10-04T17:05:21-04:00
+leg main-5 rc=0
+leg fix-6 (fix) waiting for host lock 2026-10-04T17:05:21-04:00
+leg fix-6 (fix) acquired host lock 2026-10-04T17:05:21-04:00 head=65aa92cc017e0905584563d9041f17f7ecdbb06c daemon=ef83eae041e4301c harness=7651f049971e3c0c
+cut cool-down
+leg fix-6 (fix) runner rc=0 status=pass 2026-10-04T17:08:01-04:00
+leg fix-6 rc=0
+ab-done

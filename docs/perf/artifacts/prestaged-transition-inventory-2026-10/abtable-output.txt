@@ -1,0 +1,40 @@
+fix-2 r1: prestage 479 fence 183.6 build_inv 26.8 stall p50/p95/max 209.6/253.8/285.7 compl p50 870 UPDATEs/member med 893.0 [892-893] vmhwm 559
+fix-2 r2: prestage 449 fence 184.5 build_inv 27.8 stall p50/p95/max 204.7/334.2/398.4 compl p50 850 UPDATEs/member med 893.0 [892-893] vmhwm 559
+fix-2 r3: prestage 402 fence 184.2 build_inv 27.8 stall p50/p95/max 208.5/240.8/307.7 compl p50 790 UPDATEs/member med 893.0 [892-893] vmhwm 559
+fix-2 r4: prestage 391 fence 190.1 build_inv 25.9 stall p50/p95/max 207.3/276.9/355.9 compl p50 780 UPDATEs/member med 893.0 [892-893] vmhwm 559
+fix-3 r1: prestage 480 fence 210.4 build_inv 53.1 stall p50/p95/max 231.8/259.7/290.5 compl p50 890 UPDATEs/member med 893.0 [892-893] vmhwm 570
+fix-3 r2: prestage 435 fence 186.1 build_inv 30.0 stall p50/p95/max 205.1/335.7/368.4 compl p50 810 UPDATEs/member med 893.0 [892-893] vmhwm 570
+fix-3 r3: prestage 437 fence 186.2 build_inv 29.5 stall p50/p95/max 208.1/382.1/405.4 compl p50 840 UPDATEs/member med 893.0 [892-893] vmhwm 570
+fix-3 r4: prestage 439 fence 193.1 build_inv 28.4 stall p50/p95/max 214.4/319.8/388.5 compl p50 840 UPDATEs/member med 893.0 [892-893] vmhwm 570
+fix-6 r1: prestage 482 fence 184.3 build_inv 28.3 stall p50/p95/max 211.9/268.6/296.5 compl p50 880 UPDATEs/member med 893.0 [892-893] vmhwm 571
+fix-6 r2: prestage 471 fence 183.7 build_inv 27.6 stall p50/p95/max 198.9/298.5/373.4 compl p50 850 UPDATEs/member med 893.0 [892-893] vmhwm 571
+fix-6 r3: prestage 447 fence 185.1 build_inv 27.9 stall p50/p95/max 205.6/324.9/378.0 compl p50 830 UPDATEs/member med 893.0 [892-893] vmhwm 571
+fix-6 r4: prestage 466 fence 197.3 build_inv 31.6 stall p50/p95/max 216.4/278.6/374.8 compl p50 860 UPDATEs/member med 893.0 [892-893] vmhwm 571
+main-1 r1: prestage 321 fence 370.0 build_inv 213.0 stall p50/p95/max 395.6/435.6/527.4 compl p50 900 UPDATEs/member med 893.0 [892-893] vmhwm 558
+main-1 r2: prestage 301 fence 318.5 build_inv 164.6 stall p50/p95/max 348.2/490.9/529.3 compl p50 830 UPDATEs/member med 893.0 [892-893] vmhwm 558
+main-1 r3: prestage 313 fence 322.2 build_inv 163.9 stall p50/p95/max 345.6/442.3/541.5 compl p50 860 UPDATEs/member med 893.0 [892-893] vmhwm 558
+main-1 r4: prestage 335 fence 334.2 build_inv 176.0 stall p50/p95/max 370.1/470.0/543.5 compl p50 870 UPDATEs/member med 893.0 [892-893] vmhwm 558
+main-4 r1: prestage 319 fence 364.1 build_inv 212.1 stall p50/p95/max 384.6/447.6/538.6 compl p50 890 UPDATEs/member med 893.0 [892-893] vmhwm 567
+main-4 r2: prestage 290 fence 327.5 build_inv 170.8 stall p50/p95/max 369.0/419.5/521.5 compl p50 830 UPDATEs/member med 893.0 [892-893] vmhwm 567
+main-4 r3: prestage 292 fence 325.4 build_inv 169.5 stall p50/p95/max 347.5/439.4/522.8 compl p50 840 UPDATEs/member med 893.0 [892-893] vmhwm 567
+main-4 r4: prestage 295 fence 343.3 build_inv 171.4 stall p50/p95/max 385.5/389.3/432.3 compl p50 840 UPDATEs/member med 893.0 [892-893] vmhwm 567
+main-5 r1: prestage 325 fence 373.2 build_inv 220.1 stall p50/p95/max 401.6/449.9/517.5 compl p50 900 UPDATEs/member med 893.0 [892-893] vmhwm 571
+main-5 r2: prestage 310 fence 336.6 build_inv 175.1 stall p50/p95/max 360.3/489.1/542.8 compl p50 850 UPDATEs/member med 893.0 [892-893] vmhwm 571
+main-5 r3: prestage 326 fence 323.0 build_inv 163.7 stall p50/p95/max 343.2/450.7/525.5 compl p50 860 UPDATEs/member med 893.0 [892-893] vmhwm 571
+main-5 r4: prestage 328 fence 346.0 build_inv 177.9 stall p50/p95/max 360.8/543.9/561.9 compl p50 890 UPDATEs/member med 893.0 [892-893] vmhwm 571
+
+| metric, median [range] over reloads | main | fix |
+| -- | -- | -- |
+| prestage round trip (ms, unfenced) | 316 [290–335] | 448 [391–482] |
+| fence: classify start → commit end (ms) | 335.4 [318.5–373.2] | 185.6 [183.6–210.4] |
+| BuildInventory busy under the fence (ms) | 173.2 [163.7–220.1] | 28.1 [25.9–53.1] |
+| stall p50 (ms) | 364.9 [343.2–401.6] | 208.3 [198.9–231.8] |
+| stall p95 (ms) | 448.8 [389.3–543.9] | 288.6 [240.8–382.1] |
+| worst observer max gap (ms) | 528.3 [432.3–561.9] | 370.9 [285.7–405.4] |
+| completion p50 (ms) | 860 [830–900] | 845 [780–890] |
+| base UPDATEs per member, median observer | 893 [893–893] | 893 [893–893] |
+| base UPDATEs per member, min observer | 892 [892–892] | 892 [892–892] |
+| base UPDATEs per member, max observer | 893 [893–893] | 893 [893–893] |
+| VmHWM per leg (MiB) | 567 [558–571] | 570 [559–571] |
+
+n reloads: main=12 fix=12; legs main=3 fix=3

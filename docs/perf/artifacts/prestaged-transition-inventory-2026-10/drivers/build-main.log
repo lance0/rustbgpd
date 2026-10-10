@@ -1,0 +1,5 @@
+build main start 2026-10-04T15:34:29-04:00 head=65aa92cc017e0905584563d9041f17f7ecdbb06c diff=6bee995b9a35
+daemon main rc=0 2026-10-04T15:43:14-04:00
+harness rc=0 2026-10-04T16:29:44-04:00
+ab8a5902eb2c6c908cbd66b1dd90d7df1fc3ea580627dab2674ac5b47a365ea1  <worktree>-main/target/release/rustbgpd
+build-done

@@ -1,0 +1,44 @@
+{
+  "schema": 1,
+  "cell": "rustbgpd",
+  "git": {
+    "commit": "e68aa3fe62a12a7ac5eb618d7c47797ada289c75",
+    "tree": "f82868fd192f54acc0c68197e4f23fdcf9ab7eeb",
+    "dirty": false
+  },
+  "toolchain": "rustc 1.99.0 (b940084d7 2026-09-28)\nbinary: rustc\ncommit-hash: b940084d7eb6a299eb4bfeb8e34901bc051e7ac4\ncommit-date: 2026-09-28\nhost: x86_64-unknown-linux-gnu\nrelease: 1.99.0\nLLVM version: 23.1.1",
+  "host": "Linux 7.0.0-30-generic #30~24.04.1-Ubuntu SMP PREEMPT_DYNAMIC Fri Aug  7 13:27:52 UTC 2 x86_64 GNU/Linux",
+  "sources": {
+    "common": {
+      "bench/scale/provenance.sh": "7db6727dc99ec42515359f674e56c749453bc29c9981b67f30568f0d6cce1991",
+      "bench/scale/cgroup-memory.sh": "64753985d0b8c167daa1d382b70fe6f4369275713ebcaec8e4de677ff281ee3a",
+      "bench/scale/matrix/run-matrix.sh": "d8e6f9462a7f14e6a22c2e40e387bbbbf19cee2c17e56107b2a8e40b65d78401",
+      "bench/scale/matrix/verify-provenance.py": "7da2a7088bd2a9669621895c33c60ea6fce6fc62c695be600f63efc4530aedc4",
+      "bench/scale/matrix/rss-sampler.sh": "3ecffb93298c49f8524320ecebe976efc806f9f0b0caf260d6a1431ca402a10d",
+      "bench/scale/host-quiet.sh": "abb3391cd5e0879c29aabd0aa0c316ea33d5f7c72f6d2a7d111b30025de411fd",
+      "tests/soak/host-lock.sh": "f5f419bb439f0b5e22521e9f7fa73d4ef73df159abeec31fafff63548899c658"
+    },
+    "generator": {
+      "bench/scale/reloadstall/gen-scenario.py": "e563659beef5857ee79ddac40e1cff5730c34e424b5ca074a3f9007b5dc0ab42"
+    },
+    "reloadstall": {
+      "path": "target/scale/reloadstall",
+      "sha256": "35d5cabc81e5c3a796b8775d9a3d9fbe40cdbfb5a4eab8ebcecf95aacbb6131f"
+    }
+  },
+  "workload": {
+    "binary": "target/release/rustbgpd",
+    "sha256": "6a72730280960d52389df322dc8c2ccd22ecfcbb1437c840838bcfac2157d7f0",
+    "inputs": {
+      "N_PEERS": "700",
+      "TOTAL_PREFIXES": "400400",
+      "PORT": "1790",
+      "RELOADS": "4",
+      "CONTROL_SECS": "30",
+      "CHANGED_PEERS": "",
+      "FLAPSTORM": "",
+      "BIRD_THREADS": "8",
+      "PROBE_PREFIXES": ""
+    }
+  }
+}

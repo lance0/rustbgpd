@@ -1,0 +1,65 @@
+{
+  "verdict": "PASS",
+  "invalid_calls": [],
+  "checks_pass": true,
+  "errors": [],
+  "flat": {
+    "pass": true,
+    "in_band_max_ms": 0,
+    "quiescent_median_ms": 0.0,
+    "limit_ms": 50.0
+  },
+  "in_band_pairs": 12,
+  "deadline_misses": 0,
+  "calls_over_2s": 0,
+  "timing": {
+    "in_band": {
+      "stage_sum_ms": {
+        "n": 12,
+        "min": 0,
+        "p50": 0,
+        "p95": 0,
+        "max": 0
+      },
+      "external_ms": {
+        "n": 12,
+        "min": 11.164649855345488,
+        "p50": 12.046653777360916,
+        "p95": 274.43829691037536,
+        "max": 274.43829691037536
+      }
+    },
+    "pair_all": {
+      "stage_sum_ms": {
+        "n": 12,
+        "min": 0,
+        "p50": 0,
+        "p95": 0,
+        "max": 0
+      },
+      "external_ms": {
+        "n": 12,
+        "min": 11.164649855345488,
+        "p50": 12.046653777360916,
+        "p95": 274.43829691037536,
+        "max": 274.43829691037536
+      }
+    },
+    "quiescent": {
+      "stage_sum_ms": {
+        "n": 12,
+        "min": 0,
+        "p50": 0,
+        "p95": 0,
+        "max": 0
+      },
+      "external_ms": {
+        "n": 12,
+        "min": 11.214575730264187,
+        "p50": 12.003347743302584,
+        "p95": 12.360794004052877,
+        "max": 12.360794004052877
+      }
+    }
+  }
+}
