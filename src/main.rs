@@ -10063,6 +10063,7 @@ peer_group = "plain"
                     import_policy_chain: Vec::new(),
                     export_policy_chain: Vec::new(),
                     conditional_advertisements: Vec::new(),
+                    route_flap_dampening: None,
                     log_level: None,
                 },
                 crate::config::Neighbor {
@@ -10122,6 +10123,7 @@ peer_group = "plain"
                     import_policy_chain: Vec::new(),
                     export_policy_chain: Vec::new(),
                     conditional_advertisements: Vec::new(),
+                    route_flap_dampening: None,
                     log_level: None,
                 },
                 crate::config::Neighbor {
@@ -10181,6 +10183,7 @@ peer_group = "plain"
                     import_policy_chain: Vec::new(),
                     export_policy_chain: Vec::new(),
                     conditional_advertisements: Vec::new(),
+                    route_flap_dampening: None,
                     log_level: None,
                 },
             ],

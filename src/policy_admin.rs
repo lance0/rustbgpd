@@ -580,6 +580,7 @@ fn raw_neighbor(raw: &PresenceAwareNeighborCreate) -> Result<Neighbor, ConfigErr
         import_policy_chain: Vec::new(),
         export_policy_chain: Vec::new(),
         conditional_advertisements: Vec::new(),
+        route_flap_dampening: None,
     })
 }
 
@@ -703,6 +704,7 @@ pub fn apply_config_event(config: &mut Config, event: &ConfigEvent) -> Result<()
                     import_policy_chain: Vec::new(),
                     export_policy_chain: Vec::new(),
                     conditional_advertisements: Vec::new(),
+                    route_flap_dampening: None,
                     log_level: None,
                 });
             }
@@ -1557,6 +1559,7 @@ peer_group = "fabric"
                 link_local_next_hop: Some(true),
                 log_level: Some("debug".into()),
                 conditional_advertisements: vec!["backup".into()],
+                route_flap_dampening: Some(false),
                 // API-owned fields. No `..Default::default()`: a new
                 // field must be added here before this test compiles.
                 min_hold_time: None,

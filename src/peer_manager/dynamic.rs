@@ -181,6 +181,10 @@ impl PeerManager {
     /// live `dynamic_ranges` and the `current_config` snapshot so a later
     /// `ConfigEvent` persists it. Overlapping ranges of different lengths are
     /// allowed — longest-prefix-match resolves them at accept time.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "dynamic range admission keeps all validation ahead of both live and persisted state updates"
+    )]
     pub(super) fn add_dynamic_range(
         &mut self,
         prefix: String,
@@ -196,6 +200,13 @@ impl PeerManager {
                 "peer_group {peer_group:?} not defined"
             )));
         };
+        self.current_config
+            .validate_dynamic_route_flap_dampening(remote_asn, group)
+            .map_err(|reason| {
+                DynamicRangeError::Invalid(format!(
+                    "route_flap_dampening via peer_group {peer_group:?}: {reason}"
+                ))
+            })?;
         if group.bfd.as_ref().is_some_and(|b| b.enabled) {
             return Err(DynamicRangeError::Invalid(format!(
                 "peer_group {peer_group:?} enables BFD, which is not supported for \

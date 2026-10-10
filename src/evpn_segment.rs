@@ -66,7 +66,7 @@ use tracing::{debug, info, warn};
 
 use crate::evpn_ack::{PendingRibOps, RibAckOutcome, send_and_ack};
 use crate::evpn_es_link_drain::EsLinkBindings;
-use crate::evpn_originator::{LOCAL_PEER, route_target_to_extcomm};
+use crate::evpn_originator::{LOCAL_PEER, instance_extcomms};
 
 /// RFC 9785 §4.3 boot-timer ceiling: any recovery decision due within this
 /// long of actor start waits for every established EVPN session's End-of-RIB
@@ -2085,7 +2085,8 @@ async fn retry_pending_rib_ops(
 /// Build the wire-shaped `EvpnRibRoute` for a Type 1/4 origination.
 ///
 /// Path attributes: Origin, empty `AsPath`, plus the instance's
-/// configured RT extcomms. The VTEP IP is carried separately as the
+/// configured RT extcomms and the VXLAN BGP Encapsulation extcomm
+/// (RFC 8365 §5.1.3 lists ES and both EAD routes). The VTEP IP is carried separately as the
 /// route's `next_hop` and encoded only in `MP_REACH_NLRI`; no `NEXT_HOP`
 /// attribute is stored. Per RFC 7432, Gate 8b prep
 /// also attaches:
@@ -2201,12 +2202,7 @@ fn build_es_route(
             }
         };
 
-    let mut ext_communities: Vec<rustbgpd_wire::ExtendedCommunity> = instance
-        .route_targets
-        .iter()
-        .copied()
-        .map(route_target_to_extcomm)
-        .collect();
+    let mut ext_communities = instance_extcomms(instance);
     ext_communities.extend(key_specific_extcomms);
 
     let attributes: Vec<PathAttribute> = vec![
@@ -2256,7 +2252,10 @@ mod tests {
     use rustbgpd_evpn::{EvpnInstance, EvpnInstanceTable};
     use rustbgpd_wire::{EthernetTagId, ExtendedCommunity};
 
-    use crate::test_support::{RibReplyMode, ScriptedRib, evpn_instance, ip as ipa, rd, vni};
+    use crate::test_support::{
+        RibReplyMode, ScriptedRib, assert_wire_vxlan_encapsulation, evpn_instance, ip as ipa, rd,
+        vni,
+    };
 
     fn esi(seed: u8) -> EthernetSegmentIdentifier {
         EthernetSegmentIdentifier::new([seed; 10])
@@ -2533,6 +2532,43 @@ mod tests {
                 assert_eq!(r.label.value(), 100, "label must carry the instance VNI");
             }
             other => panic!("expected EadPerEvi, got {other:?}"),
+        }
+    }
+
+    /// RFC 8365 §5.1.3 lists ES, EAD-per-ES and EAD-per-EVI routes among
+    /// those that carry the VXLAN Encapsulation extended community.
+    #[test]
+    fn es_and_ead_wire_attributes_carry_vxlan_encapsulation() {
+        let inst = instance(100);
+        let keys = [
+            EvpnRouteKey::Es {
+                rd: rd(65000, 100),
+                esi: esi(1),
+                originator_ip: ipa("10.0.0.1"),
+            },
+            EvpnRouteKey::EadPerEs {
+                rd: rd(65000, 100),
+                esi: esi(1),
+                ethernet_tag: EthernetTagId::MAX_ET,
+            },
+            EvpnRouteKey::EadPerEvi {
+                rd: rd(65000, 100),
+                esi: esi(1),
+                ethernet_tag: EthernetTagId(0),
+            },
+        ];
+        for key in keys {
+            let route = build_es_route(
+                &inst,
+                &key,
+                MplsLabel::new(123),
+                DfAlgorithm::DefaultModulo,
+                32_768,
+                false,
+                RedundancyMode::AllActive,
+            )
+            .expect("ES route builder accepts Type 1/4 keys");
+            assert_wire_vxlan_encapsulation(&route);
         }
     }
 

@@ -2293,6 +2293,7 @@ pub(crate) async fn reload_config_with_tcp_ao(
         || policy_diff.import_chain_changed
         || policy_diff.export_chain_changed
         || !policy_diff.conditional_advertisements_changed.is_empty()
+        || policy_diff.route_flap_dampening_changed
         || policy_diff.rpol_changed;
     let dataset_events_pending = !new_config.policy.dataset_events.swapped.is_empty()
         || !new_config.policy.dataset_events.failed.is_empty();
@@ -10710,6 +10711,23 @@ peer_group = "secure"
             "a policy addition is one generation with no session action"
         );
         assert!(returned.policy.definitions.contains_key("block-private"));
+    }
+
+    #[tokio::test]
+    async fn reload_adopts_disabled_dampening_parameters_without_session_actions() {
+        let new_toml = format!(
+            "{}\n[policy.route_flap_dampening]\nmode = \"observe\"\nsuppress = 7000\n",
+            baseline_toml()
+        );
+        let (returned, tags) = drive_reload(baseline_toml(), &new_toml).await;
+        assert_eq!(
+            tags,
+            ["ApplyReloadGeneration(hot=0,replace=0,add=0,remove=0)"]
+        );
+        let returned = returned.expect("disabled schema reload succeeds");
+        let parameters = returned.policy.route_flap_dampening.as_ref().unwrap();
+        assert_eq!(parameters.suppress, 7000);
+        assert_eq!(parameters.mode, config::DampeningMode::Observe);
     }
 
     /// ADR-0073: an explain-only reload must adopt the new

@@ -603,6 +603,21 @@
         2
       ]
     },
+    "DampeningMode": {
+      "description": "Future dampening runtime mode (RFC 7196 test mode is observe).",
+      "oneOf": [
+        {
+          "description": "Suppress unstable received paths.",
+          "type": "string",
+          "const": "suppress"
+        },
+        {
+          "description": "Calculate penalties without changing route eligibility.",
+          "type": "string",
+          "const": "observe"
+        }
+      ]
+    },
     "DatasetFileConfig": {
       "description": "One `[policy.datasets.<name>]` binding.",
       "type": "object",
@@ -2433,6 +2448,13 @@
             }
           ]
         },
+        "route_flap_dampening": {
+          "description": "Alpha route flap dampening enablement override. Runtime hooks\nare not implemented; effective enablement is rejected.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
         "route_reflector_client": {
           "description": "Mark this neighbor as a route reflector client (RFC 4456).\nOnly valid for iBGP neighbors (`remote_asn` == `global.asn`).",
           "type": [
@@ -2951,6 +2973,13 @@
             }
           ]
         },
+        "route_flap_dampening": {
+          "description": "Alpha dampening override inherited by eBGP neighbors. File-only;\neffective enablement is rejected until runtime hooks exist.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
         "route_reflector_client": {
           "description": "Mark neighbors in this group as route reflector clients (RFC 4456).",
           "type": [
@@ -3116,6 +3145,17 @@
             "capacity": 1024,
             "enabled": true
           }
+        },
+        "route_flap_dampening": {
+          "description": "Alpha dampening parameter schema. Effective enablement is rejected:\nthe pure penalty engine is not yet connected to received routes.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RouteFlapDampeningConfig"
+            },
+            {
+              "type": "null"
+            }
+          ]
         },
         "rpol_files": {
           "description": "`.rpol` policy-language files (ADR-0096) compiled at config\nload. Relative paths resolve against the config file's\ndirectory and are rewritten to absolute paths after load (so\nruntime config snapshots and transaction candidates stay\nloadable regardless of the daemon's working directory).\nCompile diagnostics are config load errors. The policies they\ndefine share one namespace with `[policy.definitions]`; chains\nreference them by name, parameterized policies by call-form\n(`\"customer-in(200)\"`).",
@@ -3388,6 +3428,55 @@
       "required": [
         "action"
       ]
+    },
+    "RouteFlapDampeningConfig": {
+      "description": "`[policy.route_flap_dampening]` parameters, reserved for an alpha runtime\nimplementation. Loading validates them but refuses effective enablement.",
+      "type": "object",
+      "properties": {
+        "apply_to_ebgp": {
+          "description": "Default enablement for eligible eBGP peers; effective enablement is unavailable.",
+          "type": "boolean",
+          "default": false
+        },
+        "half_life": {
+          "description": "Seconds for a penalty to halve (60..=2700).",
+          "type": "integer",
+          "format": "uint32",
+          "default": 900,
+          "maximum": 2700,
+          "minimum": 60
+        },
+        "max_suppress_time": {
+          "description": "Maximum hold seconds after flapping stops (`half_life`..=14400).",
+          "type": "integer",
+          "format": "uint32",
+          "default": 3600,
+          "maximum": 14400,
+          "minimum": 60
+        },
+        "mode": {
+          "description": "Future runtime behavior; neither mode is activated in this slice.",
+          "$ref": "#/$defs/DampeningMode",
+          "default": "suppress"
+        },
+        "reuse": {
+          "description": "Reuse strictly below this penalty (1..=49999).",
+          "type": "integer",
+          "format": "uint32",
+          "default": 750,
+          "maximum": 49999,
+          "minimum": 1
+        },
+        "suppress": {
+          "description": "Suppress at this penalty; must exceed reuse and not exceed the ceiling.",
+          "type": "integer",
+          "format": "uint32",
+          "default": 6000,
+          "maximum": 50000,
+          "minimum": 2
+        }
+      },
+      "additionalProperties": false
     },
     "RpkiConfig": {
       "type": "object",

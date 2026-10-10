@@ -2984,6 +2984,54 @@ neighbor's export chain always applies and the advertise policy's set
 actions never do; and startup waits for `settle_time` instead of advertising
 immediately.
 
+### Route flap dampening preparation (alpha)
+
+The optional `[policy.route_flap_dampening]` schema and pure penalty engine
+are preparation for received-route dampening. **No route is dampened in this
+slice.** Effective enablement is rejected at startup, reload and runtime
+neighbor admission, in both `suppress` and `observe` mode. The fields remain
+outside the v1 contract. Omitting them preserves existing behavior and the
+persisted configuration shape.
+
+```toml
+[policy.route_flap_dampening]
+apply_to_ebgp = false
+half_life = 900          # seconds
+reuse = 750
+suppress = 6000
+max_suppress_time = 3600 # seconds
+mode = "suppress"       # "observe" is also accepted while disabled
+```
+
+`half_life` accepts 60–2700 seconds; `reuse` accepts 1–49999; `suppress` must
+exceed `reuse` and be at most 50000. `max_suppress_time` must be at least
+`half_life` and at most 14400 seconds. The computed ceiling is
+`reuse * 2^(max_suppress_time / half_life)`: it must be at least `suppress`
+and at most 1000000. The default ceiling is 12000. Invalid parameters are
+refused even when enablement is off.
+
+The optional `route_flap_dampening` boolean resolves from the neighbor,
+then its peer group, then `apply_to_ebgp`. An explicit false overrides
+inherited true. An explicit true on an iBGP neighbor or route-server client
+is refused; inherited settings do not apply to those roles. An effective
+true on an eligible static or dynamic eBGP peer is refused until runtime
+integration exists. A dynamic range accepting any ASN is potentially eBGP
+and is checked before admission. `SetPeerGroup` and unrelated neighbor
+mutations preserve the file-only settings. Disabled parameter edits adopt
+through the SIGHUP generation snapshot; incompatible sequential edits are
+rejected, as the [reload matrix](reload-matrix.md) describes.
+
+The standalone engine accounts for withdrawals (+1000), attribute changes
+(+500) and re-announcements (+0), with exponential decay, suppress/reuse
+hysteresis and one removable deadline per history key. Processing due work
+has an explicit entry budget. It neither holds routes nor runs an actor
+timer. Future received-route integration must bind each owner to the full
+peer identity, including accepted dynamic-range provenance, and resolve
+release keys against current route/session state rather than saved routes.
+These requirements address the identity and release-order questions in the
+historical [ADR-0138](../adr/0138-route-flap-dampening.md); its parked design
+and modeled memory figures remain historical, not runtime evidence.
+
 ### `.rpol` policy files (`rpol_files`, ADR-0096)
 
 Policies written in the rustbgpd policy language

@@ -1001,12 +1001,7 @@ pub(crate) fn build_originated_route(
         label2: None,
     };
 
-    let mut ext_communities: Vec<ExtendedCommunity> = instance
-        .route_targets
-        .iter()
-        .copied()
-        .map(route_target_to_extcomm)
-        .collect();
+    let mut ext_communities = instance_extcomms(instance);
     if let Some(seq) = mobility_seq {
         ext_communities.push(ExtendedCommunity::mac_mobility(sticky, seq));
     } else if sticky {
@@ -1036,40 +1031,25 @@ pub(crate) fn build_originated_route(
     }
 }
 
-/// Encode an [`rustbgpd_evpn::RouteTarget`] into the wire-format
-/// 8-byte Extended Community per RFC 4360 §4. Three forms differ only
-/// in the type byte (`0x00` 2-octet AS, `0x01` IPv4, `0x02` 4-octet
-/// AS) and the value-field width split. Subtype is always `0x02`
-/// (Route Target).
-///
-/// Shared with [`crate::evpn_imet`] which encodes the same RT set on
-/// Type 3 routes.
-pub(crate) fn route_target_to_extcomm(rt: rustbgpd_evpn::RouteTarget) -> ExtendedCommunity {
-    use rustbgpd_evpn::RouteTarget;
-    match rt {
-        RouteTarget::TwoOctetAs { asn, value } => {
-            let a = asn.to_be_bytes();
-            let v = value.to_be_bytes();
-            ExtendedCommunity::new(u64::from_be_bytes([
-                0x00, 0x02, a[0], a[1], v[0], v[1], v[2], v[3],
-            ]))
-        }
-        RouteTarget::Ipv4 { ipv4, value } => {
-            let a = ipv4.octets();
-            let v = value.to_be_bytes();
-            ExtendedCommunity::new(u64::from_be_bytes([
-                0x01, 0x02, a[0], a[1], a[2], a[3], v[0], v[1],
-            ]))
-        }
-        RouteTarget::FourOctetAs { asn, value } => {
-            let a = asn.to_be_bytes();
-            let v = value.to_be_bytes();
-            ExtendedCommunity::new(u64::from_be_bytes([
-                0x02, 0x02, a[0], a[1], a[2], a[3], v[0], v[1],
-            ]))
-        }
-    }
+/// Extended Communities every route originated for `instance` carries:
+/// each configured Route Target, then the BGP Encapsulation extended
+/// community for VXLAN (tunnel type 8). RFC 8365 §5.1.3 includes the
+/// latter with all EVPN routes an egress NVE advertises (MAC/IP, EAD
+/// per EVI and per ES, IMET and ES routes); the local VTEP is
+/// VXLAN-only. Shared by the Type 1/2/3/4 builders in this module,
+/// [`crate::evpn_imet`] and [`crate::evpn_segment`].
+pub(crate) fn instance_extcomms(instance: &EvpnInstance) -> Vec<ExtendedCommunity> {
+    instance
+        .route_targets
+        .iter()
+        .copied()
+        .map(rustbgpd_evpn::RouteTarget::to_extended_community)
+        .chain([ExtendedCommunity::bgp_encapsulation(VXLAN_TUNNEL_TYPE)])
+        .collect()
 }
+
+/// IANA BGP Tunnel Encapsulation type for VXLAN (RFC 8365 §11).
+const VXLAN_TUNNEL_TYPE: u16 = 8;
 
 #[derive(Debug, thiserror::Error)]
 enum RibQueryError {

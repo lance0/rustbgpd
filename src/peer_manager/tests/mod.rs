@@ -1264,6 +1264,7 @@ fn config_neighbor(addr: IpAddr, remote_asn: u32) -> crate::config::Neighbor {
         import_policy_chain: Vec::new(),
         export_policy_chain: Vec::new(),
         conditional_advertisements: Vec::new(),
+        route_flap_dampening: None,
     }
 }
 
