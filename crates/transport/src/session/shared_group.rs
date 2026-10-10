@@ -9,11 +9,13 @@
 //! UPDATE by the total encode time divided by the core count.
 //!
 //! The first member to consume its envelope is elected encoder through the
-//! envelope's [`rustbgpd_rib::SharedGroupEncode`] cell (a synchronous `OnceLock`, so the
-//! election commits with no await point that could strand an initialized
-//! cell without a live encoder). The encoder prepares, groups, and encodes
-//! the inventory in bounded route slices, publishing each slice's chunks as
-//! they are produced; every other member proves byte-equivalence with
+//! envelope's [`rustbgpd_rib::SharedGroupEncode`] cell, a synchronous `OnceLock`.
+//! Election and terminal-guard installation complete before any suspension;
+//! the producer retains the guard across slice yields, so an initialized cell
+//! has either a live encoder or a terminal stream. After grouping the whole
+//! inventory by source, the encoder prepares, groups, and encodes bounded
+//! route slices, publishing each slice's chunks as they are produced. Every
+//! other member proves byte-equivalence with
 //! [`SessionExportProfile::has_same_wire_encoding`] and then *streams* the
 //! chunks — sending chunk `i` as soon as it exists instead of awaiting the
 //! whole payload — skipping the chunks of its own source (split horizon)
@@ -22,10 +24,11 @@
 //!
 //! Failure semantics: any anomaly (preparation failure, OTC filter hit,
 //! single-entry oversize, scoped-link-local IPv4 drop) terminates the
-//! stream as `Failed` — published by a drop guard even if the encoder
-//! unwinds — and every member falls back to the ordinary per-session
-//! encode, which owns the established diagnostics and teardown semantics
-//! for each case. Mid-stream fallback is safe by construction — the
+//! stream as `Failed`. The drop guard also publishes failure and notifies
+//! waiters if the encoder unwinds or its suspended future is cancelled.
+//! Every member falls back to the ordinary per-session encode, which owns
+//! the established diagnostics and teardown semantics for each case.
+//! Mid-stream fallback is safe by construction — the
 //! invariant is per-NLRI attribute identity, not byte-identical chunks (an
 //! extended-message member's local re-encode chunks at its negotiated
 //! ceiling, and the shared stream's source-sorted walk yields different
@@ -220,9 +223,10 @@ impl ProgressiveUnicastEncode {
     }
 }
 
-/// Publishes `Failed` if the encoder unwinds (panic or early return) before
-/// its explicit `finish(Complete)`, so consumers can never wait forever on a
-/// stream with no live encoder.
+/// Publishes `Failed` and notifies waiters if the producer returns early,
+/// unwinds, or is cancelled before its explicit `finish(Complete)`. Installed
+/// before the first suspension and retained across slice yields, the guard
+/// keeps the stream backed by either a live encoder or a terminal result.
 pub(super) struct EncoderGuard<'cell>(pub(super) &'cell ProgressiveUnicastEncode);
 
 impl Drop for EncoderGuard<'_> {
@@ -607,7 +611,7 @@ impl PeerSession {
             }
             encode.publish(chunks);
             idx = end;
-            if idx < order.len() {
+            if idx < order.len() && idx.is_multiple_of(2 * PROGRESSIVE_SLICE_ROUTES) {
                 tokio::task::yield_now().await;
             }
         }

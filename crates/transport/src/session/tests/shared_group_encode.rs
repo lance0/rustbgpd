@@ -644,7 +644,7 @@ async fn shared_group_encoder_and_buffered_consumer_service_queued_reads() {
 }
 
 fn shared_fairness_routes() -> Vec<Route> {
-    (0..=2 * super::shared_group::PROGRESSIVE_SLICE_ROUTES)
+    (0..=4 * super::shared_group::PROGRESSIVE_SLICE_ROUTES)
         .map(|index| {
             let index = u32::try_from(index).unwrap();
             let source = Ipv4Addr::new(10, 44, 0, if index % 2 == 0 { 1 } else { 2 });
@@ -669,7 +669,7 @@ fn shared_fairness_member() -> (
     let (mut member, commands, _rib_rx) = make_test_session_with_channels(65001, 65002, 64);
     member.negotiated = Some(Arc::new(negotiated_session(65002, false)));
     member.config.route_server_client = true;
-    let (bulk, frames) = mpsc::channel(8192);
+    let (bulk, frames) = mpsc::channel(1 << 16);
     member.writer_bulk_tx = Some(bulk);
     (member, commands, frames)
 }
@@ -705,7 +705,7 @@ async fn shared_group_elected_encoder_yields_for_new_reads() {
         .downcast_ref::<ProgressiveUnicastEncode>()
         .unwrap();
     let (published, terminal) = stream.test_snapshot();
-    assert_eq!(published, super::shared_group::PROGRESSIVE_SLICE_ROUTES);
+    assert_eq!(published, 2 * super::shared_group::PROGRESSIVE_SLICE_ROUTES);
     assert_eq!(terminal, None);
 
     let (reply, mut response) = oneshot::channel();
@@ -823,10 +823,13 @@ async fn shared_group_elected_encoder_cancellation_wakes_follower_and_falls_back
         .unwrap();
     assert_eq!(
         stream.test_snapshot(),
-        (super::shared_group::PROGRESSIVE_SLICE_ROUTES, None)
+        (2 * super::shared_group::PROGRESSIVE_SLICE_ROUTES, None)
     );
     let update = shared_group_envelope(&follower, &shared, excluded, &routes);
     follower.handle_outbound_route_update(update).await;
+    assert_eq!(follower.updates_sent, 2048);
+    follower.advance_pending_outbound();
+    assert_eq!(follower.updates_sent, 4096);
     {
         let pending = follower.pending_outbound.as_ref().unwrap();
         let ready = pending.ready(follower.writer_bulk_tx.as_ref());
@@ -868,11 +871,11 @@ async fn shared_group_elected_encoder_cancellation_wakes_follower_and_falls_back
     }
     assert_eq!(
         counts.len(),
-        super::shared_group::PROGRESSIVE_SLICE_ROUTES + 1
+        2 * super::shared_group::PROGRESSIVE_SLICE_ROUTES + 1
     );
     assert_eq!(
         counts.values().filter(|&&count| count == 2).count(),
-        super::shared_group::PROGRESSIVE_SLICE_ROUTES
+        2 * super::shared_group::PROGRESSIVE_SLICE_ROUTES
     );
     assert_eq!(counts.values().filter(|&&count| count == 1).count(), 1);
 }
