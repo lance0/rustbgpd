@@ -1,0 +1,1794 @@
+[
+  {
+    "run": "parent-r1",
+    "reload": 1,
+    "sighup_wall": 1791652847.848302,
+    "rib_commit_wall": 1791652849.06509,
+    "complete_wall": 1791652849.069413,
+    "sighup_to_commit_ms": 1216.7880535125732,
+    "sighup_to_complete_ms": 1221.1110591888428,
+    "rib_transition": {
+      "message": "RIB export-policy transition completed",
+      "outcome": "committed",
+      "member_count": 1000,
+      "elapsed_ms": 562
+    },
+    "phase_timing": {
+      "message": "reload generation phase timing",
+      "target": "reload_generation_phase",
+      "total_targets": 1000,
+      "cohort_targets": 1000,
+      "remainder_targets": 0,
+      "refresh_count": 0,
+      "outcome": "committed",
+      "authoritative_fallback": false,
+      "preflight_us": 152,
+      "cohort_selection_us": 7634,
+      "cohort_prestage_session_apply_us": 586001,
+      "cohort_rib_transition_us": 563384,
+      "authoritative_remainder_apply_us": 0,
+      "deferred_refresh_dispatch_us": 7,
+      "convergence_check_us": 165,
+      "total_us": 1158543,
+      "unattributed_us": 1200
+    },
+    "calls": [
+      {
+        "phase": "pair",
+        "op": "policy_stats",
+        "duration_ms": 12.438321020454168,
+        "exit": 0,
+        "start_minus_rib_commit_ms": -562.246561050415
+      },
+      {
+        "phase": "pair",
+        "op": "neighbor",
+        "duration_ms": 21.68903686106205,
+        "exit": 0,
+        "start_minus_rib_commit_ms": -562.4756813049316
+      },
+      {
+        "phase": "quiescent",
+        "op": "policy_stats",
+        "duration_ms": 12.798971962183714,
+        "exit": 0,
+        "start_minus_rib_commit_ms": 20004.39763069153
+      }
+    ],
+    "cell_verdict": "PASS",
+    "exits": {
+      "cell": 0,
+      "daemon": 0,
+      "engine": 0,
+      "probe": 0
+    }
+  },
+  {
+    "run": "parent-r1",
+    "reload": 2,
+    "sighup_wall": 1791652891.628468,
+    "rib_commit_wall": 1791652892.879265,
+    "complete_wall": 1791652892.883827,
+    "sighup_to_commit_ms": 1250.7970333099365,
+    "sighup_to_complete_ms": 1255.3589344024658,
+    "rib_transition": {
+      "message": "RIB export-policy transition completed",
+      "outcome": "committed",
+      "member_count": 1000,
+      "elapsed_ms": 572
+    },
+    "phase_timing": {
+      "message": "reload generation phase timing",
+      "target": "reload_generation_phase",
+      "total_targets": 1000,
+      "cohort_targets": 1000,
+      "remainder_targets": 0,
+      "refresh_count": 0,
+      "outcome": "committed",
+      "authoritative_fallback": false,
+      "preflight_us": 93,
+      "cohort_selection_us": 10202,
+      "cohort_prestage_session_apply_us": 609775,
+      "cohort_rib_transition_us": 573267,
+      "authoritative_remainder_apply_us": 1,
+      "deferred_refresh_dispatch_us": 8,
+      "convergence_check_us": 157,
+      "total_us": 1194668,
+      "unattributed_us": 1165
+    },
+    "calls": [
+      {
+        "phase": "pair",
+        "op": "policy_stats",
+        "duration_ms": 298.1495694257319,
+        "exit": 0,
+        "start_minus_rib_commit_ms": -119.56477165222168
+      },
+      {
+        "phase": "pair",
+        "op": "neighbor",
+        "duration_ms": 406.94450912997127,
+        "exit": 0,
+        "start_minus_rib_commit_ms": -119.68135833740234
+      },
+      {
+        "phase": "quiescent",
+        "op": "policy_stats",
+        "duration_ms": 12.220444157719612,
+        "exit": 0,
+        "start_minus_rib_commit_ms": 20004.647731781006
+      }
+    ],
+    "cell_verdict": "PASS",
+    "exits": {
+      "cell": 0,
+      "daemon": 0,
+      "engine": 0,
+      "probe": 0
+    }
+  },
+  {
+    "run": "parent-r1",
+    "reload": 3,
+    "sighup_wall": 1791652935.851269,
+    "rib_commit_wall": 1791652936.966064,
+    "complete_wall": 1791652936.970528,
+    "sighup_to_commit_ms": 1114.7949695587158,
+    "sighup_to_complete_ms": 1119.2588806152344,
+    "rib_transition": {
+      "message": "RIB export-policy transition completed",
+      "outcome": "committed",
+      "member_count": 1000,
+      "elapsed_ms": 551
+    },
+    "phase_timing": {
+      "message": "reload generation phase timing",
+      "target": "reload_generation_phase",
+      "total_targets": 1000,
+      "cohort_targets": 1000,
+      "remainder_targets": 0,
+      "refresh_count": 0,
+      "outcome": "committed",
+      "authoritative_fallback": false,
+      "preflight_us": 91,
+      "cohort_selection_us": 4213,
+      "cohort_prestage_session_apply_us": 502815,
+      "cohort_rib_transition_us": 551949,
+      "authoritative_remainder_apply_us": 1,
+      "deferred_refresh_dispatch_us": 7,
+      "convergence_check_us": 155,
+      "total_us": 1060402,
+      "unattributed_us": 1171
+    },
+    "calls": [
+      {
+        "phase": "pair",
+        "op": "policy_stats",
+        "duration_ms": 232.04837506636977,
+        "exit": 0,
+        "start_minus_rib_commit_ms": -88.32502365112305
+      },
+      {
+        "phase": "pair",
+        "op": "neighbor",
+        "duration_ms": 337.8970022313297,
+        "exit": 0,
+        "start_minus_rib_commit_ms": -88.42778205871582
+      },
+      {
+        "phase": "quiescent",
+        "op": "policy_stats",
+        "duration_ms": 11.917480733245611,
+        "exit": 0,
+        "start_minus_rib_commit_ms": 20004.515409469604
+      }
+    ],
+    "cell_verdict": "PASS",
+    "exits": {
+      "cell": 0,
+      "daemon": 0,
+      "engine": 0,
+      "probe": 0
+    }
+  },
+  {
+    "run": "parent-r1",
+    "reload": 4,
+    "sighup_wall": 1791652979.453547,
+    "rib_commit_wall": 1791652980.644508,
+    "complete_wall": 1791652980.649789,
+    "sighup_to_commit_ms": 1190.9608840942383,
+    "sighup_to_complete_ms": 1196.242094039917,
+    "rib_transition": {
+      "message": "RIB export-policy transition completed",
+      "outcome": "committed",
+      "member_count": 1000,
+      "elapsed_ms": 556
+    },
+    "phase_timing": {
+      "message": "reload generation phase timing",
+      "target": "reload_generation_phase",
+      "total_targets": 1000,
+      "cohort_targets": 1000,
+      "remainder_targets": 0,
+      "refresh_count": 0,
+      "outcome": "committed",
+      "authoritative_fallback": false,
+      "preflight_us": 173,
+      "cohort_selection_us": 11929,
+      "cohort_prestage_session_apply_us": 537212,
+      "cohort_rib_transition_us": 582255,
+      "authoritative_remainder_apply_us": 1,
+      "deferred_refresh_dispatch_us": 7,
+      "convergence_check_us": 159,
+      "total_us": 1133152,
+      "unattributed_us": 1416
+    },
+    "calls": [
+      {
+        "phase": "pair",
+        "op": "policy_stats",
+        "duration_ms": 309.64412121102214,
+        "exit": 0,
+        "start_minus_rib_commit_ms": -140.02180099487305
+      },
+      {
+        "phase": "pair",
+        "op": "neighbor",
+        "duration_ms": 418.80054073408246,
+        "exit": 0,
+        "start_minus_rib_commit_ms": -140.14863967895508
+      },
+      {
+        "phase": "quiescent",
+        "op": "policy_stats",
+        "duration_ms": 11.74579281359911,
+        "exit": 0,
+        "start_minus_rib_commit_ms": 20005.33628463745
+      }
+    ],
+    "cell_verdict": "PASS",
+    "exits": {
+      "cell": 0,
+      "daemon": 0,
+      "engine": 0,
+      "probe": 0
+    }
+  },
+  {
+    "run": "parent-r1",
+    "reload": 5,
+    "sighup_wall": 1791653023.268147,
+    "rib_commit_wall": 1791653024.389058,
+    "complete_wall": 1791653024.393677,
+    "sighup_to_commit_ms": 1120.9111213684082,
+    "sighup_to_complete_ms": 1125.5300045013428,
+    "rib_transition": {
+      "message": "RIB export-policy transition completed",
+      "outcome": "committed",
+      "member_count": 1000,
+      "elapsed_ms": 555
+    },
+    "phase_timing": {
+      "message": "reload generation phase timing",
+      "target": "reload_generation_phase",
+      "total_targets": 1000,
+      "cohort_targets": 1000,
+      "remainder_targets": 0,
+      "refresh_count": 0,
+      "outcome": "committed",
+      "authoritative_fallback": false,
+      "preflight_us": 179,
+      "cohort_selection_us": 4472,
+      "cohort_prestage_session_apply_us": 502376,
+      "cohort_rib_transition_us": 555908,
+      "authoritative_remainder_apply_us": 1,
+      "deferred_refresh_dispatch_us": 7,
+      "convergence_check_us": 160,
+      "total_us": 1064322,
+      "unattributed_us": 1219
+    },
+    "calls": [
+      {
+        "phase": "pair",
+        "op": "policy_stats",
+        "duration_ms": 231.1368677765131,
+        "exit": 0,
+        "start_minus_rib_commit_ms": -83.42766761779785
+      },
+      {
+        "phase": "pair",
+        "op": "neighbor",
+        "duration_ms": 327.3835298605263,
+        "exit": 0,
+        "start_minus_rib_commit_ms": -83.52231979370117
+      },
+      {
+        "phase": "quiescent",
+        "op": "policy_stats",
+        "duration_ms": 12.210328597575426,
+        "exit": 0,
+        "start_minus_rib_commit_ms": 20004.69946861267
+      }
+    ],
+    "cell_verdict": "PASS",
+    "exits": {
+      "cell": 0,
+      "daemon": 0,
+      "engine": 0,
+      "probe": 0
+    }
+  },
+  {
+    "run": "parent-r1",
+    "reload": 6,
+    "sighup_wall": 1791653066.879542,
+    "rib_commit_wall": 1791653067.997558,
+    "complete_wall": 1791653068.002645,
+    "sighup_to_commit_ms": 1118.016004562378,
+    "sighup_to_complete_ms": 1123.1029033660889,
+    "rib_transition": {
+      "message": "RIB export-policy transition completed",
+      "outcome": "committed",
+      "member_count": 1000,
+      "elapsed_ms": 554
+    },
+    "phase_timing": {
+      "message": "reload generation phase timing",
+      "target": "reload_generation_phase",
+      "total_targets": 1000,
+      "cohort_targets": 1000,
+      "remainder_targets": 0,
+      "refresh_count": 0,
+      "outcome": "committed",
+      "authoritative_fallback": false,
+      "preflight_us": 61,
+      "cohort_selection_us": 4725,
+      "cohort_prestage_session_apply_us": 503350,
+      "cohort_rib_transition_us": 555128,
+      "authoritative_remainder_apply_us": 1,
+      "deferred_refresh_dispatch_us": 7,
+      "convergence_check_us": 157,
+      "total_us": 1064621,
+      "unattributed_us": 1192
+    },
+    "calls": [
+      {
+        "phase": "pair",
+        "op": "policy_stats",
+        "duration_ms": 284.7492881119251,
+        "exit": 0,
+        "start_minus_rib_commit_ms": -108.8559627532959
+      },
+      {
+        "phase": "pair",
+        "op": "neighbor",
+        "duration_ms": 381.20204908773303,
+        "exit": 0,
+        "start_minus_rib_commit_ms": -108.95609855651855
+      },
+      {
+        "phase": "quiescent",
+        "op": "policy_stats",
+        "duration_ms": 15.454578213393688,
+        "exit": 0,
+        "start_minus_rib_commit_ms": 20005.11622428894
+      }
+    ],
+    "cell_verdict": "PASS",
+    "exits": {
+      "cell": 0,
+      "daemon": 0,
+      "engine": 0,
+      "probe": 0
+    }
+  },
+  {
+    "run": "parent-r1",
+    "reload": 7,
+    "sighup_wall": 1791653110.541034,
+    "rib_commit_wall": 1791653111.676984,
+    "complete_wall": 1791653111.68133,
+    "sighup_to_commit_ms": 1135.9500885009766,
+    "sighup_to_complete_ms": 1140.2959823608398,
+    "rib_transition": {
+      "message": "RIB export-policy transition completed",
+      "outcome": "committed",
+      "member_count": 1000,
+      "elapsed_ms": 558
+    },
+    "phase_timing": {
+      "message": "reload generation phase timing",
+      "target": "reload_generation_phase",
+      "total_targets": 1000,
+      "cohort_targets": 1000,
+      "remainder_targets": 0,
+      "refresh_count": 0,
+      "outcome": "committed",
+      "authoritative_fallback": false,
+      "preflight_us": 138,
+      "cohort_selection_us": 17748,
+      "cohort_prestage_session_apply_us": 502565,
+      "cohort_rib_transition_us": 559355,
+      "authoritative_remainder_apply_us": 1,
+      "deferred_refresh_dispatch_us": 7,
+      "convergence_check_us": 159,
+      "total_us": 1081261,
+      "unattributed_us": 1288
+    },
+    "calls": [
+      {
+        "phase": "pair",
+        "op": "policy_stats",
+        "duration_ms": 280.01950215548277,
+        "exit": 0,
+        "start_minus_rib_commit_ms": -113.99054527282715
+      },
+      {
+        "phase": "pair",
+        "op": "neighbor",
+        "duration_ms": 341.04692190885544,
+        "exit": 0,
+        "start_minus_rib_commit_ms": -114.11786079406738
+      },
+      {
+        "phase": "quiescent",
+        "op": "policy_stats",
+        "duration_ms": 12.027835939079523,
+        "exit": 0,
+        "start_minus_rib_commit_ms": 20004.42409515381
+      }
+    ],
+    "cell_verdict": "PASS",
+    "exits": {
+      "cell": 0,
+      "daemon": 0,
+      "engine": 0,
+      "probe": 0
+    }
+  },
+  {
+    "run": "child-r1",
+    "reload": 1,
+    "sighup_wall": 1791653207.297935,
+    "rib_commit_wall": 1791653208.392265,
+    "complete_wall": 1791653208.396732,
+    "sighup_to_commit_ms": 1094.330072402954,
+    "sighup_to_complete_ms": 1098.797082901001,
+    "rib_transition": {
+      "message": "RIB export-policy transition completed",
+      "outcome": "committed",
+      "member_count": 1000,
+      "elapsed_ms": 519
+    },
+    "phase_timing": {
+      "message": "reload generation phase timing",
+      "target": "reload_generation_phase",
+      "total_targets": 1000,
+      "cohort_targets": 1000,
+      "remainder_targets": 0,
+      "refresh_count": 0,
+      "outcome": "committed",
+      "authoritative_fallback": false,
+      "preflight_us": 58,
+      "cohort_selection_us": 4417,
+      "cohort_prestage_session_apply_us": 513372,
+      "cohort_rib_transition_us": 520211,
+      "authoritative_remainder_apply_us": 12,
+      "deferred_refresh_dispatch_us": 7,
+      "convergence_check_us": 144,
+      "total_us": 1039209,
+      "unattributed_us": 988
+    },
+    "calls": [
+      {
+        "phase": "pair",
+        "op": "policy_stats",
+        "duration_ms": 11.942666955292225,
+        "exit": 0,
+        "start_minus_rib_commit_ms": -519.4470882415771
+      },
+      {
+        "phase": "pair",
+        "op": "neighbor",
+        "duration_ms": 20.955777261406183,
+        "exit": 0,
+        "start_minus_rib_commit_ms": -519.5932388305664
+      },
+      {
+        "phase": "quiescent",
+        "op": "policy_stats",
+        "duration_ms": 12.289565987884998,
+        "exit": 0,
+        "start_minus_rib_commit_ms": 20004.528760910034
+      }
+    ],
+    "cell_verdict": "PASS",
+    "exits": {
+      "cell": 0,
+      "daemon": 0,
+      "engine": 0,
+      "probe": 0
+    }
+  },
+  {
+    "run": "child-r1",
+    "reload": 2,
+    "sighup_wall": 1791653250.990227,
+    "rib_commit_wall": 1791653252.085386,
+    "complete_wall": 1791653252.08971,
+    "sighup_to_commit_ms": 1095.1590538024902,
+    "sighup_to_complete_ms": 1099.4830131530762,
+    "rib_transition": {
+      "message": "RIB export-policy transition completed",
+      "outcome": "committed",
+      "member_count": 1000,
+      "elapsed_ms": 508
+    },
+    "phase_timing": {
+      "message": "reload generation phase timing",
+      "target": "reload_generation_phase",
+      "total_targets": 1000,
+      "cohort_targets": 1000,
+      "remainder_targets": 0,
+      "refresh_count": 0,
+      "outcome": "committed",
+      "authoritative_fallback": false,
+      "preflight_us": 101,
+      "cohort_selection_us": 26229,
+      "cohort_prestage_session_apply_us": 501886,
+      "cohort_rib_transition_us": 509150,
+      "authoritative_remainder_apply_us": 1,
+      "deferred_refresh_dispatch_us": 7,
+      "convergence_check_us": 146,
+      "total_us": 1038842,
+      "unattributed_us": 1322
+    },
+    "calls": [
+      {
+        "phase": "pair",
+        "op": "policy_stats",
+        "duration_ms": 12.527782935649157,
+        "exit": 0,
+        "start_minus_rib_commit_ms": -98.51741790771484
+      },
+      {
+        "phase": "pair",
+        "op": "neighbor",
+        "duration_ms": 20.068188663572073,
+        "exit": 0,
+        "start_minus_rib_commit_ms": -98.70600700378418
+      },
+      {
+        "phase": "quiescent",
+        "op": "policy_stats",
+        "duration_ms": 12.275963090360165,
+        "exit": 0,
+        "start_minus_rib_commit_ms": 20004.400730133057
+      }
+    ],
+    "cell_verdict": "PASS",
+    "exits": {
+      "cell": 0,
+      "daemon": 0,
+      "engine": 0,
+      "probe": 0
+    }
+  },
+  {
+    "run": "child-r1",
+    "reload": 3,
+    "sighup_wall": 1791653294.616324,
+    "rib_commit_wall": 1791653295.711901,
+    "complete_wall": 1791653295.716677,
+    "sighup_to_commit_ms": 1095.5770015716553,
+    "sighup_to_complete_ms": 1100.3530025482178,
+    "rib_transition": {
+      "message": "RIB export-policy transition completed",
+      "outcome": "committed",
+      "member_count": 1000,
+      "elapsed_ms": 521
+    },
+    "phase_timing": {
+      "message": "reload generation phase timing",
+      "target": "reload_generation_phase",
+      "total_targets": 1000,
+      "cohort_targets": 1000,
+      "remainder_targets": 0,
+      "refresh_count": 0,
+      "outcome": "committed",
+      "authoritative_fallback": false,
+      "preflight_us": 157,
+      "cohort_selection_us": 28878,
+      "cohort_prestage_session_apply_us": 486436,
+      "cohort_rib_transition_us": 522275,
+      "authoritative_remainder_apply_us": 1,
+      "deferred_refresh_dispatch_us": 6,
+      "convergence_check_us": 154,
+      "total_us": 1039247,
+      "unattributed_us": 1340
+    },
+    "calls": [
+      {
+        "phase": "pair",
+        "op": "policy_stats",
+        "duration_ms": 13.240950182080269,
+        "exit": 0,
+        "start_minus_rib_commit_ms": -122.75505065917969
+      },
+      {
+        "phase": "pair",
+        "op": "neighbor",
+        "duration_ms": 37.06928715109825,
+        "exit": 0,
+        "start_minus_rib_commit_ms": -122.85995483398438
+      },
+      {
+        "phase": "quiescent",
+        "op": "policy_stats",
+        "duration_ms": 11.730541940778494,
+        "exit": 0,
+        "start_minus_rib_commit_ms": 20004.85348701477
+      }
+    ],
+    "cell_verdict": "PASS",
+    "exits": {
+      "cell": 0,
+      "daemon": 0,
+      "engine": 0,
+      "probe": 0
+    }
+  },
+  {
+    "run": "child-r1",
+    "reload": 4,
+    "sighup_wall": 1791653338.227857,
+    "rib_commit_wall": 1791653339.290722,
+    "complete_wall": 1791653339.295634,
+    "sighup_to_commit_ms": 1062.8647804260254,
+    "sighup_to_complete_ms": 1067.7769184112549,
+    "rib_transition": {
+      "message": "RIB export-policy transition completed",
+      "outcome": "committed",
+      "member_count": 1000,
+      "elapsed_ms": 517
+    },
+    "phase_timing": {
+      "message": "reload generation phase timing",
+      "target": "reload_generation_phase",
+      "total_targets": 1000,
+      "cohort_targets": 1000,
+      "remainder_targets": 0,
+      "refresh_count": 0,
+      "outcome": "committed",
+      "authoritative_fallback": false,
+      "preflight_us": 68,
+      "cohort_selection_us": 4177,
+      "cohort_prestage_session_apply_us": 480356,
+      "cohort_rib_transition_us": 517951,
+      "authoritative_remainder_apply_us": 1,
+      "deferred_refresh_dispatch_us": 6,
+      "convergence_check_us": 147,
+      "total_us": 1003847,
+      "unattributed_us": 1141
+    },
+    "calls": [
+      {
+        "phase": "pair",
+        "op": "policy_stats",
+        "duration_ms": 11.428887955844402,
+        "exit": 0,
+        "start_minus_rib_commit_ms": -105.41772842407227
+      },
+      {
+        "phase": "pair",
+        "op": "neighbor",
+        "duration_ms": 20.722982939332724,
+        "exit": 0,
+        "start_minus_rib_commit_ms": -105.6222915649414
+      },
+      {
+        "phase": "quiescent",
+        "op": "policy_stats",
+        "duration_ms": 12.722267303615808,
+        "exit": 0,
+        "start_minus_rib_commit_ms": 20004.98628616333
+      }
+    ],
+    "cell_verdict": "PASS",
+    "exits": {
+      "cell": 0,
+      "daemon": 0,
+      "engine": 0,
+      "probe": 0
+    }
+  },
+  {
+    "run": "child-r1",
+    "reload": 5,
+    "sighup_wall": 1791653381.789138,
+    "rib_commit_wall": 1791653382.859541,
+    "complete_wall": 1791653382.864425,
+    "sighup_to_commit_ms": 1070.4028606414795,
+    "sighup_to_complete_ms": 1075.286865234375,
+    "rib_transition": {
+      "message": "RIB export-policy transition completed",
+      "outcome": "committed",
+      "member_count": 1000,
+      "elapsed_ms": 518
+    },
+    "phase_timing": {
+      "message": "reload generation phase timing",
+      "target": "reload_generation_phase",
+      "total_targets": 1000,
+      "cohort_targets": 1000,
+      "remainder_targets": 0,
+      "refresh_count": 0,
+      "outcome": "committed",
+      "authoritative_fallback": false,
+      "preflight_us": 143,
+      "cohort_selection_us": 5113,
+      "cohort_prestage_session_apply_us": 485802,
+      "cohort_rib_transition_us": 519098,
+      "authoritative_remainder_apply_us": 1,
+      "deferred_refresh_dispatch_us": 7,
+      "convergence_check_us": 148,
+      "total_us": 1011628,
+      "unattributed_us": 1316
+    },
+    "calls": [
+      {
+        "phase": "pair",
+        "op": "policy_stats",
+        "duration_ms": 12.096897698938847,
+        "exit": 0,
+        "start_minus_rib_commit_ms": -110.93592643737793
+      },
+      {
+        "phase": "pair",
+        "op": "neighbor",
+        "duration_ms": 29.05796468257904,
+        "exit": 0,
+        "start_minus_rib_commit_ms": -111.03129386901855
+      },
+      {
+        "phase": "quiescent",
+        "op": "policy_stats",
+        "duration_ms": 12.0112388394773,
+        "exit": 0,
+        "start_minus_rib_commit_ms": 20004.952907562256
+      }
+    ],
+    "cell_verdict": "PASS",
+    "exits": {
+      "cell": 0,
+      "daemon": 0,
+      "engine": 0,
+      "probe": 0
+    }
+  },
+  {
+    "run": "child-r1",
+    "reload": 6,
+    "sighup_wall": 1791653425.362227,
+    "rib_commit_wall": 1791653426.45695,
+    "complete_wall": 1791653426.461726,
+    "sighup_to_commit_ms": 1094.7229862213135,
+    "sighup_to_complete_ms": 1099.498987197876,
+    "rib_transition": {
+      "message": "RIB export-policy transition completed",
+      "outcome": "committed",
+      "member_count": 1000,
+      "elapsed_ms": 523
+    },
+    "phase_timing": {
+      "message": "reload generation phase timing",
+      "target": "reload_generation_phase",
+      "total_targets": 1000,
+      "cohort_targets": 1000,
+      "remainder_targets": 0,
+      "refresh_count": 0,
+      "outcome": "committed",
+      "authoritative_fallback": false,
+      "preflight_us": 155,
+      "cohort_selection_us": 22940,
+      "cohort_prestage_session_apply_us": 490217,
+      "cohort_rib_transition_us": 524255,
+      "authoritative_remainder_apply_us": 1,
+      "deferred_refresh_dispatch_us": 7,
+      "convergence_check_us": 153,
+      "total_us": 1039034,
+      "unattributed_us": 1306
+    },
+    "calls": [
+      {
+        "phase": "pair",
+        "op": "policy_stats",
+        "duration_ms": 12.388973962515593,
+        "exit": 0,
+        "start_minus_rib_commit_ms": -114.90368843078613
+      },
+      {
+        "phase": "pair",
+        "op": "neighbor",
+        "duration_ms": 34.0255000628531,
+        "exit": 0,
+        "start_minus_rib_commit_ms": -115.00263214111328
+      },
+      {
+        "phase": "quiescent",
+        "op": "policy_stats",
+        "duration_ms": 11.62811229005456,
+        "exit": 0,
+        "start_minus_rib_commit_ms": 20004.850387573242
+      }
+    ],
+    "cell_verdict": "PASS",
+    "exits": {
+      "cell": 0,
+      "daemon": 0,
+      "engine": 0,
+      "probe": 0
+    }
+  },
+  {
+    "run": "child-r1",
+    "reload": 7,
+    "sighup_wall": 1791653468.914254,
+    "rib_commit_wall": 1791653470.023184,
+    "complete_wall": 1791653470.02773,
+    "sighup_to_commit_ms": 1108.9301109313965,
+    "sighup_to_complete_ms": 1113.476037979126,
+    "rib_transition": {
+      "message": "RIB export-policy transition completed",
+      "outcome": "committed",
+      "member_count": 1000,
+      "elapsed_ms": 516
+    },
+    "phase_timing": {
+      "message": "reload generation phase timing",
+      "target": "reload_generation_phase",
+      "total_targets": 1000,
+      "cohort_targets": 1000,
+      "remainder_targets": 0,
+      "refresh_count": 0,
+      "outcome": "committed",
+      "authoritative_fallback": false,
+      "preflight_us": 147,
+      "cohort_selection_us": 21809,
+      "cohort_prestage_session_apply_us": 513125,
+      "cohort_rib_transition_us": 516824,
+      "authoritative_remainder_apply_us": 1,
+      "deferred_refresh_dispatch_us": 7,
+      "convergence_check_us": 151,
+      "total_us": 1053328,
+      "unattributed_us": 1264
+    },
+    "calls": [
+      {
+        "phase": "pair",
+        "op": "policy_stats",
+        "duration_ms": 11.769393924623728,
+        "exit": 0,
+        "start_minus_rib_commit_ms": -102.29897499084473
+      },
+      {
+        "phase": "pair",
+        "op": "neighbor",
+        "duration_ms": 19.47324862703681,
+        "exit": 0,
+        "start_minus_rib_commit_ms": -102.41270065307617
+      },
+      {
+        "phase": "quiescent",
+        "op": "policy_stats",
+        "duration_ms": 12.52540573477745,
+        "exit": 0,
+        "start_minus_rib_commit_ms": 20004.623889923096
+      }
+    ],
+    "cell_verdict": "PASS",
+    "exits": {
+      "cell": 0,
+      "daemon": 0,
+      "engine": 0,
+      "probe": 0
+    }
+  },
+  {
+    "run": "child-r2",
+    "reload": 1,
+    "sighup_wall": 1791653625.871829,
+    "rib_commit_wall": 1791653627.00561,
+    "complete_wall": 1791653627.010131,
+    "sighup_to_commit_ms": 1133.7809562683105,
+    "sighup_to_complete_ms": 1138.3018493652344,
+    "rib_transition": {
+      "message": "RIB export-policy transition completed",
+      "outcome": "committed",
+      "member_count": 1000,
+      "elapsed_ms": 505
+    },
+    "phase_timing": {
+      "message": "reload generation phase timing",
+      "target": "reload_generation_phase",
+      "total_targets": 1000,
+      "cohort_targets": 1000,
+      "remainder_targets": 0,
+      "refresh_count": 0,
+      "outcome": "committed",
+      "authoritative_fallback": false,
+      "preflight_us": 147,
+      "cohort_selection_us": 5893,
+      "cohort_prestage_session_apply_us": 566567,
+      "cohort_rib_transition_us": 505410,
+      "authoritative_remainder_apply_us": 1,
+      "deferred_refresh_dispatch_us": 6,
+      "convergence_check_us": 149,
+      "total_us": 1079221,
+      "unattributed_us": 1048
+    },
+    "calls": [
+      {
+        "phase": "pair",
+        "op": "policy_stats",
+        "duration_ms": 11.350949760526419,
+        "exit": 0,
+        "start_minus_rib_commit_ms": -502.64549255371094
+      },
+      {
+        "phase": "pair",
+        "op": "neighbor",
+        "duration_ms": 20.49053506925702,
+        "exit": 0,
+        "start_minus_rib_commit_ms": -502.9187202453613
+      },
+      {
+        "phase": "quiescent",
+        "op": "policy_stats",
+        "duration_ms": 12.084640096873045,
+        "exit": 0,
+        "start_minus_rib_commit_ms": 20004.591941833496
+      }
+    ],
+    "cell_verdict": "PASS",
+    "exits": {
+      "cell": 0,
+      "daemon": 0,
+      "engine": 0,
+      "probe": 0
+    }
+  },
+  {
+    "run": "child-r2",
+    "reload": 2,
+    "sighup_wall": 1791653669.593428,
+    "rib_commit_wall": 1791653670.715655,
+    "complete_wall": 1791653670.720532,
+    "sighup_to_commit_ms": 1122.2271919250488,
+    "sighup_to_complete_ms": 1127.1040439605713,
+    "rib_transition": {
+      "message": "RIB export-policy transition completed",
+      "outcome": "committed",
+      "member_count": 1000,
+      "elapsed_ms": 526
+    },
+    "phase_timing": {
+      "message": "reload generation phase timing",
+      "target": "reload_generation_phase",
+      "total_targets": 1000,
+      "cohort_targets": 1000,
+      "remainder_targets": 0,
+      "refresh_count": 0,
+      "outcome": "committed",
+      "authoritative_fallback": false,
+      "preflight_us": 139,
+      "cohort_selection_us": 4950,
+      "cohort_prestage_session_apply_us": 526727,
+      "cohort_rib_transition_us": 526695,
+      "authoritative_remainder_apply_us": 1,
+      "deferred_refresh_dispatch_us": 6,
+      "convergence_check_us": 148,
+      "total_us": 1059860,
+      "unattributed_us": 1194
+    },
+    "calls": [
+      {
+        "phase": "pair",
+        "op": "policy_stats",
+        "duration_ms": 16.71177614480257,
+        "exit": 0,
+        "start_minus_rib_commit_ms": -130.9683322906494
+      },
+      {
+        "phase": "pair",
+        "op": "neighbor",
+        "duration_ms": 36.73547925427556,
+        "exit": 0,
+        "start_minus_rib_commit_ms": -131.0732364654541
+      },
+      {
+        "phase": "quiescent",
+        "op": "policy_stats",
+        "duration_ms": 11.972551234066486,
+        "exit": 0,
+        "start_minus_rib_commit_ms": 20004.95171546936
+      }
+    ],
+    "cell_verdict": "PASS",
+    "exits": {
+      "cell": 0,
+      "daemon": 0,
+      "engine": 0,
+      "probe": 0
+    }
+  },
+  {
+    "run": "child-r2",
+    "reload": 3,
+    "sighup_wall": 1791653713.162435,
+    "rib_commit_wall": 1791653714.218574,
+    "complete_wall": 1791653714.22329,
+    "sighup_to_commit_ms": 1056.1389923095703,
+    "sighup_to_complete_ms": 1060.8549118041992,
+    "rib_transition": {
+      "message": "RIB export-policy transition completed",
+      "outcome": "committed",
+      "member_count": 1000,
+      "elapsed_ms": 502
+    },
+    "phase_timing": {
+      "message": "reload generation phase timing",
+      "target": "reload_generation_phase",
+      "total_targets": 1000,
+      "cohort_targets": 1000,
+      "remainder_targets": 0,
+      "refresh_count": 0,
+      "outcome": "committed",
+      "authoritative_fallback": false,
+      "preflight_us": 59,
+      "cohort_selection_us": 11076,
+      "cohort_prestage_session_apply_us": 485048,
+      "cohort_rib_transition_us": 503272,
+      "authoritative_remainder_apply_us": 1,
+      "deferred_refresh_dispatch_us": 10,
+      "convergence_check_us": 150,
+      "total_us": 1000933,
+      "unattributed_us": 1317
+    },
+    "calls": [
+      {
+        "phase": "pair",
+        "op": "policy_stats",
+        "duration_ms": 328.93519289791584,
+        "exit": 0,
+        "start_minus_rib_commit_ms": -86.30228042602539
+      },
+      {
+        "phase": "pair",
+        "op": "neighbor",
+        "duration_ms": 360.36701686680317,
+        "exit": 0,
+        "start_minus_rib_commit_ms": -86.39836311340332
+      },
+      {
+        "phase": "quiescent",
+        "op": "policy_stats",
+        "duration_ms": 11.808492708951235,
+        "exit": 0,
+        "start_minus_rib_commit_ms": 20004.794359207153
+      }
+    ],
+    "cell_verdict": "PASS",
+    "exits": {
+      "cell": 0,
+      "daemon": 0,
+      "engine": 0,
+      "probe": 0
+    }
+  },
+  {
+    "run": "child-r2",
+    "reload": 4,
+    "sighup_wall": 1791653756.742113,
+    "rib_commit_wall": 1791653757.841252,
+    "complete_wall": 1791653757.846147,
+    "sighup_to_commit_ms": 1099.1389751434326,
+    "sighup_to_complete_ms": 1104.0339469909668,
+    "rib_transition": {
+      "message": "RIB export-policy transition completed",
+      "outcome": "committed",
+      "member_count": 1000,
+      "elapsed_ms": 525
+    },
+    "phase_timing": {
+      "message": "reload generation phase timing",
+      "target": "reload_generation_phase",
+      "total_targets": 1000,
+      "cohort_targets": 1000,
+      "remainder_targets": 0,
+      "refresh_count": 0,
+      "outcome": "committed",
+      "authoritative_fallback": false,
+      "preflight_us": 128,
+      "cohort_selection_us": 19459,
+      "cohort_prestage_session_apply_us": 493765,
+      "cohort_rib_transition_us": 525949,
+      "authoritative_remainder_apply_us": 1,
+      "deferred_refresh_dispatch_us": 6,
+      "convergence_check_us": 148,
+      "total_us": 1040849,
+      "unattributed_us": 1393
+    },
+    "calls": [
+      {
+        "phase": "pair",
+        "op": "policy_stats",
+        "duration_ms": 12.449773959815502,
+        "exit": 0,
+        "start_minus_rib_commit_ms": -132.5209140777588
+      },
+      {
+        "phase": "pair",
+        "op": "neighbor",
+        "duration_ms": 38.44712907448411,
+        "exit": 0,
+        "start_minus_rib_commit_ms": -132.62081146240234
+      },
+      {
+        "phase": "quiescent",
+        "op": "policy_stats",
+        "duration_ms": 12.321161106228828,
+        "exit": 0,
+        "start_minus_rib_commit_ms": 20004.969596862793
+      }
+    ],
+    "cell_verdict": "PASS",
+    "exits": {
+      "cell": 0,
+      "daemon": 0,
+      "engine": 0,
+      "probe": 0
+    }
+  },
+  {
+    "run": "child-r2",
+    "reload": 5,
+    "sighup_wall": 1791653800.308518,
+    "rib_commit_wall": 1791653801.423104,
+    "complete_wall": 1791653801.673826,
+    "sighup_to_commit_ms": 1114.5861148834229,
+    "sighup_to_complete_ms": 1365.3080463409424,
+    "rib_transition": {
+      "message": "RIB export-policy transition completed",
+      "outcome": "committed",
+      "member_count": 1000,
+      "elapsed_ms": 510
+    },
+    "phase_timing": {
+      "message": "reload generation phase timing",
+      "target": "reload_generation_phase",
+      "total_targets": 1000,
+      "cohort_targets": 1000,
+      "remainder_targets": 0,
+      "refresh_count": 0,
+      "outcome": "committed",
+      "authoritative_fallback": false,
+      "preflight_us": 181,
+      "cohort_selection_us": 15346,
+      "cohort_prestage_session_apply_us": 525831,
+      "cohort_rib_transition_us": 757740,
+      "authoritative_remainder_apply_us": 1,
+      "deferred_refresh_dispatch_us": 6,
+      "convergence_check_us": 69,
+      "total_us": 1300588,
+      "unattributed_us": 1414
+    },
+    "calls": [
+      {
+        "phase": "pair",
+        "op": "policy_stats",
+        "duration_ms": 11.869692709296942,
+        "exit": 0,
+        "start_minus_rib_commit_ms": -95.07918357849121
+      },
+      {
+        "phase": "pair",
+        "op": "neighbor",
+        "duration_ms": 363.4661613032222,
+        "exit": 0,
+        "start_minus_rib_commit_ms": -95.28827667236328
+      },
+      {
+        "phase": "quiescent",
+        "op": "policy_stats",
+        "duration_ms": 12.141140177845955,
+        "exit": 0,
+        "start_minus_rib_commit_ms": 20250.75125694275
+      }
+    ],
+    "cell_verdict": "PASS",
+    "exits": {
+      "cell": 0,
+      "daemon": 0,
+      "engine": 0,
+      "probe": 0
+    }
+  },
+  {
+    "run": "child-r2",
+    "reload": 6,
+    "sighup_wall": 1791653843.952576,
+    "rib_commit_wall": 1791653845.014459,
+    "complete_wall": 1791653845.018712,
+    "sighup_to_commit_ms": 1061.8829727172852,
+    "sighup_to_complete_ms": 1066.136121749878,
+    "rib_transition": {
+      "message": "RIB export-policy transition completed",
+      "outcome": "committed",
+      "member_count": 1000,
+      "elapsed_ms": 523
+    },
+    "phase_timing": {
+      "message": "reload generation phase timing",
+      "target": "reload_generation_phase",
+      "total_targets": 1000,
+      "cohort_targets": 1000,
+      "remainder_targets": 0,
+      "refresh_count": 0,
+      "outcome": "committed",
+      "authoritative_fallback": false,
+      "preflight_us": 93,
+      "cohort_selection_us": 4177,
+      "cohort_prestage_session_apply_us": 471495,
+      "cohort_rib_transition_us": 523784,
+      "authoritative_remainder_apply_us": 1,
+      "deferred_refresh_dispatch_us": 6,
+      "convergence_check_us": 146,
+      "total_us": 1000864,
+      "unattributed_us": 1162
+    },
+    "calls": [
+      {
+        "phase": "pair",
+        "op": "policy_stats",
+        "duration_ms": 11.152587831020355,
+        "exit": 0,
+        "start_minus_rib_commit_ms": -122.1468448638916
+      },
+      {
+        "phase": "pair",
+        "op": "neighbor",
+        "duration_ms": 30.27479164302349,
+        "exit": 0,
+        "start_minus_rib_commit_ms": -122.24864959716797
+      },
+      {
+        "phase": "quiescent",
+        "op": "policy_stats",
+        "duration_ms": 12.2762406244874,
+        "exit": 0,
+        "start_minus_rib_commit_ms": 20004.300832748413
+      }
+    ],
+    "cell_verdict": "PASS",
+    "exits": {
+      "cell": 0,
+      "daemon": 0,
+      "engine": 0,
+      "probe": 0
+    }
+  },
+  {
+    "run": "child-r2",
+    "reload": 7,
+    "sighup_wall": 1791653887.523384,
+    "rib_commit_wall": 1791653888.579114,
+    "complete_wall": 1791653888.583797,
+    "sighup_to_commit_ms": 1055.729866027832,
+    "sighup_to_complete_ms": 1060.412883758545,
+    "rib_transition": {
+      "message": "RIB export-policy transition completed",
+      "outcome": "committed",
+      "member_count": 1000,
+      "elapsed_ms": 522
+    },
+    "phase_timing": {
+      "message": "reload generation phase timing",
+      "target": "reload_generation_phase",
+      "total_targets": 1000,
+      "cohort_targets": 1000,
+      "remainder_targets": 0,
+      "refresh_count": 0,
+      "outcome": "committed",
+      "authoritative_fallback": false,
+      "preflight_us": 59,
+      "cohort_selection_us": 4426,
+      "cohort_prestage_session_apply_us": 468659,
+      "cohort_rib_transition_us": 522841,
+      "authoritative_remainder_apply_us": 1,
+      "deferred_refresh_dispatch_us": 7,
+      "convergence_check_us": 148,
+      "total_us": 997332,
+      "unattributed_us": 1191
+    },
+    "calls": [
+      {
+        "phase": "pair",
+        "op": "policy_stats",
+        "duration_ms": 11.443392839282751,
+        "exit": 0,
+        "start_minus_rib_commit_ms": -108.79898071289062
+      },
+      {
+        "phase": "pair",
+        "op": "neighbor",
+        "duration_ms": 24.354426190257072,
+        "exit": 0,
+        "start_minus_rib_commit_ms": -108.89768600463867
+      },
+      {
+        "phase": "quiescent",
+        "op": "policy_stats",
+        "duration_ms": 12.212935369461775,
+        "exit": 0,
+        "start_minus_rib_commit_ms": 20004.744052886963
+      }
+    ],
+    "cell_verdict": "PASS",
+    "exits": {
+      "cell": 0,
+      "daemon": 0,
+      "engine": 0,
+      "probe": 0
+    }
+  },
+  {
+    "run": "parent-r2",
+    "reload": 1,
+    "sighup_wall": 1791654044.268966,
+    "rib_commit_wall": 1791654045.49067,
+    "complete_wall": 1791654045.49504,
+    "sighup_to_commit_ms": 1221.7040061950684,
+    "sighup_to_complete_ms": 1226.073980331421,
+    "rib_transition": {
+      "message": "RIB export-policy transition completed",
+      "outcome": "committed",
+      "member_count": 1000,
+      "elapsed_ms": 564
+    },
+    "phase_timing": {
+      "message": "reload generation phase timing",
+      "target": "reload_generation_phase",
+      "total_targets": 1000,
+      "cohort_targets": 1000,
+      "remainder_targets": 0,
+      "refresh_count": 0,
+      "outcome": "committed",
+      "authoritative_fallback": false,
+      "preflight_us": 145,
+      "cohort_selection_us": 4034,
+      "cohort_prestage_session_apply_us": 594522,
+      "cohort_rib_transition_us": 564678,
+      "authoritative_remainder_apply_us": 0,
+      "deferred_refresh_dispatch_us": 7,
+      "convergence_check_us": 155,
+      "total_us": 1164592,
+      "unattributed_us": 1051
+    },
+    "calls": [
+      {
+        "phase": "pair",
+        "op": "policy_stats",
+        "duration_ms": 11.575127951800823,
+        "exit": 0,
+        "start_minus_rib_commit_ms": -562.391996383667
+      },
+      {
+        "phase": "pair",
+        "op": "neighbor",
+        "duration_ms": 20.823318045586348,
+        "exit": 0,
+        "start_minus_rib_commit_ms": -562.6316070556641
+      },
+      {
+        "phase": "quiescent",
+        "op": "policy_stats",
+        "duration_ms": 11.823229026049376,
+        "exit": 0,
+        "start_minus_rib_commit_ms": 20004.444360733032
+      }
+    ],
+    "cell_verdict": "PASS",
+    "exits": {
+      "cell": 0,
+      "daemon": 0,
+      "engine": 0,
+      "probe": 0
+    }
+  },
+  {
+    "run": "parent-r2",
+    "reload": 2,
+    "sighup_wall": 1791654088.054825,
+    "rib_commit_wall": 1791654089.265891,
+    "complete_wall": 1791654089.27064,
+    "sighup_to_commit_ms": 1211.0660076141357,
+    "sighup_to_complete_ms": 1215.8148288726807,
+    "rib_transition": {
+      "message": "RIB export-policy transition completed",
+      "outcome": "committed",
+      "member_count": 1000,
+      "elapsed_ms": 565
+    },
+    "phase_timing": {
+      "message": "reload generation phase timing",
+      "target": "reload_generation_phase",
+      "total_targets": 1000,
+      "cohort_targets": 1000,
+      "remainder_targets": 0,
+      "refresh_count": 0,
+      "outcome": "committed",
+      "authoritative_fallback": false,
+      "preflight_us": 125,
+      "cohort_selection_us": 13637,
+      "cohort_prestage_session_apply_us": 572572,
+      "cohort_rib_transition_us": 566038,
+      "authoritative_remainder_apply_us": 1,
+      "deferred_refresh_dispatch_us": 7,
+      "convergence_check_us": 161,
+      "total_us": 1153849,
+      "unattributed_us": 1308
+    },
+    "calls": [
+      {
+        "phase": "pair",
+        "op": "policy_stats",
+        "duration_ms": 272.2282111644745,
+        "exit": 0,
+        "start_minus_rib_commit_ms": -110.95237731933594
+      },
+      {
+        "phase": "pair",
+        "op": "neighbor",
+        "duration_ms": 400.1363329589367,
+        "exit": 0,
+        "start_minus_rib_commit_ms": -111.15837097167969
+      },
+      {
+        "phase": "quiescent",
+        "op": "policy_stats",
+        "duration_ms": 12.339973356574774,
+        "exit": 0,
+        "start_minus_rib_commit_ms": 20004.79292869568
+      }
+    ],
+    "cell_verdict": "PASS",
+    "exits": {
+      "cell": 0,
+      "daemon": 0,
+      "engine": 0,
+      "probe": 0
+    }
+  },
+  {
+    "run": "parent-r2",
+    "reload": 3,
+    "sighup_wall": 1791654131.705014,
+    "rib_commit_wall": 1791654132.881201,
+    "complete_wall": 1791654132.885698,
+    "sighup_to_commit_ms": 1176.1870384216309,
+    "sighup_to_complete_ms": 1180.6840896606445,
+    "rib_transition": {
+      "message": "RIB export-policy transition completed",
+      "outcome": "committed",
+      "member_count": 1000,
+      "elapsed_ms": 563
+    },
+    "phase_timing": {
+      "message": "reload generation phase timing",
+      "target": "reload_generation_phase",
+      "total_targets": 1000,
+      "cohort_targets": 1000,
+      "remainder_targets": 0,
+      "refresh_count": 0,
+      "outcome": "committed",
+      "authoritative_fallback": false,
+      "preflight_us": 89,
+      "cohort_selection_us": 34401,
+      "cohort_prestage_session_apply_us": 519494,
+      "cohort_rib_transition_us": 564179,
+      "authoritative_remainder_apply_us": 1,
+      "deferred_refresh_dispatch_us": 8,
+      "convergence_check_us": 155,
+      "total_us": 1119673,
+      "unattributed_us": 1346
+    },
+    "calls": [
+      {
+        "phase": "pair",
+        "op": "policy_stats",
+        "duration_ms": 290.64143309369683,
+        "exit": 0,
+        "start_minus_rib_commit_ms": -107.92708396911621
+      },
+      {
+        "phase": "pair",
+        "op": "neighbor",
+        "duration_ms": 388.06800870224833,
+        "exit": 0,
+        "start_minus_rib_commit_ms": -108.02149772644043
+      },
+      {
+        "phase": "quiescent",
+        "op": "policy_stats",
+        "duration_ms": 11.802666820585728,
+        "exit": 0,
+        "start_minus_rib_commit_ms": 20004.573583602905
+      }
+    ],
+    "cell_verdict": "PASS",
+    "exits": {
+      "cell": 0,
+      "daemon": 0,
+      "engine": 0,
+      "probe": 0
+    }
+  },
+  {
+    "run": "parent-r2",
+    "reload": 4,
+    "sighup_wall": 1791654175.545018,
+    "rib_commit_wall": 1791654176.664059,
+    "complete_wall": 1791654176.668414,
+    "sighup_to_commit_ms": 1119.0409660339355,
+    "sighup_to_complete_ms": 1123.3961582183838,
+    "rib_transition": {
+      "message": "RIB export-policy transition completed",
+      "outcome": "committed",
+      "member_count": 1000,
+      "elapsed_ms": 561
+    },
+    "phase_timing": {
+      "message": "reload generation phase timing",
+      "target": "reload_generation_phase",
+      "total_targets": 1000,
+      "cohort_targets": 1000,
+      "remainder_targets": 0,
+      "refresh_count": 0,
+      "outcome": "committed",
+      "authoritative_fallback": false,
+      "preflight_us": 61,
+      "cohort_selection_us": 4192,
+      "cohort_prestage_session_apply_us": 497097,
+      "cohort_rib_transition_us": 561644,
+      "authoritative_remainder_apply_us": 1,
+      "deferred_refresh_dispatch_us": 6,
+      "convergence_check_us": 151,
+      "total_us": 1064267,
+      "unattributed_us": 1115
+    },
+    "calls": [
+      {
+        "phase": "pair",
+        "op": "policy_stats",
+        "duration_ms": 283.9942807331681,
+        "exit": 0,
+        "start_minus_rib_commit_ms": -107.18321800231934
+      },
+      {
+        "phase": "pair",
+        "op": "neighbor",
+        "duration_ms": 372.01301474124193,
+        "exit": 0,
+        "start_minus_rib_commit_ms": -107.28788375854492
+      },
+      {
+        "phase": "quiescent",
+        "op": "policy_stats",
+        "duration_ms": 12.117579113692045,
+        "exit": 0,
+        "start_minus_rib_commit_ms": 20004.40812110901
+      }
+    ],
+    "cell_verdict": "PASS",
+    "exits": {
+      "cell": 0,
+      "daemon": 0,
+      "engine": 0,
+      "probe": 0
+    }
+  },
+  {
+    "run": "parent-r2",
+    "reload": 5,
+    "sighup_wall": 1791654219.056655,
+    "rib_commit_wall": 1791654220.167261,
+    "complete_wall": 1791654220.171853,
+    "sighup_to_commit_ms": 1110.6059551239014,
+    "sighup_to_complete_ms": 1115.1981353759766,
+    "rib_transition": {
+      "message": "RIB export-policy transition completed",
+      "outcome": "committed",
+      "member_count": 1000,
+      "elapsed_ms": 557
+    },
+    "phase_timing": {
+      "message": "reload generation phase timing",
+      "target": "reload_generation_phase",
+      "total_targets": 1000,
+      "cohort_targets": 1000,
+      "remainder_targets": 0,
+      "refresh_count": 0,
+      "outcome": "committed",
+      "authoritative_fallback": false,
+      "preflight_us": 169,
+      "cohort_selection_us": 13732,
+      "cohort_prestage_session_apply_us": 480778,
+      "cohort_rib_transition_us": 557852,
+      "authoritative_remainder_apply_us": 1,
+      "deferred_refresh_dispatch_us": 7,
+      "convergence_check_us": 160,
+      "total_us": 1053956,
+      "unattributed_us": 1257
+    },
+    "calls": [
+      {
+        "phase": "pair",
+        "op": "policy_stats",
+        "duration_ms": 277.9843737371266,
+        "exit": 0,
+        "start_minus_rib_commit_ms": -105.82494735717773
+      },
+      {
+        "phase": "pair",
+        "op": "neighbor",
+        "duration_ms": 361.69974599033594,
+        "exit": 0,
+        "start_minus_rib_commit_ms": -106.01496696472168
+      },
+      {
+        "phase": "quiescent",
+        "op": "policy_stats",
+        "duration_ms": 12.198099866509438,
+        "exit": 0,
+        "start_minus_rib_commit_ms": 20004.613161087036
+      }
+    ],
+    "cell_verdict": "PASS",
+    "exits": {
+      "cell": 0,
+      "daemon": 0,
+      "engine": 0,
+      "probe": 0
+    }
+  },
+  {
+    "run": "parent-r2",
+    "reload": 6,
+    "sighup_wall": 1791654262.720122,
+    "rib_commit_wall": 1791654263.879445,
+    "complete_wall": 1791654263.884017,
+    "sighup_to_commit_ms": 1159.32297706604,
+    "sighup_to_complete_ms": 1163.8948917388916,
+    "rib_transition": {
+      "message": "RIB export-policy transition completed",
+      "outcome": "committed",
+      "member_count": 1000,
+      "elapsed_ms": 568
+    },
+    "phase_timing": {
+      "message": "reload generation phase timing",
+      "target": "reload_generation_phase",
+      "total_targets": 1000,
+      "cohort_targets": 1000,
+      "remainder_targets": 0,
+      "refresh_count": 0,
+      "outcome": "committed",
+      "authoritative_fallback": false,
+      "preflight_us": 183,
+      "cohort_selection_us": 6934,
+      "cohort_prestage_session_apply_us": 517312,
+      "cohort_rib_transition_us": 569278,
+      "authoritative_remainder_apply_us": 1,
+      "deferred_refresh_dispatch_us": 7,
+      "convergence_check_us": 158,
+      "total_us": 1095098,
+      "unattributed_us": 1225
+    },
+    "calls": [
+      {
+        "phase": "pair",
+        "op": "policy_stats",
+        "duration_ms": 386.0342502593994,
+        "exit": 0,
+        "start_minus_rib_commit_ms": -121.08325958251953
+      },
+      {
+        "phase": "pair",
+        "op": "neighbor",
+        "duration_ms": 436.3830890506506,
+        "exit": 0,
+        "start_minus_rib_commit_ms": -121.26469612121582
+      },
+      {
+        "phase": "quiescent",
+        "op": "policy_stats",
+        "duration_ms": 12.83622533082962,
+        "exit": 0,
+        "start_minus_rib_commit_ms": 20004.645586013794
+      }
+    ],
+    "cell_verdict": "PASS",
+    "exits": {
+      "cell": 0,
+      "daemon": 0,
+      "engine": 0,
+      "probe": 0
+    }
+  },
+  {
+    "run": "parent-r2",
+    "reload": 7,
+    "sighup_wall": 1791654306.36176,
+    "rib_commit_wall": 1791654307.483312,
+    "complete_wall": 1791654307.487949,
+    "sighup_to_commit_ms": 1121.5519905090332,
+    "sighup_to_complete_ms": 1126.1889934539795,
+    "rib_transition": {
+      "message": "RIB export-policy transition completed",
+      "outcome": "committed",
+      "member_count": 1000,
+      "elapsed_ms": 563
+    },
+    "phase_timing": {
+      "message": "reload generation phase timing",
+      "target": "reload_generation_phase",
+      "total_targets": 1000,
+      "cohort_targets": 1000,
+      "remainder_targets": 0,
+      "refresh_count": 0,
+      "outcome": "committed",
+      "authoritative_fallback": false,
+      "preflight_us": 104,
+      "cohort_selection_us": 4067,
+      "cohort_prestage_session_apply_us": 497425,
+      "cohort_rib_transition_us": 564221,
+      "authoritative_remainder_apply_us": 1,
+      "deferred_refresh_dispatch_us": 7,
+      "convergence_check_us": 156,
+      "total_us": 1067150,
+      "unattributed_us": 1169
+    },
+    "calls": [
+      {
+        "phase": "pair",
+        "op": "policy_stats",
+        "duration_ms": 320.70751721039414,
+        "exit": 0,
+        "start_minus_rib_commit_ms": -104.5539379119873
+      },
+      {
+        "phase": "pair",
+        "op": "neighbor",
+        "duration_ms": 359.6267062239349,
+        "exit": 0,
+        "start_minus_rib_commit_ms": -104.69913482666016
+      },
+      {
+        "phase": "quiescent",
+        "op": "policy_stats",
+        "duration_ms": 11.599101126194,
+        "exit": 0,
+        "start_minus_rib_commit_ms": 20004.708290100098
+      }
+    ],
+    "cell_verdict": "PASS",
+    "exits": {
+      "cell": 0,
+      "daemon": 0,
+      "engine": 0,
+      "probe": 0
+    }
+  }
+]

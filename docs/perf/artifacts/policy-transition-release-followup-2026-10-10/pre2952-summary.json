@@ -1,0 +1,66 @@
+{
+  "early-s2": {
+    "base": {
+      "max": 580,
+      "median": 574.0,
+      "min": 560,
+      "n": 12
+    },
+    "base-reloads2to4": {
+      "max": 580,
+      "median": 574,
+      "min": 560,
+      "n": 9
+    },
+    "main": {
+      "max": 492,
+      "median": 486.0,
+      "min": 483,
+      "n": 12
+    },
+    "main-reloads2to4": {
+      "max": 492,
+      "median": 487,
+      "min": 483,
+      "n": 9
+    }
+  },
+  "prefix-snapshot-s2": {
+    "main": {
+      "max": 371,
+      "median": 363.0,
+      "min": 359,
+      "n": 16
+    },
+    "main-reloads2to4": {
+      "max": 371,
+      "median": 365.5,
+      "min": 360,
+      "n": 12
+    },
+    "memo": {
+      "max": 376,
+      "median": 368.5,
+      "min": 362,
+      "n": 16
+    },
+    "memo-reloads2to4": {
+      "max": 376,
+      "median": 369.5,
+      "min": 363,
+      "n": 12
+    },
+    "snap": {
+      "max": 381,
+      "median": 329.0,
+      "min": 316,
+      "n": 16
+    },
+    "snap-reloads2to4": {
+      "max": 330,
+      "median": 325.0,
+      "min": 316,
+      "n": 12
+    }
+  }
+}

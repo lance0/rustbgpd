@@ -1,0 +1,482 @@
+{
+  "parent-r1": {
+    "all": {
+      "actor_ms": {
+        "n": 7,
+        "median": 556,
+        "min": 551,
+        "max": 572
+      },
+      "cohort_ms": {
+        "n": 7,
+        "median": 559.355,
+        "min": 551.949,
+        "max": 582.255
+      },
+      "prestage_session_apply_ms": {
+        "n": 7,
+        "median": 503.35,
+        "min": 502.376,
+        "max": 609.775
+      },
+      "sighup_to_complete_ms": {
+        "n": 7,
+        "median": 1140.296,
+        "min": 1119.259,
+        "max": 1255.359
+      }
+    },
+    "first": {
+      "actor_ms": {
+        "n": 1,
+        "median": 562,
+        "min": 562,
+        "max": 562
+      },
+      "cohort_ms": {
+        "n": 1,
+        "median": 563.384,
+        "min": 563.384,
+        "max": 563.384
+      },
+      "prestage_session_apply_ms": {
+        "n": 1,
+        "median": 586.001,
+        "min": 586.001,
+        "max": 586.001
+      },
+      "sighup_to_complete_ms": {
+        "n": 1,
+        "median": 1221.111,
+        "min": 1221.111,
+        "max": 1221.111
+      }
+    },
+    "later": {
+      "actor_ms": {
+        "n": 6,
+        "median": 555.5,
+        "min": 551,
+        "max": 572
+      },
+      "cohort_ms": {
+        "n": 6,
+        "median": 557.631,
+        "min": 551.949,
+        "max": 582.255
+      },
+      "prestage_session_apply_ms": {
+        "n": 6,
+        "median": 503.082,
+        "min": 502.376,
+        "max": 609.775
+      },
+      "sighup_to_complete_ms": {
+        "n": 6,
+        "median": 1132.913,
+        "min": 1119.259,
+        "max": 1255.359
+      }
+    }
+  },
+  "child-r1": {
+    "all": {
+      "actor_ms": {
+        "n": 7,
+        "median": 518,
+        "min": 508,
+        "max": 523
+      },
+      "cohort_ms": {
+        "n": 7,
+        "median": 519.098,
+        "min": 509.15,
+        "max": 524.255
+      },
+      "prestage_session_apply_ms": {
+        "n": 7,
+        "median": 490.217,
+        "min": 480.356,
+        "max": 513.372
+      },
+      "sighup_to_complete_ms": {
+        "n": 7,
+        "median": 1099.483,
+        "min": 1067.777,
+        "max": 1113.476
+      }
+    },
+    "first": {
+      "actor_ms": {
+        "n": 1,
+        "median": 519,
+        "min": 519,
+        "max": 519
+      },
+      "cohort_ms": {
+        "n": 1,
+        "median": 520.211,
+        "min": 520.211,
+        "max": 520.211
+      },
+      "prestage_session_apply_ms": {
+        "n": 1,
+        "median": 513.372,
+        "min": 513.372,
+        "max": 513.372
+      },
+      "sighup_to_complete_ms": {
+        "n": 1,
+        "median": 1098.797,
+        "min": 1098.797,
+        "max": 1098.797
+      }
+    },
+    "later": {
+      "actor_ms": {
+        "n": 6,
+        "median": 517.5,
+        "min": 508,
+        "max": 523
+      },
+      "cohort_ms": {
+        "n": 6,
+        "median": 518.524,
+        "min": 509.15,
+        "max": 524.255
+      },
+      "prestage_session_apply_ms": {
+        "n": 6,
+        "median": 488.327,
+        "min": 480.356,
+        "max": 513.125
+      },
+      "sighup_to_complete_ms": {
+        "n": 6,
+        "median": 1099.491,
+        "min": 1067.777,
+        "max": 1113.476
+      }
+    }
+  },
+  "child-r2": {
+    "all": {
+      "actor_ms": {
+        "n": 7,
+        "median": 522,
+        "min": 502,
+        "max": 526
+      },
+      "cohort_ms": {
+        "n": 7,
+        "median": 523.784,
+        "min": 503.272,
+        "max": 757.74
+      },
+      "prestage_session_apply_ms": {
+        "n": 7,
+        "median": 493.765,
+        "min": 468.659,
+        "max": 566.567
+      },
+      "sighup_to_complete_ms": {
+        "n": 7,
+        "median": 1104.034,
+        "min": 1060.413,
+        "max": 1365.308
+      }
+    },
+    "first": {
+      "actor_ms": {
+        "n": 1,
+        "median": 505,
+        "min": 505,
+        "max": 505
+      },
+      "cohort_ms": {
+        "n": 1,
+        "median": 505.41,
+        "min": 505.41,
+        "max": 505.41
+      },
+      "prestage_session_apply_ms": {
+        "n": 1,
+        "median": 566.567,
+        "min": 566.567,
+        "max": 566.567
+      },
+      "sighup_to_complete_ms": {
+        "n": 1,
+        "median": 1138.302,
+        "min": 1138.302,
+        "max": 1138.302
+      }
+    },
+    "later": {
+      "actor_ms": {
+        "n": 6,
+        "median": 522.5,
+        "min": 502,
+        "max": 526
+      },
+      "cohort_ms": {
+        "n": 6,
+        "median": 524.866,
+        "min": 503.272,
+        "max": 757.74
+      },
+      "prestage_session_apply_ms": {
+        "n": 6,
+        "median": 489.406,
+        "min": 468.659,
+        "max": 526.727
+      },
+      "sighup_to_complete_ms": {
+        "n": 6,
+        "median": 1085.085,
+        "min": 1060.413,
+        "max": 1365.308
+      }
+    }
+  },
+  "parent-r2": {
+    "all": {
+      "actor_ms": {
+        "n": 7,
+        "median": 563,
+        "min": 557,
+        "max": 568
+      },
+      "cohort_ms": {
+        "n": 7,
+        "median": 564.221,
+        "min": 557.852,
+        "max": 569.278
+      },
+      "prestage_session_apply_ms": {
+        "n": 7,
+        "median": 517.312,
+        "min": 480.778,
+        "max": 594.522
+      },
+      "sighup_to_complete_ms": {
+        "n": 7,
+        "median": 1163.895,
+        "min": 1115.198,
+        "max": 1226.074
+      }
+    },
+    "first": {
+      "actor_ms": {
+        "n": 1,
+        "median": 564,
+        "min": 564,
+        "max": 564
+      },
+      "cohort_ms": {
+        "n": 1,
+        "median": 564.678,
+        "min": 564.678,
+        "max": 564.678
+      },
+      "prestage_session_apply_ms": {
+        "n": 1,
+        "median": 594.522,
+        "min": 594.522,
+        "max": 594.522
+      },
+      "sighup_to_complete_ms": {
+        "n": 1,
+        "median": 1226.074,
+        "min": 1226.074,
+        "max": 1226.074
+      }
+    },
+    "later": {
+      "actor_ms": {
+        "n": 6,
+        "median": 563.0,
+        "min": 557,
+        "max": 568
+      },
+      "cohort_ms": {
+        "n": 6,
+        "median": 564.2,
+        "min": 557.852,
+        "max": 569.278
+      },
+      "prestage_session_apply_ms": {
+        "n": 6,
+        "median": 507.369,
+        "min": 480.778,
+        "max": 572.572
+      },
+      "sighup_to_complete_ms": {
+        "n": 6,
+        "median": 1145.042,
+        "min": 1115.198,
+        "max": 1215.815
+      }
+    }
+  },
+  "parent": {
+    "all": {
+      "actor_ms": {
+        "n": 14,
+        "median": 561.5,
+        "min": 551,
+        "max": 572
+      },
+      "cohort_ms": {
+        "n": 14,
+        "median": 563.782,
+        "min": 551.949,
+        "max": 582.255
+      },
+      "prestage_session_apply_ms": {
+        "n": 14,
+        "median": 510.331,
+        "min": 480.778,
+        "max": 609.775
+      },
+      "sighup_to_complete_ms": {
+        "n": 14,
+        "median": 1152.095,
+        "min": 1115.198,
+        "max": 1255.359
+      }
+    },
+    "first": {
+      "actor_ms": {
+        "n": 2,
+        "median": 563.0,
+        "min": 562,
+        "max": 564
+      },
+      "cohort_ms": {
+        "n": 2,
+        "median": 564.031,
+        "min": 563.384,
+        "max": 564.678
+      },
+      "prestage_session_apply_ms": {
+        "n": 2,
+        "median": 590.262,
+        "min": 586.001,
+        "max": 594.522
+      },
+      "sighup_to_complete_ms": {
+        "n": 2,
+        "median": 1223.593,
+        "min": 1221.111,
+        "max": 1226.074
+      }
+    },
+    "later": {
+      "actor_ms": {
+        "n": 12,
+        "median": 559.5,
+        "min": 551,
+        "max": 572
+      },
+      "cohort_ms": {
+        "n": 12,
+        "median": 562.911,
+        "min": 551.949,
+        "max": 582.255
+      },
+      "prestage_session_apply_ms": {
+        "n": 12,
+        "median": 503.082,
+        "min": 480.778,
+        "max": 609.775
+      },
+      "sighup_to_complete_ms": {
+        "n": 12,
+        "median": 1133.242,
+        "min": 1115.198,
+        "max": 1255.359
+      }
+    }
+  },
+  "child": {
+    "all": {
+      "actor_ms": {
+        "n": 14,
+        "median": 518.5,
+        "min": 502,
+        "max": 526
+      },
+      "cohort_ms": {
+        "n": 14,
+        "median": 521.243,
+        "min": 503.272,
+        "max": 757.74
+      },
+      "prestage_session_apply_ms": {
+        "n": 14,
+        "median": 491.991,
+        "min": 468.659,
+        "max": 566.567
+      },
+      "sighup_to_complete_ms": {
+        "n": 14,
+        "median": 1099.491,
+        "min": 1060.413,
+        "max": 1365.308
+      }
+    },
+    "first": {
+      "actor_ms": {
+        "n": 2,
+        "median": 512.0,
+        "min": 505,
+        "max": 519
+      },
+      "cohort_ms": {
+        "n": 2,
+        "median": 512.811,
+        "min": 505.41,
+        "max": 520.211
+      },
+      "prestage_session_apply_ms": {
+        "n": 2,
+        "median": 539.969,
+        "min": 513.372,
+        "max": 566.567
+      },
+      "sighup_to_complete_ms": {
+        "n": 2,
+        "median": 1118.549,
+        "min": 1098.797,
+        "max": 1138.302
+      }
+    },
+    "later": {
+      "actor_ms": {
+        "n": 12,
+        "median": 519.5,
+        "min": 502,
+        "max": 526
+      },
+      "cohort_ms": {
+        "n": 12,
+        "median": 522.558,
+        "min": 503.272,
+        "max": 757.74
+      },
+      "prestage_session_apply_ms": {
+        "n": 12,
+        "median": 488.327,
+        "min": 468.659,
+        "max": 526.727
+      },
+      "sighup_to_complete_ms": {
+        "n": 12,
+        "median": 1099.491,
+        "min": 1060.413,
+        "max": 1365.308
+      }
+    }
+  }
+}
