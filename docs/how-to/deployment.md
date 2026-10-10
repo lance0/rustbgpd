@@ -20,12 +20,15 @@ For deeper references:
 ## Status & expectations
 
 rustbgpd is **public alpha overall**. The exception is the narrow,
-machine-pinned [v1 route-server / route-reflector contract](../reference/v1-stable-contract.md),
+machine-pinned [v1 route-server / route-reflector / controller contract](../reference/v1-stable-contract.md),
 which covers only its listed config fields, native gRPC signatures, CLI/JSON
 contracts, and control-plane roles. Unlisted TOML and API surfaces can still
 change between minor versions. See [`CHANGELOG.md`](../../CHANGELOG.md) for
 migration notes and run `rustbgpd --check <new config>` against the new binary
-before swapping it in.
+before swapping it in. FlowSpec controllers should also follow the
+[controller upgrade and rollback procedure](../reference/v1-stable-contract.md#controller-upgrade-and-rollback)
+to verify server outcomes and view acknowledgements, then reconcile desired
+rules after restart.
 
 The supported daemon targets are Linux x86_64 and aarch64. Published binaries
 use a glibc 2.31 baseline. See the canonical

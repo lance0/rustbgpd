@@ -11,12 +11,13 @@ contract differ, use the linked contract.
 ## Narrow stable daemon surface
 
 The only stable daemon boundary is the exact inventory in
-[`v1-stable-surface.json`](v1-stable-surface.json). It applies to the listed
-surfaces for the `route-server-unicast` and `route-reflector-unicast` roles;
-absence from that inventory means absence from the v1 promise.
+[`v1-stable-surface.json`](v1-stable-surface.json). It applies to inventoried
+surfaces for roles classified `stable` or `scoped_rr_only`, within each role's
+stated constraints. This includes the scoped `flowspec-controller` boundary
+described below. Absence from that inventory means absence from the v1 promise.
 
 Read the inventory with the
-[v1 route-server / route-reflector contract](v1-stable-contract.md), which
+[v1 route-server / route-reflector / controller contract](v1-stable-contract.md), which
 defines compatible evolution, migration support, and the evidence required for
 a breaking change. Do not infer stability for a containing config object,
 protobuf service, CLI subtree, JSON object, or feature from one inventoried
@@ -28,6 +29,12 @@ In particular:
 - Linux dataplane work, including FIB and managed-netdev behavior, remains
   outside the control-plane contract.
 - Experimental features remain outside the contract.
+- FlowSpec controller origination, local-intent reconciliation, and selected /
+  committed advertised views use the
+  [scoped controller boundary](v1-stable-contract.md#flowspec-controller-boundary).
+  `Config.flowspec`, receive-side validation and its shared diagnostic fields,
+  remote received-candidate mode, FlowSpec CLI surfaces, GR/LLGR guarantees,
+  and dataplane enforcement remain outside that promise.
 - Files under `runtime_state_dir`, and the event store wherever
   `[event_history].path` places it, remain outside the inventory; the
   contract's [on-disk runtime state](v1-stable-contract.md#on-disk-runtime-state)

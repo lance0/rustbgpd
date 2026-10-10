@@ -19,9 +19,9 @@ them, and stream routing events to your own tools.
 
 <a id="project-status"></a>
 
-**Stability:** inventoried IPv4/IPv6 unicast route-server and route-reflector
-surfaces have a [narrow v1 compatibility contract](docs/reference/v1-stable-contract.md),
-with baseline v0.75.0. The project remains alpha overall; unlisted surfaces,
+**Stability:** inventoried route-server, route-reflector, and scoped FlowSpec
+controller surfaces have a [narrow v1 compatibility contract](docs/reference/v1-stable-contract.md),
+with release baseline v0.75.0. The project remains alpha overall; unlisted surfaces,
 EVPN, and Linux dataplane features are outside that promise.
 [Stability and compatibility](docs/reference/stability.md) explains the boundaries.
 
@@ -48,8 +48,10 @@ Types 1–6 remain alpha; Type 6 SMET supports relay only.
 
 ### Monitoring and automation
 
-BMP/MRT feeds, route injection, FlowSpec, and gRPC integration. Shipped
-capabilities have individual limits; support does not imply v1 stability.
+BMP/MRT feeds, route injection, FlowSpec, and gRPC integration. FlowSpec local
+origination, reconciliation, and committed advertisements have a
+[scoped controller contract](docs/reference/v1-stable-contract.md#flowspec-controller-boundary);
+receive-side validation and dataplane enforcement remain outside it.
 
 [Monitoring recipe](docs/cookbook/monitoring-feed.md) · [API reference](docs/reference/api.md) ·
 [DDoS example](examples/ddos-mitigation/config.toml)

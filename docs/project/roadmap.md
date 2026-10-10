@@ -58,7 +58,7 @@ those.
 | Observability & API: gRPC (13 services), Prometheus, structured logs, durable event history | Shipped | ADR-0072 outbox + `SubscribeFromEvent` |
 | gNMI / OpenConfig telemetry + Set subset | Partial | `Get` / `Subscribe`, BGP state subset; static numbered-neighbor `Set` + commit-confirmed; broader OpenConfig config/state deferred |
 | BMP trio (7854 + 8671 Adj-RIB-Out + 9069 Loc-RIB) + BMPv4 TLV draft, MRT dump (6396) | Shipped | Per-collector views + `version = 3\|4`; Path Marking temporarily unavailable pending a non-colliding TLV type; ADR-0097, M81 receipt |
-| FlowSpec (8955/8956, IPv4/IPv6) | Shipped | All 13 component types; opt-in RFC 9117 cross-RIB feasibility |
+| FlowSpec (8955/8956, IPv4/IPv6) | Shipped | All 13 component types; [scoped controller contract](../reference/v1-stable-contract.md#flowspec-controller-boundary) for local origination, reconciliation and committed advertisements; receive-side RFC 9117 feasibility stays opt-in and alpha |
 | BGP-LS receive + reflection + API export (RFC 9552, SAFI 71/72) | Partial | Controller-feed / RR only; no local topology production (ADR-0077); RFC 9857 type-5 NLRI passes opaquely, while typed SR Policy state remains demand-gated (ADR-0116) |
 
 For per-release feature deltas see [CHANGELOG.md](../../CHANGELOG.md); for the
@@ -191,7 +191,11 @@ remain visible without automatically blocking a release whose agreed gates pass.
   inventory (#862; LAN-355) pins only the configuration and API used by
   IPv4/IPv6 route servers and route reflectors, `.rpol`, RPKI/ASPA, Roles/OTC,
   transactions, BMP/MRT/events, and the already-proven RR/controller-feed
-  families. Keep its stability, migration, deprecation, and compatibility
+  families, plus the [scoped FlowSpec controller API](../reference/v1-stable-contract.md#flowspec-controller-boundary).
+  [ADR-0139](../adr/0139-flowspec-controller-contract.md) promotes that controller
+  boundary using separate dual-stack functional qualification; receive-side
+  validation, GR/LLGR guarantees and enforcement remain excluded.
+  Keep its stability, migration, deprecation, and compatibility
   rules current while EVPN VTEP/IRB remains alpha and outside this contract.
   What tagging v1.0 means — the frozen surfaces, evidence bar, and post-1.0
   deprecation policy — is accepted in
