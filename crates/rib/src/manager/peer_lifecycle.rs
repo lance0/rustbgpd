@@ -117,6 +117,15 @@ impl RibManager {
         session_id: u64,
         event: &str,
     ) -> SessionTeardownDisposition {
+        // Another transport may have staged its registration between this
+        // session's final input and teardown. Only remove the ending session's
+        // pending metadata; its replacement still needs the accepted context.
+        self.pending_peer_export_context.remove(&(peer, session_id));
+        self.pending_peer_rs_control.remove(&(peer, session_id));
+        self.pending_peer_export_encoders
+            .remove(&(peer, session_id));
+        self.pending_peer_gr_context.remove(&(peer, session_id));
+        self.pending_peer_source_context.remove(&(peer, session_id));
         let Some(&registered) = self.outbound_session_ids.get(&peer) else {
             // No registration. Ordinarily `live_sessions` is empty for the
             // peer here and the full teardown proceeds; during the LAN-475
@@ -418,16 +427,10 @@ impl RibManager {
         // Full teardown drops every live-session record with the
         // registration — any session event arriving for the address
         // afterwards is classified against an empty state (accept-all
-        // for teardowns, fresh registration for PeerUp).
+        // for teardowns, fresh registration for PeerUp). Pending registration
+        // contexts belong to their stamped sessions: ordinary teardown and
+        // GR expiry must preserve a replacement staged before its PeerUp.
         self.live_sessions.remove(&peer);
-        self.pending_peer_export_context
-            .retain(|(context_peer, _), _| *context_peer != peer);
-        self.pending_peer_rs_control
-            .retain(|(context_peer, _), _| *context_peer != peer);
-        self.pending_peer_export_encoders
-            .retain(|(context_peer, _), _| *context_peer != peer);
-        self.pending_peer_gr_context
-            .retain(|(context_peer, _), _| *context_peer != peer);
         self.clear_policy_filtered_routes_for_peer(peer);
         if self.gr_peers.remove(&peer).is_some() {
             self.gr_stale_deadlines.remove(&peer);
@@ -584,6 +587,16 @@ impl RibManager {
     /// `handle_peer_down` does not apply.
     pub(super) fn handle_peer_deleted(&mut self, peer: IpAddr) {
         self.peer_down_teardown(peer);
+        self.pending_peer_export_context
+            .retain(|(context_peer, _), _| *context_peer != peer);
+        self.pending_peer_rs_control
+            .retain(|(context_peer, _), _| *context_peer != peer);
+        self.pending_peer_export_encoders
+            .retain(|(context_peer, _), _| *context_peer != peer);
+        self.pending_peer_gr_context
+            .retain(|(context_peer, _), _| *context_peer != peer);
+        self.pending_peer_source_context
+            .retain(|(context_peer, _), _| *context_peer != peer);
         // Deletion also removes the peer from the startup selection-deferral
         // roster: no future session can satisfy its waiters, and leaving them
         // in a blocking state would freeze the family until timer expiry even
@@ -817,6 +830,7 @@ impl RibManager {
 
         let record = LiveSessionRecord {
             session_id,
+            source_context: self.pending_peer_source_context.remove(&(peer, session_id)),
             outbound_tx,
             peer_asn,
             peer_router_id,

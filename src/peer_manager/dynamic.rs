@@ -23,17 +23,7 @@ pub(super) struct DynamicRange {
     pub(super) tcp_ao: Option<TcpAoKeyring>,
 }
 
-/// Canonical dynamic range that accepted a live peer.
-///
-/// Stored on `ManagedPeer` for future transaction targeting. It deliberately
-/// uses the effective prefix key instead of the literal TOML prefix, so host-bit
-/// or formatting variants cannot split attribution for the same address set.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(super) struct AcceptedDynamicRange {
-    pub(super) addr: IpAddr,
-    pub(super) prefix_len: u8,
-    pub(super) peer_group: String,
-}
+pub(super) use rustbgpd_rib::update::AcceptedDynamicRange;
 
 impl DynamicRange {
     /// True when `addr` falls within this range's prefix.

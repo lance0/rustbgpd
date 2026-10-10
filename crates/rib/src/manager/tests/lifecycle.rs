@@ -2133,3 +2133,188 @@ async fn run_loop_advances_deferred_registrations() {
     drop(tx);
     handle.await.unwrap();
 }
+
+#[tokio::test]
+async fn accepted_source_context_survives_collision_failback_and_stamps_pending_input() {
+    use crate::update::{AcceptedDynamicRange, PeerSourceContext};
+    let (_tx, rx) = mpsc::channel(64);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let peer: IpAddr = "192.0.2.1".parse().unwrap();
+    let context = Arc::new(PeerSourceContext {
+        peer_interface: Some("eth1".into()),
+        accepted_dynamic_range: Some(AcceptedDynamicRange {
+            addr: "192.0.2.0".parse().unwrap(),
+            prefix_len: 24,
+            peer_group: "members".into(),
+        }),
+        route_server_client: true,
+    });
+    let (winner_tx, _winner_rx) = mpsc::channel(64);
+    let (loser_tx, _loser_rx) = mpsc::channel(64);
+    manager.handle_update(RibUpdate::SetPeerSourceContext {
+        peer,
+        session_id: 1,
+        context: context.clone(),
+    });
+    manager.handle_update(session_peer_up(peer, 1, winner_tx, ipv4_sendable()));
+    let loser_context = Arc::new(PeerSourceContext {
+        accepted_dynamic_range: Some(AcceptedDynamicRange {
+            addr: "192.0.0.0".parse().unwrap(),
+            prefix_len: 16,
+            peer_group: "replacement".into(),
+        }),
+        ..(*context).clone()
+    });
+    manager.handle_update(RibUpdate::SetPeerSourceContext {
+        peer,
+        session_id: 2,
+        context: loser_context,
+    });
+    manager.handle_update(session_peer_up(peer, 2, loser_tx, ipv4_sendable()));
+    manager.handle_update(RibUpdate::PeerDown {
+        peer,
+        session_id: 2,
+    });
+    let survivor = &manager.live_sessions[&peer][0];
+    assert_eq!(survivor.session_id, 1);
+    assert_eq!(survivor.source_context, Some(context.clone()));
+    let peer_asn = survivor.peer_asn;
+    manager.handle_update(RibUpdate::RoutesReceived {
+        peer,
+        session_id: 1,
+        announced: vec![],
+        withdrawn: vec![],
+        flowspec_announced: vec![],
+        flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
+        validated_with: None,
+    });
+    let admitted = manager.pending_route_batches.back().unwrap().source.clone();
+    assert_eq!(admitted.session_id, 1);
+    assert_eq!(admitted.peer_asn, Some(peer_asn));
+    assert_eq!(admitted.context, Some(context));
+    manager.handle_update(RibUpdate::PeerDown {
+        peer,
+        session_id: 1,
+    });
+    assert!(!manager.live_sessions.contains_key(&peer));
+    assert!(manager.pending_peer_source_context.is_empty());
+    assert_eq!(
+        admitted.session_id, 1,
+        "the captured batch is independent of later teardown"
+    );
+}
+
+#[tokio::test]
+async fn ending_session_preserves_newer_staged_registration_context() {
+    use crate::update::PeerSourceContext;
+    let (_tx, rx) = mpsc::channel(64);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let peer: IpAddr = "192.0.2.1".parse().unwrap();
+    let (old_tx, _old_rx) = mpsc::channel(64);
+    manager.handle_update(session_peer_up(peer, 1, old_tx, ipv4_sendable()));
+    let context = Arc::new(PeerSourceContext {
+        peer_interface: Some("eth2".into()),
+        accepted_dynamic_range: None,
+        route_server_client: false,
+    });
+    manager.handle_update(RibUpdate::SetPeerSourceContext {
+        peer,
+        session_id: 2,
+        context: context.clone(),
+    });
+    manager.handle_update(RibUpdate::SetPeerGracefulRestartContext {
+        peer,
+        session_id: 2,
+        peer_restart_state: false,
+        peer_gr_families: ipv4_sendable(),
+        peer_enhanced_refresh: true,
+        peer_llgr_families: vec![],
+        local_llgr_stale_time: 30,
+    });
+    manager.handle_update(RibUpdate::SetPeerRsControl {
+        peer,
+        session_id: 2,
+        rs_control_asn: Some(65001),
+    });
+    manager.handle_update(RibUpdate::SetPeerExportContext {
+        peer,
+        session_id: 2,
+        local_role: Some(rustbgpd_wire::BgpRole::Provider),
+    });
+    let encoder: Arc<dyn crate::update::ExactExportEncoder> =
+        super::exportability::MockExactExportEncoder::accepting(1);
+    manager.handle_update(RibUpdate::SetPeerExportEncoder {
+        peer,
+        session_id: 2,
+        encoder: encoder.clone(),
+    });
+    manager.handle_update(RibUpdate::PeerDown {
+        peer,
+        session_id: 1,
+    });
+    let (new_tx, _new_rx) = mpsc::channel(64);
+    manager.handle_update(session_peer_up(peer, 2, new_tx, ipv4_sendable()));
+    let record = &manager.live_sessions[&peer][0];
+    assert_eq!(record.source_context, Some(context));
+    assert!(record.gr_context.as_ref().unwrap().peer_enhanced_refresh);
+    assert_eq!(record.rs_control_asn, Some(65001));
+    assert_eq!(record.local_role, Some(rustbgpd_wire::BgpRole::Provider));
+    assert!(Arc::ptr_eq(
+        record.exact_export_encoder.as_ref().unwrap(),
+        &encoder,
+    ));
+    assert!(manager.pending_peer_source_context.is_empty());
+}
+
+#[tokio::test]
+async fn aborted_registration_reaps_only_its_own_staged_source_context() {
+    use crate::update::PeerSourceContext;
+    for registered in [false, true] {
+        for graceful in [false, true] {
+            let (_tx, rx) = mpsc::channel(64);
+            let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+            let peer: IpAddr = "192.0.2.1".parse().unwrap();
+            let (active_tx, _active_rx) = mpsc::channel(64);
+            if registered {
+                manager.handle_update(session_peer_up(peer, 99, active_tx, ipv4_sendable()));
+            }
+            for session_id in [1, 2] {
+                manager.handle_update(RibUpdate::SetPeerSourceContext {
+                    peer,
+                    session_id,
+                    context: Arc::new(PeerSourceContext {
+                        peer_interface: None,
+                        accepted_dynamic_range: None,
+                        route_server_client: false,
+                    }),
+                });
+            }
+            if graceful {
+                manager.handle_update(RibUpdate::PeerGracefulRestart {
+                    peer,
+                    session_id: 1,
+                    restart_time: 30,
+                    stale_routes_time: 30,
+                    gr_families: ipv4_sendable(),
+                    peer_llgr_capable: false,
+                    peer_llgr_families: vec![],
+                    llgr_stale_time: 0,
+                });
+            } else {
+                manager.handle_update(RibUpdate::PeerDown {
+                    peer,
+                    session_id: 1,
+                });
+            }
+            assert!(!manager.pending_peer_source_context.contains_key(&(peer, 1)));
+            assert!(manager.pending_peer_source_context.contains_key(&(peer, 2)));
+            if registered {
+                assert_eq!(manager.live_sessions[&peer][0].session_id, 99);
+            }
+            manager.handle_update(RibUpdate::PeerDeleted { peer });
+            assert!(manager.pending_peer_source_context.is_empty());
+        }
+    }
+}

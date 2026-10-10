@@ -607,6 +607,8 @@ pub struct RibManager {
     /// Session-stamped peer GR capability context staged immediately before
     /// `PeerUp`, used only by the process-start RFC 4724 selection gate.
     pending_peer_gr_context: HashMap<(IpAddr, u64), PeerSelectionDeferralContext>,
+    /// Accepted provenance awaiting its matching session registration.
+    pending_peer_source_context: HashMap<(IpAddr, u64), Arc<crate::update::PeerSourceContext>>,
     /// Exact encoder owned by the active outbound registration. Every
     /// precommit pass captures one immutable snapshot from this handle and
     /// attaches that same snapshot to the outbound envelope.
@@ -1328,6 +1330,7 @@ pub(in crate::manager) const MAX_PRECOMMIT_POLICY_TRANSITION_OWNERSHIP: std::tim
 )]
 pub(super) struct LiveSessionRecord {
     session_id: u64,
+    source_context: Option<Arc<crate::update::PeerSourceContext>>,
     outbound_tx: mpsc::Sender<OutboundRouteUpdate>,
     peer_asn: u32,
     peer_router_id: Ipv4Addr,
@@ -1537,7 +1540,7 @@ enum PendingRoutePhase {
 }
 
 struct PendingRoutesReceived {
-    peer: IpAddr,
+    source: crate::update::ReceivedRouteSource,
     route_capacity_hint: usize,
     flowspec_capacity_hint: usize,
     withdrawn: std::vec::IntoIter<(Prefix, u32)>,
@@ -1568,7 +1571,12 @@ impl PendingRoutesReceived {
         let route_capacity_hint = (announced.len() + withdrawn.len()).max(16);
         let flowspec_capacity_hint = (flowspec_announced.len() + flowspec_withdrawn.len()).max(4);
         Self {
-            peer,
+            source: crate::update::ReceivedRouteSource {
+                peer,
+                session_id: 0,
+                peer_asn: None,
+                context: None,
+            },
             route_capacity_hint,
             flowspec_capacity_hint,
             withdrawn: withdrawn.into_iter(),
@@ -1591,7 +1599,7 @@ impl PendingRoutesReceived {
     }
 
     fn peer(&self) -> IpAddr {
-        self.peer
+        self.source.peer
     }
 
     fn next_chunk(&mut self) -> Option<PendingRouteChunk> {
@@ -1857,6 +1865,7 @@ impl RibManager {
             pending_peer_rs_control: HashMap::new(),
             pending_peer_export_encoders: HashMap::new(),
             pending_peer_gr_context: HashMap::new(),
+            pending_peer_source_context: HashMap::new(),
             peer_export_encoders: HashMap::new(),
             peer_unexportable: HashMap::new(),
             #[cfg(test)]
@@ -2957,6 +2966,21 @@ impl RibManager {
                         evpn_withdrawn,
                         validated_with,
                     );
+                    let record = self.live_sessions.get(&peer).and_then(|sessions| {
+                        sessions
+                            .iter()
+                            .find(|record| record.session_id == session_id)
+                    });
+                    let pending = self
+                        .pending_route_batches
+                        .back_mut()
+                        .expect("received batch was enqueued");
+                    pending.source = crate::update::ReceivedRouteSource {
+                        peer,
+                        session_id,
+                        peer_asn: record.map(|record| record.peer_asn),
+                        context: record.and_then(|record| record.source_context.clone()),
+                    };
                 }
             }
             RibUpdate::BgpLsRoutesReceived {
@@ -3197,6 +3221,14 @@ impl RibManager {
                     self.advance_advertised_pages();
                     self.handle_set_peer_policy_context(peer, peer_group);
                 }
+            }
+            RibUpdate::SetPeerSourceContext {
+                peer,
+                session_id,
+                context,
+            } => {
+                self.pending_peer_source_context
+                    .insert((peer, session_id), context);
             }
             RibUpdate::SetPeerExportContext {
                 peer,

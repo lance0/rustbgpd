@@ -1296,10 +1296,15 @@ async fn staged_snapshot_fences_dynamic_accept_and_restore_reaps_candidate_dynam
     tx.send(PeerManagerCommand::ListPeers { reply: list_tx })
         .await
         .unwrap();
+    let peers = list_rx.await.unwrap();
     assert_eq!(
-        list_rx.await.unwrap().len(),
+        peers.len(),
         1,
         "dynamic inbound should be accepted once the staged snapshot is committed"
+    );
+    assert_eq!(
+        peers[0].accepted_dynamic_range.as_ref().unwrap().peer_group,
+        "ix-members"
     );
 
     let (restore_tx, restore_rx) = oneshot::channel();

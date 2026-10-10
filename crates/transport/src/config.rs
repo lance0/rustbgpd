@@ -480,6 +480,8 @@ pub struct TransportConfig {
     pub local_address: Option<IpAddr>,
     /// Configured interface for IPv6 link-local / unnumbered peers.
     pub peer_interface: Option<String>,
+    /// Canonical range selected at accept; retained across matcher changes.
+    pub accepted_dynamic_range: Option<rustbgpd_rib::update::AcceptedDynamicRange>,
     /// Resolved interface index for scoped IPv6 link-local peers.
     pub peer_scope_id: Option<u32>,
     /// Timeout for outbound TCP connect attempts.
@@ -660,6 +662,7 @@ impl TransportConfig {
             remote_addr,
             local_address: None,
             peer_interface: None,
+            accepted_dynamic_range: None,
             peer_scope_id: None,
             connect_timeout: Self::DEFAULT_CONNECT_TIMEOUT,
             max_prefixes: None,

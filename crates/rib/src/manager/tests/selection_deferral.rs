@@ -2265,7 +2265,7 @@ fn inactive_selection_gate_skips_identity_tracking_before_and_after_release() {
 }
 
 #[test]
-fn peer_teardown_discards_unconsumed_gr_context() {
+fn peer_deleted_discards_unconsumed_gr_context() {
     let a = peer(1);
     let (_tx, rx) = mpsc::channel(8);
     let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
@@ -2279,7 +2279,7 @@ fn peer_teardown_discards_unconsumed_gr_context() {
         local_llgr_stale_time: 0,
     });
     assert!(manager.pending_peer_gr_context.contains_key(&(a, 9)));
-    manager.peer_down_teardown(a);
+    manager.handle_update(RibUpdate::PeerDeleted { peer: a });
     assert!(!manager.pending_peer_gr_context.contains_key(&(a, 9)));
 }
 
