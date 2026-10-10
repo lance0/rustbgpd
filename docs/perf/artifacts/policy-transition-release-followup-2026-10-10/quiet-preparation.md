@@ -40,10 +40,20 @@ checks that they stay unchanged. Record daemon source separately from runner
 source; a main runner's Git identity does not make the old binary main.
 
 No adapter has been applied and no tooling source has been edited for this
-preparation. Before the quiet window, instantiate clean owned candidate trees,
-record their source and adapter hashes, build the common tools under the host
-lock, and perform the compatibility smoke listed in the manifest. Do not
-disable the existing source gate or label a changed tree as an unmodified main.
+preparation. Before the quiet window, freeze then-current main and create one
+explicit **committed adapter revision** based on it. Check out both owned
+runner trees clean at that same adapter commit. Set `RUNNER_CANDIDATE_SHA` to
+the exact 40-hex commit ID obtained after committing the adapter, rather than
+the unmodified main or pre-patch HEAD. Record the frozen main commit/tree and
+adapter commit/tree/patch digest separately from the arm daemon identities.
+
+The full IRR source gate requires a clean HEAD equal to that candidate and
+current `origin/main` to be its ancestor. It fetches main: if main advances
+before measurement, refresh the frozen main, rebase and commit the adapter,
+rebuild the main daemon and common tools, and update the manifest before
+trying the window. Preserve the source gate. Build the shared tools from the
+frozen main source under the host lock and perform the compatibility smoke
+listed in the manifest; the adapter changes only the daemon build selection.
 
 ## Future cell invocations
 
