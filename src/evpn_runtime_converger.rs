@@ -1634,6 +1634,15 @@ impl EvpnRuntimeActorConverger {
             redefined_old_instances.push(old_instance.clone());
             match rekey {
                 Err(withdraw_outcome) => {
+                    // A rejected withdraw left the committed route and its key
+                    // in place: exclude it from the rollback, which would
+                    // otherwise withdraw and re-add it. An unacknowledged one
+                    // stays in, so the rollback puts the route back, but that
+                    // compensating re-add is still an effect.
+                    let no_effect = imet_withdraw_had_no_effect(&withdraw_outcome);
+                    if no_effect {
+                        redefined_old_instances.pop();
+                    }
                     let restored = self
                         .rollback_l2vni_mixed(
                             current,
@@ -1644,7 +1653,7 @@ impl EvpnRuntimeActorConverger {
                         )
                         .await;
                     return Err(l2vni_swap_failure(
-                        restored,
+                        restored && no_effect,
                         &format!(
                             "EVPN IMET withdrawal failed for redefined L2VNI {redefined_vni}: {withdraw_outcome:?}"
                         ),

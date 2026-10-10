@@ -10223,3 +10223,158 @@ fn restore_watch_counts_a_receiver_closing_during_the_rollback_as_unrestored() {
     drop(rx);
     assert!(!restore_watch(&tx, committed));
 }
+
+fn two_l2vni_redefine_100_add_300_runtime_candidate_toml() -> &'static str {
+    r#"
+[global]
+asn = 65000
+router_id = "10.0.0.1"
+listen_port = 179
+
+[global.telemetry]
+log_format = "json"
+
+[[evpn_instances]]
+vni = 100
+rd = "65000:101"
+route_targets = ["65000:100"]
+local_vtep_ip = "10.0.0.1"
+
+[[evpn_instances]]
+vni = 200
+rd = "65000:200"
+route_targets = ["65000:200"]
+local_vtep_ip = "10.0.0.1"
+
+[[evpn_instances]]
+vni = 300
+rd = "65000:300"
+route_targets = ["65000:300"]
+local_vtep_ip = "10.0.0.1"
+"#
+}
+
+#[derive(Clone, Copy, Debug)]
+enum FirstWithdraw {
+    Reject,
+    DropReply,
+}
+
+/// Mixed L2VNI update (add 300, redefine 100) whose redefine withdraw of the
+/// committed VNI 100 route fails as `first_withdraw`. Returns the apply
+/// error and the Type 3 injects and withdraws sent after setup.
+async fn mixed_redefine_withdraw_failure(
+    first_withdraw: FirstWithdraw,
+) -> (GrpcEvpnRuntimeApplyError, usize, usize) {
+    let current = runtime_model_from_candidate_toml(two_l2vni_runtime_candidate_toml());
+    let (dataplane, _instances_rx, _ip_vrfs_rx) =
+        owned_dataplane(Arc::new(current.instances().clone()));
+    let armed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let injects = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let withdraws = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let (rib_tx, rib_rx) = mpsc::channel::<RibUpdate>(64);
+    let _rib = tokio::spawn({
+        let (armed, injects, withdraws) = (armed.clone(), injects.clone(), withdraws.clone());
+        async move {
+            let mut rib_rx = rib_rx;
+            let (events_tx, _) = broadcast::channel(16);
+            while let Some(msg) = rib_rx.recv().await {
+                let counting = armed.load(std::sync::atomic::Ordering::SeqCst);
+                match msg {
+                    RibUpdate::SubscribeEvpnRouteEvents { reply } => {
+                        let _ = reply.send(events_tx.subscribe());
+                    }
+                    RibUpdate::QueryEvpnRoutes { reply, .. } => {
+                        let _ = reply.send(vec![]);
+                    }
+                    RibUpdate::InjectEvpn { reply, .. } => {
+                        if counting {
+                            injects.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        }
+                        let _ = reply.send(Ok(()));
+                    }
+                    RibUpdate::WithdrawEvpn { reply, .. } => {
+                        let first = counting
+                            && withdraws.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0;
+                        match (first, first_withdraw) {
+                            (true, FirstWithdraw::Reject) => {
+                                let _ =
+                                    reply.send(Err(RibCommandError::internal("withdraw rejected")));
+                            }
+                            (true, FirstWithdraw::DropReply) => drop(reply),
+                            (false, _) => {
+                                let _ = reply.send(Ok(()));
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+    });
+    // The committed Type 3 routes for VNI 100 and 200 are live.
+    let imet = Arc::new(tokio::sync::Mutex::new(evpn_imet::EvpnImetController::new()));
+    for instance in current.instances().iter() {
+        assert!(matches!(
+            imet.lock()
+                .await
+                .originate_instance(instance.clone(), &rib_tx)
+                .await,
+            evpn_imet::ImetOriginateOutcome::Originated { .. }
+        ));
+    }
+    armed.store(true, std::sync::atomic::Ordering::SeqCst);
+
+    let (error, _) = apply_l2vni_class_case(
+        two_l2vni_runtime_candidate_toml(),
+        two_l2vni_redefine_100_add_300_runtime_candidate_toml(),
+        rib_tx,
+        &dataplane,
+        imet,
+    )
+    .await;
+    (
+        error,
+        injects.load(std::sync::atomic::Ordering::SeqCst),
+        withdraws.load(std::sync::atomic::Ordering::SeqCst),
+    )
+}
+
+#[tokio::test]
+async fn mixed_redefine_rejected_withdraw_is_no_effect_without_a_route_flap() {
+    // Rejected: the committed VNI 100 route never moved. The rollback only
+    // withdraws the added VNI 300; re-keying VNI 100 again would withdraw
+    // and re-add a route that was never touched.
+    let (error, injects, withdraws) = mixed_redefine_withdraw_failure(FirstWithdraw::Reject).await;
+
+    let GrpcEvpnRuntimeApplyError::FailedPrecondition(message) = &error else {
+        panic!("a rejected redefine withdraw has no effect, got {error:?}");
+    };
+    assert!(
+        message.contains("IMET withdrawal failed for redefined L2VNI 100"),
+        "{message}"
+    );
+    assert_eq!(injects, 1, "only the added VNI 300 was originated");
+    assert_eq!(
+        withdraws, 2,
+        "the rejected withdraw plus the VNI 300 rollback"
+    );
+}
+
+#[tokio::test]
+async fn mixed_redefine_unacknowledged_withdraw_is_internal_after_the_re_add() {
+    // Unacknowledged: the committed route may be gone. The rollback puts it
+    // back, but that compensating withdraw and re-add is an effect.
+    let (error, injects, withdraws) =
+        mixed_redefine_withdraw_failure(FirstWithdraw::DropReply).await;
+
+    let GrpcEvpnRuntimeApplyError::Internal(message) = &error else {
+        panic!("an unacknowledged redefine withdraw is known divergence, got {error:?}");
+    };
+    assert!(
+        message.contains("IMET withdrawal failed for redefined L2VNI 100"),
+        "{message}"
+    );
+    assert_eq!(injects, 2, "VNI 300 plus the committed VNI 100 re-add");
+    assert_eq!(withdraws, 3, "the dropped withdraw plus both rollbacks");
+}
