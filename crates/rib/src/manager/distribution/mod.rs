@@ -205,6 +205,10 @@ pub(in crate::manager) struct OutboundCommitBatch {
     /// The shared plain-group staging pass already applied the group-uniform
     /// OTC egress gate to every unicast announcement in this batch.
     pub(in crate::manager) unicast_otc_prechecked: bool,
+    /// A plain grouped peer refresh with no withdrawals can read its current
+    /// advertised view only if an exact probe fails: neither the group table,
+    /// rejection overlay nor outbound admission changes before that point.
+    pub(in crate::manager) defer_grouped_refresh_prior: bool,
     pub(in crate::manager) announce_source_exclusion: Option<IpAddr>,
     pub(in crate::manager) shared_group_encode: Option<Arc<crate::update::SharedGroupEncode>>,
     pub(in crate::manager) withdraw: Vec<(Prefix, u32)>,
@@ -2732,6 +2736,7 @@ impl RibManager {
                     mut next_hop_override,
                 },
             unicast_otc_prechecked,
+            defer_grouped_refresh_prior,
             announce_source_exclusion,
             mut shared_group_encode,
             mut withdraw,
@@ -2928,9 +2933,10 @@ impl RibManager {
                 && !has_non_unicast_payload
                 && shared_unicast_precommit.is_some();
             let maximum_fast_path_eligible = cache_eligible
-                && shared_unicast_precommit
-                    .as_ref()
-                    .is_some_and(|precommit| precommit.lazy_group_prior.is_some())
+                && (defer_grouped_refresh_prior
+                    || shared_unicast_precommit
+                        .as_ref()
+                        .is_some_and(|precommit| precommit.lazy_group_prior.is_some()))
                 && !self.peer_unexportable.contains_key(&peer);
             #[cfg(test)]
             let maximum_fast_path_eligible =
@@ -3149,6 +3155,14 @@ impl RibManager {
                     .any(Result::is_err);
                 let mut previously_advertised = group_prior;
                 if has_probe_failure {
+                    if defer_grouped_refresh_prior
+                        && let Some(routes) = self.grouped_advertised_routes_iter(peer)
+                    {
+                        previously_advertised.extend(
+                            routes
+                                .map(|route| ExactExportKey::Unicast(route.prefix, route.path_id)),
+                        );
+                    }
                     if let Some(lazy) = shared_unicast_precommit
                         .as_ref()
                         .and_then(|precommit| precommit.lazy_group_prior)

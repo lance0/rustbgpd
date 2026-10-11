@@ -236,16 +236,13 @@ impl Drop for EncoderGuard<'_> {
 }
 
 /// Whether an envelope is shaped like a grouped unicast fanout: unicast
-/// announcements, optionally preceded by unicast withdrawals, everything
-/// else empty. Withdrawals stay per member and go out first through the
-/// ordinary cursor (a failover pass mixes them with displacing
-/// announcements); only the announce inventory is shared. Anything richer
+/// announcements, optionally bracketed by refresh markers or `EoR` and preceded
+/// by unicast withdrawals. Those phases stay per member in the ordinary
+/// cursor; only the announce inventory is shared. Anything richer
 /// keeps the ordinary path, which handles every payload kind.
 fn shared_encode_eligible(update: &OutboundRouteUpdate) -> bool {
     update.shared_group_encode.is_some()
         && !update.announce.is_empty()
-        && update.end_of_rib.is_empty()
-        && update.refresh_markers.is_empty()
         && update.flowspec_announce.is_empty()
         && update.flowspec_withdraw.is_empty()
         && update.evpn_announce.is_empty()
@@ -571,10 +568,15 @@ impl PeerSession {
         // Keep publishing after this member runs out of writer capacity.
         // Its first unsent chunk becomes the same pending cursor consumers use;
         // the group's publication cannot depend on one member's reader. A
-        // member with its own withdrawals sends none of its copy here: they
-        // must precede its announcements, so it streams from chunk 0 once
-        // the ordinary cursor has admitted them.
-        let mut own_send_healthy = update.withdraw.is_empty();
+        // A member with its own withdrawals or BoRR sends none of its copy
+        // here: every earlier phase must precede announcements. It streams
+        // from chunk 0 once the ordinary cursor has admitted those phases.
+        // Requests remain excluded by shared_encode_eligible.
+        let mut own_send_healthy = update.withdraw.is_empty()
+            && !update
+                .refresh_markers
+                .iter()
+                .any(|(_, _, subtype)| *subtype == rustbgpd_wire::RouteRefreshSubtype::BoRR);
         let mut next = 0;
         let mut sent: u64 = 0;
         let mut idx = 0;

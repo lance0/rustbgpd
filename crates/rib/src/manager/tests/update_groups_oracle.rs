@@ -286,6 +286,7 @@ pub(super) struct NormMsg {
     pub(super) announce: Vec<NormAnnounce>,
     pub(super) withdraw: Vec<(Prefix, u32)>,
     pub(super) end_of_rib: Vec<(Afi, Safi)>,
+    pub(super) refresh_markers: Vec<(Afi, Safi, rustbgpd_wire::RouteRefreshSubtype)>,
     pub(super) vpn_announce: Vec<NormVpnAnnounce>,
     pub(super) vpn_withdraw: Vec<(String, u32)>,
 }
@@ -341,6 +342,7 @@ pub(super) fn normalize(update: &OutboundRouteUpdate) -> NormMsg {
         announce,
         withdraw,
         end_of_rib,
+        refresh_markers: update.refresh_markers.clone(),
         vpn_announce,
         vpn_withdraw,
     }
@@ -672,6 +674,7 @@ impl Oracle {
                 announce: vec![],
                 withdraw: vec![],
                 end_of_rib: vec![],
+                refresh_markers: vec![],
                 vpn_announce: vec![],
                 vpn_withdraw: vec![],
             });
@@ -3452,5 +3455,84 @@ async fn oracle_pcb_route_refresh_replays_runner_up_substitution() {
                 .all(|msg| msg.withdraw.is_empty()),
             "refresh replay must not withdraw anything"
         );
+    }
+}
+
+/// All requests are queued before the actor runs. Distinct own-source rows,
+/// a different policy group and negotiated private paths retain the same
+/// normalized announcements, next hops, withdrawals and refresh markers.
+#[tokio::test]
+async fn oracle_queued_refresh_cohort_matches_private_replays() {
+    for features in [
+        OraclePeerFeatures::default(),
+        OraclePeerFeatures {
+            add_path_send_max: 2,
+            ..OraclePeerFeatures::default()
+        },
+        OraclePeerFeatures {
+            negotiated_orf_recv: ipv4_sendable(),
+            ..OraclePeerFeatures::default()
+        },
+        OraclePeerFeatures {
+            per_client_best: true,
+            ..OraclePeerFeatures::default()
+        },
+    ] {
+        let scenario = async |o: &mut Oracle| {
+            for peer in [A, B, C] {
+                o.peer_up_families_generation_with_features(
+                    peer,
+                    SESSION,
+                    false,
+                    true,
+                    None,
+                    64,
+                    ipv4_sendable(),
+                    features.clone(),
+                )
+                .await;
+            }
+            o.routes(A, vec![ibgp_route(pfx(1, 0), A, 100, vec![])], vec![])
+                .await;
+            o.routes(B, vec![ibgp_route(pfx(2, 0), B, 100, vec![])], vec![])
+                .await;
+            o.routes(C, vec![ibgp_route(pfx(3, 0), C, 100, vec![])], vec![])
+                .await;
+            let requests = [A, B, C].map(|peer| RibUpdate::RouteRefreshRequest {
+                peer: IpAddr::V4(peer),
+                session_id: SESSION,
+                afi: Afi::Ipv4,
+                safi: Safi::Unicast,
+                queued: Arc::default(),
+            });
+            o.queue(requests.into()).await;
+            // A policy mutation is an actual FIFO barrier between otherwise
+            // compatible requests; C must observe its new policy afterward.
+            o.replace_policy(C, Some(deny_prefix_chain(pfx(1, 0))))
+                .await;
+            o.queue(
+                [A, B, C]
+                    .map(|peer| RibUpdate::RouteRefreshRequest {
+                        peer: IpAddr::V4(peer),
+                        session_id: SESSION,
+                        afi: Afi::Ipv4,
+                        safi: Safi::Unicast,
+                        queued: Arc::default(),
+                    })
+                    .into(),
+            )
+            .await;
+        };
+        let (grouped, ungrouped) =
+            run_grouped_and_ungrouped(Some(Ipv4Addr::new(192, 0, 2, 1)), scenario).await;
+        assert_eq!(grouped, ungrouped, "features={features:?}");
+        for peer in [A, B, C] {
+            assert!(
+                grouped[&IpAddr::V4(peer)]
+                    .iter()
+                    .any(|message| { !message.refresh_markers.is_empty() }),
+                "each member received a refresh response"
+            );
+        }
     }
 }

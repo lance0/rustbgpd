@@ -341,7 +341,14 @@ impl PeerSession {
             }
             if *next == end {
                 match terminal {
-                    Some(super::shared_group::StreamTerminal::Complete) => finished = true,
+                    Some(super::shared_group::StreamTerminal::Complete) => {
+                        // Only Announce was shared. Each member still owes
+                        // its own terminal refresh/EoR phases, under the same
+                        // writer capacity and envelope ownership as before.
+                        pending.shared = None;
+                        pending.phase = ANNOUNCE_PHASE + 1;
+                        pending.offset = 0;
+                    }
                     Some(super::shared_group::StreamTerminal::Failed) => pending.shared = None,
                     None => {}
                 }

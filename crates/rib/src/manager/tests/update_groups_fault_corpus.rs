@@ -2109,6 +2109,7 @@ fn norm_message(announce: Vec<NormAnnounce>, withdraw: Vec<(Prefix, u32)>) -> No
         announce,
         withdraw,
         end_of_rib: vec![],
+        refresh_markers: vec![],
         vpn_announce: vec![],
         vpn_withdraw: vec![],
     }
@@ -2120,6 +2121,7 @@ fn session_start_message(generation: u64) -> NormMsg {
         announce: vec![],
         withdraw: vec![],
         end_of_rib: vec![],
+        refresh_markers: vec![],
         vpn_announce: vec![],
         vpn_withdraw: vec![],
     }

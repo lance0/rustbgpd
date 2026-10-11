@@ -8470,6 +8470,395 @@ fn replacement_readiness_fleet(export_policy: &PolicyChain) -> BatchedPcbFleet {
     }
 }
 
+fn queue_refresh(
+    tx: &mpsc::Sender<RibUpdate>,
+    peer: IpAddr,
+    session_id: u64,
+    afi: Afi,
+) -> Arc<AtomicBool> {
+    let queued = Arc::new(AtomicBool::new(true));
+    tx.try_send(RibUpdate::RouteRefreshRequest {
+        peer,
+        session_id,
+        afi,
+        safi: Safi::Unicast,
+        queued: Arc::clone(&queued),
+    })
+    .unwrap();
+    queued
+}
+
+/// The first real replay checkpoint observes every admitted flag released.
+/// A request inserted at that checkpoint stays for a later actor turn.
+#[tokio::test]
+async fn queued_refresh_shares_inventory_and_releases_flags_before_replay() {
+    let mut fleet = replacement_readiness_fleet(&community_chain(0xFDE8_0001));
+    let (tx, rx) = mpsc::channel(8);
+    fleet.manager.rx = rx;
+    let flags: Vec<_> = fleet
+        .members
+        .iter()
+        .map(|peer| queue_refresh(&tx, *peer, 0, Afi::Ipv4))
+        .collect();
+    let late = Arc::new(Mutex::new(None));
+    let visited = Arc::new(AtomicBool::new(false));
+    let peer = fleet.members[0];
+    fleet.manager.replacement_readiness_test_hook = Some(Arc::new({
+        let flags = flags.clone();
+        let late = Arc::clone(&late);
+        let visited = Arc::clone(&visited);
+        move |label| {
+            if label == "refresh" && !visited.swap(true, Ordering::Relaxed) {
+                assert!(flags.iter().all(|flag| !flag.load(Ordering::Acquire)));
+                *late.lock().unwrap() = Some(queue_refresh(&tx, peer, 0, Afi::Ipv4));
+            }
+        }
+    }));
+    fleet.probes.store(0, Ordering::Relaxed);
+    fleet.reuses.store(0, Ordering::Relaxed);
+    let version = fleet.manager.route_page_advertised_version.unwrap();
+    assert!(fleet.manager.drain_ready_updates().await);
+    fleet.manager.replacement_readiness_test_hook = None;
+    assert!(visited.load(Ordering::Relaxed));
+    assert_eq!(
+        fleet
+            .manager
+            .route_page_advertised_version
+            .unwrap()
+            .generation,
+        version.generation + 4
+    );
+    assert_eq!(fleet.manager.primary_backlog(), 1);
+    assert!(
+        late.lock()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .load(Ordering::Acquire)
+    );
+    let responses: Vec<_> = fleet
+        .receivers
+        .iter_mut()
+        .map(|rx| rx.try_recv().unwrap())
+        .collect();
+    for (peer, response) in fleet.members.iter().zip(&responses) {
+        assert!(Arc::ptr_eq(&responses[0].announce, &response.announce));
+        assert!(Arc::ptr_eq(
+            responses[0].shared_group_encode.as_ref().unwrap(),
+            response.shared_group_encode.as_ref().unwrap()
+        ));
+        assert_eq!(response.announce_source_exclusion, Some(*peer));
+        assert_eq!(response.end_of_rib, ipv4_sendable());
+        assert_eq!(response.refresh_markers.len(), 2);
+        assert!(
+            response
+                .announce
+                .iter()
+                .all(|route| matches!(route.prefix, Prefix::V4(_)))
+        );
+    }
+    assert_eq!(
+        fleet.probes.load(Ordering::Relaxed),
+        2,
+        "one exact probe per family row"
+    );
+    assert_eq!(
+        fleet.reuses.load(Ordering::Relaxed),
+        3,
+        "each follower reuses the maximum proof"
+    );
+    assert!(fleet.manager.drain_ready_updates().await);
+    assert!(
+        !late
+            .lock()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .load(Ordering::Acquire)
+    );
+    assert!(
+        fleet.receivers[0]
+            .try_recv()
+            .unwrap()
+            .shared_group_encode
+            .is_none()
+    );
+}
+
+#[tokio::test]
+async fn queued_refresh_stops_at_stale_session_and_preserves_page_advancement() {
+    let (mut manager, peers, mut receivers) = direct_clean_transition_manager(3, 2, None);
+    let (tx, rx) = mpsc::channel(8);
+    manager.rx = rx;
+    let first = queue_refresh(&tx, peers[0], 0, Afi::Ipv4);
+    let stale = queue_refresh(&tx, peers[1], 1, Afi::Ipv4);
+    let last = queue_refresh(&tx, peers[2], 0, Afi::Ipv4);
+    let version = manager.route_page_advertised_version.unwrap();
+    assert!(manager.drain_ready_updates().await);
+    assert!(!first.load(Ordering::Acquire));
+    assert!(stale.load(Ordering::Acquire) && last.load(Ordering::Acquire));
+    assert_eq!(
+        manager.route_page_advertised_version.unwrap().generation,
+        version.generation + 1
+    );
+    assert!(
+        receivers[0]
+            .try_recv()
+            .unwrap()
+            .shared_group_encode
+            .is_none()
+    );
+    assert!(manager.drain_ready_updates().await);
+    assert!(!stale.load(Ordering::Acquire));
+    assert!(last.load(Ordering::Acquire));
+    assert_eq!(
+        manager.route_page_advertised_version.unwrap().generation,
+        version.generation + 1
+    );
+    assert!(receivers[1].try_recv().is_err());
+    assert!(manager.drain_ready_updates().await);
+    assert!(!last.load(Ordering::Acquire));
+    assert_eq!(
+        manager.route_page_advertised_version.unwrap().generation,
+        version.generation + 2
+    );
+}
+
+#[tokio::test]
+async fn queued_refresh_respects_cohort_cap_and_conditional_cutoff() {
+    for (cutoff, admitted) in [(None, 64), (Some(2), 2)] {
+        let (mut manager, peers, mut receivers) = direct_clean_transition_manager(66, 2, None);
+        let (tx, rx) = mpsc::channel(128);
+        manager.rx = rx;
+        manager.conditional_expiry_cutoff = cutoff;
+        let flags: Vec<_> = peers
+            .iter()
+            .map(|peer| queue_refresh(&tx, *peer, 0, Afi::Ipv4))
+            .collect();
+        assert!(manager.drain_ready_updates().await);
+        assert_eq!(manager.primary_backlog(), peers.len() - admitted);
+        for (i, (flag, receiver)) in flags.iter().zip(&mut receivers).enumerate() {
+            assert_eq!(flag.load(Ordering::Acquire), i >= admitted);
+            assert_eq!(receiver.try_recv().is_ok(), i < admitted);
+        }
+        if cutoff.is_some() {
+            assert_eq!(manager.conditional_expiry_cutoff, Some(0));
+        }
+    }
+}
+
+/// A withdrawal between two refresh pairs is not swallowed by lookahead:
+/// the earlier pair sees the route; the later pair sees the withdrawn table.
+#[tokio::test]
+async fn queued_refresh_keeps_route_mutations_between_cohorts() {
+    let mut fleet = replacement_readiness_fleet(&community_chain(0xFDE8_0001));
+    let (tx, rx) = mpsc::channel(8);
+    fleet.manager.rx = rx;
+    queue_refresh(&tx, fleet.members[0], 0, Afi::Ipv4);
+    queue_refresh(&tx, fleet.members[1], 0, Afi::Ipv4);
+    tx.try_send(RibUpdate::RoutesReceived {
+        peer: IpAddr::V4(Ipv4Addr::new(192, 0, 2, 54)),
+        session_id: 0,
+        announced: vec![],
+        withdrawn: vec![(Prefix::V4(fleet.shared_prefix), 0)],
+        flowspec_announced: vec![],
+        flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
+        validated_with: None,
+    })
+    .unwrap();
+    let later: Vec<_> = fleet.members[2..]
+        .iter()
+        .map(|peer| queue_refresh(&tx, *peer, 0, Afi::Ipv4))
+        .collect();
+    assert!(fleet.manager.drain_ready_updates().await);
+    assert!(matches!(
+        fleet.manager.primary_lookahead,
+        Some(RibUpdate::RoutesReceived { .. })
+    ));
+    assert!(later.iter().all(|flag| flag.load(Ordering::Acquire)));
+    for receiver in &mut fleet.receivers[..2] {
+        let response = receiver.try_recv().unwrap();
+        assert!(response.shared_group_encode.is_some());
+        assert!(
+            response
+                .announce
+                .iter()
+                .any(|route| route.prefix == Prefix::V4(fleet.shared_prefix))
+        );
+    }
+    assert!(fleet.receivers[2].try_recv().is_err());
+    while fleet.manager.drain_ready_updates().await {}
+    for receiver in &mut fleet.receivers[2..] {
+        let responses: Vec<_> = std::iter::from_fn(|| receiver.try_recv().ok()).collect();
+        let response = responses.last().unwrap();
+        assert!(response.shared_group_encode.is_some());
+        assert!(
+            !response
+                .announce
+                .iter()
+                .any(|route| route.prefix == Prefix::V4(fleet.shared_prefix))
+        );
+    }
+}
+
+#[tokio::test]
+async fn queued_refresh_keeps_initial_eor_and_saturation_per_member() {
+    let (mut manager, peers, mut receivers) = direct_clean_transition_manager(3, 2, None);
+    let (tx, rx) = mpsc::channel(8);
+    manager.rx = rx;
+    let family = (Afi::Ipv4, Safi::Unicast);
+    manager
+        .gr_deferred_eor
+        .entry(peers[0])
+        .or_default()
+        .insert(family);
+    let held: Vec<_> = (0..8)
+        .map(|_| {
+            manager.outbound_peers[&peers[1]]
+                .clone()
+                .try_reserve_owned()
+                .unwrap()
+        })
+        .collect();
+    let flags: Vec<_> = peers
+        .iter()
+        .map(|peer| queue_refresh(&tx, *peer, 0, Afi::Ipv4))
+        .collect();
+    assert!(manager.drain_ready_updates().await);
+    assert!(flags.iter().all(|flag| !flag.load(Ordering::Acquire)));
+    let initial = receivers[0].try_recv().unwrap();
+    assert!(initial.shared_group_encode.is_some());
+    assert!(initial.refresh_markers.is_empty() && initial.end_of_rib.is_empty());
+    let eor = receivers[0].try_recv().unwrap();
+    assert_eq!(eor.end_of_rib, vec![family]);
+    assert!(eor.announce.is_empty());
+    assert!(!manager.gr_deferred_eor.contains_key(&peers[0]));
+    assert!(receivers[1].try_recv().is_err());
+    assert!(manager.dirty_peers.contains(&peers[1]));
+    assert!(manager.pending_refresh[&peers[1]].contains(&family));
+    let unaffected = receivers[2].try_recv().unwrap();
+    assert!(unaffected.shared_group_encode.is_some());
+    assert_eq!(unaffected.refresh_markers.len(), 2);
+    assert!(!manager.dirty_peers.contains(&peers[2]));
+    drop(held);
+    manager.resync_dirty_peers_bounded();
+    let recovered: Vec<_> = std::iter::from_fn(|| receivers[1].try_recv().ok()).collect();
+    assert!(recovered.iter().any(|update| update.announce.len() == 2));
+    assert!(!manager.dirty_peers.contains(&peers[1]));
+}
+
+#[tokio::test]
+async fn queued_refresh_probe_failure_invalidates_only_its_member_and_recovers() {
+    let (mut manager, peers, mut receivers) = direct_clean_transition_manager(3, 2, None);
+    let (tx, rx) = mpsc::channel(8);
+    manager.rx = rx;
+    let encoder = super::exportability::MockExactExportEncoder::accepting(71);
+    let delivered = manager.grouped_advertised_routes(peers[1]).unwrap()[0].clone();
+    let key = crate::update::ExactExportKey::Unicast(delivered.prefix, delivered.path_id);
+    encoder.set_profile(72, [key]);
+    manager
+        .peer_export_encoders
+        .insert(peers[1], encoder.clone());
+    for phase in 0..3 {
+        if phase == 2 {
+            encoder.set_profile(73, []);
+        }
+        for peer in &peers {
+            queue_refresh(&tx, *peer, 0, Afi::Ipv4);
+        }
+        assert!(manager.drain_ready_updates().await);
+        let responses: Vec<_> = receivers
+            .iter_mut()
+            .map(|rx| rx.try_recv().unwrap())
+            .collect();
+        for index in [0, 2] {
+            assert!(responses[index].shared_group_encode.is_some());
+            assert_eq!(responses[index].announce.len(), 2);
+            assert_eq!(responses[index].withdraw, Vec::new());
+        }
+        let affected = &responses[1];
+        assert_eq!(affected.announce.len(), if phase == 2 { 2 } else { 1 });
+        assert_eq!(
+            affected.withdraw,
+            if phase == 0 {
+                vec![(delivered.prefix, delivered.path_id)]
+            } else {
+                vec![]
+            }
+        );
+        if phase != 2 {
+            assert!(
+                affected.shared_group_encode.is_none(),
+                "filtered inventory cannot reuse shared bytes"
+            );
+        }
+        assert_eq!(
+            manager.grouped_advertised_routes(peers[1]).unwrap().len(),
+            affected.announce.len()
+        );
+    }
+}
+
+#[tokio::test]
+async fn queued_refresh_preserves_member_prefix_limit_and_recovery() {
+    let (mut manager, peers, mut receivers) = direct_clean_transition_manager(3, 0, None);
+    let limited = peers[1];
+    manager
+        .outbound_prefix_limits
+        .entry(limited)
+        .or_default()
+        .family_mut(Afi::Ipv4)
+        .unwrap()
+        .limit = std::num::NonZeroU32::new(1);
+    distribute_direct_routes(
+        &mut manager,
+        Ipv4Addr::new(192, 0, 2, 42),
+        [
+            Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24),
+            Ipv4Prefix::new(Ipv4Addr::new(203, 0, 114, 0), 24),
+        ],
+    );
+    for receiver in &mut receivers {
+        while receiver.try_recv().is_ok() {}
+    }
+    assert_eq!(manager.grouped_advertised_routes(limited).unwrap().len(), 1);
+    let (tx, rx) = mpsc::channel(8);
+    manager.rx = rx;
+    for peer in &peers {
+        queue_refresh(&tx, *peer, 0, Afi::Ipv4);
+    }
+    assert!(manager.drain_ready_updates().await);
+    for (index, receiver) in receivers.iter_mut().enumerate() {
+        let response = receiver.try_recv().unwrap();
+        assert_eq!(response.announce.len(), if index == 1 { 1 } else { 2 });
+        assert_eq!(response.shared_group_encode.is_some(), index != 1);
+    }
+    assert!(manager.outbound_blocking(limited, Afi::Ipv4));
+    manager
+        .outbound_prefix_limits
+        .get_mut(&limited)
+        .unwrap()
+        .family_mut(Afi::Ipv4)
+        .unwrap()
+        .limit = std::num::NonZeroU32::new(2);
+    assert_eq!(
+        manager.send_route_refresh_response_inner(
+            limited,
+            Afi::Ipv4,
+            Safi::Unicast,
+            super::super::route_refresh::FamilyReplayKind::PrefixLimitRecovery
+        ),
+        super::super::route_refresh::FamilyReplayOutcome::Committed
+    );
+    let recovered = receivers[1].try_recv().unwrap();
+    assert_eq!(recovered.announce.len(), 2);
+    assert_eq!(recovered.refresh_markers, Vec::new());
+    assert!(!manager.outbound_blocking(limited, Afi::Ipv4));
+    assert_eq!(manager.grouped_advertised_routes(limited).unwrap().len(), 2);
+}
+
 fn queue_replacement_readiness(
     tx: &mpsc::Sender<crate::update::RibReadinessQuery>,
 ) -> oneshot::Receiver<Result<usize, crate::update::RibReadinessError>> {
@@ -8679,7 +9068,8 @@ fn route_refresh_services_interior_readiness_and_fences_other_lanes() {
                     general.lock().unwrap().try_recv(),
                     Err(oneshot::error::TryRecvError::Empty)
                 ));
-                assert_eq!(mutation_tx.capacity(), 0);
+                // Refresh admission may hold the mutation in primary_lookahead;
+                // the assertion below checks its preserved FIFO position.
                 if observed != "refresh" {
                     return;
                 }
@@ -8714,6 +9104,8 @@ fn route_refresh_services_interior_readiness_and_fences_other_lanes() {
             "ungrouped={ungrouped}: refresh interior not reached"
         );
         assert_eq!(fleet.manager.loc_rib.len(), 4);
+        assert_eq!(fleet.manager.primary_backlog(), 1);
+        assert!(fleet.manager.outbound_peers.contains_key(&peer));
         assert_eq!(fleet.manager.grouped_member_of(peer).is_none(), ungrouped);
         assert_eq!(fleet.manager.replacement_readiness_receipts.len(), 1);
         assert_eq!(fleet.manager.replacement_readiness_receipts[0].serviced, 1);
