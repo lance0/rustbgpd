@@ -1,0 +1,1945 @@
+{
+  "status": "VALID four-cell native ABBA; selected public evidence reconciled",
+  "source_parent": "6ee2a052607b34a11e8daa2f4a4d4639b5101690",
+  "source_candidate": "aceacb435677291fdb20c2e792f58cb9e4575b74",
+  "window_start": "2026-10-11T04:42:25-04:00",
+  "window_finish": "2026-10-11T05:13:03-04:00",
+  "outer_exit": 0,
+  "processes_per_arm": 2,
+  "correlated_reloads_per_arm": 16,
+  "total_raw_reload_rows": 32,
+  "total_raw_rpc_calls": 96,
+  "rpc_duration_ms": {
+    "n": 96,
+    "median": 12.740418082103133,
+    "min": 11.224245186895132,
+    "max": 317.1125608496368,
+    "mean": 27.21551306603942
+  },
+  "legs": {
+    "baseline-r1": {
+      "start": "2026-10-11T04:42:55-04:00",
+      "finish": "2026-10-11T04:49:04-04:00",
+      "verdict": "PASS",
+      "native_exit": 0,
+      "reloads": 8,
+      "raw_rpc_calls": 24,
+      "in_band_pairs": 7,
+      "all": {
+        "actor_ms": {
+          "n": 8,
+          "median": 331.0,
+          "min": 324,
+          "max": 389,
+          "mean": 336.875
+        },
+        "cohort_ms": {
+          "n": 8,
+          "median": 331.619,
+          "min": 325.299,
+          "max": 389.775,
+          "mean": 337.847875
+        },
+        "prestage_ms": {
+          "n": 8,
+          "median": 370.299,
+          "min": 289.818,
+          "max": 426.023,
+          "mean": 353.88275
+        },
+        "complete_ms": {
+          "n": 8,
+          "median": 783.2216024398804,
+          "min": 686.4581108093262,
+          "max": 886.9600296020508,
+          "mean": 770.393431186676
+        },
+        "generation_ms": {
+          "n": 8,
+          "median": 720.5295,
+          "min": 626.774,
+          "max": 823.89,
+          "mean": 707.85225
+        },
+        "wire_p50_ms": {
+          "n": 8,
+          "median": 2005.6765,
+          "min": 1961.155,
+          "max": 2245.336,
+          "mean": 2041.334625
+        },
+        "wire_p95_ms": {
+          "n": 8,
+          "median": 3017.8435,
+          "min": 2926.787,
+          "max": 3226.683,
+          "mean": 3027.03925
+        },
+        "wire_max_ms": {
+          "n": 8,
+          "median": 3108.036,
+          "min": 3014.3309999999997,
+          "max": 3275.675,
+          "mean": 3115.418375
+        }
+      },
+      "first": {
+        "actor_ms": {
+          "n": 1,
+          "median": 389,
+          "min": 389,
+          "max": 389,
+          "mean": 389
+        },
+        "cohort_ms": {
+          "n": 1,
+          "median": 389.775,
+          "min": 389.775,
+          "max": 389.775,
+          "mean": 389.775
+        },
+        "prestage_ms": {
+          "n": 1,
+          "median": 426.023,
+          "min": 426.023,
+          "max": 426.023,
+          "mean": 426.023
+        },
+        "complete_ms": {
+          "n": 1,
+          "median": 886.9600296020508,
+          "min": 886.9600296020508,
+          "max": 886.9600296020508,
+          "mean": 886.9600296020508
+        },
+        "generation_ms": {
+          "n": 1,
+          "median": 823.89,
+          "min": 823.89,
+          "max": 823.89,
+          "mean": 823.89
+        },
+        "wire_p50_ms": {
+          "n": 1,
+          "median": 2245.336,
+          "min": 2245.336,
+          "max": 2245.336,
+          "mean": 2245.336
+        },
+        "wire_p95_ms": {
+          "n": 1,
+          "median": 3226.683,
+          "min": 3226.683,
+          "max": 3226.683,
+          "mean": 3226.683
+        },
+        "wire_max_ms": {
+          "n": 1,
+          "median": 3275.675,
+          "min": 3275.675,
+          "max": 3275.675,
+          "mean": 3275.675
+        }
+      },
+      "later": {
+        "actor_ms": {
+          "n": 7,
+          "median": 328,
+          "min": 324,
+          "max": 336,
+          "mean": 329.42857142857144
+        },
+        "cohort_ms": {
+          "n": 7,
+          "median": 328.672,
+          "min": 325.299,
+          "max": 337.338,
+          "mean": 330.4297142857143
+        },
+        "prestage_ms": {
+          "n": 7,
+          "median": 370.082,
+          "min": 289.818,
+          "max": 395.969,
+          "mean": 343.577
+        },
+        "complete_ms": {
+          "n": 7,
+          "median": 775.3040790557861,
+          "min": 686.4581108093262,
+          "max": 812.2570514678955,
+          "mean": 753.7410599844796
+        },
+        "generation_ms": {
+          "n": 7,
+          "median": 714.437,
+          "min": 626.774,
+          "max": 746.092,
+          "mean": 691.2754285714286
+        },
+        "wire_p50_ms": {
+          "n": 7,
+          "median": 1992.8049999999998,
+          "min": 1961.155,
+          "max": 2116.6209999999996,
+          "mean": 2012.1915714285715
+        },
+        "wire_p95_ms": {
+          "n": 7,
+          "median": 3016.88,
+          "min": 2926.787,
+          "max": 3081.648,
+          "mean": 2998.5187142857144
+        },
+        "wire_max_ms": {
+          "n": 7,
+          "median": 3105.9519999999998,
+          "min": 3014.3309999999997,
+          "max": 3170.5260000000003,
+          "mean": 3092.5245714285716
+        }
+      },
+      "rpc_duration_ms": {
+        "n": 24,
+        "median": 12.3434504494071,
+        "min": 11.571135837584734,
+        "max": 317.1125608496368,
+        "mean": 40.2903703507036
+      }
+    },
+    "candidate-r1": {
+      "start": "2026-10-11T04:51:05-04:00",
+      "finish": "2026-10-11T04:57:14-04:00",
+      "verdict": "PASS",
+      "native_exit": 0,
+      "reloads": 8,
+      "raw_rpc_calls": 24,
+      "in_band_pairs": 8,
+      "all": {
+        "actor_ms": {
+          "n": 8,
+          "median": 197.5,
+          "min": 195,
+          "max": 220,
+          "mean": 200.25
+        },
+        "cohort_ms": {
+          "n": 8,
+          "median": 198.6165,
+          "min": 195.702,
+          "max": 221.217,
+          "mean": 201.18824999999998
+        },
+        "prestage_ms": {
+          "n": 8,
+          "median": 484.34799999999996,
+          "min": 420.0,
+          "max": 592.177,
+          "mean": 496.94375
+        },
+        "complete_ms": {
+          "n": 8,
+          "median": 782.0169925689697,
+          "min": 726.6459465026855,
+          "max": 869.3521022796631,
+          "mean": 789.5022630691528
+        },
+        "generation_ms": {
+          "n": 8,
+          "median": 707.719,
+          "min": 666.671,
+          "max": 799.181,
+          "mean": 717.76325
+        },
+        "wire_p50_ms": {
+          "n": 8,
+          "median": 2071.2665,
+          "min": 1981.356,
+          "max": 2189.39,
+          "mean": 2070.935875
+        },
+        "wire_p95_ms": {
+          "n": 8,
+          "median": 3032.2655,
+          "min": 2968.982,
+          "max": 3163.128,
+          "mean": 3045.307625
+        },
+        "wire_max_ms": {
+          "n": 8,
+          "median": 3130.393,
+          "min": 3077.3869999999997,
+          "max": 3213.917,
+          "mean": 3139.2995
+        }
+      },
+      "first": {
+        "actor_ms": {
+          "n": 1,
+          "median": 196,
+          "min": 196,
+          "max": 196,
+          "mean": 196
+        },
+        "cohort_ms": {
+          "n": 1,
+          "median": 196.777,
+          "min": 196.777,
+          "max": 196.777,
+          "mean": 196.777
+        },
+        "prestage_ms": {
+          "n": 1,
+          "median": 543.253,
+          "min": 543.253,
+          "max": 543.253,
+          "mean": 543.253
+        },
+        "complete_ms": {
+          "n": 1,
+          "median": 810.5289936065674,
+          "min": 810.5289936065674,
+          "max": 810.5289936065674,
+          "mean": 810.5289936065674
+        },
+        "generation_ms": {
+          "n": 1,
+          "median": 746.266,
+          "min": 746.266,
+          "max": 746.266,
+          "mean": 746.266
+        },
+        "wire_p50_ms": {
+          "n": 1,
+          "median": 2189.39,
+          "min": 2189.39,
+          "max": 2189.39,
+          "mean": 2189.39
+        },
+        "wire_p95_ms": {
+          "n": 1,
+          "median": 3163.128,
+          "min": 3163.128,
+          "max": 3163.128,
+          "mean": 3163.128
+        },
+        "wire_max_ms": {
+          "n": 1,
+          "median": 3213.917,
+          "min": 3213.917,
+          "max": 3213.917,
+          "mean": 3213.917
+        }
+      },
+      "later": {
+        "actor_ms": {
+          "n": 7,
+          "median": 199,
+          "min": 195,
+          "max": 220,
+          "mean": 200.85714285714286
+        },
+        "cohort_ms": {
+          "n": 7,
+          "median": 199.892,
+          "min": 195.702,
+          "max": 221.217,
+          "mean": 201.81842857142857
+        },
+        "prestage_ms": {
+          "n": 7,
+          "median": 479.777,
+          "min": 420.0,
+          "max": 592.177,
+          "mean": 490.32814285714284
+        },
+        "complete_ms": {
+          "n": 7,
+          "median": 774.507999420166,
+          "min": 726.6459465026855,
+          "max": 869.3521022796631,
+          "mean": 786.4984444209507
+        },
+        "generation_ms": {
+          "n": 7,
+          "median": 702.575,
+          "min": 666.671,
+          "max": 799.181,
+          "mean": 713.6914285714286
+        },
+        "wire_p50_ms": {
+          "n": 7,
+          "median": 2061.764,
+          "min": 1981.356,
+          "max": 2098.064,
+          "mean": 2054.013857142857
+        },
+        "wire_p95_ms": {
+          "n": 7,
+          "median": 3016.305,
+          "min": 2968.982,
+          "max": 3114.372,
+          "mean": 3028.476142857143
+        },
+        "wire_max_ms": {
+          "n": 7,
+          "median": 3111.578,
+          "min": 3077.3869999999997,
+          "max": 3213.378,
+          "mean": 3128.639857142857
+        }
+      },
+      "rpc_duration_ms": {
+        "n": 24,
+        "median": 12.82029808498919,
+        "min": 11.478094384074211,
+        "max": 43.94493391737342,
+        "mean": 18.89344434797143
+      }
+    },
+    "candidate-r2": {
+      "start": "2026-10-11T04:58:44-04:00",
+      "finish": "2026-10-11T05:04:53-04:00",
+      "verdict": "PASS",
+      "native_exit": 0,
+      "reloads": 8,
+      "raw_rpc_calls": 24,
+      "in_band_pairs": 8,
+      "all": {
+        "actor_ms": {
+          "n": 8,
+          "median": 199.0,
+          "min": 193,
+          "max": 211,
+          "mean": 200.625
+        },
+        "cohort_ms": {
+          "n": 8,
+          "median": 199.8615,
+          "min": 194.029,
+          "max": 211.741,
+          "mean": 201.4315
+        },
+        "prestage_ms": {
+          "n": 8,
+          "median": 449.8215,
+          "min": 388.177,
+          "max": 646.422,
+          "mean": 468.404875
+        },
+        "complete_ms": {
+          "n": 8,
+          "median": 728.2924652099609,
+          "min": 685.9309673309326,
+          "max": 913.2959842681885,
+          "mean": 752.0353496074677
+        },
+        "generation_ms": {
+          "n": 8,
+          "median": 665.038,
+          "min": 620.678,
+          "max": 852.215,
+          "mean": 689.40725
+        },
+        "wire_p50_ms": {
+          "n": 8,
+          "median": 1997.2780000000002,
+          "min": 1891.707,
+          "max": 2337.504,
+          "mean": 2042.7705
+        },
+        "wire_p95_ms": {
+          "n": 8,
+          "median": 2966.364,
+          "min": 2910.071,
+          "max": 3266.3579999999997,
+          "mean": 3023.920375
+        },
+        "wire_max_ms": {
+          "n": 8,
+          "median": 3057.1684999999998,
+          "min": 3002.124,
+          "max": 3312.962,
+          "mean": 3112.25525
+        }
+      },
+      "first": {
+        "actor_ms": {
+          "n": 1,
+          "median": 195,
+          "min": 195,
+          "max": 195,
+          "mean": 195
+        },
+        "cohort_ms": {
+          "n": 1,
+          "median": 196.238,
+          "min": 196.238,
+          "max": 196.238,
+          "mean": 196.238
+        },
+        "prestage_ms": {
+          "n": 1,
+          "median": 646.422,
+          "min": 646.422,
+          "max": 646.422,
+          "mean": 646.422
+        },
+        "complete_ms": {
+          "n": 1,
+          "median": 913.2959842681885,
+          "min": 913.2959842681885,
+          "max": 913.2959842681885,
+          "mean": 913.2959842681885
+        },
+        "generation_ms": {
+          "n": 1,
+          "median": 852.215,
+          "min": 852.215,
+          "max": 852.215,
+          "mean": 852.215
+        },
+        "wire_p50_ms": {
+          "n": 1,
+          "median": 2337.504,
+          "min": 2337.504,
+          "max": 2337.504,
+          "mean": 2337.504
+        },
+        "wire_p95_ms": {
+          "n": 1,
+          "median": 3266.3579999999997,
+          "min": 3266.3579999999997,
+          "max": 3266.3579999999997,
+          "mean": 3266.3579999999997
+        },
+        "wire_max_ms": {
+          "n": 1,
+          "median": 3312.962,
+          "min": 3312.962,
+          "max": 3312.962,
+          "mean": 3312.962
+        }
+      },
+      "later": {
+        "actor_ms": {
+          "n": 7,
+          "median": 202,
+          "min": 193,
+          "max": 211,
+          "mean": 201.42857142857142
+        },
+        "cohort_ms": {
+          "n": 7,
+          "median": 202.834,
+          "min": 194.029,
+          "max": 211.741,
+          "mean": 202.17342857142856
+        },
+        "prestage_ms": {
+          "n": 7,
+          "median": 446.298,
+          "min": 388.177,
+          "max": 514.121,
+          "mean": 442.9738571428571
+        },
+        "complete_ms": {
+          "n": 7,
+          "median": 721.9650745391846,
+          "min": 685.9309673309326,
+          "max": 828.4339904785156,
+          "mean": 728.9981160845075
+        },
+        "generation_ms": {
+          "n": 7,
+          "median": 655.925,
+          "min": 620.678,
+          "max": 767.738,
+          "mean": 666.149
+        },
+        "wire_p50_ms": {
+          "n": 7,
+          "median": 1983.3400000000001,
+          "min": 1891.707,
+          "max": 2171.093,
+          "mean": 2000.6657142857143
+        },
+        "wire_p95_ms": {
+          "n": 7,
+          "median": 2959.5370000000003,
+          "min": 2910.071,
+          "max": 3195.954,
+          "mean": 2989.2864285714286
+        },
+        "wire_max_ms": {
+          "n": 7,
+          "median": 3055.587,
+          "min": 3002.124,
+          "max": 3294.192,
+          "mean": 3083.582857142857
+        }
+      },
+      "rpc_duration_ms": {
+        "n": 24,
+        "median": 12.567892437800765,
+        "min": 11.258047074079514,
+        "max": 40.89444177225232,
+        "mean": 18.565166043117642
+      }
+    },
+    "baseline-r2": {
+      "start": "2026-10-11T05:06:54-04:00",
+      "finish": "2026-10-11T05:13:03-04:00",
+      "verdict": "PASS",
+      "native_exit": 0,
+      "reloads": 8,
+      "raw_rpc_calls": 24,
+      "in_band_pairs": 7,
+      "all": {
+        "actor_ms": {
+          "n": 8,
+          "median": 341.0,
+          "min": 326,
+          "max": 383,
+          "mean": 343.875
+        },
+        "cohort_ms": {
+          "n": 8,
+          "median": 359.7835,
+          "min": 326.929,
+          "max": 577.334,
+          "mean": 384.007125
+        },
+        "prestage_ms": {
+          "n": 8,
+          "median": 361.142,
+          "min": 291.698,
+          "max": 411.622,
+          "mean": 357.151
+        },
+        "complete_ms": {
+          "n": 8,
+          "median": 804.7995567321777,
+          "min": 718.9779281616211,
+          "max": 1064.466953277588,
+          "mean": 818.257749080658
+        },
+        "generation_ms": {
+          "n": 8,
+          "median": 733.823,
+          "min": 657.317,
+          "max": 1000.112,
+          "mean": 753.143125
+        },
+        "wire_p50_ms": {
+          "n": 8,
+          "median": 2061.1655,
+          "min": 1992.7060000000001,
+          "max": 2260.665,
+          "mean": 2077.566
+        },
+        "wire_p95_ms": {
+          "n": 8,
+          "median": 3044.8025,
+          "min": 2948.344,
+          "max": 3192.5099999999998,
+          "mean": 3047.000625
+        },
+        "wire_max_ms": {
+          "n": 8,
+          "median": 3149.406,
+          "min": 3045.4919999999997,
+          "max": 3237.077,
+          "mean": 3140.34525
+        }
+      },
+      "first": {
+        "actor_ms": {
+          "n": 1,
+          "median": 383,
+          "min": 383,
+          "max": 383,
+          "mean": 383
+        },
+        "cohort_ms": {
+          "n": 1,
+          "median": 383.733,
+          "min": 383.733,
+          "max": 383.733,
+          "mean": 383.733
+        },
+        "prestage_ms": {
+          "n": 1,
+          "median": 376.795,
+          "min": 376.795,
+          "max": 376.795,
+          "mean": 376.795
+        },
+        "complete_ms": {
+          "n": 1,
+          "median": 831.6311836242676,
+          "min": 831.6311836242676,
+          "max": 831.6311836242676,
+          "mean": 831.6311836242676
+        },
+        "generation_ms": {
+          "n": 1,
+          "median": 766.864,
+          "min": 766.864,
+          "max": 766.864,
+          "mean": 766.864
+        },
+        "wire_p50_ms": {
+          "n": 1,
+          "median": 2260.665,
+          "min": 2260.665,
+          "max": 2260.665,
+          "mean": 2260.665
+        },
+        "wire_p95_ms": {
+          "n": 1,
+          "median": 3192.5099999999998,
+          "min": 3192.5099999999998,
+          "max": 3192.5099999999998,
+          "mean": 3192.5099999999998
+        },
+        "wire_max_ms": {
+          "n": 1,
+          "median": 3237.077,
+          "min": 3237.077,
+          "max": 3237.077,
+          "mean": 3237.077
+        }
+      },
+      "later": {
+        "actor_ms": {
+          "n": 7,
+          "median": 340,
+          "min": 326,
+          "max": 348,
+          "mean": 338.2857142857143
+        },
+        "cohort_ms": {
+          "n": 7,
+          "median": 342.803,
+          "min": 326.929,
+          "max": 577.334,
+          "mean": 384.0462857142857
+        },
+        "prestage_ms": {
+          "n": 7,
+          "median": 356.183,
+          "min": 291.698,
+          "max": 411.622,
+          "mean": 354.3447142857143
+        },
+        "complete_ms": {
+          "n": 7,
+          "median": 803.1270503997803,
+          "min": 718.9779281616211,
+          "max": 1064.466953277588,
+          "mean": 816.3472584315708
+        },
+        "generation_ms": {
+          "n": 7,
+          "median": 728.044,
+          "min": 657.317,
+          "max": 1000.112,
+          "mean": 751.183
+        },
+        "wire_p50_ms": {
+          "n": 7,
+          "median": 2052.445,
+          "min": 1992.7060000000001,
+          "max": 2101.178,
+          "mean": 2051.409
+        },
+        "wire_p95_ms": {
+          "n": 7,
+          "median": 3031.256,
+          "min": 2948.344,
+          "max": 3084.0589999999997,
+          "mean": 3026.2135714285714
+        },
+        "wire_max_ms": {
+          "n": 7,
+          "median": 3131.725,
+          "min": 3045.4919999999997,
+          "max": 3190.7619999999997,
+          "mean": 3126.5264285714284
+        }
+      },
+      "rpc_duration_ms": {
+        "n": 24,
+        "median": 12.816260568797588,
+        "min": 11.224245186895132,
+        "max": 315.03703771159053,
+        "mean": 31.113071522365015
+      }
+    }
+  },
+  "arms": {
+    "baseline": {
+      "all": {
+        "actor_ms": {
+          "n": 16,
+          "median": 335.0,
+          "min": 324,
+          "max": 389,
+          "mean": 340.375
+        },
+        "cohort_ms": {
+          "n": 16,
+          "median": 337.50750000000005,
+          "min": 325.299,
+          "max": 577.334,
+          "mean": 360.9275
+        },
+        "prestage_ms": {
+          "n": 16,
+          "median": 368.0915,
+          "min": 289.818,
+          "max": 426.023,
+          "mean": 355.516875
+        },
+        "complete_ms": {
+          "n": 16,
+          "median": 794.7571277618408,
+          "min": 686.4581108093262,
+          "max": 1064.466953277588,
+          "mean": 794.325590133667
+        },
+        "generation_ms": {
+          "n": 16,
+          "median": 727.333,
+          "min": 626.774,
+          "max": 1000.112,
+          "mean": 730.4976875
+        },
+        "wire_p50_ms": {
+          "n": 16,
+          "median": 2042.4500000000003,
+          "min": 1961.155,
+          "max": 2260.665,
+          "mean": 2059.4503125
+        },
+        "wire_p95_ms": {
+          "n": 16,
+          "median": 3019.8055,
+          "min": 2926.787,
+          "max": 3226.683,
+          "mean": 3037.0199375
+        },
+        "wire_max_ms": {
+          "n": 16,
+          "median": 3118.5260000000003,
+          "min": 3014.3309999999997,
+          "max": 3275.675,
+          "mean": 3127.8818125
+        }
+      },
+      "first": {
+        "actor_ms": {
+          "n": 2,
+          "median": 386.0,
+          "min": 383,
+          "max": 389,
+          "mean": 386
+        },
+        "cohort_ms": {
+          "n": 2,
+          "median": 386.754,
+          "min": 383.733,
+          "max": 389.775,
+          "mean": 386.754
+        },
+        "prestage_ms": {
+          "n": 2,
+          "median": 401.409,
+          "min": 376.795,
+          "max": 426.023,
+          "mean": 401.409
+        },
+        "complete_ms": {
+          "n": 2,
+          "median": 859.2956066131592,
+          "min": 831.6311836242676,
+          "max": 886.9600296020508,
+          "mean": 859.2956066131592
+        },
+        "generation_ms": {
+          "n": 2,
+          "median": 795.377,
+          "min": 766.864,
+          "max": 823.89,
+          "mean": 795.377
+        },
+        "wire_p50_ms": {
+          "n": 2,
+          "median": 2253.0005,
+          "min": 2245.336,
+          "max": 2260.665,
+          "mean": 2253.0005
+        },
+        "wire_p95_ms": {
+          "n": 2,
+          "median": 3209.5964999999997,
+          "min": 3192.5099999999998,
+          "max": 3226.683,
+          "mean": 3209.5964999999997
+        },
+        "wire_max_ms": {
+          "n": 2,
+          "median": 3256.376,
+          "min": 3237.077,
+          "max": 3275.675,
+          "mean": 3256.376
+        }
+      },
+      "later": {
+        "actor_ms": {
+          "n": 14,
+          "median": 334.0,
+          "min": 324,
+          "max": 348,
+          "mean": 333.85714285714283
+        },
+        "cohort_ms": {
+          "n": 14,
+          "median": 336.124,
+          "min": 325.299,
+          "max": 577.334,
+          "mean": 357.238
+        },
+        "prestage_ms": {
+          "n": 14,
+          "median": 361.142,
+          "min": 289.818,
+          "max": 411.622,
+          "mean": 348.96085714285715
+        },
+        "complete_ms": {
+          "n": 14,
+          "median": 783.2216024398804,
+          "min": 686.4581108093262,
+          "max": 1064.466953277588,
+          "mean": 785.0441592080252
+        },
+        "generation_ms": {
+          "n": 14,
+          "median": 720.5295,
+          "min": 626.774,
+          "max": 1000.112,
+          "mean": 721.2292142857143
+        },
+        "wire_p50_ms": {
+          "n": 14,
+          "median": 2027.4265,
+          "min": 1961.155,
+          "max": 2116.6209999999996,
+          "mean": 2031.8002857142858
+        },
+        "wire_p95_ms": {
+          "n": 14,
+          "median": 3017.8435,
+          "min": 2926.787,
+          "max": 3084.0589999999997,
+          "mean": 3012.3661428571427
+        },
+        "wire_max_ms": {
+          "n": 14,
+          "median": 3108.036,
+          "min": 3014.3309999999997,
+          "max": 3190.7619999999997,
+          "mean": 3109.5254999999997
+        }
+      },
+      "additive_means_ms": {
+        "before_timed_generation_ms": 60.21554823589325,
+        "preflight_ms": 0.144625,
+        "cohort_selection_ms": 12.466125,
+        "cohort_prestage_session_apply_ms": 355.516875,
+        "cohort_rib_transition_ms": 360.9275,
+        "authoritative_remainder_apply_ms": 0.0010625,
+        "deferred_refresh_dispatch_ms": 0.006625,
+        "convergence_check_ms": 0.14475,
+        "unattributed_ms": 1.290125,
+        "after_phase_log_to_complete_ms": 3.6123543977737427
+      },
+      "complete_mean_ms": 794.325590133667,
+      "rpc_duration_ms": {
+        "n": 48,
+        "median": 12.500317534431815,
+        "min": 11.224245186895132,
+        "max": 317.1125608496368,
+        "mean": 35.70172093653431
+      }
+    },
+    "candidate": {
+      "all": {
+        "actor_ms": {
+          "n": 16,
+          "median": 197.5,
+          "min": 193,
+          "max": 220,
+          "mean": 200.4375
+        },
+        "cohort_ms": {
+          "n": 16,
+          "median": 198.6165,
+          "min": 194.029,
+          "max": 221.217,
+          "mean": 201.309875
+        },
+        "prestage_ms": {
+          "n": 16,
+          "median": 469.845,
+          "min": 388.177,
+          "max": 646.422,
+          "mean": 482.6743125
+        },
+        "complete_ms": {
+          "n": 16,
+          "median": 754.9779415130615,
+          "min": 685.9309673309326,
+          "max": 913.2959842681885,
+          "mean": 770.7688063383102
+        },
+        "generation_ms": {
+          "n": 16,
+          "median": 693.094,
+          "min": 620.678,
+          "max": 852.215,
+          "mean": 703.58525
+        },
+        "wire_p50_ms": {
+          "n": 16,
+          "median": 2034.728,
+          "min": 1891.707,
+          "max": 2337.504,
+          "mean": 2056.8531875
+        },
+        "wire_p95_ms": {
+          "n": 16,
+          "median": 2994.2889999999998,
+          "min": 2910.071,
+          "max": 3266.3579999999997,
+          "mean": 3034.614
+        },
+        "wire_max_ms": {
+          "n": 16,
+          "median": 3099.4905000000003,
+          "min": 3002.124,
+          "max": 3312.962,
+          "mean": 3125.777375
+        }
+      },
+      "first": {
+        "actor_ms": {
+          "n": 2,
+          "median": 195.5,
+          "min": 195,
+          "max": 196,
+          "mean": 195.5
+        },
+        "cohort_ms": {
+          "n": 2,
+          "median": 196.5075,
+          "min": 196.238,
+          "max": 196.777,
+          "mean": 196.5075
+        },
+        "prestage_ms": {
+          "n": 2,
+          "median": 594.8375000000001,
+          "min": 543.253,
+          "max": 646.422,
+          "mean": 594.8375000000001
+        },
+        "complete_ms": {
+          "n": 2,
+          "median": 861.9124889373779,
+          "min": 810.5289936065674,
+          "max": 913.2959842681885,
+          "mean": 861.9124889373779
+        },
+        "generation_ms": {
+          "n": 2,
+          "median": 799.2405,
+          "min": 746.266,
+          "max": 852.215,
+          "mean": 799.2405
+        },
+        "wire_p50_ms": {
+          "n": 2,
+          "median": 2263.447,
+          "min": 2189.39,
+          "max": 2337.504,
+          "mean": 2263.447
+        },
+        "wire_p95_ms": {
+          "n": 2,
+          "median": 3214.743,
+          "min": 3163.128,
+          "max": 3266.3579999999997,
+          "mean": 3214.743
+        },
+        "wire_max_ms": {
+          "n": 2,
+          "median": 3263.4395,
+          "min": 3213.917,
+          "max": 3312.962,
+          "mean": 3263.4395
+        }
+      },
+      "later": {
+        "actor_ms": {
+          "n": 14,
+          "median": 199.5,
+          "min": 193,
+          "max": 220,
+          "mean": 201.14285714285714
+        },
+        "cohort_ms": {
+          "n": 14,
+          "median": 200.32549999999998,
+          "min": 194.029,
+          "max": 221.217,
+          "mean": 201.99592857142858
+        },
+        "prestage_ms": {
+          "n": 14,
+          "median": 460.76599999999996,
+          "min": 388.177,
+          "max": 592.177,
+          "mean": 466.651
+        },
+        "complete_ms": {
+          "n": 14,
+          "median": 748.8019466400146,
+          "min": 685.9309673309326,
+          "max": 869.3521022796631,
+          "mean": 757.7482802527292
+        },
+        "generation_ms": {
+          "n": 14,
+          "median": 688.265,
+          "min": 620.678,
+          "max": 799.181,
+          "mean": 689.9202142857143
+        },
+        "wire_p50_ms": {
+          "n": 14,
+          "median": 2023.6170000000002,
+          "min": 1891.707,
+          "max": 2171.093,
+          "mean": 2027.3397857142859
+        },
+        "wire_p95_ms": {
+          "n": 14,
+          "median": 2978.4215,
+          "min": 2910.071,
+          "max": 3195.954,
+          "mean": 3008.8812857142857
+        },
+        "wire_max_ms": {
+          "n": 14,
+          "median": 3084.3465,
+          "min": 3002.124,
+          "max": 3294.192,
+          "mean": 3106.1113571428573
+        }
+      },
+      "additive_means_ms": {
+        "before_timed_generation_ms": 63.770177145957945,
+        "preflight_ms": 0.1570625,
+        "cohort_selection_ms": 18.0075625,
+        "cohort_prestage_session_apply_ms": 482.6743125,
+        "cohort_rib_transition_ms": 201.309875,
+        "authoritative_remainder_apply_ms": 0.0011250000000000001,
+        "deferred_refresh_dispatch_ms": 0.0065625,
+        "convergence_check_ms": 0.149,
+        "unattributed_ms": 1.27975,
+        "after_phase_log_to_complete_ms": 3.413379192352295
+      },
+      "complete_mean_ms": 770.7688063383102,
+      "rpc_duration_ms": {
+        "n": 48,
+        "median": 12.781749945133924,
+        "min": 11.258047074079514,
+        "max": 43.94493391737342,
+        "mean": 18.729305195544537
+      }
+    }
+  },
+  "reloads": [
+    {
+      "leg": "baseline-r1",
+      "arm": "baseline",
+      "reload": 1,
+      "actor_ms": 389,
+      "cohort_ms": 389.775,
+      "prestage_ms": 426.023,
+      "complete_ms": 886.9600296020508,
+      "generation_ms": 823.89,
+      "before_timed_generation_ms": 59.15996490478517,
+      "after_phase_log_to_complete_ms": 3.910064697265625,
+      "complete_pair_in_band": false,
+      "preflight_ms": 0.154,
+      "cohort_selection_ms": 6.658,
+      "cohort_prestage_session_apply_ms": 426.023,
+      "cohort_rib_transition_ms": 389.775,
+      "authoritative_remainder_apply_ms": 0.001,
+      "deferred_refresh_dispatch_ms": 0.006,
+      "convergence_check_ms": 0.146,
+      "unattributed_ms": 1.127,
+      "wire_p50_ms": 2245.336,
+      "wire_p95_ms": 3226.683,
+      "wire_max_ms": 3275.675
+    },
+    {
+      "leg": "baseline-r1",
+      "arm": "baseline",
+      "reload": 2,
+      "actor_ms": 328,
+      "cohort_ms": 328.672,
+      "prestage_ms": 395.969,
+      "complete_ms": 812.2570514678955,
+      "generation_ms": 746.092,
+      "before_timed_generation_ms": 62.76591778564455,
+      "after_phase_log_to_complete_ms": 3.3991336822509766,
+      "complete_pair_in_band": true,
+      "preflight_ms": 0.15,
+      "cohort_selection_ms": 19.799,
+      "cohort_prestage_session_apply_ms": 395.969,
+      "cohort_rib_transition_ms": 328.672,
+      "authoritative_remainder_apply_ms": 0.001,
+      "deferred_refresh_dispatch_ms": 0.006,
+      "convergence_check_ms": 0.144,
+      "unattributed_ms": 1.351,
+      "wire_p50_ms": 2116.6209999999996,
+      "wire_p95_ms": 3081.648,
+      "wire_max_ms": 3170.5260000000003
+    },
+    {
+      "leg": "baseline-r1",
+      "arm": "baseline",
+      "reload": 3,
+      "actor_ms": 324,
+      "cohort_ms": 325.299,
+      "prestage_ms": 292.197,
+      "complete_ms": 686.4581108093262,
+      "generation_ms": 626.774,
+      "before_timed_generation_ms": 55.98695390319824,
+      "after_phase_log_to_complete_ms": 3.6971569061279297,
+      "complete_pair_in_band": true,
+      "preflight_ms": 0.173,
+      "cohort_selection_ms": 7.662,
+      "cohort_prestage_session_apply_ms": 292.197,
+      "cohort_rib_transition_ms": 325.299,
+      "authoritative_remainder_apply_ms": 0.001,
+      "deferred_refresh_dispatch_ms": 0.006,
+      "convergence_check_ms": 0.147,
+      "unattributed_ms": 1.289,
+      "wire_p50_ms": 1967.883,
+      "wire_p95_ms": 2926.787,
+      "wire_max_ms": 3014.3309999999997
+    },
+    {
+      "leg": "baseline-r1",
+      "arm": "baseline",
+      "reload": 4,
+      "actor_ms": 325,
+      "cohort_ms": 325.867,
+      "prestage_ms": 307.064,
+      "complete_ms": 716.5820598602295,
+      "generation_ms": 655.724,
+      "before_timed_generation_ms": 57.07602593994136,
+      "after_phase_log_to_complete_ms": 3.782033920288086,
+      "complete_pair_in_band": true,
+      "preflight_ms": 0.171,
+      "cohort_selection_ms": 21.043,
+      "cohort_prestage_session_apply_ms": 307.064,
+      "cohort_rib_transition_ms": 325.867,
+      "authoritative_remainder_apply_ms": 0.0,
+      "deferred_refresh_dispatch_ms": 0.007,
+      "convergence_check_ms": 0.148,
+      "unattributed_ms": 1.424,
+      "wire_p50_ms": 1992.8049999999998,
+      "wire_p95_ms": 2982.35,
+      "wire_max_ms": 3082.7909999999997
+    },
+    {
+      "leg": "baseline-r1",
+      "arm": "baseline",
+      "reload": 5,
+      "actor_ms": 325,
+      "cohort_ms": 326.356,
+      "prestage_ms": 370.516,
+      "complete_ms": 775.3040790557861,
+      "generation_ms": 714.437,
+      "before_timed_generation_ms": 57.22809628295897,
+      "after_phase_log_to_complete_ms": 3.6389827728271484,
+      "complete_pair_in_band": true,
+      "preflight_ms": 0.112,
+      "cohort_selection_ms": 15.948,
+      "cohort_prestage_session_apply_ms": 370.516,
+      "cohort_rib_transition_ms": 326.356,
+      "authoritative_remainder_apply_ms": 0.0,
+      "deferred_refresh_dispatch_ms": 0.007,
+      "convergence_check_ms": 0.146,
+      "unattributed_ms": 1.352,
+      "wire_p50_ms": 2018.548,
+      "wire_p95_ms": 3018.807,
+      "wire_max_ms": 3126.9320000000002
+    },
+    {
+      "leg": "baseline-r1",
+      "arm": "baseline",
+      "reload": 6,
+      "actor_ms": 334,
+      "cohort_ms": 334.91,
+      "prestage_ms": 370.082,
+      "complete_ms": 791.1391258239746,
+      "generation_ms": 726.622,
+      "before_timed_generation_ms": 60.67596409606938,
+      "after_phase_log_to_complete_ms": 3.8411617279052734,
+      "complete_pair_in_band": true,
+      "preflight_ms": 0.17,
+      "cohort_selection_ms": 19.842,
+      "cohort_prestage_session_apply_ms": 370.082,
+      "cohort_rib_transition_ms": 334.91,
+      "authoritative_remainder_apply_ms": 0.001,
+      "deferred_refresh_dispatch_ms": 0.007,
+      "convergence_check_ms": 0.15,
+      "unattributed_ms": 1.46,
+      "wire_p50_ms": 2048.5950000000003,
+      "wire_p95_ms": 3020.804,
+      "wire_max_ms": 3105.9519999999998
+    },
+    {
+      "leg": "baseline-r1",
+      "arm": "baseline",
+      "reload": 7,
+      "actor_ms": 336,
+      "cohort_ms": 337.338,
+      "prestage_ms": 289.818,
+      "complete_ms": 696.0718631744385,
+      "generation_ms": 632.999,
+      "before_timed_generation_ms": 59.22597940063474,
+      "after_phase_log_to_complete_ms": 3.846883773803711,
+      "complete_pair_in_band": true,
+      "preflight_ms": 0.063,
+      "cohort_selection_ms": 4.536,
+      "cohort_prestage_session_apply_ms": 289.818,
+      "cohort_rib_transition_ms": 337.338,
+      "authoritative_remainder_apply_ms": 0.001,
+      "deferred_refresh_dispatch_ms": 0.006,
+      "convergence_check_ms": 0.147,
+      "unattributed_ms": 1.09,
+      "wire_p50_ms": 1961.155,
+      "wire_p95_ms": 2942.355,
+      "wire_max_ms": 3037.02
+    },
+    {
+      "leg": "baseline-r1",
+      "arm": "baseline",
+      "reload": 8,
+      "actor_ms": 334,
+      "cohort_ms": 334.566,
+      "prestage_ms": 379.393,
+      "complete_ms": 798.375129699707,
+      "generation_ms": 736.28,
+      "before_timed_generation_ms": 58.30498954772952,
+      "after_phase_log_to_complete_ms": 3.790140151977539,
+      "complete_pair_in_band": true,
+      "preflight_ms": 0.156,
+      "cohort_selection_ms": 20.599,
+      "cohort_prestage_session_apply_ms": 379.393,
+      "cohort_rib_transition_ms": 334.566,
+      "authoritative_remainder_apply_ms": 0.001,
+      "deferred_refresh_dispatch_ms": 0.007,
+      "convergence_check_ms": 0.147,
+      "unattributed_ms": 1.411,
+      "wire_p50_ms": 1979.7340000000002,
+      "wire_p95_ms": 3016.88,
+      "wire_max_ms": 3110.1200000000003
+    },
+    {
+      "leg": "candidate-r1",
+      "arm": "candidate",
+      "reload": 1,
+      "actor_ms": 196,
+      "cohort_ms": 196.777,
+      "prestage_ms": 543.253,
+      "complete_ms": 810.5289936065674,
+      "generation_ms": 746.266,
+      "before_timed_generation_ms": 60.58991697692875,
+      "after_phase_log_to_complete_ms": 3.673076629638672,
+      "complete_pair_in_band": true,
+      "preflight_ms": 0.154,
+      "cohort_selection_ms": 4.783,
+      "cohort_prestage_session_apply_ms": 543.253,
+      "cohort_rib_transition_ms": 196.777,
+      "authoritative_remainder_apply_ms": 0.001,
+      "deferred_refresh_dispatch_ms": 0.006,
+      "convergence_check_ms": 0.151,
+      "unattributed_ms": 1.141,
+      "wire_p50_ms": 2189.39,
+      "wire_p95_ms": 3163.128,
+      "wire_max_ms": 3213.917
+    },
+    {
+      "leg": "candidate-r1",
+      "arm": "candidate",
+      "reload": 2,
+      "actor_ms": 195,
+      "cohort_ms": 195.702,
+      "prestage_ms": 511.734,
+      "complete_ms": 774.507999420166,
+      "generation_ms": 712.863,
+      "before_timed_generation_ms": 58.268992340087834,
+      "after_phase_log_to_complete_ms": 3.376007080078125,
+      "complete_pair_in_band": true,
+      "preflight_ms": 0.182,
+      "cohort_selection_ms": 3.771,
+      "cohort_prestage_session_apply_ms": 511.734,
+      "cohort_rib_transition_ms": 195.702,
+      "authoritative_remainder_apply_ms": 0.001,
+      "deferred_refresh_dispatch_ms": 0.007,
+      "convergence_check_ms": 0.149,
+      "unattributed_ms": 1.317,
+      "wire_p50_ms": 2061.764,
+      "wire_p95_ms": 3048.226,
+      "wire_max_ms": 3149.2079999999996
+    },
+    {
+      "leg": "candidate-r1",
+      "arm": "candidate",
+      "reload": 3,
+      "actor_ms": 196,
+      "cohort_ms": 196.903,
+      "prestage_ms": 488.919,
+      "complete_ms": 753.5049915313721,
+      "generation_ms": 693.742,
+      "before_timed_generation_ms": 56.51596890258793,
+      "after_phase_log_to_complete_ms": 3.2470226287841797,
+      "complete_pair_in_band": true,
+      "preflight_ms": 0.182,
+      "cohort_selection_ms": 6.328,
+      "cohort_prestage_session_apply_ms": 488.919,
+      "cohort_rib_transition_ms": 196.903,
+      "authoritative_remainder_apply_ms": 0.001,
+      "deferred_refresh_dispatch_ms": 0.006,
+      "convergence_check_ms": 0.147,
+      "unattributed_ms": 1.256,
+      "wire_p50_ms": 2035.556,
+      "wire_p95_ms": 2968.982,
+      "wire_max_ms": 3077.3869999999997
+    },
+    {
+      "leg": "candidate-r1",
+      "arm": "candidate",
+      "reload": 4,
+      "actor_ms": 199,
+      "cohort_ms": 199.892,
+      "prestage_ms": 420.0,
+      "complete_ms": 835.5011940002441,
+      "generation_ms": 702.575,
+      "before_timed_generation_ms": 129.3890159606933,
+      "after_phase_log_to_complete_ms": 3.5371780395507812,
+      "complete_pair_in_band": true,
+      "preflight_ms": 0.221,
+      "cohort_selection_ms": 80.892,
+      "cohort_prestage_session_apply_ms": 420.0,
+      "cohort_rib_transition_ms": 199.892,
+      "authoritative_remainder_apply_ms": 0.001,
+      "deferred_refresh_dispatch_ms": 0.007,
+      "convergence_check_ms": 0.148,
+      "unattributed_ms": 1.414,
+      "wire_p50_ms": 2098.064,
+      "wire_p95_ms": 3062.8700000000003,
+      "wire_max_ms": 3149.947
+    },
+    {
+      "leg": "candidate-r1",
+      "arm": "candidate",
+      "reload": 5,
+      "actor_ms": 196,
+      "cohort_ms": 197.341,
+      "prestage_ms": 463.584,
+      "complete_ms": 726.6459465026855,
+      "generation_ms": 666.671,
+      "before_timed_generation_ms": 56.94083166503901,
+      "after_phase_log_to_complete_ms": 3.0341148376464844,
+      "complete_pair_in_band": true,
+      "preflight_ms": 0.059,
+      "cohort_selection_ms": 4.471,
+      "cohort_prestage_session_apply_ms": 463.584,
+      "cohort_rib_transition_ms": 197.341,
+      "authoritative_remainder_apply_ms": 0.0,
+      "deferred_refresh_dispatch_ms": 0.007,
+      "convergence_check_ms": 0.148,
+      "unattributed_ms": 1.061,
+      "wire_p50_ms": 1981.356,
+      "wire_p95_ms": 2982.062,
+      "wire_max_ms": 3089.4300000000003
+    },
+    {
+      "leg": "candidate-r1",
+      "arm": "candidate",
+      "reload": 6,
+      "actor_ms": 200,
+      "cohort_ms": 200.759,
+      "prestage_ms": 592.177,
+      "complete_ms": 869.3521022796631,
+      "generation_ms": 799.181,
+      "before_timed_generation_ms": 66.94720625305172,
+      "after_phase_log_to_complete_ms": 3.223896026611328,
+      "complete_pair_in_band": true,
+      "preflight_ms": 0.156,
+      "cohort_selection_ms": 4.721,
+      "cohort_prestage_session_apply_ms": 592.177,
+      "cohort_rib_transition_ms": 200.759,
+      "authoritative_remainder_apply_ms": 0.001,
+      "deferred_refresh_dispatch_ms": 0.006,
+      "convergence_check_ms": 0.146,
+      "unattributed_ms": 1.215,
+      "wire_p50_ms": 2086.688,
+      "wire_p95_ms": 3114.372,
+      "wire_max_ms": 3213.378
+    },
+    {
+      "leg": "candidate-r1",
+      "arm": "candidate",
+      "reload": 7,
+      "actor_ms": 200,
+      "cohort_ms": 200.915,
+      "prestage_ms": 476.106,
+      "complete_ms": 756.450891494751,
+      "generation_ms": 692.446,
+      "before_timed_generation_ms": 60.66583929443357,
+      "after_phase_log_to_complete_ms": 3.339052200317383,
+      "complete_pair_in_band": true,
+      "preflight_ms": 0.178,
+      "cohort_selection_ms": 13.734,
+      "cohort_prestage_session_apply_ms": 476.106,
+      "cohort_rib_transition_ms": 200.915,
+      "authoritative_remainder_apply_ms": 0.001,
+      "deferred_refresh_dispatch_ms": 0.007,
+      "convergence_check_ms": 0.149,
+      "unattributed_ms": 1.356,
+      "wire_p50_ms": 2033.9,
+      "wire_p95_ms": 3006.516,
+      "wire_max_ms": 3109.5510000000004
+    },
+    {
+      "leg": "candidate-r1",
+      "arm": "candidate",
+      "reload": 8,
+      "actor_ms": 220,
+      "cohort_ms": 221.217,
+      "prestage_ms": 479.777,
+      "complete_ms": 789.5259857177734,
+      "generation_ms": 728.362,
+      "before_timed_generation_ms": 57.969176757812534,
+      "after_phase_log_to_complete_ms": 3.1948089599609375,
+      "complete_pair_in_band": true,
+      "preflight_ms": 0.11,
+      "cohort_selection_ms": 25.832,
+      "cohort_prestage_session_apply_ms": 479.777,
+      "cohort_rib_transition_ms": 221.217,
+      "authoritative_remainder_apply_ms": 0.001,
+      "deferred_refresh_dispatch_ms": 0.007,
+      "convergence_check_ms": 0.146,
+      "unattributed_ms": 1.272,
+      "wire_p50_ms": 2080.7690000000002,
+      "wire_p95_ms": 3016.305,
+      "wire_max_ms": 3111.578
+    },
+    {
+      "leg": "candidate-r2",
+      "arm": "candidate",
+      "reload": 1,
+      "actor_ms": 195,
+      "cohort_ms": 196.238,
+      "prestage_ms": 646.422,
+      "complete_ms": 913.2959842681885,
+      "generation_ms": 852.215,
+      "before_timed_generation_ms": 57.49397674560544,
+      "after_phase_log_to_complete_ms": 3.587007522583008,
+      "complete_pair_in_band": true,
+      "preflight_ms": 0.14,
+      "cohort_selection_ms": 8.151,
+      "cohort_prestage_session_apply_ms": 646.422,
+      "cohort_rib_transition_ms": 196.238,
+      "authoritative_remainder_apply_ms": 0.001,
+      "deferred_refresh_dispatch_ms": 0.007,
+      "convergence_check_ms": 0.151,
+      "unattributed_ms": 1.105,
+      "wire_p50_ms": 2337.504,
+      "wire_p95_ms": 3266.3579999999997,
+      "wire_max_ms": 3312.962
+    },
+    {
+      "leg": "candidate-r2",
+      "arm": "candidate",
+      "reload": 2,
+      "actor_ms": 196,
+      "cohort_ms": 196.889,
+      "prestage_ms": 457.948,
+      "complete_ms": 744.0989017486572,
+      "generation_ms": 684.084,
+      "before_timed_generation_ms": 56.508956542968804,
+      "after_phase_log_to_complete_ms": 3.5059452056884766,
+      "complete_pair_in_band": true,
+      "preflight_ms": 0.107,
+      "cohort_selection_ms": 27.683,
+      "cohort_prestage_session_apply_ms": 457.948,
+      "cohort_rib_transition_ms": 196.889,
+      "authoritative_remainder_apply_ms": 0.001,
+      "deferred_refresh_dispatch_ms": 0.006,
+      "convergence_check_ms": 0.155,
+      "unattributed_ms": 1.295,
+      "wire_p50_ms": 2013.334,
+      "wire_p95_ms": 2973.191,
+      "wire_max_ms": 3055.587
+    },
+    {
+      "leg": "candidate-r2",
+      "arm": "candidate",
+      "reload": 3,
+      "actor_ms": 208,
+      "cohort_ms": 208.682,
+      "prestage_ms": 388.177,
+      "complete_ms": 685.9309673309326,
+      "generation_ms": 620.678,
+      "before_timed_generation_ms": 61.72103450012207,
+      "after_phase_log_to_complete_ms": 3.531932830810547,
+      "complete_pair_in_band": true,
+      "preflight_ms": 0.18,
+      "cohort_selection_ms": 22.095,
+      "cohort_prestage_session_apply_ms": 388.177,
+      "cohort_rib_transition_ms": 208.682,
+      "authoritative_remainder_apply_ms": 0.004,
+      "deferred_refresh_dispatch_ms": 0.007,
+      "convergence_check_ms": 0.149,
+      "unattributed_ms": 1.384,
+      "wire_p50_ms": 1891.707,
+      "wire_p95_ms": 2952.049,
+      "wire_max_ms": 3050.328
+    },
+    {
+      "leg": "candidate-r2",
+      "arm": "candidate",
+      "reload": 4,
+      "actor_ms": 211,
+      "cohort_ms": 211.741,
+      "prestage_ms": 514.121,
+      "complete_ms": 828.4339904785156,
+      "generation_ms": 767.738,
+      "before_timed_generation_ms": 57.02815905761713,
+      "after_phase_log_to_complete_ms": 3.6678314208984375,
+      "complete_pair_in_band": true,
+      "preflight_ms": 0.184,
+      "cohort_selection_ms": 40.006,
+      "cohort_prestage_session_apply_ms": 514.121,
+      "cohort_rib_transition_ms": 211.741,
+      "authoritative_remainder_apply_ms": 0.001,
+      "deferred_refresh_dispatch_ms": 0.007,
+      "convergence_check_ms": 0.154,
+      "unattributed_ms": 1.524,
+      "wire_p50_ms": 2171.093,
+      "wire_p95_ms": 3195.954,
+      "wire_max_ms": 3294.192
+    },
+    {
+      "leg": "candidate-r2",
+      "arm": "candidate",
+      "reload": 5,
+      "actor_ms": 193,
+      "cohort_ms": 194.029,
+      "prestage_ms": 423.788,
+      "complete_ms": 692.8620338439941,
+      "generation_ms": 630.562,
+      "before_timed_generation_ms": 58.72089413452147,
+      "after_phase_log_to_complete_ms": 3.5791397094726562,
+      "complete_pair_in_band": true,
+      "preflight_ms": 0.187,
+      "cohort_selection_ms": 11.172,
+      "cohort_prestage_session_apply_ms": 423.788,
+      "cohort_rib_transition_ms": 194.029,
+      "authoritative_remainder_apply_ms": 0.001,
+      "deferred_refresh_dispatch_ms": 0.007,
+      "convergence_check_ms": 0.152,
+      "unattributed_ms": 1.226,
+      "wire_p50_ms": 1955.388,
+      "wire_p95_ms": 2910.071,
+      "wire_max_ms": 3002.124
+    },
+    {
+      "leg": "candidate-r2",
+      "arm": "candidate",
+      "reload": 6,
+      "actor_ms": 202,
+      "cohort_ms": 202.834,
+      "prestage_ms": 417.14,
+      "complete_ms": 695.0759887695312,
+      "generation_ms": 629.905,
+      "before_timed_generation_ms": 61.82502243041995,
+      "after_phase_log_to_complete_ms": 3.345966339111328,
+      "complete_pair_in_band": true,
+      "preflight_ms": 0.187,
+      "cohort_selection_ms": 8.357,
+      "cohort_prestage_session_apply_ms": 417.14,
+      "cohort_rib_transition_ms": 202.834,
+      "authoritative_remainder_apply_ms": 0.001,
+      "deferred_refresh_dispatch_ms": 0.006,
+      "convergence_check_ms": 0.146,
+      "unattributed_ms": 1.234,
+      "wire_p50_ms": 1983.3400000000001,
+      "wire_p95_ms": 2959.422,
+      "wire_max_ms": 3044.8360000000002
+    },
+    {
+      "leg": "candidate-r2",
+      "arm": "candidate",
+      "reload": 7,
+      "actor_ms": 204,
+      "cohort_ms": 204.503,
+      "prestage_ms": 446.298,
+      "complete_ms": 734.6198558807373,
+      "generation_ms": 674.151,
+      "before_timed_generation_ms": 57.10596182250981,
+      "after_phase_log_to_complete_ms": 3.362894058227539,
+      "complete_pair_in_band": true,
+      "preflight_ms": 0.155,
+      "cohort_selection_ms": 21.497,
+      "cohort_prestage_session_apply_ms": 446.298,
+      "cohort_rib_transition_ms": 204.503,
+      "authoritative_remainder_apply_ms": 0.001,
+      "deferred_refresh_dispatch_ms": 0.006,
+      "convergence_check_ms": 0.146,
+      "unattributed_ms": 1.545,
+      "wire_p50_ms": 2011.2160000000001,
+      "wire_p95_ms": 2974.781,
+      "wire_max_ms": 3079.263
+    },
+    {
+      "leg": "candidate-r2",
+      "arm": "candidate",
+      "reload": 8,
+      "actor_ms": 196,
+      "cohort_ms": 196.536,
+      "prestage_ms": 453.345,
+      "complete_ms": 721.9650745391846,
+      "generation_ms": 655.925,
+      "before_timed_generation_ms": 62.63188095092778,
+      "after_phase_log_to_complete_ms": 3.408193588256836,
+      "complete_pair_in_band": true,
+      "preflight_ms": 0.131,
+      "cohort_selection_ms": 4.628,
+      "cohort_prestage_session_apply_ms": 453.345,
+      "cohort_rib_transition_ms": 196.536,
+      "authoritative_remainder_apply_ms": 0.001,
+      "deferred_refresh_dispatch_ms": 0.006,
+      "convergence_check_ms": 0.147,
+      "unattributed_ms": 1.131,
+      "wire_p50_ms": 1978.582,
+      "wire_p95_ms": 2959.5370000000003,
+      "wire_max_ms": 3058.75
+    },
+    {
+      "leg": "baseline-r2",
+      "arm": "baseline",
+      "reload": 1,
+      "actor_ms": 383,
+      "cohort_ms": 383.733,
+      "prestage_ms": 376.795,
+      "complete_ms": 831.6311836242676,
+      "generation_ms": 766.864,
+      "before_timed_generation_ms": 61.693014465332,
+      "after_phase_log_to_complete_ms": 3.074169158935547,
+      "complete_pair_in_band": false,
+      "preflight_ms": 0.149,
+      "cohort_selection_ms": 4.9,
+      "cohort_prestage_session_apply_ms": 376.795,
+      "cohort_rib_transition_ms": 383.733,
+      "authoritative_remainder_apply_ms": 0.001,
+      "deferred_refresh_dispatch_ms": 0.007,
+      "convergence_check_ms": 0.157,
+      "unattributed_ms": 1.122,
+      "wire_p50_ms": 2260.665,
+      "wire_p95_ms": 3192.5099999999998,
+      "wire_max_ms": 3237.077
+    },
+    {
+      "leg": "baseline-r2",
+      "arm": "baseline",
+      "reload": 2,
+      "actor_ms": 329,
+      "cohort_ms": 577.334,
+      "prestage_ms": 411.622,
+      "complete_ms": 1064.466953277588,
+      "generation_ms": 1000.112,
+      "before_timed_generation_ms": 60.89693020629886,
+      "after_phase_log_to_complete_ms": 3.4580230712890625,
+      "complete_pair_in_band": true,
+      "preflight_ms": 0.18,
+      "cohort_selection_ms": 9.549,
+      "cohort_prestage_session_apply_ms": 411.622,
+      "cohort_rib_transition_ms": 577.334,
+      "authoritative_remainder_apply_ms": 0.001,
+      "deferred_refresh_dispatch_ms": 0.006,
+      "convergence_check_ms": 0.077,
+      "unattributed_ms": 1.343,
+      "wire_p50_ms": 2101.178,
+      "wire_p95_ms": 3084.0589999999997,
+      "wire_max_ms": 3182.933
+    },
+    {
+      "leg": "baseline-r2",
+      "arm": "baseline",
+      "reload": 3,
+      "actor_ms": 326,
+      "cohort_ms": 326.929,
+      "prestage_ms": 401.274,
+      "complete_ms": 803.1270503997803,
+      "generation_ms": 739.602,
+      "before_timed_generation_ms": 59.71488308715823,
+      "after_phase_log_to_complete_ms": 3.8101673126220703,
+      "complete_pair_in_band": true,
+      "preflight_ms": 0.14,
+      "cohort_selection_ms": 9.752,
+      "cohort_prestage_session_apply_ms": 401.274,
+      "cohort_rib_transition_ms": 326.929,
+      "authoritative_remainder_apply_ms": 0.001,
+      "deferred_refresh_dispatch_ms": 0.006,
+      "convergence_check_ms": 0.149,
+      "unattributed_ms": 1.351,
+      "wire_p50_ms": 2036.305,
+      "wire_p95_ms": 3031.256,
+      "wire_max_ms": 3131.725
+    },
+    {
+      "leg": "baseline-r2",
+      "arm": "baseline",
+      "reload": 4,
+      "actor_ms": 346,
+      "cohort_ms": 376.764,
+      "prestage_ms": 356.183,
+      "complete_ms": 823.983907699585,
+      "generation_ms": 758.264,
+      "before_timed_generation_ms": 61.94598001098632,
+      "after_phase_log_to_complete_ms": 3.773927688598633,
+      "complete_pair_in_band": true,
+      "preflight_ms": 0.166,
+      "cohort_selection_ms": 23.693,
+      "cohort_prestage_session_apply_ms": 356.183,
+      "cohort_rib_transition_ms": 376.764,
+      "authoritative_remainder_apply_ms": 0.001,
+      "deferred_refresh_dispatch_ms": 0.007,
+      "convergence_check_ms": 0.148,
+      "unattributed_ms": 1.302,
+      "wire_p50_ms": 2094.207,
+      "wire_p95_ms": 3058.349,
+      "wire_max_ms": 3167.087
+    },
+    {
+      "leg": "baseline-r2",
+      "arm": "baseline",
+      "reload": 5,
+      "actor_ms": 337,
+      "cohort_ms": 337.677,
+      "prestage_ms": 366.101,
+      "complete_ms": 806.4720630645752,
+      "generation_ms": 728.044,
+      "before_timed_generation_ms": 74.98911347961428,
+      "after_phase_log_to_complete_ms": 3.4389495849609375,
+      "complete_pair_in_band": true,
+      "preflight_ms": 0.205,
+      "cohort_selection_ms": 22.371,
+      "cohort_prestage_session_apply_ms": 366.101,
+      "cohort_rib_transition_ms": 337.677,
+      "authoritative_remainder_apply_ms": 0.001,
+      "deferred_refresh_dispatch_ms": 0.007,
+      "convergence_check_ms": 0.151,
+      "unattributed_ms": 1.531,
+      "wire_p50_ms": 2069.886,
+      "wire_p95_ms": 3077.69,
+      "wire_max_ms": 3190.7619999999997
+    },
+    {
+      "leg": "baseline-r2",
+      "arm": "baseline",
+      "reload": 6,
+      "actor_ms": 340,
+      "cohort_ms": 340.411,
+      "prestage_ms": 344.899,
+      "complete_ms": 753.6928653717041,
+      "generation_ms": 690.826,
+      "before_timed_generation_ms": 59.80700132751463,
+      "after_phase_log_to_complete_ms": 3.059864044189453,
+      "complete_pair_in_band": true,
+      "preflight_ms": 0.188,
+      "cohort_selection_ms": 3.945,
+      "cohort_prestage_session_apply_ms": 344.899,
+      "cohort_rib_transition_ms": 340.411,
+      "authoritative_remainder_apply_ms": 0.004,
+      "deferred_refresh_dispatch_ms": 0.007,
+      "convergence_check_ms": 0.148,
+      "unattributed_ms": 1.224,
+      "wire_p50_ms": 2052.445,
+      "wire_p95_ms": 3007.817,
+      "wire_max_ms": 3098.704
+    },
+    {
+      "leg": "baseline-r2",
+      "arm": "baseline",
+      "reload": 7,
+      "actor_ms": 348,
+      "cohort_ms": 386.406,
+      "prestage_ms": 291.698,
+      "complete_ms": 743.7100410461426,
+      "generation_ms": 684.116,
+      "before_timed_generation_ms": 55.93908422851564,
+      "after_phase_log_to_complete_ms": 3.654956817626953,
+      "complete_pair_in_band": true,
+      "preflight_ms": 0.059,
+      "cohort_selection_ms": 4.625,
+      "cohort_prestage_session_apply_ms": 291.698,
+      "cohort_rib_transition_ms": 386.406,
+      "authoritative_remainder_apply_ms": 0.001,
+      "deferred_refresh_dispatch_ms": 0.007,
+      "convergence_check_ms": 0.157,
+      "unattributed_ms": 1.163,
+      "wire_p50_ms": 1992.7060000000001,
+      "wire_p95_ms": 2948.344,
+      "wire_max_ms": 3045.4919999999997
+    },
+    {
+      "leg": "baseline-r2",
+      "arm": "baseline",
+      "reload": 8,
+      "actor_ms": 342,
+      "cohort_ms": 342.803,
+      "prestage_ms": 308.636,
+      "complete_ms": 718.9779281616211,
+      "generation_ms": 657.317,
+      "before_timed_generation_ms": 58.03887310791015,
+      "after_phase_log_to_complete_ms": 3.6220550537109375,
+      "complete_pair_in_band": true,
+      "preflight_ms": 0.078,
+      "cohort_selection_ms": 4.536,
+      "cohort_prestage_session_apply_ms": 308.636,
+      "cohort_rib_transition_ms": 342.803,
+      "authoritative_remainder_apply_ms": 0.001,
+      "deferred_refresh_dispatch_ms": 0.007,
+      "convergence_check_ms": 0.154,
+      "unattributed_ms": 1.102,
+      "wire_p50_ms": 2013.1359999999997,
+      "wire_p95_ms": 2975.98,
+      "wire_max_ms": 3068.982
+    }
+  ]
+}
