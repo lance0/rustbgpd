@@ -19,7 +19,56 @@ checker = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(checker)
 
 
+def run_checker(*args: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        [sys.executable, str(SCRIPT), *args],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+
+def check_source(text: str) -> subprocess.CompletedProcess[str]:
+    with tempfile.TemporaryDirectory() as tmp:
+        source = Path(tmp) / "lib.rs"
+        source.write_text(text, encoding="utf-8")
+        return run_checker(str(source))
+
+
 class ClippyReasonTests(unittest.TestCase):
+    def test_cfg_attr_suppression_without_reason_is_rejected(self) -> None:
+        for source in (
+            "#[cfg_attr(test, allow(clippy::unwrap_used))]\nfn f() {}\n",
+            "#[cfg_attr(not(test), expect(clippy::needless_pass_by_value))]\nfn f() {}\n",
+            "#![cfg_attr(test, allow(clippy::unwrap_used))]\n",
+            "#[cfg_attr(\n    feature = \"x\",\n    expect(clippy::too_many_lines)\n)]\nfn f() {}\n",
+        ):
+            with self.subTest(source=source):
+                result = check_source(source)
+                self.assertEqual(result.returncode, 1, result.stdout)
+                self.assertIn("lib.rs:1: missing reason", result.stdout)
+
+    def test_cfg_attr_suppression_with_reason_is_accepted(self) -> None:
+        for source in (
+            '#[cfg_attr(test, allow(clippy::unwrap_used, reason = "fixture"))]\nfn f() {}\n',
+            "#[cfg_attr(\n    not(test),\n    expect(\n        clippy::needless_pass_by_value,\n"
+            '        reason = "the test variant moves a receiver in"\n    )\n)]\nfn f() {}\n',
+            "#[cfg_attr(test, allow(dead_code))]\nfn f() {}\n",
+            "#[cfg_attr(test, deny(clippy::unwrap_used))]\nfn f() {}\n",
+            '#[cfg_attr(feature = "clippy::x", derive(Debug))]\nstruct S;\n',
+        ):
+            with self.subTest(source=source):
+                result = check_source(source)
+                self.assertEqual(result.returncode, 0, result.stdout)
+
+    def test_nonexistent_explicit_path_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            missing = Path(tmp) / "missing.rs"
+            result = run_checker(str(missing))
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn(str(missing), result.stderr)
+
     def test_crate_level_suppression_without_reason_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             source = Path(tmp) / "lib.rs"

@@ -11,7 +11,9 @@ import subprocess
 import sys
 
 
-ATTRIBUTE_HEAD = re.compile(r"#!?\[\s*(?:allow|expect)\s*\(")
+ATTRIBUTE_HEAD = re.compile(r"#!?\[\s*(?P<name>allow|expect|cfg_attr)\s*\(")
+# A `cfg_attr` is a suppression only when it applies `allow` or `expect`.
+CFG_ATTR_SUPPRESSION = re.compile(r"\b(?:allow|expect)\s*\(")
 REASON = re.compile(r"\breason\s*=")
 
 
@@ -105,7 +107,8 @@ def missing_reasons(path: pathlib.Path) -> list[tuple[int, str]]:
             misses.append((line, "unterminated clippy allow/expect attribute"))
             break
         attr = text[start : end + 1]
-        if "clippy::" in attr and REASON.search(attr) is None:
+        suppression = match["name"] != "cfg_attr" or CFG_ATTR_SUPPRESSION.search(attr)
+        if suppression and "clippy::" in attr and REASON.search(attr) is None:
             line = text.count("\n", 0, start) + 1
             first_line = attr.splitlines()[0].strip()
             misses.append((line, first_line))
@@ -125,6 +128,12 @@ def main() -> int:
         help="Rust files or directories to check (default: Cargo workspace production roots)",
     )
     args = parser.parse_args()
+
+    missing = [path for path in args.paths if not path.exists()]
+    if missing:
+        for path in missing:
+            print(f"{path}: no such file or directory", file=sys.stderr)
+        return 2
 
     try:
         paths = args.paths or workspace_source_roots(pathlib.Path.cwd())
