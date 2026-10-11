@@ -1,6 +1,6 @@
 # ADR-0138: Route flap dampening
 
-**Status:** Proposed (deferred — not scheduled; implementation NO-GO, demand-gated; see [Reopen conditions](#reopen-conditions))
+**Status:** Proposed (preparation shipped; runtime enablement NO-GO, demand-gated; see [Reopen conditions](#reopen-conditions))
 **Date:** 2026-10-08
 
 ## Context
@@ -175,6 +175,21 @@ reads it. There are no dampening parameters.
   "Suppressed" bit (`crates/rib/src/bmp_sync.rs`).
 
 ## Decision
+
+**Amendment (2026-10-11).** Alpha preparation was pulled forward on
+2026-10-09. [#3034](https://github.com/lance0/rustbgpd/pull/3034) shipped
+disabled-only configuration and a standalone penalty/decay engine;
+[#3045](https://github.com/lance0/rustbgpd/pull/3045) retained accepted source
+provenance; and [#3056](https://github.com/lance0/rustbgpd/pull/3056) added
+committed source history and preparation for source-local capacity recovery.
+Effective enablement is still rejected by [configuration validation](../../src/config/validation.rs).
+Received-route suppression, decay-driven reuse, operator surfaces, and
+production resource qualification remain unfinished. The demand gate below
+still applies to runtime support. This preparation decision is active; the
+runtime design remains proposed. The original decision and design below
+record the 2026-10-08 rationale, not shipped runtime behavior.
+
+**Original decision (2026-10-08).**
 
 rustbgpd does not implement route flap dampening now. The record is parked:
 the design below is kept so that a later implementation starts from settled
@@ -850,7 +865,7 @@ defaults for a reopened implementation:
    of the 6000 suppress threshold. An exemption window was rejected, because a
    flapping path could exploit it (Design 3).
 
-## Consequences
+## Original consequences (2026-10-08)
 
 - No runtime code, configuration, RPC or metric ships. rustbgpd still has no
   route flap dampening, and operators who need it on an eBGP edge use another
