@@ -46,6 +46,28 @@ use crate::snapshot::{InstanceProbes, KernelSnapshot};
 /// reports.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DataplaneOp {
+    /// Add an owned bridge-master row toward the local ES after checking conflicts.
+    AddPeerSyncFdb {
+        /// EVPN instance.
+        vni: EvpnInstanceId,
+        /// Peer-learned host MAC.
+        mac: MacAddress,
+        /// Local bridge VLAN.
+        vlan: Option<u16>,
+        /// Bound local Ethernet Segment port.
+        ifindex: u32,
+    },
+    /// Remove a peer-sync row after revalidating its ownership marker.
+    RemovePeerSyncFdb {
+        /// EVPN instance.
+        vni: EvpnInstanceId,
+        /// Peer-learned host MAC.
+        mac: MacAddress,
+        /// Local bridge VLAN.
+        vlan: Option<u16>,
+        /// Port on which the row was installed.
+        ifindex: u32,
+    },
     /// Program a fresh remote-MAC FDB entry for `(vni, mac)` pointing
     /// at `dst`. Implementations should set `NTF_EXT_LEARNED` and
     /// route through the bridge/master path per ADR-0054 §5.

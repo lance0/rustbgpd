@@ -4591,6 +4591,15 @@ remote Type 4 routes for the same ESI; the elected DF role drives
 Type 2 origination ESI tagging and the optional BUM-suppression
 filter (see the top-level `apply_bum_enforcement` key).
 
+All-active CE forwarding requires `interface`. On a healthy bound segment,
+an imported peer Type 2 with matching EAD-per-ES/EVI reachability installs
+an owned non-aging master FDB row on that interface, scoped by `bridge_vlan`
+when configured. Existing local learns and foreign rows observed before
+apply take priority. Withdrawal,
+quarantine, AC failure, drain, and segment removal withdraw the peer-sync
+row; it never creates a local Type 2 advertisement. An unbound segment
+cannot provide peer-synchronized local forwarding.
+
 SIGHUP reload and `EvpnService.ApplyEvpnRuntime` can live-commit a single
 Ethernet Segment add, delete, or redefine when the segment actor exists,
 additive build-up, and dropping an Ethernet Segment (delete or member-shrink)

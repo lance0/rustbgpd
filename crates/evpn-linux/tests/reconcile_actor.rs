@@ -6361,3 +6361,69 @@ async fn crash_leftover_flood_rows_are_claimed_or_reaped() {
         "the claimed row is owned, so shutdown drains it"
     );
 }
+
+#[tokio::test(start_paused = true)]
+async fn peer_sync_adoption_reaps_only_owned_rows_in_managed_vlan() {
+    let mut h = Harness::spawn(ReconcileActorConfig {
+        fdb_adoption_reap_deferral: Duration::ZERO,
+        ..ReconcileActorConfig::for_tests()
+    });
+    h.handle.set_probe(vni(100), InstanceProbe::Ready);
+    for (m, vlan, marked) in [(mac(1), 10, true), (mac(2), 10, false), (mac(3), 20, true)] {
+        let mut row = extern_learn_row(m, "10.0.0.2");
+        row.dst = None;
+        row.vlan = Some(vlan);
+        row.flags.extern_learn = marked;
+        h.handle.pre_load_local_fdb(vni(100), 12, row);
+    }
+    let instances = one_instance_table(instance_with_bridge_vlan(100, "br100", 10, "10.0.0.1"));
+    h.intent_tx
+        .send(intent(1, instances, RemoteMacTable::new()))
+        .unwrap();
+    let report = wait_for_generation(&mut h, 1).await;
+    assert!(report.failed.is_empty(), "{:?}", report.failed);
+    let rows = h.handle.kernel_snapshot().local_fdb;
+    assert!(!rows.contains_key(&(vni(100), Some(10), mac(1))));
+    assert!(rows.contains_key(&(vni(100), Some(10), mac(2))));
+    assert!(rows.contains_key(&(vni(100), Some(20), mac(3))));
+    h.shutdown().await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn peer_sync_local_takeover_survives_withdrawal_and_shutdown() {
+    let mut h = Harness::spawn(ReconcileActorConfig::for_tests());
+    h.handle.set_probe(vni(100), InstanceProbe::Ready);
+    h.handle.set_bridge_port("es0", 12, Some(3));
+    let mut link = managed_link("br100", 10, false, vec![]);
+    link.ce_port_ifindexes.push(12);
+    h.handle.set_links(BTreeMap::from([("br100".into(), link)]));
+    let instances = one_instance_table(instance(100, Some("br100"), "10.0.0.1"));
+    let mut desired = RemoteMacTable::new();
+    desired.set_peer_sync_fdb(vni(100), mac(2), "es0".into());
+    desired.set_peer_sync_fdb(vni(100), mac(3), "es0".into());
+    h.intent_tx
+        .send(intent(1, instances.clone(), desired))
+        .unwrap();
+    let report = wait_for_generation(&mut h, 1).await;
+    assert!(report.failed.is_empty());
+    let key = (vni(100), None, mac(2));
+    let mut learned = h.handle.kernel_snapshot().local_fdb[&key].1.clone();
+    learned.flags.extern_learn = false;
+    learned.flags.noarp = false;
+    h.handle.pre_load_local_fdb(vni(100), 12, learned.clone());
+    let mut remaining = RemoteMacTable::new();
+    remaining.set_peer_sync_fdb(vni(100), mac(3), "es0".into());
+    h.intent_tx.send(intent(2, instances, remaining)).unwrap();
+    wait_for_generation(&mut h, 2).await;
+    assert_eq!(h.handle.kernel_snapshot().local_fdb[&key].1, learned);
+    let handle = h.handle.clone();
+    h.shutdown().await;
+    assert_eq!(handle.kernel_snapshot().local_fdb[&key].1, learned);
+    assert!(
+        !handle
+            .kernel_snapshot()
+            .local_fdb
+            .contains_key(&(vni(100), None, mac(3))),
+        "peer-only ownership must trigger shutdown drain"
+    );
+}

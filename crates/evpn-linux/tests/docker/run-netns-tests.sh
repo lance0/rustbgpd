@@ -158,6 +158,7 @@ case "${1:-all}" in
     foreign_state_nhid) TEST_BIN="netns_foreign_state"; FILTER="nhid_reserved_range_foreign_object_not_clobbered_adopted_or_reaped" ;;
     foreign_state_l3)   TEST_BIN="netns_foreign_state"; FILTER="l3_"; EXACT_FILTER=0 ;;
     l3_route_event)     TEST_BIN="netns_l3_install"; FILTER="linux_dataplane_route_event_wakes_within_2s" ;;
+    peer_sync_local_fdb) TEST_BIN="netns_dataplane"; FILTER="linux_dataplane_peer_sync_local_fdb_forwards_with_flood_off" ;;
     dataplane_vlan_fdb) TEST_BIN="netns_dataplane"; FILTER="linux_dataplane_programs_vlan_scoped_remote_mac_add_remove" ;;
     dataplane_remote_mac) TEST_BIN="netns_dataplane"; FILTER="linux_dataplane_programs_remote_mac_with_extern_learn" ;;
     vlan_local_mac_attribution) TEST_BIN="netns_dataplane"; FILTER="linux_dataplane_attributes_vlan_local_mac_observations" ;;

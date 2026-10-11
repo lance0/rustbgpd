@@ -523,6 +523,9 @@ pub enum InstanceProbe {
 /// `(VNI, MAC)` with Ethernet Tag ID `0`.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct KernelSnapshot {
+    /// Local bridge master rows, including dynamic learns and peer-sync rows.
+    /// Kept separate so remote mobility retains its existing takeover behavior.
+    pub local_fdb: BTreeMap<(EvpnInstanceId, Option<u16>, MacAddress), (u32, KernelFdbEntry)>,
     fdb: BTreeMap<(EvpnInstanceId, Option<u16>, MacAddress), KernelFdbEntry>,
     /// All-zero-MAC ingress-replication entries per VNI. Kept apart from
     /// `fdb`: one zero-MAC entry holds many destinations, which the
@@ -776,6 +779,8 @@ impl KernelSnapshot {
 /// removed on successful withdraw.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct OwnedSet {
+    /// Peer-sync local rows successfully installed, keyed by VNI, VLAN and MAC.
+    pub(crate) peer_sync: BTreeMap<(EvpnInstanceId, Option<u16>, MacAddress), u32>,
     entries: BTreeMap<(EvpnInstanceId, MacAddress), OwnedEntry>,
     /// Zero-MAC ingress-replication rows we appended, per `(VNI, dst)`.
     /// Not counted by [`Self::len`] / [`Self::keys`], which describe the

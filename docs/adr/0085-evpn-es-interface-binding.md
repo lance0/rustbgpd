@@ -249,3 +249,64 @@ the other `_seconds` timer keys. The bounds and default are unchanged
 the decisions above, is still accepted as an alias, and the config JSON Schema
 publishes it as a deprecated property with the same bounds. See the
 [`[[ethernet_segments]]` configuration reference](../reference/configuration.md#ethernet_segments).
+
+## Amendment (2026-10-11): peer-synchronized local FDB forwarding
+
+Decision 5's remote-row suppression alone does not deliver aliased known
+unicast when only the other ES member learned the CE MAC. The receiving
+member has no bridge FDB destination; on a non-DF member the unknown-unicast
+flood flag is disabled, so the frame is dropped. The aliasing procedure in
+[RFC 7432 §14.1.2](https://www.rfc-editor.org/rfc/rfc7432.html#section-14.1.2)
+allows a remote PE to select either all-active member.
+
+For a bias-eligible `(ESI, VNI)`, an imported Type 2 now contributes an
+owned non-aging master FDB row on the bound `interface`. The row carries the
+instance's `bridge_vlan` when configured. The originating VTEP must also
+advertise matching EAD-per-ES and imported EAD-per-EVI reachability in the
+same RIB snapshot; an equal ESI on a Type 2 alone is insufficient. The join
+uses the EVPN next hop, including through a route reflector. Peer
+and remote candidates compete using the same MAC Mobility sequence
+and deterministic tie-break rules; a winning peer candidate becomes local
+forwarding instead of an overlay row. Duplicate-MAC quarantine suppresses
+peer-sync forwarding too.
+
+Dynamic local learns and foreign static rows observed before apply retain
+priority. The reconciler rereads the FDB before adding or removing a row,
+and verifies its ownership marker after an add. Rows use
+the existing `extern_learn` ownership marker and BGP protocol stamp where
+the kernel supports it. Linux reports a newly created `extern_learn` row
+as reachable rather than static, but the external-learning flag prevents
+aging. Startup adoption reaps stale owned local rows;
+unmarked rows remain outside ownership. Withdrawal, EAD loss, local drain,
+AC failure, or segment removal removes the local intent. Drain and failure
+restore the existing remote forwarding path after the bias lifts.
+
+The Linux bridge API does not provide an atomic ownership check with a
+single-MAC update: `extern_learn` additions ignore `NLM_F_EXCL`, and ordinary
+deletions match the port/MAC/VLAN without checking the ownership flag. A
+foreign writer replacing the same row between the final dump and netlink
+apply can still race this operation. The implementation does not claim
+atomic exclusion of concurrent FDB writers. The first add uses
+`NLM_F_CREATE | NLM_F_EXCL`, but the Linux external-learning path does not
+receive those flags; the ordinary unmarked/static add path does honor
+`EXCL` and returns `EEXIST`. A two-step unmarked add followed by ownership
+marking is not used: it would introduce another unowned crash/race window.
+
+This is forwarding state only. Owned FDB rows are excluded from local MAC
+observations and do not originate a new Type 2. Locally learned routes retain
+the existing sequence-adoption and configured sticky behavior. In the terms
+of [RFC 9721 §6.4–6.5](https://www.rfc-editor.org/rfc/rfc9721.html#section-6.4),
+peer-only learning does not create local origination ownership. Peer-only
+MAC/IP adjacency programming and full mobility probing remain outside this
+amendment.
+
+Later CE source traffic on the same bound port does not turn the owned row
+into a local learn: Linux retains `extern_learn` when the learned port is
+unchanged. Moving the MAC to another port clears that flag, but detecting
+same-port local activity requires an additional mechanism. Existing local
+origination is preserved; promotion from peer-only to locally learned state
+on the same port is not implemented.
+
+All-active CE forwarding requires an `interface` binding. Unbound segments
+retain their control-plane behavior, but cannot install a local attachment
+row and do not qualify as an all-active CE forwarding deployment.

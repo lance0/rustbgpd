@@ -10,7 +10,7 @@ from pathlib import Path
 
 BASE = (
     "fdb_nhg", "fib_runtime", "bfd_runtime", "dataplane_vlan_fdb",
-    "dataplane_remote_mac", "vlan_local_mac_attribution",
+    "peer_sync_local_fdb", "dataplane_remote_mac", "vlan_local_mac_attribution",
     "macip_vlan_attribution", "svd_fdb_vni", "flood_list", "svd_flood_list",
     "managed_bridge",
     "managed_vxlan", "managed_svd_vxlan", "managed_vlan_upper",

@@ -146,6 +146,16 @@ pub fn compute_diff(
     // `RemoveRemoteFdb`, and group-key drift).
     let mut conversions: Vec<DataplaneOp> = Vec::new();
 
+    peer_sync_pass(
+        desired,
+        snapshot,
+        last_applied,
+        probes,
+        instances,
+        &mut creates,
+        &mut deletes,
+    );
+
     // Pass 1b helpers — track which (VNI, ESI, EthTag) groups have
     // already been considered for member-set diff, so two MACs
     // sharing the same group_key produce at most one
@@ -440,6 +450,68 @@ pub fn compute_diff(
         ipv6_alias_fallback_keys,
         foreign_blocked_keys: foreign_blocked,
         foreign_blocked_flood_vnis,
+    }
+}
+
+/// Local learns and foreign static rows always take precedence over peer sync.
+fn peer_sync_pass(
+    desired: &RemoteMacTable,
+    snapshot: &KernelSnapshot,
+    owned: &OwnedSet,
+    probes: &InstanceProbes,
+    instances: &EvpnInstanceTable,
+    creates: &mut Vec<DataplaneOp>,
+    deletes: &mut Vec<DataplaneOp>,
+) {
+    let target = |vni, mac| {
+        if !probes.is_ready(vni) {
+            return None;
+        }
+        let interface = desired.peer_sync_fdb().get(&(vni, mac))?;
+        let port = snapshot.bridge_ports.get(interface)?;
+        let bridge = snapshot.links.get(instances.get(vni)?.bridge.as_ref()?)?;
+        if !bridge.ce_port_ifindexes.contains(&port.ifindex) {
+            return None;
+        }
+        Some((desired_vlan(instances, vni), port.ifindex))
+    };
+    for (&(vni, vlan, mac), &ifindex) in &owned.peer_sync {
+        if target(vni, mac) != Some((vlan, ifindex)) {
+            deletes.push(DataplaneOp::RemovePeerSyncFdb {
+                vni,
+                mac,
+                vlan,
+                ifindex,
+            });
+        }
+    }
+    for &(vni, mac) in desired.peer_sync_fdb().keys() {
+        let Some((vlan, ifindex)) = target(vni, mac) else {
+            continue;
+        };
+        let key = (vni, vlan, mac);
+        if let Some((port, row)) = snapshot.local_fdb.get(&key) {
+            if !row.is_extern_learned() || *port != ifindex {
+                continue;
+            }
+            if owned.peer_sync.get(&key) == Some(&ifindex) {
+                continue;
+            }
+        }
+        // An owned overlay row is removed by the ordinary withdrawal pass;
+        // a foreign overlay row must keep the shared bridge master slot.
+        if snapshot
+            .find_fdb_in_vlan(vni, mac, vlan)
+            .is_some_and(|row| !row.is_extern_learned())
+        {
+            continue;
+        }
+        creates.push(DataplaneOp::AddPeerSyncFdb {
+            vni,
+            mac,
+            vlan,
+            ifindex,
+        });
     }
 }
 
@@ -1036,6 +1108,91 @@ mod tests {
         InstanceProbe, InstanceProbes, KernelFdbEntry, KernelFdbFlags, KernelSnapshot, OwnedEntry,
         OwnedSet,
     };
+
+    #[test]
+    fn peer_sync_local_precedence_vlan_withdrawal_and_remote_handoff() {
+        let v = vni(100);
+        let m = mac(2);
+        let vlan = Some(10);
+        let mut desired = RemoteMacTable::new();
+        desired.set_peer_sync_fdb(v, m, "es0".into());
+        let mut snapshot = KernelSnapshot::new();
+        snapshot.bridge_ports.insert(
+            "es0".into(),
+            crate::snapshot::KernelBridgePortInfo {
+                ifindex: 12,
+                state: Some(3),
+            },
+        );
+        snapshot.insert_link(crate::snapshot::KernelLinkInfo {
+            bridge_name: "br100".into(),
+            ce_port_ifindexes: vec![12],
+            ..Default::default()
+        });
+        let mut owned = OwnedSet::new();
+        let probes = ready_probes(&[v]);
+        let instances = instances_with_vlan(10, &[v]);
+        let groups = GroupOwnedMap::new();
+        let diff = |desired: &RemoteMacTable, snapshot: &KernelSnapshot, owned: &OwnedSet| {
+            compute_diff(desired, snapshot, owned, &probes, &groups, &instances)
+        };
+        assert_eq!(
+            diff(&desired, &snapshot, &owned).ops,
+            vec![DataplaneOp::AddPeerSyncFdb {
+                vni: v,
+                mac: m,
+                vlan,
+                ifindex: 12
+            }]
+        );
+        let mut local = KernelFdbEntry {
+            mac: m,
+            vlan,
+            dst: None,
+            nh_id: None,
+            protocol: None,
+            flags: KernelFdbFlags {
+                master: true,
+                ..Default::default()
+            },
+        };
+        for permanent in [false, true] {
+            local.flags.permanent = permanent;
+            snapshot.local_fdb.insert((v, vlan, m), (13, local.clone()));
+            assert!(
+                diff(&desired, &snapshot, &owned).is_noop(),
+                "local learned and foreign static rows win"
+            );
+        }
+        local.flags.extern_learn = true;
+        snapshot.local_fdb.insert((v, vlan, m), (12, local));
+        owned.peer_sync.insert((v, vlan, m), 12);
+        assert!(diff(&desired, &snapshot, &owned).is_noop());
+        let remove = DataplaneOp::RemovePeerSyncFdb {
+            vni: v,
+            mac: m,
+            vlan,
+            ifindex: 12,
+        };
+        assert_eq!(
+            diff(&RemoteMacTable::new(), &snapshot, &owned).ops,
+            vec![remove.clone()]
+        );
+        let mut overlay = RemoteMacTable::builder();
+        overlay.insert(v, m, entry("10.0.0.2", None)).unwrap();
+        assert_eq!(
+            diff(&overlay.build(), &snapshot, &owned).ops,
+            vec![
+                remove,
+                DataplaneOp::AddRemoteFdb {
+                    vni: v,
+                    mac: m,
+                    vlan,
+                    dst: ip("10.0.0.2")
+                }
+            ]
+        );
+    }
 
     fn vni(n: u32) -> EvpnInstanceId {
         EvpnInstanceId::new(n).unwrap()
@@ -2021,7 +2178,9 @@ mod tests {
                         "Remove key not in applied: {op:?}"
                     );
                 }
-                DataplaneOp::AddFloodFdb { .. }
+                DataplaneOp::AddPeerSyncFdb { .. }
+                | DataplaneOp::RemovePeerSyncFdb { .. }
+                | DataplaneOp::AddFloodFdb { .. }
                 | DataplaneOp::RemoveFloodFdb { .. }
                 | DataplaneOp::SetBumPortFlags { .. }
                 | DataplaneOp::SetAcPortState { .. }

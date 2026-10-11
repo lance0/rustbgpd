@@ -25,7 +25,7 @@
 //! bridge FDB keys. Entries whose ifindex can't be attributed are silently
 //! dropped from the snapshot.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::io;
 use std::net::IpAddr;
 
@@ -107,6 +107,7 @@ pub(crate) async fn dump_fdb(
     let mut out: HashMap<(EvpnInstanceId, Option<u16>, MacAddress), KernelFdbEntry> =
         HashMap::new();
     let mut flood = Vec::new();
+    let mut local = BTreeMap::new();
     let mut req = handle.neighbours().get();
     req.message_mut().header.family = AddressFamily::Bridge;
     let mut stream = req.execute();
@@ -118,6 +119,16 @@ pub(crate) async fn dump_fdb(
         let Some((key, entry)) = parse_fdb_entry(&msg, cache) else {
             continue;
         };
+        if !cache.vxlan_ifindex_to_vni.contains_key(&msg.header.ifindex)
+            && !cache.svd_vxlan_ifindexes.contains(&msg.header.ifindex)
+        {
+            local.insert(key, (msg.header.ifindex, entry.clone()));
+            // Ordinary remote mobility may replace a dynamic local learn; only
+            // foreign static locals participate in its existing conflict gate.
+            if entry.flags.extern_learn || !(entry.flags.permanent || entry.flags.noarp) {
+                continue;
+            }
+        }
         if entry.mac == ZERO_MAC {
             if let Some(dst) = entry.dst {
                 flood.push((key.0, dst, entry.is_extern_learned()));
@@ -133,6 +144,7 @@ pub(crate) async fn dump_fdb(
     }
     Ok(FdbDump {
         unicast: out,
+        local,
         flood,
     })
 }
@@ -142,6 +154,7 @@ const ZERO_MAC: MacAddress = MacAddress::new([0; 6]);
 
 /// Result of one bridge FDB dump.
 pub(crate) struct FdbDump {
+    pub(crate) local: BTreeMap<(EvpnInstanceId, Option<u16>, MacAddress), (u32, KernelFdbEntry)>,
     /// Per-MAC rows keyed by `(VNI, VLAN, MAC)`.
     pub(crate) unicast: HashMap<(EvpnInstanceId, Option<u16>, MacAddress), KernelFdbEntry>,
     /// Zero-MAC flood rows as `(VNI, dst, ownership marker)`.
@@ -275,7 +288,7 @@ fn parse_fdb_entry(msg: &NeighbourMessage, cache: &LinkCache) -> Option<FdbSnaps
     } else if cache.svd_vxlan_ifindexes.contains(&port_ifindex) {
         from_svd = true;
         explicit_vni?
-    } else if !flags.extern_learn && flags.master && (flags.permanent || flags.noarp) {
+    } else if flags.master {
         // A local interface MAC or operator static row is foreign to
         // our programmer even when a remote Type 2 names the same MAC.
         // Reuse local-port attribution, including its VLAN ambiguity gate.
@@ -438,6 +451,102 @@ fn build_remote_fdb_message(
     msg
 }
 
+/// Local peer-sync forwarding has no VXLAN self/encapsulation leg.
+fn build_peer_sync_fdb_message(
+    ifindex: u32,
+    mac: MacAddress,
+    vlan: Option<u16>,
+) -> NeighbourMessage {
+    let mut msg = NeighbourMessage::default();
+    msg.header.family = AddressFamily::Bridge;
+    msg.header.ifindex = ifindex;
+    msg.header.state = NeighbourState::Noarp;
+    msg.header.flags = NeighbourFlags::Controller | NeighbourFlags::ExtLearned;
+    msg.attributes
+        .push(NeighbourAttribute::LinkLayerAddress(mac.octets().to_vec()));
+    msg.attributes
+        .push(NeighbourAttribute::Protocol(RouteProtocol::Bgp));
+    if let Some(vlan) = vlan {
+        msg.attributes.push(NeighbourAttribute::Vlan(vlan));
+    }
+    msg
+}
+
+pub(crate) async fn apply_peer_sync_op(
+    handle: &Handle,
+    cache: &LinkCache,
+    op: &DataplaneOp,
+) -> Result<(), DataplaneError> {
+    let (vni, mac, vlan, ifindex, add) = match *op {
+        DataplaneOp::AddPeerSyncFdb {
+            vni,
+            mac,
+            vlan,
+            ifindex,
+        } => (vni, mac, vlan, ifindex, true),
+        DataplaneOp::RemovePeerSyncFdb {
+            vni,
+            mac,
+            vlan,
+            ifindex,
+        } => (vni, mac, vlan, ifindex, false),
+        _ => unreachable!("peer-sync FDB operation"),
+    };
+    if add
+        && super::notify::resolve_bridge_port_observation_vni(cache, ifindex, vlan)
+            != Some(vni.as_u32())
+    {
+        return Err(DataplaneError::Other(format!(
+            "peer-sync port {ifindex} does not map to VNI {vni} VLAN {vlan:?}"
+        )));
+    }
+    let key = (vni, vlan, mac);
+    let owns = |dump: &FdbDump| {
+        dump.local
+            .get(&key)
+            .is_some_and(|(port, row)| *port == ifindex && row.is_extern_learned())
+    };
+    // shortcut: AF_BRIDGE lacks atomic owner comparison, revisit when the kernel supports it.
+    let current = dump_fdb(handle, cache).await?;
+    if add {
+        if owns(&current) {
+            return Ok(());
+        }
+        let affected =
+            |&(row_vni, row_vlan, row_mac): &(EvpnInstanceId, Option<u16>, MacAddress)| {
+                row_vni == vni && row_mac == mac && (vlan.is_none() || row_vlan == vlan)
+            };
+        if current.local.keys().any(affected) || current.unicast.keys().any(affected) {
+            return Err(DataplaneError::LocalMacConflict { vni, mac });
+        }
+        // Linux's ExtLearned path ignores EXCL; the fresh dump above is the
+        // available ownership check, not an atomic compare-and-insert.
+        let mut request = handle.neighbours().add_bridge(ifindex, &mac.octets());
+        *request.message_mut() = build_peer_sync_fdb_message(ifindex, mac, vlan);
+        request
+            .execute()
+            .await
+            .map_err(|error| classify_apply_error(&error))?;
+        if !owns(&dump_fdb(handle, cache).await?) {
+            return Err(DataplaneError::LocalMacConflict { vni, mac });
+        }
+    } else if owns(&current) {
+        // VLAN 0 delete also visits every VLAN configured on the port.
+        if vlan.is_none()
+            && current.local.iter().any(|(&(v, _, m), (port, row))| {
+                v == vni && m == mac && *port == ifindex && !row.is_extern_learned()
+            })
+        {
+            return Err(DataplaneError::LocalMacConflict { vni, mac });
+        }
+        let msg = build_peer_sync_fdb_message(ifindex, mac, vlan);
+        if let Err(error) = handle.neighbours().del(msg).execute().await {
+            classify_remove_apply_error(&error)?;
+        }
+    }
+    Ok(())
+}
+
 /// Apply one [`DataplaneOp`] against the kernel.
 ///
 /// Mirrors the iproute2 `bridge fdb add MAC dev vxlanX master dst
@@ -472,7 +581,9 @@ pub(crate) async fn apply_op(
         DataplaneOp::AddRemoteFdb { vni, mac, .. }
         | DataplaneOp::UpdateRemoteFdb { vni, mac, .. }
         | DataplaneOp::RemoveRemoteFdb { vni, mac, .. } => (*vni, *mac),
-        DataplaneOp::AddFloodFdb { .. }
+        DataplaneOp::AddPeerSyncFdb { .. }
+        | DataplaneOp::RemovePeerSyncFdb { .. }
+        | DataplaneOp::AddFloodFdb { .. }
         | DataplaneOp::RemoveFloodFdb { .. }
         | DataplaneOp::SetBumPortFlags { .. }
         | DataplaneOp::SetAcPortState { .. }
@@ -543,7 +654,9 @@ pub(crate) async fn apply_op(
             }?;
             Ok(())
         }
-        DataplaneOp::AddFloodFdb { .. }
+        DataplaneOp::AddPeerSyncFdb { .. }
+        | DataplaneOp::RemovePeerSyncFdb { .. }
+        | DataplaneOp::AddFloodFdb { .. }
         | DataplaneOp::RemoveFloodFdb { .. }
         | DataplaneOp::SetBumPortFlags { .. }
         | DataplaneOp::SetAcPortState { .. }
@@ -1283,7 +1396,9 @@ mod tests {
                 NeighbourAttribute::Controller(10),
             ];
             let mut snapshot = KernelSnapshot::new();
-            if let Some((_, row)) = parse_fdb_entry(&msg, &cache) {
+            if let Some((_, row)) = parse_fdb_entry(&msg, &cache)
+                && (row.flags.permanent || row.flags.noarp)
+            {
                 snapshot.insert_fdb(vni, row);
             }
             let mut desired = RemoteMacTable::builder();
@@ -1375,6 +1490,32 @@ mod tests {
                 assert!(!entry.is_extern_learned());
             }
         }
+    }
+
+    #[test]
+    fn peer_sync_message_is_master_only_and_vlan_attributed() {
+        let mut cache = LinkCache::default();
+        cache.bridge_ports_requiring_vlan_attribution.insert(12);
+        cache.bridge_port_vlan_to_vni.insert((12, 10), 100);
+        let m = MacAddress::new([2; 6]);
+        let msg = build_peer_sync_fdb_message(12, m, Some(10));
+        assert_eq!(
+            msg.header.flags,
+            NeighbourFlags::Controller | NeighbourFlags::ExtLearned
+        );
+        assert_eq!(msg.header.state, NeighbourState::Noarp);
+        let (key, row) = parse_fdb_entry(&msg, &cache).unwrap();
+        assert_eq!(key, (EvpnInstanceId::new(100).unwrap(), Some(10), m));
+        assert!(row.is_extern_learned());
+        assert!(row.dst.is_none() && row.nh_id.is_none() && !row.flags.self_flag);
+        assert!(
+            super::super::notify::classify_neigh(
+                super::super::notify::NeighEventKind::New,
+                &msg,
+                &cache
+            )
+            .is_none()
+        );
     }
 
     #[test]

@@ -881,6 +881,9 @@ jobs:
       - name: ADR-0089 VLAN-scoped FDB netns test
         run: bash crates/evpn-linux/tests/docker/run-netns-tests.sh dataplane_vlan_fdb
 
+      - name: Peer-synchronized local FDB forwarding netns test
+        run: bash crates/evpn-linux/tests/docker/run-netns-tests.sh peer_sync_local_fdb
+
       - name: Remote MAC extern-learn netns test
         run: bash crates/evpn-linux/tests/docker/run-netns-tests.sh dataplane_remote_mac
 

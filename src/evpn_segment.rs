@@ -1784,7 +1784,7 @@ fn publish_same_esi_bias_snapshot(
     };
     let bound_esis: BTreeSet<EthernetSegmentIdentifier> =
         runtime.es_link_bindings.keys().copied().collect();
-    let table = build_same_esi_bias_table_from_roles(
+    let mut table = build_same_esi_bias_table_from_roles(
         &bound_esis,
         &runtime.drained_esis,
         by_esi.iter().flat_map(|(&esi, state)| {
@@ -1794,6 +1794,9 @@ fn publish_same_esi_bias_snapshot(
                 .map(move |(&vni, &role)| (esi, state.config.redundancy_mode, vni, role))
         }),
     );
+    for (&esi, binding) in runtime.es_link_bindings.iter() {
+        table.bind_interface(esi, binding.interface.clone());
+    }
     if send_same_esi_bias_if_modified(tx, table) {
         debug!("EVPN segment: published same-ESI bias eligibility");
     }
@@ -4543,6 +4546,7 @@ mod tests {
         // the AC gate forwarding.
         wait_for_dataplane_state(&bias_rx, &bum_rx, "startup DF snapshots", |bias, bum| {
             bias.is_eligible(id, vni(101))
+                && bias.bound_interface(id, vni(101)) == Some("es0")
                 && bum.ac_gate(id).map(|entry| entry.state) == Some(AcGateState::Forwarding)
         })
         .await;

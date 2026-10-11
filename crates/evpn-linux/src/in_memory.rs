@@ -386,6 +386,60 @@ impl InMemoryDataplane {
         }
 
         match op {
+            DataplaneOp::AddPeerSyncFdb {
+                vni,
+                mac,
+                vlan,
+                ifindex,
+            } => {
+                let key = (*vni, *vlan, *mac);
+                if state
+                    .kernel
+                    .local_fdb
+                    .get(&key)
+                    .is_some_and(|(port, row)| *port != *ifindex || !row.is_extern_learned())
+                    || state.kernel.find_fdb_in_vlan(*vni, *mac, *vlan).is_some()
+                {
+                    return Err(DataplaneError::LocalMacConflict {
+                        vni: *vni,
+                        mac: *mac,
+                    });
+                }
+                state.kernel.local_fdb.insert(
+                    key,
+                    (
+                        *ifindex,
+                        KernelFdbEntry {
+                            mac: *mac,
+                            vlan: *vlan,
+                            dst: None,
+                            nh_id: None,
+                            protocol: None,
+                            flags: KernelFdbFlags {
+                                extern_learn: true,
+                                master: true,
+                                ..Default::default()
+                            },
+                        },
+                    ),
+                );
+            }
+            DataplaneOp::RemovePeerSyncFdb {
+                vni,
+                mac,
+                vlan,
+                ifindex,
+            } => {
+                let key = (*vni, *vlan, *mac);
+                if state
+                    .kernel
+                    .local_fdb
+                    .get(&key)
+                    .is_some_and(|(port, row)| *port == *ifindex && row.is_extern_learned())
+                {
+                    state.kernel.local_fdb.remove(&key);
+                }
+            }
             DataplaneOp::AddRemoteFdb {
                 vni,
                 mac,
@@ -1284,6 +1338,16 @@ impl InMemoryHandle {
             .expect("poisoned")
             .kernel
             .insert_fdb(vni, entry);
+    }
+
+    /// Pre-load a local bridge master row, including external ownership markers.
+    pub fn pre_load_local_fdb(&self, vni: EvpnInstanceId, ifindex: u32, entry: KernelFdbEntry) {
+        self.state
+            .lock()
+            .expect("poisoned")
+            .kernel
+            .local_fdb
+            .insert((vni, entry.vlan, entry.mac), (ifindex, entry));
     }
 
     /// Pre-load one zero-MAC flood row; `owned` is its `extern_learn`

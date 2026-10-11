@@ -346,6 +346,7 @@ impl BumEnforcementTable {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SameEsiBiasTable {
     eligible: std::collections::BTreeSet<(EthernetSegmentIdentifier, EvpnInstanceId)>,
+    interfaces: std::collections::BTreeMap<EthernetSegmentIdentifier, String>,
 }
 
 impl SameEsiBiasTable {
@@ -359,6 +360,24 @@ impl SameEsiBiasTable {
     /// Mark one `(ESI, VNI)` pair bias-eligible.
     pub fn insert(&mut self, esi: EthernetSegmentIdentifier, vni: EvpnInstanceId) {
         self.eligible.insert((esi, vni));
+    }
+
+    /// Bind the local attachment used for peer-synchronized forwarding.
+    /// Eligibility remains controlled independently by health and DF role.
+    pub fn bind_interface(&mut self, esi: EthernetSegmentIdentifier, interface: String) {
+        self.interfaces.insert(esi, interface);
+    }
+
+    /// Local attachment for an eligible pair, absent while drained or unbound.
+    #[must_use]
+    pub fn bound_interface(
+        &self,
+        esi: EthernetSegmentIdentifier,
+        vni: EvpnInstanceId,
+    ) -> Option<&str> {
+        self.is_eligible(esi, vni)
+            .then(|| self.interfaces.get(&esi).map(String::as_str))
+            .flatten()
     }
 
     /// Whether remote MAC/MAC-IP routes for `(esi, vni)` are biased
@@ -743,6 +762,20 @@ pub struct FailedOp {
 /// Discriminator for [`AppliedOp`] / [`FailedOp`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DataplaneOpKind {
+    /// Install an owned peer-synchronized MAC on the local ES attachment.
+    AddPeerSyncFdb {
+        /// MAC the entry programs.
+        mac: MacAddress,
+        /// Local attachment interface index.
+        ifindex: u32,
+    },
+    /// Remove an owned peer-synchronized MAC from the local attachment.
+    RemovePeerSyncFdb {
+        /// MAC the entry programmed.
+        mac: MacAddress,
+        /// Local attachment interface index.
+        ifindex: u32,
+    },
     /// Add a remote-MAC FDB entry pointing at `dst` (the remote VTEP IP).
     AddRemoteFdb {
         /// MAC the entry programs.

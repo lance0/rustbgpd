@@ -902,3 +902,346 @@ async fn linux_dataplane_attributes_vlan_mac_ip_observations_inner() {
     );
     expect_no_observation(&mut rx).await;
 }
+
+#[tokio::test]
+async fn linux_dataplane_peer_sync_local_fdb_forwards_with_flood_off() {
+    if !netns_gate() {
+        eprintln!("skipping: set EVPN_LINUX_NETNS=1 to run privileged netns test");
+        return;
+    }
+    if std::env::var("RUSTBGPD_NETNS_INNER").as_deref() == Ok("peer-sync") {
+        peer_sync_local_fdb_inner().await;
+        return;
+    }
+    let ns = NetnsFixture::create("peer-sync");
+    setup_vlan_aware_vxlan_topology(&ns, "10.255.0.10");
+    setup_vlan_access_port(&ns);
+    setup_vlan_upper_devices(&ns);
+    ns.exec(
+        "bridge",
+        &[
+            "link",
+            "set",
+            "dev",
+            "swp1",
+            "flood",
+            "off",
+            "mcast_flood",
+            "off",
+            "bcast_flood",
+            "off",
+        ],
+    );
+    ns.exec("ip", &["addr", "add", "192.0.2.1/24", "dev", "brvlan.10"]);
+    ns.exec(
+        "ip",
+        &[
+            "neigh",
+            "replace",
+            "192.0.2.2",
+            "lladdr",
+            &mac_str(mac(0x79)),
+            "nud",
+            "permanent",
+            "dev",
+            "brvlan.10",
+        ],
+    );
+    let status = Command::new("ip")
+        .args(["netns", "exec", &ns.name])
+        .arg(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "--nocapture",
+            "linux_dataplane_peer_sync_local_fdb_forwards_with_flood_off",
+        ])
+        .env("RUSTBGPD_NETNS_INNER", "peer-sync")
+        .env("EVPN_LINUX_NETNS", "1")
+        .status()
+        .unwrap();
+    assert!(status.success());
+}
+
+async fn peer_sync_local_fdb_inner() {
+    let mut dp = LinuxDataplane::connect().await.unwrap();
+    let instances = table_with_vlan_instances("10.255.0.10");
+    assert_eq!(
+        dp.probe(&instances)
+            .await
+            .get(EvpnInstanceId::new(100).unwrap()),
+        Some(&InstanceProbe::Ready)
+    );
+    let snapshot = dp.dump_snapshot().await.unwrap();
+    let ifindex = snapshot.bridge_ports["swp1"].ifindex;
+    let m = mac(0x79);
+    let vni100 = EvpnInstanceId::new(100).unwrap();
+    let key = (vni100, Some(10), m);
+    let add = DataplaneOp::AddPeerSyncFdb {
+        vni: vni100,
+        mac: m,
+        vlan: Some(10),
+        ifindex,
+    };
+    let remove = DataplaneOp::RemovePeerSyncFdb {
+        vni: vni100,
+        mac: m,
+        vlan: Some(10),
+        ifindex,
+    };
+    run("tc", &["qdisc", "add", "dev", "swp1", "clsact"]);
+    run(
+        "tc",
+        &[
+            "filter",
+            "add",
+            "dev",
+            "swp1",
+            "egress",
+            "protocol",
+            "all",
+            "pref",
+            "1",
+            "flower",
+            "dst_mac",
+            &mac_str(m),
+            "action",
+            "pass",
+        ],
+    );
+    let sent_to_ce = || -> u64 {
+        let output = run("tc", &["-s", "filter", "show", "dev", "swp1", "egress"]);
+        let text = String::from_utf8(output.stdout).unwrap();
+        text.lines()
+            .find(|line| line.trim_start().starts_with("Sent "))
+            .unwrap()
+            .split_whitespace()
+            .nth(3)
+            .unwrap()
+            .parse()
+            .unwrap()
+    };
+    let send_frame = || {
+        // A permanent neighbor avoids ARP; the CE has no IP and never replies.
+        let output = Command::new("ping")
+            .args(["-c", "1", "-W", "1", "-I", "brvlan.10", "192.0.2.2"])
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(1));
+    };
+    let before = sent_to_ce();
+    send_frame();
+    assert_eq!(
+        sent_to_ce(),
+        before,
+        "unknown unicast is blocked by non-DF flood off"
+    );
+    dp.apply(&add).await.unwrap();
+    let row = dp.dump_snapshot().await.unwrap().local_fdb[&key].clone();
+    assert_eq!(row.0, ifindex);
+    assert!(row.1.is_extern_learned());
+    assert!(row.1.dst.is_none() && row.1.nh_id.is_none() && !row.1.flags.self_flag);
+    send_frame();
+    assert_eq!(
+        sent_to_ce(),
+        before + 1,
+        "peer-sync row forwards known unicast with flood off"
+    );
+    dp.apply(&remove).await.unwrap();
+    send_frame();
+    assert_eq!(
+        sent_to_ce(),
+        before + 1,
+        "withdrawal restores the missing-row control"
+    );
+
+    // A stale planned add or remove must preserve a row already taken over.
+    for state in ["dynamic", "static"] {
+        run(
+            "bridge",
+            &[
+                "fdb",
+                "add",
+                &mac_str(m),
+                "dev",
+                "swp1",
+                "master",
+                "vlan",
+                "10",
+                state,
+            ],
+        );
+        assert!(dp.apply(&add).await.is_err());
+        dp.apply(&remove).await.unwrap();
+        assert!(
+            !dp.dump_snapshot().await.unwrap().local_fdb[&key]
+                .1
+                .is_extern_learned()
+        );
+        run(
+            "bridge",
+            &[
+                "fdb",
+                "del",
+                &mac_str(m),
+                "dev",
+                "swp1",
+                "master",
+                "vlan",
+                "10",
+            ],
+        );
+    }
+
+    // A second local VLAN retains its independent peer-sync row.
+    let vni200 = EvpnInstanceId::new(200).unwrap();
+    dp.apply(&DataplaneOp::AddPeerSyncFdb {
+        vni: vni200,
+        mac: m,
+        vlan: Some(20),
+        ifindex,
+    })
+    .await
+    .unwrap();
+    dp.apply(&add).await.unwrap();
+    dp.apply(&remove).await.unwrap();
+    assert!(
+        dp.dump_snapshot()
+            .await
+            .unwrap()
+            .local_fdb
+            .contains_key(&(vni200, Some(20), m))
+    );
+    peer_sync_legacy_vlan_guard(&mut dp, instances).await;
+}
+
+async fn peer_sync_legacy_vlan_guard(dp: &mut LinuxDataplane, mut instances: EvpnInstanceTable) {
+    run("ip", &["link", "add", "brlegacy", "type", "bridge"]);
+    run("ip", &["link", "add", "eslegacy", "type", "dummy"]);
+    run(
+        "ip",
+        &[
+            "link",
+            "add",
+            "vxlegacy",
+            "type",
+            "vxlan",
+            "id",
+            "300",
+            "local",
+            "10.255.0.10",
+            "dstport",
+            "4789",
+            "nolearning",
+        ],
+    );
+    for name in ["eslegacy", "vxlegacy"] {
+        run("ip", &["link", "set", name, "master", "brlegacy"]);
+        run("ip", &["link", "set", name, "up"]);
+    }
+    run("ip", &["link", "set", "brlegacy", "up"]);
+    let v = EvpnInstanceId::new(300).unwrap();
+    instances
+        .insert(
+            EvpnInstance::new(
+                v,
+                rd_for(v),
+                vec![RouteTarget::TwoOctetAs {
+                    asn: 65001,
+                    value: 300,
+                }],
+                "10.255.0.10".parse().unwrap(),
+                Some("brlegacy".into()),
+                false,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+    assert_eq!(
+        dp.probe(&instances).await.get(v),
+        Some(&InstanceProbe::Ready)
+    );
+    let ifindex = dp.dump_snapshot().await.unwrap().bridge_ports["eslegacy"].ifindex;
+    let m = mac(0x7a);
+    let add = DataplaneOp::AddPeerSyncFdb {
+        vni: v,
+        mac: m,
+        vlan: None,
+        ifindex,
+    };
+    let remove = DataplaneOp::RemovePeerSyncFdb {
+        vni: v,
+        mac: m,
+        vlan: None,
+        ifindex,
+    };
+    dp.apply(&add).await.unwrap();
+    let rows = dp.dump_snapshot().await.unwrap().local_fdb;
+    for vlan in [None, Some(1)] {
+        assert!(rows[&(v, vlan, m)].1.is_extern_learned());
+    }
+    // Legacy VLAN-zero requests also affect the port's default PVID row.
+    run(
+        "bridge",
+        &[
+            "fdb",
+            "del",
+            &mac_str(m),
+            "dev",
+            "eslegacy",
+            "master",
+            "vlan",
+            "1",
+        ],
+    );
+    run(
+        "bridge",
+        &[
+            "fdb",
+            "add",
+            &mac_str(m),
+            "dev",
+            "eslegacy",
+            "master",
+            "vlan",
+            "1",
+            "static",
+        ],
+    );
+    assert!(
+        dp.apply(&remove).await.is_err(),
+        "legacy delete must not erase a foreign PVID sibling"
+    );
+    assert!(
+        !dp.dump_snapshot().await.unwrap().local_fdb[&(v, Some(1), m)]
+            .1
+            .is_extern_learned()
+    );
+    // Delete both rows explicitly as the test's owner, then leave only foreign PVID 1.
+    run(
+        "bridge",
+        &["fdb", "del", &mac_str(m), "dev", "eslegacy", "master"],
+    );
+    run(
+        "bridge",
+        &[
+            "fdb",
+            "add",
+            &mac_str(m),
+            "dev",
+            "eslegacy",
+            "master",
+            "vlan",
+            "1",
+            "dynamic",
+        ],
+    );
+    assert!(
+        dp.apply(&add).await.is_err(),
+        "legacy add must not replace a foreign PVID sibling"
+    );
+    assert!(
+        !dp.dump_snapshot().await.unwrap().local_fdb[&(v, Some(1), m)]
+            .1
+            .is_extern_learned()
+    );
+}

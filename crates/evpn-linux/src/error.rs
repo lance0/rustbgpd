@@ -54,10 +54,10 @@ pub enum DataplaneError {
     #[error("permission denied: {0} (CAP_NET_ADMIN missing or LSM-blocked)")]
     PermissionDenied(String),
 
-    /// A remote-MAC entry conflicts with a kernel-learned local entry
-    /// for the same `(VNI, MAC)`. The diff loop logs and skips; this
-    /// variant exists for the [`InMemoryDataplane`] fake to emit
-    /// during specific test scenarios.
+    /// An FDB operation conflicts with an existing local or foreign row
+    /// for the same `(VNI, MAC)`. The Linux peer-sync apply guard rechecks
+    /// current ownership before mutation; the [`InMemoryDataplane`] fake
+    /// uses the same classification for conflicting test state.
     ///
     /// [`InMemoryDataplane`]: crate::InMemoryDataplane
     #[error("MAC {mac} in VNI {vni} conflicts with kernel-learned local entry")]
