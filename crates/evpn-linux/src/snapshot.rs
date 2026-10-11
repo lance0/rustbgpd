@@ -387,6 +387,38 @@ impl KernelFdbEntry {
     }
 }
 
+/// Foreign rows indexed by the scope a bridge FDB mutation can affect.
+/// Build once per observation batch, rather than scanning every row per MAC.
+#[derive(Default)]
+pub(crate) struct ForeignFdbEntries {
+    exact: BTreeSet<(EvpnInstanceId, Option<u16>, MacAddress)>,
+    unscoped: BTreeSet<(EvpnInstanceId, MacAddress)>,
+}
+
+impl ForeignFdbEntries {
+    pub(crate) fn new<'a>(
+        rows: impl Iterator<Item = ((EvpnInstanceId, MacAddress), &'a KernelFdbEntry)>,
+    ) -> Self {
+        let mut foreign = Self::default();
+        for ((vni, mac), row) in rows {
+            if !row.is_extern_learned() {
+                foreign.exact.insert((vni, row.vlan, mac));
+                foreign.unscoped.insert((vni, mac));
+            }
+        }
+        foreign
+    }
+
+    pub(crate) fn contains(&self, vni: EvpnInstanceId, mac: MacAddress, vlan: Option<u16>) -> bool {
+        // An omitted NDA_VLAN also visits the bridge port's VLAN memberships.
+        if vlan.is_none() {
+            self.unscoped.contains(&(vni, mac))
+        } else {
+            self.exact.contains(&(vni, vlan, mac))
+        }
+    }
+}
+
 /// One instance's all-zero-MAC ingress-replication entry on its VXLAN
 /// port, as observed in the kernel.
 ///

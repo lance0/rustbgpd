@@ -264,6 +264,10 @@ pub struct EvpnDataplaneHandle {
 /// Bundles the independently watched config surfaces so helper
 /// signatures stay stable as ADR-managed surfaces are added.
 #[derive(Clone, Copy)]
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "test dataplane injection table")
+)]
 pub struct EvpnDataplaneTables<'a> {
     pub instances: &'a Arc<EvpnInstanceTable>,
     pub ip_vrfs: &'a Arc<IpVrfTable>,
@@ -451,7 +455,10 @@ pub async fn spawn_with_quarantine(
 /// receive a handle with `local_mac_rx = None`; tests that need
 /// observations should call `take_local_mac_rx` themselves before
 /// passing the dataplane in.
-#[allow(dead_code)]
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "test dataplane injection entrypoint")
+)]
 pub fn spawn_with_dataplane<D>(
     config: SupervisorConfig,
     tables: EvpnDataplaneTables<'_>,

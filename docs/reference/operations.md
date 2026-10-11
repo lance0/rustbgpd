@@ -1652,6 +1652,7 @@ exactly under the floods these drops account for.
 | `bgp_max_prefix_headroom{peer,scope}` | Saturating `limit - usage` for a finite scope; absent when unlimited or disconnected |
 | `bgp_max_prefix_blocking{peer,scope}` | 1 while a `max_prefix_action = "block"` episode is open for a finite scope — net-new prefixes are being withheld until usage falls back under the bound; present for every finite scope, reaped with the other capacity series |
 | `bgp_add_path_receive_limit_attempts_total{peer,family,action}` | Net-new received Add-Path ID admission attempts beyond the per-prefix cap for negotiated `ipv4_unicast` or `ipv6_unicast`; a repeated withheld ID counts again, but an admitted-ID replacement does not. `action` is `block`, `shutdown`, or `warning`. No prefix label or per-prefix gauge. Reaped when the configured peer is deleted |
+| `bgp_orf_capacity_rejections_total{peer,family}` | Address-Prefix ORF groups rejected because an ADD would exceed the 4,096-entry cap for `ipv4_unicast` or `ipv6_unicast`; the installed filter is retained. Reaped on configured peer deletion |
 | `bgp_outbound_prefix_usage{peer,family}` | Distinct prefixes admitted into a peer's ADVERTISED unicast state (ADR-0113), `family` = `ipv4_unicast` or `ipv6_unicast`. Post-policy, post-OTC, post-exact-export — the same truth the neighbor API reports, never the shared update-group table's count. Series reaped on session teardown |
 | `bgp_outbound_prefix_limit{peer,family}` | Effective finite `max_prefixes_out_*` for the same family; absent means unlimited, never zero. A family that becomes unlimited drops this series rather than keeping a stale value |
 | `bgp_outbound_prefix_headroom{peer,family}` | Saturating `limit - usage`; absent while the family is unlimited |
@@ -2832,6 +2833,15 @@ Established while that peer's net-new prefixes are withheld. Nonblocking
 inbound scopes add no checks. Link-local identities
 retain their `%interface` scope in both check names and details.
 
+`peer.<scoped-address>.inbound_prefix_bound` is yellow for an established
+eBGP peer with no effective inbound prefix bound after peer-group inheritance.
+It names the peer and the five keys that can set a bound: `max_prefixes`,
+`max_prefixes_ipv4`, `max_prefixes_ipv6`, `max_prefixes_received_ipv4`, and
+`max_prefixes_received_ipv6`. Static, API-added, and accepted dynamic peers
+are checked. iBGP, route-reflector clients, down sessions, and stale snapshots
+are excluded; the check also requires the daemon's global ASN and peer
+configuration to be available. This advisory warning retains exit status 0.
+
 Doctor parses the effective-config document once and reads probe targets from
 its documented key paths. With `global.listen_addresses`, a local check uses
 every configured address, including when management uses a Unix socket; it
@@ -3876,13 +3886,13 @@ per-prefix work.
 
 Truthfulness: the explanation is produced by a read-only dry run of
 the *same staging body* live distribution executes -- including for
-update-grouped peers, which are explained against their group table
+update-grouped peers, which are explained against their member's advertised view
 with split horizon applied per member exactly like the emit-time
 source-flip matrix. The response carries `update_group_id` when the
 peer's export is group-staged. Explain queries never count toward
 `bgp_policy_routes_total` or per-term policy hit counters.
 
-The live commit path then applies one final exact-wire gate through an
+After staging, the live commit path applies an exact-wire gate through an
 immutable snapshot of the session encoder and its negotiated 4096/65535-byte
 ceiling. A failed announcement never enters Adj-RIB-Out. If it had been
 advertised before an attribute, next-hop, capability, or ceiling change made
@@ -3897,6 +3907,15 @@ was never advertised. Watch
 warning log. Cease/8 still tears down the session if transport encounters an
 impossible single-route message or a missing/mismatched encoder snapshot; that
 is defense in depth, not the normal rejection path.
+
+After the exact-wire gate, the unicast ladder applies the final
+`outbound_prefix_limit` gate (ADR-0113). A net-new prefix withheld at capacity
+returns Deny with `[STOP]`, code `outbound_prefix_limit_reached`, and detail
+naming the family, configured limit, and admitted usage. Prefixes already
+admitted to this peer can still be updated at the limit. For a grouped peer,
+the advertised-state diff uses the same member admission filter as
+`rbgp rib advertised <peer>`, rather than the shared group's full table.
+This capacity gate covers IPv4/IPv6 unicast only.
 
 Neighbor `last_error` and session notification history retain the bounded local
 cause of that defense-in-depth teardown, outbound queue saturation, and TCP

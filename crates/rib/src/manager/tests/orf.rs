@@ -217,6 +217,63 @@ async fn orf_filter_constrains_advertised_set() {
 }
 
 #[tokio::test]
+async fn orf_capacity_rejection_keeps_filter_through_plain_refresh_fallback() {
+    let (tx, handle, target, mut out_rx) = orf_setup().await;
+    let cap = u32::try_from(crate::orf::MAX_ORF_ENTRIES).unwrap();
+    let permitted = Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 8);
+    let denied = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 0, 0), 16);
+    send_peer_orf(
+        &tx,
+        target,
+        WhenToRefresh::Immediate,
+        (0..cap)
+            .map(|seq| orf_permit(seq, 0, 32, permitted))
+            .collect(),
+    )
+    .await;
+    assert_eq!(
+        collect_announced(&mut out_rx, 1).await,
+        vec![Prefix::V4(permitted)]
+    );
+
+    let (reply, response) = oneshot::channel();
+    tx.send(RibUpdate::PeerOrfUpdate {
+        session_id: 0,
+        peer: target,
+        afi: Afi::Ipv4,
+        safi: Safi::Unicast,
+        when: WhenToRefresh::Immediate,
+        entries: vec![orf_permit(0, 0, 32, denied), orf_permit(cap, 0, 32, denied)],
+        reply,
+    })
+    .await
+    .unwrap();
+    assert!(response.await.unwrap().is_err());
+    // This is the transport's existing rejection fallback, through the actor.
+    tx.send(RibUpdate::RouteRefreshRequest {
+        queued: Arc::default(),
+        peer: target,
+        session_id: 0,
+        afi: Afi::Ipv4,
+        safi: Safi::Unicast,
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        collect_announced(&mut out_rx, 1).await,
+        vec![Prefix::V4(permitted)]
+    );
+    assert!(
+        tokio::time::timeout(Duration::from_millis(200), out_rx.recv())
+            .await
+            .is_err(),
+        "rejected replacement must not advertise the previously denied route"
+    );
+    drop(tx);
+    handle.await.unwrap();
+}
+
+#[tokio::test]
 async fn orf_immediate_withdraws_now_denied_prefix() {
     let (tx, handle, target, mut out_rx) = orf_setup().await;
 
@@ -1233,6 +1290,169 @@ fn dual_stack_orf_manager(peer: IpAddr) -> (RibManager, mpsc::Receiver<OutboundR
         "both families start gated"
     );
     (manager, out_rx)
+}
+
+fn push_orf_entries(
+    manager: &mut RibManager,
+    peer: IpAddr,
+    afi: Afi,
+    entries: Vec<AddressPrefixOrf>,
+) -> Result<(), String> {
+    let (reply, mut response) = oneshot::channel();
+    manager.handle_update(RibUpdate::PeerOrfUpdate {
+        peer,
+        session_id: 7,
+        afi,
+        safi: Safi::Unicast,
+        when: WhenToRefresh::Defer,
+        entries,
+        reply,
+    });
+    response.try_recv().expect("synchronous ORF reply")
+}
+
+#[test]
+fn orf_capacity_accumulates_atomically_and_remove_all_recovers() {
+    let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let (mut manager, _out_rx) = dual_stack_orf_manager(peer);
+    let family = (Afi::Ipv4, Safi::Unicast);
+    let cap = u32::try_from(crate::orf::MAX_ORF_ENTRIES).unwrap();
+    let prefix = Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 8);
+    // Several wire messages accumulate up to the exact boundary.
+    for start in (0..cap).step_by(512) {
+        push_orf_entries(
+            &mut manager,
+            peer,
+            Afi::Ipv4,
+            (start..(start + 512).min(cap))
+                .map(|seq| orf_permit(seq, 0, 32, prefix))
+                .collect(),
+        )
+        .unwrap();
+    }
+    assert_eq!(manager.peer_orf_filters[&peer][&family].len(), cap as usize);
+    // Replacement is allowed even at capacity, and sequence order still wins.
+    push_orf_entries(
+        &mut manager,
+        peer,
+        Afi::Ipv4,
+        vec![orf_deny(0, 0, 32, prefix)],
+    )
+    .unwrap();
+    let before = manager.peer_orf_filters[&peer][&family].clone();
+    assert!(!before.permits(&Prefix::V4(prefix)));
+    // A replacement before the overflowing ADD must be rolled back too.
+    let error = push_orf_entries(
+        &mut manager,
+        peer,
+        Afi::Ipv4,
+        vec![orf_permit(0, 0, 32, prefix), orf_permit(cap, 0, 32, prefix)],
+    )
+    .unwrap_err();
+    assert!(error.contains("installed filter retained"));
+    assert_eq!(manager.peer_orf_filters[&peer][&family], before);
+    assert_eq!(
+        counter_metric_value(
+            &manager.metrics,
+            "bgp_orf_capacity_rejections_total",
+            &[("peer", "10.0.0.2"), ("family", "ipv4_unicast")],
+        ),
+        1.0
+    );
+    // The other family has its own capacity, and removing one entry frees a slot.
+    let mut v6 = orf_permit(0, 0, 0, prefix);
+    v6.prefix = Some(Prefix::V6(Ipv6Prefix::new(
+        "2001:db8::".parse().unwrap(),
+        32,
+    )));
+    push_orf_entries(&mut manager, peer, Afi::Ipv6, vec![v6]).unwrap();
+    let remove = AddressPrefixOrf {
+        action: OrfAction::Remove,
+        prefix: None,
+        ..orf_permit(0, 0, 0, prefix)
+    };
+    push_orf_entries(
+        &mut manager,
+        peer,
+        Afi::Ipv4,
+        vec![remove, orf_permit(cap, 0, 32, prefix)],
+    )
+    .unwrap();
+    assert_eq!(manager.peer_orf_filters[&peer][&family].len(), cap as usize);
+    push_orf_entries(
+        &mut manager,
+        peer,
+        Afi::Ipv4,
+        vec![AddressPrefixOrf {
+            action: OrfAction::RemoveAll,
+            ..remove
+        }],
+    )
+    .unwrap();
+    assert!(!manager.peer_orf_filters[&peer].contains_key(&family));
+    push_orf_entries(
+        &mut manager,
+        peer,
+        Afi::Ipv4,
+        vec![orf_permit(cap, 0, 32, prefix)],
+    )
+    .unwrap();
+    assert_eq!(manager.peer_orf_filters[&peer][&family].len(), 1);
+}
+
+#[test]
+fn orf_malformed_field_resets_even_after_an_overflowing_add() {
+    let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let (mut manager, _out_rx) = dual_stack_orf_manager(peer);
+    let cap = u32::try_from(crate::orf::MAX_ORF_ENTRIES).unwrap();
+    let prefix = Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 8);
+    push_orf_entries(
+        &mut manager,
+        peer,
+        Afi::Ipv4,
+        (0..cap).map(|seq| orf_permit(seq, 0, 32, prefix)).collect(),
+    )
+    .unwrap();
+    push_orf_entries(
+        &mut manager,
+        peer,
+        Afi::Ipv4,
+        vec![
+            orf_permit(cap, 0, 32, prefix),
+            orf_permit(cap + 1, 24, 16, prefix),
+        ],
+    )
+    .unwrap();
+    assert!(!manager.peer_orf_filters.contains_key(&peer));
+    assert_eq!(
+        counter_metric_value(
+            &manager.metrics,
+            "bgp_orf_capacity_rejections_total",
+            &[("peer", "10.0.0.2"), ("family", "ipv4_unicast")],
+        ),
+        0.0
+    );
+}
+
+#[test]
+fn orf_capacity_rejects_oversized_first_group_without_lifting_gate() {
+    let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let (mut manager, _out_rx) = dual_stack_orf_manager(peer);
+    let cap = u32::try_from(crate::orf::MAX_ORF_ENTRIES).unwrap();
+    let prefix = Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 8);
+    assert!(
+        push_orf_entries(
+            &mut manager,
+            peer,
+            Afi::Ipv4,
+            (0..=cap)
+                .map(|seq| orf_permit(seq, 0, 32, prefix))
+                .collect(),
+        )
+        .is_err()
+    );
+    assert!(!manager.peer_orf_filters.contains_key(&peer));
+    assert!(manager.peer_orf_pending[&peer].contains(&(Afi::Ipv4, Safi::Unicast)));
 }
 
 /// Regression: once every negotiated family's gate has lifted through the

@@ -44,7 +44,7 @@ use rustbgpd_evpn::{EvpnInstanceId, MacAddress};
 
 use crate::dataplane::DataplaneOp;
 use crate::error::DataplaneError;
-use crate::snapshot::{KernelFdbEntry, KernelFdbFlags};
+use crate::snapshot::{ForeignFdbEntries, KernelFdbEntry, KernelFdbFlags};
 
 use super::links::{LinkCache, matching_svd_vxlan_ports, unique_fdb_vxlan_target_for_vni};
 
@@ -159,6 +159,28 @@ pub(crate) struct FdbDump {
     pub(crate) unicast: HashMap<(EvpnInstanceId, Option<u16>, MacAddress), KernelFdbEntry>,
     /// Zero-MAC flood rows as `(VNI, dst, ownership marker)`.
     pub(crate) flood: Vec<(EvpnInstanceId, IpAddr, bool)>,
+}
+
+/// Recheck every foreign row in the mutation's scope after planning.
+pub(crate) async fn guard_foreign_fdb(
+    handle: &Handle,
+    cache: &LinkCache,
+    vni: EvpnInstanceId,
+    mac: MacAddress,
+    vlan: Option<u16>,
+) -> Result<(), DataplaneError> {
+    // shortcut: AF_BRIDGE has no atomic owner comparison, revisit when the kernel supports it.
+    let current = dump_fdb(handle, cache).await?;
+    let foreign = ForeignFdbEntries::new(
+        current
+            .unicast
+            .iter()
+            .map(|(&(vni, _, mac), row)| ((vni, mac), row)),
+    );
+    if foreign.contains(vni, mac, vlan) {
+        return Err(DataplaneError::LocalMacConflict { vni, mac });
+    }
+    Ok(())
 }
 
 /// Fold `incoming` into `existing` for the same `(VNI, MAC)` key.
@@ -628,6 +650,7 @@ pub(crate) async fn apply_op(
     match op {
         DataplaneOp::AddRemoteFdb { dst, vlan, .. }
         | DataplaneOp::UpdateRemoteFdb { dst, vlan, .. } => {
+            guard_foreign_fdb(handle, cache, vni, mac, *vlan).await?;
             // Single message matching what iproute2 sends for
             // `bridge fdb add MAC dev vxlanX master dst R self
             // extern_learn` (verified via strace on FRR's exact wire
@@ -647,6 +670,7 @@ pub(crate) async fn apply_op(
             Ok(())
         }
         DataplaneOp::RemoveRemoteFdb { vlan, .. } => {
+            guard_foreign_fdb(handle, cache, vni, mac, *vlan).await?;
             let msg = build_remove_fdb_message(target.ifindex, mac, *vlan, target.source_vni);
             match handle.neighbours().del(msg).execute().await {
                 Ok(()) => Ok(()),

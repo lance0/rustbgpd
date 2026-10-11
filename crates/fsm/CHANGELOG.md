@@ -3,11 +3,12 @@
 This changelog covers the independently published `rustbgpd-fsm` crate. Daemon
 and workspace changes remain in the repository-level `CHANGELOG.md`.
 
-## Unreleased
+## 0.11.0 - 2026-10-11
 
-- Prepare 0.11 with wire 0.24; upgrade consumers exchanging public wire types
-  together. The paired wire release is breaking: `UpdateValidationOptions` is
-  now `#[non_exhaustive]` and gains `link_local_next_hop`, so construct it with
+- Move the public wire dependency to 0.24. Upgrade crates exchanging public
+  wire types together. The paired wire release is breaking:
+  `UpdateValidationOptions` is now `#[non_exhaustive]` and gains
+  `link_local_next_hop`, so construct it with
   `UpdateValidationOptions::default()` and assign fields.
 
 - Add opt-in Link-Local Next Hop capability advertisement and bilateral

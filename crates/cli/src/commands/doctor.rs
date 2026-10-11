@@ -981,6 +981,34 @@ fn inbound_prefix_limit_checks(
         .collect()
 }
 
+fn inbound_prefix_bound_check(
+    identity: &str,
+    neighbor: &crate::proto::NeighborState,
+    local_asn: Option<u32>,
+) -> Option<Check> {
+    let config = neighbor.config.as_ref()?;
+    let local_asn = local_asn?;
+    if neighbor.stale
+        || neighbor.state != crate::proto::SessionState::Established as i32
+        || config.remote_asn == local_asn
+        || neighbor.route_reflector_client
+        || config.max_prefixes != 0
+        || !neighbor.inbound_prefix_limits.is_empty()
+        || neighbor.effective_max_prefixes.is_some()
+        || neighbor.effective_max_prefixes_ipv4.is_some()
+        || neighbor.effective_max_prefixes_ipv6.is_some()
+    {
+        return None;
+    }
+    Some(Check {
+        name: format!("peer.{identity}.inbound_prefix_bound"),
+        status: CheckStatus::Warn,
+        detail: format!(
+            "peer {identity} is Established eBGP with no effective inbound prefix bound; configure max_prefixes, max_prefixes_ipv4, max_prefixes_ipv6, max_prefixes_received_ipv4, or max_prefixes_received_ipv6 on the neighbor or its peer group"
+        ),
+    })
+}
+
 /// Most recent session-event timestamp per peer, for time-in-state.
 fn last_transition_by_peer(events: &[serde_json::Value]) -> HashMap<String, u64> {
     last_event_by_peer(events, |_| true)
@@ -2801,6 +2829,7 @@ async fn run_with_deadlines(
     let mut bundle = Bundle { files: Vec::new() };
     let mut sections: BTreeMap<&'static str, String> = BTreeMap::new();
     let mut daemon_version: Option<String> = None;
+    let mut local_asn = None;
     let mut state_dir: Option<String> = None;
     let mut effective_toml: Option<String> = None;
     let mut effective_config: Option<toml::Value> = None;
@@ -2916,6 +2945,7 @@ async fn run_with_deadlines(
             {
                 Ok(resp) => {
                     let global_state = resp.into_inner();
+                    local_asn = Some(global_state.asn);
                     tcp_ao_support = global_state.tcp_ao_support;
                     bundle.add_json(
                         "system/global.json",
@@ -3220,6 +3250,7 @@ async fn run_with_deadlines(
                                     &identity,
                                     &n.inbound_prefix_limits,
                                 ))
+                                .chain(inbound_prefix_bound_check(&identity, n, local_asn))
                         {
                             reporter.record(check.name, check.status, check.detail)?;
                         }
@@ -4353,6 +4384,99 @@ tcp_ao = { key = "<redacted>", send_id = 1, recv_id = 2, algorithm = "hmac(sha25
         );
         assert!(inbound_prefix_limit_checks("fe80::1%eth1", &[nonblocking]).is_empty());
         assert!(inbound_prefix_limit_checks("fe80::1%eth1", &[]).is_empty());
+    }
+
+    #[test]
+    fn inbound_prefix_bound_requires_fresh_established_ebgp_evidence() {
+        let peer = crate::proto::NeighborState {
+            config: Some(crate::proto::NeighborConfig {
+                remote_asn: 65002,
+                ..Default::default()
+            }),
+            state: crate::proto::SessionState::Established as i32,
+            ..Default::default()
+        };
+        let check = inbound_prefix_bound_check("fe80::1%eth0", &peer, Some(65001)).unwrap();
+        assert_eq!(check.name, "peer.fe80::1%eth0.inbound_prefix_bound");
+        assert_eq!(check.status, CheckStatus::Warn);
+        for key in [
+            "max_prefixes",
+            "max_prefixes_ipv4",
+            "max_prefixes_ipv6",
+            "max_prefixes_received_ipv4",
+            "max_prefixes_received_ipv6",
+        ] {
+            assert!(check.detail.contains(key), "{}", check.detail);
+        }
+        let json = json_report(
+            Path::new("bundle.tar.gz"),
+            false,
+            &[check],
+            &BTreeMap::new(),
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            json["checks"][0]["name"],
+            "peer.fe80::1%eth0.inbound_prefix_bound"
+        );
+        assert_eq!(json["checks"][0]["status"], "warn");
+        assert_eq!(json["ok"], true);
+
+        assert!(inbound_prefix_bound_check("fe80::1%eth0", &peer, None).is_none());
+        for case in 0..5 {
+            let mut skipped = peer.clone();
+            match case {
+                0 => skipped.config.as_mut().unwrap().remote_asn = 65001,
+                1 => skipped.route_reflector_client = true,
+                2 => skipped.stale = true,
+                3 => skipped.state = crate::proto::SessionState::Idle as i32,
+                4 => skipped.config = None,
+                _ => unreachable!(),
+            }
+            assert!(
+                inbound_prefix_bound_check("fe80::1%eth0", &skipped, Some(65001)).is_none(),
+                "case {case}"
+            );
+        }
+    }
+
+    #[test]
+    fn inbound_prefix_bound_accepts_every_effective_limit() {
+        let peer = crate::proto::NeighborState {
+            config: Some(crate::proto::NeighborConfig {
+                remote_asn: 65002,
+                ..Default::default()
+            }),
+            state: crate::proto::SessionState::Established as i32,
+            ..Default::default()
+        };
+        for scope in [
+            "aggregate",
+            "ipv4_unicast",
+            "ipv6_unicast",
+            "ipv4_unicast_received",
+            "ipv6_unicast_received",
+        ] {
+            let mut bounded = peer.clone();
+            bounded.inbound_prefix_limits = vec![crate::proto::InboundPrefixLimitState {
+                scope: scope.to_string(),
+                limit: 100,
+                ..Default::default()
+            }];
+            assert!(inbound_prefix_bound_check("10.0.0.2", &bounded, Some(65001)).is_none());
+        }
+        for case in 0..4 {
+            let mut bounded = peer.clone();
+            match case {
+                0 => bounded.effective_max_prefixes = Some(0),
+                1 => bounded.effective_max_prefixes_ipv4 = Some(100),
+                2 => bounded.effective_max_prefixes_ipv6 = Some(100),
+                3 => bounded.config.as_mut().unwrap().max_prefixes = 100,
+                _ => unreachable!(),
+            }
+            assert!(inbound_prefix_bound_check("10.0.0.2", &bounded, Some(65001)).is_none());
+        }
     }
 
     /// ADR-0112 doctor contract, all four dispositions in one place.
@@ -6674,6 +6798,100 @@ paths = ["x"]
                 && check["detail"]
                     .as_str()
                     .is_some_and(|detail| detail.contains("retained history shows a session loss"))
+        }));
+    }
+
+    #[tokio::test]
+    async fn doctor_warns_on_unbounded_ebgp_inventory_after_inheritance() {
+        let server = spawn_mock_server(None).await;
+        let state_dir = tempfile::tempdir().unwrap();
+        *server.state.config_effective_toml.lock().await = Some(format!(
+            "[global]\nasn = 65000\nruntime_state_dir = \"{}\"\n\
+             [peer_groups.members]\nmax_prefixes_received_ipv4 = 100\n\
+             [[neighbors]]\naddress = \"192.0.2.2\"\nremote_asn = 65000\n\
+             [[neighbors]]\naddress = \"192.0.2.4\"\nremote_asn = 65002\npeer_group = \"members\"\n",
+            state_dir.path().display()
+        ));
+        let mut peers: Vec<_> = [
+            "192.0.2.2",
+            "fe80::1",
+            "192.0.2.3",
+            "192.0.2.4",
+            "192.0.2.5",
+        ]
+        .into_iter()
+        .map(|address| {
+            neighbor(
+                address,
+                rustbgpd_api::proto::SessionState::Established as i32,
+                0,
+                "",
+            )
+        })
+        .collect();
+        // GetGlobal reports 65001; the effective TOML's 65000 must not classify this peer as iBGP.
+        peers[0].config.as_mut().unwrap().remote_asn = 65000;
+        // An API-added peer need not appear in the effective TOML inventory.
+        peers[1].config.as_mut().unwrap().interface = "eth0".to_string();
+        peers[2].is_dynamic = true;
+        // Only the peer group supplies this received-only bound; no legacy aggregate limit is set.
+        peers[3].config.as_mut().unwrap().peer_group = "members".to_string();
+        peers[3].inbound_prefix_limits = vec![rustbgpd_api::proto::InboundPrefixLimitState {
+            scope: "ipv4_unicast_received".to_string(),
+            limit: 100,
+            ..Default::default()
+        }];
+        peers[4].config.as_mut().unwrap().remote_asn = 65001;
+        for peer in &mut peers {
+            peer.update_group = "group:1".to_string();
+        }
+        *server.state.list_neighbors_response.lock().await = peers;
+        let output_dir = tempfile::tempdir().unwrap();
+        let (code, manifest) =
+            run_doctor(&server.addr, &output_dir.path().join("bundle.tar.gz"), None).await;
+
+        assert_eq!(code, 0, "missing inbound bounds are advisory");
+        for identity in ["192.0.2.2", "fe80::1%eth0", "192.0.2.3"] {
+            let check = manifest_check(&manifest, &format!("peer.{identity}.inbound_prefix_bound"));
+            assert_eq!(check["status"], "warn");
+            assert!(check["detail"].as_str().unwrap().contains(identity));
+        }
+        assert_eq!(
+            manifest["checks"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|check| check["name"]
+                    .as_str()
+                    .unwrap()
+                    .ends_with(".inbound_prefix_bound"))
+                .count(),
+            3
+        );
+        assert_eq!(server.state.global_calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn doctor_skips_inbound_prefix_bound_without_global_asn() {
+        let server = spawn_mock_server(None).await;
+        server
+            .state
+            .global_failures_remaining
+            .store(1, Ordering::SeqCst);
+        *server.state.list_neighbors_response.lock().await = vec![neighbor(
+            "192.0.2.2",
+            rustbgpd_api::proto::SessionState::Established as i32,
+            0,
+            "",
+        )];
+        let output_dir = tempfile::tempdir().unwrap();
+        let (_, manifest) =
+            run_doctor(&server.addr, &output_dir.path().join("bundle.tar.gz"), None).await;
+        assert!(!manifest["checks"].as_array().unwrap().iter().any(|check| {
+            check["name"]
+                .as_str()
+                .unwrap()
+                .ends_with(".inbound_prefix_bound")
         }));
     }
 

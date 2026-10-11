@@ -42,7 +42,7 @@ bash crates/evpn-linux/tests/docker/run-netns-tests.sh fib_runtime # ADR-0061 FI
 bash crates/evpn-linux/tests/docker/run-netns-tests.sh link_carrier # ADR-0085 carrier monitor
 bash crates/evpn-linux/tests/docker/run-netns-tests.sh ac_gate # AC-gate port-state round-trip
 bash crates/evpn-linux/tests/docker/run-netns-tests.sh nexthop_raw # all five raw nexthop tests
-bash crates/evpn-linux/tests/docker/run-netns-tests.sh foreign_state_l2 # L2 foreign takeover
+bash crates/evpn-linux/tests/docker/run-netns-tests.sh foreign_state_l2 # L2 foreign takeover and PVID-only siblings
 bash crates/evpn-linux/tests/docker/run-netns-tests.sh foreign_state_l2_dst # owned FDB destination drift repair
 bash crates/evpn-linux/tests/docker/run-netns-tests.sh foreign_state_nhid # reserved-NHID non-clobber
 bash crates/evpn-linux/tests/docker/run-netns-tests.sh foreign_state_l3 # L3 foreign takeover (VRF)
@@ -85,7 +85,7 @@ caches across runs.
 | `link_carrier` | `link_carrier_monitor_tracks_veth_carrier_transitions` | RTNLGRP_LINK carrier transitions |
 | `ac_gate` | `linux_dataplane_set_ac_port_state_round_trip` | AC-gate port state and flood-flag preservation |
 | `nexthop_raw` | `netns_nexthop_raw` | all five raw nexthop socket tests |
-| `foreign_state_l2` / `foreign_state_l2_dst` / `foreign_state_nhid` | exact `netns_foreign_state` L2/NHID tests | foreign takeover, owned destination drift repair, and reserved-NHID non-clobber |
+| `foreign_state_l2` / `foreign_state_l2_dst` / `foreign_state_nhid` | `netns_foreign_state` L2/NHID tests | foreign takeover, PVID-only sibling preservation and stale-plan checks, owned destination drift repair, and reserved-NHID non-clobber |
 | `foreign_state_l3` / `l3_route_event` | exact VRF-dependent tests | L3 foreign takeover and route-event wake latency |
 | `dataplane_vlan_fdb` | `linux_dataplane_programs_vlan_scoped_remote_mac_add_remove` | ADR-0089 VLAN-scoped single-dst FDB add/remove and scoped delete |
 | `peer_sync_local_fdb` | `linux_dataplane_peer_sync_local_fdb_forwards_with_flood_off` | Peer-sync local ES forwarding with flood off, VLAN isolation and foreign-row preservation |

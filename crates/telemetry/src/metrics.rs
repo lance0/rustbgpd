@@ -621,6 +621,7 @@ struct BgpMetricsInner {
     outbound_prefix_headroom: IntGaugeVec,
     outbound_prefix_blocking: IntGaugeVec,
     outbound_prefix_blocked: IntCounterVec,
+    orf_capacity_rejections: IntCounterVec,
 
     // ── RIB drops ───────────────────────────────────────────────
     outbound_route_drops: IntCounterVec,
@@ -1465,6 +1466,15 @@ impl BgpMetrics {
             Opts::new(
                 "bgp_outbound_prefix_blocked_total",
                 "Net-new prefixes dropped from a peer's outbound vector by its configured maximum.",
+            ),
+            &["peer", "family"],
+        )
+        .expect("valid metric definition");
+
+        let orf_capacity_rejections = IntCounterVec::new(
+            Opts::new(
+                "bgp_orf_capacity_rejections_total",
+                "Address-Prefix ORF updates rejected because an ADD would exceed the per-peer family entry cap; the installed filter is retained.",
             ),
             &["peer", "family"],
         )
@@ -3016,6 +3026,9 @@ impl BgpMetrics {
             .register(Box::new(outbound_prefix_blocked.clone()))
             .expect("metric not already registered");
         registry
+            .register(Box::new(orf_capacity_rejections.clone()))
+            .expect("metric not already registered");
+        registry
             .register(Box::new(outbound_route_drops.clone()))
             .expect("metric not already registered");
         registry
@@ -3542,6 +3555,7 @@ impl BgpMetrics {
             outbound_prefix_headroom,
             outbound_prefix_blocking,
             outbound_prefix_blocked,
+            orf_capacity_rejections,
             outbound_route_drops,
             inbound_rib_backpressure,
             hold_timer_rearmed_pending_input,
@@ -3832,6 +3846,7 @@ impl BgpMetrics {
         Self::reap_peer_series_from_vec(&self.0.outbound_prefix_headroom, peer);
         Self::reap_peer_series_from_vec(&self.0.outbound_prefix_blocking, peer);
         Self::reap_peer_series_from_vec(&self.0.outbound_prefix_blocked, peer);
+        Self::reap_peer_series_from_vec(&self.0.orf_capacity_rejections, peer);
         Self::reap_peer_series_from_vec(&self.0.outbound_route_drops, peer);
         Self::reap_peer_series_from_vec(&self.0.rib_outbound_registration_replaced, peer);
         Self::reap_peer_series_from_vec(&self.0.rib_stale_peer_down_ignored, peer);
@@ -4883,6 +4898,15 @@ impl BgpMetrics {
         Self::reap_peer_series_from_vec(&self.0.outbound_prefix_limit, peer);
         Self::reap_peer_series_from_vec(&self.0.outbound_prefix_headroom, peer);
         Self::reap_peer_series_from_vec(&self.0.outbound_prefix_blocking, peer);
+    }
+
+    /// Record a rejected ORF update, preserving the installed family filter.
+    pub fn record_orf_capacity_rejection(&self, peer: &str, family: &str) {
+        debug_assert!(matches!(family, "ipv4_unicast" | "ipv6_unicast"));
+        self.0
+            .orf_capacity_rejections
+            .with_label_values(&[peer, family])
+            .inc();
     }
 
     /// Record an outbound route update drop for a peer.
@@ -9496,6 +9520,7 @@ mod tests {
         m.set_max_prefix_capacity(peer, "aggregate", 80, Some(100));
         m.set_outbound_prefix_capacity(peer, "ipv4_unicast", 5, Some(8), true);
         m.record_outbound_prefix_blocked(peer, "ipv4_unicast", 2);
+        m.record_orf_capacity_rejection(peer, "ipv4_unicast");
         m.record_max_prefix_exceeded(peer);
         m.record_outbound_route_drop(peer);
         m.record_inbound_rib_backpressure(peer);
@@ -9570,10 +9595,10 @@ mod tests {
         let m = BgpMetrics::new();
         populate_all_peer_families(&m, "10.0.0.1");
         populate_all_peer_families(&m, "10.0.0.2");
-        // 74 peer-labeled series; state transitions and EVPN discard types
+        // 75 peer-labeled series; state transitions and EVPN discard types
         // hold two each, while exact
         // state and down-reason vocabularies materialize six rows each.
-        assert_eq!(series_for_peer(&m, "10.0.0.1").len(), 74);
+        assert_eq!(series_for_peer(&m, "10.0.0.1").len(), 75);
 
         m.reap_peer_series("10.0.0.1");
 
@@ -9583,7 +9608,7 @@ mod tests {
             "peer-labeled families not reaped: {leftovers:?}"
         );
         // The other peer's series are untouched.
-        assert_eq!(series_for_peer(&m, "10.0.0.2").len(), 74);
+        assert_eq!(series_for_peer(&m, "10.0.0.2").len(), 75);
     }
 
     /// Load-bearing finite/unlimited proof: removing either finite gauge
@@ -9757,6 +9782,23 @@ mod tests {
     }
 
     #[test]
+    fn orf_capacity_counter_has_bounded_family_labels_and_is_reaped() {
+        let m = BgpMetrics::new();
+        m.record_orf_capacity_rejection("10.0.0.1", "ipv4_unicast");
+        m.record_orf_capacity_rejection("10.0.0.1", "ipv6_unicast");
+        m.record_orf_capacity_rejection("10.0.0.2", "ipv4_unicast");
+        assert!(gather_text(&m).contains(
+            "bgp_orf_capacity_rejections_total{family=\"ipv6_unicast\",peer=\"10.0.0.1\"} 1"
+        ));
+        m.reap_peer_series("10.0.0.1");
+        let text = gather_text(&m);
+        assert!(!text.contains("10.0.0.1"));
+        assert!(text.contains(
+            "bgp_orf_capacity_rejections_total{family=\"ipv4_unicast\",peer=\"10.0.0.2\"} 1"
+        ));
+    }
+
+    #[test]
     fn reap_peer_series_without_series_is_noop() {
         let m = BgpMetrics::new();
         // Nothing recorded at all — must not panic.
@@ -9852,7 +9894,7 @@ mod tests {
     // `gather()`, so no runtime check can catch one that is added and
     // left unpopulated; this list plus the struct doc comment is the
     // practical ceiling.
-    const PEER_LABELED_FAMILIES: [&str; 62] = [
+    const PEER_LABELED_FAMILIES: [&str; 63] = [
         "bfd_session_flaps_total",
         "bfd_session_up",
         "bgp_as_path_loop_detected_total",
@@ -9876,6 +9918,7 @@ mod tests {
         "bgp_messages_sent_total",
         "bgp_notifications_received_total",
         "bgp_notifications_sent_total",
+        "bgp_orf_capacity_rejections_total",
         "bgp_otc_routes_blocked_total",
         "bgp_outbound_prefix_blocked_total",
         "bgp_outbound_prefix_blocking",

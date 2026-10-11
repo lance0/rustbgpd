@@ -55,12 +55,9 @@ pub enum DataplaneError {
     PermissionDenied(String),
 
     /// An FDB operation conflicts with an existing local or foreign row
-    /// for the same `(VNI, MAC)`. The Linux peer-sync apply guard rechecks
-    /// current ownership before mutation; the [`InMemoryDataplane`] fake
-    /// uses the same classification for conflicting test state.
-    ///
-    /// [`InMemoryDataplane`]: crate::InMemoryDataplane
-    #[error("MAC {mac} in VNI {vni} conflicts with kernel-learned local entry")]
+    /// in its `(VNI, MAC, VLAN)` scope. Unscoped bridge operations
+    /// also affect VLAN siblings; the apply path preserves them and retries.
+    #[error("MAC {mac} in VNI {vni} conflicts with an existing local or foreign FDB entry")]
     LocalMacConflict {
         /// Affected VNI.
         vni: EvpnInstanceId,

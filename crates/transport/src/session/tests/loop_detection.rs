@@ -1091,3 +1091,43 @@ async fn as_path_loop_counter_counts_evpn_announcements() {
         "every loop-discarded EVPN route must be counted"
     );
 }
+
+/// The counter uses the same seven-vector `MP_REACH` count as RFC 7606 §5.2.
+#[tokio::test]
+async fn as_path_loop_counter_counts_labeled_rtc_and_bgpls_announcements() {
+    let mut labeled = empty_nonunicast_reach(
+        Afi::Ipv4,
+        Safi::LabeledUnicast,
+        IpAddr::V4(Ipv4Addr::new(192, 0, 2, 8)),
+    );
+    labeled.labeled_announced = vec![rustbgpd_wire::LabeledNlriEntry {
+        path_id: 0,
+        nlri: rustbgpd_wire::LabeledNlri {
+            labels: vec![MplsLabelEntry::try_new(4092, 0, true).unwrap()],
+            prefix: Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24)),
+        },
+    }];
+
+    let mut rtc = empty_nonunicast_reach(
+        Afi::Ipv4,
+        Safi::RtConstrain,
+        IpAddr::V4(Ipv4Addr::new(192, 0, 2, 9)),
+    );
+    rtc.rtc_announced =
+        vec![rustbgpd_wire::RtcNlri::new(65002, 0x0002_fdea_0000_0001, 96).unwrap()];
+
+    let mut bgpls = empty_nonunicast_reach(
+        Afi::BgpLs,
+        Safi::BgpLs,
+        IpAddr::V4(Ipv4Addr::new(192, 0, 2, 10)),
+    );
+    bgpls.bgpls_announced = decode_bgpls_nlri(&[0xfd, 0xe8, 0, 3, 0xaa, 0xbb, 1]).unwrap();
+
+    for (family, reach) in [("labeled", labeled), ("rtc", rtc), ("bgpls", bgpls)] {
+        assert_eq!(
+            as_path_loop_count_for(reach).await,
+            1,
+            "{family} announcement must increment the loop counter"
+        );
+    }
+}

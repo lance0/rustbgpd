@@ -172,7 +172,7 @@ This is the "MRT reader / monitor / analyzer" consumer. Links only
 ```toml
 # Cargo.toml
 [dependencies]
-rustbgpd-wire = "0.23.0"
+rustbgpd-wire = "0.24.0"
 bytes = "1"
 ```
 
@@ -232,8 +232,8 @@ intentional split (ADR-0005: pure state machine, no I/O in the FSM).
 ```toml
 # Cargo.toml
 [dependencies]
-rustbgpd-wire = "0.23.0"
-rustbgpd-fsm = "0.10.0"
+rustbgpd-wire = "0.24.0"
+rustbgpd-fsm = "0.11.0"
 bytes = "1"
 tokio = { version = "1", features = ["net", "io-util", "time", "rt"] }
 ```
@@ -297,8 +297,8 @@ verified published versions in §7.
 ```toml
 # Cargo.toml
 [dependencies]
-rustbgpd-rpki = "0.5.0"
-rustbgpd-wire = "0.23.0"
+rustbgpd-rpki = "0.6.0"
+rustbgpd-wire = "0.24.0"
 ```
 
 ```rust
@@ -663,13 +663,13 @@ The working-tree column comes from the crate manifests and may run ahead
 during preparation or a partial publication. An unchanged published column
 does not mean no newer individual crate exists on the registry.
 
-The prepared wire 0.24 / FSM 0.11 / RPKI 0.6 set adds an
+The wire 0.24 / FSM 0.11 / RPKI 0.6 set adds an
 `UpdateValidationOptions::link_local_next_hop` field and marks the struct
 `#[non_exhaustive]`. Build it from `UpdateValidationOptions::default()` and
 assign fields instead of using a struct literal; the default preserves existing
 validation. Opting in requires
 interface scope and negotiated capability context; see the
-[0.24 compatibility note](../../crates/wire/README.md#0240-compatibility-note-prepared).
+[0.24 compatibility note](../../crates/wire/README.md#0240-compatibility-note).
 This source break is separate from the additive non-exhaustive capability variant.
 The same set also changes `RtcNlri::matches` behaviour: it compares only the
 route-target bits after the membership's origin AS (RFC 4684 §4 and §6), so a
@@ -681,9 +681,9 @@ changelogs carry the detail.
 <!-- published-crate-versions:start -->
 | Crate | Published examples | Working tree |
 |---|---|---|
-| `rustbgpd-wire` | `0.23.0` | `0.24.0` |
-| `rustbgpd-fsm` | `0.10.0` | `0.11.0` |
-| `rustbgpd-rpki` | `0.5.0` | `0.6.0` |
+| `rustbgpd-wire` | `0.24.0` | `0.24.0` |
+| `rustbgpd-fsm` | `0.11.0` | `0.11.0` |
+| `rustbgpd-rpki` | `0.6.0` | `0.6.0` |
 <!-- published-crate-versions:end -->
 
 After changing manifests, run `python3 scripts/check_embedding_versions.py --write`

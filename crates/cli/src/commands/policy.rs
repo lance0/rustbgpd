@@ -695,19 +695,38 @@ pub fn fmt_local(files: &[String], check: bool) -> i32 {
     i32::from(failed)
 }
 
-/// Atomic in-place rewrite: write a sibling temp file, carry over the
-/// original's permissions, and rename over the target — a crash never
-/// leaves a truncated policy file. Failures name the destination path
-/// (the daemon's `write_atomic` discipline, CLI-side).
+/// Rewrite through a unique sibling file, preserving permissions, syncing
+/// the payload before rename and the parent directory afterward. Pre-rename
+/// failures remove the temp; a directory-sync failure can report an error
+/// after the target has been replaced. Errors name the destination path.
 fn write_atomic(path: &std::path::Path, text: &str) -> std::io::Result<()> {
+    use std::io::Write;
+
     let inner = || -> std::io::Result<()> {
-        let mut tmp = path.as_os_str().to_os_string();
-        tmp.push(".tmp");
-        let tmp = std::path::PathBuf::from(tmp);
         let permissions = std::fs::metadata(path)?.permissions();
-        std::fs::write(&tmp, text)?;
-        std::fs::set_permissions(&tmp, permissions)?;
-        std::fs::rename(&tmp, path)
+        let parent = path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .unwrap_or_else(|| std::path::Path::new("."));
+        let directory = std::fs::File::open(parent)?;
+        let (tmp, mut file) = create_policy_stage(parent)?;
+        let result = (|| -> std::io::Result<()> {
+            file.write_all(text.as_bytes())?;
+            // Restore the original mode after writes, which can clear set-ID bits.
+            file.set_permissions(permissions)?;
+            file.sync_all()?;
+            std::fs::rename(&tmp, path)
+        })();
+        if result.is_err() {
+            let _ = std::fs::remove_file(&tmp);
+        }
+        result?;
+        directory.sync_all().map_err(|error| {
+            std::io::Error::new(
+                error.kind(),
+                format!("replacement published but parent directory sync failed: {error}"),
+            )
+        })
     };
     inner().map_err(|error| {
         std::io::Error::new(
@@ -715,6 +734,35 @@ fn write_atomic(path: &std::path::Path, text: &str) -> std::io::Result<()> {
             format!("failed to write {}: {error}", path.display()),
         )
     })
+}
+
+/// Reserve a unique sibling; on Unix, create it with mode 0600.
+fn create_policy_stage(
+    parent: &std::path::Path,
+) -> std::io::Result<(std::path::PathBuf, std::fs::File)> {
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    loop {
+        let sequence = TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+        let tmp = parent.join(format!(
+            ".rbgp-policy-fmt.{}.{sequence}.tmp",
+            std::process::id()
+        ));
+        match options.open(&tmp) {
+            Ok(file) => return Ok((tmp, file)),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(error),
+        }
+    }
 }
 
 /// Minimal line diff (`-` old / `+` new, `@ line N` hunk markers) for
@@ -3911,8 +3959,16 @@ mod tests {
     #[test]
     fn fmt_local_rewrites_in_place_and_is_idempotent() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("p.rpol");
+        let name = "p.rpol";
+        let path = dir.path().join(name);
         std::fs::write(&path, "policy p{term t{if route.rpki==invalid{reject}}}").unwrap();
+        let old_temp = dir.path().join(format!("{name}.tmp"));
+        std::fs::write(&old_temp, "another writer's stage").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o2640)).unwrap();
+        }
         let files = vec![path.to_str().unwrap().to_string()];
         assert_eq!(fmt_local(&files, false), 0);
         let formatted = std::fs::read_to_string(&path).unwrap();
@@ -3920,15 +3976,95 @@ mod tests {
             formatted,
             "policy p {\n    term t { if route.rpki == invalid { reject } }\n}\n"
         );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                std::fs::metadata(&path).unwrap().permissions().mode() & 0o7777,
+                0o2640
+            );
+        }
         // Idempotent: nothing further to rewrite, and --check agrees.
         assert_eq!(fmt_local(&files, false), 0);
         assert_eq!(std::fs::read_to_string(&path).unwrap(), formatted);
         assert_eq!(fmt_local(&files, true), 0);
-        // No temp residue from the atomic write.
-        assert!(!dir.path().join("p.rpol.tmp").exists());
+        assert_eq!(
+            std::fs::read_to_string(old_temp).unwrap(),
+            "another writer's stage"
+        );
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 2);
         assert_eq!(
             check_local(&files[0], &[], false, false, None, None, None, false),
             0
+        );
+    }
+
+    #[test]
+    fn write_atomic_removes_temp_when_rename_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("p.rpol");
+        // A directory destination forces rename to fail after the payload was staged.
+        std::fs::create_dir(&path).unwrap();
+        let original = path.join("original");
+        std::fs::write(&original, "keep this").unwrap();
+
+        let error = write_atomic(&path, "replacement").unwrap_err();
+        assert!(error.to_string().contains("failed to write"));
+        assert!(path.is_dir());
+        assert_eq!(std::fs::read_to_string(original).unwrap(), "keep this");
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn fmt_local_accepts_max_length_filename() {
+        let dir = tempfile::tempdir().unwrap();
+        // The target fits NAME_MAX=255; appending the former `.tmp` suffix does not.
+        let name = format!("{}.rpol", "p".repeat(250));
+        let path = dir.path().join(name);
+        std::fs::write(&path, "policy p{term t{accept}}").unwrap();
+        let files = vec![path.to_str().unwrap().to_string()];
+
+        assert_eq!(fmt_local(&files, false), 0);
+        assert_eq!(
+            std::fs::read_to_string(path).unwrap(),
+            "policy p {\n    term t { accept }\n}\n"
+        );
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn policy_stage_is_private_with_permissive_umask() {
+        use std::os::unix::fs::PermissionsExt;
+
+        const CHILD_ENV: &str = "RUSTBGPD_POLICY_STAGE_UMASK_CHILD";
+        if std::env::var_os(CHILD_ENV).is_none() {
+            // Isolate the process-wide umask from tests running on other threads.
+            let output = std::process::Command::new("sh")
+                .args([
+                    "-c",
+                    "umask 0; exec \"$1\" --exact commands::policy::tests::policy_stage_is_private_with_permissive_umask --nocapture",
+                    "policy-stage-test",
+                ])
+                .arg(std::env::current_exe().unwrap())
+                .env(CHILD_ENV, "1")
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "private-stage subprocess failed:\n{}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let (path, file) = create_policy_stage(dir.path()).unwrap();
+        assert_eq!(file.metadata().unwrap().permissions().mode() & 0o777, 0o600);
+        assert_eq!(
+            std::fs::metadata(path).unwrap().permissions().mode() & 0o777,
+            0o600
         );
     }
 

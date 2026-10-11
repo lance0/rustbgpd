@@ -1676,28 +1676,71 @@ impl RibManager {
         });
         explanation
     }
+
+    /// Apply the live unicast commit gates after the staging dry run.
+    fn apply_unicast_export_overlays_to_explain(
+        &self,
+        peer: IpAddr,
+        explanation: ExplainAdvertisedRoute,
+    ) -> ExplainAdvertisedRoute {
+        let mut explanation = self.apply_exact_export_overlay_to_explain(
+            peer,
+            &ExactExportKey::Unicast(explanation.prefix, explanation.path_id),
+            explanation,
+        );
+        if explanation.decision != crate::update::ExplainDecision::Advertise {
+            return explanation;
+        }
+        let afi = prefix_family(&explanation.prefix).0;
+        let Some(limits) = self.outbound_prefix_limits.get(&peer) else {
+            return explanation;
+        };
+        let Some(limit) = limits.family(afi).and_then(|family| family.limit) else {
+            return explanation;
+        };
+        let grouped = self.grouped_member_of(peer).is_some();
+        let admitted = if grouped {
+            limits.grouped_contains(&explanation.prefix)
+        } else {
+            self.adj_ribs_out
+                .get(&peer)
+                .is_some_and(|rib| rib.iter_prefix(&explanation.prefix).next().is_some())
+        };
+        let usage = self.outbound_family_usage(peer, afi, grouped);
+        if admitted || usage < usize::try_from(limit.get()).unwrap_or(usize::MAX) {
+            return explanation;
+        }
+
+        let detail = format!(
+            "{} outbound prefix limit reached for peer {peer}: limit {limit}, usage {usage}",
+            super::outbound_prefix_limits::family_label(afi)
+        );
+        explanation.decision = crate::update::ExplainDecision::Deny;
+        explanation.already_advertised = false;
+        explanation.reasons = vec![crate::update::ExplainReason {
+            code: crate::update::OUTBOUND_PREFIX_LIMIT_REACHED,
+            message: detail.clone(),
+        }];
+        explanation.gates.push(crate::update::ExportGateStep {
+            gate: "outbound_prefix_limit",
+            code: crate::update::OUTBOUND_PREFIX_LIMIT_REACHED,
+            verdict: crate::update::ExportGateVerdict::Stop,
+            detail,
+        });
+        explanation
+    }
+
     /// Materialize the member-specific wire view used to explain a grouped
     /// unicast export — `adv(m)` per staged key (ADR-0126 Decision 4): the
     /// staged entry minus own-sourced slots, with the exception-lane
     /// runner-up substituting at an own-sourced slot of a per-client-best
-    /// group. Rejected rows remain absent until an exact encoder accepts
-    /// them again, just as they do in live group projections (the
-    /// substitution shares the staged slot's key, so the member-local
-    /// rejection overlay applies identically).
+    /// group. The shared advertised iterator applies the member's OTC
+    /// backstop, exact-export rejections and outbound capacity admission,
+    /// so this view agrees with the advertised listing.
     fn grouped_unicast_explain_view(&self, peer: IpAddr) -> Option<AdjRibOut> {
-        let group = self
-            .grouped_member_of(peer)
-            .and_then(|gid| self.group_ribs.get(&gid))?;
-        let rejected = self.peer_unexportable.get(&peer);
         let mut view = AdjRibOut::new(peer);
-        for staged in group.table.iter() {
-            let key = ExactExportKey::Unicast(staged.prefix, staged.path_id);
-            if rejected.is_some_and(|keys| keys.contains(&key)) {
-                continue;
-            }
-            if let Some(entry) = group.adv_entry(peer, &staged.prefix, staged.path_id) {
-                view.insert(entry.route.clone());
-            }
+        for route in self.grouped_advertised_routes_iter(peer)? {
+            view.insert(route.clone());
         }
         Some(view)
     }
@@ -1707,8 +1750,8 @@ impl RibManager {
     /// AND update-grouped — this dry-runs the very staging body live
     /// distribution executes (`distribute_single_best_prefix`) with an
     /// explain-only `ExportTarget` that records the gate ladder and
-    /// counts nothing; a grouped member is explained against its group
-    /// table (its real advertised state) with split horizon applied
+    /// counts nothing; a grouped member is explained against its own
+    /// admitted advertised view with split horizon applied
     /// against the member, exactly like the source-flip matrix does at
     /// emit time. ORR-vantage, Add-Path-send, and per-client-best peers
     /// take the dedicated explain that shares its candidate collection
@@ -1804,11 +1847,7 @@ impl RibManager {
                 source,
             );
             explanation.update_group_id = member_of.map(|gid| gid as u64);
-            return self.apply_exact_export_overlay_to_explain(
-                peer,
-                &ExactExportKey::Unicast(prefix, explanation.path_id),
-                explanation,
-            );
+            return self.apply_unicast_export_overlays_to_explain(peer, explanation);
         }
 
         // Dry run of the live single-best staging body against the
@@ -1854,11 +1893,7 @@ impl RibManager {
             false,
         );
         let explanation = trace.into_explain(peer, prefix, None, member_of.map(|gid| gid as u64));
-        self.apply_exact_export_overlay_to_explain(
-            peer,
-            &ExactExportKey::Unicast(prefix, explanation.path_id),
-            explanation,
-        )
+        self.apply_unicast_export_overlays_to_explain(peer, explanation)
     }
     /// Explain the VPNv4/VPNv6 (SAFI 128) export ladder for
     /// `(rd, prefix, peer)` by dry-running the live VPN staging body

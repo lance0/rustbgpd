@@ -1593,37 +1593,29 @@ pub(crate) async fn run_config_bridge_accepted(
                             continue;
                             }
                         };
-                        if let Some(ack) = event_ack {
-                            match persist_acknowledged(&mutation_tx, Arc::clone(&candidate), ack).await {
-                                AckedPersistOutcome::Settled { outcome, reply } => {
-                                    // The candidate is on disk; adopt it as the bridge snapshot.
-                                    if matches!(
-                                        outcome,
-                                        ConfigPersistCommitOutcome::PublishedDurable
-                                            | ConfigPersistCommitOutcome::PublicationAmbiguous(_)
-                                    ) {
-                                        current = candidate;
-                                        accepted_tx.send_replace(Arc::clone(&current));
-                                    }
-                                    // Both bridge and persister authority are
-                                    // updated before the owner can observe the
-                                    // terminal publication result.
-                                    let _ = reply.send(outcome);
+                        let Some(ack) = event_ack else {
+                            error!("dropping config event without persistence acknowledgement");
+                            continue;
+                        };
+                        match persist_acknowledged(&mutation_tx, Arc::clone(&candidate), ack).await {
+                            AckedPersistOutcome::Settled { outcome, reply } => {
+                                // The candidate is on disk; adopt it as the bridge snapshot.
+                                if matches!(
+                                    outcome,
+                                    ConfigPersistCommitOutcome::PublishedDurable
+                                        | ConfigPersistCommitOutcome::PublicationAmbiguous(_)
+                                ) {
+                                    current = candidate;
+                                    accepted_tx.send_replace(Arc::clone(&current));
                                 }
-                                // Nothing was written; keep the previous snapshot.
-                                AckedPersistOutcome::Rejected => {}
-                                AckedPersistOutcome::PersisterLost => break,
+                                // Both bridge and persister authority are
+                                // updated before the owner can observe the
+                                // terminal publication result.
+                                let _ = reply.send(outcome);
                             }
-                        } else {
-                            if mutation_tx
-                                .send(ConfigMutation::ReplaceConfig(Arc::clone(&candidate)))
-                                .await
-                                .is_err()
-                            {
-                                break;
-                            }
-                            current = candidate;
-                            accepted_tx.send_replace(Arc::clone(&current));
+                            // Nothing was written; keep the previous snapshot.
+                            AckedPersistOutcome::Rejected => {}
+                            AckedPersistOutcome::PersisterLost => break,
                         }
                     }
                     None => event_rx_open = false,
@@ -11223,7 +11215,7 @@ peer_group = "secure"
     /// would destroy an operator's edit-then-restart TOML.
     /// This test drives the bridge directly: send a snapshot
     /// replacement, then a `ConfigEvent` that adds a named policy,
-    /// and assert the resulting persisted `ReplaceConfig` was computed
+    /// and assert the resulting persisted `ReplaceConfigAck` was computed
     /// against the *replacement* base — i.e. the bridge's internal
     /// snapshot was successfully swapped.
     #[tokio::test]
@@ -11292,8 +11284,9 @@ peer_group = "secure"
         ));
         // Then a gRPC mutation that adds a policy definition. If the
         // bridge missed the swap, this would compute against `stale`
-        // and the resulting ReplaceConfig wouldn't carry the new
+        // and the resulting ReplaceConfigAck wouldn't carry the new
         // peer_groups.upstream entry.
+        let (ack_tx, ack_rx) = oneshot::channel();
         event_tx
             .send(ConfigEvent::SetPolicy {
                 name: "block-private".to_string(),
@@ -11301,7 +11294,7 @@ peer_group = "secure"
                     default_action: "deny".to_string(),
                     statements: Vec::new(),
                 },
-                ack: None,
+                ack: Some(ConfigPersistAck::immediate(ack_tx)),
             })
             .await
             .unwrap();
@@ -11315,8 +11308,8 @@ peer_group = "secure"
             .await
             .expect("bridge should forward event to persister")
             .expect("event forwarded");
-        let ConfigMutation::ReplaceConfig(received_event) = event_msg else {
-            panic!("bridge must forward event-derived snapshot as ReplaceConfig");
+        let ConfigMutation::ReplaceConfigAck(received_event, persist_ack) = event_msg else {
+            panic!("bridge must forward event-derived snapshot as ReplaceConfigAck");
         };
         assert!(
             received_event.peer_groups.contains_key("upstream"),
@@ -11330,6 +11323,11 @@ peer_group = "secure"
                 .contains_key("block-private"),
             "post-event snapshot must carry the event-applied policy"
         );
+        let _ = persist_ack.send(ConfigPersistCommitOutcome::PublishedDurable);
+        assert_eq!(
+            ack_rx.await.unwrap(),
+            ConfigPersistCommitOutcome::PublishedDurable
+        );
 
         drop(replace_tx);
         drop(event_tx);
@@ -11337,6 +11335,74 @@ peer_group = "secure"
             .await
             .expect("bridge should exit after both inputs close")
             .unwrap();
+    }
+
+    #[tokio::test]
+    async fn config_bridge_drops_event_without_persistence_ack() {
+        use rustbgpd_api::peer_types::{ConfigEvent, NamedPolicyDefinition};
+        use tokio::time::{Duration, timeout};
+
+        let path = unique_temp_path("bridge-unacked-event");
+        std::fs::write(&path, baseline_toml()).unwrap();
+        let initial_config = Config::load_with_diagnostics(path.to_str().unwrap()).unwrap();
+        std::fs::remove_file(&path).ok();
+        let initial = AcceptedConfigSnapshot::from_config_for_test(initial_config);
+        let (event_tx, event_rx) = mpsc::channel(2);
+        let (replace_tx, replace_rx) = mpsc::channel(1);
+        let (mutation_tx, mut mutation_rx) = mpsc::channel(2);
+        let (accepted_tx, accepted_rx) = watch::channel(Arc::clone(&initial));
+        let bridge = tokio::spawn(run_config_bridge_accepted(
+            event_rx,
+            replace_rx,
+            mutation_tx,
+            accepted_tx,
+        ));
+        let definition = NamedPolicyDefinition {
+            default_action: "deny".to_string(),
+            statements: Vec::new(),
+        };
+        event_tx
+            .send(ConfigEvent::SetPolicy {
+                name: "unacknowledged".to_string(),
+                definition: definition.clone(),
+                ack: None,
+            })
+            .await
+            .unwrap();
+        let (ack_tx, ack_rx) = oneshot::channel();
+        event_tx
+            .send(ConfigEvent::SetPolicy {
+                name: "acknowledged".to_string(),
+                definition,
+                ack: Some(ConfigPersistAck::immediate(ack_tx)),
+            })
+            .await
+            .unwrap();
+
+        let mutation = timeout(Duration::from_secs(1), mutation_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        let ConfigMutation::ReplaceConfigAck(candidate, persist_ack) = mutation else {
+            panic!("only the acknowledged event may reach the persister");
+        };
+        assert!(candidate.policy.definitions.contains_key("acknowledged"));
+        assert!(!candidate.policy.definitions.contains_key("unacknowledged"));
+        assert!(Arc::ptr_eq(&accepted_rx.borrow(), &initial));
+        let _ = persist_ack.send(ConfigPersistCommitOutcome::PublishedDurable);
+        assert_eq!(
+            ack_rx.await.unwrap(),
+            ConfigPersistCommitOutcome::PublishedDurable
+        );
+        assert!(Arc::ptr_eq(&accepted_rx.borrow(), &candidate));
+
+        drop(event_tx);
+        drop(replace_tx);
+        timeout(Duration::from_secs(1), bridge)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(mutation_rx.try_recv().is_err());
     }
 
     #[tokio::test]
@@ -11849,13 +11915,14 @@ remote_asn = 65002
             ConfigPersistCommitOutcome::NotPublished(ref error) if error == "disk full"
         ));
 
+        let (second_ack_tx, second_ack_rx) = oneshot::channel();
         event_tx
             .send(ConfigEvent::NeighborDeleted {
                 peer: rustbgpd_api::peer_types::PeerKey {
                     address: "10.0.0.2".parse().unwrap(),
                     interface: None,
                 },
-                ack: None,
+                ack: Some(ConfigPersistAck::immediate(second_ack_tx)),
             })
             .await
             .unwrap();
@@ -11863,8 +11930,9 @@ remote_asn = 65002
             .await
             .expect("bridge should forward second event")
             .expect("event forwarded");
-        let ConfigMutation::ReplaceConfig(second_candidate) = second_msg else {
-            panic!("non-acked event should request normal persist");
+        let ConfigMutation::ReplaceConfigAck(second_candidate, second_persist_ack) = second_msg
+        else {
+            panic!("second event should request acknowledged persist");
         };
         assert!(
             second_candidate
@@ -11872,6 +11940,11 @@ remote_asn = 65002
                 .iter()
                 .all(|neighbor| neighbor.address != "10.0.0.9"),
             "failed acked event must not remain in bridge snapshot"
+        );
+        let _ = second_persist_ack.send(ConfigPersistCommitOutcome::PublishedDurable);
+        assert_eq!(
+            second_ack_rx.await.unwrap(),
+            ConfigPersistCommitOutcome::PublishedDurable
         );
 
         drop(replace_tx);
@@ -12001,13 +12074,14 @@ remote_asn = 65002
             ConfigPersistCommitOutcome::NotPublished(ref error) if error == "disk full"
         ));
 
+        let (second_ack_tx, second_ack_rx) = oneshot::channel();
         event_tx
             .send(ConfigEvent::DynamicNeighborAdded {
                 prefix: "192.0.3.0/24".to_string(),
                 peer_group: "fabric".to_string(),
                 remote_asn: 65003,
                 description: None,
-                ack: None,
+                ack: Some(ConfigPersistAck::immediate(second_ack_tx)),
             })
             .await
             .unwrap();
@@ -12015,8 +12089,9 @@ remote_asn = 65002
             .await
             .expect("bridge should forward second event")
             .expect("event forwarded");
-        let ConfigMutation::ReplaceConfig(second_candidate) = second_msg else {
-            panic!("non-acked event should request normal persist");
+        let ConfigMutation::ReplaceConfigAck(second_candidate, second_persist_ack) = second_msg
+        else {
+            panic!("second event should request acknowledged persist");
         };
         assert_eq!(
             second_candidate.dynamic_neighbors.len(),
@@ -12024,6 +12099,11 @@ remote_asn = 65002
             "failed acked event must not remain in bridge snapshot"
         );
         assert_eq!(second_candidate.dynamic_neighbors[0].prefix, "192.0.3.0/24");
+        let _ = second_persist_ack.send(ConfigPersistCommitOutcome::PublishedDurable);
+        assert_eq!(
+            second_ack_rx.await.unwrap(),
+            ConfigPersistCommitOutcome::PublishedDurable
+        );
 
         drop(replace_tx);
         drop(event_tx);
@@ -12098,6 +12178,7 @@ remote_asn = 65002
             ReloadDispatch::Replied(())
         ));
 
+        let (ack_tx, _ack_rx) = oneshot::channel();
         event_tx
             .send(ConfigEvent::SetPolicy {
                 name: "after-reload".to_string(),
@@ -12105,7 +12186,7 @@ remote_asn = 65002
                     default_action: "deny".to_string(),
                     statements: Vec::new(),
                 },
-                ack: None,
+                ack: Some(ConfigPersistAck::immediate(ack_tx)),
             })
             .await
             .unwrap();

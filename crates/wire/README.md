@@ -16,18 +16,18 @@ Requires Rust 1.95 or newer.
 
 Release-by-release crate changes are recorded in the [changelog](CHANGELOG.md).
 
-### 0.24.0 compatibility note (prepared)
+### 0.24.0 compatibility note
 
-The prepared wire 0.24 line pairs with FSM 0.11 and RPKI 0.6 when exchanging
-public wire types. The published examples below continue to use the previous
-coordinated release until all three crates are published.
+`rustbgpd-wire` 0.24.0 is a breaking minor release and pairs with FSM 0.11 and
+RPKI 0.6 when sharing public wire types. Upgrade crates exchanging public wire
+types together when adopting this line.
 
 `UpdateValidationOptions` gains the `link_local_next_hop` field and is now
 `#[non_exhaustive]`, so struct literals no longer compile outside the crate.
 Start from `UpdateValidationOptions::default()` (strict validation) and assign
-the fields the session context supports. Enable `link_local_next_hop` only with bilateral capability 77,
-a directly attached peer's interface scope, and Extended Next Hop negotiation
-for IPv4. IPv4 callers must also set
+the fields the session context supports. Enable `link_local_next_hop` only
+with bilateral capability 77, a directly attached peer's interface scope, and
+Extended Next Hop negotiation for IPv4. IPv4 callers must also set
 `allow_ipv4_link_local_mp_reach_next_hop` after establishing that context.
 The daemon normalizes legacy link-local pairs before validation;
 standalone embedders must likewise select the second link-local address in
@@ -41,6 +41,10 @@ compatibility boundary. This draft support is experimental.
 Behavior change: `RtcNlri::matches` now compares only the Route Target bits
 after the membership's origin-AS field (RFC 4684 §4, §6). The origin AS no
 longer filters, so a /32 membership matches every Route Target.
+
+Behavior change: `is_dataplane_route_type` now returns `true` for Type 3
+(IMET), whose ingress-replication routes feed a VTEP's BUM flood list. Type 4
+remains excluded.
 
 The new non-default `strict-encode-invariants` feature makes debug builds of
 the path-attribute encoder panic when one attribute list would emit the same
@@ -404,7 +408,7 @@ Add the published codec and its buffer type as direct dependencies:
 
 ```toml
 [dependencies]
-rustbgpd-wire = "0.23.0"
+rustbgpd-wire = "0.24.0"
 bytes = "1"
 ```
 

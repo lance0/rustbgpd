@@ -17,7 +17,8 @@ Part of [rustbgpd](https://github.com/lance0/rustbgpd).
 - **Periodic + on-demand** — configurable dump interval or gRPC
   `TriggerMrtDump` for immediate snapshots
 - **Optional gzip** compression via flate2
-- **Atomic writes** — temp file + rename to prevent partial dumps
+- **Durable atomic writes** — sync the completed temp file before rename,
+  then sync the output directory; failed writes clean up their temp file
 - **NH synthesis** — IPv4 routes get NEXT_HOP attribute, IPv6 get
   MP_REACH_NLRI, RFC 8950 IPv4-with-IPv6-NH get MP_REACH_NLRI
 - **TABLE_DUMP_V2 reader** — `SnapshotReader` parses `PEER_INDEX_TABLE` +

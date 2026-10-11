@@ -33,8 +33,6 @@ pub const LAST_PERSIST_FILE: &str = "config-last-persist";
 
 /// A mutation to apply to the persisted config.
 pub enum ConfigMutation {
-    /// Replace the entire config snapshot and persist it to disk.
-    ReplaceConfig(Arc<AcceptedConfigSnapshot>),
     /// Replace the entire config snapshot, persist it to disk, then acknowledge
     /// the result to a caller that must not proceed until the write has settled.
     ReplaceConfigAck(
@@ -129,9 +127,6 @@ impl ConfigPersister {
         let mut persister = self;
         while let Some(mutation) = persister.rx.recv().await {
             match mutation {
-                ConfigMutation::ReplaceConfig(new_config) => {
-                    (persister, ()) = persister.off_runtime(move |p| p.replace(new_config)).await;
-                }
                 ConfigMutation::ReplaceConfigAck(new_config, ack) => {
                     #[cfg(debug_assertions)]
                     let drop_ack = rustbgpd_api::runtime_config_settlement::settlement_test_control::persister_checkpoint(
@@ -199,25 +194,6 @@ impl ConfigPersister {
         // Every sender is gone. Remove a stage nobody will commit here rather
         // than in `StagedWrite`'s drop on this worker.
         let _ = persister.off_runtime(Self::discard_staged).await;
-    }
-
-    fn replace(&mut self, new_config: Arc<AcceptedConfigSnapshot>) {
-        self.discard_staged();
-        info!("replacing persister config snapshot and persisting it");
-        self.current = new_config;
-        match self.persist() {
-            ConfigPersistCommitOutcome::PublishedDurable => {}
-            ConfigPersistCommitOutcome::NotPublished(error) => error!(
-                path = %self.config_path.display(),
-                error = %error,
-                "config was not published — in-memory state diverges from disk"
-            ),
-            ConfigPersistCommitOutcome::PublicationAmbiguous(error) => error!(
-                path = %self.config_path.display(),
-                error = %error,
-                "config is visible but crash durability is unproved"
-            ),
-        }
     }
 
     fn replace_ack(
@@ -537,6 +513,20 @@ log_format = "json"
         observed.await.expect("persister retained-snapshot reply")
     }
 
+    async fn persist_replacement(
+        tx: &mpsc::Sender<ConfigMutation>,
+        snapshot: Arc<AcceptedConfigSnapshot>,
+    ) {
+        let (ack, acknowledged) = oneshot::channel();
+        tx.send(ConfigMutation::ReplaceConfigAck(snapshot, ack))
+            .await
+            .unwrap();
+        assert_eq!(
+            acknowledged.await.unwrap(),
+            ConfigPersistCommitOutcome::PublishedDurable
+        );
+    }
+
     #[tokio::test]
     async fn persist_is_durable_atomic_write_no_temp_left() {
         // LAN-206: persist() must go through the fsync'd atomic-write primitive
@@ -551,11 +541,11 @@ log_format = "json"
         let handle = tokio::spawn(persister.run());
         let mut replacement = minimal_config();
         replacement.neighbors.push(test_neighbor("10.0.0.2", 65002));
-        tx.send(ConfigMutation::ReplaceConfig(
+        persist_replacement(
+            &tx,
             AcceptedConfigSnapshot::from_config_for_test(replacement),
-        ))
-        .await
-        .unwrap();
+        )
+        .await;
         drop(tx);
         handle.await.unwrap();
 
@@ -589,11 +579,11 @@ log_format = "json"
         let handle = tokio::spawn(persister.run());
         let mut replacement = config.clone();
         replacement.neighbors.push(test_neighbor("10.0.0.2", 65002));
-        tx.send(ConfigMutation::ReplaceConfig(
+        persist_replacement(
+            &tx,
             AcceptedConfigSnapshot::from_config_for_test(replacement),
-        ))
-        .await
-        .unwrap();
+        )
+        .await;
         drop(tx);
         handle.await.unwrap();
 
@@ -666,11 +656,7 @@ log_format = "json"
         );
         let mut following = observed.config();
         following.neighbors.push(test_neighbor("10.0.0.3", 65003));
-        tx.send(ConfigMutation::ReplaceConfig(
-            observed.derive_config(following).unwrap(),
-        ))
-        .await
-        .unwrap();
+        persist_replacement(&tx, observed.derive_config(following).unwrap()).await;
         drop(tx);
         handle.await.unwrap();
 
@@ -703,17 +689,13 @@ log_format = "json"
         // Two durable writes, so a second header would have somewhere to land.
         let mut first = minimal_config();
         first.neighbors.push(test_neighbor("10.0.0.2", 65002));
-        tx.send(ConfigMutation::ReplaceConfig(
+        persist_replacement(
+            &tx,
             AcceptedConfigSnapshot::from_config_for_test(first.clone()),
-        ))
-        .await
-        .unwrap();
+        )
+        .await;
         first.neighbors.push(test_neighbor("10.0.0.3", 65003));
-        tx.send(ConfigMutation::ReplaceConfig(
-            AcceptedConfigSnapshot::from_config_for_test(first),
-        ))
-        .await
-        .unwrap();
+        persist_replacement(&tx, AcceptedConfigSnapshot::from_config_for_test(first)).await;
         drop(tx);
         handle.await.unwrap();
 
@@ -765,11 +747,11 @@ log_format = "json"
         let handle = tokio::spawn(persister.run());
         let mut replacement = config;
         replacement.neighbors.push(test_neighbor("10.0.0.2", 65002));
-        tx.send(ConfigMutation::ReplaceConfig(
+        persist_replacement(
+            &tx,
             AcceptedConfigSnapshot::from_config_for_test(replacement),
-        ))
-        .await
-        .unwrap();
+        )
+        .await;
         drop(tx);
         handle.await.unwrap();
         let first = std::fs::read_to_string(&path).unwrap();
@@ -783,11 +765,7 @@ log_format = "json"
         let (tx, rx) = mpsc::channel(16);
         let persister = ConfigPersister::new(rx, path.clone(), reloaded.clone(), None);
         let handle = tokio::spawn(persister.run());
-        tx.send(ConfigMutation::ReplaceConfig(
-            AcceptedConfigSnapshot::from_config_for_test(reloaded),
-        ))
-        .await
-        .unwrap();
+        persist_replacement(&tx, AcceptedConfigSnapshot::from_config_for_test(reloaded)).await;
         drop(tx);
         handle.await.unwrap();
         let second = std::fs::read_to_string(&path).unwrap();
@@ -816,11 +794,11 @@ log_format = "json"
         let handle = tokio::spawn(persister.run());
         let mut replacement = minimal_config();
         replacement.neighbors.push(test_neighbor("10.0.0.2", 65002));
-        tx.send(ConfigMutation::ReplaceConfig(
+        persist_replacement(
+            &tx,
             AcceptedConfigSnapshot::from_config_for_test(replacement),
-        ))
-        .await
-        .unwrap();
+        )
+        .await;
         drop(tx);
         handle.await.unwrap();
 
@@ -1065,11 +1043,7 @@ log_format = "json"
         // than a snapshot assembled independently by the test.
         let mut following = observed.config();
         following.neighbors.push(test_neighbor("10.0.0.3", 65003));
-        tx.send(ConfigMutation::ReplaceConfig(
-            observed.derive_config(following).unwrap(),
-        ))
-        .await
-        .unwrap();
+        persist_replacement(&tx, observed.derive_config(following).unwrap()).await;
         drop(tx);
         handle.await.unwrap();
         let disk_config: Config =

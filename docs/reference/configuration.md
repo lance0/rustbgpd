@@ -2243,6 +2243,18 @@ implicit deny on a non-empty list, and permit-all when the list is empty or
 removed. `DEFER` installs the filter state but waits for a later immediate or
 plain ROUTE-REFRESH to sweep advertisements and withdrawals.
 
+Each peer and AFI/SAFI can retain at most **4,096 Address-Prefix ORF entries**,
+including entries accumulated across `DEFER` updates. Replacing an existing
+sequence does not consume another entry. If any `ADD` would exceed the cap,
+the entire Address-Prefix ORF group is rejected and its previously installed
+filter stays unchanged, including any removals or replacements earlier in
+that group. The session stays up; the rejected update follows the ordinary
+route-refresh path using the retained filter. A subsequent `REMOVE-ALL` or
+`REMOVE` can free capacity. Overflow emits a warning and increments
+`bgp_orf_capacity_rejections_total{peer,family}` (`ipv4_unicast` or
+`ipv6_unicast`). This capacity rule is separate from malformed-entry handling,
+which still resets the list under RFC 5291 §6.
+
 rustbgpd implements the receive side only: it does not send ORF entries to its
 own upstreams. The knob is static TOML state, inherited through peer groups, and
 is off by default.

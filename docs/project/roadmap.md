@@ -179,7 +179,14 @@ and main CI. The
 [2026-10-06 run](../soaks/soak-rs-flagship-24h-2026-10-06.md) then qualified
 the v0.75.0 tag under the current gates (on-host verdict, no reanalysis;
 every gate passes, with all 146 `rbgp doctor` runs `ok`), so the published
-route-server flagship receipt now describes v0.75.0. The
+route-server flagship receipt now describes v0.75.0. v0.76.0 (2026-10-11) is
+a minor release that adds alpha conditional advertisement, experimental
+Link-Local Next Hop capability negotiation, live and LACP-derived EVPN
+Ethernet Segments, single-homed VLAN-aware bundle VTEP service with IRB, and
+promotes the scoped FlowSpec controller role into the v1 inventory, with
+next-hop export, EVPN DF election and flood-list fixes. It publishes wire
+0.24.0, FSM 0.11.0 and RPKI 0.6.0. It ships on its per-change regression
+tests and main CI; no flagship receipt covers it. The
 [release checklist](release-checklist.md#flagship-operating-proof) calls for a
 qualifying 24-hour management-load soak on the selected candidate. Earlier
 archived soaks do not automatically qualify later runtime changes.
@@ -1288,7 +1295,7 @@ gobmp/pmacct already terminate it into Kafka), and BGPsec.
   trie-backed prefix indexes shipped; the larger LocRib trie swap remains
   deferred because the naive version regressed recompute. Shared route storage
   was measured and rejected — see Deferred.
-- ~~**Conditional advertisement.**~~ **Shipped (unreleased; alpha, outside
+- ~~**Conditional advertisement.**~~ **Shipped (v0.76.0; alpha, outside
   the v1 inventory)** — advertise-if-present / advertise-if-absent for IPv4
   and IPv6 unicast, attached to static neighbors
   ([ADR-0137](../adr/0137-conditional-advertisement.md),

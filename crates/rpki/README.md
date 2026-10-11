@@ -7,10 +7,10 @@ Part of [rustbgpd](https://github.com/lance0/rustbgpd). Requires Rust 1.95 or
 newer. Release-by-release crate changes are recorded in the
 [changelog](CHANGELOG.md).
 
-The prepared 0.6 line moves the public wire dependency to 0.24. Verifier and
-RTR APIs are unchanged; upgrade crates exchanging wire types together with
-FSM 0.11. It also adds `VrpManager::with_end_of_data_observer`, an optional
-callback for each configured cache's last accepted End of Data. The published examples below retain the previous release set.
+`rustbgpd-rpki` 0.6.0 moves to the wire `0.24.0` dependency; verifier and RTR
+signatures are unchanged. Upgrade crates exchanging public wire types together
+with FSM 0.11. It also adds `VrpManager::with_end_of_data_observer`, an
+optional callback for each configured cache's last accepted End of Data.
 
 `rustbgpd-rpki` 0.5.0 moves to the wire `0.23.0` dependency for the Type 6
 SMET decoder change; verifier and RTR signatures are unchanged.
@@ -85,8 +85,8 @@ published versions:
 
 ```toml
 [dependencies]
-rustbgpd-rpki = "0.5.0"
-rustbgpd-wire = "0.23.0"
+rustbgpd-rpki = "0.6.0"
+rustbgpd-wire = "0.24.0"
 ```
 
 When building against a source checkout instead, use matching versioned paths
@@ -176,7 +176,7 @@ incompatible public wire-type dependency require the next `0.x` minor version.
 The first `0.1.x` line used wire `0.19`; `0.2.x` used wire `0.20`. The
 `0.3.x` line uses wire `0.21` and adopts the enum policy below. The
 `0.4.x` line moves the public wire dependency to `0.22`, the `0.5.x` line
-moves it to `0.23`, and the prepared `0.6.x` line moves it to `0.24`, each with
+moves it to `0.23`, and the `0.6.x` line moves it to `0.24`, each with
 verifier and RTR method signatures unchanged.
 
 ## Enum exhaustiveness

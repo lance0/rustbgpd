@@ -568,9 +568,21 @@ class PerfReceiptFreshnessTests(unittest.TestCase):
             with self.subTest(path=path, fragment=fragment):
                 self.assert_red(error, overrides={path: text(path).replace(fragment, "removed", 1)})
 
-    def test_zero_inbound_links_are_advisory_inventory(self) -> None:
-        self.assertEqual(checker.unlinked_receipts(ROOT), [])
-        self.assertEqual(self.errors(), [])
+    def test_orphan_receipt_is_advisory(self) -> None:
+        with TemporaryReceiptRepository() as fixture:
+            fixture.write("docs/perf/orphan.md", "# Orphan receipt\n")
+            fixture.run("add", "docs/perf/orphan.md")
+            self.assertIn("docs/perf/orphan.md", checker.unlinked_receipts(fixture.root))
+            with (
+                mock.patch.object(checker, "ROOT", fixture.root),
+                mock.patch.object(checker, "check_contract", return_value=([], [])),
+                contextlib.redirect_stdout(io.StringIO()) as stdout,
+            ):
+                self.assertEqual(checker.main(), 0)
+            self.assertIn(
+                "performance receipt advisory: no inbound Markdown link to docs/perf/orphan.md",
+                stdout.getvalue(),
+            )
 
     def test_reference_style_link_counts_as_inbound(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

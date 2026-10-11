@@ -40,7 +40,12 @@ use rustbgpd_evpn::{
     IpVrfId, IpVrfTable, Ipv4Prefix, MacAddress, RemoteMacEntry, RemoteMacSource, RemoteMacTable,
     RouteDistinguisher, RouteTarget,
 };
-use rustbgpd_evpn_linux::{LinuxDataplane, ReconcileActor, ReconcileActorConfig};
+use rustbgpd_evpn_linux::dataplane::NexthopOps;
+use rustbgpd_evpn_linux::group_state::GroupOwnedMap;
+use rustbgpd_evpn_linux::{
+    Dataplane, DataplaneOp, FailureClass, LinuxDataplane, OwnedEntry, OwnedSet, ReconcileActor,
+    ReconcileActorConfig, compute_diff,
+};
 use tokio::sync::{mpsc, watch};
 use tokio_util::sync::CancellationToken;
 
@@ -282,6 +287,277 @@ fn l2_rows_match(dump: &str, mac: &str, owned_sibling: bool) -> bool {
         && has("master br100 static", "vlan dst extern_learn self")
         && has("vlan 1 master br100 static", "dst extern_learn self")
         && (!owned_sibling || has("dst 10.0.0.2 self extern_learn permanent", "master vlan"))
+}
+
+fn l2_mac_rows() -> Vec<String> {
+    let mut rows: Vec<_> = shell("bridge", &["fdb", "show", "br", "br100"])
+        .lines()
+        .filter(|row| row.starts_with(&mac_str(l2_mac())))
+        .map(str::to_owned)
+        .collect();
+    rows.sort();
+    rows
+}
+
+fn replace_l2_pvid_with_foreign() {
+    let mac = mac_str(l2_mac());
+    run(
+        "bridge",
+        &["fdb", "del", &mac, "dev", "vxlan100", "master", "vlan", "1"],
+    );
+    run(
+        "bridge",
+        &[
+            "fdb", "add", &mac, "dev", "vxlan100", "master", "static", "vlan", "1",
+        ],
+    );
+    assert!(l2_mac_rows().iter().any(|row| {
+        row.contains("dev vxlan100 vlan 1 master br100 static") && !row.contains("extern_learn")
+    }));
+}
+
+#[tokio::test]
+async fn l2_foreign_pvid_only_row_survives_legacy_reconciliation() {
+    if !netns_gate() {
+        eprintln!("skipping: set EVPN_LINUX_NETNS=1 to run privileged foreign-state test");
+        return;
+    }
+    if !is_inner() {
+        let ns = NetnsFixture::create("l2-pvid-only");
+        setup_l2_topology(&ns);
+        ns.exec("ip", &["link", "add", "ce0", "type", "dummy"]);
+        ns.exec("ip", &["link", "set", "ce0", "master", "br100"]);
+        ns.exec("ip", &["link", "set", "ce0", "up"]);
+        run_inner(
+            &ns,
+            "l2_foreign_pvid_only_row_survives_legacy_reconciliation",
+        );
+        return;
+    }
+
+    let mac = mac_str(l2_mac());
+    run(
+        "bridge",
+        &[
+            "fdb", "add", &mac, "dev", "ce0", "master", "static", "vlan", "1",
+        ],
+    );
+    let before = l2_mac_rows();
+    assert_eq!(before.len(), 1, "only the PVID row may exist: {before:?}");
+    assert!(
+        before[0].contains("dev ce0 vlan 1 master br100 static"),
+        "{before:?}"
+    );
+    let (intent_tx, mut report_rx, shutdown, actor_join) = spawn_reconcile_actor().await;
+    intent_tx.send(l2_intent(1, true)).unwrap();
+    let report = wait_for_report_generation(&mut report_rx, 1).await;
+    assert!(report.failed.is_empty(), "install: {:?}", report.failed);
+    assert_eq!(
+        l2_mac_rows(),
+        before,
+        "remote install must preserve the PVID-only foreign row"
+    );
+    assert_eq!(report.foreign_state_counters.replaces_blocked, 1);
+
+    intent_tx.send(l2_intent(2, false)).unwrap();
+    wait_for_report_generation(&mut report_rx, 2).await;
+    assert_eq!(
+        l2_mac_rows(),
+        before,
+        "withdrawal must preserve the foreign row"
+    );
+
+    // Once the foreign row is removed, ordinary programming resumes.
+    run(
+        "bridge",
+        &["fdb", "del", &mac, "dev", "ce0", "master", "vlan", "1"],
+    );
+    intent_tx.send(l2_intent(3, true)).unwrap();
+    let report = wait_for_report_generation(&mut report_rx, 3).await;
+    assert!(report.failed.is_empty());
+    assert_eq!(l2_mac_rows().len(), 3);
+
+    // Replace only the PVID sibling; the unscoped row is still ours.
+    replace_l2_pvid_with_foreign();
+    let mixed = l2_mac_rows();
+    intent_tx.send(l2_intent(4, true)).unwrap();
+    let report = wait_for_report_generation(&mut report_rx, 4).await;
+    assert_eq!(report.foreign_state_counters.owned_relinquished, 0);
+    assert_eq!(
+        l2_mac_rows(),
+        mixed,
+        "repair must preserve the foreign sibling"
+    );
+    intent_tx.send(l2_intent(5, false)).unwrap();
+    wait_for_report_generation(&mut report_rx, 5).await;
+    assert_eq!(
+        l2_mac_rows(),
+        mixed,
+        "withdrawal must preserve all mixed rows"
+    );
+
+    run(
+        "bridge",
+        &["fdb", "del", &mac, "dev", "vxlan100", "master", "vlan", "1"],
+    );
+    intent_tx.send(l2_intent(6, false)).unwrap();
+    let report = wait_for_report_generation(&mut report_rx, 6).await;
+    assert!(
+        report.failed.is_empty(),
+        "owned cleanup: {:?}",
+        report.failed
+    );
+    assert!(
+        l2_mac_rows().is_empty(),
+        "owned rows must remain tracked for cleanup"
+    );
+
+    intent_tx.send(l2_intent(7, true)).unwrap();
+    wait_for_report_generation(&mut report_rx, 7).await;
+    replace_l2_pvid_with_foreign();
+    let mixed = l2_mac_rows();
+    shutdown.cancel();
+    tokio::time::timeout(Duration::from_secs(10), actor_join)
+        .await
+        .expect("actor shutdown timed out")
+        .expect("actor panicked");
+    assert_eq!(
+        l2_mac_rows(),
+        mixed,
+        "shutdown must preserve the foreign sibling"
+    );
+}
+
+#[tokio::test]
+async fn l2_foreign_pvid_stale_operations_are_rechecked_before_apply() {
+    if !netns_gate() {
+        eprintln!("skipping: set EVPN_LINUX_NETNS=1 to run privileged foreign-state test");
+        return;
+    }
+    if !is_inner() {
+        let ns = NetnsFixture::create("l2-pvid-stale");
+        setup_l2_topology(&ns);
+        ns.exec("ip", &["link", "add", "ce0", "type", "dummy"]);
+        ns.exec("ip", &["link", "set", "ce0", "master", "br100"]);
+        ns.exec("ip", &["link", "set", "ce0", "up"]);
+        run_inner(
+            &ns,
+            "l2_foreign_pvid_stale_operations_are_rechecked_before_apply",
+        );
+        return;
+    }
+
+    let mut dp = LinuxDataplane::connect().await.expect("netlink connect");
+    let instances = l2_instances();
+    let probes = dp.probe(&instances).await;
+    let vni = EvpnInstanceId::new(L2_VNI).unwrap();
+    let mac = mac_str(l2_mac());
+    let add = compute_diff(
+        &l2_macs(true),
+        &dp.dump_snapshot().await.unwrap(),
+        &OwnedSet::new(),
+        &probes,
+        &GroupOwnedMap::new(),
+        &instances,
+    );
+    assert!(matches!(
+        add.ops.as_slice(),
+        [DataplaneOp::AddRemoteFdb { .. }]
+    ));
+    run(
+        "bridge",
+        &[
+            "fdb", "add", &mac, "dev", "ce0", "master", "static", "vlan", "1",
+        ],
+    );
+    let foreign = l2_mac_rows();
+    let error = dp
+        .apply(&add.ops[0])
+        .await
+        .expect_err("stale add must conflict");
+    assert_eq!(error.class(), FailureClass::Conflict);
+    assert_eq!(l2_mac_rows(), foreign);
+
+    run(
+        "bridge",
+        &["fdb", "del", &mac, "dev", "ce0", "master", "vlan", "1"],
+    );
+    run(
+        "bridge",
+        &["fdb", "add", &mac, "dev", "ce0", "master", "dynamic"],
+    );
+    dp.apply(&add.ops[0])
+        .await
+        .expect("dynamic local mobility remains permitted");
+    let mut owned = OwnedSet::new();
+    owned.record_applied(
+        vni,
+        l2_mac(),
+        OwnedEntry::single_dst("10.0.0.2".parse().unwrap(), None),
+    );
+    let snapshot = dp.dump_snapshot().await.unwrap();
+    let remove = compute_diff(
+        &RemoteMacTable::new(),
+        &snapshot,
+        &owned,
+        &probes,
+        &GroupOwnedMap::new(),
+        &instances,
+    );
+    assert!(matches!(
+        remove.ops.as_slice(),
+        [DataplaneOp::RemoveRemoteFdb { .. }]
+    ));
+    let mut moved = l2_macs(true).get(vni, l2_mac()).unwrap().clone();
+    moved.remote_vtep_ip = "10.0.0.3".parse().unwrap();
+    let mut desired = RemoteMacTable::builder();
+    desired.insert(vni, l2_mac(), moved).unwrap();
+    let update = compute_diff(
+        &desired.build(),
+        &snapshot,
+        &owned,
+        &probes,
+        &GroupOwnedMap::new(),
+        &instances,
+    );
+    assert!(matches!(
+        update.ops.as_slice(),
+        [DataplaneOp::UpdateRemoteFdb { .. }]
+    ));
+    replace_l2_pvid_with_foreign();
+    let mixed = l2_mac_rows();
+    for op in [&update.ops[0], &remove.ops[0]] {
+        let error = dp
+            .apply(op)
+            .await
+            .expect_err("stale mutation must conflict");
+        assert_eq!(error.class(), FailureClass::Conflict, "{op:?}: {error}");
+        assert_eq!(l2_mac_rows(), mixed, "{op:?}");
+    }
+    let error = dp
+        .install_fdb_nhg_row(vni, l2_mac(), None, 0x4000_0001)
+        .await
+        .expect_err("NHG install must check the same scope before mutation");
+    assert_eq!(error.class(), FailureClass::Conflict);
+    let error = dp
+        .remove_fdb_nhg_row(vni, l2_mac(), None)
+        .await
+        .expect_err("NHG removal must check the same scope before mutation");
+    assert_eq!(error.class(), FailureClass::Conflict);
+    assert_eq!(l2_mac_rows(), mixed);
+
+    run(
+        "bridge",
+        &["fdb", "del", &mac, "dev", "vxlan100", "master", "vlan", "1"],
+    );
+    dp.apply(&update.ops[0])
+        .await
+        .expect("remote mobility resumes after conflict removal");
+    assert!(l2_mac_rows().iter().any(|row| row.contains("dst 10.0.0.3")));
+    dp.apply(&remove.ops[0])
+        .await
+        .expect("owned cleanup remains permitted");
+    assert!(l2_mac_rows().is_empty());
 }
 
 /// LAN-283 L2: a foreign `static` FDB row that replaces the owned row

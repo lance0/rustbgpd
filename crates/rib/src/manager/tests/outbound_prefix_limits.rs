@@ -172,6 +172,16 @@ fn register_peer_with_families(
     peer: IpAddr,
     sendable_families: &[(Afi, Safi)],
 ) -> mpsc::Receiver<OutboundRouteUpdate> {
+    register_peer_with_selection(manager, peer, sendable_families, false, 0)
+}
+
+fn register_peer_with_selection(
+    manager: &mut RibManager,
+    peer: IpAddr,
+    sendable_families: &[(Afi, Safi)],
+    per_client_best: bool,
+    add_path_send_max: u32,
+) -> mpsc::Receiver<OutboundRouteUpdate> {
     let (outbound_tx, mut outbound_rx) = mpsc::channel(64);
     manager.handle_update(RibUpdate::PeerUp {
         peer,
@@ -184,10 +194,14 @@ fn register_peer_with_families(
         is_ebgp: false,
         route_reflector_client: false,
         orr_vantage: None,
-        per_client_best: false,
+        per_client_best,
         interpret_rfc1997: true,
-        add_path_send_families: vec![],
-        add_path_send_max: 0,
+        add_path_send_families: if add_path_send_max > 0 {
+            sendable_families.to_vec()
+        } else {
+            vec![]
+        },
+        add_path_send_max,
         negotiated_orf_recv: vec![],
         negotiated_llgr_families: vec![],
     });
@@ -273,6 +287,214 @@ fn source_v6_routes(source: Ipv6Addr, segments: &[u16]) -> Vec<Route> {
             make_v6_route(prefix, source)
         })
         .collect()
+}
+
+fn explain_export(
+    manager: &mut RibManager,
+    peer: IpAddr,
+    prefix: Prefix,
+) -> crate::update::ExplainAdvertisedRoute {
+    let (reply, mut response) = oneshot::channel();
+    manager.handle_update(RibUpdate::ExplainAdvertisedRoute {
+        peer,
+        prefix,
+        rd: None,
+        labeled: false,
+        source: None,
+        reply,
+    });
+    response.try_recv().unwrap().unwrap()
+}
+
+fn advertised_prefixes(manager: &mut RibManager, peer: IpAddr) -> HashSet<Prefix> {
+    let (reply, mut response) = oneshot::channel();
+    manager.handle_query_routes_page_versioned(
+        crate::update::RouteQueryScope::Advertised { peer },
+        None,
+        None,
+        None,
+        16,
+        reply,
+    );
+    response
+        .try_recv()
+        .unwrap()
+        .unwrap()
+        .routes
+        .into_iter()
+        .map(|route| route.prefix)
+        .collect()
+}
+
+fn export_explain_limit_fixture(
+    ungrouped: bool,
+    per_client_best: bool,
+) -> (RibManager, IpAddr, HashSet<Prefix>) {
+    let (_tx, rx) = mpsc::channel(1);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    manager.test_force_ungrouped = ungrouped;
+    let peer = IpAddr::V4(Ipv4Addr::new(10, 113, 0, 1));
+    let sibling = IpAddr::V4(Ipv4Addr::new(10, 113, 0, 2));
+    let mut peer_rx =
+        register_peer_with_selection(&mut manager, peer, &ipv4_sendable(), per_client_best, 0);
+    let mut sibling_rx =
+        register_peer_with_selection(&mut manager, sibling, &ipv4_sendable(), per_client_best, 0);
+    set_ipv4_limit(&mut manager, peer, 2);
+    let source = Ipv4Addr::new(192, 0, 2, 113);
+    announce(
+        &mut manager,
+        IpAddr::V4(source),
+        source_routes(source, &[1, 2, 3]),
+    );
+
+    assert_eq!(manager.grouped_member_of(peer).is_none(), ungrouped);
+    if !ungrouped {
+        assert_eq!(
+            manager.grouped_member_of(peer),
+            manager.grouped_member_of(sibling)
+        );
+    }
+    let advertised = wire_prefixes(&mut peer_rx);
+    assert_eq!(advertised.len(), 2);
+    assert_eq!(advertised_prefixes(&mut manager, peer), advertised);
+    assert_eq!(
+        wire_prefixes(&mut sibling_rx),
+        HashSet::from([v4(1), v4(2), v4(3)])
+    );
+    (manager, peer, advertised)
+}
+
+/// Removing the commit overlay reports Advertise for a prefix absent from the
+/// same peer's advertised listing. Both staging ladders and storage shapes run.
+#[test]
+fn export_explain_denies_withheld_prefix_at_outbound_limit() {
+    use crate::update::{ExplainDecision, ExportGateVerdict, OUTBOUND_PREFIX_LIMIT_REACHED};
+
+    for ungrouped in [false, true] {
+        for per_client_best in [false, true] {
+            let (mut manager, peer, advertised) =
+                export_explain_limit_fixture(ungrouped, per_client_best);
+            let withheld = [v4(1), v4(2), v4(3)]
+                .into_iter()
+                .find(|prefix| !advertised.contains(prefix))
+                .unwrap();
+            let explanation = explain_export(&mut manager, peer, withheld);
+            assert_eq!(explanation.decision, ExplainDecision::Deny);
+            assert!(!explanation.already_advertised);
+            let stop = explanation.gates.last().unwrap();
+            assert_eq!(stop.gate, "outbound_prefix_limit");
+            assert_eq!(stop.code, OUTBOUND_PREFIX_LIMIT_REACHED);
+            assert_eq!(stop.verdict, ExportGateVerdict::Stop);
+            assert!(stop.detail.contains("ipv4_unicast"));
+            assert!(stop.detail.contains("limit 2, usage 2"));
+            assert!(stop.detail.contains(&peer.to_string()));
+            assert_eq!(explanation.reasons[0].code, OUTBOUND_PREFIX_LIMIT_REACHED);
+            let diff = explanation
+                .gates
+                .iter()
+                .find(|step| step.gate == "adj_rib_out")
+                .unwrap();
+            assert_eq!(diff.code, "staged_announce");
+            assert!(!advertised_prefixes(&mut manager, peer).contains(&withheld));
+        }
+    }
+}
+
+#[test]
+fn export_explain_allows_admitted_prefix_at_outbound_limit() {
+    for ungrouped in [false, true] {
+        for per_client_best in [false, true] {
+            let (mut manager, peer, advertised) =
+                export_explain_limit_fixture(ungrouped, per_client_best);
+            let admitted = *advertised.iter().next().unwrap();
+            let explanation = explain_export(&mut manager, peer, admitted);
+            assert_eq!(
+                explanation.decision,
+                crate::update::ExplainDecision::Advertise
+            );
+            assert!(explanation.already_advertised);
+            assert!(
+                explanation
+                    .gates
+                    .iter()
+                    .all(|step| { step.verdict != crate::update::ExportGateVerdict::Stop })
+            );
+            assert!(advertised_prefixes(&mut manager, peer).contains(&admitted));
+        }
+    }
+}
+
+#[test]
+fn export_explain_outbound_limit_preserves_earlier_exact_rejection() {
+    for ungrouped in [false, true] {
+        let (mut manager, peer, advertised) = export_explain_limit_fixture(ungrouped, false);
+        let withheld = [v4(1), v4(2), v4(3)]
+            .into_iter()
+            .find(|prefix| !advertised.contains(prefix))
+            .unwrap();
+        manager
+            .peer_unexportable
+            .entry(peer)
+            .or_default()
+            .insert(crate::update::ExactExportKey::Unicast(withheld, 0));
+        let explanation = explain_export(&mut manager, peer, withheld);
+        assert_eq!(explanation.decision, crate::update::ExplainDecision::Deny);
+        assert_eq!(explanation.gates.last().unwrap().gate, "exact_export");
+        assert_eq!(explanation.reasons[0].code, "exact_export_rejected");
+    }
+}
+
+#[test]
+fn export_explain_allows_existing_add_path_slots_at_outbound_limit() {
+    let (_tx, rx) = mpsc::channel(1);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    manager.test_force_ungrouped = true;
+    let peer = IpAddr::V4(Ipv4Addr::new(10, 113, 0, 1));
+    let mut outbound_rx =
+        register_peer_with_selection(&mut manager, peer, &ipv4_sendable(), false, 2);
+    set_ipv4_limit(&mut manager, peer, 1);
+    let sources = [Ipv4Addr::new(192, 0, 2, 113), Ipv4Addr::new(192, 0, 2, 114)];
+    for source in sources {
+        announce(
+            &mut manager,
+            IpAddr::V4(source),
+            source_routes(source, &[1]),
+        );
+    }
+    assert_eq!(wire_prefixes(&mut outbound_rx), HashSet::from([v4(1)]));
+    assert_eq!(
+        manager.adj_ribs_out[&peer].iter_prefix(&v4(1)).count(),
+        2,
+        "two advertised Add-Path slots must share the one admitted prefix"
+    );
+    assert_eq!(manager.outbound_family_usage(peer, Afi::Ipv4, false), 1);
+
+    for source in sources {
+        let (reply, mut response) = oneshot::channel();
+        manager.handle_update(RibUpdate::ExplainAdvertisedRoute {
+            peer,
+            prefix: v4(1),
+            rd: None,
+            labeled: false,
+            source: Some(crate::update::RouteSourceIdentity {
+                peer: IpAddr::V4(source),
+                path_id: 0,
+            }),
+            reply,
+        });
+        let explanation = response.try_recv().unwrap().unwrap();
+        assert_eq!(
+            explanation.decision,
+            crate::update::ExplainDecision::Advertise
+        );
+        assert!(explanation.already_advertised);
+        assert!(
+            explanation
+                .gates
+                .iter()
+                .all(|step| { step.verdict != crate::update::ExportGateVerdict::Stop })
+        );
+    }
 }
 
 #[test]

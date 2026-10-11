@@ -261,9 +261,10 @@ The API uses gRPC status codes consistently across services:
 | `UNIMPLEMENTED` | The RPC is reserved in the protobuf but runtime support has not shipped yet, the connected daemon predates the RPC, or a gNMI path or extension is outside the supported subset |
 | `INTERNAL` | An internal daemon actor, metrics encoder, or RIB boundary failed unexpectedly after the request passed validation |
 
-Runtime-config mutations that fail after transient runtime changes, but whose
-forward effects are then fully compensated, preserve the original gRPC status
-code and append the original message after this exact prefix:
+For neighbor, peer-group, and policy runtime-config mutations, a failure
+after transient runtime changes whose forward effects are fully compensated
+preserves the original gRPC status code and appends the original message after
+this exact prefix:
 `runtime effects were fully compensated; retry may repeat transient runtime changes:`.
 When an original message is present, exactly one ASCII space separates it from
 that prefix; an empty original message adds no trailing space.
@@ -272,6 +273,7 @@ Their trailing metadata also includes
 candidate is discarded, so the runtime and TOML remain at their prior state.
 The marker is a retry warning: repeating the request can repeat those transient
 runtime changes even though the reported attempt left no final-state change.
+For `ApplyEvpnRuntime`, see its [failure status table](#applyevpnruntime-failure-status).
 
 ### Operator-read deadlines
 
@@ -3200,6 +3202,8 @@ or unacknowledged effects, the coordinator pins `mutation_state=Failed` and
 `evpn_runtime_decomposed_fail_stops_total` increments. A fully compensated step
 leaves the prior committed model authoritative; it does not undo earlier
 primitive commits. SIGHUP still fences that partial sequence for recovery.
+
+### ApplyEvpnRuntime failure status
 
 A failed `ApplyEvpnRuntime` status states what the failure left behind:
 
