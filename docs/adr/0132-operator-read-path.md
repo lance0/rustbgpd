@@ -562,9 +562,9 @@ its field-level contract. Complete neighbor responses and import policy
 statistics still depend on session tasks. Paged tables and explain remain
 actor-served; a separate read owner and process split are not selected.
 
-## Amendment (2026-10-10, proposed): reads overlapping reload completion
+## Amendment (2026-10-10): reads overlapping reload completion
 
-**Status of this amendment:** proposed; no implementation yet.
+**Status of this amendment:** accepted and implemented.
 
 ### Problem
 
@@ -623,11 +623,12 @@ does three things synchronously, with no await between them:
 3. It calls `try_reserve` on every session command channel and then sends one
    `QueryState` through each permit.
 
-If any reservation fails, it drops all of its permits and serves the read in
-place, exactly as before. It does the same when the detached-read limit
-below is reached. The first case is a full or closed session channel, which
-already holds eight commands. The limit and the reservation fallback are
-the only conditions that select the old path.
+If any channel is full (it already holds eight commands), the owner drops
+all of its permits and serves the read in place, exactly as before. It does
+the same when the detached-read limit below is reached. These are the only
+conditions that select the old path. A closed channel is not a fallback:
+that session's row is reported unavailable, which is what the in-place
+fan-out reports when its send fails.
 
 **Row semantics.** Every field that comes from the manager has its value at
 the admission point. Every field that comes from a session has the value at
@@ -706,12 +707,13 @@ The owner never awaits these tasks during a transaction or an ordinary step.
   the transaction before the reply is sent.
 - **Ordering.** A neighbor read can now complete after
   `config reload complete`. Its rows describe manager state at admission.
-- **Documentation.** Update the neighbor section of `docs/reference/api.md`
-  with that observation point, and update the wait-site row above for
-  transaction-admitted `ListPeers`.
-- **Upgrade and changelog.** Add an upgrade-note sentence for clients that
-  correlate neighbor reads with reload completion. Add a `Changed` fragment
-  for reload completion no longer waiting for an overlapping neighbor read.
+- **Documentation.** The neighbor section of `docs/reference/api.md` states
+  the observation point. Every `Served` row of the wait-site matrix above
+  now detaches an admitted `ListPeers` when it can; reads drained between
+  serial acknowledgements (`drain_operator_queries`) remain in place.
+- **Upgrade and changelog.** An upgrade note covers clients that correlate
+  neighbor reads with reload completion, and a `Changed` entry covers reload
+  completion no longer waiting for an overlapping neighbor read.
 - **Metrics.** `bgp_peer_manager_operator_query_wait_seconds` keeps its
   admission-time sample.
 
