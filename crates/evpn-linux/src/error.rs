@@ -54,13 +54,10 @@ pub enum DataplaneError {
     #[error("permission denied: {0} (CAP_NET_ADMIN missing or LSM-blocked)")]
     PermissionDenied(String),
 
-    /// A remote-MAC entry conflicts with a kernel-learned local entry
-    /// for the same `(VNI, MAC)`. The diff loop logs and skips; this
-    /// variant exists for the [`InMemoryDataplane`] fake to emit
-    /// during specific test scenarios.
-    ///
-    /// [`InMemoryDataplane`]: crate::InMemoryDataplane
-    #[error("MAC {mac} in VNI {vni} conflicts with kernel-learned local entry")]
+    /// A remote-MAC mutation conflicts with a foreign kernel entry
+    /// in its `(VNI, MAC, VLAN)` scope. Unscoped bridge operations
+    /// also affect VLAN siblings; the apply path preserves them and retries.
+    #[error("MAC {mac} in VNI {vni} conflicts with an existing local or foreign FDB entry")]
     LocalMacConflict {
         /// Affected VNI.
         vni: EvpnInstanceId,

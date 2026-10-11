@@ -141,6 +141,18 @@ by remote VTEPs. Previously installed Type 2 rows that fail these requirements
 are removed from local forwarding and gateway-IP resolution; correct the
 sender's RTs or the intended instance configuration before upgrading.
 
+For an instance without `bridge_vlan`, Linux can apply a remote-MAC FDB
+operation to both the untagged entry and VLAN entries configured on the
+bridge port. A foreign static row for the same MAC and VNI blocks that
+operation even when it exists only on the port's PVID. This can leave an
+owned row pending removal until the conflicting foreign row is cleared.
+An instance with `bridge_vlan` checks the configured VLAN only.
+
+The daemon checks ownership again before applying remote FDB changes.
+These checks preserve foreign rows already visible to the check; the kernel
+does not provide an atomic ownership comparison for the subsequent write or
+delete. Avoid concurrent management of the same bridge MAC entries.
+
 ### BUM flooding (ingress replication)
 
 Broadcast, unknown-unicast and multicast (BUM) frames reach remote VTEPs by
