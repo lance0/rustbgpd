@@ -56,7 +56,7 @@ def neighbors(directory, tag):
                 f"{side} tag {tag} neighbor was not dynamically resolved")
 
 
-def srl_rib(observation, local_tags=(10, 20), remote_tags=(10, 20)):
+def srl_rib(observation, local_tags=(10, 20), remote_tags=(10, 20), *, local_host_ips=None):
     rib = observation["network-instance"][0]["bgp-rib"]
     families = [f for f in rib["afi-safi"] if f["afi-safi-name"] == "evpn"]
     require(len(families) == 1, "missing unique EVPN AFI/SAFI")
@@ -91,7 +91,9 @@ def srl_rib(observation, local_tags=(10, 20), remote_tags=(10, 20)):
                 if kind == "mac-ip-route":
                     require(row["mac-length"] == 48 and row["mac-address"].lower() ==
                             (LOCAL_MAC if local else REMOTE_MAC)
-                            and row["ip-address"] == "0.0.0.0"
+                            and row["ip-address"] == (
+                                (local_host_ips[tag] or "0.0.0.0")
+                                if local and local_host_ips is not None else "0.0.0.0")
                             and row["esi"] == "00:00:00:00:00:00:00:00:00:00"
                             and row["label1"] == {"value": 10000 + tag, "value-type": "vni"}
                             and "label2" not in row, f"{kind} {rd} NLRI differs")
@@ -136,7 +138,7 @@ def imported(directory, local_tags=(10, 20), active_tags=(10, 20)):
 
 
 
-def daemon_rib(rows, local_tags=(10, 20), remote_tags=(10, 20)):
+def daemon_rib(rows, local_tags=(10, 20), remote_tags=(10, 20), *, local_host_ips=None):
     expected = []
     for local, tags in ((True, local_tags), (False, remote_tags)):
         vtep = LOCAL_VTEP if local else REMOTE_VTEP
@@ -146,7 +148,8 @@ def daemon_rib(rows, local_tags=(10, 20), remote_tags=(10, 20)):
                           "ethernet_tag": str(tag), "next_hop": vtep,
                           "peer": "0.0.0.0" if local else "10.0.119.2", "tunnel_type": 8,
                           "mac": (LOCAL_MAC if local else REMOTE_MAC) if kind == 2 else "",
-                          "ip": "" if kind == 2 else vtep, "label": 10000 + tag if kind == 2 else 0,
+                          "ip": ((local_host_ips[tag] if local and local_host_ips is not None else "")
+                                 if kind == 2 else vtep), "label": 10000 + tag if kind == 2 else 0,
                           "label2": 0, "esi": "00:00:00:00:00:00:00:00:00:00" if kind == 2 else ""}
                 matches = [r for r in rows if all(r.get(k) == v for k, v in wanted.items())]
                 require(len(matches) == 1, f"daemon route differs: {wanted}")

@@ -213,6 +213,33 @@ class BundleOracleTests(unittest.TestCase):
 class ReceiptReplayTests(unittest.TestCase):
     receipt = Path(__file__).resolve().parents[3] / "docs/artifacts/interop/m119-evpn-bundle-vtep-20261010T124729Z"
 
+    def test_exact_optional_host_ips_preserve_mac_only_default(self):
+        for side in ("daemon", "vendor"):
+            with self.subTest(side=side):
+                if side == "daemon":
+                    observation = json.loads((self.receipt / "initial/routes.json").read_text())
+                    check = oracle.daemon_rib
+                    hosts = [r for r in observation if r["route_type"] == 2
+                             and r["peer"] == "0.0.0.0"]
+                    tag_key, ip_key = "ethernet_tag", "ip"
+                else:
+                    observation = rib_snapshot()
+                    check = oracle.srl_rib
+                    hosts = [r for r in observation["network-instance"][0]["bgp-rib"]["afi-safi"][0]["evpn"]["local-rib"]["mac-ip-route"]
+                             if r["neighbor"] == "10.0.119.1"]
+                    tag_key, ip_key = "ethernet-tag-id", "ip-address"
+                check(observation)
+                check(observation, local_host_ips={10: "", 20: ""})
+                for row in hosts:
+                    row[ip_key] = f"198.18.{row[tag_key]}.1"
+                with self.assertRaises(ValueError):
+                    check(observation)
+                with self.assertRaises(ValueError):
+                    check(observation, local_host_ips={10: "", 20: ""})
+                check(observation, local_host_ips={10: "198.18.10.1", 20: "198.18.20.1"})
+                with self.assertRaises(ValueError):
+                    check(observation, local_host_ips={10: "198.18.20.1", 20: "198.18.10.1"})
+
     def test_committed_receipt(self):
         oracle.replay(self.receipt)
 

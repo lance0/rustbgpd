@@ -16,7 +16,7 @@ FIXTURE_RMAC_PREFIX = "fixture-router-mac:"
 FIXTURE_NH_TYPE = "fixture-ifl-next-hop"
 
 
-def vendor_snapshot():
+def vendor_snapshot(learned=False):
     """Synthetic schema fixture; these strings are not vendor observations."""
     routes = []
     attributes = []
@@ -52,7 +52,8 @@ def vendor_snapshot():
                        "path-id": 0, "attr-id": index, "valid-route": True,
                        "best-route": True, "stale-route": False, "pending-delete": False}
                 if kind == "mac-ip-route":
-                    row.update({"mac-length": 48, "mac-address": mac, "ip-address": "0.0.0.0",
+                    row.update({"mac-length": 48, "mac-address": mac,
+                                "ip-address": f"198.18.{tag}.1" if rust and learned else "0.0.0.0",
                                 "esi": "00:00:00:00:00:00:00:00:00:00",
                                 "label1": {"value": 10000 + tag, "value-type": "vni"}})
                 else:
@@ -138,7 +139,7 @@ def vendor_l2_imported_snapshot():
     return snapshots
 
 
-def snapshot():
+def snapshot(learned=False):
     rows = []
     for local, vtep, mac, router_mac, suffixes in (
         (True, "10.0.119.1", "02:aa:bb:01:19:01", "02:00:00:01:20:01", (121, 124)),
@@ -149,7 +150,9 @@ def snapshot():
             for kind in (2, 3):
                 rows.append({"route_type": kind, "rd": f"{vtep}:{tag if local else remote_rd}",
                              "ethernet_tag": str(tag), "next_hop": vtep, "peer": peer,
-                             "mac": mac if kind == 2 else "", "ip": "" if kind == 2 else vtep,
+                             "mac": mac if kind == 2 else "",
+                             "ip": ((f"198.18.{tag}.1" if local and learned else "")
+                                    if kind == 2 else vtep),
                              "label": 10000 + tag if kind == 2 else 0, "label2": 0,
                              "esi": "00:00:00:00:00:00:00:00:00:00" if kind == 2 else "",
                              "tunnel_type": 8, "extended_communities": [842122827661412, 219550481834311688]})
@@ -210,7 +213,7 @@ def snapshot():
                         "installed_routes_count": 4,
                         "remote_prefix_drop_counts": [{"reason": "self_originated", "count": 4}]},
     }
-    observation.update(vendor_snapshot())
+    observation.update(vendor_snapshot(learned))
     observation.update(vendor_l2_imported_snapshot())
     return observation
 
@@ -233,7 +236,7 @@ def write(directory, observation):
 
 def write_receipt(directory):
     for phase in ("startup", "initial", "remote-withdrawn", "restored", "rejected-reload", "unlinked", "relinked", "final"):
-        observation = snapshot()
+        observation = snapshot(learned=phase != "startup")
         if phase == "remote-withdrawn":
             withdraw(observation)
         elif phase == "unlinked":
@@ -242,6 +245,16 @@ def write_receipt(directory):
         elif phase in ("relinked", "final"):
             observation["runtime.json"]["generation"] = 44
         write(directory / phase, observation)
+
+
+def local_host_paths(observation, side):
+    if side == "daemon":
+        rows = observation["routes.json"]
+        hosts = [r for r in rows if r["route_type"] == 2 and r["mac"] == "02:aa:bb:01:19:01"]
+        return rows, hosts, "ip", "ethernet_tag"
+    rows = observation["srl-rib.json"]["network-instance"][0]["bgp-rib"]["afi-safi"][0]["evpn"]["local-rib"]["mac-ip-route"]
+    hosts = [r for r in rows if r["mac-address"].lower() == "02:aa:bb:01:19:01"]
+    return rows, hosts, "ip-address", "ethernet-tag-id"
 
 
 class BundleIrbOracleTests(unittest.TestCase):
@@ -275,8 +288,8 @@ class BundleIrbOracleTests(unittest.TestCase):
             if attr["next-hop"] == "192.0.2.2" and "target:65000:50120" in attr["communities"]["ext-community"]:
                 attr["communities"]["ext-community"][2] = FIXTURE_RMAC_PREFIX + alternate
         with tempfile.TemporaryDirectory() as temporary:
-            write(Path(temporary), good)
-            oracle.state(Path(temporary))
+            write(Path(temporary) / "startup", good)
+            oracle.state(Path(temporary) / "startup")
 
     def test_vendor_router_mac_must_be_valid_unicast_and_from_l3_member(self):
         for mac in (None, "00:00:00:00:00:00", "01:00:5e:00:00:01", "ff:ff:ff:ff:ff:ff", "02:00:00:01:20"):
@@ -309,6 +322,115 @@ class BundleIrbOracleTests(unittest.TestCase):
             directory = Path(temporary)
             write_receipt(directory)
             oracle.replay(directory)
+
+    def check_learned_host_paths(self, observation, side):
+        expected = {10: "198.18.10.1", 20: "198.18.20.1"}
+        if side == "daemon":
+            oracle.daemon_l2(observation["routes.json"], observation["instances.json"], IRB_MACS,
+                             local_host_ips=expected)
+        else:
+            oracle.vendor_l2_rib(observation["srl-rib.json"], IRB_MACS, local_host_ips=expected)
+
+    def test_every_phase_requires_its_exact_host_ip_form_on_both_peers(self):
+        for phase in oracle.PHASES:
+            for side in ("daemon", "vendor"):
+                for tag in (10, 20):
+                    with self.subTest(phase=phase, side=side, tag=tag), tempfile.TemporaryDirectory() as temporary:
+                        directory = Path(temporary)
+                        write_receipt(directory)
+                        phase_dir = directory / phase
+                        name = "routes.json" if side == "daemon" else "srl-rib.json"
+                        observation = {name: json.loads((phase_dir / name).read_text())}
+                        _, hosts, ip_key, tag_key = local_host_paths(observation, side)
+                        row = next(r for r in hosts if int(r[tag_key]) == tag)
+                        row[ip_key] = (f"198.18.{tag}.1" if phase == "startup"
+                                       else "" if side == "daemon" else "0.0.0.0")
+                        (phase_dir / name).write_text(json.dumps(observation[name]))
+                        with self.assertRaises(ValueError):
+                            oracle.state(phase_dir, "remote-withdrawn" if phase == "remote-withdrawn" else "full")
+
+    def test_learned_host_ip_is_bound_to_the_configured_member(self):
+        for side in ("daemon", "vendor"):
+            good = snapshot(learned=True)
+            self.check_learned_host_paths(good, side)
+            for tag in (10, 20):
+                for wrong in (f"198.18.{tag}.2", f"198.18.{tag}.253", f"198.18.{tag}.254",
+                              f"198.18.{30 - tag}.1", "203.0.113.1", "198.18.10.1/32"):
+                    with self.subTest(side=side, tag=tag, wrong=wrong):
+                        bad = copy.deepcopy(good)
+                        _, hosts, ip_key, tag_key = local_host_paths(bad, side)
+                        next(r for r in hosts if int(r[tag_key]) == tag)[ip_key] = wrong
+                        with self.assertRaises(ValueError):
+                            self.check_learned_host_paths(bad, side)
+            bad = copy.deepcopy(good)
+            _, hosts, ip_key, _ = local_host_paths(bad, side)
+            hosts[0][ip_key], hosts[1][ip_key] = hosts[1][ip_key], hosts[0][ip_key]
+            with self.subTest(side=side, case="swapped"), self.assertRaises(ValueError):
+                self.check_learned_host_paths(bad, side)
+            self.assertEqual(good, snapshot(learned=True))
+
+    def test_learned_host_inventory_rejects_missing_duplicate_and_coexisting_forms(self):
+        for side in ("daemon", "vendor"):
+            for tag in (10, 20):
+                for case in ("missing", "duplicate", "coexisting-mac-only", "extra-ip"):
+                    with self.subTest(side=side, tag=tag, case=case):
+                        bad = snapshot(learned=True)
+                        rows, hosts, ip_key, tag_key = local_host_paths(bad, side)
+                        row = next(r for r in hosts if int(r[tag_key]) == tag)
+                        if case == "missing":
+                            rows.remove(row)
+                        else:
+                            extra = copy.deepcopy(row)
+                            if case == "coexisting-mac-only":
+                                extra[ip_key] = "" if side == "daemon" else "0.0.0.0"
+                            elif case == "extra-ip":
+                                extra[ip_key] = f"198.18.{tag}.99"
+                            rows.append(extra)
+                        with self.assertRaises(ValueError):
+                            self.check_learned_host_paths(bad, side)
+
+    def test_learned_host_keeps_exact_tuple_and_referenced_attributes(self):
+        changes = {
+            "daemon": (("rd", "10.0.119.1:20"), ("ethernet_tag", "20"),
+                       ("mac", "02:aa:bb:01:19:ff"), ("label", 10020), ("label2", 50120),
+                       ("esi", "00:01:02:03:04:05:06:07:08:09"), ("peer", "10.0.119.2"),
+                       ("next_hop", "192.0.2.2"), ("tunnel_type", 1),
+                       ("extended_communities", [842122827661413, 219550481834311688]),
+                       ("extended_communities", [842122827661412])),
+            "vendor": (("route-distinguisher", "10.0.119.1:20"), ("ethernet-tag-id", 20),
+                       ("mac-address", "02:aa:bb:01:19:ff"), ("mac-length", 40),
+                       ("label1", {"value": 10020, "value-type": "vni"}),
+                       ("label2", {"value": 50120, "value-type": "vni"}),
+                       ("esi", "00:01:02:03:04:05:06:07:08:09"), ("neighbor", "0.0.0.0"),
+                       ("path-id", 1), ("valid-route", False), ("best-route", False),
+                       ("stale-route", True), ("pending-delete", True)),
+        }
+        for side, fields in changes.items():
+            for field, wrong in fields:
+                with self.subTest(side=side, field=field, wrong=wrong):
+                    bad = snapshot(learned=True)
+                    _, hosts, _, tag_key = local_host_paths(bad, side)
+                    next(r for r in hosts if int(r[tag_key]) == 10)[field] = wrong
+                    with self.assertRaises(ValueError):
+                        self.check_learned_host_paths(bad, side)
+        for field, wrong in (("next-hop", "192.0.2.2"),
+                             ("communities", {"ext-community": ["target:65000:200", "bgp-tunnel-encap:VXLAN"]}),
+                             ("communities", {"ext-community": ["target:65000:100", "bgp-tunnel-encap:MPLS"]})):
+            with self.subTest(field=field, wrong=wrong):
+                bad = snapshot(learned=True)
+                _, hosts, _, _ = local_host_paths(bad, "vendor")
+                rib = bad["srl-rib.json"]["network-instance"][0]["bgp-rib"]
+                attrs = rib["attr-sets"]["attr-set"]
+                redirected = copy.deepcopy(next(r for r in attrs if r["index"] == hosts[0]["attr-id"]))
+                redirected.update({"index": 999, field: wrong})
+                attrs.append(redirected)
+                hosts[0]["attr-id"] = 999
+                with self.assertRaises(ValueError):
+                    self.check_learned_host_paths(bad, "vendor")
+
+    def test_unknown_phase_cannot_choose_a_host_ip_expectation(self):
+        with self.assertRaisesRegex(ValueError, "unknown M120 phase"):
+            oracle.state(Path("unknown-phase"))
 
     def test_vendor_l2_rib_requires_exact_inventory_and_member_identity(self):
         good = snapshot()["srl-rib.json"]
@@ -744,9 +866,9 @@ class BundleIrbOracleTests(unittest.TestCase):
                 observation["fdb.txt"] += (
                     f"\n02:de:ad:01:20:99 dev vxlan{10000 + tag} "
                     "dst 192.0.2.2 self extern_learn permanent")
-                write(Path(temporary), observation)
+                write(Path(temporary) / "startup", observation)
                 with self.assertRaisesRegex(ValueError, "unexpected managed FDB row"):
-                    oracle.state(Path(temporary))
+                    oracle.state(Path(temporary) / "startup")
 
     def test_replay_rejects_transient_unrelated_managed_l2_mac(self):
         with tempfile.TemporaryDirectory() as temporary:

@@ -141,7 +141,7 @@ def kernel_fdb(text, remote_mac):
     l2.fdb("\n".join(" ".join(r) for r in subset))
 
 
-def daemon_l2(rows, instances, irb_macs):
+def daemon_l2(rows, instances, irb_macs, *, local_host_ips=None):
     require(set(irb_macs) == {10, 20}, "independent IRB member inventory differs")
     require(all(row["route_type"] in (2, 3, 5) for row in rows), "unexpected EVPN route type")
     subset = [r for r in rows if r["route_type"] in (2, 3)]
@@ -159,7 +159,7 @@ def daemon_l2(rows, instances, irb_macs):
                     and [c for c in communities if c >> 48 == 0x030C] == [VXLAN],
                     f"daemon IRB Type 2 tag {tag} RT or encapsulation differs")
             irb_rows.extend(matches)
-    l2.daemon_rib([r for r in subset if r not in irb_rows])
+    l2.daemon_rib([r for r in subset if r not in irb_rows], local_host_ips=local_host_ips)
     require(sorted(row["vni"] for row in instances) == [10010, 10020], "bundle member inventory differs")
     for row in instances:
         tag = row["vni"] - 10000
@@ -425,7 +425,7 @@ def vendor_irb_macs(directory):
     return macs
 
 
-def vendor_l2_rib(observation, irb_macs):
+def vendor_l2_rib(observation, irb_macs, *, local_host_ips=None):
     # Type 5 is independently checked by vendor_l3_rib. Validate the full
     # inventory before passing precisely the Type 2/3 subset to M119.
     subset = deepcopy(observation)
@@ -462,7 +462,8 @@ def vendor_l2_rib(observation, irb_macs):
             irb_rows.extend(matches)
     routes["mac-ip-route"] = [r for r in routes["mac-ip-route"] if r not in irb_rows]
     del routes["ip-prefix-route"]
-    l2.srl_rib({"network-instance": [{"name": "default", "bgp-rib": rib}]})
+    l2.srl_rib({"network-instance": [{"name": "default", "bgp-rib": rib}]},
+               local_host_ips=local_host_ips)
 
 
 def vendor_l2_imported(directory):
@@ -495,7 +496,15 @@ def vendor_l2_imported(directory):
 
 
 
+PHASES = ("startup", "initial", "remote-withdrawn", "restored", "rejected-reload", "unlinked", "relinked", "final")
+
+
 def state(directory, mode="full"):
+    require(directory.name in PHASES, "unknown M120 phase")
+    # Warmup ARP replaces each local MAC-only NLRI with its configured host
+    # MAC/IP NLRI. Require that handoff in every later phase on both peers.
+    local_host_ips = {tag: "" if directory.name == "startup" else f"198.18.{tag}.1"
+                      for tag in (10, 20)}
     effective_config(read(directory, "effective-config.json"), directory.name == "unlinked")
     runtime(read(directory, "runtime.json"))
     session(directory)
@@ -503,20 +512,20 @@ def state(directory, mode="full"):
     irb_macs = vendor_irb_macs(directory)
     rows = read(directory, "routes.json")
     daemon_l3(rows, remote_mac, mode)
-    daemon_l2(rows, read(directory, "instances.json"), irb_macs)
+    daemon_l2(rows, read(directory, "instances.json"), irb_macs, local_host_ips=local_host_ips)
     kernel_routes(read(directory, "kernel-routes.json"), mode)
     kernel_neighbor(read(directory, "kernel-neighbors.json"), remote_mac)
     kernel_fdb((directory / "fdb.txt").read_text(), remote_mac)
     ip_vrf(read(directory, "ip-vrf.json"), mode)
     vendor_l3_state(directory, mode)
-    vendor_l2_rib(read(directory, "srl-rib.json"), irb_macs)
+    vendor_l2_rib(read(directory, "srl-rib.json"), irb_macs, local_host_ips=local_host_ips)
     vendor_l2_imported(directory)
 
 
 def replay(directory):
     generation = runtime(read(directory / "initial", "runtime.json"))
     transitions = set()
-    for phase in ("startup", "initial", "remote-withdrawn", "restored", "rejected-reload", "unlinked", "relinked", "final"):
+    for phase in PHASES:
         phase_dir = directory / phase
         state(phase_dir, "remote-withdrawn" if phase == "remote-withdrawn" else "full")
         increment = 2 if phase in ("relinked", "final") else int(phase == "unlinked")
