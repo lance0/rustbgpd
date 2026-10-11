@@ -561,3 +561,222 @@ Persistent publication is conditional on a measured remaining problem and
 its field-level contract. Complete neighbor responses and import policy
 statistics still depend on session tasks. Paged tables and explain remain
 actor-served; a separate read owner and process split are not selected.
+
+## Amendment (2026-10-10): reads overlapping reload completion
+
+**Status of this amendment:** accepted and implemented.
+
+### Problem
+
+A neighbor read admitted at a transaction wait is answered in place:
+`await_with_readiness` runs the admitted `ListPeers` handler to completion
+before it polls the owner's future again. That handler fans out one
+`QueryState` to every session and joins all replies, and the owner cannot
+continue in the meantime. When the read overlaps the RIB commit of a cohort
+export-policy transition, the sessions answer during the following
+re-advertisement and shared encoding, so the reload waits for the slowest
+session reply even though the RIB reply is already ready.
+
+On the default policy-stats cell (1,000 peers, 400,000 IPv4 prefixes, eight
+reloads per process, two processes per arm, one same-host window), the read
+pair starts about 55 ms before commit once the fenced transition is shorter
+than the cell's 110 ms read lead. Main at `310276878` completes SIGHUP in a
+pooled median of 808.5 ms against 742.3 ms for the #2952 parent. Additive
+per-reload means attribute the difference to the wait after the RIB reply
+(20.9 → 74.6 ms) rather than to the RIB transition (204.4 → 55.5 ms). The
+parent binary has the same delay when its read is placed at the same offset:
+the median rises to 911.9 ms, and seven of 16 reloads wait more than 100 ms
+after the RIB commit. This is a read-admission interlock, not added RIB work.
+Neither the shared-encoding yield nor further RIB work can remove it: the
+owner waits for a read that it does not need.
+
+### Options considered
+
+- **C, persistent publication**, would remove the session dependency only
+  if sessions published their own observations. That needs the acquisition,
+  identity and freshness contract listed above for every session field, and
+  it changes `stale` from "unavailable now" to an aged observation. That is
+  more than this problem requires.
+- **D, a separate read owner**, would move the queue into another task
+  without changing what the owner must wait for. It also adds feed ordering
+  and lag rules.
+- **F, ordered detached collection (selected).** The owner admits the read,
+  captures the manager half of every row, and enqueues every session query
+  before resuming. A per-read task completes the join and replies. No view
+  outlives the read and no persistent publisher is introduced.
+
+### Selected contract
+
+This applies only to `ListPeers` reads admitted by `await_with_readiness` or
+`await_with_readiness_budget` (the operator arm at transaction waits). The
+ordinary lane, readiness `ListPeers`, `GetPeerState` and the other operator
+queries keep their current in-place behavior.
+
+**Admission point.** When the operator arm receives `ListPeers`, the owner
+does three things synchronously, with no await between them:
+
+1. It records the operator-wait observation, as it does today.
+2. It captures, for every peer in `PeerTable` order, the values that
+   `build_peer_info` takes from the manager. These are `ManagedPeerState`
+   fields, the RFC 8212 statuses and posture, and max-prefix latch errors
+   and deadlines. It also captures each peer's command sender.
+3. It calls `try_reserve` on every session command channel and then sends one
+   `QueryState` through each permit.
+
+If any channel is full (it already holds eight commands), the owner drops
+all of its permits and serves the read in place, exactly as before. It does
+the same when the detached-read limit below is reached. These are the only
+conditions that select the old path. A closed channel is not a fallback:
+that session's row is reported unavailable, which is what the in-place
+fan-out reports when its send fails.
+
+**Row semantics.** Every field that comes from the manager has its value at
+the admission point. Every field that comes from a session has the value at
+the moment that session dequeues the query. That moment is after admission
+and before the session executes any command the owner enqueues after
+admission. Session command channels are FIFO, and the shared-group and
+replay read pumps preserve that order: a deferred non-read command blocks
+later commands, and only canceled reads are discarded.
+
+The table below covers a read admitted before a cohort RIB commit:
+
+| Field source | Value reported |
+|---|---|
+| Manager configuration, transport metadata, installed-chain RFC 8212 status, dynamic provenance, latch | pre-commit admission value. Before every cohort wait, the cohort has already applied its sessions and updated their bookkeeping, so these already describe the target policy |
+| Session FSM, negotiated state, effective max-prefix and Add-Path limits, role | the session's own state before any later owner command. A cohort commit sends no session command, so these are unchanged by the commit |
+| Session counters (`updates_sent`, `messages_sent`, prefix counts, policy permit/deny counts) | live at the dequeue, so they can include post-commit re-advertisement. The in-place contract already allows this, because the RIB drives delivery independently of the peer manager |
+| RIB stage (`NeighborRibSnapshots`) | unchanged: a separate stage with no shared generation pin |
+
+**A torn configuration row is not possible.** ADR-0132 admits reads only
+where manager bookkeeping agrees with every acknowledged session command:
+per-session acknowledgements remain fenced until bookkeeping. The owner
+changes a session's configuration only through commands on that session's
+channel. Any such command is therefore ordered after the read's query, and
+the session reports the state that matches the captured manager half. The
+implementation must enumerate every `Served` wait and keep in place any
+wait that spans an unacknowledged session configuration command. The
+replay-scheduling wait spans `ReplayOutbound`, which changes no row field
+and qualifies.
+
+Two outcomes that already exist cover the remaining cases:
+
+- **Unavailable session state.** A session that does not answer within
+  `PEER_QUERY_TIMEOUT` of admission, or whose task has exited, yields
+  `stale=true` with admission-time manager values. A peer that is removed or
+  replaced after admission still answers the queued query before its later
+  shutdown command. If the old task is aborted first, the row is stale. A
+  replacement handle never answers the old read.
+- **Membership at admission.** The read contains exactly the peers present at
+  admission. A peer added after admission is absent.
+
+### Ownership, cancellation and shutdown
+
+The peer manager owns a `JoinSet` of detached collections. It holds at most
+as many as the operator lane's capacity and reaps finished entries at each
+admission. Each task owns:
+
+- the API reply sender;
+- the captured rows;
+- the per-session reply receivers;
+- one absolute deadline: admission plus `PEER_QUERY_TIMEOUT`.
+
+The owner never awaits these tasks during a transaction or an ordinary step.
+
+- **Caller cancellation.** The task selects on `reply.closed()` and returns,
+  which drops the session receivers. Sessions already skip canceled
+  `QueryState` commands through `is_canceled_read`.
+- **Reply loss and panics.** If a task panics or is aborted, its reply sender
+  drops. The API returns its existing unavailable status for a dropped
+  peer-manager reply, and the owner logs the join error at reap.
+- **Shutdown.** Dropping the peer manager aborts the set. An in-flight read
+  receives the same dropped-reply error instead of delaying shutdown. Today
+  such a read delays shutdown until its fan-out returns. No read can keep the
+  owner or a session handle alive past the manager's teardown.
+- **Owner budgets.** A detached read never extends the wait that admitted it,
+  and `await_with_readiness_budget` charges it no service time. Reads served
+  in place keep the existing charging rules.
+
+### Compatibility surfaces
+
+- **Protobuf, CLI and gNMI.** No field, type, status code or deadline changes,
+  and `stale` keeps its meaning (an unavailable observation). The
+  observation point changes for `ListNeighbors`, the gNMI neighbor tree and
+  `TestPolicy`'s peer stage when they run during a configuration
+  transaction. Before, the manager half was read after the fan-out, while
+  the owner was frozen. Now it is read at admission, and the owner may finish
+  the transaction before the reply is sent.
+- **Ordering.** A neighbor read can now complete after
+  `config reload complete`. Its rows describe manager state at admission.
+- **Documentation.** The neighbor section of `docs/reference/api.md` states
+  the observation point. Every `Served` row of the wait-site matrix above
+  now detaches an admitted `ListPeers` when it can; reads drained between
+  serial acknowledgements (`drain_operator_queries`) remain in place.
+- **Upgrade and changelog.** An upgrade note covers clients that correlate
+  neighbor reads with reload completion, and a `Changed` entry covers reload
+  completion no longer waiting for an overlapping neighbor read.
+- **Metrics.** `bgp_peer_manager_operator_query_wait_seconds` keeps its
+  admission-time sample.
+
+### Regression plan
+
+Extend `src/peer_manager/tests/wait_sites.rs` with held sessions and the
+held-RIB fixture. Use explicit channel handshakes on paused time, with no
+sleeps.
+
+1. Drive a cohort transaction to `ReplacePeerExportPolicies`, then hold it.
+2. Send `ListPeers`. Observe one `QueryState` arrive on every session, and
+   hold the first session's reply.
+3. Release the cohort reply as `Committed`. Assert that the owner returns its
+   committed result while the `ListPeers` reply is still pending.
+4. Have the owner enqueue a configuration command to the held session after
+   the transaction, such as a hot-knob update. Assert that the session
+   dequeues it only after answering the held query. Answer the query with
+   the pre-command state.
+5. Assert that the reply rows pair the admission-time manager values with
+   that pre-command session state. Assert that no row is stale.
+
+Prove the regression is red by restoring in-place service for the operator
+arm: step 3 must fail. Add companion tests for the edge cases:
+
+- a full session channel at admission serves the read in place, and the
+  owner waits;
+- the detached limit falls back to in-place service;
+- caller cancellation drops the queries;
+- peer-manager drop with a read in flight returns the dropped-reply error
+  without hanging;
+- a peer replaced after admission yields a stale row, not a reply from the
+  replacement handle.
+
+Update the existing matrix cases that asserted that the owner waits for an
+admitted `ListPeers`; that wait is no longer the contract.
+
+### Acceptance measurement
+
+Build the #2952 parent (`3bbc1576`), the merge-base main and the candidate
+with the same locked package command and toolchain, and use one common
+`rbgp`. Run the unchanged default policy-stats cell with the default
+`PAIR_LEAD=0.110`, eight reloads per process and two processes per arm.
+Use the balanced order P, M, C, C, M, P in one window, under the canonical
+host lock, with the quiet gate before each leg and no concurrent builds.
+
+The candidate passes when:
+
+- every cell has a native PASS, with no read deadline miss or call over two
+  seconds;
+- its pooled SIGHUP→complete median is at or below the parent's pooled
+  median in the same window;
+- its logged RIB transition median stays within a few milliseconds of main's
+  (about 55 ms).
+
+Report process medians and ranges, the additive per-reload means and the
+neighbor RPC distribution. The read moves off the reload path but still
+competes for the daemon CPUs, so its own duration is not expected to fall.
+
+The expected margin is small. In the attribution window, main's prestage
+round trip is about 138 ms longer than the parent's, because the inventory
+probe moved unfenced into prestage. Main's fenced transition is about 149 ms
+shorter. Removing the continuation wait is therefore expected to bring main
+to approximately the parent's completion, not clearly below it. If the
+candidate misses the bar by less than that window's spread, the next
+question is the unfenced prestage probe cost. That separate decision must
+not be answered by relaxing this bar.
