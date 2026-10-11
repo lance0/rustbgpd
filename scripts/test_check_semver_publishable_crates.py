@@ -210,6 +210,17 @@ class PublishableCrateContractTests(unittest.TestCase):
                     lambda _name: RegistryState.NORMAL_RELEASE,
                 )
 
+    def test_scalar_valued_paths_key_is_not_a_filter(self) -> None:
+        for value in ("|", ">-", "[]"):
+            with self.subTest(value=value), self.assertRaisesRegex(
+                ContractError, "paths filter is missing"
+            ):
+                derive(
+                    metadata(),
+                    WORKFLOW.replace("    paths:\n", f"    paths: {value}\n"),
+                    lambda _name: RegistryState.NORMAL_RELEASE,
+                )
+
     def test_only_pull_request_paths_count(self) -> None:
         moved = WORKFLOW.replace('      - "crates/wire/**"\n', "").replace(
             '    tags: ["v*"]\n',

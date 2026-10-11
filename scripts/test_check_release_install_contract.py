@@ -824,6 +824,24 @@ class ReleaseInstallContractTest(unittest.TestCase):
                         f"release install workflow must trigger for {relative}", errors
                     )
 
+    def test_scalar_valued_paths_key_is_not_a_filter(self) -> None:
+        header = "    paths:\n"
+        for occurrence in range(2):
+            for value in ("|", ">-", "[]"):
+                with self.subTest(occurrence=occurrence, value=value):
+                    root = self.fixture()
+                    path = root / WORKFLOW
+                    text = path.read_text()
+                    self.assertEqual(text.count(header), 2)
+                    at = text.find(header) if occurrence == 0 else text.rfind(header)
+                    path.write_text(
+                        text[:at] + f"    paths: {value}\n" + text[at + len(header) :]
+                    )
+                    errors = contract.check(root)
+                    self.assertIn(
+                        "release install workflow must trigger for LICENSES.md", errors
+                    )
+
     def test_duplicate_entry_does_not_cover_the_other_filter(self) -> None:
         monitoring = {source for source, _, _ in contract.MONITORING}
         for relative in (path for path in INPUTS if path not in monitoring):

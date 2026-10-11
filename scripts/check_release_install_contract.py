@@ -188,7 +188,9 @@ def trigger_paths(workflow: str, event: str) -> set[str]:
             if [key for _, key in stack] == ["on", event, "paths"]:
                 paths.add(line.lstrip()[2:].strip().strip("\"'"))
         elif key := re.match(r"\s*([\w-]+):(?:\s|$)", line):
-            stack.append((indent, key.group(1)))
+            # Only a bare `key:` opens a mapping or sequence. A key with an
+            # inline value (block scalar, flow value) shadows what follows.
+            stack.append((indent, key.group(1) if line.endswith(":") else ""))
     return paths
 
 
