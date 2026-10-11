@@ -2511,3 +2511,39 @@ async fn session_replaced_mid_snapshot_reports_the_row_stale() {
         "the replacement session never receives the earlier snapshot's query"
     );
 }
+
+/// Every row shares the admission deadline: a row joined after an earlier
+/// held row does not get a fresh timeout of its own.
+#[tokio::test(start_paused = true)]
+async fn detached_snapshot_reply_after_the_deadline_is_stale_behind_a_held_row() {
+    let (rib_tx, _rib_rx) = mpsc::channel(16);
+    let (mut manager, _operator_tx, mut first, mut second) = detach_fixture(rib_tx, 4, 16);
+    first.hold.store(true, Ordering::SeqCst);
+    second.hold.store(true, Ordering::SeqCst);
+    // Rows follow peer-table order; hold whichever row is joined first.
+    let first_row = manager.peers.keys().next().unwrap().address;
+    let (held, late) = if first_row == DETACH_FIRST {
+        (&mut first, &mut second)
+    } else {
+        (&mut second, &mut first)
+    };
+    let late_addr = if first_row == DETACH_FIRST {
+        DETACH_SECOND
+    } else {
+        DETACH_FIRST
+    };
+    let admitted = tokio::time::Instant::now();
+    let infos = admit_list_peers(&mut manager).await;
+    let (_held_reply, _held_resume) = held_state_query(held).await;
+    let (late_reply, _late_resume) = held_state_query(late).await;
+    let answer = tokio::spawn(async move {
+        tokio::time::sleep_until(admitted + PEER_QUERY_TIMEOUT + Duration::from_millis(1)).await;
+        let _ = late_reply.send(policy_test_peer_state(late_addr, SessionState::Established));
+    });
+    let infos = infos.await.unwrap();
+    answer.await.unwrap();
+    assert!(
+        row(&infos, late_addr).stale,
+        "a reply after the deadline is not fresh"
+    );
+}

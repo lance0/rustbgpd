@@ -338,9 +338,14 @@ struct DetachedPeerRow {
 }
 
 /// Join one detached neighbor snapshot (ADR-0132, 2026-10-10 amendment).
-/// Every query was enqueued at admission, so waiting for each reply in turn
-/// under one absolute deadline waits for them concurrently. Caller
-/// cancellation drops the receivers, which marks the queued reads canceled.
+/// Every query was enqueued at admission and each oneshot buffers its reply,
+/// so awaiting the rows in turn under one shared absolute deadline gives each
+/// row the outcome of waiting for all of them at once: a reply delivered
+/// before the deadline is used even while an earlier row is still pending,
+/// and a row with no reply when the deadline is observed is stale. As with
+/// any tokio timeout, a reply delivered between the deadline and this task's
+/// next poll is still used. Caller cancellation drops the receivers, which
+/// marks the queued reads canceled.
 async fn complete_detached_list_peers(
     rows: Vec<DetachedPeerRow>,
     mut reply: oneshot::Sender<Vec<PeerInfo>>,
