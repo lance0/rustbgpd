@@ -1,0 +1,38 @@
+[global]
+asn = 65001
+router_id = "RR_ID"
+cluster_id = "CLUSTER_ID"
+listen_port = 179
+
+[global.telemetry]
+prometheus_addr = "0.0.0.0:9179"
+log_format = "json"
+
+[global.telemetry.grpc_tcp]
+address = "0.0.0.0:50051"
+token_file = "/run/rustbgpd/grpc-test-only-operator.token"
+principal = "rustbgpd://operator/test-only"
+
+[bmp]
+sys_name = "rr-upgrade-trial"
+[[bmp.collectors]]
+address = "SINK_ADDR:SINK_PORT"
+version = 3
+monitor = ["rib_out_post"]
+
+[[neighbors]]
+address = "ORIGINATOR_ADDR"
+remote_asn = 65001
+route_reflector_client = true
+families = ["ipv4_unicast"]
+
+[[neighbors]]
+address = "OBSERVER_ADDR"
+remote_asn = 65001
+route_reflector_client = true
+families = ["ipv4_unicast"]
+
+[security.grpc]
+enforcement = "tier"
+[security.grpc.roles]
+"rustbgpd://operator/test-only" = "operator"

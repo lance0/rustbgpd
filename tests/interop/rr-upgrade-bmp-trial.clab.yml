@@ -1,0 +1,39 @@
+# Local upgrade trial only; does not qualify an external incumbent RR.
+# RR_MAIN_IMAGE_ALIAS is an owned retained alias: containerlab cannot use a
+# bare sha256 image ID here. The driver verifies its separate RR_MAIN_IMAGE
+# immutable ID and pinned source. The released daemon is copied into incumbent
+# after its original archive digest is verified. No shared image tag changes.
+name: rr-upgrade-bmp-trial
+
+topology:
+  nodes:
+    main:
+      kind: linux
+      image: ${RR_MAIN_IMAGE_ALIAS}
+      cmd: sleep infinity
+      binds:
+        - ../fixtures/grpc-test-only-operator.token:/run/rustbgpd/grpc-test-only-operator.token:ro
+    incumbent:
+      kind: linux
+      image: ${RR_MAIN_IMAGE_ALIAS}
+      cmd: sleep infinity
+      binds:
+        - ../fixtures/grpc-test-only-operator.token:/run/rustbgpd/grpc-test-only-operator.token:ro
+    originator:
+      kind: linux
+      image: gobgp:v4.10.0-m76
+      cmd: sleep infinity
+    observer:
+      kind: linux
+      image: gobgp:v4.10.0-m76
+      cmd: sleep infinity
+    bmpsink:
+      kind: linux
+      image: bmpsink:m81
+      cmd: sleep infinity
+      binds:
+        - ./scripts/bmp-raw-sink.py:/usr/local/bin/bmp-raw-sink.py:ro
+
+# All four BGP sessions and both BMP streams use this lab's management
+# network. Each RR therefore sees the same originator and observer addresses.
+# The observer installs no forwarding routes and advertises no routes.
