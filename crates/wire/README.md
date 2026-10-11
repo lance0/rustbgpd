@@ -412,8 +412,13 @@ rustbgpd-wire = "0.24.0"
 bytes = "1"
 ```
 
-To build against a source checkout instead, replace the version with
-`path = "../rustbgpd/crates/wire"`.
+To build against a source checkout instead, depend on its path:
+
+```toml
+[dependencies]
+rustbgpd-wire = { path = "../rustbgpd/crates/wire" }
+bytes = "1"
+```
 
 `decode_message` accepts `&mut bytes::Bytes`. The `bytes` crate is a public
 dependency of `rustbgpd-wire`, but the crate root does not expose a stable

@@ -88,9 +88,14 @@ rustbgpd-rpki = "0.6.0"
 rustbgpd-wire = "0.24.0"
 ```
 
-To build against a source checkout instead, give both crates paths
-(`../rustbgpd/crates/rpki` and `../rustbgpd/crates/wire`) from one rustbgpd
-checkout.
+To build against a source checkout instead, take both crates from the same
+checkout:
+
+```toml
+[dependencies]
+rustbgpd-rpki = { path = "../rustbgpd/crates/rpki" }
+rustbgpd-wire = { path = "../rustbgpd/crates/wire" }
+```
 
 ```rust
 use std::net::{IpAddr, Ipv4Addr};
