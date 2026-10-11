@@ -67,6 +67,14 @@ docker exec "$OLD" mkdir /opt/incumbent
 docker cp "$ARTIFACT_DIR/release/rustbgpd" "$OLD:/opt/incumbent/rustbgpd"
 docker cp "$MAIN:/usr/local/bin/rbgp" "$ARTIFACT_DIR/rbgp"
 RBGP=$ARTIFACT_DIR/rbgp
+comparator_status=0
+"$RBGP" --version > "$ARTIFACT_DIR/comparator-exec.log" 2>&1 || comparator_status=$?
+printf '%s\n' "$comparator_status" > "$ARTIFACT_DIR/comparator-exec.exit"
+if [ "$comparator_status" -ne 0 ]; then
+    echo 'Cannot execute the copied rbgp comparator: the Linux amd64 host needs a Debian 12 (Bookworm)-compatible glibc loader and libraries.' >&2
+    cat "$ARTIFACT_DIR/comparator-exec.log" >&2
+    exit "$comparator_status"
+fi
 test "$(docker exec "$OLD" /opt/incumbent/rustbgpd --version)" = 'rustbgpd 0.75.0'
 for node in "$SOURCE" "$OBSERVER"; do
     test "$(docker exec "$node" gobgp --version)" = 'gobgp version 4.10.0'
@@ -191,7 +199,8 @@ phase() {
     wait_until 60 1 observer_ready "$main_ip" "$cluster" "$ARTIFACT_DIR/$name/observer-main.json"
     docker exec "$OBSERVER" gobgp neighbor "$old_ip" -j > "$ARTIFACT_DIR/$name/observer-incumbent-session.json"
     docker exec "$OBSERVER" gobgp neighbor "$main_ip" -j > "$ARTIFACT_DIR/$name/observer-main-session.json"
-    convert_phase "$name" "$connection" "$cluster" "$generation"
+    # Observer delivery can precede BMP export or a complete sink JSONL write.
+    wait_until 30 1 convert_phase "$name" "$connection" "$cluster" "$generation"
     "$RBGP" diff snapshots "$ARTIFACT_DIR/$name/incumbent.ndjson" "$ARTIFACT_DIR/$name/main.ndjson" --json > "$ARTIFACT_DIR/$name/diff.json" || status=$?
     printf '%s\n' "$status" > "$ARTIFACT_DIR/$name/diff.exit"
     test "$status" -eq "$expected"

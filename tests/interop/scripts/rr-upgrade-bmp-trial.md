@@ -21,6 +21,10 @@ negotiation and EOR completeness. The additional checker requires O=1/L=1,
 one observer generation, a nonempty route inventory, and exact numeric type
 9/10 flags and value bytes. GoBGP's separate per-neighbor Adj-RIB-In captures
 prove actual observer delivery, including NEXT_HOP and reflection attributes.
+Observer delivery can precede BMP export. Each phase therefore retries capture
+and strict conversion for up to 30 attempts, one second apart, before comparing
+the complete nonempty snapshots; a partial JSONL write or missing BMP data
+cannot make the phase pass.
 
 The equal phase must exit 0 with one matched route. The driver then disables
 only main's two peer sessions, terminates that daemon, changes its actual
@@ -62,7 +66,11 @@ guard proves its build inputs match the pinned commit. No shared image alias
 needs to change.
 
 Required host tools: Docker, containerlab, grpcurl, jq, Python 3, Bash, Git,
-tar and sha256sum. The host must run Linux amd64. Reuse these peer/helper images:
+tar and sha256sum. The host must run Linux amd64 with a glibc loader and
+libraries compatible with the Debian 12 (Bookworm) dev image: the driver copies
+its `rbgp` comparator onto the host and executes it there. A `--version` probe
+fails early with the loader error before either RR daemon starts if the host
+cannot run it. Reuse these peer/helper images:
 
 - `gobgp:v4.10.0-m76`, with both executable hashes checked by the driver.
 - `bmpsink:m81`, from the existing `Dockerfile.bmpsink`.
