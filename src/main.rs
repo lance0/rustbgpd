@@ -3685,7 +3685,7 @@ fn safe_sighup_target(bucket: &str, raw: &str, trace: &SighupReloadTrace) -> Str
     if raw.len() <= 128
         && raw
             .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || b"._:-/%[]".contains(&byte))
+            .all(|byte| byte.is_ascii_alphanumeric() || b"._:-%[]".contains(&byte))
     {
         raw.to_string()
     } else {
@@ -7331,13 +7331,21 @@ mod tests {
                 trace.applied.insert(effect);
             }
         }
-        let unsafe_target = "!secret token='private'\n";
+        let unsafe_target = "/private/credential.toml";
         let unsafe_effect = SighupEffect {
             bucket: "policy.add",
             target: unsafe_target.to_string(),
         };
         trace.planned.insert(unsafe_effect.clone());
         trace.applied.insert(unsafe_effect);
+        assert_eq!(
+            safe_sighup_target("policy.add", unsafe_target, &trace),
+            "[redacted]"
+        );
+        assert_eq!(
+            safe_sighup_target("policy.add", "!secret token='private'\n", &trace),
+            "[redacted]"
+        );
         let record = last_sighup_record(SystemTime::now(), &Ok(Ok(authority)), &trace);
         assert_eq!(record.applied_count, 41);
         assert_eq!(record.applied.len(), LAST_SIGHUP_EFFECT_LIMIT);
