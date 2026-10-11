@@ -531,6 +531,7 @@ impl Dataplane for LinuxDataplane {
         }
         let fdb_entries = fdb::dump_fdb(&self.handle, &cache).await?;
         let mut snap = KernelSnapshot::new();
+        snap.local_fdb = fdb_entries.local;
         for ((vni, _vlan, _mac), entry) in fdb_entries.unicast {
             snap.insert_fdb(vni, entry);
         }
@@ -698,6 +699,10 @@ impl Dataplane for LinuxDataplane {
             }
             DataplaneOp::SetAcPortState { ifindex, blocked } => {
                 ac_gate::apply_ac_port_state(&self.handle, *ifindex, *blocked).await
+            }
+            DataplaneOp::AddPeerSyncFdb { .. } | DataplaneOp::RemovePeerSyncFdb { .. } => {
+                let cache = self.link_cache.lock().await.clone();
+                fdb::apply_peer_sync_op(&self.handle, &cache, op).await
             }
             DataplaneOp::AddRemoteFdb { .. }
             | DataplaneOp::UpdateRemoteFdb { .. }

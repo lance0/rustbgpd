@@ -151,6 +151,50 @@ pub(crate) fn vlan_rows_contain(rows: &[KernelBridgeVlanInfo], vlan: u16) -> boo
     false
 }
 
+/// Usable VLAN members of one unambiguously observed peer-sync port.
+/// Expand compressed ranges once per port, never by scanning every VLAN per MAC.
+pub(crate) fn peer_sync_vlan_members(
+    bridge: &KernelLinkInfo,
+    ifindex: u32,
+) -> Option<BTreeSet<u16>> {
+    let mut ports = bridge
+        .port_vlan_inventory
+        .iter()
+        .filter(|port| port.ifindex == ifindex);
+    let port = ports.next()?;
+    if ports.next().is_some() {
+        return None;
+    }
+    let mut members = BTreeSet::new();
+    let mut range_start = None;
+    for row in port
+        .vlans
+        .iter()
+        .filter(|row| !row.flags.only_options && !row.flags.bridge_entry)
+    {
+        if !(1..=4094).contains(&row.vid) {
+            return None;
+        }
+        if row.flags.range_begin {
+            if range_start.replace(row.vid).is_some() || row.flags.range_end {
+                return None;
+            }
+        } else if row.flags.range_end {
+            let start = range_start.take()?;
+            if start > row.vid {
+                return None;
+            }
+            members.extend(start..=row.vid);
+        } else {
+            if range_start.is_some() {
+                return None;
+            }
+            members.insert(row.vid);
+        }
+    }
+    range_start.is_none().then_some(members)
+}
+
 /// One `IFLA_BRIDGE_VLAN_TUNNEL_INFO` row.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KernelBridgeVlanTunnelInfo {
@@ -555,6 +599,9 @@ pub enum InstanceProbe {
 /// `(VNI, MAC)` with Ethernet Tag ID `0`.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct KernelSnapshot {
+    /// Local bridge master rows, including dynamic learns and peer-sync rows.
+    /// Kept separate so remote mobility retains its existing takeover behavior.
+    pub local_fdb: BTreeMap<(EvpnInstanceId, Option<u16>, MacAddress), (u32, KernelFdbEntry)>,
     fdb: BTreeMap<(EvpnInstanceId, Option<u16>, MacAddress), KernelFdbEntry>,
     /// All-zero-MAC ingress-replication entries per VNI. Kept apart from
     /// `fdb`: one zero-MAC entry holds many destinations, which the
@@ -808,6 +855,8 @@ impl KernelSnapshot {
 /// removed on successful withdraw.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct OwnedSet {
+    /// Peer-sync local rows successfully installed, keyed by VNI, VLAN and MAC.
+    pub(crate) peer_sync: BTreeMap<(EvpnInstanceId, Option<u16>, MacAddress), u32>,
     entries: BTreeMap<(EvpnInstanceId, MacAddress), OwnedEntry>,
     /// Zero-MAC ingress-replication rows we appended, per `(VNI, dst)`.
     /// Not counted by [`Self::len`] / [`Self::keys`], which describe the
@@ -1053,6 +1102,82 @@ mod tests {
         assert!(vlan_rows_contain(&rows, 30));
         assert!(!vlan_rows_contain(&rows, 19));
         assert!(!vlan_rows_contain(&rows, 26));
+    }
+
+    #[test]
+    fn peer_sync_vlan_members_requires_unambiguous_valid_inventory() {
+        let row = |vid, range_begin, range_end| KernelBridgeVlanInfo {
+            vid,
+            flags: KernelBridgeVlanFlags {
+                range_begin,
+                range_end,
+                ..Default::default()
+            },
+        };
+        let mut bridge = KernelLinkInfo {
+            ifindex: 10,
+            bridge_name: "br100".into(),
+            vlan_filtering: false,
+            altnames: Vec::new(),
+            vxlan: None,
+            svd_vxlan_ports: Vec::new(),
+            ce_port_ifindexes: vec![12],
+            vlans: Vec::new(),
+            vlan_tunnels: Vec::new(),
+            port_vlan_inventory: Vec::new(),
+        };
+        assert_eq!(peer_sync_vlan_members(&bridge, 12), None);
+        bridge.port_vlan_inventory.push(KernelBridgePortVlanInfo {
+            ifindex: 12,
+            name: Some("es0".into()),
+            is_vxlan: false,
+            vlans: vec![
+                row(1, false, false),
+                row(20, true, false),
+                row(22, false, true),
+            ],
+            vlan_tunnels: Vec::new(),
+        });
+        assert_eq!(
+            peer_sync_vlan_members(&bridge, 12),
+            Some(BTreeSet::from([1, 20, 21, 22]))
+        );
+        for flags in [
+            KernelBridgeVlanFlags {
+                only_options: true,
+                ..Default::default()
+            },
+            KernelBridgeVlanFlags {
+                bridge_entry: true,
+                ..Default::default()
+            },
+        ] {
+            bridge.port_vlan_inventory[0]
+                .vlans
+                .push(KernelBridgeVlanInfo { vid: 0, flags });
+        }
+        assert_eq!(
+            peer_sync_vlan_members(&bridge, 12),
+            Some(BTreeSet::from([1, 20, 21, 22]))
+        );
+        bridge
+            .port_vlan_inventory
+            .push(bridge.port_vlan_inventory[0].clone());
+        assert_eq!(peer_sync_vlan_members(&bridge, 12), None);
+        bridge.port_vlan_inventory.pop();
+        for invalid in [
+            vec![row(0, false, false)],
+            vec![row(4095, false, false)],
+            vec![row(1, false, true)],
+            vec![row(1, true, false)],
+            vec![row(1, true, true)],
+            vec![row(20, true, false), row(10, false, true)],
+            vec![row(10, true, false), row(20, true, false)],
+            vec![row(10, true, false), row(20, false, false)],
+        ] {
+            bridge.port_vlan_inventory[0].vlans = invalid;
+            assert_eq!(peer_sync_vlan_members(&bridge, 12), None);
+        }
     }
 
     #[test]

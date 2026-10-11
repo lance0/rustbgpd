@@ -1460,10 +1460,7 @@ fn project_intent_tables(
     // The OR-folded `ead_per_es_modes` above stays the L2 aliasing contract
     // and feeds every L2 consumer below unchanged.
     let ead_per_es_modes_esi_type5 = fold_ead_per_es_modes_for_esi_type5_import(routes);
-    let active_ead_per_es: std::collections::BTreeSet<(
-        std::net::IpAddr,
-        rustbgpd_wire::EthernetSegmentIdentifier,
-    )> = ead_per_es_modes.keys().copied().collect();
+    let active_ead_per_es: BTreeSet<_> = ead_per_es_modes.keys().copied().collect();
 
     // ADR-0083: derive the single-active eligible-set index from the
     // same RIB snapshot — EAD-per-ES modes (the OR-fold above) plus
@@ -1554,14 +1551,27 @@ fn project_intent_tables(
             esi_overlay_ead,
         )
     };
+    let peer_sync = project_peer_sync_fdb(
+        routes,
+        instances,
+        &active_ead_per_es,
+        &single_active_index,
+        same_esi_bias,
+        quarantined_macs,
+        &projected,
+    );
     let (flood_vteps, flood_skips) = project_flood_vteps(routes, instances, &local_vtep_ips);
-    let remote_macs = rustbgpd_evpn::project_evpn_routes_with_backup_paths(
+    let mut remote_macs = rustbgpd_evpn::project_evpn_routes_with_backup_paths(
         instances,
         projected,
         ead_per_evi,
         &single_active_index,
     )
     .with_flood_vteps(flood_vteps);
+
+    for ((vni, mac), interface) in peer_sync {
+        remote_macs.set_peer_sync_fdb(vni, mac, interface);
+    }
 
     IntentTables {
         remote_macs,
@@ -1570,6 +1580,74 @@ fn project_intent_tables(
         single_active_backup_active,
         l2_remote_route_drops: l2_remote_route_drop_counts(routes, instances, &local_vtep_ips),
     }
+}
+
+/// Select peer-only forwarding with the same mobility ordering as remote MACs.
+fn project_peer_sync_fdb(
+    routes: &[EvpnRibRoute],
+    instances: &EvpnInstanceTable,
+    active_ead_per_es: &BTreeSet<(std::net::IpAddr, rustbgpd_wire::EthernetSegmentIdentifier)>,
+    single_active_index: &rustbgpd_evpn::SingleActiveEligibleIndex,
+    same_esi_bias: &SameEsiBiasTable,
+    quarantined_macs: &BTreeSet<DuplicateMacKey>,
+    projected: &[ProjectedEvpnRoute],
+) -> BTreeMap<(rustbgpd_evpn::EvpnInstanceId, rustbgpd_wire::MacAddress), String> {
+    if same_esi_bias.is_empty() {
+        return BTreeMap::new();
+    }
+    let local_vtep_ips = instances
+        .iter()
+        .map(|instance| instance.local_vtep_ip)
+        .collect();
+    // Join on the originating VTEP, not the BGP session address (which may be an RR).
+    let peer_evis: BTreeSet<_> = routes
+        .iter()
+        .filter_map(|route| project_ead_per_evi_unfiltered(route, &local_vtep_ips, instances))
+        .filter(|ead| active_ead_per_es.contains(&(ead.vtep_ip, ead.esi)))
+        .map(|ead| (ead.vni, ead.esi, ead.ethernet_tag, ead.vtep_ip))
+        .collect();
+    let no_bias = SameEsiBiasTable::new();
+    let peers: Vec<_> = routes
+        .iter()
+        .filter_map(|route| {
+            let candidate = project_one(
+                route,
+                instances,
+                active_ead_per_es,
+                single_active_index,
+                &no_bias,
+            )?;
+            let vni = rustbgpd_evpn::EvpnInstanceId::new(candidate.label1.as_vni()).ok()?;
+            same_esi_bias.bound_interface(candidate.esi, vni)?;
+            (candidate.esi != rustbgpd_wire::EthernetSegmentIdentifier::ZERO
+                && peer_evis.contains(&(
+                    vni,
+                    candidate.esi,
+                    candidate.ethernet_tag,
+                    candidate.next_hop,
+                ))
+                && !quarantined_macs.contains(&DuplicateMacKey::new(vni, candidate.mac)))
+            .then_some(candidate)
+        })
+        .collect();
+    let mut winners: BTreeMap<_, &ProjectedEvpnRoute> = BTreeMap::new();
+    for candidate in projected.iter().chain(&peers) {
+        let Ok(vni) = rustbgpd_evpn::EvpnInstanceId::new(candidate.label1.as_vni()) else {
+            continue;
+        };
+        let winner = winners.entry((vni, candidate.mac)).or_insert(candidate);
+        if candidate.preference_cmp(winner).is_gt() {
+            *winner = candidate;
+        }
+    }
+    winners
+        .into_iter()
+        .filter_map(|(key, winner)| {
+            same_esi_bias
+                .bound_interface(winner.esi, key.0)
+                .map(|interface| (key, interface.to_owned()))
+        })
+        .collect()
 }
 
 /// Count the (VNI, ESI, Ethernet Tag) groups in the post-failover backup
@@ -3395,6 +3473,238 @@ mod tests {
         );
     }
 
+    fn peer_sync_routes(esi: EthernetSegmentIdentifier) -> Vec<EvpnRibRoute> {
+        vec![
+            evpn_macip_route_with_esi(100, 1, "10.0.0.2", esi),
+            evpn_ead_per_es_route(esi, "10.0.0.2", false),
+            evpn_ead_per_evi_route(esi, 0, "10.0.0.2"),
+        ]
+    }
+
+    #[test]
+    fn peer_sync_projects_bound_non_df_attachment_without_remote_rows() {
+        let esi = EthernetSegmentIdentifier::new([7; 10]);
+        let mut bias = bias_table(
+            &[esi],
+            &[],
+            &[(esi, RedundancyMode::AllActive, 100, DfRole::NonDf)],
+        );
+        bias.bind_interface(esi, "bond0".into());
+        for host_ip in [None, Some(ipa("192.0.2.1"))] {
+            for sticky in [false, true] {
+                let mut routes = peer_sync_routes(esi);
+                if let EvpnRoute::MacIp(route) = &mut routes[0].route {
+                    route.ip = host_ip;
+                }
+                AttrSet::edit(&mut routes[0].attributes, |attrs| {
+                    attrs.push(PathAttribute::ExtendedCommunities(vec![
+                        ExtendedCommunity::mac_mobility(sticky, 7),
+                    ]));
+                });
+                let tables = project_intent_tables(
+                    &routes,
+                    &local_instance_table(100, Some("br100")),
+                    &IpVrfTable::new(),
+                    &BTreeSet::new(),
+                    &bias,
+                );
+                assert!(tables.remote_macs.get(vni(100), mac(1)).is_none());
+                assert_eq!(
+                    tables.remote_macs.peer_sync_fdb(),
+                    &BTreeMap::from([((vni(100), mac(1)), "bond0".into())]),
+                    "MAC and MAC/IP, including sticky peers, need local forwarding"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn peer_sync_requires_matching_peer_reachability_and_import_scope() {
+        let esi = EthernetSegmentIdentifier::new([7; 10]);
+        let mut bias = SameEsiBiasTable::new();
+        bias.insert(esi, vni(100));
+        bias.bind_interface(esi, "bond0".into());
+        for case in [
+            "no_type2",
+            "no_ead_es",
+            "no_ead_evi",
+            "other_vtep",
+            "wrong_rt",
+            "wrong_tag",
+            "wrong_ead_rt",
+            "wrong_ead_tag",
+            "wrong_ead_esi",
+            "wrong_ead_vtep",
+            "quarantine",
+        ] {
+            let mut routes = peer_sync_routes(esi);
+            let mut quarantined = BTreeSet::new();
+            match case {
+                "no_type2" => {
+                    routes.remove(0);
+                }
+                "no_ead_es" => {
+                    routes.remove(1);
+                }
+                "no_ead_evi" => {
+                    routes.remove(2);
+                }
+                "other_vtep" => routes[0].next_hop = ipa("10.0.0.3"),
+                "wrong_rt" => routes[0].attributes = AttrSet::new(vec![]),
+                "wrong_ead_rt" => routes[2].attributes = AttrSet::new(vec![]),
+                "wrong_ead_tag" => {
+                    if let EvpnRoute::EadPerEvi(route) = &mut routes[2].route {
+                        route.ethernet_tag = EthernetTagId(42);
+                    }
+                }
+                "wrong_ead_esi" => {
+                    if let EvpnRoute::EadPerEvi(route) = &mut routes[2].route {
+                        route.esi = EthernetSegmentIdentifier::new([8; 10]);
+                    }
+                }
+                "wrong_ead_vtep" => routes[2].next_hop = ipa("10.0.0.3"),
+                "wrong_tag" => {
+                    if let EvpnRoute::MacIp(route) = &mut routes[0].route {
+                        route.ethernet_tag = EthernetTagId(42);
+                    }
+                }
+                "quarantine" => {
+                    quarantined.insert(DuplicateMacKey::new(vni(100), mac(1)));
+                }
+                _ => unreachable!(),
+            }
+            let tables = project_intent_tables(
+                &routes,
+                &local_instance_table(100, Some("br100")),
+                &IpVrfTable::new(),
+                &quarantined,
+                &bias,
+            );
+            assert!(tables.remote_macs.peer_sync_fdb().is_empty(), "{case}");
+        }
+    }
+
+    #[test]
+    fn peer_sync_lifts_on_drain_or_es_removal_and_preserves_remote_takeover() {
+        let esi = EthernetSegmentIdentifier::new([7; 10]);
+        let routes = peer_sync_routes(esi);
+        for (bound, drained) in [(vec![esi], vec![esi]), (vec![], vec![])] {
+            let mut bias = bias_table(
+                &bound,
+                &drained,
+                &[(esi, RedundancyMode::AllActive, 100, DfRole::NonDf)],
+            );
+            bias.bind_interface(esi, "bond0".into());
+            let tables = project_intent_tables(
+                &routes,
+                &local_instance_table(100, Some("br100")),
+                &IpVrfTable::new(),
+                &BTreeSet::new(),
+                &bias,
+            );
+            assert!(tables.remote_macs.peer_sync_fdb().is_empty());
+            assert_eq!(
+                tables
+                    .remote_macs
+                    .get(vni(100), mac(1))
+                    .unwrap()
+                    .remote_vtep_ip,
+                ipa("10.0.0.2")
+            );
+        }
+    }
+
+    #[test]
+    fn peer_sync_keeps_vlan_scope_and_existing_remote_mobility_winner() {
+        let esi = EthernetSegmentIdentifier::new([7; 10]);
+        let mut bias = SameEsiBiasTable::new();
+        bias.insert(esi, vni(100));
+        bias.bind_interface(esi, "bond0".into());
+        let mut instances = EvpnInstanceTable::new();
+        instances
+            .insert(
+                local_instance(100, Some("br100"))
+                    .with_bridge_vlan(Some(rustbgpd_evpn::BridgeVlan::new(10).unwrap())),
+            )
+            .unwrap();
+        let mut routes = peer_sync_routes(esi);
+        let project = |routes: &[EvpnRibRoute]| {
+            project_intent_tables(
+                routes,
+                &instances,
+                &IpVrfTable::new(),
+                &BTreeSet::new(),
+                &bias,
+            )
+            .remote_macs
+        };
+        assert_eq!(project(&routes).peer_sync_fdb().len(), 1);
+        routes.push(evpn_macip_route(100, 1, "10.0.0.3", Some(9)));
+        let table = project(&routes);
+        assert!(table.peer_sync_fdb().is_empty());
+        assert_eq!(
+            table.get(vni(100), mac(1)).unwrap().remote_vtep_ip,
+            ipa("10.0.0.3")
+        );
+    }
+
+    #[test]
+    fn peer_sync_competes_with_remote_mobility_in_either_order() {
+        let esi = EthernetSegmentIdentifier::new([7; 10]);
+        let mut bias = SameEsiBiasTable::new();
+        bias.insert(esi, vni(100));
+        bias.bind_interface(esi, "bond0".into());
+        for (peer_sequence, remote_sequence, remote_ip, peer_wins) in [
+            (Some(7), Some(6), "10.0.0.3", true),
+            (Some(7), Some(8), "10.0.0.3", false),
+            (Some(7), Some(7), "10.0.0.3", true),
+            (Some(7), Some(7), "10.0.0.1", false),
+            (None, Some(0), "10.0.0.3", true),
+            (Some(0), None, "10.0.0.1", false),
+        ] {
+            let mut routes = peer_sync_routes(esi);
+            if let Some(sequence) = peer_sequence {
+                AttrSet::edit(&mut routes[0].attributes, |attrs| {
+                    attrs.push(PathAttribute::ExtendedCommunities(vec![
+                        ExtendedCommunity::mac_mobility(false, sequence),
+                    ]));
+                });
+            }
+            routes.push(evpn_macip_route(100, 1, remote_ip, remote_sequence));
+            // Use a local VTEP distinct from both remote contenders.
+            let mut instances = EvpnInstanceTable::new();
+            let mut instance = local_instance(100, Some("br100"));
+            instance.local_vtep_ip = ipa("10.0.0.9");
+            instances.insert(instance).unwrap();
+            for reverse in [false, true] {
+                if reverse {
+                    routes.reverse();
+                }
+                let table = project_intent_tables(
+                    &routes,
+                    &instances,
+                    &IpVrfTable::new(),
+                    &BTreeSet::new(),
+                    &bias,
+                )
+                .remote_macs;
+                assert_eq!(
+                    table.peer_sync_fdb().contains_key(&(vni(100), mac(1))),
+                    peer_wins,
+                    "peer={peer_sequence:?} remote={remote_sequence:?} remote_ip={remote_ip} reverse={reverse}"
+                );
+                if peer_wins {
+                    assert!(table.get(vni(100), mac(1)).is_none());
+                } else {
+                    assert_eq!(
+                        table.get(vni(100), mac(1)).unwrap().remote_vtep_ip,
+                        ipa(remote_ip)
+                    );
+                }
+            }
+        }
+    }
+
     #[test]
     fn single_active_df_suppresses_the_remote_row() {
         let esi = EthernetSegmentIdentifier::new([7; 10]);
@@ -3417,6 +3727,20 @@ mod tests {
             )
             .is_none(),
             "the single-active DF forwards on its own AC; the peer's Type 2 must not usurp it"
+        );
+        let mut routes = peer_sync_routes(esi);
+        routes[1] = evpn_ead_per_es_route(esi, "10.0.0.2", true);
+        let tables = project_intent_tables(
+            &routes,
+            &local_instance_table(100, Some("br100")),
+            &IpVrfTable::new(),
+            &BTreeSet::new(),
+            &bias,
+        );
+        assert!(tables.remote_macs.get(vni(100), mac(1)).is_none());
+        assert!(
+            tables.remote_macs.peer_sync_fdb().is_empty(),
+            "the single-active DF must allow ordinary local relearning after recovery"
         );
     }
 

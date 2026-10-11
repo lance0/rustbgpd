@@ -146,6 +146,7 @@ pub struct RemoteMacEntry {
 pub struct RemoteMacTable {
     entries: BTreeMap<(EvpnInstanceId, MacAddress), RemoteMacEntry>,
     flood_vteps: BTreeMap<EvpnInstanceId, BTreeSet<IpAddr>>,
+    peer_sync_fdb: BTreeMap<(EvpnInstanceId, MacAddress), String>,
 }
 
 impl RemoteMacTable {
@@ -182,6 +183,20 @@ impl RemoteMacTable {
     /// Iterate entries in deterministic `(VNI, MAC)` ascending order.
     pub fn iter(&self) -> impl Iterator<Item = (&(EvpnInstanceId, MacAddress), &RemoteMacEntry)> {
         self.entries.iter()
+    }
+
+    /// Set a peer-learned MAC's local Ethernet Segment forwarding port.
+    /// Replaces remote forwarding for the selected MAC without conferring
+    /// local origination ownership.
+    pub fn set_peer_sync_fdb(&mut self, vni: EvpnInstanceId, mac: MacAddress, interface: String) {
+        self.entries.remove(&(vni, mac));
+        self.peer_sync_fdb.insert((vni, mac), interface);
+    }
+
+    /// Peer-learned MACs forwarded through a bound local Ethernet Segment.
+    #[must_use]
+    pub fn peer_sync_fdb(&self) -> &BTreeMap<(EvpnInstanceId, MacAddress), String> {
+        &self.peer_sync_fdb
     }
 
     /// Replace the ingress-replication flood lists. Instances with an
@@ -251,6 +266,7 @@ impl RemoteMacTableBuilder {
         RemoteMacTable {
             entries: self.entries,
             flood_vteps: BTreeMap::new(),
+            peer_sync_fdb: BTreeMap::new(),
         }
     }
 }

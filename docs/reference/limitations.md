@@ -145,6 +145,17 @@ Known EVPN gaps:
   §2.2 makes local bias the only split-horizon mechanism for VXLAN (the ESI
   Label Split Horizon Type MUST be 00 for tunnel type 8), so there is no
   ESI-label alternative to implement for this lane.
+- All-active CE forwarding requires an Ethernet Segment `interface` binding.
+  On all-active segments, eligible peer Type 2 routes install owned local-port
+  FDB rows, including on a non-DF PE that never learned the CE MAC. This does not originate
+  peer-only MAC/MAC-IP routes or program peer-only IP adjacencies. Unbound
+  segments retain control-plane behavior without this forwarding guarantee.
+  Single-active segments retain ordinary local MAC relearning and do not install
+  these peer-synchronized rows.
+  Later CE source traffic on the same port does not promote an owned peer-sync
+  row to local origination; Linux retains the external-learning marker.
+  Concurrent foreign FDB writers can also race the pre-apply ownership check;
+  see the [ADR-0085 amendment](../adr/0085-evpn-es-interface-binding.md#amendment-2026-10-11-peer-synchronized-local-fdb-forwarding).
 - Symmetric Interface-less IRB does not implement `RTA_VIA`, so a Type 5
   prefix and its next hop must be the same address family. Under an IPv6
   VTEP only IPv6 tenant prefixes are carried: an IPv4 prefix is refused at

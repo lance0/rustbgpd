@@ -54,7 +54,7 @@ pub enum DataplaneError {
     #[error("permission denied: {0} (CAP_NET_ADMIN missing or LSM-blocked)")]
     PermissionDenied(String),
 
-    /// A remote-MAC mutation conflicts with a foreign kernel entry
+    /// An FDB operation conflicts with an existing local or foreign row
     /// in its `(VNI, MAC, VLAN)` scope. Unscoped bridge operations
     /// also affect VLAN siblings; the apply path preserves them and retries.
     #[error("MAC {mac} in VNI {vni} conflicts with an existing local or foreign FDB entry")]

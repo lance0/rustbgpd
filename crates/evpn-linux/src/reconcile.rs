@@ -56,14 +56,14 @@ use rustbgpd_evpn::{EvpnInstanceId, EvpnIpPrefixValue, IpVrfId, MacAddress};
 
 use crate::backoff::RetrySchedule;
 use crate::dataplane::{Dataplane, DataplaneOp, KernelEvent};
-use crate::diff::{Plan, compute_diff};
+use crate::diff::{Plan, compute_diff, peer_sync_target};
 use crate::enforcement::build_bum_enforcement_status;
 use crate::error::FailureClass;
 use crate::l3_adoption::{AdoptedL3Route, AdoptedL3VxlanFdb, AdoptedL3VxlanFdbTarget};
 use crate::snapshot::{
     InstanceProbe, InstanceProbes, KernelLinkInfo, KernelSnapshot, KernelVlanUpperLinkInfo,
     KernelVrfLinkInfo, KernelVxlanLinkInfo, OwnedEntry, OwnedEntryKind, OwnedSet,
-    vlan_rows_contain,
+    peer_sync_vlan_members, vlan_rows_contain,
 };
 use crate::worker_progress::{WorkerProgress, WorkerProgressState};
 
@@ -238,6 +238,7 @@ struct ActorState {
     /// the first snapshot on managed VNIs; reaped with `adopted_fdb`
     /// unless a desired IMET re-claims them first.
     adopted_flood: BTreeSet<(EvpnInstanceId, IpAddr)>,
+    adopted_peer_sync: BTreeMap<(EvpnInstanceId, Option<u16>, MacAddress), u32>,
     /// Per-op-fingerprint suppression for permanent FDB failures.
     /// Keyed by `(VNI, MAC)`; the value is the exact [`DataplaneOp`]
     /// that hit the permanent failure (e.g.,
@@ -542,6 +543,7 @@ impl ActorState {
             flood_permanent_failures: BTreeMap::new(),
             warned_foreign_flood: BTreeSet::new(),
             adopted_flood: BTreeSet::new(),
+            adopted_peer_sync: BTreeMap::new(),
             permanent_failures: BTreeMap::new(),
             bum_retry: RetrySchedule::new(),
             bum_permanent_failures: BTreeMap::new(),
@@ -882,6 +884,17 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
                     );
                 }
             }
+            for (&key @ (vni, vlan, _), (ifindex, row)) in &snapshot.local_fdb {
+                if row.is_extern_learned()
+                    && intent.instances.get(vni).is_some_and(|instance| {
+                        instance
+                            .bridge_vlan
+                            .is_none_or(|configured| Some(configured.as_u16()) == vlan)
+                    })
+                {
+                    self.state.adopted_peer_sync.insert(key, *ifindex);
+                }
+            }
             for (vni, entry) in snapshot.iter_flood() {
                 if !entry.owned || intent.instances.get(vni).is_none() {
                     continue;
@@ -1052,6 +1065,80 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
         // it (the diff's own foreign gates then fail closed for the
         // key while the foreign row persists).
         self.relinquish_foreign_l2(&snapshot).await;
+
+        // A locally learned takeover relinquishes peer-sync ownership before
+        // any withdrawal can target it. Adopted rows share the startup grace.
+        self.state.owned.peer_sync.retain(|key, port| {
+            snapshot
+                .local_fdb
+                .get(key)
+                .is_some_and(|(current, row)| current == port && row.is_extern_learned())
+        });
+        if self
+            .state
+            .fdb_adoption_reap_after
+            .is_some_and(|deadline| Instant::now() >= deadline)
+        {
+            let mut memberships = BTreeMap::new();
+            for (key, port) in std::mem::take(&mut self.state.adopted_peer_sync) {
+                if snapshot
+                    .local_fdb
+                    .get(&key)
+                    .is_some_and(|(current, row)| *current == port && row.is_extern_learned())
+                {
+                    let (vni, vlan, mac) = key;
+                    if intent.remote_macs.peer_sync_fdb().contains_key(&(vni, mac))
+                        && intent.instances.get(vni).is_some_and(|instance| {
+                            instance
+                                .bridge_vlan
+                                .is_none_or(|configured| Some(configured.as_u16()) == vlan)
+                        })
+                        && peer_sync_target(
+                            &intent.remote_macs,
+                            &snapshot,
+                            &probes,
+                            &intent.instances,
+                            vni,
+                            mac,
+                        )
+                        .is_none()
+                    {
+                        self.state.adopted_peer_sync.insert(key, port);
+                        continue;
+                    }
+                    // None sorts first. Unscoped bridge operations cover all
+                    // usable port VLAN members, not only the PVID. Co-own only
+                    // marked siblings revalidated against that same port's
+                    // unambiguous membership inventory.
+                    let covered_sibling = intent.instances.get(vni).is_some_and(|instance| {
+                        let Some(vlan) = vlan else {
+                            return false;
+                        };
+                        if instance.bridge_vlan.is_some() {
+                            return false;
+                        }
+                        let Some(bridge) = instance
+                            .bridge
+                            .as_ref()
+                            .and_then(|name| snapshot.links.get(name))
+                        else {
+                            return false;
+                        };
+                        memberships
+                            .entry((vni, port))
+                            .or_insert_with(|| peer_sync_vlan_members(bridge, port))
+                            .as_ref()
+                            .is_some_and(|members| members.contains(&vlan))
+                    });
+                    if covered_sibling
+                        && self.state.owned.peer_sync.get(&(vni, None, mac)) == Some(&port)
+                    {
+                        continue;
+                    }
+                    self.state.owned.peer_sync.insert(key, port);
+                }
+            }
+        }
 
         let mut plan = compute_diff(
             intent.remote_macs.as_ref(),
@@ -3879,6 +3966,21 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
     /// schedule resets.
     fn record_success(&mut self, op: &DataplaneOp, desired: &RemoteMacTable) {
         match op {
+            DataplaneOp::AddPeerSyncFdb {
+                vni,
+                mac,
+                vlan,
+                ifindex,
+            } => {
+                let key = (*vni, *vlan, *mac);
+                self.state.owned.peer_sync.insert(key, *ifindex);
+                self.state.adopted_peer_sync.remove(&key);
+                self.state.retry.record_success((*vni, *mac));
+            }
+            DataplaneOp::RemovePeerSyncFdb { vni, mac, vlan, .. } => {
+                self.state.owned.peer_sync.remove(&(*vni, *vlan, *mac));
+                self.state.retry.record_success((*vni, *mac));
+            }
             DataplaneOp::AddRemoteFdb {
                 vni,
                 mac,
@@ -3899,8 +4001,9 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
                 );
                 self.state.retry.record_success((*vni, *mac));
             }
-            DataplaneOp::RemoveRemoteFdb { vni, mac, .. }
-            | DataplaneOp::RemoveFdbNhg { vni, mac, .. } => {
+            DataplaneOp::RemoveRemoteFdb { vni, mac, vlan }
+            | DataplaneOp::RemoveFdbNhg { vni, mac, vlan, .. } => {
+                self.state.adopted_fdb.remove(&(*vni, *vlan, *mac));
                 self.state.owned.record_withdrawn(*vni, *mac);
                 self.state.retry.record_success((*vni, *mac));
             }
@@ -4001,6 +4104,14 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
 
         let mut live_keys: BTreeSet<(EvpnInstanceId, MacAddress)> =
             desired.iter().map(|(&(vni, mac), _)| (vni, mac)).collect();
+        live_keys.extend(desired.peer_sync_fdb().keys().copied());
+        live_keys.extend(
+            self.state
+                .owned
+                .peer_sync
+                .keys()
+                .map(|&(vni, _, mac)| (vni, mac)),
+        );
         live_keys.extend(self.state.owned.iter().map(|(&(vni, mac), _)| (vni, mac)));
         live_keys.extend(
             self.state
@@ -4430,6 +4541,7 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
         };
 
         if self.state.owned.is_empty()
+            && self.state.owned.peer_sync.is_empty()
             && self.state.owned.iter_flood().next().is_none()
             && bum_restore_ops.is_empty()
             && ac_gate_restore_ops.is_empty()
@@ -4492,6 +4604,35 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
                     None
                 }
             };
+
+            if let Some(snapshot) = &drain_snapshot {
+                let rows: Vec<_> = self
+                    .state
+                    .owned
+                    .peer_sync
+                    .iter()
+                    .map(|(&key, &port)| (key, port))
+                    .collect();
+                for ((vni, vlan, mac), ifindex) in rows {
+                    if snapshot
+                        .local_fdb
+                        .get(&(vni, vlan, mac))
+                        .is_some_and(|(port, row)| *port == ifindex && row.is_extern_learned())
+                    {
+                        let op = DataplaneOp::RemovePeerSyncFdb {
+                            vni,
+                            mac,
+                            vlan,
+                            ifindex,
+                        };
+                        if let Err(error) = self.dataplane.apply(&op).await {
+                            tracing::warn!(%error, ?op, "peer-sync FDB shutdown removal failed");
+                            continue;
+                        }
+                    }
+                    self.state.owned.peer_sync.remove(&(vni, vlan, mac));
+                }
+            }
 
             // Snapshot the owned set with kind info — for FdbNhg
             // entries we route through `apply_nhg_op` (so the FDB
@@ -4673,6 +4814,7 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
         {
             tracing::warn!(
                 remaining = self.state.owned.len(),
+                peer_sync_remaining = self.state.owned.peer_sync.len(),
                 l3_remaining = self.state.l3_owned.installs.len(),
                 l3_neighbors_remaining = self.state.l3_owned.kernel_neighbors.len(),
                 l3_fdb_remaining = self.state.l3_owned.kernel_fdb.len(),
@@ -7843,7 +7985,9 @@ async fn try_del_and_release_alloc<D: crate::dataplane::NexthopOps>(
 /// `AppliedOp` / `FailedOp` predate BUM-port operations.
 fn fdb_op_vni(op: &DataplaneOp) -> rustbgpd_evpn::EvpnInstanceId {
     match op {
-        DataplaneOp::AddRemoteFdb { vni, .. }
+        DataplaneOp::AddPeerSyncFdb { vni, .. }
+        | DataplaneOp::RemovePeerSyncFdb { vni, .. }
+        | DataplaneOp::AddRemoteFdb { vni, .. }
         | DataplaneOp::UpdateRemoteFdb { vni, .. }
         | DataplaneOp::RemoveRemoteFdb { vni, .. }
         | DataplaneOp::InstallFdbNhg { vni, .. }
@@ -7887,7 +8031,9 @@ fn fdb_op_vni(op: &DataplaneOp) -> rustbgpd_evpn::EvpnInstanceId {
 /// harmless for BUM rows.
 fn fdb_op_mac(op: &DataplaneOp) -> rustbgpd_evpn::MacAddress {
     match op {
-        DataplaneOp::AddRemoteFdb { mac, .. }
+        DataplaneOp::AddPeerSyncFdb { mac, .. }
+        | DataplaneOp::RemovePeerSyncFdb { mac, .. }
+        | DataplaneOp::AddRemoteFdb { mac, .. }
         | DataplaneOp::UpdateRemoteFdb { mac, .. }
         | DataplaneOp::RemoveRemoteFdb { mac, .. }
         | DataplaneOp::InstallFdbNhg { mac, .. }
@@ -7924,6 +8070,14 @@ fn fdb_op_mac(op: &DataplaneOp) -> rustbgpd_evpn::MacAddress {
 
 fn op_to_kind(op: &DataplaneOp) -> DataplaneOpKind {
     match op {
+        DataplaneOp::AddPeerSyncFdb { mac, ifindex, .. } => DataplaneOpKind::AddPeerSyncFdb {
+            mac: *mac,
+            ifindex: *ifindex,
+        },
+        DataplaneOp::RemovePeerSyncFdb { mac, ifindex, .. } => DataplaneOpKind::RemovePeerSyncFdb {
+            mac: *mac,
+            ifindex: *ifindex,
+        },
         DataplaneOp::AddRemoteFdb { mac, dst, .. } => DataplaneOpKind::AddRemoteFdb {
             mac: *mac,
             dst: *dst,

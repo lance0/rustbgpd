@@ -44,7 +44,7 @@ use crate::dataplane::DataplaneOp;
 use crate::group_state::{AliasGroupKey, GroupOwnedMap};
 use crate::snapshot::{
     ForeignFdbEntries, InstanceProbes, KernelFdbEntry, KernelSnapshot, OwnedEntry, OwnedEntryKind,
-    OwnedSet,
+    OwnedSet, peer_sync_vlan_members,
 };
 
 /// Output of a single diff pass.
@@ -147,6 +147,16 @@ pub fn compute_diff(
     // (nhid→dst via `RemoveFdbNhg`, marker-row nhid→dst via
     // `RemoveRemoteFdb`, and group-key drift).
     let mut conversions: Vec<DataplaneOp> = Vec::new();
+
+    peer_sync_pass(
+        desired,
+        snapshot,
+        last_applied,
+        probes,
+        instances,
+        &mut creates,
+        &mut deletes,
+    );
 
     // Pass 1b helpers — track which (VNI, ESI, EthTag) groups have
     // already been considered for member-set diff, so two MACs
@@ -464,6 +474,178 @@ pub fn compute_diff(
         ipv6_alias_fallback_keys,
         foreign_blocked_keys: foreign_blocked,
         foreign_blocked_flood_vnis,
+    }
+}
+
+/// Resolve desired peer-sync attachment using the same readiness gates as apply planning.
+pub(crate) fn peer_sync_target(
+    desired: &RemoteMacTable,
+    snapshot: &KernelSnapshot,
+    probes: &InstanceProbes,
+    instances: &EvpnInstanceTable,
+    vni: EvpnInstanceId,
+    mac: MacAddress,
+) -> Option<(Option<u16>, u32)> {
+    if !probes.is_ready(vni) {
+        return None;
+    }
+    let interface = desired.peer_sync_fdb().get(&(vni, mac))?;
+    let port = snapshot.bridge_ports.get(interface)?;
+    let bridge = snapshot.links.get(instances.get(vni)?.bridge.as_ref()?)?;
+    bridge
+        .ce_port_ifindexes
+        .contains(&port.ifindex)
+        .then_some((desired_vlan(instances, vni), port.ifindex))
+}
+
+/// Local learns and foreign static rows always take precedence over peer sync.
+#[expect(
+    clippy::too_many_lines,
+    reason = "peer-sync repair validates complete scoped ownership before ordering guarded removal and replacement"
+)]
+fn peer_sync_pass(
+    desired: &RemoteMacTable,
+    snapshot: &KernelSnapshot,
+    owned: &OwnedSet,
+    probes: &InstanceProbes,
+    instances: &EvpnInstanceTable,
+    creates: &mut Vec<DataplaneOp>,
+    deletes: &mut Vec<DataplaneOp>,
+) {
+    let target = |vni, mac| peer_sync_target(desired, snapshot, probes, instances, vni, mac);
+    for (&(vni, vlan, mac), &ifindex) in &owned.peer_sync {
+        if target(vni, mac) != Some((vlan, ifindex)) {
+            deletes.push(DataplaneOp::RemovePeerSyncFdb {
+                vni,
+                mac,
+                vlan,
+                ifindex,
+            });
+        }
+    }
+    if desired.peer_sync_fdb().is_empty() {
+        return;
+    }
+    // Local dynamic learns take precedence over peer sync, but must stay out
+    // of the ordinary remote index so remote MAC mobility can still converge.
+    let foreign = ForeignFdbEntries::new(
+        snapshot.iter_fdb().chain(
+            snapshot
+                .local_fdb
+                .iter()
+                .map(|(&(vni, _, mac), (_, row))| ((vni, mac), row)),
+        ),
+    );
+    let mut memberships = BTreeMap::new();
+    let mut local_rows = BTreeMap::<_, Vec<_>>::new();
+    for (&(vni, vlan, mac), (port, row)) in &snapshot.local_fdb {
+        local_rows
+            .entry((vni, mac))
+            .or_default()
+            .push((vlan, *port, row));
+    }
+    for &(vni, mac) in desired.peer_sync_fdb().keys() {
+        let Some((vlan, ifindex)) = target(vni, mac) else {
+            continue;
+        };
+        let key = (vni, vlan, mac);
+        if let Some((port, row)) = snapshot.local_fdb.get(&key)
+            && (!row.is_extern_learned() || *port != ifindex)
+        {
+            continue;
+        }
+        // Unscoped bridge removal can affect every VLAN sibling. Preserve
+        // foreign rows across that entire scope before planning a conversion.
+        if foreign.contains(vni, mac, vlan) {
+            continue;
+        }
+        // Unsupported overlay conversion must also preserve a partial local
+        // set: validate it before queuing any peer-sync repair removal.
+        let adopted_overlay = snapshot
+            .find_fdb_in_vlan(vni, mac, vlan)
+            .filter(|_| owned.get(vni, mac).is_none_or(|entry| entry.vlan != vlan));
+        if adopted_overlay.is_some_and(|row| row.dst.is_none() || row.nh_id.is_some()) {
+            continue;
+        }
+        let canonical_present = snapshot.local_fdb.contains_key(&key);
+        if vlan.is_none() {
+            let members = memberships.entry((vni, ifindex)).or_insert_with(|| {
+                instances
+                    .get(vni)
+                    .and_then(|instance| instance.bridge.as_ref())
+                    .and_then(|name| snapshot.links.get(name))
+                    .and_then(|bridge| peer_sync_vlan_members(bridge, ifindex))
+            });
+            if let Some(members) = members {
+                // Do not dismantle a partial set when an unrecognized row would
+                // prevent its replacement. Group observations once per pass.
+                if local_rows.get(&(vni, mac)).is_some_and(|rows| {
+                    rows.iter().any(|(row_vlan, port, row)| {
+                        *port != ifindex
+                            || !row.is_extern_learned()
+                            || row_vlan.is_some_and(|member| !members.contains(&member))
+                    })
+                }) {
+                    continue;
+                }
+                let complete = canonical_present
+                    && members.iter().all(|&member| {
+                        snapshot
+                            .local_fdb
+                            .get(&(vni, Some(member), mac))
+                            .is_some_and(|(port, row)| *port == ifindex && row.is_extern_learned())
+                    });
+                if !complete {
+                    if canonical_present {
+                        deletes.push(DataplaneOp::RemovePeerSyncFdb {
+                            vni,
+                            mac,
+                            vlan,
+                            ifindex,
+                        });
+                    } else {
+                        // Without canonical ownership an unscoped delete is a
+                        // no-op. Remove only observed, validated marked siblings.
+                        for &member in members.iter() {
+                            if owned.peer_sync.get(&(vni, Some(member), mac)) != Some(&ifindex)
+                                && snapshot
+                                    .local_fdb
+                                    .get(&(vni, Some(member), mac))
+                                    .is_some_and(|(port, row)| {
+                                        *port == ifindex && row.is_extern_learned()
+                                    })
+                            {
+                                deletes.push(DataplaneOp::RemovePeerSyncFdb {
+                                    vni,
+                                    mac,
+                                    vlan: Some(member),
+                                    ifindex,
+                                });
+                            }
+                        }
+                    }
+                } else if owned.peer_sync.get(&key) == Some(&ifindex) {
+                    continue;
+                }
+            } else if canonical_present && owned.peer_sync.get(&key) == Some(&ifindex) {
+                continue;
+            }
+        } else if canonical_present && owned.peer_sync.get(&key) == Some(&ifindex) {
+            continue;
+        }
+        // Ordinary ownership withdrawal already removes its overlay row.
+        // A marked single-dst row adopted at startup must convert immediately,
+        // without waiting for the orphan-reap grace. Untracked NHG rows need
+        // their group ownership path and must not use single-dst removal.
+        if adopted_overlay.is_some() {
+            deletes.push(DataplaneOp::RemoveRemoteFdb { vni, mac, vlan });
+        }
+        creates.push(DataplaneOp::AddPeerSyncFdb {
+            vni,
+            mac,
+            vlan,
+            ifindex,
+        });
     }
 }
 
@@ -1046,6 +1228,110 @@ mod tests {
         InstanceProbe, InstanceProbes, KernelFdbEntry, KernelFdbFlags, KernelSnapshot, OwnedEntry,
         OwnedSet,
     };
+
+    #[test]
+    fn peer_sync_local_precedence_vlan_withdrawal_and_remote_handoff() {
+        let v = vni(100);
+        let m = mac(2);
+        let vlan = Some(10);
+        let mut desired = RemoteMacTable::new();
+        desired.set_peer_sync_fdb(v, m, "es0".into());
+        let mut snapshot = KernelSnapshot::new();
+        snapshot.bridge_ports.insert(
+            "es0".into(),
+            crate::snapshot::KernelBridgePortInfo {
+                ifindex: 12,
+                state: Some(3),
+            },
+        );
+        snapshot.insert_link(crate::snapshot::KernelLinkInfo {
+            bridge_name: "br100".into(),
+            ce_port_ifindexes: vec![12],
+            ..Default::default()
+        });
+        let mut owned = OwnedSet::new();
+        let probes = ready_probes(&[v]);
+        let instances = instances_with_vlan(10, &[v]);
+        let groups = GroupOwnedMap::new();
+        let diff = |desired: &RemoteMacTable, snapshot: &KernelSnapshot, owned: &OwnedSet| {
+            compute_diff(desired, snapshot, owned, &probes, &groups, &instances)
+        };
+        assert_eq!(
+            diff(&desired, &snapshot, &owned).ops,
+            vec![DataplaneOp::AddPeerSyncFdb {
+                vni: v,
+                mac: m,
+                vlan,
+                ifindex: 12
+            }]
+        );
+        let mut local = KernelFdbEntry {
+            mac: m,
+            vlan,
+            dst: None,
+            nh_id: None,
+            protocol: None,
+            flags: KernelFdbFlags {
+                master: true,
+                ..Default::default()
+            },
+        };
+        for permanent in [false, true] {
+            local.flags.permanent = permanent;
+            snapshot.local_fdb.insert((v, vlan, m), (13, local.clone()));
+            assert!(
+                diff(&desired, &snapshot, &owned).is_noop(),
+                "local learned and foreign static rows win"
+            );
+        }
+        local.flags.extern_learn = true;
+        snapshot.local_fdb.insert((v, vlan, m), (12, local));
+        owned.peer_sync.insert((v, vlan, m), 12);
+        assert!(diff(&desired, &snapshot, &owned).is_noop());
+        let remove = DataplaneOp::RemovePeerSyncFdb {
+            vni: v,
+            mac: m,
+            vlan,
+            ifindex: 12,
+        };
+        assert_eq!(
+            diff(&RemoteMacTable::new(), &snapshot, &owned).ops,
+            vec![remove.clone()]
+        );
+        let mut overlay = RemoteMacTable::builder();
+        overlay.insert(v, m, entry("10.0.0.2", None)).unwrap();
+        let overlay = overlay.build();
+        assert_eq!(
+            diff(&overlay, &snapshot, &owned).ops,
+            vec![
+                remove,
+                DataplaneOp::AddRemoteFdb {
+                    vni: v,
+                    mac: m,
+                    vlan,
+                    dst: ip("10.0.0.2")
+                }
+            ]
+        );
+        snapshot
+            .local_fdb
+            .get_mut(&(v, vlan, m))
+            .unwrap()
+            .1
+            .flags
+            .extern_learn = false;
+        owned.peer_sync.clear();
+        assert_eq!(
+            diff(&overlay, &snapshot, &owned).ops,
+            vec![DataplaneOp::AddRemoteFdb {
+                vni: v,
+                mac: m,
+                vlan,
+                dst: ip("10.0.0.2"),
+            }],
+            "local dynamic peer-sync priority must not suppress ordinary remote mobility"
+        );
+    }
 
     fn vni(n: u32) -> EvpnInstanceId {
         EvpnInstanceId::new(n).unwrap()
@@ -2114,7 +2400,9 @@ mod tests {
                         "Remove key not in applied: {op:?}"
                     );
                 }
-                DataplaneOp::AddFloodFdb { .. }
+                DataplaneOp::AddPeerSyncFdb { .. }
+                | DataplaneOp::RemovePeerSyncFdb { .. }
+                | DataplaneOp::AddFloodFdb { .. }
                 | DataplaneOp::RemoveFloodFdb { .. }
                 | DataplaneOp::SetBumPortFlags { .. }
                 | DataplaneOp::SetAcPortState { .. }

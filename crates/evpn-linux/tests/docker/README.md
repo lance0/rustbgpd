@@ -49,6 +49,7 @@ bash crates/evpn-linux/tests/docker/run-netns-tests.sh foreign_state_l3 # L3 for
 bash crates/evpn-linux/tests/docker/run-netns-tests.sh l3_route_event # route-event wake (VRF)
 bash crates/evpn-linux/tests/docker/run-netns-tests.sh dataplane_vlan_fdb # ADR-0089 VLAN FDB proof
 bash crates/evpn-linux/tests/docker/run-netns-tests.sh dataplane_remote_mac # remote MAC + foreign preservation
+bash crates/evpn-linux/tests/docker/run-netns-tests.sh peer_sync_local_fdb # local ES peer MAC forwarding
 bash crates/evpn-linux/tests/docker/run-netns-tests.sh vlan_local_mac_attribution # VLAN local MAC attribution
 bash crates/evpn-linux/tests/docker/run-netns-tests.sh svd_fdb_vni # LAN-64 SVD explicit FDB VNI proof
 bash crates/evpn-linux/tests/docker/run-netns-tests.sh l3_multipath # LAN-70 L3VNI multipath/FDB-NHG proof
@@ -87,6 +88,7 @@ caches across runs.
 | `foreign_state_l2` / `foreign_state_l2_dst` / `foreign_state_nhid` | `netns_foreign_state` L2/NHID tests | foreign takeover, PVID-only sibling preservation and stale-plan checks, owned destination drift repair, and reserved-NHID non-clobber |
 | `foreign_state_l3` / `l3_route_event` | exact VRF-dependent tests | L3 foreign takeover and route-event wake latency |
 | `dataplane_vlan_fdb` | `linux_dataplane_programs_vlan_scoped_remote_mac_add_remove` | ADR-0089 VLAN-scoped single-dst FDB add/remove and scoped delete |
+| `peer_sync_local_fdb` | `linux_dataplane_peer_sync_local_fdb_forwards_with_flood_off` | Peer-sync local ES forwarding with flood off, VLAN isolation and foreign-row preservation |
 | `dataplane_remote_mac` | `linux_dataplane_programs_remote_mac_with_extern_learn` | Remote MAC install/remove shape plus foreign-entry preservation |
 | `vlan_local_mac_attribution` | `linux_dataplane_attributes_vlan_local_mac_observations` | Same-MAC observations attributed independently across two VLANs |
 | `svd_fdb_vni` | `svd_topology_is_ready_and_programs_vni_scoped_fdb_rows` | LAN-64 collect-metadata VXLAN Ready + explicit `src_vni` FDB programming / scoped-delete proof |

@@ -242,9 +242,8 @@ fn classify_bridge_fdb(
         return Some(LocalMacObservation::ObservedOnVxlanPort { vni, mac });
     }
 
-    // Drop programmed-entry echoes on non-VXLAN ports — ours never
-    // land there, so these are a foreign controller's rows (ADR-0054
-    // foreign-state discipline: not local learns).
+    // Peer-sync forwarding and foreign controller rows do not confer
+    // local origination ownership.
     if msg.header.flags.contains(NeighbourFlags::ExtLearned) {
         return None;
     }
@@ -287,7 +286,7 @@ fn resolve_vxlan_observation_vni(
     cache.vxlan_ifindex_to_vni.get(&ifindex).copied()
 }
 
-fn resolve_bridge_port_observation_vni(
+pub(super) fn resolve_bridge_port_observation_vni(
     cache: &LinkCache,
     ifindex: u32,
     vlan: Option<u16>,
@@ -581,7 +580,14 @@ pub(crate) fn classify_route(msg: &RouteMessage, _kind: RouteEventKind) -> bool 
 pub(crate) fn classify_fdb_drift(msg: &NeighbourMessage, cache: &LinkCache) -> bool {
     matches!(msg.header.family, AddressFamily::Bridge)
         && (cache.vxlan_ifindex_to_vni.contains_key(&msg.header.ifindex)
-            || cache.svd_vxlan_ifindexes.contains(&msg.header.ifindex))
+            || cache.svd_vxlan_ifindexes.contains(&msg.header.ifindex)
+            || (msg.header.flags.contains(NeighbourFlags::ExtLearned)
+                && resolve_bridge_port_observation_vni(
+                    cache,
+                    msg.header.ifindex,
+                    extract_vlan(msg),
+                )
+                .is_some()))
 }
 
 /// `RTM_NEWLINK` / `RTM_DELLINK` drift classifier — should the

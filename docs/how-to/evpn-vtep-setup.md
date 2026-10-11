@@ -361,8 +361,8 @@ predicate table below is the contract rustbgpd checks.
 
 ## Multi-homing (Ethernet Segments)
 
-rustbgpd's `[[ethernet_segments]]` is **control-plane only**: when the
-EVPN reconcile actor is running it originates Type 4 (ES route), Type 1
+When the EVPN reconcile actor is running, `[[ethernet_segments]]`
+originates Type 4 (ES route), Type 1
 EAD-per-ES, and Type 1 EAD-per-EVI for the configured ESI over its
 `member_vnis`, and runs DF election. With an explicit `esi` it does **not**
 probe or require a kernel bond/ES netdev, and there is no ES readiness gate.
@@ -374,6 +374,14 @@ state follow that link's carrier — an AC failure then withdraws the
 ES routes automatically (see the drain section in
 `docs/how-to/evpn-vtep-troubleshooting.md`); this watches the named link's
 carrier but still gates nothing at startup beyond the drain itself.
+
+**Bind `interface` for all-active CE forwarding.** A healthy bound all-active segment
+installs peer-learned MACs on its local access link, so aliased known unicast
+can reach the CE even when only the other PE learned the MAC. Existing local
+learns and operator FDB rows observed before apply take priority; peer-only
+rows do not originate new Type 2 routes. Unbound segments provide control-plane origination, but do
+not provide this forwarding behavior. See the
+[ADR-0085 amendment](../adr/0085-evpn-es-interface-binding.md#amendment-2026-10-11-peer-synchronized-local-fdb-forwarding).
 
 What you still provide:
 

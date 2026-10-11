@@ -117,8 +117,8 @@ issue #187) so reviewers can distinguish real stability from flake masking.
 - M110: EVPN Type 5 symmetric Interface-less IRB over an IPv6-only VXLAN
   underlay against FRR (uses `vrf`).
 - Docker netns selectors, in job order — `fdb_nhg`, `fib_runtime`,
-  `bfd_runtime`, `dataplane_vlan_fdb`, `dataplane_remote_mac`,
-  `vlan_local_mac_attribution`, `macip_vlan_attribution`, `svd_fdb_vni`,
+  `bfd_runtime`, `dataplane_vlan_fdb`, `peer_sync_local_fdb`,
+  `dataplane_remote_mac`, `vlan_local_mac_attribution`, `macip_vlan_attribution`, `svd_fdb_vni`,
   `flood_list`, `svd_flood_list`, `managed_bridge`, `managed_vxlan`, `managed_svd_vxlan`,
   `managed_vlan_upper`, `managed_ready`, `link_carrier`, `bond_lacp`,
   `auto_lacp_daemon`, `ac_gate`, `nexthop_raw`, `foreign_state_l2`, `foreign_state_l2_dst`, and `foreign_state_nhid`. Seven further
@@ -133,8 +133,8 @@ issue #187) so reviewers can distinguish real stability from flake masking.
 
 The job always publishes a stable `netns-selector-receipt` JSON artifact and a
 concise job summary. A selector is recorded only after its harness invocation
-succeeds. The finalizer requires all 27 selectors when VRF is available; when
-VRF is unavailable it requires the 20 unconditional selectors and records the
+succeeds. The finalizer requires all 31 selectors when VRF is available; when
+VRF is unavailable it requires the 24 unconditional selectors and records the
 seven L3 omissions with reason `vrf_unavailable`. Missing, duplicate, or
 unexpected required selectors fail the job.
 

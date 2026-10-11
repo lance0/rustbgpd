@@ -182,6 +182,7 @@ jobs:
           bash tests/interop/scripts/test-test-vtep-route-oracles.sh
           bash tests/interop/scripts/test-test-wait-helper.sh
           python3 tests/interop/scripts/test_evpn_peer_sync_oracle.py
+          python3 tests/interop/scripts/test_evpn_frr_peer_sync.py
           python3 tests/interop/scripts/test_interop_signal_cleanup.py
           python3 tests/interop/scripts/test_m66_failure_diagnostics.py
           python3 tests/interop/scripts/test_m67_rerun_mode.py

@@ -1036,7 +1036,9 @@ pub fn record_l3_success(
         } => {
             owned.kernel_fdb.remove(&(*l3vxlan_ifindex, *router_mac));
         }
-        DataplaneOp::AddRemoteFdb { .. }
+        DataplaneOp::AddPeerSyncFdb { .. }
+        | DataplaneOp::RemovePeerSyncFdb { .. }
+        | DataplaneOp::AddRemoteFdb { .. }
         | DataplaneOp::UpdateRemoteFdb { .. }
         | DataplaneOp::RemoveRemoteFdb { .. }
         | DataplaneOp::AddFloodFdb { .. }

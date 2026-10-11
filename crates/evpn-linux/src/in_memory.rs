@@ -37,7 +37,7 @@ use crate::snapshot::{
     InstanceProbe, InstanceProbes, KernelBridgePortVlanInfo, KernelBridgeVlanFlags,
     KernelBridgeVlanInfo, KernelBridgeVlanTunnelInfo, KernelFdbEntry, KernelFdbFlags,
     KernelLinkInfo, KernelSnapshot, KernelVlanUpperLinkInfo, KernelVrfLinkInfo,
-    KernelVxlanLinkInfo,
+    KernelVxlanLinkInfo, peer_sync_vlan_members,
 };
 
 /// Test fake of [`Dataplane`].
@@ -386,6 +386,121 @@ impl InMemoryDataplane {
         }
 
         match op {
+            DataplaneOp::AddPeerSyncFdb {
+                vni,
+                mac,
+                vlan,
+                ifindex,
+            } => {
+                let key = (*vni, *vlan, *mac);
+                if state
+                    .kernel
+                    .local_fdb
+                    .get(&key)
+                    .is_some_and(|(port, row)| *port == *ifindex && row.is_extern_learned())
+                {
+                    return Ok(());
+                }
+                let affected =
+                    |&(row_vni, row_vlan, row_mac): &(EvpnInstanceId, Option<u16>, MacAddress)| {
+                        row_vni == *vni && row_mac == *mac && (vlan.is_none() || row_vlan == *vlan)
+                    };
+                if state.kernel.local_fdb.keys().any(affected)
+                    || state
+                        .kernel
+                        .iter_fdb()
+                        .any(|((v, m), row)| affected(&(v, row.vlan, m)))
+                {
+                    return Err(DataplaneError::LocalMacConflict {
+                        vni: *vni,
+                        mac: *mac,
+                    });
+                }
+                let mut vlans = vec![*vlan];
+                if vlan.is_none()
+                    && let Some(members) = state
+                        .kernel
+                        .links
+                        .values()
+                        .find(|bridge| bridge.ce_port_ifindexes.contains(ifindex))
+                        .and_then(|bridge| peer_sync_vlan_members(bridge, *ifindex))
+                {
+                    vlans.extend(members.into_iter().map(Some));
+                }
+                for member in vlans {
+                    state.kernel.local_fdb.insert(
+                        (*vni, member, *mac),
+                        (
+                            *ifindex,
+                            KernelFdbEntry {
+                                mac: *mac,
+                                vlan: member,
+                                dst: None,
+                                nh_id: None,
+                                protocol: None,
+                                flags: KernelFdbFlags {
+                                    extern_learn: true,
+                                    master: true,
+                                    ..Default::default()
+                                },
+                            },
+                        ),
+                    );
+                }
+            }
+            DataplaneOp::RemovePeerSyncFdb {
+                vni,
+                mac,
+                vlan,
+                ifindex,
+            } => {
+                let key = (*vni, *vlan, *mac);
+                if state
+                    .kernel
+                    .local_fdb
+                    .get(&key)
+                    .is_some_and(|(port, row)| *port == *ifindex && row.is_extern_learned())
+                {
+                    if vlan.is_none()
+                        && state
+                            .kernel
+                            .local_fdb
+                            .iter()
+                            .any(|(&(v, _, m), (port, row))| {
+                                v == *vni
+                                    && m == *mac
+                                    && *port == *ifindex
+                                    && !row.is_extern_learned()
+                            })
+                    {
+                        return Err(DataplaneError::LocalMacConflict {
+                            vni: *vni,
+                            mac: *mac,
+                        });
+                    }
+                    let members = state
+                        .kernel
+                        .links
+                        .values()
+                        .find(|bridge| bridge.ce_port_ifindexes.contains(ifindex))
+                        .and_then(|bridge| peer_sync_vlan_members(bridge, *ifindex));
+                    state
+                        .kernel
+                        .local_fdb
+                        .retain(|&(v, row_vlan, m), (port, _)| {
+                            !(v == *vni
+                                && m == *mac
+                                && *port == *ifindex
+                                && (row_vlan == *vlan
+                                    || (vlan.is_none()
+                                        && row_vlan.is_some_and(|member| {
+                                            members
+                                                .as_ref()
+                                                .is_some_and(|members| members.contains(&member))
+                                        }))))
+                        });
+                }
+            }
             DataplaneOp::AddRemoteFdb {
                 vni,
                 mac,
@@ -1284,6 +1399,26 @@ impl InMemoryHandle {
             .expect("poisoned")
             .kernel
             .insert_fdb(vni, entry);
+    }
+
+    /// Pre-load a local bridge master row, including external ownership markers.
+    pub fn pre_load_local_fdb(&self, vni: EvpnInstanceId, ifindex: u32, entry: KernelFdbEntry) {
+        self.state
+            .lock()
+            .expect("poisoned")
+            .kernel
+            .local_fdb
+            .insert((vni, entry.vlan, entry.mac), (ifindex, entry));
+    }
+
+    /// Simulate a local bridge row disappearing outside the actor.
+    pub fn force_remove_local_fdb(&self, vni: EvpnInstanceId, vlan: Option<u16>, mac: MacAddress) {
+        self.state
+            .lock()
+            .expect("poisoned")
+            .kernel
+            .local_fdb
+            .remove(&(vni, vlan, mac));
     }
 
     /// Pre-load one zero-MAC flood row; `owned` is its `extern_learn`
