@@ -97,13 +97,15 @@ Implemented:
   `match_aspa_validation` in TOML policy and `route.aspa` in `.rpol`
   ([rpol-language.md](rpol-language.md)). One explicit deny statement
   makes Invalid ineligible.
-- Cache updates trigger targeted inbound Route Refresh for
-  established peers whose import policy depends on ASPA
+- Cache updates re-evaluate established peers whose import policy
+  depends on ASPA (`bgp_validation_import_refreshes_total` metric),
+  so previously denied routes are re-evaluated against the fresh
+  snapshot. By default this requests inbound Route Refresh
   (`soft_reset_import_validation_dependents` in
-  `src/peer_manager/policy.rs`,
-  `bgp_validation_import_refreshes_total` metric), so
-  previously denied routes are re-evaluated against the fresh
-  snapshot.
+  `src/peer_manager/policy.rs`); with `[rpki] local_revalidation`
+  it replays retained input locally for routes whose `AS_PATH`
+  contains a changed customer ASN
+  ([configuration](configuration.md#local-re-evaluation-rfc-9324)).
 - Best path deprioritizes Invalid: step 0.7 ranks
   `Valid > Unknown > Invalid` between RPKI and LOCAL_PREF
   (`crates/rib/src/best_path.rs`).
@@ -121,8 +123,13 @@ Not implemented:
   the same retention reasoning for drop policies). rustbgpd's
   rejected-routes store is a bounded, lossy diagnostic LRU — it
   answers "why was this rejected", it cannot reproduce the route.
-  Re-evaluation of policy-rejected routes relies on inbound Route
-  Refresh from the peer.
+  The opt-in `[rpki] local_revalidation` store keeps the received
+  input of validation-decided rejects and re-evaluates them locally,
+  but it is bounded per session (overflow falls back to Route
+  Refresh) and does not change selection: Invalid stays selectable
+  unless policy denies it. By default, re-evaluation of
+  policy-rejected routes relies on inbound Route Refresh from the
+  peer.
 
 This is a deliberate posture, not a gap awaiting a quick fix. As with
 RFC 8212 handling ([ADR-0112](../adr/0112-rfc-8212-ebgp-requires-policy.md),

@@ -27,7 +27,7 @@ deviations; [docs/interop.md](../interop.md) has the interop matrix,
 | Graceful restart | RFC 4724 (GR helper), RFC 9494 (LLGR) | Stale retention across all RR families; role-derived forwarding-state bits |
 | VPN / MPLS families (RR / controller-feed only, ADR-0077) | RFC 4364/4659 VPNv4/v6 (SAFI 128), RFC 4684 RT-Constrain (SAFI 132), RFC 8277 labeled-unicast (SAFI 4), RFC 9552 BGP-LS (SAFI 71/72) | RD/label/next-hop/RT preserved verbatim (a received IPv6 link-local next hop only toward its own link); no VRF import, no MPLS FIB, no local BGP-LS production |
 | EVPN (Linux/VXLAN alpha) | RFC 7432, RFC 9135/9136 (symmetric IRB), RFC 9012/8365 (VXLAN encap), RFC 9251 (SMET relay) | Route types 1–6; Type 6 SMET relay only; RR + VTEP + multi-homing building blocks; RFC 9721 §5.1/§6.2 local-move cascade (partial) |
-| Origin / path security | RFC 6811 + RFC 8210 (RPKI/RTR), ASPA, RFC 9234 (Roles + OTC, ADR-0071) | Origin validation, AS-path verification, leak prevention |
+| Origin / path security | RFC 6811 + RFC 8210 (RPKI/RTR), RFC 9324 (opt-in), ASPA, RFC 9234 (Roles + OTC, ADR-0071) | Origin validation, AS-path verification, leak prevention; local VRP/ASPA re-evaluation without Route Refresh when `[rpki] local_revalidation` is set |
 | Transport security | RFC 5925 (TCP-AO), TCP MD5, RFC 5082 (GTSM) | TCP-AO: static-neighbor and direct dynamic-prefix keyrings on Linux; add-only successor installation, observation-gated successor selection/deprecation, then deprecated unselected-MKT deletion on separate SIGHUP generations; RPKI cache (RTR) sockets take the same MD5 or TCP-AO material |
 | FlowSpec / blackhole | RFC 8955/8956 and RFC 9117 (FlowSpec, SAFI 133), RFC 7999 (BLACKHOLE) | Opt-in FlowSpec feasibility; opt-in BLACKHOLE Linux FIB discard |
 | Liveness | RFC 5880/5881/5882/5883 (BFD), RFC 9384 (BFD Down Cease subcode), RFC 9687 (Send Hold Timer) | Single-hop and multihop async BFD for static neighbors; typed Cease/10 teardown on a genuine BFD Down |
@@ -1616,6 +1616,40 @@ carries inactive (absent), unlimited (zero), or finite.
   EBGP sessions across administrative boundaries." rpol can still add
   `OV_*`.
 - See ADR-0034.
+
+---
+
+## RFC 9324 — Route Refresh avoidance for RPKI-based policy
+
+- Section 5 requires a speaker performing ROV to keep the full Adj-RIB-In or,
+  per Section 4, at least the routes dropped by ROV, so new RPKI data is
+  evaluated without asking neighbors for Route Refresh.
+- **Default: deviation.** `[rpki] local_revalidation` defaults to `false`. A
+  changed VRP or ASPA snapshot then sends inbound Route Refresh for every
+  negotiated family to each Established peer whose import policy matches
+  validation state, and routes dropped by validation are recovered only by
+  that replay.
+- **Opt-in: conforming for IPv4/IPv6 unicast.** With
+  `local_revalidation = true` (one global control, as Section 4 requires),
+  sessions with a validation-dependent import policy keep their pre-policy
+  unicast input: accepted routes and the rejects some other validation outcome
+  would admit. A VRP change re-runs import policy over the retained routes
+  under the changed VRP prefixes, an ASPA change over routes whose `AS_PATH`
+  contains a changed customer ASN, through the ordinary inbound path. No
+  Route Refresh is sent. The retained input is the received attributes, so
+  validation-based policy sees them before any policy rewrite (Section 4).
+- Limits of the opt-in mode: each session retains at most 65,536 validation
+  rejects; beyond that, and when retention starts mid-session, it falls back
+  to Route Refresh until the session resets
+  (`bgp_validation_import_refreshes_total{outcome="fallback_refresh"}` plus a
+  warning). FlowSpec routes are not retained, so negotiated FlowSpec families
+  keep Route Refresh on a VRP change. IRR and other dataset swaps are outside
+  RFC 9324 and keep Route Refresh.
+- ASPA: the normative MUSTs in Sections 4 and 5 name ROV. ASPA appears in
+  Section 3 and in Section 4's ordering requirement as a future RPKI-based
+  policy; the ASPA verification draft (Section 5.7 of -28) points to
+  RFC 9324 for keeping ASPA-invalid routes. The opt-in store covers ASPA on
+  that basis. See [ASPA conformance](aspa-conformance.md).
 
 ---
 
