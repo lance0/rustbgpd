@@ -522,6 +522,21 @@ def state(directory, mode="full"):
     vendor_l2_imported(directory)
 
 
+def capture_witness(text, remote_mac):
+    """Require the complete routed probe before stopping the live capture."""
+    rows = [line.split("\t") for line in text.splitlines()]
+    require(all(len(row) == 7 for row in rows), "incomplete capture witness row")
+    requests = [row for row in rows if row[2:5] == ["198.18.10.1", "198.19.120.2", "8"]]
+    require(len(requests) == 3, "capture has not observed exactly three probe requests")
+    require(sorted(row[6] for row in requests) == ["1", "2", "3"],
+            "capture probe sequences differ")
+    identifiers = {row[5] for row in requests}
+    require(len(identifiers) == 1 and next(iter(identifiers)).isdigit(),
+            "capture probe ICMP identifiers differ or are missing")
+    require(all(row[0] == "50120" and row[1].lower() == remote_mac for row in requests),
+            "capture probe VNI or inner Router MAC differs")
+
+
 def replay(directory):
     generation = runtime(read(directory / "initial", "runtime.json"))
     transitions = set()
@@ -545,7 +560,10 @@ if __name__ == "__main__":
     try:
         directory = Path(sys.argv[1])
         mode = sys.argv[2] if len(sys.argv) > 2 else "full"
-        if mode == "replay":
+        if mode == "capture-witness":
+            capture_witness((directory / "capture-witness.tsv").read_text(),
+                            remote_router_mac(read(directory / "initial", "srl-tunnels.json")))
+        elif mode == "replay":
             replay(directory)
         else:
             state(directory, mode)

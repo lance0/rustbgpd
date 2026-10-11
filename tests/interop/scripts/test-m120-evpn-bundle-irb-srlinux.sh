@@ -66,6 +66,10 @@ forward() {
         ping_host "$CLIENT" "$tag" 198.19.121.1 "$phase-remote-$tag"
     done
 }
+capture_drained() {
+    docker exec "$CAPTURE_CONTAINER" cat /tmp/m120-witness.tsv > "$OUT/capture-witness.tsv" &&
+        python3 "$ORACLE" "$OUT" capture-witness
+}
 finish() {
     local rc=$?
     set +e
@@ -78,6 +82,7 @@ finish() {
         if [ ! -f "$OUT/routed.pcap" ]; then
             docker cp "$CAPTURE_CONTAINER:/tmp/m120.pcap" "$OUT/failed-capture.pcap" >/dev/null 2>&1
         fi
+        docker cp "$CAPTURE_CONTAINER:/tmp/m120-witness.tsv" "$OUT/capture-witness.tsv" >/dev/null 2>&1
         docker rm -f "$CAPTURE_CONTAINER" >/dev/null 2>&1
     fi
     docker exec "$VTEP" cat /var/log/rustbgpd.log > "$OUT/rustbgpd.log" 2>&1
@@ -119,9 +124,14 @@ docker exec "$VTEP" ip -j route get 198.19.120.2 vrf tenant > "$OUT/route-get.js
 docker image inspect "$CAPTURE_IMAGE" > "$OUT/capture-image.json"
 docker run -d --name "$CAPTURE_CONTAINER" \
     --network "container:$VTEP" --cap-add=NET_ADMIN --cap-add=NET_RAW \
-    "$CAPTURE_IMAGE" tshark -p -i eth1 -f 'udp port 4789' -w /tmp/m120.pcap >/dev/null
+    "$CAPTURE_IMAGE" sh -c 'exec tshark -l -P -p -i eth1 -f "udp port 4789" -w /tmp/m120.pcap \
+        -T fields -E occurrence=l -e vxlan.vni -e eth.dst -e ip.src -e ip.dst \
+        -e icmp.type -e icmp.ident -e icmp.seq > /tmp/m120-witness.tsv' >/dev/null
 wait_capture_ready "$CAPTURE_CONTAINER" /tmp/m120.pcap -
 ping_host "$VTEP" 10 198.19.120.2 capture
+# Ping completion can precede capture delivery. Wait for all three dissected
+# requests, with stdout flushed per packet, before asking tshark to stop.
+wait_until 15 1 capture_drained
 docker kill --signal=INT "$CAPTURE_CONTAINER" >/dev/null
 capture_status=$(timeout 15 docker wait "$CAPTURE_CONTAINER")
 printf '%s\n' "$capture_status" > "$OUT/capture.exit"

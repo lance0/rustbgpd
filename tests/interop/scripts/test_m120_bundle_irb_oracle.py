@@ -1152,5 +1152,32 @@ class BundleIrbOracleTests(unittest.TestCase):
                     oracle.vendor_l3_fib(bad["srl-tenant.json"], bad["srl-default-fib.json"])
 
 
+class CaptureWitnessTests(unittest.TestCase):
+    def test_complete_probe_and_counterexamples(self):
+        rows = [["50120", REMOTE_MAC, "198.18.10.1", "198.19.120.2", "8", "42", str(seq)]
+                for seq in (1, 2, 3)]
+
+        def render(packets):
+            return "".join("\t".join(row) + "\n" for row in packets)
+
+        # An unrelated ARP and a reply are normal in the same capture.
+        unrelated = [["10010", "ff:ff:ff:ff:ff:ff", "", "", "", "", ""],
+                     ["50120", REMOTE_MAC, "198.19.120.2", "198.18.10.1", "0", "42", "1"]]
+        oracle.capture_witness(render(unrelated + rows), REMOTE_MAC)
+        invalid = [[], rows[:2], rows + [rows[2]], rows[:2] + [rows[1]]]
+        for field, value in ((0, "10010"), (1, "02:00:00:00:00:01"),
+                             (1, "02:00:00:00:00:01," + REMOTE_MAC),
+                             (2, "198.18.20.1"), (3, "198.19.123.2"), (4, "0"),
+                             (5, "43"), (5, ""), (6, "4")):
+            bad = copy.deepcopy(rows)
+            bad[2][field] = value
+            invalid.append(bad)
+        invalid.append([row[:5] + [""] + row[6:] for row in rows])
+        invalid.append(rows[:2] + [rows[2][:-1]])
+        for packets in invalid:
+            with self.subTest(packets=packets), self.assertRaises(ValueError):
+                oracle.capture_witness(render(packets), REMOTE_MAC)
+
+
 if __name__ == "__main__":
     unittest.main()
