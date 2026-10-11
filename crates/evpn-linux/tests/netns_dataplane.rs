@@ -1161,6 +1161,7 @@ async fn peer_sync_legacy_vlan_guard(dp: &mut LinuxDataplane, mut instances: Evp
         Some(&InstanceProbe::Ready)
     );
     let ifindex = dp.dump_snapshot().await.unwrap().bridge_ports["eslegacy"].ifindex;
+    peer_sync_legacy_reconciliation(dp, &instances, v, ifindex).await;
     let m = mac(0x7a);
     let add = DataplaneOp::AddPeerSyncFdb {
         vni: v,
@@ -1243,5 +1244,230 @@ async fn peer_sync_legacy_vlan_guard(dp: &mut LinuxDataplane, mut instances: Evp
         !dp.dump_snapshot().await.unwrap().local_fdb[&(v, Some(1), m)]
             .1
             .is_extern_learned()
+    );
+}
+
+/// Exercise the actor against actual partial kernel sets, including startup adoption.
+async fn peer_sync_legacy_reconciliation(
+    dp: &mut LinuxDataplane,
+    instances: &EvpnInstanceTable,
+    vni: EvpnInstanceId,
+    ifindex: u32,
+) {
+    use std::sync::Arc;
+
+    use rustbgpd_evpn::{DataplaneIntent, RemoteMacTable};
+    use rustbgpd_evpn_linux::{ReconcileActor, ReconcileActorConfig};
+    use tokio::sync::{mpsc, watch};
+    use tokio_util::sync::CancellationToken;
+
+    let m = mac(0x7b);
+    for missing in [None, Some(1)] {
+        dp.apply(&DataplaneOp::AddPeerSyncFdb {
+            vni,
+            mac: m,
+            vlan: None,
+            ifindex,
+        })
+        .await
+        .unwrap();
+        if missing.is_none() {
+            // Unscoped DEL removes the complete pair on Linux. Explicitly stage
+            // a marked VLAN 1 orphan; never assume DEL leaves that sibling.
+            run(
+                "bridge",
+                &["fdb", "del", &mac_str(m), "dev", "eslegacy", "master"],
+            );
+            run(
+                "bridge",
+                &[
+                    "fdb",
+                    "add",
+                    &mac_str(m),
+                    "dev",
+                    "eslegacy",
+                    "master",
+                    "vlan",
+                    "1",
+                    "extern_learn",
+                ],
+            );
+        } else {
+            run(
+                "bridge",
+                &[
+                    "fdb",
+                    "del",
+                    &mac_str(m),
+                    "dev",
+                    "eslegacy",
+                    "master",
+                    "vlan",
+                    "1",
+                ],
+            );
+        }
+        eprintln!(
+            "raw partial FDB: {}",
+            String::from_utf8(run("bridge", &["-j", "fdb", "show", "dev", "eslegacy"]).stdout)
+                .unwrap()
+        );
+        let before = dp.dump_snapshot().await.unwrap();
+        assert!(!before.local_fdb.contains_key(&(vni, missing, m)));
+        let remaining = if missing.is_none() { Some(1) } else { None };
+        assert!(before.local_fdb[&(vni, remaining, m)].1.is_extern_learned());
+        eprintln!(
+            "peer-sync partial set before repair: missing={missing:?} rows={:?}",
+            before.local_fdb
+        );
+
+        let mut desired = RemoteMacTable::new();
+        desired.set_peer_sync_fdb(vni, m, "eslegacy".into());
+        if missing.is_none() {
+            peer_sync_partial_plan_preserves_takeover(dp, instances, &desired, vni, m).await;
+        }
+        let mut intent = DataplaneIntent::empty();
+        intent.generation = 1;
+        intent.instances = Arc::new(instances.clone());
+        intent.remote_macs = Arc::new(desired);
+        let (_intent_tx, intent_rx) = watch::channel(Arc::new(intent));
+        let (report_tx, mut report_rx) = mpsc::channel(16);
+        let shutdown = CancellationToken::new();
+        let actor = ReconcileActor::new(
+            ReconcileActorConfig::for_tests(),
+            LinuxDataplane::connect().await.unwrap(),
+            intent_rx,
+            report_tx,
+            shutdown.clone(),
+        );
+        let task = tokio::spawn(actor.run());
+        let report = tokio::time::timeout(Duration::from_secs(5), report_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(report.intent_generation, 1);
+        assert!(report.failed.is_empty(), "{report:?}");
+        eprintln!(
+            "raw repaired FDB: {}",
+            String::from_utf8(run("bridge", &["-j", "fdb", "show", "dev", "eslegacy"]).stdout)
+                .unwrap()
+        );
+        let after = dp.dump_snapshot().await.unwrap();
+        for vlan in [None, Some(1)] {
+            let (port, row) = &after.local_fdb[&(vni, vlan, m)];
+            assert_eq!(*port, ifindex);
+            assert!(row.is_extern_learned());
+        }
+        eprintln!(
+            "peer-sync complete set after repair: missing={missing:?} rows={:?}",
+            after.local_fdb
+        );
+        shutdown.cancel();
+        tokio::time::timeout(Duration::from_secs(5), task)
+            .await
+            .unwrap()
+            .unwrap();
+        let drained = dp.dump_snapshot().await.unwrap();
+        assert!(
+            !drained
+                .local_fdb
+                .keys()
+                .any(|(v, _, mac)| *v == vni && *mac == m)
+        );
+    }
+}
+
+/// A takeover after planning must survive the real backend's fresh guards.
+async fn peer_sync_partial_plan_preserves_takeover(
+    dp: &mut LinuxDataplane,
+    instances: &EvpnInstanceTable,
+    desired: &rustbgpd_evpn::RemoteMacTable,
+    vni: EvpnInstanceId,
+    m: MacAddress,
+) {
+    use rustbgpd_evpn_linux::group_state::GroupOwnedMap;
+    use rustbgpd_evpn_linux::{OwnedSet, compute_diff};
+
+    let probes = dp.probe(instances).await;
+    let plan = compute_diff(
+        desired,
+        &dp.dump_snapshot().await.unwrap(),
+        &OwnedSet::new(),
+        &probes,
+        &GroupOwnedMap::new(),
+        instances,
+    );
+    assert!(matches!(
+        plan.ops.as_slice(),
+        [
+            DataplaneOp::RemovePeerSyncFdb { vlan: Some(1), .. },
+            DataplaneOp::AddPeerSyncFdb { vlan: None, .. },
+        ]
+    ));
+    for state in ["dynamic", "static"] {
+        run(
+            "bridge",
+            &[
+                "fdb",
+                "del",
+                &mac_str(m),
+                "dev",
+                "eslegacy",
+                "master",
+                "vlan",
+                "1",
+            ],
+        );
+        run(
+            "bridge",
+            &[
+                "fdb",
+                "add",
+                &mac_str(m),
+                "dev",
+                "eslegacy",
+                "master",
+                "vlan",
+                "1",
+                state,
+            ],
+        );
+        let foreign = dp.dump_snapshot().await.unwrap().local_fdb;
+        assert!(!foreign[&(vni, Some(1), m)].1.is_extern_learned());
+        dp.apply(&plan.ops[0]).await.unwrap();
+        assert!(dp.apply(&plan.ops[1]).await.is_err());
+        assert_eq!(dp.dump_snapshot().await.unwrap().local_fdb, foreign);
+        eprintln!(
+            "raw preserved post-plan {state} FDB: {}",
+            String::from_utf8(run("bridge", &["-j", "fdb", "show", "dev", "eslegacy"]).stdout)
+                .unwrap()
+        );
+    }
+    run(
+        "bridge",
+        &[
+            "fdb",
+            "del",
+            &mac_str(m),
+            "dev",
+            "eslegacy",
+            "master",
+            "vlan",
+            "1",
+        ],
+    );
+    run(
+        "bridge",
+        &[
+            "fdb",
+            "add",
+            &mac_str(m),
+            "dev",
+            "eslegacy",
+            "master",
+            "vlan",
+            "1",
+            "extern_learn",
+        ],
     );
 }

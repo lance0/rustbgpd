@@ -6509,17 +6509,22 @@ async fn peer_sync_adopted_overlay_preserves_foreign_scope_and_nhg_rows() {
         "foreign local sibling",
         "local dynamic sibling",
         "nhg",
+        "nhg with partial local set",
     ] {
         let mut h = Harness::spawn(ReconcileActorConfig::for_tests());
         setup_peer_sync(&h);
         let mut overlay = extern_learn_row(mac(1), "10.0.0.2");
         if shape == "foreign overlay" {
             overlay.flags.extern_learn = false;
-        } else if shape == "nhg" {
+        } else if shape.starts_with("nhg") {
             overlay.dst = None;
             overlay.nh_id = Some(0x4000_0001);
         }
         h.handle.pre_load_fdb(vni(100), overlay);
+        if shape == "nhg with partial local set" {
+            h.handle
+                .pre_load_local_fdb(vni(100), 12, peer_sync_row(mac(1), Some(1), true));
+        }
         if shape == "foreign remote sibling" {
             let mut sibling = extern_learn_row(mac(1), "10.9.9.9");
             sibling.vlan = Some(37);
@@ -6544,6 +6549,205 @@ async fn peer_sync_adopted_overlay_preserves_foreign_scope_and_nhg_rows() {
         assert_eq!(after.local_fdb, before.local_fdb, "{shape}");
         h.shutdown().await;
     }
+}
+
+async fn assert_peer_sync_legacy_drift_repaired(missing: Option<u16>) {
+    let mut h = Harness::spawn(ReconcileActorConfig::for_tests());
+    setup_peer_sync(&h);
+    for vlan in [None, Some(1)] {
+        h.handle
+            .pre_load_local_fdb(vni(100), 12, peer_sync_row(mac(1), vlan, true));
+    }
+    h.intent_tx.send(peer_sync_intent(1)).unwrap();
+    let first = wait_for_generation(&mut h, 1).await;
+    assert!(first.failed.is_empty());
+    let complete = h.handle.kernel_snapshot().local_fdb;
+    h.handle.force_remove_local_fdb(vni(100), missing, mac(1));
+    h.intent_tx.send(peer_sync_intent(2)).unwrap();
+    let repaired = wait_for_generation(&mut h, 2).await;
+    assert!(repaired.failed.is_empty(), "{:?}", repaired.failed);
+    assert_eq!(
+        h.handle.kernel_snapshot().local_fdb,
+        complete,
+        "missing {missing:?}"
+    );
+    h.intent_tx.send(peer_sync_intent(3)).unwrap();
+    let stable = wait_for_generation(&mut h, 3).await;
+    assert!(
+        stable.applied.is_empty(),
+        "complete sibling set must settle"
+    );
+    h.shutdown().await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn peer_sync_repairs_missing_canonical() {
+    assert_peer_sync_legacy_drift_repaired(None).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn peer_sync_repairs_missing_sibling() {
+    assert_peer_sync_legacy_drift_repaired(Some(1)).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn peer_sync_partial_repair_preserves_unrecognized_rows() {
+    for conflict in ["dynamic", "static", "wrong port", "unmatched VLAN"] {
+        let mut h = Harness::spawn(ReconcileActorConfig::for_tests());
+        setup_peer_sync(&h);
+        for vlan in [None, Some(1)] {
+            h.handle
+                .pre_load_local_fdb(vni(100), 12, peer_sync_row(mac(1), vlan, true));
+        }
+        h.intent_tx.send(peer_sync_intent(1)).unwrap();
+        wait_for_generation(&mut h, 1).await;
+        h.handle.force_remove_local_fdb(vni(100), None, mac(1));
+        let vlan = if conflict == "unmatched VLAN" { 99 } else { 1 };
+        let port = if conflict == "wrong port" { 13 } else { 12 };
+        let marked = matches!(conflict, "wrong port" | "unmatched VLAN");
+        let mut row = peer_sync_row(mac(1), Some(vlan), marked);
+        row.flags.noarp = conflict == "static";
+        h.handle.pre_load_local_fdb(vni(100), port, row);
+        let before = h.handle.kernel_snapshot().local_fdb;
+        h.intent_tx.send(peer_sync_intent(2)).unwrap();
+        let report = wait_for_generation(&mut h, 2).await;
+        assert!(
+            report.applied.is_empty(),
+            "{conflict}: {:?}",
+            report.applied
+        );
+        assert!(report.failed.is_empty(), "{conflict}: {:?}", report.failed);
+        assert_eq!(h.handle.kernel_snapshot().local_fdb, before, "{conflict}");
+        h.shutdown().await;
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn peer_sync_partial_repair_remove_failure_defers_add() {
+    let mut h = Harness::spawn(ReconcileActorConfig::for_tests());
+    setup_peer_sync(&h);
+    h.intent_tx.send(peer_sync_intent(1)).unwrap();
+    wait_for_generation(&mut h, 1).await;
+    let complete = h.handle.kernel_snapshot().local_fdb;
+    h.handle.force_remove_local_fdb(vni(100), Some(1), mac(1));
+    let partial = h.handle.kernel_snapshot().local_fdb;
+    h.handle
+        .inject_failure_io(Some(DataplaneOp::RemovePeerSyncFdb {
+            vni: vni(100),
+            mac: mac(1),
+            vlan: None,
+            ifindex: 12,
+        }));
+    h.intent_tx.send(peer_sync_intent(2)).unwrap();
+    let failed = wait_for_generation(&mut h, 2).await;
+    assert_eq!(failed.failed.len(), 1);
+    assert!(
+        failed.applied.is_empty(),
+        "Add must not bypass failed Remove"
+    );
+    assert_eq!(h.handle.kernel_snapshot().local_fdb, partial);
+    tokio::time::advance(Duration::from_secs(6)).await;
+    h.intent_tx.send(peer_sync_intent(3)).unwrap();
+    let recovered = wait_for_generation(&mut h, 3).await;
+    assert!(recovered.failed.is_empty());
+    assert_eq!(h.handle.kernel_snapshot().local_fdb, complete);
+    h.shutdown().await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn peer_sync_repair_preserves_other_explicit_vlan() {
+    let mut h = Harness::spawn(ReconcileActorConfig::for_tests());
+    setup_peer_sync(&h);
+    let instances = one_instance_table(instance_with_bridge_vlan(100, "br100", 10, "10.0.0.1"));
+    let mut desired = RemoteMacTable::new();
+    desired.set_peer_sync_fdb(vni(100), mac(1), "es0".into());
+    for vlan in [10, 20] {
+        h.handle
+            .pre_load_local_fdb(vni(100), 12, peer_sync_row(mac(1), Some(vlan), true));
+    }
+    let complete = h.handle.kernel_snapshot().local_fdb;
+    h.intent_tx
+        .send(intent(1, instances.clone(), desired.clone()))
+        .unwrap();
+    wait_for_generation(&mut h, 1).await;
+    h.handle.force_remove_local_fdb(vni(100), Some(10), mac(1));
+    h.intent_tx.send(intent(2, instances, desired)).unwrap();
+    let repaired = wait_for_generation(&mut h, 2).await;
+    assert!(repaired.failed.is_empty());
+    assert_eq!(h.handle.kernel_snapshot().local_fdb, complete);
+    let handle = h.handle.clone();
+    h.shutdown().await;
+    assert_eq!(handle.kernel_snapshot().local_fdb.len(), 1);
+    assert!(
+        handle
+            .kernel_snapshot()
+            .local_fdb
+            .contains_key(&(vni(100), Some(20), mac(1)))
+    );
+}
+
+async fn assert_peer_sync_adoption_waits_for_target(unready_probe: bool) {
+    for withdraw_while_unresolved in [false, true] {
+        let mut h = Harness::spawn(ReconcileActorConfig {
+            fdb_adoption_reap_deferral: Duration::from_secs(2),
+            ..ReconcileActorConfig::for_tests()
+        });
+        setup_peer_sync(&h);
+        for vlan in [None, Some(1)] {
+            h.handle
+                .pre_load_local_fdb(vni(100), 12, peer_sync_row(mac(1), vlan, true));
+        }
+        if unready_probe {
+            h.handle.set_probe(
+                vni(100),
+                InstanceProbe::NotReady {
+                    reason: "startup".into(),
+                },
+            );
+        } else {
+            h.handle.set_bridge_port("es0", 13, Some(3));
+        }
+        let retained = h.handle.kernel_snapshot().local_fdb;
+        h.intent_tx.send(peer_sync_intent(1)).unwrap();
+        wait_for_generation(&mut h, 1).await;
+        tokio::time::advance(Duration::from_secs(3)).await;
+        h.intent_tx.send(peer_sync_intent(2)).unwrap();
+        let pending = wait_for_generation(&mut h, 2).await;
+        assert!(
+            pending.applied.is_empty(),
+            "desired unresolved adoption must not reap: {:?}",
+            pending.applied
+        );
+        assert_eq!(h.handle.kernel_snapshot().local_fdb, retained);
+        if withdraw_while_unresolved {
+            let instances = one_instance_table(instance(100, Some("br100"), "10.0.0.1"));
+            h.intent_tx
+                .send(intent(3, instances, RemoteMacTable::new()))
+                .unwrap();
+            wait_for_generation(&mut h, 3).await;
+            assert!(
+                h.handle.kernel_snapshot().local_fdb.is_empty(),
+                "withdrawal must still reap"
+            );
+        } else {
+            setup_peer_sync(&h);
+            h.intent_tx.send(peer_sync_intent(3)).unwrap();
+            let ready = wait_for_generation(&mut h, 3).await;
+            assert!(ready.failed.is_empty());
+            assert_eq!(h.handle.kernel_snapshot().local_fdb, retained);
+        }
+        h.shutdown().await;
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn peer_sync_adoption_waits_for_ready_instance() {
+    assert_peer_sync_adoption_waits_for_target(true).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn peer_sync_adoption_waits_for_resolved_port() {
+    assert_peer_sync_adoption_waits_for_target(false).await;
 }
 
 #[tokio::test(start_paused = true)]
@@ -6747,21 +6951,8 @@ async fn peer_sync_legacy_orphan_is_reaped_before_live_unscoped_install() {
         .pre_load_local_fdb(vni(100), 12, peer_sync_row(mac(1), Some(1), true));
     h.intent_tx.send(peer_sync_intent(1)).unwrap();
     let report = wait_for_generation(&mut h, 1).await;
-    assert_eq!(
-        report.failed.len(),
-        1,
-        "orphan occupies unscoped add's mutation scope"
-    );
-    tokio::time::advance(Duration::from_secs(3)).await;
-    h.intent_tx.send(peer_sync_intent(2)).unwrap();
-    let mut applied = Vec::new();
-    loop {
-        let report = h.next_report().await;
-        applied.extend(report.applied);
-        if report.intent_generation >= 2 {
-            break;
-        }
-    }
+    assert!(report.failed.is_empty());
+    let applied = report.applied;
     assert!(matches!(
         applied
             .iter()
@@ -6811,9 +7002,10 @@ async fn peer_sync_legacy_pair_is_revalidated_at_grace_expiry() {
             Some(rustbgpd_evpn::DataplaneOpKind::RemovePeerSyncFdb { .. })
         ));
         let rows = h.handle.kernel_snapshot().local_fdb;
-        assert!(
-            !rows.contains_key(&(vni(100), Some(1), mac(1))),
-            "orphan must be reaped"
+        assert_eq!(
+            rows.contains_key(&(vni(100), Some(1), mac(1))),
+            !foreign_none,
+            "a desired missing canonical restores its complete set; a foreign canonical preserves takeover"
         );
         assert_eq!(
             rows[&(vni(100), None, mac(1))].1.is_extern_learned(),

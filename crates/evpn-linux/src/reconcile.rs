@@ -56,14 +56,14 @@ use rustbgpd_evpn::{EvpnInstanceId, EvpnIpPrefixValue, IpVrfId, MacAddress};
 
 use crate::backoff::RetrySchedule;
 use crate::dataplane::{Dataplane, DataplaneOp, KernelEvent};
-use crate::diff::{Plan, compute_diff};
+use crate::diff::{Plan, compute_diff, peer_sync_target};
 use crate::enforcement::build_bum_enforcement_status;
 use crate::error::FailureClass;
 use crate::l3_adoption::{AdoptedL3Route, AdoptedL3VxlanFdb, AdoptedL3VxlanFdbTarget};
 use crate::snapshot::{
     InstanceProbe, InstanceProbes, KernelLinkInfo, KernelSnapshot, KernelVlanUpperLinkInfo,
     KernelVrfLinkInfo, KernelVxlanLinkInfo, OwnedEntry, OwnedEntryKind, OwnedSet,
-    vlan_rows_contain,
+    peer_sync_vlan_members, vlan_rows_contain,
 };
 use crate::worker_progress::{WorkerProgress, WorkerProgressState};
 
@@ -1079,6 +1079,7 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
             .fdb_adoption_reap_after
             .is_some_and(|deadline| Instant::now() >= deadline)
         {
+            let mut memberships = BTreeMap::new();
             for (key, port) in std::mem::take(&mut self.state.adopted_peer_sync) {
                 if snapshot
                     .local_fdb
@@ -1086,6 +1087,25 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
                     .is_some_and(|(current, row)| *current == port && row.is_extern_learned())
                 {
                     let (vni, vlan, mac) = key;
+                    if intent.remote_macs.peer_sync_fdb().contains_key(&(vni, mac))
+                        && intent.instances.get(vni).is_some_and(|instance| {
+                            instance
+                                .bridge_vlan
+                                .is_none_or(|configured| Some(configured.as_u16()) == vlan)
+                        })
+                        && peer_sync_target(
+                            &intent.remote_macs,
+                            &snapshot,
+                            &probes,
+                            &intent.instances,
+                            vni,
+                            mac,
+                        )
+                        .is_none()
+                    {
+                        self.state.adopted_peer_sync.insert(key, port);
+                        continue;
+                    }
                     // None sorts first. Unscoped bridge operations cover all
                     // usable port VLAN members, not only the PVID. Co-own only
                     // marked siblings revalidated against that same port's
@@ -1104,23 +1124,11 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
                         else {
                             return false;
                         };
-                        let mut ports = bridge
-                            .port_vlan_inventory
-                            .iter()
-                            .filter(|entry| entry.ifindex == port);
-                        let Some(inventory) = ports.next() else {
-                            return false;
-                        };
-                        if ports.next().is_some() {
-                            return false;
-                        }
-                        let members: Vec<_> = inventory
-                            .vlans
-                            .iter()
-                            .filter(|row| !row.flags.only_options && !row.flags.bridge_entry)
-                            .copied()
-                            .collect();
-                        vlan_rows_contain(&members, vlan)
+                        memberships
+                            .entry((vni, port))
+                            .or_insert_with(|| peer_sync_vlan_members(bridge, port))
+                            .as_ref()
+                            .is_some_and(|members| members.contains(&vlan))
                     });
                     if covered_sibling
                         && self.state.owned.peer_sync.get(&(vni, None, mac)) == Some(&port)

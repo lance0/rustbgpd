@@ -9,3 +9,5 @@
   After restart, live peer forwarding retains validated local VLAN siblings
   and converts an adopted overlay row without waiting for orphan-reap grace.
   Single-active DF recovery retains ordinary local MAC relearning.
+  Reconciliation repairs incomplete owned legacy VLAN row sets and retains
+  desired adopted rows while their startup attachment is not ready.

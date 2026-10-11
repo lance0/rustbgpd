@@ -37,7 +37,7 @@ use crate::snapshot::{
     InstanceProbe, InstanceProbes, KernelBridgePortVlanInfo, KernelBridgeVlanFlags,
     KernelBridgeVlanInfo, KernelBridgeVlanTunnelInfo, KernelFdbEntry, KernelFdbFlags,
     KernelLinkInfo, KernelSnapshot, KernelVlanUpperLinkInfo, KernelVrfLinkInfo,
-    KernelVxlanLinkInfo,
+    KernelVxlanLinkInfo, peer_sync_vlan_members,
 };
 
 /// Test fake of [`Dataplane`].
@@ -416,24 +416,37 @@ impl InMemoryDataplane {
                         mac: *mac,
                     });
                 }
-                state.kernel.local_fdb.insert(
-                    key,
-                    (
-                        *ifindex,
-                        KernelFdbEntry {
-                            mac: *mac,
-                            vlan: *vlan,
-                            dst: None,
-                            nh_id: None,
-                            protocol: None,
-                            flags: KernelFdbFlags {
-                                extern_learn: true,
-                                master: true,
-                                ..Default::default()
+                let mut vlans = vec![*vlan];
+                if vlan.is_none()
+                    && let Some(members) = state
+                        .kernel
+                        .links
+                        .values()
+                        .find(|bridge| bridge.ce_port_ifindexes.contains(ifindex))
+                        .and_then(|bridge| peer_sync_vlan_members(bridge, *ifindex))
+                {
+                    vlans.extend(members.into_iter().map(Some));
+                }
+                for member in vlans {
+                    state.kernel.local_fdb.insert(
+                        (*vni, member, *mac),
+                        (
+                            *ifindex,
+                            KernelFdbEntry {
+                                mac: *mac,
+                                vlan: member,
+                                dst: None,
+                                nh_id: None,
+                                protocol: None,
+                                flags: KernelFdbFlags {
+                                    extern_learn: true,
+                                    master: true,
+                                    ..Default::default()
+                                },
                             },
-                        },
-                    ),
-                );
+                        ),
+                    );
+                }
             }
             DataplaneOp::RemovePeerSyncFdb {
                 vni,
@@ -465,6 +478,12 @@ impl InMemoryDataplane {
                             mac: *mac,
                         });
                     }
+                    let members = state
+                        .kernel
+                        .links
+                        .values()
+                        .find(|bridge| bridge.ce_port_ifindexes.contains(ifindex))
+                        .and_then(|bridge| peer_sync_vlan_members(bridge, *ifindex));
                     state
                         .kernel
                         .local_fdb
@@ -472,7 +491,13 @@ impl InMemoryDataplane {
                             !(v == *vni
                                 && m == *mac
                                 && *port == *ifindex
-                                && (vlan.is_none() || row_vlan == *vlan))
+                                && (row_vlan == *vlan
+                                    || (vlan.is_none()
+                                        && row_vlan.is_some_and(|member| {
+                                            members
+                                                .as_ref()
+                                                .is_some_and(|members| members.contains(&member))
+                                        }))))
                         });
                 }
             }

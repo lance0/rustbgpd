@@ -278,8 +278,11 @@ and verifies its ownership marker after an add. Rows use
 the existing `extern_learn` ownership marker and BGP protocol stamp where
 the kernel supports it. Linux reports a newly created `extern_learn` row
 as reachable rather than static, but the external-learning flag prevents
-aging. Startup adoption reaps stale owned local rows;
-unmarked rows remain outside ownership. Withdrawal, EAD loss, local drain,
+aging. Reconciliation checks the complete validated legacy VLAN row set and
+repairs incomplete owned sets through guarded removal and reinstallation.
+Startup adoption retains desired rows while their attachment is not ready,
+but still reaps rows after the intent is withdrawn. Unmarked rows remain
+outside ownership. Withdrawal, EAD loss, local drain,
 AC failure, or segment removal removes the local intent. Drain and failure
 restore the existing remote forwarding path after the bias lifts.
 
