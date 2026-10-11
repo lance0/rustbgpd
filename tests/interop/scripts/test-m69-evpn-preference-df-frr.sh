@@ -178,13 +178,33 @@ commands = []
 release = None
 window_end = None
 
-def run(args):
-    result = subprocess.run(args, text=True, capture_output=True, timeout=10)
-    commands.append({"time": time.time(), "args": args, "returncode": result.returncode,
-                     "stdout": result.stdout, "stderr": result.stderr})
+def run(args, timeout=10):
+    command = {"time": time.time(), "args": args, "timeout": timeout, "returncode": None}
+    commands.append(command)
+    result = subprocess.run(args, text=True, capture_output=True, timeout=timeout)
+    command.update(returncode=result.returncode, stdout=result.stdout, stderr=result.stderr)
     if result.returncode:
         raise RuntimeError(f"command failed: {args}: {result.stderr}")
     return result.stdout
+
+def wait_daemon_exit(old_stat):
+    pid = old_stat.split(" ", 1)[0]
+    old_start = old_stat.rsplit(")", 1)[1].split()[19]
+    deadline = time.monotonic() + 10
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise RuntimeError(f"old rustbgpd process {pid} did not exit within 10s")
+        current = run(["docker", "exec", pe1, "sh", "-c",
+                       'cat "/proc/$1/stat" || test ! -d "/proc/$1"', "sh", pid],
+                      timeout=remaining)
+        if not current:
+            return
+        fields = current.rsplit(")", 1)[1].split()
+        # An unreaped zombie has exited; a reused PID is a different lifetime.
+        if fields[0] in ("Z", "X") or fields[19] != old_start:
+            return
+        time.sleep(0.1)
 
 def frr_command(shutdown):
     return ["docker", "exec", pe2, "vtysh", "-c", "configure terminal",
@@ -266,7 +286,9 @@ try:
         raise RuntimeError("baseline AC must already suppress all three BUM classes")
     # Kill the daemon before shutting down its peer: otherwise the old
     # lifetime could legitimately elect itself when the peer disappears.
-    run(["docker", "exec", pe1, "sh", "-c", 'kill -KILL "$(cat /run/rustbgpd/m69.pid)"'])
+    old_stat = run(["docker", "exec", pe1, "sh", "-c",
+                    'pid=$(cat /run/rustbgpd/m69.pid); cat "/proc/$pid/stat" && kill -KILL "$pid"'])
+    wait_daemon_exit(old_stat)
     reply = run(frr_command(True))
     if "%" in reply:
         raise RuntimeError("FRR rejected the administrative neighbor hold")

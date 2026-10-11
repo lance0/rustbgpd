@@ -6,18 +6,25 @@ import json
 from pathlib import Path
 import re
 import subprocess
+import tempfile
 import unittest
 from unittest.mock import Mock
 
 
 DRIVER = Path(__file__).with_name("test-m69-evpn-preference-df-frr.sh")
 PYTHON = DRIVER.read_text().split("<<'PY'\n", 1)[1].split("\nPY\n", 1)[0]
-FUNCTIONS = {"flood_suppressed", "check_samples", "reap_release", "parse_daemon_log"}
+FUNCTIONS = {"flood_suppressed", "check_samples", "reap_release", "parse_daemon_log", "wait_daemon_exit", "frr_command"}
 DEFINITIONS = [node for node in ast.parse(PYTHON).body
                if isinstance(node, ast.FunctionDef) and node.name in FUNCTIONS]
 assert {node.name for node in DEFINITIONS} == FUNCTIONS
 NAMESPACE = {"re": re, "json": json}
 exec(compile(ast.Module(body=DEFINITIONS, type_ignores=[]), str(DRIVER), "exec"), NAMESPACE)
+
+
+RESTART_BODY = next(node.body for node in ast.parse(PYTHON).body if isinstance(node, ast.Try))
+RESTART_PREFIX = RESTART_BODY[:next(
+    index + 1 for index, node in enumerate(RESTART_BODY)
+    if "start-rustbgpd-m69-vtep.sh" in ast.unparse(node))]
 
 
 def samples():
@@ -102,6 +109,65 @@ class M69DfWaitCheckerTests(unittest.TestCase):
             with self.subTest(broken=broken):
                 with self.assertRaises(json.JSONDecodeError):
                     parse(broken)
+
+    def run_restart_prefix(self, ending):
+        def stat(state="S", start="123"):
+            return "42 (rustbgpd) " + " ".join([state] + ["0"] * 18 + [start])
+
+        clock = 0
+        observed_exit = False
+        checks = 0
+        restarted = False
+
+        def poll_delay(seconds):
+            nonlocal clock
+            clock += seconds if ending is not None else 5
+
+        def run(args, timeout=10):
+            nonlocal checks, observed_exit, restarted
+            self.assertGreater(timeout, 0)
+            if "bridge" in args:
+                return samples()[0]["bridge"]
+            if "kill -KILL" in args[-1]:
+                return stat()
+            if args[-1] == "42":
+                checks += 1
+                if clock == 0 or ending is None:
+                    return stat()
+                observed_exit = True
+                return "" if ending == "gone" else stat(*ending)
+            # Neither the peer hold nor replacement may run until an actual
+            # poll observes exit; the controlled clock alone is not enough.
+            self.assertTrue(observed_exit)
+            self.assertGreaterEqual(checks, 2)
+            if "show bgp neighbors 10.0.0.1 json" in args:
+                return json.dumps({"10.0.0.1": {"bgpState": "Idle"}})
+            if args[-1] == "restart":
+                restarted = True
+            return ""
+
+        with tempfile.TemporaryDirectory() as directory:
+            namespace = {"re": re, "json": json, "pe1": "pe1", "pe2": "pe2",
+                         "output": Path(directory), "run": run,
+                         "time": Mock(monotonic=lambda: clock, time=lambda: 0,
+                                      sleep=poll_delay)}
+            exec(compile(ast.Module(body=DEFINITIONS, type_ignores=[]), str(DRIVER), "exec"), namespace)
+            prefix = compile(ast.Module(body=RESTART_PREFIX, type_ignores=[]), str(DRIVER), "exec")
+            if ending is None:
+                with self.assertRaisesRegex(RuntimeError, "did not exit within 10s"):
+                    exec(prefix, namespace)
+                self.assertFalse(restarted)
+            else:
+                exec(prefix, namespace)
+                self.assertTrue(restarted)
+
+    def test_restart_waits_for_old_lifetime_before_peer_hold_and_replacement(self):
+        for ending in ("gone", ("Z", "123"), ("X", "123"), ("S", "456")):
+            with self.subTest(ending=ending):
+                self.run_restart_prefix(ending)
+
+    def test_restart_timeout_does_not_hold_peer_or_start_replacement(self):
+        self.run_restart_prefix(None)
 
     def test_release_child_is_joined_after_success_timeout_or_error(self):
         for error in (None, subprocess.TimeoutExpired("vtysh", 10), OSError("read failed")):
