@@ -1,4 +1,10 @@
 #!/usr/bin/env bash
+# leg: m14  slug: route-reflector
+# proves: IPv4 iBGP client-to-client reflection with ORIGINATOR_ID and CLUSTER_LIST; no IPv6, optimal route reflection, forwarding or scale claim
+# claims: stored advertised
+# evidence: docs/interop.md#m14-rr-frr-test-results-2026-03-06-frr-1031
+# pinned: FRR 10.3.1, 2026-03-06; the dated result records no daemon revision
+#
 # M14 interop test — Route Reflector (RFC 4456)
 #
 # Validates: iBGP route reflection between two RR clients via rustbgpd.

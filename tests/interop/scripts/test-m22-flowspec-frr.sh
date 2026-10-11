@@ -1,4 +1,10 @@
 #!/usr/bin/env bash
+# leg: m22  slug: flowspec
+# proves: IPv4 FlowSpec injection over gRPC, distribution to FRR and withdrawal propagation without a session flap; later receive-validation phases are not part of this dated result
+# claims: stored advertised
+# evidence: docs/interop.md#m22-test-results-2026-04-30-frr-1031
+# pinned: FRR 10.3.1, 2026-04-30
+#
 # M22 interop test — FlowSpec injection and distribution to FRR
 #
 # Validates:

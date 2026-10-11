@@ -78,6 +78,7 @@ Look up commands, configuration, and compatibility boundaries.
 | [Stability and compatibility](reference/stability.md) | Daemon, library, adapter, and authorization contracts. |
 | [Narrow v1 contract](reference/v1-stable-contract.md) | The route-server, route-reflector, and scoped FlowSpec controller compatibility promise. |
 | [Stable surface inventory](reference/v1-stable-surface.json) | Machine-readable inventory of the narrow v1 contract. |
+| [Capability evidence](reference/capabilities.md) | Scoped capabilities linked to the dated interop evidence behind them. |
 | [Format and version namespaces](reference/format-version-namespaces.md) | Independent versions for stored and exchanged formats. |
 | [RFC implementation notes](reference/rfc-notes.md) | Protocol interpretations and deviations. |
 | [ASPA conformance](reference/aspa-conformance.md) | Verification procedures and route-server scope. |

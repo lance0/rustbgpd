@@ -1,4 +1,10 @@
 #!/usr/bin/env bash
+# leg: m83  slug: route-server
+# proves: RFC 7947 transparency, OTC, per-member views, ROV rejection and per-client-best path hiding for BIRD, GoBGP and FRR members under a reduced lab policy; does not qualify the production cookbook policy
+# claims: selected advertised
+# evidence: docs/interop.md#test-matrix
+# pinned: BIRD 2.19.2, GoBGP 4.10.0, digest-pinned FRR 10.7.0 and StayRTR; local run 2026-09-22, recorded in the M83 test-matrix row
+#
 # M83 interop test — route-server profile, multi-stack receipt
 # (RFC 7947 / RFC 7948 / RFC 9234 / ADR-0101 proof-ladder closer).
 #

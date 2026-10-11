@@ -72,6 +72,7 @@ check-fast:
     python3 scripts/check_ci_scale_split_contract.py
     python3 -m unittest -v scripts/test_check_clippy_reasons.py
     python3 scripts/check-clippy-reasons.py
+    python3 -m unittest -v scripts/test_check_v1_stable_surface.py
     python3 scripts/check-v1-stable-surface.py
     python3 -m unittest -v scripts/test_check_sighup_architecture.py
     python3 scripts/check_sighup_architecture.py
@@ -98,6 +99,8 @@ check-contracts:
     python3 scripts/check_metric_release_notes.py
     python3 -m unittest -v scripts/test_check_site_manifest.py
     python3 scripts/check_site_manifest.py
+    python3 -m unittest -v scripts/test_generate_evidence_index.py
+    python3 scripts/generate_evidence_index.py --check
     python3 -m unittest -v scripts/test_check_perf_receipt_freshness.py
     python3 scripts/check_perf_receipt_freshness.py
     python3 -m unittest -v scripts/test_check_embedding_crate_map.py
