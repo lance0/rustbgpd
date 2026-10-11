@@ -162,6 +162,7 @@ restart_without_transient_df() {
     mkdir -p "$evidence"
     log "Restart evidence: $evidence"
     python3 - "$PE1" "$PE2" "$(resolve_ip "$PE1")" "$evidence" "$ESI" <<'PY'
+from datetime import datetime
 import json
 import pathlib
 import re
@@ -267,6 +268,55 @@ def parse_daemon_log(text):
         index += 1
     return entries
 
+
+def check_reconvergence(entries, started_wall, release_at, samples, esi):
+    # Initial prepared NonDF metrics are insufficient. In this one-peer
+    # Highest-Preference topology, a completed NonDF election requires the
+    # returning remote Type 4: a local-only (or fallback modulo) election is DF.
+    events = {"established": [], "evpn_eor": [], "nondf_election": []}
+    errors = []
+    for entry in entries:
+        fields = entry.get("fields", {})
+        target = entry.get("target")
+        if (target == "rustbgpd_transport::session::fsm"
+                and fields.get("message") == "session established"
+                and fields.get("peer") == "10.0.0.2"):
+            event = "established"
+        elif (target == "rustbgpd_transport::session::inbound"
+              and fields.get("message") == "received End-of-RIB"
+              and fields.get("peer") == "10.0.0.2"
+              and fields.get("afi") == "L2Vpn" and fields.get("safi") == "Evpn"):
+            event = "evpn_eor"
+        elif (target == "rustbgpd::evpn_segment"
+              and fields.get("message") == "EVPN segment: DF role updated"
+              and fields.get("esi") == esi and fields.get("vni") == 200
+              and fields.get("role") == "nondf"):
+            event = "nondf_election"
+        else:
+            continue
+        try:
+            timestamp = datetime.fromisoformat(entry["timestamp"])
+            if timestamp.tzinfo is None or timestamp.utcoffset().total_seconds() != 0:
+                raise ValueError("timestamp must be UTC aware")
+            events[event].append(timestamp.timestamp() - started_wall)
+        except (KeyError, TypeError, ValueError) as error:
+            errors.append(f"invalid {event} UTC timestamp: {error}")
+    recovery = {}
+    after = release_at
+    for event, times in events.items():
+        # Require a later retained kernel/metric sample, not just a log read
+        # after the sampler stopped. Missing or slow recovery fails the proof.
+        observed = [elapsed for elapsed in times
+                    if samples and after <= elapsed < samples[-1]["elapsed"]]
+        if not observed:
+            errors.append(f"no ordered {event} after peer release and before the final sample")
+            break
+        after = recovery[event] = min(observed)
+    if not errors:
+        recovery["post_settlement_sample"] = next(
+            sample["elapsed"] for sample in samples if sample["elapsed"] > after)
+    return errors, recovery
+
 def reap_release(process):
     if process is None:
         return
@@ -346,8 +396,12 @@ try:
     failures.extend(check_samples(samples, first_role, release_at, window_end))
     daemon_log = run(["docker", "exec", pe1, "cat", "/var/log/rustbgpd.log"])
     (output / "restart-daemon.jsonl").write_text(daemon_log)
+    entries = parse_daemon_log(daemon_log)
+    recovery_errors, recovery = check_reconvergence(
+        entries, started_wall, release_at, samples[first_role:] if first_role is not None else [], esi)
+    failures.extend(recovery_errors)
     first_publication = None
-    for entry in parse_daemon_log(daemon_log):
+    for entry in entries:
         fields = entry.get("fields", {})
         if fields.get("message") == "EVPN segment: published BUM enforcement intent" and first_publication is None:
             first_publication = entry.get("timestamp")
@@ -359,6 +413,7 @@ try:
         "restart_started": started_wall, "first_role_sample": first_role,
         "first_actor_publication": first_publication,
         "peer_release_elapsed": release_at,
+        "reconvergence_elapsed": recovery,
         "declared_window_end_elapsed": 12,
         "observed_window_end_elapsed": window_end,
         "scope": "Restart with preserved suppressed AC; samples before the first new daemon role are recorded but excluded. Kernel observations are sampled, not continuous.",

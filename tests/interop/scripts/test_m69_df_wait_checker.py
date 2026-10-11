@@ -2,6 +2,7 @@
 """Exercise the M69 driver's actual sample oracle and release-child cleanup."""
 
 import ast
+from datetime import datetime, timezone
 import json
 from pathlib import Path
 import re
@@ -13,11 +14,11 @@ from unittest.mock import Mock
 
 DRIVER = Path(__file__).with_name("test-m69-evpn-preference-df-frr.sh")
 PYTHON = DRIVER.read_text().split("<<'PY'\n", 1)[1].split("\nPY\n", 1)[0]
-FUNCTIONS = {"flood_suppressed", "check_samples", "reap_release", "parse_daemon_log", "wait_daemon_exit", "frr_command"}
+FUNCTIONS = {"flood_suppressed", "check_samples", "reap_release", "parse_daemon_log", "wait_daemon_exit", "frr_command", "check_reconvergence"}
 DEFINITIONS = [node for node in ast.parse(PYTHON).body
                if isinstance(node, ast.FunctionDef) and node.name in FUNCTIONS]
 assert {node.name for node in DEFINITIONS} == FUNCTIONS
-NAMESPACE = {"re": re, "json": json}
+NAMESPACE = {"re": re, "json": json, "datetime": datetime}
 exec(compile(ast.Module(body=DEFINITIONS, type_ignores=[]), str(DRIVER), "exec"), NAMESPACE)
 
 
@@ -31,6 +32,24 @@ def samples():
     return [{"elapsed": index / 10, "duration": 0.04, "errors": [], "df": 0,
              "bridge": "7: es0: <BROADCAST,UP> master br200\n flood off mcast_flood off bcast_flood off\n"}
             for index in range(120)]
+
+
+ESI = "03:aa:bb:cc:dd:ee:ff:00:00:01"
+STARTED = 1791717870
+
+
+def recovery_events():
+    return [
+        {"timestamp": datetime.fromtimestamp(STARTED + elapsed, timezone.utc).isoformat(),
+         "target": target, "fields": fields}
+        for elapsed, target, fields in (
+            (7, "rustbgpd_transport::session::fsm",
+             {"message": "session established", "peer": "10.0.0.2"}),
+            (8, "rustbgpd_transport::session::inbound",
+             {"message": "received End-of-RIB", "peer": "10.0.0.2", "afi": "L2Vpn", "safi": "Evpn"}),
+            (9, "rustbgpd::evpn_segment",
+             {"message": "EVPN segment: DF role updated", "esi": ESI, "vni": 200, "role": "nondf"}),
+        )]
 
 
 class M69DfWaitCheckerTests(unittest.TestCase):
@@ -85,6 +104,60 @@ class M69DfWaitCheckerTests(unittest.TestCase):
         self.assertEqual(self.check(rows, first=1), [])
         rows[20].pop("df")
         self.assertTrue(self.check(rows, first=1))
+
+    def recovery(self, events):
+        # Every negative control retains the otherwise valid 120-sample window.
+        self.assertEqual(self.check(samples()), [])
+        return NAMESPACE["check_reconvergence"](events, STARTED, 6, samples(), ESI)
+
+    def test_completed_election_before_a_retained_sample_passes(self):
+        errors, observed = self.recovery(recovery_events())
+        self.assertEqual(errors, [])
+        self.assertEqual(observed, {"established": 7, "evpn_eor": 8,
+                                    "nondf_election": 9, "post_settlement_sample": 9.1})
+
+    def test_missing_recovery_events_and_prepared_nondf_do_not_qualify(self):
+        for index in range(3):
+            events = recovery_events()
+            del events[index]
+            with self.subTest(missing=index):
+                self.assertTrue(self.recovery(events)[0])
+        events = recovery_events()
+        events[-1]["fields"]["message"] = "EVPN segment: published BUM enforcement intent"
+        self.assertTrue(self.recovery(events)[0])
+
+    def test_slow_recovery_and_missing_post_settlement_sample_fail(self):
+        for times in ((12.1, 12.2, 12.3), (7, 8, 11.95), (1, 2, 3), (7, 10, 9)):
+            events = recovery_events()
+            for entry, elapsed in zip(events, times):
+                entry["timestamp"] = datetime.fromtimestamp(STARTED + elapsed, timezone.utc).isoformat()
+            with self.subTest(times=times):
+                self.assertTrue(self.recovery(events)[0])
+
+    def test_wrong_peer_family_segment_role_or_emitter_cannot_qualify(self):
+        for index, field, wrong in (
+                (0, "peer", "10.0.0.3"), (1, "peer", "10.0.0.3"),
+                (1, "afi", "Ipv4"), (1, "safi", "Unicast"),
+                (2, "esi", "wrong-esi"), (2, "vni", 201), (2, "role", "df")):
+            events = recovery_events()
+            events[index]["fields"][field] = wrong
+            with self.subTest(index=index, field=field):
+                self.assertTrue(self.recovery(events)[0])
+        for index in range(3):
+            events = recovery_events()
+            events[index]["target"] = "unrelated_emitter"
+            with self.subTest(target=index):
+                self.assertTrue(self.recovery(events)[0])
+
+    def test_recovery_requires_parseable_utc_timestamps(self):
+        for timestamp in (None, "invalid", "2026-10-11T11:24:37", "2026-10-11T13:24:37+02:00"):
+            events = recovery_events()
+            events[0]["timestamp"] = timestamp
+            with self.subTest(timestamp=timestamp):
+                self.assertTrue(self.recovery(events)[0])
+        events = recovery_events()
+        del events[0]["timestamp"]
+        self.assertTrue(self.recovery(events)[0])
 
     def test_actual_startup_banner_preserves_json_df_events(self):
         starting = {"target": "rustbgpd", "fields": {
