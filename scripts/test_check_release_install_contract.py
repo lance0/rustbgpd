@@ -760,6 +760,70 @@ class ReleaseInstallContractTest(unittest.TestCase):
             any("tarball active assertions" in error for error in errors), errors
         )
 
+    def test_tarball_failure_branches_must_exit(self) -> None:
+        marker = "          for f in "
+        for index in range(2):
+            for replacement in ("", "              true\n"):
+                with self.subTest(branch=index, replacement=replacement):
+                    root = self.fixture()
+                    path = root / RELEASE
+                    before, after = path.read_text().split(marker, 1)
+                    lines = after.splitlines(keepends=True)
+                    exits = [i for i, line in enumerate(lines) if line.strip() == "exit 1"]
+                    lines[exits[index]] = replacement
+                    path.write_text(before + marker + "".join(lines))
+                    errors = contract.check(root)
+                    self.assertTrue(
+                        any("tarball active assertions" in error for error in errors),
+                        errors,
+                    )
+
+    def test_guarded_lines_reject_failure_suppression(self) -> None:
+        guarded = (
+            (RELEASE, GREP_ASSERT),
+            (RELEASE, TAR_SIZE_ASSERT),
+            (WORKFLOW, 'test -n "$deb" && test -n "$rpm"'),
+            (WORKFLOW, '|| { echo "missing or not executable: $tree/usr/bin/$exe" >&2; exit 1; }'),
+            (WORKFLOW, 'test -s "$tree/$file" || { echo "missing or empty: $tree/$file" >&2; exit 1; }'),
+            (WORKFLOW, UNIT_ASSERT),
+            (WORKFLOW, TEMPLATE_EXEC_ASSERT),
+            (WORKFLOW, "grep -qxF 'StateDirectory=rustbgpd/%i rustbgpd/%i/activation' \"$template\""),
+            (WORKFLOW, "grep -qxF 'ReadWritePaths=/var/lib/rustbgpd/%i' \"$template\""),
+        )
+        for relative, line in guarded:
+            for suffix in (" || true", " || :"):
+                with self.subTest(line=line, suffix=suffix):
+                    root = self.fixture()
+                    path = root / relative
+                    text = path.read_text()
+                    if line.endswith("; then"):
+                        old, new = line, line.removesuffix("; then") + suffix + "; then"
+                    else:
+                        old, new = line + "\n", line + suffix + "\n"
+                    self.assertIn(old, text)
+                    path.write_text(text.replace(old, new, 1))
+                    self.assertNotEqual(contract.check(root), [])
+
+    def test_every_read_input_triggers_the_workflow(self) -> None:
+        monitoring = {source for source, _, _ in contract.MONITORING}
+        for relative in (path for path in INPUTS if path not in monitoring):
+            entry = f"      - {relative}\n"
+            for occurrence in range(2):
+                with self.subTest(path=relative, occurrence=occurrence):
+                    root = self.fixture()
+                    path = root / WORKFLOW
+                    text = path.read_text()
+                    self.assertEqual(text.count(entry), 2)
+                    start = text.find(entry) if occurrence == 0 else text.rfind(entry)
+                    commented = entry.replace("- ", "# - ", 1)
+                    path.write_text(
+                        text[:start] + commented + text[start + len(entry) :]
+                    )
+                    errors = contract.check(root)
+                    self.assertIn(
+                        f"release install workflow must trigger for {relative}", errors
+                    )
+
 
 class VerifiedInstallerTest(unittest.TestCase):
     """Exercise the released shell resolver against deterministic local assets."""

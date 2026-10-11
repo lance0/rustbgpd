@@ -461,7 +461,12 @@ def check_compose(errors: list[str], text: str) -> None:
 
 def check(root: Path) -> list[str]:
     errors: list[str] = []
-    read = lambda path: (root / path).read_text(encoding="utf-8")
+    inputs: list[str] = []
+
+    def read(path: str) -> str:
+        inputs.append(path)
+        return (root / path).read_text(encoding="utf-8")
+
     try:
         check_systemd_unit(errors, read(SYSTEMD_UNIT))
         check_systemd_template(errors, read(SYSTEMD_TEMPLATE))
@@ -486,8 +491,6 @@ def check(root: Path) -> list[str]:
             "cp packaging/install.sh artifacts/install.sh",
         )
         workflow = read(".github/workflows/release-install-contract.yml")
-        if workflow.count("      - packaging/install.sh") != 2:
-            errors.append("release install workflow must trigger for packaging/install.sh")
         build_packages = read("scripts/build-packages.sh")
         require_patterns(
             errors,
@@ -529,11 +532,14 @@ def check(root: Path) -> list[str]:
             errors.append(
                 f"tarball payload assertions: missing {sorted(missing_payloads)!r}"
             )
-        tar_checks = (
-            exact('if ! grep -qxF "$f" <<<"$entries"; then'),
-            exact(
-                'if [ "$(tar -xOzf "dist/rustbgpd-${SUFFIX}.tar.gz" "$f" | wc -c)" -eq 0 ]; then'
-            ),
+        # Each failure branch must stop the job, not only report the error.
+        tar_checks = tuple(
+            exact(condition).removesuffix("$")
+            + r'\necho "::error::[^\n]*"\nexit 1\nfi$'
+            for condition in (
+                'if ! grep -qxF "$f" <<<"$entries"; then',
+                'if [ "$(tar -xOzf "dist/rustbgpd-${SUFFIX}.tar.gz" "$f" | wc -c)" -eq 0 ]; then',
+            )
         )
         require_patterns(errors, "tarball active assertions", assertion, tar_checks)
 
@@ -589,9 +595,9 @@ def check(root: Path) -> list[str]:
                 r'^rpm2cpio "\$rpm" \| cpio --quiet -id --no-absolute-filenames --directory=extracted/rpm$',
                 r"^for tree in extracted/deb extracted/rpm; do$",
                 r"^for exe in rustbgpd rbgp rs-config-render birdwatcher-adapter; do$",
-                r'^test -x "\$tree/usr/bin/\$exe" ',
+                exact('test -x "$tree/usr/bin/$exe" || { echo "missing or not executable: $tree/usr/bin/$exe" >&2; exit 1; }'),
                 r"^for file in lib/systemd/system/rustbgpd\.service lib/systemd/system/rustbgpd@\.service usr/share/man/man1/rbgp\.1\.gz usr/share/man/man8/rustbgpd\.8\.gz usr/share/doc/rustbgpd/LICENSES\.md usr/share/doc/rustbgpd/monitoring/rustbgpd-overview\.json usr/share/doc/rustbgpd/monitoring/rustbgpd-evpn\.json usr/share/doc/rustbgpd/monitoring/rustbgpd-alerts\.yml usr/share/doc/rustbgpd/monitoring/rustbgpd-alerts_test\.yml; do$",
-                r'^test -s "\$tree/\$file" ',
+                exact('test -s "$tree/$file" || { echo "missing or empty: $tree/$file" >&2; exit 1; }'),
                 r'^"\$tree/usr/bin/rustbgpd" --check "\$tree/etc/rustbgpd/config\.toml"$',
                 r'^unit="\$tree/lib/systemd/system/rustbgpd\.service"$',
                 r"^for directive in Type=notify NotifyAccess=main WatchdogSec=5min TimeoutStartSec=10min StartLimitIntervalSec=10min StartLimitBurst=5 Restart=on-failure RestartSec=5 TimeoutStopSec=32min; do$",
@@ -614,6 +620,11 @@ def check(root: Path) -> list[str]:
 
         image_command = "docker run --rm --entrypoint birdwatcher-adapter rustbgpd:release-install-contract --help"
         select_script(workflow, "production image adapter assertion", image_command)
+
+        # Both the pull_request and push path filters must cover every input.
+        for path in inputs:
+            if workflow.count(f"\n      - {path}\n") != 2:
+                errors.append(f"release install workflow must trigger for {path}")
     except (OSError, ValueError) as error:
         errors.append(str(error))
     return errors
