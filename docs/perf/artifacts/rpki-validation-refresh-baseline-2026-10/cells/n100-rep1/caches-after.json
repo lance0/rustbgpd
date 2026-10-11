@@ -1,0 +1,19 @@
+{
+  "caches": [
+    {
+      "accepted": {
+        "age_seconds": 17,
+        "aspa_count": 0,
+        "protocol_version": 1,
+        "serial": 1,
+        "session_id": 13153,
+        "vrp_v4_count": 299800,
+        "vrp_v6_count": 200200
+      },
+      "address": "127.0.0.1:13383",
+      "connected": true
+    }
+  ],
+  "complete": true,
+  "omitted": 0
+}

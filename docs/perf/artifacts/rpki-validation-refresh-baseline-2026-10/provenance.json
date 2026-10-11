@@ -1,0 +1,61 @@
+{
+  "measured": "2026-10-03T09:59:41Z/2026-10-03T10:33:19Z",
+  "source": {
+    "commit": "481e0187d873dd8e7715033224be0fe90cb7d4e2",
+    "tree": "dc90a0c052af909f56a2625515fcd22e72fa658b",
+    "workspace_version": "0.73.0",
+    "contains": ["#2855", "#2857", "#2858", "#2859"],
+    "refresh_targeting_change": false
+  },
+  "toolchain": {
+    "rustc": "rustc 1.99.0 (b940084d7 2026-09-28)",
+    "cargo": "cargo 1.99.0 (5f94df478 2026-08-27)",
+    "daemon_build": "cargo build --release --locked --bin rustbgpd --bin rbgp",
+    "harness_build": "cargo build --profile scale --locked -p reloadstall"
+  },
+  "binaries_sha256": {
+    "rustbgpd": "010a999f7ac58234a093c55f1b2ae191eb2ed0015ce3e3704de0823dd54d2ab5",
+    "rbgp": "9a58c2dcc09ed60c7173223616921200cbe991c44472134d64dc19c65b55c11a",
+    "reloadstall": "944dbb96cbd5588971065f40479ae81fe8026162b20b7386327c1663253e7446",
+    "poll.py": "e34c9d3e631697b24d99931eb6eb22f3ab44ab48807829ca018ea81ec37c636b"
+  },
+  "harness_sources_sha256_at_commit": {
+    "bench/scale/reloadstall/gen-scenario.py": "e563659beef5857ee79ddac40e1cff5730c34e424b5ca074a3f9007b5dc0ab42",
+    "bench/scale/reloadstall/src/main.rs": "4a2c432a607f0320fa17c477f813e75d4cf4b9e53013fa702e025f0ddac5cd4b",
+    "bench/scale/rpki-cell/rpki_cell.py": "e18ab0d0544c944a5cd628cbb2dbb2c74ad3decca4ede17f97816c3207649c37",
+    "bench/scale/host-quiet.sh": "abb3391cd5e0879c29aabd0aa0c316ea33d5f7c72f6d2a7d111b30025de411fd",
+    "tests/soak/host-lock.sh": "f5f419bb439f0b5e22521e9f7fa73d4ef73df159abeec31fafff63548899c658",
+    "tests/soak/fd-headroom.sh": "f55832b71079cdcd0f708fe3b764cf35d020dfe4ab894ff81191c436a4d04b2b"
+  },
+  "job_script_sha256_before_path_redaction": "cd8a8c45b87842eaa502d8bf52c10023e10323b4bdc55becfae7d952af413139",
+  "vrp_fixtures_sha256": {
+    "base.json": "c682ff6dfceab31b30bd048625b861afcf2b197393d491d7bbed2fd0fa8a9278",
+    "delta-10.json": "948cc5c225d329f131796d5aa9b8bb5df1acb90f5014945685ecc1cc618a29ce",
+    "delta-100.json": "cd2d903ba4ccebf002c293fbb574193e66e740592e8630988dfcaa32f028c4b9",
+    "delta-1000.json": "4d1441442b9c6014c63b5a5c25e4356300c97dd6a289d50b6440a593e4feb937"
+  },
+  "rtr_cache": "rpki/stayrtr@sha256:cdb93c0b661d97179a5525e00caf7d9e693a04da3b9002f7e24bebb194d9a77b (StayRTR 0.6.4, RTR v1)",
+  "shape": {
+    "members": 700,
+    "prefixes": 400400,
+    "ipv4_prefixes": 200200,
+    "ipv6_prefixes": 200200,
+    "prefixes_per_member": 572,
+    "vrps": 500000,
+    "deltas": [10, 100, 1000],
+    "repeats": 2,
+    "hold_secs": 240,
+    "idle_secs": 10,
+    "poll_secs": 0.25,
+    "quiet_tail_secs": 10
+  },
+  "cell_order": ["n10-rep1", "n100-rep1", "n1000-rep1", "n1000-rep2", "n100-rep2", "n10-rep2"],
+  "placement": {
+    "daemon_cpus": "12-32,34-39",
+    "harness_cpus": "40-63",
+    "rtr_cache_cpus": "8-11",
+    "kernel": "7.0.0-30-generic",
+    "clk_tck": 100
+  },
+  "job_exit_code": 0
+}

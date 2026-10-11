@@ -1,0 +1,29 @@
+2026-10-03T09:59:41Z START baseline peers=700 prefixes=400400 v4=200200 vrps=500000 deltas='10 100 1000' repeats=2 hold=240 quiet=1 load=1.80 1.92 2.13
+2026-10-03T09:59:41Z build @ 481e0187d873dd8e7715033224be0fe90cb7d4e2
+acquired host lock: <host-lock>
+file-descriptor headroom: nofile soft 65536 (hard 1048576)
+host quiet: retained two accepted samples in <out-dir>/quiet/n10-rep1.tsv
+2026-10-03T10:05:36Z cell n=10 rep=1 start load=1.45
+2026-10-03T10:05:52Z cell n=10 rep=1 injected
+2026-10-03T10:09:43Z cell n=10 rep=1 harness_rc=0 daemon_rc=0
+host quiet: retained two accepted samples in <out-dir>/quiet/n100-rep1.tsv
+2026-10-03T10:10:13Z cell n=100 rep=1 start load=1.25
+2026-10-03T10:10:30Z cell n=100 rep=1 injected
+2026-10-03T10:14:20Z cell n=100 rep=1 harness_rc=0 daemon_rc=0
+host quiet: retained two accepted samples in <out-dir>/quiet/n1000-rep1.tsv
+2026-10-03T10:14:50Z cell n=1000 rep=1 start load=1.45
+2026-10-03T10:15:07Z cell n=1000 rep=1 injected
+2026-10-03T10:18:57Z cell n=1000 rep=1 harness_rc=0 daemon_rc=0
+host quiet: retained two accepted samples in <out-dir>/quiet/n1000-rep2.tsv
+2026-10-03T10:19:58Z cell n=1000 rep=2 start load=1.47
+2026-10-03T10:20:14Z cell n=1000 rep=2 injected
+2026-10-03T10:24:05Z cell n=1000 rep=2 harness_rc=0 daemon_rc=0
+host quiet: retained two accepted samples in <out-dir>/quiet/n100-rep2.tsv
+2026-10-03T10:24:35Z cell n=100 rep=2 start load=1.16
+2026-10-03T10:24:51Z cell n=100 rep=2 injected
+2026-10-03T10:28:42Z cell n=100 rep=2 harness_rc=0 daemon_rc=0
+host quiet: retained two accepted samples in <out-dir>/quiet/n10-rep2.tsv
+2026-10-03T10:29:12Z cell n=10 rep=2 start load=1.10
+2026-10-03T10:29:28Z cell n=10 rep=2 injected
+2026-10-03T10:33:19Z cell n=10 rep=2 harness_rc=0 daemon_rc=0
+2026-10-03T10:33:19Z END baseline rc=0
