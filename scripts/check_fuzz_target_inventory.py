@@ -95,12 +95,14 @@ CAMPAIGN_BOUNDS: dict[str, tuple[str, int]] = {
     "crates/rpki": ("decode_rtr_pdu", 65_535),
 }
 # Every nightly campaign enumerates its crate's targets, fails on an empty
-# list, and fuzzes each one.
+# list, and fuzzes each one inside the loop. These must appear in this order on
+# uncommented lines.
 NIGHTLY_TARGET_LOOP = (
     "targets=$(cargo fuzz list)",
     'if [ -z "$targets" ]; then',
     "for t in $targets; do",
     'cargo fuzz run "$t"',
+    "done",
 )
 WIRE_DICTIONARY_TARGETS = tuple(
     target for target in EXPECTED_TARGETS["crates/wire"] if target != "parse_rd"
@@ -373,6 +375,22 @@ def validate_inventory(
         raise InventoryError("; ".join(errors))
 
 
+def runs_target_loop(body: str) -> bool:
+    """Whether `body` holds `NIGHTLY_TARGET_LOOP` in order on uncommented lines."""
+    lines = [
+        line for line in body.splitlines() if not line.lstrip().startswith("#")
+    ]
+    position = 0
+    for needle in NIGHTLY_TARGET_LOOP:
+        position = next(
+            (i for i in range(position, len(lines)) if needle in lines[i]), -1
+        )
+        if position < 0:
+            return False
+        position += 1
+    return True
+
+
 def campaign_block(workflow: str, crate: str) -> str | None:
     """Return the run body of the one nightly step that changes into `crate`.
 
@@ -479,7 +497,7 @@ def validate_pipeline_enrollment(builder: str, workflow: str) -> None:
         body = campaign_block(workflow, crate)
         if body is None:
             raise InventoryError(f"nightly workflow has no {crate} campaign")
-        if not all(line in body for line in NIGHTLY_TARGET_LOOP):
+        if not runs_target_loop(body):
             raise InventoryError(
                 f"nightly {crate} campaign does not fuzz every {crate} target "
                 "from a fail-closed cargo fuzz list loop"

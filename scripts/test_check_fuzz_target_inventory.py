@@ -361,14 +361,24 @@ class FuzzTargetInventoryTests(unittest.TestCase):
         builder = (inventory.ROOT / "fuzz/build-fuzzers.sh").read_text()
         workflow = (inventory.ROOT / ".github/workflows/fuzz.yml").read_text()
         for crate in inventory.EXPECTED_TARGETS:
-            for line in NIGHTLY_TARGET_LOOP:
-                with self.subTest(crate=crate, line=line):
-                    body = inventory.campaign_block(workflow, crate)
-                    self.assertIsNotNone(body)
-                    self.assertIn(line, body)
-                    mutated = workflow.replace(
-                        body, body.replace(line, "true", 1), 1
-                    )
+            body = inventory.campaign_block(workflow, crate)
+            self.assertIsNotNone(body)
+            run_line = next(
+                line for line in body.splitlines() if 'cargo fuzz run "$t"' in line
+            )
+            mutations = [
+                (f"{line} {how}", body.replace(line, replacement, 1))
+                for line in NIGHTLY_TARGET_LOOP
+                for how, replacement in (("removed", "true"), ("commented", f"# {line}"))
+            ]
+            # A fuzz run after the loop closes runs only the last target.
+            mutations.append(
+                ("run after done", body.replace(f"{run_line}\n", "", 1) + f"{run_line}\n")
+            )
+            for name, mutated_body in mutations:
+                with self.subTest(crate=crate, mutation=name):
+                    self.assertNotEqual(mutated_body, body)
+                    mutated = workflow.replace(body, mutated_body, 1)
                     with self.assertRaisesRegex(
                         inventory.InventoryError, f"every {crate} target"
                     ):
