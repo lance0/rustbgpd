@@ -5,3 +5,6 @@
   changes so removed or drained segments do not originate stale candidates.
   Publish each replacement's non-DF forwarding state before waiting for another
   segment's withdrawal, retaining that segment's owned attachment circuit gate.
+  Recheck live segment intent after startup and election acknowledgements before
+  further advertisements, retaining complete forwarding suppression while stale
+  owned routes withdraw.

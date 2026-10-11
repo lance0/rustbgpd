@@ -480,6 +480,7 @@ pub(crate) fn prepare_with_local_bias(
         // a value published before the start is not replayed as a change.
         segments_rx.borrow_and_update();
         let runtime = SegmentRuntime {
+            watches: None,
             instances: instances_rx.borrow_and_update().clone(),
             rib_tx,
             bum_enforcement_tx,
@@ -508,7 +509,17 @@ pub(crate) fn prepare_with_local_bias(
     (control, start)
 }
 
+/// Non-consuming views of the actor's existing desired-state publications.
+/// Originators recheck these after RIB awaits without recursively reconciling.
+struct SegmentWatches {
+    instances: watch::Receiver<Arc<EvpnInstanceTable>>,
+    segments: watch::Receiver<Arc<Vec<EthernetSegment>>>,
+    drained: watch::Receiver<Arc<BTreeSet<EthernetSegmentIdentifier>>>,
+    bindings: Option<watch::Receiver<EsLinkBindings>>,
+}
+
 struct SegmentRuntime {
+    watches: Option<SegmentWatches>,
     instances: Arc<EvpnInstanceTable>,
     rib_tx: mpsc::Sender<RibUpdate>,
     bum_enforcement_tx: Option<watch::Sender<Arc<BumEnforcementTable>>>,
@@ -573,6 +584,12 @@ async fn segment_loop(
     mut es_link_bindings_rx: Option<watch::Receiver<EsLinkBindings>>,
     df_status_tx: watch::Sender<Arc<SegmentDfStatusTable>>,
 ) {
+    runtime.watches = Some(SegmentWatches {
+        instances: instances_rx.clone(),
+        segments: segments_rx.clone(),
+        drained: drained_esis_rx.clone(),
+        bindings: es_link_bindings_rx.clone(),
+    });
     let mut by_esi: HashMap<EthernetSegmentIdentifier, SegmentState> = HashMap::new();
     // ADR-0102 acknowledgement tracker for Type 1/4 publication.
     // In-memory only: a restart re-derives segment intent from config
@@ -695,13 +712,23 @@ async fn segment_loop(
             changed = bindings_changed(&mut es_link_bindings_rx) => {
                 if changed.is_ok() {
                     if let Some(rx) = es_link_bindings_rx.as_mut() {
-                        runtime.es_link_bindings = rx.borrow_and_update().clone();
+                        let previous = std::mem::replace(
+                            &mut runtime.es_link_bindings,
+                            rx.borrow_and_update().clone(),
+                        );
+                        publish_dataplane_snapshots(&runtime, &by_esi);
+                        // Resume only changed bindings, including a start that
+                        // paused after any Type 4, EAD or candidate-query await.
+                        // The existing originators make every retry idempotent.
+                        for state in by_esi.values_mut() {
+                            if previous.get(&state.config.esi)
+                                != runtime.es_link_bindings.get(&state.config.esi)
+                            {
+                                startup_segment_state(&runtime, state, &mut pending_rib_ops).await;
+                            }
+                        }
+                        publish_dataplane_snapshots(&runtime, &by_esi);
                     }
-                    // Bindings shape both snapshots: bias eligibility
-                    // (bound-ness) and the AC-gate rows riding the
-                    // BUM-enforcement table (the bound link name is
-                    // the gate's port handle).
-                    publish_dataplane_snapshots(&runtime, &by_esi);
                 } else {
                     // Bindings publisher gone (daemon teardown / test
                     // rig). Keep the last-known bound set — the drain
@@ -1110,6 +1137,36 @@ fn prepare_segment_startup(runtime: &SegmentRuntime, state: &mut SegmentState, r
     }
 }
 
+/// Check the exact ES and its dependencies, not an unrelated watch version.
+/// No watch guard crosses an await, and none consumes the actor's notification.
+fn segment_intent_is_current(runtime: &SegmentRuntime, state: &SegmentState) -> bool {
+    if runtime.shutdown.is_cancelled() || runtime.drained_esis.contains(&state.config.esi) {
+        return false;
+    }
+    let Some(watches) = &runtime.watches else {
+        return true;
+    };
+    if watches.segments.has_changed().is_err()
+        || watches.instances.has_changed().is_err()
+        || watches.drained.has_changed().is_err()
+    {
+        return false;
+    }
+    let segments = watches.segments.borrow();
+    let instances = watches.instances.borrow();
+    let drained = watches.drained.borrow();
+    if drained.contains(&state.config.esi)
+        || !segment_matches_snapshot(runtime, &state.config, &instances, &segments)
+    {
+        return false;
+    }
+    // A final unseen binding still precedes closure. The ordinary binding
+    // branch consumes it before retaining that last-known value after close.
+    watches.bindings.as_ref().is_none_or(|bindings| {
+        bindings.borrow().get(&state.config.esi) == runtime.es_link_bindings.get(&state.config.esi)
+    })
+}
+
 /// Originate a prepared ES. Ordinary `DF_WAIT` advertises the candidate now;
 /// RFC 9785 §4.3(5) Don't-Preempt recovery delays publication until election.
 async fn startup_segment_state(
@@ -1117,16 +1174,24 @@ async fn startup_segment_state(
     state: &mut SegmentState,
     pending: &mut PendingRibOps,
 ) {
-    if state.recovery_deadline.is_some() && state.config.df_dont_preempt {
+    if !segment_intent_is_current(runtime, state)
+        || (state.recovery_deadline.is_some() && state.config.df_dont_preempt)
+    {
         return;
     }
     // Type 4 ES first so peers see us as a candidate before any
     // EAD routes show up.
     let actions = state.es_origin.on_startup();
     apply(runtime, state, actions, pending).await;
+    if !segment_intent_is_current(runtime, state) {
+        return;
+    }
 
     let actions = state.ead_per_es.on_startup();
     apply(runtime, state, actions, pending).await;
+    if !segment_intent_is_current(runtime, state) {
+        return;
+    }
 
     // Include already received remote Type 4 routes in the initial election.
     run_election_for(runtime, state, pending).await;
@@ -1192,7 +1257,7 @@ async fn refresh_segment_dependencies(
     let mut withdrawing = BTreeSet::new();
     let mut starting = BTreeSet::new();
     loop {
-        let (instances, segments, drained) = {
+        let (instances, segments, drained, rebound) = {
             // Freeze desired segments before reading their dependencies. The
             // producer publishes instances and Link seeds before segments, and
             // GCs removed drains afterwards. No watch guard crosses an await.
@@ -1201,10 +1266,27 @@ async fn refresh_segment_dependencies(
             // Committed bindings precede undrain. Non-consuming reads leave
             // newer notifications available to the ordinary actor branches.
             let drained = drained_rx.borrow().clone();
+            let mut rebound = BTreeSet::new();
             if let Some(rx) = bindings_rx {
-                runtime.es_link_bindings = rx.borrow().clone();
+                let bindings = rx.borrow().clone();
+                rebound.extend(
+                    by_esi
+                        .values()
+                        .filter(|state| {
+                            state.es_origin.is_advertising()
+                                && runtime.es_link_bindings.get(&state.config.esi)
+                                    != bindings.get(&state.config.esi)
+                        })
+                        .map(|state| state.config.esi),
+                );
+                runtime.es_link_bindings = bindings;
             }
-            (instances.clone(), segments.as_ref().clone(), drained)
+            (
+                instances.clone(),
+                segments.as_ref().clone(),
+                drained,
+                rebound,
+            )
         };
         let retained: BTreeSet<_> = segments
             .iter()
@@ -1224,6 +1306,15 @@ async fn refresh_segment_dependencies(
         let prior = std::mem::replace(&mut runtime.drained_esis, drained.clone());
         withdrawing.extend(drained.difference(&prior).copied());
         starting.retain(|esi| !drained.contains(esi) && retained.contains(esi));
+        // A binding may change while an undrain's startup acknowledgement is
+        // held. Preserve that retry before updating the cached binding erases
+        // the delta seen by the ordinary binding notification branch. Unstarted
+        // prepared states remain owned by the outer reconciliation queue.
+        starting.extend(
+            rebound
+                .into_iter()
+                .filter(|esi| !drained.contains(esi) && retained.contains(esi)),
+        );
         for esi in prior
             .difference(&drained)
             .filter(|esi| retained.contains(*esi))
@@ -1364,7 +1455,7 @@ async fn run_election_with_candidates(
     // election; role transitions must not re-emit EAD-per-EVI routes
     // for it (sweeps and remote Type 4 events keep firing while
     // drained).
-    if runtime.drained_esis.contains(&state.config.esi) {
+    if !segment_intent_is_current(runtime, state) {
         return;
     }
     if state.recovery_deadline.is_some_and(|deadline| {
@@ -1383,17 +1474,20 @@ async fn run_election_with_candidates(
     if delayed_publication || changed {
         let actions = state.es_origin.on_refresh();
         apply(runtime, state, actions, pending).await;
+        if !segment_intent_is_current(runtime, state) {
+            return;
+        }
     }
     if delayed_publication {
         let actions = state.ead_per_es.on_startup();
         apply(runtime, state, actions, pending).await;
+        if !segment_intent_is_current(runtime, state) {
+            return;
+        }
     }
-    if recovering || state.ead_per_evi.advertised_count() == 0 {
-        // The temporary NonDf roles protected the dataplane before election;
-        // clear them so EAD-per-EVI is originated even if we remain NonDf.
-        // Published snapshots stay suppressed until this election completes.
-        state.last_roles.clear();
-    }
+    // Re-advertise after recovery even if the prepared NonDf role is unchanged,
+    // retaining those published roles until every awaited action is current.
+    let advertise_all = recovering || state.ead_per_evi.advertised_count() == 0;
     let new_roles = match state.election.run(&candidates, state.config.originator_ip) {
         Ok(r) => r,
         Err(e) => {
@@ -1411,24 +1505,13 @@ async fn run_election_with_candidates(
     let mut transitions: Vec<(EvpnInstanceId, DfRole)> = Vec::new();
     for (&vni, &role) in &new_roles {
         let prior = state.last_roles.get(&vni).copied();
-        if prior != Some(role) {
+        if advertise_all || prior != Some(role) {
             transitions.push((vni, role));
         }
     }
 
-    for (vni, role) in transitions {
+    for &(vni, role) in &transitions {
         let actions = state.ead_per_evi.on_vni_role_changed(vni, role);
-        // Update telemetry first so it reflects the wire-side state
-        // we're about to commit.
-        runtime
-            .metrics
-            .set_evpn_df_role(esi_str.as_str(), vni.as_u32(), role.is_df());
-        if state.last_roles.contains_key(&vni) {
-            runtime
-                .metrics
-                .record_evpn_df_role_change(esi_str.as_str(), vni.as_u32());
-        }
-        state.last_roles.insert(vni, role);
         let Some(inst) = runtime.instances.get(vni).cloned() else {
             warn!(
                 esi = esi_str.as_str(),
@@ -1449,6 +1532,23 @@ async fn run_election_with_candidates(
             pending,
         )
         .await;
+        if !segment_intent_is_current(runtime, state) {
+            return;
+        }
+    }
+    // Publish one complete election only after every member's owned action
+    // has settled against current intent. A stale later ACK must not expose
+    // an earlier member's DF role while the old routes await teardown.
+    for (vni, role) in transitions {
+        runtime
+            .metrics
+            .set_evpn_df_role(esi_str.as_str(), vni.as_u32(), role.is_df());
+        if !advertise_all && state.last_roles.contains_key(&vni) {
+            runtime
+                .metrics
+                .record_evpn_df_role_change(esi_str.as_str(), vni.as_u32());
+        }
+        state.last_roles.insert(vni, role);
         debug!(
             esi = esi_str.as_str(),
             vni = vni.as_u32(),
@@ -3585,6 +3685,7 @@ mod tests {
         let instances = Arc::new(t);
         let (rib_tx, _rib_rx) = mpsc::channel::<RibUpdate>(1);
         let runtime = SegmentRuntime {
+            watches: None,
             instances,
             rib_tx,
             bum_enforcement_tx: None,
@@ -3863,6 +3964,7 @@ mod tests {
         let mut alloc = rustbgpd_evpn::EsiLabelAllocator::new();
         let (rib_tx, _rib_rx) = mpsc::channel::<RibUpdate>(1);
         let runtime = SegmentRuntime {
+            watches: None,
             instances,
             rib_tx,
             bum_enforcement_tx: None,
@@ -3938,6 +4040,7 @@ mod tests {
         let mut alloc = rustbgpd_evpn::EsiLabelAllocator::new();
         let (rib_tx, _rib_rx) = mpsc::channel::<RibUpdate>(1);
         let runtime = SegmentRuntime {
+            watches: None,
             instances,
             rib_tx,
             bum_enforcement_tx: None,
@@ -4481,6 +4584,7 @@ mod tests {
         let mut table = EvpnInstanceTable::new();
         table.insert(instance(100)).unwrap();
         SegmentRuntime {
+            watches: None,
             instances: Arc::new(table),
             rib_tx: rib.rib_tx.clone(),
             bum_enforcement_tx: None,
@@ -4858,6 +4962,495 @@ mod tests {
             // Closing the fake RIB lets the actor's bounded drain settle.
             drop(self.rib_rx);
             self.handle.shutdown().await;
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "held startup acknowledgements exercise same-ES model, drain, binding and closure publications"
+    )]
+    async fn held_startup_ack_revalidates_the_same_segment() {
+        for stage in ["type4", "ead"] {
+            for change in [
+                "delete",
+                "replace",
+                "redrain",
+                "instances",
+                "binding",
+                "binding-close",
+                "binding-final-close",
+                "shutdown",
+                "segments-close",
+                "instances-close",
+                "drain-close",
+            ] {
+                let mut actor = DfWaitActor::new(DfAlgorithm::HighestPreference);
+                let mut control = actor.handle.runtime_control();
+                let RibUpdate::SubscribeEvpnRouteEvents { reply } =
+                    actor.rib_rx.recv().await.unwrap()
+                else {
+                    panic!("initial startup subscribes before originating");
+                };
+                reply.send(actor.events.subscribe()).unwrap();
+                let held = loop {
+                    let RibUpdate::InjectEvpn { route, reply } = actor.rib_rx.recv().await.unwrap()
+                    else {
+                        panic!("startup must reach the selected origination acknowledgement");
+                    };
+                    let is_type4 = matches!(route.key(), EvpnRouteKey::Es { .. });
+                    actor.injected.push(route.key());
+                    if (stage == "type4") == is_type4 {
+                        break reply;
+                    }
+                    reply.send(Ok(())).unwrap();
+                };
+                actor.assert_role(DfRole::NonDf);
+                let mut desired = control.segments_tx.borrow().as_ref().clone();
+                match change {
+                    "delete" => assert!(control.replace_segments(Arc::new(Vec::new()))),
+                    "replace" => {
+                        desired[0].member_vnis = BTreeSet::from([vni(103)]);
+                        assert!(control.replace_segments(Arc::new(desired)));
+                    }
+                    "redrain" => {
+                        assert!(control.replace_drained_esis(Arc::new(BTreeSet::from([esi(1)]))));
+                    }
+                    "instances" => {
+                        let mut instances = EvpnInstanceTable::new();
+                        for member in [101, 103, 105] {
+                            instances
+                                .insert(instance_with_rd(
+                                    member,
+                                    if member == 101 { 201 } else { member },
+                                ))
+                                .unwrap();
+                        }
+                        assert!(control.replace_instances(Arc::new(instances)));
+                    }
+                    "binding" | "binding-final-close" => {
+                        let mut bindings = actor.bindings.borrow().as_ref().clone();
+                        bindings.get_mut(&esi(1)).unwrap().interface = "es-new".to_string();
+                        actor.bindings.send_replace(Arc::new(bindings));
+                    }
+                    "binding-close" => {}
+                    "shutdown" => actor.handle.shutdown.cancel(),
+                    "segments-close" => {
+                        let tx = watch::channel(Arc::new(Vec::new())).0;
+                        control.segments_tx = tx.clone();
+                        actor.handle.control.segments_tx = tx;
+                    }
+                    "instances-close" => {
+                        let tx = watch::channel(Arc::new(EvpnInstanceTable::new())).0;
+                        control.instances_tx = tx.clone();
+                        actor.handle.control.instances_tx = tx;
+                    }
+                    "drain-close" => {
+                        let tx = watch::channel(Arc::new(BTreeSet::new())).0;
+                        control.drained_esis_tx = tx.clone();
+                        actor.handle.control.drained_esis_tx = tx;
+                    }
+                    _ => unreachable!(),
+                }
+                if matches!(change, "binding-close" | "binding-final-close") {
+                    actor.bindings = watch::channel(Arc::new(BTreeMap::new())).0;
+                }
+                held.send(Ok(())).unwrap();
+                if change.starts_with("binding") {
+                    let expected = if change == "binding-close" {
+                        "es0"
+                    } else {
+                        "es-new"
+                    };
+                    if stage == "type4" {
+                        let RibUpdate::InjectEvpn { route, reply } =
+                            actor.rib_rx.recv().await.unwrap()
+                        else {
+                            panic!("a binding-only retry must resume its EAD-per-ES");
+                        };
+                        assert!(matches!(route.key(), EvpnRouteKey::EadPerEs { .. }));
+                        assert_eq!(
+                            actor.bum.borrow().ac_gate(esi(1)).unwrap().interface,
+                            expected
+                        );
+                        actor.assert_role(DfRole::NonDf);
+                        actor.injected.push(route.key());
+                        reply.send(Ok(())).unwrap();
+                    }
+                    let query = actor.routes_reply().await;
+                    assert_eq!(
+                        actor.bum.borrow().ac_gate(esi(1)).unwrap().interface,
+                        expected
+                    );
+                    actor.assert_role(DfRole::NonDf);
+                    assert_eq!(
+                        actor
+                            .injected
+                            .iter()
+                            .filter(|key| matches!(key, EvpnRouteKey::Es { .. }))
+                            .count(),
+                        1
+                    );
+                    assert_eq!(
+                        actor
+                            .injected
+                            .iter()
+                            .filter(|key| matches!(key, EvpnRouteKey::EadPerEs { .. }))
+                            .count(),
+                        1
+                    );
+                    query.send(Vec::new()).unwrap();
+                } else {
+                    for index in 0..if stage == "type4" { 1 } else { 2 } {
+                        let RibUpdate::WithdrawEvpn { key, reply } =
+                            actor.rib_rx.recv().await.unwrap()
+                        else {
+                            panic!(
+                                "stale startup must withdraw owned routes before another EAD or query: {stage}/{change}"
+                            );
+                        };
+                        assert_eq!(esi_of_key(&key), Some(esi(1)));
+                        assert_eq!(
+                            matches!(key, EvpnRouteKey::Es { .. }),
+                            stage == "type4" || index == 1
+                        );
+                        actor.assert_role(DfRole::NonDf);
+                        assert_eq!(actor.bum.borrow().ac_gate(esi(1)).unwrap().interface, "es0");
+                        reply.send(Ok(())).unwrap();
+                    }
+                    if matches!(change, "replace" | "instances") {
+                        let RibUpdate::InjectEvpn { route, reply } =
+                            actor.rib_rx.recv().await.unwrap()
+                        else {
+                            panic!("current replacement must restart after its owned teardown");
+                        };
+                        let EvpnRouteKey::Es { rd: route_rd, .. } = route.key() else {
+                            panic!("replacement restarts with Type 4");
+                        };
+                        assert_eq!(
+                            route_rd,
+                            rd(65000, if change == "replace" { 103 } else { 201 })
+                        );
+                        actor.injected.push(route.key());
+                        reply.send(Ok(())).unwrap();
+                        actor.routes_reply().await.send(Vec::new()).unwrap();
+                    }
+                }
+                actor.finish().await;
+            }
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "real live starts hold the same ES Type 4 across desired-state changes"
+    )]
+    async fn live_startup_ack_revalidates_add_admin_and_undrain() {
+        for start in ["addition", "admin", "undrain"] {
+            for change in ["delete", "redrain", "binding"] {
+                let mut actor = DfWaitActor::new(DfAlgorithm::HighestPreference);
+                actor.startup().await;
+                tokio::time::advance(Duration::from_secs(3)).await;
+                actor.sync_reply().await.send(true).unwrap();
+                actor.routes_reply().await.send(Vec::new()).unwrap();
+                let event = type_4_es_route(esi(1), "10.0.0.2", attrs_with_es_import_rt(esi(1)));
+                actor.remote_event(&event);
+                let before = actor.routes_reply().await;
+                actor.assert_role(DfRole::Df);
+                let control = actor.handle.runtime_control();
+                let mut desired = control.segments_tx.borrow().as_ref().clone();
+                let (id, member, old_interface) = if start == "addition" {
+                    (2, 103, "es1")
+                } else {
+                    (1, 101, "es0")
+                };
+                match start {
+                    "addition" => {
+                        let mut added = desired[0].clone();
+                        added.esi = esi(id);
+                        added.member_vnis = BTreeSet::from([vni(member)]);
+                        desired.push(added);
+                        assert!(control.replace_segments(Arc::new(desired.clone())));
+                    }
+                    "admin" => {
+                        desired[0].df_preference = 200;
+                        assert!(control.replace_segments(Arc::new(desired.clone())));
+                    }
+                    "undrain" => {
+                        assert!(control.replace_drained_esis(Arc::new(BTreeSet::from([esi(id)]))));
+                    }
+                    _ => unreachable!(),
+                }
+                before.send(Vec::new()).unwrap();
+                if start != "addition" {
+                    for index in 0..3 {
+                        let RibUpdate::WithdrawEvpn { reply, .. } =
+                            actor.rib_rx.recv().await.unwrap()
+                        else {
+                            panic!("the old DF owns three routes to withdraw");
+                        };
+                        if start == "undrain" && index == 2 {
+                            assert!(control.replace_drained_esis(Arc::new(BTreeSet::new())));
+                        }
+                        reply.send(Ok(())).unwrap();
+                    }
+                }
+                let RibUpdate::InjectEvpn { route, reply: held } =
+                    actor.rib_rx.recv().await.unwrap()
+                else {
+                    panic!("the live start must reach its Type 4 acknowledgement");
+                };
+                assert!(
+                    matches!(route.key(), EvpnRouteKey::Es { esi: key_esi, .. } if key_esi == esi(id))
+                );
+                actor.injected.push(route.key());
+                let injected_before = actor.injected.len();
+                match change {
+                    "delete" => {
+                        desired.retain(|segment| segment.esi != esi(id));
+                        assert!(control.replace_segments(Arc::new(desired)));
+                    }
+                    "redrain" => {
+                        assert!(control.replace_drained_esis(Arc::new(BTreeSet::from([esi(id)]))));
+                    }
+                    "binding" => {
+                        let mut bindings = actor.bindings.borrow().as_ref().clone();
+                        bindings.get_mut(&esi(id)).unwrap().interface = "es-live-new".to_string();
+                        actor.bindings.send_replace(Arc::new(bindings));
+                    }
+                    _ => unreachable!(),
+                }
+                held.send(Ok(())).unwrap();
+                if change == "binding" {
+                    let RibUpdate::InjectEvpn { route, reply } = actor.rib_rx.recv().await.unwrap()
+                    else {
+                        panic!("binding retry must resume the live EAD-per-ES");
+                    };
+                    assert!(
+                        matches!(route.key(), EvpnRouteKey::EadPerEs { esi: key_esi, .. } if key_esi == esi(id))
+                    );
+                    actor.assert_segment_role(esi(id), vni(member), DfRole::NonDf);
+                    assert_eq!(
+                        actor.bum.borrow().ac_gate(esi(id)).unwrap().interface,
+                        "es-live-new"
+                    );
+                    actor.injected.push(route.key());
+                    reply.send(Ok(())).unwrap();
+                    actor.routes_reply().await.send(Vec::new()).unwrap();
+                } else {
+                    let RibUpdate::WithdrawEvpn { key, reply } = actor.rib_rx.recv().await.unwrap()
+                    else {
+                        panic!(
+                            "stale live start must withdraw Type 4 before EAD or query: {start}/{change}"
+                        );
+                    };
+                    assert!(
+                        matches!(key, EvpnRouteKey::Es { esi: key_esi, .. } if key_esi == esi(id))
+                    );
+                    actor.assert_segment_role(esi(id), vni(member), DfRole::NonDf);
+                    assert_eq!(
+                        actor.bum.borrow().ac_gate(esi(id)).unwrap().interface,
+                        old_interface
+                    );
+                    assert_eq!(actor.injected.len(), injected_before);
+                    reply.send(Ok(())).unwrap();
+                }
+                actor.finish().await;
+            }
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn delayed_recovery_ack_revalidates_before_ead() {
+        for change in ["delete", "replace", "redrain", "binding"] {
+            let mut actor = DfWaitActor::new(DfAlgorithm::HighestPreference);
+            let control = actor.handle.runtime_control();
+            let mut desired = control.segments_tx.borrow().as_ref().clone();
+            desired[0].df_dont_preempt = true;
+            assert!(control.replace_segments(Arc::new(desired.clone())));
+            let RibUpdate::SubscribeEvpnRouteEvents { reply } = actor.rib_rx.recv().await.unwrap()
+            else {
+                panic!("recovery subscribes before waiting for boot synchronization");
+            };
+            reply.send(actor.events.subscribe()).unwrap();
+            // The immediate interval query cannot elect or originate during wait.
+            actor.routes_reply().await.send(Vec::new()).unwrap();
+            tokio::time::advance(Duration::from_secs(3)).await;
+            actor.sync_reply().await.send(true).unwrap();
+            actor.routes_reply().await.send(Vec::new()).unwrap();
+            let RibUpdate::InjectEvpn { route, reply: held } = actor.rib_rx.recv().await.unwrap()
+            else {
+                panic!("Don't-Preempt recovery must reach its delayed Type 4 acknowledgement");
+            };
+            assert!(matches!(route.key(), EvpnRouteKey::Es { .. }));
+            actor.injected.push(route.key());
+            match change {
+                "delete" => assert!(control.replace_segments(Arc::new(Vec::new()))),
+                "replace" => {
+                    desired[0].member_vnis = BTreeSet::from([vni(103)]);
+                    assert!(control.replace_segments(Arc::new(desired)));
+                }
+                "redrain" => {
+                    assert!(control.replace_drained_esis(Arc::new(BTreeSet::from([esi(1)]))));
+                }
+                "binding" => {
+                    let mut bindings = actor.bindings.borrow().as_ref().clone();
+                    bindings.get_mut(&esi(1)).unwrap().interface = "es-dp-new".to_string();
+                    actor.bindings.send_replace(Arc::new(bindings));
+                }
+                _ => unreachable!(),
+            }
+            held.send(Ok(())).unwrap();
+            if change == "binding" {
+                let RibUpdate::InjectEvpn { route, reply } = actor.rib_rx.recv().await.unwrap()
+                else {
+                    panic!("delayed recovery must resume its EAD on the current binding");
+                };
+                assert!(matches!(route.key(), EvpnRouteKey::EadPerEs { .. }));
+                assert_eq!(
+                    actor.bum.borrow().ac_gate(esi(1)).unwrap().interface,
+                    "es-dp-new"
+                );
+                actor.assert_role(DfRole::NonDf);
+                reply.send(Ok(())).unwrap();
+                actor.routes_reply().await.send(Vec::new()).unwrap();
+            } else {
+                let RibUpdate::WithdrawEvpn { key, reply } = actor.rib_rx.recv().await.unwrap()
+                else {
+                    panic!("stale delayed recovery must withdraw Type 4 before EAD: {change}");
+                };
+                assert!(matches!(key, EvpnRouteKey::Es { .. }));
+                actor.assert_role(DfRole::NonDf);
+                assert_eq!(actor.bum.borrow().ac_gate(esi(1)).unwrap().interface, "es0");
+                reply.send(Ok(())).unwrap();
+            }
+            actor.finish().await;
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn held_candidate_query_revalidates_before_election() {
+        for change in ["delete", "redrain", "binding"] {
+            let mut actor = DfWaitActor::new(DfAlgorithm::HighestPreference);
+            actor.startup().await;
+            tokio::time::advance(Duration::from_secs(3)).await;
+            actor.sync_reply().await.send(true).unwrap();
+            // Boot wait has settled; answering this query would elect local DF.
+            let held = actor.routes_reply().await;
+            let control = actor.handle.runtime_control();
+            match change {
+                "delete" => assert!(control.replace_segments(Arc::new(Vec::new()))),
+                "redrain" => {
+                    assert!(control.replace_drained_esis(Arc::new(BTreeSet::from([esi(1)]))));
+                }
+                "binding" => {
+                    let mut bindings = actor.bindings.borrow().as_ref().clone();
+                    bindings.get_mut(&esi(1)).unwrap().interface = "es-query-new".to_string();
+                    actor.bindings.send_replace(Arc::new(bindings));
+                }
+                _ => unreachable!(),
+            }
+            held.send(Vec::new()).unwrap();
+            if change == "binding" {
+                let refreshed_query = actor.routes_reply().await;
+                actor.assert_role(DfRole::NonDf);
+                assert_eq!(
+                    actor.bum.borrow().ac_gate(esi(1)).unwrap().interface,
+                    "es-query-new"
+                );
+                refreshed_query.send(Vec::new()).unwrap();
+            } else {
+                let RibUpdate::WithdrawEvpn { key, reply } = actor.rib_rx.recv().await.unwrap()
+                else {
+                    panic!(
+                        "stale candidate query must not elect or originate per-EVI EAD: {change}"
+                    );
+                };
+                assert!(matches!(key, EvpnRouteKey::EadPerEs { .. }));
+                actor.assert_role(DfRole::NonDf);
+                assert_eq!(actor.bum.borrow().ac_gate(esi(1)).unwrap().interface, "es0");
+                reply.send(Ok(())).unwrap();
+            }
+            actor.finish().await;
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn later_member_ack_cannot_publish_a_partial_election() {
+        for change in ["delete", "replace", "redrain", "binding"] {
+            let mut actor = DfWaitActor::new(DfAlgorithm::HighestPreference);
+            let control = actor.handle.runtime_control();
+            let mut desired = control.segments_tx.borrow().as_ref().clone();
+            desired[0].member_vnis.insert(vni(103));
+            assert!(control.replace_segments(Arc::new(desired.clone())));
+            actor.startup().await;
+            tokio::time::advance(Duration::from_secs(3)).await;
+            actor.sync_reply().await.send(true).unwrap();
+            actor.routes_reply().await.send(Vec::new()).unwrap();
+            let mut held = None;
+            for index in 0..2 {
+                let RibUpdate::InjectEvpn { route, reply } = actor.rib_rx.recv().await.unwrap()
+                else {
+                    panic!("both prepared members must reach their per-EVI acknowledgement");
+                };
+                assert!(matches!(route.key(), EvpnRouteKey::EadPerEvi { .. }));
+                actor.injected.push(route.key());
+                if index == 0 {
+                    reply.send(Ok(())).unwrap();
+                } else {
+                    held = Some(reply);
+                }
+            }
+            // Even one acknowledged member must not expose a partial role set.
+            for member in [101, 103] {
+                actor.assert_segment_role(esi(1), vni(member), DfRole::NonDf);
+            }
+            match change {
+                "delete" => assert!(control.replace_segments(Arc::new(Vec::new()))),
+                "replace" => {
+                    desired[0].member_vnis = BTreeSet::from([vni(105)]);
+                    assert!(control.replace_segments(Arc::new(desired)));
+                }
+                "redrain" => {
+                    assert!(control.replace_drained_esis(Arc::new(BTreeSet::from([esi(1)]))));
+                }
+                "binding" => {
+                    let mut bindings = actor.bindings.borrow().as_ref().clone();
+                    bindings.get_mut(&esi(1)).unwrap().interface = "es-members-new".to_string();
+                    actor.bindings.send_replace(Arc::new(bindings));
+                }
+                _ => unreachable!(),
+            }
+            held.unwrap().send(Ok(())).unwrap();
+            if change == "binding" {
+                let refreshed_query = actor.routes_reply().await;
+                for member in [101, 103] {
+                    actor.assert_segment_role(esi(1), vni(member), DfRole::NonDf);
+                }
+                assert_eq!(
+                    actor.bum.borrow().ac_gate(esi(1)).unwrap().interface,
+                    "es-members-new"
+                );
+                refreshed_query.send(Vec::new()).unwrap();
+            } else {
+                let RibUpdate::WithdrawEvpn { key, reply } = actor.rib_rx.recv().await.unwrap()
+                else {
+                    panic!("stale member election must settle its owned EAD routes");
+                };
+                assert!(matches!(key, EvpnRouteKey::EadPerEvi { .. }));
+                assert_eq!(
+                    actor.bum.borrow().ac_gate(esi(1)).unwrap().state,
+                    AcGateState::Blocked,
+                    "a stale later member acknowledgement must retain the complete blocked gate"
+                );
+                for member in [101, 103] {
+                    actor.assert_segment_role(esi(1), vni(member), DfRole::NonDf);
+                }
+                assert_eq!(actor.bum.borrow().ac_gate(esi(1)).unwrap().interface, "es0");
+                reply.send(Ok(())).unwrap();
+            }
+            actor.finish().await;
         }
     }
 
@@ -6562,6 +7155,7 @@ mod tests {
         let mut instances = EvpnInstanceTable::new();
         instances.insert(instance(100)).unwrap();
         let mut runtime = SegmentRuntime {
+            watches: None,
             instances: Arc::new(instances),
             rib_tx,
             bum_enforcement_tx: None,
