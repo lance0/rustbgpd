@@ -123,12 +123,30 @@ except (OSError, ValueError):
     sys.exit(1)
 ' "$1" "$2"
 }
-peer_ready() {
-    local state
-    state=$(docker exec "$1" gobgp neighbor "$2") || return 1
-    grep -qi 'BGP state = ESTABLISHED' <<<"$state"
+peer_state() {
+    local node=$1 peer=$2 expected=$3 status=0
+    local output="$ARTIFACT_DIR/peer-$node-$peer"
+    rm -f "$output.check.stdout" "$output.check.stderr" "$output.check.exit"
+    printf '%s\n' "$expected" > "$output.expected-state"
+    docker exec "$node" gobgp --json neighbor "$peer" > "$output.json" 2> "$output.stderr" || status=$?
+    printf '%s\n' "$status" > "$output.exit"
+    if [ "$status" -ne 0 ]; then return "$status"; fi
+    # Reuse the M83 GoBGP leg's structured identity/state predicate.
+    jq -e -s --arg neighbor "$peer" --argjson expected "$expected" '
+        length == 1
+        and (.[0] | type == "object")
+        and (.[0].state | type == "object")
+        and .[0].state.neighbor_address == $neighbor
+        and .[0].state.local_asn == 65001
+        and .[0].state.peer_asn == 65001
+        and (.[0].state.session_state | type == "number")
+        and .[0].state.session_state == $expected
+    ' "$output.json" > "$output.check.stdout" 2> "$output.check.stderr" || status=$?
+    printf '%s\n' "$status" > "$output.check.exit"
+    return "$status"
 }
-peer_down() { ! peer_ready "$1" "$2"; }
+peer_ready() { peer_state "$1" "$2" 6; }
+peer_down() { peer_state "$1" "$2" 1; }
 observer_ready() {
     local peer=$1 cluster=$2 output=$3
     docker exec "$OBSERVER" gobgp neighbor "$peer" adj-in -a ipv4 -j > "$output" &&
