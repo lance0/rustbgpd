@@ -94,6 +94,14 @@ CAMPAIGN_BOUNDS: dict[str, tuple[str, int]] = {
     "crates/cli": ("ribsnap_convert", 65_536),
     "crates/rpki": ("decode_rtr_pdu", 65_535),
 }
+# Every nightly campaign enumerates its crate's targets, fails on an empty
+# list, and fuzzes each one.
+NIGHTLY_TARGET_LOOP = (
+    "targets=$(cargo fuzz list)",
+    'if [ -z "$targets" ]; then',
+    "for t in $targets; do",
+    'cargo fuzz run "$t"',
+)
 WIRE_DICTIONARY_TARGETS = tuple(
     target for target in EXPECTED_TARGETS["crates/wire"] if target != "parse_rd"
 )
@@ -467,6 +475,20 @@ def validate_pipeline_enrollment(builder: str, workflow: str) -> None:
                 "reviewed max_len contract"
             )
 
+    for crate in EXPECTED_TARGETS:
+        body = campaign_block(workflow, crate)
+        if body is None:
+            raise InventoryError(f"nightly workflow has no {crate} campaign")
+        if not all(line in body for line in NIGHTLY_TARGET_LOOP):
+            raise InventoryError(
+                f"nightly {crate} campaign does not fuzz every {crate} target "
+                "from a fail-closed cargo fuzz list loop"
+            )
+        if f"{crate}/fuzz/artifacts/" not in workflow:
+            raise InventoryError(
+                f"nightly workflow does not retain {crate} failure artifacts"
+            )
+
     for crate, (target, max_len) in CAMPAIGN_BOUNDS.items():
         body = campaign_block(workflow, crate)
         if body is None:
@@ -476,10 +498,6 @@ def validate_pipeline_enrollment(builder: str, workflow: str) -> None:
         if f"-max_len={max_len}" not in body:
             raise InventoryError(
                 f"nightly workflow does not enforce {crate}/{target} max_len={max_len}"
-            )
-        if f"{crate}/fuzz/artifacts/" not in workflow:
-            raise InventoryError(
-                f"nightly workflow does not retain {crate} failure artifacts"
             )
 
         options = ROOT / crate / "fuzz" / f"{target}.options"

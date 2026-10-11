@@ -73,7 +73,18 @@ VIOLATION_RULES: tuple[tuple[re.Pattern[str], str], ...] = (
         re.compile(r"nightly-\d{4}-\d{2}-\d{2}"),
         f"hardcodes a nightly date; read it from {PIN_PATH}",
     ),
+    (
+        re.compile(
+            r"""\b(?:toolchain\s*[=:]|RUSTUP_TOOLCHAIN(?:\s*[=:]|\s))"""
+            r"""\s*["']?nightly\b"""
+        ),
+        f"assigns a floating nightly; read the toolchain from {PIN_PATH}",
+    ),
 )
+
+# Shell, YAML, Dockerfile, and justfile comments all start with `#`. A comment
+# that names the pin file does not read it.
+COMMENT_LINE = re.compile(r"^\s*#")
 
 
 class PinGuardError(RuntimeError):
@@ -127,7 +138,8 @@ def discover_consumers() -> dict[str, str]:
 def audit_consumer(relative: str, text: str) -> list[str]:
     """Report every way `relative` stops taking its toolchain from the pin."""
     failures: list[str] = []
-    if PIN_PATH not in text:
+    code = [line for line in text.splitlines() if not COMMENT_LINE.match(line)]
+    if not any(PIN_PATH in line for line in code):
         failures.append(
             f"{relative} selects a Rust toolchain for fuzzing but no longer "
             f"reads {PIN_PATH}"
