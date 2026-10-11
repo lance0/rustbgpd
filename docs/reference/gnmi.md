@@ -65,7 +65,9 @@ heartbeat reconciliation use the peer manager's operator-read lane on TLS and
 Unix listeners and for dial-out subscriptions. They report the same live
 session observations as native neighbor reads and can complete during policy
 waits that admit operator reads; they do not pin peers to a common policy
-generation. The existing two-second peer-manager budget covers both queue
+generation. As for `ListNeighbors`, a snapshot admitted at such a wait does
+not hold the transaction: its manager-owned fields are captured at admission
+(see the [API reference](api.md#neighborservice)). The existing two-second peer-manager budget covers both queue
 admission and reply. An unavailable or timed-out snapshot still fails the
 request or terminates the subscription with its error; dial-out reconnects.
 
