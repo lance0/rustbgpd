@@ -3290,3 +3290,223 @@ async fn labeled_ipv4_ipv6_next_hop_export_requires_extended_nexthop_on_the_wire
         manager_task.abort();
     }
 }
+
+/// Exercise policy staging, exact-export preflight and wire encoding together.
+/// An unchanged primary may keep its same-interface link-local companion; a
+/// changed primary must discard both the companion and its source scope.
+#[expect(
+    clippy::too_many_lines,
+    reason = "one RIB-to-wire scenario with unchanged and rewritten next-hop controls"
+)]
+async fn check_mpls_specific_rewrite_link_local(safi: Safi, add_path: bool) {
+    let primary: IpAddr = RECEIVED_IPV6_NEXT_HOP.parse().unwrap();
+    let rewritten: IpAddr = "2001:db8::9".parse().unwrap();
+    let companion = "fe80::a8c1:1".parse().unwrap();
+    let scope = Box::new(rustbgpd_rib::NextHopScope {
+        interface: Arc::from("eth1"),
+        ifindex: 7,
+    });
+    let family = (Afi::Ipv6, safi);
+    let add_path_families = if add_path { vec![family] } else { vec![] };
+    for override_addr in [None, Some(primary), Some(rewritten)] {
+        let (mut session, rib_rx) = make_test_session_with_metrics_and_identity(
+            BgpMetrics::new(),
+            SessionIdentity::primary(7),
+        );
+        configure_scoped_link_local_peer(&mut session);
+        let (client, mut server) = connected_stream_pair().await;
+        session.test_install_stream(client);
+        let mut negotiated = negotiated_session(65002, false);
+        negotiated.negotiated_families = vec![family];
+        if add_path {
+            negotiated
+                .add_path_families
+                .insert(family, AddPathMode::Send);
+        }
+        install_test_negotiated_session(&mut session, negotiated);
+        session.publish_export_profile();
+        let (_query_tx, query_rx) = mpsc::channel(8);
+        let manager =
+            rustbgpd_rib::RibManager::new(rib_rx, query_rx, None, None, BgpMetrics::new());
+        let manager_task = tokio::spawn(manager.run());
+        let (outbound_tx, mut outbound_rx) = mpsc::channel(16);
+        session
+            .rib_tx
+            .send(RibUpdate::SetPeerExportEncoder {
+                peer: session.peer_ip,
+                session_id: 7,
+                encoder: session.export_encoder.clone(),
+            })
+            .await
+            .unwrap();
+        session
+            .rib_tx
+            .send(RibUpdate::PeerUp {
+                peer: session.peer_ip,
+                session_id: 7,
+                peer_asn: 65002,
+                peer_router_id: Ipv4Addr::new(10, 0, 0, 2),
+                outbound_tx,
+                export_policy: override_addr.map(|addr| {
+                    set_next_hop_import(rustbgpd_policy::NextHopAction::Specific(addr))
+                }),
+                sendable_families: vec![family],
+                is_ebgp: true,
+                route_reflector_client: false,
+                orr_vantage: None,
+                per_client_best: false,
+                interpret_rfc1997: true,
+                add_path_send_families: add_path_families.clone(),
+                add_path_send_max: u32::from(add_path),
+                negotiated_orf_recv: vec![],
+                negotiated_llgr_families: vec![],
+            })
+            .await
+            .unwrap();
+        let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 9));
+        let prefix = "2001:db8:100::".parse().unwrap();
+        let received = if safi == Safi::LabeledUnicast {
+            let mut route = labeled_route_with(Prefix::V6(Ipv6Prefix::new(prefix, 48)), primary);
+            route.link_local_next_hop = Some(companion);
+            route.next_hop_scope = Some(scope.clone());
+            RibUpdate::LabeledRoutesReceived {
+                peer: source,
+                session_id: 0,
+                announced: vec![route],
+                withdrawn: vec![],
+            }
+        } else {
+            let mut route = vpn_route_with(VpnPrefix::v6(prefix, 48).unwrap(), primary);
+            route.link_local_next_hop = Some(companion);
+            route.next_hop_scope = Some(scope.clone());
+            RibUpdate::VpnRoutesReceived {
+                peer: source,
+                session_id: 0,
+                announced: vec![route],
+                withdrawn: vec![],
+            }
+        };
+        session.rib_tx.send(received).await.unwrap();
+        let staged = loop {
+            let update = tokio::time::timeout(Duration::from_secs(3), outbound_rx.recv())
+                .await
+                .expect("RIB export within deadline")
+                .expect("outbound channel open");
+            let route = update
+                .labeled_announce
+                .first()
+                .map(|r| {
+                    (
+                        r.next_hop,
+                        r.link_local_next_hop,
+                        r.next_hop_scope.clone(),
+                        r.path_id,
+                    )
+                })
+                .or_else(|| {
+                    update.vpn_announce.first().map(|r| {
+                        (
+                            r.next_hop,
+                            r.link_local_next_hop,
+                            r.next_hop_scope.clone(),
+                            r.path_id,
+                        )
+                    })
+                });
+            session.send_route_update(update);
+            if let Some(route) = route {
+                break route;
+            }
+        };
+        let (wire, raw) = loop {
+            let raw = tokio::time::timeout(
+                Duration::from_secs(3),
+                read_single_raw_bgp_message(&mut server),
+            )
+            .await
+            .expect("wire UPDATE within deadline");
+            if let Some(wire) = raw_mp_reach_family_next_hop(&raw) {
+                break (wire, raw);
+            }
+        };
+        let selected = override_addr.unwrap_or(primary);
+        let changed = selected != primary;
+        let mut expected = Vec::new();
+        for addr in std::iter::once(selected).chain((!changed).then_some(IpAddr::V6(companion))) {
+            if safi == Safi::MplsVpn {
+                expected.extend([0_u8; 8]);
+            }
+            let IpAddr::V6(addr) = addr else {
+                unreachable!()
+            };
+            expected.extend(addr.octets());
+        }
+        assert_eq!(wire.0, 2);
+        assert_eq!(wire.1, if safi == Safi::LabeledUnicast { 4 } else { 128 });
+        assert_eq!(
+            usize::from(wire.2),
+            expected.len(),
+            "{safi:?}, Add-Path {add_path}, override {override_addr:?}: NH-Len"
+        );
+        assert_eq!(wire.3, expected, "MP_REACH next-hop bytes");
+        let Message::Update(message) =
+            rustbgpd_wire::decode_message(&mut Bytes::from(raw), rustbgpd_wire::MAX_MESSAGE_LEN)
+                .unwrap()
+        else {
+            panic!("expected UPDATE")
+        };
+        let parsed = message.parse(true, false, &add_path_families).unwrap();
+        let mp = parsed
+            .attributes
+            .iter()
+            .find_map(|attr| match attr {
+                PathAttribute::MpReachNlri(mp) => Some(mp),
+                _ => None,
+            })
+            .expect("MP_REACH attribute");
+        assert_eq!(mp.next_hop, selected);
+        assert_eq!(mp.link_local_next_hop, (!changed).then_some(companion));
+        if safi == Safi::LabeledUnicast {
+            assert_eq!(mp.labeled_announced.len(), 1);
+            assert_eq!(
+                mp.labeled_announced[0].nlri.prefix,
+                Prefix::V6(Ipv6Prefix::new(prefix, 48))
+            );
+            assert_eq!(mp.labeled_announced[0].path_id, staged.3);
+        } else {
+            assert_eq!(mp.vpn_announced.len(), 1);
+            assert_eq!(
+                mp.vpn_announced[0].nlri.prefix,
+                VpnPrefix::v6(prefix, 48).unwrap()
+            );
+            assert_eq!(mp.vpn_announced[0].path_id, staged.3);
+        }
+        assert_eq!(staged.0, selected);
+        assert_eq!(staged.1, (!changed).then_some(companion));
+        assert_eq!(staged.2, (!changed).then_some(scope.clone()));
+        assert_eq!(staged.3 != 0, add_path, "outbound Add-Path identity");
+        drop(session);
+        manager_task.abort();
+        let _ = manager_task.await;
+    }
+}
+
+#[tokio::test]
+async fn labeled_ipv6_specific_rewrite_link_local_on_the_wire() {
+    check_mpls_specific_rewrite_link_local(Safi::LabeledUnicast, false).await;
+}
+
+#[tokio::test]
+async fn labeled_ipv6_add_path_specific_rewrite_link_local_on_the_wire() {
+    check_mpls_specific_rewrite_link_local(Safi::LabeledUnicast, true).await;
+}
+
+#[tokio::test]
+async fn vpnv6_specific_rewrite_link_local_on_the_wire() {
+    check_mpls_specific_rewrite_link_local(Safi::MplsVpn, false).await;
+}
+
+#[tokio::test]
+async fn vpnv6_add_path_specific_rewrite_link_local_on_the_wire() {
+    check_mpls_specific_rewrite_link_local(Safi::MplsVpn, true).await;
+}
