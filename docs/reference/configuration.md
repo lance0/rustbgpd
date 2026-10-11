@@ -4512,7 +4512,7 @@ preference election and becomes non-DF when an ES peer advertises another
 algorithm. With rustbgpd's default `"default-modulo"`, both PEs can be
 non-DF for a VNI, dropping remote BUM traffic toward the CE. Matching
 highest-preference settings avoid that algorithm disagreement. See the
-[pinned FRR election logic](https://github.com/FRRouting/frr/blob/frr-10.7.1/zebra/zebra_evpn_mh.c#L1829-L1845).
+[pinned FRR election logic](https://github.com/FRRouting/frr/blob/f8c0b08dcb0c78f9e42b9b86ae70b049e4e617c1/zebra/zebra_evpn_mh.c#L1948-L1976).
 
 Highest-preference elects the same winner across an ES's member VNIs;
 changing the VNI does not distribute the DF role between its PEs.
