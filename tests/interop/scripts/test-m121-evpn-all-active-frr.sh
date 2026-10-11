@@ -28,16 +28,12 @@ trap finish EXIT
 source "$SCRIPT_DIR/source-id-guard.sh"
 check_lab_source_ids "$TOPO" "$CONTROLLER"
 python3 - "$ROOT" "$OUT" "$TOPO" <<'META'
-import json,subprocess,sys
+import sys
 from pathlib import Path
 root,out,topology=Path(sys.argv[1]),Path(sys.argv[2]),sys.argv[3]
-meta={'source_commit':subprocess.check_output(['git','-C',str(root),'rev-parse','HEAD'],text=True).strip(),
-      'runtime_diff':subprocess.check_output(['git','-C',str(root),'diff','HEAD','--','src','crates'],text=True),
-      'containers':{}}
-for node in ['a','r','controller']:
-    info=json.loads(subprocess.check_output(['docker','inspect',f'clab-{topology}-{node}']))[0]
-    meta['containers'][node]={'image':info['Config']['Image'],'image_id':info['Image']}
-(out/'host-metadata.json').write_text(json.dumps(meta,indent=2)+'\n')
+sys.path.insert(0,str(root/'tests/interop/scripts'))
+from m121_all_active_frr import record_host_metadata
+record_host_metadata(root,out,topology)
 META
 # Validate retained baseline identity before comparing any fresh packets.
 python3 - "$ROOT" "$OUT" <<'PY'

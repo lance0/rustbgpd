@@ -24,6 +24,40 @@ OUT = None
 PIDS = {}
 DAEMON = None
 CAPTURES = []
+HARNESS_INPUTS = (
+    'tests/interop/scripts/m121_all_active_frr.py',
+    'tests/interop/scripts/m121_all_active_oracle.py',
+    'tests/interop/scripts/m121_all_active_wire.py',
+    'tests/interop/scripts/evpn_frr_peer_sync.py',
+    'tests/interop/scripts/m105_capture_oracle.py',
+    'tests/interop/scripts/test-m121-evpn-all-active-frr.sh',
+    'tests/interop/scripts/source-id-guard.sh',
+    'scripts/source-id.sh',
+    'tests/interop/configs/rustbgpd-m121-pe.toml',
+    'tests/interop/m121-evpn-all-active-frr.clab.yml',
+    'tests/fixtures/grpc-test-only-operator.token',
+    'docs/artifacts/interop/evpn-frr-peer-sync-20261011/result.json',
+)
+
+
+def record_host_metadata(root, out, topology):
+    """Identify repository inputs, including dirty and untracked scoped paths."""
+    def git(*args):
+        return subprocess.check_output(['git', '-C', str(root), *args], text=True)
+    scopes = dict(runtime=['Cargo.toml', 'Cargo.lock', '.cargo', 'src', 'crates', 'proto',
+                           'bench', 'benches', 'examples', 'tools'],
+                  harness=['tests/interop', 'tests/fixtures/grpc-test-only-operator.token',
+                           'scripts/source-id.sh', 'docs/artifacts/interop/evpn-frr-peer-sync-20261011/result.json'])
+    meta = dict(source_commit=git('rev-parse', 'HEAD').strip(), repository_scopes=scopes,
+                harness_sha256={name: hashlib.sha256((root / name).read_bytes()).hexdigest()
+                                for name in HARNESS_INPUTS}, containers={})
+    for scope, paths in scopes.items():
+        meta[scope + '_diff'] = git('diff', 'HEAD', '--', *paths)
+        meta[scope + '_status'] = git('status', '--porcelain', '--untracked-files=all', '--', *paths)
+    for node in ('a', 'r', 'controller'):
+        info = json.loads(subprocess.check_output(['docker', 'inspect', f'clab-{topology}-{node}']))[0]
+        meta['containers'][node] = dict(image=info['Config']['Image'], image_id=info['Image'])
+    (out / 'host-metadata.json').write_text(json.dumps(meta, indent=2) + '\n')
 
 
 def render_config(template, cell):
@@ -487,23 +521,24 @@ def carrier_cycle(vni, survivor_seeds):
     snapshot('carrier-withdrawn', vni)
     packets = capture('carrier-survivor', survivor_seeds)
     verify_delivery(packets, 'carrier-survivor', survivor_seeds, 'a', True)
-    raised = event('carrier_up_requested')
+    event('carrier_up_requested')
     ns('b', 'ip', 'link', 'set', 'ac', 'up')
     wait(lambda: 'LOWER_UP' in json.loads(ns('b', 'ip', '-j', 'link', 'show', 'es0'))[0]['flags'],
          'actual Rust attachment-circuit carrier return')
     carrier = event('carrier_up_observed')
     samples = []
-    while time.monotonic() - carrier['monotonic'] < 3:
+    while time.monotonic() - carrier['monotonic'] < 5:
         state = ctl('evpn', 'es', 'list')
-        elapsed = time.monotonic() - raised['monotonic']
-        assert state['segments'][0]['drained'], f'link drain cleared before recovery delay at {elapsed}'
-        samples.append(dict(elapsed_seconds=elapsed, carrier_up_elapsed_seconds=time.monotonic() - carrier['monotonic'], state=state))
+        elapsed = time.monotonic() - carrier['monotonic']
+        samples.append(dict(carrier_observation_elapsed_seconds=elapsed, state=state))
+        save('carrier-recovery-hold.json', samples)
+        if elapsed < 5:
+            assert state['segments'][0]['drained'], f'link drain cleared before recovery delay at {elapsed}'
         time.sleep(.25)
-    assert samples and samples[-1]['carrier_up_elapsed_seconds'] >= 2, 'no deep recovery-hold sample'
-    save('carrier-recovery-hold.json', samples)
+    assert any(4 <= sample['carrier_observation_elapsed_seconds'] < 5 for sample in samples), 'no deep recovery-hold sample'
     wait(lambda: ready(vni, 'a') and nhg(PEER_MAC, {IPS['a'], IPS['b']}),
          'recovered EAD-per-EVI, preference roles and actual two-member NHG')
-    elapsed = time.monotonic() - raised['monotonic']
+    elapsed = time.monotonic() - carrier['monotonic']
     assert elapsed >= 5, 'recovery completed before configured five-second hold'
     snapshot('carrier-recovered', vni)
     discovery = capture('carrier-rediscover', list(range(10, 74)), count=1)
@@ -514,8 +549,8 @@ def carrier_cycle(vni, survivor_seeds):
     return dict(surviving_frr_delivered=len(survivor_seeds) * 10, survivor_flow_seeds=survivor_seeds,
                 recovered_rust_delivered=len(b) * 10,
                 recovered_rust_flow_seeds=b, recovered_frr_flow_seeds=a,
-                recovery_delay_seconds=5, recovery_observed_seconds=elapsed,
-                timing_scope='ordering only, not a latency measurement')
+                recovery_delay_seconds=5, carrier_observation_elapsed_seconds=elapsed,
+                timing_scope='external carrier observation to full readiness ordering; observer may follow actor edge; not internal hold or latency measurement')
 
 
 def cleanup():

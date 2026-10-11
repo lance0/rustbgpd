@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""Bounded host/controller command-channel failure controls; no live containers."""
+"""Offline driver controls for command failures, carrier timing and provenance."""
+import ast
 import contextlib
 import io
 import json
@@ -55,6 +56,144 @@ class HistoricalComparisonTests(unittest.TestCase):
         driver.verify_historical_flows(a, b, False)
         with self.assertRaisesRegex(AssertionError, 'immutable baseline'):
             driver.verify_historical_flows(a, b, True)
+
+
+class CarrierRecoveryTests(unittest.TestCase):
+    def recover(self, carrier_hold, full_readiness=6.25, response_duration=0.0):
+        clock = [0.0]
+        def sleep(seconds):
+            clock[0] += seconds
+        def wait(predicate, description):
+            if description == 'actual Rust attachment-circuit carrier return':
+                clock[0] += 10
+            elif description == 'recovered EAD-per-EVI, preference roles and actual two-member NHG':
+                clock[0] = max(clock[0], 10 + full_readiness)
+            self.assertTrue(predicate())
+        def ctl(*args):
+            if clock[0] >= 10:
+                clock[0] += response_duration
+            return dict(segments=[dict(drained=clock[0] < 10 + carrier_hold)])
+        def ns(node, *args):
+            if node == 'ce' and args == ('ip', '-j', 'link', 'show', 'bond0'):
+                return json.dumps([dict(address=driver.PEER_MAC)])
+            return json.dumps([dict(flags=['LOWER_UP'])])
+        with tempfile.TemporaryDirectory() as directory, contextlib.ExitStack() as stack:
+            stack.enter_context(patch.object(driver, 'OUT', Path(directory)))
+            stack.enter_context(patch.object(driver.time, 'monotonic', side_effect=lambda: clock[0]))
+            stack.enter_context(patch.object(driver.time, 'sleep', side_effect=sleep))
+            stack.enter_context(patch.object(driver, 'wait', side_effect=wait))
+            stack.enter_context(patch.object(driver, 'ns', side_effect=ns))
+            stack.enter_context(patch.object(driver, 'ctl', side_effect=ctl))
+            stack.enter_context(patch.object(driver, 'frr', return_value='{}'))
+            for name in ('ready', 'nhg', 'peer_only_ready'):
+                stack.enter_context(patch.object(driver, name, return_value=True))
+            for name in ('learn', 'snapshot', 'capture'):
+                stack.enter_context(patch.object(driver, name))
+            for name in ('verify_frr_es_routes', 'verify_frr_peer_originated'):
+                stack.enter_context(patch(f'm121_all_active_oracle.{name}'))
+            stack.enter_context(patch('m121_all_active_oracle.verify_discovery', return_value=dict(a=[10], b=[11])))
+            stack.enter_context(patch('evpn_frr_peer_sync.verify_delivery'))
+            try:
+                return driver.carrier_cycle(100, [11])
+            finally:
+                self.hold_samples = json.loads(Path(directory, 'carrier-recovery-hold.json').read_text())
+
+    def test_delayed_carrier_return_cannot_count_toward_recovery_hold(self):
+        with self.assertRaisesRegex(AssertionError, 'recovery delay'):
+            self.recover(3.5, full_readiness=5.25)
+        self.assertEqual(self.hold_samples[-1]['carrier_observation_elapsed_seconds'], 3.5)
+        self.assertFalse(self.hold_samples[-1]['state']['segments'][0]['drained'])
+
+    def test_recovery_receipt_measures_from_observed_carrier_return(self):
+        self.assertEqual(self.recover(5)['carrier_observation_elapsed_seconds'], 6.25)
+
+    def test_rpc_completed_after_hold_boundary_does_not_require_drained(self):
+        self.assertEqual(self.recover(5, response_duration=.125)['carrier_observation_elapsed_seconds'], 6.25)
+        self.assertGreaterEqual(self.hold_samples[-1]['carrier_observation_elapsed_seconds'], 5)
+        self.assertFalse(self.hold_samples[-1]['state']['segments'][0]['drained'])
+
+    def test_rpc_spanning_entire_hold_does_not_prove_deep_drained_sample(self):
+        with self.assertRaisesRegex(AssertionError, 'no deep recovery-hold sample'):
+            self.recover(5, response_duration=5.1)
+
+
+class HostMetadataTests(unittest.TestCase):
+    def setUp(self):
+        self.directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.directory.cleanup)
+        self.root = Path(self.directory.name) / 'repo'
+        self.out = Path(self.directory.name)
+        repository = Path(__file__).resolve().parents[3]
+        subprocess.run(['git', 'clone', '--quiet', '--shared', '--no-checkout', str(repository), str(self.root)],
+                       check=True, capture_output=True)
+        # Reuse existing commits; this fixture never creates a commit or runs hooks.
+        self.git('sparse-checkout', 'set', '--no-cone', *('/' + name for name in driver.HARNESS_INPUTS), '/Cargo.toml')
+        self.git('checkout', '--quiet', 'HEAD')
+
+    def git(self, *args):
+        return subprocess.check_output(['git', '-C', str(self.root), *args], text=True)
+
+    def metadata(self):
+        check_output = subprocess.check_output
+        def command(args, **kwargs):
+            if args[:2] == ['docker', 'inspect']:
+                return json.dumps([dict(Config=dict(Image='fixture:tag'), Image='sha256:fixture')]).encode()
+            return check_output(args, **kwargs)
+        with patch.object(driver.subprocess, 'check_output', side_effect=command):
+            driver.record_host_metadata(self.root, self.out, 'm121-fixture')
+        return json.loads((self.out / 'host-metadata.json').read_text())
+
+    def test_every_harness_input_mutation_changes_its_hash_and_dirty_evidence(self):
+        baseline = self.metadata()
+        self.assertEqual(baseline['harness_status'], '')
+        for name in driver.HARNESS_INPUTS:
+            with self.subTest(path=name):
+                path = self.root / name
+                original = path.read_bytes()
+                path.write_bytes(original + b'\n# provenance mutation\n')
+                changed = self.metadata()
+                self.assertNotEqual(changed['harness_sha256'][name], baseline['harness_sha256'][name])
+                self.assertIn(name, changed['harness_diff'])
+                self.assertIn(name, changed['harness_status'])
+                self.assertEqual([key for key in baseline['harness_sha256']
+                                  if changed['harness_sha256'][key] != baseline['harness_sha256'][key]], [name])
+                path.write_bytes(original)
+
+    def test_runtime_staged_harness_and_untracked_inputs_are_recorded(self):
+        for name in ('src/m121-untracked.rs', 'tests/interop/scripts/m121-untracked.py'):
+            path = self.root / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text('untracked input\n')
+        with (self.root / 'Cargo.toml').open('a') as file:
+            file.write('\n# modified runtime input\n')
+        name = 'tests/interop/configs/rustbgpd-m121-pe.toml'
+        with (self.root / name).open('a') as file:
+            file.write('\n# staged harness input\n')
+        self.git('add', name)
+        metadata = self.metadata()
+        self.assertIn('?? src/m121-untracked.rs', metadata['runtime_status'])
+        self.assertIn('?? tests/interop/scripts/m121-untracked.py', metadata['harness_status'])
+        self.assertIn('Cargo.toml', metadata['runtime_diff'])
+        self.assertIn(name, metadata['harness_diff'])
+        self.assertIn('M  ' + name, metadata['harness_status'])
+
+    def test_manifest_covers_transitive_local_python_imports(self):
+        scripts = Path(__file__).resolve().parent
+        pending = [scripts / 'm121_all_active_frr.py']
+        visited = set()
+        while pending:
+            path = pending.pop()
+            if path in visited:
+                continue
+            visited.add(path)
+            self.assertIn('tests/interop/scripts/' + path.name, driver.HARNESS_INPUTS)
+            for node in ast.walk(ast.parse(path.read_text())):
+                names = ([node.module] if isinstance(node, ast.ImportFrom)
+                         else [alias.name for alias in node.names] if isinstance(node, ast.Import) else [])
+                for name in names:
+                    candidate = scripts / (name + '.py')
+                    if candidate.is_file():
+                        pending.append(candidate)
 
 
 class CommandBridgeTests(unittest.TestCase):
