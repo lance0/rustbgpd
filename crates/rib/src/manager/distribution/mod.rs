@@ -5240,13 +5240,26 @@ impl RibManager {
         let _ = reply.send(Ok(()));
     }
 
+    /// Empty families mean permit-all; absent peer keys keep readiness accurate.
+    fn reap_empty_orf_filter(&mut self, peer: IpAddr, family: (Afi, Safi)) {
+        if let Some(by_family) = self.peer_orf_filters.get_mut(&peer) {
+            if by_family
+                .get(&family)
+                .is_some_and(crate::orf::OrfFilterSet::is_empty)
+            {
+                by_family.remove(&family);
+            }
+            if by_family.is_empty() {
+                self.peer_orf_filters.remove(&peer);
+            }
+        }
+    }
+
     /// Apply Address-Prefix ORF entries pushed by a peer (RFC 5291/5292).
     ///
-    /// Installs/updates the per-`(peer, AFI, SAFI)` filter and lifts the
-    /// initial-advertisement gate. The re-advertisement sweep runs for
-    /// `IMMEDIATE` (or after a malformed-field reset, RFC 5291 §5.2); `DEFER`
-    /// installs the filter only — it stays live for subsequent outbound churn
-    /// and is swept on a later IMMEDIATE/plain ROUTE-REFRESH.
+    /// Accepted updates lift the initial-advertisement gate. The sweep runs
+    /// for `IMMEDIATE` or a malformed-field reset (RFC 5291 §6); `DEFER`
+    /// installs the filter for outbound churn and a later route refresh.
     pub(super) fn handle_peer_orf_update(
         &mut self,
         peer: IpAddr,
@@ -5271,8 +5284,6 @@ impl RibManager {
             "an ORF-receive peer must never be registered in an update group"
         );
         let family = (afi, safi);
-        // The ORF message is itself a ROUTE-REFRESH (RFC 5291 §6) — lift the gate.
-        self.lift_orf_gate(peer, family);
         let filter = self
             .peer_orf_filters
             .entry(peer)
@@ -5303,9 +5314,30 @@ impl RibManager {
                 );
                 true
             }
-            _ => filter.apply(entries).is_err(),
+            _ => match filter.apply(entries) {
+                Ok(()) => false,
+                Err(crate::orf::OrfApplyError::Malformed) => true,
+                Err(crate::orf::OrfApplyError::Capacity) => {
+                    self.metrics.record_orf_capacity_rejection(
+                        &peer.to_string(),
+                        rustbgpd_wire::family_label(afi, safi).unwrap_or("unknown"),
+                    );
+                    warn!(
+                        %peer,
+                        ?family,
+                        limit = crate::orf::MAX_ORF_ENTRIES,
+                        installed = filter.len(),
+                        "ORF entry limit exceeded — update rejected, installed filter retained"
+                    );
+                    self.reap_empty_orf_filter(peer, family);
+                    let _ = reply.send(Err(format!(
+                        "ORF entry limit {} exceeded; installed filter retained",
+                        crate::orf::MAX_ORF_ENTRIES
+                    )));
+                    return;
+                }
+            },
         };
-        let now_empty = filter.is_empty();
         if reset && !unknown_when {
             warn!(%peer, ?family, "malformed ORF entry — installed ORF list for this type reset");
         }
@@ -5332,17 +5364,9 @@ impl RibManager {
                 );
             }
         }
-        // An emptied filter (REMOVE-ALL or a reset) means permit-all again —
-        // drop the entry so the absent-filter fast path applies, and the
-        // peer's entry with its last family: readers such as
-        // `clean_policy_transition_peer_ready` check the peer key, so a
-        // present key must mean an installed filter.
-        if now_empty && let Some(by_family) = self.peer_orf_filters.get_mut(&peer) {
-            by_family.remove(&family);
-            if by_family.is_empty() {
-                self.peer_orf_filters.remove(&peer);
-            }
-        }
+        // An accepted ORF message is itself a ROUTE-REFRESH (RFC 5291 §6).
+        self.lift_orf_gate(peer, family);
+        self.reap_empty_orf_filter(peer, family);
         if reset || when == WhenToRefresh::Immediate {
             // If this peer's EoR for the family was withheld at `PeerUp`
             // (GR restarter + §6 gate, see `send_initial_table`), the forced
