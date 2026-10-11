@@ -99,6 +99,19 @@ groups:
             daemon exits independently when the 30-minute budget plus
             five-second grace expires.
 
+      - alert: BgpSighupReloadRejected
+        expr: >-
+          increase(bgp_sighup_reload_outcomes_total{outcome="rejected_no_effect"}[10m]) > 0
+        for: 0m
+        labels:
+          severity: warning
+        annotations:
+          summary: "SIGHUP reload rejected without runtime effect"
+          description: >-
+            A SIGHUP reload on {{ $labels.instance }} was rejected in the last
+            10 minutes. Run rbgp config last-reload for the latest reason;
+            check reload logs if a later signal replaced that receipt.
+
       - alert: BgpSighupReloadKnownPartial
         expr: >-
           increase(bgp_sighup_reload_outcomes_total{outcome="known_partial"}[10m]) > 0
@@ -109,8 +122,9 @@ groups:
           summary: "SIGHUP reload completed with partial runtime authority"
           description: >-
             A SIGHUP reload on {{ $labels.instance }} reached an authoritative
-            partial result in the last 10 minutes. Inspect the reload logs,
-            correct the reported cause, and reload again to converge.
+            partial result in the last 10 minutes. Run rbgp config last-reload
+            for the latest reason and applied/unapplied operations; if another
+            signal replaced the receipt, inspect the reload logs.
 
       - alert: BgpSighupReloadTaskFailed
         expr: >-

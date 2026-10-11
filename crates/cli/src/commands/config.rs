@@ -11,10 +11,11 @@ use crate::proto::{
     ConfigTransactionConfirmationStatus, ConfigTransactionPlanResponse,
     ConfigTransactionPlanStatus, ConfigTransactionStatusResponse, ConfirmConfigTransactionRequest,
     ConfirmConfigTransactionResponse, DiffRuntimeConfigRequest, DiffRuntimeConfigResponse,
-    GetConfigTransactionStatusRequest, GetEffectiveConfigRequest, ListConfigHistoryRequest,
-    ListConfigHistoryResponse, PlanConfigTransactionRequest, RollbackConfigTransactionRequest,
-    StreamApplyConfigMetadata, StreamApplyConfigTransactionRequest, StreamPlanConfigEnd,
-    StreamPlanConfigMetadata, StreamPlanConfigTransactionRequest, UpdateGroupImpactPlan,
+    GetConfigTransactionStatusRequest, GetEffectiveConfigRequest, GetLastSighupReloadRequest,
+    ListConfigHistoryRequest, ListConfigHistoryResponse, PlanConfigTransactionRequest,
+    RollbackConfigTransactionRequest, SighupReloadRecord, StreamApplyConfigMetadata,
+    StreamApplyConfigTransactionRequest, StreamPlanConfigEnd, StreamPlanConfigMetadata,
+    StreamPlanConfigTransactionRequest, UpdateGroupImpactPlan,
 };
 use prost::Message;
 use sha2::{Digest as _, Sha256};
@@ -661,6 +662,80 @@ pub async fn status(connection: Connection, json: bool) -> Result<(), CliError> 
     Ok(())
 }
 
+pub async fn last_reload(connection: Connection, json: bool) -> Result<(), CliError> {
+    let mut client =
+        ConfigServiceClient::with_interceptor(connection.channel(), connection.interceptor());
+    let response = read_rpc(
+        "GetLastSighupReload",
+        client.get_last_sighup_reload(GetLastSighupReloadRequest {}),
+    )
+    .await?
+    .into_inner();
+    if json {
+        print_json(serde_json::json!({
+            "record": response.record.as_ref().map(last_reload_to_json),
+        }))?;
+    } else if let Some(record) = response.record.as_ref() {
+        output::print_text(&format!(
+            "Last SIGHUP: {} (route: {})\nStarted: {}\nFinished: {}",
+            record.outcome,
+            if record.route.is_empty() {
+                "before classification"
+            } else {
+                &record.route
+            },
+            format_unix_utc_or_seconds(record.started_unix_millis / 1000),
+            format_unix_utc_or_seconds(record.finished_unix_millis / 1000),
+        ))?;
+        if !record.reason_code.is_empty() {
+            output::print_text(&format!(
+                "Reason: {} at {} {}",
+                record.reason_code, record.failure_bucket, record.failure_target
+            ))?;
+        }
+        output::print_text(&format!(
+            "Applied operations: {} ({} omitted)\nUnapplied operations: {} ({} omitted)",
+            record.applied_count,
+            record.applied_omitted,
+            record.unapplied_count,
+            record.unapplied_omitted,
+        ))?;
+        for effect in &record.applied {
+            output::print_text(&format!("  applied {} {}", effect.bucket, effect.target))?;
+        }
+        for effect in &record.unapplied {
+            output::print_text(&format!("  unapplied {} {}", effect.bucket, effect.target))?;
+        }
+    } else {
+        output::print_text("No SIGHUP reload has completed in this daemon process.")?;
+    }
+    Ok(())
+}
+
+fn last_reload_to_json(record: &SighupReloadRecord) -> serde_json::Value {
+    let effects = |effects: &[crate::proto::SighupReloadEffect]| {
+        effects
+            .iter()
+            .map(|effect| serde_json::json!({"bucket": effect.bucket, "target": effect.target}))
+            .collect::<Vec<_>>()
+    };
+    serde_json::json!({
+        "started_unix_millis": record.started_unix_millis,
+        "finished_unix_millis": record.finished_unix_millis,
+        "outcome": record.outcome,
+        "route": if record.route.is_empty() { None } else { Some(record.route.as_str()) },
+        "reason_code": if record.reason_code.is_empty() { None } else { Some(record.reason_code.as_str()) },
+        "failure_bucket": if record.failure_bucket.is_empty() { None } else { Some(record.failure_bucket.as_str()) },
+        "failure_target": if record.failure_target.is_empty() { None } else { Some(record.failure_target.as_str()) },
+        "applied_count": record.applied_count,
+        "applied": effects(&record.applied),
+        "applied_omitted": record.applied_omitted,
+        "unapplied_count": record.unapplied_count,
+        "unapplied": effects(&record.unapplied),
+        "unapplied_omitted": record.unapplied_omitted,
+    })
+}
+
 /// List bounded mixed config history: index, timestamp, content hash, provenance
 /// status, and a one-line summary per retained row (never document contents).
 /// Retired TOML rows are ignored and retained.
@@ -1268,6 +1343,30 @@ mod tests {
     use crate::test_support::spawn_mock_server;
     use tonic::codegen::tokio_stream::StreamExt as _;
 
+    #[test]
+    fn last_reload_json_preserves_bounded_effect_counts() {
+        let record = SighupReloadRecord {
+            outcome: "known_partial".to_string(),
+            reason_code: "step_rejected".to_string(),
+            applied_count: 33,
+            applied_omitted: 32,
+            applied: vec![crate::proto::SighupReloadEffect {
+                bucket: "policy.add".to_string(),
+                target: "edge".to_string(),
+            }],
+            unapplied_count: 1,
+            unapplied: vec![crate::proto::SighupReloadEffect {
+                bucket: "policy.change".to_string(),
+                target: "export".to_string(),
+            }],
+            ..Default::default()
+        };
+        let value = last_reload_to_json(&record);
+        assert_eq!(value["applied_count"], 33);
+        assert_eq!(value["applied_omitted"], 32);
+        assert_eq!(value["unapplied"][0]["target"], "export");
+        assert_eq!(value["reason_code"], "step_rejected");
+    }
     // Field 1's one-byte tag plus the four-byte length varint used by a
     // candidate whose encoded request reaches the 4 MiB boundary.
     const PROTOBUF_STRING_FIELD_OVERHEAD_AT_LIMIT: usize = 5;

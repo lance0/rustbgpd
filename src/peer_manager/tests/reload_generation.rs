@@ -2338,7 +2338,8 @@ async fn owned_sighup_releases_candidate_owners_after_late_compensation() {
 async fn sighup_outer_failure_never_publishes_and_lost_publication_fences() {
     use crate::config::AcceptedConfigSnapshot;
     use crate::reload::{
-        AcceptedBridgeReplacement, SighupAuthority, SighupCompletion, finalize_sighup_authority,
+        AcceptedBridgeReplacement, SighupAuthority, SighupCompletion, SighupEffect,
+        SighupReloadTrace, finalize_sighup_authority,
     };
     use rustbgpd_api::gnmi_dialout::{DialoutManager, GnmiService};
     use rustbgpd_api::health_probe::DaemonGate;
@@ -2365,6 +2366,11 @@ async fn sighup_outer_failure_never_publishes_and_lost_publication_fences() {
         let (internal_tx, mut internal_rx) = mpsc::channel(1);
         let (bridge_tx, mut bridge_rx) = mpsc::channel::<AcceptedBridgeReplacement>(1);
         let publication = ConfiguredOwnerPublicationReceipt(7);
+        let trace = Arc::new(Mutex::new(SighupReloadTrace {
+            dynamic_replacement_pending: true,
+            explain_snapshot_pending: true,
+            ..SighupReloadTrace::default()
+        }));
         let acknowledgements = tokio::spawn(async move {
             let Some(InternalCommand::ReplaceConfigSnapshot { ack: Some(ack), .. }) =
                 internal_rx.recv().await
@@ -2423,8 +2429,18 @@ async fn sighup_outer_failure_never_publishes_and_lost_publication_fences() {
             &internal_tx,
             &bridge_tx,
             &dialout,
+            Some(&trace),
         )
         .await;
+        let applied = trace.lock().unwrap().applied.clone();
+        assert!(applied.contains(&SighupEffect {
+            bucket: "dynamic_neighbors.replace",
+            target: "[[dynamic_neighbors]]".to_string(),
+        }));
+        assert!(applied.contains(&SighupEffect {
+            bucket: "policy.explain.sync",
+            target: "[policy.explain]".to_string(),
+        }));
         // This is a direct finalizer test; disarm the production watchdog
         // before asserting its returned fencing decision.
         assert!(operation.try_settle());
@@ -2589,7 +2605,7 @@ async fn assert_owned_sighup_lifetimes(compensate: bool) {
                 .await
                 .begin_result()
                 .unwrap();
-                match reload_config_with_tcp_ao(
+                match Box::pin(reload_config_with_tcp_ao(
                     plan,
                     None,
                     live_uds.as_ref(),
@@ -2600,7 +2616,7 @@ async fn assert_owned_sighup_lifetimes(compensate: bool) {
                     None,
                     None,
                     Some(&operation),
-                )
+                ))
                 .await
                 {
                     SighupReloadOutcome::CleanNoEffect(error) => {
@@ -2627,6 +2643,7 @@ async fn assert_owned_sighup_lifetimes(compensate: bool) {
                             &operation_internal,
                             &operation_bridge,
                             &dialout,
+                            None,
                         )
                         .await
                     }

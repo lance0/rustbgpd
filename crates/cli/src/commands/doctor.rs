@@ -34,7 +34,8 @@ use crate::proto::rpki_service_client::RpkiServiceClient;
 use crate::proto::{
     BfdSession, BfdSessionState, ConfigTransactionConfirmationStatus,
     ConfigTransactionStatusResponse, GetBfdSessionsRequest, GetConfigTransactionStatusRequest,
-    GetEffectiveConfigRequest, GetGlobalRequest, GetValidationPolicyPostureRequest,
+    GetEffectiveConfigRequest, GetGlobalRequest, GetLastSighupReloadRequest,
+    GetLastSighupReloadResponse, GetValidationPolicyPostureRequest,
     GetValidationPolicyPostureResponse, HealthRequest, ListDynamicNeighborsRequest,
     ListNeighborsRequest, ListPolicyEventsRequest, ListRpkiCachesRequest, ListRpkiCachesResponse,
     ListSessionEventsRequest, MetricsRequest, ValidationPolicyDimensionPosture,
@@ -2216,6 +2217,44 @@ fn config_freshness_check(
     }
 }
 
+fn last_sighup_reload_check(response: &GetLastSighupReloadResponse) -> Check {
+    let (status, detail) = match response.record.as_ref() {
+        None => (
+            CheckStatus::Ok,
+            "no SIGHUP reload has completed in this process".to_string(),
+        ),
+        Some(record)
+            if matches!(
+                record.outcome.as_str(),
+                "rejected_no_effect" | "known_partial"
+            ) =>
+        {
+            (
+                CheckStatus::Warn,
+                format!(
+                    "latest SIGHUP {}: {} at {} {}; inspect `rbgp config last-reload`",
+                    record.outcome,
+                    record.reason_code,
+                    record.failure_bucket,
+                    record.failure_target
+                ),
+            )
+        }
+        Some(record) => (
+            CheckStatus::Ok,
+            format!(
+                "latest SIGHUP {}; inspect `rbgp config last-reload`",
+                record.outcome
+            ),
+        ),
+    };
+    Check {
+        name: "daemon.last_sighup_reload".to_string(),
+        status,
+        detail,
+    }
+}
+
 /// Issue `GetHealth`, retrying once after `retry_delay` when the first reply is
 /// `UNAVAILABLE` (a core-probe deadline miss or a transient transport error).
 /// Returns the final outcome plus the first miss when a retry happened. Every
@@ -2987,6 +3026,23 @@ async fn run_with_deadlines(
             // dump (same RPC as `rbgp config effective`). Never the raw file.
             let mut config_client = connection.effective_config_client();
             match rpc_with_timeout(
+                "GetLastSighupReload",
+                read_budget,
+                config_client.get_last_sighup_reload(GetLastSighupReloadRequest {}),
+            )
+            .await
+            {
+                Ok(response) => {
+                    let check = last_sighup_reload_check(&response.into_inner());
+                    reporter.record(check.name, check.status, check.detail)?;
+                }
+                Err(error) => reporter.record(
+                    "daemon.last_sighup_reload",
+                    CheckStatus::Warn,
+                    format!("last SIGHUP receipt unavailable: {error}"),
+                )?,
+            }
+            match rpc_with_timeout(
                 "GetEffectiveConfig",
                 effective_config_budget,
                 config_client.get_effective_config(GetEffectiveConfigRequest {}),
@@ -3718,6 +3774,30 @@ mod tests {
     use crate::test_support::spawn_mock_server;
     use tonic::Code;
 
+    #[test]
+    fn last_sighup_reload_warns_on_latest_rejection_or_partial() {
+        for outcome in ["rejected_no_effect", "known_partial"] {
+            let check = last_sighup_reload_check(&GetLastSighupReloadResponse {
+                record: Some(crate::proto::SighupReloadRecord {
+                    outcome: outcome.to_string(),
+                    reason_code: "unsupported_compound".to_string(),
+                    failure_bucket: "reload.preflight".to_string(),
+                    failure_target: "[[dynamic_neighbors]]".to_string(),
+                    ..Default::default()
+                }),
+            });
+            assert_eq!(check.status, CheckStatus::Warn);
+            assert!(check.detail.contains("unsupported_compound"));
+            assert!(check.detail.contains("rbgp config last-reload"));
+        }
+        let complete = last_sighup_reload_check(&GetLastSighupReloadResponse {
+            record: Some(crate::proto::SighupReloadRecord {
+                outcome: "complete".to_string(),
+                ..Default::default()
+            }),
+        });
+        assert_eq!(complete.status, CheckStatus::Ok);
+    }
     fn gtsm_record(address: &str, interface: &str) -> NeighborDoctorRecord {
         NeighborDoctorRecord {
             support: JsonNeighbor {

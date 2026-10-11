@@ -654,7 +654,7 @@ fn runtime_config_coordinator_inventory_is_complete_and_closed() {
         "SIGHUP credential reload enters Mutating only after atomic publication"
     );
     let reload_dispatch = main
-        .find("let outcome = reload_config_with_tcp_ao(")
+        .find("let outcome = reload_config_with_tcp_ao_recorded(")
         .unwrap();
     let acknowledged_arm = main
         .find("SighupReloadOutcome::Acknowledged(authority) => {")

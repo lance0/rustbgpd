@@ -139,6 +139,9 @@ _rbgp() {
             rbgp__subcmd__config,import)
                 cmd="rbgp__subcmd__config__subcmd__import"
                 ;;
+            rbgp__subcmd__config,last-reload)
+                cmd="rbgp__subcmd__config__subcmd__last__subcmd__reload"
+                ;;
             rbgp__subcmd__config,plan)
                 cmd="rbgp__subcmd__config__subcmd__plan"
                 ;;
@@ -171,6 +174,9 @@ _rbgp() {
                 ;;
             rbgp__subcmd__config__subcmd__help,import)
                 cmd="rbgp__subcmd__config__subcmd__help__subcmd__import"
+                ;;
+            rbgp__subcmd__config__subcmd__help,last-reload)
+                cmd="rbgp__subcmd__config__subcmd__help__subcmd__last__subcmd__reload"
                 ;;
             rbgp__subcmd__config__subcmd__help,plan)
                 cmd="rbgp__subcmd__config__subcmd__help__subcmd__plan"
@@ -660,6 +666,9 @@ _rbgp() {
                 ;;
             rbgp__subcmd__help__subcmd__config,import)
                 cmd="rbgp__subcmd__help__subcmd__config__subcmd__import"
+                ;;
+            rbgp__subcmd__help__subcmd__config,last-reload)
+                cmd="rbgp__subcmd__help__subcmd__config__subcmd__last__subcmd__reload"
                 ;;
             rbgp__subcmd__help__subcmd__config,plan)
                 cmd="rbgp__subcmd__help__subcmd__config__subcmd__plan"
@@ -1581,7 +1590,7 @@ _rbgp() {
             return 0
             ;;
         rbgp__subcmd__config)
-            opts="-s -j -h --addr --token-file --tls-ca --tls-cert --tls-key --tls-server-name --json --json-version --no-color --help diff plan apply confirm abort status history rollback effective import help"
+            opts="-s -j -h --addr --token-file --tls-ca --tls-cert --tls-key --tls-server-name --json --json-version --no-color --help diff plan apply confirm abort status last-reload history rollback effective import help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -1948,7 +1957,7 @@ _rbgp() {
             return 0
             ;;
         rbgp__subcmd__config__subcmd__help)
-            opts="diff plan apply confirm abort status history rollback effective import help"
+            opts="diff plan apply confirm abort status last-reload history rollback effective import help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -2060,6 +2069,20 @@ _rbgp() {
             return 0
             ;;
         rbgp__subcmd__config__subcmd__help__subcmd__import)
+            opts=""
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        rbgp__subcmd__config__subcmd__help__subcmd__last__subcmd__reload)
             opts=""
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
@@ -2234,6 +2257,52 @@ _rbgp() {
                     ;;
                 --tls-server-name)
                     COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        rbgp__subcmd__config__subcmd__last__subcmd__reload)
+            opts="-s -j -h --addr --token-file --tls-ca --tls-cert --tls-key --tls-server-name --json --json-version --no-color --help"
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                --addr)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                -s)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --token-file)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --tls-ca)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --tls-cert)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --tls-key)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --tls-server-name)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --json-version)
+                    COMPREPLY=($(compgen -W "1" -- "${cur}"))
                     return 0
                     ;;
                 *)
@@ -6922,7 +6991,7 @@ _rbgp() {
             return 0
             ;;
         rbgp__subcmd__help__subcmd__config)
-            opts="diff plan apply confirm abort status history rollback effective import"
+            opts="diff plan apply confirm abort status last-reload history rollback effective import"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -7020,6 +7089,20 @@ _rbgp() {
             return 0
             ;;
         rbgp__subcmd__help__subcmd__config__subcmd__import)
+            opts=""
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        rbgp__subcmd__help__subcmd__config__subcmd__last__subcmd__reload)
             opts=""
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )

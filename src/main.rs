@@ -92,8 +92,9 @@ use crate::config::{
 use crate::config_persister::{ConfigMutation, ConfigPersister};
 use crate::peer_manager::PeerManager;
 use crate::reload::{
-    ReloadStepError, SighupAuthority, SighupReloadError, SighupReloadOutcome, SighupReloadPlan,
-    finalize_sighup_authority, reload_config_with_tcp_ao, run_config_bridge_accepted,
+    ReloadStepError, SighupAuthority, SighupEffect, SighupReloadError, SighupReloadOutcome,
+    SighupReloadPlan, SighupReloadTrace, SighupReloadTraceHandle, finalize_sighup_authority,
+    reload_config_with_tcp_ao_recorded, run_config_bridge_accepted,
     runtime_config_snapshot_accepted,
 };
 use rustbgpd_api::health_probe::DaemonGate;
@@ -3630,6 +3631,158 @@ fn record_sighup_ignored_in_flight(metrics: &BgpMetrics) {
     metrics.record_sighup_reload_outcome(SighupReloadMetricOutcome::IgnoredInFlight);
 }
 
+const LAST_SIGHUP_EFFECT_LIMIT: usize = 32;
+type LastSighupReloadState = Arc<Mutex<Option<rustbgpd_api::proto::SighupReloadRecord>>>;
+
+fn sighup_unix_millis(time: SystemTime) -> u64 {
+    u64::try_from(
+        time.duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis(),
+    )
+    .unwrap_or(u64::MAX)
+}
+
+fn publish_last_sighup(
+    state: &LastSighupReloadState,
+    record: rustbgpd_api::proto::SighupReloadRecord,
+) {
+    let mut state = state
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    *state = Some(record);
+}
+
+fn safe_sighup_target(bucket: &str, raw: &str, trace: &SighupReloadTrace) -> String {
+    let section = match bucket {
+        "reload.preflight" => trace.rejection_target.as_deref().unwrap_or("[config]"),
+        "evpn_runtime.apply" => "[[evpn_instances]]",
+        "fib_tables.apply" => "[[fib_tables]]",
+        "policy.dataset.refresh" | "policy.rpol.sync" => "[policy]",
+        "listener_auth.apply" | "tcp_ao.awaiting_peer" => "[neighbors]",
+        _ => "[config]",
+    };
+    if raw.is_empty() {
+        return section.to_string();
+    }
+    if matches!(
+        raw,
+        "[config]"
+            | "[global]"
+            | "[neighbors]"
+            | "[[dynamic_neighbors]]"
+            | "[[evpn_instances]]"
+            | "[[fib_tables]]"
+            | "[policy]"
+            | "[policy] rpol_files"
+            | "[policy.datasets]"
+            | "[policy.explain]"
+            | "[policy.import_chain]"
+            | "[policy.export_chain]"
+    ) {
+        return raw.to_string();
+    }
+    if raw.len() <= 128
+        && raw
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"._:-/%[]".contains(&byte))
+    {
+        raw.to_string()
+    } else {
+        "[redacted]".to_string()
+    }
+}
+
+fn sighup_failure(
+    error: &SighupReloadError,
+    trace: &SighupReloadTrace,
+) -> (&'static str, String, String) {
+    match error {
+        SighupReloadError::CoordinatorClosed => (
+            "coordinator_closed",
+            "coordinator".to_string(),
+            "[config]".to_string(),
+        ),
+        SighupReloadError::Failed(failure) => {
+            let reason = if failure.bucket == "reload.preflight" {
+                "unsupported_compound"
+            } else if failure.bucket == "transaction.preflight" {
+                "transaction_pending"
+            } else if failure.bucket == "authority.preflight" {
+                "authority_unavailable"
+            } else {
+                match &failure.error {
+                    ReloadStepError::NotAccepted(_) => "step_not_accepted",
+                    ReloadStepError::Rejected(_) => "step_rejected",
+                    ReloadStepError::AcknowledgementLost => "acknowledgement_lost",
+                }
+            };
+            (
+                reason,
+                failure.bucket.to_string(),
+                safe_sighup_target(failure.bucket, &failure.target, trace),
+            )
+        }
+    }
+}
+
+fn sighup_effect_proto(effect: &SighupEffect) -> rustbgpd_api::proto::SighupReloadEffect {
+    rustbgpd_api::proto::SighupReloadEffect {
+        bucket: effect.bucket.to_string(),
+        target: safe_sighup_target(effect.bucket, &effect.target, &SighupReloadTrace::default()),
+    }
+}
+
+fn last_sighup_record(
+    started: SystemTime,
+    outcome: &Result<Result<SighupAuthority, SighupReloadError>, tokio::task::JoinError>,
+    trace: &SighupReloadTrace,
+) -> rustbgpd_api::proto::SighupReloadRecord {
+    let (reason_code, failure_bucket, failure_target) = match outcome {
+        Ok(Ok(SighupAuthority {
+            completion: reload::SighupCompletion::KnownPartial { failures },
+            ..
+        })) => failures.first().map_or_else(
+            || ("step_rejected", String::new(), "[config]".to_string()),
+            |failure| sighup_failure(&SighupReloadError::Failed(failure.clone()), trace),
+        ),
+        Ok(Err(error)) => sighup_failure(error, trace),
+        Err(_) => (
+            "task_failed",
+            "reload.task".to_string(),
+            "[config]".to_string(),
+        ),
+        Ok(Ok(_)) => ("", String::new(), String::new()),
+    };
+    let unapplied: Vec<_> = trace.planned.difference(&trace.applied).collect();
+    let applied_count = u64::try_from(trace.applied.len()).unwrap_or(u64::MAX);
+    let unapplied_count = u64::try_from(unapplied.len()).unwrap_or(u64::MAX);
+    rustbgpd_api::proto::SighupReloadRecord {
+        started_unix_millis: sighup_unix_millis(started),
+        finished_unix_millis: sighup_unix_millis(SystemTime::now()),
+        outcome: sighup_reload_metric_outcome(outcome).as_str().to_string(),
+        route: trace.route.unwrap_or("").to_string(),
+        reason_code: reason_code.to_string(),
+        failure_bucket,
+        failure_target,
+        applied_count,
+        applied: trace
+            .applied
+            .iter()
+            .take(LAST_SIGHUP_EFFECT_LIMIT)
+            .map(sighup_effect_proto)
+            .collect(),
+        applied_omitted: applied_count.saturating_sub(LAST_SIGHUP_EFFECT_LIMIT as u64),
+        unapplied_count,
+        unapplied: unapplied
+            .into_iter()
+            .take(LAST_SIGHUP_EFFECT_LIMIT)
+            .map(sighup_effect_proto)
+            .collect(),
+        unapplied_omitted: unapplied_count.saturating_sub(LAST_SIGHUP_EFFECT_LIMIT as u64),
+    }
+}
+
 #[expect(
     clippy::too_many_lines,
     reason = "runtime startup keeps listener, API, and shutdown wiring in one owner"
@@ -5514,6 +5667,8 @@ async fn run<T>(
             })
         })
     };
+    let last_sighup_reload: LastSighupReloadState = Arc::new(Mutex::new(None));
+    let last_sighup_reload_read = Arc::clone(&last_sighup_reload);
     let serve_config = ServeConfig {
         asn: config.global.asn,
         router_id: config.global.router_id.clone(),
@@ -5746,6 +5901,14 @@ async fn run<T>(
         config_transaction_confirm: Some(config_transaction_controller.confirm_fn()),
         config_transaction_abort: Some(config_transaction_controller.abort_fn()),
         config_transaction_status: Some(config_transaction_controller.status_fn()),
+        last_sighup_reload: Some(Arc::new(move || {
+            let state = last_sighup_reload_read
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            rustbgpd_api::proto::GetLastSighupReloadResponse {
+                record: state.clone(),
+            }
+        })),
         config_history_list: Some(config_transaction_controller.history_fn()),
         config_rollback: Some(config_transaction_controller.rollback_fn()),
         config_rollback_preview: Some(config_transaction_controller.rollback_preview_fn()),
@@ -6155,6 +6318,8 @@ async fn run<T>(
     let mut reload_in_flight: Option<
         tokio::task::JoinHandle<Result<SighupAuthority, SighupReloadError>>,
     > = None;
+    let mut active_sighup_started = None;
+    let mut active_sighup_trace: Option<SighupReloadTraceHandle> = None;
     // Set only by the peer-manager supervision arm, which consumes the
     // JoinHandle; the coordinated teardown below must not join it twice.
     let mut peer_mgr_exited = false;
@@ -6272,11 +6437,25 @@ async fn run<T>(
                 break;
             }
             _ = sighup.recv() => {
+                let received_at = SystemTime::now();
                 if reload_in_flight.is_some() {
                     record_sighup_ignored_in_flight(&metrics);
+                    let timestamp = sighup_unix_millis(received_at);
+                    publish_last_sighup(&last_sighup_reload, rustbgpd_api::proto::SighupReloadRecord {
+                        started_unix_millis: timestamp,
+                        finished_unix_millis: timestamp,
+                        outcome: SighupReloadMetricOutcome::IgnoredInFlight.as_str().to_string(),
+                        reason_code: "reload_in_flight".to_string(),
+                        failure_bucket: "reload.admission".to_string(),
+                        failure_target: "[config]".to_string(),
+                        ..Default::default()
+                    });
                     warn!("SIGHUP received while previous reload still in flight; ignoring");
                     continue;
                 }
+                active_sighup_started = Some(received_at);
+                let trace: SighupReloadTraceHandle = Arc::new(Mutex::new(SighupReloadTrace::default()));
+                active_sighup_trace = Some(Arc::clone(&trace));
                 info!("SIGHUP received, reloading configuration");
                 let path = config.file_path.as_ref().map(|p| p.to_string_lossy().to_string()).unwrap_or_default();
                 let live_tcp = live_grpc_tcp.clone();
@@ -6384,7 +6563,7 @@ async fn run<T>(
                             };
                         }
                     };
-                    let outcome = reload_config_with_tcp_ao(
+                    let outcome = reload_config_with_tcp_ao_recorded(
                         SighupReloadPlan {
                             baseline_runtime: snapshot,
                             desired,
@@ -6398,6 +6577,7 @@ async fn run<T>(
                         Some(&evpn_runtime_reload_apply),
                         tcp_ao_listener.as_ref(),
                         Some(&operation),
+                        Some(Arc::clone(&trace)),
                     )
                     .await;
                     match outcome {
@@ -6461,6 +6641,7 @@ async fn run<T>(
                                 &pm_internal,
                                 bridge_replace,
                                 &dialout_manager,
+                                Some(&trace),
                             ).await
                         }
                     }
@@ -6482,6 +6663,15 @@ async fn run<T>(
             } => {
                 reload_in_flight = None;
                 metrics.record_sighup_reload_outcome(sighup_reload_metric_outcome(&outcome));
+                if let (Some(started), Some(trace)) =
+                    (active_sighup_started.take(), active_sighup_trace.take())
+                {
+                    let trace = trace.lock().expect("SIGHUP trace poisoned").clone();
+                    publish_last_sighup(
+                        &last_sighup_reload,
+                        last_sighup_record(started, &outcome, &trace),
+                    );
+                }
                 match outcome {
                     Ok(Ok(authority)) => {
                         match &authority.completion {
@@ -6540,6 +6730,15 @@ async fn run<T>(
     match runtime_config_drain.reload {
         Some(ShutdownWait::Completed(outcome)) => {
             metrics.record_sighup_reload_outcome(sighup_reload_metric_outcome(&outcome));
+            if let (Some(started), Some(trace)) =
+                (active_sighup_started.take(), active_sighup_trace.take())
+            {
+                let trace = trace.lock().expect("SIGHUP trace poisoned").clone();
+                publish_last_sighup(
+                    &last_sighup_reload,
+                    last_sighup_record(started, &outcome, &trace),
+                );
+            }
             match outcome {
                 Ok(Ok(authority)) => config = authority.runtime,
                 Ok(Err(error)) => warn!(error = %error, "SIGHUP rejected during shutdown drain"),
@@ -7046,6 +7245,114 @@ mod tests {
     use crate::test_support::{
         assert_tier_authorized_test_config, tier_authorized_uds_test_config,
     };
+
+    #[test]
+    fn settled_sighup_result_replaces_interim_ignored_signal() {
+        let state: LastSighupReloadState = Arc::new(Mutex::new(None));
+        publish_last_sighup(
+            &state,
+            rustbgpd_api::proto::SighupReloadRecord {
+                outcome: "rejected_no_effect".to_string(),
+                ..Default::default()
+            },
+        );
+        publish_last_sighup(
+            &state,
+            rustbgpd_api::proto::SighupReloadRecord {
+                outcome: "complete".to_string(),
+                ..Default::default()
+            },
+        );
+        assert_eq!(state.lock().unwrap().as_ref().unwrap().outcome, "complete");
+        publish_last_sighup(
+            &state,
+            rustbgpd_api::proto::SighupReloadRecord {
+                outcome: "ignored_in_flight".to_string(),
+                ..Default::default()
+            },
+        );
+        publish_last_sighup(
+            &state,
+            rustbgpd_api::proto::SighupReloadRecord {
+                outcome: "known_partial".to_string(),
+                ..Default::default()
+            },
+        );
+        assert_eq!(
+            state.lock().unwrap().as_ref().unwrap().outcome,
+            "known_partial"
+        );
+    }
+
+    #[test]
+    fn compound_rejection_record_uses_closed_reason_and_section_target() {
+        let trace = SighupReloadTrace {
+            rejection_target: Some("[[dynamic_neighbors]]".to_string()),
+            ..Default::default()
+        };
+        let outcome: Result<Result<SighupAuthority, SighupReloadError>, tokio::task::JoinError> =
+            Ok(Err(SighupReloadError::preflight(
+                "reload.preflight",
+                "candidate contains private text that must not escape",
+            )));
+        let record = last_sighup_record(SystemTime::now(), &outcome, &trace);
+        assert_eq!(record.outcome, "rejected_no_effect");
+        assert_eq!(record.reason_code, "unsupported_compound");
+        assert_eq!(record.failure_target, "[[dynamic_neighbors]]");
+        assert!(!format!("{record:?}").contains("private text"));
+    }
+
+    #[test]
+    fn last_sighup_record_bounds_both_effect_lists_and_redacts_targets() {
+        let config = Config::load_toml_with_diagnostics(
+            &tier_authorized_uds_test_config(
+                "[global]\nasn = 65000\nrouter_id = \"10.0.0.1\"\nlisten_port = 1179\n\n[global.telemetry]\nlog_format = \"json\"\n",
+            ),
+            "SIGHUP receipt projection test",
+        )
+        .unwrap();
+        let authority = SighupAuthority {
+            runtime: config.clone(),
+            desired: AcceptedConfigSnapshot::from_config_for_test(config),
+            dialout_targets: Vec::new(),
+            completion: reload::SighupCompletion::Complete,
+        };
+        let mut trace = SighupReloadTrace {
+            route: Some("sequential"),
+            ..Default::default()
+        };
+        for index in 0..80 {
+            let effect = SighupEffect {
+                bucket: "policy.add",
+                target: format!("item-{index:03}"),
+            };
+            trace.planned.insert(effect.clone());
+            if index < 40 {
+                trace.applied.insert(effect);
+            }
+        }
+        let unsafe_target = "!secret token='private'\n";
+        let unsafe_effect = SighupEffect {
+            bucket: "policy.add",
+            target: unsafe_target.to_string(),
+        };
+        trace.planned.insert(unsafe_effect.clone());
+        trace.applied.insert(unsafe_effect);
+        let record = last_sighup_record(SystemTime::now(), &Ok(Ok(authority)), &trace);
+        assert_eq!(record.applied_count, 41);
+        assert_eq!(record.applied.len(), LAST_SIGHUP_EFFECT_LIMIT);
+        assert_eq!(record.applied_omitted, 9);
+        assert_eq!(record.unapplied_count, 40);
+        assert_eq!(record.unapplied.len(), LAST_SIGHUP_EFFECT_LIMIT);
+        assert_eq!(record.unapplied_omitted, 8);
+        assert!(
+            record
+                .applied
+                .iter()
+                .any(|effect| effect.target == "[redacted]")
+        );
+        assert!(!format!("{record:?}").contains(unsafe_target));
+    }
 
     fn rpki_cache_gauge(metrics: &BgpMetrics, name: &str, cache: &str) -> Option<f64> {
         metrics

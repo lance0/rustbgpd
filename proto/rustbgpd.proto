@@ -147,6 +147,9 @@ service ConfigService {
   // redacted and never includes candidate config contents.
   rpc GetConfigTransactionStatus(GetConfigTransactionStatusRequest) returns (ConfigTransactionStatusResponse);
 
+  // Return the latest process-local SIGHUP result. Empty before the first reload.
+  rpc GetLastSighupReload(GetLastSighupReloadRequest) returns (GetLastSighupReloadResponse);
+
   // Return the daemon's effective running config as normalized TOML with
   // per-neighbor defaults materialized (peer-group inheritance and computed
   // defaults such as hold_time / send_hold_time resolved to the values the
@@ -473,6 +476,35 @@ message GetConfigTransactionStatusRequest {}
 message ConfigTransactionStatusResponse {
   ConfigTransactionConfirmation confirmation = 1;
   string human_text = 2;
+}
+
+message GetLastSighupReloadRequest {}
+
+message SighupReloadEffect {
+  string bucket = 1;
+  string target = 2;
+}
+
+message SighupReloadRecord {
+  uint64 started_unix_millis = 1;
+  uint64 finished_unix_millis = 2;
+  // complete, rejected_no_effect, known_partial, task_failed, ignored_in_flight.
+  string outcome = 3;
+  // generation or sequential; empty if the reload stopped before classification.
+  string route = 4;
+  string reason_code = 5;
+  string failure_bucket = 6;
+  string failure_target = 7;
+  uint64 applied_count = 8;
+  repeated SighupReloadEffect applied = 9;
+  uint64 applied_omitted = 10;
+  uint64 unapplied_count = 11;
+  repeated SighupReloadEffect unapplied = 12;
+  uint64 unapplied_omitted = 13;
+}
+
+message GetLastSighupReloadResponse {
+  SighupReloadRecord record = 1;
 }
 
 // ---------------------------------------------------------------------------
