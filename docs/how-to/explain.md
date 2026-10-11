@@ -157,6 +157,12 @@ or `conditional_advertisement_eval_error` while an attached
 [conditional advertisement](../reference/configuration.md#conditional-advertisements)
 withholds it. A denial shows `[STOP]` at the gate that
 held the route back, with per-term policy attribution for `.rpol` chains.
+After staging and the exact-wire check, unicast export explain applies the
+peer's outbound prefix limit. A net-new prefix held at capacity ends with
+`[STOP] outbound_prefix_limit`, code `outbound_prefix_limit_reached`, and
+detail naming the family, limit, and current usage. An already admitted
+prefix can still be updated at capacity. Grouped peers use their own admitted
+advertised view, so explain agrees with `rbgp rib advertised <peer>`.
 `--rd <rd>` explains the VPNv4/VPNv6 (RD, prefix) ladder including the RFC 4684
 RT-Constrain membership gate; `--labeled` explains the RFC 8277
 labeled-unicast ladder. Rung-by-rung semantics:
