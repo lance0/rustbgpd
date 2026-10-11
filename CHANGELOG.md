@@ -11,6 +11,710 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- `just bench-converged-rejoin <out-dir> <base> <head>` measures the
+  reloadstall converged-rejoin (GR helper) flapstorm, base against head at a
+  low and a high K in alternating order, one fresh daemon per cell behind the
+  quiet-host gate. Its shape and bars are written to `campaign.json` before
+  the first cell, and `ACCEPTANCE` overrides the bars from a JSON file. The
+  verdict is PASS, FAIL or INVALID, and any missing or malformed cell makes
+  it INVALID. `SMOKE=1` runs a small pipeline check that applies every
+  validity check but no performance bar, and `DRY_RUN=1` prints the plan.
+  See
+  [`bench/scale/reloadstall/README.md`](bench/scale/reloadstall/README.md#converged-rejoin-ab-campaign).
+- Conditional advertisement conditions accept prefix ranges (alpha, outside
+  the v1 inventory). A `condition_prefixes` entry may be a table such as
+  `{ prefix = "10.0.0.0/8", le = 24 }` or
+  `{ prefix = "2001:db8::/32", ge = 48, le = 64 }`, with prefix-list `ge`/`le`
+  semantics, beside the existing exact strings. Invalid bounds are load
+  errors. Ranges are tracked as routes change, without a table walk.
+  `rbgp policy conditional-advertisements` and
+  `PolicyService.ListConditionalAdvertisements` report each range's bounds,
+  its count of present prefixes, and up to eight of them. See
+  [configuration](docs/reference/configuration.md#conditional-advertisements).
+- Conditional advertisement status and peer-group attachment (alpha, outside
+  the v1 inventory). `rbgp policy conditional-advertisements` (alias
+  `conditional`) and the new `PolicyService.ListConditionalAdvertisements` RPC
+  (`sensitive_read` tier, 2 s deadline) list each installed definition with
+  every condition prefix's observation, the applied gate (`pending`,
+  `advertise`, or `suppress`), the settle timer and its remaining time, and
+  the attached neighbors; `--json` prints the same fields.
+  `[peer_groups.<name>] conditional_advertisements` attaches definitions to
+  every static member that sets no list of its own, with the
+  `export_policy_chain` override rule; dynamic neighbors do not inherit it.
+  `SetPeerGroup` keeps the configured group value, and a SIGHUP reload that
+  changes it runs on the generation route. See
+  [configuration](docs/reference/configuration.md#conditional-advertisements).
+- Conditional advertisement for IPv4 and IPv6 unicast (alpha, outside the v1
+  inventory). `[policy.conditional_advertisements.<name>]` defines an
+  `advertise_policy` predicate, `advertise_if = "present" | "absent"`, exact
+  `condition_prefixes`, an optional `condition_policy`, and a `settle_time`
+  debounce (default 5 s); static neighbors attach definitions with
+  `conditional_advertisements = [...]`. Matching routes are advertised to an
+  attached neighbor only while the condition holds. The gate runs last,
+  just before the neighbor's export chain, in every unicast export mode
+  (single best, Add-Path, `per_client_best`, ORR); a suppressed route is
+  withdrawn silently, and an `advertise_policy` evaluation error suppresses.
+  Conditions react to route changes rather than a scan timer. Attached
+  neighbors use the per-peer export path with the update-group reason
+  `conditional_advertisement`, and `rbgp rib --prefix P advertised PEER
+  --explain` reports `conditional_advertisement_suppressed` or
+  `conditional_advertisement_eval_error`. New metrics:
+  `bgp_conditional_advertisement_condition`,
+  `bgp_conditional_advertisement_permitted`, and
+  `bgp_conditional_advertisement_transitions_total`; a `condition_policy`
+  evaluation error counts on `bgp_policy_eval_errors_total` with
+  `direction="condition"`. See
+  [configuration](docs/reference/configuration.md#conditional-advertisements)
+  and [ADR-0137](docs/adr/0137-conditional-advertisement.md).
+- The unsent-data threshold experiment can run isolated container RTT legs
+  with daemon-only cgroup accounting, receiver-ingress delay and live TCP RTT
+  evidence. The native namespace path now uses the same ingress shaping and
+  rejects missing delay or dropped packets. Production defaults are unchanged.
+- `[[ethernet_segments]]` accepts `esi = "auto-lacp"`, which derives the
+  RFC 7432 §5 Type 1 ESI from the CE's LACP system MAC and port key as
+  reported by the 802.3ad bond named by `interface`. Readiness is checked at
+  runtime: the daemon and `rustbgpd --check` do not depend on the bond. The
+  segment originates nothing while its bond is missing, down, not 802.3ad,
+  or partnerless, logging the reason. It is added when LACP converges, and
+  it is withdrawn and re-originated under the new ESI when the CE is
+  replaced, with no restart. Type 2 (STP) derivation is not implemented.
+  See
+  [Auto-derived ESI](docs/reference/configuration.md#auto-derived-esi-lacp-type-1).
+- `esi = "auto-lacp"` Ethernet Segment readiness is visible outside the log.
+  The new `evpn_es_auto_esi_state{interface, state}` gauge is a state set
+  per configured bond, with `state` either `ready` or the not-ready reason
+  (`no_partner`, `down`, `not_lacp_mode`, …). `rbgp doctor` adds an
+  `evpn.es.<interface>.auto_esi` check that names the reason, and the shipped
+  alert rules add `EvpnAutoLacpSegmentNotReady` (not ready for 10 minutes).
+  See
+  [Auto-derived ESI](docs/reference/configuration.md#auto-derived-esi-lacp-type-1).
+- Allow single-homed VLAN-aware bundle members to bind an IP-VRF configured
+  with `overlay_index_mode = "interface_less"`. Routed Type 5 prefixes retain
+  Ethernet Tag `0` and the separate IP-VRF L3VNI, RD, route targets and Router
+  MAC; member Type 2/3 routes retain their Ethernet Tags. Linux SVI/VRF
+  attachments remain operator-provisioned. Bundle multi-homing, locally
+  assigned VNIs, non-zero-tag Type 5, and GW-IP/ESI overlay-index resolution
+  through bundle members remain unsupported. A
+  [local SR Linux 25.10.1 receipt](docs/artifacts/interop/m120-evpn-bundle-irb-20261011T045852Z/README.md)
+  qualifies routed forwarding, Type 5 withdrawal and binding reloads; EVPN
+  remains alpha. See the
+  [bundle configuration](docs/reference/configuration.md#vlan-aware-bundle-members).
+- `rbgp evpn instances` and the `ListEvpnInstances` API now report, per
+  L2VNI, the remote Type 1 EAD-per-EVI and Type 2 routes that the VTEP
+  does not program, by reason (for example `ethernet_tag_mismatch`). The
+  new `EvpnInstanceState.remote_route_drop_counts` field carries the same
+  current values as the `evpn_l2_remote_route_drops{vni,reason}` gauge.
+  The human output adds `remote-route-drops=[reason=N,...]` when a VNI has
+  drops; JSON adds `remote_route_drop_counts`. See
+  [the API reference](docs/reference/api.md#list-local-evpn-instances).
+- The VTEP now counts remote Type 1 EAD-per-EVI and Type 2 routes that
+  match a local L2VNI by VNI and route target but carry another Ethernet
+  Tag. Before, it skipped them silently. The new
+  `evpn_l2_remote_route_drops{vni,reason}` gauge reports them with reason
+  `ethernet_tag_mismatch`. The routes stay in Adj-RIB-In and are still
+  reflected. `[[evpn_instances]]` also gains `service_interface` and
+  `ethernet_tag` for the VLAN-aware bundle service, validated against the
+  bundle rules. See
+  [the configuration reference](docs/reference/configuration.md#validation).
+- A daemon started with no `[[ethernet_segments]]` now takes its first
+  Ethernet Segment live. SIGHUP or `ApplyEvpnRuntime` can add an explicit-ESI
+  segment or an `esi = "auto-lacp"` segment without a restart, where both
+  were rejected with `FAILED_PRECONDITION` before. The segment orchestrator
+  starts with the first committed segment; the `auto-lacp` readiness probe
+  starts the first time the committed config names an `auto-lacp` bond. A
+  refused or failed apply starts neither. Coordinated shutdown drains a
+  live-started orchestrator the same way as one started at boot. See
+  [Auto-derived ESI](docs/reference/configuration.md#auto-derived-esi-lacp-type-1).
+  **Operator-visible:** on a daemon with no Ethernet Segment,
+  `SetEthernetSegmentDrain` for an unconfigured ESI now returns `NOT_FOUND`
+  instead of `UNAVAILABLE`.
+- EVPN preference DF election now honors RFC 9785 Don't-Preempt recovery:
+  recovering segments wait three seconds for remote Type 4 routes (within
+  30 seconds of daemon start, also until an L2VPN/EVPN session is
+  established, every established one has sent End-of-RIB, and
+  graceful-restart selection deferral no longer holds L2VPN/EVPN), inherit
+  a protected reference PE's preference with DP=0, and restore configured
+  values when becoming the reference. Equal-preference elections prefer
+  DP=1 before the lowest originator IP. Explicit administrative DF changes
+  still force a switchover; mixed DP and remote routes arriving after the
+  wait cannot guarantee non-preemption. Single-active attachment circuits
+  stay blocked during the recovery wait.
+- `EvpnService.ListEthernetSegments` and `rbgp evpn es list` report the DF
+  preference and Don't-Preempt bit the local Type 4 route carries
+  (`advertised_df_preference`, `advertised_df_dont_preempt`) beside the
+  configured values, and whether RFC 9785 recovery is still waiting for
+  remote Type 4 routes (`df_recovery_pending`,
+  `df_recovery_remaining_ms`). The advertised values differ from the
+  configured ones while a recovering PE inherits another PE's preference.
+- The VTEP now serves single-homed VLAN-aware bundle members
+  (RFC 8365 §5.1.2, ADR-0092). An `[[evpn_instances]]` row with
+  `service_interface = "vlan_aware_bundle"` and an explicit `ethernet_tag`
+  is accepted. It originates its IMET and its local MAC-only, MAC+IP and
+  SVI-MAC Type 2 routes under that Ethernet Tag, and programs remote Type 2
+  and Type 3 routes only when they carry its tag, its VNI and a bundle
+  route target. The FDB rows land on the member's `bridge_vlan`, so the
+  same MAC under two tags is kept in two VLANs. For a bundle member,
+  `evpn_l2_remote_route_drops` now also counts `vni_mismatch` (route target
+  and tag select the member but the VNI differs) and
+  `multihoming_unsupported` (a multi-homed Type 2 or an EAD-per-EVI route).
+  For every L2VNI it also counts received IMET routes under another
+  Ethernet Tag as `ethernet_tag_mismatch`. `ListEvpnInstances` adds
+  `service_interface` and `ethernet_tag`, and `rbgp evpn instances` shows
+  `service=vlan-aware-bundle ethernet-tag=N` for bundle members. Members
+  cannot join an Ethernet Segment or link an `ip_vrf`, and non-zero-tag
+  Type 5 routes are still not imported. See
+  [VLAN-aware bundle members](docs/reference/configuration.md#vlan-aware-bundle-members).
+- Experimental Link-Local Next Hop capability 77 negotiation for explicitly
+  interface-bound IPv6 link-local peers, following
+  `draft-ietf-idr-linklocal-capability-06`. Opt in per neighbor or peer group
+  with `link_local_next_hop = true` (default `false`); config load rejects it
+  on a neighbor or dynamic range without an interface-bound link-local
+  address, and a toggle resets the session to renegotiate OPEN. Negotiated
+  IPv4 and IPv6 unicast can use a 16-byte link-local next hop; IPv4 also
+  requires Extended Next Hop. Peers without the capability keep the legacy
+  IPv4 encoding. This draft feature is outside the unicast v1 compatibility
+  contract.
+- Fleet import policy counters support opt-in partial results during peer churn:
+  `GetPolicyStats.allow_partial` and the CLI's `--allow-partial` option retain
+  usable import/both rows and identify exited sessions in
+  `incomplete_peer_addresses`. Default requests still fail whole; deadlines,
+  unavailable counters, stopped owners, export and dataset errors remain errors.
+- Alpha route flap dampening configuration preparation and a pure RFC 2439
+  penalty/decay engine with bounded, removable reuse scheduling. Effective
+  enablement is rejected until received-route integration exists; no routes
+  are dampened, and omitted settings preserve existing behavior. See the
+  [configuration reference](docs/reference/configuration.md#route-flap-dampening-preparation-alpha).
+- Route flap dampening preparation now retains accepted source provenance through
+  transport registration and queued RIB input, with read-only engine inspection,
+  input revision cutoffs, and bounded history retirement. Effective enablement
+  remains rejected; no routes are dampened.
+- `bgp_rpki_cache_end_of_data_age_seconds{cache}` reports the seconds since
+  each configured RTR cache's last accepted End of Data, computed at scrape
+  time from the daemon's monotonic clock, so it matches the age
+  `rbgp rpki caches` shows. The series appears with the first End of Data,
+  keeps advancing through an ordinary disconnect while the contribution is
+  retained, restarts on each new End of Data, and is removed on a flush or
+  expiry. The shipped `RpkiCacheDataNearExpiry` alert (warning) fires when
+  less than a quarter of `bgp_rpki_cache_effective_expire_seconds` remains
+  before the retained data expires, for a disconnected cache and for a
+  connected session that stopped refreshing.
+
+### Changed
+
+- Peers that reconnect together into the same plain update group now get
+  their initial tables in one deferred-registration turn. The group table is
+  replayed once, one exact-export probe pass covers every member whose
+  session profile is proven equivalent, and transport encodes the shared
+  announcement once, with each member's own routes excluded. Previously each
+  joiner paid a full replay, probe and encode, one after another. Each
+  member keeps its own route-server control, OTC, ORF, policy-filtered
+  counters, prefix limits and End-of-RIB, sent after its table. Per-client-best,
+  Add-Path, ORR, ORF, conditional-advertisement and mismatched-profile peers,
+  and route-server members whose table carries control communities for them,
+  are still served one at a time. A turn takes at most 64 joiners.
+- Refresh the live comparison and interoperability pins to BIRD 3.3.3 and
+  GoBGP 4.10.0. Published comparison receipts and version-specific
+  interoperability controls retain their measured versions.
+- A neighbor snapshot admitted while a configuration transaction waits no
+  longer holds that transaction until every session has answered. The peer
+  manager captures its half of each row and queues every session's state
+  query before it resumes; a separate task joins the replies. Reload
+  completion therefore no longer waits for a `ListNeighbors`, gNMI neighbor
+  or `TestPolicy` peer read that overlaps the RIB commit
+  ([ADR-0132 amendment](docs/adr/0132-operator-read-path.md#amendment-2026-10-10-reads-overlapping-reload-completion)).
+- Clean grouped export-policy transitions retain successful prestaged wire
+  probes across route additions and withdrawals, rechecking changed rows and
+  each target's wire ceiling before publication. Rejected or stale proofs retain
+  the full fenced validation path.
+- Include the IPv4/IPv6 FlowSpec controller role in the existing narrow v1
+  compatibility inventory: `AddFlowSpec`, `DeleteFlowSpec`, and selected,
+  retained local-intent and committed advertised `ListFlowSpecRoutes` modes.
+  Receive-side validation, its shared diagnostic fields, remote received mode,
+  `Config.flowspec`, FlowSpec CLI surfaces, GR/LLGR guarantees and dataplane
+  enforcement remain outside the promise. The existing pre-v1 rules apply
+  during 0.x; inventoried surfaces remain functional throughout 1.x after
+  v1.0. See the [controller boundary](docs/reference/v1-stable-contract.md#flowspec-controller-boundary).
+- Grouped initial unicast dumps now clone routes directly into their final
+  shared announcement slices after filtering borrowed group entries. This
+  avoids a temporary vector of route shells and its full copy during peer
+  rejoin, while preserving source exclusion, route-server control rewrites,
+  next-hop overrides, and exact-export admission.
+- RIB readiness checkpoints use channel wake notifications to skip the owner
+  mutex during steady idle service, while retaining the existing readiness and
+  summary budgets during route replay and policy replacement.
+- IRR reload receipts capture native scope and competitor container cgroup
+  memory peaks through harness completion, before lifecycle probes or teardown.
+  Summaries label these sources and require zero actual swap peak; historical
+  receipts retain their existing timing and RSS validation.
+- Explicit neighbor enable now retains the shared configuration coordinator
+  through peer-manager settlement, including when its RPC client disconnects.
+  Internal route-flap history preparation adds committed owner publication,
+  admission-pinned wire classification and bounded test histories with owned
+  source-capacity recovery. Effective dampening remains rejected; production
+  does not install histories, retention limits, suppression or a decay timer.
+- Compatible, already queued unicast route-refresh requests share one bounded
+  replay inventory and announcement encoding. Each peer retains its own source
+  exclusion, export checks, prefix limits, refresh markers and retry state.
+  In the measured 200-peer IPv4 route-reflector shape with 400,000 prefixes,
+  50 concurrent refreshes completed in 0.257–0.295 s instead of 10.469–11.019 s;
+  round-end daemon RSS was 3–19 MiB higher in matched rounds. See the
+  [dated A/B receipt](docs/perf/shared-route-refresh-2026-10-11.md) for scope.
+- Skip redundant per-route rejection reconciliation when every exact-export
+  probe succeeds and the peer has no rejected routes, including initial-table
+  exports. Exact wire validation and table-before-End-of-RIB ordering remain
+  enforced. In a measured 700-peer, 400,400-prefix ordinary flap workload, the
+  first-survivor UPDATE p50 fell from 130.086 to 106.426 ms; see the
+  [qualification receipt](docs/perf/initial-table-reconciliation-2026-10.md)
+  for scope, returning-peer completion and withdrawal-tail diagnostics.
+- Published crates: `rustbgpd-wire` 0.23.0 → 0.24.0 (breaking),
+  `rustbgpd-fsm` 0.10.0 → 0.11.0 and `rustbgpd-rpki` 0.5.0 → 0.6.0. Wire adds
+  capability 77 encode/decode with context-dependent link-local next-hop
+  validation, makes `UpdateValidationOptions` `#[non_exhaustive]`, matches
+  RT-Constrain memberships independently of origin AS, classifies Type 3
+  IMET as dataplane input, and adds the non-default
+  `strict-encode-invariants` feature. FSM adds opt-in capability 77
+  advertisement and negotiation; RPKI adds
+  `VrpManager::with_end_of_data_observer`. FSM and RPKI move their public
+  wire dependency to 0.24, so embedders upgrade the three together. See the
+  [wire](crates/wire/CHANGELOG.md), [fsm](crates/fsm/CHANGELOG.md) and
+  [rpki](crates/rpki/CHANGELOG.md) changelogs.
+
+### Fixed
+
+- Local `docker build` runs no longer link another tree's code when the
+  source files are older than the artifacts in the shared Cargo target
+  cache. The builder stages touch the copied sources before `cargo build`,
+  so every workspace crate is rebuilt from the build context. Images also
+  record a content hash of their Rust build inputs at
+  `/usr/local/share/rustbgpd/source-id`; compare it with
+  `scripts/source-id.sh` in the intended tree, as described in
+  [the interop guide](docs/interop.md#prerequisites).
+- EVPN administrative DF preference, algorithm, and Don't-Preempt changes
+  retain desired BUM suppression and bound single-active AC blocking while
+  replacement routes await acknowledgement. Election still runs immediately
+  after origination without a recovery timer, and the replacement EAD-per-EVI
+  route is advertised even when the local PE remains non-DF.
+- `ApplyEvpnRuntime` no longer returns `FAILED_PRECONDITION` for a failed
+  converge that changed live EVPN state. When a rollback step does not
+  restore the committed model, or a failing Type 3 IMET step may have taken
+  effect without an acknowledgement, the apply now returns `INTERNAL` with a
+  message saying the state was not restored. `FAILED_PRECONDITION` is kept
+  for failures with no effect and for fully rolled-back ones. A rollback to
+  an actor that exited counts as restored only when that actor never
+  received the candidate. See the
+  [EVPN runtime API](docs/reference/api.md#evpnservice).
+  **Operator-visible:** some converge failures change status from
+  `FAILED_PRECONDITION` to `INTERNAL`. EVPN is alpha and outside the v1
+  compatibility surface.
+- EVPN runtime failures with fully acknowledged compensation retain the committed
+  coordinator without degrading it. SIGHUP reports an EVPN rejection as
+  `rejected_no_effect` when no other reload step changes runtime state, or
+  `known_partial` alongside independently accepted changes. Unacknowledged effects,
+  failed rollback, and previously committed decomposed steps still fence the reload.
+- LACP partner netlink errors retain their underlying I/O error in the standard
+  error chain.
+- The EVPN dataplane now restores a remote-MAC VXLAN self row that is
+  deleted out of band while its bridge master row stays. Previously the
+  reconciler treated a row with no destination as matching the route,
+  so unicast frames to that MAC fell back to the VXLAN port's flood
+  entries, if it had any, until the route changed.
+  **Operator-visible:** a `bridge fdb replace … self dst …` written
+  without `extern_learn` over a rustbgpd-owned row is now treated as an
+  operator takeover, as an unmarked static master row already was.
+  rustbgpd relinquishes the row, counts it in the foreign-state counters,
+  and leaves it in place on withdrawal and shutdown instead of rewriting
+  it.
+- The EVPN dataplane now reads the VXLAN destination of each kernel FDB
+  row it dumps. The netlink decoder returns `NDA_DST` in an `AF_BRIDGE`
+  message as raw bytes, which the dump discarded, so on Linux every
+  remote-MAC row appeared to have no destination and the reconciler's
+  check of an owned row's destination against its route never saw a
+  mismatch.
+- BUM traffic now reaches remote VTEPs. A VTEP originated its own Type 3
+  IMET but ignored received ones, so broadcast, unknown-unicast and
+  multicast frames from local hosts had no VXLAN destination unless the
+  operator added static flood rows. Each received IMET with an
+  ingress-replication PMSI that passes the instance's import check now
+  programs one `00:00:00:00:00:00 … self extern_learn` row on the
+  instance's VXLAN port (with `src_vni` on SVD ports); a withdrawal
+  removes the row. IMETs with another PMSI tunnel type are skipped with a
+  logged reason.
+  **Operator-visible:** a VNI that still has a static zero-MAC row
+  without `extern_learn` is left alone and logged as foreign; delete those
+  rows to hand the flood list to the daemon. See
+  [BUM flooding](docs/how-to/evpn-vtep-setup.md#bum-flooding-ingress-replication).
+- EVPN Ethernet Segments now hold every DF algorithm in non-DF state during
+  the initial three-second wait after startup, live addition, or undrain.
+  During boot, election also waits for EVPN End-of-RIB and GR selection
+  release, bounded by 30 seconds. Desired BUM suppression and bound
+  single-active AC blocking are published before route origination can wait
+  for a reply; enabled Linux enforcement applies these asynchronously to
+  configured, resolvable ports.
+  Ordinary segments advertise their Type 4/EAD-per-ES candidate routes
+  during the wait; Don't-Preempt recovery keeps its publication delay.
+  The existing `df_recovery_pending` and `df_recovery_remaining_ms` fields
+  now expose the wait for all algorithms. Kernel defaults before daemon
+  startup are unchanged.
+- EVPN routes the VTEP originates from `[[evpn_instances]]` and
+  `[[ethernet_segments]]` now carry the BGP Encapsulation extended community
+  for VXLAN (tunnel type 8), as
+  [RFC 8365 §5.1.3](https://www.rfc-editor.org/rfc/rfc8365.html#section-5.1.3)
+  requires. This covers Type 2 MAC and MAC+IP routes (including SVI MACs),
+  Type 3 IMET, Type 1 EAD-per-ES and EAD-per-EVI, and Type 4 ES routes, for
+  VLAN-based instances and VLAN-aware bundle members alike. Previously only
+  native Type 5 origination and `InjectionService/AddEvpnRoute` attached it.
+  **Operator-visible:** peers that require a matching encapsulation before
+  installing a route now accept these routes, and `rbgp evpn` shows
+  `encap=vxlan` on them.
+- Keep EVPN DF recovery deadlines ahead of queued route events, and revalidate
+  pending segment starts after withdrawal acknowledgements and configuration
+  changes so removed or drained segments do not originate stale candidates.
+  Publish each replacement's non-DF forwarding state before waiting for another
+  segment's withdrawal, retaining that segment's owned attachment circuit gate.
+  Recheck live segment intent after startup and election acknowledgements before
+  further advertisements, retaining complete forwarding suppression while stale
+  owned routes withdraw.
+- An EVPN runtime apply that daemon shutdown cuts off after it published to
+  the segment and Type 2 originator actors now returns `UNAVAILABLE` with a
+  message saying the published state was not restored. It used to return
+  `FAILED_PRECONDITION`, which reports no effect, although the publishes
+  stayed in place until the shutdown drained those actors. See the
+  [EVPN runtime API](docs/reference/api.md#evpnservice).
+- A remote EVPN Type 5 route with a non-zero Ethernet Tag is no longer
+  imported into a matching IP-VRF. It is counted as `non_zero_ethernet_tag`
+  in `evpn_ip_vrf_remote_prefix_drops`, as
+  [ADR-0092](docs/adr/0092-evpn-vlan-aware-bundle-service.md) requires.
+  The route is still reflected, and no NOTIFICATION is sent.
+- An IPv4 unicast route whose import policy sets `next-hop self` (or an IPv6
+  next hop) is now advertised to iBGP peers and route-server clients with the
+  next hop the import chose. Previously such peers received the address the
+  route arrived with, while the RIB, FIB and `rbgp rib` used the rewritten
+  one; with Extended Next Hop negotiated the route also fell back to a
+  4-octet IPv4 `MP_REACH_NLRI`. eBGP and export-policy next-hop rewrites were
+  not affected.
+  **Operator-visible:** after upgrading, passthrough peers of such routes see
+  the import-chosen next hop. A body IPv4 route given an IPv6 next hop on
+  import is no longer exported to a passthrough peer without Extended Next
+  Hop, matching routes received with an IPv6 next hop.
+- IPv6 labeled-unicast and VPNv6 routes are no longer advertised with an IPv4
+  next hop. An export `set next-hop` with an IPv4 address, typical of an
+  export policy shared by IPv4 and IPv6 peers, gave these routes a 4-octet
+  next hop under AFI 2 / SAFI 4, which receivers reject as malformed
+  (RFC 8277), or a 12-octet RD + IPv4 next hop under AFI 2 / SAFI 128, which
+  RFC 4659 does not define. An IPv4 `set next-hop` now does not apply to any
+  route with IPv6 NLRI, as already for IPv6 unicast, and explain reports the
+  route's kept next hop.
+  **Operator-visible:** see
+  [route modifications](docs/reference/configuration.md#route-modifications-set-actions).
+  Export withholds any remaining labeled-IPv6 or VPNv6 route with an IPv4 next
+  hop, including a VPNv6 route received with a 12-octet next hop, and counts
+  it in `bgp_exact_export_rejections_total{reason="missing_ipv6_next_hop"}`.
+- Update-group per-source counters and the outbound grouping and
+  export caches now hash IPv6 peer and next-hop addresses through the
+  hasher's byte-string path, as IPv6 prefixes already do. Before this
+  change, sequentially numbered IPv6 peers (`::1`, `::2`, ...) shared one
+  hashbrown control byte and one starting bucket in those `FxHash` maps, so
+  each lookup compared about half of the peers. IPv4 hash values are
+  unchanged; no configuration, API, or wire behaviour changes.
+- An IPv6 unicast route is no longer advertised with a 4-octet next hop in
+  `MP_REACH_NLRI`; RFC 2545 §3 requires 16 or 32 octets. A receiver may reject
+  such a route, treat it as withdrawn, or, as FRR 10.7.1 does, install it with
+  an unusable `::` next hop. Import `next-hop self` on a session over IPv4
+  transport, or an import or export `set next-hop` with an IPv4 address, could
+  give an IPv6 route an IPv4 next hop that iBGP and route-server-client
+  exports sent as is. Import `next-hop self` for an IPv6 route now resolves to
+  the session's local IPv6 address, else `local_ipv6_nexthop`, and otherwise
+  keeps the received next hop. An IPv4 `set next-hop` no longer applies to an
+  IPv6 unicast route, matching FRR's `set ip next-hop`.
+  **Operator-visible:** see
+  [route modifications](docs/reference/configuration.md#route-modifications-set-actions).
+  Export withholds any remaining IPv6 route with an IPv4 next hop from the
+  peer and counts it in
+  `bgp_exact_export_rejections_total{reason="missing_ipv6_next_hop"}`.
+- Labeled IPv4 (AFI 1 / SAFI 4) routes with an IPv6 next hop are no longer
+  advertised to peers that did not negotiate Extended Next Hop for that
+  family (RFC 8950 tuple 1/4/2). A route received with an IPv6 next hop, or
+  given one by an export `set next-hop`, went out with a 16-octet next hop
+  regardless. rustbgpd does not advertise 1/4/2, so such a route is now
+  withheld from every peer and counted in
+  `bgp_exact_export_rejections_total{reason="ipv4_requires_extended_next_hop"}`,
+  as for VPNv4.
+  **Operator-visible:** inbound, a labeled-IPv4 `MP_REACH_NLRI` with a 16- or
+  32-octet next hop is now malformed (RFC 7606 §7.11) and resets the session
+  with UPDATE Message Error / Optional Attribute Error, the same handling as
+  IPv4 unicast without Extended Next Hop. Earlier releases accepted and
+  reflected such routes. See
+  [RFC 8950 notes](docs/reference/rfc-notes.md#rfc-8950--extended-next-hop).
+- A unicast route whose outbound next hop is an IPv6 link-local address is
+  no longer advertised outside the link it was learned on. This applies
+  whether or not Link-Local Next Hop capability 77 is configured or
+  negotiated. The route is still sent to an interface-bound peer on the same
+  interface, or when the next hop is rewritten to a local address (next-hop
+  self or `local_ipv6_nexthop`). Previously, IPv4 routes carried over Extended
+  Next Hop were reflected between unnumbered peers on different interfaces,
+  and a policy `set next-hop` to a link-local address reached peers on other
+  links, with a next hop those peers cannot reach. An IPv6 unicast route whose
+  only next hop is link-local now also requires capability 77.
+  **Operator-visible:** each withheld route increments
+  `bgp_exact_export_rejections_total{reason="missing_ipv6_next_hop"}` and logs
+  a WARN with detail `link-local next hop cannot be advertised outside its
+  interface scope`; a route previously advertised to that peer is withdrawn.
+- A route carried in `MP_REACH_NLRI` no longer has a classic `NEXT_HOP`
+  attribute next to it in eBGP exports of IPv6 unicast routes, BMP Loc-RIB VPN
+  announcements or MRT EVPN RIB entries (RFC 4760 §3). An import policy that
+  set a specific IPv4 next hop added that attribute to IPv6 unicast, VPN and
+  EVPN routes. Locally originated EVPN routes stored one too, as `0.0.0.0`
+  for an IPv6 VTEP. The next hop is now encoded only in `MP_REACH_NLRI`.
+  **Operator-visible:** `InjectionService.AddPath` rejects an IPv6 prefix
+  with an IPv4 `next_hop` with `INVALID_ARGUMENT`. IPv6 unicast
+  `MP_REACH_NLRI` has no encoding for an IPv4 next hop. An IPv4 prefix with an
+  IPv6 next hop (RFC 8950) is still accepted.
+- Labeled IPv6 and VPNv6 export policies now discard the received link-local
+  next hop and its interface scope when a `Specific` action changes the primary
+  next hop, including Add-Path advertisements. Same-interface forwarding keeps
+  its valid companion when the primary next hop is unchanged.
+- MRT dumps, the shutdown warm checkpoint and BMP Loc-RIB announcements now
+  carry exactly one `NEXT_HOP` for an IPv4 unicast route learned over BGP.
+  The encoders added the route's next hop beside the received `NEXT_HOP`
+  that the RIB keeps, so each entry carried the attribute twice, and after
+  an import `next-hop self` the second copy was the stale received value.
+  **Operator-visible:** with
+  [`warm_cache_checkpoint_on_shutdown`](docs/reference/configuration.md)
+  enabled, a daemon holding such a route never published a checkpoint (the
+  shutdown log reported `warm bundle MRT recovery discarded N path
+  attributes`); it now does. MRT files and BMP collectors receive one `NEXT_HOP`, the
+  route's post-import-policy next hop. MRT files written by earlier releases
+  still hold the duplicate; readers that follow RFC 7606 keep the first copy,
+  which was already the post-policy next hop.
+- An IPv6 next hop forwarded unchanged to an iBGP peer or route-server
+  client no longer carries the source's link-local address to peers on
+  other links. RFC 2545 §3 allows the link-local in a 32-octet next hop only
+  when the speaker shares a subnet with both the next hop and the receiving
+  peer. The received link-local is now forwarded only between
+  interface-bound IPv6 link-local peers on the same interface; every other
+  peer gets the 16-octet global next hop. This matches FRR's default. It
+  applies to IPv6 unicast and to IPv4 unicast over Extended Next Hop.
+  **Operator-visible:** a route server or reflector that peers over global or
+  IPv4 transport now sends a 16-octet IPv6 next hop where it previously
+  passed the source's 32-octet form through. A peer whose IPv6 route
+  resolution depended on that forwarded link-local must resolve the global
+  next hop instead.
+- `SetPeerGroup` no longer clears peer-group fields its definition does not
+  carry. Previously a gRPC edit (or a peer-group change applied by a SIGHUP
+  reload on the sequential route) reset `role`, `strict_role`,
+  `prefix_orf_receive`, `disable_ipv4_unicast`, the slow-peer, per-family,
+  received and outbound prefix limits, `max_prefix_action`,
+  `max_prefix_warning_percent`, `next_hop_ownership`, `interpret_rfc1997`,
+  `rs_control_communities`, `send_non_transitive_extended_communities` and
+  `log_level` on the group and reshaped its members without them; a gRPC
+  edit also persisted the loss to the configuration file. These fields now
+  keep their configured values.
+- Keep rebuilt peer-group sessions provisional until configuration persistence
+  and configured-owner publication settle. Clean compensation restores admission
+  without advancing retained-history ownership; ambiguous acknowledgements remain
+  fenced. Runtime dampening enablement remains rejected.
+- `/readyz` and `GetHealth` no longer miss their 200 ms RIB deadline while
+  the RIB answers a ROUTE-REFRESH with a full-table replay. With about
+  400,000 prefixes, one replay held the RIB actor for roughly 180 to 280 ms
+  without answering readiness. The replay now services the readiness lane at
+  the same bounded checkpoints that initial table export uses. Replayed
+  routes, End-of-RIB and Enhanced Route Refresh markers are unchanged, and
+  ordinary queries and mutations still wait until the replay finishes.
+- RT-Constrain matches VPN and EVPN route targets independently of the
+  membership origin AS, so peers can import targets administered by another
+  AS. Partial RT prefixes remain supported; /32 covers every RT value,
+  while only the default /0 admits routes with no RT.
+- Yield after every two published slices of shared update-group encoding so other
+  session tasks can run during large exports. Cancellation wakes followers for
+  ordinary fallback, preserving source exclusion and command order.
+- Ending one session preserves registration metadata already staged by a
+  replacement session, including negotiated capability and export context.
+  Peer-group identity follows the registered session through replacement and
+  collision failback, so its initial advertisements use the correct group policy
+  and outbound prefix limits. Re-registering the same session preserves its
+  accepted source and peer group unless explicitly replaced or cleared.
+- Reflected labeled-unicast and VPN routes no longer carry the source's IPv6
+  link-local next hop to peers on other links. RFC 4659 §3.2.1.1 and RFC 2545
+  §3 (which RFC 4798 applies to labeled IPv6) allow the link-local half of a
+  48-octet VPN or 32-octet labeled next hop only toward a peer sharing the
+  link. As for IPv6 unicast, the received link-local is now forwarded only
+  between interface-bound IPv6 link-local peers on the same interface; every
+  other peer gets the 24-octet VPN or 16-octet labeled global next hop. This
+  matches FRR's default.
+  **Operator-visible:** a reflector or route server peering over global or
+  IPv4 transport now sends the global-only VPNv6, labeled-IPv6, or
+  IPv6-next-hop VPNv4 form where it previously passed the source's link-local
+  through.
+
+### Documentation
+
+- Refresh the [BGP implementation comparison](docs/explanation/comparison.md)
+  and [GoBGP parity page](docs/explanation/gobgp-parity.md) against their
+  pinned releases: GoBGP v4.10.0 applies TCP-AO keychains to peer sockets,
+  BIRD 3.3.3 does not implement RT-Constrain, conditional advertisement is
+  listed as a shipped alpha feature, and RT-Constrain matching is described
+  as Route Target prefix matching independent of the membership origin AS.
+  The comparison, IXP evaluation and performance index now cite the
+  2026-10-06 BIRD 3.3.3 IRR comparison and the v0.74.0 and v0.75.0 flagship
+  soak passes.
+- Refresh the GoBGP BMP qualification notes for the 4.10.0 pin. Incumbent
+  route-reflector comparison still requires a qualified post-policy
+  Adj-RIB-Out capture.
+- Add a dated IRR reload comparison of unreleased rustbgpd source with BIRD
+  3.3.3 and OpenBGPD 9.3 at 0% received-view overlap, with all 36 reload
+  rows, memory windows and compact evidence. Preserve the broader released
+  campaign as dated history; this adds no GoBGP performance result.
+- Add a quiet-host memory receipt for import-explain cache sizing: daemon
+  cgroup, settled RSS and allocator readings at the 4,096 default and raised
+  ceilings, with exact eviction-count answers, supporting the flat 4,096
+  explain cache default. Rejected-route retention was not exercised.
+  See [the receipt](docs/perf/explain-cache-quiet-host-2026-10.md).
+- Add the [export-probe S2 receipt](docs/perf/export-probe-delta-arcvec-2026-10.md)
+  with exact timing bars, compact measurements, provenance, rejection checks
+  and the CPU cost of the measured stall reduction.
+- Record the first survivor UPDATE phase investigation across 18 member-flap
+  rounds, with compact evidence, probe overhead and initial-table occupancy
+  as the bounded follow-up lead.
+- Correct the [BGP implementation comparison](docs/explanation/comparison.md#address-families)
+  FRR RT-Constrain cell to `No`, scoped to FRR 10.7.1 and linked to upstream
+  source.
+- Record a same-session A/B of jemalloc's `background_thread:true` against
+  the defaults on the S2, IRR reload, and operator-read cells. It raised the
+  median daemon cgroup memory peak by 177 MiB (S2) and 93 MiB (IRR) for IRR
+  reloads 17–30 ms faster, so the daemon keeps jemalloc's defaults. See the
+  [receipt](docs/perf/jemalloc-runtime-options-2026-10.md).
+- Add the [M119 SR Linux 25.10.1 receipt](docs/artifacts/interop/m119-evpn-bundle-vtep-20261010T124729Z/README.md)
+  for single-homed VLAN-aware bundle VTEP origination, vendor import,
+  ARP-driven forwarding and per-tag withdrawal/restore. EVPN remains alpha;
+  multi-homing, IRB, local VNIs and non-zero-tag Type 5 remain deferred.
+- Document the [policy-stats reload completion and cohort clocks after #2952](docs/perf/policy-transition-release-followup-2026-10-10.md),
+  the isolated prefix-retirement step and prior attribution limits, and the prepared corrected S2/IRR
+  comparison using the release binary through the main runner.
+- Record the complete six-process reload receiver/publication measurement
+  failure: both stall-overhead bars fail, with all native outcomes and joins
+  retained. The [receipt](docs/perf/reload-boundary-attribution-2026-10.md)
+  reports diagnostic limits without selecting a production optimization.
+- Bound S2 reload CPU variation using all six retained process traces, with
+  reproducible phase endpoints and explicit limits on cause attribution.
+- Add a [policy-reload observer-tail diagnostic](docs/perf/reload-observer-tail-2026-10-06.md)
+  with complete first-chunk attribution, recomputable compact evidence, and
+  explicit instrumentation and receiver-processing limits.
+- Add a runnable v0.75.0-to-pinned-main route-reflector upgrade trial and
+  [RR shadow-trial guidance](docs/cookbook/route-reflector.md#shadow-trial),
+  covering complete outgoing BMP snapshots, preserved reflection attributes,
+  equality, and cluster-ID divergence with the existing comparator.
+  External-incumbent qualification remains outstanding.
+- Link operator SRv6 troubleshooting to the scoped contract and pinned interop
+  receipts, and publish the RFC notes and path-attribute registry in the site manual.
+- Record the [64 KiB](docs/perf/tcp-unsent-threshold-screen-2026-10.md) and
+  [128 KiB](docs/perf/tcp-unsent-threshold-128k-screen-2026-10.md) TCP unsent-threshold
+  screens with compact reproducible evidence. Both candidates missed the
+  completion gate; [container sizing guidance](docs/benchmarks.md#current-evaluator-evidence)
+  retains existing socket behavior and uses whole-cgroup reload peaks plus headroom.
+
+### Upgrade notes
+
+- The default EVPN `[[ethernet_segments]] df_preference` is now 32767, the
+  value RFC 9785 §3 requires, instead of 32768. A highest-preference or
+  lowest-preference segment that omits `df_preference` now ties with other
+  implementations' default instead of winning (highest) or losing (lowest)
+  against it, so the equal-preference tie-breaks (Don't-Preempt, then the
+  lowest originator IP) decide the DF in mixed fleets. During a rolling
+  upgrade, PEs relying on the implicit default disagree until all are
+  upgraded: under `highest-preference` a not-yet-upgraded rustbgpd PE
+  (32768) beats an upgraded one (32767), and under `lowest-preference` the
+  upgraded PE wins. DF ownership can therefore move as PEs restart; set
+  `df_preference` explicitly on every PE of the segment before upgrading.
+  Set `df_preference = 32768` explicitly to keep the previous election.
+  Default-modulo and highest-random-weight segments do not advertise
+  preference and are unaffected; an explicit `df_preference = 32768` on
+  them is still accepted.
+- FlowSpec controllers must retain desired state and re-inject it after a
+  daemon restart. Check explicit mutation outcomes and received/advertised
+  view acknowledgements, including empty responses, when upgrading or rolling
+  back to an older daemon. Unknown outcomes and ignored selectors do not prove
+  unchanged, absent or advertised state. The promotion changes no configuration
+  defaults or wire behavior; see the
+  [controller upgrade guidance](docs/reference/v1-stable-contract.md#controller-upgrade-and-rollback).
+- Embedders of the published crates: in `rustbgpd-wire` 0.24.0,
+  `UpdateValidationOptions` is `#[non_exhaustive]` and gains
+  `link_local_next_hop`; replace struct literals with
+  `UpdateValidationOptions::default()` plus field assignment. The default
+  retains strict validation. `RtcNlri::matches` no longer compares the
+  membership origin AS, and `is_dataplane_route_type` now returns `true` for
+  Type 3 IMET. `rustbgpd-fsm` 0.11.0 and `rustbgpd-rpki` 0.6.0 move to wire
+  0.24; upgrade the three together.
+- Daemon operators: a route whose outbound next hop is IPv6 link-local is now
+  advertised only to peers on the interface where it was learned, whether or
+  not capability 77 is configured. Routes that previously crossed interfaces, such
+  as IPv4 reflected between unnumbered peers or a policy `set next-hop` to a
+  link-local address, are withheld and withdrawn; set next-hop self or
+  `local_ipv6_nexthop` where they must still reach those peers. Watch
+  `bgp_exact_export_rejections_total{reason="missing_ipv6_next_hop"}` after
+  upgrading. Capability 77 itself stays off unless `link_local_next_hop` is set.
+- A `ListNeighbors` response that overlaps a configuration transaction can
+  now arrive after `config reload complete` is logged. Its configuration
+  fields describe the peer manager when the read was admitted, so arrival
+  after reload completion does not mean the response reflects the new
+  configuration.
+- A SIGHUP reload that changes a TCP-AO keyring or a listener MD5/GTSM
+  setting together with a config-file-only peer-group field (for example
+  `role`, `strict_role`, `prefix_orf_receive` or `disable_ipv4_unicast`) is
+  now rejected before any effect, and `rustbgpd --diff` reports the
+  `rejected` route. The reason names the group and field. Split the reload:
+  apply the authentication change and the peer-group change in separate
+  reloads. Outbound prefix maxima (`max_prefixes_out_ipv4`/`_ipv6`) on a
+  group that already exists are applied by that reload and are not rejected;
+  on a group the same reload adds, they are. A `tcp_mss` change that the
+  reload pins until restart is not rejected. See the
+  [reload matrix](docs/reference/reload-matrix.md#sighup-reload-routes).
+- Next hops toward iBGP peers and route-server clients change on upgrade.
+  Passthrough exports carry the next hop the import policy chose, including
+  import `next-hop self`. An IPv4 `set next-hop` no longer applies to IPv6
+  unicast, labeled-IPv6 or VPNv6 routes. A forwarded IPv6 next hop drops the
+  source's link-local half (16-octet global, 16-octet labeled or 24-octet VPN
+  form) except between interface-bound link-local peers on the same
+  interface; a peer that resolved routes through that link-local must resolve
+  the global next hop. An IPv6, labeled-IPv6 or VPNv6 route still left with
+  an IPv4 next hop is withheld and counted in
+  `bgp_exact_export_rejections_total{reason="missing_ipv6_next_hop"}`, and a
+  labeled-IPv4 route with an IPv6 next hop is withheld from every peer under
+  `reason="ipv4_requires_extended_next_hop"`.
+- A received labeled-IPv4 (AFI 1 / SAFI 4) `MP_REACH_NLRI` with a 16- or
+  32-octet next hop is now malformed and resets the session with UPDATE
+  Message Error / Optional Attribute Error. Earlier releases accepted and
+  reflected such routes. Check labeled-unicast peers that send IPv6 next hops
+  for IPv4 labeled routes before upgrading.
+- `InjectionService.AddPath` rejects an IPv6 prefix with an IPv4 `next_hop`
+  with `INVALID_ARGUMENT`.
+- RT-Constrain memberships now match Route Targets independently of the
+  membership's origin AS, so a peer whose membership names another AS than an
+  RT's administrator starts receiving VPN and EVPN routes with that RT, and a
+  /32 membership admits every RT.
+- MRT dumps, the shutdown warm checkpoint and BMP Loc-RIB announcements carry
+  one `NEXT_HOP` for a BGP-learned IPv4 unicast route, the post-import-policy
+  value. With `warm_cache_checkpoint_on_shutdown` enabled, a daemon that
+  previously discarded its checkpoint for such routes now publishes it.
+- EVPN (alpha) forwarding: every DF algorithm now holds a segment non-DF,
+  with BUM suppression, for three seconds after startup, live addition or
+  undrain, and `df_recovery_pending` / `df_recovery_remaining_ms` report that
+  wait for every algorithm. Received ingress-replication IMET routes now
+  program the VXLAN flood list; delete static zero-MAC rows without
+  `extern_learn` to hand a VNI's flood list to the daemon. A remote-MAC
+  `self` row rewritten without `extern_learn` is treated as an operator
+  takeover. Originated EVPN routes carry the VXLAN encapsulation extended
+  community. Remote Type 5 routes with a non-zero Ethernet Tag are no longer
+  imported and count as `non_zero_ethernet_tag` in
+  `evpn_ip_vrf_remote_prefix_drops`.
+- EVPN (alpha) API status codes: `ApplyEvpnRuntime` returns `INTERNAL` for a
+  failed converge that left live state unrestored and `UNAVAILABLE` when
+  shutdown cuts off a published converge, where it returned
+  `FAILED_PRECONDITION`. On a daemon with no Ethernet Segment,
+  `SetEthernetSegmentDrain` for an unconfigured ESI returns `NOT_FOUND`
+  instead of `UNAVAILABLE`.
+
 ## [0.75.0] — 2026-10-05
 
 ### Changed
