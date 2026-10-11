@@ -11,6 +11,8 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.76.0] — 2026-10-11
+
 ### Added
 
 - `just bench-converged-rejoin <out-dir> <base> <head>` measures the

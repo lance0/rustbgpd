@@ -669,7 +669,7 @@ The prepared wire 0.24 / FSM 0.11 / RPKI 0.6 set adds an
 assign fields instead of using a struct literal; the default preserves existing
 validation. Opting in requires
 interface scope and negotiated capability context; see the
-[0.24 compatibility note](../../crates/wire/README.md#0240-compatibility-note-prepared).
+[0.24 compatibility note](../../crates/wire/README.md#0240-compatibility-note).
 This source break is separate from the additive non-exhaustive capability variant.
 The same set also changes `RtcNlri::matches` behaviour: it compares only the
 route-target bits after the membership's origin AS (RFC 4684 §4 and §6), so a

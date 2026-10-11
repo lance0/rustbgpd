@@ -3,7 +3,7 @@
 This changelog covers the independently published `rustbgpd-wire` crate. Daemon
 and workspace changes remain in the repository-level `CHANGELOG.md`.
 
-## Unreleased
+## 0.24.0 - 2026-10-11
 
 - `is_dataplane_route_type` now returns `true` for Type 3 (IMET). Received
   ingress-replication IMET routes feed a VTEP's BUM flood list, so they are
@@ -30,6 +30,8 @@ and workspace changes remain in the repository-level `CHANGELOG.md`.
   matches every Route Target, and a /96 membership whose origin AS differs
   from the RT administrator now matches that RT. Partial prefixes still
   compare every covered bit, and non-RT extended communities never match.
+- Pair this wire compatibility line with FSM 0.11 and RPKI 0.6 when sharing
+  public wire types.
 
 ## 0.23.0 - 2026-10-03
 

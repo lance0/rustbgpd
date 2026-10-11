@@ -3,10 +3,10 @@
 This changelog covers the independently versioned `rustbgpd-rpki` crate.
 Daemon and workspace changes remain in the repository-level `CHANGELOG.md`.
 
-## Unreleased
+## 0.6.0 - 2026-10-11
 
-- Prepare 0.6 with wire 0.24 for shared public wire types. Verifier and RTR
-  behavior and method signatures are unchanged. Upgrade wire/FSM/RPKI together.
+- Move the public wire dependency to 0.24. Existing verifier and RTR behavior
+  and method signatures are unchanged. Upgrade wire/FSM/RPKI together.
 - Add `VrpManager::with_end_of_data_observer`, called with a configured
   cache's address and `Some(instant)` after each accepted End of Data, the
   monotonic instant `AcceptedCacheState::age_seconds` counts from, or `None`
