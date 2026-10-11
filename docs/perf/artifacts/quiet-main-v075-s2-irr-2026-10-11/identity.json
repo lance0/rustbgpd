@@ -1,0 +1,44 @@
+{
+  "pairing": "each arm's daemon binary through one shared main runner revision with identical main rbgp, rs-config-render and reloadstall",
+  "arms": {
+    "v075": {
+      "source_commit": "54ed19b5af927f1c8e5064ecb1a497885c15d068",
+      "source_tree": "47ba5f6a356284c11530a9ada9d991f05df454ac",
+      "tag": "v0.75.0",
+      "daemon_sha256": "4d2fc74b73aab0f32225ba8cdbef119dab473dea4feca4e8a1cf057039c9ce6f",
+      "note": "fresh build for this comparison; the 2026-10-08 retained binary (6eb3cad8b8f4b11cd5348f4fa2b3f98d40e7d6e40a3c10a254f37431da350205) was not used"
+    },
+    "main": {
+      "source_commit": "0a73ba716ac0a83e5bb9977e0fab4f88f6b54cc9",
+      "source_tree": "fb47aa6a47f872f97a33d3df7c3daf1b2fca9249",
+      "daemon_sha256": "29643828243b09b6bf905f66e6f026530177c342181cf8cd41208b783658df26"
+    }
+  },
+  "daemon_build_command": "cargo build --release --locked -j 4 -p rustbgpd -p rustbgpctl",
+  "toolchain": "rustc 1.99.0 (b940084d7 2026-09-28); cargo 1.99.0 (5f94df478 2026-08-27)",
+  "build_closure": {
+    "artifact_units": {"v075": 227, "main": 227},
+    "including_build_units": {"v075": 342, "main": 343},
+    "bench_internals_enabled": false
+  },
+  "runner": {
+    "commit": "225f75667c2ded306aaf16f74603567d9c340971",
+    "tree": "11bb851be53655a456616c2b1c239ddce18d5856",
+    "parent": "0a73ba716ac0a83e5bb9977e0fab4f88f6b54cc9",
+    "adapter_patch": "irr-prebuilt-adapter.patch",
+    "adapter_patch_sha256": "8213d8daadccf4e724f371c279a0e7dc45302b95c41e4599a2f7d21dfdd15d60"
+  },
+  "common_tools_sha256": {
+    "rbgp": "866e06e2050c42aa0a85fc19124164b85c5761d08ffd8d384f4b4ce1aeb3516b",
+    "rs-config-render": "dfd347670e38f3a77157ebec513a23083b0bb00aec0ac979032af14f8f61dc09",
+    "reloadstall": "395686d97f115a53e746ad11241d618a656f337623412392836b881276941358"
+  },
+  "cells": {
+    "s2": {"runner": "bench/scale/matrix/run-matrix.sh rustbgpd", "peers": 700, "prefixes": 400400, "reloads": 4, "control_secs": 30},
+    "irr": {"runner": "bench/scale/irrreload/run-irr-reload.sh rustbgpd-sighup", "members": 320, "prefixes": 183040,
+            "min_list": 1000, "max_list": 40000, "seed": 61, "changed_fraction": 0.1, "overlap_fraction": 0,
+            "reloads": 4, "control_secs": 30}
+  },
+  "order_per_cell": ["v075-r1", "main-r1", "main-r2", "v075-r2", "v075-r3", "main-r3"],
+  "cell_order": ["s2", "irr"]
+}
