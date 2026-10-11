@@ -3885,13 +3885,13 @@ per-prefix work.
 
 Truthfulness: the explanation is produced by a read-only dry run of
 the *same staging body* live distribution executes -- including for
-update-grouped peers, which are explained against their group table
+update-grouped peers, which are explained against their member's advertised view
 with split horizon applied per member exactly like the emit-time
 source-flip matrix. The response carries `update_group_id` when the
 peer's export is group-staged. Explain queries never count toward
 `bgp_policy_routes_total` or per-term policy hit counters.
 
-The live commit path then applies one final exact-wire gate through an
+After staging, the live commit path applies an exact-wire gate through an
 immutable snapshot of the session encoder and its negotiated 4096/65535-byte
 ceiling. A failed announcement never enters Adj-RIB-Out. If it had been
 advertised before an attribute, next-hop, capability, or ceiling change made
@@ -3906,6 +3906,15 @@ was never advertised. Watch
 warning log. Cease/8 still tears down the session if transport encounters an
 impossible single-route message or a missing/mismatched encoder snapshot; that
 is defense in depth, not the normal rejection path.
+
+After the exact-wire gate, the unicast ladder applies the final
+`outbound_prefix_limit` gate (ADR-0113). A net-new prefix withheld at capacity
+returns Deny with `[STOP]`, code `outbound_prefix_limit_reached`, and detail
+naming the family, configured limit, and admitted usage. Prefixes already
+admitted to this peer can still be updated at the limit. For a grouped peer,
+the advertised-state diff uses the same member admission filter as
+`rbgp rib advertised <peer>`, rather than the shared group's full table.
+This capacity gate covers IPv4/IPv6 unicast only.
 
 Neighbor `last_error` and session notification history retain the bounded local
 cause of that defense-in-depth teardown, outbound queue saturation, and TCP
