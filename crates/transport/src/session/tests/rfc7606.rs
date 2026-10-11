@@ -1535,6 +1535,298 @@ async fn rfc7606_nonempty_mp_reach_with_taw_error_stays_established() {
     }
 }
 
+/// Each `MP_REACH` announcement vector must keep RFC 7606 §5.2 on the
+/// treat-as-withdraw path, while an empty attribute must reset the session.
+#[tokio::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one table exercises every MP_REACH vector through both RFC 7606 dispositions"
+)]
+async fn rfc7606_mp_reach_families_count_reachable_nlri() {
+    use rustbgpd_wire::{
+        EthernetSegmentIdentifier, EthernetTagId, EvpnMacIp, EvpnRoute, LabeledNlri,
+        LabeledNlriEntry, MacAddress, MpReachNlri, MplsLabel, NlriEntry, RtcNlri, VpnNlriEntry,
+    };
+
+    #[derive(Clone, Copy, Debug)]
+    enum Case {
+        UnicastV4,
+        UnicastV6,
+        FlowSpec,
+        Evpn,
+        BgpLs,
+        Vpn,
+        Labeled,
+        Rtc,
+    }
+
+    fn reach(case: Case) -> MpReachNlri {
+        let (afi, safi, next_hop) = match case {
+            Case::UnicastV4 => (Afi::Ipv4, Safi::Unicast, "192.0.2.2".parse().unwrap()),
+            Case::UnicastV6 => (Afi::Ipv6, Safi::Unicast, "2001:db8::2".parse().unwrap()),
+            Case::FlowSpec => (Afi::Ipv4, Safi::FlowSpec, IpAddr::V4(Ipv4Addr::UNSPECIFIED)),
+            Case::Evpn => (Afi::L2Vpn, Safi::Evpn, "192.0.2.2".parse().unwrap()),
+            Case::BgpLs => (Afi::BgpLs, Safi::BgpLs, "192.0.2.2".parse().unwrap()),
+            Case::Vpn => (Afi::Ipv4, Safi::MplsVpn, "192.0.2.2".parse().unwrap()),
+            Case::Labeled => (
+                Afi::Ipv4,
+                Safi::LabeledUnicast,
+                "192.0.2.2".parse().unwrap(),
+            ),
+            Case::Rtc => (Afi::Ipv4, Safi::RtConstrain, "192.0.2.2".parse().unwrap()),
+        };
+        let mut mp = empty_nonunicast_reach(afi, safi, next_hop);
+        match case {
+            Case::UnicastV4 => mp.announced.push(NlriEntry {
+                path_id: 0,
+                prefix: Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24)),
+            }),
+            Case::UnicastV6 => mp.announced.push(NlriEntry {
+                path_id: 0,
+                prefix: Prefix::V6(Ipv6Prefix::new("2001:db8:100::".parse().unwrap(), 48)),
+            }),
+            Case::FlowSpec => mp.flowspec_announced.push(FlowSpecRule {
+                components: vec![FlowSpecComponent::IpProtocol(vec![NumericMatch {
+                    end_of_list: true,
+                    and_bit: false,
+                    lt: false,
+                    gt: false,
+                    eq: true,
+                    value: 6,
+                }])],
+            }),
+            Case::Evpn => mp.evpn_announced.push(EvpnRoute::MacIp(EvpnMacIp {
+                rd: RouteDistinguisher([0, 0, 0xfd, 0xe8, 0, 0, 0, 100]),
+                esi: EthernetSegmentIdentifier::ZERO,
+                ethernet_tag: EthernetTagId(100),
+                mac: MacAddress([2, 0, 0, 0, 0, 1]),
+                ip: None,
+                label1: MplsLabel::new(100),
+                label2: None,
+            })),
+            Case::BgpLs => mp.bgpls_announced.push(
+                decode_bgpls_nlri(&[0xfd, 0xe8, 0, 3, 0xaa, 0xbb, 1])
+                    .unwrap()
+                    .pop()
+                    .unwrap(),
+            ),
+            Case::Vpn => mp.vpn_announced.push(VpnNlriEntry {
+                path_id: 0,
+                nlri: make_vpn_rib_route(3).nlri,
+            }),
+            Case::Labeled => mp.labeled_announced.push(LabeledNlriEntry {
+                path_id: 0,
+                nlri: LabeledNlri {
+                    labels: vec![MplsLabelEntry::try_new(4092, 0, true).unwrap()],
+                    prefix: Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24)),
+                },
+            }),
+            Case::Rtc => mp
+                .rtc_announced
+                .push(RtcNlri::new(65002, 0x0002_fdea_0000_0001, 96).unwrap()),
+        }
+        mp
+    }
+
+    fn route_key(case: Case, update: RibUpdate, announced: bool) -> String {
+        fn one_key<A, K>(
+            announced_routes: &[A],
+            withdrawn_keys: &[K],
+            announced: bool,
+            announce_key: impl Fn(&A) -> String,
+            withdraw_key: impl Fn(&K) -> String,
+        ) -> String {
+            if announced {
+                assert_eq!(announced_routes.len(), 1);
+                assert!(withdrawn_keys.is_empty());
+                announce_key(&announced_routes[0])
+            } else {
+                assert!(announced_routes.is_empty());
+                assert_eq!(withdrawn_keys.len(), 1);
+                withdraw_key(&withdrawn_keys[0])
+            }
+        }
+
+        match (case, update) {
+            (
+                Case::UnicastV4 | Case::UnicastV6,
+                RibUpdate::RoutesReceived {
+                    announced: a,
+                    withdrawn: w,
+                    ..
+                },
+            ) => one_key(
+                &a,
+                &w,
+                announced,
+                |r| format!("{:?}", (r.prefix, r.path_id)),
+                |k| format!("{k:?}"),
+            ),
+            (
+                Case::FlowSpec,
+                RibUpdate::RoutesReceived {
+                    flowspec_announced: a,
+                    flowspec_withdrawn: w,
+                    ..
+                },
+            ) => one_key(
+                &a,
+                &w,
+                announced,
+                |r| format!("{:?}", (r.afi, &r.rule)),
+                |k| format!("{:?}", (k.afi, &k.rule)),
+            ),
+            (
+                Case::Evpn,
+                RibUpdate::RoutesReceived {
+                    evpn_announced: a,
+                    evpn_withdrawn: w,
+                    ..
+                },
+            ) => one_key(
+                &a,
+                &w,
+                announced,
+                |r| format!("{:?}", r.key()),
+                |k| format!("{k:?}"),
+            ),
+            (
+                Case::BgpLs,
+                RibUpdate::BgpLsRoutesReceived {
+                    announced: a,
+                    withdrawn: w,
+                    ..
+                },
+            ) => one_key(
+                &a,
+                &w,
+                announced,
+                |r| format!("{:?}", r.key()),
+                |k| format!("{k:?}"),
+            ),
+            (
+                Case::Vpn,
+                RibUpdate::VpnRoutesReceived {
+                    announced: a,
+                    withdrawn: w,
+                    ..
+                },
+            ) => one_key(
+                &a,
+                &w,
+                announced,
+                |r| format!("{:?}", r.key()),
+                |k| format!("{k:?}"),
+            ),
+            (
+                Case::Labeled,
+                RibUpdate::LabeledRoutesReceived {
+                    announced: a,
+                    withdrawn: w,
+                    ..
+                },
+            ) => one_key(
+                &a,
+                &w,
+                announced,
+                |r| format!("{:?}", r.key()),
+                |k| format!("{k:?}"),
+            ),
+            (
+                Case::Rtc,
+                RibUpdate::RtcRoutesReceived {
+                    announced: a,
+                    withdrawn: w,
+                    ..
+                },
+            ) => one_key(
+                &a,
+                &w,
+                announced,
+                |r| format!("{:?}", r.key()),
+                |k| format!("{k:?}"),
+            ),
+            _ => panic!("{case:?}: wrong RIB family"),
+        }
+    }
+
+    for case in [
+        Case::UnicastV4,
+        Case::UnicastV6,
+        Case::FlowSpec,
+        Case::Evpn,
+        Case::BgpLs,
+        Case::Vpn,
+        Case::Labeled,
+        Case::Rtc,
+    ] {
+        let mp = reach(case);
+        let family = (mp.afi, mp.safi);
+        let attrs = [
+            nonunicast_accepted_attrs(),
+            vec![PathAttribute::MpReachNlri(Box::new(mp.clone()))],
+        ]
+        .concat();
+        let clean = UpdateMessage::build(&[], &[], &attrs, true, false, Ipv4UnicastMode::MpReach);
+
+        let (mut session, mut rib_rx) = make_test_session_with_rib(65001, 65002);
+        let (client, _server) = connected_stream_pair().await;
+        session.test_install_stream(client);
+        establish_test_session(&mut session, 65002).await;
+        let mut negotiated = negotiated_session(65002, false);
+        negotiated.negotiated_families = vec![family];
+        install_test_negotiated_session(&mut session, negotiated);
+        rfc7606_drain(&mut rib_rx);
+
+        session.process_update(clean.clone()).await;
+        let accepted = route_key(case, rib_rx.try_recv().expect("accepted route"), true);
+        assert_eq!(session.fsm.state(), SessionState::Established, "{case:?}");
+        assert!(rib_rx.try_recv().is_err(), "{case:?}: extra RIB message");
+
+        let mut malformed = clean.path_attributes.to_vec();
+        malformed.extend([0x80, 4, 3, 0, 0, 1]); // malformed MED
+        session
+            .process_update(UpdateMessage {
+                withdrawn_routes: Bytes::new(),
+                path_attributes: Bytes::from(malformed),
+                nlri: Bytes::new(),
+            })
+            .await;
+        assert_eq!(session.fsm.state(), SessionState::Established, "{case:?}");
+        let withdrawn = route_key(case, rib_rx.try_recv().expect("withdrawn route"), false);
+        assert_eq!(withdrawn, accepted, "{case:?}: exact accepted key");
+        assert!(rib_rx.try_recv().is_err(), "{case:?}: extra RIB message");
+        assert_single_malformed_disposition(&session, "treat_as_withdraw");
+
+        let (mut session, mut rib_rx) = make_test_session_with_rib(65001, 65002);
+        let (client, _server) = connected_stream_pair().await;
+        session.test_install_stream(client);
+        establish_test_session(&mut session, 65002).await;
+        let mut negotiated = negotiated_session(65002, false);
+        negotiated.negotiated_families = vec![family];
+        install_test_negotiated_session(&mut session, negotiated);
+        rfc7606_drain(&mut rib_rx);
+        let empty = empty_nonunicast_reach(mp.afi, mp.safi, mp.next_hop);
+        let attrs = [
+            nonunicast_accepted_attrs(),
+            vec![PathAttribute::MpReachNlri(Box::new(empty))],
+        ]
+        .concat();
+        let clean = UpdateMessage::build(&[], &[], &attrs, true, false, Ipv4UnicastMode::MpReach);
+        let mut malformed = clean.path_attributes.to_vec();
+        malformed.extend([0x80, 4, 3, 0, 0, 1]);
+        session
+            .process_update(UpdateMessage {
+                withdrawn_routes: Bytes::new(),
+                path_attributes: Bytes::from(malformed),
+                nlri: Bytes::new(),
+            })
+            .await;
+        assert_ne!(session.fsm.state(), SessionState::Established, "{case:?}");
+        assert_single_malformed_disposition(&session, "session_reset");
+    }
+}
+
 /// RFC 7606 §7.11 reserves reset for MP syntax that prevents reliable NLRI
 /// parsing. A structurally complete `MP_REACH` with an invalid unspecified
 /// IPv6 next hop is instead treat-as-withdraw: the exact accepted replacement
