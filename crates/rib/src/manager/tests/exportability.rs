@@ -1498,6 +1498,99 @@ async fn grouped_link_local_scope_change_withdraws_and_restores_with_fixed_profi
     handle.await.unwrap();
 }
 
+/// A refresh must withdraw a previously delivered row when its exact probe
+/// starts failing, but never withdraw an already rejected row again. Removing
+/// lazy current-group prior materialization makes the first refresh fail.
+#[tokio::test]
+async fn grouped_refresh_probe_failure_withdraws_once_and_recovers_like_private() {
+    let mut streams = Vec::new();
+    for force_ungrouped in [false, true] {
+        let (tx, rx) = mpsc::channel(64);
+        let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+        manager.test_force_ungrouped = force_ungrouped;
+        let handle = tokio::spawn(manager.run());
+        let peer = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 51));
+        let source = Ipv4Addr::new(198, 51, 100, 51);
+        let delivered = make_route(Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24), source);
+        let rejected = make_route(Ipv4Prefix::new(Ipv4Addr::new(203, 0, 114, 0), 24), source);
+        let delivered_key = ExactExportKey::Unicast(delivered.prefix, delivered.path_id);
+        let rejected_key = ExactExportKey::Unicast(rejected.prefix, rejected.path_id);
+        let encoder = MockExactExportEncoder::accepting(51);
+        encoder.set_profile(51, [rejected_key.clone()]);
+        let mut output = peer_up_with_encoder(&tx, peer, encoder.clone()).await;
+        if !force_ungrouped {
+            assert_eq!(update_group(&tx, peer).await, "group:0");
+        }
+        tx.send(RibUpdate::RoutesReceived {
+            session_id: 0,
+            peer: IpAddr::V4(source),
+            announced: vec![delivered.clone(), rejected],
+            withdrawn: vec![],
+            flowspec_announced: vec![],
+            flowspec_withdrawn: vec![],
+            evpn_announced: vec![],
+            evpn_withdrawn: vec![],
+            validated_with: None,
+        })
+        .await
+        .unwrap();
+        let initial = output.recv().await.unwrap();
+        assert_eq!(initial.announce.len(), 1);
+        assert_eq!(advertised_count(&tx, peer).await, 1);
+        encoder.set_profile(52, [delivered_key, rejected_key]);
+        let mut stream = Vec::new();
+        for phase in 0..3 {
+            if phase == 2 {
+                encoder.set_profile(53, []);
+            }
+            let queued = Arc::new(std::sync::atomic::AtomicBool::new(true));
+            tx.send(RibUpdate::RouteRefreshRequest {
+                peer,
+                session_id: 7,
+                afi: Afi::Ipv4,
+                safi: Safi::Unicast,
+                queued: Arc::clone(&queued),
+            })
+            .await
+            .unwrap();
+            let refresh = output.recv().await.unwrap();
+            assert!(!queued.load(Ordering::Acquire));
+            assert_eq!(refresh.end_of_rib, ipv4_sendable());
+            assert_eq!(
+                refresh.refresh_markers,
+                vec![
+                    (
+                        Afi::Ipv4,
+                        Safi::Unicast,
+                        rustbgpd_wire::RouteRefreshSubtype::BoRR
+                    ),
+                    (
+                        Afi::Ipv4,
+                        Safi::Unicast,
+                        rustbgpd_wire::RouteRefreshSubtype::EoRR
+                    ),
+                ]
+            );
+            if phase == 0 {
+                assert_eq!(
+                    refresh.withdraw,
+                    vec![(delivered.prefix, delivered.path_id)]
+                );
+            } else {
+                assert_eq!(refresh.withdraw, Vec::new());
+            }
+            let expected = if phase == 2 { 2 } else { 0 };
+            assert_eq!(refresh.announce.len(), expected);
+            assert_eq!(advertised_count(&tx, peer).await, expected);
+            stream.push(super::update_groups_oracle::normalize(&refresh));
+        }
+        streams.push(stream);
+        drop(tx);
+        handle.await.unwrap();
+    }
+    assert_eq!(streams[0], streams[1]);
+}
+
 #[tokio::test]
 #[expect(
     clippy::too_many_lines,

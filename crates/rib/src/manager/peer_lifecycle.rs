@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::net::{IpAddr, Ipv4Addr};
 use std::sync::Arc;
 
@@ -55,23 +55,56 @@ enum ActiveSessionRegistration {
 /// per-member commits. A member's commit reuses the cohort's probe and OTC
 /// proof and touches only its own residue, so it carries no table-sized
 /// scan of its own.
-const MAX_JOIN_COHORT: usize = 64;
+pub(super) const MAX_JOIN_COHORT: usize = 64;
 
 /// Most queued registrations one turn's cohort admission examines; the rest
 /// stay queued in order. Bounds admission's own work when the queue head
 /// holds joiners that cannot share the leader's replay.
 pub(super) const MAX_JOIN_COHORT_EXAMINED: usize = 256;
 
-/// The shared initial unicast replay of one joiner cohort: the plain group
-/// table outside selection-deferred families, with the encode cell and
+/// The shared unicast replay of one join or refresh cohort: a plain group
+/// table inventory, with the encode cell and
 /// exact-export probe cache every member's commit reuses. Each member's
 /// envelope excludes its own source in transport (ADR-0109).
-struct JoinCohortReplay {
-    gid: usize,
-    announce: Arc<Vec<crate::route::Route>>,
-    next_hop_override: Arc<Vec<Option<rustbgpd_policy::NextHopAction>>>,
-    encode: Arc<crate::update::SharedGroupEncode>,
-    probe_cache: super::distribution::SharedUnicastProbeCache,
+pub(super) struct GroupReplay {
+    pub(super) gid: usize,
+    pub(super) announce: Arc<Vec<crate::route::Route>>,
+    pub(super) next_hop_override: Arc<Vec<Option<rustbgpd_policy::NextHopAction>>>,
+    pub(super) encode: Arc<crate::update::SharedGroupEncode>,
+    pub(super) probe_cache: super::distribution::SharedUnicastProbeCache,
+    only_source: Option<IpAddr>,
+}
+
+impl GroupReplay {
+    /// Empty and entirely own-sourced inventories keep the ordinary path.
+    pub(super) fn has_routes_for(&self, peer: IpAddr) -> bool {
+        !self.announce.is_empty() && self.only_source != Some(peer)
+    }
+}
+
+/// One control-tag inventory answers every RS ASN admitted to this replay.
+/// Both the source and post-policy tags must leave the member's rows intact.
+pub(super) fn group_replay_rs_inert(
+    group: &super::update_groups::GroupRibOut,
+    rs_asn: Option<u32>,
+    tags: &mut Option<super::distribution::rs_control::ControlTagInventory>,
+    checkpoint: &mut impl FnMut(),
+) -> bool {
+    rs_asn.is_none_or(|rs_asn| {
+        !tags
+            .get_or_insert_with(|| {
+                let mut tags = super::distribution::rs_control::ControlTagInventory::default();
+                for route in group.table.iter() {
+                    checkpoint();
+                    let (communities, large_communities) =
+                        group.source_control((route.prefix, route.path_id));
+                    tags.record(communities, large_communities);
+                    tags.record(route.communities(), route.large_communities());
+                }
+                tags
+            })
+            .tagged(rs_asn)
+    })
 }
 
 impl RibManager {
@@ -1438,13 +1471,11 @@ impl RibManager {
     /// over the group table, whatever the number of distinct RS ASNs, and
     /// at most [`MAX_JOIN_COHORT_EXAMINED`] queued entries examined.
     fn take_join_cohort(&mut self, leader: IpAddr) -> Vec<IpAddr> {
-        use super::distribution::rs_control::ControlTagInventory;
-
         if self.pending_initial_registrations.is_empty() {
             return Vec::new();
         }
         let readiness = self.replacement_readiness.clone();
-        let checkpoint = || {
+        let mut checkpoint = || {
             super::replacement_readiness_checkpoint_at(&readiness, "initial_group_replay", false);
         };
         let Some(gid) = self.grouped_member_of(leader) else {
@@ -1466,30 +1497,9 @@ impl RibManager {
         };
         // One table pass answers every RS ASN in the queue (built on first
         // need: most turns have no rs-control joiner).
-        #[cfg(test)]
-        let mut scans = 0;
-        let mut tags: Option<ControlTagInventory> = None;
-        let mut rs_inert = |rs_asn: Option<u32>| {
-            rs_asn.is_none_or(|rs_asn| {
-                !tags
-                    .get_or_insert_with(|| {
-                        #[cfg(test)]
-                        {
-                            scans += 1;
-                        }
-                        let mut tags = ControlTagInventory::default();
-                        for route in group.table.iter() {
-                            checkpoint();
-                            let (communities, large_communities) =
-                                group.source_control((route.prefix, route.path_id));
-                            tags.record(communities, large_communities);
-                            tags.record(route.communities(), route.large_communities());
-                        }
-                        tags
-                    })
-                    .tagged(rs_asn)
-            })
-        };
+        let mut tags = None;
+        let mut rs_inert =
+            |rs_asn: Option<u32>| group_replay_rs_inert(group, rs_asn, &mut tags, &mut checkpoint);
         if !rs_inert(profile.rs_control_asn) {
             return Vec::new();
         }
@@ -1530,7 +1540,7 @@ impl RibManager {
         }
         #[cfg(test)]
         {
-            self.join_cohort_tag_scans += scans;
+            self.join_cohort_tag_scans += usize::from(tags.is_some());
         }
         members
     }
@@ -1556,41 +1566,13 @@ impl RibManager {
                 regrouped.push(peer);
             }
         }
-        let readiness = self.replacement_readiness.clone();
-        let checkpoint = || {
-            super::replacement_readiness_checkpoint_at(&readiness, "initial_group_replay", false);
-        };
-        let group = self.group_ribs.get(&gid).expect("cohort group exists");
-        let mut announce = Vec::new();
-        let mut next_hop_override = Vec::new();
-        for route in group.table.iter() {
-            checkpoint();
-            if self.selection_deferred(prefix_family(&route.prefix)) {
-                continue;
-            }
-            announce.push(route.clone());
-            next_hop_override.push(group.nh_override((route.prefix, route.path_id)));
-        }
+        let mut replay = self.build_group_replay(gid, None);
         // A member that sourced every replayed row would get an envelope
         // carrying nothing after exclusion; the ordinary path sends it
         // none, so keep it there.
-        let mut own_rows: HashMap<IpAddr, usize> = cohort.iter().map(|peer| (*peer, 0)).collect();
-        for route in &announce {
-            checkpoint();
-            if let Some(count) = own_rows.get_mut(&route.peer) {
-                *count += 1;
-            }
-        }
-        let keeps_rows =
-            |peer: &IpAddr| own_rows.get(peer).is_some_and(|own| *own < announce.len());
-        let (sharing, solo): (Vec<_>, Vec<_>) = cohort.into_iter().partition(keeps_rows);
-        let mut replay = JoinCohortReplay {
-            gid,
-            announce: announce.into(),
-            next_hop_override: next_hop_override.into(),
-            encode: Arc::new(crate::update::SharedGroupEncode::default()),
-            probe_cache: super::distribution::SharedUnicastProbeCache::default(),
-        };
+        let (sharing, solo): (Vec<_>, Vec<_>) = cohort
+            .into_iter()
+            .partition(|peer| replay.has_routes_for(*peer));
         debug!(
             %leader,
             group = gid,
@@ -1604,6 +1586,49 @@ impl RibManager {
         drop(replay);
         for peer in solo.into_iter().chain(regrouped) {
             self.send_initial_table_with_readiness(peer, None);
+        }
+    }
+
+    /// Build one plain-group inventory for a join (all released families) or
+    /// a refresh (one already released family). No member state is committed.
+    pub(super) fn build_group_replay(
+        &self,
+        gid: usize,
+        family: Option<(Afi, Safi)>,
+    ) -> GroupReplay {
+        let group = self.group_ribs.get(&gid).expect("cohort group exists");
+        let label = if family.is_some() {
+            "refresh"
+        } else {
+            "initial_group_replay"
+        };
+        let mut announce = Vec::new();
+        let mut next_hop_override = Vec::new();
+        let mut only_source = None;
+        for route in group.table.iter() {
+            super::replacement_readiness_checkpoint_at(&self.replacement_readiness, label, false);
+            let route_family = prefix_family(&route.prefix);
+            if family.map_or_else(
+                || self.selection_deferred(route_family),
+                |family| family != route_family,
+            ) {
+                continue;
+            }
+            if announce.is_empty() {
+                only_source = Some(route.peer);
+            } else if only_source != Some(route.peer) {
+                only_source = None;
+            }
+            announce.push(route.clone());
+            next_hop_override.push(group.nh_override((route.prefix, route.path_id)));
+        }
+        GroupReplay {
+            gid,
+            announce: announce.into(),
+            next_hop_override: next_hop_override.into(),
+            encode: Arc::new(crate::update::SharedGroupEncode::default()),
+            probe_cache: super::distribution::SharedUnicastProbeCache::default(),
+            only_source,
         }
     }
 
@@ -1705,7 +1730,7 @@ impl RibManager {
     fn send_initial_table_with_readiness(
         &mut self,
         peer: IpAddr,
-        cohort: Option<&mut JoinCohortReplay>,
+        cohort: Option<&mut GroupReplay>,
     ) {
         let readiness = self.replacement_readiness.clone();
         let checkpoint_at = |stage| {

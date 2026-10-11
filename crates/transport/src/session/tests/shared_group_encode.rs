@@ -106,6 +106,224 @@ fn shared_query_update(
     (typed, update, chunks)
 }
 
+fn refresh_frame_kind(mut frame: Bytes) -> String {
+    match rustbgpd_wire::decode_message(&mut frame, rustbgpd_wire::MAX_MESSAGE_LEN).unwrap() {
+        Message::RouteRefresh(refresh) => format!("refresh:{}", refresh.subtype_raw),
+        Message::Update(update) => {
+            let parsed = update.parse(true, false, &[]).unwrap();
+            format!(
+                "update:{}/{}",
+                parsed.withdrawn.len(),
+                parsed.announced.len()
+            )
+        }
+        other => panic!("unexpected refresh frame: {other:?}"),
+    }
+}
+
+/// A one-slot writer makes each marker, withdrawal and shared chunk a
+/// separate admission. Both producers and followers retain the envelope
+/// through its terminal; a successful eager producer never repeats a chunk.
+#[expect(
+    clippy::too_many_lines,
+    reason = "one-slot producer and follower matrix keeps marker order, exact prefix coverage and terminal ownership in one scenario"
+)]
+#[tokio::test]
+async fn shared_group_refresh_terminals_follow_chunks_at_one_slot_capacity() {
+    for enhanced in [false, true] {
+        for with_withdrawal in [false, true] {
+            let shared = Arc::new(rustbgpd_rib::SharedGroupEncode::default());
+            let routes: Vec<_> = (0..2)
+                .map(|index| {
+                    let mut route = make_route(100);
+                    route.prefix = Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(10, 1, index, 0), 24));
+                    AttrSet::edit(&mut route.attributes, |attrs| {
+                        attrs.push(PathAttribute::Med(u32::from(index)));
+                    });
+                    route
+                })
+                .collect();
+            for producer in [true, false] {
+                let (mut member, _commands, _) = shared_fairness_member();
+                if enhanced {
+                    install_enhanced_refresh_session(
+                        &mut member,
+                        vec![(Afi::Ipv4, Safi::Unicast)],
+                        false,
+                    );
+                }
+                let (bulk, mut frames) = mpsc::channel(1);
+                member.writer_bulk_tx = Some(bulk);
+                let mut update =
+                    shared_group_envelope(&member, &shared, Ipv4Addr::new(10, 43, 0, 254), &routes);
+                update.end_of_rib = vec![(Afi::Ipv4, Safi::Unicast)];
+                if enhanced {
+                    update.refresh_markers = vec![
+                        (Afi::Ipv4, Safi::Unicast, RouteRefreshSubtype::BoRR),
+                        (Afi::Ipv4, Safi::Unicast, RouteRefreshSubtype::EoRR),
+                    ];
+                }
+                if with_withdrawal {
+                    update.withdraw = vec![(
+                        Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(100, 64, 1, 0), 24)),
+                        0,
+                    )];
+                }
+                let before = shared.cell.get().cloned();
+                member.handle_outbound_route_update(update).await;
+                assert!(
+                    shared.cell.get().is_some(),
+                    "fixture must use shared encoding"
+                );
+                if !producer {
+                    assert!(Arc::ptr_eq(
+                        before.as_ref().unwrap(),
+                        shared.cell.get().unwrap()
+                    ));
+                }
+                let mut observed = Vec::new();
+                let mut announced = std::collections::BTreeMap::new();
+                for _ in 0..16 {
+                    while let Ok(frame) = frames.try_recv() {
+                        if frame[18] == 2 {
+                            let parsed = parse_frame(&frame, false);
+                            for entry in parsed.announced {
+                                let index = entry.prefix.addr.octets()[2];
+                                assert!(
+                                    parsed
+                                        .attributes
+                                        .contains(&PathAttribute::Med(u32::from(index)))
+                                );
+                                *announced.entry(entry.prefix.to_string()).or_insert(0_usize) += 1;
+                            }
+                        }
+                        observed.push(refresh_frame_kind(frame));
+                    }
+                    if member.pending_outbound.is_none() {
+                        break;
+                    }
+                    member.advance_pending_outbound();
+                }
+                assert!(
+                    member.pending_outbound.is_none(),
+                    "terminal must eventually admit"
+                );
+                assert_eq!(
+                    announced,
+                    routes
+                        .iter()
+                        .map(|route| (route.prefix.to_string(), 1))
+                        .collect(),
+                    "every successful shared announcement appears exactly once"
+                );
+                let mut expected = Vec::new();
+                if enhanced {
+                    expected.push("refresh:1".to_owned());
+                }
+                if with_withdrawal {
+                    expected.push("update:1/0".to_owned());
+                }
+                expected.extend(["update:0/1".to_owned(), "update:0/1".to_owned()]);
+                expected.push(if enhanced { "refresh:2" } else { "update:0/0" }.to_owned());
+                assert_eq!(
+                    observed, expected,
+                    "producer={producer}, enhanced={enhanced}, withdrawal={with_withdrawal}"
+                );
+                // Only after the terminal has admitted may a later envelope
+                // use the slot; its marker cannot appear inside this replay.
+                member
+                    .test_drain_outbound(OutboundRouteUpdate {
+                        end_of_rib: vec![(Afi::Ipv4, Safi::Unicast)],
+                        ..OutboundRouteUpdate::default()
+                    })
+                    .await;
+                assert_eq!(refresh_frame_kind(frames.try_recv().unwrap()), "update:0/0");
+            }
+        }
+    }
+}
+
+/// Both later envelopes are queued while the initial replay owns a full
+/// writer slot. The real actor must admit its `EoR` before the later `BoRR`.
+#[tokio::test]
+async fn shared_group_initial_eor_precedes_queued_refresh_in_real_actor() {
+    for producer in [true, false] {
+        let (mut member, commands, _rib_rx) = make_test_session_with_channels(65001, 65002, 64);
+        let (client, _wire) = connected_stream_pair().await;
+        member.test_install_stream(client);
+        member.config.route_server_client = true;
+        establish_test_session(&mut member, 65002).await;
+        install_enhanced_refresh_session(&mut member, vec![(Afi::Ipv4, Safi::Unicast)], true);
+        member.timers.hold = None;
+        member.writer_join.take().unwrap().abort();
+        let (bulk, mut frames) = mpsc::channel(1);
+        member.writer_bulk_tx = Some(bulk);
+        let routes = [make_route(100)];
+        let mut initial = if producer {
+            shared_group_envelope(
+                &member,
+                &Arc::new(rustbgpd_rib::SharedGroupEncode::default()),
+                Ipv4Addr::new(10, 43, 0, 254),
+                &routes,
+            )
+        } else {
+            let (typed, update, chunks) = shared_query_update(&member, &routes);
+            typed.test_publish(chunks);
+            typed.test_finish(super::shared_group::StreamTerminal::Complete);
+            update
+        };
+        initial.end_of_rib = vec![(Afi::Ipv4, Safi::Unicast)];
+        let mut refresh = shared_group_envelope(
+            &member,
+            initial.shared_group_encode.as_ref().unwrap(),
+            Ipv4Addr::new(10, 43, 0, 254),
+            &routes,
+        );
+        refresh.refresh_markers = vec![
+            (Afi::Ipv4, Safi::Unicast, RouteRefreshSubtype::BoRR),
+            (Afi::Ipv4, Safi::Unicast, RouteRefreshSubtype::EoRR),
+        ];
+        let outbound = member.outbound_tx.clone();
+        outbound.try_send(refresh).unwrap();
+        outbound
+            .try_send(OutboundRouteUpdate {
+                end_of_rib: vec![(Afi::Ipv4, Safi::Unicast)],
+                ..OutboundRouteUpdate::default()
+            })
+            .unwrap();
+        member.handle_outbound_route_update(initial).await;
+        assert!(member.pending_outbound.is_some());
+        assert_eq!(outbound.capacity(), outbound.max_capacity() - 2);
+        let actor = tokio::spawn(async move { member.run().await });
+        for expected in [
+            "update:0/1",
+            "update:0/0",
+            "refresh:1",
+            "update:0/1",
+            "refresh:2",
+            "update:0/0",
+        ] {
+            let frame = tokio::time::timeout(Duration::from_secs(2), frames.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(refresh_frame_kind(frame), expected, "producer={producer}");
+        }
+        let (reply, response) = oneshot::channel();
+        commands
+            .send(PeerCommand::QueryState { reply })
+            .await
+            .unwrap();
+        assert_eq!(response.await.unwrap().fsm_state, SessionState::Established);
+        assert!(
+            frames.try_recv().is_err(),
+            "no duplicate successful replay frame"
+        );
+        commands.send(PeerCommand::Shutdown).await.unwrap();
+        actor.await.unwrap().unwrap();
+    }
+}
+
 /// An admitted import snapshot must not spend its complete RPC budget waiting
 /// for an unrelated shared-output stream to reach its terminal.
 #[expect(
@@ -786,6 +1004,10 @@ async fn shared_group_elected_encoder_keeps_mutation_before_later_read() {
 
 /// Dropping an initialized producer at its real yield wakes a waiting follower,
 /// which retains source exclusion while replaying the complete local fallback.
+#[expect(
+    clippy::too_many_lines,
+    reason = "real-yield cancellation proof keeps producer guard drop, follower wakeup, complete fallback and terminal order together"
+)]
 #[tokio::test]
 async fn shared_group_elected_encoder_cancellation_wakes_follower_and_falls_back() {
     use super::shared_group::{ProgressiveUnicastEncode, StreamTerminal};
@@ -804,10 +1026,17 @@ async fn shared_group_elected_encoder_cancellation_wakes_follower_and_falls_back
     }
     let (mut encoder, _commands, _own_frames) = shared_fairness_member();
     let (mut follower, _commands, mut frames) = shared_fairness_member();
+    for member in [&mut encoder, &mut follower] {
+        install_enhanced_refresh_session(member, vec![(Afi::Ipv4, Safi::Unicast)], false);
+    }
     let shared = Arc::new(rustbgpd_rib::SharedGroupEncode::default());
     let routes = shared_fairness_routes();
     let excluded = Ipv4Addr::new(10, 44, 0, 2);
-    let update = shared_group_envelope(&encoder, &shared, excluded, &routes);
+    let mut update = shared_group_envelope(&encoder, &shared, excluded, &routes);
+    update.refresh_markers = vec![
+        (Afi::Ipv4, Safi::Unicast, RouteRefreshSubtype::BoRR),
+        (Afi::Ipv4, Safi::Unicast, RouteRefreshSubtype::EoRR),
+    ];
     let mut producer = Box::pin(encoder.handle_outbound_route_update(update));
     assert!(
         producer
@@ -825,8 +1054,14 @@ async fn shared_group_elected_encoder_cancellation_wakes_follower_and_falls_back
         stream.test_snapshot(),
         (2 * super::shared_group::PROGRESSIVE_SLICE_ROUTES, None)
     );
-    let update = shared_group_envelope(&follower, &shared, excluded, &routes);
+    let mut update = shared_group_envelope(&follower, &shared, excluded, &routes);
+    update.refresh_markers = vec![
+        (Afi::Ipv4, Safi::Unicast, RouteRefreshSubtype::BoRR),
+        (Afi::Ipv4, Safi::Unicast, RouteRefreshSubtype::EoRR),
+    ];
     follower.handle_outbound_route_update(update).await;
+    assert_eq!(refresh_frame_kind(frames.try_recv().unwrap()), "refresh:1");
+    follower.advance_pending_outbound();
     assert_eq!(follower.updates_sent, 2048);
     follower.advance_pending_outbound();
     assert_eq!(follower.updates_sent, 4096);
@@ -860,7 +1095,15 @@ async fn shared_group_elected_encoder_cancellation_wakes_follower_and_falls_back
         follower.advance_pending_outbound();
     }
     let mut counts = std::collections::BTreeMap::new();
+    let mut ended = false;
     while let Ok(frame) = frames.try_recv() {
+        if frame[18] == 5 {
+            assert!(!ended, "one EoRR after the entire fallback");
+            assert_eq!(refresh_frame_kind(frame), "refresh:2");
+            ended = true;
+            continue;
+        }
+        assert!(!ended, "no announcement after EoRR");
         let parsed = parse_frame(&frame, false);
         for entry in parsed.announced {
             let index = u32::from(entry.prefix.addr) & 0x00ff_ffff;
@@ -878,6 +1121,7 @@ async fn shared_group_elected_encoder_cancellation_wakes_follower_and_falls_back
         2 * super::shared_group::PROGRESSIVE_SLICE_ROUTES
     );
     assert_eq!(counts.values().filter(|&&count| count == 1).count(), 1);
+    assert!(ended, "fallback retains the terminal marker");
 }
 
 #[tokio::test]

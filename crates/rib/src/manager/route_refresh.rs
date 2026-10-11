@@ -7,7 +7,8 @@ use tracing::{debug, info, warn};
 
 use super::distribution::OutboundCommitBatch;
 use super::helpers::{afi_safi_label, gauge_val, prefix_family};
-use super::{PolicyFilteredRouteKey, RibManager};
+use super::peer_lifecycle::{GroupReplay, MAX_JOIN_COHORT, group_replay_rs_inert};
+use super::{PolicyFilteredRouteKey, RibManager, RibUpdate};
 use crate::ERR_REFRESH_TIMEOUT;
 use crate::adj_rib_out::AdjRibOut;
 use crate::route::{BgpLsFamily, FlowSpecKey, FlowSpecRoute, FlowSpecRouteKey};
@@ -563,7 +564,121 @@ impl RibManager {
 
     pub(super) fn handle_route_refresh_request(&mut self, peer: IpAddr, afi: Afi, safi: Safi) {
         info!(%peer, ?afi, ?safi, "handling route refresh request");
-        self.send_route_refresh_response(peer, afi, safi);
+        // The leader's dispatch has already released its queued flag and
+        // checked its session. One readiness owner covers admission, the
+        // shared inventory and every per-member commit; mutations stay queued.
+        super::with_executor_handoff(|| {
+            self.with_replacement_readiness(|manager| {
+                let kind = FamilyReplayKind::PeerRefresh {
+                    suppress_eor: false,
+                };
+                if let Some((gid, peers)) = manager.take_refresh_cohort(peer, (afi, safi)) {
+                    let mut replay = manager.build_group_replay(gid, Some((afi, safi)));
+                    for peer in peers {
+                        let cohort = replay.has_routes_for(peer).then_some(&mut replay);
+                        manager.send_route_refresh_response_with_readiness(
+                            peer, afi, safi, kind, cohort,
+                        );
+                    }
+                } else {
+                    manager.send_route_refresh_response_with_readiness(peer, afi, safi, kind, None);
+                }
+            });
+        });
+    }
+
+    /// Take only a compatible prefix of the primary FIFO, never crossing a
+    /// mutation or moving an incompatible request out of its queue position.
+    /// Unlike deferred joins, refreshes already have live registrations and
+    /// prior advertised state. Late arrivals and a repeated peer need a later
+    /// replay, even if the leader's released flag lets them enqueue now.
+    fn take_refresh_cohort(
+        &mut self,
+        leader: IpAddr,
+        family: (Afi, Safi),
+    ) -> Option<(usize, Vec<IpAddr>)> {
+        let queued = self.primary_backlog().min(MAX_JOIN_COHORT - 1);
+        if queued == 0
+            || !matches!(family, (Afi::Ipv4 | Afi::Ipv6, Safi::Unicast))
+            || self.selection_convergence_held(family)
+            || self.test_ingest_stall.is_some()
+            || !self.pending_route_batches.is_empty()
+            || !self.outbound_session_ids.contains_key(&leader)
+        {
+            return None;
+        }
+        let gid = self.grouped_member_of(leader)?;
+        if self.group_ribs.get(&gid)?.per_client_best {
+            return None;
+        }
+        let readiness = self.replacement_readiness.clone();
+        let mut checkpoint = || {
+            super::replacement_readiness_checkpoint_at(&readiness, "refresh", false);
+        };
+        let mut tags = None;
+        let mut peers = vec![leader];
+        for _ in 0..queued {
+            if self.conditional_expiry_cutoff == Some(0) {
+                break;
+            }
+            if self.primary_lookahead.is_none() {
+                self.primary_lookahead = self.rx.try_recv().ok();
+            }
+            let Some(RibUpdate::RouteRefreshRequest {
+                peer,
+                session_id,
+                afi,
+                safi,
+                ..
+            }) = self.primary_lookahead.as_ref()
+            else {
+                break;
+            };
+            if (*afi, *safi) != family
+                || peers.contains(peer)
+                || self.outbound_session_ids.get(peer) != Some(session_id)
+                || self.grouped_member_of(*peer) != Some(gid)
+            {
+                break;
+            }
+            let group = self.group_ribs.get(&gid).expect("refresh group exists");
+            if !group_replay_rs_inert(
+                group,
+                self.peer_rs_control.get(&leader).copied(),
+                &mut tags,
+                &mut checkpoint,
+            ) || !group_replay_rs_inert(
+                group,
+                self.peer_rs_control.get(peer).copied(),
+                &mut tags,
+                &mut checkpoint,
+            ) {
+                break;
+            }
+            let update = self
+                .primary_lookahead
+                .take()
+                .expect("refresh admitted above");
+            self.count_conditional_expiry_admission();
+            self.advance_route_pages_for_update(&update);
+            let RibUpdate::RouteRefreshRequest {
+                peer,
+                session_id,
+                queued,
+                ..
+            } = update
+            else {
+                unreachable!("refresh admitted above");
+            };
+            queued.store(false, std::sync::atomic::Ordering::Release);
+            if !self.stale_session_message(peer, session_id, "RouteRefreshRequest", super::Refresh)
+            {
+                self.advance_advertised_pages();
+                info!(%peer, afi = ?family.0, safi = ?family.1, "handling route refresh request");
+                peers.push(peer);
+            }
+        }
+        (peers.len() > 1).then_some((gid, peers))
     }
 
     pub(super) fn handle_begin_route_refresh(&mut self, peer: IpAddr, afi: Afi, safi: Safi) {
@@ -777,7 +892,13 @@ impl RibManager {
     ) -> FamilyReplayOutcome {
         super::with_executor_handoff(|| {
             self.with_replacement_readiness(|manager| {
-                manager.send_route_refresh_response_with_readiness(peer, afi, safi, replay_kind)
+                manager.send_route_refresh_response_with_readiness(
+                    peer,
+                    afi,
+                    safi,
+                    replay_kind,
+                    None,
+                )
             })
         })
     }
@@ -792,6 +913,7 @@ impl RibManager {
         afi: Afi,
         safi: Safi,
         replay_kind: FamilyReplayKind,
+        cohort: Option<&mut GroupReplay>,
     ) -> FamilyReplayOutcome {
         self.replacement_checkpoint(true);
         let family = (afi, safi);
@@ -1330,43 +1452,46 @@ impl RibManager {
                 // replay — source-suppressed entries skipped, announced
                 // tagged entries rewritten per target (prepend from the
                 // captured source, scrub post-policy).
-                let rs_control = rs_control_asn.zip(target_peer_asn);
-                for staged in group.table.iter().inspect(|_| {
-                    super::replacement_readiness_checkpoint_at(
-                        &self.replacement_readiness,
-                        "refresh",
-                        false,
-                    );
-                }) {
-                    if prefix_family(&staged.prefix) != family {
-                        continue;
+                if cohort.is_none() {
+                    let rs_control = rs_control_asn.zip(target_peer_asn);
+                    for staged in group.table.iter().inspect(|_| {
+                        super::replacement_readiness_checkpoint_at(
+                            &self.replacement_readiness,
+                            "refresh",
+                            false,
+                        );
+                    }) {
+                        if prefix_family(&staged.prefix) != family {
+                            continue;
+                        }
+                        // adv(m) resolves the slot ([`GroupRibOut::adv_entry`],
+                        // ADR-0126 Decision 4): the staged winner for a
+                        // non-source member, the lane runner-up for the
+                        // winner's own source, nothing when the lane is
+                        // empty. The rs-control decision and the nh residue
+                        // come from the RESOLVED entry.
+                        let Some(entry) = group.adv_entry(peer, &staged.prefix, staged.path_id)
+                        else {
+                            continue;
+                        };
+                        let (source_communities, source_large_communities) =
+                            group.source_control_for_route(entry.route, entry.source_attrs);
+                        if super::distribution::rs_control::rs_control_suppressed(
+                            source_communities,
+                            source_large_communities,
+                            rs_control,
+                        ) {
+                            continue;
+                        }
+                        unicast.next_hop_override.push(entry.nh.cloned());
+                        let mut route = entry.route.clone();
+                        super::distribution::rs_control::rs_control_route_rewrite(
+                            &mut route,
+                            source_large_communities,
+                            rs_control,
+                        );
+                        unicast.announce.push(route);
                     }
-                    // adv(m) resolves the slot ([`GroupRibOut::adv_entry`],
-                    // ADR-0126 Decision 4): the staged winner for a
-                    // non-source member, the lane runner-up for the
-                    // winner's own source, nothing when the lane is
-                    // empty. The rs-control decision and the nh residue
-                    // come from the RESOLVED entry.
-                    let Some(entry) = group.adv_entry(peer, &staged.prefix, staged.path_id) else {
-                        continue;
-                    };
-                    let (source_communities, source_large_communities) =
-                        group.source_control_for_route(entry.route, entry.source_attrs);
-                    if super::distribution::rs_control::rs_control_suppressed(
-                        source_communities,
-                        source_large_communities,
-                        rs_control,
-                    ) {
-                        continue;
-                    }
-                    unicast.next_hop_override.push(entry.nh.cloned());
-                    let mut route = entry.route.clone();
-                    super::distribution::rs_control::rs_control_route_rewrite(
-                        &mut route,
-                        source_large_communities,
-                        rs_control,
-                    );
-                    unicast.announce.push(route);
                 }
                 let mut filtered = group
                     .policy_filtered_for_member_with_checkpoint(peer, &all_prefixes, &mut || {
@@ -1650,8 +1775,19 @@ impl RibManager {
             self.replacement_checkpoint(true);
             return FamilyReplayOutcome::Failed;
         }
+        // Only this shape preserves the current advertised view until the
+        // exact probe: withdrawals can retire rejection-overlay entries,
+        // per-client-best can add OTC withdrawals, and prefix-limit recovery
+        // changes blocking state below. Keep their eager snapshot.
+        let defer_grouped_refresh_prior = unicast_family
+            && matches!(replay_kind, FamilyReplayKind::PeerRefresh { .. })
+            && unicast.withdraw.is_empty()
+            && member_of
+                .and_then(|gid| self.group_ribs.get(&gid))
+                .is_some_and(|group| !group.per_client_best);
         let mut group_prior = HashSet::new();
-        if member_of.is_some()
+        if !defer_grouped_refresh_prior
+            && member_of.is_some()
             && let Some(routes) = self.grouped_advertised_routes(peer)
         {
             group_prior.extend(routes.into_iter().map(|route| {
@@ -1714,17 +1850,40 @@ impl RibManager {
             }
         };
         self.replacement_checkpoint(true);
-        let announce = unicast.announce.into();
+        let announce = cohort.as_deref().map_or_else(
+            || unicast.announce.into(),
+            |shared| std::sync::Arc::clone(&shared.announce),
+        );
         self.replacement_checkpoint(true);
-        let next_hop_override = unicast.next_hop_override.into();
+        let next_hop_override = cohort.as_deref().map_or_else(
+            || unicast.next_hop_override.into(),
+            |shared| std::sync::Arc::clone(&shared.next_hop_override),
+        );
         self.replacement_checkpoint(true);
         super::retire_vec(&mut unicast.policy_filtered, &mut || {
             self.replacement_checkpoint(false);
         });
         super::replacement_readiness_checkpoint(&self.replacement_readiness, true);
+        // Same plain-group proof as the existing join cohort. Refresh keeps
+        // its current-view lazy prior; the join's empty delta prior is wrong.
+        let unicast_otc_prechecked = cohort.is_some();
+        let announce_source_exclusion = cohort.is_some().then_some(peer);
+        let shared_group_encode = cohort
+            .as_deref()
+            .map(|shared| std::sync::Arc::clone(&shared.encode));
+        let shared_unicast_precommit =
+            cohort.map(|shared| super::distribution::SharedUnicastPrecommit {
+                group_id: shared.gid,
+                probe_cache: &mut shared.probe_cache,
+                lazy_group_prior: None,
+            });
         if !self.try_send_and_commit_outbound_update_with_group_prior_and_otc_scope(
             peer,
             OutboundCommitBatch {
+                defer_grouped_refresh_prior,
+                unicast_otc_prechecked,
+                announce_source_exclusion,
+                shared_group_encode,
                 withdraw: unicast.withdraw,
                 end_of_rib,
                 refresh_markers,
@@ -1743,7 +1902,7 @@ impl RibManager {
                 ..OutboundCommitBatch::with_unicast(announce, next_hop_override)
             },
             group_prior,
-            None,
+            shared_unicast_precommit,
             member_of.is_none().then_some(&all_prefixes),
         ) {
             if let Some(blocking) = prior_blocking {

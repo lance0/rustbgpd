@@ -1,0 +1,27 @@
+{
+  "source_sha": "e623cb194475362c122ddbcb6505dca289556eea",
+  "source_tree": "c7ac2fe347ce2351df9ec15d39c34623958f55f9",
+  "source_identity_unchanged_during_gate": true,
+  "just_gate_native_exit": 0,
+  "just_gate_rib_native_exit": 0,
+  "gate_owner_reaped": true,
+  "gate_helpers_absent": true,
+  "normal_source_commit_hooks": {
+    "fmt": "passed",
+    "clippy": "passed"
+  },
+  "normal_source_push_hooks": [
+    "fmt passed",
+    "Clippy passed",
+    "test passed",
+    "doc passed"
+  ],
+  "normal_source_push_exit": 0,
+  "raw_log_sha256": {
+    "gate": "66d9cf8f79cd12dbffad6c955a9eccce21bb06aa7611f1ad53ee54ee76a55349",
+    "gate_rib": "fa1c8c9c7cefdc9c9ed2f9a684ddec823c127a70224768e4b3bdc3951ac14295",
+    "source_commit": "9444d2b9d6dd175128bf05143180da49bdbcf7b1a6a5a2db9b6ee316ddbdc9fa",
+    "source_push": "cc941ea812cf8d8a8e1fa38146b5b6549817a3b6bd1f9deb82c28862533da893"
+  },
+  "scope": "Runtime source validation completed before measurement; receipt-only edits and any later documentation hook skips are separate."
+}

@@ -1,0 +1,5 @@
+published raw-log recomputation: exit 0; exact summary bytes
+published normal/build closure comparison: exit 0; exact report bytes
+negative control wrong exact table: rejected with exit 1
+negative control failed quiet sample: rejected with exit 1
+negative control nonzero native cell: rejected with exit 1

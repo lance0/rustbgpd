@@ -1,0 +1,139 @@
+{
+  "owner_native_exit": 0,
+  "owner_fully_reaped": true,
+  "wrapper_native_exit": 0,
+  "campaign_native_exit": 0,
+  "validation_native_exit": 0,
+  "cells": {
+    "a1/k1": {
+      "exits": {
+        "cell": 0,
+        "harness": 0,
+        "daemon": 0,
+        "metrics": 0,
+        "wrapper": 0
+      },
+      "forced_kill": 0,
+      "pids": {
+        "daemon": 1603021,
+        "harness": 1603035
+      },
+      "proc_absent": true
+    },
+    "a1/k50": {
+      "exits": {
+        "cell": 0,
+        "harness": 0,
+        "daemon": 0,
+        "metrics": 0,
+        "wrapper": 0
+      },
+      "forced_kill": 0,
+      "pids": {
+        "daemon": 1606226,
+        "harness": 1606240
+      },
+      "proc_absent": true
+    },
+    "b1/k1": {
+      "exits": {
+        "cell": 0,
+        "harness": 0,
+        "daemon": 0,
+        "metrics": 0,
+        "wrapper": 0
+      },
+      "forced_kill": 0,
+      "pids": {
+        "daemon": 1603995,
+        "harness": 1604009
+      },
+      "proc_absent": true
+    },
+    "b1/k50": {
+      "exits": {
+        "cell": 0,
+        "harness": 0,
+        "daemon": 0,
+        "metrics": 0,
+        "wrapper": 0
+      },
+      "forced_kill": 0,
+      "pids": {
+        "daemon": 1605014,
+        "harness": 1605028
+      },
+      "proc_absent": true
+    },
+    "b2/k1": {
+      "exits": {
+        "cell": 0,
+        "harness": 0,
+        "daemon": 0,
+        "metrics": 0,
+        "wrapper": 0
+      },
+      "forced_kill": 0,
+      "pids": {
+        "daemon": 1609463,
+        "harness": 1609477
+      },
+      "proc_absent": true
+    },
+    "b2/k50": {
+      "exits": {
+        "cell": 0,
+        "harness": 0,
+        "daemon": 0,
+        "metrics": 0,
+        "wrapper": 0
+      },
+      "forced_kill": 0,
+      "pids": {
+        "daemon": 1608463,
+        "harness": 1608477
+      },
+      "proc_absent": true
+    },
+    "a2/k1": {
+      "exits": {
+        "cell": 0,
+        "harness": 0,
+        "daemon": 0,
+        "metrics": 0,
+        "wrapper": 0
+      },
+      "forced_kill": 0,
+      "pids": {
+        "daemon": 1610279,
+        "harness": 1610293
+      },
+      "proc_absent": true
+    },
+    "a2/k50": {
+      "exits": {
+        "cell": 0,
+        "harness": 0,
+        "daemon": 0,
+        "metrics": 0,
+        "wrapper": 0
+      },
+      "forced_kill": 0,
+      "pids": {
+        "daemon": 1607400,
+        "harness": 1607416
+      },
+      "proc_absent": true
+    }
+  },
+  "raw_sha256": {
+    "normal-ab-wrapper.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "normal-ab-wrapper.exit": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+    "normal-ab/campaign.log": "74e2053d06e775ee5e2db07fa8bc17d51cda42c913206acf4727429c86760c5d",
+    "normal-ab/campaign.exit": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+    "normal-ab-summary.json": "85ae5d97d2608ab0a05d51829d6441387cd15b1582ea91b79e4bdf8885366fde",
+    "normal-ab-validation.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "normal-ab-validation.exit": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+    "inputs-after.log": "aac58ba104ac976b5d9c1615fe9c496811615328746eb528155214f92ea0c5fa"
+  }
+}

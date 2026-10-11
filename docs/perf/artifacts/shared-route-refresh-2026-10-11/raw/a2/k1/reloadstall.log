@@ -1,0 +1,26 @@
+# reloadstall peers=200 changed_peers=200 stable_peers=0 prefixes=400000 per_peer=2000 pid=1610279
+established 200 at 0.2s
+establishment transport_retries=0 recovered_peers=0
+first_exact_bitmap,mode=ibgp-rr,peers=200,total=400000,per_peer=2000,expected=398000,completed=200,min_unique=398000,max_unique=398000
+converged (>= 398000/observer) at 1.3s rss_mib=352
+control_maxgap_ms: p50=18.23 p95=18.44 max=41.27 (n=200)
+control_rss_mib 303
+rr_hold elapsed_s=0 churn_cycles=2096 sessions_up=200 rss_mib=303
+rr_hold elapsed_s=3 churn_cycles=2287 sessions_up=200 rss_mib=303
+rr_refresh_csv_header,round,peers_total,refreshers,prefixes,completion_p50_s,completion_max_s,survivor_maxgap_ms,readiness_samples,rss_mib,sessions_up,parse_errors,window_start_us,window_end_us
+rr_readiness_sample,round=1,sample=1,started_us=37260949,finished_us=37291771,success=true
+rr_refresh_peer,round=1,peer=0,queue_attempt_us=37260473,written_us=37260529,first_base_us=37477049,table_us=37537453,eor_us=37537455,complete_us=37537455,unique=398000,expected=398000,completion_s=0.276926
+rr_refresh 1 completion_s: p50=0.28 p95=0.28 max=0.28 (n=1)
+rr_refresh 1 survivor_maxgap_ms: p50=219.82 p95=220.06 max=220.36 (n=199)
+rr_refresh_csv,1,200,1,400000,0.276926,0.276926,220.356000,1,316,200,0,37260473,37537455
+rr_readiness_sample,round=2,sample=1,started_us=47565501,finished_us=47594001,success=true
+rr_refresh_peer,round=2,peer=0,queue_attempt_us=47564393,written_us=47564432,first_base_us=47784291,table_us=47844298,eor_us=47844301,complete_us=47844301,unique=398000,expected=398000,completion_s=0.279869
+rr_refresh 2 completion_s: p50=0.28 p95=0.28 max=0.28 (n=1)
+rr_refresh 2 survivor_maxgap_ms: p50=224.52 p95=225.00 max=225.05 (n=199)
+rr_refresh_csv,2,200,1,400000,0.279869,0.279869,225.051000,1,316,200,0,47564392,47844301
+rr_readiness_sample,round=3,sample=1,started_us=57869503,finished_us=57898403,success=true
+rr_refresh_peer,round=3,peer=0,queue_attempt_us=57868392,written_us=57868446,first_base_us=58081017,table_us=58141291,eor_us=58141294,complete_us=58141294,unique=398000,expected=398000,completion_s=0.272848
+rr_refresh 3 completion_s: p50=0.27 p95=0.27 max=0.27 (n=1)
+rr_refresh 3 survivor_maxgap_ms: p50=216.68 p95=217.05 max=217.12 (n=199)
+rr_refresh_csv,3,200,1,400000,0.272848,0.272848,217.115000,1,312,200,0,57868392,58141294
+done rss_mib=312
