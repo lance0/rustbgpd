@@ -583,7 +583,7 @@ member individually.
 The freshest published [v0.68.0 cross-stack
 receipt](../perf/competitive-bgperf2-v0680-2026-08.md), measured 2026-08-30,
 is an 80-cell, counterbalanced same-host campaign against fresh pinned builds
-of BIRD 2.19.2, FRR 10.7.0, and GoBGP 4.8.0. FRR 10.7.1, released 2026-08-31, and GoBGP v4.10.0, released 2026-10-04, are not yet measured. Values are
+of BIRD 2.19.2, FRR 10.7.0, and GoBGP 4.8.0. BIRD 2.19.3, released 2026-10-02, FRR 10.7.1, released 2026-08-31, and GoBGP v4.10.0, released 2026-10-04, are not yet measured. Values are
 successful-run medians of **convergence seconds / total seconds**.
 
 | Scenario | rustbgpd v0.68.0 | BIRD 2.19.2 | FRR 10.7.0 | GoBGP 4.8.0 |
@@ -677,7 +677,7 @@ older IRR receipts are historical records.
 
 A separate
 [2026-10-06 current-source receipt](../perf/irr-reload-current-comparators-2026-10-06.md)
-measures BIRD 3.3.3 and OpenBGPD 9.3 against unreleased rustbgpd source
+measures BIRD 3.3.3, released 2026-10-01, and OpenBGPD 9.3 against unreleased rustbgpd source
 `dcc9b6384` at 0% overlap only: completion p50 was 0.578–0.606 s for
 rustbgpd, 12.493–14.490 s for BIRD 3.3.3 and 44.429–59.541 s for OpenBGPD
 9.3. It is not a release result, and BIRD 3.3.3 has no 10% or 50% overlap
