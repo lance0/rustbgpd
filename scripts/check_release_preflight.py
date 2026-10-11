@@ -5,10 +5,11 @@ Hosted CI is where a release commit usually meets these for the first time,
 some of them only after the tag is pushed:
 
   - the metric release-note contract (`public-docs-contract.yml`);
-  - each independently versioned crate whose manifest is ahead of
-    `docs/reference/published-crate-versions.json`: its `CHANGELOG.md` must
-    open with that version, and on a release commit the heading must be dated
-    and the crate README must no longer call the version prepared;
+  - each publishable crate: its `CHANGELOG.md` must open with the manifest
+    version; every dependency snippet in a crate README, and the root
+    workspace pin, must name the manifest version of the crate it depends on;
+    and on a release commit the heading must be dated and the crate README
+    must no longer call the version prepared;
   - the changelog fragments under `changelog.d/`, which must assemble cleanly
     and, on a release commit, must already have been assembled into the root
     `CHANGELOG.md` by `scripts/assemble-changelog.py`;
@@ -26,7 +27,6 @@ from __future__ import annotations
 
 import argparse
 import importlib.util
-import json
 import re
 import subprocess
 import sys
@@ -39,7 +39,6 @@ ASSEMBLER_SPEC = importlib.util.spec_from_file_location(
 )
 ASSEMBLER = importlib.util.module_from_spec(ASSEMBLER_SPEC)
 ASSEMBLER_SPEC.loader.exec_module(ASSEMBLER)
-RECORD = "docs/reference/published-crate-versions.json"
 # Staging prose for a not-yet-published version has used many phrasings
 # ("prepared in this checkout", "the source tree prepares", "the prepared
 # 0.22.0 release"); every one carries a form of "prepare", and released crate
@@ -47,6 +46,11 @@ RECORD = "docs/reference/published-crate-versions.json"
 PREPARED_WORDING = re.compile(r"\bprepar\w*", re.IGNORECASE)
 SECTION = re.compile(r"(?m)^## \[[^\]\n]+\][^\n]*$")
 DATE = re.compile(r"\b\d{4}-\d{2}-\d{2}\b")
+# A Cargo dependency line: `name = "1.2.3"` or `name = { version = "1.2.3", ... }`.
+DEPENDENCY = re.compile(
+    r'(?m)^([A-Za-z0-9_-]+)[ \t]*=[ \t]*'
+    r'(?:"([^"\n]*)"|\{[^}\n]*\bversion[ \t]*=[ \t]*"([^"\n]*)")'
+)
 
 
 class PreflightError(Exception):
@@ -105,20 +109,6 @@ def publishable_crates(root: Path) -> dict[str, tuple[str, str]]:
     return crates
 
 
-def pending_crates(root: Path) -> dict[str, tuple[str, str]]:
-    """Return the publishable crates whose manifest differs from the published record."""
-    try:
-        record = json.loads(read(root, RECORD))
-    except json.JSONDecodeError as error:
-        raise PreflightError(f"{RECORD} is not valid JSON") from error
-    crates = publishable_crates(root)
-    if not isinstance(record, dict) or set(record) != set(crates):
-        raise PreflightError(
-            f"{RECORD} must list exactly the publishable crates {sorted(crates)}"
-        )
-    return {crate: meta for crate, meta in crates.items() if meta[1] != record[crate]}
-
-
 def command_errors(root: Path, argv: list[str]) -> list[str]:
     result = subprocess.run(argv, cwd=root, check=False)
     shown = " ".join(argv[1:] if argv[0] == sys.executable else argv)
@@ -131,9 +121,9 @@ def metric_release_note_errors(root: Path) -> list[str]:
     ) + command_errors(root, [sys.executable, "scripts/check_metric_release_notes.py"])
 
 
-def crate_heading_errors(root: Path, pending: dict[str, tuple[str, str]]) -> list[str]:
+def crate_heading_errors(root: Path, crates: dict[str, tuple[str, str]]) -> list[str]:
     errors = []
-    for crate, (_, version) in pending.items():
+    for crate, (_, version) in crates.items():
         heading = top_heading(root, crate)
         if not re.match(rf"## \[?{re.escape(version)}\]?(?:\s|$)", heading):
             errors.append(
@@ -148,9 +138,39 @@ def top_heading(root: Path, crate: str) -> str:
     return next((line for line in changelog.splitlines() if line.startswith("## ")), "")
 
 
-def crate_release_errors(root: Path, pending: dict[str, tuple[str, str]]) -> list[str]:
+def version_copy_errors(root: Path, crates: dict[str, tuple[str, str]]) -> list[str]:
+    """Each crate README is packaged with its crate and is the crates.io landing
+    page, so every dependency snippet in it must name the manifest version of
+    the publishable crate it depends on. The root workspace pins must too."""
+    versions = dict(crates.values())
     errors = []
-    for crate in pending:
+    for crate in crates:
+        relative = f"crates/{crate}/README.md"
+        for match in DEPENDENCY.finditer(read(root, relative)):
+            name, version = match[1], match[2] if match[2] is not None else match[3]
+            if name in versions and version != versions[name]:
+                errors.append(
+                    f"{relative} names {name} {version!r}, not the manifest "
+                    f"version {versions[name]}"
+                )
+    try:
+        manifest = tomllib.loads(read(root, "Cargo.toml"))
+    except tomllib.TOMLDecodeError as error:
+        raise PreflightError("cannot parse Cargo.toml") from error
+    pins = manifest.get("workspace", {}).get("dependencies", {})
+    for name, version in versions.items():
+        pin = pins.get(name)
+        if isinstance(pin, dict) and pin.get("version") != version:
+            errors.append(
+                f"Cargo.toml workspace pin for {name} is {pin.get('version')!r}, "
+                f"not the manifest version {version}"
+            )
+    return errors
+
+
+def crate_release_errors(root: Path, crates: dict[str, tuple[str, str]]) -> list[str]:
+    errors = []
+    for crate in crates:
         heading = top_heading(root, crate)
         if "unreleased" in heading.casefold() or not DATE.search(heading):
             errors.append(
@@ -193,19 +213,19 @@ def root_changelog_errors(root: Path) -> list[str]:
     return [] if body.strip() else [f"CHANGELOG.md section `## [{version}]` is empty"]
 
 
-def heavy_commands(pending: dict[str, tuple[str, str]]) -> list[list[str]]:
+def heavy_commands(crates: dict[str, tuple[str, str]]) -> list[list[str]]:
     lock = ["bash", "scripts/build-lock.sh"]
     # The build is release.yml's, for the host target only.
     build = "cargo build --locked --workspace --release --features rustbgpd/jemalloc"
-    commands = [["cargo", "audit"], [*lock, *build.split()]]
-    if pending:
-        # Only versions ahead of the registry can be published; together, so a
-        # dependent resolves a wire version that is not registry-visible yet.
-        packages = [arg for name, _ in pending.values() for arg in ("-p", name)]
-        commands.append(
-            [*lock, "cargo", "publish", "--locked", "--dry-run", "--all-features", *packages]
-        )
-    return commands
+    # Dry-run every publishable crate together, so a dependent resolves a wire
+    # version that is not registry-visible yet. A dry run only warns about a
+    # version that is already on the registry.
+    packages = [arg for name, _ in crates.values() for arg in ("-p", name)]
+    return [
+        ["cargo", "audit"],
+        [*lock, *build.split()],
+        [*lock, "cargo", "publish", "--locked", "--dry-run", "--all-features", *packages],
+    ]
 
 
 def preflight(
@@ -215,8 +235,8 @@ def preflight(
     if mode == "auto":
         mode = detect_mode(root)
     release = mode == "release"
-    pending = pending_crates(root)
-    named = ", ".join(f"{crate} {meta[1]}" for crate, meta in pending.items()) or "none"
+    crates = publishable_crates(root)
+    named = ", ".join(f"{crate} {meta[1]}" for crate, meta in crates.items())
     checks = [
         ("metric release notes", True, lambda: metric_release_note_errors(root)),
         (
@@ -225,14 +245,19 @@ def preflight(
             lambda: fragment_errors(root, release),
         ),
         (
-            f"pending crate changelog headings ({named})",
+            f"crate changelog headings ({named})",
             True,
-            lambda: crate_heading_errors(root, pending),
+            lambda: crate_heading_errors(root, crates),
         ),
         (
-            f"pending crate changelog dates and README wording ({named})",
+            "crate README snippets and workspace pins name manifest versions",
+            True,
+            lambda: version_copy_errors(root, crates),
+        ),
+        (
+            f"crate changelog dates and README wording ({named})",
             release,
-            lambda: crate_release_errors(root, pending),
+            lambda: crate_release_errors(root, crates),
         ),
         (
             f"root CHANGELOG section for workspace {workspace_version(root)}",
@@ -245,7 +270,7 @@ def preflight(
         errors = check() if enabled else []
         status = "FAIL" if errors else "ok" if enabled else "skipped [release-only]"
         rows.append((status, name, errors))
-    for command in heavy_commands(pending):
+    for command in heavy_commands(crates):
         name = " ".join(command[2:] if command[0] == "bash" else command)
         errors = command_errors(root, command) if heavy else []
         rows.append(("FAIL" if errors else "ok" if heavy else "skipped [--heavy]", name, errors))

@@ -80,8 +80,7 @@ synchronous. `RtrClient` and `VrpManager` require a Tokio runtime.
 ## Usage
 
 Origin validation uses prefix and validation-state types from the independently
-published wire crate. These registry examples use the repository's verified
-published versions:
+published wire crate, so depend on the wire version this release pairs with:
 
 ```toml
 [dependencies]
@@ -89,14 +88,9 @@ rustbgpd-rpki = "0.6.0"
 rustbgpd-wire = "0.24.0"
 ```
 
-When building against a source checkout instead, use matching versioned paths
-from one rustbgpd checkout:
-
-```toml
-[dependencies]
-rustbgpd-rpki = { version = "0.6.0", path = "../rustbgpd/crates/rpki" }
-rustbgpd-wire = { version = "0.24.0", path = "../rustbgpd/crates/wire" }
-```
+To build against a source checkout instead, give both crates paths
+(`../rustbgpd/crates/rpki` and `../rustbgpd/crates/wire`) from one rustbgpd
+checkout.
 
 ```rust
 use std::net::{IpAddr, Ipv4Addr};
