@@ -32,13 +32,14 @@ def announcements():
 
 
 def tcp_rows(routes=None, *, source='10.211.0.2', dest='10.211.0.3',
-             family=b'\0\x19\x46', next_hop=IP):
+             family=b'\0\x19\x46', next_hop=IP, mp_flags=0x90, ec_flags=0xd0):
     rows, sequence = [], 1000
     for kind, body, communities in routes if routes is not None else announcements():
         reach = family + bytes([len(next_hop)]) + next_hop + b'\0' + bytes([kind, len(body)]) + body
         attrs = b''
-        for code, value in ((14, reach), (16, b''.join(communities))):
-            attrs += bytes([0x90, code]) + len(value).to_bytes(2, 'big') + value
+        for flags, code, value in ((mp_flags, 14, reach), (ec_flags, 16, b''.join(communities))):
+            length_size = 2 if flags & 0x10 else 1
+            attrs += bytes([flags, code]) + len(value).to_bytes(length_size, 'big') + value
         update = b'\0\0' + len(attrs).to_bytes(2, 'big') + attrs
         message = b'\xff'*16 + (19+len(update)).to_bytes(2, 'big') + b'\x02' + update
         rows.append(f'0\t{source}\t{dest}\t{sequence}\t{message.hex()}')
@@ -57,6 +58,29 @@ class WireTests(unittest.TestCase):
         routes = announcements()
         routes.append(deepcopy(routes[0]))
         self.assertEqual(verify_wire(tcp_rows(routes), MAC, 100)['type2'], 2)
+
+    def test_valid_short_and_extended_attribute_lengths(self):
+        for mp_flags in (0x80, 0x90):
+            for ec_flags in (0xc0, 0xd0):
+                with self.subTest(mp_flags=mp_flags, ec_flags=ec_flags):
+                    self.assertEqual(verify_wire(tcp_rows(mp_flags=mp_flags, ec_flags=ec_flags), MAC, 100),
+                                     dict(type2=1, ead_per_es=1, ead_per_evi=1, type4=1))
+
+    def test_invalid_extended_community_flags(self):
+        for name, flags in (('nontransitive', 0x80), ('missing_optional', 0x40),
+                            ('partial', 0xe0), ('reserved', 0xc1)):
+            for length_flag in (0, 0x10):
+                with self.subTest(reason=name, extended=bool(length_flag)), self.assertRaisesRegex(
+                        ValueError, 'extended communities flags'):
+                    verify_wire(tcp_rows(ec_flags=flags | length_flag), MAC, 100)
+
+    def test_invalid_mp_reach_flags(self):
+        for name, flags in (('transitive', 0xc0), ('partial', 0xa0),
+                            ('missing_optional', 0), ('reserved', 0x81)):
+            for length_flag in (0, 0x10):
+                with self.subTest(reason=name, extended=bool(length_flag)), self.assertRaisesRegex(
+                        ValueError, 'MP_REACH flags'):
+                    verify_wire(tcp_rows(mp_flags=flags | length_flag), MAC, 100)
 
     @unittest.skipUnless(shutil.which('tshark'), 'tshark is not installed')
     def test_real_tshark_extracts_raw_vni_and_reserved_bytes(self):

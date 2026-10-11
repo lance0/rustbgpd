@@ -48,6 +48,7 @@ def verify_wire(rows, mac, vni, df_preference=100):
         need(not withdrawn and not announced, 'unexpected unicast NLRI')
         if 14 not in attrs:
             continue
+        need(attrs[14][0] & ~0x10 == 0x80, 'wrong MP_REACH flags')
         reach = attrs[14][1]
         need(len(reach) >= 5, 'truncated MP_REACH')
         # This session advertises EVPN only; another family cannot prove it.
@@ -56,6 +57,7 @@ def verify_wire(rows, mac, vni, df_preference=100):
              'wrong MP_REACH next hop or reserved byte')
         ext = [attrs[16][1]] if 16 in attrs else []
         need(len(ext) == 1 and len(ext[0]) % 8 == 0, 'missing/duplicate/truncated extended communities')
+        need(attrs[16][0] & ~0x10 == 0xc0, 'wrong extended communities flags')
         communities = [ext[0][i:i+8] for i in range(0, len(ext[0]), 8)]
         cursor = 9
         while cursor < len(reach):
