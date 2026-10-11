@@ -220,6 +220,33 @@ def check_samples(samples, first_role, release_at, window_end):
         errors.append("no post-release observation")
     return errors
 
+def parse_daemon_log(text):
+    # print_startup_banner writes this complete M69 topology block to stderr,
+    # which the restart wrapper collects alongside JSON tracing output.
+    lines = text.splitlines()
+    entries = []
+    version = None
+    index = 0
+    while index < len(lines):
+        banner = [
+            "", f"  rustbgpd {version} | AS 65000 | router-id 10.0.0.1",
+            "  |- 1 peers (1 iBGP)",
+            "  |- grpc: tcp://0.0.0.0:50051 (token auth)",
+            "  |- grpc: unix:///var/lib/rustbgpd/grpc.sock",
+            "  |- metrics: http://0.0.0.0:9179/metrics", "",
+        ]
+        if version is not None and lines[index:index + len(banner)] == banner:
+            index += len(banner)
+            version = None
+            continue
+        entry = json.loads(lines[index])
+        entries.append(entry)
+        fields = entry.get("fields", {})
+        if entry.get("target") == "rustbgpd" and fields.get("message") == "starting rustbgpd":
+            version = fields["version"]
+        index += 1
+    return entries
+
 def reap_release(process):
     if process is None:
         return
@@ -298,8 +325,7 @@ try:
     daemon_log = run(["docker", "exec", pe1, "cat", "/var/log/rustbgpd.log"])
     (output / "restart-daemon.jsonl").write_text(daemon_log)
     first_publication = None
-    for line in daemon_log.splitlines():
-        entry = json.loads(line)
+    for entry in parse_daemon_log(daemon_log):
         fields = entry.get("fields", {})
         if fields.get("message") == "EVPN segment: published BUM enforcement intent" and first_publication is None:
             first_publication = entry.get("timestamp")

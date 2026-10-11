@@ -2,6 +2,7 @@
 """Exercise the M69 driver's actual sample oracle and release-child cleanup."""
 
 import ast
+import json
 from pathlib import Path
 import re
 import subprocess
@@ -11,11 +12,11 @@ from unittest.mock import Mock
 
 DRIVER = Path(__file__).with_name("test-m69-evpn-preference-df-frr.sh")
 PYTHON = DRIVER.read_text().split("<<'PY'\n", 1)[1].split("\nPY\n", 1)[0]
-FUNCTIONS = {"flood_suppressed", "check_samples", "reap_release"}
+FUNCTIONS = {"flood_suppressed", "check_samples", "reap_release", "parse_daemon_log"}
 DEFINITIONS = [node for node in ast.parse(PYTHON).body
                if isinstance(node, ast.FunctionDef) and node.name in FUNCTIONS]
 assert {node.name for node in DEFINITIONS} == FUNCTIONS
-NAMESPACE = {"re": re}
+NAMESPACE = {"re": re, "json": json}
 exec(compile(ast.Module(body=DEFINITIONS, type_ignores=[]), str(DRIVER), "exec"), NAMESPACE)
 
 
@@ -77,6 +78,30 @@ class M69DfWaitCheckerTests(unittest.TestCase):
         self.assertEqual(self.check(rows, first=1), [])
         rows[20].pop("df")
         self.assertTrue(self.check(rows, first=1))
+
+    def test_actual_startup_banner_preserves_json_df_events(self):
+        starting = {"target": "rustbgpd", "fields": {
+            "message": "starting rustbgpd", "version": "0.75.0"}}
+        transition = {"fields": {"message": "EVPN segment: DF role updated", "role": "df"}}
+        # Exact stderr block retained from an M69 restart; version comes from
+        # the preceding structured startup record, not a release-specific skip.
+        banner = "\n  rustbgpd 0.75.0 | AS 65000 | router-id 10.0.0.1\n" \
+            "  |- 1 peers (1 iBGP)\n" \
+            "  |- grpc: tcp://0.0.0.0:50051 (token auth)\n" \
+            "  |- grpc: unix:///var/lib/rustbgpd/grpc.sock\n" \
+            "  |- metrics: http://0.0.0.0:9179/metrics\n\n"
+        text = json.dumps(starting) + "\n" + banner + json.dumps(transition) + "\n"
+        parse = NAMESPACE["parse_daemon_log"]
+        self.assertEqual(parse(text), [starting, transition])
+        for broken in (text.replace("1 peers (1 iBGP)", "2 peers (2 iBGP)"),
+                       text.replace("  |- metrics: http://0.0.0.0:9179/metrics\n", ""),
+                       text.replace("rustbgpd 0.75.0", "rustbgpd 0.74.0"),
+                       banner + json.dumps(transition),
+                       text + "unexpected stderr warning\n",
+                       text + '{"fields":{"message":"EVPN segment: DF role updated","role":"df"}\n'):
+            with self.subTest(broken=broken):
+                with self.assertRaises(json.JSONDecodeError):
+                    parse(broken)
 
     def test_release_child_is_joined_after_success_timeout_or_error(self):
         for error in (None, subprocess.TimeoutExpired("vtysh", 10), OSError("read failed")):
