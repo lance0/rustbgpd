@@ -17,7 +17,7 @@ pub(crate) fn prepare_output_dir(config: &MrtWriterConfig) -> std::io::Result<()
     std::fs::create_dir_all(&config.output_dir)
 }
 
-/// Write MRT data to a file using atomic rename.
+/// Sync MRT data before atomic rename, then sync its parent directory.
 ///
 /// Returns the final file path on success.
 ///
@@ -56,20 +56,38 @@ fn write_atomic(
     data: &[u8],
     compress: bool,
 ) -> std::io::Result<()> {
-    {
-        let file = std::fs::File::create(tmp_path)?;
+    let directory = std::fs::File::open(
+        final_path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new(".")),
+    )?;
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(tmp_path)?;
+    let result = (|| -> std::io::Result<()> {
         if compress {
-            let mut encoder = flate2::write::GzEncoder::new(file, flate2::Compression::default());
+            let mut encoder =
+                flate2::write::GzEncoder::new(&mut file, flate2::Compression::default());
             encoder.write_all(data)?;
             encoder.finish()?;
         } else {
-            let mut writer = std::io::BufWriter::new(file);
-            writer.write_all(data)?;
-            writer.flush()?;
+            file.write_all(data)?;
         }
+        file.sync_all()?;
+        std::fs::rename(tmp_path, final_path)
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(tmp_path);
     }
-    std::fs::rename(tmp_path, final_path)?;
-    Ok(())
+    result?;
+    directory.sync_all().map_err(|error| {
+        std::io::Error::new(
+            error.kind(),
+            format!("MRT dump published but parent directory sync failed: {error}"),
+        )
+    })
 }
 
 #[cfg(test)]
@@ -133,6 +151,42 @@ mod tests {
         let path = write_dump(&config, &[]).unwrap();
         assert!(path.exists());
         assert_eq!(std::fs::read(&path).unwrap().len(), 0);
+    }
+
+    #[test]
+    fn failed_rename_removes_temp_and_preserves_destination() {
+        for compress in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let final_path = dir.path().join("rib.mrt");
+            // A directory destination forces rename to fail after the payload was staged.
+            std::fs::create_dir(&final_path).unwrap();
+            let original = final_path.join("original");
+            std::fs::write(&original, "keep this").unwrap();
+            let tmp_path = dir.path().join(".rib.mrt.tmp");
+
+            assert!(write_atomic(&tmp_path, &final_path, b"replacement", compress).is_err());
+            assert!(!tmp_path.exists());
+            assert!(final_path.is_dir());
+            assert_eq!(std::fs::read_to_string(original).unwrap(), "keep this");
+            assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+        }
+    }
+
+    #[test]
+    fn existing_temp_is_not_overwritten_or_removed() {
+        let dir = tempfile::tempdir().unwrap();
+        let final_path = dir.path().join("rib.mrt");
+        let tmp_path = dir.path().join(".rib.mrt.tmp");
+        std::fs::write(&final_path, "original").unwrap();
+        std::fs::write(&tmp_path, "another writer's stage").unwrap();
+
+        let error = write_atomic(&tmp_path, &final_path, b"replacement", false).unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists);
+        assert_eq!(std::fs::read_to_string(final_path).unwrap(), "original");
+        assert_eq!(
+            std::fs::read_to_string(tmp_path).unwrap(),
+            "another writer's stage"
+        );
     }
 
     #[test]

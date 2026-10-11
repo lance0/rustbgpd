@@ -695,19 +695,57 @@ pub fn fmt_local(files: &[String], check: bool) -> i32 {
     i32::from(failed)
 }
 
-/// Atomic in-place rewrite: write a sibling temp file, carry over the
-/// original's permissions, and rename over the target — a crash never
-/// leaves a truncated policy file. Failures name the destination path
-/// (the daemon's `write_atomic` discipline, CLI-side).
+/// Rewrite through a unique sibling file, preserving permissions, syncing
+/// the payload before rename and the parent directory afterward. Pre-rename
+/// failures remove the temp; a directory-sync failure can report an error
+/// after the target has been replaced. Errors name the destination path.
 fn write_atomic(path: &std::path::Path, text: &str) -> std::io::Result<()> {
+    use std::io::Write;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
     let inner = || -> std::io::Result<()> {
-        let mut tmp = path.as_os_str().to_os_string();
-        tmp.push(".tmp");
-        let tmp = std::path::PathBuf::from(tmp);
         let permissions = std::fs::metadata(path)?.permissions();
-        std::fs::write(&tmp, text)?;
-        std::fs::set_permissions(&tmp, permissions)?;
-        std::fs::rename(&tmp, path)
+        let parent = path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .unwrap_or_else(|| std::path::Path::new("."));
+        let directory = std::fs::File::open(parent)?;
+        let (tmp, mut file) = loop {
+            let sequence = TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+            let tmp = parent.join(format!(
+                ".rbgp-policy-fmt.{}.{sequence}.tmp",
+                std::process::id()
+            ));
+            match std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&tmp)
+            {
+                Ok(file) => break (tmp, file),
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(error) => return Err(error),
+            }
+        };
+        let result = (|| -> std::io::Result<()> {
+            file.set_permissions(permissions.clone())?;
+            file.write_all(text.as_bytes())?;
+            // Payload writes can clear set-ID permission bits.
+            file.set_permissions(permissions)?;
+            file.sync_all()?;
+            std::fs::rename(&tmp, path)
+        })();
+        if result.is_err() {
+            let _ = std::fs::remove_file(&tmp);
+        }
+        result?;
+        directory.sync_all().map_err(|error| {
+            std::io::Error::new(
+                error.kind(),
+                format!("replacement published but parent directory sync failed: {error}"),
+            )
+        })
     };
     inner().map_err(|error| {
         std::io::Error::new(
@@ -3911,8 +3949,16 @@ mod tests {
     #[test]
     fn fmt_local_rewrites_in_place_and_is_idempotent() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("p.rpol");
+        let name = format!("{}.rpol", "p".repeat(245));
+        let path = dir.path().join(&name);
         std::fs::write(&path, "policy p{term t{if route.rpki==invalid{reject}}}").unwrap();
+        let old_temp = dir.path().join(format!("{name}.tmp"));
+        std::fs::write(&old_temp, "another writer's stage").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o2640)).unwrap();
+        }
         let files = vec![path.to_str().unwrap().to_string()];
         assert_eq!(fmt_local(&files, false), 0);
         let formatted = std::fs::read_to_string(&path).unwrap();
@@ -3920,16 +3966,43 @@ mod tests {
             formatted,
             "policy p {\n    term t { if route.rpki == invalid { reject } }\n}\n"
         );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                std::fs::metadata(&path).unwrap().permissions().mode() & 0o7777,
+                0o2640
+            );
+        }
         // Idempotent: nothing further to rewrite, and --check agrees.
         assert_eq!(fmt_local(&files, false), 0);
         assert_eq!(std::fs::read_to_string(&path).unwrap(), formatted);
         assert_eq!(fmt_local(&files, true), 0);
-        // No temp residue from the atomic write.
-        assert!(!dir.path().join("p.rpol.tmp").exists());
+        assert_eq!(
+            std::fs::read_to_string(old_temp).unwrap(),
+            "another writer's stage"
+        );
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 2);
         assert_eq!(
             check_local(&files[0], &[], false, false, None, None, None, false),
             0
         );
+    }
+
+    #[test]
+    fn write_atomic_removes_temp_when_rename_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("p.rpol");
+        // A directory destination forces rename to fail after the payload was staged.
+        std::fs::create_dir(&path).unwrap();
+        let original = path.join("original");
+        std::fs::write(&original, "keep this").unwrap();
+
+        let error = write_atomic(&path, "replacement").unwrap_err();
+        assert!(error.to_string().contains("failed to write"));
+        assert!(path.is_dir());
+        assert_eq!(std::fs::read_to_string(original).unwrap(), "keep this");
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
     }
 
     /// LAN-323: `--check` never rewrites, exits 1 on drift, and a
