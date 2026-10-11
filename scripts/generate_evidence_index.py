@@ -147,7 +147,9 @@ def load_labs(root: Path) -> dict[str, dict]:
             raise MetadataError(f"labs {slugs[match[2]]} and {name} both claim slug {match[2]!r}")
         slugs[match[2]] = name
         labs[name] = record | {"slug": match[2]}
-    recipe = re.search(r"^\s+([a-z|-]+)\) exec bash \"labs/", (root / "justfile").read_text(), re.M)
+    recipe = re.search(
+        rf"^\s+({SLUG}(?:\|{SLUG})*)\) exec bash \"labs/", (root / "justfile").read_text(), re.M
+    )
     if not recipe or sorted(recipe[1].split("|")) != sorted(labs):
         raise MetadataError(f"justfile lab names do not match labs/*/lab.sh {sorted(labs)}")
     return labs

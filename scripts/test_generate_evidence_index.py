@@ -200,6 +200,12 @@ class EvidenceIndexTests(unittest.TestCase):
                 self.put(path, text)
                 self.assert_metadata_error(pattern)
 
+    def test_lab_names_with_digits_and_hyphens_match_the_justfile(self):
+        self.put("justfile", 'lab:\n    case "$1" in\n'
+                 '        rr|m14-demo) exec bash "labs/$1/lab.sh" "$2" ;;\n    esac\n')
+        self.put("labs/m14-demo/lab.sh", LAB.format(name="m14-demo", slug="m14-demo"))
+        self.assertEqual(sorted(gen.load_labs(self.root)), ["m14-demo", "rr"])
+
     def test_capability_references_must_resolve(self):
         for change, pattern in (
             ({"evidence": [{"leg": "m99-missing", "claims": ["stored"]}]}, "unknown leg"),
