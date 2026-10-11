@@ -593,6 +593,20 @@ Ships:
   role-independent per RFC 7432 §14).
 - Daemon orchestrator (`src/evpn_segment.rs`) wiring all of the
   above off the EVPN best-path broadcast (Gate 7c).
+- RFC 7432 §8.5 / RFC 8584 §2.1 initial DF wait for every algorithm:
+  startup, live addition and undrain/link recovery publish `NonDf` for all
+  members and the desired BUM suppression and bound single-active AC blocking
+  before awaiting origination. Linux reconciliation applies those controls
+  asynchronously to configured, resolvable ports with enforcement enabled;
+  the actor does not wait for a kernel acknowledgement. During boot, election also
+  waits for an established EVPN session, all established sessions' End-of-RIB,
+  and release of EVPN GR selection deferral, with a 30-second ceiling from
+  actor start. Ordinary segments advertise Type 4/EAD-per-ES during this
+  wait; Don't-Preempt retains its delayed publication and inheritance.
+  Administrative DF changes retain their immediate override. `rbgp evpn es
+  list` exposes the wait through `df_recovery_pending` and
+  `df_recovery_remaining_ms`. This does not change kernel defaults before
+  the daemon starts or guarantee candidates arriving after the boot ceiling.
 - Cloneable runtime owner/control surface for complete desired-ES
   snapshots. This preserves `src/evpn_segment.rs` as the only Type 1/4
   owner and gives ADR-0063 ES commits a single actor boundary.

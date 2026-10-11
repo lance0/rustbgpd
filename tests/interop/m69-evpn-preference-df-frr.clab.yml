@@ -30,11 +30,11 @@ topology:
       binds:
         - ./configs/rustbgpd-m69-pe1.toml:/etc/rustbgpd/config.toml:ro
         - ../fixtures/grpc-test-only-operator.token:/run/rustbgpd/grpc-test-only-operator.token:ro
-        - ./scripts/start-rustbgpd-segment.sh:/usr/local/bin/start-rustbgpd-segment.sh:ro
+        - ./scripts/start-rustbgpd-m69-vtep.sh:/usr/local/bin/start-rustbgpd-m69-vtep.sh:ro
       exec:
         - ip addr add 10.0.0.1/24 dev eth1
         - ip link set eth1 up
-        - /usr/local/bin/start-rustbgpd-segment.sh 200
+        - /usr/local/bin/start-rustbgpd-m69-vtep.sh
       env:
         RUST_LOG: info,rustbgpd::evpn_segment=debug,rustbgpd_evpn::df_election=debug
 

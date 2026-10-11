@@ -68,7 +68,7 @@ use crate::evpn_ack::{PendingRibOps, RibAckOutcome, send_and_ack};
 use crate::evpn_es_link_drain::EsLinkBindings;
 use crate::evpn_originator::{LOCAL_PEER, instance_extcomms};
 
-/// RFC 9785 §4.3 boot-timer ceiling: any recovery decision due within this
+/// Boot-timer ceiling: any DF wait due within this
 /// long of actor start waits for every established EVPN session's End-of-RIB
 /// (remote routes cannot be present earlier), but never past the ceiling.
 const BOOT_RECOVERY_MAX_WAIT: Duration = Duration::from_secs(30);
@@ -331,13 +331,13 @@ impl EvpnSegmentControlProbe {
     }
 }
 
-/// Per-ESI RFC 9785 DF state the actor advertises, for the operator API.
+/// Per-ESI DF state the actor advertises, for the operator API.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct SegmentDfStatus {
     /// Preference and Don't-Preempt carried (or to be carried) on the local
     /// Type 4 route; differs from config while a preference is inherited.
     pub(crate) advertised: (u32, bool),
-    /// Pending recovery wait before the local Type 4 is published.
+    /// Pending DF wait; only Don't-Preempt recovery delays local Type 4.
     pub(crate) recovery_deadline: Option<tokio::time::Instant>,
 }
 
@@ -543,7 +543,7 @@ struct SegmentState {
     election: DfElection,
     /// RFC 9785 §4.3 operational advertisement, separate from admin config.
     operational_df: (u32, bool),
-    /// Recovery waits for remote Type 4 routes before advertising locally.
+    /// DF wait for remote Type 4 routes; Don't-Preempt also delays publication.
     recovery_deadline: Option<tokio::time::Instant>,
     /// Last role assignment per member VNI. Used to detect flips.
     last_roles: BTreeMap<EvpnInstanceId, DfRole>,
@@ -597,6 +597,16 @@ async fn segment_loop(
         startup_segments,
     );
 
+    // Suppress forwarding before any RIB subscription or publication await.
+    // Every member needs an explicit NonDf row: incomplete roles fail open.
+    for state in by_esi.values_mut() {
+        if !runtime.drained_esis.contains(&state.config.esi) {
+            prepare_segment_startup(&runtime, state, true);
+        }
+    }
+    publish_dataplane_snapshots(&runtime, &by_esi);
+    publish_df_status(&df_status_tx, &by_esi);
+
     // Subscribe to the EVPN best-path broadcast for re-election triggers.
     let mut evpn_event_rx = subscribe_evpn_events(&runtime.rib_tx).await;
     if evpn_event_rx.is_none() {
@@ -626,13 +636,15 @@ async fn segment_loop(
             }
             changed = segments_rx.changed() => {
                 if let Ok(()) = changed {
-                    // A coordinator may publish an instance snapshot immediately
-                    // before the segment snapshot that depends on it. Watch
-                    // receivers expose the latest value even if their own
-                    // `changed()` branch has not run yet, so refresh here before
-                    // rebuilding ES state.
-                    let instances = instances_rx.borrow().clone();
-                    let segments = segments_rx.borrow_and_update().as_ref().clone();
+                    let (instances, segments) = refresh_segment_dependencies(
+                        &mut runtime,
+                        &mut by_esi,
+                        &mut drained_esis_rx,
+                        es_link_bindings_rx.as_ref(),
+                        (&instances_rx, &segments_rx),
+                        &mut pending_rib_ops,
+                        &df_status_tx,
+                    ).await;
                     apply_runtime_snapshot(
                         &mut runtime,
                         &mut by_esi,
@@ -640,6 +652,7 @@ async fn segment_loop(
                         instances,
                         segments,
                         &mut pending_rib_ops,
+                        Some(&df_status_tx),
                     )
                     .await;
                 } else {
@@ -651,8 +664,15 @@ async fn segment_loop(
             },
             changed = instances_rx.changed() => {
                 if let Ok(()) = changed {
-                    let instances = instances_rx.borrow_and_update().clone();
-                    let segments = segments_rx.borrow().as_ref().clone();
+                    let (instances, segments) = refresh_segment_dependencies(
+                        &mut runtime,
+                        &mut by_esi,
+                        &mut drained_esis_rx,
+                        es_link_bindings_rx.as_ref(),
+                        (&instances_rx, &segments_rx),
+                        &mut pending_rib_ops,
+                        &df_status_tx,
+                    ).await;
                     apply_runtime_snapshot(
                         &mut runtime,
                         &mut by_esi,
@@ -660,6 +680,7 @@ async fn segment_loop(
                         instances,
                         segments,
                         &mut pending_rib_ops,
+                        Some(&df_status_tx),
                     ).await;
                 } else {
                     debug!("EVPN segment: runtime instance watch closed; draining");
@@ -670,8 +691,15 @@ async fn segment_loop(
             },
             changed = drained_esis_rx.changed() => {
                 if let Ok(()) = changed {
-                    let drained = drained_esis_rx.borrow_and_update().clone();
-                    apply_drained_esi_snapshot(&mut runtime, &mut by_esi, drained, &mut pending_rib_ops).await;
+                    refresh_segment_dependencies(
+                        &mut runtime,
+                        &mut by_esi,
+                        &mut drained_esis_rx,
+                        es_link_bindings_rx.as_ref(),
+                        (&instances_rx, &segments_rx),
+                        &mut pending_rib_ops,
+                        &df_status_tx,
+                    ).await;
                 } else {
                     // The drained-set sender lives on the same handle as the
                     // instance/segment senders, so a closed watch here means
@@ -879,7 +907,11 @@ async fn apply_runtime_snapshot(
     instances: Arc<EvpnInstanceTable>,
     segments: Vec<EthernetSegment>,
     pending: &mut PendingRibOps,
+    df_status_tx: Option<&watch::Sender<Arc<SegmentDfStatusTable>>>,
 ) {
+    if runtime.shutdown.is_cancelled() {
+        return;
+    }
     let previous_instances = std::mem::replace(&mut runtime.instances, instances);
     let next_esis: HashSet<_> = segments.iter().map(|seg| seg.esi).collect();
     let removed: Vec<_> = by_esi
@@ -893,6 +925,7 @@ async fn apply_runtime_snapshot(
         }
         esi_label_allocator.release(esi);
     }
+    let mut starting = Vec::new();
     for seg in segments {
         if by_esi.get(&seg.esi).is_some_and(|state| {
             state.config == seg
@@ -919,10 +952,26 @@ async fn apply_runtime_snapshot(
             esi_label_allocator.release(esi);
             continue;
         };
-        if !runtime.drained_esis.contains(&esi) {
-            startup_segment_state(runtime, &mut state, pending, !administrative_change).await;
+        let start = !runtime.drained_esis.contains(&esi);
+        if start {
+            prepare_segment_startup(runtime, &mut state, !administrative_change);
         }
         by_esi.insert(esi, state);
+        if start {
+            starting.push(esi);
+        }
+    }
+    // All added/replaced ESs must be visible as pending NonDf before the
+    // first one's origination can wait for an acknowledgement.
+    publish_dataplane_snapshots(runtime, by_esi);
+    if let Some(tx) = df_status_tx {
+        publish_df_status(tx, by_esi);
+    }
+    for esi in starting {
+        if runtime.shutdown.is_cancelled() {
+            break;
+        }
+        startup_segment_state(runtime, by_esi.get_mut(&esi).unwrap(), pending).await;
     }
     publish_dataplane_snapshots(runtime, by_esi);
 }
@@ -972,23 +1021,16 @@ async fn initial_startup(
         if runtime.drained_esis.contains(&state.config.esi) {
             continue;
         }
-        startup_segment_state(runtime, state, pending, true).await;
+        startup_segment_state(runtime, state, pending).await;
     }
 }
 
-/// Originate one ES's Type 4 + EAD-per-ES and run its DF election.
-/// Shared by startup and by an ADR-0084 undrain, which mirrors what
-/// segment-set application does for a new ES.
-async fn startup_segment_state(
-    runtime: &SegmentRuntime,
-    state: &mut SegmentState,
-    pending: &mut PendingRibOps,
-    recover: bool,
-) {
+/// Enter `DF_WAIT` before any awaited RIB work. Explicit administrative DF
+/// changes retain their immediate override instead of entering recovery.
+fn prepare_segment_startup(runtime: &SegmentRuntime, state: &mut SegmentState, recover: bool) {
     state.operational_df = (state.config.df_preference, state.config.df_dont_preempt);
-    if recover && state.config.df_dont_preempt {
-        // RFC 9785 §4.3(5): collect remote routes before Type 4 publication.
-        // Three seconds matches the RFC 7432 default DF wait interval.
+    if recover {
+        // RFC 7432 §8.5 / RFC 8584 §2.1: all algorithms wait as NonDf.
         state.recovery_deadline = Some(tokio::time::Instant::now() + Duration::from_secs(3));
         state.last_roles = state
             .config
@@ -996,6 +1038,21 @@ async fn startup_segment_state(
             .iter()
             .map(|&vni| (vni, DfRole::NonDf))
             .collect();
+        let esi = format_esi(state.config.esi);
+        for &vni in &state.config.member_vnis {
+            runtime.metrics.set_evpn_df_role(&esi, vni.as_u32(), false);
+        }
+    }
+}
+
+/// Originate a prepared ES. Ordinary `DF_WAIT` advertises the candidate now;
+/// RFC 9785 §4.3(5) Don't-Preempt recovery delays publication until election.
+async fn startup_segment_state(
+    runtime: &SegmentRuntime,
+    state: &mut SegmentState,
+    pending: &mut PendingRibOps,
+) {
+    if state.recovery_deadline.is_some() && state.config.df_dont_preempt {
         return;
     }
     // Type 4 ES first so peers see us as a candidate before any
@@ -1048,40 +1105,98 @@ async fn drain_segment_state(
     }
 }
 
-/// Apply an ADR-0084 drained-ESI snapshot: withdraw routes for
-/// newly-drained ESIs, re-originate + re-elect newly-undrained ones,
-/// and republish the BUM enforcement snapshot when anything moved.
-/// ESIs not in the current segment config are ignored — the
-/// coordinator GCs their drain entries on segment-set replace.
-async fn apply_drained_esi_snapshot(
+/// The converger seeds Link drain before publishing a newly bound ES, then
+/// publishes its binding only after commit. The biased segment branch must
+/// observe that seed; a subsequent undrain must observe the committed binding
+/// before it originates. Apply transitions rather than assigning the set so
+/// an existing ES's pending drain still withdraws its owned routes.
+async fn refresh_segment_dependencies(
     runtime: &mut SegmentRuntime,
     by_esi: &mut HashMap<EthernetSegmentIdentifier, SegmentState>,
-    drained: Arc<BTreeSet<EthernetSegmentIdentifier>>,
+    drained_rx: &mut watch::Receiver<Arc<BTreeSet<EthernetSegmentIdentifier>>>,
+    bindings_rx: Option<&watch::Receiver<EsLinkBindings>>,
+    desired_rx: (
+        &watch::Receiver<Arc<EvpnInstanceTable>>,
+        &watch::Receiver<Arc<Vec<EthernetSegment>>>,
+    ),
     pending: &mut PendingRibOps,
-) {
-    let prior = std::mem::replace(&mut runtime.drained_esis, drained.clone());
-    if *prior == *drained {
-        return;
-    }
-    let mut changed = false;
-    for esi in drained.iter().filter(|esi| !prior.contains(*esi)) {
-        let Some(state) = by_esi.get_mut(esi) else {
-            continue;
+    df_status_tx: &watch::Sender<Arc<SegmentDfStatusTable>>,
+) -> (Arc<EvpnInstanceTable>, Vec<EthernetSegment>) {
+    // Keep ownership of prepared undrains across withdrawal acknowledgements.
+    // Re-reading the same drained set must not discard an unstarted recovery.
+    let mut withdrawing = BTreeSet::new();
+    let mut starting = BTreeSet::new();
+    loop {
+        let (instances, segments, drained) = {
+            // Freeze desired segments before reading their dependencies. The
+            // producer publishes instances and Link seeds before segments, and
+            // GCs removed drains afterwards. No watch guard crosses an await.
+            let segments = desired_rx.1.borrow();
+            let instances = desired_rx.0.borrow();
+            // Committed bindings precede undrain. Non-consuming reads leave
+            // newer notifications available to the ordinary actor branches.
+            let drained = drained_rx.borrow().clone();
+            if let Some(rx) = bindings_rx {
+                runtime.es_link_bindings = rx.borrow().clone();
+            }
+            (instances.clone(), segments.as_ref().clone(), drained)
         };
-        info!(esi = %esi, "EVPN segment: draining Ethernet Segment (operator)");
-        drain_segment_state(runtime, state, pending).await;
-        changed = true;
-    }
-    for esi in prior.iter().filter(|esi| !drained.contains(*esi)) {
-        let Some(state) = by_esi.get_mut(esi) else {
+        let retained: BTreeSet<_> = segments
+            .iter()
+            .filter_map(|segment| {
+                by_esi
+                    .get(&segment.esi)
+                    .filter(|state| {
+                        state.config == *segment
+                            && segment
+                                .member_vnis
+                                .iter()
+                                .all(|&vni| runtime.instances.get(vni) == instances.get(vni))
+                    })
+                    .map(|_| segment.esi)
+            })
+            .collect();
+        let prior = std::mem::replace(&mut runtime.drained_esis, drained.clone());
+        withdrawing.extend(drained.difference(&prior).copied());
+        starting.retain(|esi| !drained.contains(esi) && retained.contains(esi));
+        for esi in prior
+            .difference(&drained)
+            .filter(|esi| retained.contains(*esi))
+        {
+            let state = by_esi.get_mut(esi).unwrap();
+            prepare_segment_startup(runtime, state, true);
+            starting.insert(*esi);
+        }
+        // Publish every prepared recovery before any other ES can wait for a
+        // withdrawal acknowledgement. Refresh committed port names on every
+        // pass, including the pass immediately before recovery origination.
+        publish_bum_enforcement_snapshot(runtime, by_esi, Some(&retained));
+        publish_same_esi_bias_snapshot(runtime, by_esi);
+        publish_df_status(df_status_tx, by_esi);
+        if runtime.shutdown.is_cancelled() {
+            return (instances, segments);
+        }
+        if let Some(esi) = withdrawing.pop_first() {
+            if let Some(state) = by_esi.get_mut(&esi) {
+                info!(esi = %esi, "EVPN segment: draining Ethernet Segment (operator)");
+                drain_segment_state(runtime, state, pending).await;
+                // A queued drain may have been undone while another ES was
+                // settling. Its own withdrawal cleared the prepared roles.
+                if starting.contains(&esi) {
+                    prepare_segment_startup(runtime, state, true);
+                }
+            }
             continue;
-        };
-        info!(esi = %esi, "EVPN segment: undraining Ethernet Segment (operator)");
-        startup_segment_state(runtime, state, pending, true).await;
-        changed = true;
-    }
-    if changed {
-        publish_dataplane_snapshots(runtime, by_esi);
+        }
+        if let Some(esi) = starting.pop_first() {
+            // Membership, effective drain and committed bindings were just
+            // re-read. Removed/replaced or re-drained work was discarded above.
+            let state = by_esi.get_mut(&esi).unwrap();
+            info!(esi = %esi, "EVPN segment: undraining Ethernet Segment (operator)");
+            startup_segment_state(runtime, state, pending).await;
+            continue;
+        }
+        return (instances, segments);
     }
 }
 
@@ -1193,19 +1308,22 @@ async fn run_election_with_candidates(
         return;
     }
     let recovering = state.recovery_deadline.take().is_some();
+    let delayed_publication = recovering && state.config.df_dont_preempt;
     let changed = update_operational_df(state, &candidates, recovering);
     for candidate in &mut candidates {
         if candidate.originator_ip == state.config.originator_ip {
             (candidate.df_preference, candidate.df_dont_preempt) = state.operational_df;
         }
     }
-    if recovering || changed {
+    if delayed_publication || changed {
         let actions = state.es_origin.on_refresh();
         apply(runtime, state, actions, pending).await;
     }
-    if recovering {
+    if delayed_publication {
         let actions = state.ead_per_es.on_startup();
         apply(runtime, state, actions, pending).await;
+    }
+    if recovering {
         // The temporary NonDf roles protected the dataplane during recovery;
         // clear them so EAD-per-EVI is originated even if we remain NonDf.
         state.last_roles.clear();
@@ -1320,7 +1438,7 @@ fn publish_dataplane_snapshots(
     runtime: &SegmentRuntime,
     by_esi: &HashMap<EthernetSegmentIdentifier, SegmentState>,
 ) {
-    publish_bum_enforcement_snapshot(runtime, by_esi);
+    publish_bum_enforcement_snapshot(runtime, by_esi, None);
     publish_same_esi_bias_snapshot(runtime, by_esi);
 }
 
@@ -1334,6 +1452,7 @@ fn publish_empty_dataplane_snapshots(runtime: &SegmentRuntime) {
 fn publish_bum_enforcement_snapshot(
     runtime: &SegmentRuntime,
     by_esi: &HashMap<EthernetSegmentIdentifier, SegmentState>,
+    retained: Option<&BTreeSet<EthernetSegmentIdentifier>>,
 ) {
     let Some(tx) = &runtime.bum_enforcement_tx else {
         return;
@@ -1345,6 +1464,16 @@ fn publish_bum_enforcement_snapshot(
         &runtime.drained_esis,
         by_esi,
     );
+    if let Some(retained) = retained {
+        // A dependency refresh may observe committed bindings for a deletion
+        // or replacement before apply_runtime_snapshot settles the old routes.
+        // Keep that owned state's old AC gate until its teardown finishes.
+        for gate in tx.borrow().ac_gates() {
+            if by_esi.contains_key(&gate.esi) && !retained.contains(&gate.esi) {
+                table.set_ac_gate(gate.esi, gate.interface.clone(), gate.state);
+            }
+        }
+    }
     publish_enforcement_table(runtime, tx, table);
 }
 
@@ -1789,7 +1918,7 @@ fn df_election_extcomm(
     }
 }
 
-/// RFC 9785 §4.3 boot timer. Remote Type 4 routes cannot be present before
+/// Boot synchronization for the DF wait. Remote Type 4 routes cannot be present before
 /// the BGP sessions carrying them are up, so after a restart the recovery
 /// decision waits until every established EVPN session has sent End-of-RIB
 /// and GR selection deferral has released L2VPN/EVPN, bounded by
@@ -2260,6 +2389,8 @@ fn format_esi(esi: EthernetSegmentIdentifier) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::fmt::Write as _;
+
     use super::*;
     use rustbgpd_evpn::{EvpnInstance, EvpnInstanceTable};
     use rustbgpd_wire::{EthernetTagId, ExtendedCommunity};
@@ -2361,6 +2492,9 @@ mod tests {
                     }
                     RibUpdate::QueryEvpnRoutes { reply, .. } => {
                         let _ = reply.send(Vec::new());
+                    }
+                    RibUpdate::QueryEvpnSessionsSynced { reply } => {
+                        let _ = reply.send(true);
                     }
                     RibUpdate::InjectEvpn { route, reply } => {
                         injects.lock().await.push(route.key());
@@ -3142,7 +3276,7 @@ mod tests {
         assert!(h.is_none());
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn runtime_control_replaces_segments_and_drains_removed_routes() {
         let mut t = EvpnInstanceTable::new();
         t.insert(instance(100)).unwrap();
@@ -3203,7 +3337,7 @@ mod tests {
         assert!(!control.is_open());
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn runtime_control_drains_routes_when_member_instance_removed_with_segment() {
         // Tenant teardown removes the member L2VNI and its Ethernet Segment in
         // the same pass, so the segment actor sees an empty instance table when
@@ -3257,7 +3391,7 @@ mod tests {
         handle.shutdown().await;
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn runtime_control_uses_replaced_instances_for_dependent_segment_snapshot() {
         let mut t = EvpnInstanceTable::new();
         t.insert(instance(100)).unwrap();
@@ -3301,7 +3435,7 @@ mod tests {
         handle.shutdown().await;
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn runtime_control_rebuilds_routes_when_member_instance_redefined() {
         let mut t = EvpnInstanceTable::new();
         t.insert(instance(100)).unwrap();
@@ -3790,7 +3924,7 @@ mod tests {
         }
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn drain_withdraws_exactly_target_esi_route_classes() {
         let mut t = EvpnInstanceTable::new();
         t.insert(instance(100)).unwrap();
@@ -3845,7 +3979,7 @@ mod tests {
         handle.shutdown().await;
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn undrain_reoriginates_all_route_classes() {
         let mut t = EvpnInstanceTable::new();
         t.insert(instance(100)).unwrap();
@@ -3895,7 +4029,7 @@ mod tests {
         handle.shutdown().await;
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn segment_snapshot_reapply_while_drained_does_not_resurrect_routes() {
         let mut t = EvpnInstanceTable::new();
         t.insert(instance(100)).unwrap();
@@ -3946,7 +4080,7 @@ mod tests {
         handle.shutdown().await;
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn drained_esi_removed_from_config_drops_cleanly() {
         let mut t = EvpnInstanceTable::new();
         t.insert(instance(100)).unwrap();
@@ -3995,7 +4129,7 @@ mod tests {
     /// segment snapshot first, then the GC'd drained set), re-adding
     /// the same ESI in a later apply must start undrained — no phantom
     /// drain may survive inside the actor.
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn re_added_esi_after_drain_gc_starts_undrained() {
         let mut t = EvpnInstanceTable::new();
         t.insert(instance(100)).unwrap();
@@ -4142,6 +4276,9 @@ mod tests {
                                 .collect(),
                         );
                     }
+                    RibUpdate::QueryEvpnSessionsSynced { reply } => {
+                        let _ = reply.send(true);
+                    }
                     RibUpdate::InjectEvpn { route, reply } => {
                         injects.lock().await.push(route.key());
                         let _ = reply.send(Ok(()));
@@ -4184,7 +4321,7 @@ mod tests {
     /// updates BOTH published snapshots from the same election pass —
     /// the `(ESI, VNI)` bias eligibility drops AND the AC gate row
     /// flips to `Blocked`, with no further stimulus.
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn df_flip_republishes_bias_and_ac_gate_together() {
         // With candidates sorted [10.0.0.1, 10.0.0.2], DefaultModulo
         // gives VNI 101 → slot 101 % 2 = 1 → the remote wins DF.
@@ -4301,7 +4438,8 @@ mod tests {
         config_a.df_preference = 500;
         config_a.df_dont_preempt = true;
         let mut state_a = build_segment_state(&runtime, config_a.clone(), &mut allocator).unwrap();
-        startup_segment_state(&runtime, &mut state_a, &mut pending, true).await;
+        prepare_segment_startup(&runtime, &mut state_a, true);
+        startup_segment_state(&runtime, &mut state_a, &mut pending).await;
         tokio::time::advance(Duration::from_secs(3)).await;
         run_election_for_routes(&runtime, &mut state_a, &[], &mut pending).await;
         let mut candidates = gather_candidates_from_routes(&state_a, &[]);
@@ -4325,12 +4463,21 @@ mod tests {
             Arc::new(instances),
             vec![config_a.clone(), config_b.clone()],
             &mut pending,
+            None,
         )
         .await;
         assert_eq!(rib.withdraw_count(), 0);
         assert!(states[&config_a.esi].recovery_deadline.is_none());
         assert_eq!(states[&config_a.esi].operational_df, (500, true));
         assert_eq!(states[&config_a.esi].last_roles[&vni(100)], DfRole::Df);
+        tokio::time::advance(Duration::from_secs(3)).await;
+        run_election_for_routes(
+            &runtime,
+            states.get_mut(&config_b.esi).unwrap(),
+            &[],
+            &mut pending,
+        )
+        .await;
         // Editing B withdraws only B's three route classes.
         config_b.originator_ip = ipa("10.0.0.22");
         let instances = runtime.instances.clone();
@@ -4341,10 +4488,19 @@ mod tests {
             instances,
             vec![config_a.clone(), config_b.clone()],
             &mut pending,
+            None,
         )
         .await;
         assert_eq!(rib.withdraw_count(), 3);
         assert_eq!(states[&config_a.esi].last_roles[&vni(100)], DfRole::Df);
+        tokio::time::advance(Duration::from_secs(3)).await;
+        run_election_for_routes(
+            &runtime,
+            states.get_mut(&config_b.esi).unwrap(),
+            &[],
+            &mut pending,
+        )
+        .await;
         // Redefining B's member instance likewise preserves A's running state.
         let mut replacement = EvpnInstanceTable::new();
         replacement.insert(instance(100)).unwrap();
@@ -4356,6 +4512,7 @@ mod tests {
             Arc::new(replacement),
             vec![config_a.clone(), config_b],
             &mut pending,
+            None,
         )
         .await;
         assert_eq!(rib.withdraw_count(), 6);
@@ -4409,6 +4566,1082 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// Drive real actor/RIB boundaries explicitly: holding a reply prevents
+    /// clock advancement or a scheduling guess from establishing the ordering.
+    struct DfWaitActor {
+        handle: EvpnSegmentHandle,
+        rib_tx: mpsc::Sender<RibUpdate>,
+        rib_rx: mpsc::Receiver<RibUpdate>,
+        events: broadcast::Sender<Arc<EvpnRouteEvent>>,
+        bum: watch::Receiver<Arc<BumEnforcementTable>>,
+        status: watch::Receiver<Arc<SegmentDfStatusTable>>,
+        injected: Vec<EvpnRouteKey>,
+        metrics: BgpMetrics,
+        bindings: watch::Sender<EsLinkBindings>,
+    }
+
+    impl DfWaitActor {
+        fn new(algorithm: DfAlgorithm) -> Self {
+            let mut instances = EvpnInstanceTable::new();
+            for member in [101, 103, 105] {
+                instances.insert(instance(member)).unwrap();
+            }
+            let mut config = segment(esi(1), &[101]);
+            config.df_algorithm = algorithm;
+            config.df_preference = 100;
+            config.redundancy_mode = RedundancyMode::SingleActive;
+            let (rib_tx, rib_rx) = mpsc::channel(64);
+            let (bum_tx, bum) = watch::channel(Arc::new(BumEnforcementTable::new()));
+            let bindings: EsLinkBindings = Arc::new(
+                [(1, "es0"), (2, "es1"), (3, "es2")]
+                    .into_iter()
+                    .map(|(id, interface)| {
+                        (
+                            esi(id),
+                            crate::config::EsLinkBinding {
+                                interface: interface.to_string(),
+                                recovery_delay: Duration::ZERO,
+                            },
+                        )
+                    })
+                    .collect(),
+            );
+            let (bindings_tx, bindings_rx) = watch::channel(bindings);
+            let metrics = BgpMetrics::new();
+            let handle = spawn_with_local_bias(
+                &Arc::new(instances),
+                vec![config],
+                rib_tx.clone(),
+                Some(bum_tx),
+                None,
+                Some(bindings_rx),
+                metrics.clone(),
+                CancellationToken::new(),
+            );
+            let status = handle.df_status();
+            Self {
+                handle,
+                rib_tx,
+                rib_rx,
+                events: broadcast::channel(16).0,
+                bum,
+                status,
+                injected: Vec::new(),
+                metrics,
+                bindings: bindings_tx,
+            }
+        }
+
+        async fn next_query(&mut self) -> RibUpdate {
+            loop {
+                let update = tokio::time::timeout(Duration::from_secs(1), self.rib_rx.recv())
+                    .await
+                    .expect("actor must reach the next RIB boundary without advancing a timer")
+                    .expect("segment actor RIB sender remains open");
+                match update {
+                    RibUpdate::SubscribeEvpnRouteEvents { reply } => {
+                        reply.send(self.events.subscribe()).unwrap();
+                    }
+                    RibUpdate::InjectEvpn { route, reply } => {
+                        self.injected.push(route.key());
+                        reply.send(Ok(())).unwrap();
+                    }
+                    RibUpdate::WithdrawEvpn { reply, .. } => {
+                        reply.send(Ok(())).unwrap();
+                    }
+                    query @ (RibUpdate::QueryEvpnRoutes { .. }
+                    | RibUpdate::QueryEvpnSessionsSynced { .. }) => return query,
+                    _ => panic!("unexpected segment actor RIB operation"),
+                }
+            }
+        }
+
+        async fn routes_reply(&mut self) -> oneshot::Sender<Vec<EvpnRibRoute>> {
+            let RibUpdate::QueryEvpnRoutes { reply, .. } = self.next_query().await else {
+                panic!("expected route query, not boot synchronization");
+            };
+            reply
+        }
+
+        async fn sync_reply(&mut self) -> oneshot::Sender<bool> {
+            let RibUpdate::QueryEvpnSessionsSynced { reply } = self.next_query().await else {
+                panic!("election must wait for boot synchronization");
+            };
+            reply
+        }
+
+        fn assert_role(&self, role: DfRole) {
+            self.assert_segment_role(esi(1), vni(101), role);
+        }
+
+        fn assert_segment_role(
+            &self,
+            id: EthernetSegmentIdentifier,
+            member: EvpnInstanceId,
+            role: DfRole,
+        ) {
+            let bum = self.bum.borrow();
+            let row = bum.get(id, member).expect("explicit member intent");
+            assert_eq!(row.role, role);
+            assert_eq!(
+                row.action,
+                rustbgpd_evpn::BumForwardingAction::from_df_role(role)
+            );
+            assert_eq!(
+                bum.ac_gate(id).unwrap().state,
+                if role.is_df() {
+                    AcGateState::Forwarding
+                } else {
+                    AcGateState::Blocked
+                }
+            );
+            let families = self.metrics.registry().gather();
+            let family = families
+                .iter()
+                .find(|family| family.name() == "evpn_df_role")
+                .unwrap();
+            let esi_label = format_esi(id);
+            let vni_label = member.as_u32().to_string();
+            let df = family
+                .get_metric()
+                .iter()
+                .find(|metric| {
+                    [
+                        ("role", "df"),
+                        ("esi", esi_label.as_str()),
+                        ("vni", vni_label.as_str()),
+                    ]
+                    .into_iter()
+                    .all(|(name, value)| {
+                        metric
+                            .get_label()
+                            .iter()
+                            .any(|label| label.name() == name && label.value() == value)
+                    })
+                })
+                .unwrap();
+            let expected = if role.is_df() { 1.0 } else { 0.0 };
+            assert!((df.get_gauge().get_value() - expected).abs() < f64::EPSILON);
+        }
+
+        async fn startup(&mut self) {
+            tokio::time::timeout(Duration::from_secs(1), self.bum.changed())
+                .await
+                .expect("suppression must publish before any RIB reply")
+                .unwrap();
+            self.assert_role(DfRole::NonDf);
+            assert!(self.status.borrow()[&esi(1)].recovery_deadline.is_some());
+            // No RIB request has been answered: suppression precedes both
+            // subscription and the first Type 4 acknowledgement.
+            assert_eq!(self.injected, Vec::new());
+            self.routes_reply().await.send(Vec::new()).unwrap();
+            assert_eq!(self.injected.len(), 2, "Type 4 + EAD-per-ES during DF_WAIT");
+            assert!(
+                self.injected
+                    .iter()
+                    .any(|key| matches!(key, EvpnRouteKey::Es { .. }))
+            );
+            assert!(
+                self.injected
+                    .iter()
+                    .any(|key| matches!(key, EvpnRouteKey::EadPerEs { .. }))
+            );
+            // The interval's first immediate tick is another election attempt.
+            self.routes_reply().await.send(Vec::new()).unwrap();
+            self.status.borrow_and_update();
+        }
+
+        fn remote_event(&self, route: &EvpnRibRoute) {
+            self.events
+                .send(Arc::new(EvpnRouteEvent {
+                    event_type: rustbgpd_rib::RouteEventType::Added,
+                    key: route.key(),
+                    best: Some(route.clone()),
+                    previous_best: None,
+                    peer: Some(route.peer),
+                    previous_peer: None,
+                    timestamp: rustbgpd_rib::event::unix_timestamp_now(),
+                }))
+                .unwrap();
+        }
+
+        async fn finish(self) {
+            // Closing the fake RIB lets the actor's bounded drain settle.
+            drop(self.rib_rx);
+            self.handle.shutdown().await;
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn every_df_algorithm_waits_before_first_election() {
+        for algorithm in [
+            DfAlgorithm::DefaultModulo,
+            DfAlgorithm::HighestRandomWeight,
+            DfAlgorithm::HighestPreference,
+            DfAlgorithm::LowestPreference,
+        ] {
+            let mut actor = DfWaitActor::new(algorithm);
+            actor.startup().await;
+            tokio::time::advance(Duration::from_millis(2999)).await;
+            actor.assert_role(DfRole::NonDf);
+            tokio::time::advance(Duration::from_millis(1)).await;
+            actor.sync_reply().await.send(true).unwrap();
+            actor.routes_reply().await.send(Vec::new()).unwrap();
+            actor.remote_event(&type_4_es_route(
+                esi(1),
+                "10.0.0.2",
+                attrs_with_es_import_rt(esi(1)),
+            ));
+            let next_event = actor.routes_reply().await;
+            assert!(
+                actor.status.borrow_and_update()[&esi(1)]
+                    .recovery_deadline
+                    .is_none()
+            );
+            actor.assert_role(DfRole::Df);
+            // Ordinary wait completion must not refresh its Type 4 or EAD-per-ES.
+            assert_eq!(
+                actor
+                    .injected
+                    .iter()
+                    .filter(|key| matches!(key, EvpnRouteKey::Es { .. }))
+                    .count(),
+                1
+            );
+            next_event.send(Vec::new()).unwrap();
+            actor.finish().await;
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn first_df_election_includes_type4_received_during_wait() {
+        let mut actor = DfWaitActor::new(DfAlgorithm::HighestPreference);
+        actor.startup().await;
+        let mut attrs = attrs_with_es_import_rt(esi(1));
+        attrs.push(PathAttribute::ExtendedCommunities(vec![
+            ExtendedCommunity::df_election(
+                DfAlgorithm::HighestPreference.algorithm_id(),
+                0,
+                Some(200),
+            ),
+        ]));
+        let remote = type_4_es_route(esi(1), "10.0.0.2", attrs);
+        tokio::time::advance(Duration::from_millis(2999)).await;
+        actor.remote_event(&remote);
+        actor
+            .routes_reply()
+            .await
+            .send(vec![remote.clone()])
+            .unwrap();
+        // Reaching the next event query proves the first event's election
+        // attempt completed, rather than inspecting state before it ran.
+        actor.remote_event(&remote);
+        let second_event = actor.routes_reply().await;
+        actor.assert_role(DfRole::NonDf);
+        assert_eq!(actor.injected.len(), 2);
+        second_event.send(vec![remote.clone()]).unwrap();
+        tokio::time::advance(Duration::from_millis(1)).await;
+        actor.sync_reply().await.send(false).unwrap();
+        actor.status.changed().await.unwrap();
+        assert!(
+            actor.status.borrow_and_update()[&esi(1)]
+                .recovery_deadline
+                .is_some()
+        );
+        actor.assert_role(DfRole::NonDf);
+        tokio::time::advance(Duration::from_secs(1)).await;
+        actor.sync_reply().await.send(true).unwrap();
+        actor.routes_reply().await.send(vec![remote]).unwrap();
+        // A second query cannot start until the completed election's EAD has
+        // been acknowledged. Trigger it to drive that acknowledgement.
+        let remote = type_4_es_route(esi(1), "10.0.0.2", attrs_with_es_import_rt(esi(1)));
+        actor.remote_event(&remote);
+        let next_event = actor.routes_reply().await;
+        assert!(actor.status.borrow()[&esi(1)].recovery_deadline.is_none());
+        actor.assert_role(DfRole::NonDf);
+        assert_eq!(
+            actor.injected.len(),
+            3,
+            "first election adds only EAD-per-EVI"
+        );
+        next_event.send(Vec::new()).unwrap();
+        actor.finish().await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn live_added_segments_publish_all_waits_before_first_type4_ack() {
+        let mut actor = DfWaitActor::new(DfAlgorithm::DefaultModulo);
+        actor.startup().await;
+        tokio::time::advance(Duration::from_secs(3)).await;
+        actor.sync_reply().await.send(true).unwrap();
+        actor.routes_reply().await.send(Vec::new()).unwrap();
+        actor.remote_event(&type_4_es_route(
+            esi(1),
+            "10.0.0.2",
+            attrs_with_es_import_rt(esi(1)),
+        ));
+        let barrier = actor.routes_reply().await;
+        actor.assert_role(DfRole::Df);
+        barrier.send(Vec::new()).unwrap();
+
+        let configs = [(1, 101), (2, 103), (3, 105)]
+            .into_iter()
+            .map(|(id, member)| {
+                let mut config = segment(esi(id), &[member]);
+                config.df_preference = 100;
+                config.redundancy_mode = RedundancyMode::SingleActive;
+                config
+            })
+            .collect();
+        assert!(
+            actor
+                .handle
+                .runtime_control()
+                .replace_segments(Arc::new(configs))
+        );
+        let RibUpdate::InjectEvpn { route, reply } = actor.rib_rx.recv().await.unwrap() else {
+            panic!("live add must first advertise Type 4");
+        };
+        assert!(matches!(route.key(), EvpnRouteKey::Es { esi: id, .. } if id == esi(2)));
+        // Neither the first Type 4 nor anything from the second added ES has
+        // been acknowledged. Both complete watch views must already exist.
+        for (id, member) in [(2, 103), (3, 105)] {
+            actor.assert_segment_role(esi(id), vni(member), DfRole::NonDf);
+            assert_eq!(
+                actor.status.borrow()[&esi(id)].recovery_deadline.unwrap()
+                    - tokio::time::Instant::now(),
+                Duration::from_secs(3)
+            );
+        }
+        actor.assert_role(DfRole::Df);
+        actor.injected.push(route.key());
+        reply.send(Ok(())).unwrap();
+        // Finish each added ES's initial candidate query without inventing a
+        // remote route. The first's RIB acknowledgement cannot hide the second.
+        actor.routes_reply().await.send(Vec::new()).unwrap();
+        actor.routes_reply().await.send(Vec::new()).unwrap();
+        let remote = type_4_es_route(esi(2), "10.0.0.2", attrs_with_es_import_rt(esi(2)));
+        tokio::time::advance(Duration::from_millis(2999)).await;
+        actor.remote_event(&remote);
+        actor
+            .routes_reply()
+            .await
+            .send(vec![remote.clone()])
+            .unwrap();
+        actor.remote_event(&remote);
+        let barrier = actor.routes_reply().await;
+        for (id, member) in [(2, 103), (3, 105)] {
+            actor.assert_segment_role(esi(id), vni(member), DfRole::NonDf);
+            assert!(actor.status.borrow()[&esi(id)].recovery_deadline.is_some());
+        }
+        assert_eq!(
+            actor.injected.len(),
+            7,
+            "one existing EAD-per-EVI, only Type 4/EAD-per-ES for both new ESs"
+        );
+        barrier.send(vec![remote]).unwrap();
+        actor.finish().await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn lagging_actor_keeps_both_uncommitted_revisions_drained() {
+        let mut actor = DfWaitActor::new(DfAlgorithm::DefaultModulo);
+        let initial_bindings = Arc::new(BTreeMap::from([(
+            esi(1),
+            actor.bindings.borrow()[&esi(1)].clone(),
+        )]));
+        actor.bindings.send_replace(initial_bindings);
+        actor.startup().await;
+        let event = type_4_es_route(esi(1), "10.0.0.2", attrs_with_es_import_rt(esi(1)));
+        actor.remote_event(&event);
+        let held = actor.routes_reply().await;
+        let control = actor.handle.runtime_control();
+        let configs = |members: &[(u8, u32)]| {
+            Arc::new(
+                members
+                    .iter()
+                    .map(|&(id, member)| {
+                        let mut config = segment(esi(id), &[member]);
+                        config.df_preference = 100;
+                        config.redundancy_mode = RedundancyMode::SingleActive;
+                        config
+                    })
+                    .collect(),
+            )
+        };
+        // Queue revision A, then revision B, while an acknowledged RIB
+        // boundary holds the actor. Each revision seeds Link drain before
+        // publishing dependent segments; neither binding has committed.
+        assert!(control.replace_drained_esis(drained_set(&[esi(2)])));
+        assert!(control.replace_segments(configs(&[(1, 101), (2, 103)])));
+        assert!(control.replace_drained_esis(drained_set(&[esi(2), esi(3)])));
+        assert!(control.replace_segments(configs(&[(1, 101), (2, 103), (3, 105)])));
+        held.send(Vec::new()).unwrap();
+        actor.remote_event(&event);
+        let observed = actor.routes_reply().await;
+        for id in [2, 3] {
+            assert!(actor.status.borrow().contains_key(&esi(id)));
+            assert!(!actor.bindings.borrow().contains_key(&esi(id)));
+        }
+        assert_eq!(
+            actor.injected.len(),
+            2,
+            "neither uncommitted revision may originate"
+        );
+        observed.send(Vec::new()).unwrap();
+        actor.finish().await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one held commit verifies candidate publication, binding commit, undrain and removal ordering"
+    )]
+    async fn committed_binding_precedes_undrain_and_removal_gc_does_not_reoriginate() {
+        use crate::evpn_es_drain::{EsDrainReason, EvpnEsDrainState, apply_ethernet_segment_drain};
+        use crate::evpn_runtime_converger::{
+            DaemonEvpnRuntimeConvergeFuture, DaemonEvpnRuntimeConverger, EvpnRuntimeActorConverger,
+            EvpnRuntimeReloadApply,
+        };
+
+        // Run the real converger, but hold its return so the actor consumes
+        // candidate publication before the reload owner commits the binding.
+        struct HoldCommit {
+            inner: EvpnRuntimeActorConverger,
+            published: tokio::sync::Notify,
+            commit: tokio::sync::Notify,
+        }
+        impl DaemonEvpnRuntimeConverger for HoldCommit {
+            fn converge<'a>(
+                &'a self,
+                current: &'a rustbgpd_evpn::EvpnRuntimeModel,
+                candidate: &'a rustbgpd_evpn::EvpnRuntimeCandidate,
+                plan: &'a rustbgpd_evpn::EvpnRuntimePlan,
+            ) -> DaemonEvpnRuntimeConvergeFuture<'a> {
+                Box::pin(async move {
+                    self.inner.converge(current, candidate, plan).await?;
+                    self.published.notify_one();
+                    self.commit.notified().await;
+                    Ok(())
+                })
+            }
+
+            fn seed_link_drain(
+                &self,
+                esis: &BTreeSet<EthernetSegmentIdentifier>,
+            ) -> Option<Arc<crate::evpn_es_drain::EsDrainReasonMap>> {
+                self.inner.seed_link_drain(esis)
+            }
+
+            fn restore_link_drain(&self, prior: Arc<crate::evpn_es_drain::EsDrainReasonMap>) {
+                self.inner.restore_link_drain(prior);
+            }
+        }
+
+        let mut baseline_toml = "[global]\nasn=65000\nrouter_id=\"10.0.0.1\"\nlisten_port=179\n\n[global.telemetry]\nlog_format=\"json\"\n".to_string();
+        for member in [101, 103, 105] {
+            writeln!(baseline_toml,
+                "\n[[evpn_instances]]\nvni={member}\nrd=\"65000:{member}\"\nroute_targets=[\"65000:{member}\"]\nlocal_vtep_ip=\"10.0.0.1\"\nbridge=\"br{member}\"\nadvertise_svi_mac=false"
+            ).unwrap();
+        }
+        let es_config = |id, member, interface| {
+            format!(
+                "\n[[ethernet_segments]]\nesi=\"{}\"\nmember_vnis=[{member}]\noriginator_ip=\"10.0.0.1\"\ndf_preference=100\ndf_algorithm=\"highest-preference\"\nredundancy_mode=\"single-active\"\ninterface=\"{interface}\"\nrecovery_delay_seconds=0\n",
+                format_esi(esi(id))
+            )
+        };
+        baseline_toml.push_str(&es_config(1, 101, "es0"));
+        let candidate_toml = baseline_toml.clone() + &es_config(2, 103, "es1");
+        let baseline = crate::config::Config::load_toml_with_diagnostics(
+            &crate::test_support::tier_authorized_uds_test_config(&baseline_toml),
+            "baseline",
+        )
+        .unwrap();
+        let candidate = crate::config::Config::load_toml_with_diagnostics(
+            &crate::test_support::tier_authorized_uds_test_config(&candidate_toml),
+            "candidate",
+        )
+        .unwrap();
+        let mut actor = DfWaitActor::new(DfAlgorithm::HighestPreference);
+        let initial_bindings = Arc::new(BTreeMap::from([(
+            esi(1),
+            actor.bindings.borrow()[&esi(1)].clone(),
+        )]));
+        actor.bindings.send_replace(initial_bindings);
+        actor.startup().await;
+        tokio::time::advance(Duration::from_secs(3)).await;
+        actor.sync_reply().await.send(true).unwrap();
+        actor.routes_reply().await.send(Vec::new()).unwrap();
+        actor.remote_event(&type_4_es_route(
+            esi(1),
+            "10.0.0.2",
+            attrs_with_es_import_rt(esi(1)),
+        ));
+        let before_apply = actor.routes_reply().await;
+        actor.assert_role(DfRole::Df);
+
+        let coordinator = Arc::new(std::sync::Mutex::new(
+            rustbgpd_evpn::EvpnRuntimeCoordinator::new(
+                baseline.resolve_evpn_instances().unwrap(),
+                baseline.resolve_evpn_ip_vrfs().unwrap(),
+                baseline.resolve_ethernet_segments().unwrap(),
+            ),
+        ));
+        let lock = Arc::new(tokio::sync::Mutex::new(()));
+        let drain = EvpnEsDrainState::default();
+        let control = actor.handle.runtime_control();
+        let held = Arc::new(HoldCommit {
+            inner: EvpnRuntimeActorConverger::new(
+                actor.rib_tx.clone(),
+                Arc::new(tokio::sync::Mutex::new(
+                    crate::evpn_imet::EvpnImetController::new(),
+                )),
+                None,
+                None,
+                None,
+                None,
+                Some(control.clone()),
+                drain.clone(),
+            ),
+            published: tokio::sync::Notify::new(),
+            commit: tokio::sync::Notify::new(),
+        });
+        let apply = Arc::new(
+            EvpnRuntimeReloadApply::new(
+                coordinator.clone(),
+                lock.clone(),
+                held.clone(),
+                baseline.clone(),
+            )
+            .with_es_link_bindings_publisher(Arc::new(actor.bindings.clone())),
+        );
+        let apply_task = apply.clone();
+        let applying = tokio::spawn(async move { apply_task.apply_config(&candidate).await });
+        held.published.notified().await;
+        assert_eq!(
+            drain.reasons_for(esi(2)),
+            BTreeSet::from([EsDrainReason::Link])
+        );
+        assert!(
+            !actor.bindings.borrow().contains_key(&esi(2)),
+            "binding is not committed yet"
+        );
+
+        // Both the seed and candidate are queued while the actor is held.
+        // Its biased segment branch must consume the seed before startup.
+        before_apply.send(Vec::new()).unwrap();
+        let event = type_4_es_route(esi(2), "10.0.0.2", attrs_with_es_import_rt(esi(2)));
+        actor.remote_event(&event);
+        let before_commit = actor.routes_reply().await;
+        assert!(actor.status.borrow().contains_key(&esi(2)));
+        assert_eq!(
+            actor.injected.len(),
+            3,
+            "no uncommitted bound ES origination"
+        );
+
+        held.commit.notify_one();
+        applying.await.unwrap().unwrap();
+        assert!(actor.bindings.borrow().contains_key(&esi(2)));
+        // The real drain mutation follows the same post-commit carrier-probe
+        // path. Queue it while the actor is still held: drain is biased ahead
+        // of bindings, so undrain must explicitly read the latest binding.
+        apply_ethernet_segment_drain(
+            esi(2),
+            EsDrainReason::Link,
+            false,
+            &lock,
+            &coordinator,
+            &drain,
+            Some(&control),
+            None,
+        )
+        .await
+        .unwrap();
+        before_commit.send(Vec::new()).unwrap();
+        let RibUpdate::InjectEvpn { route, reply } = actor.rib_rx.recv().await.unwrap() else {
+            panic!("undrain must first originate Type 4");
+        };
+        assert!(matches!(route.key(), EvpnRouteKey::Es { esi: id, .. } if id == esi(2)));
+        actor.assert_segment_role(esi(2), vni(103), DfRole::NonDf);
+        assert!(actor.status.borrow()[&esi(2)].recovery_deadline.is_some());
+        actor.injected.push(route.key());
+        reply.send(Ok(())).unwrap();
+        actor.routes_reply().await.send(Vec::new()).unwrap();
+        actor.remote_event(&event);
+        let barrier = actor.routes_reply().await;
+        actor.assert_segment_role(esi(2), vni(103), DfRole::NonDf);
+
+        // Drain the new ES, then hold the actor while the real deletion
+        // publishes its segment snapshot and garbage-collects that drain.
+        apply_ethernet_segment_drain(
+            esi(2),
+            EsDrainReason::Operator,
+            true,
+            &lock,
+            &coordinator,
+            &drain,
+            Some(&control),
+            None,
+        )
+        .await
+        .unwrap();
+        barrier.send(Vec::new()).unwrap();
+        let retained_event = type_4_es_route(esi(1), "10.0.0.2", attrs_with_es_import_rt(esi(1)));
+        actor.remote_event(&retained_event);
+        let before_remove = actor.routes_reply().await;
+        assert_eq!(
+            actor.bum.borrow().ac_gate(esi(2)).unwrap().state,
+            AcGateState::Blocked
+        );
+        let injected_before_remove = actor.injected.len();
+        let removing = tokio::spawn(async move { apply.apply_config(&baseline).await });
+        held.published.notified().await;
+        assert!(
+            drain.reasons_for(esi(2)).is_empty(),
+            "real converger GC removed the drain reason"
+        );
+        before_remove.send(Vec::new()).unwrap();
+        actor.remote_event(&retained_event);
+        let after_remove = actor.routes_reply().await;
+        assert!(!actor.status.borrow().contains_key(&esi(2)));
+        assert_eq!(
+            actor.injected.len(),
+            injected_before_remove,
+            "drain GC must not reoriginate the removed ES"
+        );
+        held.commit.notify_one();
+        removing.await.unwrap().unwrap();
+        after_remove.send(Vec::new()).unwrap();
+        actor.finish().await;
+    }
+
+    fn df_wait_reload_config(
+        include_y: bool,
+        y_interface: &str,
+        y_member: u32,
+    ) -> crate::config::Config {
+        let mut text = "[global]\nasn=65000\nrouter_id=\"10.0.0.1\"\nlisten_port=179\n\n[global.telemetry]\nlog_format=\"json\"\n".to_string();
+        for member in [101, 103, 105] {
+            writeln!(text,
+                "\n[[evpn_instances]]\nvni={member}\nrd=\"65000:{member}\"\nroute_targets=[\"65000:{member}\"]\nlocal_vtep_ip=\"10.0.0.1\"\nbridge=\"br{member}\"\nadvertise_svi_mac=false"
+            ).unwrap();
+        }
+        for (id, member, interface) in [(1, y_member, y_interface), (2, 103, "es2")] {
+            if id == 1 && !include_y {
+                continue;
+            }
+            writeln!(text,
+                "\n[[ethernet_segments]]\nesi=\"{}\"\nmember_vnis=[{member}]\noriginator_ip=\"10.0.0.1\"\ndf_preference=100\ndf_algorithm=\"highest-preference\"\nredundancy_mode=\"single-active\"\ninterface=\"{interface}\"\nrecovery_delay_seconds=0",
+                format_esi(esi(id))
+            ).unwrap();
+        }
+        crate::config::Config::load_toml_with_diagnostics(
+            &crate::test_support::tier_authorized_uds_test_config(&text),
+            "held-withdrawal",
+        )
+        .unwrap()
+    }
+
+    #[tokio::test(start_paused = true)]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one controlled withdrawal exercises committed binding, removal, redrain and shutdown transitions"
+    )]
+    async fn held_withdrawal_revalidates_prepared_undrain_before_origination() {
+        use crate::evpn_es_drain::{EsDrainReason, EvpnEsDrainState, apply_ethernet_segment_drain};
+        use crate::evpn_runtime_converger::{EvpnRuntimeActorConverger, EvpnRuntimeReloadApply};
+
+        // Each case holds X's actual withdrawal acknowledgement while Y is a
+        // prepared undrain. Changes commit through the real reload/drain path.
+        for change in ["binding", "delete", "redrain", "shutdown"] {
+            let baseline = df_wait_reload_config(true, "es0", 101);
+            let mut actor = DfWaitActor::new(DfAlgorithm::HighestPreference);
+            actor.bindings.send_replace(Arc::new(
+                baseline
+                    .resolve_es_link_bindings(&crate::config::AutoLacpEsis::default())
+                    .unwrap(),
+            ));
+            actor.startup().await;
+            let control = actor.handle.runtime_control();
+            assert!(
+                control.replace_segments(Arc::new(baseline.resolve_ethernet_segments().unwrap()))
+            );
+            actor.routes_reply().await.send(Vec::new()).unwrap();
+            let event = type_4_es_route(esi(2), "10.0.0.2", attrs_with_es_import_rt(esi(2)));
+            actor.remote_event(&event);
+            let before_drain = actor.routes_reply().await;
+
+            let coordinator = Arc::new(std::sync::Mutex::new(
+                rustbgpd_evpn::EvpnRuntimeCoordinator::new(
+                    baseline.resolve_evpn_instances().unwrap(),
+                    baseline.resolve_evpn_ip_vrfs().unwrap(),
+                    baseline.resolve_ethernet_segments().unwrap(),
+                ),
+            ));
+            let lock = Arc::new(tokio::sync::Mutex::new(()));
+            let drain = EvpnEsDrainState::default();
+            let converger = Arc::new(EvpnRuntimeActorConverger::new(
+                actor.rib_tx.clone(),
+                Arc::new(tokio::sync::Mutex::new(
+                    crate::evpn_imet::EvpnImetController::new(),
+                )),
+                None,
+                None,
+                None,
+                None,
+                Some(control.clone()),
+                drain.clone(),
+            ));
+            let apply =
+                EvpnRuntimeReloadApply::new(coordinator.clone(), lock.clone(), converger, baseline)
+                    .with_es_link_bindings_publisher(Arc::new(actor.bindings.clone()));
+            apply_ethernet_segment_drain(
+                esi(1),
+                EsDrainReason::Operator,
+                true,
+                &lock,
+                &coordinator,
+                &drain,
+                Some(&control),
+                None,
+            )
+            .await
+            .unwrap();
+            before_drain.send(Vec::new()).unwrap();
+            actor.remote_event(&event);
+            let before_swap = actor.routes_reply().await;
+            assert!(actor.status.borrow()[&esi(1)].recovery_deadline.is_none());
+            let injections_before = actor.injected.len();
+
+            // Coalesce prior={Y}, incoming={X} while the actor is held.
+            for (id, drained) in [(2, true), (1, false)] {
+                apply_ethernet_segment_drain(
+                    esi(id),
+                    EsDrainReason::Operator,
+                    drained,
+                    &lock,
+                    &coordinator,
+                    &drain,
+                    Some(&control),
+                    None,
+                )
+                .await
+                .unwrap();
+            }
+            before_swap.send(Vec::new()).unwrap();
+            let RibUpdate::WithdrawEvpn {
+                reply: held_withdrawal,
+                ..
+            } = actor.rib_rx.recv().await.unwrap()
+            else {
+                panic!("X must reach its real withdrawal acknowledgement");
+            };
+            actor.assert_segment_role(esi(1), vni(101), DfRole::NonDf);
+            assert!(actor.status.borrow()[&esi(1)].recovery_deadline.is_some());
+            assert_eq!(actor.bum.borrow().ac_gate(esi(1)).unwrap().interface, "es0");
+            match change {
+                "binding" => {
+                    apply
+                        .apply_config(&df_wait_reload_config(true, "es1", 101))
+                        .await
+                        .unwrap();
+                    assert_eq!(actor.bindings.borrow()[&esi(1)].interface, "es1");
+                }
+                "delete" => {
+                    apply
+                        .apply_config(&df_wait_reload_config(false, "es0", 101))
+                        .await
+                        .unwrap();
+                }
+                "redrain" => {
+                    apply_ethernet_segment_drain(
+                        esi(1),
+                        EsDrainReason::Operator,
+                        true,
+                        &lock,
+                        &coordinator,
+                        &drain,
+                        Some(&control),
+                        None,
+                    )
+                    .await
+                    .unwrap();
+                }
+                "shutdown" => actor.handle.shutdown.cancel(),
+                _ => unreachable!(),
+            }
+            held_withdrawal.send(Ok(())).unwrap();
+            if change == "binding" {
+                loop {
+                    match actor.rib_rx.recv().await.unwrap() {
+                        RibUpdate::WithdrawEvpn { reply, .. } => {
+                            reply.send(Ok(())).unwrap();
+                        }
+                        RibUpdate::InjectEvpn { route, reply } => {
+                            assert!(
+                                matches!(route.key(), EvpnRouteKey::Es { esi: id, .. } if id == esi(1))
+                            );
+                            actor.assert_segment_role(esi(1), vni(101), DfRole::NonDf);
+                            let gate = actor.bum.borrow().ac_gate(esi(1)).unwrap().clone();
+                            assert_eq!(
+                                gate.interface, "es1",
+                                "gate must follow the committed binding before Type 4"
+                            );
+                            assert_eq!(gate.state, AcGateState::Blocked);
+                            actor.injected.push(route.key());
+                            reply.send(Ok(())).unwrap();
+                            break;
+                        }
+                        _ => panic!("undrain must originate only after X's withdrawals"),
+                    }
+                }
+                actor.routes_reply().await.send(Vec::new()).unwrap();
+            } else if change == "shutdown" {
+                let mut join = actor.handle.join;
+                loop {
+                    tokio::select! {
+                        result = &mut join => { result.unwrap(); break; }
+                        update = actor.rib_rx.recv() => match update.unwrap() {
+                            RibUpdate::WithdrawEvpn { reply, .. } => { reply.send(Ok(())).unwrap(); }
+                            _ => panic!("shutdown must settle withdrawals without new origination"),
+                        }
+                    }
+                }
+                continue;
+            } else {
+                actor.remote_event(&event);
+                let observed = actor.routes_reply().await;
+                assert_eq!(
+                    actor.injected.len(),
+                    injections_before,
+                    "{change} must cancel Y's prepared origination"
+                );
+                if change == "delete" {
+                    assert!(!actor.status.borrow().contains_key(&esi(1)));
+                } else {
+                    assert_eq!(
+                        actor.bum.borrow().ac_gate(esi(1)).unwrap().state,
+                        AcGateState::Blocked
+                    );
+                    assert!(actor.status.borrow()[&esi(1)].recovery_deadline.is_none());
+                }
+                observed.send(Vec::new()).unwrap();
+            }
+            actor.finish().await;
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one acknowledged withdrawal sequence verifies old and replacement attachment circuit gates"
+    )]
+    async fn retiring_live_non_df_keeps_old_ac_gate_until_withdrawals_settle() {
+        use crate::evpn_es_drain::EvpnEsDrainState;
+        use crate::evpn_runtime_converger::{EvpnRuntimeActorConverger, EvpnRuntimeReloadApply};
+
+        for replace in [false, true] {
+            let baseline = df_wait_reload_config(true, "es0", 101);
+            let mut actor = DfWaitActor::new(DfAlgorithm::HighestPreference);
+            actor.bindings.send_replace(Arc::new(
+                baseline
+                    .resolve_es_link_bindings(&crate::config::AutoLacpEsis::default())
+                    .unwrap(),
+            ));
+            actor.startup().await;
+            let control = actor.handle.runtime_control();
+            assert!(
+                control.replace_segments(Arc::new(baseline.resolve_ethernet_segments().unwrap()))
+            );
+            actor.routes_reply().await.send(Vec::new()).unwrap();
+            let mut attrs = attrs_with_es_import_rt(esi(1));
+            attrs.push(PathAttribute::ExtendedCommunities(vec![
+                ExtendedCommunity::df_election(
+                    DfAlgorithm::HighestPreference.algorithm_id(),
+                    0,
+                    Some(200),
+                ),
+            ]));
+            let remote = type_4_es_route(esi(1), "10.0.0.2", attrs);
+            tokio::time::advance(Duration::from_secs(3)).await;
+            actor.sync_reply().await.send(true).unwrap();
+            actor
+                .routes_reply()
+                .await
+                .send(vec![remote.clone()])
+                .unwrap();
+            actor.remote_event(&remote);
+            let before_apply = actor.routes_reply().await;
+            actor.assert_role(DfRole::NonDf);
+            assert!(actor.status.borrow()[&esi(1)].recovery_deadline.is_none());
+            assert_eq!(
+                actor
+                    .injected
+                    .iter()
+                    .filter(|key| esi_of_key(key) == Some(esi(1)))
+                    .count(),
+                3,
+                "the retiring non-DF owns Type 4 and both EAD route classes"
+            );
+
+            let coordinator = Arc::new(std::sync::Mutex::new(
+                rustbgpd_evpn::EvpnRuntimeCoordinator::new(
+                    baseline.resolve_evpn_instances().unwrap(),
+                    baseline.resolve_evpn_ip_vrfs().unwrap(),
+                    baseline.resolve_ethernet_segments().unwrap(),
+                ),
+            ));
+            let converger = Arc::new(EvpnRuntimeActorConverger::new(
+                actor.rib_tx.clone(),
+                Arc::new(tokio::sync::Mutex::new(
+                    crate::evpn_imet::EvpnImetController::new(),
+                )),
+                None,
+                None,
+                None,
+                None,
+                Some(control),
+                EvpnEsDrainState::default(),
+            ));
+            let apply = EvpnRuntimeReloadApply::new(
+                coordinator,
+                Arc::new(tokio::sync::Mutex::new(())),
+                converger,
+                baseline,
+            )
+            .with_es_link_bindings_publisher(Arc::new(actor.bindings.clone()));
+            apply
+                .apply_config(&df_wait_reload_config(replace, "es1", 105))
+                .await
+                .unwrap();
+            before_apply.send(vec![remote]).unwrap();
+
+            // Observe every acknowledgement, including the first and last.
+            // The old gate must survive until all three owned classes settle.
+            for _ in 0..3 {
+                let RibUpdate::WithdrawEvpn { key, reply } = actor.rib_rx.recv().await.unwrap()
+                else {
+                    panic!("old route classes must withdraw before replacement origination");
+                };
+                assert_eq!(esi_of_key(&key), Some(esi(1)));
+                let table = actor.bum.borrow().clone();
+                let gate = table
+                    .ac_gate(esi(1))
+                    .expect("retiring segment keeps its old AC gate");
+                assert_eq!(gate.interface, "es0");
+                assert_eq!(gate.state, AcGateState::Blocked);
+                assert_eq!(table.get(esi(1), vni(101)).unwrap().role, DfRole::NonDf);
+                reply.send(Ok(())).unwrap();
+            }
+            if replace {
+                let RibUpdate::InjectEvpn { route, reply } = actor.rib_rx.recv().await.unwrap()
+                else {
+                    panic!("replacement may originate after the old withdrawals settle");
+                };
+                assert!(matches!(route.key(), EvpnRouteKey::Es { esi: id, .. } if id == esi(1)));
+                actor.assert_segment_role(esi(1), vni(105), DfRole::NonDf);
+                let table = actor.bum.borrow().clone();
+                assert_eq!(table.ac_gate(esi(1)).unwrap().interface, "es1");
+                assert!(table.ac_gates().all(|gate| gate.interface != "es0"));
+                actor.injected.push(route.key());
+                reply.send(Ok(())).unwrap();
+                actor.routes_reply().await.send(Vec::new()).unwrap();
+            } else {
+                actor.remote_event(&type_4_es_route(
+                    esi(2),
+                    "10.0.0.2",
+                    attrs_with_es_import_rt(esi(2)),
+                ));
+                let observed = actor.routes_reply().await;
+                assert!(actor.bum.borrow().ac_gate(esi(1)).is_none());
+                assert!(!actor.status.borrow().contains_key(&esi(1)));
+                observed.send(Vec::new()).unwrap();
+            }
+            actor.finish().await;
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn ordinary_df_boot_wait_is_bounded_without_sessions() {
+        let mut actor = DfWaitActor::new(DfAlgorithm::DefaultModulo);
+        actor.startup().await;
+        tokio::time::advance(Duration::from_secs(3)).await;
+        actor.sync_reply().await.send(false).unwrap();
+        actor.status.changed().await.unwrap();
+        actor.status.borrow_and_update();
+        // Move directly to the ceiling; missed periodic ticks may query the
+        // RIB, but the boot deadline prevents them from electing prematurely.
+        tokio::time::advance(Duration::from_secs(27)).await;
+        actor.routes_reply().await.send(Vec::new()).unwrap();
+        actor.remote_event(&type_4_es_route(
+            esi(1),
+            "10.0.0.2",
+            attrs_with_es_import_rt(esi(1)),
+        ));
+        let next_event = actor.routes_reply().await;
+        assert!(actor.status.borrow()[&esi(1)].recovery_deadline.is_none());
+        actor.assert_role(DfRole::Df);
+        next_event.send(Vec::new()).unwrap();
+        actor.finish().await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn undrain_reenters_df_wait_after_boot_sync_has_completed() {
+        let mut actor = DfWaitActor::new(DfAlgorithm::DefaultModulo);
+        actor.startup().await;
+        tokio::time::advance(Duration::from_secs(3)).await;
+        actor.sync_reply().await.send(true).unwrap();
+        actor.routes_reply().await.send(Vec::new()).unwrap();
+        let event = type_4_es_route(esi(1), "10.0.0.2", attrs_with_es_import_rt(esi(1)));
+        actor.remote_event(&event);
+        let barrier = actor.routes_reply().await;
+        actor.assert_role(DfRole::Df);
+        barrier.send(Vec::new()).unwrap();
+
+        let control = actor.handle.runtime_control();
+        assert!(control.replace_drained_esis(drained_set(&[esi(1)])));
+        actor.remote_event(&event);
+        let drained = actor.routes_reply().await;
+        assert_eq!(
+            actor.bum.borrow().ac_gate(esi(1)).unwrap().state,
+            AcGateState::Blocked
+        );
+        drained.send(Vec::new()).unwrap();
+
+        assert!(control.replace_drained_esis(drained_set(&[])));
+        // Reaching the startup query acknowledges the re-advertised Type 4
+        // and EAD-per-ES, while the AC was already published as blocked.
+        let startup = actor.routes_reply().await;
+        actor.assert_role(DfRole::NonDf);
+        assert_eq!(actor.injected.len(), 5);
+        startup.send(Vec::new()).unwrap();
+        actor.remote_event(&event);
+        let barrier = actor.routes_reply().await;
+        let deadline = actor.status.borrow()[&esi(1)].recovery_deadline.unwrap();
+        assert_eq!(
+            deadline - tokio::time::Instant::now(),
+            Duration::from_secs(3)
+        );
+        barrier.send(Vec::new()).unwrap();
+
+        tokio::time::advance(Duration::from_millis(2999)).await;
+        actor.remote_event(&event);
+        let during_wait = actor.routes_reply().await;
+        actor.assert_role(DfRole::NonDf);
+        // Hold this candidate reply across the deadline. The actor may
+        // complete election from it; no separate timer query is required.
+        tokio::time::advance(Duration::from_millis(1)).await;
+        during_wait.send(Vec::new()).unwrap();
+        // This explicit next-event query proves that reply was consumed.
+        actor.remote_event(&event);
+        let barrier = actor.routes_reply().await;
+        actor.assert_role(DfRole::Df);
+        assert!(actor.status.borrow()[&esi(1)].recovery_deadline.is_none());
+        barrier.send(Vec::new()).unwrap();
+        actor.finish().await;
     }
 
     /// Full segment actor against a RIB whose EVPN sessions report synced
@@ -4634,7 +5867,8 @@ mod tests {
             ]));
             let remote = type_4_es_route(state.config.esi, "10.0.0.2", attrs);
             injected.lock().await.clear();
-            startup_segment_state(&runtime, &mut state, &mut pending, true).await;
+            prepare_segment_startup(&runtime, &mut state, true);
+            startup_segment_state(&runtime, &mut state, &mut pending).await;
             assert_eq!(
                 ac_gate_state_for_es(
                     state.config.redundancy_mode,
@@ -4724,7 +5958,8 @@ mod tests {
             drop(routes);
             // Drain/rejoin loses local history and derives non-preemption anew.
             drain_segment_state(&runtime, &mut state, &mut pending).await;
-            startup_segment_state(&runtime, &mut state, &mut pending, true).await;
+            prepare_segment_startup(&runtime, &mut state, true);
+            startup_segment_state(&runtime, &mut state, &mut pending).await;
             tokio::time::advance(Duration::from_secs(3)).await;
             run_election_for_routes(&runtime, &mut state, &[remote], &mut pending).await;
             assert_eq!(state.operational_df, (200, false));
@@ -4744,6 +5979,7 @@ mod tests {
                 instances,
                 vec![replacement],
                 &mut pending,
+                None,
             )
             .await;
             assert!(states[&id].recovery_deadline.is_none());
@@ -4764,7 +6000,8 @@ mod tests {
         // Startup publishes Type 4 ES + Type 1 EAD-per-ES, then the
         // self-only election emits Type 1 EAD-per-EVI for the member
         // VNI — all three replies are dropped.
-        startup_segment_state(&runtime, &mut state, &mut pending, true).await;
+        prepare_segment_startup(&runtime, &mut state, false);
+        startup_segment_state(&runtime, &mut state, &mut pending).await;
 
         assert_eq!(rib.inject_count(), 3, "ES + EAD-per-ES + EAD-per-EVI sent");
         assert_eq!(
@@ -4792,7 +6029,8 @@ mod tests {
         let mut pending = crate::evpn_ack::PendingRibOps::new();
         let mut state = segment_state(esi(1));
 
-        startup_segment_state(&runtime, &mut state, &mut pending, true).await;
+        prepare_segment_startup(&runtime, &mut state, false);
+        startup_segment_state(&runtime, &mut state, &mut pending).await;
         assert!(pending.is_empty(), "startup acked cleanly");
 
         // Teardown withdraws lose their replies...
@@ -4824,7 +6062,8 @@ mod tests {
         let mut pending = crate::evpn_ack::PendingRibOps::new();
         let mut state = segment_state(esi(1));
 
-        startup_segment_state(&runtime, &mut state, &mut pending, true).await;
+        prepare_segment_startup(&runtime, &mut state, false);
+        startup_segment_state(&runtime, &mut state, &mut pending).await;
         assert_eq!(pending.len(), 3);
 
         // The segment is removed before the retry fires: pending

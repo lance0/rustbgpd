@@ -24,7 +24,7 @@ FRR_DF_EXTCOMM="434036613111087304"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 INTEROP_TEST_OPERATOR_AUTH=1
 export INTEROP_TEST_OPERATOR_AUTH
-# shellcheck source=test-lib.sh
+# shellcheck source=tests/interop/scripts/test-lib.sh
 source "$SCRIPT_DIR/test-lib.sh"
 
 wait_grpc_ready() {
@@ -157,6 +157,188 @@ dump_debug() {
     docker exec "$PE2" vtysh -c "show evpn es detail" >&2 || true
 }
 
+restart_without_transient_df() {
+    local evidence=${M69_ARTIFACT_DIR:-/tmp/m69-df-wait-$(date -u +%Y%m%dT%H%M%SZ)}
+    mkdir -p "$evidence"
+    log "Restart evidence: $evidence"
+    python3 - "$PE1" "$PE2" "$(resolve_ip "$PE1")" "$evidence" "$ESI" <<'PY'
+import json
+import pathlib
+import re
+import subprocess
+import sys
+import time
+import urllib.request
+
+pe1, pe2, management_ip, output, esi = sys.argv[1:]
+output = pathlib.Path(output)
+samples = []
+failures = []
+commands = []
+release = None
+window_end = None
+
+def run(args):
+    result = subprocess.run(args, text=True, capture_output=True, timeout=10)
+    commands.append({"time": time.time(), "args": args, "returncode": result.returncode,
+                     "stdout": result.stdout, "stderr": result.stderr})
+    if result.returncode:
+        raise RuntimeError(f"command failed: {args}: {result.stderr}")
+    return result.stdout
+
+def frr_command(shutdown):
+    return ["docker", "exec", pe2, "vtysh", "-c", "configure terminal",
+            "-c", "router bgp 65000", "-c",
+            ("neighbor" if shutdown else "no neighbor") + " 10.0.0.1 shutdown"]
+
+def flood_suppressed(text):
+    return "es0" in text and all(
+        re.search(r"(?:^|\s)" + flag + r"\s+off(?:\s|$)", text)
+        for flag in ("flood", "mcast_flood", "bcast_flood"))
+
+def check_samples(samples, first_role, release_at, window_end):
+    errors = []
+    if first_role is None:
+        return ["new daemon never exposed its DF role"]
+    observed = samples[first_role:]
+    held = [sample for sample in observed if sample["elapsed"] < release_at]
+    if len(held) < 16 or held[-1]["elapsed"] - held[0]["elapsed"] < 4:
+        errors.append("fewer than four seconds / 16 valid-role observations during the peer hold")
+    for sample in observed:
+        if sample["errors"] or sample.get("df") != 0 or not flood_suppressed(sample.get("bridge", "")):
+            errors.append(f"bad observation at {sample['elapsed']:.3f}s: {sample}")
+        if sample["duration"] > 0.25:
+            errors.append(f"sample exceeded 250 ms at {sample['elapsed']:.3f}s")
+    for before, after in zip(observed, observed[1:]):
+        if after["elapsed"] - before["elapsed"] > 0.25:
+            errors.append(f"sampling gap over 250 ms after {before['elapsed']:.3f}s")
+    if window_end < 12:
+        errors.append("sampling window ended before 12 seconds")
+    if not observed or window_end - observed[-1]["elapsed"] > 0.25:
+        errors.append("final sample does not cover the window end within 250 ms")
+    if not any(sample["elapsed"] > release_at for sample in observed):
+        errors.append("no post-release observation")
+    return errors
+
+def reap_release(process):
+    if process is None:
+        return
+    try:
+        process.communicate(timeout=10)
+    finally:
+        try:
+            if process.poll() is None:
+                process.kill()
+        finally:
+            process.wait()
+
+try:
+    baseline = run(["docker", "exec", pe1, "bridge", "-d", "link", "show", "dev", "es0"])
+    (output / "baseline-ac.txt").write_text(baseline)
+    if not flood_suppressed(baseline):
+        raise RuntimeError("baseline AC must already suppress all three BUM classes")
+    # Kill the daemon before shutting down its peer: otherwise the old
+    # lifetime could legitimately elect itself when the peer disappears.
+    run(["docker", "exec", pe1, "sh", "-c", 'kill -KILL "$(cat /run/rustbgpd/m69.pid)"'])
+    reply = run(frr_command(True))
+    if "%" in reply:
+        raise RuntimeError("FRR rejected the administrative neighbor hold")
+    peer = json.loads(run(["docker", "exec", pe2, "vtysh", "-c", "show bgp neighbors 10.0.0.1 json"]))
+    if peer["10.0.0.1"]["bgpState"] == "Established":
+        raise RuntimeError("FRR neighbor hold did not take effect")
+    (output / "held-peer.json").write_text(json.dumps(peer, indent=2) + "\n")
+    # The restart entrypoint only starts the process; it does not reset the
+    # preserved kernel flags. The pre-daemon interval is excluded below.
+    started = time.monotonic()
+    started_wall = time.time()
+    run(["docker", "exec", pe1, "/usr/local/bin/start-rustbgpd-m69-vtep.sh", "restart"])
+    first_role = None
+    while time.monotonic() - started < 12:
+        now = time.monotonic()
+        if release is None and now - started >= 6:
+            # Popen keeps the sampler running while vtysh releases the hold.
+            release = subprocess.Popen(frr_command(False), text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            release_at = now - started
+        sample = {"time": time.time(), "elapsed": now - started, "errors": []}
+        try:
+            with urllib.request.urlopen(f"http://{management_ip}:9179/metrics", timeout=0.1) as response:
+                metrics = response.read().decode()
+            rows = [line for line in metrics.splitlines() if line.startswith("evpn_df_role{")]
+            sample["metrics"] = rows
+            values = [float(line.rsplit(" ", 1)[1]) for line in rows
+                      if f'esi="{esi}"' in line and 'vni="200"' in line and 'role="df"' in line]
+            if len(values) != 1:
+                raise ValueError(f"expected one DF gauge, found {values}")
+            sample["df"] = values[0]
+            if first_role is None:
+                first_role = len(samples)
+        except Exception as error:
+            sample["errors"].append(f"metrics: {error}")
+        try:
+            result = subprocess.run(["docker", "exec", pe1, "bridge", "-d", "link", "show", "dev", "es0"],
+                                    text=True, capture_output=True, timeout=0.15)
+            sample["bridge"] = result.stdout
+            if result.returncode:
+                raise RuntimeError(result.stderr)
+            sample["flood_suppressed"] = flood_suppressed(result.stdout)
+        except Exception as error:
+            sample["errors"].append(f"bridge: {error}")
+        sample["duration"] = time.monotonic() - now
+        samples.append(sample)
+        time.sleep(max(0, 0.1 - sample["duration"]))
+    window_end = time.monotonic() - started
+    if release is None:
+        raise RuntimeError("peer hold was never released")
+    stdout, stderr = release.communicate(timeout=10)
+    commands.append({"time": time.time(), "args": frr_command(False),
+                     "returncode": release.returncode, "stdout": stdout, "stderr": stderr})
+    if release.returncode or "%" in stdout:
+        failures.append(f"FRR hold release failed: {stdout} {stderr}")
+    failures.extend(check_samples(samples, first_role, release_at, window_end))
+    daemon_log = run(["docker", "exec", pe1, "cat", "/var/log/rustbgpd.log"])
+    (output / "restart-daemon.jsonl").write_text(daemon_log)
+    first_publication = None
+    for line in daemon_log.splitlines():
+        entry = json.loads(line)
+        fields = entry.get("fields", {})
+        if fields.get("message") == "EVPN segment: published BUM enforcement intent" and first_publication is None:
+            first_publication = entry.get("timestamp")
+        if fields.get("message") == "EVPN segment: DF role updated" and fields.get("role") == "df":
+            failures.append("daemon recorded a DF transition during the restart window")
+    if first_publication is None:
+        failures.append("first actor enforcement publication was not recorded")
+    (output / "window.json").write_text(json.dumps({
+        "restart_started": started_wall, "first_role_sample": first_role,
+        "first_actor_publication": first_publication,
+        "peer_release_elapsed": release_at,
+        "declared_window_end_elapsed": 12,
+        "observed_window_end_elapsed": window_end,
+        "scope": "Restart with preserved suppressed AC; samples before the first new daemon role are recorded but excluded. Kernel observations are sampled, not continuous.",
+    }, indent=2) + "\n")
+except Exception as error:
+    failures.append(str(error))
+finally:
+    try:
+        reap_release(release)
+    except Exception as error:
+        failures.append(f"release process cleanup: {error}")
+    # Never leave the owned peer administratively down on a failed proof.
+    try:
+        run(frr_command(False))
+    except Exception as error:
+        failures.append(f"cleanup: {error}")
+    (output / "samples.jsonl").write_text("".join(json.dumps(sample) + "\n" for sample in samples))
+    (output / "commands.json").write_text(json.dumps(commands, indent=2) + "\n")
+    (output / "result.json").write_text(json.dumps({
+        "passed": not failures, "failures": failures,
+        "declared_window_end_elapsed": 12, "observed_window_end_elapsed": window_end,
+    }, indent=2) + "\n")
+for failure in failures:
+    print(failure, file=sys.stderr)
+raise SystemExit(bool(failures))
+PY
+}
+
 resolve_grpc_addr
 wait_grpc_ready
 
@@ -203,6 +385,23 @@ if wait_frr_reports_preference_df_win; then
     ok "FRR reports local DF with preference 200 and remote preference 100"
 else
     fail "FRR did not report the expected preference-DF winner state"
+    dump_debug
+fi
+
+log "[test] restart holds NonDF and suppresses BUM before FRR Type 4 can return"
+if restart_without_transient_df; then
+    ok "restart showed no DF role or BUM opening; samples stayed at least 4 Hz"
+else
+    fail "restart DF wait proof failed (raw observations retained)"
+    dump_debug
+fi
+wait_frr_established "$PE2" "$PE1_IP" "FRR EVPN after restart" \
+    || fail "FRR did not re-establish after the controlled hold"
+if wait_rust_decoded_frr_preference_df && wait_for_role "$PE1" nondf 1 30 \
+    && wait_frr_reports_preference_df_win; then
+    ok "FRR preference 200 remains the DF after restart"
+else
+    fail "the remote preference-DF winner did not recover after restart"
     dump_debug
 fi
 

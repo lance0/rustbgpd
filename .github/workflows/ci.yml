@@ -163,6 +163,8 @@ jobs:
             tests/interop/scripts/test-test-source-id-guard.sh \
             tests/interop/scripts/test-test-vtep-route-oracles.sh \
             tests/interop/scripts/test-test-wait-helper.sh \
+            tests/interop/scripts/test-m69-evpn-preference-df-frr.sh \
+            tests/interop/scripts/start-rustbgpd-m69-vtep.sh \
             tests/interop/scripts/test-m1-frr.sh; do
             bash -n "$f"
           done
@@ -172,6 +174,8 @@ jobs:
             tests/interop/scripts/test-test-source-id-guard.sh \
             tests/interop/scripts/test-test-vtep-route-oracles.sh \
             tests/interop/scripts/test-test-wait-helper.sh \
+            tests/interop/scripts/test-m69-evpn-preference-df-frr.sh \
+            tests/interop/scripts/start-rustbgpd-m69-vtep.sh \
             tests/interop/scripts/test-m1-frr.sh
           bash tests/interop/scripts/test-test-operator-auth-helper.sh
           bash tests/interop/scripts/test-test-source-id-guard.sh
@@ -181,6 +185,7 @@ jobs:
           python3 tests/interop/scripts/test_interop_signal_cleanup.py
           python3 tests/interop/scripts/test_m66_failure_diagnostics.py
           python3 tests/interop/scripts/test_m67_rerun_mode.py
+          python3 tests/interop/scripts/test_m69_df_wait_checker.py
           python3 tests/interop/scripts/test_evpn_quiet_startup.py
           python3 tests/interop/scripts/test_m87_session_baseline.py
           python3 tests/interop/scripts/test_m38_ledger.py

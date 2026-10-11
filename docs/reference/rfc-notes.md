@@ -2132,6 +2132,24 @@ carries inactive (absent), unlimited (zero), or finite.
   advertises a segment under several RDs, the route with the lowest RD
   supplies its DF candidate, so election does not depend on RIB iteration
   order.
+- **Initial DF wait (RFC 7432 §8.5, RFC 8584 §2.1):** daemon startup,
+  a newly added segment, and undrain/link recovery hold every local member
+  `NonDf` for three seconds. Before awaiting route publication, the actor
+  publishes the desired BUM suppression and bound single-active AC blocking.
+  Linux reconciliation applies this asynchronously to configured, resolvable
+  ports when the corresponding enforcement is enabled; publication is not a
+  kernel acknowledgement.
+  During daemon boot the wait also requires an established L2VPN/EVPN session,
+  End-of-RIB from every established EVPN session, and released EVPN GR
+  selection deferral, bounded by 30 seconds from actor start. Ordinary
+  segments advertise Type 4 and EAD-per-ES during the wait; only RFC 9785
+  Don't-Preempt recovery delays those advertisements. Remote Type 4 events
+  cannot bypass the wait. Explicit administrative DF changes retain their
+  immediate override. The existing `df_recovery_pending` and
+  `df_recovery_remaining_ms` fields expose the wait for every algorithm.
+  This does not hold kernel ports down before the daemon starts, guarantee
+  remote candidates arrive before the boot ceiling, or synchronize timers
+  across PEs as RFC 9722 would.
 - **Gate 8 scope was observation only; Gate 8b is now alpha and default-on
   with explicit opt-out flags.**
   The follow-up Gate 8b slices add ESI Label / ES-Import RT
