@@ -3959,8 +3959,8 @@ mod tests {
     #[test]
     fn fmt_local_rewrites_in_place_and_is_idempotent() {
         let dir = tempfile::tempdir().unwrap();
-        let name = format!("{}.rpol", "p".repeat(245));
-        let path = dir.path().join(&name);
+        let name = "p.rpol";
+        let path = dir.path().join(name);
         std::fs::write(&path, "policy p{term t{if route.rpki==invalid{reject}}}").unwrap();
         let old_temp = dir.path().join(format!("{name}.tmp"));
         std::fs::write(&old_temp, "another writer's stage").unwrap();
@@ -4012,6 +4012,23 @@ mod tests {
         assert!(error.to_string().contains("failed to write"));
         assert!(path.is_dir());
         assert_eq!(std::fs::read_to_string(original).unwrap(), "keep this");
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn fmt_local_accepts_max_length_filename() {
+        let dir = tempfile::tempdir().unwrap();
+        // The target fits NAME_MAX=255; appending the former `.tmp` suffix does not.
+        let name = format!("{}.rpol", "p".repeat(250));
+        let path = dir.path().join(name);
+        std::fs::write(&path, "policy p{term t{accept}}").unwrap();
+        let files = vec![path.to_str().unwrap().to_string()];
+
+        assert_eq!(fmt_local(&files, false), 0);
+        assert_eq!(
+            std::fs::read_to_string(path).unwrap(),
+            "policy p {\n    term t { accept }\n}\n"
+        );
         assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
     }
 
