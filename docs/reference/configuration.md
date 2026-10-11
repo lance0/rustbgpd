@@ -4504,6 +4504,19 @@ originator_ip = "10.0.0.1"                     # source IP used for Type 1/4 ori
 | `interface`     | string   | no       | --            | ADR-0085 attachment-circuit link binding: name of the local link whose carrier drives this ES's link drain. When set, carrier loss on the link drains the segment automatically |
 | `recovery_delay_seconds` | u64 | no     | `30`          | ADR-0085 hold-off (seconds, `0..=3600`) to wait after carrier returns before releasing the link drain. Only valid with `interface` — rejected without it. The earlier spelling `recovery_delay_secs` is still accepted as an alias |
 
+### FRR all-active ES peers
+
+Set `df_algorithm = "highest-preference"` when sharing an all-active ES
+with FRR 10.7.1, and bind `interface` to the CE-facing bond. FRR supports
+preference election and becomes non-DF when an ES peer advertises another
+algorithm. With rustbgpd's default `"default-modulo"`, both PEs can be
+non-DF for a VNI, dropping remote BUM traffic toward the CE. Matching
+highest-preference settings avoid that algorithm disagreement. See the
+[pinned FRR election logic](https://github.com/FRRouting/frr/blob/frr-10.7.1/zebra/zebra_evpn_mh.c#L1829-L1845).
+
+Highest-preference elects the same winner across an ES's member VNIs;
+changing the VNI does not distribute the DF role between its PEs.
+
 ### Auto-derived ESI (LACP, Type 1)
 
 `esi = "auto-lacp"` derives the RFC 7432 §5 Type 1 ESI from the 802.3ad
