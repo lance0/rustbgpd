@@ -11,10 +11,11 @@ use crate::proto::{
     ConfigTransactionConfirmationStatus, ConfigTransactionPlanResponse,
     ConfigTransactionPlanStatus, ConfigTransactionStatusResponse, ConfirmConfigTransactionRequest,
     ConfirmConfigTransactionResponse, DiffRuntimeConfigRequest, DiffRuntimeConfigResponse,
-    GetConfigTransactionStatusRequest, GetEffectiveConfigRequest, ListConfigHistoryRequest,
-    ListConfigHistoryResponse, PlanConfigTransactionRequest, RollbackConfigTransactionRequest,
-    StreamApplyConfigMetadata, StreamApplyConfigTransactionRequest, StreamPlanConfigEnd,
-    StreamPlanConfigMetadata, StreamPlanConfigTransactionRequest, UpdateGroupImpactPlan,
+    GetConfigTransactionStatusRequest, GetEffectiveConfigRequest, GetLastSighupReloadRequest,
+    ListConfigHistoryRequest, ListConfigHistoryResponse, PlanConfigTransactionRequest,
+    RollbackConfigTransactionRequest, SighupReloadRecord, StreamApplyConfigMetadata,
+    StreamApplyConfigTransactionRequest, StreamPlanConfigEnd, StreamPlanConfigMetadata,
+    StreamPlanConfigTransactionRequest, UpdateGroupImpactPlan,
 };
 use prost::Message;
 use sha2::{Digest as _, Sha256};
@@ -661,6 +662,97 @@ pub async fn status(connection: Connection, json: bool) -> Result<(), CliError> 
     Ok(())
 }
 
+pub async fn last_reload(connection: Connection, json: bool) -> Result<(), CliError> {
+    let mut client =
+        ConfigServiceClient::with_interceptor(connection.channel(), connection.interceptor());
+    let response = read_rpc(
+        "GetLastSighupReload",
+        client.get_last_sighup_reload(GetLastSighupReloadRequest {}),
+    )
+    .await?
+    .into_inner();
+    if json {
+        print_json(serde_json::json!({
+            "record": response.record.as_ref().map(last_reload_to_json),
+        }))?;
+    } else {
+        output::print_text(&last_reload_human(response.record.as_ref()))?;
+    }
+    Ok(())
+}
+
+fn last_reload_human(record: Option<&SighupReloadRecord>) -> String {
+    let Some(record) = record else {
+        return "No SIGHUP reload has completed in this daemon process.\n".to_string();
+    };
+    let mut lines = vec![
+        format!(
+            "Last SIGHUP: {} (route: {})",
+            record.outcome,
+            if record.route.is_empty() {
+                "before classification"
+            } else {
+                &record.route
+            },
+        ),
+        format!(
+            "Started: {}",
+            format_unix_utc_or_seconds(record.started_unix_millis / 1000)
+        ),
+        format!(
+            "Finished: {}",
+            format_unix_utc_or_seconds(record.finished_unix_millis / 1000)
+        ),
+    ];
+    if !record.reason_code.is_empty() {
+        lines.push(format!(
+            "Reason: {} at {} {}",
+            record.reason_code, record.failure_bucket, record.failure_target
+        ));
+    }
+    lines.extend([
+        format!(
+            "Applied operations: {} ({} omitted)",
+            record.applied_count, record.applied_omitted,
+        ),
+        format!(
+            "Unapplied operations: {} ({} omitted)",
+            record.unapplied_count, record.unapplied_omitted,
+        ),
+    ]);
+    for effect in &record.applied {
+        lines.push(format!("  applied {} {}", effect.bucket, effect.target));
+    }
+    for effect in &record.unapplied {
+        lines.push(format!("  unapplied {} {}", effect.bucket, effect.target));
+    }
+    format!("{}\n", lines.join("\n"))
+}
+
+fn last_reload_to_json(record: &SighupReloadRecord) -> serde_json::Value {
+    let effects = |effects: &[crate::proto::SighupReloadEffect]| {
+        effects
+            .iter()
+            .map(|effect| serde_json::json!({"bucket": effect.bucket, "target": effect.target}))
+            .collect::<Vec<_>>()
+    };
+    serde_json::json!({
+        "started_unix_millis": record.started_unix_millis,
+        "finished_unix_millis": record.finished_unix_millis,
+        "outcome": record.outcome,
+        "route": if record.route.is_empty() { None } else { Some(record.route.as_str()) },
+        "reason_code": if record.reason_code.is_empty() { None } else { Some(record.reason_code.as_str()) },
+        "failure_bucket": if record.failure_bucket.is_empty() { None } else { Some(record.failure_bucket.as_str()) },
+        "failure_target": if record.failure_target.is_empty() { None } else { Some(record.failure_target.as_str()) },
+        "applied_count": record.applied_count,
+        "applied": effects(&record.applied),
+        "applied_omitted": record.applied_omitted,
+        "unapplied_count": record.unapplied_count,
+        "unapplied": effects(&record.unapplied),
+        "unapplied_omitted": record.unapplied_omitted,
+    })
+}
+
 /// List bounded mixed config history: index, timestamp, content hash, provenance
 /// status, and a one-line summary per retained row (never document contents).
 /// Retired TOML rows are ignored and retained.
@@ -1268,6 +1360,79 @@ mod tests {
     use crate::test_support::spawn_mock_server;
     use tonic::codegen::tokio_stream::StreamExt as _;
 
+    #[test]
+    fn last_reload_json_projects_complete_record() {
+        let record = SighupReloadRecord {
+            started_unix_millis: 1_700_000_000_001,
+            finished_unix_millis: 1_700_000_000_999,
+            outcome: "known_partial".to_string(),
+            route: "sequential".to_string(),
+            reason_code: "step_rejected".to_string(),
+            failure_bucket: "neighbors.reconcile".to_string(),
+            failure_target: "192.0.2.1".to_string(),
+            applied_count: 33,
+            applied: vec![crate::proto::SighupReloadEffect {
+                bucket: "policy.add".to_string(),
+                target: "edge".to_string(),
+            }],
+            applied_omitted: 32,
+            unapplied_count: 1,
+            unapplied: vec![crate::proto::SighupReloadEffect {
+                bucket: "neighbors.reconcile".to_string(),
+                target: "192.0.2.1".to_string(),
+            }],
+            unapplied_omitted: 0,
+        };
+        assert_eq!(
+            last_reload_to_json(&record),
+            serde_json::json!({
+                "started_unix_millis": 1_700_000_000_001_u64,
+                "finished_unix_millis": 1_700_000_000_999_u64,
+                "outcome": "known_partial",
+                "route": "sequential",
+                "reason_code": "step_rejected",
+                "failure_bucket": "neighbors.reconcile",
+                "failure_target": "192.0.2.1",
+                "applied_count": 33,
+                "applied": [{"bucket": "policy.add", "target": "edge"}],
+                "applied_omitted": 32,
+                "unapplied_count": 1,
+                "unapplied": [{"bucket": "neighbors.reconcile", "target": "192.0.2.1"}],
+                "unapplied_omitted": 0,
+            })
+        );
+    }
+
+    #[test]
+    fn last_reload_human_separates_every_line() {
+        let record = SighupReloadRecord {
+            outcome: "known_partial".to_string(),
+            route: "sequential".to_string(),
+            reason_code: "step_rejected".to_string(),
+            failure_bucket: "neighbors.reconcile".to_string(),
+            failure_target: "192.0.2.1".to_string(),
+            applied_count: 1,
+            applied: vec![crate::proto::SighupReloadEffect {
+                bucket: "policy.add".to_string(),
+                target: "edge".to_string(),
+            }],
+            unapplied_count: 1,
+            unapplied: vec![crate::proto::SighupReloadEffect {
+                bucket: "neighbors.reconcile".to_string(),
+                target: "192.0.2.1".to_string(),
+            }],
+            ..Default::default()
+        };
+        let rendered = last_reload_human(Some(&record));
+        assert!(rendered.contains("Finished: 1970-01-01T00:00:00Z\nReason: "));
+        assert!(rendered.contains("Applied operations: 1 (0 omitted)\nUnapplied operations: 1"));
+        assert!(rendered.contains("  applied policy.add edge\n  unapplied neighbors.reconcile"));
+        assert!(rendered.ends_with('\n'));
+        assert_eq!(
+            last_reload_human(None),
+            "No SIGHUP reload has completed in this daemon process.\n"
+        );
+    }
     // Field 1's one-byte tag plus the four-byte length varint used by a
     // candidate whose encoded request reaches the 4 MiB boundary.
     const PROTOBUF_STRING_FIELD_OVERHEAD_AT_LIMIT: usize = 5;

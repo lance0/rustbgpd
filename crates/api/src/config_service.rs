@@ -11,8 +11,8 @@ use crate::audit::{
     abort_config_transaction_summary, apply_config_transaction_summary,
     confirm_config_transaction_summary, diff_runtime_config_summary,
     get_config_transaction_status_summary, get_effective_config_summary,
-    list_config_history_summary, plan_config_transaction_summary, preview_config_rollback_summary,
-    rollback_config_transaction_summary, set_request_summary,
+    get_last_sighup_reload_summary, list_config_history_summary, plan_config_transaction_summary,
+    preview_config_rollback_summary, rollback_config_transaction_summary, set_request_summary,
 };
 use crate::peer_types::{
     PeerManagerCommand, RuntimeConfigDiff, RuntimeConfigDiffError, RuntimeConfigTransactionPlan,
@@ -24,7 +24,7 @@ use crate::server::{
     AccessMode, ConfigHistoryListFn, ConfigRollbackFn, ConfigRollbackPreviewFn,
     ConfigTransactionAbortFn, ConfigTransactionApplyContext, ConfigTransactionApplyError,
     ConfigTransactionApplyFn, ConfigTransactionConfirmFn, ConfigTransactionStatusFn,
-    read_only_rejection,
+    LastSighupReloadFn, read_only_rejection,
 };
 
 pub(super) const CONFIG_OPERATION_TIMEOUT: Duration = Duration::from_mins(30);
@@ -62,6 +62,7 @@ pub struct ConfigService {
     transaction_confirm: Option<ConfigTransactionConfirmFn>,
     transaction_abort: Option<ConfigTransactionAbortFn>,
     transaction_status: Option<ConfigTransactionStatusFn>,
+    last_sighup_reload: Option<LastSighupReloadFn>,
     history_list: Option<ConfigHistoryListFn>,
     rollback: Option<ConfigRollbackFn>,
     rollback_preview: Option<ConfigRollbackPreviewFn>,
@@ -79,6 +80,7 @@ impl ConfigService {
             transaction_confirm: None,
             transaction_abort: None,
             transaction_status: None,
+            last_sighup_reload: None,
             history_list: None,
             rollback: None,
             rollback_preview: None,
@@ -110,6 +112,12 @@ impl ConfigService {
         preview: Option<ConfigRollbackPreviewFn>,
     ) -> Self {
         self.rollback_preview = preview;
+        self
+    }
+
+    #[must_use]
+    pub fn with_last_sighup_reload(mut self, read: Option<LastSighupReloadFn>) -> Self {
+        self.last_sighup_reload = read;
         self
     }
 
@@ -409,6 +417,19 @@ impl proto::config_service_server::ConfigService for ConfigService {
             .await
             .map(Response::new)
             .map_err(ConfigTransactionApplyError::into_status)
+    }
+
+    async fn get_last_sighup_reload(
+        &self,
+        request: Request<proto::GetLastSighupReloadRequest>,
+    ) -> Result<Response<proto::GetLastSighupReloadResponse>, Status> {
+        set_request_summary(&request, get_last_sighup_reload_summary());
+        let Some(read) = &self.last_sighup_reload else {
+            return Err(Status::failed_precondition(
+                "ConfigService.GetLastSighupReload executor is unavailable",
+            ));
+        };
+        Ok(Response::new(read()))
     }
 
     async fn list_config_history(

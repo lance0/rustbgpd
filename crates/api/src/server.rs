@@ -709,6 +709,10 @@ pub type ConfigTransactionStatusFn = Arc<
         + 'static,
 >;
 
+/// Daemon-owned snapshot of the most recent process-local SIGHUP result.
+pub type LastSighupReloadFn =
+    Arc<dyn Fn() -> crate::proto::GetLastSighupReloadResponse + Send + Sync + 'static>;
+
 /// Future returned by the daemon-owned config history list hook.
 pub type ConfigHistoryListFuture = Pin<
     Box<
@@ -1280,6 +1284,7 @@ pub struct ServeConfig {
     pub config_transaction_abort: Option<ConfigTransactionAbortFn>,
     /// Daemon hook for confirmed config transaction status.
     pub config_transaction_status: Option<ConfigTransactionStatusFn>,
+    pub last_sighup_reload: Option<LastSighupReloadFn>,
     /// Daemon hook for listing the applied-config history. `None` fails
     /// closed with `FAILED_PRECONDITION`.
     pub config_history_list: Option<ConfigHistoryListFn>,
@@ -1822,6 +1827,7 @@ async fn run_listener(
     let config_transaction_confirm = config.config_transaction_confirm;
     let config_transaction_abort = config.config_transaction_abort;
     let config_transaction_status = config.config_transaction_status;
+    let last_sighup_reload = config.last_sighup_reload;
     let config_history_list = config.config_history_list;
     let config_rollback = config.config_rollback;
     let config_rollback_preview = config.config_rollback_preview;
@@ -1898,6 +1904,7 @@ async fn run_listener(
                 config_transaction_confirm,
                 config_transaction_abort,
                 config_transaction_status,
+                last_sighup_reload,
                 config_history_list,
                 config_rollback,
                 config_rollback_preview,
@@ -1971,6 +1978,7 @@ async fn run_listener(
                 config_transaction_confirm,
                 config_transaction_abort,
                 config_transaction_status,
+                last_sighup_reload,
                 config_history_list,
                 config_rollback,
                 config_rollback_preview,
@@ -2051,6 +2059,7 @@ async fn run_tcp_listener(
     config_transaction_confirm: Option<ConfigTransactionConfirmFn>,
     config_transaction_abort: Option<ConfigTransactionAbortFn>,
     config_transaction_status: Option<ConfigTransactionStatusFn>,
+    last_sighup_reload: Option<LastSighupReloadFn>,
     config_history_list: Option<ConfigHistoryListFn>,
     config_rollback: Option<ConfigRollbackFn>,
     config_rollback_preview: Option<ConfigRollbackPreviewFn>,
@@ -2242,6 +2251,7 @@ async fn run_tcp_listener(
                 config_history_list.clone(),
                 config_rollback.clone(),
             )
+            .with_last_sighup_reload(last_sighup_reload.clone())
             .with_rollback_preview(config_rollback_preview.clone())
             .with_stream_plan(stream_plan, stream_authenticated_transport),
         interceptor.clone(),
@@ -2371,6 +2381,7 @@ async fn run_uds_listener(
     config_transaction_confirm: Option<ConfigTransactionConfirmFn>,
     config_transaction_abort: Option<ConfigTransactionAbortFn>,
     config_transaction_status: Option<ConfigTransactionStatusFn>,
+    last_sighup_reload: Option<LastSighupReloadFn>,
     config_history_list: Option<ConfigHistoryListFn>,
     config_rollback: Option<ConfigRollbackFn>,
     config_rollback_preview: Option<ConfigRollbackPreviewFn>,
@@ -2519,6 +2530,7 @@ async fn run_uds_listener(
                 config_history_list.clone(),
                 config_rollback.clone(),
             )
+            .with_last_sighup_reload(last_sighup_reload.clone())
             .with_rollback_preview(config_rollback_preview.clone())
             .with_stream_plan(stream_plan, stream_authenticated_transport),
         interceptor.clone(),

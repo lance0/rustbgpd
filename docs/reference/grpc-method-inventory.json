@@ -6,10 +6,10 @@
   "additional_protos": [
     "proto/github.com/openconfig/gnmi/proto/gnmi/gnmi.proto"
   ],
-  "method_count": 117,
+  "method_count": 118,
   "tier_counts": {
     "read": 1,
-    "sensitive_read": 70,
+    "sensitive_read": 71,
     "mutating": 22,
     "operator_only": 24
   },
@@ -27,6 +27,7 @@
     { "service": "rustbgpd.v1.ConfigService", "method": "ConfirmConfigTransaction", "path": "/rustbgpd.v1.ConfigService/ConfirmConfigTransaction", "tier": "operator_only" },
     { "service": "rustbgpd.v1.ConfigService", "method": "AbortConfigTransaction", "path": "/rustbgpd.v1.ConfigService/AbortConfigTransaction", "tier": "operator_only" },
     { "service": "rustbgpd.v1.ConfigService", "method": "GetConfigTransactionStatus", "path": "/rustbgpd.v1.ConfigService/GetConfigTransactionStatus", "tier": "sensitive_read" },
+    { "service": "rustbgpd.v1.ConfigService", "method": "GetLastSighupReload", "path": "/rustbgpd.v1.ConfigService/GetLastSighupReload", "tier": "sensitive_read" },
     { "service": "rustbgpd.v1.ConfigService", "method": "GetEffectiveConfig", "path": "/rustbgpd.v1.ConfigService/GetEffectiveConfig", "tier": "sensitive_read" },
     { "service": "rustbgpd.v1.ConfigService", "method": "PreviewConfigRollback", "path": "/rustbgpd.v1.ConfigService/PreviewConfigRollback", "tier": "sensitive_read" },
     { "service": "rustbgpd.v1.ConfigService", "method": "ListConfigHistory", "path": "/rustbgpd.v1.ConfigService/ListConfigHistory", "tier": "sensitive_read" },

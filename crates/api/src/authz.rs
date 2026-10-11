@@ -189,6 +189,12 @@ pub const METHODS: &[GrpcMethodAuthz] = &[
     ),
     method(
         "rustbgpd.v1.ConfigService",
+        "GetLastSighupReload",
+        "/rustbgpd.v1.ConfigService/GetLastSighupReload",
+        AuthTier::SensitiveRead,
+    ),
+    method(
+        "rustbgpd.v1.ConfigService",
         "GetEffectiveConfig",
         "/rustbgpd.v1.ConfigService/GetEffectiveConfig",
         AuthTier::SensitiveRead,
@@ -854,8 +860,8 @@ mod tests {
         include_str!("../../../proto/github.com/openconfig/gnmi/proto/gnmi/gnmi.proto");
     const INVENTORY_JSON: &str = include_str!("../../../docs/reference/grpc-method-inventory.json");
     const INVENTORY_MD: &str = include_str!("../../../docs/reference/grpc-method-inventory.md");
-    const READ_TOTAL: &str = "| `read` | 1 | 0.9% |";
-    const SENSITIVE_TOTAL: &str = "| `sensitive_read` | 70 | 59.8% |";
+    const READ_TOTAL: &str = "| `read` | 1 | 0.8% |";
+    const SENSITIVE_TOTAL: &str = "| `sensitive_read` | 71 | 60.2% |";
     const AUTHZ_SOURCE_PATH: &str = "crates/api/src/authz.rs";
     const PRIMARY_PROTO_PATH: &str = "proto/rustbgpd.proto";
     const ADDITIONAL_PROTO_PATHS: &[&str] =
@@ -1095,7 +1101,7 @@ mod tests {
             .collect::<BTreeSet<_>>();
 
         assert_eq!(matrix_methods, proto_methods);
-        assert_eq!(METHODS.len(), 117);
+        assert_eq!(METHODS.len(), 118);
     }
 
     #[test]
@@ -1136,7 +1142,7 @@ mod tests {
     #[test]
     fn method_matrix_tier_counts_match_inventory() {
         assert_eq!(method_count_by_tier(AuthTier::Read), 1);
-        assert_eq!(method_count_by_tier(AuthTier::SensitiveRead), 70);
+        assert_eq!(method_count_by_tier(AuthTier::SensitiveRead), 71);
         assert_eq!(method_count_by_tier(AuthTier::Mutating), 22);
         assert_eq!(method_count_by_tier(AuthTier::OperatorOnly), 24);
     }
@@ -1299,7 +1305,7 @@ mod tests {
 
     #[test]
     fn markdown_totals_rejects_stale_percentage() {
-        let stale = INVENTORY_MD.replace(SENSITIVE_TOTAL, "| `sensitive_read` | 70 | 57.0% |");
+        let stale = INVENTORY_MD.replace(SENSITIVE_TOTAL, "| `sensitive_read` | 71 | 57.0% |");
         assert_eq!(
             verify_markdown_totals(&stale, &fixture_totals(), METHODS.len()),
             Err("percentage mismatch")
@@ -1428,6 +1434,10 @@ mod tests {
         );
         assert_eq!(
             method_authz("/rustbgpd.v1.ConfigService/GetConfigTransactionStatus").map(|m| m.tier),
+            Some(AuthTier::SensitiveRead)
+        );
+        assert_eq!(
+            method_authz("/rustbgpd.v1.ConfigService/GetLastSighupReload").map(|m| m.tier),
             Some(AuthTier::SensitiveRead)
         );
         // The effective-config dump discloses the whole config (peer lists,

@@ -847,8 +847,29 @@ an accepted reply loss or non-authoritative reconcile instead recovery-fences
 the daemon, makes `/readyz` fail, rejects another persisted mutation, and exits
 70 after the five-second grace. Settlement-facing policy failures use closed
 `policy_*` codes, never raw session, RIB, config, path, or credential-bearing
-error text. Per-step operational detail remains in structured
-`bucket` / `target` / `error` logs.
+error text. `rbgp config last-reload` (`--json` for automation) reports the
+latest process-local SIGHUP outcome, its closed reason code and failing bucket,
+and a sanitized target. The read-only outside-v1 `GetLastSighupReload` RPC
+retains one record in memory; restart clears it. An `ignored_in_flight`
+signal appears immediately, then the active reload's settled result replaces
+it. `rbgp doctor` warns when the latest outcome is `rejected_no_effect`,
+`known_partial`, or `task_failed`. A preflight rejection has no selected route.
+For `known_partial`, applied identities come from acknowledged reload operations,
+and unapplied identities are planned operations that failed or were not reached.
+One aggregate generation apply is one operation; startup-pinned fields and
+no-ops are absent. Each list retains
+at most 32 identities and reports total and omitted counts. Recovery-fenced
+ownership remains parked and is not mislabeled `rejected_no_effect`; use the
+settlement metrics and daemon health for that state. Structured
+`bucket` / `target` / `error` logs retain further per-step detail.
+
+When a gRPC credential store is configured, an accepted SIGHUP also attempts
+an atomic credential-generation publication, even if the config file is
+unchanged. The receipt counts a successful publication as applied. A failed
+publication keeps the previous credential generation active and settles as
+`known_partial`, with `grpc_credentials.reload` and `[global.telemetry]` in
+the receipt. The API result includes neither raw error text nor credential
+paths; the existing credential reload metric and log also report failure.
 
 `bgp_sighup_reload_outcomes_total{outcome}` is process-global and
 preinitializes five bounded outcomes: `complete` includes a clean no-op;

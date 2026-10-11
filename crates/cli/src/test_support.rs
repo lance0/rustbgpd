@@ -94,6 +94,7 @@ pub(crate) struct MockState {
     pub(crate) config_abort_calls: AtomicUsize,
     pub(crate) add_neighbor_calls: AtomicUsize,
     pub(crate) config_status_calls: AtomicUsize,
+    pub(crate) last_sighup_record: Mutex<Option<server_proto::SighupReloadRecord>>,
     pub(crate) config_snapshot_read_stall: AtomicBool,
     pub(crate) config_history_calls: AtomicUsize,
     pub(crate) config_rollback_calls: AtomicUsize,
@@ -826,6 +827,15 @@ impl rustbgpd_api::proto::config_service_server::ConfigService for MockConfigSer
                 human_text: "No confirmed config transaction is pending.\n".to_string(),
             },
         ))
+    }
+
+    async fn get_last_sighup_reload(
+        &self,
+        _request: Request<server_proto::GetLastSighupReloadRequest>,
+    ) -> Result<Response<server_proto::GetLastSighupReloadResponse>, Status> {
+        Ok(Response::new(server_proto::GetLastSighupReloadResponse {
+            record: self.state.last_sighup_record.lock().await.clone(),
+        }))
     }
 
     async fn preview_config_rollback(

@@ -778,6 +778,9 @@ enum ConfigAction {
     /// Show pending or last confirmed-transaction lifecycle state
     Status,
 
+    /// Show the latest process-local SIGHUP outcome and bounded effect receipt
+    LastReload,
+
     /// List retained config-history rows (newest first)
     ///
     /// The daemon keeps bounded v2 history under its runtime state directory.
@@ -3856,6 +3859,7 @@ fn validate_json_version(cli: &Cli) -> Result<(), CliError> {
             | ConfigAction::Confirm { .. }
             | ConfigAction::Abort { .. }
             | ConfigAction::Status
+            | ConfigAction::LastReload
             | ConfigAction::History
             | ConfigAction::Rollback { .. }
             | ConfigAction::Effective => true,
@@ -4255,6 +4259,7 @@ async fn run(cli: Cli, binary_name: &'static str) -> Result<(), CliError> {
                 commands::config::abort(connection, &confirm_id, json).await
             }
             ConfigAction::Status => commands::config::status(connection, json).await,
+            ConfigAction::LastReload => commands::config::last_reload(connection, json).await,
             ConfigAction::History => commands::config::history(connection, json).await,
             ConfigAction::Rollback {
                 index,

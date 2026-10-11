@@ -4,9 +4,9 @@
 //! `main.rs`: gRPC config-event persistence, restart-required field pinning,
 //! and ordered peer-manager reconciliation.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::net::IpAddr;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use rustbgpd_api::owner_publication::{
@@ -275,12 +275,12 @@ pub(crate) fn build_peer_mgr_config(
 pub(crate) struct ReloadStepFailure {
     /// Which delta bucket the command came from
     /// (e.g., `"policy.set"`, `"peer_group.delete"`).
-    bucket: &'static str,
+    pub(crate) bucket: &'static str,
     /// Identifier of the affected object (policy / peer-group / set name,
     /// or neighbor address). Empty for global-chain operations.
-    target: String,
+    pub(crate) target: String,
     /// Human-readable failure reason.
-    error: ReloadStepError,
+    pub(crate) error: ReloadStepError,
 }
 
 #[derive(Clone, Debug)]
@@ -309,6 +309,73 @@ impl std::fmt::Display for ReloadStepError {
 pub(crate) struct SighupReloadPlan {
     pub(crate) baseline_runtime: Config,
     pub(crate) desired: Arc<AcceptedConfigSnapshot>,
+}
+
+/// One reload's typed effect ledger. The owner retains only a bounded projection
+/// after settlement; this transient set records acknowledgements as they happen.
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub(crate) struct SighupEffect {
+    pub(crate) bucket: &'static str,
+    pub(crate) target: String,
+}
+
+#[derive(Clone, Default)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "each independent finalizer effect is recorded only after its own snapshot or manager acknowledgement"
+)]
+pub(crate) struct SighupReloadTrace {
+    pub(crate) route: Option<&'static str>,
+    pub(crate) rejection_target: Option<String>,
+    pub(crate) dynamic_replacement_pending: bool,
+    pub(crate) dynamic_limit_snapshot_pending: bool,
+    pub(crate) dialout_targets_pending: bool,
+    pub(crate) explain_snapshot_pending: bool,
+    pub(crate) planned: BTreeSet<SighupEffect>,
+    pub(crate) applied: BTreeSet<SighupEffect>,
+}
+
+impl SighupReloadTrace {
+    pub(crate) fn plan(&mut self, bucket: &'static str, target: impl Into<String>) {
+        self.planned.insert(SighupEffect {
+            bucket,
+            target: target.into(),
+        });
+    }
+
+    pub(crate) fn applied(&mut self, bucket: &'static str, target: impl Into<String>) {
+        self.applied.insert(SighupEffect {
+            bucket,
+            target: target.into(),
+        });
+    }
+
+    fn unapply(&mut self, bucket: &'static str, target: &str) {
+        self.applied.remove(&SighupEffect {
+            bucket,
+            target: target.to_string(),
+        });
+    }
+
+    fn unplan(&mut self, bucket: &'static str, target: &str) {
+        self.planned.remove(&SighupEffect {
+            bucket,
+            target: target.to_string(),
+        });
+    }
+}
+
+pub(crate) type SighupReloadTraceHandle = Arc<Mutex<SighupReloadTrace>>;
+
+fn neighbor_trace_target(neighbor: &config::Neighbor) -> String {
+    rustbgpd_api::peer_types::PeerKey::new(
+        neighbor
+            .address
+            .parse()
+            .expect("validated neighbor address"),
+        neighbor.interface.clone(),
+    )
+    .to_string()
 }
 
 #[derive(Clone)]
@@ -378,6 +445,7 @@ struct SighupMutationProgress<'a> {
     operation: Option<&'a OwnedRuntimeConfigOperation>,
     accepted_effect: bool,
     completion: SighupCompletion,
+    trace: Option<SighupReloadTraceHandle>,
 }
 
 impl<'a> SighupMutationProgress<'a> {
@@ -386,6 +454,7 @@ impl<'a> SighupMutationProgress<'a> {
             operation,
             accepted_effect,
             completion: SighupCompletion::Complete,
+            trace: None,
         };
         if accepted_effect && let Some(operation) = operation {
             operation.mark_sighup_accepted_effect();
@@ -403,6 +472,16 @@ impl<'a> SighupMutationProgress<'a> {
         self.accepted_effect = true;
         if let Some(operation) = self.operation {
             operation.mark_sighup_accepted_effect();
+        }
+    }
+
+    fn record_applied(&mut self, bucket: &'static str, target: impl Into<String>) {
+        self.mark_accepted_effect();
+        if let Some(trace) = &self.trace {
+            trace
+                .lock()
+                .expect("SIGHUP trace poisoned")
+                .applied(bucket, target);
         }
     }
 
@@ -1680,6 +1759,11 @@ pub(crate) async fn run_config_bridge(
 ///
 /// This remains async because it waits for both the peer-manager snapshot
 /// assignment and the bridge's accepted-snapshot adoption acknowledgements.
+#[expect(
+    clippy::too_many_arguments,
+    clippy::too_many_lines,
+    reason = "one owned finalizer carries the runtime snapshot and trace through ordered acknowledgements"
+)]
 pub(crate) async fn finalize_sighup_authority(
     operation: &OwnedRuntimeConfigOperation,
     peer_mgr_tx: &mpsc::Sender<PeerManagerCommand>,
@@ -1688,6 +1772,7 @@ pub(crate) async fn finalize_sighup_authority(
     peer_mgr_internal_tx: &mpsc::Sender<InternalCommand>,
     bridge_replace_tx: &mpsc::Sender<AcceptedBridgeReplacement>,
     dialout_manager: &Arc<tokio::sync::Mutex<rustbgpd_api::gnmi_dialout::DialoutManager>>,
+    trace: Option<&SighupReloadTraceHandle>,
 ) -> OwnedRuntimeConfigOutcome<SighupAuthority, SighupReloadError> {
     operation.advance_phase(RuntimeConfigSettlementPhase::SettlingRollback);
     let fenced = |bucket, reason, fence_reason| {
@@ -1729,6 +1814,18 @@ pub(crate) async fn finalize_sighup_authority(
         );
     }
     operation.mark_sighup_accepted_effect();
+    if let Some(trace) = trace {
+        let mut trace = trace.lock().expect("SIGHUP trace poisoned");
+        if trace.dynamic_replacement_pending {
+            trace.applied("dynamic_neighbors.replace", "[[dynamic_neighbors]]");
+        }
+        if trace.dynamic_limit_snapshot_pending {
+            trace.applied("dynamic_neighbor_limit.apply", "[global]");
+        }
+        if trace.explain_snapshot_pending {
+            trace.applied("policy.explain.sync", "[policy.explain]");
+        }
+    }
     let (adopted, adopted_rx) = oneshot::channel();
     if bridge_replace_tx
         .send(AcceptedBridgeReplacement {
@@ -1787,6 +1884,12 @@ pub(crate) async fn finalize_sighup_authority(
         .lock()
         .await
         .apply(&authority.dialout_targets);
+    if let Some(trace) = trace {
+        let mut trace = trace.lock().expect("SIGHUP trace poisoned");
+        if trace.dialout_targets_pending {
+            trace.applied("gnmi_dialout.apply", "[gnmi_dialout]");
+        }
+    }
     if let Err((error, reason)) = dispatch_configured_owner_publication(
         peer_mgr_tx,
         OWNER_PUBLICATION_TIMEOUT,
@@ -1908,6 +2011,34 @@ pub(crate) async fn reload_config(
     fib_cmd_tx: Option<&mpsc::Sender<FibRuntimeCommand>>,
     evpn_runtime_apply: Option<&EvpnRuntimeReloadApply>,
 ) -> SighupReloadOutcome {
+    reload_config_recorded(
+        config_path,
+        current,
+        live_grpc_tcp,
+        live_grpc_uds,
+        peer_mgr_tx,
+        fib_cmd_tx,
+        evpn_runtime_apply,
+        None,
+    )
+    .await
+}
+
+#[cfg(test)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "test driver accepts the optional SIGHUP receipt"
+)]
+async fn reload_config_recorded(
+    config_path: &str,
+    current: &Config,
+    live_grpc_tcp: Option<&config::GrpcTcpListenerConfig>,
+    live_grpc_uds: Option<&config::GrpcUdsListenerConfig>,
+    peer_mgr_tx: &mpsc::Sender<PeerManagerCommand>,
+    fib_cmd_tx: Option<&mpsc::Sender<FibRuntimeCommand>>,
+    evpn_runtime_apply: Option<&EvpnRuntimeReloadApply>,
+    trace: Option<SighupReloadTraceHandle>,
+) -> SighupReloadOutcome {
     let config_path = std::path::Path::new(config_path);
     let source = std::fs::read_to_string(config_path).unwrap();
     write_tier_test_config(config_path, &source);
@@ -1920,7 +2051,7 @@ pub(crate) async fn reload_config(
         )
         .expect("test reload config must parse"),
     );
-    reload_config_with_tcp_ao(
+    reload_config_with_tcp_ao_recorded(
         SighupReloadPlan {
             baseline_runtime: current.clone(),
             desired,
@@ -1934,6 +2065,7 @@ pub(crate) async fn reload_config(
         evpn_runtime_apply,
         None,
         None,
+        trace,
     )
     .await
 }
@@ -1952,10 +2084,10 @@ fn sighup_global_restart_required(current: &config::Global, new: &config::Global
     new != *current
 }
 
+#[cfg(test)]
 #[expect(
     clippy::too_many_arguments,
-    clippy::too_many_lines,
-    reason = "reload threads live subsystem handles, ordered reconciliation, and failure aggregation through one transaction coordinator"
+    reason = "the wrapper keeps the existing reload handle set for callers without a receipt"
 )]
 pub(crate) async fn reload_config_with_tcp_ao(
     plan: SighupReloadPlan,
@@ -1969,9 +2101,44 @@ pub(crate) async fn reload_config_with_tcp_ao(
     tcp_ao_listener: Option<&TcpAoListenerHandle>,
     operation: Option<&OwnedRuntimeConfigOperation>,
 ) -> SighupReloadOutcome {
+    reload_config_with_tcp_ao_recorded(
+        plan,
+        live_grpc_tcp,
+        live_grpc_uds,
+        peer_mgr_tx,
+        peer_mgr_internal_tx,
+        rib_tx,
+        fib_cmd_tx,
+        evpn_runtime_apply,
+        tcp_ao_listener,
+        operation,
+        None,
+    )
+    .await
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    clippy::too_many_lines,
+    reason = "the recorded reload keeps the existing ordered executor and its optional receipt together"
+)]
+pub(crate) async fn reload_config_with_tcp_ao_recorded(
+    plan: SighupReloadPlan,
+    live_grpc_tcp: Option<&config::GrpcTcpListenerConfig>,
+    live_grpc_uds: Option<&config::GrpcUdsListenerConfig>,
+    peer_mgr_tx: &mpsc::Sender<PeerManagerCommand>,
+    peer_mgr_internal_tx: Option<&mpsc::Sender<InternalCommand>>,
+    rib_tx: Option<&mpsc::Sender<rustbgpd_rib::RibUpdate>>,
+    fib_cmd_tx: Option<&mpsc::Sender<FibRuntimeCommand>>,
+    evpn_runtime_apply: Option<&EvpnRuntimeReloadApply>,
+    tcp_ao_listener: Option<&TcpAoListenerHandle>,
+    operation: Option<&OwnedRuntimeConfigOperation>,
+    trace: Option<SighupReloadTraceHandle>,
+) -> SighupReloadOutcome {
     let current = &plan.baseline_runtime;
     let desired_snapshot = plan.desired;
     let mut progress = SighupMutationProgress::new(operation, false);
+    progress.trace = trace;
     // LAN-305: parse dataset contents against the running binding schema, but
     // stage changed data and refresh errors on detached candidate handles.
     // Shared live handles are committed only after the complete no-side-effect
@@ -2403,6 +2570,157 @@ pub(crate) async fn reload_config_with_tcp_ao(
             Vec::new()
         }
     };
+    let mut dataset_commit = Some(dataset_commit);
+    let generation_datasets = if matches!(&route, config::SighupReloadRoute::Generation) {
+        let prepared = dataset_commit
+            .take()
+            .expect("generation dataset staging is still owned")
+            .prepare_generation(current, &new_config);
+        match prepared {
+            Ok(datasets) => Some(datasets),
+            Err(error) => return clean_reload_failure("generation.datasets", error),
+        }
+    } else {
+        None
+    };
+    if let Some(trace) = &progress.trace {
+        let mut trace = trace.lock().expect("SIGHUP trace poisoned");
+        if matches!(
+            &route,
+            config::SighupReloadRoute::Generation | config::SighupReloadRoute::Sequential { .. }
+        ) {
+            if dynamic_neighbor_limit_changed {
+                trace.plan("dynamic_neighbor_limit.apply", "[global]");
+            }
+            if current.gnmi_dialout != new_config.gnmi_dialout {
+                trace.plan("gnmi_dialout.apply", "[gnmi_dialout]");
+            }
+        }
+        match &route {
+            config::SighupReloadRoute::Rejected { reasons } => {
+                trace.rejection_target = reasons.iter().find_map(|reason| match reason.as_str() {
+                    "[[dynamic_neighbors]]" | "[[fib_tables]]" => Some(reason.clone()),
+                    "EVPN runtime tables" => Some("[[evpn_instances]]".to_string()),
+                    "[global] honor_graceful_shutdown / honor_blackhole" => {
+                        Some("[global]".to_string())
+                    }
+                    _ => None,
+                });
+            }
+            config::SighupReloadRoute::Generation => {
+                trace.route = Some("generation");
+                trace.plan("generation.apply", "[config]");
+                if let Some((desired_inventory, prior_inventory)) = &listener_replacement {
+                    let staged =
+                        config::listener_inbound_auth_staged(prior_inventory, desired_inventory);
+                    if &staged != prior_inventory {
+                        trace.plan("listener_auth.apply", "[neighbors]");
+                    }
+                    if &staged != desired_inventory {
+                        trace.plan("listener_auth.withdraw", "[neighbors]");
+                    }
+                }
+                if rib_tx.is_some()
+                    && current.outbound_prefix_limits() != new_config.outbound_prefix_limits()
+                {
+                    trace.plan("prefix_limit.activate", "[neighbors]");
+                }
+            }
+            config::SighupReloadRoute::Sequential { .. } => {
+                trace.route = Some("sequential");
+                if tcp_ao_rotation_candidate {
+                    trace.plan("tcp_ao.apply", "[neighbors]");
+                }
+                if listener_replacement.is_some() {
+                    trace.plan("listener_auth.apply", "[neighbors]");
+                }
+                if evpn_runtime_pending && evpn_runtime_apply.is_some() {
+                    trace.plan("evpn_runtime.apply", "[[evpn_instances]]");
+                }
+                if rib_tx.is_some()
+                    && current.outbound_prefix_limits() != new_config.outbound_prefix_limits()
+                {
+                    trace.plan("prefix_limit.activate", "[neighbors]");
+                }
+                if explain_changed {
+                    trace.plan("policy.explain.sync", "[policy.explain]");
+                }
+                if policy_diff.rpol_changed {
+                    trace.plan("policy.rpol.sync", "[policy] rpol_files");
+                }
+                if dataset_commit_pending {
+                    trace.plan("policy.dataset.commit", "[policy.datasets]");
+                }
+                if dataset_events_pending {
+                    trace.plan("policy.dataset.refresh", "[policy.datasets]");
+                }
+                for name in &policy_diff.neighbor_sets_added {
+                    trace.plan("neighbor_set.add", name.clone());
+                }
+                for name in &policy_diff.neighbor_sets_changed {
+                    trace.plan("neighbor_set.change", name.clone());
+                }
+                for name in &policy_diff.definitions_added {
+                    trace.plan("policy.add", name.clone());
+                }
+                for name in &policy_diff.definitions_changed {
+                    trace.plan("policy.change", name.clone());
+                }
+                for name in &peer_group_diff.added {
+                    trace.plan("peer_group.add", name.clone());
+                }
+                for name in &peer_group_diff.changed {
+                    trace.plan("peer_group.change", name.clone());
+                }
+                if policy_diff.import_chain_changed {
+                    trace.plan("global_chain.import", "[policy.import_chain]");
+                }
+                if policy_diff.export_chain_changed {
+                    trace.plan("global_chain.export", "[policy.export_chain]");
+                }
+                if dynamic_neighbors_changed {
+                    trace.plan("dynamic_neighbors.replace", "[[dynamic_neighbors]]");
+                }
+                for neighbor in &hot_changed {
+                    trace.plan("neighbors.hot_update", neighbor_trace_target(neighbor));
+                }
+                for neighbor in diff.added.iter().chain(&rebuild_changed) {
+                    trace.plan(
+                        "neighbors.reconcile",
+                        rustbgpd_api::peer_types::PeerKey::new(
+                            neighbor
+                                .address
+                                .parse()
+                                .expect("validated neighbor address"),
+                            neighbor.interface.clone(),
+                        )
+                        .to_string(),
+                    );
+                }
+                for peer in &diff.removed {
+                    trace.plan("neighbors.reconcile", peer.to_string());
+                }
+                if honor_graceful_shutdown_changed {
+                    trace.plan("honor_graceful_shutdown.apply", "[global]");
+                }
+                if honor_blackhole_changed {
+                    trace.plan("honor_blackhole.apply", "[global]");
+                }
+                if fib_tables_changed && fib_cmd_tx.is_some() {
+                    trace.plan("fib_tables.apply", "[[fib_tables]]");
+                }
+                for name in &peer_group_diff.removed {
+                    trace.plan("peer_group.delete", name.clone());
+                }
+                for name in &policy_diff.definitions_removed {
+                    trace.plan("policy.delete", name.clone());
+                }
+                for name in &policy_diff.neighbor_sets_removed {
+                    trace.plan("neighbor_set.delete", name.clone());
+                }
+            }
+        }
+    }
     match route {
         config::SighupReloadRoute::Rejected { reasons } => {
             error!(
@@ -2421,10 +2739,6 @@ pub(crate) async fn reload_config_with_tcp_ao(
             );
         }
         config::SighupReloadRoute::Generation => {
-            let datasets = match dataset_commit.prepare_generation(current, &new_config) {
-                Ok(datasets) => datasets,
-                Err(error) => return clean_reload_failure("generation.datasets", error),
-            };
             return Box::pin(reload_generation_route(
                 &mut progress,
                 current,
@@ -2435,7 +2749,7 @@ pub(crate) async fn reload_config_with_tcp_ao(
                 rib_tx,
                 tcp_ao_listener.zip(listener_replacement),
                 actions,
-                datasets,
+                generation_datasets.expect("generation datasets were prepared before planning"),
             ))
             .await;
         }
@@ -2609,6 +2923,7 @@ pub(crate) async fn reload_config_with_tcp_ao(
             return fenced_reload_failure(&progress, "tcp_ao.listener_commit", error, reason);
         }
         tcp_ao_rotation_applied = true;
+        progress.record_applied("tcp_ao.apply", "[neighbors]");
         info!(
             generation = plan.generation.as_u64(),
             operation = ?plan.operation,
@@ -2644,6 +2959,7 @@ pub(crate) async fn reload_config_with_tcp_ao(
                 };
                 return fenced_reload_failure(&progress, "listener_auth.apply", error, reason);
             }
+            progress.record_applied("listener_auth.apply", "[neighbors]");
             info!("listener inbound MD5/GTSM inventory replaced");
         }
     }
@@ -2659,14 +2975,21 @@ pub(crate) async fn reload_config_with_tcp_ao(
             .await;
         match attempt.terminal {
             EvpnRuntimeReloadTerminal::Applied(result) => {
-                progress.mark_accepted_effect();
+                progress.record_applied("evpn_runtime.apply", "[[evpn_instances]]");
                 info!(
                     outcome = ?result.outcome,
                     message = %result.message,
                     "reload: EVPN runtime model hot-applied through ADR-0063 coordinator"
                 );
             }
-            EvpnRuntimeReloadTerminal::Unchanged => {}
+            EvpnRuntimeReloadTerminal::Unchanged => {
+                if let Some(trace) = &progress.trace {
+                    trace
+                        .lock()
+                        .expect("SIGHUP trace poisoned")
+                        .unplan("evpn_runtime.apply", "[[evpn_instances]]");
+                }
+            }
             EvpnRuntimeReloadTerminal::RejectedNoEffect(error) => {
                 error!(
                     error = ?error,
@@ -2737,7 +3060,18 @@ pub(crate) async fn reload_config_with_tcp_ao(
         && !fib_tables_changed
         && !dataset_commit_pending
     {
+        if let Some(trace) = &progress.trace {
+            let mut trace = trace.lock().expect("SIGHUP trace poisoned");
+            trace.dynamic_limit_snapshot_pending = dynamic_neighbor_limit_changed;
+            trace.dialout_targets_pending = current.gnmi_dialout != new_config.gnmi_dialout;
+        }
         if explain_changed {
+            if let Some(trace) = &progress.trace {
+                trace
+                    .lock()
+                    .expect("SIGHUP trace poisoned")
+                    .explain_snapshot_pending = true;
+            }
             warn!(
                 "config reloaded — only [policy.explain] changed; the new \
                  enabled/cache_size apply to sessions established after this reload \
@@ -2840,7 +3174,7 @@ pub(crate) async fn reload_config_with_tcp_ao(
         let activation = match activation {
             ReloadDispatch::NotAccepted(error) => Err(ReloadStepError::NotAccepted(error)),
             ReloadDispatch::Replied(Ok(())) => {
-                progress.mark_accepted_effect();
+                progress.record_applied("prefix_limit.activate", "[neighbors]");
                 Ok(())
             }
             ReloadDispatch::Replied(Err(error)) => Err(ReloadStepError::Rejected(error)),
@@ -2872,6 +3206,12 @@ pub(crate) async fn reload_config_with_tcp_ao(
         working_config
             .dynamic_neighbors
             .clone_from(&new_config.dynamic_neighbors);
+        if let Some(trace) = &progress.trace {
+            trace
+                .lock()
+                .expect("SIGHUP trace poisoned")
+                .dynamic_replacement_pending = true;
+        }
         info!(
             ranges = new_config.dynamic_neighbors.len(),
             "reload: [[dynamic_neighbors]] updated; accept-matcher rebuilds on the \
@@ -2880,6 +3220,23 @@ pub(crate) async fn reload_config_with_tcp_ao(
     }
     if dynamic_neighbor_limit_changed {
         working_config.global.dynamic_neighbor_limit = new_config.global.dynamic_neighbor_limit;
+        if let Some(trace) = &progress.trace {
+            trace
+                .lock()
+                .expect("SIGHUP trace poisoned")
+                .dynamic_limit_snapshot_pending = true;
+        }
+    }
+    if current.gnmi_dialout != new_config.gnmi_dialout {
+        working_config
+            .gnmi_dialout
+            .clone_from(&new_config.gnmi_dialout);
+        if let Some(trace) = &progress.trace {
+            trace
+                .lock()
+                .expect("SIGHUP trace poisoned")
+                .dialout_targets_pending = true;
+        }
     }
 
     // ADR-0073: `working_config` starts from `current` and only absorbs
@@ -2914,7 +3271,7 @@ pub(crate) async fn reload_config_with_tcp_ao(
         .await;
         match outcome {
             ReloadDispatch::Replied(()) => {
-                progress.mark_accepted_effect();
+                progress.record_applied("policy.explain.sync", "[policy.explain]");
                 working_config.policy.explain = new_config.policy.explain.clone();
                 working_config.policy.reject_retention = new_config.policy.reject_retention.clone();
             }
@@ -2987,6 +3344,7 @@ pub(crate) async fn reload_config_with_tcp_ao(
             // runs. On failure the candidate survives only as on-disk
             // `.rpol` intent; the next successful reload adopts it.
             Ok(()) => {
+                progress.record_applied("policy.rpol.sync", "[policy] rpol_files");
                 working_config
                     .policy
                     .rpol_files
@@ -3014,9 +3372,11 @@ pub(crate) async fn reload_config_with_tcp_ao(
     if dataset_commit_pending {
         progress.begin_mutation();
     }
-    dataset_commit.commit();
+    dataset_commit
+        .expect("sequential dataset staging is still owned")
+        .commit();
     if dataset_commit_pending {
-        progress.mark_accepted_effect();
+        progress.record_applied("policy.dataset.commit", "[policy.datasets]");
     }
     working_config
         .policy
@@ -3034,7 +3394,9 @@ pub(crate) async fn reload_config_with_tcp_ao(
         })
         .await;
         match outcome {
-            ReloadDispatch::Replied(Ok(())) => progress.mark_accepted_effect(),
+            ReloadDispatch::Replied(Ok(())) => {
+                progress.record_applied("policy.dataset.refresh", "[policy.datasets]");
+            }
             ReloadDispatch::NotAccepted(error) => {
                 return acknowledge_partial(
                     &progress,
@@ -3120,6 +3482,7 @@ pub(crate) async fn reload_config_with_tcp_ao(
         .await
         {
             Ok(()) => {
+                progress.record_applied(bucket, name.clone());
                 if let Err(error) = apply_config_event(&mut working_config, &event) {
                     return acknowledge_partial(
                         &progress,
@@ -3190,6 +3553,7 @@ pub(crate) async fn reload_config_with_tcp_ao(
         .await
         {
             Ok(()) => {
+                progress.record_applied(bucket, name.clone());
                 if let Err(error) = apply_config_event(&mut working_config, &event) {
                     return acknowledge_partial(
                         &progress,
@@ -3260,6 +3624,7 @@ pub(crate) async fn reload_config_with_tcp_ao(
         .await
         {
             Ok(()) => {
+                progress.record_applied(bucket, name.clone());
                 if let Err(error) = apply_config_event(&mut working_config, &event) {
                     return acknowledge_partial(
                         &progress,
@@ -3320,6 +3685,7 @@ pub(crate) async fn reload_config_with_tcp_ao(
         };
         match res {
             Ok(()) => {
+                progress.record_applied("global_chain.import", "[policy.import_chain]");
                 if let Err(error) = apply_config_event(&mut working_config, &event) {
                     return acknowledge_partial(
                         &progress,
@@ -3377,6 +3743,7 @@ pub(crate) async fn reload_config_with_tcp_ao(
         };
         match res {
             Ok(()) => {
+                progress.record_applied("global_chain.export", "[policy.export_chain]");
                 if let Err(error) = apply_config_event(&mut working_config, &event) {
                     return acknowledge_partial(
                         &progress,
@@ -3530,10 +3897,11 @@ pub(crate) async fn reload_config_with_tcp_ao(
                     working_config,
                     &desired_snapshot,
                     "neighbors.hot_update",
-                    n.address.clone(),
+                    neighbor_trace_target(n),
                     failure,
                 );
             }
+            progress.record_applied("neighbors.hot_update", neighbor_trace_target(n));
             if let Some(entry) = working_config
                 .neighbors
                 .iter_mut()
@@ -3599,6 +3967,15 @@ pub(crate) async fn reload_config_with_tcp_ao(
                             | PeerReconcileEffect::Replaced(key)
                             | PeerReconcileEffect::RemovedForFailedReplacement(key) => key,
                         };
+                        let effect_bucket = if matches!(
+                            effect,
+                            PeerReconcileEffect::RemovedForFailedReplacement(_)
+                        ) {
+                            "neighbors.removed_for_failed_replacement"
+                        } else {
+                            "neighbors.reconcile"
+                        };
+                        progress.record_applied(effect_bucket, key.to_string());
                         working_config.neighbors.retain(|neighbor| {
                             rustbgpd_api::peer_types::PeerKey::new(
                                 neighbor
@@ -3669,6 +4046,7 @@ pub(crate) async fn reload_config_with_tcp_ao(
         .await
         {
             Ok(()) => {
+                progress.record_applied("honor_graceful_shutdown.apply", "[global]");
                 working_config.global.honor_graceful_shutdown = enabled;
                 info!(
                     enabled,
@@ -3681,6 +4059,18 @@ pub(crate) async fn reload_config_with_tcp_ao(
                     "honor_graceful_shutdown.apply",
                     error,
                     RuntimeConfigFenceReason::AcknowledgementLost,
+                );
+            }
+            Err(error @ ReloadStepError::NotAccepted(_)) => {
+                return acknowledge_partial(
+                    &progress,
+                    working_config,
+                    &desired_snapshot,
+                    ReloadStepFailure {
+                        bucket: "honor_graceful_shutdown.apply",
+                        target: "[global]".to_string(),
+                        error,
+                    },
                 );
             }
             Err(error) => {
@@ -3706,6 +4096,7 @@ pub(crate) async fn reload_config_with_tcp_ao(
                      advanced anyway; bail-and-carry will retry failed peers on next \
                      policy edit"
                 );
+                progress.record_applied("honor_graceful_shutdown.apply", "[global]");
                 working_config.global.honor_graceful_shutdown = enabled;
             }
         }
@@ -3718,6 +4109,7 @@ pub(crate) async fn reload_config_with_tcp_ao(
         .await
         {
             Ok(()) => {
+                progress.record_applied("honor_blackhole.apply", "[global]");
                 working_config.global.honor_blackhole = enabled;
                 info!(enabled, "reload: [global] honor_blackhole hot-applied");
             }
@@ -3729,6 +4121,18 @@ pub(crate) async fn reload_config_with_tcp_ao(
                     RuntimeConfigFenceReason::AcknowledgementLost,
                 );
             }
+            Err(error @ ReloadStepError::NotAccepted(_)) => {
+                return acknowledge_partial(
+                    &progress,
+                    working_config,
+                    &desired_snapshot,
+                    ReloadStepFailure {
+                        bucket: "honor_blackhole.apply",
+                        target: "[global]".to_string(),
+                        error,
+                    },
+                );
+            }
             Err(error) => {
                 warn!(
                     enabled,
@@ -3737,6 +4141,7 @@ pub(crate) async fn reload_config_with_tcp_ao(
                      advanced anyway; bail-and-carry will retry failed peers on next \
                      policy edit"
                 );
+                progress.record_applied("honor_blackhole.apply", "[global]");
                 working_config.global.honor_blackhole = enabled;
             }
         }
@@ -3771,7 +4176,7 @@ pub(crate) async fn reload_config_with_tcp_ao(
                 });
                 match reply_rx.await {
                     Ok(OwnedFibReplaceOutcome::Applied) => {
-                        progress.mark_accepted_effect();
+                        progress.record_applied("fib_tables.apply", "[[fib_tables]]");
                         working_config.fib_tables.clone_from(&new_config.fib_tables);
                         match set_pm_fib_tables_snapshot(peer_mgr_tx, &new_config.fib_tables).await
                         {
@@ -3873,6 +4278,7 @@ pub(crate) async fn reload_config_with_tcp_ao(
         .await
         {
             Ok(()) => {
+                progress.record_applied("peer_group.delete", name.clone());
                 if let Err(error) = apply_config_event(&mut working_config, &event) {
                     return acknowledge_partial(
                         &progress,
@@ -3914,6 +4320,7 @@ pub(crate) async fn reload_config_with_tcp_ao(
         .await
         {
             Ok(()) => {
+                progress.record_applied("policy.delete", name.clone());
                 if let Err(error) = apply_config_event(&mut working_config, &event) {
                     return acknowledge_partial(
                         &progress,
@@ -3955,6 +4362,7 @@ pub(crate) async fn reload_config_with_tcp_ao(
         .await
         {
             Ok(()) => {
+                progress.record_applied("neighbor_set.delete", name.clone());
                 if let Err(error) = apply_config_event(&mut working_config, &event) {
                     return acknowledge_partial(
                         &progress,
@@ -4048,19 +4456,39 @@ impl GenerationSideEffects<'_> {
         error: String,
     ) -> SighupReloadOutcome {
         let mut failures = Vec::new();
-        if let Some((listener, (md5_keys, ttl_security))) = self.listener_prior
-            && let Err(restore_error) = listener_step(
+        if let Some((listener, (md5_keys, ttl_security))) = self.listener_prior {
+            match listener_step(
                 listener
                     .replace_inbound_auth(md5_keys, ttl_security, || {})
                     .await,
-            )
-        {
-            failures.push(format!("listener inbound inventory: {restore_error}"));
+            ) {
+                Ok(()) => {
+                    if let Some(trace) = &progress.trace {
+                        trace
+                            .lock()
+                            .expect("SIGHUP trace poisoned")
+                            .unapply("listener_auth.apply", "[neighbors]");
+                    }
+                }
+                Err(restore_error) => {
+                    failures.push(format!("listener inbound inventory: {restore_error}"));
+                }
+            }
         }
-        if let Some(rib_tx) = self.limits_rib_tx
-            && let Err(restore_error) = restore_outbound_prefix_limits(rib_tx, current).await
-        {
-            failures.push(format!("outbound prefix maxima: {restore_error}"));
+        if let Some(rib_tx) = self.limits_rib_tx {
+            match restore_outbound_prefix_limits(rib_tx, current).await {
+                Ok(()) => {
+                    if let Some(trace) = &progress.trace {
+                        trace
+                            .lock()
+                            .expect("SIGHUP trace poisoned")
+                            .unapply("prefix_limit.activate", "[neighbors]");
+                    }
+                }
+                Err(restore_error) => {
+                    failures.push(format!("outbound prefix maxima: {restore_error}"));
+                }
+            }
         }
         if failures.is_empty() {
             return generation_step_rejected(bucket, error);
@@ -4140,7 +4568,9 @@ async fn reload_generation_route(
         })
         .await;
         match activation {
-            ReloadDispatch::Replied(Ok(())) => progress.mark_accepted_effect(),
+            ReloadDispatch::Replied(Ok(())) => {
+                progress.record_applied("prefix_limit.activate", "[neighbors]");
+            }
             ReloadDispatch::Replied(Err(error)) | ReloadDispatch::NotAccepted(error) => {
                 return generation_step_rejected("prefix_limit.activate", error);
             }
@@ -4181,6 +4611,7 @@ async fn reload_generation_route(
                 };
                 return fenced_reload_failure(progress, "listener_auth.apply", error, reason);
             }
+            progress.record_applied("listener_auth.apply", "[neighbors]");
             effects.listener_prior = Some((listener, prior_inventory));
         }
         if staged != desired_inventory {
@@ -4217,7 +4648,14 @@ async fn reload_generation_route(
     }
     match reply_rx.await {
         Ok(ReloadGenerationOutcome::Applied(receipt)) => {
-            progress.mark_accepted_effect();
+            progress.record_applied("generation.apply", "[config]");
+            if let Some(trace) = &progress.trace {
+                let mut trace = trace.lock().expect("SIGHUP trace poisoned");
+                trace.dynamic_limit_snapshot_pending = current.global.dynamic_neighbor_limit
+                    != new_config.global.dynamic_neighbor_limit;
+                trace.dialout_targets_pending = current.gnmi_dialout != new_config.gnmi_dialout;
+            }
+            let listener_trim_needed = listener_trim.is_some();
             // The removed sessions are gone: withdraw their listener keys and
             // selectors. A failure leaves only entries for addresses that are
             // no longer configured, which the peer manager refuses anyway, so
@@ -4241,6 +4679,9 @@ async fn reload_generation_route(
                         error,
                     },
                 );
+            }
+            if listener_trim_needed {
+                progress.record_applied("listener_auth.withdraw", "[neighbors]");
             }
             info!(%receipt, "config reload complete (one runtime generation)");
             acknowledged_reload(
@@ -4339,6 +4780,34 @@ mod tests {
     };
     use rustbgpd_telemetry::BgpMetrics;
 
+    async fn read_last_sighup_via_rpc(
+        state: &crate::LastSighupReloadState,
+    ) -> Option<rustbgpd_api::proto::SighupReloadRecord> {
+        use rustbgpd_api::proto::config_service_server::ConfigService as _;
+
+        let (peer_mgr_tx, _peer_mgr_rx) = mpsc::channel(1);
+        let state = Arc::clone(state);
+        let service = rustbgpd_api::ConfigService::new(
+            rustbgpd_api::server::AccessMode::ReadOnly,
+            peer_mgr_tx,
+        )
+        .with_last_sighup_reload(Some(Arc::new(move || {
+            let record = state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone();
+            rustbgpd_api::proto::GetLastSighupReloadResponse { record }
+        })));
+        service
+            .get_last_sighup_reload(tonic::Request::new(
+                rustbgpd_api::proto::GetLastSighupReloadRequest {},
+            ))
+            .await
+            .unwrap()
+            .into_inner()
+            .record
+    }
+
     #[test]
     fn dataplane_readiness_remains_startup_only_on_reload() {
         let current: Config = toml::from_str(
@@ -4394,8 +4863,8 @@ log_format = "json"
         let legacy_variant = concat!("GrpcEnforcementConfig::", "Legacy");
         let expected_seams = [
             (concat!("explicit_tier", "_test_toml("), 4),
-            (concat!("write_tier", "_test_config("), 25),
-            (concat!("load_tier", "_test_config("), 32),
+            (concat!("write_tier", "_test_config("), 34),
+            (concat!("load_tier", "_test_config("), 37),
             (concat!("load_tier", "_test_toml("), 9),
             (concat!("tier_authorized_uds", "_test_config("), 4),
             (concat!("assert_tier_authorized", "_test_config("), 13),
@@ -5979,6 +6448,10 @@ local_vtep_ip = "10.0.0.1"
     }
 
     #[tokio::test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one controlled actor interleaving covers both FIB rejection variants and the retained RPC receipt"
+    )]
     async fn reload_partial_receipt_preserves_evpn_rejection_before_later_failure() {
         for reject_fib in [false, true] {
             let path = unique_temp_path("reload-evpn-partial-receipt");
@@ -6002,6 +6475,10 @@ local_vtep_ip = "10.0.0.1"
             .unwrap();
             let (peer_mgr_tx, mut peer_mgr_rx) = mpsc::channel(8);
             let (fib_tx, mut fib_rx) = mpsc::channel(8);
+            let trace: SighupReloadTraceHandle = Arc::new(Mutex::new(SighupReloadTrace::default()));
+            let state: crate::LastSighupReloadState = Arc::new(Mutex::new(None));
+            let (held_tx, held_rx) = tokio::sync::oneshot::channel();
+            let (release_tx, release_rx) = tokio::sync::oneshot::channel();
             let actor = tokio::spawn(async move {
                 let Some(PeerManagerCommand::SetHonorGracefulShutdown { reply, .. }) =
                     peer_mgr_rx.recv().await
@@ -6012,6 +6489,8 @@ local_vtep_ip = "10.0.0.1"
                     // Close admission before acknowledging the preceding effect.
                     fib_rx.close();
                 }
+                held_tx.send(()).unwrap();
+                release_rx.await.unwrap();
                 reply.send(Ok(())).unwrap();
                 if reject_fib {
                     let Some(FibRuntimeCommand::OwnedReplaceTables { reply, .. }) =
@@ -6026,17 +6505,39 @@ local_vtep_ip = "10.0.0.1"
                         .unwrap();
                 }
             });
-            let authority = reload_config(
-                path.to_str().unwrap(),
-                &initial,
-                initial.global.telemetry.grpc_tcp.as_ref(),
-                initial.global.telemetry.grpc_uds.as_ref(),
-                &peer_mgr_tx,
-                Some(&fib_tx),
-                Some(&apply),
-            )
-            .await
-            .expect("accepted honor change must retain partial authority");
+            let reload_path = path.clone();
+            let reload_initial = initial.clone();
+            let reload_trace = Arc::clone(&trace);
+            let reload = tokio::spawn(async move {
+                reload_config_recorded(
+                    reload_path.to_str().unwrap(),
+                    &reload_initial,
+                    reload_initial.global.telemetry.grpc_tcp.as_ref(),
+                    reload_initial.global.telemetry.grpc_uds.as_ref(),
+                    &peer_mgr_tx,
+                    Some(&fib_tx),
+                    Some(&apply),
+                    Some(reload_trace),
+                )
+                .await
+            });
+            held_rx.await.unwrap();
+            crate::publish_last_sighup(
+                &state,
+                rustbgpd_api::proto::SighupReloadRecord {
+                    outcome: "ignored_in_flight".to_string(),
+                    ..Default::default()
+                },
+            );
+            assert_eq!(
+                read_last_sighup_via_rpc(&state).await.unwrap().outcome,
+                "ignored_in_flight"
+            );
+            release_tx.send(()).unwrap();
+            let authority = reload
+                .await
+                .unwrap()
+                .expect("accepted honor change must retain partial authority");
             actor.await.unwrap();
             assert_eq!(authority.runtime.evpn_instances, initial.evpn_instances);
             assert!(authority.runtime.global.honor_graceful_shutdown);
@@ -6060,8 +6561,62 @@ local_vtep_ip = "10.0.0.1"
                 coordinator.lock().unwrap().model().mutation_state(),
                 rustbgpd_evpn::EvpnRuntimeMutationState::Idle,
             );
+            let record = crate::last_sighup_record(
+                std::time::SystemTime::now(),
+                &Ok(Ok(authority.clone())),
+                &trace.lock().unwrap(),
+            );
+            crate::publish_last_sighup(&state, record.clone());
+            let published = read_last_sighup_via_rpc(&state).await.unwrap();
+            assert_eq!(published.outcome, "known_partial");
+            assert_eq!(published, record);
+            assert_eq!(record.outcome, "known_partial");
+            assert_eq!(record.route, "sequential");
+            assert_eq!(record.reason_code, "step_rejected");
+            assert_eq!(record.failure_target, "[[evpn_instances]]");
+            assert_eq!(record.applied_count, 1);
+            assert_eq!(record.applied[0].bucket, "honor_graceful_shutdown.apply");
+            assert_eq!(record.unapplied_count, 2);
+            assert!(
+                record
+                    .unapplied
+                    .iter()
+                    .any(|effect| effect.bucket == "fib_tables.apply")
+            );
             std::fs::remove_file(path).unwrap();
         }
+    }
+
+    #[tokio::test]
+    async fn evpn_already_converged_is_not_an_unapplied_reload_operation() {
+        let path = unique_temp_path("reload-evpn-already-converged-receipt");
+        std::fs::write(&path, EVPN_VNI_100_TOML).unwrap();
+        let initial = load_tier_test_config(&path);
+        let (apply, _coordinator) = evpn_reload_apply_sequence(&initial, vec![Ok(())]);
+        let candidate = load_config_from_toml("already-converged-evpn", EVPN_VNI_100_200_TOML);
+        apply
+            .apply_config(&candidate)
+            .await
+            .expect("runtime EVPN apply should settle before stale snapshot reload");
+        std::fs::write(&path, EVPN_VNI_100_200_TOML).unwrap();
+        let (peer_mgr_tx, _peer_mgr_rx) = mpsc::channel(8);
+        let trace: SighupReloadTraceHandle = Arc::new(Mutex::new(SighupReloadTrace::default()));
+        let authority = reload_config_recorded(
+            path.to_str().unwrap(),
+            &initial,
+            initial.global.telemetry.grpc_tcp.as_ref(),
+            initial.global.telemetry.grpc_uds.as_ref(),
+            &peer_mgr_tx,
+            None,
+            Some(&apply),
+            Some(Arc::clone(&trace)),
+        )
+        .await
+        .expect("already-converged EVPN candidate should settle");
+        assert_eq!(authority.runtime.evpn_instances, candidate.evpn_instances);
+        assert!(trace.lock().unwrap().planned.is_empty());
+        assert!(trace.lock().unwrap().applied.is_empty());
+        std::fs::remove_file(path).unwrap();
     }
 
     #[tokio::test]
@@ -6505,6 +7060,52 @@ hold_time = 90
         );
 
         std::fs::remove_file(&path).ok();
+    }
+
+    #[tokio::test]
+    async fn honor_knob_admission_failure_keeps_the_runtime_snapshot() {
+        for (knob, bucket) in [
+            ("honor_graceful_shutdown", "honor_graceful_shutdown.apply"),
+            ("honor_blackhole", "honor_blackhole.apply"),
+        ] {
+            let path = unique_temp_path("reload-honor-admission-rejected");
+            write_tier_test_config(&path, baseline_toml());
+            let initial = load_tier_test_config(&path);
+            write_tier_test_config(
+                &path,
+                &baseline_toml().replace("asn = 65001", &format!("asn = 65001\n{knob} = true")),
+            );
+            let (peer_mgr_tx, peer_mgr_rx) = mpsc::channel(1);
+            drop(peer_mgr_rx);
+            let trace: SighupReloadTraceHandle = Arc::new(Mutex::new(SighupReloadTrace::default()));
+            let outcome = reload_config_recorded(
+                path.to_str().unwrap(),
+                &initial,
+                initial.global.telemetry.grpc_tcp.as_ref(),
+                initial.global.telemetry.grpc_uds.as_ref(),
+                &peer_mgr_tx,
+                None,
+                None,
+                Some(Arc::clone(&trace)),
+            )
+            .await;
+            let SighupReloadOutcome::CleanNoEffect(SighupReloadError::Failed(failure)) = outcome
+            else {
+                panic!("unadmitted honor change must not advance authority: {outcome:?}");
+            };
+            assert_eq!(failure.bucket, bucket);
+            assert!(matches!(failure.error, ReloadStepError::NotAccepted(_)));
+            assert_eq!(trace.lock().unwrap().applied.len(), 0);
+            assert!(
+                trace
+                    .lock()
+                    .unwrap()
+                    .planned
+                    .iter()
+                    .any(|effect| effect.bucket == bucket)
+            );
+            std::fs::remove_file(path).unwrap();
+        }
     }
 
     async fn assert_honor_reply_loss_fences(graceful: bool, bucket: &'static str) {
@@ -7659,6 +8260,103 @@ hold_time = 90
     }
 
     #[tokio::test]
+    async fn scoped_hot_updates_keep_distinct_receipt_identities() {
+        let scoped = |address: &str, interface: &str, description: &str| {
+            format!(
+                "\n[[neighbors]]\naddress = \"{address}\"\ninterface = \"{interface}\"\nremote_asn = 65002\ndescription = \"{description}\"\n"
+            )
+        };
+        let initial_toml = format!(
+            "{}{}{}",
+            baseline_toml(),
+            scoped("fe80::2", "rbgp-scoped-a", "old"),
+            scoped("fe80::3", "rbgp-scoped-b", "old")
+        );
+        let desired_toml = format!(
+            "{}{}{}",
+            baseline_toml().replace(
+                "hold_time = 90",
+                "hold_time = 90\nmd5_password = \"new-secret\""
+            ),
+            scoped("fe80::2", "rbgp-scoped-a", "new"),
+            scoped("fe80::3", "rbgp-scoped-b", "new")
+        );
+        let initial = load_config_from_toml("scoped-receipt-prior", &initial_toml);
+        let desired = load_config_from_toml("scoped-receipt-desired", &desired_toml);
+        let (peer_mgr_tx, mut peer_mgr_rx) = mpsc::channel(8);
+        let actor = tokio::spawn(async move {
+            let mut seen = Vec::new();
+            while let Some(command) = peer_mgr_rx.recv().await {
+                let PeerManagerCommand::HotUpdatePeer { config, reply } = command else {
+                    panic!("hot updates must stop before auth reconcile");
+                };
+                seen.push(config.interface.clone());
+                let outcome = if seen.len() == 1 {
+                    OwnedHotUpdatePeerOutcome::Success
+                } else {
+                    OwnedHotUpdatePeerOutcome::RejectedNoEffect(
+                        rustbgpd_api::peer_types::PeerLifecycleError::Internal(
+                            "injected second peer rejection".to_string(),
+                        ),
+                    )
+                };
+                reply.send(outcome).unwrap();
+            }
+            seen
+        });
+        let trace: SighupReloadTraceHandle = Arc::new(Mutex::new(SighupReloadTrace::default()));
+        let outcome = reload_config_with_tcp_ao_recorded(
+            SighupReloadPlan {
+                baseline_runtime: initial,
+                desired: AcceptedConfigSnapshot::from_config_for_test(desired),
+            },
+            None,
+            None,
+            &peer_mgr_tx,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(Arc::clone(&trace)),
+        )
+        .await;
+        drop(peer_mgr_tx);
+        let seen = actor.await.unwrap();
+        assert_eq!(seen.len(), 2);
+        let SighupReloadOutcome::Acknowledged(authority) = outcome else {
+            panic!("first accepted hot update should yield partial authority: {outcome:?}");
+        };
+        let SighupCompletion::KnownPartial { failures } = &authority.completion else {
+            panic!("expected one rejected hot update");
+        };
+        let trace = trace.lock().unwrap();
+        let planned: Vec<_> = trace
+            .planned
+            .iter()
+            .filter(|effect| effect.bucket == "neighbors.hot_update")
+            .map(|effect| effect.target.as_str())
+            .collect();
+        let applied: Vec<_> = trace
+            .applied
+            .iter()
+            .filter(|effect| effect.bucket == "neighbors.hot_update")
+            .map(|effect| effect.target.as_str())
+            .collect();
+        assert_eq!(planned, ["fe80::2%rbgp-scoped-a", "fe80::3%rbgp-scoped-b"]);
+        assert_eq!(applied.len(), 1);
+        assert!(applied[0].ends_with(seen[0].as_deref().unwrap()));
+        let unapplied: Vec<_> = planned
+            .iter()
+            .copied()
+            .filter(|target| !applied.contains(target))
+            .collect();
+        assert_eq!(unapplied.len(), 1);
+        assert_eq!(failures[0].target, unapplied[0]);
+    }
+
+    #[tokio::test]
     async fn reload_missing_interface_replacement_rejects_before_any_route_effect() {
         let initial = accepted_missing_interface_toml();
         for with_listener in [false, true] {
@@ -7840,6 +8538,78 @@ hold_time = 90
             );
             assert!(calls.is_empty(), "{family}");
         }
+    }
+
+    #[tokio::test]
+    async fn rejected_compound_reload_builds_redacted_api_receipt() {
+        let path = unique_temp_path("reload-rejected-receipt");
+        write_tier_test_config(&path, baseline_toml());
+        let current = load_tier_test_config(&path);
+        let candidate = format!(
+            "{}\n[peer_groups.ranges]\nhold_time = 30\n[[dynamic_neighbors]]\nprefix = \"192.0.2.0/24\"\npeer_group = \"ranges\"\nremote_asn = 65100\n",
+            baseline_toml().replace("hold_time = 90", "hold_time = 45")
+        );
+        write_tier_test_config(&path, &candidate);
+        let (peer_mgr_tx, mut peer_mgr_rx) = mpsc::channel(1);
+        let trace: SighupReloadTraceHandle = Arc::new(Mutex::new(SighupReloadTrace::default()));
+        let outcome = reload_config_recorded(
+            path.to_str().unwrap(),
+            &current,
+            current.global.telemetry.grpc_tcp.as_ref(),
+            current.global.telemetry.grpc_uds.as_ref(),
+            &peer_mgr_tx,
+            None,
+            None,
+            Some(Arc::clone(&trace)),
+        )
+        .await;
+        let SighupReloadOutcome::CleanNoEffect(error) = outcome else {
+            panic!("compound candidate must reject before any effect");
+        };
+        assert!(peer_mgr_rx.try_recv().is_err());
+        let record = crate::last_sighup_record(
+            std::time::SystemTime::now(),
+            &Ok(Err(error)),
+            &trace.lock().unwrap(),
+        );
+        assert_eq!(record.outcome, "rejected_no_effect");
+        assert_eq!(record.route, "");
+        assert_eq!(record.reason_code, "unsupported_compound");
+        assert_eq!(record.failure_bucket, "reload.preflight");
+        assert_eq!(record.failure_target, "[[dynamic_neighbors]]");
+        assert_eq!(record.applied_count, 0);
+        assert_eq!(record.unapplied_count, 0);
+        let state: crate::LastSighupReloadState = Arc::new(Mutex::new(None));
+        crate::publish_last_sighup(&state, record.clone());
+        assert_eq!(read_last_sighup_via_rpc(&state).await.unwrap(), record);
+
+        write_tier_test_config(&path, baseline_toml());
+        let noop_trace: SighupReloadTraceHandle =
+            Arc::new(Mutex::new(SighupReloadTrace::default()));
+        let noop = reload_config_recorded(
+            path.to_str().unwrap(),
+            &current,
+            current.global.telemetry.grpc_tcp.as_ref(),
+            current.global.telemetry.grpc_uds.as_ref(),
+            &peer_mgr_tx,
+            None,
+            None,
+            Some(Arc::clone(&noop_trace)),
+        )
+        .await
+        .expect("unchanged candidate should settle without effect");
+        let noop_record = crate::last_sighup_record(
+            std::time::SystemTime::now(),
+            &Ok(Ok(noop)),
+            &noop_trace.lock().unwrap(),
+        );
+        crate::publish_last_sighup(&state, noop_record.clone());
+        let published = read_last_sighup_via_rpc(&state).await.unwrap();
+        assert_eq!(published, noop_record);
+        assert_eq!(published.outcome, "complete");
+        assert_eq!(published.applied_count, 0);
+        assert_eq!(published.unapplied_count, 0);
+        std::fs::remove_file(path).unwrap();
     }
 
     #[tokio::test]
@@ -8592,15 +9362,30 @@ import_policy_chain = ["origin-guard"]
             });
             let (peer_mgr_tx, _peer_mgr_rx) = mpsc::channel::<PeerManagerCommand>(8);
             let (internal_tx, generation) = spawn_generation_mock(vec![reply], None);
-            let outcome = reload_config_generation(
-                path.to_str().unwrap(),
-                &initial,
+            let desired = Arc::new(
+                AcceptedConfigSnapshot::load_for_reload(
+                    &path,
+                    &AcceptedConfigSnapshot::from_config_for_test(initial.clone()),
+                    &initial.policy.dataset_bindings,
+                )
+                .unwrap(),
+            );
+            let trace: SighupReloadTraceHandle = Arc::new(Mutex::new(SighupReloadTrace::default()));
+            let outcome = reload_config_with_tcp_ao_recorded(
+                SighupReloadPlan {
+                    baseline_runtime: initial.clone(),
+                    desired,
+                },
                 initial.global.telemetry.grpc_tcp.as_ref(),
                 initial.global.telemetry.grpc_uds.as_ref(),
                 &peer_mgr_tx,
-                &internal_tx,
+                Some(&internal_tx),
                 Some(&rib_tx),
                 None,
+                None,
+                None,
+                None,
+                Some(Arc::clone(&trace)),
             )
             .await;
             drop(rib_tx);
@@ -8610,9 +9395,25 @@ import_policy_chain = ["origin-guard"]
             match (reply, restore_ok) {
                 (GenerationReply::Applied, _) => {
                     outcome.expect("generation settles");
+                    assert!(
+                        trace
+                            .lock()
+                            .unwrap()
+                            .applied
+                            .iter()
+                            .any(|effect| { effect.bucket == "prefix_limit.activate" })
+                    );
                     assert_eq!(seen, vec!["prepare(Some(100))", "apply(activate=true)"]);
                 }
                 (_, true) => {
+                    assert!(
+                        !trace
+                            .lock()
+                            .unwrap()
+                            .applied
+                            .iter()
+                            .any(|effect| { effect.bucket == "prefix_limit.activate" })
+                    );
                     assert!(
                         matches!(
                             &outcome,
@@ -8633,6 +9434,14 @@ import_policy_chain = ["origin-guard"]
                     );
                 }
                 (_, false) => {
+                    assert!(
+                        trace
+                            .lock()
+                            .unwrap()
+                            .applied
+                            .iter()
+                            .any(|effect| { effect.bucket == "prefix_limit.activate" })
+                    );
                     assert!(
                         matches!(
                             &outcome,
@@ -9761,6 +10570,150 @@ tcp_ao = [
             Some(17),
             "desired snapshot must match the edited value"
         );
+    }
+
+    #[tokio::test]
+    async fn sequential_plan_includes_snapshot_limit_and_dialout_finalizer_effects() {
+        let path = unique_temp_path("reload-finalizer-effects");
+        let initial = format!(
+            "{}\n[peer_groups.ranges]\nhold_time = 30\n",
+            baseline_toml()
+        );
+        write_tier_test_config(&path, &initial);
+        let current = load_tier_test_config(&path);
+        let desired = format!(
+            "{}\n[[dynamic_neighbors]]\nprefix = \"192.0.2.0/24\"\npeer_group = \"ranges\"\nremote_asn = 65100\n[gnmi_dialout]\n[[gnmi_dialout.targets]]\nname = \"collector\"\naddress = \"192.0.2.10:57400\"\npaths = [\"network-instances/network-instance[name=DEFAULT]/protocols/protocol[identifier=BGP][name=BGP]/bgp/neighbors/neighbor[neighbor-address=*]/state/session-state\"]\n",
+            initial.replace(
+                "listen_port = 179",
+                "listen_port = 179\ndynamic_neighbor_limit = 17"
+            )
+        );
+        write_tier_test_config(&path, &desired);
+        let (peer_mgr_tx, mut peer_mgr_rx) = mpsc::channel(1);
+        let trace: SighupReloadTraceHandle = Arc::new(Mutex::new(SighupReloadTrace::default()));
+        let authority = reload_config_recorded(
+            path.to_str().unwrap(),
+            &current,
+            current.global.telemetry.grpc_tcp.as_ref(),
+            current.global.telemetry.grpc_uds.as_ref(),
+            &peer_mgr_tx,
+            None,
+            None,
+            Some(Arc::clone(&trace)),
+        )
+        .await
+        .expect("validated finalizer-only candidate should stage");
+        assert!(peer_mgr_rx.try_recv().is_err());
+        assert_eq!(authority.runtime.global.dynamic_neighbor_limit, Some(17));
+        assert_eq!(authority.runtime.dynamic_neighbors.len(), 1);
+        assert_eq!(
+            authority.runtime.gnmi_dialout,
+            authority.desired.config().gnmi_dialout
+        );
+        assert_eq!(authority.dialout_targets.len(), 1);
+        let trace = trace.lock().unwrap();
+        assert_eq!(trace.route, Some("sequential"));
+        assert!(trace.dynamic_limit_snapshot_pending);
+        assert!(trace.dialout_targets_pending);
+        for effect in [
+            SighupEffect {
+                bucket: "dynamic_neighbor_limit.apply",
+                target: "[global]".to_string(),
+            },
+            SighupEffect {
+                bucket: "gnmi_dialout.apply",
+                target: "[gnmi_dialout]".to_string(),
+            },
+        ] {
+            assert!(trace.planned.contains(&effect));
+            assert!(!trace.applied.contains(&effect));
+        }
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[tokio::test]
+    async fn prefix_limit_rejection_leaves_planned_finalizer_effects_unstaged() {
+        let path = unique_temp_path("reload-prefix-limit-finalizer-plan");
+        write_tier_test_config(&path, baseline_toml());
+        let current = load_tier_test_config(&path);
+        let candidate = format!(
+            "{}\n[gnmi_dialout]\n[[gnmi_dialout.targets]]\nname = \"collector\"\naddress = \"192.0.2.10:57400\"\npaths = [\"network-instances/network-instance[name=DEFAULT]/protocols/protocol[identifier=BGP][name=BGP]/bgp/neighbors/neighbor[neighbor-address=*]/state/session-state\"]\n",
+            baseline_toml()
+                .replace(
+                    "listen_port = 179",
+                    "listen_port = 179\ndynamic_neighbor_limit = 17"
+                )
+                .replace(
+                    "hold_time = 90",
+                    "hold_time = 45\nmax_prefixes_out_ipv4 = 100"
+                )
+        );
+        write_tier_test_config(&path, &candidate);
+        let desired = Arc::new(
+            AcceptedConfigSnapshot::load_for_reload(
+                &path,
+                &AcceptedConfigSnapshot::from_config_for_test(current.clone()),
+                &current.policy.dataset_bindings,
+            )
+            .unwrap(),
+        );
+        let (peer_mgr_tx, mut peer_mgr_rx) = mpsc::channel(1);
+        let (internal_tx, mut internal_rx) = mpsc::channel(1);
+        let (rib_tx, mut rib_rx) = mpsc::channel(1);
+        let rib = tokio::spawn(async move {
+            let Some(rustbgpd_rib::RibUpdate::PrepareOutboundPrefixLimits { reply, .. }) =
+                rib_rx.recv().await
+            else {
+                panic!("expected prefix-limit preparation");
+            };
+            reply.send(Err(Vec::new())).unwrap();
+        });
+        let trace: SighupReloadTraceHandle = Arc::new(Mutex::new(SighupReloadTrace::default()));
+        let outcome = reload_config_with_tcp_ao_recorded(
+            SighupReloadPlan {
+                baseline_runtime: current.clone(),
+                desired,
+            },
+            current.global.telemetry.grpc_tcp.as_ref(),
+            current.global.telemetry.grpc_uds.as_ref(),
+            &peer_mgr_tx,
+            Some(&internal_tx),
+            Some(&rib_tx),
+            None,
+            None,
+            None,
+            None,
+            Some(Arc::clone(&trace)),
+        )
+        .await;
+        rib.await.unwrap();
+        assert!(peer_mgr_rx.try_recv().is_err());
+        assert!(internal_rx.try_recv().is_err());
+        assert!(matches!(
+            outcome,
+            SighupReloadOutcome::CleanNoEffect(SighupReloadError::Failed(ReloadStepFailure {
+                bucket: "prefix_limit.prepare",
+                ..
+            }))
+        ));
+        let trace = trace.lock().unwrap();
+        assert_eq!(trace.route, Some("generation"));
+        assert!(!trace.dynamic_limit_snapshot_pending);
+        assert!(!trace.dialout_targets_pending);
+        assert!(trace.applied.is_empty());
+        for effect in [
+            SighupEffect {
+                bucket: "dynamic_neighbor_limit.apply",
+                target: "[global]".to_string(),
+            },
+            SighupEffect {
+                bucket: "gnmi_dialout.apply",
+                target: "[gnmi_dialout]".to_string(),
+            },
+        ] {
+            assert!(trace.planned.contains(&effect));
+        }
+        std::fs::remove_file(path).unwrap();
     }
 
     #[tokio::test]

@@ -175,6 +175,10 @@ pub(crate) fn get_config_transaction_status_summary() -> GrpcRequestSummary {
     GrpcRequestSummary::new("request=empty")
 }
 
+pub(crate) fn get_last_sighup_reload_summary() -> GrpcRequestSummary {
+    GrpcRequestSummary::new("request=empty")
+}
+
 /// Summary for `GetEffectiveConfig`; there are no request fields. The
 /// response TOML is redacted by the peer manager before it reaches the
 /// service, so nothing response-side needs masking here either.
