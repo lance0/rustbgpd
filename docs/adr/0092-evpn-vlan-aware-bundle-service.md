@@ -403,6 +403,9 @@ does not promise a hitless migration.
 
 **Status:** Accepted (2026-10-10); M120 vendor qualification pending.
 
+The [2026-10-11 qualification addendum](#qualification-addendum-2026-10-11-local-sr-linux-member-irb)
+supersedes this pending status; the dated decision and requirements below are retained.
+
 This amendment replaces the blanket `ip_vrf` rejection in the 2026-10-08
 amendment's E and corresponding H validation obligation. It preserves the
 other bundle restrictions and the earlier dated decisions as history.
@@ -448,6 +451,17 @@ state, withdrawal/recovery, and rejection of unsupported forms. Until that
 receipt passes, no vendor qualification is claimed for member IRB. The
 [M119 receipt](../artifacts/interop/m119-evpn-bundle-vtep-20261010T124729Z/README.md)
 qualifies only the L2 service.
+
+## Qualification addendum (2026-10-11): Local SR Linux member IRB
+
+This addendum supersedes the 2026-10-10 pending M120 qualification status.
+The [M120 local receipt](../artifacts/interop/m120-evpn-bundle-irb-20261011T045852Z/README.md)
+records 37 passed, 0 failed against pinned SR Linux 25.10.1-399 with
+operator-provisioned SVIs, VRF attachments and L3 VXLAN devices. It exercises
+exact route and kernel inventories, routed Type 5 forwarding, L2 isolation
+during scoped withdrawal/recovery, a rejected reload and member unlink/relink.
+EVPN remains alpha. This local topology does not establish hosted vendor
+qualification or scale results; the amendment's unsupported shapes remain excluded.
 
 ## Consequences
 

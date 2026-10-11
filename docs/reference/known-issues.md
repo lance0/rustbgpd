@@ -468,9 +468,12 @@ resolved.
   receive programming against GoBGP; the
   [M119 local receipt](../artifacts/interop/m119-evpn-bundle-vtep-20261010T124729Z/README.md)
   qualifies SR Linux 25.10.1 import, per-tag forwarding with fresh ARP, and
-  withdrawal/restore isolation in a two-VTEP L2 fixture. Member IRB vendor
-  qualification is pending in M120 with pinned SR Linux; M119 does not
-  qualify routing between members. EVPN remains alpha. See
+  withdrawal/restore isolation in a two-VTEP L2 fixture. The
+  [M120 local receipt](../artifacts/interop/m120-evpn-bundle-irb-20261011T045852Z/README.md)
+  qualifies member IRB against pinned SR Linux 25.10.1-399 with
+  operator-provisioned SVIs, VRF attachments and L3 VXLAN devices.
+  These local receipts do not establish hosted vendor qualification or scale
+  results. EVPN remains alpha. See
   [ADR-0092](../adr/0092-evpn-vlan-aware-bundle-service.md).
 - **Family scope is still limited.** MP-BGP supports AFI/SAFI negotiation,
   but rustbgpd currently implements IPv4/IPv6 unicast (AFI 1/2, SAFI 1),

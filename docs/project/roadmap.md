@@ -575,7 +575,9 @@ gobmp/pmacct already terminate it into Kafka), and BGPsec.
   attribution, and Ethernet Tag ID still `0`. Opt-in single-homed
   VLAN-aware bundle members originate/import non-zero-tag Type 2/3 and can
   bind to an IP-VRF in `interface_less` mode for tag-zero Type 5 routing;
-  pinned SR Linux member IRB qualification (M120) remains pending.
+  the [M120 local receipt](../artifacts/interop/m120-evpn-bundle-irb-20261011T045852Z/README.md)
+  qualifies member IRB against pinned SR Linux 25.10.1-399 with
+  operator-provisioned SVIs, VRF attachments and L3 VXLAN devices.
   [M119](../artifacts/interop/m119-evpn-bundle-vtep-20261010T124729Z/README.md)
   qualifies SR Linux L2 import and forwarding in a two-VTEP fixture. **LAN-64 SVD /
   collect-metadata Ready/programming landed:** rustbgpd now detects
@@ -761,7 +763,10 @@ gobmp/pmacct already terminate it into Kafka), and BGPsec.
   [M119](../artifacts/interop/m119-evpn-bundle-vtep-20261010T124729Z/README.md)
   qualifies SR Linux L2 import, forwarding and scoped withdrawal. Members
   can bind an IP-VRF in `interface_less` mode for tag-zero Type 5 routing over
-  a separate L3VNI; M120 qualification against pinned SR Linux is pending.
+  a separate L3VNI; the
+  [M120 local receipt](../artifacts/interop/m120-evpn-bundle-irb-20261011T045852Z/README.md)
+  qualifies this routing against pinned SR Linux 25.10.1-399 with
+  operator-provisioned SVIs, VRF attachments and L3 VXLAN devices.
   Tag-scoped multi-homing, non-zero-tag Type 5, locally assigned VNIs and
   GW-IP/ESI overlay-index recursion through bundle members remain deferred.
   **ADR-0091 managed-netdev bridge +
