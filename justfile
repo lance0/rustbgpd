@@ -94,6 +94,16 @@ check-contracts:
     python3 scripts/check_markdown_claims.py
     python3 -m unittest -v scripts/test_check_metric_consumers.py
     python3 scripts/check-metric-consumers.py
+    python3 -m unittest -v scripts/test_check_metric_release_notes.py
+    python3 scripts/check_metric_release_notes.py
+    python3 -m unittest -v scripts/test_check_site_manifest.py
+    python3 scripts/check_site_manifest.py
+    python3 -m unittest -v scripts/test_check_perf_receipt_freshness.py
+    python3 scripts/check_perf_receipt_freshness.py
+    python3 -m unittest -v scripts/test_check_embedding_versions.py
+    python3 scripts/check_embedding_versions.py
+    python3 -m unittest -v scripts/test_check_embedding_crate_map.py
+    python3 scripts/check_embedding_crate_map.py
     python3 -m unittest -v scripts/test_check_release_preflight.py
     python3 -m unittest -v scripts/test_source_id.py
     just check-changelog-fragments
