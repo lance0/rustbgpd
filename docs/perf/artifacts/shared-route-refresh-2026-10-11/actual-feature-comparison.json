@@ -1,0 +1,35 @@
+{
+  "scopes": {
+    "normal_units": {
+      "baseline_artifact_units": 227,
+      "candidate_artifact_units": 227,
+      "only_baseline_units": [],
+      "only_candidate_units": [],
+      "configuration_differences": [],
+      "dependency_identity_differences": []
+    },
+    "including_build_units": {
+      "baseline_artifact_units": 343,
+      "candidate_artifact_units": 343,
+      "only_baseline_units": [],
+      "only_candidate_units": [],
+      "configuration_differences": [],
+      "dependency_identity_differences": []
+    }
+  },
+  "missing": {
+    "baseline": {
+      "normal_missing": [],
+      "including_build_missing": []
+    },
+    "candidate": {
+      "normal_missing": [],
+      "including_build_missing": []
+    }
+  },
+  "forbidden_bench_internals": {
+    "baseline": [],
+    "candidate": []
+  },
+  "normal_build_resolution_equal": true
+}

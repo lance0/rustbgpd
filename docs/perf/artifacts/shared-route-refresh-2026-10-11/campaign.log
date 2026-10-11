@@ -1,0 +1,21 @@
+2026-10-11T07:11:18Z waiting for canonical host lock
+2026-10-11T07:17:20Z waiting for light lock
+2026-10-11T07:17:20Z locks held light=11 canonical=10
+2026-10-11T07:17:21Z start a1/k1
+2026-10-11T07:18:50Z a1/k1 native wrapper exit=0
+2026-10-11T07:18:50Z start b1/k1
+2026-10-11T07:20:49Z b1/k1 native wrapper exit=0
+2026-10-11T07:20:49Z start b1/k50
+2026-10-11T07:22:19Z b1/k50 native wrapper exit=0
+2026-10-11T07:22:19Z start a1/k50
+2026-10-11T07:24:19Z a1/k50 native wrapper exit=0
+2026-10-11T07:24:19Z start a2/k50
+2026-10-11T07:26:20Z a2/k50 native wrapper exit=0
+2026-10-11T07:26:20Z start b2/k50
+2026-10-11T07:27:50Z b2/k50 native wrapper exit=0
+2026-10-11T07:27:50Z start b2/k1
+2026-10-11T07:29:18Z b2/k1 native wrapper exit=0
+2026-10-11T07:29:18Z start a2/k1
+2026-10-11T07:30:48Z a2/k1 native wrapper exit=0
+2026-10-11T07:30:48Z native execution complete; receipt validation and shape decision remain separate
+2026-10-11T07:30:48Z native campaign exit=0; release locks

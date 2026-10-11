@@ -1,0 +1,636 @@
+diff --git a/bench/scale/reloadstall/README.md b/bench/scale/reloadstall/README.md
+index c1dfd29aa..9d0e64ebb 100644
+--- a/bench/scale/reloadstall/README.md
++++ b/bench/scale/reloadstall/README.md
+@@ -497,6 +497,53 @@ absent reproduces the frozen eBGP route-server contract exactly:
+   `rr_terminal_receipt,peers=…,prefixes=…,per_peer=…,expected=…,min_unique=…,max_unique=…,sessions_up=…,parse_errors=…,churn_cycles=…`
+   record. Requires `RELOADSTALL_IBGP_RR_ASN`.
+ 
++For a bounded concurrent-refresh comparison, opt in with
++`RELOADSTALL_RR_REFRESHERS=K` (1..=peers-8) and
++`RELOADSTALL_RR_REFRESH_ROUNDS=N` (default 3, 1..=100). This replaces the
++all-peer terminal check with N rounds on the first K non-churner clients;
++without the knobs the existing terminal path is unchanged. It requires
++IPv4 iBGP-RR with the existing disjoint, unfiltered zero-reload shape.
++`RELOADSTALL_REJOIN_METRICS_ADDR` selects the loopback readiness endpoint
++(default `127.0.0.1:9179`).
++
++Initial OPEN tracking must first observe the initial exact table and EoR.
++Each round resets all K fresh coverage/EoR trackers before queuing any
++request and queues every request before waiting for any write or response.
++The `written_us` clock is taken immediately after that client's successful
++socket `write_all`; the time immediately before awaiting queue submission is separately recorded
++as `queue_attempt_us`; it does not prove channel admission.
++Each `rr_refresh_peer` row retains the first fresh base announcement,
++exact table-minus-own coverage, EoR, and the later of table/EoR completion.
++All timestamps use the harness's monotonic microsecond clock; completion
++seconds are `(complete_us - written_us) / 1e6`. These are wire receipt
++clocks, not daemon CPU time or an OPEN/rejoin clock. The first base
++receipt can precede the post-write stamp if the writer resumes later than
++the reader; both raw stamps are retained, and completion must follow the
++write stamp.
++
++Every round emits `rr_refresh_csv` with completion p50/max, non-refreshing
++clients' maximum inter-UPDATE gap (including both window edges), readiness
++samples, live sessions/decode errors, and window timestamps. The gap window
++runs from just before the first queue attempt to the last table/EoR completion;
++1 Hz readiness polling continues through the harness's completion check and
++requires HTTP 200 within 250 ms with at least one sample. Zero observed
++misses apply to that watch interval. Opt-in `rr_readiness_sample` rows retain
++every request's monotonic `started_us`/`finished_us`, sample ordinal and
++success/failure, so actual overlap with the refresh window is reviewable.
++A sample starts immediately before the existing HTTP request and ends after
++its result/deadline decision; it adds no probe, wait or pacing. 1 Hz sampling
++may miss a short refresh window and does not establish continuous readiness. Session loss,
++base withdrawal (including between rounds), own-source delivery, EoR before
++the requested table finishes, missing coverage/EoR, invalid clock ordering, write failure,
++or readiness failure aborts. Event recording during each measured round retains only non-refresher
++UPDATEs for the survivor gap; selected-peer base UPDATEs advance the existing
++bitmap and stamps without adding redundant event vectors. Initial/control
++event recording remains unchanged. The existing hold phase retains its
++bounded-memory behavior.
++Rounds are separated by 10 seconds of steady churn, and native fleet
++cleanup still completes before successful exit. The request sequence does
++not wait for a read or readiness result before sending another request.
++
+ `gen-scenario.py` grows the matching additive knob: `GEN_IBGP_RR_ASN`
+ emits the iBGP route-reflector scenario (`asn = <value>`,
+ `cluster_id = "10.0.0.1"`, every neighbor `remote_asn = <value>` +
+diff --git a/bench/scale/reloadstall/src/main.rs b/bench/scale/reloadstall/src/main.rs
+index c64f1ba00..cf72c9056 100644
+--- a/bench/scale/reloadstall/src/main.rs
++++ b/bench/scale/reloadstall/src/main.rs
+@@ -130,6 +130,11 @@
+ //!   parse error during the hold aborts). Requires
+ //!   `RELOADSTALL_IBGP_RR_ASN`.
+ //!
++//! - `RELOADSTALL_RR_REFRESHERS=K`: opt-in terminal RR refresh cell for
++//!   first K non-churners, requiring a fresh table and EoR per round.
++//!   `RELOADSTALL_RR_REFRESH_ROUNDS` defaults to 3 (1..=100); readiness uses
++//!   `RELOADSTALL_REJOIN_METRICS_ADDR`. Clock starts after socket write.
++//!
+ //! UPDATE-packing extension (small-message input shape) — additive env
+ //! vars; absent, every stub keeps the frozen `NLRI_PER_MSG` packing:
+ //! - `RELOADSTALL_NLRI_PER_MSG=k` (1..=900): announce UPDATEs carry at most
+@@ -432,6 +437,7 @@ async fn fetch_http(addr: SocketAddr, path: &str, deadline: Instant) -> Result<S
+ async fn watch_readiness(
+     addr: SocketAddr,
+     mut stop: tokio::sync::oneshot::Receiver<()>,
++    report: Option<(Arc<Ctx>, u32)>,
+ ) -> Result<u64, String> {
+     let mut tick = tokio::time::interval(Duration::from_secs(1));
+     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+@@ -440,10 +446,24 @@ async fn watch_readiness(
+         tokio::select! {
+             _ = &mut stop => return Ok(samples),
+             _ = tick.tick() => {
+-                let started = Instant::now();
+-                fetch_http(addr, "/readyz", started + READINESS_DEADLINE).await?;
+-                if started.elapsed() > READINESS_DEADLINE {
+-                    return Err("late readiness success".into());
++                if let Some((ctx, round)) = report.as_ref() {
++                    let started_us = now_us(ctx);
++                    let started = Instant::now();
++                    let result = fetch_http(addr, "/readyz", started + READINESS_DEADLINE).await;
++                    let within_deadline = started.elapsed() <= READINESS_DEADLINE;
++                    let finished_us = now_us(ctx);
++                    let success = result.is_ok() && within_deadline;
++                    println!("rr_readiness_sample,round={round},sample={},started_us={started_us},finished_us={finished_us},success={success}", samples + 1);
++                    result?;
++                    if !within_deadline {
++                        return Err("late readiness success".into());
++                    }
++                } else {
++                    let started = Instant::now();
++                    fetch_http(addr, "/readyz", started + READINESS_DEADLINE).await?;
++                    if started.elapsed() > READINESS_DEADLINE {
++                        return Err("late readiness success".into());
++                    }
+                 }
+                 samples += 1;
+             }
+@@ -820,6 +840,7 @@ struct Stub {
+ struct Outbound {
+     message: Message,
+     replay: Option<ReplayWrite>,
++    written: Option<tokio::sync::oneshot::Sender<u64>>,
+ }
+ 
+ struct ReplayWrite {
+@@ -833,6 +854,7 @@ impl From<Message> for Outbound {
+         Self {
+             message,
+             replay: None,
++            written: None,
+         }
+     }
+ }
+@@ -1099,6 +1121,8 @@ struct Ctx {
+     t0: Instant,
+     converged_rejoin: bool,
+     rejoin_require_eor: bool,
++    rr_refreshers: u32,
++    rr_gap_only: AtomicBool,
+     n_peers: u32,
+     // Uniform IPv4-only modes retain their historical per-member size.
+     per_peer: u32,
+@@ -1529,6 +1553,7 @@ async fn enqueue_replay(
+                     nlri,
+                     last: index == last,
+                 }),
++                written: None,
+             })
+             .await
+             .is_err()
+@@ -2034,7 +2059,7 @@ async fn establish_stub(ctx: Arc<Ctx>, i: u32, rejoin: bool) -> Result<(Stub, u3
+         required_families(dualstack()),
+     )
+     .await?;
+-    if rejoin {
++    if rejoin || i < ctx.rr_refreshers {
+         let sent_us = u64::try_from(open_sent.duration_since(ctx.t0).as_micros()).unwrap();
+         *ctx.obs[i as usize].rejoin.lock().unwrap() = Some(RejoinProgress::new(&ctx, i, sent_us));
+     }
+@@ -2042,7 +2067,7 @@ async fn establish_stub(ctx: Arc<Ctx>, i: u32, rejoin: bool) -> Result<(Stub, u3
+         .established
+         .store(true, Ordering::Relaxed);
+ 
+-    let track_rejoin = rejoin || ctx.converged_rejoin;
++    let track_rejoin = rejoin || ctx.converged_rejoin || i < ctx.rr_refreshers;
+     Ok((start_stub(ctx, i, stream, track_rejoin), retries))
+ }
+ 
+@@ -2059,6 +2084,22 @@ fn rejoin_gr_capability(restart_state: bool) -> Capability {
+     }
+ }
+ 
++async fn write_and_stamp(
++    writer: &mut (impl tokio::io::AsyncWrite + Unpin),
++    bytes: &[u8],
++    written: Option<tokio::sync::oneshot::Sender<u64>>,
++    ctx: &Ctx,
++) -> Result<(), String> {
++    writer
++        .write_all(bytes)
++        .await
++        .map_err(|e| format!("write: {e}"))?;
++    if let Some(written) = written {
++        let _ = written.send(now_us(ctx));
++    }
++    Ok(())
++}
++
+ fn start_stub(ctx: Arc<Ctx>, i: u32, stream: TcpStream, track_rejoin: bool) -> Stub {
+     let (tx, mut tx_rx) = mpsc::channel::<Outbound>(256);
+     let (mut reader, mut writer) = stream.into_split();
+@@ -2078,7 +2119,7 @@ fn start_stub(ctx: Arc<Ctx>, i: u32, stream: TcpStream, track_rejoin: bool) -> S
+                     Some(outbound) = tx_rx.recv() => {
+                         let msg = outbound.message;
+                         let bytes = encode_message(&msg).map_err(|e| format!("encode: {e}"))?;
+-                        writer.write_all(&bytes).await.map_err(|e| format!("write: {e}"))?;
++                        write_and_stamp(&mut writer, &bytes, outbound.written, &writer_ctx).await?;
+                         if let Some(replay) = outbound.replay {
+                             let counts = refresh_accounting(&writer_ctx.obs[i as usize], replay.ipv6);
+                             counts.sent_nlri.fetch_add(u64::from(replay.nlri), Ordering::Relaxed);
+@@ -2423,7 +2464,11 @@ fn start_stub(ctx: Arc<Ctx>, i: u32, stream: TcpStream, track_rejoin: bool) -> S
+                             .fetch_add(u64::from(base), Ordering::Relaxed);
+                         #[cfg(test)]
+                         ob.reader_observed.notify_one();
+-                        if rctx.record_events.load(Ordering::Relaxed) {
++                        if rctx.record_events.load(Ordering::Relaxed)
++                            && (rctx.rr_refreshers == 0
++                                || !rctx.rr_gap_only.load(Ordering::Relaxed)
++                                || i >= rctx.rr_refreshers)
++                        {
+                             ob.events.lock().unwrap().push(Event {
+                                 t_us,
+                                 base_ann: base,
+@@ -3016,7 +3061,7 @@ async fn run_converged_rejoin(
+             .collect();
+         converged_integrity(ctx, k, &withdrawn, false)?;
+         let (stop, stopped) = tokio::sync::oneshot::channel();
+-        let readiness = tokio::spawn(watch_readiness(addr, stopped));
++        let readiness = tokio::spawn(watch_readiness(addr, stopped, None));
+         // Abort both halves together, then join the old tasks before a new
+         // session can publish established=true in their shared observer.
+         for stub in stubs.iter().take(k as usize) {
+@@ -3601,6 +3646,182 @@ async fn run_trip_cycle(
+     println!("trip {trip} complete wall_us={} rss_mib={rss}", wall_us());
+ }
+ 
++fn rr_refresh_shape_allowed(rr: bool, peers: u32, k: u32, rounds: u32) -> bool {
++    rr && peers
++        .checked_sub(CHURNERS)
++        .is_some_and(|end| (1..=end).contains(&k))
++        && (1..=MAX_FLAP_ROUNDS).contains(&rounds)
++}
++
++fn validate_rr_refresh(progress: &RejoinProgress, queued: u64) -> Result<(), String> {
++    let first = progress
++        .table
++        .first_marker_base_at_us
++        .ok_or("no fresh base UPDATE")?;
++    let table = progress
++        .table
++        .completed_at_us
++        .ok_or("no fresh table completion")?;
++    let eor = progress.eor_us.ok_or("no fresh EoR")?;
++    let complete = progress.complete_us.ok_or("no refresh completion")?;
++    if progress.table.unique != progress.table.target {
++        return Err("incomplete current RR table".into());
++    }
++    if (progress.table.excluded_start..progress.table.excluded_end)
++        .any(|i| progress.table.received[i / 64] & (1u64 << (i % 64)) != 0)
++    {
++        return Err("RR delivered an excluded own-source prefix".into());
++    }
++    if queued > progress.open_sent_us
++        || queued > first
++        || first > table
++        || queued > eor
++        || table > eor
++        || progress.open_sent_us >= complete
++        || complete != table.max(eor)
++    {
++        return Err("invalid requested-refresh clock ordering".into());
++    }
++    Ok(())
++}
++
++/// Opt-in terminal RR cell. The existing fresh table/EoR tracker is armed
++/// before any request, and each clock begins only after its successful write.
++async fn run_rr_refresh(
++    ctx: &Arc<Ctx>,
++    stubs: &[Stub],
++    k: u32,
++    rounds: u32,
++    pid: i32,
++    addr: SocketAddr,
++) -> Result<(), String> {
++    let withdrawn: Vec<u64> = ctx
++        .obs
++        .iter()
++        .map(|o| o.base_withdrawn.load(Ordering::Relaxed))
++        .collect();
++    // Initial OPEN tracking must have consumed the initial snapshot's EoR;
++    // it must not be mistaken for the first requested refresh's EoR.
++    wait_rejoin_completion(ctx, 0, k, 0).await;
++    if !current_rejoin_tables_complete(ctx, 0, k) {
++        return Err("initial RR table/EoR proof incomplete".into());
++    }
++    disarm_survivors(ctx, 0);
++    println!("rr_refresh_csv_header,round,peers_total,refreshers,prefixes,completion_p50_s,completion_max_s,survivor_maxgap_ms,readiness_samples,rss_mib,sessions_up,parse_errors,window_start_us,window_end_us");
++    for round in 1..=rounds {
++        converged_integrity(ctx, 0, &withdrawn, false)?;
++        drain_cycle_events(&ctx.obs);
++        ctx.rr_gap_only.store(true, Ordering::Release);
++        ctx.record_events.store(true, Ordering::Release);
++        // All fresh trackers are reset before the first request is queued.
++        for i in 0..k {
++            let mut progress = RejoinProgress::new(ctx, i, 0);
++            progress.require_eor = true;
++            *ctx.obs[i as usize].rejoin.lock().unwrap() = Some(progress);
++        }
++        let (stop, stopped) = tokio::sync::oneshot::channel();
++        let readiness = tokio::spawn(watch_readiness(
++            addr,
++            stopped,
++            Some((Arc::clone(ctx), round)),
++        ));
++        let window_start = now_us(ctx);
++        let deadline = tokio::time::Instant::now() + STALL_WINDOW;
++        let mut writes = Vec::with_capacity(k as usize);
++        for (i, stub) in stubs.iter().enumerate().take(k as usize) {
++            let queued = now_us(ctx);
++            let (written, receipt) = tokio::sync::oneshot::channel();
++            tokio::time::timeout_at(
++                deadline,
++                stub.tx.send(Outbound {
++                    message: Message::RouteRefresh(RouteRefreshMessage::new(
++                        Afi::Ipv4,
++                        Safi::Unicast,
++                    )),
++                    replay: None,
++                    written: Some(written),
++                }),
++            )
++            .await
++            .map_err(|_| format!("refresh {i} enqueue timed out"))?
++            .map_err(|_| format!("refresh {i} writer closed"))?;
++            writes.push((queued, receipt));
++        }
++        // Every request is enqueued before waiting for any write or response.
++        let mut queued_times = Vec::with_capacity(k as usize);
++        for (i, (queued, receipt)) in writes.into_iter().enumerate() {
++            let written = tokio::time::timeout_at(deadline, receipt)
++                .await
++                .map_err(|_| format!("refresh {i} socket write timed out"))?
++                .map_err(|_| format!("refresh {i} socket write failed"))?;
++            ctx.obs[i]
++                .rejoin
++                .lock()
++                .unwrap()
++                .as_mut()
++                .unwrap()
++                .open_sent_us = written;
++            queued_times.push(queued);
++        }
++        let values = wait_rejoin_completion(ctx, 0, k, round).await;
++        if !current_rejoin_tables_complete(ctx, 0, k) {
++            return Err("fresh RR table/EoR proof incomplete".into());
++        }
++        converged_integrity(ctx, 0, &withdrawn, false)?;
++        let mut window_end = window_start;
++        for (i, &queued) in queued_times.iter().enumerate() {
++            let guard = ctx.obs[i].rejoin.lock().unwrap();
++            let progress = guard.as_ref().unwrap();
++            validate_rr_refresh(progress, queued)
++                .map_err(|error| format!("refresh peer {i}: {error}"))?;
++            let written = progress.open_sent_us;
++            let first = progress.table.first_marker_base_at_us.unwrap();
++            let table = progress.table.completed_at_us.unwrap();
++            let eor = progress.eor_us.unwrap();
++            let complete = progress.complete_us.unwrap();
++            window_end = window_end.max(complete);
++            println!("rr_refresh_peer,round={round},peer={i},queue_attempt_us={queued},written_us={written},first_base_us={first},table_us={table},eor_us={eor},complete_us={complete},unique={},expected={},completion_s={:.6}",
++                progress.table.unique, progress.table.target, (complete - written) as f64 / 1e6);
++        }
++        ctx.record_events.store(false, Ordering::Release);
++        let _ = stop.send(());
++        let samples = readiness
++            .await
++            .map_err(|e| format!("readiness task: {e}"))??;
++        if samples == 0 {
++            return Err("no readiness samples".into());
++        }
++        converged_integrity(ctx, 0, &withdrawn, false)?;
++        for (i, &queued) in queued_times.iter().enumerate() {
++            let mut guard = ctx.obs[i].rejoin.lock().unwrap();
++            validate_rr_refresh(guard.as_ref().unwrap(), queued)
++                .map_err(|error| format!("final refresh peer {i}: {error}"))?;
++            // Freeze this terminal proof under the same lock that validates
++            // it, so an UPDATE during the readiness join cannot escape it.
++            *guard = None;
++        }
++        let completion = stats_line(&format!("rr_refresh {round} completion_s"), values);
++        let gap = stats_line(
++            &format!("rr_refresh {round} survivor_maxgap_ms"),
++            (k as usize..ctx.obs.len())
++                .map(|i| max_gap_ms(ctx, i, window_start, window_end, true))
++                .collect(),
++        );
++        let up = ctx
++            .obs
++            .iter()
++            .filter(|o| o.established.load(Ordering::Relaxed))
++            .count();
++        println!("rr_refresh_csv,{round},{},{k},{},{:.6},{:.6},{:.6},{samples},{},{up},{},{window_start},{window_end}",
++            ctx.n_peers, ctx.totals[0], completion.p50, completion.max, gap.max,
++            rss_mib(pid), ctx.parse_errors.load(Ordering::Relaxed));
++        if round < rounds {
++            tokio::time::sleep(Duration::from_secs(10)).await;
++        }
++    }
++    Ok(())
++}
++
+ /// iBGP-RR soak phase (`RELOADSTALL_IBGP_RR_ASN` +
+ /// `RELOADSTALL_IBGP_RR_HOLD_SECS`): hold the fleet under the steady
+ /// churn for the whole window (fail-closed integrity check + one
+@@ -3609,7 +3830,13 @@ async fn run_trip_cycle(
+ /// Normal ROUTE_REFRESH and must complete its full-table-minus-own-slice
+ /// bitmap exactly. Churn prefixes (172.16+.x) sit outside the base
+ /// space, so in-flight churn cannot advance or pollute the bitmaps.
+-async fn run_ibgp_rr_soak(ctx: &Arc<Ctx>, stubs: &[Stub], hold_secs: u64, pid: i32) {
++async fn run_ibgp_rr_soak(
++    ctx: &Arc<Ctx>,
++    stubs: &[Stub],
++    hold_secs: u64,
++    pid: i32,
++    refresh: Option<(u32, u32, SocketAddr)>,
++) {
+     let n_peers = ctx.n_peers;
+     let total = n_peers * ctx.per_peer;
+     let expected = u64::from(total - ctx.per_peer);
+@@ -3651,6 +3878,13 @@ async fn run_ibgp_rr_soak(ctx: &Arc<Ctx>, stubs: &[Stub], hold_secs: u64, pid: i
+         }
+         tokio::time::sleep((hold - elapsed).min(Duration::from_secs(60))).await;
+     }
++    if let Some((k, rounds, addr)) = refresh {
++        if let Err(error) = run_rr_refresh(ctx, stubs, k, rounds, pid, addr).await {
++            eprintln!("FAIL: RR refresh cell: {error}");
++            std::process::exit(1);
++        }
++        return;
++    }
+     // Terminal verification: re-arm the initial-convergence bitmap shape
+     // and ask the daemon to re-send its Adj-RIB-Out to every observer.
+     disarm_survivors(ctx, 0);
+@@ -4058,6 +4292,22 @@ fn main() {
+         std::process::exit(2);
+     });
+     let ibgp_hold_secs = env_u64("RELOADSTALL_IBGP_RR_HOLD_SECS", 0);
++    let rr_refreshers = std::env::var_os("RELOADSTALL_RR_REFRESHERS").map(|_| {
++        u32::try_from(env_u64("RELOADSTALL_RR_REFRESHERS", 0))
++            .expect("RELOADSTALL_RR_REFRESHERS must fit u32")
++    });
++    let rr_refresh_rounds = u32::try_from(env_u64("RELOADSTALL_RR_REFRESH_ROUNDS", 3))
++        .expect("RELOADSTALL_RR_REFRESH_ROUNDS must fit u32");
++    assert!(
++        rr_refreshers.is_some() || std::env::var_os("RELOADSTALL_RR_REFRESH_ROUNDS").is_none(),
++        "RELOADSTALL_RR_REFRESH_ROUNDS requires RELOADSTALL_RR_REFRESHERS"
++    );
++    if let Some(k) = rr_refreshers {
++        assert!(
++            rr_refresh_shape_allowed(ibgp_rr.is_some(), n_peers, k, rr_refresh_rounds),
++            "RR refresh requires iBGP-RR, K in 1..=peers-8 and rounds in 1..=100"
++        );
++    }
+     if let Some(shared_as) = ibgp_rr {
+         IBGP_RR_ASN.store(u32::from(shared_as), Ordering::Relaxed);
+     }
+@@ -4278,8 +4528,8 @@ fn main() {
+     );
+     let rejoin_metrics_addr = std::env::var("RELOADSTALL_REJOIN_METRICS_ADDR").ok();
+     assert!(
+-        converged_rejoin || rejoin_metrics_addr.is_none(),
+-        "RELOADSTALL_REJOIN_METRICS_ADDR requires --converged-rejoin"
++        converged_rejoin || rr_refreshers.is_some() || rejoin_metrics_addr.is_none(),
++        "RELOADSTALL_REJOIN_METRICS_ADDR requires --converged-rejoin or RR refresh"
+     );
+     let rejoin_metrics_addr: SocketAddr = rejoin_metrics_addr
+         .as_deref()
+@@ -4301,6 +4551,8 @@ fn main() {
+             t0: Instant::now(),
+             converged_rejoin,
+             rejoin_require_eor: !rejoin_coverage_only,
++            rr_refreshers: rr_refreshers.unwrap_or(0),
++            rr_gap_only: AtomicBool::new(false),
+             n_peers,
+             per_peer,
+             totals,
+@@ -4678,7 +4930,14 @@ fn main() {
+ 
+         // --- iBGP-RR soak mode: churn hold + terminal refresh verify. ---
+         if ibgp_rr.is_some() {
+-            run_ibgp_rr_soak(&ctx, &stubs, ibgp_hold_secs, pid).await;
++            run_ibgp_rr_soak(
++                &ctx,
++                &stubs,
++                ibgp_hold_secs,
++                pid,
++                rr_refreshers.map(|k| (k, rr_refresh_rounds, rejoin_metrics_addr)),
++            )
++            .await;
+             println!("done rss_mib={}", rss_mib(pid));
+             let parse_errors = ctx.parse_errors.load(Ordering::Relaxed);
+             if parse_errors > 0 {
+@@ -5377,6 +5636,8 @@ mod tests {
+             t0: Instant::now(),
+             converged_rejoin: false,
+             rejoin_require_eor: true,
++            rr_refreshers: 0,
++            rr_gap_only: AtomicBool::new(false),
+             n_peers: CHURNERS,
+             per_peer: 1,
+             totals: [CHURNERS, CHURNERS],
+@@ -6448,6 +6709,8 @@ mod tests {
+             t0: Instant::now(),
+             converged_rejoin: false,
+             rejoin_require_eor: true,
++            rr_refreshers: 0,
++            rr_gap_only: AtomicBool::new(false),
+             n_peers: 12,
+             per_peer: 2,
+             totals: [24, 0],
+@@ -7115,6 +7378,121 @@ mod tests {
+         );
+     }
+ 
++    #[test]
++    fn rr_refresh_shape_excludes_churners_and_wrong_modes() {
++        assert!(rr_refresh_shape_allowed(true, 12, 1, 3));
++        assert!(rr_refresh_shape_allowed(true, 12, 4, 100));
++        for (rr, peers, k, rounds) in [
++            (false, 12, 1, 3),
++            (true, 8, 1, 3),
++            (true, 12, 0, 3),
++            (true, 12, 5, 3),
++            (true, 12, 1, 0),
++            (true, 12, 1, 101),
++        ] {
++            assert!(!rr_refresh_shape_allowed(rr, peers, k, rounds));
++        }
++        assert!(Outbound::from(Message::Keepalive).written.is_none());
++    }
++
++    #[tokio::test]
++    async fn rr_refresh_stamp_waits_for_the_complete_frame_and_refuses_failed_write() {
++        tokio::time::timeout(Duration::from_secs(2), async {
++            let ctx = finish_test_ctx();
++            let (mut writer, mut reader) = tokio::io::duplex(1);
++            let message = Message::RouteRefresh(RouteRefreshMessage::new(Afi::Ipv4, Safi::Unicast));
++            let expected = encode_message(&message).unwrap();
++            let bytes = expected.clone();
++            let (written, mut receipt) = tokio::sync::oneshot::channel();
++            let before = now_us(&ctx);
++            let writer_ctx = Arc::clone(&ctx);
++            let task = tokio::spawn(async move {
++                write_and_stamp(&mut writer, &bytes, Some(written), &writer_ctx).await
++            });
++            let mut first = [0];
++            reader.read_exact(&mut first).await.unwrap();
++            assert_eq!(first[0], expected[0]);
++            assert!(
++                matches!(
++                    receipt.try_recv(),
++                    Err(tokio::sync::oneshot::error::TryRecvError::Empty)
++                ),
++                "one byte read cannot acknowledge the still-blocked remainder"
++            );
++            let mut remainder = vec![0; expected.len() - 1];
++            reader.read_exact(&mut remainder).await.unwrap();
++            assert_eq!(remainder, expected[1..]);
++            let at = receipt.await.unwrap();
++            assert!(before <= at && at <= now_us(&ctx));
++            task.await.unwrap().unwrap();
++
++            let (mut writer, reader) = tokio::io::duplex(1);
++            drop(reader);
++            let (written, receipt) = tokio::sync::oneshot::channel();
++            assert!(write_and_stamp(&mut writer, &expected, Some(written), &ctx)
++                .await
++                .is_err());
++            assert!(
++                receipt.await.is_err(),
++                "failed write cannot publish a successful stamp"
++            );
++        })
++        .await
++        .unwrap();
++    }
++
++    #[test]
++    fn rr_refresh_campaign_baseline_refuses_between_round_route_loss() {
++        let ctx = finish_test_ctx();
++        for observer in &ctx.obs {
++            observer.established.store(true, Ordering::Relaxed);
++        }
++        let baseline: Vec<_> = ctx
++            .obs
++            .iter()
++            .map(|o| o.base_withdrawn.load(Ordering::Relaxed))
++            .collect();
++        assert!(converged_integrity(&ctx, 0, &baseline, false).is_ok());
++        // The pause has no fresh refresh tracker; its loss must still fail
++        // the next round's precondition against the campaign's first baseline.
++        ctx.obs[2].base_withdrawn.fetch_add(1, Ordering::Relaxed);
++        assert!(converged_integrity(&ctx, 0, &baseline, false).is_err());
++    }
++
++    #[test]
++    fn rr_refresh_refuses_own_source_and_early_eor() {
++        let ctx = finish_test_ctx();
++        let prefixes: Vec<_> = (1..CHURNERS).map(base_prefix).collect();
++        let mut valid = RejoinProgress::new(&ctx, 0, 15);
++        valid.observe(&prefixes, &[], false, CHURNERS, 20);
++        valid.observe(&[], &[], true, CHURNERS, 25);
++        assert!(validate_rr_refresh(&valid, 10).is_ok());
++        valid.observe(&[base_prefix(0)], &[], false, CHURNERS, 30);
++        assert_eq!(
++            valid.table.unique, valid.table.target,
++            "excluded own source does not advance unique coverage"
++        );
++        assert!(validate_rr_refresh(&valid, 10).is_err());
++
++        let mut early = RejoinProgress::new(&ctx, 0, 15);
++        early.observe(&[], &[], true, CHURNERS, 5);
++        early.observe(&prefixes, &[], false, CHURNERS, 20);
++        assert!(
++            validate_rr_refresh(&early, 10).is_err(),
++            "EoR must follow enqueue"
++        );
++        early.eor_us = Some(17);
++        assert!(
++            validate_rr_refresh(&early, 10).is_err(),
++            "EoR must follow full coverage"
++        );
++        let fresh = RejoinProgress::new(&ctx, 0, 15);
++        assert!(
++            validate_rr_refresh(&fresh, 10).is_err(),
++            "prior coverage/EoR cannot carry over"
++        );
++    }
++
+     #[test]
+     fn converged_rejoin_requires_helper_state_for_each_peer() {
+         let sample = |i, active, stale| {
+@@ -7539,6 +7917,8 @@ mod tests {
+             t0: Instant::now(),
+             converged_rejoin: false,
+             rejoin_require_eor: true,
++            rr_refreshers: 0,
++            rr_gap_only: AtomicBool::new(false),
+             n_peers: 1,
+             per_peer: 1,
+             totals: [1, 1],

@@ -1,0 +1,87 @@
+{
+  "measured_utc": "2026-10-11T07:17:51Z to 2026-10-11T07:30:48Z",
+  "baseline_main_snapshot": "56cc5c4af5a607951915d175966de17241fca9a9",
+  "candidate": "e623cb194475362c122ddbcb6505dca289556eea",
+  "later_main_move": "RR documentation merge after source freeze; outside the measured comparison",
+  "arms": {
+    "baseline": {
+      "sha": "56cc5c4af5a607951915d175966de17241fca9a9",
+      "tree": "7b9164c074417ba224af5a841403d39f6b51588e",
+      "daemon_sha256": "86180dd6501516d8a391fcae6100d4a811c25c64c71a04e7395b2a4f98c2ec11",
+      "cli_sha256": "8fc6ac7c24009ba6455ddc492a0e6ebf83198686ce481b517456651155001338",
+      "source_input_refresh_count": 781,
+      "input_refreshed_at": "2026-10-11T02:55:50-04:00",
+      "input_inventory_sha256": "08f24ccfd69073f12d15c30a96fb3ca86e9fa0f8d3d7793f31386c4c5f6bf840",
+      "build_started": "2026-10-11T02:55:50-04:00",
+      "build_finished": "2026-10-11T03:00:41-04:00",
+      "toolchain_sha256": "91a27f7fa86c27583f5a7c3d1f23dbd9a7e42ed18dc031db7472502cc55c88b9",
+      "closure_sha256": "3037cddb294f005e8308cdb2e6d28c3aea2eba415cdb11a658f6ae071f5c0365",
+      "retained_inputs_sha256": "fa7c23b57e0f4ce42093c4cff16624d6bc1c84eb0928182106cf85f321a87bb0",
+      "native_build_exit": 0,
+      "source_clean_after": true,
+      "daemon_immutable": true
+    },
+    "candidate": {
+      "sha": "e623cb194475362c122ddbcb6505dca289556eea",
+      "tree": "c7ac2fe347ce2351df9ec15d39c34623958f55f9",
+      "daemon_sha256": "d2e5a21b3c28a092f7080d4514c488c322cc3a91fb511789ed3d4c57f1372c79",
+      "cli_sha256": "8fc6ac7c24009ba6455ddc492a0e6ebf83198686ce481b517456651155001338",
+      "source_input_refresh_count": 781,
+      "input_refreshed_at": "2026-10-11T03:00:41-04:00",
+      "input_inventory_sha256": "08f24ccfd69073f12d15c30a96fb3ca86e9fa0f8d3d7793f31386c4c5f6bf840",
+      "build_started": "2026-10-11T03:00:41-04:00",
+      "build_finished": "2026-10-11T03:05:33-04:00",
+      "toolchain_sha256": "91a27f7fa86c27583f5a7c3d1f23dbd9a7e42ed18dc031db7472502cc55c88b9",
+      "closure_sha256": "35976fbd584875cc960e5c8f534a59db6f85974744ecb8118412dd997626ec23",
+      "retained_inputs_sha256": "693fef074f1bc61f672601dd149f0a2f7f548a7946364a354b59860ab3d33ced",
+      "native_build_exit": 0,
+      "source_clean_after": true,
+      "daemon_immutable": true
+    }
+  },
+  "runner_sha": "0fc491c61f77cfab0c04c125469aa714702ed8eb",
+  "runner_base_sha": "fda6d6e55e0fb0993cd1a1cd185e7661830fe7bf",
+  "common_harness_sha256": "045e1ae2ed431ed8f1d581a2f35323f3d6390ba8b6f3af36344c70b36318164e",
+  "daemon_cpu_affinity": "12-32,34-39",
+  "harness_cpu_affinity": "40-63",
+  "build_command": "cargo build --release --locked -j 4 -p rustbgpd -p rustbgpctl",
+  "source_input_refresh": "all tracked Rust/protobuf/manifest/lock files touched before each native build",
+  "artifact_configuration_scope": "rustc,features,declared_features,target,profile,path,rustflags,config,compile_kind,build_environment and dependency identities; no claim of an independent binary ABI proof",
+  "normal_build_native_exit": {
+    "normal-a": 0,
+    "normal-b": 0,
+    "normal-audit": 0
+  },
+  "normal_build_helpers_reaped": true,
+  "source_delta": "11 files, 1156 insertions, 131 deletions; no Cargo.lock or Cargo.toml changes",
+  "validator_as_run_sha256": "ca6a5bb6b550f88181a8152c43764a57b1e39158aeaea628fbf5fba6d8655fff",
+  "summary_as_run_sha256": "85ae5d97d2608ab0a05d51829d6441387cd15b1582ea91b79e4bdf8885366fde",
+  "published_closure_normalization": "only cache_artifact absolute cache prefix replaced with <CACHE>; original capture SHA256 retained in arms",
+  "shape": {
+    "peers": 200,
+    "prefixes": 400000,
+    "per_peer": 2000,
+    "expected_receiver_table": 398000,
+    "k": [
+      1,
+      50
+    ],
+    "fresh_processes_per_arm_and_k": 2,
+    "rounds_per_process": 3,
+    "churners": 8,
+    "hold_seconds": 3,
+    "control_seconds": 30
+  },
+  "instrument_patch_sha256": "4d22f9ac94acd1a7bd1e72603f694449542e41336d7093aa2fb0ce4cb9df721c",
+  "as_run_cell_sha256": "4e66cde985efba5a7c2970b024847958aadbb4b60b0a45ad800f89677c86c78c",
+  "as_run_input_sha256": {
+    "baseline/rustbgpd": "86180dd6501516d8a391fcae6100d4a811c25c64c71a04e7395b2a4f98c2ec11",
+    "candidate/rustbgpd": "d2e5a21b3c28a092f7080d4514c488c322cc3a91fb511789ed3d4c57f1372c79",
+    "common/reloadstall": "045e1ae2ed431ed8f1d581a2f35323f3d6390ba8b6f3af36344c70b36318164e",
+    "normal-ab-screen.sh": "33819a12a24705872ba5f9b52647c7f338ac7a0230755ecdb6630aca5a02bf71",
+    "rr-control-cell.sh": "4e66cde985efba5a7c2970b024847958aadbb4b60b0a45ad800f89677c86c78c",
+    "host-quiet.sh": "abb3391cd5e0879c29aabd0aa0c316ea33d5f7c72f6d2a7d111b30025de411fd",
+    "fd-headroom.sh": "f55832b71079cdcd0f708fe3b764cf35d020dfe4ab894ff81191c436a4d04b2b",
+    "gen-scenario.py": "e563659beef5857ee79ddac40e1cff5730c34e424b5ca074a3f9007b5dc0ab42"
+  }
+}
