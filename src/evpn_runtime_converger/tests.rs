@@ -2731,6 +2731,9 @@ fn runtime_converger_rib_responder(
                 RibUpdate::SubscribeEvpnRouteEvents { reply } => {
                     let _ = reply.send(events_tx.subscribe());
                 }
+                RibUpdate::QueryEvpnSessionsSynced { reply } => {
+                    let _ = reply.send(true);
+                }
                 RibUpdate::QueryEvpnRoutes { reply, .. } => {
                     let _ = reply.send(vec![]);
                 }
@@ -2762,6 +2765,9 @@ fn runtime_converger_rib_recorder(
                 RibUpdate::SubscribeEvpnRouteEvents { reply } => {
                     let _ = reply.send(events_tx.subscribe());
                 }
+                RibUpdate::QueryEvpnSessionsSynced { reply } => {
+                    let _ = reply.send(true);
+                }
                 RibUpdate::QueryEvpnRoutes { reply, .. } => {
                     let _ = reply.send(vec![]);
                 }
@@ -2777,6 +2783,43 @@ fn runtime_converger_rib_recorder(
             }
         }
     })
+}
+
+/// Cross the actor's published recovery deadline on the paused test clock.
+/// The normal route assertions still prove origination and withdrawal effects.
+async fn complete_segment_df_wait(
+    control: &evpn_segment::EvpnSegmentRuntimeControl,
+    esi: rustbgpd_wire::EthernetSegmentIdentifier,
+) {
+    let mut status = control.df_status();
+    let deadline = tokio::time::timeout(Duration::from_secs(2), async {
+        status
+            .wait_for(|states| {
+                states
+                    .get(&esi)
+                    .is_some_and(|s| s.recovery_deadline.is_some())
+            })
+            .await
+            .unwrap()[&esi]
+            .recovery_deadline
+            .unwrap()
+    })
+    .await
+    .expect("segment must publish its pending DF wait");
+    let remaining = deadline - tokio::time::Instant::now();
+    assert!(remaining > Duration::ZERO && remaining <= Duration::from_secs(3));
+    tokio::time::advance(remaining).await;
+    tokio::time::timeout(
+        Duration::from_secs(2),
+        status.wait_for(|states| {
+            states
+                .get(&esi)
+                .is_some_and(|s| s.recovery_deadline.is_none())
+        }),
+    )
+    .await
+    .expect("segment must finish DF wait after synchronized boot")
+    .unwrap();
 }
 
 fn runtime_ip_vrf_ready_status(
@@ -4494,7 +4537,7 @@ async fn runtime_actor_converger_l2vni_add_publishes_imet_and_actor_models() {
     dataplane_handle.shutdown().await;
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 #[expect(
     clippy::too_many_lines,
     reason = "the additive L2VNI then Ethernet Segment scenario keeps its actor fixtures and ordering together"
@@ -4557,6 +4600,11 @@ async fn runtime_actor_converger_l2vni_add_updates_segment_instance_view() {
         tokio_util::sync::CancellationToken::new(),
     )
     .expect("segment actor should spawn for non-empty ES config");
+    complete_segment_df_wait(
+        &segment_handle.runtime_control(),
+        current.ethernet_segments()[0].esi,
+    )
+    .await;
 
     let converger = EvpnRuntimeActorConverger {
         rib_tx,
@@ -4577,6 +4625,11 @@ async fn runtime_actor_converger_l2vni_add_updates_segment_instance_view() {
         .converge(&current_after_l2, &es_candidate, &es_plan)
         .await
         .unwrap();
+    complete_segment_df_wait(
+        &segment_handle.runtime_control(),
+        es_candidate.ethernet_segments().last().unwrap().esi,
+    )
+    .await;
 
     // The Ethernet Tag is pinned to 0 (RFC 7432 §6.1); the
     // runtime-added VNI's EAD-per-EVI is identified by its RD.
@@ -4585,7 +4638,7 @@ async fn runtime_actor_converger_l2vni_add_updates_segment_instance_view() {
         .get(rustbgpd_evpn::EvpnInstanceId::new(200).unwrap())
         .expect("VNI 200 present after the L2 add")
         .rd;
-    let deadline = StdInstant::now() + Duration::from_secs(2);
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
     loop {
         let observed = injects.lock().await.clone();
         if observed.iter().any(|key| {
@@ -4600,7 +4653,7 @@ async fn runtime_actor_converger_l2vni_add_updates_segment_instance_view() {
             break;
         }
         assert!(
-            StdInstant::now() < deadline,
+            tokio::time::Instant::now() < deadline,
             "timed out waiting for EAD-per-EVI over runtime-added VNI; observed {observed:?}"
         );
         tokio::time::sleep(Duration::from_millis(10)).await;
@@ -4936,7 +4989,7 @@ async fn runtime_actor_converger_additive_build_up_rollback_restores_imet_and_mo
     dataplane_handle.shutdown().await;
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 #[expect(
     clippy::too_many_lines,
     reason = "wires every EVPN runtime actor to prove cross-domain additive convergence"
@@ -5017,6 +5070,11 @@ async fn runtime_actor_converger_additive_build_up_publishes_all_actor_models() 
         tokio_util::sync::CancellationToken::new(),
     )
     .expect("segment actor should spawn for non-empty ES config");
+    complete_segment_df_wait(
+        &segment_handle.runtime_control(),
+        current.ethernet_segments()[0].esi,
+    )
+    .await;
 
     let (obs_tx, obs_rx) = watch::channel(Arc::new(std::collections::HashMap::<
         rustbgpd_evpn::IpVrfId,
@@ -5054,6 +5112,7 @@ async fn runtime_actor_converger_additive_build_up_publishes_all_actor_models() 
         .converge(&current, &candidate, &plan)
         .await
         .unwrap();
+    complete_segment_df_wait(&segment_handle.runtime_control(), added_esi).await;
 
     assert!(evpn_instances_rx.borrow().get(added_vni).is_some());
     assert!(
@@ -5109,7 +5168,7 @@ async fn runtime_actor_converger_additive_build_up_publishes_all_actor_models() 
     .await;
 
     let local_mac = rustbgpd_evpn::MacAddress::new([0x02, 0, 0, 0, 0, 0xab]);
-    let local_mac_deadline = StdInstant::now() + Duration::from_secs(2);
+    let local_mac_deadline = tokio::time::Instant::now() + Duration::from_secs(2);
     loop {
         local_tx
             .send(rustbgpd_evpn::LocalMacObservation::Learned {
@@ -5132,14 +5191,14 @@ async fn runtime_actor_converger_additive_build_up_publishes_all_actor_models() 
             break;
         }
         assert!(
-            StdInstant::now() < local_mac_deadline,
+            tokio::time::Instant::now() < local_mac_deadline,
             "Type 2 originator did not accept the added L2VNI"
         );
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
 
     let svi_mac = rustbgpd_evpn::MacAddress::new([0x02, 0, 0, 0, 0, 0xcd]);
-    let svi_deadline = StdInstant::now() + Duration::from_secs(2);
+    let svi_deadline = tokio::time::Instant::now() + Duration::from_secs(2);
     loop {
         let _ = svi_report_tx.send(svi_dataplane_report(200, svi_mac));
         if injects.lock().await.iter().any(|key| {
@@ -5155,7 +5214,7 @@ async fn runtime_actor_converger_additive_build_up_publishes_all_actor_models() 
             break;
         }
         assert!(
-            StdInstant::now() < svi_deadline,
+            tokio::time::Instant::now() < svi_deadline,
             "SVI actor did not accept the added L2VNI"
         );
         tokio::time::sleep(Duration::from_millis(10)).await;
@@ -5168,7 +5227,7 @@ async fn runtime_actor_converger_additive_build_up_publishes_all_actor_models() 
     dataplane_handle.shutdown().await;
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 #[expect(
     clippy::too_many_lines,
     reason = "full dataplane-handle + segment-actor wiring per the sibling converger proofs"
@@ -5232,6 +5291,7 @@ async fn runtime_actor_converger_additive_existing_es_member_expansion_publishes
         tokio_util::sync::CancellationToken::new(),
     )
     .expect("segment actor should spawn for non-empty ES config");
+    complete_segment_df_wait(&segment_handle.runtime_control(), expanded_esi).await;
 
     let converger = EvpnRuntimeActorConverger {
         rib_tx,
@@ -5248,6 +5308,7 @@ async fn runtime_actor_converger_additive_existing_es_member_expansion_publishes
         .converge(&current, &candidate, &plan)
         .await
         .unwrap();
+    complete_segment_df_wait(&segment_handle.runtime_control(), expanded_esi).await;
 
     assert!(evpn_instances_rx.borrow().get(added_vni).is_some());
     wait_for_recorded_evpn_key_matching(
@@ -7405,7 +7466,7 @@ async fn runtime_actor_converger_ip_vrf_redefine_reoriginates_type5() {
     dataplane_handle.shutdown().await;
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn runtime_actor_converger_ethernet_segment_add_publishes_es_routes() {
     // current = one ES over VNI 100 (actor spawned); candidate adds a
     // second ES over VNI 200 (one local ES per VNI).
@@ -7426,6 +7487,11 @@ async fn runtime_actor_converger_ethernet_segment_add_publishes_es_routes() {
         tokio_util::sync::CancellationToken::new(),
     )
     .expect("segment actor should spawn for non-empty ES config");
+    complete_segment_df_wait(
+        &segment_handle.runtime_control(),
+        current.ethernet_segments()[0].esi,
+    )
+    .await;
 
     let converger = EvpnRuntimeActorConverger {
         rib_tx,
@@ -7442,12 +7508,17 @@ async fn runtime_actor_converger_ethernet_segment_add_publishes_es_routes() {
         .converge(&current, &candidate, &plan)
         .await
         .unwrap();
+    complete_segment_df_wait(
+        &segment_handle.runtime_control(),
+        candidate.ethernet_segments().last().unwrap().esi,
+    )
+    .await;
 
     // The segment actor consumes the new ES snapshot asynchronously and
     // re-originates Type 4 ES + Type 1 EAD-per-ES + EAD-per-EVI for the
     // full set. Poll until at least two ES (Type 4) routes are seen,
     // proving the added ES drove origination past the single startup ES.
-    let deadline = StdInstant::now() + Duration::from_secs(2);
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
     loop {
         let observed = injects.lock().await.clone();
         let es = observed
@@ -7464,7 +7535,7 @@ async fn runtime_actor_converger_ethernet_segment_add_publishes_es_routes() {
             break;
         }
         assert!(
-            StdInstant::now() < deadline,
+            tokio::time::Instant::now() < deadline,
             "timed out waiting for ES routes; observed {observed:?}"
         );
         tokio::time::sleep(Duration::from_millis(10)).await;
@@ -7582,7 +7653,7 @@ async fn runtime_actor_converger_ethernet_segment_add_restamps_member_vni_local_
     segment_handle.shutdown().await;
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn runtime_actor_converger_ethernet_segment_redefine_rebuilds_es_routes() {
     let current = runtime_model_from_candidate_toml(two_l2vni_one_es_runtime_candidate_toml());
     let candidate = runtime_candidate_from_toml(two_l2vni_redefined_es_runtime_candidate_toml());
@@ -7616,8 +7687,9 @@ async fn runtime_actor_converger_ethernet_segment_redefine_rebuilds_es_routes() 
         tokio_util::sync::CancellationToken::new(),
     )
     .expect("segment actor should spawn for non-empty ES config");
+    complete_segment_df_wait(&segment_handle.runtime_control(), redefined_esi).await;
 
-    let initial_deadline = StdInstant::now() + Duration::from_secs(2);
+    let initial_deadline = tokio::time::Instant::now() + Duration::from_secs(2);
     loop {
         if injects.lock().await.iter().any(|key| {
             matches!(
@@ -7632,7 +7704,7 @@ async fn runtime_actor_converger_ethernet_segment_redefine_rebuilds_es_routes() 
             break;
         }
         assert!(
-            StdInstant::now() < initial_deadline,
+            tokio::time::Instant::now() < initial_deadline,
             "timed out waiting for initial ES EAD-per-EVI route"
         );
         tokio::time::sleep(Duration::from_millis(10)).await;
@@ -7653,8 +7725,9 @@ async fn runtime_actor_converger_ethernet_segment_redefine_rebuilds_es_routes() 
         .converge(&current, &candidate, &plan)
         .await
         .unwrap();
+    complete_segment_df_wait(&segment_handle.runtime_control(), redefined_esi).await;
 
-    let redefine_deadline = StdInstant::now() + Duration::from_secs(2);
+    let redefine_deadline = tokio::time::Instant::now() + Duration::from_secs(2);
     loop {
         let drained = withdraws.lock().await.clone();
         let injected = injects.lock().await.clone();
@@ -7682,7 +7755,7 @@ async fn runtime_actor_converger_ethernet_segment_redefine_rebuilds_es_routes() 
             break;
         }
         assert!(
-            StdInstant::now() < redefine_deadline,
+            tokio::time::Instant::now() < redefine_deadline,
             "ES redefine did not drain/rebuild EAD-per-EVI routes; drained {drained:?}, injected {injected:?}"
         );
         tokio::time::sleep(Duration::from_millis(10)).await;
@@ -8072,7 +8145,7 @@ async fn apply_evpn_runtime_l2vni_redefine_aliasing_toggle_commits() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn runtime_actor_converger_ethernet_segment_delete_drains_es_routes() {
     let current = runtime_model_from_candidate_toml(two_l2vni_two_es_runtime_candidate_toml());
     let candidate = runtime_candidate_from_toml(two_l2vni_one_es_runtime_candidate_toml());
@@ -8094,8 +8167,9 @@ async fn runtime_actor_converger_ethernet_segment_delete_drains_es_routes() {
         tokio_util::sync::CancellationToken::new(),
     )
     .expect("segment actor should spawn for non-empty ES config");
+    complete_segment_df_wait(&segment_handle.runtime_control(), removed_esi).await;
 
-    let initial_deadline = StdInstant::now() + Duration::from_secs(2);
+    let initial_deadline = tokio::time::Instant::now() + Duration::from_secs(2);
     loop {
         let observed = injects.lock().await.clone();
         let has_es = observed.iter().any(
@@ -8111,7 +8185,7 @@ async fn runtime_actor_converger_ethernet_segment_delete_drains_es_routes() {
             break;
         }
         assert!(
-            StdInstant::now() < initial_deadline,
+            tokio::time::Instant::now() < initial_deadline,
             "timed out waiting for initial removed-ES routes; observed {observed:?}"
         );
         tokio::time::sleep(Duration::from_millis(10)).await;
@@ -8133,7 +8207,7 @@ async fn runtime_actor_converger_ethernet_segment_delete_drains_es_routes() {
         .await
         .unwrap();
 
-    let drain_deadline = StdInstant::now() + Duration::from_secs(2);
+    let drain_deadline = tokio::time::Instant::now() + Duration::from_secs(2);
     loop {
         let drained = withdraws.lock().await.clone();
         let has_es = drained.iter().any(
@@ -8149,7 +8223,7 @@ async fn runtime_actor_converger_ethernet_segment_delete_drains_es_routes() {
             break;
         }
         assert!(
-            StdInstant::now() < drain_deadline,
+            tokio::time::Instant::now() < drain_deadline,
             "ES delete did not drain removed segment routes; drained {drained:?}"
         );
         tokio::time::sleep(Duration::from_millis(10)).await;
@@ -8158,7 +8232,7 @@ async fn runtime_actor_converger_ethernet_segment_delete_drains_es_routes() {
     segment_handle.shutdown().await;
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 #[expect(
     clippy::too_many_lines,
     reason = "tenant teardown exercises every actor at once"
@@ -8223,13 +8297,14 @@ async fn runtime_actor_converger_tenant_teardown_drains_imet_and_es_routes() {
         tokio_util::sync::CancellationToken::new(),
     )
     .expect("segment actor should spawn for non-empty ES config");
+    complete_segment_df_wait(&segment_handle.runtime_control(), removed_esi).await;
     let mut imet_controller = evpn_imet::EvpnImetController::new();
     let imet_keys = imet_controller
         .originate_all(current.instances().iter().cloned(), &rib_tx)
         .await;
     assert_eq!(imet_keys.len(), 1);
 
-    let initial_deadline = StdInstant::now() + Duration::from_secs(2);
+    let initial_deadline = tokio::time::Instant::now() + Duration::from_secs(2);
     loop {
         let observed = injects.lock().await.clone();
         let has_es = observed.iter().any(
@@ -8245,7 +8320,7 @@ async fn runtime_actor_converger_tenant_teardown_drains_imet_and_es_routes() {
             break;
         }
         assert!(
-            StdInstant::now() < initial_deadline,
+            tokio::time::Instant::now() < initial_deadline,
             "timed out waiting for initial ES routes; observed {observed:?}"
         );
         tokio::time::sleep(Duration::from_millis(10)).await;
@@ -8272,7 +8347,7 @@ async fn runtime_actor_converger_tenant_teardown_drains_imet_and_es_routes() {
         "dataplane instance model should drop the torn-down L2VNI"
     );
 
-    let drain_deadline = StdInstant::now() + Duration::from_secs(2);
+    let drain_deadline = tokio::time::Instant::now() + Duration::from_secs(2);
     loop {
         let drained = withdraws.lock().await.clone();
         let has_imet = drained
@@ -8291,7 +8366,7 @@ async fn runtime_actor_converger_tenant_teardown_drains_imet_and_es_routes() {
             break;
         }
         assert!(
-            StdInstant::now() < drain_deadline,
+            tokio::time::Instant::now() < drain_deadline,
             "tenant teardown did not drain IMET + segment routes; drained {drained:?}"
         );
         tokio::time::sleep(Duration::from_millis(10)).await;
