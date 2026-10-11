@@ -2,6 +2,8 @@
 set / routing-policy extended-community-set m120-tenant-rt member [ target:65000:50120 ]
 set / routing-policy prefix-set m120-withdraw-120 prefix 198.19.120.0/24 mask-length-range exact
 set / routing-policy prefix-set m120-withdraw-120 prefix 198.19.120.2/32 mask-length-range exact
+set / routing-policy prefix-set m120-withdraw-120 prefix 198.18.10.253/32 mask-length-range exact
+set / routing-policy prefix-set m120-withdraw-120 prefix 198.18.20.253/32 mask-length-range exact
 set / routing-policy policy m120-withdraw-120 default-action policy-result accept
 set / routing-policy policy m120-withdraw-120 default-action bgp extended-community operation add
 set / routing-policy policy m120-withdraw-120 default-action bgp extended-community referenced-sets [ m120-tenant-rt ]
