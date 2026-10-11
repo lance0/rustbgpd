@@ -1664,6 +1664,12 @@ fn project_overlay_index(
     let raw_vni = route.label1.as_vni();
     let vni = rustbgpd_evpn::EvpnInstanceId::new(raw_vni).ok()?;
     let local_instance = instances.get(vni)?;
+    // ADR-0092 member IRB supports interface-less Type 5 only. Linking a
+    // member to an IP-VRF must not also enable GW-IP overlay recursion:
+    // receive-side recursion is independent of the origination mode.
+    if local_instance.is_vlan_aware_bundle() {
+        return None;
+    }
     if route.next_hop == local_instance.local_vtep_ip {
         return None;
     }
@@ -6032,6 +6038,93 @@ mod tests {
                 },
             ]
         );
+    }
+
+    #[test]
+    fn bundle_irb_keeps_interface_less_prefixes_and_rejects_overlay_recursion() {
+        let instances = bundle_table();
+        let mut ip_vrfs = ip_vrf_table_one("blue", 5000, 5000);
+        for member in [10010, 10020] {
+            ip_vrfs.mark_referenced_by_l2vni("blue".to_string(), vni(member));
+        }
+        let l2 = [10, 20].map(|tag| {
+            bundle_route(
+                evpn_macip_route_with_host_ip(
+                    10000 + tag,
+                    0xaa,
+                    Some("192.0.2.10"),
+                    "10.0.0.2",
+                    None,
+                ),
+                10000 + tag,
+                tag,
+            )
+        });
+        let direct = type5_with_esi_and_router_mac(
+            "10.1.0.0/24",
+            "10.0.0.9",
+            5000,
+            EthernetSegmentIdentifier::ZERO,
+            0,
+            [2; 6],
+        );
+        let gateway = evpn_ip_prefix_route("10.2.0.0/24", "192.0.2.10", "10.0.0.9", 5000);
+        let nonzero = type5_with_esi_and_router_mac(
+            "10.3.0.0/24",
+            "10.0.0.9",
+            5000,
+            EthernetSegmentIdentifier::ZERO,
+            10,
+            [2; 6],
+        );
+        let mut routes = vec![
+            l2[0].clone(),
+            l2[1].clone(),
+            direct.clone(),
+            gateway,
+            nonzero,
+        ];
+        let esi = EthernetSegmentIdentifier::new([7; 10]);
+        routes.extend([
+            evpn_ead_per_es_route(esi, "10.0.0.2", true),
+            bundle_route(evpn_ead_per_evi_route(esi, 10, "10.0.0.2"), 10010, 10),
+            type5_with_esi_and_router_mac("10.4.0.0/24", "10.0.0.9", 5000, esi, 0, [2; 6]),
+        ]);
+        let project = |routes: &[EvpnRibRoute]| {
+            project_intent_tables(routes, &instances, &ip_vrfs, &BTreeSet::new(), &no_bias())
+        };
+        let initial = project(&routes);
+        assert_eq!(initial.remote_macs.len(), 2);
+        let entries: Vec<_> = initial
+            .remote_ip_prefixes
+            .for_vrf(IpVrfId::new(5000).unwrap())
+            .collect();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].1.next_hop, ipa("10.0.0.9"));
+        assert_eq!(entries[0].1.router_mac, MacAddress::new([2; 6]));
+        assert_eq!(
+            initial.remote_ip_prefixes.drop_counts_by_vrf_reason(),
+            BTreeMap::from([
+                (("blue".to_string(), "non_zero_ethernet_tag"), 1),
+                (("blue".to_string(), "unresolved_overlay_index_gateway"), 1),
+                (("blue".to_string(), "unresolved_esi_overlay_index"), 1),
+            ])
+        );
+        assert_eq!(
+            initial.l2_remote_route_drops,
+            BTreeMap::from([((10010, "multihoming_unsupported"), 1)])
+        );
+        // RT5 withdrawal and restoration do not remove either member's
+        // independently scoped Type 2. The L3 route returns with its original
+        // remote Router MAC, not the host MAC carried by either member.
+        routes.remove(2);
+        let withdrawn = project(&routes);
+        assert_eq!(withdrawn.remote_macs, initial.remote_macs);
+        assert!(withdrawn.remote_ip_prefixes.is_empty());
+        routes.insert(2, direct);
+        let restored = project(&routes);
+        assert_eq!(restored.remote_macs, initial.remote_macs);
+        assert_eq!(restored.remote_ip_prefixes, initial.remote_ip_prefixes);
     }
 
     /// ADR-0092 amendment F: received IMET routes resolve to members by the

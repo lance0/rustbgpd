@@ -4292,8 +4292,10 @@ crossings, not to applying a configuration change.
 - `service_interface = "vlan_aware_bundle"` rows follow the bundle rules:
   `ethernet_tag` is required, explicit, and in
   `1..=16777215`, and it is rejected on `vlan_based` rows. A bundle row
-  cannot set `ip_vrf` or `auto_derive_route_target`, and it cannot be
-  listed in `[[ethernet_segments]].member_vnis`. Two bundle rows that
+  can set `ip_vrf` only when the named IP-VRF uses
+  `overlay_index_mode = "interface_less"`. It cannot set
+  `auto_derive_route_target` or be listed in
+  `[[ethernet_segments]].member_vnis`. Two bundle rows that
   share a route target need different Ethernet Tags. A route target
   cannot be shared between a `vlan_based` row and a bundle row. A bundle
   row's `(bridge, bridge_vlan)` cannot be claimed by any other row;
@@ -4349,9 +4351,21 @@ bridge_vlan = 20
   These counts appear in `evpn_l2_remote_route_drops{vni,reason}` and in
   `rbgp evpn instances`. The routes stay in Adj-RIB-In and are still
   reflected.
-- **Not supported.** Multi-homing, IRB (`ip_vrf`), locally assigned VNIs, and
-  Type 5 routes with a non-zero Ethernet Tag. Those Type 5 routes are counted
-  as `non_zero_ethernet_tag` in `evpn_ip_vrf_remote_prefix_drops`.
+- **IP-VRF binding.** A single-homed member can set `ip_vrf` to a declared
+  IP-VRF whose `overlay_index_mode` is `"interface_less"`. This uses the
+  existing symmetric Interface-less model (RFC 9136 §4.4.1): Type 5 routes
+  carry Ethernet Tag `0` and the IP-VRF's separate L3VNI, RD, route targets,
+  and Router MAC. Member Type 2/3 routes keep their non-zero tag and L2VNI;
+  this does not add Type 2 symmetric host routing. The binding is
+  control-plane metadata: provision the VLAN SVI and its Linux VRF
+  attachment separately. See [L2VNI binding](#l2vni-binding).
+- **Not supported.** Multi-homing, locally assigned VNIs, non-zero-tag Type 5,
+  and GW-IP or ESI overlay-index recursion through bundle members. Incoming
+  overlay-index routes cannot resolve through bundle Type 2 or EAD state;
+  existing unresolved-drop reasons remain in use. Non-zero-tag Type 5 routes
+  are counted as `non_zero_ethernet_tag` in `evpn_ip_vrf_remote_prefix_drops`.
+  The M120 pinned SR Linux qualification for member IRB is pending; M119
+  qualifies the L2 service only.
 - **Migration.** Changing `service_interface` or `ethernet_tag` on a live row
   goes through the L2VNI redefine path: routes under the old tag are
   withdrawn and local routes are replayed under the new one. Every PE in the
@@ -4579,7 +4593,7 @@ unsupported dependency cycles fail closed before commit.
 ## `[[evpn_ip_vrfs]]`
 
 Optional, repeatable. Declares the local IP-VRF / L3VNI tenants this VTEP
-serves under the RFC 9136 §4.4.2 symmetric Interface-less IRB model
+serves under the RFC 9136 §4.4.1 symmetric Interface-less IRB model
 (Gate 9, ADR-0058). Empty by default — L2-only VTEPs and RR-only
 deployments leave it empty.
 
@@ -4641,7 +4655,7 @@ ip_vrf = "tenant-blue"             # optional — empty means L2-only
 | `vrf_device`     | string    | yes      | --      | Linux VRF device name (operator-managed, observe-only) |
 | `l3vxlan_device` | string    | yes      | --      | Linux L3 VXLAN device name (operator-managed, observe-only) |
 | `table_id`       | u32       | yes      | --      | VRF route table id (> 0); cross-checked against `vrf_device`'s `IFLA_VRF_TABLE` |
-| `overlay_index_mode` | string | no      | `"interface_less"` | Outbound Type 5 overlay-index shape (ADR-0087). `"interface_less"` (RFC 9136 §4.4.2) keeps the Gateway Address zero + Router's MAC extcomm. `"gateway_ip"` (RFC 9136 §4.1/§4.2) originates a route whose kernel via lands on a connected subnet of this VRF with that via in the Gateway Address and no Router's MAC extcomm; routes without an eligible via fall back to interface-less. `"esi"` (RFC 9136 §4.3) originates with a configured non-zero ESI, zero Gateway Address, and `overlay_index_mac` as the Router MAC extcomm. `"gateway_ip"` and `"esi"` require at least one `ip_vrf`-linked L2VNI |
+| `overlay_index_mode` | string | no      | `"interface_less"` | Outbound Type 5 overlay-index shape (ADR-0087). `"interface_less"` (RFC 9136 §4.4.1) keeps the Gateway Address zero + Router's MAC extcomm. IP-VRFs linked from a VLAN-aware bundle member must use this mode. `"gateway_ip"` (RFC 9136 §4.1/§4.2) originates a route whose kernel via lands on a connected subnet of this VRF with that via in the Gateway Address and no Router's MAC extcomm; routes without an eligible via fall back to interface-less. `"esi"` (RFC 9136 §4.3) originates with a configured non-zero ESI, zero Gateway Address, and `overlay_index_mac` as the Router MAC extcomm. `"gateway_ip"` and `"esi"` require at least one `ip_vrf`-linked L2VNI |
 | `overlay_index_esi` | string | `esi` only | -- | Non-zero ESI (`xx:xx:xx:xx:xx:xx:xx:xx:xx:xx`) used as the Type 5 overlay index when `overlay_index_mode = "esi"`; must match a configured explicit `[[ethernet_segments]].esi` (an `auto-lacp` segment does not qualify) |
 | `overlay_index_mac` | string | `esi` only | -- | Unicast non-zero virtual/transit MAC advertised as the Router MAC extcomm when `overlay_index_mode = "esi"` |
 | `overlay_index_l2vni` | u32 | conditional | -- | L2VNI disambiguator for `overlay_index_mode = "esi"` when multiple `[[evpn_instances]]` entries link to this IP-VRF; the selected L2VNI must be linked to this IP-VRF and be a member of `overlay_index_esi` |
@@ -4651,7 +4665,17 @@ ip_vrf = "tenant-blue"             # optional — empty means L2-only
 `[[evpn_instances]].ip_vrf` is an optional string that names an
 `[[evpn_ip_vrfs]]` entry. Empty / unset leaves that L2VNI as
 bridging-only. Validation rejects a name that does not resolve to any
-declared IP-VRF.
+declared IP-VRF. A VLAN-aware bundle member can bind only to an IP-VRF with
+`overlay_index_mode = "interface_less"`; this restriction also applies when
+an IP-VRF's mode changes during reload or runtime configuration.
+
+The binding associates control-plane state. It does not create or attach a
+Linux SVI: provision each routed member's VLAN interface, tenant addresses,
+and VRF attachment, plus the IP-VRF's L3VXLAN device. The member's Ethernet
+Tag selects its L2 bridge table; routed Type 5 prefixes use Ethernet Tag `0`
+and the separate IP-VRF RD, route targets, L3VNI, and Router MAC. Incoming
+GW-IP or ESI overlay-index routes cannot use bundle member state for
+resolution and retain the existing unresolved-drop behavior.
 
 ### Readiness predicates
 

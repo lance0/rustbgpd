@@ -399,6 +399,56 @@ bundle tag do not import each other's routes, and those drops are counted as
 `ethernet_tag_mismatch`. This is the cutover window from Decision 5. The MVP
 does not promise a hitless migration.
 
+## Amendment (2026-10-10): Single-homed member IP-VRF binding
+
+**Status:** Accepted (2026-10-10); M120 vendor qualification pending.
+
+This amendment replaces the blanket `ip_vrf` rejection in the 2026-10-08
+amendment's E and corresponding H validation obligation. It preserves the
+other bundle restrictions and the earlier dated decisions as history.
+
+A single-homed `vlan_aware_bundle` member may bind to a declared IP-VRF only
+when that IP-VRF uses `overlay_index_mode = "interface_less"`. Startup,
+SIGHUP reload and runtime candidates apply the same rule, including changes
+to the mode of an IP-VRF that already has bundle members. A nonexistent
+IP-VRF remains a configuration error.
+
+The routing model is the existing symmetric Interface-less IP-VRF-to-IP-VRF
+model in [RFC 9136 §4.4.1](https://www.rfc-editor.org/rfc/rfc9136.html#section-4.4.1).
+Some earlier project text cites §4.4.2 for this model; that section actually
+describes the Interface-ful model with SBD IRB. This decision uses §4.4.1.
+
+- Type 2 and Type 3 retain each member's non-zero Ethernet Tag, L2VNI, RD,
+  and shared bundle route targets.
+- Type 5 retains Ethernet Tag `0`, zero ESI and Gateway Address, and the
+  IP-VRF's separate L3VNI, RD, route targets and Router MAC. Type 5 prefix
+  origination, import and programming use the existing IP-VRF path. This
+  decision does not add symmetric host routing based on Type 2 routes.
+- `ip_vrf` is control-plane metadata. Operators must provision each routed
+  member's VLAN SVI, tenant addresses and Linux VRF attachment, together
+  with the separate L3VXLAN device. Readiness and forwarding still depend
+  on that kernel topology.
+- Incoming GW-IP or ESI overlay-index recursion must exclude bundle member
+  Type 2 and EAD state. Configuring `interface_less` controls outbound
+  origination; it does not by itself restrict received Type 5 shapes.
+  An incoming overlay-index route with no eligible resolution retains the
+  existing unresolved-drop behavior. Eligible VLAN-Based resolution remains
+  available independently of any bundle members linked to the same IP-VRF.
+- Bundle members remain single-homed with global VNIs. Local Ethernet
+  Segment membership, received non-zero-ESI Type 2/EAD-per-EVI consumption,
+  non-zero-tag Type 5 and locally assigned VNIs remain rejected. Their
+  existing counted-drop and reflection behavior is preserved.
+
+Qualification must show valid startup and runtime bindings, rejected
+`gateway_ip`/`esi` bindings, preserved multi-homing and non-zero-tag Type 5
+rejections, and no incoming overlay-index resolution through bundle state.
+The planned M120 lab uses pinned SR Linux and must separately establish
+member L2 isolation and routed Type 5 forwarding, exact route and kernel
+state, withdrawal/recovery, and rejection of unsupported forms. Until that
+receipt passes, no vendor qualification is claimed for member IRB. The
+[M119 receipt](../artifacts/interop/m119-evpn-bundle-vtep-20261010T124729Z/README.md)
+qualifies only the L2 service.
+
 ## Consequences
 
 ### Positive

@@ -132,8 +132,13 @@ Known EVPN gaps:
   mid-sequence convergence failures fail-stop on the last committed generation.
 - VLAN-aware bundle VTEP members have a bounded
   [SR Linux 25.10.1 import and forwarding receipt](../artifacts/interop/m119-evpn-bundle-vtep-20261010T124729Z/README.md).
-  Tag-scoped multi-homing, IRB, locally assigned VNIs, and non-zero Ethernet
-  Tag Type 5 routes remain future work. EVPN remains alpha.
+  Single-homed members can bind an `ip_vrf` only in `interface_less` mode,
+  using Ethernet Tag `0` Type 5 routes with a separate L3VNI; the M120
+  pinned SR Linux member IRB qualification remains pending. Tag-scoped
+  multi-homing, locally assigned VNIs, non-zero Ethernet Tag Type 5, and
+  GW-IP/ESI overlay-index recursion through bundle members remain unsupported.
+  The binding does not provision Linux SVI/VRF attachments or add Type 2
+  symmetric host routing. EVPN remains alpha.
 - VXLAN local-bias split-horizon for all-active shared segments remains an
   ASIC/offload-dependent limitation of the Linux softswitch path. RFC 9746
   §2.2 makes local bias the only split-horizon mechanism for VXLAN (the ESI

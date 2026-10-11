@@ -894,3 +894,106 @@ async fn l3_foreign_takeover_triple_survives_withdrawal_and_shutdown() {
         .expect("actor panicked");
     assert_foreign_l3_triple_present("after shutdown drain");
 }
+
+/// A bundle member can share its connected subnet with another VTEP. The
+/// remote Type 5 for that subnet must not replace the local SVI route, while
+/// an unrelated remote-only prefix must still install through the real actor.
+#[tokio::test]
+async fn l3_connected_prefix_survives_remote_import_withdraw_restore_and_shutdown() {
+    if !netns_gate() {
+        eprintln!("skipping: set EVPN_LINUX_NETNS=1 to run privileged foreign-state test");
+        return;
+    }
+    if !is_inner() {
+        let ns = NetnsFixture::create("l3-connected");
+        setup_l3_topology(&ns);
+        ns.exec("ip", &["link", "add", "local-ac", "type", "dummy"]);
+        ns.exec("ip", &["link", "set", "local-ac", "master", "vrf-test"]);
+        ns.exec("ip", &["link", "set", "local-ac", "up"]);
+        ns.exec("ip", &["addr", "add", "198.51.100.1/24", "dev", "local-ac"]);
+        run_inner(
+            &ns,
+            "l3_connected_prefix_survives_remote_import_withdraw_restore_and_shutdown",
+        );
+        return;
+    }
+
+    let connected = || {
+        let routes = shell("ip", &["route", "show", "table", &L3_TABLE_ID.to_string()]);
+        let rows: Vec<_> = routes
+            .lines()
+            .filter(|line| line.starts_with(L3_PREFIX))
+            .collect();
+        assert_eq!(rows.len(), 1, "connected prefix inventory: {routes}");
+        assert!(
+            rows[0].contains("dev local-ac proto kernel scope link src 198.51.100.1"),
+            "{routes}"
+        );
+        let lookup = shell("ip", &["route", "get", "198.51.100.42", "vrf", "vrf-test"]);
+        assert!(
+            lookup.contains("dev local-ac"),
+            "connected lookup changed: {lookup}"
+        );
+        assert!(
+            !lookup.contains("via"),
+            "connected lookup recursed: {lookup}"
+        );
+        rows[0].to_owned()
+    };
+    let original = connected();
+    let control =
+        rustbgpd_evpn::EvpnIpPrefixValue::V4(Ipv4Prefix::new("203.0.113.0".parse().unwrap(), 24));
+    let (intent_tx, mut report_rx, shutdown, actor_join) = spawn_reconcile_actor().await;
+    for (generation, desired) in [(1, true), (2, false), (3, true)] {
+        let mut intent = l3_intent(generation, desired);
+        if desired {
+            Arc::get_mut(&mut Arc::get_mut(&mut intent).unwrap().remote_ip_prefixes)
+                .unwrap()
+                .insert_resolved(
+                    IpVrfId::new(L3_VNI).unwrap(),
+                    RemoteIpPrefixEntry::single(
+                        control,
+                        "10.0.0.2".parse().unwrap(),
+                        L3_VNI,
+                        l3_router_mac(),
+                    ),
+                );
+        }
+        intent_tx.send(intent).unwrap();
+        let report = wait_for_report_generation(&mut report_rx, generation).await;
+        assert!(
+            report.failed.is_empty(),
+            "actor apply failures: {:?}",
+            report.failed
+        );
+        assert_eq!(connected(), original);
+        let routes = shell("ip", &["route", "show", "table", &L3_TABLE_ID.to_string()]);
+        let controls: Vec<_> = routes
+            .lines()
+            .filter(|line| line.starts_with("203.0.113.0/24"))
+            .collect();
+        assert_eq!(
+            controls.len(),
+            usize::from(desired),
+            "control prefix: {routes}"
+        );
+        if desired {
+            assert!(
+                controls[0].contains("via 10.0.0.2 dev l3vxlan-test proto bgp"),
+                "{routes}"
+            );
+        }
+        eprintln!("generation {generation}, desired={desired}:\n{routes}");
+    }
+    shutdown.cancel();
+    tokio::time::timeout(Duration::from_secs(10), actor_join)
+        .await
+        .expect("actor shutdown timed out")
+        .expect("actor panicked");
+    assert_eq!(connected(), original);
+    let routes = shell("ip", &["route", "show", "table", &L3_TABLE_ID.to_string()]);
+    assert!(
+        !routes.contains("203.0.113.0/24"),
+        "shutdown retained owned prefix: {routes}"
+    );
+}
