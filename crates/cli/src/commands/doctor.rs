@@ -2226,7 +2226,7 @@ fn last_sighup_reload_check(response: &GetLastSighupReloadResponse) -> Check {
         Some(record)
             if matches!(
                 record.outcome.as_str(),
-                "rejected_no_effect" | "known_partial"
+                "rejected_no_effect" | "known_partial" | "task_failed"
             ) =>
         {
             (
@@ -3775,19 +3775,23 @@ mod tests {
     use tonic::Code;
 
     #[test]
-    fn last_sighup_reload_warns_on_latest_rejection_or_partial() {
-        for outcome in ["rejected_no_effect", "known_partial"] {
+    fn last_sighup_reload_warns_on_failed_outcomes() {
+        for (outcome, reason_code) in [
+            ("rejected_no_effect", "unsupported_compound"),
+            ("known_partial", "step_rejected"),
+            ("task_failed", "task_failed"),
+        ] {
             let check = last_sighup_reload_check(&GetLastSighupReloadResponse {
                 record: Some(crate::proto::SighupReloadRecord {
                     outcome: outcome.to_string(),
-                    reason_code: "unsupported_compound".to_string(),
+                    reason_code: reason_code.to_string(),
                     failure_bucket: "reload.preflight".to_string(),
                     failure_target: "[[dynamic_neighbors]]".to_string(),
                     ..Default::default()
                 }),
             });
             assert_eq!(check.status, CheckStatus::Warn);
-            assert!(check.detail.contains("unsupported_compound"));
+            assert!(check.detail.contains(reason_code));
             assert!(check.detail.contains("rbgp config last-reload"));
         }
         let complete = last_sighup_reload_check(&GetLastSighupReloadResponse {

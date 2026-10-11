@@ -654,7 +654,7 @@ inventory is:
 | FlowSpec | Complete component details, curated actions and raw extended communities, including unknown values and duplicate ordering |
 | Topology and ORR | Complete node, link, vantage and input-diagnostic records |
 | EVPN routes, pages, explanations and runtime views | Route selectors, nested export decisions, instances, netdevs, nexthops, Ethernet Segments, VRFs and mutation receipts |
-| Configuration plan, apply, status, confirm, abort, history and rollback | Nested diffs, update-group impact, confirmation and history eligibility; effective config preserves the TOML document, including unknown keys |
+| Configuration plan, apply, status, confirm, abort, history, rollback and last reload | Nested diffs, update-group impact, confirmation and history eligibility; the latest SIGHUP receipt preserves timing, outcome, route, closed failure fields and bounded applied/unapplied effects; effective config preserves the TOML document, including unknown keys |
 
 These are curated views, not protobuf JSON. List summaries intentionally count
 or select detail fields. Neighbor detail reports configured `role`, effective

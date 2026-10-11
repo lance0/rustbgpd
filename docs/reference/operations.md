@@ -852,11 +852,12 @@ latest process-local SIGHUP outcome, its closed reason code and failing bucket,
 and a sanitized target. The read-only outside-v1 `GetLastSighupReload` RPC
 retains one record in memory; restart clears it. An `ignored_in_flight`
 signal appears immediately, then the active reload's settled result replaces
-it. A preflight
-rejection has no selected route. For `known_partial`, applied identities come
-from acknowledged reload operations, and unapplied identities are planned
-operations that failed or were not reached. One aggregate generation apply is
-one operation; startup-pinned fields and no-ops are absent. Each list retains
+it. `rbgp doctor` warns when the latest outcome is `rejected_no_effect`,
+`known_partial`, or `task_failed`. A preflight rejection has no selected route.
+For `known_partial`, applied identities come from acknowledged reload operations,
+and unapplied identities are planned operations that failed or were not reached.
+One aggregate generation apply is one operation; startup-pinned fields and
+no-ops are absent. Each list retains
 at most 32 identities and reports total and omitted counts. Recovery-fenced
 ownership remains parked and is not mislabeled `rejected_no_effect`; use the
 settlement metrics and daemon health for that state. Structured

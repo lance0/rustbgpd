@@ -1361,28 +1361,46 @@ mod tests {
     use tonic::codegen::tokio_stream::StreamExt as _;
 
     #[test]
-    fn last_reload_json_preserves_bounded_effect_counts() {
+    fn last_reload_json_projects_complete_record() {
         let record = SighupReloadRecord {
+            started_unix_millis: 1_700_000_000_001,
+            finished_unix_millis: 1_700_000_000_999,
             outcome: "known_partial".to_string(),
+            route: "sequential".to_string(),
             reason_code: "step_rejected".to_string(),
+            failure_bucket: "neighbors.reconcile".to_string(),
+            failure_target: "192.0.2.1".to_string(),
             applied_count: 33,
-            applied_omitted: 32,
             applied: vec![crate::proto::SighupReloadEffect {
                 bucket: "policy.add".to_string(),
                 target: "edge".to_string(),
             }],
+            applied_omitted: 32,
             unapplied_count: 1,
             unapplied: vec![crate::proto::SighupReloadEffect {
-                bucket: "policy.change".to_string(),
-                target: "export".to_string(),
+                bucket: "neighbors.reconcile".to_string(),
+                target: "192.0.2.1".to_string(),
             }],
-            ..Default::default()
+            unapplied_omitted: 0,
         };
-        let value = last_reload_to_json(&record);
-        assert_eq!(value["applied_count"], 33);
-        assert_eq!(value["applied_omitted"], 32);
-        assert_eq!(value["unapplied"][0]["target"], "export");
-        assert_eq!(value["reason_code"], "step_rejected");
+        assert_eq!(
+            last_reload_to_json(&record),
+            serde_json::json!({
+                "started_unix_millis": 1_700_000_000_001_u64,
+                "finished_unix_millis": 1_700_000_000_999_u64,
+                "outcome": "known_partial",
+                "route": "sequential",
+                "reason_code": "step_rejected",
+                "failure_bucket": "neighbors.reconcile",
+                "failure_target": "192.0.2.1",
+                "applied_count": 33,
+                "applied": [{"bucket": "policy.add", "target": "edge"}],
+                "applied_omitted": 32,
+                "unapplied_count": 1,
+                "unapplied": [{"bucket": "neighbors.reconcile", "target": "192.0.2.1"}],
+                "unapplied_omitted": 0,
+            })
+        );
     }
 
     #[test]
