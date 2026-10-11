@@ -73,9 +73,10 @@ an RPC signature or behavior as stable.
 ## Embedding and crate versions
 
 Published Rust crates follow their own SemVer boundary, independently of the
-daemon's narrow v1 contract. Use the versions and upgrade guidance in
-[`EMBEDDING.md`](embedding.md#7-published-crate-release-boundary), including the
-per-release compatibility notes and coordinated dependency guidance. A daemon
+daemon's narrow v1 contract. Each crate's README and changelog carry its
+version and per-release compatibility notes;
+[`EMBEDDING.md`](embedding.md#7-published-crate-release-boundary) covers
+coordinated dependency upgrades. A daemon
 release or an inventoried daemon surface does not make an internal workspace
 crate a supported library API.
 

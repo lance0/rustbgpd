@@ -340,7 +340,7 @@ fn source_public_error_roster() -> BTreeMap<String, bool> {
 #[test]
 fn usage_matches_the_crate_local_contract() {
     let usage = section(README, "## Usage");
-    // The repository's embedding checker owns registry-version equality.
+    // The release preflight owns version equality for every crate README.
     // This packaged test keeps the example's shape and crate-local API contract.
     let registry_version = usage
         .lines()
@@ -348,10 +348,6 @@ fn usage_matches_the_crate_local_contract() {
         .filter(|version| !version.is_empty())
         .expect("Usage must contain a registry dependency example");
     assert!(usage.contains(&expected_dependency_block(registry_version)));
-    assert!(usage.contains(&format!(
-        "rustbgpd-wire = {{ version = \"{}\", path = \"../rustbgpd/crates/wire\" }}",
-        env!("CARGO_PKG_VERSION")
-    )));
     assert!(usage.contains("`decode_message` accepts `&mut bytes::Bytes`"));
     assert!(usage.contains("the crate root does not expose a stable\n`Bytes` re-export"));
     assert!(decode_message_has_documented_signature(MESSAGE_SOURCE));

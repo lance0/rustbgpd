@@ -834,8 +834,8 @@ Before rolling any versions:
    that otherwise first fail in hosted CI on the release commit, or only after
    the tag: the metric release-note contract, the `changelog.d/` fragment
    assembly (no fragment may remain), a dated `CHANGELOG.md` heading and
-   released README wording for every crate whose manifest is ahead of
-   `docs/reference/published-crate-versions.json`, and the root `## [X.Y.Z]`
+   released README wording for every publishable crate, crate README install
+   snippets and workspace pins that name the manifest versions, and the root `## [X.Y.Z]`
    section that `release.yml` extracts. Without `--mode release` the
    recipe detects a release commit by its empty `[Unreleased]` section with no
    `changelog.d/` fragment pending, and otherwise lists the release-only
@@ -978,39 +978,33 @@ After the tag publishes:
     `linux/amd64` and `linux/arm64`. Leave dated and historical examples
     unchanged.
 
-### Published-crate documentation refresh
+### Published-crate version edits
 
-After changing crate versions and their workspace pins, run
-`python3 scripts/check_embedding_versions.py --write`. This updates the prepared
-versions and wire/RPKI path examples from the manifests, keeping registry examples
-at the versions recorded in `docs/reference/published-crate-versions.json`.
-The command works offline; tests never need release-number edits.
+Each crate's manifest is the one source for its version. A crate release
+makes these edits, all in the release commit, and nothing after publishing:
 
-After completing the intended crate publishes, run
-`python3 scripts/check_embedding_versions.py --refresh` once. It verifies that
-all three manifest versions exist and are not yanked on crates.io before
-updating the published record, boundary table, and dependency examples. Publish
-wire before dependent crates. If a publish or registry check fails, retain the
-existing record and retry after resolving the failure.
+1. `version` in the crate's `Cargo.toml`, its root
+   `[workspace.dependencies]` pin, and the root `Cargo.lock`.
+2. The install snippet under `## Usage` in the crate README. When the wire
+   version changes, also the `rustbgpd-wire` line in `crates/rpki/README.md`.
+   The README is packaged with the crate and is its crates.io landing page,
+   so it names the version about to publish. The crate's lines in the
+   `docs/reference/embedding.md` §3 examples also move, so those examples stay
+   one coordinated set.
+3. A dated heading and entries in the crate's `CHANGELOG.md`. For a
+   breaking wire line, add a compatibility note to `crates/wire/README.md`.
+4. A `rustbgpd-<crate>` entry in the repository-level release notes, through
+   a `changelog.d/` fragment.
 
-`--refresh` does not reword prose. A crate README is packaged with the crate
-and becomes its crates.io landing page, so turn staging wording for a version
-about to publish ("prepared in this checkout", "the source checkout prepares",
-"the prepared 0.x release") into released wording in `crates/wire/README.md`,
-`crates/fsm/README.md`, and `crates/rpki/README.md` before the release commit;
-`just gate-release --mode release` rejects any form of "prepare" in the README
-of a crate whose manifest is ahead of the published record. Reword
-`docs/reference/embedding.md` §4 in the same change as `--refresh`. Past
-`CHANGELOG.md` sections keep their wording.
+`just gate-release` fails while any dependency snippet in a crate README or the
+embedding guide, or a root workspace pin, names a publishable crate at a
+version other than that crate's manifest version, when a README `## Usage`
+block or embedding §3 example loses one of its required dependency lines, or
+when a publishable crate has no workspace pin. `--mode release` also rejects any form of "prepare"
+left in a crate README; a version written while staging must read as released
+before the release commit. Past `CHANGELOG.md` sections keep their wording.
 
-Review the generated changes and run the offline checks before committing:
-
-```bash
-python3 -m unittest -v scripts/test_check_embedding_versions.py
-python3 scripts/check_embedding_versions.py
-```
-
-For a coordinated wire compatibility-line change, validate all three prepared
+For a coordinated wire compatibility-line change, validate all three
 packages together before publishing:
 
 ```bash
@@ -1019,8 +1013,9 @@ cargo publish --locked --dry-run --all-features \
 ```
 
 Cargo's multi-package dry-run verifies the normalized packages against a
-temporary local registry, so FSM and RPKI can resolve the prepared wire version
-without uploading it. Actual publication still follows wire, then FSM and RPKI;
+temporary local registry, so FSM and RPKI can resolve the new wire version
+without uploading it. A version that is already on crates.io produces only a
+warning in a dry run. Actual publication still follows wire, then FSM and RPKI;
 an individual dependent-only package or dry-run needs the new wire version in
 the registry. Run these checks from the final committed source.
 
@@ -1036,22 +1031,14 @@ changed.
 2. Decide semver bump (see below). The `semver-checks` workflow already
    compared the crate against its latest crates.io release on the PR, so a
    bump it reported as required is not optional.
-3. Update `version` in `crates/wire/Cargo.toml`, its matching root workspace
-   dependency pin and root `Cargo.lock`. Keep the
-   wire publish ahead of dependent FSM or RPKI releases when moving to a new
-   wire line.
-4. Roll `crates/wire/CHANGELOG.md`, review and update the crate README, and
-   add a `rustbgpd-wire` entry in the repository-level `CHANGELOG.md`.
-   `python3 scripts/check_embedding_versions.py` fails while the README path
-   example trails the manifest version, and `just gate-release --mode release`
-   rejects "prepare" wording left in it for the version about to publish.
-   Date the crate `CHANGELOG.md` heading in the release commit.
+3. Make the [published-crate version edits](#published-crate-version-edits).
+   Keep the wire publish ahead of dependent FSM or RPKI releases when moving
+   to a new wire line.
+4. Review the rest of the crate README.
 5. Run `cargo package --locked -p rustbgpd-wire --list` and inspect the exact
    package inventory and normalized manifest.
 6. `cargo publish --locked -p rustbgpd-wire --dry-run`
 7. `cargo publish --locked -p rustbgpd-wire`
-8. After all intended crate publishes complete, run the
-   [published-crate documentation refresh](#published-crate-documentation-refresh).
 
 **Wire crate semver:**
 - **Patch (`0.x.Y`)**: backward-compatible fixes and additions, including new
@@ -1081,23 +1068,16 @@ do not force an FSM release for every daemon tag.
      requires an FSM minor bump because wire types appear in the public FSM API.
    The `semver-checks` workflow applies the same crates.io comparison to this
    crate on the PR.
-3. Update `version` in `crates/fsm/Cargo.toml`, its matching root workspace
-   dependency pin and root `Cargo.lock`. When the
-   wire line also moves, publish wire first so the FSM package can resolve it.
-4. Roll `crates/fsm/CHANGELOG.md`, review and update the crate README, and
-   add a `rustbgpd-fsm` entry in the repository-level `CHANGELOG.md`. The
-   README review is manual: no checker reads its content, except that
-   `just gate-release --mode release` rejects "prepare" wording left in it for
-   the version about to publish. Date the crate `CHANGELOG.md` heading in the
-   release commit.
+3. Make the [published-crate version edits](#published-crate-version-edits).
+   When the wire line also moves, publish wire first so the FSM package can
+   resolve it.
+4. Review the rest of the crate README; it has no install snippet.
 5. Run `cargo package --locked -p rustbgpd-fsm --list` and inspect the exact
    package inventory and normalized manifest.
 6. `cargo publish --locked -p rustbgpd-fsm --dry-run`. When this release moves
    to a new wire line, a resolver failure is expected until that wire version
    is registry-visible; do not weaken verification with `--no-verify`.
 7. `cargo publish --locked -p rustbgpd-fsm`
-8. After all intended crate publishes complete, run the
-   [published-crate documentation refresh](#published-crate-documentation-refresh).
 
 ### rustbgpd-rpki crate release
 
@@ -1118,14 +1098,8 @@ client share one public compatibility boundary.
      types appear in public RPKI method signatures.
    The `semver-checks` workflow compares every registry-visible release with
    its latest normal crates.io baseline.
-3. Update `version` in `crates/rpki/Cargo.toml`, its matching root workspace
-   dependency pin and root `Cargo.lock`.
-4. Roll `crates/rpki/CHANGELOG.md`, review and update the crate README, and
-   add a `rustbgpd-rpki` entry in the repository-level `CHANGELOG.md`.
-   `python3 scripts/check_embedding_versions.py` fails while the README path
-   example trails the manifest version, and `just gate-release --mode release`
-   rejects "prepare" wording left in it for the version about to publish.
-   Date the crate `CHANGELOG.md` heading in the release commit.
+3. Make the [published-crate version edits](#published-crate-version-edits).
+4. Review the rest of the crate README.
 5. Run `cargo package --locked -p rustbgpd-rpki --list`; inspect the exact
    package inventory and normalized manifest. Normal dependencies must resolve
    from crates.io with no path-only edge.
@@ -1133,8 +1107,6 @@ client share one public compatibility boundary.
    to a new wire line, a resolver failure is expected until that wire version
    is registry-visible; do not weaken verification with `--no-verify`.
 7. `cargo publish --locked -p rustbgpd-rpki`
-8. After all intended crate publishes complete, run the
-   [published-crate documentation refresh](#published-crate-documentation-refresh).
 
 The semver workflow retains a historical first-publish exception for exactly
 `rustbgpd-rpki 0.1.0` while crates.io returns 404 for its name. Published RPKI

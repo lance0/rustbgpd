@@ -49,10 +49,9 @@ This document is the contract for embedders: which crate to depend on, what the
 
 All Cargo workspace packages are listed. Internal dependencies include normal and build dependencies, including target-specific dependencies; dev dependencies are excluded.
 
-`rustbgpd-wire`, `rustbgpd-fsm`, and `rustbgpd-rpki` all have
-registry-published releases; `rustbgpd-rpki` is on the registry from its first
-release, `0.1.0`. `Disabled` means this repository's package manifest
-sets `publish = false`; it makes no claim about unrelated registry packages
+`rustbgpd-wire`, `rustbgpd-fsm`, and `rustbgpd-rpki` are published on
+crates.io; each crate's `CHANGELOG.md` records its releases. `Disabled`
+means this repository's package manifest sets `publish = false`; it makes no claim about unrelated registry packages
 with a similar name. These workspace packages can still be consumed through
 git or path dependencies, including from outside this repository. A consumer
 that needs the daemon's gRPC surface can instead generate a client from the
@@ -146,19 +145,6 @@ in a compatible `0.x` patch release. Closed-by-construction sets
 (`Origin`, `AsPathSegment`, `Prefix`, `AddPathMode`, `ErrorDisposition`,
 `RpkiValidation`) stay exhaustively matchable on purpose. `crates/wire/README.md`
 carries the full split under "Enum exhaustiveness".
-
-**The 0.16.0 release** is additive at the API level, but **decode
-acceptance or type classification changed in six places** — bytes that decoded
-under 0.15.0 may now be rejected or typed differently. `crates/wire/README.md`
-carries the itemized list under "0.16.0 compatibility note"; diff exactly that
-list before you upgrade a consumer that asserts on acceptance or typed
-variants. Consumers comparing decoded values must also account for RFC 8092
-Large Community duplicate normalization, which keeps the first occurrence.
-Separately, `RouteDistinguisher::from_str` now accepts the displayed
-`0x<16-hex-digits>` fallback for unknown RD types and the non-exhaustive
-`RouteDistinguisherParseError` gains `InvalidHexFallback(String)`. That is an
-additive text-parser acceptance and API change, not a seventh binary
-wire-decode change.
 
 ---
 
@@ -291,8 +277,7 @@ NOTIFICATION and hold-expiry exits.
 An analyzer or policy controller that already has validated ROA payloads can
 construct an immutable table and classify a route without starting Tokio or an
 RTR session. The prefix and validation-state types are part of the published
-wire boundary. This example resolves entirely from crates.io using the
-verified published versions in §7.
+wire boundary. This example resolves entirely from crates.io.
 
 ```toml
 # Cargo.toml
@@ -366,164 +351,27 @@ k8s pod) links `rustbgpd-wire` + `rustbgpd-fsm` and owns one or a few sessions.
 It does *not* get a RIB or best-path — it is a speaker, not a router. This is
 the gap Cilium fills by embedding GoBGP today. Links: `rustbgpd-wire` +
 `rustbgpd-fsm` + `tokio`. If it needs origin validation, add the RPKI crate as a
-registry dependency (§3.4); its published pairing with wire is recorded in §7.
+registry dependency (§3.4); its changelog records which wire line it pairs
+with (§7).
 
 ---
 
 ## 4. Which crate to publish next, and why
 
-**`wire`, `fsm`, and `rpki` are published; see §7 for the verified version
-boundary. `rib`, `bmp`, `mrt`, and `policy` remain demand-gated.**
+**`wire`, `fsm`, and `rpki` are published. `rib`, `bmp`, `mrt`, and `policy`
+remain demand-gated.** Release-by-release changes, including which wire line
+each FSM and RPKI release pairs with, live in each crate's changelog:
+[wire](../../crates/wire/CHANGELOG.md), [fsm](../../crates/fsm/CHANGELOG.md),
+and [rpki](../../crates/rpki/CHANGELOG.md). The wire README's compatibility
+notes itemize the migration for each breaking wire line.
 
 1. **`rustbgpd-wire`.** This is the foundation —
    dependent crate versions cannot publish before their wire dependency exists
-   on crates.io. `0.15.0` brought `Capability::PathsLimit`
-   with its `PathsLimitFamily` entry type (experimental capability code 76),
-   the `Ord` implementation on `EvpnRouteKey`, and `#[non_exhaustive]` across
-   the registry-tracking enums. The `0.16.0` release is additive at the API
-   level with six binary decode-acceptance changes plus the separate additive
-   Route Distinguisher text-parser change described in §2.3. `0.17.0` is a
-   **breaking release**: `encode_evpn_nlri` now returns
-   `Result<(), EncodeError>` instead of `()`. Direct callers must handle or
-   propagate the result, and on `Err` the output buffer may hold a partial
-   encoding and must be discarded. Three EVPN wire invariants that release
-   builds previously papered over (encoding substitute bytes) now refuse to
-   encode with `EncodeError::ValueOutOfRange`: a Type 5 gateway whose address
-   family differs from its prefix, an EAD-per-ES route whose ethernet tag is
-   not `MAX_ET`, and an EAD-per-EVI route whose ethernet tag is `MAX_ET`.
-   Indirect encode paths (`MP_REACH_NLRI`/`MP_UNREACH_NLRI` via
-   `UpdateMessage::try_build` / `encode_message`) surface the same routes as
-   errors where they previously emitted silently altered wire bytes.
-   `crates/wire/README.md` carries the itemized note under "0.17.0
-   compatibility note". `0.17.1` is a **documentation-only patch**: every
-   change in it corrects an RFC section reference in a doc comment or a test
-   assertion message (RFC 5291 ORF sections, the Default Gateway community's
-   RFC 7432 §7.8 citation, and the FlowSpec next-hop citation to RFC 8955 §4).
-   There is no public API, wire-format, or decoder/encoder behavior change,
-   and therefore nothing to migrate — code that builds against `0.17.0`
-   builds and behaves identically against `0.17.1`. `0.17.2` is
-   **additive**: `PathAttribute` (a `#[non_exhaustive]` enum) gains the
-   `AtomicAggregate` variant, and a zero-length `ATOMIC_AGGREGATE` (type 6)
-   now decodes to it instead of `PathAttribute::Unknown`. Under `0.17.1` that
-   `Unknown` value tripped the unrecognized-well-known-attribute validation,
-   so the UPDATE was treat-as-withdrawn with subcode 2; under `0.17.2` the
-   route validates and the encoder re-emits the attribute. A non-zero length
-   stays an attribute-length error — attribute-discard on the revised decode
-   path per RFC 7606 §7.6. Code matching `PathAttribute::Unknown` for type
-   code 6 no longer sees it; no signature changed and nothing was removed, so
-   `cargo semver-checks` reports no required bump and consumers compiled
-   against `0.17.1` build unchanged. The same release replaces the
-   `unreachable!` arms on the attribute decode path with the typed
-   `DecodeError` the surrounding validation already produces; acceptance is
-   unchanged for every input those guards already rejected. `0.18.0` removes
-   no public item but **takes the next 0.x compatibility line**, because
-   decode acceptance and RFC 7606 classification change in several places.
-   Assigned path attributes now decode under their registered
-   Optional/Transitive propagation classes, with bounded structural framing
-   checks and typed strict-mode flag errors: Traffic Engineering (24) stays
-   payload-opaque and is ignored as optional non-transitive; the IPv6 Address
-   Specific Extended Community (25) stays opaque and propagates with Partial,
-   but its payload must now be a nonempty multiple of 20 octets; a
-   zero-length BIER attribute is discarded per RFC 7606; and the temporary
-   Community Container (34) gains bounded container, Type 1 subtype, atom,
-   and prefix framing while valid values stay opaque and propagate with
-   Partial. Attributes 36-41 stay opaque under the same treatment, and class
-   conflicts on Tunnel Encapsulation, AIGP, PE Distinguisher Labels,
-   BGPsec_Path, Prefix-SID, and ATTR_SET now produce their registered RFC
-   7606 outcomes instead of being silently ignored. Truncated
-   `MP_REACH_NLRI` / `MP_UNREACH_NLRI` attributes return Optional Attribute
-   Error carrying the exact received bytes, Partial is rejected on both, and
-   complete undersized values return Attribute Length Error. Received
-   Partial-bearing Communities, Extended Communities, PMSI Tunnel, Large
-   Communities, and OTC values now stay typed through propagation via new
-   `PathAttribute` variants; locally built canonical variants are unchanged.
-   The additive API surface is
-   `UpdateMessage::try_build_from_attribute_iter` (a single-pass builder over
-   borrowed attributes that delegates to the same transactional encoder),
-   `cease_subcode::BFD_DOWN`, the assigned path-attribute registry constants,
-   and the default-off `tokio-codec` feature (`BgpCodec` / `BgpCodecError`,
-   with independent inbound and outbound RFC 8654 ceilings). A consumer that
-   asserts on accepted bytes or on exact `PathAttribute` variants must diff
-   the itemized list in `crates/wire/README.md` under "0.18.0 compatibility
-   note" before upgrading. The `0.19.0` compatibility line remains API-additive
-   but intentionally advances the 0.x boundary
-   for new observation/framing APIs and decode-behavior refinements. Its
-   compatibility note includes the exact role-sensitive disposition for
-   Partial-bearing MED, ORIGINATOR_ID, and CLUSTER_LIST, while MP_REACH_NLRI
-   and MP_UNREACH_NLRI retain session reset. Moving off `0.18.0` means moving
-   `rustbgpd-fsm` to `0.6.0` in the same step.
+   on crates.io. FSM and RPKI re-export wire types in their public APIs, so a
+   wire compatibility-line move is also a minor bump for each of them; upgrade
+   crates exchanging wire types together.
 
-   The `0.20.0` compatibility line adds `decode_prefix_sid_services` and public SRv6
-   service/SID/structure inspection types. They preserve advertised values;
-   raw Prefix-SID bytes retain unknown and reserved data. This requires the
-   coordinated FSM `0.7.0` and RPKI `0.2.0` wire-type boundary.
-
-   That line also adds `DecodeError::MalformedSrv6ServiceTlv` for
-   recognized RFC 9252 L3/L2 Service framing errors. Revised decoding uses
-   treat-as-withdraw, while generic Prefix-SID errors retain attribute-discard.
-   Valid nested unknown/reserved values remain opaque; see the
-   [framing contract](path-attribute-registry.md#srv6-service-framing-within-prefix-sid).
-
-   The `0.21.0` compatibility line pairs with FSM `0.8` and RPKI `0.3`. It
-   adds error-context parse and validation entry points
-   (`UpdateMessage::parse_revised_observed_with_error_context` and
-   `validate::validate_update_attributes_with_context`) and the typed
-   `DecodeError::ProhibitedAsSet` and `DecodeError::TruncatedAttributeHeader`
-   variants; a truncated attribute header now maps to UPDATE Malformed
-   Attribute List. The FlowSpec action helpers read negative, negative-zero,
-   and NaN traffic rates as zero, and the NOTIFICATION descriptions cover
-   every registered code and subcode. `0.21.1` and `0.21.2` are
-   documentation-only patches: the FlowSpec Terminal Action bit meaning and
-   the shutdown-communication length cap.
-
-   The `0.22.0` line pairs with FSM `0.9` and RPKI `0.4`. It is
-   breaking: `PathAttribute::MpReachNlri` and `MpUnreachNlri` hold boxed
-   payloads (the enum shrinks from 208 to 48 bytes), and the `keepalive`
-   module is private. It also names NOTIFICATION code 7
-   (`NotificationCode::RouteRefreshMessage`) and rejects a zero-length
-   `CLUSTER_LIST`; see the crate's
-   [0.22.0 compatibility note](../../crates/wire/README.md#0220-compatibility-note).
-
-   The `0.23.0` line pairs with FSM `0.10` and RPKI `0.5`.
-   EVPN Type 6 now decodes as a typed SMET route instead of an unknown-type
-   discard. Structural codec calls preserve raw flags; announcement admission
-   additionally requires `validate_evpn_announcements` or
-   `EvpnSmet::validate_announcement`. Revised UPDATE decoding applies that
-   check to MP_REACH and retains keys for treat-as-withdraw; MP_UNREACH uses
-   only structural validation. See the
-   [0.23.0 compatibility note](../../crates/wire/README.md#0230-compatibility-note).
-
-2. **`rustbgpd-fsm`.** The `0.4.0` release makes no
-   FSM API changes of its own — it exists because the FSM's public surface
-   re-exports `rustbgpd-wire` types (`Action` carries wire messages), so the
-   wire `0.16.2 → 0.17.0` breaking transition changes the identity of those
-   types. `0.4.0` re-pins `rustbgpd-wire ^0.17.0`; upgrade both crates
-   together, or the re-exported types stop unifying across the two wire
-   versions in one dependency tree. `0.4.1` is **additive**: it adds
-   `Session::negotiated_shared() -> Option<Arc<NegotiatedSession>>` for
-   embedders that need to hold the negotiated parameters across a subsystem
-   boundary while the session is live. `Session::negotiated()` keeps its
-   `Option<&NegotiatedSession>` signature, nothing was removed or changed,
-   and `0.4.1` re-pins `rustbgpd-wire ^0.17.1` — a patch-level wire move with
-   no API change, so there is nothing to migrate. That requirement admits wire
-   `0.17.2` without another FSM release. `0.5.0` is the **paired breaking
-   bump** for wire `0.18.0`: the FSM's public surface re-exports wire types
-   (`Event` carries `OpenMessage` and `NotificationMessage`, `Action` carries
-   wire messages), so the wire `0.17.2 → 0.18.0` compatibility-line move
-   changes the identity of those types even though the FSM removed nothing.
-   Upgrade both crates together, or the re-exported types stop unifying
-   across the two wire versions in one dependency tree. The FSM's own change
-   is additive: `Event::BfdDown` joins the `#[non_exhaustive]` `Event` enum,
-   and a BFD-triggered teardown in `OpenSent`, `OpenConfirm`, or
-   `Established` emits the typed Cease notification and the authoritative
-   session-down cleanup, while earlier connection states return to `Idle`
-   without a notification. Because the FSM surfaces wire decode results to
-   its callers, diff the wire `0.18.0` acceptance changes above before
-   upgrading. (History:
-   `0.3.1` added
-   `min_hold_time` and `required_families` to the `#[non_exhaustive]`
-   `PeerConfig`, made the last duplicate Graceful Restart capability win, and
-   rejected invalid OPEN identities.) Why the FSM was the second published crate:
+2. **`rustbgpd-fsm`.** Why the FSM was the second published crate:
    - It depends *only* on `rustbgpd-wire` + `thiserror` + `bytes`. Zero
      daemon-tier coupling.
    - It is the smallest, purest building block a second consumer needs. A test
@@ -535,57 +383,18 @@ boundary. `rib`, `bmp`, `mrt`, and `policy` remain demand-gated.**
      is `#[non_exhaustive]` or gets a constructor/default path. The published
      crate already has the forward-compat boundary: `PeerConfig`,
      `NegotiatedSession`, `Event`, and `Action` are `#[non_exhaustive]`.
-   The `0.6.0` line pairs with wire `0.19.0` and adds
-   `Event::AdministrativeReset` to the non-exhaustive event enum. The `0.7.0`
-   line pairs with wire `0.20.0`, which changes the identity of wire types
-   exposed through the FSM, so an embedder on `0.6.0` moves both crates in one
-   step. It advertises the RFC 8950 1/128/2 tuple whenever VPNv4 is configured
-   and limits `add_path_families` / `extended_nexthop_families` to the
-   negotiated MultiProtocol intersection. The `0.8.0` line pairs with wire
-   `0.21.0` with no direct FSM API or behavior change. `0.8.1` limits
-   `NegotiatedSession::negotiated_orf_recv` to the negotiated MultiProtocol
-   intersection, and `0.8.2` is documentation-only: the embedding
-   application owns the ranges of its local timer settings. The
-   `0.9.0` line pairs with wire `0.22` and is breaking: the `action`,
-   `config`, `event`, `session`, and `state` modules are private (import from
-   the crate root), and `Action::RoleMismatchObserved::remote_role` becomes
-   the `#[non_exhaustive]` `ReceivedRole` enum. See the crate's
-   [changelog](../../crates/fsm/CHANGELOG.md). The `0.10.0` line
-   moves to wire `0.23` without direct FSM API or state-machine changes.
 
-3. **`rustbgpd-rpki`.** Its first registry release was `0.1.0`.
-   Why it is independent:
+3. **`rustbgpd-rpki`.** Why it is independent:
    - Its direct dependencies are `rustbgpd-wire`, `tokio`, `tracing`,
      `smallvec`, `thiserror`, and `rustc-hash`; it has no `rib`/`policy` edge.
    - Synchronous `VrpTable` / `AspaTable` validation can be embedded without a
      runtime. `RtrClient` and `VrpManager` are the explicitly Tokio-coupled
      acquisition layer.
-   - The `0.1.x` compatibility boundary covers the crate-root facade and every
-     public module path, including the raw RTR PDU codec. That first publish
-     froze those paths: breaking Rust API changes or an incompatible public
-     wire-type move require the next `0.x` minor compatibility line. There was
-     no earlier public RPKI line to bump
-     away from, so the first release, `0.1.0`, started directly on wire
-     `0.19.0`. The RPKI `0.2.0` line pairs with wire `0.20.0`.
-   - The RPKI `0.3.0` line pairs with wire `0.21.0` and also marks `RtrPdu`,
-     `RtrDecodeError`, `RtrEncodeError`, and `RtrError` non-exhaustive.
-     Downstream exhaustive matches need a fallback; existing variant
-     constructors and fields remain available. `ProviderAuth` and `VrpUpdate`
-     remain exhaustive. See the crate's [enum policy](../../crates/rpki/README.md#enum-exhaustiveness)
-     for migration details. These changes add no variants or runtime behavior.
-   - RPKI `0.3.1` adds no public item. `RtrClient::new` bounds configured RTR
-     timers to the RFC 8210 §6 ranges with a warning: a zero refresh or retry
-     is raised to 1 second, a zero expire or `max_expire_interval` is raised
-     to 600 seconds, and either above 172800 seconds is clamped to it.
-   - RPKI `0.3.2` clamps a `retry_interval` above 7200 seconds, publishes the
-     first accepted empty VRP and ASPA tables, and adds
-     `VrpManager::with_connectivity_observer`, `AspaTable::providers`, and
-     `aspa_verify::validation_context`. See the crate's
-     [changelog](../../crates/rpki/CHANGELOG.md).
-   - The RPKI `0.4.0` line moves the public wire dependency to
-     `0.22`; verifier and RTR method signatures are unchanged. The
-     `0.5.0` line moves to wire `0.23`, also without direct verifier or RTR
-     signature changes.
+   - The compatibility boundary covers the crate-root facade and every
+     public module path, including the raw RTR PDU codec. Breaking Rust API
+     changes or an incompatible public wire-type move require the next `0.x`
+     minor compatibility line. See the crate's
+     [enum policy](../../crates/rpki/README.md#enum-exhaustiveness).
 
 4. **Later: `rib`, `bmp`, `mrt`, `policy`.** These pull in heavier deps
    (`prefix-trie`, `ipnet`, `flate2`, `chrono`) and have more churn. Publish
@@ -657,55 +466,24 @@ To be the de facto Rust BGP codec, the concrete gaps:
 
 ## 7. Published-crate release boundary
 
-The dependency examples use the last verified coordinated set of published
-versions in [`published-crate-versions.json`](published-crate-versions.json).
-The working-tree column comes from the crate manifests and may run ahead
-during preparation or a partial publication. An unchanged published column
-does not mean no newer individual crate exists on the registry.
-
-The wire 0.24 / FSM 0.11 / RPKI 0.6 set adds an
-`UpdateValidationOptions::link_local_next_hop` field and marks the struct
-`#[non_exhaustive]`. Build it from `UpdateValidationOptions::default()` and
-assign fields instead of using a struct literal; the default preserves existing
-validation. Opting in requires
-interface scope and negotiated capability context; see the
-[0.24 compatibility note](../../crates/wire/README.md#0240-compatibility-note).
-This source break is separate from the additive non-exhaustive capability variant.
-The same set also changes `RtcNlri::matches` behaviour: it compares only the
-route-target bits after the membership's origin AS (RFC 4684 §4 and §6), so a
-/32 membership matches every Route Target and the origin AS no longer has to
-equal the RT's global administrator. RPKI 0.6 adds
-`VrpManager::with_end_of_data_observer`; it is additive. The crate
-changelogs carry the detail.
-
-<!-- published-crate-versions:start -->
-| Crate | Published examples | Working tree |
-|---|---|---|
-| `rustbgpd-wire` | `0.24.0` | `0.24.0` |
-| `rustbgpd-fsm` | `0.11.0` | `0.11.0` |
-| `rustbgpd-rpki` | `0.6.0` | `0.6.0` |
-<!-- published-crate-versions:end -->
-
-After changing manifests, run `python3 scripts/check_embedding_versions.py --write`
-to sync this table and the examples offline. After all versions in the working
-tree are published, run `python3 scripts/check_embedding_versions.py --refresh`.
-It verifies each exact version is present and not yanked on crates.io before
-updating the record and examples. A missing version or failed registry lookup
-leaves every file unchanged; rerunning a successful refresh produces no diff.
-The checker without either flag is read-only and offline.
+Each crate's README is its crates.io landing page and names that release's own
+version in its install snippet; its `CHANGELOG.md` records what changed and
+which wire line an FSM or RPKI release pairs with. The examples in §3 pin one
+coordinated set, so the wire types an embedder uses directly unify with those
+the FSM and RPKI crates expose; an unpinned newest release of each can mix
+wire lines while a coordinated publish is in progress. The release preflight
+checks these pins against the crate manifests.
 
 The ordering rules that govern these publishes are:
 
 - Before publishing a coordinated set, select all three crates in one
   `cargo publish --locked --dry-run --all-features` command. Cargo verifies
   the normalized packages against a temporary local registry, including the
-  prepared wire dependency. The release checklist gives the full command.
+  new wire dependency. The release checklist gives the full command.
 - Publish `rustbgpd-wire` first, then verify it is registry-visible before
   publishing FSM or RPKI. An individual dependent-only package/dry-run needs
   that wire version in the registry because Cargo normalizes its path
   dependency to a version requirement.
-- Keep the dependency examples in §3 pinned to the versions actually available
-  from crates.io — never to a version not yet published.
 - FSM and RPKI do not depend on each other.
 - All three crates keep their package metadata and README; the README is the
   rendered crates.io landing page and carries the compatibility boundary.

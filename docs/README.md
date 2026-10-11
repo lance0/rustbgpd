@@ -72,7 +72,6 @@ Look up commands, configuration, and compatibility boundaries.
 | [gNMI and OpenConfig](reference/gnmi.md) | Supported telemetry paths and operations. |
 | [Policy language](reference/rpol-language.md) | The typed routing-policy language and its tools. |
 | [Rust libraries](reference/embedding.md) | Workspace crates and their embedding boundaries. |
-| [Published crate versions](reference/published-crate-versions.json) | Machine-readable versions of published library crates. |
 | [Security posture](reference/security.md) | Management API protection and deployment tiers. |
 | [Limitations](reference/limitations.md) | Current product boundaries and unsupported behavior. |
 | [Known issues](reference/known-issues.md) | Known defects, workarounds, and operational caveats. |

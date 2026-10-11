@@ -412,12 +412,11 @@ rustbgpd-wire = "0.24.0"
 bytes = "1"
 ```
 
-To use the crate from a source checkout instead, use the matching versioned
-path:
+To build against a source checkout instead, depend on its path:
 
 ```toml
 [dependencies]
-rustbgpd-wire = { version = "0.24.0", path = "../rustbgpd/crates/wire" }
+rustbgpd-wire = { path = "../rustbgpd/crates/wire" }
 bytes = "1"
 ```
 

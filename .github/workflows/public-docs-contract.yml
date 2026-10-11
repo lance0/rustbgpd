@@ -102,11 +102,6 @@ jobs:
             cargo test --locked "${args[@]}"
             echo "::endgroup::"
           done < "$SELECTION"
-      - name: Check published crate boundary
-        if: matrix.contract == 'embedding'
-        run: |
-          python3 -m unittest -v scripts/test_check_embedding_versions.py
-          python3 scripts/check_embedding_versions.py
       - name: Check embedding crate map
         if: matrix.contract == 'embedding'
         run: |

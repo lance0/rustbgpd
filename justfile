@@ -100,8 +100,6 @@ check-contracts:
     python3 scripts/check_site_manifest.py
     python3 -m unittest -v scripts/test_check_perf_receipt_freshness.py
     python3 scripts/check_perf_receipt_freshness.py
-    python3 -m unittest -v scripts/test_check_embedding_versions.py
-    python3 scripts/check_embedding_versions.py
     python3 -m unittest -v scripts/test_check_embedding_crate_map.py
     python3 scripts/check_embedding_crate_map.py
     python3 -m unittest -v scripts/test_check_release_preflight.py
@@ -231,7 +229,7 @@ gate-msrv:
 # `--heavy` adds `cargo audit`, the release build, and the multi-package
 # publish dry-run.
 
-# Run the checks that otherwise first fail on a release commit: metric release notes, changelog fragments, crate changelogs, and the root changelog section.
+# Run the checks that otherwise first fail on a release commit: metric release notes, changelog fragments, crate changelogs and README and embedding versions, and the root changelog section.
 gate-release *args:
     python3 -m unittest -v scripts/test_check_release_preflight.py
     python3 -m unittest -v scripts/test_source_id.py

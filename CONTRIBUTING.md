@@ -136,9 +136,10 @@ The recipes intentionally expose their direct commands:
   beside it.
 - `just gate-release [--mode release] [--heavy]` runs the
   checks that otherwise first fail on a release commit: the metric
-  release-note contract, the `changelog.d/` fragment assembly, and the
-  `CHANGELOG.md` heading of every crate whose manifest
-  is ahead of `docs/reference/published-crate-versions.json`. On a release
+  release-note contract, the `changelog.d/` fragment assembly, the
+  `CHANGELOG.md` heading of every publishable crate, and the crate README and
+  embedding-guide dependency snippets and workspace pins against the crate
+  manifests. On a release
   commit, or with `--mode release`, it also requires that no fragment remains,
   dated crate headings, released crate README wording, and the root
   `CHANGELOG.md` section that the release workflow extracts; otherwise it
