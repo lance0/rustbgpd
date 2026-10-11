@@ -95,7 +95,14 @@ def _publishable(metadata: dict[str, object]) -> list[Package]:
     root_path = Path(root)
     result = []
     for package in packages:
-        if not isinstance(package, dict) or package.get("publish") is not None:
+        if not isinstance(package, dict):
+            continue
+        # Cargo metadata reports an unrestricted manifest as null and
+        # `publish = ["crates-io"]` as that list; both reach crates.io.
+        publish = package.get("publish")
+        if publish is not None and (
+            not isinstance(publish, list) or "crates-io" not in publish
+        ):
             continue
         name = package.get("name")
         version = package.get("version")
@@ -120,6 +127,30 @@ def _publishable(metadata: dict[str, object]) -> list[Package]:
     return sorted(result, key=lambda package: package.name)
 
 
+def pull_request_paths(workflow: str) -> set[str]:
+    """Return `on.pull_request.paths` from block-style workflow YAML.
+
+    Comments are dropped, so a commented-out entry does not count. A flow-style
+    or otherwise unrecognised filter yields no entries and fails closed.
+    """
+    stack: list[tuple[int, str]] = []
+    paths = set()
+    for raw in workflow.splitlines():
+        line = re.sub(r"(^|\s)#.*$", "", raw).rstrip()
+        if not line.strip():
+            continue
+        indent = len(line) - len(line.lstrip())
+        item = line.lstrip().startswith("- ")
+        while stack and (stack[-1][0] > indent or (stack[-1][0] == indent and not item)):
+            stack.pop()
+        if item:
+            if [key for _, key in stack] == ["on", "pull_request", "paths"]:
+                paths.add(line.lstrip()[2:].strip().strip("\"'"))
+        elif key := re.match(r"\s*([\w-]+):(?:\s|$)", line):
+            stack.append((indent, key.group(1)))
+    return paths
+
+
 def derive(
     metadata: dict[str, object],
     workflow: str,
@@ -127,9 +158,10 @@ def derive(
 ) -> tuple[list[Package], list[Package]]:
     publishable = _publishable(metadata)
     required_paths = tuple(package.directory for package in publishable) + SUPPORT_PATHS
+    filter_paths = pull_request_paths(workflow)
     missing_paths = [
-        path for path in required_paths if f'- "{path}/**"' not in workflow
-        and f'- "{path}"' not in workflow
+        path for path in required_paths
+        if f"{path}/**" not in filter_paths and path not in filter_paths
     ]
     if missing_paths:
         raise ContractError(
