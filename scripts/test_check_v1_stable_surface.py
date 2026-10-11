@@ -68,6 +68,21 @@ class CapabilitySectionTests(unittest.TestCase):
                 mutate(row)
                 self.rejected(inventory, expected)
 
+    def test_malformed_evidence_values_fail_closed(self):
+        cases = [
+            ({"leg": ["m14-rr-frr"], "claims": ["stored"]}, "leg must be a string"),
+            ({"leg": {"id": "m14-rr-frr"}, "claims": ["stored"]}, "leg must be a string"),
+            ({"leg": "m14-rr-frr", "claims": [["stored"]]}, "distinct strings"),
+            ({"leg": "m14-rr-frr", "claims": [{"key": "stored"}]}, "distinct strings"),
+            ({"leg": "m14-rr-frr", "claims": [1]}, "distinct strings"),
+            ({"leg": "m14-rr-frr", "claims": "stored"}, "distinct strings"),
+        ]
+        for item, expected in cases:
+            with self.subTest(item=item):
+                inventory, row = self.row("unicast-route-reflection")
+                row["evidence"] = [item]
+                self.rejected(inventory, expected)
+
     def test_section_shape(self):
         inventory = copy.deepcopy(self.inventory)
         inventory["capabilities"]["stable"] = []

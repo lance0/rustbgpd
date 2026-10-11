@@ -617,8 +617,8 @@
       },
       {
         "id": "bmp-base-export",
-        "scope": "Basic BMP collector session with Initiation, PeerUp and RouteMonitoring in order",
-        "excludes": ["every BMP view", "draft BMPv4", "collector outage replay", "durability"],
+        "scope": "Basic BMP collector session delivering Initiation, PeerUp and RouteMonitoring, with Initiation before PeerUp",
+        "excludes": ["RouteMonitoring ordering", "every BMP view", "draft BMPv4", "collector outage replay", "durability"],
         "roles": [],
         "surfaces": ["Config.bmp"],
         "evidence": [{"leg": "m24-bmp-frr", "claims": ["encoded", "advertised"]}]

@@ -1661,6 +1661,8 @@ def check_capabilities(inventory: dict, legs: dict[str, dict]) -> None:
         for item in evidence:
             if not isinstance(item, dict) or set(item) != {"leg", "claims"}:
                 fail(f"{label} evidence entries must have exactly 'leg' and 'claims'")
+            if not isinstance(item["leg"], str):
+                fail(f"{label} evidence leg must be a string, got {item['leg']!r}")
             if item["leg"] in cited:
                 fail(f"{label} repeats evidence leg {item['leg']!r}")
             cited.add(item["leg"])
@@ -1668,8 +1670,13 @@ def check_capabilities(inventory: dict, legs: dict[str, dict]) -> None:
             if leg is None:
                 fail(f"{label} references leg {item['leg']!r} with no driver header")
             claims = item["claims"]
-            if not isinstance(claims, list) or not claims or len(claims) != len(set(claims)):
-                fail(f"{label} claims must be a non-empty list of distinct keys")
+            if (
+                not isinstance(claims, list)
+                or not claims
+                or not all(isinstance(claim, str) for claim in claims)
+                or len(claims) != len(set(claims))
+            ):
+                fail(f"{label} claims must be a non-empty list of distinct strings")
             for claim in claims:
                 if claim not in evidence_index.CLAIM_KEYS:
                     fail(

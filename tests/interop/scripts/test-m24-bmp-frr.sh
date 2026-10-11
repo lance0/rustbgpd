@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # leg: m24  slug: monitoring-feed
-# proves: BMP collector session with Initiation, PeerUp and RouteMonitoring in order; not every BMP view, draft BMPv4 or collector outage replay
+# proves: BMP collector session delivering Initiation, PeerUp and one RouteMonitoring per FRR prefix, with Initiation before PeerUp; not RouteMonitoring ordering, every BMP view, draft BMPv4 or collector outage replay
 # claims: encoded advertised
 # evidence: docs/interop.md#m24-test-results-2026-03-15-frr-1031--python-bmp-receiver
 # pinned: FRR 10.3.1 and the described Python BMP receiver, 2026-03-15
