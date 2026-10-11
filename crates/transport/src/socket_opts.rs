@@ -255,7 +255,6 @@ pub(crate) enum TcpAoSocketRole {
 
 /// A single Linux TCP-AO Master Key Tuple for a peer address.
 #[cfg(target_os = "linux")]
-#[allow(dead_code)]
 pub(crate) struct TcpAoKey<'a> {
     pub(crate) peer: IpAddr,
     pub(crate) scope_id: u32,
@@ -321,7 +320,6 @@ impl TcpAoAdd {
 
 #[cfg(target_os = "linux")]
 #[repr(C, align(8))]
-#[allow(dead_code)]
 struct TcpAoInfoOpt {
     flags: u32,
     reserved2: u16,
@@ -723,7 +721,6 @@ const TCP_AO_ADD_KEY: libc::c_int = 38;
 #[cfg(target_os = "linux")]
 const TCP_AO_DEL_KEY: libc::c_int = 39;
 #[cfg(target_os = "linux")]
-#[allow(dead_code)]
 const TCP_AO_INFO: libc::c_int = 40;
 #[cfg(target_os = "linux")]
 const TCP_AO_GET_KEYS: libc::c_int = 41;

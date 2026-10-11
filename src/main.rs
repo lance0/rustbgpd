@@ -8984,11 +8984,11 @@ tcp_ao = {{ key = "secret", send_id = 1, recv_id = 1, algorithm = "hmac(sha256)"
         #[derive(Deserialize)]
         #[serde(deny_unknown_fields)]
         struct LegacyMarker {
-            #[allow(dead_code)]
+            #[expect(dead_code, reason = "deserialize legacy marker shape")]
             version: u8,
-            #[allow(dead_code)]
+            #[expect(dead_code, reason = "deserialize legacy marker shape")]
             expires_at_unix: u64,
-            #[allow(dead_code)]
+            #[expect(dead_code, reason = "deserialize legacy marker shape")]
             #[serde(default)]
             checkpoint_generation: Option<String>,
         }

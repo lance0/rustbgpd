@@ -496,8 +496,8 @@ pub struct BfdRuntimeEvent {
 pub use linux::spawn_prepared;
 #[cfg(target_os = "linux")]
 // These are crate-internal daemon wiring types; their names are not all
-// referenced directly in this binary crate, hence the allow.
-#[allow(unused_imports)]
+// referenced directly in this binary crate.
+#[expect(unused_imports, reason = "crate-internal daemon wiring re-exports")]
 pub use linux::{
     BfdReloadCommand, BfdRuntimeHandle, PreparedRuntime, prepare_reload, prepare_runtime,
     spawn_prepared_with_reload,

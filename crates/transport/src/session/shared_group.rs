@@ -567,7 +567,7 @@ impl PeerSession {
         let order = source_grouped_order(&update.announce);
         // Keep publishing after this member runs out of writer capacity.
         // Its first unsent chunk becomes the same pending cursor consumers use;
-        // the group's publication cannot depend on one member's reader. A
+        // the group's publication cannot depend on one member's reader.
         // A member with its own withdrawals or BoRR sends none of its copy
         // here: every earlier phase must precede announcements. It streams
         // from chunk 0 once the ordinary cursor has admitted those phases.

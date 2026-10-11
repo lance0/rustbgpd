@@ -569,7 +569,7 @@ fn mp_add_path_families(add_path: bool) -> &'static [(Afi, Safi)] {
 }
 
 #[test]
-#[ignore]
+#[ignore = "opt-in: needs MRT_DIFFERENTIAL_PATH/OUT"]
 fn real_updates() {
     let path = std::env::var("MRT_DIFFERENTIAL_PATH")
         .expect("set MRT_DIFFERENTIAL_PATH to uncompressed MRT");
