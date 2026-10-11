@@ -83,7 +83,8 @@ VIOLATION_RULES: tuple[tuple[re.Pattern[str], str], ...] = (
 )
 
 # Shell, YAML, Dockerfile, and justfile comments all start with `#`. A comment
-# that names the pin file does not read it.
+# that names the pin file does not read it, and one that quotes a floating
+# toolchain does not select it.
 COMMENT_LINE = re.compile(r"^\s*#")
 
 
@@ -145,6 +146,8 @@ def audit_consumer(relative: str, text: str) -> list[str]:
             f"reads {PIN_PATH}"
         )
     for number, line in enumerate(text.splitlines(), start=1):
+        if COMMENT_LINE.match(line):
+            continue
         for pattern, reason in VIOLATION_RULES:
             match = pattern.search(line)
             if match:

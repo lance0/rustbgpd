@@ -40,6 +40,9 @@ PIN_DERIVED_SELECTIONS = (
     '    && cargo "+$toolchain" install cargo-fuzz --version 0.13.2 --locked',
     '        cargo +"$TOOLCHAIN" fuzz build',
     "        export RUSTUP_TOOLCHAIN",
+    # A comment cannot select a toolchain, so guidance may quote a bad one.
+    "      # never set toolchain=nightly or RUSTUP_TOOLCHAIN=nightly-2026-07-07",
+    "# Do not use dtolnay/rust-toolchain@nightly or `cargo +nightly`.",
 )
 
 
