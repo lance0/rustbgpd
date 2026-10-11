@@ -23,8 +23,9 @@ pub(crate) fn prepare_output_dir(config: &MrtWriterConfig) -> std::io::Result<()
 ///
 /// # Errors
 ///
-/// Returns an error if the output directory cannot be created or the file
-/// cannot be written.
+/// Returns an error if directory creation, staging, syncing or renaming fails.
+/// A parent-directory sync error occurs after the final file is published;
+/// retrying after that error can produce a second dump.
 pub fn write_dump(config: &MrtWriterConfig, data: &[u8]) -> std::io::Result<PathBuf> {
     prepare_output_dir(config)?;
 

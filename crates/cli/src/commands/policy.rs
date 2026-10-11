@@ -701,9 +701,6 @@ pub fn fmt_local(files: &[String], check: bool) -> i32 {
 /// after the target has been replaced. Errors name the destination path.
 fn write_atomic(path: &std::path::Path, text: &str) -> std::io::Result<()> {
     use std::io::Write;
-    use std::sync::atomic::{AtomicU64, Ordering};
-
-    static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
     let inner = || -> std::io::Result<()> {
         let permissions = std::fs::metadata(path)?.permissions();
@@ -712,26 +709,10 @@ fn write_atomic(path: &std::path::Path, text: &str) -> std::io::Result<()> {
             .filter(|parent| !parent.as_os_str().is_empty())
             .unwrap_or_else(|| std::path::Path::new("."));
         let directory = std::fs::File::open(parent)?;
-        let (tmp, mut file) = loop {
-            let sequence = TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed);
-            let tmp = parent.join(format!(
-                ".rbgp-policy-fmt.{}.{sequence}.tmp",
-                std::process::id()
-            ));
-            match std::fs::OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(&tmp)
-            {
-                Ok(file) => break (tmp, file),
-                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
-                Err(error) => return Err(error),
-            }
-        };
+        let (tmp, mut file) = create_policy_stage(parent)?;
         let result = (|| -> std::io::Result<()> {
-            file.set_permissions(permissions.clone())?;
             file.write_all(text.as_bytes())?;
-            // Payload writes can clear set-ID permission bits.
+            // Restore the original mode after writes, which can clear set-ID bits.
             file.set_permissions(permissions)?;
             file.sync_all()?;
             std::fs::rename(&tmp, path)
@@ -753,6 +734,35 @@ fn write_atomic(path: &std::path::Path, text: &str) -> std::io::Result<()> {
             format!("failed to write {}: {error}", path.display()),
         )
     })
+}
+
+/// Reserve a unique sibling; on Unix, create it with mode 0600.
+fn create_policy_stage(
+    parent: &std::path::Path,
+) -> std::io::Result<(std::path::PathBuf, std::fs::File)> {
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    loop {
+        let sequence = TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+        let tmp = parent.join(format!(
+            ".rbgp-policy-fmt.{}.{sequence}.tmp",
+            std::process::id()
+        ));
+        match options.open(&tmp) {
+            Ok(file) => return Ok((tmp, file)),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(error),
+        }
+    }
 }
 
 /// Minimal line diff (`-` old / `+` new, `@ line N` hunk markers) for
@@ -4003,6 +4013,42 @@ mod tests {
         assert!(path.is_dir());
         assert_eq!(std::fs::read_to_string(original).unwrap(), "keep this");
         assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn policy_stage_is_private_with_permissive_umask() {
+        use std::os::unix::fs::PermissionsExt;
+
+        const CHILD_ENV: &str = "RUSTBGPD_POLICY_STAGE_UMASK_CHILD";
+        if std::env::var_os(CHILD_ENV).is_none() {
+            // Isolate the process-wide umask from tests running on other threads.
+            let output = std::process::Command::new("sh")
+                .args([
+                    "-c",
+                    "umask 0; exec \"$1\" --exact commands::policy::tests::policy_stage_is_private_with_permissive_umask --nocapture",
+                    "policy-stage-test",
+                ])
+                .arg(std::env::current_exe().unwrap())
+                .env(CHILD_ENV, "1")
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "private-stage subprocess failed:\n{}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let (path, file) = create_policy_stage(dir.path()).unwrap();
+        assert_eq!(file.metadata().unwrap().permissions().mode() & 0o777, 0o600);
+        assert_eq!(
+            std::fs::metadata(path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
     }
 
     /// LAN-323: `--check` never rewrites, exits 1 on drift, and a
