@@ -155,8 +155,11 @@ carries the full split under "Enum exhaustiveness".
 This is the "MRT reader / monitor / analyzer" consumer. Links only
 `rustbgpd-wire`.
 
-```sh
-cargo add rustbgpd-wire bytes
+```toml
+# Cargo.toml
+[dependencies]
+rustbgpd-wire = "0.24.0"
+bytes = "1"
 ```
 
 ```rust
@@ -212,9 +215,13 @@ This is the "k8s sidecar / SDN controller / test harness" consumer. Links
 `Event`s; the *embedder* owns the TCP socket and the timers. This is the
 intentional split (ADR-0005: pure state machine, no I/O in the FSM).
 
-```sh
-cargo add rustbgpd-wire rustbgpd-fsm bytes
-cargo add tokio --features net,io-util,time,rt
+```toml
+# Cargo.toml
+[dependencies]
+rustbgpd-wire = "0.24.0"
+rustbgpd-fsm = "0.11.0"
+bytes = "1"
+tokio = { version = "1", features = ["net", "io-util", "time", "rt"] }
 ```
 
 ```rust
@@ -272,8 +279,11 @@ construct an immutable table and classify a route without starting Tokio or an
 RTR session. The prefix and validation-state types are part of the published
 wire boundary. This example resolves entirely from crates.io.
 
-```sh
-cargo add rustbgpd-rpki rustbgpd-wire
+```toml
+# Cargo.toml
+[dependencies]
+rustbgpd-rpki = "0.6.0"
+rustbgpd-wire = "0.24.0"
 ```
 
 ```rust
@@ -458,8 +468,11 @@ To be the de facto Rust BGP codec, the concrete gaps:
 
 Each crate's README is its crates.io landing page and names that release's own
 version in its install snippet; its `CHANGELOG.md` records what changed and
-which wire line an FSM or RPKI release pairs with. The examples in §3 use
-`cargo add`, which selects the newest release of each crate.
+which wire line an FSM or RPKI release pairs with. The examples in §3 pin one
+coordinated set, so the wire types an embedder uses directly unify with those
+the FSM and RPKI crates expose; an unpinned newest release of each can mix
+wire lines while a coordinated publish is in progress. The release preflight
+checks these pins against the crate manifests.
 
 The ordering rules that govern these publishes are:
 

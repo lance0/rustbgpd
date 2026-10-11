@@ -988,15 +988,18 @@ makes these edits, all in the release commit, and nothing after publishing:
 2. The install snippet under `## Usage` in the crate README. When the wire
    version changes, also the `rustbgpd-wire` line in `crates/rpki/README.md`.
    The README is packaged with the crate and is its crates.io landing page,
-   so it names the version about to publish.
+   so it names the version about to publish. The crate's lines in the
+   `docs/reference/embedding.md` §3 examples also move, so those examples stay
+   one coordinated set.
 3. A dated heading and entries in the crate's `CHANGELOG.md`. For a
    breaking wire line, add a compatibility note to `crates/wire/README.md`.
 4. A `rustbgpd-<crate>` entry in the repository-level release notes, through
    a `changelog.d/` fragment.
 
-`just gate-release` fails while any dependency snippet in a crate README, or a
-root workspace pin, names a publishable crate at a version other than that
-crate's manifest version. `--mode release` also rejects any form of "prepare"
+`just gate-release` fails while any dependency snippet in a crate README or the
+embedding guide, or a root workspace pin, names a publishable crate at a
+version other than that crate's manifest version, or a publishable crate has
+no workspace pin. `--mode release` also rejects any form of "prepare"
 left in a crate README; a version written while staging must read as released
 before the release commit. Past `CHANGELOG.md` sections keep their wording.
 

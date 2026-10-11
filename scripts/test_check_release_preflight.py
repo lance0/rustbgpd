@@ -11,9 +11,12 @@ SPEC = importlib.util.spec_from_file_location("release_preflight", PATH)
 check = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(check)
 
-# A release-ready tree: wire 0.2.0 has a dated changelog and a matching README.
+ROOT_MANIFEST = '[workspace.package]\nversion = "1.2.3"\n\n[workspace.dependencies]\n'
+# A release-ready tree: wire 0.2.0 has a dated changelog, a workspace pin, and
+# matching README and embedding-guide snippets.
 RELEASE_TREE = {
-    "Cargo.toml": '[workspace.package]\nversion = "1.2.3"\n',
+    "Cargo.toml": ROOT_MANIFEST + 'demo-wire = { path = "crates/wire", version = "0.2.0" }\n',
+    check.EMBEDDING: '```toml\n[dependencies]\ndemo-wire = "0.2.0"\nbytes = "1"\n```\n',
     "CHANGELOG.md": "# Changelog\n\n## [Unreleased]\n\n## [1.2.3] — 2026-01-02\n\n- Fix.\n",
     "crates/wire/Cargo.toml": '[package]\nname = "demo-wire"\nversion = "0.2.0"\n',
     "crates/wire/CHANGELOG.md": "# Changelog\n\n## 0.2.0 - 2026-01-02\n\n- Fix.\n",
@@ -112,12 +115,23 @@ class ReleasePreflightTests(unittest.TestCase):
                 'demo-wire = { version = "0.1.0", path = "../wire" }\n',
                 "names demo-wire '0.1.0'",
             ),
+            (check.EMBEDDING, 'demo-wire = "0.1.0"\n', "embedding.md names demo-wire '0.1.0'"),
             (
                 "Cargo.toml",
-                '[workspace.package]\nversion = "1.2.3"\n\n[workspace.dependencies]\n'
-                'demo-wire = { path = "crates/wire", version = "0.1.0" }\n',
+                ROOT_MANIFEST + 'demo-wire = { path = "crates/wire", version = "0.1.0" }\n',
                 "workspace pin for demo-wire is '0.1.0'",
             ),
+            (
+                "Cargo.toml",
+                ROOT_MANIFEST + 'demo-wire = "0.1.0"\n',
+                "workspace pin for demo-wire is '0.1.0'",
+            ),
+            (
+                "Cargo.toml",
+                ROOT_MANIFEST + 'demo-wire = { path = "crates/wire" }\n',
+                "workspace pin for demo-wire is None",
+            ),
+            ("Cargo.toml", ROOT_MANIFEST, "workspace pin for demo-wire is None"),
         ):
             with self.subTest(text=text):
                 root = self.tree(**{relative: text})
@@ -127,12 +141,12 @@ class ReleasePreflightTests(unittest.TestCase):
                 # It fails in staging mode too, not only on the release commit.
                 _, statuses = self.statuses(self.tree(**{**STAGING, relative: text}), "auto")
                 self.assertEqual(statuses[3], "FAIL")
-        # Other dependencies, and path-only snippets, carry no checked version.
+        # Other dependencies, and path-only snippets, carry no checked version;
+        # the string form of a matching workspace pin is accepted.
         root = self.tree(
             **{
                 "crates/wire/README.md": 'bytes = "1"\np = "0.0.1"\ndemo-wire = { path = "x" }\n',
-                "Cargo.toml": '[workspace.package]\nversion = "1.2.3"\n\n'
-                '[workspace.dependencies]\ndemo-wire = { path = "crates/wire", version = "0.2.0" }\n',
+                "Cargo.toml": ROOT_MANIFEST + 'demo-wire = "0.2.0"\n',
             }
         )
         self.assertEqual(check.version_copy_errors(root, check.publishable_crates(root)), [])

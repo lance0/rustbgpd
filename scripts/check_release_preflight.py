@@ -6,8 +6,9 @@ some of them only after the tag is pushed:
 
   - the metric release-note contract (`public-docs-contract.yml`);
   - each publishable crate: its `CHANGELOG.md` must open with the manifest
-    version; every dependency snippet in a crate README, and the root
-    workspace pin, must name the manifest version of the crate it depends on;
+    version; every dependency snippet in a crate README or the embedding
+    guide, and the required root workspace pin, must name the manifest
+    version of the crate it depends on;
     and on a release commit the heading must be dated and the crate README
     must no longer call the version prepared;
   - the changelog fragments under `changelog.d/`, which must assemble cleanly
@@ -46,6 +47,7 @@ ASSEMBLER_SPEC.loader.exec_module(ASSEMBLER)
 PREPARED_WORDING = re.compile(r"\bprepar\w*", re.IGNORECASE)
 SECTION = re.compile(r"(?m)^## \[[^\]\n]+\][^\n]*$")
 DATE = re.compile(r"\b\d{4}-\d{2}-\d{2}\b")
+EMBEDDING = "docs/reference/embedding.md"
 # A Cargo dependency line: `name = "1.2.3"` or `name = { version = "1.2.3", ... }`.
 DEPENDENCY = re.compile(
     r'(?m)^([A-Za-z0-9_-]+)[ \t]*=[ \t]*'
@@ -141,11 +143,12 @@ def top_heading(root: Path, crate: str) -> str:
 def version_copy_errors(root: Path, crates: dict[str, tuple[str, str]]) -> list[str]:
     """Each crate README is packaged with its crate and is the crates.io landing
     page, so every dependency snippet in it must name the manifest version of
-    the publishable crate it depends on. The root workspace pins must too."""
+    the publishable crate it depends on. The embedding guide's examples are a
+    coordinated set, and every publishable crate needs a root workspace pin;
+    both must name the manifest versions too."""
     versions = dict(crates.values())
     errors = []
-    for crate in crates:
-        relative = f"crates/{crate}/README.md"
+    for relative in [*(f"crates/{crate}/README.md" for crate in crates), EMBEDDING]:
         for match in DEPENDENCY.finditer(read(root, relative)):
             name, version = match[1], match[2] if match[2] is not None else match[3]
             if name in versions and version != versions[name]:
@@ -160,9 +163,11 @@ def version_copy_errors(root: Path, crates: dict[str, tuple[str, str]]) -> list[
     pins = manifest.get("workspace", {}).get("dependencies", {})
     for name, version in versions.items():
         pin = pins.get(name)
-        if isinstance(pin, dict) and pin.get("version") != version:
+        # Cargo accepts both `name = "1.2.3"` and `name = { version = "1.2.3", ... }`.
+        pinned = pin.get("version") if isinstance(pin, dict) else pin
+        if pinned != version:
             errors.append(
-                f"Cargo.toml workspace pin for {name} is {pin.get('version')!r}, "
+                f"Cargo.toml workspace pin for {name} is {pinned!r}, "
                 f"not the manifest version {version}"
             )
     return errors
@@ -250,7 +255,7 @@ def preflight(
             lambda: crate_heading_errors(root, crates),
         ),
         (
-            "crate README snippets and workspace pins name manifest versions",
+            "crate README and embedding snippets and workspace pins name manifest versions",
             True,
             lambda: version_copy_errors(root, crates),
         ),
