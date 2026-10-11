@@ -12,13 +12,22 @@
 //! entries still receives the full table once the initial-advertisement gate is
 //! lifted (see the manager's `peer_orf_pending`).
 
+use std::collections::BTreeMap;
+
 use rustbgpd_wire::{AddressPrefixOrf, OrfAction, OrfMatch, Prefix};
+
+/// Fixed retained-entry bound per peer and address family, including DEFER pushes.
+pub(crate) const MAX_ORF_ENTRIES: usize = 4096;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum OrfApplyError {
+    Malformed,
+    Capacity,
+}
 
 /// One installed Address-Prefix ORF entry.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct OrfFilterEntry {
-    /// Ordering key — entries are evaluated in ascending sequence order.
-    pub sequence: u32,
     /// Permit or Deny on match.
     pub match_: OrfMatch,
     /// Minimum prefix length (0 = unspecified, RFC 5292 §4).
@@ -33,10 +42,8 @@ pub(crate) struct OrfFilterEntry {
 /// with prefix-list match semantics.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct OrfFilterSet {
-    /// Entries kept sorted by `sequence` (ascending). A plain `Vec`, not a
-    /// trie — first-match-by-sequence ordering matters more than lookup speed,
-    /// and ORF lists are small.
-    entries: Vec<OrfFilterEntry>,
+    /// Sequence order also supports replacements/removals without a list scan.
+    entries: BTreeMap<u32, OrfFilterEntry>,
 }
 
 impl OrfFilterSet {
@@ -45,42 +52,59 @@ impl OrfFilterSet {
         self.entries.is_empty()
     }
 
+    pub(crate) fn len(&self) -> usize {
+        self.entries.len()
+    }
+
     /// Apply a batch of wire ORF entries (in wire order).
     ///
     /// `ADD` inserts/replaces by sequence, `REMOVE` deletes by sequence,
-    /// `REMOVE-ALL` clears the set. Returns `Err(())` if any entry carries an
+    /// `REMOVE-ALL` clears the set. Returns `Malformed` if any entry carries an
     /// unrecognized field value (e.g. `min_len > max_len`, or a length beyond
-    /// the address family): per RFC 5291 §5.2 the previously installed list of
+    /// the address family): per RFC 5291 §6 the previously installed list of
     /// that type is removed, so on error the set is cleared and the caller
-    /// treats the family as permit-all again.
-    pub(crate) fn apply(&mut self, entries: &[AddressPrefixOrf]) -> Result<(), ()> {
+    /// treats the family as permit-all again. An ADD exceeding the fixed cap
+    /// rejects the entire batch and preserves the previously installed filter.
+    pub(crate) fn apply(&mut self, entries: &[AddressPrefixOrf]) -> Result<(), OrfApplyError> {
+        // RFC 5291 §6 malformed-field reset takes precedence over capacity.
+        if entries.iter().any(|entry| {
+            entry.action == OrfAction::Add
+                && entry
+                    .prefix
+                    .is_none_or(|prefix| !valid_lengths(&prefix, entry.min_len, entry.max_len))
+        }) {
+            self.entries.clear();
+            return Err(OrfApplyError::Malformed);
+        }
+        // Staging is bounded too: never insert the cap+1 entry.
+        let mut next = self.entries.clone();
         for entry in entries {
             match entry.action {
-                OrfAction::RemoveAll => self.entries.clear(),
+                OrfAction::RemoveAll => next.clear(),
                 OrfAction::Remove => {
-                    self.entries.retain(|e| e.sequence != entry.sequence);
+                    next.remove(&entry.sequence);
                 }
                 OrfAction::Add => {
                     let Some(prefix) = entry.prefix else {
                         self.entries.clear();
-                        return Err(());
+                        return Err(OrfApplyError::Malformed);
                     };
-                    if !valid_lengths(&prefix, entry.min_len, entry.max_len) {
-                        self.entries.clear();
-                        return Err(());
+                    if next.len() == MAX_ORF_ENTRIES && !next.contains_key(&entry.sequence) {
+                        return Err(OrfApplyError::Capacity);
                     }
-                    self.entries.retain(|e| e.sequence != entry.sequence);
-                    self.entries.push(OrfFilterEntry {
-                        sequence: entry.sequence,
-                        match_: entry.match_,
-                        min_len: entry.min_len,
-                        max_len: entry.max_len,
-                        prefix,
-                    });
+                    next.insert(
+                        entry.sequence,
+                        OrfFilterEntry {
+                            match_: entry.match_,
+                            min_len: entry.min_len,
+                            max_len: entry.max_len,
+                            prefix,
+                        },
+                    );
                 }
             }
         }
-        self.entries.sort_by_key(|e| e.sequence);
+        self.entries = next;
         Ok(())
     }
 
@@ -93,7 +117,7 @@ impl OrfFilterSet {
         if self.entries.is_empty() {
             return true;
         }
-        for entry in &self.entries {
+        for entry in self.entries.values() {
             if entry_matches(entry, prefix) {
                 return entry.match_ == OrfMatch::Permit;
             }
