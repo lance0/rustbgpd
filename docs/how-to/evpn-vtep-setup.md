@@ -147,6 +147,8 @@ bridge port. A foreign static row for the same MAC and VNI blocks that
 operation even when it exists only on the port's PVID. This can leave an
 owned row pending removal until the conflicting foreign row is cleared.
 An instance with `bridge_vlan` checks the configured VLAN only.
+If the blocked row still references a shared nexthop group, group installs
+and updates also wait so another MAC cannot change its forwarding indirectly.
 
 The daemon checks ownership again before applying remote FDB changes.
 These checks preserve foreign rows already visible to the check; the kernel
