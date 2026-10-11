@@ -27,15 +27,39 @@ and build and instrument identities ([identity.json](artifacts/quiet-main-v075-s
 The [2026-10-10 follow-up](policy-transition-release-followup-2026-10-10.md)
 marked the earlier main-vs-v0.75.0 comparison invalid for IRR memory.
 v0.75.0's own IRR runner predates daemon cgroup peak capture, so its legs
-recorded none. This run uses the corrected
-[preparation recipe](artifacts/policy-transition-release-followup-2026-10-10/quiet-preparation.md).
-Both daemons run through **one main runner revision**, with identical main
-`rbgp`, `rs-config-render` and `reloadstall` binaries. The runner revision is
-main plus a [two-line adapter](artifacts/quiet-main-v075-s2-irr-2026-10-11/irr-prebuilt-adapter.patch).
-The adapter only stops the IRR runner from rebuilding binaries, so the
-preinstalled arm daemon is the one measured. All of the runner's source,
-quiet, workload, cgroup and status gates remain. All 12 legs recorded a
-cgroup `memory.peak`, with `memory.swap.max` = 0.
+recorded none. This run follows the pairing in the
+[preparation recipe](artifacts/policy-transition-release-followup-2026-10-10/quiet-preparation.md):
+both daemons run through **one main runner revision**, with identical main
+`rbgp`, `rs-config-render` and `reloadstall` binaries. All of the runner's
+source, quiet, workload, cgroup and status gates remain. All 12 legs recorded
+a cgroup `memory.peak`, with `memory.swap.max` = 0.
+
+### Deviation from the published adapter
+
+The recipe's published adapter removes only `-p rustbgpd` from the IRR
+runner's build command. The runner would therefore still rebuild the common
+CLI, renderer and `reloadstall` engine inside each runner tree before every
+IRR leg, and that rebuild can replace the bytes installed there. This run
+instead used an [adapter that removes both build lines](artifacts/quiet-main-v075-s2-irr-2026-10-11/irr-prebuilt-adapter.patch),
+so the IRR runner builds nothing. One prebuilt set of common tools was
+installed identically into both runner trees. The matrix runner has no build
+step and needed no adapter.
+
+The common tools were built once from main `0a73ba716`, the same source as the
+main daemon, with Rust/Cargo 1.99.0:
+
+| Tool | Build command | SHA-256 |
+|---|---|---|
+| `rbgp` | `cargo build --release --locked -j 4 -p rustbgpd -p rustbgpctl` (the main daemon build) | `866e06e2050c42aa0a85fc19124164b85c5761d08ffd8d384f4b4ce1aeb3516b` |
+| `rs-config-render` | `cargo build --release --locked -j 4 -p rs-config-render` | `dfd347670e38f3a77157ebec513a23083b0bb00aec0ac979032af14f8f61dc09` |
+| `reloadstall` | `cargo build --profile scale --locked -j 4 -p reloadstall` | `395686d97f115a53e746ad11241d618a656f337623412392836b881276941358` |
+
+The IRR runner hashes all four installed binaries (daemon, `rbgp`, renderer
+and `reloadstall`) at the start of each leg, and rechecks them during and at
+the end of the leg. The matrix runner records and rechecks the daemon and
+`reloadstall` hashes. In addition, the window hash-checked all four installed
+binaries in both runner trees before and after every leg. Every check
+matched.
 
 ## Sources and builds
 

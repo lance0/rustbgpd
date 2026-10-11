@@ -33,6 +33,19 @@
     "rs-config-render": "dfd347670e38f3a77157ebec513a23083b0bb00aec0ac979032af14f8f61dc09",
     "reloadstall": "395686d97f115a53e746ad11241d618a656f337623412392836b881276941358"
   },
+  "common_tools_build": {
+    "source_commit": "0a73ba716ac0a83e5bb9977e0fab4f88f6b54cc9",
+    "source_tree": "fb47aa6a47f872f97a33d3df7c3daf1b2fca9249",
+    "toolchain": "rustc 1.99.0 (b940084d7 2026-09-28); cargo 1.99.0 (5f94df478 2026-08-27)",
+    "commands": {
+      "rbgp": "cargo build --release --locked -j 4 -p rustbgpd -p rustbgpctl",
+      "rs-config-render": "cargo build --release --locked -j 4 -p rs-config-render",
+      "reloadstall": "cargo build --profile scale --locked -j 4 -p reloadstall"
+    },
+    "installation": "one prebuilt set installed identically into both runner trees; the IRR runner's build lines are removed by the adapter, so no runner rebuilt them",
+    "hash_checks": "IRR runner: all four installed binaries hashed at leg start and rechecked during and at leg end; matrix runner: daemon and reloadstall recorded and rechecked; window: all four installed binaries hash-checked in both runner trees before and after every leg"
+  },
+  "deviation_from_published_adapter": "the published adapter removed only -p rustbgpd, leaving the runner to rebuild the CLI, renderer and reloadstall in each runner tree; this run removed both build lines and installed prebuilt common tools",
   "cells": {
     "s2": {"runner": "bench/scale/matrix/run-matrix.sh rustbgpd", "peers": 700, "prefixes": 400400, "reloads": 4, "control_secs": 30},
     "irr": {"runner": "bench/scale/irrreload/run-irr-reload.sh rustbgpd-sighup", "members": 320, "prefixes": 183040,
