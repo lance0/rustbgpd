@@ -38,6 +38,36 @@ class OperatorAuthTests(unittest.TestCase):
         self.assertIn(f'        RUSTBGPD_TOKEN_FILE: {token}', lines)
 
 
+class RustOriginTests(unittest.TestCase):
+    def test_requires_and_retains_frr_sync_state_before_wire_proof(self):
+        fixture = json.loads((Path(__file__).resolve().parents[2] /
+                              'fixtures/m121-frr-synchronized-proxy.json').read_text())
+        mac = fixture['mac']
+        for inactive, active in ((True, True), (False, True), (True, False)):
+            with self.subTest(inactive=inactive, active=active), tempfile.TemporaryDirectory() as directory:
+                state = {mac: dict(type='local', intf='es0', esi=driver.ESI,
+                                   localInactive=inactive, peerActive=active)}
+                def frr(node, command, state=state):
+                    if node == 'a':
+                        self.assertEqual(command, f'show evpn mac vni 100 mac {mac} json')
+                        return json.dumps(state)
+                    return json.dumps(fixture['frr_routes'])
+                with patch.object(driver, 'OUT', Path(directory)), \
+                     patch.object(driver, 'learn'), patch.object(driver, 'ctl', return_value=fixture['rust_routes']), \
+                     patch.object(driver, 'frr', side_effect=frr), patch.object(driver, 'nhg', return_value=True), \
+                     patch.object(driver, 'wait', side_effect=lambda check, _: check()), \
+                     patch.object(driver, 'snapshot'), patch.object(driver, 'stop_captures'), \
+                     patch('m121_all_active_wire.verify_pcap', return_value={'type2': 1}) as wire:
+                    if inactive and active:
+                        driver.rust_origin(100, 100, None)
+                        wire.assert_called_once()
+                    else:
+                        with self.assertRaises(AssertionError):
+                            driver.rust_origin(100, 100, None)
+                        wire.assert_not_called()
+                self.assertEqual(json.loads(Path(directory, 'rust-origin-frr-sync.json').read_text()), state)
+
+
 class HistoricalComparisonTests(unittest.TestCase):
     def test_explicit_option_only(self):
         self.assertFalse(driver.historical_comparison_enabled('0'))
@@ -312,6 +342,21 @@ class CommandBridgeTests(unittest.TestCase):
                 with self.assertRaises(AssertionError):
                     driver.execute_frr_request(request)
                 run.assert_not_called()
+
+    def test_only_fixed_sync_mac_and_vnis_are_allowed(self):
+        result = subprocess.CompletedProcess([], 0, '{}', '')
+        for vni in (100, 101, 102):
+            for mac in (driver.RUST_MAC, driver.PEER_MAC):
+                request = self.request()
+                request['args'] = ['vtysh', '-c', f'show evpn mac vni {vni} mac {mac} json']
+                with self.subTest(vni=vni, mac=mac), patch.object(driver.subprocess, 'run', return_value=result) as run:
+                    if vni in (100, 101) and mac == driver.RUST_MAC:
+                        self.assertEqual(driver.execute_frr_request(request)['exit'], 0)
+                        run.assert_called_once()
+                    else:
+                        with self.assertRaises(AssertionError):
+                            driver.execute_frr_request(request)
+                        run.assert_not_called()
 
     def test_nonzero_exit_and_output_propagate(self):
         result = subprocess.CompletedProcess([], 7, 'partial output\n', 'failure\n')

@@ -10,7 +10,7 @@ import unittest
 from m121_all_active_oracle import (
     ESI, FRR, RUST, verify_bum, verify_discovery, verify_frr_es_routes, verify_frr_originated,
     verify_frr_peer_originated,
-    verify_local_originated, verify_nhg, verify_unicast,
+    verify_local_originated, verify_nhg, verify_unicast, verify_frr_synced_mac,
     checksum, frame, make_frame, packet_identities, verify_identities,
 )
 
@@ -169,7 +169,9 @@ def frr_routes():
             'ET:8 ES-Import-Rt:aa:bb:cc:dd:ee:ff DF: (alg: 2, pref: 100)')
     add(f'{RUST}:100', f'[2]:[0]:[48]:[{MAC}]', 2, RUST,
         'RT:65000:100 ET:8', mac=MAC, ethTag=0, macLen=48, esi=ESI)
-    routes['numPrefix'] = 7
+    add(f'{FRR}:2', f'[2]:[0]:[48]:[{MAC}]', 2, FRR,
+        'RT:65000:100 ET:8 ND:Proxy', mac=MAC, ethTag=0, macLen=48, esi=ESI)
+    routes['numPrefix'] = 8
     return routes
 
 
@@ -400,6 +402,32 @@ class FrrRouteTests(unittest.TestCase):
         with self.assertRaises(AssertionError):
             verify_frr_originated(self.routes, MAC, VNI)
 
+    def test_proxy_pair_missing_duplicate_and_unmarked(self):
+        original = deepcopy(self.routes)
+        for peer in (RUST, FRR):
+            with self.subTest(missing=peer):
+                routes = deepcopy(original)
+                del routes[f'{peer}:100' if peer == RUST else f'{peer}:2'][self.prefix]
+                with self.assertRaises(AssertionError):
+                    verify_frr_originated(routes, MAC, VNI)
+        proxy = self.routes[f'{FRR}:2'][self.prefix]['paths'][0][0]
+        for field, bad in [('peerId', RUST), ('esi', ESI[:-1]+'2'), ('ethTag', 1),
+                           ('macLen', 47), ('valid', False),
+                           ('nexthops', [dict(ip=RUST, afi='ipv4', used=True)]),
+                           ('extendedCommunity', {'string': 'RT:65000:100 ET:8'}),
+                           ('extendedCommunity', {'string': 'RT:65000:100 ET:8 ND:Proxy ND:Proxy'}),
+                           ('extendedCommunity', {'string': 'RT:65000:100 ET:8 ND:Proxy R:1'}),
+                           ('extendedCommunity', {'string': 'RT:65000:100 ET:8 ND:Proxyy'})]:
+            with self.subTest(field=field, bad=bad):
+                saved = proxy[field]
+                proxy[field] = bad
+                with self.assertRaises(AssertionError):
+                    verify_frr_originated(self.routes, MAC, VNI)
+                proxy[field] = saved
+        self.routes[f'{FRR}:2'][self.prefix]['paths'].append([deepcopy(proxy)])
+        with self.assertRaises(AssertionError):
+            verify_frr_originated(self.routes, MAC, VNI)
+
     def test_es_present_and_withdrawn(self):
         self.assertTrue(verify_frr_es_routes(self.routes, True, VNI))
         for prefix in list(self.table):
@@ -441,9 +469,42 @@ class LocalRouteTests(unittest.TestCase):
                           label=100, label2=0, esi=ESI, ethernet_tag='0', next_hop=RUST,
                           tunnel_type=8, ip='',
                           extended_communities=[842122827661412, 219550481834311688])
+        self.proxy = dict(self.route, peer=FRR, rd=f'{FRR}:2', next_hop=FRR,
+                          extended_communities=[842122827661412, 219550481834311688,
+                                                434601762087763968])
+
+    def test_retained_hosted_proxy_shape(self):
+        fixture = json.loads((Path(__file__).resolve().parents[2] /
+                              'fixtures/m121-frr-synchronized-proxy.json').read_text())
+        self.assertTrue(verify_local_originated(fixture['rust_routes'], fixture['mac'], fixture['vni']))
+        self.assertTrue(verify_frr_originated(fixture['frr_routes'], fixture['mac'], fixture['vni']))
 
     def test_local_label(self):
-        self.assertTrue(verify_local_originated([self.route], MAC, VNI))
+        self.assertTrue(verify_local_originated([self.route, self.proxy], MAC, VNI))
+
+    def test_proxy_exact_fields_and_flags(self):
+        for field, bad in [('label', 101), ('label2', 100), ('peer', '10.211.0.3'),
+                           ('rd', f'{FRR}:3'), ('esi', ESI[:-1]+'2'), ('ethernet_tag', '1'),
+                           ('next_hop', RUST), ('ip', '192.0.2.1'), ('tunnel_type', 0)]:
+            with self.subTest(field=field):
+                with self.assertRaises(AssertionError):
+                    verify_local_originated([self.route, dict(self.proxy, **{field: bad})], MAC, VNI)
+        for communities in (self.proxy['extended_communities'][:2],
+                            self.proxy['extended_communities']*2,
+                            [842122827661412, 219550481834311688, 0x0608040000000001],
+                            [842122827661412, 219550481834311688, 0x0608060000000000],
+                            [842122827661413, 219550481834311688, 0x0608040000000000],
+                            [842122827661412, 219550481834311689, 0x0608040000000000]):
+            with self.subTest(communities=communities):
+                with self.assertRaises(AssertionError):
+                    verify_local_originated([self.route, dict(self.proxy, extended_communities=communities)], MAC, VNI)
+        for routes in ([self.route], [self.proxy], [self.route, self.route],
+                       [self.proxy, self.proxy], [self.route, self.proxy, self.proxy]):
+            with self.assertRaises(AssertionError):
+                verify_local_originated(routes, MAC, VNI)
+        with self.assertRaises(AssertionError):
+            verify_local_originated([dict(self.route, extended_communities=self.proxy['extended_communities']),
+                                     self.proxy], MAC, VNI)
 
     def test_wrong_label_peer_esi_rt_or_encapsulation(self):
         for field, bad in [('label', 101), ('label2', 100), ('peer', FRR),
@@ -455,9 +516,30 @@ class LocalRouteTests(unittest.TestCase):
             with self.subTest(field=field, bad=bad):
                 route = dict(self.route, **{field: bad})
                 with self.assertRaises(AssertionError):
-                    verify_local_originated([route], MAC, VNI)
+                    verify_local_originated([route, self.proxy], MAC, VNI)
         with self.assertRaises(AssertionError):
             verify_local_originated([self.route, self.route], MAC, VNI)
+
+
+class FrrSyncStateTests(unittest.TestCase):
+    def test_source_derived_sync_state(self):
+        state = {MAC: dict(type='local', intf='es0', esi=ESI, localInactive=True, peerActive=True)}
+        self.assertTrue(verify_frr_synced_mac(state, MAC))
+        self.assertTrue(verify_frr_synced_mac({MAC: dict(state[MAC], peerProxy=False)}, MAC))
+        for field, bad in [('type', 'remote'), ('intf', 'vx100'), ('esi', ESI[:-1]+'2'),
+                           ('localInactive', False), ('localInactive', 1),
+                           ('peerActive', False), ('peerActive', 1), ('peerProxy', True)]:
+            with self.subTest(field=field, bad=bad):
+                with self.assertRaises(AssertionError):
+                    verify_frr_synced_mac({MAC: dict(state[MAC], **{field: bad})}, MAC)
+        for missing in ('localInactive', 'peerActive'):
+            bad = deepcopy(state)
+            del bad[MAC][missing]
+            with self.assertRaises(AssertionError):
+                verify_frr_synced_mac(bad, MAC)
+        for bad in ({}, {**state, '02:00:00:00:00:00': state[MAC]}):
+            with self.assertRaises(AssertionError):
+                verify_frr_synced_mac(bad, MAC)
 
 
 if __name__ == '__main__':

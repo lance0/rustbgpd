@@ -223,8 +223,25 @@ def _verify_originated(routes, mac, vni, peer, expected_rd):
 
 
 def verify_frr_originated(routes, mac, vni):
-    """Require one rustbgpd MAC route and no competing origin at the remote FRR."""
-    return _verify_originated(routes, mac, vni, RUST, f'{RUST}:{vni}')
+    """Require the Rust original and FRR's synchronized proxy, with no other origin."""
+    matches = [(rd, prefix, path) for rd, prefix, path in _route_paths(routes)
+               if path.get('routeType') == 2
+               and (path.get('mac') == mac or f'[{mac}]' in prefix)]
+    assert len(matches) == 2, f'Type 2 original and proxy: {matches}'
+    seen = []
+    for rd, prefix, path in matches:
+        peer = path.get('peerId')
+        assert peer in (RUST, FRR), path
+        assert rd == (f'{RUST}:{vni}' if peer == RUST else f'{FRR}:2'), rd
+        assert prefix == f'[2]:[0]:[48]:[{mac}]', prefix
+        assert path.get('mac') == mac and path.get('ethTag') == 0 and path.get('macLen') == 48, path
+        assert path.get('esi') == ESI, path
+        communities = [f'RT:65000:{vni}', 'ET:8'] + (['ND:Proxy'] if peer == FRR else [])
+        _verify_path(path, peer, communities)
+        assert sorted(path['extendedCommunity']['string'].split()) == sorted(communities), path
+        seen.append(peer)
+    assert sorted(seen) == sorted([RUST, FRR]), seen
+    return True
 
 
 def verify_frr_peer_originated(routes, mac, vni):
@@ -266,17 +283,37 @@ def verify_frr_es_routes(routes, present, vni):
 
 
 def verify_local_originated(rbgp_routes, mac, vni):
-    """Pin the local Type 2 label that FRR's route JSON does not expose."""
+    """Pin the Rust original and exact FRR proxy bytes, including both VNI labels."""
     matches = [route for route in rbgp_routes
                if route.get('route_type') == 2 and route.get('mac') == mac]
-    assert len(matches) == 1, matches
-    route = matches[0]
-    expected = dict(peer='0.0.0.0', rd=f'{RUST}:{vni}', label=vni, label2=0,
-                    esi=ESI, ethernet_tag='0', next_hop=RUST, tunnel_type=8, ip='')
-    for key, value in expected.items():
-        assert route.get(key) == value, (key, route)
+    assert len(matches) == 2, matches
     rt = int.from_bytes(bytes.fromhex('0002fde8') + vni.to_bytes(4, 'big'), 'big')
     encap = int.from_bytes(bytes.fromhex('030c000000000008'), 'big')
-    communities = route.get('extended_communities', [])
-    assert communities.count(rt) == 1 and communities.count(encap) == 1, communities
+    proxy = int.from_bytes(bytes.fromhex('0608040000000000'), 'big')
+    seen = []
+    for route in matches:
+        peer = route.get('peer')
+        assert peer in ('0.0.0.0', FRR), route
+        original = peer == '0.0.0.0'
+        expected = dict(rd=f'{RUST}:{vni}' if original else f'{FRR}:2', label=vni, label2=0,
+                        esi=ESI, ethernet_tag='0', next_hop=RUST if original else FRR,
+                        tunnel_type=8, ip='')
+        for key, value in expected.items():
+            assert route.get(key) == value, (key, route)
+        communities = [rt, encap] + ([] if original else [proxy])
+        assert sorted(route.get('extended_communities', [])) == sorted(communities), route
+        seen.append(peer)
+    assert sorted(seen) == sorted(['0.0.0.0', FRR]), seen
+    return True
+
+
+def verify_frr_synced_mac(state, mac):
+    """Require FRR's inactive local MAC synchronized from its active ES peer."""
+    # FRR 10.7.1 zebra/zebra_evpn_mac.c:674-690 emits only true sync flags.
+    assert set(state) == {mac}, state
+    row = state[mac]
+    for key, expected in dict(type='local', intf='es0', esi=ESI,
+                              localInactive=True, peerActive=True).items():
+        assert type(row.get(key)) is type(expected) and row[key] == expected, (key, row)
+    assert row.get('peerProxy', False) is False, row
     return True

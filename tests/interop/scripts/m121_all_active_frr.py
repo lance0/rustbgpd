@@ -145,7 +145,8 @@ def execute_frr_request(request):
     node, args, timeout = request['node'], request['args'], request['timeout']
     assert node in ('a', 'r') and type(timeout) is int and 0 < timeout <= 60, request
     shows = {'show version', 'show evpn es detail', 'show bgp l2vpn evpn route json',
-             'show evpn mac vni 100', 'show evpn mac vni 101'}
+             'show evpn mac vni 100', 'show evpn mac vni 101',
+             *{f'show evpn mac vni {vni} mac {RUST_MAC} json' for vni in (100, 101)}}
     assert (len(args) == 3 and args[:2] == ['vtysh', '-c'] and args[2] in shows) or args in (
         ['/usr/lib/frr/frrinit.sh', 'start'], ['/usr/lib/frr/frrinit.sh', 'stop']), request
     try:
@@ -444,14 +445,17 @@ def peer_only(vni, compare_baseline):
 
 
 def rust_origin(vni, preference, bgp):
-    from m121_all_active_oracle import verify_frr_originated, verify_local_originated
+    from m121_all_active_oracle import verify_frr_originated, verify_local_originated, verify_frr_synced_mac
     learn('b', RUST_MAC)
     def check():
         verify_local_originated(ctl('evpn'), RUST_MAC, vni)
         verify_frr_originated(json.loads(frr('r', 'show bgp l2vpn evpn route json')), RUST_MAC, vni)
+        state = json.loads(frr('a', f'show evpn mac vni {vni} mac {RUST_MAC} json'))
+        save('rust-origin-frr-sync.json', state)
+        verify_frr_synced_mac(state, RUST_MAC)
         nhg(RUST_MAC, {IPS['a'], IPS['b']})
         return True
-    wait(check, 'exclusive Rust-originated Type2 and FRR two-member NHG')
+    wait(check, 'Rust original, FRR synchronized proxy and two-member NHG')
     snapshot('rust-only-before-bidirectional', vni)
     stop_captures([bgp])
     # Extract raw TCP bytes; the oracle checks the actual BGP NLRI/attributes.

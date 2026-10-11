@@ -14,14 +14,70 @@ import subprocess
 import sys
 
 from m105_capture_oracle import messages, need, reassemble, update
-from m121_all_active_oracle import ESI, RUST
+from m121_all_active_oracle import ESI, FRR, RUST
 
 
 REMOTE = '10.211.0.3'
 
 
+def verify_frr_proxy(rows, mac, vni):
+    """Require FRR's synchronized MAC proxy, with no independent second origin."""
+    streams = defaultdict(list)
+    for row in rows:
+        stream, source, destination, sequence, payload = row.rstrip('\n').split('\t')
+        if destination == RUST and source != RUST and payload:
+            streams[(stream, source)].append((int(sequence), bytes.fromhex(payload.replace(':', ''))))
+    ip = ipaddress.IPv4Address(FRR).packed
+    target_mac = bytes.fromhex(mac.replace(':', ''))
+    expected_body = (b'\x00\x01' + ip + b'\x00\x02'
+                     + bytes.fromhex(ESI.replace(':', '')) + b'\0\0\0\0\x30'
+                     + target_mac + b'\0' + vni.to_bytes(3, 'big'))
+    expected_communities = sorted([bytes.fromhex('0002fde8') + vni.to_bytes(4, 'big'),
+                                   bytes.fromhex('030c000000000008'),
+                                   bytes.fromhex('0608040000000000')])
+    seen, origins = 0, set()
+    for (stream, source), segments in streams.items():
+        for kind, message in messages(reassemble(segments)):
+            need(kind != 3, 'peer sent a NOTIFICATION')
+            if kind != 2:
+                continue
+            withdrawn, attrs, announced = update(message)
+            need(not withdrawn and not announced, 'unexpected peer unicast NLRI')
+            if 14 not in attrs:
+                continue
+            need(attrs[14][0] & ~0x10 == 0x80, 'wrong proxy MP_REACH flags')
+            reach = attrs[14][1]
+            need(len(reach) >= 9 and reach[:4] == bytes([0, 25, 70, 4])
+                 and reach[8] == 0, 'wrong proxy AFI/SAFI/next-hop length or reserved byte')
+            cursor = 9
+            while cursor < len(reach):
+                need(cursor + 2 <= len(reach), 'truncated peer EVPN NLRI header')
+                route_type, length = reach[cursor:cursor+2]
+                cursor += 2
+                need(cursor + length <= len(reach), 'truncated peer EVPN NLRI body')
+                body = reach[cursor:cursor+length]
+                cursor += length
+                if route_type == 2:
+                    need(length >= 33, 'truncated peer Type 2 NLRI')
+                if route_type != 2 or body[23:29] != target_mac:
+                    continue
+                need(source == FRR and reach[4:8] == ip, 'foreign proxy source or next hop')
+                need(body == expected_body, 'wrong proxy RD, ESI, tag, MAC-only shape or VNI')
+                need(16 in attrs and attrs[16][0] & ~0x10 == 0xc0,
+                     'missing proxy extended communities or wrong flags')
+                ext = attrs[16][1]
+                communities = [ext[i:i+8] for i in range(0, len(ext), 8)]
+                need(sorted(communities) == expected_communities,
+                     'wrong proxy RT, VXLAN encapsulation or router community')
+                origins.add((stream, source))
+                seen += 1
+    need(seen > 0 and len(origins) == 1, 'missing or multiple FRR proxy streams')
+    return seen
+
+
 def verify_wire(rows, mac, vni, df_preference=100):
-    """Check five-field TCP TSV rows and require all four originated route kinds."""
+    """Require four rustbgpd route kinds and the FRR synchronized proxy witness."""
+    rows = list(rows)
     streams = defaultdict(list)
     for row in rows:
         columns = row.rstrip('\n').split('\t')
@@ -77,6 +133,8 @@ def verify_wire(rows, mac, vni, df_preference=100):
             encapsulations = [c for c in communities if c[:2] == b'\x03\x0c']
             need(route_targets == [rt] and encapsulations == [encap], 'conflicting RT or encapsulation')
             if route_type == 2:
+                need(sorted(communities) == sorted([rt, encap]),
+                     'Rust Type 2 must be a nonproxy original with only RT and VXLAN encapsulation')
                 need(length == 33 and body[18:23] == b'\0\0\0\0\x30'
                      and body[23:29] == target_mac and body[29] == 0,
                      'wrong MAC-only Type 2 shape, tag or MAC')
@@ -105,6 +163,7 @@ def verify_wire(rows, mac, vni, df_preference=100):
                 seen['type4'] += 1
 
     need(all(seen.values()), f'missing originated route kinds: {seen}')
+    seen['frr_proxy_type2'] = verify_frr_proxy(rows, mac, vni)
     return seen
 
 
