@@ -552,6 +552,10 @@ pub(crate) struct PeerSession {
     flap_count: u64,
     established_at: Option<tokio::time::Instant>,
     last_error: String,
+    /// Bounded cause of the teardown in progress, captured where it happens
+    /// and attached to the loss of `Established`. Unlike `last_error`, it
+    /// never outlives the transition it explains.
+    teardown_cause: Option<String>,
     /// Root cause of an in-flight local Cease/8 teardown.
     pending_outbound_teardown_cause: Option<crate::handle::SessionFailureCause>,
     /// Latest query-time TCP-AO inspection for the currently owned stream.
@@ -2156,6 +2160,7 @@ impl PeerSession {
             flap_count: 0,
             established_at: None,
             last_error: String::new(),
+            teardown_cause: None,
             pending_outbound_teardown_cause: None,
             tcp_ao_info,
             tcp_ao_key_metadata,
@@ -2497,10 +2502,10 @@ impl PeerSession {
                 self.session_telemetry_metric_lease
                     .latch_down_reason(SessionDownReason::LocalNoNotification);
                 if pending_outbound_cause.is_none() {
-                    self.last_error = format!(
+                    self.record_transport_cause(format!(
                         "send hold timer expired after {}s (RFC 9687)",
                         limit.as_secs()
-                    );
+                    ));
                 }
                 self.emit_notification_event(
                     SessionNotificationDirection::Sent,
@@ -2530,7 +2535,7 @@ impl PeerSession {
                 let cause = crate::handle::SessionFailureCause::WriterIo(e.kind());
                 debug!(peer = %self.peer_label, cause = %cause, "writer task TCP error");
                 if pending_outbound_cause.is_none() {
-                    self.last_error = cause.to_string();
+                    self.record_transport_cause(cause.to_string());
                 }
                 self.session_telemetry_metric_lease
                     .latch_down_reason(SessionDownReason::TransportError);
@@ -2543,7 +2548,7 @@ impl PeerSession {
                 };
                 warn!(peer = %self.peer_label, cause = %cause, "writer task ended unexpectedly");
                 if pending_outbound_cause.is_none() {
-                    self.last_error = cause.to_string();
+                    self.record_transport_cause(cause.to_string());
                 }
                 self.session_telemetry_metric_lease
                     .latch_down_reason(SessionDownReason::TransportError);
@@ -2566,7 +2571,7 @@ impl PeerSession {
                 let cause = crate::handle::SessionFailureCause::ReaderIo(e.kind());
                 debug!(peer = %self.peer_label, cause = %cause, "TCP read error");
                 if self.pending_outbound_teardown_cause.is_none() {
-                    self.last_error = cause.to_string();
+                    self.record_transport_cause(cause.to_string());
                 }
                 self.session_telemetry_metric_lease
                     .latch_down_reason(SessionDownReason::TransportError);

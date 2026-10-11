@@ -431,6 +431,11 @@ pub enum SessionLifecycleNotification {
         old: SessionState,
         /// New FSM state.
         new: SessionState,
+        /// Bounded teardown cause captured when this transition left
+        /// `Established`: the sent or received NOTIFICATION (with any valid
+        /// RFC 9003 shutdown communication), a transport cause, or
+        /// `closed without NOTIFICATION`. `None` for every other transition.
+        teardown_cause: Option<String>,
     },
 }
 

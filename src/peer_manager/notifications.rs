@@ -1,7 +1,4 @@
-use std::net::IpAddr;
-
 use rustbgpd_api::peer_types::PeerKey;
-use rustbgpd_fsm::SessionState;
 use rustbgpd_transport::{
     PeerHandle, SessionIdentity, SessionLifecycleNotification, SessionNotification,
 };
@@ -619,40 +616,16 @@ impl PeerManager {
         &mut self,
         notification: &SessionLifecycleNotification,
     ) {
-        match notification {
-            SessionLifecycleNotification::StateChanged {
-                session_id,
-                role,
-                peer_addr,
-                peer_asn,
-                old,
-                new,
-            } => self.handle_state_changed_notification(
-                *session_id,
-                *role,
-                *peer_addr,
-                *peer_asn,
-                *old,
-                *new,
-            ),
-        }
-    }
-
-    pub(super) fn drain_ready_session_lifecycle_notifications(&mut self) {
-        while let Ok(notification) = self.session_lifecycle_rx.try_recv() {
-            self.handle_session_lifecycle_notification(&notification);
-        }
-    }
-
-    pub(super) fn handle_state_changed_notification(
-        &mut self,
-        session_id: u64,
-        role: rustbgpd_transport::SessionRole,
-        peer_addr: IpAddr,
-        peer_asn: Option<u32>,
-        old: SessionState,
-        new: SessionState,
-    ) {
+        let SessionLifecycleNotification::StateChanged {
+            session_id,
+            role,
+            peer_addr,
+            peer_asn,
+            old,
+            new,
+            teardown_cause,
+        } = notification;
+        let (session_id, role) = (*session_id, *role);
         let Some(peer_key) = self.peer_key_for_session(session_id) else {
             debug!(peer = %peer_addr, session_id, ?role, "ignoring lifecycle notification for unknown peer session");
             return;
@@ -667,10 +640,16 @@ impl PeerManager {
             debug!(peer = %peer_addr, session_id, ?role, "ignoring stale StateChanged lifecycle notification");
             return;
         }
-        if let Some(peer_asn) = peer_asn {
+        if let Some(peer_asn) = *peer_asn {
             self.learn_dynamic_remote_asn(&peer_key, peer_asn);
         }
-        self.publish_state_lifecycle_event(&peer_key, role, old, new);
+        self.publish_state_lifecycle_event(&peer_key, role, *old, *new, teardown_cause.as_deref());
+    }
+
+    pub(super) fn drain_ready_session_lifecycle_notifications(&mut self) {
+        while let Ok(notification) = self.session_lifecycle_rx.try_recv() {
+            self.handle_session_lifecycle_notification(&notification);
+        }
     }
 
     fn learn_dynamic_remote_asn(&mut self, peer_key: &PeerKey, peer_asn: u32) {

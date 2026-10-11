@@ -536,8 +536,12 @@ impl PeerSession {
             bytes::Bytes::new(),
         );
         self.log_notification(SessionNotificationDirection::Sent, &notif, None);
-        self.record_notification_cause(SessionNotificationDirection::Sent, &notif);
+        self.record_notification_cause(SessionNotificationDirection::Sent, &notif, None);
         self.last_error = cause.to_string();
+        if let Some(teardown_cause) = &mut self.teardown_cause {
+            use std::fmt::Write as _;
+            let _ = write!(teardown_cause, "; {cause}");
+        }
         // Best-effort: the writer's priority channel is unbounded, so
         // this only fails if we already dropped the writer (e.g. a
         // double-trigger race). Either way, proceed with teardown.
@@ -827,6 +831,7 @@ impl PeerSession {
                             self.record_notification_cause(
                                 SessionNotificationDirection::Received,
                                 &notif,
+                                shutdown_reason.as_deref(),
                             );
                             self.metrics.record_notification_received(
                                 &self.peer_label,

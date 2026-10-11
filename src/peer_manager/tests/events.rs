@@ -131,6 +131,7 @@ async fn dynamic_accept_any_peer_snapshot_learns_negotiated_asn() {
         peer_asn: Some(65099),
         old: SessionState::OpenConfirm,
         new: SessionState::Established,
+        teardown_cause: None,
     });
 
     let managed = mgr.peers.get(&key(addr)).unwrap();
@@ -194,6 +195,7 @@ async fn lifecycle_notification_matches_scoped_static_peer_by_session_id() {
         peer_asn: None,
         old: SessionState::OpenConfirm,
         new: SessionState::Established,
+        teardown_cause: None,
     });
 
     let event = tokio::time::timeout(Duration::from_millis(250), events.recv())
@@ -591,4 +593,195 @@ async fn policy_event_history_capacity_evicts_oldest() {
         events.last().map(|event| event.target.as_str()),
         Some(expected_last.as_str())
     );
+}
+
+/// Spawn a real primary session for `remote` on the manager's lifecycle lane.
+/// The manager loop is not running, so lifecycle notifications stay queued
+/// until the test drains them: that is the interleaving under test.
+fn spawn_real_primary(
+    mgr: &mut PeerManager,
+    remote: std::net::SocketAddr,
+) -> mpsc::Receiver<RibUpdate> {
+    let (rib_tx, rib_rx) = mpsc::channel(1024);
+    let mut config = mgr.build_transport_config(&make_config(remote.ip(), 65002));
+    config.remote_addr = remote;
+    config.connect_timeout = Duration::from_millis(500);
+    config.peer.connect_retry_secs = 1;
+    let handle = PeerHandle::spawn_with_identity_and_lifecycle(
+        config,
+        BgpMetrics::new(),
+        rib_tx,
+        None,
+        None,
+        None,
+        None,
+        Some(mgr.session_lifecycle_tx.clone()),
+        None,
+        None,
+        false,
+        rustbgpd_transport::SessionIdentity::primary(1),
+    );
+    insert_test_managed_peer(mgr, remote.ip(), handle, false);
+    rib_rx
+}
+
+/// Complete the OPEN/KEEPALIVE exchange and wait until the session task
+/// itself reports Established.
+async fn establish_real_session(mgr: &PeerManager, stream: &mut TcpStream) {
+    use super::collision::{mock_open, read_bgp_message, send_bgp_message};
+
+    let mut buf = BytesMut::new();
+    assert!(matches!(
+        read_bgp_message(stream, &mut buf).await,
+        Message::Open(_)
+    ));
+    send_bgp_message(
+        stream,
+        &Message::Open(mock_open(Ipv4Addr::new(10, 0, 0, 2))),
+    )
+    .await;
+    assert!(matches!(
+        read_bgp_message(stream, &mut buf).await,
+        Message::Keepalive
+    ));
+    send_bgp_message(stream, &Message::Keepalive).await;
+    session_state_where(mgr, |state| state.fsm_state == SessionState::Established).await;
+}
+
+/// Poll the session task until `done` holds. Each answer comes from the
+/// session task between FSM batches, so it also proves every lifecycle
+/// notification of the batches before it has been queued.
+async fn session_state_where(
+    mgr: &PeerManager,
+    done: impl Fn(&PeerSessionState) -> bool,
+) -> PeerSessionState {
+    let handle = mgr.peers[&key(IpAddr::V4(Ipv4Addr::LOCALHOST))].handle();
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            if let Some(state) = handle.query_state_timeout(Duration::from_secs(1)).await
+                && done(&state)
+            {
+                return state;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("session reached the expected state")
+}
+
+/// Send Cease/2 with an RFC 9003 communication that needs sanitizing, then
+/// read to EOF: the session has processed the NOTIFICATION and closed TCP.
+async fn send_shutdown_and_wait_for_close(stream: &mut TcpStream) {
+    use super::collision::send_bgp_message;
+
+    let text = b"maint\nwindow";
+    let mut data = vec![u8::try_from(text.len()).unwrap()];
+    data.extend_from_slice(text);
+    send_bgp_message(
+        stream,
+        &Message::Notification(rustbgpd_wire::NotificationMessage::new(
+            rustbgpd_wire::notification::NotificationCode::Cease,
+            rustbgpd_wire::notification::cease_subcode::ADMINISTRATIVE_SHUTDOWN,
+            bytes::Bytes::from(data),
+        )),
+    )
+    .await;
+    let mut rest = Vec::new();
+    stream.read_to_end(&mut rest).await.unwrap();
+}
+
+async fn lost_row_summaries(mgr: &mut PeerManager) -> Vec<String> {
+    mgr.drain_ready_session_lifecycle_notifications();
+    query_session_event_history(
+        mgr,
+        Some(IpAddr::V4(Ipv4Addr::LOCALHOST)),
+        BTreeSet::from([SessionLifecycleEventType::Lost]),
+        0,
+    )
+    .await
+    .into_iter()
+    // The exact conversion `ListSessionEvents` applies to each row.
+    .map(|event| {
+        rustbgpd_api::event_converters::session_event_to_bgp_event(SessionEvent::Lifecycle(event))
+            .summary
+    })
+    .collect()
+}
+
+const SHUTDOWN_LOST_ROW: &str = "session lost for peer 127.0.0.1: established -> idle; \
+     received NOTIFICATION 6/2 (Administrative Shutdown): \"maint\\nwindow\"";
+
+/// Load-bearing: the loss is queued before connect retries overwrite
+/// `last_error` and is only consumed afterwards. Deriving the cause from
+/// `last_error`, at the transition or when the row is read, loses the RFC 9003
+/// text or reports the connect failure.
+#[tokio::test]
+async fn lost_row_keeps_notification_cause_after_failed_reconnects() {
+    let reservation = tokio::net::TcpSocket::new_v4().unwrap();
+    reservation.set_reuseaddr(true).unwrap();
+    reservation.bind((Ipv4Addr::LOCALHOST, 0).into()).unwrap();
+    let remote = reservation.local_addr().unwrap();
+    let listener = reservation.listen(16).unwrap();
+    let mut mgr = test_peer_manager();
+    let _rib_rx = spawn_real_primary(&mut mgr, remote);
+    mgr.peers[&key(remote.ip())].handle().start().await.unwrap();
+
+    let (mut stream, _) = listener.accept().await.unwrap();
+    establish_real_session(&mgr, &mut stream).await;
+    send_shutdown_and_wait_for_close(&mut stream).await;
+    drop(stream);
+    drop(listener);
+    // Hold the port without listening so every reconnect is refused.
+    let refuser = tokio::net::TcpSocket::new_v4().unwrap();
+    refuser.set_reuseaddr(true).unwrap();
+    refuser.bind(remote).unwrap();
+
+    let state = session_state_where(&mgr, |state| {
+        !state.last_error.is_empty() && !state.last_error.contains("NOTIFICATION")
+    })
+    .await;
+    assert_ne!(state.fsm_state, SessionState::Established);
+
+    assert_eq!(lost_row_summaries(&mut mgr).await, [SHUTDOWN_LOST_ROW]);
+    let managed = mgr.peers.remove(&key(remote.ip())).unwrap();
+    managed.into_parts().0.shutdown().await.unwrap().unwrap();
+}
+
+/// Load-bearing: a clean remote close leaves the previous flap's NOTIFICATION
+/// in `last_error`; the second loss row must not inherit it.
+#[tokio::test]
+async fn lost_row_reports_clean_close_after_notification_flap() {
+    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+    let remote = listener.local_addr().unwrap();
+    let mut mgr = test_peer_manager();
+    let _rib_rx = spawn_real_primary(&mut mgr, remote);
+    mgr.peers[&key(remote.ip())].handle().start().await.unwrap();
+
+    let (mut stream, _) = listener.accept().await.unwrap();
+    establish_real_session(&mgr, &mut stream).await;
+    send_shutdown_and_wait_for_close(&mut stream).await;
+    drop(stream);
+
+    let (mut stream, _) = listener.accept().await.unwrap();
+    establish_real_session(&mgr, &mut stream).await;
+    stream.shutdown().await.unwrap();
+    let mut rest = Vec::new();
+    stream.read_to_end(&mut rest).await.unwrap();
+    let state =
+        session_state_where(&mgr, |state| state.fsm_state != SessionState::Established).await;
+    assert_eq!(
+        state.last_error, "received NOTIFICATION 6/2 (Administrative Shutdown)",
+        "precondition: the clean close leaves the earlier cause in last_error"
+    );
+
+    assert_eq!(
+        lost_row_summaries(&mut mgr).await,
+        [
+            SHUTDOWN_LOST_ROW,
+            "session lost for peer 127.0.0.1: established -> idle; closed without NOTIFICATION",
+        ]
+    );
+    let managed = mgr.peers.remove(&key(remote.ip())).unwrap();
+    managed.into_parts().0.shutdown().await.unwrap().unwrap();
 }

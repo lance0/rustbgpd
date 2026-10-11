@@ -31,10 +31,36 @@ rbgp events sessions --neighbor 10.0.0.2
 rbgp events watch --category session --type established,lost   # live tail
 ```
 
-The event history gives timestamps and teardown reasons: hold-timer
-expiry, NOTIFICATION received/sent, max-prefix cease. Regular spacing
-at the hold time (default 90 s) points at a keepalive path problem;
-irregular spacing points at the transport or the peer.
+Each `lost` row ends with the teardown cause the session recorded when
+it left Established:
+
+```text
+[2026-10-10 03:12:07] lost session lost for peer 10.0.0.2: established -> idle; received NOTIFICATION 6/2 (Administrative Shutdown): "maintenance window"
+[2026-10-10 03:20:41] lost session lost for peer 10.0.0.2: established -> idle; sent NOTIFICATION 4/0 (Hold Timer Expired)
+[2026-10-10 03:31:02] lost session lost for peer 10.0.0.2: established -> idle; closed without NOTIFICATION
+```
+
+The cause is one of:
+
+- `sent NOTIFICATION` or `received NOTIFICATION`, followed by
+  `code/subcode (description)`, for example hold-timer expiry
+  (`sent ... 4/0`), a max-prefix cease (`sent ... 6/1`, or `6/9 (Hard
+  Reset: Maximum Number of Prefixes Reached)` when Notification GR was
+  negotiated), or an operator shutdown on either side (`6/2`). A valid
+  RFC 9003 shutdown communication follows in quotes, with control and
+  non-ASCII characters escaped.
+- A transport cause, such as `TCP reader I/O failure (ConnectionReset)`
+  or `send hold timer expired after 180s (RFC 9687)`.
+- `closed without NOTIFICATION` when the TCP connection closed with no
+  NOTIFICATION in either direction.
+
+The row keeps the cause that ended that session. `Last Error` in
+`rbgp neighbor 10.0.0.2` holds one value and can be newer: a failed
+reconnect replaces it, while a clean close leaves the previous cause in
+place. The history is an in-memory ring shared by all peers (4096
+events), so a daemon restart clears it. Regular spacing at the hold time
+(default 90 s) points at a keepalive path problem; irregular spacing
+points at the transport or the peer.
 
 ## 3. Match the teardown reason
 
@@ -55,8 +81,9 @@ irregular spacing points at the transport or the peer.
   overloaded peer, or an MTU/blackhole on large UPDATE bursts.
 - **Send-hold expiry (RFC 9687)** — the *peer* stopped draining its
   socket; the problem is on their side.
-- **TCP resets with no BGP NOTIFICATION** — MD5/TCP-AO key mismatch or
-  a middlebox; see "Debugging a session that won't establish" in
+- **TCP resets with no BGP NOTIFICATION** (`closed without NOTIFICATION`
+  or a `TCP reader I/O failure`) — MD5/TCP-AO key mismatch or a
+  middlebox; see "Debugging a session that won't establish" in
   [`OPERATIONS.md`](../reference/operations.md).
 - **BFD down events** — if the neighbor has BFD, check
   `rbgp bfd` and the `bfd_session_flaps_total{peer}` counter before

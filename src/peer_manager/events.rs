@@ -246,6 +246,7 @@ impl PeerManager {
         role: rustbgpd_transport::SessionRole,
         old: SessionState,
         new: SessionState,
+        teardown_cause: Option<&str>,
     ) {
         let event_type = Self::classify_state_event(old, new);
         let peer_label = peer.label();
@@ -254,11 +255,16 @@ impl PeerManager {
                 format!("session established for peer {peer_label}")
             }
             SessionLifecycleEventType::Lost => {
-                format!(
+                let mut reason = format!(
                     "session lost for peer {peer_label}: {} -> {}",
                     old.as_str(),
                     new.as_str()
-                )
+                );
+                if let Some(cause) = teardown_cause {
+                    reason.push_str("; ");
+                    reason.push_str(cause);
+                }
+                reason
             }
             SessionLifecycleEventType::StateChanged => {
                 format!(
