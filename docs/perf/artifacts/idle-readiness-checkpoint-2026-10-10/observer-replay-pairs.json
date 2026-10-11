@@ -1,0 +1,338 @@
+[
+  {
+    "cell": "baseline-r1",
+    "round": 1,
+    "phase": "disconnected",
+    "first": {
+      "timestamp": "2026-10-11T00:02:59.404304Z",
+      "peer": "127.1.0.2"
+    },
+    "second": {
+      "timestamp": "2026-10-11T00:02:59.623621Z",
+      "peer": "127.1.0.3"
+    },
+    "inter_handler_gap_ms": 219.317
+  },
+  {
+    "cell": "baseline-r1",
+    "round": 1,
+    "phase": "settled",
+    "first": {
+      "timestamp": "2026-10-11T00:03:00.319467Z",
+      "peer": "127.1.0.2"
+    },
+    "second": {
+      "timestamp": "2026-10-11T00:03:00.534052Z",
+      "peer": "127.1.0.3"
+    },
+    "inter_handler_gap_ms": 214.585
+  },
+  {
+    "cell": "baseline-r1",
+    "round": 2,
+    "phase": "disconnected",
+    "first": {
+      "timestamp": "2026-10-11T00:03:20.879012Z",
+      "peer": "127.1.0.2"
+    },
+    "second": {
+      "timestamp": "2026-10-11T00:03:21.090628Z",
+      "peer": "127.1.0.3"
+    },
+    "inter_handler_gap_ms": 211.61599999999999
+  },
+  {
+    "cell": "baseline-r1",
+    "round": 2,
+    "phase": "settled",
+    "first": {
+      "timestamp": "2026-10-11T00:03:21.690265Z",
+      "peer": "127.1.0.2"
+    },
+    "second": {
+      "timestamp": "2026-10-11T00:03:21.905215Z",
+      "peer": "127.1.0.3"
+    },
+    "inter_handler_gap_ms": 214.95
+  },
+  {
+    "cell": "baseline-r1",
+    "round": 3,
+    "phase": "disconnected",
+    "first": {
+      "timestamp": "2026-10-11T00:03:42.255830Z",
+      "peer": "127.1.0.2"
+    },
+    "second": {
+      "timestamp": "2026-10-11T00:03:42.471722Z",
+      "peer": "127.1.0.3"
+    },
+    "inter_handler_gap_ms": 215.892
+  },
+  {
+    "cell": "baseline-r1",
+    "round": 3,
+    "phase": "settled",
+    "first": {
+      "timestamp": "2026-10-11T00:03:43.069183Z",
+      "peer": "127.1.0.2"
+    },
+    "second": {
+      "timestamp": "2026-10-11T00:03:43.288144Z",
+      "peer": "127.1.0.3"
+    },
+    "inter_handler_gap_ms": 218.96099999999998
+  },
+  {
+    "cell": "candidate-r1",
+    "round": 1,
+    "phase": "disconnected",
+    "first": {
+      "timestamp": "2026-10-11T00:06:10.880556Z",
+      "peer": "127.1.0.2"
+    },
+    "second": {
+      "timestamp": "2026-10-11T00:06:11.095234Z",
+      "peer": "127.1.0.3"
+    },
+    "inter_handler_gap_ms": 214.678
+  },
+  {
+    "cell": "candidate-r1",
+    "round": 1,
+    "phase": "settled",
+    "first": {
+      "timestamp": "2026-10-11T00:06:11.690316Z",
+      "peer": "127.1.0.2"
+    },
+    "second": {
+      "timestamp": "2026-10-11T00:06:11.898883Z",
+      "peer": "127.1.0.3"
+    },
+    "inter_handler_gap_ms": 208.567
+  },
+  {
+    "cell": "candidate-r1",
+    "round": 2,
+    "phase": "disconnected",
+    "first": {
+      "timestamp": "2026-10-11T00:06:32.250918Z",
+      "peer": "127.1.0.2"
+    },
+    "second": {
+      "timestamp": "2026-10-11T00:06:32.462678Z",
+      "peer": "127.1.0.3"
+    },
+    "inter_handler_gap_ms": 211.76
+  },
+  {
+    "cell": "candidate-r1",
+    "round": 2,
+    "phase": "settled",
+    "first": {
+      "timestamp": "2026-10-11T00:06:33.055063Z",
+      "peer": "127.1.0.2"
+    },
+    "second": {
+      "timestamp": "2026-10-11T00:06:33.266555Z",
+      "peer": "127.1.0.3"
+    },
+    "inter_handler_gap_ms": 211.49200000000002
+  },
+  {
+    "cell": "candidate-r1",
+    "round": 3,
+    "phase": "disconnected",
+    "first": {
+      "timestamp": "2026-10-11T00:06:53.622231Z",
+      "peer": "127.1.0.2"
+    },
+    "second": {
+      "timestamp": "2026-10-11T00:06:53.833178Z",
+      "peer": "127.1.0.3"
+    },
+    "inter_handler_gap_ms": 210.947
+  },
+  {
+    "cell": "candidate-r1",
+    "round": 3,
+    "phase": "settled",
+    "first": {
+      "timestamp": "2026-10-11T00:06:54.429648Z",
+      "peer": "127.1.0.3"
+    },
+    "second": {
+      "timestamp": "2026-10-11T00:06:54.646172Z",
+      "peer": "127.1.0.2"
+    },
+    "inter_handler_gap_ms": 216.524
+  },
+  {
+    "cell": "candidate-r2",
+    "round": 1,
+    "phase": "disconnected",
+    "first": {
+      "timestamp": "2026-10-11T00:08:23.026522Z",
+      "peer": "127.1.0.2"
+    },
+    "second": {
+      "timestamp": "2026-10-11T00:08:23.242138Z",
+      "peer": "127.1.0.3"
+    },
+    "inter_handler_gap_ms": 215.616
+  },
+  {
+    "cell": "candidate-r2",
+    "round": 1,
+    "phase": "settled",
+    "first": {
+      "timestamp": "2026-10-11T00:08:23.828619Z",
+      "peer": "127.1.0.2"
+    },
+    "second": {
+      "timestamp": "2026-10-11T00:08:24.036763Z",
+      "peer": "127.1.0.3"
+    },
+    "inter_handler_gap_ms": 208.144
+  },
+  {
+    "cell": "candidate-r2",
+    "round": 2,
+    "phase": "disconnected",
+    "first": {
+      "timestamp": "2026-10-11T00:08:44.393657Z",
+      "peer": "127.1.0.2"
+    },
+    "second": {
+      "timestamp": "2026-10-11T00:08:44.609677Z",
+      "peer": "127.1.0.3"
+    },
+    "inter_handler_gap_ms": 216.01999999999998
+  },
+  {
+    "cell": "candidate-r2",
+    "round": 2,
+    "phase": "settled",
+    "first": {
+      "timestamp": "2026-10-11T00:08:45.198837Z",
+      "peer": "127.1.0.2"
+    },
+    "second": {
+      "timestamp": "2026-10-11T00:08:45.403521Z",
+      "peer": "127.1.0.3"
+    },
+    "inter_handler_gap_ms": 204.684
+  },
+  {
+    "cell": "candidate-r2",
+    "round": 3,
+    "phase": "disconnected",
+    "first": {
+      "timestamp": "2026-10-11T00:09:05.764024Z",
+      "peer": "127.1.0.3"
+    },
+    "second": {
+      "timestamp": "2026-10-11T00:09:05.976308Z",
+      "peer": "127.1.0.2"
+    },
+    "inter_handler_gap_ms": 212.284
+  },
+  {
+    "cell": "candidate-r2",
+    "round": 3,
+    "phase": "settled",
+    "first": {
+      "timestamp": "2026-10-11T00:09:06.575028Z",
+      "peer": "127.1.0.2"
+    },
+    "second": {
+      "timestamp": "2026-10-11T00:09:06.784546Z",
+      "peer": "127.1.0.3"
+    },
+    "inter_handler_gap_ms": 209.518
+  },
+  {
+    "cell": "baseline-r2",
+    "round": 1,
+    "phase": "disconnected",
+    "first": {
+      "timestamp": "2026-10-11T00:11:04.642314Z",
+      "peer": "127.1.0.2"
+    },
+    "second": {
+      "timestamp": "2026-10-11T00:11:04.853346Z",
+      "peer": "127.1.0.3"
+    },
+    "inter_handler_gap_ms": 211.032
+  },
+  {
+    "cell": "baseline-r2",
+    "round": 1,
+    "phase": "settled",
+    "first": {
+      "timestamp": "2026-10-11T00:11:05.448727Z",
+      "peer": "127.1.0.2"
+    },
+    "second": {
+      "timestamp": "2026-10-11T00:11:05.672653Z",
+      "peer": "127.1.0.3"
+    },
+    "inter_handler_gap_ms": 223.926
+  },
+  {
+    "cell": "baseline-r2",
+    "round": 2,
+    "phase": "disconnected",
+    "first": {
+      "timestamp": "2026-10-11T00:11:26.014583Z",
+      "peer": "127.1.0.2"
+    },
+    "second": {
+      "timestamp": "2026-10-11T00:11:26.236696Z",
+      "peer": "127.1.0.3"
+    },
+    "inter_handler_gap_ms": 222.113
+  },
+  {
+    "cell": "baseline-r2",
+    "round": 2,
+    "phase": "settled",
+    "first": {
+      "timestamp": "2026-10-11T00:11:26.816784Z",
+      "peer": "127.1.0.3"
+    },
+    "second": {
+      "timestamp": "2026-10-11T00:11:27.031879Z",
+      "peer": "127.1.0.2"
+    },
+    "inter_handler_gap_ms": 215.095
+  },
+  {
+    "cell": "baseline-r2",
+    "round": 3,
+    "phase": "disconnected",
+    "first": {
+      "timestamp": "2026-10-11T00:11:47.381089Z",
+      "peer": "127.1.0.2"
+    },
+    "second": {
+      "timestamp": "2026-10-11T00:11:47.597927Z",
+      "peer": "127.1.0.3"
+    },
+    "inter_handler_gap_ms": 216.838
+  },
+  {
+    "cell": "baseline-r2",
+    "round": 3,
+    "phase": "settled",
+    "first": {
+      "timestamp": "2026-10-11T00:11:48.193737Z",
+      "peer": "127.1.0.2"
+    },
+    "second": {
+      "timestamp": "2026-10-11T00:11:48.401915Z",
+      "peer": "127.1.0.3"
+    },
+    "inter_handler_gap_ms": 208.178
+  }
+]

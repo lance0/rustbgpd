@@ -1,0 +1,520 @@
+{
+  "clock_scope": "Wall-time between the two observer route-refresh handler logs; includes replay/readiness/scheduling, not CPU or a dedicated wire timer. Native OPEN/rejoin and survivor gap are separate harness clocks.",
+  "replication": "Two independent processes per arm; six correlated rounds and twelve correlated pairs per arm. Pooled rows descriptive, no significance claim.",
+  "processes": {
+    "baseline-r1": {
+      "inter_handler_gap_ms": {
+        "n": 6,
+        "median": 215.421,
+        "min": 211.61599999999999,
+        "max": 219.317,
+        "mean": 215.88683333333333
+      },
+      "by_checkpoint": {
+        "disconnected": {
+          "n": 3,
+          "median": 215.892,
+          "min": 211.61599999999999,
+          "max": 219.317,
+          "mean": 215.60833333333332
+        },
+        "settled": {
+          "n": 3,
+          "median": 214.95,
+          "min": 214.585,
+          "max": 218.96099999999998,
+          "mean": 216.16533333333334
+        }
+      },
+      "by_round": {
+        "1": {
+          "n": 2,
+          "median": 216.95100000000002,
+          "min": 214.585,
+          "max": 219.317,
+          "mean": 216.95100000000002
+        },
+        "2": {
+          "n": 2,
+          "median": 213.283,
+          "min": 211.61599999999999,
+          "max": 214.95,
+          "mean": 213.283
+        },
+        "3": {
+          "n": 2,
+          "median": 217.42649999999998,
+          "min": 215.892,
+          "max": 218.96099999999998,
+          "mean": 217.42649999999998
+        }
+      },
+      "rejoin_ms": {
+        "n": 3,
+        "median": 169.816,
+        "min": 165.956,
+        "max": 176.893,
+        "mean": 170.88833333333332
+      },
+      "survivor_maxgap_ms": {
+        "n": 3,
+        "median": 113.359,
+        "min": 105.419,
+        "max": 118.084,
+        "mean": 112.28733333333334
+      },
+      "readiness_samples": [
+        12,
+        12,
+        12
+      ]
+    },
+    "candidate-r1": {
+      "inter_handler_gap_ms": {
+        "n": 6,
+        "median": 211.626,
+        "min": 208.567,
+        "max": 216.524,
+        "mean": 212.328
+      },
+      "by_checkpoint": {
+        "disconnected": {
+          "n": 3,
+          "median": 211.76,
+          "min": 210.947,
+          "max": 214.678,
+          "mean": 212.46166666666667
+        },
+        "settled": {
+          "n": 3,
+          "median": 211.49200000000002,
+          "min": 208.567,
+          "max": 216.524,
+          "mean": 212.19433333333333
+        }
+      },
+      "by_round": {
+        "1": {
+          "n": 2,
+          "median": 211.6225,
+          "min": 208.567,
+          "max": 214.678,
+          "mean": 211.6225
+        },
+        "2": {
+          "n": 2,
+          "median": 211.626,
+          "min": 211.49200000000002,
+          "max": 211.76,
+          "mean": 211.626
+        },
+        "3": {
+          "n": 2,
+          "median": 213.7355,
+          "min": 210.947,
+          "max": 216.524,
+          "mean": 213.7355
+        }
+      },
+      "rejoin_ms": {
+        "n": 3,
+        "median": 166.92100000000002,
+        "min": 164.25300000000001,
+        "max": 169.245,
+        "mean": 166.80633333333336
+      },
+      "survivor_maxgap_ms": {
+        "n": 3,
+        "median": 108.107,
+        "min": 105.56,
+        "max": 109.299,
+        "mean": 107.65533333333333
+      },
+      "readiness_samples": [
+        12,
+        12,
+        12
+      ]
+    },
+    "candidate-r2": {
+      "inter_handler_gap_ms": {
+        "n": 6,
+        "median": 210.901,
+        "min": 204.684,
+        "max": 216.01999999999998,
+        "mean": 211.04433333333333
+      },
+      "by_checkpoint": {
+        "disconnected": {
+          "n": 3,
+          "median": 215.616,
+          "min": 212.284,
+          "max": 216.01999999999998,
+          "mean": 214.64
+        },
+        "settled": {
+          "n": 3,
+          "median": 208.144,
+          "min": 204.684,
+          "max": 209.518,
+          "mean": 207.44866666666667
+        }
+      },
+      "by_round": {
+        "1": {
+          "n": 2,
+          "median": 211.88,
+          "min": 208.144,
+          "max": 215.616,
+          "mean": 211.88
+        },
+        "2": {
+          "n": 2,
+          "median": 210.35199999999998,
+          "min": 204.684,
+          "max": 216.01999999999998,
+          "mean": 210.35199999999998
+        },
+        "3": {
+          "n": 2,
+          "median": 210.901,
+          "min": 209.518,
+          "max": 212.284,
+          "mean": 210.901
+        }
+      },
+      "rejoin_ms": {
+        "n": 3,
+        "median": 163.73499999999999,
+        "min": 159.81699999999998,
+        "max": 164.12199999999999,
+        "mean": 162.558
+      },
+      "survivor_maxgap_ms": {
+        "n": 3,
+        "median": 103.317,
+        "min": 102.053,
+        "max": 105.671,
+        "mean": 103.68033333333334
+      },
+      "readiness_samples": [
+        12,
+        12,
+        12
+      ]
+    },
+    "baseline-r2": {
+      "inter_handler_gap_ms": {
+        "n": 6,
+        "median": 215.9665,
+        "min": 208.178,
+        "max": 223.926,
+        "mean": 216.197
+      },
+      "by_checkpoint": {
+        "disconnected": {
+          "n": 3,
+          "median": 216.838,
+          "min": 211.032,
+          "max": 222.113,
+          "mean": 216.661
+        },
+        "settled": {
+          "n": 3,
+          "median": 215.095,
+          "min": 208.178,
+          "max": 223.926,
+          "mean": 215.733
+        }
+      },
+      "by_round": {
+        "1": {
+          "n": 2,
+          "median": 217.47899999999998,
+          "min": 211.032,
+          "max": 223.926,
+          "mean": 217.47899999999998
+        },
+        "2": {
+          "n": 2,
+          "median": 218.60399999999998,
+          "min": 215.095,
+          "max": 222.113,
+          "mean": 218.60399999999998
+        },
+        "3": {
+          "n": 2,
+          "median": 212.50799999999998,
+          "min": 208.178,
+          "max": 216.838,
+          "mean": 212.50799999999998
+        }
+      },
+      "rejoin_ms": {
+        "n": 3,
+        "median": 125.06200000000001,
+        "min": 120.09100000000001,
+        "max": 127.056,
+        "mean": 124.06966666666668
+      },
+      "survivor_maxgap_ms": {
+        "n": 3,
+        "median": 103.412,
+        "min": 100.007,
+        "max": 106.652,
+        "mean": 103.357
+      },
+      "readiness_samples": [
+        12,
+        12,
+        12
+      ]
+    }
+  },
+  "arms": {
+    "baseline": {
+      "processes": 2,
+      "correlated_rounds": 6,
+      "correlated_pairs": 12,
+      "inter_handler_gap_ms": {
+        "n": 12,
+        "median": 215.49349999999998,
+        "min": 208.178,
+        "max": 223.926,
+        "mean": 216.04191666666665
+      },
+      "by_checkpoint": {
+        "disconnected": {
+          "n": 6,
+          "median": 216.365,
+          "min": 211.032,
+          "max": 222.113,
+          "mean": 216.13466666666667
+        },
+        "settled": {
+          "n": 6,
+          "median": 215.02249999999998,
+          "min": 208.178,
+          "max": 223.926,
+          "mean": 215.94916666666666
+        }
+      },
+      "first_round_gap_ms": {
+        "n": 4,
+        "median": 216.95100000000002,
+        "min": 211.032,
+        "max": 223.926,
+        "mean": 217.215
+      },
+      "later_round_gap_ms": {
+        "n": 8,
+        "median": 215.49349999999998,
+        "min": 208.178,
+        "max": 222.113,
+        "mean": 215.455375
+      },
+      "rejoin_ms": {
+        "n": 6,
+        "median": 146.506,
+        "min": 120.09100000000001,
+        "max": 176.893,
+        "mean": 147.479
+      },
+      "survivor_maxgap_ms": {
+        "n": 6,
+        "median": 106.0355,
+        "min": 100.007,
+        "max": 118.084,
+        "mean": 107.82216666666667
+      },
+      "readiness_samples": 72
+    },
+    "candidate": {
+      "processes": 2,
+      "correlated_rounds": 6,
+      "correlated_pairs": 12,
+      "inter_handler_gap_ms": {
+        "n": 12,
+        "median": 211.626,
+        "min": 204.684,
+        "max": 216.524,
+        "mean": 211.68616666666668
+      },
+      "by_checkpoint": {
+        "disconnected": {
+          "n": 6,
+          "median": 213.481,
+          "min": 210.947,
+          "max": 216.01999999999998,
+          "mean": 213.55083333333334
+        },
+        "settled": {
+          "n": 6,
+          "median": 209.04250000000002,
+          "min": 204.684,
+          "max": 216.524,
+          "mean": 209.82150000000001
+        }
+      },
+      "first_round_gap_ms": {
+        "n": 4,
+        "median": 211.6225,
+        "min": 208.144,
+        "max": 215.616,
+        "mean": 211.75125
+      },
+      "later_round_gap_ms": {
+        "n": 8,
+        "median": 211.626,
+        "min": 204.684,
+        "max": 216.524,
+        "mean": 211.653625
+      },
+      "rejoin_ms": {
+        "n": 6,
+        "median": 164.1875,
+        "min": 159.81699999999998,
+        "max": 169.245,
+        "mean": 164.68216666666666
+      },
+      "survivor_maxgap_ms": {
+        "n": 6,
+        "median": 105.6155,
+        "min": 102.053,
+        "max": 109.299,
+        "mean": 105.66783333333333
+      },
+      "readiness_samples": 72
+    }
+  },
+  "native_rounds": {
+    "baseline-r1": [
+      {
+        "round": 1,
+        "rejoin_ms": 165.956,
+        "rejoin_max_ms": 165.956,
+        "survivor_maxgap_ms": 105.419,
+        "readiness_samples": 12,
+        "rss_mib": 419,
+        "sessions_up": 700,
+        "parse_errors": 0
+      },
+      {
+        "round": 2,
+        "rejoin_ms": 176.893,
+        "rejoin_max_ms": 176.893,
+        "survivor_maxgap_ms": 118.084,
+        "readiness_samples": 12,
+        "rss_mib": 429,
+        "sessions_up": 700,
+        "parse_errors": 0
+      },
+      {
+        "round": 3,
+        "rejoin_ms": 169.816,
+        "rejoin_max_ms": 169.816,
+        "survivor_maxgap_ms": 113.359,
+        "readiness_samples": 12,
+        "rss_mib": 408,
+        "sessions_up": 700,
+        "parse_errors": 0
+      }
+    ],
+    "candidate-r1": [
+      {
+        "round": 1,
+        "rejoin_ms": 169.245,
+        "rejoin_max_ms": 169.245,
+        "survivor_maxgap_ms": 105.56,
+        "readiness_samples": 12,
+        "rss_mib": 423,
+        "sessions_up": 700,
+        "parse_errors": 0
+      },
+      {
+        "round": 2,
+        "rejoin_ms": 164.25300000000001,
+        "rejoin_max_ms": 164.25300000000001,
+        "survivor_maxgap_ms": 109.299,
+        "readiness_samples": 12,
+        "rss_mib": 423,
+        "sessions_up": 700,
+        "parse_errors": 0
+      },
+      {
+        "round": 3,
+        "rejoin_ms": 166.92100000000002,
+        "rejoin_max_ms": 166.92100000000002,
+        "survivor_maxgap_ms": 108.107,
+        "readiness_samples": 12,
+        "rss_mib": 418,
+        "sessions_up": 700,
+        "parse_errors": 0
+      }
+    ],
+    "candidate-r2": [
+      {
+        "round": 1,
+        "rejoin_ms": 159.81699999999998,
+        "rejoin_max_ms": 159.81699999999998,
+        "survivor_maxgap_ms": 102.053,
+        "readiness_samples": 12,
+        "rss_mib": 401,
+        "sessions_up": 700,
+        "parse_errors": 0
+      },
+      {
+        "round": 2,
+        "rejoin_ms": 163.73499999999999,
+        "rejoin_max_ms": 163.73499999999999,
+        "survivor_maxgap_ms": 103.317,
+        "readiness_samples": 12,
+        "rss_mib": 411,
+        "sessions_up": 700,
+        "parse_errors": 0
+      },
+      {
+        "round": 3,
+        "rejoin_ms": 164.12199999999999,
+        "rejoin_max_ms": 164.12199999999999,
+        "survivor_maxgap_ms": 105.671,
+        "readiness_samples": 12,
+        "rss_mib": 417,
+        "sessions_up": 700,
+        "parse_errors": 0
+      }
+    ],
+    "baseline-r2": [
+      {
+        "round": 1,
+        "rejoin_ms": 120.09100000000001,
+        "rejoin_max_ms": 120.09100000000001,
+        "survivor_maxgap_ms": 100.007,
+        "readiness_samples": 12,
+        "rss_mib": 407,
+        "sessions_up": 700,
+        "parse_errors": 0
+      },
+      {
+        "round": 2,
+        "rejoin_ms": 125.06200000000001,
+        "rejoin_max_ms": 125.06200000000001,
+        "survivor_maxgap_ms": 103.412,
+        "readiness_samples": 12,
+        "rss_mib": 416,
+        "sessions_up": 700,
+        "parse_errors": 0
+      },
+      {
+        "round": 3,
+        "rejoin_ms": 127.056,
+        "rejoin_max_ms": 127.056,
+        "survivor_maxgap_ms": 106.652,
+        "readiness_samples": 12,
+        "rss_mib": 417,
+        "sessions_up": 700,
+        "parse_errors": 0
+      }
+    ]
+  }
+}
