@@ -89,6 +89,7 @@ pub(crate) async fn apply_install_fdb_nhg_row(
     nh_id: u32,
 ) -> Result<(), DataplaneError> {
     let target = check_cve_guard_and_get_target(cache, vni)?;
+    super::fdb::guard_foreign_fdb(handle, cache, vni, mac, vlan).await?;
 
     // `add_bridge` only supplies the transport; the full message
     // shape comes from the pure builder so it unit-tests without a
@@ -166,6 +167,7 @@ pub(crate) async fn apply_remove_fdb_nhg_row(
     vlan: Option<u16>,
 ) -> Result<(), DataplaneError> {
     let target = unique_fdb_vxlan_target_for_vni(cache, vni)?;
+    super::fdb::guard_foreign_fdb(handle, cache, vni, mac, vlan).await?;
 
     let mut msg = NeighbourMessage::default();
     msg.header.family = AddressFamily::Bridge;

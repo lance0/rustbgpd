@@ -43,7 +43,8 @@ use rustbgpd_evpn::{
 use crate::dataplane::DataplaneOp;
 use crate::group_state::{AliasGroupKey, GroupOwnedMap};
 use crate::snapshot::{
-    InstanceProbes, KernelFdbEntry, KernelSnapshot, OwnedEntry, OwnedEntryKind, OwnedSet,
+    ForeignFdbEntries, InstanceProbes, KernelFdbEntry, KernelSnapshot, OwnedEntry, OwnedEntryKind,
+    OwnedSet,
 };
 
 /// Output of a single diff pass.
@@ -130,6 +131,7 @@ pub fn compute_diff(
     groups: &GroupOwnedMap,
     instances: &EvpnInstanceTable,
 ) -> Plan {
+    let foreign = ForeignFdbEntries::new(snapshot.iter_fdb());
     let mut creates: Vec<DataplaneOp> = Vec::new();
     let mut updates: Vec<DataplaneOp> = Vec::new();
     let mut deletes: Vec<DataplaneOp> = Vec::new();
@@ -163,6 +165,21 @@ pub fn compute_diff(
     // the exact slot. See `Plan::foreign_blocked_keys`.
     let mut foreign_blocked: BTreeSet<(EvpnInstanceId, MacAddress)> = BTreeSet::new();
 
+    // A foreign-blocked owner retains its current group reference, including
+    // during withdrawal or a desired group/VLAN change. Freeze that group's
+    // setup and member updates so another MAC cannot retarget the retained row.
+    let mut frozen_groups = BTreeSet::new();
+    for (&(vni, mac), owned) in last_applied.iter() {
+        if let OwnedEntryKind::FdbNhg { group_key } = owned.kind
+            && (foreign.contains(vni, mac, owned.vlan)
+                || (desired.get(vni, mac).is_some()
+                    && foreign.contains(vni, mac, desired_vlan(instances, vni))))
+        {
+            frozen_groups.insert(group_key);
+            foreign_blocked.insert((vni, mac));
+        }
+    }
+
     // A segment key is shareable only when every eligible MAC agrees on
     // membership and standby. In particular, single-active MACs can name
     // different advertising PEs (RFC 7432 §14.1.1); neither MAC may replace
@@ -180,12 +197,13 @@ pub fn compute_diff(
             continue;
         }
         // Match the NHG emission ownership gate, including the old slot
-        // during VLAN conversion. A blocked MAC cannot share the group.
+        // during VLAN conversion. A blocked MAC cannot contribute new intent;
+        // its retained current group is frozen separately above.
         let vlan = desired_vlan(instances, vni);
-        if foreign_row_at(snapshot, vni, mac, vlan)
-            || last_applied.get(vni, mac).is_some_and(|owned| {
-                owned.vlan != vlan && foreign_row_at(snapshot, vni, mac, owned.vlan)
-            })
+        if foreign.contains(vni, mac, vlan)
+            || last_applied
+                .get(vni, mac)
+                .is_some_and(|owned| owned.vlan != vlan && foreign.contains(vni, mac, owned.vlan))
         {
             continue;
         }
@@ -246,6 +264,9 @@ pub fn compute_diff(
                 // latter distinguished by
                 // `single_active_backup_vtep_ip`).
                 let linux_key = AliasGroupKey::new(vni, portable_key.0, portable_key.1);
+                if frozen_groups.contains(&linux_key) {
+                    continue;
+                }
                 emit_fdb_nhg_pass(
                     vni,
                     mac,
@@ -254,6 +275,7 @@ pub fn compute_diff(
                     linux_key,
                     last_applied,
                     snapshot,
+                    &foreign,
                     groups,
                     &mut group_seen,
                     &mut creates,
@@ -288,6 +310,7 @@ pub fn compute_diff(
                     vlan,
                     entry,
                     snapshot,
+                    &foreign,
                     last_applied,
                     &mut creates,
                     &mut updates,
@@ -319,6 +342,7 @@ pub fn compute_diff(
                     vlan,
                     entry,
                     snapshot,
+                    &foreign,
                     last_applied,
                     &mut creates,
                     &mut updates,
@@ -340,6 +364,10 @@ pub fn compute_diff(
             continue;
         }
 
+        if foreign.contains(vni, mac, owned.vlan) {
+            foreign_blocked.insert((vni, mac));
+            continue;
+        }
         match owned.kind {
             OwnedEntryKind::SingleDst { .. } => {
                 // Existing single-dst delete: check kernel snapshot,
@@ -373,16 +401,12 @@ pub fn compute_diff(
                 // nhid-row drift detection from RTNLGRP_NEIGH is
                 // incomplete per research §8) — but never when the
                 // row present at the key is foreign (LAN-283).
-                if foreign_row_at(snapshot, vni, mac, owned.vlan) {
-                    foreign_blocked.insert((vni, mac));
-                } else {
-                    deletes.push(DataplaneOp::RemoveFdbNhg {
-                        vni,
-                        mac,
-                        vlan: owned.vlan,
-                        group_key,
-                    });
-                }
+                deletes.push(DataplaneOp::RemoveFdbNhg {
+                    vni,
+                    mac,
+                    vlan: owned.vlan,
+                    group_key,
+                });
             }
         }
     }
@@ -494,21 +518,6 @@ fn flood_pass(
     blocked
 }
 
-/// `true` when the kernel snapshot holds a row at `(vni, vlan, mac)`
-/// that is provably not ours (no `extern_learn` marker, or a foreign
-/// `NDA_PROTOCOL` stamp). LAN-283 fail-closed predicate: no create /
-/// update / conversion / delete may target such a key.
-fn foreign_row_at(
-    snapshot: &KernelSnapshot,
-    vni: EvpnInstanceId,
-    mac: MacAddress,
-    vlan: Option<u16>,
-) -> bool {
-    snapshot
-        .find_fdb_in_vlan(vni, mac, vlan)
-        .is_some_and(|k| !k.is_extern_learned())
-}
-
 /// `true` when `entry.remote_vtep_ip` and every `alias_vtep_ips`
 /// member share the same address family (all IPv4 or all IPv6).
 /// Slice 1's projection enforces same-family-per-`(ESI,
@@ -544,12 +553,22 @@ fn emit_single_dst_pass(
     vlan: Option<u16>,
     entry: &RemoteMacEntry,
     snapshot: &KernelSnapshot,
+    foreign: &ForeignFdbEntries,
     last_applied: &OwnedSet,
     creates: &mut Vec<DataplaneOp>,
     updates: &mut Vec<DataplaneOp>,
     conversions: &mut Vec<DataplaneOp>,
     foreign_blocked: &mut BTreeSet<(EvpnInstanceId, MacAddress)>,
 ) {
+    if foreign.contains(vni, mac, vlan) {
+        if snapshot
+            .find_fdb_in_vlan(vni, mac, vlan)
+            .is_none_or(|row| !row.is_kernel_learned_local())
+        {
+            foreign_blocked.insert((vni, mac));
+        }
+        return;
+    }
     if let Some(owned) = last_applied.get(vni, mac)
         && owned.vlan != vlan
     {
@@ -557,9 +576,7 @@ fn emit_single_dst_pass(
         // owned VLAN and adds at the desired VLAN without consulting
         // the snapshot. If a foreign row sits at either key, emitting
         // would clobber it — fail closed for this MAC instead.
-        if foreign_row_at(snapshot, vni, mac, owned.vlan)
-            || foreign_row_at(snapshot, vni, mac, vlan)
-        {
+        if foreign.contains(vni, mac, owned.vlan) {
             foreign_blocked.insert((vni, mac));
             return;
         }
@@ -600,13 +617,6 @@ fn emit_single_dst_pass(
     if let Some(owned) = last_applied.get(vni, mac)
         && let OwnedEntryKind::FdbNhg { group_key } = owned.kind
     {
-        // LAN-283: the Remove half of this conversion pair deletes
-        // whatever row sits at the key — never emit it over a
-        // foreign row.
-        if foreign_row_at(snapshot, vni, mac, vlan) {
-            foreign_blocked.insert((vni, mac));
-            return;
-        }
         conversions.push(DataplaneOp::RemoveFdbNhg {
             vni,
             mac,
@@ -665,6 +675,7 @@ fn emit_fdb_nhg_pass(
     linux_key: AliasGroupKey,
     last_applied: &OwnedSet,
     snapshot: &KernelSnapshot,
+    foreign: &ForeignFdbEntries,
     groups: &GroupOwnedMap,
     group_seen: &mut BTreeSet<AliasGroupKey>,
     creates: &mut Vec<DataplaneOp>,
@@ -679,10 +690,9 @@ fn emit_fdb_nhg_pass(
     // re-Install would all replace or delete another agent's row.
     // Foreign-entry preservation for the fresh-install arm used to
     // live in a local `fdb_nhg_install_safe` check; this gate
-    // subsumes it and extends it to the owned arms. Group-level
-    // `UpdateFdbNhgMembers` is not gated — it targets our kernel
-    // nexthop objects, not the FDB row.
-    if foreign_row_at(snapshot, vni, mac, vlan) {
+    // subsumes it and extends it to the owned arms. The caller also freezes
+    // group mutation when another retained reference is foreign-blocked.
+    if foreign.contains(vni, mac, vlan) {
         foreign_blocked.insert((vni, mac));
         tracing::trace!(
             ?vni,
@@ -693,7 +703,7 @@ fn emit_fdb_nhg_pass(
     }
     if let Some(owned) = last_applied.get(vni, mac)
         && owned.vlan != vlan
-        && foreign_row_at(snapshot, vni, mac, owned.vlan)
+        && foreign.contains(vni, mac, owned.vlan)
     {
         foreign_blocked.insert((vni, mac));
         return;
@@ -1569,6 +1579,89 @@ mod tests {
             plan.foreign_blocked_keys.contains(&(vni(100), mac(1))),
             "blocked key must be reported for observability (LAN-283)"
         );
+    }
+
+    #[test]
+    fn foreign_vlan_sibling_blocks_unscoped_add_update_conversion_and_withdrawal() {
+        for remote in [
+            entry("10.0.0.3", None),
+            entry_multi_homed("10.0.0.3", &["10.0.0.4"], 7),
+        ] {
+            for owned in [
+                None,
+                Some(OwnedEntry::single_dst(ip("10.0.0.2"), None)),
+                Some(OwnedEntry::fdb_nhg(linux_key(100, 7))),
+            ] {
+                let mut snapshot = KernelSnapshot::new();
+                let mut foreign = ours("10.0.0.99");
+                foreign.mac = mac(1);
+                foreign.vlan = Some(1);
+                foreign.flags.extern_learn = false;
+                foreign.flags.noarp = true;
+                snapshot.insert_fdb(vni(100), foreign);
+                let mut applied = OwnedSet::new();
+                if let Some(owned) = &owned {
+                    let mut row = ours("10.0.0.2");
+                    row.mac = mac(1);
+                    snapshot.insert_fdb(vni(100), row);
+                    applied.record_applied(vni(100), mac(1), owned.clone());
+                }
+                let desired = desired_one(vni(100), mac(1), remote.clone());
+                for intent in [&desired, &RemoteMacTable::new()] {
+                    let plan = flood_plan(intent, &snapshot, &applied, &[vni(100)]);
+                    assert!(plan.is_noop(), "{owned:?}: {:?}", plan.ops);
+                    if !intent.is_empty() || owned.is_some() {
+                        assert!(plan.foreign_blocked_keys.contains(&(vni(100), mac(1))));
+                    }
+                }
+                snapshot.remove_fdb_in_vlan(vni(100), mac(1), Some(1));
+                assert!(
+                    !flood_plan(&desired, &snapshot, &applied, &[vni(100)]).is_noop(),
+                    "removing the conflict must restore programming"
+                );
+                if owned.is_some() {
+                    let plan = flood_plan(&RemoteMacTable::new(), &snapshot, &applied, &[vni(100)]);
+                    assert!(matches!(
+                        plan.ops.as_slice(),
+                        [DataplaneOp::RemoveRemoteFdb { .. } | DataplaneOp::RemoveFdbNhg { .. }]
+                    ));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn foreign_scope_keeps_explicit_vlan_vni_and_mac_isolation() {
+        let mut snapshot = KernelSnapshot::new();
+        let mut foreign = ours("10.0.0.99");
+        foreign.mac = mac(1);
+        foreign.vlan = Some(1);
+        foreign.flags.extern_learn = false;
+        foreign.flags.noarp = true;
+        snapshot.insert_fdb(vni(100), foreign);
+        for (v, m, instances, blocked) in [
+            (vni(100), mac(1), instances_with_vlan(1, &[vni(100)]), true),
+            (
+                vni(100),
+                mac(1),
+                instances_with_vlan(10, &[vni(100)]),
+                false,
+            ),
+            (vni(200), mac(1), EvpnInstanceTable::new(), false),
+            (vni(100), mac(2), EvpnInstanceTable::new(), false),
+        ] {
+            let desired = desired_one(v, m, entry("10.0.0.2", None));
+            let plan = compute_diff(
+                &desired,
+                &snapshot,
+                &OwnedSet::new(),
+                &ready_probes(&[v]),
+                &GroupOwnedMap::new(),
+                &instances,
+            );
+            assert_eq!(plan.is_noop(), blocked);
+            assert_eq!(plan.foreign_blocked_keys.contains(&(v, m)), blocked);
+        }
     }
 
     // LAN-283 rule 3: an owned single-dst key that is no longer
@@ -2933,6 +3026,140 @@ mod tests {
             }]
         );
         assert!(plan.foreign_blocked_keys.contains(&(vni(100), mac(2))));
+    }
+
+    #[test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "keep the shared-group mutation and retained-ownership regression matrix together"
+    )]
+    fn foreign_blocked_nhg_reference_freezes_shared_group_mutations() {
+        // A blocked owner retains its current group's reference even when
+        // withdrawn or moving elsewhere. Other MACs must not retarget that
+        // row indirectly through either group updates or install-time setup.
+        for blocked_intent in ["same group", "withdrawn", "new group"] {
+            for existing_peer in [false, true] {
+                for change_members in [false, true] {
+                    for (owned_vlan, conflict_vlan, desired_vlan) in [
+                        (None, Some(1), None),
+                        (Some(20), Some(20), Some(10)),
+                        (Some(20), Some(10), Some(10)),
+                    ] {
+                        if blocked_intent == "withdrawn"
+                            && owned_vlan.is_some()
+                            && owned_vlan != conflict_vlan
+                        {
+                            continue;
+                        }
+                        let key = linux_key(100, 7);
+                        let next = if change_members {
+                            entry_single_active("10.0.0.4", "10.0.0.3", 7)
+                        } else {
+                            entry_single_active("10.0.0.2", "10.0.0.4", 7)
+                        };
+                        let mut desired = RemoteMacTable::builder();
+                        if blocked_intent != "withdrawn" {
+                            let mut blocked = next.clone();
+                            if blocked_intent == "new group" {
+                                blocked.alias_group_key = Some((esi(8), EthernetTagId(0)));
+                            }
+                            desired.insert(vni(100), mac(1), blocked).unwrap();
+                        }
+                        desired.insert(vni(100), mac(2), next).unwrap();
+                        desired
+                            .insert(
+                                vni(100),
+                                mac(3),
+                                entry_single_active("10.0.0.5", "10.0.0.6", 9),
+                            )
+                            .unwrap();
+                        let desired = desired.build();
+                        let mut snapshot = KernelSnapshot::new();
+                        let mut applied = OwnedSet::new();
+                        let mut groups = GroupOwnedMap::new();
+                        groups.record_group_install(
+                            key,
+                            0x4000_0001,
+                            [ip("10.0.0.2")].into_iter().collect(),
+                            Some(ip("10.0.0.3")),
+                        );
+                        for m in [mac(1), mac(2)] {
+                            if m == mac(2) && !existing_peer {
+                                continue;
+                            }
+                            let vlan = if m == mac(1) {
+                                owned_vlan
+                            } else {
+                                desired_vlan
+                            };
+                            let mut row = ours("10.0.0.2");
+                            row.mac = m;
+                            row.vlan = vlan;
+                            row.dst = None;
+                            row.nh_id = Some(0x4000_0001);
+                            snapshot.insert_fdb(vni(100), row);
+                            let mut owned = OwnedEntry::fdb_nhg(key);
+                            owned.vlan = vlan;
+                            applied.record_applied(vni(100), m, owned);
+                            groups.record_mac_ref(key, vni(100), m);
+                        }
+                        let clean_snapshot = snapshot.clone();
+                        let mut foreign = ours("10.9.9.9");
+                        foreign.mac = mac(1);
+                        foreign.vlan = conflict_vlan;
+                        foreign.flags.extern_learn = false;
+                        snapshot.insert_fdb(vni(100), foreign);
+                        let instances = desired_vlan.map_or_else(EvpnInstanceTable::new, |vlan| {
+                            instances_with_vlan(vlan, &[vni(100)])
+                        });
+                        let probes = ready_probes(&[vni(100)]);
+                        let plan = compute_diff(
+                            &desired, &snapshot, &applied, &probes, &groups, &instances,
+                        );
+                        assert!(
+                            !plan.ops.iter().any(|op| matches!(
+                                op,
+                                DataplaneOp::UpdateFdbNhgMembers { group_key, .. }
+                                    | DataplaneOp::InstallFdbNhg { group_key, .. }
+                                    if *group_key == key
+                            )),
+                            "blocked={blocked_intent}, peer_owned={existing_peer}, \
+                             members={change_members}, vlans={owned_vlan:?}/\
+                             {conflict_vlan:?}/{desired_vlan:?}: {:?}",
+                            plan.ops,
+                        );
+                        assert!(!plan.ops.iter().any(|op| matches!(
+                            op, DataplaneOp::RemoveFdbNhg { mac: m, .. } if *m == mac(1)
+                        )));
+                        assert!(
+                            plan.ops.iter().any(|op| matches!(
+                                op, DataplaneOp::InstallFdbNhg { mac: m, .. } if *m == mac(3)
+                            )),
+                            "unrelated groups must still progress: {:?}",
+                            plan.ops
+                        );
+                        let resumed = compute_diff(
+                            &desired,
+                            &clean_snapshot,
+                            &applied,
+                            &probes,
+                            &groups,
+                            &instances,
+                        );
+                        assert!(
+                            resumed.ops.iter().any(|op| matches!(
+                                op,
+                                DataplaneOp::UpdateFdbNhgMembers { group_key, .. }
+                                    | DataplaneOp::InstallFdbNhg { group_key, .. }
+                                    if *group_key == key
+                            )),
+                            "removing the conflict must resume group work: {:?}",
+                            resumed.ops
+                        );
+                    }
+                }
+            }
+        }
     }
 
     #[test]

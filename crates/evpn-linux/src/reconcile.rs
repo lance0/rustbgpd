@@ -4549,11 +4549,9 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
                 };
                 if let Err(e) = res {
                     tracing::debug!(error = %e, ?op, "drain apply failed");
-                    // Best-effort — keep going. Foreign entries in
-                    // the kernel are never touched by `apply` for
-                    // RemoveRemoteFdb in either the real or fake
-                    // impl; `apply_nhg_op` GC is also best-effort
-                    // for the group/member teardown.
+                    // Best-effort — keep going. Apply rechecks visible
+                    // foreign rows before removal; `apply_nhg_op` GC
+                    // is also best-effort for the group/member teardown.
                 } else {
                     self.state.owned.record_withdrawn(vni, mac);
                 }

@@ -59,7 +59,7 @@
 #   bash crates/evpn-linux/tests/docker/run-netns-tests.sh nexthop_raw
 #       (all five raw RTM_NEWNEXTHOP/RTM_DELNEXTHOP proofs)
 #   bash crates/evpn-linux/tests/docker/run-netns-tests.sh foreign_state_l2
-#       (L2 foreign-takeover preservation proof)
+#       (L2 foreign takeover, PVID-only siblings, and stale-plan checks)
 #   bash crates/evpn-linux/tests/docker/run-netns-tests.sh foreign_state_l2_dst
 #       (owned remote-MAC destination drift repair + unmarked rewrite relinquish)
 #   bash crates/evpn-linux/tests/docker/run-netns-tests.sh foreign_state_nhid
@@ -153,7 +153,7 @@ case "${1:-all}" in
     auto_lacp_daemon)   FILTER=""; RUSTBGPD_TEST_BIN="evpn_auto_lacp_binary" ;;
     ac_gate)            TEST_BIN="netns_ac_gate"; FILTER="" ;;
     nexthop_raw)        TEST_BIN="netns_nexthop_raw"; FILTER="" ;;
-    foreign_state_l2)   TEST_BIN="netns_foreign_state"; FILTER="l2_foreign_takeover_row_survives_withdrawal_and_shutdown" ;;
+    foreign_state_l2)   TEST_BIN="netns_foreign_state"; FILTER="l2_foreign_"; EXACT_FILTER=0 ;;
     foreign_state_l2_dst) TEST_BIN="netns_foreign_state"; FILTER="l2_owned_destination_drift_is_repaired_and_unmarked_rewrite_relinquished" ;;
     foreign_state_nhid) TEST_BIN="netns_foreign_state"; FILTER="nhid_reserved_range_foreign_object_not_clobbered_adopted_or_reaped" ;;
     foreign_state_l3)   TEST_BIN="netns_foreign_state"; FILTER="l3_"; EXACT_FILTER=0 ;;
