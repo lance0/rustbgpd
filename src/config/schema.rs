@@ -594,6 +594,15 @@ pub struct RpkiConfig {
     /// RTR cache servers to connect to.
     #[serde(default)]
     pub cache_servers: Vec<CacheServer>,
+    /// RFC 9324 local re-evaluation. When `true`, a session whose import
+    /// policy matches RPKI or ASPA state keeps its pre-policy IPv4/IPv6
+    /// unicast input (accepted routes plus rejects that validation decided),
+    /// and a VRP or ASPA change is re-evaluated locally instead of requesting
+    /// inbound Route Refresh. A session whose retained rejects exceed the
+    /// per-session bound falls back to Route Refresh. Default `false`;
+    /// restart-required like the rest of `[rpki]`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub local_revalidation: bool,
 }
 
 #[derive(Clone, PartialEq, Serialize, Deserialize, JsonSchema)]

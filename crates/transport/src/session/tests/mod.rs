@@ -2163,6 +2163,7 @@ mod forwarding_state;
 mod import_policy;
 mod inbound_update;
 mod labeled;
+mod local_revalidation;
 mod loop_detection;
 mod max_prefix;
 mod metrics;

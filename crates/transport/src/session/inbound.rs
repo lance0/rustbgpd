@@ -1,5 +1,8 @@
 use super::import_decision_cache::{CachedDecision, CachedPolicyContext, ImportDecisionKey};
 use super::rejected_routes::{RejectedRouteEntry, policy_reject_detail};
+use super::validation_retention::{
+    RetainedKey, RetainedReach, ValidationRetention, reject_depends_on_validation,
+};
 use super::{
     Afi, AsPath, BgpLsFamily, BgpLsRibRoute, BgpLsRouteKey, BgpRole, Event, EvpnRibRoute,
     EvpnRoute, EvpnRouteKey, FlowSpecKey, FlowSpecRoute, Instant, IpAddr, Ipv4Addr,
@@ -1421,6 +1424,12 @@ impl PeerSession {
             }
         }
         let original_unicast_withdrawals = loop_withdrawn.len();
+        let forget: Vec<RetainedKey> = loop_withdrawn
+            .iter()
+            .chain(&rejected_unicast)
+            .copied()
+            .collect();
+        self.update_validation_retention(forget, Vec::new(), || unreachable!());
         for &(prefix, path_id) in &loop_withdrawn {
             self.forget_known_path(prefix, path_id);
             self.forget_rejected_path(prefix, path_id);
@@ -1692,18 +1701,22 @@ impl PeerSession {
         self.process_accepted_update(update, record_wire_history)
     }
 
-    #[expect(
-        clippy::too_many_lines,
-        reason = "UPDATE handling keeps decode, validation, import policy, RIB enqueue, and FSM side effects ordered"
-    )]
+    /// RFC 9324: run retained input through the same path as a peer UPDATE,
+    /// without wire-only effects (decode, history, hold-timer feed).
+    pub(super) async fn process_local_replay(&mut self, parsed: ParsedUpdate) {
+        let revised = rustbgpd_wire::RevisedParsedUpdate {
+            update: parsed,
+            malformed: Vec::new(),
+        };
+        Box::pin(self.process_decoded_update(None, revised, Vec::new(), false)).await;
+    }
+
     async fn process_accepted_update(
         &mut self,
         update: rustbgpd_wire::UpdateMessage,
         record_wire_history: bool,
     ) {
         let four_octet_as = self.negotiated.as_ref().is_some_and(|n| n.four_octet_as);
-        let mut import_policy_routes_permitted = 0_u64;
-        let mut import_policy_routes_denied = 0_u64;
         // Check if Add-Path receive is negotiated for IPv4 unicast (body NLRI)
         let add_path_ipv4 = self
             .add_path_receive_families
@@ -1739,6 +1752,29 @@ impl PeerSession {
                 return;
             }
         };
+        self.process_decoded_update(Some(&update), revised, evpn_discarded, record_wire_history)
+            .await;
+    }
+
+    #[expect(
+        clippy::too_many_lines,
+        reason = "UPDATE handling keeps validation, import policy, RIB enqueue, and FSM side effects ordered"
+    )]
+    async fn process_decoded_update(
+        &mut self,
+        update: Option<&rustbgpd_wire::UpdateMessage>,
+        revised: rustbgpd_wire::RevisedParsedUpdate,
+        evpn_discarded: rustbgpd_wire::EvpnNlriDiscardObservations,
+        record_wire_history: bool,
+    ) {
+        // `None` = RFC 9324 local replay: no hold-timer feed from this input.
+        let from_wire = update.is_some();
+        let is_ebgp = self
+            .negotiated
+            .as_ref()
+            .is_some_and(|n| n.peer_asn != self.config.peer.local_asn);
+        let mut import_policy_routes_permitted = 0_u64;
+        let mut import_policy_routes_denied = 0_u64;
         let malformed = revised.malformed;
         let mut causes: Vec<_> = malformed
             .iter()
@@ -1791,8 +1827,10 @@ impl PeerSession {
                 "malformed path attribute (RFC 7606 revised error handling)"
             );
         }
-        if !malformed.is_empty() {
-            self.debug_dump_malformed_update(&update, &parsed);
+        if !malformed.is_empty()
+            && let Some(update) = update
+        {
+            self.debug_dump_malformed_update(update, &parsed);
         }
         // Keep the established OTC-specific diagnostic in addition to the
         // generic RFC 7606 malformed-update disposition. The codec omits the
@@ -1862,7 +1900,10 @@ impl PeerSession {
         // The session-reset next-hop length check runs first so a weaker
         // validation error cannot mask it (RFC 7606 §3 (h)).
         let validation = self
-            .check_ipv4_mp_next_hop_length(&parsed.attributes, &update.path_attributes)
+            .check_ipv4_mp_next_hop_length(
+                &parsed.attributes,
+                update.map_or(&[][..], |update| &update.path_attributes[..]),
+            )
             .and_then(|()| {
                 rustbgpd_wire::validate::validate_update_attributes_with_context(
                     &parsed.attributes,
@@ -1906,7 +1947,9 @@ impl PeerSession {
                 max_as_path_length = self.config.max_as_path_length,
                 "UPDATE validation error"
             );
-            self.debug_dump_malformed_update(&update, &parsed);
+            if let Some(update) = update {
+                self.debug_dump_malformed_update(update, &parsed);
+            }
             if update_err.disposition == ErrorDisposition::SessionReset {
                 record_malformed_update(
                     &self.metrics,
@@ -2067,7 +2110,9 @@ impl PeerSession {
                         safi: Safi::Unicast,
                     })
                     .await;
-                self.drive_fsm(Event::UpdateReceived).await;
+                if from_wire {
+                    self.drive_fsm(Event::UpdateReceived).await;
+                }
                 return;
             }
             // MP EoR: UPDATE with only an empty MP_UNREACH_NLRI (IPv6 unicast, FlowSpec, etc.)
@@ -2099,7 +2144,9 @@ impl PeerSession {
                         safi: mp.safi,
                     })
                     .await;
-                self.drive_fsm(Event::UpdateReceived).await;
+                if from_wire {
+                    self.drive_fsm(Event::UpdateReceived).await;
+                }
                 return;
             }
         }
@@ -2432,6 +2479,13 @@ impl PeerSession {
         let reject_proto_attrs = (parsed_as_path, update_communities, update_large_communities);
         let mut reject_proto: Option<RejectedRouteEntry> = None;
         let mut rejected_retained: Vec<(Prefix, u32, RejectedRouteEntry)> = Vec::new();
+        // RFC 9324: every unicast identity this UPDATE evaluates, with the
+        // retained entry for validation-dependent ones (`None` = forget).
+        let retention_active = self
+            .validation_retention
+            .as_ref()
+            .is_some_and(ValidationRetention::is_complete);
+        let mut retention_evaluated: Vec<(RetainedKey, Option<(RetainedReach, bool)>)> = Vec::new();
         // A denied announcement replaces any prior accepted path under the
         // same wire identity; retire it after explicit withdrawals below.
         let mut denied_unicast: Vec<(Prefix, u32)> = Vec::new();
@@ -2536,8 +2590,20 @@ impl PeerSession {
                             reject_entry.aspa_invalid_hop = body_aspa.invalid_hop;
                             rejected_retained.push((prefix, entry.path_id, reject_entry));
                         }
+                        if retention_active {
+                            let retain =
+                                reject_depends_on_validation(self.import_policy.as_ref(), &ctx);
+                            retention_evaluated.push((
+                                (prefix, entry.path_id),
+                                retain.then_some((RetainedReach::Body, false)),
+                            ));
+                        }
                         denied_unicast.push((prefix, entry.path_id));
                         return None;
+                    }
+                    if retention_active {
+                        retention_evaluated
+                            .push(((prefix, entry.path_id), Some((RetainedReach::Body, true))));
                     }
                     let (attrs, nh_action) =
                         import_attr_memo.materialize(&attr_bundle.unicast, &result.modifications);
@@ -3156,7 +3222,16 @@ impl PeerSession {
                                 },
                             );
                         }
+                        let mp_reach = RetainedReach::Mp {
+                            afi: mp.afi,
+                            next_hop: mp.next_hop,
+                            link_local_next_hop: mp.link_local_next_hop,
+                        };
                         if result.action == rustbgpd_policy::PolicyAction::Permit {
+                            if retention_active {
+                                retention_evaluated
+                                    .push(((entry.prefix, entry.path_id), Some((mp_reach, true))));
+                            }
                             let (attrs, nh_action) = import_attr_memo
                                 .materialize(&attr_bundle.mp_unicast, &result.modifications);
                             let next_hop = resolve_import_nexthop(
@@ -3212,6 +3287,14 @@ impl PeerSession {
                                 reject_entry.aspa = mp_aspa_state;
                                 reject_entry.aspa_invalid_hop = mp_aspa.invalid_hop;
                                 rejected_retained.push((entry.prefix, entry.path_id, reject_entry));
+                            }
+                            if retention_active {
+                                let retain =
+                                    reject_depends_on_validation(self.import_policy.as_ref(), &ctx);
+                                retention_evaluated.push((
+                                    (entry.prefix, entry.path_id),
+                                    retain.then_some((mp_reach, false)),
+                                ));
                             }
                             denied_unicast.push((entry.prefix, entry.path_id));
                         }
@@ -3338,6 +3421,32 @@ impl PeerSession {
                     path_id,
                 });
             }
+        }
+        // RFC 9324: explicit withdrawals and pre-policy safety rejections
+        // forget retained input; evaluated identities are retained or
+        // forgotten by their import outcome. Same-UPDATE re-announcement wins.
+        if retention_active {
+            let forget: Vec<RetainedKey> = withdrawn
+                .iter()
+                .chain(&otc_rejected_unicast)
+                .chain(&ownership_rejected_unicast)
+                .copied()
+                .collect();
+            self.update_validation_retention(forget, retention_evaluated, || {
+                AttrSet::new(
+                    parsed
+                        .attributes
+                        .iter()
+                        .filter(|attr| {
+                            !matches!(
+                                attr,
+                                PathAttribute::MpReachNlri(_) | PathAttribute::MpUnreachNlri(_)
+                            )
+                        })
+                        .cloned()
+                        .collect(),
+                )
+            });
         }
         // LAN-472: retain the pre-policy safety rejections under their
         // gate reason. One shared entry per gate, derived from the
@@ -3661,7 +3770,9 @@ impl PeerSession {
             }
         }
         // 5. Tell FSM about the update (restarts hold timer)
-        self.drive_fsm(Event::UpdateReceived).await;
+        if from_wire {
+            self.drive_fsm(Event::UpdateReceived).await;
+        }
     }
 }
 #[cfg(test)]

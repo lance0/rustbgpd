@@ -1129,11 +1129,12 @@ pub enum PeerManagerCommand {
         /// Scheduling acknowledgement; does not wait for replay completion.
         reply: oneshot::Sender<Result<(), OutboundRefreshError>>,
     },
-    /// Trigger soft inbound reset for established peers whose resolved import
-    /// policy depends on an external validation cache.
+    /// Re-evaluate established peers whose resolved import policy depends on
+    /// an external validation cache: locally (RFC 9324, `[rpki]
+    /// local_revalidation`) or by inbound Route Refresh.
     SoftResetImportValidationDependents {
-        /// Validation cache that changed.
-        dependency: ImportValidationDependency,
+        /// What changed in the validation cache.
+        delta: rustbgpd_transport::ValidationDelta,
         /// Reply channel for success/failure.
         reply: oneshot::Sender<Result<(), String>>,
     },

@@ -1283,6 +1283,15 @@ impl PeerManager {
         self.session_index.remove(&session_id);
     }
 
+    /// `[rpki] local_revalidation`: RFC 9324 local re-evaluation instead of
+    /// inbound Route Refresh on a validation-cache change.
+    fn local_revalidation(&self) -> bool {
+        self.current_config
+            .rpki
+            .as_ref()
+            .is_some_and(|rpki| rpki.local_revalidation)
+    }
+
     fn build_transport_config(&self, config: &PeerManagerNeighborConfig) -> TransportConfig {
         let families = if config.families.is_empty() {
             vec![(Afi::Ipv4, Safi::Unicast)]
@@ -1394,6 +1403,8 @@ impl PeerManager {
         // hazard as the explain knobs above.
         transport.reject_retention_enabled = self.current_config.policy.reject_retention.enabled;
         transport.reject_retention_capacity = self.current_config.policy.reject_retention.capacity;
+        // RFC 9324: `[rpki]` is restart-required, so construction-time reads hold.
+        transport.local_revalidation = self.local_revalidation();
         // RFC 8671: tap outbound UPDATEs for BMP only when some collector
         // actually monitors the post-policy Adj-RIB-Out stream ([bmp]
         // changes require a restart, so read-at-construction is
@@ -1890,10 +1901,15 @@ impl PeerManager {
             PeerManagerCommand::ReplayOutbound { peer, reply } => {
                 self.replay_outbound(peer, reply).await;
             }
-            PeerManagerCommand::SoftResetImportValidationDependents { dependency, reply } => {
-                let result = self
-                    .soft_reset_import_validation_dependents(dependency)
-                    .await;
+            PeerManagerCommand::SoftResetImportValidationDependents { delta, reply } => {
+                let result = if self.local_revalidation() {
+                    self.revalidate_import_validation_dependents(delta).await
+                } else {
+                    self.soft_reset_import_validation_dependents(policy::validation_dependency(
+                        &delta,
+                    ))
+                    .await
+                };
                 let _ = reply.send(result);
             }
             PeerManagerCommand::SetGracefulShutdown {

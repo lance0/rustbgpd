@@ -11,6 +11,7 @@ mod refresh_accounting;
 pub mod rejected_routes;
 mod replay;
 mod shared_group;
+pub(crate) mod validation_retention;
 mod writer;
 
 pub use io::{connect_authenticated, preflight_authenticated_dial};
@@ -633,6 +634,12 @@ pub(crate) struct PeerSession {
     /// attaches its initially pending publication, without an intervening await.
     import_policy_counters:
         Option<watch::Sender<Option<Arc<crate::handle::InstalledImportPolicy>>>>,
+    /// `[rpki] local_revalidation`: retain validation-dependent input for
+    /// RFC 9324 local re-evaluation. Fixed for the daemon's lifetime.
+    local_revalidation: bool,
+    /// RFC 9324 store; `Some` only while `local_revalidation` is on and the
+    /// import chain matches RPKI or ASPA state.
+    validation_retention: Option<validation_retention::ValidationRetention>,
 }
 
 /// One exceeded max-prefix bound: the offending count, the configured
@@ -2003,6 +2010,10 @@ impl PeerSession {
             tcp_ao_key_metadata(&config, tcp_ao_info.as_ref(), tcp_ao_selected_owner);
         let import_needs_as_path_string =
             Self::import_chain_needs_as_path_string(import_policy.as_ref());
+        let local_revalidation = config.local_revalidation;
+        let validation_retention = (local_revalidation
+            && Self::import_chain_needs_validation(import_policy.as_ref()))
+        .then(|| validation_retention::ValidationRetention::new(true));
         let (outbound_tx, outbound_rx) = mpsc::channel(OUTBOUND_BUFFER);
         let max_prefix_metric_lease = MaxPrefixMetricLease::new(
             metrics.clone(),
@@ -2183,6 +2194,8 @@ impl PeerSession {
             ),
             import_policy_generation: 0,
             import_policy_counters: None,
+            local_revalidation,
+            validation_retention,
         }
     }
 
@@ -2197,12 +2210,30 @@ impl PeerSession {
         import_policy.is_some_and(PolicyChain::requires_as_path_string)
     }
 
+    /// Whether import decisions can change with the RPKI or ASPA snapshot.
+    fn import_chain_needs_validation(import_policy: Option<&PolicyChain>) -> bool {
+        import_policy.is_some_and(|chain| {
+            chain.requires_rpki_validation() || chain.requires_aspa_validation()
+        })
+    }
+
     /// Install (or clear) the import chain, recomputing the cached
     /// `as_path_str` gate. The single mutation point for
     /// `import_policy` after construction — assigning the field
     /// directly would desynchronize the gate.
     pub(super) fn install_import_policy(&mut self, policy: Option<PolicyChain>) {
         self.import_needs_as_path_string = Self::import_chain_needs_as_path_string(policy.as_ref());
+        // Starting retention mid-session cannot see routes already received:
+        // the store stays incomplete (Route Refresh fallback) until reset.
+        let retain =
+            self.local_revalidation && Self::import_chain_needs_validation(policy.as_ref());
+        if !retain {
+            self.validation_retention = None;
+        } else if self.validation_retention.is_none() {
+            let complete = self.fsm.state() != SessionState::Established;
+            self.validation_retention =
+                Some(validation_retention::ValidationRetention::new(complete));
+        }
         self.import_policy = policy;
         // Every actual install, including a clear or equal reinstall, advances
         // the local generation before publication and command acknowledgement.
@@ -2648,6 +2679,7 @@ impl PeerSession {
             let receive_outbound = self.fsm.state() == SessionState::Established
                 && !replay_waiting
                 && self.pending_outbound.is_none();
+            let revalidating = self.revalidation_pending();
             // Destructure to split borrows for tokio::select!
             let Self {
                 read_half,
@@ -2671,6 +2703,11 @@ impl PeerSession {
             } = self;
 
             tokio::select! {
+                // RFC 9324: one bounded chunk of queued local re-evaluation.
+                () = std::future::ready(()), if revalidating => {
+                    self.advance_revalidation().await;
+                }
+
                 // TCP read — only when connected and past the Idle bootstrap
                 result = read_tcp(read_half, &mut read_buf.buf), if read_active => {
                     self.handle_tcp_read_result(result).await;

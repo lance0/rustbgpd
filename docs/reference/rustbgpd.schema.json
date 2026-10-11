@@ -3488,6 +3488,10 @@
           "items": {
             "$ref": "#/$defs/CacheServer"
           }
+        },
+        "local_revalidation": {
+          "description": "RFC 9324 local re-evaluation. When `true`, a session whose import\npolicy matches RPKI or ASPA state keeps its pre-policy IPv4/IPv6\nunicast input (accepted routes plus rejects that validation decided),\nand a VRP or ASPA change is re-evaluated locally instead of requesting\ninbound Route Refresh. A session whose retained rejects exceed the\nper-session bound falls back to Route Refresh. Default `false`;\nrestart-required like the rest of `[rpki]`.",
+          "type": "boolean"
         }
       },
       "additionalProperties": false

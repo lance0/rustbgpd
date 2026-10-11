@@ -1120,6 +1120,10 @@ impl Config {
         // retention knobs — both construction paths must see them.
         transport.reject_retention_enabled = self.policy.reject_retention.enabled;
         transport.reject_retention_capacity = self.policy.reject_retention.capacity;
+        transport.local_revalidation = self
+            .rpki
+            .as_ref()
+            .is_some_and(|rpki| rpki.local_revalidation);
 
         let policy =
             self.effective_policy_for_neighbor_with_store(neighbor, group, external_pinned, store)?;

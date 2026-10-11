@@ -2562,3 +2562,105 @@ async fn conditional_install_shares_one_deadline_across_send_and_reply() {
     );
     rib.abort();
 }
+
+/// A session that answers RFC 9324 re-evaluation requests with `answer` and
+/// counts every request and ROUTE-REFRESH it receives.
+fn revalidating_peer_handle(
+    answer: rustbgpd_transport::ImportRevalidation,
+    revalidate: Arc<AtomicU32>,
+    route_refresh: Arc<std::sync::Mutex<Vec<(Afi, Safi)>>>,
+) -> PeerHandle {
+    let (commands, mut receiver) = mpsc::channel(8);
+    let session = tokio::spawn(async move {
+        while let Some(command) = receiver.recv().await {
+            match command {
+                PeerCommand::RevalidateImport { reply, .. } => {
+                    revalidate.fetch_add(1, Ordering::SeqCst);
+                    let _ = reply.send(answer.clone());
+                }
+                PeerCommand::SendRouteRefresh { afi, safi, reply } => {
+                    route_refresh.lock().unwrap().push((afi, safi));
+                    let _ = reply.send(Ok(()));
+                }
+                _ => {}
+            }
+        }
+        Ok(())
+    });
+    PeerHandle::from_parts(commands, session)
+}
+
+#[tokio::test]
+async fn local_revalidation_refreshes_only_incomplete_sessions() {
+    use rustbgpd_transport::ImportRevalidation;
+
+    let mut mgr = test_peer_manager();
+    mgr.current_config.rpki = Some(crate::config::RpkiConfig {
+        cache_servers: Vec::new(),
+        local_revalidation: true,
+    });
+    assert!(mgr.local_revalidation());
+    let cases = [
+        (
+            "10.0.0.31",
+            ImportRevalidation::Local {
+                refresh_families: Vec::new(),
+            },
+        ),
+        ("10.0.0.32", ImportRevalidation::Incomplete),
+        ("10.0.0.33", ImportRevalidation::NotEstablished),
+        (
+            "10.0.0.34",
+            ImportRevalidation::Local {
+                refresh_families: vec![(Afi::Ipv4, Safi::FlowSpec)],
+            },
+        ),
+    ];
+    let mut observed = Vec::new();
+    for (addr, answer) in cases {
+        let peer: IpAddr = addr.parse().unwrap();
+        let revalidate = Arc::new(AtomicU32::new(0));
+        let refresh = Arc::new(std::sync::Mutex::new(Vec::new()));
+        insert_test_managed_peer(
+            &mut mgr,
+            peer,
+            revalidating_peer_handle(answer, revalidate.clone(), refresh.clone()),
+            false,
+        );
+        mgr.peers.get_mut(&key(peer)).unwrap().import_policy =
+            Some(validation_policy_chain(ImportValidationDependency::Rpki));
+        observed.push((revalidate, refresh));
+    }
+
+    mgr.revalidate_import_validation_dependents(rustbgpd_transport::ValidationDelta::Rpki(None))
+        .await
+        .unwrap();
+
+    let refreshes: Vec<Vec<(Afi, Safi)>> = observed
+        .iter()
+        .map(|(revalidate, refresh)| {
+            assert_eq!(revalidate.load(Ordering::SeqCst), 1);
+            refresh.lock().unwrap().clone()
+        })
+        .collect();
+    assert_eq!(
+        refreshes,
+        vec![
+            vec![],
+            mgr.peers[&key("10.0.0.32".parse().unwrap())]
+                .transport_config
+                .peer
+                .families
+                .clone(),
+            vec![],
+            vec![(Afi::Ipv4, Safi::FlowSpec)],
+        ],
+        "only the incomplete session (and a non-retained family) is refreshed"
+    );
+    assert_validation_import_refresh_metric(&mgr, "rpki", "eligible", 4.0);
+    assert_validation_import_refresh_metric(&mgr, "rpki", "revalidated_locally", 2.0);
+    assert_validation_import_refresh_metric(&mgr, "rpki", "fallback_refresh", 1.0);
+    assert_validation_import_refresh_metric(&mgr, "rpki", "refreshed", 2.0);
+    assert_validation_import_refresh_metric(&mgr, "rpki", "skipped_not_established", 1.0);
+    assert_validation_import_refresh_metric(&mgr, "rpki", "failed", 0.0);
+}

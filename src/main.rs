@@ -2115,12 +2115,16 @@ fn invalid_invocation(message: impl std::fmt::Display) -> ! {
 
 async fn trigger_import_validation_refresh(
     peer_mgr_tx: &mpsc::Sender<PeerManagerCommand>,
-    dependency: ImportValidationDependency,
+    delta: rustbgpd_transport::ValidationDelta,
 ) {
+    let dependency = match delta {
+        rustbgpd_transport::ValidationDelta::Rpki(_) => ImportValidationDependency::Rpki,
+        rustbgpd_transport::ValidationDelta::Aspa(_) => ImportValidationDependency::Aspa,
+    };
     let (reply_tx, reply_rx) = oneshot::channel();
     if peer_mgr_tx
         .send(PeerManagerCommand::SoftResetImportValidationDependents {
-            dependency,
+            delta,
             reply: reply_tx,
         })
         .await
@@ -4661,10 +4665,20 @@ async fn run<T>(
         let rpki_peer_mgr_tx = peer_mgr_tx.clone();
         let validation_tx_vrp = validation_watch_tx.clone();
         let handle = rpki_tasks.spawn(async move {
+            // Routes evaluated before the first table saw no VRPs, so the
+            // first table re-evaluates everything (the RIB applies the same
+            // rule to its own revalidation).
+            let mut first_table = true;
             while let Some(update) = rpki_table_rx.recv().await {
                 validation_tx_vrp.send_modify(|snapshot| {
                     snapshot.vrp_table = Some(std::sync::Arc::clone(&update.table));
                 });
+                let session_delta = update
+                    .delta
+                    .as_deref()
+                    .filter(|_| !first_table)
+                    .map(std::sync::Arc::<[rustbgpd_rpki::VrpEntry]>::from);
+                first_table = false;
                 let _ = rpki_rib_tx
                     .send(RibUpdate::RpkiCacheUpdate {
                         table: update.table,
@@ -4673,7 +4687,7 @@ async fn run<T>(
                     .await;
                 trigger_import_validation_refresh(
                     &rpki_peer_mgr_tx,
-                    ImportValidationDependency::Rpki,
+                    rustbgpd_transport::ValidationDelta::Rpki(session_delta),
                 )
                 .await;
             }
@@ -4689,10 +4703,17 @@ async fn run<T>(
         let aspa_peer_mgr_tx = peer_mgr_tx.clone();
         let validation_tx_aspa = validation_watch_tx.clone();
         let handle = rpki_tasks.spawn(async move {
+            let mut first_table = true;
             while let Some(update) = aspa_table_rx.recv().await {
                 validation_tx_aspa.send_modify(|snapshot| {
                     snapshot.aspa_table = Some(std::sync::Arc::clone(&update.table));
                 });
+                let session_delta = update
+                    .changed_customer_asns
+                    .clone()
+                    .filter(|_| !first_table)
+                    .map(std::sync::Arc::new);
+                first_table = false;
                 let _ = aspa_rib_tx
                     .send(RibUpdate::AspaTableUpdate {
                         table: update.table,
@@ -4701,7 +4722,7 @@ async fn run<T>(
                     .await;
                 trigger_import_validation_refresh(
                     &aspa_peer_mgr_tx,
-                    ImportValidationDependency::Aspa,
+                    rustbgpd_transport::ValidationDelta::Aspa(session_delta),
                 )
                 .await;
             }

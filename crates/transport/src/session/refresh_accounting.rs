@@ -63,6 +63,11 @@ impl PeerSession {
     /// fresh snapshot and deadline.
     pub(super) fn begin_refresh_accounting(&mut self, afi: Afi, safi: Safi) {
         let family = (afi, safi);
+        if safi == Safi::Unicast
+            && let Some(retention) = self.validation_retention.as_mut()
+        {
+            retention.begin_refresh(afi);
+        }
         let stale_rejected = match family {
             (Afi::Ipv4 | Afi::Ipv6, Safi::Unicast) if self.receives_add_path_for_family(family) => {
                 self.rejected_paths
@@ -145,6 +150,11 @@ impl PeerSession {
         let Some(window) = self.refresh_accounting.windows.remove(&(afi, safi)) else {
             return;
         };
+        if safi == Safi::Unicast
+            && let Some(retention) = self.validation_retention.as_mut()
+        {
+            retention.end_refresh(afi);
+        }
         self.arm_refresh_accounting_timer();
         self.sweep_refresh_accounting(window.stale);
         for (prefix, path_id) in window.stale_rejected {
