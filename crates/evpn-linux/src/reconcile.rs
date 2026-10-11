@@ -1085,6 +1085,48 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
                     .get(&key)
                     .is_some_and(|(current, row)| *current == port && row.is_extern_learned())
                 {
+                    let (vni, vlan, mac) = key;
+                    // None sorts first. Unscoped bridge operations cover all
+                    // usable port VLAN members, not only the PVID. Co-own only
+                    // marked siblings revalidated against that same port's
+                    // unambiguous membership inventory.
+                    let covered_sibling = intent.instances.get(vni).is_some_and(|instance| {
+                        let Some(vlan) = vlan else {
+                            return false;
+                        };
+                        if instance.bridge_vlan.is_some() {
+                            return false;
+                        }
+                        let Some(bridge) = instance
+                            .bridge
+                            .as_ref()
+                            .and_then(|name| snapshot.links.get(name))
+                        else {
+                            return false;
+                        };
+                        let mut ports = bridge
+                            .port_vlan_inventory
+                            .iter()
+                            .filter(|entry| entry.ifindex == port);
+                        let Some(inventory) = ports.next() else {
+                            return false;
+                        };
+                        if ports.next().is_some() {
+                            return false;
+                        }
+                        let members: Vec<_> = inventory
+                            .vlans
+                            .iter()
+                            .filter(|row| !row.flags.only_options && !row.flags.bridge_entry)
+                            .copied()
+                            .collect();
+                        vlan_rows_contain(&members, vlan)
+                    });
+                    if covered_sibling
+                        && self.state.owned.peer_sync.get(&(vni, None, mac)) == Some(&port)
+                    {
+                        continue;
+                    }
                     self.state.owned.peer_sync.insert(key, port);
                 }
             }
@@ -3951,8 +3993,9 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
                 );
                 self.state.retry.record_success((*vni, *mac));
             }
-            DataplaneOp::RemoveRemoteFdb { vni, mac, .. }
-            | DataplaneOp::RemoveFdbNhg { vni, mac, .. } => {
+            DataplaneOp::RemoveRemoteFdb { vni, mac, vlan }
+            | DataplaneOp::RemoveFdbNhg { vni, mac, vlan, .. } => {
+                self.state.adopted_fdb.remove(&(*vni, *vlan, *mac));
                 self.state.owned.record_withdrawn(*vni, *mac);
                 self.state.retry.record_success((*vni, *mac));
             }

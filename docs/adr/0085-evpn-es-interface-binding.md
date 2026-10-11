@@ -291,6 +291,13 @@ atomic exclusion of concurrent FDB writers. The first add uses
 receive those flags; the ordinary unmarked/static add path does honor
 `EXCL` and returns `EEXIST`. A two-step unmarked add followed by ownership
 marking is not used: it would introduce another unowned crash/race window.
+The pinned [Linux v7.0 external-learning path](https://github.com/torvalds/linux/blob/v7.0/net/bridge/br_fdb.c#L1202-L1212)
+shows the flag handling. Its [unscoped add](https://github.com/torvalds/linux/blob/v7.0/net/bridge/br_fdb.c#L1288-L1303)
+and [delete](https://github.com/torvalds/linux/blob/v7.0/net/bridge/br_fdb.c#L1360-L1374)
+also affect every usable VLAN membership on the port, so adoption groups
+marked same-port siblings only when current port inventory confirms that
+membership. The retained kernel probes establish the observed behavior on
+the tested host.
 
 This is forwarding state only. Owned FDB rows are excluded from local MAC
 observations and do not originate a new Type 2. Locally learned routes retain

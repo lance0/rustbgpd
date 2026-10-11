@@ -397,8 +397,19 @@ impl InMemoryDataplane {
                     .kernel
                     .local_fdb
                     .get(&key)
-                    .is_some_and(|(port, row)| *port != *ifindex || !row.is_extern_learned())
-                    || state.kernel.find_fdb_in_vlan(*vni, *mac, *vlan).is_some()
+                    .is_some_and(|(port, row)| *port == *ifindex && row.is_extern_learned())
+                {
+                    return Ok(());
+                }
+                let affected =
+                    |&(row_vni, row_vlan, row_mac): &(EvpnInstanceId, Option<u16>, MacAddress)| {
+                        row_vni == *vni && row_mac == *mac && (vlan.is_none() || row_vlan == *vlan)
+                    };
+                if state.kernel.local_fdb.keys().any(affected)
+                    || state
+                        .kernel
+                        .iter_fdb()
+                        .any(|((v, m), row)| affected(&(v, row.vlan, m)))
                 {
                     return Err(DataplaneError::LocalMacConflict {
                         vni: *vni,
@@ -437,7 +448,32 @@ impl InMemoryDataplane {
                     .get(&key)
                     .is_some_and(|(port, row)| *port == *ifindex && row.is_extern_learned())
                 {
-                    state.kernel.local_fdb.remove(&key);
+                    if vlan.is_none()
+                        && state
+                            .kernel
+                            .local_fdb
+                            .iter()
+                            .any(|(&(v, _, m), (port, row))| {
+                                v == *vni
+                                    && m == *mac
+                                    && *port == *ifindex
+                                    && !row.is_extern_learned()
+                            })
+                    {
+                        return Err(DataplaneError::LocalMacConflict {
+                            vni: *vni,
+                            mac: *mac,
+                        });
+                    }
+                    state
+                        .kernel
+                        .local_fdb
+                        .retain(|&(v, row_vlan, m), (port, _)| {
+                            !(v == *vni
+                                && m == *mac
+                                && *port == *ifindex
+                                && (vlan.is_none() || row_vlan == *vlan))
+                        });
                 }
             }
             DataplaneOp::AddRemoteFdb {
@@ -1348,6 +1384,16 @@ impl InMemoryHandle {
             .kernel
             .local_fdb
             .insert((vni, entry.vlan, entry.mac), (ifindex, entry));
+    }
+
+    /// Simulate a local bridge row disappearing outside the actor.
+    pub fn force_remove_local_fdb(&self, vni: EvpnInstanceId, vlan: Option<u16>, mac: MacAddress) {
+        self.state
+            .lock()
+            .expect("poisoned")
+            .kernel
+            .local_fdb
+            .remove(&(vni, vlan, mac));
     }
 
     /// Pre-load one zero-MAC flood row; `owned` is its `extern_learn`

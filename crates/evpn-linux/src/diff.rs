@@ -509,6 +509,19 @@ fn peer_sync_pass(
             });
         }
     }
+    if desired.peer_sync_fdb().is_empty() {
+        return;
+    }
+    // Local dynamic learns take precedence over peer sync, but must stay out
+    // of the ordinary remote index so remote MAC mobility can still converge.
+    let foreign = ForeignFdbEntries::new(
+        snapshot.iter_fdb().chain(
+            snapshot
+                .local_fdb
+                .iter()
+                .map(|(&(vni, _, mac), (_, row))| ((vni, mac), row)),
+        ),
+    );
     for &(vni, mac) in desired.peer_sync_fdb().keys() {
         let Some((vlan, ifindex)) = target(vni, mac) else {
             continue;
@@ -522,13 +535,22 @@ fn peer_sync_pass(
                 continue;
             }
         }
-        // An owned overlay row is removed by the ordinary withdrawal pass;
-        // a foreign overlay row must keep the shared bridge master slot.
-        if snapshot
-            .find_fdb_in_vlan(vni, mac, vlan)
-            .is_some_and(|row| !row.is_extern_learned())
-        {
+        // Unscoped bridge removal can affect every VLAN sibling. Preserve
+        // foreign rows across that entire scope before planning a conversion.
+        if foreign.contains(vni, mac, vlan) {
             continue;
+        }
+        // Ordinary ownership withdrawal already removes its overlay row.
+        // A marked single-dst row adopted at startup must convert immediately,
+        // without waiting for the orphan-reap grace. Untracked NHG rows need
+        // their group ownership path and must not use single-dst removal.
+        if let Some(row) = snapshot.find_fdb_in_vlan(vni, mac, vlan)
+            && owned.get(vni, mac).is_none_or(|entry| entry.vlan != vlan)
+        {
+            if row.dst.is_none() || row.nh_id.is_some() {
+                continue;
+            }
+            deletes.push(DataplaneOp::RemoveRemoteFdb { vni, mac, vlan });
         }
         creates.push(DataplaneOp::AddPeerSyncFdb {
             vni,
@@ -1190,8 +1212,9 @@ mod tests {
         );
         let mut overlay = RemoteMacTable::builder();
         overlay.insert(v, m, entry("10.0.0.2", None)).unwrap();
+        let overlay = overlay.build();
         assert_eq!(
-            diff(&overlay.build(), &snapshot, &owned).ops,
+            diff(&overlay, &snapshot, &owned).ops,
             vec![
                 remove,
                 DataplaneOp::AddRemoteFdb {
@@ -1201,6 +1224,24 @@ mod tests {
                     dst: ip("10.0.0.2")
                 }
             ]
+        );
+        snapshot
+            .local_fdb
+            .get_mut(&(v, vlan, m))
+            .unwrap()
+            .1
+            .flags
+            .extern_learn = false;
+        owned.peer_sync.clear();
+        assert_eq!(
+            diff(&overlay, &snapshot, &owned).ops,
+            vec![DataplaneOp::AddRemoteFdb {
+                vni: v,
+                mac: m,
+                vlan,
+                dst: ip("10.0.0.2"),
+            }],
+            "local dynamic peer-sync priority must not suppress ordinary remote mobility"
         );
     }
 
