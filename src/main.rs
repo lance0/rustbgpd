@@ -3631,6 +3631,33 @@ fn record_sighup_ignored_in_flight(metrics: &BgpMetrics) {
     metrics.record_sighup_reload_outcome(SighupReloadMetricOutcome::IgnoredInFlight);
 }
 
+fn settle_sighup_credential_reload(
+    trace: &SighupReloadTraceHandle,
+    completion: &mut reload::SighupCompletion,
+    published: bool,
+) {
+    if published {
+        trace
+            .lock()
+            .expect("SIGHUP trace poisoned")
+            .applied("grpc_credentials.reload", "[global.telemetry]");
+        return;
+    }
+    let failure = reload::ReloadStepFailure {
+        bucket: "grpc_credentials.reload",
+        target: String::new(),
+        error: ReloadStepError::Rejected("gRPC credential publication rejected".to_string()),
+    };
+    match completion {
+        reload::SighupCompletion::Complete => {
+            *completion = reload::SighupCompletion::KnownPartial {
+                failures: vec![failure],
+            };
+        }
+        reload::SighupCompletion::KnownPartial { failures } => failures.push(failure),
+    }
+}
+
 const LAST_SIGHUP_EFFECT_LIMIT: usize = 32;
 type LastSighupReloadState = Arc<Mutex<Option<rustbgpd_api::proto::SighupReloadRecord>>>;
 
@@ -3659,6 +3686,7 @@ fn safe_sighup_target(bucket: &str, raw: &str, trace: &SighupReloadTrace) -> Str
         "evpn_runtime.apply" => "[[evpn_instances]]",
         "fib_tables.apply" => "[[fib_tables]]",
         "policy.dataset.refresh" | "policy.rpol.sync" => "[policy]",
+        "grpc_credentials.reload" => "[global.telemetry]",
         "listener_auth.apply"
         | "listener_auth.withdraw"
         | "prefix_limit.prepare"
@@ -6603,7 +6631,7 @@ async fn run<T>(
                             }
                         },
                         SighupReloadOutcome::RecoveryFenced { error, reason } => OwnedRuntimeConfigOutcome::Fenced { error, reason },
-                        SighupReloadOutcome::Acknowledged(authority) => {
+                        SighupReloadOutcome::Acknowledged(mut authority) => {
                             // Credential files are operator authority independent of
                             // the config generation: rotate them only once the runtime
                             // generation is acknowledged, so a rejected or restored
@@ -6611,8 +6639,13 @@ async fn run<T>(
                             // stays non-fatal with the last-known-good generation
                             // active.
                             if let Some(credentials) = grpc_credentials {
+                                trace
+                                    .lock()
+                                    .expect("SIGHUP trace poisoned")
+                                    .plan("grpc_credentials.reload", "[global.telemetry]");
                                 match credentials.reload() {
                                     Ok(generation) => {
+                                        settle_sighup_credential_reload(&trace, &mut authority.completion, true);
                                         // A config-unchanged SIGHUP reaches here without
                                         // any earlier mutation; the atomic credential
                                         // publication is one.
@@ -6625,6 +6658,7 @@ async fn run<T>(
                                         }
                                     }
                                     Err(error) => {
+                                        settle_sighup_credential_reload(&trace, &mut authority.completion, false);
                                         reload_metrics.record_grpc_credential_reload("failure");
                                         error!(error = %error, "gRPC credential reload rejected; last-known-good generation remains active");
                                     }
@@ -7377,6 +7411,100 @@ mod tests {
                 .any(|effect| effect.target == "[redacted]")
         );
         assert!(!format!("{record:?}").contains(unsafe_target));
+    }
+
+    #[test]
+    fn credential_publication_receipt_tracks_success_failure_and_prior_partial() {
+        use rustbgpd_api::credentials::{CredentialSource, CredentialStore};
+
+        let dir = tempfile::tempdir().unwrap();
+        let token = dir.path().join("token");
+        std::fs::write(&token, "private token").unwrap();
+        let store = CredentialStore::stage(vec![CredentialSource {
+            token_file: Some(token.clone()),
+            tls: None,
+        }])
+        .unwrap();
+        let config = Config::load_toml_with_diagnostics(
+            &tier_authorized_uds_test_config(
+                "[global]\nasn = 65000\nrouter_id = \"10.0.0.1\"\nlisten_port = 1179\n\n[global.telemetry]\nlog_format = \"json\"\n",
+            ),
+            "credential SIGHUP receipt test",
+        )
+        .unwrap();
+        let authority = SighupAuthority {
+            runtime: config.clone(),
+            desired: AcceptedConfigSnapshot::from_config_for_test(config),
+            dialout_targets: Vec::new(),
+            completion: reload::SighupCompletion::Complete,
+        };
+
+        let success_trace: SighupReloadTraceHandle =
+            Arc::new(Mutex::new(SighupReloadTrace::default()));
+        success_trace
+            .lock()
+            .unwrap()
+            .plan("grpc_credentials.reload", "[global.telemetry]");
+        let mut complete = authority.clone();
+        assert_eq!(store.reload().unwrap(), 2);
+        settle_sighup_credential_reload(&success_trace, &mut complete.completion, true);
+        let success_record = last_sighup_record(
+            SystemTime::now(),
+            &Ok(Ok(complete)),
+            &success_trace.lock().unwrap(),
+        );
+        assert_eq!(success_record.outcome, "complete");
+        assert_eq!(success_record.applied_count, 1);
+        assert_eq!(success_record.unapplied_count, 0);
+        assert_eq!(success_record.applied[0].bucket, "grpc_credentials.reload");
+        assert_eq!(success_record.applied[0].target, "[global.telemetry]");
+
+        std::fs::remove_file(&token).unwrap();
+        let prior_generation = store.load().sequence();
+        let error = store.reload().unwrap_err();
+        assert_eq!(store.load().sequence(), prior_generation);
+        let failure_trace: SighupReloadTraceHandle =
+            Arc::new(Mutex::new(SighupReloadTrace::default()));
+        failure_trace
+            .lock()
+            .unwrap()
+            .plan("grpc_credentials.reload", "[global.telemetry]");
+        let mut partial = authority.clone();
+        settle_sighup_credential_reload(&failure_trace, &mut partial.completion, false);
+        let failure_record = last_sighup_record(
+            SystemTime::now(),
+            &Ok(Ok(partial)),
+            &failure_trace.lock().unwrap(),
+        );
+        assert_eq!(failure_record.outcome, "known_partial");
+        assert_eq!(failure_record.reason_code, "step_rejected");
+        assert_eq!(failure_record.failure_bucket, "grpc_credentials.reload");
+        assert_eq!(failure_record.failure_target, "[global.telemetry]");
+        assert_eq!(failure_record.applied_count, 0);
+        assert_eq!(failure_record.unapplied_count, 1);
+        assert!(!format!("{failure_record:?}").contains(&error));
+
+        let mut prior_partial = authority;
+        prior_partial.completion = reload::SighupCompletion::KnownPartial {
+            failures: vec![reload::ReloadStepFailure {
+                bucket: "evpn_runtime.apply",
+                target: String::new(),
+                error: ReloadStepError::Rejected("earlier rejection".to_string()),
+            }],
+        };
+        settle_sighup_credential_reload(&failure_trace, &mut prior_partial.completion, false);
+        let reload::SighupCompletion::KnownPartial { failures } = &prior_partial.completion else {
+            panic!("credential rejection retains partial authority");
+        };
+        assert_eq!(failures.len(), 2);
+        assert_eq!(failures[0].bucket, "evpn_runtime.apply");
+        assert_eq!(failures[1].bucket, "grpc_credentials.reload");
+        let ordered_record = last_sighup_record(
+            SystemTime::now(),
+            &Ok(Ok(prior_partial)),
+            &failure_trace.lock().unwrap(),
+        );
+        assert_eq!(ordered_record.failure_bucket, "evpn_runtime.apply");
     }
 
     fn rpki_cache_gauge(metrics: &BgpMetrics, name: &str, cache: &str) -> Option<f64> {

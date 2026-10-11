@@ -336,14 +336,14 @@ pub(crate) struct SighupReloadTrace {
 }
 
 impl SighupReloadTrace {
-    fn plan(&mut self, bucket: &'static str, target: impl Into<String>) {
+    pub(crate) fn plan(&mut self, bucket: &'static str, target: impl Into<String>) {
         self.planned.insert(SighupEffect {
             bucket,
             target: target.into(),
         });
     }
 
-    fn applied(&mut self, bucket: &'static str, target: impl Into<String>) {
+    pub(crate) fn applied(&mut self, bucket: &'static str, target: impl Into<String>) {
         self.applied.insert(SighupEffect {
             bucket,
             target: target.into(),
@@ -4863,8 +4863,8 @@ log_format = "json"
         let legacy_variant = concat!("GrpcEnforcementConfig::", "Legacy");
         let expected_seams = [
             (concat!("explicit_tier", "_test_toml("), 4),
-            (concat!("write_tier", "_test_config("), 30),
-            (concat!("load_tier", "_test_config("), 35),
+            (concat!("write_tier", "_test_config("), 34),
+            (concat!("load_tier", "_test_config("), 37),
             (concat!("load_tier", "_test_toml("), 9),
             (concat!("tier_authorized_uds", "_test_config("), 4),
             (concat!("assert_tier_authorized", "_test_config("), 13),

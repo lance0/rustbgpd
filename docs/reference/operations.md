@@ -862,6 +862,14 @@ ownership remains parked and is not mislabeled `rejected_no_effect`; use the
 settlement metrics and daemon health for that state. Structured
 `bucket` / `target` / `error` logs retain further per-step detail.
 
+When a gRPC credential store is configured, an accepted SIGHUP also attempts
+an atomic credential-generation publication, even if the config file is
+unchanged. The receipt counts a successful publication as applied. A failed
+publication keeps the previous credential generation active and settles as
+`known_partial`, with `grpc_credentials.reload` and `[global.telemetry]` in
+the receipt. The API result includes neither raw error text nor credential
+paths; the existing credential reload metric and log also report failure.
+
 `bgp_sighup_reload_outcomes_total{outcome}` is process-global and
 preinitializes five bounded outcomes: `complete` includes a clean no-op;
 `known_partial` means the retained task settled with an authoritative partial
