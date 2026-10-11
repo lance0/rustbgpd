@@ -73,7 +73,38 @@ VIOLATION_RULES: tuple[tuple[re.Pattern[str], str], ...] = (
         re.compile(r"nightly-\d{4}-\d{2}-\d{2}"),
         f"hardcodes a nightly date; read it from {PIN_PATH}",
     ),
+    (
+        re.compile(
+            r"""\b(?:toolchain\s*[=:]|RUSTUP_TOOLCHAIN(?:\s*[=:]|\s))"""
+            r"""\s*["']?nightly\b"""
+        ),
+        f"assigns a floating nightly; read the toolchain from {PIN_PATH}",
+    ),
 )
+
+def strip_comment(line: str) -> str:
+    """Drop a shell, YAML, Dockerfile, or justfile `#` comment from `line`.
+
+    A comment that names the pin file does not read it, and one that quotes
+    a floating toolchain does not select it. A `#` starts a comment only at
+    the start of the line or after whitespace, outside quotes, so `"#"`,
+    `$#`, and `${#var}` stay code.
+    """
+    quote = ""
+    escaped = False
+    for index, char in enumerate(line):
+        if escaped:
+            escaped = False
+        elif char == "\\" and quote != "'":
+            escaped = True
+        elif quote:
+            if char == quote:
+                quote = ""
+        elif char in "'\"":
+            quote = char
+        elif char == "#" and (index == 0 or line[index - 1].isspace()):
+            return line[:index]
+    return line
 
 
 class PinGuardError(RuntimeError):
@@ -127,12 +158,13 @@ def discover_consumers() -> dict[str, str]:
 def audit_consumer(relative: str, text: str) -> list[str]:
     """Report every way `relative` stops taking its toolchain from the pin."""
     failures: list[str] = []
-    if PIN_PATH not in text:
+    code = [strip_comment(line) for line in text.splitlines()]
+    if not any(PIN_PATH in line for line in code):
         failures.append(
             f"{relative} selects a Rust toolchain for fuzzing but no longer "
             f"reads {PIN_PATH}"
         )
-    for number, line in enumerate(text.splitlines(), start=1):
+    for number, line in enumerate(code, start=1):
         for pattern, reason in VIOLATION_RULES:
             match = pattern.search(line)
             if match:
