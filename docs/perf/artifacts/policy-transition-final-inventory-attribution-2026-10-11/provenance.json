@@ -1,0 +1,603 @@
+{
+  "schema": 1,
+  "status": "VALID native four-cell ABBA; selected public projections",
+  "window_start": "2026-10-11T04:42:25-04:00",
+  "window_finish": "2026-10-11T05:13:03-04:00",
+  "native_exits": {
+    "logs/build.exit": 0,
+    "logs/abba.exit": 0,
+    "logs/abba-wrapper.exit": 0
+  },
+  "lock_order": "continuous canonical host then light; build stages also owned cache lock",
+  "arms": {
+    "baseline": {
+      "source": "6ee2a052607b34a11e8daa2f4a4d4639b5101690",
+      "tree": "393acc58915f65e9e021fb2ec92db1d0d763bfb2",
+      "daemon_sha256": "4328bec4b2658a5c090aad1c5ee3e947cba6a03325a066484a3d2d95f446ad6d",
+      "cli_sha256": "578b90010df58157a6f9682329158096fb377e45503fd8afd5fbae0978a2d03d",
+      "build_command": "taskset -c 40-63 cargo build --release --locked -j 4 -p rustbgpd -p rustbgpctl",
+      "build_exits": {
+        "cargo-build.exit": 0,
+        "build-stage.exit": 0
+      },
+      "build_start": "2026-10-11T00:19:04-04:00",
+      "build_finish": "2026-10-11T00:36:42-04:00",
+      "input_refreshed_at": "2026-10-11T00:32:05-04:00",
+      "toolchain": "rustc 1.99.0 (b940084d7 2026-09-28)\nbinary: rustc\ncommit-hash: b940084d7eb6a299eb4bfeb8e34901bc051e7ac4\ncommit-date: 2026-09-28\nhost: x86_64-unknown-linux-gnu\nrelease: 1.99.0\nLLVM version: 23.1.1\ncargo 1.99.0 (5f94df478 2026-08-27)\n",
+      "original_hashes": {
+        "build-identity.txt": "303c3a62532f1413b8621d0aee1b53de53f4adc957678ab3d5acd60989b6699b",
+        "source-identity.txt": "58b9b06d5f13f4e194ebabb6c52e81d7177263bf313532db785aaf7c8e8a99e9",
+        "source-diff.patch": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "build.log": "d41b23e8c355159d00bd0a1c8a319266febc7ef223187ffe73327d18697054d0",
+        "build-driver.log": "bf9c9f3d5c982f6521b4dbf9d9696782502dcb25825dd57f7984635765c38aa5",
+        "build-driver-as-run.sh": "464f239ebe6052bd565299ccf32a697a288f215ce310197c5bdab71e010d74c5",
+        "snapshot-as-run.py": "46dfc01cab22bd4caed088e0314bd8cf693073e9f8bcf320a13cd6b1289fdd13",
+        "input-refresh.nul": "6c87071106139adf7091cd2b5dcce643a552334fe88435973707c3d720160f1b",
+        "input-refresh.sha256": "0420cff704290a1b9863714e5bcb039faebeed167e5784f69461ce0537a8c645",
+        "toolchain.txt": "91a27f7fa86c27583f5a7c3d1f23dbd9a7e42ed18dc031db7472502cc55c88b9",
+        "actual/closure.json": "3c3af14dbba97d808e1cca3da0453c76992c0f0b4b26da99fe187515367d784c",
+        "actual-capture.log": "cbd0c9d02252d576d8dc64d1157587071df24009bd2a86a12cfc25082379093f",
+        "normal-build-tree.txt": "8d42e1cc8862b5d83c9804f9a683aea97493a0ce1d5dfced43bd5ee0e42354e9",
+        "normal-build-tree.normalized.txt": "c1364681434d3ae9a897ba64fc6193abc8127c70d557fda52986d549c88c87cf",
+        "provenance.sha256": "13b3af7d11551c30dbcc2cb88370dd7bff1d4d0f5329f4da3ca48546435f4ac3",
+        "SHA256SUMS": "2bd567e4dcd4c7e1d8dd82d583e87ae00999460d1aae9f64f5842786ca2049e4"
+      }
+    },
+    "candidate": {
+      "source": "aceacb435677291fdb20c2e792f58cb9e4575b74",
+      "tree": "e43026bd5e90766e8da8fea419fa736463f19117",
+      "daemon_sha256": "8452cb51673979474b61c77a1288bf29896e370f92946a82c0974921503ea48e",
+      "cli_sha256": "578b90010df58157a6f9682329158096fb377e45503fd8afd5fbae0978a2d03d",
+      "build_command": "taskset -c 40-63 cargo build --release --locked -j 4 -p rustbgpd -p rustbgpctl",
+      "build_exits": {
+        "cargo-build.exit": 0,
+        "build-stage.exit": 0
+      },
+      "build_start": "2026-10-11T00:36:42-04:00",
+      "build_finish": "2026-10-11T00:58:36-04:00",
+      "input_refreshed_at": "2026-10-11T00:53:56-04:00",
+      "toolchain": "rustc 1.99.0 (b940084d7 2026-09-28)\nbinary: rustc\ncommit-hash: b940084d7eb6a299eb4bfeb8e34901bc051e7ac4\ncommit-date: 2026-09-28\nhost: x86_64-unknown-linux-gnu\nrelease: 1.99.0\nLLVM version: 23.1.1\ncargo 1.99.0 (5f94df478 2026-08-27)\n",
+      "original_hashes": {
+        "build-identity.txt": "092d0995eb3bd0eb0c7ec5ac9d6c4c350747398daaf8198d46f2fb8b2c7d493e",
+        "source-identity.txt": "0fa2b5fc9cd7f9a269d0b498aed939272dd48dc2bcfc76c270fdc0c09d457537",
+        "source-diff.patch": "a60ba50f7820dcb4fc77f246917e55255fbc8c9dbd41946cb9b16994ad7c5ce2",
+        "build.log": "bb17ecea74ad1251fc4be02068a8b996afa8696090acbfa2a721185a59b23a85",
+        "build-driver.log": "c8008bce479243a4108f45edaa0ff2094ef68ec83e0cd3c1bf902ef621be67dd",
+        "build-driver-as-run.sh": "464f239ebe6052bd565299ccf32a697a288f215ce310197c5bdab71e010d74c5",
+        "snapshot-as-run.py": "46dfc01cab22bd4caed088e0314bd8cf693073e9f8bcf320a13cd6b1289fdd13",
+        "input-refresh.nul": "6c87071106139adf7091cd2b5dcce643a552334fe88435973707c3d720160f1b",
+        "input-refresh.sha256": "5beaf1585995bf249b44d5c70bb2ec4a54cf7e38f9e48f77710db4b76015f166",
+        "toolchain.txt": "91a27f7fa86c27583f5a7c3d1f23dbd9a7e42ed18dc031db7472502cc55c88b9",
+        "actual/closure.json": "632c951e7b8a63b0eaf409f67614fe78443d3a29f4b0ba66c508a63261add128",
+        "actual-capture.log": "cbd0c9d02252d576d8dc64d1157587071df24009bd2a86a12cfc25082379093f",
+        "normal-build-tree.txt": "1dc8cb835934a1c812d20f230f511f259dc59867ace5a484f3deaccb324f1a45",
+        "normal-build-tree.normalized.txt": "c1364681434d3ae9a897ba64fc6193abc8127c70d557fda52986d549c88c87cf",
+        "provenance.sha256": "1fdf67737855fb47c3b03d61fb5ea65f41ca2db04e77d19a4d7a02d50611d056",
+        "SHA256SUMS": "74404fa2326646b5112045be871bd9e059b8d6aeda9d6813d6aa7762bfd12432"
+      }
+    }
+  },
+  "legs": {
+    "baseline-r1": {
+      "start": "2026-10-11T04:42:55-04:00",
+      "finish": "2026-10-11T04:49:04-04:00",
+      "evidence_end_wall": 1791708544.1030166,
+      "exits": {
+        "daemon": 0,
+        "engine": 0,
+        "probe": 0,
+        "cell": 0
+      },
+      "outer_leg_exit": 0,
+      "environment": {
+        "source_head": "591ac39d4b50fc2c647942713a9ea99c0588a51a",
+        "source_dirty": "",
+        "binaries": {
+          "rustbgpd": "4328bec4b2658a5c090aad1c5ee3e947cba6a03325a066484a3d2d95f446ad6d",
+          "rbgp": "578b90010df58157a6f9682329158096fb377e45503fd8afd5fbae0978a2d03d",
+          "reloadstall": "2701b6b81deca419dbcb55692cc74a9e976b73bcc628507dfa6c284116880b30"
+        },
+        "versions": {
+          "rustbgpd": "rustbgpd 0.74.0",
+          "rbgp": "rbgp 0.74.0"
+        },
+        "shape": {
+          "peers": 1000,
+          "prefixes": 400000,
+          "reloads": 8,
+          "control_secs": 15,
+          "quiesce_secs": 40,
+          "run_cap_secs": 1115,
+          "pair_lead_s": 0.11,
+          "quiescent_offset_s": 20
+        },
+        "placement": {
+          "daemon_cpus": "2-3",
+          "engine_cpus": "4-5",
+          "probe_cpus": "8-15"
+        },
+        "kernel": "7.0.0-30-generic",
+        "nproc": 64,
+        "loadavg_start": [
+          "1.33",
+          "2.22",
+          "2.32"
+        ],
+        "cpu_model": "AMD Ryzen Threadripper 7970X 32-Cores",
+        "cpu_topology": "CPU CORE SOCKET NODE\n  0    0      0    0\n  1    1      0    0\n  2    2      0    0\n  3    3      0    0\n  4    4      0    0\n  5    5      0    0\n  6    6      0    0\n  7    7      0    0\n  8    8      0    0\n  9    9      0    0\n 10   10      0    0\n 11   11      0    0\n 12   12      0    0\n 13   13      0    0\n 14   14      0    0\n 15   15      0    0\n 16   16      0    0\n 17   17      0    0\n 18   18      0    0\n 19   19      0    0\n 20   20      0    0\n 21   21      0    0\n 22   22      0    0\n 23   23      0    0\n 24   24      0    0\n 25   25      0    0\n 26   26      0    0\n 27   27      0    0\n 28   28      0    0\n 29   29      0    0\n 30   30      0    0\n 31   31      0    0\n 32    0      0    0\n 33    1      0    0\n 34    2      0    0\n 35    3      0    0\n 36    4      0    0\n 37    5      0    0\n 38    6      0    0\n 39    7      0    0\n 40    8      0    0\n 41    9      0    0\n 42   10      0    0\n 43   11      0    0\n 44   12      0    0\n 45   13      0    0\n 46   14      0    0\n 47   15      0    0\n 48   16      0    0\n 49   17      0    0\n 50   18      0    0\n 51   19      0    0\n 52   20      0    0\n 53   21      0    0\n 54   22      0    0\n 55   23      0    0\n 56   24      0    0\n 57   25      0    0\n 58   26      0    0\n 59   27      0    0\n 60   28      0    0\n 61   29      0    0\n 62   30      0    0\n 63   31      0    0",
+        "compiler_processes_at_start": 0
+      },
+      "quiet_samples": [
+        {
+          "sample": "1",
+          "epoch_s": "1791708145",
+          "load1": "1.44",
+          "pswpin": "2424677",
+          "pswpout": "2447475",
+          "governors": "performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance",
+          "performance_governors": "64",
+          "governor_count": "64",
+          "competitors": "none",
+          "quiet": "true",
+          "failed_dimensions": "none",
+          "original_attempt": "1"
+        },
+        {
+          "sample": "2",
+          "epoch_s": "1791708175",
+          "load1": "1.33",
+          "pswpin": "2424677",
+          "pswpout": "2447475",
+          "governors": "performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance",
+          "performance_governors": "64",
+          "governor_count": "64",
+          "competitors": "none",
+          "quiet": "true",
+          "failed_dimensions": "none",
+          "original_attempt": "2"
+        }
+      ],
+      "original_hashes": {
+        "summary.json": "ad4d198e8e0d97861b0d50818fa56a147ec685f3680f335404bac9732dca7da9",
+        "probes.jsonl": "6d8b4cb3d6e7bc7c33213d245eb80ac4944824e3971b80454c286caa700f3f28",
+        "rustbgpd.log": "1ce241f83aa6bee4a4ebdb0365b1824c81d7341c23e5e01bf95df6fcdefddd62",
+        "reloadstall.log": "17e3cb4e05613a66dbf25758986c9cad44730a946e165c0c14bc47e4264dc1d0",
+        "environment.json": "c8ffb073a5f7d3c01a059395d19553075a51543e072b207798ca59c6a1926b00",
+        "cpu.jsonl": "4f934e50175b43e3aa7bfdb68dc131193e7b6eab44ec7eeb9ba751c4cb04cb34",
+        "metrics-before.prom": "6e1a1bdbdcb7c0827a54f2b9fcbb02800986df464d9b63b95095c01aad2a91df",
+        "metrics-after.prom": "8df3d3c3eda4a3085e56b2e7f33c242e32e8338756457285645a96a1f4b5501e",
+        "final-evidence-completed.json": "c2364a6b5cef02bb6d1982d3b2c028a397e504c477f26c2866f4a4153c585f15",
+        "scenario/config.toml": "49fe26c47991fa93f0cdf6a916f589d400296640d8d63ea7687d8f06c0174735",
+        "scenario/gen-a.rpol": "21adb20cd35f2bd33564d258463e80548579aaa0597479b6cb8a0f068ddaecaa",
+        "scenario/gen-b.rpol": "62571446e179726524a5768b636a13bceac7d11e327f6299627968664d7e1c41",
+        "scenario/member.rpol": "21adb20cd35f2bd33564d258463e80548579aaa0597479b6cb8a0f068ddaecaa"
+      },
+      "original_quiet_sha256": "7df6aedec4416fb3a14b158db48ec2feb1896993c238c6b72c304357383c6f40",
+      "daemon_errors_through_evidence_end": 0,
+      "non_json_lines": 6
+    },
+    "candidate-r1": {
+      "start": "2026-10-11T04:51:05-04:00",
+      "finish": "2026-10-11T04:57:14-04:00",
+      "evidence_end_wall": 1791709033.9986956,
+      "exits": {
+        "daemon": 0,
+        "engine": 0,
+        "probe": 0,
+        "cell": 0
+      },
+      "outer_leg_exit": 0,
+      "environment": {
+        "source_head": "591ac39d4b50fc2c647942713a9ea99c0588a51a",
+        "source_dirty": "",
+        "binaries": {
+          "rustbgpd": "8452cb51673979474b61c77a1288bf29896e370f92946a82c0974921503ea48e",
+          "rbgp": "578b90010df58157a6f9682329158096fb377e45503fd8afd5fbae0978a2d03d",
+          "reloadstall": "2701b6b81deca419dbcb55692cc74a9e976b73bcc628507dfa6c284116880b30"
+        },
+        "versions": {
+          "rustbgpd": "rustbgpd 0.74.0",
+          "rbgp": "rbgp 0.74.0"
+        },
+        "shape": {
+          "peers": 1000,
+          "prefixes": 400000,
+          "reloads": 8,
+          "control_secs": 15,
+          "quiesce_secs": 40,
+          "run_cap_secs": 1115,
+          "pair_lead_s": 0.11,
+          "quiescent_offset_s": 20
+        },
+        "placement": {
+          "daemon_cpus": "2-3",
+          "engine_cpus": "4-5",
+          "probe_cpus": "8-15"
+        },
+        "kernel": "7.0.0-30-generic",
+        "nproc": 64,
+        "loadavg_start": [
+          "1.40",
+          "2.73",
+          "2.70"
+        ],
+        "cpu_model": "AMD Ryzen Threadripper 7970X 32-Cores",
+        "cpu_topology": "CPU CORE SOCKET NODE\n  0    0      0    0\n  1    1      0    0\n  2    2      0    0\n  3    3      0    0\n  4    4      0    0\n  5    5      0    0\n  6    6      0    0\n  7    7      0    0\n  8    8      0    0\n  9    9      0    0\n 10   10      0    0\n 11   11      0    0\n 12   12      0    0\n 13   13      0    0\n 14   14      0    0\n 15   15      0    0\n 16   16      0    0\n 17   17      0    0\n 18   18      0    0\n 19   19      0    0\n 20   20      0    0\n 21   21      0    0\n 22   22      0    0\n 23   23      0    0\n 24   24      0    0\n 25   25      0    0\n 26   26      0    0\n 27   27      0    0\n 28   28      0    0\n 29   29      0    0\n 30   30      0    0\n 31   31      0    0\n 32    0      0    0\n 33    1      0    0\n 34    2      0    0\n 35    3      0    0\n 36    4      0    0\n 37    5      0    0\n 38    6      0    0\n 39    7      0    0\n 40    8      0    0\n 41    9      0    0\n 42   10      0    0\n 43   11      0    0\n 44   12      0    0\n 45   13      0    0\n 46   14      0    0\n 47   15      0    0\n 48   16      0    0\n 49   17      0    0\n 50   18      0    0\n 51   19      0    0\n 52   20      0    0\n 53   21      0    0\n 54   22      0    0\n 55   23      0    0\n 56   24      0    0\n 57   25      0    0\n 58   26      0    0\n 59   27      0    0\n 60   28      0    0\n 61   29      0    0\n 62   30      0    0\n 63   31      0    0",
+        "compiler_processes_at_start": 0
+      },
+      "quiet_samples": [
+        {
+          "sample": "1",
+          "epoch_s": "1791708634",
+          "load1": "1.67",
+          "pswpin": "2424677",
+          "pswpout": "2447475",
+          "governors": "performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance",
+          "performance_governors": "64",
+          "governor_count": "64",
+          "competitors": "none",
+          "quiet": "true",
+          "failed_dimensions": "none",
+          "original_attempt": "4"
+        },
+        {
+          "sample": "2",
+          "epoch_s": "1791708665",
+          "load1": "1.40",
+          "pswpin": "2424677",
+          "pswpout": "2447475",
+          "governors": "performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance",
+          "performance_governors": "64",
+          "governor_count": "64",
+          "competitors": "none",
+          "quiet": "true",
+          "failed_dimensions": "none",
+          "original_attempt": "5"
+        }
+      ],
+      "original_hashes": {
+        "summary.json": "9f95612910cf86165c142f5e1d9270203f5eca8c1066252b5f2133f3b53899a9",
+        "probes.jsonl": "29f402bc6f1e2399b6d90bc59cb7a3e10d9de19ecf2aa351d4d13da94cac28d2",
+        "rustbgpd.log": "159ec2b1ece01d52dd3c311565901e5d394045740c1e15e8ee6451b13ae05274",
+        "reloadstall.log": "51b81a3c72656502eabf21d9cc929fe4fa0d8a0bbe23eb528acd239bf361fd42",
+        "environment.json": "dae0766ba48fa75c9197d942018967c94df51516b16131ea10f903c1962db837",
+        "cpu.jsonl": "a8689b633f6d792d13719d478d6a1d1b5cc6874de8e1869d3f46b6fa0db2443a",
+        "metrics-before.prom": "56fc017228bbf46d1bfe7e4d2d55e32cd944c77ac0db8bb7282f6aaf35cf6def",
+        "metrics-after.prom": "0fb489679fd27e629e10a6817ba9509ff7d8b1554ca1835f54cba8c5f6be68f4",
+        "final-evidence-completed.json": "cbb6f3e5b3972373ac7d2279ca6a0c4c8d7f9078a6c3ae343bfe6b43b5daad0f",
+        "scenario/config.toml": "6e1b0c96d240b5f115a81fa7d00896c09b77fc1a15f6acb9bb2df92d542ccdf3",
+        "scenario/gen-a.rpol": "21adb20cd35f2bd33564d258463e80548579aaa0597479b6cb8a0f068ddaecaa",
+        "scenario/gen-b.rpol": "62571446e179726524a5768b636a13bceac7d11e327f6299627968664d7e1c41",
+        "scenario/member.rpol": "21adb20cd35f2bd33564d258463e80548579aaa0597479b6cb8a0f068ddaecaa"
+      },
+      "original_quiet_sha256": "32952d035dae3e62a233c89ece36ca2a0e2144513573abfa394d1fcd269c27d5",
+      "daemon_errors_through_evidence_end": 0,
+      "non_json_lines": 6
+    },
+    "candidate-r2": {
+      "start": "2026-10-11T04:58:44-04:00",
+      "finish": "2026-10-11T05:04:53-04:00",
+      "evidence_end_wall": 1791709493.119519,
+      "exits": {
+        "daemon": 0,
+        "engine": 0,
+        "probe": 0,
+        "cell": 0
+      },
+      "outer_leg_exit": 0,
+      "environment": {
+        "source_head": "591ac39d4b50fc2c647942713a9ea99c0588a51a",
+        "source_dirty": "",
+        "binaries": {
+          "rustbgpd": "8452cb51673979474b61c77a1288bf29896e370f92946a82c0974921503ea48e",
+          "rbgp": "578b90010df58157a6f9682329158096fb377e45503fd8afd5fbae0978a2d03d",
+          "reloadstall": "2701b6b81deca419dbcb55692cc74a9e976b73bcc628507dfa6c284116880b30"
+        },
+        "versions": {
+          "rustbgpd": "rustbgpd 0.74.0",
+          "rbgp": "rbgp 0.74.0"
+        },
+        "shape": {
+          "peers": 1000,
+          "prefixes": 400000,
+          "reloads": 8,
+          "control_secs": 15,
+          "quiesce_secs": 40,
+          "run_cap_secs": 1115,
+          "pair_lead_s": 0.11,
+          "quiescent_offset_s": 20
+        },
+        "placement": {
+          "daemon_cpus": "2-3",
+          "engine_cpus": "4-5",
+          "probe_cpus": "8-15"
+        },
+        "kernel": "7.0.0-30-generic",
+        "nproc": 64,
+        "loadavg_start": [
+          "1.51",
+          "2.41",
+          "2.62"
+        ],
+        "cpu_model": "AMD Ryzen Threadripper 7970X 32-Cores",
+        "cpu_topology": "CPU CORE SOCKET NODE\n  0    0      0    0\n  1    1      0    0\n  2    2      0    0\n  3    3      0    0\n  4    4      0    0\n  5    5      0    0\n  6    6      0    0\n  7    7      0    0\n  8    8      0    0\n  9    9      0    0\n 10   10      0    0\n 11   11      0    0\n 12   12      0    0\n 13   13      0    0\n 14   14      0    0\n 15   15      0    0\n 16   16      0    0\n 17   17      0    0\n 18   18      0    0\n 19   19      0    0\n 20   20      0    0\n 21   21      0    0\n 22   22      0    0\n 23   23      0    0\n 24   24      0    0\n 25   25      0    0\n 26   26      0    0\n 27   27      0    0\n 28   28      0    0\n 29   29      0    0\n 30   30      0    0\n 31   31      0    0\n 32    0      0    0\n 33    1      0    0\n 34    2      0    0\n 35    3      0    0\n 36    4      0    0\n 37    5      0    0\n 38    6      0    0\n 39    7      0    0\n 40    8      0    0\n 41    9      0    0\n 42   10      0    0\n 43   11      0    0\n 44   12      0    0\n 45   13      0    0\n 46   14      0    0\n 47   15      0    0\n 48   16      0    0\n 49   17      0    0\n 50   18      0    0\n 51   19      0    0\n 52   20      0    0\n 53   21      0    0\n 54   22      0    0\n 55   23      0    0\n 56   24      0    0\n 57   25      0    0\n 58   26      0    0\n 59   27      0    0\n 60   28      0    0\n 61   29      0    0\n 62   30      0    0\n 63   31      0    0",
+        "compiler_processes_at_start": 0
+      },
+      "quiet_samples": [
+        {
+          "sample": "1",
+          "epoch_s": "1791709094",
+          "load1": "1.66",
+          "pswpin": "2424677",
+          "pswpout": "2447475",
+          "governors": "performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance",
+          "performance_governors": "64",
+          "governor_count": "64",
+          "competitors": "none",
+          "quiet": "true",
+          "failed_dimensions": "none",
+          "original_attempt": "3"
+        },
+        {
+          "sample": "2",
+          "epoch_s": "1791709124",
+          "load1": "1.51",
+          "pswpin": "2424677",
+          "pswpout": "2447475",
+          "governors": "performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance",
+          "performance_governors": "64",
+          "governor_count": "64",
+          "competitors": "none",
+          "quiet": "true",
+          "failed_dimensions": "none",
+          "original_attempt": "4"
+        }
+      ],
+      "original_hashes": {
+        "summary.json": "d3f1ac6dc7b8a880f098d1034b576c3e486eb6470507461a40bb98f5eaa08082",
+        "probes.jsonl": "7616084380c901fe0132b795c0493190ed88fdc9397c3de4ae58699d322c5ba7",
+        "rustbgpd.log": "d775336423e052158e16b8f4263af1ff555085cde5c27bee7197a6bd13dc8f3b",
+        "reloadstall.log": "600700da4cd75b0d7252f4ebfc01612e7dcd0df00904ad3308c663b7e7c711fb",
+        "environment.json": "8ad4413d2377a674cbfba62d8a4ff0db21e95468b60dfdce5bcc9ce2612ff1dc",
+        "cpu.jsonl": "f8a8495d75f27991e096416072dade21cace79bd41692e7da4c02de75fcb5bd3",
+        "metrics-before.prom": "8002c8881111b88f374b77d1973115ffbf6aea664b9fcd008aacbb98260d84ee",
+        "metrics-after.prom": "54f1d30a9d43cb9b10f974843b6b804f9644d5f1a92dc6ca985358233eb7d1f7",
+        "final-evidence-completed.json": "b67ee4cbe3fabc6b541aaa03cee5057c0a26c2324046146bab1295bed070ef3d",
+        "scenario/config.toml": "6866283a11a002db7e199a06e121c0d1f6e695be71ca17ccd64e5aa49e293cd5",
+        "scenario/gen-a.rpol": "21adb20cd35f2bd33564d258463e80548579aaa0597479b6cb8a0f068ddaecaa",
+        "scenario/gen-b.rpol": "62571446e179726524a5768b636a13bceac7d11e327f6299627968664d7e1c41",
+        "scenario/member.rpol": "21adb20cd35f2bd33564d258463e80548579aaa0597479b6cb8a0f068ddaecaa"
+      },
+      "original_quiet_sha256": "d4c29a2c8537bae347d78a9aa3a27d616293e1ac26bd3314571c929474c820e7",
+      "daemon_errors_through_evidence_end": 0,
+      "non_json_lines": 6
+    },
+    "baseline-r2": {
+      "start": "2026-10-11T05:06:54-04:00",
+      "finish": "2026-10-11T05:13:03-04:00",
+      "evidence_end_wall": 1791709983.0224519,
+      "exits": {
+        "daemon": 0,
+        "engine": 0,
+        "probe": 0,
+        "cell": 0
+      },
+      "outer_leg_exit": 0,
+      "environment": {
+        "source_head": "591ac39d4b50fc2c647942713a9ea99c0588a51a",
+        "source_dirty": "",
+        "binaries": {
+          "rustbgpd": "4328bec4b2658a5c090aad1c5ee3e947cba6a03325a066484a3d2d95f446ad6d",
+          "rbgp": "578b90010df58157a6f9682329158096fb377e45503fd8afd5fbae0978a2d03d",
+          "reloadstall": "2701b6b81deca419dbcb55692cc74a9e976b73bcc628507dfa6c284116880b30"
+        },
+        "versions": {
+          "rustbgpd": "rustbgpd 0.74.0",
+          "rbgp": "rbgp 0.74.0"
+        },
+        "shape": {
+          "peers": 1000,
+          "prefixes": 400000,
+          "reloads": 8,
+          "control_secs": 15,
+          "quiesce_secs": 40,
+          "run_cap_secs": 1115,
+          "pair_lead_s": 0.11,
+          "quiescent_offset_s": 20
+        },
+        "placement": {
+          "daemon_cpus": "2-3",
+          "engine_cpus": "4-5",
+          "probe_cpus": "8-15"
+        },
+        "kernel": "7.0.0-30-generic",
+        "nproc": 64,
+        "loadavg_start": [
+          "1.53",
+          "2.51",
+          "2.68"
+        ],
+        "cpu_model": "AMD Ryzen Threadripper 7970X 32-Cores",
+        "cpu_topology": "CPU CORE SOCKET NODE\n  0    0      0    0\n  1    1      0    0\n  2    2      0    0\n  3    3      0    0\n  4    4      0    0\n  5    5      0    0\n  6    6      0    0\n  7    7      0    0\n  8    8      0    0\n  9    9      0    0\n 10   10      0    0\n 11   11      0    0\n 12   12      0    0\n 13   13      0    0\n 14   14      0    0\n 15   15      0    0\n 16   16      0    0\n 17   17      0    0\n 18   18      0    0\n 19   19      0    0\n 20   20      0    0\n 21   21      0    0\n 22   22      0    0\n 23   23      0    0\n 24   24      0    0\n 25   25      0    0\n 26   26      0    0\n 27   27      0    0\n 28   28      0    0\n 29   29      0    0\n 30   30      0    0\n 31   31      0    0\n 32    0      0    0\n 33    1      0    0\n 34    2      0    0\n 35    3      0    0\n 36    4      0    0\n 37    5      0    0\n 38    6      0    0\n 39    7      0    0\n 40    8      0    0\n 41    9      0    0\n 42   10      0    0\n 43   11      0    0\n 44   12      0    0\n 45   13      0    0\n 46   14      0    0\n 47   15      0    0\n 48   16      0    0\n 49   17      0    0\n 50   18      0    0\n 51   19      0    0\n 52   20      0    0\n 53   21      0    0\n 54   22      0    0\n 55   23      0    0\n 56   24      0    0\n 57   25      0    0\n 58   26      0    0\n 59   27      0    0\n 60   28      0    0\n 61   29      0    0\n 62   30      0    0\n 63   31      0    0",
+        "compiler_processes_at_start": 0
+      },
+      "quiet_samples": [
+        {
+          "sample": "1",
+          "epoch_s": "1791709583",
+          "load1": "1.80",
+          "pswpin": "2424677",
+          "pswpout": "2447475",
+          "governors": "performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance",
+          "performance_governors": "64",
+          "governor_count": "64",
+          "competitors": "none",
+          "quiet": "true",
+          "failed_dimensions": "none",
+          "original_attempt": "4"
+        },
+        {
+          "sample": "2",
+          "epoch_s": "1791709614",
+          "load1": "1.53",
+          "pswpin": "2424677",
+          "pswpout": "2447475",
+          "governors": "performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance",
+          "performance_governors": "64",
+          "governor_count": "64",
+          "competitors": "none",
+          "quiet": "true",
+          "failed_dimensions": "none",
+          "original_attempt": "5"
+        }
+      ],
+      "original_hashes": {
+        "summary.json": "212d4e390bc1c9663d8214904db221238192777c2f3e279b43a18aec4779185d",
+        "probes.jsonl": "747597e89dc2f4ff207249bfbb7beb2189e175a899eab282474e87ab1835c212",
+        "rustbgpd.log": "1c39fdedb944497162ee651e78c9db26417d70488caaac83a65c81652454be2f",
+        "reloadstall.log": "7ceacba69ee7d548688552996f0961b0234729025bfff31efcfb2c15becb28de",
+        "environment.json": "4a1ae722892e89181ecb41d0b088ea6c3c5da3b0396d58d8d500da94c806a51d",
+        "cpu.jsonl": "ec4b51e51aa32bbd2d12d4330a9d8ba7c667c02e4695fe4de002bacf5102ab68",
+        "metrics-before.prom": "52b952c238e52f0bef7333846e64d332458df3f49bd20601144c675f5e67b256",
+        "metrics-after.prom": "9b18d25c64d34210de2a54d388ec98b0edb686a326dfac10d33d40b9fe138803",
+        "final-evidence-completed.json": "394bd7bf63a983e72d14422a8ee893b6e1278fb8f0c3ec56271c6672338b8f4e",
+        "scenario/config.toml": "727a6fca9824364bb12e5089935ebf11c3323e659281989863082e012ba4e7fc",
+        "scenario/gen-a.rpol": "21adb20cd35f2bd33564d258463e80548579aaa0597479b6cb8a0f068ddaecaa",
+        "scenario/gen-b.rpol": "62571446e179726524a5768b636a13bceac7d11e327f6299627968664d7e1c41",
+        "scenario/member.rpol": "21adb20cd35f2bd33564d258463e80548579aaa0597479b6cb8a0f068ddaecaa"
+      },
+      "original_quiet_sha256": "a5ccfb33dc20df73832cb382499b07f6ea59e85ce3e86ad2e8789ac7241265f2",
+      "daemon_errors_through_evidence_end": 0,
+      "non_json_lines": 6
+    }
+  },
+  "actual_feature_comparison": {
+    "scopes": {
+      "normal_units": {
+        "baseline_artifact_units": 227,
+        "candidate_artifact_units": 227,
+        "only_baseline_units": [],
+        "only_candidate_units": [],
+        "configuration_differences": [],
+        "dependency_identity_differences": []
+      },
+      "including_build_units": {
+        "baseline_artifact_units": 342,
+        "candidate_artifact_units": 342,
+        "only_baseline_units": [],
+        "only_candidate_units": [],
+        "configuration_differences": [],
+        "dependency_identity_differences": []
+      }
+    },
+    "missing": {
+      "baseline": {
+        "normal_missing": [],
+        "including_build_missing": []
+      },
+      "candidate": {
+        "normal_missing": [],
+        "including_build_missing": []
+      }
+    },
+    "forbidden_bench_internals": {
+      "baseline": [],
+      "candidate": []
+    },
+    "normal_build_resolution_equal": true
+  },
+  "instrument_source": "591ac39d4b50fc2c647942713a9ea99c0588a51a",
+  "instrument_tree": "f82868fd192f54acc0c68197e4f23fdcf9ab7eeb",
+  "original_instrument_sha256": {
+    "<RUNNER>/bench/scale/reloadstall/policy_stats_cell.sh": "171a07117f6936aabcfa8486376acc8fc3ae31e476f8fbd7661f018e9dd02600",
+    "<RUNNER>/bench/scale/reloadstall/policy_stats_cell.py": "f4c25450473cc811b4a9a108892408b68bef972b5a1109f2ef162b7a6c0fa535",
+    "<RUNNER>/bench/scale/reloadstall/gen-scenario.py": "e563659beef5857ee79ddac40e1cff5730c34e424b5ca074a3f9007b5dc0ab42",
+    "<RUNNER>/bench/scale/host-quiet.sh": "abb3391cd5e0879c29aabd0aa0c316ea33d5f7c72f6d2a7d111b30025de411fd",
+    "<RUNNER>/tests/soak/host-lock.sh": "f5f419bb439f0b5e22521e9f7fa73d4ef73df159abeec31fafff63548899c658",
+    "<RUNNER>/tests/soak/fd-headroom.sh": "f55832b71079cdcd0f708fe3b764cf35d020dfe4ab894ff81191c436a4d04b2b",
+    "<RUNNER>/scripts/build-lock.sh": "2bb48e5b02c3c3e49084a1c5456be34a476ecb09e0ee8f879e858d8ba17eea75",
+    "<ENGINE_DIRECTORY>/reloadstall": "2701b6b81deca419dbcb55692cc74a9e976b73bcc628507dfa6c284116880b30"
+  },
+  "original_execution_sha256": {
+    "abba-invocation-as-run.sh": "3f5c8dbbc6c18431dd845d1c6187afd46f2cfb7a6cbe290c7195b2e805de2e2c",
+    "abba-driver-as-run.sh": "3b0f761095f1ae7da5e1474ce21fcd1376bea55490d4cdb50b77df36dcccc388",
+    "build-driver-as-run.sh": "3b0f761095f1ae7da5e1474ce21fcd1376bea55490d4cdb50b77df36dcccc388",
+    "build-preparation-manifest.json": "b0b7ce31e4609b96abc1dd888a871096480b8b07163f57f857371a2e4655fe9e",
+    "abba-preparation-manifest.json": "a7d81675a56099cc3a0f570a86ad2747e1861eddb8f9a8abaa7ef20096fcb034",
+    "logs/abba-wrapper.log": "17a4ba3668aba19f129f4bdab0013933b4efd96da65d342e9c768e0b85968f16",
+    "logs/abba.log": "24bd43fcb3efb6483d3f262c8a32caad262c058d6687f867baa23e9c0ad3c9f1",
+    "logs/end-instruments.log": "afcb5c3205c642beaf9f111a67bed7750ead17fded9d46bff7efb79a6519443f"
+  },
+  "end_instrument_ok_count": 8,
+  "public_projections": {
+    "timing-launcher.normalized.sh": {
+      "original_sha256": "3f5c8dbbc6c18431dd845d1c6187afd46f2cfb7a6cbe290c7195b2e805de2e2c",
+      "public_sha256": "016e85b4a54e4c587b52a96431be660b514abe3813a4c1a050b5d051578128fa",
+      "operation": "literal private-root replacement after measurement; not executed public bytes"
+    },
+    "driver.normalized.sh": {
+      "original_sha256": "3b0f761095f1ae7da5e1474ce21fcd1376bea55490d4cdb50b77df36dcccc388",
+      "public_sha256": "660be8458e03fb1b8d9fab834b37172be6c59f5e2fdc223b8e289fd4f3ba72b6",
+      "operation": "literal private-root replacement after measurement; not executed public bytes"
+    },
+    "build-arm.normalized.sh": {
+      "original_sha256": "464f239ebe6052bd565299ccf32a697a288f215ce310197c5bdab71e010d74c5",
+      "public_sha256": "9db9263e5759b2912c2ad874f924c820660e75c349935c48154649c546d0c82f",
+      "operation": "literal private-root replacement after measurement; not executed public bytes"
+    },
+    "source-diff.patch": {
+      "original_sha256": "a60ba50f7820dcb4fc77f246917e55255fbc8c9dbd41946cb9b16994ad7c5ce2",
+      "public_sha256": "a60ba50f7820dcb4fc77f246917e55255fbc8c9dbd41946cb9b16994ad7c5ce2",
+      "operation": "literal private-root replacement after measurement; not executed public bytes"
+    },
+    "normal-build-graph.txt.gz": {
+      "original_normalized_graph_sha256": "c1364681434d3ae9a897ba64fc6193abc8127c70d557fda52986d549c88c87cf",
+      "public_gzip_sha256": "cc73351477fdbe591cb1b4b34871d5c8c471382f938a0337f78c646989af2051",
+      "lines": 17891,
+      "operation": "retained resolution proxy; deterministic gzip after root normalization"
+    },
+    "feature-audit.json": {
+      "original_closure_sha256": {
+        "baseline": "3c3af14dbba97d808e1cca3da0453c76992c0f0b4b26da99fe187515367d784c",
+        "candidate": "632c951e7b8a63b0eaf409f67614fe78443d3a29f4b0ba66c508a63261add128"
+      },
+      "public_sha256": "def2100bc8ead0900504de06e1cd8b1dcc8fff196bf4bfe3731b828455454496",
+      "operation": "private-root replacement only; all artifact-unit configuration/dependency records retained"
+    },
+    "quiet-irr-prebuilt-adapter.patch": {
+      "original_sha256": "8213d8daadccf4e724f371c279a0e7dc45302b95c41e4599a2f7d21dfdd15d60",
+      "public_sha256": "8213d8daadccf4e724f371c279a0e7dc45302b95c41e4599a2f7d21dfdd15d60",
+      "operation": "literal private-root replacement after measurement; not executed public bytes"
+    },
+    "quiet-source-preparation.json": {
+      "original_sha256": "082c14f01b4a7e8cba0e2958928a13d5bd5ccc26fe925d03698e9024f7ee93ab",
+      "public_sha256": "44316784ff5ecee15e6ad8f1331f9f672b9f5f07b75064c28036fe99a204d0d8",
+      "operation": "source-only future preparation; private-root replacement after the unrelated completed measurement"
+    }
+  },
+  "normalization": {
+    "when": "after fully reaped successful measurement",
+    "placeholders": [
+      "<ARTIFACTS>",
+      "<PREPARATION>",
+      "<QUIET_PREPARATION>",
+      "<SOURCE_BASELINE>",
+      "<SOURCE_CANDIDATE>",
+      "<CACHE>",
+      "<RUNNER>",
+      "<ENGINE_DIRECTORY>",
+      "<LOCK_DIRECTORY>",
+      "<PRIMARY>",
+      "<HOME>",
+      "<SOCKET_DIRECTORY>"
+    ],
+    "rule": "literal replacement of private roots and generated audit listener socket directories only; original local files untouched",
+    "boundaries": "selected original daemon timestamp/field objects, exact wire CSV and compressed RPC bodies; omitted full logs identified by original hashes"
+  },
+  "reproduction_helper_provenance": {
+    "feature_compare_original_sha256": "9e85eb756a583c1706829911be33afcad94e223545dd20df4f7896de4dbde79e",
+    "operation": "unchanged pure function ASTs; omit private path-dependent CLI and unused sys import",
+    "native_parser_source_sha256": "f4c25450473cc811b4a9a108892408b68bef972b5a1109f2ef162b7a6c0fa535",
+    "parser_operation": "reuse native stage and reply grammar; omit workload, sampler, subprocess and probe machinery"
+  }
+}
