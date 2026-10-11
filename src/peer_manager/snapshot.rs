@@ -705,6 +705,8 @@ impl PeerManager {
         &mut self,
         reply: oneshot::Sender<Vec<PeerInfo>>,
     ) -> Result<(), oneshot::Sender<Vec<PeerInfo>>> {
+        // One absolute deadline from admission, as the in-place fan-out has.
+        let deadline = tokio::time::Instant::now() + PEER_QUERY_TIMEOUT;
         while let Some(joined) = self.detached_list_peers.try_join_next() {
             if let Err(error) = joined
                 && !error.is_cancelled()
@@ -748,7 +750,6 @@ impl PeerManager {
                 }),
             })
             .collect();
-        let deadline = tokio::time::Instant::now() + PEER_QUERY_TIMEOUT;
         self.detached_list_peers
             .spawn(complete_detached_list_peers(rows, reply, deadline));
         Ok(())
