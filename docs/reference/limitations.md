@@ -146,10 +146,12 @@ Known EVPN gaps:
   Label Split Horizon Type MUST be 00 for tunnel type 8), so there is no
   ESI-label alternative to implement for this lane.
 - All-active CE forwarding requires an Ethernet Segment `interface` binding.
-  Eligible peer Type 2 routes install owned local-port FDB rows, including
-  on a non-DF PE that never learned the CE MAC. This does not originate
+  On all-active segments, eligible peer Type 2 routes install owned local-port
+  FDB rows, including on a non-DF PE that never learned the CE MAC. This does not originate
   peer-only MAC/MAC-IP routes or program peer-only IP adjacencies. Unbound
   segments retain control-plane behavior without this forwarding guarantee.
+  Single-active segments retain ordinary local MAC relearning and do not install
+  these peer-synchronized rows.
   Later CE source traffic on the same port does not promote an owned peer-sync
   row to local origination; Linux retains the external-learning marker.
   Concurrent foreign FDB writers can also race the pre-apply ownership check;

@@ -375,7 +375,7 @@ ES routes automatically (see the drain section in
 `docs/how-to/evpn-vtep-troubleshooting.md`); this watches the named link's
 carrier but still gates nothing at startup beyond the drain itself.
 
-**Bind `interface` for all-active CE forwarding.** A healthy bound segment
+**Bind `interface` for all-active CE forwarding.** A healthy bound all-active segment
 installs peer-learned MACs on its local access link, so aliased known unicast
 can reach the CE even when only the other PE learned the MAC. Existing local
 learns and operator FDB rows observed before apply take priority; peer-only

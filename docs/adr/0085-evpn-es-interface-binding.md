@@ -259,8 +259,8 @@ flood flag is disabled, so the frame is dropped. The aliasing procedure in
 [RFC 7432 §14.1.2](https://www.rfc-editor.org/rfc/rfc7432.html#section-14.1.2)
 allows a remote PE to select either all-active member.
 
-For a bias-eligible `(ESI, VNI)`, an imported Type 2 now contributes an
-owned non-aging master FDB row on the bound `interface`. The row carries the
+For a bias-eligible **all-active** `(ESI, VNI)`, an imported Type 2 now
+contributes an owned non-aging master FDB row on the bound `interface`. The row carries the
 instance's `bridge_vlan` when configured. The originating VTEP must also
 advertise matching EAD-per-ES and imported EAD-per-EVI reachability in the
 same RIB snapshot; an equal ESI on a Type 2 alone is insufficient. The join
@@ -268,7 +268,9 @@ uses the EVPN next hop, including through a route reflector. Peer
 and remote candidates compete using the same MAC Mobility sequence
 and deterministic tie-break rules; a winning peer candidate becomes local
 forwarding instead of an overlay row. Duplicate-MAC quarantine suppresses
-peer-sync forwarding too.
+peer-sync forwarding too. Single-active segments retain the existing remote-row
+suppression on the DF, but never install peer-synchronized local rows: recovery
+must allow CE source traffic to create an ordinary local learn and Type 2.
 
 Dynamic local learns and foreign static rows observed before apply retain
 priority. The reconciler rereads the FDB before adding or removing a row,

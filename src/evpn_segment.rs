@@ -1795,7 +1795,14 @@ fn publish_same_esi_bias_snapshot(
         }),
     );
     for (&esi, binding) in runtime.es_link_bindings.iter() {
-        table.bind_interface(esi, binding.interface.clone());
+        // Single-active DF recovery needs ordinary source-MAC learning;
+        // an external-learning peer row would suppress that local learn.
+        if by_esi
+            .get(&esi)
+            .is_some_and(|state| state.config.redundancy_mode == RedundancyMode::AllActive)
+        {
+            table.bind_interface(esi, binding.interface.clone());
+        }
     }
     if send_same_esi_bias_if_modified(tx, table) {
         debug!("EVPN segment: published same-ESI bias eligibility");
@@ -4546,7 +4553,7 @@ mod tests {
         // the AC gate forwarding.
         wait_for_dataplane_state(&bias_rx, &bum_rx, "startup DF snapshots", |bias, bum| {
             bias.is_eligible(id, vni(101))
-                && bias.bound_interface(id, vni(101)) == Some("es0")
+                && bias.bound_interface(id, vni(101)).is_none()
                 && bum.ac_gate(id).map(|entry| entry.state) == Some(AcGateState::Forwarding)
         })
         .await;
@@ -4598,6 +4605,44 @@ mod tests {
             drained_esis: Arc::new(BTreeSet::new()),
             es_link_bindings: EsLinkBindings::default(),
             boot_until: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn peer_sync_binding_is_all_active_only() {
+        let rib = ScriptedRib::spawn(RibReplyMode::Ok);
+        let mut runtime = scripted_runtime(&rib);
+        let id = esi(1);
+        let (bias_tx, bias_rx) = watch::channel(Arc::new(SameEsiBiasTable::new()));
+        runtime.same_esi_bias_tx = Some(bias_tx);
+        runtime.es_link_bindings = Arc::new(BTreeMap::from([(
+            id,
+            crate::config::EsLinkBinding {
+                interface: "es0".into(),
+                recovery_delay: Duration::ZERO,
+            },
+        )]));
+        for (mode, role, eligible, interface) in [
+            (RedundancyMode::AllActive, DfRole::Df, true, Some("es0")),
+            (RedundancyMode::AllActive, DfRole::NonDf, true, Some("es0")),
+            (RedundancyMode::SingleActive, DfRole::Df, true, None),
+            (RedundancyMode::SingleActive, DfRole::NonDf, false, None),
+        ] {
+            let mut state = segment_state(id);
+            state.config.redundancy_mode = mode;
+            state.last_roles.insert(vni(100), role);
+            publish_same_esi_bias_snapshot(&runtime, &HashMap::from([(id, state)]));
+            let bias = bias_rx.borrow();
+            assert_eq!(
+                bias.is_eligible(id, vni(100)),
+                eligible,
+                "{mode:?}/{role:?}"
+            );
+            assert_eq!(
+                bias.bound_interface(id, vni(100)),
+                interface,
+                "{mode:?}/{role:?}"
+            );
         }
     }
 

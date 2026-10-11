@@ -3728,6 +3728,20 @@ mod tests {
             .is_none(),
             "the single-active DF forwards on its own AC; the peer's Type 2 must not usurp it"
         );
+        let mut routes = peer_sync_routes(esi);
+        routes[1] = evpn_ead_per_es_route(esi, "10.0.0.2", true);
+        let tables = project_intent_tables(
+            &routes,
+            &local_instance_table(100, Some("br100")),
+            &IpVrfTable::new(),
+            &BTreeSet::new(),
+            &bias,
+        );
+        assert!(tables.remote_macs.get(vni(100), mac(1)).is_none());
+        assert!(
+            tables.remote_macs.peer_sync_fdb().is_empty(),
+            "the single-active DF must allow ordinary local relearning after recovery"
+        );
     }
 
     /// The operator review amendment, pinned by name: a healthy
