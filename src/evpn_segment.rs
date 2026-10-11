@@ -42,7 +42,7 @@
 //! remains Gate 8b — see ADR-0057.
 
 use std::collections::btree_map::Entry;
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::net::IpAddr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -636,23 +636,14 @@ async fn segment_loop(
             }
             changed = segments_rx.changed() => {
                 if let Ok(()) = changed {
-                    let (instances, segments) = refresh_segment_dependencies(
-                        &mut runtime,
-                        &mut by_esi,
-                        &mut drained_esis_rx,
-                        es_link_bindings_rx.as_ref(),
-                        (&instances_rx, &segments_rx),
-                        &mut pending_rib_ops,
-                        &df_status_tx,
-                    ).await;
                     apply_runtime_snapshot(
                         &mut runtime,
                         &mut by_esi,
                         &mut esi_label_allocator,
-                        instances,
-                        segments,
+                        (&instances_rx, &segments_rx),
+                        (&mut drained_esis_rx, es_link_bindings_rx.as_ref()),
                         &mut pending_rib_ops,
-                        Some(&df_status_tx),
+                        &df_status_tx,
                     )
                     .await;
                 } else {
@@ -664,23 +655,14 @@ async fn segment_loop(
             },
             changed = instances_rx.changed() => {
                 if let Ok(()) = changed {
-                    let (instances, segments) = refresh_segment_dependencies(
-                        &mut runtime,
-                        &mut by_esi,
-                        &mut drained_esis_rx,
-                        es_link_bindings_rx.as_ref(),
-                        (&instances_rx, &segments_rx),
-                        &mut pending_rib_ops,
-                        &df_status_tx,
-                    ).await;
                     apply_runtime_snapshot(
                         &mut runtime,
                         &mut by_esi,
                         &mut esi_label_allocator,
-                        instances,
-                        segments,
+                        (&instances_rx, &segments_rx),
+                        (&mut drained_esis_rx, es_link_bindings_rx.as_ref()),
                         &mut pending_rib_ops,
-                        Some(&df_status_tx),
+                        &df_status_tx,
                     ).await;
                 } else {
                     debug!("EVPN segment: runtime instance watch closed; draining");
@@ -730,6 +712,11 @@ async fn segment_loop(
                     es_link_bindings_rx = None;
                 }
             },
+            () = crate::evpn_ack::retry_delay(by_esi.values().filter_map(|s| s.recovery_deadline).min()) => {
+                if settle_boot_wait(&mut runtime, &mut by_esi).await {
+                    reelection_sweep(&runtime, &mut by_esi, &mut pending_rib_ops).await;
+                }
+            }
             event = recv_evpn_event(&mut evpn_event_rx) => match event {
                 Ok(ev) => {
                     handle_evpn_event(&runtime, &mut by_esi, &ev, &mut pending_rib_ops).await;
@@ -746,11 +733,6 @@ async fn segment_loop(
                     evpn_event_rx = None;
                 }
             },
-            () = crate::evpn_ack::retry_delay(by_esi.values().filter_map(|s| s.recovery_deadline).min()) => {
-                if settle_boot_wait(&mut runtime, &mut by_esi).await {
-                    reelection_sweep(&runtime, &mut by_esi, &mut pending_rib_ops).await;
-                }
-            }
             // ADR-0102: re-drive RIB operations whose acknowledgement
             // was lost. Parks forever while nothing is pending.
             () = crate::evpn_ack::retry_delay(pending_rib_ops.next_deadline()) => {
@@ -900,80 +882,165 @@ fn build_segment_state(
 
 /// Reconcile only affected ESIs. An unrelated configuration change must not
 /// turn a healthy non-revertive DF into a recovering PE and surrender its role.
+#[expect(
+    clippy::too_many_lines,
+    reason = "snapshot reconciliation revalidates desired state across each owned withdrawal and startup"
+)]
 async fn apply_runtime_snapshot(
     runtime: &mut SegmentRuntime,
     by_esi: &mut HashMap<EthernetSegmentIdentifier, SegmentState>,
     esi_label_allocator: &mut rustbgpd_evpn::EsiLabelAllocator,
-    instances: Arc<EvpnInstanceTable>,
-    segments: Vec<EthernetSegment>,
+    desired_rx: (
+        &watch::Receiver<Arc<EvpnInstanceTable>>,
+        &watch::Receiver<Arc<Vec<EthernetSegment>>>,
+    ),
+    dependencies_rx: (
+        &mut watch::Receiver<Arc<BTreeSet<EthernetSegmentIdentifier>>>,
+        Option<&watch::Receiver<EsLinkBindings>>,
+    ),
     pending: &mut PendingRibOps,
-    df_status_tx: Option<&watch::Sender<Arc<SegmentDfStatusTable>>>,
+    df_status_tx: &watch::Sender<Arc<SegmentDfStatusTable>>,
 ) {
-    if runtime.shutdown.is_cancelled() {
+    // Retain ownership of every prepared start if a later publication forces
+    // another reconciliation pass. Unchanged prepared states still need startup.
+    let mut starting = VecDeque::new();
+    'reconcile: loop {
+        let (instances, segments) = refresh_segment_dependencies(
+            runtime,
+            by_esi,
+            dependencies_rx.0,
+            dependencies_rx.1,
+            desired_rx,
+            pending,
+            df_status_tx,
+        )
+        .await;
+        let mut latest = (instances.clone(), segments.clone());
+        if runtime.shutdown.is_cancelled() {
+            return;
+        }
+        starting.retain(|esi| !runtime.drained_esis.contains(esi));
+        let previous_instances = std::mem::replace(&mut runtime.instances, instances);
+        let next_esis: HashSet<_> = segments.iter().map(|seg| seg.esi).collect();
+        let removed: Vec<_> = by_esi
+            .keys()
+            .copied()
+            .filter(|esi| !next_esis.contains(esi))
+            .collect();
+        for esi in removed {
+            starting.retain(|pending_esi| *pending_esi != esi);
+            if let Some(mut state) = by_esi.remove(&esi) {
+                drain_segment_state(runtime, &mut state, pending).await;
+                latest = {
+                    let segments = desired_rx.1.borrow();
+                    (desired_rx.0.borrow().clone(), segments.as_ref().clone())
+                };
+            }
+            esi_label_allocator.release(esi);
+        }
+        let mut reconciled = BTreeSet::new();
+        for seg in &segments {
+            if by_esi.get(&seg.esi).is_some_and(|state| {
+                state.config == *seg
+                    && seg
+                        .member_vnis
+                        .iter()
+                        .all(|&vni| previous_instances.get(vni) == runtime.instances.get(vni))
+            }) {
+                reconciled.insert(seg.esi);
+                continue;
+            }
+            let mut administrative_change = false;
+            if let Some(mut old) = by_esi.remove(&seg.esi) {
+                // RFC 9785 §4.1: explicit administrative DF changes force
+                // a switchover instead of inheriting the previous reference.
+                // A prepared override remains administrative if a newer
+                // member/config publication makes us rebuild it before startup.
+                administrative_change = (starting.contains(&seg.esi)
+                    && old.recovery_deadline.is_none())
+                    || (
+                        old.config.df_preference,
+                        old.config.df_dont_preempt,
+                        old.config.df_algorithm,
+                    ) != (seg.df_preference, seg.df_dont_preempt, seg.df_algorithm);
+                drain_segment_state(runtime, &mut old, pending).await;
+                latest = {
+                    let segments = desired_rx.1.borrow();
+                    (desired_rx.0.borrow().clone(), segments.as_ref().clone())
+                };
+            }
+            let esi = seg.esi;
+            let Some(mut state) = build_segment_state(runtime, seg.clone(), esi_label_allocator)
+            else {
+                starting.retain(|pending_esi| *pending_esi != esi);
+                esi_label_allocator.release(esi);
+                continue;
+            };
+            let start = !runtime.drained_esis.contains(&esi);
+            if start {
+                prepare_segment_startup(runtime, &mut state, !administrative_change);
+            }
+            by_esi.insert(esi, state);
+            if start && !starting.contains(&esi) {
+                starting.push_back(esi);
+            }
+            // Publish this prepared replacement before another ES can await
+            // teardown, retaining old AC gates for states still owned there.
+            reconciled.insert(esi);
+            publish_bum_enforcement_snapshot(runtime, by_esi, Some(&reconciled));
+            publish_same_esi_bias_snapshot(runtime, by_esi);
+            publish_df_status(df_status_tx, by_esi);
+        }
+        // Publish every prepared NonDf before another withdrawal or startup
+        // can await. A stale prepared state retains its gate until the next
+        // pass replaces it through the normal owned teardown/rebuild path.
+        publish_dataplane_snapshots(runtime, by_esi);
+        publish_df_status(df_status_tx, by_esi);
+        if !Arc::ptr_eq(&runtime.instances, &latest.0) || segments != latest.1 {
+            continue;
+        }
+        while let Some(&esi) = starting.front() {
+            let (instances, segments) = refresh_segment_dependencies(
+                runtime,
+                by_esi,
+                dependencies_rx.0,
+                dependencies_rx.1,
+                desired_rx,
+                pending,
+                df_status_tx,
+            )
+            .await;
+            if runtime.shutdown.is_cancelled() {
+                return;
+            }
+            if !segment_matches_snapshot(runtime, &by_esi[&esi].config, &instances, &segments) {
+                // Keep both the state and its queued start: removing it here
+                // would drop its blocked gate before a later start can await.
+                continue 'reconcile;
+            }
+            starting.pop_front();
+            if !runtime.drained_esis.contains(&esi) {
+                startup_segment_state(runtime, by_esi.get_mut(&esi).unwrap(), pending).await;
+            }
+        }
+        publish_dataplane_snapshots(runtime, by_esi);
         return;
     }
-    let previous_instances = std::mem::replace(&mut runtime.instances, instances);
-    let next_esis: HashSet<_> = segments.iter().map(|seg| seg.esi).collect();
-    let removed: Vec<_> = by_esi
-        .keys()
-        .copied()
-        .filter(|esi| !next_esis.contains(esi))
-        .collect();
-    for esi in removed {
-        if let Some(mut state) = by_esi.remove(&esi) {
-            drain_segment_state(runtime, &mut state, pending).await;
-        }
-        esi_label_allocator.release(esi);
-    }
-    let mut starting = Vec::new();
-    for seg in segments {
-        if by_esi.get(&seg.esi).is_some_and(|state| {
-            state.config == seg
-                && seg
-                    .member_vnis
-                    .iter()
-                    .all(|&vni| previous_instances.get(vni) == runtime.instances.get(vni))
-        }) {
-            continue;
-        }
-        let mut administrative_change = false;
-        if let Some(mut old) = by_esi.remove(&seg.esi) {
-            // RFC 9785 §4.1: explicit administrative DF changes force
-            // a switchover instead of inheriting the previous reference.
-            administrative_change = (
-                old.config.df_preference,
-                old.config.df_dont_preempt,
-                old.config.df_algorithm,
-            ) != (seg.df_preference, seg.df_dont_preempt, seg.df_algorithm);
-            drain_segment_state(runtime, &mut old, pending).await;
-        }
-        let esi = seg.esi;
-        let Some(mut state) = build_segment_state(runtime, seg, esi_label_allocator) else {
-            esi_label_allocator.release(esi);
-            continue;
-        };
-        let start = !runtime.drained_esis.contains(&esi);
-        if start {
-            prepare_segment_startup(runtime, &mut state, !administrative_change);
-        }
-        by_esi.insert(esi, state);
-        if start {
-            starting.push(esi);
-        }
-    }
-    // All added/replaced ESs must be visible as pending NonDf before the
-    // first one's origination can wait for an acknowledgement.
-    publish_dataplane_snapshots(runtime, by_esi);
-    if let Some(tx) = df_status_tx {
-        publish_df_status(tx, by_esi);
-    }
-    for esi in starting {
-        if runtime.shutdown.is_cancelled() {
-            break;
-        }
-        startup_segment_state(runtime, by_esi.get_mut(&esi).unwrap(), pending).await;
-    }
-    publish_dataplane_snapshots(runtime, by_esi);
+}
+
+/// A pending start belongs to the exact segment and member-instance snapshot
+/// that prepared it; bindings and effective drains are refreshed separately.
+fn segment_matches_snapshot(
+    runtime: &SegmentRuntime,
+    segment: &EthernetSegment,
+    instances: &EvpnInstanceTable,
+    segments: &[EthernetSegment],
+) -> bool {
+    segments.iter().any(|desired| desired == segment)
+        && segment
+            .member_vnis
+            .iter()
+            .all(|&vni| runtime.instances.get(vni) == instances.get(vni))
 }
 
 async fn subscribe_evpn_events(
@@ -4455,14 +4522,13 @@ mod tests {
         instances.insert(instance(200)).unwrap();
         let mut config_b = segment(esi(2), &[200]);
         // Adding B must not withdraw A or restart its recovery timer.
-        apply_runtime_snapshot(
+        apply_test_runtime_snapshot(
             &mut runtime,
             &mut states,
             &mut allocator,
             Arc::new(instances),
             vec![config_a.clone(), config_b.clone()],
             &mut pending,
-            None,
         )
         .await;
         assert_eq!(rib.withdraw_count(), 0);
@@ -4480,14 +4546,13 @@ mod tests {
         // Editing B withdraws only B's three route classes.
         config_b.originator_ip = ipa("10.0.0.22");
         let instances = runtime.instances.clone();
-        apply_runtime_snapshot(
+        apply_test_runtime_snapshot(
             &mut runtime,
             &mut states,
             &mut allocator,
             instances,
             vec![config_a.clone(), config_b.clone()],
             &mut pending,
-            None,
         )
         .await;
         assert_eq!(rib.withdraw_count(), 3);
@@ -4504,14 +4569,13 @@ mod tests {
         let mut replacement = EvpnInstanceTable::new();
         replacement.insert(instance(100)).unwrap();
         replacement.insert(instance_with_rd(200, 201)).unwrap();
-        apply_runtime_snapshot(
+        apply_test_runtime_snapshot(
             &mut runtime,
             &mut states,
             &mut allocator,
             Arc::new(replacement),
             vec![config_a.clone(), config_b],
             &mut pending,
-            None,
         )
         .await;
         assert_eq!(rib.withdraw_count(), 6);
@@ -4565,6 +4629,30 @@ mod tests {
                 );
             }
         }
+    }
+
+    async fn apply_test_runtime_snapshot(
+        runtime: &mut SegmentRuntime,
+        by_esi: &mut HashMap<EthernetSegmentIdentifier, SegmentState>,
+        allocator: &mut rustbgpd_evpn::EsiLabelAllocator,
+        instances: Arc<EvpnInstanceTable>,
+        segments: Vec<EthernetSegment>,
+        pending: &mut PendingRibOps,
+    ) {
+        let (_instances_tx, instances_rx) = watch::channel(instances);
+        let (_segments_tx, segments_rx) = watch::channel(Arc::new(segments));
+        let (_drained_tx, mut drained_rx) = watch::channel(runtime.drained_esis.clone());
+        let (status_tx, _status_rx) = watch::channel(Arc::new(SegmentDfStatusTable::new()));
+        apply_runtime_snapshot(
+            runtime,
+            by_esi,
+            allocator,
+            (&instances_rx, &segments_rx),
+            (&mut drained_rx, None),
+            pending,
+            &status_tx,
+        )
+        .await;
     }
 
     /// Drive real actor/RIB boundaries explicitly: holding a reply prevents
@@ -5524,6 +5612,514 @@ mod tests {
     #[tokio::test(start_paused = true)]
     #[expect(
         clippy::too_many_lines,
+        reason = "held replacement withdrawals exercise configuration, drain and binding publications through the real actor"
+    )]
+    async fn held_replacement_withdrawal_revalidates_before_origination() {
+        use crate::evpn_es_drain::{EsDrainReason, EvpnEsDrainState, apply_ethernet_segment_drain};
+        use crate::evpn_runtime_converger::{EvpnRuntimeActorConverger, EvpnRuntimeReloadApply};
+
+        for change in ["delete", "replace", "redrain", "binding", "instances"] {
+            let baseline = df_wait_reload_config(true, "es0", 101);
+            let mut actor = DfWaitActor::new(DfAlgorithm::HighestPreference);
+            actor.bindings.send_replace(Arc::new(
+                baseline
+                    .resolve_es_link_bindings(&crate::config::AutoLacpEsis::default())
+                    .unwrap(),
+            ));
+            actor.startup().await;
+            let control = actor.handle.runtime_control();
+            assert!(
+                control.replace_segments(Arc::new(baseline.resolve_ethernet_segments().unwrap()))
+            );
+            actor.routes_reply().await.send(Vec::new()).unwrap();
+            let event = type_4_es_route(esi(2), "10.0.0.2", attrs_with_es_import_rt(esi(2)));
+            actor.remote_event(&event);
+            let before_apply = actor.routes_reply().await;
+            let coordinator = Arc::new(std::sync::Mutex::new(
+                rustbgpd_evpn::EvpnRuntimeCoordinator::new(
+                    baseline.resolve_evpn_instances().unwrap(),
+                    baseline.resolve_evpn_ip_vrfs().unwrap(),
+                    baseline.resolve_ethernet_segments().unwrap(),
+                ),
+            ));
+            let lock = Arc::new(tokio::sync::Mutex::new(()));
+            let drain = EvpnEsDrainState::default();
+            let converger = Arc::new(EvpnRuntimeActorConverger::new(
+                actor.rib_tx.clone(),
+                Arc::new(tokio::sync::Mutex::new(
+                    crate::evpn_imet::EvpnImetController::new(),
+                )),
+                None,
+                None,
+                None,
+                None,
+                Some(control.clone()),
+                drain.clone(),
+            ));
+            let apply =
+                EvpnRuntimeReloadApply::new(coordinator.clone(), lock.clone(), converger, baseline)
+                    .with_es_link_bindings_publisher(Arc::new(actor.bindings.clone()));
+            apply
+                .apply_config(&df_wait_reload_config(true, "es1", 105))
+                .await
+                .unwrap();
+            before_apply.send(Vec::new()).unwrap();
+            let RibUpdate::WithdrawEvpn { reply: held, .. } = actor.rib_rx.recv().await.unwrap()
+            else {
+                panic!("replacement must await its old routes' withdrawal");
+            };
+            assert_eq!(actor.bum.borrow().ac_gate(esi(1)).unwrap().interface, "es0");
+            let injections_before = actor.injected.len();
+            match change {
+                "delete" => {
+                    apply
+                        .apply_config(&df_wait_reload_config(false, "es1", 105))
+                        .await
+                        .unwrap();
+                }
+                "replace" => {
+                    apply
+                        .apply_config(&df_wait_reload_config(true, "es1", 101))
+                        .await
+                        .unwrap();
+                }
+                "binding" => {
+                    apply
+                        .apply_config(&df_wait_reload_config(true, "es-new", 105))
+                        .await
+                        .unwrap();
+                }
+                "redrain" => {
+                    apply_ethernet_segment_drain(
+                        esi(1),
+                        EsDrainReason::Operator,
+                        true,
+                        &lock,
+                        &coordinator,
+                        &drain,
+                        Some(&control),
+                        None,
+                    )
+                    .await
+                    .unwrap();
+                }
+                "instances" => {
+                    let mut instances = EvpnInstanceTable::new();
+                    for member in [101, 103, 105] {
+                        instances
+                            .insert(instance_with_rd(
+                                member,
+                                if member == 105 { 205 } else { member },
+                            ))
+                            .unwrap();
+                    }
+                    assert!(control.replace_instances(Arc::new(instances)));
+                }
+                _ => unreachable!(),
+            }
+            held.send(Ok(())).unwrap();
+            let RibUpdate::WithdrawEvpn { reply, .. } = actor.rib_rx.recv().await.unwrap() else {
+                panic!("both old route classes must settle before a new candidate");
+            };
+            assert_eq!(actor.bum.borrow().ac_gate(esi(1)).unwrap().interface, "es0");
+            reply.send(Ok(())).unwrap();
+            if matches!(change, "delete" | "redrain") {
+                actor.remote_event(&event);
+                let observed = actor.routes_reply().await;
+                assert_eq!(actor.injected.len(), injections_before, "{change}");
+                if change == "delete" {
+                    assert!(!actor.status.borrow().contains_key(&esi(1)));
+                } else {
+                    assert_eq!(
+                        actor.bum.borrow().ac_gate(esi(1)).unwrap().state,
+                        AcGateState::Blocked
+                    );
+                }
+                observed.send(Vec::new()).unwrap();
+            } else {
+                let RibUpdate::InjectEvpn { route, reply } = actor.rib_rx.recv().await.unwrap()
+                else {
+                    panic!("latest replacement must originate after withdrawal");
+                };
+                let EvpnRouteKey::Es { esi: id, rd, .. } = route.key() else {
+                    panic!("replacement starts with its Type 4 candidate");
+                };
+                assert_eq!(id, esi(1));
+                let expected_rd = match change {
+                    "instances" => 205,
+                    "replace" => 101,
+                    _ => 105,
+                };
+                assert_eq!(rd, instance_with_rd(105, expected_rd).rd);
+                let member = if change == "replace" { 101 } else { 105 };
+                actor.assert_segment_role(esi(1), vni(member), DfRole::NonDf);
+                assert_eq!(
+                    actor.bum.borrow().ac_gate(esi(1)).unwrap().interface,
+                    if change == "binding" { "es-new" } else { "es1" }
+                );
+                actor.injected.push(route.key());
+                reply.send(Ok(())).unwrap();
+                actor.routes_reply().await.send(Vec::new()).unwrap();
+            }
+            actor.finish().await;
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "two real DF replacements hold the second teardown to verify both owned attachment circuit gates"
+    )]
+    async fn prepared_replacement_publishes_before_another_withdrawal() {
+        use crate::evpn_es_drain::EvpnEsDrainState;
+        use crate::evpn_runtime_converger::{EvpnRuntimeActorConverger, EvpnRuntimeReloadApply};
+
+        let baseline = df_wait_reload_config(true, "es0", 101);
+        let mut actor = DfWaitActor::new(DfAlgorithm::HighestPreference);
+        actor.bindings.send_replace(Arc::new(
+            baseline
+                .resolve_es_link_bindings(&crate::config::AutoLacpEsis::default())
+                .unwrap(),
+        ));
+        actor.startup().await;
+        let control = actor.handle.runtime_control();
+        assert!(control.replace_segments(Arc::new(baseline.resolve_ethernet_segments().unwrap())));
+        actor.routes_reply().await.send(Vec::new()).unwrap();
+        tokio::time::advance(Duration::from_secs(3)).await;
+        actor.sync_reply().await.send(true).unwrap();
+        actor.routes_reply().await.send(Vec::new()).unwrap();
+        let event = type_4_es_route(esi(1), "10.0.0.2", attrs_with_es_import_rt(esi(1)));
+        actor.remote_event(&event);
+        let before_apply = actor.routes_reply().await;
+        for (id, member, interface) in [(1, 101, "es0"), (2, 103, "es2")] {
+            actor.assert_segment_role(esi(id), vni(member), DfRole::Df);
+            assert!(actor.status.borrow()[&esi(id)].recovery_deadline.is_none());
+            assert_eq!(
+                actor.bum.borrow().ac_gate(esi(id)).unwrap().interface,
+                interface
+            );
+            assert_eq!(
+                actor
+                    .injected
+                    .iter()
+                    .filter(|key| esi_of_key(key) == Some(esi(id)))
+                    .count(),
+                3
+            );
+        }
+        let injections_before = actor.injected.len();
+        let coordinator = Arc::new(std::sync::Mutex::new(
+            rustbgpd_evpn::EvpnRuntimeCoordinator::new(
+                baseline.resolve_evpn_instances().unwrap(),
+                baseline.resolve_evpn_ip_vrfs().unwrap(),
+                baseline.resolve_ethernet_segments().unwrap(),
+            ),
+        ));
+        let converger = Arc::new(EvpnRuntimeActorConverger::new(
+            actor.rib_tx.clone(),
+            Arc::new(tokio::sync::Mutex::new(
+                crate::evpn_imet::EvpnImetController::new(),
+            )),
+            None,
+            None,
+            None,
+            None,
+            Some(control),
+            EvpnEsDrainState::default(),
+        ));
+        let apply = EvpnRuntimeReloadApply::new(
+            coordinator,
+            Arc::new(tokio::sync::Mutex::new(())),
+            converger,
+            baseline,
+        )
+        .with_es_link_bindings_publisher(Arc::new(actor.bindings.clone()));
+        let mut replacement = df_wait_reload_config(true, "es-a-new", 105);
+        replacement.ethernet_segments[1].originator_ip = "10.0.0.3".to_string();
+        replacement.ethernet_segments[1].interface = Some("es-b-new".to_string());
+        apply.apply_config(&replacement).await.unwrap();
+        before_apply.send(Vec::new()).unwrap();
+
+        // A owned all three route classes as a real DF. Acknowledge its entire
+        // teardown, then stop on B's first actual withdrawal acknowledgement.
+        for _ in 0..3 {
+            let RibUpdate::WithdrawEvpn { key, reply } = actor.rib_rx.recv().await.unwrap() else {
+                panic!("A must withdraw every old route before any new origination");
+            };
+            assert_eq!(esi_of_key(&key), Some(esi(1)));
+            assert_eq!(actor.bum.borrow().ac_gate(esi(1)).unwrap().interface, "es0");
+            reply.send(Ok(())).unwrap();
+        }
+        let RibUpdate::WithdrawEvpn { key, reply: held_b } = actor.rib_rx.recv().await.unwrap()
+        else {
+            panic!("B must reach its real teardown before any prepared start");
+        };
+        assert_eq!(esi_of_key(&key), Some(esi(2)));
+        assert_eq!(
+            actor
+                .bum
+                .borrow()
+                .get(esi(1), vni(105))
+                .expect(
+                    "prepared A must publish its latest NonDf member while B withdrawal is held"
+                )
+                .role,
+            DfRole::NonDf
+        );
+        actor.assert_segment_role(esi(1), vni(105), DfRole::NonDf);
+        assert!(actor.bum.borrow().get(esi(1), vni(101)).is_none());
+        assert_eq!(
+            actor.bum.borrow().ac_gate(esi(1)).unwrap().interface,
+            "es-a-new"
+        );
+        assert!(actor.status.borrow()[&esi(1)].recovery_deadline.is_some());
+        actor.assert_segment_role(esi(2), vni(103), DfRole::Df);
+        assert_eq!(actor.bum.borrow().ac_gate(esi(2)).unwrap().interface, "es2");
+        assert!(actor.status.borrow()[&esi(2)].recovery_deadline.is_none());
+        assert_eq!(actor.injected.len(), injections_before);
+        held_b.send(Ok(())).unwrap();
+        actor.routes_reply().await.send(Vec::new()).unwrap();
+        actor.routes_reply().await.send(Vec::new()).unwrap();
+        actor.remote_event(&event);
+        let settled = actor.routes_reply().await;
+        for (id, member, interface) in [(1, 105, "es-a-new"), (2, 103, "es-b-new")] {
+            actor.assert_segment_role(esi(id), vni(member), DfRole::NonDf);
+            assert_eq!(
+                actor.bum.borrow().ac_gate(esi(id)).unwrap().interface,
+                interface
+            );
+            assert!(actor.status.borrow()[&esi(id)].recovery_deadline.is_some());
+        }
+        assert_eq!(actor.injected.len(), injections_before + 4);
+        settled.send(Vec::new()).unwrap();
+        actor.finish().await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one held origination verifies every queued start against intervening desired-state publications"
+    )]
+    async fn queued_addition_revalidates_after_another_startup_ack() {
+        for change in ["delete", "replace", "redrain", "binding", "instances"] {
+            let mut actor = DfWaitActor::new(DfAlgorithm::HighestPreference);
+            actor.startup().await;
+            let control = actor.handle.runtime_control();
+            let mut desired = control.segments_tx.borrow().as_ref().clone();
+            for (id, member) in [(2, 103), (3, 105), (4, 101)] {
+                let mut added = desired[0].clone();
+                added.esi = esi(id);
+                added.member_vnis = BTreeSet::from([vni(member)]);
+                desired.push(added);
+            }
+            let mut bindings = actor.bindings.borrow().as_ref().clone();
+            let mut fourth_binding = bindings[&esi(3)].clone();
+            fourth_binding.interface = "es3".to_string();
+            bindings.insert(esi(4), fourth_binding);
+            actor.bindings.send_replace(Arc::new(bindings));
+            let event = type_4_es_route(esi(1), "10.0.0.2", attrs_with_es_import_rt(esi(1)));
+            actor.remote_event(&event);
+            let before_apply = actor.routes_reply().await;
+            assert!(control.replace_segments(Arc::new(desired.clone())));
+            before_apply.send(Vec::new()).unwrap();
+            let RibUpdate::InjectEvpn { route, reply: held } = actor.rib_rx.recv().await.unwrap()
+            else {
+                panic!("first addition must reach its Type 4 acknowledgement");
+            };
+            assert_eq!(esi_of_key(&route.key()), Some(esi(2)));
+            actor.injected.push(route.key());
+            for (id, member) in [(2, 103), (3, 105), (4, 101)] {
+                actor.assert_segment_role(esi(id), vni(member), DfRole::NonDf);
+            }
+            match change {
+                "delete" => {
+                    desired.retain(|segment| segment.esi != esi(3));
+                    assert!(control.replace_segments(Arc::new(desired)));
+                }
+                "replace" => {
+                    desired[2].originator_ip = ipa("10.0.0.3");
+                    desired[2].member_vnis = BTreeSet::from([vni(103)]);
+                    assert!(control.replace_segments(Arc::new(desired)));
+                }
+                "redrain" => {
+                    assert!(control.replace_drained_esis(drained_set(&[esi(3)])));
+                }
+                "binding" => {
+                    let mut bindings = actor.bindings.borrow().as_ref().clone();
+                    bindings.get_mut(&esi(3)).unwrap().interface = "es-new".to_string();
+                    actor.bindings.send_replace(Arc::new(bindings));
+                }
+                "instances" => {
+                    let mut instances = EvpnInstanceTable::new();
+                    for member in [101, 103, 105] {
+                        instances
+                            .insert(instance_with_rd(
+                                member,
+                                if member == 105 { 205 } else { member },
+                            ))
+                            .unwrap();
+                    }
+                    assert!(control.replace_instances(Arc::new(instances)));
+                }
+                _ => unreachable!(),
+            }
+            held.send(Ok(())).unwrap();
+            actor.routes_reply().await.send(Vec::new()).unwrap();
+            let mut third_starts = 0;
+            let held_fourth = loop {
+                let RibUpdate::InjectEvpn { route, reply } = actor.rib_rx.recv().await.unwrap()
+                else {
+                    panic!("each prepared addition must reach its Type 4 acknowledgement");
+                };
+                let EvpnRouteKey::Es {
+                    esi: id,
+                    rd: route_rd,
+                    originator_ip,
+                } = route.key()
+                else {
+                    panic!("queued addition begins with Type 4");
+                };
+                actor.injected.push(route.key());
+                if id == esi(4) {
+                    break reply;
+                }
+                assert_eq!(id, esi(3));
+                assert!(!matches!(change, "delete" | "redrain"), "{change}");
+                third_starts += 1;
+                assert_eq!(
+                    originator_ip,
+                    ipa(if change == "replace" {
+                        "10.0.0.3"
+                    } else {
+                        "10.0.0.1"
+                    })
+                );
+                let expected_rd = match change {
+                    "instances" => 205,
+                    "replace" => 103,
+                    _ => 105,
+                };
+                assert_eq!(route_rd, rd(65000, expected_rd));
+                let member = if change == "replace" { 103 } else { 105 };
+                actor.assert_segment_role(esi(3), vni(member), DfRole::NonDf);
+                reply.send(Ok(())).unwrap();
+                actor.routes_reply().await.send(Vec::new()).unwrap();
+            };
+            // ES4 is actually waiting for its acknowledgement. A replaced ES3
+            // must keep complete current BUM intent and its blocked AC gate;
+            // neither its pending startup nor ES4's may disappear on retry.
+            actor.assert_segment_role(esi(4), vni(101), DfRole::NonDf);
+            if change == "delete" {
+                assert!(!actor.status.borrow().contains_key(&esi(3)));
+                assert!(actor.bum.borrow().ac_gate(esi(3)).is_none());
+            } else {
+                assert_eq!(
+                    actor
+                        .bum
+                        .borrow()
+                        .ac_gate(esi(3))
+                        .expect("pending ES3 must keep its blocked AC gate while ES4 acknowledgement is held")
+                        .state,
+                    AcGateState::Blocked
+                );
+                if change != "redrain" {
+                    let member = if change == "replace" { 103 } else { 105 };
+                    actor.assert_segment_role(esi(3), vni(member), DfRole::NonDf);
+                    assert_eq!(
+                        actor.bum.borrow().ac_gate(esi(3)).unwrap().interface,
+                        if change == "binding" { "es-new" } else { "es2" }
+                    );
+                }
+            }
+            assert_eq!(
+                third_starts,
+                usize::from(!matches!(change, "delete" | "redrain"))
+            );
+            held_fourth.send(Ok(())).unwrap();
+            actor.routes_reply().await.send(Vec::new()).unwrap();
+            actor.remote_event(&event);
+            let observed = actor.routes_reply().await;
+            assert_eq!(
+                actor
+                    .injected
+                    .iter()
+                    .filter(|key| matches!(key, EvpnRouteKey::Es { esi: id, .. } if *id == esi(3)))
+                    .count(),
+                third_starts,
+                "the latest ES3 starts exactly once"
+            );
+            observed.send(Vec::new()).unwrap();
+            actor.finish().await;
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn queued_administrative_start_survives_member_republication() {
+        let mut actor = DfWaitActor::new(DfAlgorithm::HighestPreference);
+        actor.startup().await;
+        let control = actor.handle.runtime_control();
+        let mut desired = control.segments_tx.borrow().as_ref().clone();
+        let mut third = desired[0].clone();
+        third.esi = esi(3);
+        third.member_vnis = BTreeSet::from([vni(105)]);
+        desired.push(third);
+        assert!(control.replace_segments(Arc::new(desired.clone())));
+        actor.routes_reply().await.send(Vec::new()).unwrap();
+        let event = type_4_es_route(esi(1), "10.0.0.2", attrs_with_es_import_rt(esi(1)));
+        actor.remote_event(&event);
+        let before_apply = actor.routes_reply().await;
+        let mut second = desired[0].clone();
+        second.esi = esi(2);
+        second.member_vnis = BTreeSet::from([vni(103)]);
+        desired.insert(1, second);
+        desired[2].df_preference = 200;
+        assert!(control.replace_segments(Arc::new(desired.clone())));
+        before_apply.send(Vec::new()).unwrap();
+        // Settle ES3's old routes before ES2's first origination. The whole
+        // desired snapshot, including ES3's admin override, is now prepared.
+        for _ in 0..2 {
+            let RibUpdate::WithdrawEvpn { key, reply } = actor.rib_rx.recv().await.unwrap() else {
+                panic!("old ES3 routes must settle before the prepared additions");
+            };
+            assert_eq!(esi_of_key(&key), Some(esi(3)));
+            reply.send(Ok(())).unwrap();
+        }
+        let RibUpdate::InjectEvpn { route, reply: held } = actor.rib_rx.recv().await.unwrap()
+        else {
+            panic!("ES2 must reach its real Type 4 acknowledgement");
+        };
+        assert_eq!(esi_of_key(&route.key()), Some(esi(2)));
+        actor.injected.push(route.key());
+        assert!(actor.status.borrow()[&esi(3)].recovery_deadline.is_none());
+        actor.assert_segment_role(esi(3), vni(105), DfRole::NonDf);
+        // This later publication changes no DF field. Rebuilding the pending
+        // ES3 must preserve its already accepted administrative start.
+        desired[2].member_vnis = BTreeSet::from([vni(101)]);
+        assert!(control.replace_segments(Arc::new(desired)));
+        held.send(Ok(())).unwrap();
+        actor.routes_reply().await.send(Vec::new()).unwrap();
+        let RibUpdate::InjectEvpn { route, reply } = actor.rib_rx.recv().await.unwrap() else {
+            panic!("the latest administrative ES3 must originate");
+        };
+        assert!(
+            matches!(route.key(), EvpnRouteKey::Es { esi: id, rd: route_rd, .. }
+            if id == esi(3) && route_rd == rd(65000, 101))
+        );
+        assert!(actor.status.borrow()[&esi(3)].recovery_deadline.is_none());
+        actor.assert_segment_role(esi(3), vni(101), DfRole::NonDf);
+        actor.injected.push(route.key());
+        reply.send(Ok(())).unwrap();
+        actor.routes_reply().await.send(Vec::new()).unwrap();
+        actor.remote_event(&event);
+        let observed = actor.routes_reply().await;
+        actor.assert_segment_role(esi(3), vni(101), DfRole::Df);
+        observed.send(Vec::new()).unwrap();
+        actor.finish().await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    #[expect(
+        clippy::too_many_lines,
         reason = "one acknowledged withdrawal sequence verifies old and replacement attachment circuit gates"
     )]
     async fn retiring_live_non_df_keeps_old_ac_gate_until_withdrawals_settle() {
@@ -5647,6 +6243,48 @@ mod tests {
                 assert!(!actor.status.borrow().contains_key(&esi(1)));
                 observed.send(Vec::new()).unwrap();
             }
+            actor.finish().await;
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn recovery_deadline_precedes_queued_evpn_events() {
+        for ceiling in [false, true] {
+            let mut actor = DfWaitActor::new(DfAlgorithm::DefaultModulo);
+            actor.startup().await;
+            if ceiling {
+                for second in 3..30 {
+                    tokio::time::advance(Duration::from_secs(if second == 3 { 3 } else { 1 }))
+                        .await;
+                    actor.sync_reply().await.send(false).unwrap();
+                    actor.status.changed().await.unwrap();
+                    actor.status.borrow_and_update();
+                    if second % 10 == 0 {
+                        // Explicitly acknowledge the periodic sweep as well.
+                        actor.routes_reply().await.send(Vec::new()).unwrap();
+                    }
+                }
+                tokio::time::advance(Duration::from_millis(999)).await;
+            } else {
+                tokio::time::advance(Duration::from_millis(2999)).await;
+            }
+            let event = type_4_es_route(esi(1), "10.0.0.2", attrs_with_es_import_rt(esi(1)));
+            actor.remote_event(&event);
+            let held = actor.routes_reply().await;
+            // The actor cannot select again until this reply is released.
+            // Queue an event and expire recovery while it is held, guaranteeing
+            // both branches are ready on the same subsequent select poll.
+            actor.remote_event(&event);
+            tokio::time::advance(Duration::from_millis(1)).await;
+            held.send(Vec::new()).unwrap();
+            if !ceiling {
+                actor.sync_reply().await.send(true).unwrap();
+            }
+            actor.routes_reply().await.send(Vec::new()).unwrap();
+            let queued = actor.routes_reply().await;
+            actor.assert_role(DfRole::Df);
+            assert!(actor.status.borrow()[&esi(1)].recovery_deadline.is_none());
+            queued.send(Vec::new()).unwrap();
             actor.finish().await;
         }
     }
@@ -6059,14 +6697,13 @@ mod tests {
             let expected = replacement.df_preference;
             let mut states = HashMap::from([(id, state)]);
             let instances = runtime.instances.clone();
-            apply_runtime_snapshot(
+            apply_test_runtime_snapshot(
                 &mut runtime,
                 &mut states,
                 &mut rustbgpd_evpn::EsiLabelAllocator::new(),
                 instances,
                 vec![replacement],
                 &mut pending,
-                None,
             )
             .await;
             assert!(states[&id].recovery_deadline.is_none());
