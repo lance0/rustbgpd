@@ -100,6 +100,7 @@ struct PersistenceRig {
     mutation_tx: mpsc::Sender<crate::config_persister::ConfigMutation>,
     peer_mgr_tx: mpsc::Sender<PeerManagerCommand>,
     rib_rx: mpsc::Receiver<RibUpdate>,
+    observed_rib_updates: Vec<RibUpdate>,
     service: rustbgpd_api::NeighborService,
 }
 
@@ -233,6 +234,7 @@ hold_time = 90
             mutation_tx,
             peer_mgr_tx,
             rib_rx,
+            observed_rib_updates: Vec::new(),
             service,
         }
     }
@@ -337,7 +339,11 @@ hold_time = 90
 
     /// Nothing peer-deleting reached the RIB.
     fn assert_no_rib_peer_deletion(&mut self, peer: IpAddr) {
-        while let Ok(update) = self.rib_rx.try_recv() {
+        for update in self
+            .observed_rib_updates
+            .drain(..)
+            .chain(std::iter::from_fn(|| self.rib_rx.try_recv().ok()))
+        {
             assert!(
                 !matches!(update, RibUpdate::PeerDeleted { peer: deleted } if deleted == peer),
                 "a rejected mutation must not reap the peer's RIB state"
@@ -345,24 +351,49 @@ hold_time = 90
         }
     }
 
-    async fn delete_neighbor(&self, address: &str) -> Result<(), tonic::Status> {
+    /// Service publication replies while preserving every other update for the
+    /// deletion oracle, without a relay task that could lag behind an RPC.
+    async fn with_owner_publications<F: std::future::Future>(
+        rib_rx: &mut mpsc::Receiver<RibUpdate>,
+        observed: &mut Vec<RibUpdate>,
+        operation: F,
+    ) -> F::Output {
+        tokio::pin!(operation);
+        loop {
+            tokio::select! {
+                result = &mut operation => return result,
+                Some(update) = rib_rx.recv() => match update {
+                    RibUpdate::PublishDampeningOwners { reply, .. } => {
+                        reply.send(Ok(())).unwrap();
+                    }
+                    update => observed.push(update),
+                },
+            }
+        }
+    }
+
+    async fn delete_neighbor(&mut self, address: &str) -> Result<(), tonic::Status> {
         use rustbgpd_api::proto::neighbor_service_server::NeighborService as _;
 
         tokio::time::timeout(
             Duration::from_secs(10),
-            self.service.delete_neighbor(tonic::Request::new(
-                rustbgpd_api::proto::DeleteNeighborRequest {
-                    address: address.to_string(),
-                    interface: String::new(),
-                },
-            )),
+            Self::with_owner_publications(
+                &mut self.rib_rx,
+                &mut self.observed_rib_updates,
+                self.service.delete_neighbor(tonic::Request::new(
+                    rustbgpd_api::proto::DeleteNeighborRequest {
+                        address: address.to_string(),
+                        interface: String::new(),
+                    },
+                )),
+            ),
         )
         .await
         .expect("delete_neighbor must answer, not hang")
         .map(|_| ())
     }
 
-    async fn add_neighbor(&self, address: &str, remote_asn: u32) -> Result<(), tonic::Status> {
+    async fn add_neighbor(&mut self, address: &str, remote_asn: u32) -> Result<(), tonic::Status> {
         self.add_presence_neighbor(
             rustbgpd_api::proto::NeighborConfig {
                 address: address.to_string(),
@@ -380,7 +411,7 @@ hold_time = 90
         reason = "the API crate does not re-export prost_types::FieldMask"
     )]
     async fn add_presence_neighbor(
-        &self,
+        &mut self,
         config: rustbgpd_api::proto::NeighborConfig,
         paths: &[&str],
     ) -> Result<(), tonic::Status> {
@@ -394,11 +425,15 @@ hold_time = 90
             paths.iter().map(|path| (*path).to_string()).collect();
         tokio::time::timeout(
             Duration::from_secs(10),
-            self.service.add_neighbor(tonic::Request::new(
-                rustbgpd_api::proto::AddNeighborRequest {
-                    intent: Some(intent),
-                },
-            )),
+            Self::with_owner_publications(
+                &mut self.rib_rx,
+                &mut self.observed_rib_updates,
+                self.service.add_neighbor(tonic::Request::new(
+                    rustbgpd_api::proto::AddNeighborRequest {
+                        intent: Some(intent),
+                    },
+                )),
+            ),
         )
         .await
         .expect("presence-aware add must answer, not hang")
@@ -440,7 +475,7 @@ async fn presence_create_preserves_raw_inheritance_over_disk_actor_and_reload() 
     const MASKED: &str = "10.0.0.10";
     const IPV6_DEFAULT: &str = "2001:db8::9";
     const RR_CLIENT: &str = "10.0.0.14";
-    let rig = PersistenceRig::start();
+    let mut rig = PersistenceRig::start();
     assert!(
         Config::load_with_diagnostics(rig.config_path.to_str().unwrap())
             .unwrap()
@@ -594,7 +629,7 @@ async fn presence_create_preserves_raw_inheritance_over_disk_actor_and_reload() 
 
 #[tokio::test]
 async fn presence_create_rejections_leave_no_disk_history_or_live_half_state() {
-    let rig = PersistenceRig::start();
+    let mut rig = PersistenceRig::start();
     let config_before = rig.config_bytes();
     let history_before = rig.session_history().await;
 
@@ -667,7 +702,7 @@ async fn presence_create_rejections_leave_no_disk_history_or_live_half_state() {
 /// session, disk, or history effect; the boundary and inverted pairs succeed.
 #[tokio::test]
 async fn presence_create_rejects_min_hold_time_above_effective_hold_time() {
-    let rig = PersistenceRig::start();
+    let mut rig = PersistenceRig::start();
     let config_before = rig.config_bytes();
     let history_before = rig.session_history().await;
 
@@ -825,7 +860,7 @@ async fn neighbor_delete_persistence_failure_leaves_the_session_untouched() {
 async fn neighbor_add_persistence_failure_creates_no_session() {
     const NEW_PEER: &str = "10.0.0.9";
 
-    let rig = PersistenceRig::start();
+    let mut rig = PersistenceRig::start();
     let existing_before = observable_session(
         &rig.peer(PersistenceRig::PEER)
             .await
@@ -880,7 +915,7 @@ async fn neighbor_add_persistence_failure_creates_no_session() {
 /// writable config into a no-op.
 #[tokio::test]
 async fn neighbor_delete_persists_and_applies_when_the_config_is_writable() {
-    let rig = PersistenceRig::start();
+    let mut rig = PersistenceRig::start();
     assert!(rig.peer(PersistenceRig::PEER).await.is_some());
 
     rig.delete_neighbor(PersistenceRig::PEER)

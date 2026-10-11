@@ -1522,7 +1522,16 @@ impl RibManager {
         explain
     }
 
-    pub(super) fn process_withdraw_chunk(&mut self, peer: IpAddr, withdrawn: Vec<(Prefix, u32)>) {
+    pub(super) fn process_withdraw_chunk(
+        &mut self,
+        peer: IpAddr,
+        withdrawn: Vec<(Prefix, u32)>,
+        history: Option<(
+            &crate::update::ReceivedRouteSource,
+            crate::dampening::DampeningSource,
+            usize,
+        )>,
+    ) {
         let active_refresh = self
             .refresh_in_progress
             .get(&peer)
@@ -1538,7 +1547,18 @@ impl RibManager {
                 .get_mut(&peer)
                 .expect("peer rib must exist before chunk processing");
 
-            for (prefix, path_id) in withdrawn {
+            for (index, (prefix, path_id)) in withdrawn.into_iter().enumerate() {
+                if let Some((source, admitted, original)) = history
+                    && index < original
+                    && rib.get(&prefix, path_id).is_some()
+                {
+                    self.dampening_history.record(
+                        source,
+                        admitted,
+                        crate::dampening::DampeningKey { prefix, path_id },
+                        crate::dampening::DampeningEvent::Withdrawal,
+                    );
+                }
                 if rib.withdraw(&prefix, path_id) {
                     removed += 1;
                     debug!(%peer, %prefix, path_id, "withdrawn");

@@ -40,6 +40,8 @@ use crate::policy_admin::{
 mod admission;
 mod bfd;
 mod conditional;
+mod configured_owners;
+mod dampening_control;
 mod dynamic;
 mod events;
 pub(crate) mod generation;
@@ -530,6 +532,10 @@ pub struct PeerManager {
     policy_events_tx: broadcast::Sender<Arc<PolicyEvent>>,
     policy_event_history: VecDeque<Arc<PolicyEvent>>,
     current_config: Config,
+    configured_owners: configured_owners::ConfiguredOwners,
+    /// A history-enabled retirement failed its primary-RIB barrier. The next
+    /// actor turn terminates through existing daemon component supervision.
+    dampening_control_failed: bool,
     /// ADR-0137: the conditional-advertisement set the RIB last
     /// acknowledged. The RIB install is the only copy the gate reads; this
     /// is the comparison basis for deciding when to install again.
@@ -1146,6 +1152,8 @@ impl PeerManager {
         );
         Self {
             peers: PeerTable::new(&current_config),
+            configured_owners: configured_owners::ConfiguredOwners::new(&current_config),
+            dampening_control_failed: false,
             max_prefix_latches: HashMap::new(),
             next_max_prefix_restart_deadline: None,
             next_max_prefix_latch_generation: 1,
@@ -1427,6 +1435,18 @@ impl PeerManager {
     async fn dispatch_command(&mut self, cmd: PeerManagerCommand) -> ControlFlow<()> {
         self.operator_read_seam = OperatorReadSeam::Unfenced;
         match cmd {
+            PeerManagerCommand::EnablePeerOwned { peer, reply } => {
+                let outcome = self.enable_peer_owned(peer).await;
+                let _ = reply.send(outcome);
+            }
+            PeerManagerCommand::DisableDampeningCapacity { notice, reply } => {
+                let outcome = self.disable_dampening_capacity(notice).await;
+                let _ = reply.send(outcome);
+            }
+            PeerManagerCommand::ConfiguredOwnerPublication { operation, reply } => {
+                let outcome = self.configured_owner_publication(operation).await;
+                let _ = reply.send(outcome);
+            }
             PeerManagerCommand::Ping { reply } => {
                 let _ = reply.send(());
             }
@@ -2378,6 +2398,10 @@ impl PeerManager {
         reason = "peer manager run loop centralizes command, notification, and reload orchestration"
     )]
     pub async fn run(mut self) {
+        if let Err(error) = self.publish_initial_configured_owners().await {
+            error!(%error, "initial configured-owner publication failed");
+            return;
+        }
         let mut bmp_stats_interval = self.bmp_tx.as_ref().map(|_| {
             let mut interval =
                 tokio::time::interval(std::time::Duration::from_secs(BMP_STATS_INTERVAL_SECS));
@@ -2400,6 +2424,12 @@ impl PeerManager {
         }
 
         loop {
+            if self.dampening_control_failed {
+                tracing::error!(
+                    "dampening source retirement is unacknowledged; terminating peer manager"
+                );
+                return;
+            }
             // Between run-loop steps no roster batch is open, and in test
             // builds the published import roster is exactly the peer table
             // and live dataset bindings.

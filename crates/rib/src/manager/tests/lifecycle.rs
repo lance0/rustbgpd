@@ -2141,6 +2141,7 @@ async fn accepted_source_context_survives_collision_failback_and_stamps_pending_
     let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
     let peer: IpAddr = "192.0.2.1".parse().unwrap();
     let context = Arc::new(PeerSourceContext {
+        dampening_admission: None,
         peer_interface: Some("eth1".into()),
         accepted_dynamic_range: Some(AcceptedDynamicRange {
             addr: "192.0.2.0".parse().unwrap(),
@@ -2219,6 +2220,7 @@ async fn repeated_peer_up_preserves_only_matching_source_context() {
             let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
             let peer: IpAddr = "192.0.2.1".parse().unwrap();
             let context = Arc::new(PeerSourceContext {
+                dampening_admission: None,
                 peer_interface: Some("eth1".into()),
                 accepted_dynamic_range: None,
                 route_server_client: false,
@@ -2281,6 +2283,7 @@ async fn ending_session_preserves_newer_staged_registration_context() {
     let (old_tx, _old_rx) = mpsc::channel(64);
     manager.handle_update(session_peer_up(peer, 1, old_tx, ipv4_sendable()));
     let context = Arc::new(PeerSourceContext {
+        dampening_admission: None,
         peer_interface: Some("eth2".into()),
         accepted_dynamic_range: None,
         route_server_client: false,
@@ -2360,6 +2363,7 @@ async fn aborted_registration_reaps_only_its_own_staged_source_context() {
                     peer,
                     session_id,
                     context: Arc::new(PeerSourceContext {
+                        dampening_admission: None,
                         peer_interface: None,
                         accepted_dynamic_range: None,
                         route_server_client: false,

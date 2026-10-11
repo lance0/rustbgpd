@@ -971,6 +971,7 @@ impl PeerSession {
                             peer: self.peer_ip,
                             session_id: self.session_identity.id,
                             context: std::sync::Arc::new(rustbgpd_rib::update::PeerSourceContext {
+                                dampening_admission: self.config.dampening_admission.clone(),
                                 peer_interface: self.config.peer_interface.clone(),
                                 accepted_dynamic_range: self.config.accepted_dynamic_range.clone(),
                                 route_server_client: self.config.route_server_client,

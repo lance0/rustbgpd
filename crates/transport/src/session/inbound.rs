@@ -1104,6 +1104,25 @@ impl PeerSession {
             Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => Err(()),
         }
     }
+    /// Keep classification in the same admitted primary-lane batch. Ordinary
+    /// production has no installed history consumer and preserves its variant.
+    async fn deliver_wire_routes_to_rib(
+        &self,
+        batch: RibUpdate,
+        original_unicast_withdrawals: usize,
+        record_wire_history: bool,
+    ) -> Result<(), ()> {
+        let batch = if record_wire_history {
+            RibUpdate::WireRoutesReceived(rustbgpd_rib::update::WireRoutesReceived::new(
+                batch,
+                original_unicast_withdrawals,
+            ))
+        } else {
+            batch
+        };
+        self.deliver_routes_to_rib(batch).await
+    }
+
     /// Maximum message length we may SEND to this peer: 65535 if the PEER
     /// advertised Extended Messages, otherwise 4096 (RFC 8654 §2 — the
     /// peer's capability governs our outbound sizes). The inbound limit is
@@ -1275,6 +1294,7 @@ impl PeerSession {
         parsed: &ParsedUpdate,
         reject_reason: ImportRejectReason,
         reject_detail: Option<&str>,
+        record_wire_history: bool,
     ) {
         let mut rejected_unicast = self.eligible_unicast_announcements(parsed);
         let mut loop_withdrawn: Vec<(Prefix, u32)> = parsed
@@ -1400,6 +1420,7 @@ impl PeerSession {
                 loop_evpn_rejected.extend(mp.evpn_announced.iter().map(EvpnRoute::key));
             }
         }
+        let original_unicast_withdrawals = loop_withdrawn.len();
         for &(prefix, path_id) in &loop_withdrawn {
             self.forget_known_path(prefix, path_id);
             self.forget_rejected_path(prefix, path_id);
@@ -1535,17 +1556,21 @@ impl PeerSession {
                 &loop_evpn_withdrawn,
             );
             if self
-                .deliver_routes_to_rib(RibUpdate::RoutesReceived {
-                    peer: self.peer_ip,
-                    session_id: self.session_identity.id,
-                    announced: vec![],
-                    withdrawn: loop_withdrawn,
-                    flowspec_announced: vec![],
-                    flowspec_withdrawn: loop_fs_withdrawn,
-                    evpn_announced: vec![],
-                    evpn_withdrawn: loop_evpn_withdrawn,
-                    validated_with: None,
-                })
+                .deliver_wire_routes_to_rib(
+                    RibUpdate::RoutesReceived {
+                        peer: self.peer_ip,
+                        session_id: self.session_identity.id,
+                        announced: vec![],
+                        withdrawn: loop_withdrawn,
+                        flowspec_announced: vec![],
+                        flowspec_withdrawn: loop_fs_withdrawn,
+                        evpn_announced: vec![],
+                        evpn_withdrawn: loop_evpn_withdrawn,
+                        validated_with: None,
+                    },
+                    original_unicast_withdrawals,
+                    record_wire_history,
+                )
                 .await
                 .is_err()
             {
@@ -1651,11 +1676,31 @@ impl PeerSession {
     /// Parse an UPDATE message, validate attributes, apply import policy,
     /// enforce max-prefix limit, send routes to RIB, and feed the
     /// appropriate event to the FSM.
+    pub(super) fn process_update(
+        &mut self,
+        update: rustbgpd_wire::UpdateMessage,
+    ) -> impl std::future::Future<Output = ()> + '_ {
+        // Pin at acceptance, before processing or delivery can await. A later
+        // owner publication cannot make already accepted input chargeable.
+        let record_wire_history =
+            self.config
+                .dampening_admission
+                .as_ref()
+                .is_some_and(|admission| {
+                    admission.owner.records_wire_history() && admission.is_published()
+                });
+        self.process_accepted_update(update, record_wire_history)
+    }
+
     #[expect(
         clippy::too_many_lines,
         reason = "UPDATE handling keeps decode, validation, import policy, RIB enqueue, and FSM side effects ordered"
     )]
-    pub(super) async fn process_update(&mut self, update: rustbgpd_wire::UpdateMessage) {
+    async fn process_accepted_update(
+        &mut self,
+        update: rustbgpd_wire::UpdateMessage,
+        record_wire_history: bool,
+    ) {
         let four_octet_as = self.negotiated.as_ref().is_some_and(|n| n.four_octet_as);
         let mut import_policy_routes_permitted = 0_u64;
         let mut import_policy_routes_denied = 0_u64;
@@ -1938,8 +1983,13 @@ impl PeerSession {
                 &causes,
                 MalformedUpdateDisposition::TreatAsWithdraw,
             );
-            self.treat_update_as_withdraw(&parsed, ImportRejectReason::TreatAsWithdraw, None)
-                .await;
+            self.treat_update_as_withdraw(
+                &parsed,
+                ImportRejectReason::TreatAsWithdraw,
+                None,
+                record_wire_history,
+            )
+            .await;
             return;
         }
         // draft-ietf-sidrops-aspa-verification-28 §5.1: an AS_PATH whose most
@@ -1983,6 +2033,7 @@ impl PeerSession {
                 &parsed,
                 ImportRejectReason::TreatAsWithdraw,
                 Some("aspa_first_as_mismatch"),
+                record_wire_history,
             )
             .await;
             return;
@@ -2157,8 +2208,13 @@ impl PeerSession {
             // Covers unicast, FlowSpec, EVPN, and BGP-LS — the AS_PATH-loop branch must
             // not silently drop withdrawals for any family, or stale non-unicast state
             // accumulates downstream until the next session reset / refresh.
-            self.treat_update_as_withdraw(&parsed, ImportRejectReason::AsPathLoop, None)
-                .await;
+            self.treat_update_as_withdraw(
+                &parsed,
+                ImportRejectReason::AsPathLoop,
+                None,
+                record_wire_history,
+            )
+            .await;
             return;
         }
         // Route reflector loop detection (RFC 4456 §8):
@@ -2207,6 +2263,7 @@ impl PeerSession {
                 &parsed,
                 ImportRejectReason::RrLoop,
                 Some(reason.as_str()),
+                record_wire_history,
             )
             .await;
             return;
@@ -3206,6 +3263,7 @@ impl PeerSession {
                 _ => {}
             }
         }
+        let original_unicast_withdrawals = withdrawn.len();
         // ADR-0073: tombstone any cached decision for a withdrawn prefix
         // as WITHDRAWN, so the explain surface distinguishes "seen then
         // withdrawn" from "never seen". Runs here — after the attribute
@@ -3504,17 +3562,21 @@ impl PeerSession {
                 &evpn_withdrawn,
             );
             if self
-                .deliver_routes_to_rib(RibUpdate::RoutesReceived {
-                    peer: self.peer_ip,
-                    session_id: self.session_identity.id,
-                    announced,
-                    withdrawn,
-                    flowspec_announced,
-                    flowspec_withdrawn,
-                    evpn_announced,
-                    evpn_withdrawn,
-                    validated_with: validation,
-                })
+                .deliver_wire_routes_to_rib(
+                    RibUpdate::RoutesReceived {
+                        peer: self.peer_ip,
+                        session_id: self.session_identity.id,
+                        announced,
+                        withdrawn,
+                        flowspec_announced,
+                        flowspec_withdrawn,
+                        evpn_announced,
+                        evpn_withdrawn,
+                        validated_with: validation,
+                    },
+                    original_unicast_withdrawals,
+                    record_wire_history,
+                )
                 .await
                 .is_err()
             {

@@ -164,6 +164,9 @@ fn spawn_generation_rib(
                 RibUpdate::PrepareExportPolicyDestination { reply, .. } => {
                     let _ = reply.send(Ok(()));
                 }
+                RibUpdate::PublishDampeningOwners { reply, .. } => {
+                    let _ = reply.send(Ok(()));
+                }
                 RibUpdate::QueryPeerRetainedStale { reply, .. } => {
                     let _ = reply.send(0);
                 }
@@ -2327,6 +2330,129 @@ async fn owned_sighup_releases_candidate_owners_after_late_compensation() {
     assert_owned_sighup_lifetimes(true).await;
 }
 
+#[tokio::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "the controlled finalizer proof keeps snapshot, bridge and publication acknowledgements in explicit order"
+)]
+async fn sighup_outer_failure_never_publishes_and_lost_publication_fences() {
+    use crate::config::AcceptedConfigSnapshot;
+    use crate::reload::{
+        AcceptedBridgeReplacement, SighupAuthority, SighupCompletion, finalize_sighup_authority,
+    };
+    use rustbgpd_api::gnmi_dialout::{DialoutManager, GnmiService};
+    use rustbgpd_api::health_probe::DaemonGate;
+    use rustbgpd_api::peer_types::{
+        ConfiguredOwnerPublicationOperation, ConfiguredOwnerPublicationReceipt,
+    };
+    use rustbgpd_api::runtime_config_settlement::{
+        OwnedRuntimeConfigOutcome, RuntimeConfigFenceReason, RuntimeConfigOperationKind,
+        RuntimeConfigSettlementWatchdog,
+    };
+    use rustbgpd_api::server::{AccessMode, RuntimeConfigCoordinator};
+    use rustbgpd_transport::listener::ReloadDispatch;
+
+    for bridge_failure in [true, false] {
+        let fixture = RsFixture::new();
+        let accepted = Arc::new(AcceptedConfigSnapshot::load(&fixture.config_path, None).unwrap());
+        let authority = SighupAuthority {
+            runtime: accepted.config(),
+            desired: accepted,
+            dialout_targets: Vec::new(),
+            completion: SighupCompletion::Complete,
+        };
+        let (pm_tx, mut pm_rx) = mpsc::channel(1);
+        let (internal_tx, mut internal_rx) = mpsc::channel(1);
+        let (bridge_tx, mut bridge_rx) = mpsc::channel::<AcceptedBridgeReplacement>(1);
+        let publication = ConfiguredOwnerPublicationReceipt(7);
+        let acknowledgements = tokio::spawn(async move {
+            let Some(InternalCommand::ReplaceConfigSnapshot { ack: Some(ack), .. }) =
+                internal_rx.recv().await
+            else {
+                panic!("expected runtime snapshot adoption");
+            };
+            ack.send(()).unwrap();
+            let adopted = bridge_rx.recv().await.unwrap().into_adoption_reply();
+            assert!(
+                pm_rx.try_recv().is_err(),
+                "publication cannot precede bridge adoption"
+            );
+            if bridge_failure {
+                adopted
+                    .send(ReloadDispatch::NotAccepted("persister unavailable".into()))
+                    .unwrap();
+            } else {
+                adopted.send(ReloadDispatch::Replied(())).unwrap();
+                let Some(PeerManagerCommand::ConfiguredOwnerPublication { operation, reply }) =
+                    pm_rx.recv().await
+                else {
+                    panic!("expected final owner publication");
+                };
+                assert_eq!(
+                    operation,
+                    ConfiguredOwnerPublicationOperation::Publish(publication)
+                );
+                drop(reply);
+            }
+            pm_rx
+        });
+        let dialout = Arc::new(tokio::sync::Mutex::new(DialoutManager::new(
+            GnmiService::new(
+                65001,
+                "10.0.0.1".into(),
+                AccessMode::ReadWrite,
+                pm_tx.clone(),
+            ),
+            BgpMetrics::new(),
+        )));
+        let coordinator = RuntimeConfigCoordinator::new();
+        let (operation, guard) = RuntimeConfigSettlementWatchdog::new().register_owned(
+            RuntimeConfigOperationKind::Sighup,
+            coordinator.clone(),
+            coordinator.acquire().await.unwrap(),
+            DaemonGate::new(),
+            None,
+            None,
+            Arc::new(AtomicBool::new(true)),
+        );
+        let outcome = finalize_sighup_authority(
+            &operation,
+            &pm_tx,
+            publication,
+            authority,
+            &internal_tx,
+            &bridge_tx,
+            &dialout,
+        )
+        .await;
+        // This is a direct finalizer test; disarm the production watchdog
+        // before asserting its returned fencing decision.
+        assert!(operation.try_settle());
+        drop(guard);
+        let OwnedRuntimeConfigOutcome::Fenced { error, reason } = outcome else {
+            panic!("unacknowledged authority must fence");
+        };
+        assert_eq!(
+            reason,
+            if bridge_failure {
+                RuntimeConfigFenceReason::KnownDivergence
+            } else {
+                RuntimeConfigFenceReason::AcknowledgementLost
+            }
+        );
+        assert!(error.to_string().contains(if bridge_failure {
+            "config_persister"
+        } else {
+            "configured_owner_publication"
+        }));
+        let mut pm_rx = acknowledgements.await.unwrap();
+        assert!(
+            pm_rx.try_recv().is_err(),
+            "failed outer adoption must not publish; lost publication must not compensate"
+        );
+    }
+}
+
 // This proves generation/accepted-authority and manager-installed ownership.
 // Fake session/RIB acknowledgements do not inventory real transport/RIB caches
 // or measure peak allocation at an IRR-scale shape.
@@ -2343,6 +2469,10 @@ async fn assert_owned_sighup_lifetimes(compensate: bool) {
     };
     use rustbgpd_api::gnmi_dialout::{DialoutManager, GnmiService};
     use rustbgpd_api::health_probe::DaemonGate;
+    use rustbgpd_api::owner_publication::{
+        OWNER_PUBLICATION_TIMEOUT, dispatch_configured_owner_publication,
+    };
+    use rustbgpd_api::peer_types::ConfiguredOwnerPublicationOperation;
     use rustbgpd_api::runtime_config_settlement::{
         OwnedRuntimeConfigOutcome, OwnedRuntimeConfigRequestContext, RuntimeConfigOperationKind,
         RuntimeConfigSettlementWatchdog,
@@ -2450,6 +2580,15 @@ async fn assert_owned_sighup_lifetimes(compensate: bool) {
             move |operation| async move {
                 // main retains the accepted baseline throughout its owned body.
                 let _prior_accepted = operation_accepted.borrow().clone();
+                let publication = dispatch_configured_owner_publication(
+                    &operation_pm,
+                    OWNER_PUBLICATION_TIMEOUT,
+                    Some(operation.pre_effect_deadline()),
+                    ConfiguredOwnerPublicationOperation::Begin,
+                )
+                .await
+                .begin_result()
+                .unwrap();
                 match reload_config_with_tcp_ao(
                     plan,
                     None,
@@ -2465,6 +2604,15 @@ async fn assert_owned_sighup_lifetimes(compensate: bool) {
                 .await
                 {
                     SighupReloadOutcome::CleanNoEffect(error) => {
+                        dispatch_configured_owner_publication(
+                            &operation_pm,
+                            OWNER_PUBLICATION_TIMEOUT,
+                            None,
+                            ConfiguredOwnerPublicationOperation::Discard(publication),
+                        )
+                        .await
+                        .settlement_result()
+                        .unwrap();
                         OwnedRuntimeConfigOutcome::CleanNoEffect(Err(error))
                     }
                     SighupReloadOutcome::RecoveryFenced { error, reason } => {
@@ -2473,6 +2621,8 @@ async fn assert_owned_sighup_lifetimes(compensate: bool) {
                     SighupReloadOutcome::Acknowledged(authority) => {
                         finalize_sighup_authority(
                             &operation,
+                            &operation_pm,
+                            publication,
                             authority,
                             &operation_internal,
                             &operation_bridge,
@@ -4709,6 +4859,7 @@ async fn failing_conditional_reconcile_backs_off_without_stalling_the_loop() {
     let rib = tokio::spawn({
         let installs = Arc::clone(&installs);
         async move {
+            acknowledge_initial_dampening_owners(&mut rib_rx).await;
             // Unresponsive: every install is held, never acknowledged.
             let mut held = Vec::new();
             while let Some(update) = rib_rx.recv().await {

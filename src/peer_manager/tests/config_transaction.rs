@@ -870,8 +870,14 @@ export_policy_chain = ["dataset-export"]
     );
     let responder = tokio::spawn(async move {
         for _ in 0..5 {
-            let Some(RibUpdate::QueryUpdateGroupSnapshot { reply }) = rib_rx.recv().await else {
-                panic!("plan snapshot query missing");
+            let reply = loop {
+                match rib_rx.recv().await {
+                    Some(RibUpdate::PublishDampeningOwners { reply, .. }) => {
+                        reply.send(Ok(())).unwrap();
+                    }
+                    Some(RibUpdate::QueryUpdateGroupSnapshot { reply }) => break reply,
+                    _ => panic!("plan snapshot query missing"),
+                }
             };
             reply
                 .send(rustbgpd_rib::UpdateGroupSnapshot {
@@ -1070,7 +1076,7 @@ export_policy_chain = ["dataset-export"]
 async fn transaction_fib_stage_overlays_only_tables_and_posture_and_restores_raw_prior() {
     let (tx, rx) = mpsc::channel(8);
     let (internal_tx, internal_rx) = mpsc::channel(1);
-    let (rib_tx, _rib_rx) = mpsc::channel(8);
+    let (rib_tx, mut rib_rx) = mpsc::channel(8);
     let mut live = make_dynamic_manager_config();
     live.policy.rpol_files = vec!["live-source.rpol".to_string()];
     live.fib_tables = vec![crate::test_support::basic_fib_table("edge", 1000)];
@@ -1096,6 +1102,8 @@ async fn transaction_fib_stage_overlays_only_tables_and_posture_and_restores_raw
         live.clone(),
     );
     let handle = tokio::spawn(manager.run());
+    acknowledge_initial_dampening_owners(&mut rib_rx).await;
+
     let (stage_tx, stage_rx) = oneshot::channel();
     internal_tx
         .send(InternalCommand::StageTransactionConfig {
@@ -1147,7 +1155,7 @@ async fn transaction_fib_stage_overlays_only_tables_and_posture_and_restores_raw
 async fn stage_config_snapshot_rebuilds_matcher_and_returns_previous_toml() {
     let (tx, rx) = mpsc::channel(16);
     let (internal_tx, internal_rx) = mpsc::channel(1);
-    let (rib_tx, _rib_rx) = mpsc::channel(64);
+    let (rib_tx, mut rib_rx) = mpsc::channel(64);
     let config = make_dynamic_manager_config();
     let mut replacement = config.clone();
     replacement.dynamic_neighbors = vec![crate::config::DynamicNeighborConfig {
@@ -1172,6 +1180,7 @@ async fn stage_config_snapshot_rebuilds_matcher_and_returns_previous_toml() {
         config,
     );
     let handle = tokio::spawn(manager.run());
+    acknowledge_initial_dampening_owners(&mut rib_rx).await;
 
     let (reply_tx, reply_rx) = oneshot::channel();
     internal_tx
@@ -1336,7 +1345,7 @@ async fn staged_snapshot_fences_dynamic_accept_and_restore_reaps_candidate_dynam
 async fn runtime_config_snapshot_returns_current_staged_config() {
     let (tx, rx) = mpsc::channel(16);
     let (internal_tx, internal_rx) = mpsc::channel(1);
-    let (rib_tx, _rib_rx) = mpsc::channel(64);
+    let (rib_tx, mut rib_rx) = mpsc::channel(64);
     let config = make_dynamic_manager_config();
     let mut replacement = config.clone();
     replacement.dynamic_neighbors = vec![crate::config::DynamicNeighborConfig {
@@ -1361,6 +1370,7 @@ async fn runtime_config_snapshot_returns_current_staged_config() {
         config,
     );
     let handle = tokio::spawn(manager.run());
+    acknowledge_initial_dampening_owners(&mut rib_rx).await;
 
     let (stage_tx, stage_rx) = oneshot::channel();
     internal_tx
@@ -1402,7 +1412,7 @@ async fn policy_route_series_retire_only_when_a_staged_snapshot_commits() {
 
     let (tx, rx) = mpsc::channel(16);
     let (internal_tx, internal_rx) = mpsc::channel(2);
-    let (rib_tx, _rib_rx) = mpsc::channel(16);
+    let (rib_tx, mut rib_rx) = mpsc::channel(16);
     let config = make_dynamic_manager_config();
     let candidate = config.clone();
     let metrics = BgpMetrics::new();
@@ -1430,6 +1440,7 @@ async fn policy_route_series_retire_only_when_a_staged_snapshot_commits() {
         Some(named_deny_policy_chain(&[Some("staged-old")]));
     metrics.record_policy_routes("192.0.2.142", "staged-old", "import", "deny");
     let handle = tokio::spawn(manager.run());
+    acknowledge_initial_dampening_owners(&mut rib_rx).await;
 
     let (stage_tx, stage_rx) = oneshot::channel();
     internal_tx

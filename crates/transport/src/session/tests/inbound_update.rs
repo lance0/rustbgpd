@@ -1,5 +1,180 @@
 use super::*;
 
+fn wire_history_actor() -> (
+    mpsc::Sender<RibUpdate>,
+    mpsc::Sender<RibUpdate>,
+    tokio::task::JoinHandle<()>,
+) {
+    let (tx, rx) = mpsc::channel(4);
+    let (query_tx, query_rx) = mpsc::channel(4);
+    let (notices, _notice_rx) = mpsc::unbounded_channel();
+    let mut manager = rustbgpd_rib::RibManager::new(rx, query_rx, None, None, BgpMetrics::new());
+    manager
+        .install_dampening_history_for_test(
+            rustbgpd_rib::dampening::DampeningParameters::new(900, 750, 6000, 3600).unwrap(),
+            rustbgpd_rib::dampening::DampeningHistoryLimits {
+                owners: 2,
+                sources: 2,
+                history_keys: 4,
+                source_history_keys: 4,
+            },
+            notices,
+        )
+        .unwrap();
+    (tx, query_tx, tokio::spawn(manager.run()))
+}
+
+async fn publish_wire_history_owner(
+    tx: &mpsc::Sender<RibUpdate>,
+    owner: Arc<rustbgpd_rib::dampening::DampeningOwner>,
+) {
+    let (reply, response) = oneshot::channel();
+    tx.send(RibUpdate::PublishDampeningOwners {
+        publication: 1,
+        owners: vec![owner],
+        reply,
+    })
+    .await
+    .unwrap();
+    response.await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn tentative_update_acceptance_is_not_upgraded_by_delayed_processing() {
+    use rustbgpd_rib::dampening::{DampeningAdmission, DampeningOwner};
+
+    let (mut session, mut rib_rx) = make_test_session_with_rib(65001, 65002);
+    session.negotiated = Some(Arc::new(negotiated_session(65002, false)));
+    let owner = Arc::new(DampeningOwner::new(std::num::NonZeroU64::new(1).unwrap()));
+    session.config.dampening_admission = Some(DampeningAdmission::new(Arc::clone(&owner)));
+    let (history_tx, _query_tx, history_task) = wire_history_actor();
+    let prefix = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24);
+
+    // Acceptance captures the tentative authority even if processing does not
+    // get polled until after the real RIB actor acknowledges publication.
+    let accepted = session.process_update(ipv4_announce(prefix, 0, false));
+    assert!(!owner.records_wire_history());
+    publish_wire_history_owner(&history_tx, Arc::clone(&owner)).await;
+    assert!(owner.records_wire_history());
+    accepted.await;
+    assert!(matches!(
+        rib_rx.recv().await.unwrap(),
+        RibUpdate::RoutesReceived { announced, .. } if announced.len() == 1
+    ));
+
+    session
+        .process_update(ipv4_withdraw(prefix, 0, false))
+        .await;
+    let RibUpdate::WireRoutesReceived(batch) = rib_rx.recv().await.unwrap() else {
+        panic!("a fresh UPDATE must capture the now-committed history consumer")
+    };
+    assert_eq!(batch.original_unicast_withdrawals, 1);
+    assert_eq!(batch.withdrawn, vec![(Prefix::V4(prefix), 0)]);
+    history_task.abort();
+    assert!(history_task.await.unwrap_err().is_cancelled());
+}
+
+#[tokio::test]
+async fn same_owner_tentative_role_input_stays_ineligible_after_publication() {
+    use rustbgpd_rib::dampening::{DampeningAdmission, DampeningOwner};
+
+    let (mut session, mut rib_rx) = make_test_session_with_rib(65001, 65002);
+    session.negotiated = Some(Arc::new(negotiated_session(65002, false)));
+    let owner = Arc::new(DampeningOwner::new(std::num::NonZeroU64::new(1).unwrap()));
+    let original = DampeningAdmission::new(Arc::clone(&owner));
+    let candidate = original.tentative_publication();
+    session.config.dampening_admission = Some(candidate.clone());
+    let (history_tx, _query_tx, history_task) = wire_history_actor();
+    publish_wire_history_owner(&history_tx, Arc::clone(&owner)).await;
+    assert!(original.is_published());
+    assert!(owner.records_wire_history());
+    assert!(!candidate.is_published());
+    let prefix = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24);
+
+    // The owner is already committed, but this replacement session belongs to
+    // the pending role change. Publication before first poll cannot upgrade it.
+    let accepted = session.process_update(ipv4_announce(prefix, 0, false));
+    candidate.acknowledge_publication();
+    accepted.await;
+    assert!(matches!(
+        rib_rx.recv().await.unwrap(),
+        RibUpdate::RoutesReceived { announced, .. } if announced.len() == 1
+    ));
+    session
+        .process_update(ipv4_withdraw(prefix, 0, false))
+        .await;
+    assert!(matches!(
+        rib_rx.recv().await.unwrap(),
+        RibUpdate::WireRoutesReceived(_)
+    ));
+
+    // A rejected replacement is never authorized, even while its owner and
+    // another session under that owner remain committed.
+    let rejected = original.tentative_publication();
+    session.config.dampening_admission = Some(rejected.clone());
+    session
+        .process_update(ipv4_announce(prefix, 0, false))
+        .await;
+    assert!(matches!(
+        rib_rx.recv().await.unwrap(),
+        RibUpdate::RoutesReceived { .. }
+    ));
+    assert!(!rejected.is_published());
+    history_task.abort();
+    assert!(history_task.await.unwrap_err().is_cancelled());
+}
+
+#[tokio::test]
+async fn wire_history_counts_explicit_withdrawals_before_synthetic_withdrawals() {
+    use rustbgpd_rib::dampening::{DampeningAdmission, DampeningOwner};
+
+    for malformed in [true, false] {
+        let (mut session, mut rib_rx) = make_test_session_with_rib(65001, 65002);
+        session.negotiated = Some(Arc::new(negotiated_session(65002, false)));
+        let owner = Arc::new(DampeningOwner::new(std::num::NonZeroU64::new(1).unwrap()));
+        session.config.dampening_admission = Some(DampeningAdmission::new(Arc::clone(&owner)));
+        let (history_tx, _query_tx, history_task) = wire_history_actor();
+        publish_wire_history_owner(&history_tx, owner).await;
+        let explicit = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24);
+        let synthetic = Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 0), 24);
+        for prefix in [explicit, synthetic] {
+            session
+                .process_update(ipv4_announce(prefix, 0, false))
+                .await;
+            assert!(matches!(
+                rib_rx.recv().await.unwrap(),
+                RibUpdate::WireRoutesReceived(_)
+            ));
+        }
+
+        let mut attrs = rfc7606_attr_bytes(&[]);
+        if malformed {
+            attrs[3] = 3; // Invalid ORIGIN value: RFC 7606 treat-as-withdraw.
+        } else {
+            session.install_import_policy(Some(PolicyChain::new(vec![Policy {
+                entries: vec![],
+                default_action: PolicyAction::Deny,
+            }])));
+        }
+        let mut update = rfc7606_update(attrs, &[synthetic]);
+        let mut withdrawals = Vec::new();
+        rustbgpd_wire::nlri::encode_nlri(&[explicit], &mut withdrawals);
+        update.withdrawn_routes = Bytes::from(withdrawals);
+        session.process_update(update).await;
+        let RibUpdate::WireRoutesReceived(batch) = rib_rx.recv().await.unwrap() else {
+            panic!("expected original-wire classification before synthetic withdrawal")
+        };
+        assert!(batch.announced.is_empty());
+        assert_eq!(batch.original_unicast_withdrawals, 1);
+        assert_eq!(
+            batch.withdrawn,
+            vec![(Prefix::V4(explicit), 0), (Prefix::V4(synthetic), 0)]
+        );
+        history_task.abort();
+        assert!(history_task.await.unwrap_err().is_cancelled());
+    }
+}
+
 /// RFC 4760 §4 / RFC 8950 §4: Extended Next Hop governs only the next-hop
 /// encoding, never whether IPv4 unicast may use the MP attributes. A route
 /// announced in the classic body and withdrawn by an IPv4 `MP_UNREACH_NLRI`

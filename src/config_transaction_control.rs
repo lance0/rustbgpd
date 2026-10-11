@@ -18,7 +18,11 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::sync::{Mutex, mpsc, oneshot, watch};
 
 use rustbgpd_api::health_probe::DaemonGate;
+use rustbgpd_api::owner_publication::{
+    OWNER_PUBLICATION_TIMEOUT, dispatch_configured_owner_publication,
+};
 use rustbgpd_api::peer_types::ConfigPersistCommitOutcome;
+use rustbgpd_api::peer_types::ConfiguredOwnerPublicationOperation;
 #[cfg(test)]
 use rustbgpd_api::peer_types::ResolvedPeerPolicy;
 use rustbgpd_api::peer_types::{
@@ -2681,7 +2685,20 @@ async fn apply_config_transaction_locked_with_preloaded(
     let update_group_impact = rustbgpd_api::update_group_impact_to_proto(plan.update_group_impact);
     let authoritative_candidate =
         (family == ApplyFamily::LivePolicyImpact).then(|| Box::new(candidate.clone()));
-    let mut response = commit_apply_family(
+    progress.begin_mutation();
+    let publication = dispatch_configured_owner_publication(
+        &deps.peer_mgr_tx,
+        OWNER_PUBLICATION_TIMEOUT,
+        progress.pre_effect_deadline(),
+        ConfiguredOwnerPublicationOperation::Begin,
+    )
+    .await
+    .begin_result()
+    .map_err(|(error, fence_reason)| ApplyFailure {
+        error: ConfigTransactionApplyError::Internal(error.to_string()),
+        fence_reason,
+    })?;
+    let committed = commit_apply_family(
         deps,
         peer_mgr_internal_tx,
         &config_tx,
@@ -2693,7 +2710,29 @@ async fn apply_config_transaction_locked_with_preloaded(
         update_group_impact,
         progress,
     )
-    .await?;
+    .await;
+    let mut response = match committed {
+        Ok(response) => response,
+        Err(error) => {
+            if error.fence_reason.is_none() {
+                dispatch_configured_owner_publication(
+                    &deps.peer_mgr_tx,
+                    OWNER_PUBLICATION_TIMEOUT,
+                    None,
+                    ConfiguredOwnerPublicationOperation::Discard(publication),
+                )
+                .await
+                .settlement_result()
+                .map_err(|(error, reason)| {
+                    ApplyFailure::fenced(
+                        ConfigTransactionApplyError::Internal(error.to_string()),
+                        reason,
+                    )
+                })?;
+            }
+            return Err(error);
+        }
+    };
     if family == ApplyFamily::LivePolicyImpact {
         // The candidate is already durable and live here: a re-plan failure
         // must not read as a clean no-effect error, which would drop a
@@ -2715,6 +2754,24 @@ async fn apply_config_transaction_locked_with_preloaded(
         })?;
         response.runtime_snapshot_token = authoritative.plan.runtime_snapshot_token;
     }
+    dispatch_configured_owner_publication(
+        &deps.peer_mgr_tx,
+        OWNER_PUBLICATION_TIMEOUT,
+        None,
+        if response.status == i32::from(proto::ConfigTransactionPlanStatus::Committable) {
+            ConfiguredOwnerPublicationOperation::Publish(publication)
+        } else {
+            ConfiguredOwnerPublicationOperation::Discard(publication)
+        },
+    )
+    .await
+    .settlement_result()
+    .map_err(|(error, reason)| {
+        ApplyFailure::fenced(
+            ConfigTransactionApplyError::Internal(error.to_string()),
+            reason,
+        )
+    })?;
     Ok(response)
 }
 

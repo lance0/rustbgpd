@@ -73,7 +73,7 @@ async fn forwarding_state_static_dynamic_and_managed_construction_agree() {
 async fn forwarding_state_transaction_stage_commit_rollback_and_reload_publication() {
     let (tx, rx) = mpsc::channel(8);
     let (internal_tx, internal_rx) = mpsc::channel(8);
-    let (rib_tx, _rib_rx) = mpsc::channel(8);
+    let (rib_tx, mut rib_rx) = mpsc::channel(8);
     let base = make_dynamic_manager_config();
     let mut candidate = base.clone();
     let mut table = crate::test_support::basic_fib_table("v4", 1001);
@@ -94,6 +94,8 @@ async fn forwarding_state_transaction_stage_commit_rollback_and_reload_publicati
     );
     let roles = mgr.local_forwarding_state.clone();
     let task = tokio::spawn(mgr.run());
+    acknowledge_initial_dampening_owners(&mut rib_rx).await;
+
     for (config, before, after) in [
         (candidate, vec![], vec![(Afi::Ipv4, Safi::Unicast)]),
         (base.clone(), vec![(Afi::Ipv4, Safi::Unicast)], vec![]),

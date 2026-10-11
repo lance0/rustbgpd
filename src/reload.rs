@@ -9,11 +9,17 @@ use std::net::IpAddr;
 use std::sync::Arc;
 use std::time::Instant;
 
-use rustbgpd_api::peer_types::ConfigPersistCommitOutcome;
+use rustbgpd_api::owner_publication::{
+    OWNER_PUBLICATION_TIMEOUT, dispatch_configured_owner_publication,
+};
 use rustbgpd_api::peer_types::{
     CatalogMutationError, ConfigEvent, ConfigPersistAck, ConfigPersistError, FibTableSnapshot,
     OwnedCatalogMutation, OwnedCatalogMutationOutcome, OwnedHotUpdatePeerOutcome,
     PeerManagerCommand, PeerManagerNeighborConfig, PeerReconcileAuthority, PeerReconcileEffect,
+};
+use rustbgpd_api::peer_types::{
+    ConfigPersistCommitOutcome, ConfiguredOwnerPublicationOperation,
+    ConfiguredOwnerPublicationReceipt,
 };
 use rustbgpd_policy::PolicyChain;
 use tokio::sync::{mpsc, oneshot, watch};
@@ -1477,6 +1483,13 @@ pub(crate) struct AcceptedBridgeReplacement {
     adopted: oneshot::Sender<ReloadDispatch<(), String>>,
 }
 
+#[cfg(test)]
+impl AcceptedBridgeReplacement {
+    pub(crate) fn into_adoption_reply(self) -> oneshot::Sender<ReloadDispatch<(), String>> {
+        self.adopted
+    }
+}
+
 #[expect(
     clippy::too_many_lines,
     reason = "single serialized bridge loop makes authority adoption ordering explicit"
@@ -1677,6 +1690,8 @@ pub(crate) async fn run_config_bridge(
 /// assignment and the bridge's accepted-snapshot adoption acknowledgements.
 pub(crate) async fn finalize_sighup_authority(
     operation: &OwnedRuntimeConfigOperation,
+    peer_mgr_tx: &mpsc::Sender<PeerManagerCommand>,
+    publication: ConfiguredOwnerPublicationReceipt,
     authority: SighupAuthority,
     peer_mgr_internal_tx: &mpsc::Sender<InternalCommand>,
     bridge_replace_tx: &mpsc::Sender<AcceptedBridgeReplacement>,
@@ -1780,6 +1795,21 @@ pub(crate) async fn finalize_sighup_authority(
         .lock()
         .await
         .apply(&authority.dialout_targets);
+    if let Err((error, reason)) = dispatch_configured_owner_publication(
+        peer_mgr_tx,
+        OWNER_PUBLICATION_TIMEOUT,
+        None,
+        ConfiguredOwnerPublicationOperation::Publish(publication),
+    )
+    .await
+    .settlement_result()
+    {
+        return fenced(
+            "configured_owner_publication",
+            ReloadStepError::Rejected(error.to_string()),
+            reason,
+        );
+    }
     OwnedRuntimeConfigOutcome::AcknowledgedAuthority(authority)
 }
 
@@ -4648,7 +4678,7 @@ local_vtep_ip = "10.0.0.1"
 
         let (tx, rx) = mpsc::channel(16);
         let (internal_tx, internal_rx) = mpsc::channel(1);
-        let (rib_tx, _rib_rx) = mpsc::channel(64);
+        let (rib_tx, mut rib_rx) = mpsc::channel(64);
         let manager = PeerManager::new_with_config(
             rx,
             internal_rx,
@@ -4663,6 +4693,12 @@ local_vtep_ip = "10.0.0.1"
             initial,
         );
         let handle = tokio::spawn(manager.run());
+        let Some(rustbgpd_rib::RibUpdate::PublishDampeningOwners { reply, .. }) =
+            rib_rx.recv().await
+        else {
+            panic!("expected initial configured-owner publication");
+        };
+        reply.send(Ok(())).unwrap();
 
         let (stage_tx, stage_rx) = oneshot::channel();
         internal_tx

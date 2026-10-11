@@ -193,7 +193,30 @@ fn owned_transaction_phase_boundaries_are_closed() {
             .unwrap()
             < apply.find("commit_apply_family(").unwrap()
     );
-    assert!(!apply.contains("progress.begin_mutation()"));
+    assert!(
+        apply.find("plan_loaded_candidate(").unwrap()
+            < apply.find("progress.begin_mutation()").unwrap()
+    );
+    assert!(
+        apply.find("progress.begin_mutation()").unwrap()
+            < apply
+                .find("ConfiguredOwnerPublicationOperation::Begin")
+                .unwrap()
+    );
+    assert!(
+        apply
+            .find("ConfiguredOwnerPublicationOperation::Begin")
+            .unwrap()
+            < apply.find("commit_apply_family(").unwrap()
+    );
+    assert!(
+        apply
+            .find("response.runtime_snapshot_token = authoritative.plan.runtime_snapshot_token")
+            .unwrap()
+            < apply
+                .find("ConfiguredOwnerPublicationOperation::Publish(publication)")
+                .unwrap()
+    );
 
     let dispatch = body(
         source,
@@ -1544,13 +1567,48 @@ fn attach_committed_candidate(
     plan
 }
 
+/// Protocol state for caller fixtures: an admitted publication must settle
+/// before another mutation can begin, and finalization must use its receipt.
+#[derive(Default)]
+struct FakeConfiguredOwners {
+    next: u64,
+    pending: Option<rustbgpd_api::peer_types::ConfiguredOwnerPublicationReceipt>,
+}
+
+impl FakeConfiguredOwners {
+    fn apply(
+        &mut self,
+        operation: ConfiguredOwnerPublicationOperation,
+    ) -> rustbgpd_api::peer_types::ConfiguredOwnerPublicationReceipt {
+        match operation {
+            ConfiguredOwnerPublicationOperation::Begin => {
+                assert!(self.pending.is_none(), "prior publication was not settled");
+                self.next += 1;
+                let receipt =
+                    rustbgpd_api::peer_types::ConfiguredOwnerPublicationReceipt(self.next);
+                self.pending = Some(receipt);
+                receipt
+            }
+            ConfiguredOwnerPublicationOperation::Publish(receipt)
+            | ConfiguredOwnerPublicationOperation::Discard(receipt) => {
+                assert_eq!(self.pending.take(), Some(receipt));
+                receipt
+            }
+        }
+    }
+}
+
 async fn fake_peer_manager(
     mut rx: mpsc::Receiver<PeerManagerCommand>,
     plan: RuntimeConfigTransactionPlan,
     staged: Arc<Mutex<Vec<FibTableSnapshot>>>,
 ) {
+    let mut owners = FakeConfiguredOwners::default();
     while let Some(cmd) = rx.recv().await {
         match cmd {
+            PeerManagerCommand::ConfiguredOwnerPublication { operation, reply } => {
+                let _ = reply.send(Ok(owners.apply(operation)));
+            }
             PeerManagerCommand::PlanConfigTransaction {
                 candidate_toml,
                 reply,
@@ -1645,6 +1703,7 @@ struct TransactionFaultSchedule {
     // An applied effect stays outstanding until its restoration is acknowledged.
     // Observing a restored fake alone is not proof that the controller knows it.
     outstanding: std::sync::atomic::AtomicU8,
+    publication_outstanding: AtomicBool,
 }
 
 impl TransactionFaultSchedule {
@@ -1965,8 +2024,12 @@ async fn fake_snapshot_peer_manager_recording_bounces_and_purges(
     purge_calls: Arc<Mutex<Vec<Vec<DynamicRangeTarget>>>>,
     reshape_calls: Arc<Mutex<Vec<Vec<PeerManagerNeighborConfig>>>>,
 ) {
+    let mut owners = FakeConfiguredOwners::default();
     while let Some(cmd) = rx.recv().await {
         match cmd {
+            PeerManagerCommand::ConfiguredOwnerPublication { operation, reply } => {
+                let _ = reply.send(Ok(owners.apply(operation)));
+            }
             PeerManagerCommand::PlanConfigTransaction {
                 candidate_toml,
                 reply,
@@ -2090,8 +2153,12 @@ async fn fake_snapshot_peer_manager_with_plans(
     snapshot_toml: Arc<Mutex<String>>,
     peers: Arc<Mutex<Vec<PeerManagerNeighborConfig>>>,
 ) {
+    let mut owners = FakeConfiguredOwners::default();
     while let Some(cmd) = rx.recv().await {
         match cmd {
+            PeerManagerCommand::ConfiguredOwnerPublication { operation, reply } => {
+                let _ = reply.send(Ok(owners.apply(operation)));
+            }
             PeerManagerCommand::PlanConfigTransaction {
                 candidate_toml,
                 reply,
@@ -2397,8 +2464,12 @@ async fn fake_live_policy_peer_manager(
     dynamic_calls: Arc<Mutex<Vec<Vec<DynamicRangeTarget>>>>,
 ) {
     let mut plan_calls = 0usize;
+    let mut owners = FakeConfiguredOwners::default();
     while let Some(cmd) = rx.recv().await {
         match cmd {
+            PeerManagerCommand::ConfiguredOwnerPublication { operation, reply } => {
+                let _ = reply.send(Ok(owners.apply(operation)));
+            }
             PeerManagerCommand::PlanConfigTransaction {
                 candidate_toml,
                 expected_runtime_snapshot_token,
@@ -3445,8 +3516,12 @@ async fn fake_snapshot_peer_manager_dropping_stage_commit(
     plan: RuntimeConfigTransactionPlan,
     snapshot_toml: Arc<Mutex<String>>,
 ) {
+    let mut owners = FakeConfiguredOwners::default();
     while let Some(cmd) = rx.recv().await {
         match cmd {
+            PeerManagerCommand::ConfiguredOwnerPublication { operation, reply } => {
+                let _ = reply.send(Ok(owners.apply(operation)));
+            }
             PeerManagerCommand::PlanConfigTransaction {
                 candidate_toml,
                 reply,
@@ -4180,8 +4255,12 @@ families = ["ipv4_unicast"]
     let (peer_tx, mut peer_rx) = mpsc::channel(16);
     let runtime_toml = previous_toml.clone();
     tokio::spawn(async move {
+        let mut owners = FakeConfiguredOwners::default();
         while let Some(command) = peer_rx.recv().await {
             match command {
+                PeerManagerCommand::ConfiguredOwnerPublication { operation, reply } => {
+                    let _ = reply.send(Ok(owners.apply(operation)));
+                }
                 PeerManagerCommand::RuntimeConfigSnapshot { reply } => {
                     let _ = reply.send(Ok(rustbgpd_api::peer_types::RuntimeConfigSnapshotReply {
                         toml: runtime_toml.clone(),
@@ -7462,8 +7541,12 @@ async fn fake_peer_manager_parking_reshape(
 ) {
     let mut parked = Some(parked);
     let mut held = Vec::new();
+    let mut owners = FakeConfiguredOwners::default();
     while let Some(cmd) = rx.recv().await {
         match cmd {
+            PeerManagerCommand::ConfiguredOwnerPublication { operation, reply } => {
+                let _ = reply.send(Ok(owners.apply(operation)));
+            }
             PeerManagerCommand::PlanConfigTransaction {
                 candidate_toml,
                 reply,
@@ -11619,8 +11702,14 @@ async fn enumerated_live_policy_peer(
     schedule: Arc<TransactionFaultSchedule>,
 ) {
     let mut calls = 0;
+    let mut owners = FakeConfiguredOwners::default();
     while let Some(command) = rx.recv().await {
         let name = match &command {
+            PeerManagerCommand::ConfiguredOwnerPublication { operation, .. } => match operation {
+                ConfiguredOwnerPublicationOperation::Begin => "begin configured owners",
+                ConfiguredOwnerPublicationOperation::Publish(_) => "publish configured owners",
+                ConfiguredOwnerPublicationOperation::Discard(_) => "discard configured owners",
+            },
             PeerManagerCommand::RuntimeConfigSnapshot { .. } => "snapshot",
             PeerManagerCommand::PlanConfigTransaction { .. } => "plan",
             PeerManagerCommand::ApplyPolicyImpactSnapshot { .. } => "apply policies",
@@ -11634,6 +11723,21 @@ async fn enumerated_live_policy_peer(
             rx.close();
         }
         match command {
+            PeerManagerCommand::ConfiguredOwnerPublication { operation, reply } => {
+                let receipt = owners.apply(operation);
+                if operation == ConfiguredOwnerPublicationOperation::Begin {
+                    schedule
+                        .publication_outstanding
+                        .store(true, Ordering::SeqCst);
+                }
+                if transaction_test_reply(reply, Ok(receipt), fault).await
+                    && operation != ConfiguredOwnerPublicationOperation::Begin
+                {
+                    schedule
+                        .publication_outstanding
+                        .store(false, Ordering::SeqCst);
+                }
+            }
             PeerManagerCommand::RuntimeConfigSnapshot { reply } => {
                 let value = rustbgpd_api::peer_types::RuntimeConfigSnapshotReply {
                     toml: snapshot.lock().await.clone(),
@@ -11810,7 +11914,8 @@ async fn run_confirmed_live_policy_fault_child(root: &Path) {
     })
     .await
     .expect("owned apply must settle or actually fence within its test budget");
-    let outstanding = schedule.outstanding.load(Ordering::SeqCst);
+    let outstanding = schedule.outstanding.load(Ordering::SeqCst)
+        | (u8::from(schedule.publication_outstanding.load(Ordering::SeqCst)) << 3);
     let fence = watchdog.owner_fence_reason();
     assert_eq!(
         live.lock().await.len(),

@@ -11,9 +11,10 @@ use tonic::{Request, Response, Status};
 
 use crate::actor_read::{peer_manager_operator_read, peer_manager_read, rib_summary_read};
 use crate::health_probe::DaemonGate;
+use crate::owner_publication::dispatch_configured_owner_publication;
 use crate::peer_types::{
-    ConfigEvent, DynamicRangeError, EnqueuedOperatorQuery, NeighborCreateAddPath,
-    OutboundRefreshError, OwnedNeighborMutation, OwnedNeighborMutationError,
+    ConfigEvent, ConfiguredOwnerPublicationOperation, DynamicRangeError, EnqueuedOperatorQuery,
+    NeighborCreateAddPath, OutboundRefreshError, OwnedNeighborMutation, OwnedNeighborMutationError,
     OwnedNeighborMutationOutcome, PeerInfo, PeerKey, PeerLifecycleError, PeerManagerCommand,
     PeerManagerOperatorQuery, PresenceAwareNeighborCreate, Rfc8212PolicyStatus,
 };
@@ -310,7 +311,8 @@ async fn dispatch_owned_neighbor_mutation(
 
 #[expect(
     clippy::too_many_arguments,
-    reason = "the closed owner body lists each retained mutation and settlement dependency explicitly"
+    clippy::too_many_lines,
+    reason = "the closed owner body keeps persistence, mutation, publication and compensation under one retained owner"
 )]
 async fn owned_neighbor_mutation_body<B>(
     owned: Option<OwnedRuntimeConfigOperation>,
@@ -351,10 +353,29 @@ where
         None
     };
 
-    let outcome =
-        dispatch_owned_neighbor_mutation(peer_mgr_tx, actor_timeout, pre_effect_deadline, mutation)
-            .await;
-    match outcome {
+    let receipt = match dispatch_configured_owner_publication(
+        &peer_mgr_tx,
+        actor_timeout,
+        pre_effect_deadline,
+        ConfiguredOwnerPublicationOperation::Begin,
+    )
+    .await
+    .begin_result()
+    {
+        Ok(receipt) => receipt,
+        Err((error, None)) => return OwnedRuntimeConfigOutcome::CleanNoEffect(Err(error)),
+        Err((error, Some(reason))) => {
+            return OwnedRuntimeConfigOutcome::Fenced { error, reason };
+        }
+    };
+    let outcome = dispatch_owned_neighbor_mutation(
+        peer_mgr_tx.clone(),
+        actor_timeout,
+        pre_effect_deadline,
+        mutation,
+    )
+    .await;
+    let outcome = match outcome {
         OwnedNeighborDispatch::NotAccepted(error) => {
             drop(staged);
             OwnedRuntimeConfigOutcome::CleanNoEffect(Err(error))
@@ -380,23 +401,37 @@ where
             reason: crate::runtime_config_settlement::RuntimeConfigFenceReason::KnownDivergence,
         },
         OwnedNeighborDispatch::Replied(OwnedNeighborMutationOutcome::Success) => {
-            let Some(staged) = staged else {
-                return OwnedRuntimeConfigOutcome::PublishedDurable(());
-            };
-            if let Some(operation) = &owned {
-                operation.advance_phase(RuntimeConfigSettlementPhase::SettlingRollback);
-            }
-            match staged.commit_typed().await {
-                Ok(()) => OwnedRuntimeConfigOutcome::PublishedDurable(()),
-                Err(error) => {
-                    let reason = error.fence_reason();
-                    OwnedRuntimeConfigOutcome::Fenced {
+            if let Some(staged) = staged {
+                if let Some(operation) = &owned {
+                    operation.advance_phase(RuntimeConfigSettlementPhase::SettlingRollback);
+                }
+                if let Err(error) = staged.commit_typed().await {
+                    return OwnedRuntimeConfigOutcome::Fenced {
+                        reason: error.fence_reason(),
                         error: error.into_status(),
-                        reason,
-                    }
+                    };
                 }
             }
+            OwnedRuntimeConfigOutcome::PublishedDurable(())
         }
+    };
+    let publication = match &outcome {
+        OwnedRuntimeConfigOutcome::CleanNoEffect(_) => {
+            ConfiguredOwnerPublicationOperation::Discard(receipt)
+        }
+        OwnedRuntimeConfigOutcome::PublishedDurable(()) => {
+            ConfiguredOwnerPublicationOperation::Publish(receipt)
+        }
+        _ => return outcome,
+    };
+    // Begin has been admitted. Finishing or discarding that stage is owned
+    // settlement, never another pre-effect wait or a speculative rollback.
+    match dispatch_configured_owner_publication(&peer_mgr_tx, actor_timeout, None, publication)
+        .await
+        .settlement_result()
+    {
+        Ok(_) => outcome,
+        Err((error, reason)) => OwnedRuntimeConfigOutcome::Fenced { error, reason },
     }
 }
 
@@ -1401,12 +1436,15 @@ impl proto::neighbor_service_server::NeighborService for NeighborService {
         let req = request.into_inner();
         let peer = peer_key(&req.address, &req.interface)?;
 
-        peer_manager_request(&self.peer_mgr_tx, |reply| PeerManagerCommand::EnablePeer {
+        crate::dampening_control::enable_peer_owned(
+            self.peer_mgr_tx.clone(),
             peer,
-            reply,
-        })
-        .await?
-        .map_err(peer_lifecycle_error_status)?;
+            self.runtime_config_lock.clone(),
+            self.config_mutation_gate.clone(),
+            self.settlement.clone(),
+            self.owned_actor_timeout,
+        )
+        .await?;
 
         Ok(Response::new(proto::EnableNeighborResponse {}))
     }
@@ -2208,6 +2246,21 @@ mod tests {
         config: Option<FrozenNeighborConfig>,
     }
 
+    async fn acknowledge_owner_publication(
+        rx: &mut mpsc::Receiver<PeerManagerCommand>,
+        expected: ConfiguredOwnerPublicationOperation,
+    ) {
+        let PeerManagerCommand::ConfiguredOwnerPublication { operation, reply } =
+            rx.recv().await.expect("publication command")
+        else {
+            panic!("expected configured-owner publication");
+        };
+        assert_eq!(operation, expected);
+        reply
+            .send(Ok(crate::peer_types::ConfiguredOwnerPublicationReceipt(1)))
+            .unwrap();
+    }
+
     #[tokio::test]
     async fn frozen_v064_intent_wire_is_accepted_unchanged() {
         let frozen = FrozenV064AddNeighborRequest {
@@ -2227,6 +2280,8 @@ mod tests {
         let (rib_tx, _rib_rx) = mpsc::channel(1);
         let svc = NeighborService::new(65001, AccessMode::ReadWrite, peer_tx, rib_tx, None);
         let call = tokio::spawn(async move { svc.add_neighbor(Request::new(request)).await });
+        acknowledge_owner_publication(&mut peer_rx, ConfiguredOwnerPublicationOperation::Begin)
+            .await;
         match peer_rx.recv().await.unwrap() {
             PeerManagerCommand::OwnedNeighborMutation {
                 mutation: OwnedNeighborMutation::Add(spec),
@@ -2238,6 +2293,13 @@ mod tests {
             }
             _ => panic!("expected owned neighbor add"),
         }
+        acknowledge_owner_publication(
+            &mut peer_rx,
+            ConfiguredOwnerPublicationOperation::Publish(
+                crate::peer_types::ConfiguredOwnerPublicationReceipt(1),
+            ),
+        )
+        .await;
         call.await.unwrap().unwrap();
     }
 
@@ -2770,6 +2832,8 @@ mod tests {
         };
         let staged = tokio::spawn(staged.accept());
 
+        acknowledge_owner_publication(&mut peer_mgr_rx, ConfiguredOwnerPublicationOperation::Begin)
+            .await;
         match peer_mgr_rx.recv().await.unwrap() {
             PeerManagerCommand::OwnedNeighborMutation {
                 mutation:
@@ -2796,6 +2860,13 @@ mod tests {
             _ => panic!("expected owned dynamic add"),
         }
         assert!(staged.await.unwrap(), "the staged write must be committed");
+        acknowledge_owner_publication(
+            &mut peer_mgr_rx,
+            ConfiguredOwnerPublicationOperation::Publish(
+                crate::peer_types::ConfiguredOwnerPublicationReceipt(1),
+            ),
+        )
+        .await;
         call.await.unwrap();
     }
 
@@ -2861,6 +2932,8 @@ mod tests {
             .await
         });
 
+        acknowledge_owner_publication(&mut peer_mgr_rx, ConfiguredOwnerPublicationOperation::Begin)
+            .await;
         match peer_mgr_rx.recv().await.unwrap() {
             PeerManagerCommand::OwnedNeighborMutation {
                 mutation: OwnedNeighborMutation::DynamicAdd { .. },
@@ -2877,6 +2950,13 @@ mod tests {
             _ => panic!("expected owned dynamic add"),
         }
 
+        acknowledge_owner_publication(
+            &mut peer_mgr_rx,
+            ConfiguredOwnerPublicationOperation::Discard(
+                crate::peer_types::ConfiguredOwnerPublicationReceipt(1),
+            ),
+        )
+        .await;
         let err = call.await.unwrap().unwrap_err();
         assert_eq!(err.code(), tonic::Code::NotFound);
     }
@@ -2929,6 +3009,8 @@ mod tests {
             }))
             .await
         });
+        acknowledge_owner_publication(&mut peer_mgr_rx, ConfiguredOwnerPublicationOperation::Begin)
+            .await;
         let PeerManagerCommand::OwnedNeighborMutation { reply, .. } =
             peer_mgr_rx.recv().await.unwrap()
         else {
@@ -2941,6 +3023,13 @@ mod tests {
                 )),
             ))
             .unwrap();
+        acknowledge_owner_publication(
+            &mut peer_mgr_rx,
+            ConfiguredOwnerPublicationOperation::Discard(
+                crate::peer_types::ConfiguredOwnerPublicationReceipt(1),
+            ),
+        )
+        .await;
         let error = call.await.unwrap().unwrap_err();
         assert_eq!(error.code(), tonic::Code::NotFound);
         assert_eq!(
@@ -2982,6 +3071,11 @@ mod tests {
                 }))
                 .await
             });
+            acknowledge_owner_publication(
+                &mut peer_mgr_rx,
+                ConfiguredOwnerPublicationOperation::Begin,
+            )
+            .await;
             let PeerManagerCommand::OwnedNeighborMutation { reply, .. } =
                 peer_mgr_rx.recv().await.unwrap()
             else {
@@ -3009,6 +3103,133 @@ mod tests {
             );
             call.abort();
         }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn publication_and_discard_reply_loss_keep_the_coordinator() {
+        for clean_rejection in [false, true] {
+            let (peer_mgr_tx, mut peer_mgr_rx) = mpsc::channel(1);
+            let (rib_tx, _rib_rx) = mpsc::channel(1);
+            let coordinator = RuntimeConfigCoordinator::new();
+            let svc = NeighborService::with_runtime_config_coordinator(
+                65001,
+                AccessMode::ReadWrite,
+                peer_mgr_tx,
+                rib_tx,
+                None,
+                coordinator.clone(),
+                None,
+            );
+            let mut call = tokio::spawn(async move {
+                svc.delete_dynamic_neighbor(Request::new(proto::DeleteDynamicNeighborRequest {
+                    prefix: "192.0.2.0/24".into(),
+                }))
+                .await
+            });
+            acknowledge_owner_publication(
+                &mut peer_mgr_rx,
+                ConfiguredOwnerPublicationOperation::Begin,
+            )
+            .await;
+            let PeerManagerCommand::OwnedNeighborMutation { reply, .. } =
+                peer_mgr_rx.recv().await.unwrap()
+            else {
+                panic!("expected mutation");
+            };
+            reply
+                .send(if clean_rejection {
+                    OwnedNeighborMutationOutcome::RejectedNoEffect(
+                        OwnedNeighborMutationError::Dynamic(DynamicRangeError::NotFound(
+                            "missing".into(),
+                        )),
+                    )
+                } else {
+                    OwnedNeighborMutationOutcome::Success
+                })
+                .unwrap();
+            let PeerManagerCommand::ConfiguredOwnerPublication { operation, reply } =
+                peer_mgr_rx.recv().await.unwrap()
+            else {
+                panic!("expected final publication or clean discard");
+            };
+            let receipt = crate::peer_types::ConfiguredOwnerPublicationReceipt(1);
+            assert_eq!(
+                operation,
+                if clean_rejection {
+                    ConfiguredOwnerPublicationOperation::Discard(receipt)
+                } else {
+                    ConfiguredOwnerPublicationOperation::Publish(receipt)
+                }
+            );
+            drop(reply);
+            assert!(
+                tokio::time::timeout(Duration::from_secs(1), &mut call)
+                    .await
+                    .is_err()
+            );
+            assert!(
+                tokio::time::timeout(Duration::from_secs(1), coordinator.acquire())
+                    .await
+                    .is_err()
+            );
+            assert!(
+                peer_mgr_rx.try_recv().is_err(),
+                "lost publication must not trigger compensation"
+            );
+            call.abort();
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn canceled_neighbor_caller_keeps_publication_until_acknowledged() {
+        let (peer_mgr_tx, mut peer_mgr_rx) = mpsc::channel(1);
+        let (rib_tx, _rib_rx) = mpsc::channel(1);
+        let coordinator = RuntimeConfigCoordinator::new();
+        let svc = NeighborService::with_runtime_config_coordinator(
+            65001,
+            AccessMode::ReadWrite,
+            peer_mgr_tx,
+            rib_tx,
+            None,
+            coordinator.clone(),
+            None,
+        );
+        let call = tokio::spawn(async move {
+            svc.delete_dynamic_neighbor(Request::new(proto::DeleteDynamicNeighborRequest {
+                prefix: "192.0.2.0/24".into(),
+            }))
+            .await
+        });
+        acknowledge_owner_publication(&mut peer_mgr_rx, ConfiguredOwnerPublicationOperation::Begin)
+            .await;
+        let PeerManagerCommand::OwnedNeighborMutation { reply, .. } =
+            peer_mgr_rx.recv().await.unwrap()
+        else {
+            panic!("expected mutation");
+        };
+        reply.send(OwnedNeighborMutationOutcome::Success).unwrap();
+        let PeerManagerCommand::ConfiguredOwnerPublication { operation, reply } =
+            peer_mgr_rx.recv().await.unwrap()
+        else {
+            panic!("expected final publication");
+        };
+        let receipt = crate::peer_types::ConfiguredOwnerPublicationReceipt(1);
+        assert_eq!(
+            operation,
+            ConfiguredOwnerPublicationOperation::Publish(receipt)
+        );
+        call.abort();
+        assert!(call.await.unwrap_err().is_cancelled());
+        assert!(
+            tokio::time::timeout(Duration::from_secs(1), coordinator.acquire())
+                .await
+                .is_err()
+        );
+        reply.send(Ok(receipt)).unwrap();
+        let _released = tokio::time::timeout(Duration::from_secs(1), coordinator.acquire())
+            .await
+            .unwrap()
+            .unwrap();
     }
 
     #[tokio::test]
@@ -3045,6 +3266,8 @@ mod tests {
         };
         let staged = tokio::spawn(staged.accept());
 
+        acknowledge_owner_publication(&mut peer_mgr_rx, ConfiguredOwnerPublicationOperation::Begin)
+            .await;
         match peer_mgr_rx.recv().await.unwrap() {
             PeerManagerCommand::OwnedNeighborMutation {
                 mutation: OwnedNeighborMutation::DynamicDelete { prefix },
@@ -3062,6 +3285,13 @@ mod tests {
             _ => panic!("expected owned dynamic delete"),
         }
         assert!(staged.await.unwrap(), "the staged write must be committed");
+        acknowledge_owner_publication(
+            &mut peer_mgr_rx,
+            ConfiguredOwnerPublicationOperation::Publish(
+                crate::peer_types::ConfiguredOwnerPublicationReceipt(1),
+            ),
+        )
+        .await;
         call.await.unwrap();
     }
 
@@ -4751,6 +4981,8 @@ mod tests {
         );
         let staged = tokio::spawn(ack.accept());
 
+        acknowledge_owner_publication(&mut peer_mgr_rx, ConfiguredOwnerPublicationOperation::Begin)
+            .await;
         match peer_mgr_rx.recv().await.unwrap() {
             PeerManagerCommand::OwnedNeighborMutation {
                 mutation: OwnedNeighborMutation::Add(spec),
@@ -4768,6 +5000,13 @@ mod tests {
             _ => panic!("expected owned neighbor add"),
         }
         assert!(staged.await.unwrap());
+        acknowledge_owner_publication(
+            &mut peer_mgr_rx,
+            ConfiguredOwnerPublicationOperation::Publish(
+                crate::peer_types::ConfiguredOwnerPublicationReceipt(1),
+            ),
+        )
+        .await;
         call.await.unwrap().unwrap();
     }
 
@@ -4806,6 +5045,8 @@ mod tests {
         };
         let staged = tokio::spawn(staged.accept());
 
+        acknowledge_owner_publication(&mut peer_mgr_rx, ConfiguredOwnerPublicationOperation::Begin)
+            .await;
         match peer_mgr_rx.recv().await.unwrap() {
             PeerManagerCommand::OwnedNeighborMutation {
                 mutation: OwnedNeighborMutation::Delete(peer),
@@ -4823,6 +5064,13 @@ mod tests {
             _ => panic!("expected owned neighbor delete"),
         }
         assert!(staged.await.unwrap(), "the staged write must be committed");
+        acknowledge_owner_publication(
+            &mut peer_mgr_rx,
+            ConfiguredOwnerPublicationOperation::Publish(
+                crate::peer_types::ConfiguredOwnerPublicationReceipt(1),
+            ),
+        )
+        .await;
         call.await.unwrap().unwrap();
     }
 
@@ -4928,11 +5176,9 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn owned_neighbor_blocked_actor_send_ends_clean_at_the_pre_effect_deadline() {
-        use crate::test_support::{
-            assert_only_filler_delivered, full_peer_manager_queue, settle_exactly_at,
-            spawn_owned_body,
-        };
+        use crate::test_support::{full_peer_manager_queue, settle_exactly_at, spawn_owned_body};
         let (peer_tx, mut peer_rx) = full_peer_manager_queue();
+        let fill_tx = peer_tx.clone();
         let (config_tx, mut config_rx) = mpsc::channel(1);
         let permit = config_tx.reserve_owned().await.unwrap();
         let (join, operation, _watchdog, terminal) = spawn_owned_body(
@@ -4957,8 +5203,8 @@ mod tests {
             },
         )
         .await;
-        // Handshake: the stage is acknowledged, so the owner's remaining
-        // pre-effect wait is the send into the full peer-manager queue.
+        // Acknowledge persistence and Begin, then fill the queue before the
+        // actual mutation can be sent. Only that mutation hits the deadline.
         let Some(ConfigEvent::DynamicNeighborDeleted {
             ack: Some(crate::peer_types::ConfigPersistAck::Staged { staged, commit }),
             ..
@@ -4967,6 +5213,36 @@ mod tests {
             panic!("expected a staged dynamic-neighbor delete")
         };
         staged.send(Ok(())).unwrap();
+        let filler = peer_rx.recv().await.unwrap();
+        let PeerManagerCommand::ConfiguredOwnerPublication {
+            operation: begin,
+            reply,
+        } = peer_rx.recv().await.unwrap()
+        else {
+            panic!("expected Begin");
+        };
+        assert_eq!(begin, ConfiguredOwnerPublicationOperation::Begin);
+        fill_tx.try_send(filler).unwrap();
+        let receipt = crate::peer_types::ConfiguredOwnerPublicationReceipt(1);
+        reply.send(Ok(receipt)).unwrap();
+        let discard = tokio::spawn(async move {
+            assert!(
+                commit.await.is_err(),
+                "the persistence stage must be discarded"
+            );
+            assert!(
+                matches!(peer_rx.recv().await, Some(PeerManagerCommand::GetPeerGroup { name, .. }) if name == "filler")
+            );
+            acknowledge_owner_publication(
+                &mut peer_rx,
+                ConfiguredOwnerPublicationOperation::Discard(receipt),
+            )
+            .await;
+            assert!(
+                peer_rx.try_recv().is_err(),
+                "the runtime mutation was never admitted"
+            );
+        });
 
         let error = settle_exactly_at(join, operation.pre_effect_deadline())
             .await
@@ -4976,8 +5252,7 @@ mod tests {
             error.message(),
             "peer manager mutation queue timed out before accepting command"
         );
-        assert!(commit.await.is_err(), "the stage must be discarded");
-        assert_only_filler_delivered(&mut peer_rx);
+        discard.await.unwrap();
         assert!(terminal.try_recv().is_err(), "a clean owner never fences");
     }
 }

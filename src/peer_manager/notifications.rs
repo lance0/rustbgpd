@@ -78,7 +78,7 @@ impl PeerManager {
             .await
             .is_err()
         {
-            warn!(peer = %peer_key, old_session_id, "RIB unavailable while fencing aborted max-prefix primary");
+            warn!(peer = %peer_key, old_session_id, "RIB unavailable while fencing replaced primary");
         }
         self.unregister_session(old_session_id);
         self.register_session(new_session_id, peer_key);
@@ -278,11 +278,13 @@ impl PeerManager {
                     return;
                 }
                 // Auto-remove dynamic peers when they go idle (no reconnect).
-                if self
-                    .peers
-                    .get(&peer_key)
-                    .is_some_and(|m| m.is_dynamic && !m.enabled)
-                {
+                if self.peers.get(&peer_key).is_some_and(|m| {
+                    m.is_dynamic
+                        && (!m.enabled
+                            || m.transport_config.dampening_admission.as_ref().is_some_and(
+                                rustbgpd_rib::dampening::DampeningAdmission::is_blocked,
+                            ))
+                }) {
                     // Operator explicitly disabled — don't remove, just let it stay idle.
                 } else if self.peers.get(&peer_key).is_some_and(|m| m.is_dynamic) {
                     // Snapshot any unfired hot-apply / Route Refresh
@@ -292,13 +294,15 @@ impl PeerManager {
                     // [[dynamic_neighbors]] range) inherits the retry
                     // when handle_inbound recreates the ManagedPeer.
                     self.dead_letter_pending_for(peer_addr);
-                    info!(peer = %peer_addr, "dynamic peer session went idle, removing");
+                    info!(peer = %peer_addr, "dynamic peer session went idle, retiring producers");
                     if let Some(managed) = self.peers.remove(&peer_key) {
                         let (primary_handle, primary_session_id, mut managed) =
                             managed.into_parts();
                         self.retiring_sessions
                             .insert(primary_session_id, peer_key.clone());
+                        let mut retired_sessions = vec![primary_session_id];
                         if let Some(pending) = managed.pending_inbound.take() {
+                            retired_sessions.push(pending.session_id);
                             let _ = self
                                 .quiesce_retiring_session(
                                     &peer_key,
@@ -319,11 +323,37 @@ impl PeerManager {
                             )
                             .await;
 
-                        if self.max_prefix_latches.contains_key(&peer_key) {
-                            // The retiring actor crossed max-prefix after its
-                            // earlier BackToIdle was queued. Keep a disabled
-                            // recovery target instead of auto-removing the peer
-                            // and making explicit Enable impossible.
+                        // Joined producers may already have queued a wire batch
+                        // whose capacity failure the RIB has not processed yet.
+                        // Fence those exact sessions on the primary lane before
+                        // deciding whether their dynamic recovery target can go.
+                        let mut barrier_failed = false;
+                        if managed
+                            .transport_config
+                            .dampening_admission
+                            .as_ref()
+                            .is_some_and(|admission| admission.owner.records_wire_history())
+                            && let Err(error) = self
+                                .dampening_retirement_barrier(peer_addr, &retired_sessions)
+                                .await
+                        {
+                            tracing::error!(peer = %peer_addr, %error, "dynamic dampening retirement barrier failed; retaining disabled peer");
+                            self.dampening_control_failed = true;
+                            barrier_failed = true;
+                        }
+
+                        if barrier_failed
+                            || self.max_prefix_latches.contains_key(&peer_key)
+                            || managed
+                                .transport_config
+                                .dampening_admission
+                                .as_ref()
+                                .is_some_and(
+                                    rustbgpd_rib::dampening::DampeningAdmission::is_blocked,
+                                )
+                        {
+                            // A late terminal block or an unacknowledged RIB
+                            // fence must retain the explicit recovery target.
                             let session_id = self.allocate_session_id();
                             let handle = PeerHandle::spawn_at_tcp_ao_generation(
                                 managed.transport_config.clone(),
@@ -349,10 +379,10 @@ impl PeerManager {
                             self.register_session(session_id, &peer_key);
                             self.seed_peer_truth_metrics(&peer_key, false);
                             self.publish_peer_info_metric(&peer_key);
-                            info!(peer = %peer_addr, "retained dynamic peer disabled after terminal max-prefix signal during retirement");
+                            info!(peer = %peer_addr, "retained dynamic peer disabled after terminal block or failed RIB retirement fence");
                         } else {
-                            // Auto-removal is authoritative when no terminal
-                            // breach was discovered during the join barrier.
+                            // Producer joins and the required RIB fence found
+                            // no terminal block, so auto-removal is authoritative.
                             self.dynamic_peer_count = self.dynamic_peer_count.saturating_sub(1);
                             self.refresh_dynamic_neighbor_capacity_metrics();
                             self.reap_deleted_peer_metric_series_for_key(&peer_key)

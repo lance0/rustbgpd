@@ -13,6 +13,7 @@ pub use bench_support::{
     bench_evpn_dataplane_legacy_snapshot,
 };
 mod conditional_advertisement;
+mod dampening_history;
 mod distribution;
 mod export_chains;
 mod flowspec_validation;
@@ -48,7 +49,7 @@ use rustbgpd_telemetry::BgpMetrics;
 use rustbgpd_telemetry::metrics::RibPolicyTransitionOutcome;
 use rustbgpd_telemetry::metrics::StaleSessionMessageKind as Kind;
 use rustbgpd_telemetry::metrics::StaleSessionMessageKind::{
-    BgpLs, Eor, Labeled, Orf, Refresh, Routes, Rtc, Vpn,
+    BgpLs, Eor, Labeled, Orf, Refresh, Rtc, Vpn,
 };
 use rustbgpd_wire::{Afi, BgpRole, Prefix, Safi};
 use tokio::sync::{broadcast, mpsc, watch};
@@ -612,6 +613,8 @@ pub struct RibManager {
     pending_peer_gr_context: HashMap<(IpAddr, u64), PeerSelectionDeferralContext>,
     /// Accepted provenance awaiting its matching session registration.
     pending_peer_source_context: HashMap<(IpAddr, u64), Arc<crate::update::PeerSourceContext>>,
+    /// Committed owner authority; history allocation remains absent in production.
+    dampening_history: dampening_history::DampeningHistoryState,
     /// Policy identity awaiting its matching registration, before initial export.
     pending_peer_policy_context: HashMap<(IpAddr, u64), Option<String>>,
     /// Exact encoder owned by the active outbound registration. Every
@@ -1597,6 +1600,9 @@ enum PendingRoutePhase {
 
 struct PendingRoutesReceived {
     source: crate::update::ReceivedRouteSource,
+    /// Committed history eligibility fixed at admission, never re-bound later.
+    dampening_source: Option<crate::dampening::DampeningSource>,
+    original_unicast_withdrawals: usize,
     route_capacity_hint: usize,
     flowspec_capacity_hint: usize,
     withdrawn: std::vec::IntoIter<(Prefix, u32)>,
@@ -1633,6 +1639,8 @@ impl PendingRoutesReceived {
                 peer_asn: None,
                 context: None,
             },
+            dampening_source: None,
+            original_unicast_withdrawals: 0,
             route_capacity_hint,
             flowspec_capacity_hint,
             withdrawn: withdrawn.into_iter(),
@@ -1922,6 +1930,7 @@ impl RibManager {
             pending_peer_export_encoders: HashMap::new(),
             pending_peer_gr_context: HashMap::new(),
             pending_peer_source_context: HashMap::new(),
+            dampening_history: dampening_history::DampeningHistoryState::default(),
             pending_peer_policy_context: HashMap::new(),
             peer_export_encoders: HashMap::new(),
             peer_unexportable: HashMap::new(),
@@ -2286,7 +2295,10 @@ impl RibManager {
     /// [`TEST_INGEST_STALL_ENV`] was set at construction.
     async fn maybe_stall_test_ingest(&self, update: &RibUpdate) {
         if let Some(stall) = self.test_ingest_stall
-            && matches!(update, RibUpdate::RoutesReceived { .. })
+            && matches!(
+                update,
+                RibUpdate::RoutesReceived { .. } | RibUpdate::WireRoutesReceived(_)
+            )
         {
             debug!(
                 stall_ms = u64::try_from(stall.as_millis()).unwrap_or(u64::MAX),
@@ -2992,61 +3004,40 @@ impl RibManager {
         reason = "dispatcher needs one arm per RibUpdate variant"
     )]
     fn handle_update(&mut self, update: RibUpdate) {
+        self.dampening_history.arm_owner_retirement();
         assert!(
             !(self.test_panic_on_peer_up.is_some() && matches!(&update, RibUpdate::PeerUp { .. })),
             "{TEST_PANIC_ON_PEER_UP_ENV} triggered before route-page generation advance"
         );
         self.advance_route_pages_for_update(&update);
         match update {
-            RibUpdate::RoutesReceived {
-                peer,
-                session_id,
-                announced,
-                withdrawn,
-                flowspec_announced,
-                flowspec_withdrawn,
-                evpn_announced,
-                evpn_withdrawn,
-                validated_with,
+            RibUpdate::WireRoutesReceived(batch) => self.admit_received_batch(batch, true),
+            batch @ RibUpdate::RoutesReceived { .. } => {
+                self.admit_received_batch(crate::update::WireRoutesReceived::new(batch, 0), false);
+            }
+            RibUpdate::PublishDampeningOwners {
+                publication,
+                owners,
+                reply,
             } => {
-                if !self.stale_session_message(peer, session_id, "RoutesReceived", Routes) {
-                    #[cfg(any(test, feature = "bench-internals"))]
-                    {
-                        self.adj_rib_out_commit_stats.routes_received_dispatches = self
-                            .adj_rib_out_commit_stats
-                            .routes_received_dispatches
-                            .saturating_add(1);
-                        self.adj_rib_out_commit_stats.routes_received_withdrawals = self
-                            .adj_rib_out_commit_stats
-                            .routes_received_withdrawals
-                            .saturating_add(withdrawn.len());
-                    }
-                    self.enqueue_routes_received(
-                        peer,
-                        announced,
-                        withdrawn,
-                        flowspec_announced,
-                        flowspec_withdrawn,
-                        evpn_announced,
-                        evpn_withdrawn,
-                        validated_with,
-                    );
-                    let record = self.live_sessions.get(&peer).and_then(|sessions| {
-                        sessions
-                            .iter()
-                            .find(|record| record.session_id == session_id)
-                    });
-                    let pending = self
-                        .pending_route_batches
-                        .back_mut()
-                        .expect("received batch was enqueued");
-                    pending.source = crate::update::ReceivedRouteSource {
-                        peer,
-                        session_id,
-                        peer_asn: record.map(|record| record.peer_asn),
-                        context: record.and_then(|record| record.source_context.clone()),
-                    };
-                }
+                let result = self.dampening_history.publish(publication, owners);
+                let _ = reply.send(result);
+            }
+            RibUpdate::PrepareDampeningEnable {
+                source,
+                reason,
+                reply,
+            } => {
+                let result = self.dampening_history.prepare_enable(&source, reason);
+                let _ = reply.send(result);
+            }
+            RibUpdate::CompleteDampeningEnable {
+                receipt,
+                enabled,
+                reply,
+            } => {
+                let result = self.dampening_history.complete_enable(receipt, enabled);
+                let _ = reply.send(result);
             }
             RibUpdate::BgpLsRoutesReceived {
                 peer,
@@ -3055,6 +3046,11 @@ impl RibManager {
                 withdrawn,
             } => {
                 if !self.stale_session_message(peer, session_id, "BgpLsRoutesReceived", BgpLs) {
+                    let announced = if self.dampening_session_blocked(peer, session_id) {
+                        Vec::new()
+                    } else {
+                        announced
+                    };
                     let retired = withdrawn
                         .iter()
                         .cloned()
@@ -3071,6 +3067,11 @@ impl RibManager {
                 withdrawn,
             } => {
                 if !self.stale_session_message(peer, session_id, "VpnRoutesReceived", Vpn) {
+                    let announced = if self.dampening_session_blocked(peer, session_id) {
+                        Vec::new()
+                    } else {
+                        announced
+                    };
                     let retired = withdrawn
                         .iter()
                         .cloned()
@@ -3087,6 +3088,11 @@ impl RibManager {
                 withdrawn,
             } => {
                 if !self.stale_session_message(peer, session_id, "LabeledRoutesReceived", Labeled) {
+                    let announced = if self.dampening_session_blocked(peer, session_id) {
+                        Vec::new()
+                    } else {
+                        announced
+                    };
                     let retired = withdrawn
                         .iter()
                         .copied()
@@ -3103,6 +3109,11 @@ impl RibManager {
                 withdrawn,
             } => {
                 if !self.stale_session_message(peer, session_id, "RtcRoutesReceived", Rtc) {
+                    let announced = if self.dampening_session_blocked(peer, session_id) {
+                        Vec::new()
+                    } else {
+                        announced
+                    };
                     let retired = withdrawn
                         .iter()
                         .cloned()
@@ -4802,6 +4813,12 @@ impl RibManager {
         tokio::pin!(conditional_sleep);
 
         loop {
+            if self.dampening_history.notice_failed() {
+                tracing::error!(
+                    "dampening capacity disable owner unavailable; terminating RIB actor"
+                );
+                return;
+            }
             // The export roster's one publication point (ADR-0136): after
             // each completed unit, never while a grouped transition is
             // parked between `CommitMembers` batches.
@@ -4910,7 +4927,8 @@ impl RibManager {
             // under sustained primary traffic. Clean transitions above retain
             // their existing ownership fence.
             let validated_flowspec = self.process_flowspec_validation_chunk();
-            if validated_flowspec {
+            let retired_dampening = self.dampening_history.retire(ROUTES_RECEIVED_CHUNK_SIZE) > 0;
+            if validated_flowspec || retired_dampening {
                 self.drain_readiness_queries(None);
                 self.drain_queries(QUERY_BUDGET_PER_CHUNK);
                 tokio::task::yield_now().await;
@@ -5113,7 +5131,7 @@ impl RibManager {
                 self.drain_readiness_queries(None);
                 self.drain_queries(QUERY_BUDGET_PER_CHUNK);
                 tokio::task::yield_now().await;
-            } else if validated_flowspec {
+            } else if validated_flowspec || retired_dampening {
                 // Do not sleep while validation remains queued, but admit a
                 // primary update between slices instead of monopolizing turns.
                 if let Some(update) = self.try_recv_primary() {
