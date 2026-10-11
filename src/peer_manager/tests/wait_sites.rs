@@ -2041,12 +2041,24 @@ fn stall_state(command: &PeerCommand, _: usize) -> SessionAction {
 }
 
 /// Advance to just before the owner's five-second deadline, then admit a
-/// neighbor snapshot whose stalled session query carries the owner past it.
+/// single-peer read whose stalled session query carries the owner past it.
+/// `GetPeerState` is always served in place, unlike a detached `ListPeers`.
 async fn admit_snapshot_across_deadline(
     operator_tx: &mpsc::Sender<EnqueuedOperatorQuery>,
-) -> oneshot::Receiver<Vec<PeerInfo>> {
+    peer: IpAddr,
+) -> oneshot::Receiver<Option<PeerInfo>> {
     tokio::time::advance(RIB_REPLY_TIMEOUT.saturating_sub(PEER_QUERY_TIMEOUT / 2)).await;
-    let infos = list_peers(operator_tx).await;
+    let (reply, infos) = oneshot::channel();
+    operator_tx
+        .send(
+            PeerManagerOperatorQuery::GetPeerState {
+                peer: key(peer),
+                reply,
+            }
+            .into(),
+        )
+        .await
+        .unwrap();
     for _ in 0..4 {
         tokio::task::yield_now().await;
     }
@@ -2083,7 +2095,7 @@ async fn expired_capacity_wait_finishes_its_admitted_read_without_late_dispatch(
         for _ in 0..4 {
             tokio::task::yield_now().await;
         }
-        let infos = admit_snapshot_across_deadline(&operator_tx).await;
+        let infos = admit_snapshot_across_deadline(&operator_tx, peer).await;
         assert!(
             !transaction.is_finished(),
             "owner expiry must not abandon an admitted read"
@@ -2096,7 +2108,7 @@ async fn expired_capacity_wait_finishes_its_admitted_read_without_late_dispatch(
             .await
             .unwrap()
             .unwrap();
-        assert!(matches!(infos.as_slice(), [info] if info.stale));
+        assert!(matches!(infos, Some(ref info) if info.stale));
         let (mut manager, result) = transaction.await.unwrap();
         assert!(
             result.is_err(),
@@ -2139,7 +2151,7 @@ async fn dataset_reply_preserves_legacy_wall_and_generation_attention_budgets() 
         else {
             panic!("expected actual dataset reevaluation dispatch")
         };
-        let infos = admit_snapshot_across_deadline(&operator_tx).await;
+        let infos = admit_snapshot_across_deadline(&operator_tx, peer).await;
         assert!(
             !transaction.is_finished(),
             "owner waits for the admitted read even after wall expiry"
@@ -2171,4 +2183,367 @@ async fn dataset_reply_preserves_legacy_wall_and_generation_attention_budgets() 
             managed.into_parts().0.shutdown().await.unwrap().unwrap();
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Detached neighbor snapshots at transaction waits (ADR-0132, 2026-10-10
+// amendment). Paused time: every step is a channel handshake, and nothing
+// awaits an idle runtime while a session reply is held, so the 100 ms query
+// deadline cannot elapse unless a test means it to.
+
+/// A session whose commands the test observes in dequeue order. While
+/// `hold` is set, the task hands each command to the test and dequeues the
+/// next one only after the test resumes it; otherwise it answers normally.
+struct ObservedSession {
+    commands: mpsc::Sender<PeerCommand>,
+    observed: mpsc::UnboundedReceiver<(PeerCommand, oneshot::Sender<()>)>,
+    hold: Arc<AtomicBool>,
+}
+
+impl ObservedSession {
+    fn queued(&self) -> usize {
+        self.commands.max_capacity() - self.commands.capacity()
+    }
+}
+
+fn spawn_observed_session(addr: IpAddr, capacity: usize) -> (PeerHandle, ObservedSession) {
+    let (commands, mut rx) = mpsc::channel::<PeerCommand>(capacity);
+    let (observed_tx, observed) = mpsc::unbounded_channel();
+    let hold = Arc::new(AtomicBool::new(false));
+    let task_hold = Arc::clone(&hold);
+    let (publication, receiver) =
+        tokio::sync::watch::channel(Some(installed_policy(1, Some(&PolicyChain::new(vec![])))));
+    let task = tokio::spawn(async move {
+        // The installed-policy publication lives as long as the session.
+        let _publication = publication;
+        while let Some(command) = rx.recv().await {
+            if matches!(command, PeerCommand::Shutdown) {
+                break;
+            }
+            if task_hold.load(Ordering::SeqCst) {
+                let (resume, resumed) = oneshot::channel();
+                if observed_tx.send((command, resume)).is_err() {
+                    break;
+                }
+                let _ = resumed.await;
+            } else {
+                answer_session(command, addr, true, false);
+            }
+        }
+        Ok(())
+    });
+    (
+        PeerHandle::from_parts_with_import_policy_counters(commands.clone(), task, receiver),
+        ObservedSession {
+            commands,
+            observed,
+            hold,
+        },
+    )
+}
+
+const DETACH_FIRST: IpAddr = IpAddr::V4(Ipv4Addr::new(10, 41, 0, 1));
+const DETACH_SECOND: IpAddr = IpAddr::V4(Ipv4Addr::new(10, 41, 0, 2));
+
+/// A manager with two observed sessions and an operator lane of
+/// `operator_capacity` (the detached-snapshot limit).
+fn detach_fixture(
+    rib_tx: mpsc::Sender<RibUpdate>,
+    operator_capacity: usize,
+    first_capacity: usize,
+) -> (
+    PeerManager,
+    mpsc::Sender<EnqueuedOperatorQuery>,
+    ObservedSession,
+    ObservedSession,
+) {
+    let (_command_tx, command_rx) = mpsc::channel(16);
+    let (operator_tx, operator_rx) = mpsc::channel(operator_capacity);
+    let mut manager = PeerManager::new(
+        command_rx,
+        65001,
+        Ipv4Addr::new(10, 0, 0, 1),
+        None,
+        None,
+        BgpMetrics::new(),
+        rib_tx,
+        None,
+    )
+    .with_operator_queries(operator_rx);
+    let (handle, first) = spawn_observed_session(DETACH_FIRST, first_capacity);
+    insert_test_managed_peer_with_asn(&mut manager, DETACH_FIRST, 65002, handle, false);
+    let (handle, second) = spawn_observed_session(DETACH_SECOND, 16);
+    insert_test_managed_peer_with_asn(&mut manager, DETACH_SECOND, 65003, handle, false);
+    (manager, operator_tx, first, second)
+}
+
+fn row(infos: &[PeerInfo], addr: IpAddr) -> &PeerInfo {
+    infos
+        .iter()
+        .find(|info| info.address == addr)
+        .expect("every admission-time peer has a row")
+}
+
+/// Admit one `ListPeers` exactly as an owner's wait helper does.
+async fn admit_list_peers(manager: &mut PeerManager) -> oneshot::Receiver<Vec<PeerInfo>> {
+    let (reply, response) = oneshot::channel();
+    manager
+        .handle_waiting_operator_query(PeerManagerOperatorQuery::ListPeers { reply }.into())
+        .await;
+    response
+}
+
+/// Take the held session's next command, which must be a state query.
+async fn held_state_query(
+    session: &mut ObservedSession,
+) -> (oneshot::Sender<PeerSessionState>, oneshot::Sender<()>) {
+    let (command, resume) = session.observed.recv().await.expect("session alive");
+    let PeerCommand::QueryState { reply } = command else {
+        panic!(
+            "expected the admitted QueryState, got {}",
+            command_kind(&command)
+        );
+    };
+    (reply, resume)
+}
+
+#[tokio::test(start_paused = true)]
+async fn detached_snapshot_lets_the_reload_finish_while_a_session_reply_is_held() {
+    let gate = Gate::new();
+    let (rib_tx, rib_rx) = mpsc::channel(16);
+    let rib = spawn_rib(
+        rib_rx,
+        gate.clone(),
+        RibHold::Reply(is_cohort_replace),
+        CohortReply::Committed,
+    );
+    let (manager, operator_tx, mut first, _second) = detach_fixture(rib_tx, 4, 16);
+    let transaction = tokio::spawn(async move {
+        let mut manager = manager;
+        let result = drive(&mut manager, FORWARD_COHORT, [DETACH_FIRST, DETACH_SECOND]).await;
+        (manager, result)
+    });
+
+    // The owner is parked on the cohort RIB reply; admit a neighbor read and
+    // hold the first session's answer to it.
+    gate.held().await;
+    first.hold.store(true, Ordering::SeqCst);
+    let mut infos = list_peers(&operator_tx).await;
+    let (state_reply, resume) = held_state_query(&mut first).await;
+
+    // Releasing the RIB reply completes the transaction although the read
+    // is still waiting for that session.
+    gate.release();
+    let (manager, result) = transaction.await.unwrap();
+    result.expect("the cohort transaction commits");
+    assert!(
+        matches!(infos.try_recv(), Err(oneshot::error::TryRecvError::Empty)),
+        "the owner must not wait for an admitted neighbor snapshot's session replies"
+    );
+
+    // A later owner command to the held session queues behind the query.
+    let mutation = tokio::spawn(async move {
+        let mut manager = manager;
+        let result = manager
+            .set_graceful_shutdown(Some(key(DETACH_FIRST)), true)
+            .await;
+        (manager, result)
+    });
+    while first.queued() == 0 {
+        tokio::task::yield_now().await;
+    }
+    assert!(
+        first.observed.try_recv().is_err(),
+        "the session dequeued a later owner command before answering the admitted query"
+    );
+    let mut answered = policy_test_peer_state(DETACH_FIRST, SessionState::Established);
+    answered.updates_sent = 7;
+    state_reply.send(answered).unwrap();
+    resume.send(()).unwrap();
+
+    let (command, resume) = first.observed.recv().await.unwrap();
+    let PeerCommand::UpdateGracefulShutdown { enabled, reply } = command else {
+        panic!("expected the graceful-shutdown update");
+    };
+    assert!(enabled);
+    reply.send(Ok(())).unwrap();
+    resume.send(()).unwrap();
+    first.hold.store(false, Ordering::SeqCst);
+
+    let infos = infos.await.expect("the detached snapshot replies");
+    assert_eq!(infos.len(), 2);
+    let held = row(&infos, DETACH_FIRST);
+    assert!(!held.stale, "the held session answered within its deadline");
+    assert_eq!(
+        held.updates_sent, 7,
+        "session half: the answer to the admitted query"
+    );
+    assert!(
+        !held.graceful_shutdown_advertise_intent,
+        "manager half: the value at admission, before the later command"
+    );
+    assert!(!row(&infos, DETACH_SECOND).stale);
+
+    let (manager, result) = mutation.await.unwrap();
+    result.expect("graceful-shutdown toggle");
+    assert!(manager.peers[&key(DETACH_FIRST)].advertise_graceful_shutdown);
+    drop(manager);
+    rib.await.unwrap();
+}
+
+#[tokio::test(start_paused = true)]
+async fn full_session_channel_serves_the_snapshot_in_place() {
+    let (rib_tx, _rib_rx) = mpsc::channel(16);
+    let (mut manager, _operator_tx, mut first, _second) = detach_fixture(rib_tx, 4, 1);
+    first.hold.store(true, Ordering::SeqCst);
+    // One command parked in the session, one filling its only slot.
+    let (parked, _parked_rx) = oneshot::channel();
+    first
+        .commands
+        .try_send(PeerCommand::QueryState { reply: parked })
+        .unwrap();
+    let _held = first.observed.recv().await.unwrap();
+    let (filler, _filler_rx) = oneshot::channel();
+    first
+        .commands
+        .try_send(PeerCommand::QueryState { reply: filler })
+        .unwrap();
+    assert_eq!(first.commands.capacity(), 0);
+
+    let mut infos = admit_list_peers(&mut manager).await;
+    assert!(
+        manager.detached_list_peers.is_empty(),
+        "nothing was detached"
+    );
+    let infos = infos
+        .try_recv()
+        .expect("an in-place snapshot replies before the owner resumes");
+    assert!(
+        row(&infos, DETACH_FIRST).stale,
+        "the full session timed out"
+    );
+    assert!(!row(&infos, DETACH_SECOND).stale);
+}
+
+#[tokio::test(start_paused = true)]
+async fn detached_snapshots_are_capped_at_the_operator_lane_capacity() {
+    let (rib_tx, _rib_rx) = mpsc::channel(16);
+    let (mut manager, _operator_tx, mut first, _second) = detach_fixture(rib_tx, 2, 16);
+    first.hold.store(true, Ordering::SeqCst);
+    let mut detached = Vec::new();
+    for _ in 0..2 {
+        let mut infos = admit_list_peers(&mut manager).await;
+        assert!(
+            matches!(infos.try_recv(), Err(oneshot::error::TryRecvError::Empty)),
+            "a snapshot under the limit is detached"
+        );
+        detached.push(infos);
+    }
+    assert_eq!(manager.detached_list_peers.len(), 2);
+    let _held = held_state_query(&mut first).await;
+
+    let mut third = admit_list_peers(&mut manager).await;
+    assert_eq!(
+        manager.detached_list_peers.len(),
+        2,
+        "the third snapshot is not detached"
+    );
+    let third = third
+        .try_recv()
+        .expect("a snapshot over the limit is answered in place");
+    assert_eq!(third.len(), 2);
+}
+
+#[tokio::test(start_paused = true)]
+async fn canceled_detached_snapshot_drops_its_session_queries() {
+    let (rib_tx, _rib_rx) = mpsc::channel(16);
+    let (mut manager, _operator_tx, mut first, _second) = detach_fixture(rib_tx, 4, 16);
+    first.hold.store(true, Ordering::SeqCst);
+    let started = tokio::time::Instant::now();
+    let infos = admit_list_peers(&mut manager).await;
+    let (mut state_reply, _resume) = held_state_query(&mut first).await;
+    drop(infos);
+    state_reply.closed().await;
+    assert!(
+        started.elapsed() < PEER_QUERY_TIMEOUT,
+        "caller cancellation, not the query deadline, released the session query"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn dropping_the_manager_aborts_detached_snapshots() {
+    let (rib_tx, _rib_rx) = mpsc::channel(16);
+    let (mut manager, _operator_tx, mut first, _second) = detach_fixture(rib_tx, 4, 16);
+    first.hold.store(true, Ordering::SeqCst);
+    let started = tokio::time::Instant::now();
+    let infos = admit_list_peers(&mut manager).await;
+    let _held = held_state_query(&mut first).await;
+    drop(manager);
+    assert!(
+        infos.await.is_err(),
+        "shutdown drops the reply instead of answering after the owner is gone"
+    );
+    assert!(started.elapsed() < PEER_QUERY_TIMEOUT);
+}
+
+#[tokio::test(start_paused = true)]
+async fn session_replaced_mid_snapshot_reports_the_row_stale() {
+    let (rib_tx, _rib_rx) = mpsc::channel(16);
+    let (mut manager, _operator_tx, mut first, _second) = detach_fixture(rib_tx, 4, 16);
+    first.hold.store(true, Ordering::SeqCst);
+    let infos = admit_list_peers(&mut manager).await;
+    // The predecessor session exits with the admitted query unanswered.
+    let (state_reply, resume) = held_state_query(&mut first).await;
+    drop((state_reply, resume));
+    drop(first);
+    let (handle, replacement) = spawn_observed_session(DETACH_FIRST, 16);
+    replacement.hold.store(true, Ordering::SeqCst);
+    insert_test_managed_peer_with_asn(&mut manager, DETACH_FIRST, 65002, handle, false);
+
+    let infos = infos.await.expect("the snapshot completes");
+    assert!(
+        row(&infos, DETACH_FIRST).stale,
+        "the exited predecessor's row is unavailable"
+    );
+    assert_eq!(
+        replacement.queued(),
+        0,
+        "the replacement session never receives the earlier snapshot's query"
+    );
+}
+
+/// Every row shares the admission deadline: a row joined after an earlier
+/// held row does not get a fresh timeout of its own.
+#[tokio::test(start_paused = true)]
+async fn detached_snapshot_reply_after_the_deadline_is_stale_behind_a_held_row() {
+    let (rib_tx, _rib_rx) = mpsc::channel(16);
+    let (mut manager, _operator_tx, mut first, mut second) = detach_fixture(rib_tx, 4, 16);
+    first.hold.store(true, Ordering::SeqCst);
+    second.hold.store(true, Ordering::SeqCst);
+    // Rows follow peer-table order; hold whichever row is joined first.
+    let first_row = manager.peers.keys().next().unwrap().address;
+    let (held, late) = if first_row == DETACH_FIRST {
+        (&mut first, &mut second)
+    } else {
+        (&mut second, &mut first)
+    };
+    let late_addr = if first_row == DETACH_FIRST {
+        DETACH_SECOND
+    } else {
+        DETACH_FIRST
+    };
+    let admitted = tokio::time::Instant::now();
+    let infos = admit_list_peers(&mut manager).await;
+    let (_held_reply, _held_resume) = held_state_query(held).await;
+    let (late_reply, _late_resume) = held_state_query(late).await;
+    let answer = tokio::spawn(async move {
+        tokio::time::sleep_until(admitted + PEER_QUERY_TIMEOUT + Duration::from_millis(1)).await;
+        let _ = late_reply.send(policy_test_peer_state(late_addr, SessionState::Established));
+    });
+    let infos = infos.await.unwrap();
+    answer.await.unwrap();
+    assert!(
+        row(&infos, late_addr).stale,
+        "a reply after the deadline is not fresh"
+    );
 }

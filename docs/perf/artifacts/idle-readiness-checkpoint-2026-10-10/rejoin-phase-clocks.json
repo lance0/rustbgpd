@@ -1,0 +1,110 @@
+[
+  {
+    "cell": "baseline-r1",
+    "round": 1,
+    "native_rejoin_ms": 165.956,
+    "session_established": "2026-10-11T00:03:00.064331Z",
+    "eor_enqueued_log": "2026-10-11T00:03:00.192779Z",
+    "session_to_eor_enqueued_ms": 128.448,
+    "difference_of_durations_ms": 37.50799999999998
+  },
+  {
+    "cell": "baseline-r1",
+    "round": 2,
+    "native_rejoin_ms": 176.893,
+    "session_established": "2026-10-11T00:03:21.435459Z",
+    "eor_enqueued_log": "2026-10-11T00:03:21.574871Z",
+    "session_to_eor_enqueued_ms": 139.412,
+    "difference_of_durations_ms": 37.480999999999995
+  },
+  {
+    "cell": "baseline-r1",
+    "round": 3,
+    "native_rejoin_ms": 169.816,
+    "session_established": "2026-10-11T00:03:42.814468Z",
+    "eor_enqueued_log": "2026-10-11T00:03:42.948106Z",
+    "session_to_eor_enqueued_ms": 133.638,
+    "difference_of_durations_ms": 36.178
+  },
+  {
+    "cell": "candidate-r1",
+    "round": 1,
+    "native_rejoin_ms": 169.245,
+    "session_established": "2026-10-11T00:06:11.438033Z",
+    "eor_enqueued_log": "2026-10-11T00:06:11.570015Z",
+    "session_to_eor_enqueued_ms": 131.982,
+    "difference_of_durations_ms": 37.263000000000005
+  },
+  {
+    "cell": "candidate-r1",
+    "round": 2,
+    "native_rejoin_ms": 164.25300000000001,
+    "session_established": "2026-10-11T00:06:32.803967Z",
+    "eor_enqueued_log": "2026-10-11T00:06:32.931669Z",
+    "session_to_eor_enqueued_ms": 127.70200000000001,
+    "difference_of_durations_ms": 36.551
+  },
+  {
+    "cell": "candidate-r1",
+    "round": 3,
+    "native_rejoin_ms": 166.92100000000002,
+    "session_established": "2026-10-11T00:06:54.175248Z",
+    "eor_enqueued_log": "2026-10-11T00:06:54.305279Z",
+    "session_to_eor_enqueued_ms": 130.031,
+    "difference_of_durations_ms": 36.890000000000015
+  },
+  {
+    "cell": "candidate-r2",
+    "round": 1,
+    "native_rejoin_ms": 159.81699999999998,
+    "session_established": "2026-10-11T00:08:23.582391Z",
+    "eor_enqueued_log": "2026-10-11T00:08:23.705994Z",
+    "session_to_eor_enqueued_ms": 123.60300000000001,
+    "difference_of_durations_ms": 36.21399999999997
+  },
+  {
+    "cell": "candidate-r2",
+    "round": 2,
+    "native_rejoin_ms": 163.73499999999999,
+    "session_established": "2026-10-11T00:08:44.947433Z",
+    "eor_enqueued_log": "2026-10-11T00:08:45.073164Z",
+    "session_to_eor_enqueued_ms": 125.73100000000001,
+    "difference_of_durations_ms": 38.00399999999998
+  },
+  {
+    "cell": "candidate-r2",
+    "round": 3,
+    "native_rejoin_ms": 164.12199999999999,
+    "session_established": "2026-10-11T00:09:06.318149Z",
+    "eor_enqueued_log": "2026-10-11T00:09:06.445519Z",
+    "session_to_eor_enqueued_ms": 127.37,
+    "difference_of_durations_ms": 36.75199999999998
+  },
+  {
+    "cell": "baseline-r2",
+    "round": 1,
+    "native_rejoin_ms": 120.09100000000001,
+    "session_established": "2026-10-11T00:11:05.199014Z",
+    "eor_enqueued_log": "2026-10-11T00:11:05.318007Z",
+    "session_to_eor_enqueued_ms": 118.993,
+    "difference_of_durations_ms": 1.0980000000000132
+  },
+  {
+    "cell": "baseline-r2",
+    "round": 2,
+    "native_rejoin_ms": 125.06200000000001,
+    "session_established": "2026-10-11T00:11:26.568222Z",
+    "eor_enqueued_log": "2026-10-11T00:11:26.692070Z",
+    "session_to_eor_enqueued_ms": 123.848,
+    "difference_of_durations_ms": 1.2140000000000128
+  },
+  {
+    "cell": "baseline-r2",
+    "round": 3,
+    "native_rejoin_ms": 127.056,
+    "session_established": "2026-10-11T00:11:47.935779Z",
+    "eor_enqueued_log": "2026-10-11T00:11:48.061569Z",
+    "session_to_eor_enqueued_ms": 125.79,
+    "difference_of_durations_ms": 1.2659999999999911
+  }
+]

@@ -1,0 +1,2334 @@
+{
+  "baseline-r1": {
+    "harness_log": "# reloadstall peers=700 changed_peers=700 stable_peers=0 prefixes=400400 per_peer=572 pid=4100157\nestablished 700 at 0.8s\nestablishment transport_retries=0 recovered_peers=0\nfirst_exact_bitmap,mode=flapstorm,peers=700,total=400400,per_peer=572,expected=399828,completed=700,min_unique=399828,max_unique=399828\nconverged (>= 399828/observer) at 3.6s rss_mib=400\ncontrol_maxgap_ms: p50=19.46 p95=20.61 max=41.93 (n=700)\ncontrol_rss_mib 347\nconverged_rejoin_csv_header,round,peers_total,peers_flapped,prefixes,rejoin_p50_s,rejoin_max_s,survivor_maxgap_ms,readiness_samples,rss_mib,sessions_up,parse_errors\nconverged_table_checkpoint,round=1,phase=disconnected,observers=1:2,unique=399828,eor=present\nconverged_rejoin 1 reconnect transport_retries=0\nflap 1 peer 0 rejoin_complete_s=0.165956 eor_before_full_table=false eor=present\nflap 1 rejoin_complete_s: p50=0.17 p95=0.17 max=0.17 (n=1)\nconverged_table_checkpoint,round=1,phase=settled,observers=1:2,unique=399828,eor=present\nconverged_rejoin 1 survivor_maxgap_ms: p50=103.56 p95=105.25 max=105.42 (n=699)\nconverged_rejoin_csv,1,700,1,400400,0.165956,0.165956,105.419000,12,419,700,0\nconverged_table_checkpoint,round=2,phase=disconnected,observers=1:2,unique=399828,eor=present\nconverged_rejoin 2 reconnect transport_retries=0\nflap 2 peer 0 rejoin_complete_s=0.176893 eor_before_full_table=false eor=present\nflap 2 rejoin_complete_s: p50=0.18 p95=0.18 max=0.18 (n=1)\nconverged_table_checkpoint,round=2,phase=settled,observers=1:2,unique=399828,eor=present\nconverged_rejoin 2 survivor_maxgap_ms: p50=115.91 p95=117.85 max=118.08 (n=699)\nconverged_rejoin_csv,2,700,1,400400,0.176893,0.176893,118.084000,12,429,700,0\nconverged_table_checkpoint,round=3,phase=disconnected,observers=1:2,unique=399828,eor=present\nconverged_rejoin 3 reconnect transport_retries=0\nflap 3 peer 0 rejoin_complete_s=0.169816 eor_before_full_table=false eor=present\nflap 3 rejoin_complete_s: p50=0.17 p95=0.17 max=0.17 (n=1)\nconverged_table_checkpoint,round=3,phase=settled,observers=1:2,unique=399828,eor=present\nconverged_rejoin 3 survivor_maxgap_ms: p50=111.39 p95=112.40 max=113.36 (n=699)\nconverged_rejoin_csv,3,700,1,400400,0.169816,0.169816,113.359000,12,408,700,0\ndone rss_mib=349\n",
+    "selected_daemon_events": [
+      {
+        "original_line": 3530,
+        "event": {
+          "timestamp": "2026-10-11T00:02:12.699953Z",
+          "level": "INFO",
+          "fields": {
+            "message": "session established",
+            "peer": "127.1.0.1",
+            "peer_asn": 64512,
+            "hold_time": 180,
+            "keepalive_interval": 60,
+            "four_octet_as": true,
+            "link_local_next_hop": false
+          },
+          "target": "rustbgpd_transport::session::fsm",
+          "span": {
+            "peer_addr": "127.1.0.1",
+            "peer_group": "",
+            "remote_asn": 64512,
+            "name": "peer"
+          },
+          "spans": [
+            {
+              "peer_addr": "127.1.0.1",
+              "peer_group": "",
+              "remote_asn": 64512,
+              "name": "peer"
+            }
+          ]
+        }
+      },
+      {
+        "original_line": 3544,
+        "event": {
+          "timestamp": "2026-10-11T00:02:12.700395Z",
+          "level": "INFO",
+          "fields": {
+            "message": "sent End-of-RIB",
+            "peer": "127.1.0.1",
+            "afi": "Ipv4",
+            "safi": "Unicast"
+          },
+          "target": "rustbgpd_transport::session::outbound",
+          "span": {
+            "peer_addr": "127.1.0.1",
+            "peer_group": "",
+            "remote_asn": 64512,
+            "name": "peer"
+          },
+          "spans": [
+            {
+              "peer_addr": "127.1.0.1",
+              "peer_group": "",
+              "remote_asn": 64512,
+              "name": "peer"
+            }
+          ]
+        }
+      },
+      {
+        "original_line": 11221,
+        "event": {
+          "timestamp": "2026-10-11T00:02:49.347137Z",
+          "level": "INFO",
+          "fields": {
+            "message": "peer entered graceful restart",
+            "peer": "127.1.0.1",
+            "restart_time": 180,
+            "stale_routes_time": 360,
+            "llgr_stale_time": 0
+          },
+          "target": "rustbgpd_rib::manager::graceful_restart"
+        }
+      },
+      {
+        "original_line": 11232,
+        "event": {
+          "timestamp": "2026-10-11T00:02:59.404304Z",
+          "level": "INFO",
+          "fields": {
+            "message": "handling route refresh request",
+            "peer": "127.1.0.2",
+            "afi": "Ipv4",
+            "safi": "Unicast"
+          },
+          "target": "rustbgpd_rib::manager::route_refresh"
+        }
+      },
+      {
+        "original_line": 11233,
+        "event": {
+          "timestamp": "2026-10-11T00:02:59.623621Z",
+          "level": "INFO",
+          "fields": {
+            "message": "handling route refresh request",
+            "peer": "127.1.0.3",
+            "afi": "Ipv4",
+            "safi": "Unicast"
+          },
+          "target": "rustbgpd_rib::manager::route_refresh"
+        }
+      },
+      {
+        "original_line": 11243,
+        "event": {
+          "timestamp": "2026-10-11T00:03:00.064331Z",
+          "level": "INFO",
+          "fields": {
+            "message": "session established",
+            "peer": "127.1.0.1",
+            "peer_asn": 64512,
+            "hold_time": 180,
+            "keepalive_interval": 60,
+            "four_octet_as": true,
+            "link_local_next_hop": false
+          },
+          "target": "rustbgpd_transport::session::fsm",
+          "span": {
+            "peer_addr": "127.1.0.1",
+            "peer_group": "",
+            "remote_asn": 64512,
+            "name": "peer"
+          },
+          "spans": [
+            {
+              "peer_addr": "127.1.0.1",
+              "peer_group": "",
+              "remote_asn": 64512,
+              "name": "peer"
+            }
+          ]
+        }
+      },
+      {
+        "original_line": 11244,
+        "event": {
+          "timestamp": "2026-10-11T00:03:00.064374Z",
+          "level": "INFO",
+          "fields": {
+            "message": "peer re-established during GR \u2014 waiting for End-of-RIB",
+            "peer": "127.1.0.1"
+          },
+          "target": "rustbgpd_rib::manager::peer_lifecycle"
+        }
+      },
+      {
+        "original_line": 11245,
+        "event": {
+          "timestamp": "2026-10-11T00:03:00.192779Z",
+          "level": "INFO",
+          "fields": {
+            "message": "sent End-of-RIB",
+            "peer": "127.1.0.1",
+            "afi": "Ipv4",
+            "safi": "Unicast"
+          },
+          "target": "rustbgpd_transport::session::outbound",
+          "span": {
+            "peer_addr": "127.1.0.1",
+            "peer_group": "",
+            "remote_asn": 64512,
+            "name": "peer"
+          },
+          "spans": [
+            {
+              "peer_addr": "127.1.0.1",
+              "peer_group": "",
+              "remote_asn": 64512,
+              "name": "peer"
+            }
+          ]
+        }
+      },
+      {
+        "original_line": 11248,
+        "event": {
+          "timestamp": "2026-10-11T00:03:00.267999Z",
+          "level": "INFO",
+          "fields": {
+            "message": "graceful restart complete \u2014 all End-of-RIB received",
+            "peer": "127.1.0.1"
+          },
+          "target": "rustbgpd_rib::manager::route_refresh"
+        }
+      },
+      {
+        "original_line": 11251,
+        "event": {
+          "timestamp": "2026-10-11T00:03:00.319467Z",
+          "level": "INFO",
+          "fields": {
+            "message": "handling route refresh request",
+            "peer": "127.1.0.2",
+            "afi": "Ipv4",
+            "safi": "Unicast"
+          },
+          "target": "rustbgpd_rib::manager::route_refresh"
+        }
+      },
+      {
+        "original_line": 11252,
+        "event": {
+          "timestamp": "2026-10-11T00:03:00.534052Z",
+          "level": "INFO",
+          "fields": {
+            "message": "handling route refresh request",
+            "peer": "127.1.0.3",
+            "afi": "Ipv4",
+            "safi": "Unicast"
+          },
+          "target": "rustbgpd_rib::manager::route_refresh"
+        }
+      },
+      {
+        "original_line": 11257,
+        "event": {
+          "timestamp": "2026-10-11T00:03:10.826210Z",
+          "level": "INFO",
+          "fields": {
+            "message": "peer entered graceful restart",
+            "peer": "127.1.0.1",
+            "restart_time": 180,
+            "stale_routes_time": 360,
+            "llgr_stale_time": 0
+          },
+          "target": "rustbgpd_rib::manager::graceful_restart"
+        }
+      },
+      {
+        "original_line": 11267,
+        "event": {
+          "timestamp": "2026-10-11T00:03:20.879012Z",
+          "level": "INFO",
+          "fields": {
+            "message": "handling route refresh request",
+            "peer": "127.1.0.2",
+            "afi": "Ipv4",
+            "safi": "Unicast"
+          },
+          "target": "rustbgpd_rib::manager::route_refresh"
+        }
+      },
+      {
+        "original_line": 11269,
+        "event": {
+          "timestamp": "2026-10-11T00:03:21.090628Z",
+          "level": "INFO",
+          "fields": {
+            "message": "handling route refresh request",
+            "peer": "127.1.0.3",
+            "afi": "Ipv4",
+            "safi": "Unicast"
+          },
+          "target": "rustbgpd_rib::manager::route_refresh"
+        }
+      },
+      {
+        "original_line": 11279,
+        "event": {
+          "timestamp": "2026-10-11T00:03:21.435459Z",
+          "level": "INFO",
+          "fields": {
+            "message": "session established",
+            "peer": "127.1.0.1",
+            "peer_asn": 64512,
+            "hold_time": 180,
+            "keepalive_interval": 60,
+            "four_octet_as": true,
+            "link_local_next_hop": false
+          },
+          "target": "rustbgpd_transport::session::fsm",
+          "span": {
+            "peer_addr": "127.1.0.1",
+            "peer_group": "",
+            "remote_asn": 64512,
+            "name": "peer"
+          },
+          "spans": [
+            {
+              "peer_addr": "127.1.0.1",
+              "peer_group": "",
+              "remote_asn": 64512,
+              "name": "peer"
+            }
+          ]
+        }
+      },
+      {
+        "original_line": 11280,
+        "event": {
+          "timestamp": "2026-10-11T00:03:21.435497Z",
+          "level": "INFO",
+          "fields": {
+            "message": "peer re-established during GR \u2014 waiting for End-of-RIB",
+            "peer": "127.1.0.1"
+          },
+          "target": "rustbgpd_rib::manager::peer_lifecycle"
+        }
+      },
+      {
+        "original_line": 11281,
+        "event": {
+          "timestamp": "2026-10-11T00:03:21.574871Z",
+          "level": "INFO",
+          "fields": {
+            "message": "sent End-of-RIB",
+            "peer": "127.1.0.1",
+            "afi": "Ipv4",
+            "safi": "Unicast"
+          },
+          "target": "rustbgpd_transport::session::outbound",
+          "span": {
+            "peer_addr": "127.1.0.1",
+            "peer_group": "",
+            "remote_asn": 64512,
+            "name": "peer"
+          },
+          "spans": [
+            {
+              "peer_addr": "127.1.0.1",
+              "peer_group": "",
+              "remote_asn": 64512,
+              "name": "peer"
+            }
+          ]
+        }
+      },
+      {
+        "original_line": 11284,
+        "event": {
+          "timestamp": "2026-10-11T00:03:21.639282Z",
+          "level": "INFO",
+          "fields": {
+            "message": "graceful restart complete \u2014 all End-of-RIB received",
+            "peer": "127.1.0.1"
+          },
+          "target": "rustbgpd_rib::manager::route_refresh"
+        }
+      },
+      {
+        "original_line": 11286,
+        "event": {
+          "timestamp": "2026-10-11T00:03:21.690265Z",
+          "level": "INFO",
+          "fields": {
+            "message": "handling route refresh request",
+            "peer": "127.1.0.2",
+            "afi": "Ipv4",
+            "safi": "Unicast"
+          },
+          "target": "rustbgpd_rib::manager::route_refresh"
+        }
+      },
+      {
+        "original_line": 11288,
+        "event": {
+          "timestamp": "2026-10-11T00:03:21.905215Z",
+          "level": "INFO",
+          "fields": {
+            "message": "handling route refresh request",
+            "peer": "127.1.0.3",
+            "afi": "Ipv4",
+            "safi": "Unicast"
+          },
+          "target": "rustbgpd_rib::manager::route_refresh"
+        }
+      },
+      {
+        "original_line": 11293,
+        "event": {
+          "timestamp": "2026-10-11T00:03:32.200975Z",
+          "level": "INFO",
+          "fields": {
+            "message": "peer entered graceful restart",
+            "peer": "127.1.0.1",
+            "restart_time": 180,
+            "stale_routes_time": 360,
+            "llgr_stale_time": 0
+          },
+          "target": "rustbgpd_rib::manager::graceful_restart"
+        }
+      },
+      {
+        "original_line": 11303,
+        "event": {
+          "timestamp": "2026-10-11T00:03:42.255830Z",
+          "level": "INFO",
+          "fields": {
+            "message": "handling route refresh request",
+            "peer": "127.1.0.2",
+            "afi": "Ipv4",
+            "safi": "Unicast"
+          },
+          "target": "rustbgpd_rib::manager::route_refresh"
+        }
+      },
+      {
+        "original_line": 11305,
+        "event": {
+          "timestamp": "2026-10-11T00:03:42.471722Z",
+          "level": "INFO",
+          "fields": {
+            "message": "handling route refresh request",
+            "peer": "127.1.0.3",
+            "afi": "Ipv4",
+            "safi": "Unicast"
+          },
+          "target": "rustbgpd_rib::manager::route_refresh"
+        }
+      },
+      {
+        "original_line": 11315,
+        "event": {
+          "timestamp": "2026-10-11T00:03:42.814468Z",
+          "level": "INFO",
+          "fields": {
+            "message": "session established",
+            "peer": "127.1.0.1",
+            "peer_asn": 64512,
+            "hold_time": 180,
+            "keepalive_interval": 60,
+            "four_octet_as": true,
+            "link_local_next_hop": false
+          },
+          "target": "rustbgpd_transport::session::fsm",
+          "span": {
+            "peer_addr": "127.1.0.1",
+            "peer_group": "",
+            "remote_asn": 64512,
+            "name": "peer"
+          },
+          "spans": [
+            {
+              "peer_addr": "127.1.0.1",
+              "peer_group": "",
+              "remote_asn": 64512,
+              "name": "peer"
+            }
+          ]
+        }
+      },
+      {
+        "original_line": 11316,
+        "event": {
+          "timestamp": "2026-10-11T00:03:42.815228Z",
+          "level": "INFO",
+          "fields": {
+            "message": "peer re-established during GR \u2014 waiting for End-of-RIB",
+            "peer": "127.1.0.1"
+          },
+          "target": "rustbgpd_rib::manager::peer_lifecycle"
+        }
+      },
+      {
+        "original_line": 11317,
+        "event": {
+          "timestamp": "2026-10-11T00:03:42.948106Z",
+          "level": "INFO",
+          "fields": {
+            "message": "sent End-of-RIB",
+            "peer": "127.1.0.1",
+            "afi": "Ipv4",
+            "safi": "Unicast"
+          },
+          "target": "rustbgpd_transport::session::outbound",
+          "span": {
+            "peer_addr": "127.1.0.1",
+            "peer_group": "",
+            "remote_asn": 64512,
+            "name": "peer"
+          },
+          "spans": [
+            {
+              "peer_addr": "127.1.0.1",
+              "peer_group": "",
+              "remote_asn": 64512,
+              "name": "peer"
+            }
+          ]
+        }
+      },
+      {
+        "original_line": 11320,
+        "event": {
+          "timestamp": "2026-10-11T00:03:43.019305Z",
+          "level": "INFO",
+          "fields": {
+            "message": "graceful restart complete \u2014 all End-of-RIB received",
+            "peer": "127.1.0.1"
+          },
+          "target": "rustbgpd_rib::manager::route_refresh"
+        }
+      },
+      {
+        "original_line": 11322,
+        "event": {
+          "timestamp": "2026-10-11T00:03:43.069183Z",
+          "level": "INFO",
+          "fields": {
+            "message": "handling route refresh request",
+            "peer": "127.1.0.2",
+            "afi": "Ipv4",
+            "safi": "Unicast"
+          },
+          "target": "rustbgpd_rib::manager::route_refresh"
+        }
+      },
+      {
+        "original_line": 11324,
+        "event": {
+          "timestamp": "2026-10-11T00:03:43.288144Z",
+          "level": "INFO",
+          "fields": {
+            "message": "handling route refresh request",
+            "peer": "127.1.0.3",
+            "afi": "Ipv4",
+            "safi": "Unicast"
+          },
+          "target": "rustbgpd_rib::manager::route_refresh"
+        }
+      }
+    ],
+    "full_daemon_scan": {
+      "errors": [],
+      "readiness_failures": []
+    },
+    "quiet_samples": [
+      {
+        "sample": "1",
+        "epoch_s": "1791676902",
+        "load1": "1.83",
+        "pswpin": "2424677",
+        "pswpout": "2447475",
+        "governors": "performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance",
+        "performance_governors": "64",
+        "governor_count": "64",
+        "competitors": "none",
+        "quiet": "true",
+        "failed_dimensions": "none",
+        "original_attempt": "4"
+      },
+      {
+        "sample": "2",
+        "epoch_s": "1791676932",
+        "load1": "1.50",
+        "pswpin": "2424677",
+        "pswpout": "2447475",
+        "governors": "performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance",
+        "performance_governors": "64",
+        "governor_count": "64",
+        "competitors": "none",
+        "quiet": "true",
+        "failed_dimensions": "none",
+        "original_attempt": "5"
+      }
+    ],
+    "exits": {
+      "cell": 0,
+      "harness": 0,
+      "daemon": 0,
+      "metrics": 0
+    },
+    "forced_kill": 0,
+    "integrity": {
+      "binary-integrity": "<ARTIFACTS>/binaries/baseline/rustbgpd: OK\n<ARTIFACTS>/harness/reloadstall: OK\n<ARTIFACTS>/binaries/baseline/rustbgpd: OK\n<ARTIFACTS>/harness/reloadstall: OK\n",
+      "input-integrity": "<SOURCE>/bench/scale/reloadstall/gen-scenario.py: OK\nconfig.toml: OK\nmember.rpol: OK\ngen-a.rpol: OK\ngen-b.rpol: OK\n"
+    },
+    "generated_input_hashes": "51f853cb2b06af891b0d35668c141aff993ab1604d922c564b693fbeffc7ef46  config.toml\nfaf7b16a50f72ac85b7805436bba1738622435906cbe3622461d3c14f229fa90  member.rpol\nfaf7b16a50f72ac85b7805436bba1738622435906cbe3622461d3c14f229fa90  gen-a.rpol\nd8be1ba1e9b1cff6e3afcaf772953e19b7dc8e2b46b0bed903337d6193093de0  gen-b.rpol\n",
+    "normalized_generated_inputs": {
+      "config.toml": "6aa2044a6c50c82e4d0cc308551e31b183839713c2b9c1107df1a3acbebcf6f6",
+      "member.rpol": "faf7b16a50f72ac85b7805436bba1738622435906cbe3622461d3c14f229fa90",
+      "gen-a.rpol": "faf7b16a50f72ac85b7805436bba1738622435906cbe3622461d3c14f229fa90",
+      "gen-b.rpol": "d8be1ba1e9b1cff6e3afcaf772953e19b7dc8e2b46b0bed903337d6193093de0"
+    },
+    "generator_hash": "e563659beef5857ee79ddac40e1cff5730c34e424b5ca074a3f9007b5dc0ab42  <SOURCE>/bench/scale/reloadstall/gen-scenario.py\n",
+    "started": "2026-10-10T20:00:12-04:00",
+    "finished": "2026-10-10T20:03:54-04:00",
+    "outer_cell_exit": 0,
+    "cell_log": "2026-10-11T00:02:12Z cell start peers=700 prefixes=400400 k=1 rounds=3\n2026-10-11T00:03:54Z cell done harness_rc=0 daemon_rc=0 metrics_rc=0 timeout=0 forced_kill=0\n2026-10-11T00:03:54Z cell pass\n"
+  },
+  "candidate-r1": {
+    "harness_log": "# reloadstall peers=700 changed_peers=700 stable_peers=0 prefixes=400400 per_peer=572 pid=4101826\nestablished 700 at 0.8s\nestablishment transport_retries=0 recovered_peers=0\nfirst_exact_bitmap,mode=flapstorm,peers=700,total=400400,per_peer=572,expected=399828,completed=700,min_unique=399828,max_unique=399828\nconverged (>= 399828/observer) at 3.3s rss_mib=408\ncontrol_maxgap_ms: p50=20.25 p95=20.88 max=42.03 (n=700)\ncontrol_rss_mib 348\nconverged_rejoin_csv_header,round,peers_total,peers_flapped,prefixes,rejoin_p50_s,rejoin_max_s,survivor_maxgap_ms,readiness_samples,rss_mib,sessions_up,parse_errors\nconverged_table_checkpoint,round=1,phase=disconnected,observers=1:2,unique=399828,eor=present\nconverged_rejoin 1 reconnect transport_retries=0\nflap 1 peer 0 rejoin_complete_s=0.169245 eor_before_full_table=false eor=present\nflap 1 rejoin_complete_s: p50=0.17 p95=0.17 max=0.17 (n=1)\nconverged_table_checkpoint,round=1,phase=settled,observers=1:2,unique=399828,eor=present\nconverged_rejoin 1 survivor_maxgap_ms: p50=104.51 p95=105.12 max=105.56 (n=699)\nconverged_rejoin_csv,1,700,1,400400,0.169245,0.169245,105.560000,12,423,700,0\nconverged_table_checkpoint,round=2,phase=disconnected,observers=1:2,unique=399828,eor=present\nconverged_rejoin 2 reconnect transport_retries=0\nflap 2 peer 0 rejoin_complete_s=0.164253 eor_before_full_table=false eor=present\nflap 2 rejoin_complete_s: p50=0.16 p95=0.16 max=0.16 (n=1)\nconverged_table_checkpoint,round=2,phase=settled,observers=1:2,unique=399828,eor=present\nconverged_rejoin 2 survivor_maxgap_ms: p50=104.66 p95=108.42 max=109.30 (n=699)\nconverged_rejoin_csv,2,700,1,400400,0.164253,0.164253,109.299000,12,423,700,0\nconverged_table_checkpoint,round=3,phase=disconnected,observers=1:2,unique=399828,eor=present\nconverged_rejoin 3 reconnect transport_retries=0\nflap 3 peer 0 rejoin_complete_s=0.166921 eor_before_full_table=false eor=present\nflap 3 rejoin_complete_s: p50=0.17 p95=0.17 max=0.17 (n=1)\nconverged_table_checkpoint,round=3,phase=settled,observers=1:2,unique=399828,eor=present\nconverged_rejoin 3 survivor_maxgap_ms: p50=106.28 p95=107.93 max=108.11 (n=699)\nconverged_rejoin_csv,3,700,1,400400,0.166921,0.166921,108.107000,12,418,700,0\ndone rss_mib=349\n",
+    "selected_daemon_events": [
+      {
+        "original_line": 3538,
+        "event": {
+          "timestamp": "2026-10-11T00:05:24.561953Z",
+          "level": "INFO",
+          "fields": {
+            "message": "session established",
+            "peer": "127.1.0.1",
+            "peer_asn": 64512,
+            "hold_time": 180,
+            "keepalive_interval": 60,
+            "four_octet_as": true,
+            "link_local_next_hop": false
+          },
+          "target": "rustbgpd_transport::session::fsm",
+          "span": {
+            "peer_addr": "127.1.0.1",
+            "peer_group": "",
+            "remote_asn": 64512,
+            "name": "peer"
+          },
+          "spans": [
+            {
+              "peer_addr": "127.1.0.1",
+              "peer_group": "",
+              "remote_asn": 64512,
+              "name": "peer"
+            }
+          ]
+        }
+      },
+      {
+        "original_line": 3544,
+        "event": {
+          "timestamp": "2026-10-11T00:05:24.562181Z",
+          "level": "INFO",
+          "fields": {
+            "message": "sent End-of-RIB",
+            "peer": "127.1.0.1",
+            "afi": "Ipv4",
+            "safi": "Unicast"
+          },
+          "target": "rustbgpd_transport::session::outbound",
+          "span": {
+            "peer_addr": "127.1.0.1",
+            "peer_group": "",
+            "remote_asn": 64512,
+            "name": "peer"
+          },
+          "spans": [
+            {
+              "peer_addr": "127.1.0.1",
+              "peer_group": "",
+              "remote_asn": 64512,
+              "name": "peer"
+            }
+          ]
+        }
+      },
+      {
+        "original_line": 11221,
+        "event": {
+          "timestamp": "2026-10-11T00:06:00.825371Z",
+          "level": "INFO",
+          "fields": {
+            "message": "peer entered graceful restart",
+            "peer": "127.1.0.1",
+            "restart_time": 180,
+            "stale_routes_time": 360,
+            "llgr_stale_time": 0
+          },
+          "target": "rustbgpd_rib::manager::graceful_restart"
+        }
+      },
+      {
+        "original_line": 11231,
+        "event": {
+          "timestamp": "2026-10-11T00:06:10.880556Z",
+          "level": "INFO",
+          "fields": {
+            "message": "handling route refresh request",
+            "peer": "127.1.0.2",
+            "afi": "Ipv4",
+            "safi": "Unicast"
+          },
+          "target": "rustbgpd_rib::manager::route_refresh"
+        }
+      },
+      {
+        "original_line": 11233,
+        "event": {
+          "timestamp": "2026-10-11T00:06:11.095234Z",
+          "level": "INFO",
+          "fields": {
+            "message": "handling route refresh request",
+            "peer": "127.1.0.3",
+            "afi": "Ipv4",
+            "safi": "Unicast"
+          },
+          "target": "rustbgpd_rib::manager::route_refresh"
+        }
+      },
+      {
+        "original_line": 11243,
+        "event": {
+          "timestamp": "2026-10-11T00:06:11.438033Z",
+          "level": "INFO",
+          "fields": {
+            "message": "session established",
+            "peer": "127.1.0.1",
+            "peer_asn": 64512,
+            "hold_time": 180,
+            "keepalive_interval": 60,
+            "four_octet_as": true,
+            "link_local_next_hop": false
+          },
+          "target": "rustbgpd_transport::session::fsm",
+          "span": {
+            "peer_addr": "127.1.0.1",
+            "peer_group": "",
+            "remote_asn": 64512,
+            "name": "peer"
+          },
+          "spans": [
+            {
+              "peer_addr": "127.1.0.1",
+              "peer_group": "",
+              "remote_asn": 64512,
+              "name": "peer"
+            }
+          ]
+        }
+      },
+      {
+        "original_line": 11244,
+        "event": {
+          "timestamp": "2026-10-11T00:06:11.438065Z",
+          "level": "INFO",
+          "fields": {
+            "message": "peer re-established during GR \u2014 waiting for End-of-RIB",
+            "peer": "127.1.0.1"
+          },
+          "target": "rustbgpd_rib::manager::peer_lifecycle"
+        }
+      },
+      {
+        "original_line": 11245,
+        "event": {
+          "timestamp": "2026-10-11T00:06:11.570015Z",
+          "level": "INFO",
+          "fields": {
+            "message": "sent End-of-RIB",
+            "peer": "127.1.0.1",
+            "afi": "Ipv4",
+            "safi": "Unicast"
+          },
+          "target": "rustbgpd_transport::session::outbound",
+          "span": {
+            "peer_addr": "127.1.0.1",
+            "peer_group": "",
+            "remote_asn": 64512,
+            "name": "peer"
+          },
+          "spans": [
+            {
+              "peer_addr": "127.1.0.1",
+              "peer_group": "",
+              "remote_asn": 64512,
+              "name": "peer"
+            }
+          ]
+        }
+      },
+      {
+        "original_line": 11248,
+        "event": {
+          "timestamp": "2026-10-11T00:06:11.643807Z",
+          "level": "INFO",
+          "fields": {
+            "message": "graceful restart complete \u2014 all End-of-RIB received",
+            "peer": "127.1.0.1"
+          },
+          "target": "rustbgpd_rib::manager::route_refresh"
+        }
+      },
+      {
+        "original_line": 11251,
+        "event": {
+          "timestamp": "2026-10-11T00:06:11.690316Z",
+          "level": "INFO",
+          "fields": {
+            "message": "handling route refresh request",
+            "peer": "127.1.0.2",
+            "afi": "Ipv4",
+            "safi": "Unicast"
+          },
+          "target": "rustbgpd_rib::manager::route_refresh"
+        }
+      },
+      {
+        "original_line": 11252,
+        "event": {
+          "timestamp": "2026-10-11T00:06:11.898883Z",
+          "level": "INFO",
+          "fields": {
+            "message": "handling route refresh request",
+            "peer": "127.1.0.3",
+            "afi": "Ipv4",
+            "safi": "Unicast"
+          },
+          "target": "rustbgpd_rib::manager::route_refresh"
+        }
+      },
+      {
+        "original_line": 11257,
+        "event": {
+          "timestamp": "2026-10-11T00:06:22.197304Z",
+          "level": "INFO",
+          "fields": {
+            "message": "peer entered graceful restart",
+            "peer": "127.1.0.1",
+            "restart_time": 180,
+            "stale_routes_time": 360,
+            "llgr_stale_time": 0
+          },
+          "target": "rustbgpd_rib::manager::graceful_restart"
+        }
+      },
+      {
+        "original_line": 11267,
+        "event": {
+          "timestamp": "2026-10-11T00:06:32.250918Z",
+          "level": "INFO",
+          "fields": {
+            "message": "handling route refresh request",
+            "peer": "127.1.0.2",
+            "afi": "Ipv4",
+            "safi": "Unicast"
+          },
+          "target": "rustbgpd_rib::manager::route_refresh"
+        }
+      },
+      {
+        "original_line": 11269,
+        "event": {
+          "timestamp": "2026-10-11T00:06:32.462678Z",
+          "level": "INFO",
+          "fields": {
+            "message": "handling route refresh request",
+            "peer": "127.1.0.3",
+            "afi": "Ipv4",
+            "safi": "Unicast"
+          },
+          "target": "rustbgpd_rib::manager::route_refresh"
+        }
+      },
+      {
+        "original_line": 11279,
+        "event": {
+          "timestamp": "2026-10-11T00:06:32.803967Z",
+          "level": "INFO",
+          "fields": {
+            "message": "session established",
+            "peer": "127.1.0.1",
+            "peer_asn": 64512,
+            "hold_time": 180,
+            "keepalive_interval": 60,
+            "four_octet_as": true,
+            "link_local_next_hop": false
+          },
+          "target": "rustbgpd_transport::session::fsm",
+          "span": {
+            "peer_addr": "127.1.0.1",
+            "peer_group": "",
+            "remote_asn": 64512,
+            "name": "peer"
+          },
+          "spans": [
+            {
+              "peer_addr": "127.1.0.1",
+              "peer_group": "",
+              "remote_asn": 64512,
+              "name": "peer"
+            }
+          ]
+        }
+      },
+      {
+        "original_line": 11280,
+        "event": {
+          "timestamp": "2026-10-11T00:06:32.804000Z",
+          "level": "INFO",
+          "fields": {
+            "message": "peer re-established during GR \u2014 waiting for End-of-RIB",
+            "peer": "127.1.0.1"
+          },
+          "target": "rustbgpd_rib::manager::peer_lifecycle"
+        }
+      },
+      {
+        "original_line": 11281,
+        "event": {
+          "timestamp": "2026-10-11T00:06:32.931669Z",
+          "level": "INFO",
+          "fields": {
+            "message": "sent End-of-RIB",
+            "peer": "127.1.0.1",
+            "afi": "Ipv4",
+            "safi": "Unicast"
+          },
+          "target": "rustbgpd_transport::session::outbound",
+          "span": {
+            "peer_addr": "127.1.0.1",
+            "peer_group": "",
+            "remote_asn": 64512,
+            "name": "peer"
+          },
+          "spans": [
+            {
+              "peer_addr": "127.1.0.1",
+              "peer_group": "",
+              "remote_asn": 64512,
+              "name": "peer"
+            }
+          ]
+        }
+      },
+      {
+        "original_line": 11284,
+        "event": {
+          "timestamp": "2026-10-11T00:06:33.007795Z",
+          "level": "INFO",
+          "fields": {
+            "message": "graceful restart complete \u2014 all End-of-RIB received",
+            "peer": "127.1.0.1"
+          },
+          "target": "rustbgpd_rib::manager::route_refresh"
+        }
+      },
+      {
+        "original_line": 11286,
+        "event": {
+          "timestamp": "2026-10-11T00:06:33.055063Z",
+          "level": "INFO",
+          "fields": {
+            "message": "handling route refresh request",
+            "peer": "127.1.0.2",
+            "afi": "Ipv4",
+            "safi": "Unicast"
+          },
+          "target": "rustbgpd_rib::manager::route_refresh"
+        }
+      },
+      {
+        "original_line": 11288,
+        "event": {
+          "timestamp": "2026-10-11T00:06:33.266555Z",
+          "level": "INFO",
+          "fields": {
+            "message": "handling route refresh request",
+            "peer": "127.1.0.3",
+            "afi": "Ipv4",
+            "safi": "Unicast"
+          },
+          "target": "rustbgpd_rib::manager::route_refresh"
+        }
+      },
+      {
+        "original_line": 11293,
+        "event": {
+          "timestamp": "2026-10-11T00:06:43.565968Z",
+          "level": "INFO",
+          "fields": {
+            "message": "peer entered graceful restart",
+            "peer": "127.1.0.1",
+            "restart_time": 180,
+            "stale_routes_time": 360,
+            "llgr_stale_time": 0
+          },
+          "target": "rustbgpd_rib::manager::graceful_restart"
+        }
+      },
+      {
+        "original_line": 11303,
+        "event": {
+          "timestamp": "2026-10-11T00:06:53.622231Z",
+          "level": "INFO",
+          "fields": {
+            "message": "handling route refresh request",
+            "peer": "127.1.0.2",
+            "afi": "Ipv4",
+            "safi": "Unicast"
+          },
+          "target": "rustbgpd_rib::manager::route_refresh"
+        }
+      },
+      {
+        "original_line": 11305,
+        "event": {
+          "timestamp": "2026-10-11T00:06:53.833178Z",
+          "level": "INFO",
+          "fields": {
+            "message": "handling route refresh request",
+            "peer": "127.1.0.3",
+            "afi": "Ipv4",
+            "safi": "Unicast"
+          },
+          "target": "rustbgpd_rib::manager::route_refresh"
+        }
+      },
+      {
+        "original_line": 11315,
+        "event": {
+          "timestamp": "2026-10-11T00:06:54.175248Z",
+          "level": "INFO",
+          "fields": {
+            "message": "session established",
+            "peer": "127.1.0.1",
+            "peer_asn": 64512,
+            "hold_time": 180,
+            "keepalive_interval": 60,
+            "four_octet_as": true,
+            "link_local_next_hop": false
+          },
+          "target": "rustbgpd_transport::session::fsm",
+          "span": {
+            "peer_addr": "127.1.0.1",
+            "peer_group": "",
+            "remote_asn": 64512,
+            "name": "peer"
+          },
+          "spans": [
+            {
+              "peer_addr": "127.1.0.1",
+              "peer_group": "",
+              "remote_asn": 64512,
+              "name": "peer"
+            }
+          ]
+        }
+      },
+      {
+        "original_line": 11316,
+        "event": {
+          "timestamp": "2026-10-11T00:06:54.175287Z",
+          "level": "INFO",
+          "fields": {
+            "message": "peer re-established during GR \u2014 waiting for End-of-RIB",
+            "peer": "127.1.0.1"
+          },
+          "target": "rustbgpd_rib::manager::peer_lifecycle"
+        }
+      },
+      {
+        "original_line": 11317,
+        "event": {
+          "timestamp": "2026-10-11T00:06:54.305279Z",
+          "level": "INFO",
+          "fields": {
+            "message": "sent End-of-RIB",
+            "peer": "127.1.0.1",
+            "afi": "Ipv4",
+            "safi": "Unicast"
+          },
+          "target": "rustbgpd_transport::session::outbound",
+          "span": {
+            "peer_addr": "127.1.0.1",
+            "peer_group": "",
+            "remote_asn": 64512,
+            "name": "peer"
+          },
+          "spans": [
+            {
+              "peer_addr": "127.1.0.1",
+              "peer_group": "",
+              "remote_asn": 64512,
+              "name": "peer"
+            }
+          ]
+        }
+      },
+      {
+        "original_line": 11320,
+        "event": {
+          "timestamp": "2026-10-11T00:06:54.379917Z",
+          "level": "INFO",
+          "fields": {
+            "message": "graceful restart complete \u2014 all End-of-RIB received",
+            "peer": "127.1.0.1"
+          },
+          "target": "rustbgpd_rib::manager::route_refresh"
+        }
+      },
+      {
+        "original_line": 11323,
+        "event": {
+          "timestamp": "2026-10-11T00:06:54.429648Z",
+          "level": "INFO",
+          "fields": {
+            "message": "handling route refresh request",
+            "peer": "127.1.0.3",
+            "afi": "Ipv4",
+            "safi": "Unicast"
+          },
+          "target": "rustbgpd_rib::manager::route_refresh"
+        }
+      },
+      {
+        "original_line": 11324,
+        "event": {
+          "timestamp": "2026-10-11T00:06:54.646172Z",
+          "level": "INFO",
+          "fields": {
+            "message": "handling route refresh request",
+            "peer": "127.1.0.2",
+            "afi": "Ipv4",
+            "safi": "Unicast"
+          },
+          "target": "rustbgpd_rib::manager::route_refresh"
+        }
+      }
+    ],
+    "full_daemon_scan": {
+      "errors": [],
+      "readiness_failures": []
+    },
+    "quiet_samples": [
+      {
+        "sample": "1",
+        "epoch_s": "1791677094",
+        "load1": "1.91",
+        "pswpin": "2424677",
+        "pswpout": "2447475",
+        "governors": "performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance",
+        "performance_governors": "64",
+        "governor_count": "64",
+        "competitors": "none",
+        "quiet": "true",
+        "failed_dimensions": "none",
+        "original_attempt": "3"
+      },
+      {
+        "sample": "2",
+        "epoch_s": "1791677124",
+        "load1": "1.61",
+        "pswpin": "2424677",
+        "pswpout": "2447475",
+        "governors": "performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance",
+        "performance_governors": "64",
+        "governor_count": "64",
+        "competitors": "none",
+        "quiet": "true",
+        "failed_dimensions": "none",
+        "original_attempt": "4"
+      }
+    ],
+    "exits": {
+      "cell": 0,
+      "harness": 0,
+      "daemon": 0,
+      "metrics": 0
+    },
+    "forced_kill": 0,
+    "integrity": {
+      "binary-integrity": "<ARTIFACTS>/binaries/candidate/rustbgpd: OK\n<ARTIFACTS>/harness/reloadstall: OK\n<ARTIFACTS>/binaries/candidate/rustbgpd: OK\n<ARTIFACTS>/harness/reloadstall: OK\n",
+      "input-integrity": "<SOURCE>/bench/scale/reloadstall/gen-scenario.py: OK\nconfig.toml: OK\nmember.rpol: OK\ngen-a.rpol: OK\ngen-b.rpol: OK\n"
+    },
+    "generated_input_hashes": "e6f947aac1cc98fa894fabf0cc64659e87e9488622afc4198f89bcbf9494f146  config.toml\nfaf7b16a50f72ac85b7805436bba1738622435906cbe3622461d3c14f229fa90  member.rpol\nfaf7b16a50f72ac85b7805436bba1738622435906cbe3622461d3c14f229fa90  gen-a.rpol\nd8be1ba1e9b1cff6e3afcaf772953e19b7dc8e2b46b0bed903337d6193093de0  gen-b.rpol\n",
+    "normalized_generated_inputs": {
+      "config.toml": "6aa2044a6c50c82e4d0cc308551e31b183839713c2b9c1107df1a3acbebcf6f6",
+      "member.rpol": "faf7b16a50f72ac85b7805436bba1738622435906cbe3622461d3c14f229fa90",
+      "gen-a.rpol": "faf7b16a50f72ac85b7805436bba1738622435906cbe3622461d3c14f229fa90",
+      "gen-b.rpol": "d8be1ba1e9b1cff6e3afcaf772953e19b7dc8e2b46b0bed903337d6193093de0"
+    },
+    "generator_hash": "e563659beef5857ee79ddac40e1cff5730c34e424b5ca074a3f9007b5dc0ab42  <SOURCE>/bench/scale/reloadstall/gen-scenario.py\n",
+    "started": "2026-10-10T20:03:54-04:00",
+    "finished": "2026-10-10T20:07:05-04:00",
+    "outer_cell_exit": 0,
+    "cell_log": "2026-10-11T00:05:24Z cell start peers=700 prefixes=400400 k=1 rounds=3\n2026-10-11T00:07:05Z cell done harness_rc=0 daemon_rc=0 metrics_rc=0 timeout=0 forced_kill=0\n2026-10-11T00:07:05Z cell pass\n"
+  },
+  "candidate-r2": {
+    "harness_log": "# reloadstall peers=700 changed_peers=700 stable_peers=0 prefixes=400400 per_peer=572 pid=4104158\nestablished 700 at 0.8s\nestablishment transport_retries=0 recovered_peers=0\nfirst_exact_bitmap,mode=flapstorm,peers=700,total=400400,per_peer=572,expected=399828,completed=700,min_unique=399828,max_unique=399828\nconverged (>= 399828/observer) at 3.6s rss_mib=399\ncontrol_maxgap_ms: p50=19.51 p95=20.71 max=42.00 (n=700)\ncontrol_rss_mib 346\nconverged_rejoin_csv_header,round,peers_total,peers_flapped,prefixes,rejoin_p50_s,rejoin_max_s,survivor_maxgap_ms,readiness_samples,rss_mib,sessions_up,parse_errors\nconverged_table_checkpoint,round=1,phase=disconnected,observers=1:2,unique=399828,eor=present\nconverged_rejoin 1 reconnect transport_retries=0\nflap 1 peer 0 rejoin_complete_s=0.159817 eor_before_full_table=false eor=present\nflap 1 rejoin_complete_s: p50=0.16 p95=0.16 max=0.16 (n=1)\nconverged_table_checkpoint,round=1,phase=settled,observers=1:2,unique=399828,eor=present\nconverged_rejoin 1 survivor_maxgap_ms: p50=100.23 p95=101.86 max=102.05 (n=699)\nconverged_rejoin_csv,1,700,1,400400,0.159817,0.159817,102.053000,12,401,700,0\nconverged_table_checkpoint,round=2,phase=disconnected,observers=1:2,unique=399828,eor=present\nconverged_rejoin 2 reconnect transport_retries=0\nflap 2 peer 0 rejoin_complete_s=0.163735 eor_before_full_table=false eor=present\nflap 2 rejoin_complete_s: p50=0.16 p95=0.16 max=0.16 (n=1)\nconverged_table_checkpoint,round=2,phase=settled,observers=1:2,unique=399828,eor=present\nconverged_rejoin 2 survivor_maxgap_ms: p50=100.62 p95=102.76 max=103.32 (n=699)\nconverged_rejoin_csv,2,700,1,400400,0.163735,0.163735,103.317000,12,411,700,0\nconverged_table_checkpoint,round=3,phase=disconnected,observers=1:2,unique=399828,eor=present\nconverged_rejoin 3 reconnect transport_retries=0\nflap 3 peer 0 rejoin_complete_s=0.164122 eor_before_full_table=false eor=present\nflap 3 rejoin_complete_s: p50=0.16 p95=0.16 max=0.16 (n=1)\nconverged_table_checkpoint,round=3,phase=settled,observers=1:2,unique=399828,eor=present\nconverged_rejoin 3 survivor_maxgap_ms: p50=101.96 p95=105.31 max=105.67 (n=699)\nconverged_rejoin_csv,3,700,1,400400,0.164122,0.164122,105.671000,12,417,700,0\ndone rss_mib=348\n",
+    "selected_daemon_events": [
+      {
+        "original_line": 3534,
+        "event": {
+          "timestamp": "2026-10-11T00:07:36.325698Z",
+          "level": "INFO",
+          "fields": {
+            "message": "session established",
+            "peer": "127.1.0.1",
+            "peer_asn": 64512,
+            "hold_time": 180,
+            "keepalive_interval": 60,
+            "four_octet_as": true,
+            "link_local_next_hop": false
+          },
+          "target": "rustbgpd_transport::session::fsm",
+          "span": {
+            "peer_addr": "127.1.0.1",
+            "peer_group": "",
+            "remote_asn": 64512,
+            "name": "peer"
+          },
+          "spans": [
+            {
+              "peer_addr": "127.1.0.1",
+              "peer_group": "",
+              "remote_asn": 64512,
+              "name": "peer"
+            }
+          ]
+        }
+      },
+      {
+        "original_line": 3553,
+        "event": {
+          "timestamp": "2026-10-11T00:07:36.325934Z",
+          "level": "INFO",
+          "fields": {
+            "message": "sent End-of-RIB",
+            "peer": "127.1.0.1",
+            "afi": "Ipv4",
+            "safi": "Unicast"
+          },
+          "target": "rustbgpd_transport::session::outbound",
+          "span": {
+            "peer_addr": "127.1.0.1",
+            "peer_group": "",
+            "remote_asn": 64512,
+            "name": "peer"
+          },
+          "spans": [
+            {
+              "peer_addr": "127.1.0.1",
+              "peer_group": "",
+              "remote_asn": 64512,
+              "name": "peer"
+            }
+          ]
+        }
+      },
+      {
+        "original_line": 11221,
+        "event": {
+          "timestamp": "2026-10-11T00:08:12.967366Z",
+          "level": "INFO",
+          "fields": {
+            "message": "peer entered graceful restart",
+            "peer": "127.1.0.1",
+            "restart_time": 180,
+            "stale_routes_time": 360,
+            "llgr_stale_time": 0
+          },
+          "target": "rustbgpd_rib::manager::graceful_restart"
+        }
+      },
+      {
+        "original_line": 11232,
+        "event": {
+          "timestamp": "2026-10-11T00:08:23.026522Z",
+          "level": "INFO",
+          "fields": {
+            "message": "handling route refresh request",
+            "peer": "127.1.0.2",
+            "afi": "Ipv4",
+            "safi": "Unicast"
+          },
+          "target": "rustbgpd_rib::manager::route_refresh"
+        }
+      },
+      {
+        "original_line": 11233,
+        "event": {
+          "timestamp": "2026-10-11T00:08:23.242138Z",
+          "level": "INFO",
+          "fields": {
+            "message": "handling route refresh request",
+            "peer": "127.1.0.3",
+            "afi": "Ipv4",
+            "safi": "Unicast"
+          },
+          "target": "rustbgpd_rib::manager::route_refresh"
+        }
+      },
+      {
+        "original_line": 11243,
+        "event": {
+          "timestamp": "2026-10-11T00:08:23.582391Z",
+          "level": "INFO",
+          "fields": {
+            "message": "session established",
+            "peer": "127.1.0.1",
+            "peer_asn": 64512,
+            "hold_time": 180,
+            "keepalive_interval": 60,
+            "four_octet_as": true,
+            "link_local_next_hop": false
+          },
+          "target": "rustbgpd_transport::session::fsm",
+          "span": {
+            "peer_addr": "127.1.0.1",
+            "peer_group": "",
+            "remote_asn": 64512,
+            "name": "peer"
+          },
+          "spans": [
+            {
+              "peer_addr": "127.1.0.1",
+              "peer_group": "",
+              "remote_asn": 64512,
+              "name": "peer"
+            }
+          ]
+        }
+      },
+      {
+        "original_line": 11244,
+        "event": {
+          "timestamp": "2026-10-11T00:08:23.582427Z",
+          "level": "INFO",
+          "fields": {
+            "message": "peer re-established during GR \u2014 waiting for End-of-RIB",
+            "peer": "127.1.0.1"
+          },
+          "target": "rustbgpd_rib::manager::peer_lifecycle"
+        }
+      },
+      {
+        "original_line": 11245,
+        "event": {
+          "timestamp": "2026-10-11T00:08:23.705994Z",
+          "level": "INFO",
+          "fields": {
+            "message": "sent End-of-RIB",
+            "peer": "127.1.0.1",
+            "afi": "Ipv4",
+            "safi": "Unicast"
+          },
+          "target": "rustbgpd_transport::session::outbound",
+          "span": {
+            "peer_addr": "127.1.0.1",
+            "peer_group": "",
+            "remote_asn": 64512,
+            "name": "peer"
+          },
+          "spans": [
+            {
+              "peer_addr": "127.1.0.1",
+              "peer_group": "",
+              "remote_asn": 64512,
+              "name": "peer"
+            }
+          ]
+        }
+      },
+      {
+        "original_line": 11248,
+        "event": {
+          "timestamp": "2026-10-11T00:08:23.785796Z",
+          "level": "INFO",
+          "fields": {
+            "message": "graceful restart complete \u2014 all End-of-RIB received",
+            "peer": "127.1.0.1"
+          },
+          "target": "rustbgpd_rib::manager::route_refresh"
+        }
+      },
+      {
+        "original_line": 11251,
+        "event": {
+          "timestamp": "2026-10-11T00:08:23.828619Z",
+          "level": "INFO",
+          "fields": {
+            "message": "handling route refresh request",
+            "peer": "127.1.0.2",
+            "afi": "Ipv4",
+            "safi": "Unicast"
+          },
+          "target": "rustbgpd_rib::manager::route_refresh"
+        }
+      },
+      {
+        "original_line": 11252,
+        "event": {
+          "timestamp": "2026-10-11T00:08:24.036763Z",
+          "level": "INFO",
+          "fields": {
+            "message": "handling route refresh request",
+            "peer": "127.1.0.3",
+            "afi": "Ipv4",
+            "safi": "Unicast"
+          },
+          "target": "rustbgpd_rib::manager::route_refresh"
+        }
+      },
+      {
+        "original_line": 11257,
+        "event": {
+          "timestamp": "2026-10-11T00:08:34.336656Z",
+          "level": "INFO",
+          "fields": {
+            "message": "peer entered graceful restart",
+            "peer": "127.1.0.1",
+            "restart_time": 180,
+            "stale_routes_time": 360,
+            "llgr_stale_time": 0
+          },
+          "target": "rustbgpd_rib::manager::graceful_restart"
+        }
+      },
+      {
+        "original_line": 11267,
+        "event": {
+          "timestamp": "2026-10-11T00:08:44.393657Z",
+          "level": "INFO",
+          "fields": {
+            "message": "handling route refresh request",
+            "peer": "127.1.0.2",
+            "afi": "Ipv4",
+            "safi": "Unicast"
+          },
+          "target": "rustbgpd_rib::manager::route_refresh"
+        }
+      },
+      {
+        "original_line": 11269,
+        "event": {
+          "timestamp": "2026-10-11T00:08:44.609677Z",
+          "level": "INFO",
+          "fields": {
+            "message": "handling route refresh request",
+            "peer": "127.1.0.3",
+            "afi": "Ipv4",
+            "safi": "Unicast"
+          },
+          "target": "rustbgpd_rib::manager::route_refresh"
+        }
+      },
+      {
+        "original_line": 11279,
+        "event": {
+          "timestamp": "2026-10-11T00:08:44.947433Z",
+          "level": "INFO",
+          "fields": {
+            "message": "session established",
+            "peer": "127.1.0.1",
+            "peer_asn": 64512,
+            "hold_time": 180,
+            "keepalive_interval": 60,
+            "four_octet_as": true,
+            "link_local_next_hop": false
+          },
+          "target": "rustbgpd_transport::session::fsm",
+          "span": {
+            "peer_addr": "127.1.0.1",
+            "peer_group": "",
+            "remote_asn": 64512,
+            "name": "peer"
+          },
+          "spans": [
+            {
+              "peer_addr": "127.1.0.1",
+              "peer_group": "",
+              "remote_asn": 64512,
+              "name": "peer"
+            }
+          ]
+        }
+      },
+      {
+        "original_line": 11280,
+        "event": {
+          "timestamp": "2026-10-11T00:08:44.947468Z",
+          "level": "INFO",
+          "fields": {
+            "message": "peer re-established during GR \u2014 waiting for End-of-RIB",
+            "peer": "127.1.0.1"
+          },
+          "target": "rustbgpd_rib::manager::peer_lifecycle"
+        }
+      },
+      {
+        "original_line": 11281,
+        "event": {
+          "timestamp": "2026-10-11T00:08:45.073164Z",
+          "level": "INFO",
+          "fields": {
+            "message": "sent End-of-RIB",
+            "peer": "127.1.0.1",
+            "afi": "Ipv4",
+            "safi": "Unicast"
+          },
+          "target": "rustbgpd_transport::session::outbound",
+          "span": {
+            "peer_addr": "127.1.0.1",
+            "peer_group": "",
+            "remote_asn": 64512,
+            "name": "peer"
+          },
+          "spans": [
+            {
+              "peer_addr": "127.1.0.1",
+              "peer_group": "",
+              "remote_asn": 64512,
+              "name": "peer"
+            }
+          ]
+        }
+      },
+      {
+        "original_line": 11284,
+        "event": {
+          "timestamp": "2026-10-11T00:08:45.151278Z",
+          "level": "INFO",
+          "fields": {
+            "message": "graceful restart complete \u2014 all End-of-RIB received",
+            "peer": "127.1.0.1"
+          },
+          "target": "rustbgpd_rib::manager::route_refresh"
+        }
+      },
+      {
+        "original_line": 11286,
+        "event": {
+          "timestamp": "2026-10-11T00:08:45.198837Z",
+          "level": "INFO",
+          "fields": {
+            "message": "handling route refresh request",
+            "peer": "127.1.0.2",
+            "afi": "Ipv4",
+            "safi": "Unicast"
+          },
+          "target": "rustbgpd_rib::manager::route_refresh"
+        }
+      },
+      {
+        "original_line": 11288,
+        "event": {
+          "timestamp": "2026-10-11T00:08:45.403521Z",
+          "level": "INFO",
+          "fields": {
+            "message": "handling route refresh request",
+            "peer": "127.1.0.3",
+            "afi": "Ipv4",
+            "safi": "Unicast"
+          },
+          "target": "rustbgpd_rib::manager::route_refresh"
+        }
+      },
+      {
+        "original_line": 11293,
+        "event": {
+          "timestamp": "2026-10-11T00:08:55.708702Z",
+          "level": "INFO",
+          "fields": {
+            "message": "peer entered graceful restart",
+            "peer": "127.1.0.1",
+            "restart_time": 180,
+            "stale_routes_time": 360,
+            "llgr_stale_time": 0
+          },
+          "target": "rustbgpd_rib::manager::graceful_restart"
+        }
+      },
+      {
+        "original_line": 11304,
+        "event": {
+          "timestamp": "2026-10-11T00:09:05.764024Z",
+          "level": "INFO",
+          "fields": {
+            "message": "handling route refresh request",
+            "peer": "127.1.0.3",
+            "afi": "Ipv4",
+            "safi": "Unicast"
+          },
+          "target": "rustbgpd_rib::manager::route_refresh"
+        }
+      },
+      {
+        "original_line": 11305,
+        "event": {
+          "timestamp": "2026-10-11T00:09:05.976308Z",
+          "level": "INFO",
+          "fields": {
+            "message": "handling route refresh request",
+            "peer": "127.1.0.2",
+            "afi": "Ipv4",
+            "safi": "Unicast"
+          },
+          "target": "rustbgpd_rib::manager::route_refresh"
+        }
+      },
+      {
+        "original_line": 11315,
+        "event": {
+          "timestamp": "2026-10-11T00:09:06.318149Z",
+          "level": "INFO",
+          "fields": {
+            "message": "session established",
+            "peer": "127.1.0.1",
+            "peer_asn": 64512,
+            "hold_time": 180,
+            "keepalive_interval": 60,
+            "four_octet_as": true,
+            "link_local_next_hop": false
+          },
+          "target": "rustbgpd_transport::session::fsm",
+          "span": {
+            "peer_addr": "127.1.0.1",
+            "peer_group": "",
+            "remote_asn": 64512,
+            "name": "peer"
+          },
+          "spans": [
+            {
+              "peer_addr": "127.1.0.1",
+              "peer_group": "",
+              "remote_asn": 64512,
+              "name": "peer"
+            }
+          ]
+        }
+      },
+      {
+        "original_line": 11316,
+        "event": {
+          "timestamp": "2026-10-11T00:09:06.318205Z",
+          "level": "INFO",
+          "fields": {
+            "message": "peer re-established during GR \u2014 waiting for End-of-RIB",
+            "peer": "127.1.0.1"
+          },
+          "target": "rustbgpd_rib::manager::peer_lifecycle"
+        }
+      },
+      {
+        "original_line": 11317,
+        "event": {
+          "timestamp": "2026-10-11T00:09:06.445519Z",
+          "level": "INFO",
+          "fields": {
+            "message": "sent End-of-RIB",
+            "peer": "127.1.0.1",
+            "afi": "Ipv4",
+            "safi": "Unicast"
+          },
+          "target": "rustbgpd_transport::session::outbound",
+          "span": {
+            "peer_addr": "127.1.0.1",
+            "peer_group": "",
+            "remote_asn": 64512,
+            "name": "peer"
+          },
+          "spans": [
+            {
+              "peer_addr": "127.1.0.1",
+              "peer_group": "",
+              "remote_asn": 64512,
+              "name": "peer"
+            }
+          ]
+        }
+      },
+      {
+        "original_line": 11320,
+        "event": {
+          "timestamp": "2026-10-11T00:09:06.522873Z",
+          "level": "INFO",
+          "fields": {
+            "message": "graceful restart complete \u2014 all End-of-RIB received",
+            "peer": "127.1.0.1"
+          },
+          "target": "rustbgpd_rib::manager::route_refresh"
+        }
+      },
+      {
+        "original_line": 11323,
+        "event": {
+          "timestamp": "2026-10-11T00:09:06.575028Z",
+          "level": "INFO",
+          "fields": {
+            "message": "handling route refresh request",
+            "peer": "127.1.0.2",
+            "afi": "Ipv4",
+            "safi": "Unicast"
+          },
+          "target": "rustbgpd_rib::manager::route_refresh"
+        }
+      },
+      {
+        "original_line": 11324,
+        "event": {
+          "timestamp": "2026-10-11T00:09:06.784546Z",
+          "level": "INFO",
+          "fields": {
+            "message": "handling route refresh request",
+            "peer": "127.1.0.3",
+            "afi": "Ipv4",
+            "safi": "Unicast"
+          },
+          "target": "rustbgpd_rib::manager::route_refresh"
+        }
+      }
+    ],
+    "full_daemon_scan": {
+      "errors": [],
+      "readiness_failures": []
+    },
+    "quiet_samples": [
+      {
+        "sample": "1",
+        "epoch_s": "1791677226",
+        "load1": "1.46",
+        "pswpin": "2424677",
+        "pswpout": "2447475",
+        "governors": "performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance",
+        "performance_governors": "64",
+        "governor_count": "64",
+        "competitors": "none",
+        "quiet": "true",
+        "failed_dimensions": "none",
+        "original_attempt": "1"
+      },
+      {
+        "sample": "2",
+        "epoch_s": "1791677256",
+        "load1": "1.31",
+        "pswpin": "2424677",
+        "pswpout": "2447475",
+        "governors": "performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance",
+        "performance_governors": "64",
+        "governor_count": "64",
+        "competitors": "none",
+        "quiet": "true",
+        "failed_dimensions": "none",
+        "original_attempt": "2"
+      }
+    ],
+    "exits": {
+      "cell": 0,
+      "harness": 0,
+      "daemon": 0,
+      "metrics": 0
+    },
+    "forced_kill": 0,
+    "integrity": {
+      "binary-integrity": "<ARTIFACTS>/binaries/candidate/rustbgpd: OK\n<ARTIFACTS>/harness/reloadstall: OK\n<ARTIFACTS>/binaries/candidate/rustbgpd: OK\n<ARTIFACTS>/harness/reloadstall: OK\n",
+      "input-integrity": "<SOURCE>/bench/scale/reloadstall/gen-scenario.py: OK\nconfig.toml: OK\nmember.rpol: OK\ngen-a.rpol: OK\ngen-b.rpol: OK\n"
+    },
+    "generated_input_hashes": "995115dc010e24a4886b7712b8b8804a728fd3ebc264aebcf667b13a00fe2f22  config.toml\nfaf7b16a50f72ac85b7805436bba1738622435906cbe3622461d3c14f229fa90  member.rpol\nfaf7b16a50f72ac85b7805436bba1738622435906cbe3622461d3c14f229fa90  gen-a.rpol\nd8be1ba1e9b1cff6e3afcaf772953e19b7dc8e2b46b0bed903337d6193093de0  gen-b.rpol\n",
+    "normalized_generated_inputs": {
+      "config.toml": "6aa2044a6c50c82e4d0cc308551e31b183839713c2b9c1107df1a3acbebcf6f6",
+      "member.rpol": "faf7b16a50f72ac85b7805436bba1738622435906cbe3622461d3c14f229fa90",
+      "gen-a.rpol": "faf7b16a50f72ac85b7805436bba1738622435906cbe3622461d3c14f229fa90",
+      "gen-b.rpol": "d8be1ba1e9b1cff6e3afcaf772953e19b7dc8e2b46b0bed903337d6193093de0"
+    },
+    "generator_hash": "e563659beef5857ee79ddac40e1cff5730c34e424b5ca074a3f9007b5dc0ab42  <SOURCE>/bench/scale/reloadstall/gen-scenario.py\n",
+    "started": "2026-10-10T20:07:05-04:00",
+    "finished": "2026-10-10T20:09:17-04:00",
+    "outer_cell_exit": 0,
+    "cell_log": "2026-10-11T00:07:36Z cell start peers=700 prefixes=400400 k=1 rounds=3\n2026-10-11T00:09:17Z cell done harness_rc=0 daemon_rc=0 metrics_rc=0 timeout=0 forced_kill=0\n2026-10-11T00:09:17Z cell pass\n"
+  },
+  "baseline-r2": {
+    "harness_log": "# reloadstall peers=700 changed_peers=700 stable_peers=0 prefixes=400400 per_peer=572 pid=4105444\nestablished 700 at 0.8s\nestablishment transport_retries=0 recovered_peers=0\nfirst_exact_bitmap,mode=flapstorm,peers=700,total=400400,per_peer=572,expected=399828,completed=700,min_unique=399828,max_unique=399828\nconverged (>= 399828/observer) at 3.4s rss_mib=398\ncontrol_maxgap_ms: p50=19.28 p95=20.18 max=41.97 (n=700)\ncontrol_rss_mib 347\nconverged_rejoin_csv_header,round,peers_total,peers_flapped,prefixes,rejoin_p50_s,rejoin_max_s,survivor_maxgap_ms,readiness_samples,rss_mib,sessions_up,parse_errors\nconverged_table_checkpoint,round=1,phase=disconnected,observers=1:2,unique=399828,eor=present\nconverged_rejoin 1 reconnect transport_retries=0\nflap 1 peer 0 rejoin_complete_s=0.120091 eor_before_full_table=false eor=present\nflap 1 rejoin_complete_s: p50=0.12 p95=0.12 max=0.12 (n=1)\nconverged_table_checkpoint,round=1,phase=settled,observers=1:2,unique=399828,eor=present\nconverged_rejoin 1 survivor_maxgap_ms: p50=98.17 p95=99.81 max=100.01 (n=699)\nconverged_rejoin_csv,1,700,1,400400,0.120091,0.120091,100.007000,12,407,700,0\nconverged_table_checkpoint,round=2,phase=disconnected,observers=1:2,unique=399828,eor=present\nconverged_rejoin 2 reconnect transport_retries=0\nflap 2 peer 0 rejoin_complete_s=0.125062 eor_before_full_table=false eor=present\nflap 2 rejoin_complete_s: p50=0.13 p95=0.13 max=0.13 (n=1)\nconverged_table_checkpoint,round=2,phase=settled,observers=1:2,unique=399828,eor=present\nconverged_rejoin 2 survivor_maxgap_ms: p50=101.67 p95=102.31 max=103.41 (n=699)\nconverged_rejoin_csv,2,700,1,400400,0.125062,0.125062,103.412000,12,416,700,0\nconverged_table_checkpoint,round=3,phase=disconnected,observers=1:2,unique=399828,eor=present\nconverged_rejoin 3 reconnect transport_retries=0\nflap 3 peer 0 rejoin_complete_s=0.127056 eor_before_full_table=false eor=present\nflap 3 rejoin_complete_s: p50=0.13 p95=0.13 max=0.13 (n=1)\nconverged_table_checkpoint,round=3,phase=settled,observers=1:2,unique=399828,eor=present\nconverged_rejoin 3 survivor_maxgap_ms: p50=105.64 p95=106.47 max=106.65 (n=699)\nconverged_rejoin_csv,3,700,1,400400,0.127056,0.127056,106.652000,12,417,700,0\ndone rss_mib=349\n",
+    "selected_daemon_events": [
+      {
+        "original_line": 3557,
+        "event": {
+          "timestamp": "2026-10-11T00:10:18.136504Z",
+          "level": "INFO",
+          "fields": {
+            "message": "session established",
+            "peer": "127.1.0.1",
+            "peer_asn": 64512,
+            "hold_time": 180,
+            "keepalive_interval": 60,
+            "four_octet_as": true,
+            "link_local_next_hop": false
+          },
+          "target": "rustbgpd_transport::session::fsm",
+          "span": {
+            "peer_addr": "127.1.0.1",
+            "peer_group": "",
+            "remote_asn": 64512,
+            "name": "peer"
+          },
+          "spans": [
+            {
+              "peer_addr": "127.1.0.1",
+              "peer_group": "",
+              "remote_asn": 64512,
+              "name": "peer"
+            }
+          ]
+        }
+      },
+      {
+        "original_line": 3562,
+        "event": {
+          "timestamp": "2026-10-11T00:10:18.136608Z",
+          "level": "INFO",
+          "fields": {
+            "message": "sent End-of-RIB",
+            "peer": "127.1.0.1",
+            "afi": "Ipv4",
+            "safi": "Unicast"
+          },
+          "target": "rustbgpd_transport::session::outbound",
+          "span": {
+            "peer_addr": "127.1.0.1",
+            "peer_group": "",
+            "remote_asn": 64512,
+            "name": "peer"
+          },
+          "spans": [
+            {
+              "peer_addr": "127.1.0.1",
+              "peer_group": "",
+              "remote_asn": 64512,
+              "name": "peer"
+            }
+          ]
+        }
+      },
+      {
+        "original_line": 11221,
+        "event": {
+          "timestamp": "2026-10-11T00:10:54.582339Z",
+          "level": "INFO",
+          "fields": {
+            "message": "peer entered graceful restart",
+            "peer": "127.1.0.1",
+            "restart_time": 180,
+            "stale_routes_time": 360,
+            "llgr_stale_time": 0
+          },
+          "target": "rustbgpd_rib::manager::graceful_restart"
+        }
+      },
+      {
+        "original_line": 11231,
+        "event": {
+          "timestamp": "2026-10-11T00:11:04.642314Z",
+          "level": "INFO",
+          "fields": {
+            "message": "handling route refresh request",
+            "peer": "127.1.0.2",
+            "afi": "Ipv4",
+            "safi": "Unicast"
+          },
+          "target": "rustbgpd_rib::manager::route_refresh"
+        }
+      },
+      {
+        "original_line": 11233,
+        "event": {
+          "timestamp": "2026-10-11T00:11:04.853346Z",
+          "level": "INFO",
+          "fields": {
+            "message": "handling route refresh request",
+            "peer": "127.1.0.3",
+            "afi": "Ipv4",
+            "safi": "Unicast"
+          },
+          "target": "rustbgpd_rib::manager::route_refresh"
+        }
+      },
+      {
+        "original_line": 11243,
+        "event": {
+          "timestamp": "2026-10-11T00:11:05.199014Z",
+          "level": "INFO",
+          "fields": {
+            "message": "session established",
+            "peer": "127.1.0.1",
+            "peer_asn": 64512,
+            "hold_time": 180,
+            "keepalive_interval": 60,
+            "four_octet_as": true,
+            "link_local_next_hop": false
+          },
+          "target": "rustbgpd_transport::session::fsm",
+          "span": {
+            "peer_addr": "127.1.0.1",
+            "peer_group": "",
+            "remote_asn": 64512,
+            "name": "peer"
+          },
+          "spans": [
+            {
+              "peer_addr": "127.1.0.1",
+              "peer_group": "",
+              "remote_asn": 64512,
+              "name": "peer"
+            }
+          ]
+        }
+      },
+      {
+        "original_line": 11244,
+        "event": {
+          "timestamp": "2026-10-11T00:11:05.199048Z",
+          "level": "INFO",
+          "fields": {
+            "message": "peer re-established during GR \u2014 waiting for End-of-RIB",
+            "peer": "127.1.0.1"
+          },
+          "target": "rustbgpd_rib::manager::peer_lifecycle"
+        }
+      },
+      {
+        "original_line": 11245,
+        "event": {
+          "timestamp": "2026-10-11T00:11:05.318007Z",
+          "level": "INFO",
+          "fields": {
+            "message": "sent End-of-RIB",
+            "peer": "127.1.0.1",
+            "afi": "Ipv4",
+            "safi": "Unicast"
+          },
+          "target": "rustbgpd_transport::session::outbound",
+          "span": {
+            "peer_addr": "127.1.0.1",
+            "peer_group": "",
+            "remote_asn": 64512,
+            "name": "peer"
+          },
+          "spans": [
+            {
+              "peer_addr": "127.1.0.1",
+              "peer_group": "",
+              "remote_asn": 64512,
+              "name": "peer"
+            }
+          ]
+        }
+      },
+      {
+        "original_line": 11248,
+        "event": {
+          "timestamp": "2026-10-11T00:11:05.403147Z",
+          "level": "INFO",
+          "fields": {
+            "message": "graceful restart complete \u2014 all End-of-RIB received",
+            "peer": "127.1.0.1"
+          },
+          "target": "rustbgpd_rib::manager::route_refresh"
+        }
+      },
+      {
+        "original_line": 11250,
+        "event": {
+          "timestamp": "2026-10-11T00:11:05.448727Z",
+          "level": "INFO",
+          "fields": {
+            "message": "handling route refresh request",
+            "peer": "127.1.0.2",
+            "afi": "Ipv4",
+            "safi": "Unicast"
+          },
+          "target": "rustbgpd_rib::manager::route_refresh"
+        }
+      },
+      {
+        "original_line": 11252,
+        "event": {
+          "timestamp": "2026-10-11T00:11:05.672653Z",
+          "level": "INFO",
+          "fields": {
+            "message": "handling route refresh request",
+            "peer": "127.1.0.3",
+            "afi": "Ipv4",
+            "safi": "Unicast"
+          },
+          "target": "rustbgpd_rib::manager::route_refresh"
+        }
+      },
+      {
+        "original_line": 11257,
+        "event": {
+          "timestamp": "2026-10-11T00:11:15.959282Z",
+          "level": "INFO",
+          "fields": {
+            "message": "peer entered graceful restart",
+            "peer": "127.1.0.1",
+            "restart_time": 180,
+            "stale_routes_time": 360,
+            "llgr_stale_time": 0
+          },
+          "target": "rustbgpd_rib::manager::graceful_restart"
+        }
+      },
+      {
+        "original_line": 11268,
+        "event": {
+          "timestamp": "2026-10-11T00:11:26.014583Z",
+          "level": "INFO",
+          "fields": {
+            "message": "handling route refresh request",
+            "peer": "127.1.0.2",
+            "afi": "Ipv4",
+            "safi": "Unicast"
+          },
+          "target": "rustbgpd_rib::manager::route_refresh"
+        }
+      },
+      {
+        "original_line": 11269,
+        "event": {
+          "timestamp": "2026-10-11T00:11:26.236696Z",
+          "level": "INFO",
+          "fields": {
+            "message": "handling route refresh request",
+            "peer": "127.1.0.3",
+            "afi": "Ipv4",
+            "safi": "Unicast"
+          },
+          "target": "rustbgpd_rib::manager::route_refresh"
+        }
+      },
+      {
+        "original_line": 11279,
+        "event": {
+          "timestamp": "2026-10-11T00:11:26.568222Z",
+          "level": "INFO",
+          "fields": {
+            "message": "session established",
+            "peer": "127.1.0.1",
+            "peer_asn": 64512,
+            "hold_time": 180,
+            "keepalive_interval": 60,
+            "four_octet_as": true,
+            "link_local_next_hop": false
+          },
+          "target": "rustbgpd_transport::session::fsm",
+          "span": {
+            "peer_addr": "127.1.0.1",
+            "peer_group": "",
+            "remote_asn": 64512,
+            "name": "peer"
+          },
+          "spans": [
+            {
+              "peer_addr": "127.1.0.1",
+              "peer_group": "",
+              "remote_asn": 64512,
+              "name": "peer"
+            }
+          ]
+        }
+      },
+      {
+        "original_line": 11280,
+        "event": {
+          "timestamp": "2026-10-11T00:11:26.569091Z",
+          "level": "INFO",
+          "fields": {
+            "message": "peer re-established during GR \u2014 waiting for End-of-RIB",
+            "peer": "127.1.0.1"
+          },
+          "target": "rustbgpd_rib::manager::peer_lifecycle"
+        }
+      },
+      {
+        "original_line": 11281,
+        "event": {
+          "timestamp": "2026-10-11T00:11:26.692070Z",
+          "level": "INFO",
+          "fields": {
+            "message": "sent End-of-RIB",
+            "peer": "127.1.0.1",
+            "afi": "Ipv4",
+            "safi": "Unicast"
+          },
+          "target": "rustbgpd_transport::session::outbound",
+          "span": {
+            "peer_addr": "127.1.0.1",
+            "peer_group": "",
+            "remote_asn": 64512,
+            "name": "peer"
+          },
+          "spans": [
+            {
+              "peer_addr": "127.1.0.1",
+              "peer_group": "",
+              "remote_asn": 64512,
+              "name": "peer"
+            }
+          ]
+        }
+      },
+      {
+        "original_line": 11284,
+        "event": {
+          "timestamp": "2026-10-11T00:11:26.772310Z",
+          "level": "INFO",
+          "fields": {
+            "message": "graceful restart complete \u2014 all End-of-RIB received",
+            "peer": "127.1.0.1"
+          },
+          "target": "rustbgpd_rib::manager::route_refresh"
+        }
+      },
+      {
+        "original_line": 11287,
+        "event": {
+          "timestamp": "2026-10-11T00:11:26.816784Z",
+          "level": "INFO",
+          "fields": {
+            "message": "handling route refresh request",
+            "peer": "127.1.0.3",
+            "afi": "Ipv4",
+            "safi": "Unicast"
+          },
+          "target": "rustbgpd_rib::manager::route_refresh"
+        }
+      },
+      {
+        "original_line": 11288,
+        "event": {
+          "timestamp": "2026-10-11T00:11:27.031879Z",
+          "level": "INFO",
+          "fields": {
+            "message": "handling route refresh request",
+            "peer": "127.1.0.2",
+            "afi": "Ipv4",
+            "safi": "Unicast"
+          },
+          "target": "rustbgpd_rib::manager::route_refresh"
+        }
+      },
+      {
+        "original_line": 11293,
+        "event": {
+          "timestamp": "2026-10-11T00:11:37.326873Z",
+          "level": "INFO",
+          "fields": {
+            "message": "peer entered graceful restart",
+            "peer": "127.1.0.1",
+            "restart_time": 180,
+            "stale_routes_time": 360,
+            "llgr_stale_time": 0
+          },
+          "target": "rustbgpd_rib::manager::graceful_restart"
+        }
+      },
+      {
+        "original_line": 11303,
+        "event": {
+          "timestamp": "2026-10-11T00:11:47.381089Z",
+          "level": "INFO",
+          "fields": {
+            "message": "handling route refresh request",
+            "peer": "127.1.0.2",
+            "afi": "Ipv4",
+            "safi": "Unicast"
+          },
+          "target": "rustbgpd_rib::manager::route_refresh"
+        }
+      },
+      {
+        "original_line": 11305,
+        "event": {
+          "timestamp": "2026-10-11T00:11:47.597927Z",
+          "level": "INFO",
+          "fields": {
+            "message": "handling route refresh request",
+            "peer": "127.1.0.3",
+            "afi": "Ipv4",
+            "safi": "Unicast"
+          },
+          "target": "rustbgpd_rib::manager::route_refresh"
+        }
+      },
+      {
+        "original_line": 11315,
+        "event": {
+          "timestamp": "2026-10-11T00:11:47.935779Z",
+          "level": "INFO",
+          "fields": {
+            "message": "session established",
+            "peer": "127.1.0.1",
+            "peer_asn": 64512,
+            "hold_time": 180,
+            "keepalive_interval": 60,
+            "four_octet_as": true,
+            "link_local_next_hop": false
+          },
+          "target": "rustbgpd_transport::session::fsm",
+          "span": {
+            "peer_addr": "127.1.0.1",
+            "peer_group": "",
+            "remote_asn": 64512,
+            "name": "peer"
+          },
+          "spans": [
+            {
+              "peer_addr": "127.1.0.1",
+              "peer_group": "",
+              "remote_asn": 64512,
+              "name": "peer"
+            }
+          ]
+        }
+      },
+      {
+        "original_line": 11316,
+        "event": {
+          "timestamp": "2026-10-11T00:11:47.935819Z",
+          "level": "INFO",
+          "fields": {
+            "message": "peer re-established during GR \u2014 waiting for End-of-RIB",
+            "peer": "127.1.0.1"
+          },
+          "target": "rustbgpd_rib::manager::peer_lifecycle"
+        }
+      },
+      {
+        "original_line": 11317,
+        "event": {
+          "timestamp": "2026-10-11T00:11:48.061569Z",
+          "level": "INFO",
+          "fields": {
+            "message": "sent End-of-RIB",
+            "peer": "127.1.0.1",
+            "afi": "Ipv4",
+            "safi": "Unicast"
+          },
+          "target": "rustbgpd_transport::session::outbound",
+          "span": {
+            "peer_addr": "127.1.0.1",
+            "peer_group": "",
+            "remote_asn": 64512,
+            "name": "peer"
+          },
+          "spans": [
+            {
+              "peer_addr": "127.1.0.1",
+              "peer_group": "",
+              "remote_asn": 64512,
+              "name": "peer"
+            }
+          ]
+        }
+      },
+      {
+        "original_line": 11320,
+        "event": {
+          "timestamp": "2026-10-11T00:11:48.139434Z",
+          "level": "INFO",
+          "fields": {
+            "message": "graceful restart complete \u2014 all End-of-RIB received",
+            "peer": "127.1.0.1"
+          },
+          "target": "rustbgpd_rib::manager::route_refresh"
+        }
+      },
+      {
+        "original_line": 11323,
+        "event": {
+          "timestamp": "2026-10-11T00:11:48.193737Z",
+          "level": "INFO",
+          "fields": {
+            "message": "handling route refresh request",
+            "peer": "127.1.0.2",
+            "afi": "Ipv4",
+            "safi": "Unicast"
+          },
+          "target": "rustbgpd_rib::manager::route_refresh"
+        }
+      },
+      {
+        "original_line": 11324,
+        "event": {
+          "timestamp": "2026-10-11T00:11:48.401915Z",
+          "level": "INFO",
+          "fields": {
+            "message": "handling route refresh request",
+            "peer": "127.1.0.3",
+            "afi": "Ipv4",
+            "safi": "Unicast"
+          },
+          "target": "rustbgpd_rib::manager::route_refresh"
+        }
+      }
+    ],
+    "full_daemon_scan": {
+      "errors": [],
+      "readiness_failures": []
+    },
+    "quiet_samples": [
+      {
+        "sample": "1",
+        "epoch_s": "1791677387",
+        "load1": "1.70",
+        "pswpin": "2424677",
+        "pswpout": "2447475",
+        "governors": "performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance",
+        "performance_governors": "64",
+        "governor_count": "64",
+        "competitors": "none",
+        "quiet": "true",
+        "failed_dimensions": "none",
+        "original_attempt": "2"
+      },
+      {
+        "sample": "2",
+        "epoch_s": "1791677417",
+        "load1": "1.49",
+        "pswpin": "2424677",
+        "pswpout": "2447475",
+        "governors": "performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance,performance",
+        "performance_governors": "64",
+        "governor_count": "64",
+        "competitors": "none",
+        "quiet": "true",
+        "failed_dimensions": "none",
+        "original_attempt": "3"
+      }
+    ],
+    "exits": {
+      "cell": 0,
+      "harness": 0,
+      "daemon": 0,
+      "metrics": 0
+    },
+    "forced_kill": 0,
+    "integrity": {
+      "binary-integrity": "<ARTIFACTS>/binaries/baseline/rustbgpd: OK\n<ARTIFACTS>/harness/reloadstall: OK\n<ARTIFACTS>/binaries/baseline/rustbgpd: OK\n<ARTIFACTS>/harness/reloadstall: OK\n",
+      "input-integrity": "<SOURCE>/bench/scale/reloadstall/gen-scenario.py: OK\nconfig.toml: OK\nmember.rpol: OK\ngen-a.rpol: OK\ngen-b.rpol: OK\n"
+    },
+    "generated_input_hashes": "83204e4f3d0529af1bfbd9df05b195ae5e1096ad36eebb405dd256847fc630d6  config.toml\nfaf7b16a50f72ac85b7805436bba1738622435906cbe3622461d3c14f229fa90  member.rpol\nfaf7b16a50f72ac85b7805436bba1738622435906cbe3622461d3c14f229fa90  gen-a.rpol\nd8be1ba1e9b1cff6e3afcaf772953e19b7dc8e2b46b0bed903337d6193093de0  gen-b.rpol\n",
+    "normalized_generated_inputs": {
+      "config.toml": "6aa2044a6c50c82e4d0cc308551e31b183839713c2b9c1107df1a3acbebcf6f6",
+      "member.rpol": "faf7b16a50f72ac85b7805436bba1738622435906cbe3622461d3c14f229fa90",
+      "gen-a.rpol": "faf7b16a50f72ac85b7805436bba1738622435906cbe3622461d3c14f229fa90",
+      "gen-b.rpol": "d8be1ba1e9b1cff6e3afcaf772953e19b7dc8e2b46b0bed903337d6193093de0"
+    },
+    "generator_hash": "e563659beef5857ee79ddac40e1cff5730c34e424b5ca074a3f9007b5dc0ab42  <SOURCE>/bench/scale/reloadstall/gen-scenario.py\n",
+    "started": "2026-10-10T20:09:17-04:00",
+    "finished": "2026-10-10T20:11:59-04:00",
+    "outer_cell_exit": 0,
+    "cell_log": "2026-10-11T00:10:17Z cell start peers=700 prefixes=400400 k=1 rounds=3\n2026-10-11T00:11:59Z cell done harness_rc=0 daemon_rc=0 metrics_rc=0 timeout=0 forced_kill=0\n2026-10-11T00:11:59Z cell pass\n"
+  }
+}

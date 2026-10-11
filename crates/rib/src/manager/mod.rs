@@ -34,10 +34,13 @@ mod tests;
 use crate::ERR_REFRESH_TIMEOUT;
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
+use std::future::Future;
 use std::hash::{BuildHasher, Hasher};
 use std::net::{IpAddr, Ipv4Addr};
 use std::num::NonZeroU32;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
+use std::task::{Context, Poll, Wake, Waker};
 
 use rustbgpd_policy::PolicyChain;
 use rustbgpd_rpki::VrpTable;
@@ -891,7 +894,7 @@ pub struct RibManager {
     summary_rx: Option<mpsc::Receiver<RibSummaryQuery>>,
     /// Readiness and frozen values are shared across synchronous replacement
     /// helpers. Canonical RIB state remains actor-owned.
-    replacement_readiness: Option<Arc<Mutex<ReplacementReadiness>>>,
+    replacement_readiness: Option<Arc<ReplacementReadinessContext>>,
     #[cfg(test)]
     replacement_readiness_test_hook: Option<Arc<dyn Fn(&'static str) + Send + Sync>>,
     #[cfg(test)]
@@ -1136,6 +1139,34 @@ impl PostCommitQueryTrace {
     }
 }
 
+/// A channel wake marks work pending without sharing canonical RIB state.
+/// Keep this separate from the context: receiver-held wakers must not retain
+/// the context that owns those receivers.
+struct ReadinessWake {
+    pending: AtomicBool,
+}
+
+impl Wake for ReadinessWake {
+    fn wake(self: Arc<Self>) {
+        self.wake_by_ref();
+    }
+
+    fn wake_by_ref(self: &Arc<Self>) {
+        self.pending.store(true, Ordering::Release);
+    }
+}
+
+struct ReplacementReadinessContext {
+    wake: Arc<ReadinessWake>,
+    state: Mutex<ReplacementReadiness>,
+}
+
+/// Register the checkpoint wake when empty, without charging the synchronous
+/// owner's Tokio task budget. The caller retains the existing per-lane cap.
+fn poll_readiness_query<T>(rx: &mut mpsc::Receiver<T>, cx: &mut Context<'_>) -> Poll<Option<T>> {
+    std::pin::pin!(tokio::task::unconstrained(rx.recv())).poll(cx)
+}
+
 struct ReplacementReadiness {
     summaries: Option<replacement_summaries::ReplacementSummaries>,
     #[cfg(feature = "bench-internals")]
@@ -1174,13 +1205,14 @@ struct ReplacementReadinessReceipt {
     reason = "callbacks borrow the actor's optional shared fence handle without creating another owner"
 )]
 fn replacement_readiness_checkpoint_at(
-    readiness: &Option<Arc<Mutex<ReplacementReadiness>>>,
+    readiness: &Option<Arc<ReplacementReadinessContext>>,
     stage: &'static str,
     force: bool,
 ) {
     #[cfg(test)]
     if let Some(context) = readiness {
         let observer = context
+            .state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .observer
@@ -1202,59 +1234,63 @@ fn replacement_readiness_checkpoint_at(
     reason = "callbacks borrow the actor's optional shared fence handle without creating another owner"
 )]
 fn replacement_readiness_checkpoint(
-    readiness: &Option<Arc<Mutex<ReplacementReadiness>>>,
+    readiness: &Option<Arc<ReplacementReadinessContext>>,
     force: bool,
 ) {
-    let Some(readiness) = readiness else {
+    let Some(context) = readiness else {
         return;
     };
-    let mut readiness = readiness
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    // The receipt measures opportunity gaps: the longest interval between
-    // checkpoints at which a queued query would have been served, using the
-    // same eligibility as the service pass below.
+    // Instrumented builds still measure every eligible opportunity, including
+    // idle checkpoints. Once armed, production idle dispatch needs no mutex
+    // or clock. A capped drain retains its hint until it can rearm below.
     #[cfg(any(test, feature = "bench-internals"))]
-    if force || readiness.last_service.elapsed() >= readiness.budget {
-        let now = tokio::time::Instant::now();
-        readiness.max_gap = readiness
-            .max_gap
-            .max(now.duration_since(readiness.last_opportunity));
-        readiness.last_opportunity = now;
-    }
-    // Staging calls this per element and both lanes are usually empty, so
-    // skip the clock read. `last_service` then stays at the last real pass:
-    // a query queued after an idle stretch is served at the next checkpoint,
-    // one queued within the budget of a pass waits as before.
-    if !force
-        && readiness.rx.as_ref().is_none_or(mpsc::Receiver::is_empty)
-        && readiness
-            .summaries
-            .as_ref()
-            .is_none_or(|summaries| summaries.rx.is_empty())
     {
+        let mut readiness = context
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if force || readiness.last_service.elapsed() >= readiness.budget {
+            let now = tokio::time::Instant::now();
+            readiness.max_gap = readiness
+                .max_gap
+                .max(now.duration_since(readiness.last_opportunity));
+            readiness.last_opportunity = now;
+        }
+    }
+    service_replacement_readiness(context, force);
+}
+
+fn service_replacement_readiness(context: &ReplacementReadinessContext, force: bool) {
+    if !force && !context.wake.pending.load(Ordering::Acquire) {
         return;
     }
+    let mut readiness = context
+        .state
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     if !force && readiness.last_service.elapsed() < readiness.budget {
         return;
     }
-    readiness.last_service = tokio::time::Instant::now();
-    #[cfg(any(test, feature = "bench-internals"))]
-    {
-        readiness.last_opportunity = readiness.last_service;
-    }
+    let started = tokio::time::Instant::now();
+    // Clear before polling: a concurrent enqueue either appears in this pass
+    // or wakes the flag after poll_recv registers it. Never clear after a drain.
+    context.wake.pending.store(false, Ordering::Release);
+    let waker = Waker::from(Arc::clone(&context.wake));
+    let mut cx = Context::from_waker(&waker);
+    let mut received = 0;
     for _ in 0..QUERY_BUDGET_PER_CHUNK {
         let query = match readiness.rx.as_mut() {
-            Some(rx) => match rx.try_recv() {
-                Ok(query) => query,
-                Err(mpsc::error::TryRecvError::Empty) => break,
-                Err(mpsc::error::TryRecvError::Disconnected) => {
+            Some(rx) => match poll_readiness_query(rx, &mut cx) {
+                Poll::Ready(Some(query)) => query,
+                Poll::Pending => break,
+                Poll::Ready(None) => {
                     readiness.rx = None;
                     break;
                 }
             },
             None => break,
         };
+        received += 1;
         let RibReadinessQuery::LocRibCount { reply, enqueued } = query;
         // Selection release shares the owner and its healthy bound, but an
         // operator reading `/readyz` must learn which mechanism is running.
@@ -1283,8 +1319,25 @@ fn replacement_readiness_checkpoint(
             readiness.serviced += 1;
         }
     }
+    if received == QUERY_BUDGET_PER_CHUNK {
+        // The cap can stop before an empty poll registers the next wake.
+        context.wake.wake_by_ref();
+    }
     if let Some(summaries) = readiness.summaries.as_mut() {
-        summaries.drain();
+        let count = summaries.drain(&mut cx);
+        if count == QUERY_BUDGET_PER_CHUNK {
+            context.wake.wake_by_ref();
+        }
+        received += count;
+    }
+    // A close or a coalesced wake can leave no query. As before, idle passes
+    // must not postpone service for the next query by advancing this clock.
+    if force || received != 0 {
+        readiness.last_service = started;
+        #[cfg(any(test, feature = "bench-internals"))]
+        {
+            readiness.last_opportunity = started;
+        }
     }
 }
 
@@ -2077,26 +2130,31 @@ impl RibManager {
             return work(self);
         }
         let started = tokio::time::Instant::now() - age;
-        self.replacement_readiness = Some(Arc::new(Mutex::new(ReplacementReadiness {
-            summaries: None,
-            #[cfg(feature = "bench-internals")]
-            capacities: HashMap::new(),
-            #[cfg(test)]
-            observer: self.replacement_readiness_test_hook.clone(),
-            rx: self.readiness_rx.take(),
-            metrics: self.metrics.clone(),
-            count: self.loc_rib.len(),
-            selection_release,
-            started,
-            last_service: tokio::time::Instant::now(),
-            budget: self.flush_poll_budget.min(FLUSH_POLL_BUDGET),
-            #[cfg(any(test, feature = "bench-internals"))]
-            last_opportunity: tokio::time::Instant::now(),
-            #[cfg(any(test, feature = "bench-internals"))]
-            max_gap: std::time::Duration::ZERO,
-            #[cfg(any(test, feature = "bench-internals"))]
-            serviced: 0,
-        })));
+        self.replacement_readiness = Some(Arc::new(ReplacementReadinessContext {
+            wake: Arc::new(ReadinessWake {
+                pending: AtomicBool::new(true),
+            }),
+            state: Mutex::new(ReplacementReadiness {
+                summaries: None,
+                #[cfg(feature = "bench-internals")]
+                capacities: HashMap::new(),
+                #[cfg(test)]
+                observer: self.replacement_readiness_test_hook.clone(),
+                rx: self.readiness_rx.take(),
+                metrics: self.metrics.clone(),
+                count: self.loc_rib.len(),
+                selection_release,
+                started,
+                last_service: tokio::time::Instant::now(),
+                budget: self.flush_poll_budget.min(FLUSH_POLL_BUDGET),
+                #[cfg(any(test, feature = "bench-internals"))]
+                last_opportunity: tokio::time::Instant::now(),
+                #[cfg(any(test, feature = "bench-internals"))]
+                max_gap: std::time::Duration::ZERO,
+                #[cfg(any(test, feature = "bench-internals"))]
+                serviced: 0,
+            }),
+        }));
         self.replacement_checkpoint(true);
         self.record_replacement_capacities();
         let result = work(self);
@@ -2112,6 +2170,7 @@ impl RibManager {
             "readiness callback escaped its command frame"
         );
         let mut readiness = context
+            .state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         debug_assert_eq!(readiness.count, self.loc_rib.len());
@@ -2144,6 +2203,7 @@ impl RibManager {
     fn selection_readiness_checkpoint(&self) {
         if let Some(context) = &self.replacement_readiness {
             let mut context = context
+                .state
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             if !context.selection_release {
@@ -2177,6 +2237,7 @@ impl RibManager {
         #[cfg(feature = "bench-internals")]
         if let Some(context) = &self.replacement_readiness {
             let mut context = context
+                .state
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             let maximum = context.capacities.entry(name).or_default();
