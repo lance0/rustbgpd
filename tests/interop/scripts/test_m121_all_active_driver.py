@@ -58,6 +58,108 @@ class HistoricalComparisonTests(unittest.TestCase):
             driver.verify_historical_flows(a, b, True)
 
 
+class FrrVersionTests(unittest.TestCase):
+    def test_pinned_release_and_observed_container_banner(self):
+        for version in ('10.7.1', '10.7.1_git'):
+            driver.verify_frr_version(f'FRRouting {version} (a) on Linux(6.17.0-1022-azure).\n')
+
+    def test_other_releases_and_unrecognized_suffixes_are_rejected(self):
+        for version in ('10.7.10', '10.7.2', '10.7.1_gitfoo', '10.7.1_git_git', '10.7.1-dev', '10.7.1.1'):
+            with self.subTest(version=version), self.assertRaises(AssertionError):
+                driver.verify_frr_version(f'FRRouting {version} (a) on Linux.\n')
+
+
+class NamespaceCleanupTests(unittest.TestCase):
+    def test_frr_nodes_preserve_the_pinned_images_init_entrypoint(self):
+        source = (Path(__file__).resolve().parents[1] / 'm121-evpn-all-active-frr.clab.yml').read_text()
+        for node in ('a', 'r'):
+            section = re.search(rf'(?ms)^    {node}:\n(.*?)(?=^    \S|\Z)', source).group(1)
+            self.assertNotIn('entrypoint:', section)
+            self.assertIn('      cmd: /bin/sleep infinity', section)
+            self.assertIn('      image: quay.io/frrouting/frr:10.7.1', section)
+
+    def test_parent_namespace_mount_is_initialized_before_sibling_handles(self):
+        with tempfile.TemporaryDirectory() as directory, \
+             patch.object(driver, 'NETNS_ROOT', Path(directory)), \
+             patch.object(driver, 'NAMESPACE_HANDLES', {}), \
+             patch.object(driver, 'PIDS', dict(a=101, r=102)), \
+             patch.object(driver, 'run', return_value='') as run:
+            driver.setup_namespaces()
+            commands = [call.args for call in run.call_args_list]
+            self.assertEqual(commands[:3], [('ip', 'netns', 'add', node) for node in ('b', 'ce', 'hr')])
+            self.assertEqual(commands[3:], [('mount', '--bind', f'/hostproc/{pid}/ns/net', str(Path(directory, node)))
+                                           for node, pid in [('a', 101), ('r', 102)]])
+            self.assertEqual(driver.NAMESPACE_HANDLES, dict(a=True, r=True))
+
+    def cleanup_context(self, stack, directory):
+        stack.enter_context(patch.object(driver, 'OUT', Path(directory)))
+        stack.enter_context(patch.object(driver, 'NETNS_ROOT', Path(directory)))
+        stack.enter_context(patch.object(driver, 'DAEMON', None))
+        stack.enter_context(patch.object(driver, 'cleanup_diagnostics'))
+        stack.enter_context(patch.object(driver, 'stop_captures'))
+        stack.enter_context(patch.object(driver, 'ns'))
+
+    def test_partial_bind_failure_removes_only_successfully_mounted_handles(self):
+        with tempfile.TemporaryDirectory() as directory, contextlib.ExitStack() as stack:
+            self.cleanup_context(stack, directory)
+            stack.enter_context(patch.object(driver, 'NAMESPACE_HANDLES', {}))
+            stack.enter_context(patch.object(driver, 'PIDS', dict(a=101, r=102)))
+            def setup_command(*args):
+                if args[:2] == ('mount', '--bind') and args[2] == '/hostproc/102/ns/net':
+                    raise RuntimeError('second mount failed')
+                return ''
+            with patch.object(driver, 'run', side_effect=setup_command):
+                with self.assertRaisesRegex(RuntimeError, 'second mount failed'):
+                    driver.setup_namespaces()
+            self.assertEqual(driver.NAMESPACE_HANDLES, dict(a=True, r=False))
+            with patch.object(driver, 'run', return_value='') as run, patch.object(driver, 'frr_run'):
+                driver.cleanup()
+            self.assertEqual([call.args for call in run.call_args_list if call.args[0] == 'umount'],
+                             [('umount', str(Path(directory, 'a')))])
+            self.assertEqual(driver.NAMESPACE_HANDLES, {})
+            self.assertFalse(Path(directory, 'a').exists())
+            self.assertFalse(Path(directory, 'r').exists())
+
+    def test_stop_and_first_unmount_failures_do_not_skip_other_owned_cleanup(self):
+        with tempfile.TemporaryDirectory() as directory, contextlib.ExitStack() as stack:
+            self.cleanup_context(stack, directory)
+            stack.enter_context(patch.object(driver, 'NAMESPACE_HANDLES', dict(a=True, r=True)))
+            for node in ('a', 'r'):
+                Path(directory, node).touch()
+            def command(*args, **kwargs):
+                if args == ('umount', str(Path(directory, 'a'))):
+                    raise RuntimeError('first unmount failed')
+                return 'a\n' if args == ('ip', 'netns', 'list') else ''
+            with patch.object(driver, 'run', side_effect=command) as run, \
+                 patch.object(driver, 'frr_run', side_effect=[RuntimeError('stop timed out'), '']) as frr:
+                with self.assertRaises(AssertionError):
+                    driver.cleanup()
+            self.assertEqual([call.args[0] for call in frr.call_args_list], ['a', 'r'])
+            self.assertTrue(all(call.kwargs.get('check', True) for call in frr.call_args_list))
+            self.assertIn(('umount', str(Path(directory, 'r'))), [call.args for call in run.call_args_list])
+            self.assertEqual(driver.NAMESPACE_HANDLES, dict(a=True))
+            errors = json.loads(Path(directory, 'cleanup.json').read_text())['errors']
+            self.assertTrue(any('stop timed out' in error for error in errors))
+            self.assertTrue(any('first unmount failed' in error for error in errors))
+            self.assertTrue(any('owned namespace handles remain' in error for error in errors))
+
+    def test_cleanup_failure_preserves_the_original_failure(self):
+        primary = ValueError('original proof failure')
+        with patch.object(driver, 'cleanup', side_effect=RuntimeError('cleanup failure')):
+            with self.assertRaises(ValueError) as failure:
+                try:
+                    raise primary
+                finally:
+                    driver.cleanup_preserving_error()
+        self.assertIs(failure.exception, primary)
+        self.assertIn('cleanup failure', primary.__notes__[0])
+
+    def test_cleanup_failure_after_success_is_still_fatal(self):
+        with patch.object(driver, 'cleanup', side_effect=RuntimeError('cleanup failure')):
+            with self.assertRaisesRegex(RuntimeError, 'cleanup failure'):
+                driver.cleanup_preserving_error()
+
+
 class CarrierRecoveryTests(unittest.TestCase):
     def recover(self, carrier_hold, full_readiness=6.25, response_duration=0.0):
         clock = [0.0]

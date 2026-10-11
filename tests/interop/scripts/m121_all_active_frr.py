@@ -24,6 +24,8 @@ OUT = None
 PIDS = {}
 DAEMON = None
 CAPTURES = []
+NETNS_ROOT = Path('/run/netns')
+NAMESPACE_HANDLES = {}
 HARNESS_INPUTS = (
     'tests/interop/scripts/m121_all_active_frr.py',
     'tests/interop/scripts/m121_all_active_oracle.py',
@@ -84,6 +86,10 @@ def historical_comparison_enabled(value):
 def verify_historical_flows(a, b, enabled):
     if enabled:
         assert sorted(b) == BASELINE_B and sorted(a) == BASELINE_A, 'flow identity differs from immutable baseline'
+
+
+def verify_frr_version(version):
+    assert re.search(r'^FRRouting 10\.7\.1(?:_git)?(?:\s|\()', version, re.MULTILINE), version
 
 
 def save(name, value):
@@ -285,12 +291,23 @@ def capture(phase, seeds, count=10, direction='remote-to-ce', destination=PEER_M
     return result
 
 
+def setup_namespaces():
+    # ip netns initializes its parent mount before we attach sibling handles.
+    for node in ['b', 'ce', 'hr']:
+        run('ip', 'netns', 'add', node)
+    for node, pid in PIDS.items():
+        path = NETNS_ROOT / node
+        path.touch(exist_ok=False)
+        NAMESPACE_HANDLES[node] = False
+        run('mount', '--bind', f'/hostproc/{pid}/ns/net', str(path))
+        NAMESPACE_HANDLES[node] = True
+
+
 def setup(config, vni):
     global DAEMON
     run('ip', 'link', 'add', 'underlay', 'type', 'bridge')
     run('ip', 'link', 'set', 'underlay', 'up')
-    for node in ['b', 'ce', 'hr']:
-        run('ip', 'netns', 'add', node)
+    setup_namespaces()
     for node in ['a', 'b', 'r', 'ce', 'hr']:
         ns(node, 'ip', 'link', 'set', 'lo', 'up')
         ns(node, 'sysctl', '-wq', 'net.ipv6.conf.all.disable_ipv6=1')
@@ -357,7 +374,7 @@ def setup(config, vni):
         frr_run(node, '/usr/lib/frr/frrinit.sh', 'start', timeout=60)
         version = frr(node, 'show version')
         (OUT / (node + '-version.txt')).write_text(version)
-        assert re.search(r'^FRRouting 10\.7\.1(?:\s|\()', version, re.MULTILINE), version
+        verify_frr_version(version)
     # Each cell gets a fresh durable state directory as well as fresh namespaces.
     config = config.replace('/var/lib/rustbgpd-m121', str(OUT / 'runtime-state'))
     (OUT / 'b.toml').write_text(config)
@@ -553,38 +570,80 @@ def carrier_cycle(vni, survivor_seeds):
                 timing_scope='external carrier observation to full readiness ordering; observer may follow actor edge; not internal hold or latency measurement')
 
 
-def cleanup():
-    global DAEMON
-    errors = []
-    try:
-        stop_captures(list(CAPTURES))
-    except (AssertionError, subprocess.TimeoutExpired) as error:
-        errors.append(str(error))
-    if DAEMON is not None:
-        if DAEMON.poll() is None:
-            DAEMON.terminate()
+def cleanup_diagnostics(phase):
+    (OUT / f'cleanup-{phase}-mountinfo.txt').write_text(Path('/proc/self/mountinfo').read_text())
+    processes = {}
+    for node, pid in PIDS.items():
+        rows = []
+        for path in Path(f'/hostproc/{pid}/root/proc').iterdir():
+            if not path.name.isdigit():
+                continue
             try:
-                DAEMON.wait(timeout=10)
-            except subprocess.TimeoutExpired:
-                DAEMON.kill()
-                DAEMON.wait(timeout=10)
-        event('daemon_stopped', exit=DAEMON.returncode)
-        DAEMON = None
-    for node in ['a', 'r']:
+                rows.append(dict(pid=int(path.name), status=(path / 'status').read_text(),
+                                 cmdline=(path / 'cmdline').read_bytes().replace(b'\0', b' ').decode(errors='replace')))
+            except FileNotFoundError:
+                continue  # A process may exit while the snapshot is read.
+        processes[node] = rows
+    save(f'cleanup-{phase}-processes.json', processes)
+
+
+def cleanup():
+    errors = []
+    def attempt(description, action):
         try:
-            frr_run(node, '/usr/lib/frr/frrinit.sh', 'stop', check=False, timeout=30)
-        except RuntimeError as error:
-            errors.append(str(error))
+            return action()
+        except (OSError, RuntimeError, AssertionError, subprocess.SubprocessError) as error:
+            errors.append(f'{description}: {error}')
+            return None
+    attempt('initial diagnostics', lambda: cleanup_diagnostics('before'))
+    attempt('packet capture stop', lambda: stop_captures(list(CAPTURES)))
+    def stop_daemon():
+        global DAEMON
+        if DAEMON is not None:
+            if DAEMON.poll() is None:
+                DAEMON.terminate()
+                try:
+                    DAEMON.wait(timeout=10)
+                except subprocess.TimeoutExpired:
+                    DAEMON.kill()
+                    DAEMON.wait(timeout=10)
+            event('daemon_stopped', exit=DAEMON.returncode)
+            DAEMON = None
+    attempt('rustbgpd stop', stop_daemon)
+    for node in ['a', 'r']:
+        attempt(f'{node} FRR stop', lambda node=node: frr_run(node, '/usr/lib/frr/frrinit.sh', 'stop', timeout=30))
     for node in ['a', 'r']:
         for interface in ['ac', 'es0', 'injbr', 'vx100', 'br100', 'ul']:
-            ns(node, 'ip', 'link', 'del', interface, check=False)
+            attempt(f'{node} {interface} removal', lambda node=node, interface=interface:
+                    ns(node, 'ip', 'link', 'del', interface, check=False))
     for node in ['b', 'ce', 'hr']:
-        run('ip', 'netns', 'del', node, check=False)
-    run('ip', 'link', 'del', 'underlay', check=False)
-    remaining = run('ip', 'netns', 'list')
-    assert not any(line.split()[0] in ['b', 'ce', 'hr'] for line in remaining.splitlines()), remaining
-    save('cleanup.json', dict(remaining_namespace_handles=remaining.splitlines(), errors=errors))
+        attempt(f'{node} namespace removal', lambda node=node: run('ip', 'netns', 'del', node, check=False))
+    attempt('underlay removal', lambda: run('ip', 'link', 'del', 'underlay', check=False))
+    for node, mounted in list(NAMESPACE_HANDLES.items()):
+        def detach(node=node, mounted=mounted):
+            path = NETNS_ROOT / node
+            if mounted:
+                run('umount', str(path))
+                NAMESPACE_HANDLES[node] = False
+            path.unlink()
+            del NAMESPACE_HANDLES[node]
+        attempt(f'{node} handle removal', detach)
+    remaining = attempt('namespace inventory', lambda: run('ip', 'netns', 'list'))
+    if remaining is not None and any(line.split()[0] in ['a', 'r', 'b', 'ce', 'hr'] for line in remaining.splitlines()):
+        errors.append(f'owned namespace handles remain: {remaining}')
+    attempt('final diagnostics', lambda: cleanup_diagnostics('after'))
+    save('cleanup.json', dict(remaining_namespace_handles=None if remaining is None else remaining.splitlines(), errors=errors))
     assert not errors, errors
+
+
+def cleanup_preserving_error():
+    primary = sys.exception()
+    try:
+        cleanup()
+    except Exception as error:
+        if primary is None:
+            raise
+        primary.add_note(f'Cleanup also failed: {error}')
 
 
 def main():
@@ -611,10 +670,6 @@ def main():
     OUT = root
     PIDS = json.loads(os.environ['FRR_PIDS'])
     assert set(PIDS) == {'a', 'r'} and all(isinstance(pid, int) and pid > 1 for pid in PIDS.values())
-    Path('/run/netns').mkdir(exist_ok=True)
-    for node, pid in PIDS.items():
-        Path('/run/netns/' + node).touch()
-        run('mount', '--bind', f'/hostproc/{pid}/ns/net', '/run/netns/' + node)
     metadata = dict(daemon_sha256=hashlib.sha256(Path('/usr/local/bin/rustbgpd').read_bytes()).hexdigest(),
                     cli_sha256=hashlib.sha256(Path('/usr/local/bin/rbgp').read_bytes()).hexdigest(),
                     source_id=Path('/usr/local/share/rustbgpd/source-id').read_text().strip(),
@@ -643,7 +698,7 @@ def main():
                 save('result.json', result)
                 results[cell] = result
             finally:
-                cleanup()
+                cleanup_preserving_error()
         OUT = root
         results['modulo-hazard']['matched_positive_control'] = 'frr-df'
         save('result.json', dict(status='passed', cells=results, compare_historical=compare_historical,
@@ -652,11 +707,14 @@ def main():
                                 historical_packet_scope='retained baseline uses per-seed counters; not retroactively identity-qualified'))
     finally:
         OUT = root
-        for node in PIDS:
-            run('umount', '/run/netns/' + node)
-            Path('/run/netns/' + node).unlink()
-        save('final-cleanup.json', dict(named_namespaces=run('ip', 'netns', 'list').splitlines()))
-        (root / 'driver.pid').unlink(missing_ok=True)
+        primary = sys.exception()
+        try:
+            save('final-cleanup.json', dict(named_namespaces=run('ip', 'netns', 'list').splitlines()))
+            (root / 'driver.pid').unlink(missing_ok=True)
+        except Exception as error:
+            if primary is None:
+                raise
+            primary.add_note(f'Final cleanup receipt also failed: {error}')
 
 
 if __name__ == '__main__':

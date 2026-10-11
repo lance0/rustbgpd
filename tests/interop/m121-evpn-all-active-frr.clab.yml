@@ -10,13 +10,11 @@ topology:
     a:
       kind: linux
       image: quay.io/frrouting/frr:10.7.1
-      entrypoint: /bin/sleep
-      cmd: infinity
+      cmd: /bin/sleep infinity
     r:
       kind: linux
       image: quay.io/frrouting/frr:10.7.1
-      entrypoint: /bin/sleep
-      cmd: infinity
+      cmd: /bin/sleep infinity
     controller:
       kind: linux
       image: rustbgpd:dev
