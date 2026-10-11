@@ -63,7 +63,7 @@ watchdog:
 |---|---|
 | Config transactions | Unary and streamed `ApplyConfigTransaction`, `RollbackConfigTransaction`, `ConfirmConfigTransaction`, `AbortConfigTransaction`, the timeout auto-revert, and gNMI `Set` (ordinary, commit-confirmed, confirm, cancel, set-rollback-duration) |
 | SIGHUP reload | The whole reload, from post-acquire validation through peer reconciliation, config-bridge/persister adoption, tracing, and gNMI dial-out acknowledgement |
-| Neighbors | Static and dynamic neighbor Add/Delete |
+| Neighbors | Static and dynamic neighbor Add/Delete, explicit neighbor Enable, and source-local dampening capacity Disable |
 | FIB tables | `SetFibTable`, `DeleteFibTable` |
 | Peer groups | Group Set/Delete and neighbor membership Set/Clear |
 | Policy | Policy and neighbor-set Set/Delete, global import/export chain Set/Clear, per-neighbor import/export chain Set/Clear |
@@ -305,8 +305,8 @@ In daemon mode no other path
 exits 70, and no fail-stop happens without this line. Reading it:
 
 - `kind` names the owner family (`sighup`, `apply`, `confirm`,
-  `neighbor_add`, `policy_set`, …) and `phase` names how far it got
-  (`owned_preflight` / `mutating` / `settling_rollback`).
+  `neighbor_add`, `neighbor_enable`, `dampening_capacity_disable`, `policy_set`, …).
+  `phase` names how far it got (`owned_preflight` / `mutating` / `settling_rollback`).
 - `fence_reason` is the diagnosis — see
   [the table above](#the-fence-reasons). `elapsed_seconds` near
   1800 with `budget_expired` is a silent wedge (expect the 15/25/29

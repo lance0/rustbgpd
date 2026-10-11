@@ -36,7 +36,9 @@ The other workspace members, the `bench/` harnesses, the `examples/`
 programs and the `tools/` binaries (`rs-config-render`, the MCP server),
 consume these crates or the gRPC API from outside the daemon; the daemon does
 not depend on them (root integration tests use `rs-config-render` and `cli`
-as dev-dependencies).
+as dev-dependencies). Root actor tests also enable the RIB's `bench-internals`
+feature to install explicitly bounded history consumers. The normal daemon
+feature dependency tree excludes that test-only feature.
 
 ### Crate summary
 

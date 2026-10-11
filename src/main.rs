@@ -22,6 +22,7 @@ mod config_migration;
 mod config_persister;
 mod config_transaction_control;
 mod confirm_journal;
+mod dampening_control;
 mod evpn_ack;
 mod evpn_auto_esi;
 mod evpn_dataplane;
@@ -96,6 +97,10 @@ use crate::reload::{
     runtime_config_snapshot_accepted,
 };
 use rustbgpd_api::health_probe::DaemonGate;
+use rustbgpd_api::owner_publication::{
+    OWNER_PUBLICATION_TIMEOUT, dispatch_configured_owner_publication,
+};
+use rustbgpd_api::peer_types::ConfiguredOwnerPublicationOperation;
 use rustbgpd_api::peer_types::{
     EnqueuedOperatorQuery, ImportValidationDependency, PeerManagerCommand,
     PeerManagerNeighborConfig, PeerManagerReadinessQuery, WarmCheckpointCapture,
@@ -4350,9 +4355,11 @@ async fn run<T>(
     // Sessions carry their complete current effective export chain, including
     // global inheritance. A startup fallback here would restore an old chain
     // when a peer reconnects after the global chain was removed.
+    let (dampening_capacity_tx, dampening_capacity_rx) = mpsc::unbounded_channel();
     let mut rib_manager = RibManager::new(rib_rx, rib_query_rx, None, cluster_id, metrics.clone())
         .with_readiness_queries(rib_readiness_rx)
-        .with_summary_queries(rib_summary_rx);
+        .with_summary_queries(rib_summary_rx)
+        .with_dampening_capacity_notices(dampening_capacity_tx);
     // GetPolicyStats reads the RIB's published export roster (ADR-0136)
     // instead of queueing on the RIB.
     let export_roster = rib_manager.export_roster();
@@ -5450,6 +5457,15 @@ async fn run<T>(
     // runtime-config owner and the readiness/admission surfaces.
     let daemon_gate = DaemonGate::new();
     daemon_gate.arm_initial_roster();
+    let (dampening_control_stop, dampening_control_stop_rx) = watch::channel(false);
+    let mut dampening_control_handle = tokio::spawn(dampening_control::run(
+        dampening_capacity_rx,
+        peer_mgr_tx.clone(),
+        runtime_config_lock.clone(),
+        runtime_config_settlement.clone(),
+        daemon_gate.clone(),
+        dampening_control_stop_rx,
+    ));
     let config_transaction_controller =
         config_transaction_control::ConfigTransactionController::new_accepted(
             fib_table_control::FibTableControlDeps {
@@ -6150,6 +6166,7 @@ async fn run<T>(
     // Set only by the gRPC supervision arm for the same reason: polling a
     // completed JoinHandle again during coordinated teardown would panic.
     let mut grpc_exited = false;
+    let mut dampening_control_exited = false;
     loop {
         if initial_peer_boot_failed {
             break;
@@ -6174,6 +6191,24 @@ async fn run<T>(
                 error!(?result, "gRPC server exited unexpectedly");
                 info!("initiating shutdown due to gRPC server failure");
                 grpc_exited = true;
+                component_failed = true;
+                break;
+            }
+            result = &mut dampening_control_handle => {
+                dampening_control_exited = true;
+                let result = match result {
+                    Ok(Ok(dampening_control::Outcome::RibChannelClosed)) => {
+                        // The RIB owns the sole capacity-notice sender. Join
+                        // its owner to retain the original failure attribution.
+                        let result = (&mut rib_handle).await;
+                        error!(?result, "RIB manager exited unexpectedly");
+                        info!("initiating shutdown due to RIB manager failure");
+                        component_failed = true;
+                        break;
+                    }
+                    result => result,
+                };
+                error!(?result, "dampening capacity adapter exited unexpectedly");
                 component_failed = true;
                 break;
             }
@@ -6330,6 +6365,25 @@ async fn run<T>(
                     for (name, _) in &desired.config_ref().policy.dataset_events.failed {
                         reload_metrics.record_policy_dataset_refresh_error(name);
                     }
+                    operation.advance_phase(RuntimeConfigSettlementPhase::Mutating);
+                    let publication = match dispatch_configured_owner_publication(
+                        &pm_tx,
+                        OWNER_PUBLICATION_TIMEOUT,
+                        Some(operation.pre_effect_deadline()),
+                        ConfiguredOwnerPublicationOperation::Begin,
+                    ).await.begin_result() {
+                        Ok(receipt) => receipt,
+                        Err((error, None)) => return OwnedRuntimeConfigOutcome::CleanNoEffect(Err(
+                            SighupReloadError::step("configured_owner_publication", ReloadStepError::Rejected(error.to_string())),
+                        )),
+                        Err((error, Some(reason))) => {
+                            operation.record_sighup_recovery_step("configured_owner_publication");
+                            return OwnedRuntimeConfigOutcome::Fenced {
+                                error: SighupReloadError::step("configured_owner_publication", ReloadStepError::Rejected(error.to_string())),
+                                reason,
+                            };
+                        }
+                    };
                     let outcome = reload_config_with_tcp_ao(
                         SighupReloadPlan {
                             baseline_runtime: snapshot,
@@ -6347,7 +6401,23 @@ async fn run<T>(
                     )
                     .await;
                     match outcome {
-                        SighupReloadOutcome::CleanNoEffect(error) => OwnedRuntimeConfigOutcome::CleanNoEffect(Err(error)),
+                        SighupReloadOutcome::CleanNoEffect(error) => {
+                            match dispatch_configured_owner_publication(
+                                &pm_tx,
+                                OWNER_PUBLICATION_TIMEOUT,
+                                None,
+                                ConfiguredOwnerPublicationOperation::Discard(publication),
+                            ).await.settlement_result() {
+                                Ok(_) => OwnedRuntimeConfigOutcome::CleanNoEffect(Err(error)),
+                                Err((error, reason)) => {
+                                    operation.record_sighup_recovery_step("configured_owner_publication");
+                                    OwnedRuntimeConfigOutcome::Fenced {
+                                        error: SighupReloadError::step("configured_owner_publication", ReloadStepError::Rejected(error.to_string())),
+                                        reason,
+                                    }
+                                }
+                            }
+                        },
                         SighupReloadOutcome::RecoveryFenced { error, reason } => OwnedRuntimeConfigOutcome::Fenced { error, reason },
                         SighupReloadOutcome::Acknowledged(authority) => {
                             // Credential files are operator authority independent of
@@ -6385,6 +6455,8 @@ async fn run<T>(
                             };
                             finalize_sighup_authority(
                                 &operation,
+                                &pm_tx,
+                                publication,
                                 authority,
                                 &pm_internal,
                                 bridge_replace,
@@ -6433,6 +6505,7 @@ async fn run<T>(
     daemon_gate.begin_shutdown();
     sd_notify.stopping();
     runtime_config_lock.close();
+    let _ = dampening_control_stop.send(true);
     info!("initiating coordinated shutdown");
     // The first signal asked for a graceful stop; a further one stops waiting
     // and fail-stops an owned runtime-config settlement instead of waiting it out.
@@ -6452,6 +6525,7 @@ async fn run<T>(
         &runtime_config_settlement,
         &runtime_config_lock,
         reload_in_flight.take(),
+        (!dampening_control_exited).then_some(dampening_control_handle),
         RUNTIME_CONFIG_DRAIN_DEADLINE,
         &stop_waiting,
     )
@@ -6478,6 +6552,21 @@ async fn run<T>(
             "SIGHUP reload task is still running with no settlement owner; continuing shutdown without joining it"
         ),
         None => {}
+    }
+
+    match runtime_config_drain.dampening_control {
+        Some(ShutdownWait::Completed(Ok(Ok(dampening_control::Outcome::Stopped)))) | None => {}
+        Some(ShutdownWait::Completed(result)) => {
+            error!(?result, "dampening capacity adapter failed during shutdown");
+            component_failed = true;
+        }
+        Some(abandoned) => {
+            error!(
+                reason = abandoned.abandoned(),
+                "dampening capacity adapter did not finish after owned settlement drained"
+            );
+            component_failed = true;
+        }
     }
 
     // Drop the profiler now while all data structures are still alive,
@@ -6882,9 +6971,13 @@ async fn run<T>(
 struct RuntimeConfigDrain<R> {
     coordinator: ShutdownWait<()>,
     reload: Option<ShutdownWait<Result<R, tokio::task::JoinError>>>,
+    dampening_control: Option<
+        ShutdownWait<Result<Result<dampening_control::Outcome, String>, tokio::task::JoinError>>,
+    >,
 }
 
-/// Wait for the closed coordinator to go quiet, then join an in-flight SIGHUP.
+/// Wait for the closed coordinator to go quiet, then join SIGHUP and the
+/// capacity adapter concurrently within the existing shutdown wait budget.
 ///
 /// An owned mutation is waited for without any deadline of this function's:
 /// only the settlement watchdog may end that wait, by settlement or fail-stop
@@ -6906,6 +6999,7 @@ async fn drain_runtime_config<R>(
     runtime_config_settlement: &RuntimeConfigSettlementWatchdog,
     runtime_config_lock: &RuntimeConfigCoordinator,
     reload_in_flight: Option<tokio::task::JoinHandle<R>>,
+    dampening_control: Option<tokio::task::JoinHandle<Result<dampening_control::Outcome, String>>>,
     deadline: Duration,
     stop_waiting: &tokio_util::sync::CancellationToken,
 ) -> RuntimeConfigDrain<R> {
@@ -6922,13 +7016,24 @@ async fn drain_runtime_config<R>(
             break drained;
         }
     };
-    let reload = match reload_in_flight {
-        Some(handle) => Some(shutdown_wait(Some(deadline), stop_waiting, handle).await),
-        None => None,
-    };
+    let (reload, dampening_control) = tokio::join!(
+        async {
+            match reload_in_flight {
+                Some(handle) => Some(shutdown_wait(Some(deadline), stop_waiting, handle).await),
+                None => None,
+            }
+        },
+        async {
+            match dampening_control {
+                Some(handle) => Some(shutdown_wait(Some(deadline), stop_waiting, handle).await),
+                None => None,
+            }
+        },
+    );
     RuntimeConfigDrain {
         coordinator,
         reload,
+        dampening_control,
     }
 }
 
@@ -7731,6 +7836,7 @@ mod tests {
                 &settlement,
                 &coordinator,
                 None,
+                None,
                 DRAIN_TEST_DEADLINE,
                 &tokio_util::sync::CancellationToken::new(),
             ),
@@ -7754,6 +7860,7 @@ mod tests {
                 &settlement,
                 &coordinator,
                 Some(reload),
+                None,
                 DRAIN_TEST_DEADLINE,
                 &tokio_util::sync::CancellationToken::new(),
             ),
@@ -7762,6 +7869,35 @@ mod tests {
         .expect("shutdown drain hung on a reload task that never finishes");
         assert_eq!(drain.coordinator, ShutdownWait::Completed(()));
         assert!(matches!(drain.reload, Some(ShutdownWait::DeadlineExpired)));
+    }
+
+    #[tokio::test]
+    async fn shutdown_drain_bounds_capacity_adapter_after_owner_release() {
+        let settlement = RuntimeConfigSettlementWatchdog::new();
+        let coordinator = RuntimeConfigCoordinator::new();
+        coordinator.close();
+        let adapter = tokio::spawn(std::future::pending::<
+            Result<dampening_control::Outcome, String>,
+        >());
+        let drain = tokio::time::timeout(
+            DRAIN_TEST_GUARD,
+            drain_runtime_config::<()>(
+                &settlement,
+                &coordinator,
+                None,
+                Some(adapter),
+                DRAIN_TEST_DEADLINE,
+                &tokio_util::sync::CancellationToken::new(),
+            ),
+        )
+        .await
+        .expect("shutdown drain hung on an adapter with no settlement owner");
+        assert_eq!(drain.coordinator, ShutdownWait::Completed(()));
+        assert!(drain.reload.is_none());
+        assert!(matches!(
+            drain.dampening_control,
+            Some(ShutdownWait::DeadlineExpired)
+        ));
     }
 
     #[tokio::test]
@@ -7782,6 +7918,7 @@ mod tests {
                 &settlement,
                 &coordinator,
                 Some(reload),
+                None,
                 Duration::from_secs(3600),
                 &stop_waiting,
             ),
@@ -7817,6 +7954,7 @@ mod tests {
                 drain_runtime_config::<()>(
                     &settlement,
                     &coordinator,
+                    None,
                     None,
                     Duration::from_secs(3600),
                     &stop_waiting,
@@ -7895,6 +8033,7 @@ mod tests {
             drain_runtime_config::<()>(
                 &settlement,
                 &coordinator,
+                None,
                 None,
                 Duration::from_secs(3600),
                 &stop_waiting,
@@ -7999,6 +8138,7 @@ mod tests {
             drain_runtime_config::<()>(
                 &settlement,
                 &coordinator,
+                None,
                 None,
                 Duration::from_secs(3600),
                 &stop_waiting,

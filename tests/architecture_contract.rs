@@ -202,6 +202,7 @@ fn root_daemon_depends_on_every_graphed_library_crate() {
     assert_eq!(
         root_dev_dependencies
             .intersection(&graphed_crates)
+            .filter(|dependency| !daemon_dependencies.contains(*dependency))
             .cloned()
             .collect::<BTreeSet<_>>(),
         BTreeSet::from(["cli".to_owned()]),

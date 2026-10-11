@@ -342,6 +342,17 @@ impl std::fmt::Display for PeerLifecycleError {
 
 impl std::error::Error for PeerLifecycleError {}
 
+/// Settlement result for source-capacity disable and explicit enable.
+#[derive(Debug)]
+pub enum OwnedDampeningControlOutcome {
+    /// No runtime change was accepted; the source remains in its prior state.
+    RejectedNoEffect(PeerLifecycleError),
+    /// Session and primary-RIB acknowledgements are complete.
+    Applied,
+    /// An accepted actor operation could not establish a determinate result.
+    Ambiguous(PeerLifecycleError),
+}
+
 /// Typed failure for runtime catalog mutations.
 ///
 /// These commands are surfaced by gRPC services. Keeping the failure class in
@@ -706,7 +717,59 @@ pub struct WarmCheckpointCapture {
     pub sessions: Vec<WarmCheckpointSession>,
 }
 
+/// Actor-issued identity of one final configured-owner publication.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ConfiguredOwnerPublicationReceipt(pub u64);
+
+/// One coordinator-owned configured-owner publication scope.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ConfiguredOwnerPublicationOperation {
+    /// Reserve a scope before any tentative sessions are constructed.
+    Begin,
+    /// Publish only after outer runtime and durable authority settles.
+    Publish(ConfiguredOwnerPublicationReceipt),
+    /// Discard reservations after a proved clean/compensated outcome.
+    Discard(ConfiguredOwnerPublicationReceipt),
+}
+
+/// Publication failures retain the distinction between rejection and reply loss.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ConfiguredOwnerPublicationError {
+    /// Another publication owns the pending scope, or the receipt is stale.
+    StaleAuthority,
+    /// A never-reused identity counter is exhausted.
+    IdentityExhausted,
+    /// The RIB did not accept the final publication command.
+    RibNotAccepted(String),
+    /// The RIB accepted publication but its acknowledgement was lost.
+    RibAcknowledgementLost,
+    /// The RIB determinately rejected publication.
+    RibRejected(String),
+}
+
+impl std::fmt::Display for ConfiguredOwnerPublicationError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::StaleAuthority => f.write_str("configured-owner publication authority changed"),
+            Self::IdentityExhausted => f.write_str("configured-owner identity exhausted"),
+            Self::RibNotAccepted(error) | Self::RibRejected(error) => f.write_str(error),
+            Self::RibAcknowledgementLost => {
+                f.write_str("RIB configured-owner publication acknowledgement lost")
+            }
+        }
+    }
+}
+
+impl std::error::Error for ConfiguredOwnerPublicationError {}
+
 pub enum PeerManagerCommand {
+    /// Begin, publish or discard one final configured-owner authority scope.
+    ConfiguredOwnerPublication {
+        operation: ConfiguredOwnerPublicationOperation,
+        reply: oneshot::Sender<
+            Result<ConfiguredOwnerPublicationReceipt, ConfiguredOwnerPublicationError>,
+        >,
+    },
     /// Confirm that the peer-manager actor can service its ordinary command
     /// lane without collecting per-peer session state.
     Ping {
@@ -1001,6 +1064,20 @@ pub enum PeerManagerCommand {
         address: IpAddr,
         /// Reply channel; false also covers an ambiguous scoped address.
         reply: oneshot::Sender<bool>,
+    },
+    /// Explicit enable retained by the existing runtime-config settlement owner.
+    EnablePeerOwned {
+        /// Managed peer to recover, including any capacity-blocked source.
+        peer: PeerKey,
+        /// Complete actor result, including primary-RIB credit settlement.
+        reply: oneshot::Sender<OwnedDampeningControlOutcome>,
+    },
+    /// Join every producer of one exhausted source and retain a disabled target.
+    DisableDampeningCapacity {
+        /// Original accepted-source identity; delayed notices cannot retarget.
+        notice: rustbgpd_rib::dampening::DampeningCapacityNotice,
+        /// Complete disable result for the retained settlement owner.
+        reply: oneshot::Sender<OwnedDampeningControlOutcome>,
     },
     /// Start (enable) a previously disabled peer.
     EnablePeer {

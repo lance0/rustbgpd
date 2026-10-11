@@ -750,6 +750,14 @@ impl PeerManager {
                 )
             };
 
+        transport.dampening_admission = self
+            .configured_owner_admission_for_static(peer_key.clone(), config.remote_asn)
+            .map_err(|error| PeerLifecycleError::Internal(error.to_string()))?;
+        let enabled = enabled
+            && !transport
+                .dampening_admission
+                .as_ref()
+                .is_some_and(rustbgpd_rib::dampening::DampeningAdmission::is_blocked);
         transport.local_forwarding_state = Some(rustbgpd_transport::ForwardingStateSource::Live(
             self.local_forwarding_state.clone(),
         ));
@@ -1980,6 +1988,17 @@ impl PeerManager {
     }
 
     pub(super) async fn enable_peer(&mut self, peer: PeerKey) -> Result<(), PeerLifecycleError> {
+        if self.peers.get(&peer).is_some_and(|managed| {
+            managed
+                .transport_config
+                .dampening_admission
+                .as_ref()
+                .is_some_and(rustbgpd_rib::dampening::DampeningAdmission::is_blocked)
+        }) {
+            return Err(PeerLifecycleError::Invalid(
+                "dampening capacity recovery requires an owned explicit enable".into(),
+            ));
+        }
         let address = peer.address;
         // ADR-0067 step 4b: re-enabling a strict peer must re-apply the withhold
         // — start BGP only if BFD is already Up, else withhold until it is.
@@ -1991,7 +2010,7 @@ impl PeerManager {
         };
         if !withhold {
             handle
-                .start()
+                .start_timeout(PEER_LIFECYCLE_COMMAND_TIMEOUT)
                 .await
                 .map_err(|e| PeerLifecycleError::Internal(format!("failed to start peer: {e}")))?;
         }

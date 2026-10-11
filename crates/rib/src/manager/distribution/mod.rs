@@ -99,7 +99,13 @@ impl DistributionWindow {
                 evpn_announced,
                 evpn_withdrawn,
                 ..
-            } if flowspec_announced.is_empty()
+            } | RibUpdate::WireRoutesReceived(crate::update::WireRoutesReceived {
+                flowspec_announced,
+                flowspec_withdrawn,
+                evpn_announced,
+                evpn_withdrawn,
+                ..
+            }) if flowspec_announced.is_empty()
                 && flowspec_withdrawn.is_empty()
                 && evpn_announced.is_empty()
                 && evpn_withdrawn.is_empty()
@@ -5446,10 +5452,30 @@ impl RibManager {
                         .iter()
                         .map(|&(prefix, path_id)| ExactExportKey::Unicast(prefix, path_id)),
                 );
-                self.process_withdraw_chunk(peer, withdrawn);
+                let original = pending.original_unicast_withdrawals.min(withdrawn.len());
+                pending.original_unicast_withdrawals -= original;
+                let history = pending
+                    .dampening_source
+                    .map(|source| (&pending.source, source, original));
+                self.process_withdraw_chunk(peer, withdrawn, history);
             }
             PendingRouteChunk::Announced(announced) => {
-                self.process_announce_chunk(peer, announced, pending.validated_with.as_ref());
+                if !Self::dampening_source_blocked(&pending.source) {
+                    if let Some(admitted) = pending.dampening_source {
+                        for route in &announced {
+                            self.record_dampening_input(
+                                &pending.source,
+                                Some(admitted),
+                                crate::dampening::DampeningKey {
+                                    prefix: route.prefix,
+                                    path_id: route.path_id,
+                                },
+                                crate::dampening::DampeningEvent::Announcement,
+                            );
+                        }
+                    }
+                    self.process_announce_chunk(peer, announced, pending.validated_with.as_ref());
+                }
             }
             PendingRouteChunk::FlowSpecWithdrawn(flowspec_withdrawn) => {
                 self.pending_exact_export_withdrawals.extend(
@@ -5461,7 +5487,9 @@ impl RibManager {
                 self.process_flowspec_withdraw_chunk(peer, flowspec_withdrawn);
             }
             PendingRouteChunk::FlowSpecAnnounced(flowspec_announced) => {
-                self.process_flowspec_announce_chunk(peer, flowspec_announced);
+                if !Self::dampening_source_blocked(&pending.source) {
+                    self.process_flowspec_announce_chunk(peer, flowspec_announced);
+                }
             }
             PendingRouteChunk::EvpnWithdrawn(evpn_withdrawn) => {
                 self.pending_exact_export_withdrawals
@@ -5469,7 +5497,9 @@ impl RibManager {
                 self.process_evpn_withdraw_chunk(peer, evpn_withdrawn);
             }
             PendingRouteChunk::EvpnAnnounced(evpn_announced) => {
-                self.process_evpn_announce_chunk(peer, evpn_announced);
+                if !Self::dampening_source_blocked(&pending.source) {
+                    self.process_evpn_announce_chunk(peer, evpn_announced);
+                }
             }
         }
 

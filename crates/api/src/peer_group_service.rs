@@ -11,9 +11,11 @@ use crate::health_probe::DaemonGate;
 use crate::neighbor_service::{
     family_to_string, parse_families_proto, parse_remove_private_as_proto,
 };
+use crate::owner_publication::dispatch_configured_owner_publication;
 use crate::peer_types::{
-    AddPathDefinition, ConfigEvent, OwnedCatalogMutation, OwnedCatalogMutationOutcome,
-    PeerGroupDefinition, PeerManagerCommand, PolicyStatementDefinition,
+    AddPathDefinition, ConfigEvent, ConfiguredOwnerPublicationOperation, OwnedCatalogMutation,
+    OwnedCatalogMutationOutcome, PeerGroupDefinition, PeerManagerCommand,
+    PolicyStatementDefinition,
 };
 use crate::policy_helpers::proto_statement_to_input;
 use crate::proto;
@@ -551,10 +553,29 @@ async fn owned_peer_group_mutation_body(
         None
     };
 
-    let dispatch =
-        dispatch_owned_catalog_mutation(peer_mgr_tx, actor_timeout, pre_effect_deadline, mutation)
-            .await;
-    match dispatch {
+    let receipt = match dispatch_configured_owner_publication(
+        &peer_mgr_tx,
+        actor_timeout,
+        pre_effect_deadline,
+        ConfiguredOwnerPublicationOperation::Begin,
+    )
+    .await
+    .begin_result()
+    {
+        Ok(receipt) => receipt,
+        Err((error, None)) => return OwnedRuntimeConfigOutcome::CleanNoEffect(Err(error)),
+        Err((error, Some(reason))) => {
+            return OwnedRuntimeConfigOutcome::Fenced { error, reason };
+        }
+    };
+    let dispatch = dispatch_owned_catalog_mutation(
+        peer_mgr_tx.clone(),
+        actor_timeout,
+        pre_effect_deadline,
+        mutation,
+    )
+    .await;
+    let outcome = match dispatch {
         OwnedCatalogDispatch::NotAccepted(error) => {
             drop(staged);
             OwnedRuntimeConfigOutcome::CleanNoEffect(Err(error))
@@ -580,23 +601,37 @@ async fn owned_peer_group_mutation_body(
             reason: crate::runtime_config_settlement::RuntimeConfigFenceReason::KnownDivergence,
         },
         OwnedCatalogDispatch::Replied(OwnedCatalogMutationOutcome::Success) => {
-            let Some(staged) = staged else {
-                return OwnedRuntimeConfigOutcome::PublishedDurable(());
-            };
-            if let Some(operation) = &owned {
-                operation.advance_phase(RuntimeConfigSettlementPhase::SettlingRollback);
-            }
-            match staged.commit_typed().await {
-                Ok(()) => OwnedRuntimeConfigOutcome::PublishedDurable(()),
-                Err(error) => {
-                    let reason = error.fence_reason();
-                    OwnedRuntimeConfigOutcome::Fenced {
+            if let Some(staged) = staged {
+                if let Some(operation) = &owned {
+                    operation.advance_phase(RuntimeConfigSettlementPhase::SettlingRollback);
+                }
+                if let Err(error) = staged.commit_typed().await {
+                    return OwnedRuntimeConfigOutcome::Fenced {
+                        reason: error.fence_reason(),
                         error: error.into_status(),
-                        reason,
-                    }
+                    };
                 }
             }
+            OwnedRuntimeConfigOutcome::PublishedDurable(())
         }
+    };
+    let publication = match &outcome {
+        OwnedRuntimeConfigOutcome::CleanNoEffect(_) => {
+            ConfiguredOwnerPublicationOperation::Discard(receipt)
+        }
+        OwnedRuntimeConfigOutcome::PublishedDurable(()) => {
+            ConfiguredOwnerPublicationOperation::Publish(receipt)
+        }
+        _ => return outcome,
+    };
+    // Begin was acknowledged before any reshape. Its final publication or
+    // discard remains owned settlement, even after the admission deadline.
+    match dispatch_configured_owner_publication(&peer_mgr_tx, actor_timeout, None, publication)
+        .await
+        .settlement_result()
+    {
+        Ok(_) => outcome,
+        Err((error, reason)) => OwnedRuntimeConfigOutcome::Fenced { error, reason },
     }
 }
 
@@ -777,9 +812,41 @@ impl proto::peer_group_service_server::PeerGroupService for PeerGroupService {
 mod tests {
     use super::*;
     use crate::audit::GrpcAuditHandle;
-    use crate::peer_types::NamedPeerGroupSnapshot;
+    use crate::peer_types::{ConfiguredOwnerPublicationReceipt, NamedPeerGroupSnapshot};
     use crate::proto::peer_group_service_server::PeerGroupService as PeerGroupServiceRpc;
+    use std::future::Future as _;
+    use std::task::Poll;
     use tokio::sync::mpsc::error::TryRecvError;
+
+    const PUBLICATION: ConfiguredOwnerPublicationReceipt = ConfiguredOwnerPublicationReceipt(7);
+
+    async fn publication_reply(
+        peer_rx: &mut mpsc::Receiver<PeerManagerCommand>,
+        expected: ConfiguredOwnerPublicationOperation,
+    ) -> tokio::sync::oneshot::Sender<
+        Result<
+            ConfiguredOwnerPublicationReceipt,
+            crate::peer_types::ConfiguredOwnerPublicationError,
+        >,
+    > {
+        let Some(PeerManagerCommand::ConfiguredOwnerPublication { operation, reply }) =
+            peer_rx.recv().await
+        else {
+            panic!("expected owner publication {expected:?}");
+        };
+        assert_eq!(operation, expected);
+        reply
+    }
+
+    async fn acknowledge_publication(
+        peer_rx: &mut mpsc::Receiver<PeerManagerCommand>,
+        operation: ConfiguredOwnerPublicationOperation,
+    ) {
+        publication_reply(peer_rx, operation)
+            .await
+            .send(Ok(PUBLICATION))
+            .unwrap();
+    }
 
     #[tokio::test(start_paused = true)]
     async fn config_persistence_admission_failures_are_unavailable() {
@@ -1191,6 +1258,14 @@ mod tests {
                         assert_eq!(definition.families, vec!["ipv6_unicast"]);
                         let _ = reply.send(OwnedCatalogMutationOutcome::Success);
                     }
+                    PeerManagerCommand::ConfiguredOwnerPublication { operation, reply } => {
+                        assert!(matches!(
+                            operation,
+                            ConfiguredOwnerPublicationOperation::Begin
+                                | ConfiguredOwnerPublicationOperation::Publish(PUBLICATION)
+                        ));
+                        reply.send(Ok(PUBLICATION)).unwrap();
+                    }
                     _ => panic!("unexpected peer-manager command"),
                 }
             }
@@ -1277,6 +1352,14 @@ mod tests {
                         );
                         let _ = reply.send(OwnedCatalogMutationOutcome::Success);
                     }
+                    PeerManagerCommand::ConfiguredOwnerPublication { operation, reply } => {
+                        assert!(matches!(
+                            operation,
+                            ConfiguredOwnerPublicationOperation::Begin
+                                | ConfiguredOwnerPublicationOperation::Publish(PUBLICATION)
+                        ));
+                        reply.send(Ok(PUBLICATION)).unwrap();
+                    }
                     _ => panic!("unexpected peer-manager command"),
                 }
             }
@@ -1338,6 +1421,14 @@ mod tests {
                         );
                         let _ = reply.send(OwnedCatalogMutationOutcome::Success);
                     }
+                    PeerManagerCommand::ConfiguredOwnerPublication { operation, reply } => {
+                        assert!(matches!(
+                            operation,
+                            ConfiguredOwnerPublicationOperation::Begin
+                                | ConfiguredOwnerPublicationOperation::Publish(PUBLICATION)
+                        ));
+                        reply.send(Ok(PUBLICATION)).unwrap();
+                    }
                     _ => panic!("unexpected peer-manager command"),
                 }
             }
@@ -1398,6 +1489,7 @@ mod tests {
             _ => panic!("unexpected config event"),
         };
         let staged = tokio::spawn(staged.accept());
+        acknowledge_publication(&mut peer_rx, ConfiguredOwnerPublicationOperation::Begin).await;
         match peer_rx.recv().await.expect("expected passwordless create") {
             PeerManagerCommand::OwnedCatalogMutation {
                 mutation: OwnedCatalogMutation::SetPeerGroup { name, definition },
@@ -1414,6 +1506,11 @@ mod tests {
             _ => panic!("unexpected peer-manager command"),
         }
         assert!(staged.await.expect("persist ack task panicked"));
+        acknowledge_publication(
+            &mut peer_rx,
+            ConfiguredOwnerPublicationOperation::Publish(PUBLICATION),
+        )
+        .await;
 
         task.await
             .expect("SetPeerGroup task panicked")
@@ -1495,6 +1592,14 @@ mod tests {
                         assert_eq!(name, "rs-clients");
                         assert_eq!(definition.md5_password, None);
                         let _ = reply.send(OwnedCatalogMutationOutcome::Success);
+                    }
+                    PeerManagerCommand::ConfiguredOwnerPublication { operation, reply } => {
+                        assert!(matches!(
+                            operation,
+                            ConfiguredOwnerPublicationOperation::Begin
+                                | ConfiguredOwnerPublicationOperation::Publish(PUBLICATION)
+                        ));
+                        reply.send(Ok(PUBLICATION)).unwrap();
                     }
                     _ => panic!("unexpected peer-manager command"),
                 }
@@ -1795,6 +1900,185 @@ mod tests {
     }
 
     #[tokio::test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "all four group intents share one explicit persistence and publication handshake"
+    )]
+    async fn all_peer_group_mutations_publish_only_after_commit_and_retain_the_coordinator() {
+        let address = "192.0.2.1".parse().unwrap();
+        let intents = [
+            (
+                RuntimeConfigOperationKind::PeerGroupSet,
+                PeerGroupMutationIntent::Set {
+                    name: "edge".into(),
+                    definition: Box::new(proto_definition_to_input(sample_definition()).unwrap()),
+                    preserve_md5_password: false,
+                    allow_passwordless_create: false,
+                },
+            ),
+            (
+                RuntimeConfigOperationKind::PeerGroupDelete,
+                PeerGroupMutationIntent::Delete {
+                    name: "edge".into(),
+                },
+            ),
+            (
+                RuntimeConfigOperationKind::NeighborPeerGroupSet,
+                PeerGroupMutationIntent::SetNeighbor {
+                    address,
+                    peer_group: "edge".into(),
+                },
+            ),
+            (
+                RuntimeConfigOperationKind::NeighborPeerGroupClear,
+                PeerGroupMutationIntent::ClearNeighbor { address },
+            ),
+        ];
+        for (kind, intent) in intents {
+            let (peer_tx, mut peer_rx) = mpsc::channel(4);
+            let (config_tx, mut config_rx) = mpsc::channel(1);
+            let permit = config_tx.reserve_owned().await.unwrap();
+            let coordinator = RuntimeConfigCoordinator::new();
+            let svc = PeerGroupService::with_runtime_config_coordinator(
+                AccessMode::ReadWrite,
+                peer_tx,
+                None,
+                None,
+                coordinator.clone(),
+            );
+            let mut call = tokio::spawn(async move {
+                svc.execute_owned_peer_group_mutation(
+                    kind,
+                    "test group mutation",
+                    intent,
+                    Some(permit),
+                )
+                .await
+            });
+            let ack = match config_rx.recv().await.unwrap() {
+                ConfigEvent::SetPeerGroup { ack, .. }
+                | ConfigEvent::DeletePeerGroup { ack, .. }
+                | ConfigEvent::SetNeighborPeerGroup { ack, .. }
+                | ConfigEvent::ClearNeighborPeerGroup { ack, .. } => ack.unwrap(),
+                _ => panic!("expected group persistence"),
+            };
+            let crate::peer_types::ConfigPersistAck::Staged { staged, commit } = ack else {
+                panic!("expected two-phase persistence");
+            };
+            assert!(matches!(peer_rx.try_recv(), Err(TryRecvError::Empty)));
+            staged.send(Ok(())).unwrap();
+            let begin =
+                publication_reply(&mut peer_rx, ConfiguredOwnerPublicationOperation::Begin).await;
+            assert!(matches!(peer_rx.try_recv(), Err(TryRecvError::Empty)));
+            begin.send(Ok(PUBLICATION)).unwrap();
+            let Some(PeerManagerCommand::OwnedCatalogMutation { mutation, reply }) =
+                peer_rx.recv().await
+            else {
+                panic!("expected mutation only after Begin");
+            };
+            assert!(matches!(
+                (kind, mutation),
+                (
+                    RuntimeConfigOperationKind::PeerGroupSet,
+                    OwnedCatalogMutation::SetPeerGroup { .. }
+                ) | (
+                    RuntimeConfigOperationKind::PeerGroupDelete,
+                    OwnedCatalogMutation::DeletePeerGroup { .. }
+                ) | (
+                    RuntimeConfigOperationKind::NeighborPeerGroupSet,
+                    OwnedCatalogMutation::SetNeighborPeerGroup { .. }
+                ) | (
+                    RuntimeConfigOperationKind::NeighborPeerGroupClear,
+                    OwnedCatalogMutation::ClearNeighborPeerGroup { .. }
+                )
+            ));
+            reply.send(OwnedCatalogMutationOutcome::Success).unwrap();
+            let committed = commit.await.unwrap();
+            assert!(
+                matches!(peer_rx.try_recv(), Err(TryRecvError::Empty)),
+                "publication must wait for durable commit"
+            );
+            committed
+                .send(crate::peer_types::ConfigPersistCommitOutcome::PublishedDurable)
+                .unwrap();
+            let publication = publication_reply(
+                &mut peer_rx,
+                ConfiguredOwnerPublicationOperation::Publish(PUBLICATION),
+            )
+            .await;
+            let acquire = coordinator.acquire();
+            tokio::pin!(acquire);
+            std::future::poll_fn(|cx| {
+                assert!(
+                    std::pin::Pin::new(&mut call).poll(cx).is_pending(),
+                    "response waits for publication ACK"
+                );
+                assert!(
+                    acquire.as_mut().poll(cx).is_pending(),
+                    "coordinator remains owned until publication ACK"
+                );
+                Poll::Ready(())
+            })
+            .await;
+            publication.send(Ok(PUBLICATION)).unwrap();
+            call.await.unwrap().unwrap();
+            let _released = acquire.await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn lost_final_peer_group_publication_or_discard_ack_is_fenced() {
+        use crate::runtime_config_settlement::RuntimeConfigFenceReason;
+
+        for applied in [false, true] {
+            let (peer_tx, mut peer_rx) = mpsc::channel(4);
+            let call = tokio::spawn(owned_peer_group_mutation_body(
+                None,
+                None,
+                None,
+                "test group mutation",
+                peer_tx,
+                OWNED_PEER_GROUP_ACTOR_TIMEOUT,
+                PeerGroupMutationIntent::Delete {
+                    name: "edge".into(),
+                },
+                None,
+            ));
+            acknowledge_publication(&mut peer_rx, ConfiguredOwnerPublicationOperation::Begin).await;
+            let Some(PeerManagerCommand::OwnedCatalogMutation { reply, .. }) = peer_rx.recv().await
+            else {
+                panic!("expected owned group mutation");
+            };
+            reply
+                .send(if applied {
+                    OwnedCatalogMutationOutcome::Success
+                } else {
+                    OwnedCatalogMutationOutcome::RejectedNoEffect(
+                        crate::peer_types::CatalogMutationError::not_found("missing"),
+                    )
+                })
+                .unwrap();
+            let operation = if applied {
+                ConfiguredOwnerPublicationOperation::Publish(PUBLICATION)
+            } else {
+                ConfiguredOwnerPublicationOperation::Discard(PUBLICATION)
+            };
+            drop(publication_reply(&mut peer_rx, operation).await);
+            assert!(matches!(
+                call.await.unwrap(),
+                OwnedRuntimeConfigOutcome::Fenced {
+                    reason: RuntimeConfigFenceReason::AcknowledgementLost,
+                    ..
+                }
+            ));
+            assert!(
+                peer_rx.try_recv().is_err(),
+                "lost acknowledgement cannot trigger a compensating publication"
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn owned_rejected_no_effect_discards_stage_and_returns() {
         let (peer_tx, mut peer_rx) = mpsc::channel(4);
         let (config_tx, mut config_rx) = mpsc::channel(4);
@@ -1808,6 +2092,7 @@ mod tests {
         );
         let (call, ack) = staged_delete_call(svc, &mut config_rx).await;
         let staged = tokio::spawn(ack.accept());
+        acknowledge_publication(&mut peer_rx, ConfiguredOwnerPublicationOperation::Begin).await;
         match peer_rx.recv().await.expect("expected owned delete") {
             PeerManagerCommand::OwnedCatalogMutation {
                 mutation: OwnedCatalogMutation::DeletePeerGroup { name },
@@ -1826,6 +2111,11 @@ mod tests {
             !staged.await.unwrap(),
             "rejected mutation must discard stage"
         );
+        acknowledge_publication(
+            &mut peer_rx,
+            ConfiguredOwnerPublicationOperation::Discard(PUBLICATION),
+        )
+        .await;
         let error = call.await.unwrap().unwrap_err();
         let expected = catalog_mutation_error_to_status(
             &crate::peer_types::CatalogMutationError::not_found("missing group"),
@@ -1865,6 +2155,7 @@ mod tests {
         );
         let (call, ack) = staged_delete_call(svc, &mut config_rx).await;
         let staged = tokio::spawn(ack.accept());
+        acknowledge_publication(&mut peer_rx, ConfiguredOwnerPublicationOperation::Begin).await;
         match peer_rx.recv().await.expect("expected owned delete") {
             PeerManagerCommand::OwnedCatalogMutation { reply, .. } => {
                 reply
@@ -1881,6 +2172,11 @@ mod tests {
             !staged.await.unwrap(),
             "compensated mutation must discard stage"
         );
+        acknowledge_publication(
+            &mut peer_rx,
+            ConfiguredOwnerPublicationOperation::Discard(PUBLICATION),
+        )
+        .await;
         let error = call.await.unwrap().unwrap_err();
         assert_eq!(error.code(), tonic::Code::Internal);
         assert_eq!(
@@ -1907,6 +2203,7 @@ mod tests {
         let svc = PeerGroupService::new(AccessMode::ReadWrite, peer_tx, Some(config_tx), None);
         let (mut call, ack) = staged_delete_call(svc, &mut config_rx).await;
         let staged = tokio::spawn(ack.accept());
+        acknowledge_publication(&mut peer_rx, ConfiguredOwnerPublicationOperation::Begin).await;
         match peer_rx.recv().await.expect("expected owned delete") {
             PeerManagerCommand::OwnedCatalogMutation { reply, .. } => drop(reply),
             _ => panic!("expected owned peer-group delete"),
@@ -1921,6 +2218,10 @@ mod tests {
                 .is_err(),
             "accepted reply loss must never produce an RPC response"
         );
+        assert!(
+            peer_rx.try_recv().is_err(),
+            "ambiguous work cannot settle publication"
+        );
         call.abort();
     }
 
@@ -1934,6 +2235,7 @@ mod tests {
             panic!("expected staged persistence")
         };
         staged.send(Ok(())).unwrap();
+        acknowledge_publication(&mut peer_rx, ConfiguredOwnerPublicationOperation::Begin).await;
         match peer_rx.recv().await.expect("expected owned delete") {
             PeerManagerCommand::OwnedCatalogMutation { reply, .. } => {
                 reply.send(OwnedCatalogMutationOutcome::Success).unwrap();
@@ -1949,6 +2251,10 @@ mod tests {
                 .await
                 .is_err(),
             "lost commit acknowledgement must never produce an RPC response"
+        );
+        assert!(
+            peer_rx.try_recv().is_err(),
+            "ambiguous work cannot settle publication"
         );
         call.abort();
     }
@@ -1970,6 +2276,7 @@ mod tests {
             panic!("expected staged persistence")
         };
         staged.send(Ok(())).unwrap();
+        acknowledge_publication(&mut peer_rx, ConfiguredOwnerPublicationOperation::Begin).await;
         let PeerManagerCommand::OwnedCatalogMutation { reply, .. } =
             peer_rx.recv().await.expect("expected owned delete")
         else {
@@ -1988,12 +2295,25 @@ mod tests {
         commit_reply
             .send(crate::peer_types::ConfigPersistCommitOutcome::PublishedDurable)
             .unwrap();
+        let publication = publication_reply(
+            &mut peer_rx,
+            ConfiguredOwnerPublicationOperation::Publish(PUBLICATION),
+        )
+        .await;
+        let acquire = coordinator.acquire();
+        tokio::pin!(acquire);
+        std::future::poll_fn(|cx| {
+            assert!(acquire.as_mut().poll(cx).is_pending());
+            Poll::Ready(())
+        })
+        .await;
+        publication.send(Ok(PUBLICATION)).unwrap();
         assert!(
-            tokio::time::timeout(Duration::from_secs(1), coordinator.acquire())
+            tokio::time::timeout(Duration::from_secs(1), acquire)
                 .await
                 .unwrap()
                 .is_ok(),
-            "ownership releases only after detached commit settles"
+            "ownership releases only after detached publication settles"
         );
     }
 
@@ -2041,7 +2361,7 @@ mod tests {
         assert_eq!(error.code(), tonic::Code::Unavailable);
         assert_eq!(
             error.message(),
-            "peer manager mutation queue timed out before accepting command"
+            "peer manager publication queue timed out before accepting command"
         );
         assert!(commit.await.is_err(), "the stage must be discarded");
         assert_only_filler_delivered(&mut peer_rx);

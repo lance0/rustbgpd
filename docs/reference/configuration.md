@@ -3027,9 +3027,18 @@ hysteresis and one removable deadline per history key. Due processing and
 history retirement have explicit entry budgets; read-only inspection returns a
 decayed penalty without changing eligibility. Accepted dynamic-range provenance
 and the negotiated ASN now accompany RIB session registration and queued input.
-These values do not authorize dampening: committed owner installation and
-received-route integration remain unfinished. The engine neither holds routes nor runs an actor
-timer. Future releases must resolve keys against current route/session state
+Committed owner publication now follows settled configuration authority, and
+original wire input retains its admission identity and publication eligibility.
+Replacement sessions remain ineligible until their owned configuration operation
+settles, even when a role-only change preserves the configured owner. The internal bounded-history
+consumer is exercised with explicit test budgets; production does not install
+histories or choose retention limits. Owner capacity is currently checked at
+final publication, so test-installed history can fence a configuration change
+after runtime or persistence effects. Reserving candidate owner credits before
+those effects remains required before live enablement. There is still no
+held-route integration or actor timer, and these preparations do not authorize
+effective enablement.
+Future release decisions must resolve keys against current route/session state
 rather than saved routes.
 These requirements address the identity and release-order questions in the
 historical [ADR-0138](../adr/0138-route-flap-dampening.md); its parked design

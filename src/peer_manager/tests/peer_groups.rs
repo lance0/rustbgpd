@@ -339,6 +339,104 @@ async fn peer_group_reshape_applies_to_all_members_and_advances_config() {
 }
 
 #[tokio::test]
+async fn owned_peer_group_role_reshape_waits_for_owner_publication() {
+    use rustbgpd_api::peer_types::ConfiguredOwnerPublicationOperation as Publication;
+
+    let config = load_test_config(EDGE_GROUP_TOML);
+    let mut mgr = peer_group_reshape_manager(config.clone());
+    let (rib_tx, mut rib_rx) = mpsc::channel(64);
+    mgr.rib_tx = rib_tx;
+    for resolved in config.resolved_neighbors().unwrap() {
+        mgr.add_peer(
+            PeerManager::peer_manager_config_from_resolved(resolved, false),
+            false,
+        )
+        .await
+        .unwrap();
+    }
+    let addresses: Vec<IpAddr> = ["10.0.0.2", "10.0.0.3", "10.0.0.4"]
+        .into_iter()
+        .map(|address| address.parse().unwrap())
+        .collect();
+    let prior: Vec<_> = addresses
+        .iter()
+        .map(|address| {
+            let peer = &mgr.peers[&key(*address)];
+            (
+                peer.session_id(),
+                peer.transport_config.dampening_admission.clone().unwrap(),
+            )
+        })
+        .collect();
+    let receipt = mgr
+        .configured_owner_publication(Publication::Begin)
+        .await
+        .unwrap();
+    let mut definition = edge_group_definition(Some(90));
+    definition.route_server_client = Some(true);
+    let outcome = mgr
+        .apply_peer_group_change_owned(
+            ConfigEvent::SetPeerGroup {
+                name: "edge".into(),
+                definition,
+                ack: None,
+            },
+            addresses.clone(),
+        )
+        .await;
+    assert!(matches!(
+        outcome,
+        rustbgpd_api::peer_types::OwnedCatalogMutationOutcome::Success
+    ));
+    let captures: Vec<_> = addresses
+        .iter()
+        .zip(&prior)
+        .map(|(address, (session, original))| {
+            let peer = &mgr.peers[&key(*address)];
+            assert_ne!(
+                peer.session_id(),
+                *session,
+                "inherited role edit must rebuild the session"
+            );
+            let admission = peer.transport_config.dampening_admission.clone().unwrap();
+            assert_eq!(admission.owner, original.owner);
+            assert!(original.is_published());
+            assert!(
+                !admission.is_published(),
+                "rebuilt group member is provisional"
+            );
+            admission
+        })
+        .collect();
+    let (published, ()) = tokio::join!(
+        mgr.configured_owner_publication(Publication::Publish(receipt)),
+        async {
+            loop {
+                match rib_rx.recv().await.unwrap() {
+                    RibUpdate::PeerDown { .. } | RibUpdate::PeerDeleted { .. } => {}
+                    RibUpdate::PublishDampeningOwners { owners, reply, .. } => {
+                        assert_eq!(owners.len(), captures.len());
+                        assert!(
+                            captures.iter().all(|admission| !admission.is_published()),
+                            "queue admission is not publication acknowledgement"
+                        );
+                        reply.send(Ok(())).unwrap();
+                        break;
+                    }
+                    _ => panic!("unexpected RIB update during group reshape"),
+                }
+            }
+        }
+    );
+    assert_eq!(published, Ok(receipt));
+    assert!(
+        captures
+            .iter()
+            .all(rustbgpd_rib::dampening::DampeningAdmission::is_published)
+    );
+}
+
+#[tokio::test]
 async fn peer_group_discard_change_purge_resets_every_static_inheritor() {
     let config = load_test_config(
         r#"
@@ -501,6 +599,17 @@ async fn owned_peer_group_reshape_reports_fully_compensated_failure() {
     }
     let a1 = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
     let a2 = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 3));
+    let original = mgr.peers[&key(a1)]
+        .transport_config
+        .dampening_admission
+        .clone()
+        .unwrap();
+    let publication = mgr
+        .configured_owner_publication(
+            rustbgpd_api::peer_types::ConfiguredOwnerPublicationOperation::Begin,
+        )
+        .await
+        .unwrap();
     mgr.inject_reconfigure_failures.insert(key(a2), 0);
 
     let outcome = mgr
@@ -516,6 +625,23 @@ async fn owned_peer_group_reshape_reports_fully_compensated_failure() {
     assert_eq!(mgr.current_config, config);
     assert_eq!(mgr.peers[&key(a1)].hold_time, Some(90));
     assert_eq!(mgr.peers[&key(a2)].hold_time, Some(90));
+    let restored = mgr.peers[&key(a1)]
+        .transport_config
+        .dampening_admission
+        .clone()
+        .unwrap();
+    assert_eq!(restored.owner, original.owner);
+    assert!(original.is_published());
+    assert!(
+        !restored.is_published(),
+        "compensated member still awaits outer settlement"
+    );
+    mgr.configured_owner_publication(
+        rustbgpd_api::peer_types::ConfiguredOwnerPublicationOperation::Discard(publication),
+    )
+    .await
+    .unwrap();
+    assert!(restored.is_published());
 }
 
 /// ADR-0081: rollback of the captured priors is best-effort — a failed

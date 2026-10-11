@@ -159,6 +159,14 @@ async fn wait_for_session_event(
     panic!("session event {event_type:?} did not arrive");
 }
 
+/// Settle startup authority before the fixture exercises actor commands.
+async fn acknowledge_initial_dampening_owners(rib_rx: &mut mpsc::Receiver<RibUpdate>) {
+    let Some(RibUpdate::PublishDampeningOwners { reply, .. }) = rib_rx.recv().await else {
+        panic!("expected initial configured-owner publication");
+    };
+    reply.send(Ok(())).unwrap();
+}
+
 fn test_peer_manager() -> PeerManager {
     let (_tx, rx) = mpsc::channel(16);
     let (rib_tx, _rib_rx) = mpsc::channel(64);
@@ -1695,6 +1703,9 @@ fn spawn_rfc8212_rib_stub(
     tokio::spawn(async move {
         while let Some(update) = rib_rx.recv().await {
             match update {
+                RibUpdate::PublishDampeningOwners { reply, .. } => {
+                    let _ = reply.send(Ok(()));
+                }
                 RibUpdate::QueryPeerRetainedStale { reply, .. } => {
                     let _ = reply.send(retained_stale);
                 }
@@ -1714,6 +1725,8 @@ mod cohort_handoff;
 mod collision;
 mod config_mutation;
 mod config_transaction;
+mod configured_owners;
+mod dampening_control;
 mod dynamic_ranges;
 mod events;
 mod export_cohorts;

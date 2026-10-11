@@ -653,6 +653,8 @@ pub enum RuntimeConfigOperationKind {
     AutoRevert,
     NeighborAdd,
     NeighborDelete,
+    NeighborEnable,
+    DampeningCapacityDisable,
     DynamicNeighborAdd,
     DynamicNeighborDelete,
     FibSet,
@@ -687,6 +689,8 @@ impl RuntimeConfigOperationKind {
             Self::AutoRevert => "auto_revert",
             Self::NeighborAdd => "neighbor_add",
             Self::NeighborDelete => "neighbor_delete",
+            Self::NeighborEnable => "neighbor_enable",
+            Self::DampeningCapacityDisable => "dampening_capacity_disable",
             Self::DynamicNeighborAdd => "dynamic_neighbor_add",
             Self::DynamicNeighborDelete => "dynamic_neighbor_delete",
             Self::FibSet => "fib_set",
@@ -2296,6 +2300,10 @@ mod tests {
                 "operator_forced",
             ]
         );
+    }
+
+    #[test]
+    fn operation_kind_labels_are_exact() {
         assert_eq!(
             [
                 RuntimeConfigOperationKind::Sighup,
@@ -2307,6 +2315,8 @@ mod tests {
                 RuntimeConfigOperationKind::AutoRevert,
                 RuntimeConfigOperationKind::NeighborAdd,
                 RuntimeConfigOperationKind::NeighborDelete,
+                RuntimeConfigOperationKind::NeighborEnable,
+                RuntimeConfigOperationKind::DampeningCapacityDisable,
                 RuntimeConfigOperationKind::DynamicNeighborAdd,
                 RuntimeConfigOperationKind::DynamicNeighborDelete,
                 RuntimeConfigOperationKind::FibSet,
@@ -2339,6 +2349,8 @@ mod tests {
                 "auto_revert",
                 "neighbor_add",
                 "neighbor_delete",
+                "neighbor_enable",
+                "dampening_capacity_disable",
                 "dynamic_neighbor_add",
                 "dynamic_neighbor_delete",
                 "fib_set",

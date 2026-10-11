@@ -482,6 +482,8 @@ pub struct TransportConfig {
     pub peer_interface: Option<String>,
     /// Canonical range selected at accept; retained across matcher changes.
     pub accepted_dynamic_range: Option<rustbgpd_rib::update::AcceptedDynamicRange>,
+    /// Captured owner and pre-owned recovery target; absent for legacy embedders.
+    pub dampening_admission: Option<rustbgpd_rib::dampening::DampeningAdmission>,
     /// Resolved interface index for scoped IPv6 link-local peers.
     pub peer_scope_id: Option<u32>,
     /// Timeout for outbound TCP connect attempts.
@@ -663,6 +665,7 @@ impl TransportConfig {
             local_address: None,
             peer_interface: None,
             accepted_dynamic_range: None,
+            dampening_admission: None,
             peer_scope_id: None,
             connect_timeout: Self::DEFAULT_CONNECT_TIMEOUT,
             max_prefixes: None,

@@ -1930,8 +1930,110 @@ pub struct SelectionDeferralPeerFamilyState {
     pub release_reason: String,
 }
 
+/// One original-wire batch, retaining the boundary before synthetic withdrawals.
+///
+/// This travels on the same primary lane and owns the same vectors as
+/// `RoutesReceived`. Legacy/synthetic producers keep that existing variant.
+/// No import-policy or validation authority is inferred from this wrapper.
+pub struct WireRoutesReceived {
+    /// Source transport peer.
+    pub peer: IpAddr,
+    /// Exact sending session.
+    pub session_id: u64,
+    /// Accepted unicast announcements.
+    pub announced: Vec<Route>,
+    /// Original wire withdrawals followed by synthetic withdrawals.
+    pub withdrawn: Vec<(Prefix, u32)>,
+    /// Length of the original-wire prefix of `withdrawn`.
+    pub original_unicast_withdrawals: usize,
+    /// Accepted `FlowSpec` announcements.
+    pub flowspec_announced: Vec<FlowSpecRoute>,
+    /// `FlowSpec` withdrawals, outside this unicast history consumer.
+    pub flowspec_withdrawn: Vec<crate::route::FlowSpecKey>,
+    /// Accepted EVPN announcements.
+    pub evpn_announced: Vec<EvpnRibRoute>,
+    /// EVPN withdrawals, outside this unicast history consumer.
+    pub evpn_withdrawn: Vec<EvpnRouteKey>,
+    /// Existing validation snapshot, unchanged by history classification.
+    pub validated_with: Option<rustbgpd_rpki::ValidationSnapshot>,
+}
+
+impl WireRoutesReceived {
+    /// Classify a just-built transport batch without cloning its route vectors.
+    ///
+    /// # Panics
+    ///
+    /// Panics unless `batch` is `RoutesReceived`, or the original-wire count
+    /// exceeds its withdrawal vector. Both are transport construction invariants.
+    #[must_use]
+    pub fn new(batch: RibUpdate, original_unicast_withdrawals: usize) -> Self {
+        let RibUpdate::RoutesReceived {
+            peer,
+            session_id,
+            announced,
+            withdrawn,
+            flowspec_announced,
+            flowspec_withdrawn,
+            evpn_announced,
+            evpn_withdrawn,
+            validated_with,
+        } = batch
+        else {
+            panic!("wire classification requires a received route batch");
+        };
+        assert!(original_unicast_withdrawals <= withdrawn.len());
+        Self {
+            peer,
+            session_id,
+            announced,
+            withdrawn,
+            original_unicast_withdrawals,
+            flowspec_announced,
+            flowspec_withdrawn,
+            evpn_announced,
+            evpn_withdrawn,
+            validated_with,
+        }
+    }
+}
+
 /// Messages sent from peer sessions to the RIB manager.
 pub enum RibUpdate {
+    /// Final configured-owner publication on the primary mutation lane.
+    PublishDampeningOwners {
+        /// Manager-issued monotonically increasing publication receipt.
+        publication: u64,
+        /// Exact committed incarnations, including their captured emission handles.
+        owners: Vec<Arc<crate::dampening::DampeningOwner>>,
+        /// Acknowledges RIB authority installation, not just manager assignment.
+        reply: oneshot::Sender<Result<(), crate::dampening::DampeningControlError>>,
+    },
+    /// Reserve headroom and reopen RIB admission after acknowledged producer
+    /// teardown, before the managed peer can accept Start.
+    PrepareDampeningEnable {
+        /// Exact source retained by the manager-owned disable receipt.
+        source: ReceivedRouteSource,
+        /// Original capacity failure, retained without inventing a max-prefix event.
+        reason: crate::dampening::DampeningCapacityReason,
+        /// Ownership of this reservation survives caller response cancellation.
+        reply: oneshot::Sender<
+            Result<
+                crate::dampening::DampeningEnableReceipt,
+                crate::dampening::DampeningControlError,
+            >,
+        >,
+    },
+    /// Finish or abort the reserved source-local enable after manager settlement.
+    CompleteDampeningEnable {
+        /// Accepted reservation identity.
+        receipt: crate::dampening::DampeningEnableReceipt,
+        /// True only after the disabled peer accepted the bounded enable command.
+        enabled: bool,
+        /// Accepted/reply-lost must fence rather than invent cancellation.
+        reply: oneshot::Sender<Result<(), crate::dampening::DampeningControlError>>,
+    },
+    /// Original-wire classification for an installed history consumer.
+    WireRoutesReceived(WireRoutesReceived),
     /// Peer session sent us routes.
     RoutesReceived {
         /// Source peer address.
@@ -3226,9 +3328,12 @@ pub struct AcceptedDynamicRange {
 }
 
 /// Immutable accepted configuration provenance, independent of policy updates.
-/// This is not a committed owner token and does not authorize dampening.
+/// Captured owner identity does not itself authorize dampening: the RIB also
+/// checks final publication when admitting the received batch.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PeerSourceContext {
+    /// Configured incarnation and pre-owned capacity recovery target.
+    pub dampening_admission: Option<crate::dampening::DampeningAdmission>,
     /// Configured interface, using the manager's scoped peer identity.
     pub peer_interface: Option<String>,
     /// Accepting range for a dynamic session, absent for configured peers.

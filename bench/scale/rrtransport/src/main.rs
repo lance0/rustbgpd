@@ -146,6 +146,7 @@ fn transport_config(remote: SocketAddr) -> TransportConfig {
         local_address: None,
         peer_interface: None,
         accepted_dynamic_range: None,
+        dampening_admission: None,
         peer_scope_id: None,
         connect_timeout: Duration::from_secs(2),
         max_prefixes: None,

@@ -1,17 +1,291 @@
-//! Pure RFC 2439 penalty accounting, without received-route or actor hooks.
+//! RFC 2439 penalty accounting and internal committed-source control types.
 //!
-//! One owner represents one source peer. Its caller supplies elapsed monotonic
-//! time, classifies real path changes, and owns any held routes. Nothing here
-//! selects, withdraws, or announces a route.
+//! Each pure engine accounts for one retained source. Its caller supplies
+//! elapsed monotonic time and classifies original input. The control types
+//! connect owner publication and finite history admission to the actors;
+//! production does not install that history consumer or suppress routes.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
+use std::net::IpAddr;
+use std::num::NonZeroU64;
 use std::ops::RangeBounds;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 
 use rustbgpd_wire::Prefix;
 
 const TICK_SECONDS: u64 = 10;
+
+/// Process-local configured-owner incarnation, reserved before a session starts.
+///
+/// The RIB independently admits only committed incarnations. The emission bit
+/// merely asks transport to retain original-wire classification in its batch;
+/// it grants no owner authority and remains false without a history consumer.
+#[derive(Debug)]
+pub struct DampeningOwner {
+    id: NonZeroU64,
+    record_wire_history: AtomicBool,
+}
+
+impl DampeningOwner {
+    /// Reserve a fresh, never-reused incarnation in the peer manager.
+    #[must_use]
+    pub const fn new(id: NonZeroU64) -> Self {
+        Self {
+            id,
+            record_wire_history: AtomicBool::new(false),
+        }
+    }
+
+    /// Immutable identity; publication and session replacement never edit it.
+    #[must_use]
+    pub const fn id(&self) -> NonZeroU64 {
+        self.id
+    }
+
+    /// Whether the installed RIB consumer needs original-wire classification.
+    #[must_use]
+    pub fn records_wire_history(&self) -> bool {
+        self.record_wire_history.load(Ordering::Acquire)
+    }
+
+    pub(crate) fn set_records_wire_history(&self, enabled: bool) {
+        self.record_wire_history.store(enabled, Ordering::Release);
+    }
+}
+
+impl PartialEq for DampeningOwner {
+    fn eq(&self, other: &Self) -> bool {
+        self.id == other.id
+    }
+}
+
+impl Eq for DampeningOwner {}
+
+/// Recovery target reserved with a managed peer, before reachable admission.
+///
+/// Collision actors share this latch. RIB exhaustion sets it before queuing
+/// owned disable, so dynamic Idle cleanup cannot discard the recovery target
+/// while that operation waits for the configuration coordinator.
+#[derive(Clone, Debug)]
+pub struct DampeningAdmission {
+    /// Captured configured owner; never rebound from a later range matcher.
+    pub owner: Arc<DampeningOwner>,
+    blocked: Arc<AtomicU64>,
+    disabled: Arc<AtomicBool>,
+    published: Arc<AtomicBool>,
+}
+
+impl DampeningAdmission {
+    /// Reserve recovery state before constructing a transport session.
+    #[must_use]
+    pub fn new(owner: Arc<DampeningOwner>) -> Self {
+        Self {
+            owner,
+            blocked: Arc::new(AtomicU64::new(0)),
+            disabled: Arc::new(AtomicBool::new(false)),
+            published: Arc::new(AtomicBool::new(true)),
+        }
+    }
+
+    /// Fork one authority for a configured owner during an owned publication.
+    /// Static recovery state remains shared across session replacement.
+    #[must_use]
+    pub fn tentative_publication(&self) -> Self {
+        Self {
+            published: Arc::new(AtomicBool::new(false)),
+            ..self.clone()
+        }
+    }
+
+    /// Dynamic children share publication authority but own recovery state.
+    #[must_use]
+    pub fn independent_recovery(&self) -> Self {
+        Self {
+            blocked: Arc::new(AtomicU64::new(0)),
+            disabled: Arc::new(AtomicBool::new(false)),
+            ..self.clone()
+        }
+    }
+
+    /// Publication authority is separate from immutable source identity.
+    #[must_use]
+    pub fn is_published(&self) -> bool {
+        self.published.load(Ordering::Acquire)
+    }
+
+    /// The manager calls this only after the owned publication is settled.
+    pub fn acknowledge_publication(&self) {
+        self.published.store(true, Ordering::Release);
+    }
+
+    /// A capacity block survives session end until owned, checked recovery.
+    #[must_use]
+    pub fn is_blocked(&self) -> bool {
+        self.blocked.load(Ordering::Acquire) != 0
+    }
+
+    /// The original exhausted source remains recoverable after transport exit.
+    #[must_use]
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "the packed ASN was stored from u32 and only shifted by two reason bits"
+    )]
+    pub fn capacity_failure(&self) -> Option<(u32, DampeningCapacityReason)> {
+        let state = self.blocked.load(Ordering::Acquire);
+        let reason = match state & 3 {
+            1 => DampeningCapacityReason::Sources,
+            2 => DampeningCapacityReason::HistoryKeys,
+            3 => DampeningCapacityReason::SourceHistoryKeys,
+            _ => return None,
+        };
+        Some(((state >> 2) as u32, reason))
+    }
+
+    /// Whether the manager joined all prior producers and acknowledged the
+    /// exact primary-RIB teardown barrier for this block.
+    #[must_use]
+    pub fn capacity_disable_complete(&self) -> bool {
+        self.disabled.load(Ordering::Acquire)
+    }
+
+    /// Set only after the manager-owned teardown and primary-RIB barrier.
+    pub fn acknowledge_capacity_disable(&self) {
+        self.disabled.store(true, Ordering::Release);
+    }
+
+    pub(crate) fn clear_blocked(&self) {
+        self.disabled.store(false, Ordering::Release);
+        self.blocked.store(0, Ordering::Release);
+    }
+
+    pub(crate) fn block_once(&self, asn: u32, reason: DampeningCapacityReason) -> bool {
+        let reason = match reason {
+            DampeningCapacityReason::Sources => 1,
+            DampeningCapacityReason::HistoryKeys => 2,
+            DampeningCapacityReason::SourceHistoryKeys => 3,
+        };
+        self.blocked
+            .compare_exchange(
+                0,
+                (u64::from(asn) << 2) | reason,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            )
+            .is_ok()
+    }
+}
+
+// Mutable recovery state is deliberately outside accepted-source identity.
+impl PartialEq for DampeningAdmission {
+    fn eq(&self, other: &Self) -> bool {
+        self.owner == other.owner
+    }
+}
+
+impl Eq for DampeningAdmission {}
+
+/// Full retained-history identity, independent of transport session lifetime.
+/// The configured incarnation already distinguishes scoped static identities
+/// and accepted dynamic ranges; negotiated ASN distinguishes accept-any peers.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct DampeningSource {
+    /// Committed configured incarnation.
+    pub owner: NonZeroU64,
+    /// Remote transport address.
+    pub peer: IpAddr,
+    /// Negotiated OPEN ASN.
+    pub peer_asn: u32,
+}
+
+/// Explicit finite history credits. There is deliberately no production default.
+/// Runtime configuration cannot install this consumer yet.
+#[derive(Clone, Copy, Debug)]
+pub struct DampeningHistoryLimits {
+    /// Current and retained configured incarnations combined.
+    pub owners: usize,
+    /// Active, down, blocked and retiring sources combined.
+    pub sources: usize,
+    /// Retained keys and pending enable reservations across all engines.
+    pub history_keys: usize,
+    /// Retained keys and pending enable reservations for one source.
+    pub source_history_keys: usize,
+}
+
+/// Distinct capacity causes; none denotes a max-prefix protocol violation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DampeningCapacityReason {
+    /// No retained-source credit remains.
+    Sources,
+    /// No global history-key credit remains.
+    HistoryKeys,
+    /// This source exhausted its history-key credits.
+    SourceHistoryKeys,
+}
+
+impl fmt::Display for DampeningCapacityReason {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::Sources => "dampening retained-source capacity exhausted",
+            Self::HistoryKeys => "dampening global history capacity exhausted",
+            Self::SourceHistoryKeys => "dampening source history capacity exhausted",
+        })
+    }
+}
+
+/// Primary-lane control failure, never a successful cancellation receipt.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum DampeningControlError {
+    /// Every budget must be finite and positive.
+    InvalidLimits,
+    /// Publication would exceed retained configured-owner capacity.
+    OwnerCapacity,
+    /// The requested publication or source is no longer authoritative.
+    StaleAuthority,
+    /// A retained source cannot currently reserve recovery headroom.
+    Capacity(DampeningCapacityReason),
+    /// A different accepted enable still owns its reservation.
+    RecoveryInProgress,
+    /// A monotonic operation counter cannot allocate another identity.
+    IdentityExhausted,
+}
+
+impl fmt::Display for DampeningControlError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::InvalidLimits => f.write_str("dampening credits must be positive"),
+            Self::OwnerCapacity => f.write_str("dampening configured-owner capacity exhausted"),
+            Self::StaleAuthority => f.write_str("dampening authority changed"),
+            Self::Capacity(reason) => reason.fmt(f),
+            Self::RecoveryInProgress => {
+                f.write_str("dampening recovery already owns a reservation")
+            }
+            Self::IdentityExhausted => f.write_str("dampening operation identity exhausted"),
+        }
+    }
+}
+
+impl std::error::Error for DampeningControlError {}
+
+/// One source-local disable, coalesced by its pre-owned recovery latch.
+#[derive(Clone, Debug)]
+pub struct DampeningCapacityNotice {
+    /// Exact accepted session and source which exhausted capacity.
+    pub source: crate::update::ReceivedRouteSource,
+    /// Resource whose reservation failed.
+    pub reason: DampeningCapacityReason,
+}
+
+/// Actor-issued reservation held across the complete owned enable operation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DampeningEnableReceipt {
+    /// Full retained source identity.
+    pub source: DampeningSource,
+    /// Monotonic recovery operation identity.
+    pub generation: u64,
+}
 
 /// Validated penalty parameters. The default suppress threshold follows RFC
 /// 7196 and RIPE-580; the ceiling still follows RFC 2439's maximum hold time.
