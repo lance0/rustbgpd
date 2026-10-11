@@ -1025,23 +1025,21 @@ async fn initial_startup(
     }
 }
 
-/// Enter `DF_WAIT` before any awaited RIB work. Explicit administrative DF
-/// changes retain their immediate override instead of entering recovery.
+/// Suppress forwarding before any awaited RIB work. Explicit administrative
+/// DF changes elect immediately after origination instead of entering recovery.
 fn prepare_segment_startup(runtime: &SegmentRuntime, state: &mut SegmentState, recover: bool) {
     state.operational_df = (state.config.df_preference, state.config.df_dont_preempt);
-    if recover {
-        // RFC 7432 §8.5 / RFC 8584 §2.1: all algorithms wait as NonDf.
-        state.recovery_deadline = Some(tokio::time::Instant::now() + Duration::from_secs(3));
-        state.last_roles = state
-            .config
-            .member_vnis
-            .iter()
-            .map(|&vni| (vni, DfRole::NonDf))
-            .collect();
-        let esi = format_esi(state.config.esi);
-        for &vni in &state.config.member_vnis {
-            runtime.metrics.set_evpn_df_role(&esi, vni.as_u32(), false);
-        }
+    // RFC 7432 §8.5 / RFC 8584 §2.1: ordinary starts wait as NonDf.
+    state.recovery_deadline = recover.then(|| tokio::time::Instant::now() + Duration::from_secs(3));
+    state.last_roles = state
+        .config
+        .member_vnis
+        .iter()
+        .map(|&vni| (vni, DfRole::NonDf))
+        .collect();
+    let esi = format_esi(state.config.esi);
+    for &vni in &state.config.member_vnis {
+        runtime.metrics.set_evpn_df_role(&esi, vni.as_u32(), false);
     }
 }
 
@@ -1323,9 +1321,10 @@ async fn run_election_with_candidates(
         let actions = state.ead_per_es.on_startup();
         apply(runtime, state, actions, pending).await;
     }
-    if recovering {
-        // The temporary NonDf roles protected the dataplane during recovery;
+    if recovering || state.ead_per_evi.advertised_count() == 0 {
+        // The temporary NonDf roles protected the dataplane before election;
         // clear them so EAD-per-EVI is originated even if we remain NonDf.
+        // Published snapshots stay suppressed until this election completes.
         state.last_roles.clear();
     }
     let new_roles = match state.election.run(&candidates, state.config.originator_ip) {
@@ -4943,6 +4942,94 @@ mod tests {
         );
         barrier.send(vec![remote]).unwrap();
         actor.finish().await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn administrative_df_change_suppresses_until_origination_ack_without_wait() {
+        for (preference, expected_role) in [(150, DfRole::NonDf), (250, DfRole::Df)] {
+            let mut actor = DfWaitActor::new(DfAlgorithm::HighestPreference);
+            actor.startup().await;
+            let mut attrs = attrs_with_es_import_rt(esi(1));
+            attrs.push(PathAttribute::ExtendedCommunities(vec![
+                ExtendedCommunity::df_election(
+                    DfAlgorithm::HighestPreference.algorithm_id(),
+                    0,
+                    Some(200),
+                ),
+            ]));
+            let remote = type_4_es_route(esi(1), "10.0.0.2", attrs);
+            tokio::time::advance(Duration::from_secs(3)).await;
+            actor.sync_reply().await.send(true).unwrap();
+            actor
+                .routes_reply()
+                .await
+                .send(vec![remote.clone()])
+                .unwrap();
+            actor.remote_event(&remote);
+            let before_change = actor.routes_reply().await;
+            actor.assert_role(DfRole::NonDf);
+            assert!(actor.status.borrow()[&esi(1)].recovery_deadline.is_none());
+
+            let mut replacement = segment(esi(1), &[101]);
+            replacement.df_algorithm = DfAlgorithm::HighestPreference;
+            replacement.df_preference = preference;
+            replacement.redundancy_mode = RedundancyMode::SingleActive;
+            let changed_at = tokio::time::Instant::now();
+            assert!(
+                actor
+                    .handle
+                    .runtime_control()
+                    .replace_segments(Arc::new(vec![replacement]))
+            );
+            before_change.send(vec![remote.clone()]).unwrap();
+            for _ in 0..3 {
+                let RibUpdate::WithdrawEvpn { key, reply } = actor.rib_rx.recv().await.unwrap()
+                else {
+                    panic!("all old route classes must withdraw before the administrative change");
+                };
+                assert_eq!(esi_of_key(&key), Some(esi(1)));
+                reply.send(Ok(())).unwrap();
+            }
+            let RibUpdate::InjectEvpn { route, reply } = actor.rib_rx.recv().await.unwrap() else {
+                panic!("administrative change must first advertise Type 4");
+            };
+            assert!(matches!(route.key(), EvpnRouteKey::Es { .. }));
+            // Holding the first origination reply proves the pre-start watch
+            // publication has run. BUM and the bound AC must remain suppressed.
+            actor.assert_role(DfRole::NonDf);
+            assert!(actor.status.borrow()[&esi(1)].recovery_deadline.is_none());
+            actor.injected.push(route.key());
+            reply.send(Ok(())).unwrap();
+            let RibUpdate::InjectEvpn { route, reply } = actor.rib_rx.recv().await.unwrap() else {
+                panic!("EAD-per-ES must follow Type 4");
+            };
+            assert!(matches!(route.key(), EvpnRouteKey::EadPerEs { .. }));
+            actor.assert_role(DfRole::NonDf);
+            actor.injected.push(route.key());
+            reply.send(Ok(())).unwrap();
+            actor
+                .routes_reply()
+                .await
+                .send(vec![remote.clone()])
+                .unwrap();
+            // The next event query follows election and its EAD-per-EVI ACK.
+            actor.remote_event(&remote);
+            let after_change = actor.routes_reply().await;
+            actor.assert_role(expected_role);
+            assert!(actor.status.borrow()[&esi(1)].recovery_deadline.is_none());
+            assert_eq!(tokio::time::Instant::now(), changed_at);
+            assert_eq!(
+                actor
+                    .injected
+                    .iter()
+                    .filter(|key| matches!(key, EvpnRouteKey::EadPerEvi { .. }))
+                    .count(),
+                2,
+                "replacement EAD-per-EVI must originate even when election remains NonDf"
+            );
+            after_change.send(vec![remote]).unwrap();
+            actor.finish().await;
+        }
     }
 
     #[tokio::test(start_paused = true)]
