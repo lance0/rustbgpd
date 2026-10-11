@@ -472,6 +472,11 @@ pub struct PeerManager {
     /// Neighbor snapshots deferred while another normal snapshot services
     /// lightweight reads. Bounded by the operator channel's capacity.
     deferred_operator_queries: VecDeque<EnqueuedOperatorQuery>,
+    /// Neighbor snapshots admitted at a transaction wait whose session
+    /// replies are still being joined (ADR-0132, 2026-10-10 amendment).
+    /// At most the operator lane's capacity; dropping the manager aborts
+    /// them, and their callers observe a dropped reply.
+    detached_list_peers: JoinSet<()>,
     /// Current command's policy phase. Reset before each command; ordinary
     /// commands must not erase the last completed policy phase below.
     operator_read_seam: OperatorReadSeam,
@@ -809,17 +814,21 @@ impl PeerManager {
             .observe_peer_manager_operator_query_wait(seam.label(), enqueued.elapsed());
     }
 
+    /// Seam for a read admitted inside a transaction. A marked transaction
+    /// wait owns the attribution; an unmarked admitting wait retains a
+    /// completed policy seam that held this read.
+    fn admitted_operator_seam(&self, enqueued: tokio::time::Instant) -> OperatorReadSeam {
+        if self.operator_read_seam == OperatorReadSeam::Unfenced {
+            self.seam_that_held(enqueued)
+        } else {
+            self.operator_read_seam
+        }
+    }
+
     async fn handle_operator_query(&mut self, query: EnqueuedOperatorQuery, during_prestage: bool) {
         let EnqueuedOperatorQuery { enqueued, query } = query;
         if during_prestage {
-            // A marked transaction wait owns the attribution. An unmarked
-            // admitting wait retains a completed policy seam that held this read.
-            let seam = if self.operator_read_seam == OperatorReadSeam::Unfenced {
-                self.seam_that_held(enqueued)
-            } else {
-                self.operator_read_seam
-            };
-            self.observe_operator_query_wait(enqueued, seam);
+            self.observe_operator_query_wait(enqueued, self.admitted_operator_seam(enqueued));
             // Finish the admitted snapshot before a prestage ACK can let
             // the reload advance any session's installed policy.
             self.answer_operator_query(query).await;
@@ -827,6 +836,23 @@ impl PeerManager {
             self.observe_operator_query_wait(enqueued, self.seam_that_held(enqueued));
             self.answer_normal_operator_query(query).await;
         }
+    }
+
+    /// A read admitted by an owner's wait helper. `ListPeers` is detached
+    /// when possible so the owner can resume as soon as its own future is
+    /// ready; every other read, and a snapshot that cannot be detached, is
+    /// answered in place.
+    async fn handle_waiting_operator_query(&mut self, query: EnqueuedOperatorQuery) {
+        let EnqueuedOperatorQuery { enqueued, query } = query;
+        self.observe_operator_query_wait(enqueued, self.admitted_operator_seam(enqueued));
+        let query = match query {
+            PeerManagerOperatorQuery::ListPeers { reply } => match self.detach_list_peers(reply) {
+                Ok(()) => return,
+                Err(reply) => PeerManagerOperatorQuery::ListPeers { reply },
+            },
+            query => query,
+        };
+        self.answer_operator_query(query).await;
     }
 
     async fn answer_operator_query(&self, query: PeerManagerOperatorQuery) {
@@ -966,9 +992,11 @@ impl PeerManager {
     /// query at a time and, when `admission` is [`OperatorReadAdmission::Served`],
     /// the bounded operator-read lane as well. The step future is biased
     /// first, so a probe flood cannot delay a completed apply/rollback step.
-    /// Each admitted operator read completes before this wait resumes, and
-    /// the ordinary command receiver is never polled here, so mutations
-    /// remain strictly behind the owner.
+    /// An admitted `ListPeers` is detached (its session replies are joined by
+    /// a separate task, with every query enqueued before this wait resumes);
+    /// every other admitted read completes before this wait resumes. The
+    /// ordinary command receiver is never polled here, so mutations remain
+    /// strictly behind the owner.
     ///
     /// A forward policy apply serves reads while it awaits the cohort's RIB
     /// transition and while the same transaction's rollback awaits its
@@ -1003,7 +1031,7 @@ impl PeerManager {
                         // Boxed so the read's handler is not part of every
                         // fenced wait's state machine; it allocates only
                         // when a read is actually admitted.
-                        Some(query) => Box::pin(self.handle_operator_query(query, true)).await,
+                        Some(query) => Box::pin(self.handle_waiting_operator_query(query)).await,
                         None => self.operator_rx = None,
                     }
                 }
@@ -1050,7 +1078,7 @@ impl PeerManager {
                 query = Self::receive_operator_query(&mut self.operator_rx, &mut self.deferred_operator_queries), if admission.admits() => {
                     remaining = remaining.saturating_sub(attended.elapsed());
                     match query {
-                        Some(query) => Box::pin(self.handle_operator_query(query, true)).await,
+                        Some(query) => Box::pin(self.handle_waiting_operator_query(query)).await,
                         None => self.operator_rx = None,
                     }
                     if remaining.is_zero() {
@@ -1127,6 +1155,7 @@ impl PeerManager {
             readiness_rx: None,
             operator_rx: None,
             deferred_operator_queries: VecDeque::new(),
+            detached_list_peers: JoinSet::new(),
             operator_read_seam: OperatorReadSeam::Unfenced,
             completed_operator_seam: None,
             internal_rx: Some(internal_rx),

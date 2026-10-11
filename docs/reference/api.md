@@ -989,6 +989,17 @@ its placeholder `Idle` state is not evidence that the session is down.
 Check `stale` before interpreting `state`. An observed `Idle` with
 `stale=false` is a different result.
 
+A `ListNeighbors` read that a configuration transaction admits while it waits
+does not hold that transaction. Manager-owned fields (configuration, transport
+settings, installed-policy RFC 8212 status, max-prefix latch) are captured when
+the read is admitted. Every session's state query is queued at the same
+instant, so each session field is observed before that session runs any later
+configuration command; counters can still advance in the meantime. The
+response can therefore arrive after the transaction, and after
+`config reload complete`, while describing the configuration at admission. A
+session that does not answer within its query bound is reported `stale=true`.
+See the [ADR-0132 amendment](../adr/0132-operator-read-path.md#amendment-2026-10-10-reads-overlapping-reload-completion).
+
 `ListNeighbors` and `GetNeighborState` set `is_dynamic` and, for a dynamic
 peer, include `accepted_dynamic_range` with the canonical prefix and peer group
 captured when the connection was accepted. This is session provenance, not a

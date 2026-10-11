@@ -8,8 +8,9 @@ use rustbgpd_api::peer_types::{
 use rustbgpd_bmp::{BmpEvent, BmpPeerInfo, BmpPeerType};
 use rustbgpd_fsm::SessionState;
 use rustbgpd_policy::PolicyChain;
-use rustbgpd_transport::{PeerHandle, PeerSessionState, StateQueryOutcome};
+use rustbgpd_transport::{PeerCommand, PeerHandle, PeerSessionState, StateQueryOutcome};
 use rustbgpd_wire::{Afi, Safi};
+use tokio::sync::{mpsc, oneshot};
 use tokio_util::task::AbortOnDropHandle;
 use tracing::warn;
 
@@ -29,13 +30,10 @@ fn accepted_dynamic_range_snapshot(managed: &ManagedPeerState) -> Option<Dynamic
         })
 }
 
-fn authentication_snapshot(
-    managed: &ManagedPeerState,
-    session_state: Option<&PeerSessionState>,
-) -> &'static str {
-    if session_state.map_or(managed.tcp_ao_protected, |state| state.tcp_ao_protected) {
+fn authentication_label(tcp_ao_protected: bool, md5_configured: bool) -> &'static str {
+    if tcp_ao_protected {
         "tcp_ao"
-    } else if managed.transport_config.md5_password.is_some() {
+    } else if md5_configured {
         "md5"
     } else {
         "plaintext"
@@ -154,37 +152,46 @@ pub(super) fn build_peer_info(
     session_state: Option<&PeerSessionState>,
     ebgp_requires_policy: bool,
 ) -> PeerInfo {
-    let stale = session_state.is_none();
-    let remote_asn = effective_remote_asn(managed, session_state);
+    let mut info = manager_peer_info(peer, managed, ebgp_requires_policy);
+    if let Some(state) = session_state {
+        apply_session_state(
+            &mut info,
+            managed.transport_config.md5_password.is_some(),
+            state,
+        );
+    }
+    info
+}
+
+/// The manager half of one neighbor row: every field the manager owns, with
+/// the stale placeholders a missing session observation reports.
+fn manager_peer_info(
+    peer: &PeerKey,
+    managed: &ManagedPeerState,
+    ebgp_requires_policy: bool,
+) -> PeerInfo {
     let (rfc8212_import_policy, rfc8212_export_policy) =
         rfc8212_statuses(managed, ebgp_requires_policy);
     PeerInfo {
         address: peer.address,
         interface: peer.interface.clone(),
-        remote_asn,
+        remote_asn: managed.remote_asn,
         description: managed.description.clone(),
         peer_group: managed.peer_group.clone(),
-        state: session_state.map_or(SessionState::Idle, |s| s.fsm_state),
+        state: SessionState::Idle,
         enabled: managed.enabled,
         graceful_shutdown_advertise_intent: managed.advertise_graceful_shutdown,
-        prefix_count: session_state.map_or(0, |s| s.prefix_count),
-        rejected_routes_retained: session_state.map(|s| s.rejected_routes_retained),
-        prefix_count_ipv4: session_state.map_or(0, |s| s.max_prefix.prefix_count_ipv4),
-        prefix_count_ipv6: session_state.map_or(0, |s| s.max_prefix.prefix_count_ipv6),
-        max_prefixes_effective: session_state
-            .map_or(managed.max_prefixes, |s| s.max_prefix.max_prefixes),
-        max_prefixes_ipv4_effective: session_state
-            .map_or(managed.transport_config.max_prefixes_ipv4, |s| {
-                s.max_prefix.max_prefixes_ipv4
-            }),
-        max_prefixes_ipv6_effective: session_state
-            .map_or(managed.transport_config.max_prefixes_ipv6, |s| {
-                s.max_prefix.max_prefixes_ipv6
-            }),
-        max_prefix_headroom: session_state.and_then(|s| s.max_prefix.headroom),
-        max_prefix_headroom_ipv4: session_state.and_then(|s| s.max_prefix.headroom_ipv4),
-        max_prefix_headroom_ipv6: session_state.and_then(|s| s.max_prefix.headroom_ipv6),
-        inbound_prefix_limits: session_state.map_or_else(Vec::new, inbound_prefix_limit_rows),
+        prefix_count: 0,
+        rejected_routes_retained: None,
+        prefix_count_ipv4: 0,
+        prefix_count_ipv6: 0,
+        max_prefixes_effective: managed.max_prefixes,
+        max_prefixes_ipv4_effective: managed.transport_config.max_prefixes_ipv4,
+        max_prefixes_ipv6_effective: managed.transport_config.max_prefixes_ipv6,
+        max_prefix_headroom: None,
+        max_prefix_headroom_ipv4: None,
+        max_prefix_headroom_ipv6: None,
+        inbound_prefix_limits: Vec::new(),
         hold_time: managed.hold_time,
         min_hold_time: managed.transport_config.peer.min_hold_time,
         send_hold_time: managed.transport_config.peer.send_hold_time,
@@ -202,7 +209,7 @@ pub(super) fn build_peer_info(
         max_prefix_restart_remaining_millis: None,
         families: managed.transport_config.peer.families.clone(),
         required_families: managed.transport_config.peer.required_families.clone(),
-        negotiated_session: session_state.and_then(|state| state.negotiated_session.clone()),
+        negotiated_session: None,
         remove_private_as: managed.transport_config.remove_private_as,
         discard_path_attributes: managed.transport_config.discard_path_attributes.clone(),
         route_server_client: managed.transport_config.route_server_client,
@@ -213,45 +220,159 @@ pub(super) fn build_peer_info(
         orr_vantage: managed.transport_config.orr_vantage,
         local_role: managed.transport_config.peer.local_role,
         strict_role: managed.transport_config.peer.strict_role,
-        remote_role: session_state.and_then(|s| s.remote_role),
-        role_negotiated: session_state.is_some_and(|s| s.role_negotiated),
+        remote_role: None,
+        role_negotiated: false,
         add_path_receive: managed.transport_config.peer.add_path_receive,
         add_path_send: managed.transport_config.peer.add_path_send,
         add_path_send_max: managed.transport_config.peer.add_path_send_max,
         paths_limit_receive_max: managed.transport_config.peer.paths_limit_receive_max,
-        peer_paths_limits: session_state
-            .map(|state| state.peer_paths_limits.clone())
-            .unwrap_or_default(),
-        effective_add_path_send_limits: session_state
-            .map(|state| state.effective_add_path_send_limits.clone())
-            .unwrap_or_default(),
-        updates_received: session_state.map_or(0, |s| s.updates_received),
-        updates_sent: session_state.map_or(0, |s| s.updates_sent),
-        notifications_received: session_state.map_or(0, |s| s.notifications_received),
-        notifications_sent: session_state.map_or(0, |s| s.notifications_sent),
-        messages_received: session_state.map_or(0, |s| s.messages_received),
-        messages_sent: session_state.map_or(0, |s| s.messages_sent),
+        peer_paths_limits: Vec::new(),
+        effective_add_path_send_limits: Vec::new(),
+        updates_received: 0,
+        updates_sent: 0,
+        notifications_received: 0,
+        notifications_sent: 0,
+        messages_received: 0,
+        messages_sent: 0,
         route_reflector_client: managed.transport_config.route_reflector_client,
-        otc_routes_blocked: session_state.map_or(0, |s| s.otc_routes_blocked),
-        import_policy_routes_permitted: session_state
-            .map_or(0, |s| s.import_policy_routes_permitted),
-        import_policy_routes_denied: session_state.map_or(0, |s| s.import_policy_routes_denied),
+        otc_routes_blocked: 0,
+        import_policy_routes_permitted: 0,
+        import_policy_routes_denied: 0,
         export_policy_routes_permitted: 0,
         export_policy_routes_denied: 0,
-        flap_count: session_state.map_or(0, |s| s.flap_count),
-        uptime_secs: session_state.map_or(0, |s| s.uptime_secs),
-        reconnect_in_secs: session_state.map_or(0, |s| s.reconnect_in_secs),
-        last_error: session_state.map_or_else(String::new, |s| s.last_error.clone()),
-        authentication: authentication_snapshot(managed, session_state).to_string(),
-        tcp_ao_info: session_state.and_then(|s| s.tcp_ao_info.as_deref().cloned()),
+        flap_count: 0,
+        uptime_secs: 0,
+        reconnect_in_secs: 0,
+        last_error: String::new(),
+        authentication: authentication_label(
+            managed.tcp_ao_protected,
+            managed.transport_config.md5_password.is_some(),
+        )
+        .to_string(),
+        tcp_ao_info: None,
         tcp_ao_rotation: managed.tcp_ao_rotation.clone(),
         is_dynamic: managed.is_dynamic,
         accepted_dynamic_range: accepted_dynamic_range_snapshot(managed),
-        stale,
-        slow_peer: session_state.is_some_and(|s| s.slow_peer),
+        stale: true,
+        slow_peer: false,
         rfc8212_import_policy,
         rfc8212_export_policy,
     }
+}
+
+/// Overlay one live session observation on its manager half. `md5_configured`
+/// is the manager's authentication fallback when the session is not TCP-AO.
+fn apply_session_state(info: &mut PeerInfo, md5_configured: bool, state: &PeerSessionState) {
+    if let Some(asn) = state.peer_asn.filter(|asn| *asn != 0) {
+        info.remote_asn = asn;
+    }
+    info.state = state.fsm_state;
+    info.prefix_count = state.prefix_count;
+    info.rejected_routes_retained = Some(state.rejected_routes_retained);
+    info.prefix_count_ipv4 = state.max_prefix.prefix_count_ipv4;
+    info.prefix_count_ipv6 = state.max_prefix.prefix_count_ipv6;
+    info.max_prefixes_effective = state.max_prefix.max_prefixes;
+    info.max_prefixes_ipv4_effective = state.max_prefix.max_prefixes_ipv4;
+    info.max_prefixes_ipv6_effective = state.max_prefix.max_prefixes_ipv6;
+    info.max_prefix_headroom = state.max_prefix.headroom;
+    info.max_prefix_headroom_ipv4 = state.max_prefix.headroom_ipv4;
+    info.max_prefix_headroom_ipv6 = state.max_prefix.headroom_ipv6;
+    info.inbound_prefix_limits = inbound_prefix_limit_rows(state);
+    info.negotiated_session
+        .clone_from(&state.negotiated_session);
+    info.remote_role = state.remote_role;
+    info.role_negotiated = state.role_negotiated;
+    info.peer_paths_limits.clone_from(&state.peer_paths_limits);
+    info.effective_add_path_send_limits
+        .clone_from(&state.effective_add_path_send_limits);
+    info.updates_received = state.updates_received;
+    info.updates_sent = state.updates_sent;
+    info.notifications_received = state.notifications_received;
+    info.notifications_sent = state.notifications_sent;
+    info.messages_received = state.messages_received;
+    info.messages_sent = state.messages_sent;
+    info.otc_routes_blocked = state.otc_routes_blocked;
+    info.import_policy_routes_permitted = state.import_policy_routes_permitted;
+    info.import_policy_routes_denied = state.import_policy_routes_denied;
+    info.flap_count = state.flap_count;
+    info.uptime_secs = state.uptime_secs;
+    info.reconnect_in_secs = state.reconnect_in_secs;
+    info.last_error.clone_from(&state.last_error);
+    info.authentication = authentication_label(state.tcp_ao_protected, md5_configured).to_string();
+    info.tcp_ao_info = state.tcp_ao_info.as_deref().cloned();
+    info.stale = false;
+    info.slow_peer = state.slow_peer;
+}
+
+/// A manager-owned max-prefix latch overrides the session's error and action.
+/// The remaining hold-down is computed when the row is completed.
+fn apply_max_prefix_latch(
+    info: &mut PeerInfo,
+    error: &str,
+    deadline: Option<tokio::time::Instant>,
+) {
+    error.clone_into(&mut info.last_error);
+    info.max_prefix_action = if deadline.is_some() {
+        "restart"
+    } else {
+        "shutdown"
+    }
+    .to_string();
+    info.max_prefix_restart_remaining_millis = deadline.map(|deadline| {
+        deadline
+            .saturating_duration_since(tokio::time::Instant::now())
+            .as_millis()
+            .try_into()
+            .unwrap_or(u64::MAX)
+    });
+}
+
+/// One neighbor row captured when a transaction wait admits `ListPeers`,
+/// and the reply of the session query enqueued at that instant.
+struct DetachedPeerRow {
+    info: PeerInfo,
+    md5_configured: bool,
+    latch: Option<(String, Option<tokio::time::Instant>)>,
+    /// `None` when the session's command channel had already closed.
+    state: Option<oneshot::Receiver<PeerSessionState>>,
+}
+
+/// Join one detached neighbor snapshot (ADR-0132, 2026-10-10 amendment).
+/// Every query was enqueued at admission, so waiting for each reply in turn
+/// under one absolute deadline waits for them concurrently. Caller
+/// cancellation drops the receivers, which marks the queued reads canceled.
+async fn complete_detached_list_peers(
+    rows: Vec<DetachedPeerRow>,
+    mut reply: oneshot::Sender<Vec<PeerInfo>>,
+    deadline: tokio::time::Instant,
+) {
+    let collect = async move {
+        let mut infos = Vec::with_capacity(rows.len());
+        for row in rows {
+            let DetachedPeerRow {
+                mut info,
+                md5_configured,
+                latch,
+                state,
+            } = row;
+            if let Some(state) = state
+                && let Ok(Ok(state)) = tokio::time::timeout_at(deadline, state).await
+            {
+                apply_session_state(&mut info, md5_configured, &state);
+            }
+            if let Some((error, deadline)) = &latch {
+                apply_max_prefix_latch(&mut info, error, *deadline);
+            }
+            infos.push(info);
+        }
+        infos
+    };
+    let infos = tokio::select! {
+        biased;
+        () = reply.closed() => return,
+        infos = collect => infos,
+    };
+    let _ = reply.send(infos);
 }
 
 /// ADR-0112 directional status for both of one peer's directions.
@@ -534,20 +655,7 @@ impl PeerManager {
             self.current_config.rfc8212_posture().policy_effective,
         );
         if let Some(latch) = self.max_prefix_latches.get(peer) {
-            info.last_error.clone_from(&latch.error);
-            info.max_prefix_action = if latch.deadline.is_some() {
-                "restart"
-            } else {
-                "shutdown"
-            }
-            .to_string();
-            info.max_prefix_restart_remaining_millis = latch.deadline.map(|deadline| {
-                deadline
-                    .saturating_duration_since(tokio::time::Instant::now())
-                    .as_millis()
-                    .try_into()
-                    .unwrap_or(u64::MAX)
-            });
+            apply_max_prefix_latch(&mut info, &latch.error, latch.deadline);
         }
         Some(info)
     }
@@ -575,24 +683,75 @@ impl PeerManager {
                 self.current_config.rfc8212_posture().policy_effective,
             );
             if let Some(latch) = self.max_prefix_latches.get(peer) {
-                info.last_error.clone_from(&latch.error);
-                info.max_prefix_action = if latch.deadline.is_some() {
-                    "restart"
-                } else {
-                    "shutdown"
-                }
-                .to_string();
-                info.max_prefix_restart_remaining_millis = latch.deadline.map(|deadline| {
-                    deadline
-                        .saturating_duration_since(tokio::time::Instant::now())
-                        .as_millis()
-                        .try_into()
-                        .unwrap_or(u64::MAX)
-                });
+                apply_max_prefix_latch(&mut info, &latch.error, latch.deadline);
             }
             infos.push(info);
         }
         infos
+    }
+
+    /// Serve a `ListPeers` admitted at a transaction wait without holding the
+    /// owner (ADR-0132, 2026-10-10 amendment). Capture the manager half of
+    /// every row and enqueue one `QueryState` per session before returning;
+    /// a task in [`PeerManager::detached_list_peers`] joins the replies.
+    /// Session command channels are FIFO, so each session answers before it
+    /// executes any command the owner sends after this point.
+    ///
+    /// Returns the reply for in-place service when the detached-read limit
+    /// (the operator lane's capacity) is reached or any session channel is
+    /// full. A closed channel reports that session as unavailable, as the
+    /// in-place fan-out does.
+    pub(super) fn detach_list_peers(
+        &mut self,
+        reply: oneshot::Sender<Vec<PeerInfo>>,
+    ) -> Result<(), oneshot::Sender<Vec<PeerInfo>>> {
+        while let Some(joined) = self.detached_list_peers.try_join_next() {
+            if let Err(error) = joined
+                && !error.is_cancelled()
+            {
+                warn!(error = %error, "detached neighbor snapshot task failed");
+            }
+        }
+        let limit = self
+            .operator_rx
+            .as_ref()
+            .map_or(0, mpsc::Receiver::max_capacity);
+        if self.detached_list_peers.len() >= limit {
+            return Err(reply);
+        }
+        if reply.is_closed() {
+            return Ok(());
+        }
+        let mut reserved = Vec::with_capacity(self.peers.len());
+        for (peer, managed) in &self.peers {
+            let permit = match managed.handle().commands_sender().try_reserve_owned() {
+                Ok(permit) => Some(permit),
+                Err(mpsc::error::TrySendError::Closed(_)) => None,
+                Err(mpsc::error::TrySendError::Full(_)) => return Err(reply),
+            };
+            reserved.push((peer, managed, permit));
+        }
+        let ebgp_requires_policy = self.current_config.rfc8212_posture().policy_effective;
+        let rows = reserved
+            .into_iter()
+            .map(|(peer, managed, permit)| DetachedPeerRow {
+                info: manager_peer_info(peer, managed, ebgp_requires_policy),
+                md5_configured: managed.transport_config.md5_password.is_some(),
+                latch: self
+                    .max_prefix_latches
+                    .get(peer)
+                    .map(|latch| (latch.error.clone(), latch.deadline)),
+                state: permit.map(|permit| {
+                    let (state_tx, state_rx) = oneshot::channel();
+                    permit.send(PeerCommand::QueryState { reply: state_tx });
+                    state_rx
+                }),
+            })
+            .collect();
+        let deadline = tokio::time::Instant::now() + PEER_QUERY_TIMEOUT;
+        self.detached_list_peers
+            .spawn(complete_detached_list_peers(rows, reply, deadline));
+        Ok(())
     }
 
     /// Answer an operator/readiness peer snapshot only when its caller still
