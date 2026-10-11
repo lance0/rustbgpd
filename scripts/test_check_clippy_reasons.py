@@ -42,6 +42,9 @@ class ClippyReasonTests(unittest.TestCase):
             "#[cfg_attr(not(test), expect(clippy::needless_pass_by_value))]\nfn f() {}\n",
             "#![cfg_attr(test, allow(clippy::unwrap_used))]\n",
             "#[cfg_attr(\n    feature = \"x\",\n    expect(clippy::too_many_lines)\n)]\nfn f() {}\n",
+            # Another nested attribute's reason does not cover this one.
+            '#[cfg_attr(test, allow(dead_code, reason = "fixture"), allow(clippy::unwrap_used))]\n'
+            "fn f() {}\n",
         ):
             with self.subTest(source=source):
                 result = check_source(source)
@@ -56,6 +59,9 @@ class ClippyReasonTests(unittest.TestCase):
             "#[cfg_attr(test, allow(dead_code))]\nfn f() {}\n",
             "#[cfg_attr(test, deny(clippy::unwrap_used))]\nfn f() {}\n",
             '#[cfg_attr(feature = "clippy::x", derive(Debug))]\nstruct S;\n',
+            '#[cfg_attr(feature = "clippy::x", allow(dead_code))]\nfn f() {}\n',
+            '#[cfg_attr(test, allow(clippy::unwrap_used, reason = "a (b) c"), allow(dead_code))]\n'
+            "fn f() {}\n",
         ):
             with self.subTest(source=source):
                 result = check_source(source)
@@ -66,7 +72,7 @@ class ClippyReasonTests(unittest.TestCase):
             missing = Path(tmp) / "missing.rs"
             result = run_checker(str(missing))
 
-        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(result.returncode, 2)
         self.assertIn(str(missing), result.stderr)
 
     def test_crate_level_suppression_without_reason_is_rejected(self) -> None:

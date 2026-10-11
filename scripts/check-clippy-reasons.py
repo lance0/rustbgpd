@@ -92,6 +92,38 @@ def find_attribute_end(text: str, start: int) -> int | None:
     return None
 
 
+def cfg_attr_suppressions(attr: str) -> list[str]:
+    """Return each `allow(...)` or `expect(...)` applied by a `cfg_attr`."""
+    groups: list[str] = []
+    offset = 0
+    while match := CFG_ATTR_SUPPRESSION.search(attr, offset):
+        in_string = False
+        escaped = False
+        depth = 0
+        end = len(attr)
+        for idx in range(match.end() - 1, len(attr)):
+            ch = attr[idx]
+            if in_string:
+                if escaped:
+                    escaped = False
+                elif ch == "\\":
+                    escaped = True
+                elif ch == '"':
+                    in_string = False
+            elif ch == '"':
+                in_string = True
+            elif ch == "(":
+                depth += 1
+            elif ch == ")":
+                depth -= 1
+                if depth == 0:
+                    end = idx + 1
+                    break
+        groups.append(attr[match.start() : end])
+        offset = end
+    return groups
+
+
 def missing_reasons(path: pathlib.Path) -> list[tuple[int, str]]:
     text = path.read_text(encoding="utf-8")
     misses: list[tuple[int, str]] = []
@@ -107,8 +139,14 @@ def missing_reasons(path: pathlib.Path) -> list[tuple[int, str]]:
             misses.append((line, "unterminated clippy allow/expect attribute"))
             break
         attr = text[start : end + 1]
-        suppression = match["name"] != "cfg_attr" or CFG_ATTR_SUPPRESSION.search(attr)
-        if suppression and "clippy::" in attr and REASON.search(attr) is None:
+        # A `cfg_attr` can apply several attributes; each one needs its own reason.
+        suppressions = (
+            [attr] if match["name"] != "cfg_attr" else cfg_attr_suppressions(attr)
+        )
+        if any(
+            "clippy::" in suppression and REASON.search(suppression) is None
+            for suppression in suppressions
+        ):
             line = text.count("\n", 0, start) + 1
             first_line = attr.splitlines()[0].strip()
             misses.append((line, first_line))
