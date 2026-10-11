@@ -53,6 +53,15 @@ DEPENDENCY = re.compile(
     r'(?m)^([A-Za-z0-9_-]+)[ \t]*=[ \t]*'
     r'(?:"([^"\n]*)"|\{[^}\n]*\bversion[ \t]*=[ \t]*"([^"\n]*)")'
 )
+# Each versioned dependency line, by crate directory, that a section must keep;
+# a deleted line would otherwise leave nothing to compare. Entries naming a
+# crate that is not publishable are skipped.
+REQUIRED_SNIPPETS = {
+    "crates/wire/README.md": {"## Usage": ("wire",)},
+    "crates/rpki/README.md": {"## Usage": ("rpki", "wire")},
+    EMBEDDING: {"### 3.1 ": ("wire",), "### 3.3 ": ("wire", "fsm"), "### 3.4 ": ("rpki", "wire")},
+}
+SECTION_END = re.compile(r"(?m)^#{2,3} ")
 
 
 class PreflightError(Exception):
@@ -145,7 +154,8 @@ def version_copy_errors(root: Path, crates: dict[str, tuple[str, str]]) -> list[
     page, so every dependency snippet in it must name the manifest version of
     the publishable crate it depends on. The embedding guide's examples are a
     coordinated set, and every publishable crate needs a root workspace pin;
-    both must name the manifest versions too."""
+    both must name the manifest versions too. The sections in
+    `REQUIRED_SNIPPETS` must keep their dependency lines."""
     versions = dict(crates.values())
     errors = []
     for relative in [*(f"crates/{crate}/README.md" for crate in crates), EMBEDDING]:
@@ -156,6 +166,24 @@ def version_copy_errors(root: Path, crates: dict[str, tuple[str, str]]) -> list[
                     f"{relative} names {name} {version!r}, not the manifest "
                     f"version {versions[name]}"
                 )
+    for relative, sections in REQUIRED_SNIPPETS.items():
+        for heading, required in sections.items():
+            if not set(required) <= set(crates):
+                continue
+            text = read(root, relative)
+            start = re.search(rf"(?m)^{re.escape(heading)}.*$", text)
+            if start is None:
+                errors.append(f"{relative} has no `{heading.strip()}` section")
+                continue
+            end = SECTION_END.search(text, start.end())
+            body = text[start.end() : end.start() if end else len(text)]
+            named = {match[1] for match in DEPENDENCY.finditer(body)}
+            for crate in required:
+                if crates[crate][0] not in named:
+                    errors.append(
+                        f"{relative} `{heading.strip()}` has no versioned "
+                        f"{crates[crate][0]} dependency line"
+                    )
     try:
         manifest = tomllib.loads(read(root, "Cargo.toml"))
     except tomllib.TOMLDecodeError as error:

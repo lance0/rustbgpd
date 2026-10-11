@@ -998,8 +998,9 @@ makes these edits, all in the release commit, and nothing after publishing:
 
 `just gate-release` fails while any dependency snippet in a crate README or the
 embedding guide, or a root workspace pin, names a publishable crate at a
-version other than that crate's manifest version, or a publishable crate has
-no workspace pin. `--mode release` also rejects any form of "prepare"
+version other than that crate's manifest version, when a README `## Usage`
+block or embedding §3 example loses one of its required dependency lines, or
+when a publishable crate has no workspace pin. `--mode release` also rejects any form of "prepare"
 left in a crate README; a version written while staging must read as released
 before the release commit. Past `CHANGELOG.md` sections keep their wording.
 
