@@ -4,12 +4,37 @@ import contextlib
 import io
 import json
 from pathlib import Path
+import re
 import subprocess
 import tempfile
+import tomllib
 import unittest
 from unittest.mock import Mock, patch
 
 import m121_all_active_frr as driver
+
+
+class OperatorAuthTests(unittest.TestCase):
+    def test_rendered_cells_keep_authenticated_operator_access(self):
+        template = (Path(__file__).resolve().parents[1] / 'configs/rustbgpd-m121-pe.toml').read_text()
+        for cell in driver.CELLS:
+            with self.subTest(cell=cell):
+                config = tomllib.loads(driver.render_config(template, cell))
+                listener = config['global']['telemetry']['grpc_tcp']
+                self.assertEqual(listener['token_file'], '/run/rustbgpd/grpc-test-only-operator.token')
+                self.assertEqual(listener['principal'], 'rustbgpd://operator/test-only')
+                security = config['security']['grpc']
+                self.assertEqual(security['enforcement'], 'tier')
+                self.assertEqual(security['roles'][listener['principal']], 'operator')
+
+    def test_controller_mounts_and_uses_the_shared_read_only_token(self):
+        source = (Path(__file__).resolve().parents[1] / 'm121-evpn-all-active-frr.clab.yml').read_text()
+        controller = re.search(r'(?ms)^    controller:\n(.*?)(?=^    \S|\Z)', source)
+        self.assertIsNotNone(controller)
+        lines = controller.group(1).splitlines()
+        token = '/run/rustbgpd/grpc-test-only-operator.token'
+        self.assertIn(f'        - ../fixtures/grpc-test-only-operator.token:{token}:ro', lines)
+        self.assertIn(f'        RUSTBGPD_TOKEN_FILE: {token}', lines)
 
 
 class HistoricalComparisonTests(unittest.TestCase):
