@@ -448,12 +448,16 @@ resolved.
   While NotReady, local MACs on the segment's VNIs are advertised without an
   ESI. Type 2 (STP) derivation is not implemented. See
   [Auto-derived ESI](configuration.md#auto-derived-esi-lacp-type-1).
-- **VLAN-aware bundle members are single-homed and L2-only.** A
+- **VLAN-aware bundle members remain single-homed.** A
   [`vlan_aware_bundle` row](configuration.md#vlan-aware-bundle-members)
   originates and imports Type 2 and Type 3 routes under its own Ethernet
-  Tag, but it cannot join an Ethernet Segment, link an `ip_vrf`, or use a
-  locally assigned VNI. A multi-homed Type 2 or an EAD-per-EVI route for a
-  member is not programmed and is counted as `multihoming_unsupported`; a
+  Tag. An `ip_vrf` binding is allowed only with the IP-VRF's
+  `overlay_index_mode = "interface_less"`, using tag-zero Type 5 routes and
+  a separate L3VNI. Linux SVI/VRF attachment remains operator-provisioned.
+  Bundle members cannot join an Ethernet Segment, use locally assigned
+  VNIs, or resolve incoming GW-IP or ESI overlay-index routes. A multi-homed
+  Type 2 or an EAD-per-EVI route for a member is not programmed and is counted
+  as `multihoming_unsupported`; a
   route under another tag counts as `ethernet_tag_mismatch`, and one whose
   route target and tag select a member under another VNI counts as
   `vni_mismatch`. These appear in `evpn_l2_remote_route_drops` and in the
@@ -464,7 +468,12 @@ resolved.
   receive programming against GoBGP; the
   [M119 local receipt](../artifacts/interop/m119-evpn-bundle-vtep-20261010T124729Z/README.md)
   qualifies SR Linux 25.10.1 import, per-tag forwarding with fresh ARP, and
-  withdrawal/restore isolation in a two-VTEP fixture. EVPN remains alpha. See
+  withdrawal/restore isolation in a two-VTEP L2 fixture. The
+  [M120 local receipt](../artifacts/interop/m120-evpn-bundle-irb-20261011T045852Z/README.md)
+  qualifies member IRB against pinned SR Linux 25.10.1-399 with
+  operator-provisioned SVIs, VRF attachments and L3 VXLAN devices.
+  These local receipts do not establish hosted vendor qualification or scale
+  results. EVPN remains alpha. See
   [ADR-0092](../adr/0092-evpn-vlan-aware-bundle-service.md).
 - **Family scope is still limited.** MP-BGP supports AFI/SAFI negotiation,
   but rustbgpd currently implements IPv4/IPv6 unicast (AFI 1/2, SAFI 1),

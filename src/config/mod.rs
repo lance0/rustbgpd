@@ -1501,10 +1501,21 @@ impl Config {
         // Validate L2→L3 bindings + record references.
         for inst in &self.evpn_instances {
             if let Some(ref name) = inst.ip_vrf {
-                if table.get(name).is_none() {
+                let Some(vrf) = table.get(name) else {
                     return Err(ConfigError::InvalidEvpnIpVrf {
                         reason: format!(
                             "evpn_instances[vni={}]: ip_vrf {:?} does not match any declared [[evpn_ip_vrfs]] entry",
+                            inst.vni, name
+                        ),
+                    });
+                };
+                if inst.service_interface == EvpnServiceInterfaceConfig::VlanAwareBundle
+                    && vrf.overlay_index_mode != OverlayIndexMode::InterfaceLess
+                {
+                    return Err(ConfigError::InvalidEvpnIpVrf {
+                        reason: format!(
+                            "evpn_instances[vni={}]: vlan_aware_bundle ip_vrf {:?} requires \
+                             overlay_index_mode = \"interface_less\"",
                             inst.vni, name
                         ),
                     });
@@ -6740,8 +6751,9 @@ fn parse_evpn_instance(
 }
 
 /// ADR-0092 amendment B2/E row-level rules: the Ethernet Tag is explicit,
-/// non-zero and bundle-only, and a bundle row carries no IRB binding and no
-/// per-VNI auto-derived route target. Returns the row's Ethernet Tag.
+/// non-zero and bundle-only, and a bundle row carries no per-VNI auto-derived
+/// route target. IP-VRF binding restrictions are checked by the IP-VRF
+/// resolver. Returns the row's Ethernet Tag.
 fn parse_evpn_service_interface(cfg: &EvpnInstanceConfig) -> Result<EthernetTagId, ConfigError> {
     let invalid = |reason: String| Err(ConfigError::InvalidEvpnInstance { reason });
     let vni = cfg.vni;
@@ -6766,12 +6778,6 @@ fn parse_evpn_service_interface(cfg: &EvpnInstanceConfig) -> Result<EthernetTagI
                 "vni {vni}: auto_derive_route_target is not supported with \
                  service_interface = \"vlan_aware_bundle\"; configure the bundle's shared \
                  route_targets explicitly"
-            ))
-        }
-        (EvpnServiceInterfaceConfig::VlanAwareBundle, Some(_)) if cfg.ip_vrf.is_some() => {
-            invalid(format!(
-                "vni {vni}: ip_vrf is not supported with service_interface = \
-                 \"vlan_aware_bundle\" yet"
             ))
         }
         (EvpnServiceInterfaceConfig::VlanAwareBundle, Some(tag)) => Ok(EthernetTagId(tag)),

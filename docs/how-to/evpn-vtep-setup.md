@@ -281,11 +281,24 @@ Each member originates its IMET and Type 2 routes under its own tag and
 programs only remote routes that carry its tag, VNI and a bundle route
 target, so the same MAC under tags 10 and 20 lands in VLANs 10 and 20. Every
 PE in the EVI must use the same tag for the same broadcast domain. Members
-are single-homed and L2-only: no Ethernet Segments, no `ip_vrf`, and global
-VNIs only. Check `rbgp evpn instances` for
+are single-homed, cannot join Ethernet Segments, and use global VNIs only.
+Check `rbgp evpn instances` for
 `service=vlan-aware-bundle ethernet-tag=N` and for counted
 `remote-route-drops`. See the
 [configuration reference](../reference/configuration.md#vlan-aware-bundle-members).
+
+For routed members, set `ip_vrf = "tenant-blue"` on each member and declare
+that IP-VRF with `overlay_index_mode = "interface_less"`. Provision the
+member's VLAN SVI, tenant gateway address, and Linux VRF attachment yourself;
+`ip_vrf` supplies the control-plane association. Provision the separate
+IP-VRF/L3VNI devices using the recipe below. Type 5 routes use Ethernet Tag
+`0` with the IP-VRF's own RD, route targets, L3VNI, and Router MAC
+(RFC 9136 §4.4.1); Type 2/3 routes retain the member tag and L2VNI.
+Incoming GW-IP/ESI overlay-index resolution through bundle members and
+non-zero-tag Type 5 remain unsupported. The
+[M120 local receipt](../artifacts/interop/m120-evpn-bundle-irb-20261011T045852Z/README.md)
+qualifies routed bundle members against SR Linux 25.10.1, including Type 5
+withdrawal and binding reloads. EVPN and Linux dataplane behavior remain alpha.
 
 ## IP-VRF / L3VNI VTEP (Type 5 / symmetric IRB)
 

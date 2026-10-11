@@ -1753,6 +1753,71 @@ fn vlan_aware_bundle_rows_resolve_with_their_member_tags() {
 }
 
 #[test]
+fn vlan_aware_bundle_irb_links_members_only_to_interface_less_ip_vrfs() {
+    let members = [10, 20]
+        .map(|tag| {
+            bundle_row(
+                10000 + tag,
+                "65000:100",
+                &format!(
+                    "service_interface = \"vlan_aware_bundle\"\nethernet_tag = {tag}\n\
+                     bridge_vlan = {tag}\nip_vrf = \"blue\""
+                ),
+            )
+        })
+        .join("");
+    let vrf = r#"
+[[evpn_ip_vrfs]]
+name = "blue"
+vni = 5000
+rd = "65000:5000"
+route_targets = ["65000:5000"]
+local_vtep_ip = "10.0.0.100"
+router_mac = "02:00:00:00:00:01"
+vrf_device = "vrf-blue"
+l3vxlan_device = "vni5000"
+table_id = 5000
+"#;
+    let config = parse(&evpn_toml_with(&format!("{members}{vrf}"))).unwrap();
+    let instances = config.resolve_evpn_instances().unwrap();
+    let vrfs = config.resolve_evpn_ip_vrfs().unwrap();
+    let linked: Vec<_> = vrfs
+        .referenced_l2vnis("blue")
+        .unwrap()
+        .iter()
+        .map(|vni| {
+            let member = instances.get(*vni).unwrap();
+            (vni.as_u32(), member.ethernet_tag.0)
+        })
+        .collect();
+    assert_eq!(linked, vec![(10010, 10), (10020, 20)]);
+
+    // Both full config validation and direct resolution enforce the same
+    // boundary, including runtime candidates assembled from existing config.
+    for mode in [
+        OverlayIndexModeConfig::GatewayIp,
+        OverlayIndexModeConfig::Esi,
+    ] {
+        let mut candidate = config.clone();
+        candidate.evpn_ip_vrfs[0].overlay_index_mode = mode;
+        if mode == OverlayIndexModeConfig::Esi {
+            candidate.evpn_ip_vrfs[0].overlay_index_esi =
+                Some("00:00:00:00:00:00:00:00:00:01".to_string());
+            candidate.evpn_ip_vrfs[0].overlay_index_mac = Some("02:00:00:00:00:02".to_string());
+        }
+        let error = candidate.resolve_evpn_ip_vrfs().unwrap_err().to_string();
+        assert!(
+            error.contains(
+                "vlan_aware_bundle ip_vrf \"blue\" requires overlay_index_mode = \"interface_less\""
+            ),
+            "{error}"
+        );
+    }
+    let missing = parse(&evpn_toml_with(&members)).unwrap_err().to_string();
+    assert!(missing.contains("does not match any declared [[evpn_ip_vrfs]]"));
+}
+
+#[test]
 fn vlan_aware_bundle_row_level_rules_are_pinned() {
     let bundle = "service_interface = \"vlan_aware_bundle\"";
     for (extra, expected) in [
@@ -1785,11 +1850,6 @@ fn vlan_aware_bundle_row_level_rules_are_pinned() {
             "vni 10010: auto_derive_route_target is not supported with \
              service_interface = \"vlan_aware_bundle\"; configure the bundle's shared \
              route_targets explicitly",
-        ),
-        (
-            format!("{bundle}\nethernet_tag = 10\nip_vrf = \"blue\""),
-            "vni 10010: ip_vrf is not supported with service_interface = \
-             \"vlan_aware_bundle\" yet",
         ),
     ] {
         assert_eq!(

@@ -7112,6 +7112,107 @@ async fn runtime_actor_converger_ip_vrf_relink_republishes_ip_vrfs() {
 }
 
 #[tokio::test]
+async fn bundle_irb_reload_relinks_one_member_and_preserves_the_sibling() {
+    let text = relink_blue_runtime_candidate_toml()
+        .replacen(
+            "[[evpn_instances]]",
+            "[[evpn_instances]]\nservice_interface = \"vlan_aware_bundle\"\nethernet_tag = 10",
+            1,
+        )
+        .replacen(
+            "[[evpn_ip_vrfs]]",
+            r#"
+[[evpn_instances]]
+vni = 200
+rd = "65000:200"
+route_targets = ["65000:100"]
+local_vtep_ip = "10.0.0.1"
+service_interface = "vlan_aware_bundle"
+ethernet_tag = 20
+ip_vrf = "tenant-blue"
+
+[[evpn_ip_vrfs]]"#,
+            1,
+        );
+    let baseline = load_runtime_test_config(&text, "bundle IRB baseline");
+    let instances = Arc::new(baseline.resolve_evpn_instances().unwrap());
+    let initial_vrfs = Arc::new(baseline.resolve_evpn_ip_vrfs().unwrap());
+    let coordinator = coordinator_from_config(&baseline, &crate::config::AutoLacpEsis::default());
+    let (dataplane, instances_rx, ip_vrfs_rx) = owned_dataplane(instances.clone());
+    assert!(dataplane.runtime_control().replace_ip_vrfs(initial_vrfs));
+    let (rib_tx, mut rib_rx) = mpsc::channel::<RibUpdate>(1);
+    let converger = Arc::new(EvpnRuntimeActorConverger {
+        rib_tx,
+        imet_controller: Arc::new(tokio::sync::Mutex::new(evpn_imet::EvpnImetController::new())),
+        dataplane: Some(dataplane.runtime_control()),
+        originator: None,
+        svi: None,
+        l3_originator: None,
+        segment: None,
+        es_drain: crate::evpn_es_drain::EvpnEsDrainState::default(),
+    });
+    let apply = EvpnRuntimeReloadApply::new(
+        coordinator.clone(),
+        Arc::new(tokio::sync::Mutex::new(())),
+        converger,
+        baseline.clone(),
+    );
+    let member = rustbgpd_evpn::EvpnInstanceId::new(100).unwrap();
+    let sibling = rustbgpd_evpn::EvpnInstanceId::new(200).unwrap();
+    for (offset, target) in [None, Some("tenant-green"), Some("tenant-blue")]
+        .into_iter()
+        .enumerate()
+    {
+        let mut candidate = baseline.clone();
+        candidate.evpn_instances[0].ip_vrf = target.map(str::to_owned);
+        apply.apply_config(&candidate).await.unwrap();
+        let published = ip_vrfs_rx.borrow();
+        for name in ["tenant-blue", "tenant-green"] {
+            let links = published.referenced_l2vnis(name);
+            assert_eq!(
+                links.is_some_and(|links| links.contains(&member)),
+                target == Some(name)
+            );
+            assert_eq!(
+                links.is_some_and(|links| links.contains(&sibling)),
+                name == "tenant-blue"
+            );
+        }
+        assert_eq!(*instances_rx.borrow(), instances);
+        assert_eq!(
+            coordinator.lock().unwrap().model().generation().as_u64(),
+            offset as u64 + 2
+        );
+    }
+    // A mode outside the new gate must fail before the actor sees it.
+    let before = ip_vrfs_rx.borrow().clone();
+    let mut unsupported = baseline.clone();
+    unsupported.evpn_ip_vrfs[0].overlay_index_mode =
+        crate::config::OverlayIndexModeConfig::GatewayIp;
+    assert!(apply.apply_config(&unsupported).await.is_err());
+    assert_eq!(*ip_vrfs_rx.borrow(), before);
+    assert_eq!(coordinator.lock().unwrap().model().generation().as_u64(), 4);
+    assert!(
+        rib_rx.try_recv().is_err(),
+        "a relink must not withdraw sibling L2 routes"
+    );
+    // A lost dataplane receiver cannot turn a failed publication into a
+    // committed relink or advance the reload baseline.
+    drop(ip_vrfs_rx);
+    let mut failed = baseline;
+    failed.evpn_instances[0].ip_vrf = None;
+    assert!(apply.apply_config(&failed).await.is_err());
+    assert_eq!(coordinator.lock().unwrap().model().generation().as_u64(), 4);
+    assert_eq!(
+        apply.committed_config_locked().evpn_instances[0]
+            .ip_vrf
+            .as_deref(),
+        Some("tenant-blue")
+    );
+    dataplane.shutdown().await;
+}
+
+#[tokio::test]
 async fn runtime_actor_converger_ip_vrf_delete_publishes_dataplane_and_l3_model() {
     let current = runtime_model_from_candidate_toml(two_ip_vrf_runtime_candidate_toml());
     let candidate = runtime_candidate_from_toml(ip_vrf_runtime_candidate_toml());

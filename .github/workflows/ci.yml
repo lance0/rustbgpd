@@ -195,6 +195,18 @@ jobs:
           python3 tests/interop/scripts/m119_bundle_oracle.py docs/artifacts/interop/m119-evpn-bundle-vtep-20261010T124729Z replay
           bash -n tests/interop/scripts/test-m119-evpn-bundle-vtep-srlinux.sh
           shellcheck -x tests/interop/scripts/test-m119-evpn-bundle-vtep-srlinux.sh tests/interop/scripts/setup-m119-hosts.sh
+          python3 tests/interop/scripts/test_m120_bundle_irb_oracle.py
+          bash -n tests/interop/scripts/test-m120-evpn-bundle-irb-srlinux.sh
+          shellcheck -x tests/interop/scripts/test-m120-evpn-bundle-irb-srlinux.sh tests/interop/scripts/setup-m120-irb.sh
+      - name: Replay committed M120 bundle IRB receipt
+        run: |
+          set -euo pipefail
+          m120_receipt=docs/artifacts/interop/m120-evpn-bundle-irb-20261011T045852Z
+          m120_scratch=$(mktemp -d)
+          trap 'rm -rf "$m120_scratch"' EXIT
+          tar -xzf "$m120_receipt/evidence.tar.gz" -C "$m120_scratch"
+          python3 tests/interop/scripts/m120_bundle_irb_oracle.py "$m120_scratch/state" replay
+          python3 tests/interop/scripts/m120_bundle_irb_oracle.py "$m120_scratch/state" capture-witness
       - name: Check SRv6 and SMET reflection proof helpers
         run: |
           python3 tests/interop/scripts/test_m112_capture_oracle.py

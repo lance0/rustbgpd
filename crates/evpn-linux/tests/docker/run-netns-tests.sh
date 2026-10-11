@@ -65,7 +65,7 @@
 #   bash crates/evpn-linux/tests/docker/run-netns-tests.sh foreign_state_nhid
 #       (reserved-NHID foreign-object non-clobber proof)
 #   bash crates/evpn-linux/tests/docker/run-netns-tests.sh foreign_state_l3
-#       (L3 foreign-takeover preservation proof; requires VRF)
+#       (L3 foreign-takeover and connected-prefix preservation; requires VRF)
 #   bash crates/evpn-linux/tests/docker/run-netns-tests.sh l3_route_event
 #       (route-event wake proof; requires VRF)
 #   bash crates/evpn-linux/tests/docker/run-netns-tests.sh dataplane_vlan_fdb
@@ -156,7 +156,7 @@ case "${1:-all}" in
     foreign_state_l2)   TEST_BIN="netns_foreign_state"; FILTER="l2_foreign_takeover_row_survives_withdrawal_and_shutdown" ;;
     foreign_state_l2_dst) TEST_BIN="netns_foreign_state"; FILTER="l2_owned_destination_drift_is_repaired_and_unmarked_rewrite_relinquished" ;;
     foreign_state_nhid) TEST_BIN="netns_foreign_state"; FILTER="nhid_reserved_range_foreign_object_not_clobbered_adopted_or_reaped" ;;
-    foreign_state_l3)   TEST_BIN="netns_foreign_state"; FILTER="l3_foreign_takeover_triple_survives_withdrawal_and_shutdown" ;;
+    foreign_state_l3)   TEST_BIN="netns_foreign_state"; FILTER="l3_"; EXACT_FILTER=0 ;;
     l3_route_event)     TEST_BIN="netns_l3_install"; FILTER="linux_dataplane_route_event_wakes_within_2s" ;;
     dataplane_vlan_fdb) TEST_BIN="netns_dataplane"; FILTER="linux_dataplane_programs_vlan_scoped_remote_mac_add_remove" ;;
     dataplane_remote_mac) TEST_BIN="netns_dataplane"; FILTER="linux_dataplane_programs_remote_mac_with_extern_learn" ;;

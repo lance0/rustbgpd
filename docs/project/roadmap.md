@@ -572,10 +572,14 @@ gobmp/pmacct already terminate it into Kafka), and BGPsec.
   **ADR-0089's first programming target landed:** VNI-per-broadcast-domain
   EVPN over Linux `vlan_filtering=1` bridges, with a local bridge-VLAN
   binding, `NDA_VLAN` remote-MAC FDB attribution, AF_BRIDGE local-MAC VLAN
-  attribution, and Ethernet Tag ID still `0`. Opt-in single-homed L2
-  VLAN-aware bundle members now originate/import non-zero-tag Type 2/3;
+  attribution, and Ethernet Tag ID still `0`. Opt-in single-homed
+  VLAN-aware bundle members originate/import non-zero-tag Type 2/3 and can
+  bind to an IP-VRF in `interface_less` mode for tag-zero Type 5 routing;
+  the [M120 local receipt](../artifacts/interop/m120-evpn-bundle-irb-20261011T045852Z/README.md)
+  qualifies member IRB against pinned SR Linux 25.10.1-399 with
+  operator-provisioned SVIs, VRF attachments and L3 VXLAN devices.
   [M119](../artifacts/interop/m119-evpn-bundle-vtep-20261010T124729Z/README.md)
-  qualifies SR Linux import and forwarding in a two-VTEP fixture. **LAN-64 SVD /
+  qualifies SR Linux L2 import and forwarding in a two-VTEP fixture. **LAN-64 SVD /
   collect-metadata Ready/programming landed:** rustbgpd now detects
   `external` / `vnifilter` VXLAN devices, accepts an unambiguous
   `(bridge_vlan, tunnel_info id <VNI>)` mapping as a Ready VXLAN target,
@@ -754,11 +758,17 @@ gobmp/pmacct already terminate it into Kafka), and BGPsec.
   proves same-MAC+IP VLAN10/VNI100 and VLAN20/VNI200 observations on real VLAN
   upper devices, while bridge-ifindex ARP/ND on a `vlan_filtering=1` bridge
   remains fail-closed unless a future FDB-correlation design proves freshness
-  and ambiguity handling. Single-homed L2 VLAN-aware bundle members now
-  support non-zero Ethernet Tags with global member VNIs;
+  and ambiguity handling. Single-homed VLAN-aware bundle members support
+  non-zero Ethernet Tags with global member VNIs;
   [M119](../artifacts/interop/m119-evpn-bundle-vtep-20261010T124729Z/README.md)
-  qualifies SR Linux import, forwarding and scoped withdrawal. Tag-scoped
-  multi-homing, IRB, non-zero-tag Type 5 and local VNIs remain deferred.
+  qualifies SR Linux L2 import, forwarding and scoped withdrawal. Members
+  can bind an IP-VRF in `interface_less` mode for tag-zero Type 5 routing over
+  a separate L3VNI; the
+  [M120 local receipt](../artifacts/interop/m120-evpn-bundle-irb-20261011T045852Z/README.md)
+  qualifies this routing against pinned SR Linux 25.10.1-399 with
+  operator-provisioned SVIs, VRF attachments and L3 VXLAN devices.
+  Tag-scoped multi-homing, non-zero-tag Type 5, locally assigned VNIs and
+  GW-IP/ESI overlay-index recursion through bundle members remain deferred.
   **ADR-0091 managed-netdev bridge +
   VXLAN + SVD + VLAN upper + VRF/L3VXLAN lifecycle landed:**
   `[managed_netdevs]` bridge, fixed-VNI VXLAN, SVD / collect-metadata VXLAN,
