@@ -598,6 +598,8 @@
     "feature_compare_original_sha256": "9e85eb756a583c1706829911be33afcad94e223545dd20df4f7896de4dbde79e",
     "operation": "unchanged pure function ASTs; omit private path-dependent CLI and unused sys import",
     "native_parser_source_sha256": "f4c25450473cc811b4a9a108892408b68bef972b5a1109f2ef162b7a6c0fa535",
-    "parser_operation": "reuse native stage and reply grammar; omit workload, sampler, subprocess and probe machinery"
+    "parser_operation": "reuse native stage and reply grammar; omit workload, sampler, subprocess and probe machinery",
+    "public_checker_sha256": "6d283ac1ce3ba1013d0fdb72001b1300461e1d6e696a665c762b7689ff3d1ad7",
+    "public_controls_sha256": "c9d167bbbcdf5252f0e606429789b1fc11cdeced74b0e8ee8db551e576200ae6"
   }
 }

@@ -15,7 +15,7 @@ processes and 16 correlated reloads per arm. Historical receipts are unchanged.
 | `provenance.json` | Native exits, exact source/tree/toolchain/input-refresh/binary/instrument identities, quiet samples, original native hashes and public normalization provenance |
 | `driver.normalized.sh`, `build-arm.normalized.sh`, `timing-launcher.normalized.sh` | Post-run projections of the actual executed local scripts, with private roots replaced by stable placeholders; **not the executed bytes or a runnable launch recipe** |
 | `source-diff.patch` | Exact parent-to-merged-child source diff |
-| `summary.json`, `reloads.tsv`, `timing.md` | Derived process/arm distributions, first reload versus later rows, wire clocks and additive means; no censoring |
+| `summary.json`, `reloads.tsv`, `timing.md` | Derived process/arm distributions, first reload versus later rows, wire clocks, additive means, and exact 96-call RPC duration distributions/maxima; no censoring |
 | `recompute.py`, `feature_compare.py`, `test_recompute.py` | Standard-library reproduction, native stage/reply grammar and duplicate-preserving actual-unit comparison, with broken-input controls |
 | `quiet-preparation.md`, `quiet-source-preparation.json`, `quiet-irr-prebuilt-adapter.patch` | Separate, source-only future S2/IRR preparation; no adapter/config smoke/build/campaign executed |
 | `SHA256SUMS` | Public file and receipt checksums, distinct from native original hashes |
@@ -28,13 +28,18 @@ python3 test_recompute.py
 sha256sum -c SHA256SUMS
 ```
 
-The complete positive is established before any negative control counts.
+The complete positive is established before 24 control tests covering 32
+broken-input variants.
 Broken controls cover full phase binding, non-additive components, each
 selected boundary clock, fallback, missing reload/pair, failed/slow paired
 policy-stats, corrupted or incomplete reply, malformed audit, incorrect flat
 criterion, native failure/missing finish, quiet failure, wire inversion/parser
 error, missing normal/build closure, changed feature/dependency/environment,
-and both equal arms accidentally enabling `bench-internals`.
+both equal arms accidentally enabling `bench-internals`, wrong exact source
+trees or recorded Rust/Cargo identity, and coordinated RPC duration changes
+below the native 2 s acceptance bar. Both source trees and the full matching
+recorded toolchain are pinned; RPC durations reproduce per-process, per-arm
+and all-call distributions, including the receipt's exact maximum.
 
 The checker links the selected native summaries to their event/RPC/audit/wire
 projections and regenerates summary/table/TSV bytes. Native full CPU streams,

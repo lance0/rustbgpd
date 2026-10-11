@@ -126,6 +126,16 @@ LEGS = ('baseline-r1', 'candidate-r1', 'candidate-r2', 'baseline-r2')
 ARMS = ('baseline', 'candidate')
 SOURCES = ('6ee2a052607b34a11e8daa2f4a4d4639b5101690',
            'aceacb435677291fdb20c2e792f58cb9e4575b74')
+TREES = ('393acc58915f65e9e021fb2ec92db1d0d763bfb2',
+         'e43026bd5e90766e8da8fea419fa736463f19117')
+TOOLCHAIN = ('rustc 1.99.0 (b940084d7 2026-09-28)\n'
+             'binary: rustc\n'
+             'commit-hash: b940084d7eb6a299eb4bfeb8e34901bc051e7ac4\n'
+             'commit-date: 2026-09-28\n'
+             'host: x86_64-unknown-linux-gnu\n'
+             'release: 1.99.0\n'
+             'LLVM version: 23.1.1\n'
+             'cargo 1.99.0 (5f94df478 2026-08-27)\n')
 COMPONENTS = ('preflight_us', 'cohort_selection_us', 'cohort_prestage_session_apply_us',
               'cohort_rib_transition_us', 'authoritative_remainder_apply_us',
               'deferred_refresh_dispatch_us', 'convergence_check_us', 'unattributed_us')
@@ -147,13 +157,20 @@ def distribution(rows):
                  'mean': mean(r[key] for r in rows)} for key in METRICS}
 
 
+def rpc_distribution(calls):
+    values = [call['duration_ms'] for call in calls]
+    return {'n': len(values), 'median': median(values), 'min': min(values),
+            'max': max(values), 'mean': mean(values)}
+
+
 def validate_builds(provenance, captures):
     """Actual binary-bound units, including build scripts; resolution is separate."""
-    for arm, source in zip(ARMS, SOURCES, strict=True):
+    for arm, source, tree in zip(ARMS, SOURCES, TREES, strict=True):
         identity, capture = provenance['arms'][arm], captures[arm]
         assert identity['source'] == source
         assert identity['daemon_sha256'] == capture['binary_sha256'] == capture['cache_binary_sha256']
-        assert len(identity['tree']) == 40
+        assert identity['tree'] == tree, 'source tree differs from recorded arm'
+        assert identity['toolchain'] == TOOLCHAIN, 'Rust/Cargo identity differs from recorded matching toolchain'
         assert identity['build_command'] == (
             'taskset -c 40-63 cargo build --release --locked -j 4 -p rustbgpd -p rustbgpctl')
         assert set(identity['build_exits']) == {'cargo-build.exit', 'build-stage.exit'}
@@ -304,7 +321,8 @@ def compute(records, responses, provenance, captures):
         metadata[leg] = {'start': control['start'], 'finish': control['finish'], 'verdict': 'PASS',
                          'native_exit': 0, 'reloads': 8, 'raw_rpc_calls': 24,
                          'in_band_pairs': native['in_band_pairs'], 'all': distribution(selected),
-                         'first': distribution(selected[:1]), 'later': distribution(selected[1:])}
+                         'first': distribution(selected[:1]), 'later': distribution(selected[1:]),
+                         'rpc_duration_ms': rpc_distribution(data['probes'])}
     assert used_responses == set(responses) and len(used_responses) == 96
     phases = ('before_timed_generation_ms',) + tuple(k[:-3] + '_ms' for k in COMPONENTS) + ('after_phase_log_to_complete_ms',)
     arms = {}
@@ -313,13 +331,16 @@ def compute(records, responses, provenance, captures):
         arms[arm] = {'all': distribution(group), 'first': distribution([r for r in group if r['reload'] == 1]),
                      'later': distribution([r for r in group if r['reload'] > 1]),
                      'additive_means_ms': {k: mean(r[k] for r in group) for k in phases},
-                     'complete_mean_ms': mean(r['complete_ms'] for r in group)}
+                     'complete_mean_ms': mean(r['complete_ms'] for r in group),
+                     'rpc_duration_ms': rpc_distribution([call for leg in LEGS if leg.split('-')[0] == arm
+                                                          for call in records[leg]['probes']])}
         assert abs(sum(arms[arm]['additive_means_ms'].values()) - arms[arm]['complete_mean_ms']) < 1e-6
     return {'status': 'VALID four-cell native ABBA; selected public evidence reconciled',
             'source_parent': SOURCES[0], 'source_candidate': SOURCES[1],
             'window_start': provenance['window_start'], 'window_finish': provenance['window_finish'],
             'outer_exit': 0, 'processes_per_arm': 2, 'correlated_reloads_per_arm': 16,
             'total_raw_reload_rows': len(rows), 'total_raw_rpc_calls': 96,
+            'rpc_duration_ms': rpc_distribution([call for leg in LEGS for call in records[leg]['probes']]),
             'legs': metadata, 'arms': arms, 'reloads': rows}
 
 
@@ -355,6 +376,13 @@ def render_table(report):
         lines.append(f'| {key} | {a[key]:.6f} | {b[key]:.6f} | {b[key] - a[key]:+.6f} |')
     aa, bb = (report['arms'][arm]['complete_mean_ms'] for arm in ARMS)
     lines.append(f'| complete mean | {aa:.6f} | {bb:.6f} | {bb - aa:+.6f} |')
+    lines += ['', '| RPC population | Calls | Minimum | Median | Mean | Maximum |',
+              '| --- | --- | --- | --- | --- | --- |']
+    populations = [(leg, report['legs'][leg]['rpc_duration_ms']) for leg in LEGS]
+    populations += [(arm, report['arms'][arm]['rpc_duration_ms']) for arm in ARMS]
+    populations.append(('all', report['rpc_duration_ms']))
+    for name, d in populations:
+        lines.append(f"| {name} | {d['n']} | {d['min']:.6f} | {d['median']:.6f} | {d['mean']:.6f} | {d['max']:.6f} |")
     return '\n'.join(lines) + '\n'
 
 
@@ -364,7 +392,11 @@ def load(root):
 
 
 def main(root):
-    report = compute(*load(root))
+    inputs = load(root)
+    report = compute(*inputs)
+    helper = inputs[2]['reproduction_helper_provenance']
+    for name, key in (('recompute.py', 'public_checker_sha256'), ('test_recompute.py', 'public_controls_sha256')):
+        assert hashlib.sha256((root / name).read_bytes()).hexdigest() == helper[key]
     outputs = {'summary.json': json.dumps(report, indent=2) + '\n',
                'reloads.tsv': render_tsv(report), 'timing.md': render_table(report)}
     for name, content in outputs.items():
@@ -372,7 +404,7 @@ def main(root):
     graph = gzip.decompress((root / 'normal-build-graph.txt.gz').read_bytes())
     assert len(graph.splitlines()) == 17891
     assert hashlib.sha256(graph).hexdigest() == 'c1364681434d3ae9a897ba64fc6193abc8127c70d557fda52986d549c88c87cf'
-    print('PASS: 32 reloads, 128 selected boundaries, 96 RPC replies, 64 audits, 32 wire rows; '
+    print('PASS: 32 reloads, 128 selected boundaries, 96 RPC replies/durations, 64 audits, 32 wire rows; '
           '227 normal/342 including-build units per arm; all summary/table/TSV bytes reproduce')
 
 

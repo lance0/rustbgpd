@@ -63,7 +63,8 @@ fallback, no remainder, no deadline miss and no daemon ERROR through the
 final evidence boundary. Complete in-band pairs are **7/8, 8/8, 8/8, 7/8**,
 above the unchanged minimum six/process. Both out-of-band baseline first
 reloads remain in the primary timing population. All 96 RPC calls are kept;
-their maximum external duration is 317.113 ms, below 2 s. All original
+their [recomputed duration distribution](artifacts/policy-transition-final-inventory-attribution-2026-10-11/timing.md)
+has maximum external duration 317.113 ms, below 2 s. All original
 integrity checks passed, children were reaped, and both locks were released.
 
 The read pair fires **after cohort hot-apply**, at

@@ -33,3 +33,13 @@ The first population is the first reload of each process; all reloads remain in 
 | unattributed_ms | 1.290125 | 1.279750 | -0.010375 |
 | after_phase_log_to_complete_ms | 3.612354 | 3.413379 | -0.198975 |
 | complete mean | 794.325590 | 770.768806 | -23.556784 |
+
+| RPC population | Calls | Minimum | Median | Mean | Maximum |
+| --- | --- | --- | --- | --- | --- |
+| baseline-r1 | 24 | 11.571136 | 12.343450 | 40.290370 | 317.112561 |
+| candidate-r1 | 24 | 11.478094 | 12.820298 | 18.893444 | 43.944934 |
+| candidate-r2 | 24 | 11.258047 | 12.567892 | 18.565166 | 40.894442 |
+| baseline-r2 | 24 | 11.224245 | 12.816261 | 31.113072 | 315.037038 |
+| baseline | 48 | 11.224245 | 12.500318 | 35.701721 | 317.112561 |
+| candidate | 48 | 11.258047 | 12.781750 | 18.729305 | 43.944934 |
+| all | 96 | 11.224245 | 12.740418 | 27.215513 | 317.112561 |

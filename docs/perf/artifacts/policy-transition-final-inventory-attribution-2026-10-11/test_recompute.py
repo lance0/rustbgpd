@@ -164,6 +164,34 @@ class Controls(unittest.TestCase):
                 capture[scope][capture['entry']]['features'] = '["bench-internals", "default"]'
         self.reject()
 
+    def test_wrong_exact_tree(self):
+        for arm in receipt.ARMS:
+            with self.subTest(arm=arm):
+                self.setUp()
+                self.provenance['arms'][arm]['tree'] = 'a' * 40
+                self.reject()
+
+    def test_recorded_matching_rust_and_cargo_identity(self):
+        for mutation in ('candidate_rust', 'candidate_cargo', 'both_matching_wrong'):
+            with self.subTest(mutation=mutation):
+                self.setUp()
+                if mutation == 'both_matching_wrong':
+                    for arm in self.provenance['arms'].values():
+                        arm['toolchain'] = 'rustc 1.98.0\ncargo 1.98.0\n'
+                else:
+                    name = 'rustc' if mutation == 'candidate_rust' else 'cargo'
+                    arm = self.provenance['arms']['candidate']
+                    arm['toolchain'] = arm['toolchain'].replace(name + ' 1.99.0', name + ' 1.98.0')
+                self.reject()
+
+    def test_coordinated_subthreshold_rpc_duration(self):
+        raw = max(self.leg['probes'], key=lambda call: call['duration_ms'])
+        raw['duration_ms'] = 1999.0  # still below the native 2 s acceptance bar
+        row = next(r for r in self.leg['native_summary']['reloads'] if r['reload'] == raw['reload'])
+        call = next(c for c in row['calls'] if (c['op'], c['phase']) == (raw['op'], raw['phase']))
+        call['duration_ms'] = 1999.0
+        self.reject()  # the exact derived distribution/max must change
+
 
 if __name__ == '__main__':
     unittest.main(verbosity=2)
