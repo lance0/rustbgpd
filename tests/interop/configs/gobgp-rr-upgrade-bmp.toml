@@ -1,0 +1,19 @@
+[global.config]
+as = 65001
+router-id = "PEER_ID"
+
+[[neighbors]]
+[neighbors.config]
+neighbor-address = "INCUMBENT_ADDR"
+peer-as = 65001
+[[neighbors.afi-safis]]
+[neighbors.afi-safis.config]
+afi-safi-name = "ipv4-unicast"
+
+[[neighbors]]
+[neighbors.config]
+neighbor-address = "MAIN_ADDR"
+peer-as = 65001
+[[neighbors.afi-safis]]
+[neighbors.afi-safis.config]
+afi-safi-name = "ipv4-unicast"

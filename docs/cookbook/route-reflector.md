@@ -175,6 +175,18 @@ $ rbgp orr                   # each live vantage: resolved, SPF reach, bound pee
 An unresolved vantage row means that client is silently getting the
 standard best — fix the BGP-LS feed, not the client.
 
+## Shadow trial
+
+Compare outgoing **post-policy Adj-RIB-Out** BMP captures toward the same
+observer address and ASN before an RR upgrade or migration. Require complete,
+nonempty generations and preserve ORIGINATOR_ID, CLUSTER_LIST, and NEXT_HOP.
+Follow the [wire-snapshot comparison workflow](../how-to/ribdiff.md#compare-two-wire-captures)
+and [RR capture prerequisites](route-server-migration.md#route-reflector-snapshot-comparison).
+The [runnable v0.75.0-to-pinned-main upgrade trial](../../tests/interop/scripts/rr-upgrade-bmp-trial.md#verified-upgrade-trial)
+demonstrates equality and a configured CLUSTER_LIST difference using the
+existing comparator. This trial compares two rustbgpd versions;
+external-incumbent Adj-RIB-Out qualification remains outstanding.
+
 ## Watch
 
 Prometheus (`prometheus_addr`, `/metrics`; dashboard import in
