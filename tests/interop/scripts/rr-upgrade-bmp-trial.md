@@ -31,6 +31,26 @@ difference; ORIGINATOR_ID remains present and unchanged. The incumbent stays
 running with the same settled route. Each phase assigns its own shared capture
 generation to the two conversions; this label does not itself prove simultaneity.
 
+## Verified upgrade trial
+
+The 2026-10-11 run used harness commit
+`603ec963368605aac98366027f0cc4313de37270`, the released v0.75.0 daemon,
+and the pinned main runtime above. Both BMP version 3 captures used O=1/L=1
+toward the same observer, with Peer Up and End-of-RIB present.
+
+| Phase | Complete generation | Comparator result |
+|-------|---------------------|-------------------|
+| Equal cluster IDs | 1 | Exit 0; one matched route |
+| Main cluster ID changed to `192.0.2.2` | 2 | Exit 1; one attribute-changed route |
+
+The only differing route attribute was CLUSTER_LIST (type 10, flags 128):
+`c0000201` became `c0000202`. ORIGINATOR_ID (type 9, flags 128) remained
+`c0000214`. Independent GoBGP 4.10.0 Adj-RIB-In checks confirmed delivery
+of `198.51.100.0/24`, the original NEXT_HOP, and both reflection attributes
+in each phase. The driver and owned cleanup both exited 0. This proves the
+one-prefix IPv4 upgrade trial; external-incumbent qualification remains
+outstanding.
+
 ## Admission and prerequisites
 
 Use one exclusive lab slot. Do not overlap with CLI doctor/workspace tests,
