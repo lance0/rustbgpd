@@ -162,7 +162,7 @@ states that the whole decision is Superseded.
 | [0135](0135-flowspec-feasibility.md) | Opt-in FlowSpec cross-RIB feasibility validation | Accepted | 2026-09-20 | Active |
 | [0136](0136-owner-published-counter-reads.md) | Owner-published counter reads | Accepted | 2026-09-25 | Active |
 | [0137](0137-conditional-advertisement.md) | Conditional advertisement | Accepted | 2026-10-07 | Active |
-| [0138](0138-route-flap-dampening.md) | Route flap dampening | Proposed (preparation shipped since 2026-10-09; runtime enablement NO-GO, demand-gated) | 2026-10-08 | Active |
+| [0138](0138-route-flap-dampening.md) | Route flap dampening | Proposed (preparation pulled forward 2026-10-09 and shipped; runtime enablement NO-GO, demand-gated) | 2026-10-08 | Active |
 | [0139](0139-flowspec-controller-contract.md) | Scoped FlowSpec controller compatibility contract | Accepted | 2026-10-10 | Active |
 
 ## Supporting records
