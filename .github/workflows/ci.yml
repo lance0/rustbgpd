@@ -257,6 +257,7 @@ jobs:
                 --phase "$phase" | cmp - "$m112/$phase-$view-check.json"
             done
           done
+      - run: python3 -m unittest -v scripts/test_check_v1_stable_surface.py
       - run: python3 scripts/check-v1-stable-surface.py
       - run: python3 scripts/reflow-release-notes.py --selftest
       - run: cargo clippy --locked --workspace --all-targets -- -D warnings

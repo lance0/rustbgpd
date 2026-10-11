@@ -603,5 +603,34 @@
       "validation_test": "config::tests::v1_stable_archived_fixtures_parse",
       "result": "accepted_without_config_migration"
     }
-  ]
+  ],
+  "capabilities": {
+    "purpose": "Documentation and evidence navigation only, rendered to docs/reference/capabilities.md. A row promotes nothing: compatibility is read from the roles and inventoried surfaces above, and an uncataloged capability is not cataloged rather than unsupported.",
+    "rows": [
+      {
+        "id": "unicast-route-reflection",
+        "scope": "IPv4 iBGP client-to-client reflection with ORIGINATOR_ID and CLUSTER_LIST",
+        "excludes": ["IPv6", "optimal route reflection", "forwarding", "scale"],
+        "roles": ["route-reflector-unicast"],
+        "surfaces": [],
+        "evidence": [{"leg": "m14-rr-frr", "claims": ["stored", "advertised"]}]
+      },
+      {
+        "id": "bmp-base-export",
+        "scope": "Basic BMP collector session with Initiation, PeerUp and RouteMonitoring in order",
+        "excludes": ["every BMP view", "draft BMPv4", "collector outage replay", "durability"],
+        "roles": [],
+        "surfaces": ["Config.bmp"],
+        "evidence": [{"leg": "m24-bmp-frr", "claims": ["encoded", "advertised"]}]
+      },
+      {
+        "id": "flowspec-controller",
+        "scope": "IPv4 and IPv6 controller create, replace and delete with local, selected and advertised views, reconnect, and explicit reconciliation after restart; an API acknowledgement is local channel admission",
+        "excludes": ["remote enforcement", "installation", "forwarding", "scale"],
+        "roles": ["flowspec-controller"],
+        "surfaces": ["InjectionService.AddFlowSpec", "InjectionService.DeleteFlowSpec", "RibService.ListFlowSpecRoutes", "Config.flowspec"],
+        "evidence": [{"leg": "m22-flowspec-controller", "claims": ["stored", "selected", "advertised"]}]
+      }
+    ]
+  }
 }

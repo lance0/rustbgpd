@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
-# A BMP collector outage leaves the BGP session and selected route intact.
+# lab: monitoring  slug: monitoring-feed
+# summary: A BMP collector outage leaves the BGP session and selected route intact.
+#
 set -euo pipefail
 
 if [[ $# != 1 ]]; then

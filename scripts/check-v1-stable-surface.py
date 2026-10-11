@@ -24,6 +24,9 @@ if sys.version_info < (3, 11):
 
 import tomllib
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import generate_evidence_index as evidence_index  # noqa: E402
+
 
 ROOT = Path(__file__).resolve().parents[1]
 INVENTORY_PATH = ROOT / "docs/reference/v1-stable-surface.json"
@@ -111,9 +114,17 @@ def fail(message: str) -> None:
     raise SystemExit(1)
 
 
+def reject_duplicate_keys(pairs: list[tuple[str, object]]) -> dict:
+    keys = [key for key, _ in pairs]
+    duplicates = sorted({key for key in keys if keys.count(key) > 1})
+    if duplicates:
+        raise json.JSONDecodeError(f"duplicate keys {duplicates}", "", 0)
+    return dict(pairs)
+
+
 def load_json(path: Path) -> dict:
     try:
-        return json.loads(path.read_text())
+        return json.loads(path.read_text(), object_pairs_hook=reject_duplicate_keys)
     except (OSError, json.JSONDecodeError) as error:
         fail(f"cannot load {path.relative_to(ROOT)}: {error}")
 
@@ -1597,6 +1608,95 @@ def check_policy(inventory: dict) -> None:
         fail("v1 deprecation window cannot be shortened below two minors and 90 days")
 
 
+CAPABILITY_ROW_KEYS = {"id", "scope", "excludes", "roles", "surfaces", "evidence"}
+CAPABILITY_ID_RE = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*")
+
+
+def check_capabilities(inventory: dict, legs: dict[str, dict]) -> None:
+    """Validate the documentation-only capability rows; they promote nothing."""
+    section = inventory.get("capabilities")
+    if not isinstance(section, dict) or set(section) != {"purpose", "rows"}:
+        fail("capabilities must be an object with exactly 'purpose' and 'rows'")
+    if not isinstance(section["purpose"], str) or not section["purpose"].strip():
+        fail("capabilities.purpose must state that the section is navigation only")
+    rows = section["rows"]
+    if not isinstance(rows, list) or not rows:
+        fail("capabilities.rows must be a non-empty list")
+    role_ids = {role["id"] for role in inventory["roles"]}
+    seen: set[str] = set()
+    for row in rows:
+        if not isinstance(row, dict) or set(row) != CAPABILITY_ROW_KEYS:
+            extra = sorted(set(row) - CAPABILITY_ROW_KEYS) if isinstance(row, dict) else row
+            fail(
+                f"capability row keys must be {sorted(CAPABILITY_ROW_KEYS)}; got {extra or row}: "
+                "compatibility is read from the inventory, never written per row"
+            )
+        row_id = row["id"]
+        if not isinstance(row_id, str) or not CAPABILITY_ID_RE.fullmatch(row_id):
+            fail(f"capability id {row_id!r} must be a lowercase slug")
+        if row_id in seen:
+            fail(f"duplicate capability id {row_id!r}")
+        seen.add(row_id)
+        label = f"capability {row_id}"
+        if not isinstance(row["scope"], str) or not row["scope"].strip():
+            fail(f"{label} needs a scope")
+        for key in ("excludes", "roles", "surfaces"):
+            values = row[key]
+            if not isinstance(values, list) or not all(
+                isinstance(value, str) and value for value in values
+            ) or len(values) != len(set(values)):
+                fail(f"{label}.{key} must be a list of distinct non-empty strings")
+        if not row["excludes"]:
+            fail(f"{label} must state what it does not cover")
+        for role in row["roles"]:
+            if role not in role_ids:
+                fail(f"{label} references unknown role {role!r}")
+        for surface in row["surfaces"]:
+            if evidence_index.surface_classification(inventory, surface) is None:
+                fail(f"{label} references surface {surface!r} that is not inventoried")
+        evidence = row["evidence"]
+        if not isinstance(evidence, list) or not evidence:
+            fail(f"{label} needs evidence")
+        cited: set[str] = set()
+        for item in evidence:
+            if not isinstance(item, dict) or set(item) != {"leg", "claims"}:
+                fail(f"{label} evidence entries must have exactly 'leg' and 'claims'")
+            if item["leg"] in cited:
+                fail(f"{label} repeats evidence leg {item['leg']!r}")
+            cited.add(item["leg"])
+            leg = legs.get(item["leg"])
+            if leg is None:
+                fail(f"{label} references leg {item['leg']!r} with no driver header")
+            claims = item["claims"]
+            if not isinstance(claims, list) or not claims or len(claims) != len(set(claims)):
+                fail(f"{label} claims must be a non-empty list of distinct keys")
+            for claim in claims:
+                if claim not in evidence_index.CLAIM_KEYS:
+                    fail(
+                        f"{label} claim {claim!r} is not a behavior key "
+                        f"{list(evidence_index.CLAIM_KEYS)}; stability is never a claim"
+                    )
+                if claim not in leg["claims"]:
+                    fail(
+                        f"{label} projects claim {claim!r} that leg {item['leg']} "
+                        "does not declare"
+                    )
+
+
+def check_evidence_index(inventory: dict) -> None:
+    try:
+        legs = evidence_index.load_legs(ROOT)
+        check_capabilities(inventory, legs)
+        stale = evidence_index.stale_outputs(ROOT)
+    except evidence_index.MetadataError as error:
+        fail(f"evidence index metadata: {error}")
+    if stale:
+        fail(
+            f"generated evidence index is stale: {', '.join(stale)}; "
+            "run `python3 scripts/generate_evidence_index.py --write`"
+        )
+
+
 def main() -> None:
     check_release_line_selftests()
     check_stable_config_object_shape_regressions()
@@ -1610,6 +1710,7 @@ def main() -> None:
     check_cli_checker_selftests(inventory)
     check_cli(inventory)
     check_upgrade_exercises(inventory)
+    check_evidence_index(inventory)
     print("v1 stable-surface inventory: OK")
 
 

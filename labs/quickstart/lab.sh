@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
-# Guided RFC 8212 exercise using the existing two-node Compose demo.
+# lab: quickstart  slug: quickstart
+# summary: Guided RFC 8212 exercise using the existing two-node Compose demo.
+#
 set -euo pipefail
 
 if [[ $# != 1 ]]; then

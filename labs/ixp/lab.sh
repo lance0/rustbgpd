@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
-# Guided route-server RPKI and import-policy exercise.
+# lab: ixp  slug: route-server
+# summary: Guided route-server RPKI and import-policy exercise.
+#
 set -euo pipefail
 
 if [[ $# != 1 ]]; then
