@@ -1,0 +1,81 @@
+{
+  "started_utc": "2026-10-11T04:58:52Z",
+  "finished_utc": "2026-10-11T05:00:39Z",
+  "evidence_class": "local native qualification",
+  "image_build_commit": "1d3d6b56ca5f815d8ba1b342d2effb98399f15fd",
+  "execution_commit": "f3bbe73378faee7112016e868d3837048c4ad2b4",
+  "execution_tree": "bffebfc50d50c5de48be183e3d251027ddf16506",
+  "rust_source_id": "d708f51f0ee913fc03ce742f7e3248177c08168d5ae9d6b32f66c1f51e500c59",
+  "daemon_image_id": "sha256:c4f6b55c21710b8d4188273685b62f071bd15688dd1225bdec9f33d6600213f8",
+  "daemon_sha256": "afbcc96a2f6cf1fc7ce8ccf799a4ae343e936461c0a035734a807a969ddd3c1b",
+  "capture_image_id": "sha256:e7590408087140bbaf792eabac70e695f9daf50bca178602461d5f40e46bc57a",
+  "srl_image": "ghcr.io/nokia/srlinux:25.10.1@sha256:bc8112667b5a87bee5039ade65b504ac2ef35511210d0675db6c7b0754e8cc4c",
+  "srl_version": "25.10.1-399-g90c1dbe35ef",
+  "image_reuse": "Rust source-ID unchanged between build and execution; intervening changes affect lab fixtures and capture completion.",
+  "exit_codes": {
+    "image-source-check": 0,
+    "deploy": 0,
+    "driver": 0,
+    "operation": 0,
+    "wrapper": 0,
+    "cleanup": 0,
+    "network-cleanup": 0
+  },
+  "summary": {
+    "passed": 37,
+    "failed": 0,
+    "state_snapshots": 8,
+    "successful_ping_cases": 25,
+    "requests_per_ping": 3,
+    "withdrawn_destination_ping": "3 transmitted, 0 received, 100% loss",
+    "type5_inventory": [
+      10,
+      8,
+      10
+    ],
+    "installed_remote_prefixes": [
+      4,
+      2,
+      4
+    ],
+    "l3vni": 50120,
+    "capture_requests": 3,
+    "full_rib_and_fdb_restored": true,
+    "session_flap": false
+  },
+  "cleanup": {
+    "owned_containers_absent": true,
+    "owned_network_absent": true,
+    "recorded_phase_pids_absent": true,
+    "observed_process_identities_reaped": true
+  },
+  "harness_sha256": {
+    "tests/interop/m120-evpn-bundle-irb-srlinux.clab.yml": "3e7db80319222c7fe1d35a65305b25e4a7a6e6f3ec1b52b7fea91dd23693e390",
+    "tests/interop/configs/rustbgpd-m120-bundle-irb.toml": "71dec338419eca7cdb7e6c44cd2569d0240a9aad42183865b73703d82e28bf24",
+    "tests/interop/configs/srl-m120-bundle-irb.cli": "9a2679010c68b57e2cd0eac9b650310f5d7e41a2904e37f869589fa460c5f8ed",
+    "tests/interop/scripts/setup-m120-irb.sh": "88dcaf624dd8e9bb24cacb3f5c5b5bea9f150a95689b4a4cf94fec762ef2b42d",
+    "tests/interop/scripts/setup-m119-hosts.sh": "9a26f14b6f174730744d42c4327df0b02fc6b74fb7363f1d7a370b19c5cb52d0",
+    "tests/interop/scripts/test-m120-evpn-bundle-irb-srlinux.sh": "ee9fc93c8e2e428a7775d18b320824333b57e95502e8dbe7a13847372c0c5b72",
+    "tests/interop/scripts/m120_bundle_irb_oracle.py": "661eeb032741dcf9a6f9e5ed1d408525a6cacbd7e332f563894920d1c61b5bb0",
+    "tests/interop/scripts/test_m120_bundle_irb_oracle.py": "4a2bd0b41fd6f49e0c0270e58f35af6a372c0f1407a3087d455bf1c22814f632",
+    "tests/interop/scripts/test-lib.sh": "bae9f334ffa2b2ae65fb416ffd05e02813d100faad296f95830fb6e31bf5bcd2",
+    "tests/interop/scripts/start-rustbgpd.sh": "47bafe51af0a2d46eb9d085000bc3c49a66e4d1d978fb87c6e05b41d4841d8ad",
+    "tests/interop/scripts/source-id-guard.sh": "d4bddf6b1a72f09ab18041887559fe4b2fd9ce83c0a1b1afe6d5bc0de614835e",
+    "scripts/source-id.sh": "703efb7e015d4e98e18160486d1ef3bb1a1a542eb42ea6699358804924fca5d6"
+  },
+  "raw_evidence_files": 192,
+  "normalization": "None. Archived state files and driver.log are byte-identical to the native run, including ANSI terminal colors and local UTC-04 log times.",
+  "archive_selection": {
+    "included": [
+      "all 191 state/ files",
+      "driver.log",
+      "raw-sha256.json manifest"
+    ],
+    "excluded": [
+      "host preflight",
+      "deployment and orchestration logs",
+      "earlier attempts"
+    ],
+    "raw_file_omissions_within_state_and_driver": 0
+  }
+}

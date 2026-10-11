@@ -25,7 +25,9 @@ member.
 
 In particular:
 
-- EVPN, including route-reflector use and Type 6 SMET relay, remains alpha.
+- EVPN, including route-reflector use, Type 6 SMET relay, and
+  [interface-less IRB on bundle members](../how-to/evpn-vtep-setup.md#vlan-aware-bundle-members),
+  remains alpha.
 - Linux dataplane work, including FIB and managed-netdev behavior, remains
   outside the control-plane contract.
 - Experimental features remain outside the contract.

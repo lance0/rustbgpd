@@ -295,8 +295,10 @@ IP-VRF/L3VNI devices using the recipe below. Type 5 routes use Ethernet Tag
 `0` with the IP-VRF's own RD, route targets, L3VNI, and Router MAC
 (RFC 9136 §4.4.1); Type 2/3 routes retain the member tag and L2VNI.
 Incoming GW-IP/ESI overlay-index resolution through bundle members and
-non-zero-tag Type 5 remain unsupported. Member IRB qualification against
-pinned SR Linux is pending in M120; the M119 receipt covers L2 forwarding.
+non-zero-tag Type 5 remain unsupported. The
+[M120 local receipt](../artifacts/interop/m120-evpn-bundle-irb-20261011T045852Z/README.md)
+qualifies routed bundle members against SR Linux 25.10.1, including Type 5
+withdrawal and binding reloads. EVPN and Linux dataplane behavior remain alpha.
 
 ## IP-VRF / L3VNI VTEP (Type 5 / symmetric IRB)
 

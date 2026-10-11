@@ -4364,8 +4364,9 @@ bridge_vlan = 20
   overlay-index routes cannot resolve through bundle Type 2 or EAD state;
   existing unresolved-drop reasons remain in use. Non-zero-tag Type 5 routes
   are counted as `non_zero_ethernet_tag` in `evpn_ip_vrf_remote_prefix_drops`.
-  The M120 pinned SR Linux qualification for member IRB is pending; M119
-  qualifies the L2 service only.
+  The [M120 local receipt](../artifacts/interop/m120-evpn-bundle-irb-20261011T045852Z/README.md)
+  qualifies this interface-less member IRB shape against SR Linux 25.10.1;
+  EVPN and Linux dataplane behavior remain alpha.
 - **Migration.** Changing `service_interface` or `ethernet_tag` on a live row
   goes through the L2VNI redefine path: routes under the old tag are
   withdrawn and local routes are replayed under the new one. Every PE in the

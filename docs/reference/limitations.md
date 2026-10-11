@@ -133,8 +133,9 @@ Known EVPN gaps:
 - VLAN-aware bundle VTEP members have a bounded
   [SR Linux 25.10.1 import and forwarding receipt](../artifacts/interop/m119-evpn-bundle-vtep-20261010T124729Z/README.md).
   Single-homed members can bind an `ip_vrf` only in `interface_less` mode,
-  using Ethernet Tag `0` Type 5 routes with a separate L3VNI; the M120
-  pinned SR Linux member IRB qualification remains pending. Tag-scoped
+  using ESI `0`, Ethernet Tag `0` Type 5 routes with a separate L3VNI. The
+  [M120 local receipt](../artifacts/interop/m120-evpn-bundle-irb-20261011T045852Z/README.md)
+  qualifies this shape against SR Linux 25.10.1. Tag-scoped
   multi-homing, locally assigned VNIs, non-zero Ethernet Tag Type 5, and
   GW-IP/ESI overlay-index recursion through bundle members remain unsupported.
   The binding does not provision Linux SVI/VRF attachments or add Type 2
