@@ -425,6 +425,33 @@ class FuzzTargetInventoryTests(unittest.TestCase):
                 ):
                     inventory.validate_pipeline_enrollment(builder, mutated)
 
+    def test_commented_artifact_path_does_not_retain_artifacts(self) -> None:
+        builder = (inventory.ROOT / "fuzz/build-fuzzers.sh").read_text()
+        workflow = (inventory.ROOT / ".github/workflows/fuzz.yml").read_text()
+        for crate in inventory.EXPECTED_TARGETS:
+            entry = f"            {crate}/fuzz/artifacts/\n"
+            self.assertIn(entry, workflow)
+            for where, mutated in (
+                (
+                    "in the path block",
+                    workflow.replace(entry, f"            # {crate}/fuzz/artifacts/\n", 1),
+                ),
+                (
+                    "elsewhere",
+                    workflow.replace(entry, "", 1).replace(
+                        "    steps:\n",
+                        f"    # keep {crate}/fuzz/artifacts/\n    steps:\n",
+                        1,
+                    ),
+                ),
+            ):
+                with self.subTest(crate=crate, comment=where):
+                    self.assertNotEqual(mutated, workflow)
+                    with self.assertRaisesRegex(
+                        inventory.InventoryError, "failure artifacts"
+                    ):
+                        inventory.validate_pipeline_enrollment(builder, mutated)
+
     def test_new_campaign_options_and_harness_bounds_are_load_bearing(self) -> None:
         builder = (inventory.ROOT / "fuzz/build-fuzzers.sh").read_text()
         workflow = (inventory.ROOT / ".github/workflows/fuzz.yml").read_text()

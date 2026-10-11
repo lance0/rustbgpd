@@ -391,6 +391,26 @@ def runs_target_loop(body: str) -> bool:
     return True
 
 
+def uploaded_artifact_paths(workflow: str) -> set[str]:
+    """Return the uncommented `with.path` entries of every upload-artifact step."""
+    paths: set[str] = set()
+    for step in re.split(r"(?m)^      - ", workflow):
+        if not re.search(r"(?m)^(?:        )?uses: actions/upload-artifact@", step):
+            continue
+        block = re.search(
+            r"(?m)^        with:\n(?:          .*\n)*?          path: \|\n"
+            r"(?P<body>(?:            .*\n)*)",
+            step,
+        )
+        if block is not None:
+            paths.update(
+                line.strip()
+                for line in block["body"].splitlines()
+                if not line.lstrip().startswith("#")
+            )
+    return paths
+
+
 def campaign_block(workflow: str, crate: str) -> str | None:
     """Return the run body of the one nightly step that changes into `crate`.
 
@@ -493,6 +513,7 @@ def validate_pipeline_enrollment(builder: str, workflow: str) -> None:
                 "reviewed max_len contract"
             )
 
+    artifact_paths = uploaded_artifact_paths(workflow)
     for crate in EXPECTED_TARGETS:
         body = campaign_block(workflow, crate)
         if body is None:
@@ -502,7 +523,7 @@ def validate_pipeline_enrollment(builder: str, workflow: str) -> None:
                 f"nightly {crate} campaign does not fuzz every {crate} target "
                 "from a fail-closed cargo fuzz list loop"
             )
-        if f"{crate}/fuzz/artifacts/" not in workflow:
+        if f"{crate}/fuzz/artifacts/" not in artifact_paths:
             raise InventoryError(
                 f"nightly workflow does not retain {crate} failure artifacts"
             )
