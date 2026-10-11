@@ -168,6 +168,30 @@ def active_script(step: str) -> str:
     return "\n".join(commands)
 
 
+def trigger_paths(workflow: str, event: str) -> set[str]:
+    """Return `on.<event>.paths` from block-style workflow YAML.
+
+    Comments are dropped, so a commented-out entry does not count. A flow-style
+    or otherwise unrecognised filter yields no entries and fails closed.
+    """
+    stack: list[tuple[int, str]] = []
+    paths = set()
+    for raw in workflow.splitlines():
+        line = re.sub(r"(^|\s)#.*$", "", raw).rstrip()
+        if not line.strip():
+            continue
+        indent = len(line) - len(line.lstrip())
+        item = line.lstrip().startswith("- ")
+        while stack and (stack[-1][0] > indent or (stack[-1][0] == indent and not item)):
+            stack.pop()
+        if item:
+            if [key for _, key in stack] == ["on", event, "paths"]:
+                paths.add(line.lstrip()[2:].strip().strip("\"'"))
+        elif key := re.match(r"\s*([\w-]+):(?:\s|$)", line):
+            stack.append((indent, key.group(1)))
+    return paths
+
+
 def require_patterns(
     errors: list[str], label: str, text: str, patterns: tuple[str, ...]
 ) -> None:
@@ -622,8 +646,9 @@ def check(root: Path) -> list[str]:
         select_script(workflow, "production image adapter assertion", image_command)
 
         # Both the pull_request and push path filters must cover every input.
+        filters = [trigger_paths(workflow, event) for event in ("pull_request", "push")]
         for path in inputs:
-            if workflow.count(f"\n      - {path}\n") != 2:
+            if not all(path in paths for paths in filters):
                 errors.append(f"release install workflow must trigger for {path}")
     except (OSError, ValueError) as error:
         errors.append(str(error))

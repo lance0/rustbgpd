@@ -824,6 +824,34 @@ class ReleaseInstallContractTest(unittest.TestCase):
                         f"release install workflow must trigger for {relative}", errors
                     )
 
+    def test_duplicate_entry_does_not_cover_the_other_filter(self) -> None:
+        monitoring = {source for source, _, _ in contract.MONITORING}
+        for relative in (path for path in INPUTS if path not in monitoring):
+            entry = f"      - {relative}\n"
+            for keep in ("pull_request", "push"):
+                with self.subTest(path=relative, keep=keep):
+                    root = self.fixture()
+                    path = root / WORKFLOW
+                    text = path.read_text()
+                    first, last = text.find(entry), text.rfind(entry)
+                    self.assertNotEqual(first, last)
+                    # Duplicate at the head of the kept list, away from the
+                    # original entry, and drop the other filter's entry.
+                    header = "    paths:\n"
+                    if keep == "pull_request":
+                        text = text[:last] + text[last + len(entry) :]
+                        at = text.find(header) + len(header)
+                    else:
+                        text = text[:first] + text[first + len(entry) :]
+                        at = text.rfind(header) + len(header)
+                    text = text[:at] + entry + text[at:]
+                    self.assertEqual(text.count(entry), 2)
+                    path.write_text(text)
+                    errors = contract.check(root)
+                    self.assertIn(
+                        f"release install workflow must trigger for {relative}", errors
+                    )
+
 
 class VerifiedInstallerTest(unittest.TestCase):
     """Exercise the released shell resolver against deterministic local assets."""
