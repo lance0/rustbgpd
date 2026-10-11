@@ -2353,7 +2353,8 @@ async fn sighup_outer_failure_never_publishes_and_lost_publication_fences() {
     use rustbgpd_api::server::{AccessMode, RuntimeConfigCoordinator};
     use rustbgpd_transport::listener::ReloadDispatch;
 
-    for bridge_failure in [true, false] {
+    for (bridge_failure, finalizer_effects_staged) in [(true, true), (false, true), (false, false)]
+    {
         let fixture = RsFixture::new();
         let accepted = Arc::new(AcceptedConfigSnapshot::load(&fixture.config_path, None).unwrap());
         let authority = SighupAuthority {
@@ -2369,6 +2370,20 @@ async fn sighup_outer_failure_never_publishes_and_lost_publication_fences() {
         let trace = Arc::new(Mutex::new(SighupReloadTrace {
             dynamic_replacement_pending: true,
             explain_snapshot_pending: true,
+            dynamic_limit_snapshot_pending: finalizer_effects_staged,
+            dialout_targets_pending: finalizer_effects_staged,
+            planned: [
+                SighupEffect {
+                    bucket: "dynamic_neighbor_limit.apply",
+                    target: "[global]".to_string(),
+                },
+                SighupEffect {
+                    bucket: "gnmi_dialout.apply",
+                    target: "[gnmi_dialout]".to_string(),
+                },
+            ]
+            .into_iter()
+            .collect(),
             ..SighupReloadTrace::default()
         }));
         let acknowledgements = tokio::spawn(async move {
@@ -2441,6 +2456,22 @@ async fn sighup_outer_failure_never_publishes_and_lost_publication_fences() {
             bucket: "policy.explain.sync",
             target: "[policy.explain]".to_string(),
         }));
+        assert_eq!(
+            applied.contains(&SighupEffect {
+                bucket: "dynamic_neighbor_limit.apply",
+                target: "[global]".to_string(),
+            }),
+            finalizer_effects_staged,
+            "only a staged limit can be acknowledged by the snapshot"
+        );
+        assert_eq!(
+            applied.contains(&SighupEffect {
+                bucket: "gnmi_dialout.apply",
+                target: "[gnmi_dialout]".to_string(),
+            }),
+            finalizer_effects_staged && !bridge_failure,
+            "dial-out is applied only after bridge adoption"
+        );
         // This is a direct finalizer test; disarm the production watchdog
         // before asserting its returned fencing decision.
         assert!(operation.try_settle());

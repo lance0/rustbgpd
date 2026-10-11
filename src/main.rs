@@ -3659,7 +3659,11 @@ fn safe_sighup_target(bucket: &str, raw: &str, trace: &SighupReloadTrace) -> Str
         "evpn_runtime.apply" => "[[evpn_instances]]",
         "fib_tables.apply" => "[[fib_tables]]",
         "policy.dataset.refresh" | "policy.rpol.sync" => "[policy]",
-        "listener_auth.apply" | "tcp_ao.awaiting_peer" => "[neighbors]",
+        "listener_auth.apply"
+        | "listener_auth.withdraw"
+        | "prefix_limit.prepare"
+        | "prefix_limit.activate"
+        | "tcp_ao.awaiting_peer" => "[neighbors]",
         _ => "[config]",
     };
     if raw.is_empty() {
@@ -7300,6 +7304,19 @@ mod tests {
         assert_eq!(record.reason_code, "unsupported_compound");
         assert_eq!(record.failure_target, "[[dynamic_neighbors]]");
         assert!(!format!("{record:?}").contains("private text"));
+    }
+
+    #[test]
+    fn empty_neighbor_failure_targets_keep_their_section() {
+        let trace = SighupReloadTrace::default();
+        for bucket in [
+            "listener_auth.apply",
+            "listener_auth.withdraw",
+            "prefix_limit.prepare",
+            "prefix_limit.activate",
+        ] {
+            assert_eq!(safe_sighup_target(bucket, "", &trace), "[neighbors]");
+        }
     }
 
     #[test]

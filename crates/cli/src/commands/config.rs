@@ -675,41 +675,58 @@ pub async fn last_reload(connection: Connection, json: bool) -> Result<(), CliEr
         print_json(serde_json::json!({
             "record": response.record.as_ref().map(last_reload_to_json),
         }))?;
-    } else if let Some(record) = response.record.as_ref() {
-        output::print_text(&format!(
-            "Last SIGHUP: {} (route: {})\nStarted: {}\nFinished: {}",
+    } else {
+        output::print_text(&last_reload_human(response.record.as_ref()))?;
+    }
+    Ok(())
+}
+
+fn last_reload_human(record: Option<&SighupReloadRecord>) -> String {
+    let Some(record) = record else {
+        return "No SIGHUP reload has completed in this daemon process.\n".to_string();
+    };
+    let mut lines = vec![
+        format!(
+            "Last SIGHUP: {} (route: {})",
             record.outcome,
             if record.route.is_empty() {
                 "before classification"
             } else {
                 &record.route
             },
-            format_unix_utc_or_seconds(record.started_unix_millis / 1000),
-            format_unix_utc_or_seconds(record.finished_unix_millis / 1000),
-        ))?;
-        if !record.reason_code.is_empty() {
-            output::print_text(&format!(
-                "Reason: {} at {} {}",
-                record.reason_code, record.failure_bucket, record.failure_target
-            ))?;
-        }
-        output::print_text(&format!(
-            "Applied operations: {} ({} omitted)\nUnapplied operations: {} ({} omitted)",
-            record.applied_count,
-            record.applied_omitted,
-            record.unapplied_count,
-            record.unapplied_omitted,
-        ))?;
-        for effect in &record.applied {
-            output::print_text(&format!("  applied {} {}", effect.bucket, effect.target))?;
-        }
-        for effect in &record.unapplied {
-            output::print_text(&format!("  unapplied {} {}", effect.bucket, effect.target))?;
-        }
-    } else {
-        output::print_text("No SIGHUP reload has completed in this daemon process.")?;
+        ),
+        format!(
+            "Started: {}",
+            format_unix_utc_or_seconds(record.started_unix_millis / 1000)
+        ),
+        format!(
+            "Finished: {}",
+            format_unix_utc_or_seconds(record.finished_unix_millis / 1000)
+        ),
+    ];
+    if !record.reason_code.is_empty() {
+        lines.push(format!(
+            "Reason: {} at {} {}",
+            record.reason_code, record.failure_bucket, record.failure_target
+        ));
     }
-    Ok(())
+    lines.extend([
+        format!(
+            "Applied operations: {} ({} omitted)",
+            record.applied_count, record.applied_omitted,
+        ),
+        format!(
+            "Unapplied operations: {} ({} omitted)",
+            record.unapplied_count, record.unapplied_omitted,
+        ),
+    ]);
+    for effect in &record.applied {
+        lines.push(format!("  applied {} {}", effect.bucket, effect.target));
+    }
+    for effect in &record.unapplied {
+        lines.push(format!("  unapplied {} {}", effect.bucket, effect.target));
+    }
+    format!("{}\n", lines.join("\n"))
 }
 
 fn last_reload_to_json(record: &SighupReloadRecord) -> serde_json::Value {
@@ -1366,6 +1383,37 @@ mod tests {
         assert_eq!(value["applied_omitted"], 32);
         assert_eq!(value["unapplied"][0]["target"], "export");
         assert_eq!(value["reason_code"], "step_rejected");
+    }
+
+    #[test]
+    fn last_reload_human_separates_every_line() {
+        let record = SighupReloadRecord {
+            outcome: "known_partial".to_string(),
+            route: "sequential".to_string(),
+            reason_code: "step_rejected".to_string(),
+            failure_bucket: "neighbors.reconcile".to_string(),
+            failure_target: "192.0.2.1".to_string(),
+            applied_count: 1,
+            applied: vec![crate::proto::SighupReloadEffect {
+                bucket: "policy.add".to_string(),
+                target: "edge".to_string(),
+            }],
+            unapplied_count: 1,
+            unapplied: vec![crate::proto::SighupReloadEffect {
+                bucket: "neighbors.reconcile".to_string(),
+                target: "192.0.2.1".to_string(),
+            }],
+            ..Default::default()
+        };
+        let rendered = last_reload_human(Some(&record));
+        assert!(rendered.contains("Finished: 1970-01-01T00:00:00Z\nReason: "));
+        assert!(rendered.contains("Applied operations: 1 (0 omitted)\nUnapplied operations: 1"));
+        assert!(rendered.contains("  applied policy.add edge\n  unapplied neighbors.reconcile"));
+        assert!(rendered.ends_with('\n'));
+        assert_eq!(
+            last_reload_human(None),
+            "No SIGHUP reload has completed in this daemon process.\n"
+        );
     }
     // Field 1's one-byte tag plus the four-byte length varint used by a
     // candidate whose encoded request reaches the 4 MiB boundary.

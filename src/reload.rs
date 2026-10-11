@@ -320,10 +320,16 @@ pub(crate) struct SighupEffect {
 }
 
 #[derive(Clone, Default)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "each independent finalizer effect is recorded only after its own snapshot or manager acknowledgement"
+)]
 pub(crate) struct SighupReloadTrace {
     pub(crate) route: Option<&'static str>,
     pub(crate) rejection_target: Option<String>,
     pub(crate) dynamic_replacement_pending: bool,
+    pub(crate) dynamic_limit_snapshot_pending: bool,
+    pub(crate) dialout_targets_pending: bool,
     pub(crate) explain_snapshot_pending: bool,
     pub(crate) planned: BTreeSet<SighupEffect>,
     pub(crate) applied: BTreeSet<SighupEffect>,
@@ -1813,6 +1819,9 @@ pub(crate) async fn finalize_sighup_authority(
         if trace.dynamic_replacement_pending {
             trace.applied("dynamic_neighbors.replace", "[[dynamic_neighbors]]");
         }
+        if trace.dynamic_limit_snapshot_pending {
+            trace.applied("dynamic_neighbor_limit.apply", "[global]");
+        }
         if trace.explain_snapshot_pending {
             trace.applied("policy.explain.sync", "[policy.explain]");
         }
@@ -1875,6 +1884,12 @@ pub(crate) async fn finalize_sighup_authority(
         .lock()
         .await
         .apply(&authority.dialout_targets);
+    if let Some(trace) = trace {
+        let mut trace = trace.lock().expect("SIGHUP trace poisoned");
+        if trace.dialout_targets_pending {
+            trace.applied("gnmi_dialout.apply", "[gnmi_dialout]");
+        }
+    }
     if let Err((error, reason)) = dispatch_configured_owner_publication(
         peer_mgr_tx,
         OWNER_PUBLICATION_TIMEOUT,
@@ -2570,6 +2585,17 @@ pub(crate) async fn reload_config_with_tcp_ao_recorded(
     };
     if let Some(trace) = &progress.trace {
         let mut trace = trace.lock().expect("SIGHUP trace poisoned");
+        if matches!(
+            &route,
+            config::SighupReloadRoute::Generation | config::SighupReloadRoute::Sequential { .. }
+        ) {
+            if dynamic_neighbor_limit_changed {
+                trace.plan("dynamic_neighbor_limit.apply", "[global]");
+            }
+            if current.gnmi_dialout != new_config.gnmi_dialout {
+                trace.plan("gnmi_dialout.apply", "[gnmi_dialout]");
+            }
+        }
         match &route {
             config::SighupReloadRoute::Rejected { reasons } => {
                 trace.rejection_target = reasons.iter().find_map(|reason| match reason.as_str() {
@@ -2584,6 +2610,16 @@ pub(crate) async fn reload_config_with_tcp_ao_recorded(
             config::SighupReloadRoute::Generation => {
                 trace.route = Some("generation");
                 trace.plan("generation.apply", "[config]");
+                if let Some((desired_inventory, prior_inventory)) = &listener_replacement {
+                    let staged =
+                        config::listener_inbound_auth_staged(prior_inventory, desired_inventory);
+                    if &staged != prior_inventory {
+                        trace.plan("listener_auth.apply", "[neighbors]");
+                    }
+                    if &staged != desired_inventory {
+                        trace.plan("listener_auth.withdraw", "[neighbors]");
+                    }
+                }
                 if rib_tx.is_some()
                     && current.outbound_prefix_limits() != new_config.outbound_prefix_limits()
                 {
@@ -3024,6 +3060,11 @@ pub(crate) async fn reload_config_with_tcp_ao_recorded(
         && !fib_tables_changed
         && !dataset_commit_pending
     {
+        if let Some(trace) = &progress.trace {
+            let mut trace = trace.lock().expect("SIGHUP trace poisoned");
+            trace.dynamic_limit_snapshot_pending = dynamic_neighbor_limit_changed;
+            trace.dialout_targets_pending = current.gnmi_dialout != new_config.gnmi_dialout;
+        }
         if explain_changed {
             if let Some(trace) = &progress.trace {
                 trace
@@ -3179,6 +3220,23 @@ pub(crate) async fn reload_config_with_tcp_ao_recorded(
     }
     if dynamic_neighbor_limit_changed {
         working_config.global.dynamic_neighbor_limit = new_config.global.dynamic_neighbor_limit;
+        if let Some(trace) = &progress.trace {
+            trace
+                .lock()
+                .expect("SIGHUP trace poisoned")
+                .dynamic_limit_snapshot_pending = true;
+        }
+    }
+    if current.gnmi_dialout != new_config.gnmi_dialout {
+        working_config
+            .gnmi_dialout
+            .clone_from(&new_config.gnmi_dialout);
+        if let Some(trace) = &progress.trace {
+            trace
+                .lock()
+                .expect("SIGHUP trace poisoned")
+                .dialout_targets_pending = true;
+        }
     }
 
     // ADR-0073: `working_config` starts from `current` and only absorbs
@@ -4538,12 +4596,6 @@ async fn reload_generation_route(
     if let Some((listener, (desired_inventory, prior_inventory))) = listener_replacement {
         let staged = config::listener_inbound_auth_staged(&prior_inventory, &desired_inventory);
         if staged != prior_inventory {
-            if let Some(trace) = &progress.trace {
-                trace
-                    .lock()
-                    .expect("SIGHUP trace poisoned")
-                    .plan("listener_auth.apply", "[neighbors]");
-            }
             let (md5_keys, ttl_security) = staged.clone();
             if let Err(error) = listener_mutation_step(
                 listener
@@ -4563,12 +4615,6 @@ async fn reload_generation_route(
             effects.listener_prior = Some((listener, prior_inventory));
         }
         if staged != desired_inventory {
-            if let Some(trace) = &progress.trace {
-                trace
-                    .lock()
-                    .expect("SIGHUP trace poisoned")
-                    .plan("listener_auth.withdraw", "[neighbors]");
-            }
             listener_trim = Some((listener, desired_inventory));
         }
     }
@@ -4603,6 +4649,12 @@ async fn reload_generation_route(
     match reply_rx.await {
         Ok(ReloadGenerationOutcome::Applied(receipt)) => {
             progress.record_applied("generation.apply", "[config]");
+            if let Some(trace) = &progress.trace {
+                let mut trace = trace.lock().expect("SIGHUP trace poisoned");
+                trace.dynamic_limit_snapshot_pending = current.global.dynamic_neighbor_limit
+                    != new_config.global.dynamic_neighbor_limit;
+                trace.dialout_targets_pending = current.gnmi_dialout != new_config.gnmi_dialout;
+            }
             let listener_trim_needed = listener_trim.is_some();
             // The removed sessions are gone: withdraw their listener keys and
             // selectors. A failure leaves only entries for addresses that are
@@ -10518,6 +10570,150 @@ tcp_ao = [
             Some(17),
             "desired snapshot must match the edited value"
         );
+    }
+
+    #[tokio::test]
+    async fn sequential_plan_includes_snapshot_limit_and_dialout_finalizer_effects() {
+        let path = unique_temp_path("reload-finalizer-effects");
+        let initial = format!(
+            "{}\n[peer_groups.ranges]\nhold_time = 30\n",
+            baseline_toml()
+        );
+        write_tier_test_config(&path, &initial);
+        let current = load_tier_test_config(&path);
+        let desired = format!(
+            "{}\n[[dynamic_neighbors]]\nprefix = \"192.0.2.0/24\"\npeer_group = \"ranges\"\nremote_asn = 65100\n[gnmi_dialout]\n[[gnmi_dialout.targets]]\nname = \"collector\"\naddress = \"192.0.2.10:57400\"\npaths = [\"network-instances/network-instance[name=DEFAULT]/protocols/protocol[identifier=BGP][name=BGP]/bgp/neighbors/neighbor[neighbor-address=*]/state/session-state\"]\n",
+            initial.replace(
+                "listen_port = 179",
+                "listen_port = 179\ndynamic_neighbor_limit = 17"
+            )
+        );
+        write_tier_test_config(&path, &desired);
+        let (peer_mgr_tx, mut peer_mgr_rx) = mpsc::channel(1);
+        let trace: SighupReloadTraceHandle = Arc::new(Mutex::new(SighupReloadTrace::default()));
+        let authority = reload_config_recorded(
+            path.to_str().unwrap(),
+            &current,
+            current.global.telemetry.grpc_tcp.as_ref(),
+            current.global.telemetry.grpc_uds.as_ref(),
+            &peer_mgr_tx,
+            None,
+            None,
+            Some(Arc::clone(&trace)),
+        )
+        .await
+        .expect("validated finalizer-only candidate should stage");
+        assert!(peer_mgr_rx.try_recv().is_err());
+        assert_eq!(authority.runtime.global.dynamic_neighbor_limit, Some(17));
+        assert_eq!(authority.runtime.dynamic_neighbors.len(), 1);
+        assert_eq!(
+            authority.runtime.gnmi_dialout,
+            authority.desired.config().gnmi_dialout
+        );
+        assert_eq!(authority.dialout_targets.len(), 1);
+        let trace = trace.lock().unwrap();
+        assert_eq!(trace.route, Some("sequential"));
+        assert!(trace.dynamic_limit_snapshot_pending);
+        assert!(trace.dialout_targets_pending);
+        for effect in [
+            SighupEffect {
+                bucket: "dynamic_neighbor_limit.apply",
+                target: "[global]".to_string(),
+            },
+            SighupEffect {
+                bucket: "gnmi_dialout.apply",
+                target: "[gnmi_dialout]".to_string(),
+            },
+        ] {
+            assert!(trace.planned.contains(&effect));
+            assert!(!trace.applied.contains(&effect));
+        }
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[tokio::test]
+    async fn prefix_limit_rejection_leaves_planned_finalizer_effects_unstaged() {
+        let path = unique_temp_path("reload-prefix-limit-finalizer-plan");
+        write_tier_test_config(&path, baseline_toml());
+        let current = load_tier_test_config(&path);
+        let candidate = format!(
+            "{}\n[gnmi_dialout]\n[[gnmi_dialout.targets]]\nname = \"collector\"\naddress = \"192.0.2.10:57400\"\npaths = [\"network-instances/network-instance[name=DEFAULT]/protocols/protocol[identifier=BGP][name=BGP]/bgp/neighbors/neighbor[neighbor-address=*]/state/session-state\"]\n",
+            baseline_toml()
+                .replace(
+                    "listen_port = 179",
+                    "listen_port = 179\ndynamic_neighbor_limit = 17"
+                )
+                .replace(
+                    "hold_time = 90",
+                    "hold_time = 45\nmax_prefixes_out_ipv4 = 100"
+                )
+        );
+        write_tier_test_config(&path, &candidate);
+        let desired = Arc::new(
+            AcceptedConfigSnapshot::load_for_reload(
+                &path,
+                &AcceptedConfigSnapshot::from_config_for_test(current.clone()),
+                &current.policy.dataset_bindings,
+            )
+            .unwrap(),
+        );
+        let (peer_mgr_tx, mut peer_mgr_rx) = mpsc::channel(1);
+        let (internal_tx, mut internal_rx) = mpsc::channel(1);
+        let (rib_tx, mut rib_rx) = mpsc::channel(1);
+        let rib = tokio::spawn(async move {
+            let Some(rustbgpd_rib::RibUpdate::PrepareOutboundPrefixLimits { reply, .. }) =
+                rib_rx.recv().await
+            else {
+                panic!("expected prefix-limit preparation");
+            };
+            reply.send(Err(Vec::new())).unwrap();
+        });
+        let trace: SighupReloadTraceHandle = Arc::new(Mutex::new(SighupReloadTrace::default()));
+        let outcome = reload_config_with_tcp_ao_recorded(
+            SighupReloadPlan {
+                baseline_runtime: current.clone(),
+                desired,
+            },
+            current.global.telemetry.grpc_tcp.as_ref(),
+            current.global.telemetry.grpc_uds.as_ref(),
+            &peer_mgr_tx,
+            Some(&internal_tx),
+            Some(&rib_tx),
+            None,
+            None,
+            None,
+            None,
+            Some(Arc::clone(&trace)),
+        )
+        .await;
+        rib.await.unwrap();
+        assert!(peer_mgr_rx.try_recv().is_err());
+        assert!(internal_rx.try_recv().is_err());
+        assert!(matches!(
+            outcome,
+            SighupReloadOutcome::CleanNoEffect(SighupReloadError::Failed(ReloadStepFailure {
+                bucket: "prefix_limit.prepare",
+                ..
+            }))
+        ));
+        let trace = trace.lock().unwrap();
+        assert_eq!(trace.route, Some("generation"));
+        assert!(!trace.dynamic_limit_snapshot_pending);
+        assert!(!trace.dialout_targets_pending);
+        assert!(trace.applied.is_empty());
+        for effect in [
+            SighupEffect {
+                bucket: "dynamic_neighbor_limit.apply",
+                target: "[global]".to_string(),
+            },
+            SighupEffect {
+                bucket: "gnmi_dialout.apply",
+                target: "[gnmi_dialout]".to_string(),
+            },
+        ] {
+            assert!(trace.planned.contains(&effect));
+        }
+        std::fs::remove_file(path).unwrap();
     }
 
     #[tokio::test]

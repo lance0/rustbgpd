@@ -194,6 +194,9 @@ tests:
       - eval_time: 2m
         alertname: BgpSighupReloadTaskFailed
         exp_alerts: []
+      - eval_time: 2m
+        alertname: BgpSighupReloadRejected
+        exp_alerts: []
       - eval_time: 10m
         alertname: BgpSighupReloadKnownPartial
         exp_alerts:
@@ -205,8 +208,22 @@ tests:
               summary: "SIGHUP reload completed with partial runtime authority"
               description: >-
                 A SIGHUP reload on edge1:9179 reached an authoritative partial
-                result in the last 10 minutes. Inspect the reload logs, correct
-                the reported cause, and reload again to converge.
+                result in the last 10 minutes. Run rbgp config last-reload for
+                the latest reason and applied/unapplied operations; if another
+                signal replaced the receipt, inspect the reload logs.
+      - eval_time: 10m
+        alertname: BgpSighupReloadRejected
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              outcome: rejected_no_effect
+              instance: edge5:9179
+            exp_annotations:
+              summary: "SIGHUP reload rejected without runtime effect"
+              description: >-
+                A SIGHUP reload on edge5:9179 was rejected in the last 10
+                minutes. Run rbgp config last-reload for the latest reason;
+                check reload logs if a later signal replaced that receipt.
       - eval_time: 10m
         alertname: BgpSighupReloadTaskFailed
         exp_alerts:
@@ -225,6 +242,9 @@ tests:
         exp_alerts: []
       - eval_time: 21m
         alertname: BgpSighupReloadTaskFailed
+        exp_alerts: []
+      - eval_time: 21m
+        alertname: BgpSighupReloadRejected
         exp_alerts: []
 
   # Session rules.
