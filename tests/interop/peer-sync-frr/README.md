@@ -52,8 +52,9 @@ python3 tests/interop/scripts/test_evpn_frr_peer_sync.py
 ```
 
 `baseline` requires the peer-only MAC to be absent from rustbgpd's FDB and
-all frames selected for rustbgpd to be lost. `fixed` requires one owned
-`extern_learn` FDB row on its bound `es0` and zero loss, including exact
+all frames selected for rustbgpd to be lost. `fixed` requires the owned
+`extern_learn` FDB rows on its bound `es0` (the exact untagged/default-PVID-1
+pair produced by an unscoped legacy-bridge add) and zero loss, including exact
 acceptance on the CE bond. Both require the accepted Type 2 to carry the
 shared ESI, no locally originated CE MAC on rustbgpd, and suppression of
 unknown-unicast flooding on rustbgpd's non-DF interface. `--keep` retains

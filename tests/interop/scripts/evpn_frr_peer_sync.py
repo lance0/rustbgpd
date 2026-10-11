@@ -259,6 +259,15 @@ def verify_delivery(result,phase,seeds,member,delivered):
     assert Counter(result[f'{phase}-ce-bond0'])==(expected if delivered else Counter()), 'CE bond did not accept the exact frames'
 
 
+def verify_peer_rows(rows):
+    # An unscoped legacy-bridge ADD creates the untagged row and default PVID 1.
+    assert len(rows)==2 and {row.get('vlan') for row in rows}=={None,1}, 'expected untagged and default-PVID peer rows'
+    for row in rows:
+        assert row.get('mac')==MAC and row.get('ifname')=='es0' and row.get('master')=='br100', 'wrong peer-sync bridge port'
+        assert set(row.get('flags',[]))=={'extern_learn'}, 'foreign or unexpected sibling ownership'
+        assert not row.get('dst') and not row.get('nhid'), 'peer-sync row must not point at the overlay'
+
+
 def main():
     setup()
     wait(lambda: len(cli('b','neighbor'))==2 and all(row['state']=='Established' for row in cli('b','neighbor')), 'fully meshed EVPN peers')
@@ -282,8 +291,7 @@ def main():
     if expected=='baseline':
         assert not b_rows, 'baseline must have no locally learned or peer-sync CE row'
     else:
-        assert len(b_rows)==1 and b_rows[0]['ifname']=='es0' and 'extern_learn' in b_rows[0]['flags']
-        assert b_rows[0].get('master')=='br100' and not b_rows[0].get('dst') and not b_rows[0].get('nhid')
+        verify_peer_rows(b_rows)
     assert not any(row.get('mac')==MAC and row.get('peer')=='0.0.0.0' for row in state['b']['routes']), 'B must not originate a locally learned CE route'
     remote_row=next(row for row in state['r']['fdb'] if row.get('mac')==MAC and row.get('nhid'))
     group=next(row for row in state['r']['nexthops'] if row['id']==remote_row['nhid'])
@@ -305,6 +313,8 @@ def main():
     sent=len(b_seeds)*10
     delivered=len(result['non-df-ce-ceb'])
     final=snapshot('after')
+    if expected=='fixed':
+        verify_peer_rows([row for row in final['b']['fdb'] if row.get('mac')==MAC])
     assert final['b']['segments']['segments'][0]['members'][0]['df_role']=='nondf'
     assert any(row.get('ifname')=='es0' and row.get('flood') is False for row in final['b']['ports'])
     assert not any(row.get('mac')==MAC and row.get('peer')=='0.0.0.0' for row in final['b']['routes']), 'peer-sync row must not become a locally originated MAC'
