@@ -1,5 +1,8 @@
+config_epoch = 1
+
 [global]
 asn = 65001
+ebgp_requires_policy = false
 router_id = "RR_ID"
 cluster_id = "CLUSTER_ID"
 listen_port = 179
