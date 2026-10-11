@@ -72,15 +72,15 @@ Each result below links to its published, reproducible receipt:
   2026-10-04 to 2026-10-05 — [v0.75.0 cross-daemon receipt](cross-daemon-v0750-2026-10.md).
   BIRD 3.3.2 read 3.27–4.06 s and 0.68–0.99 s the night before, against
   rustbgpd v0.74.0 — [v0.74.0 cross-daemon receipt](cross-daemon-v0740-2026-10.md);
-  BIRD 3.3.3 is not yet measured
+  BIRD 3.3.3, released 2026-10-01, is not yet measured
 - **Cold start**: full 400,400-route table delivered to all 700 members in
   **2.8 s** for rustbgpd v0.75.0, against 325.2–417.8 s for OpenBGPD 9.3;
   all 700 sessions were Established in 0.8 s and 88.6–182.5 s, measured
   2026-10-04 to 2026-10-05 —
   [v0.75.0 cross-daemon receipt](cross-daemon-v0750-2026-10.md). BIRD
   3.3.2 read 67.3–70.1 s and 15.2–17.8 s the night before —
-  [v0.74.0 cross-daemon receipt](cross-daemon-v0740-2026-10.md); BIRD 3.3.3
-  is not yet measured
+  [v0.74.0 cross-daemon receipt](cross-daemon-v0740-2026-10.md); BIRD 3.3.3,
+  released 2026-10-01, is not yet measured
 - **Route-reflector scale**: 1,000 RR clients × 100k routes converge on the
   wire in **305–330 ms** at **350,504–383,660 KiB** direct-process RSS in nine
   v0.73.0 runs, against 332–356 ms at 376,440–419,292 KiB in nine same-night
@@ -105,7 +105,7 @@ Each result below links to its published, reproducible receipt:
   511–544 MiB at S3), and settled RSS under flap churn is mixed (BIRD
   377/332/373 MiB, rustbgpd 376/376/375 MiB) —
   [v0.74.0 cross-daemon receipt](cross-daemon-v0740-2026-10.md#memory-matrix-shapes);
-  BIRD 3.3.3 is not yet measured. Cross-daemon memory is not otherwise
+  BIRD 3.3.3, released 2026-10-01, is not yet measured. Cross-daemon memory is not otherwise
   ranked, because daemon and container defaults differ.
 
 The v0.75.0 rows above measure commit `319d14e4b`, overnight 2026-10-04 to
@@ -146,7 +146,7 @@ The freshest published [v0.68.0 cross-stack bgperf2
 receipt](competitive-bgperf2-v0680-2026-08.md), measured 2026-08-30,
 is the headline same-host IPv4 import/convergence comparison. All 80 cells
 reached the exact expected route count across five fixed shapes; the largest is
-two peers × 100,000 prefixes, not a full-table cell. FRR 10.7.1, released 2026-08-31, and GoBGP v4.10.0, released 2026-10-04, are not yet measured. Microbenchmarks and memory
+two peers × 100,000 prefixes, not a full-table cell. BIRD 2.19.3, released 2026-10-02, FRR 10.7.1, released 2026-08-31, and GoBGP v4.10.0, released 2026-10-04, are not yet measured. Microbenchmarks and memory
 scaling are in [Benchmarks](../benchmarks.md). That page also retains
 the corrected July campaign as explicitly historical evidence; it supports no
 cross-daemon ranking. Every receipt is indexed in
@@ -230,11 +230,11 @@ records.
 | [`authoritative-policy-replacement-cursor-feasibility-2026-07.md`][authoritative-policy-replacement-cursor-feasibility-2026-07.md] | 2026-07 | Borrow-free, exact-once bounded-continuation feasibility gate | Gate 1 NO-GO | Gate 2 or a behavior change |
 | [`competitive-bgperf2-2026-07.md`][competitive-bgperf2-2026-07.md] | Initial campaign 2026-07-26; latest refresh 2026-07-27 | Four daemons, five fleet shapes, three runs per shape | Historical observations whose cross-daemon ranking was later retracted | Any projection beyond 100 peers |
 | [`competitive-bgperf2-v0670-2026-08.md`][competitive-bgperf2-v0670-2026-08.md] | 2026-08-29 | Four daemons, five import shapes, four repetitions | 79 of 80 cells reached the exact expected table | Export, reload, churn, IPv6, Add-Path, OpenBGPD, or another host |
-| [`competitive-bgperf2-v0680-2026-08.md`][competitive-bgperf2-v0680-2026-08.md] | 2026-08-30 | Four daemons, five import shapes, four counterbalanced repetitions | All 80 cells reached the exact expected table | Universal throughput, memory, or CPU ranking |
+| [`competitive-bgperf2-v0680-2026-08.md`][competitive-bgperf2-v0680-2026-08.md] | 2026-08-30 | Four daemons, five import shapes, four counterbalanced repetitions | All 80 cells reached the exact expected table | Universal throughput, memory, or CPU ranking; BIRD 2.19.3, FRR 10.7.1 or GoBGP v4.10.0 |
 | [`config-persistence-2026-07.md`][config-persistence-2026-07.md] | 2026-07-25 | Pinned persistence, history, rollback, and commit-confirm lifecycle harness | Behavioral assertions preserved by the workspace integration test | Timing or performance |
 | [`controller-injection-2026-09.md`](controller-injection-2026-09.md) | 2026-09-20–21 | Unary inserts, replacements and deletes through 100k routes, one passive client | Scoped CPU reduction from deferred controller attribute collection; existing local-route reconciliation | Batch packing, multi-client scale or isolated-host latency |
 | [`cross-daemon-v0750-2026-10.md`](cross-daemon-v0750-2026-10.md) | 2026-10-04 to 2026-10-05 | rustbgpd v0.75.0 daemon source (`319d14e4b`) and OpenBGPD 9.3 at IXP-700 S1/S2/S3, and those two plus BIRD 3.3.2 in IRR reload at 0%, 10% and 50% overlap, three runs per daemon, 21 legs | Same-night rows against OpenBGPD 9.3 for every matrix cell and against both competitors for IRR reload, including the losses, with cgroup peaks for the matrix memory rows | BIRD in the matrix, BIRD 3.3.3, RR1000, IPv6, or attribution of any change |
-| [`cross-daemon-v0740-2026-10.md`](cross-daemon-v0740-2026-10.md) | 2026-10-03 to 2026-10-04 | rustbgpd v0.74.0, BIRD 3.3.2 and OpenBGPD 9.2 at IXP-700 S1/S2/S3 and IRR reload at 0%, 10% and 50% overlap, three runs per daemon, 27 legs | Same-night cross-daemon rows for every published comparison cell, including the losses | OpenBGPD 9.3, RR1000, IPv6, or attribution of any change |
+| [`cross-daemon-v0740-2026-10.md`](cross-daemon-v0740-2026-10.md) | 2026-10-03 to 2026-10-04 | rustbgpd v0.74.0, BIRD 3.3.2 and OpenBGPD 9.2 at IXP-700 S1/S2/S3 and IRR reload at 0%, 10% and 50% overlap, three runs per daemon, 27 legs | Same-night cross-daemon rows for every published comparison cell, including the losses | BIRD 3.3.3, OpenBGPD 9.3, RR1000, IPv6, or attribution of any change |
 | [`enhanced-route-refresh-2026-07.md`][enhanced-route-refresh-2026-07.md] | Initial campaign 2026-07; latest refresh 2026-08-30 | 100k-route Enhanced Route Refresh inventory lifecycle | Completion dominated snapshot creation in the all-withdraw shape | Fleet-wide convergence or generic throughput |
 | [`event-history-producer-2026-07.md`][event-history-producer-2026-07.md] | 2026-07 | Three event-history producer shapes at 1.3–3.3 µs per event | The offload proceed gate passed and bounded delivery completed | Independent BIRD timeout evidence |
 | [`evpn-fanout-2026-09-05.md`](evpn-fanout-2026-09-05.md) | 2026-09-05 | Synthetic EVPN Type 2 reflector workload: 10,000 selected routes at 8–480 receiving peers, plus a separate ten-second churn phase | Absolute baseline: every receiver in every accepted run reached the exact 10,000-key table and withdrawal count | An optimization comparison or throughput ceiling |

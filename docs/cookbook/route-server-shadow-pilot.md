@@ -429,7 +429,8 @@ claims; each links its full method, configs, and raw artifacts:
   settled at **369–373 MiB** after the S2 reload leg and 375–376 MiB after
   the S3 flapstorm, with peak samples of 511–544 MiB. BIRD 3.3.2 had the lower
   peak sample at both shapes (332–414 MiB); settled RSS was lower for
-  rustbgpd at S2 and mixed at S3.
+  rustbgpd at S2 and mixed at S3. BIRD 3.3.3, released 2026-10-01, is not
+  yet re-measured at this shape.
 - The earlier dated run at the same shape (the July 2026 same-host
   matrix, v0.61.0 exact-tag refresh, runs A/B): settled RSS **412 / 410 MiB** after the reload leg, peak
   590 / 577 MiB. In the same runs BIRD 3.3.1 settled at 425 / 417 MiB
