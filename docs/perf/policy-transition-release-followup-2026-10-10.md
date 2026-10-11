@@ -145,6 +145,22 @@ config settlement does not explain the interval.
 
 ## Release assessment
 
+> **Follow-up (2026-10-10):** the completion-clock limitation assessed below
+> no longer applies to current main. A controlled comparison placed the
+> parent's read pair at #2952's offset before commit and reproduced the long
+> continuation on the parent binary, so the interval was the admitted
+> neighbor read rather than added RIB work. The
+> [ADR-0132 amendment](../adr/0132-operator-read-path.md#amendment-2026-10-10-reads-overlapping-reload-completion)
+> stops a transaction from waiting for that read's session replies. In one
+> same-host window with this cell's default shape and lead (parent, main,
+> candidate, candidate, main, parent; eight reloads per process, all six
+> cells PASS), pooled SIGHUP → complete medians were 739.1 ms for the parent,
+> 757.9 ms for main and 717.0 ms for the change, with its RIB transition
+> median at 55.0 ms and the post-commit continuation at 1.1 ms. Process
+> medians were 739.1/739.0 ms (parent) and 714.0/752.2 ms (change); ranges
+> overlap, so this restores the parent's completion rather than establishing
+> a general reload-latency gain. The assessment below is retained as recorded.
+
 The original Q1 and the valid short confirmation establish a real increase
 in the end-to-end clock for this operator-read workload. They also establish
 the shorter fenced RIB transition. Calling the whole effect pure noise or
