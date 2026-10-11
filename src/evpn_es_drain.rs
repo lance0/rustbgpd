@@ -832,6 +832,9 @@ mod tests {
                         RibUpdate::SubscribeEvpnRouteEvents { reply } => {
                             let _ = reply.send(events_tx.subscribe());
                         }
+                        RibUpdate::QueryEvpnSessionsSynced { reply } => {
+                            let _ = reply.send(true);
+                        }
                         RibUpdate::QueryEvpnRoutes { reply, .. } => {
                             let _ = reply.send(Vec::new());
                         }
@@ -857,18 +860,61 @@ mod tests {
         where
             F: FnMut(&[EvpnRouteKey]) -> bool,
         {
-            let deadline = std::time::Instant::now() + Duration::from_secs(5);
+            let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
             loop {
                 let observed = keys.lock().await.clone();
                 if pred(&observed) {
                     return observed;
                 }
                 assert!(
-                    std::time::Instant::now() < deadline,
+                    tokio::time::Instant::now() < deadline,
                     "timed out waiting for {label}; observed {observed:?}"
                 );
                 tokio::time::sleep(Duration::from_millis(10)).await;
             }
+        }
+
+        async fn wait_for_segment_startup(
+            injects: &Arc<tokio::sync::Mutex<Vec<EvpnRouteKey>>>,
+            control: &crate::evpn_segment::EvpnSegmentRuntimeControl,
+            id: EthernetSegmentIdentifier,
+            floor: usize,
+        ) {
+            let mut status = control.df_status();
+            let deadline = tokio::time::timeout(Duration::from_secs(2), async {
+                status
+                    .wait_for(|states| {
+                        states
+                            .get(&id)
+                            .is_some_and(|s| s.recovery_deadline.is_some())
+                    })
+                    .await
+                    .unwrap()[&id]
+                    .recovery_deadline
+                    .unwrap()
+            })
+            .await
+            .expect("segment must publish its pending DF wait");
+            wait_for(injects, "candidate routes during DF wait", |keys| {
+                es_class_count(&keys[floor..], id) == 2
+            })
+            .await;
+            // Candidate Type 4 and EAD-per-ES advertise during the wait;
+            // EAD-per-EVI follows election only after the recovery deadline.
+            let remaining = deadline - tokio::time::Instant::now();
+            tokio::time::advance(
+                remaining
+                    .checked_sub(Duration::from_millis(1))
+                    .expect("DF wait has at least one millisecond remaining"),
+            )
+            .await;
+            assert!(!has_all_es_classes(&injects.lock().await[floor..], id));
+            assert!(status.borrow()[&id].recovery_deadline.is_some());
+            tokio::time::advance(Duration::from_millis(1)).await;
+            wait_for(injects, "segment origination after DF wait", |keys| {
+                has_all_es_classes(&keys[floor..], id)
+            })
+            .await;
         }
 
         fn has_all_es_classes(keys: &[EvpnRouteKey], id: EthernetSegmentIdentifier) -> bool {
@@ -970,11 +1016,8 @@ mod tests {
             )
             .expect("segment actor spawns for non-empty ES config");
 
-            // Initial Type 1/4 origination before any test stimulus.
-            wait_for(&injects, "initial segment origination", |keys| {
-                has_all_es_classes(keys, id)
-            })
-            .await;
+            // Complete the real startup wait before the drain stimulus.
+            wait_for_segment_startup(&injects, &segment_handle.runtime_control(), id, 0).await;
 
             CrossActorRig {
                 apply_lock: tokio::sync::Mutex::new(()),
@@ -1004,7 +1047,7 @@ mod tests {
         /// exactly the preserved LIVE local state — a MAC that aged
         /// out during the drain must not come back, a MAC learned
         /// during the drain must.
-        #[tokio::test]
+        #[tokio::test(start_paused = true)]
         async fn undrain_replays_preserved_live_state_through_both_actors() {
             let id = esi(0x41);
             let rig = spawn_cross_actor_rig(id).await;
@@ -1089,6 +1132,7 @@ mod tests {
             .await
             .unwrap();
             assert!(!outcome.drained && outcome.changed);
+            wait_for_segment_startup(&rig.injects, &rig.segment_control, id, inject_floor).await;
             let replayed = wait_for(&rig.injects, "undrain re-origination + replay", |keys| {
                 has_all_es_classes(&keys[inject_floor..], id)
                     && macip_count(&keys[inject_floor..], mac(0xBB)) >= 1
@@ -1110,7 +1154,7 @@ mod tests {
         /// order — originator model first, segment drained-set second
         /// — and assert it converges to the same withdrawn set the
         /// segment-first order produces.
-        #[tokio::test]
+        #[tokio::test(start_paused = true)]
         async fn reverse_publish_order_converges_to_the_same_withdrawn_state() {
             let id = esi(0x42);
             let rig = spawn_cross_actor_rig(id).await;
