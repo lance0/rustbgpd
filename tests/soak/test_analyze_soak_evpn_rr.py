@@ -277,6 +277,15 @@ class EvpnRrAnalyzerContracts(unittest.TestCase):
             row["flaps_total"] += 1
         self.assert_only_failure("flap_budget", rows=rows)
 
+    def test_rss_peak_uses_the_scenario_ceiling(self):
+        rows = smoke_rows()
+        rows[4]["rss_mb"] = 3500.0  # above scenario 10's 3072 MB, below 4096
+        result, payload = run_analyzer(rows=rows)
+        self.assertEqual(result.returncode, 0, payload["gates"]["rss_peak_mb"])
+        rows[4]["rss_mb"] = 4096.0
+        gate = self.assert_only_failure("rss_peak_mb", rows=rows)
+        self.assertEqual(gate["limit"], 4096.0)
+
     def test_spurious_max_prefix_latch_fails(self):
         rows = smoke_rows()
         rows[5]["max_prefix_exceeded_total"] = 1

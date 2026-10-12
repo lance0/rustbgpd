@@ -1189,7 +1189,7 @@ reads client 0's paged EVPN views alongside the scenario 10 reads. The
 existing EVPN soaks (M33, M67, Gate 8b) measure VTEP state, not reflection.
 
 ```bash
-# 24 h default (200 clients x 400 Type 2 + 100 Type 5, 60 s epochs):
+# 24 h default (150 clients x 200 Type 2 + 50 Type 5, 60 s epochs):
 bash tests/soak/run-soak-evpn-rr.sh
 
 # ~6-minute smoke:

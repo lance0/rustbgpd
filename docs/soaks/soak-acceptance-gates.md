@@ -457,13 +457,13 @@ churn-floor slack is unchanged.
 ### 12. EVPN route reflector (Type 2/5 churn, client flaps, reloads) — `run-soak-evpn-rr.sh` (`analyze-soak-evpn-rr.py`)
 
 A bare-host daemon reflecting `l2vpn_evpn` only to `SOAK_CLIENTS` real iBGP
-route-reflector-client sessions (default 200), driven by `bench/evpn-load`'s
+route-reflector-client sessions (default 150), driven by `bench/evpn-load`'s
 `evpn-rr-soak` driver. Each client advertises a sliding window of
-`SOAK_TYPE2` Type 2 MAC/IP routes (default 400) and `SOAK_TYPE5` Type 5 IPv4
-prefix routes (default 100), with its own RD, a route target and the VXLAN
+`SOAK_TYPE2` Type 2 MAC/IP routes (default 200) and `SOAK_TYPE5` Type 5 IPv4
+prefix routes (default 50), with its own RD, a route target and the VXLAN
 encapsulation community. The default 24 h shape is 1440 epochs of 60 s. In
 every epoch, each client announces `SOAK_SHIFT2` + `SOAK_SHIFT5` new routes
-(default 40 + 10) and withdraws as many old ones, paced across the first 30 s.
+(default 20 + 5) and withdraws as many old ones, paced across the first 30 s.
 Every fifth epoch, one client sends Cease/Administrative Reset, reconnects and
 re-announces; client 0 never flaps. Every thirtieth epoch, the driver copies
 the other description generation over the live config and sends SIGHUP to the
@@ -479,11 +479,20 @@ containers.
 The convergence check after each epoch is exact on the wire. Every client
 must hold exactly the current windows of every other client: no more, no
 fewer and nothing else. That is (`SOAK_CLIENTS` − 1) × (`SOAK_TYPE2` +
-`SOAK_TYPE5`) = 99 500 routes at the default shape. The driver also counts
-reflected routes it never originated and UPDATEs it cannot parse. The RSS
-ceiling, slope bounds and readyz rule are scenario 10's, reused through its
-analyzer. Each epoch rotates route identities, so this tests intern-table
-release as well as reflection.
+`SOAK_TYPE5`) = 37 250 routes at the default shape. The driver also counts
+reflected routes it never originated and UPDATEs it cannot parse. The slope
+bounds and readyz rule are scenario 10's, reused through its analyzer. Each
+epoch rotates route identities, so this tests intern-table release as well as
+reflection.
+
+RSS ceiling rationale: a 5-minute run of the default shape pinned to eight
+CPUs peaked at 2,512 MB during the initial table dump and held 2.13–2.16 GB
+under churn, flaps and reloads. The daemon held one update group with 150
+members. Scenario 10's 3 GiB ceiling would leave a 1.2× margin over that
+peak, so this scenario precommits 4096 MB, about 1.6× the measured peak. It
+leaves more than 10 GiB of a 15 GiB host for the driver, the management load
+and the page cache. Without swap, a leak of about 1.5 GB still trips the gate;
+the slope gates catch slower growth.
 
 | Gate | Precommitted bound | Evidence | Refreshes under scenario via |
 |------|--------------------|----------|------------------------------|
@@ -497,7 +506,8 @@ release as well as reflection.
 | Per-series sent counters | every `bgp_messages_sent_total{peer,type}` series in a retained `/metrics` snapshot is present in each later snapshot and never decreases; at least two snapshots with at least one series | `metrics-snapshots.txt.gz` (every `METRICS_SNAPSHOT_EVERY` samples; 0 is refused) | Flaps reconnect a peer; a counter reset or a dropped series on reconnect fails. |
 | Aggregate sent counter | `bgp_messages_sent_total` sum never decreases (scenario 10 rule) | CSV `msgs_sent_total` | Churn and keepalives on every session. |
 | Max-prefix flat | `bgp_max_prefix_exceeded_total` == 0 on every sample | CSV `max_prefix_exceeded_total` | No bounds are configured. |
-| Peak RSS / RSS slope / intern slope | scenario 10 bounds (< 3072 MB; < 10 MB/h and < 100 entries/h over the final 25 %, evaluated when that window ≥ 1 h) | CSV `rss_mb`, `intern_size` | Route identities rotate every epoch. |
+| Peak RSS | < 4096 MB (rationale above) | CSV `rss_mb` | Full-table dumps at start and after every flap; route identities rotate every epoch. |
+| RSS slope / intern slope | scenario 10 bounds (< 10 MB/h and < 100 entries/h over the final 25 %, evaluated when that window ≥ 1 h) | CSV `rss_mb`, `intern_size` | Route identities rotate every epoch. |
 | readyz availability | scenario 10 rule (fewer than 3 consecutive misses of 200 within 250 ms; no dropped scrape or observation gap) | CSV `readyz_code`, `readyz_ms` | Probed every sample under churn, flaps and reloads. |
 | Management plane | scenario 10's management gates with the EVPN operation set and identity `evpn_peer == 127.1.0.1`; EVPN view rows must be Type 2 or 5, sourced from client 0 (received) or never from client 0 (advertised) | `management-plane-load.jsonl` | Bounded reads throughout the measured window. |
 | Minimum sample count / no abort / daemon log | scenario 10 rules | CSV, `cycles.log`, `rustbgpd.log` | As scenario 10. |

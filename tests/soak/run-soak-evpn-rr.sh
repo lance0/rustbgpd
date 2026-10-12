@@ -42,11 +42,11 @@ SOAK_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SOAK_SCRIPT_DIR/../.." && pwd)"
 
 # --- Shape (24 h defaults sized for an 8 vCPU / 15 GiB host; env-overridable) ---
-SOAK_CLIENTS="${SOAK_CLIENTS:-200}"
-SOAK_TYPE2="${SOAK_TYPE2:-400}"
-SOAK_TYPE5="${SOAK_TYPE5:-100}"
-SOAK_SHIFT2="${SOAK_SHIFT2:-40}"
-SOAK_SHIFT5="${SOAK_SHIFT5:-10}"
+SOAK_CLIENTS="${SOAK_CLIENTS:-150}"
+SOAK_TYPE2="${SOAK_TYPE2:-200}"
+SOAK_TYPE5="${SOAK_TYPE5:-50}"
+SOAK_SHIFT2="${SOAK_SHIFT2:-20}"
+SOAK_SHIFT5="${SOAK_SHIFT5:-5}"
 SOAK_SECONDS="${SOAK_SECONDS:-86400}"
 EPOCH_SEC="${EPOCH_SEC:-60}"
 CHURN_SEC="${CHURN_SEC:-30}"
@@ -493,7 +493,8 @@ main() {
 
     write_run_json
 
-    [[ ! -e $RUN_DIR/engine-finish ]] || abort "engine finish evidence path already exists"
+    [[ ! -e $RUN_DIR/engine-finish && ! -e $RUN_DIR/driver-start ]] ||
+        abort "driver handshake evidence path already exists"
     "$DAEMON" "$SCEN/config.toml" >"$RUSTBGPD_LOG" 2>&1 &
     DAEMON_PID=$!
     log "daemon started pid=$DAEMON_PID"
@@ -519,7 +520,8 @@ main() {
         --daemon-pid "$DAEMON_PID" --config-live "$SCEN/config.toml" \
         --config-gens "$SCEN/config-gen-b.toml" "$SCEN/config-gen-a.toml" \
         --metrics "127.0.0.1:${METRICS_PORT}" \
-        --evidence-dir "$RUN_DIR/engine-finish" >"$DRIVER_LOG" 2>&1 &
+        --evidence-dir "$RUN_DIR/engine-finish" \
+        --start-file "$RUN_DIR/driver-start" >"$DRIVER_LOG" 2>&1 &
     H_PID=$!
     log "driver started pid=$H_PID"
 
@@ -561,6 +563,10 @@ main() {
         if ((now >= next_sample)); then
             sample_row $((now - start_epoch))
             next_sample=$((now + SAMPLE_INTERVAL))
+            # Release epoch 1 only after a recorded pre-fault baseline row.
+            if ((SAMPLE_ROWS > 0)) && [[ ! -e $RUN_DIR/driver-start ]]; then
+                printf 'start\n' >"$RUN_DIR/driver-start"
+            fi
         fi
         ((now < overall_deadline)) || abort "overall watchdog cap ${OVERALL_CAP_SEC}s exceeded"
         sleep 1

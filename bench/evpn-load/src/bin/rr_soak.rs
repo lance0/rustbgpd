@@ -126,6 +126,9 @@ struct Args {
     /// Finish handshake directory: write `ready`, wait for `ack`, then Cease.
     #[arg(long)]
     evidence_dir: Option<PathBuf>,
+    /// Wait for this file (the runner's first sample) before epoch 1.
+    #[arg(long)]
+    start_file: Option<PathBuf>,
     /// Bound on waiting for the runner's `ack`.
     #[arg(long, default_value_t = 600)]
     finish_ack_secs: u64,
@@ -716,10 +719,7 @@ async fn issue_reload(args: &Args, n: u32) -> [u64; 5] {
     before
 }
 
-async fn settle_reload(args: &Args, n: u32, before: [u64; 5]) {
-    let metrics = args
-        .metrics
-        .unwrap_or_else(|| fail("reload without --metrics"));
+async fn settle_reload(metrics: SocketAddr, n: u32, before: [u64; 5]) {
     let deadline = Instant::now() + Duration::from_secs(120);
     loop {
         let after = fetch_metrics(metrics)
@@ -886,6 +886,17 @@ async fn main() -> anyhow::Result<()> {
     let churn_window = Duration::from_secs(args.churn_secs);
     let converge_cap = Duration::from_secs(args.converge_cap_secs);
     let (mut flaps, mut reloads, mut converged_epochs) = (0u32, 0u32, 0u32);
+    if let Some(start) = &args.start_file {
+        // The runner records its first sample before any epoch can flap a
+        // client, so the sampled flap counter has a pre-fault baseline.
+        let deadline = Instant::now() + Duration::from_secs(300);
+        while !start.is_file() {
+            if Instant::now() >= deadline {
+                fail("start handshake: the runner never started sampling");
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    }
     let schedule = Instant::now();
     for n in 1..=args.epochs {
         let t0 = (schedule + epoch * (n - 1)).max(Instant::now());
@@ -894,8 +905,16 @@ async fn main() -> anyhow::Result<()> {
             reloads += 1;
             reloads
         });
-        let reload_before = match reload {
-            Some(r) => Some(issue_reload(&args, r).await),
+        // Settlement is polled concurrently with the churn below, so the
+        // recorded reload window is the reload's own duration.
+        let settling = match reload {
+            Some(r) => {
+                let before = issue_reload(&args, r).await;
+                let metrics = args
+                    .metrics
+                    .unwrap_or_else(|| fail("reload without --metrics"));
+                Some(tokio::spawn(settle_reload(metrics, r, before)))
+            }
             None => None,
         };
         let flapped = if args.flap_every > 0 && n % args.flap_every == 0 {
@@ -916,8 +935,10 @@ async fn main() -> anyhow::Result<()> {
             tokio::time::sleep_until((t0 + offset).into()).await;
             churned += churn(shape, client).await;
         }
-        if let (Some(r), Some(before)) = (reload, reload_before) {
-            settle_reload(&args, r, before).await;
+        if let Some(task) = settling
+            && task.await.is_err()
+        {
+            fail("reload settlement task failed");
         }
         let (ok, result, converge_ms) = converge(shape, &clients, &lost, converge_cap).await;
         converged_epochs += u32::from(ok);

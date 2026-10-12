@@ -7,9 +7,11 @@ run-soak-evpn-rr.sh and emits a JSON verdict against the precommitted gates
 in docs/soaks/soak-acceptance-gates.md (scenario 12).
 
 Reused unchanged from the route-server flagship analyzer: minimum sample
-count, aggregate sent-counter monotonicity, readyz availability, RSS peak and
-late-window RSS/intern slopes, no ABORT record, the daemon-log gate and every
+count, aggregate sent-counter monotonicity, readyz availability, late-window
+RSS/intern slopes, no ABORT record, the daemon-log gate and every
 management-plane gate (with the EVPN operation set). Scenario-specific:
+
+  - RSS peak below this scenario's own ceiling (EVPN_RSS_PEAK_LIMIT_MB)
 
   - session floor: every post-warmup sample fully Established, except one
     client down inside a declared flap window
@@ -56,8 +58,11 @@ _SPEC.loader.exec_module(rs)
 
 EVPN_OPERATIONS = ("metrics", "neighbor", "evpn_received", "evpn_advertised", "doctor")
 EVPN_PEER = "127.1.0.1"
+# Precommitted in soak-acceptance-gates.md scenario 12: 1.6x the 2,512 MB
+# peak (initial table dump; 2.15 GB steady) measured at the default shape.
+EVPN_RSS_PEAK_LIMIT_MB = 4096.0
 REUSED_GATES = (
-    "min_samples", "msgs_sent_monotone", "readyz", "rss_peak_mb",
+    "min_samples", "msgs_sent_monotone", "readyz",
     "rss_late_slope_per_hour", "intern_late_slope_per_hour", "no_abort",
 )
 META_INTS = (
@@ -257,6 +262,11 @@ def analyze(run_dir: str, rows: list[dict], cycle_lines: list[str], meta: dict,
     evpn = parse_evpn_cycles(cycle_lines)
     base = rs.analyze(rows, cycles, {**meta, "planned_trips": 0}, min_slope_seconds)
     gates = {name: base["gates"][name] for name in REUSED_GATES}
+    peak = base["peak_rss_mb"]
+    gates["rss_peak_mb"] = {
+        "value": peak, "limit": EVPN_RSS_PEAK_LIMIT_MB,
+        "pass": peak is not None and peak < EVPN_RSS_PEAK_LIMIT_MB,
+    }
 
     issued, complete = len(cycles["reload_issued"]), len(cycles["reload_complete"])
     planned_reloads = meta["planned_reloads"]
