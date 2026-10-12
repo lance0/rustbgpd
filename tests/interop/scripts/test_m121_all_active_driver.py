@@ -313,6 +313,51 @@ class NamespaceCleanupTests(unittest.TestCase):
                 driver.cleanup_preserving_error()
 
 
+class BumWitnessTests(unittest.TestCase):
+    ES = ' DF status: {} \n'
+
+    def run_bum(self, winner, frr_status='non-df', a_flood=True):
+        calls = []
+        def frr(node, command):
+            self.assertEqual((node, command), ('a', 'show evpn es detail'))
+            calls.append('witness')
+            return self.ES.format(frr_status)
+        def ns(node, *args):
+            if args[:3] == ('bridge', '-j', 'fdb'):
+                return json.dumps([dict(mac='00:00:00:00:00:00', dst=ip) for ip in ('10.211.0.1', '10.211.0.2')])
+            self.assertEqual((node, args[-1]), ('a', 'es0'))
+            return json.dumps([dict(ifname='es0', flood=a_flood, mcast_flood=a_flood, bcast_flood=a_flood)])
+        packets = {'bum-a-vx100': [121], 'bum-b-vx100': [121], 'bum-ce-cea': [121],
+                   'bum-ce-ceb': [121] if winner == 'b' else [],
+                   'bum-ce-bond0': [121, 121] if winner == 'b' else [121]}
+        def capture(*args, **kwargs):
+            calls.append('capture')
+            return packets
+        with tempfile.TemporaryDirectory() as directory, \
+             patch.object(driver, 'OUT', Path(directory)), patch.object(driver, 'frr', side_effect=frr), \
+             patch.object(driver, 'ns', side_effect=ns), patch.object(driver, 'snapshot'), \
+             patch.object(driver, 'wait', side_effect=lambda check, _: check()), \
+             patch.object(driver, 'capture', side_effect=capture):
+            return driver.bum(100, winner), calls
+
+    def test_frr_non_df_cells_check_the_witness_around_the_packet_proof(self):
+        for winner, copies in (('b', 2), (None, 1)):
+            with self.subTest(winner=winner):
+                result, calls = self.run_bum(winner)
+                self.assertEqual(calls, ['witness', 'capture', 'witness'])
+                self.assertEqual((result['ce_cea'], result['ce_bond0']), (1, copies))
+                self.assertEqual(result['frr_non_enforcement_witness'],
+                                 dict(flood=True, mcast_flood=True, bcast_flood=True))
+
+    def test_frr_df_cell_has_no_witness(self):
+        result, calls = self.run_bum('a')
+        self.assertEqual((calls, result['frr_non_enforcement_witness']), (['capture'], None))
+
+    def test_frr_filtering_port_turns_the_cell_red_before_sending(self):
+        with self.assertRaisesRegex(AssertionError, 'non-enforcement witness'):
+            self.run_bum('b', a_flood=False)
+
+
 class CarrierRecoveryTests(unittest.TestCase):
     def recover(self, carrier_hold, full_readiness=6.25, response_duration=0.0):
         clock = [0.0]

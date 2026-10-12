@@ -8,7 +8,8 @@ import tempfile
 import unittest
 
 from m121_all_active_oracle import (
-    ESI, FRR, RUST, verify_bum, verify_discovery, verify_frr_es_routes, verify_frr_originated,
+    ESI, FRR, RUST, verify_bridge_flood, verify_bum, verify_discovery, verify_frr_non_enforcement,
+    verify_modulo_fallback, verify_frr_es_routes, verify_frr_originated,
     verify_frr_peer_originated,
     verify_local_originated, verify_nhg, verify_unicast, verify_frr_synced_mac,
     checksum, frame, make_frame, packet_identities, verify_identities,
@@ -131,20 +132,33 @@ class IdentityTests(unittest.TestCase):
         with self.assertRaises(AssertionError):
             verify_identities(identities, 'p', [10, 11], 10)
 
-    def test_bum_winners_and_drop_need_exact_ingress_and_host(self):
-        expected = [(10, 160)]
+    def bum_identities(self, winner):
+        one = [(10, 160)]
+        return {'p-a-vx100': one.copy(), 'p-b-vx100': one.copy(),
+                'p-ce-cea': one.copy(), 'p-ce-ceb': one.copy() if winner == 'b' else [],
+                'p-ce-bond0': one * (2 if winner == 'b' else 1), 'p-hr-eth0': one.copy()}
+
+    def test_bum_identities_pin_each_member_and_bond_copy(self):
         for winner in ('a', 'b', None):
-            identities = {'p-a-vx100': expected.copy(), 'p-b-vx100': expected.copy(),
-                          'p-ce-cea': expected.copy() if winner == 'a' else [],
-                          'p-ce-ceb': expected.copy() if winner == 'b' else [],
-                          'p-ce-bond0': expected.copy() if winner is not None else [],
-                          'p-hr-eth0': expected.copy()}
+            identities = self.bum_identities(winner)
             self.assertTrue(verify_identities(identities, 'p', [10], 1, winner))
             for key in identities:
-                broken = deepcopy(identities)
-                broken[key] = [] if broken[key] else expected.copy()
-                with self.assertRaises(AssertionError):
-                    verify_identities(broken, 'p', [10], 1, winner)
+                for value in ([], identities[key] + [(10, 160)], [(10, 161)] * len(identities[key] or [0])):
+                    if value == identities[key]:
+                        continue
+                    with self.subTest(winner=winner, key=key, value=value):
+                        broken = deepcopy(identities)
+                        broken[key] = value
+                        with self.assertRaises(AssertionError):
+                            verify_identities(broken, 'p', [10], 1, winner)
+
+    def test_identity_witness_turns_red_when_frr_filters_as_non_df(self):
+        for winner in ('b', None):
+            filtered = self.bum_identities(winner)
+            filtered['p-ce-cea'] = []
+            filtered['p-ce-bond0'] = filtered['p-ce-ceb'].copy()
+            with self.subTest(winner=winner), self.assertRaisesRegex(AssertionError, 'non-enforcement witness'):
+                verify_identities(filtered, 'p', [10], 1, winner)
 
 
 def frr_routes():
@@ -221,29 +235,115 @@ class NextHopTests(unittest.TestCase):
 
 class PacketTests(unittest.TestCase):
     def bum(self, winner):
+        # FRR's member always floods: as DF, or as stock-FRR non-enforcement.
         return {'p-a-vx100': [17], 'p-b-vx100': [17],
-                'p-ce-cea': [17] if winner == 'a' else [],
+                'p-ce-cea': [17],
                 'p-ce-ceb': [17] if winner == 'b' else [],
-                'p-ce-bond0': [17] if winner else []}
+                'p-ce-bond0': [17, 17] if winner == 'b' else [17]}
 
-    def test_bum_winners_and_drop(self):
+    def test_bum_frr_df_rust_df_and_modulo_cells(self):
         for winner in ('a', 'b', None):
             self.assertTrue(verify_bum(self.bum(winner), 'p', 17, winner))
 
     def test_bum_missing_duplicate_wrong_link_or_seed(self):
-        for key, value in [('p-a-vx100', []), ('p-b-vx100', []),
-                           ('p-a-vx100', [17, 17]), ('p-ce-cea', [17, 17]),
-                           ('p-ce-cea', [18]), ('p-ce-ceb', [17]),
-                           ('p-ce-bond0', [])]:
-            with self.subTest(key=key, value=value):
-                data = self.bum('a')
-                data[key] = value
-                with self.assertRaises(AssertionError):
-                    verify_bum(data, 'p', 17, 'a')
-        data = self.bum(None)
-        del data['p-ce-ceb']
+        for winner in ('a', 'b', None):
+            for key, value in [('p-a-vx100', []), ('p-b-vx100', []),
+                               ('p-a-vx100', [17, 17]), ('p-ce-cea', [17, 17]),
+                               ('p-ce-cea', [18]), ('p-ce-ceb', [17, 17]),
+                               ('p-ce-ceb', [] if winner == 'b' else [17]),
+                               ('p-ce-bond0', []), ('p-ce-bond0', [17, 17, 17])]:
+                with self.subTest(winner=winner, key=key, value=value):
+                    data = self.bum(winner)
+                    data[key] = value
+                    with self.assertRaises(AssertionError):
+                        verify_bum(data, 'p', 17, winner)
+            data = self.bum(winner)
+            del data['p-ce-ceb']
+            with self.assertRaises(AssertionError):
+                verify_bum(data, 'p', 17, winner)
+
+    def test_rust_df_requires_rust_member_exactly_once(self):
+        data = self.bum('b')
+        data['p-ce-ceb'], data['p-ce-bond0'] = [], [17]
+        with self.assertRaisesRegex(AssertionError, 'rustbgpd member'):
+            verify_bum(data, 'p', 17, 'b')
+
+    def test_witness_turns_red_when_frr_filters_as_non_df(self):
+        # The old strict single-copy shape is what an enforcing FRR would produce.
+        for winner in ('b', None):
+            data = self.bum(winner)
+            data['p-ce-cea'] = []
+            data['p-ce-bond0'] = data['p-ce-ceb'].copy()
+            with self.subTest(winner=winner), self.assertRaisesRegex(AssertionError, 'non-enforcement witness'):
+                verify_bum(data, 'p', 17, winner)
+        data = self.bum('a')
+        data['p-ce-cea'], data['p-ce-bond0'] = [], []
+        with self.assertRaises(AssertionError) as raised:
+            verify_bum(data, 'p', 17, 'a')
+        self.assertNotIn('non-enforcement witness', str(raised.exception))
+
+
+class FrrWitnessTests(unittest.TestCase):
+    ES = ('ESI: 03:aa:bb:cc:dd:ee:ff:00:00:01\n Interface: es0\n DF status: {status} \n'
+          ' DF preference: 200\n VTEPs:\n     10.211.0.2 df_alg: {alg} df_pref: 300 nh: 268435458\n')
+
+    def port(self, enabled=True, **overrides):
+        port = dict(ifname='es0', flood=enabled, mcast_flood=enabled, bcast_flood=enabled)
+        port.update(overrides)
+        return port
+
+    def test_non_df_flooding_port_is_the_pinned_witness(self):
+        flags = verify_frr_non_enforcement(self.ES.format(status='non-df', alg='preference'), self.port())
+        self.assertEqual(flags, dict(flood=True, mcast_flood=True, bcast_flood=True))
+
+    def test_witness_turns_red_if_frr_clears_any_flood_flag(self):
+        for key in ('flood', 'mcast_flood', 'bcast_flood'):
+            with self.subTest(key=key), self.assertRaisesRegex(AssertionError, 'non-enforcement witness'):
+                verify_frr_non_enforcement(self.ES.format(status='non-df', alg='preference'),
+                                           self.port(**{key: False}))
+
+    def test_witness_requires_frr_non_df_on_the_es_port(self):
+        for es, port in [(self.ES.format(status='df', alg='preference'), self.port()),
+                         (self.ES.format(status='non-df', alg='preference').replace('non-df', 'non-dfx'), self.port()),
+                         (self.ES.format(status='non-df', alg='preference'), self.port(ifname='es1')),
+                         (self.ES.format(status='non-df', alg='preference'), self.port(flood=1))]:
+            with self.subTest(es=es, port=port), self.assertRaises(AssertionError):
+                verify_frr_non_enforcement(es, port)
+
+    def test_bridge_flood_requires_all_three_flags(self):
+        self.assertTrue(verify_bridge_flood(self.port(False), False))
+        self.assertTrue(verify_bridge_flood(self.port(True), True))
+        for key in ('flood', 'mcast_flood', 'bcast_flood'):
+            with self.subTest(key=key), self.assertRaises(AssertionError):
+                verify_bridge_flood(self.port(False, **{key: True}), False)
+
+    def modulo(self, vni=100, role='nondf', action='suppress', alg=2, rust_alg='service-carving'):
+        segment = dict(df_algorithm='default-modulo',
+                       members=[dict(vni=vni, df_role=role, bum_forwarding_action=action)])
+        election = (0x0606 << 48) | (alg << 40) | 200
+        routes = [dict(route_type=4, peer=FRR, extended_communities=[0x030c000000000008, election]),
+                  dict(route_type=4, peer='0.0.0.0', extended_communities=[0x030c000000000008])]
+        return segment, routes, self.ES.format(status='non-df', alg=rust_alg), vni
+
+    def test_modulo_fallback_assigns_vni_100_to_frr(self):
+        result = verify_modulo_fallback(*self.modulo())
+        self.assertEqual((result['modulo_assigned'], result['rust_role']), (FRR, 'nondf'))
+        result = verify_modulo_fallback(*self.modulo(vni=101, role='df', action='allow'))
+        self.assertEqual(result['modulo_assigned'], RUST)
+
+    def test_modulo_fallback_rejects_wrong_role_algorithm_or_agreement(self):
+        for kwargs in (dict(role='df'), dict(action='allow'), dict(alg=0), dict(rust_alg='preference'),
+                       dict(vni=101)):
+            with self.subTest(**kwargs), self.assertRaises(AssertionError):
+                verify_modulo_fallback(*self.modulo(**kwargs))
+        segment, routes, es, vni = self.modulo()
+        for broken in (dict(segment, df_algorithm='highest-preference'),):
+            with self.assertRaises(AssertionError):
+                verify_modulo_fallback(broken, routes, es, vni)
         with self.assertRaises(AssertionError):
-            verify_bum(data, 'p', 17, None)
+            verify_modulo_fallback(segment, routes, es.replace('non-df', 'df'), vni)
+        with self.assertRaises(AssertionError):
+            verify_modulo_fallback(segment, routes[1:], es, vni)
 
     def unicast(self):
         return {'p-a-vx100': [10]*10, 'p-b-vx100': [11]*10,

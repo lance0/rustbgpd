@@ -3,6 +3,7 @@
 from collections import Counter
 import json
 from pathlib import Path
+import re
 import struct
 
 from evpn_frr_peer_sync import checksum, frame
@@ -87,9 +88,27 @@ def verify_identities(identities, phase, seeds, copies, bum_winner='unicast'):
     else:
         for node in ('a', 'b'):
             assert counters[f'{node}-vx100'] == expected, counters
-            assert counters[f'ce-ce{node}'] == (expected if bum_winner == node else Counter()), counters
-        assert counters['ce-bond0'] == (expected if bum_winner is not None else Counter()), counters
+        _verify_bum_links({key: counters[key] for key in ('ce-cea', 'ce-ceb', 'ce-bond0')},
+                          expected, Counter(), bum_winner)
     return True
+
+
+NON_ENFORCEMENT_WITNESS = (
+    'stock-FRR non-enforcement witness turned red: non-DF FRR no longer floods BUM '
+    'to the CE, so FRR now enforces non-DF on Linux; requalify M121 and its docs')
+
+
+def _verify_bum_links(links, one, none, winner):
+    """Pin per-member CE delivery for one BUM frame.
+
+    FRR 10.7.1's Linux netlink provider never applies its non-DF bridge-port
+    update, so FRR's member floods whether or not FRR is DF. rustbgpd's member
+    floods only as DF. With rustbgpd as DF the CE bond therefore sees two copies.
+    """
+    assert winner in ('a', 'b', None), winner
+    assert links['ce-cea'] == one, (links if winner == 'a' else (NON_ENFORCEMENT_WITNESS, links))
+    assert links['ce-ceb'] == (one if winner == 'b' else none), ('rustbgpd member', links)
+    assert links['ce-bond0'] == one + (one if winner == 'b' else none), links
 
 
 def verify_nhg(fdb, nexthops, mac, expected_vteps):
@@ -127,16 +146,61 @@ def verify_nhg(fdb, nexthops, mac, expected_vteps):
 
 
 def verify_bum(packets, phase, seed, winner):
-    """Require ingress on both VTEPs and exactly one CE delivery, or a drop."""
-    assert winner in ('a', 'b', None), winner
+    """Require ingress on both VTEPs, then FRR-member and rustbgpd-member delivery.
+
+    `winner` is the DF PE: 'a' (FRR), 'b' (rustbgpd) or None (both non-DF).
+    """
     for node in ('a', 'b'):
         key = f'{phase}-{node}-vx100'
         assert packets.get(key) == [seed], (key, packets.get(key))
-        key = f'{phase}-ce-ce{node}'
-        assert packets.get(key) == ([seed] if winner == node else []), (key, packets.get(key))
-    key = f'{phase}-ce-bond0'
-    assert packets.get(key) == ([seed] if winner is not None else []), (key, packets.get(key))
+    links = {}
+    for suffix in ('ce-cea', 'ce-ceb', 'ce-bond0'):
+        assert f'{phase}-{suffix}' in packets, f'missing capture: {phase}-{suffix}'
+        links[suffix] = Counter(packets[f'{phase}-{suffix}'])
+    _verify_bum_links(links, Counter([seed]), Counter(), winner)
     return True
+
+
+FLOOD_FLAGS = ('flood', 'mcast_flood', 'bcast_flood')
+
+
+def verify_bridge_flood(port, enabled):
+    """Require every Linux bridge-port flood flag to be on (DF) or off (non-DF)."""
+    for key in FLOOD_FLAGS:
+        assert port.get(key) is enabled, (key, port)
+    return True
+
+
+def verify_frr_non_enforcement(es_detail, port):
+    """Pin FRR reporting non-DF while its ES bridge port still floods BUM."""
+    assert re.search(r'^\s*DF status:\s*non-df\s*$', es_detail, re.MULTILINE), es_detail
+    assert port.get('ifname') == 'es0', port
+    flags = {key: port.get(key) for key in FLOOD_FLAGS}
+    assert all(value is True for value in flags.values()), (NON_ENFORCEMENT_WITNESS, flags)
+    return flags
+
+
+def verify_modulo_fallback(segment, rust_routes, frr_es_detail, vni):
+    """Record RFC 8584 algorithm disagreement and rustbgpd's modulo non-DF role."""
+    assert segment.get('df_algorithm') == 'default-modulo', segment
+    members = [member for member in segment.get('members', []) if member.get('vni') == vni]
+    assert len(members) == 1, segment
+    # Modulo orders candidates by originator IP; VNI mod 2 selects the DF.
+    assigned = sorted([FRR, RUST], key=lambda ip: tuple(map(int, ip.split('.'))))[vni % 2]
+    expected = ('df', 'allow') if assigned == RUST else ('nondf', 'suppress')
+    assert (members[0].get('df_role'), members[0].get('bum_forwarding_action')) == expected, members
+    # FRR's Type 4 carries the RFC 8584 DF Election EC with algorithm 2 (preference).
+    es = [route for route in rust_routes if route.get('route_type') == 4 and route.get('peer') == FRR]
+    assert len(es) == 1, es
+    elections = [ec for ec in es[0].get('extended_communities', []) if ec >> 48 == 0x0606]
+    assert len(elections) == 1 and (elections[0] >> 40) & 0x1f == 2, es
+    # FRR sees rustbgpd's non-preference algorithm and stays non-DF on every VNI.
+    vteps = re.findall(r'^\s*' + re.escape(RUST) + r'\s+df_alg:\s*(\S+)', frr_es_detail, re.MULTILINE)
+    assert len(vteps) == 1 and vteps[0] != 'preference', frr_es_detail
+    assert re.search(r'^\s*DF status:\s*non-df\s*$', frr_es_detail, re.MULTILINE), frr_es_detail
+    return dict(rust_df_algorithm='default-modulo', frr_df_algorithm='preference',
+                frr_view_of_rust_df_algorithm=vteps[0], modulo_assigned=assigned,
+                rust_role=expected[0], rust_bum_forwarding_action=expected[1], frr_df_status='non-df')
 
 
 def _verify_flow_paths(packets, phase, seeds, copies):

@@ -410,7 +410,7 @@ def setup(config, vni):
 
 
 def ready(vni, winner):
-    from m121_all_active_oracle import verify_frr_es_routes
+    from m121_all_active_oracle import verify_bridge_flood, verify_frr_es_routes
     neighbors = ctl('neighbor')
     assert len(neighbors) == 2 and all(row['state'] == 'Established' for row in neighbors)
     segment = ctl('evpn', 'es', 'list')['segments'][0]
@@ -418,7 +418,7 @@ def ready(vni, winner):
     assert segment['members'][0]['df_role'] == ('df' if winner == 'b' else 'nondf')
     assert segment['members'][0]['same_esi_bias_eligible']
     ports = json.loads(ns('b', 'bridge', '-j', '-d', 'link', 'show', 'dev', 'es0'))
-    assert ports[0]['flood'] == (winner == 'b')
+    verify_bridge_flood(ports[0], winner == 'b')
     frr_es = frr('a', 'show evpn es detail')
     wanted = 'df' if winner == 'a' else 'non-df'
     assert re.search(r'DF status:\s*' + re.escape(wanted) + r'\b', frr_es, re.IGNORECASE), frr_es
@@ -524,6 +524,25 @@ def bidirectional(vni):
     return result
 
 
+def frr_non_enforcement():
+    """Stock FRR 10.7.1 reports non-DF but its Linux provider leaves flooding on."""
+    from m121_all_active_oracle import verify_frr_non_enforcement
+    es_detail = frr('a', 'show evpn es detail')
+    port = json.loads(ns('a', 'bridge', '-j', '-d', 'link', 'show', 'dev', 'es0'))[0]
+    save('frr-non-enforcement-witness.json', dict(es_detail=es_detail, port=port))
+    return verify_frr_non_enforcement(es_detail, port)
+
+
+def modulo_fallback(vni):
+    from m121_all_active_oracle import verify_modulo_fallback
+    segment = ctl('evpn', 'es', 'list')['segments'][0]
+    routes = ctl('evpn')
+    es_detail = frr('a', 'show evpn es detail')
+    port = json.loads(ns('b', 'bridge', '-j', '-d', 'link', 'show', 'dev', 'es0'))[0]
+    save('modulo-fallback.json', dict(segment=segment, routes=routes, frr_es_detail=es_detail, rust_port=port))
+    return verify_modulo_fallback(segment, routes, es_detail, vni)
+
+
 def bum(vni, winner):
     from m121_all_active_oracle import verify_bum
     # No test command inserts a flood row: remote FRR must consume real IMET.
@@ -534,10 +553,16 @@ def bum(vni, winner):
         return True
     wait(imet_flood, 'remote FRR IMET-derived flood list')
     snapshot('bum-before', vni)
+    # The witness is checked on both sides of the packet proof.
+    witness = None if winner == 'a' else frr_non_enforcement()
     packets = capture('bum', [121], count=1, destination='ff:ff:ff:ff:ff:ff', bum_winner=winner)
     verify_bum(packets, 'bum', 121, winner)
+    if witness is not None:
+        witness = frr_non_enforcement()
     snapshot('bum-after', vni)
-    return dict(vxlan_ingress_a=1, vxlan_ingress_b=1, ce_delivered=0 if winner is None else 1, df=winner)
+    return dict(vxlan_ingress_a=1, vxlan_ingress_b=1, ce_cea=1, ce_ceb=int(winner == 'b'),
+                ce_bond0=1 + (winner == 'b'), rust_member_copies=int(winner == 'b'), df=winner,
+                frr_non_enforcement_witness=witness)
 
 
 @contextmanager
@@ -749,6 +774,8 @@ def main():
                     result['peer_only'] = peer_only(vni, compare_historical and cell == 'frr-df')
                     result['rust_origin'] = rust_origin(vni, 300 if cell == 'rust-df' else 100, bgp)
                     result['bidirectional'] = bidirectional(vni)
+                else:
+                    result['modulo_fallback'] = modulo_fallback(vni)
                 result['bum'] = bum(vni, winner)
                 if cell == 'frr-df':
                     result['carrier'] = carrier_cycle(vni, result['peer_only']['b_flow_seeds'])
@@ -757,7 +784,6 @@ def main():
             finally:
                 cleanup_preserving_error()
         OUT = root
-        results['modulo-hazard']['matched_positive_control'] = 'frr-df'
         save('result.json', dict(status='passed', cells=results, compare_historical=compare_historical,
                                 scope='functional packet and protocol-state correctness; no scale or performance claim',
                                 fresh_packet_identity='IPv4 ID = seed * 16 + copy; exact unique identities at ingress and delivery',
