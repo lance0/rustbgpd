@@ -150,6 +150,23 @@ route with the lowest RD.
    [`examples/evpn-vtep-leaf/README.md`](../../examples/evpn-vtep-leaf/README.md)
    for exact `ip link` pre-create commands.
 
+   Also check `rbgp evpn instances --json` for
+   `current_apply_failure_count` and `latest_permanent_apply_error`.
+   `rbgp evpn diagnose --json` exposes
+   `unscoped_apply_failure_count` and
+   `latest_unscoped_permanent_apply_error` for host-wide BUM, AC, and
+   managed-netdev operations, including when no EVI is configured. The
+   human `instances` and `diagnose` views show the overview when failures exist.
+   A Ready bridge can still have an FDB write failure. The count includes
+   operations waiting for retry and operations suppressed after a permanent
+   kernel error, so a period without new warnings does not imply the
+   failure cleared. `rbgp evpn diagnose` summarizes the per-instance count;
+   compare with `evpn_current_apply_failures{vni,kind,class}` for the
+   failure class and operation kind. `vni="unscoped"` covers bridge-port and
+   managed-netdev operations that
+   cannot be attributed to one instance. The error is the latest *still
+   current* permanent error, not a history of past failures.
+
 3. Confirm permissions:
 
    ```bash

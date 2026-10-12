@@ -751,6 +751,7 @@ struct BgpMetricsInner {
     evpn_ip_vrf_installed_routes: IntGaugeVec,
     evpn_ip_vrf_remote_prefix_drops: IntGaugeVec,
     evpn_l2_remote_route_drops: IntGaugeVec,
+    evpn_current_apply_failures: IntGaugeVec,
     evpn_managed_netdev_state: IntGaugeVec,
     evpn_fdb_nhg_drift_members_repaired: IntCounter,
     evpn_fdb_nhg_drift_groups_replaced: IntCounter,
@@ -2464,6 +2465,15 @@ impl BgpMetrics {
         )
         .expect("valid metric definition");
 
+        let evpn_current_apply_failures = IntGaugeVec::new(
+            Opts::new(
+                "evpn_current_apply_failures",
+                "Still-current Linux EVPN L2 apply failures, including suppressed and backoff-deferred operations. VNI is 'unscoped' for bridge-port and managed-netdev operations.",
+            ),
+            &["vni", "kind", "class"],
+        )
+        .expect("valid metric definition");
+
         let evpn_ip_vrf_origination_suppressed = IntCounterVec::new(
             Opts::new(
                 "evpn_ip_vrf_origination_suppressed_total",
@@ -3346,6 +3356,9 @@ impl BgpMetrics {
             .register(Box::new(evpn_l2_remote_route_drops.clone()))
             .expect("metric not already registered");
         registry
+            .register(Box::new(evpn_current_apply_failures.clone()))
+            .expect("metric not already registered");
+        registry
             .register(Box::new(evpn_managed_netdev_state.clone()))
             .expect("metric not already registered");
         registry
@@ -3659,6 +3672,7 @@ impl BgpMetrics {
             evpn_ip_vrf_installed_routes,
             evpn_ip_vrf_remote_prefix_drops,
             evpn_l2_remote_route_drops,
+            evpn_current_apply_failures,
             evpn_managed_netdev_state,
             evpn_fdb_nhg_drift_members_repaired,
             evpn_fdb_nhg_drift_groups_replaced,
@@ -6200,6 +6214,22 @@ impl BgpMetrics {
             .evpn_l2_remote_route_drops
             .with_label_values(&[&vni.to_string(), reason])
             .set(count);
+    }
+
+    /// Publish a closed-label current apply-failure count.
+    pub fn set_evpn_current_apply_failures(&self, vni: &str, kind: &str, class: &str, count: i64) {
+        self.0
+            .evpn_current_apply_failures
+            .with_label_values(&[vni, kind, class])
+            .set(count);
+    }
+
+    /// Remove a resolved or retired label tuple from the current gauge.
+    pub fn remove_evpn_current_apply_failures(&self, vni: &str, kind: &str, class: &str) {
+        let _ = self
+            .0
+            .evpn_current_apply_failures
+            .remove_label_values(&[vni, kind, class]);
     }
 
     /// Set one ADR-0091 managed-netdev state gauge tuple.
@@ -9009,6 +9039,20 @@ mod tests {
             ),
             "{text}"
         );
+    }
+
+    #[test]
+    fn current_apply_failure_gauge_uses_bounded_labels_and_removes_resolved_rows() {
+        let m = BgpMetrics::new();
+        m.set_evpn_current_apply_failures("100", "fdb", "permanent", 2);
+        m.set_evpn_current_apply_failures("unscoped", "bum_port", "transient", 1);
+        let text = gather_text(&m);
+        assert!(text.contains("evpn_current_apply_failures{"));
+        assert!(text.contains("vni=\"unscoped\""));
+        assert!(!text.contains("mac="));
+        m.remove_evpn_current_apply_failures("100", "fdb", "permanent");
+        m.remove_evpn_current_apply_failures("unscoped", "bum_port", "transient");
+        assert!(!gather_text(&m).contains("evpn_current_apply_failures{"));
     }
 
     #[test]

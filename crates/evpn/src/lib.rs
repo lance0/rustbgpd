@@ -122,10 +122,10 @@ pub use colon_hex::{ColonHexParseError, parse_esi, parse_mac_address};
 pub use dataplane::{
     AcGateEntry, AcGateState, AppliedOp, BumEnforcementEntry, BumEnforcementKey,
     BumEnforcementReadiness, BumEnforcementStatus, BumEnforcementTable, BumForwardingAction,
-    DataplaneIntent, DataplaneOpKind, DataplaneReport, FailedOp, FdbNexthopDataplaneStatus,
-    FdbNexthopGroupStatus, FdbNexthopMemberStatus, FdbNhgDriftCounters, ForeignStateCounters,
-    InstanceDataplaneStatus, InstanceState, IpVrfDataplaneStatus, L3AdoptionCounters,
-    SameEsiBiasTable, SingleActiveCounters,
+    CurrentApplyFailureSummary, DataplaneIntent, DataplaneOpKind, DataplaneReport, FailedOp,
+    FdbNexthopDataplaneStatus, FdbNexthopGroupStatus, FdbNexthopMemberStatus, FdbNhgDriftCounters,
+    ForeignStateCounters, InstanceDataplaneStatus, InstanceState, IpVrfDataplaneStatus,
+    L3AdoptionCounters, SameEsiBiasTable, SingleActiveCounters,
 };
 pub use df_election::{DfCandidate, DfElection, DfElectionError};
 pub use duplicate_ip::{

@@ -3162,7 +3162,7 @@ semantics used by both `ApplyEvpnRuntime` and SIGHUP reload.
 | RPC | Description |
 |-----|-------------|
 | `GetEvpnRuntime` | Return the committed EVPN runtime generation, lifecycle, mutation state, configured EVI/IP-VRF/ES counts, and a concise status message |
-| `ListEvpnInstances` | List configured local EVPN instances sorted by VNI (vni, rd, resolved route_targets including any auto-derived RT, local_vtep_ip, optional bridge, optional local `bridge_vlan`, advertise_svi_mac flag, originated_local_macs_count, L2 dataplane `readiness_state`, `not_ready_reason` when NotReady, and `remote_route_drop_counts`) |
+| `ListEvpnInstances` | List configured local EVPN instances sorted by VNI (vni, rd, resolved route_targets including any auto-derived RT, local_vtep_ip, optional bridge, optional local `bridge_vlan`, advertise_svi_mac flag, originated_local_macs_count, L2 dataplane `readiness_state`, `not_ready_reason` when NotReady, `remote_route_drop_counts`, `current_apply_failure_count`, and bounded `latest_permanent_apply_error`); response-level `unscoped_apply_failure_count` and `latest_unscoped_permanent_apply_error` cover host-wide L2 operations even with no EVI |
 | `ListEvpnNexthops`  | List Linux dataplane reconciler-owned ADR-0059 FDB nexthop groups (per-VNI groups with ESI / Ethernet Tag / kernel group ID, per-VTEP member nexthop IDs + gateways, MAC refs) plus top-level L2 and L3 orphan-NH and pending-delete counts and the `drift_recovery_disabled` latch — read-only operator visibility |
 | `ListEthernetSegments` | List configured Ethernet Segments sorted by ESI, joined with live multi-homing state: composed drain reasons, advertised DF preference/Don't-Preempt beside the administrative values (they differ while RFC 9785 recovery inherits another PE's preference), any pending recovery wait with its remaining milliseconds, per-member DF role and BUM forwarding action, same-ESI local-bias eligibility, whole-port AC-gate state/interface, and matching FDB-NHG group / MAC-ref counts — read-only ADR-0083/0085 diagnose visibility |
 | `ListIpVrfs`        | List configured IP-VRFs / L3VNI tenants (name, l3vni, rd, resolved route_targets including any auto-derived RT, local_vtep_ip, router_mac, optional `evpn_instance` link, readiness state, originated_routes_count, installed_routes_count, remote_prefix_drop_counts) — Gate 9 / ADR-0058 |
@@ -3298,6 +3298,18 @@ with no drops is omitted. The routes stay in Adj-RIB-In and are still
 reflected. The human CLI adds
 `remote-route-drops=[ethernet_tag_mismatch=2]` when the list is non-empty,
 and JSON exposes it as `remote_route_drop_counts` (`[]` when empty).
+
+`current_apply_failure_count` counts still-current Linux L2 operations that
+failed for this VNI, including those suppressed after a permanent error or
+deferred by transient backoff. `latest_permanent_apply_error` is a bounded
+diagnostic for the latest still-current permanent failure; it is empty when
+none remains. These fields do not change bridge readiness. Host-wide BUM
+port, AC gate, and managed-netdev operations have no VNI attribution; the
+response-level unscoped count and bounded latest permanent error expose them
+even when there are no configured EVIs. `rbgp evpn instances --json` retains
+its array of EVI rows; use `rbgp evpn diagnose --json` for the host-wide
+overview. The
+same current state is exported as `evpn_current_apply_failures` metrics.
 
 ### List EVPN FDB nexthop groups
 

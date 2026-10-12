@@ -4438,6 +4438,9 @@ message ListEvpnInstancesRequest {}
 
 message ListEvpnInstancesResponse {
   repeated EvpnInstanceState instances = 1;
+  // Host-wide L2 apply failures (BUM, AC, managed netdev), including when no EVI exists.
+  uint64 unscoped_apply_failure_count = 2;
+  string latest_unscoped_permanent_apply_error = 3;
 }
 
 message ListManagedNetdevsRequest {}
@@ -4901,6 +4904,12 @@ message EvpnInstanceState {
   // EVPN Ethernet Tag this instance originates and imports L2 routes under:
   // 0 for "vlan_based", the member tag for "vlan_aware_bundle".
   uint32 ethernet_tag = 13;
+  // Still-current Linux L2 apply failures for this VNI, including operations
+  // suppressed after a permanent error or waiting for transient backoff.
+  uint64 current_apply_failure_count = 14;
+  // Latest still-current permanent apply error for this VNI (bounded). Empty
+  // when no permanent failure remains. Host-wide operations are excluded.
+  string latest_permanent_apply_error = 15;
 }
 
 message EvpnInstanceRemoteRouteDropCount {

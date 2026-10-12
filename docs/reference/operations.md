@@ -2620,6 +2620,7 @@ per-cache readiness metrics and RTR logs for those questions.
 | `evpn_ip_vrf_installed_routes{vrf}` | Remote Type 5 routes currently owned in each IP-VRF kernel table |
 | `evpn_ip_vrf_remote_prefix_drops{vrf,reason}` | Current remote Type 5 projection drops by bounded IP-VRF/reason labels. Overlay-index reasons include `overlay_index_no_linked_l2vni`, `unresolved_overlay_index_gateway`, and `ambiguous_overlay_index_gateway`; `vrf="_unscoped"` means the drop happened before a configured IP-VRF could be selected. `non_zero_ethernet_tag` counts routes for a configured IP-VRF that carry a non-zero Ethernet Tag; Type 5 VLAN-aware bundle routes are not imported. |
 | `evpn_l2_remote_route_drops{vni,reason}` | Current remote Type 1 EAD-per-EVI, Type 2 and Type 3 IMET routes that select a local L2VNI but that the VTEP does not program, by local VNI and reason. A route selects an instance by VNI (the IMET PMSI label) and route target, or a VLAN-aware bundle member by route target and Ethernet Tag. `ethernet_tag_mismatch` means the route carries another Ethernet Tag than the instance (`0` for `vlan_based` rows). `vni_mismatch` means a bundle member's route target and Ethernet Tag select the route but its VNI differs (locally assigned VNIs are unsupported). `multihoming_unsupported` counts multi-homed Type 2 and EAD-per-EVI routes for a bundle member. The routes stay in Adj-RIB-In and are still reflected. `rbgp evpn instances` shows the same counts per instance. |
+| `evpn_current_apply_failures{vni,kind,class}` | Still-current Linux L2 apply failures, including operations suppressed after a permanent error and those waiting for transient backoff. `kind` is one of `fdb`, `flood`, `fdb_nhg`, `bum_port`, `ac_gate`, `managed_netdev`; `class` is `transient` or `permanent`. `vni="unscoped"` identifies bridge-port and managed-netdev operations without per-instance attribution. The actor removes a resolved or retired tuple; absent series mean zero. No MAC or interface name is a label. |
 | `evpn_foreign_replaces_blocked_total` | Installs or replaces withheld because an exact-key foreign kernel row already exists |
 | `evpn_foreign_deletes_skipped_total` | Deletes skipped after the live kernel row ceased to be rustbgpd-owned |
 | `evpn_foreign_owned_relinquished_total` | Owned keys released after another writer replaced the live kernel row |
@@ -2667,11 +2668,16 @@ to `0`, republishes the quarantine set, and replays still-live local MAC or
 MAC+IP state through the normal recovery path.
 `rbgp evpn instances` also reports each L2VNI's
 `readiness=ready|not-ready|unbound|unknown` and
-`originated-local-macs=N`, plus `remote-route-drops=[reason=N,...]` when
+`originated-local-macs=N`, `current-apply-failures=N`, plus
+`remote-route-drops=[reason=N,...]` when
 remote L2 routes for the VNI are not programmed;
 `rbgp evpn instances --json` exposes the same values as `readiness`,
 `not_ready_reason`, `originated_local_macs_count`, and
-`remote_route_drop_counts`.
+`remote_route_drop_counts`, along with the bounded
+`latest_permanent_apply_error`. `rbgp evpn diagnose` summarizes the
+per-instance failure count and includes the current gauge samples. Its
+host-wide overview and `ListEvpnInstances` response-level unscoped count/error
+cover BUM, AC, and managed-netdev failures even when no EVI is configured.
 
 ---
 

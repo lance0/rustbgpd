@@ -66,6 +66,7 @@ pub struct InMemoryDataplane {
 #[derive(Debug)]
 struct State {
     kernel: KernelSnapshot,
+    snapshot_dump_failures: u32,
     probes: InstanceProbes,
     /// Failure injection — popped FIFO. Each entry is consumed once
     /// per matching `apply` call; once the queue empties, applies
@@ -236,6 +237,7 @@ impl InMemoryDataplane {
             state: Arc::new(Mutex::new(State {
                 nexthop_ops: BTreeMap::new(),
                 kernel: KernelSnapshot::new(),
+                snapshot_dump_failures: 0,
                 probes: InstanceProbes::new(),
                 failures: VecDeque::new(),
                 apply_count: 0,
@@ -310,8 +312,19 @@ impl Dataplane for InMemoryDataplane {
     fn dump_snapshot(
         &mut self,
     ) -> impl Future<Output = Result<KernelSnapshot, DataplaneError>> + Send {
-        let snap = self.state.lock().expect("poisoned").kernel.clone();
-        async move { Ok(snap) }
+        let mut state = self.state.lock().expect("poisoned");
+        let failed = state.snapshot_dump_failures > 0;
+        state.snapshot_dump_failures = state.snapshot_dump_failures.saturating_sub(1);
+        let snap = state.kernel.clone();
+        async move {
+            if failed {
+                Err(DataplaneError::Io(std::io::Error::other(
+                    "injected snapshot dump failure",
+                )))
+            } else {
+                Ok(snap)
+            }
+        }
     }
 
     fn apply(
@@ -1473,6 +1486,11 @@ impl InMemoryHandle {
             .expect("poisoned")
             .probes
             .insert(vni, probe);
+    }
+
+    /// Fail the next complete snapshot dump, before a plan is available.
+    pub fn inject_snapshot_dump_failure(&self) {
+        self.state.lock().expect("poisoned").snapshot_dump_failures += 1;
     }
 
     /// Inject a failure for the next matching apply call. `target =
