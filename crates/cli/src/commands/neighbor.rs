@@ -89,20 +89,23 @@ fn json_neighbor(n: &crate::proto::NeighborState) -> JsonNeighbor {
         ),
         route_reflector_client: n.route_reflector_client,
         description: cfg.map(|c| c.description.clone()).unwrap_or_default(),
-        gr_retention: json_gr_retention(&n.gr_retention),
+        gr_retention: json_gr_retention(&n.gr_retention, false),
         gr_retention_available: n.gr_retention_available,
     }
 }
 
+/// Retention rows for JSON. A list projection passes `with_counts: false`
+/// and never carries `stale_routes`, whatever the daemon sent.
 pub(crate) fn json_gr_retention(
     rows: &[crate::proto::GracefulRestartRetentionState],
+    with_counts: bool,
 ) -> Vec<JsonGrRetentionFamily> {
     rows.iter()
         .map(|row| JsonGrRetentionFamily {
             family: row.family.clone(),
             phase: row.phase.clone(),
             remaining_seconds: row.remaining_seconds,
-            stale_routes: row.stale_routes,
+            stale_routes: row.stale_routes.filter(|_| with_counts),
         })
         .collect()
 }
@@ -478,7 +481,7 @@ fn json_neighbor_detail(n: &crate::proto::NeighborState) -> JsonNeighborDetail {
                 reason: row.reason.clone(),
             })
             .collect(),
-        gr_retention: json_gr_retention(&n.gr_retention),
+        gr_retention: json_gr_retention(&n.gr_retention, true),
         gr_retention_available: n.gr_retention_available,
     }
 }
@@ -1864,7 +1867,8 @@ mod tests {
                 family: "ipv4_unicast".to_string(),
                 phase: "gr_restart".to_string(),
                 remaining_seconds: Some(100),
-                stale_routes: None,
+                // A populated count must still never reach list JSON.
+                stale_routes: Some(7),
             }],
             ..Default::default()
         };

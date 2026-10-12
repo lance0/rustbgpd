@@ -22,8 +22,7 @@
     {
       "family": "family-value",
       "phase": "phase-value",
-      "remaining_seconds": 159,
-      "stale_routes": 160
+      "remaining_seconds": 159
     }
   ],
   "gr_retention_available": true

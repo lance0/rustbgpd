@@ -3365,7 +3365,10 @@ async fn run_with_deadlines(
                                 description: redact_text(
                                     &cfg.map(|c| c.description.clone()).unwrap_or_default(),
                                 ),
-                                gr_retention: super::neighbor::json_gr_retention(&n.gr_retention),
+                                gr_retention: super::neighbor::json_gr_retention(
+                                    &n.gr_retention,
+                                    false,
+                                ),
                                 gr_retention_available: n.gr_retention_available,
                             },
                             identity,
