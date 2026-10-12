@@ -692,8 +692,61 @@ def signature_digest(rows: list[tuple[str, str, str, bool, bool]]) -> str:
     return hashlib.sha256(canonical.encode()).hexdigest()
 
 
+def proto_field_re(field: str) -> str:
+    return rf"\b{re.escape(field)}\s*=\s*\d+"
+
+
+def carve_message_fields(
+    definitions: dict[str, str], paths: list[str], label: str
+) -> dict[str, str]:
+    """Remove exact field declarations before a method set's graph digest.
+
+    A carved field's own message types then leave the graph unless another
+    pinned field still references them.
+    """
+    carved = dict(definitions)
+    for path in paths:
+        message, separator, field = path.partition(".")
+        if not separator or message not in carved or not field or field == "*":
+            fail(f"{label} excluded protobuf field {path!r} must name one message field")
+        pattern = rf"(?<=[{{;}}])[^{{;}}]*{proto_field_re(field)}[^{{;}}]*;"
+        body, count = re.subn(pattern, "", carved[message])
+        if count != 1:
+            fail(f"{label} excluded protobuf field {path!r} disappeared")
+        carved[message] = body
+    return carved
+
+
+def check_request_values(
+    profile: dict, rows: list, definitions: dict[str, str], label: str
+) -> None:
+    """A value profile narrows calls: every method must take the profiled request."""
+    if not isinstance(profile, dict):
+        fail(f"{label}.stable_request_values must map request fields to values")
+    for path, values in profile.items():
+        message, separator, field = path.partition(".")
+        if not separator or message not in definitions or not re.search(
+            proto_field_re(field), definitions[message]
+        ):
+            fail(f"{label} stable request field {path!r} disappeared")
+        if (
+            not isinstance(values, list)
+            or not values
+            or not all(type(value) is int for value in values)
+            or values != sorted(set(values))
+        ):
+            fail(f"{label} stable request values for {path!r} must be sorted unique integers")
+        for method, request, *_ in rows:
+            if request.rsplit(".", 1)[-1] != message:
+                fail(
+                    f"{label} method {method} takes {request}, not the profiled request "
+                    f"{message}; its calls cannot be narrowed by {path!r}"
+                )
+
+
 def check_method_sets(inventory: dict, services: dict, definitions: dict[str, str]) -> set[str]:
     stable_paths: set[str] = set()
+    unstable_fields = set(inventory["grpc"]["explicitly_unstable_message_fields"])
     for class_name in ("stable_method_sets", "scoped_rr_only_method_sets"):
         for entry in inventory["grpc"][class_name]:
             service = entry["service"]
@@ -708,13 +761,23 @@ def check_method_sets(inventory: dict, services: dict, definitions: dict[str, st
             missing = sorted(wanted - found)
             if missing:
                 fail(f"stable gRPC methods disappeared from {service}: {', '.join(missing)}")
+            label = f"grpc.{class_name}.{service}"
+            check_request_values(entry.get("stable_request_values", {}), rows, definitions, label)
+            excluded = entry.get("excluded_message_fields", [])
+            require_sorted_unique(excluded, f"{label}.excluded_message_fields")
+            outside_unstable = sorted(set(excluded) - unstable_fields)
+            if outside_unstable:
+                fail(
+                    f"{label} excludes fields that are not explicitly unstable: {outside_unstable}"
+                )
+            graph_definitions = carve_message_fields(definitions, excluded, label)
             digest = signature_digest(rows)
             if digest != entry["signature_sha256"]:
                 fail(
                     f"stable gRPC signature changed for {service} ({digest}); review request/response "
                     "messages, streaming modes, and compatibility before updating the inventory"
                 )
-            graph_digest = message_graph_digest(rows, definitions)
+            graph_digest = message_graph_digest(rows, graph_definitions)
             if graph_digest != entry["message_graph_sha256"]:
                 fail(
                     f"stable protobuf message graph changed for {service} ({graph_digest}); "
@@ -779,6 +842,71 @@ def check_grpc(inventory: dict) -> None:
     missing_authz = sorted(stable_paths - authz_paths)
     if missing_authz:
         fail(f"stable gRPC methods disappeared from authorization inventory: {missing_authz}")
+
+
+METRIC_TYPES = {"Counter": "counter", "Gauge": "gauge", "Histogram": "histogram"}
+
+
+def metric_definition(source: str, name: str) -> tuple[str, list[str]] | None:
+    """Return (type, label names) for one `XxxVec::new(Opts::new("name", ...), &[...])`."""
+    matches = list(
+        re.finditer(
+            rf"\b(\w+)::new\(\s*(?:Histogram)?Opts::new\(\s*\"{re.escape(name)}\"",
+            source,
+        )
+    )
+    if len(matches) != 1:
+        return None
+    match = matches[0]
+    kind = next((value for key, value in METRIC_TYPES.items() if key in match.group(1)), None)
+    # The help string ends at `",`; the first `), &[...]` after it is the label list.
+    labels = re.compile(r"\"\s*,?\s*\)\s*,\s*&\[([^\]]*)\]").search(source, match.end())
+    if kind is None or labels is None or "::new(" in source[match.end() : labels.start()]:
+        return None
+    return kind, re.findall(r"\"([^\"]+)\"", labels.group(1))
+
+
+def check_metrics(inventory: dict, source: str | None = None) -> None:
+    section = inventory.get("metrics")
+    if not isinstance(section, dict) or set(section) != {"source", "scoped_rr_only_series"}:
+        fail("metrics must be an object with exactly 'source' and 'scoped_rr_only_series'")
+    if source is None:
+        path = ROOT / safe_relative_path(section["source"], "metric source")
+        try:
+            source = strip_rust_comments(path.read_text())
+        except OSError as error:
+            fail(f"cannot read metric source {section['source']}: {error}")
+    series = section["scoped_rr_only_series"]
+    if not isinstance(series, list) or not series:
+        fail("metrics.scoped_rr_only_series must pin at least one series")
+    names = [entry.get("name") for entry in series]
+    require_sorted_unique(names, "metrics.scoped_rr_only_series")
+    for entry in series:
+        name = entry["name"]
+        label = f"metrics.scoped_rr_only_series.{name}"
+        unknown = sorted(set(entry) - {"name", "type", "labels", "label_values", "meaning"})
+        if unknown:
+            fail(f"{label} has unknown keys {unknown}")
+        if not isinstance(entry.get("meaning"), str) or not entry["meaning"].strip():
+            fail(f"{label} must state its meaning in the pinned role")
+        labels = entry.get("labels")
+        if not isinstance(labels, list):
+            fail(f"{label}.labels must list the label names")
+        require_sorted_unique(labels, f"{label}.labels")
+        found = metric_definition(source, name)
+        if found is None:
+            fail(f"pinned metric {name} disappeared or is not one labeled definition")
+        kind, defined_labels = found
+        if kind != entry.get("type"):
+            fail(f"pinned metric {name} changed type: inventory {entry.get('type')!r}, source {kind!r}")
+        if sorted(defined_labels) != labels:
+            fail(f"pinned metric {name} changed labels: inventory {labels}, source {sorted(defined_labels)}")
+        for key, values in entry.get("label_values", {}).items():
+            if key not in labels:
+                fail(f"{label}.label_values names unknown label {key!r}")
+            if not isinstance(values, list) or not values:
+                fail(f"{label}.label_values.{key} must pin at least one value")
+            require_sorted_unique(values, f"{label}.label_values.{key}")
 
 
 def semantic_toml_sha256(path: Path) -> str:
@@ -1714,6 +1842,7 @@ def main() -> None:
     check_policy(inventory)
     check_config(inventory, load_json(SCHEMA_PATH))
     check_grpc(inventory)
+    check_metrics(inventory)
     check_cli_checker_selftests(inventory)
     check_cli(inventory)
     check_upgrade_exercises(inventory)
