@@ -236,9 +236,10 @@ def snapshot(name, vni):
     return state
 
 
-def start_capture(name, node, interface, expression):
+def start_capture(name, node, interface, expression, snaplen=None):
     err = (OUT / (name + '.stderr')).open('w')
-    process = subprocess.Popen([*prefix(node), 'tcpdump', '--immediate-mode', '-U', '-n', '-i', interface,
+    snap = [] if snaplen is None else ['-s', str(snaplen)]
+    process = subprocess.Popen([*prefix(node), 'tcpdump', '--immediate-mode', '-U', '-n', '-i', interface, *snap,
                                 '-w', str(OUT / (name + '.pcap')), *expression],
                                stdout=subprocess.DEVNULL, stderr=err)
     item = (name, process, err)
@@ -296,7 +297,10 @@ def send(node, interface, seeds, count=1, destination=PEER_MAC, source=REMOTE_MA
 def capture(phase, seeds, count=10, direction='remote-to-ce', destination=PEER_MAC, source=REMOTE_MAC, bum_winner='unicast'):
     from m121_all_active_oracle import packet_identities, verify_identities
     interfaces = [('a', 'vx100'), ('b', 'vx100'), ('ce', 'cea'), ('ce', 'ceb'), ('ce', 'bond0'), ('hr', 'eth0')]
-    items = [start_capture(f'{phase}-{n}-{dev}', n, dev, ['udp', 'dst', 'port', '45000']) for n, dev in interfaces]
+    # Immediate-mode rings sized for the default snaplen drop frames from a
+    # 340-frame burst; probes are small and the oracle rejects truncated frames.
+    items = [start_capture(f'{phase}-{n}-{dev}', n, dev, ['udp', 'dst', 'port', '45000'], snaplen=1024)
+             for n, dev in interfaces]
     try:
         wait(lambda: capture_ready(items), 'all packet capture listeners', timeout=10)
         node, interface = ('hr', 'eth0') if direction == 'remote-to-ce' else ('ce', 'bond0')

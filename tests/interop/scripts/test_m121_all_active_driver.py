@@ -83,8 +83,21 @@ class CaptureCompletionTests(unittest.TestCase):
             try:
                 self.assertIn('--immediate-mode', popen.call_args.args[0])
                 self.assertIn('-U', popen.call_args.args[0])
+                self.assertNotIn('-s', popen.call_args.args[0])
             finally:
                 item[2].close()
+
+    def test_probe_captures_use_a_small_snaplen(self):
+        with tempfile.TemporaryDirectory() as directory, patch.object(driver, 'OUT', Path(directory)), \
+             patch.object(driver, 'CAPTURES', []), patch.object(driver.subprocess, 'Popen') as popen, \
+             patch.object(driver, 'wait', side_effect=RuntimeError('stop after start')), \
+             patch.object(driver, 'stop_captures', side_effect=lambda items: [i[2].close() for i in items]):
+            with self.assertRaisesRegex(RuntimeError, 'stop after start'):
+                driver.capture('p', [10])
+            self.assertEqual(popen.call_count, 6)
+            for call in popen.call_args_list:
+                args = call.args[0]
+                self.assertEqual(args[args.index('-s') + 1], '1024')
 
     def test_partial_oracle_and_tshark_reads_retry_before_success(self):
         clock = [0.0]
