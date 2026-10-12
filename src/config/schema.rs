@@ -1475,6 +1475,110 @@ define_neighbor_and_peer_group_configs! {
                 /// `max_prefixes_received_ipv6`.
             }
         }
+        max_prefixes_l3vpn_ipv4_unicast: Option<u32> {
+            neighbor {
+                /// Maximum unique accepted VPN-IPv4 (`l3vpn_ipv4_unicast`) routes, unique by RD + prefix
+                /// from this peer, Add-Path paths collapsed, before
+                /// `max_prefix_action` applies (Cease/1 carrying the AFI/SAFI
+                /// under `shutdown`). Enforced independently of every other
+                /// bound. Unset = unlimited.
+            }
+            peer_group {
+                /// Per-family limit inherited by neighbors in this group. See
+                /// the neighbor-level `max_prefixes_l3vpn_ipv4_unicast`.
+            }
+        }
+        max_prefixes_l3vpn_ipv6_unicast: Option<u32> {
+            neighbor {
+                /// Maximum unique accepted VPN-IPv6 (`l3vpn_ipv6_unicast`) routes, unique by RD + prefix
+                /// from this peer, Add-Path paths collapsed, before
+                /// `max_prefix_action` applies (Cease/1 carrying the AFI/SAFI
+                /// under `shutdown`). Enforced independently of every other
+                /// bound. Unset = unlimited.
+            }
+            peer_group {
+                /// Per-family limit inherited by neighbors in this group. See
+                /// the neighbor-level `max_prefixes_l3vpn_ipv6_unicast`.
+            }
+        }
+        max_prefixes_ipv4_labeled_unicast: Option<u32> {
+            neighbor {
+                /// Maximum unique accepted IPv4 labeled-unicast prefixes
+                /// from this peer, Add-Path paths collapsed, before
+                /// `max_prefix_action` applies (Cease/1 carrying the AFI/SAFI
+                /// under `shutdown`). Enforced independently of every other
+                /// bound. Unset = unlimited.
+            }
+            peer_group {
+                /// Per-family limit inherited by neighbors in this group. See
+                /// the neighbor-level `max_prefixes_ipv4_labeled_unicast`.
+            }
+        }
+        max_prefixes_ipv6_labeled_unicast: Option<u32> {
+            neighbor {
+                /// Maximum unique accepted IPv6 labeled-unicast prefixes
+                /// from this peer, Add-Path paths collapsed, before
+                /// `max_prefix_action` applies (Cease/1 carrying the AFI/SAFI
+                /// under `shutdown`). Enforced independently of every other
+                /// bound. Unset = unlimited.
+            }
+            peer_group {
+                /// Per-family limit inherited by neighbors in this group. See
+                /// the neighbor-level `max_prefixes_ipv6_labeled_unicast`.
+            }
+        }
+        max_prefixes_l2vpn_evpn: Option<u32> {
+            neighbor {
+                /// Maximum unique accepted EVPN routes (unique RFC 7432 route keys)
+                /// from this peer, Add-Path paths collapsed, before
+                /// `max_prefix_action` applies (Cease/1 carrying the AFI/SAFI
+                /// under `shutdown`). Enforced independently of every other
+                /// bound. Unset = unlimited.
+            }
+            peer_group {
+                /// Per-family limit inherited by neighbors in this group. See
+                /// the neighbor-level `max_prefixes_l2vpn_evpn`.
+            }
+        }
+        max_prefixes_ipv4_flowspec: Option<u32> {
+            neighbor {
+                /// Maximum unique accepted IPv4 `FlowSpec` rules
+                /// from this peer, Add-Path paths collapsed, before
+                /// `max_prefix_action` applies (Cease/1 carrying the AFI/SAFI
+                /// under `shutdown`). Enforced independently of every other
+                /// bound. Unset = unlimited.
+            }
+            peer_group {
+                /// Per-family limit inherited by neighbors in this group. See
+                /// the neighbor-level `max_prefixes_ipv4_flowspec`.
+            }
+        }
+        max_prefixes_ipv6_flowspec: Option<u32> {
+            neighbor {
+                /// Maximum unique accepted IPv6 `FlowSpec` rules
+                /// from this peer, Add-Path paths collapsed, before
+                /// `max_prefix_action` applies (Cease/1 carrying the AFI/SAFI
+                /// under `shutdown`). Enforced independently of every other
+                /// bound. Unset = unlimited.
+            }
+            peer_group {
+                /// Per-family limit inherited by neighbors in this group. See
+                /// the neighbor-level `max_prefixes_ipv6_flowspec`.
+            }
+        }
+        max_prefixes_rtc: Option<u32> {
+            neighbor {
+                /// Maximum unique accepted RT-Constrain membership routes
+                /// from this peer, Add-Path paths collapsed, before
+                /// `max_prefix_action` applies (Cease/1 carrying the AFI/SAFI
+                /// under `shutdown`). Enforced independently of every other
+                /// bound. Unset = unlimited.
+            }
+            peer_group {
+                /// Per-family limit inherited by neighbors in this group. See
+                /// the neighbor-level `max_prefixes_rtc`.
+            }
+        }
         max_prefix_action: Option<String> {
             neighbor {
                 /// What a crossed max-prefix bound does: `"shutdown"` (default;
@@ -1482,7 +1586,7 @@ define_neighbor_and_peer_group_configs! {
                 /// restart), `"block"` (withhold net-new prefixes beyond the
                 /// bound while the session stays Established), or `"warning"`
                 /// (warn once per crossing and keep accepting). `block` applies
-                /// to the per-family unicast bounds and requires the aggregate
+                /// to the per-family bounds and requires the aggregate
                 /// `max_prefixes` to be unset; `block` and `warning` exclude
                 /// `max_prefix_restart_seconds`.
             }
@@ -1973,6 +2077,10 @@ define_neighbor_and_peer_group_configs! {
 // Manual Debug: never render `md5_password` (mirrors `TcpAoConfig`; the
 // `tcp_ao` field redacts through `TcpAoConfig`'s own Debug).
 impl fmt::Debug for Neighbor {
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one field call per configuration key; the manual impl exists only to redact md5_password"
+    )]
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Neighbor")
             .field("address", &self.address)
@@ -1999,6 +2107,32 @@ impl fmt::Debug for Neighbor {
                 "max_prefixes_received_ipv6",
                 &self.max_prefixes_received_ipv6,
             )
+            .field(
+                "max_prefixes_l3vpn_ipv4_unicast",
+                &self.max_prefixes_l3vpn_ipv4_unicast,
+            )
+            .field(
+                "max_prefixes_l3vpn_ipv6_unicast",
+                &self.max_prefixes_l3vpn_ipv6_unicast,
+            )
+            .field(
+                "max_prefixes_ipv4_labeled_unicast",
+                &self.max_prefixes_ipv4_labeled_unicast,
+            )
+            .field(
+                "max_prefixes_ipv6_labeled_unicast",
+                &self.max_prefixes_ipv6_labeled_unicast,
+            )
+            .field("max_prefixes_l2vpn_evpn", &self.max_prefixes_l2vpn_evpn)
+            .field(
+                "max_prefixes_ipv4_flowspec",
+                &self.max_prefixes_ipv4_flowspec,
+            )
+            .field(
+                "max_prefixes_ipv6_flowspec",
+                &self.max_prefixes_ipv6_flowspec,
+            )
+            .field("max_prefixes_rtc", &self.max_prefixes_rtc)
             .field("max_prefix_action", &self.max_prefix_action)
             .field(
                 "max_prefix_warning_percent",
@@ -2183,6 +2317,10 @@ impl Serialize for TcpAoKeyringConfig {
 
 // Manual Debug: never render `md5_password` (mirrors `TcpAoConfig`).
 impl fmt::Debug for PeerGroupConfig {
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one field call per configuration key; the manual impl exists only to redact md5_password"
+    )]
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("PeerGroupConfig")
             .field("admin_down", &self.admin_down)
@@ -2204,6 +2342,32 @@ impl fmt::Debug for PeerGroupConfig {
                 "max_prefixes_received_ipv6",
                 &self.max_prefixes_received_ipv6,
             )
+            .field(
+                "max_prefixes_l3vpn_ipv4_unicast",
+                &self.max_prefixes_l3vpn_ipv4_unicast,
+            )
+            .field(
+                "max_prefixes_l3vpn_ipv6_unicast",
+                &self.max_prefixes_l3vpn_ipv6_unicast,
+            )
+            .field(
+                "max_prefixes_ipv4_labeled_unicast",
+                &self.max_prefixes_ipv4_labeled_unicast,
+            )
+            .field(
+                "max_prefixes_ipv6_labeled_unicast",
+                &self.max_prefixes_ipv6_labeled_unicast,
+            )
+            .field("max_prefixes_l2vpn_evpn", &self.max_prefixes_l2vpn_evpn)
+            .field(
+                "max_prefixes_ipv4_flowspec",
+                &self.max_prefixes_ipv4_flowspec,
+            )
+            .field(
+                "max_prefixes_ipv6_flowspec",
+                &self.max_prefixes_ipv6_flowspec,
+            )
+            .field("max_prefixes_rtc", &self.max_prefixes_rtc)
             .field("max_prefix_action", &self.max_prefix_action)
             .field(
                 "max_prefix_warning_percent",

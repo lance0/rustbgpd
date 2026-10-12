@@ -511,7 +511,8 @@ never as `NOT_REQUIRED`.
 `NeighborState.inbound_prefix_limits` reports ADR-0108 inbound max-prefix
 capacity, one `InboundPrefixLimitState` per finite configured bound in
 enforcement order: the `scope` name (`aggregate`, `ipv4_unicast`,
-`ipv6_unicast`, `ipv4_unicast_received`, or `ipv6_unicast_received`), the
+`ipv6_unicast`, `ipv4_unicast_received`, `ipv6_unicast_received`, or a
+non-unicast family label such as `l3vpn_ipv4_unicast` or `l2vpn_evpn`), the
 session actor's `usage` for that scope, the configured `limit`, the
 saturating `headroom`, a `blocking` flag for an open
 `max_prefix_action = "block"` episode, and the stable `reason`

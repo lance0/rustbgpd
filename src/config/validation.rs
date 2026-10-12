@@ -2997,7 +2997,7 @@ fn validate_max_prefix_modes(
         return Err(ConfigError::InvalidNeighborConfig {
             address: subject.to_string(),
             field: "max_prefix_action".to_string(),
-            reason: "\"block\" applies to the per-family unicast bounds only; unset the aggregate \
+            reason: "\"block\" applies to the per-family bounds only; unset the aggregate \
                      max_prefixes"
                 .to_string(),
         });
