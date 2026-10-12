@@ -15,6 +15,7 @@ BASE = (
     "managed_bridge",
     "managed_vxlan", "managed_svd_vxlan", "managed_vlan_upper",
     "managed_ready", "link_carrier", "bond_lacp", "auto_lacp_daemon",
+    "core_isolation", "core_isolation_daemon",
     "ac_gate", "nexthop_raw", "foreign_state_l2",
     "foreign_state_l2_dst", "foreign_state_nhid",
 )

@@ -833,7 +833,11 @@ mod tests {
                             let _ = reply.send(events_tx.subscribe());
                         }
                         RibUpdate::QueryEvpnSessionsSynced { reply } => {
-                            let _ = reply.send(true);
+                            let _ = reply.send(rustbgpd_rib::EvpnSessionsSync {
+                                established: 1,
+                                stale: 0,
+                                synced: true,
+                            });
                         }
                         RibUpdate::QueryEvpnRoutes { reply, .. } => {
                             let _ = reply.send(Vec::new());

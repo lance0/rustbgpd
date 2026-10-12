@@ -3881,13 +3881,31 @@ impl RibManager {
                     .filter(|s| s.sendable_families.contains(&evpn))
                     .map(|s| s.evpn_end_of_rib)
                     .collect();
+                // Peers retaining L2VPN/EVPN routes as GR or LLGR stale:
+                // the overlay still forwards on them (ADR-0140 decision 2).
+                let stale = self
+                    .gr_peers
+                    .keys()
+                    .chain(self.llgr_peers.keys())
+                    .collect::<HashSet<_>>()
+                    .into_iter()
+                    .filter(|peer| {
+                        self.gr_peers.get(*peer).is_some_and(|f| f.contains(&evpn))
+                            || self
+                                .llgr_peers
+                                .get(*peer)
+                                .is_some_and(|f| f.contains(&evpn))
+                    })
+                    .count();
                 // GR selection deferral keeps EVPN Loc-RIB unchanged, so
                 // remote Type 4 routes are not readable until it releases.
-                let _ = reply.send(
-                    !self.selection_deferred(evpn)
+                let _ = reply.send(crate::update::EvpnSessionsSync {
+                    established: peers.len(),
+                    stale,
+                    synced: !self.selection_deferred(evpn)
                         && !peers.is_empty()
                         && peers.iter().all(|&synced| synced),
-                );
+                });
             }
             RibUpdate::QueryEvpnRoutesPage {
                 scope,

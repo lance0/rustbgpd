@@ -2062,6 +2062,20 @@ impl WireRoutesReceived {
     }
 }
 
+/// Reply to [`RibUpdate::QueryEvpnSessionsSynced`].
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct EvpnSessionsSync {
+    /// Peers whose newest live session negotiated L2VPN/EVPN.
+    pub established: usize,
+    /// Peers whose L2VPN/EVPN routes are retained as stale under
+    /// graceful restart or long-lived graceful restart.
+    pub stale: usize,
+    /// At least one L2VPN/EVPN session is established, every such
+    /// session has sent End-of-RIB, and GR selection deferral does not
+    /// hold the family.
+    pub synced: bool,
+}
+
 /// Messages sent from peer sessions to the RIB manager.
 pub enum RibUpdate {
     /// Final configured-owner publication on the primary mutation lane.
@@ -3153,13 +3167,16 @@ pub enum RibUpdate {
         /// Response channel.
         reply: oneshot::Sender<Vec<EvpnRibRoute>>,
     },
-    /// Whether every established L2VPN/EVPN session has sent End-of-RIB
-    /// for the family and graceful-restart selection deferral is not
-    /// holding L2VPN/EVPN; `false` while none is established. Gates the
-    /// RFC 9785 §4.3 boot-time Designated Forwarder recovery decision.
+    /// L2VPN/EVPN session state: the established and stale-retained
+    /// session counts, and whether every established session has sent
+    /// End-of-RIB for the family while graceful-restart selection
+    /// deferral is not holding L2VPN/EVPN (`synced` is `false` while
+    /// none is established). Gates the RFC 9785 §4.3 boot-time
+    /// Designated Forwarder recovery decision and feeds the ADR-0140
+    /// core-isolation signal.
     QueryEvpnSessionsSynced {
         /// Response channel.
-        reply: oneshot::Sender<bool>,
+        reply: oneshot::Sender<EvpnSessionsSync>,
     },
     /// Query one bounded, version-fenced EVPN table page. Each page scans the
     /// scope but copies at most the clamped page size, ordered by typed key.

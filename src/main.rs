@@ -5506,6 +5506,11 @@ async fn run<T>(
     // first time the committed config names one (here or live).
     // Stopped with the link-drain coordinator, before EVPN teardown.
     let evpn_auto_esi_shutdown = tokio_util::sync::CancellationToken::new();
+    // ADR-0140 core-isolation hold: its config is republished with the
+    // ADR-0085 bindings on every committed config advance.
+    let (core_isolation_tx, core_isolation_rx) = watch::channel(Arc::new(
+        config.core_isolation_snapshot(&evpn_auto_lacp_esis),
+    ));
     let evpn_runtime_reload_apply = evpn_runtime_converger::EvpnRuntimeReloadApply::new(
         evpn_runtime_coordinator.clone(),
         evpn_runtime_apply_lock.clone(),
@@ -5514,6 +5519,7 @@ async fn run<T>(
     )
     .with_metrics(metrics.clone())
     .with_es_link_bindings_publisher(es_link_bindings_tx.clone())
+    .with_core_isolation_publisher(Arc::new(core_isolation_tx))
     .with_forwarding_state(local_forwarding_state.clone())
     .with_auto_lacp_esis(evpn_auto_lacp_esis)
     .with_auto_esi_probe(evpn_auto_esi::AutoEsiProbeStarter::new(
@@ -5521,6 +5527,20 @@ async fn run<T>(
         evpn_auto_esi_shutdown.clone(),
     ));
     evpn_runtime_reload_apply.start_auto_esi_probe_if_needed(&config);
+    #[cfg(target_os = "linux")]
+    let core_isolation_handle = evpn_core_isolation::spawn(
+        core_isolation_rx,
+        evpn_core_isolation::CoreIsolationDeps {
+            rib_tx: rib_tx.clone(),
+            metrics: metrics.clone(),
+            directory: runtime_state_directory
+                .as_ref()
+                .and_then(|directory| directory.file.try_clone().ok()),
+            start: start_time,
+        },
+    );
+    #[cfg(not(target_os = "linux"))]
+    drop(core_isolation_rx);
 
     // RFC 7999 BLACKHOLE kernel-discard reconciler (ADR-0060 FIB
     // slice). Completely opt-in: `install_blackhole_discard = true`
@@ -7148,6 +7168,10 @@ async fn run<T>(
     // serializes on the EVPN runtime apply lock).
     evpn_es_link_drain_shutdown.cancel();
     evpn_auto_esi_shutdown.cancel();
+    // ADR-0140: stop deciding; held links stay down until the sessions
+    // are closed (2.3 below).
+    #[cfg(target_os = "linux")]
+    core_isolation_handle.freeze();
     // Admission closure for the segment actor: an apply that outlived
     // the fence can no longer start it, and one it already started is
     // handed to the 1.9a'' drain below, like a startup actor.
@@ -7229,6 +7253,21 @@ async fn run<T>(
         warn!(
             reason,
             "stopped waiting for the peer manager; peers may not receive a Cease"
+        );
+    }
+
+    // 2.3 ADR-0140 clean-shutdown release: with the EVPN sessions closed,
+    // raise every link the core-isolation hold took down, through the
+    // fresh checks, and remove the receipt. Bounded; the stop hook or the
+    // next start releases whatever this does not.
+    #[cfg(target_os = "linux")]
+    if tokio::time::timeout(Duration::from_secs(10), core_isolation_handle.release())
+        .await
+        .is_err()
+    {
+        warn!(
+            "core-isolation shutdown release exceeded 10s; run rustbgpd \
+             --release-core-isolation or restart to release the held links"
         );
     }
 

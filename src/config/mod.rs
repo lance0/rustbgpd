@@ -1456,6 +1456,32 @@ impl Config {
         Ok(out)
     }
 
+    /// ADR-0140: the core-isolation view of this config — the
+    /// `[evpn_core_isolation]` table when present, and every bound
+    /// segment keyed by interface with its configured ESI text, resolved
+    /// ESI (`None` while an `auto-lacp` bond is not ready) and originator.
+    pub(crate) fn core_isolation_snapshot(&self, esis: &AutoLacpEsis) -> CoreIsolationSnapshot {
+        let bindings = self
+            .ethernet_segments
+            .iter()
+            .filter_map(|cfg| {
+                let interface = cfg.interface.clone()?;
+                Some((
+                    interface,
+                    CoreIsolationBinding {
+                        esi_text: cfg.esi.clone(),
+                        esi: segment_esi(cfg, esis).ok().flatten(),
+                        originator_ip: cfg.originator_ip.parse().ok(),
+                    },
+                ))
+            })
+            .collect();
+        CoreIsolationSnapshot {
+            settings: self.evpn_core_isolation.clone(),
+            bindings,
+        }
+    }
+
     /// Resolve `[[evpn_ip_vrfs]]` entries into runtime [`IpVrfTable`].
     ///
     /// Validates:
@@ -6873,6 +6899,28 @@ pub struct EsLinkBinding {
     pub interface: String,
     /// Hold-off between carrier return and link-drain release.
     pub recovery_delay: std::time::Duration,
+}
+
+/// ADR-0140 core-isolation input published to the hold controller on
+/// every committed config advance and every applied `auto-lacp` round.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct CoreIsolationSnapshot {
+    /// `[evpn_core_isolation]`, when present.
+    pub settings: Option<EvpnCoreIsolationConfig>,
+    /// Bound segments keyed by interface.
+    pub bindings: BTreeMap<String, CoreIsolationBinding>,
+}
+
+/// One bound segment as the core-isolation hold sees it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CoreIsolationBinding {
+    /// The configured `esi` text (hex or `auto-lacp`), recorded in the
+    /// ownership receipt.
+    pub esi_text: String,
+    /// The resolved ESI; `None` while an `auto-lacp` bond is not ready.
+    pub esi: Option<EthernetSegmentIdentifier>,
+    /// This PE's Type 4 originator for the segment.
+    pub originator_ip: Option<IpAddr>,
 }
 
 /// `[[ethernet_segments]].esi` value that opts a segment into RFC 7432

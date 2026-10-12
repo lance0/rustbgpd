@@ -297,6 +297,16 @@ impl ReceiptStore {
         })
     }
 
+    /// Whether a receipt file exists in `directory`, without the lock.
+    pub(crate) fn receipt_exists(directory: &File) -> bool {
+        nix::sys::stat::fstatat(
+            directory,
+            RECEIPT_FILE,
+            nix::fcntl::AtFlags::AT_SYMLINK_NOFOLLOW,
+        )
+        .is_ok()
+    }
+
     /// Read the receipt; `Ok(None)` when it does not exist.
     pub(crate) fn read(&self) -> Result<Option<Vec<OwnedLink>>, String> {
         let fd = match openat(
