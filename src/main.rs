@@ -2856,6 +2856,17 @@ fn main() -> ExitCode {
         }
     };
     let config = accepted.config();
+    // The stop-hook helper opens the directory without following a final
+    // symlink, so a symlink here would fail only at stop; refuse it now.
+    if let Some(flag) = runtime_state_dir_flag.as_deref()
+        && std::fs::symlink_metadata(flag).is_ok_and(|m| m.file_type().is_symlink())
+    {
+        eprintln!(
+            "error: --runtime-state-dir {flag} is a symlink; pass the real directory, which \
+             the core-isolation release helper opens without following symlinks"
+        );
+        process::exit(1);
+    }
     if let Some(flag) = runtime_state_dir_flag.as_deref()
         && !same_directory(Path::new(flag), &config.runtime_state_dir())
     {

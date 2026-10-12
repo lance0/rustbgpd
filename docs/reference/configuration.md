@@ -4719,7 +4719,10 @@ session and no EVPN peer whose routes it retains as GR or LLGR stale, or when
 every configured uplink lacks carrier. Isolation is entered immediately. An
 uplink that is a bound link, is enslaved under a bound bond, or is an owned
 member is excluded from the signal, logged as an error and reported as
-`uplink_overlap`; if every uplink is excluded the uplink signal is false.
+`uplink_overlap`; if every uplink is excluded the uplink signal is false. Do
+not use an uplink stacked on a bound interface (such as a VLAN on the bound
+bond): it loses carrier when the hold takes the members down, which keeps the
+PE isolated, and validation does not detect it yet.
 
 **Action.** For a bound bond, every member is set administratively down
 (`RTM_SETLINK` clearing `IFF_UP`); the bond stays up and the members stay
@@ -4729,7 +4732,9 @@ place, member discovery is level-triggered: a member enslaved admin-up during
 the hold is recorded and taken down, a member already down when the hold
 begins is left alone and is not raised later, and a held member that another
 writer raises is reported as `overridden` and not taken down again until the
-hold ends. Taking the members down drops the bond's carrier, so the ADR-0085
+hold ends. A held member that leaves the bond and is enslaved again comes back
+admin-up from the kernel, so it is taken down again rather than treated as
+overridden. Taking the members down drops the bond's carrier, so the ADR-0085
 link drain withdraws the segment's routes; on release, origination returns
 after `recovery_delay_seconds`.
 
@@ -4737,9 +4742,12 @@ after `recovery_delay_seconds`.
 its ESI, with the matching ES-Import route target, was present while the core
 was up and EVPN was synced; a session that has not yet sent End-of-RIB never
 updates that record. Otherwise the CE has no other member and the hold is
-suppressed (`suppressed_no_peer`). Before the first sync after startup no peer
-is recorded, so a core loss then keeps the startup hold rather than becoming a
-suppressed isolation. A reload that gives a bound interface
+suppressed (`suppressed_no_peer`). Until EVPN has synced after startup and
+every bound segment has a peer record (an `auto-lacp` bond that the startup
+hold leaves unresolved has none), a core loss keeps the startup hold rather
+than becoming a suppressed isolation. A RIB that does not answer a poll gives
+no reading: nothing is decided on the previous one, and an isolation hold is
+released after `backstop_seconds` without an answer. A reload that gives a bound interface
 another ESI or originator drops that peer record and the hold: the members are
 released, and the segment is held again only after a Type 4 is seen for the
 new identity.
@@ -4777,9 +4785,10 @@ MACs, and master bond of the member; the lock file
 raised only when every recorded field still matches exactly one link and the
 link is still down. A different boot ID discards the entry. Any other mismatch
 (renamed, recreated, a member removed from the bond, more than one candidate)
-leaves the link down, keeps the entry, and reports `ownership_ambiguous`: raise
-the link by hand and run the release helper to clear the entry. Held links are
-released:
+leaves the link down, keeps the entry, and reports `ownership_ambiguous`. Raise
+(or delete) the link by hand: the release helper and the next start drop an
+ambiguous entry once no link with its ifindex or name is left down, and keep it
+otherwise. Dropping an entry never raises a link. Held links are released:
 
 - on clean shutdown, after the EVPN sessions close;
 - after any exit by `rustbgpd --release-core-isolation --runtime-state-dir DIR`,

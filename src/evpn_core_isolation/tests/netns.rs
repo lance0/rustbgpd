@@ -304,6 +304,22 @@ async fn netns_isolation_holds_bond_members_and_shutdown_raises_them() {
     wait_for("new member held", || !admin_up("m3")).await;
     assert_eq!(receipt_names(dir.path()), ["m0", "m1", "m3"]);
 
+    // A held member released from the bond, then enslaved again, comes
+    // back admin-up from the kernel; it is taken down again, not left up
+    // as overridden.
+    ip(&["link", "set", "m1", "nomaster"]);
+    wait_for("released member seen outside the bond", || {
+        state(&rig.metrics, "bond0").as_deref() == Some("ownership_ambiguous")
+    })
+    .await;
+    ip(&["link", "set", "m1", "master", "bond0"]);
+    ip(&["link", "set", "m1", "up"]);
+    wait_for("re-enslaved member held again", || {
+        !admin_up("m1") && state(&rig.metrics, "bond0").as_deref() == Some("isolated")
+    })
+    .await;
+    assert_eq!(receipt_names(dir.path()), ["m0", "m1", "m3"]);
+
     // Core back and synced: held through the settle hold, then raised.
     rib.set(1, true);
     tokio::time::sleep(Duration::from_millis(300)).await;
@@ -432,11 +448,11 @@ async fn netns_renamed_member_is_ambiguous_and_helper_releases_after_crash() {
     assert!(!admin_up("fx"), "a foreign-boot entry touches nothing");
     assert_eq!(receipt_names(&dir_path), ["m1"]);
 
-    // Once the operator restores the name, the guards match again.
-    ip(&["link", "set", "m1x", "name", "m1"]);
+    // The operator raises the renamed link by hand: nothing owned is left
+    // down, so the helper drops the entry and succeeds.
+    ip(&["link", "set", "m1x", "up"]);
     let status = helper(&dir_path);
     assert_eq!(status, 0);
-    assert!(admin_up("m1"));
     assert!(!receipt.exists());
     // Nothing left: a readable directory without a receipt is success.
     assert_eq!(release_core_isolation(&dir_path), 0);

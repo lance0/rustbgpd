@@ -188,6 +188,17 @@ pub(crate) fn classify(entry: &OwnedLink, host: &HostIdentity, links: &[AdminLin
     }
 }
 
+/// Whether an ambiguous entry no longer owns anything: no link carries
+/// its recorded ifindex or name, or every such link is admin-up (the
+/// operator raised it). Dropping such an entry raises nothing. An entry
+/// whose link still exists and is admin-down is kept.
+pub(crate) fn ambiguous_entry_is_stale(entry: &OwnedLink, links: &[AdminLinkState]) -> bool {
+    links
+        .iter()
+        .filter(|l| l.ifindex == entry.link.ifindex || l.name == entry.link.name)
+        .all(|l| l.admin_up)
+}
+
 fn describe_mismatch(recorded: &LinkIdentity, current: &LinkIdentity) -> String {
     let mut fields = Vec::new();
     if recorded.ifindex != current.ifindex {

@@ -298,4 +298,24 @@ fn runtime_state_dir_flag_must_match_the_config() {
         ],
         "--runtime-state-dir applies only to a daemon start or --check",
     );
+
+    // A symlink to the right directory is refused at start, because the
+    // release helper would refuse it at stop.
+    std::fs::create_dir(&state).unwrap();
+    let link = temp.path().join("state-link");
+    std::os::unix::fs::symlink(&state, &link).unwrap();
+    let output = run(
+        &[
+            "--runtime-state-dir",
+            link.to_str().unwrap(),
+            "--check",
+            config_path,
+        ],
+        None,
+    );
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("is a symlink"),
+        "{output:?}"
+    );
 }

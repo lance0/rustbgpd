@@ -667,6 +667,7 @@ fn discovery_downs_new_members_and_never_re_downs_an_override() {
         &links,
         std::slice::from_ref(&owned_m0),
         &BTreeSet::new(),
+        &BTreeSet::new(),
         &host(),
     );
     assert_eq!(actions.len(), 2, "{actions:?}");
@@ -675,13 +676,196 @@ fn discovery_downs_new_members_and_never_re_downs_an_override() {
 
     // After the override is recorded, discovery does not treat m0 as new.
     let overridden = BTreeSet::from([(7, "m0".to_string())]);
-    let actions = discover("bond0", &binding, &links, &[], &overridden, &host());
+    let actions = discover(
+        "bond0",
+        &binding,
+        &links,
+        &[],
+        &overridden,
+        &BTreeSet::new(),
+        &host(),
+    );
     assert_eq!(actions.len(), 1, "{actions:?}");
     assert!(matches!(&actions[0], MemberAction::TakeDown(e) if e.link.name == "m1"));
 
     // A link bound directly (not a bond) is its own member.
-    let actions = discover("other", &binding, &links, &[], &BTreeSet::new(), &host());
+    let actions = discover(
+        "other",
+        &binding,
+        &links,
+        &[],
+        &BTreeSet::new(),
+        &BTreeSet::new(),
+        &host(),
+    );
     assert!(matches!(&actions[..], [MemberAction::TakeDown(e)] if e.link.name == "other"));
+
+    // An owned member seen outside the bond during this hold and enslaved
+    // again comes back admin-up: it is taken down again, not overridden.
+    let left_bond = BTreeSet::from([(7, "m0".to_string())]);
+    let actions = discover(
+        "bond0",
+        &binding,
+        &links,
+        std::slice::from_ref(&owned_m0),
+        &BTreeSet::new(),
+        &left_bond,
+        &host(),
+    );
+    assert!(matches!(&actions[0], MemberAction::Redown { entry, .. } if *entry == owned_m0));
+}
+
+/// An `auto-lacp` binding the startup hold left unresolved cannot latch a
+/// peer. A core lost after the first sync must keep the startup hold for
+/// it, not suppress it as peerless and raise its members while isolated.
+#[tokio::test(start_paused = true)]
+async fn unlatched_binding_keeps_the_startup_hold_when_the_core_is_lost() {
+    let b = bindings(&["bond0"]);
+    let mut planner = HoldPlanner::startup(&settings(10, 180), Instant::now());
+    tokio::time::advance(Duration::from_secs(20)).await;
+    let unresolved = Observation {
+        sessions: EvpnSessionsSync {
+            established: 1,
+            stale: 0,
+            synced: true,
+        },
+        uplinks_down: false,
+        // `peers_by_binding` omits a binding with no resolved ESI.
+        peers: Some(BTreeMap::new()),
+    };
+    planner.observe(&b, &unresolved, Instant::now());
+    tokio::time::advance(Duration::from_secs(5)).await;
+    planner.observe(&b, &core_lost(), Instant::now());
+    assert_eq!(
+        planner.decision("bond0"),
+        HoldDecision::Hold("startup_hold")
+    );
+
+    // An explicit binding that latched, even empty, is a peer record: the
+    // startup hold becomes an isolation hold for it.
+    let mut planner = HoldPlanner::startup(&settings(10, 180), Instant::now());
+    planner.observe(&b, &core_up(true, &[]), Instant::now());
+    planner.observe(&b, &core_lost(), Instant::now());
+    assert_eq!(
+        planner.decision("bond0"),
+        HoldDecision::Release("suppressed_no_peer")
+    );
+}
+
+/// A RIB that stops answering is no reading: nothing is decided on the
+/// last one, and an isolation hold is released after `backstop_seconds`
+/// without an answer, so a stall never pins links down.
+#[tokio::test(start_paused = true)]
+async fn stalled_rib_is_no_reading_and_cannot_pin_an_isolation_hold() {
+    let (rib_tx, mut rib_rx) = mpsc::channel(8);
+    let mut controller = Controller::new(CoreIsolationDeps {
+        rib_tx,
+        metrics: BgpMetrics::new(),
+        directory: None,
+        start: Instant::now(),
+    });
+    controller.snapshot = Arc::new(snapshot("bond0", Some(esi(1))));
+    controller.last_sessions = Some(EvpnSessionsSync::default());
+    // Hold every query unanswered.
+    let rib = tokio::spawn(async move {
+        let mut held = Vec::new();
+        while let Some(update) = rib_rx.recv().await {
+            held.push(update);
+        }
+    });
+    let started = Instant::now();
+    assert!(controller.poll_rib().await.is_none());
+    assert!(
+        started.elapsed() < POLL_INTERVAL,
+        "a stalled poll must not block the loop for a whole poll interval"
+    );
+    assert_eq!(
+        controller.last_sessions, None,
+        "a timed-out poll must not replay the last reading"
+    );
+    drop(controller);
+    rib.await.unwrap();
+
+    let b = bindings(&["bond0"]);
+    let mut planner = steady(10, 180);
+    planner.observe(&b, &core_lost(), Instant::now());
+    assert_eq!(planner.decision("bond0"), HoldDecision::Hold("isolated"));
+    planner.expire(&b, Instant::now());
+    tokio::time::advance(Duration::from_secs(179)).await;
+    planner.expire(&b, Instant::now());
+    assert!(hold(&planner));
+    tokio::time::advance(Duration::from_secs(1)).await;
+    assert_eq!(planner.expire(&b, Instant::now())[0].0, "backstop_unsynced");
+    assert_eq!(
+        planner.decision("bond0"),
+        HoldDecision::Release("backstop_released")
+    );
+}
+
+/// Startup reconcile drops an ambiguous entry once nothing is left to
+/// own (its link is gone, or the operator raised it) and keeps one whose
+/// link is still down. Dropping never raises a link.
+#[test]
+fn startup_reconcile_drops_ambiguous_entries_with_nothing_left_down() {
+    let (rib_tx, _rib_rx) = mpsc::channel(1);
+    let mut controller = Controller::new(CoreIsolationDeps {
+        rib_tx,
+        metrics: BgpMetrics::new(),
+        directory: None,
+        start: Instant::now(),
+    });
+    controller.host = Some(host());
+    let recorded = vec![
+        link(3, "bond0", None, true),
+        link(7, "m0", Some(3), false),
+        link(8, "m1", Some(3), false),
+        link(9, "m2", Some(3), false),
+    ];
+    let entry = |i: usize| OwnedLink {
+        boot_id: host().boot_id,
+        netns: host().netns,
+        esi: "auto-lacp".into(),
+        binding: "bond0".into(),
+        link: LinkIdentity::in_dump(&recorded[i], &recorded),
+    };
+    controller.receipt = vec![entry(1), entry(2), entry(3)];
+    // m0 renamed and still down; m1 renamed and raised by the operator;
+    // m2 deleted.
+    let now = vec![
+        link(3, "bond0", None, true),
+        link(7, "m0x", Some(3), false),
+        link(8, "m1x", Some(3), true),
+    ];
+    controller.reconcile_at_start(&now);
+    let names: Vec<&str> = controller
+        .receipt
+        .iter()
+        .map(|e| e.link.name.as_str())
+        .collect();
+    assert_eq!(names, ["m0"]);
+}
+
+#[test]
+fn ambiguous_entry_is_stale_only_with_nothing_left_down() {
+    use super::receipt::ambiguous_entry_is_stale as stale;
+    let recorded = vec![link(3, "bond0", None, true), link(7, "m0", Some(3), false)];
+    let entry = OwnedLink {
+        boot_id: host().boot_id,
+        netns: host().netns,
+        esi: "auto-lacp".into(),
+        binding: "bond0".into(),
+        link: LinkIdentity::in_dump(&recorded[1], &recorded),
+    };
+    assert!(stale(&entry, &recorded[..1]), "link gone");
+    assert!(stale(&entry, &[link(7, "m0x", None, true)]), "raised");
+    assert!(!stale(&entry, &[link(7, "m0x", None, false)]), "still down");
+    assert!(
+        !stale(
+            &entry,
+            &[link(7, "m0x", None, true), link(9, "m0", None, false)]
+        ),
+        "a down candidate by name keeps it"
+    );
 }
 
 #[cfg(target_os = "linux")]

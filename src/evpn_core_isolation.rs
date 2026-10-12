@@ -48,9 +48,10 @@ use receipt::{Guard, HostIdentity, LinkIdentity, OpenError, OwnedLink, ReceiptSt
 /// 1 s cadence as the segment actor's boot-sync poll; uplink carrier is
 /// event-driven.
 pub(crate) const POLL_INTERVAL: Duration = Duration::from_secs(1);
-/// Bound on one RIB query, so a stalled RIB delays a decision instead of
-/// wedging the controller.
-const RIB_QUERY_TIMEOUT: Duration = Duration::from_secs(5);
+/// Bound on one RIB query, below the poll interval, so a stalled RIB never
+/// delays link events and member discovery by more than this. A query
+/// that times out is no reading at all, never a replay of the last one.
+const RIB_QUERY_TIMEOUT: Duration = Duration::from_millis(900);
 
 /// Published by the daemon on every committed config advance.
 pub(crate) type CoreIsolationConfig = Arc<CoreIsolationSnapshot>;
@@ -118,6 +119,8 @@ pub(crate) struct HoldPlanner {
     synced_since: Option<Instant>,
     /// Released by the backstop; cleared once sync is observed.
     backstop_unsynced: bool,
+    /// Since when the RIB has given no session reading.
+    unanswered_since: Option<Instant>,
 }
 
 impl HoldPlanner {
@@ -142,6 +145,7 @@ impl HoldPlanner {
             peers: BTreeMap::new(),
             synced_since: None,
             backstop_unsynced: false,
+            unanswered_since: None,
         }
     }
 
@@ -172,6 +176,7 @@ impl HoldPlanner {
         now: Instant,
     ) -> Vec<(&'static str, String)> {
         let mut events = Vec::new();
+        self.unanswered_since = None;
         self.held.retain(|b| bindings.contains(b));
         self.suppressed.retain(|b| bindings.contains(b));
         self.peers.retain(|b, _| bindings.contains(b));
@@ -211,10 +216,16 @@ impl HoldPlanner {
                     events.push(self.release("released", "startup hold released after EVPN sync"));
                 } else if now.saturating_duration_since(since) >= self.backstop {
                     events.push(self.release_backstop("startup"));
-                } else if !isolated && observation.sessions.synced {
-                    // The core counts as seen only once EVPN has synced,
-                    // when the peer latch can first be taken. A core lost
-                    // before that leaves the startup hold in place.
+                } else if !isolated
+                    && observation.sessions.synced
+                    && bindings.iter().all(|b| self.peers.contains_key(b))
+                {
+                    // The core counts as seen only once EVPN has synced and
+                    // every binding has latched (an empty latch counts). A
+                    // binding that could not latch, such as an `auto-lacp`
+                    // bond left unresolved by this very hold, has no peer
+                    // record yet, so a core lost before then leaves the
+                    // startup hold in place.
                     self.phase = Phase::Startup {
                         since,
                         core_seen_up: true,
@@ -256,15 +267,22 @@ impl HoldPlanner {
         events
     }
 
-    /// No session read yet (or the RIB did not answer): only the
-    /// backstop can move a hold, so a stalled RIB never pins links down.
+    /// No session reading (none yet, or the RIB did not answer this poll):
+    /// no transition is taken on stale data, and only a backstop can move a
+    /// hold. The startup and recovery holds keep their own backstop clocks;
+    /// an isolation hold is released once the RIB has given no reading for
+    /// `backstop_seconds`. A stalled RIB therefore never pins links down.
     pub(crate) fn expire(
         &mut self,
         bindings: &BTreeSet<String>,
         now: Instant,
     ) -> Vec<(&'static str, String)> {
         self.held.retain(|b| bindings.contains(b));
+        let unanswered = *self.unanswered_since.get_or_insert(now);
         match self.phase {
+            Phase::Isolated if now.saturating_duration_since(unanswered) >= self.backstop => {
+                return vec![self.release_backstop("isolation")];
+            }
             Phase::Startup { since, .. } => {
                 self.held.clone_from(bindings);
                 if now.saturating_duration_since(since) >= self.backstop {
@@ -400,6 +418,10 @@ pub(crate) fn spawn(
 struct BindingRuntime {
     /// Members seen raised by another writer during this hold.
     overridden: BTreeSet<(u32, String)>,
+    /// Owned members seen outside the bound bond during this hold. One
+    /// that is enslaved again comes back admin-up from the kernel, not
+    /// from another writer, so it is taken down again.
+    left_bond: BTreeSet<(u32, String)>,
     action_failed: bool,
     ambiguous: bool,
     ambiguous_logged: bool,
@@ -526,6 +548,7 @@ impl Controller {
                 }
                 if let Some(runtime) = self.runtime.get_mut(interface) {
                     runtime.overridden.clear();
+                    runtime.left_bond.clear();
                 }
             }
         }
@@ -680,7 +703,16 @@ impl Controller {
     /// is used only while EVPN is synced: a reconnecting session that has
     /// not sent End-of-RIB cannot present a partial Type 4 set.
     async fn poll_rib(&mut self) -> Option<BTreeMap<String, BTreeSet<IpAddr>>> {
-        let snapshot = query_es_snapshot(&self.deps.rib_tx).await?;
+        let Some(snapshot) = query_es_snapshot(&self.deps.rib_tx).await else {
+            // No answer: no reading, so the planner only runs its backstops.
+            if self.last_sessions.take().is_some() {
+                warn!(
+                    "core-isolation RIB read timed out; holding the current decision until the \
+                     RIB answers or a backstop releases"
+                );
+            }
+            return None;
+        };
         self.last_sessions = Some(snapshot.sessions);
         snapshot
             .sessions
@@ -792,6 +824,13 @@ impl Controller {
                     false
                 }
                 Guard::Matched { admin_up: true, .. } => false,
+                Guard::Ambiguous(_) if receipt::ambiguous_entry_is_stale(entry, links) => {
+                    info!(
+                        interface = %entry.link.name,
+                        "core-isolation ambiguous entry dropped: its link is gone or was raised"
+                    );
+                    false
+                }
                 _ => true,
             });
         if self.receipt.len() != before {
@@ -824,11 +863,9 @@ impl Controller {
                 if held.contains(interface) {
                     self.hold_pass(interface, binding, links).await;
                 } else {
-                    self.runtime
-                        .entry(interface.clone())
-                        .or_default()
-                        .overridden
-                        .clear();
+                    let runtime = self.runtime.entry(interface.clone()).or_default();
+                    runtime.overridden.clear();
+                    runtime.left_bond.clear();
                 }
             }
         }
@@ -875,7 +912,8 @@ impl Controller {
                         ifindex,
                         detail = %reason,
                         "core-isolation receipt entry no longer matches its link; it is left \
-                         down. Raise the link by hand, then clear the entry"
+                         down. Raise (or delete) the link by hand; the stop hook or the next \
+                         start then drops the entry"
                     );
                 }
                 runtime.ambiguous_logged = true;
@@ -893,13 +931,36 @@ impl Controller {
         let Some(host) = self.host.clone() else {
             return;
         };
-        let overridden = self
+        if let Some(bound) = links.iter().find(|l| l.name == interface && l.is_bond) {
+            let runtime = self.runtime.entry(interface.to_string()).or_default();
+            for entry in self.receipt.iter().filter(|e| e.binding == interface) {
+                if let Some(link) = links
+                    .iter()
+                    .find(|l| l.ifindex == entry.link.ifindex && l.name == entry.link.name)
+                    && link.master != Some(bound.ifindex)
+                {
+                    runtime.left_bond.insert((link.ifindex, link.name.clone()));
+                }
+            }
+        }
+        let (overridden, left_bond) = self
             .runtime
             .get(interface)
-            .map(|r| r.overridden.clone())
+            .map(|r| (r.overridden.clone(), r.left_bond.clone()))
             .unwrap_or_default();
-        for action in discover(interface, binding, links, &self.receipt, &overridden, &host) {
+        for action in discover(
+            interface,
+            binding,
+            links,
+            &self.receipt,
+            &overridden,
+            &left_bond,
+            &host,
+        ) {
             match action {
+                MemberAction::Redown { entry, key } => {
+                    self.redown(interface, &entry, key).await;
+                }
                 MemberAction::Overridden { entry, key } => {
                     // Another writer raised a held member: report it, stop
                     // owning it, and never take it down again this hold.
@@ -920,6 +981,36 @@ impl Controller {
                 }
                 MemberAction::TakeDown(entry) => self.take_down(entry).await,
             }
+        }
+    }
+
+    /// Take an owned member that was re-enslaved during the hold down
+    /// again. Its receipt entry already exists and matches.
+    async fn redown(&mut self, interface: &str, entry: &OwnedLink, key: (u32, String)) {
+        let result = match self.fresh(&entry.link).await {
+            Ok(Some((identity, true))) if identity == entry.link => self
+                .links
+                .as_ref()
+                .expect("kernel handles are open")
+                .set_admin_up(entry.link.ifindex, false)
+                .await
+                .map_err(|e| e.to_string()),
+            Ok(_) => Err("link changed before the write".to_string()),
+            Err(error) => Err(error),
+        };
+        match result {
+            Ok(()) => {
+                info!(
+                    reason = "held",
+                    interface,
+                    member = %entry.link.name,
+                    "core-isolation hold took a re-enslaved member down again"
+                );
+                if let Some(runtime) = self.runtime.get_mut(interface) {
+                    runtime.left_bond.remove(&key);
+                }
+            }
+            Err(error) => self.fail(interface, &entry.link.name, &error),
         }
     }
 
@@ -1160,19 +1251,27 @@ pub(crate) enum MemberAction {
         entry: OwnedLink,
         key: (u32, String),
     },
+    /// Owned, admin-up, and seen outside the bond during this hold: it was
+    /// re-enslaved, which raises it, so it is taken down again.
+    Redown {
+        entry: OwnedLink,
+        key: (u32, String),
+    },
 }
 
 /// ADR-0140 decision 3, level-triggered discovery: classify every
 /// current member of the bound bond (or the bound link itself) against
-/// the receipt. Owned and down: held. Owned and up: overridden. Not owned
-/// and up, not overridden this hold: take down. Not owned and down: left
-/// alone and not recorded.
+/// the receipt. Owned and down: held. Owned and up: overridden, unless it
+/// was seen outside the bond during this hold, when re-enslaving raised it
+/// and it is taken down again. Not owned and up, not overridden this hold:
+/// take down. Not owned and down: left alone and not recorded.
 pub(crate) fn discover(
     interface: &str,
     binding: &CoreIsolationBinding,
     links: &[AdminLinkState],
     receipt: &[OwnedLink],
     overridden: &BTreeSet<(u32, String)>,
+    left_bond: &BTreeSet<(u32, String)>,
     host: &HostIdentity,
 ) -> Vec<MemberAction> {
     let members: Vec<&AdminLinkState> = match links.iter().find(|l| l.name == interface) {
@@ -1196,6 +1295,10 @@ pub(crate) fn discover(
                     && e.link == identity
             });
             match owned {
+                Some(entry) if left_bond.contains(&key) => Some(MemberAction::Redown {
+                    entry: entry.clone(),
+                    key,
+                }),
                 Some(entry) => Some(MemberAction::Overridden {
                     entry: entry.clone(),
                     key,
@@ -1332,7 +1435,7 @@ pub(crate) fn release_core_isolation(directory: &Path) -> u8 {
             return 1;
         }
     };
-    let mut entries = match store.read() {
+    let entries = match store.read() {
         Ok(None) => {
             println!(
                 "no core-isolation receipt in {}; nothing to release",
@@ -1360,46 +1463,7 @@ pub(crate) fn release_core_isolation(directory: &Path) -> u8 {
         let host = HostIdentity::current()?;
         let links = AdminLinks::open().map_err(|e| e.to_string())?;
         let dump = links.dump().await.map_err(|e| e.to_string())?;
-        let mut kept = Vec::new();
-        for entry in entries.drain(..) {
-            match receipt::classify(&entry, &host, &dump) {
-                Guard::ForeignBoot | Guard::Matched { admin_up: true, .. } => {}
-                Guard::Matched { admin_up: false, ifindex } => {
-                    let fresh = links.get(ifindex).await.map_err(|e| e.to_string())?;
-                    let master = match fresh.as_ref().and_then(|s| s.master) {
-                        Some(index) => links.get(index).await.map_err(|e| e.to_string())?,
-                        None => None,
-                    };
-                    let unchanged = fresh.as_ref().is_some_and(|state| {
-                        LinkIdentity::of(state, master.as_ref()) == entry.link
-                    });
-                    if !unchanged {
-                        eprintln!(
-                            "ownership_ambiguous: {} (ifindex {}) changed before the write; left down",
-                            entry.link.name, entry.link.ifindex
-                        );
-                        kept.push(entry);
-                        continue;
-                    }
-                    if fresh.is_some_and(|s| !s.admin_up)
-                        && let Err(error) = links.set_admin_up(ifindex, true).await
-                    {
-                        eprintln!("error: cannot raise {}: {error}", entry.link.name);
-                        kept.push(entry);
-                        continue;
-                    }
-                    println!("raised {} (binding {})", entry.link.name, entry.binding);
-                }
-                Guard::Ambiguous(reason) => {
-                    eprintln!(
-                        "ownership_ambiguous: {} (ifindex {}, binding {}): {reason}; left down. \
-                         Raise it by hand, then remove the entry",
-                        entry.link.name, entry.link.ifindex, entry.binding
-                    );
-                    kept.push(entry);
-                }
-            }
-        }
+        let kept = release_entries(&links, &host, &dump, entries).await?;
         store.publish(&kept)?;
         if kept.is_empty() {
             Ok(())
@@ -1414,6 +1478,67 @@ pub(crate) fn release_core_isolation(directory: &Path) -> u8 {
             1
         }
     }
+}
+
+/// The helper's guarded release of every receipt entry; returns the
+/// entries that stay (ambiguous, changed, or not raised).
+async fn release_entries(
+    links: &AdminLinks,
+    host: &HostIdentity,
+    dump: &[AdminLinkState],
+    entries: Vec<OwnedLink>,
+) -> Result<Vec<OwnedLink>, String> {
+    let mut kept = Vec::new();
+    for entry in entries {
+        match receipt::classify(&entry, host, dump) {
+            Guard::ForeignBoot | Guard::Matched { admin_up: true, .. } => {}
+            Guard::Matched {
+                admin_up: false,
+                ifindex,
+            } => {
+                let fresh = links.get(ifindex).await.map_err(|e| e.to_string())?;
+                let master = match fresh.as_ref().and_then(|s| s.master) {
+                    Some(index) => links.get(index).await.map_err(|e| e.to_string())?,
+                    None => None,
+                };
+                let unchanged = fresh
+                    .as_ref()
+                    .is_some_and(|state| LinkIdentity::of(state, master.as_ref()) == entry.link);
+                if !unchanged {
+                    eprintln!(
+                        "ownership_ambiguous: {} (ifindex {}) changed before the write; left down",
+                        entry.link.name, entry.link.ifindex
+                    );
+                    kept.push(entry);
+                    continue;
+                }
+                if fresh.is_some_and(|s| !s.admin_up)
+                    && let Err(error) = links.set_admin_up(ifindex, true).await
+                {
+                    eprintln!("error: cannot raise {}: {error}", entry.link.name);
+                    kept.push(entry);
+                    continue;
+                }
+                println!("raised {} (binding {})", entry.link.name, entry.binding);
+            }
+            Guard::Ambiguous(_) if receipt::ambiguous_entry_is_stale(&entry, dump) => {
+                println!(
+                    "dropped the entry for {} (ifindex {}, binding {}): its link is gone or \
+                     already up",
+                    entry.link.name, entry.link.ifindex, entry.binding
+                );
+            }
+            Guard::Ambiguous(reason) => {
+                eprintln!(
+                    "ownership_ambiguous: {} (ifindex {}, binding {}): {reason}; left down. \
+                     Raise it (or delete it) by hand and run this again to drop the entry",
+                    entry.link.name, entry.link.ifindex, entry.binding
+                );
+                kept.push(entry);
+            }
+        }
+    }
+    Ok(kept)
 }
 
 #[cfg(test)]

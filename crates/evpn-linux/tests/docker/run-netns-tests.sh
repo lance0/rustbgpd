@@ -189,6 +189,11 @@ case "${1:-all}" in
 esac
 
 SECCOMP_ARGS=()
+# Optional CPU pinning for the test container (for example DOCKER_CPUSET=0-31
+# on a shared host).
+if [ -n "${DOCKER_CPUSET:-}" ]; then
+    SECCOMP_ARGS+=("--cpuset-cpus=$DOCKER_CPUSET")
+fi
 if [ -n "${SECCOMP_PROFILE:-}" ]; then
     if [[ "$SECCOMP_PROFILE" = /* ]]; then
         SECCOMP_PROFILE_CANDIDATE="$SECCOMP_PROFILE"

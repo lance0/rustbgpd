@@ -1779,8 +1779,9 @@ fn core_isolation_status(state: &str, interface: &str) -> (CheckStatus, String) 
         "ownership_ambiguous" => (
             CheckStatus::Fail,
             "ownership_ambiguous: a receipt entry no longer matches its link, which is left \
-             down; raise the link by hand, then remove the entry with rustbgpd \
-             --release-core-isolation (see the daemon log for the member)"
+             down (see the daemon log for the member); raise or delete the link by hand, and \
+             the stop hook (rustbgpd --release-core-isolation) or the next start drops the \
+             entry"
                 .to_string(),
         ),
         "action_failed" => (
