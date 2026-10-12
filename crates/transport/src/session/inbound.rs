@@ -3423,31 +3423,19 @@ impl PeerSession {
             }
         }
         // RFC 9324: explicit withdrawals and pre-policy safety rejections
-        // forget retained input; evaluated identities are retained or
-        // forgotten by their import outcome. Same-UPDATE re-announcement wins.
-        if retention_active {
+        // forget retained input. Applied after `Block` below, with the
+        // admitted denies captured here before they are consumed.
+        let (retention_forget, retention_admitted_denies) = if retention_active {
             let forget: Vec<RetainedKey> = withdrawn
                 .iter()
                 .chain(&otc_rejected_unicast)
                 .chain(&ownership_rejected_unicast)
                 .copied()
                 .collect();
-            self.update_validation_retention(forget, retention_evaluated, || {
-                AttrSet::new(
-                    parsed
-                        .attributes
-                        .iter()
-                        .filter(|attr| {
-                            !matches!(
-                                attr,
-                                PathAttribute::MpReachNlri(_) | PathAttribute::MpUnreachNlri(_)
-                            )
-                        })
-                        .cloned()
-                        .collect(),
-                )
-            });
-        }
+            (forget, denied_unicast.clone())
+        } else {
+            (Vec::new(), Vec::new())
+        };
         // LAN-472: retain the pre-policy safety rejections under their
         // gate reason. One shared entry per gate, derived from the
         // bounded per-UPDATE prototype — the attribute summary is
@@ -3538,6 +3526,37 @@ impl PeerSession {
         // they are accounted or delivered; withdrawals above already freed
         // their slots.
         self.block_over_limit_announcements(&mut announced);
+        // RFC 9324: evaluated identities are retained or forgotten by their
+        // import outcome, but only past Add-Path admission and `Block`: a
+        // withheld identity is not in the Adj-RIB-In, so it is forgotten.
+        // Same-UPDATE re-announcement wins over the forgets.
+        if retention_active {
+            let admitted: std::collections::HashSet<RetainedKey> = announced
+                .iter()
+                .map(|route| (route.prefix, route.path_id))
+                .chain(retention_admitted_denies)
+                .collect();
+            for (key, retain) in &mut retention_evaluated {
+                if !admitted.contains(key) {
+                    *retain = None;
+                }
+            }
+            self.update_validation_retention(retention_forget, retention_evaluated, || {
+                AttrSet::new(
+                    parsed
+                        .attributes
+                        .iter()
+                        .filter(|attr| {
+                            !matches!(
+                                attr,
+                                PathAttribute::MpReachNlri(_) | PathAttribute::MpUnreachNlri(_)
+                            )
+                        })
+                        .cloned()
+                        .collect(),
+                )
+            });
+        }
         // An accepted identity retires its rejected sibling so the
         // pre-policy received count stays one slot per prefix.
         for route in &announced {

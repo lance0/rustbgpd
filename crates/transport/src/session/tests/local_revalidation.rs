@@ -79,10 +79,19 @@ struct Fixture {
 }
 
 async fn fixture(snapshot: ValidationSnapshot, import: PolicyChain) -> Fixture {
+    fixture_with(snapshot, import, |_| {}).await
+}
+
+async fn fixture_with(
+    snapshot: ValidationSnapshot,
+    import: PolicyChain,
+    configure: impl FnOnce(&mut TransportConfig),
+) -> Fixture {
     let mut peer_config = PeerConfig::new(65001, 65002, Ipv4Addr::new(10, 0, 0, 1));
     peer_config.families = vec![(Afi::Ipv4, Safi::Unicast)];
     let mut config = TransportConfig::new(peer_config, "10.0.0.2:179".parse().unwrap());
     config.local_revalidation = true;
+    configure(&mut config);
     let (validation, validation_rx) = watch::channel(snapshot);
     let (_cmd_tx, cmd_rx) = mpsc::channel(8);
     let (rib_tx, rib_rx) = mpsc::channel(64);
@@ -159,11 +168,15 @@ impl Fixture {
     }
 
     fn retained(&self, addr: [u8; 4]) -> Option<bool> {
+        self.retained_path(addr, 0)
+    }
+
+    fn retained_path(&self, addr: [u8; 4], path_id: u32) -> Option<bool> {
         self.session
             .validation_retention
             .as_ref()
             .unwrap()
-            .retained(&(Prefix::V4(prefix(addr)), 0))
+            .retained(&(Prefix::V4(prefix(addr)), path_id))
     }
 
     /// Publish the new snapshot, then run the session's answer and every
@@ -396,6 +409,46 @@ async fn enhanced_refresh_window_sweeps_unreplayed_retained_input() {
     // EoRR without a replay: the peer stopped announcing it.
     f.session.end_refresh_accounting(Afi::Ipv4, Safi::Unicast);
     assert_eq!(f.retained(INVALID), None);
+}
+
+/// Max-prefix `Block` withholds a net-new prefix: it never reaches the
+/// Adj-RIB-In, so the RFC 9324 store must not hold it either.
+#[tokio::test]
+async fn max_prefix_block_withheld_route_is_not_retained() {
+    let mut f = fixture_with(vrps(vec![]), deny_invalid(true), |config| {
+        config.max_prefix_action = crate::config::MaxPrefixAction::Block;
+        config.max_prefixes_ipv4 = Some(1);
+    })
+    .await;
+    f.announce(VALID).await;
+    f.announce(OTHER).await;
+    assert_eq!(f.rib_routes(), (vec![Prefix::V4(prefix(VALID))], vec![]));
+    assert_eq!(f.retained(VALID), Some(true));
+    assert_eq!(f.retained(OTHER), None, "withheld by Block");
+    assert_eq!(
+        f.session.validation_retention.as_ref().unwrap().len(),
+        (1, 0)
+    );
+}
+
+/// Add-Path receive admission withholds a path beyond
+/// `paths_limit_receive_max`; the store is bounded by the same admission.
+#[tokio::test]
+async fn add_path_receive_bound_withheld_path_is_not_retained() {
+    let mut f = fixture_with(vrps(vec![]), deny_invalid(true), |config| {
+        config.max_prefix_action = crate::config::MaxPrefixAction::Block;
+        config.peer.paths_limit_receive_max = 1;
+    })
+    .await;
+    install_dual_stack_session(&mut f.session, true);
+    for path_id in [1, 2] {
+        f.session
+            .process_update(ipv4_announce(prefix(VALID), path_id, true))
+            .await;
+    }
+    assert_eq!(f.rib_routes(), (vec![Prefix::V4(prefix(VALID))], vec![]));
+    assert_eq!(f.retained_path(VALID, 1), Some(true));
+    assert_eq!(f.retained_path(VALID, 2), None, "beyond receive_max");
 }
 
 fn aspa(records: Vec<(u32, u32)>) -> ValidationSnapshot {
