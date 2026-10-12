@@ -649,26 +649,9 @@ impl Controller {
             self.publish_states();
             return;
         }
-        if !self.receipt_loaded {
-            match self.store.as_ref().map(ReceiptStore::read) {
-                Some(Ok(entries)) => {
-                    self.receipt = entries.unwrap_or_default();
-                    self.receipt_loaded = true;
-                }
-                Some(Err(message)) => {
-                    if self.store_error.as_deref() != Some(message.as_str()) {
-                        error!(
-                            reason = "action_failed",
-                            error = %message,
-                            "core-isolation receipt unreadable; no link is touched"
-                        );
-                    }
-                    self.store_error = Some(message);
-                    self.publish_states();
-                    return;
-                }
-                None => return,
-            }
+        if !self.load_receipt() {
+            self.publish_states();
+            return;
         }
         let peers = if poll && self.enabled().is_some() {
             self.poll_rib().await
@@ -686,6 +669,35 @@ impl Controller {
         self.plan(&links, peers);
         self.act(&links).await;
         self.publish_states();
+    }
+
+    /// Read the receipt once. A read error is reported and retried on the
+    /// next pass; a later successful read clears it, so a repaired receipt
+    /// does not leave every binding at `action_failed`.
+    fn load_receipt(&mut self) -> bool {
+        if self.receipt_loaded {
+            return true;
+        }
+        match self.store.as_ref().map(ReceiptStore::read) {
+            Some(Ok(entries)) => {
+                self.receipt = entries.unwrap_or_default();
+                self.receipt_loaded = true;
+                self.store_error = None;
+                true
+            }
+            Some(Err(message)) => {
+                if self.store_error.as_deref() != Some(message.as_str()) {
+                    error!(
+                        reason = "action_failed",
+                        error = %message,
+                        "core-isolation receipt unreadable; no link is touched"
+                    );
+                }
+                self.store_error = Some(message);
+                false
+            }
+            None => false,
+        }
     }
 
     async fn dump(&mut self) -> Option<Vec<AdminLinkState>> {

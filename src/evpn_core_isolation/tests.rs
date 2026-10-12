@@ -868,5 +868,66 @@ fn ambiguous_entry_is_stale_only_with_nothing_left_down() {
     );
 }
 
+/// A receipt that is unreadable on one pass and repaired before the next
+/// clears the read error: bindings do not stay at `action_failed`.
+#[test]
+fn repaired_receipt_clears_the_read_error() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::set_permissions(
+        dir.path(),
+        std::os::unix::fs::PermissionsExt::from_mode(0o700),
+    )
+    .unwrap();
+    let receipt_path = dir.path().join(receipt::RECEIPT_FILE);
+    std::fs::write(&receipt_path, b"not json").unwrap();
+    std::fs::set_permissions(
+        &receipt_path,
+        std::os::unix::fs::PermissionsExt::from_mode(0o600),
+    )
+    .unwrap();
+
+    let metrics = BgpMetrics::with_registry(prometheus::Registry::new());
+    let (rib_tx, _rib_rx) = mpsc::channel(1);
+    let mut controller = Controller::new(CoreIsolationDeps {
+        rib_tx,
+        metrics: metrics.clone(),
+        directory: None,
+        start: Instant::now(),
+    });
+    controller.store =
+        Some(receipt::ReceiptStore::lock(std::fs::File::open(dir.path()).unwrap()).unwrap());
+    controller.apply_config(Arc::new(snapshot("bond0", Some(esi(1)))));
+    let state = || -> Vec<String> {
+        metrics
+            .registry()
+            .gather()
+            .iter()
+            .filter(|f| f.name() == "evpn_es_core_isolation_state")
+            .flat_map(|f| f.get_metric().to_vec())
+            .filter(|m| (m.get_gauge().get_value() - 1.0).abs() < f64::EPSILON)
+            .flat_map(|m| {
+                m.get_label()
+                    .iter()
+                    .filter(|l| l.name() == "state")
+                    .map(|l| l.value().to_string())
+                    .collect::<Vec<_>>()
+            })
+            .collect()
+    };
+
+    assert!(!controller.load_receipt());
+    controller.publish_states();
+    assert_eq!(state(), ["action_failed"]);
+
+    std::fs::remove_file(&receipt_path).unwrap();
+    assert!(controller.load_receipt());
+    controller.publish_states();
+    assert_eq!(
+        state(),
+        ["startup_hold"],
+        "a repaired receipt must not leave the binding at action_failed"
+    );
+}
+
 #[cfg(target_os = "linux")]
 mod netns;

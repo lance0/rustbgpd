@@ -2447,7 +2447,9 @@ impl BgpMetrics {
                  excluded from the signal. action_failed: an admin-state write or \
                  receipt publication failed. disabled: [evpn_core_isolation] is off. \
                  interface is the bound link name. Series are removed when the binding \
-                 leaves the config.",
+                 leaves the config, except that an interface whose release is still \
+                 failing keeps its action_failed or ownership_ambiguous series until \
+                 nothing it owns is left down.",
             ),
             &["interface", "state"],
         )
