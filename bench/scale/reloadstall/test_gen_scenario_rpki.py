@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
-"""Pure generator checks for the optional RPKI route-server scenario."""
+"""Pure generator checks for the optional RPKI and EVPN route-reflector scenarios."""
 
+import hashlib
 import os
 from pathlib import Path
 import subprocess
@@ -133,6 +134,89 @@ class RpkiScenarioTests(unittest.TestCase):
                     result = self.generate(out, cache=None, changed_peers=changed, extra_env=env)
                     self.assertNotEqual(result.returncode, 0)
                     self.assertIn("GEN_CONVERGED_REJOIN", result.stderr)
+                    self.assertFalse(out.exists())
+
+
+# Default output digests (output directory normalized to <OUT>) taken from the
+# generator before the GEN_EVPN extension. An optional knob must leave them
+# byte-identical.
+DEFAULT_DIGESTS = {
+    "route-server": "359b92e3a66f87272c6fe46032196dceb9c0823abff6acce5a6b31f419fa6f29",
+    "route-reflector": "978c07ba1d7d0222403c76a5e6dc0c90908433666b1e29e362625e4eca9ab0a7",
+}
+DEFAULT_FILES = ("config.toml", "member.rpol", "gen-a.rpol", "gen-b.rpol")
+
+
+class EvpnScenarioTests(unittest.TestCase):
+    def generate(self, directory: Path, env: dict[str, str]):
+        clean = {key: value for key, value in os.environ.items() if not key.startswith("GEN_")}
+        return subprocess.run(
+            [sys.executable, str(GENERATOR), "8", str(directory), "1790"],
+            env={**clean, **env}, capture_output=True, text=True, check=False,
+        )
+
+    def test_default_outputs_stay_byte_identical(self):
+        for mode, env in (("route-server", {}), ("route-reflector", {"GEN_IBGP_RR_ASN": "64512"}),
+                          ("route-reflector", {"GEN_IBGP_RR_ASN": "64512", "GEN_EVPN": "0"})):
+            with self.subTest(mode=mode, env=env), tempfile.TemporaryDirectory(
+                prefix="evpn-gen-", dir="/tmp"
+            ) as tmp:
+                out = Path(tmp) / "scenario"
+                result = self.generate(out, env)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(sorted(p.name for p in out.iterdir()), sorted(DEFAULT_FILES))
+                digest = hashlib.sha256()
+                for name in DEFAULT_FILES:
+                    digest.update(name.encode() + b"\0")
+                    digest.update((out / name).read_text()
+                                  .replace(str(out.resolve()), "<OUT>").encode())
+                self.assertEqual(digest.hexdigest(), DEFAULT_DIGESTS[mode])
+
+    def test_evpn_generations_are_valid_and_differ_only_by_description(self):
+        with tempfile.TemporaryDirectory(prefix="evpn-gen-", dir="/tmp") as tmp:
+            out = Path(tmp) / "scenario"
+            result = self.generate(out, {"GEN_IBGP_RR_ASN": "64512", "GEN_EVPN": "1"})
+            self.assertEqual(result.returncode, 0, result.stderr)
+            live = (out / "config.toml").read_text()
+            gen_a = (out / "config-gen-a.toml").read_text()
+            gen_b = (out / "config-gen-b.toml").read_text()
+            self.assertEqual(live, gen_a, "the daemon starts on generation A")
+            for suffix, text in (("gen-a", gen_a), ("gen-b", gen_b)):
+                config = tomllib.loads(text)
+                self.assertEqual(config["global"]["asn"], 64512)
+                self.assertEqual(config["global"]["cluster_id"], "10.0.0.1")
+                self.assertNotIn("policy", config)
+                self.assertEqual(len(config["neighbors"]), 8)
+                for index, neighbor in enumerate(config["neighbors"]):
+                    self.assertEqual(neighbor, {
+                        "address": f"127.1.0.{index + 1}",
+                        "remote_asn": 64512,
+                        "route_reflector_client": True,
+                        "families": ["l2vpn_evpn"],
+                        "hold_time": 180,
+                        "description": f"evpn-rr-client-{index} {suffix}",
+                    })
+            changed = [(a, b) for a, b in zip(gen_a.splitlines(), gen_b.splitlines()) if a != b]
+            self.assertEqual(len(gen_a.splitlines()), len(gen_b.splitlines()))
+            self.assertEqual(len(changed), 8)
+            for line_a, line_b in changed:
+                self.assertTrue(line_a.startswith("description = ") and line_a.endswith(' gen-a"'))
+                self.assertEqual(line_b, line_a[: -len(' gen-a"')] + ' gen-b"')
+
+    def test_evpn_rejects_unsupported_combinations(self):
+        cases = [
+            {"GEN_EVPN": "1"},
+            {"GEN_EVPN": "2", "GEN_IBGP_RR_ASN": "64512"},
+            {"GEN_EVPN": "1", "GEN_IBGP_RR_ASN": "64512", "GEN_DUALSTACK": "1"},
+            {"GEN_EVPN": "1", "GEN_IBGP_RR_ASN": "64512", "GEN_FILTER_COUNT": "1"},
+        ]
+        with tempfile.TemporaryDirectory(prefix="evpn-gen-", dir="/tmp") as tmp:
+            for index, env in enumerate(cases):
+                with self.subTest(env=env):
+                    out = Path(tmp) / str(index)
+                    result = self.generate(out, env)
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn("GEN_EVPN", result.stderr)
                     self.assertFalse(out.exists())
 
 
