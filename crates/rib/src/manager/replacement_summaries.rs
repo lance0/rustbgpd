@@ -37,9 +37,11 @@ impl ReplacementSummaries {
                 trace.emit("summary");
             }
             match query {
+                // The frozen view captured no stale counts.
                 RibSummaryQuery::NeighborRibSnapshots {
                     peers,
                     comparison,
+                    stale_counts: _,
                     reply,
                 } => {
                     super::queries::send_neighbor_rib_snapshot(
@@ -308,6 +310,7 @@ mod tests {
                 peers: Vec::new(),
                 comparison: None,
                 reply,
+                stale_counts: false,
             })
             .unwrap();
             response
@@ -393,6 +396,7 @@ mod tests {
                 peers: vec![unknown, waiter, unknown],
                 comparison: Some((unknown, waiter)),
                 reply,
+                stale_counts: false,
             })
             .unwrap();
             let (canceled_reply, canceled_response) = oneshot::channel();
@@ -401,6 +405,7 @@ mod tests {
                 peers: vec![unknown],
                 comparison: None,
                 reply: canceled_reply,
+                stale_counts: false,
             })
             .unwrap();
             manager.with_replacement_summary_reads("apply", |manager| {
@@ -419,6 +424,7 @@ mod tests {
             peers: Vec::new(),
             comparison: None,
             reply,
+            stale_counts: false,
         })
         .unwrap();
         manager.drain_summary_queries();
@@ -519,6 +525,7 @@ mod tests {
                     peers: Vec::new(),
                     comparison: None,
                     reply,
+                    stale_counts: false,
                 })
                 .unwrap();
             context.state.lock().unwrap().last_service -= budget;
@@ -587,6 +594,7 @@ mod tests {
                             peers: Vec::new(),
                             comparison: None,
                             reply,
+                            stale_counts: false,
                         })
                         .unwrap();
                     snapshots.push(response);
@@ -657,6 +665,7 @@ mod tests {
                     peers: Vec::new(),
                     comparison: None,
                     reply,
+                    stale_counts: false,
                 })
                 .unwrap();
             (count, snapshot)
@@ -752,6 +761,7 @@ mod tests {
                     peers: Vec::new(),
                     comparison: None,
                     reply,
+                    stale_counts: false,
                 })
                 .unwrap();
             response
@@ -887,6 +897,7 @@ mod tests {
                     peers: Vec::new(),
                     comparison: None,
                     reply,
+                    stale_counts: false,
                 })
                 .unwrap();
                 replies.push(response);

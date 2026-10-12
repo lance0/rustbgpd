@@ -2774,11 +2774,13 @@ impl RibManager {
         &self,
         peers: Vec<IpAddr>,
         comparison: Option<(IpAddr, IpAddr)>,
+        stale_counts: bool,
         reply: tokio::sync::oneshot::Sender<NeighborRibSnapshotResponse>,
     ) {
-        // Stale counts scan a peer's Adj-RIB-In; bound that to one peer per
-        // actor turn so a neighbor list during a mass GR event stays cheap.
-        let with_stale_counts = peers.len() == 1;
+        // Stale counts scan a peer's Adj-RIB-In: only an explicit
+        // single-neighbor read asks, and the scan never covers more than one
+        // peer per actor turn.
+        let with_stale_counts = stale_counts && peers.len() == 1;
         send_neighbor_rib_snapshot(
             reply,
             peers,

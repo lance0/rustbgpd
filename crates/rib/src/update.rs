@@ -60,6 +60,11 @@ pub enum RibSummaryQuery {
         peers: Vec<IpAddr>,
         /// Optional update-group comparison.
         comparison: Option<(IpAddr, IpAddr)>,
+        /// Count each retained family's stale routes. Counting scans the
+        /// peer's Adj-RIB-In, so only a single-neighbor read sets this;
+        /// list and doctor reads leave it false. Honored only for a
+        /// one-peer request.
+        stale_counts: bool,
         /// Response channel.
         reply: oneshot::Sender<NeighborRibSnapshotResponse>,
     },
@@ -71,10 +76,12 @@ impl From<RibSummaryQuery> for RibUpdate {
             RibSummaryQuery::NeighborRibSnapshots {
                 peers,
                 comparison,
+                stale_counts,
                 reply,
             } => Self::QueryNeighborRibSnapshots {
                 peers,
                 comparison,
+                stale_counts,
                 reply,
             },
         }
@@ -2713,6 +2720,11 @@ pub enum RibUpdate {
         peers: Vec<IpAddr>,
         /// Optional `(primary, comparison)` update-group comparison.
         comparison: Option<(IpAddr, IpAddr)>,
+        /// Count each retained family's stale routes. Counting scans the
+        /// peer's Adj-RIB-In, so only a single-neighbor read sets this;
+        /// list and doctor reads leave it false. Honored only for a
+        /// one-peer request.
+        stale_counts: bool,
         /// Response channel.
         reply: oneshot::Sender<NeighborRibSnapshotResponse>,
     },

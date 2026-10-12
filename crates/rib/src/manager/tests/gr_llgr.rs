@@ -3374,6 +3374,7 @@ async fn gr_retention_rows(
         peers: vec![peer],
         comparison: None,
         reply,
+        stale_counts: true,
     })
     .await
     .unwrap();
@@ -3435,13 +3436,14 @@ async fn neighbor_snapshot_reports_gr_retention_phase_and_remaining_time() {
         .await
         .unwrap();
     assert_retention(&gr_retention_rows(&tx, source).await, GrRestart, 120);
-    // A multi-peer query (neighbor list, doctor) keeps the phase and deadline
-    // but never scans the Adj-RIB-In for counts.
+    // A list read (neighbor list, doctor) keeps the phase and deadline but
+    // never scans the Adj-RIB-In for counts.
     let (reply, response) = oneshot::channel();
     tx.send(RibUpdate::QueryNeighborRibSnapshots {
         peers: vec![source, IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2))],
         comparison: None,
         reply,
+        stale_counts: false,
     })
     .await
     .unwrap();
@@ -3451,6 +3453,19 @@ async fn neighbor_snapshot_reports_gr_retention_phase_and_remaining_time() {
     assert_eq!(listed[0].gr_retention[0].remaining_secs, Some(120));
     assert_eq!(listed[0].gr_retention[0].stale_routes, None);
     assert_eq!(listed[1].gr_retention, Vec::new());
+    // A list read on a one-peer daemon asks for no count, and gets none.
+    let (reply, response) = oneshot::channel();
+    tx.send(RibUpdate::QueryNeighborRibSnapshots {
+        peers: vec![source],
+        comparison: None,
+        reply,
+        stale_counts: false,
+    })
+    .await
+    .unwrap();
+    let listed = response.await.unwrap().snapshots;
+    assert_eq!(listed[0].gr_retention.len(), 1);
+    assert_eq!(listed[0].gr_retention[0].stale_routes, None);
     tokio::time::advance(Duration::from_secs(30)).await;
     tokio::task::yield_now().await;
     assert_retention(&gr_retention_rows(&tx, source).await, GrRestart, 90);
@@ -3522,6 +3537,7 @@ async fn replacement_summary_view_keeps_down_peer_retention_row() {
                 peers: vec![peer],
                 comparison: None,
                 reply,
+                stale_counts: false,
             })
             .unwrap();
         manager.replacement_checkpoint(true);

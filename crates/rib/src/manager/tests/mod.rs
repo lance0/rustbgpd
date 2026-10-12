@@ -337,6 +337,7 @@ fn neighbor_rib_snapshot_query_projects_policy_stats() {
         peers: vec![peer],
         comparison: None,
         reply,
+        stale_counts: false,
     });
     let response = response
         .try_recv()

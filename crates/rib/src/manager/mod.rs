@@ -3528,9 +3528,10 @@ impl RibManager {
             RibUpdate::QueryNeighborRibSnapshots {
                 peers,
                 comparison,
+                stale_counts,
                 reply,
             } => {
-                self.handle_query_neighbor_rib_snapshots(peers, comparison, reply);
+                self.handle_query_neighbor_rib_snapshots(peers, comparison, stale_counts, reply);
             }
             RibUpdate::QueryUpdateGroupSnapshot { reply } => {
                 self.handle_query_update_group_snapshot(reply);

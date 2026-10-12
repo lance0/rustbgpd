@@ -440,6 +440,7 @@ async fn query_neighbor_rib_snapshots(
     summary_tx: Option<&mpsc::Sender<RibSummaryQuery>>,
     peers: Vec<IpAddr>,
     comparison: Option<(IpAddr, IpAddr)>,
+    stale_counts: bool,
 ) -> Result<NeighborRibSnapshotResponse, Status> {
     tokio::time::timeout(
         RIB_SNAPSHOT_TIMEOUT,
@@ -447,6 +448,7 @@ async fn query_neighbor_rib_snapshots(
             RibSummaryQuery::NeighborRibSnapshots {
                 peers,
                 comparison,
+                stale_counts,
                 reply,
             }
         }),
@@ -1334,6 +1336,8 @@ impl proto::neighbor_service_server::NeighborService for NeighborService {
             self.rib_summary_tx.as_ref(),
             infos.iter().map(|info| info.address).collect(),
             None,
+            // A list never scans per-peer stale routes in the RIB turn.
+            false,
         )
         .await?;
         if snapshots.snapshots.len() != infos.len() {
@@ -1417,6 +1421,7 @@ impl proto::neighbor_service_server::NeighborService for NeighborService {
             self.rib_summary_tx.as_ref(),
             vec![info.address],
             comparison_pair,
+            true,
         )
         .await?;
         if snapshots.snapshots.len() != 1 {
@@ -2066,6 +2071,7 @@ mod tests {
                     peers,
                     comparison,
                     reply,
+                    stale_counts: _,
                 } = summary_rx.recv().await.unwrap();
                 assert_eq!(peers, ["192.0.2.1".parse::<IpAddr>().unwrap()]);
                 assert!(comparison.is_none());
@@ -2127,6 +2133,7 @@ mod tests {
                             peers: Vec::new(),
                             comparison: None,
                             reply,
+                            stale_counts: false,
                         })
                         .await
                         .unwrap();
@@ -3745,6 +3752,7 @@ mod tests {
                         peers,
                         comparison,
                         reply,
+                        stale_counts: _,
                     } => {
                         assert_eq!(peers, vec![addr]);
                         assert!(comparison.is_none());
@@ -3866,12 +3874,14 @@ mod tests {
                 peers,
                 comparison,
                 reply,
+                stale_counts,
             }) = rib_rx.recv().await
             else {
                 panic!("ListNeighbors must issue one aggregate RIB snapshot");
             };
             assert_eq!(peers, vec![second, tenth, link_local, link_local]);
             assert!(comparison.is_none());
+            assert!(!stale_counts, "a neighbor list never requests stale counts");
             let link_local_snapshot = NeighborRibSnapshot {
                 peer: link_local,
                 advertised_count: 11,
@@ -4000,6 +4010,7 @@ mod tests {
             peers,
             comparison,
             reply,
+            stale_counts: _,
         }) = tokio::time::timeout(Duration::from_secs(3), rib_rx.recv())
             .await
             .expect("RIB lookup must follow the inventory reply")
@@ -4159,6 +4170,7 @@ mod tests {
                 peers,
                 comparison: comparison_pair,
                 reply,
+                stale_counts: _,
             } = rib_rx.recv().await.expect("RIB snapshot")
             else {
                 panic!("expected aggregate RIB snapshot");
@@ -4287,12 +4299,13 @@ mod tests {
             }
         });
         let rib_task = tokio::spawn(async move {
-            let Some(RibUpdate::QueryNeighborRibSnapshots { peers, comparison: comparison_pair, reply })
+            let Some(RibUpdate::QueryNeighborRibSnapshots { peers, comparison: comparison_pair, stale_counts, reply })
                 = rib_rx.recv().await else {
                 panic!("comparison must use the aggregate RIB snapshot query");
             };
             assert_eq!(peers, vec![primary]);
             assert_eq!(comparison_pair, Some((primary, comparison)));
+            assert!(stale_counts, "a single-neighbor read requests stale counts");
             reply.send(NeighborRibSnapshotResponse {
                 snapshots: vec![NeighborRibSnapshot {
                     peer: primary,
@@ -4415,6 +4428,7 @@ mod tests {
                     peers,
                     comparison: actual,
                     reply,
+                    stale_counts: _,
                 }) = rib_rx.recv().await
                 else {
                     panic!("expected aggregate RIB snapshot");
