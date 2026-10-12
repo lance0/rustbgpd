@@ -266,6 +266,31 @@ class OracleTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             oracle.analyze_wire(lines)
 
+    def test_only_pre_established_collision_cease_is_allowed(self):
+        open_ = message(1, open_body()).hex()
+        keepalive = message(4, b"").hex()
+
+        def row(src, dst, *raw):
+            return f"9\t{src}\t{dst}\t100\t{''.join(raw)}"
+
+        def collided(notification, rr_sends_keepalive=False, source_sends=()):
+            # The RR's own connection to the source, closed by the source.
+            sent = (open_, keepalive) if rr_sends_keepalive else (open_,)
+            return fixture()[:1] + [row(oracle.RR, oracle.SOURCE, *sent),
+                                    row(oracle.SOURCE, oracle.RR, open_, *source_sends, notification)] + fixture()[1:]
+
+        oracle.analyze_wire(collided(message(3, b"\x06\x07").hex()))
+        oracle.analyze_wire(collided(message(3, b"\x06\x07").hex(), rr_sends_keepalive=True))
+        cases = {
+            "other Cease subcode": collided(message(3, b"\x06\x02").hex()),
+            "FSM error": collided(message(3, b"\x05\x00").hex()),
+            "after Established": collided(message(3, b"\x06\x07").hex(), True, (keepalive,)),
+            "UPDATE on the stream": collided(message(3, b"\x06\x07").hex(), source_sends=(announce(1, 1).hex(),)),
+        }
+        for name, lines in cases.items():
+            with self.subTest(name), self.assertRaises(ValueError):
+                oracle.analyze_wire(lines)
+
     def test_eor_before_all_five_refreshed_routes_fails(self):
         restart = message(1, open_body(True, True)) + b"".join(announce(t, 1) for t in range(1, 5))
         restart += message(2, update_body(attr(15, bytes.fromhex("001946"))))
