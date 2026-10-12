@@ -6214,6 +6214,14 @@ impl BgpMetrics {
         }
     }
 
+    /// Drop both core-isolation signal series, so a disabled or removed
+    /// `[evpn_core_isolation]` leaves no stale value behind.
+    pub fn clear_evpn_core_isolated(&self) {
+        for signal in EVPN_CORE_ISOLATION_SIGNALS {
+            let _ = self.0.evpn_core_isolated.remove_label_values(&[signal]);
+        }
+    }
+
     /// Publish the two ADR-0140 core-isolation signals.
     pub fn set_evpn_core_isolated(&self, sessions: bool, uplinks: bool) {
         for (signal, value) in EVPN_CORE_ISOLATION_SIGNALS.iter().zip([sessions, uplinks]) {

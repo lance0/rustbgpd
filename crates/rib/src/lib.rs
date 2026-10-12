@@ -96,8 +96,8 @@ pub use route::{
 pub use update::{
     AdjRibInRpkiCounts, AdjRibOutCounts, BestPathCandidate, BestRoutesPage, BmpPeerStats,
     DataplaneExactQueryError, DataplanePageError, DataplaneVersions, EffectiveDistributionMode,
-    EvpnDataplaneRoutesResponse, EvpnRoutePage, EvpnRouteQueryKey, EvpnSessionsSync,
-    ExactBestRoutes, ExactExportCandidate, ExactExportEncoder, ExactExportError,
+    EvpnDataplaneRoutesResponse, EvpnEsSnapshot, EvpnRoutePage, EvpnRouteQueryKey,
+    EvpnSessionsSync, ExactBestRoutes, ExactExportCandidate, ExactExportEncoder, ExactExportError,
     ExactExportErrorCode, ExactExportKey, ExactExportResult, ExactExportSnapshot,
     ExactFibInstallCandidates, ExplainAdvertisedRoute, ExplainAdvertisedRouteError,
     ExplainBestPath, ExplainDecision, ExplainEvpnExport, ExplainEvpnRoute, ExplainReason,

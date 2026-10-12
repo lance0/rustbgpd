@@ -4735,8 +4735,11 @@ after `recovery_delay_seconds`.
 
 **Peer rule.** Isolation holds a segment only if a remote PE's Type 4 route for
 its ESI, with the matching ES-Import route target, was present while the core
-was up. Otherwise the CE has no other member and the hold is suppressed
-(`suppressed_no_peer`).
+was up and EVPN was synced. Otherwise the CE has no other member and the hold
+is suppressed (`suppressed_no_peer`). A reload that gives a bound interface
+another ESI or originator drops that peer record and the hold: the members are
+released, and the segment is held again only after a Type 4 is seen for the
+new identity.
 
 **Holds.** A hold arms at daemon start (every bound segment, without the peer
 rule) or at the isolation edge. It releases once EVPN has been continuously

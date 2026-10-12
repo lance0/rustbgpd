@@ -213,11 +213,11 @@ async fn peer_latch_survives_the_last_session_down_flush_but_not_a_withdrawal() 
     );
 }
 
-/// The controller reads Type 4 before the session counts, so a flush
-/// that lands between the two reads can only hide the peers, never
-/// present an empty set as current.
+/// The controller reads sessions and Type 4 rows in one RIB turn through
+/// the O(Type 4) snapshot, never a filtered walk of the EVPN Loc-RIB, and
+/// latches peers only while EVPN is synced.
 #[tokio::test]
-async fn rib_poll_reads_type4_before_sessions() {
+async fn rib_poll_uses_one_indexed_snapshot_and_latches_only_when_synced() {
     let (rib_tx, mut rib_rx) = mpsc::channel(8);
     let mut controller = Controller::new(CoreIsolationDeps {
         rib_tx,
@@ -227,36 +227,150 @@ async fn rib_poll_reads_type4_before_sessions() {
     });
     controller.snapshot = Arc::new(snapshot("bond0", Some(esi(1))));
     let rib = tokio::spawn(async move {
-        // First query sees the pre-flush RIB, the second the flushed one.
-        let mut first = true;
+        let mut synced = true;
         while let Some(update) = rib_rx.recv().await {
             match update {
-                RibUpdate::QueryEvpnRoutes { reply, .. } => {
-                    let _ = reply.send(if first {
-                        vec![remote_type4(esi(1), "10.0.0.2")]
-                    } else {
-                        Vec::new()
+                RibUpdate::QueryEvpnEsSnapshot { reply } => {
+                    let _ = reply.send(rustbgpd_rib::EvpnEsSnapshot {
+                        sessions: EvpnSessionsSync {
+                            established: 1,
+                            stale: 0,
+                            synced,
+                        },
+                        es_routes: vec![remote_type4(esi(1), "10.0.0.2")],
                     });
+                    synced = false;
                 }
-                RibUpdate::QueryEvpnSessionsSynced { reply } => {
-                    let _ = reply.send(EvpnSessionsSync {
-                        established: usize::from(first),
-                        stale: 0,
-                        synced: first,
-                    });
+                RibUpdate::QueryEvpnRoutes { .. } => {
+                    panic!("the poll must not walk the EVPN Loc-RIB")
                 }
                 _ => panic!("unexpected RIB query"),
             }
-            first = false;
         }
     });
-    let peers = controller.poll_rib().await;
+    let peers = controller
+        .poll_rib()
+        .await
+        .expect("synced snapshot latches");
+    assert_eq!(peers["bond0"], BTreeSet::from([ip("10.0.0.2")]));
     assert!(
-        peers.is_none(),
-        "a Type 4 read before the flush is discarded when the session read after it is empty"
+        controller.poll_rib().await.is_none(),
+        "an unsynced session cannot present its partial Type 4 set"
     );
+    assert_eq!(controller.last_sessions.map(|s| s.established), Some(1));
     drop(controller);
     rib.await.unwrap();
+}
+
+fn snapshot_with(
+    esi_text: &str,
+    id: Option<rustbgpd_wire::EthernetSegmentIdentifier>,
+    originator: &str,
+) -> Arc<CoreIsolationSnapshot> {
+    let mut snap = snapshot("bond0", id);
+    let binding = snap.bindings.get_mut("bond0").unwrap();
+    binding.esi_text = esi_text.to_string();
+    binding.originator_ip = Some(ip(originator));
+    Arc::new(snap)
+}
+
+/// An isolated binding whose segment identity changes on a live reload
+/// loses its latch and its hold: its members go back up through the
+/// guarded release, and it is not held again until a Type 4 is seen for
+/// the new identity. An `auto-lacp` ESI that only goes unresolved (its
+/// own members are held down) keeps the hold.
+#[tokio::test(start_paused = true)]
+async fn identity_change_drops_the_peer_latch_and_the_hold() {
+    let isolated = |next: Arc<CoreIsolationSnapshot>| {
+        let (rib_tx, _rib_rx) = mpsc::channel(1);
+        let mut controller = Controller::new(CoreIsolationDeps {
+            rib_tx,
+            metrics: BgpMetrics::new(),
+            directory: None,
+            start: Instant::now(),
+        });
+        controller.startup = false;
+        controller.apply_config(snapshot_with("auto-lacp", Some(esi(1)), "10.0.0.1"));
+        let b = bindings(&["bond0"]);
+        let planner = controller.planner.as_mut().unwrap();
+        planner.observe(&b, &core_up(true, &["10.0.0.2"]), Instant::now());
+        planner.observe(&b, &core_lost(), Instant::now());
+        assert_eq!(planner.decision("bond0"), HoldDecision::Hold("isolated"));
+        controller.apply_config(next);
+        let planner = controller.planner.as_mut().unwrap();
+        let decision = planner.decision("bond0");
+        // Still isolated: without a fresh Type 4 it is never re-held.
+        planner.observe(&b, &core_lost(), Instant::now());
+        assert_eq!(planner.decision("bond0"), decision);
+        decision
+    };
+    for next in [
+        snapshot_with("00:00:00:00:00:00:00:00:00:07", Some(esi(7)), "10.0.0.1"),
+        snapshot_with("auto-lacp", Some(esi(9)), "10.0.0.1"),
+        snapshot_with("auto-lacp", Some(esi(1)), "10.0.0.5"),
+    ] {
+        assert_eq!(
+            isolated(next),
+            HoldDecision::Release("suppressed_no_peer"),
+            "a new segment identity must not inherit the old peer latch"
+        );
+    }
+    assert_eq!(
+        isolated(snapshot_with("auto-lacp", None, "10.0.0.1")),
+        HoldDecision::Hold("isolated"),
+        "an auto-lacp ESI lost to our own hold is not a new identity"
+    );
+}
+
+/// Disabling or removing the table clears the signal gauge, and an
+/// unbound interface loses its state series.
+#[test]
+fn disable_and_unbind_leave_no_stale_series() {
+    let metrics = BgpMetrics::with_registry(prometheus::Registry::new());
+    let (rib_tx, _rib_rx) = mpsc::channel(1);
+    let mut controller = Controller::new(CoreIsolationDeps {
+        rib_tx,
+        metrics: metrics.clone(),
+        directory: None,
+        start: Instant::now(),
+    });
+    let series = |family: &str| -> usize {
+        metrics
+            .registry()
+            .gather()
+            .iter()
+            .filter(|f| f.name() == family)
+            .map(|f| f.get_metric().len())
+            .sum()
+    };
+    controller.apply_config(Arc::new(snapshot("bond0", Some(esi(1)))));
+    controller.publish_states();
+    metrics.set_evpn_core_isolated(true, false);
+    assert!(series("evpn_es_core_isolation_state") > 0);
+    assert_eq!(series("evpn_core_isolated"), 2);
+
+    // Disabled in place: the binding reports `disabled`, the signals go.
+    let mut disabled = snapshot("bond0", Some(esi(1)));
+    disabled.settings.as_mut().unwrap().enabled = false;
+    controller.apply_config(Arc::new(disabled));
+    controller.publish_states();
+    assert_eq!(series("evpn_core_isolated"), 0);
+
+    // Unbound: the interface's state series are removed.
+    let mut unbound = snapshot("bond0", Some(esi(1)));
+    unbound.bindings.clear();
+    controller.apply_config(Arc::new(unbound));
+    controller.publish_states();
+    assert_eq!(series("evpn_es_core_isolation_state"), 0);
+
+    // Removed table with a binding left: no series either.
+    metrics.set_evpn_core_isolated(true, true);
+    let mut removed = snapshot("bond0", Some(esi(1)));
+    removed.settings = None;
+    controller.apply_config(Arc::new(removed));
+    controller.publish_states();
+    assert_eq!(series("evpn_es_core_isolation_state"), 0);
+    assert_eq!(series("evpn_core_isolated"), 0);
 }
 
 fn esi(seed: u8) -> rustbgpd_wire::EthernetSegmentIdentifier {

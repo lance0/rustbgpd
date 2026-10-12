@@ -2360,6 +2360,46 @@ impl RibManager {
     }
 
     #[must_use]
+    /// L2VPN/EVPN session counts and End-of-RIB sync, from the newest live
+    /// session record per peer.
+    fn evpn_sessions_sync(&self) -> crate::update::EvpnSessionsSync {
+        let evpn = (Afi::L2Vpn, Safi::Evpn);
+        // The newest live record is the one registration uses; an older
+        // collision-window record cannot vouch for it.
+        let peers: Vec<bool> = self
+            .live_sessions
+            .values()
+            .filter_map(|sessions| sessions.last())
+            .filter(|s| s.sendable_families.contains(&evpn))
+            .map(|s| s.evpn_end_of_rib)
+            .collect();
+        // Peers retaining L2VPN/EVPN routes as GR or LLGR stale: the
+        // overlay still forwards on them (ADR-0140 decision 2).
+        let stale = self
+            .gr_peers
+            .keys()
+            .chain(self.llgr_peers.keys())
+            .collect::<HashSet<_>>()
+            .into_iter()
+            .filter(|peer| {
+                self.gr_peers.get(*peer).is_some_and(|f| f.contains(&evpn))
+                    || self
+                        .llgr_peers
+                        .get(*peer)
+                        .is_some_and(|f| f.contains(&evpn))
+            })
+            .count();
+        // GR selection deferral keeps EVPN Loc-RIB unchanged, so remote
+        // Type 4 routes are not readable until it releases.
+        crate::update::EvpnSessionsSync {
+            established: peers.len(),
+            stale,
+            synced: !self.selection_deferred(evpn)
+                && !peers.is_empty()
+                && peers.iter().all(|&synced| synced),
+        }
+    }
+
     pub(super) fn selection_deferred(&self, family: (Afi, Safi)) -> bool {
         self.selection_deferral
             .as_ref()
@@ -3871,41 +3911,15 @@ impl RibManager {
                 queries::send_filtered_rows(self.loc_rib.iter_evpn(), filter.as_ref(), reply);
             }
             RibUpdate::QueryEvpnSessionsSynced { reply } => {
-                let evpn = (Afi::L2Vpn, Safi::Evpn);
-                // The newest live record is the one registration uses; an
-                // older collision-window record cannot vouch for it.
-                let peers: Vec<bool> = self
-                    .live_sessions
-                    .values()
-                    .filter_map(|sessions| sessions.last())
-                    .filter(|s| s.sendable_families.contains(&evpn))
-                    .map(|s| s.evpn_end_of_rib)
-                    .collect();
-                // Peers retaining L2VPN/EVPN routes as GR or LLGR stale:
-                // the overlay still forwards on them (ADR-0140 decision 2).
-                let stale = self
-                    .gr_peers
-                    .keys()
-                    .chain(self.llgr_peers.keys())
-                    .collect::<HashSet<_>>()
-                    .into_iter()
-                    .filter(|peer| {
-                        self.gr_peers.get(*peer).is_some_and(|f| f.contains(&evpn))
-                            || self
-                                .llgr_peers
-                                .get(*peer)
-                                .is_some_and(|f| f.contains(&evpn))
-                    })
-                    .count();
-                // GR selection deferral keeps EVPN Loc-RIB unchanged, so
-                // remote Type 4 routes are not readable until it releases.
-                let _ = reply.send(crate::update::EvpnSessionsSync {
-                    established: peers.len(),
-                    stale,
-                    synced: !self.selection_deferred(evpn)
-                        && !peers.is_empty()
-                        && peers.iter().all(|&synced| synced),
-                });
+                let _ = reply.send(self.evpn_sessions_sync());
+            }
+            RibUpdate::QueryEvpnEsSnapshot { reply } => {
+                if !reply.is_closed() {
+                    let _ = reply.send(crate::update::EvpnEsSnapshot {
+                        sessions: self.evpn_sessions_sync(),
+                        es_routes: self.loc_rib.iter_evpn_es().cloned().collect(),
+                    });
+                }
             }
             RibUpdate::QueryEvpnRoutesPage {
                 scope,

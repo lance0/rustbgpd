@@ -3339,6 +3339,28 @@ async fn evpn_sessions_sync_counts_established_and_gr_stale_peers() {
     handle.await.unwrap();
 }
 
+/// ADR-0140: the snapshot answers session counts and Type 4 rows in one
+/// actor turn.
+#[tokio::test]
+async fn evpn_es_snapshot_reports_sessions_with_no_routes() {
+    let a = Ipv4Addr::new(10, 0, 0, 1);
+    let (tx, rx) = mpsc::channel(64);
+    let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let handle = tokio::spawn(manager.run());
+    session_up(&tx, a, 1, evpn_sendable()).await;
+    evpn_eor(&tx, a, 1).await;
+    let (reply, rx) = tokio::sync::oneshot::channel();
+    tx.send(RibUpdate::QueryEvpnEsSnapshot { reply })
+        .await
+        .unwrap();
+    let snapshot = rx.await.unwrap();
+    assert_eq!(snapshot.sessions.established, 1);
+    assert!(snapshot.sessions.synced);
+    assert!(snapshot.es_routes.is_empty());
+    drop(tx);
+    handle.await.unwrap();
+}
+
 // --- FIB install-candidate view (multipath/ECMP) ---
 
 /// RFC 9785 §4.3 boot gate: synced only once every established EVPN

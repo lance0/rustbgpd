@@ -13,8 +13,9 @@
 //!   with the settle hold and the backstop). Paused-clock unit tests
 //!   drive it directly.
 //! - [`Controller`] owns the kernel side: it polls the RIB every
-//!   [`POLL_INTERVAL`] (Type 4 routes first, then the session counts,
-//!   so the last-session-down flush cannot clear the peer latch first),
+//!   [`POLL_INTERVAL`] for the session counts and the Type 4 rows in one
+//!   actor turn (O(Type 4) through the RIB's ES index, so the
+//!   last-session-down flush cannot fall between them),
 //!   rediscovers bond members on every `RTNLGRP_LINK` event and poll, and
 //!   applies the plan with fresh per-link checks, publishing the
 //!   write-ahead [`receipt`] before every admin-down.
@@ -29,7 +30,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use rustbgpd_evpn_linux::{AdminLinkState, AdminLinks};
-use rustbgpd_rib::{EvpnSessionsSync, RibUpdate, route::EvpnRibRoute};
+use rustbgpd_rib::{EvpnEsSnapshot, EvpnSessionsSync, RibUpdate, route::EvpnRibRoute};
 use rustbgpd_telemetry::BgpMetrics;
 use rustbgpd_wire::EvpnRoute;
 use tokio::sync::{mpsc, oneshot, watch};
@@ -76,8 +77,8 @@ pub(crate) struct Observation {
     pub sessions: EvpnSessionsSync,
     /// Every effective uplink lacks carrier.
     pub uplinks_down: bool,
-    /// Remote ES peers per bound interface, from a Type 4 read made
-    /// before a session read that still showed an Established session.
+    /// Remote ES peers per bound interface, from the Type 4 rows read in
+    /// the same RIB turn as `sessions`; latched only while EVPN is synced.
     /// Interfaces without a resolved ESI are absent and keep their latch.
     pub peers: Option<BTreeMap<String, BTreeSet<IpAddr>>>,
 }
@@ -144,6 +145,18 @@ impl HoldPlanner {
         }
     }
 
+    /// A binding's segment identity changed: drop its peer latch and its
+    /// hold. Its members are then released through the guarded path, and
+    /// it is held again only after a Type 4 is seen for the new identity
+    /// (or by a startup hold, which covers every binding).
+    pub(crate) fn forget(&mut self, binding: &str) {
+        self.peers.remove(binding);
+        self.held.remove(binding);
+        if matches!(self.phase, Phase::Isolated) {
+            self.suppressed.insert(binding.to_string());
+        }
+    }
+
     /// Apply new timers; the phase and its clocks are kept.
     pub(crate) fn retime(&mut self, settings: &EvpnCoreIsolationConfig) {
         self.hold_after_sync = Duration::from_secs(settings.hold_after_sync_seconds);
@@ -162,7 +175,7 @@ impl HoldPlanner {
         self.held.retain(|b| bindings.contains(b));
         self.suppressed.retain(|b| bindings.contains(b));
         self.peers.retain(|b, _| bindings.contains(b));
-        if observation.sessions.established > 0
+        if observation.sessions.synced
             && let Some(peers) = &observation.peers
         {
             for (binding, set) in peers {
@@ -471,7 +484,28 @@ impl Controller {
     }
 
     fn apply_config(&mut self, snapshot: CoreIsolationConfig) {
-        self.snapshot = snapshot;
+        let previous = std::mem::replace(&mut self.snapshot, snapshot);
+        for (interface, old) in &previous.bindings {
+            if let Some(new) = self.snapshot.bindings.get(interface)
+                && identity_changed(old, new)
+            {
+                info!(
+                    reason = "binding_changed",
+                    interface = %interface,
+                    "core-isolation binding changed segment identity; its peer latch and hold \
+                     are dropped until a Type 4 is seen for the new identity"
+                );
+                if let Some(planner) = self.planner.as_mut() {
+                    planner.forget(interface);
+                }
+                if let Some(runtime) = self.runtime.get_mut(interface) {
+                    runtime.overridden.clear();
+                }
+            }
+        }
+        if self.enabled().is_none() {
+            self.deps.metrics.clear_evpn_core_isolated();
+        }
         match (self.enabled().cloned(), self.planner.as_mut()) {
             (Some(settings), Some(planner)) => planner.retime(&settings),
             (Some(settings), None) => {
@@ -608,14 +642,17 @@ impl Controller {
         }
     }
 
-    /// Type 4 first, then sessions: the peer set is used only when the
-    /// session read that follows it still shows an Established session.
+    /// One RIB turn answers both the sessions and the Type 4 rows, so the
+    /// last-session-down flush can never land between them. The peer set
+    /// is used only while EVPN is synced: a reconnecting session that has
+    /// not sent End-of-RIB cannot present a partial Type 4 set.
     async fn poll_rib(&mut self) -> Option<BTreeMap<String, BTreeSet<IpAddr>>> {
-        let routes = query_type4(&self.deps.rib_tx).await;
-        let sessions = query_sessions(&self.deps.rib_tx).await?;
-        self.last_sessions = Some(sessions);
-        let routes = routes?;
-        (sessions.established > 0).then(|| peers_by_binding(&self.snapshot.bindings, &routes))
+        let snapshot = query_es_snapshot(&self.deps.rib_tx).await?;
+        self.last_sessions = Some(snapshot.sessions);
+        snapshot
+            .sessions
+            .synced
+            .then(|| peers_by_binding(&self.snapshot.bindings, &snapshot.es_routes))
     }
 
     /// Run the planner with the latest sessions and the uplink signal
@@ -1120,6 +1157,16 @@ pub(crate) fn discover(
         .collect()
 }
 
+/// Whether a binding now names a different segment: another configured
+/// ESI or originator, or another resolved ESI (a replaced CE behind an
+/// `auto-lacp` bond). An `auto-lacp` ESI that is merely unresolved, as it
+/// is while its own members are held down, is not a change.
+fn identity_changed(old: &CoreIsolationBinding, new: &CoreIsolationBinding) -> bool {
+    old.esi_text != new.esi_text
+        || old.originator_ip != new.originator_ip
+        || matches!((old.esi, new.esi), (Some(a), Some(b)) if a != b)
+}
+
 fn classify_entry(entry: &OwnedLink, host: &HostIdentity, links: &[AdminLinkState]) -> Guard {
     receipt::classify(entry, host, links)
 }
@@ -1192,32 +1239,14 @@ fn peers_by_binding(
         .collect()
 }
 
-async fn query_type4(rib_tx: &mpsc::Sender<RibUpdate>) -> Option<Vec<EvpnRibRoute>> {
+/// Session counts and Type 4 rows from one RIB actor turn: the RIB reads
+/// Type 4 through an index, so this costs O(Type 4), never a walk of the
+/// EVPN Loc-RIB.
+async fn query_es_snapshot(rib_tx: &mpsc::Sender<RibUpdate>) -> Option<EvpnEsSnapshot> {
     let (reply, rx) = oneshot::channel();
     tokio::time::timeout(RIB_QUERY_TIMEOUT, async {
         rib_tx
-            .send(RibUpdate::QueryEvpnRoutes {
-                // ponytail: scans the EVPN Loc-RIB once per poll; switch to a
-                // Type 4 event-driven re-read if it shows in RIB task profiles.
-                filter: Some(Box::new(|route: &EvpnRibRoute| {
-                    matches!(route.route, EvpnRoute::Es(_))
-                })),
-                reply,
-            })
-            .await
-            .ok()?;
-        rx.await.ok()
-    })
-    .await
-    .ok()
-    .flatten()
-}
-
-async fn query_sessions(rib_tx: &mpsc::Sender<RibUpdate>) -> Option<EvpnSessionsSync> {
-    let (reply, rx) = oneshot::channel();
-    tokio::time::timeout(RIB_QUERY_TIMEOUT, async {
-        rib_tx
-            .send(RibUpdate::QueryEvpnSessionsSynced { reply })
+            .send(RibUpdate::QueryEvpnEsSnapshot { reply })
             .await
             .ok()?;
         rx.await.ok()

@@ -2062,6 +2062,18 @@ impl WireRoutesReceived {
     }
 }
 
+/// Reply to [`RibUpdate::QueryEvpnEsSnapshot`]: the session state and the
+/// Type 4 rows read in one RIB turn, so no session teardown and its route
+/// flush can fall between the two (ADR-0140 decision 4).
+#[derive(Debug, Clone, Default)]
+pub struct EvpnEsSnapshot {
+    /// The same counts [`RibUpdate::QueryEvpnSessionsSynced`] reports.
+    pub sessions: EvpnSessionsSync,
+    /// Every best Type 4 (Ethernet Segment) route in the Loc-RIB, read in
+    /// O(Type 4) through an index, never by walking the EVPN table.
+    pub es_routes: Vec<EvpnRibRoute>,
+}
+
 /// Reply to [`RibUpdate::QueryEvpnSessionsSynced`].
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct EvpnSessionsSync {
@@ -3177,6 +3189,14 @@ pub enum RibUpdate {
     QueryEvpnSessionsSynced {
         /// Response channel.
         reply: oneshot::Sender<EvpnSessionsSync>,
+    },
+    /// The L2VPN/EVPN session state together with every best Type 4 route,
+    /// answered in one actor turn. Feeds the ADR-0140 core-isolation peer
+    /// latch at a per-second cadence, so it reads Type 4 rows through an
+    /// index rather than the whole EVPN Loc-RIB.
+    QueryEvpnEsSnapshot {
+        /// Response channel.
+        reply: oneshot::Sender<EvpnEsSnapshot>,
     },
     /// Query one bounded, version-fenced EVPN table page. Each page scans the
     /// scope but copies at most the clamped page size, ordered by typed key.

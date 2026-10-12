@@ -154,19 +154,16 @@ fn scripted_rib(initial: EvpnSessionsSync) -> (mpsc::Sender<RibUpdate>, Scripted
     tokio::spawn(async move {
         while let Some(update) = rx.recv().await {
             let sync = *rib.0.lock().unwrap();
-            match update {
-                RibUpdate::QueryEvpnRoutes { reply, .. } => {
-                    let routes = if sync.established > 0 {
-                        vec![remote_type4(esi(1), "10.0.0.2")]
-                    } else {
-                        Vec::new()
-                    };
-                    let _ = reply.send(routes);
-                }
-                RibUpdate::QueryEvpnSessionsSynced { reply } => {
-                    let _ = reply.send(sync);
-                }
-                _ => {}
+            if let RibUpdate::QueryEvpnEsSnapshot { reply } = update {
+                let es_routes = if sync.established > 0 {
+                    vec![remote_type4(esi(1), "10.0.0.2")]
+                } else {
+                    Vec::new()
+                };
+                let _ = reply.send(rustbgpd_rib::EvpnEsSnapshot {
+                    sessions: sync,
+                    es_routes,
+                });
             }
         }
     });
