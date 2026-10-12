@@ -2102,7 +2102,7 @@
           ]
         },
         "admin_down_reason": {
-          "description": "RFC 9003 shutdown communication sent with the\nCease/Administrative Shutdown when `admin_down` takes an\nEstablished session down. UTF-8, at most 128 bytes.",
+          "description": "RFC 9003 shutdown communication sent with the\nCease/Administrative Shutdown when `admin_down` takes an\nEstablished session down. UTF-8, at most 128 bytes: RFC 9003\nallows 255 octets, but rustbgpd sends at most 128 so a peer\nthat only implements RFC 8203 still accepts it.",
           "type": [
             "string",
             "null"

@@ -1334,7 +1334,9 @@ define_neighbor_and_peer_group_configs! {
             neighbor {
                 /// RFC 9003 shutdown communication sent with the
                 /// Cease/Administrative Shutdown when `admin_down` takes an
-                /// Established session down. UTF-8, at most 128 bytes.
+                /// Established session down. UTF-8, at most 128 bytes: RFC 9003
+                /// allows 255 octets, but rustbgpd sends at most 128 so a peer
+                /// that only implements RFC 8203 still accepts it.
             }
             peer_group {
                 /// Shutdown communication inherited by neighbors in this group.
