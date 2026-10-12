@@ -882,7 +882,11 @@ fn main() -> ExitCode {
         .chain([("render-receipt.json", receipt.as_bytes())])
         .collect();
     if let Err(e) = rs_config_render::ixp_manager::write_private_tree(&cli.out_dir, &files) {
-        eprintln!("rs-config-render: {}: {e}", cli.out_dir.display());
+        if matches!(e, rs_config_render::ixp_manager::Error::Output) {
+            eprintln!("rs-config-render: {}: {e}", cli.out_dir.display());
+        } else {
+            eprintln!("rs-config-render: {e}");
+        }
         return e.exit_code().into();
     }
     stdout_exit(write_stdout(|writer| {

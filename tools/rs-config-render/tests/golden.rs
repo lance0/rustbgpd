@@ -3209,3 +3209,36 @@ fn cli_output_is_private() {
     assert_eq!(output.status.code(), Some(8), "{output:?}");
     assert_eq!(std::fs::read_dir(&shared).unwrap().count(), 0);
 }
+
+#[test]
+/// Load-bearing: a directory or file that cannot be written is reported with
+/// its path and the OS cause, not as a non-empty output directory.
+fn cli_output_write_failure_names_path_and_cause() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let temp = tempfile::tempdir().unwrap();
+    let context = temp.path().join("context.yml");
+    std::fs::write(&context, to_yaml(&healthy_value())).unwrap();
+    let parent = temp.path().join("read-only");
+    std::fs::create_dir(&parent).unwrap();
+    std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o500)).unwrap();
+    let out = parent.join("out");
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_rs-config-render"))
+        .arg("--context")
+        .arg(&context)
+        .arg("--out-dir")
+        .arg(&out)
+        .arg("--rtr-cache")
+        .arg("127.0.0.1:3323")
+        .output()
+        .unwrap();
+    std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o700)).unwrap();
+    assert_eq!(output.status.code(), Some(8), "{output:?}");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains(&format!("cannot create {}", out.display())),
+        "{stderr}"
+    );
+    assert!(stderr.contains("Permission denied"), "{stderr}");
+    assert!(!stderr.contains("absent or empty"), "{stderr}");
+}

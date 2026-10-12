@@ -49,7 +49,15 @@ impl SchemaVersion {
 pub enum Error {
     Refused(&'static str),
     Input,
+    /// The output directory exists but is not an empty private directory.
     Output,
+    /// Creating or writing `path` failed with an OS error.
+    Write {
+        action: &'static str,
+        path: std::path::PathBuf,
+        kind: std::io::ErrorKind,
+        cause: String,
+    },
     /// The checker binary could not run (`--version` or `--check` failed to
     /// spawn, `--version` exited nonzero or printed an unrecognised line): an
     /// unmet precondition, not a verdict on the candidate.
@@ -63,7 +71,7 @@ impl Error {
         match self {
             Self::Input => Exit::InvalidInput,
             Self::Refused(_) | Self::CheckerUnavailable => Exit::Refused,
-            Self::Output => Exit::OutputUnusable,
+            Self::Output | Self::Write { .. } => Exit::OutputUnusable,
             Self::Checker => Exit::StrictCheckFailed,
         }
     }
@@ -77,6 +85,12 @@ impl std::fmt::Display for Error {
             Self::Output => {
                 f.write_str("candidate output must be an absent or empty private directory")
             }
+            Self::Write {
+                action,
+                path,
+                cause,
+                ..
+            } => write!(f, "cannot {action} {}: {cause}", path.display()),
             Self::CheckerUnavailable => {
                 f.write_str("strict checker is unavailable; candidate has no receipt")
             }
@@ -1366,19 +1380,30 @@ fn write_private(_: &Path, _: &[u8]) -> std::io::Result<()> {
     Err(std::io::ErrorKind::Unsupported.into())
 }
 
+impl Error {
+    fn write(action: &'static str, path: &Path) -> impl FnOnce(std::io::Error) -> Self {
+        move |error| Self::Write {
+            action,
+            path: path.to_path_buf(),
+            kind: error.kind(),
+            cause: error.to_string(),
+        }
+    }
+}
+
 fn prepare_output(out: &Path) -> Result<(), Error> {
     if out.exists() {
         if !out.is_dir()
             || !private_dir(out, 0o700)
             || fs::read_dir(out)
-                .map_err(|_| Error::Output)?
+                .map_err(Error::write("read", out))?
                 .next()
                 .is_some()
         {
             return Err(Error::Output);
         }
     } else {
-        create_private_dir(out).map_err(|_| Error::Output)?;
+        create_private_dir(out).map_err(Error::write("create", out))?;
     }
     Ok(())
 }
@@ -1392,9 +1417,9 @@ pub fn write_private_tree(out: &Path, files: &[(&str, &[u8])]) -> Result<(), Err
     for (relative, contents) in files {
         let path = out.join(relative);
         if let Some(parent) = path.parent() {
-            create_private_dir(parent).map_err(|_| Error::Output)?;
+            create_private_dir(parent).map_err(Error::write("create", parent))?;
         }
-        write_private(&path, contents).map_err(|_| Error::Output)?;
+        write_private(&path, contents).map_err(Error::write("write", &path))?;
     }
     Ok(())
 }
@@ -1508,6 +1533,7 @@ fn write_checked_candidate_for(
     receipt["strict_check"] = json!({"binary_version": version, "passed": true});
     let mut encoded = serde_json::to_vec_pretty(&receipt).expect("receipt serializes");
     encoded.push(b'\n');
-    write_private(&out.join("render-receipt.json"), &encoded).map_err(|_| Error::Output)?;
+    let receipt = out.join("render-receipt.json");
+    write_private(&receipt, &encoded).map_err(Error::write("write", &receipt))?;
     Ok(candidate.files.len())
 }
