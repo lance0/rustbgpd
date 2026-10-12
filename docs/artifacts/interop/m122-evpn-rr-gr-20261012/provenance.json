@@ -1,0 +1,30 @@
+{
+  "gobgp_source_commit": "da824d99912e02124b53741245ee4186c381adcc",
+  "gobgp_version": "4.10.0",
+  "harness_dirty": true,
+  "harness_sha256": {
+    "tests/interop/Dockerfile.m122-tools": "13b148de6bd628775891e51b8a7a5860af75a04fc2248bfa36f12b79953a00fe",
+    "tests/interop/configs/gobgp-m122-client.toml": "828ace1376bef2ed053f6b322a6675426c9084b6406d051158620dde208af022",
+    "tests/interop/configs/gobgp-m122-source.toml": "4844acfbf2557f08b4a383c41835d357b647b0a675a4d0ecdc48dec1bd31d653",
+    "tests/interop/configs/rustbgpd-m122-evpn-gr-rr.toml": "e6cc296322867a180b0003d624af58242b3516c425a9848f908e34fc762893c4",
+    "tests/interop/m122-evpn-gr-rr-gobgp.clab.yml": "32cf949a8999000822c4ef7aeb03ce4d828b3f0823f7f20bbc4b5a115f2496b3",
+    "tests/interop/scripts/m105_capture_oracle.py": "9d152b017ff20a27e8db17b4e2b5afab5e40d050e2b9144f6d70730a67a434c9",
+    "tests/interop/scripts/m122_evpn_gr_oracle.py": "0b7bea34e83034c7cf678eabce265bd0a05c7a0e260e46cbaeeb85523ebf6d9d",
+    "tests/interop/scripts/run_m122_evpn_gr.py": "b46547433d6b9b762eb7f78988eb545a8bd43e9cb46331ca14c208aee84ed536",
+    "tests/interop/scripts/test-m122-evpn-gr-rr-gobgp.sh": "85ecb8f4a0e26d4fae0d37a6f17ee214fae2e15acf3d4481637cf714e2c4cc2b"
+  },
+  "peers": [
+    {
+      "gobgp_sha256": "55eded2e53f5c597baab409f69d18729292a6e28084fd0ce2be9b5383a406f86",
+      "gobgpd_sha256": "bea17d8561b776cb35820ce14601a617e26acb1efa687b9d949a1737ee2f670d",
+      "image": "sha256:cb11461fb5974c334e9a501c221fb286c20400e59776aa27a5af5d94a3db32d2"
+    },
+    {
+      "gobgp_sha256": "55eded2e53f5c597baab409f69d18729292a6e28084fd0ce2be9b5383a406f86",
+      "gobgpd_sha256": "bea17d8561b776cb35820ce14601a617e26acb1efa687b9d949a1737ee2f670d",
+      "image": "sha256:cb11461fb5974c334e9a501c221fb286c20400e59776aa27a5af5d94a3db32d2"
+    }
+  ],
+  "rustbgpd_commit": "75a3820a4d245871e5078cecbc2b7e55e6cf87db",
+  "rustbgpd_source_id": "96c31f7b1047c9e041bc95d646a2bbfe025504d3f0f3972d6100c40bb103ba43"
+}

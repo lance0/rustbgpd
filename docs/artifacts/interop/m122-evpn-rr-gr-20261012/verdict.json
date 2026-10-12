@@ -1,0 +1,16 @@
+{
+  "client_flaps": 0,
+  "eor_swept_routes": 5,
+  "expired_routes": 5,
+  "initial_routes": 10,
+  "llgr_routes": 5,
+  "refreshed_routes": 5,
+  "result": "pass",
+  "route_types": [
+    1,
+    2,
+    3,
+    4,
+    5
+  ]
+}

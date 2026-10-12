@@ -1,0 +1,22 @@
+[global.config]
+as = 65001
+router-id = "10.0.122.2"
+
+[[neighbors]]
+[neighbors.config]
+neighbor-address = "10.0.122.1"
+peer-as = 65001
+[neighbors.timers.config]
+connect-retry = 1
+[neighbors.graceful-restart.config]
+enabled = true
+restart-time = 60
+long-lived-enabled = true
+[[neighbors.afi-safis]]
+[neighbors.afi-safis.config]
+afi-safi-name = "l2vpn-evpn"
+[neighbors.afi-safis.mp-graceful-restart.config]
+enabled = true
+[neighbors.afi-safis.long-lived-graceful-restart.config]
+enabled = true
+restart-time = 30

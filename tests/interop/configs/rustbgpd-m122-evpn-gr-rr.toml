@@ -1,0 +1,36 @@
+[global]
+asn = 65001
+router_id = "10.0.122.1"
+cluster_id = "10.0.122.1"
+listen_port = 179
+
+[global.telemetry]
+prometheus_addr = "0.0.0.0:9179"
+log_format = "json"
+
+[global.telemetry.grpc_tcp]
+address = "0.0.0.0:50051"
+token_file = "/run/rustbgpd/grpc-test-only-operator.token"
+principal = "rustbgpd://operator/test-only"
+
+[[neighbors]]
+address = "10.0.122.2"
+remote_asn = 65001
+route_reflector_client = true
+families = ["l2vpn_evpn"]
+graceful_restart = true
+gr_stale_routes_time = 60
+llgr_stale_time = 120
+
+[[neighbors]]
+address = "10.0.123.2"
+remote_asn = 65001
+route_reflector_client = true
+families = ["l2vpn_evpn"]
+graceful_restart = true
+llgr_stale_time = 120
+
+[security.grpc]
+enforcement = "tier"
+[security.grpc.roles]
+"rustbgpd://operator/test-only" = "operator"

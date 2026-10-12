@@ -1,0 +1,38 @@
+[
+  {
+    "destination": "10.0.122.1",
+    "forwarding": false,
+    "gr": "003c00194600",
+    "llgr": "0019460000001e",
+    "mp": "00190046",
+    "restart": false,
+    "source": "10.0.122.2"
+  },
+  {
+    "destination": "10.0.123.1",
+    "forwarding": false,
+    "gr": "003c00194600",
+    "llgr": "0019460000001e",
+    "mp": "00190046",
+    "restart": false,
+    "source": "10.0.123.2"
+  },
+  {
+    "destination": "10.0.123.2",
+    "forwarding": true,
+    "gr": "407800194680",
+    "llgr": "00194680000078",
+    "mp": "00190046",
+    "restart": false,
+    "source": "10.0.123.1"
+  },
+  {
+    "destination": "10.0.122.2",
+    "forwarding": true,
+    "gr": "407800194680",
+    "llgr": "00194680000078",
+    "mp": "00190046",
+    "restart": false,
+    "source": "10.0.122.1"
+  }
+]

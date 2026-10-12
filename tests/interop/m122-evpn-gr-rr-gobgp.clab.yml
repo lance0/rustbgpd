@@ -1,0 +1,42 @@
+# M122: EVPN Types 1–5 RR helper restart, EoR sweep and LLGR expiry.
+# GoBGP 4.10.0 source and client; no VTEP or Linux dataplane configuration.
+# Build rustbgpd:dev, gobgp:v4.10.0-m122 and rustbgpd:m122-tools first.
+# Deploy this topology, then run scripts/test-m122-evpn-gr-rr-gobgp.sh.
+name: m122-evpn-gr-rr-gobgp
+topology:
+  nodes:
+    rustbgpd:
+      kind: linux
+      image: rustbgpd:dev
+      cmd: sleep infinity
+      binds:
+        - ./configs/rustbgpd-m122-evpn-gr-rr.toml:/etc/rustbgpd/config.toml:ro
+        - ../fixtures/grpc-test-only-operator.token:/run/rustbgpd/grpc-test-only-operator.token:ro
+      env:
+        RUSTBGPD_TOKEN_FILE: /run/rustbgpd/grpc-test-only-operator.token
+      exec:
+        - ip addr add 10.0.122.1/24 dev eth1
+        - ip link set eth1 up
+        - ip addr add 10.0.123.1/24 dev eth2
+        - ip link set eth2 up
+    gobgp-source:
+      kind: linux
+      image: gobgp:v4.10.0-m122
+      cmd: sleep infinity
+      binds:
+        - ./configs/gobgp-m122-source.toml:/config/gobgp.toml:ro
+      exec:
+        - ip addr add 10.0.122.2/24 dev eth1
+        - ip link set eth1 up
+    gobgp-client:
+      kind: linux
+      image: gobgp:v4.10.0-m122
+      cmd: sleep infinity
+      binds:
+        - ./configs/gobgp-m122-client.toml:/config/gobgp.toml:ro
+      exec:
+        - ip addr add 10.0.123.2/24 dev eth1
+        - ip link set eth1 up
+  links:
+    - endpoints: [rustbgpd:eth1, gobgp-source:eth1]
+    - endpoints: [rustbgpd:eth2, gobgp-client:eth1]
