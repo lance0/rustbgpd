@@ -1,7 +1,7 @@
 # ADR-0140: EVPN core isolation and startup hold for bound Ethernet Segments
 
-**Status:** Proposed (design only; no runtime behavior shipped. Four
-decisions remain open; see [Open decisions](#open-decisions))
+**Status:** Accepted (design; no runtime behavior shipped. The four open
+decisions were taken on 2026-10-12; see [Decisions](#decisions))
 **Date:** 2026-10-12
 
 ## Context
@@ -43,7 +43,7 @@ condition clears or the daemon dies.
 
 ### Primary sources: Linux protodown
 
-The ticket proposed `IFLA_PROTO_DOWN` with a rustbgpd bit in
+The original proposal used `IFLA_PROTO_DOWN` with a rustbgpd bit in
 `IFLA_PROTO_DOWN_REASON`. That action does not work on the devices an ES
 binds to.
 
@@ -177,22 +177,23 @@ in either redundancy mode. A single-active DF that loses its core is the
 same case: it still elects itself DF and forwards, so its CE never fails
 over. An unbound segment has no handle to act on and is unaffected.
 
-The feature is **opt-in** and global, through a new top-level table:
+The feature is **opt-in** and global, through a new top-level table.
+rustbgpd takes control of link admin state only when the operator enables it
+explicitly. Enabling it is consent to the ownership contract in decision 3.
 
 ```toml
 [evpn_core_isolation]
 enabled = true                 # default false
 uplinks = ["eth1", "eth2"]     # optional; see decision 2
 hold_after_sync_seconds = 10   # default 10, 0..=3600
-max_hold_seconds = 180         # default 180, 0..=3600
+backstop_seconds = 180         # default 180, 1..=3600
 ```
 
 The table is accepted only when `[[ethernet_segments]]` has at least one
-bound segment and the EVPN dataplane runs on Linux. Validation rejects
-`max_hold_seconds < hold_after_sync_seconds` unless `max_hold_seconds` is 0.
-Runtime reload may toggle `enabled`, edit the lists and change the timers.
-Disabling the feature releases every held link at once (decision 6).
-Whether this should be default-on is open decision 1.
+bound segment and the EVPN dataplane runs on Linux. Validation rejects a
+`backstop_seconds` below `hold_after_sync_seconds`. Runtime reload may
+toggle `enabled`, edit the lists and change the timers. Disabling the
+feature releases every held link at once (decision 6).
 
 ### 2. Signal: core isolation
 
@@ -207,9 +208,10 @@ The PE is **core-isolated** when either condition holds.
   sessions while the overlay data plane keeps forwarding on retained routes.
   Isolating during that window would cause the outage it is meant to
   prevent.
-- **Uplinks, optional.** `uplinks` is set and none of the named links has
-  carrier in the `link_carrier` projection. A missing link counts as down,
-  as in ADR-0085.
+- **Uplinks, optional.** `uplinks` is set and **all** of the named links
+  lack carrier in the `link_carrier` projection. A missing link counts as
+  down, as in ADR-0085. Losing one redundant uplink while another still has
+  carrier does not isolate the PE.
 
 The two are **ORed**. The session signal is topology-independent but only
 as fast as the hold timer or BFD. The uplink signal is immediate but sees
@@ -237,8 +239,8 @@ Member admin-down is chosen over the alternatives for these reasons:
 - **Protodown.** No CE-facing device in the probe accepts it, and no
   upstream bond, team, veth or physical-NIC driver supports it through
   v7.3-rc7. FRR's stock-Linux behaviour shows the failure mode: the write
-  fails at debug level and the CE is never moved. A protodown provider is
-  open decision 2. It is not part of the v1 contract.
+  fails at debug level and the CE is never moved. The first implementation
+  has no protodown provider (see [Decisions](#decisions), item 2).
 - **Bond master admin-down.** It depends on the CE's LACP timeout: 2.4 s in
   the probe at the fast rate, up to 90 s at the slow rate. With a static
   LAG it never takes effect, because the members keep carrier.
@@ -280,28 +282,41 @@ after the CE link is back (the M67 path). Single-active AC-gate state is
 unaffected. The gate reconciles against observed port state when the link
 returns.
 
-**Other link owners.** Admin state has no owner field, so the contract is
-explicit:
+**Exclusive admin-ownership contract.** Admin state is a single bit with
+no owner field, and the kernel offers no compare-and-set on it. rustbgpd
+therefore does not claim to tell its own writes apart from anyone else's.
+The contract:
 
-- rustbgpd takes only links that are admin-up when it acts. A link already
-  down is not recorded and is never brought up by rustbgpd.
-- rustbgpd brings up only links it recorded in its receipt (decision 6),
-  matched by name and ifindex.
-- If a held link is observed admin-up while rustbgpd holds it, rustbgpd
-  treats this as an operator or network-manager override. It does not take
-  the link down again, it reports `overridden`, and it drops the link from
-  its receipt.
+- While the feature is enabled and a segment is bound, rustbgpd owns the
+  admin state of that binding's CE-facing members: each member of the bound
+  bond, or the bound link itself. The operator must not manage that state by
+  any other means, including `ip link`, systemd-networkd, NetworkManager or
+  ifupdown. To work on a member, disable the feature or remove the binding
+  first. Either releases the hold through decision 6.
 - systemd-networkd with `ActivationPolicy=always-up` re-raises any link set
-  down. With `BindCarrier=` it also drives admin state. Members of a held
-  ES need `ActivationPolicy=manual` (or `up`, which acts only on
-  reconfiguration), and the operator guide must say so. NetworkManager's
-  behaviour toward an externally downed bond port was not verified.
-  Members should be unmanaged or the setup tested before enabling.
-- An operator who downs a held member for maintenance cannot be told apart
-  from rustbgpd's own down, which uses the same bit. Release will bring that
-  member up. Maintenance on a held ES should use the ADR-0084 drain or
-  disable this feature first. Protodown reasons would avoid this, which is
-  the main argument for open decision 2.
+  down, and `BindCarrier=` also drives admin state. Members of a bound ES
+  need `ActivationPolicy=manual`. NetworkManager's behaviour toward an
+  externally downed bond port was not verified, so members should be
+  unmanaged. The operator guide must state both.
+
+**Fresh state checks before acting.** Immediately before each admin-down or
+admin-up, rustbgpd re-reads the link. It writes only if the link's name,
+ifindex and current master still match the binding, and its admin state
+differs from the target.
+
+- A member already admin-down when a hold begins is left out of the receipt
+  and is not raised on release. This is best effort within the contract,
+  not a guarantee against other writers.
+- A held member seen admin-up during the hold breaks the contract. rustbgpd
+  does not take it down again, which would fight another manager. It reports
+  `overridden` and removes the member from the receipt.
+
+**Residual race.** Re-reading the link and writing `RTM_SETLINK` are two
+separate operations, so a foreign write between them goes undetected. The
+next link event or poll then shows the result. Under the contract, nothing
+legitimate writes in that window. Outside it, rustbgpd cannot tell an
+operator's admin-down of an owned member from its own, and release raises
+that member. Decision 6 covers the crash windows.
 
 ### 4. Safety rule: never isolate a CE that has no other ES member
 
@@ -320,7 +335,7 @@ was up. The segment actor already gathers these candidates for DF election.
   other member left. It is not isolated: the CE keeps local switching, and
   traffic to the overlay would be lost either way.
 - The peer set lives in memory only. After a restart during isolation, the
-  set is empty, and decision 5's ceiling releases the links.
+  set is empty, and decision 5's backstop releases the links.
 - If both ES members are isolated together, both take their CE links down.
   The CE then has no path to the overlay through either PE, which is
   already the case. Only local switching on the isolated PEs is lost. This
@@ -330,63 +345,97 @@ A suppressed isolation is reported, never silent (decision 7).
 
 ### 5. Startup hold and recovery hold
 
-The two holds follow one sequence. A hold **arms** at daemon start (the
-startup hold) or at the isolation edge. An isolation hold stays in place
-while the PE is core-isolated. Once it is not, the hold **releases** when
-either of these happens first:
+A hold **arms** at daemon start (the startup hold) or at the isolation edge.
+An isolation hold stays in place while the PE is core-isolated. Once the PE
+is no longer isolated, the hold releases under one of two separate rules:
 
-- `QueryEvpnSessionsSynced` has reported `true` continuously for
-  `hold_after_sync_seconds` (default **10**, 0–3600); or
-- `max_hold_seconds` (default **180**, 0–3600) have passed since the
-  core-up edge, or since daemon start for the startup hold. With 0, the
-  startup hold is disabled, and an isolation hold releases as soon as the
-  core is up.
+- **Normal release.** `QueryEvpnSessionsSynced` has reported `true`
+  continuously for `hold_after_sync_seconds` (default **10**, 0–3600).
+  `true` means at least one L2VPN/EVPN session is Established, every
+  Established session has sent End-of-RIB, and GR selection deferral does
+  not hold the family.
+- **Backstop release.** No normal release has happened when
+  `backstop_seconds` (default **180**, 1–3600) have passed. The clock starts
+  at daemon start for the startup hold, and at the core-up edge for an
+  isolation hold.
 
-The startup hold is the one case where the ceiling can release a
-core-isolated PE. A fresh start has no peer set, so the startup hold applies
-to every bound ES without the decision 4 check. When it expires, decision 4
-applies: if the core is still unreachable and no peer was ever recorded, the
-links come up. The 180 s default matches FRR's `startup-delay` default, so
-an unreachable core cannot hold CE links down indefinitely. If the core
-comes up during the startup hold and a peer is recorded, and the core is
-then lost before release, the startup hold becomes an isolation hold.
+**Availability trade-off.** The backstop can release before End-of-RIB, and
+it does so deliberately: an EVPN session that never syncs must not keep the
+CE out of the PE indefinitely. A backstop release is always reported:
 
-Gating on sync rather than a plain timer releases a healthy PE in seconds
-rather than minutes, and it never releases before every established EVPN
-session has sent End-of-RIB. The settle period covers dataplane programming
-of the remote MACs learned from those routes. Once a link is back up,
-ADR-0085's `recovery_delay_seconds` still governs when the ES's own routes
-are originated again. CE traffic enters before this PE attracts remote
-traffic, never after.
+- a `warn` log with the reason `backstop_unsynced`;
+- the per-interface state `backstop_released`, held until a later sync is
+  observed;
+- a doctor warning (decision 7).
 
-A startup hold takes down links that are up at boot. On a planned
-graceful restart this moves all of the CE's traffic to the other ES member
-until EVPN syncs. That is the intended outcome of "the CE does not use this
-PE before End-of-RIB". A GR-aware exemption is not part of this decision.
+The 180 s default matches FRR's `startup-delay` default. Wherever this
+record says release follows End-of-RIB, it means the normal release only.
+
+**The settle period is a hold, not a confirmation.**
+`hold_after_sync_seconds` gives the dataplane supervisor time to program the
+remote MACs learned from the synced routes. Its expiry does not show that
+the programming finished or succeeded, and release does not wait for any
+dataplane acknowledgement.
+
+A fresh start has no peer set, so the startup hold applies to every bound
+ES without the decision 4 check. When the backstop fires:
+
+- If the core is still unreachable and no peer was ever recorded,
+  decision 4 applies and the links come up.
+- If the core came up during the startup hold, a peer was recorded, and the
+  core was then lost before release, the startup hold has already become an
+  isolation hold.
+
+Once a link is back up, ADR-0085's `recovery_delay_seconds` still governs
+when the ES originates its own routes again. CE traffic reaches this PE
+before the PE attracts remote traffic, never after.
+
+A startup hold takes down links that are up at boot. On a planned graceful
+restart, this moves all of the CE's traffic to the other ES member until
+release. When EVPN syncs within the backstop, the CE therefore does not use
+this PE before End-of-RIB, which is the intended outcome. This decision does
+not include a GR-aware exemption.
 
 ### 6. Crash and reconcile safety
 
-- **Receipt.** Before the first admin-down, rustbgpd writes and fsyncs
-  `<runtime_state_dir>/evpn-core-isolation-owned.json`. The receipt lists
-  `(ES binding, link name, ifindex)` for each link about to be taken down.
+- **Receipt.** Before each admin-down, rustbgpd writes and fsyncs
+  `<runtime_state_dir>/evpn-core-isolation-owned.json`. The receipt records
+  **intent**, not proof that the write completed. Each entry holds:
+  - the kernel boot ID (`/proc/sys/kernel/random/boot_id`);
+  - the identity of the daemon's network namespace (namespace inode and
+    device);
+  - the binding identity: the segment's configured `esi` text and bound
+    interface name;
+  - the member's name and ifindex.
+
   Entries are removed after a successful admin-up. If the receipt cannot be
   written, rustbgpd does not act and reports `action_failed`. This follows
-  ADR-0079: there is no kernel marker for admin state, so ownership needs an
+  ADR-0079: admin state has no kernel marker, so ownership needs an
   exact-value receipt.
-- **Clean shutdown** releases every held link after the EVPN sessions are
-  closed, then removes the receipt. A stopped daemon leaves no CE link down.
-- **Unclean exit, then restart.** The receipt is read before the
-  startup hold arms. Recorded links that still match by name and ifindex and
-  are still down are adopted into the startup hold, and decision 5 releases
-  them. Any recorded link whose ES is no longer bound, or whose
-  binding changed, or that exists while the feature is disabled, is brought
-  up at once. Entries that no longer match, because the link is gone or was
-  recreated with a new ifindex, are dropped without action.
+- **Identity guards on reconcile.** rustbgpd acts on an entry only if all
+  of these match: the boot ID, the namespace, and the member's recorded
+  name and ifindex under the same binding.
+  - A different boot ID means the kernel state is new, so the entry is
+    discarded.
+  - A different namespace, ifindex or binding means the entry describes
+    another object. The entry is discarded and the link is not touched.
+- **Crash between fsync and the kernel write.** The receipt names a member
+  that was never taken down. At reconcile that member is admin-up, so the
+  entry is discarded. If the startup hold applies, the member is taken down
+  again, after a fresh receipt write.
+- **Clean shutdown** closes the EVPN sessions, releases every held link,
+  then removes the receipt. A stopped daemon does not leave down any CE
+  link that it took down.
+- **Unclean exit, then restart.** The receipt is read before the startup
+  hold arms. Entries that pass the identity guards and are still admin-down
+  are adopted into the startup hold, and decision 5 releases them. Such an
+  entry is brought up at once if its segment is no longer bound or the
+  feature is disabled.
 - **Unclean exit with no restart.** The links stay down until an operator
-  raises them. The receipt is plain JSON and names them, and the operator
+  raises them. The receipt is plain JSON that names them, and the operator
   guide gives the `ip link set <member> up` recovery. The shipped systemd
-  unit restarts on failure. An `ExecStopPost=` helper that releases from
-  the receipt is a possible follow-up. It is not part of this decision.
+  unit restarts on failure. An `ExecStopPost=` helper that releases links
+  from the receipt is a possible follow-up, not part of this decision.
 - **Runtime changes.** Removing a binding, rebinding to another link,
   removing the ES, or disabling the feature releases the affected links
   through the same path. The ADR-0084 operator drain does not change the
@@ -401,6 +450,8 @@ PE before End-of-RIB". A GR-aware exemption is not part of this decision.
   - `startup_hold`
   - `isolated`
   - `recovering` (core up, waiting for sync or settle)
+  - `backstop_released` (released by the backstop before sync; becomes
+    `released` once sync is observed)
   - `suppressed_no_peer` (decision 4 stopped an isolation)
   - `overridden`
   - `action_failed`
@@ -411,8 +462,8 @@ PE before End-of-RIB". A GR-aware exemption is not part of this decision.
   `isolated` and `suppressed_no_peer` log at `warn`.
 - `rbgp doctor` adds one `evpn.es.<interface>.core_isolation` check per
   bound ES while the feature is enabled, built like the auto-lacp check.
-  - `warn` for `isolated`, `startup_hold` past `max_hold_seconds`,
-    `suppressed_no_peer` or `overridden`.
+  - `warn` for `isolated`, `backstop_released`, `suppressed_no_peer` or
+    `overridden`.
   - `fail` for `action_failed`.
   - It also warns when every configured uplink lacks carrier while
     sessions are Established, which points to a wrong `uplinks` list.
@@ -424,55 +475,57 @@ Each regression must fail when the action is removed:
 - Paused-clock unit tests of the planner:
   - isolate → hold;
   - recover → sync → settle → release;
-  - the ceiling;
+  - backstop release before sync, with its warning state;
   - GR-stale non-isolation;
   - the peer latch across the last-session-down flush;
   - override handling.
-- Netns tests (privileged runner): member admin-down and up on bond and
-  veth. Also receipt write-ahead, adoption after a simulated crash, and
-  release of a receipt-only link once its binding is removed.
+- Netns tests (privileged runner):
+  - member admin-down and admin-up on a bond and on a veth;
+  - receipt write-ahead;
+  - adoption after a simulated crash;
+  - an entry discarded for a recreated link (new ifindex) and for a foreign
+    boot ID;
+  - release of a receipt-only link once its binding is removed.
 - Interop in the existing FRR all-active topology:
   - Cut rustbgpd's underlay. The CE drops its member from the aggregator,
     and remote↔CE traffic continues through FRR with bounded loss.
   - Restore the underlay. The link returns only after EVPN sync and the
-    settle period.
-  - Restart rustbgpd. The CE does not use rustbgpd's link before
-    End-of-RIB.
+    settle hold.
+  - Restart rustbgpd. When EVPN syncs within the backstop, the CE does not
+    use rustbgpd's link before End-of-RIB.
   - Record the pre-fix loss in the receipt.
 
 Timing bounds need a quiet host. Results from a busy development host count
 as correctness evidence only.
 
-## Open decisions
+## Decisions
 
-1. **Opt-in or default-on.** Recommendation: **opt-in**. The action changes
-   admin state on links that other managers may own, and its effect on the
-   CE depends on CE LACP settings outside rustbgpd's control. Revisit after
-   the interop receipt and one operator deployment.
-2. **Admin-down only, or protodown where supported.** Recommendation:
-   **admin-down only** for v1. A protodown provider has better ownership
-   semantics: a reason bit, foreign reasons preserved, and kernel-side
-   EBUSY protection. But no device in the supported topology accepts it, so
-   it cannot be qualified or tested. Add it as a second provider, selected
-   by probing with a masked reason write, only when a CE-facing device that
-   accepts it is in scope.
-3. **Startup-hold defaults.** Recommendation: `hold_after_sync_seconds = 10`
-   and `max_hold_seconds = 180`, which is FRR's startup-delay default. The
-   alternative is a 30 s ceiling to match ADR-0085's `recovery_delay_seconds`
-   and the RFC 9785 boot wait. That gives less protection when the core is
-   slow to establish.
-4. **Uplink combination.** Recommendation: **OR**, as in decision 2. The
-   alternative, sessions only with no `uplinks` key, is simpler but detects
-   isolation only at hold-timer or BFD speed.
+The four questions this record left open were decided on 2026-10-12.
+
+1. **Opt-in.** rustbgpd takes control of link admin state only with
+   explicit operator consent: `[evpn_core_isolation] enabled = true`.
+2. **Admin-down of the bound bond's members only** for the first
+   implementation. While EVPN multi-homing is alpha there is no protodown
+   provider. Adding one would need a CE-facing device that accepts a masked
+   reason write.
+3. **Holds.** `hold_after_sync_seconds` defaults to 10 s. A separate
+   backstop, `backstop_seconds`, defaults to 180 s. A backstop release that
+   happens without sync produces a warning in the log, the metric and the
+   doctor check (decision 5).
+4. **Signal.** The PE is isolated when it loses its EVPN sessions **or all**
+   configured uplinks are down. Losing one redundant uplink while another
+   still carries traffic does not isolate the PE.
 
 ## Consequences
 
-- An isolated all-active PE stops attracting CE traffic. Recovery and boot
-  release only after EVPN has synced. This closes the loss the premise run
-  measured, within the limits of the CE's LACP settings.
-- rustbgpd starts owning link admin state on CE-facing links. That is a new
-  kernel-ownership surface. Its safety comes from the receipt and the
-  don't-fight rule, not from a kernel marker.
+- An isolated all-active PE stops attracting CE traffic. At recovery and
+  at boot, release normally waits for EVPN to sync. The backstop can release
+  earlier, with a warning. This closes the loss the premise run measured,
+  within the limits of the CE's LACP settings.
+- rustbgpd starts owning link admin state on CE-facing links, a new
+  kernel-ownership surface. Its safety rests on the exclusive-ownership
+  contract, fresh checks and an identity-guarded receipt, not on a kernel
+  marker. The residual race in decision 3 remains.
 - Reusing ADR-0085's link drain means isolation and release need no new
   drain reason. Origination order follows the tested link-recovery path.
 - A planned restart now moves CE traffic to the other ES member for the

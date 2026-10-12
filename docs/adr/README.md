@@ -164,7 +164,7 @@ states that the whole decision is Superseded.
 | [0137](0137-conditional-advertisement.md) | Conditional advertisement | Accepted | 2026-10-07 | Active |
 | [0138](0138-route-flap-dampening.md) | Route flap dampening | Proposed (preparation pulled forward 2026-10-09 and shipped; runtime enablement NO-GO, demand-gated) | 2026-10-08 | Active |
 | [0139](0139-flowspec-controller-contract.md) | Scoped FlowSpec controller compatibility contract | Accepted | 2026-10-10 | Active |
-| [0140](0140-evpn-core-isolation-es-hold.md) | EVPN core isolation and startup hold for bound Ethernet Segments | Proposed (design only; four open decisions) | 2026-10-12 | Unstated |
+| [0140](0140-evpn-core-isolation-es-hold.md) | EVPN core isolation and startup hold for bound Ethernet Segments | Accepted (design; implementation pending) | 2026-10-12 | Active |
 
 ## Supporting records
 
@@ -178,14 +178,13 @@ ADR or from repository history.
 
 ## Lifecycle metadata gaps
 
-The five records below do not state one of the navigation lifecycles above.
+The four records below do not state one of the navigation lifecycles above.
 They remain **Unstated** rather than being inferred as Parked:
 
 - [ADR-0093](0093-evpn-vlan-macip-fdb-correlation.md)
 - [ADR-0123](0123-aspa-v27-mitigation-and-retention.md)
 - [ADR-0129](0129-prefix-sid-domain-boundary.md)
 - [ADR-0134](0134-reload-monitoring-and-validation-endpoints.md)
-- [ADR-0140](0140-evpn-core-isolation-es-hold.md)
 
 ## Template
 
