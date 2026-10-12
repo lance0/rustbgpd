@@ -221,7 +221,7 @@ impl RibManager {
         }
         let mut neighbors = HashMap::with_capacity(peers.len());
         for peer in peers {
-            neighbors.insert(peer, self.neighbor_rib_snapshot(peer));
+            neighbors.insert(peer, self.neighbor_rib_snapshot(peer, false));
             self.replacement_checkpoint(false);
         }
         let unknown_outbound = PeerOutboundState {
@@ -384,7 +384,7 @@ mod tests {
                 }],
             });
         let expected_neighbors =
-            [unknown, waiter, unknown].map(|peer| manager.neighbor_rib_snapshot(peer));
+            [unknown, waiter, unknown].map(|peer| manager.neighbor_rib_snapshot(peer, false));
         manager.with_replacement_summary_reads("restore", |manager| {
             // Mutating these canonical inputs cannot change the captured values.
             manager.selection_deferral = None;

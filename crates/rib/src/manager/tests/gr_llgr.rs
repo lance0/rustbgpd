@@ -3391,7 +3391,7 @@ fn assert_retention(
     assert_eq!((rows[0].afi, rows[0].safi), (Afi::Ipv4, Safi::Unicast));
     assert_eq!(rows[0].phase, phase, "{rows:?}");
     assert_eq!(rows[0].remaining_secs, Some(remaining_secs), "{rows:?}");
-    assert_eq!(rows[0].stale_routes, 2);
+    assert_eq!(rows[0].stale_routes, Some(2));
 }
 
 /// The neighbor snapshot's retention row follows the RIB's own deadlines
@@ -3435,6 +3435,22 @@ async fn neighbor_snapshot_reports_gr_retention_phase_and_remaining_time() {
         .await
         .unwrap();
     assert_retention(&gr_retention_rows(&tx, source).await, GrRestart, 120);
+    // A multi-peer query (neighbor list, doctor) keeps the phase and deadline
+    // but never scans the Adj-RIB-In for counts.
+    let (reply, response) = oneshot::channel();
+    tx.send(RibUpdate::QueryNeighborRibSnapshots {
+        peers: vec![source, IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2))],
+        comparison: None,
+        reply,
+    })
+    .await
+    .unwrap();
+    let listed = response.await.unwrap().snapshots;
+    assert_eq!(listed[0].gr_retention.len(), 1);
+    assert_eq!(listed[0].gr_retention[0].phase, GrRestart);
+    assert_eq!(listed[0].gr_retention[0].remaining_secs, Some(120));
+    assert_eq!(listed[0].gr_retention[0].stale_routes, None);
+    assert_eq!(listed[1].gr_retention, Vec::new());
     tokio::time::advance(Duration::from_secs(30)).await;
     tokio::task::yield_now().await;
     assert_retention(&gr_retention_rows(&tx, source).await, GrRestart, 90);
@@ -3492,7 +3508,7 @@ async fn replacement_summary_view_keeps_down_peer_retention_row() {
     });
     drain_route_chunks(&mut manager);
     manager.handle_update(gr_with_llgr(peer, 120, ipv4_sendable(), vec![], 0));
-    let expected = manager.neighbor_rib_snapshot(peer);
+    let expected = manager.neighbor_rib_snapshot(peer, false);
     assert_eq!(expected.gr_retention.len(), 1);
     assert_eq!(
         expected.gr_retention[0].phase,

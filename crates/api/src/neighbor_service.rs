@@ -3787,7 +3787,7 @@ mod tests {
                                     safi: Safi::Unicast,
                                     phase: rustbgpd_rib::GrRetentionPhase::Llgr,
                                     remaining_secs: Some(86_400),
-                                    stale_routes: 12,
+                                    stale_routes: Some(12),
                                 }],
                             }],
                             comparison: None,
@@ -3831,7 +3831,7 @@ mod tests {
                 family: "ipv6_unicast".to_string(),
                 phase: "llgr".to_string(),
                 remaining_seconds: Some(86_400),
-                stale_routes: 12,
+                stale_routes: Some(12),
             }]
         );
     }

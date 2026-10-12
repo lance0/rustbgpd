@@ -1824,7 +1824,8 @@ pub struct NeighborRibSnapshot {
     /// Live outbound registration and capacity state.
     pub outbound: PeerOutboundState,
     /// RFC 4724 / RFC 9494 helper-side stale-route retention, one row per
-    /// family that still holds stale routes. Empty when nothing is retained.
+    /// family the RIB tracks in a GR or LLGR phase. Empty when nothing is
+    /// retained.
     pub gr_retention: Vec<GrRetentionFamilyState>,
 }
 
@@ -1862,8 +1863,10 @@ pub struct GrRetentionFamilyState {
     /// negotiated) or the LLGR sweep, whichever is first. `None` when no
     /// deadline is armed.
     pub remaining_secs: Option<u64>,
-    /// Routes of this family still held GR- or LLGR-stale.
-    pub stale_routes: u64,
+    /// Routes of this family still held GR- or LLGR-stale. Counted only for
+    /// a single-peer query, because counting scans the peer's Adj-RIB-In;
+    /// `None` in multi-peer responses and the replacement summary view.
+    pub stale_routes: Option<u64>,
 }
 
 /// One actor-turn response for `NeighborService`'s RIB-owned state.

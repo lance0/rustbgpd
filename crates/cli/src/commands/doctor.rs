@@ -994,9 +994,8 @@ fn llgr_retention_checks(
             name: format!("peer.{identity}.llgr_retention.{}", row.family),
             status: CheckStatus::Warn,
             detail: format!(
-                "peer {identity} family {} holds {} LLGR-stale routes; sweep in {}",
+                "peer {identity} family {} is in the LLGR stale phase; sweep in {}",
                 row.family,
-                row.stale_routes,
                 super::neighbor::retention_remaining_label(row.remaining_seconds)
             ),
         })
@@ -6998,13 +6997,13 @@ paths = ["x"]
                 family: "ipv4_unicast".to_string(),
                 phase: "llgr".to_string(),
                 remaining_seconds: Some(16_416_000),
-                stale_routes: 42,
+                stale_routes: None,
             },
             rustbgpd_api::proto::GracefulRestartRetentionState {
                 family: "ipv6_unicast".to_string(),
                 phase: "gr_awaiting_eor".to_string(),
                 remaining_seconds: Some(300),
-                stale_routes: 7,
+                stale_routes: None,
             },
         ];
         *server.state.list_neighbors_response.lock().await = vec![peer];
@@ -7017,7 +7016,7 @@ paths = ["x"]
         assert_eq!(check["status"], "warn");
         assert_eq!(
             check["detail"],
-            "peer 192.0.2.2 family ipv4_unicast holds 42 LLGR-stale routes; sweep in 190d 0h"
+            "peer 192.0.2.2 family ipv4_unicast is in the LLGR stale phase; sweep in 190d 0h"
         );
         assert!(!manifest["checks"].as_array().unwrap().iter().any(|check| {
             check["name"]

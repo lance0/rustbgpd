@@ -2776,15 +2776,22 @@ impl RibManager {
         comparison: Option<(IpAddr, IpAddr)>,
         reply: tokio::sync::oneshot::Sender<NeighborRibSnapshotResponse>,
     ) {
+        // Stale counts scan a peer's Adj-RIB-In; bound that to one peer per
+        // actor turn so a neighbor list during a mass GR event stays cheap.
+        let with_stale_counts = peers.len() == 1;
         send_neighbor_rib_snapshot(
             reply,
             peers,
             comparison,
-            |peer| self.neighbor_rib_snapshot(peer),
+            |peer| self.neighbor_rib_snapshot(peer, with_stale_counts),
             |primary, comparison| self.update_group_comparison(primary, comparison),
         );
     }
-    pub(super) fn neighbor_rib_snapshot(&self, peer: IpAddr) -> NeighborRibSnapshot {
+    pub(super) fn neighbor_rib_snapshot(
+        &self,
+        peer: IpAddr,
+        with_stale_counts: bool,
+    ) -> NeighborRibSnapshot {
         NeighborRibSnapshot {
             peer,
             advertised_count: self
@@ -2796,7 +2803,7 @@ impl RibManager {
                 .copied()
                 .unwrap_or_default(),
             outbound: self.peer_outbound_state(peer),
-            gr_retention: self.gr_retention_snapshot(peer),
+            gr_retention: self.gr_retention_snapshot(peer, with_stale_counts),
         }
     }
 

@@ -500,7 +500,9 @@ pub struct JsonGrRetentionFamily {
     pub phase: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub remaining_seconds: Option<u64>,
-    pub stale_routes: u64,
+    /// Absent from list views, which do not count.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stale_routes: Option<u64>,
 }
 
 /// One finite inbound max-prefix bound. `reason` carries the stable
@@ -2059,7 +2061,7 @@ mod tests {
                 family: "ipv4_unicast".to_string(),
                 phase: "llgr".to_string(),
                 remaining_seconds: Some(86_400),
-                stale_routes: 3,
+                stale_routes: Some(3),
             }],
             gr_retention_available: Some(true),
         };

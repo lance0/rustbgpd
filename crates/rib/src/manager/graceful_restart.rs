@@ -164,7 +164,7 @@ pub(super) fn retained_stale_count(rib: &crate::adj_rib_in::AdjRibIn) -> usize {
 }
 
 /// Per-family split of [`retained_stale_count`] for the requested families.
-/// One pass over the peer's tables; only runs for a peer in retention.
+/// One pass over the peer's tables; only for a single-peer query.
 fn retained_stale_counts(
     rib: &crate::adj_rib_in::AdjRibIn,
     families: &[(Afi, Safi)],
@@ -211,10 +211,17 @@ impl RibManager {
     /// reports `llgr`. A GR-phase family that also kept its original LLGR
     /// deadline across a reconnect reports the earlier of the two.
     ///
-    /// The stale counts scan the retained peer's Adj-RIB-In once per query;
-    /// per-family stale counters in `AdjRibIn` would make this O(1) if a
-    /// profile ever shows the scan.
-    pub(super) fn gr_retention_snapshot(&self, peer: IpAddr) -> Vec<GrRetentionFamilyState> {
+    /// The phase and deadline reads are map lookups. No per-route stale
+    /// counter is maintained (the `bgp_gr_stale_routes` gauge is a scan at
+    /// retention transitions), so counting is a scan of the peer's
+    /// Adj-RIB-In and runs only when `with_stale_counts` is set: the caller
+    /// sets it for a single-peer query, never for a list, so one actor turn
+    /// scans at most one peer.
+    pub(super) fn gr_retention_snapshot(
+        &self,
+        peer: IpAddr,
+        with_stale_counts: bool,
+    ) -> Vec<GrRetentionFamilyState> {
         let mut rows: Vec<((Afi, Safi), GrRetentionPhase, Option<tokio::time::Instant>)> =
             Vec::new();
         if let Some(families) = self.gr_peers.get(&peer) {
@@ -245,27 +252,27 @@ impl RibManager {
         if rows.is_empty() {
             return Vec::new();
         }
-        let families: Vec<(Afi, Safi)> = rows.iter().map(|row| row.0).collect();
-        let counts = self
-            .ribs
-            .get(&peer)
-            .map(|rib| retained_stale_counts(rib, &families))
-            .unwrap_or_default();
+        let counts = with_stale_counts.then(|| {
+            let families: Vec<(Afi, Safi)> = rows.iter().map(|row| row.0).collect();
+            self.ribs
+                .get(&peer)
+                .map(|rib| retained_stale_counts(rib, &families))
+                .unwrap_or_default()
+        });
         let now = tokio::time::Instant::now();
         let mut out: Vec<GrRetentionFamilyState> = rows
             .into_iter()
-            .filter_map(|((afi, safi), phase, deadline)| {
-                let stale_routes = counts.get(&(afi, safi)).copied().unwrap_or(0);
-                (stale_routes > 0).then(|| GrRetentionFamilyState {
-                    afi,
-                    safi,
-                    phase,
-                    remaining_secs: deadline.map(|d| {
-                        let left = d.saturating_duration_since(now);
-                        left.as_secs() + u64::from(left.subsec_nanos() > 0)
-                    }),
-                    stale_routes,
-                })
+            .map(|((afi, safi), phase, deadline)| GrRetentionFamilyState {
+                afi,
+                safi,
+                phase,
+                remaining_secs: deadline.map(|d| {
+                    let left = d.saturating_duration_since(now);
+                    left.as_secs() + u64::from(left.subsec_nanos() > 0)
+                }),
+                stale_routes: counts
+                    .as_ref()
+                    .map(|counts| counts.get(&(afi, safi)).copied().unwrap_or(0)),
             })
             .collect();
         out.sort_by_key(|row| (row.afi as u16, row.safi as u8));

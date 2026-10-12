@@ -12397,7 +12397,7 @@ fn replacement_summaries_answer_frozen_interiors_before_restore_or_apply_ack() {
             let expected_rows: Vec<_> = fleet
                 .members
                 .iter()
-                .map(|peer| fleet.manager.neighbor_rib_snapshot(*peer))
+                .map(|peer| fleet.manager.neighbor_rib_snapshot(*peer, false))
                 .collect();
             let expected_comparison = fleet
                 .manager

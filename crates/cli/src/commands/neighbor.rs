@@ -926,6 +926,7 @@ fn render_neighbor_detail_human(n: &crate::proto::NeighborState) -> String {
                     row.phase,
                     retention_remaining_label(row.remaining_seconds),
                     row.stale_routes
+                        .map_or_else(|| "unknown".to_string(), |n| n.to_string())
                 ),
             );
         }
@@ -1794,7 +1795,7 @@ mod tests {
                 family: "family-value".to_string(),
                 phase: "phase-value".to_string(),
                 remaining_seconds: Some(159),
-                stale_routes: 160,
+                stale_routes: Some(160),
             }],
             gr_retention_available: Some(true),
         }
