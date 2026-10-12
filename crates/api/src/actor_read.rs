@@ -277,7 +277,6 @@ mod tests {
                 peers: Vec::new(),
                 comparison: None,
                 reply,
-                stale_counts: false,
                 include_retained: false,
             }
         })

@@ -4950,7 +4950,6 @@ policy customer-in(peer_lp: u32) {
                 peers: Vec::new(),
                 comparison: None,
                 reply,
-                stale_counts: false,
                 include_retained: false,
             })
             .unwrap();

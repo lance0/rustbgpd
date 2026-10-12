@@ -1628,6 +1628,65 @@ async fn evpn_lower_identifier_reflected_over_shorter_cluster_list() {
     handle.await.unwrap();
 }
 
+/// RFC 8214 §4: a single-homed VPWS per-EVI Ethernet A-D route carries
+/// ESI 0. Decoded from the wire, it is reflected to another client with
+/// byte-identical NLRI, and its withdrawal follows.
+#[tokio::test]
+async fn zero_esi_vpws_ead_per_evi_reflects_byte_identically() {
+    let (tx, rx) = mpsc::channel(64);
+    let cluster_id = Some(Ipv4Addr::new(10, 0, 0, 100));
+    let manager = RibManager::new(rx, dummy_query_rx(), None, cluster_id, BgpMetrics::new());
+    let handle = tokio::spawn(manager.run());
+
+    let source = Ipv4Addr::new(10, 0, 0, 1);
+    let client = Ipv4Addr::new(10, 0, 0, 2);
+    let _source_rx = evpn_rr_client_up(&tx, source).await;
+    let mut client_rx = evpn_rr_client_up(&tx, client).await;
+
+    let mut wire = vec![1, 25, 0, 0, 0xFD, 0xE8, 0, 0, 0, 100]; // RD 65000:100
+    wire.extend([0; 10]); // ESI 0: single-homed
+    wire.extend([0, 0, 0, 100]); // VPWS service instance 100
+    wire.extend([0, 0x06, 0x41]); // label 100, bottom of stack
+    let mut routes = rustbgpd_wire::decode_evpn_nlri(&wire).unwrap();
+    assert!(matches!(routes[..], [EvpnRoute::EadPerEvi(_)]));
+    let mut received = make_evpn_macip(source, [0; 6], None, false);
+    received.route = routes.remove(0);
+    let key = received.key();
+    evpn_routes_received(&tx, source, received).await;
+
+    let msg = tokio::time::timeout(Duration::from_secs(2), client_rx.recv())
+        .await
+        .expect("client should receive the reflection within 2s")
+        .expect("outbound channel open");
+    assert_eq!(msg.evpn_announce.len(), 1);
+    let mut reflected = Vec::new();
+    rustbgpd_wire::encode_evpn_nlri(&[msg.evpn_announce[0].route.clone()], &mut reflected).unwrap();
+    assert_eq!(reflected, wire);
+
+    tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
+        peer: IpAddr::V4(source),
+        announced: vec![],
+        withdrawn: vec![],
+        flowspec_announced: vec![],
+        flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![key],
+        validated_with: None,
+    })
+    .await
+    .unwrap();
+    let msg = tokio::time::timeout(Duration::from_secs(2), client_rx.recv())
+        .await
+        .expect("client should receive the withdrawal within 2s")
+        .expect("outbound channel open");
+    assert!(msg.evpn_announce.is_empty());
+    assert_eq!(msg.evpn_withdraw, vec![key]);
+
+    drop(tx);
+    handle.await.unwrap();
+}
+
 /// Withdrawing an unknown EVPN key surfaces a user-visible error
 /// (controller got a bad route identifier).
 #[tokio::test]

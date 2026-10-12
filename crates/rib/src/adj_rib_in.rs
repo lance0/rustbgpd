@@ -42,6 +42,246 @@ use crate::slab::RouteSlab;
 use crate::update::RpkiValidationCounts;
 use crate::update::{RouteQueryKey, route_query_key};
 
+/// Routes of one family of one peer held for GR or LLGR retention. A route is
+/// counted once: as `stale` when its GR-stale flag is set, otherwise as
+/// `llgr_stale` when its LLGR-stale flag is set.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct StaleRouteCounts {
+    /// GR-stale routes (restart window or awaiting End-of-RIB).
+    pub stale: u64,
+    /// LLGR-stale routes.
+    pub llgr_stale: u64,
+}
+
+impl StaleRouteCounts {
+    /// Every route counted, GR- or LLGR-stale.
+    #[must_use]
+    pub const fn total(self) -> u64 {
+        self.stale + self.llgr_stale
+    }
+}
+
+/// A route's retention class, `None` while it is fresh.
+type Retention = Option<((Afi, Safi), bool)>;
+
+/// What every Adj-RIB-In route type exposes for stale accounting.
+trait RetainedRoute {
+    fn stale_flags(&self) -> (bool, bool);
+    fn family(&self) -> (Afi, Safi);
+
+    /// `Some((family, is_gr_stale))` when the route counts as retained. The
+    /// family is computed only for a stale route, so the fresh-route insert
+    /// path pays two flag reads.
+    fn retention(&self) -> Retention {
+        match self.stale_flags() {
+            (false, false) => None,
+            (stale, _) => Some((self.family(), stale)),
+        }
+    }
+}
+
+impl RetainedRoute for Route {
+    fn stale_flags(&self) -> (bool, bool) {
+        (self.is_stale, self.is_llgr_stale)
+    }
+    fn family(&self) -> (Afi, Safi) {
+        match self.prefix {
+            Prefix::V4(_) => (Afi::Ipv4, Safi::Unicast),
+            Prefix::V6(_) => (Afi::Ipv6, Safi::Unicast),
+        }
+    }
+}
+
+impl RetainedRoute for FlowSpecRoute {
+    fn stale_flags(&self) -> (bool, bool) {
+        (self.is_stale, self.is_llgr_stale)
+    }
+    fn family(&self) -> (Afi, Safi) {
+        (self.afi, Safi::FlowSpec)
+    }
+}
+
+impl RetainedRoute for EvpnRibRoute {
+    fn stale_flags(&self) -> (bool, bool) {
+        (self.is_stale, self.is_llgr_stale)
+    }
+    fn family(&self) -> (Afi, Safi) {
+        (Afi::L2Vpn, Safi::Evpn)
+    }
+}
+
+impl RetainedRoute for BgpLsRibRoute {
+    fn stale_flags(&self) -> (bool, bool) {
+        (self.is_stale, self.is_llgr_stale)
+    }
+    fn family(&self) -> (Afi, Safi) {
+        self.family.to_afi_safi()
+    }
+}
+
+impl RetainedRoute for VpnRibRoute {
+    fn stale_flags(&self) -> (bool, bool) {
+        (self.is_stale, self.is_llgr_stale)
+    }
+    fn family(&self) -> (Afi, Safi) {
+        self.afi_safi()
+    }
+}
+
+impl RetainedRoute for LabeledRibRoute {
+    fn stale_flags(&self) -> (bool, bool) {
+        (self.is_stale, self.is_llgr_stale)
+    }
+    fn family(&self) -> (Afi, Safi) {
+        self.afi_safi()
+    }
+}
+
+impl RetainedRoute for RtcRibRoute {
+    fn stale_flags(&self) -> (bool, bool) {
+        (self.is_stale, self.is_llgr_stale)
+    }
+    fn family(&self) -> (Afi, Safi) {
+        self.afi_safi()
+    }
+}
+
+/// Maintained per-family stale counts for one route table. A table spans at
+/// most two families, so the lookup is a short linear probe. A `Vec` keeps
+/// the per-table cost at one empty header; it allocates only when the table
+/// first holds a stale route.
+#[derive(Debug, Default)]
+struct StaleCounters(Vec<((Afi, Safi), StaleRouteCounts)>);
+
+impl StaleCounters {
+    /// Move one route from `before` to `after`. O(1).
+    fn shift(&mut self, before: Retention, after: Retention) {
+        if before == after {
+            return;
+        }
+        if let Some((family, stale)) = before {
+            let counts = self.entry(family);
+            let n = if stale {
+                &mut counts.stale
+            } else {
+                &mut counts.llgr_stale
+            };
+            debug_assert!(*n > 0, "stale counter underflow for {family:?}");
+            *n = n.saturating_sub(1);
+        }
+        if let Some((family, stale)) = after {
+            let counts = self.entry(family);
+            if stale {
+                counts.stale += 1;
+            } else {
+                counts.llgr_stale += 1;
+            }
+        }
+    }
+
+    fn entry(&mut self, family: (Afi, Safi)) -> &mut StaleRouteCounts {
+        let pos = self
+            .0
+            .iter()
+            .position(|(f, _)| *f == family)
+            .unwrap_or_else(|| {
+                self.0.push((family, StaleRouteCounts::default()));
+                self.0.len() - 1
+            });
+        &mut self.0[pos].1
+    }
+
+    fn iter(&self) -> impl Iterator<Item = ((Afi, Safi), StaleRouteCounts)> + '_ {
+        self.0
+            .iter()
+            .copied()
+            .filter(|(_, counts)| counts.total() > 0)
+    }
+}
+
+/// Apply `mutate` to every route, moving each one's stale accounting with it.
+fn for_each_counted<'a, K: 'a, R: RetainedRoute + 'a>(
+    routes: impl Iterator<Item = (K, &'a mut R)>,
+    counts: &mut StaleCounters,
+    mut mutate: impl FnMut(K, &mut R),
+) {
+    for (key, route) in routes {
+        let before = route.retention();
+        mutate(key, route);
+        counts.shift(before, route.retention());
+    }
+}
+
+/// A keyed route table whose stale counts are maintained on every mutation.
+/// Reads go through `Deref`; every write goes through the methods below, so
+/// no caller can change a route's stale flags without the counters seeing it.
+#[derive(Debug)]
+struct StaleTracked<K, V> {
+    map: HashMap<K, V>,
+    counts: StaleCounters,
+}
+
+impl<K, V> Default for StaleTracked<K, V> {
+    fn default() -> Self {
+        Self {
+            map: HashMap::default(),
+            counts: StaleCounters::default(),
+        }
+    }
+}
+
+impl<K: Eq + std::hash::Hash, V: RetainedRoute> StaleTracked<K, V> {
+    fn with_capacity(capacity: usize) -> Self {
+        Self {
+            map: HashMap::with_capacity_and_hasher(capacity, FastState::default()),
+            counts: StaleCounters::default(),
+        }
+    }
+
+    fn insert(&mut self, key: K, route: V) -> Option<V> {
+        let after = route.retention();
+        let previous = self.map.insert(key, route);
+        self.counts
+            .shift(previous.as_ref().and_then(RetainedRoute::retention), after);
+        previous
+    }
+
+    fn remove(&mut self, key: &K) -> Option<V> {
+        let previous = self.map.remove(key);
+        if let Some(route) = &previous {
+            self.counts.shift(route.retention(), None);
+        }
+        previous
+    }
+
+    fn clear(&mut self) {
+        self.map.clear();
+        self.counts = StaleCounters::default();
+    }
+
+    /// Mutate one route in place.
+    fn update(&mut self, key: &K, mutate: impl FnOnce(&mut V)) {
+        if let Some(route) = self.map.get_mut(key) {
+            let before = route.retention();
+            mutate(route);
+            self.counts.shift(before, route.retention());
+        }
+    }
+
+    /// Mutate every route in place.
+    fn for_each_mut(&mut self, mutate: impl FnMut(&K, &mut V)) {
+        for_each_counted(self.map.iter_mut(), &mut self.counts, mutate);
+    }
+}
+
+impl<K, V> std::ops::Deref for StaleTracked<K, V> {
+    type Target = HashMap<K, V>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.map
+    }
+}
+
 /// Per-peer Adj-RIB-In: stores the routes received from a single peer.
 ///
 /// Routes are keyed by `(Prefix, path_id)` to support Add-Path (RFC 7911).
@@ -63,6 +303,9 @@ pub struct AdjRibIn {
     /// bucket array carrying inline `Route` values was the dominant heap cost
     /// at high N (docs/perf/rebaseline-2026-07.md).
     routes: RouteSlab<Route>,
+    /// Maintained GR/LLGR stale counts for `routes`; the other tables carry
+    /// their own in [`StaleTracked`].
+    unicast_stale: StaleCounters,
     /// Primary index: prefix → `(path_id, slab handle)` pairs stored for that
     /// prefix, backed by a family-split prefix trie. `SmallVec<[(u32, u32); 1]>`
     /// inlines the single-path case (`path_id=0`, no Add-Path) without a
@@ -76,27 +319,27 @@ pub struct AdjRibIn {
     /// Exact `(prefix, path_id)` counts by RPKI state for IPv6 unicast.
     rpki_counts_v6: RpkiValidationCounts,
     /// `FlowSpec` routes keyed by AFI, rule, and Add-Path ID.
-    flowspec_routes: HashMap<FlowSpecRouteKey, FlowSpecRoute>,
+    flowspec_routes: StaleTracked<FlowSpecRouteKey, FlowSpecRoute>,
     /// `FlowSpec` route keys where `LLGR_STALE` was injected locally.
     flowspec_llgr_stale_local_tags: HashSet<FlowSpecRouteKey>,
     /// EVPN routes keyed by RFC 7432 route identity.
-    evpn_routes: HashMap<EvpnRouteKey, EvpnRibRoute>,
+    evpn_routes: StaleTracked<EvpnRouteKey, EvpnRibRoute>,
     /// BGP-LS routes keyed by opaque RFC 9552 route identity.
-    bgpls_routes: HashMap<BgpLsRouteKey, BgpLsRibRoute>,
+    bgpls_routes: StaleTracked<BgpLsRouteKey, BgpLsRibRoute>,
     /// VPNv4/VPNv6 routes keyed by RFC 4364 RD + prefix identity.
-    vpn_routes: HashMap<VpnRibRouteKey, VpnRibRoute>,
+    vpn_routes: StaleTracked<VpnRibRouteKey, VpnRibRoute>,
     /// Secondary index: VPN RD+prefix identity → Add-Path path IDs stored for
     /// it (the SAFI 128 analog of `prefix_index`). `SmallVec<[u32; 1]>`
     /// inlines the non-Add-Path case (`path_id=0`) without heap allocation.
     vpn_key_index: HashMap<rustbgpd_wire::VpnRouteKey, SmallVec<[u32; 1]>>,
     /// Labeled-unicast routes keyed by RFC 8277 prefix + path-id identity.
     /// Deliberately separate from the unicast `routes` map (ADR-0077 §2).
-    labeled_routes: HashMap<LabeledRibRouteKey, LabeledRibRoute>,
+    labeled_routes: StaleTracked<LabeledRibRouteKey, LabeledRibRoute>,
     /// Secondary index: labeled prefix → Add-Path path IDs stored for it
     /// (the SAFI 4 analog of `vpn_key_index`).
     labeled_key_index: HashMap<Prefix, SmallVec<[u32; 1]>>,
     /// RT-Constrain routes keyed by RFC 4684 RT membership identity.
-    rtc_routes: HashMap<RtcRibRouteKey, RtcRibRoute>,
+    rtc_routes: StaleTracked<RtcRibRouteKey, RtcRibRoute>,
     /// EVPN route keys where `LLGR_STALE` was injected locally by this daemon
     /// during promotion from GR-stale → LLGR-stale. Used to distinguish
     /// locally-injected communities (which we strip on clear) from
@@ -131,22 +374,20 @@ impl AdjRibIn {
         Self {
             peer,
             routes: RouteSlab::with_capacity(route_capacity),
+            unicast_stale: StaleCounters::default(),
             prefix_index: FamilyPrefixMap::default(),
             llgr_stale_local_tags: HashSet::default(),
             rpki_counts_v4: RpkiValidationCounts::default(),
             rpki_counts_v6: RpkiValidationCounts::default(),
-            flowspec_routes: HashMap::with_capacity_and_hasher(
-                flowspec_capacity,
-                FastState::default(),
-            ),
+            flowspec_routes: StaleTracked::with_capacity(flowspec_capacity),
             flowspec_llgr_stale_local_tags: HashSet::default(),
-            evpn_routes: HashMap::default(),
-            bgpls_routes: HashMap::default(),
-            vpn_routes: HashMap::default(),
+            evpn_routes: StaleTracked::default(),
+            bgpls_routes: StaleTracked::default(),
+            vpn_routes: StaleTracked::default(),
             vpn_key_index: HashMap::default(),
-            labeled_routes: HashMap::default(),
+            labeled_routes: StaleTracked::default(),
             labeled_key_index: HashMap::default(),
-            rtc_routes: HashMap::default(),
+            rtc_routes: StaleTracked::default(),
             evpn_llgr_stale_local_tags: HashSet::default(),
             bgpls_llgr_stale_local_tags: HashSet::default(),
             vpn_llgr_stale_local_tags: HashSet::default(),
@@ -159,6 +400,60 @@ impl AdjRibIn {
     #[must_use]
     pub fn peer(&self) -> IpAddr {
         self.peer
+    }
+
+    /// GR/LLGR stale-route counts for every family that holds any, from
+    /// counters maintained on each mutation: O(families), never a route scan.
+    pub fn stale_route_counts(&self) -> impl Iterator<Item = ((Afi, Safi), StaleRouteCounts)> + '_ {
+        self.unicast_stale
+            .iter()
+            .chain(self.flowspec_routes.counts.iter())
+            .chain(self.evpn_routes.counts.iter())
+            .chain(self.bgpls_routes.counts.iter())
+            .chain(self.vpn_routes.counts.iter())
+            .chain(self.labeled_routes.counts.iter())
+            .chain(self.rtc_routes.counts.iter())
+    }
+
+    /// Routes held GR- or LLGR-stale across every family table.
+    #[must_use]
+    pub fn retained_stale_count(&self) -> u64 {
+        self.stale_route_counts()
+            .map(|(_, counts)| counts.total())
+            .sum()
+    }
+
+    /// The same counts as [`Self::stale_route_counts`], recomputed by
+    /// scanning every table. The consistency oracle for the maintained
+    /// counters; sorted by family.
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) fn scanned_stale_route_counts(&self) -> Vec<((Afi, Safi), StaleRouteCounts)> {
+        let mut counts = StaleCounters::default();
+        let mut add = |retention: Retention| counts.shift(None, retention);
+        self.routes.iter().for_each(|r| add(r.retention()));
+        self.flowspec_routes
+            .values()
+            .for_each(|r| add(r.retention()));
+        self.evpn_routes.values().for_each(|r| add(r.retention()));
+        self.bgpls_routes.values().for_each(|r| add(r.retention()));
+        self.vpn_routes.values().for_each(|r| add(r.retention()));
+        self.labeled_routes
+            .values()
+            .for_each(|r| add(r.retention()));
+        self.rtc_routes.values().for_each(|r| add(r.retention()));
+        let mut counts: Vec<_> = counts.iter().collect();
+        counts.sort_by_key(|((afi, safi), _)| (*afi as u16, *safi as u8));
+        counts
+    }
+
+    /// Maintained counts, sorted like [`Self::scanned_stale_route_counts`].
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) fn maintained_stale_route_counts(&self) -> Vec<((Afi, Safi), StaleRouteCounts)> {
+        let mut counts: Vec<_> = self.stale_route_counts().collect();
+        counts.sort_by_key(|((afi, safi), _)| (*afi as u16, *safi as u8));
+        counts
     }
 
     /// Insert or replace a route. Clears any stale tag on the key.
@@ -195,11 +490,14 @@ impl AdjRibIn {
         let path_id = route.path_id;
         let ids = self.prefix_index.entry_or_default(prefix);
         if let Some((_, handle)) = ids.iter().find(|(id, _)| *id == path_id) {
-            let previous_state = self
+            let previous = self
                 .routes
                 .get(*handle)
-                .expect("Adj-RIB-In prefix index references a live route")
-                .validation_state;
+                .expect("Adj-RIB-In prefix index references a live route");
+            let previous_state = previous.validation_state;
+            // A re-advertisement replaces a stale path with a fresh one.
+            self.unicast_stale
+                .shift(previous.retention(), route.retention());
             if previous_state != route.validation_state {
                 let counts = match prefix {
                     Prefix::V4(_) => &mut self.rpki_counts_v4,
@@ -215,6 +513,7 @@ impl AdjRibIn {
                 Prefix::V4(_) => self.rpki_counts_v4.increment(route.validation_state),
                 Prefix::V6(_) => self.rpki_counts_v6.increment(route.validation_state),
             }
+            self.unicast_stale.shift(None, route.retention());
             let handle = self.routes.insert(route);
             ids.push((path_id, handle));
             false
@@ -255,6 +554,7 @@ impl AdjRibIn {
             self.prefix_index.remove(prefix);
         }
         let route = self.routes.remove(handle)?;
+        self.unicast_stale.shift(route.retention(), None);
         match route.prefix {
             Prefix::V4(_) => self.rpki_counts_v4.decrement(route.validation_state),
             Prefix::V6(_) => self.rpki_counts_v6.decrement(route.validation_state),
@@ -270,6 +570,7 @@ impl AdjRibIn {
     /// attribute sets the dropped routes were the last users of.
     pub fn clear(&mut self) {
         self.routes.clear();
+        self.unicast_stale = StaleCounters::default();
         self.prefix_index.clear();
         self.rpki_counts_v4 = RpkiValidationCounts::default();
         self.rpki_counts_v6 = RpkiValidationCounts::default();
@@ -407,6 +708,7 @@ impl AdjRibIn {
     ) {
         let Self {
             routes,
+            unicast_stale,
             rpki_counts_v4,
             rpki_counts_v6,
             ..
@@ -415,12 +717,14 @@ impl AdjRibIn {
             let old_prefix = route.prefix;
             let old_path_id = route.path_id;
             let old_state = route.validation_state;
+            let old_retention = route.retention();
             mutate(route);
             assert_eq!(
                 (route.prefix, route.path_id),
                 (old_prefix, old_path_id),
                 "whole-route mutation must preserve indexed route identity"
             );
+            unicast_stale.shift(old_retention, route.retention());
             let new_state = route.validation_state;
             if old_state == new_state {
                 continue;
@@ -609,11 +913,15 @@ impl AdjRibIn {
             self.llgr_stale_local_tags.remove(key);
             self.remove_route_entry(&key.0, key.1);
         }
-        for route in self.routes.iter_mut() {
-            if route_matches_family(route, family) && !route.is_llgr_stale {
-                route.is_stale = true;
-            }
-        }
+        for_each_counted(
+            self.routes.iter_mut().map(|route| ((), route)),
+            &mut self.unicast_stale,
+            |(), route| {
+                if route_matches_family(route, family) && !route.is_llgr_stale {
+                    route.is_stale = true;
+                }
+            },
+        );
         deleted
     }
 
@@ -623,20 +931,24 @@ impl AdjRibIn {
     pub fn clear_stale(&mut self, family: (Afi, Safi)) -> Vec<Prefix> {
         let mut changed = Vec::new();
         let mut clear_local_llgr = Vec::new();
-        for route in self.routes.iter_mut() {
-            if route_matches_family(route, family) {
-                let key = (route.prefix, route.path_id);
-                let tagged = self.llgr_stale_local_tags.contains(&key);
-                if route.is_stale || route.is_llgr_stale || tagged {
-                    changed.push(route.prefix);
+        for_each_counted(
+            self.routes.iter_mut().map(|route| ((), route)),
+            &mut self.unicast_stale,
+            |(), route| {
+                if route_matches_family(route, family) {
+                    let key = (route.prefix, route.path_id);
+                    let tagged = self.llgr_stale_local_tags.contains(&key);
+                    if route.is_stale || route.is_llgr_stale || tagged {
+                        changed.push(route.prefix);
+                    }
+                    route.is_stale = false;
+                    route.is_llgr_stale = false;
+                    if tagged {
+                        clear_local_llgr.push(key);
+                    }
                 }
-                route.is_stale = false;
-                route.is_llgr_stale = false;
-                if tagged {
-                    clear_local_llgr.push(key);
-                }
-            }
-        }
+            },
+        );
         self.clear_local_llgr_stale_community(&clear_local_llgr);
         changed
     }
@@ -754,19 +1066,23 @@ impl AdjRibIn {
         }
 
         // Second pass: promote remaining stale routes to LLGR-stale
-        for route in self.routes.iter_mut() {
-            if route.is_stale && route_matches_family(route, family) {
-                route.is_stale = false;
-                route.is_llgr_stale = true;
-                // Add LLGR_STALE community
-                if AttrSet::edit(&mut route.attributes, add_llgr_stale_community) {
-                    self.llgr_stale_local_tags
-                        .insert((route.prefix, route.path_id));
+        for_each_counted(
+            self.routes.iter_mut().map(|route| ((), route)),
+            &mut self.unicast_stale,
+            |(), route| {
+                if route.is_stale && route_matches_family(route, family) {
+                    route.is_stale = false;
+                    route.is_llgr_stale = true;
+                    // Add LLGR_STALE community
+                    if AttrSet::edit(&mut route.attributes, add_llgr_stale_community) {
+                        self.llgr_stale_local_tags
+                            .insert((route.prefix, route.path_id));
+                    }
+                    attr_intern.intern(&mut route.attributes);
+                    affected.push(route.prefix);
                 }
-                attr_intern.intern(&mut route.attributes);
-                affected.push(route.prefix);
-            }
-        }
+            },
+        );
 
         affected
     }
@@ -814,19 +1130,23 @@ impl AdjRibIn {
     pub fn clear_llgr_stale(&mut self, family: (Afi, Safi)) -> Vec<Prefix> {
         let mut changed = Vec::new();
         let mut clear_local_llgr = Vec::new();
-        for route in self.routes.iter_mut() {
-            if route_matches_family(route, family) {
-                let key = (route.prefix, route.path_id);
-                let tagged = self.llgr_stale_local_tags.contains(&key);
-                if route.is_llgr_stale || tagged {
-                    changed.push(route.prefix);
+        for_each_counted(
+            self.routes.iter_mut().map(|route| ((), route)),
+            &mut self.unicast_stale,
+            |(), route| {
+                if route_matches_family(route, family) {
+                    let key = (route.prefix, route.path_id);
+                    let tagged = self.llgr_stale_local_tags.contains(&key);
+                    if route.is_llgr_stale || tagged {
+                        changed.push(route.prefix);
+                    }
+                    route.is_llgr_stale = false;
+                    if tagged {
+                        clear_local_llgr.push(key);
+                    }
                 }
-                route.is_llgr_stale = false;
-                if tagged {
-                    clear_local_llgr.push(key);
-                }
-            }
-        }
+            },
+        );
         self.clear_local_llgr_stale_community(&clear_local_llgr);
         changed
     }
@@ -916,11 +1236,6 @@ impl AdjRibIn {
         self.evpn_routes.len()
     }
 
-    /// Iterate mutably over all EVPN routes.
-    pub fn iter_evpn_mut(&mut self) -> impl Iterator<Item = &mut EvpnRibRoute> {
-        self.evpn_routes.values_mut()
-    }
-
     // --- EVPN GR/LLGR stale handling (RFC 4724 + RFC 9494) ---
     //
     // Follows the unicast pattern (not FlowSpec): EvpnRibRoute attributes
@@ -953,11 +1268,11 @@ impl AdjRibIn {
         }
         // LLGR-stale routes are retained as-is (RFC 9494: consecutive resets
         // neither delete nor re-mark them; the original deadline governs).
-        for route in self.evpn_routes.values_mut() {
+        self.evpn_routes.for_each_mut(|_, route| {
             if !route.is_llgr_stale {
                 route.is_stale = true;
             }
-        }
+        });
         already_stale
     }
 
@@ -969,13 +1284,13 @@ impl AdjRibIn {
             return;
         }
         let mut clear_local_llgr = Vec::new();
-        for (key, route) in &mut self.evpn_routes {
+        self.evpn_routes.for_each_mut(|key, route| {
             route.is_stale = false;
             route.is_llgr_stale = false;
             if self.evpn_llgr_stale_local_tags.contains(key) {
                 clear_local_llgr.push(*key);
             }
-        }
+        });
         self.clear_local_llgr_stale_evpn_community(&clear_local_llgr);
     }
 
@@ -1035,7 +1350,7 @@ impl AdjRibIn {
         }
 
         // Second pass: promote remaining stale routes to LLGR-stale
-        for route in self.evpn_routes.values_mut() {
+        self.evpn_routes.for_each_mut(|_, route| {
             if route.is_stale {
                 route.is_stale = false;
                 route.is_llgr_stale = true;
@@ -1045,7 +1360,7 @@ impl AdjRibIn {
                 attr_intern.intern(&mut route.attributes);
                 affected.push(route.key());
             }
-        }
+        });
 
         affected
     }
@@ -1082,12 +1397,12 @@ impl AdjRibIn {
             return;
         }
         let mut clear_local_llgr = Vec::new();
-        for (key, route) in &mut self.evpn_routes {
+        self.evpn_routes.for_each_mut(|key, route| {
             route.is_llgr_stale = false;
             if self.evpn_llgr_stale_local_tags.contains(key) {
                 clear_local_llgr.push(*key);
             }
-        }
+        });
         self.clear_local_llgr_stale_evpn_community(&clear_local_llgr);
     }
 
@@ -1191,11 +1506,11 @@ impl AdjRibIn {
         }
         // LLGR-stale routes are retained as-is (RFC 9494: consecutive resets
         // neither delete nor re-mark them; the original deadline governs).
-        for route in self.bgpls_routes.values_mut() {
+        self.bgpls_routes.for_each_mut(|_, route| {
             if route.family == fam && !route.is_llgr_stale {
                 route.is_stale = true;
             }
-        }
+        });
         already_stale
     }
 
@@ -1208,7 +1523,7 @@ impl AdjRibIn {
             return;
         };
         let mut clear_local_llgr = Vec::new();
-        for (key, route) in &mut self.bgpls_routes {
+        self.bgpls_routes.for_each_mut(|key, route| {
             if route.family == fam {
                 route.is_stale = false;
                 route.is_llgr_stale = false;
@@ -1216,7 +1531,7 @@ impl AdjRibIn {
                     clear_local_llgr.push(key.clone());
                 }
             }
-        }
+        });
         self.clear_local_llgr_stale_bgpls_community(&clear_local_llgr);
     }
 
@@ -1292,7 +1607,7 @@ impl AdjRibIn {
         }
 
         // Second pass: promote remaining stale routes to LLGR-stale
-        for route in self.bgpls_routes.values_mut() {
+        self.bgpls_routes.for_each_mut(|_, route| {
             if route.is_stale && route.family == fam {
                 route.is_stale = false;
                 route.is_llgr_stale = true;
@@ -1302,7 +1617,7 @@ impl AdjRibIn {
                 attr_intern.intern(&mut route.attributes);
                 affected.push(route.key());
             }
-        }
+        });
 
         affected
     }
@@ -1351,14 +1666,14 @@ impl AdjRibIn {
             return;
         };
         let mut clear_local_llgr = Vec::new();
-        for (key, route) in &mut self.bgpls_routes {
+        self.bgpls_routes.for_each_mut(|key, route| {
             if route.family == fam {
                 route.is_llgr_stale = false;
                 if self.bgpls_llgr_stale_local_tags.contains(key) {
                     clear_local_llgr.push(key.clone());
                 }
             }
-        }
+        });
         self.clear_local_llgr_stale_bgpls_community(&clear_local_llgr);
     }
 
@@ -1497,11 +1812,11 @@ impl AdjRibIn {
         }
         // LLGR-stale routes are retained as-is (RFC 9494: consecutive resets
         // neither delete nor re-mark them; the original deadline governs).
-        for route in self.vpn_routes.values_mut() {
+        self.vpn_routes.for_each_mut(|_, route| {
             if route.afi_safi() == family && !route.is_llgr_stale {
                 route.is_stale = true;
             }
-        }
+        });
         already_stale
     }
 
@@ -1514,7 +1829,7 @@ impl AdjRibIn {
             return;
         }
         let mut clear_local_llgr = Vec::new();
-        for (key, route) in &mut self.vpn_routes {
+        self.vpn_routes.for_each_mut(|key, route| {
             if route.afi_safi() == family {
                 route.is_stale = false;
                 route.is_llgr_stale = false;
@@ -1522,7 +1837,7 @@ impl AdjRibIn {
                     clear_local_llgr.push(key.clone());
                 }
             }
-        }
+        });
         self.clear_local_llgr_stale_vpn_community(&clear_local_llgr);
     }
 
@@ -1595,7 +1910,7 @@ impl AdjRibIn {
         }
 
         // Second pass: promote remaining stale routes to LLGR-stale
-        for route in self.vpn_routes.values_mut() {
+        self.vpn_routes.for_each_mut(|_, route| {
             if route.is_stale && route.afi_safi() == family {
                 route.is_stale = false;
                 route.is_llgr_stale = true;
@@ -1605,7 +1920,7 @@ impl AdjRibIn {
                 attr_intern.intern(&mut route.attributes);
                 affected.push(route.key());
             }
-        }
+        });
 
         affected
     }
@@ -1652,14 +1967,14 @@ impl AdjRibIn {
             return;
         }
         let mut clear_local_llgr = Vec::new();
-        for (key, route) in &mut self.vpn_routes {
+        self.vpn_routes.for_each_mut(|key, route| {
             if route.afi_safi() == family {
                 route.is_llgr_stale = false;
                 if self.vpn_llgr_stale_local_tags.contains(key) {
                     clear_local_llgr.push(key.clone());
                 }
             }
-        }
+        });
         self.clear_local_llgr_stale_vpn_community(&clear_local_llgr);
     }
 
@@ -1790,11 +2105,11 @@ impl AdjRibIn {
         }
         // LLGR-stale routes are retained as-is (RFC 9494: consecutive resets
         // neither delete nor re-mark them; the original deadline governs).
-        for route in self.labeled_routes.values_mut() {
+        self.labeled_routes.for_each_mut(|_, route| {
             if route.afi_safi() == family && !route.is_llgr_stale {
                 route.is_stale = true;
             }
-        }
+        });
         already_stale
     }
 
@@ -1807,7 +2122,7 @@ impl AdjRibIn {
             return;
         }
         let mut clear_local_llgr = Vec::new();
-        for (key, route) in &mut self.labeled_routes {
+        self.labeled_routes.for_each_mut(|key, route| {
             if route.afi_safi() == family {
                 route.is_stale = false;
                 route.is_llgr_stale = false;
@@ -1815,7 +2130,7 @@ impl AdjRibIn {
                     clear_local_llgr.push(*key);
                 }
             }
-        }
+        });
         self.clear_local_llgr_stale_labeled_community(&clear_local_llgr);
     }
 
@@ -1888,7 +2203,7 @@ impl AdjRibIn {
         }
 
         // Second pass: promote remaining stale routes to LLGR-stale
-        for route in self.labeled_routes.values_mut() {
+        self.labeled_routes.for_each_mut(|_, route| {
             if route.is_stale && route.afi_safi() == family {
                 route.is_stale = false;
                 route.is_llgr_stale = true;
@@ -1898,7 +2213,7 @@ impl AdjRibIn {
                 attr_intern.intern(&mut route.attributes);
                 affected.push(route.key());
             }
-        }
+        });
 
         affected
     }
@@ -1948,14 +2263,14 @@ impl AdjRibIn {
             return;
         }
         let mut clear_local_llgr = Vec::new();
-        for (key, route) in &mut self.labeled_routes {
+        self.labeled_routes.for_each_mut(|key, route| {
             if route.afi_safi() == family {
                 route.is_llgr_stale = false;
                 if self.labeled_llgr_stale_local_tags.contains(key) {
                     clear_local_llgr.push(*key);
                 }
             }
-        }
+        });
         self.clear_local_llgr_stale_labeled_community(&clear_local_llgr);
     }
 
@@ -2057,11 +2372,11 @@ impl AdjRibIn {
         }
         // LLGR-stale routes are retained as-is (RFC 9494: consecutive resets
         // neither delete nor re-mark them; the original deadline governs).
-        for route in self.rtc_routes.values_mut() {
+        self.rtc_routes.for_each_mut(|_, route| {
             if !route.is_llgr_stale {
                 route.is_stale = true;
             }
-        }
+        });
         already_stale
     }
 
@@ -2074,13 +2389,13 @@ impl AdjRibIn {
             return;
         }
         let mut clear_local_llgr = Vec::new();
-        for (key, route) in &mut self.rtc_routes {
+        self.rtc_routes.for_each_mut(|key, route| {
             route.is_stale = false;
             route.is_llgr_stale = false;
             if self.rtc_llgr_stale_local_tags.contains(key) {
                 clear_local_llgr.push(key.clone());
             }
-        }
+        });
         self.clear_local_llgr_stale_rtc_community(&clear_local_llgr);
     }
 
@@ -2142,7 +2457,7 @@ impl AdjRibIn {
         }
 
         // Second pass: promote remaining stale routes to LLGR-stale
-        for route in self.rtc_routes.values_mut() {
+        self.rtc_routes.for_each_mut(|_, route| {
             if route.is_stale {
                 route.is_stale = false;
                 route.is_llgr_stale = true;
@@ -2152,7 +2467,7 @@ impl AdjRibIn {
                 attr_intern.intern(&mut route.attributes);
                 affected.push(route.key());
             }
-        }
+        });
 
         affected
     }
@@ -2191,12 +2506,12 @@ impl AdjRibIn {
             return;
         }
         let mut clear_local_llgr = Vec::new();
-        for (key, route) in &mut self.rtc_routes {
+        self.rtc_routes.for_each_mut(|key, route| {
             route.is_llgr_stale = false;
             if self.rtc_llgr_stale_local_tags.contains(key) {
                 clear_local_llgr.push(key.clone());
             }
-        }
+        });
         self.clear_local_llgr_stale_rtc_community(&clear_local_llgr);
     }
 
@@ -2244,11 +2559,11 @@ impl AdjRibIn {
         }
         // LLGR-stale routes are retained as-is (RFC 9494: consecutive resets
         // neither delete nor re-mark them; the original deadline governs).
-        for route in self.flowspec_routes.values_mut() {
+        self.flowspec_routes.for_each_mut(|_, route| {
             if route.afi == family.0 && !route.is_llgr_stale {
                 route.is_stale = true;
             }
-        }
+        });
         deleted
     }
 
@@ -2283,12 +2598,12 @@ impl AdjRibIn {
         if family.1 != Safi::FlowSpec {
             return;
         }
-        for route in self.flowspec_routes.values_mut() {
+        self.flowspec_routes.for_each_mut(|_, route| {
             if route.afi == family.0 {
                 route.is_stale = false;
                 route.is_llgr_stale = false;
             }
-        }
+        });
     }
 
     /// Remove stale `FlowSpec` routes for a specific family, returning their rules.
@@ -2353,7 +2668,7 @@ impl AdjRibIn {
         }
 
         // Second pass: promote remaining stale routes to LLGR-stale
-        for route in self.flowspec_routes.values_mut() {
+        self.flowspec_routes.for_each_mut(|_, route| {
             if route.is_stale && route.afi == family.0 {
                 route.is_stale = false;
                 route.is_llgr_stale = true;
@@ -2362,7 +2677,7 @@ impl AdjRibIn {
                 }
                 affected.push(route.selection_key());
             }
-        }
+        });
 
         affected
     }
@@ -2418,7 +2733,7 @@ impl AdjRibIn {
             return;
         }
         let mut clear_local_llgr = Vec::new();
-        for route in self.flowspec_routes.values_mut() {
+        self.flowspec_routes.for_each_mut(|_, route| {
             if route.afi == family.0 {
                 route.is_llgr_stale = false;
                 let key = route.key();
@@ -2426,7 +2741,7 @@ impl AdjRibIn {
                     clear_local_llgr.push(key);
                 }
             }
-        }
+        });
         self.clear_local_llgr_stale_flowspec_community(&clear_local_llgr);
     }
 
@@ -2443,54 +2758,54 @@ impl AdjRibIn {
 
     fn clear_local_llgr_stale_flowspec_community(&mut self, keys: &[FlowSpecRouteKey]) {
         for key in keys {
-            if let Some(route) = self.flowspec_routes.get_mut(key) {
+            self.flowspec_routes.update(key, |route| {
                 remove_llgr_stale_community_attrs(&mut route.attributes);
-            }
+            });
             self.flowspec_llgr_stale_local_tags.remove(key);
         }
     }
 
     fn clear_local_llgr_stale_evpn_community(&mut self, keys: &[EvpnRouteKey]) {
         for key in keys {
-            if let Some(route) = self.evpn_routes.get_mut(key) {
+            self.evpn_routes.update(key, |route| {
                 AttrSet::edit(&mut route.attributes, remove_llgr_stale_community_attrs);
-            }
+            });
             self.evpn_llgr_stale_local_tags.remove(key);
         }
     }
 
     fn clear_local_llgr_stale_bgpls_community(&mut self, keys: &[BgpLsRouteKey]) {
         for key in keys {
-            if let Some(route) = self.bgpls_routes.get_mut(key) {
+            self.bgpls_routes.update(key, |route| {
                 AttrSet::edit(&mut route.attributes, remove_llgr_stale_community_attrs);
-            }
+            });
             self.bgpls_llgr_stale_local_tags.remove(key);
         }
     }
 
     fn clear_local_llgr_stale_vpn_community(&mut self, keys: &[VpnRibRouteKey]) {
         for key in keys {
-            if let Some(route) = self.vpn_routes.get_mut(key) {
+            self.vpn_routes.update(key, |route| {
                 AttrSet::edit(&mut route.attributes, remove_llgr_stale_community_attrs);
-            }
+            });
             self.vpn_llgr_stale_local_tags.remove(key);
         }
     }
 
     fn clear_local_llgr_stale_labeled_community(&mut self, keys: &[LabeledRibRouteKey]) {
         for key in keys {
-            if let Some(route) = self.labeled_routes.get_mut(key) {
+            self.labeled_routes.update(key, |route| {
                 AttrSet::edit(&mut route.attributes, remove_llgr_stale_community_attrs);
-            }
+            });
             self.labeled_llgr_stale_local_tags.remove(key);
         }
     }
 
     fn clear_local_llgr_stale_rtc_community(&mut self, keys: &[RtcRibRouteKey]) {
         for key in keys {
-            if let Some(route) = self.rtc_routes.get_mut(key) {
+            self.rtc_routes.update(key, |route| {
                 AttrSet::edit(&mut route.attributes, remove_llgr_stale_community_attrs);
-            }
+            });
             self.rtc_llgr_stale_local_tags.remove(key);
         }
     }
@@ -4205,7 +4520,8 @@ mod tests {
         let key_b = insert_evpn_imet(&mut rib, Ipv4Addr::new(10, 0, 0, 1), 200, vec![]);
         // Share the allocation explicitly, as the intern table would.
         let shared = Arc::clone(&rib.evpn_routes[&key_a].attributes);
-        rib.evpn_routes.get_mut(&key_b).unwrap().attributes = shared;
+        rib.evpn_routes
+            .update(&key_b, |route| route.attributes = shared);
 
         // Confirm they actually share the Arc pre-promotion
         let before_a = Arc::as_ptr(&rib.evpn_routes[&key_a].attributes);
@@ -4213,7 +4529,8 @@ mod tests {
         assert_eq!(before_a, before_b, "routes must share the Arc");
 
         // Mark only route A stale, promote — route B must NOT gain LLGR_STALE
-        rib.evpn_routes.get_mut(&key_a).unwrap().is_stale = true;
+        rib.evpn_routes
+            .update(&key_a, |route| route.is_stale = true);
         rib.promote_to_llgr_stale_evpn(
             (Afi::L2Vpn, Safi::Evpn),
             &mut crate::attr_intern::AttrInternTable::new(),
@@ -4237,7 +4554,7 @@ mod tests {
         let peer_ip = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
         let mut rib = AdjRibIn::new(peer_ip);
         let key = insert_evpn_imet(&mut rib, Ipv4Addr::new(10, 0, 0, 1), 100, vec![]);
-        rib.evpn_routes.get_mut(&key).unwrap().is_stale = true;
+        rib.evpn_routes.update(&key, |route| route.is_stale = true);
 
         // Non-EVPN family: no-op
         let swept = rib.sweep_stale_family_evpn((Afi::Ipv4, Safi::Unicast));
@@ -5369,6 +5686,369 @@ mod tests {
                 assert!(rib.withdraw(&Prefix::V4(*p), 0), "cycle {cycle}");
             }
             assert!(rib.is_empty(), "cycle {cycle}");
+        }
+    }
+
+    /// Maintained stale counters equal a full scan after every step of a
+    /// random sequence of the GR/LLGR mutations the manager performs (mark
+    /// at GR entry, re-advertise, withdraw, End-of-RIB clears and sweeps,
+    /// the GR and LLGR timer sweeps, LLGR promotion with `NO_LLGR` removal,
+    /// non-GR family pruning, whole-table and peer clears) across every
+    /// family table.
+    mod stale_counter_consistency {
+        use proptest::prelude::*;
+        use rustbgpd_wire::COMMUNITY_NO_LLGR;
+
+        use super::*;
+
+        /// Every family the daemon can be configured for, so a family added
+        /// later cannot be left out of the sequence (its table arm below
+        /// must exist, or the test panics).
+        fn family_at(index: usize) -> (Afi, Safi) {
+            let (_, afi, safi) = rustbgpd_wire::CONFIGURED_FAMILIES[index];
+            (afi, safi)
+        }
+
+        #[derive(Debug, Clone)]
+        enum Op {
+            /// Announce (or re-advertise) one route of `family_at(family)`;
+            /// `flags` 1 and 2 insert it already GR- or LLGR-stale.
+            Insert {
+                family: usize,
+                key: u8,
+                flags: u8,
+                no_llgr: bool,
+            },
+            Withdraw {
+                family: usize,
+                key: u8,
+            },
+            Mark(usize),
+            Promote(usize),
+            ClearStale(usize),
+            ClearLlgr(usize),
+            FinishGrUnicast(usize),
+            SweepStaleFamily(usize),
+            SweepLlgrFamily(usize),
+            SweepStaleAll,
+            SweepLlgrAll,
+            WithdrawFamiliesExcept(usize),
+            WithdrawAll(usize),
+            FlipFlagsThroughAccountedMutation,
+            Clear,
+        }
+
+        fn op() -> impl Strategy<Value = Op> {
+            let family = 0..rustbgpd_wire::CONFIGURED_FAMILIES.len();
+            let flags = prop_oneof![6 => Just(0u8), 1 => Just(1), 1 => Just(2)];
+            prop_oneof![
+                8 => (family.clone(), 0u8..4, flags, any::<bool>()).prop_map(
+                    |(family, key, flags, no_llgr)| Op::Insert { family, key, flags, no_llgr }
+                ),
+                3 => (family.clone(), 0u8..4).prop_map(|(family, key)| Op::Withdraw { family, key }),
+                3 => family.clone().prop_map(Op::Mark),
+                2 => family.clone().prop_map(Op::Promote),
+                1 => family.clone().prop_map(Op::ClearStale),
+                1 => family.clone().prop_map(Op::ClearLlgr),
+                1 => family.clone().prop_map(Op::FinishGrUnicast),
+                1 => family.clone().prop_map(Op::SweepStaleFamily),
+                1 => family.clone().prop_map(Op::SweepLlgrFamily),
+                1 => Just(Op::SweepStaleAll),
+                1 => Just(Op::SweepLlgrAll),
+                1 => family.clone().prop_map(Op::WithdrawFamiliesExcept),
+                1 => family.prop_map(Op::WithdrawAll),
+                1 => Just(Op::FlipFlagsThroughAccountedMutation),
+                1 => Just(Op::Clear),
+            ]
+        }
+
+        fn attrs(no_llgr: bool) -> Vec<PathAttribute> {
+            let mut attrs = vec![PathAttribute::Origin(Origin::Igp)];
+            if no_llgr {
+                attrs.push(PathAttribute::Communities(vec![COMMUNITY_NO_LLGR]));
+            }
+            attrs
+        }
+
+        /// Insert one route of `family_at(family)` with `insert = Some((flags,
+        /// no_llgr))`, or withdraw it with `None`.
+        #[expect(
+            clippy::too_many_lines,
+            reason = "one insert/withdraw arm per family table"
+        )]
+        fn insert_or_withdraw(
+            rib: &mut AdjRibIn,
+            family: usize,
+            key: u8,
+            insert: Option<(u8, bool)>,
+        ) {
+            let (stale, llgr) =
+                insert.map_or((false, false), |(flags, _)| (flags == 1, flags == 2));
+            let no_llgr = insert.is_some_and(|(_, no_llgr)| no_llgr);
+            let attr_set = AttrSet::new(attrs(no_llgr));
+            match family_at(family) {
+                (afi, Safi::Unicast) => {
+                    let mut route = if afi == Afi::Ipv4 {
+                        make_route(
+                            Ipv4Prefix::new(Ipv4Addr::new(10, key, 0, 0), 16),
+                            Ipv4Addr::new(10, 0, 0, 1),
+                        )
+                    } else {
+                        make_v6_route(
+                            Ipv6Prefix::new(
+                                Ipv6Addr::new(0x2001, 0xdb8, u16::from(key), 0, 0, 0, 0, 0),
+                                48,
+                            ),
+                            "2001:db8::1".parse().unwrap(),
+                        )
+                    };
+                    if insert.is_none() {
+                        rib.withdraw(&route.prefix, 0);
+                        return;
+                    }
+                    route.attributes = attr_set;
+                    (route.is_stale, route.is_llgr_stale) = (stale, llgr);
+                    rib.insert(route);
+                }
+                (afi, Safi::FlowSpec) => {
+                    let mut route = make_flowspec_route(Ipv4Addr::new(10, 0, 0, 1));
+                    route.afi = afi;
+                    route.path_id = u32::from(key);
+                    if insert.is_none() {
+                        rib.withdraw_flowspec(&route.key());
+                        return;
+                    }
+                    route.attributes = attrs(no_llgr);
+                    (route.is_stale, route.is_llgr_stale) = (stale, llgr);
+                    rib.insert_flowspec(route);
+                }
+                (_, Safi::Evpn) => {
+                    use rustbgpd_wire::{EthernetTagId, EvpnImet, EvpnRoute, RouteDistinguisher};
+                    let peer = Ipv4Addr::new(10, 0, 0, 1);
+                    let route = EvpnRoute::Imet(EvpnImet {
+                        rd: RouteDistinguisher([0, 0, 0xFD, 0xE8, 0, 0, 0, 100]),
+                        ethernet_tag: EthernetTagId(u32::from(key)),
+                        originator_ip: IpAddr::V4(peer),
+                    });
+                    if insert.is_none() {
+                        rib.withdraw_evpn(&route.key());
+                        return;
+                    }
+                    rib.insert_evpn(EvpnRibRoute {
+                        route,
+                        next_hop: IpAddr::V4(peer),
+                        link_local_next_hop: None,
+                        peer: IpAddr::V4(peer),
+                        attributes: attr_set,
+                        received_at: Instant::now(),
+                        origin_type: crate::route::RouteOrigin::Ibgp,
+                        peer_router_id: peer,
+                        is_stale: stale,
+                        is_llgr_stale: llgr,
+                    });
+                }
+                (afi, Safi::MplsVpn) => {
+                    let mut nlri = vpn_nlri([10, key, 0, 0], 16, 100);
+                    if afi == Afi::Ipv6 {
+                        nlri.prefix = VpnPrefix::v6(
+                            Ipv6Addr::new(0x2001, 0xdb8, u16::from(key), 0, 0, 0, 0, 0),
+                            48,
+                        )
+                        .unwrap();
+                    }
+                    let mut route = make_vpn_route(nlri, 1);
+                    if insert.is_none() {
+                        rib.withdraw_vpn(&route.key());
+                        return;
+                    }
+                    route.attributes = attr_set;
+                    (route.is_stale, route.is_llgr_stale) = (stale, llgr);
+                    rib.insert_vpn(route);
+                }
+                (afi, Safi::LabeledUnicast) => {
+                    let nlri = if afi == Afi::Ipv4 {
+                        labeled_nlri([10, key, 0, 0], 16, 100)
+                    } else {
+                        labeled_nlri_v6(u16::from(key), 48, 100)
+                    };
+                    let mut route = make_labeled_route(nlri, 1);
+                    if insert.is_none() {
+                        rib.withdraw_labeled(&route.key());
+                        return;
+                    }
+                    route.attributes = attr_set;
+                    (route.is_stale, route.is_llgr_stale) = (stale, llgr);
+                    rib.insert_labeled(route);
+                }
+                (_, safi @ (Safi::BgpLs | Safi::BgpLsVpn)) => {
+                    let mut route = if safi == Safi::BgpLs {
+                        make_bgpls_route(BgpLsFamily::LinkState, bgpls_nlri(key), 1)
+                    } else {
+                        make_bgpls_route(BgpLsFamily::LinkStateVpn, bgpls_vpn_nlri(key), 1)
+                    };
+                    if insert.is_none() {
+                        rib.withdraw_bgpls(&route.key());
+                        return;
+                    }
+                    route.attributes = attr_set;
+                    (route.is_stale, route.is_llgr_stale) = (stale, llgr);
+                    rib.insert_bgpls(route);
+                }
+                (_, Safi::RtConstrain) => {
+                    let mut route = make_rtc_route(rtc_nlri(u32::from(key)), 1);
+                    if insert.is_none() {
+                        rib.withdraw_rtc(&route.key());
+                        return;
+                    }
+                    route.attributes = attr_set;
+                    (route.is_stale, route.is_llgr_stale) = (stale, llgr);
+                    rib.insert_rtc(route);
+                }
+                other => unreachable!("no table for {other:?}"),
+            }
+        }
+
+        /// Family-scoped helpers run for every table, as the manager calls
+        /// them: each is a no-op for a family it does not hold.
+        #[expect(
+            clippy::too_many_lines,
+            reason = "one arm per GR/LLGR mutation, each across every table"
+        )]
+        fn apply(rib: &mut AdjRibIn, intern: &mut crate::attr_intern::AttrInternTable, op: &Op) {
+            match *op {
+                Op::Insert {
+                    family,
+                    key,
+                    flags,
+                    no_llgr,
+                } => insert_or_withdraw(rib, family, key, Some((flags, no_llgr))),
+                Op::Withdraw { family, key } => insert_or_withdraw(rib, family, key, None),
+                Op::Mark(f) => {
+                    let family = family_at(f);
+                    rib.mark_stale(family);
+                    rib.mark_stale_flowspec(family);
+                    rib.mark_stale_evpn(family);
+                    rib.mark_stale_vpn(family);
+                    rib.mark_stale_labeled(family);
+                    rib.mark_stale_bgpls(family);
+                    rib.mark_stale_rtc(family);
+                }
+                Op::Promote(f) => {
+                    let family = family_at(f);
+                    rib.promote_to_llgr_stale(family, intern);
+                    rib.promote_to_llgr_stale_flowspec(family);
+                    rib.promote_to_llgr_stale_evpn(family, intern);
+                    rib.promote_to_llgr_stale_vpn(family, intern);
+                    rib.promote_to_llgr_stale_labeled(family, intern);
+                    rib.promote_to_llgr_stale_bgpls(family, intern);
+                    rib.promote_to_llgr_stale_rtc(family, intern);
+                }
+                Op::ClearStale(f) => {
+                    let family = family_at(f);
+                    rib.clear_stale(family);
+                    rib.clear_stale_flowspec(family);
+                    rib.clear_stale_evpn(family);
+                    rib.clear_stale_vpn(family);
+                    rib.clear_stale_labeled(family);
+                    rib.clear_stale_bgpls(family);
+                    rib.clear_stale_rtc(family);
+                }
+                Op::ClearLlgr(f) => {
+                    let family = family_at(f);
+                    rib.clear_llgr_stale(family);
+                    rib.clear_llgr_stale_flowspec(family);
+                    rib.clear_llgr_stale_evpn(family);
+                    rib.clear_llgr_stale_vpn(family);
+                    rib.clear_llgr_stale_labeled(family);
+                    rib.clear_llgr_stale_bgpls(family);
+                    rib.clear_llgr_stale_rtc(family);
+                }
+                Op::FinishGrUnicast(f) => {
+                    rib.finish_gr_family(family_at(f));
+                }
+                Op::SweepStaleFamily(f) => {
+                    let family = family_at(f);
+                    rib.sweep_stale_family(family);
+                    rib.sweep_stale_flowspec_family(family);
+                    rib.sweep_stale_family_evpn(family);
+                    rib.sweep_stale_family_vpn(family);
+                    rib.sweep_stale_family_labeled(family);
+                    rib.sweep_stale_family_bgpls(family);
+                    rib.sweep_stale_family_rtc(family);
+                }
+                Op::SweepLlgrFamily(f) => {
+                    let family = family_at(f);
+                    rib.sweep_llgr_stale_family(family);
+                    rib.sweep_llgr_stale_flowspec_family(family);
+                    rib.sweep_llgr_stale_family_evpn(family);
+                    rib.sweep_llgr_stale_family_vpn(family);
+                    rib.sweep_llgr_stale_family_labeled(family);
+                    rib.sweep_llgr_stale_family_bgpls(family);
+                    rib.sweep_llgr_stale_family_rtc(family);
+                }
+                Op::SweepStaleAll => {
+                    rib.sweep_stale();
+                    rib.sweep_stale_flowspec();
+                    rib.sweep_stale_evpn();
+                    rib.sweep_stale_vpn();
+                    rib.sweep_stale_labeled();
+                    rib.sweep_stale_bgpls();
+                    rib.sweep_stale_rtc();
+                }
+                Op::SweepLlgrAll => {
+                    rib.sweep_llgr_stale();
+                    rib.sweep_llgr_stale_flowspec();
+                    rib.sweep_llgr_stale_evpn();
+                    rib.sweep_llgr_stale_vpn();
+                    rib.sweep_llgr_stale_labeled();
+                    rib.sweep_llgr_stale_bgpls();
+                    rib.sweep_llgr_stale_rtc();
+                }
+                Op::WithdrawFamiliesExcept(f) => {
+                    rib.withdraw_families_except(&[family_at(f)]);
+                }
+                Op::WithdrawAll(f) => match family_at(f).1 {
+                    Safi::FlowSpec => rib.clear_flowspec(),
+                    Safi::MplsVpn => drop(rib.withdraw_all_vpn()),
+                    Safi::LabeledUnicast => drop(rib.withdraw_all_labeled()),
+                    Safi::BgpLs | Safi::BgpLsVpn => drop(rib.withdraw_all_bgpls()),
+                    Safi::RtConstrain => drop(rib.withdraw_all_rtc()),
+                    _ => {}
+                },
+                Op::FlipFlagsThroughAccountedMutation => {
+                    rib.for_each_route_mut_accounting_rpki(|route| {
+                        route.is_stale = !route.is_stale;
+                    });
+                }
+                Op::Clear => rib.clear(),
+            }
+        }
+
+        proptest! {
+            #![proptest_config(ProptestConfig::with_cases(512))]
+
+            #[test]
+            fn maintained_stale_counters_match_a_scan_after_every_step(
+                ops in proptest::collection::vec(op(), 1..80),
+            ) {
+                let mut rib = AdjRibIn::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)));
+                let mut intern = crate::attr_intern::AttrInternTable::new();
+                for (step, op) in ops.iter().enumerate() {
+                    apply(&mut rib, &mut intern, op);
+                    let scanned = rib.scanned_stale_route_counts();
+                    prop_assert_eq!(
+                        rib.maintained_stale_route_counts(),
+                        scanned.clone(),
+                        "step {} {:?}",
+                        step,
+                        op
+                    );
+                    prop_assert_eq!(
+                        rib.retained_stale_count(),
+                        scanned.iter().map(|(_, counts)| counts.total()).sum::<u64>()
+                    );
+                }
+            }
         }
     }
 }
