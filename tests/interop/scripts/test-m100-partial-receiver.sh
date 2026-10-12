@@ -142,12 +142,57 @@ start_daemons() {
     docker exec "$FRR" /usr/lib/frr/frrinit.sh start >/dev/null
 }
 
+# SIGKILL returns before the old bgpd has released its TCP 179 listener, and
+# a new bgpd that loses that bind race logs `cannot bind` and never dials.
+# Wait (bounded) for the listener to go, then confirm the new bgpd opens as
+# many listeners as the old one had, failing fast by name instead of leaving
+# it to the 120 s session backstop.
+# The image (busybox, no ss) is read through /proc/net/tcp{,6}: local port
+# 179 is 00B3, LISTEN is state 0A.
 restart_openbgpd_case() {
-    docker exec "$OPENBGPD" sh -c '
-        pkill -9 bgpd 2>/dev/null || true
-        rm -f /run/bgpd/bgpd.sock.* /run/bgpd/bgpd.rsock*
-        bgpd -d -f /etc/bgpd.conf >>/tmp/m100-openbgpd.log 2>&1 &
-    '
+    docker exec -i "$OPENBGPD" sh -s <<'EOF'
+listener_inodes() {
+    awk '$4 == "0A" && $2 ~ /:00B3$/ { print $10 }' /proc/net/tcp /proc/net/tcp6
+}
+# Count only listeners absent before the new bgpd started.
+listeners() { listener_inodes | grep -cvxF "${old:-}"; }
+uptime_s() { cut -d' ' -f1 /proc/uptime; }
+log=/tmp/m100-openbgpd.log
+want=$(listeners)
+[ "$want" -gt 0 ] || want=1
+t0=$(uptime_s)
+pkill -9 bgpd 2>/dev/null || true
+i=0
+while [ "$(listeners)" -ne 0 ]; do
+    i=$((i + 1))
+    if [ "$i" -gt 100 ]; then
+        echo "OpenBGPD restart: TCP 179 still listening 10 s after SIGKILL" >&2
+        exit 1
+    fi
+    sleep 0.1
+done
+t1=$(uptime_s)
+rm -f /run/bgpd/bgpd.sock.* /run/bgpd/bgpd.rsock*
+offset=$(($(wc -c <"$log") + 1))
+old=$(listener_inodes)
+bgpd -d -f /etc/bgpd.conf </dev/null >>"$log" 2>&1 &
+i=0
+until [ "$(listeners)" -ge "$want" ]; do
+    if tail -c "+$offset" "$log" | grep -F 'cannot bind' >&2; then
+        echo "OpenBGPD restart: new bgpd could not bind TCP 179" >&2
+        exit 1
+    fi
+    i=$((i + 1))
+    if [ "$i" -gt 100 ]; then
+        echo "OpenBGPD restart: new bgpd not listening on TCP 179 after 10 s" >&2
+        exit 1
+    fi
+    sleep 0.1
+done
+awk -v n="$want" -v t0="$t0" -v t1="$t1" -v t2="$(uptime_s)" 'BEGIN {
+    printf "OpenBGPD restart: TCP 179 freed %.2f s after SIGKILL; %d new listener(s) up %.2f s later\n", t1 - t0, n, t2 - t1
+}'
+EOF
 }
 
 rs_ctl() {
