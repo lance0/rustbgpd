@@ -26,8 +26,12 @@ def open_body(restart=False, forwarding=False, llgr_time=30, family=25):
     return b"\x04" + struct.pack("!HH", 65001, 90) + ipaddress.IPv4Address(oracle.SOURCE).packed + bytes([len(optional)]) + optional
 
 
-def attr(code, data):
-    return bytes([0x80, code, len(data)]) + data
+def attr(code, data, flags=None, extended=False):
+    if flags is None:
+        flags = 0xC0 if code in (8, 16, 22) else 0x80
+    if extended:
+        return bytes([flags | 0x10, code]) + len(data).to_bytes(2, "big") + data
+    return bytes([flags, code, len(data)]) + data
 
 
 def update_body(attributes):
@@ -117,6 +121,44 @@ class OracleTests(unittest.TestCase):
         for lines in (fixture(False), fixture(include_eor=False)):
             with self.assertRaises(ValueError):
                 oracle.analyze_wire(lines)
+
+    def test_mp_flags_and_extended_length_encoding(self):
+        for code in (14, 15):
+            for flags in (0x00, 0x40, 0xA0, 0xC0):
+                with self.assertRaises(ValueError):
+                    oracle.validate_attributes({code: (flags, b"\x00\x19\x46")})
+        lines = fixture()
+        old = message(2, update_body(attr(15, bytes.fromhex("001946")))).hex()
+        bad = message(2, update_body(attr(15, bytes.fromhex("001946"), flags=0x40))).hex()
+        lines[1] = lines[1].replace(old, bad)
+        with self.assertRaises(ValueError):
+            oracle.analyze_wire(lines)
+        lines = fixture()
+        extended = message(2, update_body(attr(15, bytes.fromhex("001946"), extended=True))).hex()
+        lines[1] = lines[1].replace(old, extended)
+        oracle.analyze_wire(lines)
+
+    def test_communities_flags_and_complete_values(self):
+        marker = oracle.LLGR_STALE.to_bytes(4, "big")
+        oracle.validate_attributes({8: (0xC0, marker)})
+        oracle.validate_attributes({8: (0xF0, marker)})
+        for flags, value in ((0x80, marker), (0x40, marker), (0xC0, b""), (0xC0, marker + b"\x00")):
+            with self.assertRaises(ValueError):
+                oracle.validate_attributes({8: (flags, value)})
+        lines = fixture()
+        # Mutate a genuine complete announcement rather than a standalone attribute.
+        original = announce(5, 1, True, True).hex()
+        attrs = announce(5, 1, True, True)[23:]
+        broken = message(2, update_body(attrs.replace(attr(8, marker), attr(8, marker + b"\x00")))).hex()
+        lines[2] = lines[2].replace(original, broken)
+        with self.assertRaises(ValueError):
+            oracle.analyze_wire(lines)
+
+    def test_restart_cannot_fill_missing_initial_route(self):
+        lines = fixture()
+        lines[0] = lines[0].replace(announce(5, 1).hex(), "", 1)
+        with self.assertRaises(ValueError):
+            oracle.analyze_wire(lines)
 
     def test_raw_route_rt_next_hop_and_notification_corruption_fail(self):
         mutations = [

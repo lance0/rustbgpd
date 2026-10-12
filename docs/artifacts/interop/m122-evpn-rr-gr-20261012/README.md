@@ -10,10 +10,20 @@ are unchanged.
 ## Provenance
 
 The runtime was built from `75a3820a4d245871e5078cecbc2b7e55e6cf87db`, with
-the source content hash, uncommitted harness input hashes and both peer binary hashes retained in
+the source content hash, uncommitted harness input hashes and both peer binary
+hashes retained in
 [provenance.json](provenance.json). The source and client run the official
 GoBGP 4.10.0 linux/amd64 release binaries, corresponding to source commit
 `da824d99912e02124b53741245ee4186c381adcc`.
+
+The original executed harness hashes are preserved. A strengthened offline
+oracle replay of the same complete capture additionally checks MP attribute
+flags, community flags and complete four-byte values, and the initial source
+stream's own ten-route inventory separately from its restart stream. That
+replay passes; its oracle hash and test verdict are recorded separately in
+`strengthened_oracle_replay`. The local runtime receipt uses the original
+dirty harness, while the hosted job exercises the final committed driver and
+oracle together.
 
 A separate live peer admission preceded the new leg. In the M122 topology,
 both directions of both sessions were admitted again from captured OPENs:

@@ -26,5 +26,12 @@
     }
   ],
   "rustbgpd_commit": "75a3820a4d245871e5078cecbc2b7e55e6cf87db",
-  "rustbgpd_source_id": "96c31f7b1047c9e041bc95d646a2bbfe025504d3f0f3972d6100c40bb103ba43"
+  "rustbgpd_source_id": "96c31f7b1047c9e041bc95d646a2bbfe025504d3f0f3972d6100c40bb103ba43",
+  "strengthened_oracle_replay": {
+    "focused_regressions": 16,
+    "initial_source_routes": 10,
+    "oracle_sha256": "fe86e66022b369114ced0f039fff697ee9472e9974204a2d9cbe9c87f8d4d506",
+    "refreshed_routes": 5,
+    "result": "pass"
+  }
 }

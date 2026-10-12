@@ -116,6 +116,18 @@ def nlri_key(encoded):
     return f"{t}:{key.hex()}"
 
 
+def validate_attributes(attrs):
+    for code in (14, 15):
+        if code in attrs:
+            need(attrs[code][0] in (0x80, 0x90), "MP attribute flags must be optional and nontransitive")
+    if 8 in attrs:
+        flags, value = attrs[8]
+        # Partial and extended-length bits are legal for optional transitive
+        # communities; reserved bits and malformed values are not.
+        need(flags in (0xC0, 0xD0, 0xE0, 0xF0), "COMMUNITIES flags differ")
+        need(bool(value) and len(value) % 4 == 0, "COMMUNITIES length must be a positive multiple of four")
+
+
 def client_withdrawals(lines):
     parts = defaultdict(list)
     for line in lines:
@@ -128,6 +140,7 @@ def client_withdrawals(lines):
         for typ, body in messages(reassemble(segments)):
             if typ == 2:
                 _, attrs, _ = update(body)
+                validate_attributes(attrs)
                 if 15 in attrs:
                     raw = attrs[15][1]
                     need(raw[:3] == bytes.fromhex("001946"), "client withdrawal family differs")
@@ -163,16 +176,20 @@ def analyze_wire(lines):
             parts[(stream, src, dst)].append((int(seq), bytes.fromhex(payload.replace(":", ""))))
     opens, announced, withdrawn, promoted, eors = [], defaultdict(set), defaultdict(set), set(), []
     restarted = False
+    initial_sources = []
     for (stream, src, dst), segments in parts.items():
         decoded = messages(reassemble(segments))
         stream_announced = set()
         is_restart = False
+        source_opens = 0
         for typ, body in decoded:
             need(typ != 3, "captured BGP NOTIFICATION")
             if typ == 1:
                 witness = admit_open(body)
                 opens.append({"stream": stream, "source": src, "destination": dst, **witness})
                 is_restart = src == SOURCE and dst == RR and witness["restart"]
+                if (src, dst) == (SOURCE, RR):
+                    source_opens += 1
                 if is_restart:
                     need(witness["forwarding"], "restart OPEN lacks EVPN F bit")
                     restarted = True
@@ -180,6 +197,7 @@ def analyze_wire(lines):
                 continue
             old_withdraw, attrs, old_announce = update(body)
             need(not old_withdraw and not old_announce, "unexpected legacy NLRI")
+            validate_attributes(attrs)
             if 14 in attrs:
                 reach = attrs[14][1]
                 need(reach[:4] == bytes.fromhex("00194604") and reach[4:8] == ipaddress.IPv4Address(SOURCE).packed, "MP_REACH family/next-hop differs")
@@ -207,12 +225,21 @@ def analyze_wire(lines):
                                      "update_body": body.hex(), "refreshed_nlri": sorted(stream_announced)})
                 else:
                     withdrawn[(src, dst)].update(split_evpn(unreach[3:]))
+        if (src, dst) == (SOURCE, RR):
+            need(source_opens == 1, "source TCP stream must contain exactly one OPEN")
+            if is_restart:
+                need(stream_announced == expected_nlri([1]), "restart stream must announce exactly the refreshed five")
+            else:
+                initial_sources.append({"stream": stream, "nlri": sorted(stream_announced)})
+    need(len(initial_sources) == 1, "expected one initial non-restarting source stream")
+    need(set(initial_sources[0]["nlri"]) == expected_nlri([1, 2]), "initial source stream must announce all ten identities")
     need(restarted and len(eors) == 1, "missing unique source restart OPEN/EoR")
     for pair in [(SOURCE, RR), (RR_CLIENT, CLIENT)]:
         need(announced[pair] == expected_nlri([1, 2]), f"{pair}: initial ten raw identities differ")
     need(promoted == expected_nlri([1]), "client lacks five exact LLGR wire announcements")
     withdrawn_keys = {nlri_key(n) for n in withdrawn[(RR_CLIENT, CLIENT)]}
     need(withdrawn_keys == {nlri_key(n) for n in expected_nlri([1, 2])}, "client wire withdrawal keys differ")
-    return {"opens": opens, "restart_eor": eors, "initial_nlri": sorted(expected_nlri([1, 2])),
+    return {"opens": opens, "restart_eor": eors, "initial_source": initial_sources[0],
+            "initial_nlri": initial_sources[0]["nlri"],
             "llgr_nlri": sorted(promoted), "withdrawn_keys": sorted(withdrawn_keys),
             "withdrawn_nlri": sorted(withdrawn[(RR_CLIENT, CLIENT)])}
