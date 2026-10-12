@@ -1602,6 +1602,176 @@ fn evpn_auto_esi_checks(document: &toml::Value, metrics: Option<&str>) -> Vec<Ch
         .collect()
 }
 
+/// Every `state` reading 1 per `interface` in one state-set family.
+fn state_set(metrics: &str, family: &str) -> HashMap<String, BTreeSet<String>> {
+    let mut states: HashMap<String, BTreeSet<String>> = HashMap::new();
+    for line in metrics.lines() {
+        let Some((labels, value)) = line
+            .strip_prefix(family)
+            .and_then(|rest| rest.strip_prefix('{'))
+            .and_then(|rest| rest.split_once("} "))
+        else {
+            continue;
+        };
+        let Some(labels) = parse_metric_labels(labels) else {
+            continue;
+        };
+        let (Some(interface), Some(state)) = (labels.get("interface"), labels.get("state")) else {
+            continue;
+        };
+        let entry = states.entry(interface.clone()).or_default();
+        if value.trim() == "1" {
+            entry.insert(state.clone());
+        }
+    }
+    states
+}
+
+/// ADR-0140: one `evpn.es.<interface>.core_isolation` check per bound
+/// segment while `[evpn_core_isolation] enabled = true`, from the daemon's
+/// `evpn_es_core_isolation_state` gauge, plus `evpn.core_isolation.uplinks`
+/// when every configured uplink lacks carrier while EVPN sessions are up.
+fn evpn_core_isolation_checks(document: &toml::Value, metrics: Option<&str>) -> Vec<Check> {
+    let enabled = document
+        .get("evpn_core_isolation")
+        .and_then(|t| t.get("enabled"))
+        .and_then(toml::Value::as_bool)
+        .unwrap_or(false);
+    if !enabled {
+        return Vec::new();
+    }
+    let states = state_set(metrics.unwrap_or_default(), "evpn_es_core_isolation_state");
+    let mut checks: Vec<Check> = config_rows(document, &["ethernet_segments"])
+        .iter()
+        .filter_map(|row| row.get("interface").and_then(toml::Value::as_str))
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .map(|interface| {
+            let active = states
+                .get(interface)
+                .map(|set| set.iter().map(String::as_str).collect::<Vec<_>>())
+                .unwrap_or_default();
+            let (status, detail) = match (metrics, active.as_slice()) {
+                (None, _) => (
+                    CheckStatus::Warn,
+                    "core-isolation state unknown: the metrics snapshot is unavailable".to_string(),
+                ),
+                (Some(_), []) => (
+                    CheckStatus::Warn,
+                    "no core-isolation state reported for this binding yet; rerun doctor"
+                        .to_string(),
+                ),
+                (Some(_), [_, _, ..]) => (
+                    CheckStatus::Warn,
+                    format!(
+                        "core-isolation state ambiguous: more than one state reads 1 ({}); \
+                         rerun doctor",
+                        active.join(", ")
+                    ),
+                ),
+                (Some(_), [state]) => core_isolation_status(state, interface),
+            };
+            Check {
+                name: format!("evpn.es.{interface}.core_isolation"),
+                status,
+                detail,
+            }
+        })
+        .collect();
+    let signal = |name: &str| {
+        metrics.and_then(|text| {
+            text.lines()
+                .find_map(|line| {
+                    line.strip_prefix(&format!("evpn_core_isolated{{signal=\"{name}\"}} "))
+                })
+                .map(|value| value.trim() == "1")
+        })
+    };
+    let uplinks_configured = document
+        .get("evpn_core_isolation")
+        .and_then(|t| t.get("uplinks"))
+        .and_then(toml::Value::as_array)
+        .is_some_and(|u| !u.is_empty());
+    if uplinks_configured && signal("uplinks") == Some(true) && signal("sessions") == Some(false) {
+        checks.push(Check {
+            name: "evpn.core_isolation.uplinks".to_string(),
+            status: CheckStatus::Warn,
+            detail: "every configured uplink lacks carrier while EVPN sessions are up, so the \
+                     uplink signal isolates a PE that still reaches the overlay; check the \
+                     [evpn_core_isolation] uplinks list"
+                .to_string(),
+        });
+    }
+    checks
+}
+
+/// Doctor mapping for one `evpn_es_core_isolation_state` (ADR-0140
+/// decision 7).
+fn core_isolation_status(state: &str, interface: &str) -> (CheckStatus, String) {
+    match state {
+        "released" => (
+            CheckStatus::Ok,
+            "released: the CE-facing links are up".to_string(),
+        ),
+        "startup_hold" | "recovering" => (
+            CheckStatus::Ok,
+            format!("{state}: CE-facing links held down until EVPN syncs and settles"),
+        ),
+        "disabled" => (CheckStatus::Ok, "disabled".to_string()),
+        "isolated" => (
+            CheckStatus::Warn,
+            "isolated: the PE lost its EVPN sessions or every uplink, and the CE-facing \
+             members are held down; check the underlay and rbgp neighbor"
+                .to_string(),
+        ),
+        "backstop_released" => (
+            CheckStatus::Warn,
+            "backstop_released: the backstop released the hold before EVPN synced, so the CE \
+             may send traffic this PE has no routes for; check that EVPN sessions reach \
+             End-of-RIB"
+                .to_string(),
+        ),
+        "suppressed_no_peer" => (
+            CheckStatus::Warn,
+            "suppressed_no_peer: the PE is isolated but the segment had no remote ES peer, so \
+             its links stay up and the CE has no other path"
+                .to_string(),
+        ),
+        "overridden" => (
+            CheckStatus::Warn,
+            format!(
+                "overridden: another writer raised a held member of {interface}; rustbgpd owns \
+                 this admin state while the feature is enabled (check systemd-networkd \
+                 ActivationPolicy, NetworkManager and manual ip link use)"
+            ),
+        ),
+        "ownership_ambiguous" => (
+            CheckStatus::Fail,
+            "ownership_ambiguous: a receipt entry no longer matches its link, which is left \
+             down; raise the link by hand, then remove the entry with rustbgpd \
+             --release-core-isolation (see the daemon log for the member)"
+                .to_string(),
+        ),
+        "action_failed" => (
+            CheckStatus::Fail,
+            "action_failed: an admin-state write or receipt publication failed; see the daemon \
+             log"
+            .to_string(),
+        ),
+        "uplink_overlap" => (
+            CheckStatus::Fail,
+            format!(
+                "uplink_overlap: a configured uplink is {interface} or is enslaved under it, so \
+                 it is excluded from the uplink signal; fix the uplinks list"
+            ),
+        ),
+        other => (
+            CheckStatus::Warn,
+            format!("unknown core-isolation state {other}"),
+        ),
+    }
+}
+
 /// Remediation for one `auto-lacp` not-ready reason, as in the reasons
 /// table of the EVPN VTEP troubleshooting runbook. Only the bond reasons
 /// point at the bond: the others persist with a healthy LACP partner.
@@ -3104,6 +3274,11 @@ async fn run_with_deadlines(
                                 }
                             }
                             for check in evpn_auto_esi_checks(&document, metrics_text.as_deref()) {
+                                reporter.record(check.name, check.status, check.detail)?;
+                            }
+                            for check in
+                                evpn_core_isolation_checks(&document, metrics_text.as_deref())
+                            {
                                 reporter.record(check.name, check.status, check.detail)?;
                             }
                             if let Some(check) = authz_enforcement_check(&document) {
@@ -5383,6 +5558,70 @@ paths = ["x"]
     /// pre-existing `rpki.vrp_table` check passes this fixture. The session
     /// check is what warns; mapping a retained disconnect to `Ok` makes the
     /// retained-cache assertion red.
+    /// ADR-0140 decision 7 mapping: warn for isolated, backstop_released,
+    /// suppressed_no_peer and overridden; fail for action_failed,
+    /// ownership_ambiguous and uplink_overlap; nothing while disabled.
+    #[test]
+    fn evpn_core_isolation_check_maps_states_and_flags_dead_uplinks() {
+        let document = |enabled: bool| -> toml::Value {
+            toml::from_str(&format!(
+                r#"
+                [evpn_core_isolation]
+                enabled = {enabled}
+                uplinks = ["eth1"]
+                [[ethernet_segments]]
+                esi = "auto-lacp"
+                interface = "bond0"
+                [[ethernet_segments]]
+                esi = "00:11:22:33:44:55:66:77:88:99"
+                "#
+            ))
+            .unwrap()
+        };
+        let row = |state: &str| {
+            format!("evpn_es_core_isolation_state{{interface=\"bond0\",state=\"{state}\"}} 1\n")
+        };
+        for (state, status) in [
+            ("released", CheckStatus::Ok),
+            ("startup_hold", CheckStatus::Ok),
+            ("recovering", CheckStatus::Ok),
+            ("isolated", CheckStatus::Warn),
+            ("backstop_released", CheckStatus::Warn),
+            ("suppressed_no_peer", CheckStatus::Warn),
+            ("overridden", CheckStatus::Warn),
+            ("action_failed", CheckStatus::Fail),
+            ("ownership_ambiguous", CheckStatus::Fail),
+            ("uplink_overlap", CheckStatus::Fail),
+        ] {
+            let checks = evpn_core_isolation_checks(&document(true), Some(&row(state)));
+            assert_eq!(checks.len(), 1, "only bound segments get a check");
+            assert_eq!(checks[0].name, "evpn.es.bond0.core_isolation");
+            assert_eq!(checks[0].status, status, "{state}: {}", checks[0].detail);
+            assert!(checks[0].detail.starts_with(state), "{}", checks[0].detail);
+        }
+        assert!(evpn_core_isolation_checks(&document(false), Some(&row("isolated"))).is_empty());
+        let unknown = evpn_core_isolation_checks(&document(true), Some(""));
+        assert_eq!(unknown[0].status, CheckStatus::Warn);
+
+        let dead_uplinks = format!(
+            "{}evpn_core_isolated{{signal=\"sessions\"}} 0\nevpn_core_isolated{{signal=\"uplinks\"}} 1\n",
+            row("isolated")
+        );
+        let checks = evpn_core_isolation_checks(&document(true), Some(&dead_uplinks));
+        assert_eq!(checks.len(), 2);
+        assert_eq!(checks[1].name, "evpn.core_isolation.uplinks");
+        assert_eq!(checks[1].status, CheckStatus::Warn);
+        let both_down = format!(
+            "{}evpn_core_isolated{{signal=\"sessions\"}} 1\nevpn_core_isolated{{signal=\"uplinks\"}} 1\n",
+            row("isolated")
+        );
+        assert_eq!(
+            evpn_core_isolation_checks(&document(true), Some(&both_down)).len(),
+            1,
+            "a real isolation is not an uplink-list problem"
+        );
+    }
+
     #[test]
     fn evpn_auto_esi_check_reports_the_not_ready_reason_and_follows_the_gauge() {
         let document: toml::Value = toml::from_str(
