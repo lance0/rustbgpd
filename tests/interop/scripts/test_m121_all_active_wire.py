@@ -77,6 +77,15 @@ class WireTests(unittest.TestCase):
         routes.append(deepcopy(routes[0]))
         self.assertEqual(verify_wire(tcp_rows(routes), MAC, 100)['type2'], 2)
 
+    def test_type1_and_type4_reject_any_unexpected_community(self):
+        # The Type 2 proxy marker and an unrelated route target-like value.
+        for extra in (PROXY, bytes.fromhex('0002fde800000065'), bytes.fromhex('8001000000000000')):
+            for index, kind in ((1, 'per-ES'), (2, 'per-EVI'), (3, 'Type 4')):
+                with self.subTest(route=kind, extra=extra.hex()):
+                    routes = announcements()
+                    routes[index][2].append(extra)
+                    self.check_bad(routes)
+
     def test_valid_short_and_extended_attribute_lengths(self):
         for mp_flags in (0x80, 0x90):
             for ec_flags in (0xc0, 0xd0):

@@ -144,14 +144,14 @@ def verify_wire(rows, mac, vni, df_preference=100):
                 need(length == 25, 'wrong EAD length')
                 tag = int.from_bytes(body[18:22], 'big')
                 label = int.from_bytes(body[22:25], 'big')
-                labels = [c for c in communities if c[:2] == b'\x06\x01']
                 if tag == 0xffffffff:
-                    need(label != 0 and labels == [b'\x06\x01\0\0\0' + body[22:25]],
-                         'EAD per-ES lacks matching all-active ESI label')
+                    need(label != 0 and sorted(communities) == sorted(
+                        [rt, encap, b'\x06\x01\0\0\0' + body[22:25]]),
+                         'EAD per-ES needs exactly RT, VXLAN encapsulation and all-active ESI label')
                     seen['ead_per_es'] += 1
                 else:
-                    need(tag == 0 and label == vni and not labels,
-                         'wrong EAD per-EVI tag, VNI or ESI-label community')
+                    need(tag == 0 and label == vni and sorted(communities) == sorted([rt, encap]),
+                         'EAD per-EVI needs tag 0, the VNI and exactly RT and VXLAN encapsulation')
                     seen['ead_per_evi'] += 1
             else:
                 need(length == 23 and body[18] == 32 and body[19:23] == ip,
@@ -160,6 +160,8 @@ def verify_wire(rows, mac, vni, df_preference=100):
                      'wrong ES-Import community')
                 need([c for c in communities if c[:2] == b'\x06\x06'] == [df],
                      'wrong DF algorithm, preference or capabilities')
+                need(sorted(communities) == sorted([rt, encap, es_import, df]),
+                     'Type 4 needs exactly RT, VXLAN encapsulation, ES-Import and DF Election')
                 seen['type4'] += 1
 
     need(all(seen.values()), f'missing originated route kinds: {seen}')
