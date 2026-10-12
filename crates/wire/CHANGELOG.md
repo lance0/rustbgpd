@@ -13,7 +13,8 @@ and workspace changes remain in the repository-level `CHANGELOG.md`.
   (RFC 7432 §8.1.1), so `UpdateMessage::parse_revised` reports it as a
   treat-as-withdraw `MalformedAttribute` rather than a session-reset error.
   Withdrawals and the legacy `parse` path decode it structurally. No public
-  item or signature changes.
+  item or signature changes. This is a decode-behavior change, so under the
+  crate's semver policy it ships in the next minor release, not a patch.
 
 ## 0.24.0 - 2026-10-11
 
