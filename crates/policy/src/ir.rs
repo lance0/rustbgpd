@@ -1176,8 +1176,9 @@ impl CompiledChain {
 
     /// The first `(policy, term)` whose `set next-hop` can execute for a
     /// route of `family`, including inside loop bodies. A term counts unless
-    /// its guard provably never matches that family (see
-    /// [`guard_excludes_family`]); anything the analysis cannot prove counts.
+    /// its guard provably never matches that family: only `route.family` and
+    /// EVPN route-type predicates, combined through `and`/`or`/`not`, are
+    /// analysed, and anything the analysis cannot prove counts.
     #[must_use]
     pub fn set_next_hop_reaching(
         &self,
