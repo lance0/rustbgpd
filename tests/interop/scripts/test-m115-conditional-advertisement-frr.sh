@@ -24,7 +24,8 @@
 #     m115_wire_oracle.py: exact receiver-bound event order, one announcement
 #     and no withdrawal of the control, exactly one NEXT_HOP per announcement,
 #     each payload change at least settle_time after the source's condition
-#     change, no MP_REACH_NLRI / MP_UNREACH_NLRI, and no NOTIFICATION;
+#     change, no MP_REACH_NLRI / MP_UNREACH_NLRI, and no NOTIFICATION
+#     except a collision Cease (6/7) before Established;
 #   - both FRR sessions stay on their first connection.
 #
 # Prerequisites:

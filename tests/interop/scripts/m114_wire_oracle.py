@@ -32,12 +32,17 @@ def show(node: ET.Element | None, name: str) -> str | None:
 def notification_verdict(root: ET.Element) -> str:
     """One PASS/FAIL line covering every NOTIFICATION in the capture.
 
-    Any NOTIFICATION fails. Each is listed with its TCP connection, direction,
-    code/subcode, and whether its connection had reached Established (KEEPALIVE
-    or UPDATE seen in both directions), so a failure says what was sent.
+    Each is listed with its TCP connection, direction, code/subcode, and
+    whether its connection had reached Established (KEEPALIVE or UPDATE seen
+    in both directions), so a failure says what was sent. Any NOTIFICATION
+    fails except Cease / Connection Collision Resolution (6/7) on a connection
+    with known TCP ports that never reached Established: when both speakers
+    open at once, RFC 4271 section 6.8 closes one connection that way. Those
+    are listed separately as allowed.
     """
     sent: dict[frozenset, set] = {}
     found: list[str] = []
+    collisions: list[str] = []
     for packet in root.iter("packet"):
         protos = {p.get("name"): p for p in reversed(list(packet.iter("proto")))}
         ip, tcp = protos.get("ip"), protos.get("tcp")
@@ -61,11 +66,14 @@ def notification_verdict(root: ET.Element) -> str:
                 "?",
             )
             when = "after" if len(senders) == 2 else "before"
-            found.append(f"{src} -> {dst} code {major}/{minor} {when} Established")
+            line = f"{src} -> {dst} code {major}/{minor} {when} Established"
+            collision = (major, minor, when) == ("6", "7", "before") and "?" not in src + dst
+            (collisions if collision else found).append(line)
     return (
         ("PASS " if not found else "FAIL ")
-        + f"{len(found)} NOTIFICATION message(s) captured"
+        + f"{len(found)} unexpected NOTIFICATION message(s) captured"
         + (f": {found}" if found else "")
+        + (f"; allowed collision Cease before Established: {collisions}" if collisions else "")
     )
 
 

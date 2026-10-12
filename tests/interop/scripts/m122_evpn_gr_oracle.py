@@ -212,6 +212,29 @@ def check_client_order(events, eor_position):
     return witness
 
 
+def collided_streams(parts):
+    # Every M122 peer opens actively, so RFC 4271 §6.8 may close one TCP
+    # stream of a pair with Cease 6/7 before Established (KEEPALIVE or UPDATE
+    # from both ends). Such a stream carries no UPDATE and is left out of the
+    # analysis; any other NOTIFICATION fails.
+    first_live, ceases, updates = {}, {}, set()
+    for (stream, src, _), segments in parts.items():
+        for (ordinal, _), typ, body in completed_messages(segments):
+            if typ in (2, 4):
+                first_live.setdefault((stream, src), ordinal)
+                if typ == 2:
+                    updates.add(stream)
+            if typ == 3:
+                need(body[:2] == b"\x06\x07", "captured BGP NOTIFICATION")
+                # The last Cease bounds them all: each must precede Established.
+                ceases[stream] = max(ceases.get(stream, ordinal), ordinal)
+    for stream, ordinal in ceases.items():
+        live = [first for (live_stream, _), first in first_live.items() if live_stream == stream]
+        need(len(live) < 2 or ordinal < max(live), "captured BGP NOTIFICATION after Established")
+        need(stream not in updates, "collision-closed stream carries an UPDATE")
+    return set(ceases)
+
+
 def analyze_wire(lines):
     parts = defaultdict(list)
     for ordinal, line in enumerate(lines, 1):
@@ -224,7 +247,10 @@ def analyze_wire(lines):
     client_events = []
     restarted = False
     initial_sources = []
+    collided = collided_streams(parts)
     for (stream, src, dst), segments in parts.items():
+        if stream in collided:
+            continue
         decoded = completed_messages(segments)
         stream_announced = set()
         is_restart = False

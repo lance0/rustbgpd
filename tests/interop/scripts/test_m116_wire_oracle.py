@@ -113,7 +113,7 @@ class M116WireOracleTests(unittest.TestCase):
         root = pdml(update(mp_reach(GLOBAL)), notification)
         self.assertEqual(verdicts(root), ["PASS", "PASS", "FAIL"])
 
-    def test_every_notification_fails_decoded(self) -> None:
+    def test_every_notification_decoded(self) -> None:
         cases = notification_scenarios("10.116.0.1", "10.116.0.2", "10.116.1.2")
         for name, (want, segments) in cases.items():
             with self.subTest(name):
