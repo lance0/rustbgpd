@@ -22,6 +22,7 @@ const EVPN_DIAGNOSE_METRIC_PREFIXES: &[&str] = &[
     "evpn_local_observations_dropped_total",
     "evpn_duplicate_mac_moves_total",
     "evpn_duplicate_mac_first_move_timestamp_seconds",
+    "evpn_current_apply_failures",
 ];
 
 fn route_type_label(t: u32) -> &'static str {
@@ -1114,7 +1115,21 @@ pub async fn list_instances(connection: Connection, json: bool) -> Result<(), Cl
             outln!("{}", format_evpn_instance_human(inst))?;
         }
     }
+    if !json && resp.unscoped_apply_failure_count > 0 {
+        outln!("{}", format_unscoped_apply_failures(&resp))?;
+    }
     Ok(())
+}
+
+fn format_unscoped_apply_failures(resp: &crate::proto::ListEvpnInstancesResponse) -> String {
+    format!(
+        "Host-wide L2 apply failures: {} latest-permanent-error=[{}]",
+        resp.unscoped_apply_failure_count,
+        resp.latest_unscoped_permanent_apply_error
+            .chars()
+            .flat_map(char::escape_default)
+            .collect::<String>()
+    )
 }
 
 fn format_evpn_instance_human(inst: &EvpnInstanceState) -> String {
@@ -1147,6 +1162,19 @@ fn format_evpn_instance_human(inst: &EvpnInstanceState) -> String {
         "originated-local-macs={}",
         inst.originated_local_macs_count
     ));
+    detail.push(format!(
+        "current-apply-failures={}",
+        inst.current_apply_failure_count
+    ));
+    if !inst.latest_permanent_apply_error.is_empty() {
+        detail.push(format!(
+            "latest-permanent-apply-error=[{}]",
+            inst.latest_permanent_apply_error
+                .chars()
+                .flat_map(char::escape_default)
+                .collect::<String>()
+        ));
+    }
     if !inst.remote_route_drop_counts.is_empty() {
         let drops = inst
             .remote_route_drop_counts
@@ -1192,6 +1220,8 @@ fn evpn_instance_to_json(instance: &EvpnInstanceState) -> serde_json::Value {
         "originated_local_macs_count": instance.originated_local_macs_count,
         "readiness": evpn_instance_readiness_label(instance.readiness_state),
         "not_ready_reason": instance.not_ready_reason,
+        "current_apply_failure_count": instance.current_apply_failure_count,
+        "latest_permanent_apply_error": instance.latest_permanent_apply_error,
         "remote_route_drop_counts": instance.remote_route_drop_counts.iter().map(|row| {
             serde_json::json!({
                 "reason": row.reason,
@@ -1735,6 +1765,8 @@ fn diagnose_json(
     type2_route_count: usize,
     type3_route_count: usize,
     key_metrics: &[String],
+    failed_instances: &[&EvpnInstanceState],
+    unscoped: (u64, &str),
 ) -> serde_json::Value {
     serde_json::json!({
         "instance_count": instance_count,
@@ -1744,6 +1776,14 @@ fn diagnose_json(
         "type3_route_count": type3_route_count,
         "type3_present": type3_route_count != 0,
         "key_metrics": key_metrics,
+        "current_apply_failure_count": failed_instances.iter().map(|inst| inst.current_apply_failure_count).sum::<u64>(),
+        "apply_failed_instances": failed_instances.iter().map(|inst| serde_json::json!({
+            "vni": inst.vni,
+            "count": inst.current_apply_failure_count,
+            "latest_permanent_error": inst.latest_permanent_apply_error,
+        })).collect::<Vec<_>>(),
+        "unscoped_apply_failure_count": unscoped.0,
+        "latest_unscoped_permanent_apply_error": unscoped.1,
     })
 }
 
@@ -1751,13 +1791,13 @@ fn diagnose_json(
 pub async fn diagnose(connection: Connection, json: bool) -> Result<(), CliError> {
     let mut evpn_client =
         EvpnServiceClient::with_interceptor(connection.channel(), connection.interceptor());
-    let instances = read_rpc(
+    let instance_response = read_rpc(
         "ListEvpnInstances",
         evpn_client.list_evpn_instances(ListEvpnInstancesRequest {}),
     )
     .await?
-    .into_inner()
-    .instances;
+    .into_inner();
+    let instances = &instance_response.instances;
 
     let mut rib_client = connection.rib_listing_client();
     let type2_routes = read_rpc(
@@ -1795,6 +1835,10 @@ pub async fn diagnose(connection: Connection, json: bool) -> Result<(), CliError
         .iter()
         .map(|i| i.originated_local_macs_count)
         .sum();
+    let failed_instances: Vec<_> = instances
+        .iter()
+        .filter(|inst| inst.current_apply_failure_count > 0)
+        .collect();
 
     if json {
         output::print_json_pretty(&diagnose_json(
@@ -1803,11 +1847,43 @@ pub async fn diagnose(connection: Connection, json: bool) -> Result<(), CliError
             type2_routes.len(),
             type3_routes.len(),
             &key_metrics,
+            &failed_instances,
+            (
+                instance_response.unscoped_apply_failure_count,
+                &instance_response.latest_unscoped_permanent_apply_error,
+            ),
         ))?;
     } else {
         outln!("EVPN diagnose")?;
         outln!("Instances: {}", instances.len())?;
         outln!("Originated local MACs: {originated_local_macs}")?;
+        outln!(
+            "Current per-instance L2 apply failures: {}",
+            failed_instances
+                .iter()
+                .map(|inst| inst.current_apply_failure_count)
+                .sum::<u64>()
+        )?;
+        for inst in &failed_instances {
+            outln!(
+                "  vni={} count={} latest-permanent-error=[{}]",
+                inst.vni,
+                inst.current_apply_failure_count,
+                inst.latest_permanent_apply_error
+                    .chars()
+                    .flat_map(char::escape_default)
+                    .collect::<String>()
+            )?;
+        }
+        outln!(
+            "Host-wide L2 apply failures: {} latest-permanent-error=[{}]",
+            instance_response.unscoped_apply_failure_count,
+            instance_response
+                .latest_unscoped_permanent_apply_error
+                .chars()
+                .flat_map(char::escape_default)
+                .collect::<String>()
+        )?;
         outln!(
             "Type 2 routes: {} ({})",
             type2_routes.len(),
@@ -1893,12 +1969,50 @@ mod tests {
     #[test]
     fn evpn_diagnose_json_projection_preserves_derived_counts() {
         assert_eq!(
-            super::diagnose_json(3, u64::MAX, 0, 2, &["metric 9".into()]),
+            super::diagnose_json(3, u64::MAX, 0, 2, &["metric 9".into()], &[], (0, "")),
             serde_json::json!({
                 "instance_count":3,"originated_local_macs_count":u64::MAX,"type2_route_count":0,
-                "type2_present":false,"type3_route_count":2,"type3_present":true,"key_metrics":["metric 9"]
+                "type2_present":false,"type3_route_count":2,"type3_present":true,"key_metrics":["metric 9"],
+                "current_apply_failure_count":0,"apply_failed_instances":[],
+                "unscoped_apply_failure_count":0,"latest_unscoped_permanent_apply_error":""
             })
         );
+    }
+
+    #[test]
+    fn current_apply_failure_projection_handles_counts_and_control_characters() {
+        let inst = crate::proto::EvpnInstanceState {
+            vni: 100,
+            current_apply_failure_count: 3,
+            latest_permanent_apply_error: "bad\nerror".into(),
+            ..Default::default()
+        };
+        let human = super::format_evpn_instance_human(&inst);
+        assert!(human.contains("current-apply-failures=3"));
+        assert!(human.contains("latest-permanent-apply-error=[bad\\nerror]"));
+        assert!(!human.contains('\n'));
+        let json = super::evpn_instance_to_json(&inst);
+        assert_eq!(json["current_apply_failure_count"], 3);
+        assert_eq!(json["latest_permanent_apply_error"], "bad\nerror");
+        let diagnosed = super::diagnose_json(1, 0, 0, 0, &[], &[&inst], (2, "unscoped error"));
+        assert_eq!(diagnosed["current_apply_failure_count"], 3);
+        assert_eq!(diagnosed["apply_failed_instances"][0]["vni"], 100);
+        assert_eq!(diagnosed["unscoped_apply_failure_count"], 2);
+        assert_eq!(
+            diagnosed["latest_unscoped_permanent_apply_error"],
+            "unscoped error"
+        );
+        let response = crate::proto::ListEvpnInstancesResponse {
+            instances: Vec::new(),
+            unscoped_apply_failure_count: 2,
+            latest_unscoped_permanent_apply_error: "unscoped\nerror".into(),
+        };
+        let human = super::format_unscoped_apply_failures(&response);
+        assert!(human.contains("latest-permanent-error=[unscoped\\nerror]"));
+        assert!(!human.contains('\n'));
+        let no_evi = super::diagnose_json(0, 0, 0, 0, &[], &[], (2, "unscoped error"));
+        assert_eq!(no_evi["instance_count"], 0);
+        assert_eq!(no_evi["unscoped_apply_failure_count"], 2);
     }
 
     #[test]
@@ -2479,9 +2593,12 @@ mod tests {
             }],
             service_interface: "service_interface-value".to_string(),
             ethernet_tag: 113,
+            current_apply_failure_count: 2,
+            latest_permanent_apply_error: "permission denied".into(),
         };
         let response = crate::proto::ListEvpnInstancesResponse {
             instances: vec![response],
+            ..Default::default()
         };
         let response = &response.instances[0];
         assert_eq!(
@@ -2506,7 +2623,9 @@ mod tests {
                   "count": 111
                 }
               ],
-              "readiness": "unknown"
+              "readiness": "unknown",
+              "current_apply_failure_count":2,
+              "latest_permanent_apply_error":"permission denied"
             })
         );
     }
@@ -3407,12 +3526,14 @@ evpn_duplicate_mac_moves_total{vni="100",mac="02:aa:bb:cc:dd:01"} 2
             ],
             service_interface: "vlan_based".to_string(),
             ethernet_tag: 0,
+            current_apply_failure_count: 0,
+            latest_permanent_apply_error: String::new(),
         };
 
         assert_eq!(
             super::format_evpn_instance_human(&inst),
             "vni=100 rd=65000:100 vtep=10.0.0.1 rts=[65000:100] readiness=ready bridge=br100 \
-             originated-local-macs=3 remote-route-drops=[ethernet_tag_mismatch=2,vni_mismatch=1]"
+             originated-local-macs=3 current-apply-failures=0 remote-route-drops=[ethernet_tag_mismatch=2,vni_mismatch=1]"
         );
         let value = super::evpn_instance_to_json(&inst);
         assert_eq!(
@@ -3453,7 +3574,7 @@ evpn_duplicate_mac_moves_total{vni="100",mac="02:aa:bb:cc:dd:01"} 2
         assert_eq!(
             super::format_evpn_instance_human(&inst),
             "vni=10010 rd=65000:10010 vtep=10.0.0.1 rts=[65000:100] readiness=ready bridge=br0 \
-             bridge-vlan=10 service=vlan-aware-bundle ethernet-tag=10 originated-local-macs=0"
+             bridge-vlan=10 service=vlan-aware-bundle ethernet-tag=10 originated-local-macs=0 current-apply-failures=0"
         );
         let value = super::evpn_instance_to_json(&inst);
         assert_eq!(value["service_interface"], "vlan_aware_bundle");
@@ -3484,6 +3605,8 @@ evpn_duplicate_mac_moves_total{vni="100",mac="02:aa:bb:cc:dd:01"} 2
             not_ready_reason: "bridge br100 is VLAN-aware (vlan_filtering=1)".to_string(),
             service_interface: "vlan_based".to_string(),
             ethernet_tag: 0,
+            current_apply_failure_count: 0,
+            latest_permanent_apply_error: String::new(),
         });
 
         assert_eq!(value["vni"], 100);

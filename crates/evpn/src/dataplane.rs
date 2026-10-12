@@ -465,6 +465,12 @@ pub struct DataplaneReport {
     pub applied: Vec<AppliedOp>,
     /// Operations that failed and are queued for retry.
     pub failed: Vec<FailedOp>,
+    /// Still-current L2 apply failures, including operations suppressed or
+    /// deferred on this pass. None identifies host-wide operations.
+    pub current_apply_failures:
+        std::collections::BTreeMap<(Option<EvpnInstanceId>, &'static str, &'static str), u64>,
+    /// Host-wide L2 failures (BUM, AC, managed netdev), independent of EVI rows.
+    pub unscoped_apply_failures: CurrentApplyFailureSummary,
     /// Observable Gate 8b BUM-enforcement plan. The first Gate 8b
     /// slice reports what would be enforced, but intentionally does
     /// not mutate kernel filters.
@@ -535,6 +541,13 @@ pub struct DataplaneReport {
     /// empty when `[managed_netdevs]` is absent — observed ownership
     /// stamps alone never populate this field.
     pub managed_netdevs: Vec<ManagedNetdevStatus>,
+}
+
+/// Still-current host-wide apply failures from the reconcile actor.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CurrentApplyFailureSummary {
+    pub count: u64,
+    pub latest_permanent_error: Option<String>,
 }
 
 /// Per-report deltas for FDB-NHG drift recovery and stale-NHID
@@ -700,6 +713,10 @@ pub struct InstanceDataplaneStatus {
     /// `LinkCache`) so the SVI-MAC origination path stays on the
     /// ADR-0054 §1 boundary — Linux observes, daemon decides.
     pub bridge_mac: Option<MacAddress>,
+    /// Number of still-current L2 apply failures attributed to this VNI.
+    pub current_apply_failure_count: u64,
+    /// Latest still-current permanent apply error, bounded for display.
+    pub latest_permanent_apply_error: Option<String>,
 }
 
 /// Coarse-grained per-instance dataplane state.
@@ -972,6 +989,8 @@ mod tests {
             state: InstanceState::Ready,
             message: None,
             bridge_mac: Some(mac),
+            current_apply_failure_count: 0,
+            latest_permanent_apply_error: None,
         };
         // Equality comparison preserves the field — the daemon's SVI
         // task will memcmp full status rows when deciding whether a

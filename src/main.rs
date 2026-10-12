@@ -187,6 +187,35 @@ fn update_managed_netdev_metrics(
     *previous = current;
 }
 
+type ApplyFailureMetricLabel = (
+    Option<rustbgpd_evpn::EvpnInstanceId>,
+    &'static str,
+    &'static str,
+);
+
+fn update_current_apply_failure_metrics(
+    metrics: &BgpMetrics,
+    previous: &mut BTreeSet<ApplyFailureMetricLabel>,
+    report: &rustbgpd_evpn::DataplaneReport,
+) {
+    let current = &report.current_apply_failures;
+    let current_labels: BTreeSet<_> = current.keys().copied().collect();
+    for (vni, kind, class) in previous.difference(&current_labels) {
+        let vni = vni.map_or_else(|| "unscoped".to_string(), |vni| vni.as_u32().to_string());
+        metrics.remove_evpn_current_apply_failures(&vni, kind, class);
+    }
+    for ((vni, kind, class), count) in current {
+        let vni = vni.map_or_else(|| "unscoped".to_string(), |vni| vni.as_u32().to_string());
+        metrics.set_evpn_current_apply_failures(
+            &vni,
+            kind,
+            class,
+            i64::try_from(*count).unwrap_or(i64::MAX),
+        );
+    }
+    *previous = current_labels;
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct GrRestartMarker {
@@ -5158,6 +5187,8 @@ async fn run<T>(
     // RR-only / dataplane-disabled deployment.
     let (evpn_instance_status_tx, evpn_instance_status_rx) =
         tokio::sync::watch::channel(Vec::<rustbgpd_evpn::InstanceDataplaneStatus>::new());
+    let (evpn_unscoped_failure_tx, evpn_unscoped_failure_rx) =
+        tokio::sync::watch::channel(rustbgpd_evpn::CurrentApplyFailureSummary::default());
 
     // Latest ADR-0091 managed-netdev status rows for
     // `EvpnService.ListManagedNetdevs`.
@@ -5239,14 +5270,21 @@ async fn run<T>(
         let metrics_for_routes = metrics.clone();
         tokio::spawn(async move {
             let mut managed_netdev_metric_labels = BTreeSet::new();
+            let mut previous_apply_failure_labels = BTreeSet::new();
             loop {
                 match reports.recv().await {
                     Ok(report) => {
+                        update_current_apply_failure_metrics(
+                            &metrics_for_routes,
+                            &mut previous_apply_failure_labels,
+                            &report,
+                        );
                         // `send_replace` is the no-await write —
                         // updates the value in place and wakes any
                         // pending watchers. Safe to call from inside
                         // a tokio task without blocking the worker.
                         evpn_instance_status_tx.send_replace(report.instance_status);
+                        evpn_unscoped_failure_tx.send_replace(report.unscoped_apply_failures);
                         evpn_fdb_nexthops_tx.send_replace(report.fdb_nexthops);
                         evpn_ip_vrf_status_tx.send_replace(report.ip_vrf_status);
                         update_managed_netdev_metrics(
@@ -5730,6 +5768,10 @@ async fn run<T>(
         },
         evpn_instance_status_snapshot: {
             let rx = evpn_instance_status_rx.clone();
+            Arc::new(move || rx.borrow().clone())
+        },
+        evpn_unscoped_apply_failure_snapshot: {
+            let rx = evpn_unscoped_failure_rx.clone();
             Arc::new(move || rx.borrow().clone())
         },
         evpn_managed_netdev_status_snapshot: {
@@ -7283,6 +7325,74 @@ mod tests {
     use crate::test_support::{
         assert_tier_authorized_test_config, tier_authorized_uds_test_config,
     };
+
+    #[test]
+    fn current_apply_failure_metrics_clear_empty_and_retired_vni_snapshots() {
+        let metrics = BgpMetrics::new();
+        let mut previous = BTreeSet::new();
+        let vni = rustbgpd_evpn::EvpnInstanceId::new(100).unwrap();
+        let mut report = rustbgpd_evpn::DataplaneReport {
+            intent_generation: 1,
+            reconcile_generation: 1,
+            instance_status: Vec::new(),
+            applied: Vec::new(),
+            failed: Vec::new(),
+            current_apply_failures: BTreeMap::from([
+                ((Some(vni), "fdb", "permanent"), 2),
+                ((None, "managed_netdev", "transient"), 1),
+            ]),
+            unscoped_apply_failures: rustbgpd_evpn::CurrentApplyFailureSummary::default(),
+            bum_enforcement: Vec::new(),
+            ip_vrf_status: Vec::new(),
+            ip_vrf_routes: None,
+            ip_vrf_installed_routes: std::collections::HashMap::default(),
+            ip_vrf_install_drop_counts: BTreeMap::default(),
+            fdb_nexthops: rustbgpd_evpn::FdbNexthopDataplaneStatus::default(),
+            fdb_nhg_drift_counters: rustbgpd_evpn::FdbNhgDriftCounters::default(),
+            l3_adoption_counters: rustbgpd_evpn::L3AdoptionCounters::default(),
+            single_active_counters: rustbgpd_evpn::SingleActiveCounters::default(),
+            foreign_state_counters: rustbgpd_evpn::ForeignStateCounters::default(),
+            managed_netdevs: Vec::new(),
+        };
+        update_current_apply_failure_metrics(&metrics, &mut previous, &report);
+        let family = metrics
+            .registry()
+            .gather()
+            .into_iter()
+            .find(|family| family.name() == "evpn_current_apply_failures")
+            .unwrap();
+        assert_eq!(family.get_metric().len(), 2);
+        assert!(family.get_metric().iter().any(|metric| {
+            metric
+                .get_label()
+                .iter()
+                .any(|label| label.name() == "vni" && label.value() == "unscoped")
+        }));
+
+        report
+            .current_apply_failures
+            .remove(&(Some(vni), "fdb", "permanent"));
+        update_current_apply_failure_metrics(&metrics, &mut previous, &report);
+        let family = metrics
+            .registry()
+            .gather()
+            .into_iter()
+            .find(|family| family.name() == "evpn_current_apply_failures")
+            .unwrap();
+        assert_eq!(family.get_metric().len(), 1);
+
+        report.current_apply_failures.clear();
+        update_current_apply_failure_metrics(&metrics, &mut previous, &report);
+        assert!(previous.is_empty());
+        assert!(
+            metrics
+                .registry()
+                .gather()
+                .iter()
+                .all(|family| family.name() != "evpn_current_apply_failures"
+                    || family.get_metric().is_empty())
+        );
+    }
 
     #[test]
     fn settled_sighup_result_replaces_interim_ignored_signal() {

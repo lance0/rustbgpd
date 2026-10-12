@@ -1206,6 +1206,7 @@ pub struct ServeConfig {
     /// before the reconcile actor's first pass or when the dataplane
     /// actor is absent.
     pub evpn_instance_status_snapshot: InstanceStatusSnapshotFn,
+    pub evpn_unscoped_apply_failure_snapshot: crate::evpn_service::UnscopedApplyFailureSnapshotFn,
     /// Live snapshot reader for the most recent ADR-0091
     /// managed-netdev status rows.
     pub evpn_managed_netdev_status_snapshot: ManagedNetdevStatusSnapshotFn,
@@ -1803,6 +1804,7 @@ async fn run_listener(
     let mrt_trigger_tx = config.mrt_trigger_tx;
     let evpn_originated_local_mac_count = config.evpn_originated_local_mac_count;
     let evpn_instance_status_snapshot = config.evpn_instance_status_snapshot;
+    let evpn_unscoped_apply_failure_snapshot = config.evpn_unscoped_apply_failure_snapshot;
     let evpn_managed_netdev_status_snapshot = config.evpn_managed_netdev_status_snapshot;
     let evpn_ip_vrf_status_snapshot = config.evpn_ip_vrf_status_snapshot;
     let evpn_originated_ip_vrf_route_count = config.evpn_originated_ip_vrf_route_count;
@@ -1880,6 +1882,7 @@ async fn run_listener(
                 mrt_trigger_tx,
                 evpn_originated_local_mac_count,
                 evpn_instance_status_snapshot,
+                evpn_unscoped_apply_failure_snapshot,
                 evpn_managed_netdev_status_snapshot,
                 evpn_ip_vrf_status_snapshot,
                 evpn_originated_ip_vrf_route_count,
@@ -1954,6 +1957,7 @@ async fn run_listener(
                 mrt_trigger_tx,
                 evpn_originated_local_mac_count,
                 evpn_instance_status_snapshot,
+                evpn_unscoped_apply_failure_snapshot,
                 evpn_managed_netdev_status_snapshot,
                 evpn_ip_vrf_status_snapshot,
                 evpn_originated_ip_vrf_route_count,
@@ -2035,6 +2039,7 @@ async fn run_tcp_listener(
     mrt_trigger_tx: Option<MrtTriggerTx>,
     evpn_originated_local_mac_count: OriginatedLocalMacCountFn,
     evpn_instance_status_snapshot: InstanceStatusSnapshotFn,
+    evpn_unscoped_apply_failure_snapshot: crate::evpn_service::UnscopedApplyFailureSnapshotFn,
     evpn_managed_netdev_status_snapshot: ManagedNetdevStatusSnapshotFn,
     evpn_ip_vrf_status_snapshot: crate::evpn_service::IpVrfStatusSnapshotFn,
     evpn_originated_ip_vrf_route_count: crate::evpn_service::OriginatedIpVrfRouteCountFn,
@@ -2269,6 +2274,7 @@ async fn run_tcp_listener(
             evpn_duplicate_mac_clear,
         )
         .with_instance_status_snapshot(evpn_instance_status_snapshot)
+        .with_unscoped_apply_failure_snapshot(evpn_unscoped_apply_failure_snapshot)
         .with_managed_netdev_status_snapshot(evpn_managed_netdev_status_snapshot)
         .with_remote_ip_prefix_drop_counts(evpn_remote_ip_prefix_drop_counts)
         .with_l2_remote_route_drop_counts(evpn_l2_remote_route_drop_counts)
@@ -2357,6 +2363,7 @@ async fn run_uds_listener(
     mrt_trigger_tx: Option<MrtTriggerTx>,
     evpn_originated_local_mac_count: OriginatedLocalMacCountFn,
     evpn_instance_status_snapshot: InstanceStatusSnapshotFn,
+    evpn_unscoped_apply_failure_snapshot: crate::evpn_service::UnscopedApplyFailureSnapshotFn,
     evpn_managed_netdev_status_snapshot: ManagedNetdevStatusSnapshotFn,
     evpn_ip_vrf_status_snapshot: crate::evpn_service::IpVrfStatusSnapshotFn,
     evpn_originated_ip_vrf_route_count: crate::evpn_service::OriginatedIpVrfRouteCountFn,
@@ -2548,6 +2555,7 @@ async fn run_uds_listener(
             evpn_duplicate_mac_clear,
         )
         .with_instance_status_snapshot(evpn_instance_status_snapshot)
+        .with_unscoped_apply_failure_snapshot(evpn_unscoped_apply_failure_snapshot)
         .with_managed_netdev_status_snapshot(evpn_managed_netdev_status_snapshot)
         .with_remote_ip_prefix_drop_counts(evpn_remote_ip_prefix_drop_counts)
         .with_l2_remote_route_drop_counts(evpn_l2_remote_route_drop_counts)

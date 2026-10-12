@@ -1640,7 +1640,11 @@ impl rustbgpd_api::proto::evpn_service_server::EvpnService for MockEvpnService {
                 readiness_state:
                     server_proto::EvpnInstanceReadinessState::EvpnInstanceReadinessReady as i32,
                 not_ready_reason: String::new(),
+                current_apply_failure_count: 0,
+                latest_permanent_apply_error: String::new(),
             }],
+            unscoped_apply_failure_count: 0,
+            latest_unscoped_permanent_apply_error: String::new(),
         }))
     }
 
