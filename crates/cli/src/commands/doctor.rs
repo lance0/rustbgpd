@@ -3309,26 +3309,35 @@ async fn run_with_deadlines(
                         let identity = cfg.map_or_else(String::new, |config| {
                             peer_identity(&config.address, &config.interface)
                         });
-                        let policy_check = rfc8212_policy_check(
-                            &identity,
-                            n.rfc8212_import_policy,
-                            n.rfc8212_export_policy,
-                        );
-                        reporter.record(
-                            policy_check.name,
-                            policy_check.status,
-                            policy_check.detail,
-                        )?;
-                        for check in
-                            outbound_prefix_limit_checks(&identity, &n.outbound_prefix_limits)
-                                .into_iter()
-                                .chain(inbound_prefix_limit_checks(
-                                    &identity,
-                                    &n.inbound_prefix_limits,
-                                ))
-                                .chain(inbound_prefix_bound_check(&identity, n, local_asn))
-                                .chain(llgr_retention_checks(&identity, &n.gr_retention))
-                        {
+                        // A down dynamic neighbor whose routes are still
+                        // retained has no session or configuration to check:
+                        // only its retention is diagnosed, but it stays in
+                        // the roster and the support bundle.
+                        let retention_only = n.retention_only == Some(true);
+                        if !retention_only {
+                            let policy_check = rfc8212_policy_check(
+                                &identity,
+                                n.rfc8212_import_policy,
+                                n.rfc8212_export_policy,
+                            );
+                            reporter.record(
+                                policy_check.name,
+                                policy_check.status,
+                                policy_check.detail,
+                            )?;
+                            for check in
+                                outbound_prefix_limit_checks(&identity, &n.outbound_prefix_limits)
+                                    .into_iter()
+                                    .chain(inbound_prefix_limit_checks(
+                                        &identity,
+                                        &n.inbound_prefix_limits,
+                                    ))
+                                    .chain(inbound_prefix_bound_check(&identity, n, local_asn))
+                            {
+                                reporter.record(check.name, check.status, check.detail)?;
+                            }
+                        }
+                        for check in llgr_retention_checks(&identity, &n.gr_retention) {
                             reporter.record(check.name, check.status, check.detail)?;
                         }
                         records.push(NeighborDoctorRecord {
@@ -3348,6 +3357,7 @@ async fn run_with_deadlines(
                                 flap_count: n.flap_count,
                                 last_error: redact_text(&n.last_error),
                                 is_dynamic: n.is_dynamic,
+                                retention_only: n.retention_only,
                                 accepted_dynamic_range: output::json_accepted_dynamic_range(
                                     n.accepted_dynamic_range.as_ref(),
                                 ),
@@ -3355,6 +3365,11 @@ async fn run_with_deadlines(
                                 description: redact_text(
                                     &cfg.map(|c| c.description.clone()).unwrap_or_default(),
                                 ),
+                                gr_retention: super::neighbor::json_gr_retention(
+                                    &n.gr_retention,
+                                    false,
+                                ),
+                                gr_retention_available: n.gr_retention_available,
                             },
                             identity,
                             update_group: n.update_group.clone(),
@@ -3385,7 +3400,10 @@ async fn run_with_deadlines(
                             )?,
                         }
                     }
-                    for record in &records {
+                    for record in records
+                        .iter()
+                        .filter(|record| record.support.retention_only != Some(true))
+                    {
                         let session_evidence = if session_history_available {
                             SessionHistoryEvidence::Retained {
                                 last_transition_unix: transitions.get(&record.identity).copied(),
@@ -3840,9 +3858,12 @@ mod tests {
                 flap_count: 0,
                 last_error: String::new(),
                 is_dynamic: false,
+                retention_only: None,
                 accepted_dynamic_range: None,
                 route_reflector_client: false,
                 description: String::new(),
+                gr_retention: Vec::new(),
+                gr_retention_available: None,
             },
             identity: peer_identity(address, interface),
             update_group: String::new(),
@@ -7024,6 +7045,70 @@ paths = ["x"]
                 .unwrap()
                 .contains("llgr_retention.ipv6_unicast")
         }));
+    }
+
+    /// A retention-only row (a down dynamic neighbor whose stale routes the
+    /// RIB still retains) has no session or configuration: doctor reports
+    /// only its retention and keeps a green exit code. Running the ordinary
+    /// per-peer checks on it adds session and policy checks for a peer that
+    /// is gone.
+    #[tokio::test]
+    async fn doctor_reports_only_retention_for_retention_only_neighbor() {
+        let server = spawn_mock_server(None).await;
+        let row = rustbgpd_api::proto::NeighborState {
+            config: Some(rustbgpd_api::proto::NeighborConfig {
+                address: "192.0.2.9".to_string(),
+                remote_asn: 65009,
+                ..Default::default()
+            }),
+            state: rustbgpd_api::proto::SessionState::Idle as i32,
+            retention_only: Some(true),
+            gr_retention_available: Some(true),
+            gr_retention: vec![rustbgpd_api::proto::GracefulRestartRetentionState {
+                family: "ipv4_unicast".to_string(),
+                phase: "llgr".to_string(),
+                remaining_seconds: Some(3_600),
+                stale_routes: None,
+            }],
+            ..Default::default()
+        };
+        *server.state.list_neighbors_response.lock().await = vec![row];
+        let output_dir = tempfile::tempdir().unwrap();
+        let (code, manifest) =
+            run_doctor(&server.addr, &output_dir.path().join("bundle.tar.gz"), None).await;
+
+        assert_eq!(code, 0, "retention is advisory");
+        let peer_checks: Vec<&str> = manifest["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|check| check["name"].as_str())
+            .filter(|name| name.starts_with("peer.192.0.2.9."))
+            .collect();
+        assert_eq!(
+            peer_checks,
+            ["peer.192.0.2.9.llgr_retention.ipv4_unicast"],
+            "{manifest}"
+        );
+        let check = manifest_check(&manifest, "peer.192.0.2.9.llgr_retention.ipv4_unicast");
+        assert_eq!(check["status"], "warn");
+        // The row is still a neighbor: it counts toward the roster, so the
+        // empty-roster result is absent, and the support bundle carries it.
+        assert!(
+            !manifest["checks"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|check| check["name"] == "peers.configured"),
+            "{manifest}"
+        );
+        let files = extract_bundle(&output_dir.path().join("bundle.tar.gz"));
+        let peers: serde_json::Value =
+            serde_json::from_str(find(&files, "peers/neighbors.json")).unwrap();
+        assert_eq!(peers.as_array().unwrap().len(), 1, "{peers}");
+        assert_eq!(peers[0]["address"], "192.0.2.9");
+        assert_eq!(peers[0]["retention_only"], true);
+        assert_eq!(peers[0]["gr_retention"][0]["phase"], "llgr");
     }
 
     #[tokio::test]

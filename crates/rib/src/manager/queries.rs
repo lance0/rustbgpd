@@ -1,6 +1,6 @@
 //! Read-only RIB query, export-explain, and snapshot handlers.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::net::{IpAddr, Ipv4Addr};
 use std::sync::Arc;
 
@@ -134,16 +134,35 @@ pub(super) fn send_mrt_snapshot(
 fn materialize_neighbor_rib_snapshot(
     peers: Vec<IpAddr>,
     comparison: Option<(IpAddr, IpAddr)>,
+    retained_candidates: BTreeSet<IpAddr>,
     mut is_canceled: impl FnMut() -> bool,
     mut build_row: impl FnMut(IpAddr) -> NeighborRibSnapshot,
     build_comparison: impl FnOnce(IpAddr, IpAddr) -> UpdateGroupPeerComparison,
 ) -> Option<NeighborRibSnapshotResponse> {
+    let requested: HashSet<IpAddr> = if retained_candidates.is_empty() {
+        HashSet::new()
+    } else {
+        peers.iter().copied().collect()
+    };
     let mut snapshots = Vec::with_capacity(peers.len());
     for peer in peers {
         if is_canceled() {
             return None;
         }
         snapshots.push(build_row(peer));
+    }
+    let mut retained = Vec::new();
+    for peer in retained_candidates {
+        if is_canceled() {
+            return None;
+        }
+        if requested.contains(&peer) {
+            continue;
+        }
+        let row = build_row(peer);
+        if !row.gr_retention.is_empty() {
+            retained.push(row);
+        }
     }
     if is_canceled() {
         return None;
@@ -155,19 +174,26 @@ fn materialize_neighbor_rib_snapshot(
     Some(NeighborRibSnapshotResponse {
         snapshots,
         comparison,
+        retained,
     })
 }
 
+/// Answer one aggregate neighbor snapshot. `retained_candidates` are the
+/// peers that may hold GR/LLGR retention (empty unless the request set
+/// `include_retained`); those it names that the request did not are
+/// returned as `retained` rows when they still retain something.
 pub(super) fn send_neighbor_rib_snapshot(
     reply: tokio::sync::oneshot::Sender<NeighborRibSnapshotResponse>,
     peers: Vec<IpAddr>,
     comparison: Option<(IpAddr, IpAddr)>,
+    retained_candidates: BTreeSet<IpAddr>,
     build_row: impl FnMut(IpAddr) -> NeighborRibSnapshot,
     build_comparison: impl FnOnce(IpAddr, IpAddr) -> UpdateGroupPeerComparison,
 ) {
     let Some(snapshot) = materialize_neighbor_rib_snapshot(
         peers,
         comparison,
+        retained_candidates,
         || reply.is_closed(),
         build_row,
         build_comparison,
@@ -2775,16 +2801,23 @@ impl RibManager {
         peers: Vec<IpAddr>,
         comparison: Option<(IpAddr, IpAddr)>,
         stale_counts: bool,
+        include_retained: bool,
         reply: tokio::sync::oneshot::Sender<NeighborRibSnapshotResponse>,
     ) {
         // Stale counts scan a peer's Adj-RIB-In: only an explicit
         // single-neighbor read asks, and the scan never covers more than one
         // peer per actor turn.
         let with_stale_counts = stale_counts && peers.len() == 1;
+        let retained_candidates = if include_retained {
+            self.gr_retention_peers()
+        } else {
+            BTreeSet::new()
+        };
         send_neighbor_rib_snapshot(
             reply,
             peers,
             comparison,
+            retained_candidates,
             |peer| self.neighbor_rib_snapshot(peer, with_stale_counts),
             |primary, comparison| self.update_group_comparison(primary, comparison),
         );
@@ -2805,6 +2838,7 @@ impl RibManager {
                 .copied()
                 .unwrap_or_default(),
             outbound: self.peer_outbound_state(peer),
+            remote_asn: self.peer_asn.get(&peer).copied(),
             gr_retention: self.gr_retention_snapshot(peer, with_stale_counts),
         }
     }
@@ -3304,6 +3338,7 @@ mod cancellation_tests {
             reply,
             vec!["192.0.2.1".parse().unwrap()],
             None,
+            BTreeSet::new(),
             |_| panic!("canceled query materialized"),
             |_, _| panic!("canceled query compared"),
         );
@@ -3329,6 +3364,7 @@ mod cancellation_tests {
         let response = materialize_neighbor_rib_snapshot(
             peers.clone(),
             Some((peers[0], peers[1])),
+            BTreeSet::new(),
             {
                 let canceled = Rc::clone(&canceled);
                 move || canceled.get()
@@ -3352,6 +3388,7 @@ mod cancellation_tests {
                             selection_deferral: Vec::new(),
                             outbound_prefix_limits: Vec::new(),
                         },
+                        remote_asn: None,
                         gr_retention: Vec::new(),
                     }
                 }
@@ -3372,6 +3409,7 @@ mod cancellation_tests {
         let response = materialize_neighbor_rib_snapshot(
             vec!["192.0.2.1".parse().unwrap()],
             Some(("192.0.2.1".parse().unwrap(), "192.0.2.2".parse().unwrap())),
+            BTreeSet::new(),
             || canceled.get(),
             |peer| {
                 canceled.set(true);
@@ -3386,6 +3424,7 @@ mod cancellation_tests {
                         selection_deferral: Vec::new(),
                         outbound_prefix_limits: Vec::new(),
                     },
+                    remote_asn: None,
                     gr_retention: Vec::new(),
                 }
             },
@@ -3403,6 +3442,7 @@ mod cancellation_tests {
         let response = materialize_neighbor_rib_snapshot(
             Vec::new(),
             Some(("192.0.2.1".parse().unwrap(), "192.0.2.2".parse().unwrap())),
+            BTreeSet::new(),
             || canceled.get(),
             |_| unreachable!("no rows requested"),
             |_, _| {

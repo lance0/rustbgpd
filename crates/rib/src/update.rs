@@ -65,6 +65,11 @@ pub enum RibSummaryQuery {
         /// list and doctor reads leave it false. Honored only for a
         /// one-peer request.
         stale_counts: bool,
+        /// Also return a row for every peer the RIB retains GR/LLGR stale
+        /// routes for that `peers` does not name (a down dynamic neighbor
+        /// has left the neighbor inventory). Bounded by the retained-peer
+        /// count; no per-route work.
+        include_retained: bool,
         /// Response channel.
         reply: oneshot::Sender<NeighborRibSnapshotResponse>,
     },
@@ -77,11 +82,13 @@ impl From<RibSummaryQuery> for RibUpdate {
                 peers,
                 comparison,
                 stale_counts,
+                include_retained,
                 reply,
             } => Self::QueryNeighborRibSnapshots {
                 peers,
                 comparison,
                 stale_counts,
+                include_retained,
                 reply,
             },
         }
@@ -1830,6 +1837,9 @@ pub struct NeighborRibSnapshot {
     pub policy_stats: NeighborPolicyStats,
     /// Live outbound registration and capacity state.
     pub outbound: PeerOutboundState,
+    /// Peer ASN the RIB last recorded for this peer; kept while its routes
+    /// are retained after the session went down.
+    pub remote_asn: Option<u32>,
     /// RFC 4724 / RFC 9494 helper-side stale-route retention, one row per
     /// family the RIB tracks in a GR or LLGR phase. Empty when nothing is
     /// retained.
@@ -1883,6 +1893,10 @@ pub struct NeighborRibSnapshotResponse {
     pub snapshots: Vec<NeighborRibSnapshot>,
     /// Optional update-group comparison requested with the primary snapshot.
     pub comparison: Option<UpdateGroupPeerComparison>,
+    /// With `include_retained`: peers the request did not name whose GR/LLGR
+    /// stale routes the RIB still retains, in address order. Every row has
+    /// a non-empty `gr_retention`.
+    pub retained: Vec<NeighborRibSnapshot>,
 }
 
 /// Neighbor-facing ADR-0113 outbound capacity for one unicast family.
@@ -2725,6 +2739,11 @@ pub enum RibUpdate {
         /// list and doctor reads leave it false. Honored only for a
         /// one-peer request.
         stale_counts: bool,
+        /// Also return a row for every peer the RIB retains GR/LLGR stale
+        /// routes for that `peers` does not name (a down dynamic neighbor
+        /// has left the neighbor inventory). Bounded by the retained-peer
+        /// count; no per-route work.
+        include_retained: bool,
         /// Response channel.
         reply: oneshot::Sender<NeighborRibSnapshotResponse>,
     },

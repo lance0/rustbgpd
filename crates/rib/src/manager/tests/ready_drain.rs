@@ -73,6 +73,7 @@ async fn assert_timer_drain_yields_before_backlog_is_empty(pending_chunk: bool) 
             comparison: None,
             reply,
             stale_counts: false,
+            include_retained: false,
         })
         .unwrap();
     let (readiness, mut readiness_response) = oneshot::channel();
@@ -228,6 +229,7 @@ async fn timer_drain_preserves_newly_accepted_policy_transition_fence() {
             comparison: None,
             reply,
             stale_counts: false,
+            include_retained: false,
         })
         .unwrap();
     let (reply, mut readiness) = oneshot::channel();

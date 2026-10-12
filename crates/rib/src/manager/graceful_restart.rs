@@ -204,6 +204,18 @@ fn retained_stale_counts(
 }
 
 impl RibManager {
+    /// Every peer that may hold GR/LLGR retention, from the same three maps
+    /// [`Self::gr_retention_snapshot`] reads. Map keys only: bounded by the
+    /// retained peer-family count, never by routes.
+    pub(super) fn gr_retention_peers(&self) -> std::collections::BTreeSet<IpAddr> {
+        self.gr_peers
+            .keys()
+            .chain(self.llgr_peers.keys())
+            .chain(self.llgr_stale_deadlines.keys().map(|(peer, _, _)| peer))
+            .copied()
+            .collect()
+    }
+
     /// Helper-side retention rows for `peer`, read from the same deadline
     /// registries the GR/LLGR timer arms sweep from. A family in `gr_peers`
     /// reports the GR phase (restart while the session is absent, awaiting

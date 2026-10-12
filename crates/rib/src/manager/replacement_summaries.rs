@@ -42,12 +42,26 @@ impl ReplacementSummaries {
                     peers,
                     comparison,
                     stale_counts: _,
+                    include_retained,
                     reply,
                 } => {
+                    // The capture includes every retained peer, so its
+                    // non-empty retention rows are the retained roster.
+                    let retained_candidates = if include_retained {
+                        self.view
+                            .neighbors
+                            .iter()
+                            .filter(|(_, row)| !row.gr_retention.is_empty())
+                            .map(|(peer, _)| *peer)
+                            .collect()
+                    } else {
+                        std::collections::BTreeSet::new()
+                    };
                     super::queries::send_neighbor_rib_snapshot(
                         reply,
                         peers,
                         comparison,
+                        retained_candidates,
                         |peer| {
                             self.view.neighbors.get(&peer).cloned().unwrap_or_else(|| {
                                 NeighborRibSnapshot {
@@ -55,6 +69,7 @@ impl ReplacementSummaries {
                                     advertised_count: 0,
                                     policy_stats: NeighborPolicyStats::default(),
                                     outbound: self.view.unknown_outbound.clone(),
+                                    remote_asn: None,
                                     gr_retention: Vec::new(),
                                 }
                             })
@@ -311,6 +326,7 @@ mod tests {
                 comparison: None,
                 reply,
                 stale_counts: false,
+                include_retained: false,
             })
             .unwrap();
             response
@@ -397,6 +413,7 @@ mod tests {
                 comparison: Some((unknown, waiter)),
                 reply,
                 stale_counts: false,
+                include_retained: false,
             })
             .unwrap();
             let (canceled_reply, canceled_response) = oneshot::channel();
@@ -406,6 +423,7 @@ mod tests {
                 comparison: None,
                 reply: canceled_reply,
                 stale_counts: false,
+                include_retained: false,
             })
             .unwrap();
             manager.with_replacement_summary_reads("apply", |manager| {
@@ -425,6 +443,7 @@ mod tests {
             comparison: None,
             reply,
             stale_counts: false,
+            include_retained: false,
         })
         .unwrap();
         manager.drain_summary_queries();
@@ -526,6 +545,7 @@ mod tests {
                     comparison: None,
                     reply,
                     stale_counts: false,
+                    include_retained: false,
                 })
                 .unwrap();
             context.state.lock().unwrap().last_service -= budget;
@@ -595,6 +615,7 @@ mod tests {
                             comparison: None,
                             reply,
                             stale_counts: false,
+                            include_retained: false,
                         })
                         .unwrap();
                     snapshots.push(response);
@@ -666,6 +687,7 @@ mod tests {
                     comparison: None,
                     reply,
                     stale_counts: false,
+                    include_retained: false,
                 })
                 .unwrap();
             (count, snapshot)
@@ -762,6 +784,7 @@ mod tests {
                     comparison: None,
                     reply,
                     stale_counts: false,
+                    include_retained: false,
                 })
                 .unwrap();
             response
@@ -898,6 +921,7 @@ mod tests {
                     comparison: None,
                     reply,
                     stale_counts: false,
+                    include_retained: false,
                 })
                 .unwrap();
                 replies.push(response);

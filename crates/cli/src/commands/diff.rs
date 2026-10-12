@@ -326,7 +326,9 @@ async fn run(connection: Connection, opts: &AdvertisedDiffOpts) -> Result<(Strin
     .into_inner();
     let mut neighbor_map: BTreeMap<IpAddr, (u32, Vec<String>)> = BTreeMap::new();
     for state in &neighbors.neighbors {
-        if let Some(config) = &state.config
+        // A retention-only row has no session or configured families.
+        if state.retention_only != Some(true)
+            && let Some(config) = &state.config
             && let Ok(addr) = bare_ip_rpc_address(&config.address).parse::<IpAddr>()
         {
             neighbor_map.insert(addr, (config.remote_asn, config.families.clone()));
@@ -2327,6 +2329,25 @@ mod tests {
         assert_eq!(code, EXIT_INCOMPARABLE, "output was:\n{rendered}");
         assert!(rendered.contains("not configured on the daemon"));
         assert!(rendered.contains("incomparable"));
+    }
+
+    /// A retention-only row (a down dynamic neighbor whose stale routes the
+    /// RIB still retains) has no session to advertise to, so it is refused
+    /// as not configured. Treating it as a neighbor compares it instead.
+    #[tokio::test]
+    async fn retention_only_neighbor_refuses_equal_verdict() {
+        let file = snapshot_file(&[
+            header_line(),
+            route_line("10.0.0.0/24", None),
+            trailer_line(1),
+        ]);
+        let server = spawn_mock_server(None).await;
+        let mut row = neighbor(PEER, PEER_ASN);
+        row.retention_only = Some(true);
+        *server.state.list_neighbors_response.lock().await = vec![row];
+        let (rendered, code) = run_against(&server, &opts(file.path())).await.unwrap();
+        assert_eq!(code, EXIT_INCOMPARABLE, "output was:\n{rendered}");
+        assert!(rendered.contains("not configured on the daemon"));
     }
 
     #[tokio::test]

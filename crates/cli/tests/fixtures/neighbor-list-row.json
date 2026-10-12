@@ -17,5 +17,13 @@
     "peer_group": "peer_group-value"
   },
   "route_reflector_client": true,
-  "description": "description-value"
+  "description": "description-value",
+  "gr_retention": [
+    {
+      "family": "family-value",
+      "phase": "phase-value",
+      "remaining_seconds": 159
+    }
+  ],
+  "gr_retention_available": true
 }
