@@ -387,8 +387,11 @@ not provide this forwarding behavior. See the
 `df_algorithm = "highest-preference"` on rustbgpd and configure FRR's
 `evpn mh es-df-pref` preference on its access bond. FRR becomes non-DF
 on algorithm disagreement; leaving rustbgpd at `default-modulo` can leave
-both PEs non-DF and drop remote BUM traffic. Highest-preference chooses
-one winner across the ES's VNIs. See
+both PEs non-DF in the control plane. Matching election settings are not
+sufficient for forwarding: stock FRR 10.7.1 Linux netlink does not apply
+its non-DF bridge-port update, and the mixed lab observed duplicate BUM
+delivery when rustbgpd was DF. A working FRR dataplane provider is also
+required. Highest-preference chooses one winner across the ES's VNIs. See
 [FRR all-active ES peers](../reference/configuration.md#frr-all-active-es-peers).
 
 What you still provide:

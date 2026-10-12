@@ -4510,12 +4510,20 @@ Set `df_algorithm = "highest-preference"` when sharing an all-active ES
 with FRR 10.7.1, and bind `interface` to the CE-facing bond. FRR supports
 preference election and becomes non-DF when an ES peer advertises another
 algorithm. With rustbgpd's default `"default-modulo"`, both PEs can be
-non-DF for a VNI, dropping remote BUM traffic toward the CE. Matching
-highest-preference settings avoid that algorithm disagreement. See the
+non-DF for a VNI in the control plane. Matching highest-preference
+settings avoid that algorithm disagreement. See the
 [pinned FRR election logic](https://github.com/FRRouting/frr/blob/f8c0b08dcb0c78f9e42b9b86ae70b049e4e617c1/zebra/zebra_evpn_mh.c#L1948-L1976).
 
 Highest-preference elects the same winner across an ES's member VNIs;
 changing the VNI does not distribute the DF role between its PEs.
+
+Election agreement does not establish non-DF forwarding enforcement.
+Stock FRR 10.7.1 Linux netlink returns success without applying its
+bridge-port update. The [partial mixed-peer receipt](../artifacts/interop/evpn-all-active-frr-20261012T000900Z/README.md)
+passed the FRR-DF cell, including rustbgpd non-DF BUM suppression and
+carrier recovery, but failed with duplicate BUM delivery when rustbgpd
+was DF. The default-modulo forwarding cell was not reached. A working
+FRR dataplane provider is required before qualifying the complete matrix.
 
 ### Auto-derived ESI (LACP, Type 1)
 
