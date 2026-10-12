@@ -2891,7 +2891,8 @@ retain their `%interface` scope in both check names and details.
 eBGP peer with no effective inbound prefix bound after peer-group inheritance.
 It names the peer and the five keys that can set a bound: `max_prefixes`,
 `max_prefixes_ipv4`, `max_prefixes_ipv6`, `max_prefixes_received_ipv4`, and
-`max_prefixes_received_ipv6`. Static, API-added, and accepted dynamic peers
+`max_prefixes_received_ipv6`. A non-unicast `max_prefixes_<family>` bound
+alone does not satisfy the check. Static, API-added, and accepted dynamic peers
 are checked. iBGP, route-reflector clients, down sessions, and stale snapshots
 are excluded; the check also requires the daemon's global ASN and peer
 configuration to be available. This advisory warning retains exit status 0.
