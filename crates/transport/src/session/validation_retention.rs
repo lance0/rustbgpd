@@ -152,8 +152,10 @@ impl ValidationRetention {
                 self.rejected -= 1;
             }
             self.removals_since_gc += 1;
-            // Amortized: sweep once removals outnumber distinct attribute sets.
-            if self.removals_since_gc > self.attrs.len() {
+            // Amortized: sweep once removals since the last sweep outnumber
+            // retained routes. Each removal leaves at most one dead interned
+            // set, so dead sets stay proportional to the live store.
+            if self.removals_since_gc > self.routes.len() {
                 self.attrs.gc();
                 self.removals_since_gc = 0;
             }
@@ -690,5 +692,21 @@ mod tests {
         assert!(store.retained(&(a, 0)).is_some());
         assert!(store.retained(&(b, 0)).is_none());
         assert!(store.retained(&(c, 0)).is_some());
+    }
+
+    #[test]
+    fn unique_attribute_churn_keeps_the_intern_table_bounded() {
+        let mut store = ValidationRetention::new(true);
+        let key = (v4([192, 0, 2, 0], 24), 0);
+        for med in 0..1_000 {
+            let attrs = store.intern(AttrSet::new(vec![PathAttribute::Med(med)]));
+            store.insert(key, attrs, RetainedReach::Body, true).unwrap();
+            assert!(
+                store.attrs.len() <= store.routes.len() + 1,
+                "dead attribute sets accumulate: {} interned for {} routes",
+                store.attrs.len(),
+                store.routes.len()
+            );
+        }
     }
 }
