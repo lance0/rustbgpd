@@ -1726,7 +1726,7 @@ impl PeerManager {
         outcome
     }
 
-    async fn restore_reconfigured_peer(
+    pub(super) async fn restore_reconfigured_peer(
         &mut self,
         peer: PeerKey,
         previous: PeerManagerNeighborConfig,

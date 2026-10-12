@@ -257,3 +257,34 @@ async fn sequential_rebuild_that_sets_admin_down_sends_the_configured_reason() {
     );
     assert_eq!(starts.load(Ordering::SeqCst), 0);
 }
+
+/// The reconfigure restore path tears the replacement down before re-adding
+/// the prior. When the prior was configured down and the replacement is
+/// enabled, that teardown carries the prior's configured reason.
+#[tokio::test]
+async fn reconfigure_restore_that_takes_the_peer_down_sends_the_prior_reason() {
+    let mut mgr = test_peer_manager();
+    let addr = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 6));
+    let (handle, starts, mut stops) = recording_admin_handle();
+    insert_test_managed_peer(&mut mgr, addr, handle, false);
+    let mut previous = forward_config(&mgr, addr);
+    previous.admin_down = Some("restored quarantine".to_string());
+
+    mgr.restore_reconfigured_peer(key(addr), previous, false, false, None)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        stops
+            .recv()
+            .await
+            .expect("replacement session receives Stop"),
+        Some(rustbgpd_wire::notification::encode_shutdown_communication(
+            "restored quarantine"
+        ))
+    );
+    let managed = &mgr.peers[&key(addr)];
+    assert!(!managed.enabled);
+    assert_eq!(managed.admin_down.as_deref(), Some("restored quarantine"));
+    assert_eq!(starts.load(Ordering::SeqCst), 0);
+}
