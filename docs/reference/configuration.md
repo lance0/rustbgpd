@@ -3405,16 +3405,32 @@ These fields modify matching routes. Only valid with `action = "permit"`.
 | `set_as_path_prepend`  | table       | `{ asn = 65001, count = 3 }` (ASN 1–4294967295, count 1–10) |
 
 `set_next_hop` follows the route's address family. An IPv6 address on an IPv4
-unicast route is an RFC 8950 next hop. An IPv4 address does not apply to a
-route with IPv6 NLRI (IPv6 unicast, IPv6 labeled unicast, or VPNv6), whose
-`MP_REACH_NLRI` next hop must be IPv6 (RFC 2545 §3, RFC 8277, RFC 4659
-§3.2.1); the route keeps its next hop, as with FRR's `set ip next-hop`.
+unicast route is an RFC 8950 next hop. An IPv4 address does not apply to an
+IPv6 unicast route, whose `MP_REACH_NLRI` next hop must be IPv6 (RFC 2545
+§3); the route keeps its next hop, as with FRR's `set ip next-hop`.
 rustbgpd does not originate 6PE or 6VPE routes and never converts an IPv4
 `set_next_hop` into an IPv4-mapped IPv6 address. To set one deliberately, give
 the IPv6 form, such as `"::ffff:192.0.2.9"`. A received IPv4-mapped next hop
 is reflected unchanged. On import, `"self"` for an IPv6 route resolves to the
 session's local IPv6 address, else `local_ipv6_nexthop`; with neither (IPv4
 transport and no `local_ipv6_nexthop`) the route keeps its received next hop.
+
+`set_next_hop` never applies to a labeled-unicast or VPN route
+(`ipv4_labeled_unicast`, `ipv6_labeled_unicast`, `l3vpn_ipv4_unicast`,
+`l3vpn_ipv6_unicast`). Such a route keeps its received labels, which are valid
+only at the received next hop (RFC 8277 §3.2.2), and rustbgpd allocates no
+labels ([ADR-0077](../adr/0077-mpls-vpn-bgpls-address-family-boundary.md)
+Decision 6). Config validation therefore rejects an export policy whose
+`set_next_hop`, `"self"` or an address, can reach one of those families on the
+neighbor, peer group or dynamic range it is bound to. The check runs at
+startup and before a SIGHUP or API change commits, and the error names the
+family, the policy and the binding. A TOML statement has no family match, so
+bind a policy that sets the next hop only to unicast peers. In `.rpol`, a term
+whose guard excludes those families, such as `route.family == ipv4-unicast`,
+stays legal on a peer that also carries them; a guard the check cannot prove
+exclusive, such as a prefix match alone, is rejected. On import the action
+leaves a labeled or VPN route's next hop unchanged, as before.
+
 Export never encodes an IPv4 next hop for a route with IPv6 NLRI, including a
 VPNv6 route received with a 12-octet RD + IPv4 next hop: such a route is
 withheld from that peer and counted in

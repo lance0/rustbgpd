@@ -1102,6 +1102,63 @@ remote_asn = 65002
         assert_eq!(snapshot.statements[0].set_community_add, vec!["65001:100"]);
     }
 
+    /// An API policy edit that would make a VPN peer's export chain set the
+    /// next hop fails the candidate's validation, before it can commit.
+    #[test]
+    fn set_policy_event_refuses_set_next_hop_bound_to_a_vpn_peer() {
+        let mut config = minimal_config();
+        config.neighbors[0].families = vec!["l3vpn_ipv6_unicast".to_string()];
+        config.neighbors[0].export_policy_chain = vec!["shared".to_string()];
+        config.policy.definitions.insert(
+            "shared".to_string(),
+            crate::config::NamedPolicyConfig {
+                default_action: "permit".to_string(),
+                statements: Vec::new(),
+            },
+        );
+        config.validate().expect("a permit-all policy is legal");
+
+        let mut definition = config_definition_to_api(&config.policy.definitions["shared"]);
+        definition.statements.push(PolicyStatementDefinition {
+            action: "permit".to_string(),
+            prefix: Some("2001:db8::/32".to_string()),
+            ge: None,
+            le: Some(64),
+            match_community: Vec::new(),
+            match_as_path: None,
+            match_neighbor_set: None,
+            match_route_type: None,
+            match_evpn_route_type: None,
+            match_as_path_length_ge: None,
+            match_as_path_length_le: None,
+            match_local_pref_ge: None,
+            match_local_pref_le: None,
+            match_med_ge: None,
+            match_med_le: None,
+            match_next_hop: None,
+            match_rpki_validation: None,
+            match_aspa_validation: None,
+            set_local_pref: None,
+            set_med: None,
+            set_next_hop: Some("2001:db8::9".to_string()),
+            set_community_add: Vec::new(),
+            set_community_remove: Vec::new(),
+            set_as_path_prepend: None,
+        });
+        let error = apply_config_event(
+            &mut config.clone(),
+            &ConfigEvent::SetPolicy {
+                name: "shared".to_string(),
+                definition,
+                ack: None,
+            },
+        )
+        .expect_err("VPN export set_next_hop must not validate");
+        let error = error.to_string();
+        assert!(error.contains("l3vpn_ipv6_unicast"), "{error}");
+        assert!(error.contains("export policy \"shared\""), "{error}");
+    }
+
     #[test]
     fn policy_references_find_global_and_neighbor_chains() {
         let mut config = minimal_config();

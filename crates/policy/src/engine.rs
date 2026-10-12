@@ -187,6 +187,16 @@ impl RouteFamily {
         }
     }
 
+    /// Labeled unicast (RFC 8277) and VPN (RFC 4364/4659) families: their
+    /// NLRI carry labels bound at the advertised next hop.
+    #[must_use]
+    pub fn carries_labels(self) -> bool {
+        matches!(
+            self,
+            Self::Ipv4LabeledUnicast | Self::Ipv6LabeledUnicast | Self::Vpnv4 | Self::Vpnv6
+        )
+    }
+
     /// Map a wire AFI/SAFI pair to the policy family. `None` for pairs
     /// rustbgpd never evaluates policy for (e.g. multicast).
     #[must_use]
@@ -438,18 +448,27 @@ pub struct RouteModifications {
 }
 
 impl NextHopAction {
-    /// Whether this action applies to the evaluated route. An IPv6-NLRI
-    /// route's `MP_REACH_NLRI` next hop is IPv6: 16 or 32 octets for
-    /// unicast and labeled unicast (RFC 2545 §3, RFC 8277), an RD-prefixed
-    /// IPv6 address for `VPNv6` (RFC 4659 §3.2.1). An IPv4 address does not
-    /// apply to such a route, as with FRR's `set ip next-hop`; the action is
-    /// skipped as if absent. An IPv6 address on an IPv4 route applies
-    /// (RFC 8950). Evaluation, its merges and explain all use this one rule.
+    /// Whether this action applies to the evaluated route. Evaluation, its
+    /// merges and explain all use this one rule; an inapplicable action is
+    /// skipped as if absent.
+    ///
+    /// No action applies to a labeled-unicast or VPN route: its received
+    /// labels are valid only at the received next hop (RFC 8277 §3.2.2), and
+    /// rustbgpd allocates no labels. Config validation refuses such an export
+    /// binding ([`set_next_hop_reaching`]); this keeps a binding that bypassed
+    /// validation from rewriting either.
+    ///
+    /// An IPv4 address does not apply to an IPv6 unicast route, whose
+    /// `MP_REACH_NLRI` next hop must be IPv6 (RFC 2545 §3), as with FRR's
+    /// `set ip next-hop`. An IPv6 address on an IPv4 route applies (RFC 8950).
+    ///
+    /// [`set_next_hop_reaching`]: PolicyChain::set_next_hop_reaching
     pub(crate) fn applies_to(&self, ctx: &RouteContext<'_>) -> bool {
-        !(matches!(
-            ctx.family,
-            Some(RouteFamily::Ipv6Unicast | RouteFamily::Ipv6LabeledUnicast | RouteFamily::Vpnv6)
-        ) && matches!(self, Self::Specific(IpAddr::V4(_))))
+        match ctx.family {
+            Some(family) if family.carries_labels() => false,
+            Some(RouteFamily::Ipv6Unicast) => !matches!(self, Self::Specific(IpAddr::V4(_))),
+            _ => true,
+        }
     }
 }
 
@@ -1503,6 +1522,33 @@ impl PolicyChain {
             hits: OnceLock::new(),
             fingerprint: OnceLock::new(),
         }
+    }
+
+    /// The first member whose `set_next_hop` can execute for a route of
+    /// `family`, as `(policy name, term)`; `None` names an inline policy.
+    /// `.rpol` members are analysed per term
+    /// ([`CompiledChain::set_next_hop_reaching`]). TOML statements have no
+    /// family match, so only an EVPN route-type match excludes one.
+    #[must_use]
+    pub fn set_next_hop_reaching(&self, family: RouteFamily) -> Option<(Option<&str>, String)> {
+        self.policies.iter().find_map(|named| {
+            let term = if let Some(compiled) = named.rpol.as_deref() {
+                compiled
+                    .set_next_hop_reaching(family)
+                    .map(|(_, term)| term.unwrap_or("<unnamed>").to_string())
+            } else {
+                named
+                    .entries
+                    .iter()
+                    .position(|statement| {
+                        statement.modifications.set_next_hop.is_some()
+                            && (statement.match_evpn_route_type.is_none()
+                                || family == RouteFamily::Evpn)
+                    })
+                    .map(|index| format!("statement {}", index + 1))
+            }?;
+            Some((named.name.as_deref(), term))
+        })
     }
 
     /// Create a chain from a list of already-named policies.

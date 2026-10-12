@@ -314,13 +314,10 @@ impl RibManager {
                         let nh = AttrSet::edit(&mut modified.attributes, |attrs| {
                             rustbgpd_policy::apply_modifications(attrs, &result.modifications)
                         });
-                        if let Some(rustbgpd_policy::NextHopAction::Specific(addr)) = nh {
-                            if addr != modified.next_hop {
-                                modified.link_local_next_hop = None;
-                                modified.next_hop_scope = None;
-                            }
-                            modified.next_hop = addr;
-                        }
+                        // Evaluation applies no next-hop action to a labeled or VPN
+                        // route: its labels are bound at the received next hop
+                        // (RFC 8277 §3.2.2), which is therefore kept.
+                        debug_assert!(nh.is_none(), "next-hop action reached a labeled/VPN export");
                         checkpoint.borrow_mut()();
                     }
                     if super::no_advertise_export_suppressed(modified.communities()) {
@@ -645,13 +642,10 @@ impl RibManager {
                 let nh = AttrSet::edit(&mut modified.attributes, |attrs| {
                     rustbgpd_policy::apply_modifications(attrs, &result.modifications)
                 });
-                if let Some(rustbgpd_policy::NextHopAction::Specific(addr)) = nh {
-                    if addr != modified.next_hop {
-                        modified.link_local_next_hop = None;
-                        modified.next_hop_scope = None;
-                    }
-                    modified.next_hop = addr;
-                }
+                // Evaluation applies no next-hop action to a labeled or VPN
+                // route: its labels are bound at the received next hop
+                // (RFC 8277 §3.2.2), which is therefore kept.
+                debug_assert!(nh.is_none(), "next-hop action reached a labeled/VPN export");
                 checkpoint.borrow_mut()();
             }
             if super::no_advertise_export_suppressed(modified.communities()) {

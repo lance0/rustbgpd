@@ -14,6 +14,7 @@ mod hit_counters;
 mod ir_parity;
 mod large_community;
 mod modifications;
+mod next_hop_reach;
 mod peer_context;
 mod prefix;
 mod rpki;

@@ -1071,11 +1071,11 @@ fn next_hop_order_chains() -> [(&'static str, PolicyChain); 2] {
     [("toml", toml), ("rpol", rpol)]
 }
 
-/// An IPv4 `set next-hop` does not apply to an IPv6-NLRI route (unicast,
-/// labeled unicast or `VPNv6`), so it must not override an earlier IPv6 one
-/// (last writer wins only among applicable actions). On an IPv4-NLRI route
-/// the IPv4 action is last and wins. Explain renders exactly the next hop
-/// live evaluation produces.
+/// An IPv4 `set next-hop` does not apply to an IPv6 unicast route, so it
+/// must not override an earlier IPv6 one (last writer wins only among
+/// applicable actions). On an IPv4 unicast route the IPv4 action is last and
+/// wins; labeled-unicast and VPN routes take neither. Explain renders exactly
+/// the next hop live evaluation produces.
 #[test]
 fn inapplicable_ipv4_next_hop_does_not_override_an_ipv6_one_live_or_in_explain() {
     let v6_prefix = Prefix::V6(rustbgpd_wire::Ipv6Prefix::new(
@@ -1083,13 +1083,14 @@ fn inapplicable_ipv4_next_hop_does_not_override_an_ipv6_one_live_or_in_explain()
         48,
     ));
     let v4_prefix = v4_prefix([10, 0, 0, 0], 8);
+    // Labeled-unicast and VPN routes take no next-hop action at all.
     let routes = [
-        (v6_prefix, RouteFamily::Ipv6Unicast, "2001:db8::9"),
-        (v6_prefix, RouteFamily::Ipv6LabeledUnicast, "2001:db8::9"),
-        (v6_prefix, RouteFamily::Vpnv6, "2001:db8::9"),
-        (v4_prefix, RouteFamily::Ipv4Unicast, "192.0.2.9"),
-        (v4_prefix, RouteFamily::Ipv4LabeledUnicast, "192.0.2.9"),
-        (v4_prefix, RouteFamily::Vpnv4, "192.0.2.9"),
+        (v6_prefix, RouteFamily::Ipv6Unicast, Some("2001:db8::9")),
+        (v6_prefix, RouteFamily::Ipv6LabeledUnicast, None),
+        (v6_prefix, RouteFamily::Vpnv6, None),
+        (v4_prefix, RouteFamily::Ipv4Unicast, Some("192.0.2.9")),
+        (v4_prefix, RouteFamily::Ipv4LabeledUnicast, None),
+        (v4_prefix, RouteFamily::Vpnv4, None),
     ];
     for (chain_name, chain) in next_hop_order_chains() {
         for (prefix, family, expected) in routes {
@@ -1098,7 +1099,7 @@ fn inapplicable_ipv4_next_hop_does_not_override_an_ipv6_one_live_or_in_explain()
             let live = chain.evaluate(&ctx);
             assert_eq!(
                 live.modifications.set_next_hop,
-                Some(NextHopAction::Specific(expected.parse().unwrap())),
+                expected.map(|addr| NextHopAction::Specific(addr.parse().unwrap())),
                 "live {chain_name} {family:?}"
             );
             let rendered: Vec<String> = explain_chain_statements(Some(&chain), &ctx)
@@ -1110,7 +1111,9 @@ fn inapplicable_ipv4_next_hop_does_not_override_an_ipv6_one_live_or_in_explain()
                 .collect();
             assert_eq!(
                 rendered.last(),
-                Some(&format!("next_hop none -> {expected}")),
+                expected
+                    .map(|addr| format!("next_hop none -> {addr}"))
+                    .as_ref(),
                 "explain {chain_name} {family:?}: {rendered:?}"
             );
             if matches!(prefix, Prefix::V6(_)) {
