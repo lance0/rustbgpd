@@ -3508,7 +3508,7 @@ async fn evpn_sessions_synced(tx: &mpsc::Sender<RibUpdate>) -> bool {
     tx.send(RibUpdate::QueryEvpnSessionsSynced { reply })
         .await
         .unwrap();
-    rx.await.unwrap()
+    rx.await.unwrap().synced
 }
 
 /// `PeerUp` without waiting for the initial End-of-RIB, which selection
@@ -3636,6 +3636,89 @@ async fn evpn_sessions_synced_ignores_non_evpn_sessions_and_stale_end_of_rib() {
     handle.await.unwrap();
 }
 
+/// ADR-0140 decision 2: the reply counts established EVPN sessions and
+/// peers whose EVPN routes are retained as GR-stale, so a planned
+/// reflector restart is not read as core isolation.
+#[tokio::test]
+async fn evpn_sessions_sync_counts_established_and_gr_stale_peers() {
+    async fn sync(tx: &mpsc::Sender<RibUpdate>) -> crate::update::EvpnSessionsSync {
+        let (reply, rx) = tokio::sync::oneshot::channel();
+        tx.send(RibUpdate::QueryEvpnSessionsSynced { reply })
+            .await
+            .unwrap();
+        rx.await.unwrap()
+    }
+    let a = Ipv4Addr::new(10, 0, 0, 1);
+    let unicast = Ipv4Addr::new(10, 0, 0, 2);
+    let (tx, rx) = mpsc::channel(64);
+    let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let handle = tokio::spawn(manager.run());
+
+    session_up(&tx, unicast, 1, vec![(Afi::Ipv4, Safi::Unicast)]).await;
+    session_up(&tx, a, 1, evpn_sendable()).await;
+    let up = sync(&tx).await;
+    assert_eq!((up.established, up.stale), (1, 0));
+
+    tx.send(RibUpdate::PeerGracefulRestart {
+        peer: IpAddr::V4(a),
+        session_id: 1,
+        restart_time: 120,
+        stale_routes_time: 360,
+        gr_families: evpn_sendable(),
+        peer_llgr_capable: false,
+        peer_llgr_families: vec![],
+        llgr_stale_time: 0,
+    })
+    .await
+    .unwrap();
+    let restarting = sync(&tx).await;
+    assert_eq!(
+        (restarting.established, restarting.stale, restarting.synced),
+        (0, 1, false),
+        "a GR-restarting EVPN peer is stale, not established"
+    );
+
+    tx.send(RibUpdate::PeerDown {
+        session_id: 1,
+        peer: IpAddr::V4(unicast),
+    })
+    .await
+    .unwrap();
+    tx.send(RibUpdate::PeerDown {
+        session_id: 1,
+        peer: IpAddr::V4(a),
+    })
+    .await
+    .unwrap();
+    let gone = sync(&tx).await;
+    assert_eq!((gone.established, gone.stale), (0, 0));
+
+    drop(tx);
+    handle.await.unwrap();
+}
+
+/// ADR-0140: the snapshot answers session counts and Type 4 rows in one
+/// actor turn.
+#[tokio::test]
+async fn evpn_es_snapshot_reports_sessions_with_no_routes() {
+    let a = Ipv4Addr::new(10, 0, 0, 1);
+    let (tx, rx) = mpsc::channel(64);
+    let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let handle = tokio::spawn(manager.run());
+    session_up(&tx, a, 1, evpn_sendable()).await;
+    evpn_eor(&tx, a, 1).await;
+    let (reply, rx) = tokio::sync::oneshot::channel();
+    tx.send(RibUpdate::QueryEvpnEsSnapshot { reply })
+        .await
+        .unwrap();
+    let snapshot = rx.await.unwrap();
+    assert_eq!(snapshot.sessions.established, 1);
+    assert!(snapshot.sessions.synced);
+    assert!(snapshot.es_routes.is_empty());
+    drop(tx);
+    handle.await.unwrap();
+}
+
 // --- FIB install-candidate view (multipath/ECMP) ---
 
 /// RFC 9785 §4.3 boot gate: synced only once every established EVPN
@@ -3647,7 +3730,7 @@ async fn evpn_sessions_synced_tracks_evpn_end_of_rib_per_session() {
         tx.send(RibUpdate::QueryEvpnSessionsSynced { reply })
             .await
             .unwrap();
-        rx.await.unwrap()
+        rx.await.unwrap().synced
     }
     async fn eor(tx: &mpsc::Sender<RibUpdate>, peer: Ipv4Addr, afi: Afi, safi: Safi) {
         tx.send(RibUpdate::EndOfRib {
@@ -3699,7 +3782,7 @@ async fn evpn_sessions_synced_resets_on_collision_replacement_and_failover() {
         tx.send(RibUpdate::QueryEvpnSessionsSynced { reply })
             .await
             .unwrap();
-        rx.await.unwrap()
+        rx.await.unwrap().synced
     }
     async fn up(tx: &mpsc::Sender<RibUpdate>, peer: IpAddr, session_id: u64) {
         let (out_tx, mut out_rx) = mpsc::channel(64);

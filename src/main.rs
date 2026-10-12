@@ -25,6 +25,8 @@ mod confirm_journal;
 mod dampening_control;
 mod evpn_ack;
 mod evpn_auto_esi;
+#[cfg(target_os = "linux")]
+mod evpn_core_isolation;
 mod evpn_dataplane;
 mod evpn_es_drain;
 mod evpn_es_link_drain;
@@ -2137,6 +2139,17 @@ fn stdout_exit(result: Result<(), StdoutWriteError>) -> ExitCode {
     }
 }
 
+/// Whether two directory spellings name the same directory: equal paths
+/// (component-wise, so a trailing slash does not matter) or, when both
+/// exist, equal canonical paths.
+fn same_directory(a: &Path, b: &Path) -> bool {
+    a == b
+        || matches!(
+            (std::fs::canonicalize(a), std::fs::canonicalize(b)),
+            (Ok(a), Ok(b)) if a == b
+        )
+}
+
 fn invalid_invocation(message: impl std::fmt::Display) -> ! {
     eprintln!("error: {message}");
     process::exit(2);
@@ -2407,6 +2420,21 @@ change.
 \fB\-\-json\fR
 Output the diff as JSON (only with \fB\-\-diff\fR).
 .TP
+\fB\-\-runtime\-state\-dir\fR \fIDIR\fR
+Assert the config's \fBruntime_state_dir\fR. The daemon (and
+\fB\-\-check\fR) refuses to start when \fIDIR\fR differs from it, so a
+supervisor's stop hook and the daemon cannot use different directories.
+.TP
+\fB\-\-release\-core\-isolation\fR
+One-shot, with \fB\-\-runtime\-state\-dir\fR only: raise the CE-facing
+links that an exited daemon's EVPN core-isolation hold left
+administratively down, using the ownership receipt in \fIDIR\fR and
+without reading the config. Refuses while a running daemon holds the
+receipt lock. Exits 0 only when no owned link is left down; 1 when the
+directory, lock or receipt is unusable or an ambiguous entry remains
+down. Run it from the supervisor's stop hook (systemd
+\fBExecStopPost=\fR).
+.TP
 \fB\-\-init\-config\fR \fIPROFILE\fR
 Print a starter config to stdout and exit. Profiles: {profiles}.
 .TP
@@ -2519,6 +2547,12 @@ fn main() -> ExitCode {
                                      and deployment gates). Rejected without --check\n  \
                --diff PATH           Compare config against PATH and show what SIGHUP would change\n  \
                --json                Output diff as JSON (only with --diff)\n  \
+               --runtime-state-dir DIR\n                        \
+                                     Assert the config's runtime_state_dir; the daemon refuses\n                        \
+                                     to start when they differ\n  \
+               --release-core-isolation\n                        \
+                                     With --runtime-state-dir only: raise the links an exited\n                        \
+                                     daemon's EVPN core-isolation hold left down, then exit\n  \
                --init-config PROFILE Print a starter config to stdout and exit.\n                        \
                                      Profiles: {}\n  \
                --stdout              Accepted with --init-config and ignored (output always\n                        \
@@ -2540,6 +2574,8 @@ fn main() -> ExitCode {
                   or metrics/readiness server exit)\n  \
                2  Invalid invocation (unknown flag combination, missing argument).\n     \
                   For --diff: also a config that could not be loaded\n  \
+                  --release-core-isolation exits 0 only when no owned link is left\n     \
+                  down, and 1 otherwise\n  \
                70 Internal error",
                     env!("CARGO_PKG_VERSION"),
                     crate::config::profiles::PROFILE_NAMES.join(", ")
@@ -2569,8 +2605,24 @@ fn main() -> ExitCode {
     let mut config_path: Option<String> = None;
     let mut expect_diff_path = false;
     let mut expect_init_profile = false;
+    let mut runtime_state_dir_flag: Option<String> = None;
+    let mut expect_runtime_state_dir = false;
+    let mut release_core_isolation = false;
     for arg in &args[1..] {
-        if expect_diff_path {
+        if expect_runtime_state_dir {
+            if arg.starts_with('-') {
+                invalid_invocation("--runtime-state-dir requires a directory argument");
+            }
+            runtime_state_dir_flag = Some(arg.clone());
+            expect_runtime_state_dir = false;
+        } else if arg == "--runtime-state-dir" {
+            if runtime_state_dir_flag.is_some() {
+                invalid_invocation("--runtime-state-dir may only be specified once");
+            }
+            expect_runtime_state_dir = true;
+        } else if arg == "--release-core-isolation" {
+            release_core_isolation = true;
+        } else if expect_diff_path {
             if arg.starts_with('-') {
                 invalid_invocation("--diff requires a path argument");
             }
@@ -2613,7 +2665,7 @@ fn main() -> ExitCode {
         } else {
             eprintln!("error: unknown option: {arg}");
             eprintln!(
-                "usage: rustbgpd [--check [--strict]] [--diff PATH] [--json] [--init-config PROFILE] [--dump-config-schema] [CONFIG_PATH]\n       rustbgpd (--help | -h)\n       rustbgpd (--version | -V)\n       rustbgpd --man"
+                "usage: rustbgpd [--runtime-state-dir DIR] [--check [--strict]] [--diff PATH] [--json] [--init-config PROFILE] [--dump-config-schema] [CONFIG_PATH]\n       rustbgpd --release-core-isolation --runtime-state-dir DIR\n       rustbgpd (--help | -h)\n       rustbgpd (--version | -V)\n       rustbgpd --man"
             );
             process::exit(2);
         }
@@ -2621,6 +2673,34 @@ fn main() -> ExitCode {
     if expect_diff_path {
         eprintln!("error: --diff requires a path argument");
         process::exit(2);
+    }
+    if expect_runtime_state_dir {
+        invalid_invocation("--runtime-state-dir requires a directory argument");
+    }
+    // ADR-0140: a one-shot release that never reads the config, so a
+    // broken config cannot stop it from raising the links.
+    if release_core_isolation {
+        let Some(directory) = runtime_state_dir_flag else {
+            invalid_invocation("--release-core-isolation requires --runtime-state-dir DIR");
+        };
+        if args.len() != 4 {
+            invalid_invocation("--release-core-isolation takes only --runtime-state-dir DIR");
+        }
+        #[cfg(target_os = "linux")]
+        return ExitCode::from(evpn_core_isolation::release_core_isolation(Path::new(
+            &directory,
+        )));
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = directory;
+            eprintln!("error: --release-core-isolation needs Linux");
+            return ExitCode::from(1);
+        }
+    }
+    if runtime_state_dir_flag.is_some()
+        && (diff_path.is_some() || init_profile.is_some() || dump_schema)
+    {
+        invalid_invocation("--runtime-state-dir applies only to a daemon start or --check");
     }
     if expect_init_profile {
         eprintln!(
@@ -2776,6 +2856,27 @@ fn main() -> ExitCode {
         }
     };
     let config = accepted.config();
+    // The stop-hook helper opens the directory without following a final
+    // symlink, so a symlink here would fail only at stop; refuse it now.
+    if let Some(flag) = runtime_state_dir_flag.as_deref()
+        && std::fs::symlink_metadata(flag).is_ok_and(|m| m.file_type().is_symlink())
+    {
+        eprintln!(
+            "error: --runtime-state-dir {flag} is a symlink; pass the real directory, which \
+             the core-isolation release helper opens without following symlinks"
+        );
+        process::exit(1);
+    }
+    if let Some(flag) = runtime_state_dir_flag.as_deref()
+        && !same_directory(Path::new(flag), &config.runtime_state_dir())
+    {
+        eprintln!(
+            "error: --runtime-state-dir {flag} differs from the config's runtime_state_dir {}; \
+             the core-isolation stop hook and the daemon must use the same directory",
+            config.runtime_state_dir().display()
+        );
+        process::exit(1);
+    }
 
     if check_only {
         // Retain the exact staged generation used for credential preflight so
@@ -5416,6 +5517,11 @@ async fn run<T>(
     // first time the committed config names one (here or live).
     // Stopped with the link-drain coordinator, before EVPN teardown.
     let evpn_auto_esi_shutdown = tokio_util::sync::CancellationToken::new();
+    // ADR-0140 core-isolation hold: its config is republished with the
+    // ADR-0085 bindings on every committed config advance.
+    let (core_isolation_tx, core_isolation_rx) = watch::channel(Arc::new(
+        config.core_isolation_snapshot(&evpn_auto_lacp_esis),
+    ));
     let evpn_runtime_reload_apply = evpn_runtime_converger::EvpnRuntimeReloadApply::new(
         evpn_runtime_coordinator.clone(),
         evpn_runtime_apply_lock.clone(),
@@ -5424,6 +5530,7 @@ async fn run<T>(
     )
     .with_metrics(metrics.clone())
     .with_es_link_bindings_publisher(es_link_bindings_tx.clone())
+    .with_core_isolation_publisher(Arc::new(core_isolation_tx))
     .with_forwarding_state(local_forwarding_state.clone())
     .with_auto_lacp_esis(evpn_auto_lacp_esis)
     .with_auto_esi_probe(evpn_auto_esi::AutoEsiProbeStarter::new(
@@ -5431,6 +5538,20 @@ async fn run<T>(
         evpn_auto_esi_shutdown.clone(),
     ));
     evpn_runtime_reload_apply.start_auto_esi_probe_if_needed(&config);
+    #[cfg(target_os = "linux")]
+    let core_isolation_handle = evpn_core_isolation::spawn(
+        core_isolation_rx,
+        evpn_core_isolation::CoreIsolationDeps {
+            rib_tx: rib_tx.clone(),
+            metrics: metrics.clone(),
+            directory: runtime_state_directory
+                .as_ref()
+                .and_then(|directory| directory.file.try_clone().ok()),
+            start: start_time,
+        },
+    );
+    #[cfg(not(target_os = "linux"))]
+    drop(core_isolation_rx);
 
     // RFC 7999 BLACKHOLE kernel-discard reconciler (ADR-0060 FIB
     // slice). Completely opt-in: `install_blackhole_discard = true`
@@ -7059,6 +7180,10 @@ async fn run<T>(
     // serializes on the EVPN runtime apply lock).
     evpn_es_link_drain_shutdown.cancel();
     evpn_auto_esi_shutdown.cancel();
+    // ADR-0140: stop deciding; held links stay down until the sessions
+    // are closed (2.3 below).
+    #[cfg(target_os = "linux")]
+    core_isolation_handle.freeze();
     // Admission closure for the segment actor: an apply that outlived
     // the fence can no longer start it, and one it already started is
     // handed to the 1.9a'' drain below, like a startup actor.
@@ -7140,6 +7265,21 @@ async fn run<T>(
         warn!(
             reason,
             "stopped waiting for the peer manager; peers may not receive a Cease"
+        );
+    }
+
+    // 2.3 ADR-0140 clean-shutdown release: with the EVPN sessions closed,
+    // raise every link the core-isolation hold took down, through the
+    // fresh checks, and remove the receipt. Bounded; the stop hook or the
+    // next start releases whatever this does not.
+    #[cfg(target_os = "linux")]
+    if tokio::time::timeout(Duration::from_secs(10), core_isolation_handle.release())
+        .await
+        .is_err()
+    {
+        warn!(
+            "core-isolation shutdown release exceeded 10s; run rustbgpd \
+             --release-core-isolation or restart to release the held links"
         );
     }
 
@@ -10941,6 +11081,7 @@ peer_group = "plain"
             dynamic_neighbors: Vec::new(),
             evpn_instances: Vec::new(),
             ethernet_segments: Vec::new(),
+            evpn_core_isolation: None,
             evpn_ip_vrfs: Vec::new(),
             managed_netdevs: crate::config::ManagedNetdevsConfig::default(),
             fib_tables: Vec::new(),

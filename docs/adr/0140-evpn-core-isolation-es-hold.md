@@ -1,7 +1,10 @@
 # ADR-0140: EVPN core isolation and startup hold for bound Ethernet Segments
 
-**Status:** Accepted (design; no runtime behavior shipped. The four open
-decisions were taken on 2026-10-12; see [Decisions](#decisions))
+**Status:** Accepted. The four open decisions were taken on 2026-10-12; see
+[Decisions](#decisions). Implemented: `[evpn_core_isolation]`, the hold
+controller, the ownership receipt, the `--release-core-isolation` helper and
+the observability surface, with unit and privileged netns evidence. The
+interop evidence in decision 8 is pending.
 **Date:** 2026-10-12
 
 ## Context
@@ -694,6 +697,51 @@ The four questions this record left open were decided on 2026-10-12.
 4. **Signal.** The PE is isolated when it loses its EVPN sessions **or all**
    configured uplinks are down. Losing one redundant uplink while another
    still carries traffic does not isolate the PE.
+
+## Amendment (2026-10-12): synced-only peer latch
+
+Implementation review tightened decision 4 in two ways.
+
+- **The peer latch updates only while EVPN is synced:** an L2VPN/EVPN session
+  is Established, every Established session has sent End-of-RIB, and GR
+  selection deferral does not hold the family. Before End-of-RIB, a
+  reconnecting session's Type 4 set may be incomplete. Latching it could drop
+  a real peer and leave a segment that has another member un-held at the next
+  isolation. The latch keeps its last synced value until the next sync.
+- **Before the first sync, the startup hold covers isolation.** A fresh start
+  has no latched peer. The startup hold therefore becomes an isolation hold
+  only after the core has been up and synced. A core lost before that leaves
+  the startup hold in place, released by sync or the backstop as decision 5
+  describes.
+- **One RIB read replaces the "Type 4 before sessions" order.** The Type 4
+  rows and the session counts are read in one RIB actor turn through
+  `QueryEvpnEsSnapshot`. The Loc-RIB keeps an index of its Type 4 keys, so the
+  read costs O(Type 4), not a walk of the EVPN table. No session teardown or
+  route flush can fall between the two values, which is at least as strong as
+  the ordered pair of reads decision 4 allowed.
+
+## Amendment (2026-10-12): re-enslaved members and ambiguous entries
+
+- **A re-enslaved member is held again.** The classification table in
+  decision 3 lists an owned admin-up member as `overridden`. That conflicts
+  with the paragraph above it for a held member that left the bond and was
+  enslaved again: releasing a member closes it and enslaving opens it, so the
+  kernel, not another writer, raised it. A member seen outside the bound bond
+  during the hold is therefore taken down again when it returns; an owned
+  member raised while it stayed in the bond is still `overridden`.
+- **Ambiguous entries with nothing left down are dropped.** Decision 6 keeps
+  every ambiguous entry, so one could never be cleared once the operator had
+  raised or deleted its link. The release helper and the startup reconcile
+  now drop an ambiguous entry when no link with its ifindex or name exists, or
+  every such link is admin-up. Dropping never raises a link. An entry whose
+  link still exists and is admin-down is kept.
+- **The startup hold waits for every binding to latch.** The startup hold
+  becomes an isolation hold only after EVPN has synced and every bound
+  segment has a peer record. An `auto-lacp` segment the startup hold leaves
+  unresolved has none, so it stays under the startup hold.
+- **A stalled RIB is no reading.** A poll the RIB does not answer is not a
+  repeat of the last reading. Only backstops act without a reading, and an
+  isolation hold is released after `backstop_seconds` with no answer.
 
 ## Consequences
 

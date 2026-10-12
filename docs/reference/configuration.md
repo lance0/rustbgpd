@@ -4707,6 +4707,152 @@ unsupported dependency cycles fail closed before commit.
 
 ---
 
+## `[evpn_core_isolation]`
+
+Optional, opt-in (ADR-0140, alpha with EVPN multihoming). Holds the CE-facing
+links of bound Ethernet Segments administratively down while this PE is
+core-isolated, and at startup until EVPN has synced, so the CE moves its
+traffic to the other ES member instead of hashing flows into a PE that cannot
+deliver them. Only segments with an `interface` binding are affected.
+
+```toml
+[evpn_core_isolation]
+enabled = true                 # default false
+uplinks = ["eth1", "eth2"]     # optional underlay uplinks
+hold_after_sync_seconds = 10   # default 10, 0..=3600
+backstop_seconds = 180         # default 180, 1..=3600
+```
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `enabled` | bool | `false` | Let rustbgpd own the admin state of every bound segment's CE-facing members |
+| `uplinks` | string[] | `[]` | Underlay links. When set and every one lacks carrier (`IFF_LOWER_UP`; a missing link counts as down), the PE is core-isolated even with EVPN sessions up |
+| `hold_after_sync_seconds` | u64 | `10` | How long EVPN must stay synced before a hold releases (`0..=3600`) |
+| `backstop_seconds` | u64 | `180` | When a hold releases even without EVPN sync, with a warning (`1..=3600`, at least `hold_after_sync_seconds`) |
+
+The table is accepted only on Linux and only with at least one
+`[[ethernet_segments]]` entry that has an `interface`. While `enabled = true`,
+each `interface` may be bound by only one segment; validation names both
+segments. An `uplinks` entry that names a bound interface is rejected, because
+the hold would take its own uplink down and never release. The table reloads
+live with the EVPN runtime config on SIGHUP or `ApplyEvpnRuntime`; disabling it
+or removing a binding releases the affected links at once.
+
+**Signal.** The PE is core-isolated when it has no Established L2VPN/EVPN
+session and no EVPN peer whose routes it retains as GR or LLGR stale, or when
+every configured uplink lacks carrier. Isolation is entered immediately. An
+uplink that is a bound link, is enslaved under a bound bond, or is an owned
+member is excluded from the signal, logged as an error and reported as
+`uplink_overlap`; if every uplink is excluded the uplink signal is false. Do
+not use an uplink stacked on a bound interface (such as a VLAN on the bound
+bond): it loses carrier when the hold takes the members down, which keeps the
+PE isolated, and validation does not detect it yet.
+
+**Action.** For a bound bond, every member is set administratively down
+(`RTM_SETLINK` clearing `IFF_UP`); the bond stays up and the members stay
+enslaved. A bound link that is not a bond is itself set down. Protodown is not
+used: bonds, veths and physical NIC drivers do not accept it. While a hold is in
+place, member discovery is level-triggered: a member enslaved admin-up during
+the hold is recorded and taken down, a member already down when the hold
+begins is left alone and is not raised later, and a held member that another
+writer raises is reported as `overridden` and not taken down again until the
+hold ends. A held member that leaves the bond and is enslaved again comes back
+admin-up from the kernel, so it is taken down again rather than treated as
+overridden. Taking the members down drops the bond's carrier, so the ADR-0085
+link drain withdraws the segment's routes; on release, origination returns
+after `recovery_delay_seconds`.
+
+**Peer rule.** Isolation holds a segment only if a remote PE's Type 4 route for
+its ESI, with the matching ES-Import route target, was present while the core
+was up and EVPN was synced; a session that has not yet sent End-of-RIB never
+updates that record. Otherwise the CE has no other member and the hold is
+suppressed (`suppressed_no_peer`). Until EVPN has synced after startup and
+every bound segment has a peer record (an `auto-lacp` bond that the startup
+hold leaves unresolved has none), a core loss keeps the startup hold rather
+than becoming a suppressed isolation. A RIB that does not answer a poll gives
+no reading: nothing is decided on the previous one, and an isolation hold is
+released after `backstop_seconds` without an answer. A reload that gives a bound interface
+another ESI or originator drops that peer record and the hold: the members are
+released, and the segment is held again only after a Type 4 is seen for the
+new identity.
+
+**Holds.** A hold arms at daemon start (every bound segment, without the peer
+rule) or at the isolation edge. It releases once EVPN has been continuously
+synced (an Established session, End-of-RIB from every one, and no GR selection
+deferral) for `hold_after_sync_seconds`, or, without sync, when
+`backstop_seconds` have passed since daemon start or since the core came back.
+A backstop release logs a warning with reason `backstop_unsynced` and reports
+`backstop_released` until sync is observed. The settle hold gives the dataplane
+time to program remote MACs; it does not confirm that it did.
+
+**Device requirements.** The CE removes the member immediately when its end of
+the link loses carrier on admin-down, as with a veth or a NIC that drops PHY
+link on close. Otherwise removal waits for the CE's LACP timeout, about 3 s at
+the fast rate and 90 s at the slow rate. Use a NIC that drops link on close
+(for example the `link-down-on-close` private flag on i40e and ice) or have the
+CE request fast LACPDUs (Linux `lacp_rate fast`, the LACP short timeout
+elsewhere).
+
+**Ownership contract.** Enabling the table gives rustbgpd exclusive ownership
+of the admin state of each bound bond's members (or the bound link). Do not
+manage that state with `ip link`, systemd-networkd, NetworkManager or ifupdown.
+systemd-networkd's `ActivationPolicy=always-up` re-raises a downed link and
+`BindCarrier=` also drives admin state: give the members
+`ActivationPolicy=manual`. Leave the members unmanaged by NetworkManager. To
+work on a member, disable the table or remove the binding first.
+
+**Ownership receipt and release.** Before each admin-down, rustbgpd durably
+publishes `<runtime_state_dir>/evpn-core-isolation-owned.json`, recording the
+boot ID, network namespace, binding, ifindex, name, permanent and assigned
+MACs, and master bond of the member; the lock file
+`evpn-core-isolation-owned.json.lock` beside it is never removed. A link is
+raised only when every recorded field still matches exactly one link and the
+link is still down. A different boot ID discards the entry. Any other mismatch
+(renamed, recreated, a member removed from the bond, more than one candidate)
+leaves the link down, keeps the entry, and reports `ownership_ambiguous`. Raise
+(or delete) the link by hand: the release helper and the next start drop an
+ambiguous entry once no link with its ifindex or name is left down, and keep it
+otherwise. Dropping an entry never raises a link. Held links are released:
+
+- on clean shutdown, after the EVPN sessions close;
+- after any exit by `rustbgpd --release-core-isolation --runtime-state-dir DIR`,
+  which the shipped systemd unit runs as `ExecStopPost=`. It does not read the
+  config, refuses while a daemon holds the lock, exits 0 only when no owned link
+  is left down, and exits 1 for a missing directory, an unreadable receipt or an
+  ambiguous entry. Supervisors without a stop hook (plain containers, runit,
+  OpenRC without `stop_post`) must run it after the daemon exits;
+- at the next start, which adopts matching entries into the startup hold and
+  raises entries whose binding is gone or whose table is disabled.
+
+The daemon accepts the same `--runtime-state-dir` flag and refuses to start
+when it differs from `runtime_state_dir`, so the stop hook always reads the
+directory the daemon wrote.
+
+**Planned restarts.** A restart moves the CE's traffic to the other ES member
+for the startup hold. Between the old daemon's shutdown and the new daemon's
+startup hold, and during the supervisor's restart delay, the CE may hash into
+this PE.
+
+**Observability.** `evpn_es_core_isolation_state{interface, state}` is a state
+set per bound interface: `released`, `startup_hold`, `isolated`, `recovering`,
+`backstop_released`, `suppressed_no_peer`, `overridden`, `ownership_ambiguous`,
+`uplink_overlap`, `action_failed` or `disabled`.
+`evpn_core_isolated{signal}` is 1 while the `sessions` or `uplinks` signal
+holds. Each transition is logged once with its state as the reason code.
+`action_failed` and `ownership_ambiguous` outrank `disabled`, and an interface
+whose binding was removed keeps its series while one of its releases is
+failing, so a disable or unbind that could not raise a link stays visible.
+`rbgp doctor` reports `evpn.es.<interface>.core_isolation` for each bound
+segment while the table is enabled, reports those two failure states for any
+interface whatever the table's state, and reports
+`evpn.core_isolation.uplinks` when every uplink lacks carrier while EVPN
+sessions are up.
+
+Stock-Linux FRR peers do not provide the reverse protection: FRR's protodown
+write fails on bond members, so an isolated FRR PE keeps attracting CE traffic.
+
+---
+
 ## `[[evpn_ip_vrfs]]`
 
 Optional, repeatable. Declares the local IP-VRF / L3VNI tenants this VTEP

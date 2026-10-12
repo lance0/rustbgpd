@@ -65,7 +65,8 @@ for unit in rustbgpd.service 'rustbgpd@.service'; do
         echo "error: $source ExecStart no longer matches the expected /usr/local/bin path; update this script" >&2
         exit 1
     }
-    sed 's|^ExecStart=/usr/local/bin/rustbgpd |ExecStart=/usr/bin/rustbgpd |' \
+    sed -e 's|^ExecStart=/usr/local/bin/rustbgpd |ExecStart=/usr/bin/rustbgpd |' \
+        -e 's|^ExecStopPost=/usr/local/bin/rustbgpd |ExecStopPost=/usr/bin/rustbgpd |' \
         "$source" > "$pkgroot/lib/systemd/system/$unit"
 done
 grep -qxF 'ExecStart=/usr/bin/rustbgpd /var/lib/rustbgpd/%i/activation/current/config.toml' \

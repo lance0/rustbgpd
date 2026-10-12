@@ -1075,14 +1075,20 @@ fn evpn_runtime_changed(new_config: &Config, current: &Config) -> bool {
     new_config.evpn_instances != current.evpn_instances
         || new_config.evpn_ip_vrfs != current.evpn_ip_vrfs
         || new_config.ethernet_segments != current.ethernet_segments
+        || new_config.evpn_core_isolation != current.evpn_core_isolation
 }
 
+/// ADR-0140 `[evpn_core_isolation]` rides the EVPN runtime commit: the
+/// committed config republishes it to the core-isolation controller.
 fn copy_evpn_runtime_fields(target: &mut Config, source: &Config) {
     target.evpn_instances.clone_from(&source.evpn_instances);
     target.evpn_ip_vrfs.clone_from(&source.evpn_ip_vrfs);
     target
         .ethernet_segments
         .clone_from(&source.ethernet_segments);
+    target
+        .evpn_core_isolation
+        .clone_from(&source.evpn_core_isolation);
 }
 
 fn copy_outbound_prefix_limit_fields(target: &mut Config, source: &Config) {

@@ -1456,6 +1456,32 @@ impl Config {
         Ok(out)
     }
 
+    /// ADR-0140: the core-isolation view of this config — the
+    /// `[evpn_core_isolation]` table when present, and every bound
+    /// segment keyed by interface with its configured ESI text, resolved
+    /// ESI (`None` while an `auto-lacp` bond is not ready) and originator.
+    pub(crate) fn core_isolation_snapshot(&self, esis: &AutoLacpEsis) -> CoreIsolationSnapshot {
+        let bindings = self
+            .ethernet_segments
+            .iter()
+            .filter_map(|cfg| {
+                let interface = cfg.interface.clone()?;
+                Some((
+                    interface,
+                    CoreIsolationBinding {
+                        esi_text: cfg.esi.clone(),
+                        esi: segment_esi(cfg, esis).ok().flatten(),
+                        originator_ip: cfg.originator_ip.parse().ok(),
+                    },
+                ))
+            })
+            .collect();
+        CoreIsolationSnapshot {
+            settings: self.evpn_core_isolation.clone(),
+            bindings,
+        }
+    }
+
     /// Resolve `[[evpn_ip_vrfs]]` entries into runtime [`IpVrfTable`].
     ///
     /// Validates:
@@ -2476,6 +2502,9 @@ pub struct ConfigDiff {
     /// at startup, so edits are restart-required until a runtime swap
     /// surface exists.
     pub ethernet_segments_changed: bool,
+    /// `[evpn_core_isolation]` changed (ADR-0140). Hot-applied through the
+    /// EVPN runtime commit, which republishes the hold's configuration.
+    pub evpn_core_isolation_changed: bool,
     /// `[managed_netdevs]` changed. ADR-0091 v1 reads this table at
     /// startup and reports status from the Linux dataplane actor; live
     /// lifecycle changes are restart-required until the managed-netdev
@@ -3688,7 +3717,8 @@ impl SighupReloadFamilies {
             dynamic_ranges: diff.dynamic_neighbors_reload_applied_changed,
             evpn_runtime: diff.evpn_instances_changed
                 || diff.evpn_ip_vrfs_changed
-                || diff.ethernet_segments_changed,
+                || diff.ethernet_segments_changed
+                || diff.evpn_core_isolation_changed,
             fib_tables: diff.fib_tables_changed,
             honor_knobs: diff.honor_graceful_shutdown_changed || diff.honor_blackhole_changed,
             tcp_ao: diff.neighbor_tcp_ao_changed || diff.dynamic_neighbor_tcp_ao_changed,
@@ -4146,6 +4176,11 @@ pub fn classify_config_transaction_v1(diff: &ConfigDiff) -> ConfigTransactionSec
             .restart_required_sections
             .push("[[ethernet_segments]]".to_string());
     }
+    if diff.evpn_runtime_change_class.is_restart_required() && diff.evpn_core_isolation_changed {
+        class
+            .restart_required_sections
+            .push("[evpn_core_isolation]".to_string());
+    }
     if diff.fib_tables_requires_restart {
         class
             .restart_required_sections
@@ -4421,6 +4456,7 @@ pub fn config_diff_json_value(diff: &ConfigDiff) -> serde_json::Value {
             "evpn_instances_changed": diff.evpn_runtime_change_class.is_reload_applied() && diff.evpn_instances_changed,
             "evpn_ip_vrfs_changed": diff.evpn_runtime_change_class.is_reload_applied() && diff.evpn_ip_vrfs_changed,
             "ethernet_segments_changed": diff.evpn_runtime_change_class.is_reload_applied() && diff.ethernet_segments_changed,
+            "evpn_core_isolation_changed": diff.evpn_runtime_change_class.is_reload_applied() && diff.evpn_core_isolation_changed,
             "effective_neighbor_impact": &diff.effective_neighbor_impact,
         },
         "restart_required": {
@@ -4433,6 +4469,7 @@ pub fn config_diff_json_value(diff: &ConfigDiff) -> serde_json::Value {
             "evpn_instances_changed": diff.evpn_runtime_change_class.is_restart_required() && diff.evpn_instances_changed,
             "evpn_ip_vrfs_changed": diff.evpn_runtime_change_class.is_restart_required() && diff.evpn_ip_vrfs_changed,
             "ethernet_segments_changed": diff.evpn_runtime_change_class.is_restart_required() && diff.ethernet_segments_changed,
+            "evpn_core_isolation_changed": diff.evpn_runtime_change_class.is_restart_required() && diff.evpn_core_isolation_changed,
             "managed_netdevs_changed": diff.managed_netdevs_changed,
             "security_grpc_changed": diff.security_grpc_changed,
             "event_history_changed": diff.event_history_changed,
@@ -4722,6 +4759,9 @@ pub fn format_config_diff_with_style(diff: &ConfigDiff, style: &ConfigDiffTextSt
     }
     if diff.evpn_runtime_change_class.is_restart_required() && diff.ethernet_segments_changed {
         restart_sections.push("[[ethernet_segments]]");
+    }
+    if diff.evpn_runtime_change_class.is_restart_required() && diff.evpn_core_isolation_changed {
+        restart_sections.push("[evpn_core_isolation]");
     }
     if diff.managed_netdevs_changed {
         restart_sections.push("[managed_netdevs]");
@@ -5028,6 +5068,7 @@ pub fn diff_config(old: &Config, new: &Config) -> ConfigDiff {
         evpn_instances_changed: old.evpn_instances != new.evpn_instances,
         evpn_ip_vrfs_changed: old.evpn_ip_vrfs != new.evpn_ip_vrfs,
         ethernet_segments_changed: old.ethernet_segments != new.ethernet_segments,
+        evpn_core_isolation_changed: old.evpn_core_isolation != new.evpn_core_isolation,
         managed_netdevs_changed: old.managed_netdevs != new.managed_netdevs,
         security_grpc_changed: old.security != new.security,
         event_history_changed: old.event_history != new.event_history,
@@ -5064,6 +5105,7 @@ fn evpn_runtime_config_changed(old: &Config, new: &Config) -> bool {
     old.evpn_instances != new.evpn_instances
         || old.evpn_ip_vrfs != new.evpn_ip_vrfs
         || old.ethernet_segments != new.ethernet_segments
+        || old.evpn_core_isolation != new.evpn_core_isolation
 }
 
 fn classify_evpn_runtime_change(old: &Config, new: &Config) -> EvpnRuntimeChangeClass {
@@ -6930,6 +6972,28 @@ pub struct EsLinkBinding {
     pub interface: String,
     /// Hold-off between carrier return and link-drain release.
     pub recovery_delay: std::time::Duration,
+}
+
+/// ADR-0140 core-isolation input published to the hold controller on
+/// every committed config advance and every applied `auto-lacp` round.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct CoreIsolationSnapshot {
+    /// `[evpn_core_isolation]`, when present.
+    pub settings: Option<EvpnCoreIsolationConfig>,
+    /// Bound segments keyed by interface.
+    pub bindings: BTreeMap<String, CoreIsolationBinding>,
+}
+
+/// One bound segment as the core-isolation hold sees it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CoreIsolationBinding {
+    /// The configured `esi` text (hex or `auto-lacp`), recorded in the
+    /// ownership receipt.
+    pub esi_text: String,
+    /// The resolved ESI; `None` while an `auto-lacp` bond is not ready.
+    pub esi: Option<EthernetSegmentIdentifier>,
+    /// This PE's Type 4 originator for the segment.
+    pub originator_ip: Option<IpAddr>,
 }
 
 /// `[[ethernet_segments]].esi` value that opts a segment into RFC 7432

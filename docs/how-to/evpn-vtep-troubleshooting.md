@@ -604,6 +604,39 @@ retry succeeds the runtime still holds its previous state.
 See [Auto-derived ESI](../reference/configuration.md#auto-derived-esi-lacp-type-1)
 for the readiness rules.
 
+## Core-isolation hold (ADR-0140)
+
+With `[evpn_core_isolation] enabled = true`, rustbgpd takes the CE-facing
+members of each bound segment administratively down while the PE is
+core-isolated and at startup until EVPN syncs. The state of each binding is in
+`rbgp doctor` (`evpn.es.<interface>.core_isolation`), the
+`evpn_es_core_isolation_state{interface, state}` gauge, and one log line per
+transition with the state as `reason`.
+
+| State | Meaning and next check |
+|-------|------------------------|
+| `startup_hold` / `recovering` | Held until EVPN has been synced for `hold_after_sync_seconds`, or until `backstop_seconds`; check `rbgp neighbor` for EVPN sessions and End-of-RIB |
+| `isolated` | No EVPN session (and none GR-retained), or every uplink without carrier; `evpn_core_isolated{signal}` says which |
+| `backstop_released` | Released before EVPN synced; the CE may send traffic this PE has no routes for. Clears once sync is observed |
+| `suppressed_no_peer` | Isolated, but no remote PE advertised this ESI while the core was up, so the links stay up |
+| `overridden` | Another writer raised a held member. Check systemd-networkd (`ActivationPolicy=manual` for members), NetworkManager, and manual `ip link` use |
+| `ownership_ambiguous` | A receipt entry no longer matches its link (renamed, recreated, removed from the bond, or in another namespace). The link is left down. Raise it (or delete it) by hand. The entry is dropped once nothing it names is left down: by the stop hook (`rustbgpd --release-core-isolation --runtime-state-dir DIR`, with the daemon stopped) or at the next start. An entry whose link still exists and is down is kept |
+| `uplink_overlap` | An `uplinks` entry is a bound link or is enslaved under a bound bond; it is excluded from the signal. Fix the list |
+| `action_failed` | An admin-state write or receipt publication failed, or the runtime-state directory or its lock is unavailable; see the daemon log |
+
+Links that stay down after the daemon exited are released by the stop hook
+(`ExecStopPost=` in the shipped unit), by the next start, or by running the
+helper by hand:
+
+```bash
+sudo rustbgpd --release-core-isolation --runtime-state-dir /var/lib/rustbgpd
+echo $?   # 0: nothing owned is left down; 1: see stderr
+```
+
+The helper refuses while a daemon holds the receipt lock, never reads the
+config, and raises a link only when every recorded identity field still
+matches.
+
 ## IP-VRF stuck in `NotReady`
 
 Gate 9 slice 6 surfaces per-VRF readiness via gRPC

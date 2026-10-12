@@ -73,6 +73,9 @@ pub struct LocRib {
     flowspec_routes: HashMap<FlowSpecKey, FlowSpecRoute>,
     /// EVPN Loc-RIB: best route per RFC 7432 route identity.
     evpn_routes: HashMap<EvpnRouteKey, EvpnRibRoute>,
+    /// Keys of the Type 4 (Ethernet Segment) rows in `evpn_routes`, so ES
+    /// readers cost O(Type 4) instead of a walk of a Type 2-dominated table.
+    evpn_es_keys: std::collections::BTreeSet<EvpnRouteKey>,
     /// BGP-LS Loc-RIB: best route per opaque RFC 9552 identity.
     bgpls_routes: HashMap<BgpLsRouteKey, BgpLsRibRoute>,
     /// VPNv4/VPNv6 Loc-RIB: best route per RFC 4364 RD + prefix identity.
@@ -110,6 +113,7 @@ impl LocRib {
             dataplane_index_eager: false,
             flowspec_routes: HashMap::default(),
             evpn_routes: HashMap::default(),
+            evpn_es_keys: std::collections::BTreeSet::new(),
             bgpls_routes: HashMap::default(),
             vpn_routes: HashMap::default(),
             labeled_routes: HashMap::default(),
@@ -491,11 +495,14 @@ impl LocRib {
                         || old.attributes != new_best.attributes
                 });
                 if changed {
+                    if matches!(key, EvpnRouteKey::Es { .. }) {
+                        self.evpn_es_keys.insert(key);
+                    }
                     self.evpn_routes.insert(key, new_best);
                 }
                 changed
             }
-            None => self.evpn_routes.remove(&key).is_some(),
+            None => self.remove_evpn(&key),
         }
     }
 
@@ -516,8 +523,17 @@ impl LocRib {
         self.evpn_routes.len()
     }
 
+    /// Iterate over the best Type 4 (Ethernet Segment) routes only, in
+    /// O(Type 4) through the key index.
+    pub fn iter_evpn_es(&self) -> impl Iterator<Item = &EvpnRibRoute> {
+        self.evpn_es_keys
+            .iter()
+            .filter_map(|key| self.evpn_routes.get(key))
+    }
+
     /// Remove the best EVPN route for a key. Returns `true` if it existed.
     pub fn remove_evpn(&mut self, key: &EvpnRouteKey) -> bool {
+        self.evpn_es_keys.remove(key);
         self.evpn_routes.remove(key).is_some()
     }
 
@@ -3121,6 +3137,54 @@ mod tests {
             is_stale: false,
             is_llgr_stale: false,
         }
+    }
+
+    /// ADR-0140: the per-second core-isolation read sees Type 4 rows only
+    /// through the ES key index, so a large Type 2 table is never walked.
+    /// The index tracks install, replacement and both removal paths.
+    #[test]
+    fn evpn_es_index_reads_type4_without_walking_type2() {
+        use rustbgpd_wire::{EthernetSegmentIdentifier, EvpnEs, EvpnRoute, MacAddress};
+        let es = |seed: u8, peer: u8| {
+            let mut route = make_evpn_type2(peer, Vec::new());
+            route.route = EvpnRoute::Es(EvpnEs {
+                rd: rustbgpd_wire::RouteDistinguisher([0, 0, 0xFD, 0xE8, 0, 0, 0, 100]),
+                esi: EthernetSegmentIdentifier::new([0, 0, 0, 0, 0, 0, 0, 0, 0, seed]),
+                originator_ip: IpAddr::V4(Ipv4Addr::new(10, 0, 0, peer)),
+            });
+            route
+        };
+        let mut loc = LocRib::new();
+        for i in 0..2_000_u32 {
+            let mut route = make_evpn_type2(2, Vec::new());
+            if let EvpnRoute::MacIp(mac_ip) = &mut route.route {
+                let [_, b, c, d] = i.to_be_bytes();
+                mac_ip.mac = MacAddress([0x02, 0, 0, b, c, d]);
+            }
+            assert!(loc.recompute_evpn(route.key(), [&route].into_iter()));
+        }
+        let (a, b) = (es(1, 2), es(2, 3));
+        assert!(loc.recompute_evpn(a.key(), [&a].into_iter()));
+        assert!(loc.recompute_evpn(b.key(), [&b].into_iter()));
+        assert_eq!(loc.evpn_len(), 2_002);
+        assert_eq!(
+            loc.evpn_es_keys.len(),
+            2,
+            "the index holds Type 4 keys only, whatever the Type 2 count"
+        );
+        assert_eq!(loc.iter_evpn_es().count(), 2);
+
+        // A replaced best keeps one index entry; both removal paths drop it.
+        let mut replaced = a.clone();
+        replaced.is_stale = true;
+        assert!(loc.recompute_evpn(a.key(), [&replaced].into_iter()));
+        assert_eq!(loc.evpn_es_keys.len(), 2);
+        assert!(loc.iter_evpn_es().any(|r| r.is_stale));
+        assert!(loc.recompute_evpn(a.key(), std::iter::empty()));
+        assert!(loc.remove_evpn(&b.key()));
+        assert!(loc.evpn_es_keys.is_empty());
+        assert_eq!(loc.iter_evpn_es().count(), 0);
+        assert_eq!(loc.evpn_len(), 2_000);
     }
 
     #[test]

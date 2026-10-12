@@ -296,6 +296,28 @@ pub const fn evpn_es_auto_esi_states() -> &'static [&'static str] {
     ]
 }
 
+/// Closed `state` vocabulary of `evpn_es_core_isolation_state` (ADR-0140
+/// decision 7).
+#[must_use]
+pub const fn evpn_es_core_isolation_states() -> &'static [&'static str] {
+    &[
+        "released",
+        "startup_hold",
+        "isolated",
+        "recovering",
+        "backstop_released",
+        "suppressed_no_peer",
+        "overridden",
+        "ownership_ambiguous",
+        "uplink_overlap",
+        "action_failed",
+        "disabled",
+    ]
+}
+
+/// Closed `signal` vocabulary of `evpn_core_isolated`.
+const EVPN_CORE_ISOLATION_SIGNALS: [&str; 2] = ["sessions", "uplinks"];
+
 /// Bounded label contract for aggregate ORR topology-input diagnostics.
 const ORR_INPUT_CLASSIFICATIONS: [&str; 5] = [
     "included_default",
@@ -742,6 +764,8 @@ struct BgpMetricsInner {
     evpn_df_role: IntGaugeVec,
     evpn_es_ac_gate: IntGaugeVec,
     evpn_es_auto_esi_state: IntGaugeVec,
+    evpn_es_core_isolation_state: IntGaugeVec,
+    evpn_core_isolated: IntGaugeVec,
     evpn_df_role_changes: IntCounterVec,
     evpn_es_drained: IntGaugeVec,
     evpn_ip_vrf_observed_routes: IntGaugeVec,
@@ -2406,6 +2430,43 @@ impl BgpMetrics {
         )
         .expect("valid metric definition");
 
+        let evpn_es_core_isolation_state = IntGaugeVec::new(
+            Opts::new(
+                "evpn_es_core_isolation_state",
+                "ADR-0140 core-isolation hold of each bound Ethernet Segment as a state \
+                 set per (interface, state): the current state's series is 1 and the \
+                 others are 0. released: no hold. startup_hold: the boot hold keeps the \
+                 CE-facing members administratively down. isolated: the PE is \
+                 core-isolated and holds them down. recovering: the core is back and \
+                 the hold waits for EVPN sync and the settle time. backstop_released: \
+                 the backstop released the hold before EVPN synced. suppressed_no_peer: \
+                 isolation did not hold the segment because it had no remote ES peer. \
+                 overridden: another writer raised a held member. ownership_ambiguous: \
+                 a receipt entry no longer matches its link, which is left down. \
+                 uplink_overlap: an uplink is, or is enslaved under, this binding and is \
+                 excluded from the signal. action_failed: an admin-state write or \
+                 receipt publication failed. disabled: [evpn_core_isolation] is off. \
+                 interface is the bound link name. Series are removed when the binding \
+                 leaves the config, except that an interface whose release is still \
+                 failing keeps its action_failed or ownership_ambiguous series until \
+                 nothing it owns is left down.",
+            ),
+            &["interface", "state"],
+        )
+        .expect("valid metric definition");
+
+        let evpn_core_isolated = IntGaugeVec::new(
+            Opts::new(
+                "evpn_core_isolated",
+                "ADR-0140 core-isolation signal, 1 when it holds: signal=sessions has \
+                 no Established and no GR/LLGR-stale L2VPN/EVPN session; signal=uplinks \
+                 has every configured uplink (after excluding links under a bound \
+                 interface) without carrier. The PE is core-isolated when either is 1.",
+            ),
+            &["signal"],
+        )
+        .expect("valid metric definition");
+
         let evpn_df_role_changes = IntCounterVec::new(
             Opts::new(
                 "evpn_df_role_changes_total",
@@ -3329,6 +3390,12 @@ impl BgpMetrics {
             .register(Box::new(evpn_es_auto_esi_state.clone()))
             .expect("metric not already registered");
         registry
+            .register(Box::new(evpn_es_core_isolation_state.clone()))
+            .expect("metric not already registered");
+        registry
+            .register(Box::new(evpn_core_isolated.clone()))
+            .expect("metric not already registered");
+        registry
             .register(Box::new(evpn_df_role_changes.clone()))
             .expect("metric not already registered");
         registry
@@ -3663,6 +3730,8 @@ impl BgpMetrics {
             evpn_df_role,
             evpn_es_ac_gate,
             evpn_es_auto_esi_state,
+            evpn_es_core_isolation_state,
+            evpn_core_isolated,
             evpn_df_role_changes,
             evpn_es_drained,
             evpn_ip_vrf_observed_routes,
@@ -6118,6 +6187,59 @@ impl BgpMetrics {
                 .0
                 .evpn_es_auto_esi_state
                 .remove_label_values(&[interface, state]);
+        }
+    }
+
+    /// Publish one bound interface's core-isolation hold state as a state
+    /// set, with the same no-two-at-1 discipline as
+    /// [`Self::set_evpn_es_auto_esi_state`]. `state` is one of
+    /// [`evpn_es_core_isolation_states`].
+    pub fn set_evpn_es_core_isolation_state(&self, interface: &str, state: &str) {
+        let states = evpn_es_core_isolation_states();
+        debug_assert!(
+            states.contains(&state),
+            "unknown core-isolation state {state:?}"
+        );
+        for candidate in states.iter().filter(|candidate| **candidate != state) {
+            self.0
+                .evpn_es_core_isolation_state
+                .with_label_values(&[interface, candidate])
+                .set(0);
+        }
+        if states.contains(&state) {
+            self.0
+                .evpn_es_core_isolation_state
+                .with_label_values(&[interface, state])
+                .set(1);
+        }
+    }
+
+    /// Drop every core-isolation state series of a binding that left the
+    /// config.
+    pub fn remove_evpn_es_core_isolation_state(&self, interface: &str) {
+        for state in evpn_es_core_isolation_states() {
+            let _ = self
+                .0
+                .evpn_es_core_isolation_state
+                .remove_label_values(&[interface, state]);
+        }
+    }
+
+    /// Drop both core-isolation signal series, so a disabled or removed
+    /// `[evpn_core_isolation]` leaves no stale value behind.
+    pub fn clear_evpn_core_isolated(&self) {
+        for signal in EVPN_CORE_ISOLATION_SIGNALS {
+            let _ = self.0.evpn_core_isolated.remove_label_values(&[signal]);
+        }
+    }
+
+    /// Publish the two ADR-0140 core-isolation signals.
+    pub fn set_evpn_core_isolated(&self, sessions: bool, uplinks: bool) {
+        for (signal, value) in EVPN_CORE_ISOLATION_SIGNALS.iter().zip([sessions, uplinks]) {
+            self.0
+                .evpn_core_isolated
+                .with_label_values(&[signal])
+                .set(i64::from(value));
         }
     }
 

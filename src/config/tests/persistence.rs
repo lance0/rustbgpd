@@ -873,6 +873,7 @@ fn canonical_projection_borrows_every_large_config_field() {
         "dynamic_neighbors: &'a [DynamicNeighborConfig]",
         "evpn_instances: &'a [EvpnInstanceConfig]",
         "ethernet_segments: &'a [EthernetSegmentConfig]",
+        "evpn_core_isolation: &'a Option<EvpnCoreIsolationConfig>",
         "evpn_ip_vrfs: &'a [EvpnIpVrfConfig]",
         "fib_tables: &'a [FibTableConfig]",
         "flowspec: Option<&'a FlowSpecConfig>",

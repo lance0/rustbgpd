@@ -949,6 +949,12 @@ jobs:
       - name: Auto-lacp Ethernet Segment daemon readiness netns test
         run: bash crates/evpn-linux/tests/docker/run-netns-tests.sh auto_lacp_daemon
 
+      - name: ADR-0140 core-isolation hold controller netns tests
+        run: bash crates/evpn-linux/tests/docker/run-netns-tests.sh core_isolation
+
+      - name: ADR-0140 core-isolation daemon and release helper netns test
+        run: bash crates/evpn-linux/tests/docker/run-netns-tests.sh core_isolation_daemon
+
       - name: Single-active AC-gate netns test
         run: bash crates/evpn-linux/tests/docker/run-netns-tests.sh ac_gate
 

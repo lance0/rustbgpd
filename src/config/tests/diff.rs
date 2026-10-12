@@ -2225,6 +2225,7 @@ fn reload_matrix_pins_load_bearing_field_classes() {
             "| live (ordered rotation generations) / otherwise restart-required |",
         ),
         ("bfd", "| reload-applied |"),
+        ("[evpn_core_isolation]", "| coordinator-gated |"),
         ("ebgp_requires_policy", "| restart-required |"),
         ("validation", "| restart-required |"),
         ("log_format", "| restart-required |"),

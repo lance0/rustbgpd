@@ -1157,7 +1157,7 @@ counts. The summary repeats the mode and result beside the row table.
 | `AsPath` | 24 bytes |
 | `AsPathSegment` | 32 bytes |
 | `AdjRibIn` | 1552 bytes |
-| `LocRib` | 1040 bytes |
+| `LocRib` | 1064 bytes |
 
 `PathAttribute` grew from 112 to 208 bytes after the earlier figures in this
 doc: new attribute variants (RFC 6514 `PmsiTunnel`, RFC 9234
@@ -1171,9 +1171,11 @@ interned globally, across all peers, so the per-route impact is amortized to
 near zero (see below), but the enum size sets the per-unique-attribute-set
 heap cost.
 
-`AdjRibIn` (1032 → 1384 bytes, before the stale counters below) and `LocRib` (96 → 1040 bytes) grew the same
+`AdjRibIn` (1032 → 1384 bytes, before the stale counters below) and `LocRib` (96 → 1064 bytes) grew the same
 way — each struct picked up a route map and/or secondary index per added RIB
-family (VPN, labeled-unicast, RT-Constrain, EVPN, BGP-LS, FlowSpec; see
+family (VPN, labeled-unicast, RT-Constrain, EVPN, BGP-LS, FlowSpec; the last
+24 bytes of `LocRib` are the EVPN Type 4 key index that keeps the
+core-isolation read off the full EVPN table; see
 `crates/rib/src/adj_rib_in.rs` and `crates/rib/src/loc_rib.rs`). Confirmed
 via `std::mem::size_of` against the current struct definitions; these two
 rows aren't in the allocator-tracked harness JSON.

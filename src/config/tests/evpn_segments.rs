@@ -891,3 +891,158 @@ interface = "rbgp-shape0"
         .to_string();
     assert!(msg.contains("one bond derives one ESI"), "{msg}");
 }
+
+/// Two VNIs and two segments, both bound, plus an optional
+/// `[evpn_core_isolation]` table.
+fn core_isolation_toml(second_interface: &str, table: &str) -> String {
+    evpn_toml_with(&format!(
+        r#"
+[[evpn_instances]]
+vni = 100
+rd = "65000:100"
+route_targets = ["65000:100"]
+local_vtep_ip = "10.0.0.100"
+
+[[evpn_instances]]
+vni = 200
+rd = "65000:200"
+route_targets = ["65000:200"]
+local_vtep_ip = "10.0.0.100"
+
+[[ethernet_segments]]
+esi = "00:00:00:00:00:00:00:00:00:01"
+member_vnis = [100]
+originator_ip = "10.0.0.100"
+interface = "bond0"
+
+[[ethernet_segments]]
+esi = "00:00:00:00:00:00:00:00:00:02"
+member_vnis = [200]
+originator_ip = "10.0.0.100"
+interface = "{second_interface}"
+
+{table}
+"#
+    ))
+}
+
+#[test]
+fn evpn_core_isolation_defaults_and_shared_binding_needs_the_feature_off() {
+    let config = parse(&core_isolation_toml(
+        "bond1",
+        "[evpn_core_isolation]\nenabled = true\n",
+    ))
+    .unwrap();
+    let table = config.evpn_core_isolation.unwrap();
+    assert!(table.enabled);
+    assert_eq!(table.uplinks, Vec::<String>::new());
+    assert_eq!(table.hold_after_sync_seconds, 10);
+    assert_eq!(table.backstop_seconds, 180);
+
+    // Two segments on one link stay valid while the feature is off.
+    parse(&core_isolation_toml(
+        "bond0",
+        "[evpn_core_isolation]\nenabled = false\n",
+    ))
+    .unwrap();
+    let err = parse(&core_isolation_toml(
+        "bond0",
+        "[evpn_core_isolation]\nenabled = true\n",
+    ))
+    .unwrap_err();
+    let msg = err.to_string();
+    assert!(
+        matches!(err, ConfigError::InvalidEvpnCoreIsolation { .. }),
+        "{msg}"
+    );
+    assert!(
+        msg.contains("bond0")
+            && msg.contains("00:00:00:00:00:00:00:00:00:01")
+            && msg.contains("00:00:00:00:00:00:00:00:00:02"),
+        "the error names the interface and both segments: {msg}"
+    );
+}
+
+#[test]
+fn evpn_core_isolation_rejects_an_uplink_naming_a_bound_interface() {
+    let err = parse(&core_isolation_toml(
+        "bond1",
+        "[evpn_core_isolation]\nenabled = true\nuplinks = [\"eth1\", \"bond1\"]\n",
+    ))
+    .unwrap_err();
+    let msg = err.to_string();
+    assert!(
+        msg.contains("bond1") && msg.contains("00:00:00:00:00:00:00:00:00:02"),
+        "the error names the uplink and the segment: {msg}"
+    );
+    parse(&core_isolation_toml(
+        "bond1",
+        "[evpn_core_isolation]\nenabled = true\nuplinks = [\"eth1\", \"eth2\"]\n",
+    ))
+    .unwrap();
+}
+
+#[test]
+fn evpn_core_isolation_bounds_timers_and_requires_a_bound_segment() {
+    for (table, needle) in [
+        ("backstop_seconds = 5\nhold_after_sync_seconds = 6", "below"),
+        ("backstop_seconds = 0", "backstop_seconds 0"),
+        ("backstop_seconds = 3601", "backstop_seconds 3601"),
+        (
+            "hold_after_sync_seconds = 3601\nbackstop_seconds = 3600",
+            "hold_after_sync_seconds 3601",
+        ),
+        ("uplinks = [\"eth1\", \"eth1\"]", "duplicate uplink"),
+        ("uplinks = [\"\"]", "not a Linux interface name"),
+    ] {
+        let toml = core_isolation_toml(
+            "bond1",
+            &format!("[evpn_core_isolation]\nenabled = true\n{table}\n"),
+        );
+        let msg = parse(&toml).unwrap_err().to_string();
+        assert!(msg.contains(needle), "{table}: {msg}");
+    }
+    parse(&core_isolation_toml(
+        "bond1",
+        "[evpn_core_isolation]\nenabled = true\nbackstop_seconds = 10\nhold_after_sync_seconds = 10\n",
+    ))
+    .unwrap();
+
+    let unbound = evpn_toml_with(
+        r#"
+[[evpn_instances]]
+vni = 100
+rd = "65000:100"
+route_targets = ["65000:100"]
+local_vtep_ip = "10.0.0.100"
+
+[[ethernet_segments]]
+esi = "00:00:00:00:00:00:00:00:00:01"
+member_vnis = [100]
+originator_ip = "10.0.0.100"
+
+[evpn_core_isolation]
+enabled = true
+"#,
+    );
+    let msg = parse(&unbound).unwrap_err().to_string();
+    assert!(msg.contains("interface"), "{msg}");
+}
+
+#[test]
+fn evpn_core_isolation_edit_is_reload_applied() {
+    let old = parse(&core_isolation_toml("bond1", "")).unwrap();
+    let new = parse(&core_isolation_toml(
+        "bond1",
+        "[evpn_core_isolation]\nenabled = true\n",
+    ))
+    .unwrap();
+    let diff = diff_config(&old, &new);
+    assert!(diff.evpn_core_isolation_changed);
+    assert_eq!(
+        diff.evpn_runtime_change_class,
+        EvpnRuntimeChangeClass::ReloadApplied
+    );
+    assert!(diff.has_reload_applied_changes());
+    assert!(!diff.has_restart_required_changes());
+}
