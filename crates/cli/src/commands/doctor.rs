@@ -3365,6 +3365,8 @@ async fn run_with_deadlines(
                                 description: redact_text(
                                     &cfg.map(|c| c.description.clone()).unwrap_or_default(),
                                 ),
+                                gr_retention: super::neighbor::json_gr_retention(&n.gr_retention),
+                                gr_retention_available: n.gr_retention_available,
                             },
                             identity,
                             update_group: n.update_group.clone(),
@@ -3854,6 +3856,8 @@ mod tests {
                 accepted_dynamic_range: None,
                 route_reflector_client: false,
                 description: String::new(),
+                gr_retention: Vec::new(),
+                gr_retention_available: None,
             },
             identity: peer_identity(address, interface),
             update_group: String::new(),

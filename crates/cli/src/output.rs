@@ -324,6 +324,15 @@ pub struct JsonNeighbor {
     pub accepted_dynamic_range: Option<JsonAcceptedDynamicRange>,
     pub route_reflector_client: bool,
     pub description: String,
+    /// GR/LLGR helper retention, one row per family still holding stale
+    /// routes; same shape as the detail view, without `stale_routes`, which
+    /// a list never counts.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub gr_retention: Vec<JsonGrRetentionFamily>,
+    /// `None` means the daemon predates retention exposure; `Some(true)`
+    /// with no rows means nothing is retained.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub gr_retention_available: Option<bool>,
 }
 
 #[derive(Serialize)]

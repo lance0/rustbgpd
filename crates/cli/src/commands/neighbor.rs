@@ -89,7 +89,22 @@ fn json_neighbor(n: &crate::proto::NeighborState) -> JsonNeighbor {
         ),
         route_reflector_client: n.route_reflector_client,
         description: cfg.map(|c| c.description.clone()).unwrap_or_default(),
+        gr_retention: json_gr_retention(&n.gr_retention),
+        gr_retention_available: n.gr_retention_available,
     }
+}
+
+pub(crate) fn json_gr_retention(
+    rows: &[crate::proto::GracefulRestartRetentionState],
+) -> Vec<JsonGrRetentionFamily> {
+    rows.iter()
+        .map(|row| JsonGrRetentionFamily {
+            family: row.family.clone(),
+            phase: row.phase.clone(),
+            remaining_seconds: row.remaining_seconds,
+            stale_routes: row.stale_routes,
+        })
+        .collect()
 }
 
 enum NeighborListView {
@@ -463,16 +478,7 @@ fn json_neighbor_detail(n: &crate::proto::NeighborState) -> JsonNeighborDetail {
                 reason: row.reason.clone(),
             })
             .collect(),
-        gr_retention: n
-            .gr_retention
-            .iter()
-            .map(|row| JsonGrRetentionFamily {
-                family: row.family.clone(),
-                phase: row.phase.clone(),
-                remaining_seconds: row.remaining_seconds,
-                stale_routes: row.stale_routes,
-            })
-            .collect(),
+        gr_retention: json_gr_retention(&n.gr_retention),
         gr_retention_available: n.gr_retention_available,
     }
 }
@@ -1845,6 +1851,39 @@ mod tests {
         )
         .unwrap();
         serde_json::from_slice(&take_neighbor_show_capture()).unwrap()
+    }
+
+    /// The list JSON carries the retention rows the list RPC already returns,
+    /// in the detail view's shape, with no stale count (a list never counts).
+    /// Availability is presence-aware: an older daemon omits both fields.
+    #[test]
+    fn neighbor_list_json_carries_gr_retention_rows() {
+        let mut state = crate::proto::NeighborState {
+            gr_retention_available: Some(true),
+            gr_retention: vec![crate::proto::GracefulRestartRetentionState {
+                family: "ipv4_unicast".to_string(),
+                phase: "gr_restart".to_string(),
+                remaining_seconds: Some(100),
+                stale_routes: None,
+            }],
+            ..Default::default()
+        };
+        let value = serde_json::to_value(json_neighbor(&state)).unwrap();
+        assert_eq!(
+            value["gr_retention"],
+            serde_json::json!([
+                {"family": "ipv4_unicast", "phase": "gr_restart", "remaining_seconds": 100}
+            ])
+        );
+        assert_eq!(value["gr_retention_available"], true);
+
+        state.gr_retention.clear();
+        let value = serde_json::to_value(json_neighbor(&state)).unwrap();
+        assert!(value.get("gr_retention").is_none());
+        assert_eq!(value["gr_retention_available"], true);
+        state.gr_retention_available = None;
+        let value = serde_json::to_value(json_neighbor(&state)).unwrap();
+        assert!(value.get("gr_retention_available").is_none());
     }
 
     #[test]
