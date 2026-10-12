@@ -3310,34 +3310,34 @@ async fn run_with_deadlines(
                             peer_identity(&config.address, &config.interface)
                         });
                         // A down dynamic neighbor whose routes are still
-                        // retained has no session or configuration to check;
-                        // only its retention is reported.
-                        if n.retention_only == Some(true) {
-                            for check in llgr_retention_checks(&identity, &n.gr_retention) {
+                        // retained has no session or configuration to check:
+                        // only its retention is diagnosed, but it stays in
+                        // the roster and the support bundle.
+                        let retention_only = n.retention_only == Some(true);
+                        if !retention_only {
+                            let policy_check = rfc8212_policy_check(
+                                &identity,
+                                n.rfc8212_import_policy,
+                                n.rfc8212_export_policy,
+                            );
+                            reporter.record(
+                                policy_check.name,
+                                policy_check.status,
+                                policy_check.detail,
+                            )?;
+                            for check in
+                                outbound_prefix_limit_checks(&identity, &n.outbound_prefix_limits)
+                                    .into_iter()
+                                    .chain(inbound_prefix_limit_checks(
+                                        &identity,
+                                        &n.inbound_prefix_limits,
+                                    ))
+                                    .chain(inbound_prefix_bound_check(&identity, n, local_asn))
+                            {
                                 reporter.record(check.name, check.status, check.detail)?;
                             }
-                            continue;
                         }
-                        let policy_check = rfc8212_policy_check(
-                            &identity,
-                            n.rfc8212_import_policy,
-                            n.rfc8212_export_policy,
-                        );
-                        reporter.record(
-                            policy_check.name,
-                            policy_check.status,
-                            policy_check.detail,
-                        )?;
-                        for check in
-                            outbound_prefix_limit_checks(&identity, &n.outbound_prefix_limits)
-                                .into_iter()
-                                .chain(inbound_prefix_limit_checks(
-                                    &identity,
-                                    &n.inbound_prefix_limits,
-                                ))
-                                .chain(inbound_prefix_bound_check(&identity, n, local_asn))
-                                .chain(llgr_retention_checks(&identity, &n.gr_retention))
-                        {
+                        for check in llgr_retention_checks(&identity, &n.gr_retention) {
                             reporter.record(check.name, check.status, check.detail)?;
                         }
                         records.push(NeighborDoctorRecord {
@@ -3397,7 +3397,10 @@ async fn run_with_deadlines(
                             )?,
                         }
                     }
-                    for record in &records {
+                    for record in records
+                        .iter()
+                        .filter(|record| record.support.retention_only != Some(true))
+                    {
                         let session_evidence = if session_history_available {
                             SessionHistoryEvidence::Retained {
                                 last_transition_unix: transitions.get(&record.identity).copied(),
@@ -7086,6 +7089,23 @@ paths = ["x"]
         );
         let check = manifest_check(&manifest, "peer.192.0.2.9.llgr_retention.ipv4_unicast");
         assert_eq!(check["status"], "warn");
+        // The row is still a neighbor: it counts toward the roster, so the
+        // empty-roster result is absent, and the support bundle carries it.
+        assert!(
+            !manifest["checks"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|check| check["name"] == "peers.configured"),
+            "{manifest}"
+        );
+        let files = extract_bundle(&output_dir.path().join("bundle.tar.gz"));
+        let peers: serde_json::Value =
+            serde_json::from_str(find(&files, "peers/neighbors.json")).unwrap();
+        assert_eq!(peers.as_array().unwrap().len(), 1, "{peers}");
+        assert_eq!(peers[0]["address"], "192.0.2.9");
+        assert_eq!(peers[0]["retention_only"], true);
+        assert_eq!(peers[0]["gr_retention"][0]["phase"], "llgr");
     }
 
     #[tokio::test]
