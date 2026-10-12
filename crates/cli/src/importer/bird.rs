@@ -190,6 +190,7 @@ struct BgpAcc {
     max_prefixes_ipv4: Option<u32>,
     max_prefixes_ipv6: Option<u32>,
     auth_present: bool,
+    admin_down: Option<bool>,
 }
 
 enum Frame {
@@ -446,6 +447,9 @@ fn bgp_stmt(model: &mut Model, acc: &mut BgpAcc, line: usize, text: &str) {
             Err(_) => skip(model, line, text, GENERIC_GUIDANCE),
         },
         ["password", ..] => acc.auth_present = true,
+        // BIRD switch syntax: a bare `disabled` means yes.
+        ["disabled"] | ["disabled", "yes" | "on" | "true"] => acc.admin_down = Some(true),
+        ["disabled", "no" | "off" | "false"] => acc.admin_down = Some(false),
         ["rr", "client"] | ["rr", "client", "on"] => skip(
             model,
             line,
@@ -534,6 +538,8 @@ fn finalize_bgp(model: &mut Model, acc: BgpAcc) {
             max_prefixes_ipv4: acc.max_prefixes_ipv4,
             max_prefixes_ipv6: acc.max_prefixes_ipv6,
             auth_present: acc.auth_present,
+            admin_down: acc.admin_down,
+            admin_down_reason: None,
         });
         return;
     }
@@ -557,6 +563,8 @@ fn finalize_bgp(model: &mut Model, acc: BgpAcc) {
         max_prefixes_ipv4: acc.max_prefixes_ipv4,
         max_prefixes_ipv6: acc.max_prefixes_ipv6,
         auth_present: acc.auth_present,
+        admin_down: acc.admin_down,
+        admin_down_reason: None,
     });
 }
 

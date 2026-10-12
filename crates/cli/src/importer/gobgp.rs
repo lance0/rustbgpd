@@ -185,6 +185,7 @@ struct Session {
     max_prefixes_ipv4: Option<u32>,
     max_prefixes_ipv6: Option<u32>,
     auth_present: bool,
+    admin_down: Option<bool>,
 }
 
 fn session(
@@ -217,6 +218,13 @@ fn session(
                         "auth-password" => {
                             s.auth_present = cval.as_str().is_some_and(|p| !p.is_empty());
                         }
+                        "admin-down" => match cval.as_bool() {
+                            Some(admin_down) => s.admin_down = Some(admin_down),
+                            None => model.warnings.push(format!(
+                                "{label}: config.admin-down = {cval} is not a boolean; \
+                                 dropped — set admin_down by hand if the session must stay down"
+                            )),
+                        },
                         other => skip_key(
                             model,
                             source,
@@ -353,6 +361,8 @@ fn neighbor(model: &mut Model, source: &str, idx: usize, value: &toml::Value) {
         max_prefixes_ipv4: s.max_prefixes_ipv4,
         max_prefixes_ipv6: s.max_prefixes_ipv6,
         auth_present: s.auth_present,
+        admin_down: s.admin_down,
+        admin_down_reason: None,
     });
 }
 
@@ -380,5 +390,7 @@ fn peer_group(model: &mut Model, source: &str, value: &toml::Value) {
         max_prefixes_ipv4: s.max_prefixes_ipv4,
         max_prefixes_ipv6: s.max_prefixes_ipv6,
         auth_present: s.auth_present,
+        admin_down: s.admin_down,
+        admin_down_reason: None,
     });
 }

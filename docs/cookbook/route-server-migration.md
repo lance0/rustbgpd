@@ -34,8 +34,10 @@ rbgp diff advertised --neighbor 198.51.100.2 --against bird-member.ndjson
 ```
 
 The importer covers local AS, router-id, neighbors (address, remote AS,
-description), peer groups, address families, hold timers, and max-prefix
-limits. MD5/auth presence is flagged but secrets are never imported. BIRD
+description), peer groups, address families, hold timers, max-prefix
+limits, and administrative-down state: BIRD `disabled`, FRR
+`neighbor X shutdown [message ...]` and GoBGP `admin-down` become
+[`admin_down`](../reference/configuration.md#administrative-down-admin_down). MD5/auth presence is flagged but secrets are never imported. BIRD
 filters, FRR route-maps/prefix-lists, and GoBGP policy-definitions are
 deliberately not translated — a wrong mechanical policy translation would
 be worse than the honest list; the sections below are the hand-translation
@@ -217,6 +219,7 @@ where path hiding must be mitigated,
   `export_policy_chain`; translate the policy itself by hand to `.rpol`.
 - `rde evaluate all` maps to `per_client_best = true` for a member that cannot
   receive Add-Path. Prefer negotiated Add-Path where the member supports it.
+- A neighbor configured `down` maps to `admin_down = true`.
 - Translate authentication, timers, max-prefix limits, and address-family
   enablement peer by peer. The importer cannot inventory or warn about omitted
   OpenBGPD-only settings for you.
