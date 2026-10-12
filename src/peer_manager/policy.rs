@@ -4607,6 +4607,7 @@ impl PeerManager {
             description: resolved.label,
             peer_group: resolved.peer_group,
             admin_down: resolved.admin_down,
+            restore_admin_enabled: None,
             hold_time: Some(tc.peer.hold_time),
             min_hold_time: tc.peer.min_hold_time,
             send_hold_time: Some(tc.peer.send_hold_time),

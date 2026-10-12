@@ -500,6 +500,7 @@ impl PeerManager {
             description: managed.description.clone(),
             peer_group: managed.peer_group.clone(),
             admin_down: managed.admin_down.clone(),
+            restore_admin_enabled: Some(managed.enabled),
             hold_time: managed.hold_time,
             min_hold_time: tc.peer.min_hold_time,
             send_hold_time: Some(tc.peer.send_hold_time),
@@ -589,8 +590,11 @@ impl PeerManager {
         sync_config_snapshot: bool,
     ) -> Result<(), PeerLifecycleError> {
         // A new peer's admin state is the config's: `admin_down` adds it
-        // disabled, so it never connects or accepts until enabled.
-        let enabled = config.admin_down.is_none();
+        // disabled, so it never connects or accepts until enabled. A replayed
+        // rollback prior restores its captured state instead.
+        let enabled = config
+            .restore_admin_enabled
+            .unwrap_or(config.admin_down.is_none());
         self.add_peer_impl(config, sync_config_snapshot, enabled, true)
             .await
     }
@@ -943,7 +947,7 @@ impl PeerManager {
         peer: PeerKey,
         sync_config_snapshot: bool,
     ) -> Result<PeerManagerNeighborConfig, PeerLifecycleError> {
-        self.delete_peer_checked(peer, sync_config_snapshot, None, true, None)
+        self.delete_peer_checked(peer, sync_config_snapshot, None, true, None, None)
             .await
     }
 
@@ -962,6 +966,7 @@ impl PeerManager {
             next_tcp_ao,
             false,
             Some(next_discard_path_attributes),
+            None,
         )
         .await
         .map(|_| ())
@@ -1043,6 +1048,10 @@ impl PeerManager {
                 config.tcp_ao.as_ref(),
                 false,
                 Some(&config.discard_path_attributes),
+                // Taking the peer down sends the configured reason, as disable does.
+                (was_enabled && !enabled)
+                    .then(|| admin_down_shutdown_communication(&config))
+                    .flatten(),
             )
             .await?;
         if let Err(add_error) = self.add_peer_with_admin_state(config, false, enabled).await {
@@ -1344,12 +1353,8 @@ impl PeerManager {
         let enabled = self.peers.get(&peer).is_some_and(|managed| managed.enabled);
         match admin_enable {
             Some(false) if enabled => {
-                let reason = config
-                    .admin_down
-                    .as_deref()
-                    .filter(|reason| !reason.is_empty())
-                    .map(rustbgpd_wire::notification::encode_shutdown_communication);
-                self.disable_peer(peer.clone(), reason).await?;
+                self.disable_peer(peer.clone(), admin_down_shutdown_communication(&config))
+                    .await?;
             }
             Some(true) if !enabled => self.enable_peer(peer.clone()).await?,
             _ => {}
@@ -1545,9 +1550,8 @@ impl PeerManager {
         // `reconfigure_peer` re-reads the live enabled / graceful-shutdown state
         // and re-applies it, so rollback preserves the peer's current admin and
         // GShut state rather than resurrecting a stale transient toggle. A
-        // prior with a different config `admin_down` reverses that edge
-        // instead (`config_admin_enable`): a peer the reshape took down comes
-        // back up, even if a runtime disable preceded the reshape.
+        // prior also carries the admin state captured before the reshape,
+        // which `config_admin_enable` restores exactly.
         //
         // Best-effort: a failed restore does not stop the sweep — every prior
         // is still attempted, so one stuck member cannot strand the others in
@@ -1743,6 +1747,7 @@ impl PeerManager {
                     previous.tcp_ao.as_ref(),
                     false,
                     Some(&previous.discard_path_attributes),
+                    None,
                 )
                 .await?;
             }
@@ -1794,6 +1799,7 @@ impl PeerManager {
         next_tcp_ao: Option<&TcpAoKeyring>,
         reap_metric_series: bool,
         next_discard_path_attributes: Option<&[u8]>,
+        stop_reason: Option<bytes::Bytes>,
     ) -> Result<PeerManagerNeighborConfig, PeerLifecycleError> {
         let address = peer.address;
         // Dynamic-range peers are not deletable through the static-neighbor
@@ -1952,6 +1958,13 @@ impl PeerManager {
                 .await;
         }
 
+        if stop_reason.is_some() {
+            // Best effort: an Established session sends Cease/Administrative
+            // Shutdown with the reason; the shutdown below closes it anyway.
+            let _ = primary_handle
+                .stop_timeout(stop_reason, PEER_LIFECYCLE_COMMAND_TIMEOUT)
+                .await;
+        }
         let shutdown = self
             .quiesce_retiring_session(
                 &peer,
@@ -2519,14 +2532,25 @@ pub(super) struct SoftResetFailure {
 /// of a config-down peer lasts until restart or a reload that changes the
 /// key.
 ///
-/// Compensation that replays a prior config reverses the edge the same way,
-/// so a peer runtime-disabled before a failed reload that set the key comes
-/// back enabled. ponytail: the prior admin state is not captured per edge;
-/// capture it with the hot/reshape priors if that window matters.
+/// A replayed rollback prior ([`PeerManager::removed_peer_config`]) carries
+/// the admin state captured before the forward step and restores exactly that
+/// state, so compensation leaves an earlier runtime toggle intact.
 pub(super) fn config_admin_enable(
     managed: &ManagedPeerState,
     next: &PeerManagerNeighborConfig,
 ) -> Option<bool> {
+    if let Some(enabled) = next.restore_admin_enabled {
+        return Some(enabled);
+    }
     let next_down = next.admin_down.is_some();
     (managed.admin_down.is_some() != next_down).then_some(!next_down)
+}
+
+/// The RFC 9003 shutdown communication a config-driven disable sends.
+fn admin_down_shutdown_communication(config: &PeerManagerNeighborConfig) -> Option<bytes::Bytes> {
+    config
+        .admin_down
+        .as_deref()
+        .filter(|reason| !reason.is_empty())
+        .map(rustbgpd_wire::notification::encode_shutdown_communication)
 }

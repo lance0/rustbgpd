@@ -214,6 +214,7 @@ pub(crate) fn build_peer_mgr_config(
         description: resolved.label.clone(),
         peer_group: resolved.peer_group.clone(),
         admin_down: resolved.admin_down.clone(),
+        restore_admin_enabled: None,
         hold_time: Some(tc.peer.hold_time),
         min_hold_time: tc.peer.min_hold_time,
         send_hold_time: Some(tc.peer.send_hold_time),
@@ -12634,6 +12635,7 @@ remote_asn = 65002
             .send(ConfigEvent::NeighborAdded {
                 config: PeerManagerNeighborConfig {
                     admin_down: None,
+                    restore_admin_enabled: None,
                     min_hold_time: None,
                     address: "10.0.0.9".parse().unwrap(),
                     interface: None,
@@ -12755,6 +12757,7 @@ remote_asn = 65002
             .send(ConfigEvent::NeighborAdded {
                 config: PeerManagerNeighborConfig {
                     admin_down: None,
+                    restore_admin_enabled: None,
                     min_hold_time: None,
                     address: "10.0.0.9".parse().unwrap(),
                     interface: None,

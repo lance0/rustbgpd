@@ -28,6 +28,7 @@ struct GenerationSessionCounters {
     drop_state_after: AtomicU32,
     export_owners: Mutex<Vec<PolicyOwners>>,
     stops: AtomicU32,
+    starts: AtomicU32,
 }
 
 fn generation_session(addr: IpAddr) -> (PeerHandle, Arc<GenerationSessionCounters>) {
@@ -111,6 +112,9 @@ fn generation_session(addr: IpAddr) -> (PeerHandle, Arc<GenerationSessionCounter
                 PeerCommand::Shutdown | PeerCommand::Stop { .. } => {
                     in_task.stops.fetch_add(1, Ordering::SeqCst);
                     break;
+                }
+                PeerCommand::Start => {
+                    in_task.starts.fetch_add(1, Ordering::SeqCst);
                 }
                 _ => {}
             }
@@ -5453,4 +5457,50 @@ async fn changed_definition_is_not_applied_against_the_prior_condition_dataset()
     harness.shutdown().await;
     interposer.abort();
     relay.abort();
+}
+
+/// A compensated generation restores the admin state captured before it.
+/// A runtime-disabled peer whose `admin_down` the candidate sets stays
+/// disabled after a later step fails: rollback must not start its session.
+#[tokio::test]
+async fn failed_generation_keeps_a_runtime_disabled_peer_down() {
+    let fixture = RsFixture::new();
+    let prior = fixture.load();
+    let mut harness = GenerationHarness::new(&prior);
+    let member = key("10.0.0.2".parse().unwrap());
+    // Runtime `disable`, with the session stub kept alive so a wrong
+    // restoring Start would be observed rather than lost.
+    harness.mgr.peers.get_mut(&member).unwrap().enabled = false;
+    fixture.write_toml(
+        &fixture
+            .base_toml()
+            .replace(
+                "remote_asn = 65002\npeer_group = \"members\"",
+                "remote_asn = 65002\npeer_group = \"members\"\nadmin_down = true",
+            )
+            .replace("hold_time = 180", "hold_time = 120"),
+    );
+    let candidate = fixture.load();
+    harness
+        .mgr
+        .inject_reconfigure_failures
+        .insert(key("10.0.0.9".parse().unwrap()), 0);
+
+    let outcome = harness.apply(&candidate).await;
+    let ReloadGenerationOutcome::FullyCompensated(error) = outcome else {
+        panic!("{outcome:?}");
+    };
+    assert!(error.contains("session replace"), "{error}");
+    assert_eq!(harness.mgr.current_config, prior);
+    let managed = &harness.mgr.peers[&member];
+    assert!(!managed.enabled, "rollback must keep the runtime disable");
+    assert_eq!(managed.admin_down, None);
+    let counters = &harness.counters[&member.address];
+    assert_eq!(
+        counters.starts.load(Ordering::SeqCst),
+        0,
+        "no session start"
+    );
+    assert_eq!(counters.stops.load(Ordering::SeqCst), 0);
+    harness.shutdown().await;
 }

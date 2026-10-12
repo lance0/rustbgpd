@@ -64,6 +64,7 @@ async fn replay_outbound_result(
 fn make_config(addr: IpAddr, asn: u32) -> PeerManagerNeighborConfig {
     PeerManagerNeighborConfig {
         admin_down: None,
+        restore_admin_enabled: None,
         min_hold_time: None,
         address: addr,
         interface: None,

@@ -1342,6 +1342,7 @@ peer_group = "fabric"
     ) -> rustbgpd_api::peer_types::PeerManagerNeighborConfig {
         rustbgpd_api::peer_types::PeerManagerNeighborConfig {
             admin_down: None,
+            restore_admin_enabled: None,
             min_hold_time: Some(30),
             address,
             interface: None,

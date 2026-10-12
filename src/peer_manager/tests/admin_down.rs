@@ -37,6 +37,13 @@ async fn settle(mgr: &PeerManager, addr: IpAddr) {
     let _ = mgr.get_peer_info(&key(addr)).await;
 }
 
+/// The peer's live config as a forward reload target, not a rollback prior.
+fn forward_config(mgr: &PeerManager, addr: IpAddr) -> PeerManagerNeighborConfig {
+    let mut config = PeerManager::removed_peer_config(&key(addr), &mgr.peers[&key(addr)]);
+    config.restore_admin_enabled = None;
+    config
+}
+
 /// Regression: a daemon (re)started with `admin_down` set never offers that
 /// peer an OPEN. The configured-peer startup batch adds it disabled: its
 /// session is never started (so it stays Idle and never connects), the admin
@@ -93,7 +100,7 @@ async fn config_admin_down_hot_edges_disable_enable_and_keep_runtime_toggle() {
     let addr = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
     let (handle, starts, mut stops) = recording_admin_handle();
     insert_test_managed_peer(&mut mgr, addr, handle, false);
-    let current = PeerManager::removed_peer_config(&key(addr), &mgr.peers[&key(addr)]);
+    let current = forward_config(&mgr, addr);
     let mut down = current.clone();
     down.admin_down = Some("maintenance".to_string());
 
@@ -190,4 +197,30 @@ async fn config_admin_down_replacement_follows_key_changes_only() {
     mgr.reconfigure_peer(config).await.unwrap();
     assert!(!mgr.peers[&key(addr)].enabled, "set key disables the peer");
     assert_eq!(mgr.peers[&key(addr)].admin_down.as_deref(), Some("bye"));
+}
+
+/// A replacement that also sets the key closes the Established session with
+/// the configured shutdown communication, like the in-place disable.
+#[tokio::test]
+async fn config_admin_down_replacement_sends_the_configured_reason() {
+    let mut mgr = test_peer_manager();
+    let addr = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 4));
+    let (handle, starts, mut stops) = recording_admin_handle();
+    insert_test_managed_peer(&mut mgr, addr, handle, false);
+    let mut next = forward_config(&mgr, addr);
+    next.admin_down = Some("abuse review".to_string());
+    next.hold_time = Some(30);
+
+    mgr.reconfigure_peer(next).await.unwrap();
+
+    assert_eq!(
+        stops.recv().await.expect("old session receives Stop"),
+        Some(rustbgpd_wire::notification::encode_shutdown_communication(
+            "abuse review"
+        ))
+    );
+    let managed = &mgr.peers[&key(addr)];
+    assert!(!managed.enabled);
+    assert_eq!(managed.hold_time, Some(30));
+    assert_eq!(starts.load(Ordering::SeqCst), 0);
 }

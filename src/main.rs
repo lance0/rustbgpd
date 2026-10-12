@@ -6084,6 +6084,7 @@ async fn run<T>(
             description: label.clone(),
             peer_group,
             admin_down: neighbor.admin_down,
+            restore_admin_enabled: None,
             hold_time: Some(transport_config.peer.hold_time),
             min_hold_time: transport_config.peer.min_hold_time,
             send_hold_time: Some(transport_config.peer.send_hold_time),
