@@ -314,6 +314,16 @@ fn classify(route: &EvpnRoute, shape: Shape) -> Option<(u32, usize)> {
     }
 }
 
+/// The exact route `origin` advertises for a slot `classify` returned.
+fn originated(origin: u32, offset: usize, shape: Shape) -> EvpnRoute {
+    let offset = u32::try_from(offset).unwrap_or(u32::MAX);
+    if offset < shape.pool2() {
+        type2_route(origin, offset)
+    } else {
+        type5_route(origin, offset - shape.pool2())
+    }
+}
+
 fn build_update(origin: u32, announce: Vec<EvpnRoute>, withdraw: Vec<EvpnRoute>) -> Message {
     let mut attrs = Vec::new();
     if !announce.is_empty() {
@@ -409,12 +419,32 @@ impl View {
             return;
         }
         let bit = origin as usize * shape.block() + offset;
+        // `classify` matched the route key. An announcement must also carry
+        // every non-key field the origin sent (ESI, labels, gateway): a
+        // same-key route with other content replaces the originated route,
+        // so the slot is cleared and the route counts as unexpected.
+        // Withdrawals name only the key and are not content-checked.
+        if present && *route != originated(origin, offset, shape) {
+            self.invalid += 1;
+            self.clear(bit);
+            return;
+        }
+        if present {
+            let mask = 1u64 << (bit % 64);
+            let word = &mut self.bits[bit / 64];
+            if *word & mask == 0 {
+                *word |= mask;
+                self.live += 1;
+            }
+        } else {
+            self.clear(bit);
+        }
+    }
+
+    fn clear(&mut self, bit: usize) {
         let mask = 1u64 << (bit % 64);
         let word = &mut self.bits[bit / 64];
-        if present && *word & mask == 0 {
-            *word |= mask;
-            self.live += 1;
-        } else if !present && *word & mask != 0 {
+        if *word & mask != 0 {
             *word &= !mask;
             self.live -= 1;
         }
@@ -463,16 +493,27 @@ async fn connect(
     lost: &Arc<AtomicBool>,
     cap: Duration,
 ) -> anyhow::Result<()> {
-    let deadline = Instant::now() + cap;
-    let handle = loop {
-        match dial(args, client.index).await {
-            Ok(handle) => break handle,
-            Err(error) if Instant::now() < deadline => {
-                tracing::debug!(client = client.index, %error, "dial retry");
-                tokio::time::sleep(Duration::from_millis(500)).await;
+    // One deadline bounds the whole loop, including a single dial whose
+    // TCP connect or OPEN wait never completes.
+    let mut last_error = String::from("no attempt completed");
+    let attempts = async {
+        loop {
+            match dial(args, client.index).await {
+                Ok(handle) => break handle,
+                Err(error) => {
+                    tracing::debug!(client = client.index, %error, "dial retry");
+                    last_error = error.to_string();
+                    tokio::time::sleep(Duration::from_millis(500)).await;
+                }
             }
-            Err(error) => anyhow::bail!("client {} did not establish: {error}", client.index),
         }
+    };
+    let Ok(handle) = tokio::time::timeout(cap, attempts).await else {
+        anyhow::bail!(
+            "client {} did not establish within {} ms (last error: {last_error})",
+            client.index,
+            cap.as_millis()
+        );
     };
     let view = Arc::new(Mutex::new(View::new(shape)));
     let up = Arc::new(AtomicBool::new(true));
@@ -639,6 +680,16 @@ fn check(shape: Shape, clients: &[Client]) -> Check {
     out
 }
 
+/// Every client up and holding exactly the expected set, with no
+/// unexpected or unparseable route seen.
+fn converged(result: &Check, shape: Shape) -> bool {
+    result.exact
+        && result.invalid == 0
+        && result.parse_errors == 0
+        && result.self_reflected == 0
+        && result.receivers == shape.clients
+}
+
 /// Poll until every client's reflected view is exact, or the cap expires.
 async fn converge(
     shape: Shape,
@@ -652,10 +703,7 @@ async fn converge(
             fail("a client session was lost unexpectedly");
         }
         let result = check(shape, clients);
-        let ok = result.exact
-            && result.invalid == 0
-            && result.parse_errors == 0
-            && result.receivers == shape.clients;
+        let ok = converged(&result, shape);
         if ok || started.elapsed() >= cap {
             return (ok, result, started.elapsed().as_millis());
         }
@@ -1058,6 +1106,126 @@ mod tests {
         view.apply(1, s, &type2_route(2, 7), false);
         view.apply(1, s, &type2_route(2, 7), false);
         assert_eq!(view.live, 0);
+    }
+
+    #[test]
+    fn reflected_routes_must_match_every_originated_field() {
+        let s = shape();
+        let EvpnRoute::MacIp(base2) = type2_route(2, 7) else {
+            unreachable!()
+        };
+        let EvpnRoute::IpPrefix(base5) = type5_route(2, 9) else {
+            unreachable!()
+        };
+        let mut esi = base2.clone();
+        esi.esi = EthernetSegmentIdentifier([1; 10]);
+        let mut vni = base2.clone();
+        vni.label1 = MplsLabel::new(L2_VNI + 1);
+        let mut label2 = base2.clone();
+        label2.label2 = Some(MplsLabel::new(1));
+        let mut gateway = base5;
+        gateway.gateway = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let mut l3vni = base5;
+        l3vni.label = MplsLabel::new(L3_VNI + 1);
+        let mut esi5 = base5;
+        esi5.esi = EthernetSegmentIdentifier([1; 10]);
+        for (good, bad) in [
+            (type2_route(2, 7), EvpnRoute::MacIp(esi)),
+            (type2_route(2, 7), EvpnRoute::MacIp(vni)),
+            (type2_route(2, 7), EvpnRoute::MacIp(label2)),
+            (type5_route(2, 9), EvpnRoute::IpPrefix(gateway)),
+            (type5_route(2, 9), EvpnRoute::IpPrefix(l3vni)),
+            (type5_route(2, 9), EvpnRoute::IpPrefix(esi5)),
+        ] {
+            let mut view = View::new(s);
+            view.apply(1, s, &good, true);
+            assert_eq!((view.live, view.invalid), (1, 0));
+            // Same key, different content: it replaces the originated route,
+            // so the slot is no longer held and the route is unexpected.
+            view.apply(1, s, &bad, true);
+            assert_eq!((view.live, view.invalid), (0, 1), "{bad:?}");
+            // A withdrawal names only the key; it is never content-checked.
+            view.apply(1, s, &good, true);
+            view.apply(1, s, &bad, false);
+            assert_eq!((view.live, view.invalid), (0, 1), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn a_self_reflected_route_blocks_convergence() {
+        let s = shape();
+        let mut result = Check {
+            receivers: s.clients,
+            min_live: s.expected(),
+            max_live: s.expected(),
+            exact: true,
+            invalid: 0,
+            parse_errors: 0,
+            self_reflected: 0,
+        };
+        assert!(converged(&result, s));
+        result.self_reflected = 1;
+        assert!(!converged(&result, s));
+    }
+
+    #[tokio::test]
+    async fn establishment_is_bounded_when_the_peer_never_sends_open() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let daemon = listener.local_addr().unwrap().to_string();
+        // Accept and hold every connection without ever answering OPEN.
+        let held = tokio::spawn(async move {
+            let mut sockets = Vec::new();
+            while let Ok((socket, _)) = listener.accept().await {
+                sockets.push(socket);
+            }
+        });
+        let args = Args::try_parse_from([
+            "evpn-rr-soak",
+            "--daemon",
+            &daemon,
+            "--clients",
+            "3",
+            "--type2",
+            "2",
+            "--type5",
+            "2",
+            "--shift2",
+            "1",
+            "--shift5",
+            "1",
+            "--epochs",
+            "1",
+            "--epoch-secs",
+            "2",
+            "--churn-secs",
+            "1",
+        ])
+        .unwrap();
+        let s = Shape {
+            clients: 3,
+            type2: 2,
+            type5: 2,
+            shift2: 1,
+            shift5: 1,
+        };
+        let mut client = Client {
+            index: 1,
+            tx: None,
+            view: Arc::new(Mutex::new(View::new(s))),
+            up: Arc::new(AtomicBool::new(false)),
+            expect_down: Arc::new(AtomicBool::new(false)),
+            shifts: 0,
+        };
+        let lost = Arc::new(AtomicBool::new(false));
+        let outcome = tokio::time::timeout(
+            Duration::from_secs(10),
+            connect(&args, s, &mut client, &lost, Duration::from_millis(500)),
+        )
+        .await
+        .expect("connect must give up at its own cap, not hang");
+        let error = outcome.expect_err("a peer that never sends OPEN must not establish");
+        assert!(error.to_string().contains("within"), "{error}");
+        held.abort();
     }
 
     #[test]
