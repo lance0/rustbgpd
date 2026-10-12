@@ -2728,8 +2728,9 @@ fallback. If the overflow interrupts queued work, the session requests the
 unicast replay immediately. FlowSpec import still sees the destination
 prefix's RPKI state and is not retained, so negotiated FlowSpec families keep
 Route Refresh. An import policy that starts depending on validation state
-during an established session falls back the same way until the session
-resets. A peer whose import-policy Route Refresh failed and awaits retry also
+during an established session falls back the same way until an enhanced Route
+Refresh (RFC 7313) has replayed every negotiated unicast family, or until the
+session resets. A peer whose import-policy Route Refresh failed and awaits retry also
 falls back, because its retained input predates the policy change.
 
 The retained input costs memory in proportion to the routes received from

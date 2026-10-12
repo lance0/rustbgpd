@@ -12,6 +12,11 @@
 //! chunk runs, so a route withdrawn or replaced after the delta is never
 //! replayed from stale input.
 //!
+//! A store started mid-session is incomplete: it never saw the routes already
+//! received. An RFC 7313 window opened after it started re-sends that family's
+//! table and sweeps the rest, so once every negotiated unicast family has had
+//! one, the store is complete again.
+//!
 //! Retained rejects are bounded per session. Crossing the bound empties the
 //! store and marks it incomplete; later deltas fall back to Route Refresh for
 //! this session until it resets, and queued work is replaced by an immediate
@@ -82,6 +87,12 @@ pub(super) struct ValidationRetention {
     /// They are dropped at `EoRR` and never replayed while pending, so local
     /// re-evaluation cannot resurrect a route the peer stopped announcing.
     refresh_stale: HashMap<Afi, HashSet<RetainedKey>>,
+    /// Incomplete store only: unicast AFIs rebuilt by a window opened after
+    /// the store started, `true` once that window closed. Their input is
+    /// retained while the other families are still missing.
+    refill: HashMap<Afi, bool>,
+    /// The reject bound was exceeded: no refill until the session resets.
+    overflowed: bool,
     /// Identities a delta covered and the run loop has not replayed yet.
     pending: VecDeque<RetainedKey>,
     queued: HashSet<RetainedKey>,
@@ -99,6 +110,8 @@ impl ValidationRetention {
             attrs: AttrInternTable::new(),
             removals_since_gc: 0,
             refresh_stale: HashMap::new(),
+            refill: HashMap::new(),
+            overflowed: false,
             pending: VecDeque::new(),
             queued: HashSet::new(),
         }
@@ -107,6 +120,11 @@ impl ValidationRetention {
     /// Whether every route this session currently holds is represented.
     pub(super) fn is_complete(&self) -> bool {
         self.complete
+    }
+
+    /// Whether UPDATEs feed the store: it is complete, or being rebuilt.
+    pub(super) fn retains_input(&self) -> bool {
+        self.complete || !self.refill.is_empty()
     }
 
     /// Whether queued re-evaluation work remains.
@@ -172,13 +190,14 @@ impl ValidationRetention {
         reach: RetainedReach,
         accepted: bool,
     ) -> Result<(), RetentionOverflow> {
-        if !self.complete {
+        if !self.complete && !self.refill.contains_key(&prefix_afi(key.0)) {
             return Ok(());
         }
         self.remove(&key);
         if !accepted {
             if self.rejected >= self.reject_limit {
                 *self = Self::new(false);
+                self.overflowed = true;
                 return Err(RetentionOverflow);
             }
             self.rejected += 1;
@@ -302,10 +321,14 @@ impl ValidationRetention {
         groups
     }
 
-    /// Open an RFC 7313 window for one unicast AFI.
+    /// Open an RFC 7313 window for one unicast AFI. On an incomplete store
+    /// the window starts rebuilding that family.
     pub(super) fn begin_refresh(&mut self, afi: Afi) {
         if !self.complete {
-            return;
+            if self.overflowed {
+                return;
+            }
+            self.refill.entry(afi).or_insert(false);
         }
         let stale = self
             .routes
@@ -316,11 +339,24 @@ impl ValidationRetention {
         self.refresh_stale.insert(afi, stale);
     }
 
-    /// Close the window: identities the peer did not re-send are gone.
-    pub(super) fn end_refresh(&mut self, afi: Afi) {
+    /// Close the window: identities the peer did not re-send are gone. A
+    /// rebuilt store is complete once every AFI in `unicast` (the negotiated
+    /// unicast families) has closed a window it opened.
+    pub(super) fn end_refresh(&mut self, afi: Afi, unicast: &[Afi]) {
         if let Some(stale) = self.refresh_stale.remove(&afi) {
             for key in stale {
                 self.remove(&key);
+            }
+            if let Some(done) = self.refill.get_mut(&afi) {
+                *done = true;
+                if !unicast.is_empty()
+                    && unicast
+                        .iter()
+                        .all(|afi| self.refill.get(afi).copied().unwrap_or(false))
+                {
+                    self.complete = true;
+                    self.refill.clear();
+                }
             }
         }
     }
@@ -667,6 +703,9 @@ mod tests {
         assert!(!store.is_complete());
         assert_eq!(store.len(), (0, 0));
         assert!(!store.has_pending(), "queued work goes with the store");
+        // Not even a refresh window rebuilds it before the session resets.
+        store.begin_refresh(Afi::Ipv4);
+        assert!(!store.retains_input());
         store
             .insert((v4([1, 1, 1, 1], 32), 0), attrs, RetainedReach::Body, true)
             .unwrap();
@@ -690,7 +729,7 @@ mod tests {
             .insert((a, 0), attrs, RetainedReach::Body, true)
             .unwrap();
         assert!(!store.awaiting_refresh(&(a, 0)));
-        store.end_refresh(Afi::Ipv4);
+        store.end_refresh(Afi::Ipv4, &[Afi::Ipv4, Afi::Ipv6]);
         assert!(store.retained(&(a, 0)).is_some());
         assert!(store.retained(&(b, 0)).is_none());
         assert!(store.retained(&(c, 0)).is_some());

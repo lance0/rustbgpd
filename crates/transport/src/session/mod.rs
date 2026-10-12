@@ -2224,7 +2224,8 @@ impl PeerSession {
     pub(super) fn install_import_policy(&mut self, policy: Option<PolicyChain>) {
         self.import_needs_as_path_string = Self::import_chain_needs_as_path_string(policy.as_ref());
         // Starting retention mid-session cannot see routes already received:
-        // the store stays incomplete (Route Refresh fallback) until reset.
+        // the store stays incomplete (Route Refresh fallback) until an RFC
+        // 7313 window has rebuilt every unicast family, or the session resets.
         let retain =
             self.local_revalidation && Self::import_chain_needs_validation(policy.as_ref());
         if !retain {

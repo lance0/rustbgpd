@@ -2484,7 +2484,7 @@ impl PeerSession {
         let retention_active = self
             .validation_retention
             .as_ref()
-            .is_some_and(ValidationRetention::is_complete);
+            .is_some_and(ValidationRetention::retains_input);
         let mut retention_evaluated: Vec<(RetainedKey, Option<(RetainedReach, bool)>)> = Vec::new();
         // A denied announcement replaces any prior accepted path under the
         // same wire identity; retire it after explicit withdrawals below.

@@ -1639,10 +1639,11 @@ carries inactive (absent), unlimited (zero), or finite.
   Route Refresh is sent. The retained input is the received attributes, so
   validation-based policy sees them before any policy rewrite (Section 4).
 - Limits of the opt-in mode: each session retains at most 65,536 validation
-  rejects; beyond that, and when retention starts mid-session, it falls back
-  to Route Refresh until the session resets
+  rejects; beyond that it falls back to Route Refresh until the session resets
   (`bgp_validation_import_refreshes_total{outcome="fallback_refresh"}` plus a
-  warning). FlowSpec routes are not retained, so negotiated FlowSpec families
+  warning). When retention starts mid-session, it falls back the same way
+  until an enhanced Route Refresh (RFC 7313) has replayed every negotiated
+  unicast family. FlowSpec routes are not retained, so negotiated FlowSpec families
   keep Route Refresh on a VRP change. IRR and other dataset swaps are outside
   RFC 9324 and keep Route Refresh.
 - ASPA: the normative MUSTs in Sections 4 and 5 name ROV. ASPA appears in

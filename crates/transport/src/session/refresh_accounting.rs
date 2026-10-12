@@ -150,10 +150,18 @@ impl PeerSession {
         let Some(window) = self.refresh_accounting.windows.remove(&(afi, safi)) else {
             return;
         };
-        if safi == Safi::Unicast
-            && let Some(retention) = self.validation_retention.as_mut()
-        {
-            retention.end_refresh(afi);
+        if safi == Safi::Unicast && self.validation_retention.is_some() {
+            let unicast: Vec<Afi> = self
+                .negotiated_families()
+                .iter()
+                .filter(|&&(afi, safi)| {
+                    safi == Safi::Unicast && matches!(afi, Afi::Ipv4 | Afi::Ipv6)
+                })
+                .map(|&(afi, _)| afi)
+                .collect();
+            if let Some(retention) = self.validation_retention.as_mut() {
+                retention.end_refresh(afi, &unicast);
+            }
         }
         self.arm_refresh_accounting_timer();
         self.sweep_refresh_accounting(window.stale);

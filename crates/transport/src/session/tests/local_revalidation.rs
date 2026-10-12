@@ -451,6 +451,45 @@ async fn add_path_receive_bound_withheld_path_is_not_retained() {
     assert_eq!(f.retained_path(VALID, 2), None, "beyond receive_max");
 }
 
+/// Retention that starts mid-session cannot see routes already received. An
+/// enhanced refresh window, opened after the store exists, re-sends a
+/// family's whole table and sweeps the rest; once every negotiated unicast
+/// family has had one, the store is complete again.
+#[tokio::test]
+async fn mid_session_store_completes_after_every_unicast_family_refreshes() {
+    let mut f = fixture(vrps(vec![vrp(INVALID, 65099)]), import_chain(vec![])).await;
+    install_dual_stack_session(&mut f.session, false);
+    f.announce(INVALID).await;
+    assert!(f.session.validation_retention.is_none());
+    // A window already open when the store starts does not count.
+    f.session.begin_refresh_accounting(Afi::Ipv4, Safi::Unicast);
+    f.session.install_import_policy(Some(deny_invalid(true)));
+    f.session.end_refresh_accounting(Afi::Ipv4, Safi::Unicast);
+    let incomplete = |f: &mut Fixture| f.session.revalidate_import(&ValidationDelta::Rpki(None));
+    assert_eq!(incomplete(&mut f), ImportRevalidation::Incomplete);
+
+    f.session.begin_refresh_accounting(Afi::Ipv4, Safi::Unicast);
+    f.announce(INVALID).await;
+    f.session.end_refresh_accounting(Afi::Ipv4, Safi::Unicast);
+    assert_eq!(f.retained(INVALID), Some(false));
+    assert_eq!(
+        incomplete(&mut f),
+        ImportRevalidation::Incomplete,
+        "IPv6 unicast has not been refreshed yet"
+    );
+
+    f.session.begin_refresh_accounting(Afi::Ipv6, Safi::Unicast);
+    f.session.end_refresh_accounting(Afi::Ipv6, Safi::Unicast);
+    f.rib_routes();
+    f.revalidate(
+        vrps(vec![vrp(INVALID, 65099), vrp(INVALID, 65002)]),
+        ValidationDelta::Rpki(Some(Arc::from(vec![vrp(INVALID, 65002)]))),
+    )
+    .await;
+    assert_eq!(f.rib_routes(), (vec![Prefix::V4(prefix(INVALID))], vec![]));
+    f.assert_wire_silent().await;
+}
+
 fn aspa(records: Vec<(u32, u32)>) -> ValidationSnapshot {
     ValidationSnapshot {
         vrp_table: None,
