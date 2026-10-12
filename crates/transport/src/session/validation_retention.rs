@@ -266,7 +266,7 @@ impl ValidationRetention {
         queued
     }
 
-    /// Take up to `limit` queued identities that are still retained, grouped
+    /// Pop up to `limit` queued identities; those still retained are grouped
     /// into one synthetic UPDATE per (attribute set, reach). An identity
     /// withdrawn or replaced since it was queued replays its current input or
     /// nothing; one still awaiting the peer's refresh replay is skipped.
@@ -278,6 +278,9 @@ impl ValidationRetention {
             let Some(key) = self.pending.pop_front() else {
                 break;
             };
+            // Every popped identity counts, replayed or skipped, so one turn
+            // stays bounded even when most of the queue is skipped.
+            taken += 1;
             self.queued.remove(&key);
             let awaiting_refresh = self
                 .refresh_stale
@@ -286,7 +289,6 @@ impl ValidationRetention {
             let Some(route) = self.routes.get(&key).filter(|_| !awaiting_refresh) else {
                 continue;
             };
-            taken += 1;
             match index.entry((Arc::as_ptr(&route.attrs), route.reach)) {
                 std::collections::hash_map::Entry::Occupied(slot) => {
                     groups[*slot.get()].2.push(key);
@@ -708,5 +710,28 @@ mod tests {
                 store.routes.len()
             );
         }
+    }
+
+    #[test]
+    fn replay_chunk_counts_skipped_identities() {
+        let prefixes: Vec<Prefix> = (0..2 * REPLAY_CHUNK)
+            .map(|index| {
+                let index = u32::try_from(index).unwrap();
+                Prefix::V4(Ipv4Prefix::new(Ipv4Addr::from(0x0a00_0000 + index), 32))
+            })
+            .collect();
+        let mut store = store(&prefixes);
+        // Every identity awaits the peer's refresh replay, so each is skipped.
+        store.begin_refresh(Afi::Ipv4);
+        store.enqueue(&ValidationDelta::Rpki(None));
+        assert_eq!(
+            store.take_chunk(REPLAY_CHUNK).len(),
+            0,
+            "nothing replayable"
+        );
+        assert!(
+            store.has_pending(),
+            "one chunk pops at most REPLAY_CHUNK identities"
+        );
     }
 }
